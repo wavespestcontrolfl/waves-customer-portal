@@ -92,8 +92,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "da0c06ae1f13c275a11d70dd5c91f34accbb8389c5cbb39d38f90aafeb079d19"
     },
     "condition": {
       "hosts": [
@@ -223,8 +224,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": "Peak months for new symptoms are an estimate tied to warm-season vector activity; UF/IFAS gives only a latent period of about 4-5 months and a 'highly variable' 2-3 month symptom-progression period, not a Florida-specific monthly calendar."
+      "status": "owner_approved",
+      "notes": "Peak months for new symptoms are an estimate tied to warm-season vector activity; UF/IFAS gives only a latent period of about 4-5 months and a 'highly variable' 2-3 month symptom-progression period, not a Florida-specific monthly calendar.",
+      "approval_hash": "c5086ab9d9e9342b2f2731eadf4896d9d667982a94943a7d7effe7e1aa094c32"
     },
     "condition": {
       "hosts": [
@@ -367,8 +369,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": "Whether lethal yellowing occurs in Charlotte County specifically is unconfirmed in the source reviewed; UF/IFAS documents it in Sarasota and Manatee counties since 2007, so range is set to occasional rather than rare."
+      "status": "owner_approved",
+      "notes": "Whether lethal yellowing occurs in Charlotte County specifically is unconfirmed in the source reviewed; UF/IFAS documents it in Sarasota and Manatee counties since 2007, so range is set to occasional rather than rare.",
+      "approval_hash": "58b5a55bfe994af81a636bcec14c83042dfcbf17b7144a7e2e1768e8fa0cfb0d"
     },
     "condition": {
       "hosts": [
@@ -499,8 +502,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "b716d3fe9212934afb17b9b84b72106a21a1832c72d99a402d941ce9fb7e0a08"
     },
     "condition": {
       "hosts": [
@@ -634,8 +638,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "36b582d694803b324043e022612cb9a0729ee053b2f81f3c9f7a8e5c6dda1eac"
     },
     "condition": {
       "hosts": [
@@ -664,7 +669,7 @@
         {
           "slug": "boron-deficiency-palm",
           "difference": "Boron deficiency keeps the spear leaf small or hooked but it stays attached; bud rot leaves discolor, wilt and pull free easily.",
-          "next_observation": "Gently check whether the spear leaf pulls free, or have a technician check it.",
+          "next_observation": "A technician checks whether the spear leaf pulls free; don't climb a ladder to reach it yourself.",
           "photo_can_confirm": false
         },
         {
@@ -776,8 +781,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": "Peak months are an estimate tied to the humid rainy season; UF/IFAS confirms the disease is mostly cosmetic on Phoenix species but gives no Florida-specific monthly calendar, so season_basis is set to unverified."
+      "status": "owner_approved",
+      "notes": "Peak months are an estimate tied to the humid rainy season; UF/IFAS confirms the disease is mostly cosmetic on Phoenix species but gives no Florida-specific monthly calendar, so season_basis is set to unverified.",
+      "approval_hash": "f75428fad8865fcfd5bb7b8757f22e89029b1cbbe48d655e4138b302497af59c"
     },
     "condition": {
       "hosts": [
@@ -913,8 +919,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "2fbff0d9a0c670d5c89e02448b18d91553d5e06b62257fe917de1142a1747c0c"
     },
     "condition": {
       "hosts": [

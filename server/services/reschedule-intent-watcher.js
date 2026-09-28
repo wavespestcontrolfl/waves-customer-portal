@@ -340,7 +340,11 @@ function composeRescheduleIntentDigest(rows) {
     `<p><a href="${esc(adminPortalUrl())}/admin/communications">Open communications</a></p>`,
   ].join('\n');
 
-  return { subject, text, html, count: total };
+  // Admin-alerts-brevity scope (owner ruling 2026-09-28): short bell copy;
+  // the full list still lands in `detail`.
+  const headline = `Schedule — ${total} reschedule text${total === 1 ? '' : 's'} not applied`;
+  const summary = 'Reply or move each visit — automation runs them as booked.';
+  return { subject, text, html, count: total, headline, summary };
 }
 
 // Durable daily-send guard — same rationale as turf-variance-digest.js:
@@ -425,6 +429,8 @@ async function runRescheduleIntentWatcher(opts = {}) {
       subject: composed.subject,
       html: composed.html,
       text: composed.text,
+      headline: composed.headline,
+      summary: composed.summary,
       link: '/admin/communications',
       sendEmail: () => mailer.sendOne({
         to,

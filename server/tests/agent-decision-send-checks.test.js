@@ -8,7 +8,13 @@ jest.mock('../services/sms-shadow-drafter', () => ({
   planOpenTimesRecheck: jest.fn(),
   openTimesStillOffered: jest.fn(),
 }));
-jest.mock('../services/sms-followup-sla', () => ({ followupPromiseBlockReason: jest.fn(() => null) }));
+// slaDraftedAt is kept REAL (only followupPromiseBlockReason is mocked) so
+// this suite proves the actual facts_generated_at → created_at fallback the
+// seam relies on (Codex #5194 P2), not a stand-in.
+jest.mock('../services/sms-followup-sla', () => ({
+  ...jest.requireActual('../services/sms-followup-sla'),
+  followupPromiseBlockReason: jest.fn(() => null),
+}));
 jest.mock('../services/sms-amount-recheck', () => ({ outgoingAmountsStale: jest.fn(async () => ({ stale: false })) }));
 const drafter = require('../services/sms-shadow-drafter');
 const { followupPromiseBlockReason } = require('../services/sms-followup-sla');
@@ -46,6 +52,33 @@ test('an unverifiable edit refuses before any availability call', async () => {
 
 test('the follow-up check receives the decision\'s draft time so a passed deadline can refuse', async () => {
   await agentDecisionSendBlockReason({ decision: decision({ created_at: '2026-09-28T14:00:00Z' }), outgoingBody: 'x' });
+  expect(followupPromiseBlockReason).toHaveBeenCalledWith(expect.objectContaining({ draftedAt: '2026-09-28T14:00:00Z' }));
+});
+
+// Codex #5194 P2: the SLA phrase is rendered off the drafter's OWN
+// facts-generated instant, which can predate created_at (the row lands only
+// after the full draft→verify→revise loop) — slaDraftedAt prefers it.
+test('a decision carrying facts_generated_at anchors the follow-up check on it, not on created_at', async () => {
+  await agentDecisionSendBlockReason({
+    decision: decision({
+      created_at: '2026-09-28T14:00:00Z',
+      input_snapshot: JSON.stringify({ ...SNAP, facts_generated_at: '2026-09-28T13:45:00.000Z' }),
+    }),
+    outgoingBody: 'x',
+  });
+  expect(followupPromiseBlockReason).toHaveBeenCalledWith(
+    expect.objectContaining({ draftedAt: new Date('2026-09-28T13:45:00.000Z') })
+  );
+});
+
+// A legacy row (drafted before this change) or one whose caller predates the
+// field carries no facts_generated_at at all — the check still runs off
+// created_at exactly as before.
+test('a decision with no facts_generated_at (legacy row) falls back to created_at', async () => {
+  await agentDecisionSendBlockReason({
+    decision: decision({ created_at: '2026-09-28T14:00:00Z', input_snapshot: JSON.stringify(SNAP) }),
+    outgoingBody: 'x',
+  });
   expect(followupPromiseBlockReason).toHaveBeenCalledWith(expect.objectContaining({ draftedAt: '2026-09-28T14:00:00Z' }));
 });
 

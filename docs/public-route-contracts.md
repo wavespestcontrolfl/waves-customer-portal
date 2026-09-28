@@ -126,7 +126,18 @@ for the PDF and any other static render or an older live reopen, so the
 PDF/static payload's `rain.lines` can only ever be the trailing-week fact +
 optional rainfast clause, never the forecast sentence, and a customer who
 reopens a weeks-old live report link never gets a heavy-rain caveat dated
-to TODAY's weather framed as being about that old treatment — a PDF/static
+to TODAY's weather framed as being about that old treatment. On a LIVE
+render, the forecast caveat fires INDEPENDENTLY of whether the trailing-week
+total is settled (codex P2 #5137 deferred finding c): a same-day live report
+with an open trailing-week window has no settled weekly rain fact at all
+(`settledWeekWeatherForRender` — see below — passes `weekWeather: null` on
+every render, live included), so the caveat is its own standalone line
+rather than a clause appended to a sentence that, on that render, never
+exists; when a settled trailing-week fact IS present, the caveat still
+appends to that sentence exactly as before, so there is never a redundant
+second line for the same signal. Either way the caveat is a treatment claim,
+so it appears only when the visit recorded at least one application; an
+inspection- or sweep-only visit gets no caveat (codex r2 on #5265). A PDF/static
 render carries the trailing-week fact
 ONLY once that 7-day window has closed (`application-conditions.js` stamps
 each result with `windowClosed`; `reports-public.js`
@@ -203,6 +214,22 @@ expectations — skips the resolution entirely (no fetch, no pin write, and
 `pestWeekWeatherUncacheable` stays false), so a cold provider outage can
 never hold a request that has no use for the weather. Live requests bound
 the lookup at 1.2 s; PDF pre-renders stay unbounded.
+Inside `reports-public.js`, `buildServiceReportV1ResponseData`'s own
+`pestWeekWeather` param (`pestExpectationsWeather`, mirroring the
+`upcomingVisitsCard`/`nearYou` opt-in pattern) is what threads that value
+down to `buildReportV1Data` above AND gates the separate live heavy-rain NWS
+forecast fetch (`fetchPestRainForecastHeavySafe`, its own ~1.2 s deadline)
+further down the same function — the direct PDF route and the `/data` route
+both pass `pestExpectationsWeather: true`; `POST /:token/ask` (the Q&A
+endpoint) does not (codex P2 2026-09-28 round 4 originally scoped the
+opt-in to `report-data.js` only, which left the WRAPPER passing
+`pestWeekWeather: true` unconditionally for every one of its own callers,
+`/ask` included — codex P2 #5137 deferred finding a). `/ask` calls the
+builder purely for report CONTEXT and `answerServiceReportQuestion` never
+reads `data.pestReportV2.expectations`, so it was paying up to ~1.2 s for
+the week-weather lookup and another ~1.2 s for the forecast on every
+customer question, under the general report limiter, for a field it never
+serves.
 The first successful render freezes the settled week onto
 `service_records.structured_notes.pestWeekWeather` (first-writer-wins, an
 atomic conditional UPDATE guarded on the key's absence — no preceding
@@ -266,7 +293,22 @@ non-guaranteeing acknowledgment card whose SOLE trigger (owner ruling
 that eaves were treated — the tech may have tagged it while applying it
 somewhere else entirely) is a recorded COMPLETED eave/web/soffit protocol
 action; no such action recorded → no spider section at all, regardless of
-any spider-targeted product. `whatWeDid` / `expectation` / `nextStep` are
+any spider-targeted product. That gate alone is not enough to CLAIM webs
+were knocked down, though (codex P2 #5137 deferred finding b): the
+completedActions "serviced-eaves" choice, "Completed the recorded eave and
+soffit service." (`client/src/lib/service-completion-choices.js`), names the
+eaves/soffit and so opens the section, but records no web-removal work of
+any kind — it could just as easily be a residual application or a plain
+inspection. Every wording below opens with "We knocked down webs...", so
+that specific claim additionally requires an action that actually says a web
+was removed: either it names web(s)/webbing/a cobweb directly (the
+completedActions "removed-webs" choice, "Removed accessible webs from the
+recorded exterior areas.") or it explicitly SWEPT (the protocol library's
+"Swept eaves, window frames, door frames, and lanai" — sweeping IS the
+web-removal act). A location-only eave/soffit action with neither gets NO
+card at all, gate on or off, residual evidence or not — an unproven "we
+knocked down webs" claim is never invented just because a treatment
+happened to reach the eaves. `whatWeDid` / `expectation` / `nextStep` are
 ALWAYS one of two fixed combinations: (1) the action was recorded but no
 spider-labeled pyrethroid residual (from the explicit `whatToExpect`
 product-name map below) was also applied, OR was applied with no evidence
@@ -2942,8 +2984,10 @@ gets 409 `PREP_CAP_REACHED` (the visit already has 3 submissions, or the new
 photos would push it past 6) and its uploaded object is deleted. `property_id`,
 `customer_id`, and `visit_id` on the inserted rows come from the RECHECKED
 row, never the pre-lock read and never the request body. The response is
-`{ ok: true, prepPhotos: { eligible, photoCount, photosRemaining } }` — 201
-when a submission was created, 200 on the idempotent duplicate-only case —
+`{ ok: true, prepPhotos: { eligible, photoCount, photosRemaining, photosAdded } }`
+— 201 when a submission was created, 200 on the idempotent duplicate-only
+case (`photosAdded` is the number of NEW photos this request stored, 0 on
+that case; the other two counts are stop-wide) —
 and NEVER carries a photo URL, an S3 key, the note, or any customer
 identity: the token is shared with whoever received the visit text, so
 nothing submitted through it is ever shown back. The counts in the
@@ -3838,7 +3882,37 @@ be `/admin`-relative; subject/body/metadata size-capped) or marks rows
 read + `metadata.resolved` — never deletes, never touches customer rows.
 No customer PII may be posted here (the ops-cron contract is id prefixes
 and masked phones). Treat the auth ordering and the exceptions-only kind
-allowlist as security/ruling-critical).
+allowlist as security/ruling-critical.
+Admin-alerts-brevity scope (owner ruling 2026-09-28): the payload also
+accepts optional `headline` (string, ≤60 chars), `summary` (string, ≤110
+chars), and `audience` (`'owner'`|`'engineering'`|`'fyi'`), each validated
+and trimmed the same way as `subject`/`body` (blank → `null`, oversized or
+wrong-typed → 400). The submitted `body` no longer becomes the bell's
+displayed body: it persists verbatim to `notifications.detail` (the
+Activity feed's expander and the destination page read `detail || body`;
+the bell itself never reads `detail`) and the bell title never carries the
+`KIND: ` prefix any more (kind rides in `metadata.kind` only). The stored
+title is the caller's own `headline`, else `${area} — ${subject}` (or that
+check's own parsed headline, e.g. the data-hygiene sweep's fixed subject
+shape) from the server-side check → destination map
+(`server/config/ops-alert-routes.js`, keyed on the check id — `key` up to
+its first `:`, regex-matchable), cut to 60 chars at a word boundary; the
+bell body is the caller's `summary`, else null (never the whole report).
+`link` substitution: the caller's own `/admin`-relative link is kept
+verbatim UNLESS it is absent or is literally the Activity feed
+(`/admin/agents?tab=activity`), in which case the map's own page for that
+check is used instead (falling back to the Activity feed itself for an
+unmapped check). `audience` resolves from the caller's own value, else the
+map's audience for that check, else FIX→`engineering`/ACT→`owner` for an
+unmapped one; a non-`owner` audience stamps `metadata.feed = 'activity'`
+and that row is excluded from the admin bell's list, unread count, and
+mark-all-read (it still lists in the Activity feed). `audience` and `feed`
+join the reserved metadata keys the caller's own `metadata` object cannot
+override (alongside the existing `opsKey`/`subject`/`kind`/`source`/
+`dedupeKey`/`dedupeVersion`/`resolved`/`resolvedAt`/`resolvedBy`/
+`observedAt`). None of this changes the auth ordering, the FIX/ACT-only
+kind allowlist, the 404/401/409/400/503 status layering, or `/resolve`,
+which are unchanged from the paragraph above).
 `/api/client-errors` (POST; unauthenticated client error telemetry. An
 anonymous surface — /admin/login, a public token route, or any page — can
 crash in the browser, so the reporter cannot require auth. Error reports

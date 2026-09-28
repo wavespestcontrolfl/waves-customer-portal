@@ -399,7 +399,7 @@ describe('POST /api/public/appointment/:token/photos', () => {
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.ok).toBe(true);
-      expect(body.prepPhotos).toMatchObject({ photoCount: 6, photosRemaining: 0 });
+      expect(body.prepPhotos).toMatchObject({ photoCount: 6, photosRemaining: 0, photosAdded: 0 });
       expect(dbState.inserted.submissions).toHaveLength(0);
       expect(mockDeletePhoto).toHaveBeenCalledTimes(1);
     });
@@ -468,7 +468,7 @@ describe('POST /api/public/appointment/:token/photos', () => {
     await withServer(async (baseUrl) => {
       const res = await postPhotos(baseUrl, { files: [{ bytes: JPEG_BYTES, mimetype: 'image/jpeg' }] });
       expect(res.status).toBe(200);
-      expect(await res.json()).toEqual({ ok: true, prepPhotos: { eligible: true, photoCount: 0, photosRemaining: 6 } });
+      expect(await res.json()).toEqual({ ok: true, prepPhotos: { eligible: true, photoCount: 0, photosRemaining: 6, photosAdded: 0 } });
       expect(mockUploadFunnelPhotoToS3).toHaveBeenCalledTimes(1);
       expect(mockDeletePhoto).toHaveBeenCalledTimes(1);
       expect(dbState.inserted.submissions).toHaveLength(0);
@@ -615,7 +615,7 @@ describe('POST /api/public/appointment/:token/photos', () => {
       // Customer row before the visit rows (Codex r3 P1).
       expect(dbState.lockOrder.slice(0, 2)).toEqual(['customers', 'scheduled_services']);
       const body = await res.json();
-      expect(body).toEqual({ ok: true, prepPhotos: { eligible: true, photoCount: 1, photosRemaining: 5 } });
+      expect(body).toEqual({ ok: true, prepPhotos: { eligible: true, photoCount: 1, photosRemaining: 5, photosAdded: 1 } });
       expect(JSON.stringify(body)).not.toMatch(/1234|friendly|s3_key|visitprep/i);
       expect(dbState.inserted.submissions).toHaveLength(1);
       expect(dbState.inserted.submissions[0]).toMatchObject({

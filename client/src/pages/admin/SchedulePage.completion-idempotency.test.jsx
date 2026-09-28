@@ -435,6 +435,7 @@ describe("completionResumeOwedError", () => {
       "unminted_setup_fee_alert_failed",
       "annual_prepay_addons_alert_failed",
       "annual_prepay_addons_lookup_failed",
+      "first_application_coverage_changed",
     ]) {
       expect(completionResumeOwedError({ status: 503, code })).toBe(true);
     }

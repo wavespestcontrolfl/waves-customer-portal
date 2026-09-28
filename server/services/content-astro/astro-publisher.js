@@ -44,8 +44,27 @@ const { normalizeSpokeSites, SPOKE_SITE_KEYS, HUB_SITE_KEYS } = require('./spoke
 const { spokeBlogNetworkEnabled } = require('../content/spoke-blog-network');
 const { resolveSpokeTarget, blogOriginForSpoke: sharedBlogOriginForSpoke } = require('./spoke-routing');
 const { etDateString } = require('../../utils/datetime-et');
+const competitorLinks = require('../content/competitor-links');
 
 const ASTRO_BLOG_DIR = 'src/content/blog';
+
+// Owner rulings 2026-09-28: "I do not want to link to a competitor's
+// website, whatsoever" — and refuse, don't rewrite. The last step before
+// EVERY commit, blog, service and location targets alike (publishAstro,
+// publishOrUpdatePage, publishRefresh, publishMetadataRewrite): a link to a
+// competitor host anywhere in the body or frontmatter refuses the publish
+// before any branch exists. Nothing is rewritten. The writer's self-lint
+// (content-guardrails' COMPETITOR_LINK) sends such a draft back first, and an
+// admin/calendar post meets the same guardrail and is fixed by hand.
+function competitorFreeMarkdown(frontmatter, body) {
+  const found = competitorLinks.competitorLinkUrlsIn(frontmatter, body);
+  if (found.length) {
+    const err = new Error(`competitor link "${found[0]}" in the page — publish refused (owner ruling: no links to competitor sites)`);
+    err.code = 'COMPETITOR_LINK';
+    throw err;
+  }
+  return fm.stringify(frontmatter, body);
+}
 const ASTRO_HERO_DIR = 'public/images/blog';
 
 // Only blog posts are governed by the blog frontmatter schema. Service/location
@@ -1413,6 +1432,12 @@ async function publishAstro(postId, { humanApproved = false } = {}) {
       hero_image_alt: vetGeneratedAlt(heroImage?.alt, post.hero_image_alt),
     });
     assertValidBlogFrontmatter(data);
+    // No competitor-evidence channel on this lane: a blog_posts row has no
+    // reviewer notes (the autonomous lanes' notes_for_reviewer), and a post
+    // may not link a competitor's page. So under GATE_EDITORIAL_EVIDENCE a
+    // claim sourced only from a competitor's own site is not evidenced here,
+    // and the review repairs or refuses it (Codex r7 on #5191; a notes field
+    // for admin posts is an owner decision).
     const prepared = await editorialEvidence.prepareDraft({ frontmatter: data, body: post.content || '' }, { page_type: 'supporting-blog' });
     const body = String(prepared.body || '').trim();
     if (!post.reading_time_min) data.reading_time_min = estimateReadingTime(body);
@@ -1564,7 +1589,7 @@ async function publishAstro(postId, { humanApproved = false } = {}) {
     // applied once the live post is known so a republish keeps its list.
     applyCostGuidePriceRange(data, liveFile ? liveFrontmatterOf(liveFile) : null);
     assertValidBlogFrontmatter(data);
-    const markdown = fm.stringify(data, finalBody + '\n');
+    const markdown = competitorFreeMarkdown(data, finalBody + '\n');
     // Owner competitor list on the FINAL text (Codex r6 on #5146): the
     // scheduler's publish auto-merges through pages-poll, so an off-list
     // company is refused before any branch; competitor content naming only
@@ -3462,11 +3487,12 @@ async function publishOrUpdatePage(draft, brief = {}, { humanApproved = false } 
   // so what we validate is exactly what we commit.
   assertValidBlogFrontmatter(frontmatter);
 
-  const markdown = fm.stringify(frontmatter, `${finalBody}\n`);
+  const markdown = competitorFreeMarkdown(frontmatter, `${finalBody}\n`);
   // Owner competitor list on the FINAL committed text — hero / body-image
   // alts included (Codex r5 on #5146). Throws before any branch exists.
   await assertOwnerListForCommit({ draft, brief, frontmatter, body: finalBody, humanApproved });
-  const editorialFiles = await editorialEvidence.filesForDocument({ document: markdown, path: filePath, brief });
+  const editorialFiles = await editorialEvidence.filesForDocument({ document: markdown, path: filePath, brief,
+    evidenceUrls: editorialEvidence.evidenceUrlsFor(draft) });
 
   await gh.createBranch(branch);
   // Reused body pictures are pinned to the blob they were judged on; a
@@ -3646,7 +3672,7 @@ async function publishMetadataRewrite(draft, brief = {}) {
     assertValidBlogFrontmatter(nextFrontmatter);
   }
 
-  const markdown = fm.stringify(nextFrontmatter, parsed.content || '');
+  const markdown = competitorFreeMarkdown(nextFrontmatter, parsed.content || '');
   if (markdown === existing.content) {
     return {
       url: canonicalForExistingPage(targetUrl, currentFrontmatter, filePath),
@@ -3678,7 +3704,8 @@ async function publishMetadataRewrite(draft, brief = {}) {
 
   const branchSlug = slugify(filePath.replace(/^src\/content\//, '').replace(/\.mdx?$/, '').replace(/\//g, ' '));
   const branch = `content/meta-${branchSlug}-${shortId()}`;
-  const editorialFiles = await editorialEvidence.filesForDocument({ document: markdown, path: filePath, brief });
+  const editorialFiles = await editorialEvidence.filesForDocument({ document: markdown, path: filePath, brief,
+    evidenceUrls: editorialEvidence.evidenceUrlsFor(draft) });
   await gh.createBranch(branch);
   if (editorialFiles.length) {
     const current = await gh.getFile(filePath, branch);
@@ -3955,11 +3982,12 @@ async function publishRefresh(draft, brief = {}, { humanApproved = false } = {})
     }
   }
   const finalBody = refreshImages.body;
-  const markdown = fm.stringify(nextFrontmatter, `${finalBody}\n`);
+  const markdown = competitorFreeMarkdown(nextFrontmatter, `${finalBody}\n`);
   // Same owner-list chokepoint as the new-post lane: refreshes auto-merge
   // under AUTONOMOUS_BLOG_AUTO_MERGE too (Codex r5 on #5146).
   await assertOwnerListForCommit({ draft, brief, frontmatter: nextFrontmatter, body: finalBody, humanApproved });
-  const editorialFiles = await editorialEvidence.filesForDocument({ document: markdown, path: filePath, brief });
+  const editorialFiles = await editorialEvidence.filesForDocument({ document: markdown, path: filePath, brief,
+    evidenceUrls: editorialEvidence.evidenceUrlsFor(draft) });
 
   const branchSlug = slugify(filePath.replace(/^src\/content\//, '').replace(/\.mdx?$/, '').replace(/\//g, ' '));
   const branch = `content/refresh-${branchSlug}-${shortId()}`;
@@ -5355,6 +5383,7 @@ module.exports = {
   clampTitle,
   clampMetaDescription,
   _internals: {
+    competitorFreeMarkdown,
     generateHeroBuffer,
     compressToWebp,
     resolveAutonomousHero,

@@ -544,6 +544,77 @@ describe('autonomous-runner._snapshotInterceptSources', () => {
     expect(persisted.intercept_snapshots).toEqual(snapshots);
   });
 
+  test('a competitor page the writer listed in notes_for_reviewer is fed into the snapshot sources (Codex r1 P2, r6 on #5191)', async () => {
+    // A post never links a competitor's own site (owner ruling 2026-09-28),
+    // so a manifest source described only in prose ("Orkin's terms page")
+    // reaches the archive audit through the writer's notes — it is only
+    // archived as evidence, never added to the post.
+    jest.spyOn(seeder, 'snapshotSources').mockResolvedValueOnce({ attempted: 1, ok: 1, snapshots: [] });
+    const update = jest.fn(() => Promise.resolve(1));
+    const where = jest.fn(() => ({ update }));
+    db.mockImplementation(() => ({ where }));
+
+    const opp = {
+      id: 'opp-1',
+      bucket: 'operator_intercept',
+      signal_metadata: { intercept_brief: { sources: [] } },
+    };
+    const draft = {
+      body: 'Per Orkin\'s terms, pricing is quote-based.',
+      notes_for_reviewer: 'Evidence sources: https://www.orkin.com/terms',
+    };
+    await runner._snapshotInterceptSources(opp, draft, {});
+
+    expect(seeder.snapshotSources).toHaveBeenCalledWith(['https://www.orkin.com/terms']);
+  });
+
+  test('notes URLs in any destination form reach Wayback as https (Codex r4 on #5191)', async () => {
+    jest.spyOn(seeder, 'snapshotSources').mockResolvedValueOnce({ attempted: 2, ok: 2, snapshots: [] });
+    db.mockImplementation(() => ({ where: jest.fn(() => ({ update: jest.fn(() => Promise.resolve(1)) })) }));
+    const opp = { id: 'opp-1', bucket: 'operator_intercept', signal_metadata: { intercept_brief: { sources: [] } } };
+    await runner._snapshotInterceptSources(opp, { body: 'Plain.', notes_for_reviewer: 'Evidence sources: //orkin.com/terms, www.terminix.com/fees, https://orkin\\.com/plans' }, {});
+    expect(seeder.snapshotSources).toHaveBeenCalledWith(['https://orkin.com/terms', 'https://www.terminix.com/fees', 'https://orkin.com/plans']);
+  });
+
+  test('the snapshot cap applies to the FINAL deduplicated list, notes evidence included (Codex r2 on #5191)', async () => {
+    jest.spyOn(seeder, 'snapshotSources').mockResolvedValueOnce({ attempted: 10, ok: 10, snapshots: [] });
+    db.mockImplementation(() => ({ where: jest.fn(() => ({ update: jest.fn(() => Promise.resolve(1)) })) }));
+    const notes = `Evidence sources: ${Array.from({ length: 14 }, (_, i) => `https://www.orkin.com/page-${i}`).join(' ')}`;
+    const opp = {
+      id: 'opp-1',
+      bucket: 'operator_intercept',
+      signal_metadata: { intercept_brief: { sources: ['https://example.com/a/', 'Orkin published terms (a note, not a URL)'] } },
+    };
+    await runner._snapshotInterceptSources(opp, { body: 'Plain body.', notes_for_reviewer: notes }, {});
+    const sent = seeder.snapshotSources.mock.calls[0][0];
+    expect(sent).toHaveLength(10);
+    // Half the cap is reserved for the notes' evidence, ahead of the rest
+    // (Codex r10 on #5191); a long notes list cannot crowd out the manifest.
+    expect(sent.slice(0, 5)).toEqual(Array.from({ length: 5 }, (_, i) => `https://www.orkin.com/page-${i}`));
+    expect(sent[5]).toBe('https://example.com/a/');
+    expect(sent.every((u) => /^https:\/\//.test(u))).toBe(true);
+  });
+
+  test('unpublished evidence keeps its snapshots when manifest and body sources fill the cap (Codex r10 on #5191)', async () => {
+    // A competitor page in the notes is on no published page: this snapshot
+    // is its only publish-day audit, so it must not be the part the cap drops.
+    jest.spyOn(seeder, 'snapshotSources').mockResolvedValueOnce({ attempted: 10, ok: 10, snapshots: [] });
+    db.mockImplementation(() => ({ where: jest.fn(() => ({ update: jest.fn(() => Promise.resolve(1)) })) }));
+    const opp = {
+      id: 'opp-1',
+      bucket: 'operator_intercept',
+      signal_metadata: { intercept_brief: { sources: Array.from({ length: 10 }, (_, i) => `https://example.com/m-${i}`) } },
+    };
+    await runner._snapshotInterceptSources(opp, {
+      body: 'Plain body.',
+      notes_for_reviewer: 'Evidence sources: https://www.orkin.com/terms and https://www.bbb.org/us/ga/atlanta/profile/pest-control/orkin-llc',
+    }, {});
+    const sent = seeder.snapshotSources.mock.calls[0][0];
+    expect(sent).toHaveLength(10);
+    expect(sent.slice(0, 2)).toEqual(['https://www.orkin.com/terms', 'https://www.bbb.org/us/ga/atlanta/profile/pest-control/orkin-llc']);
+    expect(sent).toContain('https://example.com/m-0');
+  });
+
   test('a snapshot finishing after claim replacement cannot overwrite the new claim evidence', async () => {
     const snapshots = [{ url: 'https://example.com/a/', snapshot_url: 'https://web.archive.org/a', ok: true }];
     jest.spyOn(seeder, 'snapshotSources').mockResolvedValueOnce({ attempted: 1, ok: 1, snapshots });

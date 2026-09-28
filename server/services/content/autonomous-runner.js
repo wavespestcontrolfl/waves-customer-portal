@@ -47,6 +47,10 @@ const { THRESHOLDS } = require('./scoring-config');
 // db-wide, so it also serializes across multiple app instances. 0x57415645 =
 // "WAVE" in ASCII; a fixed key shared by every publishing entry point.
 const ENGINE_PUBLISH_LOCK_KEY = 0x57415645;
+// Most Wayback snapshot requests one intercept run starts (the same bound as
+// intercept-brief-seeder's body sweep).
+const SNAPSHOT_SOURCE_LIMIT = 10;
+
 const PAGE_EDIT_SUPERSEDED_REASON = 'superseded_by_ordinary_page_edit';
 
 function pageEditSuperseded(rowOrMetadata) {
@@ -2343,10 +2347,30 @@ class AutonomousRunner {
       const citedUrls = typeof seeder.externalUrlsFromMarkdown === 'function'
         ? seeder.externalUrlsFromMarkdown(draft?.body || '')
         : [];
+      // Owner ruling 2026-09-28: a post never links a competitor's own site,
+      // so a competitor page the writer relied on is listed in
+      // notes_for_reviewer instead (editorial-evidence.evidenceUrlsFor) —
+      // otherwise it would vanish from both the sources list AND the archive
+      // audit. A Wayback snapshot is archival evidence, not a published link.
+      // Normalized to https like the review's copy (a protocol-relative,
+      // www. or escaped destination would otherwise be dropped or sent to
+      // Wayback malformed — Codex r4).
+      const evidenceUrls = require('./editorial-evidence').evidenceUrlsFor(draft);
+      // One cap on the FINAL list (Codex r2 on #5191): the body sweep caps
+      // itself, but manifest sources and the notes' evidence add to it, and
+      // the outer timeout below cannot cancel snapshots already started.
+      // The notes' evidence goes FIRST, up to half the cap (Codex r10): it is
+      // on no published page, so this snapshot is its only publish-day
+      // audit, and appended last it was the first thing the cap dropped.
+      // Half, not all: the writer controls the notes, and a long list there
+      // must not crowd out the operator's own sources.
+      const reservedEvidence = evidenceUrls.slice(0, Math.floor(SNAPSHOT_SOURCE_LIMIT / 2));
       const sources = Array.from(new Set([
+        ...reservedEvidence,
         ...(Array.isArray(manifestSources) ? manifestSources : []),
         ...citedUrls,
-      ]));
+        ...evidenceUrls,
+      ])).filter((s) => /^https?:\/\//i.test(String(s || '').trim())).slice(0, SNAPSHOT_SOURCE_LIMIT);
       if (sources.length === 0) return;
 
       const totalTimeout = envInt('INTERCEPT_SNAPSHOT_TOTAL_TIMEOUT_MS', 90_000);
@@ -4716,6 +4740,13 @@ function isDeterministicPublishError(err) {
   // the Astro build), not transient — park for review instead of releasing the
   // claim and re-running the same token-laden draft.
   if (err?.code === 'BLOG_MDX_TOKEN_LEAK') return true;
+  // A competitor link in the page to be committed (astro-publisher
+  // competitorFreeMarkdown) is edit-required too. On a metadata rewrite or
+  // refresh it can sit in the LIVE page, outside anything the run edits, so
+  // a retry regenerates the same refusal forever — park it for a human to
+  // remove the link (owner ruling 2026-09-28: refuse, don't rewrite; Codex
+  // r10 on #5191).
+  if (err?.code === 'COMPETITOR_LINK') return true;
   const message = String(err?.message || '');
   return [
     /^unsupported autonomous draft for Astro publish:/,

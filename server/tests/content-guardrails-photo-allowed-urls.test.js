@@ -85,12 +85,19 @@ describe('priceParagraphIsSourced / findHardcodedPrice — photoAllowedUrls must
     expect(result.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(false);
   });
 
-  test('the SAME citation DOES clear HARDCODED_PRICE when it rides requiredSourceUrls instead (contrast case)', () => {
-    const body = `Aptive's early-cancellation fee is $199 as of June 2026 per [source](${COMMONS_URL}).`;
-    const result = guardrails.evaluate(
-      { body },
-      { competitorPriceCitations: true, requiredSourceUrls: [COMMONS_URL] },
+  // Contrast in the current competitor-price form (#5191: plain prose, the
+  // company's own page under "Evidence sources"): the company page clears
+  // HARDCODED_PRICE, a library photo's source page never does.
+  test('a competitor price sourced from the company page clears; the photo source page does not (contrast case)', () => {
+    const { PHOTO_LIBRARY } = require('../services/content/licensed-photo-library');
+    const photo = PHOTO_LIBRARY[0];
+    const body = "Orkin's early-cancellation fee is $199 as of June 2026.";
+    const sourced = guardrails.evaluate({ body, notes_for_reviewer: 'Evidence sources: https://www.orkin.com/pricing' }, { competitorPriceCitations: true });
+    expect(sourced.findings.some((f) => f.code === 'HARDCODED_PRICE')).toBe(false);
+    const photoSourced = guardrails.evaluate(
+      { body, notes_for_reviewer: `Evidence sources: ${photo.source_page}` },
+      { competitorPriceCitations: true, photoAllowedUrls: [photo.source_page, photo.license_url] },
     );
-    expect(result.findings.some((f) => f.code === 'HARDCODED_PRICE')).toBe(false);
+    expect(photoSourced.findings.some((f) => f.code === 'HARDCODED_PRICE')).toBe(true);
   });
 });
