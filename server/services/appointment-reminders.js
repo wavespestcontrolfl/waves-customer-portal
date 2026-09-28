@@ -4292,6 +4292,8 @@ const AppointmentReminders = {
               day,
               date,
               time,
+              // The 2-hour arrival window, same phrase as the reminders.
+              window: formatArrivalWindow(newApptTime),
             }, {
               workflow: 'appointment_rescheduled',
               entity_type: 'scheduled_service',
