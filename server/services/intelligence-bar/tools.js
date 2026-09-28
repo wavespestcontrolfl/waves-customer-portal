@@ -2442,18 +2442,30 @@ async function resolveTechnicianByName(name) {
 // WDO stays out until that fee honors the member perk).
 const MEMBER_DISCOUNT_KEYS = ['waveguard_member'];
 
-// Live recurring coverage: a future, not-terminal recurring visit — the
-// "or recurring customers" half of the owner's rule (2026-09-27).
-async function hasLiveRecurringCoverage(customerId, conn = db) {
-  // The coverage module's own terminal list: a 'rescheduled' row is a
-  // phantom awaiting SmartRebooker, never live coverage.
-  const { TERMINAL_STATUSES } = require('../waveguard-existing-services');
-  const row = await conn('scheduled_services')
-    .where({ customer_id: customerId, is_recurring: true })
-    .whereNotIn('status', TERMINAL_STATUSES)
-    .where('scheduled_date', '>=', etDateString())
-    .first('id');
-  return !!row;
+// Live recurring coverage: the "or recurring customers" half of the owner's
+// rule (2026-09-27) — through the canonical owned-service lifecycle
+// (waveguard-existing-services.js loadOwnedRecurringServiceKeys), not a
+// hand-rolled is_recurring/status/date query (Codex round 5, P1). The old
+// query here counted callback rows and one-time booking sources as coverage
+// and missed a visit still en_route/on_site across ET midnight; the
+// canonical loader excludes the former unconditionally and bypasses the
+// date cutoff for the latter (same precedent as the billed-plan logic). It
+// THROWS on a catalog join failure — fail CLOSED (no automatic discount)
+// rather than misread coverage off a half-loaded catalog.
+// ownedKeys: an already-loaded owned-recurring-keys array for this same
+// customer within the same pricing pass (ibBookingPricing loads it at most
+// once and threads it here) — skips a redundant call to the canonical
+// loader. Omitted (every other caller), this loads its own.
+async function hasLiveRecurringCoverage(customerId, conn = db, ownedKeys = null) {
+  if (ownedKeys !== null) return ownedKeys.length > 0;
+  const { loadOwnedRecurringServiceKeys } = require('../waveguard-existing-services');
+  try {
+    const keys = await loadOwnedRecurringServiceKeys(conn, customerId);
+    return Array.isArray(keys) && keys.length > 0;
+  } catch (err) {
+    logger.warn(`[intelligence-bar] loadOwnedRecurringServiceKeys failed for customer ${customerId}; treating as no live recurring coverage: ${err.message}`);
+    return false;
+  }
 }
 
 // Live recurring coverage counts toward the "or recurring customers" member
@@ -2464,9 +2476,9 @@ async function hasLiveRecurringCoverage(customerId, conn = db) {
 // fail-closed guard (waveguard-existing-services.js:70-77, 151-155). Every
 // caller of the recurring-coverage evidence (the member line discount AND
 // the mosquito ladder default) goes through this, not the raw row query.
-async function activeCustomerHasLiveRecurringCoverage(customer, conn = db) {
+async function activeCustomerHasLiveRecurringCoverage(customer, conn = db, ownedKeys = null) {
   if (!customer?.id || customer.active === false) return false;
-  return hasLiveRecurringCoverage(customer.id, conn);
+  return hasLiveRecurringCoverage(customer.id, conn, ownedKeys);
 }
 
 // The WaveGuard member discount a member's one-off catalog visit carries
@@ -2476,7 +2488,7 @@ async function activeCustomerHasLiveRecurringCoverage(customer, conn = db) {
 // which meets the same Bronze floor the engine opens for recurring
 // coverage (the only extra query, run only when the plain check fails).
 // Returns { row, recurringCustomer } or null.
-async function memberOneOffDiscount({ customer, catalogRow, listPrice, conn = db }) {
+async function memberOneOffDiscount({ customer, catalogRow, listPrice, conn = db, ownedRecurringKeys = null }) {
   // An inactive customer is no member, whatever tier a cancellation left on
   // the row (the wind-down gate can retain it) — isActivePlanCustomer's rule.
   if (!customer || customer.active === false) return null;
@@ -2535,7 +2547,7 @@ async function memberOneOffDiscount({ customer, catalogRow, listPrice, conn = db
   };
   const byMembership = await firstEligible(false);
   if (byMembership) return { row: byMembership, recurringCustomer: false };
-  if (!(await activeCustomerHasLiveRecurringCoverage(customer, conn))) return null;
+  if (!(await activeCustomerHasLiveRecurringCoverage(customer, conn, ownedRecurringKeys))) return null;
   const byRecurring = await firstEligible(true);
   return byRecurring ? { row: byRecurring, recurringCustomer: true } : null;
 }
@@ -2574,6 +2586,12 @@ function resolveBookingCatalogRow(services, serviceType) {
 }
 
 async function ibBookingPricing({ customer, serviceType, statedPrice, conn = db }) {
+  // Loaded at most once per pricing pass and shared with every recurring-
+  // ownership check below (the monthly-lane dues-covered check, the member
+  // one-off discount's recurring-coverage fallback, the mosquito ladder
+  // override) — null means "not loaded yet", so a caller downstream still
+  // loads its own if the monthly-lane branch never ran.
+  let ownedRecurringKeys = null;
   const services = await conn('services').where({ is_active: true })
     .select('id', 'name', 'short_name', 'service_key', 'base_price', 'price_range_min', 'category', 'billing_type');
   const match = resolveBookingCatalogRow(Array.isArray(services) ? services : [], serviceType);
@@ -2602,9 +2620,37 @@ async function ibBookingPricing({ customer, serviceType, statedPrice, conn = db 
   // completion prices a non-recurring visit out of dues coverage, so a
   // defaulted price here would invoice a plan visit on top of the dues. An
   // operator-stated price still stands: an extra visit they chose to bill.
+  //
+  // "Dues-covered" requires actually OWNING the booked row's service family
+  // (Codex round 5, P2) — the billing_type/mode/payer check above only says
+  // this customer is a dues member on SOME recurring plan, not that THIS
+  // catalog row is that plan. A lawn-only member booking a one-off pest
+  // visit is not dues coverage for pest — it is a one-off extra, priced at
+  // catalog less the member 15% like any other one-off member booking below.
+  // Ownership reuses the canonical lifecycle set (loadOwnedRecurringServiceKeys)
+  // against the booked row's OWN family (ownershipKeysForRow) — never a fresh
+  // approximation. Fail TOWARD not billing (today's behavior: unpriced,
+  // dues-covered) when the booked family is unknown/empty (an uninformative
+  // catalog row can't be checked either way) or the loader throws.
   if (!stated && catalogRow.billing_type === 'recurring' && !customer?.payer_id
     && resolveBillingLane(customer).mode === 'monthly_membership') {
-    return { price: null, source: null, catalogRow, pricing: null };
+    const { loadOwnedRecurringServiceKeys, ownershipKeysForRow } = require('../waveguard-existing-services');
+    const bookedFamilyKeys = ownershipKeysForRow({ service_key: catalogRow.service_key, service_name: catalogRow.name });
+    let duesCovered = true;
+    if (bookedFamilyKeys.length && customer?.id) {
+      try {
+        ownedRecurringKeys = ownedRecurringKeys ?? await loadOwnedRecurringServiceKeys(conn, customer.id);
+        duesCovered = ownedRecurringKeys.some((key) => bookedFamilyKeys.includes(key));
+      } catch (err) {
+        logger.warn(`[intelligence-bar] loadOwnedRecurringServiceKeys failed for monthly-lane customer ${customer.id}; defaulting to dues-covered: ${err.message}`);
+        duesCovered = true;
+      }
+    }
+    if (duesCovered) {
+      return { price: null, source: null, catalogRow, pricing: null };
+    }
+    // Not owned: falls through as an ordinary one-off catalog booking, which
+    // picks up the member discount below exactly like any other one-off.
   }
   // The Schedule modal's own pre-fill for a picked catalog line
   // (CreateAppointmentModal addServiceFromCatalog), sent as the line price:
@@ -2626,7 +2672,7 @@ async function ibBookingPricing({ customer, serviceType, statedPrice, conn = db 
   // operator's own number) or the one-time mosquito line (its lot ladder
   // already prices members as recurring customers).
   const memberDiscount = !stated && Number(catalogDefault) > 0
-    ? await memberOneOffDiscount({ customer, catalogRow, listPrice: Number(catalogDefault), conn })
+    ? await memberOneOffDiscount({ customer, catalogRow, listPrice: Number(catalogDefault), conn, ownedRecurringKeys })
     : null;
   // The mosquito ladder's OWN "or recurring customers" floor (Codex r2 on
   // #5093, P1): mosquitoOneTimeDefaultPrice (admin-schedule.js) only ORs in
@@ -2638,7 +2684,7 @@ async function ibBookingPricing({ customer, serviceType, statedPrice, conn = db 
   // checked first so the extra query only runs when it's actually needed.
   const { hasMembership } = require('../project-completion');
   const mosquitoRecurringOverride = !stated && catalogRow.service_key === 'mosquito_one_time' && !hasMembership(customer)
-    ? await activeCustomerHasLiveRecurringCoverage(customer, conn)
+    ? await activeCustomerHasLiveRecurringCoverage(customer, conn, ownedRecurringKeys)
     : false;
   const pricing = await buildAppointmentPricing({
     serviceRecord: catalogRow,
@@ -3138,6 +3184,14 @@ async function createAppointment(input, actionContext = {}) {
   // spawned visits (Codex r3 on #5093, P1: this create path registers a
   // reminder post-commit too, and had no equivalent recheck).
   let visitWentTerminal = false;
+  // Set only when the visit's status is 'rescheduled' after registration
+  // (P2, round 5): cancelSpawnedReminderIfVisitTerminal correctly treats
+  // 'rescheduled' as NON-terminal (the reminder must stay armed for the
+  // rebook — the coverage module's own terminal list excludes it), but a
+  // visit awaiting rebooking is not a visit to send "see you then" for
+  // either. Read once, after registration, on db — same status this
+  // customer-portal reschedule flow just committed.
+  let visitAwaitingRebooking = false;
   const AppointmentReminders = require('../appointment-reminders');
   try {
     // The Schedule create's own options: fromCommittedRow reads the time
@@ -3159,6 +3213,18 @@ async function createAppointment(input, actionContext = {}) {
     // path.
     const { cancelSpawnedReminderIfVisitTerminal } = require('../../routes/admin-schedule');
     visitWentTerminal = await cancelSpawnedReminderIfVisitTerminal(db, appointment.id, 'intelligence-bar');
+    if (!visitWentTerminal) {
+      // Best-effort, like the terminal recheck above: a lookup failure here
+      // must not turn into a spurious reminder-registration warning (the
+      // registration itself succeeded) — it only means the confirmation send
+      // proceeds exactly as it did before this check existed.
+      try {
+        const visitNow = await db('scheduled_services').where({ id: appointment.id }).first('status');
+        visitAwaitingRebooking = String(visitNow?.status || '').toLowerCase() === 'rescheduled';
+      } catch (statusErr) {
+        logger.warn(`[intelligence-bar] post-registration rescheduled-status check failed for appointment ${appointment.id}: ${statusErr.message}`);
+      }
+    }
   } catch (err) {
     logger.error(`[intelligence-bar] reminder registration failed for appointment ${appointment.id}: ${err.message}`);
     // Surfaced on the confirm card as a partial-failure warning (W0B): the
@@ -3174,8 +3240,10 @@ async function createAppointment(input, actionContext = {}) {
   // failed registration has no row to send from, so nothing is attempted;
   // neither does a visit that turned terminal in the registration window —
   // sending "see you then" for an already-cancelled/completed visit is
-  // exactly what the recheck above exists to prevent.
-  if (!reminderWarning && !visitWentTerminal) {
+  // exactly what the recheck above exists to prevent — nor one that instead
+  // turned 'rescheduled' (awaiting rebooking): the reminder stays armed, but
+  // "see you then" for a visit with no settled time is exactly as wrong.
+  if (!reminderWarning && !visitWentTerminal && !visitAwaitingRebooking) {
     setImmediate(async () => {
       try {
         await AppointmentReminders.sendConfirmation(appointment.id);

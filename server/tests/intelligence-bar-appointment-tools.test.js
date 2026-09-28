@@ -40,12 +40,25 @@ jest.mock('../utils/datetime-et', () => {
   const actual = jest.requireActual('../utils/datetime-et');
   return { ...actual, sameDayWindowElapsed: jest.fn(actual.sameDayWindowElapsed) };
 });
+// Live recurring coverage now goes through the canonical ownership loader
+// (waveguard-existing-services.js loadOwnedRecurringServiceKeys — Codex
+// round 5, P1) instead of a hand-rolled scheduled_services query. Real
+// exports throughout except that one loader, which the recurring-coverage
+// tests below control directly — the loader's OWN lifecycle behavior
+// (terminal statuses, callback/one-time exclusions, the catalog join) is
+// proven by its own module's tests and by
+// intelligence-bar-recurring-coverage-canonical.test.js, not re-derived here.
+jest.mock('../services/waveguard-existing-services', () => ({
+  ...jest.requireActual('../services/waveguard-existing-services'),
+  loadOwnedRecurringServiceKeys: jest.fn(),
+}));
 
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { clearTechCurrentJob } = require('../services/tech-status');
 const AppointmentReminders = require('../services/appointment-reminders');
 const datetimeEt = require('../utils/datetime-et');
+const { loadOwnedRecurringServiceKeys } = require('../services/waveguard-existing-services');
 const { executeTool, ibBookingProposal } = require('../services/intelligence-bar/tools');
 
 // Real ET "today" — the date a same-day move targets.
@@ -129,6 +142,9 @@ beforeEach(() => {
   jest.clearAllMocks();
   db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
   db.fn = { now: jest.fn(() => 'now()') };
+  // Default: no live recurring coverage — a test that needs coverage sets
+  // its own resolved value.
+  loadOwnedRecurringServiceKeys.mockResolvedValue([]);
 });
 // A booking defers its confirmation text past the result (setImmediate), so
 // let every test's deferred work finish before the next test clears mocks.
@@ -321,6 +337,33 @@ describe('create_appointment', () => {
     expect(result.warning).toBeUndefined();
     await new Promise((resolve) => setImmediate(resolve));
     expect(AppointmentReminders.sendConfirmation).toHaveBeenCalledWith('appt-1');
+  });
+
+  test('a visit that turned \'rescheduled\' after registration keeps its reminder armed but sends no confirmation (P2, round 5)', async () => {
+    // cancelSpawnedReminderIfVisitTerminal correctly treats 'rescheduled' as
+    // NON-terminal (the reminder stays armed for the rebook — the coverage
+    // module's own terminal list excludes it), so visitWentTerminal is
+    // false here. Without the round-5 fix, that alone let the deferred
+    // "see you then" confirmation fire for a visit now awaiting rebooking.
+    const rescheduledRow = () => chain({ first: jest.fn().mockResolvedValue({ status: 'rescheduled' }) });
+    wireDb({
+      customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L', ...MEMBER_BILLING }) }),
+        chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L', ...MEMBER_BILLING }) })],
+      // Same padding rationale as the terminal/live-case tests above — every
+      // incidental post-commit 'scheduled_services' reader (the terminal
+      // recheck AND this fix's own status read) sees the SAME 'rescheduled'
+      // row regardless of exactly which reader lands on which queue slot.
+      scheduled_services: [chain(), chain(), rescheduledRow(), rescheduledRow(), rescheduledRow(), rescheduledRow()],
+    });
+    const result = await executeTool('create_appointment', {
+      customer_id: 'cust-1', scheduled_date: '2099-01-15', service_type: 'Pest Control', time_window: '9:00 AM',
+    });
+    expect(result.success).toBe(true);
+    // Silent, like the terminal recheck — not a failure the operator needs
+    // to see, and the reminder registration itself succeeded.
+    expect(result.warning).toBeUndefined();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(AppointmentReminders.sendConfirmation).not.toHaveBeenCalled();
   });
 
   test('success log carries ids only — never the customer name (no-PII-in-logs rule)', async () => {
@@ -689,6 +732,10 @@ describe('create_appointment — the visit carries a price like a Schedule-scree
       id: 'svc-foam', name: 'Recurring Termite Foam Service', short_name: null, service_key: 'foam_recurring',
       price_range_min: '146.00', base_price: '164.00', category: 'termite', billing_type: 'recurring',
     };
+    // The monthly-lane dues-covered check now verifies the member actually
+    // OWNS the booked family (Codex round 5, P2) — this member's plan IS the
+    // foam family they're booking again, so the canonical loader reports it.
+    loadOwnedRecurringServiceKeys.mockResolvedValue(['termite_foam']);
     const insertChain = wirePriced({ customer: { ...PER_VISIT, ...MEMBER_BILLING }, rows: [foam] });
     const result = await book({ service_type: foam.name, _booking_price: null, _booking_service_id: 'svc-foam' });
     expect(result.success).toBe(true);
@@ -696,6 +743,46 @@ describe('create_appointment — the visit carries a price like a Schedule-scree
     expect(payload).toMatchObject({ service_id: 'svc-foam' });
     expect(payload).not.toHaveProperty('estimated_price');
     expect(payload).not.toHaveProperty('create_invoice_on_complete');
+  });
+
+  test('a monthly member booking a one-off visit OUTSIDE their plan family is priced (not dues-covered) — the family-ownership check (Codex round 5, P2)', async () => {
+    // A lawn-only member (dues cover lawn_care) books a single PEST visit —
+    // a different family entirely, so the monthly-lane's old
+    // billing_type/mode-only check would have wrongly waived it as
+    // dues-covered. It must price like any other one-off catalog visit —
+    // catalog price less the member 15% (owner rule) — via the SAME
+    // member-discount path a per-application member's one-off gets below.
+    const pest = {
+      id: 'svc-pest-plan', name: 'Recurring Pest Control Service', short_name: null, service_key: 'pest_general_quarterly',
+      price_range_min: '146.00', base_price: '164.00', category: 'pest', billing_type: 'recurring',
+    };
+    const lawnOnlyMember = { ...PER_VISIT, ...MEMBER_BILLING, waveguard_tier: 'Gold', active: true };
+    // Owns ONLY lawn_care — never pest_control.
+    loadOwnedRecurringServiceKeys.mockResolvedValue(['lawn_care']);
+    const GENERIC = {
+      id: 'disc-member', discount_key: 'waveguard_member', name: 'WaveGuard Member Discount', discount_type: 'percentage',
+      amount: '15.00', requires_waveguard_tier: 'Bronze', service_key_filter: null, is_active: true, show_in_invoices: true, max_discount_dollars: null,
+    };
+    const listing = (rows) => chain({ orderBy: jest.fn().mockReturnThis(), select: jest.fn().mockResolvedValue(rows) });
+    const insertChain = chain();
+    insertChain.returning.mockImplementation(async () => [{ id: 'appt-1', ...insertChain.insert.mock.calls[0][0] }]);
+    wireDb({
+      customers: [chain({ first: jest.fn().mockResolvedValue(lawnOnlyMember) }), chain({ first: jest.fn().mockResolvedValue(lawnOnlyMember) })],
+      services: [catalog([pest]), catalog([pest])],
+      discounts: [
+        listing([GENERIC]), chain({ first: jest.fn().mockResolvedValue(GENERIC) }),
+        listing([GENERIC]), chain({ first: jest.fn().mockResolvedValue(GENERIC) }),
+      ],
+      scheduled_services: [chain(), chain({ columnInfo: jest.fn().mockResolvedValue({
+        line_discount_id: {}, line_discount_name: {}, line_discount_type: {}, line_discount_amount: {}, line_discount_dollars: {},
+      }) }), insertChain],
+    });
+    // catalogDefault prefers price_range_min (146) over base_price, same as
+    // every other one-off booking — 146 * 0.85 = 124.10.
+    const result = await book({ service_type: pest.name, _booking_price: 124.1, _booking_service_id: 'svc-pest-plan', _booking_list_price: 146, _booking_discount_id: 'disc-member', _booking_discount_name: 'WaveGuard Member Discount', _booking_discount_type: 'percentage', _booking_discount_amount: 15 });
+    expect(result).toMatchObject({ success: true, price: 124.1 });
+    const payload = insertChain.insert.mock.calls[0][0];
+    expect(payload).toMatchObject({ estimated_price: 124.1, primary_line_price: 146, line_discount_id: 'disc-member', create_invoice_on_complete: true });
   });
 
   test('the same plan service for a per-visit customer carries the catalog default, and a member\'s stated price still stands', async () => {
@@ -862,15 +949,18 @@ describe('create_appointment — the visit carries a price like a Schedule-scree
       };
       const insertChain = chain();
       insertChain.returning.mockImplementation(async () => [{ id: 'appt-1', ...insertChain.insert.mock.calls[0][0] }]);
-      const liveChecks = [];
-      const live = () => { const c = chain({ first: jest.fn().mockResolvedValue({ id: 'rec-visit' }) }); liveChecks.push(c); return c; };
+      // Live recurring coverage through the canonical ownership loader
+      // (Codex round 5, P1) — the loader's OWN terminal-status/callback/
+      // one-time-source exclusions are proven in its own module's tests and
+      // in intelligence-bar-recurring-coverage-canonical.test.js; this test
+      // only proves the IB wiring reaches it and honors a non-empty result.
+      loadOwnedRecurringServiceKeys.mockResolvedValue(['pest_control']);
       wireDb({
         customers: [chain({ first: jest.fn().mockResolvedValue(recurringOnly) }), chain({ first: jest.fn().mockResolvedValue(recurringOnly) })],
         services: [catalog([ONE_TIME_PEST]), catalog([ONE_TIME_PEST])],
         discounts: discountsQueue([GENERIC], GENERIC),
-        // live-recurring check (a live visit), probe, the locked pass's
-        // check, the stamp helper's column read, then the insert
-        scheduled_services: [live(), chain(), live(), chain({ columnInfo: jest.fn().mockResolvedValue(LINE_DISCOUNT_COLS) }), insertChain],
+        // probe, the stamp helper's column read, then the insert
+        scheduled_services: [chain(), chain({ columnInfo: jest.fn().mockResolvedValue(LINE_DISCOUNT_COLS) }), insertChain],
       });
       const result = await book({
         _booking_price: 212.5, _booking_service_id: 'svc-otp',
@@ -879,9 +969,8 @@ describe('create_appointment — the visit carries a price like a Schedule-scree
       });
       expect(result).toMatchObject({ success: true, price: 212.5 });
       expect(insertChain.insert.mock.calls[0][0]).toMatchObject({ estimated_price: 212.5, line_discount_id: 'disc-member' });
-      // A 'rescheduled' row is a phantom, never live coverage (the coverage
-      // module's own terminal list).
-      expect(liveChecks[0].whereNotIn).toHaveBeenCalledWith('status', expect.arrayContaining(['rescheduled']));
+      // Reached the canonical loader for this exact customer.
+      expect(loadOwnedRecurringServiceKeys).toHaveBeenCalledWith(expect.anything(), 'cust-1');
     });
 
     test('the locked recheck never refreshes the exclusion catalog on the global pool — it holds a transaction connection already', async () => {
@@ -945,7 +1034,8 @@ describe('create_appointment — the visit carries a price like a Schedule-scree
         customers: [chain({ first: jest.fn().mockResolvedValue(perAppMember) }), chain({ first: jest.fn().mockResolvedValue(perAppMember) })],
         services: [catalog([foam]), catalog([foam])],
         discounts: [listing([GENERIC]), listing([GENERIC])],
-        scheduled_services: [chain(), chain(), chain(), insertChain],
+        // probe, then the insert — no live coverage (default mock: []).
+        scheduled_services: [chain(), insertChain],
       });
       const result = await book({ service_type: foam.name, _booking_price: 146, _booking_service_id: 'svc-foam' });
       expect(result.success).toBe(true);
@@ -970,9 +1060,8 @@ describe('create_appointment — the visit carries a price like a Schedule-scree
         customers: [chain({ first: jest.fn().mockResolvedValue(PER_VISIT) }), chain({ first: jest.fn().mockResolvedValue(PER_VISIT) })],
         services: [catalog([ONE_TIME_PEST]), catalog([ONE_TIME_PEST])],
         discounts: [listing([GENERIC]), listing([GENERIC])],
-        // the live-recurring check (none) on the preflight pass, the probe,
-        // the same check on the locked pass, then the insert
-        scheduled_services: [chain(), chain(), chain(), insertChain],
+        // probe, then the insert — no live coverage (default mock: []).
+        scheduled_services: [chain(), insertChain],
       });
       const result = await book({ _booking_price: 250, _booking_service_id: 'svc-otp' });
       expect(result.success).toBe(true);
@@ -1049,10 +1138,10 @@ describe('create_appointment — the visit carries a price like a Schedule-scree
       id: 'cust-1', first_name: 'Ada', last_name: 'L', billing_mode: 'per_application', per_application_fee: 95,
       waveguard_tier: null, monthly_rate: 0, active: true, lot_sqft: 12000,
     };
+    loadOwnedRecurringServiceKeys.mockResolvedValue(['mosquito']);
     wireDb({
       customers: [chain({ first: jest.fn().mockResolvedValue(recurringOnly) })],
       services: [chain({ select: jest.fn().mockResolvedValue([MOSQUITO]) })],
-      scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ id: 'rec-visit' }) })],
     });
     const { priceOneTimeMosquito } = require('../services/pricing-engine');
     const memberExpected = priceOneTimeMosquito({ lotSqFt: 12000 }, { isRecurringCustomer: true }).price;
@@ -1083,7 +1172,8 @@ describe('create_appointment — the visit carries a price like a Schedule-scree
     wireDb({
       customers: [chain({ first: jest.fn().mockResolvedValue(customer) }), chain({ first: jest.fn().mockResolvedValue(customer) })],
       services: [catalog([mosquito]), catalog([mosquito])],
-      scheduled_services: [chain(), chain(), chain(), insertChain],
+      // probe, then the insert — no live coverage (default mock: []).
+      scheduled_services: [chain(), insertChain],
     });
     const result = await book({ service_type: mosquito.name, _booking_price: expected, _booking_service_id: 'svc-mq' });
     expect(result.success).toBe(true);

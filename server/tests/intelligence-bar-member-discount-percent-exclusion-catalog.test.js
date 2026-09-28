@@ -35,6 +35,15 @@ jest.mock('../services/appointment-reminders', () => ({
   registerAppointment: jest.fn().mockResolvedValue({ id: 'rem-1' }),
   sendConfirmation: jest.fn().mockResolvedValue(true),
 }));
+// Live recurring coverage goes through the canonical ownership loader
+// (waveguard-existing-services.js loadOwnedRecurringServiceKeys — Codex
+// round 5, P1); this file is about the percent-exclusion catalog prime, not
+// recurring coverage, so the loader is mocked to a plain "no coverage" —
+// consistent with the original bare scheduled_services stub it replaces.
+jest.mock('../services/waveguard-existing-services', () => ({
+  ...jest.requireActual('../services/waveguard-existing-services'),
+  loadOwnedRecurringServiceKeys: jest.fn().mockResolvedValue([]),
+}));
 
 const db = require('../models/db');
 const { ibBookingProposal } = require('../services/intelligence-bar/tools');
@@ -121,10 +130,10 @@ describe('memberOneOffDiscount awaits the percent-exclusion catalog prime (Codex
       // unrelated missing-mock error.
       discounts: [listing([GENERIC]), chain({ first: jest.fn().mockResolvedValue(GENERIC) })],
       // The exclusion skip means no eligible row on the membership pass, so
-      // the recurring-coverage fallback runs once — wired with no live row
-      // (irrelevant either way: the exclusion applies before eligibility is
-      // checked on both passes, same as the literal-key bed-bug test).
-      scheduled_services: [chain()],
+      // the recurring-coverage fallback runs once — the canonical loader is
+      // mocked to no coverage above (irrelevant either way: the exclusion
+      // applies before eligibility is checked on both passes, same as the
+      // literal-key bed-bug test).
     });
     const result = await ibBookingProposal('cust-1', BED_BUG_VARIANT.name, undefined);
     expect(result).toMatchObject({ price: 200, discountId: null });
