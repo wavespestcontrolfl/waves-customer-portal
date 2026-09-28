@@ -210,14 +210,18 @@ function normalizePluralToken(token) {
 /**
  * Deterministic grounding check (never trusts the model alone): every
  * alphabetic topic token longer than 3 characters must appear in the cited
- * evidence text, or the topic is rejected.
+ * evidence text, or the topic is rejected. A topic made only of short words
+ * ("rat", "air wig") must match each one as a whole word instead — a short
+ * substring is too loose ("rat" is inside "rather").
  */
 function isTopicGrounded(topic, citedText) {
   const evidenceLower = String(citedText || "").toLowerCase();
   if (!evidenceLower) return false;
-  const tokens = (String(topic || "").toLowerCase().match(/[a-z]+/g) || []).filter((t) => t.length > 3);
-  if (!tokens.length) return false;
-  return tokens.every((t) => evidenceLower.includes(normalizePluralToken(t)));
+  const words = String(topic || "").toLowerCase().match(/[a-z]+/g) || [];
+  const tokens = words.filter((t) => t.length > 3);
+  if (tokens.length) return tokens.every((t) => evidenceLower.includes(normalizePluralToken(t)));
+  if (!words.some((w) => w.length === 3)) return false;
+  return words.every((w) => new RegExp(`\\b${w}s?\\b`).test(evidenceLower));
 }
 
 function hasEvidenceToClassify(ev) {

@@ -275,6 +275,24 @@ describe('extractReviewTopic', () => {
     expect(await extractReviewTopic(evidence)).toBeNull();
   });
 
+  test('a topic of only short words ("air wig") is grounded word for word — the production replay miss', async () => {
+    mockDispatch.mockResolvedValue({
+      ok: true,
+      json: { topic: 'air wig', kind: 'service_concern', source: 'sms', evidence_id: 's-1', confidence: 0.92 },
+    });
+    const evidence = { completion: { concernText: null }, texts: [{ id: 's-1', at: NOW.toISOString(), body: 'We should be around Had an air wig in the bathroom last week' }] };
+    expect(await extractReviewTopic(evidence)).toMatchObject({ topic: 'air wig', kind: 'service_concern' });
+  });
+
+  test('a short-word topic never grounds on a longer word that merely contains it ("rat" in "rather")', async () => {
+    mockDispatch.mockResolvedValue({
+      ok: true,
+      json: { topic: 'rat', kind: 'service_concern', source: 'sms', evidence_id: 's-1', confidence: 0.9 },
+    });
+    const evidence = { completion: { concernText: null }, texts: [{ id: 's-1', at: NOW.toISOString(), body: "I'd rather move the visit to Friday" }] };
+    expect(await extractReviewTopic(evidence)).toBeNull();
+  });
+
   test('a grounded service_concern from an sms citation is stored with the version', async () => {
     mockDispatch.mockResolvedValue({
       ok: true,
