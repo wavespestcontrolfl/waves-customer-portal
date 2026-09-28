@@ -2015,7 +2015,7 @@ describe('publishAstro stamps astro_requires_human_merge (audit lane 4b)', () =>
     expect(update.update).not.toHaveBeenCalledWith(expect.objectContaining({ astro_status: 'pr_open' }));
   });
 
-  test('a scheduled post naming only the six keeps the human-merge stamp; an admin publish skips the check', async () => {
+  test('a scheduled post naming only owner-list competitors keeps the human-merge stamp; an admin publish skips the check and is stamped for an admin merge', async () => {
     businessNameConfirmer.extractCompanyNames.mockResolvedValue({ ok: true, key: 'k', companies: ['Orkin'] });
     let read = chain({ first: jest.fn().mockResolvedValue(plainPost()) });
     let update = chain();
@@ -2031,6 +2031,9 @@ describe('publishAstro stamps astro_requires_human_merge (audit lane 4b)', () =>
     queries = [read, update];
     await AstroPublisher.publishAstro('post-1', { humanApproved: true });
     expect(businessNameConfirmer.extractCompanyNames).not.toHaveBeenCalled();
+    // The skipped check is backed by an enforced manual merge (pages-poll
+    // withholds auto-merge on this stamp).
+    expect(update.update).toHaveBeenCalledWith(expect.objectContaining({ astro_status: 'pr_open', astro_requires_human_merge: true }));
   });
 
   test('namedCompetitorAutopublish never reaches this lane — the stamp stays TRUE even with the flag on (manual/calendar posts keep their human merge)', async () => {

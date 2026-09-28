@@ -1526,7 +1526,7 @@ async function publishAstro(postId, { humanApproved = false } = {}) {
     // scheduler's publish auto-merges through pages-poll, so an off-list
     // company is refused before any branch; competitor content naming only
     // owner-list competitors keeps the human-merge stamp. An admin publish (humanApproved)
-    // is a human decision and its PR waits for an admin merge anyway.
+    // is a human decision: the check stamps its PR for an admin merge.
     const ownerList = await assertOwnerListForCommit({ draft: null, brief: {}, frontmatter: data, body: finalBody, humanApproved, humanMergeFallback: true });
     const editorialFiles = await editorialEvidence.filesForDocument({ document: markdown, path: filePath });
 

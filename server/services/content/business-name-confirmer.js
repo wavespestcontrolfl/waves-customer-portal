@@ -303,7 +303,9 @@ function ownerListError(code, message, fields) {
  * the company extraction runs on its final text too, and every name must
  * be one the operator saw in the approved draft or be on the owner list
  * (#5146 r10). The admin lane (publishAstro, no stored draft) skips the
- * extraction: an admin merges that PR by hand after reading the final text.
+ * extraction: an admin merges that PR by hand after reading the final text,
+ * and the returned requiresHumanMerge stamps it so pages-poll never
+ * auto-merges it.
  * humanMergeFallback (the scheduler's publishAstro): competitor content
  * naming only owner-list competitors returns { requiresHumanMerge: true } for the PR's
  * human-merge stamp instead of throwing. Returns { extraction,
@@ -337,8 +339,10 @@ async function assertOwnerListForCommit({ draft, brief = {}, frontmatter = {}, b
       `final text fails the comparison gate: ${blocking.map((f) => `${f.severity} ${f.code}`).join('; ')}`,
       { reason: 'comparison_table_failed', offList: [], findings: blocking });
   }
-  // The admin lane's PR waits for an admin merge — see the doc comment.
-  if (humanApproved && !draft) return { extraction: null, requiresHumanMerge: false };
+  // The admin lane skips the extraction because an admin merges its PR by
+  // hand; requiresHumanMerge makes that enforced, not assumed: publishAstro
+  // stamps astro_requires_human_merge, which pages-poll's auto-merge honors.
+  if (humanApproved && !draft) return { extraction: null, requiresHumanMerge: true };
   // Through module.exports so a suite exercising the publisher can stub the
   // model call alone and keep this chokepoint's real decision logic.
   const extraction = await module.exports.extractCompanyNames(finalDraft, {

@@ -246,12 +246,12 @@ describe('assertOwnerListForCommit', () => {
     expect(dispatchWithFallback).not.toHaveBeenCalled();
   });
 
-  test('humanApproved admin lane (no stored draft) skips the extraction: an admin merges that PR by hand', async () => {
+  test('humanApproved admin lane (no stored draft) skips the extraction and requires the human merge it relies on', async () => {
     const result = await assertOwnerListForCommit({
       draft: null, brief: BLOG_BRIEF, humanApproved: true, body: 'Bug Out competes with local providers.',
       frontmatter: { ...finalFm, hero_image: { src: '/images/blog/x/hero.webp', alt: 'A technician inspects a Sarasota lanai' } },
     });
-    expect(result).toEqual({ extraction: null, requiresHumanMerge: false });
+    expect(result).toEqual({ extraction: null, requiresHumanMerge: true });
     expect(dispatchWithFallback).not.toHaveBeenCalled();
   });
 
