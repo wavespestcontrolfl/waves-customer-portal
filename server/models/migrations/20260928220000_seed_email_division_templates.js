@@ -321,7 +321,19 @@ function templateRow(t) {
     content_sensitivity: t.sensitivity || 'normal',
     send_stream: t.suppressionGroup,
     suppression_group_key: t.suppressionGroup,
-    layout_wrapper_id: 'service_default_v1',
+    // nurture.expired_1 rides a marketing_* suppression stream but is
+    // meant to read like a personal service touch, not a newsletter
+    // broadcast. mode: 'service' alone does not get it that: sendTemplate's
+    // modeOverride (email-template-library.js ~1341-1349) forces mode
+    // 'marketing' (and the newsletter wrapper) for any isMarketingSend
+    // template UNLESS layout_wrapper_id === 'service_pinned_v1' — the exact
+    // mechanism referral.invite already uses for this same combination
+    // (owner directive 2026-07-06: user-unsubscribable via a marketing_*
+    // stream, rendered like the service emails). The unsubscribe/ASM
+    // requirement itself is unaffected either way — it keys off
+    // isMarketingSend (suppression_group_key), never the wrapper (local
+    // pre-push audit round 3).
+    layout_wrapper_id: t.suppressionGroup === 'marketing_nurture' ? 'service_pinned_v1' : 'service_default_v1',
     from_name: 'Waves Pest Control',
     from_email: SERVICE_FROM,
     reply_to: SERVICE_FROM,

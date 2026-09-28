@@ -182,6 +182,24 @@ describe('seed migration 20260928220000 (re-cut of #5160)', () => {
     }
   });
 
+  test('nurture.expired_1 pins service chrome on its marketing_nurture stream, the same mechanism referral.invite uses (local pre-push audit round 3)', () => {
+    // email-template-library.js sendTemplate: isMarketingSend is true for
+    // ANY suppression_group_key starting with 'marketing_', and it forces
+    // modeOverride to 'marketing' (the newsletter wrapper) UNLESS
+    // layout_wrapper_id === 'service_pinned_v1' (renderTemplate ~1341-1349).
+    // mode: 'service' alone does NOT survive that override — only the pin
+    // does — so every marketing_* template must carry the pin to render the
+    // service chrome its seeded mode implies.
+    for (const t of migration.TEMPLATES) {
+      const row = migration.__private.templateRow(t);
+      if (String(row.suppression_group_key || '').startsWith('marketing_')) {
+        expect(row.layout_wrapper_id).toBe('service_pinned_v1');
+      } else {
+        expect(row.layout_wrapper_id).toBe('service_default_v1');
+      }
+    }
+  });
+
   test('legal_classification and content_sensitivity are values the admin API actually accepts (Codex P1 :238, P2 :179)', () => {
     // Read the SAME enums admin-email-templates.js validates against,
     // rather than re-declaring the literals here (a hand-copied list would
