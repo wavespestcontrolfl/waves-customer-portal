@@ -646,6 +646,22 @@ describe('resumeCampaign — preconditions', () => {
     expect(sweepUpdate).toMatchObject({ status: 'skipped' });
   });
 
+  test('a Pest Insider campaign that no longer passes the claim scan is refused BEFORE anything is claimed (codex round 8 P1 on #5187)', async () => {
+    let otherTableTouched = null;
+    db.mockImplementation((table) => {
+      if (table === 'newsletter_sends') {
+        return chain({ first: {
+          id: 's', status: 'failed', newsletter_type: 'pest-insider-monthly', subject: 'Pest Insider — September',
+          html_body: '<p>Termites swarm again after storms.</p>', text_body: 'Termites swarm again after storms.', event_ids: [],
+        } });
+      }
+      otherTableTouched = table;
+      return chain({});
+    });
+    await expect(prepareResumeCampaign('s')).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
+    expect(otherTableTouched).toBeNull();
+  });
+
   test('resume with only ineligible outstanding rows terminalizes them, then reports NOTHING_TO_RESUME', async () => {
     let sweepUpdate = null;
     let sweepQuery = null;

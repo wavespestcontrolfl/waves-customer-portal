@@ -1023,8 +1023,8 @@ router.post('/sends/:id/resume', async (req, res) => {
     if (err.code === 'STILL_SENDING' || err.code === 'ALREADY_CLAIMED') {
       return res.status(409).json({ error: err.message, code: err.code });
     }
-    if (err.code === 'NOT_RESUMABLE' || err.code === 'NOTHING_TO_RESUME') {
-      return res.status(400).json({ error: err.message, code: err.code });
+    if (err.code === 'NOT_RESUMABLE' || err.code === 'NOTHING_TO_RESUME' || err.code === 'VALIDATION_FAILED') {
+      return res.status(400).json({ error: err.message, code: err.code, errors: err.errors });
     }
     logger.error(`[newsletter] resume dispatch failed: ${err.message}`, { stack: err.stack });
     res.status(500).json({ error: err.message });

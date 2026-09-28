@@ -573,6 +573,7 @@ const PRONOUN_SUBJECT = /\b(?:they|them|these\s+(?:insects|pests|bugs|termites)|
 // A clause that names another pest as its own subject ("..., and fire ants
 // swarm again after storms") is about that pest, not the termites named
 // earlier (codex round 7 P2).
+const CONTRAST_LEAD_IN = /^(?:unlike|like|compared\s+(?:to|with)|rather\s+than|instead\s+of|as\s+with|as\s+opposed\s+to|versus|vs\.?|not)\b/i;
 const OTHER_PEST_SUBJECT = /\b(?:fire\s+ants?|ants?|mosquito(?:es|s)?|(?:cock)?roach(?:es)?|palmetto\s+bugs?|spiders?|fleas?|ticks?|rodents?|rats?|mice|wasps?|bees?|hornets?|yellow\s*jackets?|lovebugs?|love\s+bugs?|chinch\s+bugs?|webworms?|no-see-ums?|midges?|gnats?|flies|bed\s*bugs?|silverfish|earwigs?|millipedes?|centipedes?|scorpions?|beetles?|moths?|aphids?|whiteflies|mealybugs?|scale\s+insects?)\b/i;
 const SWARM_WORD = /\b(?:swarm\w*|fl(?:y|ies|ew|ying|own)|flights?|take\s+flight|took\s+flight|taking\s+flight|alates?|winged|emerg\w+|come\s+out|coming\s+out|came\s+out)\b/i;
 const REPEAT_TRIGGER = /\b(?:second|another|again|repeat\w*|twice|once\s+more|all\s+over\s+again|late[-\s]?summer|summer(?:s|time)?|storms?|hurricanes?|post[-\s]?storms?|tropical|rainy\s+season)\b/i;
@@ -599,8 +600,12 @@ function termiteClaimInSentence(sentence, previousSentence) {
     const clause = clauses[i];
     const own = lastTermiteKind(clause);
     if (own) subject = own;
+    // A contrast lead-in ("Unlike fire ants,", "compared with mosquitoes,")
+    // names the OTHER party, not the subject — the next clause's pronoun
+    // still means the termites (codex round 8 P1).
+    else if (CONTRAST_LEAD_IN.test(clause)) { /* subject unchanged */ }
     else if (OTHER_PEST_SUBJECT.test(clause)) subject = 'other-pest';
-    else if (subject === null && PRONOUN_SUBJECT.test(clause)) subject = lastTermiteKind(previousSentence);
+    if (subject === null && PRONOUN_SUBJECT.test(clause)) subject = lastTermiteKind(previousSentence);
     if (subject !== 'other') continue;
     if (!SWARM_WORD.test(clause) || !REPEAT_TRIGGER.test(clause)) continue;
     if (clauseDenies(clause) || previousClauseIsMythLabel(clauses, i)) continue;
@@ -618,13 +623,28 @@ function termiteClaimInSentence(sentence, previousSentence) {
 // above-80°F is the claim; UF's own "occurs in warm, humid weather" is not.
 const PATCH = /\b(?:brown|large)\s+patch\b/i;
 const PATCH_TRIGGER = /\b(?:summer(?:s|time)?|above[-\s]?80|june|july|august|september|rainy\s+season|hot\s+months?)\b/i;
-const PATCH_CONTRAST = /\b(?:unlike|differs?\s+from|different\s+from|distinct\s+from|confused\s+with|mistaken\s+for|instead\s+of|rather\s+than)\b/i;
+// The contrast must be ABOUT large patch — the words sit directly before
+// the patch noun ("mistaken for large patch", "unlike large patch"); a
+// contrast elsewhere in the clause ("Large patch thrives in summer unlike
+// gray leaf spot") asserts the claim (codex round 8 P1).
+const PATCH_CONTRAST = /\b(?:unlike|differs?\s+from|different\s+from|distinct\s+from|confused\s+with|mistaken\s+for|instead\s+of|rather\s+than)\s+(?:a\s+|the\s+)?(?:brown|large)\s+patch\b/i;
+
+// Another lawn problem named as a clause's own subject ("..., gray leaf
+// spot is a summer disease") is not large patch.
+const OTHER_LAWN_SUBJECT = /\b(?:gray\s+leaf\s+spot|chinch\s+bugs?|chinch\s+damage|dollar\s*weed|dove\s*weed|take-?all(?:\s+root\s+rot)?|root\s+rot|sod\s+webworms?|army\s*worms?|grubs?|mole\s+crickets?|nematodes?|drought|dry\s+spots?|dog\s+spots?|pythium|rhizoctonia\s+leaf|leaf\s+and\s+sheath\s+spot|fairy\s+ring|rust|weeds?)\b/i;
 
 function patchClaimInSentence(sentence) {
   const clauses = splitClauses(sentence);
+  // The subject carries across clauses the same way it does for termites:
+  // "Large patch, rather than chinch damage, is what you see in summer"
+  // asserts the claim in its third clause (codex round 8).
+  let subject = null;
   for (let i = 0; i < clauses.length; i += 1) {
     const clause = clauses[i];
-    if (!PATCH.test(clause) || !PATCH_TRIGGER.test(clause)) continue;
+    if (PATCH.test(clause)) subject = 'patch';
+    else if (CONTRAST_LEAD_IN.test(clause)) { /* names the other party, subject unchanged */ }
+    else if (OTHER_LAWN_SUBJECT.test(clause)) subject = 'other';
+    if (subject !== 'patch' || !PATCH_TRIGGER.test(clause)) continue;
     if (clauseDenies(clause, PATCH_CONTRAST) || previousClauseIsMythLabel(clauses, i)) continue;
     return clause;
   }
@@ -705,15 +725,30 @@ const TECHNICIAN_CONFIRMS = /\btechnicians?\b[^.]{0,80}\b(?:confirm|tell|let\s+y
 // or a fixed re-entry time ("safe after 15 minutes"), technician or not.
 const DRY_STATE = /\b(?:once|when|after|until)\b[^.,;]{0,40}?\b(?:dry|dried|dries)\b|\b(?:has|have)\s+dried\b|\bdry\s+to\s+the\s+touch\b/i;
 const FIXED_REENTRY_TIME = /\b(?:\d+|one|two|three|four|five|six|eight|ten|twelve|fifteen|twenty|thirty|forty-?five|sixty|ninety|half\s+an|a\s+couple\s+of|a\s+few|an?)\s*(?:minutes?|mins?|hours?|hrs?)\b/i;
-const AUDIENCE_ABSOLUTE = /\bsafe\s+(?:for|around|near|with)\s+(?:the\s+|your\s+|our\s+)?(?:bees?|pets?|kids?|children|babies|dogs?|cats?|people|humans?|(?:whole\s+|entire\s+)?family)\b/i;
+// Every protected audience, in every degree ("safer for pets", "safest for
+// pollinators"): never inside the dry-state idiom (codex round 8 P1).
+const AUDIENCE_ABSOLUTE = /\bsafe(?:r|st)?\s+(?:for|around|near|with)\s+(?:the\s+|your\s+|our\s+)?(?:bees?|pollinators?|butterfl(?:y|ies)|birds?|fish|wildlife|pets?|kids?|children|babies|infants?|toddlers?|dogs?|cats?|puppies|kittens?|people|humans?|everyone|everybody|(?:whole\s+|entire\s+)?family|the\s+environment)\b/i;
 
 // The dry-state + technician exemption is bound to the CLAIM's clause: the
 // dry condition and the technician confirmation must sit in that clause or
 // the one right beside it. "The treatment is safe and works after it dries;
 // your technician confirms timing" is not the idiom — "after it dries"
 // modifies "works", and the technician clause is two clauses away.
+// The repo-wide predicate's finding, with the phrase it matched (quoted in
+// its message) and whether that phrase is a time figure — a duration is the
+// fixed_reentry_time rule's to report, a safety word this rule's, so one
+// problem is reported once, under the right heading (codex round 8 P2).
+const DURATION_WORD = /\b(?:minutes?|mins?|hours?|hrs?|seconds?|secs?|days?|weeks?)\b/i;
+function canonicalFinding(sentence) {
+  const finding = reentrySafetyClaimFinding(sentence);
+  if (!finding) return null;
+  const phrase = (String(finding.message || '').match(/violation "([^"]*)"/) || [])[1] || '';
+  return { phrase, isDuration: DURATION_WORD.test(phrase) };
+}
+
 function safetyClaimInSentence(sentence) {
-  if (reentrySafetyClaimFinding(sentence)) return sentence;
+  const canonical = canonicalFinding(sentence);
+  if (canonical && !canonical.isDuration) return sentence;
   if (SAFE_COMPOUND.test(sentence) || SAFE_ADJECTIVE_PRODUCT.test(sentence)) return sentence;
   const clauses = splitClauses(sentence);
   for (let i = 0; i < clauses.length; i += 1) {
@@ -743,8 +778,8 @@ const REENTRY_CONTEXT = /\b(?:keep|stay|staying|remain|remaining)\b[^.]{0,40}?\b
 // in one clause and "until the spray has dried" in another is not a fixed
 // drying time.
 function reentryTimeInSentence(sentence) {
-  const canonical = reentrySafetyClaimFinding(sentence);
-  if (canonical && /\b(?:minutes?|mins?|hours?|hrs?)\b/i.test(canonical.message || '')) return sentence;
+  const canonical = canonicalFinding(sentence);
+  if (canonical?.isDuration) return sentence;
   for (const clause of splitClauses(sentence)) {
     if (FIXED_REENTRY_TIME.test(clause) && REENTRY_CONTEXT.test(clause)) return clause;
   }

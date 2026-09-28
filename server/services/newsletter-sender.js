@@ -1098,6 +1098,22 @@ async function prepareResumeCampaign(sendId) {
     err.code = 'NOT_RESUMABLE';
     throw err;
   }
+  // A resume mails the rest of the list from what is stored NOW. A campaign
+  // persisted before a stricter claim scan shipped, or one edited after its
+  // first attempt failed, must pass the same validation the manual and
+  // scheduled paths run — before anything is claimed (codex round 8 P1).
+  const { requiresClaimValidation } = require('../config/newsletter-types');
+  if (requiresClaimValidation(send.newsletter_type)) {
+    const { validateNewsletterDraft, lockedPricesForSend } = require('../services/newsletter-validator');
+    const lockedPrices = await lockedPricesForSend(send, db);
+    const { errors } = validateNewsletterDraft(send, { recipientCount: 1, lockedPrices });
+    if (errors.length > 0) {
+      const err = new Error(`campaign no longer passes validation: ${errors.join('; ')}`);
+      err.code = 'VALIDATION_FAILED';
+      err.errors = errors;
+      throw err;
+    }
+  }
   const reclaimingStaleSend = send.status === 'sending' && sendingClaimIsStale(send);
   if (send.status === 'sending' && !reclaimingStaleSend) {
     // An active sendCampaign owns the work. A crash/deploy claim ages out

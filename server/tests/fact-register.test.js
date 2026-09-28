@@ -475,6 +475,13 @@ describe('findUnverifiedClaims', () => {
     });
 
     test.each([
+      'Native subterranean termites fly in spring. Unlike fire ants, they swarm again after storms.',
+      'Native termites swarm in spring. Compared with mosquitoes, they swarm again after every storm.',
+    ])('a contrast lead-in names the other party, not the subject — the termite claim after it still flags: %s', (sentence) => {
+      expect(rule(sentence, 'termite_second_swarm')).toBe(true);
+    });
+
+    test.each([
       'Termites fly in spring, and fire ants swarm again after storms.',
       'Native termites fly in spring; mosquitoes come out again after every storm.',
       'Subterranean termites swarm in spring, but lovebugs fly again in September.',
@@ -527,6 +534,8 @@ describe('findUnverifiedClaims', () => {
       'Large patch in St. Augustinegrass flares up in summer.',
       'Large patch peaks in July and August.',
       'Brown patch loves the rainy season.',
+      'Large patch thrives in summer unlike gray leaf spot.',
+      'Large patch, rather than chinch damage, is what you see in summer.',
     ])('flags: %s', (sentence) => {
       expect(rule(sentence, 'large_patch_summer_disease')).toBe(true);
     });
@@ -607,6 +616,8 @@ describe('findUnverifiedClaims', () => {
       'It can be used safely around pets and children.',
       'Our formula is safer than the old one for your family.',
       'A pet-safer alternative.',
+      'This treatment is safer for pets once dry; your technician confirms timing.',
+      'Once dry it is the safest choice for pollinators — your technician confirms the timing.',
       'The treatment is safe, your technician confirms timing, once it dries.',
       // The repo-wide compliance predicate flags these too; its verdict is authoritative here.
       'Keep your family safe from mosquitoes this summer.',
@@ -653,6 +664,11 @@ describe('findUnverifiedClaims', () => {
     ])('the dry-state idiom, label wording and unrelated durations pass: %s', (sentence) => {
       expect(rule(sentence, 'fixed_reentry_time')).toBe(false);
     });
+  });
+
+  test('a safety claim with no time figure is reported once, as a safety claim — never also as a fixed re-entry time', () => {
+    expect(findUnverifiedClaims('Our treatment is pet-safe.').map((c) => c.rule)).toEqual(['absolute_safety_claim']);
+    expect(findUnverifiedClaims('Keep pets off the treated lawn for 30 minutes.').map((c) => c.rule)).toEqual(['fixed_reentry_time']);
   });
 
   test('a clean draft with no known-false claim shapes returns nothing', () => {
