@@ -3193,7 +3193,7 @@ describe('/sms — OPEN TIMES send-time recheck on a claimed agent decision (Cod
 
   const OPEN_TIMES_SNAPSHOT = {
     lookup: { city: 'Venice', customerId: 'cust-A', estimateId: null },
-    quotedWindows: ['9:00 AM - 11:00 AM'],
+    quotedWindows: [{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }],
   };
   function decisionRow(overrides = {}) {
     return {
@@ -3230,7 +3230,7 @@ describe('/sms — OPEN TIMES send-time recheck on a claimed agent decision (Cod
   });
 
   test('a quoted slot that is STILL open sends normally, claim settles accepted', async () => {
-    getAvailableSlots.mockResolvedValue({ zone: 'Venice Zone', days: [{ date: '2026-09-29', slots: [{ startTime24: '09:00' }] }] });
+    getAvailableSlots.mockResolvedValue({ zone: 'Venice Zone', days: [{ fullDate: 'Tuesday, September 29', slots: [{ startTime24: '09:00' }] }] });
     const claimUpdates = [];
     mockDb({ decision: decisionRow(), claimUpdates });
     await withServer(async (baseUrl) => {
@@ -3243,7 +3243,7 @@ describe('/sms — OPEN TIMES send-time recheck on a claimed agent decision (Cod
   });
 
   test('a quoted slot that is GONE blocks the send and supersedes the decision', async () => {
-    getAvailableSlots.mockResolvedValue({ zone: 'Venice Zone', days: [{ date: '2026-09-29', slots: [{ startTime24: '14:00' }] }] }); // 9-11 no longer offered
+    getAvailableSlots.mockResolvedValue({ zone: 'Venice Zone', days: [{ fullDate: 'Tuesday, September 29', slots: [{ startTime24: '14:00' }] }] }); // 9-11 no longer offered
     const claimUpdates = [];
     mockDb({ decision: decisionRow(), claimUpdates });
     await withServer(async (baseUrl) => {

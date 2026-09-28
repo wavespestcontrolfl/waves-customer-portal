@@ -3995,7 +3995,7 @@ function initScheduledJobs() {
                 const openTimesSnapshot = snapshot?.open_times_snapshot;
                 if (openTimesSnapshot?.quotedWindows?.length) {
                   const stillQuoted = openTimesSnapshot.quotedWindows.filter(
-                    (w) => String(msg.message_body || '').includes(w)
+                    (w) => w?.window && String(msg.message_body || '').includes(w.window)
                   );
                   if (stillQuoted.length) {
                     const { openTimesStillOffered } = require('./sms-shadow-drafter');

@@ -194,7 +194,7 @@ async function verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomer
     }
     if (openTimesSnapshot?.quotedWindows?.length) {
       const stillQuoted = openTimesSnapshot.quotedWindows.filter(
-        (w) => outgoingBody && outgoingBody.includes(w)
+        (w) => outgoingBody && w?.window && outgoingBody.includes(w.window)
       );
       if (stillQuoted.length) {
         const { openTimesStillOffered } = require('../services/sms-shadow-drafter');

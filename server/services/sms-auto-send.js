@@ -781,7 +781,7 @@ async function dispatchClaimedSend({ claim, gratitudeLane, eligibilityPin, draft
     // function already uses, siblings reopened same as any other pre-send
     // refusal so a stale slot never silently swallows the thread.
     if (claim.openTimesSnapshot?.quotedWindows?.length) {
-      const stillQuoted = claim.openTimesSnapshot.quotedWindows.filter((w) => reply && reply.includes(w));
+      const stillQuoted = claim.openTimesSnapshot.quotedWindows.filter((w) => reply && w?.window && reply.includes(w.window));
       if (stillQuoted.length) {
         const { openTimesStillOffered } = require('./sms-shadow-drafter');
         const recheck = await openTimesStillOffered({

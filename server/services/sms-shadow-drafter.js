@@ -273,6 +273,14 @@ function realAnswersHandoffBullets() {
 const OPEN_TIMES_TIMEOUT_MS = 3000;
 const OPEN_TIMES_MAX_DAYS = 3;
 const OPEN_TIMES_MAX_SLOTS_PER_DAY = 3;
+
+// The SAME day label fetchOpenTimesBlock renders and the send-time recheck
+// must reproduce from a FRESH getAvailableSlots call — pulled out so the two
+// can never drift into two different label formats for the same day.
+function openTimesDayLabel(d) {
+  return d?.fullDate || [d?.dayOfWeek, d?.month, d?.dayNum].filter(Boolean).join(' ');
+}
+
 async function fetchOpenTimesBlock({ city, customerId, schedulingIntent, estimateId = null } = {}) {
   if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return null;
   if (!schedulingIntent || !city) return null;
@@ -298,8 +306,7 @@ async function fetchOpenTimesBlock({ city, customerId, schedulingIntent, estimat
         .filter(Boolean)
         .slice(0, OPEN_TIMES_MAX_SLOTS_PER_DAY);
       if (!windows.length) continue; // no slot on this day survived arrival-window formatting
-      const label = d.fullDate || [d.dayOfWeek, d.month, d.dayNum].filter(Boolean).join(' ');
-      lines.push(`- ${label}: ${windows.join(', ')}`);
+      lines.push(`- ${openTimesDayLabel(d)}: ${windows.join(', ')}`);
       if (lines.length >= OPEN_TIMES_MAX_DAYS) break;
     }
     return lines.length ? lines.join('\n') : null;
@@ -321,24 +328,37 @@ async function fetchOpenTimesBlock({ city, customerId, schedulingIntent, estimat
 // re-checked availability before this fix: a reviewer or the scheduler
 // could send a specific time the drafter offered that is no longer open.
 //
-// Which offered windows (from an already-rendered OPEN TIMES block) does
-// `reply` actually quote verbatim? Pure/sync — FACT DISCIPLINE requires the
-// model to copy a window string exactly out of OPEN TIMES, so a plain
-// substring check is a reliable, deterministic detector; no NLP needed.
-// Returns [] when the reply quotes none of them (including no OPEN TIMES at
-// all) — nothing time-sensitive to recheck at send time.
+// Which offered (date, window) pairs (from an already-rendered OPEN TIMES
+// block) does `reply` actually quote verbatim? Pure/sync — FACT DISCIPLINE
+// requires the model to copy a window string exactly out of OPEN TIMES, so a
+// plain substring check on the TIME text is a reliable detector; no NLP
+// needed. The DATE travels with it (pre-push local-audit P1: pooling window
+// strings across every returned date let a reply quoting "Tuesday 9-11"
+// pass a recheck off a still-open Wednesday 9-11, even with Tuesday fully
+// booked) — every line whose window text the reply quotes contributes its
+// OWN (date, window) pair, so a time offered on more than one day yields one
+// candidate per day; the recheck below fails closed unless EVERY candidate
+// still holds, which is the safe direction when the reply's plain text
+// can't prove which specific day the model meant. Returns [] when the reply
+// quotes none of them (including no OPEN TIMES at all).
 function extractQuotedOpenTimesWindows(openTimesBlock, reply) {
   if (!openTimesBlock || !reply) return [];
-  const windows = [];
+  const pairs = [];
+  const seen = new Set();
   for (const line of String(openTimesBlock).split('\n')) {
     const idx = line.indexOf(': ');
     if (idx === -1) continue;
+    const date = line.slice(2, idx); // strip the leading "- "
     for (const w of line.slice(idx + 2).split(', ')) {
-      const trimmed = w.trim();
-      if (trimmed) windows.push(trimmed);
+      const window = w.trim();
+      if (!window || !reply.includes(window)) continue;
+      const key = `${date}|${window}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      pairs.push({ date, window });
     }
   }
-  return [...new Set(windows)].filter((w) => reply.includes(w));
+  return pairs;
 }
 
 // The minimum needed to recheck a draft's quoted OPEN TIMES at send time —
@@ -354,13 +374,14 @@ function computeOpenTimesSnapshot({ openTimesBlock, reply, city, customerId, est
   return { lookup: { city, customerId: customerId || null, estimateId: estimateId || null }, quotedWindows };
 }
 
-// Re-fetch availability at SEND time and verify every window the draft
-// quoted is STILL offered — the structural fix itself. Read-only (the SAME
-// AvailabilityEngine.getAvailableSlots call fetchOpenTimesBlock and
-// check_availability make); never books, never holds a slot. Fails CLOSED:
-// a missing city, a fetch error, or a timeout all resolve to "not still
-// offered" — the one thing this function must never do is silently assume
-// a quoted time is fine when it couldn't actually confirm that.
+// Re-fetch availability at SEND time and verify every quoted (date, window)
+// pair is STILL offered on THAT SAME date — the structural fix itself.
+// Read-only (the SAME AvailabilityEngine.getAvailableSlots call
+// fetchOpenTimesBlock and check_availability make); never books, never
+// holds a slot. Fails CLOSED: a missing city, a fetch error, or a timeout
+// all resolve to "not still offered" — the one thing this function must
+// never do is silently assume a quoted time is fine when it couldn't
+// actually confirm that.
 async function openTimesStillOffered({ city, customerId, estimateId = null, quotedWindows } = {}) {
   if (!Array.isArray(quotedWindows) || !quotedWindows.length) return { ok: true };
   if (!city) return { ok: false, reason: 'open_times_recheck_no_city' };
@@ -374,12 +395,14 @@ async function openTimesStillOffered({ city, customerId, estimateId = null, quot
     const result = await Promise.race([Availability.getAvailableSlots(city, estimateId, { customerId }), timeout]);
     const currentWindows = new Set();
     for (const d of (result?.days || [])) {
+      const date = openTimesDayLabel(d);
       for (const s of (d.slots || [])) {
         const range = arrivalWindowRange(s.startTime24);
-        if (range) currentWindows.add(formatSmsTimeRange(range));
+        const window = range ? formatSmsTimeRange(range) : null;
+        if (window) currentWindows.add(`${date}|${window}`);
       }
     }
-    const goneWindows = quotedWindows.filter((w) => !currentWindows.has(w));
+    const goneWindows = quotedWindows.filter((w) => !currentWindows.has(`${w.date}|${w.window}`));
     if (goneWindows.length) return { ok: false, reason: 'open_times_no_longer_offered', goneWindows };
     return { ok: true };
   } catch (err) {

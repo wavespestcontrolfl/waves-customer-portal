@@ -74,7 +74,7 @@ beforeEach(() => {
 
 const OPEN_TIMES_SNAPSHOT = {
   lookup: { city: 'Venice', customerId: '00000000-0000-4000-8000-000000000002', estimateId: null },
-  quotedWindows: ['9:00 AM - 11:00 AM'],
+  quotedWindows: [{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }],
 };
 
 const attempt = (overrides = {}) => autoSend.maybeAutoSend({
@@ -96,7 +96,7 @@ test('a quoted slot that is STILL open sends normally', async () => {
   await expect(attempt({ openTimesSnapshot: OPEN_TIMES_SNAPSHOT })).resolves.toMatchObject({ sent: true });
   expect(drafter.openTimesStillOffered).toHaveBeenCalledWith({
     city: 'Venice', customerId: '00000000-0000-4000-8000-000000000002', estimateId: null,
-    quotedWindows: ['9:00 AM - 11:00 AM'],
+    quotedWindows: [{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }],
   });
   expect(sendCustomerMessage).toHaveBeenCalled();
 });

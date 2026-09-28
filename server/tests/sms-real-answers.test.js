@@ -536,7 +536,7 @@ describe('fetchOpenTimesBlock — read-only AvailabilityEngine call, fully fail-
   });
 });
 
-describe('extractQuotedOpenTimesWindows — pure detector: which offered windows did the reply actually quote', () => {
+describe('extractQuotedOpenTimesWindows — pure detector: which (date, window) pairs did the reply actually quote', () => {
   const { extractQuotedOpenTimesWindows } = require('../services/sms-shadow-drafter');
   const block = '- Tuesday, September 29: 9:00 AM - 11:00 AM, 11:00 AM - 1:00 PM\n- Wednesday, September 30: 9:00 AM - 11:00 AM';
 
@@ -550,15 +550,31 @@ describe('extractQuotedOpenTimesWindows — pure detector: which offered windows
     expect(extractQuotedOpenTimesWindows(block, 'Sure, I will confirm a time and get back to you.')).toEqual([]);
   });
 
-  test('a reply that quotes exactly one window → that one', () => {
-    expect(extractQuotedOpenTimesWindows(block, 'How about 9:00 AM - 11:00 AM on Wednesday?')).toEqual(['9:00 AM - 11:00 AM']);
+  test('a reply that quotes exactly one window text → the (date, window) pair for the ONE day that offers it', () => {
+    expect(extractQuotedOpenTimesWindows(block, 'How about 11:00 AM - 1:00 PM on Tuesday?')).toEqual([
+      { date: 'Tuesday, September 29', window: '11:00 AM - 1:00 PM' },
+    ]);
   });
 
-  test('a reply that quotes two DISTINCT windows → both, deduplicated across the two lines they appear on', () => {
+  // Pre-push local-audit P1: "9:00 AM - 11:00 AM" is offered on BOTH Tuesday
+  // and Wednesday in this block. The reply's plain text can't prove which
+  // day the model meant, so this must NOT collapse to one pooled window
+  // string (the bug) — it returns ONE PAIR PER DAY that offers it, so the
+  // send-time recheck can fail closed unless BOTH still hold.
+  test('a window text offered on MULTIPLE days → one (date, window) pair per day, not pooled into a single date-less window', () => {
+    expect(extractQuotedOpenTimesWindows(block, 'How about 9:00 AM - 11:00 AM?')).toEqual([
+      { date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' },
+      { date: 'Wednesday, September 30', window: '9:00 AM - 11:00 AM' },
+    ]);
+  });
+
+  test('a reply that quotes two distinct window texts → a pair for each, deduplicated per (date, window)', () => {
     const reply = 'We have 9:00 AM - 11:00 AM or 11:00 AM - 1:00 PM Tuesday — 9:00 AM - 11:00 AM also works Wednesday.';
-    // "9:00 AM - 11:00 AM" appears on BOTH lines in the block but is a single
-    // distinct window string — the Set dedup means it is returned once, not twice.
-    expect(extractQuotedOpenTimesWindows(block, reply)).toEqual(['9:00 AM - 11:00 AM', '11:00 AM - 1:00 PM']);
+    expect(extractQuotedOpenTimesWindows(block, reply)).toEqual([
+      { date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' },
+      { date: 'Tuesday, September 29', window: '11:00 AM - 1:00 PM' },
+      { date: 'Wednesday, September 30', window: '9:00 AM - 11:00 AM' },
+    ]);
   });
 });
 
@@ -574,19 +590,19 @@ describe('computeOpenTimesSnapshot — the minimum needed to recheck at send tim
     expect(computeOpenTimesSnapshot({ openTimesBlock: block, reply: "I'll confirm and follow up.", city: 'Venice' })).toBeNull();
   });
 
-  test('OPEN TIMES fetched and quoted → the quoted windows plus the exact lookup inputs', () => {
+  test('OPEN TIMES fetched and quoted → the quoted (date, window) pairs plus the exact lookup inputs', () => {
     expect(computeOpenTimesSnapshot({
       openTimesBlock: block, reply: 'How about 9:00 AM - 11:00 AM?', city: 'Venice', customerId: 'cust-9', estimateId: 'estimate-42',
     })).toEqual({
       lookup: { city: 'Venice', customerId: 'cust-9', estimateId: 'estimate-42' },
-      quotedWindows: ['9:00 AM - 11:00 AM'],
+      quotedWindows: [{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }],
     });
   });
 
   test('omitted customerId/estimateId default to null, not undefined (JSON-stable)', () => {
     expect(computeOpenTimesSnapshot({ openTimesBlock: block, reply: '9:00 AM - 11:00 AM works.', city: 'Venice' })).toEqual({
       lookup: { city: 'Venice', customerId: null, estimateId: null },
-      quotedWindows: ['9:00 AM - 11:00 AM'],
+      quotedWindows: [{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }],
     });
   });
 });
@@ -614,43 +630,72 @@ describe('openTimesStillOffered — send-time recheck, fails CLOSED on a gone sl
     const getAvailableSlots = jest.fn();
     jest.doMock('../services/availability', () => ({ getAvailableSlots }));
     const drafter = freshDrafter();
-    await expect(drafter.openTimesStillOffered({ city: null, quotedWindows: ['9:00 AM - 11:00 AM'] }))
-      .resolves.toEqual({ ok: false, reason: 'open_times_recheck_no_city' });
+    await expect(drafter.openTimesStillOffered({
+      city: null, quotedWindows: [{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }],
+    })).resolves.toEqual({ ok: false, reason: 'open_times_recheck_no_city' });
     expect(getAvailableSlots).not.toHaveBeenCalled();
   });
 
-  test('a quoted slot that is STILL open → ok:true (sends)', async () => {
+  test('a quoted slot that is STILL open on the SAME date → ok:true (sends)', async () => {
     const getAvailableSlots = jest.fn(async () => ({
       zone: 'Venice Zone',
-      days: [{ date: '2026-09-29', slots: [{ startTime24: '09:00' }, { startTime24: '14:00' }] }],
+      days: [{ fullDate: 'Tuesday, September 29', slots: [{ startTime24: '09:00' }, { startTime24: '14:00' }] }],
     }));
     jest.doMock('../services/availability', () => ({ getAvailableSlots }));
     const drafter = freshDrafter();
     const result = await drafter.openTimesStillOffered({
-      city: 'Venice', customerId: 'cust-9', estimateId: 'estimate-42', quotedWindows: ['9:00 AM - 11:00 AM'],
+      city: 'Venice', customerId: 'cust-9', estimateId: 'estimate-42',
+      quotedWindows: [{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }],
     });
     expect(result).toEqual({ ok: true });
     expect(getAvailableSlots).toHaveBeenCalledWith('Venice', 'estimate-42', { customerId: 'cust-9' });
   });
 
-  test('a quoted slot that is GONE → ok:false, blocked, names the gone window', async () => {
+  test('a quoted slot that is GONE on its own date → ok:false, blocked, names the gone (date, window) pair', async () => {
     const getAvailableSlots = jest.fn(async () => ({
       zone: 'Venice Zone',
-      days: [{ date: '2026-09-29', slots: [{ startTime24: '14:00' }] }], // 9-11 no longer offered
+      days: [{ fullDate: 'Tuesday, September 29', slots: [{ startTime24: '14:00' }] }], // 9-11 no longer offered Tuesday
     }));
     jest.doMock('../services/availability', () => ({ getAvailableSlots }));
     const drafter = freshDrafter();
     const result = await drafter.openTimesStillOffered({
-      city: 'Venice', quotedWindows: ['9:00 AM - 11:00 AM'],
+      city: 'Venice', quotedWindows: [{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }],
     });
-    expect(result).toEqual({ ok: false, reason: 'open_times_no_longer_offered', goneWindows: ['9:00 AM - 11:00 AM'] });
+    expect(result).toEqual({
+      ok: false, reason: 'open_times_no_longer_offered',
+      goneWindows: [{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }],
+    });
+  });
+
+  // Pre-push local-audit P1 regression: the SAME window TEXT is still open
+  // on Wednesday, but the quoted pair names Tuesday specifically — the
+  // recheck must not let Wednesday's availability vouch for Tuesday's slot.
+  test('the same window TEXT still open on a DIFFERENT date does not vouch for the quoted date — still blocked', async () => {
+    const getAvailableSlots = jest.fn(async () => ({
+      zone: 'Venice Zone',
+      days: [
+        { fullDate: 'Tuesday, September 29', slots: [{ startTime24: '14:00' }] }, // 9-11 gone on Tuesday
+        { fullDate: 'Wednesday, September 30', slots: [{ startTime24: '09:00' }] }, // 9-11 still open Wednesday
+      ],
+    }));
+    jest.doMock('../services/availability', () => ({ getAvailableSlots }));
+    const drafter = freshDrafter();
+    const result = await drafter.openTimesStillOffered({
+      city: 'Venice', quotedWindows: [{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }],
+    });
+    expect(result).toEqual({
+      ok: false, reason: 'open_times_no_longer_offered',
+      goneWindows: [{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }],
+    });
   });
 
   test('a fetch error → ok:false, fails closed (never assumes a quoted time is still fine)', async () => {
     const getAvailableSlots = jest.fn(async () => { throw new Error('zone lookup failed'); });
     jest.doMock('../services/availability', () => ({ getAvailableSlots }));
     const drafter = freshDrafter();
-    const result = await drafter.openTimesStillOffered({ city: 'Venice', quotedWindows: ['9:00 AM - 11:00 AM'] });
+    const result = await drafter.openTimesStillOffered({
+      city: 'Venice', quotedWindows: [{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }],
+    });
     expect(result).toEqual({ ok: false, reason: 'open_times_recheck_failed' });
   });
 
@@ -660,7 +705,9 @@ describe('openTimesStillOffered — send-time recheck, fails CLOSED on a gone sl
       const getAvailableSlots = jest.fn(() => new Promise(() => {})); // never resolves
       jest.doMock('../services/availability', () => ({ getAvailableSlots }));
       const drafter = freshDrafter();
-      const promise = drafter.openTimesStillOffered({ city: 'Venice', quotedWindows: ['9:00 AM - 11:00 AM'] });
+      const promise = drafter.openTimesStillOffered({
+        city: 'Venice', quotedWindows: [{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }],
+      });
       await jest.advanceTimersByTimeAsync(3100);
       await expect(promise).resolves.toEqual({ ok: false, reason: 'open_times_recheck_failed' });
     } finally {
