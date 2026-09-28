@@ -63,6 +63,49 @@ describe('transactional email provider retry classification', () => {
     expect(retry.isTransactionalRetryEligible(message({ subject_snapshot: null }))).toBe(false);
   });
 
+  // Owner ruling 2026-09-27: a late-payment or invoice follow-up email the
+  // provider blocks is never re-sent from its stored copy; the sender's next
+  // stage renders fresh.
+  const senderRendered = [
+    'billing_late_payment_7_day', 'billing_late_payment_14_day', 'billing_late_payment_30_day',
+    'billing_late_payment_60_day', 'billing_late_payment_90_day',
+    'invoice.followup_3_day', 'invoice.followup_7_day', 'invoice.followup_14_day', 'invoice.followup_30_day',
+  ];
+
+  test.each(senderRendered)('a blocked %s email records the rejection but schedules no retry', (templateKey) => {
+    const blocked = message({ template_key: templateKey, suppression_group_key_snapshot: 'transactional_required',
+      send_attempt_token: 'attempt-1', provider_handoff_phase: 'started' });
+    expect(retry.isSenderRenderedEmail(blocked)).toBe(true);
+    expect(retry.isTransactionalRetryEligible(blocked)).toBe(false);
+    expect(retry.retryStateForProviderBlock(blocked, new Date('2026-09-27T12:00:00Z'))).toEqual({
+      provider_handoff_phase: 'rejected', provider_handoff_attempt_token: 'attempt-1',
+    });
+  });
+
+  test('other billing emails keep the retry rail', () => {
+    expect(retry.isSenderRenderedEmail(message({ template_key: 'billing.notice' }))).toBe(false);
+    expect(retry.isTransactionalRetryEligible(message({ template_key: 'billing.notice' }))).toBe(true);
+  });
+
+  test('a sender-rendered row already scheduled settles as not sent without reaching the provider', async () => {
+    const chain = {};
+    chain.where = jest.fn(() => chain);
+    chain.update = jest.fn(() => chain);
+    chain.returning = jest.fn(async () => [{ id: 'message-1', status: 'failed' }]);
+    db.mockReturnValue(chain);
+
+    const result = await retry.retryOne(message({ template_key: 'billing_late_payment_30_day',
+      suppression_group_key_snapshot: 'transactional_required', send_attempt_token: 'attempt-2' }));
+
+    expect(result).toMatchObject({ sent: false, stopped: true });
+    expect(chain.update).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'failed', provider_retry_next_at: null, provider_handoff_phase: 'pending',
+    }));
+    expect(emailTemplates.activeSuppressionFor).not.toHaveBeenCalled();
+    expect(sendgrid.clearBlockedAddress).not.toHaveBeenCalled();
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  });
+
   test('schedules 10 minute, 1 hour, and 6 hour backoff slots', () => {
     const now = new Date('2026-07-16T12:00:00Z');
     for (const [count, delay] of retry.RETRY_DELAYS_MS.entries()) {
