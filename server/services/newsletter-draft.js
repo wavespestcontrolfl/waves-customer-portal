@@ -89,16 +89,16 @@ CURRENT MONTH: ${month}
 
 SWFL SEASONAL CONTEXT (pick what's relevant):
 - Jan–Feb: snowbird peak, dry lawns, red tide drift
-- Mar: spring break, love bugs, citrus bloom
-- Apr: Bradenton Blues Festival, spring training tail, lawn pre-emergents
-- May: DeSoto Heritage Festival, mosquito ramp, no-see-um peak
-- Jun: hurricane season begins, daily thunderstorms, nitrogen blackout on lawns
-- Jul: 4th of July, peak rainy season, German roach pressure, palmetto bugs
+- Mar: spring break, citrus bloom, native subterranean termite flights (UF: Jan–May on warm afternoons after rain; Asian subterranean swarms begin in March)
+- Apr: Bradenton Blues Festival, spring training tail, lawn pre-emergents, lovebugs (UF: first flight April–May)
+- May: DeSoto Heritage Festival, lovebugs (UF: April–May), rainy season starts — container mosquitoes (CDC: egg to adult in 7–10 days)
+- Jun: hurricane season begins, daily thunderstorms, nitrogen/phosphorus blackout June 1–Sept 30 (Sarasota + Manatee ordinances)
+- Jul: 4th of July, peak rainy season, chinch bugs peak early July (UF), palmetto bugs indoors for food, water or shelter from extreme weather (UF)
 - Aug: back-to-school, peak hurricane risk, chinch bug damage on St. Augustine
 - Sep: hurricane peak, Siesta Key Crystal Classic, post-storm yard checklist; western drywood termite flights peak Sep–Nov (UF); subterranean termites do NOT swarm again after storms
-- Oct: snowbirds return, rodent season begins, Halloween on barrier islands
+- Oct: snowbirds return, rodent exclusion checklist (UF: prune touching limbs, trim palm skirts, plants 2 ft off the house — UF gives NO rodent season), Halloween on barrier islands
 - Nov: Sarasota Season of Sculpture, turkey trots, winter annuals
-- Dec: boat parades, cooler weather drives indoor pest activity
+- Dec: boat parades, R. hageni termite flights begin (UF: early December to early February, in the evening), holiday pantry pests
 - SWFL pests: subterranean termites, German cockroaches, palmetto bugs, no-see-ums, salt-marsh mosquitoes, fire ants, chinch bugs, sod webworms
 
 VOICE:
@@ -196,9 +196,9 @@ Return STRICT JSON (no HTML, no prose outside the JSON):
 // pitch), the Lawn Corner beat, and the content angles that month owns.
 const PEST_INSIDER_ROTATION = {
   January: {
-    service: 'rodent control & pest inspections (cool weather drives rats/mice indoors; snowbirds reopening closed-up homes — the "welcome-back inspection")',
+    service: 'rodent control & pest inspections (snowbirds reopening closed-up homes — the "welcome-back inspection"; exclusion per UF: prune touching limbs, trim palm skirts, plants 2 ft off the house — UF gives no rodent season, so do not invent one)',
     lawn: 'dry-season lawn watering discipline + winter annuals',
-    beats: 'rodents seeking warmth; surprises in snowbird homes',
+    beats: 'surprises in snowbird homes; what a roof rat can jump (UF: 3 ft up, 4 ft across); R. hageni termites fly on winter evenings (UF: early Dec–early Feb)',
   },
   February: {
     service: 'termite protection & WDO inspections (pre-swarm prep — the single most important content window of the year starts NOW)',
@@ -206,33 +206,33 @@ const PEST_INSIDER_ROTATION = {
     beats: 'flying ants vs termites — the 10-second test; drywood vs subterranean',
   },
   March: {
-    service: 'subterranean termite treatment (swarm season is ON)',
-    lawn: 'spring lawn wake-up: first mow height, aeration timing',
-    beats: 'termite swarmers after warm rain; love bug season opener (pure engagement — everyone in SWFL has opinions)',
+    service: 'subterranean termite treatment (swarm season is ON — UF: native flights Jan–May on warm afternoons after rain; Asian subterranean swarms begin in March)',
+    lawn: 'spring lawn wake-up: first mow height (UF: standard St. Augustine 3.5–4 in), aeration timing',
+    beats: 'termite swarmers after warm rain; citrus bloom (pure engagement — everyone in SWFL has opinions)',
   },
   April: {
     service: 'termite & WDO inspections (spring home-buying season) + fire ant control (mounds wake with spring rain)',
     lawn: 'weed pre-emergents last call + aeration',
-    beats: 'love bugs peak; spring buyers need WDO',
+    beats: 'lovebugs on the road (UF: first flight April–May); spring buyers need WDO',
   },
   May: {
-    service: 'mosquito treatment (rainy-season kickoff = mosquito explosion — the biggest add-on push of the year)',
-    lawn: 'rainy-season mowing rhythm; watch for early chinch activity',
+    service: 'mosquito treatment (rainy-season kickoff — every container is a nursery: CDC says egg to adult in 7–10 days — the biggest add-on push of the year)',
+    lawn: 'rainy-season mowing rhythm (UF: ½–¾ in of water per application); watch for early chinch activity',
     beats: 'standing-water audit checklist ("walk your yard with this list"); Memorial Day backyard prep',
   },
   June: {
     service: 'mosquito treatment (daily thunderstorms = standing water everywhere)',
-    lawn: 'chinch bugs starting on St. Augustine; nitrogen blackout begins',
-    beats: 'hurricane season opens — what storms do to pests (displaced rodents, mosquito boom in debris, fire ant rafts)',
+    lawn: 'chinch bugs on St. Augustine (UF: thrive in warm, damp summer months); nitrogen/phosphorus blackout begins June 1',
+    beats: 'hurricane season opens — the post-storm yard checklist (standing water is a mosquito nursery in 7–10 days per CDC; clear debris); say only what the register supports about pests after storms',
   },
   July: {
-    service: 'quarterly pest defense (German cockroach & palmetto bug peak indoor pressure; ghost ants in kitchens)',
-    lawn: 'chinch bug damage spreading — brown patches that aren\'t drought',
-    beats: 'ghost ants, palmetto bugs, post-storm pest surges',
+    service: 'quarterly pest defense (palmetto bugs indoors — UF: they wander in for food and water or to avoid extreme weather; ghost ants in kitchens — UF: wall voids, behind cabinetry, potted plants)',
+    lawn: 'chinch bug damage (UF: infestations peak early July) — brown patches that aren\'t drought; the coffee-can flotation test',
+    beats: 'ghost ants, palmetto bugs, the coffee-can chinch test',
   },
   August: {
     service: 'lawn pest control (chinch bugs shredding St. Augustine — before/after season)',
-    lawn: 'sod webworms move in; recovery plan for chinch damage',
+    lawn: 'recovery plan for chinch damage (UF: mow standard St. Augustine at 3.5–4 in, ½–¾ in of water per application)',
     beats: 'peak hurricane risk — post-storm yard checklist; back-to-school',
   },
   September: {
@@ -241,19 +241,19 @@ const PEST_INSIDER_ROTATION = {
     beats: 'hurricane peak; post-storm yard checklist (standing water, debris piles, displaced rodents); drywood termite flights in fall — never a "second subterranean swarm after storms"',
   },
   October: {
-    service: 'rodent exclusion (season begins as nights cool)',
-    lawn: 'fall fertilization + winterizing the irrigation schedule',
-    beats: 'spooky season fun: spider myths debunked, which Florida bugs are ACTUALLY dangerous',
+    service: 'rodent exclusion (UF: prune touching limbs, trim palm skirts, plants 2 ft off the house; roof rats jump 3 ft up and 4 ft across — UF gives no rodent season)',
+    lawn: 'fall fertilization (blackout ends Sept 30) + the irrigation schedule (SWFWMD one-day-a-week restrictions run through Oct 1, 2026)',
+    beats: 'spooky season fun: spider myths, which Florida bugs are ACTUALLY dangerous — sourced facts only, no invented seasonality',
   },
   November: {
-    service: 'rodent control (attics fill as snowbirds return)',
+    service: 'rodent control (attic checks as snowbirds return — exclusion per UF; UF gives no rodent season)',
     lawn: 'winter annuals in; last fertilization call',
     beats: 'pantry pests before holiday baking; firewood hitchhikers',
   },
   December: {
     service: 'pest inspections (pest-proof the house before holiday guests; gift-a-service for elderly parents)',
     lawn: 'cool-season lawn care + holiday lighting vs irrigation',
-    beats: 'Christmas tree hitchhikers; pantry pests; cooler weather drives indoor activity',
+    beats: 'Christmas tree hitchhikers; pantry pests; R. hageni termites fly on winter evenings (UF: early Dec–early Feb)',
   },
 };
 

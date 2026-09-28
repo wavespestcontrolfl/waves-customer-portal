@@ -566,12 +566,17 @@ function lastTermiteKind(text) {
 
 function termiteClaimInSentence(sentence, previousSentence) {
   const clauses = splitClauses(sentence);
-  const sentenceHasTermite = lastTermiteKind(sentence) !== null;
-  let subject = sentenceHasTermite ? null : (PRONOUN_SUBJECT.test(sentence) ? lastTermiteKind(previousSentence) : null);
+  // The subject a clause inherits: its own termite mention, else the one
+  // carried from an earlier clause, else — for a pronoun with no termite
+  // named yet in this sentence — the previous sentence's last mention. A
+  // termite named LATER in the sentence ("..., while drywood termites can
+  // fly in fall") never reaches back to shield an earlier pronoun clause.
+  let subject = null;
   for (let i = 0; i < clauses.length; i += 1) {
     const clause = clauses[i];
     const own = lastTermiteKind(clause);
     if (own) subject = own;
+    else if (subject === null && PRONOUN_SUBJECT.test(clause)) subject = lastTermiteKind(previousSentence);
     if (subject !== 'other') continue;
     if (!SWARM_WORD.test(clause) || !REPEAT_TRIGGER.test(clause)) continue;
     if (clauseDenies(clause) || previousClauseIsMythLabel(clauses, i)) continue;
@@ -651,7 +656,7 @@ const TECHNICIAN_CONFIRMS = /\btechnicians?\b[^.]{0,80}\b(?:confirm|tell|let\s+y
 // never exempts an absolute audience claim ("safe for children and pets")
 // or a fixed re-entry time ("safe after 15 minutes"), technician or not.
 const DRY_STATE = /\b(?:once|when|after|until)\b[^.,;]{0,40}?\b(?:dry|dried|dries)\b|\b(?:has|have)\s+dried\b|\bdry\s+to\s+the\s+touch\b/i;
-const FIXED_REENTRY_TIME = /\b\d+\s*(?:minutes?|mins?|hours?|hrs?)\b/i;
+const FIXED_REENTRY_TIME = /\b(?:\d+|one|two|three|four|five|six|eight|ten|twelve|fifteen|twenty|thirty|forty-?five|sixty|ninety|half\s+an|a\s+couple\s+of|a\s+few|an?)\s*(?:minutes?|mins?|hours?|hrs?)\b/i;
 const AUDIENCE_ABSOLUTE = /\bsafe\s+(?:for|around|near|with)\s+(?:the\s+|your\s+|our\s+)?(?:bees?|pets?|kids?|children|babies|dogs?|cats?|people|humans?|(?:whole\s+|entire\s+)?family)\b/i;
 
 function safetyClaimInSentence(sentence) {
@@ -662,11 +667,34 @@ function safetyClaimInSentence(sentence) {
   return dryStateWithTechnician ? null : sentence;
 }
 
+// --- fixed_reentry_time ----------------------------------------------------
+//
+// AGENTS.md: never a fixed re-entry or drying minute figure, with or without
+// the word "safe" — "Keep children and pets off the treated lawn for 30
+// minutes", "the spray dries in about 20 minutes", "wait two hours before
+// letting the dog out". The idiom is "until dry / once dry" with the
+// technician confirming the timing. Watering/mowing intervals from a label
+// ("postpone watering or mowing for 24 hours") are not re-entry guidance and
+// are not matched; "dry season" is not a drying state.
+const REENTRY_CONTEXT = /\b(?:keep|stay|staying|remain|remaining)\b[^.]{0,40}?\boff\b|\boff\s+(?:the\s+|your\s+)?(?:lawn|grass|yard|turf|treated\s+\w+)\b|\bre-?ent(?:ry|er)\w*|\b(?:let|letting|allow|allowing)\s+(?:the\s+|your\s+)?(?:pets?|kids?|children|dogs?|cats?|family|people|anyone|everyone)\b|\b(?:pets?|kids?|children|dogs?|cats?|people|anyone|everyone)\b[^.]{0,20}?\b(?:back|out|onto|inside|indoors|outside)\b|\b(?:walk|walking|play|playing)\s+on\b|\bdr(?:y|ies|ied|drying)\b(?!\s+(?:season|weather|spell|conditions|months?|winter|fall|spring|out))/i;
+
+// Clause-bound: the figure and the re-entry/drying context must share a
+// clause, so a label sentence that mentions "24 hours" of rain-free weather
+// in one clause and "until the spray has dried" in another is not a fixed
+// drying time.
+function reentryTimeInSentence(sentence) {
+  for (const clause of splitClauses(sentence)) {
+    if (FIXED_REENTRY_TIME.test(clause) && REENTRY_CONTEXT.test(clause)) return clause;
+  }
+  return null;
+}
+
 const CLAIM_RULES = [
   { rule: 'termite_second_swarm', find: (sentence, previous) => termiteClaimInSentence(sentence, previous) },
   { rule: 'large_patch_summer_disease', find: (sentence) => patchClaimInSentence(sentence) },
   { rule: 'non_flea_vacuum_advice', find: (sentence) => vacuumClaimInSentence(sentence) },
   { rule: 'absolute_safety_claim', find: (sentence) => safetyClaimInSentence(sentence) },
+  { rule: 'fixed_reentry_time', find: (sentence) => reentryTimeInSentence(sentence) },
 ];
 
 /**

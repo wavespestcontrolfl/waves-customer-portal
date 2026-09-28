@@ -424,6 +424,7 @@ describe('findUnverifiedClaims', () => {
       'Drywood termites fly in almost any month, but subterranean termites are different. They swarm again after late-summer storms.',
       'Drywood termites may fly in fall, but native subterranean termites fly in spring. They swarm again after storms.',
       'Subterranean termites swarm again after storms, unlike drywood termites.',
+      'Native subterranean termites fly in spring. They swarm again after storms, while drywood termites can fly in fall.',
     ])('a drywood mention elsewhere does NOT shield a subterranean claim (the nearest termite decides): %s', (sentence) => {
       expect(rule(sentence, 'termite_second_swarm')).toBe(true);
     });
@@ -587,6 +588,31 @@ describe('findUnverifiedClaims', () => {
       'The product is highly toxic to bees exposed to direct treatment.',
     ])('the label\'s wording, "safe from", "safe to say" and the technician-confirms idiom pass: %s', (sentence) => {
       expect(rule(sentence, 'absolute_safety_claim')).toBe(false);
+    });
+  });
+
+  describe('fixed_reentry_time — a minute or hour figure for re-entry or drying, with or without "safe"', () => {
+    test.each([
+      'Keep children and pets off the treated lawn for 30 minutes.',
+      'The spray dries in about 20 minutes.',
+      'Wait 2 hours before letting the dog back out.',
+      'Stay off the grass for one hour after we leave.',
+      'Pets can go back outside after 45 minutes.',
+      'Re-entry is fine after 4 hours.',
+    ])('flags: %s', (sentence) => {
+      expect(rule(sentence, 'fixed_reentry_time')).toBe(true);
+    });
+
+    test.each([
+      'Keep pets off the lawn until it is dry; your technician will confirm the timing.',
+      'Do not permit humans or pets to contact treated surfaces until the spray has dried.',
+      'For best results, postpone watering or mowing for 24 hours after application.',
+      'Apply in calm weather when rain is not predicted for the next 24 hours.',
+      'Our visit usually takes about 30 minutes.',
+      'The dry season runs about 6 months.',
+      'Water only between 12:01 a.m. and 4 a.m. on your day.',
+    ])('the dry-state idiom, label wording and unrelated durations pass: %s', (sentence) => {
+      expect(rule(sentence, 'fixed_reentry_time')).toBe(false);
     });
   });
 

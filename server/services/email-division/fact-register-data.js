@@ -112,6 +112,14 @@ const FACTS = [
     content: 'Red imported fire ant colonies make six to eight mating flights of up to 4,500 winged ants each between spring and fall, usually at midday on a warm (above 74°F), sunny day following rain. After mating, the queen often lands under rocks or leaves, or in a small crack or crevice such as the edge of a sidewalk, driveway or street. The source says nothing about treatments, so copy must not tie new mounds to whether a treatment worked.',
   },
   {
+    slug: 'fact-lovebug-flights',
+    title: 'Lovebugs: two four-week flights a year (April–May, August–September); windshields and paint',
+    tags: ['lovebugs', 'engagement', 'seasonal'],
+    sourceUrls: ['https://ask.ifas.ufl.edu/publication/IN204'],
+    quote: '"Each of the two Plecia nearctica generations in Florida lasts about four weeks in April–May and August–September." "In addition to the two large emergences, this species has been collected in Florida every month of the year except November". "in south Florida most of the adults seem to appear in April during the first yearly flight." "The adult flies are a nuisance to motorists because the flies are attracted to highways and spatter on the hood and windshield of vehicles." "They can also reduce visibility and etch automobile paint as the body fluids are slightly acidic." "If the egg mass and body parts are allowed to remain on the vehicle for several days, bacterial action increases the acidity and etches the paint." "The larvae develop under and feed on dead, partially decayed plant material, particularly in moist to damp areas".',
+    content: 'Lovebugs (Plecia nearctica) have two flights a year in Florida, each lasting about four weeks: April–May and August–September; in south Florida most adults of the first flight appear in April, and the species has been collected in every month except November. Adults are a nuisance to drivers because they are attracted to highways and spatter on hoods and windshields; their body fluids are slightly acidic and can etch paint, more so when left on the vehicle for several days. Larvae feed on dead, partially decayed plant material in moist to damp areas. UF describes no treatment or control for lovebugs, so copy must not offer or imply one.',
+  },
+  {
     slug: 'fact-american-cockroach-indoors',
     title: 'American cockroach: why it comes indoors',
     tags: ['cockroaches', 'american-cockroach'],
