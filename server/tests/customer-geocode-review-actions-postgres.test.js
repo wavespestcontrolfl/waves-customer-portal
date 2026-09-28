@@ -25,7 +25,7 @@ jest.mock('../services/dispatch-assignment', () => ({
 const knex = require('knex');
 const { randomUUID } = require('node:crypto');
 const createActionSchema = require('./fixtures/customer-geocode-review-actions-postgres');
-const { CUSTOMER_ID, PRIMARY_ID, ACTOR_ID, ADDRESS, CORRECTED, seedLocation, visitRow } = require('./fixtures/customer-geocode-review-visits-postgres');
+const { CUSTOMER_ID, PRIMARY_ID, ACTOR_ID, TECH_ID, ADDRESS, CORRECTED, seedLocation, visitRow } = require('./fixtures/customer-geocode-review-visits-postgres');
 const reviewStore = require('../services/customer-geocode-review');
 const { addressKey } = require('../services/customer-properties');
 const { resolveCustomerGeocodeReview } = require('../services/customer-geocode-review-actions');
@@ -403,6 +403,34 @@ const connection = process.env.SERVICE_GEOCODE_TEST_DATABASE_URL;
     if (database) {
       await database.raw('DROP SCHEMA IF EXISTS ?? CASCADE', [schema]);
       await database.destroy();
+    }
+  });
+
+  test('a decision that cannot take a visit day\'s slot lock refuses at once with a retryable conflict', async () => {
+    const visitId = randomUUID();
+    await database('scheduled_services').insert(visitRow(visitId, { property_id: PRIMARY_ID }));
+    const holder = await database.transaction();
+    try {
+      // A slot reservation on the visit's tech-day holds the lock that
+      // prelockVisitContext only TRIES (NOWAIT): the decision must refuse
+      // immediately instead of queueing behind the reservation.
+      await holder.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        ['slot-reserve', `${TECH_ID}:2099-10-01`]);
+      const snapshot = async () => ({
+        customer: await database('customers').where({ id: CUSTOMER_ID }).first(),
+        review: await database('customer_geocode_reviews').where({ customer_id: CUSTOMER_ID }).first(),
+        visit: await database('scheduled_services').where({ id: visitId }).first(),
+      });
+      const before = await snapshot();
+      await expect(resolveCustomerGeocodeReview(CUSTOMER_ID, {
+        revision: (await reviewStore.getReviewDetail(CUSTOMER_ID, database)).revision,
+        action: 'verify_pin', ...PIN, confirmed: true,
+        source: 'site_visit', evidence: 'Synthetic contended review',
+      }, ACTOR_ID, database)).rejects.toMatchObject({ statusCode: 409, code: 'visit_changed', isOperational: true });
+      expect(await snapshot()).toEqual(before);
+    } finally {
+      await holder.rollback();
+      await database('scheduled_services').where({ id: visitId }).del();
     }
   });
 

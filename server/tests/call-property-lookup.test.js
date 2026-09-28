@@ -286,6 +286,77 @@ describe('runCallPropertyLookup', () => {
     expect(mirror.property_type).toBeUndefined();
   });
 
+  test('an open geocode review quarantines the mirrored coordinates but not a residential type fill', async () => {
+    const previousGate = process.env.GATE_GEOCODE_REVIEW;
+    const previousTransaction = db.transaction;
+    process.env.GATE_GEOCODE_REVIEW = 'true';
+    db.transaction = jest.fn(async callback => callback(db));
+    try {
+      const propertyRow = {
+        id: 'p1', customer_id: 'c1', active: true, is_primary: true,
+        latitude: null, longitude: null, property_type: null,
+        address_line1: '123 Sample Cove', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34212',
+        address_key: require('../services/customer-properties').addressKey({
+          address_line1: '123 Sample Cove', city: 'Bradenton', zip: '34212',
+        }),
+      };
+      const customerRow = {
+        id: 'c1', address_line1: '123 Sample Cove', address_line2: null, city: 'Bradenton', zip: '34212',
+        latitude: null, longitude: null, property_type: null,
+      };
+      // With the review gate on, every write runs inside the fence, so the
+      // call order differs from mockRowDb's; answer each query by its shape
+      // and keep every customers query so each write's predicate is checkable.
+      const byShape = (read, written) => {
+        const query = builder(undefined);
+        query.then = (resolve, reject) => Promise.resolve(
+          query.update.mock.calls.length ? written : read,
+        ).then(resolve, reject);
+        return query;
+      };
+      const customerQueries = [];
+      db.mockImplementation((table) => {
+        if (table === 'property_lookups') return builder(undefined);
+        if (table === 'scheduled_services') return builder([]);
+        if (table === 'customer_properties') {
+          return byShape(propertyRow, [{ latitude: 27.5, longitude: -82.4, property_type: 'single_family' }]);
+        }
+        if (table === 'customers') {
+          const query = byShape(customerRow, 1);
+          customerQueries.push(query);
+          return query;
+        }
+        return builder(1);
+      });
+      performPropertyLookup.mockResolvedValueOnce({
+        satellite: { inServiceArea: true },
+        enriched: {
+          lat: 27.5, lng: -82.4, propertyType: 'Single Family',
+          _observed: { propertyType: true }, fieldVerifyFlags: [],
+        },
+      });
+
+      expect((await runCallPropertyLookup({ propertyId: 'p1' })).filled)
+        .toEqual(['latitude', 'longitude', 'property_type']);
+
+      const writes = customerQueries.filter(query => query.update.mock.calls.length);
+      expect(writes).toHaveLength(2);
+      const [typeWrite, coordinateWrite] = writes;
+      expect(typeWrite.update.mock.calls[0][0]).toMatchObject({
+        property_type: expect.objectContaining({ bindings: ['single_family'] }),
+      });
+      expect(typeWrite.update.mock.calls[0][0]).not.toHaveProperty('latitude');
+      expect(typeWrite.whereNotExists).not.toHaveBeenCalled();
+      expect(coordinateWrite.update.mock.calls[0][0].latitude).toMatchObject({ bindings: [27.5] });
+      expect(coordinateWrite.update.mock.calls[0][0]).not.toHaveProperty('property_type');
+      expect(coordinateWrite.whereNotExists).toHaveBeenCalledTimes(1);
+    } finally {
+      if (previousGate === undefined) delete process.env.GATE_GEOCODE_REVIEW;
+      else process.env.GATE_GEOCODE_REVIEW = previousGate;
+      db.transaction = previousTransaction;
+    }
+  });
+
   test('an address edited during the lookup discards the customer mirror (fence survives the live re-read)', async () => {
     // The row was re-addressed between the fenced property update and the
     // mirror decision: liveRole carries the NEW address_key while the
