@@ -429,6 +429,10 @@ describe('groundRescheduleAgreement', () => {
         quote('/scheduling/caller_accepted_slot', 'caller', "Okay, 9 o'clock tomorrow. I'll let them know."),
       ],
     }), "Caller: Can we make it earlier?\nAgent: Yep, we'll see them at 9.\nCaller: Okay, 9 o'clock tomorrow. I'll let them know.").ok).toBe(true);
+    // A bound before "o'clock" is still a bound.
+    for (const said of ["We will be there tomorrow before 9 o'clock.", "We will be there tomorrow by 9 o'clock."]) {
+      expect([said, agreedAt('2026-09-24T09:00:00-04:00', said, { day: 'tomorrow', hour: '9', period: null }).ok]).toEqual([said, false]);
+    }
     // A day the agent does name must be the recorded one.
     expect(ground(v2({
       scheduling: { agreed_slot_words: { day: 'Thursday', hour: 'two', period: null } },

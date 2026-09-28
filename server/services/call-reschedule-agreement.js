@@ -415,9 +415,12 @@ const ALTERNATIVE_WORDS = new Set([
 // Is the hour at this span said exactly: an exact lead, an exact tail, and
 // only courtesy after it? Marks the tokens it explains (the hour, ":00", a
 // range end) in `explained`.
+// Words before an hour that make it a limit, not the start ("by 9 o'clock").
+const BOUND_LEADS = new Set(['before', 'by', 'after', 'until', 'till', 'til', 'past', 'from', 'since', 'than']);
 function exactLead(toks, ha, next, hb) {
   const prev = toks[ha - 1];
-  const oclock = next === 'oclock' || (next === 'o' && toks[hb + 1] === 'clock');
+  // "9 o'clock" needs no lead word, unless the word before bounds it.
+  const oclock = (next === 'oclock' || (next === 'o' && toks[hb + 1] === 'clock')) && !BOUND_LEADS.has(prev);
   return oclock || EXACT_LEADS.has(prev) || HOUR_LEAD_DAYS.has(prev) || (prev === ',' && HOUR_LEAD_DAYS.has(toks[ha - 2]));
 }
 
