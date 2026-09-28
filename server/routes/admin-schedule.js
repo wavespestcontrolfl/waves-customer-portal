@@ -16682,7 +16682,18 @@ router.post('/:id/invoice', async (req, res, next) => {
       // collectible, matching the checkout sheet.
       const bareStampedZero = !svc.is_callback && isStampedZeroEstimate(svc.estimated_price)
         && !(svc.primary_line_price != null && Number(svc.primary_line_price) > 0);
-      if (bareStampedZero && !['paid', 'prepaid'].includes(existing.status) && invoiceAmountDue(existing) > 0) {
+      // An extras-only invoice this route minted (every charged line is a
+      // marked checkout extra) is the visit's legitimate balance, so a
+      // retry or reopen still collects it; anything else is stale.
+      let checkoutExtrasOnly = false;
+      try {
+        const rawLines = existing.line_items;
+        const lines = typeof rawLines === 'string' ? JSON.parse(rawLines) : (rawLines || []);
+        const charged = (Array.isArray(lines) ? lines : []).filter((li) => Number(li?.amount) > 0);
+        checkoutExtrasOnly = charged.length > 0 && charged.every((li) => li?.source === 'checkout_extra');
+      } catch { checkoutExtrasOnly = false; }
+      if (bareStampedZero && !checkoutExtrasOnly
+        && !['paid', 'prepaid'].includes(existing.status) && invoiceAmountDue(existing) > 0) {
         return res.status(409).json({
           error: 'This visit is priced at $0 but still has an open invoice with a balance — review that invoice in Billing before collecting.',
           code: 'stale_invoice_on_zero_price',
@@ -16776,7 +16787,9 @@ router.post('/:id/invoice', async (req, res, next) => {
           stored_discount_source: 'validated_checkout',
         });
       } else {
-        invoiceExtraLines.push(e);
+        // Marked so a retry can tell a checkout extras-only invoice on a
+        // bare $0 visit from a stale priced one (see the reuse guard above).
+        invoiceExtraLines.push({ ...e, source: 'checkout_extra' });
       }
     }
 

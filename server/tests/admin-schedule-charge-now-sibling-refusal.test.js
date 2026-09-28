@@ -321,6 +321,11 @@ describe('POST /:id/invoice — sibling-lookup refusal (codex round-2 P1)', () =
     expect(mockBuildLineItems).toHaveBeenCalledWith('svc-lawn', expect.objectContaining({
       fallbackAmount: 74.7,
     }));
+    // Positive checkout extras carry the marker the stale-invoice reuse
+    // guard uses to recognize an extras-only invoice on a retry.
+    expect(mockBuildLineItems.mock.calls[0][1].extraLineItems).toEqual([
+      expect.objectContaining({ description: 'Extra treatment', amount: 40, source: 'checkout_extra' }),
+    ]);
   });
 
   // Codex round-6 P1: this gate used to be `perApplicationBilling &&
@@ -658,6 +663,22 @@ describe('POST /:id/invoice — sibling-lookup refusal (codex round-2 P1)', () =
         expect(res.body).not.toMatchObject({ reused: true });
         expect(mockMint).not.toHaveBeenCalled();
       }
+    });
+
+    // ...but an extras-only invoice this route minted on the $0 visit is its
+    // real balance: a retry / reopen still reuses it.
+    test('a bare stamped $0 visit still reuses its own checkout extras-only invoice on retry', async () => {
+      mockDb.__svcRow = { ...SVC_ROW, estimated_price: 0, primary_line_price: null, cust_billing_mode: 'monthly_membership', cust_monthly_rate: 74.7 };
+      mockDb.__existingInvoiceRow = {
+        id: 'inv-extras', status: 'sent', total: 40, token: 'tok-extras',
+        scheduled_service_id: 'svc-lawn', payer_id: null,
+        line_items: [{ description: 'Ant bait add-on', quantity: 1, unit_price: 40, amount: 40, source: 'checkout_extra' }],
+      };
+      findFirstApplicationInvoiceForEstimateService.mockResolvedValue({ invoice: null, liveBeside: null });
+      const { req, res, next } = makeReqRes({});
+      await handler(req, res, next);
+      expect(res.status).not.toHaveBeenCalledWith(409);
+      expect(res.body).toMatchObject({ success: true, reused: true, invoiceId: 'inv-extras' });
     });
 
     // The lane this ruling does NOT touch: a monthly_membership visit's own
