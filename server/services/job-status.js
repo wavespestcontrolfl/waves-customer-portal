@@ -330,6 +330,25 @@ async function transitionJobStatus({
   // flushDispatchQualityDates). Without it a 100-row bulk cancel would
   // launch 100 concurrent route repair/measurement passes (codex #4295 r1 P2).
   qualityDates = null,
+  // Outer-commit signal override (P1 fix, PR #5268 round 4): every hook
+  // below this point (broadcasts, the visit-group terminal/revival seams,
+  // the follow-up re-park, the invoice-void seam, the tech cancel notice)
+  // is deferred to `trx.executionPromise` by default, which resolves when
+  // `trx` itself releases — correct when `trx` is a REAL transaction, but
+  // WRONG when `trx` is a SAVEPOINT (a caller already inside its own outer
+  // transaction that opened a nested `conn.transaction(...)` before calling
+  // in here, e.g. server/services/rider-series.js#writeRiderPlan): a
+  // savepoint's executionPromise resolves at RELEASE, long before the
+  // caller's own outer commit, so every one of those hooks could observe —
+  // or announce — a cancellation that the outer transaction still goes on
+  // to roll back. `afterCommit`, when passed, is used INSTEAD of
+  // `trx.executionPromise` as the commit signal every hook below waits on;
+  // a caller inside a nested transaction passes
+  // `utils/trx-commit-promise.js#commitPromiseOf(trx)` (which itself walks
+  // to the outermost transaction, so it is safe to pass even when `trx`
+  // turns out to be top-level). Omitted (every existing caller), behavior
+  // is byte-identical to before this option existed.
+  afterCommit,
 }) {
   if (!jobId || !toStatus || fromStatus === undefined) {
     throw new Error(
@@ -1001,8 +1020,11 @@ async function transitionJobStatus({
     // the promise returned by db.transaction(fn) — resolves on
     // commit, rejects on rollback.
     const { customerId, customerPayload, adminPayload } = await doWrites(trx);
-    if (trx.executionPromise) {
-      trx.executionPromise
+    // afterCommit (when passed) overrides trx.executionPromise as the
+    // commit signal — see this function's own param comment above.
+    const commitSignal = afterCommit || trx.executionPromise;
+    if (commitSignal) {
+      commitSignal
         .then(() => {
           emitBoth(customerId, customerPayload, adminPayload);
           maybeReparkFollowupObligation();

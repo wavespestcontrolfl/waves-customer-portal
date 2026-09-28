@@ -198,12 +198,26 @@ postgres('rider-series sync against migrated PostgreSQL', () => {
     return (eh * 60 + em) - (sh * 60 + sm);
   }
 
+  // Billable by default (P1 fix #6, PR #5268 round 4: rider inserts now run
+  // through seriesExtensionUnbillable, the SAME gate the top-up already
+  // consults) — create_invoice_on_complete defaults to FALSE and every
+  // price column defaults to NULL on this table, so an unpriced fixture
+  // with no billing_mode/monthly_rate on its (also-default) customer would
+  // otherwise refuse EVERY rider insert in this file as unbillable.
+  // Deliberately a BARE estimated_price, never a default primary_line_price
+  // (the STRUCTURED price several tests here rely on being ABSENT unless
+  // they stamp it themselves — a default primary_line_price would silently
+  // win over a test's own bare-estimated_price override via
+  // copyLineDiscountFields' own preference for it). A test that wants an
+  // unbillable candidate (the P1 fix #6 test itself) or its own structured
+  // price overrides these explicitly afterward.
   async function makeParent({ pattern, scheduledDate, technicianId = null, windowStart = '08:00', windowEnd = '10:00' }) {
     const [row] = await trx('scheduled_services').insert({
       id: randomUUID(), customer_id: customerId, service_type: pattern === 'every_6_weeks' ? 'Lawn Care' : 'Pest Control',
       status: 'pending', scheduled_date: scheduledDate, window_start: windowStart, window_end: windowEnd,
       technician_id: technicianId, is_recurring: true, recurring_pattern: pattern, recurring_ongoing: true,
       source: 'admin', estimated_duration_minutes: minutesBetween(windowStart, windowEnd),
+      create_invoice_on_complete: true, estimated_price: 100,
     }).returning('*');
     return row;
   }
@@ -1489,7 +1503,13 @@ postgres('rider-series sync against migrated PostgreSQL', () => {
     const lawnTechId = randomUUID();
     await trx('technicians').insert({ id: lawnTechId, name: 'Synthetic Lawn Tech', employment_status: 'active', field_dispatchable: true });
     const lawnParent = await makeParent({ pattern: 'every_6_weeks', scheduledDate: LAWN_START, technicianId: lawnTechId });
-    const pestParent = await makeParent({ pattern: 'quarterly', scheduledDate: PEST_START });
+    // A 60-minute rider template — deliberately a DIFFERENT duration than
+    // the host's own 120-minute stop below (P1 fix #8, PR #5268 round 4:
+    // the window END re-derives from the RIDER's own duration, never the
+    // host's — this test previously gave the rider the SAME 120-minute
+    // default the makeParent helper defaults to, which could not
+    // distinguish the two).
+    const pestParent = await makeParent({ pattern: 'quarterly', scheduledDate: PEST_START, windowStart: '08:00', windowEnd: '09:00' });
     await trx('scheduled_services').where({ id: pestParent.id }).update({ rides_parent_id: lawnParent.id });
 
     // A manually-inserted host CHILD (never through the seeder, which
@@ -1515,11 +1535,14 @@ postgres('rider-series sync against migrated PostgreSQL', () => {
     expect(inserted.length).toBeGreaterThan(0);
     const landed = inserted.find((r) => r.scheduled_date.toISOString().slice(0, 10) === hostChildDate);
     expect(landed).toBeTruthy();
-    // Floored to the hour (09:30 -> 09:00), end re-derived from the HOST
-    // row's own 120-minute duration (09:00 + 120min = 11:00) — never the
-    // host's raw 11:30, and never left at the un-flooured 09:30.
+    // Floored to the hour (09:30 -> 09:00) — the START still comes from
+    // the host's own (normalized) window. The END re-derives from the
+    // RIDER's own 60-minute duration (09:00 + 60min = 10:00) — updated by
+    // P1 fix #8 (PR #5268 round 4); this test previously asserted the
+    // HOST-derived 11:00 (09:00 + the host's own 120-minute duration),
+    // which round 4 found was the wrong occurrence's duration to use.
     expect(String(landed.window_start)).toBe('09:00:00');
-    expect(String(landed.window_end)).toBe('11:00:00');
+    expect(String(landed.window_end)).toBe('10:00:00');
   });
 
   // --- P2 fix #6: kept rows pick up a re-windowed/reassigned host stop ---
@@ -1983,5 +2006,348 @@ postgres('rider-series sync against migrated PostgreSQL', () => {
       await database('customers').where({ id: customerId }).del();
       if (techIds.length) await database('technicians').whereIn('id', techIds).where('name', 'like', 'Synthetic%').del();
     }
+  });
+
+  // --- P1 fix #2 (PR #5268 round 4): transitionJobStatus's OWN hooks defer
+  // to the real outer commit, not the savepoint's release --------------------
+  test('a surplus rider cancel defers transitionJobStatus\'s own hooks to the OUTER commit, not the savepoint release (P1 fix #2, fail-without-fix evidence)', async () => {
+    const { syncRiderSeries } = require('../services/rider-series');
+    const { handleFollowupChildCancellation } = require('../services/typed-followup-obligation');
+    const { pestParent } = await linkedPair();
+    await trx('scheduled_services')
+      .where((q) => { q.where('id', pestParent.id).orWhere('recurring_parent_id', pestParent.id); })
+      .update({ property_id: null });
+    await disablePropertyAnchoring();
+
+    await syncRiderSeries(trx, pestParent.id, { dryRun: false }); // aligns all 4 pest rows onto plan dates
+    const pestRowsAfterFirstSync = await seriesRows(pestParent.id);
+    const movableRow = pestRowsAfterFirstSync.find((r) => r.scheduled_date.toISOString().slice(0, 10) > PEST_START);
+    const dupDate = movableRow.scheduled_date;
+    await trx('scheduled_services').insert({
+      id: randomUUID(), customer_id: customerId, service_type: 'Pest Control', status: 'pending',
+      scheduled_date: dupDate, is_recurring: true, recurring_pattern: 'quarterly',
+      recurring_parent_id: pestParent.id, recurring_ongoing: true, source: 'admin',
+      track_state: 'scheduled',
+    });
+
+    handleFollowupChildCancellation.mockClear();
+    const result = await syncRiderSeries(trx, pestParent.id, { dryRun: false });
+    expect(result.cancelledIds.length).toBeGreaterThan(0);
+
+    // transitionJobStatus's own hook (job-status.js#maybeReparkFollowupObligation)
+    // calls typed-followup-obligation#handleFollowupChildCancellation ONLY
+    // once its commit signal settles. syncRiderSeries's own
+    // conn.transaction(run) call ran as a SAVEPOINT here (trx is itself
+    // already an open transaction) and has already released by the time
+    // syncRiderSeries returns above — so WITHOUT this fix (transitionJobStatus
+    // defaulting to trx.executionPromise, the savepoint's own promise), the
+    // mock would already be called at this point, well before trx ever
+    // commits. A couple of microtask ticks are enough to flush an
+    // already-resolved promise's .then() chain — no real DB round trip is
+    // needed on the buggy path, unlike the P1 fix #3 test's own
+    // post-commit-deferred assertion below.
+    await new Promise((resolve) => { setImmediate(resolve); });
+    await new Promise((resolve) => { setImmediate(resolve); });
+    expect(handleFollowupChildCancellation).not.toHaveBeenCalled();
+
+    require('../models/db').connection = database;
+    await trx.commit();
+    try {
+      await waitFor(() => handleFollowupChildCancellation.mock.calls.length > 0);
+      expect(handleFollowupChildCancellation).toHaveBeenCalledWith(
+        expect.objectContaining({ jobId: result.cancelledIds[0], toStatus: 'cancelled' }),
+      );
+    } finally {
+      const rows = await database('scheduled_services').where({ customer_id: customerId }).select('id', 'technician_id');
+      const ids = rows.map((r) => r.id);
+      const techIds = [...new Set(rows.map((r) => r.technician_id).filter(Boolean))];
+      await database('job_status_history').whereIn('job_id', ids).del();
+      await database('scheduled_service_addons').whereIn('scheduled_service_id', ids).del();
+      await database('scheduled_services').whereIn('id', ids).whereNotNull('recurring_parent_id').del();
+      await database('scheduled_services').whereIn('id', ids).del();
+      await database('customer_properties').where({ customer_id: customerId }).del();
+      await database('customers').where({ id: customerId }).del();
+      if (techIds.length) await database('technicians').whereIn('id', techIds).where('name', 'like', 'Synthetic%').del();
+    }
+  });
+
+  // --- PR #5268 round 4 findings -------------------------------------------
+  describe('round 4', () => {
+    // --- P1 fix #1: a rider MOVE recomputes that date's financials --------
+    test('a rider MOVE recomputes the destination date\'s add-ons and price both ways — onto a due date adds it, off a due date drops it (P1 fix #1, fail-without-fix evidence)', async () => {
+      const { syncRiderSeries } = require('../services/rider-series');
+      const { buildSeriesOccurrenceForDate } = require('../routes/admin-schedule');
+      const { overlayRecurringTemplateOverrides } = require('../services/recurring-template-overrides');
+      const lawnParent = await makeParent({ pattern: 'every_6_weeks', scheduledDate: LAWN_START });
+      const pestParent = await makeParent({ pattern: 'quarterly', scheduledDate: PEST_START });
+      await trx('scheduled_services').where({ id: pestParent.id })
+        .update({
+          rides_parent_id: lawnParent.id, primary_line_price: 50, estimated_price: 50,
+        });
+      const dueDate = addDays(PEST_START, 168);
+      // A "custom" cadence add-on due every 168 days from the PARENT's own
+      // scheduled_date (PEST_START) — due at day168/336/…, never at day84
+      // or the host-joined date this test places at day175 (deliberately
+      // outside step-1's [77,105] window but inside step-2's [161,189],
+      // so it wins step-2 over the standalone TARGET_GAP_DAYS fallback of
+      // day168 — a blackout day was tried first here and rejected: it
+      // shifts the add-on's OWN due-date candidate by the identical
+      // seasonalSafeShift the plan date gets, so the two can never
+      // diverge — a real host date carries no such shift).
+      await trx('scheduled_service_addons').insert({
+        id: randomUUID(), scheduled_service_id: pestParent.id, service_name: 'Custom Cadence Add-On',
+        estimated_price: 20, recurring_pattern: 'custom', recurring_interval_days: 168,
+      });
+      const hostSlotDate = addDays(PEST_START, 175);
+      const [hostSlot] = await trx('scheduled_services').insert({
+        id: randomUUID(), customer_id: customerId, service_type: 'Lawn Care', status: 'pending',
+        scheduled_date: hostSlotDate, window_start: '09:00', window_end: '11:00',
+        is_recurring: true, recurring_pattern: 'every_6_weeks', recurring_parent_id: lawnParent.id,
+        recurring_ongoing: true, source: 'admin', estimated_duration_minutes: 120,
+      }).returning('*');
+
+      // Phase 1 — host date at day175 wins step 2; day168 is untouched, so
+      // the row that lands at 175 is genuinely NOT on the add-on's due date.
+      const first = await syncRiderSeries(trx, pestParent.id, { dryRun: false });
+      expect(first.insert).toContain(hostSlotDate);
+      const relocatedRow = (await seriesRows(pestParent.id))
+        .find((r) => r.scheduled_date.toISOString().slice(0, 10) === hostSlotDate);
+      expect(relocatedRow).toBeTruthy();
+      expect(Number(relocatedRow.estimated_price)).toBe(50); // not due here
+      expect(await trx('scheduled_service_addons').where({ scheduled_service_id: relocatedRow.id }).pluck('service_name')).toEqual([]);
+
+      // Phase 2 — cancel the host slot: step 2 falls back to its standalone
+      // day168 (the add-on's own due date), and the row above must now
+      // MOVE onto it (fail-without-fix: before this fix, a MOVE never
+      // touched scheduled_service_addons or re-priced the row, so it would
+      // still read $50 with no add-on after relocating).
+      await trx('scheduled_services').where({ id: hostSlot.id }).update({ status: 'cancelled' });
+      const second = await syncRiderSeries(trx, pestParent.id, { dryRun: false });
+      const moveOnto = second.move.find((m) => m.id === relocatedRow.id);
+      expect(moveOnto).toBeTruthy();
+      expect(moveOnto.to).toBe(dueDate);
+      const afterOnto = await trx('scheduled_services').where({ id: relocatedRow.id }).first();
+      expect(Number(afterOnto.estimated_price)).toBe(70); // 50 + the $20 add-on
+      expect(await trx('scheduled_service_addons').where({ scheduled_service_id: relocatedRow.id }).pluck('service_name'))
+        .toEqual(['Custom Cadence Add-On']);
+      // Oracle: the row's fields now match what a FRESH insert for this
+      // SAME date would build (buildSeriesOccurrenceForDate, P1 fix #1's
+      // own extracted builder) — not just "some add-on landed."
+      const cols = await trx('scheduled_services').columnInfo();
+      const template = overlayRecurringTemplateOverrides(await trx('scheduled_services').where({ id: pestParent.id }).first(), cols);
+      const oracle = await buildSeriesOccurrenceForDate(trx, template, pestParent.id, cols, { date: dueDate, blackoutDates: null, skipParent: false });
+      expect(Number(afterOnto.estimated_price)).toBe(Number(oracle.data.estimated_price));
+      expect(oracle.dueAddons.map((a) => a.service_name)).toEqual(['Custom Cadence Add-On']);
+
+      // Phase 3 — revive the host slot: step 2 wins it back over the
+      // standalone day168, and the SAME row must MOVE off day168 again,
+      // dropping the add-on and repricing to base.
+      await trx('scheduled_services').where({ id: hostSlot.id }).update({ status: 'pending' });
+      const third = await syncRiderSeries(trx, pestParent.id, { dryRun: false });
+      const moveOff = third.move.find((m) => m.id === relocatedRow.id);
+      expect(moveOff).toBeTruthy();
+      expect(moveOff.to).toBe(hostSlotDate);
+      const afterOff = await trx('scheduled_services').where({ id: relocatedRow.id }).first();
+      expect(Number(afterOff.estimated_price)).toBe(50);
+      expect(await trx('scheduled_service_addons').where({ scheduled_service_id: relocatedRow.id }).pluck('service_name')).toEqual([]);
+    });
+
+    // --- P1 fix #3: host dates come from BASE recurring rows only ---------
+    test('a host BOOSTER (is_recurring=false) inside the 77-105 window is never picked as a host date (P1 fix #3, fail-without-fix evidence)', async () => {
+      const lawnTechId = randomUUID();
+      await trx('technicians').insert({ id: lawnTechId, name: 'Synthetic Lawn Tech', employment_status: 'active', field_dispatchable: true });
+      const lawnParent = await makeParent({ pattern: 'every_6_weeks', scheduledDate: LAWN_START, technicianId: lawnTechId });
+      await seedChildren(lawnParent, 'every_6_weeks', 9);
+      const pestParent = await makeParent({ pattern: 'quarterly', scheduledDate: PEST_START });
+      await trx('scheduled_services').where({ id: pestParent.id }).update({ rides_parent_id: lawnParent.id });
+
+      // A booster inside [anchor+77, anchor+105], BEFORE the lawn's own
+      // genuine +84 cadence date — sorts first in hostDates, so a
+      // fail-without-fix pick (no is_recurring filter) wins the
+      // `hostDates.find(d => d >= minDate)` race over the real cadence date.
+      const boosterDate = addDays(LAWN_START, 80);
+      await trx('scheduled_services').insert({
+        id: randomUUID(), customer_id: customerId, service_type: 'Lawn Care', status: 'pending',
+        scheduled_date: boosterDate, is_recurring: false, recurring_parent_id: lawnParent.id, source: 'admin',
+      });
+
+      const { syncRiderSeries } = require('../services/rider-series');
+      const dry = await syncRiderSeries(trx, pestParent.id, { dryRun: true });
+      const firstPlanned = [...dry.insert, ...dry.move.map((m) => m.to)].sort()[0];
+      expect(firstPlanned).toBeTruthy();
+      expect(firstPlanned).not.toBe(boosterDate);
+      expect(firstPlanned).toBe(addDays(LAWN_START, 84));
+    });
+
+    // --- P2 fix #4: the host query is null-status safe ---------------------
+    test('a host row with a NULL status is still picked as a host date, never silently dropped (P2 fix #4, fail-without-fix evidence)', async () => {
+      const hostTechId = randomUUID();
+      await trx('technicians').insert({ id: hostTechId, name: 'Synthetic Host Tech', employment_status: 'active', field_dispatchable: true });
+      const lawnParent = await makeParent({
+        pattern: 'every_6_weeks', scheduledDate: LAWN_START, technicianId: hostTechId, windowStart: '09:00', windowEnd: '11:00',
+      });
+      // No seedChildren: the ONLY host date on offer is this NULL-status
+      // legacy child — a fail-without-fix drop of it leaves hostDates EMPTY
+      // and the rider falls back to its own standalone cadence instead
+      // (same raw date here, since LAWN_START === PEST_START, but a
+      // standalone insert never carries the host's own technician).
+      const hostChildDate = addDays(LAWN_START, 84);
+      await trx('scheduled_services').insert({
+        id: randomUUID(), customer_id: customerId, service_type: 'Lawn Care', status: null,
+        scheduled_date: hostChildDate, window_start: '09:00', window_end: '11:00', technician_id: hostTechId,
+        is_recurring: true, recurring_pattern: 'every_6_weeks', recurring_parent_id: lawnParent.id,
+        recurring_ongoing: true, source: 'admin', estimated_duration_minutes: 120,
+      });
+      const pestParent = await makeParent({ pattern: 'quarterly', scheduledDate: PEST_START, windowStart: '08:00', windowEnd: '10:00' });
+      await trx('scheduled_services').where({ id: pestParent.id }).update({ rides_parent_id: lawnParent.id });
+
+      const { syncRiderSeries } = require('../services/rider-series');
+      await syncRiderSeries(trx, pestParent.id, { dryRun: false });
+      const landed = (await seriesRows(pestParent.id))
+        .find((r) => r.scheduled_date.toISOString().slice(0, 10) === hostChildDate);
+      expect(landed).toBeTruthy();
+      // Fail-without-fix: technician_id reads null (the rider's own
+      // unassigned standalone template), never the host's tech.
+      expect(String(landed.technician_id)).toBe(String(hostTechId));
+    });
+
+    // --- P1 fix #5: extend honors count and works on a FIXED rider --------
+    test('runRecurringAlertAction extend on a rider caps NEW inserts at the requested count, deferring the rest (P1 fix #5, fail-without-fix evidence)', async () => {
+      const { runRecurringAlertAction } = require('../routes/admin-schedule')._test;
+      const lawnTechId = randomUUID();
+      await trx('technicians').insert({ id: lawnTechId, name: 'Synthetic Lawn Tech', employment_status: 'active', field_dispatchable: true });
+      const lawnParent = await makeParent({ pattern: 'every_6_weeks', scheduledDate: LAWN_START, technicianId: lawnTechId });
+      await seedChildren(lawnParent, 'every_6_weeks', 9);
+      // A FRESH pest parent (no seeded children) linked to this host plans
+      // FOUR standalone-vs-host dates (84/168/252/336 — every 2nd lawn
+      // date) — every one an INSERT, so a cap is unambiguous.
+      const pestParent = await makeParent({ pattern: 'quarterly', scheduledDate: PEST_START });
+      await trx('scheduled_services').where({ id: pestParent.id }).update({ rides_parent_id: lawnParent.id });
+      const dry = await require('../services/rider-series').syncRiderSeries(trx, pestParent.id, { dryRun: true });
+      expect(dry.insert.length).toBeGreaterThan(1); // fail-without-fix precondition: more than 1 is available
+
+      const outcome = await runRecurringAlertAction(trx, {
+        idParam: `derived-${pestParent.id}`, action: 'extend', count: 1, adminUserId: null,
+      });
+
+      expect(outcome.status).toBe(200);
+      expect(outcome.body.success).toBe(true);
+      expect(outcome.body.riderSynced).toBe(true);
+      // Fail-without-fix: before this fix, syncRiderSeries had no insert cap
+      // at all — an extend count=1 request would insert EVERY planned date
+      // in one call (here, all 4), never just 1.
+      expect(outcome.body.created).toBe(1);
+      const inserted = (await seriesRows(pestParent.id)).filter((r) => r.id !== pestParent.id);
+      expect(inserted.length).toBe(1);
+    });
+
+    test('runRecurringAlertAction extend works on a FIXED (non-ongoing) rider, adding exactly the requested count, never refusing not_ongoing (P1 fix #5, fail-without-fix evidence)', async () => {
+      const { runRecurringAlertAction } = require('../routes/admin-schedule')._test;
+      const lawnTechId = randomUUID();
+      await trx('technicians').insert({ id: lawnTechId, name: 'Synthetic Lawn Tech', employment_status: 'active', field_dispatchable: true });
+      const lawnParent = await makeParent({ pattern: 'every_6_weeks', scheduledDate: LAWN_START, technicianId: lawnTechId });
+      await seedChildren(lawnParent, 'every_6_weeks', 9);
+      // A FRESH pest parent (no seeded children, unlike linkedPair()) so
+      // every planned date is a genuine INSERT — a fixture whose plan is
+      // all MOVES (linkedPair's own pre-seeded own-cadence children) could
+      // report created:0 correctly even completely unfixed, and this test
+      // would not distinguish the two.
+      const pestParent = await makeParent({ pattern: 'quarterly', scheduledDate: PEST_START });
+      await trx('scheduled_services').where({ id: pestParent.id })
+        .update({ rides_parent_id: lawnParent.id, recurring_ongoing: false });
+      // fail-without-fix precondition: an unmodified syncRiderSeries call
+      // refuses this rider outright.
+      const bareSync = await require('../services/rider-series').syncRiderSeries(trx, pestParent.id, { dryRun: true });
+      expect(bareSync.skipped).toBe('not_ongoing');
+
+      const outcome = await runRecurringAlertAction(trx, {
+        idParam: `derived-${pestParent.id}`, action: 'extend', count: 1, adminUserId: null,
+      });
+
+      expect(outcome.status).toBe(200);
+      expect(outcome.body.success).toBe(true);
+      expect(outcome.body.riderSynced).toBe(true);
+      expect(outcome.body.created).toBe(1);
+      // extend never flips the ongoing flag the way convert_ongoing does —
+      // this rider stays FIXED.
+      const parentAfter = await trx('scheduled_services').where({ id: pestParent.id }).first('recurring_ongoing');
+      expect(parentAfter.recurring_ongoing).toBe(false);
+    });
+
+    // --- P1 fix #6: unbillable guard on rider inserts -----------------------
+    test('a rider insert refuses an unbillable candidate date — never mints a stack of $0 rows (P1 fix #6, fail-without-fix evidence)', async () => {
+      const lawnParent = await makeParent({ pattern: 'every_6_weeks', scheduledDate: LAWN_START });
+      const pestParent = await makeParent({ pattern: 'quarterly', scheduledDate: PEST_START });
+      await trx('scheduled_services').where({ id: pestParent.id }).update({
+        rides_parent_id: lawnParent.id, create_invoice_on_complete: false, estimated_price: null, primary_line_price: null,
+      });
+
+      const { syncRiderSeries } = require('../services/rider-series');
+      const dry = await syncRiderSeries(trx, pestParent.id, { dryRun: true });
+      expect(dry.insert.length).toBeGreaterThan(0);
+
+      const applied = await syncRiderSeries(trx, pestParent.id, { dryRun: false });
+      // Fail-without-fix: without checkUnbillable, every one of these
+      // planned dates would insert a real, $0, non-invoiceable row.
+      expect((applied.insertedRows || []).length).toBe(0);
+      const inserted = (await seriesRows(pestParent.id)).filter((r) => r.id !== pestParent.id);
+      expect(inserted.length).toBe(0);
+    });
+
+    // --- P1 fix #7: runaway horizon bound (PG integration; the pure bound
+    // itself is proven in rider-series-plan.test.js) --------------------
+    test('a rider sync with a host row 10 years out plans and inserts only a bounded number of rows, never one per cadence step to the host date (P1 fix #7, PG, fail-without-fix evidence)', async () => {
+      const lawnParent = await makeParent({ pattern: 'every_6_weeks', scheduledDate: LAWN_START });
+      // The host's ONLY future row besides its own parent sits 10 years out.
+      await trx('scheduled_services').insert({
+        id: randomUUID(), customer_id: customerId, service_type: 'Lawn Care', status: 'pending',
+        scheduled_date: addDays(LAWN_START, 3653), is_recurring: true, recurring_pattern: 'every_6_weeks',
+        recurring_parent_id: lawnParent.id, recurring_ongoing: true, source: 'admin',
+      });
+      const pestParent = await makeParent({ pattern: 'quarterly', scheduledDate: PEST_START });
+      await trx('scheduled_services').where({ id: pestParent.id }).update({ rides_parent_id: lawnParent.id });
+
+      const { syncRiderSeries } = require('../services/rider-series');
+      const dry = await syncRiderSeries(trx, pestParent.id, { dryRun: true });
+      // Fail-without-fix: the pre-fix horizon would be the host date itself
+      // (10 years out), and planRiderDates would walk every ~84-day
+      // standalone step all the way there — dozens of planned dates. Fixed,
+      // the horizon caps at the standalone horizon (~252 days here) plus
+      // MAX_HORIZON_EXTRA_DAYS (730) — at most ~13 steps at the tightest
+      // MIN_GAP_DAYS (77) spacing, nowhere near the ~43 steps an
+      // unbounded 10-year walk would take.
+      expect(dry.insert.length).toBeLessThan(15);
+      for (const d of dry.insert) {
+        expect(daysBetween(PEST_START, d)).toBeLessThan(3653);
+      }
+    });
+
+    // --- P1 fix #8: rider window END derives from the RIDER's own duration -
+    test('a rider joining a host date keeps the HOST\'s start but the RIDER\'s own duration for the end (P1 fix #8, fail-without-fix evidence)', async () => {
+      const hostTechId = randomUUID();
+      await trx('technicians').insert({ id: hostTechId, name: 'Synthetic Host Tech', employment_status: 'active', field_dispatchable: true });
+      // 120-minute host stop at 09:00 (already on-the-hour — no flooring
+      // needed, isolating this test to the duration question alone; the
+      // off-hour-plus-duration combination is covered by the "off-hour
+      // window" test above).
+      const lawnParent = await makeParent({
+        pattern: 'every_6_weeks', scheduledDate: LAWN_START, technicianId: hostTechId, windowStart: '09:00', windowEnd: '11:00',
+      });
+      await seedChildren(lawnParent, 'every_6_weeks', 9);
+      // A 60-minute rider template.
+      const pestParent = await makeParent({ pattern: 'quarterly', scheduledDate: PEST_START, windowStart: '08:00', windowEnd: '09:00' });
+      await trx('scheduled_services').where({ id: pestParent.id }).update({ rides_parent_id: lawnParent.id });
+
+      const { syncRiderSeries } = require('../services/rider-series');
+      await syncRiderSeries(trx, pestParent.id, { dryRun: false });
+      const lawnDates = (await seriesRows(lawnParent.id)).map((r) => r.scheduled_date.toISOString().slice(0, 10));
+      const landed = (await seriesRows(pestParent.id))
+        .find((r) => r.id !== pestParent.id && lawnDates.includes(r.scheduled_date.toISOString().slice(0, 10)));
+      expect(landed).toBeTruthy();
+      // fail-without-fix: window_end reads 11:00 (09:00 + the HOST's own
+      // 120-minute duration), never 10:00 (09:00 + the RIDER's own 60).
+      expect(String(landed.window_start)).toBe('09:00:00');
+      expect(String(landed.window_end)).toBe('10:00:00');
+    });
   });
 });

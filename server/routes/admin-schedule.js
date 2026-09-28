@@ -17904,6 +17904,91 @@ function normalizeTopUpWindow(windowStart, durationMinutes, windowEnd) {
 // series stopped between the pre-checks and the insert (the stopped-series
 // rollback — a cancellation landing while this function's own price/add-on
 // math ran).
+// Builds the DATE-DEPENDENT part of one series occurrence (P1 fix #1, PR
+// #5268 round 4): catalog service identity, the price template, stored
+// financials, the discount restack, the pricing-regime marker, the due
+// add-on set (filterAddonLinesForDate) and its restacked dollars, and
+// create_invoice_on_complete — everything insertSeriesOccurrenceLocked (below)
+// used to compute inline before its own insert. Split out so a rider MOVE
+// (server/services/rider-series.js#writeRiderPlan) can recompute a row's
+// financials for its NEW date without re-inserting the row: a move changes
+// WHICH date a row sits on, and this is every field that is a FUNCTION of
+// that date. Deliberately excludes anything that is NOT a function of the
+// date: technician_id/window/scheduled_date (the caller's own join/move
+// resolution), Bill-To (copyBillToFields), the stamped service address
+// (copyStampedServiceAddressFields) and property anchoring
+// (anchorSoleProperty) — none of those vary by occurrence date, and a MOVE
+// must never touch them. insertSeriesOccurrenceLocked calls this with
+// EXACTLY the same statements in the same order it always ran inline, so
+// its own callers (extendSeriesOnceLocked's auto-extend/top-up insert) are
+// byte-identical to before this extraction — see this file's own module
+// tests (recurring-series-maintenance, recurring-series-topup, …) and the
+// design doc's "The reconciler" section for how that is proven.
+//
+// Returns { data, dueAddons, restackedAddonDollars, parentAddons,
+// storedDiscountScope } — `data` carries only the fields enumerated above
+// (service_type/service_id/service_key_snapshot/appointment_type,
+// primary_line_price + every line_discount_*/discount_* field,
+// pricing_provenance, create_invoice_on_complete); the caller merges it
+// onto whatever base fields (customer_id, technician_id, scheduled_date,
+// window, status, …) belong to ITS OWN write — an insert's full nextData,
+// or a rider MOVE's guarded UPDATE (never scheduled_date/technician_id/
+// window there — the move's own host-join/standalone resolution owns
+// those).
+async function buildSeriesOccurrenceForDate(conn, parent, parentId, cols, opts = {}) {
+  const { date, blackoutDates = null, skipParent = false } = opts;
+  const childIdentity = await resolveSeriesChildIdentity(conn, parent);
+  const data = { service_type: childIdentity.service_type };
+  if (cols.service_id && childIdentity.service_id) data.service_id = childIdentity.service_id;
+  if (cols.appointment_type) data.appointment_type = classifyAppointmentTag(childIdentity.service_type);
+  const extensionPriceParent = await resolveSeriesExtensionPriceTemplate(conn, parentId, parent);
+  copyLineDiscountFields(data, extensionPriceParent, cols);
+  if (cols.service_key_snapshot && childIdentity.service_key) data.service_key_snapshot = childIdentity.service_key;
+  copyAppointmentDiscountFields(data, parent, cols);
+  // Required scope must be readable before creating any child.
+  const parentAddons = await conn('scheduled_service_addons').where({ scheduled_service_id: parentId });
+  // Legacy-series root freeze (Codex round 2 P1) — see
+  // freezeLegacySeriesRootCaps's own comment. Only one date is ever placed
+  // per call, so no per-date loop to hoist this out of.
+  await freezeLegacySeriesRootCaps(conn, parent, cols, parentAddons);
+  const storedDiscountScope = await loadStoredDiscountScope(conn, parent, parentAddons);
+  const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, date, blackoutDates, skipParent);
+  // Anchored-split series (self-booked funnels, wizard plans): the PARENT's
+  // estimated_price carries the annual's remainder cents and every seeded
+  // follow-up bills the even quotient. Templating the extension off the
+  // parent re-billed those cents on every renewal visit (owner ruling
+  // 2026-08-27). Use the series' per-visit amount instead when the parent
+  // is a remainder-bearing anchor — an existing follow-up priced within $1
+  // below it.
+  applyStoredVisitFinancials(data, cols, extensionPriceParent, dueAddons, parentAddons, storedDiscountScope);
+  // Canonical restack (GATE_DISCOUNT_STACKING): restates the frozen fields
+  // the two copy* calls and applyStoredVisitFinancials just wrote —
+  // line_discount_dollars, discount_dollars, estimated_price — against THIS
+  // occurrence's own due add-ons; no-op off (see applyDiscountStackRestack).
+  // The returned array threads through to insertRecurringChildAddons below
+  // so each due add-on's own discount restates the same way. discountCaps
+  // is the REAL catalog cap for the primary + every due add-on's own
+  // discount.
+  const discountCaps = discountStackingLive()
+    ? await loadDiscountCapsById(conn, [extensionPriceParent.line_discount_id, ...dueAddons.map((a) => a.discount_id)])
+    : null;
+  const restackedAddonDollars = applyDiscountStackRestack(data, cols, extensionPriceParent, dueAddons, storedDiscountScope, discountCaps);
+  // Pricing-regime provenance — see restackStoredVisitFinancials's own
+  // comment.
+  if (discountStackingLive()) stampPricingRegimeMarker(data, cols, resolveStoredDiscountCaps(extensionPriceParent, discountCaps).snapshot);
+  // Extension rows keep invoice-on-complete stamping — sibling-resolved so
+  // the freshest office billing intent wins (see
+  // resolveSeriesCreateInvoiceOnComplete). Without it a pay-per-visit
+  // customer's occurrence completes UNINVOICED.
+  if (cols.create_invoice_on_complete) {
+    const seriesCioc = await resolveSeriesCreateInvoiceOnComplete(conn, parentId, parent);
+    if (seriesCioc !== undefined) data.create_invoice_on_complete = seriesCioc;
+  }
+  return {
+    data, dueAddons, restackedAddonDollars, parentAddons, storedDiscountScope,
+  };
+}
+
 async function insertSeriesOccurrenceLocked(conn, parent, parentId, cols, opts = {}) {
   const {
     date, windowStart, windowEnd, preferredTechnicianId, svcLike,
@@ -17911,7 +17996,6 @@ async function insertSeriesOccurrenceLocked(conn, parent, parentId, cols, opts =
     dirParent = 'forward', checkUnbillable = false, onSkip,
   } = opts;
 
-  const childIdentity = await resolveSeriesChildIdentity(conn, parent);
   // Host tech semantics (P1 fix #4, PR #5268 round 3): a `parent` with an
   // explicit pin (recurring_technician_override true — a rider's own
   // template) must keep ITS OWN tech even when a caller passes
@@ -17938,68 +18022,33 @@ async function insertSeriesOccurrenceLocked(conn, parent, parentId, cols, opts =
       recurring_technician_override: false,
     }, date)
     : await assignableRecurringTemplateTechnicianId(conn, parent, date);
+  // Everything date-dependent (identity, price template, stored financials,
+  // discount restack, pricing-regime marker, due add-ons, create-invoice
+  // flag) — see buildSeriesOccurrenceForDate's own header (P1 fix #1, PR
+  // #5268 round 4). Same statements this function ran inline before the
+  // extraction, in the same order — byte-identical for this function's own
+  // callers.
+  const {
+    data, dueAddons, restackedAddonDollars, parentAddons, storedDiscountScope,
+  } = await buildSeriesOccurrenceForDate(conn, parent, parentId, cols, { date, blackoutDates, skipParent });
   const nextData = {
     customer_id: parent.customer_id,
     technician_id: technicianId,
     scheduled_date: date,
     window_start: windowStart, window_end: windowEnd,
-    service_type: childIdentity.service_type, status: 'pending',
+    status: 'pending',
     time_window: parent.time_window, zone: parent.zone,
     estimated_duration_minutes: parent.estimated_duration_minutes,
     is_recurring: true, recurring_pattern: parent.recurring_pattern,
     recurring_parent_id: parentId,
+    ...data,
   };
   if (cols.recurring_ongoing) nextData.recurring_ongoing = true;
   if (cols.skip_weekends) nextData.skip_weekends = skipParentStamp;
   if (cols.weekend_shift && skipParent) nextData.weekend_shift = dirParent;
-  if (cols.service_id && childIdentity.service_id) nextData.service_id = childIdentity.service_id;
-  if (cols.appointment_type) nextData.appointment_type = classifyAppointmentTag(childIdentity.service_type);
-  const extensionPriceParent = await resolveSeriesExtensionPriceTemplate(conn, parentId, parent);
-  copyLineDiscountFields(nextData, extensionPriceParent, cols);
-  if (cols.service_key_snapshot && childIdentity.service_key) nextData.service_key_snapshot = childIdentity.service_key;
-  copyAppointmentDiscountFields(nextData, parent, cols);
   copyBillToFields(nextData, parent, cols);
   copyStampedServiceAddressFields(nextData, parent, cols);
   await anchorSoleProperty(nextData, cols, conn);
-  // Required scope must be readable before creating any child.
-  const parentAddons = await conn('scheduled_service_addons').where({ scheduled_service_id: parentId });
-  // Legacy-series root freeze (Codex round 2 P1) — see
-  // freezeLegacySeriesRootCaps's own comment. Only one date is ever placed
-  // per call, so no per-date loop to hoist this out of.
-  await freezeLegacySeriesRootCaps(conn, parent, cols, parentAddons);
-  const storedDiscountScope = await loadStoredDiscountScope(conn, parent, parentAddons);
-  const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, date, blackoutDates, skipParent);
-  // Anchored-split series (self-booked funnels, wizard plans): the PARENT's
-  // estimated_price carries the annual's remainder cents and every seeded
-  // follow-up bills the even quotient. Templating the extension off the
-  // parent re-billed those cents on every renewal visit (owner ruling
-  // 2026-08-27). Use the series' per-visit amount instead when the parent
-  // is a remainder-bearing anchor — an existing follow-up priced within $1
-  // below it.
-  applyStoredVisitFinancials(nextData, cols, extensionPriceParent, dueAddons, parentAddons, storedDiscountScope);
-  // Canonical restack (GATE_DISCOUNT_STACKING): restates the frozen fields
-  // the two copy* calls and applyStoredVisitFinancials just wrote —
-  // line_discount_dollars, discount_dollars, estimated_price — against THIS
-  // occurrence's own due add-ons; no-op off (see applyDiscountStackRestack).
-  // The returned array threads through to insertRecurringChildAddons below
-  // so each due add-on's own discount restates the same way. discountCaps
-  // is the REAL catalog cap for the primary + every due add-on's own
-  // discount.
-  const discountCaps = discountStackingLive()
-    ? await loadDiscountCapsById(conn, [extensionPriceParent.line_discount_id, ...dueAddons.map((a) => a.discount_id)])
-    : null;
-  const restackedAddonDollars = applyDiscountStackRestack(nextData, cols, extensionPriceParent, dueAddons, storedDiscountScope, discountCaps);
-  // Pricing-regime provenance — see restackStoredVisitFinancials's own
-  // comment.
-  if (discountStackingLive()) stampPricingRegimeMarker(nextData, cols, resolveStoredDiscountCaps(extensionPriceParent, discountCaps).snapshot);
-  // Extension rows keep invoice-on-complete stamping — sibling-resolved so
-  // the freshest office billing intent wins (see
-  // resolveSeriesCreateInvoiceOnComplete). Without it a pay-per-visit
-  // customer's occurrence completes UNINVOICED.
-  if (cols.create_invoice_on_complete) {
-    const seriesCioc = await resolveSeriesCreateInvoiceOnComplete(conn, parentId, parent);
-    if (seriesCioc !== undefined) nextData.create_invoice_on_complete = seriesCioc;
-  }
   // opts.checkUnbillable (topUp only): the SAME shared verdict every OFFICE
   // series writer consults, run against THIS ACTUAL candidate date and its
   // real due add-ons — price varies by date (e.g. an annual-only add-on not
@@ -18045,7 +18094,16 @@ async function insertSeriesOccurrenceLocked(conn, parent, parentId, cols, opts =
   // registration below are skipped, so a stale reminder can't be minted
   // after the sweep's reminder-cancel step already ran.
   let live = true;
-  if (cols.recurring_ongoing && insertedRow?.id) {
+  // opts.ignoreOngoingRace (P1 fix #5, PR #5268 round 4): this re-check
+  // exists to catch a genuine RACE — a cancellation flipping
+  // recurring_ongoing false WHILE this insert's own price/add-on math ran —
+  // never to refuse an insert onto a series that was ALREADY, deliberately,
+  // not-ongoing before this call started (a FIXED rider's office-driven
+  // extend, under allowNotOngoing — server/services/rider-series.js#
+  // writeRiderPlan passes this true only for that one explicit action).
+  // Every other caller (auto-extend, top-up, an ordinary ongoing rider
+  // sync) never sets it, so the race guard is unchanged for them.
+  if (cols.recurring_ongoing && insertedRow?.id && !opts.ignoreOngoingRace) {
     const parentNow = await conn('scheduled_services')
       .where({ id: parentId })
       .first('recurring_ongoing');
@@ -24857,6 +24915,25 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
       // non-rider convert_ongoing branch below (series-wide, base rows only).
       // The flip and the sync share one savepoint: a skipped sync rolls the
       // flip back too, so the 409 below leaves the series exactly as it was.
+      //
+      // extend's own count (P1 fix #5, PR #5268 round 4): parsed and
+      // validated exactly like the ordinary (non-rider) extend branch below
+      // (`Math.min(Math.max(parseInt(count) || 4, 1), 12)`) — the office
+      // asked for N more visits, and a rider must honor that request the
+      // same as a plain series. allowNotOngoing:true (extend only, never
+      // convert_ongoing, which already flips the flag true above) lets
+      // syncRiderSeries proceed on a FIXED (non-ongoing) rider — without it
+      // every fixed rider's extend action always refused with
+      // skipped: 'not_ongoing', the same gate an unattended sync correctly
+      // honors but an explicit office "add N more visits" action must not.
+      // maxNewInserts:n caps this call's own NEW inserts at the requested
+      // count (dates still derived from the host plan; a plan that would
+      // insert MORE than n this pass defers the rest to the next sync,
+      // never truncated silently — see syncRiderSeries' own opts comment).
+      // Moves/cancels of rows the plan already accounts for are unaffected.
+      const riderExtendCount = action === 'extend'
+        ? Math.min(Math.max(parseInt(count) || 4, 1), 12)
+        : null;
       let riderSync;
       const skippedSync = new Error('rider sync skipped');
       try {
@@ -24876,7 +24953,10 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
           // riderLivenessSkipReason's own comment. Every other liveness
           // gate still applies.
           riderSync = await require('../services/rider-series').syncRiderSeries(sp, parentId, {
-            source: 'alert_action', revive: action === 'convert_ongoing',
+            source: 'alert_action',
+            revive: action === 'convert_ongoing',
+            allowNotOngoing: action === 'extend',
+            maxNewInserts: riderExtendCount,
           });
           if (riderSync.skipped) throw skippedSync;
         });
@@ -25850,6 +25930,12 @@ module.exports.assignableRecurringTemplateTechnicianId = assignableRecurringTemp
 // due-date filtering can never drift from the auto-extend/top-up path
 // again.
 module.exports.insertSeriesOccurrenceLocked = insertSeriesOccurrenceLocked;
+module.exports.buildSeriesOccurrenceForDate = buildSeriesOccurrenceForDate;
+// P1 fix #7 (PR #5268 round 4): TOPUP_MAX_INSERTS_PER_SERIES_PER_RUN was
+// previously reachable only via router._test (test-only) — rider-series.js
+// needs it as a real production import (its own insert-per-sync cap), so it
+// is exported top-level here too. Same constant either way, never copied.
+module.exports.TOPUP_MAX_INSERTS_PER_SERIES_PER_RUN = TOPUP_MAX_INSERTS_PER_SERIES_PER_RUN;
 // Shared off-hour window normalization (see its own header) — rider-series.js
 // applies it unconditionally to every host window it joins.
 module.exports.normalizeTopUpWindow = normalizeTopUpWindow;

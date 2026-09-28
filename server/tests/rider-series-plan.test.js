@@ -208,4 +208,30 @@ describe('rider-series planRiderDates', () => {
     const floored = planRiderDates({ hostDates, lastRiderDate: anchor, horizonDate: horizon, earliestDate: '2026-10-09' });
     expect(floored).toEqual(base);
   });
+
+  // --- P1 fix #7 (PR #5268 round 4): runaway horizon bound ---------------
+  test('computeRiderHorizon bounds a host date sitting years out to the standalone horizon plus the sane maximum, never the raw host date (fail-without-fix evidence)', () => {
+    const anchor = '2026-10-01';
+    const tenYearsOut = addDays(anchor, 3653);
+    const horizon = computeRiderHorizon(anchor, [tenYearsOut], 'quarterly');
+    // fail-without-fix: the pre-fix formula returns hostLast verbatim
+    // whenever it exceeds the standalone horizon, however far out that is.
+    expect(horizon).not.toBe(tenYearsOut);
+    const standaloneHorizon = addDays(anchor, 3 * TARGET_GAP_DAYS);
+    expect(horizon).toBe(addDays(standaloneHorizon, 730));
+  });
+
+  test('computeRiderHorizon still takes a host date that is only modestly past the standalone horizon (unaffected by the cap)', () => {
+    const anchor = '2026-10-01';
+    const standaloneHorizon = addDays(anchor, 3 * TARGET_GAP_DAYS);
+    const modestlyLater = addDays(standaloneHorizon, 30);
+    const horizon = computeRiderHorizon(anchor, [modestlyLater], 'quarterly');
+    expect(horizon).toBe(modestlyLater);
+  });
+
+  test('computeRiderHorizon is unaffected by the cap for an ordinary near-today anchor with no host dates', () => {
+    const anchor = '2026-10-01';
+    const horizon = computeRiderHorizon(anchor, [], 'quarterly');
+    expect(horizon).toBe(addDays(anchor, 3 * TARGET_GAP_DAYS));
+  });
 });

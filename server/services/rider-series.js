@@ -98,6 +98,23 @@ function addDaysStr(dateStr, days) {
   return etDateString(addETDays(base, days));
 }
 
+// How far PAST the rider's own standalone horizon a host date is still
+// allowed to push the plan (P1 fix #7, PR #5268 round 4): ~2 years. A host
+// row seeded or hand-edited an arbitrary distance out (the fail-without-fix
+// scenario this bounds: one host row 10 years out) would otherwise blow the
+// rider's own insert horizon out to match it, and planRiderDates' own walk
+// (bounded at 1000 steps, but each step is real work: a clash probe, a
+// tech-eligibility resolve, an insert) would mint years of rows in one
+// sync. Deliberately relative to the rider's OWN standaloneHorizon, never
+// to a real wall-clock "today": a synthetic or deliberately-future-dated
+// anchor (this module's own test fixtures use one, and so can a genuine
+// long-lapsed rider revived after months away) must stay convergent
+// relative to ITS OWN horizon, which a wall-clock cap would clamp out from
+// under it. For an ordinary rider (anchor near today), standaloneHorizon is
+// itself near today, so this reads as "never beyond ~2 years from today" in
+// the common case the parenthetical in the finding names.
+const MAX_HORIZON_EXTRA_DAYS = 730;
+
 // Pure — the horizon rule (P1 fix #3): the LATER of the host's own last
 // live date and the rider's own standalone horizon (anchorDate +
 // plannedVisitCountForPattern(pattern) * TARGET_GAP_DAYS — the same visit
@@ -105,9 +122,11 @@ function addDaysStr(dateStr, days) {
 // rider's own fallback interval). Clamping to "the host's last date,
 // whenever it has any future row at all" (the pre-fix rule) lapses a rider
 // the instant its host is ending, however soon — the plan comes back empty
-// and every movable rider row gets cancelled as surplus. Exposed via
-// _internals so tests can derive the SAME horizon a real sync would,
-// rather than duplicating this formula.
+// and every movable rider row gets cancelled as surplus. Then bounded (P1
+// fix #7) to at most MAX_HORIZON_EXTRA_DAYS past the standalone horizon —
+// see that constant's own comment. Exposed via _internals so tests can
+// derive the SAME horizon a real sync would, rather than duplicating this
+// formula.
 function computeRiderHorizon(anchorDate, hostDates, pattern) {
   const { plannedVisitCountForPattern } = require('./recurring-appointment-seeder');
   const count = plannedVisitCountForPattern(pattern, {});
@@ -120,9 +139,14 @@ function computeRiderHorizon(anchorDate, hostDates, pattern) {
   const gaps = Math.max(0, count - 1);
   const standaloneHorizon = addDaysStr(anchorDate, gaps * TARGET_GAP_DAYS);
   const sorted = Array.from(new Set((hostDates || []).map(dateOnly).filter(Boolean))).sort();
-  if (!sorted.length) return standaloneHorizon;
-  const hostLast = sorted[sorted.length - 1];
-  return hostLast > standaloneHorizon ? hostLast : standaloneHorizon;
+  let horizon = standaloneHorizon;
+  if (sorted.length) {
+    const hostLast = sorted[sorted.length - 1];
+    if (hostLast > horizon) horizon = hostLast;
+  }
+  const maxHorizon = addDaysStr(standaloneHorizon, MAX_HORIZON_EXTRA_DAYS);
+  if (maxHorizon && horizon > maxHorizon) horizon = maxHorizon;
+  return horizon;
 }
 
 // Same weekend-shift arithmetic the seeder applies to every date it walks
@@ -337,7 +361,7 @@ function immovableByOwnFields(row) {
 // not a currently-ongoing series root (Fable review NEW B) or that rides a
 // host at a different address (Fable review NEW C). Returns either
 // { skip: reason } or { riderParent, hostParent, cols }.
-async function loadLockedRiderContext(trx, riderParentId, revive = false) {
+async function loadLockedRiderContext(trx, riderParentId, revive = false, allowNotOngoing = false) {
   const cols = await trx('scheduled_services').columnInfo();
   if (!cols.rides_parent_id) return { skip: 'no_column' };
 
@@ -383,7 +407,7 @@ async function loadLockedRiderContext(trx, riderParentId, revive = false) {
     return { skip: 'host_is_rider' };
   }
 
-  const livenessSkip = await riderLivenessSkipReason(trx, riderParent, hostParent, riderParentId, cols, revive);
+  const livenessSkip = await riderLivenessSkipReason(trx, riderParent, hostParent, riderParentId, cols, revive, allowNotOngoing);
   if (livenessSkip) return { skip: livenessSkip };
 
   return { riderParent, hostParent, cols };
@@ -415,11 +439,22 @@ async function loadLockedRiderContext(trx, riderParentId, revive = false) {
 // applies (not_series_root, not_recurring, not_ongoing, different_property)
 // — a genuinely non-root, non-recurring, still-not-ongoing, or cross-
 // property rider is refused exactly as before.
-async function riderLivenessSkipReason(trx, riderParent, hostParent, riderParentId, cols, revive = false) {
+//
+// `allowNotOngoing` (P1 fix #5, PR #5268 round 4): skips ONLY the
+// not_ongoing gate — runRecurringAlertAction's own `extend` action (never
+// `convert_ongoing`, which already flips the flag true before syncing, and
+// never any other caller) passes it for this one explicit office action, so
+// a FIXED (non-ongoing) rider can still be extended by a fixed count the
+// same way a fixed HOST series can, rather than always refusing with
+// not_ongoing the way an unattended sync correctly does. Every other gate —
+// not_series_root, not_recurring, plan_stopped, different_property — still
+// applies unchanged: a genuinely stopped or cross-property rider is refused
+// exactly as before.
+async function riderLivenessSkipReason(trx, riderParent, hostParent, riderParentId, cols, revive = false, allowNotOngoing = false) {
   if (riderParent.recurring_parent_id) return 'not_series_root';
   if (!riderParent.is_recurring || !riderParent.recurring_pattern) return 'not_recurring';
   const riderOngoing = cols.recurring_ongoing ? !!riderParent.recurring_ongoing : false;
-  if (!riderOngoing) return 'not_ongoing';
+  if (!riderOngoing && !allowNotOngoing) return 'not_ongoing';
   const latestDecision = await trx('recurring_plan_alerts')
     .where({ recurring_parent_id: riderParentId })
     .whereNotNull('resolved_at')
@@ -480,9 +515,26 @@ async function buildRiderSyncPlan(trx, cols, riderParent, hostParent, riderParen
   const hostParentId = hostParent.id;
   const todayStr = etDateString();
 
+  // Host dates come from the BASE recurring series only (P1 fix #3, PR
+  // #5268 round 4) — is_recurring = true, the SAME predicate
+  // latestLiveSeriesVisit (admin-schedule.js) applies to every other
+  // extension anchor in this codebase. Without it, a host BOOSTER row
+  // (is_recurring = false — a one-off extra visit riding the host's own
+  // recurring_parent_id, never part of its cadence) was picked up as a
+  // "host date" here: the rider would join a booster's one-off stop as if
+  // it were a real cadence step, and a host booster inside the 77-105 day
+  // window could pull the rider onto it instead of the host's own next
+  // cadence date. The whereNotIn(status, ...) below is null-safe (P2 fix
+  // #4): a bare `whereNotIn` on a nullable column drops every NULL-status
+  // row from the result (SQL's `col NOT IN (...)` evaluates to NULL, not
+  // true, when col is NULL), silently excluding a legacy base row with no
+  // stamped status from ever being read as a host date — the same
+  // null-status hazard MOVABLE_ROW_STATUSES' own comment documents for the
+  // RIDER side of this module, mirrored here for the host side.
   const hostRows = await trx('scheduled_services')
     .where((q) => { q.where('id', hostParentId).orWhere('recurring_parent_id', hostParentId); })
-    .whereNotIn('status', JOIN_INELIGIBLE_STATUSES)
+    .where('is_recurring', true)
+    .where((q) => { q.whereNull('status').orWhereNotIn('status', JOIN_INELIGIBLE_STATUSES); })
     .where('scheduled_date', '>=', todayStr)
     .orderBy('scheduled_date', 'asc')
     .select('id', 'scheduled_date', 'window_start', 'window_end', 'technician_id', 'estimated_duration_minutes');
@@ -628,12 +680,18 @@ async function buildRiderSyncPlan(trx, cols, riderParent, hostParent, riderParen
 // nulls the rider's own assignment rather than joining them to it), and
 // the SAME off-hour normalization the top-up applies (normalizeTopUpWindow)
 // — the rider path normalizes UNCONDITIONALLY, never behind an opt-in
-// flag, since it always joins an already-live host stop. The HOST row's
-// own estimated_duration_minutes drives the normalization (never the
-// rider's own, which can be a different service length) — this floors and
-// re-derives the HOST'S window, which the rider is only borrowing;
-// passing the rider's own duration would recompute a stop-end the host's
-// stop never had. Returns { unplaceable: true } (never writes) or
+// flag, since it always joins an already-live host stop. The (normalized)
+// host window's own START drives the join — the rider takes the host's
+// slot on the calendar — but the END is derived from the RIDER'S OWN
+// estimated_duration_minutes (the template's), never the host's (P1 fix
+// #8, PR #5268 round 4): a rider whose own service runs a different length
+// than its host (e.g. a 60-minute pest visit riding a 120-minute lawn stop)
+// must keep its OWN duration's end, not silently adopt the host's — the
+// host's own row is untouched either way; only the RIDER'S window is being
+// computed here. (Round 2/3 read the host's own duration for this, on the
+// reasoning that a floored HOST window should re-derive from the HOST's
+// own span — correct for the host's own row, but this function computes
+// the RIDER's window, never the host's.) Returns { unplaceable: true } (never writes) or
 // { technicianId, windowStart, windowEnd }. Resolved once per host date
 // BEFORE the diff (resolveHostJoins), so the kept-row refresh check compares
 // a rider row against the values a write would actually produce, never the
@@ -665,7 +723,9 @@ async function resolveHostJoinFields(trx, template, hostRow, date) {
     recurring_technician_override: false,
   };
   const technicianId = await assignableRecurringTemplateTechnicianId(trx, preferredTechParent, date);
-  const normalizedWindow = normalizeTopUpWindow(hostRow.window_start, hostRow.estimated_duration_minutes, hostRow.window_end);
+  // P1 fix #8: the RIDER's own duration drives the end, not the host's —
+  // see this function's own header comment.
+  const normalizedWindow = normalizeTopUpWindow(hostRow.window_start, template.estimated_duration_minutes, hostRow.window_end);
   if (normalizedWindow?.unplaceable) return { unplaceable: true };
   return {
     technicianId,
@@ -756,12 +816,15 @@ function diffRiderPlan(planCtx) {
 }
 
 // --- Stage 5: writes (only stage that writes; never called on dryRun) -----
-async function writeRiderPlan(trx, { cols, riderParent, riderParentId }, planCtx, diff) {
+async function writeRiderPlan(trx, {
+  cols, riderParent, riderParentId, allowNotOngoing = false,
+}, planCtx, diff) {
   const { hostByDate, hostJoinByDate, riderRows, blackoutDates } = planCtx;
   const { move, refresh, insertDates, cancelRows } = diff;
   const {
     seriesCandidateDateClashes, assignableRecurringTemplateTechnicianId,
     insertSeriesOccurrenceLocked, normalizeTopUpWindow,
+    buildSeriesOccurrenceForDate, insertRecurringChildAddons,
   } = require('../routes/admin-schedule');
 
   // Template for every insert (P1 fix #1): the series PARENT with
@@ -843,6 +906,25 @@ async function writeRiderPlan(trx, { cols, riderParent, riderParentId }, planCtx
         continue;
       }
     }
+    // P1 fix #1 (PR #5268 round 4): a MOVE changes WHICH date the row
+    // sits on — every date-dependent field must be recomputed for the NEW
+    // date, the SAME way a fresh insert for that date would
+    // (buildSeriesOccurrenceForDate, the builder insertSeriesOccurrenceLocked
+    // itself now shares — see its own header). Never tech/window/date,
+    // which the host-join/standalone branch above already resolved for
+    // THIS move. A build failure (e.g. a required add-on scope read error)
+    // skips this ONE pairing, same posture as an unplaceable window or a
+    // clash above — logged, retried next pass, never a half-written move.
+    let moveBuilt;
+    try {
+      moveBuilt = await buildSeriesOccurrenceForDate(trx, template, riderParentId, cols, {
+        date: to, blackoutDates, skipParent: planCtx.skipRiderEffective,
+      });
+    } catch (err) {
+      logger.warn(`[rider-series] parent=${riderParentId} move of row ${id} to ${to} could not recompute its financials — skipped this sync, retried next pass: ${err.message}`);
+      continue;
+    }
+    Object.assign(updates, moveBuilt.data);
     // Guarded write (P1 lock rows): this sync already locked every rider
     // row FOR UPDATE NOWAIT (buildRiderSyncPlan), so a row here cannot have
     // changed status/visit_id from a DIFFERENT transaction since without
@@ -858,6 +940,12 @@ async function writeRiderPlan(trx, { cols, riderParent, riderParentId }, planCtx
       logger.warn(`[rider-series] parent=${riderParentId} row ${id} changed underneath this sync (status/visit_id) — move to ${to} skipped, retried next pass`);
       continue;
     }
+    // Only once the guarded write above actually landed (never on a
+    // skipped/raced move): replace the row's due add-on set to match the
+    // NEW date — insertRecurringChildAddons only ever ADDS, so the row's
+    // stale set (from wherever it used to sit) is cleared first.
+    await trx('scheduled_service_addons').where({ scheduled_service_id: id }).del();
+    await insertRecurringChildAddons(trx, id, moveBuilt.dueAddons, moveBuilt.restackedAddonDollars);
     await maybeGroupRow(id, { database: trx, createdBy: 'dispatch' });
   }
 
@@ -905,9 +993,10 @@ async function writeRiderPlan(trx, { cols, riderParent, riderParentId }, planCtx
       // behind an opt-in flag the way the top-up's own
       // opts.normalizeOffHourStart is) — a rider joining a host's already-
       // live stop must never carry an off-hour window onto its own new row
-      // unfloored. The HOST row's own duration drives it (see
-      // resolveHostJoinFields's identical comment above).
-      const normalizedWindow = normalizeTopUpWindow(hostRow.window_start, hostRow.estimated_duration_minutes, hostRow.window_end);
+      // unfloored. The RIDER's own duration drives the end (P1 fix #8 — see
+      // resolveHostJoinFields's identical comment above); the START still
+      // comes from the host's own (normalized) window.
+      const normalizedWindow = normalizeTopUpWindow(hostRow.window_start, template.estimated_duration_minutes, hostRow.window_end);
       if (normalizedWindow?.unplaceable) {
         logger.warn(`[rider-series] parent=${riderParentId} host date ${d} has an unplaceable window after normalization — insert skipped this sync, retried next pass`);
         continue;
@@ -929,6 +1018,15 @@ async function writeRiderPlan(trx, { cols, riderParent, riderParentId }, planCtx
         continue;
       }
     }
+    // checkUnbillable (P1 fix #6, PR #5268 round 4): the SAME shared verdict
+    // every OFFICE series writer consults (seriesExtensionUnbillable) before
+    // adding a visit — the rider sync is an unattended writer exactly like
+    // the nightly top-up (no human reviews each date it lands on), so it
+    // belongs with that OFFICE-writer class rather than the completion
+    // path's own owner-ruling exemption (warn at completion, never block a
+    // tech closing out today's job). Refuses (never inserts) a candidate
+    // date whose real due add-ons make it $0 or non-invoiceable; a later
+    // sync re-diffs and retries.
     const inserted = await insertSeriesOccurrenceLocked(trx, template, riderParentId, cols, {
       date: d,
       windowStart,
@@ -938,6 +1036,17 @@ async function writeRiderPlan(trx, { cols, riderParent, riderParentId }, planCtx
       skipParent: planCtx.skipRiderEffective,
       skipParentStamp: skipRiderStamp,
       dirParent: dirRider,
+      checkUnbillable: true,
+      // See insertSeriesOccurrenceLocked's own opts.ignoreOngoingRace
+      // comment (P1 fix #5): only when THIS sync was explicitly authorized
+      // to run on a not-yet-ongoing rider (an office extend on a fixed
+      // plan) does its own post-insert "series stopped mid-write" re-check
+      // stand down — every ordinary (ongoing) rider sync keeps that race
+      // guard.
+      ignoreOngoingRace: allowNotOngoing,
+      onSkip: (reason) => {
+        logger.warn(`[rider-series] parent=${riderParentId} insert date ${d} skipped by insertSeriesOccurrenceLocked: ${reason}`);
+      },
     });
     if (inserted) {
       await maybeGroupRow(inserted.id, { database: trx, createdBy: 'dispatch' });
@@ -954,6 +1063,18 @@ async function writeRiderPlan(trx, { cols, riderParent, riderParentId }, planCtx
     const fresh = await trx('scheduled_services').where({ id }).first('status');
     if (!fresh || TERMINAL_ROW_STATUSES.includes(fresh.status)) continue;
     try {
+      // afterCommit (P1 fix #2, PR #5268 round 4): transitionJobStatus
+      // defaults to trx.executionPromise for its own broadcasts and terminal
+      // hooks (visit-group seam, follow-up re-park, invoice-void seam, tech
+      // cancel notice) — correct only when `trx` is a real transaction. Here
+      // `trx` is syncRiderSeries's own conn.transaction(run), which is a
+      // SAVEPOINT for every in-band caller (a rider/host hook already holds
+      // an outer transaction before calling in) — its executionPromise
+      // resolves at savepoint RELEASE, well before the caller's own outer
+      // commit. commitPromiseOf(trx) walks to the outermost transaction (or
+      // returns trx's own executionPromise when trx has no parent, i.e. this
+      // sync IS the top-level transaction) — same fix shape as this
+      // function's own cancellation follow-through below.
       await transitionJobStatus({
         jobId: id,
         fromStatus: fresh.status,
@@ -961,6 +1082,7 @@ async function writeRiderPlan(trx, { cols, riderParent, riderParentId }, planCtx
         transitionedBy: null,
         notes: 'rider_resync',
         trx,
+        afterCommit: commitPromiseOf(trx),
         notifyCustomer: 'caller_suppress',
         suppressTechNotice: true,
       });
@@ -992,10 +1114,21 @@ async function writeRiderPlan(trx, { cols, riderParent, riderParentId }, planCtx
  *
  * @param {object} conn - a knex connection or an open transaction.
  * @param {string} riderParentId
- * @param {{dryRun?: boolean, source?: string, revive?: boolean}} [opts]
+ * @param {{dryRun?: boolean, source?: string, revive?: boolean,
+ *   allowNotOngoing?: boolean, maxNewInserts?: number}} [opts]
  *   revive (P1 revival) - skips ONLY the plan_stopped liveness check (a
  *   convert_ongoing reviving a lapsed rider); every other gate still
  *   applies. See riderLivenessSkipReason's own comment.
+ *   allowNotOngoing (P1 fix #5) - skips ONLY the not_ongoing liveness check
+ *   (runRecurringAlertAction's own `extend` action on a fixed rider). See
+ *   riderLivenessSkipReason's own comment.
+ *   maxNewInserts (P1 fix #5) - caps this call's own NEW inserts at this
+ *   count (never below the module-wide TOPUP_MAX_INSERTS_PER_SERIES_PER_RUN
+ *   cap, P1 fix #7 below) — the office's own explicit `extend` count. Dates
+ *   still come from the plan; the earliest N (plan order) are kept, the
+ *   rest deferred to the next sync. Moves and cancels of EXISTING rows are
+ *   never capped by this — the office asked for N more visits, not for the
+ *   rest of the plan to stop reconciling.
  * @returns {Promise<{skipped?: string, keep: Array, move: Array,
  *   refresh: Array, insert: string[], cancel: Array, insertedRows?: Array,
  *   cancelledIds?: string[]}>} cancelledIds is the subset of `cancel`'s ids
@@ -1003,12 +1136,14 @@ async function writeRiderPlan(trx, { cols, riderParent, riderParentId }, planCtx
  *   guard-mismatched id) — what the post-commit cancellation follow-through
  *   ran against.
  */
-async function syncRiderSeries(conn, riderParentId, { dryRun = false, source = 'sync', revive = false } = {}) {
+async function syncRiderSeries(conn, riderParentId, {
+  dryRun = false, source = 'sync', revive = false, allowNotOngoing = false, maxNewInserts = null,
+} = {}) {
   const empty = () => ({
     keep: [], move: [], insert: [], cancel: [], refresh: [],
   });
   const run = async (trx) => {
-    const ctx = await loadLockedRiderContext(trx, riderParentId, revive);
+    const ctx = await loadLockedRiderContext(trx, riderParentId, revive, allowNotOngoing);
     if (ctx.skip) return { ...empty(), skipped: ctx.skip };
     const { riderParent, hostParent, cols } = ctx;
 
@@ -1021,12 +1156,31 @@ async function syncRiderSeries(conn, riderParentId, { dryRun = false, source = '
 
     planCtx.hostJoinByDate = await resolveHostJoins(trx, overlayRecurringTemplateOverrides(riderParent, cols), planCtx);
     const diff = diffRiderPlan(planCtx);
+    // Runaway-horizon insert cap (P1 fix #7, PR #5268 round 4): the SAME
+    // per-run cap the nightly top-up applies to its own insert loop
+    // (TOPUP_MAX_INSERTS_PER_SERIES_PER_RUN, admin-schedule.js — imported,
+    // never copied, so the two can't silently drift). A runaway pattern or
+    // a horizon misconfiguration (see computeRiderHorizon's own
+    // MAX_HORIZON_EXTRA_DAYS bound above) can still never mint an unbounded
+    // number of rows in one sync. maxNewInserts (opts, P1 fix #5) further
+    // tightens this — never loosens it — to the office's own explicit
+    // `extend` count. Only NEW inserts are capped: move/refresh/cancel of
+    // rows the plan already accounts for are untouched, and the dropped
+    // insert dates are simply retried by the next sync (in plan order, so
+    // the EARLIEST dates always land first).
+    const { TOPUP_MAX_INSERTS_PER_SERIES_PER_RUN } = require('../routes/admin-schedule');
+    const insertCap = Number.isFinite(maxNewInserts)
+      ? Math.min(TOPUP_MAX_INSERTS_PER_SERIES_PER_RUN, maxNewInserts)
+      : TOPUP_MAX_INSERTS_PER_SERIES_PER_RUN;
+    if (diff.insertDates.length > insertCap) diff.insertDates = diff.insertDates.slice(0, insertCap);
     const result = {
       keep: diff.keep, move: diff.move, insert: diff.insertDates, cancel: diff.cancelRows, refresh: diff.refresh,
     };
     if (dryRun) return result;
 
-    const { insertedRows, cancelledIds } = await writeRiderPlan(trx, { cols, riderParent, riderParentId }, planCtx, diff);
+    const { insertedRows, cancelledIds } = await writeRiderPlan(trx, {
+      cols, riderParent, riderParentId, allowNotOngoing,
+    }, planCtx, diff);
 
     logger.info(
       `[rider-series] synced parent=${riderParentId} rides=${hostParent.id} source=${source} `
