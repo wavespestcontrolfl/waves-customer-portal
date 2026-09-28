@@ -1023,6 +1023,22 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // Plaid bank feed → Bank Import staging (GATE_PLAID_SYNC + GATE_BANK_IMPORT,
+  // read at call time). Staging only — nothing reaches the P&L until an
+  // exact match or the operator links it. Items waiting on a re-login skip.
+  cron.schedule('33 * * * *', async () => {
+    if (!gateEnvValue('GATE_BANK_IMPORT') || !gateEnvValue('GATE_PLAID_SYNC')) return;
+    try {
+      await runExclusive('plaid-bank-sync', async () => {
+        const out = await require('./plaid-sync').syncAllItems();
+        const failed = (out.results || []).filter(r => r.error);
+        if (failed.length) logger.warn(`[plaid-sync] hourly sync: ${failed.length}/${out.items} connection(s) failed`);
+      });
+    } catch (err) {
+      logger.error(`[plaid-sync] hourly sync failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   cron.schedule('40 2 * * *', async () => {
     if (!isEnabled('hybridKnowledge')) return;
     try {
@@ -3370,6 +3386,51 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY 15 MIN — Same-trip first-application billing-alert sweep. A
+  // reserved-accept slot that sells 2+ recurring programs mints ONE
+  // combined first-application invoice, linked to the reserved (priced)
+  // visit; the same-trip sibling is left unpriced on purpose (covered by
+  // that invoice while both share a date). If a later reschedule pulls the
+  // sibling onto a different day, the invoice still charges for both. This
+  // sweep re-derives every OPEN (non-settled) first-application invoice's
+  // estimate group fresh and opens/refreshes or clears ONE durable admin
+  // billing alert per estimate, telling the office to split it by hand —
+  // it never touches the invoice or any visit row, and never holds
+  // collection (owner ruling, 2026-09-27 redesign of #5021 — see
+  // first-application-sibling-split.js; supersedes the per-writer
+  // in-transaction alert that design used through round 9). No dedicated
+  // gate: same always-on shape as tech-late-detector/unassigned-overdue-
+  // detector above (an internal, idempotent, dedupe-keyed alert, no
+  // customer-facing side effect). runExclusive lives INSIDE
+  // runFirstApplicationSiblingSplitSweep itself, and this tick runs as a
+  // SCHEDULED tick (registered through utils/scheduled-cron, not node-cron
+  // directly), so runExclusive always takes runScheduled's waitForSlot
+  // path here — never the fire-and-forget request path. On a genuine
+  // 'no_connection' skip, runScheduled's own "no lock slot within
+  // SLOT_WAIT_MAX_MS" branch has ALREADY called recordMissedTick before
+  // returning (cron-lock.js) — a second recordJobStart/recordJobEnd pair
+  // here recorded the SAME missed tick twice (Codex P2: the adjacent
+  // followup-sla-watcher.js and call-commitments-watchdog.js cron entries
+  // carry this identical extra write and are not a correct model to copy;
+  // left as-is here since fixing shared cron-lock plumbing or those other
+  // jobs' entries is outside this module). This tick only throws, so the
+  // skip is still logged and the tick still counts as failed to whatever
+  // is watching this promise — job_health itself is left to the
+  // cron-lock wrapper alone.
+  // =========================================================================
+  cron.schedule('*/15 * * * *', async () => {
+    try {
+      const { runFirstApplicationSiblingSplitSweep } = require('./first-application-sibling-split');
+      const result = await runFirstApplicationSiblingSplitSweep();
+      if (result?.skipped && result.reason !== 'lease_held') {
+        throw new Error(`First-application sibling-split sweep tick skipped: ${result.reason || 'no_connection'}`);
+      }
+    } catch (err) {
+      logger.error(`[first-application-sibling-split] sweep tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY 2 MIN — Cloudflare Pages build status for open blog-publish PRs.
   // Updates astro_preview_url once the preview deploy succeeds, or flips
   // the post to build_failed if it blows up. runExclusive: this tick
@@ -4102,8 +4163,93 @@ function initScheduledJobs() {
                 }
               }
             }
-            if (anchorStale || amountsStale) {
-              const blockedReason = anchorStale ? 'stale_agent_decision' : 'stale_amount_agent_decision';
+            // OPEN TIMES revalidation (Codex P2): the same "can't see it
+            // from an inbound-anchored check" gap as the amount check above
+            // — a scheduled send can sit hours past drafting, and the
+            // calendar it quoted is never re-read before firing. Only when
+            // the anchor and amount checks already passed, and only for
+            // pairs the OUTGOING body still carries (planOpenTimesRecheck:
+            // a human-edited reply that dropped every quoted window needs
+            // no recheck; an unverifiable edit refuses).
+            // Fail closed on a gone slot, a fetch error, or a timeout — same
+            // block+retire path as the checks above, no new mechanism.
+            let openTimesStale = false;
+            let openTimesReason = null;
+            if (!anchorStale && !amountsStale) {
+              try {
+                const decisionRow = await db('agent_decisions')
+                  .where({ id: claimMeta.agent_decision_id })
+                  .first('input_snapshot', 'suggested_message');
+                let snapshot = decisionRow?.input_snapshot;
+                if (typeof snapshot === 'string') {
+                  try { snapshot = JSON.parse(snapshot); } catch { snapshot = null; }
+                }
+                const openTimesSnapshot = snapshot?.open_times_snapshot;
+                if (openTimesSnapshot?.quotedWindows?.length) {
+                  // Same planner as the queue-time seam (Codex r2): a
+                  // reviewer-edited body is matched to its snapshot pair by
+                  // pair against the drafted text, so a dropped day that
+                  // shares its window with a kept day is not rechecked, and
+                  // an unverifiable edit refuses here too.
+                  const { openTimesStillOffered, planOpenTimesRecheck } = require('./sms-shadow-drafter');
+                  const plan = planOpenTimesRecheck({
+                    snapshot: openTimesSnapshot,
+                    outgoingBody: msg.message_body,
+                    originalBody: decisionRow?.suggested_message ?? null,
+                  });
+                  if (plan.action === 'refuse') {
+                    openTimesStale = true;
+                    openTimesReason = plan.reason;
+                  } else if (plan.action === 'recheck') {
+                    const recheck = await openTimesStillOffered({
+                      city: openTimesSnapshot.lookup?.city || null,
+                      customerId: openTimesSnapshot.lookup?.customerId || null,
+                      estimateId: openTimesSnapshot.lookup?.estimateId || null,
+                      ...(openTimesSnapshot.lookup?.serviceType ? { serviceType: openTimesSnapshot.lookup.serviceType } : {}),
+                      quotedWindows: plan.quotedWindows,
+                    });
+                    if (!recheck.ok) {
+                      openTimesStale = true;
+                      openTimesReason = recheck.reason;
+                    }
+                  }
+                }
+              } catch (err) {
+                logger.warn(`[scheduler] open-times revalidation failed for scheduled sms ${msg.id}: ${err.message}; blocking send`);
+                openTimesStale = true;
+                openTimesReason = 'open_times_recheck_failed';
+              }
+            }
+            // Follow-up SLA phrase revalidation (Codex r3 P2): the relative
+            // wording ("within the hour" / "by 9 AM this morning"/"tomorrow
+            // morning") is frozen at draft time, but this scheduled reply can
+            // fire hours later, past the 8am/8pm ET boundary the phrase was
+            // computed against — the exact "quoted a window that's gone"
+            // staleness the open-times check above covers, for the SLA
+            // phrase. Same fail-closed block+retire path, no new mechanism.
+            let slaStale = false;
+            if (!anchorStale && !amountsStale && !openTimesStale) {
+              try {
+                // Scoped to drafts that recorded an escalation (Codex r5):
+                // wording alone never blocks a scheduled reply.
+                const { followupPromiseIsStale } = require('./sms-followup-sla');
+                const slaDecision = await db('agent_decisions')
+                  .where({ id: claimMeta.agent_decision_id })
+                  .first('input_snapshot', 'prompt_version');
+                if (followupPromiseIsStale({ inputSnapshot: slaDecision?.input_snapshot, promptVersion: slaDecision?.prompt_version, body: msg.message_body })) slaStale = true;
+              } catch (err) {
+                logger.warn(`[scheduler] SLA phrase revalidation failed for scheduled sms ${msg.id}: ${err.message}; blocking send`);
+                slaStale = true;
+              }
+            }
+            if (anchorStale || amountsStale || openTimesStale || slaStale) {
+              const blockedReason = anchorStale
+                ? 'stale_agent_decision'
+                : amountsStale
+                  ? 'stale_amount_agent_decision'
+                  : openTimesStale
+                    ? 'stale_open_times_agent_decision'
+                    : 'stale_sla_agent_decision';
               const threadKey = String(msg.to_phone || '').replace(/\D/g, '').slice(-10) || msg.customer_id || msg.id;
               // Everything under the lock, metadata read THROUGH the trx
               // AFTER acquiring it — the cancel route can transfer parked
@@ -4129,7 +4275,11 @@ function initScheduledJobs() {
                   fromStatus: 'scheduled',
                   note: anchorStale
                     ? 'A newer customer message arrived before this scheduled reply fired — review the thread.'
-                    : 'This scheduled reply quoted a price — house rule: no prices in SMS. Review the thread.',
+                    : amountsStale
+                      ? 'This scheduled reply quoted a price — house rule: no prices in SMS. Review the thread.'
+                      : openTimesStale
+                        ? `This scheduled reply quoted an appointment time that is no longer open (${openTimesReason}) — review the thread.`
+                        : 'This scheduled reply’s follow-up timing no longer matches the current window — review the thread.',
                   dbi: trx,
                   strict: true,
                 });

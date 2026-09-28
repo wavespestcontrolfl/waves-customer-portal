@@ -431,6 +431,30 @@ test('qualified live gratitude preserves mode/graduation checks and reaches only
   }));
 });
 
+// Pre-push audit P1 (GATE_SMS_REAL_ANSWERS): reloadGratitudeCaller and
+// claimGratitudeSend used to hard-code expectedPromptVersion to the static
+// PROMPT_VERSION constant, which stays 'house_voice_v11' forever once the
+// real-answers gate goes live — a gratitude draft stamped
+// 'house_voice_v12_real_answers' would fail 'prompt_version_mismatch'
+// forever, even with the gate on. Both sites now judge the STORED row's own
+// version (threaded through from the caller, who set it once at draft
+// insert time and never mutates it), so either recognized version succeeds
+// when it genuinely matches the row — and a genuine mismatch still fails
+// closed.
+test('a gratitude draft stamped under the real-answers prompt (v12) sends — the version check judges the ROW, not a hardcoded v11', async () => {
+  mockState.draft.prompt_version = 'house_voice_v12_real_answers';
+  await expect(attempt({ promptVersion: 'house_voice_v12_real_answers' })).resolves.toMatchObject({
+    sent: true, providerMessageId: expect.stringMatching(/^SM/),
+  });
+});
+
+test('a caller whose promptVersion disagrees with the stored row still fails closed (prompt_version_mismatch), never sends', async () => {
+  mockState.draft.prompt_version = 'house_voice_v12_real_answers';
+  // The caller believes this draft was drafted under v11 — genuinely wrong
+  // versus the stored row — so it must still be refused, not waved through.
+  await expect(attempt({ promptVersion: 'house_voice_v11' })).resolves.toMatchObject({ sent: false });
+});
+
 test('candidate sweep drains the oldest inbound before more than 25 newer rejected drafts', async () => {
   const now = new Date();
   const oldestInboundAt = new Date(now.getTime() - 9 * 60 * 1000);

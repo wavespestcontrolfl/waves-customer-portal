@@ -14,7 +14,9 @@ const {
   isPreSlabTreatmentItem,
   preSlabExtendedWarrantySelected,
   preSlabSelectedWarrantyPart,
+  preSlabWarrantyDecision,
   rawOneTimeWarrantyEvidenceItems,
+  reconcilePricedPreSlabWarrantyEvidence,
   reconcileTrenchingWarrantyEvidence,
   reconcilePricedTrenchingWarrantyEvidence,
   trenchingServiceIdentity,
@@ -436,7 +438,9 @@ function mergeServiceRows(primaryRows = [], fallbackRows = [], options = {}) {
         // A pre-slab row's warranty selection is authoritative either way:
         // false must survive the merge, or the row falls back to stale
         // detail text that still names the removed extended warranty.
-        if (key === 'warrantyExtendedSelected') return typeof value === 'boolean';
+        if (key === 'warrantyExtendedSelected') return typeof value === 'boolean' || value === null;
+        // Its status travels with it: null clears a sibling's lent text.
+        if (key === 'warrantyStatus') return value === null || Boolean(cleanText(value));
         if (typeof value === 'number') return Number.isFinite(value) && value > 0;
         return cleanText(value);
       })),
@@ -457,7 +461,10 @@ function mergeServiceRows(primaryRows = [], fallbackRows = [], options = {}) {
 // default and the extended 5-year tier as a paid add-on. Owner ruling
 // 2026-09-27: a selected pre-slab warranty is stated, never "no guarantee".
 function preSlabWarrantyTerms(item) {
-  return preSlabExtendedWarrantySelected(item)
+  return preSlabWarrantyTermsForDecision(preSlabWarrantyDecision(item));
+}
+function preSlabWarrantyTermsForDecision(decision) {
+  return decision === 'extended'
     ? ['Extended 5-year warranty selected. Warranty terms depend on the selected warranty option.']
     : ['Warranty terms depend on the selected warranty option. No extended warranty selected.'];
 }
@@ -507,12 +514,25 @@ function mergeOneTimeServiceRows(primaryRows = [], fallbackRows = []) {
 // preSlabSelectedWarrantyPart reads the selection, never stale detail text
 // that still names the removed extended warranty (pre-push audit P1 on
 // 5c8876e256). Other rows carry nothing extra.
-function preSlabProjectionFields(item = {}) {
+// `evidence` is the row whose warranty decision governs (the priced row
+// itself, or the saved row reconcilePricedPreSlabWarrantyEvidence matched
+// it to when the priced row carries no decision), so the stated terms and
+// the kept detail part agree.
+function preSlabProjectionFields(item = {}, evidence = item) {
   if (!isPreSlabTreatmentItem(item)) return {};
+  const decided = evidence && typeof evidence === 'object' ? evidence : item;
+  // One decision (preSlabWarrantyDecision) drives the terms, the stamped
+  // boolean and the status, so they can never disagree. The boolean is
+  // stamped whenever the evidence row decided, even by detail text only
+  // (pre-push audit P1 on ca460e0f0c). An UNDECIDED row is stamped null
+  // rather than left blank: mergeServiceRows lets null through for these
+  // two keys, so a priced row the reconciler could not decide never
+  // inherits a saved sibling's selection through the label merge.
+  const decision = preSlabWarrantyDecision(decided);
   return {
-    warrantyTerms: preSlabWarrantyTerms(item),
-    ...(typeof item.warrantyExtendedSelected === 'boolean' ? { warrantyExtendedSelected: item.warrantyExtendedSelected } : {}),
-    ...(cleanText(item.warrantyStatus) ? { warrantyStatus: cleanText(item.warrantyStatus) } : {}),
+    warrantyTerms: preSlabWarrantyTermsForDecision(decision),
+    warrantyExtendedSelected: decision === 'unset' ? null : decision === 'extended',
+    warrantyStatus: decision === 'unset' ? null : (cleanText(decided.warrantyStatus) || null),
   };
 }
 
@@ -530,6 +550,7 @@ function oneTimeRowsFromPricing(pricingBundle = {}, evidenceGroups = []) {
         Number.isFinite(amount) && amount > 0 ? fmtMoney(amount) : null,
       ].filter(Boolean);
       const evidence = reconcilePricedTrenchingWarrantyEvidence(item, evidenceGroups, pricingBundle, items);
+      const preSlabEvidence = reconcilePricedPreSlabWarrantyEvidence(item, evidenceGroups, pricingBundle, items);
       return {
         service: cleanText(item.service || item.serviceKey || item.service_key || item.key) || null,
         label: cleanText(item.label || item.name || item.service || 'One-time service'),
@@ -538,7 +559,7 @@ function oneTimeRowsFromPricing(pricingBundle = {}, evidenceGroups = []) {
         ...(trenchingServiceIdentity(item) === 'termite_trenching'
           ? { purchasedTerms: purchasedTermsForRow(evidence) }
           : {}),
-        ...preSlabProjectionFields(item),
+        ...preSlabProjectionFields(item, preSlabEvidence),
         ...(item.isCommercial === true ? { isCommercial: true } : {}),
         oneTime: true,
       };
@@ -596,12 +617,33 @@ function oneTimeEvidenceGroupsFromEstimateData(estData = {}) {
   return roots.map(rawOneTimeWarrantyEvidenceItems);
 }
 
-function oneTimeRowsFromEstimateData(estData = {}) {
+// The saved roots, current first: result, then an older engineResult, else
+// the raw save.
+function oneTimeRootsFromEstimateData(estData = {}) {
   const roots = [...new Set([estData.result, estData.engineResult]
     .filter((value) => value && typeof value === 'object'))];
   if (!roots.length) roots.push(estData);
+  return roots;
+}
+
+// The one-time rows on the CURRENT saved root only (no fallback rows).
+function currentOneTimeRowsFromEstimateData(estData = {}) {
+  return oneTimeRowsFromResult(oneTimeRootsFromEstimateData(estData)[0]);
+}
+
+const oneTimeRowScopeKey = (row = {}) => `${cleanText(row.service).toLowerCase()}|${cleanText(row.label).toLowerCase()}`;
+
+function oneTimeRowsFromEstimateData(estData = {}) {
+  const roots = oneTimeRootsFromEstimateData(estData);
   const evidenceGroups = oneTimeEvidenceGroupsFromEstimateData(estData);
-  const currentRows = oneTimeRowsFromResult(roots[0]);
+  const projectedCurrent = oneTimeRowsFromResult(roots[0]);
+  // A current pre-slab row takes its decision through the same reconciler
+  // the priced rows use (current rows, then itself, then older rows), BEFORE
+  // the merge with older rows, so the merge lends nothing the reconciler did
+  // not grant (tree-reviewer on #5195).
+  const currentRows = projectedCurrent.map((row) => (isPreSlabTreatmentItem(row)
+    ? { ...row, ...preSlabProjectionFields(row, reconcilePricedPreSlabWarrantyEvidence(row, evidenceGroups, {}, projectedCurrent)) }
+    : row));
   const fallbackRows = roots.slice(1).flatMap(oneTimeRowsFromResult);
   const mergedRows = mergeOneTimeServiceRows(currentRows, fallbackRows);
   return mergedRows.map((row) => {
@@ -857,9 +899,16 @@ function buildEstimateAssistantContext({
     { allowFallbackOnly: pricingRecurringRows.length === 0 },
   );
   const oneTimeEvidenceGroups = oneTimeEvidenceGroupsFromEstimateData(parsedData);
+  const pricedOneTimeRows = oneTimeRowsFromPricing(pricingBundle, oneTimeEvidenceGroups);
   const oneTimeServices = mergeOneTimeServiceRows(
-    oneTimeRowsFromPricing(pricingBundle, oneTimeEvidenceGroups),
+    pricedOneTimeRows,
     oneTimeRowsFromEstimateData(parsedData),
+  );
+  // Rows still in the current scope: priced now, or on the current saved
+  // result. oneTimeRowsFromEstimateData also keeps rows only an older
+  // engineResult retains; those were removed and must never be advertised.
+  const currentOneTimeKeys = new Set(
+    [...pricedOneTimeRows, ...currentOneTimeRowsFromEstimateData(parsedData)].map(oneTimeRowScopeKey),
   );
   const oneTimeTotal = Number(pricingBundle.anchorOneTimePrice || estimate.onetime_total || estimate.onetimeTotal);
   const hasOneTimeValue = (Number.isFinite(oneTimeTotal) && oneTimeTotal > 0) || oneTimeServices.length > 0;
@@ -899,10 +948,13 @@ function buildEstimateAssistantContext({
   // Expose separately-billed add-ons with their own Ask Waves chip or proven
   // purchased terms even when this recurring estimate offers no one-time plan.
   // The plan selector must not hide the purchased scope of a billed add-on.
-  const hasAssistantVisibleOneTimeAddOn = oneTimeServices.some(
-    (row) => isGermanRoachCleanoutContextRow(row) || isBoraCareContextRow(row)
-      || row.purchasedTerms?.length > 0,
-  );
+  const isAssistantVisibleOneTimeAddOn = (row) => isGermanRoachCleanoutContextRow(row) || isBoraCareContextRow(row)
+    || row.purchasedTerms?.length > 0
+    // A pre-slab add-on's warranty terms expose it only while it is still
+    // in the current scope (Codex #5195 r1: a fallback-only row from an
+    // older engineResult is a removed treatment).
+    || (row.warrantyTerms?.length > 0 && currentOneTimeKeys.has(oneTimeRowScopeKey(row)));
+  const hasAssistantVisibleOneTimeAddOn = oneTimeServices.some(isAssistantVisibleOneTimeAddOn);
   const exposeOneTimeContext = !quoteRequired
     && (oneTimeAvailable || hasAssistantVisibleOneTimeAddOn)
     && (hasOneTimeValue || oneTimeServices.length > 0);
@@ -931,15 +983,22 @@ function buildEstimateAssistantContext({
       : (guarantees.recurringTermsEligible || rowCarriesOwnPlanTerms(row, { commercialScope }) ? 'all' : 'satisfaction');
     const detail = rowScope === 'all' ? row.detail
       : withoutClaimsOutsideScope(cleanText(row.detail), rowScope, preSlabSelectedWarrantyPart(row));
+    // Null warranty keys carried for the merge are not served.
+    const { warrantyExtendedSelected: _flag, warrantyStatus: _status, ...served } = row;
+    const projectedRow = {
+      ...served,
+      ...(typeof row.warrantyExtendedSelected === 'boolean' ? { warrantyExtendedSelected: row.warrantyExtendedSelected } : {}),
+      ...(cleanText(row.warrantyStatus) ? { warrantyStatus: cleanText(row.warrantyStatus) } : {}),
+    };
     const safeRow = quoteRequired
       ? {
-          ...row,
+          ...projectedRow,
           monthly: null,
           perApplication: null,
           amount: null,
           detail: cleanText(detail).replace(/\$[\d,]+(?:\.\d{1,2})?/g, 'price pending inspection'),
         }
-      : { ...row, detail };
+      : { ...projectedRow, detail };
     return {
       ...safeRow,
       summary: serviceLine(safeRow),
@@ -947,7 +1006,15 @@ function buildEstimateAssistantContext({
   };
   const servicesContext = services.map(rowWithSummary);
   const recurringServicesContext = recurringServices.map(rowWithSummary);
-  const oneTimeItemsContext = exposeOneTimeContext ? oneTimeServices.map(rowWithSummary) : null;
+  // When one-time work is not offered and an add-on alone exposes this
+  // context, only the add-ons are exposed: the merged list also retains
+  // rows only an older engineResult still carries (a removed termite-foam
+  // treatment), and those must not ride along (pre-push audit P1 on
+  // 5e030feff6).
+  const exposedOneTimeServices = oneTimeAvailable
+    ? oneTimeServices
+    : oneTimeServices.filter(isAssistantVisibleOneTimeAddOn);
+  const oneTimeItemsContext = exposeOneTimeContext ? exposedOneTimeServices.map(rowWithSummary) : null;
 
   return {
     company: COMPANY,
