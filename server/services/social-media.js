@@ -2843,6 +2843,9 @@ module.exports.SOCIAL_FLAGS = SOCIAL_FLAGS;
 // `module.exports = SocialMediaService` reassignment on the line above, which
 // discards any property set earlier in the file.
 module.exports.stripFixedReentryTiming = stripFixedReentryTiming;
+// The approved idiom that replaces a stripped fixed-timing clause on customer
+// reports (server side; ServiceReportDocument.jsx mirrors it client-side).
+module.exports.REENTRY_SAFE_COPY = 'Ready once dry — your technician confirms timing.';
 // Compliance-language check ONLY (no pricing/phone/platform-length rules) —
 // for short customer-facing operator copy such as dispatch Quick Move
 // notes. Same regexes, clause logic, and regression matrix as

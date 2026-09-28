@@ -65,6 +65,7 @@ async function technicianFirstName(technicianId) {
 }
 const { publicPortalUrl } = require("../utils/portal-url");
 const OUTREACH = require("./review-outreach-templates");
+const { resolveReviewTopicForEnrollment, isRecurringAskPlan } = require("./review-ask-topic");
 const ASK_TOUCH_SQL = OUTREACH.ASK_TOUCH_SQL;
 const ASK_HISTORY = require("./review-ask-history");
 const { ASK_SPACING_MS, deliveredAskRows, lastDeliveredAskAt } = ASK_HISTORY;
@@ -1785,6 +1786,18 @@ const ReviewService = {
         plan: resolved.plan,
         seriesFinal: resolved.seriesFinal === true,
         customerRequested: customerRequested || null,
+        // GATE_REVIEW_DAY0_CONTEXT (dark): run by startReviewSequence only once
+        // this enrollment has won its insert. Null off-gate, off the recurring
+        // plan, or on any lookup/model failure — never blocks or changes this
+        // enrollment (review-ask-topic.js). The visit's own start anchors the
+        // evidence window; completedAt is the fallback.
+        resolveAskContext: () => resolveReviewTopicForEnrollment({
+          customerId,
+          serviceRecordId,
+          scheduledServiceId,
+          completedAt: completedAt ? new Date(completedAt) : null,
+          plan: resolved.plan,
+        }),
         decision: sequenceDecision({
           reason: customerRequested ? "customer_requested" : explicitTiming ? "operator_timing" : "smart_window",
           plannedAt: firstTouchAt,
@@ -2112,7 +2125,7 @@ const ReviewService = {
     const outreachTechFirst = firstNameFrom(request.tech_name) || null;
     const outreachVars = {
       tech: outreachTechFirst || TECH_FALLBACK_SMS,
-      sender: outreachTechFirst ? `${outreachTechFirst} with Waves` : "Waves Pest Control",
+      sender: outreachTechFirst ? `${outreachTechFirst} with Waves` : OUTREACH.SENDER_FALLBACK,
     };
 
     // Body source priority so a deferred/retried send keeps the operator's
@@ -4800,7 +4813,7 @@ const ReviewService = {
       tech: techFirst || TECH_FALLBACK_SMS,
       // {sender} (day0_ask): the technician on the record, else the company —
       // the "Your tech" SMS fallback must not become "Your tech with Waves".
-      sender: techFirst ? `${techFirst} with Waves` : "Waves Pest Control",
+      sender: techFirst ? `${techFirst} with Waves` : OUTREACH.SENDER_FALLBACK,
       service_type: serviceType || "service",
       review_url: reviewUrl,
     };
@@ -5814,7 +5827,7 @@ const ReviewService = {
 
 
   async startReviewSequence(options, captureRetries = 1) {
-    const { customerId, plan, startedBy, locationId, serviceType, techName, serviceRecordId, scheduledServiceId = null, firstTouchAt = null, seriesFinal = false, customerRequested = null, decision = null } = options;
+    const { customerId, plan, startedBy, locationId, serviceType, techName, serviceRecordId, scheduledServiceId = null, firstTouchAt = null, seriesFinal = false, customerRequested = null, resolveAskContext = null, decision = null } = options;
     const retryEnrollment = () => {
       // Re-run caps and visit dedupe too: the settled winner may have sent.
       // Persistent contention must fail visibly, never claim a lost capture.
@@ -6114,6 +6127,30 @@ const ReviewService = {
       }
     }
 
+    // GATE_REVIEW_DAY0_CONTEXT: classify only once this enrollment has won its
+    // insert — the one-active unique index is the serialization point, so a
+    // refused or racing duplicate trigger (completion + paid webhook) never
+    // sends evidence to a model. Detached: a best-effort topic never holds
+    // the completion request or the paid webhook for a model call. The topic
+    // lands on its own column (the step runner rewrites `decision` on every
+    // deferral) while nothing has been sent and the plan is still the one it
+    // was classified for (a first-send re-resolve may have swapped it); a
+    // Day-0 that goes out first just uses the fixed text. updated_at is the
+    // runner's claim stamp and is left alone.
+    if (typeof resolveAskContext === "function") {
+      const sequenceId = sequence.id;
+      const planJson = JSON.stringify(usePlan);
+      setImmediate(() => {
+        void Promise.resolve()
+          .then(resolveAskContext)
+          .then((askContext) => askContext && db("review_sequences")
+            .where({ id: sequenceId, status: "active", touches_sent: 0 })
+            .whereRaw("plan = ?::jsonb", [planJson])
+            .update({ ask_context: JSON.stringify(askContext) }))
+          .catch((err) => logger.warn(`[review] Day-0 topic not stored (sequenceId=${sequenceId}): ${err.message}`));
+      });
+    }
+
     // Scheduled start: the cron fires step 0 at firstTouchAt; nothing to run
     // inline. (The stop conditions re-run inside _runSequenceStep at send
     // time, so a customer who reviews/opts out in the gap is still skipped.)
@@ -6216,13 +6253,20 @@ const ReviewService = {
           return { ran: false, stopped: true, reason: re.skip };
         }
         if (re.plan && JSON.stringify(re.plan) !== JSON.stringify(plan)) {
+          // GATE_REVIEW_DAY0_CONTEXT: a Day-0 topic is recurring-only, so it
+          // leaves with the recurring plan in the same write — whatever this
+          // step's earlier read saw, since the detached classifier may have
+          // stored one since.
+          const clearAskContext = !isRecurringAskPlan(re.plan);
           await db("review_sequences").where({ id: seq.id, status: "active" }).update({
             plan: JSON.stringify(re.plan),
             series_final: re.seriesFinal === true,
+            ...(clearAskContext ? { ask_context: null } : {}),
             updated_at: new Date(),
           });
           plan = re.plan;
           seq.series_final = re.seriesFinal === true;
+          if (clearAskContext) seq.ask_context = null;
         }
       } catch {
         // Same posture as re.error (codex r19): a blip mid-swap must defer,

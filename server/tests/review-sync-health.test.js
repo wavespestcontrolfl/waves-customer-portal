@@ -9,7 +9,12 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 const mockNotifyAdmin = jest.fn(async () => ({}));
-jest.mock('../services/notification-service', () => ({ notifyAdmin: (...a) => mockNotifyAdmin(...a) }));
+jest.mock('../services/notification-service', () => ({
+  notifyAdmin: (...a) => mockNotifyAdmin(...a),
+  // Pass-through: the digest rewrite's normalization (emoji strip + the
+  // ops_digest brevity cut) is pinned in notification-admin-brevity-and-activity.
+  normalizeAdminText: ({ title, body, detail }) => ({ title, body, detail }),
+}));
 const mockEmailSend = jest.fn(async () => ({ ok: true }));
 jest.mock('../services/email', () => ({ send: (...a) => mockEmailSend(...a) }));
 let mockNotificationLockHeld = false;
@@ -154,6 +159,7 @@ describe('_assessReviewSyncHealth (escalation)', () => {
         orWhereNot: jest.fn(function () { return this; }),
         whereNull: jest.fn(function () { return this; }),
         orWhereNull: jest.fn(function () { return this; }),
+        orWhereRaw: jest.fn(function () { return this; }),
         whereIn: jest.fn(function () { return this; }),
         orderBy: jest.fn(function () { return this; }),
         limit: jest.fn(function () { return this; }),
@@ -325,9 +331,18 @@ describe('_assessReviewSyncHealth (escalation)', () => {
     expect(updates).toHaveLength(3);
     expect(JSON.parse(updates[1].metadata.bindings[0]).observedAt).toBe(t3);
     expect(updates[2]).toMatchObject({ read_at: null });
-    expect(updates[2].title).toMatch(/Google review sync/);
-    expect(typeof updates[2].body).toBe('string');
-    expect(JSON.parse(updates[2].metadata.bindings[0]).observedAt).toBe(t3);
+    // Same row shape deliverOpsDigest writes (codex r2 P1 on #5236): short
+    // title with no ACT:/FIX: prefix, the full report in `detail`, and the
+    // kind/audience/feed stamps refreshed with it.
+    expect(updates[2].title).not.toMatch(/^(ACT|FIX):/);
+    expect(updates[2].title.length).toBeLessThanOrEqual(60);
+    expect(updates[2].detail).toMatch(/Hourly Google review sync/);
+    const rewriteMeta = JSON.parse(updates[2].metadata.bindings[0]);
+    expect(rewriteMeta.observedAt).toBe(t3);
+    expect(rewriteMeta.subject).toMatch(/^(ACT|FIX): Google review sync/);
+    expect(['ACT', 'FIX']).toContain(rewriteMeta.kind);
+    expect(rewriteMeta.feed).toBe(rewriteMeta.kind === 'FIX' ? 'activity' : null);
+    expect(rewriteMeta.audience).toBe(rewriteMeta.kind === 'FIX' ? 'engineering' : 'owner');
     expect(await gbp._assessReviewSyncHealth({ venice: 'gbp' }, {}, {}, t2)).toEqual({ stale: true });
     expect(marker.metadata.observedAt).toBe(t3);
     expect(mockNotifyAdmin).not.toHaveBeenCalled();

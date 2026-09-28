@@ -2696,3 +2696,29 @@ rider row that lands on a host date gets grouped (and, per round 2's
 visit_id rule, immovable) on the very first sync — expected, not a bug,
 but real-catalog PG tests that need a SECOND round of diffing must clear
 `property_id` first or they will find nothing left movable.
+
+## 2026-09-28 — Visit facts contract (2026-09-28)
+
+Owner rulings (2026-09-28), Step 1 of syncing the tech's Complete Service form
+with the customer service report: the tech sees no new field lists. "Found"
+(pests, where) and "Treated" (areas) are read-only summary lines filled from
+voice. Tips from your tech (`tip-library.js`) and the per-service
+Recommendations vocabulary (`service-completion-choices.js`,
+`GATE_SERVICE_REPORT_COMPLETION_CHOICES`) merge into one searchable,
+prefilled Recommendations list. The Next-steps chips stay retired
+(2026-09-27). The office note never reaches the report writer. WDO and
+pre-treat are out of scope. Per-product standard amounts are deferred
+("protocols later").
+
+`server/config/visit-facts-contract.js` is now the source of truth for which
+facts the form records and which the report reads. For each service line it
+records each fact's capture mode (tap / voice / prefill / derived / photo),
+where it is stored, which files write it, which report section reads it, and
+what the report shows when the fact is missing.
+`server/tests/visit-facts-contract.test.js` checks the registry against the
+code, and `docs/design/visit-facts-contract.md` explains it and lists the
+known gaps. Typed form facts are generated from `project-types.js`
+(`findingsFields`, with requiredness from `REQUIRED_FINDINGS_FIELDS`), not
+hand-listed. A report section may only make a claim that a registered fact
+supports. The typed forms' field rules stay in
+`specialty-service-completion-contract.md`. No runtime behavior changed.

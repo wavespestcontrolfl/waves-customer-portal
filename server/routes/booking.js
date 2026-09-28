@@ -164,12 +164,29 @@ const {
   mintSlotOfferField,
   verifySlotOfferField,
   isRealCalendarDate,
+  bookInsertionOfferPolicy,
   generateConfirmationCode,
 } = require('../utils/slot-offer-token');
 const RecurringAppointmentSeeder = require('../services/recurring-appointment-seeder');
 const {
   isOneTimeBookingSource,
 } = require('../services/self-booking-plan-sync');
+
+// Canonical reader for whether a /book self-serve offer may be minted (and
+// later confirmed) with mid-route insertion (owner 2026-09-28, PR #5231
+// round 2): capacityPlacement is worth passing only when createSelfBooking
+// will actually prepare, verify and persist the traffic-certified route
+// order for it (GATE_BOOK_CAPACITY_COMMIT) AND the whole-route capacity
+// model is live at all (GATE_SCHEDULING_CAPACITY) — re-running placement
+// only makes sense once the offer itself came from that model. Mirrors the
+// existing `technician_id && bookCapacityCommitLive() && capacityEnabled()`
+// condition createSelfBooking's own preparedCapacity gate already uses
+// (unchanged here — it also needs technician_id, which this reader has no
+// opinion on). Named rather than repeated inline: five offer builders and
+// the commit-time signature check below all read it.
+function bookInsertionOffersLive() {
+  return bookCapacityCommitLive() && capacityEnabled();
+}
 
 function cleanBookingServiceLabel(value) {
   const label = String(value || '').trim().replace(/\s+/g, ' ');
@@ -1415,8 +1432,15 @@ function idleMinutesAgainst(dayOccupied, startMin, endMin, candidate = {}) {
 // lookup), so this function itself carries none of that branching. It only
 // ever reorders `slots`/`days`' is_best_fit; the offered slot SET
 // (days[].slots) is never filtered.
-async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], excludeSelfBookingId = null, serviceKey = '', serviceIdentity = null, selfServeNotice = false, rankProfile }) {
+async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], excludeSelfBookingId = null, serviceKey = '', serviceIdentity = null, selfServeNotice = false, rankProfile, capacityPlacement }) {
   config = applySchedulingPolicy(config);
+  // The signed-offer policy tag for this build (minted inside addCandidate
+  // below; createSelfBooking verifies with the same mapping). An offer built
+  // with mid-route insertion carries it, so a GATE_BOOK_CAPACITY_COMMIT /
+  // GATE_SCHEDULING_CAPACITY flip during the offer's 45-minute lifetime fails
+  // the signature instead of confirming under the wrong policy (Codex round 2
+  // P1 on PR #5231).
+  const offerPolicy = bookInsertionOfferPolicy(capacityPlacement);
   // addCandidate's customerWindowAdmits() call defaults dayEndMinutes to
   // currentDayEndMinutes() / lunchGateOn to lunchBlockEnabled() — both read
   // scheduling/customer-windows.js's shared, 60s-TTL cache. Unlike
@@ -1455,6 +1479,24 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     // packed inside find-time (no `insertion` to key off here), and
     // unassigned committed visits anchor the route (push-audit P1).
     packEnds: true,
+    // capacityPlacement is the estimate picker's existing flag
+    // (estimate-slot-availability.js): it both allows inserting the new
+    // visit BETWEEN a day's existing stops (not only appended after the
+    // stored route order) and skips find-time's conservative_travel
+    // no-traffic fallback probe, because the estimate accept commit
+    // re-verifies with live traffic and persists the certified order.
+    // Owner 2026-09-28: only a caller here whose OWN commit is
+    // createSelfBooking, and only while GATE_BOOK_CAPACITY_COMMIT is live,
+    // may pass it too — that commit re-verifies with traffic
+    // (verifyArrivalCapacity) and persists the certified route order
+    // (persistBookCapacityOrder), so an inserted offer it confirms is
+    // exactly what gets saved. A caller whose commit does NOT persist a
+    // route order (public reschedule — rebooker.js clears route_order on a
+    // move; the voice agent — relay-booking.js inserts with no route_order)
+    // must never pass this — an inserted offer there would commit as an
+    // unnumbered stop sorted after the route, not at the position it was
+    // offered at — so it stays append-only and omits capacityPlacement.
+    capacityPlacement,
     dateFrom: rangeFrom,
     dateTo: rangeTo,
     // Travel gap (GATE_SLOT_TRAVEL_GAP): customer-facing turnaround buffer
@@ -1700,7 +1742,9 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
       // a live HMAC — see utils/slot-offer-token.js. The client passes it
       // through as-is; serviceKey + locationKey bind the request context the
       // slots were computed FOR, so an offer fetched for one address/service
-      // can't confirm another.
+      // can't confirm another. `policy` (offerPolicy, computed once above)
+      // additionally binds THIS build's insertion policy into the HMAC —
+      // Codex round 2 P1 on PR #5231.
       slot_sig: mintSlotOfferField({
         surface: 'booking',
         scopeId: '',
@@ -1710,6 +1754,7 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
         startMinutes: startMin,
         technicianId: slot.technician.id || null,
         durationMinutes: duration,
+        policy: offerPolicy,
       }),
       start_label: minToTime12(startMin),
       end_label: minToTime12(endMin),
@@ -1944,6 +1989,14 @@ router.get('/availability', async (req, res, next) => {
       serviceKey,
       // Self-serve surface — enforce the notice window (owner ruling 2026-09-23).
       selfServeNotice: true,
+      // /confirm's own commit for this funnel is createSelfBooking, which
+      // (while bookInsertionOffersLive() is live) re-verifies with traffic
+      // and persists the certified route order — see the comment on
+      // capacityPlacement inside buildBookingAvailability. The minted offer
+      // carries a signed policy tag either way (below), so a gate flip
+      // between this mint and /confirm can't be redeemed under the wrong
+      // policy.
+      capacityPlacement: bookInsertionOffersLive(),
     });
 
     // Coords the caller didn't already hold (estimate_id → customer record,
@@ -2050,6 +2103,9 @@ router.post('/find-slots', findSlotsLimiter, findSlotsHourlyLimiter, async (req,
       serviceKey,
       // Self-serve surface — enforce the notice window (owner ruling 2026-09-23).
       selfServeNotice: true,
+      // Same /confirm commit (createSelfBooking) as /availability — see the
+      // comment there and on capacityPlacement inside buildBookingAvailability.
+      capacityPlacement: bookInsertionOffersLive(),
     });
 
     const slotCount = (availability.days || []).reduce((n, d) => n + (Array.isArray(d.slots) ? d.slots.length : 0), 0);
@@ -2704,7 +2760,22 @@ async function createSelfBooking(payload = {}) {
     // commits), and callbackVisit is unreachable from public POST bodies
     // (/confirm pins it null after the spread). Every transactional re-check
     // below — blackout, date bounds, geometry, day cap, conflict + global
-    // occupancy — still runs for them.
+    // occupancy — still runs for them. No separate policy tag is needed for
+    // them either: reservice-public.js's buildAvailabilityForCustomer and
+    // inspection-public.js's buildAvailabilityForLead both call
+    // buildBookingAvailability in the SAME request, a few lines before this
+    // createSelfBooking call, so that rebuild's capacityPlacement and this
+    // preparedCapacity gate just below read bookInsertionOffersLive() (and
+    // therefore the same env) microseconds apart — not across the signed
+    // offer's 45-minute window a gate flip could actually straddle.
+    //
+    // `policy` (Codex round 2 P1 on PR #5231): binds the SAME insertion
+    // policy the offer was minted under (buildBookingAvailability's
+    // offerPolicy) — a GATE_BOOK_CAPACITY_COMMIT/GATE_SCHEDULING_CAPACITY
+    // flip between mint and this verify fails the signature in either
+    // direction (an insertion offer confirmed with the gate off, or an
+    // append-only offer confirmed with it on) rather than silently
+    // accepting a route-order promise this commit can't actually keep.
     if (!callbackVisit && (!serviceKey || !verifySlotOfferField({
       surface: 'booking',
       scopeId: '',
@@ -2714,6 +2785,7 @@ async function createSelfBooking(payload = {}) {
       startMinutes: timeToMin(slot_start),
       technicianId: technician_id || null,
       durationMinutes: duration,
+      policy: bookInsertionOfferPolicy(bookInsertionOffersLive()),
     }, slot_sig))) {
       return { ok: false, status: 409, error: 'That time slot is no longer available — please pick your time again.' };
     }
@@ -6346,6 +6418,14 @@ router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter,
         // Self-serve surface — a slot the notice window would now refuse
         // must not be treated as still offered (offer/commit parity).
         selfServeNotice: true,
+        // This re-checks a slot /availability or /find-slots already
+        // offered, so it must use the SAME capacityPlacement value those
+        // used, or a genuinely still-offered inserted slot would revalidate
+        // as unavailable (offer/commit parity). This route never redeems a
+        // slot_sig itself (capture-intent only stages a recovery row), so
+        // the mismatch protection here is offer/commit parity, not the
+        // signed policy tag below.
+        capacityPlacement: bookInsertionOffersLive(),
       });
       const day = (avail.days || []).find((d) => String(d.date).slice(0, 10) === row.slot_date);
       const offered = !!day && Array.isArray(day.slots)
@@ -6539,6 +6619,11 @@ router.get('/status/:code', bookingStatusLimiter, async (req, res, next) => {
 module.exports = router;
 module.exports._internals = {
   isOneTimeBookingSource,
+  // Codex round 2 P1 on PR #5231: the canonical reader reservice-public.js
+  // and inspection-public.js pass through to buildBookingAvailability
+  // (capacityPlacement) so their own createSelfBooking commits agree with
+  // what they offered.
+  bookInsertionOffersLive,
   cleanBookingServiceLabel,
   canonicalBookingServiceLabel,
   BOOKING_FUNNEL_SERVICE_LABELS,

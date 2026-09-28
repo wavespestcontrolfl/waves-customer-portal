@@ -323,7 +323,7 @@ async function maybeDivertToMicrodepositReminder(inv, daysSince, domain, now = n
       return 'deduped';
     }
     const priorLedgerIds = pendingEmailEpisode.ledgerIds || [];
-    const pendingVerdict = await collectionsChannelPermitted(customer.id, inv.id, 'email', now, priorLedgerIds, true);
+    const pendingVerdict = await collectionsChannelPermitted(customer.id, inv.id, 'email', now, priorLedgerIds, true, true);
     if (!verdictAllows(pendingVerdict)) {
       // A durable denial (flag, suppression) means this Email is no longer
       // owed and must not hold the invoice on this tier forever; a spacing
@@ -389,7 +389,7 @@ async function maybeDivertToMicrodepositReminder(inv, daysSince, domain, now = n
       { microdeposit: true, channels: policyChannels });
     if (ownLedgerIds === null) return 'skip';
     const policyResults = await Promise.all(policyChannels.map((channel) =>
-      collectionsChannelPermitted(customer.id, inv.id, channel, now, ownLedgerIds, true)));
+      collectionsChannelPermitted(customer.id, inv.id, channel, now, ownLedgerIds, true, true)));
     const policy = Object.fromEntries(policyChannels.map((channel, index) => [channel, verdictAllows(policyResults[index])]));
     const emailDurablyDenied = verdictDurablyDenied(policyResults[policyChannels.indexOf('email')]);
     const emailPermitted = policy.email;
@@ -484,9 +484,14 @@ async function maybeDivertToMicrodepositReminder(inv, daysSince, domain, now = n
 // byte-identical, per-channel verdicts, invoice-membership required.
 const { collectionsChannelPermitted: railGuardPermitted } = require('./collections/rail-guard');
 
-async function collectionsChannelPermitted(customerId, invoiceId, channel, now, excludeLedgerIds = [], detail = false) {
+// A microdeposit verification reminder is written as purpose
+// payment_verification, not an overdue reminder, so it names no source and
+// the spacing shadow never observes it (Codex #5189 r5); its policy verdict
+// is unchanged.
+async function collectionsChannelPermitted(customerId, invoiceId, channel, now, excludeLedgerIds = [], detail = false, verification = false) {
   return railGuardPermitted({
-    customerId, invoiceId, channel, purpose: 'late_payment', now, excludeLedgerIds, logTag: 'late-payment', detail,
+    customerId, invoiceId, channel, purpose: 'late_payment', now, excludeLedgerIds,
+    ...(verification ? {} : { source: 'late_payment_checker' }), logTag: 'late-payment', detail,
   });
 }
 

@@ -14,7 +14,7 @@ const sendgrid = require('../services/sendgrid-mail');
 const { retireIfClean } = require('../services/ops-digest-fall-off');
 const {
   runUnworkedCommsWatcher,
-  _private: { composeUnworkedCommsDigest },
+  _private: { composeUnworkedCommsDigest, unworkedCommsHeadlineAndSummary },
 } = require('../services/unworked-comms-watcher');
 
 beforeEach(() => {
@@ -141,6 +141,63 @@ describe('composeUnworkedCommsDigest', () => {
     });
     expect(composed.subject).toContain('14 open requests');
     expect(composed.text).toContain('…and 13 more not shown');
+  });
+
+  // Admin-alerts-brevity scope (owner ruling 2026-09-28): short bell copy —
+  // headline leads with callbacks; summary lists whatever else is nonzero.
+  test('headline/summary lead with callbacks when present', () => {
+    const composed = composeUnworkedCommsDigest({
+      callbacks: [callback({ total_count: 7 })],
+      followUps: [followUp(), followUp({ id: 't2' })],
+      unanswered: [thread()],
+      requests: [request()],
+    });
+    expect(composed.headline).toBe('Comms — 7 callbacks waiting');
+    expect(composed.summary).toBe('Plus 1 unanswered text, 2 follow-ups due and 1 open request.');
+  });
+
+  // Zero-guard (coordinator fix, 2026-09-28): a day with NO callbacks must
+  // never read "Comms — 0 callbacks waiting" — lead with the next nonzero
+  // bucket in priority order.
+  test('headline/summary never lead with a zero bucket — no callbacks today, lead with unanswered texts', () => {
+    const composed = composeUnworkedCommsDigest({
+      unanswered: [thread({ total_count: 93 })],
+      followUps: [followUp({ total_count: 128 })],
+      requests: [request({ total_count: 31 })],
+    });
+    expect(composed.headline).toBe('Comms — 93 unanswered texts');
+    expect(composed.summary).toBe('Plus 128 follow-ups due and 31 open requests.');
+  });
+
+  test('a single nonzero bucket has no "Plus" summary line', () => {
+    const composed = composeUnworkedCommsDigest({ callbacks: [callback({ total_count: 1 })] });
+    expect(composed.headline).toBe('Comms — 1 callback waiting');
+    expect(composed.summary).toBeNull();
+  });
+
+  test('a lane failure gets no headline/summary — the ops-digest.js FIX default (engineering, Activity-only) applies', () => {
+    const composed = composeUnworkedCommsDigest(
+      { unanswered: [thread()] },
+      [{ lane: 'callbacks', message: 'query timed out' }],
+    );
+    expect(composed.subject).toMatch(/^FIX:/);
+    expect(composed.headline).toBeUndefined();
+    expect(composed.summary).toBeUndefined();
+  });
+});
+
+describe('unworkedCommsHeadlineAndSummary (pure)', () => {
+  test('every bucket nonzero: callbacks leads, the rest follow in priority order', () => {
+    expect(unworkedCommsHeadlineAndSummary({ callbacks: 7, unanswered: 93, followUps: 128, requests: 31 })).toEqual({
+      headline: 'Comms — 7 callbacks waiting',
+      summary: 'Plus 93 unanswered texts, 128 follow-ups due and 31 open requests.',
+    });
+  });
+  test('singular counts read naturally', () => {
+    expect(unworkedCommsHeadlineAndSummary({ callbacks: 1, unanswered: 0, followUps: 1, requests: 0 })).toEqual({
+      headline: 'Comms — 1 callback waiting',
+      summary: 'Plus 1 follow-up due.',
+    });
   });
 });
 

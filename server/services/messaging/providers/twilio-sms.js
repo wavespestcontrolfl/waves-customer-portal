@@ -116,9 +116,9 @@ async function sendViaTwilio(input, hooks = {}) {
 }
 
 async function sendViaTwilioOnce(input, {
-  preSendCheck, providerPreSendCheck, onDispatchStart, onDispatchAbort, withSmsHandoff, providerHandoffReservation,
+  preSendCheck, providerPreSendCheck, onDispatchStart, onDispatchAbort, onDispatchRejected, withSmsHandoff, providerHandoffReservation,
   // codex #5018 structural fix (post-r7): threaded straight through, same
-  // as onDispatchStart/onDispatchAbort above.
+  // as onDispatchStart/onDispatchAbort/onDispatchRejected above.
   logInHandoff,
 } = {}) {
   const providerCoordination = require('../provider-handoff-reservation');
@@ -218,6 +218,10 @@ async function sendViaTwilioOnce(input, {
       // codex #5018 r15 pre-push P1: lets the caller undo its own marker
       // when twilio.js's post-onDispatchStart window recheck refuses.
       onDispatchAbort,
+      // codex #5196 r4 P2: fired instead of onDispatchAbort when
+      // messages.create() throws a definitive rejection, still inside the
+      // handoff lock.
+      onDispatchRejected,
       withSmsHandoff,
       // codex #5018 structural fix (post-r7): gates twilio.js's in-
       // transaction sms_log insert (dispatch()'s own comment there).
