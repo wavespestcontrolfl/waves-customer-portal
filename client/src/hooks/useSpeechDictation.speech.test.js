@@ -278,4 +278,59 @@ describe("useSpeechDictation speech path — keep listening through pauses", () 
     expect(onTranscript).toHaveBeenNthCalledWith(2, "after the pause");
     expect(result.current.listening).toBe(true);
   });
+  it("the idle timer stops a live session that never fires onend on its own, and re-arms on each final result", () => {
+    vi.useFakeTimers();
+    try {
+      const onTranscript = vi.fn();
+      const { result } = renderHook(() => useSpeechDictation(onTranscript));
+      act(() => result.current.toggle());
+      const instance = FakeSpeechRecognition.instances[0];
+
+      act(() => vi.advanceTimersByTime(50000));
+      act(() => fireFinalResult(instance, "still talking")); // re-arms
+      act(() => vi.advanceTimersByTime(50000));
+      expect(instance.stop).not.toHaveBeenCalled();
+
+      act(() => vi.advanceTimersByTime(10000)); // 60 s since the last final result
+      expect(instance.stop).toHaveBeenCalledTimes(1);
+      act(() => instance.onend());
+      expect(instance.start).toHaveBeenCalledTimes(1); // stopped, not restarted
+      expect(result.current.listening).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("the idle timer stops a live session where nothing is ever said", () => {
+    vi.useFakeTimers();
+    try {
+      const { result } = renderHook(() => useSpeechDictation(vi.fn()));
+      act(() => result.current.toggle());
+      const instance = FakeSpeechRecognition.instances[0];
+
+      act(() => vi.advanceTimersByTime(59999));
+      expect(instance.stop).not.toHaveBeenCalled();
+      act(() => vi.advanceTimersByTime(1));
+      expect(instance.stop).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("hiding the page stops a live session right away, without waiting for onend", () => {
+    const { result } = renderHook(() => useSpeechDictation(vi.fn()));
+    act(() => result.current.toggle());
+    const instance = FakeSpeechRecognition.instances[0];
+
+    const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
+    try {
+      act(() => document.dispatchEvent(new Event("visibilitychange")));
+      expect(instance.stop).toHaveBeenCalledTimes(1);
+      act(() => instance.onend());
+      expect(instance.start).toHaveBeenCalledTimes(1);
+      expect(result.current.listening).toBe(false);
+    } finally {
+      visibility.mockRestore();
+    }
+  });
 });

@@ -29,8 +29,9 @@ const IDLE_STOP_MS = 60000;
  *   - the hook unmounted (existing abort + handler nulling)
  *   - a recognition error fired other than `no-speech` (`aborted` included)
  *   - no FINAL transcript for IDLE_STOP_MS since the session started or the
- *     last final result
- *   - the page is hidden (`document.visibilityState === "hidden"`)
+ *     last final result (a timer stops the live session; onend re-checks)
+ *   - the page is hidden (`document.visibilityState === "hidden"`; a
+ *     visibilitychange listener stops the live session; onend re-checks)
  *   - 3 consecutive sessions each ended under 1000ms after their own
  *     `start()` with no final result (a fast-end loop, e.g. mic denied by OS)
  *   - `recognitionRef.current` no longer points at this instance
@@ -71,6 +72,9 @@ export default function useSpeechDictation(onTranscript, options = {}) {
   const sessionStartedAtRef = useRef(0); // this internal session's start() time
   const fastEndStreakRef = useRef(0); // consecutive fast, empty sessions
   const gotResultThisSessionRef = useRef(false); // final result in this session
+  // Ends a session that stays open with no final result for IDLE_STOP_MS —
+  // a browser that honors `continuous` may never fire onend on its own.
+  const idleTimerRef = useRef(null);
 
   const speechSupported =
     typeof window !== "undefined" &&
@@ -245,6 +249,20 @@ export default function useSpeechDictation(onTranscript, options = {}) {
       return;
     }
     const rec = new SR();
+    // Idle cutoff as a real timer, not only an onend check: stop() ends the
+    // session through onend, which sees stopRequestedRef and finishes.
+    const armIdleTimer = () => {
+      clearTimeout(idleTimerRef.current);
+      idleTimerRef.current = setTimeout(() => {
+        if (recognitionRef.current !== rec) return;
+        stopRequestedRef.current = true;
+        try {
+          rec.stop();
+        } catch {
+          /* already ending */
+        }
+      }, IDLE_STOP_MS);
+    };
     rec.continuous = true;
     rec.interimResults = false;
     rec.lang = "en-US";
@@ -257,6 +275,7 @@ export default function useSpeechDictation(onTranscript, options = {}) {
       if (text) {
         gotResultThisSessionRef.current = true;
         lastFinalAtRef.current = Date.now();
+        armIdleTimer();
         if (onTranscriptRef.current) onTranscriptRef.current(text);
       }
     };
@@ -293,6 +312,7 @@ export default function useSpeechDictation(onTranscript, options = {}) {
         fastEndStreakRef.current >= 3;
 
       if (shouldStop) {
+        clearTimeout(idleTimerRef.current);
         setListening(false);
         recognitionRef.current = null;
         return;
@@ -303,6 +323,7 @@ export default function useSpeechDictation(onTranscript, options = {}) {
         gotResultThisSessionRef.current = false;
         rec.start();
       } catch {
+        clearTimeout(idleTimerRef.current);
         setListening(false);
         recognitionRef.current = null;
       }
@@ -323,8 +344,28 @@ export default function useSpeechDictation(onTranscript, options = {}) {
       alert(`Dictation error: ${e?.message || "could not start dictation"}`);
       return;
     }
+    armIdleTimer();
     setListening(true);
   }, [mode, toggleUpload]);
+
+  // Leaving the page ends a speech session right away (a browser that keeps
+  // a continuous session open would otherwise record in the background). The
+  // MediaRecorder upload path records until tap-to-stop and is unaffected.
+  useEffect(() => {
+    if (!listening || typeof document === "undefined") return undefined;
+    const onVisibilityChange = () => {
+      const rec = recognitionRef.current;
+      if (document.visibilityState !== "hidden" || !rec) return;
+      stopRequestedRef.current = true;
+      try {
+        rec.stop();
+      } catch {
+        /* already ending */
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", onVisibilityChange);
+  }, [listening]);
 
   // Stop an in-progress session if the consumer unmounts (e.g. the completion
   // modal closes mid-dictation) so the mic isn't left recording and stale
@@ -334,6 +375,7 @@ export default function useSpeechDictation(onTranscript, options = {}) {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      clearTimeout(idleTimerRef.current);
       const rec = recognitionRef.current;
       if (rec) {
         rec.onresult = null;

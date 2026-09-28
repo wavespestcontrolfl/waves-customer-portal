@@ -69,4 +69,18 @@ describe("DictationButton", () => {
       "false",
     );
   });
+  it("ends an active session when the consumer disables the button (no tap can stop it then)", () => {
+    window.webkitSpeechRecognition = FakeSpeechRecognition;
+    const { rerender } = render(<DictationButton onAppend={vi.fn()} />);
+    act(() => fireEvent.click(screen.getByRole("button")));
+    const instance = FakeSpeechRecognition.instances[0];
+    expect(screen.getByRole("button")).toHaveAttribute("aria-pressed", "true");
+
+    rerender(<DictationButton onAppend={vi.fn()} disabled />);
+    expect(instance.stop).toHaveBeenCalledTimes(1);
+
+    act(() => instance.onend()); // the browser's onend after stop()
+    expect(instance.start).toHaveBeenCalledTimes(1); // no restart
+    expect(screen.getByRole("button")).toHaveAttribute("aria-pressed", "false");
+  });
 });

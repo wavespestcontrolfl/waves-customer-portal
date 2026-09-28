@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { Button } from "../ui";
 import useSpeechDictation from "../../hooks/useSpeechDictation";
 
@@ -27,6 +28,13 @@ export default function DictationButton({
   const migrated = presentation === "admin";
   const Control = migrated ? Button : "button";
   const { listening, supported, toggle } = useSpeechDictation(onAppend);
+
+  // A consumer disables the mic while it is busy (e.g. an AI rewrite of the
+  // same field). Dictation keeps listening through pauses, and a disabled
+  // button can't be tapped to stop it, so disabling it ends the session.
+  useEffect(() => {
+    if (disabled && listening) toggle();
+  }, [disabled, listening, toggle]);
 
   if (!supported) return null;
 
