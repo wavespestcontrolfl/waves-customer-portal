@@ -6,7 +6,7 @@ const { etDateString } = require('../utils/datetime-et');
 
 const ADDRESS_FIELDS = ['address_line1', 'address_line2', 'city', 'state', 'zip'];
 const CUSTOMER_FIELDS = ['id', 'first_name', 'last_name', ...ADDRESS_FIELDS, 'latitude', 'longitude'];
-const reviewEnabled = () => typeof gateEnvValue === 'function' && gateEnvValue('GATE_GEOCODE_REVIEW');
+const reviewEnabled = () => gateEnvValue('GATE_GEOCODE_REVIEW');
 const addressSnapshot = customer => ADDRESS_FIELDS.map(field => customer[field] ?? null);
 const normalizedAddress = values => (values || []).map(value => value || null);
 const sameAddress = (customer, review) => JSON.stringify(normalizedAddress(addressSnapshot(customer)))
