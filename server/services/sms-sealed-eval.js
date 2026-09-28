@@ -125,10 +125,6 @@ function isV12PromptVersion(promptVersion) {
   return typeof promptVersion === 'string' && promptVersion.startsWith('house_voice_v12');
 }
 
-function hasFollowupSlaFact(factsBlock) {
-  return String(factsBlock || '').includes(V12_FACTS_MARKER);
-}
-
 // Follow-up #4 (Codex r7): compatibility is the FULL fact contract of the
 // prompt version, not just the base v12 line. A category gate adds its own
 // fact (complaints: the FREE RE-SERVICE eligibility line), and an exam
@@ -190,6 +186,29 @@ async function retireDisplacedPreV12Items({ dbi, overflow, markers = [V12_FACTS_
   return Number(retired) || 0;
 }
 
+// Restore (active=true) up to `remaining` RETIRED items the current fact
+// contract matches, newest first (Codex #5194 r5): a category-gate rollback
+// (complaints on, then off) makes the plain-v12 items retired under +c
+// compatible again, and the candidate anti-join never re-seals a row, so
+// without this the pool stays short of compatible items for good. Safe to
+// automate: retireDisplacedPreV12Items is the only writer of active=false,
+// so every retired row was displaced by a contract, never set aside by a
+// person. Returns the count restored.
+async function restoreCompatibleItems({ dbi, remaining, markers, forbidden }) {
+  if (!(remaining > 0)) return 0;
+  const compat = compatibleWhereRaw(markers, forbidden);
+  const restored = await dbi('sms_sealed_eval_items')
+    .whereIn('id', dbi('sms_sealed_eval_items')
+      .select('id')
+      .where('active', false)
+      .whereRaw(compat.sql, compat.bindings)
+      .orderBy('sealed_at', 'desc')
+      .limit(remaining))
+    .update({ active: true });
+  if (restored) logger.info(`[sealed-eval] seal: reactivated ${restored} previously-retired item(s) matching the current fact contract`);
+  return Number(restored) || 0;
+}
+
 async function sealEvalItems({ target = SEALED_EVAL_TARGET, dbi = db } = {}) {
   const startedAt = Date.now();
   const [{ count: activeCount }] = await dbi('sms_sealed_eval_items')
@@ -215,15 +234,20 @@ async function sealEvalItems({ target = SEALED_EVAL_TARGET, dbi = db } = {}) {
       .count('* as count');
     compatibleCount = Number(count);
   }
-  const remaining = target - compatibleCount;
+  let remaining = target - compatibleCount;
+  // retired items the current contract matches come back before any new
+  // draft is sealed; only the rest of the shortfall is sourced fresh
+  const reactivated = v12 ? await restoreCompatibleItems({ dbi, remaining, markers, forbidden }) : 0;
+  remaining -= reactivated;
+  const activeAfterRestore = Number(activeCount) + reactivated;
   if (remaining <= 0) {
     // Codex r4: a prior run may have inserted compatible rows and then
     // failed before retiring the displaced pre-v12 ones, leaving an
     // oversized active pool that would otherwise never shrink (and trips
     // the auto-exam spend cap). Prune here too, so the two steps need not
     // be atomic to converge.
-    const retired = v12 ? await retireDisplacedPreV12Items({ dbi, overflow: Number(activeCount) - target, markers, forbidden }) : 0;
-    return { sealed: 0, retired, activeCount: Number(activeCount) - retired, ms: Date.now() - startedAt };
+    const retired = v12 ? await retireDisplacedPreV12Items({ dbi, overflow: activeAfterRestore - target, markers, forbidden }) : 0;
+    return { sealed: 0, retired, reactivated, activeCount: activeAfterRestore - retired, ms: Date.now() - startedAt };
   }
 
   const cutoff = new Date(Date.now() - SEALED_EVAL_MIN_AGE_DAYS * 86400 * 1000);
@@ -276,7 +300,7 @@ async function sealEvalItems({ target = SEALED_EVAL_TARGET, dbi = db } = {}) {
 
   if (!picked.length) {
     logger.info('[sealed-eval] seal: no new eligible candidates');
-    return { sealed: 0, activeCount: Number(activeCount), ms: Date.now() - startedAt };
+    return { sealed: 0, reactivated, activeCount: activeAfterRestore, ms: Date.now() - startedAt };
   }
 
   const rows = picked.map((c) => ({
@@ -295,9 +319,9 @@ async function sealEvalItems({ target = SEALED_EVAL_TARGET, dbi = db } = {}) {
   await dbi('sms_sealed_eval_items').insert(rows).onConflict('source_draft_id').ignore();
   // Keep the active pool at the target: retire the OLDEST pre-v12 items that
   // the new compatible ones displaced (never delete — results reference them).
-  const retired = v12 ? await retireDisplacedPreV12Items({ dbi, overflow: Number(activeCount) + rows.length - target, markers, forbidden }) : 0;
+  const retired = v12 ? await retireDisplacedPreV12Items({ dbi, overflow: activeAfterRestore + rows.length - target, markers, forbidden }) : 0;
 
-  const summary = { sealed: rows.length, retired, activeCount: Number(activeCount) + rows.length - retired, ms: Date.now() - startedAt };
+  const summary = { sealed: rows.length, retired, reactivated, activeCount: activeAfterRestore + rows.length - retired, ms: Date.now() - startedAt };
   logger.info(`[sealed-eval] seal complete: ${JSON.stringify(summary)}`);
   return summary;
 }

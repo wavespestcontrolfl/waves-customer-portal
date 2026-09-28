@@ -145,7 +145,8 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
   afterEach(() => { if (versionSpy) versionSpy.mockRestore(); versionSpy = null; });
 
   // A fake that answers the two counts differently and records updates.
-  function makeV12FakeDb({ activeCount, compatibleCount, candidates }) {
+  // `restorable`: rows a restore UPDATE ({ active: true }) reports; a retire always reports 3.
+  function makeV12FakeDb({ activeCount, compatibleCount, candidates, restorable = 0 }) {
     const calls = [];
     const inserts = [];
     const updates = [];
@@ -169,7 +170,7 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
       }
       b.then = (resolve, reject) => {
         let rows;
-        if (b._update) rows = 3; // rows retired
+        if (b._update) rows = b._update.active === true ? restorable : 3; // restore vs retire row counts
         else if (b._insertRows) rows = [];
         else if (b._isCount) rows = [{ count: String(b._compat ? compatibleCount : activeCount) }];
         else rows = candidates;
@@ -188,12 +189,16 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
     const out = await sealEvalItems({ target: 100, dbi });
     expect(out.sealed).toBe(3);
     expect(out.retired).toBe(3);
+    expect(out.reactivated).toBe(0); // no retired plain items to restore in this fake (restorable defaults to 0)
     expect(out.activeCount).toBe(100);
     // candidates were restricted to v12-compatible drafts
     expect(dbi.calls.some(([name, args]) => name === 'whereRaw' && /md\.facts_block LIKE/.test(String(args[0])))).toBe(true);
-    // the retirement targeted pre-v12 rows (NOT LIKE marker), oldest first, capped at the overflow
-    expect(dbi.updates).toHaveLength(1);
-    expect(dbi.updates[0].patch).toEqual({ active: false });
+    // the reactivation attempt ran first (Codex r5 #5194 P2), found nothing, then the retirement
+    // targeted pre-v12 rows (NOT LIKE marker), oldest first, capped at the overflow
+    const restoreUpdates = dbi.updates.filter((u) => u.patch.active === true);
+    const retireUpdates = dbi.updates.filter((u) => u.patch.active === false);
+    expect(restoreUpdates).toHaveLength(1);
+    expect(retireUpdates).toHaveLength(1);
     expect(dbi.calls.some(([name, args]) => name === 'whereRaw' && /NOT LIKE/.test(String(args[0])))).toBe(true);
     expect(dbi.calls.some(([name, args]) => name === 'limit' && args[0] === 3)).toBe(true);
     expect(dbi.calls.some(([name, args]) => name === 'orderBy' && args[0] === 'sealed_at' && args[1] === 'asc')).toBe(true);
@@ -242,6 +247,68 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
     expect(dbi.calls.filter(([name]) => name === 'count')).toHaveLength(1);
     expect(dbi.calls.some(([name, args]) => name === 'whereRaw' && /md\.facts_block LIKE/.test(String(args[0])))).toBe(false);
     expect(dbi.updates).toHaveLength(0);
+  });
+
+  // Codex #5194 r5: after a category-gate rollback the retired items the
+  // current contract matches come back; the anti-join never re-seals them.
+  describe('reactivation of previously-retired items', () => {
+    test('the finding\'s scenario: a plain-v12 pool full of complaint items reactivates retired plain items instead of sourcing new drafts', async () => {
+      versionSpy = jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue('house_voice_v12_real_answers');
+      // Every active item is a +c complaint item (compatibleCount: 0 under
+      // plain v12), and enough retired plain-v12 items exist to cover the
+      // whole shortfall (restorable: 100 === target - compatibleCount).
+      const dbi = makeV12FakeDb({ activeCount: 100, compatibleCount: 0, candidates: [], restorable: 100 });
+      const out = await sealEvalItems({ target: 100, dbi });
+
+      const restoreUpdates = dbi.updates.filter((u) => u.patch.active === true);
+      const retireUpdates = dbi.updates.filter((u) => u.patch.active === false);
+      expect(restoreUpdates).toHaveLength(1);
+      expect(retireUpdates).toHaveLength(1); // the incompatible complaint overflow still gets retired
+
+      // filtered by the EXACT current contract: SLA line required, FREE RE-SERVICE forbidden
+      const likeRaws = dbi.calls.filter(([name, args]) => name === 'whereRaw' && /LIKE \?/.test(String(args[0])) && !/^NOT \(/.test(String(args[0])));
+      expect(likeRaws.length).toBeGreaterThanOrEqual(2); // the compat count + the restore filter
+      for (const [, args] of likeRaws) {
+        expect(args[1]).toEqual(['%FOLLOW-UP SLA RIGHT NOW:%', '%FREE RE-SERVICE:%']);
+      }
+      // restore targets INACTIVE rows, newest sealed_at first, limited to the whole shortfall (100)
+      expect(dbi.calls.some(([name, args]) => name === 'where' && args[0] === 'active' && args[1] === false)).toBe(true);
+      expect(dbi.calls.some(([name, args]) => name === 'orderBy' && args[0] === 'sealed_at' && args[1] === 'desc')).toBe(true);
+      expect(dbi.calls.some(([name, args]) => name === 'limit' && args[0] === 100)).toBe(true);
+
+      // no new drafts sourced — the restore alone reached target
+      expect(dbi.inserts).toHaveLength(0);
+
+      expect(out.reactivated).toBe(100);
+      expect(out.retired).toBe(3); // fake's hardcoded retire row count
+      expect(out.activeCount).toBe(197); // 100 active + 100 reactivated - 3 retired
+    });
+
+    test('a partial restore leaves the rest to be sourced from new drafts (the candidate cap is the leftover, not the whole shortfall)', async () => {
+      versionSpy = jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue('house_voice_v12_real_answers');
+      const candidates = Array.from({ length: 25 }, (_, i) => v12cand(`n${i}`, `2026-08-${String(i + 1).padStart(2, '0')}`));
+      // shortfall = target(100) - compatibleCount(70) = 30; only 10 restore
+      const dbi = makeV12FakeDb({ activeCount: 90, compatibleCount: 70, candidates, restorable: 10 });
+      const out = await sealEvalItems({ target: 100, dbi });
+
+      expect(out.reactivated).toBe(10);
+      // the restore attempt was capped at the FULL shortfall (30), not the post-restore remainder
+      expect(dbi.calls.some(([name, args]) => name === 'limit' && args[0] === 30)).toBe(true);
+      const restoreUpdates = dbi.updates.filter((u) => u.patch.active === true);
+      expect(restoreUpdates).toHaveLength(1);
+
+      // only the 20 leftover (30 - 10 restored) are sourced from new candidates, not all 25 available
+      expect(out.sealed).toBe(20);
+      expect(dbi.inserts[0]).toHaveLength(20);
+    });
+
+    test('v11 runs no restore query, even with a short pool', async () => {
+      versionSpy = jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue('house_voice_v11');
+      const dbi = makeV12FakeDb({ activeCount: 50, compatibleCount: 0, candidates: [cand('a', 'GENERAL', '2026-08-01')] });
+      const out = await sealEvalItems({ target: 100, dbi });
+      expect(out.reactivated).toBe(0);
+      expect(dbi.updates.filter((u) => u.patch.active === true)).toHaveLength(0);
+    });
   });
 });
 
