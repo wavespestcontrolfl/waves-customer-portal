@@ -321,6 +321,12 @@ describe('classifyDecision — a new product\'s category must be one the listing
       .toMatchObject({ kind: 'new_product', status: 'logged', newProduct: { name: 'Southern Ag Thuricide BT', category: 'insecticide' } });
   });
 
+  test('a device named only by its category words keeps its original anchor ("Snap Trap Rat Trap")', () => {
+    const count = { size_text: '12 Count', size_number: 12, size_unit: 'each', pack_count: 1 };
+    expect(decide('Snap Trap Rat Trap 12 Count', 'Snap Trap Rat Trap', 'rodent_trap', count))
+      .toMatchObject({ kind: 'new_product', status: 'logged', newProduct: { category: 'rodent_trap' } });
+  });
+
   test('an EARLY category word never moves the anchor: a manufacturer-only name is still refused', () => {
     expect(decide('Syngenta Insecticide Demand CS 8 oz', 'Syngenta Insecticide', 'insecticide', oz(8)))
       .toMatchObject({ kind: 'unsure', reason: expect.stringMatching(/product-identity word/) });

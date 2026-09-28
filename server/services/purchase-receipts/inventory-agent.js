@@ -445,14 +445,18 @@ function titleAnchorWordIndex(rawTitle) {
   // identity word before that phrase ("BT"). A category word EARLIER in the
   // title ("Syngenta Insecticide Demand CS 8 oz") never moves it: the anchor
   // is still "CS", so a manufacturer-only name stays refused.
-  let anchor = lastIdentityWordBefore(title, cutoff, titleWords);
+  // When every identity word is category wording ("Snap Trap Rat Trap 12
+  // Count" — a device named by its own category words), there is nowhere to
+  // move to, and the original anchor stands.
+  const original = lastIdentityWordBefore(title, cutoff, titleWords);
+  let anchor = original;
   const spans = categoryPhraseWordSpans(title);
   for (let guard = 0; anchor != null && guard < spans.length; guard += 1) {
     const span = spans.find((sp) => anchor >= sp.first && anchor <= sp.last);
     if (!span) break;
     anchor = lastIdentityWordBefore(title, span.startChar, titleWords);
   }
-  return anchor;
+  return anchor ?? original;
 }
 
 function lastIdentityWordBefore(title, cutoff, titleWords) {
