@@ -19,9 +19,9 @@ import useSpeechDictation from "../../hooks/useSpeechDictation";
  *   uploadServiceId optional — the visit's id; where SpeechRecognition is
  *                   missing, the hook records a clip and sends it for server
  *                   transcription instead (GATE_TECH_DICTATION_UPLOAD)
- *   onPendingChange optional — told true while a recorded clip is being
- *                   taken or transcribed (the upload path only), so the
- *                   caller can hold a save until the words arrive
+ *   onPendingChange optional — told true from the mic tap until a recorded
+ *                   clip is taken and transcribed (the upload path only),
+ *                   so the caller can hold a save until the words arrive
  */
 function micLabel({ uploading, listening, title }) {
   if (uploading) return "Transcribing";
@@ -65,12 +65,15 @@ export default function DictationButton({
 }) {
   const migrated = presentation === "admin";
   const Control = migrated ? Button : "button";
-  const { listening, supported, toggle, cancel, mode, uploading } = useSpeechDictation(onAppend, { uploadServiceId });
+  const { listening, supported, toggle, cancel, mode, starting, uploading } = useSpeechDictation(onAppend, { uploadServiceId });
 
   // A recorded clip has no transcript until it is stopped and transcribed;
-  // a save in that window would go out without it. (Live speech recognition
-  // stops itself when another button is pressed, so it never holds a save.)
-  const pending = mode === "upload" && (listening || uploading);
+  // a save in that window would go out without it. The window opens at the
+  // tap: while the phone is still asking for the mic, a save would miss the
+  // clip and anything opened over the sheet would sit on a live recording.
+  // (Live speech recognition stops itself when another button is pressed,
+  // so it never holds a save.)
+  const pending = mode === "upload" && (starting || listening || uploading);
   useEffect(() => {
     onPendingChange?.(pending);
   }, [pending, onPendingChange]);

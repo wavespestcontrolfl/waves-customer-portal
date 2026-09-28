@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 
 // The mic: a supported browser whose transcript the test delivers by hand.
-const dictation = vi.hoisted(() => ({ onTranscript: null, options: null, state: { listening: false, mode: 'speech', uploading: false } }));
+const dictation = vi.hoisted(() => ({ onTranscript: null, options: null, state: { listening: false, mode: 'speech', starting: false, uploading: false } }));
 vi.mock('../../hooks/useSpeechDictation', () => ({
   default: (onTranscript, options) => {
     dictation.onTranscript = onTranscript;
@@ -28,7 +28,7 @@ import FastCompleteSheet from './FastCompleteSheet';
 
 beforeEach(() => {
   vi.spyOn(window, 'scrollTo').mockImplementation(() => {});
-  dictation.state = { listening: false, mode: 'speech', uploading: false };
+  dictation.state = { listening: false, mode: 'speech', starting: false, uploading: false };
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
@@ -126,6 +126,17 @@ describe('FastCompleteSheet recorded dictation', () => {
     const submit = await fillRequired(makeRequest());
     expect(submit.disabled).toBe(true);
     expect(screen.getByRole('button', { name: 'Transcribing' }).disabled).toBe(true);
+  });
+
+  test('the completion and photos wait from the mic tap, while the phone is still asking for the mic', async () => {
+    dictation.state = { listening: false, mode: 'upload', starting: true, uploading: false };
+    const submit = await fillRequired(makeRequest());
+    expect(submit.disabled).toBe(true);
+    expect(screen.getByText('Finish dictating before you complete.')).toBeTruthy();
+    const photos = screen.getByRole('button', { name: 'Add photos' });
+    expect(photos.disabled).toBe(true);
+    fireEvent.click(photos);
+    expect(screen.queryByRole('dialog', { name: 'Photo manager' })).toBeNull();
   });
 
   test('photos wait until a recorded clip is finished', async () => {
