@@ -55,7 +55,7 @@ function makeConn(handler) {
       const calls = [];
       const b = {};
       const record = (name) => (...args) => { calls.push([name, ...args]); return b; };
-      for (const m of ['where', 'orWhere', 'whereIn', 'whereNot', 'whereNotIn', 'orderBy', 'select', 'limit', 'forUpdate']) {
+      for (const m of ['where', 'orWhere', 'whereIn', 'whereNot', 'whereNotIn', 'orderBy', 'select', 'limit', 'forUpdate', 'noWait']) {
         b[m] = record(m);
       }
       // The sibling mint-lock candidate read (owner ruling 2026-09-28)
@@ -390,6 +390,9 @@ describe('propagatePriceServiceToFollowingSiblings', () => {
     // Targets are row-locked up front so a concurrent invoice mint can't
     // mint from the old price after the reconcile probes ran.
     expect(targetQueries[0].some(([name]) => name === 'forUpdate')).toBe(true);
+    // NOWAIT (Codex r6 P2 on #5253): a peer 'following' save's row maps to
+    // VISIT_BUSY_RETRY instead of a raw deadlock abort.
+    expect(targetQueries[0].some(([name]) => name === 'noWait')).toBe(true);
   });
 
   it('keeps an explicitly free series an explicit $0, never NULL', async () => {

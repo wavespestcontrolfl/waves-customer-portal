@@ -4714,9 +4714,24 @@ async function lockAndGuardFollowingSiblings(conn, {
     // found nothing — the later UPDATE would just wait, then leave that
     // fresh invoice live and stale. Advisory locks (maintenance + comms)
     // are already held, keeping the advisory-then-rows order.
-    .forUpdate();
+    // NOWAIT (Codex r6 P2 on #5253): this txn already holds its edited
+    // row, so waiting on a peer row can close a cycle with a concurrent
+    // 'following' save from a same-day sibling — Postgres would abort one
+    // side as a raw deadlock. Contention maps to the same retry response
+    // as the sibling mint try-locks below.
+    .forUpdate()
+    .noWait();
   if (fromDateStr) targetQuery.where('scheduled_date', '>=', fromDateStr);
-  const targets = await targetQuery;
+  let targets;
+  try {
+    targets = await targetQuery;
+  } catch (err) {
+    if (err?.code !== '55P03') throw err;
+    throw Object.assign(
+      new Error('Another change to a later visit in this series is in progress — try again in a moment.'),
+      { statusCode: 409, isOperational: true, code: 'VISIT_BUSY_RETRY' },
+    );
+  }
   if (priceChanged || serviceChanged) {
     const { tryAcquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
     for (const id of targets.map((row) => String(row.id)).sort()) {
@@ -13506,7 +13521,16 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             .whereIn('status', ['pending', 'confirmed'])
             .orderBy('id', 'asc')
             .forUpdate()
-            .select(...sibSelect);
+            .noWait()
+            .select(...sibSelect)
+            // Same NOWAIT → retry mapping as lockAndGuardFollowingSiblings.
+            .catch((err) => {
+              if (err?.code !== '55P03') throw err;
+              throw Object.assign(
+                new Error('Another change to a later visit in this series is in progress — try again in a moment.'),
+                { statusCode: 409, isOperational: true, code: 'VISIT_BUSY_RETRY' },
+              );
+            });
           if (convSiblings.length > 0) {
             const { tryAcquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
             for (const id of convSiblings.map((row) => String(row.id)).sort()) {
