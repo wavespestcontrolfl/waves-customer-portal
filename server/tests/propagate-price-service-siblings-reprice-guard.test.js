@@ -64,6 +64,7 @@ function makeConn({
       for (const m of ['where', 'whereIn', 'whereNotIn', 'whereNot', 'orderBy']) c[m] = jest.fn(() => c);
       c.modify = jest.fn((cb) => { cb(c); return c; });
       c.forUpdate = jest.fn((...a) => { rowForUpdateSpy(...a); return c; });
+      c.noWait = jest.fn(() => c);
       c.pluck = jest.fn(async () => candidateIds);
       c.update = jest.fn(async (...a) => { siblingUpdateSpy(...a); return 1; });
       c.then = (resolve, reject) => Promise.resolve(targets).then(resolve, reject);
