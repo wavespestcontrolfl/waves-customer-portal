@@ -1691,7 +1691,6 @@ class GoogleBusinessService {
    */
   _classifyLocationSyncHealth({ hasResource, source, pulledCount, gbpFailure, rowCount, storedCount, newestIngestAt, statsUpdatedAt, statsTotal, placesTotal, now = Date.now() }) {
     if (!hasResource) return null;               // not a GBP-tracked location
-    if (source === 'concurrent_skip') return null; // another runner owns this cycle
     const days = (ts) => (ts ? (now - new Date(ts).getTime()) / 86400000 : Infinity);
 
     const failureText = gbpFailure && gbpFailure !== 'no_client' ? String(gbpFailure).replace(/\s+/g, ' ').slice(0, 200) : null;
@@ -1716,10 +1715,12 @@ class GoogleBusinessService {
       const why = failureText ? failedWhat : 'GBP credentials are broken (client could not be initialized)';
       return { cls: 'feed_degraded', severity: 'ACT', detail: `${why} — running on the ~5-review Places sample; removals and most new reviews are invisible` };
     }
+    // The checks below judge a completed GBP pull; concurrent_skip means
+    // another runner owns this cycle.
+    if (source !== 'gbp') return null;
     // Judged on the CURRENT pull, not retained rows: a wiped profile keeps
     // its historical rows (missing_since-stamped, never deleted), so a
-    // stored-row count would read healthy forever after the wipe. Every
-    // failed source returned above, so a pull counted here succeeded.
+    // stored-row count would read healthy forever after the wipe.
     if (Number(pulledCount) === 0) {
       // Nothing is missing from a profile that has never had a review. A
       // wipe still alerts: its removal-stamped rows stay stored.
