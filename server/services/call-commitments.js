@@ -322,8 +322,18 @@ function evidenceFor(v2, paths) {
 // Fractional seconds are dropped: the ET parser reads only naive
 // 'YYYY-MM-DDTHH:MM[:SS]' (anything else would fall through to UTC).
 const ET_OFFSET_TIME_RE = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?)(?:\.\d+)?(?:-04:?00|-05:?00)$/;
+// The written instant stands whenever its offset is valid for that ET wall
+// clock — it reads back as the same clock, e.g. either occurrence of 1:30
+// on the fall-back night — and the wall clock is used only when the offset
+// is from the wrong season (codex #5139 r2 P1).
 function isoOrNull(value) {
   const et = ET_OFFSET_TIME_RE.exec(String(value ?? '').trim());
+  if (et) {
+    const written = new Date(String(value).trim());
+    const p = !Number.isNaN(written.getTime()) ? etParts(written) : null;
+    const pad = (n) => String(n).padStart(2, '0');
+    if (p && `${p.year}-${pad(p.month)}-${pad(p.day)}T${pad(p.hour)}:${pad(p.minute)}` === et[1].slice(0, 16)) return written.toISOString();
+  }
   const d = parseDueAt(et ? et[1] : value);
   return d instanceof Date ? d.toISOString() : null;
 }

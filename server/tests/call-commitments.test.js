@@ -304,6 +304,10 @@ describe('groundModelCommitments', () => {
     expect(say('2026-07-10T15:00')).toBe('2026-07-10T19:00:00.000Z');
     // January is EST: the same rule the other way round.
     expect(say('2026-01-10T15:00:00-04:00')).toBe('2026-01-10T20:00:00.000Z');
+    // The fall-back night repeats 1:00–2:00: both offsets are valid there
+    // and name different instants — each is kept as written (codex #5139 r2 P1).
+    expect(say('2026-11-01T01:30:00-04:00')).toBe('2026-11-01T05:30:00.000Z');
+    expect(say('2026-11-01T01:30:00-05:00')).toBe('2026-11-01T06:30:00.000Z');
     // A UTC or other offset is a real instant.
     expect(say('2026-07-10T20:00:00Z')).toBe('2026-07-10T20:00:00.000Z');
     expect(say('2026-07-10T15:00:00-07:00')).toBe('2026-07-10T22:00:00.000Z');
