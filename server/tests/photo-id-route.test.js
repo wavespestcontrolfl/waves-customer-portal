@@ -395,9 +395,13 @@ function unnamedV2ResultFor({ level = 'unknown', nodeId = null, headline = "We c
 function realCatalogV2ResultForCandidates(specs) {
   const catalog = jest.requireActual('../services/species-catalog');
   const { buildAnswer, mapToV1, resolveCandidate } = jest.requireActual('../services/photo-id-v2/pest-engine');
-  const candidates = specs.map(([slug, confidence]) => ({
-    ...resolveCandidate({ slug, confidence }), checked: true, verified: true,
-  }));
+  // Every caller exercises the unnamed (draft) path, so each real entry is
+  // forced to draft here rather than relying on its catalog review status.
+  const candidates = specs.map(([slug, confidence]) => {
+    const resolved = resolveCandidate({ slug, confidence });
+    const entry = resolved.entry ? { ...resolved.entry, review: { status: 'draft', notes: '' } } : null;
+    return { ...resolved, entry, checked: true, verified: true };
+  });
   const built = buildAnswer({
     candidates, disagreed: false, disagreementNode: null,
     escalationTriggered: false, openaiAnswered: false, openaiStoodInAlone: false,

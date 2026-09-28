@@ -15,8 +15,9 @@
     "safety_line": "Bites are rare and defensive but medically significant — alpha-latrotoxin can cause serious symptoms. See a doctor for a suspected bite, and call 911 if someone has trouble breathing.",
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "bd088ff0de9375d92e4edc6a34e592e18aabdd39dda312be7cb3eb47ce6d74c2"
     },
     "slug": "black-widow",
     "common_name": "Southern Black Widow",
@@ -127,8 +128,9 @@
     "safety_line": "Venom is potent but this species injects less of it and bites less readily than the black widow. See a doctor for a suspected bite, and call 911 if someone has trouble breathing.",
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "437cb0992328f8f8d7aa02ddcb1fc9b27caf068bd3cfa0d3311b89aef06a629b"
     },
     "slug": "brown-widow",
     "common_name": "Brown Widow",
@@ -237,8 +239,9 @@
     "safety_line": "Bites only if held or pinched, and feel about like a bee sting. No medical concern for most people.",
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "50c97450fad095cca1d3a4506bf02d692aa02493d23eadf57f80f4427014449b"
     },
     "slug": "golden-silk-orbweaver",
     "common_name": "Golden Silk Orb-weaver",
@@ -342,8 +345,9 @@
     "safety_line": "Not dangerous to people, though a bite from handling one can be locally painful. No medical concern for most people.",
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "07787610ed58957a2d26f887429280889a93ecaf5243dd89df9b7142b9b1574f"
     },
     "slug": "huntsman-spider",
     "common_name": "Huntsman Spider",
@@ -447,8 +451,9 @@
     "safety_line": "Venom is not dangerous to people; a bite from handling one can be locally painful, like a bee sting.",
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "049cd71d3f2e7fd56b0a0030f0df75926cbc386853beaa298a6f419fd5326447"
     },
     "slug": "wolf-spider",
     "common_name": "Wolf Spider",
@@ -641,8 +646,9 @@
       "https://en.wikipedia.org/wiki/Gasteracantha_cancriformis"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Per audit item 44: safety.bites changed from false to true (capability, not danger, per rule 5); risk changed from low to defensive to match."
+      "status": "owner_approved",
+      "notes": "Per audit item 44: safety.bites changed from false to true (capability, not danger, per rule 5); risk changed from low to defensive to match. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "bb6f146295358917747ff45d9facce2308a882613fad964857ac128c62c0e332"
     }
   },
   {
@@ -748,8 +754,9 @@
       "https://en.wikipedia.org/wiki/Argiope_aurantia"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "12f413be733a9a29f979368c5adcea10c97c793bca178b7f9ea024caf405d38b"
     }
   },
   {
@@ -858,8 +865,9 @@
       "https://ask.ifas.ufl.edu/publication/IN568"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Confirmed against UF/IFAS EDIS IN568 (Featured Creatures: Tropical Orb Weaver Spider): \"the web is constructed after dark, and the orb is taken down before dawn,\" and all stages occur throughout the year in Florida. The source doesn't specifically mention porch lights, but that detail follows from its documented night-flying-insect diet and isn't contradicted. Per audit item 44: safety.bites changed from false to true (capability, not danger, per rule 5); risk changed from low to defensive to match; copy's 'harmless' softened since bites is now true."
+      "status": "owner_approved",
+      "notes": "Confirmed against UF/IFAS EDIS IN568 (Featured Creatures: Tropical Orb Weaver Spider): \"the web is constructed after dark, and the orb is taken down before dawn,\" and all stages occur throughout the year in Florida. The source doesn't specifically mention porch lights, but that detail follows from its documented night-flying-insect diet and isn't contradicted. Per audit item 44: safety.bites changed from false to true (capability, not danger, per rule 5); risk changed from low to defensive to match; copy's 'harmless' softened since bites is now true. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "823f96f14c2625f026f8cad46acf52a79bd5c8a14f298bc02ba8035a85ea5ccb"
     }
   },
   {
@@ -967,8 +975,9 @@
       "https://ask.ifas.ufl.edu/publication/IN1243"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Source corrected to UF/IFAS EDIS IN1243, which is specifically about Leucauge argyrobapta (and the near-identical L. venusta) and confirms silvery-white abdomen with dark lines and reddish-orange ventral marks, green/greenish-black legs banded at the joints, and a mostly horizontal (under 45 degrees) web. It also distinguishes the truly different L. argyra (dorsal lines that turn inward 90 degrees, no reddish-orange spots), so traits are now correctly matched to this species rather than argyra. Per audit item 44: safety.bites changed from false to true (capability, not danger, per rule 5); risk changed from low to defensive to match; copy's 'harmless' softened since bites is now true."
+      "status": "owner_approved",
+      "notes": "Source corrected to UF/IFAS EDIS IN1243, which is specifically about Leucauge argyrobapta (and the near-identical L. venusta) and confirms silvery-white abdomen with dark lines and reddish-orange ventral marks, green/greenish-black legs banded at the joints, and a mostly horizontal (under 45 degrees) web. It also distinguishes the truly different L. argyra (dorsal lines that turn inward 90 degrees, no reddish-orange spots), so traits are now correctly matched to this species rather than argyra. Per audit item 44: safety.bites changed from false to true (capability, not danger, per rule 5); risk changed from low to defensive to match; copy's 'harmless' softened since bites is now true. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "8eba656e446eb3b7e57120977592dda0fcd688ef9b2644d34a63adab07653ddf"
     }
   },
   {
@@ -1069,8 +1078,9 @@
       "https://en.wikipedia.org/wiki/Peucetia_viridans"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "161b584518f55ba0e6575c87a1f634d1552c00a37602ce1339ffb8be4f199086"
     }
   },
   {
@@ -1178,8 +1188,9 @@
       "https://en.wikipedia.org/wiki/Phidippus_regius"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "5c9128c9440065b895c276a0d9c2e9fe71ca0a5aada46cd99715678922300a37"
     }
   },
   {
@@ -1287,8 +1298,9 @@
       "https://en.wikipedia.org/wiki/Kukulcania_hibernalis"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Corrected per outside review: UF/IFAS reports bite cases for this species; bites is now true and copy no longer claims it can't break skin. Per audit item 49: tech_notes cited 'P. brunnea' alongside L. reclusa as if both were the recluse's scientific name; P. brunnea (Periplaneta brunnea) is actually the brown cockroach, unrelated to spiders -- removed the erroneous reference."
+      "status": "owner_approved",
+      "notes": "Corrected per outside review: UF/IFAS reports bite cases for this species; bites is now true and copy no longer claims it can't break skin. Per audit item 49: tech_notes cited 'P. brunnea' alongside L. reclusa as if both were the recluse's scientific name; P. brunnea (Periplaneta brunnea) is actually the brown cockroach, unrelated to spiders -- removed the erroneous reference. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "7ecfa8ca251fc8148f6fbf8ad6ebc17da6178d78129df71cb73631fb4671aafa"
     }
   },
   {
@@ -1413,8 +1425,9 @@
       "https://en.wikipedia.org/wiki/Brown_recluse_spider"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Verdict/urgency are a deliberate judgment call: kept at watch/moderate rather than call/high specifically because the species is not established in Florida, to avoid fear-marketing a spider that is very unlikely to be the true culprit; owner should confirm this framing is what they want for this entry. Per audit item 46: traits[3] previously stated the Florida non-establishment fact, which isn't a visible trait; replaced with a size feature. The non-establishment fact is still covered in copy.what_it_means and tech_notes."
+      "status": "owner_approved",
+      "notes": "Verdict/urgency are a deliberate judgment call: kept at watch/moderate rather than call/high specifically because the species is not established in Florida, to avoid fear-marketing a spider that is very unlikely to be the true culprit; owner should confirm this framing is what they want for this entry. Per audit item 46: traits[3] previously stated the Florida non-establishment fact, which isn't a visible trait; replaced with a size feature. The non-establishment fact is still covered in copy.what_it_means and tech_notes. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "1d262473bea4815dad79c948d06a868e4302f05c17ca0ddf55f251b6896e7a4d"
     }
   },
   {
@@ -1521,8 +1534,9 @@
       "https://en.wikipedia.org/wiki/Cheiracanthium_inclusum"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "bf7f5248282661b33b0aa94f1fdd0b4fc764b03192ba3dac5de3ebd2489be550"
     }
   },
   {
@@ -1642,8 +1656,9 @@
       "https://en.wikipedia.org/wiki/Pholcidae"
     ],
     "review": {
-      "status": "draft",
-      "notes": "safety.bites changed to true to match the copy's own admission that it rarely bites — an earlier draft said both 'cannot bite' and 'does bite on rare occasion' in the same entry."
+      "status": "owner_approved",
+      "notes": "safety.bites changed to true to match the copy's own admission that it rarely bites — an earlier draft said both 'cannot bite' and 'does bite on rare occasion' in the same entry. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "18666f49c01a985a52513866a024b51001ec76b65f77fdf92ef8f593d2ac9f79"
     }
   },
   {
@@ -1751,8 +1766,9 @@
       "https://en.wikipedia.org/wiki/Thomisidae"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Per audit item 44: safety.bites changed from false to true (capability, not danger, per rule 5); risk changed from low to defensive to match."
+      "status": "owner_approved",
+      "notes": "Per audit item 44: safety.bites changed from false to true (capability, not danger, per rule 5); risk changed from low to defensive to match. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "89057777d27b169ad28da2b06e8bedae246a2888560ae4b8d09f1198f9e736a5"
     }
   }
 ]

@@ -350,9 +350,12 @@ describe('owner approval content binding', () => {
     expect(catalog.isApproved(entry)).toBe(true);
   });
 
-  test('the history migration preserves only the 73 unchanged approvals', () => {
-    expect(allEntries.filter((entry) => entry.review.status === 'owner_approved')).toHaveLength(73);
-    expect(allEntries.filter((entry) => entry.review.status === 'draft')).toHaveLength(166);
+  // Owner approved every fact-check-clean entry 2026-09-27 (after #5106);
+  // only house-centipede keeps an open fact-check.
+  test('every fact-check-clean entry is owner-approved; house-centipede stays draft', () => {
+    expect(allEntries.filter((entry) => entry.review.status === 'owner_approved')).toHaveLength(238);
+    expect(allEntries.filter((entry) => entry.review.status === 'draft').map((entry) => entry.slug))
+      .toEqual(['house-centipede']);
   });
 });
 
@@ -551,7 +554,6 @@ describe('resolveName regressions', () => {
   test.each(['alate', 'alates'])('generic %s does not claim an ant or termite identification', (name) => {
     expect(catalog.resolveName(name)).toBeNull();
     expect(catalog.resolveName('termite swarmers')).toMatchObject({ node: { slug: 'termite-swarmers' } });
-    expect(catalog.getEntry('termite-swarmers').review.status).toBe('draft');
   });
 
   test.each(['swarmer', 'swarmers'])('bare %s does not claim termites when ants also swarm', (name) => {
@@ -884,21 +886,11 @@ describe('reviewed catalog correction regressions', () => {
     const entry = catalog.getEntry('sooty-mold');
     expect(entry.traits.join(' ')).toMatch(/insects are no longer present/i);
     expect(entry.traits.join(' ')).not.toMatch(/always found.+also has/i);
-    expect(entry.review.status).toBe('draft');
   });
 
   test('oleander caterpillar customer copy keeps its qualified related-host range', () => {
     const entry = catalog.getEntry('oleander-caterpillar');
     expect(entry.copy.what_it_means).toMatch(/mainly on oleander.+occasionally.+related plants/i);
-    expect(entry.review.status).toBe('draft');
-  });
-
-  test('changed hunting billbug aliases require owner re-review', () => {
-    expect(catalog.getEntry('hunting-billbug').review.status).toBe('draft');
-  });
-
-  test('bagworm resolver exclusions added after approval require owner re-review', () => {
-    expect(catalog.getEntry('bagworm').review.status).toBe('draft');
   });
 });
 
@@ -945,8 +937,10 @@ describe('loader API surface', () => {
 
   test('the actual draft fire-ant fallback keeps customers away from the mound', () => {
     const { buildAnswer, resolveCandidate } = require('../services/photo-id-v2/pest-engine');
-    expect(catalog.getEntry('fire-ant').review.status).toBe('draft');
-    const candidate = { ...resolveCandidate({ slug: 'fire-ant', confidence: 0.95 }), checked: true, verified: true };
+    const resolved = resolveCandidate({ slug: 'fire-ant', confidence: 0.95 });
+    const candidate = {
+      ...resolved, entry: { ...resolved.entry, review: { status: 'draft', notes: '' } }, checked: true, verified: true,
+    };
     const built = buildAnswer({ candidates: [candidate], qualityUsable: true, currentMonth: 6 });
     expect(built.answer).toMatchObject({ level: 'subgroup', node_id: 'fire-ants' });
     expect(built.nextPhoto.ask).toMatch(/safe distance/);
@@ -976,8 +970,8 @@ describe('loader API surface', () => {
 
 // The one rule behind every unnamed answer: customer text comes from an
 // owner-approved entry or from the engine's fixed templates, never from an
-// unreviewed entry and never from group prose. Checked for every entry that
-// is not approved today, so a new or re-drafted species can't reopen it.
+// unreviewed entry and never from group prose. Checked for EVERY entry,
+// forced to draft, so a new or re-drafted species can't reopen it.
 describe('unnamed answers show only fixed text (real catalog)', () => {
   const {
     buildAnswer, resolveCandidate, UNNAMED_SAFETY_CLAUSES, UNNAMED_NEXT_PHOTO, NO_PHOTO_CONFIRMS,
@@ -992,15 +986,18 @@ describe('unnamed answers show only fixed text (real catalog)', () => {
   };
   const keepsDistance = (e) => (!!e.risk && e.risk !== 'low') || !!e.safety?.protected
     || e.role === 'wildlife' || e.role === 'protected_wildlife';
-  const unapproved = catalog.listEntries().filter((e) => !catalog.isApproved(e));
+  const unapproved = catalog.listEntries();
 
-  test('the catalog still has unapproved entries to check', () => {
+  test('the catalog has entries to check', () => {
     expect(unapproved.length).toBeGreaterThan(0);
   });
 
   test.each(unapproved.map((e) => [e.slug]))('a confident, unapproved %s shows none of its own text', (slug) => {
     const entry = catalog.getEntry(slug);
-    const candidate = { ...resolveCandidate({ slug, confidence: 0.95 }), checked: true, verified: true };
+    const resolved = resolveCandidate({ slug, confidence: 0.95 });
+    const candidate = {
+      ...resolved, entry: { ...resolved.entry, review: { status: 'draft', notes: '' } }, checked: true, verified: true,
+    };
     const built = buildAnswer({ candidates: [candidate], qualityUsable: true, currentMonth: 6 });
     expect(built.entry).toBeNull();
     expect(built.referral).toBeNull();
