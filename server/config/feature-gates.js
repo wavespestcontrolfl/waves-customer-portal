@@ -1699,6 +1699,17 @@ const gates = {
   // no text) — the call flow is unchanged from before this lane.
   outboundVoicemailSms: process.env.GATE_OUTBOUND_VOICEMAIL_SMS === 'true',
 
+  // Automatic booking-link text after a call (owner ruling 2026-09-26): a
+  // NEW lead who wanted someone to come out and ended the call with nothing
+  // booked gets the existing free-consultation link text 2 hours later (or
+  // 8 AM ET the next morning for a call ending at/after 6 PM ET) — staff get
+  // the first shot at a callback, and every "never" condition (booked since,
+  // opted out, an estimate linked, a link sent in the last 14 days…) is
+  // re-checked at send time. Also requires GATE_LEAD_INSPECTION_LINK live
+  // (buildLeadConsultationSmsLine's own gate). Off → nothing is read or
+  // written; the call_log row carries no metadata for this lane. See
+  // services/call-booking-link-text.js.
+  callBookingLinkText: process.env.GATE_CALL_BOOKING_LINK_TEXT === 'true',
   // Missed-call text-back (services/missed-call-text-back.js): an UNKNOWN
   // caller (no customer record on file) calls a Waves line,
   // nobody answers, they wait >= 25s (missed-call-bell's own floor) and

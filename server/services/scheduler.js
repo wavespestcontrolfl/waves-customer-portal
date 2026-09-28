@@ -13,6 +13,14 @@ const { acceptedScheduledSms, markScheduledSmsSent, dispatchScheduledSms } = req
 const { isEnabled, gateEnvValue } = require('../config/feature-gates');
 const { runExclusive, recordMissedTick } = require('../utils/cron-lock');
 const { REPRICE_PENDING_ABSENT_SQL } = require('../utils/estimate-claim-sql');
+// Required HERE, at scheduler init (= process boot), not lazily inside the
+// cron tick below (codex r3 P1): the module's own MODULE_LOAD_AT — the
+// anchor its first-ever activation boundary falls back to — must be this
+// process's actual boot time. A lazy require deferred that capture to
+// whenever the first tick happened to fire, 5 minutes later, defeating the
+// whole point of the fix (a call landing in that gap still read as
+// pre_activation). Mirrors this file's own PROCESS_BOOT_AT convention above.
+const callBookingLinkText = require('./call-booking-link-text');
 
 const SCHEDULED_SMS_CLAIM_LIMIT = 20;
 const SCHEDULED_SMS_STALE_CLAIM_MS = 30 * 60 * 1000;
@@ -1700,6 +1708,27 @@ function initScheduledJobs() {
       }
     } catch (err) {
       logger.error(`[reschedule-link-promises] tick failed (${err.code || err.name || 'error'})`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // Automatic booking-link text after a call (GATE_CALL_BOOKING_LINK_TEXT) —
+  // same 5-minute cadence as reschedule-link-promises: stages newly-extracted
+  // calls and dispatches whatever 2-hour/8am-ET delay has elapsed.
+  cron.schedule('0 */5 * * * *', async () => {
+    if (!isEnabled('callBookingLinkText')) return;
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      const result = await runExclusive('call-booking-link-text', () => callBookingLinkText.sweep());
+      if (result?.skipped && result.reason !== 'lease_held') {
+        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+        const startedAt = Date.now();
+        const error = new Error(`Booking-link text tick skipped: ${result.reason || 'no_connection'}`);
+        await recordJobStart('call-booking-link-text').catch(() => {});
+        await recordJobEnd('call-booking-link-text', startedAt, error).catch(() => {});
+        throw error;
+      }
+    } catch (err) {
+      logger.error(`[call-booking-link-text] tick failed (${err.code || err.name || 'error'})`);
     }
   }, { timezone: 'America/New_York' });
 
