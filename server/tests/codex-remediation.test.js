@@ -1452,6 +1452,13 @@ describe('operator-FAQ exception (intercept posts on FAQ-blocked services)', () 
     }
   });
 
+  test('a remediation fix that leaves a competitor link is refused before any commit (owner ruling 2026-09-28)', async () => {
+    const withLink = `---\n${JSON.stringify(TERMITE_FM, null, 2)}\n---\nBait stations target the colony itself. Compare [this plan](https://www.orkin.com/plans) before you sign.`;
+    const r = await rem.validateFixedBlogFile(withLink, { operatorFaqException: true }, gateDeps);
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/COMPETITOR_LINK/);
+  });
+
   test('validateFixedBlogFile: termite post with a pre-existing FAQ blocks without the flag, passes with it', async () => {
     const strict = await rem.validateFixedBlogFile(FAQ_MD, {}, gateDeps);
     expect(strict.ok).toBe(false);
