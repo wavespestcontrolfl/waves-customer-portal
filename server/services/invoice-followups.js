@@ -407,7 +407,15 @@ async function resolveCombinedVariant(customer, step) {
 // has), else the ordinary single-invoice body, byte-identical to before.
 async function resolveFollowupSmsBody(step, ctx, combinedVariant) {
   if (combinedVariant?.smsTemplateKey) {
-    const body = await smsTemplatesRouter.getTemplate(combinedVariant.smsTemplateKey, {
+    // No fallback to the single-invoice body here (Claude pre-push review
+    // P1): sendFollowupEmail renders the combined email unconditionally
+    // once combinedVariant is non-null, so a silent SMS fallback here —
+    // even on an unexpected post-active-check render failure — risks the
+    // exact "mismatched combined-text/single-email pair"
+    // resolveCombinedVariant's own contract forbids. A render failure
+    // surfaces as this leg's ordinary missing-template outcome instead
+    // (fireTouch's own existing handling), never a quietly different body.
+    return smsTemplatesRouter.getTemplate(combinedVariant.smsTemplateKey, {
       first_name: ctx.name || 'there',
       invoice_count: String(combinedVariant.invoiceCount),
       total_due: combinedVariant.totalDue,
@@ -417,7 +425,6 @@ async function resolveFollowupSmsBody(step, ctx, combinedVariant) {
       entity_type: 'customer',
       entity_id: ctx.customerId || null,
     });
-    if (body) return body;
   }
   return resolveBody(step, ctx);
 }
@@ -1102,18 +1109,59 @@ async function fireGroupedRows(toFire) {
         await fireOne(sibling);
         continue;
       }
-      // The anchor's combined reminder covered this invoice this run —
-      // re-time the sibling to the anchor's own new next_touch_at (or
-      // +7 days if the anchor's ladder just finished with no next touch)
-      // and leave its step untouched, guarded on the row still being
+      // The anchor's combined reminder covered this invoice this run — the
+      // customer WAS told about it (it's in the count/total/line items),
+      // so the sibling advances its OWN step in lockstep with the anchor
+      // (same +1 fireTouch itself would apply) rather than being left
+      // frozen: a sibling perpetually re-timed at an unchanged low step
+      // would still read "3-day friendly" once it eventually fires on its
+      // own (e.g. the anchor's invoice pays off or its ladder completes),
+      // even though real calendar time — and its own cadence — has moved
+      // on just as far as the anchor's (Claude pre-push review P1). Falls
+      // off the end of the ladder exactly as a normal touch does:
+      // 'completed', next_touch_at null. Guarded on the row still being
       // active (a concurrent payment/pause since the batch select is left
       // alone, not revived).
       try {
-        const nextAt = anchorOutcome.nextTouchAt || new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+        const steps = followupSteps();
+        const siblingNextIndex = sibling.step_index + 1;
+        const outOfSteps = siblingNextIndex >= steps.length;
+        const nextAt = outOfSteps ? null
+          : (anchorOutcome.nextTouchAt || new Date(Date.now() + 7 * 24 * 60 * 60 * 1000));
         const updated = await db('invoice_followup_sequences')
           .where({ id: sibling.id, status: 'active' })
-          .update({ updated_at: db.fn.now(), next_touch_at: nextAt });
-        if (updated) skipped++;
+          .update({
+            updated_at: db.fn.now(),
+            step_index: siblingNextIndex,
+            next_touch_at: nextAt,
+            status: outOfSteps ? 'completed' : 'active',
+          });
+        if (updated) {
+          skipped++;
+          // A lightweight audit trail only (never a new ledger/idempotency
+          // record — that would reintroduce the cross-invoice ledger
+          // complexity this narrow rebuild deliberately avoids): the
+          // anchor's own fireTouch already wrote the real
+          // customer_interactions/contact-ledger rows for its own
+          // invoice_id, so staff reading a sibling invoice's own history
+          // would otherwise see no touch for a run it was in fact named
+          // in (Claude pre-push review P1). Best-effort; never blocks or
+          // fails the touch.
+          try {
+            await db('customer_interactions').insert({
+              customer_id: sibling.customer_id,
+              interaction_type: 'sms_outbound',
+              subject: `Invoice follow-up — combined with invoice ${anchor.invoice_number || anchor.invoice_id} (${sibling.invoice_number || sibling.invoice_id})`,
+              body: `Included in the combined reminder sent for invoice ${anchor.invoice_number || anchor.invoice_id} this run.`,
+              metadata: JSON.stringify({
+                invoice_id: sibling.invoice_id,
+                combined_anchor_invoice_id: anchor.invoice_id,
+                step_index: sibling.step_index,
+                next_step_index: siblingNextIndex,
+              }),
+            });
+          } catch { /* non-critical — best-effort audit trail only */ }
+        }
       } catch (err) {
         logger.error(`[invoice-followups] could not re-time sibling sequence ${sibling.id} after combined anchor send: ${err.message}`);
         skipped++;
