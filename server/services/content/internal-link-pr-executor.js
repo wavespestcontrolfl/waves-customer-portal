@@ -60,6 +60,9 @@ const REVIEWER_REJECTION_PREFIXES = ['llm_judge_rejected', 'codex_findings'];
 // Marker for a PR closed so its links return to the pool (moved main,
 // canceled preview), recorded before the branch retirement that may fail.
 const RECYCLE_PENDING = 'internal_link_recycle_pending';
+// Stamped on pr_open rows (failure_reason) just before mergePr's external
+// write; cleared by the recorded publication or a merge that didn't land.
+const MERGE_IN_FLIGHT = 'internal_link_merge_in_flight';
 
 function terminalVerdict(task, fields) {
   return { persist: { task_id: task.id, executor_version: EXECUTOR_VERSION, ...fields } };
@@ -182,6 +185,37 @@ async function publishedCleanupGate(ctx) {
     await this._markTaskMerged(task.id, { mergedAt: new Date(task.merged_at), commitSha: task.pr_commit_sha || null });
   }
   return { result: { status: 'merged', reason: 'published_settled' } };
+}
+
+// A merge was started (MERGE_IN_FLIGHT recorded) but its publication was
+// never recorded — the process died mid-merge, or the error path could not
+// clear the marker. Prove from GitHub whether main contains our commit (the
+// atomic merge makes it a parent of main's new commit): if so, record the
+// publication and settle through publishedCleanupGate; if not, the merge
+// never landed — clear the marker and continue the normal gates.
+async function mergeInFlightGate(ctx) {
+  const inFlight = ctx.prTasks.filter((t) => t.failure_reason === MERGE_IN_FLIGHT && !t.merged_at);
+  if (!inFlight.length) return null;
+  const ours = String(inFlight[0].pr_commit_sha || '');
+  let landed;
+  try {
+    const production = process.env.GITHUB_ASTRO_DEFAULT_BRANCH || 'main';
+    const { mergeBaseSha } = await GitHubClient.compareFiles(production, ours);
+    landed = !!ours && String(mergeBaseSha || '').toLowerCase() === ours.toLowerCase();
+  } catch (err) {
+    logger.warn(`[internal-link-pr-executor] merge-in-flight check failed for PR #${ctx.prNumber}: ${err.message}`);
+    return { hold: 'merge_state_unknown' };
+  }
+  const ids = ctx.prTasks.map((t) => t.id);
+  if (!landed) {
+    await db(TABLE).whereIn('id', ids).where({ status: 'pr_open', failure_reason: MERGE_IN_FLIGHT })
+      .update({ failure_reason: null, updated_at: new Date() });
+    ctx.prTasks = ctx.prTasks.map((t) => ({ ...t, failure_reason: null }));
+    return null;
+  }
+  const mergedAt = new Date();
+  await db(TABLE).whereIn('id', ids).where('status', 'pr_open').update({ merged_at: mergedAt, updated_at: new Date() });
+  return publishedCleanupGate.call(this, { ...ctx, prTasks: ctx.prTasks.map((t) => ({ ...t, merged_at: mergedAt })) });
 }
 
 function prStateGate(ctx) {
@@ -366,7 +400,7 @@ function mergeCapGate(ctx) {
   return ctx.allowMerge ? null : { hold: 'merge_cap_reached' };
 }
 
-const MERGE_GATES = [publishedCleanupGate, prStateGate, provenanceGate, productionBaseGate, codexFindingsGate, linkOnlyDiffGate, previewBuildGate, codexGraceGate, targetStillValidGate, sourceProtectionMergeGate, publishCapGate, mergeCapGate];
+const MERGE_GATES = [publishedCleanupGate, mergeInFlightGate, prStateGate, provenanceGate, productionBaseGate, codexFindingsGate, linkOnlyDiffGate, previewBuildGate, codexGraceGate, targetStillValidGate, sourceProtectionMergeGate, publishCapGate, mergeCapGate];
 
 class InternalLinkPrExecutor {
   async runDryRun({ limit = DEFAULT_LIMIT, taskIds = null } = {}) {
@@ -608,6 +642,11 @@ class InternalLinkPrExecutor {
 
   async _mergeLinkPr(ctx) {
     const { pr, prNumber, prTasks, codex } = ctx;
+    // Merge intent is recorded BEFORE the external write: if the process dies
+    // after main moved but before publication is recorded, mergeInFlightGate
+    // proves whether main already contains our commit and settles from there.
+    await db(TABLE).whereIn('id', prTasks.map((t) => t.id)).where('status', 'pr_open')
+      .update({ failure_reason: MERGE_IN_FLIGHT, updated_at: new Date() });
     let merged;
     try {
       merged = await GitHubClient.mergePr(prNumber, {
@@ -619,6 +658,11 @@ class InternalLinkPrExecutor {
         message: `Auto-merged: link-only diff, green hub preview, ${codex.clean ? 'clean Codex review' : 'no Codex findings within the grace window'}.`,
       });
     } catch (err) {
+      // The merge did not land (mergePr throws before moving main): drop the
+      // in-flight marker. If it did land despite the error, the marker left
+      // behind by a failed clear lets mergeInFlightGate recover it.
+      await db(TABLE).whereIn('id', prTasks.map((t) => t.id)).where({ status: 'pr_open', failure_reason: MERGE_IN_FLIGHT })
+        .update({ failure_reason: null, updated_at: new Date() }).catch(() => {});
       // Main moved between the check and the merge: re-verify next tick.
       if (err?.code === 'BLOG_BASE_MOVED') return { status: 'hold', reason: 'base_moved', pr_number: prNumber };
       throw err;
@@ -733,6 +777,19 @@ class InternalLinkPrExecutor {
         logger.warn(`[internal-link-pr-executor] close note failed for PR #${pr.number}: ${err.message}`);
       }
       await GitHubClient.closePr(pr.number);
+      // A human may have merged it between our read and the close: then the
+      // links are live — record the publication, never the rejection.
+      const after = await GitHubClient.getPr(pr.number).catch(() => null);
+      if (after?.merged) {
+        const mergedAt = after.merged_at ? new Date(after.merged_at) : new Date();
+        await db(TABLE).whereIn('id', prTasks.map((t) => t.id)).where('status', 'pr_open')
+          .update({ skip_reason: null, merged_at: mergedAt, updated_at: new Date() });
+        for (const task of prTasks) {
+          await this._markTaskMerged(task.id, { mergedAt, commitSha: after.merge_commit_sha || null });
+        }
+        logger.info(`[internal-link-pr-executor] PR #${pr.number} was merged concurrently; recorded as published instead of closing`);
+        return true;
+      }
     }
     // Clear the tasks' PR lifecycle only once the rejected branch is
     // confirmed gone: while it survives, the PR could be reopened and merged,
@@ -2035,6 +2092,17 @@ async function requestCodexReview(pr, headSha, selected) {
 module.exports = new InternalLinkPrExecutor();
 module.exports.InternalLinkPrExecutor = InternalLinkPrExecutor;
 module.exports.REVIEWER_REJECTION_PREFIXES = REVIEWER_REJECTION_PREFIXES;
+// Planners without a claim to release (weekly GSC, post-merge planning) put
+// dry-run rows that failed only on a transient load error back in the pool:
+// the sweep's runPrBatch fully revalidates every candidate anyway.
+module.exports.requeueTransientDryRunFailures = async (results = []) => {
+  const ids = (results || [])
+    .filter((r) => r.status === 'failed' && r.task_id && module.exports.isTransientLoadFailure(r.failure_reason))
+    .map((r) => r.task_id);
+  if (!ids.length) return 0;
+  await db(TABLE).whereIn('id', ids).where('status', 'failed').update({ status: 'patch_candidate', updated_at: new Date() });
+  return ids.length;
+};
 // A load failure that is not a confirmed-missing file (rate limit, network,
 // 5xx) — callers retry instead of treating it as a verdict.
 module.exports.isTransientLoadFailure = (reason) => !!reason && !MISSING_FILE_RE.test(String(reason))

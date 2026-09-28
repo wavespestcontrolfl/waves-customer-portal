@@ -1363,8 +1363,12 @@ describe('internal-link PR auto-merge', () => {
     GitHubClient.mergePr.mockResolvedValueOnce({ sha: 'b'.repeat(40), merged: true, headAdvanced: 'c'.repeat(40) });
     GitHubClient.closePr.mockRejectedValueOnce(new Error('github down'));
     await expect(instance.runAutoMerge()).rejects.toThrow('github down');
-    // Publication evidence is on the rows before cleanup was attempted.
-    expect(updates).toEqual([expect.objectContaining({ merged_at: expect.any(Date) })]);
+    // Merge intent before the external write, then publication evidence,
+    // both on the rows before cleanup was attempted.
+    expect(updates).toEqual([
+      expect.objectContaining({ failure_reason: 'internal_link_merge_in_flight' }),
+      expect.objectContaining({ merged_at: expect.any(Date) }),
+    ]);
     expect(instance._markTaskMerged).not.toHaveBeenCalled();
 
     // Next tick, branch retirement fails: still held, rows stay pr_open.
@@ -1579,6 +1583,23 @@ describe('internal-link PR auto-merge', () => {
     expect(instance._closeLinkPr).toHaveBeenCalledWith(expect.any(Object), expect.any(Array), expect.objectContaining({ status: 'patch_candidate' }));
   });
 
+  test('a merge that landed before the process died is recovered from the in-flight marker', async () => {
+    openTasks([{ id: 't1', status: 'pr_open', astro_pr_url: prUrl, pr_commit_sha: HEAD, failure_reason: 'internal_link_merge_in_flight', executor_version: 'internal-link-pr-executor-v2', source_file: 'src/content/blog/a.md', source_url: '/a/', target_url: '/termite-inspection/' }]);
+    GitHubClient.getPr.mockResolvedValue({ number: 77, state: 'open', user: { login: 'waves-bot' }, head: { sha: 'c'.repeat(40), ref: 'content/internal-link-x' }, base: { ref: 'main' } });
+    GitHubClient.compareFiles = jest.fn(async () => ({ files: [], mergeBaseSha: HEAD }));
+    expect(await instance.runAutoMerge()).toMatchObject({ status: 'merged', reason: 'published_settled' });
+    expect(GitHubClient.closePr).toHaveBeenCalledWith(77);
+    expect(instance._markTaskMerged).toHaveBeenCalledWith('t1', expect.any(Object));
+    expect(GitHubClient.mergePr).not.toHaveBeenCalled();
+  });
+
+  test('an in-flight marker for a merge that never landed is cleared and the gates continue', async () => {
+    openTasks([{ id: 't1', status: 'pr_open', astro_pr_url: prUrl, pr_commit_sha: HEAD, failure_reason: 'internal_link_merge_in_flight', executor_version: 'internal-link-pr-executor-v2', source_file: 'src/content/blog/a.md', source_url: '/a/', target_url: '/termite-inspection/' }]);
+    GitHubClient.compareFiles = jest.fn(async () => ({ files: [], mergeBaseSha: 'd'.repeat(40) }));
+    expect(await instance.runAutoMerge()).toMatchObject({ status: 'merged', codex: 'silent' });
+    expect(GitHubClient.mergePr).toHaveBeenCalledTimes(1);
+  });
+
   test('kill switch and shadow mode disable it', async () => {
     process.env.AUTONOMOUS_INTERNAL_LINK_AUTO_MERGE = 'false';
     expect(await instance.runAutoMerge()).toEqual({ status: 'disabled' });
@@ -1729,6 +1750,39 @@ describe('internal-link stale reservation keeps its branch reference until retir
     GitHubClient.retireBranch = jest.fn(async () => false);
     expect(await new InternalLinkPrExecutor()._recoverStalePrReservedTasks()).toBe(0);
     expect(updates).toEqual([]);
+    db.mockImplementation(() => undefined);
+  });
+});
+
+describe('internal-link close vs a concurrent human merge', () => {
+  test('a PR merged while we closed it is recorded as published, not rejected', async () => {
+    const instance = new InternalLinkPrExecutor();
+    instance._markTaskMerged = jest.fn();
+    const updates = [];
+    const q = { whereIn: jest.fn(() => q), where: jest.fn(() => q), update: jest.fn(async (patch) => { updates.push(patch); return 1; }) };
+    db.mockImplementation(() => q);
+    GitHubClient.closePr = jest.fn();
+    GitHubClient.getPr.mockResolvedValueOnce({ number: 77, state: 'closed', merged: true, merged_at: '2026-09-28T01:00:00Z', merge_commit_sha: 'm'.repeat(40) });
+    GitHubClient.retireBranch = jest.fn();
+    expect(await instance._closeLinkPr({ number: 77, state: 'open', head: { ref: 'b' } }, [{ id: 't1' }], { status: 'skipped', skipReason: 'codex_findings', note: 'n' })).toBe(true);
+    expect(instance._markTaskMerged).toHaveBeenCalledWith('t1', expect.objectContaining({ commitSha: 'm'.repeat(40) }));
+    expect(updates.at(-1)).toMatchObject({ skip_reason: null, merged_at: expect.any(Date) });
+    db.mockImplementation(() => undefined);
+  });
+});
+
+describe('internal-link transient dry-run failures from planners', () => {
+  test('are returned to the candidate pool; confirmed-missing files are not', async () => {
+    const updates = [];
+    const q = { whereIn: jest.fn((col, ids) => { q.ids = ids; return q; }), where: jest.fn(() => q), update: jest.fn(async (patch) => { updates.push({ ids: q.ids, patch }); return 1; }) };
+    db.mockImplementation(() => q);
+    const n = await executor.requeueTransientDryRunFailures([
+      { task_id: 'a', status: 'failed', failure_reason: 'GitHub 502' },
+      { task_id: 'b', status: 'failed', failure_reason: 'source_file_not_found:x.md' },
+      { task_id: 'c', status: 'patch_candidate' },
+    ]);
+    expect(n).toBe(1);
+    expect(updates).toEqual([{ ids: ['a'], patch: expect.objectContaining({ status: 'patch_candidate' }) }]);
     db.mockImplementation(() => undefined);
   });
 });

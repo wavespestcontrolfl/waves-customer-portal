@@ -4282,6 +4282,7 @@ async function planInternalLinksForTarget(target = {}) {
     if (executor?.runDryRun) {
       const dryRun = await executor.runDryRun({ taskIds, limit: taskIds.length });
       candidates = (dryRun?.results || []).filter((r) => r.status === 'patch_candidate').length;
+      if (executor.requeueTransientDryRunFailures) candidates += await executor.requeueTransientDryRunFailures(dryRun?.results);
     }
   }
   return { url, queued: taskIds.length, candidates };

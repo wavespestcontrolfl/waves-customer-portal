@@ -128,6 +128,7 @@ async function planGscTargets({
     const executor = require('./internal-link-pr-executor');
     const dryRun = await executor.runDryRun({ taskIds, limit: taskIds.length });
     candidates = (dryRun?.results || []).filter((r) => r.status === 'patch_candidate').length;
+    candidates += await executor.requeueTransientDryRunFailures(dryRun?.results);
   }
   logger.info(`[internal-link-target-planner] ${pages.length} GSC target(s): queued=${taskIds.length} candidates=${candidates}`);
   return { status: 'ok', targets: pages.length, queued: taskIds.length, candidates, summary };
