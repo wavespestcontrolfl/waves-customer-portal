@@ -16,6 +16,16 @@
 
 const { hasCreditableWaterIn, normalizeLawnAftercare, wateringRestrictionAction } = require('./lawn-aftercare');
 
+// The water/damp cards below phrase a CREDITED watering-in generically
+// ("Water in today's application as directed…") rather than quoting the
+// recorded label instruction verbatim, so the hero action's own dedup check
+// (lawn-report-v2.js, which compares against the exact recorded instruction)
+// cannot recognize the two as the same task and concatenates both — the
+// customer reads the watering-in command twice in different words (codex P2
+// #5033 r8). This marker lets the hero recognize the generic phrasing
+// without hardcoding the sentence in two files.
+const CREDITED_WATER_IN_PHRASE = 'Water in today’s application as directed';
+
 const STATUS_RANK = { needs_attention: 0, urgent: 0, watch: 1, healthy: 2, strong: 2, tracking: 3 };
 
 function catByKey(categories, key) {
@@ -255,4 +265,4 @@ function buildLawnInsightCards({ categories = [], water = {}, mowing = null, gra
   return cards;
 }
 
-module.exports = { buildLawnInsightCards };
+module.exports = { buildLawnInsightCards, CREDITED_WATER_IN_PHRASE };

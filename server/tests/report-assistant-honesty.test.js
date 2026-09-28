@@ -258,6 +258,24 @@ describe('watering questions answer with the weekly plan when the report carries
     }
   });
 
+  // Round 8 (codex P1 #5033 on report-assistant.js:577): a verified
+  // instruction still marked needsReview resolves to the SAME 'review'
+  // verdict as the legacy-unverified case above, but wateringPlanCondition()
+  // used to return null with no weekPlan at all — dropping the mandatory
+  // confirmation task and leaving the customer with only the unreviewed
+  // label instruction, as if it were settled guidance.
+  test('a review-marked instruction still carries its confirmation task with no weekly plan at all', () => {
+    const aftercare = {
+      watering: 'Apply 0.25 inches within 24 hours.',
+      evidenceSource: 'product_instruction',
+      needsReview: true,
+    };
+    const data = { pressureIndex: null, dynamicContext: {}, reportV2: { aftercare, water: { weekPlan: null } } };
+    const answer = answerServiceReportQuestion({ question: 'Should I water?', data });
+    expect(answer).toContain(aftercare.watering);
+    expect(answer).toMatch(/Confirm the product watering directions with your technician before changing irrigation\./);
+  });
+
   test.each([
     [true, true],
     [undefined, true],

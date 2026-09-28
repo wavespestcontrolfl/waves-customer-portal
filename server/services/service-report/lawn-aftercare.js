@@ -111,9 +111,20 @@ function aftercareCustomerTask(aftercare, weekPlan) {
 // membership (older payloads) keeps the current-week reading. Routed through
 // the same scoped verdict as every other helper — a visit outside the plan
 // week resolves 'none', which carries no plan condition either.
+//
+// With NO weekly plan at all there is no "plan below" to place a condition
+// ahead of, but an unresolved review/hold verdict still owes the customer its
+// confirmation/restriction task — falling all the way through to null here
+// silently dropped it (codex P1 #5033 r8: a direct watering question with a
+// review-marked instruction and no weekPlan answered with the raw, unreviewed
+// label text and nothing else). Fall back to the same plain task
+// wateringRestrictionAction() returns, so the task is never conditioned on a
+// plan's presence.
 function wateringPlanCondition(aftercare, weekPlan) {
-  if (!weekPlan?.title) return null;
-  return VERDICT_PLAN_CONDITION[resolveLawnAftercare(aftercare, weekPlan).verdict] || null;
+  const state = resolveLawnAftercare(aftercare, weekPlan);
+  if (!state.restricts) return null;
+  if (!weekPlan?.title) return state.customerTask;
+  return VERDICT_PLAN_CONDITION[state.verdict] || null;
 }
 
 // The weekly plan the report actually shows: reduced by a credited water-in

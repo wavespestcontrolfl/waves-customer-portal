@@ -298,6 +298,43 @@ describe('aftercare verdict fixture table (PR #5033 findings)', () => {
     ['P2 a past-visit review confirmation is stripped from assistant next steps', () => ask('What should I do next?', { weekPlan: { ...RUN_PLAN, visitInPlanWeek: false } }), (answer) => {
       expect(answer).not.toMatch(CONFIRM);
     }],
+    // Round 8 (PR #5033 on lawn-report-v2.js:654): a credited watering-in
+    // instruction can itself read like drought advice ("Water in
+    // drought-stressed areas…"); promoting it into snapshot.customerAction
+    // must not expose it to the SAME rain-vs-drought rewrite that reconciles
+    // the surrounding prose, or the hero disagrees with the Aftercare
+    // section's own (untouched) instruction.
+    ['P1 drought reconciliation preserves a credited instruction word for word', () => {
+      const report = renderWithCredit('deficit');
+      report.aftercare = { ...creditedAftercare(), watering: 'Water in drought-stressed areas with 0.25 inches today.' };
+      report.water = { ...report.water, droughtSignal: true, rainInches: 3, targetInches: 1.25 };
+      report.snapshot = {
+        ...report.snapshot,
+        customerAction: `${report.aftercare.watering} Damage could be drought-related in the other zones.`,
+      };
+      const fix = reconcileLawnReport({ data: { lawnAssessment: CASES.deficit }, reportV2: report });
+      return { report, fix };
+    }, ({ report, fix }) => {
+      expect(fix).toBeTruthy();
+      // The credited instruction survives verbatim…
+      expect(fix.snapshot.customerAction).toContain(report.aftercare.watering);
+      // …while the surrounding drought hypothesis is still reconciled.
+      expect(fix.snapshot.customerAction).toMatch(/sprinkler-coverage-related/);
+    }],
+    // Round 8 (PR #5033 on lawn-report-v2.js:657): a credited water-in on a
+    // surplus/damp water card phrases the SAME task generically ("Water in
+    // today's application as directed…") rather than quoting the recorded
+    // instruction — the literal `includes` check missed that semantic
+    // duplicate and the hero repeated the watering command twice.
+    ['P2 a credited water-in is not repeated when the water card already states it', () => renderWithCredit('overWatered'), (report) => {
+      const waterCard = report.insights.find((c) => c.category === 'water');
+      expect(waterCard).toBeDefined();
+      expect(waterCard.customerAction).toMatch(/^Water in today’s application as directed/);
+      // The hero shows the card's own wording once — not the card's generic
+      // phrasing AND the recorded instruction concatenated.
+      expect(report.snapshot.customerAction).toBe(waterCard.customerAction);
+      expect(report.snapshot.customerAction).not.toContain(creditedAftercare().watering);
+    }],
   ])('%s', async (_finding, run, check) => check(await run()));
 });
 

@@ -13,7 +13,7 @@
 
 const { dateOnlyToNoonUtc } = require('./time-format');
 const { buildVisualDiagnosisCategories, scoreStatus } = require('./lawn-visual-diagnosis');
-const { buildLawnInsightCards } = require('./lawn-report-insights');
+const { buildLawnInsightCards, CREDITED_WATER_IN_PHRASE } = require('./lawn-report-insights');
 const { buildTreatmentSummary } = require('./treatment-summary');
 const { crossSeasonNote, crossSeasonNoteFromSeasons, dormancyLikely } = require('./lawn-seasonality');
 const { photoZoneLabel } = require('../lawn-visit-input');
@@ -652,7 +652,15 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   // in the Aftercare section only, never promoted into the hero action,
   // noActionNeeded, or the SMS summary derived from it below (codex P2 r10).
   const aftercareTask = aftercareCustomerTask(aftercare, water ? water.weekPlan : null);
-  const realCustomerAction = aftercareTask && topIssue?.customerAction?.includes(aftercareTask)
+  // A credited water-in the water/damp cards phrase generically ("as
+  // directed") already carries this same task in different words — the
+  // literal-instruction `includes` check below misses that semantic
+  // duplicate, so recognize the shared marker too before concatenating both
+  // and repeating the watering command twice (codex P2 #5033 r8).
+  const aftercareAlreadyStated = topIssue?.customerAction
+    && (topIssue.customerAction.includes(aftercareTask || '\u0000')
+      || (topIssue.category === 'water' && topIssue.customerAction.includes(CREDITED_WATER_IN_PHRASE)));
+  const realCustomerAction = aftercareTask && aftercareAlreadyStated
     ? topIssue.customerAction
     : [aftercareTask, topIssue?.customerAction].filter(Boolean).join(' ') || null;
   const wavesNext = topIssue ? (topIssue.nextVisitPlan || null) : null;
