@@ -15,7 +15,11 @@ jest.mock('../services/billing-channel-email-authority', () => ({
   dispatchUnderBillingEmailAuthority: jest.fn(),
 }));
 jest.mock('../services/collections/contact-ledger', () => ({
-  recordContact: jest.fn(async () => ({ id: 'led-1', metadata: {} })),
+  // Echoes the caller's OWN metadata back (real recordContact's fresh-
+  // insert return shape: `{ id, metadata: metadata || {} }`) so a test
+  // that reads combined_invoice_ids off the returned ledger object (Codex
+  // round-5 P2) sees exactly what THIS call passed in, not a fixed stub.
+  recordContact: jest.fn(async (args) => ({ id: 'led-1', metadata: args?.metadata || {} })),
   markSendFailed: jest.fn(async () => true),
   markDelivered: jest.fn(async () => true),
   claimAttempt: jest.fn(async () => ({ allowed: true })),
@@ -1268,7 +1272,7 @@ describe('GATE_DUNNING_COMBINED_MESSAGE — narrow rebuild', () => {
     expect(unbatchedUpdate.update).not.toHaveBeenCalled();
   });
 
-  test('a covered sibling paid between resolve and dispatch refuses the combined SMS leg at the true provider boundary (round-4 finding #2)', async () => {
+  test('a covered sibling paid between resolve and dispatch refuses the combined SMS leg at the true provider boundary (round-4 finding #2, restructured round-5 finding #1)', async () => {
     const seq = followupRow();
     const sequenceUpdate = chain();
     setDbQueues({
@@ -1303,35 +1307,144 @@ describe('GATE_DUNNING_COMBINED_MESSAGE — narrow rebuild', () => {
     );
 
     // Pull the ACTUAL preDispatchCheck wired onto the combined SMS leg and
-    // re-invoke it directly against a fresh DB state where inv-2 (a
-    // covered sibling, not the anchor) has since been paid — proving the
-    // boundary check covers the FULL combined set, not just row.invoice_id.
+    // re-invoke it directly against a fresh re-run of the SAME eligibility
+    // authority (buildPayBalanceLink) where inv-2 (a covered sibling, not
+    // the anchor) has since been paid and no longer resolves into the
+    // combined set at all — proving the boundary check re-runs the
+    // authority itself rather than a parallel predicate (Codex round-5 P1),
+    // and covers the FULL combined set, not just row.invoice_id.
     const dispatchCall = sendCustomerMessage.mock.calls.find((call) => call[0]?.preDispatchCheck);
     expect(dispatchCall).toBeTruthy();
     const preDispatchCheck = dispatchCall[0].preDispatchCheck;
 
-    db.mockImplementationOnce((table) => {
-      if (table !== 'invoices') throw new Error(`unexpected table: ${table}`);
-      return {
-        whereIn: () => ({
-          select: async () => [
-            {
-              id: 'inv-1', customer_id: 'cust-1', status: 'sent', payer_id: null,
-              scheduled_send_error: null, total: 129, credit_applied: 0,
-            },
-            // Paid since the message was composed.
-            {
-              id: 'inv-2', customer_id: 'cust-1', status: 'paid', payer_id: null,
-              scheduled_send_error: null, total: 129, credit_applied: 0,
-            },
-          ],
-        }),
-      };
-    });
+    ComposerLinks.buildPayBalanceLink.mockResolvedValueOnce(payLink({
+      coveredInvoiceIds: ['inv-1'],
+      coveredInvoiceCents: { 'inv-1': 12900 },
+      balance: { total: 129, count: 1 },
+    }));
 
     const verdict = await preDispatchCheck();
     expect(verdict.ok).toBe(false);
-    expect(verdict.code).toBe('INVOICE_TERMINAL');
-    expect(verdict.reason).toContain('inv-2');
+    expect(verdict.code).toBe('INVOICE_COMBINED_SET_CHANGED');
+    expect(ComposerLinks.buildPayBalanceLink).toHaveBeenCalledTimes(2);
+  });
+
+  test('a deduped retry reports the ORIGINAL delivered set from the ledger, not this run\'s recomputed one — a newly-covered invoice is never silently advanced (round-5 finding #2)', async () => {
+    // The anchor's legs were BOTH already delivered by an earlier attempt
+    // — when the covered set was inv-1 + inv-2 (stamped on the ledger rows
+    // at that original send). THIS run's resolveCombinedVariant recomputes
+    // fresh and now covers inv-1 + inv-3 instead (inv-2 dropped out,
+    // inv-3 — due THIS run, in the batch as a "sibling" — newly joined).
+    // inv-3 was never actually named by the delivered message and must not
+    // be silently advanced as covered; it fires its own individual touch.
+    const ContactLedger = require('../services/collections/contact-ledger');
+    ContactLedger.claimAttempt
+      .mockResolvedValueOnce({ delivered: true }) // email
+      .mockResolvedValueOnce({ delivered: true }); // sms
+    // Overrides the shared echo-back default for exactly these 2 calls —
+    // simulating a REUSED ledger row whose metadata was stamped on the
+    // ORIGINAL send, not this retry's own (different) combinedVariant.
+    ContactLedger.recordContact
+      .mockResolvedValueOnce({ id: 'led-email-1', metadata: { combined_invoice_ids: ['inv-1', 'inv-2'] } })
+      .mockResolvedValueOnce({ id: 'led-sms-1', metadata: { combined_invoice_ids: ['inv-1', 'inv-2'] } });
+    ComposerLinks.buildPayBalanceLink.mockResolvedValue(payLink({
+      coveredInvoiceIds: ['inv-1', 'inv-3'],
+      coveredInvoiceCents: { 'inv-1': 12900, 'inv-3': 12900 },
+    }));
+    const anchorSeq = followupRow({ id: 'seq-1', invoice_id: 'inv-1', invoice_created_at: '2026-05-20T12:00:00.000Z' });
+    const siblingSeq = followupRow({ id: 'seq-3', invoice_id: 'inv-3', invoice_created_at: '2026-05-21T12:00:00.000Z', step_index: 0 });
+    const sequenceUpdate = chain();
+    setDbQueues({
+      'invoice_followup_sequences as s': [chain({ result: [anchorSeq, siblingSeq] })],
+      customers: [chain({ first: customer() }), chain({ first: customer() })],
+      invoices: [
+        chain({ first: invoice() }),
+        chain({ first: invoice() }),
+        chain({ first: invoice() }),
+        chain({ result: [
+          { id: 'inv-1', invoice_number: 'WPC-2026-1042', title: 'Quarterly Pest Control' },
+          { id: 'inv-3', invoice_number: 'WPC-2026-1088', title: 'Mosquito' },
+        ] }),
+        chain({ first: invoice() }),
+        chain({ first: invoice({ id: 'inv-3' }) }), chain({ first: invoice({ id: 'inv-3' }) }),
+        chain({ first: invoice({ id: 'inv-3' }) }), chain({ first: invoice({ id: 'inv-3' }) }),
+      ],
+      notification_prefs: [
+        chain({ first: { email_enabled: true, invoice_channels: ['sms', 'email'] } }),
+        chain({ first: { email_enabled: true, invoice_channels: ['sms', 'email'] } }),
+      ],
+      customer_interactions: [chain(), chain(), chain(), chain()],
+      invoice_followup_sequences: [
+        ...claimCycle(anchorSeq, sequenceUpdate, { combinedCheck: true }),
+        ...claimCycle(siblingSeq, chain()),
+      ],
+    });
+
+    await InvoiceFollowUps.runPending();
+
+    // inv-3 was never named by the delivered (deduped) message — it fired
+    // its OWN normal single-invoice touch instead of being silently
+    // credited as covered.
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      templateKey: 'invoice.followup_3_day',
+      idempotencyKey: 'invoice_followup_email:inv-3:d3_friendly',
+    }));
+    // The anchor itself sent nothing new this run (fully deduped).
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalledWith(expect.objectContaining({
+      templateKey: 'invoice.followup_combined_3_day',
+    }));
+  });
+
+  test('a claim.delivered SMS leg reports its OWN channel in the interaction type, not email_outbound (round-5 finding #3)', async () => {
+    // Email is NOT selected at all (invoice_channels: ['sms']), so the
+    // email leg never runs — the anchor's ENTIRE combined delivery this
+    // run rests on the SMS leg alone, which was already delivered by an
+    // earlier attempt (claim.delivered dedup — actualSmsSent, reserved for
+    // a FRESH send, stays false). The anchor's own row still advances
+    // (anchorAdvanced), so the covered sibling advances in lockstep too,
+    // crediting whatever interactionType the anchor's outcome reports on
+    // the sibling's own audit row — this must be 'sms_outbound', not
+    // 'email_outbound'.
+    const ContactLedger = require('../services/collections/contact-ledger');
+    ContactLedger.claimAttempt.mockResolvedValueOnce({ delivered: true }); // sms leg, only leg attempted
+    const anchorSeq = followupRow({ id: 'seq-1', invoice_id: 'inv-1', invoice_created_at: '2026-05-20T12:00:00.000Z' });
+    const siblingSeq = followupRow({ id: 'seq-2', invoice_id: 'inv-2', invoice_created_at: '2026-05-21T12:00:00.000Z', step_index: 0 });
+    const sequenceUpdate = chain();
+    const siblingLiveRead = chain({ first: {
+      id: siblingSeq.id, customer_id: siblingSeq.customer_id, status: 'active',
+      step_index: siblingSeq.step_index, next_touch_at: siblingSeq.next_touch_at, anchor_at: null,
+    } });
+    const siblingUpdate = chain();
+    const siblingAudit = chain();
+    const siblingInvoiceLock = chain({ first: invoice({ id: 'inv-2' }) });
+    setDbQueues({
+      'invoice_followup_sequences as s': [chain({ result: [anchorSeq, siblingSeq] })],
+      customers: [chain({ first: customer() })],
+      invoices: [
+        chain({ first: invoice() }), // claim-txn row lock read
+        chain({ first: invoice() }), // liveInvoice
+        chain({ first: invoice() }), // pre-dun refresh
+        chain({ result: [
+          { id: 'inv-1', invoice_number: 'WPC-2026-1042', title: 'Quarterly Pest Control' },
+          { id: 'inv-2', invoice_number: 'WPC-2026-1055', title: 'Lawn Care' },
+        ] }), // resolveCombinedVariant's per-invoice line lookup
+        // No sendFollowupEmail read — email is not selected, so that leg
+        // never runs at all this touch.
+        siblingInvoiceLock,
+      ],
+      notification_prefs: [chain({ first: { email_enabled: true, invoice_channels: ['sms'] } })],
+      customer_interactions: [siblingAudit],
+      invoice_followup_sequences: [
+        ...claimCycle(anchorSeq, sequenceUpdate, { combinedCheck: true }),
+        siblingLiveRead, siblingUpdate,
+      ],
+    });
+
+    await InvoiceFollowUps.runPending();
+
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    expect(siblingAudit.insert).toHaveBeenCalledWith(expect.objectContaining({
+      interaction_type: 'sms_outbound',
+    }));
   });
 });

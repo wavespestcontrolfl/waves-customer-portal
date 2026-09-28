@@ -156,48 +156,105 @@ async function collectionsChannelPermitted(customerId, invoiceId, channel, exclu
 }
 
 /**
+ * The combined-payment eligibility authority (composer-customer-links.js
+ * buildPayBalanceLink → pay-combined.js combinedEligibleSiblings →
+ * open-balance.js openBalanceInvoices — the SAME chain GET /pay/:token
+ * itself reads) is the ONLY source of the covered set, both when a
+ * combined touch is first rendered and when it is re-verified at the true
+ * dispatch boundary (Codex round-5 P1: "no parallel predicate" — a
+ * narrower, separately-maintained boundary check misses exactly what the
+ * authority itself already tracks: a sibling that gains a live
+ * stripe_payment_intent_id, moves onto a payer statement, returns to
+ * draft, or newly resolves to a third-party payer). ONE read
+ * (`deferMint: true` — resolves everything without minting, so a
+ * candidate this lane may still reject never leaves a short_codes row
+ * behind) plus this lane's own sequence-status disqualification re-check
+ * (an admin stop/pause/autopay-hold the authority itself doesn't track —
+ * Codex round-2 P1, local finding #1), shared verbatim by
+ * resolveCombinedVariant (render) and dunningDispatchCheck (boundary)
+ * below. Never filters the set down on a disqualification — returns null
+ * outright, since a filtered set would still leave the excluded invoice
+ * chargeable through the very link that no longer names it.
+ */
+async function resolveCombinedEligibleSet(customerId) {
+  const { buildPayBalanceLink } = require('./composer-customer-links');
+  const link = await buildPayBalanceLink([customerId], { deferMint: true });
+  const coveredIds = (link?.coveredInvoiceIds || []).map(String);
+  if (typeof link?.mintUrl !== 'function' || !(link?.balance?.total > 0) || coveredIds.length < 2) return null;
+
+  // The itemized lines come from the SAME read as the total and must add
+  // up to it exactly, or this touch is not rendered/dispatched combined (a
+  // payment/edit landing between two reads inside buildPayBalanceLink
+  // itself — defensive; the same call supplies both).
+  const lineCents = link.coveredInvoiceCents || {};
+  const linesTotal = coveredIds.reduce(
+    (sum, id) => sum + (Number.isInteger(lineCents[id]) ? lineCents[id] : NaN), 0,
+  );
+  if (!Number.isInteger(linesTotal) || linesTotal !== Math.round(link.balance.total * 100)) return null;
+
+  // buildPayBalanceLink's own siblings filter (pay-combined.js) excludes
+  // only a sibling whose sequence status is 'stopped' — it never checks
+  // 'paused'/'autopay_hold', and it never checks the ANCHOR invoice at all
+  // (dunningStoppedInvoiceIds is only ever called on candidates/siblings).
+  // Trusting coveredIds verbatim would let the combined text dun the
+  // customer about an invoice an admin stopped/paused, or one on an
+  // autopay hold — and the linked pay page would still charge it. Any
+  // disqualifying status anywhere in the set falls back to the single
+  // template (never filter the set down). An invoice with no sequence row
+  // at all does not disqualify (nothing to conflict with).
+  const disqualified = await db('invoice_followup_sequences')
+    .whereIn('invoice_id', coveredIds)
+    .whereIn('status', ['stopped', 'paused', 'autopay_hold'])
+    .first('invoice_id');
+  if (disqualified) return null;
+
+  return { link, coveredIds, coveredInvoiceCents: lineCents };
+}
+
+/**
  * The LAST eligibility check, run by the canonical sender immediately
  * before provider preparation (Codex #4311 r42 P1) — extended to the FULL
- * combined set for a combined touch (Codex round-4 P2). Before this, only
- * the anchor invoice (row.invoice_id) was re-verified at the true dispatch
- * boundary; a covered SIBLING paid, credited, stopped, paused, put on an
- * autopay hold, or moved to a third-party payer between
- * resolveCombinedVariant's snapshot and the actual provider request still
- * rode the anchor's clearance — the combined text would dun the customer
- * about it and the linked pay page would still attempt to charge it.
+ * combined set for a combined touch (Codex round-4 P2, restructured round-5
+ * P1). Before round-4, only the anchor invoice (row.invoice_id) was
+ * re-verified at the true dispatch boundary; a covered SIBLING paid,
+ * credited, stopped, paused, put on an autopay hold, or moved to a
+ * third-party payer between resolveCombinedVariant's snapshot and the
+ * actual provider request still rode the anchor's clearance. Round-4's own
+ * fix (a narrower, separately-maintained predicate — selfPayAtDispatchMany)
+ * itself missed the cases the eligibility AUTHORITY already tracks (a
+ * sibling that gains a live PaymentIntent, moves onto a payer statement,
+ * returns to draft, or newly resolves to a third-party payer) — this
+ * re-runs that SAME authority (resolveCombinedEligibleSet) instead of a
+ * parallel predicate, and requires its covered set AND per-invoice cents
+ * to equal the rendered snapshot EXACTLY. Any difference — including the
+ * authority now refusing to resolve one at all — fails the leg closed.
  * Wired as the preDispatchCheck for the SMS/push leg (sendCustomerMessage)
  * and as the preSendCheck for the email leg
  * (dispatchUnderBillingEmailAuthority) — both run this at their own true
  * provider boundary, under whatever lock each already holds there. A
  * single-invoice touch (combinedVariant null) is byte-identical to
- * before: the same selfPayAtDispatch call, same failure shape — this
- * never invents a new outcome, only a wider set to check it against.
+ * before: the same selfPayAtDispatch call, same failure shape.
  */
 function dunningDispatchCheck(invoiceId, customerId, combinedVariant) {
   if (!combinedVariant) return invoiceHelpers.selfPayAtDispatch(invoiceId, db);
-  const coveredIds = combinedVariant.coveredInvoiceIds;
-  const selfPayMany = invoiceHelpers.selfPayAtDispatchMany(
-    coveredIds, db, combinedVariant.coveredInvoiceCents, customerId,
-  );
+  const snapshotIds = combinedVariant.coveredInvoiceIds.map(String);
+  const snapshotCents = combinedVariant.coveredInvoiceCents || {};
   return async () => {
-    const verdict = await selfPayMany();
-    if (verdict.ok !== true) return verdict;
-    // The same disqualifying-status re-check resolveCombinedVariant itself
-    // runs (Codex round-2 P1, local finding #1) — an admin stop/pause/
-    // autopay-hold landing in the window between that resolution and this
-    // true dispatch boundary is exactly the race this check exists for.
-    // Never filter the set down: refuse the whole leg, since the linked
-    // pay page would still charge the excluded invoice.
-    const disqualified = await db('invoice_followup_sequences')
-      .whereIn('invoice_id', coveredIds)
-      .whereIn('status', ['stopped', 'paused', 'autopay_hold'])
-      .first('invoice_id');
-    if (disqualified) {
+    const resolved = await resolveCombinedEligibleSet(customerId).catch(() => null);
+    if (!resolved) {
       return {
-        ok: false,
-        code: 'INVOICE_SEQUENCE_DISQUALIFIED',
-        retryable: true,
-        reason: `invoice ${disqualified.invoice_id}'s follow-up sequence is stopped, paused, or on an autopay hold`,
+        ok: false, code: 'INVOICE_COMBINED_SET_CHANGED', retryable: true,
+        reason: 'the combined eligible set could not be re-resolved before dispatch',
+      };
+    }
+    const { coveredIds, coveredInvoiceCents } = resolved;
+    const sameSet = coveredIds.length === snapshotIds.length
+      && snapshotIds.every((id) => coveredIds.includes(id))
+      && snapshotIds.every((id) => coveredInvoiceCents[id] === snapshotCents[id]);
+    if (!sameSet) {
+      return {
+        ok: false, code: 'INVOICE_COMBINED_SET_CHANGED', retryable: true,
+        reason: 'the combined eligible set changed since this message was composed',
       };
     }
     return { ok: true };
@@ -461,40 +518,14 @@ async function resolveCombinedVariant(customer, invoiceId, step) {
     ]);
     if (!smsRow || !emailRow) return null;
 
-    const { buildPayBalanceLink } = require('./composer-customer-links');
-    // Resolved without minting; the short link is minted only after every
-    // check below passes (Codex round-3 P2: a rejected candidate must not
-    // leave a permanent short_codes row behind).
-    const link = await buildPayBalanceLink([customer.id], { deferMint: true });
-    const coveredIds = (link?.coveredInvoiceIds || []).map(String);
-    if (typeof link?.mintUrl !== 'function' || !(link?.balance?.total > 0) || coveredIds.length < 2) return null;
+    // The SAME authority read the true dispatch boundary re-runs (Codex
+    // round-5 P1) — resolveCombinedEligibleSet's own disqualification
+    // checks (reconciled lines, sequence status) apply here identically;
+    // see its own doc comment.
+    const resolved = await resolveCombinedEligibleSet(customer.id);
+    if (!resolved) return null;
+    const { link, coveredIds, coveredInvoiceCents: lineCents } = resolved;
     if (!coveredIds.includes(String(invoiceId))) return null;
-
-    // buildPayBalanceLink's own siblings filter (pay-combined.js) excludes
-    // only a sibling whose sequence status is 'stopped' — it never checks
-    // 'paused'/'autopay_hold', and it never checks the ANCHOR invoice at
-    // all (dunningStoppedInvoiceIds is only ever called on candidates/
-    // siblings). Trusting coveredIds verbatim here would let the combined
-    // text dun the customer about an invoice an admin stopped/paused, or
-    // one on an autopay hold — and the linked pay page would still charge
-    // it. Re-check every covered id's OWN sequence status directly: any
-    // disqualifying status anywhere in the set falls back to the single
-    // template (never filter the set down — the page would still charge
-    // the excluded invoice). An invoice with no sequence row at all does
-    // not disqualify (nothing to conflict with).
-    const disqualified = await db('invoice_followup_sequences')
-      .whereIn('invoice_id', coveredIds)
-      .whereIn('status', ['stopped', 'paused', 'autopay_hold'])
-      .first('invoice_id');
-    if (disqualified) return null;
-
-    // The itemized lines come from the SAME read as the total and must add
-    // up to it exactly, or this touch is not rendered combined.
-    const lineCents = link.coveredInvoiceCents || {};
-    const linesTotal = coveredIds.reduce(
-      (sum, id) => sum + (Number.isInteger(lineCents[id]) ? lineCents[id] : NaN), 0,
-    );
-    if (!Number.isInteger(linesTotal) || linesTotal !== Math.round(link.balance.total * 100)) return null;
 
     const invoiceRows = await db('invoices').whereIn('id', coveredIds)
       .select('id', 'invoice_number', 'title', 'service_type', 'stripe_payment_intent_id');
@@ -549,10 +580,10 @@ async function resolveCombinedVariant(customer, invoiceId, step) {
       coveredInvoiceIds: coveredIds,
       // The per-invoice amount-due-cents snapshot the rendered message's
       // own itemized lines came from (`lineCents` above) — carried out so
-      // the true provider-boundary check (Codex round-4 P2,
-      // selfPayAtDispatchMany's expectedCents) can refuse a stale-amount
-      // send instead of the dispatch itself re-deriving a second,
-      // possibly-inconsistent snapshot.
+      // dunningDispatchCheck's exact-match re-check (Codex round-5 P1) has
+      // this run's own composed snapshot to compare its fresh
+      // resolveCombinedEligibleSet read against, rather than re-deriving a
+      // second, possibly-inconsistent one.
       coveredInvoiceCents: lineCents,
     };
   } catch (err) {
@@ -2287,6 +2318,25 @@ async function fireTouch(row, { operatorInitiated = false, allowCombined = true 
   // keeps the claim held until delivery evidence can settle it.
   const ContactLedger = require('./collections/contact-ledger');
   const originalDeliveryTimes = [];
+  // Codex round-5 P2: a deduped/claim.delivered retry must report what the
+  // EARLIER delivery actually named, not this run's freshly recomputed
+  // combinedVariant — the covered set can legitimately change between
+  // attempts (e.g. A+B -> A+C), and a sibling only present in the NEW
+  // recompute was never actually communicated by the delivery being
+  // deduped. Set below to whichever delivered leg's own ledger row
+  // recorded (stamped at the ORIGINAL send, before this retry ever ran) —
+  // left `undefined` when no leg deduped at all this run (a genuinely
+  // fresh delivery reflects the current combinedVariant correctly). An
+  // unreadable/legacy ledger row (no stamped metadata) resolves to `null`
+  // here — reported as "no covered set", never a guess.
+  let dedupedCoveredIds;
+  // Codex round-5 P2: a claim.delivered SMS/push leg sets smsSent but
+  // never actualSmsSent/appSent (those are reserved for a fresh delivery
+  // THIS run, which freshDelivery below depends on), so
+  // combinedDeliveredInteractionType would otherwise misreport the
+  // recovered leg's channel as email. Set to the recovered leg's own
+  // channel in that branch; read only by combinedDeliveredInteractionType.
+  let recoveredChannel = null;
   let emailResult = { ok: false, skipped: true, reason: 'collections_policy_denied' };
   // A spacing-window denial keeps the selected Email owed on this step; a
   // durable one (flag, suppression) waives it so the step cannot be pinned
@@ -2301,7 +2351,14 @@ async function fireTouch(row, { operatorInitiated = false, allowCombined = true 
         purpose: mdPending ? 'payment_verification' : 'invoice_followup',
         invoiceIds: [row.invoice_id],
         source: 'invoice_followups',
-        metadata: { step_id: step.id, notificationEventKey: followupEventKey(row, step) },
+        metadata: {
+          step_id: step.id,
+          notificationEventKey: followupEventKey(row, step),
+          // The exact set THIS render named (Codex round-5 P2) — read back
+          // on a later claim.delivered retry instead of trusting that
+          // retry's own freshly recomputed (and possibly different) set.
+          ...(combinedVariant ? { combined_invoice_ids: combinedVariant.coveredInvoiceIds } : {}),
+        },
         ...(selectedChannels !== null ? { idempotencyKey: followupLedgerKey(row, step, 'email') } : {}),
       });
     } catch (ledgerErr) {
@@ -2314,6 +2371,9 @@ async function fireTouch(row, { operatorInitiated = false, allowCombined = true 
       if (claim.delivered) {
         emailResult = { ok: true, deduped: true };
         if (emailLedger.occurred_at) originalDeliveryTimes.push(emailLedger.occurred_at);
+        if (combinedVariant && dedupedCoveredIds === undefined) {
+          dedupedCoveredIds = emailLedger.metadata?.combined_invoice_ids || null;
+        }
       } else if (claim.resolved) {
         emailResult = {
           ok: false,
@@ -2384,7 +2444,15 @@ async function fireTouch(row, { operatorInitiated = false, allowCombined = true 
           customerId: customer.id, channel,
           purpose: mdPending ? 'payment_verification' : 'invoice_followup',
           invoiceIds: [row.invoice_id], source: 'invoice_followups',
-          metadata: { step_id: step.id, notificationEventKey: followupEventKey(row, step) },
+          metadata: {
+            step_id: step.id,
+            notificationEventKey: followupEventKey(row, step),
+            // The exact set THIS render named (Codex round-5 P2) — read
+            // back on a later claim.delivered retry instead of trusting
+            // that retry's own freshly recomputed (and possibly
+            // different) set.
+            ...(combinedVariant ? { combined_invoice_ids: combinedVariant.coveredInvoiceIds } : {}),
+          },
           idempotencyKey: followupLedgerKey(row, step, channel),
         });
       } catch (err) {
@@ -2397,7 +2465,11 @@ async function fireTouch(row, { operatorInitiated = false, allowCombined = true 
         ? await ContactLedger.claimAttempt(ledger) : { allowed: true };
       if (claim.delivered) {
         smsSent = true;
+        recoveredChannel = channel;
         if (ledger.occurred_at) originalDeliveryTimes.push(ledger.occurred_at);
+        if (combinedVariant && dedupedCoveredIds === undefined) {
+          dedupedCoveredIds = ledger.metadata?.combined_invoice_ids || null;
+        }
         continue;
       }
       if (!claim.allowed) { holdStep(); continue; }
@@ -2602,8 +2674,22 @@ async function fireTouch(row, { operatorInitiated = false, allowCombined = true 
   // smsSent (not actualSmsSent): an SMS/push leg an earlier attempt already
   // delivered (claim.delivered / a deduped provider result) counts too.
   const combinedDelivered = !!combinedVariant && (smsSent || appSent || emailResult.ok === true);
-  const combinedDeliveredInteractionType = selectedChannels === null || actualSmsSent ? 'sms_outbound'
-    : appSent ? 'app_outbound' : 'email_outbound';
+  // Codex round-5 P2: a claim.delivered SMS/push leg (recoveredChannel) is
+  // a real delivered leg the SAME as actualSmsSent/appSent would be — it
+  // just isn't counted there because freshDelivery further down must stay
+  // false for a dedup-only retry (see recoveredChannel's own comment).
+  const combinedDeliveredInteractionType = selectedChannels === null || actualSmsSent || recoveredChannel === 'sms'
+    ? 'sms_outbound'
+    : appSent || recoveredChannel === 'push' ? 'app_outbound' : 'email_outbound';
+  // Codex round-5 P2: the ORIGINAL covered set a deduped leg actually
+  // delivered (dedupedCoveredIds, from that ledger row's own recorded
+  // metadata) outranks this run's freshly recomputed combinedVariant —
+  // see dedupedCoveredIds' own comment above. No leg deduped at all this
+  // run (dedupedCoveredIds still `undefined`) reports the recomputed set,
+  // since that IS what was just communicated.
+  const combinedCoveredIds = dedupedCoveredIds !== undefined
+    ? dedupedCoveredIds
+    : (combinedVariant?.coveredInvoiceIds || null);
 
   if (!smsSent && !emailResult.ok) {
     // A retryable email outcome (the shared billing email check could not
@@ -2679,7 +2765,7 @@ async function fireTouch(row, { operatorInitiated = false, allowCombined = true 
     // collection reminders in one run for invoices the anchor's own
     // message already named.
     return combinedDelivered
-      ? { sent: false, deliveredCombined: true, coveredInvoiceIds: combinedVariant.coveredInvoiceIds, interactionType: combinedDeliveredInteractionType }
+      ? { sent: false, deliveredCombined: true, coveredInvoiceIds: combinedCoveredIds, interactionType: combinedDeliveredInteractionType }
       : undefined;
   }
 
@@ -2735,9 +2821,9 @@ async function fireTouch(row, { operatorInitiated = false, allowCombined = true 
     return combinedDelivered
       ? {
         sent: false, deliveredCombined: true, anchorAdvanced: true, nextTouchAt: nextAt,
-        coveredInvoiceIds: combinedVariant.coveredInvoiceIds, interactionType: combinedDeliveredInteractionType,
+        coveredInvoiceIds: combinedCoveredIds, interactionType: combinedDeliveredInteractionType,
       }
-      : { sent: false, nextTouchAt: nextAt, coveredInvoiceIds: combinedVariant?.coveredInvoiceIds || null };
+      : { sent: false, nextTouchAt: nextAt, coveredInvoiceIds: combinedCoveredIds };
   }
 
   // Log to customer_interactions for the 360 view
@@ -2754,7 +2840,7 @@ async function fireTouch(row, { operatorInitiated = false, allowCombined = true 
       metadata: JSON.stringify({
         invoice_id: row.invoice_id,
         step_id: step.id,
-        combined_invoice_ids: combinedVariant?.coveredInvoiceIds || undefined,
+        combined_invoice_ids: combinedCoveredIds || undefined,
         step_index: row.step_index,
         sms_sent: actualSmsSent,
         app_sent: appSent,
@@ -2763,7 +2849,7 @@ async function fireTouch(row, { operatorInitiated = false, allowCombined = true 
       }),
     });
   } catch { /* non-critical */ }
-  return { sent: true, nextTouchAt: nextAt, coveredInvoiceIds: combinedVariant?.coveredInvoiceIds || null, interactionType };
+  return { sent: true, nextTouchAt: nextAt, coveredInvoiceIds: combinedCoveredIds, interactionType };
 }
 
 /**
