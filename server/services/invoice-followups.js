@@ -1195,10 +1195,16 @@ async function fireGroupedRows(toFire) {
               step_index: siblingNextIndex,
               next_touch_at: nextAt,
               status: outOfSteps ? 'completed' : 'active',
+              // The customer was told about this invoice in the anchor's
+              // message, so it counts as a touch sent (read later as "a
+              // reminder went out" for this sequence).
+              touches_sent: trx.raw('touches_sent + 1'),
             });
         });
+        // Covered or lost to a concurrent change, either way no send of
+        // its own this run.
+        skipped++;
         if (updated) {
-          skipped++;
           // A lightweight audit trail only (never a new ledger/idempotency
           // record — that would reintroduce the cross-invoice ledger
           // complexity this narrow rebuild deliberately avoids): the

@@ -178,6 +178,7 @@ describe('GATE_DUNNING_COMBINED_MESSAGE — narrow rebuild', () => {
         return { ok: true };
       });
     db.transaction = jest.fn(async (fn) => fn(db));
+    db.raw = jest.fn((sql) => ({ sql }));
     db.fn = { now: jest.fn(() => 'CURRENT_TIMESTAMP') };
     ComposerLinks.buildPayBalanceLink.mockReset().mockResolvedValue(payLink());
   });
@@ -323,6 +324,7 @@ describe('GATE_DUNNING_COMBINED_MESSAGE — narrow rebuild', () => {
     const siblingPatch = siblingUpdate.update.mock.calls[0][0];
     expect(siblingPatch.step_index).toBe(1);
     expect(siblingPatch.status).toBe('active');
+    expect(siblingPatch.touches_sent).toEqual({ sql: 'touches_sent + 1' });
     expect(siblingPatch.next_touch_at).toEqual(new Date('2026-05-28T14:00:00.000Z'));
     // Confirms it's independent of the anchor's own new schedule, not a copy.
     expect(sequenceUpdate.update).toHaveBeenCalled();
