@@ -749,13 +749,10 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
 
     describe('finding 4: the providers\' `shows` reads gate naming', () => {
       test('`shows: nothing` makes the workup unusable even with a high-confidence candidate', async () => {
-        queue(
-          candidatesLeg({ shows: 'nothing', turf: [idItem('fixture-st-augustine', 0.95)] }),
-          verifyLeg([['fixture-st-augustine', 0.95]]),
-          conditionsLeg([['fixture-large-patch', 0.9]]),
-        );
+        queue(candidatesLeg({ shows: 'nothing', turf: [idItem('fixture-st-augustine', 0.95)] }));
         const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn' });
-        expect(dispatch).toHaveBeenCalledTimes(3);
+        // Call A's `nothing` is final (combineQuality), so the ladder stops there (Codex #5186 r6 P2).
+        expect(dispatch).toHaveBeenCalledTimes(1);
         expect(result.v2.quality).toMatchObject({ usable: false, shows: 'nothing' });
         expect(result.v2.answer).toMatchObject({ level: 'symptom', headline: engine.UNUSABLE_HEADLINE });
         expect(result.v2.subject.plant).toBeNull();
@@ -763,10 +760,7 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
       });
 
       test('`shows: nothing` in identify mode -> unknown answer', async () => {
-        queue(
-          candidatesLeg({ shows: 'nothing', turf: [idItem('fixture-st-augustine', 0.95)] }),
-          verifyLeg([['fixture-st-augustine', 0.95]]),
-        );
+        queue(candidatesLeg({ shows: 'nothing', turf: [idItem('fixture-st-augustine', 0.95)] }));
         const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn', mode: 'identify' });
         expect(result.v2.answer.level).toBe('unknown');
         expect(result.v2.entry).toBeNull();
@@ -1492,6 +1486,182 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
       }
     });
   });
+
+  describe('Codex #5186 round 6 regressions', () => {
+    const PHOTOS = [{ data: 'x', mimeType: 'image/jpeg' }];
+    const OK_QUALITY = { usable: true, issue: 'none' };
+    const MISS = { ok: false, reason: 'provider_error' };
+    const idItem = (slug, confidence, extra = {}) => ({
+      slug, off_catalog_name: '', group_id: null, confidence, ...extra,
+    });
+    const escIdItem = (slug, confidence, cuesVisible = [1]) => ({ ...idItem(slug, confidence), cues_visible: cuesVisible, cues_not_visible: [] });
+    const condItem = ([slug, confidence, elementsVisible = [1]]) => ({
+      slug, confidence, elements_visible: elementsVisible, signs_visible: [], symptoms_visible: [],
+    });
+    const candidatesLeg = ({
+      quality = OK_QUALITY, shows = 'plant', turf = [], weeds = [], host = [],
+    } = {}) => ({
+      ok: true,
+      json: {
+        quality, shows, turf, weeds, host,
+      },
+    });
+    const verifyLeg = (items) => ({
+      ok: true,
+      json: {
+        candidates: items.map(([slug, confidence, cuesVisible = [1]]) => ({
+          slug, confidence, cues_visible: cuesVisible, cues_not_visible: [],
+        })),
+      },
+    });
+    const conditionsLeg = (items) => ({ ok: true, json: { quality: OK_QUALITY, observed_terms: ['browning'], candidates: items.map(condItem) } });
+    const escalationLeg = ({
+      turf = [], weeds = [], host = [], conditions = [],
+    } = {}) => ({
+      ok: true,
+      json: {
+        quality: OK_QUALITY, shows: 'plant', turf, weeds, host, observed_terms: [], conditions: conditions.map(condItem),
+      },
+    });
+    const queue = (...legs) => legs.forEach((leg) => dispatch.mockResolvedValueOnce(leg));
+    const cand = (slug, confidence) => {
+      const entry = catalog.getEntry(slug);
+      return {
+        slug, entry, confidence, verified: true, checked: true, uncovered: false, cuesVisible: [1], cuesNotVisible: [], offCatalogName: null, groupId: entry.group,
+      };
+    };
+    const offGroup = (name, confidence, groupId) => ({
+      slug: null, entry: null, confidence, verified: false, checked: false, uncovered: false, cuesVisible: [], cuesNotVisible: [], offCatalogName: name, groupId,
+    });
+
+    test('finding 1: an unnamed identity carries a fixed safety line triaged for the worst plant under its node', () => {
+      const { base, swallowed } = engine.UNNAMED_PLANT_SAFETY_CLAUSES;
+      // "Looks like a shrub or tree": the group holds a medical-risk plant (the fixture sago palm).
+      const shrub = engine.buildIdentityResult([offGroup('some shrub', 0.9, 'shrubs-trees')], { subject: 'tree_shrub', currentMonth: 6 });
+      expect(shrub.answer).toMatchObject({ level: 'group', node_id: 'shrubs-trees' });
+      expect(shrub.generic_safety_line).toBe(`${base} ${swallowed}`);
+      // No hazard under the node: no line.
+      const turf = engine.buildIdentityResult([offGroup('some grass', 0.9, 'turfgrasses')], { subject: 'lawn', currentMonth: 6 });
+      expect(turf.answer).toMatchObject({ level: 'group', node_id: 'turfgrasses' });
+      expect(turf.generic_safety_line).toBeNull();
+      // Unknown: triaged over every plant the subject could have named.
+      const unknown = engine.buildIdentityResult([], { subject: 'tree_shrub', currentMonth: 6 });
+      expect(unknown.answer.level).toBe('unknown');
+      expect(unknown.generic_safety_line).toBe(`${base} ${swallowed}`);
+      // A named plant carries its own catalog line instead.
+      const named = engine.buildIdentityResult([cand('fixture-sago-palm', 0.9)], { subject: 'tree_shrub', currentMonth: 6 });
+      expect(named.entry.safety_line).toBe('Toxic to pets.');
+      expect(named.generic_safety_line).toBeNull();
+    });
+
+    test('finding 1: identify mode passes the line through to the card payload', async () => {
+      queue(candidatesLeg({ host: [idItem('', 0.9, { off_catalog_name: 'Some shrub', group_id: 'shrubs-trees' })] }));
+      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'tree_shrub', mode: 'identify' });
+      expect(result.ok).toBe(true);
+      expect(result.v2.answer).toMatchObject({ level: 'group', node_id: 'shrubs-trees' });
+      expect(result.v2.entry).toBeNull();
+      expect(result.v2.generic_safety_line).toContain(engine.UNNAMED_PLANT_SAFETY_CLAUSES.base);
+    });
+
+    test('finding 2: a slot that did not ask for the second opinion keeps its pretty_sure when OpenAI leaves it empty', async () => {
+      queue(
+        candidatesLeg({ turf: [idItem('fixture-bahia', 0.95)], weeds: [idItem('fixture-nutsedge', 0.6)] }),
+        verifyLeg([['fixture-bahia', 0.95], ['fixture-nutsedge', 0.6]]),
+        conditionsLeg([['fixture-large-patch', 0.9]]),
+        escalationLeg({ weeds: [escIdItem('fixture-nutsedge', 0.85)] }),
+      );
+      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn' });
+      expect(dispatch).toHaveBeenCalledTimes(4);
+      expect(result.internal.identity.trigger_reasons).toEqual(['low_confidence']); // the weed slot's
+      expect(result.v2.subject.plant).toMatchObject({ slug: 'fixture-bahia', wording: 'pretty_sure' });
+    });
+
+    test('finding 2: with OpenAI unavailable, only the scope that triggered is capped', async () => {
+      queue(
+        candidatesLeg({ turf: [idItem('fixture-bahia', 0.95)], weeds: [idItem('fixture-nutsedge', 0.6)] }),
+        verifyLeg([['fixture-bahia', 0.95], ['fixture-nutsedge', 0.6]]),
+        conditionsLeg([['fixture-large-patch', 0.9]]),
+        MISS,
+      );
+      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn' });
+      expect(result.internal.escalation_triggered).toBe(true);
+      expect(result.v2.subject.plant).toMatchObject({ slug: 'fixture-bahia', wording: 'pretty_sure' });
+    });
+
+    test('finding 2: the slot that did trigger stays capped when OpenAI leaves it unanswered', async () => {
+      // The verify leg flips the turf slot's top (self_contradiction); OpenAI then answers nothing for turf.
+      queue(
+        candidatesLeg({ turf: [idItem('fixture-st-augustine', 0.9), idItem('fixture-bahia', 0.5)] }),
+        verifyLeg([['fixture-st-augustine', 0.3, []], ['fixture-bahia', 0.95]]),
+        conditionsLeg([['fixture-large-patch', 0.9]]),
+        escalationLeg(),
+      );
+      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn' });
+      expect(result.internal.identity.trigger_reasons).toEqual(['self_contradiction']);
+      expect(result.v2.subject.plant).toMatchObject({ slug: 'fixture-bahia', wording: 'likely' });
+    });
+
+    test('finding 3: settle_it finds the curated comparison from either side of the pair', () => {
+      // Only large patch names chinch bug; with chinch bug ranked first the comparison (and its soap flush) still applies.
+      expect(catalog.getEntry('fixture-chinch-bug').look_alikes).toEqual([]);
+      const chinch = possibility('fixture-chinch-bug', 0.9, [1]);
+      const large = possibility('fixture-large-patch', 0.5, [1]);
+      expect(engine.settleItFor([chinch, large], 'lawn')).toMatchObject({ kind: 'field_test', name: 'Soap flush' });
+      expect(engine.settleItFor([large, chinch], 'lawn')).toMatchObject({ kind: 'field_test', name: 'Soap flush' });
+    });
+
+    test('finding 4: an application with an unknown age never earns fits_application', () => {
+      const herbicide = catalog.getEntry('fixture-herbicide-injury');
+      const sig = engine.signatureFor(herbicide);
+      expect(sig.siteFactors).toContain('recent_herbicide');
+      const tagsFor = (daysAgo) => engine.localAnnotationsFor(herbicide, sig, { currentMonth: 1, chips: {}, context: { applications: [{ kind: 'herbicide', days_ago: daysAgo }] } });
+      for (const unknownAge of [null, undefined, '', 'abc', -3]) expect(tagsFor(unknownAge)).not.toContain('fits_application');
+      expect(tagsFor(5)).toContain('fits_application');
+      expect(tagsFor('10')).toContain('fits_application');
+      expect(tagsFor(30)).not.toContain('fits_application');
+    });
+
+    test('finding 5: a completed cue check replaces an unchecked guess, even when it found no supporting cue', () => {
+      const { combineIdentity } = engine._test;
+      const turfIndex = engine.turfIndexFor();
+      const inContext = new Set(['fixture-st-augustine']);
+      // Gemini's verify leg missed, so its 0.9 is an unchecked guess; OpenAI checked it and found no cue at 0.1.
+      const unchecked = engine.resolveIdentityCandidate(idItem('fixture-st-augustine', 0.9), turfIndex);
+      expect(unchecked).toMatchObject({ checked: false, verified: false });
+      const refuted = combineIdentity([unchecked], [escIdItem('fixture-st-augustine', 0.1, [])], turfIndex, inContext);
+      expect(refuted.candidates[0]).toMatchObject({ confidence: 0.1, checked: true, verified: false });
+      expect(engine.identityEntryLevelAnswer(refuted.candidates[0])).toBeNull();
+      // Two checks that found no cue: the more doubtful score stands — neither can raise the other.
+      const [checkedNoCue] = engine.mergeIdentityVerify([unchecked], {
+        candidates: [{
+          slug: 'fixture-st-augustine', confidence: 0.8, cues_visible: [], cues_not_visible: [],
+        }],
+      });
+      expect(checkedNoCue).toMatchObject({ checked: true, verified: false });
+      expect(combineIdentity([checkedNoCue], [escIdItem('fixture-st-augustine', 0.3, [])], turfIndex, inContext).candidates[0].confidence).toBe(0.3);
+      expect(combineIdentity([checkedNoCue], [escIdItem('fixture-st-augustine', 0.95, [])], turfIndex, inContext).candidates[0].confidence).toBe(0.8);
+    });
+
+    test.each([
+      ['usable: false', { quality: { usable: false, issue: 'blurry' } }],
+      ['shows: nothing', { shows: 'nothing' }],
+    ])('finding 6: a Call A read of %s ends the ladder — no verify, conditions or escalation call', async (_label, read) => {
+      queue(candidatesLeg({ ...read, turf: [idItem('fixture-bahia', 0.5)] }));
+      const workup = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn' });
+      expect(dispatch).toHaveBeenCalledTimes(1);
+      expect(workup.ok).toBe(true);
+      expect(workup.v2.quality.usable).toBe(false);
+      expect(workup.v2.settle_it).toEqual({ kind: 'retake', text: engine.RETAKE_TEXT.lawn });
+      expect(workup.internal.escalation_triggered).toBe(false);
+
+      dispatch.mockReset();
+      queue(candidatesLeg({ ...read, turf: [idItem('fixture-bahia', 0.5)] }));
+      const identity = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn', mode: 'identify' });
+      expect(dispatch).toHaveBeenCalledTimes(1);
+      expect(identity.v2.answer.level).toBe('unknown');
+      expect(identity.v2.tier).toBe('needs_more_evidence');
+    });
+  });
 });
 
 describe('plant-engine — schema-invalid answers flip their ledger row (Codex #5186 round 2, finding 7)', () => {
@@ -1547,6 +1717,17 @@ describe('plant-engine — real catalog', () => {
   beforeAll(() => {
     catalog = require('../services/species-catalog');
     engine = require('../services/photo-id-v2/plant-engine');
+  });
+
+  test('unnamed identity safety line (Codex #5186 r6 P1): triaged for the worst real plant under the node', () => {
+    const {
+      base, swallowed, irritant, pets,
+    } = engine.UNNAMED_PLANT_SAFETY_CLAUSES;
+    const lineFor = engine._test.unnamedPlantSafetyLineFor;
+    expect(lineFor('lawn', 'broadleaf-weeds')).toBe(`${base} ${irritant}`); // spotted spurge's sap
+    expect(lineFor('tree_shrub', 'shrubs-trees')).toBe(`${base} ${swallowed} ${irritant} ${pets}`); // oleander, sago palm, croton
+    expect(lineFor('lawn', 'turfgrasses')).toBeNull();
+    expect(lineFor('palm', null)).toContain(pets); // sago palm is in the palm index
   });
 
   test('identity index: palm subject includes sago-palm', () => {

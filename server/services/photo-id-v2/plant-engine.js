@@ -35,7 +35,7 @@ const { dispatch, rejectCall } = require('../llm/call');
 const { etParts } = require('../../utils/datetime-et');
 const Ajv = require('ajv');
 const {
-  dedupeCandidates, sameCandidateKey, deepestSharedNode, VERDICT_LABELS, ROLE_LABELS, RISK_LABELS, ACTION_LABELS,
+  dedupeCandidates, sameCandidateKey, deepestSharedNode, VERDICT_LABELS, ROLE_LABELS, RISK_LABELS, ACTION_LABELS, UNNAMED_SAFETY_CLAUSES,
 } = require('./pest-engine');
 const {
   CANDIDATES_A_SCHEMA,
@@ -507,7 +507,10 @@ function recentApplicationKinds(chips, context) {
   const kinds = new Set();
   if (chips.recent_application && !UNANSWERED_APPLICATION.includes(chips.recent_application)) kinds.add(chips.recent_application);
   for (const a of (Array.isArray(context.applications) ? context.applications : [])) {
-    if (Number(a.days_ago) <= RECENT_APPLICATION_DAYS) kinds.add(a.kind);
+    // An unknown age (`null`, `''`, not a number) is not a recent application
+    // — `chipNumber`, as for the watering chip (Codex #5186 r6 P2).
+    const daysAgo = chipNumber(a.days_ago);
+    if (daysAgo !== null && daysAgo >= 0 && daysAgo <= RECENT_APPLICATION_DAYS) kinds.add(a.kind);
   }
   return kinds;
 }
@@ -557,14 +560,26 @@ function ownSignatureSettleIt(top) {
   return { kind: 'technician', text: TECHNICIAN_CONFIRM_TEXT };
 }
 
+/** The catalog comparison between the top two possibilities, from either
+ * side — a one-way pair ranked "backwards" (chinch bug over spittlebug) still
+ * finds the curated edge (Codex #5186 r6 P2). As in the pest engine's
+ * `pairBetween`, a side that says no photo can settle the pair wins, with its
+ * own wording. */
+function differentialBetween(top, second) {
+  const own = top.sig.differentials.find((d) => d.slug === second.entry.slug);
+  const reverse = second.sig.differentials.find((d) => d.slug === top.entry.slug);
+  return [own, reverse].find((d) => d?.photo_can_confirm === false) || own || reverse || null;
+}
+
 function settleItFor(possibilities, subject) {
   const top = possibilities[0] || null;
   if (!top) return { kind: 'retake', text: RETAKE_TEXT[subject] };
   const second = possibilities[1] || null;
   if (second) {
-    const diff = top.sig.differentials.find((d) => d.slug === second.entry.slug);
+    const diff = differentialBetween(top, second);
     if (diff) {
-      const matchedTest = fieldTestMatchingText(top.sig.fieldTests, diff.next_observation);
+      // Either entry's own field test may be the one the comparison names.
+      const matchedTest = fieldTestMatchingText([...top.sig.fieldTests, ...second.sig.fieldTests], diff.next_observation);
       if (matchedTest) return fieldTestBlock(matchedTest);
       const photoCanConfirm = diff.photo_can_confirm !== false;
       return { kind: photoCanConfirm ? 'photo' : 'technician', text: diff.next_observation || null, photo_can_confirm: photoCanConfirm };
@@ -651,6 +666,36 @@ function plantSafetyFields(entry) {
     safety: entry.safety ? { ...entry.safety } : null,
     risk: entry.risk || null,
   };
+}
+
+// An unnamed identity (a climbed group or category, or unknown) has no
+// entry to carry a safety line, so it shows only these fixed clauses —
+// never a group's own prose — each chosen when ANY plant under the answered
+// node, reviewed or not, carries that hazard: the node is triaged for its
+// worst member, the pest engine's `unnamedSafetyLineFor` rule (Codex #5186
+// r6 P1). The skin/eye and pet clauses are the pest engine's own wording.
+const UNNAMED_PLANT_SAFETY_CLAUSES = Object.freeze({
+  base: "Until we know exactly which plant this is, don't eat any part of it, and keep kids and pets from chewing on it.",
+  swallowed: 'If anyone swallows part of it, call Poison Control at 1-800-222-1222 right away.',
+  irritant: UNNAMED_SAFETY_CLAUSES.irritant,
+  pets: UNNAMED_SAFETY_CLAUSES.pets,
+});
+const PLANT_HAZARD_CLAUSES = [
+  ['swallowed', (entry) => entry.risk === 'medical'],
+  ['irritant', (entry) => !!entry.safety?.irritant || entry.risk === 'irritant'],
+  ['pets', (entry) => !!entry.safety?.toxic_to_pets],
+];
+
+/** The warning for an unnamed identity: every plant entry under `nodeId`,
+ * or, for an unknown answer, every plant the subject's identity index could
+ * have named. Null when none of them carries a hazard. */
+function unnamedPlantSafetyLineFor(subject, nodeId) {
+  const members = nodeId
+    ? catalog.listEntries({ section: 'plant' }).filter((entry) => catalog.lineage(entry.slug).some((rung) => rung.id === nodeId))
+    : identityIndexFor(subject);
+  const hazards = PLANT_HAZARD_CLAUSES.filter(([, applies]) => members.some(applies)).map(([key]) => key);
+  if (!hazards.length) return null;
+  return [UNNAMED_PLANT_SAFETY_CLAUSES.base, ...hazards.map((key) => UNNAMED_PLANT_SAFETY_CLAUSES[key])].join(' ');
 }
 
 function weedWordingLine(entry, wording) {
@@ -952,6 +997,7 @@ function buildIdentityResult(candidates, {
     return {
       answer: { ...UNKNOWN_IDENTITY_ANSWER },
       entry: null,
+      generic_safety_line: unnamedPlantSafetyLineFor(subject, null),
       evidence: { matches: [], still_need: [] },
       candidates: [],
       next_photo: plantNextPhotoFor(UNKNOWN_IDENTITY_ANSWER, [], subject),
@@ -963,6 +1009,7 @@ function buildIdentityResult(candidates, {
   return {
     answer,
     entry,
+    generic_safety_line: entry ? null : unnamedPlantSafetyLineFor(subject, answer.node_id),
     evidence: plantEvidenceFor(plantCandidatesSupporting(candidates, answer.level, answer.node_id)),
     candidates: plantCandidatesBlockFor(candidates, currentMonth),
     next_photo: nextPhoto,
@@ -1240,9 +1287,22 @@ function scoreProvenanceOf(c) {
  * between two verified scores, the higher; otherwise Gemini's own stands.
  * The score and its provenance always travel together — never `Math.max`
  * of a checked score with an unchecked one. */
+/** Which provider's score an agreed identity keeps, by what stands behind
+ * it: a passed cue check (`verified`) > a completed check that found no
+ * supporting cue (`checked`) > an unchecked guess. A completed check
+ * replaces an unchecked guess even when it found nothing — a raw 0.9 Gemini
+ * guess whose verify leg missed must not outlive OpenAI's checked 0.1
+ * (Codex #5186 r6 P1; the pest engine's `pickVerifiedWinner`) — but only a
+ * passed check can raise a score (Codex #5186 r1 P1). Two passed checks:
+ * the higher; two checks that found no cue: the more doubtful; two guesses:
+ * Gemini's. */
 function checkedScoreWinner(gemini, openai) {
-  if (gemini.verified && openai.verified) return openai.confidence > gemini.confidence ? openai : gemini;
-  return openai.verified ? openai : gemini;
+  const rankOf = (c) => (c.verified ? 2 : (c.checked ? 1 : 0));
+  const [g, o] = [rankOf(gemini), rankOf(openai)];
+  if (g !== o) return o > g ? openai : gemini;
+  if (g === 2) return openai.confidence > gemini.confidence ? openai : gemini;
+  if (g === 1) return openai.confidence < gemini.confidence ? openai : gemini;
+  return gemini;
 }
 
 const NO_IDENTITY_ESCALATION = Object.freeze({
@@ -1398,22 +1458,36 @@ async function runIdentityLadder(run) {
   const call1 = mapSlots((slot) => dedupeCandidates((candidatesJson?.[slot] || []).map((r) => resolveIdentityCandidate(r, run.indexes[slot]))));
   const catalogCandidates = IDENTITY_SLOTS.flatMap((slot) => call1[slot].filter((c) => c.entry));
   const identity = {
-    candidatesResult, candidatesJson, verifyResult: null, slots: call1, catalogCandidates, verifyMissed: false, selfContradiction: false,
+    candidatesResult, candidatesJson, verifyResult: null, slots: call1, catalogCandidates, verifyMissedSlots: mapSlots(() => false), flippedSlots: mapSlots(() => false),
   };
-  if (!catalogCandidates.length) return identity;
+  if (!catalogCandidates.length || irrevocablyUnusable(candidatesJson)) return identity;
   const verifyResult = await callIdentityVerify(run.images, identityContextFor(catalogCandidates), run.legTimeoutMs(3));
   // Codex pre-push P1: Ajv-validated before merging (schema rejection = a
   // miss, contract §5); Codex #5186 r1 P1: an answered verify leg that
-  // leaves out a requested candidate is a miss too.
+  // leaves out a requested candidate is a miss too — recorded per slot
+  // (Codex #5186 r6 P2), like the contradiction check, so an escalation
+  // trigger belongs to the slot it came from.
   const verifyJson = validJson(verifyResult, 'verifyA');
   const slots = mapSlots((slot) => dedupeCandidates(mergeIdentityVerify(call1[slot], verifyJson)));
   return {
     ...identity,
     verifyResult,
     slots,
-    verifyMissed: !verifyCoversAll(verifyJson, catalogCandidates),
-    selfContradiction: IDENTITY_SLOTS.some((slot) => slotFlipped(call1[slot], slots[slot])),
+    verifyMissedSlots: mapSlots((slot) => {
+      const asked = call1[slot].filter((c) => c.entry);
+      return asked.length > 0 && !verifyCoversAll(verifyJson, asked);
+    }),
+    flippedSlots: mapSlots((slot) => slotFlipped(call1[slot], slots[slot])),
   };
+}
+
+/** Contract §5's conservative combine makes one leg's `usable: false` or
+ * `shows: "nothing"` final (`combineQuality`): no later answer brings the
+ * photos back. Once Call A reads that, the rest of the ladder — verify,
+ * Call C, the escalation — would only spend billed calls and budget on
+ * evidence the result discards, so it stops there (Codex #5186 r6 P2). */
+function irrevocablyUnusable(json) {
+  return !!json && (json.quality?.usable === false || json.shows === 'nothing');
 }
 
 /** Host slugs whose conditions enter the tree/shrub/palm condition index:
@@ -1477,27 +1551,26 @@ function identifyLaneSlotsFor(subject) {
   return subject === 'lawn' ? ['turf', 'weeds'] : ['host'];
 }
 
-/** `low_confidence` is checked per populated slot, off-catalog tops
+/** Each identity slot's own escalation triggers (Codex #5186 r6 P2: kept
+ * per slot, so an unanswered second opinion caps only the slot that asked
+ * for it). `low_confidence` is checked per populated slot, off-catalog tops
  * included (Codex pre-push audit on #5186 r1): a confident weed must not
  * suppress the second read an uncertain turf answer needs. In identify
- * mode a schema-valid Call A that says the photos show a plant but raises
- * NO candidate in any lane the mode can answer from is a miss of its own
- * (`no_identity_candidate`, Codex #5186 r2 P1) — one inconclusive read must
- * not skip the second opinion and hand the customer an unknown. */
-function identityTriggerReasons(identity, run) {
-  const lowSlot = IDENTITY_SLOTS.some((slot) => identity.slots[slot].length > 0 && identity.slots[slot][0].confidence < escalateBelow());
-  // A lane whose candidates answer only `unknown` (an off-catalog guess with
-  // no valid group, or nothing that climbs) is as empty as no candidate at
-  // all — the customer would get `unknown` without the second read (Codex
-  // #5186 r4 P1).
-  const noLaneCandidate = run.mode === 'identify' && !!identity.candidatesJson
-    && identifyLaneSlotsFor(run.subject).every((slot) => identitySlotAnswer(identity.slots[slot]).answer.level === 'unknown');
-  return reasonsFrom([
-    [!identity.candidatesJson || identity.verifyMissed, 'gemini_missed'],
-    [noLaneCandidate, 'no_identity_candidate'],
-    [lowSlot, 'low_confidence'],
-    [identity.selfContradiction, 'self_contradiction'],
-  ]);
+ * mode a schema-valid Call A that says the photos show a plant but leaves
+ * every lane the mode can answer from with only `unknown` (no candidate, an
+ * off-catalog guess with no valid group, or nothing that climbs) is a miss
+ * of its own for those lanes (`no_identity_candidate`, Codex #5186 r2 + r4
+ * P1) — one inconclusive read must not skip the second opinion. */
+function identitySlotTriggers(identity, run) {
+  const laneSlots = identifyLaneSlotsFor(run.subject);
+  const noLaneAnswer = run.mode === 'identify' && !!identity.candidatesJson
+    && laneSlots.every((slot) => identitySlotAnswer(identity.slots[slot]).answer.level === 'unknown');
+  return mapSlots((slot) => reasonsFrom([
+    [!identity.candidatesJson || identity.verifyMissedSlots[slot], 'gemini_missed'],
+    [noLaneAnswer && laneSlots.includes(slot), 'no_identity_candidate'],
+    [identity.slots[slot].length > 0 && identity.slots[slot][0].confidence < escalateBelow(), 'low_confidence'],
+    [identity.flippedSlots[slot], 'self_contradiction'],
+  ]));
 }
 
 /** Includes the contract's new trigger: the top two possibilities read
@@ -1528,20 +1601,21 @@ function escalationPromptArgs(run, identity, conditions) {
   };
 }
 
-/** Escalation uncertainty for one slot or the condition list — Codex
- * pre-push P1 round 2: an unanswered trigger caps wording at `likely`, a
- * disagreement blocks naming (see `identityEntryLevelAnswer` /
- * `namedAnswerFor`). */
-function flagsOf(combined) {
+/** Escalation uncertainty for one scope — an identity slot or the
+ * condition list. Codex pre-push P1 round 2: an unanswered trigger caps
+ * wording at `likely`, a disagreement blocks naming (see
+ * `identityEntryLevelAnswer` / `namedAnswerFor`). Codex #5186 r6 P2: the
+ * cap belongs only to a scope that TRIGGERED the escalation; OpenAI leaving
+ * an already-settled slot empty (or being unavailable) is not an unanswered
+ * question about it. `combined` is that scope's combine result, when
+ * OpenAI answered at all. */
+function scopeFlags(triggered, combined = {}) {
   return {
-    disagreed: !!combined.disagreed, blockPrettySure: !combined.openaiAnswered, openaiAnswered: !!combined.openaiAnswered, disagreementPair: combined.disagreementPair || null,
+    disagreed: !!combined.disagreed,
+    blockPrettySure: triggered && !combined.openaiAnswered,
+    openaiAnswered: !!combined.openaiAnswered,
+    disagreementPair: combined.disagreementPair || null,
   };
-}
-function uniformFlags(blockPrettySure) {
-  const flags = {
-    disagreed: false, blockPrettySure, openaiAnswered: false, disagreementPair: null,
-  };
-  return { identityFlags: mapSlots(() => ({ ...flags })), conditionFlags: { ...flags } };
 }
 
 /** Codex #5186 r1 P1: the tree/shrub/palm condition index is the union of
@@ -1571,11 +1645,19 @@ async function reconcileCorrectedHost(run, conditions, hostCombined, escalationJ
   return { ...recombined, observedTerms: json.observed_terms, rerun };
 }
 
-/** Call D (OpenAI escalation) when any trigger fires, plus the per-slot and
- * condition combine. OpenAI unavailable (or Ajv-invalid) entirely: Gemini
- * stands, but nothing escalated may read `pretty_sure`. */
-async function runEscalation(run, identity, conditions) {
-  const reasons = { identity: identityTriggerReasons(identity, run), conditions: conditionTriggerReasons(conditions) };
+/** Call D (OpenAI escalation) when any scope's trigger fires, plus the
+ * per-slot and condition combine. OpenAI unavailable (or Ajv-invalid)
+ * entirely: Gemini stands, but no TRIGGERED scope may read `pretty_sure`.
+ * `skip` (an irrevocably unusable read) runs nothing and records no
+ * trigger. */
+async function runEscalation(run, identity, conditions, { skip = false } = {}) {
+  const slotReasons = skip ? mapSlots(() => []) : identitySlotTriggers(identity, run);
+  const reasons = {
+    identity: REASON_ORDER.filter((r) => IDENTITY_SLOTS.some((slot) => slotReasons[slot].includes(r))),
+    conditions: skip ? [] : conditionTriggerReasons(conditions),
+  };
+  const slotTriggered = mapSlots((slot) => slotReasons[slot].length > 0);
+  const conditionsTriggered = reasons.conditions.length > 0;
   const base = {
     reasons,
     all: REASON_ORDER.filter((r) => reasons.identity.includes(r) || reasons.conditions.includes(r)),
@@ -1585,11 +1667,13 @@ async function runEscalation(run, identity, conditions) {
     slots: identity.slots,
     possibilities: conditions.possibilities,
     observedTerms: conditions.observedTerms,
+    identityFlags: mapSlots((slot) => scopeFlags(slotTriggered[slot])),
+    conditionFlags: scopeFlags(conditionsTriggered),
   };
-  if (!base.all.length) return { ...base, ...uniformFlags(false) };
+  if (!base.all.length) return base;
   const result = await callEscalation(run.images, escalationPromptArgs(run, identity, conditions), run.legTimeoutMs(1));
   const json = validJson(result, 'escalation');
-  if (!json) return { ...base, result, ...uniformFlags(true) };
+  if (!json) return { ...base, result };
   const contextSlugs = new Set(identity.catalogCandidates.map((c) => c.slug));
   const combined = mapSlots((slot) => combineIdentity(identity.slots[slot], json[slot], run.indexes[slot], contextSlugs));
   const conditionCombined = await reconcileCorrectedHost(run, conditions, combined.host, json,
@@ -1600,8 +1684,8 @@ async function runEscalation(run, identity, conditions) {
     json,
     rerun: conditionCombined.rerun,
     slots: mapSlots((slot) => combined[slot].candidates),
-    identityFlags: mapSlots((slot) => flagsOf(combined[slot])),
-    conditionFlags: flagsOf(conditionCombined),
+    identityFlags: mapSlots((slot) => scopeFlags(slotTriggered[slot], combined[slot])),
+    conditionFlags: scopeFlags(conditionsTriggered, conditionCombined),
     possibilities: conditionCombined.possibilities,
     observedTerms: [json.observed_terms, conditionCombined.observedTerms, conditions.observedTerms].find((t) => t?.length) || [],
   };
@@ -1651,6 +1735,7 @@ function assembleIdentity(run, escalation, quality, lane) {
     tier: built.tier,
     answer: built.answer,
     entry: built.entry,
+    generic_safety_line: built.generic_safety_line,
     evidence: built.evidence,
     candidates: built.candidates,
     next_photo: built.next_photo,
@@ -1761,8 +1846,10 @@ async function identifyPlantV2({
     images, subject, chips, context, now, mode,
   });
   const identity = await runIdentityLadder(run);
-  const conditions = await runConditionLadder(run, identity);
-  const escalation = await runEscalation(run, identity, conditions);
+  // An irrevocably unusable Call A read ends the ladder (`irrevocablyUnusable`).
+  const photosUnusable = irrevocablyUnusable(identity.candidatesJson);
+  const conditions = photosUnusable ? NO_CONDITIONS : await runConditionLadder(run, identity);
+  const escalation = await runEscalation(run, identity, conditions, { skip: photosUnusable });
   const failure = legFailureReason(run, identity, conditions, escalation);
   if (failure) return { ok: false, reason: failure };
 
@@ -1820,6 +1907,7 @@ module.exports = {
   UNUSABLE_HEADLINE,
   PLANT_ROLE_LABELS,
   PLANT_VERDICT_LABELS,
+  UNNAMED_PLANT_SAFETY_CLAUSES,
   OBSERVED_TERMS,
   escalateBelow,
   _test: {
@@ -1832,7 +1920,8 @@ module.exports = {
     combineShows,
     identifyLaneFor,
     laneEligibilityRank,
-    identityTriggerReasons,
+    identitySlotTriggers,
+    unnamedPlantSafetyLineFor,
     legFailureReason,
     legInfo,
     pestOutcomeFor,

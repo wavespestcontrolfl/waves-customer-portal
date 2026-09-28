@@ -48,8 +48,8 @@ be merged into `v2`.
 ```
 
 `mode: "identify"` returns the pest identity-card shape instead (`{ version,
-kind: "identity", answer, entry, evidence: { matches, still_need },
-candidates, next_photo, quality }`) for Layer A only, so the existing
+kind: "identity", answer, entry, generic_safety_line, evidence: { matches,
+still_need }, candidates, next_photo, quality }`) for Layer A only, so the existing
 `V2Result` card renders its "What matches" / "What we still need to see"
 sections; that evidence (and the next-photo pair) is read only from the
 candidates that support the chosen answer node, never from a top candidate
@@ -287,6 +287,34 @@ are grouped under "Codex #5186 round 1 regressions" in the same file.
 - The palm retake prompt asks for three views (whole palm, oldest fronds,
   newest fronds with the spear), matching the app's three guided palm shots
   and the 3-photo request limit.
+
+## Round 6 hardening (Codex #5186 r6)
+
+- An unnamed identity (a climbed group or category, or unknown) carries
+  `generic_safety_line`, built only from fixed clauses
+  (`UNNAMED_PLANT_SAFETY_CLAUSES`), each chosen when any plant under the
+  answered node — reviewed or not — carries that hazard (medical risk →
+  Poison Control, irritant sap → wash skin/eyes, toxic to pets → call the
+  vet); an unknown answer is triaged over the subject's whole identity
+  index. The pest engine's `unnamedSafetyLineFor` rule; its skin/eye and pet
+  clauses are reused verbatim.
+- Escalation triggers are tracked per scope (each identity slot, and the
+  condition list). An unanswered or unavailable second opinion caps
+  `pretty_sure` only in a scope that asked for it — a confidently verified
+  turf keeps its wording when only the weeds escalated.
+- `settle_it` finds the catalog comparison between the top two
+  possibilities from either side (a one-way pair ranked "backwards"), a
+  "photo can't settle this" side wins with its own wording, and either
+  entry's field test can match it.
+- An application with an unknown age (`null`, `''`, non-numeric, negative)
+  never earns `fits_application`.
+- An agreed identity keeps the score with the strongest provenance: a
+  passed cue check > a completed check that found no cue > an unchecked
+  guess (a completed check replaces an unchecked guess; only a passed check
+  can raise a score).
+- A Call A read of `usable: false` or `shows: "nothing"` ends the ladder:
+  it is final under the conservative quality combine, so verify, Call C and
+  the escalation are not called.
 
 ## What L4 must do
 
