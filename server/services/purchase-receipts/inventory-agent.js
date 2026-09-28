@@ -653,41 +653,57 @@ function validateExistingCandidate(raw, ctx, candidate) {
 // (validateNewProduct). A category the title doesn't state, or one not on this list at all
 // ("supplies", "cleaner", "termite monitoring", "soil moisture management
 // aid", "termiticide / insecticide"), holds the line for a person.
+//
+// Two kinds of wording, and two general rules over them:
+// - `statedBy` is the category's own LITERAL word ("insecticide",
+//   "fertilizer", an N-P-K grade, "surfactant"); it always counts.
+// - `plainPhrase` is plain-language wording that implies the category
+//   ("ant control", "weed killer", "lawn food", "rat poison"); it NEVER
+//   counts on a device or supply listing (PHYSICAL_DEVICE_WORDS — "Insect
+//   Control Glue Traps", "Weed Control Landscape Fabric", "Mosquito Net"),
+//   which stays held for a person.
+// - `supersedes`: a specific category the title states hides the generic one
+//   it refines, wherever the words sit ("Micronutrient Liquid Fertilizer" is
+//   micronutrient fertilizer, never also fertilizer; "Termite Bait" is never
+//   also bait).
 const CANONICAL_CATEGORIES = [
   {
     name: 'insecticide',
     statedBy: /\binsecticides?\b/i,
-    // Plain-language phrases never count on a trap/board/monitor listing
-    // ("Insect Control Glue Traps" is a supply, not an insecticide) —
-    // PHYSICAL_DEVICE_WORDS below.
     plainPhrase: /\binsect killers?\b|\bbug killers?\b|\b(?:ant|roach|cockroach|flea|tick|flea and tick|flea & tick|spider|scorpion|wasp|hornet) killers?\b|\b(?:ant|roach|cockroach|flea|tick|caterpillar|grub|worm|armyworm|chinch bug|insect|bug|mite|spider|scorpion) control\b/i,
   },
   { name: 'termiticide', statedBy: /\btermiticides?\b/i },
   {
     name: 'herbicide',
-    statedBy: /\bherbicides?\b|\bweed killers?\b|\b(?:weed|grass|sedge|nutsedge|crabgrass|brush|weed ?(?:&|and) ?grass) (?:killers?|control)\b|\bpre ?emergents?\b|\bpost ?emergents?\b|\bcrabgrass preventers?\b/i,
+    statedBy: /\bherbicides?\b/i,
+    plainPhrase: /\bweed killers?\b|\b(?:weed|grass|sedge|nutsedge|crabgrass|brush|weed ?(?:&|and) ?grass) (?:killers?|control)\b|\bpre ?emergents?\b|\bpost ?emergents?\b|\bcrabgrass preventers?\b/i,
   },
   {
     name: 'fungicide',
-    statedBy: /\bfungicides?\b|\b(?:fungus|disease|brown patch|large patch|dollar spot) (?:control|killers?)\b/i,
+    statedBy: /\bfungicides?\b/i,
+    plainPhrase: /\b(?:fungus|disease|brown patch|large patch|dollar spot) (?:control|killers?)\b/i,
   },
   {
     name: 'fertilizer',
-    statedBy: /(?<!\bmicronutrients? )\bfertili[sz]ers?\b|\b\d{1,2}-\d{1,2}-\d{1,2}\b|\b(?:lawn|plant|turf|palm) food\b|\bweed ?(?:&|and) ?feed\b/i,
+    statedBy: /\bfertili[sz]ers?\b|\b\d{1,2}-\d{1,2}-\d{1,2}\b/i,
+    plainPhrase: /\b(?:lawn|plant|turf|palm) food\b|\bweed ?(?:&|and) ?feed\b/i,
   },
-  { name: 'micronutrient fertilizer', statedBy: /\bmicronutrients?\b/i },
+  { name: 'micronutrient fertilizer', statedBy: /\bmicronutrients?\b/i, supersedes: ['fertilizer'] },
   { name: 'igr', statedBy: /\binsect growth regulators?\b|\bIGR\b/i },
   { name: 'pgr', statedBy: /\bplant growth regulators?\b|\bPGR\b/i },
   // "surfactant" alone states adjuvant; "soil surfactant" (however it is
   // punctuated — statingText folds the separator) never does.
   { name: 'adjuvant', statedBy: /\badjuvants?\b|(?<!\bsoil )\bsurfactants?\b/i },
   { name: 'soil_amendment', statedBy: /\bsoil amendments?\b/i },
-  { name: 'bait', statedBy: /(?<!\b(?:termite|mole) )\bbaits?\b/i },
-  { name: 'termite bait', statedBy: /\btermite baits?\b/i },
-  { name: 'mole bait', statedBy: /\bmole baits?\b/i },
-  { name: 'rodenticide', statedBy: /\brodenticides?\b|\brat poison\b|\bmouse poison\b/i },
+  { name: 'bait', statedBy: /\bbaits?\b/i },
+  { name: 'termite bait', statedBy: /\btermite baits?\b/i, supersedes: ['bait'] },
+  { name: 'mole bait', statedBy: /\bmole baits?\b/i, supersedes: ['bait'] },
+  { name: 'rodenticide', statedBy: /\brodenticides?\b/i, plainPhrase: /\brat poison\b|\bmouse poison\b/i },
+  // A device category: its own words name the device, so no device guard.
   { name: 'rodent_trap', statedBy: /\b(?:rat|mouse|mice|rodent|snap) traps?\b/i },
-  { name: 'mosquito', statedBy: /\bmosquito(?:es)?\b|\blarvicides?\b/i },
+  // "larvicide" is literal; "mosquito" alone only implies (a mosquito trap,
+  // net or fogger is a device).
+  { name: 'mosquito', statedBy: /\blarvicides?\b/i, plainPhrase: /\bmosquito(?:es)?\b/i },
 ];
 
 const CANONICAL_CATEGORY_BY_LOWER = new Map(CANONICAL_CATEGORIES.map((c) => [c.name, c.name]));
@@ -705,17 +721,16 @@ function statingText(rawTitle) {
     .trim();
 }
 
-// A trap, glue board, sticky card or monitor is a physical device: a
-// plain-language pest phrase on its listing ("Insect Control Glue Traps")
-// never states a pesticide category — only the category's own word would.
-const PHYSICAL_DEVICE_WORDS = /\b(?:traps?|boards?|glue|sticky|monitors?|monitoring)\b/i;
+// A device or supply listing: plain-language pest wording on it never states
+// a category (see CANONICAL_CATEGORIES) — only a category's literal word does.
+const PHYSICAL_DEVICE_WORDS = /\b(?:traps?|boards?|glue|sticky|cards?|monitors?|monitoring|fabric|mats?|nets?|netting|screens?|barriers?|sprayers?|spreaders?|applicators?|dusters?|foggers?|misters?|nozzles?|wands?|hoses?|gloves?|masks?|respirators?|goggles|tools?|zappers?|lights?|lamps?|repeller|repellers|ultrasonic)\b/i;
 
 function categoriesStatedBy(rawTitle) {
   const title = statingText(rawTitle);
   const device = PHYSICAL_DEVICE_WORDS.test(title);
-  return new Set(CANONICAL_CATEGORIES
-    .filter((c) => c.statedBy.test(title) || (!device && c.plainPhrase && c.plainPhrase.test(title)))
-    .map((c) => c.name));
+  const stated = CANONICAL_CATEGORIES.filter((c) => c.statedBy.test(title) || (!device && c.plainPhrase && c.plainPhrase.test(title)));
+  const superseded = new Set(stated.flatMap((c) => c.supersedes || []));
+  return new Set(stated.map((c) => c.name).filter((name) => !superseded.has(name)));
 }
 
 // The proposal's category, validated against the canonical list and the

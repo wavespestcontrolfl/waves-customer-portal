@@ -382,6 +382,22 @@ describe('categoriesStatedBy — the wording that counts as stating each canonic
     expect(categoriesStatedBy('Acme Ant Control Granules 10 lb').has('insecticide')).toBe(true);
   });
 
+  test('micronutrient supersedes fertilizer wherever the words sit', () => {
+    expect([...categoriesStatedBy('Acme Micronutrient Liquid Fertilizer 2.5 gal')]).toEqual(['micronutrient fertilizer']);
+  });
+
+  test('no plain-language phrase states any category on a device or supply listing', () => {
+    expect(categoriesStatedBy('ECOgardener Weed Control Landscape Fabric 20 Count').size).toBe(0);
+    expect(categoriesStatedBy('Acme Disease Control Sprayer 2 gal').size).toBe(0);
+    expect(categoriesStatedBy('Acme Mosquito Net').size).toBe(0);
+    expect(categoriesStatedBy('Acme Lawn Food Spreader').size).toBe(0);
+    // a literal category word still counts on any listing
+    expect([...categoriesStatedBy('Acme Herbicide Applicator Refill')]).toEqual(['herbicide']);
+    // and plain phrases still count off devices
+    expect([...categoriesStatedBy('Acme Weed Control Granules 10 lb')]).toEqual(['herbicide']);
+    expect([...categoriesStatedBy('Summit Mosquito Dunks 20 Count')]).toEqual(['mosquito']);
+  });
+
   test('an N-P-K grade keeps its hyphens through separator folding', () => {
     expect(categoriesStatedBy('LESCO 0-0-62').has('fertilizer')).toBe(true);
   });
