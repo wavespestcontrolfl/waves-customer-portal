@@ -18,6 +18,7 @@ const {
 } = require('../services/event-freshness');
 const {
   filterRepeatedDateIdentities,
+  filterPreviouslyFeaturedIdentities,
   identityOccurrenceCount,
   isPreviouslyFeaturedIdentity,
   assessFlagshipEventSelection,
@@ -395,5 +396,20 @@ describe('operator star override still bypasses the calendar-year rule', () => {
     });
     expect(isEligibleForFreshDigest(relabeled, REFERENCE)).toBe(false);
     expect(isEligibleForFreshDigest({ ...relabeled, __identityRecurring: true }, REFERENCE)).toBe(true);
+  });
+
+  test('history check honors the pool verdict when only a third sibling is labeled monthly', async () => {
+    const oneTime = { event_type: 'one_time', recurrence_type: 'none', freshness_status: 'fresh_one_time', title: 'Riverside Harvest Market', description: 'Produce and crafts.' };
+    const monthlySibling = weeklyEvent('prior-2025-monthly', { ...oneTime, recurrence_type: 'monthly', start_at: '2025-06-07T14:00:00Z' });
+    const featuredLastYear = weeklyEvent('prior-2025-featured', {
+      ...oneTime, start_at: '2025-08-02T14:00:00Z', times_featured: 1, last_featured_at: '2025-07-29T10:00:00Z',
+    });
+    const candidate = weeklyEvent('first-2026', { ...oneTime, start_at: '2026-08-08T14:00:00Z' });
+    const pool = [monthlySibling, featuredLastYear, candidate];
+
+    const history = { select: () => history, where: async () => [featuredLastYear] };
+    const knex = () => history;
+    const rows = await filterPreviouslyFeaturedIdentities([candidate], { knex, reference: REFERENCE, yearPool: pool });
+    expect(rows.map((r) => r.id)).toEqual(['first-2026']);
   });
 });

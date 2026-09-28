@@ -49,7 +49,7 @@ function parseLockedEventIds(value) {
   return Array.isArray(parsed) ? parsed.map(String) : [];
 }
 
-function isPreviouslyFeaturedIdentity(event, featuredHistory, reference, { occurrenceCount = null } = {}) {
+function isPreviouslyFeaturedIdentity(event, featuredHistory, reference, { occurrenceCount = null, identityRecurring = false } = {}) {
   return (Array.isArray(featuredHistory) ? featuredHistory : []).some((prior) => {
     if (String(prior.id) === String(event.id)) return false;
     const hasHistory = Number(prior.times_featured) > 0 || Boolean(prior.last_featured_at);
@@ -77,7 +77,10 @@ function isPreviouslyFeaturedIdentity(event, featuredHistory, reference, { occur
     // of granting the calendar-year refresh (Codex P2, 2026-09-27).
     const eventRecurring = isRecurringIdentityEvent(event, { occurrenceCount });
     const priorRecurring = isRecurringIdentityEvent(prior, { occurrenceCount });
-    if (eventRecurring || priorRecurring) {
+    // identityRecurring: the pool-verified verdict (identityIsRecurring) from
+    // the caller, for when neither this row nor the featured one is labeled
+    // recurring but another sibling of the identity is.
+    if (identityRecurring || eventRecurring || priorRecurring) {
       // Codex P2, 2026-09-27 (second pass): pass the ALREADY-ESTABLISHED
       // recurring verdict through explicitly rather than letting
       // isEditoriallyNewEvent re-derive it from `event`'s own metadata alone.
@@ -125,7 +128,9 @@ async function filterPreviouslyFeaturedIdentities(events, { knex = db, reference
   return rows.filter((event) => {
     if (event.admin_status === 'featured') return true;
     const occurrenceCount = identityOccurrenceCount(event, calendarYearPool);
-    return !isPreviouslyFeaturedIdentity(event, history, reference, { occurrenceCount });
+    const identityRecurring = event.__identityRecurring === true
+      || identityIsRecurring(event, calendarYearPool, occurrenceCount);
+    return !isPreviouslyFeaturedIdentity(event, history, reference, { occurrenceCount, identityRecurring });
   });
 }
 
@@ -585,7 +590,9 @@ function assessFlagshipEventSelection(
           && repeatedTitles.has(normalizeDigestTitle(event.title)))
         || (!starred && isRecurringIdentity && !firstOfYear)
         || !isEligibleForFreshDigest(eligibilityCheckEvent, reference)
-        || (!starred && isPreviouslyFeaturedIdentity(event, featuredHistory, reference, { occurrenceCount }))) {
+        || (!starred && isPreviouslyFeaturedIdentity(event, featuredHistory, reference, {
+          occurrenceCount, identityRecurring: isRecurringIdentity,
+        }))) {
       errors.push(`Locked event is no longer eligible: ${event.title || event.id}.`);
       continue;
     }
