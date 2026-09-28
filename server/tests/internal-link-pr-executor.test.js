@@ -1032,7 +1032,7 @@ describe('internal-link dry-run executor helpers', () => {
     db.mockImplementation(() => undefined);
   });
 
-  test('_markReservedTasksFailed clears pr_branch so the failure stays requeue-able', async () => {
+  test('a failed PR open retires the half-made branch and returns tasks to the candidate pool', async () => {
     let patch = null;
     const builder = {
       whereIn: jest.fn(() => builder),
@@ -1041,13 +1041,15 @@ describe('internal-link dry-run executor helpers', () => {
     };
     db.mockImplementation(() => builder);
 
-    await new InternalLinkPrExecutor()._markReservedTasksFailed(
+    GitHubClient.retireBranch = jest.fn(async () => true);
+    await new InternalLinkPrExecutor()._releaseReservedTasks(
       [{ task: { id: 'task-open-failed' } }],
-      new Error('createBranch exploded')
+      { branch: 'content/internal-link-x', err: new Error('createPr 502') }
     );
 
+    expect(GitHubClient.retireBranch).toHaveBeenCalledWith('content/internal-link-x');
     expect(patch).toMatchObject({
-      status: 'failed',
+      status: 'patch_candidate',
       failure_reason: expect.stringContaining('internal_link_pr_open_failed'),
       pr_branch: null,
     });

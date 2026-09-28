@@ -511,7 +511,7 @@ class InternalLinkPrExecutor {
           reviewerNotes: `Astro internal-link PR opened but follow-up failed: ${err.message}. Confirm Codex review manually before merge.`,
         });
       } else {
-        await this._markReservedTasksFailed(selected, err);
+        await this._releaseReservedTasks(selected, { branch, err });
       }
       throw err;
     }
@@ -1104,18 +1104,27 @@ class InternalLinkPrExecutor {
     }
   }
 
-  async _markReservedTasksFailed(selected, err) {
+  // No PR was opened (branch/commit/createPr failed — usually a transient
+  // GitHub error): retire any half-created branch and return the tasks to
+  // patch_candidate so the next daily sweep retries them. Marking them
+  // failed stranded one-off post-publish candidates for good (the sweep
+  // selects only patch_candidate). The error is kept for diagnosis.
+  async _releaseReservedTasks(selected, { branch, err }) {
     const ids = selected.map((item) => item.task.id).filter(Boolean);
     if (!ids.length) return;
+    try {
+      if (branch) await GitHubClient.retireBranch(branch);
+    } catch (cleanupErr) {
+      logger.warn(`[internal-link-pr-executor] branch cleanup after failed PR open failed for ${branch}: ${cleanupErr.message}`);
+    }
     await db(TABLE)
       .whereIn('id', ids)
       .where('status', 'pr_reserved')
       .update({
-        status: 'failed',
+        status: 'patch_candidate',
         failure_reason: `internal_link_pr_open_failed:${String(err?.message || err).slice(0, 500)}`,
         // Clear the reservation branch: no PR exists, and a lingering
-        // pr_branch trips the review queue's hasPrLifecycle guard, blocking
-        // requeue/dismiss on an otherwise retryable failure.
+        // pr_branch trips the review queue's hasPrLifecycle guard.
         pr_branch: null,
         updated_at: new Date(),
       });
@@ -1123,7 +1132,7 @@ class InternalLinkPrExecutor {
 
   // Crash-orphan recovery. _reserveTasksForPr commits status='pr_reserved'
   // BEFORE branch/PR creation; if the process dies before _markTasksPrOpen /
-  // _markReservedTasksFailed run, the row is stranded forever — no loader
+  // _releaseReservedTasks run, the row is stranded forever — no loader
   // selects pr_reserved and the review queue 409s requeue/dismiss/verify on
   // it. A healthy run flips the status within seconds, so a reservation with
   // no astro_pr_url that has sat untouched for >2h is a crash orphan: reset
