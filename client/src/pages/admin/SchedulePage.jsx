@@ -38,6 +38,7 @@ import { isCanonicallyMarkedProvenance } from '@pricing-regime-marker';
 import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import useIsMobile from "../../hooks/useIsMobile";
 import useLockBodyScroll from "../../hooks/useLockBodyScroll";
+import { formatLabelRate, formatMeasuredAmount, formatMeasuredRange } from "../../lib/mix-amount";
 import useModalFocus from "../../hooks/useModalFocus";
 import CompletionPricingCard from "../../components/schedule/CompletionPricingCard";
 import VisitProtocol from "../../components/admin/VisitProtocol";
@@ -6712,22 +6713,9 @@ function JobCardSprayCheck({ sprayCheck, products, D }) {
   );
 }
 
-function fmtUnit(unit) {
-  return unit ? String(unit).replace(/_/g, " ") : "";
-}
-
-// Small doses keep their precision: under 1 oz they render in mL / g (a
-// syringe or scale number), anything else to three significant decimals.
-const SMALL_DOSE = { "fl oz": ["mL", 29.5735], fl_oz: ["mL", 29.5735], oz: ["g", 28.3495] };
-function fmtAmount(amount, unit) {
-  if (amount == null) return null;
-  const n = Number(amount);
-  const small = n > 0 && n < 1 ? SMALL_DOSE[String(unit || "").toLowerCase()] : null;
-  if (small) return `${(n * small[1]).toFixed(1).replace(/\.0$/, "")} ${small[0]}`;
-  const txt = n >= 100 ? Math.round(n).toString() : n.toFixed(n < 1 ? 3 : 2).replace(/\.?0+$/, "");
-  const u = fmtUnit(unit);
-  return `${txt}${u ? ` ${u}` : ""}`;
-}
+// Amounts a tech can measure: teaspoons under 1 fl oz, fl oz above, never mL
+// (owner rule 2026-09-27); dry weights stay oz, or g under 1 oz.
+const fmtAmount = formatMeasuredAmount;
 
 function JobCardOrderButton({ productId, name, order, D, compact = false }) {
   const [state, setState] = useState("idle");
@@ -6991,14 +6979,14 @@ function JobCardTank({ tank, serviceId, D }) {
               <div style={{ fontSize: 13, color: D.muted }}>Working out the mix…</div>
             ) : mix?.amount != null ? (
               <div style={{ fontSize: 20, fontWeight: 500, color: D.heading, fontVariantNumeric: "tabular-nums" }}>
-                {fmtAmount(mix.amount, mix.unit)}{mix.amountMax != null ? ` – ${fmtAmount(mix.amountMax, mix.unit)}` : ""} <span style={{ fontSize: 13, fontWeight: 400, color: D.muted }}>in {mix.gallons ?? gallons} gal{mix.rig?.name ? ` · ${mix.rig.name}` : ""}{mix.coversSqft ? ` · covers ${mix.coversSqft.toLocaleString()} sq ft` : ""}</span>
+                {formatMeasuredRange(mix.amount, mix.amountMax, mix.unit)} <span style={{ fontSize: 13, fontWeight: 400, color: D.muted }}>in {mix.gallons ?? gallons} gal{mix.rig?.name ? ` · ${mix.rig.name}` : ""}{mix.coversSqft ? ` · covers ${mix.coversSqft.toLocaleString()} sq ft` : ""}</span>
               </div>
             ) : (
               <div style={{ fontSize: 13, color: "#C8312F" }}>{mix?.reason || "No mix available"}</div>
             )}
             {mix && (mix.ratePer1000 != null || mix.ratePerGallon) && (
               <div style={{ fontSize: 12, color: D.muted }}>
-                Label rate {mix.ratePerGallon ? `${mix.ratePerGallon.lo}${mix.ratePerGallon.hi > mix.ratePerGallon.lo ? `–${mix.ratePerGallon.hi}` : ""} ${fmtUnit(mix.ratePerGallon.unit)} per gallon` : `${fmtAmount(mix.ratePer1000, mix.unit)} per 1,000 sq ft`}{mix.rateVerified ? "" : " (not yet verified)"}
+                Label rate {mix.ratePerGallon ? `${formatLabelRate(mix.ratePerGallon.lo, mix.ratePerGallon.hi, mix.ratePerGallon.unit)} per gallon` : `${fmtAmount(mix.ratePer1000, mix.unit)} per 1,000 sq ft`}{mix.rateVerified ? "" : " (not yet verified)"}
               </div>
             )}
             <JobCardOrderButton key={picked.id} productId={picked.id} name={picked.name} order={mix?.order} D={D} compact />
