@@ -16674,6 +16674,20 @@ router.post('/:id/invoice', async (req, res, next) => {
           error: 'This visit is billed to a third-party payer — do not collect in person. The invoice will be sent to the payer.',
         });
       }
+      // A visit re-priced to a bare $0 can still carry its old priced invoice
+      // (the update route voids only on a re-service conversion). Never hand
+      // that stale amount to in-person checkout (Codex r1 on #5181): the
+      // office reconciles it. The discount-to-$0 shape (a positive
+      // primary_line_price) was reconciled by completion pricing and stays
+      // collectible, matching the checkout sheet.
+      const bareStampedZero = !svc.is_callback && isStampedZeroEstimate(svc.estimated_price)
+        && !(svc.primary_line_price != null && Number(svc.primary_line_price) > 0);
+      if (bareStampedZero && !['paid', 'prepaid'].includes(existing.status) && invoiceAmountDue(existing) > 0) {
+        return res.status(409).json({
+          error: 'This visit is priced at $0 but still has an open invoice with a balance — review that invoice in Billing before collecting.',
+          code: 'stale_invoice_on_zero_price',
+        });
+      }
       const applied = await applyPrepaidCredit(existing);
       existing = applied.invoice;
       // Settled = nothing left to collect. A zero amount due counts too

@@ -640,6 +640,26 @@ describe('POST /:id/invoice — sibling-lookup refusal (codex round-2 P1)', () =
       expect(mockMint).not.toHaveBeenCalled();
     });
 
+    // Codex r1 on #5181: a visit re-priced to a bare $0 can still carry its
+    // old priced invoice — the route must never hand that stale balance to
+    // in-person checkout, in any lane.
+    test('a bare stamped $0 visit with an open priced invoice refuses reuse (stale invoice), never returns its token', async () => {
+      for (const mode of ['per_application', 'monthly_membership']) {
+        mockDb.__svcRow = { ...SVC_ROW, estimated_price: 0, primary_line_price: null, cust_billing_mode: mode, cust_monthly_rate: 74.7 };
+        mockDb.__existingInvoiceRow = {
+          id: 'inv-stale', status: 'sent', total: 129, token: 'tok-stale',
+          scheduled_service_id: 'svc-lawn', payer_id: null,
+        };
+        findFirstApplicationInvoiceForEstimateService.mockResolvedValue({ invoice: null, liveBeside: null });
+        const { req, res, next } = makeReqRes({});
+        await handler(req, res, next);
+        expect(res.status).toHaveBeenCalledWith(409);
+        expect(res.body).toMatchObject({ code: 'stale_invoice_on_zero_price' });
+        expect(res.body).not.toMatchObject({ reused: true });
+        expect(mockMint).not.toHaveBeenCalled();
+      }
+    });
+
     // The lane this ruling does NOT touch: a monthly_membership visit's own
     // existing invoice is still reused normally, exactly as round-9 P1
     // always intended for a genuine 'none' verdict.
