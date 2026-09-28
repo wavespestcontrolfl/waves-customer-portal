@@ -1,7 +1,9 @@
-/** Real PostgreSQL regression: withReviewWriteFence must lock a scheduled_services
- * visit BEFORE the customer row when the caller will write that visit, matching the
- * annual-prepay switch's order (admin-schedule.js: visit, then customer). Reversing
- * it opens an ABBA lock cycle against that switch and Postgres aborts one side. */
+/** Real PostgreSQL regression: withReviewWriteFence guards background enrichment
+ * writes, so it never WAITS for a lock a staff transaction holds. Any lock order a
+ * staff path uses (the annual-prepay switch: visit, customer, then the rest of its
+ * series; a staff geocode decision: prefs advisory lock, customer, then visits)
+ * therefore cannot form a deadlock cycle with it: the fence backs off with
+ * review_fence_busy, and the staff transaction always completes. */
 let mockConnection;
 jest.mock('../models/db', () => {
   const proxy = (...args) => mockConnection(...args);
@@ -86,159 +88,88 @@ postgres('geocode enrichment visit-then-customer lock order', () => {
     await mockConnection('customers').del();
   });
 
-  test('a visit-then-customer holder (the annual-prepay switch order) never deadlocks against this fence', async () => {
-    let visitLocked;
-    let releaseHolder;
-    const locked = new Promise(resolve => { visitLocked = resolve; });
-    const release = new Promise(resolve => { releaseHolder = resolve; });
-    // Mimics admin-schedule.js's annual-prepay switch transaction: lock the visit
-    // (scheduled_services), THEN the customer.
+  const isBusy = err => ['review_fence_busy', '55P03'].includes(err?.code);
+  const fenceWrite = (visitIds, values = { lat: 27.6, lng: -82.4 }) => withReviewWriteFence(
+    { propertyId, customerId, visitIds },
+    async conn => conn('scheduled_services').whereIn('id', visitIds).update(values),
+  );
+
+  // Runs `hold` in a staff-shaped transaction, tries the fence while it holds its
+  // first locks, then lets it finish the rest of its lock sequence.
+  async function againstHolder(hold, finish, visitIds) {
+    let held;
+    let release;
+    const holding = new Promise(resolve => { held = resolve; });
+    const released = new Promise(resolve => { release = resolve; });
     const holder = mockConnection.transaction(async (trx) => {
-      await trx('scheduled_services').where({ id: visitId }).forUpdate().first('id');
-      visitLocked();
-      await release;
-      await trx('customers').where({ id: customerId }).forUpdate().first('id');
+      await hold(trx);
+      held();
+      await released;
+      await finish(trx);
     });
-    await locked;
-
-    let fenceSettled = false;
-    const fence = withReviewWriteFence({ propertyId, customerId, visitIds: [visitId] }, async (conn) => (
-      conn('scheduled_services').where({ id: visitId }).update({ lat: 27.6, lng: -82.4 })
-    )).finally(() => { fenceSettled = true; });
-
-    const deadline = Date.now() + 5000;
-    let blocked = false;
-    while (!blocked && Date.now() < deadline) {
-      const waiting = await admin('pg_stat_activity')
-        .where({ application_name: 'geocode-lock-order' })
-        .where({ state: 'active', wait_event_type: 'Lock' })
-        .count('* as count').first();
-      blocked = Number(waiting?.count || 0) > 0;
-      if (!blocked) await new Promise(resolve => setImmediate(resolve));
-    }
-    try {
-      // The fence must be the one waiting — on the VISIT lock the holder already
-      // has — not off acquiring the customer row out of order.
-      expect(blocked).toBe(true);
-      expect(fenceSettled).toBe(false);
-    } finally {
-      releaseHolder();
-    }
-    // No deadlock: both transactions complete; Postgres never has to abort one
-    // to break an ABBA cycle (which would reject one of these with a 40P01 error).
+    await holding;
+    const fence = await fenceWrite(visitIds).then(value => ({ value }), error => ({ error }));
+    release();
+    // No deadlock: the staff transaction completes its whole sequence.
     await expect(holder).resolves.toBeUndefined();
-    await expect(fence).resolves.toBe(1);
+    return fence;
+  }
+
+  test('the annual-prepay switch order (visit, then customer) makes the fence back off, never wait', async () => {
+    const fence = await againstHolder(
+      trx => trx('scheduled_services').where({ id: visitId }).forUpdate().first('id'),
+      trx => trx('customers').where({ id: customerId }).forUpdate().first('id'),
+      [visitId],
+    );
+    expect(isBusy(fence.error)).toBe(true);
+    expect((await mockConnection('scheduled_services').where({ id: visitId }).first()).lat).toBeNull();
+    // Once the switch commits, the retry writes.
+    await expect(fenceWrite([visitId])).resolves.toBe(1);
+  });
+
+  test('a staff geocode decision (prefs lock, customer, then visits) makes the fence back off', async () => {
+    const fence = await againstHolder(
+      async (trx) => {
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+          ['property-preferences', String(customerId)]);
+        await trx('customers').where({ id: customerId }).forUpdate().first('id');
+      },
+      trx => trx('scheduled_services').where({ id: visitId }).forUpdate().first('id'),
+      [visitId],
+    );
+    expect(isBusy(fence.error)).toBe(true);
+    await expect(fenceWrite([visitId])).resolves.toBe(1);
+  });
+
+  test('the prepay series sweep (target, customer, then an earlier sibling) cannot trap a fence holding the sibling', async () => {
+    // Fixed ids: the sibling sorts BEFORE the target, so the fence's ordered
+    // scan reaches the free sibling first and only then meets the held target.
+    const siblingId = '00000000-0000-4000-8000-000000000001';
+    const targetId = 'ffffffff-ffff-4fff-8fff-ffffffffffff';
+    await mockConnection('scheduled_services').insert([
+      { id: targetId, customer_id: customerId, property_id: propertyId, lat: null, lng: null },
+      { id: siblingId, customer_id: customerId, property_id: propertyId, lat: null, lng: null },
+    ]);
+    const fence = await againstHolder(
+      async (trx) => {
+        await trx('scheduled_services').where({ id: targetId }).forUpdate().first('id');
+        await trx('customers').where({ id: customerId }).forUpdate().first('id');
+      },
+      // Mirrors admin-schedule.js locking the rest of the series after the customer.
+      trx => trx('scheduled_services').where({ id: siblingId }).forUpdate().first('id'),
+      [targetId, siblingId],
+    );
+    expect(isBusy(fence.error)).toBe(true);
+    // The busy fence rolled back its sibling lock and wrote nothing.
+    expect(await mockConnection('scheduled_services').whereIn('id', [siblingId, targetId]).whereNotNull('lat'))
+      .toEqual([]);
+    await expect(fenceWrite([targetId, siblingId])).resolves.toBe(2);
+  });
+
+  test('an uncontended fence locks and writes as before', async () => {
+    await expect(fenceWrite([visitId])).resolves.toBe(1);
     const visit = await mockConnection('scheduled_services').where({ id: visitId }).first();
     expect(Number(visit.lat)).toBeCloseTo(27.6);
     expect(Number(visit.lng)).toBeCloseTo(-82.4);
-  });
-
-  test('a staff geocode decision (prefs lock, customer, then visits) never deadlocks against this fence', async () => {
-    let customerLocked;
-    let releaseHolder;
-    const locked = new Promise(resolve => { customerLocked = resolve; });
-    const release = new Promise(resolve => { releaseHolder = resolve; });
-    // Mimics resolveCustomerGeocodeReview: the property-preferences advisory
-    // lock, then the customer row (lockedContext), and only THEN the visits
-    // (lockVisitContext) -- the reverse of this fence's visit-then-customer.
-    const holder = mockConnection.transaction(async (trx) => {
-      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-        ['property-preferences', String(customerId)]);
-      await trx('customers').where({ id: customerId }).forUpdate().first('id');
-      customerLocked();
-      await release;
-      await trx('scheduled_services').where({ id: visitId }).forUpdate().first('id');
-    });
-    await locked;
-
-    let fenceSettled = false;
-    const fence = withReviewWriteFence({ propertyId, customerId, visitIds: [visitId] }, async (conn) => (
-      conn('scheduled_services').where({ id: visitId }).update({ lat: 27.6, lng: -82.4 })
-    )).finally(() => { fenceSettled = true; });
-
-    const deadline = Date.now() + 5000;
-    let blocked = false;
-    while (!blocked && Date.now() < deadline) {
-      const waiting = await admin('pg_stat_activity')
-        .where({ application_name: 'geocode-lock-order' })
-        .where({ state: 'active', wait_event_type: 'Lock' })
-        .count('* as count').first();
-      blocked = Number(waiting?.count || 0) > 0;
-      if (!blocked) await new Promise(resolve => setImmediate(resolve));
-    }
-    try {
-      // The fence must wait on the shared advisory lock BEFORE taking the
-      // visit row, so the decision can still lock that visit.
-      expect(blocked).toBe(true);
-      expect(fenceSettled).toBe(false);
-    } finally {
-      releaseHolder();
-    }
-    await expect(holder).resolves.toBeUndefined();
-    await expect(fence).resolves.toBe(1);
-  });
-
-  test('a multi-visit lock is acquired in ascending id order regardless of the caller\'s array order', async () => {
-    // Fixed ids so the sort order is known independent of insertion order.
-    // Inserted HIGH-then-LOW (reversed from id order): an unindexed/unordered
-    // lock query returns Postgres's physical (heap/insertion) order here, so
-    // this insertion order is what makes an unordered lock disagree with the
-    // ascending convention below -- inserting ascending would happen to
-    // "accidentally" match it and hide the bug this test exists to catch.
-    const lowId = '00000000-0000-4000-8000-000000000001';
-    const highId = 'ffffffff-ffff-4fff-8fff-ffffffffffff';
-    await mockConnection('scheduled_services').insert([
-      { id: highId, customer_id: customerId, property_id: propertyId, lat: null, lng: null },
-      { id: lowId, customer_id: customerId, property_id: propertyId, lat: null, lng: null },
-    ]);
-
-    let lowLocked;
-    let releaseHolder;
-    const locked = new Promise(resolve => { lowLocked = resolve; });
-    const release = new Promise(resolve => { releaseHolder = resolve; });
-    // Mimics prelockVisitContext's own ascending-id FOR UPDATE convention
-    // (customer-geocode-review-visits.js: .orderBy('id').forUpdate()): lock
-    // the LOW id, then the HIGH id.
-    const holder = mockConnection.transaction(async (trx) => {
-      await trx('scheduled_services').where({ id: lowId }).forUpdate().first('id');
-      lowLocked();
-      await release;
-      await trx('scheduled_services').where({ id: highId }).forUpdate().first('id');
-    });
-    await locked;
-
-    // Pass the ids in DESCENDING order. Without an explicit ORDER BY, a plain
-    // `whereIn` locks rows in the order Postgres returns them for this
-    // predicate shape, which follows the literal array order supplied here
-    // (confirmed against this database) -- so an unordered fence would lock
-    // HIGH (uncontested) then LOW, the reverse of the holder above, and
-    // deadlock. With the fix, the fence always locks LOW then HIGH no matter
-    // what order the caller's array is in, so it simply waits its turn.
-    let fenceSettled = false;
-    const fence = withReviewWriteFence({
-      propertyId, customerId, visitIds: [highId, lowId],
-    }, async (conn) => conn('scheduled_services').whereIn('id', [highId, lowId]).update({ lat: 1, lng: 1 }))
-      .finally(() => { fenceSettled = true; });
-
-    const deadline = Date.now() + 5000;
-    let blocked = false;
-    while (!blocked && Date.now() < deadline) {
-      const waiting = await admin('pg_stat_activity')
-        .where({ application_name: 'geocode-lock-order' })
-        .where({ state: 'active', wait_event_type: 'Lock' })
-        .count('* as count').first();
-      blocked = Number(waiting?.count || 0) > 0;
-      if (!blocked) await new Promise(resolve => setImmediate(resolve));
-    }
-    try {
-      // The fence must be the one waiting on LOW (the holder's first lock),
-      // not off holding HIGH while the holder waits on it.
-      expect(blocked).toBe(true);
-      expect(fenceSettled).toBe(false);
-    } finally {
-      releaseHolder();
-    }
-    await expect(holder).resolves.toBeUndefined();
-    await expect(fence).resolves.toBe(2);
   });
 });

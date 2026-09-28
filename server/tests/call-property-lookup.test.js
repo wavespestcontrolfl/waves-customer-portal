@@ -10,7 +10,7 @@
 
 jest.mock('../models/db', () => {
   const fn = jest.fn();
-  fn.raw = jest.fn((sql, bindings) => ({ __raw: sql, bindings }));
+  fn.raw = jest.fn((sql, bindings) => ({ __raw: sql, bindings, rows: [{ locked: true }] }));
   fn.fn = { now: () => 'NOW()' };
   return fn;
 });
@@ -60,7 +60,7 @@ function mockRowDb(row, updateBuilder, extra = {}) {
 
 function builder(result) {
   const b = {};
-  for (const m of ['where', 'first', 'update', 'join', 'whereIn', 'whereRaw', 'whereNull', 'whereNotNull', 'whereNotExists', 'orWhereNull', 'select', 'orderBy', 'limit', 'offset', 'insert', 'onConflict', 'merge', 'forUpdate']) b[m] = jest.fn(() => b);
+  for (const m of ['where', 'first', 'update', 'join', 'whereIn', 'whereRaw', 'whereNull', 'whereNotNull', 'whereNotExists', 'orWhereNull', 'select', 'orderBy', 'limit', 'offset', 'insert', 'onConflict', 'merge', 'forUpdate', 'noWait']) b[m] = jest.fn(() => b);
   b.then = (resolve, reject) => Promise.resolve(result).then(resolve, reject);
   return b;
 }
