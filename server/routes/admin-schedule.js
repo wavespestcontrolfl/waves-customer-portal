@@ -23352,7 +23352,15 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
       // internal_only companion facts never reach the prompt, so they must
       // not defeat the assessment-only retryable 503 (codex r30; the
       // primary term is the confirmed flag for the same reason, r72).
-      && !(primaryTypedConfirmed || companionCustomerInput);
+      && !(primaryTypedConfirmed || companionCustomerInput)
+      // Reviewed photo captions are substantive on their own (pre-push P2,
+      // Codex #5145 r2) — cappedPhotoCaptions is only ever non-empty when
+      // the gate is on AND at least one caption survived capping, so a gate
+      // check here would be redundant. A request grounded by captions must
+      // proceed on the photo block even when the assessment load itself
+      // fails; only a TRUE assessment-only request (no captions either)
+      // still 503s retryable.
+      && !cappedPhotoCaptions.length;
     if (assessmentWasOnlyInput && !contextSignals.hasCurrentLawnAssessment) {
       return res.status(503).json({
         error: 'Lawn assessment grounding is unavailable right now — try again in a moment.',

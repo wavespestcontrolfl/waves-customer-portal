@@ -77,6 +77,10 @@ async function seedAndRestore(overrides = {}) {
 
 it('sends the reviewed captions and summary to Generate, in current photo order', async () => {
   await seedAndRestore();
+  // Captions are already tech-reviewed and need no opt-in; the basic-flow
+  // summary does (pre-push P2, Codex #5145 r2) — click "Add to technician
+  // notes" for THIS exact summary before Generate.
+  fireEvent.click(screen.getAllByRole('button', { name: 'Add to technician notes' })[0]);
   await act(async () => fireEvent.click(screen.getAllByRole('button', { name: /generate ai/i })[0]));
   await waitFor(() => expect(generateReportCalls.length).toBe(1));
   const body = generateReportCalls[0];
@@ -113,6 +117,7 @@ it('caps captions at 5 entries of 200 chars each, even if more/longer are restor
     name: `p${i}.jpg`, data: `data:image/jpeg;base64,${i}`, capturedAt: '2099-01-01T12:00:00Z', caption: `${longCaption}`,
   }));
   await seedAndRestore({ servicePhotos: manyPhotos, generationPhotoCount: manyPhotos.length, typedPhotoSummary: 'y'.repeat(900) });
+  fireEvent.click(screen.getAllByRole('button', { name: 'Add to technician notes' })[0]);
   await act(async () => fireEvent.click(screen.getAllByRole('button', { name: /generate ai/i })[0]));
   await waitFor(() => expect(generateReportCalls.length).toBe(1));
   const body = generateReportCalls[0];
@@ -198,4 +203,60 @@ it('editing the photo summary WHILE Generate is in flight still invalidates once
   resolveGenerate();
   await waitFor(() => expect(generateReportCalls.length).toBe(1));
   await screen.findByText(/the draft\s+was cleared/);
+});
+
+// Pre-push P2 (Codex #5145 r2): the basic (non-typed) flow's photo summary
+// must not ground the writer until the tech explicitly opts in via "Add to
+// technician notes" — reviewing it in the textarea is not itself consent.
+// Captions are already tech-reviewed and unaffected.
+it('basic flow: the photo summary is withheld from Generate until the opt-in button is clicked', async () => {
+  await seedAndRestore();
+  await act(async () => fireEvent.click(screen.getAllByRole('button', { name: /generate ai/i })[0]));
+  await waitFor(() => expect(generateReportCalls.length).toBe(1));
+  const body = generateReportCalls[0];
+  expect(body.photoCaptions).toEqual([
+    'Ants at the front porch.',
+    'Droppings under the kitchen sink.',
+    'Garage perimeter treated.',
+  ]);
+  expect(body).not.toHaveProperty('photoSummary');
+});
+
+// Typed flow: the summary "appears on the customer report" directly (no
+// opt-in button rendered at all — see the ternary right next to it) — so
+// it always sends, exactly as before this fix.
+const typedService = {
+  id: 'typed-photo-visit', customerId: 'typed-photo-customer', customerName: 'Typed Customer',
+  serviceType: 'Termite Bait Station Monitoring', status: 'confirmed', scheduledDate: '2099-01-01', estimatedPrice: 100,
+  completionProfile: { serviceKey: 'termite', findingsType: 'termite_bait_station' },
+  findingsSchema: {
+    type: 'termite_bait_station',
+    label: 'Termite Bait Station Inspection',
+    fields: [
+      { key: 'stations_checked', label: 'Stations checked', type: 'count', section: 'Station inspection' },
+    ],
+  },
+};
+const typedKey = `waves_completion_draft_${typedService.id}`;
+
+it('typed flow: the photo summary sends unconditionally, with no opt-in step', async () => {
+  const draft = {
+    serviceId: typedService.id, draftId: 'draft-typed', savedAt: '2099-01-01T12:00:00Z',
+    notes: '', generationPhotoCount: photos.length, servicePhotos: photos, sendSms: false,
+    typedPhotoSummary: 'Photos document ant and rodent activity.',
+    findingsValues: { stations_checked: '3' },
+  };
+  const { servicePhotos: _photos, ...metadata } = draft;
+  localStorage.setItem(typedKey, JSON.stringify(metadata));
+  await putCompletionDraft(typedService.id, draft);
+  render(<CompletionPanel service={typedService} products={[]} onClose={() => {}} onSubmit={vi.fn()} />);
+  await screen.findByPlaceholderText('Notes about this service...');
+  await waitFor(() => expect(screen.queryByText('Loading saved draft…')).toBeNull());
+  fireEvent.click(screen.getByRole('button', { name: 'Restore', exact: true }));
+  await screen.findByAltText(photos[0].name);
+  // No "Add to technician notes" button in the typed flow.
+  expect(screen.queryByRole('button', { name: 'Add to technician notes' })).toBeNull();
+  await act(async () => fireEvent.click(screen.getAllByRole('button', { name: /generate ai/i })[0]));
+  await waitFor(() => expect(generateReportCalls.length).toBe(1));
+  expect(generateReportCalls[0].photoSummary).toBe('Photos document ant and rodent activity.');
 });

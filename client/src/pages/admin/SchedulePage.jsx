@@ -13030,6 +13030,16 @@ export function CompletionPanel({
   // (codex r23). An edited draft is the tech's reviewed copy and is theirs.
   const generatedReportTextRef = useRef(null);
   const [generatedReportCleared, setGeneratedReportCleared] = useState(false);
+  // Basic (non-typed) flow only (pre-push P2, Codex #5145 r2): the tech
+  // reviews the photo summary and explicitly opts in via the "add to notes"
+  // button before it may ground the writer — captions are already
+  // tech-reviewed and need no separate opt-in. Stores the EXACT
+  // (trimmed/capped) summary text that was opted into, the same
+  // "does the CURRENT value still match what was trusted" pattern
+  // generatedReportTextRef uses: a later summary edit (or re-analysis)
+  // no longer matches, so the stale opt-in silently stops applying instead
+  // of grounding text the tech never actually reviewed-and-accepted.
+  const optedInPhotoSummaryRef = useRef(null);
   // Baseline for the generation-inputs watcher below — null means "not yet
   // initialized" (fresh mount or just-restored draft), so the first run
   // records without invalidating.
@@ -15905,6 +15915,14 @@ export function CompletionPanel({
       .slice(0, 5)
       .map((c) => c.slice(0, 200));
     const reportPhotoSummary = String(typedPhotoSummary || "").trim().slice(0, 600);
+    // Basic flow only: the summary must be sent only after the tech's
+    // explicit "add to notes" opt-in for THIS exact text (see
+    // optedInPhotoSummaryRef above) — reviewing it in the textarea is not
+    // itself consent to ground the writer. The typed flow has no opt-in
+    // step (the summary "appears on the customer report" directly), so it
+    // always sends.
+    const reportPhotoSummaryOptedIn = isTypedFindings
+      || (optedInPhotoSummaryRef.current !== null && optedInPhotoSummaryRef.current === reportPhotoSummary);
     const actionsCompleted = activeSelectedLabels(selectedProtocolActionLabels);
     // Free text is the input surface now; restored older drafts can still
     // carry chip-label selections, so both merge into the same arrays.
@@ -16119,7 +16137,7 @@ export function CompletionPanel({
       // its caption is never sent. Capped defensively; the server re-caps
       // from scratch and never trusts this client-side cap.
       ...(reportPhotoCaptions.length ? { photoCaptions: reportPhotoCaptions } : {}),
-      ...(reportPhotoSummary ? { photoSummary: reportPhotoSummary } : {}),
+      ...(reportPhotoSummary && reportPhotoSummaryOptedIn ? { photoSummary: reportPhotoSummary } : {}),
       includeCustomerComms: aiReportIncludeComms,
       ...typedFindingsPayload,
     };
@@ -19737,6 +19755,13 @@ export function CompletionPanel({
                             onClick={() => {
                               const summary = typedPhotoSummary.trim();
                               if (!summary) return;
+                              // The explicit opt-in (pre-push P2, Codex
+                              // #5145 r2) — buildAiReportPayload only sends
+                              // photoSummary once this exact text has been
+                              // accepted this way. Capped the same way
+                              // reportPhotoSummary is, so a restored
+                              // over-length draft still matches.
+                              optedInPhotoSummaryRef.current = summary.slice(0, 600);
                               setNotes((prev) =>
                                 prev.trim() ? `${prev.trimEnd()}\n\n${summary}` : summary,
                               );
@@ -22143,6 +22168,13 @@ export function CompletionPanel({
                           onClick={() => {
                             const summary = typedPhotoSummary.trim();
                             if (!summary) return;
+                            // The explicit opt-in (pre-push P2, Codex #5145
+                            // r2) — buildAiReportPayload only sends
+                            // photoSummary once this exact text has been
+                            // accepted this way. Capped the same way
+                            // reportPhotoSummary is, so a restored
+                            // over-length draft still matches.
+                            optedInPhotoSummaryRef.current = summary.slice(0, 600);
                             setNotes((prev) =>
                               prev.trim() ? `${prev.trimEnd()}\n\n${summary}` : summary,
                             );

@@ -24,6 +24,12 @@ jest.mock('../models/db', () => {
 });
 const router = require('../routes/admin-schedule');
 const handler = router.stack.find((layer) => layer.route?.path === '/generate-report').route.stack.at(-1).handle;
+const db = require('../models/db');
+// Captured once so per-test overrides (the assessment-validation tests
+// below) can be reverted in beforeEach — no other test in this file relies
+// on lawn_assessments resolving truthy, so leaking a custom impl forward
+// would silently open the lawn-assessment-gate branch for unrelated tests.
+const defaultDbImpl = db.getMockImplementation();
 
 function mkReq(body) {
   return {
@@ -41,6 +47,7 @@ function mkRes() {
 
 beforeEach(() => {
   mockProvider.mockClear();
+  db.mockImplementation(defaultDbImpl);
   delete process.env.GATE_REPORT_PHOTO_CONTENT;
 });
 afterEach(() => { delete process.env.GATE_REPORT_PHOTO_CONTENT; });
@@ -193,4 +200,50 @@ test('gate on: the same request differs from the gate-off prompt ONLY by the gat
   // sent, so `text` differs ONLY by that one parenthetical note.
   expect(onText).not.toBe(offText);
   expect(onText.replace(GATE_ON_PHOTO_COUNT_NOTE, 'X')).toBe(offText.replace(PRE_BRANCH_PHOTO_COUNT_NOTE, 'X'));
+});
+
+// Pre-push P2 (Codex #5145 r2): a valid lawn assessment + reviewed captions
+// pass the INPUT gate (hasReportInput), but assessmentWasOnlyInput ignored
+// captions entirely — so when the assessment grounding load then failed,
+// the route 503'd `lawn_assessment_grounding_unavailable` even though the
+// captions are substantive on their own and generation could proceed from
+// them. `db` here validates the lawn assessment truthy
+// (hasValidLawnAssessment); buildReportCopyContext is already mocked to
+// return `signals: {}` (no hasCurrentLawnAssessment) — i.e. the grounding
+// load "failed" for every test in this file, which is exactly the scenario
+// these two tests are about.
+function withValidLawnAssessment() {
+  db.mockImplementation((table) => {
+    if (table === 'lawn_assessments') {
+      return {
+        where: function where() { return this; },
+        first: async () => ({ id: 'assessment-1' }),
+      };
+    }
+    return defaultDbImpl(table);
+  });
+}
+
+test('gate on: a valid assessment + reviewed captions, assessment grounding fails → generation still proceeds on the photo block', async () => {
+  process.env.GATE_REPORT_PHOTO_CONTENT = 'true';
+  withValidLawnAssessment();
+  const res = mkRes();
+  await handler(mkReq({
+    lawnAssessmentId: 'assessment-1',
+    photoCaptions: ['Thin turf along the south fence line.'],
+  }), res);
+  expect(res.statusCode).toBe(200);
+  expect(mockProvider).toHaveBeenCalled();
+});
+
+test('gate off: the same assessment-only-plus-captions request still 503s lawn_assessment_grounding_unavailable', async () => {
+  withValidLawnAssessment();
+  const res = mkRes();
+  await handler(mkReq({
+    lawnAssessmentId: 'assessment-1',
+    photoCaptions: ['Thin turf along the south fence line.'],
+  }), res);
+  expect(res.statusCode).toBe(503);
+  expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ code: 'lawn_assessment_grounding_unavailable' }));
+  expect(mockProvider).not.toHaveBeenCalled();
 });
