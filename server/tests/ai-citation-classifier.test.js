@@ -228,6 +228,15 @@ describe('classifyUrl', () => {
       expect(isProviderIntentQuestion(null)).toBe(false);
     });
 
+    // Codex P2 2026-09-28 (round 9): an entity-cohort question asks ABOUT
+    // Waves ("Who owns …?") — its bare "who" is never provider intent.
+    test('isProviderIntentQuestion: entity-cohort questions are never provider intent, despite who/company words', () => {
+      expect(isProviderIntentQuestion({ id: null, query: 'Who owns Waves Pest Control?', intent: null })).toBe(false);
+      expect(isProviderIntentQuestion({ id: null, query: 'Is Waves Pest Control independently owned or a franchise?', intent: null })).toBe(false);
+      // a non-cohort "who" question is still provider intent
+      expect(isProviderIntentQuestion({ id: null, query: 'Who does termite inspections in Venice FL?', intent: null })).toBe(true);
+    });
+
     test('negative: a non-provider question leaves an otherwise-other URL as other, even with local/best tokens', () => {
       const r = classifyUrl('https://www.unknownlocaldirectory.example/best-pest-control-sarasota-fl', { providerIntent: false });
       expect(r).toEqual({ category: 'other', host: 'unknownlocaldirectory.example', rule: 'unmatched' });

@@ -25,6 +25,7 @@
 
 const { isOwnedUrl } = require('./aeo-measurement');
 const { canonicalProspectDomain } = require('./prospect-domain-lock');
+const { isEntityQuestion } = require('./aeo-entity-facts');
 // competitor-discovery.js's NATIONAL_CHAINS is the portal's existing tracked
 // national/regional pest-and-lawn franchise list (orkin.com, terminix.com,
 // trugreen.com, trulynolen.com, masseyservices.com, …) — reused verbatim
@@ -228,6 +229,12 @@ function hasBestToken(urlString) {
 const PROVIDER_INTENT_WORDS_RE = /\b(who|best|top|company)\b/i;
 function isProviderIntentQuestion(question) {
   if (!question) return false;
+  // Entity-cohort questions (aeo-entity-cohort-v1.json — "Who owns Waves Pest
+  // Control?") ask ABOUT Waves, never for a provider: their citations are
+  // identity evidence, not listicle candidates (Codex P2 2026-09-28, round
+  // 9). Same exclusion gsc-opportunity-miner.js's mineAeoGaps applies, via
+  // the same shared isEntityQuestion().
+  if (isEntityQuestion(question.query)) return false;
   if (question.intent === 'provider') return true;
   return PROVIDER_INTENT_WORDS_RE.test(question.query || '');
 }

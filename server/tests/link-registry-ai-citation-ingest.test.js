@@ -167,6 +167,14 @@ describe('aggregateCitations (pure)', () => {
       }]);
     });
 
+    // Codex P2 2026-09-28 (round 9): the seeded entity-cohort question is
+    // identity evidence — a local-token URL cited under it stays `other`.
+    test('negative: the SAME URL cited under the entity question "Who owns Waves Pest Control?" stays other', () => {
+      const out = aggregateCitations([mention({ query: 'Who owns Waves Pest Control?', cited_urls: [LOCAL_LISTICLE_URL] })], []);
+      expect(out).toHaveLength(1);
+      expect(out[0]).toMatchObject({ host: 'unknownlocaldirectory.example', category: 'other', rule: 'unmatched', subtype: null });
+    });
+
     test('negative: the SAME URL on a non-provider question stays other, no subtype', () => {
       const out = aggregateCitations([mention({ query: Q12_IDENTIFY_NON_PROVIDER, cited_urls: [LOCAL_LISTICLE_URL] })], []);
       expect(out).toEqual([{
