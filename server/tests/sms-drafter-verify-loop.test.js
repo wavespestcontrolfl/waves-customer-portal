@@ -376,3 +376,52 @@ describe('generateGroundedDraft — the verifier receives the draft\'s offered_t
     expect(client2.calls[1].messages[0].content).toContain('(none — the drafter declares that this draft offers NO new appointment times)');
   });
 });
+
+// Codex r2 P2: SHADOW_DRAFT_VERIFY=false (single-pass) skipped the
+// deterministic offered_times check along with the LLM verifier, so a draft
+// quoting a slot with a missing/wrong declaration could persist a null or
+// wrong send-time snapshot. The check costs no call and now runs there too.
+describe('generateGroundedDraft — single-pass mode (SHADOW_DRAFT_VERIFY=false) still runs the deterministic offered_times check', () => {
+  const priorGate = process.env.GATE_SMS_REAL_ANSWERS;
+  const priorVerify = process.env.SHADOW_DRAFT_VERIFY;
+  beforeEach(() => { process.env.GATE_SMS_REAL_ANSWERS = 'true'; process.env.SHADOW_DRAFT_VERIFY = 'false'; });
+  afterEach(() => {
+    if (priorGate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = priorGate;
+    if (priorVerify === undefined) delete process.env.SHADOW_DRAFT_VERIFY; else process.env.SHADOW_DRAFT_VERIFY = priorVerify;
+    jest.dontMock('../services/availability');
+    jest.resetModules();
+  });
+  function setup() {
+    jest.resetModules();
+    jest.doMock('../services/availability', () => ({
+      getAvailableSlots: jest.fn(async () => ({ days: [{ fullDate: 'Tuesday, September 29', slots: [{ startTime24: '09:00' }] }] })),
+    }));
+    return require('../services/sms-shadow-drafter');
+  }
+  const args = (client) => ({
+    client, context: CTX, inboundMessage: 'Can we book a visit?', intent: { intent: 'general_customer_sms_needs_review' },
+    schedulingIntent: true, city: 'Venice',
+  });
+
+  test('a correctly declared offer → converged, one call, snapshot persisted', async () => {
+    const drafter = setup();
+    const client = makeClient([{
+      reply: 'How about Tuesday 9:00 AM - 11:00 AM?', intended_actions: [], missing_info: null,
+      offered_times: [{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }],
+    }]);
+    const r = await drafter.generateGroundedDraft(args(client));
+    expect(client.calls).toHaveLength(1);
+    expect(r.converged).toBe(true);
+    expect(r.openTimesSnapshot?.quotedWindows).toEqual([{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }]);
+  });
+
+  test('a quoted slot with NO declaration → NOT converged (consumers refuse it), no snapshot, still one call', async () => {
+    const drafter = setup();
+    const client = makeClient([{ reply: 'How about Tuesday 9:00 AM - 11:00 AM?', intended_actions: [], missing_info: null, offered_times: [] }]);
+    const r = await drafter.generateGroundedDraft(args(client));
+    expect(client.calls).toHaveLength(1);
+    expect(r.converged).toBe(false);
+    expect(r.openTimesSnapshot).toBeNull();
+    expect(r.parsed.reply).toMatch(/9:00 AM - 11:00 AM/); // the draft itself is still returned for telemetry
+  });
+});

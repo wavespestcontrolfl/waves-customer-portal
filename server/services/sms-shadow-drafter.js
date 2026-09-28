@@ -482,6 +482,65 @@ function parseOpenTimesDaysFromFactsBlock(factsBlock) {
   return days;
 }
 
+// Which of a persisted snapshot's (date, window) pairs a send path must
+// recheck against live availability, given the body that will ACTUALLY go
+// out. Pure/sync; shared by the immediate /sms and queue-time /schedule-sms
+// Agent Review seam (verifyAgentDecisionForSend). Returns one of:
+//   { action: 'skip' }                       nothing to recheck
+//   { action: 'recheck', quotedWindows }     recheck exactly these pairs
+//   { action: 'refuse', reason }             fail closed — do not send
+//
+// Unedited body (matches the drafted reply): recheck every pair whose window
+// text is still present; a body that quotes none needs no recheck.
+//
+// Edited body (Codex r2 P2): a reviewer who reformats an offered time
+// ("9–11 AM"), or changes its day while keeping the time, would otherwise
+// slip past an exact-text filter — the first skips the recheck, the second
+// rechecks the wrong day. With no prose parsing available, an edited body
+// fails closed unless each pair is either fully KEPT (window text present,
+// and the day name present when the drafted reply named it) or fully
+// DROPPED (neither present); any other time-range or weekday name in the
+// edited body that the snapshot does not know also refuses. A refused
+// reviewer edit re-drafts; a stale offer never sends.
+const TIME_RANGE_RE = /\d{1,2}:\d{2} [AP]M - \d{1,2}:\d{2} [AP]M/g;
+const WEEKDAY_RE = /\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/gi;
+function normalizeBodyForComparison(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim();
+}
+function planOpenTimesRecheck({ snapshot, outgoingBody, originalBody = null }) {
+  const pairs = (snapshot?.quotedWindows || []).filter((w) => w && typeof w.window === 'string' && w.window);
+  if (!pairs.length) return { action: 'skip' };
+  const body = String(outgoingBody || '');
+  const edited = originalBody != null && normalizeBodyForComparison(body) !== normalizeBodyForComparison(originalBody);
+  if (!edited) {
+    const still = pairs.filter((w) => body.includes(w.window));
+    return still.length ? { action: 'recheck', quotedWindows: still } : { action: 'skip' };
+  }
+
+  const knownWindows = new Set(pairs.map((w) => w.window));
+  for (const m of body.match(TIME_RANGE_RE) || []) {
+    if (!knownWindows.has(m)) return { action: 'refuse', reason: 'edited_offer_unknown_window' };
+  }
+  const knownDays = new Set(pairs.map((w) => String(w.date || '').split(',')[0].trim().toLowerCase()).filter(Boolean));
+  for (const m of body.match(WEEKDAY_RE) || []) {
+    if (!knownDays.has(m.toLowerCase())) return { action: 'refuse', reason: 'edited_offer_unknown_day' };
+  }
+
+  const original = String(originalBody || '').toLowerCase();
+  const lowerBody = body.toLowerCase();
+  const kept = [];
+  for (const w of pairs) {
+    const day = String(w.date || '').split(',')[0].trim().toLowerCase();
+    const dayRequired = Boolean(day) && original.includes(day);
+    const hasWindow = countQuotedWindow(body, w.window) > 0;
+    const hasDay = Boolean(day) && lowerBody.includes(day);
+    if (hasWindow && (!dayRequired || hasDay)) { kept.push(w); continue; }
+    if (!hasWindow && (!dayRequired || !hasDay)) continue; // dropped outright
+    return { action: 'refuse', reason: 'edited_offer_text' };
+  }
+  return kept.length ? { action: 'recheck', quotedWindows: kept } : { action: 'skip' };
+}
+
 // The minimum needed to recheck a draft's quoted OPEN TIMES at send time —
 // computed once per generation and carried on whichever row the caller
 // persists it to (message_drafts.intended_actions for the live SMS lane,
@@ -1338,13 +1397,29 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     voiceProfileVersion, verifierModels: [], factsBlock, promptVersion,
   };
   let { parsed, model, servedModel } = first;
-  // Kill switch / single-pass mode: no verification claim, behave as pre-v3.
-  if (!VERIFY_ENABLED) return {
-    parsed, passes: 1, converged: true, model, servedModel, voiceProfileVersion, verifierModels: [], factsBlock, promptVersion,
-    openTimesSnapshot: computeOpenTimesSnapshot({
-      openTimesBlock, offeredTimes: parsed?.offered_times, city, customerId: context?.customer?.id || null, estimateId,
-    }),
-  };
+  // Kill switch / single-pass mode: no LLM verification claim, behave as
+  // pre-v3 — except the offered_times check, which is deterministic and
+  // costs no call (Codex r2 P2): a single-pass draft that quotes a slot but
+  // omits or misstates its declaration would otherwise persist a null or
+  // wrong send-time snapshot. It fails closed the same way an exhausted
+  // revise loop does — converged:false, which every consumer already
+  // refuses to publish or send.
+  if (!VERIFY_ENABLED) {
+    const singlePassCheck = validateOfferedTimes({ offeredTimes: parsed?.offered_times, openTimesDays, reply: parsed?.reply, factsBlock });
+    if (!singlePassCheck.ok) {
+      logger.warn(`[sms-shadow] single-pass draft failed the offered_times check (${singlePassCheck.violations.join('; ')}); not converged`);
+      return {
+        parsed, passes: 1, converged: false, model, servedModel, voiceProfileVersion, verifierModels: [], factsBlock, promptVersion,
+        openTimesSnapshot: null,
+      };
+    }
+    return {
+      parsed, passes: 1, converged: true, model, servedModel, voiceProfileVersion, verifierModels: [], factsBlock, promptVersion,
+      openTimesSnapshot: computeOpenTimesSnapshot({
+        openTimesBlock, offeredTimes: parsed?.offered_times, city, customerId: context?.customer?.id || null, estimateId,
+      }),
+    };
+  }
 
   const verifier = require('./sms-draft-verifier');
   let passes = 1;
@@ -1898,6 +1973,7 @@ module.exports = {
   countQuotedWindow,
   parseOpenTimesDaysFromFactsBlock,
   stripOpenTimesSection,
+  planOpenTimesRecheck,
   computeOpenTimesSnapshot,
   openTimesStillOffered,
 };

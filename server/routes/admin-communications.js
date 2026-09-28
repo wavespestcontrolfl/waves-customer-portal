@@ -180,7 +180,8 @@ async function verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomer
     // to 48h, or be scheduled for later, and the calendar never re-checks
     // itself. Only windows still present in the OUTGOING body are rechecked
     // (a reviewer's correction that drops every quoted window needs no
-    // recheck); a gone slot, a fetch error, or a timeout all fail closed,
+    // recheck; an edit that reformats or re-dates one refuses — see
+    // planOpenTimesRecheck); a gone slot, a fetch error, or a timeout all fail closed,
     // reusing the same supersede-and-refuse mechanism as the staleness check
     // above rather than inventing a new one.
     let openTimesSnapshot = null;
@@ -193,16 +194,22 @@ async function verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomer
       } catch (_e) { openTimesSnapshot = null; }
     }
     if (openTimesSnapshot?.quotedWindows?.length) {
-      const stillQuoted = openTimesSnapshot.quotedWindows.filter(
-        (w) => outgoingBody && w?.window && outgoingBody.includes(w.window)
-      );
-      if (stillQuoted.length) {
-        const { openTimesStillOffered } = require('../services/sms-shadow-drafter');
+      // Codex r2 P2: an EDITED body (reformatted time, changed day) cannot be
+      // matched to its snapshot by exact text — planOpenTimesRecheck fails
+      // closed on any edit that is not a clean keep-or-drop of each pair.
+      const { openTimesStillOffered, planOpenTimesRecheck } = require('../services/sms-shadow-drafter');
+      const plan = planOpenTimesRecheck({ snapshot: openTimesSnapshot, outgoingBody, originalBody: decision.suggested_message });
+      if (plan.action === 'refuse') {
+        logger.info(`[agent-review] decision ${decision.id} open-times unverifiable after edit (${plan.reason}) — refusing send`);
+        await require('../services/sms-suggest-mode').supersedeStaleDecision({ decisionId: decision.id });
+        return null;
+      }
+      if (plan.action === 'recheck') {
         const recheck = await openTimesStillOffered({
           city: openTimesSnapshot.lookup?.city || null,
           customerId: openTimesSnapshot.lookup?.customerId || null,
           estimateId: openTimesSnapshot.lookup?.estimateId || null,
-          quotedWindows: stillQuoted,
+          quotedWindows: plan.quotedWindows,
         });
         if (!recheck.ok) {
           logger.info(`[agent-review] decision ${decision.id} open-times stale (${recheck.reason}) — refusing send`);

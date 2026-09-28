@@ -3295,6 +3295,45 @@ describe('/sms — OPEN TIMES send-time recheck on a claimed agent decision (Cod
     expect(sendCustomerMessage).toHaveBeenCalled();
   });
 
+  // Codex r2 P2: an EDITED body must be a clean keep-or-drop of each offered
+  // pair; a reformatted time or a changed day cannot be matched to the
+  // snapshot and fails closed instead of skipping or rechecking the wrong day.
+  test('a reviewer edit that REFORMATS an offered time ("9–11 AM") refuses the send, supersedes, and never calls the engine', async () => {
+    const claimUpdates = [];
+    mockDb({ decision: decisionRow({ suggested_message: 'How about Tuesday 9:00 AM - 11:00 AM?' }), claimUpdates });
+    await withServer(async (baseUrl) => {
+      const res = await send(baseUrl, { body: 'How about Tuesday 9–11 AM?' });
+      expect(res.status).toBe(409);
+    });
+    expect(getAvailableSlots).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(require('../services/sms-suggest-mode').supersedeStaleDecision).toHaveBeenCalledWith({ decisionId: 'dec-1' });
+  });
+
+  test('a reviewer edit that changes the DAY but keeps the time refuses the send rather than rechecking the old day', async () => {
+    getAvailableSlots.mockResolvedValue({ zone: 'Venice Zone', days: [{ fullDate: 'Tuesday, September 29', slots: [{ startTime24: '09:00' }] }] }); // Tuesday IS still open — must not matter
+    const claimUpdates = [];
+    mockDb({ decision: decisionRow({ suggested_message: 'How about Tuesday 9:00 AM - 11:00 AM?' }), claimUpdates });
+    await withServer(async (baseUrl) => {
+      const res = await send(baseUrl, { body: 'How about Thursday 9:00 AM - 11:00 AM?' });
+      expect(res.status).toBe(409);
+    });
+    expect(getAvailableSlots).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('a reviewer edit elsewhere in the text keeps the offer intact → normal recheck, sends when still open', async () => {
+    getAvailableSlots.mockResolvedValue({ zone: 'Venice Zone', days: [{ fullDate: 'Tuesday, September 29', slots: [{ startTime24: '09:00' }] }] });
+    const claimUpdates = [];
+    mockDb({ decision: decisionRow({ suggested_message: 'How about Tuesday 9:00 AM - 11:00 AM?' }), claimUpdates });
+    await withServer(async (baseUrl) => {
+      const res = await send(baseUrl, { body: 'How about Tuesday 9:00 AM - 11:00 AM? Thanks so much!' });
+      expect(res.status).toBe(200);
+    });
+    expect(getAvailableSlots).toHaveBeenCalled();
+    expect(sendCustomerMessage).toHaveBeenCalled();
+  });
+
   test('a reviewer correction that drops every quoted window skips the recheck entirely', async () => {
     const claimUpdates = [];
     mockDb({ decision: decisionRow(), claimUpdates });
