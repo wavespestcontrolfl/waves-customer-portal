@@ -33,6 +33,22 @@ module.exports = {
     { id: 'd30_final',    template_key: 'invoice_followup_30day', daysAfterSend: 30, label: '30-day final notice' },
   ],
 
+  // GATE_DUNNING_LADDER_90 (dark; dunning unification, owner rulings
+  // 2026-09-27): the ladder owns an overdue invoice through Day 90 with
+  // touches a week or more apart, and Day 90 is the only final notice. The
+  // first four steps keep their ids, so step_index and the ledger keys built
+  // from step ids stay stable across the switch; only their days and labels
+  // move. `steps` above stays the legacy cadence that the gate-off path and
+  // the 2026-04 backfill migration read.
+  stepsThrough90: [
+    { id: 'd3_friendly',      template_key: 'invoice_followup_3day',  daysAfterSend: 3,  label: '3-day friendly nudge' },
+    { id: 'd7_reminder',      template_key: 'invoice_followup_7day',  daysAfterSend: 10, label: '10-day reminder' },
+    { id: 'd14_firmer',       template_key: 'invoice_followup_14day', daysAfterSend: 17, label: '17-day check-in' },
+    { id: 'd30_final',        template_key: 'invoice_followup_30day', daysAfterSend: 30, label: '30-day reminder' },
+    { id: 'd60_reminder',     template_key: 'invoice_followup_60day', daysAfterSend: 60, label: '60-day reminder' },
+    { id: 'd90_final_notice', template_key: 'invoice_followup_90day', daysAfterSend: 90, label: '90-day final notice' },
+  ],
+
   // After how many failed autopay attempts do we release the sequence from
   // autopay hold and start sending manual reminders?
   autopayFailureThreshold: 3,

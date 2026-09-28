@@ -3,7 +3,7 @@ const { isDeepStrictEqual } = require("node:util");
 const db = require("../models/db");
 const logger = require("./logger");
 const TaxCalculator = require("./tax-calculator");
-const { REPLAY_HOLD_CODES, isReplayHold, billingLegDeliveryState } = require("./messaging/billing-channel-routing");
+const { REPLAY_HOLD_CODES, isReplayHold, billingLegDeliveryState, billingLegContactTime, previouslySettledBillingLegs } = require("./messaging/billing-channel-routing");
 const DiscountEngine = require("./discount-engine");
 const {
   percentageDiscountDollars,
@@ -21,6 +21,7 @@ const { explicitBillingChannels } = require("./billing-delivery-channels");
 const PhotoService = require("./photos");
 const config = require("../config");
 const { customerSafeServiceNotes } = require("./project-types");
+const { hasAuthoritativeZeroPrice } = require("./billing-lane");
 const {
   SEND_CLAIMABLE_STATUSES,
   SEND_FINALIZABLE_STATUSES,
@@ -1760,7 +1761,53 @@ async function buildScheduledServiceInvoiceLines(
     : null;
   if (appointmentDiscount) lineItems.push(appointmentDiscount);
 
-  const storedNetAmount = hasNumericValue(scheduled.estimated_price)
+  // Codex pre-push P1: a stamped estimated_price of 0 is not the visit's
+  // authoritative frozen net the way a stamped POSITIVE price is — it's
+  // the same "no price on this row" shape as null, and completionInvoiceAmount
+  // / predictCompletionBilling / resolveScheduledServiceCharge (billing-lane.js,
+  // admin-schedule.js) all defer to their fee/rate fallback for exactly that
+  // shape. Anchoring the reconciliation on a bare hasNumericValue(0) === true
+  // read 0 as the real net and wiped the freshly-computed fee-fallback
+  // primaryBase (above, via firstPositiveNumber — which already treats 0 the
+  // same as absent) straight back down to $0 through a "Scheduled price
+  // adjustment" line, so a $97.20 fee visit with a $40 checkout extra minted
+  // $40, not the $137.20 the checkout preview showed. `scheduledAmount`
+  // above uses the same positive-price precedence for primaryBase; mirror it
+  // here so the two never disagree on what "no price" means. The legacy
+  // callback-reconciliation shape this guards (a stale gross primary_line_price
+  // beside a genuinely-zero estimated_price AND a genuinely-zero fallbackAmount)
+  // is unaffected — both sides still resolve to 0 there.
+  //
+  // Codex pre-push P1 (round 3): that same bare-0 check ALSO caught the
+  // opposite, supported shape — completion-pricing's discount engine froze
+  // a fully-discounted application at a genuine $0 net (a positive
+  // primary_line_price gross base stamped alongside it — see
+  // hasAuthoritativeZeroPrice, billing-lane.js), which is exactly
+  // `primaryBaseKnown` above. Treating it as "no price, use the fallback"
+  // let a positive fallbackAmount (e.g. the per-application fee another
+  // caller resolved for a DIFFERENT reason) reconcile a real $0 invoice
+  // back up to that fee. completion-pricing.postgres.test.js's "fully
+  // discounted application stays zero" pins this with fallbackAmount
+  // matching (0) — this guard is for a caller whose fallback does NOT.
+  // Codex round 4 P0: this used to re-derive the check inline as
+  // `Number(scheduled.estimated_price) === 0`, and Number(null) === 0 —
+  // so a NEVER-PRICED row (estimated_price null, no reconciliation
+  // authority at all) with a positive primary_line_price misread as an
+  // authoritative zero, reconciling a genuinely-owed fee (e.g. the
+  // fallbackAmount another caller correctly resolved) back down to $0.
+  // Delegate to the shared predicate so this can never drift from
+  // completionInvoiceAmount / predictCompletionBilling's own reading of
+  // the same provenance signal.
+  const authoritativeZero = primaryBaseKnown
+    && hasAuthoritativeZeroPrice(scheduled.estimated_price, scheduled.primary_line_price);
+  // Whether storedNetAmount below actually came from a stamped price on this
+  // row (a real positive estimated_price, or the provenance-backed genuine
+  // $0) versus the fee/rate fallback another caller resolved because this
+  // row was NEVER priced. Only the stamped case is trustworthy enough to
+  // reconcile the replay DOWN to (below) — the fallback case is the ground
+  // truth net either way, so it must reconcile in BOTH directions.
+  const storedNetIsAuthoritative = Number(scheduled.estimated_price) > 0 || authoritativeZero;
+  const storedNetAmount = storedNetIsAuthoritative
     ? roundMoney(scheduled.estimated_price)
     : roundMoney(fallbackAmount);
   const replayNetAmount = roundMoney(
@@ -1782,6 +1829,30 @@ async function buildScheduledServiceInvoiceLines(
       discount_dollars: adjustment,
       use_stored_discount: true,
       stored_discount_source: "scheduled_service",
+    });
+  } else if (
+    // Codex round 5 P1: with no authoritative net on this row, a stale
+    // positive primary_line_price left over from a different pricing
+    // regime (e.g. a per-application row that was never priced but still
+    // carries an old primary_line_price) fed a replay total BELOW the
+    // fee/rate fallback another caller resolved as the intended net —
+    // the checkout preview shows the fallback (e.g. a $97.20 acceptance
+    // fee) while the minted invoice only totaled the stale $50 primary
+    // line, because the reconciliation above only ever corrected DOWNWARD.
+    // fallbackAmount is the ground truth here (nothing stamped on the row
+    // to contradict it), so top the replay UP to match it too.
+    !storedNetIsAuthoritative
+    && hasNumericValue(storedNetAmount)
+    && replayNetAmount < storedNetAmount
+  ) {
+    const adjustment = roundMoney(storedNetAmount - replayNetAmount);
+    lineItems.push({
+      client_id: `scheduled_price_topup_${scheduledServiceId}`,
+      description: "Scheduled price adjustment",
+      quantity: 1,
+      unit_price: adjustment,
+      amount: adjustment,
+      category: null,
     });
   }
 
@@ -3532,7 +3603,7 @@ async function restoreSendClaim(invoiceId, previousStatus, claimed, consumedQueu
 
 const BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED = "BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED";
 
-async function markAcceptedChannelPendingEmail(invoiceId, claimToken) {
+async function markAcceptedChannelPendingEmail(invoiceId, claimToken, acceptedSmsAt) {
   if (!claimToken) return false;
   try {
     const marked = await whereSendClaimOwned(
@@ -3541,7 +3612,7 @@ async function markAcceptedChannelPendingEmail(invoiceId, claimToken) {
         .whereRaw("COALESCE(scheduled_send_error, '') NOT LIKE 'payer_billed:%'"),
       claimToken,
     ).update({
-      sms_sent_at: db.raw("COALESCE(sms_sent_at, ?)", [new Date()]),
+      sms_sent_at: db.raw("COALESCE(sms_sent_at, ?)", [acceptedSmsAt]),
       scheduled_send_error: BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED,
       updated_at: new Date(),
     });
@@ -5591,6 +5662,7 @@ const InvoiceService = {
     // or hasEmailLeg's own nested SMS/App-only leg) — that is definitionally
     // an SMS/App send, matching the byte-identical fallback below.
     let acceptedChannelResults = null;
+    let settledEvent = {};
     // The pending leg's queueing decision (Codex round-3 P1/P2 #4963), set
     // once known inside the try block below — before finalizeInvoiceAfterSms
     // is ever called, even though this closure is defined here. null means
@@ -5612,6 +5684,16 @@ const InvoiceService = {
     // invoice stays under its 'sending' claim for processScheduledSends'
     // existing stale-claim recovery to park for operator review — never a
     // half-committed "stamped but the retry vanished" state.
+    const smsFinalizationStamp = (trx) => {
+      if (!acceptedChannelResults) return new Date();
+      const legs = require('./messaging/billing-prior-delivery')
+        .settledLegTimes({ channelResults: acceptedChannelResults });
+      // App and Text share this invoice rail. A new acceptance wins over an
+      // older sibling, while all-old replay uses the latest stored rail time.
+      if (legs.freshSms) return new Date();
+      if (legs.smsAccepted) return trx.raw("COALESCE(sms_sent_at, ?::timestamptz)", [legs.smsAt]);
+      return new Date();
+    };
     const finalizeInvoiceAfterSms = () => db.transaction(async (trx) => {
       // Stamp each channel's OWN durable delivery evidence (the same
       // convention invoice-email.js's markEmailDelivered and this same
@@ -5623,6 +5705,9 @@ const InvoiceService = {
       // for one leg). No fan-out at all (acceptedChannelResults null) is
       // definitionally the plain SMS path — byte-identical to before.
       const emailAccepted = legAccepted(acceptedChannelResults?.email);
+      const emailTime = acceptedChannelResults?.email?.sentAt;
+      const originalEmailTime = emailTime && !Number.isNaN(new Date(emailTime).getTime())
+        ? new Date(emailTime) : null;
       const smsOrAppAccepted = acceptedChannelResults
         ? (legAccepted(acceptedChannelResults.sms) || legAccepted(acceptedChannelResults.push, "push"))
         : true;
@@ -5636,15 +5721,19 @@ const InvoiceService = {
         // hasEmailLeg always excludes Email from THIS call's own fan-out
         // (billing-channel-routing.js selectedLegs), so acceptedChannelResults
         // never carries an accepted email leg here — sms_sent_at is correct.
-        sms_sent_at: new Date(),
+        sms_sent_at: smsFinalizationStamp(trx),
         updated_at: new Date(),
       } : {
           status: trx.raw(
             "CASE WHEN status IN ('draft', 'scheduled', 'sending') THEN 'sent' ELSE status END",
           ),
-          sent_at: new Date(),
-          ...(smsOrAppAccepted ? { sms_sent_at: new Date() } : {}),
-          ...(emailAccepted ? { email_sent_at: new Date() } : {}),
+          sent_at: settledEvent.deduped
+            ? trx.raw("COALESCE(sent_at, ?::timestamptz)", [settledEvent.eventVisibleAt || null])
+            : new Date(),
+          ...(smsOrAppAccepted ? { sms_sent_at: smsFinalizationStamp(trx) } : {}),
+          ...(emailAccepted ? { email_sent_at: acceptedChannelResults.email.deduped
+            ? trx.raw("COALESCE(email_sent_at, ?::timestamptz)", [originalEmailTime])
+            : new Date() } : {}),
           scheduled_send_at: null,
           scheduled_send_error: require("./invoice-helpers").preserveWithdrawalStamp(trx),
           scheduled_request_review: false,
@@ -5761,6 +5850,17 @@ const InvoiceService = {
       // Available to the catch block's retry call too (declared outside the
       // try block) — see finalizeInvoiceAfterSms above.
       acceptedChannelResults = sendResult.channelResults || null;
+      const legStates = Object.entries(acceptedChannelResults || {})
+        .map(([channel, leg]) => ({ channel, leg, state: billingLegDeliveryState(channel, leg) }));
+      if (legStates.some(({ state }) => state === "deduped")
+        && legStates.every(({ state }) => state !== "delivered")) {
+        const originalTimes = legStates.filter(({ state }) => state === "deduped")
+          .flatMap(({ leg }) => [leg.eventVisibleAt, leg.sentAt])
+          .map((value) => (value == null ? null : new Date(value)))
+          .filter((value) => value && !Number.isNaN(value.getTime()));
+        settledEvent = { deduped: true, ...(originalTimes.length
+          ? { eventVisibleAt: new Date(Math.max(...originalTimes.map((value) => value.getTime()))) } : {}) };
+      }
       // Codex round-2 P1 (#4963): billing-channel-routing.js's
       // billingDispatchOutcome deliberately surfaces an UNFINISHED leg's own
       // retry/hold as the top-level `sendResult` when one leg (Email, say)
@@ -5872,7 +5972,7 @@ const InvoiceService = {
 
       smsDelivered = true;
       const finalized = await finalizeInvoiceAfterSms();
-      if (!finalized) return { sent: true, payUrl, claimLost: true };
+      if (!finalized) return { sent: true, payUrl, ...settledEvent, claimLost: true };
 
       // Kick off the per-invoice automated follow-up sequence (Day 0/3/7/14/30)
       try {
@@ -5887,7 +5987,7 @@ const InvoiceService = {
       // accepted (Codex round-2 P2 #4963), never the legacy "sent via SMS"
       // wording for an Email-only or App-only send.
       const deliveredVia = describeInvoiceDeliveryChannels(acceptedChannelResults);
-      await db("activity_log")
+      if (!settledEvent.deduped) await db("activity_log")
         .insert({
           customer_id: customer.id,
           action: "invoice_sent",
@@ -5919,7 +6019,7 @@ const InvoiceService = {
       await releaseDirectSmsClaim();
 
       return {
-        sent: true, payUrl, ...queueOutcome,
+        sent: true, payUrl, ...settledEvent, ...queueOutcome,
         ...(pendingChannel ? {
           pendingChannel: pendingChannel[0],
           pendingChannelCode: pendingChannel[1]?.code,
@@ -5949,12 +6049,12 @@ const InvoiceService = {
         );
         try {
           const finalized = await finalizeInvoiceAfterSms();
-          if (!finalized) return { sent: true, payUrl, claimLost: true, finalizeError: err.message };
+          if (!finalized) return { sent: true, payUrl, ...settledEvent, claimLost: true, finalizeError: err.message };
         } catch (retryErr) {
           logger.error(
             `[invoice] finalize retry failed for ${invoice.invoice_number}: ${retryErr.message} — row left under its send claim; do NOT auto-resend`,
           );
-          return { sent: true, payUrl, finalizeError: err.message };
+          return { sent: true, payUrl, ...settledEvent, finalizeError: err.message };
         }
         // Finalize is durable — run the normal post-delivery bookkeeping
         // (each leg best-effort/idempotent, mirroring the happy path) so a
@@ -5965,7 +6065,7 @@ const InvoiceService = {
         } catch (e) {
           logger.error(`[invoice-followups] scheduleForInvoice failed (post-recovery): ${e.message}`);
         }
-        await db("activity_log")
+        if (!settledEvent.deduped) await db("activity_log")
           .insert({
             customer_id: invoice.customer_id,
             action: "invoice_sent",
@@ -5993,8 +6093,8 @@ const InvoiceService = {
         }
         const queueOutcome = await resolveAdoptedRowsAfterDelivery(invoiceId, invoice.send_claim_token, consumedQueuedSendRows, invoice.invoice_number);
         await releaseDirectSmsClaim();
-        if (queueOutcome.queueResolutionError) return { sent: true, payUrl, finalizeError: err.message, ...queueOutcome };
-        return { sent: true, payUrl, finalizeError: err.message };
+        if (queueOutcome.queueResolutionError) return { sent: true, payUrl, ...settledEvent, finalizeError: err.message, ...queueOutcome };
+        return { sent: true, payUrl, ...settledEvent, finalizeError: err.message };
       }
       if (claimed && err.code === "INVOICE_VISIT_TERMINAL" && err.deliveryOutcome === "not_sent") {
         const scheduledServiceId = await linkedScheduledServiceId(invoice);
@@ -6157,14 +6257,8 @@ const InvoiceService = {
     // at schedule time — the success path below clears
     // scheduled_request_review unconditionally, so without this fallback an
     // early manual send silently drops it. An explicit true/false still wins.
-    let effectiveRequestReview = requestReview;
-    let effectiveReviewDelayMinutes = reviewDelayMinutes;
-    if (effectiveRequestReview == null) {
-      effectiveRequestReview = Boolean(claim.invoice.scheduled_request_review);
-      if (effectiveRequestReview && effectiveReviewDelayMinutes == null) {
-        effectiveReviewDelayMinutes = claim.invoice.scheduled_review_delay_minutes;
-      }
-    }
+    const { requestReview: effectiveRequestReview, reviewDelayMinutes: effectiveReviewDelayMinutes } =
+      require('./invoice-delivery-review').reviewDecisionForInvoice(claim.invoice, requestReview, reviewDelayMinutes);
 
     // Third-party Bill-To: a payer-billed invoice must NOT text the homeowner
     // a pay link — AR and the pay link route to the payer (email) instead.
@@ -6173,14 +6267,14 @@ const InvoiceService = {
       sms.error = "Suppressed — invoice billed to a third-party payer";
       sms.code = "payer_billed";
     } else if (!operatorInitiated
-      && claim.invoice.sms_sent_at
       && String(claim.invoice.scheduled_send_error || "").startsWith(BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED)) {
       // A prior automated attempt delivered Text/App but could not start its
-      // selected Email leg. The dedicated marker ties sms_sent_at to this
-      // schedule episode; a historical stamp alone must not suppress a new
-      // delivery after unvoid + explicit reschedule.
+      // selected Email leg. The dedicated marker is this episode's positive
+      // acceptance proof even when the original acceptance time is unknown;
+      // a historical stamp alone never suppresses a new delivery.
       sms.ok = true;
       sms.deduped = true;
+      sms.eventVisibleAt = claim.invoice.sms_sent_at;
     } else {
       try {
         // The nested call does not adopt (adoptsQueuedInvoiceSend: false
@@ -6294,6 +6388,11 @@ const InvoiceService = {
         }
         if (smsResult?.sent) {
           sms.ok = true;
+          if (smsResult.deduped) {
+            sms.deduped = true;
+            sms.eventVisibleAt = smsResult.eventVisibleAt;
+            sms.originalAt = billingLegContactTime(smsResult);
+          }
           if (smsResult.finalizeError) sms.finalizeError = smsResult.finalizeError;
         } else {
           sms.error = smsResult?.reason || smsResult?.code || "SMS not sent";
@@ -6430,7 +6529,9 @@ const InvoiceService = {
           ...(!operatorInitiated ? { billingDeliveryCategory: 'invoice' } : {}),
         });
         if (r?.ok) email.ok = true;
-        else if (r?.error) email.error = r.error;
+        if (r?.deduped) email.deduped = true;
+        if (r?.sentAt) email.sentAt = r.sentAt;
+        if (r?.error) email.error = r.error;
         if (r?.code) email.code = r.code;
         if (r?.deliveryOutcome) email.deliveryOutcome = r.deliveryOutcome;
         if (!payUrl && r?.payUrl) payUrl = r.payUrl;
@@ -6442,6 +6543,7 @@ const InvoiceService = {
     }
 
     const emailMustRetry = !operatorInitiated && email.code === "billing_prefs_unavailable";
+    const acceptedSmsAt = sms.ok ? (sms.deduped ? billingLegContactTime(sms) : new Date()) : null;
     if (emailMustRetry && sms.ok && claimed && !allowClaimed
       && ["draft", "scheduled"].includes(previousStatus)) {
       // A direct caller owns this claim, so it must put the accepted Text/App
@@ -6472,7 +6574,7 @@ const InvoiceService = {
             .whereRaw("COALESCE(scheduled_send_error, '') NOT LIKE 'payer_billed:%'")
             .update({
               status: "scheduled",
-              sms_sent_at: trx.raw("COALESCE(sms_sent_at, ?)", [now]),
+              sms_sent_at: trx.raw("COALESCE(sms_sent_at, ?)", [acceptedSmsAt]),
               scheduled_send_at: new Date(now.getTime() + 5 * 60 * 1000),
               scheduled_send_error: BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED,
               scheduled_send_attempts: alreadyPending ? owned.scheduled_send_attempts : 0,
@@ -6499,7 +6601,7 @@ const InvoiceService = {
       };
     }
     if (emailMustRetry && sms.ok
-      && !await markAcceptedChannelPendingEmail(invoiceId, claim.invoice.send_claim_token)) {
+      && !await markAcceptedChannelPendingEmail(invoiceId, claim.invoice.send_claim_token, acceptedSmsAt)) {
       logger.error(`[invoice] Email retry for ${invoiceId} parked because its accepted Text/App leg has no durable retry marker`);
       return {
         ok: false,
@@ -6561,6 +6663,7 @@ const InvoiceService = {
         }
       }
       if (!adoptedQueueUnrestored) {
+        const priorSettlement = previouslySettledBillingLegs([sms, email]);
         const finalized = await whereSendClaimOwned(
           db("invoices").where({ id: invoiceId }).whereIn("status", SEND_FINALIZABLE_STATUSES),
           claim.invoice.send_claim_token,
@@ -6569,7 +6672,8 @@ const InvoiceService = {
             status: db.raw(
               "CASE WHEN status IN ('draft', 'scheduled', 'sending') THEN 'sent' ELSE status END",
             ),
-            sent_at: new Date(),
+            sent_at: priorSettlement
+              ? db.raw("COALESCE(sent_at, ?::timestamptz)", [priorSettlement.originalAt]) : new Date(),
             scheduled_send_at: null,
             scheduled_send_error: require("./invoice-helpers").preserveWithdrawalStamp(db),
             scheduled_request_review: false,
@@ -6673,8 +6777,6 @@ const InvoiceService = {
       const { closeOutVisitForIssuedInvoice } = require("./invoice-issued-closeout");
       issuedCloseout = await closeOutVisitForIssuedInvoice({ invoiceId, trigger: "sent", actorTechnicianId });
     }
-    const { issuedCloseoutOwnsRecord } = require("./invoice-issued-closeout");
-
     // The review decision waits for the closeout (GitHub r4 P1 #4127): a
     // linked pre-completion invoice has no service_record_id until the
     // closeout writes it, so deciding first would classify it standalone
@@ -6684,48 +6786,9 @@ const InvoiceService = {
     // the paid webhook enrolls nothing later either); otherwise the fresh
     // read below sees whatever linkage now stands.
     if (effectiveRequestReview && ownedDeliveryFinalized) {
-      try {
-        const ReviewService = require("./review-request");
-        if (issuedCloseout?.closed) {
-          logger.info(`[invoice] Review ask suppressed for invoice ${invoiceId}: the invoice-issued closeout completed visit ${issuedCloseout.visitId} quietly`);
-        } else {
-          const inv = await db("invoices")
-            .where({ id: invoiceId })
-            .select("customer_id", "service_record_id", "status")
-            .first();
-          // Unpaid COMPLETION invoices defer the review ask to payment — the
-          // Stripe paid-invoice webhook enrolls then, reading the completion's
-          // requestReview intent from the service record. Enrolling here would
-          // text a review ask alongside an open pay link (Codex P1, PR #3104
-          // r1). Standalone invoices (no service_record_id) keep the legacy
-          // at-delivery ask: their operator opt-in has no other trigger (a
-          // cash/manual payment never reaches the webhook).
-          const deferToPayment = inv
-            && inv.service_record_id
-            && !["paid", "prepaid"].includes(String(inv.status || ""));
-          if (deferToPayment) {
-            logger.info(`[invoice] Review ask deferred to payment for invoice ${invoiceId} (unpaid completion invoice)`);
-          } else if (inv && await issuedCloseoutOwnsRecord(inv.service_record_id)) {
-            // A closeout that committed its record (frozen requestReview:
-            // false) but reported closed: false — post-commit failure, or a
-            // later send on an already-closed visit — still owns the ask
-            // (pre-push P1 r7): the durable provenance decides, not this
-            // invocation's return value.
-            logger.info(`[invoice] Review ask suppressed for invoice ${invoiceId}: record ${inv.service_record_id} was committed by the invoice-issued closeout`);
-          } else if (inv) {
-            await ReviewService.enrollPostService({
-              customerId: inv.customer_id,
-              serviceRecordId: inv.service_record_id || null,
-              triggeredBy: "auto",
-              delayMinutes: effectiveReviewDelayMinutes,
-            });
-          }
-        }
-      } catch (err) {
-        logger.error(
-          `[invoice] Review request schedule failed: ${err.message}`,
-        );
-      }
+      await require('./invoice-delivery-review').enrollReviewAfterInvoiceDelivery({
+        invoiceId, issuedCloseout, delayMinutes: effectiveReviewDelayMinutes,
+      });
     }
     return { ok, sms, email, payUrl, creditApplied: sms.ok ? 0 : (sendCreditResult?.applied || 0),
       ...queueOutcome,
@@ -6770,6 +6833,10 @@ const InvoiceService = {
       // claim out from under it. Callers with no claim to release (the
       // deferred-queue rails, project reports) omit it — unchanged.
       claimToken = null,
+      eventVisibleAt = null,
+      smsEventVisibleAt = undefined,
+      emailEventVisibleAt = undefined,
+      deduped = false,
     } = {},
   ) {
     const invoice = await db("invoices").where({ id: invoiceId }).first();
@@ -6788,29 +6855,25 @@ const InvoiceService = {
     // so a delivery finalized through this path (combined project send,
     // completion SMS with invoice) must not silently drop it. An explicit
     // true/false from the caller still wins.
-    let effectiveRequestReview = requestReview;
-    let effectiveReviewDelayMinutes = reviewDelayMinutes;
-    if (effectiveRequestReview == null) {
-      effectiveRequestReview = Boolean(invoice.scheduled_request_review);
-      if (effectiveRequestReview && effectiveReviewDelayMinutes == null) {
-        effectiveReviewDelayMinutes = invoice.scheduled_review_delay_minutes;
-      }
-    }
+    const { requestReview: effectiveRequestReview, reviewDelayMinutes: effectiveReviewDelayMinutes } =
+      require('./invoice-delivery-review').reviewDecisionForInvoice(invoice, requestReview, reviewDelayMinutes);
 
     const now = new Date();
+    // A known prior acceptance without a valid original timestamp cannot
+    // acquire this retry's clock time as its first delivery stamp.
     const updates = {
       status: db.raw(
         "CASE WHEN status IN ('draft', 'scheduled', 'sending') THEN 'sent' ELSE status END",
       ),
-      sent_at: db.raw("COALESCE(sent_at, ?)", [now]),
+      ...require('./messaging/billing-prior-delivery').invoiceDeliveryStampUpdates(db, {
+        deduped, eventVisibleAt, smsEventVisibleAt, emailEventVisibleAt, sms, email, now,
+      }),
       scheduled_send_at: null,
       scheduled_send_error: require("./invoice-helpers").preserveWithdrawalStamp(db),
       scheduled_request_review: false,
       scheduled_review_delay_minutes: null,
       updated_at: now,
     };
-    if (sms) updates.sms_sent_at = db.raw("COALESCE(sms_sent_at, ?)", [now]);
-
     const finalizeQuery = db("invoices")
       .where({ id: invoiceId })
       .whereIn("status", SEND_FINALIZABLE_STATUSES);
@@ -6847,7 +6910,7 @@ const InvoiceService = {
       );
     }
 
-    await db("activity_log")
+    if (!deduped) await db("activity_log")
       .insert({
         customer_id: finalInvoice.customer_id,
         action: "invoice_sent",
@@ -6878,51 +6941,10 @@ const InvoiceService = {
     // closeout that completed the visit quietly suppresses the ask outright
     // — its record froze requestReview: false, so nothing enrolls later.
     if (updated && effectiveRequestReview) {
-      try {
-        if (issuedCloseout?.closed) {
-          logger.info(`[invoice] Review ask suppressed for invoice ${invoiceId}: the invoice-issued closeout completed visit ${issuedCloseout.visitId} quietly (source=${source})`);
-        } else {
-          // The DURABLE linkage, re-read after the closeout (GitHub r5 P1
-          // #4127) — never the pre-closeout row: a closeout that committed
-          // the record and this invoice's back-link but failed in its
-          // post-commit work reports closed: false (the attempt stays
-          // resumable), and the stale read would still say "standalone".
-          const linked = await db("invoices")
-            .where({ id: invoiceId })
-            .select("service_record_id", "status")
-            .first();
-          const linkage = linked ? { ...finalInvoice, ...linked } : finalInvoice;
-          // Same unpaid-completion-invoice hold as sendViaSMSAndEmail (Codex
-          // P1, PR #3104 r1): delivery of an unpaid completion invoice must
-          // not start review outreach — the paid webhook enrolls on payment
-          // from the service record's requestReview intent. Standalone
-          // invoices (no service_record_id) keep the legacy at-delivery ask.
-          const deferToPayment = linkage.service_record_id
-            && !["paid", "prepaid"].includes(String(linkage.status || ""));
-          const { issuedCloseoutOwnsRecord } = require("./invoice-issued-closeout");
-          if (deferToPayment) {
-            logger.info(`[invoice] Review ask deferred to payment for invoice ${invoiceId} (unpaid completion invoice, source=${source})`);
-          } else if (await issuedCloseoutOwnsRecord(linkage.service_record_id)) {
-            // Durable provenance over this invocation's verdict (pre-push
-            // P1 r7): a closeout that committed the record but failed after
-            // — or a resend on a visit it already closed — reports closed:
-            // false, yet the record froze requestReview: false.
-            logger.info(`[invoice] Review ask suppressed for invoice ${invoiceId}: record ${linkage.service_record_id} was committed by the invoice-issued closeout (source=${source})`);
-          } else {
-            const ReviewService = require("./review-request");
-            await ReviewService.enrollPostService({
-              customerId: invoice.customer_id,
-              serviceRecordId: linkage.service_record_id || null,
-              triggeredBy: "auto",
-              delayMinutes: effectiveReviewDelayMinutes,
-            });
-          }
-        }
-      } catch (err) {
-        logger.error(
-          `[invoice] Review request schedule failed after ${source}: ${err.message}`,
-        );
-      }
+      await require('./invoice-delivery-review').enrollReviewAfterInvoiceDelivery({
+        invoiceId, issuedCloseout, delayMinutes: effectiveReviewDelayMinutes,
+        source, fallbackInvoice: finalInvoice,
+      });
     }
 
     return finalInvoice;
@@ -7091,8 +7113,8 @@ const InvoiceService = {
         // and send at their requested time. Fail toward deferral on a
         // lookup error: worst case an email waits for 8:00 AM, never a
         // night text.
-        const acceptedChannelPendingEmail = Boolean(inv.sms_sent_at)
-          && String(inv.scheduled_send_error || "").startsWith(BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED);
+        const acceptedChannelPendingEmail = String(inv.scheduled_send_error || "")
+          .startsWith(BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED);
         let hasSmsLeg = !inv.payer_id && !acceptedChannelPendingEmail;
         if (hasSmsLeg) {
           try {

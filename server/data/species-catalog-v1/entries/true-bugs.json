@@ -432,8 +432,9 @@
       "https://en.wikipedia.org/wiki/Leptoglossus"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Per audit item 34: added a reciprocal look-alike to kissing-bug, the most common false-alarm pairing for that species (this one is harmless, feeds on plants)."
+      "status": "owner_approved",
+      "notes": "Per audit item 34: added a reciprocal look-alike to kissing-bug, the most common false-alarm pairing for that species (this one is harmless, feeds on plants). Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "6096dbb38f1eec488100d8f9bae1fbb8f3e8e735b80c07977fad69aa1a7a237a"
     },
     "role": "plant_pest",
     "risk": "low",
@@ -535,8 +536,9 @@
       "https://en.wikipedia.org/wiki/Arilus_cristatus"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "3a736df68d6a86c87b797713266fc3c7810d2d6a9245c24563056cc574406cab"
     },
     "role": "beneficial",
     "risk": "defensive",
@@ -639,8 +641,9 @@
       "https://en.wikipedia.org/wiki/Zelus_longipes"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "f15fe1a56dcd4a58980de05c607636463d20ea40bf5f737100ad04861dc4e450"
     },
     "role": "beneficial",
     "risk": "defensive",
@@ -754,8 +757,9 @@
       "https://en.wikipedia.org/wiki/Triatoma_sanguisuga"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Per audit item 42: service.inspection_first changed from false to true (and key from \"pest\" to null) to match action: \"inspection\", consistent with the tech_notes advice to save a specimen for ID before treatment. Traits[3] (biting on the face while sleeping) replaced with a visible size/wing trait, since it described behavior rather than something visible in a photo of the insect itself. Per audit item 34: added a reciprocal look-alike to leaf-footed-bug, the most common false alarm for this species."
+      "status": "owner_approved",
+      "notes": "Per audit item 42: service.inspection_first changed from false to true (and key from \"pest\" to null) to match action: \"inspection\", consistent with the tech_notes advice to save a specimen for ID before treatment. Traits[3] (biting on the face while sleeping) replaced with a visible size/wing trait, since it described behavior rather than something visible in a photo of the insect itself. Per audit item 34: added a reciprocal look-alike to leaf-footed-bug, the most common false alarm for this species. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "85d7648dd6f18c7894e78d416b77837f1095f70d6ce2bac7bb74557fb758c849"
     },
     "role": "health_pest",
     "risk": "medical",

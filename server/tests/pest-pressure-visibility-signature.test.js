@@ -138,7 +138,7 @@ describe('invalidatePdfCacheForServiceRecord', () => {
 
 describe('reportPdfStorageKey: visibilitySignature embedding', () => {
   test('uses the structured-observation content version', () => {
-    expect(reportPdfStorageKey('svc-1')).toContain('p10-poison-control-20260926');
+    expect(reportPdfStorageKey('svc-1')).toContain('p11-products-safety-20260928');
   });
 
   test('omits the signature suffix when not supplied (back-compat)', () => {

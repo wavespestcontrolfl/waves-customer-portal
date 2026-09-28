@@ -215,6 +215,16 @@ describe('isFaqBlockedService (exported policy helper)', () => {
     }
   });
 
+  test('named lawn pests resolve to the blocked lawn-pest id (Chinch Bugs, Sod Webworms, Mole Crickets, Grubs, Armyworms)', () => {
+    for (const tag of ['Chinch Bugs', 'chinch-bug', 'Sod Webworms', 'Mole Crickets', 'grubs', 'Armyworms']) {
+      expect(guardrails.isFaqBlockedService(tag)).toBe(true);
+    }
+    // Every alias targets a real blocklist id.
+    for (const target of guardrails.BLOCKED_SERVICE_ALIASES.values()) {
+      expect(guardrails.FAQ_BLOCKED_SERVICES.has(target)).toBe(true);
+    }
+  });
+
   test('every canonical blog tag whose service is blocked resolves as blocked', () => {
     // BLOG_TAGS (blog-writer) ∩ FAQ-blocked services — every canonical-tag
     // form of a blocked service must be covered, alias or normalization.
@@ -5978,5 +5988,83 @@ describe('reentrySafetyClaimFinding — shared claim corpus', () => {
   const { FLAGGED_CLAIMS } = require('./fixtures/safety-claim-corpus');
   test.each(FLAGGED_CLAIMS)('%s', (text) => {
     expect(reentrySafetyClaimFinding(text)).toBeTruthy();
+  });
+});
+
+// #4905 guard: reentrySafetyClaimFinding runs synchronously on every live
+// voice-call turn (relay-visit.js / relay-context.js / relay-booking.js) and
+// email draft (email-reply-claims-verifier.js), plus comms-lint.js. Its
+// multi-second stalls were V8 compiling the ~50 large patterns to native code
+// on their first runs in a process — once for one-byte text and again for
+// two-byte text (an em dash, é) — landing on the first live call to reach
+// each path. A single warm-up call never fixed it: the function returns at
+// its first claim, and a one-byte call never compiles the two-byte code. The
+// server now runs warmReentrySafetyPatterns() once at boot, before it
+// listens. The tests below guard the patterns being compiled once, the boot
+// warm-up being wired before listen, and first-sight latency after that
+// warm-up, timed in a FRESH process (in-worker timing is flaky on CI; see
+// ask-waves-latency-probe.js).
+describe('reentrySafetyClaimFinding avoids rebuilding RegExp objects per call (#4905)', () => {
+  const { reentrySafetyClaimFinding, _internals } = require('../services/content/content-guardrails');
+  const { REENTRY_SAFETY_PATTERNS } = _internals;
+
+  test('reuses the SAME compiled RegExp objects across calls instead of rebuilding them', () => {
+    expect(REENTRY_SAFETY_PATTERNS.length).toBeGreaterThan(40);
+    const before = REENTRY_SAFETY_PATTERNS.map((entry) => entry.re);
+    reentrySafetyClaimFinding('Those sound like ghost ants — tiny, pale, and they love kitchens.');
+    reentrySafetyClaimFinding('A totally different sentence about billing questions today.');
+    const after = REENTRY_SAFETY_PATTERNS.map((entry) => entry.re);
+    // Object IDENTITY, not just equal sources: a regression back to
+    // `new RegExp(src, 'gi')` per call would produce a DIFFERENT object with
+    // the same source, which `toBe` catches and `toEqual` would not.
+    before.forEach((re, i) => expect(after[i]).toBe(re));
+  });
+});
+
+describe('reentrySafetyClaimFinding worst-case latency (#4905)', () => {
+  const { execFileSync } = require('child_process');
+  const path = require('path');
+  // The issue's own first-seen inputs, plus em-dash/en-dash/ASCII-hyphen
+  // variants (normalizeHardCopyText folds all dash variants to ASCII) and a
+  // couple of Spanish replies — ordinary short text, not adversarial input.
+  const corpus = [
+    'Those sound like ghost ants — tiny, pale, and they love kitchens.',
+    'No worries — it is safe for kids.',
+    'Hello — world, this is a short line.',
+    'Hello - world, this is a short line.',
+    'Hello – world, this is a short line.',
+    'Great question! Our barrier treatment covers the yard every 21 days.',
+    'Ghost ants – tiny and pale – love sugary kitchen spills.',
+    'No hay problema — es completamente normal en esta época del año.',
+    'Los técnicos llegarán mañana — por favor mantenga a las mascotas adentro.',
+    'Su patio se ve genial - gracias por elegir Waves.',
+  ];
+  // A super-linear or never-tiers regex fails fast instead of hanging CI
+  // (the child is synchronous, so jest's own test timeout cannot interrupt
+  // it).
+  const timeInFreshProcess = () => {
+    const out = execFileSync(process.execPath, [path.join(__dirname, 'fixtures', 'reentry-claim-latency-probe.js')], {
+      input: JSON.stringify(corpus), encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, timeout: 30000,
+    });
+    return JSON.parse(out.split('\n').find((line) => line.startsWith('LATENCY ')).slice('LATENCY '.length));
+  };
+
+  // Best of three fresh processes per input: one sample can catch a CI
+  // scheduling spike; a real regression fails all three.
+  let ms = [];
+  beforeAll(() => {
+    const runs = [timeInFreshProcess(), timeInFreshProcess(), timeInFreshProcess()];
+    ms = corpus.map((_, i) => Math.min(...runs.map((run) => run[i])));
+  });
+
+  test('the server compiles the patterns at boot, before it listens', () => {
+    const src = require('fs').readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
+    const warm = src.indexOf('warmReentrySafetyPatterns()');
+    expect(warm).toBeGreaterThan(-1);
+    expect(src.indexOf('primeGuardrails.then(() => httpServer.listen(')).toBeGreaterThan(warm);
+  });
+
+  test.each(corpus.map((text, index) => [text, index]))('stays well under budget for %j', (text, index) => {
+    expect(ms[index]).toBeLessThan(50);
   });
 });

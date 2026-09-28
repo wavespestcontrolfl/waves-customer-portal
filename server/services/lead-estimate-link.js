@@ -1905,10 +1905,14 @@ async function recordOrganicSelfBookingAttribution({
   const attr = attribution;
   const utm = (attr.utm && typeof attr.utm === 'object') ? attr.utm : {};
   const { determineLeadSource } = require('./lead-source-classify');
+  // referrer rides as its own trailing arg (not folded into `url`) so the
+  // AI-assistant branch can detect a ChatGPT/Perplexity/etc. referrer host
+  // even when `url` here is the landing page, not the referrer itself.
   const classify = (url) => determineLeadSource(
     '', url || '',
     utm.source || '', utm.medium || '', utm.campaign || '', utm.content || '',
     attr.fbclid || '', attr.fbc || '', attr.gclid || '', attr.wbraid || '', attr.gbraid || '',
+    attr.referrer || '',
   );
 
   let classified = classify(attr.landing_url || attr.referrer);

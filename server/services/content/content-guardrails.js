@@ -5225,6 +5225,14 @@ const BLOCKED_SERVICE_ALIASES = new Map([
   ['palmetto-bug', 'cockroach'],
   ['stinging-insects', 'wasp'], // canonical blog tag "Stinging Insects"
   ['stinging-insect', 'wasp'],
+  // Lawn pests by name → the blocked lawn-pest id. A chinch-bug topic is a
+  // lawn-pest topic; without these a "chinch bugs" question or tag carries
+  // only the broad service 'lawn' and keeps its FAQ.
+  ['chinch-bug', 'lawn-pest'],
+  ['sod-webworm', 'lawn-pest'],
+  ['mole-cricket', 'lawn-pest'],
+  ['grub', 'lawn-pest'],
+  ['armyworm', 'lawn-pest'],
 ]);
 
 function blockedServiceCandidates(service) {
@@ -5848,6 +5856,38 @@ const REENTRY_SAFETY_SRCS = [
   `\\b(?:\\d+|${REENTRY_SPELLED_NUM_SRC})[-‑\\s]\\s?(?:minute|min|hour|hr|second|sec|day|week)\\s+(?:re-?entry|wait(?:ing)?)\\b`,
   { src: `\\b(?:\\d+|${REENTRY_SPELLED_NUM_SRC})[-‑\\s]\\s?(?:minute|min|hour|hr|second|sec|day|week)\\s+dry(?:ing)?\\b`, needsTreatmentContext: true },
 ];
+// PERFORMANCE (#4905): reentrySafetyClaimFinding runs synchronously on every
+// live voice-call turn and email draft. It used to build a fresh `new
+// RegExp(src, 'gi')` — parsing the source string and allocating a new object
+// — for each of the ~50 sources above on EVERY call, discarding all ~50
+// objects immediately after. That per-call construction is real,
+// unavoidable work on top of whatever the match itself costs, repeated on
+// every single invocation forever. V8 also runs any regex it hasn't
+// executed (yet) in a slow bytecode interpreter before tiering up to fast
+// compiled code, and a short battery of ~50 moderately complex patterns
+// scanning a string while still in that slow tier is where the worst
+// documented latencies (tens of ms up to multiple seconds, content-
+// dependent) came from; a one-time warm-up call at server start didn't
+// reliably prevent it, since real traffic's constant unrelated regex
+// compilation (this file alone builds many other DYNAMIC, content-keyed
+// patterns per request) can still leave these specific ~50 patterns cold
+// when a live call reaches them. Compiling every pattern ONCE here, at
+// module load, and reusing the SAME RegExp objects on every call (resetting
+// `lastIndex` per use, exactly like the old per-call `new RegExp` did
+// implicitly) removes the repeated construction cost entirely — measured
+// at a many-fold lower steady-state per-call cost with no other behavior
+// change (same sources, same 'gi' flags, same per-call lastIndex-from-0
+// scan). It does not, on its own, guarantee every call is instant — the
+// first handful of executions after a process starts (or certain V8-
+// internal resets) still pay some interpreter-tier cost either way, which
+// is inherent to a plain-JS regex approach and shared by any
+// implementation — but it ends the PER-CALL, FOREVER-RECURRING cost this
+// function used to pay on every single turn.
+const REENTRY_SAFETY_PATTERNS = REENTRY_SAFETY_SRCS.map((entry) => (
+  typeof entry === 'string'
+    ? { re: new RegExp(entry, 'gi') }
+    : { re: new RegExp(entry.src, 'gi'), needsTreatmentContext: entry.needsTreatmentContext, needsTreatmentAntecedent: entry.needsTreatmentAntecedent }
+));
 
 // The APPROVED conditional idiom has TWO required parts (AGENTS.md): the
 // dry condition ("safe once dry" — condition before or after the claim,
@@ -6081,11 +6121,34 @@ function normalizeHardCopyText(text) {
     .replace(/(\*\*|__|~~|[*_`])/g, '');
 }
 
+// #4905: V8 compiles each pattern above to native code on its first runs in
+// a process — once for one-byte text and again for two-byte text (an em
+// dash, é, ñ). Across this battery that is about a second (seconds on a busy
+// host), and it used to land on the first live voice turn or email draft to
+// reach each path. The server runs this once at boot, before it listens. It
+// runs every pattern directly: reentrySafetyClaimFinding returns at its first
+// claim, so calling it cannot reach the rest. Returns the time spent (ms).
+const REENTRY_WARM_TEXTS = ['Warm up line, nothing to see here.', 'Warm up \u2014 nothing to see here, se\u00f1or.'];
+function warmReentrySafetyPatterns() {
+  const started = Date.now();
+  for (let pass = 0; pass < 3; pass += 1) {
+    for (const text of REENTRY_WARM_TEXTS) {
+      for (const { re } of REENTRY_SAFETY_PATTERNS) {
+        re.lastIndex = 0;
+        re.test(text);
+        re.lastIndex = 0;
+      }
+      reentrySafetyClaimFinding(text);
+    }
+  }
+  return Date.now() - started;
+}
+
 function reentrySafetyClaimFinding(text) {
   const s = normalizeHardCopyText(text);
-  for (const entry of REENTRY_SAFETY_SRCS) {
-    const src = typeof entry === 'string' ? entry : entry.src;
-    const re = new RegExp(src, 'gi');
+  for (const entry of REENTRY_SAFETY_PATTERNS) {
+    const { re } = entry;
+    re.lastIndex = 0;
     let m;
     while ((m = re.exec(s)) !== null) {
       const before = s.slice(Math.max(0, m.index - 80), m.index);
@@ -6100,7 +6163,7 @@ function reentrySafetyClaimFinding(text) {
       // Drying forms with no intrinsic re-entry word only count as the
       // banned figure in pesticide context (Codex PR r5) — "Paint drying
       // takes 30 minutes" stays legal maintenance advice.
-      if (typeof entry === 'object' && entry.needsTreatmentContext && !REENTRY_TREATMENT_CONTEXT_RE.test(fullSentence)) {
+      if (entry.needsTreatmentContext && !REENTRY_TREATMENT_CONTEXT_RE.test(fullSentence)) {
         if (m.index === re.lastIndex) re.lastIndex += 1;
         continue;
       }
@@ -6110,7 +6173,7 @@ function reentrySafetyClaimFinding(text) {
       // r5, scoped PR r6): "The pesticide is applied outdoors. The
       // repaired screen prevents entry. It is safe for pets." keeps the
       // screen as the antecedent and stays legal.
-      if (typeof entry === 'object' && entry.needsTreatmentAntecedent) {
+      if (entry.needsTreatmentAntecedent) {
         const before220 = s.slice(Math.max(0, m.index - 220), m.index);
         const governing = before220.split(/[.!?\n]/).slice(-2).join(' ');
         if (!REENTRY_TREATMENT_CONTEXT_RE.test(governing)) {
@@ -6655,6 +6718,7 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
 }
 
 module.exports = {
+  warmReentrySafetyPatterns,
   evaluate,
   // affiliate-material detector for reuse channels (newsletter validator,
   // social share lanes) — affiliate links are web-only; runs regardless of
@@ -6668,6 +6732,10 @@ module.exports = {
   // generators/gates can never contradict the publish-time guard.
   isFaqBlockedService,
   FAQ_BLOCKED_SERVICES,
+  // Topic-name aliases onto blocked ids — the miner's specialty-topic
+  // derivation matches these names too, so it can never miss a topic the
+  // publish-time guard blocks.
+  BLOCKED_SERVICE_ALIASES,
   KEYWORD_DENSITY_MAX,
   // single source of truth for the raw-markdown-table policy — consumed by
   // content-quality-gate's no_raw_markdown_tables hard check so the two
@@ -6737,5 +6805,10 @@ module.exports = {
   SANCTIONED_META_TOKEN_RE,
   outOfAreaCities,
   GEO_COMPOUND_EXEMPT_RE,
-  _internals: { priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding, blockedServiceCandidates, BLOCKED_SERVICE_ALIASES, externalLinkFinding, allowedLinkHosts, hostAllowed, curatedCompetitorSourceHosts, TRUSTED_CITATION_HOSTS, productClaimFinding, preventionPromiseFinding, uncatalogedComponentFinding, citationResidueFinding, tenureClaimFinding, offFootprintCityFinding, internalRouteFinding, normalizeInternalPath, CITY_SERVICE_LINK_RE, affiliateComponentFindings, collectAffiliateLinkTags, hasServiceCtaLink, inlineCtaContractFinding },
+  _internals: { priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding, blockedServiceCandidates, BLOCKED_SERVICE_ALIASES, externalLinkFinding, allowedLinkHosts, hostAllowed, curatedCompetitorSourceHosts, TRUSTED_CITATION_HOSTS, productClaimFinding, preventionPromiseFinding, uncatalogedComponentFinding, citationResidueFinding, tenureClaimFinding, offFootprintCityFinding, internalRouteFinding, normalizeInternalPath, CITY_SERVICE_LINK_RE, affiliateComponentFindings, collectAffiliateLinkTags, hasServiceCtaLink, inlineCtaContractFinding,
+    // #4905 perf regression guard (content-guardrails.test.js): exposes the
+    // precompiled reentry-safety RegExp objects so a test can confirm
+    // reentrySafetyClaimFinding reuses the SAME objects call over call
+    // instead of rebuilding them.
+    REENTRY_SAFETY_PATTERNS },
 };

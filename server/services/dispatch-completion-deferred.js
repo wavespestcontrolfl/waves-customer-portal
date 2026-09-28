@@ -161,7 +161,7 @@ async function finalizeDeferredCompletionSend(claimMeta = {}, { retry = false } 
     try {
       const InvoiceService = require('./invoice');
       await InvoiceService.markDeliverySent(claimMeta.invoice_id, {
-        sms: true,
+        ...require('./messaging/billing-prior-delivery').priorInvoiceFinalizeOptions(claimMeta),
         source: claimMeta.original_message_type || 'completion_sms_with_invoice',
         payUrl: claimMeta.pay_url || null,
       });
@@ -244,11 +244,12 @@ async function finalizeDeferredCompletionSend(claimMeta = {}, { retry = false } 
 // the finalize_pending durability rail.
 async function finalizeDeferredDeclineNotice(claimMeta = {}) {
   let ok = true;
+  const priorDelivery = require('./messaging/billing-prior-delivery').priorInvoiceFinalizeOptions(claimMeta);
   if (claimMeta.invoice_id) {
     try {
       const InvoiceService = require('./invoice');
       await InvoiceService.markDeliverySent(claimMeta.invoice_id, {
-        sms: true,
+        ...priorDelivery,
         source: 'payment_failed_notice',
         payUrl: claimMeta.pay_url || null,
       });
@@ -259,10 +260,15 @@ async function finalizeDeferredDeclineNotice(claimMeta = {}) {
   }
   if (claimMeta.service_record_id) {
     try {
+      const originalAt = priorDelivery.deduped && priorDelivery.eventVisibleAt
+        ? new Date(priorDelivery.eventVisibleAt) : null;
+      const noticeAt = originalAt && !Number.isNaN(originalAt.getTime())
+        ? originalAt.toISOString() : (priorDelivery.deduped ? null : new Date().toISOString());
       await db('service_records').where({ id: claimMeta.service_record_id }).update({
         structured_notes: db.raw(
           "COALESCE(structured_notes::jsonb, '{}'::jsonb) || ?::jsonb",
-          [JSON.stringify({ paymentFailedNoticeStatus: 'sent', paymentFailedNoticeSentAt: new Date().toISOString() })],
+          [JSON.stringify({ paymentFailedNoticeStatus: 'sent',
+            ...(noticeAt ? { paymentFailedNoticeSentAt: noticeAt } : {}) })],
         ),
       });
     } catch (err) {

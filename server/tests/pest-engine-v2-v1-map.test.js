@@ -99,7 +99,13 @@ describe('inherited v1 identity keeps the named v2 entry service contract', () =
   // Codex #5106 r2: withholding a draft's own prose must not drop first aid
   // for any hazard it carries. Every hazard flag on every entry maps to a
   // fixed clause, and a draft climb's line carries all of its clauses.
-  test.each(catalog.listEntries().map((entry) => [entry.slug]))('a draft %s climb covers each of its own hazards', (slug) => {
+  // Scoped to the pest section: this v1-compatibility mapping (mapToV1,
+  // generic hazard clauses keyed to pest roles/groups) predates the L1b
+  // lawn/plant content and is never exercised for it — the live engine's own
+  // `resolveCandidate` already refuses any non-pest slug (PR #5143), and the
+  // route-wiring/engine PRs that will decide plant/condition behavior land
+  // later and dark. Unweakened for all 239 pest entries.
+  test.each(catalog.listEntries({ section: 'pest' }).map((entry) => [entry.slug]))('a draft %s climb covers each of its own hazards', (slug) => {
     const entry = catalog.getEntry(slug);
     const line = answerFor(slug, { approved: false }).genericSafetyLine;
     if (entry.safety?.bites || entry.safety?.stings) expect(line).toMatch(/If anyone is bitten/);
@@ -193,7 +199,11 @@ describe('inherited v1 identity keeps the named v2 entry service contract', () =
   });
 
   test('every universally routed actual fallback preserves its catalog contract', () => {
-    const entries = catalog.listEntries();
+    // Pest-section only: mapToV1's fixed contract fields (service.line, the
+    // 'pest' default, etc.) are a v1 legacy-mapping concept that never
+    // applied to the L1b lawn/plant content. Unweakened for all 239 pest
+    // entries.
+    const entries = catalog.listEntries({ section: 'pest' });
     const answersByNode = new Map();
     for (const entry of entries) {
       const built = answerFor(entry.slug, { approved: false });
@@ -374,9 +384,13 @@ describe('inherited v1 identity keeps the named v2 entry service contract', () =
   // service line or 'high' urgency shared by the whole node).
   test('every audited draft special fallback stays unnamed and keeps its mapped medical hazards', () => {
     const safetyFields = { stinging: 'stings', venomous: 'venomous', disease_vector: 'disease_vector' };
-    const audited = catalog.listEntries().filter((entry) => entry.review.status === 'draft'
-      && (entry.service.referral || entry.safety.protected || entry.risk === 'medical'));
-    expect(audited).toHaveLength(55);
+    // Every such entry, forced to draft (answerFor approved:false), whatever
+    // its catalog review status.
+    // Pest-section only (see the comment on the "climb covers each of its
+    // own hazards" test above) — unweakened for all 239 pest entries.
+    const audited = catalog.listEntries({ section: 'pest' }).filter((entry) => entry.service.referral
+      || entry.safety.protected || entry.risk === 'medical');
+    expect(audited).toHaveLength(59);
 
     for (const entry of audited) {
       const built = answerFor(entry.slug, { approved: false });

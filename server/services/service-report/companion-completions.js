@@ -11,8 +11,8 @@
  * payload — a submitted type outside profile.companions is a 409, and a
  * declared type missing from the submission is a 422 on a completed visit.
  * All per-type validation calls into the existing typed machinery
- * (validateTypedFindings / validateNextStepChips / derive-then-pin /
- * validateActivityScoreConsistency); nothing is reimplemented here.
+ * (validateTypedFindings / derive-then-pin / validateActivityScoreConsistency);
+ * nothing is reimplemented here.
  */
 const ActivityIndicators = require('./activity-indicators');
 
@@ -23,13 +23,13 @@ function reject(status, body) {
 /**
  * Validate a companionFindings submission against the profile's declared
  * companions. Returns { ok: true, companions } with one normalized entry per
- * declared companion, in DECLARED order ({ type, values, chips,
+ * declared companion, in DECLARED order ({ type, values,
  * activityScore, activityScoreSource }), or { ok: false, status, body }
  * shaped like the /complete route's other validation failures.
  *
  * @param {object} opts.profile              resolved completion profile
  * @param {Array}  opts.companionFindings    request payload entries
- *                 [{ type, values, nextStepChips, activityScore, activityScoreSource }]
+ *                 [{ type, values, activityScore, activityScoreSource }]
  * @param {string} opts.primaryFindingsType  profile.findingsType (null for
  *                 recurring primaries) — used for indicator-collision checks
  */
@@ -141,23 +141,10 @@ function validateCompanionSubmission({ profile, companionFindings, primaryFindin
       );
     }
 
-    const chipsValidation = ActivityIndicators.validateNextStepChips(
-      entry.nextStepChips, type, values || {},
-    );
-    if (!chipsValidation.ok) {
-      return reject(400, {
-        error: chipsValidation.error,
-        code: 'companion_next_step_chips_invalid',
-        companionType: type,
-      });
-    }
-    if (ActivityIndicators.nextStepRequiredForType(type) && !chipsValidation.chips.length) {
-      return reject(422, {
-        error: `Select at least one next step for the ${type} companion section.`,
-        code: 'companion_next_step_required',
-        companionType: type,
-      });
-    }
+    // The "Next steps" chip picker/requirement was retired (owner ruling
+    // 2026-09-27) — Recommendations is the single tech-advice field now. A
+    // pre-deploy tab that still submits entry.nextStepChips has it accepted
+    // and ignored (never read here).
 
     // Companion findings values render verbatim on the customer report via
     // the snapshot — same banned-copy policy as the primary's free-text
@@ -240,7 +227,6 @@ function validateCompanionSubmission({ profile, companionFindings, primaryFindin
     normalized.push({
       type,
       values: values || {},
-      chips: chipsValidation.chips,
       activityScore: finalScore,
       activityScoreSource: finalScoreSource,
     });

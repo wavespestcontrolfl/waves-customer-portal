@@ -1862,8 +1862,9 @@ postgres('SMS commitments on PostgreSQL', () => {
     expect(evidence.records.filter((r) => r.type === 'payment')).toHaveLength(0);
   });
 
-  test('R2 rule 6: for a customer with a property history, a property-scoped ask needs the invoice\'s own visit property; an unlinked ledger payment cannot vouch for it', async () => {
+  test('R2 rule 6: for a customer with a property history, a property-scoped ask takes the invoice\'s own visit property and an unlinked ledger payment, never a payment for another property', async () => {
     await giveFormerProperty(message.customer_id);
+    const [former] = await mockPg('customer_properties').where({ customer_id: message.customer_id, active: false }).pluck('id');
     result.facts = [];
     result.obligations[0] = { ...result.obligations[0], kind: 'other', answered_by_payment: true, due_at: null, property_id: context.properties[0].id,
       quote: 'Did you receive my payment?', description: 'Did you receive my payment?' };
@@ -1880,16 +1881,27 @@ postgres('SMS commitments on PostgreSQL', () => {
     // An unlinked ledger prepayment, same customer, tied to no property at all.
     await mockPg('payments').insert({ customer_id: message.customer_id, amount: 50, status: 'paid', payment_date: etDateString(after),
       metadata: JSON.stringify({ source: 'account_credit_prepayment', method: 'cash' }), created_at: after });
+    // A payment toward a visit at the customer's former property.
+    const [elsewhere] = await mockPg('scheduled_services').insert({ customer_id: message.customer_id, property_id: former,
+      service_type: 'Quarterly Pest Control', scheduled_date: etDateString(after), window_start: '09:00:00', status: 'completed', created_at: before }).returning('id');
+    const [elsewhereInvoice] = await mockPg('invoices').insert({ customer_id: message.customer_id, token: randomUUID(), invoice_number: 'WPC-2026-0414',
+      title: 'Quarterly Pest Control', total: 95, subtotal: 95, line_items: '[]', status: 'paid', paid_at: after, scheduled_service_id: elsewhere.id }).returning('id');
+    await mockPg('payments').insert({ customer_id: message.customer_id, amount: 95, status: 'paid', payment_date: etDateString(after),
+      metadata: JSON.stringify({ invoice_id: elsewhereInvoice.id, settled_event_at: after.toISOString() }), created_at: after });
     const verify = jest.fn(async () => ({ verdict: 'open', reason: 'model_says_open', evidence_hash: 'x', retry_after: null }));
     const outcome = await refreshSmsCommitments({ conn: mockPg, verify, now });
     expect(verify).toHaveBeenCalledTimes(1);
     const paymentRecords = verify.mock.calls[0][1].records.filter((r) => r.type === 'payment');
-    const linked = paymentRecords.find((r) => r.payment_source === 'invoice');
+    const linked = paymentRecords.find((r) => r.invoice_id === invoice.id);
+    const other = paymentRecords.find((r) => r.invoice_id === elsewhereInvoice.id);
     const ledger = paymentRecords.find((r) => r.payment_source === 'ledger');
     expect(linked.property_id).toBe(context.properties[0].id);
+    expect(other.property_id).toBe(former);
+    expect(ledger.property_id).toBeNull();
     const scopedAsk = { kind: 'other', sms_context: { property_id: context.properties[0].id, money_answerable: true } };
     expect(admissibleWitness(linked, scopedAsk)).toBe(true);
-    expect(admissibleWitness(ledger, scopedAsk)).toBe(false);
+    expect(admissibleWitness(ledger, scopedAsk)).toBe(true);
+    expect(admissibleWitness(other, scopedAsk)).toBe(false);
     expect(outcome).toMatchObject({ scanned: 1, fulfilled: 0 });
   });
 
@@ -2372,7 +2384,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     } finally { await writer.rollback(); }
   });
 
-  test('Codex #4996 r11: money no link ties to a property belongs to the customer\'s only property, and never when they have had another', async () => {
+  test('Codex #4996 r11: money no link ties to a property belongs to the customer\'s only property, and still counts for a scoped ask once they have had another', async () => {
     const after = new Date(message.created_at.getTime() + 1000);
     const now = new Date(after.getTime() + 1000);
     const propertyId = context.properties[0].id;
@@ -2394,12 +2406,14 @@ postgres('SMS commitments on PostgreSQL', () => {
     }
     // An unscoped ask attributes nothing: it needs no property.
     expect((await payments(unscoped))[autopay.id].property_id).toBeNull();
-    // Once the customer has had another property, a payment with no link could be for either.
+    // Once the customer has had another property, a payment with no link is
+    // no longer attributed to either, but nothing ties it to the other one,
+    // so it still counts (owner ruling 2026-09-27).
     await giveFormerProperty(message.customer_id);
     const history = await payments(scoped);
     for (const id of [office.id, autopay.id]) {
       expect(history[id].property_id).toBeNull();
-      expect(admissibleWitness(history[id], scoped)).toBe(false);
+      expect(admissibleWitness(history[id], scoped)).toBe(true);
     }
   });
 

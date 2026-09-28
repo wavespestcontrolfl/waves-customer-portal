@@ -43,7 +43,9 @@ const DESCRIBES_CURRENT_SQL = (t) => `${t}.d = scheduled_services.scheduled_date
 // 15: whether money landing can answer an ask is the extraction's judgement
 //     (answered_by_payment), no longer a word list; an ask without it is
 //     never answered by money.
-const FULFILLMENT_POLICY = 15;
+// 16: a property-scoped ask admits a payment nothing ties to any property;
+//     only a payment tied to another property is refused.
+const FULFILLMENT_POLICY = 16;
 const SCHEMA = {
   type: 'object', additionalProperties: false, required: ['verdict', 'record_ref', 'quote'],
   properties: {
@@ -616,12 +618,13 @@ function scopedToProperty(record, commitment) {
   }
   // Only an ask scoped to one property narrows which payment can answer it
   // (rule 6, Codex #4816 r13 P1). An unscoped ask admits any of the
-  // customer's own payments — the query is already customer-scoped — but a
-  // scoped ask needs the payment tied to THAT property: through its links,
-  // or because it is the only property the customer has ever had (the loader
-  // attributes a payment with no link to it). Otherwise an unlinked payment
-  // never vouches for it.
-  if (record.type === 'payment') return !propertyId || witnessProperty === propertyId;
+  // customer's own payments — the query is already customer-scoped. A scoped
+  // ask refuses only a payment tied to a DIFFERENT property: one tied to
+  // this property (through its links, or because it is the only property the
+  // customer has ever had) counts, and so does one nothing ties to any
+  // property — an office invoice, autopay, a staff-recorded payment (owner
+  // ruling 2026-09-27: count it unless it is clearly for another property).
+  if (record.type === 'payment') return !propertyId || !witnessProperty || witnessProperty === propertyId;
   return !!propertyId && witnessProperty === propertyId;
 }
 

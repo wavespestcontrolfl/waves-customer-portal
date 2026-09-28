@@ -20949,5 +20949,26 @@ CallRecordingProcessor.recoveryMarkerPayload = recoveryMarkerPayload;
 // this file got `undefined`.
 CallRecordingProcessor.resolveCallContactPhone = resolveCallContactPhone;
 
+// Production contract for call-booking-link-text.js's own outbound-return
+// prior-contact check (codex r7 P1, pre-push): that lane's own
+// customerPredatesThisCall only excludes a customer THIS call's own legacy
+// path created — it has no comparison against the customer ROW'S OWN
+// created_at, missing the exact TCPA-implied-consent timing gap this
+// helper's own predatesCall() already closed for every caller inside this
+// file. It lived only under `_test` too, same reason as
+// resolveCallContactPhone above — promoted here rather than reimplemented
+// a second time (CLAUDE.md rule 15).
+CallRecordingProcessor.outboundPriorContactCustomerId = outboundPriorContactCustomerId;
+
+// Production contract for call-booking-link-text.js's own staging check
+// (codex #5018 r11 P2): duration_seconds/conversationSeconds prove only that
+// the clock ran, never that the caller and Waves actually spoke — a call
+// that connected and dropped in the first few seconds can still carry
+// enough ring/hold time to clear call_too_short. hasRealTwoWayConversation
+// (PR #5012) already exists for exactly this and lived only under `_test`,
+// same reason as the two promotions above — promoted rather than
+// reimplemented (CLAUDE.md rule 15).
+CallRecordingProcessor.hasRealTwoWayConversation = hasRealTwoWayConversation;
+
 module.exports = CallRecordingProcessor;
 // Pure decision helper, exported for its unit test.

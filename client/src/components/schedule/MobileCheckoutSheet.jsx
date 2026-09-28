@@ -38,6 +38,7 @@ import {
   isCardExpired,
 } from '../../hooks/useCustomerCards';
 import { attachedVisitInvoice } from './visitInvoice';
+import { siblingCoverageCopy } from '../../lib/siblingInvoiceCoverage';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -89,11 +90,137 @@ export default function MobileCheckoutSheet({
 
   const tier = service.waveguardTier ? String(service.waveguardTier).toLowerCase() : null;
   const rawPrice = service.estimatedPrice != null ? Number(service.estimatedPrice) : null;
+  // Positive-price precedence — matches completionInvoiceAmount /
+  // predictCompletionBilling (server/services/billing-lane.js), which both
+  // treat `estimatedPrice != null && Number(estimatedPrice) > 0` as "this
+  // visit has its own authoritative price," never a bare != null. A
+  // stamped 0 means the SAME server resolver already fell through to the
+  // per-application fee / rate for this row's own prediction — so a $0
+  // rawPrice must defer to the prediction exactly like a null one does
+  // (codex pre-push P1: estimatedPrice: 0 with a $97.20 fee and a $40
+  // checkout extra previewed $40 here while the mint endpoint created
+  // $137.20 — the sheet read its own $0 as authoritative instead of
+  // consulting the prediction).
+  const hasOwnPrice = rawPrice != null && rawPrice > 0;
+  // Declared here (not at its old spot further down) so the gross-fallback
+  // safety check right below can read it before `price` is computed.
+  const prepaidAmount = service.prepaidAmount != null ? Math.max(0, Number(service.prepaidAmount) || 0) : 0;
   // Callbacks (re-services) are free by definition for recurring/WaveGuard
   // customers — the server zeroes the visit and won't bill monthly dues, so the
   // checkout preview must not fall back to monthlyRate (which would show a
-  // "Charge $<rate>" button that the mint endpoint then rejects as $0).
-  const price = rawPrice != null ? rawPrice : (service.isCallback ? 0 : Number(service.monthlyRate || 0));
+  // "Charge $<rate>" button that the mint endpoint then rejects as $0). For an
+  // unpriced visit, monthlyRate is only ever the right fallback for a
+  // monthly-membership customer — everywhere else the AUTHORITATIVE amount is
+  // the schedule payload's own billingLane.prediction, the same
+  // predictCompletionBilling / completionInvoiceAmount (billing-lane.js) both
+  // completion and the Charge Now mint endpoint's own amount ultimately trace
+  // back to — never re-derived locally, so this can't drift (mirrors the
+  // CompletionPanel/detail-sheet fix; a real prod case for the old
+  // explicit-lane gate: a $56.40/app lawn visit whose invoice is covered by a
+  // same-day sibling previewed $74.70 — the annual/12 equivalent — here). A
+  // sibling-covered or otherwise fully-covered visit still previews $0 here
+  // (nothingToCharge disables Charge) — the covering invoice is on the
+  // SIBLING row, never this one's own attached invoice, so there is nothing
+  // for this sheet to mint regardless of the prediction amount.
+  //
+  // This sheet, uniquely among the four schedule surfaces, can stack extra
+  // line items on top of the base visit — so it reads `grossAmount` (the
+  // fee/rate BEFORE the recorded prepayment was netted out), never the
+  // already-net `amount` the other three surfaces use directly. Feeding the
+  // ALREADY-NET figure into this sheet's OWN prepaid-credit math below would
+  // net the SAME prepayment a SECOND time (codex pre-push P1: a $100 fee
+  // with $60 prepaid predicts $40 net; crediting $60 again against that $40
+  // zeroed the charge although $40 was still owed) — and once extras are
+  // added, would drop credit still owed on them too (a $100 fee, $100
+  // prepaid, plus a $30 extra bills $110 gross with $100 applied, $10 due —
+  // never a flat $30 that ignores the $100 sitting on file). `grossAmount`
+  // is absent for kinds this sheet doesn't need to re-net (payer: never
+  // netted against THIS customer's prepaid to begin with; covered_*/
+  // no_charge: null/0 either way) — `?? amount` covers those, and an older
+  // cached payload with no grossAmount at all.
+  //
+  // Codex round-2 P2: that `?? amount` fallback treats a legacy NET amount
+  // as if it WERE the gross base — for an 'invoice'/'auto_charge' kind,
+  // `amount` is already net of any recorded prepayment (predictCompletionBilling
+  // subtracts it server-side), so using it as the base here and then netting
+  // prepaidAmount a SECOND time below double-credits the SAME prepayment
+  // (a $100 fee with $60 prepaid predicts `{ amount: 40 }`; using $40 as
+  // the base and crediting $60 again previews $0 although the mint
+  // endpoint would create a real $40 balance). Client and server ship
+  // together, so this is never reachable from a current payload — it can
+  // only happen from a STALE cached one, and stale + a real prepayment on
+  // file is exactly the combination this sheet must not guess at. With NO
+  // prepayment recorded, `amount` IS the gross fee (there's nothing to net
+  // against it), so the legacy fallback stays exactly as safe as before.
+  const predictionAmount = service.billingLane?.prediction?.amount;
+  const predictionGrossAmount = service.billingLane?.prediction?.grossAmount;
+  const predictionKind = service.billingLane?.prediction?.kind || null;
+  const usingUnpricedPrediction = !hasOwnPrice && !service.isCallback;
+  // Codex round 4 P1: only 'invoice' / 'auto_charge' / 'prepaid' kinds ever
+  // net a recorded prepayment against a gross base (see the block comment
+  // above) and so are the only ones whose MISSING grossAmount is actually
+  // stale/unsafe. A CONFIRMED no-charge kind ('no_charge', 'covered_*',
+  // 'payer') legitimately has no grossAmount — it is null/0 either way —
+  // so a leftover positive prepaidAmount on a fully-discounted $0 visit
+  // (hasAuthoritativeZeroPrice's 'no_charge'/'fully_discounted' kind never
+  // carries grossAmount by design) must not permanently disable Charge for
+  // it, including for a chargeable extra stacked on top.
+  const priceNeedsRefresh = usingUnpricedPrediction
+    && ['invoice', 'auto_charge', 'prepaid'].includes(predictionKind)
+    && predictionGrossAmount == null
+    && predictionAmount != null
+    && prepaidAmount > 0;
+  // codex round-2 P1 (moved up from further below so `price` can read it):
+  // an attached-invoice prediction (predictionFromAttachedInvoice,
+  // admin-schedule.js) legitimately never carries grossAmount, and its
+  // amount is the REAL invoice's total, never fee-derived — the
+  // feeOnlyPerApplicationPreview check right below must never fire for it.
+  const attachedInvoicePrediction = service.billingLane?.prediction?.source === 'attached_invoice';
+  // Owner ruling — REMOVE THE CHARGE NOW FEE FALLBACK (2026-09-27): Charge
+  // Now (this sheet) must never bill the customer-level per_application_fee
+  // for an unpriced visit — only completion still does (predictCompletionBilling
+  // is completion's own prediction and is unaffected by this ruling; it
+  // still returns the fee as grossAmount so completion's OWN preview
+  // elsewhere — CompletionPanel, the detail sheet — stays accurate). An
+  // unpriced, non-callback, per_application-lane visit with no attached
+  // invoice previews a fee-based grossAmount here that Charge Now's own
+  // mint endpoint (resolveScheduledServiceCharge, admin-schedule.js) no
+  // longer honors — reading it as `price` would show a "Charge $X" button
+  // the server then 400s (or, for a fully-prepaid 'prepaid' kind, a "Charge
+  // $0.00" settle-the-invoice button the server would ALSO 400, since there
+  // is no fee left to build that $0 invoice's line items from). With no own
+  // price and not callback (`price`'s ternary below already guarantees
+  // both), the ENTIRE amount for 'invoice' / 'auto_charge' / 'prepaid'
+  // kinds under this lane comes from that fee — `estimatedPrice` alone
+  // would have taken the `hasOwnPrice` branch above, and
+  // hasAuthoritativeZeroPrice / callback / always-free-type all predict
+  // 'no_charge' instead, never reaching these kinds at all.
+  //
+  // Codex pre-push P1 (round 13): this same shape is ALSO used further below
+  // to hide the Add Service / Add Item pickers entirely — the server now
+  // refuses the WHOLE mint for it, extras included (completion bills the
+  // fee, not Charge Now; an extras-only invoice attached here would strand
+  // that fee — see resolveScheduledServiceCharge's own header,
+  // admin-schedule.js), so offering the pickers would let the tech add an
+  // extra the server then 409s.
+  // Codex pre-push P1 (round 13, Codex r11 finding): this must ALSO require
+  // !hasOwnPrice explicitly — it is read directly (not just inside the
+  // `price` ternary's own hasOwnPrice-gated branch) further below, to hide
+  // the Add Service / Add Item pickers. Without this, an EXPLICITLY priced
+  // per_application visit whose prediction still happens to carry kind
+  // 'invoice'/'auto_charge'/'prepaid' (completionInvoiceAmount's precedence
+  // doesn't change kind based on WHERE the amount came from) would
+  // incorrectly hide its supported checkout controls and claim the visit
+  // needs a price it already has.
+  const feeOnlyPerApplicationPreview = !hasOwnPrice
+    && !attachedInvoicePrediction
+    && service.billingLane?.mode === 'per_application'
+    && ['invoice', 'auto_charge', 'prepaid'].includes(predictionKind);
+  const price = hasOwnPrice
+    ? rawPrice
+    : (service.isCallback || feeOnlyPerApplicationPreview
+      ? 0
+      : Number(predictionGrossAmount ?? predictionAmount) || 0);
   const appointmentAddons = Array.isArray(service.serviceAddons) ? service.serviceAddons : [];
   const appointmentAddonTotal = Math.round(
     appointmentAddons.reduce((sum, addon) => sum + (Number(addon.estimatedPrice) || 0), 0) * 100
@@ -197,7 +324,6 @@ export default function MobileCheckoutSheet({
     })),
   ), [extras]);
 
-  const prepaidAmount = service.prepaidAmount != null ? Math.max(0, Number(service.prepaidAmount) || 0) : 0;
   // An open invoice already attached to this visit (accept-minted setup +
   // first-application invoice, or an earlier Charge-now mint) is what the
   // charge actually collects — the mint endpoint reuses it AS-IS and ignores
@@ -212,13 +338,101 @@ export default function MobileCheckoutSheet({
   // invoice's own payer flag (via inv.open). Raw payerId is deliberately NOT
   // consulted — an inactive per-job payer resolves self-pay and the visit's
   // invoice IS collectible.
-  const payerBilled = !!service.billedToPayer;
+  // Codex round 4 P2: `service.billedToPayer` alone missed an UNPRICED
+  // payer visit with no attached invoice yet — its prediction kind is
+  // 'payer' (the server resolver's ONLY other payer signal here), and
+  // without it `price` below falls through to predictionGrossAmount /
+  // predictionAmount, making this sheet preview a positive, chargeable
+  // total the mint endpoint's payer guard then refuses outright.
+  const payerBilled = !!service.billedToPayer || predictionKind === 'payer';
+  // ONE canonical per-visit collection verdict (owner decision — narrow +
+  // fail closed): `billingLane.siblingCoverage` — is this visit's own
+  // charge entangled with another invoice's state, either a same-day
+  // sibling's combined invoice or this visit's OWN attached invoice sitting
+  // in a terminal state (round-8 P2). A 'review' verdict means the mint
+  // resolver (resolveScheduledServiceCharge, admin-schedule.js) refuses to
+  // mint ANYTHING for it, base OR extras, with a 409 — Charge must stay
+  // disabled here even after an operator stacks a checkout extra on top of
+  // the (already $0) base — servicesSubtotal alone would otherwise turn
+  // positive from the extra and read as chargeable. A 'collect_on_combined_invoice'
+  // or 'settled' verdict never mints a second invoice for THIS visit's base
+  // fee either (price above is already $0 for it — grossAmount/amount are
+  // both null by design), and the same 409 refusal applies to it too
+  // (round-8 P1: no extras-only invoice on a covered visit at all) — Charge
+  // stays disabled for EVERY non-'none' state, not only 'review'.
+  const siblingCoverageVerdict = service.billingLane?.siblingCoverage || null;
+  // Not scoped to `!hasOwnPrice`: the server's siblingCoverageForSchedule
+  // (billing-lane.js) never marks a PRICED reserved row 'review' (owner
+  // ruling — REFUSE AFTER A VOID: only the unpriced sibling refuses, in
+  // either charging order), so this is a defensive read, not a live path —
+  // harmless either way, and keeps this sheet agreeing with whatever state
+  // the server ever sends without needing to know which visits can carry
+  // it.
+  const siblingNeedsReview = siblingCoverageVerdict?.state === 'review';
+  const siblingCoverage = !hasOwnPrice && predictionKind === 'covered_sibling_invoice'
+    ? siblingCoverageCopy(siblingCoverageVerdict, { siblingServiceType: service.billingLane?.prediction?.siblingServiceType || null })
+    : null;
+  const siblingCollectible = !!siblingCoverage?.collectible;
+  const siblingBlocksCharge = !!siblingCoverageVerdict && siblingCoverageVerdict.state !== 'none';
   const openVisitInvoice = !payerBilled && inv && inv.open && inv.total > 0 ? inv : null;
+  // codex pre-push P1 (round 14, Codex r11 finding): a fully-discounted
+  // application — estimatedPrice stamped 0 alongside a positive
+  // primaryLinePrice (hasAuthoritativeZeroPrice, billing-lane.js) — IS an
+  // authoritative price server-side: resolveScheduledServiceCharge's own
+  // hasOwnPrice includes this exemption, so its per_application_fee_at_completion
+  // refusal does NOT apply to it, and an attached invoice on this exact
+  // shape (e.g. a genuine extras-only invoice on a $0-net application)
+  // stays normally collectible. Checked locally here, matching the SAME
+  // server predicate, rather than widening this file's own `hasOwnPrice`
+  // above, which deliberately stays narrower (positive price only) for the
+  // unpriced-prediction `price` ternary it feeds.
+  const attachedInvoiceHasAuthoritativeZeroPrice = service.estimatedPrice != null && service.estimatedPrice !== ''
+    && Number(service.estimatedPrice) === 0
+    && service.primaryLinePrice != null && Number(service.primaryLinePrice) > 0;
+  // Codex pre-push P1 (round 13, Codex r11 finding): resolveScheduledServiceCharge
+  // refuses the per_application_fee_at_completion shape UNCONDITIONALLY —
+  // even when this visit already has an open, otherwise-collectible
+  // attached invoice (mirrors round-9 P1's own "never trust an existing
+  // invoice blindly for this exact shape" posture) — so openVisitInvoice's
+  // positive amountDue is NOT actually chargeable through this sheet
+  // either, although it drives totalBeforePrepaid to a positive number
+  // below and would otherwise leave Charge enabled for a tap the server
+  // then 409s. Scoped to the SAME shape as feeOnlyPerApplicationPreview
+  // (unpriced, non-callback, per_application lane, NOT an authoritative
+  // zero) — a callback or an explicit/authoritative-zero price is
+  // unaffected, and stays on the normal attached-invoice collection flow.
+  const attachedInvoiceRefusedForFeeAtCompletion = !hasOwnPrice
+    && !attachedInvoiceHasAuthoritativeZeroPrice
+    && !service.isCallback
+    && service.billingLane?.mode === 'per_application'
+    && !!openVisitInvoice;
   // A processing invoice is money already in flight (e.g. a pending ACH
   // debit) — the payment routes reject it, so block charging outright
   // instead of falling back to a preview that fails after tender pick.
   const processingVisitInvoice = !payerBilled && !inv?.payerBilled && inv && inv.processing ? inv : null;
   const invoicePreview = openVisitInvoice || processingVisitInvoice;
+  // codex round-2 P1: priceNeedsRefresh guards the UNPRICED-PREDICTION base
+  // (`price`, computed above from billingLane.prediction) — it must NOT
+  // apply once an invoice is already attached to this visit, because the
+  // attached-invoice preview below drives totalBeforePrepaid from
+  // invoicePreview.amountDue instead, never from `price`. The attached-
+  // invoice prediction shape (predictionFromAttachedInvoice, admin-schedule.js)
+  // legitimately never carries grossAmount — that's not a legacy/stale
+  // payload, so it must not be refused as one.
+  //
+  // codex pre-push P2 (round 3): `invoicePreview` is null for a SETTLED
+  // (paid/prepaid) or refunded attached invoice too — predictionFromAttachedInvoice
+  // still returns `source: 'attached_invoice'` for both (it excludes only
+  // void/canceled/cancelled, DEAD_ATTACHED_INVOICE_STATUSES), so an unpriced
+  // visit with a recorded prepayment and one of those invoices satisfied the
+  // OLD `!invoicePreview` guard alone and was shown "Price needs a refresh"
+  // permanently, although the payload was current. Key the exemption on the
+  // server's own `source` field instead of the invoicePreview subset — a
+  // canceled/void attached invoice (source absent, predictCompletionBilling's
+  // ordinary prediction applies instead) is UNCHANGED and still refused when
+  // stale. (`attachedInvoicePrediction` itself is declared earlier, above
+  // `price`, so the fee-only-preview check can read it too.)
+  const priceRefreshBlocksCharge = priceNeedsRefresh && !invoicePreview && !attachedInvoicePrediction;
   // amountDue (total − credit_applied), never the gross — the charge paths
   // collect the amount due. And when the recorded prepayment was already
   // consumed by this invoice (prepaidApplied), its total is already net, so
@@ -226,6 +440,10 @@ export default function MobileCheckoutSheet({
   const totalBeforePrepaid = invoicePreview
     ? invoicePreview.amountDue
     : Math.max(0, servicesSubtotal + extraDiscountsTotal);
+  // `price` above is the GROSS fee (billingLane.prediction.grossAmount when
+  // there's no attached invoice) — this is the ONE place the recorded
+  // prepayment nets against it, whether the visit is unpriced or not, and
+  // whether or not extra line items are stacked on top.
   const prepaidCredit = invoicePreview && invoicePreview.prepaidApplied
     ? 0
     : Math.min(prepaidAmount, totalBeforePrepaid);
@@ -236,7 +454,27 @@ export default function MobileCheckoutSheet({
   // chargeable amount: a positive-price visit that's fully prepaid still needs to
   // mint its invoice (the endpoint applies the prepaid credit → paid receipt), so
   // it must stay enabled even though `total` nets to $0.
-  const nothingToCharge = totalBeforePrepaid <= 0 || !!processingVisitInvoice;
+  //
+  // priceRefreshBlocksCharge refuses the WHOLE mint, not just the base —
+  // same principle as the server round-2 fix: an unconfirmed/unsafe base
+  // must never be diluted by stacking an extra on top of it and calling
+  // the sum safe (codex round-2 P2).
+  // A payer-billed visit with no already-attached collectible invoice
+  // (openVisitInvoice/processingVisitInvoice are already null for it,
+  // above — both exclude payerBilled at their own definitions) has nothing
+  // THIS sheet may collect in person; the AR is the payer's AP inbox.
+  //
+  // codex pre-push P2 (round 15, Codex r12 finding): this used to be scoped
+  // to `!hasOwnPrice` — but the server's payer guard (POST /:id/invoice,
+  // PayerService.resolveForInvoice) refuses the mint for EVERY
+  // payer-resolved visit unconditionally, with no price check at all — a
+  // PRICED payer-billed visit's own `price` (rawPrice) still previewed a
+  // live "Charge $X" button here, which then 400'd on every tap. Disabled
+  // regardless of hasOwnPrice, matching the server exactly.
+  const nothingToCharge = priceRefreshBlocksCharge || totalBeforePrepaid <= 0 || !!processingVisitInvoice
+    || (payerBilled && !invoicePreview)
+    || siblingBlocksCharge
+    || attachedInvoiceRefusedForFeeAtCompletion;
 
   // One-line card-on-file note for the tech. Shows the first non-expired
   // method (server orders default first); if every method is expired, says
@@ -455,7 +693,15 @@ export default function MobileCheckoutSheet({
             ? 'Opening payment…'
             : processingVisitInvoice
               ? 'Payment processing — nothing to collect'
-              : nothingToCharge
+              : priceRefreshBlocksCharge
+                ? 'Price needs a refresh — reopen this visit'
+                : attachedInvoiceRefusedForFeeAtCompletion
+                ? 'Bills at completion — see the invoice or set a price'
+                : siblingNeedsReview
+                ? 'Needs review on Customer 360 — can’t charge here'
+                : siblingCollectible && nothingToCharge
+                ? 'Combined trip invoice due — collect there, not here'
+                : nothingToCharge
                 ? 'No charge — complete from job'
                 : discountGroupConflict
                   ? 'Resolve discount conflict to charge'
@@ -669,14 +915,38 @@ export default function MobileCheckoutSheet({
         {/* Add Service / Add Item or Discount. Hidden when an invoice is
             already attached: the mint endpoint reuses that invoice as-is and
             ignores extraLineItems, so offering the pickers would silently
-            drop whatever the tech added. */}
+            drop whatever the tech added.
+            Codex pre-push P1 (round 13): ALSO hidden for the fee-at-completion
+            shape (feeOnlyPerApplicationPreview) — the server now refuses the
+            WHOLE mint, extras included, for an unpriced per_application
+            visit (completion bills the acceptance fee, not Charge Now; an
+            extras-only invoice here would attach to the visit and strand
+            that fee — complete-scheduled-service.js's existingCompletionInvoice
+            lookup would find it and never re-run the fee decision at all).
+            Offering the pickers here would let the tech add an extra the
+            server then 409s. */}
         {invoicePreview ? (
           <div className="mt-4 text-ink-secondary" style={{ fontSize: 13 }}>
             {processingVisitInvoice
               ? 'A payment for this invoice is already processing — do not collect again.'
-              : <>Charging collects this invoice as-is. To change the amounts, edit{' '}
-                {invoicePreview.number ? `invoice ${invoicePreview.number}` : 'the invoice'} from
-                the Invoices page before charging.</>}
+              // Codex pre-push P1 (round 13, Codex r11 finding): this visit
+              // bills its acceptance fee at completion — resolveScheduledServiceCharge
+              // refuses the mint for it even with this invoice already
+              // attached (the same "never trust an existing invoice blindly
+              // for this shape" posture round-9 P1 established), so the
+              // ordinary "charging collects this invoice" copy would be
+              // wrong here — every tap 409s.
+              : attachedInvoiceRefusedForFeeAtCompletion
+                ? <>This visit bills its application fee at completion, so Charge Now can’t collect{' '}
+                  {invoicePreview.number ? `invoice ${invoicePreview.number}` : 'this invoice'} here — settle it from
+                  the Invoices page, or set a price on this visit first.</>
+                : <>Charging collects this invoice as-is. To change the amounts, edit{' '}
+                  {invoicePreview.number ? `invoice ${invoicePreview.number}` : 'the invoice'} from
+                  the Invoices page before charging.</>}
+          </div>
+        ) : feeOnlyPerApplicationPreview ? (
+          <div className="mt-4 text-ink-secondary" style={{ fontSize: 13 }}>
+            This visit bills its application fee at completion — add extras there, or set a price on this visit first.
           </div>
         ) : (
         <div className="mt-4 space-y-3">

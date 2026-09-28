@@ -161,6 +161,48 @@ function splitSitusTrailingNumber(situs) {
   return m ? { base: m[1].trim(), trailing: m[2] || null } : null;
 }
 
+// A unit id compares as the resident would type it: no '#', hyphen, or
+// space ("A-101" = "A101"), and a purely numeric id without leading zeros
+// ("0201" = "201"). Returns null for an empty id.
+function normalizeUnitId(value) {
+  const id = String(value || '').toUpperCase().replace(/[#\s-]+/g, '');
+  if (!id) return null;
+  return /^\d+$/.test(id) ? (id.replace(/^0+(?=\d)/, '')) : id;
+}
+
+const SITUS_DWELLING_UNIT_RE = /(?:\b(?:APT|APARTMENT|UNIT)\b\.?\s*#?\s*|#\s*)([A-Z0-9-]+)\s*$/i;
+const SITUS_BUILDING_RE = /\b(?:BLDG|BUILDING)\.?\s*#?\s*([A-Z0-9-]+)/i;
+const SITUS_SUITE_RE = /\b(?:STE|SUITE)\b/i;
+
+// { line, unit, building } for a county unit row's situs, or null when the
+// row names no dwelling unit of its own. `line` is the resolved "NUMBER
+// STREET" (buildStackedAggregate's resolveSitusLine, so a numbered route's
+// "US 41" is never read as a unit number).
+function situsUnitDesignator(situs, resolveSitusLine) {
+  const head = String(situs || '').split(',')[0].replace(/\s+/g, ' ').trim().toUpperCase();
+  if (!head || SITUS_SUITE_RE.test(head)) return null;
+  const line = resolveSitusLine(situs);
+  if (!line) return null;
+  const bldg = head.match(SITUS_BUILDING_RE);
+  const building = bldg ? normalizeUnitId(bldg[1]) : null;
+  // Labeled designator, read off the line with the BLDG designator removed
+  // wherever it sits ("UNIT 4 BLDG C", "BLDG C UNIT 4" and "BLDG #2 UNIT 4"
+  // all name unit 4).
+  const labeled = head.replace(new RegExp(SITUS_BUILDING_RE.source, 'gi'), ' ').replace(/\s+/g, ' ').trim()
+    .match(SITUS_DWELLING_UNIT_RE);
+  if (labeled) {
+    const unit = normalizeUnitId(labeled[1]);
+    return unit ? { line, unit, building } : null;
+  }
+  // Bare trailing number the cross-row evidence stripped as a unit number.
+  const parts = splitSitusTrailingNumber(situs);
+  if (parts?.trailing && line === parts.base) {
+    const unit = normalizeUnitId(parts.trailing);
+    return unit ? { line, unit, building } : null;
+  }
+  return null;
+}
+
 function buildStackedAggregate(county, layer, features, lng, lat) {
   const rows = [];
   for (const feature of features) {
@@ -262,6 +304,22 @@ function buildStackedAggregate(county, layer, features, lng, lat) {
     }
   }
 
+  // Every unit row that names its OWN unit — a labeled dwelling designator
+  // ("UNIT 301" / "APT 706" / "# 12", the Manatee form) or a bare trailing
+  // number the cross-row evidence reads as a unit number ("1555 TARPON
+  // CENTER DR 201", the Sarasota form). The caller matches a typed Apt/Unit
+  // against these to resolve the unit's own folio (unit-scope ruling #8):
+  // it needs the full list, not a unique-key map, because "exactly one
+  // match" is its verdict to reach — repeated unit numbers across BLDG A/B
+  // under one street number must read as ambiguous, never as a pick.
+  // Suites are left out (a commercial suite is not a dwelling unit), and
+  // rings are never copied (the shared polygon is the association's land).
+  const unitDesignatorRows = [];
+  for (const row of unitRows) {
+    const designated = situsUnitDesignator(row.parsed.situsAddress, resolveSitusLine);
+    if (designated) unitDesignatorRows.push({ ...designated, row: row.parsed });
+  }
+
   // Land: a stacked master/common row carrying a roll land figure wins; else
   // the shared polygon's own area (units all carry lsqft 0 by design). Only a
   // GENUINE common row may key PAO detail fetches — advertising an arbitrary
@@ -322,6 +380,7 @@ function buildStackedAggregate(county, layer, features, lng, lat) {
     aggregateUnitParcels: unitRows.length,
     buildingCount,
     soleUnitRows,
+    unitDesignatorRows,
     _masterRings: masterRow.rings,
     _polyArea: polyArea,
   };
@@ -652,7 +711,13 @@ function unitParcelFromAggregate(aggregate, houseNumber) {
   const row = aggregate?.aggregated === true
     ? aggregate.soleUnitRows?.[String(houseNumber || '').trim()]
     : null;
-  if (!row || !row.parcelId) return null;
+  return unitParcelFromAggregateRow(aggregate, row);
+}
+
+// Same single-parcel shape for a unit row the caller already picked (the
+// typed Apt/Unit match against unitDesignatorRows).
+function unitParcelFromAggregateRow(aggregate, row) {
+  if (aggregate?.aggregated !== true || !row || !row.parcelId) return null;
   return {
     ...row,
     county: aggregate.county,
@@ -1042,6 +1107,8 @@ async function lookupSubdivisionMedianLivingSqft({ county, subdivision, lotSqft 
 module.exports = {
   lookupCountyParcelByPoint,
   unitParcelFromAggregate,
+  unitParcelFromAggregateRow,
+  normalizeUnitId,
   lookupCountyParcelAttributesById,
   queryStreetSitusAddresses,
   countyUseDescToPropertyType,

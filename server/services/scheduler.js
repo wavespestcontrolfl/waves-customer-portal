@@ -13,6 +13,14 @@ const { acceptedScheduledSms, markScheduledSmsSent, dispatchScheduledSms } = req
 const { isEnabled, gateEnvValue } = require('../config/feature-gates');
 const { runExclusive, recordMissedTick } = require('../utils/cron-lock');
 const { REPRICE_PENDING_ABSENT_SQL } = require('../utils/estimate-claim-sql');
+// Required HERE, at scheduler init (= process boot), not lazily inside the
+// cron tick below (codex r3 P1): the module's own MODULE_LOAD_AT — the
+// anchor its first-ever activation boundary falls back to — must be this
+// process's actual boot time. A lazy require deferred that capture to
+// whenever the first tick happened to fire, 5 minutes later, defeating the
+// whole point of the fix (a call landing in that gap still read as
+// pre_activation). Mirrors this file's own PROCESS_BOOT_AT convention above.
+const callBookingLinkText = require('./call-booking-link-text');
 
 const SCHEDULED_SMS_CLAIM_LIMIT = 20;
 const SCHEDULED_SMS_STALE_CLAIM_MS = 30 * 60 * 1000;
@@ -350,8 +358,25 @@ async function claimDueScheduledSms(now) {
       SELECT id
       FROM sms_log
       WHERE status = 'scheduled'
-        AND scheduled_for IS NOT NULL
-        AND scheduled_for <= ?
+        AND (
+          (scheduled_for IS NOT NULL AND scheduled_for <= ?)
+          -- Owner ruling 2026-09-28: the 8am-8pm window no longer fences the
+          -- voicemail text-back at all (missed_call_text_back /
+          -- voicemail_lead_sms are CUSTOMER_ACTION_ENTRY_POINTS), so a row
+          -- queued only because that window was closed
+          -- (original_block_code QUIET_HOURS_HOLD) is due NOW — whether it
+          -- was queued before this code shipped, or by an old instance
+          -- still running mid-deploy. Every OTHER voicemail_lead_sms_deferred
+          -- retry reason (suppression retry, an in-flight dedupe wait, …)
+          -- keeps its own scheduled_for. Only a row never claimed yet
+          -- (no scheduled_sms_attempts) is pulled forward: original_block_code
+          -- survives retries, so once the first accelerated attempt has run,
+          -- a failure's backoff (scheduled_for) must be honored rather than
+          -- re-claimed every tick until its attempts are exhausted.
+          OR (metadata->>'entry_point' = 'voicemail_lead_sms_deferred'
+              AND metadata->>'original_block_code' = 'QUIET_HOURS_HOLD'
+              AND COALESCE(NULLIF(metadata->>'scheduled_sms_attempts', ''), '0') = '0')
+        )
       ORDER BY scheduled_for ASC, created_at ASC
       FOR UPDATE SKIP LOCKED
       LIMIT ?
@@ -359,6 +384,11 @@ async function claimDueScheduledSms(now) {
     UPDATE sms_log AS s
     SET status = 'sending',
         updated_at = ?,
+        -- A quiet-hours voicemail row claimed ahead of its old 8 AM
+        -- scheduled_for (above) is pulled to the claim time, so
+        -- recoverStaleScheduledSmsClaims (scheduled_for <= now) can recover
+        -- it if this worker dies mid-send. A plainly due row is unchanged.
+        scheduled_for = LEAST(s.scheduled_for, ?::timestamptz),
         metadata = COALESCE(s.metadata, '{}'::jsonb) || jsonb_build_object(
           'scheduled_sms_claimed_at', ?::timestamptz,
           'scheduled_sms_attempts',
@@ -380,7 +410,7 @@ async function claimDueScheduledSms(now) {
     FROM due
     WHERE s.id = due.id
     RETURNING s.*
-  `, [now, SCHEDULED_SMS_CLAIM_LIMIT, now, now]);
+  `, [now, SCHEDULED_SMS_CLAIM_LIMIT, now, now, now]);
 
   return result.rows || [];
 }
@@ -580,6 +610,7 @@ function parsePositiveEnvInt(value, fallback) {
 async function runContentRegistryMaintenance({
   registry = require('./content/content-registry'),
   liveStatus = require('./content/content-registry-live-status'),
+  ownedUrlHealth = require('./seo/owned-url-health'),
 } = {}) {
   const contentType = String(process.env.CONTENT_REGISTRY_MAINTENANCE_CONTENT_TYPE || '').trim() || null;
   const syncResult = await registry.runContentRegistrySync({
@@ -603,9 +634,29 @@ async function runContentRegistryMaintenance({
     throw new Error(`live status failed: ${liveResult.error || 'unknown error'}`);
   }
 
+  // Owned cited-URL health rides the same maintenance run (AGENTS.md: one
+  // fetcher/sweep, not a parallel cron) — it reuses this run's live-status
+  // checker but reads a DIFFERENT candidate list (mention data, not registry
+  // rows), so it is additionally gated on GATE_SEO_INTELLIGENCE, the gate
+  // that owns the mention data it depends on. Fails soft: a health-check
+  // hiccup must never fail the registry sync/live-status refresh that owns
+  // this run (that failure is the one this function fails closed for).
+  let ownedUrlHealthResult = null;
+  if (isEnabled('seoIntelligence')) {
+    try {
+      const result = await ownedUrlHealth.runOwnedUrlHealthCheck();
+      ownedUrlHealthResult = { checked: result.checked, bad: result.bad };
+      logger.info(`[content-registry] owned cited-URL health: checked=${result.checked} bad=${result.bad}`);
+    } catch (err) {
+      logger.error(`[content-registry] owned cited-URL health check failed: ${err.message}`);
+      ownedUrlHealthResult = { error: err.message };
+    }
+  }
+
   return {
     sync: syncResult.summary,
     live: liveResult.summary,
+    ownedUrlHealth: ownedUrlHealthResult,
     sync_run_id: syncResult.sync_run_id,
     statuses,
     limit,
@@ -1624,6 +1675,26 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // Promises kept by a booking for their promised slot whose proof lapsed
+  // (visit cancelled/skipped/moved, call relinked) go back to Owed within
+  // fifteen minutes on the commitments gate alone — the watchdog's own
+  // cadence depends on other gates (slot-proof-reconciler.js).
+  cron.schedule('0 */15 * * * *', async () => {
+    try {
+      const result = await require('./slot-proof-reconciler').runSlotProofReconciler();
+      if (result?.skipped === true && result.reason !== 'gated_off' && result.reason !== 'lease_held') {
+        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+        const t0 = Date.now();
+        await recordJobStart('slot-proof-reconciler').catch(() => {});
+        await recordJobEnd('slot-proof-reconciler', t0, new Error(`tick skipped: ${result.reason || 'no_connection'}`)).catch(() => {});
+        throw new Error(`Slot proof reconciler tick skipped: ${result.reason || 'no_connection'}`);
+      }
+      if (result?.reopened > 0) logger.info(`[slot-proof-reconciler] reopened=${result.reopened} of ${result.checked} call(s)`);
+    } catch (err) {
+      logger.error(`[slot-proof-reconciler] tick failed (${err.code || err.name || 'error'})`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // The same watchdog and persisted identities own reminders before and
   // after rollback. Cards add a five-minute cadence to the daily sweep.
   cron.schedule('0 */5 * * * *', async () => {
@@ -1659,6 +1730,27 @@ function initScheduledJobs() {
       }
     } catch (err) {
       logger.error(`[reschedule-link-promises] tick failed (${err.code || err.name || 'error'})`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // Automatic booking-link text after a call (GATE_CALL_BOOKING_LINK_TEXT) —
+  // same 5-minute cadence as reschedule-link-promises: stages newly-extracted
+  // calls and dispatches whatever 2-hour/8am-ET delay has elapsed.
+  cron.schedule('0 */5 * * * *', async () => {
+    if (!isEnabled('callBookingLinkText')) return;
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      const result = await runExclusive('call-booking-link-text', () => callBookingLinkText.sweep());
+      if (result?.skipped && result.reason !== 'lease_held') {
+        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+        const startedAt = Date.now();
+        const error = new Error(`Booking-link text tick skipped: ${result.reason || 'no_connection'}`);
+        await recordJobStart('call-booking-link-text').catch(() => {});
+        await recordJobEnd('call-booking-link-text', startedAt, error).catch(() => {});
+        throw error;
+      }
+    } catch (err) {
+      logger.error(`[call-booking-link-text] tick failed (${err.code || err.name || 'error'})`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -2059,13 +2151,16 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // WEEKLY SUNDAY 4:10AM — Registry feeders, after the 3:30 backlink scan (§4):
-  // existing-profile baseline (idempotent) → competitor-gap ingestion → enrich
-  // (DataForSEO, gated by GATE_SEO_INTELLIGENCE inside the service). Services
-  // are called directly — never the admin HTTP route. The feeders consume
-  // seo_backlinks, so they run INSIDE the scan's own lock ('backlink-scan'):
-  // a scan still paging at 4:10 keeps the lease and the feeders wait (10-min
-  // retries, up to an hour) rather than reading rows the scan is still
-  // transitioning; while they run, no scan can start.
+  // existing-profile baseline (idempotent) → competitor-gap ingestion →
+  // ai_citation discovery (AEO answer-engine citations, gated by
+  // GATE_SEO_INTELLIGENCE inside the service — DISCOVERY NEVER GRANTS
+  // AUTHORITY: see link-authority-policy.js) → enrich (DataForSEO, gated by
+  // GATE_SEO_INTELLIGENCE inside the service). Services are called directly —
+  // never the admin HTTP route. The feeders consume seo_backlinks, so they
+  // run INSIDE the scan's own lock ('backlink-scan'): a scan still paging at
+  // 4:10 keeps the lease and the feeders wait (10-min retries, up to an hour)
+  // rather than reading rows the scan is still transitioning; while they run,
+  // no scan can start.
   cron.schedule('10 4 * * 0', async () => {
     try {
       await runExclusive('link-registry-sunday-feeders', async () => {
@@ -2074,6 +2169,8 @@ function initScheduledJobs() {
           logger.info(`[link-intake] baseline: scanned ${b.scanned} domains +${b.domainsCreated} placements +${b.placementsCreated} reconciled ${b.placementsReconciled} mappings +${b.mappingsCreated} paths +${b.pathsCreated} skipped ${b.skipped.length}`);
           const g = await require('./seo/link-registry-gap-ingest').ingestCompetitorGap(db);
           logger.info(`[link-intake] competitor gap: scanned ${g.scanned} candidates ${g.candidates} inserted ${g.inserted} touched ${g.touched} existing ${g.existing}`);
+          const ai = await require('./seo/link-registry-ai-citation-ingest').runAiCitationFeeder(db);
+          logger.info(`[link-intake] ai_citation: ${ai.gated ? 'GATED (GATE_SEO_INTELLIGENCE off)' : ''}scanned ${ai.scanned} domains ${ai.domains} byCategory ${JSON.stringify(ai.byCategory)} enqueued ${ai.enqueued} inserted ${ai.inserted} touched ${ai.touched} existing ${ai.existing}`);
           const e = await require('./seo/link-registry-enrich').enrichDomains(db, { limit: 1000 });
           logger.info(`[link-intake] enrich: ${e.gated ? 'GATED (GATE_SEO_INTELLIGENCE off)' : ''}${e.skipped ? `SKIPPED (${e.skipped}) ` : ''} selected ${e.selected} enriched ${e.enriched} failed ${e.failed.length} calls ${e.calls}`);
           return { ran: true };
@@ -2276,6 +2373,38 @@ function initScheduledJobs() {
       const AutonomousRunner = require('./content/autonomous-runner');
       await AutonomousRunner.runDaily();
     } catch (err) { logger.error(`Autonomous content engine failed: ${err.message}`); }
+  }, { timezone: 'America/New_York' });
+
+  // DAILY 10:30AM ET — Internal-link candidate sweep. Opens one Astro PR for
+  // patch candidates no run shipped (post-merge planning only plans; the
+  // runner only ships its own run's tasks). No-ops while
+  // SHADOW_MODE_ADD_INTERNAL_LINKS is on or a link PR is still open.
+  // Kill switch: AUTONOMOUS_INTERNAL_LINK_CANDIDATE_SWEEP=false.
+  cron.schedule('30 10 * * *', async () => {
+    if (!isEnabled('autonomousContentEngine')) return;
+    try {
+      await runExclusive('internal-link-candidate-sweep', async () => {
+        const executor = require('./content/internal-link-pr-executor');
+        const result = await executor.runCandidateSweep();
+        logger.info(`Internal-link candidate sweep: ${result?.status || 'unknown'}${result?.pr_url ? ` ${result.pr_url}` : ''}${result?.count ? ` (${result.count} link(s))` : ''}`);
+      });
+    } catch (err) { logger.error(`Internal-link candidate sweep failed: ${err.message}`); }
+  }, { timezone: 'America/New_York' });
+
+  // WEEKLY MONDAY 10:23AM ET — plan internal links to the pages Search
+  // Console has just off page one (position 8–20), ranked by impressions,
+  // ahead of the 10:30 sweep. On an unused 10am minute per the stagger rule
+  // (see the 10:16 invoice follow-up block). Kill switch:
+  // AUTONOMOUS_INTERNAL_LINK_GSC_TARGETS=false.
+  cron.schedule('23 10 * * 1', async () => {
+    if (!isEnabled('autonomousContentEngine')) return;
+    try {
+      await runExclusive('internal-link-gsc-targets', async () => {
+        const targetPlanner = require('./content/internal-link-target-planner');
+        const result = await targetPlanner.planGscTargets();
+        logger.info(`Internal-link GSC targets: ${result?.status || 'unknown'} targets=${result?.targets ?? 0} queued=${result?.queued ?? 0} candidates=${result?.candidates ?? 0}`);
+      });
+    } catch (err) { logger.error(`Internal-link GSC target planning failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 
   // DAILY 1PM ET — Autonomous Content Engine catch-up. A deploy restarting
@@ -3269,8 +3398,9 @@ function initScheduledJobs() {
   // human merge → completes the run (IndexNow + internal-link planning),
   // close-unmerged → fails it, and — ONLY when AUTONOMOUS_BLOG_AUTO_MERGE is
   // set (default off) — merges green + Codex-clear PRs itself, capped per
-  // tick. runExclusive: a merge and its post-merge chain must not double-run
-  // across overlapping deploy instances.
+  // tick. The internal-link lane rides the same tick and cap (open link PR →
+  // InternalLinkPrExecutor.runAutoMerge). runExclusive: a merge and its
+  // post-merge chain must not double-run across overlapping deploy instances.
   // =========================================================================
   cron.schedule('*/2 * * * *', async () => {
     try {
@@ -4172,6 +4302,14 @@ function initScheduledJobs() {
             // payment. Persisted at enqueue by the customer-action
             // requeue; automated rows never carry it.
             ...(claimMeta.customer_initiated === true ? { customerInitiated: true } : {}),
+            // A voicemail quote-link text queued before this lane's own
+            // window check was removed (owner ruling 2026-09-28) is still
+            // sitting on the rail waiting for 8 AM — this entry point is
+            // used for nothing else, so any row wearing it is by
+            // construction the answer to a prospect's own voicemail. Send
+            // it on the very next replay instead of making it wait out the
+            // window it no longer needs to.
+            ...(claimMeta.entry_point === 'voicemail_lead_sms_deferred' ? { customerInitiated: true } : {}),
             ...(claimMeta.hasEmailLeg === true ? { hasEmailLeg: true } : {}),
             // Forward the consent basis the ORIGINAL enqueue ran under (e.g. a
             // deferred voicemail text-back persists transactional_allowed)
@@ -4272,7 +4410,7 @@ function initScheduledJobs() {
             // settlement above) convert failures into bounded
             // finalize_only retries that never resend.
             {
-              const fin = await finalizeReplay(claimMeta.entry_point, { ...claimMeta, customer_id: msg.customer_id || claimMeta.customer_id || null }, { providerMessageId: smsResult.providerMessageId, customerId: msg.customer_id || null });
+              const fin = await finalizeReplay(claimMeta.entry_point, { ...claimMeta, ...await readFreshMeta(), customer_id: msg.customer_id || claimMeta.customer_id || null }, { providerMessageId: smsResult.providerMessageId, customerId: msg.customer_id || null });
               if (fin && owesFinalization) {
                 if (fin.ok) {
                   await db('sms_log').where({ id: msg.id }).update({
@@ -5320,13 +5458,21 @@ function initScheduledJobs() {
 
   // =========================================================================
   // DAILY 1:20AM ET — Content registry maintenance.
-  // Syncs the registry from the pinned GitHub Astro source, then refreshes
-  // live HTTP/sitemap status for published/reconciled rows.
+  // Syncs the registry from the pinned GitHub Astro source, refreshes live
+  // HTTP/sitemap status for published/reconciled rows, then (gated on
+  // GATE_SEO_INTELLIGENCE) checks every owned URL an AI answer engine cited
+  // in the last 30 days for a silent break the registry sweep alone
+  // wouldn't see (server/services/seo/owned-url-health.js).
   // =========================================================================
   cron.schedule('20 1 * * *', async () => {
     try {
-      const result = await runContentRegistryMaintenance();
-      logger.info(`[content-registry] maintenance complete: sync=${JSON.stringify(result.sync)} live=${JSON.stringify(result.live)}`);
+      // runExclusive: a Railway deploy overlap must not run the sweep twice —
+      // the owned-URL health step sends a FIX digest, and a second instance
+      // would double-send it or race a clean retirement against a failure.
+      await runExclusive('content-registry-maintenance', async () => {
+        const result = await runContentRegistryMaintenance();
+        logger.info(`[content-registry] maintenance complete: sync=${JSON.stringify(result.sync)} live=${JSON.stringify(result.live)} ownedUrlHealth=${JSON.stringify(result.ownedUrlHealth)}`);
+      });
     } catch (err) {
       logger.error(`[content-registry] maintenance failed: ${err.message}`);
     }
@@ -6889,7 +7035,7 @@ function initScheduledJobs() {
   // =========================================================================
   // DAILY 10:12AM — Renewal reminders (termite bond ONLY — owner ruling
   // 2026-07-13: no-term services never get "renewal" language) + the
-  // annual-prepay payment reminders/sweeps that ride the same run.
+  // annual-prepay covered-term sweep that rides the same run.
   // =========================================================================
   cron.schedule('12 10 * * *', async () => {
     logger.info('Running: renewal reminders');
@@ -7368,6 +7514,7 @@ module.exports = {
   holdFinalReviewUncertainty,
   shouldLogInventoryAgentSummary,
   recoverStaleScheduledSmsClaims,
+  claimDueScheduledSms,
   runContentRegistryMaintenance,
   runAutonomousOpportunityMining,
   parseListEnv,

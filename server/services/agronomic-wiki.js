@@ -353,6 +353,12 @@ async function callClaude(systemPrompt, userPrompt) {
       system: systemPrompt,
       messages: [{ role: 'user', content: userPrompt }],
     });
+    // A page cut off at the cap must never be saved as the page — returning
+    // null keeps the existing content (the caller's failed-generation path).
+    if (response?.stop_reason === 'max_tokens') {
+      logger.error(`[agronomic-wiki] Claude output truncated at max_tokens — discarding generation`);
+      return null;
+    }
     const text = response.content?.[0]?.text || '';
     const tokens = (response.usage?.input_tokens || 0) + (response.usage?.output_tokens || 0);
     return { text, tokens, model: response.model || MODEL };

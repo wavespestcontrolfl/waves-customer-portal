@@ -121,6 +121,16 @@ describe('InvoiceService.sendViaSMSAndEmail scheduled-review fallback', () => {
     jest.restoreAllMocks();
   });
 
+  test('wrapper repair stamps original event time and skips fresh-send activity', async () => {
+    const visibleAt = new Date('2026-09-08T15:00:00Z');
+    mockMarkDeliverySequence(scheduledInvoice({ sent_at: null, sms_sent_at: null }));
+    await InvoiceService.markDeliverySent('inv-1', { sms: true, source: 'completion_sms_with_invoice',
+      eventVisibleAt: visibleAt, deduped: true });
+    expect(db.raw).toHaveBeenCalledWith('COALESCE(sent_at, ?)', [visibleAt]);
+    expect(db.raw).toHaveBeenCalledWith('COALESCE(sms_sent_at, ?)', [visibleAt]);
+    expect(db).not.toHaveBeenCalledWith('activity_log');
+  });
+
   test('unpaid COMPLETION invoice → review ask deferred to the paid webhook (Codex P1, PR #3104 r1)', async () => {
     mockSendSequence(scheduledInvoice());
 
@@ -260,6 +270,16 @@ function mockMarkDeliverySequence(invoice, { finalized = true, postCloseoutRead 
 describe('InvoiceService.markDeliverySent scheduled-review fallback', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+  });
+
+  test('wrapper repair stamps original event time and skips fresh-send activity', async () => {
+    const visibleAt = new Date('2026-09-08T15:00:00Z');
+    mockMarkDeliverySequence(scheduledInvoice({ sent_at: null, sms_sent_at: null }));
+    await InvoiceService.markDeliverySent('inv-1', { sms: true, source: 'completion_sms_with_invoice',
+      eventVisibleAt: visibleAt, deduped: true });
+    expect(db.raw).toHaveBeenCalledWith('COALESCE(sent_at, ?)', [visibleAt]);
+    expect(db.raw).toHaveBeenCalledWith('COALESCE(sms_sent_at, ?)', [visibleAt]);
+    expect(db).not.toHaveBeenCalledWith('activity_log');
   });
 
   test('unpaid COMPLETION invoice → review ask deferred to the paid webhook (Codex P1, PR #3104 r1)', async () => {

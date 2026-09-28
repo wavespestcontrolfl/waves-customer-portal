@@ -10,8 +10,9 @@
     "safety_line": "Gopher tortoises and their burrows are protected by Florida law. Do not disturb, handle, or fill a burrow — a permit is required even for construction work nearby.",
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "e96a764791fc95236cc20f35a22a118bac99cdf7761400c6040fc0839dbbecef"
     },
     "slug": "gopher-tortoise",
     "common_name": "Gopher Tortoise",

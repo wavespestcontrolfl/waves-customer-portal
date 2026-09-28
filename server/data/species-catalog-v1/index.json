@@ -1,5 +1,5 @@
 {
-  "catalog_version": "2026-09-26.1",
+  "catalog_version": "2026-09-28.1",
   "section": "pest",
   "site_categories": [
     "Ants",
@@ -16,33 +16,57 @@
     "Plant pests",
     "Flies & gnats",
     "Beetles & bugs",
-    "Pantry & fabric pests"
+    "Pantry & fabric pests",
+    "Lawn grasses",
+    "Lawn weeds",
+    "Palms",
+    "Shrubs & trees",
+    "Lawn problems",
+    "Plant & palm problems",
+    "Lawn & plant problems"
   ],
   "categories": {
     "insect": {
       "id": "insect",
       "label": "Insect",
-      "generic": "an insect"
+      "generic": "an insect",
+      "section": "pest"
     },
     "arachnid": {
       "id": "arachnid",
       "label": "Arachnid",
-      "generic": "a spider or other arachnid"
+      "generic": "a spider or other arachnid",
+      "section": "pest"
     },
     "rodent": {
       "id": "rodent",
       "label": "Rodent",
-      "generic": "a rat, mouse, or other rodent"
+      "generic": "a rat, mouse, or other rodent",
+      "section": "pest"
     },
     "wildlife": {
       "id": "wildlife",
       "label": "Wildlife",
-      "generic": "a wildlife visitor"
+      "generic": "a wildlife visitor",
+      "section": "pest"
     },
     "other": {
       "id": "other",
       "label": "Other",
-      "generic": "something we want a closer look at"
+      "generic": "something we want a closer look at",
+      "section": "pest"
+    },
+    "plant": {
+      "id": "plant",
+      "label": "Plant",
+      "generic": "a plant",
+      "section": "plant"
+    },
+    "condition": {
+      "id": "condition",
+      "label": "Condition",
+      "generic": "a lawn or plant problem we want a closer look at",
+      "section": "condition"
     }
   },
   "groups": [
@@ -257,6 +281,97 @@
       "label": "Birds",
       "generic": "a bird",
       "category": "wildlife"
+    },
+    {
+      "id": "turfgrasses",
+      "label": "Lawn grasses",
+      "generic": "a lawn grass",
+      "aliases": [],
+      "category": "plant"
+    },
+    {
+      "id": "broadleaf-weeds",
+      "label": "Broadleaf weeds",
+      "generic": "a broadleaf weed",
+      "aliases": [],
+      "category": "plant"
+    },
+    {
+      "id": "grassy-weeds",
+      "label": "Grassy weeds",
+      "generic": "a grassy weed",
+      "aliases": [],
+      "category": "plant"
+    },
+    {
+      "id": "sedges",
+      "label": "Sedges & kyllingas",
+      "generic": "a sedge",
+      "aliases": [],
+      "category": "plant"
+    },
+    {
+      "id": "palms",
+      "label": "Palms",
+      "generic": "a palm",
+      "aliases": [],
+      "category": "plant"
+    },
+    {
+      "id": "shrubs-trees",
+      "label": "Shrubs & trees",
+      "generic": "a landscape plant",
+      "aliases": [],
+      "category": "plant"
+    },
+    {
+      "id": "nematodes",
+      "label": "Lawn nematodes",
+      "generic": "a soil nematode (never visible in a photo)",
+      "aliases": [],
+      "category": "condition"
+    },
+    {
+      "id": "turf-diseases",
+      "label": "Lawn diseases",
+      "generic": "a lawn disease",
+      "aliases": [],
+      "category": "condition"
+    },
+    {
+      "id": "ornamental-diseases",
+      "label": "Shrub & tree diseases",
+      "generic": "a plant disease",
+      "aliases": [],
+      "category": "condition"
+    },
+    {
+      "id": "palm-diseases",
+      "label": "Palm diseases",
+      "generic": "a palm disease",
+      "aliases": [],
+      "category": "condition"
+    },
+    {
+      "id": "nutrient-disorders",
+      "label": "Nutrient problems",
+      "generic": "a nutrient problem",
+      "aliases": [],
+      "category": "condition"
+    },
+    {
+      "id": "water-and-site",
+      "label": "Water, shade & site stress",
+      "generic": "a water or site problem",
+      "aliases": [],
+      "category": "condition"
+    },
+    {
+      "id": "cultural-and-chemical",
+      "label": "Mowing, chemical & physical damage",
+      "generic": "damage from care or chemicals",
+      "aliases": [],
+      "category": "condition"
     }
   ],
   "subgroups": [
@@ -920,6 +1035,34 @@
       ],
       "scientific": "Centruroides",
       "rank": "genus"
+    },
+    {
+      "id": "date-palms",
+      "group": "palms",
+      "label": "Date palms",
+      "generic": "a date palm",
+      "scientific": "Phoenix",
+      "rank": "genus"
+    },
+    {
+      "id": "fan-palms",
+      "group": "palms",
+      "label": "Fan palms",
+      "generic": "a fan palm",
+      "scientific": null,
+      "rank": "group"
+    },
+    {
+      "id": "turf-nutrient",
+      "group": "nutrient-disorders",
+      "label": "Lawn nutrient problems",
+      "generic": "a lawn nutrient problem"
+    },
+    {
+      "id": "palm-nutrient",
+      "group": "nutrient-disorders",
+      "label": "Palm nutrient problems",
+      "generic": "a palm nutrient problem"
     }
   ],
   "look_alike_groups": [
@@ -942,7 +1085,7 @@
         "snakes",
         "snails-slugs-worms"
       ],
-      "note": "The brahminy blind snake is small, shiny, and nearly legless-looking — it's very often mistaken for an earthworm."
+      "note": "The brahminy blind snake is small, shiny, and nearly legless-looking \u2014 it's very often mistaken for an earthworm."
     }
   ],
   "legacy_slug_map": {
@@ -1009,7 +1152,7 @@
     "honey-bee": {
       "node": "bees",
       "kind": "subgroup",
-      "note": "v1 did not distinguish a resting swarm from an established wall colony (very different next steps); maps to the Bees subgroup. Judgment call — owner should confirm this reads correctly in the app fallback."
+      "note": "v1 did not distinguish a resting swarm from an established wall colony (very different next steps); maps to the Bees subgroup. Judgment call \u2014 owner should confirm this reads correctly in the app fallback."
     },
     "mosquito": {
       "node": "mosquitoes",
@@ -1095,6 +1238,26 @@
       "node": null,
       "kind": null,
       "note": "v1 lumped many unrelated beneficial species (lady beetle, lacewing, dragonfly, mantis, earthworm, anole, gecko, frog, toad) under one slug. No single catalog node covers all of them without over-claiming, so this resolves to null; the caller should keep its own generic beneficial fallback copy until each species is looked up individually."
+    },
+    "st_augustine": {
+      "node": "st-augustinegrass",
+      "kind": "entry",
+      "note": "Lawn scorer grass_type value; maps to the St. Augustinegrass entry."
+    },
+    "bahia": {
+      "node": "bahiagrass",
+      "kind": "entry",
+      "note": "Lawn scorer grass_type value; maps to the Bahiagrass entry."
+    },
+    "zoysia": {
+      "node": "zoysiagrass",
+      "kind": "entry",
+      "note": "Lawn scorer grass_type value; maps to the Zoysiagrass entry."
+    },
+    "bermuda": {
+      "node": "bermudagrass",
+      "kind": "entry",
+      "note": "Lawn scorer grass_type value; maps to the Bermudagrass entry."
     }
   },
   "planned_slugs": []

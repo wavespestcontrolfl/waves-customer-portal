@@ -547,6 +547,13 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
         pushOptions: { shouldContinue: windowGuardFrom(preSendCheck), minUpdatedAt: heartbeatCutoff(), nativeOnly: true },
       });
       bell = bellReachedThisAttempt(appNotification) ? { bellPersisted: true } : {};
+      // The event's original copy is already visible even if its commit
+      // acknowledgement was lost. Settle that episode without asserting
+      // delivery of this retry's copy or minting native-push proof for it.
+      if (billingDeliveryCategory && notificationEventKey && appNotification?.id
+        && appNotification.deduped === true && !appNotification.suppressed && !appNotification.refreshed) {
+        return { delivered: false, deliveryOutcome: 'not_sent', reason: 'app_event_already_visible', eventVisibleAt: appNotification.created_at };
+      }
       if (appNotification?.push?.reason === 'push_in_flight') {
         return { delivered: false, pending: true, deliveryOutcome: 'uncertain', reason: 'push_in_flight', ...bell };
       }

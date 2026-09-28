@@ -429,7 +429,13 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     // booking is always approved as credit-free and the executor verifies
     // that inside the booking transaction.
     if (preview?.inspection_credit) push('billing', 'No inspection credit is redeemed by this booking (no open credit; re-verified at commit under the credit lock offer creation shares)');
-    push('operational', 'Registers the 72h/24h reminder rows (sent later by the reminder schedule; a registration failure is reported as a warning on this card); no confirmation text is sent now');
+    // A booking with a time texts the booking confirmation exactly as a
+    // Schedule-screen booking does (owner 2026-09-27); a windowless one
+    // registers a non-delivering placeholder: its confirmation is marked
+    // handled, so setting a time later re-arms only the 72h/24h reminders.
+    push('operational', params?.time_window
+      ? 'Registers the 72h/24h reminder rows (sent later by the reminder schedule; a registration failure is reported as a warning on this card)'
+      : 'Registers placeholder reminder rows: no booking confirmation is sent for a booking with no time, even after a time is set later; setting a time re-arms only the 72h/24h reminders');
   }
   if (toolName === 'bulk_update_customers') {
     push('customer', 'Applies to each listed customer that still resolves at commit — any skipped customer is reported as a warning on this card, never a silent Done');
@@ -594,7 +600,19 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     for (const n of preview.all_customer_names) moreEffects.push({ kind: 'customer', label: String(n) });
     push('customer', `All ${preview.all_customer_names.length} customer names are listed under "Show more"`);
   }
-  if (!propertyAction && !customerEstimateAction && WRITE_TWO_STEP_TOOL_NAMES.has(toolName) && preview && typeof preview === 'object') {
+  // repair_closeout: one effect per planned step (server-owned labels), plus
+  // the open items the confirm will NOT touch — never a flattened dump of
+  // the plan object.
+  if (toolName === 'repair_closeout' && Array.isArray(preview?.steps)) {
+    push('customer', `Visit: ${preview.visit || preview.service_id} — ${preview.customer_name || preview.customer_id || 'customer unresolved'}`);
+    for (const st of preview.steps) {
+      push(/email/i.test(st.step) ? 'comms' : 'operational', String(st.effect || st.step));
+    }
+    if (Array.isArray(preview.manual) && preview.manual.length) {
+      push('operational', `Not touched (${preview.manual.length}): ${preview.manual.map((m) => m.fact).join(', ')}`);
+    }
+  }
+  if (toolName !== 'repair_closeout' && !propertyAction && !customerEstimateAction && WRITE_TWO_STEP_TOOL_NAMES.has(toolName) && preview && typeof preview === 'object') {
     let shown = 0;
     for (const [k, v] of Object.entries(preview)) {
       if (PREVIEW_NOISE_KEYS.has(k) || String(k).startsWith('_') || VOLATILE_KEY_RE.test(k)) continue;
@@ -742,16 +760,30 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   // attributed to one (GH r17 P2) — vendor/partner replies are outbound
   // mail, not customer contact.
   const emailReplyToCustomer = toolName === 'send_email_reply' && preview?.pinned_recipient?.linked_customer === true;
+  // A timed Intelligence Bar booking texts its confirmation (owner 2026-09-27).
+  const bookingConfirmationText = toolName === 'create_appointment' && !!params?.time_window;
   const notifiesCustomer = toolName === 'move_stops_to_day'
     ? params?.notify_customers === true
-    : (CUSTOMER_CONTACT_TOOL_NAMES.has(toolName) || emailReplyToCustomer || emailChangeMayContact);
+    : (CUSTOMER_CONTACT_TOOL_NAMES.has(toolName) || emailReplyToCustomer || emailChangeMayContact || bookingConfirmationText
+      // A repair plan that queues a report email or receipt contacts the
+      // customer through the delivery workers.
+      || (toolName === 'repair_closeout' && preview?.notifies_customer === true));
   // "Will" only for tools whose whole point is the send; the conditional
   // double-opt-in path says "may" (GH r12 P2) — notifies_customer and the
   // irreversibility derivation stay conservative either way.
   if (notifiesCustomer) {
-    let contactLabel = CUSTOMER_CONTACT_TOOL_NAMES.has(toolName) || emailReplyToCustomer || toolName === 'move_stops_to_day'
+    let contactLabel = CUSTOMER_CONTACT_TOOL_NAMES.has(toolName) || emailReplyToCustomer || toolName === 'move_stops_to_day' || toolName === 'repair_closeout'
       ? 'Customer will be contacted'
       : 'Customer may be contacted (conditional double-opt-in re-send only)';
+    if (bookingConfirmationText) {
+      // Codex r2 on #5093 (P1): only the SMS leg holds for the 8 AM-8 PM
+      // send window (appointment-reminders.js reminderSendWindowHold — 'email'
+      // is never held, and the 'both' channel sends its email leg right away
+      // and defers only the text). The old wording said the WHOLE
+      // confirmation waited until 8 AM, which is false for an email-only or
+      // email+text customer.
+      contactLabel = 'Customer is sent a booking confirmation unless their appointment-confirmation setting is off or they were already confirmed for another visit at the same time, as on the Schedule screen: by text, email or both per their notice settings (email is the fallback when a text cannot go out), to their appointment contacts as they stand when it sends; a text after 8 PM waits until 8 AM, but an email goes right away';
+    }
     // Derived from the PINNED recipient set for batch moves (GH r21 P2):
     // a stop pinned with no SMS recipient cannot be texted — the card
     // must not claim an impossible send and then warn about it after.
