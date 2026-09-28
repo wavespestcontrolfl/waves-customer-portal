@@ -420,6 +420,30 @@ describe("useSpeechDictation speech path — keep listening through pauses", () 
     }
   });
 
+  it("a keypress (Enter in a prompt box running the action from onKeyDown) stops a live session; a bare modifier or a key on the mic does not", () => {
+    const onTranscript = vi.fn();
+    const { result } = renderHook(() => useSpeechDictation(onTranscript));
+    const mic = document.createElement("button");
+    const prompt = document.createElement("input");
+    document.body.append(mic, prompt);
+    try {
+      act(() => result.current.toggle({ currentTarget: mic }));
+      const instance = FakeSpeechRecognition.instances[0];
+
+      act(() => prompt.dispatchEvent(new KeyboardEvent("keydown", { key: "Shift", bubbles: true })));
+      act(() => mic.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
+      expect(instance.stop).not.toHaveBeenCalled();
+
+      act(() => prompt.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
+      expect(instance.stop).toHaveBeenCalledTimes(1);
+      act(() => fireFinalResult(instance, "after enter"));
+      expect(onTranscript).not.toHaveBeenCalled(); // the action already read the prompt
+    } finally {
+      mic.remove();
+      prompt.remove();
+    }
+  });
+
   it("submitting a form stops a live session", () => {
     const { result } = renderHook(() => useSpeechDictation(vi.fn()));
     act(() => result.current.toggle());

@@ -32,8 +32,8 @@ const IDLE_STOP_MS = 60000;
  *     last final result (a timer stops the live session; onend re-checks)
  *   - the page is hidden (`document.visibilityState === "hidden"`; a
  *     visibilitychange listener stops the live session; onend re-checks)
- *   - the user presses any button or link or submits a form (Save, Send,
- *     Generate, Complete read the field on that press)
+ *   - the user clicks any button or link, submits a form, or presses a key
+ *     (Save, Send, Generate, Complete read the field on that action)
  *   - 3 consecutive sessions each ended under 1000ms after their own
  *     `start()` with no final result (a fast-end loop, e.g. mic denied by OS)
  *   - `recognitionRef.current` no longer points at this instance
@@ -365,7 +365,8 @@ export default function useSpeechDictation(onTranscript, options = {}) {
   // used to end it before keep-listening:
   //   - leaving the page (a browser that keeps a continuous session open
   //     would otherwise record in the background);
-  //   - pressing any button or link, or submitting a form. Save, Send,
+  //   - clicking any button or link, submitting a form, or pressing a key
+  //     (below). Save, Send,
   //     Generate and Complete read the dictated field on that press, so
   //     speech after it — and a final result still in flight — must not land
   //     in state the action already took. The mic that started the session
@@ -398,13 +399,24 @@ export default function useSpeechDictation(onTranscript, options = {}) {
       }
     };
     const onSubmit = () => stopLive({ discard: true });
+    // Touching the keyboard ends it too: Enter in a prompt box can run the
+    // action straight from onKeyDown (charts Generate, the command bar) with
+    // no click or submit. A bare modifier key is not a keystroke.
+    const onKeyDown = (event) => {
+      if (["Shift", "Control", "Alt", "Meta", "CapsLock"].includes(event.key)) return;
+      const el = event.target instanceof Element ? event.target : null;
+      if (el && micElRef.current?.contains(el)) return;
+      stopLive({ discard: true });
+    };
     document.addEventListener("visibilitychange", onVisibilityChange);
     document.addEventListener("click", onClick, true);
     document.addEventListener("submit", onSubmit, true);
+    document.addEventListener("keydown", onKeyDown, true);
     return () => {
       document.removeEventListener("visibilitychange", onVisibilityChange);
       document.removeEventListener("click", onClick, true);
       document.removeEventListener("submit", onSubmit, true);
+      document.removeEventListener("keydown", onKeyDown, true);
     };
   }, [listening]);
 
