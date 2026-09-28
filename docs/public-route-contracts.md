@@ -383,6 +383,32 @@ deletes it from every non-live render (PDF, static, sms_preview), the same
 staleness rule as `nextAppointment`. No new route and no write; auth, headers
 and rate limits are unchanged.
 
+Report near-you line (owner ask 2026-09-28, "lawn only"):
+`GATE_REPORT_NEAR_YOU` (off unless exactly `true`, read at startup). On, the
+LIVE service-report payload (`/api/reports/:token/data` only — the one caller
+that opts in with `nearYou: true`; the `/ask` Q&A build and every other build
+neither read nor carry it) may carry `nearYou: { city, pest }` on a LAWN report
+only: the lawn pest most often recorded among OTHER lawn customers in this
+report's own service city over the last 30 ET days. A visit's city is the one
+its own report shows: the frozen `reportIdentitySnapshot` city when the record
+has one, else the stamped service address city, else the customer's (the
+report query's `COALESCE(ss.service_address_city, customers.city)`), so a
+customer who later moved never carries old findings to the new city; compared
+trimmed and case-blind. Records count only when completed, performed
+(not inspection-only, customer-declined or incomplete) and customer-visible;
+the pest comes only from each visit's closeout form snapshot
+(`structured_notes.formObservations`, server-allowlisted at completion), matched
+exactly to a definite-live-pest observation — never from `service_findings`
+titles, which can be free text — and is shown as a fixed customer noun
+(`LAWN_DEFINITE_LIVE_PEST_CUSTOMER_TERMS`).
+A pest is named only once at least 3 distinct customers
+(`NEAR_YOU_MIN_CUSTOMERS`) had it — the privacy floor, so one household's
+problem is never broadcast; ties go to the label that sorts first; below the
+floor the field is omitted. `city` echoes the report's own city; there is no
+count, customer name, or address in it. `stripLiveOnlyScheduleFields` also
+deletes it from every non-live render (PDF, static, sms_preview). No new route
+and no write; auth, headers and rate limits are unchanged.
+
 Invoice line-item ownership metadata: `/api/pay/:token` and
 `/api/receipt/:token` return the invoice's persisted `line_items` as `lineItems`.
 On itemized accepted-plan invoices, each base-application row intentionally may

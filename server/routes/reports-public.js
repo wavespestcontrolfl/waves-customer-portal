@@ -505,6 +505,10 @@ async function buildServiceReportV1ResponseData(service, token, {
   // included) GATE_REPORT_UPCOMING_VISITS guards. report-assistant.js
   // (the Q&A endpoint) never reads the field.
   upcomingVisitsCard = false,
+  // OPT-IN likewise for the lawn "Near you" line (GATE_REPORT_NEAR_YOU):
+  // only the /data render shows it, so only it pays for the city-wide
+  // lawn-findings read.
+  nearYou = false,
 } = {}) {
   // staffViewer gates internal_only companion sections (combined-service
   // completions): report-data omits them from customer payloads entirely.
@@ -522,6 +526,7 @@ async function buildServiceReportV1ResponseData(service, token, {
   const data = await buildReportV1Data(service, token, db, {
     pestPressureConfig, staffViewer, mode, pinnedLawnAssessmentId, pinnedWeekPlanAvailableAt,
     propertyHistoryEnabled, lawnHistory, pinnedLawnHistoryIdentity, expectationFactsOut, planSummary, upcomingVisitsCard,
+    nearYou,
     // pest week-weather is opt-in (codex P2 round 4): this builder renders
     // the expectations block (live /data + the direct PDF route), so it pays.
     pestWeekWeather: true,
@@ -2560,7 +2565,7 @@ router.get('/:token/data', async (req, res, next) => {
       const v1Data = await buildServiceReportV1ResponseData(service, req.params.token, {
         // The render path is the only consumer of the cross-sell/referral
         // keys, so it is the only caller that pays to compose them.
-        mode, staffViewer, pinnedLawnAssessmentId, pinnedWeekPlanAvailableAt, pinnedLawnHistoryIdentity, composeOffers: true, planSummary: true, upcomingVisitsCard: true,
+        mode, staffViewer, pinnedLawnAssessmentId, pinnedWeekPlanAvailableAt, pinnedLawnHistoryIdentity, composeOffers: true, planSummary: true, upcomingVisitsCard: true, nearYou: true,
       });
       // "Your Visit, in Motion" — surface the tech-approved recap inside the
       // report (owner ask 2026-07-05; the standalone /recap/:token player was

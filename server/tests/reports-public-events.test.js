@@ -646,6 +646,23 @@ describe('upcomingVisitsCard opt-in ("Your upcoming visits" card, GATE_REPORT_UP
   });
 });
 
+describe('nearYou opt-in (lawn "Near you" line, GATE_REPORT_NEAR_YOU)', () => {
+  // Same shape as planSummary/upcomingVisitsCard: the city-wide lawn-findings
+  // read runs only for the /data render, the one caller that shows the line.
+  const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/reports-public.js'), 'utf8');
+
+  test('the option defaults to OFF and is forwarded to the builder', () => {
+    expect(src).toMatch(/nearYou = false,/);
+    expect(src).toMatch(/pinnedLawnHistoryIdentity,[^\n]*\bupcomingVisitsCard,\n\s*nearYou,\n/);
+  });
+
+  test('exactly one call site opts in, and it is the /data render', () => {
+    const optIns = src.match(/nearYou: true/g) || [];
+    expect(optIns).toHaveLength(1);
+    expect(src).toMatch(/composeOffers: true, planSummary: true, upcomingVisitsCard: true, nearYou: true,/);
+  });
+});
+
 describe('report ask event metadata (topic only, owner ruling 2026-09-28)', () => {
   // The service-report /:token/ask handler records what the answer covered,
   // never what the customer typed.
