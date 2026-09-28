@@ -1720,6 +1720,99 @@ against all live tokens 2026-08-07); accept/decline carry a 10/hr
 limiter — the two heaviest public money-adjacent writes; select-tier/
 preferences ride estimateToggleLimiter, data rides dataLimiter, pdf rides
 its own estimatePdfLimiter (10 per 5 min)).
+Guarantee rule for the estimate page, its proposal document and Ask Waves
+(owner 2026-09-26/27): a guarantee line that covers the whole estimate
+appears only when every service carries it. The recurring plan terms
+(callbacks, money-back, no contract) are carried by residential pest, lawn,
+mosquito, tree & shrub and palm; "satisfaction guaranteed" is also the
+rodent and commercial lanes' own term, so it may cover any estimate without
+termite or unclassifiable work. An estimate with termite work
+states no callback, money-back, satisfaction or no-contract terms for any
+service; its termite work states "no guarantee" except the terms of a
+termite bond, trenching warranty or pre-slab warranty option the customer
+selected. Where no estimate-wide terms apply, Ask Waves answers every
+guarantee question with one per-service list under these rules, never infers
+from a question's wording which service is meant, and never serves a model
+answer that makes a plan-terms claim. A service that carries the plan terms
+itself lists them under its own name, as the page shows them on its own card;
+the route passes the page's `noEstimateWideGuarantee` and commercial scope so
+Ask Waves never states more than the page.
+`/data`'s optional `estimate.noEstimateWideGuarantee: true` (and the same
+field on a document `proposal`) is set when not every service carries the
+recurring residential terms: a rodent, commercial, termite or unclassifiable
+service anywhere, or an authored (commercial) proposal
+(`estimateCarriesPlanTerms` / `proposalCarriesPlanTerms`). Absent otherwise.
+Lines that cover the whole estimate follow it through the shared
+`guaranteeScope` ('none' under `noGuaranteeClaims` below, 'satisfaction'
+here, else 'all'): the shell footer's "Backed by the Waves Guarantee", the
+legacy plan-terms card, perks and one-time callback note, the hero, the plan
+CTA line, the one-time price card and the document's terms line. Row-level
+copy states each service's own terms instead: `/data` stamps `termsScope`
+('all' | 'satisfaction' | 'none') on every `pricing.services[]` section,
+`pricing.oneTimeBreakdown.items[]` row and document
+`proposal.buildings[].lineItems[]` line (`serviceRowTermsScope` /
+`proposalRowTermsScope`). It is 'all' for residential pest, lawn, mosquito,
+tree & shrub or palm work, 'satisfaction' for rodent or commercial work
+(every row of an estimate with a commercial row or an authored proposal),
+and 'none' under `noGuaranteeClaims`. A row's inclusions, one-time copy and
+detail follow it (`serviceGuaranteeScope`); a row without the field follows
+the estimate, and the legacy page applies the same per-row rule. So a pest
+section beside a rodent one keeps its own plan terms while the footer stays
+neutral.
+`/data`'s optional `estimate.noGuaranteeClaims: true` (copy-audit follow-up
+to #4874, 2026-09-26; termite gets no generic estimate-wide guarantee)
+is the page's guarantee decision, `serviceMixMakesNoGuaranteeClaim` in this
+route, read from the SAME normalized rows the page's category and
+regulated-surface decisions use (`recurringServicesWithSupplements` plus the
+`normalizeOneTimeBreakdown` rows unioned with the pricing bundle's). Present
+only when true, absent otherwise so every other response stays
+byte-identical. True when any recurring or one-time service row is termite
+work (the page's own category, or termite wording on the row), when a service
+row can't be classified, or when nothing on the estimate classifies at all.
+Setup, discount and credit rows never count (`isNonServiceOneTimeItem`), and
+a positive "other one-time services" residual counts as unclassified work.
+The React page's one-time hero and the proposal document's terms line drop
+their guarantee wording when it is set; per-service CTA lines follow their
+own services (`glassCtaMicroForKeys`: termite work or an unclassifiable
+service makes no guarantee). Derived read-only; no write. The legacy
+server-rendered page applies the same rule to its plan-terms card.
+When `/data` includes a `proposal` for document rendering or an enabled
+public proposal, its explicit boolean `proposal.noGuaranteeClaims` classifies
+the normalized rows that the document actually prints. React document mode
+uses that flag before the page-level fallback; PDFKit uses the same decision.
+Thus disabled itemization retained for document rendering can suppress
+guarantees in the document without changing the current page's policy or
+prices. Generic promise suppression does not remove a row's explicitly
+purchased warranty scope, which still requires that row's sold-tier metadata.
+Projected one-time-choice rows retain reconciled `warrantyTier` and
+`warrantyAdder` from the same evidence used to resolve their copy, including
+when a mapped `result` omits evidence that remains in the matching raw
+`engineResult`. A current engine replay (including its cache) governs older
+saved rows; a sent snapshot's `snapshotHit` keeps its historical source from
+being mistaken for that replay. In unversioned projections, an explicit
+priced or current saved `none`/`null` decision blocks older purchased proof,
+including key-alias and zero-price clearing rows. Removal metadata survives
+the public response so assistant fallback cannot restore rejected coverage.
+Warranty evidence is audited
+before price filtering or deduplication across `oneTime.items`, nested one-time
+items, supported `specItems`, and `lineItems`; ambiguous repeated service rows
+cannot borrow another row's warranty. Ask Waves coalesces renamed fallback
+display rows against the current canonical service identity, while retaining
+all raw rows for warranty evidence. Distinct current jobs remain distinct.
+The server, browser, and Ask Waves use the shared purchased-warranty evidence
+rule and the existing authored copy pack. Ask Waves normalizes legacy termite
+bond aliases, names, and `bondYears` through the acceptance converter's
+canonical identity rule; every guarantee question, named or generic, returns
+the one per-service list described above, and the question's wording never
+narrows it to a single service. A current top-level bond selector governs historical snapshots.
+Without that selector, the unversioned saved rows and frozen pricing must
+agree on the purchased bond term; explicit removal, contradictory terms, or
+zero-price decisions suppress coverage regardless of snapshot order. A raw
+termite-bait row's `selectedBondTerm` also participates in this check.
+Ask Waves also requires separate recurring-terms eligibility: rodent,
+commercial, bundle, and unknown scope never inherit residential callbacks,
+money-back, or no-contract terms merely because the page permits a
+category-specific satisfaction statement.
 `/data`'s optional `consultationOffer: { url }` (consultation-first lane,
 owner ruling 2026-09-23; dark behind BOTH `GATE_ESTIMATE_CONSULTATION_OFFER`
 and `GATE_LEAD_INSPECTION_LINK` — `server/services/estimate-consultation-offer.js`)

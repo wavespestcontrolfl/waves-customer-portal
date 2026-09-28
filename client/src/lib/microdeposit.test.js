@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { microdepositDetailFromNextAction, microdepositGuidance } from './microdeposit';
+import { microdepositDetailFromNextAction, microdepositGuidance, microdepositSavedPhrases } from './microdeposit';
 
 // Fixed future/past instants relative to nothing — guidance derives "passed"
 // from the real clock via isInvoiceDueDateOverdue, so build them dynamically.
@@ -62,5 +62,44 @@ describe('microdepositGuidance', () => {
       hostedVerificationUrl: 'https://evil.example.com/phish',
     }).verifyUrl).toBeNull();
     expect(microdepositGuidance({ hostedVerificationUrl: 42 }).verifyUrl).toBeNull();
+  });
+});
+
+describe('microdepositSavedPhrases', () => {
+  test('names one deposit and its SM code for descriptor_code', () => {
+    const p = microdepositSavedPhrases('descriptor_code');
+    expect(p.deposits).toBe('one small deposit');
+    expect(p.confirmStep).toMatch(/6-character code starting with “SM”/);
+  });
+
+  test('names two deposits and their amounts for amounts', () => {
+    expect(microdepositSavedPhrases('amounts')).toEqual({
+      deposits: 'two small deposits',
+      confirmStep: 'confirm the two amounts',
+      linkLabel: 'Confirm the deposits here',
+      arrival: 'once they arrive',
+      actionLabel: 'Confirm the deposits',
+    });
+  });
+
+  test('the verify link is singular for one deposit and neutral when the type is unknown (Codex r1)', () => {
+    expect(microdepositSavedPhrases('descriptor_code')).toMatchObject({ linkLabel: 'Enter the code here', arrival: 'once it arrives' });
+    expect(microdepositSavedPhrases(null).linkLabel).not.toMatch(/deposits/);
+    expect(microdepositSavedPhrases(null).arrival).toBe('when the deposit information appears');
+    // The step itself stays number-neutral when there may be two deposits (Codex r4).
+    expect(microdepositSavedPhrases(null).confirmStep).toBe('verify your account');
+    // A saved bank row doesn't know Stripe's type: its button stays neutral (Codex r3).
+    expect(microdepositSavedPhrases(null).actionLabel).toBe('Verify your account');
+    expect(microdepositSavedPhrases('descriptor_code').actionLabel).toBe('Enter the code');
+  });
+
+  test('stays true for either kind when the type is unknown', () => {
+    for (const type of [null, undefined, 'something_new']) {
+      const p = microdepositSavedPhrases(type);
+      expect(p.deposits).toBe('a small deposit (or two)');
+      expect(p.deposits).not.toMatch(/^two/);
+      expect(p.arrival).toBe('when the deposit information appears');
+      expect(p.arrival).not.toMatch(/\bit\b|\bthey\b/);
+    }
   });
 });
