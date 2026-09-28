@@ -458,7 +458,13 @@ async function isPricedCoveredMemberVisit(svc, conn) {
     if (!stampedInvoiceId) return false;
     const invoice = await conn('invoices').where({ id: stampedInvoiceId }).first('scheduled_service_id');
     if (!invoice?.scheduled_service_id) return false;
-    return String(invoice.scheduled_service_id) !== String(svc.id);
+    if (String(invoice.scheduled_service_id) === String(svc.id)) return false;
+    // Split off by hand (#5237 review P2): a member whose base application a
+    // live invoice of its OWN already bills is no longer covered — the same
+    // split evidence the backfill and the sweep use
+    // (liveBaseApplicationInvoiceVisitIdsOn). Without this, a stamped visit
+    // the office split off could never be collected in person again.
+    return !(await liveBaseApplicationInvoiceVisitIdsOn(conn, [svc.id])).size;
   } catch (err) {
     // A failed read is NOT "unstamped" (pre-push P1 on acb6a0ad54): false
     // would let a covered priced member fall through to minting its own

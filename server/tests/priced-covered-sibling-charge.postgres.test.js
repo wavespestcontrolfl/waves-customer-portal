@@ -146,6 +146,42 @@ suite('priced covered-member sibling — no double charge (Codex r21 P1, PR #502
     expect(result).toMatchObject({ refused: true, reason: 'sibling_invoice_needs_review' });
   }));
 
+  // #5237 review P2s: the priced refusal never tells staff to "set a price"
+  // (it already has one), and a stamped sibling the office split off by hand
+  // (its own live base-application invoice) is no longer a covered member.
+  test('the priced covered refusal copy never offers "set a price" as the way out', () => rollbackTest(async (trx) => {
+    const ids = await fixture(trx, { invoiceStatus: 'paid' });
+    const lawn = await trx('scheduled_services').where({ id: ids.lawnId }).first();
+    const result = await chargeNow(lawn, trx);
+    expect(result.message).not.toMatch(/set a price/i);
+    expect(result.message).toMatch(/its own invoice/i);
+  }));
+
+  test('a stamped priced sibling split off by hand (own live base-application invoice) is not refused and is not a covered member', () => rollbackTest(async (trx) => {
+    const ids = await fixture(trx, { invoiceStatus: 'paid' });
+    await trx('invoices').insert({
+      id: randomUUID(), customer_id: ids.customerId, scheduled_service_id: ids.lawnId,
+      token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`, status: 'sent', title: 'Lawn Care',
+      line_items: JSON.stringify([{ client_id: `scheduled_${ids.lawnId}_primary`, description: 'Lawn Care', quantity: 1, unit_price: 65, amount: 65 }]),
+      subtotal: 65, total: 65,
+    });
+    const lawn = await trx('scheduled_services').where({ id: ids.lawnId }).first();
+    expect(await isPricedCoveredMemberVisit(lawn, trx)).toBe(false);
+    expect(await chargeNow(lawn, trx)).toBe(65);
+  }));
+
+  test('a VOID own invoice on the sibling is not split evidence — still refused', () => rollbackTest(async (trx) => {
+    const ids = await fixture(trx, { invoiceStatus: 'paid' });
+    await trx('invoices').insert({
+      id: randomUUID(), customer_id: ids.customerId, scheduled_service_id: ids.lawnId,
+      token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`, status: 'void', title: 'Lawn Care',
+      line_items: JSON.stringify([{ client_id: `scheduled_${ids.lawnId}_primary`, description: 'Lawn Care', quantity: 1, unit_price: 65, amount: 65 }]),
+      subtotal: 65, total: 65,
+    });
+    const lawn = await trx('scheduled_services').where({ id: ids.lawnId }).first();
+    expect(await chargeNow(lawn, trx)).toMatchObject({ refused: true, reason: 'sibling_invoice_covered' });
+  }));
+
   test('the PRICED ANCHOR row is never refused — mints its own priced amount unchanged', () => rollbackTest(async (trx) => {
     const ids = await fixture(trx, { invoiceStatus: 'paid' });
     const pest = await trx('scheduled_services').where({ id: ids.pestId }).first();

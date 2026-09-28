@@ -15945,13 +15945,18 @@ router.put('/:id/assign', requireAdmin, async (req, res, next) => {
 // lookup failure all refuse the same way, since a MINT decision must fail
 // CLOSED. Returns the structured refusal, or null for a definitive 'none'
 // (nothing to refuse — the ordinary precedence below runs).
-function siblingCoverageRefusal(verdict) {
+// hasOwnPrice (#5237 review P2): a priced visit reaches this only as a
+// stamped covered member, where setting a price is not an escape hatch — the
+// copy must not send staff round the same 409.
+function siblingCoverageRefusal(verdict, { hasOwnPrice = false } = {}) {
   if (verdict.status === 'none') return null;
   if (verdict.status === 'covered') {
     return {
       refused: true,
       reason: 'sibling_invoice_covered',
-      message: 'This visit is billed on the combined trip invoice — collect on that invoice, or set a price on this visit first.',
+      message: hasOwnPrice
+        ? 'This visit is billed on the combined trip invoice — collect on that invoice. If this visit should be billed on its own, split it off by giving it its own invoice from the Invoices page.'
+        : 'This visit is billed on the combined trip invoice — collect on that invoice, or set a price on this visit first.',
     };
   }
   if (verdict.status === 'needs_review') {
@@ -16017,7 +16022,7 @@ async function resolveScheduledServiceCharge({
     } catch {
       verdict = { status: 'error' };
     }
-    const refusal = siblingCoverageRefusal(verdict);
+    const refusal = siblingCoverageRefusal(verdict, { hasOwnPrice });
     if (refusal) return refusal;
   }
   // Owner ruling — REFUSE AFTER A VOID: the priced row is never refused
