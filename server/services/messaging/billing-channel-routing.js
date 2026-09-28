@@ -98,7 +98,7 @@ const REPLAY_HOLD_CODES = Object.freeze([
 ]);
 
 function isReplayHold(result) {
-  if (result.bellPersisted === true) return false;
+  if (result.bellPersisted === true || result.reason === 'app_event_already_visible') return false;
   return result.deferred === true && REPLAY_HOLD_CODES.includes(result.code);
 }
 
@@ -123,15 +123,57 @@ function preferenceChangeHold(overrides = {}) {
   };
 }
 
-// A guarded current bell reaches the customer even if native delivery fails.
+// This is event settlement, not evidence that retry copy reached a device.
+// Only the guarded push path can supply either bell witness.
 function billingLegDeliveryState(channel, result = {}) {
-  if (result.deliveryOutcome === 'accepted') return 'delivered';
-  if (channel === 'email' && result.ok === true && result.deliveryOutcome === undefined) return 'delivered';
+  if (channel === 'push' && result.deliveryOutcome === 'not_sent'
+    && result.reason === 'app_event_already_visible') return 'deduped';
+  if (result.deliveryOutcome === 'accepted') return result.deduped ? 'deduped' : 'delivered';
+  if (channel === 'email' && result.ok === true && result.deliveryOutcome === undefined) return result.deduped ? 'deduped' : 'delivered';
   return channel === 'push' && result.bellPersisted === true ? 'delivered' : null;
 }
 
+// A deduped Email/Text leg exposes the original acceptance as sentAt; a
+// persisted App bell exposes eventVisibleAt. Return only valid stored evidence
+// and leave legacy missing-evidence behavior to each caller.
+function billingLegContactTime(result = {}) {
+  const candidates = result.deduped && result.channelResults
+    ? Object.entries(result.channelResults)
+      .filter(([channel, leg]) => billingLegDeliveryState(channel, leg) === 'deduped')
+      .flatMap(([, leg]) => [leg.sentAt, leg.eventVisibleAt])
+      .concat([result.sentAt, result.eventVisibleAt, result.originalAt])
+    : result.deduped ? [result.sentAt, result.eventVisibleAt, result.originalAt] : [result.eventVisibleAt];
+  const times = candidates.filter(Boolean).map((candidate) => new Date(candidate))
+    .filter((time) => !Number.isNaN(time.getTime()));
+  return times.length ? new Date(Math.max(...times.map((time) => time.getTime()))) : null;
+}
+
+function storedEmailAcceptedAt(message = {}) {
+  for (const candidate of [message?.sent_at, message?.created_at]) {
+    if (candidate == null) continue;
+    const time = new Date(candidate);
+    if (!Number.isNaN(time.getTime())) return time;
+  }
+  return null;
+}
+
+// A replay may close progress only when every accepted rail belongs to an
+// earlier episode. The same decision governs invoice and collections writers.
+function previouslySettledBillingLegs(results) {
+  const accepted = results.filter((result) => result?.sent === true || result?.ok === true);
+  if (!accepted.length || accepted.some((result) => result.deduped !== true)) return null;
+  const times = accepted.map(billingLegContactTime).filter(Boolean);
+  return { originalAt: times.length
+    ? new Date(Math.max(...times.map((time) => time.getTime()))) : null };
+}
+
+function originalBillingContactArgs(result) {
+  const originalAt = result?.deduped ? billingLegContactTime(result) : null;
+  return originalAt ? [{ occurredAt: originalAt }] : [];
+}
+
 function needsRetry(result) {
-  if (result?.bellPersisted === true) return false;
+  if (result?.bellPersisted === true || result?.reason === 'app_event_already_visible') return false;
   return result?.retryable || result?.deliveryOutcome === 'uncertain';
 }
 
@@ -191,13 +233,20 @@ async function sendBillingLeg({ input, channel, channels, channelResults, catego
 // the caller retries it; otherwise the latest acceptance, then any retry.
 function billingDispatchOutcome(channelResults) {
   const results = Object.values(channelResults);
-  const accepted = Object.entries(channelResults).reverse().find(([channel, result]) => billingLegDeliveryState(channel, result));
-  const delivered = accepted && { ...accepted[1], sent: true, blocked: false, deliveryOutcome: 'accepted', retryable: false, deferred: false };
+  const settled = Object.entries(channelResults).reverse().map(([channel, result]) => {
+    const state = billingLegDeliveryState(channel, result);
+    if (!state) return null;
+    // The aggregate reports settlement of the event. The leg retains its
+    // actual native outcome and never gains a provider id or current bell.
+    return { ...result, sent: true, blocked: false, deliveryOutcome: 'accepted',
+      retryable: false, deferred: false, ...(state === 'deduped' ? { deduped: true } : {}) };
+  }).filter(Boolean);
+  const accepted = settled.find((result) => !result.deduped) || settled[0];
   const retry = results.find(needsRetry);
   const textRetry = needsRetry(channelResults.sms) && channelResults.sms;
   const textAccepted = channelResults.sms?.sent && channelResults.sms.deliveryOutcome === 'accepted';
   const outcome = results.find(isReplayHold)
-    || (!textAccepted && (textRetry || retry)) || delivered || retry
+    || (!textAccepted && (textRetry || retry)) || accepted || retry
     || results[results.length - 1];
   return { ...outcome, channelResults };
 }
@@ -242,4 +291,5 @@ async function dispatchBillingChannels(input, prefs, sendLeg) {
 module.exports = {
   BILLING_MESSAGE_CATEGORIES, billingDeliveryCategory, isBillingDeliveryCandidate, usesBillingDeliveryPreferences,
   billingNotificationEventKey, dispatchBillingChannels, REPLAY_HOLD_CODES, isReplayHold, preferenceChangeHold, billingLegDeliveryState,
+  billingLegContactTime, previouslySettledBillingLegs, originalBillingContactArgs, storedEmailAcceptedAt,
 };

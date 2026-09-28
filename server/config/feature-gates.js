@@ -1680,11 +1680,14 @@ const gates = {
 
   // Voicemail lead text-back — when a NEW prospect's voicemail produces a
   // workable lead, text them a prefilled quote-wizard link ("got your message
-  // about X — get your quote: …"). A customer-facing auto-send, so it FAILS
-  // CLOSED (explicit opt-in in EVERY environment) per the house rule — a
-  // preview/dev env with real Twilio creds must NOT auto-text prospects.
-  // Owner sets GATE_VOICEMAIL_LEAD_SMS=true on prod to go live. Off → the
-  // voicemail still becomes a Needs-Review lead; only the SMS is skipped.
+  // about X — get your quote: … Someone from the Waves team will follow up
+  // as soon as possible."), at any hour (owner ruling 2026-09-28: no 8 AM
+  // defer — 'voicemail_lead_sms' is a CUSTOMER_ACTION_ENTRY_POINTS entry). A
+  // customer-facing auto-send, so it FAILS CLOSED (explicit opt-in in EVERY
+  // environment) per the house rule — a preview/dev env with real Twilio
+  // creds must NOT auto-text prospects. Owner sets
+  // GATE_VOICEMAIL_LEAD_SMS=true on prod to go live. Off → the voicemail
+  // still becomes a Needs-Review lead; only the SMS is skipped.
   voicemailLeadSms: process.env.GATE_VOICEMAIL_LEAD_SMS === 'true',
 
   // Dropped-call address-request text (services/dropped-call-sms.js): a NEW
@@ -1722,13 +1725,15 @@ const gates = {
   // caller (no customer record on file) calls a Waves line,
   // nobody answers, they wait >= 25s (missed-call-bell's own floor) and
   // hang up with no voicemail — one text goes from the exact line they
-  // called ("it's Waves... text us here... or call back anytime"). Same
-  // fail-CLOSED rule as the other text-back lanes: customer-facing
-  // auto-send, explicit opt-in in every environment. Owner sets
-  // GATE_MISSED_CALL_TEXT_BACK=true to go live. Off → the post-call hook
-  // and the durable sweep send nothing (gate read first, before any call
-  // query) — no text, no call_log write, no claim taken. The sweep still
-  // reconciles claims this lane left orphaned while it was on.
+  // called ("it's Waves... someone will follow up... text us here... or
+  // call back anytime"), at any hour (owner ruling 2026-09-28: no 8 AM
+  // defer — it is a CUSTOMER_ACTION_ENTRY_POINTS entry). Same fail-CLOSED
+  // rule as the other text-back lanes: customer-facing auto-send, explicit
+  // opt-in in every environment. Owner sets GATE_MISSED_CALL_TEXT_BACK=true
+  // to go live. Off → the post-call hook and the durable sweep send nothing
+  // (gate read first, before any call query) — no text, no call_log write,
+  // no claim taken. The sweep still reconciles claims this lane left
+  // orphaned while it was on.
   missedCallTextBack: process.env.GATE_MISSED_CALL_TEXT_BACK === 'true',
 
   // GrowthBook experimentation — master gate for A/B experiment assignment on
@@ -1899,6 +1904,13 @@ const gates = {
   // seo_llm_mentions tracker has several days of data and the opportunities
   // have been eyeballed. When off, the aeo_gap bucket miner returns [].
   aeoGapMining: isProd ? process.env.GATE_AEO_GAP_MINING === 'true' : true,
+
+  // aeo_question_gap opportunity mining — identify/decision/cost AEO
+  // benchmark questions whose target page answer engines don't cite become
+  // a refresh of that page (or one new article when it doesn't exist).
+  // DARK in every environment unless exactly 'true'; read at call time so
+  // unsetting it stops the bucket without a redeploy (off ⇒ []).
+  get aeoQuestionGapMining() { return process.env.GATE_AEO_QUESTION_GAP_MINING === 'true'; },
 
   // answer_gap opportunity mining — queries a page already ranks 9–30 for
   // (per gsc_query_page_map) whose body never directly answers them; emits
@@ -3029,6 +3041,12 @@ const gates = {
   // exactly `true`**; canonical CALL-TIME reader commercialSuiteSizingLive().
   // Off = byte-identical to before (the building size flows through).
   commercialSuiteSizing: process.env.GATE_COMMERCIAL_SUITE_SIZING === 'true',
+  // Condo unit folio (unit-scope ruling #8): a typed Apt/Unit in a stacked
+  // condo building resolves the unit's OWN county roll row instead of
+  // dropping to the address search. **Ships DARK: off unless exactly
+  // `true`**; canonical CALL-TIME reader condoUnitFolioLive(). Off =
+  // byte-identical to before.
+  condoUnitFolio: process.env.GATE_CONDO_UNIT_FOLIO === 'true',
   // Post-cancel recurring-series reseed (owner ruling 2026-09-24): a
   // single-visit cancel inside a counted plan adds one visit back at the
   // END of the series (services/recurring-series-cancel-reseed.js →
@@ -3249,6 +3267,12 @@ function commercialSuiteSizingLive() {
   return process.env.GATE_COMMERCIAL_SUITE_SIZING === 'true';
 }
 
+// GATE_CONDO_UNIT_FOLIO read at CALL time — strict `=== 'true'`, same
+// convention as commercialSuiteSizingLive().
+function condoUnitFolioLive() {
+  return process.env.GATE_CONDO_UNIT_FOLIO === 'true';
+}
+
 function leadInspectionLinkLive() {
   return process.env.GATE_LEAD_INSPECTION_LINK === 'true';
 }
@@ -3378,5 +3402,5 @@ function logGateStatus() {
   }
 }
 
-module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, autoDispatchSharedModelLive, bookCapacityCommitLive, reportPhotoContentLive };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, reportPhotoContentLive };
 // gates 1775330914

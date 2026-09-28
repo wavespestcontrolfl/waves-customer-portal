@@ -215,6 +215,16 @@ describe('isFaqBlockedService (exported policy helper)', () => {
     }
   });
 
+  test('named lawn pests resolve to the blocked lawn-pest id (Chinch Bugs, Sod Webworms, Mole Crickets, Grubs, Armyworms)', () => {
+    for (const tag of ['Chinch Bugs', 'chinch-bug', 'Sod Webworms', 'Mole Crickets', 'grubs', 'Armyworms']) {
+      expect(guardrails.isFaqBlockedService(tag)).toBe(true);
+    }
+    // Every alias targets a real blocklist id.
+    for (const target of guardrails.BLOCKED_SERVICE_ALIASES.values()) {
+      expect(guardrails.FAQ_BLOCKED_SERVICES.has(target)).toBe(true);
+    }
+  });
+
   test('every canonical blog tag whose service is blocked resolves as blocked', () => {
     // BLOG_TAGS (blog-writer) ∩ FAQ-blocked services — every canonical-tag
     // form of a blocked service must be covered, alias or normalization.
