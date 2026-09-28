@@ -120,8 +120,9 @@
     "safety_line": "Its defensive secretion can mildly irritate skin or eyes if handled roughly; sweep it up rather than picking it up bare-handed.",
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "537651578c7962ea17eed8928d50bbcf691350834e5c7fab28a822ff2a45b752"
     },
     "slug": "millipede",
     "common_name": "Florida Ivory Millipede",
@@ -430,8 +431,9 @@
       "https://ask.ifas.ufl.edu/publication/IG093"
     ],
     "review": {
-      "status": "draft",
-      "notes": "UF/IFAS EDIS IG093 (Household/occasional invaders) was checked directly and covers centipedes only as a group (\"usually brownish, flattened animals\"), with no mention of this species or blue coloring; UF/IFAS's Featured Creatures collection (771 titles checked) has no dedicated page for Hemiscolopendra marginata. \"Florida Blue Centipede\" is the fixed common name from the project's master slug list, not this worker's choice; the bluish-black coloring itself is from general reference material, not a UF/IFAS/FWC/FDACS source. Re-checked this session: a peer-reviewed taxonomic revision exists (Shelley, in Hoffman & Shelley 1996 / a later genus revision redescribing H. marginata), and a USFWS species page exists for this species, but neither was accessible with a color description in the sources checked; USFWS's page gives only taxonomic/organizational data with no physical description at all. Resolution: the bluish-black coloring is hedged with 'often described' in traits rather than stated as a settled fact, since it is consistently reported across independent photographic references (Wikipedia, and the species' own common/site name) but not confirmed by a UF/IFAS/FWC/FDACS source; this is a purely descriptive, non-safety morphological detail."
+      "status": "owner_approved",
+      "notes": "UF/IFAS EDIS IG093 (Household/occasional invaders) was checked directly and covers centipedes only as a group (\"usually brownish, flattened animals\"), with no mention of this species or blue coloring; UF/IFAS's Featured Creatures collection (771 titles checked) has no dedicated page for Hemiscolopendra marginata. \"Florida Blue Centipede\" is the fixed common name from the project's master slug list, not this worker's choice; the bluish-black coloring itself is from general reference material, not a UF/IFAS/FWC/FDACS source. Re-checked this session: a peer-reviewed taxonomic revision exists (Shelley, in Hoffman & Shelley 1996 / a later genus revision redescribing H. marginata), and a USFWS species page exists for this species, but neither was accessible with a color description in the sources checked; USFWS's page gives only taxonomic/organizational data with no physical description at all. Resolution: the bluish-black coloring is hedged with 'often described' in traits rather than stated as a settled fact, since it is consistently reported across independent photographic references (Wikipedia, and the species' own common/site name) but not confirmed by a UF/IFAS/FWC/FDACS source; this is a purely descriptive, non-safety morphological detail. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "d6bc28e0ce3a56878cbd0a39f79e8f39456b32b35d5676771f4cd462f8c450b7"
     },
     "role": "nuisance",
     "risk": "defensive",
@@ -541,8 +543,9 @@
       "https://ask.ifas.ufl.edu/publication/IG093"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "3607a3bd67b579f9423311f21e60845f43de4ebc2aacf3d5c2acb5c7089d04e1"
     },
     "role": "harmless_visitor",
     "risk": "irritant",

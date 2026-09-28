@@ -16,8 +16,9 @@
     "safety_line": "Can spread disease to dogs and, less commonly, to people. See a doctor if a bite site develops a rash or fever follows.",
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "2e72fc8ae443c96ec67a5f88f2789529b9942053a58d856ac66d460e77c32391"
     },
     "slug": "brown-dog-tick",
     "common_name": "Brown Dog Tick",
@@ -218,8 +219,9 @@
       "https://www.cdc.gov/rocky-mountain-spotted-fever/about/index.html"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "bbe0d35dbeba3552fdaaf611d8efe91661663c5d84946dcd680d2cfd4e065129"
     }
   },
   {
@@ -330,8 +332,9 @@
       "https://www.mayoclinic.org/diseases-conditions/alpha-gal-syndrome/in-depth/tick-species/art-20546861"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "e1d8cdcc678328a34cbe6384588f4e93d07c1b4d93fe1b0bc63107cfa2afdb47"
     }
   },
   {
@@ -441,8 +444,9 @@
       "https://ask.ifas.ufl.edu/publication/IN300"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Re-fetched UF/IFAS EDIS IN300 directly this session: it states 'human exposure to blacklegged ticks is greatest during the summer months when high nymphal Ixodes scapularis activity and human outdoor activity coincide,' and that adults become active in October and remain active through winter. Peak months moved from a guessed Nov-Mar adult-only window to Jun-Aug, matching IN300's own explicit 'greatest exposure' statement for nymphs (this entry's other tracked stage); season_basis moved to 'year_round' since the tick is present all year with this as the highlighted highest-exposure window. This is IN300's general species-level pattern, not a Florida- or SWFL-specific curve; Florida populations are noted elsewhere in this entry to bite people less often than northern populations."
+      "status": "owner_approved",
+      "notes": "Re-fetched UF/IFAS EDIS IN300 directly this session: it states 'human exposure to blacklegged ticks is greatest during the summer months when high nymphal Ixodes scapularis activity and human outdoor activity coincide,' and that adults become active in October and remain active through winter. Peak months moved from a guessed Nov-Mar adult-only window to Jun-Aug, matching IN300's own explicit 'greatest exposure' statement for nymphs (this entry's other tracked stage); season_basis moved to 'year_round' since the tick is present all year with this as the highlighted highest-exposure window. This is IN300's general species-level pattern, not a Florida- or SWFL-specific curve; Florida populations are noted elsewhere in this entry to bite people less often than northern populations. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "5586acd3cfea105908c772c022c5656ba139ae8a2976eb5d4c1d40c2c394ec0a"
     }
   },
   {
@@ -562,8 +566,9 @@
       "https://ask.ifas.ufl.edu/publication/IG085"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Per audit item 26: removed the 'yard treatment ... helps a lot' effectiveness claim (BRIEF Revision 2 rule 3, no treatment promises). Per BRIEF Revision 3 (bite-pattern look-alikes): both look_alikes set to photo_can_confirm false, since a photo of welts can't say what bit; added a second look-alike to cat-flea (A/fleas)."
+      "status": "owner_approved",
+      "notes": "Per audit item 26: removed the 'yard treatment ... helps a lot' effectiveness claim (BRIEF Revision 2 rule 3, no treatment promises). Per BRIEF Revision 3 (bite-pattern look-alikes): both look_alikes set to photo_can_confirm false, since a photo of welts can't say what bit; added a second look-alike to cat-flea (A/fleas). Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "c756bc7c70906b80eeddd21487f5b5096967288f48c07cfc0174867058d23607"
     }
   },
   {
@@ -678,8 +683,9 @@
       "https://en.wikipedia.org/wiki/Rodent_mite_dermatitis"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Could not load the UF/IFAS EDIS 'Mites That Attack Humans' (IG086) page directly in this session (server returned 410); facts cross-checked against Wikipedia's rodent mite dermatitis summary and general search results citing that same IFAS publication and a UF tropical fowl mite Featured Creatures page. Per audit item 26 / BRIEF Revision 3: look_alikes[0].photo_can_confirm set to false (bite-pattern comparison); softened a 'removing the source is what stops the bites' method-outcome claim in copy."
+      "status": "owner_approved",
+      "notes": "Could not load the UF/IFAS EDIS 'Mites That Attack Humans' (IG086) page directly in this session (server returned 410); facts cross-checked against Wikipedia's rodent mite dermatitis summary and general search results citing that same IFAS publication and a UF tropical fowl mite Featured Creatures page. Per audit item 26 / BRIEF Revision 3: look_alikes[0].photo_can_confirm set to false (bite-pattern comparison); softened a 'removing the source is what stops the bites' method-outcome claim in copy. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "b354cc1b9cbdd057c1a9ef9b92a389033bef79b18f658fc131c748b812fa7894"
     }
   }
 ]
