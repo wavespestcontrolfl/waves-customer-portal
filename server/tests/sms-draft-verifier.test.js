@@ -153,7 +153,15 @@ describe('verifier — DECLARED OFFERS mapping (PR #5119: the drafter\'s offered
     expect(buildVerifierUserPrompt(facts, 'When can you come?', 'You are set for Tuesday 9:00 AM - 11:00 AM.')).toBe(p); // omitted == []
   });
 
-  test('facts WITHOUT OPEN TIMES: omitted, empty, or malformed offered_times → the prompt is byte-identical to the 3-arg form', () => {
+  test('a real-answers facts block with NO OPEN TIMES (availability empty/timed out) still gets the section, telling the verifier no time may be offered at all', () => {
+    const facts = 'CUSTOMER: x\nFOLLOW-UP SLA RIGHT NOW: within the hour\nBILLING:\n';
+    const p = buildVerifierUserPrompt(facts, 'Can you come Tuesday at 9?', 'Sure, Tuesday at 9 works — see you then!', []);
+    expect(p).toContain('DECLARED OFFERS');
+    expect(p).toContain('NO OPEN TIMES were available for this draft, so it must offer NO appointment time at all');
+    expect(p).toMatch(/a time the customer suggested is a request to confirm later, never an offer/);
+  });
+
+  test('facts WITHOUT OPEN TIMES or the real-answers marker (gate off): omitted, empty, or malformed offered_times → the prompt is byte-identical to the 3-arg form', () => {
     expect(buildVerifierUserPrompt('FACTS HERE', 'When can you come?', 'How about Tuesday 9:00 AM - 11:00 AM?', [])).toBe(base);
     expect(buildVerifierUserPrompt('FACTS HERE', 'When can you come?', 'How about Tuesday 9:00 AM - 11:00 AM?', 'nope')).toBe(base);
     expect(buildVerifierUserPrompt('FACTS HERE', 'When can you come?', 'How about Tuesday 9:00 AM - 11:00 AM?', [{ date: 'Tuesday' }])).toBe(base);

@@ -56,6 +56,7 @@ or:
 // for the verifier to check like any other fact. Empty/omitted → the prompt
 // is byte-identical to before (every gate-off caller and pinned exam).
 const OPEN_TIMES_HEADER = 'OPEN TIMES (real, bookable slots, ET'; // buildFactsBlock's section header, verbatim
+const REAL_ANSWERS_MARKER = 'FOLLOW-UP SLA RIGHT NOW:'; // stamped into EVERY gate-on facts block, OPEN TIMES or not
 function buildVerifierUserPrompt(factsBlock, inboundMessage, draftReply, offeredTimes = []) {
   const declared = Array.isArray(offeredTimes)
     ? offeredTimes.filter((e) => e && typeof e.date === 'string' && typeof e.window === 'string' && e.date && e.window)
@@ -67,12 +68,22 @@ function buildVerifierUserPrompt(factsBlock, inboundMessage, draftReply, offered
   // visit's window text passes the deterministic check AND reaches a
   // verifier that was never told offers need declaring, and then no
   // send-time snapshot exists to recheck it).
-  const openTimesInPlay = declared.length > 0 || String(factsBlock || '').includes(OPEN_TIMES_HEADER);
-  const declaredSection = openTimesInPlay
+  // Every real-answers draft gets the section (pre-push audit P1 on r7):
+  // when availability timed out, returned nothing, or had no city, OPEN
+  // TIMES is omitted — and that is exactly when the model must offer NO
+  // time at all, not even one the customer suggested (the base rules accept
+  // a customer's literal words as grounding for a DATE, never as an OFFER).
+  const facts = String(factsBlock || '');
+  const realAnswersDraft = declared.length > 0 || facts.includes(OPEN_TIMES_HEADER) || facts.includes(REAL_ANSWERS_MARKER);
+  const hasOpenTimes = facts.includes(OPEN_TIMES_HEADER);
+  const noneLine = hasOpenTimes
+    ? '(none — the drafter declares that this draft offers NO new appointment times)'
+    : '(none — NO OPEN TIMES were available for this draft, so it must offer NO appointment time at all; a time the customer suggested is a request to confirm later, never an offer)';
+  const declaredSection = realAnswersDraft
     ? `
 
 DECLARED OFFERS (the drafter says these are the ONLY new appointment times the draft offers, each copied from OPEN TIMES):
-${declared.length ? declared.map((e) => `- ${e.date}: ${e.window}`).join('\n') : '(none — the drafter declares that this draft offers NO new appointment times)'}
+${declared.length ? declared.map((e) => `- ${e.date}: ${e.window}`).join('\n') : noneLine}
 Check the mapping: every appointment time the draft OFFERS must name the SAME day and window as one DECLARED OFFER (a draft that writes "Wednesday" for a Tuesday declaration, or offers a time with no declared entry — including ANY offer when the declaration is "none" — is a VIOLATION). A time in the draft that is NOT a declared offer may only restate an already-scheduled visit from UPCOMING SERVICES, on that visit's own day.`
     : '';
   return `FACTS:

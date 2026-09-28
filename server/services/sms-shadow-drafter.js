@@ -383,9 +383,6 @@ function reserviceFactLine(lanes) {
     ? `${RESERVICE_FACT_LABEL} eligible for ${list.join(' and ')} (booked through their free re-service link, which a teammate texts)`
     : `${RESERVICE_FACT_LABEL} not eligible`;
 }
-function factsSayReserviceEligible(factsBlock) {
-  return String(factsBlock || '').split('\n').some((l) => l.startsWith(`${RESERVICE_FACT_LABEL} eligible`));
-}
 
 // The shared compliance predicate (AGENTS.md "Compliance language on any
 // customer surface"): banned customer-copy claims ("pet-safe",
