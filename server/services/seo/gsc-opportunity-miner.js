@@ -202,10 +202,16 @@ function faqTopicPatterns() {
   if (FAQ_TOPIC_PATTERNS) return FAQ_TOPIC_PATTERNS;
   FAQ_TOPIC_PATTERNS = [];
   try {
-    const { FAQ_BLOCKED_SERVICES } = require('../content/content-guardrails');
-    const ids = Array.from(FAQ_BLOCKED_SERVICES).sort((a, b) => b.length - a.length);
-    for (const id of ids) {
-      const toks = String(id).split('-').filter(Boolean);
+    const { FAQ_BLOCKED_SERVICES, BLOCKED_SERVICE_ALIASES } = require('../content/content-guardrails');
+    // Blocked ids match as themselves; the guardrail's topic-name aliases
+    // ('chinch-bug' → 'lawn-pest', 'roaches' → 'cockroach') match their name
+    // and yield the blocked id they alias — one vocabulary, longest first.
+    const entries = [
+      ...Array.from(FAQ_BLOCKED_SERVICES).map((id) => [id, id]),
+      ...Array.from(BLOCKED_SERVICE_ALIASES || []),
+    ].sort((a, b) => b[0].length - a[0].length);
+    for (const [name, id] of entries) {
+      const toks = String(name).split('-').filter(Boolean);
       // Tokens join on whitespace OR hyphens — GSC queries carry both
       // 'bed bug' and 'bed-bug' phrasings, and a hyphenated miss would
       // canonicalize to the broad service with no specialty_topic, letting
@@ -1331,6 +1337,15 @@ function buildAeoQuestionGapOpp(gap, { liveUrl = null, impressions = 0 } = {}) {
 // pinned-article producer (shared with the queue's claim fence).
 const PINNED_ARTICLE_PATH_SQL = pinnedArticlePathSql();
 
+// Can this lane ever act on the candidate as mined? Not when routing demoted
+// it (do_not_publish), nor for a MISSING target an article cannot be pinned
+// to (a tool, resource or city-service path) — nothing this lane publishes
+// would close it. A permanent rejection, unlike the cap or a fence.
+function aeoQuestionGapRoutable(o) {
+  return o.action_type !== 'do_not_publish'
+    && (!!o.page_url || aeoPinnableBlogPath(o.signal_metadata?.target_path));
+}
+
 // The route a row writes: the live page it refreshes, or the target path a
 // new article is pinned to.
 function aeoQuestionGapRoute(o) {
@@ -1352,10 +1367,7 @@ function selectAeoQuestionGaps(opps = [], { cap = 2, occupiedKeys = new Set(), f
   const pages = new Set();
   for (const o of ordered) {
     if (out.length >= cap) break;
-    if (o.action_type === 'do_not_publish' || occupiedKeys.has(o.dedupe_key)) continue;
-    // Missing target the article cannot be pinned to (a tool, resource or
-    // city-service path) — nothing this lane publishes would close it.
-    if (!o.page_url && !aeoPinnableBlogPath(o.signal_metadata.target_path)) continue;
+    if (!aeoQuestionGapRoutable(o) || occupiedKeys.has(o.dedupe_key)) continue;
     if (fencedPages === null) continue;
     const id = aeoQuestionGapRoute(o);
     const holders = fencedPages.get(id);
@@ -3475,11 +3487,15 @@ class GscOpportunityMiner {
       out.push(o);
     }
     // The recovery sweep's live set: every qualifying candidate, including
-    // ones held back only by the cap or a temporary fence — but NOT a live
-    // target confirmed non-editable (cached verdict, this run's probes
-    // included). Its pending row can never be refreshed, so it retires.
+    // ones held back only by the cap or a temporary fence — but NOT one this
+    // lane can never act on: unroutable as mined (a missing tool/resource
+    // target an article cannot be pinned to — its older pending REFRESH row,
+    // same key, would otherwise stay claimable for a page that is gone), or
+    // a live target confirmed non-editable (cached verdict, this run's
+    // probes included). Those rows retire.
     const nonEditable = GscOpportunityMiner._nonEditablePages;
-    qualifying.opps = opps.filter((o) => !(o.page_url && nonEditable.get(routeIdentity(o.page_url)) > Date.now()));
+    qualifying.opps = opps.filter((o) => aeoQuestionGapRoutable(o)
+      && !(o.page_url && nonEditable.get(routeIdentity(o.page_url)) > Date.now()));
     logger.info(`[gsc-opp-miner] aeo_question_gap: ${gaps.length} qualifying question(s), ${out.length} emitted (${out.map((o) => o.signal_metadata.benchmark_id).join(', ') || 'none'})`);
     return out;
   }

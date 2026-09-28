@@ -127,7 +127,10 @@ describe('AEO feedback loop covers aeo_question_gap', () => {
     expect(calls[1].filters.map((f) => f[0])).toEqual(['where', 'whereRaw', 'whereRaw']);
   });
 
-  test('a transient query-id lookup failure throws instead of freezing an empty cohort; the retry records the ids', async () => {
+  test.each([
+    ['query-id', 'seo_llm_mention_queries'],
+    ['run-context', 'autonomous_runs as r'],
+  ])('a transient %s lookup failure throws instead of freezing an incomplete impact row; the retry records the cohort', async (_label, failingTable) => {
     let lookupFails = true;
     const inserts = [];
     // Chainable fake: every builder method returns the chain; awaiting it
@@ -137,12 +140,16 @@ describe('AEO feedback loop covers aeo_question_gap', () => {
         get(_t, prop) {
           if (prop === 'then') {
             const value = table === 'seo_llm_mention_queries'
-              ? (lookupFails ? Promise.reject(new Error('connection reset')) : Promise.resolve([{ id: 42 }]))
+              ? (lookupFails && failingTable === table ? Promise.reject(new Error('connection reset')) : Promise.resolve([{ id: 42 }]))
               : Promise.resolve([]);
             return value.then.bind(value);
           }
           if (prop === 'first') {
-            return async () => (table === 'autonomous_runs as r' ? { bucket: 'aeo_question_gap', query: 'Q?', city: null, service: 'pest' } : undefined);
+            return async () => {
+              if (table !== 'autonomous_runs as r') return undefined;
+              if (lookupFails && failingTable === table) throw new Error('connection reset');
+              return { bucket: 'aeo_question_gap', query: 'Q?', city: null, service: 'pest' };
+            };
           }
           if (prop === 'insert') return (row) => { inserts.push(row); return chain; };
           if (prop === 'returning') return async () => [inserts[inserts.length - 1]];

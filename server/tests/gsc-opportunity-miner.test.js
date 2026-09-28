@@ -1810,7 +1810,7 @@ describe('listicle_family scoring + action mapping', () => {
     // guardrail vocabulary, not a hand-kept list.
     expect(src).toMatch(/\? \['claimed', 'pending_review'\]\s*\n\s*: \['claimed', 'pending_review', 'pending'\]/);
     expect(mineSrc).toMatch(/answerGapPages\.has\(routeIdentity\(pageUrl\)\)/);
-    expect(src).toMatch(/const \{ FAQ_BLOCKED_SERVICES \} = require\('\.\.\/content\/content-guardrails'\)/);
+    expect(src).toMatch(/const \{ FAQ_BLOCKED_SERVICES(, BLOCKED_SERVICE_ALIASES)? \} = require\('\.\.\/content\/content-guardrails'\)/);
     // r34: strict registry errors in probes; the shared page-edit advisory
     // lock name; identity-keyed fences, sweep exemptions, and probe cache.
     expect(mineSrc).toMatch(/strictRegistryErrors: true/);
@@ -3247,6 +3247,27 @@ describe('aeo_question_gap bucket', () => {
     expect(buildAeoQuestionGapOpp(gapFor('Q21'), { liveUrl: null }).signal_metadata.specialty_topic).toBeNull();
   });
 
+  test('chinch-bug questions map to the blocked lawn-pest topic (Q17 via its target path, Q18 via its text)', () => {
+    const { isFaqBlockedService } = require('../services/content/content-guardrails');
+    for (const id of ['Q17', 'Q18']) {
+      for (const liveUrl of [null, `${HUB}${q(id).target_path}`]) {
+        const opp = buildAeoQuestionGapOpp(gapFor(id), { liveUrl });
+        expect(opp.service).toBe('lawn');
+        expect(opp.signal_metadata.specialty_topic).toBe('lawn-pest');
+        expect(isFaqBlockedService([opp.service, opp.signal_metadata.specialty_topic])).toBe(true);
+      }
+    }
+    // Every emittable benchmark question: a question whose text or target
+    // names a blocked topic always resolves to it (sweep, not a spot fix).
+    const blocked = aeoQuestionGapQuestions(benchmark.questions)
+      .map((x) => [x.id, buildAeoQuestionGapOpp(gapFor(x.id), { liveUrl: null }).signal_metadata.specialty_topic])
+      .filter(([, t]) => t);
+    expect(Object.fromEntries(blocked)).toEqual({
+      Q4: 'termite', Q6: 'cockroach', Q14: 'cockroach', Q16: 'termite', Q17: 'lawn-pest', Q18: 'lawn-pest',
+      Q26: 'termite', Q27: 'termite', Q28: 'termite', Q29: 'termite', Q36: 'termite', Q37: 'termite', Q38: 'termite',
+    });
+  });
+
   test('the route fence covers every pinned-article producer — a category seed holding Q19\'s target blocks the question', async () => {
     const categoryManifest = require('../data/category-seed-topics-v1.json');
     const seed = categoryManifest.briefs.find((b) => b.slug === q('Q19').target_path);
@@ -3392,6 +3413,20 @@ describe('aeo_question_gap bucket', () => {
       } finally {
         GscOpportunityMiner._nonEditablePages.delete(calc);
       }
+    });
+
+    test('recovery live set: a missing target an article cannot be pinned to drops out (Q11 /pest-identifier/ghost-ant/ gone from the sitemap)', async () => {
+      process.env.GATE_AEO_QUESTION_GAP_MINING = 'true';
+      process.env.AEO_QUESTION_GAP_MAX_PER_RUN = '1';
+      const questions = [q('Q11'), q('Q26'), q('Q36')];
+      // Q11's tool page left the sitemap; the termite pages are live.
+      const miner = stubbed(synthetic(questions), [q('Q26'), q('Q36')].map((x) => `${HUB}${x.target_path}`));
+      const qualifying = { opps: null };
+      const out = await miner.mineAeoQuestionGaps('2026-08-30', { qualifying });
+      expect(out).toHaveLength(1); // cap defers one termite question
+      // Q11 would be a non-pinnable article → its old pending refresh retires;
+      // the cap-deferred termite question keeps its row.
+      expect(qualifying.opps.map((o) => o.signal_metadata.benchmark_id).sort()).toEqual(['Q26', 'Q36']);
     });
 
     test('the editability probe is bounded and remembers confirmed non-editable pages', async () => {

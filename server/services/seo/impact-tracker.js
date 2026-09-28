@@ -432,14 +432,15 @@ async function snapshotBaseline({ db: database = db, runId, pageUrl, deployedAt 
   return row;
 }
 
+// A lookup failure THROWS, like the query-id lookup: swallowing it would
+// persist the insert-once impact row with bucket NULL and no AEO cohort,
+// leaving the run out of the AEO recheck forever. sweepNewlyLive retries.
 async function aeoContextForRun(database, runId) {
-  try {
-    const row = await database('autonomous_runs as r')
-      .leftJoin('opportunity_queue as q', 'r.opportunity_id', 'q.id')
-      .where('r.id', runId)
-      .first('q.bucket as bucket', 'q.city as city', 'q.service as service', 'q.query as query');
-    return { bucket: row?.bucket || null, city: row?.city || null, service: row?.service || null, query: row?.query || null };
-  } catch { return { bucket: null, city: null, service: null, query: null }; }
+  const row = await database('autonomous_runs as r')
+    .leftJoin('opportunity_queue as q', 'r.opportunity_id', 'q.id')
+    .where('r.id', runId)
+    .first('q.bucket as bucket', 'q.city as city', 'q.service as service', 'q.query as query');
+  return { bucket: row?.bucket || null, city: row?.city || null, service: row?.service || null, query: row?.query || null };
 }
 
 // Managed mention-query ids an AEO row watches: aeo_gap watches its
