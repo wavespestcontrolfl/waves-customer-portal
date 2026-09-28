@@ -953,7 +953,9 @@ async function listPendingPayouts(limit = 20) {
   try {
     const capped = Math.min(Math.max(parseInt(limit, 10) || 20, 1), 100);
     const result = await stripe.payouts.list({ status: 'pending', limit: capped });
-    const payouts = (result.data || []).filter((p) => p.method !== 'instant').map((p) => ({
+    // Automatic payouts (Stripe's own schedule) cannot be cancelled either —
+    // Stripe refuses them — so they are not candidates (Codex r2 P2).
+    const payouts = (result.data || []).filter((p) => p.method !== 'instant' && p.automatic !== true).map((p) => ({
       id: p.id,
       amount: p.amount / 100,
       currency: p.currency,
@@ -976,6 +978,19 @@ function payoutCancelError(message, status = 409) {
   const err = new Error(message);
   err.status = status;
   return err;
+}
+
+// Best-effort local mirror of a payout's Stripe status — never blocks or
+// fails the caller; the periodic sync repairs anything this misses.
+async function mirrorPayoutStatus(stripePayoutId, status) {
+  try {
+    await db('stripe_payouts').where('stripe_payout_id', stripePayoutId).update({
+      status,
+      synced_at: new Date().toISOString(),
+    });
+  } catch (dbErr) {
+    logger.warn(`[stripe-banking] Local status update after cancel failed for ${stripePayoutId}:`, dbErr.message);
+  }
 }
 
 /**
@@ -1017,10 +1032,17 @@ async function cancelPayout(payoutId, opts = {}) {
   if (payout.method === 'instant') {
     throw payoutCancelError('Instant payouts settle within minutes and cannot be cancelled.');
   }
+  if (payout.automatic === true) {
+    throw payoutCancelError('This is an automatic payout on Stripe\'s own schedule; Stripe does not allow cancelling automatic payouts.');
+  }
   if (payout.status === 'canceled') {
     // The requested state is already reached (a retry after a lost response,
     // or a cancel from another surface). Report success without a second
-    // Stripe call rather than a failure the operator would act on.
+    // Stripe call rather than a failure the operator would act on. Mirror
+    // the status locally the same best-effort way the live cancel does, so
+    // banking history does not stay `pending` when the first response was
+    // lost before the local update ran (Codex r2 P2).
+    await mirrorPayoutStatus(id, payout.status);
     return {
       payout_id: payout.id,
       status: payout.status,
@@ -1047,14 +1069,7 @@ async function cancelPayout(payoutId, opts = {}) {
       : await stripe.payouts.cancel(id);
 
     // Best-effort local mirror — never block the caller's result on it.
-    try {
-      await db('stripe_payouts').where('stripe_payout_id', id).update({
-        status: canceled.status,
-        synced_at: new Date().toISOString(),
-      });
-    } catch (dbErr) {
-      logger.warn(`[stripe-banking] Local status update after cancel failed for ${id}:`, dbErr.message);
-    }
+    await mirrorPayoutStatus(id, canceled.status);
 
     const actorId = nonPiiActorId(opts.requestedBy);
     logger.info(`[stripe-banking] Payout ${id} cancelled, requestedBy=${actorId || 'unknown'}`);

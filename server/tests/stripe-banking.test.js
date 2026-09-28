@@ -556,11 +556,12 @@ describe('stripe banking service', () => {
       });
     });
 
-    test('leaves instant payouts out — cancelPayout can never act on them', async () => {
+    test('leaves instant and automatic payouts out — cancelPayout can never act on them', async () => {
       stripeClient.payouts.list.mockResolvedValue({
         data: [
-          { id: 'po_pending_std', amount: 1000, currency: 'usd', arrival_date: 1780000000, method: 'standard', status: 'pending' },
-          { id: 'po_pending_inst', amount: 2000, currency: 'usd', arrival_date: 1780000000, method: 'instant', status: 'pending' },
+          { id: 'po_pending_std', amount: 1000, currency: 'usd', arrival_date: 1780000000, method: 'standard', status: 'pending', automatic: false },
+          { id: 'po_pending_inst', amount: 2000, currency: 'usd', arrival_date: 1780000000, method: 'instant', status: 'pending', automatic: false },
+          { id: 'po_pending_auto', amount: 3000, currency: 'usd', arrival_date: 1780000000, method: 'standard', status: 'pending', automatic: true },
         ],
         has_more: false,
       });
@@ -615,6 +616,13 @@ describe('stripe banking service', () => {
       expect(stripeClient.payouts.cancel).toHaveBeenCalledWith('po_cancel_2', {}, { idempotencyKey: 'cpo_confirm_abc' });
     });
 
+    test('refuses an automatic payout without calling cancel — Stripe does not allow it', async () => {
+      stripeClient.payouts.retrieve.mockResolvedValue({ id: 'po_auto_1', status: 'pending', method: 'standard', automatic: true, amount: 5000, currency: 'usd' });
+
+      await expect(service.cancelPayout('po_auto_1')).rejects.toThrow('Stripe does not allow cancelling automatic payouts');
+      expect(stripeClient.payouts.cancel).not.toHaveBeenCalled();
+    });
+
     test('refuses an instant payout without calling cancel', async () => {
       stripeClient.payouts.retrieve.mockResolvedValue({ id: 'po_instant_1', status: 'pending', method: 'instant', amount: 5000, currency: 'usd' });
 
@@ -630,6 +638,8 @@ describe('stripe banking service', () => {
       const result = await service.cancelPayout('po_done_1', { idempotencyKey: 'cpo_confirm_retry1' });
 
       expect(stripeClient.payouts.cancel).not.toHaveBeenCalled();
+      // Local banking history is brought in line even on the retry path.
+      expect(payoutUpdate).toEqual({ status: 'canceled', synced_at: expect.any(String) });
       expect(result).toEqual({
         payout_id: 'po_done_1',
         status: 'canceled',
