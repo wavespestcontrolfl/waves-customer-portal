@@ -172,12 +172,13 @@ describe('get_report_engagement', () => {
     const expectedCutoff = etDateString(addETDays(new Date(), -15));
     // The performed-visit rule's outcomes lead (pest-pressure/first-visit.js).
     expect(rawCalls[1].bindings).toEqual(['inspection_only', 'customer_declined', 'incomplete', '2026-08-01', '2026-08-31', expectedCutoff, 'pest', 'lawn']);
-    expect(rawCalls[1].sql).toMatch(/r\.scheduled_date > v\.scheduled_date/);
-    expect(rawCalls[1].sql).toMatch(/r\.scheduled_date <= v\.scheduled_date \+ INTERVAL '14 days'/);
-    // The cutoff bounds the VISIT's own scheduled_date, not the [from, to]
+    // Both sides of the window use the canonical record's frozen service_date.
+    expect(rawCalls[1].sql).toMatch(/r\.service_date > v\.service_date/);
+    expect(rawCalls[1].sql).toMatch(/r\.service_date <= v\.service_date \+ INTERVAL '14 days'/);
+    // The cutoff bounds the VISIT's own service date, not the [from, to]
     // window — it rides in the same LEAST(...) as `to`, so a visit inside
     // the last 14 days is excluded from the visits CTE entirely.
-    expect(rawCalls[1].sql).toMatch(/scheduled_date <= LEAST\(\?::date, \?::date\)/);
+    expect(rawCalls[1].sql).toMatch(/service_date <= LEAST\(\?::date, \?::date\)/);
   });
 
   test('reserviceWithin14Days still appears when the send cohort is empty but reservice rows exist', async () => {

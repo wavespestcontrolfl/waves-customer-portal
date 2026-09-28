@@ -176,6 +176,73 @@ postgres('get_report_engagement reserviceWithin14Days against migrated PostgreSQ
     expect(res.reserviceWithin14Days.pest).toEqual({ visits: 1, reserviced: 0, rate_pct: 0 });
   });
 
+  // One visit with explicit sibling completion records: each record carries
+  // its own frozen fields and created_at (now() is constant inside the test
+  // transaction, so siblings need explicit, distinct times to have an order).
+  async function visitWithRecords({ customerId, scheduledDate, records }) {
+    const [sched] = await trx('scheduled_services').insert({
+      customer_id: customerId, scheduled_date: scheduledDate, service_type: 'Test Visit', status: 'completed',
+    }).returning('*');
+    for (const r of records) {
+      const notes = {};
+      if (r.visitOutcome) notes.visitOutcome = r.visitOutcome;
+      if (r.typedReportDelivery) notes.typedReportDelivery = r.typedReportDelivery;
+      await trx('service_records').insert({
+        customer_id: customerId, service_date: r.serviceDate, service_type: 'Test Visit', status: r.status || 'completed',
+        scheduled_service_id: sched.id, service_line: r.line || 'pest', is_callback: r.isCallback === true,
+        service_data: JSON.stringify(r.completedServiceKey ? { completedServiceKey: r.completedServiceKey } : {}),
+        structured_notes: JSON.stringify(notes), created_at: r.createdAt,
+      });
+    }
+    return sched;
+  }
+
+  test('one canonical record speaks for a visit with several completion records', async () => {
+    // Visit A: an older auto-send record, but the canonical (newest) sibling
+    // is internal_only — the visit is not in the denominator.
+    const custA = await customer();
+    await visitWithRecords({ customerId: custA, scheduledDate: '2026-08-05', records: [
+      { serviceDate: '2026-08-05', createdAt: '2026-08-05T10:00:00Z' },
+      { serviceDate: '2026-08-05', createdAt: '2026-08-05T11:00:00Z', typedReportDelivery: 'internal_only' },
+    ] });
+    // Visit B: a regular record and a newer callback sibling — the canonical
+    // record makes it a re-service only, never both a visit and a callback.
+    const custB = await customer();
+    await visitWithRecords({ customerId: custB, scheduledDate: '2026-08-06', records: [
+      { serviceDate: '2026-08-06', createdAt: '2026-08-06T10:00:00Z' },
+      { serviceDate: '2026-08-06', createdAt: '2026-08-06T11:00:00Z', isCallback: true },
+    ] });
+    // One plain performed visit so the line has a measurable denominator.
+    await sentVisit({ customerId: await customer(), date: '2026-08-07', line: 'pest' });
+    const res = await executeDashboardTool('get_report_engagement', { date_from: FROM, date_to: TO });
+    expect(res.reserviceWithin14Days.pest).toEqual({ visits: 1, reserviced: 0, rate_pct: 0 });
+  });
+
+  test('an incomplete callback still counts as a re-service', async () => {
+    const cust = await customer();
+    await sentVisit({ customerId: cust, date: '2026-08-05', line: 'pest' });
+    await visitWithRecords({ customerId: cust, scheduledDate: '2026-08-10', records: [
+      { serviceDate: '2026-08-10', createdAt: '2026-08-10T10:00:00Z', isCallback: true, status: 'incomplete', visitOutcome: 'incomplete' },
+    ] });
+    const res = await executeDashboardTool('get_report_engagement', { date_from: FROM, date_to: TO });
+    expect(res.reserviceWithin14Days.pest).toEqual({ visits: 1, reserviced: 1, rate_pct: 100 });
+  });
+
+  test('the frozen service date, not a booking date corrected later, places the visit and the 14-day window', async () => {
+    const cust = await customer();
+    // Performed 2026-08-05; its booking date was later corrected to 09-25
+    // (outside the window). The re-service was performed 08-12; its booking
+    // date was corrected to 07-01. Both still pair on their service dates.
+    await visitWithRecords({ customerId: cust, scheduledDate: '2026-09-25', records: [
+      { serviceDate: '2026-08-05', createdAt: '2026-08-05T10:00:00Z' },
+    ] });
+    await visitWithRecords({ customerId: cust, scheduledDate: '2026-07-01', records: [
+      { serviceDate: '2026-08-12', createdAt: '2026-08-12T10:00:00Z', completedServiceKey: 'pest_re_service' },
+    ] });
+    const res = await executeDashboardTool('get_report_engagement', { date_from: FROM, date_to: TO });
+    expect(res.reserviceWithin14Days.pest).toEqual({ visits: 1, reserviced: 1, rate_pct: 100 });
+  });
+
   test('right-censoring: a visit inside the last 14 days is excluded even with a re-service; one outside it counts', async () => {
     const cust = await customer();
     // Visit A: 5 days ago — its 14-day follow-up window hasn't closed yet,

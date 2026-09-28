@@ -22,6 +22,7 @@ const { etDateString, etMonthStart, etMonthEnd, etQuarterStart, etYearStart, etW
 const { INTERNAL_TEST_CUSTOMERS } = require('../internal-test-customers');
 const { NON_PERFORMED_VISIT_OUTCOMES } = require('../pest-pressure/first-visit');
 const { customerVisibleServiceRecordPredicate } = require('../pest-pressure/history-filter');
+const { CANONICAL_SIBLING } = require('../completion-record-invariants');
 
 // Returns a Knex builder with the standard exclusion applied to a
 // query against the `estimates` table aliased as `e`. Use this on every
@@ -925,25 +926,30 @@ const REPORT_ACTION_EVENTS = [
 // re-service to the visit it follows up on, so a match is inferred: same
 // customer, same service line, 1-14 days after a performed visit.
 //
-// Everything is classified from the service record's FROZEN completion-time
-// evidence, never the booking row an admin can still edit or repoint after
-// closeout (20260830000051_repair_recap_callback_flags.js): the record's
-// is_callback and its service_data.completedServiceKey decide "re-service",
-// and its service_line decides the line (a row with no line is excluded,
-// never guessed).
+// The unit is the VISIT (scheduled_services), and ONE canonical completion
+// record speaks for it — CANONICAL_SIBLING from completion-record-invariants
+// (the record pinned by the newest succeeded completion attempt, else the
+// newest sibling, any status), exactly as closeout-status.js resolves it:
+// service_records.scheduled_service_id is one-to-many, and siblings can
+// disagree. That record's FROZEN completion-time evidence decides everything,
+// never the booking row an admin can still edit after closeout
+// (20260830000051_repair_recap_callback_flags.js): is_callback or
+// service_data.completedServiceKey = re-service, service_line = the line
+// (no line = excluded, never guessed), service_date = the day, for the
+// period AND the 14-day window.
 //
-// Visits (the denominator) are PERFORMED, customer-visible visits only — the
-// Pest Pressure prior-visit rule (pest-pressure/first-visit.js): an
-// incomplete, declined or inspection-only closeout leaves its booking
-// 'completed' but delivered no treatment or report. A re-service counts
-// whatever its outcome: the callback itself is the signal.
+// Visits (the denominator) are PERFORMED, customer-visible visits only — a
+// completed canonical record, outcome not incomplete / declined /
+// inspection-only (the Pest Pressure prior-visit rule,
+// pest-pressure/first-visit.js). A re-service counts whatever its outcome or
+// record status (an incomplete callback is still a callback).
 //
 // Right-censoring: a visit from the last 14 days hasn't had its full 14-day
 // follow-up window pass yet, so counting it as a "no re-service" visit
 // biases the rate low. A visit exactly 14 days ago still has its 14th
 // follow-up day running today, so `cutoff` (the caller's ET "today" minus
 // 15 days — visit day D counts only when D + 14 < today) is an ADDITIONAL
-// upper bound on the visit's own scheduled_date — never on the [from, to]
+// upper bound on the visit's own service date — never on the [from, to]
 // window itself — so only visits whose window has fully closed are counted
 // at all.
 const RESERVICE_LINES = ['pest', 'lawn'];
@@ -951,7 +957,8 @@ const RESERVICE_LINES = ['pest', 'lawn'];
 async function getReserviceWithin14Days(from, to, cutoff) {
   const { rows } = await db.raw(`
     WITH completed AS (
-      SELECT sched.id, sched.customer_id, sched.scheduled_date,
+      SELECT ss.id, ss.customer_id, srec.service_date,
+             srec.status AS record_status,
              NULLIF(srec.service_line, '') AS record_line,
              srec.service_data->>'completedServiceKey' AS frozen_key,
              -- COALESCE both sides: a record with no frozen key must read
@@ -960,20 +967,22 @@ async function getReserviceWithin14Days(from, to, cutoff) {
               OR COALESCE(srec.service_data->>'completedServiceKey', '') IN ('pest_re_service', 'lawn_re_service')) AS is_reservice,
              COALESCE(srec.structured_notes->>'visitOutcome', '') AS visit_outcome,
              (${customerVisibleServiceRecordPredicate('srec')}) AS customer_visible
-      FROM scheduled_services sched
-      JOIN service_records srec ON srec.scheduled_service_id = sched.id
-      WHERE sched.status = 'completed' AND srec.status = 'completed'
+      FROM scheduled_services ss
+      CROSS JOIN LATERAL (${CANONICAL_SIBLING}) canonical
+      JOIN service_records srec ON srec.id = canonical.id
+      WHERE ss.status = 'completed'
     ),
     visits AS (
-      SELECT id, customer_id, scheduled_date, record_line AS service_line
+      SELECT id, customer_id, service_date, record_line AS service_line
       FROM completed
       WHERE NOT is_reservice
+        AND record_status = 'completed'
         AND customer_visible
         AND visit_outcome NOT IN (${NON_PERFORMED_VISIT_OUTCOMES.map(() => '?').join(', ')})
-        AND scheduled_date >= ? AND scheduled_date <= LEAST(?::date, ?::date)
+        AND service_date >= ? AND service_date <= LEAST(?::date, ?::date)
     ),
     reservices AS (
-      SELECT id, customer_id, scheduled_date,
+      SELECT id, customer_id, service_date,
              CASE
                WHEN frozen_key = 'pest_re_service' THEN 'pest'
                WHEN frozen_key = 'lawn_re_service' THEN 'lawn'
@@ -989,8 +998,8 @@ async function getReserviceWithin14Days(from, to, cutoff) {
     LEFT JOIN reservices r
       ON r.customer_id = v.customer_id
      AND r.service_line = v.service_line
-     AND r.scheduled_date > v.scheduled_date
-     AND r.scheduled_date <= v.scheduled_date + INTERVAL '14 days'
+     AND r.service_date > v.service_date
+     AND r.service_date <= v.service_date + INTERVAL '14 days'
     WHERE v.service_line IN (${RESERVICE_LINES.map(() => '?').join(', ')})
     GROUP BY v.service_line
   `, [...NON_PERFORMED_VISIT_OUTCOMES, from, to, cutoff, ...RESERVICE_LINES]);
