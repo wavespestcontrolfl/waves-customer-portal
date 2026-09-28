@@ -132,6 +132,18 @@ describe('unitDesignatorRows on the aggregate', () => {
     }));
   });
 
+  test('a county row "BLDG #2 UNIT 301" names unit 301 in building 2', async () => {
+    mockArcgis([1, 2, 3].flatMap((n) => [
+      manateeUnit(`8100 SAMPLE HARBOR WAY BLDG #2 UNIT 30${n}`, `B30${n}`),
+      manateeUnit(`8100 SAMPLE HARBOR WAY BLDG #2 UNIT ${n}`, `B${n}`),
+    ]));
+    const parcel = await lookupCountyParcelByPoint(PT.lat, PT.lng, { county: 'Manatee' });
+
+    expect(parcel.unitDesignatorRows).toContainEqual(expect.objectContaining({ unit: '301', building: '2' }));
+    const addr = '8100 Sample Harbor Way Bldg #2 Unit 301, Bradenton, FL 34202';
+    expect(aggregateUnitDesignatorMatch(parcel, addr, addr)).toMatchObject({ status: 'resolved', row: { parcelId: 'B301' } });
+  });
+
   test('a numbered route ("123 US 41") is never read as a unit number', async () => {
     mockArcgis([1, 2, 3, 4, 5].map((n) => manateeUnit('123 US 41', `R${n}`)));
     const parcel = await lookupCountyParcelByPoint(PT.lat, PT.lng, { county: 'Manatee' });
@@ -150,6 +162,13 @@ describe('typedDwellingUnit', () => {
     ['Unit 201, 1555 Tarpon Center Dr, Venice, FL 34285', '201'],
   ])('%s → unit %s on the street line', (address, unit) => {
     expect(typedDwellingUnit(address)).toEqual({ line: '1555 TARPON CENTER DR', unit, building: null });
+  });
+
+  test('a hash-prefixed building number is never read as the unit', () => {
+    expect(typedDwellingUnit('100 Main St Bldg #2 Unit 301, Venice, FL 34285'))
+      .toEqual({ line: '100 MAIN ST', unit: '301', building: '2' });
+    expect(typedDwellingUnit('100 Main St Unit 301 Bldg #2, Venice, FL 34285'))
+      .toEqual({ line: '100 MAIN ST', unit: '301', building: '2' });
   });
 
   test('suite / lot / trailer / room are not dwelling units', () => {

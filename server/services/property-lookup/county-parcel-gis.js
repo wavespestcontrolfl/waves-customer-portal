@@ -185,9 +185,11 @@ function situsUnitDesignator(situs, resolveSitusLine) {
   if (!line) return null;
   const bldg = head.match(SITUS_BUILDING_RE);
   const building = bldg ? normalizeUnitId(bldg[1]) : null;
-  // Labeled designator, read off the line with any trailing BLDG removed
-  // ("UNIT 4 BLDG C" and "BLDG C UNIT 4" both name unit 4).
-  const labeled = head.replace(/\s+(?:BLDG|BUILDING)\.?\s*#?\s*[A-Z0-9-]+\s*$/i, '').match(SITUS_DWELLING_UNIT_RE);
+  // Labeled designator, read off the line with the BLDG designator removed
+  // wherever it sits ("UNIT 4 BLDG C", "BLDG C UNIT 4" and "BLDG #2 UNIT 4"
+  // all name unit 4).
+  const labeled = head.replace(new RegExp(SITUS_BUILDING_RE.source, 'gi'), ' ').replace(/\s+/g, ' ').trim()
+    .match(SITUS_DWELLING_UNIT_RE);
   if (labeled) {
     const unit = normalizeUnitId(labeled[1]);
     return unit ? { line, unit, building } : null;

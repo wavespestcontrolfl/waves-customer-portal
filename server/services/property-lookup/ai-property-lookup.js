@@ -1973,11 +1973,13 @@ const TYPED_NON_DWELLING_RE = /\b(?:STE|SUITE|LOT|TRLR|RM)\b/i;
 function typedDwellingUnit(address) {
   const raw = String(address || '');
   if (!raw.trim() || TYPED_NON_DWELLING_RE.test(raw)) return null;
-  const unitMatch = raw.match(TYPED_DWELLING_UNIT_RE);
+  // Building first, removed whole, so "BLDG #2 UNIT 301" never reads its
+  // "#2" as the unit.
   const bldgMatch = raw.match(TYPED_BUILDING_RE);
-  const street = raw
+  const withoutBuilding = raw.replace(new RegExp(TYPED_BUILDING_RE.source, 'gi'), ' ');
+  const unitMatch = withoutBuilding.match(TYPED_DWELLING_UNIT_RE);
+  const street = withoutBuilding
     .replace(new RegExp(TYPED_DWELLING_UNIT_RE.source, 'gi'), ' ')
-    .replace(new RegExp(TYPED_BUILDING_RE.source, 'gi'), ' ')
     .split(',')
     .map((part) => part.trim())
     .filter(Boolean)[0] || '';
