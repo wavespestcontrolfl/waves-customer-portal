@@ -70,14 +70,15 @@ const connection = process.env.CALL_BOOKING_LINK_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
 const schema = `call_booking_link_${randomUUID().replaceAll('-', '')}`;
 // call_booking_link_text_handoffs (codex #5018 r13 P1, migration
-// 20260927160000) is the ONE table this lane adds — the throwaway database
-// this file runs against must be FULLY migrated (never the possibly-stale
-// waves_test template alone) for it to exist in `public` before the clone
-// below runs.
+// 20260927160000) and consultation_link_send_attempts (codex #5196
+// follow-up, migration 20260928130000) are the two tables this lane adds —
+// the throwaway database this file runs against must be FULLY migrated
+// (never the possibly-stale waves_test template alone) for either to exist
+// in `public` before the clone below runs.
 // customer_accounts (codex #5196 P1-A): ensureCustomerAccount's own account
 // row — needed once the quick-add lock-fence test below drives that real
 // function, not merely a `customers` insert.
-const TABLES = ['customers', 'customer_accounts', 'leads', 'call_log', 'system_settings', 'scheduled_services', 'short_codes', 'sms_log', 'activity_log', 'call_booking_link_text_handoffs', 'estimates'];
+const TABLES = ['customers', 'customer_accounts', 'leads', 'call_log', 'system_settings', 'scheduled_services', 'short_codes', 'sms_log', 'activity_log', 'call_booking_link_text_handoffs', 'consultation_link_send_attempts', 'estimates'];
 let admin;
 let mockPg;
 jest.setTimeout(30000);
@@ -376,6 +377,15 @@ postgres('call-booking-link-text against PostgreSQL', () => {
   // have discarded it right along with the throw; before THIS round's
   // fix, writing it to call_log at all — even via a separate connection —
   // would have deadlocked against dbi's own FOR UPDATE lock on that row.
+  // codex #5196 P1 scenario: the SAME rollback also proves
+  // consultation_link_send_attempts — written in the SAME markerDb()
+  // transaction as the handoff marker — survives too, and that a QUEUED
+  // WAITER's own linkSentRecently read (on a genuinely separate connection,
+  // never mockPg's own trx) sees it despite the outer transaction's
+  // rollback. This is the durable evidence that closes the gap twilio.js's
+  // own comment describes: an accepted send whose outer transaction then
+  // fails to commit releases lockSmsPhone before a competing sender can see
+  // either the rolled-back sms_log row or a marker.
   test('a thrown error inside the real withSmsHandoff transaction rolls that transaction back, but the handoff marker — on its own table, never call_log — survives', async () => {
     const leadId = await insertLead(mockPg, { phone: '+15555550444' });
     const send_at = new Date(NOW.getTime() - 60 * 60 * 1000).toISOString();
@@ -405,6 +415,15 @@ postgres('call-booking-link-text against PostgreSQL', () => {
     expect(row.metadata.call_booking_link_text.handoff_started_at).toBeUndefined(); // never written to call_log at all
     const marker = await mockPg(callBookingLinkText.HANDOFF_MARKER_TABLE).where({ call_log_id: callId }).first();
     expect(marker).toBeTruthy(); // the marker row survived the rollback
+
+    // codex #5196 P1: the shared attempt row survived the SAME rollback,
+    // and a queued waiter's own linkSentRecently read (its own connection,
+    // never mockPg's trx) sees it — the exact evidence the P1 finding says
+    // a competing sender needs.
+    const attempt = await mockPg(callBookingLinkText.CONSULTATION_ATTEMPT_TABLE).where({ call_log_id: callId }).first();
+    expect(attempt).toMatchObject({ lead_id: leadId, to_phone: '+15555550444', source: 'call_booking_link_text' });
+    await expect(callBookingLinkText.linkSentRecently(mockPg, leadId, NOW)).resolves.toBe(true);
+    await expect(callBookingLinkText.linkSentRecently(mockPg, leadId, NOW, { matchPhone: '+15555550444' })).resolves.toBe(true);
 
     const outcome = await callBookingLinkText.recoverAbandonedClaim(mockPg, { ...call, metadata: row.metadata }, NOW);
     expect(outcome).toEqual({ ambiguous: true }); // never resent, exactly the contract this marker exists to prove
@@ -1299,6 +1318,67 @@ postgres('call-booking-link-text against PostgreSQL', () => {
     expect(oldMarker).toBeUndefined(); // pruned
     const recentMarker = await mockPg(callBookingLinkText.HANDOFF_MARKER_TABLE).where({ call_log_id: recentCallId }).first();
     expect(recentMarker).toBeTruthy(); // kept — still meaningful to recoverAbandonedClaim
+  });
+
+  // codex #5196: same housekeeping proof for consultation_link_send_attempts
+  // — CONSULTATION_ATTEMPT_RETENTION_MS (15 days) is longer than
+  // LINK_SENT_RECENTLY_DEFAULT_WINDOW_MS (14 days), so a row is never
+  // pruned while a dedupe read could still consult it.
+  test('pruneConsultationLinkAttempts deletes only attempt rows older than CONSULTATION_ATTEMPT_RETENTION_MS', async () => {
+    const leadId = await insertLead(mockPg);
+    const oldStamp = new Date(NOW.getTime() - callBookingLinkText.CONSULTATION_ATTEMPT_RETENTION_MS - 60 * 60 * 1000);
+    const recentStamp = new Date(NOW.getTime() - 60 * 60 * 1000);
+    await mockPg(callBookingLinkText.CONSULTATION_ATTEMPT_TABLE).insert({ lead_id: leadId, to_phone: '+15555550991', source: 'test', started_at: oldStamp });
+    await mockPg(callBookingLinkText.CONSULTATION_ATTEMPT_TABLE).insert({ lead_id: leadId, to_phone: '+15555550992', source: 'test', started_at: recentStamp });
+
+    const deleted = await callBookingLinkText.pruneConsultationLinkAttempts(mockPg, NOW);
+    expect(deleted).toBe(1);
+    const oldRow = await mockPg(callBookingLinkText.CONSULTATION_ATTEMPT_TABLE).where({ to_phone: '+15555550991' }).first();
+    expect(oldRow).toBeUndefined(); // pruned
+    const recentRow = await mockPg(callBookingLinkText.CONSULTATION_ATTEMPT_TABLE).where({ to_phone: '+15555550992' }).first();
+    expect(recentRow).toBeTruthy(); // kept — still inside the dedupe window
+  });
+
+  // codex #5196 P2 scenario: an automated attempt to phone A, then staff
+  // correct the lead's phone to B — a manual send to B must NOT be refused
+  // by the stale attempt evidence at A. Exercises insertConsultationLinkAttempt
+  // (the shared writer every sender uses) and linkSentRecently's own
+  // matchPhone scoping together, against a real Postgres connection.
+  test('a manual send to a corrected phone B is not refused by an automated attempt recorded against the OLD phone A', async () => {
+    const leadId = await insertLead(mockPg, { phone: '+15555550601' });
+    await callBookingLinkText.insertConsultationLinkAttempt(
+      { leadId, toPhone: '+15555550601', source: 'call_booking_link_text' },
+      mockPg,
+    );
+
+    // Lead-wide (the automated lane's own 14-day dedupe call) still sees it.
+    await expect(callBookingLinkText.linkSentRecently(mockPg, leadId, NOW)).resolves.toBe(true);
+    // Phone-scoped to the OLD number A also sees it.
+    await expect(callBookingLinkText.linkSentRecently(mockPg, leadId, NOW, { matchPhone: '+15555550601' })).resolves.toBe(true);
+    // Phone-scoped to the NEW, corrected number B does not — the manual
+    // send to B must be allowed through.
+    await expect(callBookingLinkText.linkSentRecently(mockPg, leadId, NOW, { matchPhone: '+15555550602' })).resolves.toBe(false);
+  });
+
+  // codex #5196 P2 scenario, extended: with insertConsultationLinkAttempt's
+  // returned id deleted (the same cleanup an onDispatchAbort/definite-
+  // failure path runs), the row is gone entirely — proving deleteConsultationLinkAttempt
+  // genuinely removes it, not merely masks it.
+  test('deleteConsultationLinkAttempt removes exactly the row its id names', async () => {
+    const leadId = await insertLead(mockPg, { phone: '+15555550701' });
+    const keptId = await callBookingLinkText.insertConsultationLinkAttempt(
+      { leadId, toPhone: '+15555550701', source: 'admin_leads_send_sms' },
+      mockPg,
+    );
+    const deletedId = await callBookingLinkText.insertConsultationLinkAttempt(
+      { leadId, toPhone: '+15555550702', source: 'admin_communications_manual_sms' },
+      mockPg,
+    );
+    await callBookingLinkText.deleteConsultationLinkAttempt(deletedId);
+    const kept = await mockPg(callBookingLinkText.CONSULTATION_ATTEMPT_TABLE).where({ id: keptId }).first();
+    const deleted = await mockPg(callBookingLinkText.CONSULTATION_ATTEMPT_TABLE).where({ id: deletedId }).first();
+    expect(kept).toBeTruthy();
+    expect(deleted).toBeUndefined();
   });
 
   // codex #5018 P2: leads.estimate_id is only the FK RESCUED at send/view

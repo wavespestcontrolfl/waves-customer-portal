@@ -1553,17 +1553,24 @@ const TwilioService = {
                 // any waiter (a composer send, admin-leads' manual send, or
                 // this lane's own next worker tick) instead of writing the
                 // recovery row unprotected while a waiter already reads
-                // linkSentRecently with no evidence. This narrows the window
-                // (recovery attempts the lock immediately, in the same tick
-                // the original transaction just released it) but does not
-                // fully close it — Postgres's own lock queue can still grant
-                // a waiter that was already blocked on this key before this
-                // recovery transaction even opens. linkSentRecently's own
-                // call_booking_link_text_handoffs marker check (codex #5196
-                // P1-B, see that function) is the other half of narrowing
-                // this specific gap for this lane's own sends; it does not
-                // cover every possible caller of this recovery path (see
-                // that comment for exactly which ones it does).
+                // linkSentRecently with no evidence.
+                //
+                // For a consultation-link send specifically, this gap is now
+                // fully closed, not merely narrowed: linkSentRecently's own
+                // consultation_link_send_attempts check (codex #5196, see
+                // that function) reads a row EVERY consultation-link sender
+                // (this lane's own worker, admin-leads.js, admin-
+                // communications.js) writes at onDispatchStart — BEFORE
+                // messages.create() runs, on markerDb()'s own separate,
+                // immediately-committed connection — so it is already
+                // durably visible to any waiter's read well before this
+                // recovery transaction even opens, regardless of how
+                // Postgres's own lock queue orders lockSmsPhone
+                // re-acquisition here. Re-acquiring the lock is still
+                // correct — it is what serializes this sms_log recovery
+                // insert itself against a concurrent writer — it is just no
+                // longer what closes the consultation-link duplicate-send
+                // window.
                 await db.transaction(async (trx) => {
                   await lockSmsPhone(trx, to);
                   await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`sms_log_sid:${message.sid}`]);

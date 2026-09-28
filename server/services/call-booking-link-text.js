@@ -30,15 +30,22 @@
  *
  * Mechanism: the decision and its timer both live on the call's own
  * `call_log.metadata.call_booking_link_text` — set once, at most, per call:
- * The one exception is the durable pre-provider handoff marker (codex
- * #5018 r13 P1) — a separate, purpose-built table,
+ * The exceptions are two purpose-built durable-marker tables. The first is
+ * the pre-provider handoff marker (codex #5018 r13 P1),
  * `call_booking_link_text_handoffs` (migration 20260927160000), keyed by
  * `call_log_id`. It exists ONLY because neverSendRecheck ALSO locks the
  * call_log row FOR UPDATE through the actual provider request (closing a
  * forced-reprocess race), and a marker written to call_log itself from a
  * separate connection would deadlock against that same lock — see
- * neverSendRecheck's own doc comment for the full reasoning. Nothing else
- * in this lane uses a table of its own.
+ * neverSendRecheck's own doc comment for the full reasoning. The second is
+ * `consultation_link_send_attempts` (migration 20260928130000, codex
+ * #5196 P1/P2 follow-up) — the SAME durable-evidence pattern generalized
+ * across all three consultation-link senders (this lane's own worker AND
+ * the manual sends in admin-leads.js/admin-communications.js), keyed by
+ * lead_id + to_phone, so linkSentRecently's phone-scoped manual-race guard
+ * can see a competing sender's in-flight attempt even if its own
+ * transaction later rolls back. See insertConsultationLinkAttempt's own
+ * doc comment.
  *   { status: 'skipped', reason, staged_at }                — never eligible
  *   { status: 'pending', lead_id, send_at, original_send_at, staged_at } — waiting out the delay
  *     (original_send_at is set once at staging and never rewritten by a
@@ -102,6 +109,22 @@ const HANDOFF_MARKER_TABLE = 'call_booking_link_text_handoffs';
 // resolved through recoverAbandonedClaim/recoverStaleClaims (both bounded
 // well under a day), so it is never read again; the live sweep prunes it.
 const HANDOFF_MARKER_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+
+// Durable pre-provider marker for ALL THREE consultation-link senders —
+// this lane's own automated worker AND the manual sends in
+// admin-leads.js/admin-communications.js (migration 20260928130000, codex
+// #5196 P1/P2 follow-up). HANDOFF_MARKER_TABLE above only ever protected
+// THIS lane's own attempt; a manual send accepted by Twilio whose outer
+// transaction then failed to commit released lockSmsPhone with no durable
+// evidence anywhere a competing sender could see, so it could resend the
+// same link. This table generalizes that evidence across all three
+// senders and carries the destination phone, so linkSentRecently's
+// phone-scoped manual-race check can use it too. See the migration's own
+// header for why it carries no foreign keys.
+const CONSULTATION_ATTEMPT_TABLE = 'consultation_link_send_attempts';
+// Longer than LINK_SENT_RECENTLY_DEFAULT_WINDOW_MS (14 days, below) — a row
+// is never pruned while a dedupe read could still consult it.
+const CONSULTATION_ATTEMPT_RETENTION_MS = 15 * 24 * 60 * 60 * 1000;
 
 // linkSentRecently's own default dedupe window — "was this lead's link
 // already sent" for the automated lane's own final pre-send refusal.
@@ -1046,37 +1069,42 @@ async function linkSentRecently(conn, leadId, now, { windowMs = LINK_SENT_RECENT
   const applyPhoneScope = (query) => (matchPhoneKey && matchPhoneKey.length === 10
     ? query.whereRaw(nanpStoredPhoneClause('sms_log.to_phone'), [matchPhoneKey])
     : query);
-  // codex #5196 P1-B: an unresolved call_booking_link_text_handoffs marker
-  // for THIS lead's own staged call, dated inside the window, is durable
-  // evidence written on a SEPARATE, immediately-committed connection
-  // (markerDb(), never `trx`) at twilio.js's REAL attempt boundary —
-  // onDispatchStart, right before messages.create() runs — so it exists
-  // regardless of whether the handoff transaction that opened around it
-  // later committed, rolled back, or is still mid-recovery right now (see
-  // twilio.js's in-handoff sms_log insert/recovery comment for the gap
-  // this specifically closes: a waiter's read landing between the phone
-  // lock releasing and that recovery's own write landing). A marker for an
-  // attempt that provably never reached Twilio does not linger here — it
-  // is deleted at that refusal (onDispatchAbort) or at the definite-
-  // failure cleanup in recordRetryableDecision — so this cannot mistake
-  // "never attempted" for "sent"; it can only ever over-count a genuine
-  // attempt (success, crash-recovered ambiguous, or a still-settling one)
-  // as "recently sent," which is the same safe-over-silent direction every
-  // other check in this function already takes.
+  // codex #5196 P1/P2: durable pre-provider evidence from
+  // CONSULTATION_ATTEMPT_TABLE (migration 20260928130000) — written by ALL
+  // THREE consultation-link senders (this lane's own worker AND the manual
+  // sends in admin-leads.js/admin-communications.js), on a SEPARATE,
+  // immediately-committed connection (markerDb(), never `trx`) at each
+  // sender's REAL attempt boundary — onDispatchStart, right before
+  // messages.create() runs — so it exists regardless of whether the
+  // sender's own handoff transaction later committed, rolled back, or is
+  // still mid-recovery right now. Replaces the original P1-B fix's
+  // HANDOFF_MARKER_TABLE-only join, which only ever protected THIS lane's
+  // own attempt and left a manual send with no durable evidence a
+  // competing sender could see (codex #5196 P1). A row for an attempt that
+  // provably never reached Twilio does not linger here — it is deleted at
+  // that refusal (onDispatchAbort) or at a definite send failure — so this
+  // cannot mistake "never attempted" for "sent"; it can only ever
+  // over-count a genuine attempt (success, crash-recovered ambiguous, or a
+  // still-settling one) as "recently sent," the same safe-over-silent
+  // direction every other check in this function already takes.
   //
-  // Deliberately NOT phone-scoped even when matchPhone (codex #5196 P2) is
-  // given — the marker carries no destination phone of its own to compare
-  // (only call_log_id), and this table is a coarse, short-lived safety net
-  // (see its own doc comment), not the primary phone-matched evidence
-  // (sms_log.to_phone) the check below already scopes correctly. Staying
-  // lead-wide here is the same safe-over-precise direction as every other
-  // check in this function.
-  const recentHandoff = await conn(HANDOFF_MARKER_TABLE)
-    .join('call_log', 'call_log.id', `${HANDOFF_MARKER_TABLE}.call_log_id`)
-    .where(`${HANDOFF_MARKER_TABLE}.handoff_started_at`, '>=', since)
-    .whereRaw("call_log.metadata->:key->>'lead_id' = :leadId", { key: METADATA_KEY, leadId: String(leadId) })
-    .first(`${HANDOFF_MARKER_TABLE}.call_log_id`);
-  if (recentHandoff) return true;
+  // Phone-scoped when matchPhone is given (codex #5196 P2) — the SAME
+  // nanpStoredPhoneClause matcher applyPhoneScope uses on sms_log.to_phone
+  // below, applied here to CONSULTATION_ATTEMPT_TABLE.to_phone, so an
+  // attempt to phone A never blocks a manual send to a DIFFERENT phone B
+  // for the same lead — the exact false refusal the old lead-wide handoff
+  // join produced (a lead corrected from A to B within the manual-race
+  // window still 409'd a legitimate send to B). Lead-wide (no matchPhone)
+  // for this lane's own 14-day dedupe call, unchanged — that call's own
+  // concern is "has ANY current number for this lead already gotten this
+  // link," not one specific destination.
+  const recentAttempt = await (matchPhoneKey && matchPhoneKey.length === 10
+    ? conn(CONSULTATION_ATTEMPT_TABLE).whereRaw(nanpStoredPhoneClause('to_phone'), [matchPhoneKey])
+    : conn(CONSULTATION_ATTEMPT_TABLE))
+    .where('lead_id', leadId)
+    .where('started_at', '>=', since)
+    .first('id');
+  if (recentAttempt) return true;
   // excludeUnresolvedSendReservations (codex r1 P2): 'sending' also covers
   // a pre-provider reply/review-ask RESERVATION row — a placeholder that
   // never reached Twilio, not delivery evidence. Every other caller of
@@ -1459,6 +1487,37 @@ function sendReadiness(call, entry, now) {
   return call.v2_extraction_status === 'valid' ? null : `extraction_${call.v2_extraction_status}`;
 }
 
+// Shared writer for all three consultation-link senders (codex #5196
+// P1/P2 follow-up; migration 20260928130000). Runs on markerDb()'s own
+// separate connection by default — from inside the sender's held handoff
+// transaction, never the sender's own `trx` — or on a transaction already
+// open on markerDb() when the caller needs it committed atomically with
+// something else (the automated lane's own onDispatchStart below, which
+// combines it with HANDOFF_MARKER_TABLE's insert). Returns the new row's
+// id so onDispatchAbort/a definite-failure cleanup can delete exactly
+// this attempt, never a sibling one.
+async function insertConsultationLinkAttempt({ leadId, toPhone, source, callLogId = null }, conn = markerDb()) {
+  const inserted = await conn(CONSULTATION_ATTEMPT_TABLE)
+    .insert({ lead_id: leadId, to_phone: toPhone, source, call_log_id: callLogId, started_at: new Date() })
+    .returning('id');
+  return inserted?.[0]?.id ?? inserted?.[0] ?? null;
+}
+
+// Best-effort delete by row id — every consultation-link sender's own
+// onDispatchAbort, and a DEFINITE post-send failure (not a real provider
+// send, not an ambiguous outcome — isRealProviderSend/
+// isAmbiguousProviderOutcome), calls this. A cleanup failure just leaves
+// the row for linkSentRecently to over-count — the same safe-over-silent
+// direction as this lane's own handoff-marker cleanup.
+async function deleteConsultationLinkAttempt(attemptId) {
+  if (attemptId == null) return;
+  try {
+    await markerDb()(CONSULTATION_ATTEMPT_TABLE).where({ id: attemptId }).del();
+  } catch (err) {
+    logger.warn(`[call-booking-link-text] consultation-link attempt cleanup failed for id ${attemptId} (${err.code || err.name || 'error'})`);
+  }
+}
+
 /**
  * Send-time re-check + dispatch for ONE already-claimed call. Re-derives
  * every "never" condition from fresh rows — nothing here trusts the
@@ -1586,8 +1645,20 @@ async function dispatchClaimedCall(conn, call, now) {
     // the same call_log_id across retries of the SAME claimed row (a claim
     // is per-dispatch-tick, not per-call) — the FIRST attempt's timestamp
     // is the one that matters; never overwritten.
-    onDispatchStart: () => markerDb()(HANDOFF_MARKER_TABLE)
-      .insert({ call_log_id: call.id, handoff_started_at: new Date() }).onConflict('call_log_id').ignore(),
+    //
+    // codex #5196 P1: the shared consultation_link_send_attempts row
+    // (CONSULTATION_ATTEMPT_TABLE — see its own doc comment for why every
+    // sender writes it, not only this lane) is inserted in the SAME
+    // markerDb() transaction as the handoff marker, so a failed write can
+    // never leave one without the other.
+    onDispatchStart: () => markerDb().transaction(async (mtrx) => {
+      await mtrx(HANDOFF_MARKER_TABLE)
+        .insert({ call_log_id: call.id, handoff_started_at: new Date() }).onConflict('call_log_id').ignore();
+      await insertConsultationLinkAttempt(
+        { leadId, toPhone: destinationPhone, source: 'call_booking_link_text', callLogId: call.id },
+        mtrx,
+      );
+    }),
     // codex #5018 r15 pre-push P1: onDispatchStart's own INSERT is a real
     // await, real wall-clock time that can itself carry the send window's
     // close boundary the last isStillValid() check ran before it. When
@@ -1596,8 +1667,11 @@ async function dispatchClaimedCall(conn, call, now) {
     // attempt never reached dispatchStarted/messages.create() at all, so
     // recoverAbandonedClaim must see NO marker here, not a permanent
     // "ambiguous, never resent" for a send that was provably never
-    // attempted.
-    onDispatchAbort: () => markerDb()(HANDOFF_MARKER_TABLE).where({ call_log_id: call.id }).del(),
+    // attempted. Clears BOTH tables (codex #5196), in the same transaction.
+    onDispatchAbort: () => markerDb().transaction(async (mtrx) => {
+      await mtrx(HANDOFF_MARKER_TABLE).where({ call_log_id: call.id }).del();
+      await mtrx(CONSULTATION_ATTEMPT_TABLE).where({ call_log_id: call.id }).del();
+    }),
     // codex #5018 structural fix (post-r7): opts INTO twilio.js's in-
     // transaction sms_log insert. This lane's own withSmsHandoff below
     // already takes lockCustomerComms for every candidate customer id
@@ -1839,7 +1913,13 @@ async function recordRetryableDecision(conn, call, entry, leadId, now, result, s
   // cleanup failure just leaves the stale marker for that same
   // (already-handled) misclassification, never a duplicate send.
   try {
-    await markerDb()(HANDOFF_MARKER_TABLE).where({ call_log_id: call.id }).del();
+    // codex #5196: clears the shared consultation_link_send_attempts row
+    // alongside the handoff marker, same transaction — see
+    // insertConsultationLinkAttempt's own doc comment.
+    await markerDb().transaction(async (mtrx) => {
+      await mtrx(HANDOFF_MARKER_TABLE).where({ call_log_id: call.id }).del();
+      await mtrx(CONSULTATION_ATTEMPT_TABLE).where({ call_log_id: call.id }).del();
+    });
   } catch (markerErr) {
     logger.warn(`[call-booking-link-text] stale handoff marker cleanup failed for call ${call.id} (${markerErr.code || markerErr.name || 'error'})`);
   }
@@ -1978,6 +2058,19 @@ async function pruneHandoffMarkers(conn, now) {
   return conn(HANDOFF_MARKER_TABLE).whereIn('call_log_id', stale).del();
 }
 
+// Housekeeping for CONSULTATION_ATTEMPT_TABLE (codex #5196), same shape as
+// pruneHandoffMarkers above. CONSULTATION_ATTEMPT_RETENTION_MS (15 days)
+// is deliberately longer than LINK_SENT_RECENTLY_DEFAULT_WINDOW_MS (14
+// days) — a row is never pruned while a dedupe read could still consult
+// it, across all three consultation-link senders, not only this lane's
+// own bounded recovery paths.
+async function pruneConsultationLinkAttempts(conn, now) {
+  const stale = conn(CONSULTATION_ATTEMPT_TABLE)
+    .where('started_at', '<', new Date(now.getTime() - CONSULTATION_ATTEMPT_RETENTION_MS))
+    .limit(DISPATCH_BATCH).select('id');
+  return conn(CONSULTATION_ATTEMPT_TABLE).whereIn('id', stale).del();
+}
+
 // One row's claim → dispatch → per-row-failure-recovery attempt, split out
 // of sweep()'s own dispatch loop (CLAUDE.md rule 20 — a genuinely separate
 // phase, not a relocated fragment): never throws — a genuine per-row
@@ -2050,6 +2143,15 @@ async function sweep(conn = db, { now = new Date() } = {}) {
   } catch (err) {
     logger.warn(`[call-booking-link-text] handoff marker housekeeping failed (${err.code || err.name || 'error'})`);
   }
+  // Same housekeeping for CONSULTATION_ATTEMPT_TABLE (codex #5196) — every
+  // row here has resolved (through this lane's own recovery paths, or a
+  // manual sender's own onDispatchAbort/definite-failure cleanup) long
+  // before it turns CONSULTATION_ATTEMPT_RETENTION_MS old.
+  try {
+    await pruneConsultationLinkAttempts(conn, now);
+  } catch (err) {
+    logger.warn(`[call-booking-link-text] consultation-link attempt housekeeping failed (${err.code || err.name || 'error'})`);
+  }
   return { staged, ineligible, sent, dispatchSkipped, staleClaimsRecovered };
 }
 
@@ -2088,6 +2190,16 @@ module.exports = {
   HANDOFF_MARKER_TABLE,
   HANDOFF_MARKER_RETENTION_MS,
   pruneHandoffMarkers,
+  // consultation_link_send_attempts (codex #5196 P1/P2 follow-up, migration
+  // 20260928130000): insertConsultationLinkAttempt/deleteConsultationLinkAttempt
+  // are reused directly by admin-leads.js and admin-communications.js's
+  // manual sends, the same way linkSentRecently already is — real
+  // cross-module callers, not test-only reach-ins.
+  CONSULTATION_ATTEMPT_TABLE,
+  CONSULTATION_ATTEMPT_RETENTION_MS,
+  insertConsultationLinkAttempt,
+  deleteConsultationLinkAttempt,
+  pruneConsultationLinkAttempts,
   sweep,
   // linkSentRecently + its manual-send race-guard window: reused directly by
   // admin-leads.js and admin-communications.js (see

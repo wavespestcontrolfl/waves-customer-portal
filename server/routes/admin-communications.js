@@ -329,6 +329,12 @@ router.post('/sms', async (req, res, next) => {
   // (delivered state stamped, windowed from the send) before the provider
   // call — handed back on every no-send exit, recorded after a real send.
   let contractActivations = null;
+  // codex #5196 P1: the shared consultation_link_send_attempts row's id
+  // (see its own doc comment in call-booking-link-text.js) — declared here,
+  // not inside the try below, so the catch block's own definite-failure
+  // cleanup can see it too, the same way every other catch-visible send
+  // state above does.
+  let consultationAttemptId = null;
   const restoreContractLinks = async () => {
     if (!contractActivations) return;
     const activations = contractActivations;
@@ -1037,6 +1043,18 @@ router.post('/sms', async (req, res, next) => {
     const providerMessageType = autopayLinkTokens ? 'autopay_setup_link'
       : cardClaim ? require('../services/appointment-card-request').TEMPLATE_KEY
         : (messageType || 'manual');
+    // codex #5196 P1: durable pre-provider evidence for THIS send, written
+    // only when it carries a validated consultation link (outreachLeadId —
+    // same condition that runs the race guard below). consultationAttemptId
+    // itself is declared with the function's other catch-visible state,
+    // above the try block, so onDispatchAbort, the post-send definite-
+    // failure cleanup below, AND the catch block's own cleanup can all
+    // delete exactly this attempt. require()'d here rather than hoisted to
+    // module scope — this file's other call-booking-link-text.js reach-ins
+    // (linkSentRecently below) are lazy for the same reason: tests replace
+    // these exports with jest.spyOn, which a module-scope destructure
+    // would capture before the spy ever lands.
+    const { insertConsultationLinkAttempt, deleteConsultationLinkAttempt } = require('../services/call-booking-link-text');
     const sendMessage = (reservationId = null) => sendCustomerMessage({
       to,
       body: cleanBody,
@@ -1071,6 +1089,18 @@ router.post('/sms', async (req, res, next) => {
       // consultation link has nothing for that lane's worker to race.
       // Scoped to MANUAL_SEND_RACE_GUARD_WINDOW_MS (minutes), never the
       // 14-day dedupe window — staff may deliberately resend an older link.
+      //
+      // codex #5196 P1: onDispatchStart/onDispatchAbort write and clear the
+      // shared consultation_link_send_attempts row at twilio.js's own REAL
+      // attempt boundary — see admin-leads.js's identical hooks for what
+      // gap this closes. Only when this send carries a validated
+      // consultation link, same as the race guard just below.
+      onDispatchStart: outreachLeadId ? (async () => {
+        consultationAttemptId = await insertConsultationLinkAttempt({
+          leadId: outreachLeadId, toPhone: to, source: 'admin_communications_manual_sms',
+        });
+      }) : undefined,
+      onDispatchAbort: outreachLeadId ? (() => deleteConsultationLinkAttempt(consultationAttemptId)) : undefined,
       withSmsHandoff: (dispatch) => db.transaction(async (trx) => {
         await lockSmsPhone(trx, to);
         if (outreachLeadId) {
@@ -1244,6 +1274,11 @@ router.post('/sms', async (req, res, next) => {
       : await dispatch();
     const ambiguousProviderOutcome = autoSendExecutor.isAmbiguousProviderOutcome(result);
     const realProviderSend = autoSendExecutor.isRealProviderSend(result);
+    // codex #5196: a DEFINITE failure (never real, never ambiguous) clears
+    // the attempt row onDispatchStart wrote above.
+    if (consultationAttemptId != null && !realProviderSend && !ambiguousProviderOutcome) {
+      await deleteConsultationLinkAttempt(consultationAttemptId);
+    }
     // A definitive result settles the marker. Uncertainty keeps its linked
     // decisions held until a sent row or an operator verdict reconciles them.
     if (ambiguousProviderOutcome) await holdManualReservation();
@@ -1484,6 +1519,12 @@ router.post('/sms', async (req, res, next) => {
     const catchProviderOutcome = err?.providerOutcome;
     const ambiguousProviderOutcome = autoSendExecutor.isAmbiguousProviderOutcome(catchProviderOutcome);
     const realProviderSend = autoSendExecutor.isRealProviderSend(catchProviderOutcome);
+    // codex #5196: same definite-failure cleanup as the resolved-result
+    // path above, for a throw that reached (or passed through) onDispatchStart.
+    if (consultationAttemptId != null && !realProviderSend && !ambiguousProviderOutcome) {
+      const { deleteConsultationLinkAttempt } = require('../services/call-booking-link-text');
+      await deleteConsultationLinkAttempt(consultationAttemptId);
+    }
     if (ambiguousProviderOutcome) await holdManualReservation();
     else if (realProviderSend && manualReservationId) {
       await settleReplyHoldingReservation({ reservationId: manualReservationId, acceptedResult: catchProviderOutcome });

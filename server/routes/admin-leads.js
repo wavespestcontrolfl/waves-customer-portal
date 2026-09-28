@@ -1450,6 +1450,14 @@ router.post('/:id/send-sms', async (req, res, next) => {
     const ownerCustomerId = linkedOwnerId || bearerCheck.customerId || null;
 
     const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    const { insertConsultationLinkAttempt, deleteConsultationLinkAttempt } = require('../services/call-booking-link-text');
+    // codex #5196 P1: durable pre-provider evidence for THIS send, written
+    // only when it carries a validated consultation link (same condition
+    // that runs the race guard below) — see insertConsultationLinkAttempt's
+    // own doc comment. Kept in this closure so onDispatchAbort and the
+    // post-send definite-failure cleanup below both delete exactly this
+    // attempt, never a sibling one.
+    let consultationAttemptId = null;
     const sendResult = await sendCustomerMessage({
       to: lead.phone,
       body: message,
@@ -1485,6 +1493,21 @@ router.post('/:id/send-sms', async (req, res, next) => {
       // no link is never touched by this check at all — only a link
       // delivery landing in this same tiny race window is refused (409,
       // below).
+      //
+      // codex #5196 P1: onDispatchStart/onDispatchAbort write and clear the
+      // shared consultation_link_send_attempts row at twilio.js's own REAL
+      // attempt boundary — the durable evidence that closes the gap where
+      // Twilio accepts this send but the transaction below then fails to
+      // commit, releasing lockSmsPhone before a queued worker or composer
+      // send can see either the rolled-back sms_log row or this marker.
+      // Only when this send carries a validated consultation link — the
+      // SAME condition that runs the race guard just below.
+      onDispatchStart: bearerCheck.consultationLeadId ? (async () => {
+        consultationAttemptId = await insertConsultationLinkAttempt({
+          leadId: bearerCheck.consultationLeadId, toPhone: lead.phone, source: 'admin_leads_send_sms',
+        });
+      }) : undefined,
+      onDispatchAbort: bearerCheck.consultationLeadId ? (() => deleteConsultationLinkAttempt(consultationAttemptId)) : undefined,
       withSmsHandoff: (dispatch) => db.transaction(async (trx) => {
         await lockSmsPhone(trx, lead.phone);
         if (bearerCheck.consultationLeadId) {
@@ -1517,7 +1540,15 @@ router.post('/:id/send-sms', async (req, res, next) => {
         media,
       },
     });
-    const { isRealProviderSend } = require('../services/sms-auto-send');
+    const { isRealProviderSend, isAmbiguousProviderOutcome } = require('../services/sms-auto-send');
+    // codex #5196: a DEFINITE failure (never a real provider send, never
+    // ambiguous — the pending/still-settling provider outcomes keep their
+    // row) clears the attempt row written above. The race-guard refusal
+    // below never reaches here with a row to clean — onDispatchStart is
+    // never invoked when withSmsHandoff returns before calling dispatch().
+    if (consultationAttemptId != null && !isRealProviderSend(sendResult) && !isAmbiguousProviderOutcome(sendResult)) {
+      await deleteConsultationLinkAttempt(consultationAttemptId);
+    }
     // The manual-send race guard above (LINK_SENT_RECENTLY_RACE) is its own
     // refusal, not the generic blocked-send 422: 409 matches the "conflict
     // with something that just happened" the composer route below returns

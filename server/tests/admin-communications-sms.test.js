@@ -3295,3 +3295,97 @@ describe('the manual-send race guard (codex #5018 r15 P2 follow-up)', () => {
     expect(result).toEqual({ sent: true, sawTrx: true });
   });
 });
+
+// codex #5196 P1: the durable consultation_link_send_attempts marker —
+// written at twilio.js's REAL attempt boundary (onDispatchStart) and
+// cleared on an abort or a definite post-send failure — only for a send
+// that carries a validated consultation link (outreachLeadId, the SAME
+// condition that runs the manual-race guard above).
+describe('the consultation-link attempt marker (codex #5196 P1)', () => {
+  const LEAD_ID = 'aaaaaaaa-1111-4111-8111-111111111111';
+  let bearerSpy;
+  let insertAttemptSpy;
+  let deleteAttemptSpy;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.mockReset();
+    db.mockImplementation(() => makeUniversalBuilder());
+    bearerSpy = jest.spyOn(require('../services/composer-customer-links'), 'bearerLinkSendCheck')
+      .mockResolvedValue({ ok: true, consultationLeadId: LEAD_ID });
+    insertAttemptSpy = jest.spyOn(require('../services/call-booking-link-text'), 'insertConsultationLinkAttempt').mockResolvedValue('attempt-99');
+    deleteAttemptSpy = jest.spyOn(require('../services/call-booking-link-text'), 'deleteConsultationLinkAttempt').mockResolvedValue();
+  });
+  afterEach(() => {
+    bearerSpy.mockRestore();
+    insertAttemptSpy.mockRestore();
+    deleteAttemptSpy.mockRestore();
+  });
+
+  const send = (baseUrl, overrides = {}) => fetch(`${baseUrl}/admin/communications/sms`, {
+    method: 'POST',
+    headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ to: '+15551234567', body: 'Pick a time: portal.wavespestcontrol.com/l/cons1', leadId: LEAD_ID, ...overrides }),
+  });
+
+  test('a consultation send passes onDispatchStart/onDispatchAbort that write and clear the shared attempt row', async () => {
+    sendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM-attempt' });
+    await withServer(async (baseUrl) => {
+      const res = await send(baseUrl);
+      expect(res.status).toBe(200);
+    });
+    const { onDispatchStart, onDispatchAbort } = sendCustomerMessage.mock.calls[0][0];
+    expect(typeof onDispatchStart).toBe('function');
+    expect(typeof onDispatchAbort).toBe('function');
+    await onDispatchStart();
+    expect(insertAttemptSpy).toHaveBeenCalledWith({ leadId: LEAD_ID, toPhone: '+15551234567', source: 'admin_communications_manual_sms' });
+    await onDispatchAbort();
+    expect(deleteAttemptSpy).toHaveBeenCalledWith('attempt-99');
+  });
+
+  // Mirrors production ordering: twilio.js invokes onDispatchStart BEFORE
+  // sendCustomerMessage resolves, so the mock does the same here — proving
+  // the ROUTE's own post-send cleanup (not just the hook's own definition)
+  // fires for a definite failure.
+  test('a definite send failure (never real, never ambiguous) deletes the attempt row', async () => {
+    sendCustomerMessage.mockImplementation(async (opts) => {
+      if (opts.onDispatchStart) await opts.onDispatchStart();
+      return { sent: false, blocked: true, code: 'SOME_DEFINITE_FAILURE' };
+    });
+    await withServer(async (baseUrl) => { await send(baseUrl); });
+    expect(insertAttemptSpy).toHaveBeenCalled();
+    expect(deleteAttemptSpy).toHaveBeenCalledWith('attempt-99');
+  });
+
+  test('a real provider send keeps the attempt row (no cleanup call)', async () => {
+    sendCustomerMessage.mockImplementation(async (opts) => {
+      if (opts.onDispatchStart) await opts.onDispatchStart();
+      return { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-real' };
+    });
+    await withServer(async (baseUrl) => { await send(baseUrl); });
+    expect(insertAttemptSpy).toHaveBeenCalled();
+    expect(deleteAttemptSpy).not.toHaveBeenCalled();
+  });
+
+  test('an ambiguous provider outcome keeps the attempt row (no cleanup call)', async () => {
+    sendCustomerMessage.mockImplementation(async (opts) => {
+      if (opts.onDispatchStart) await opts.onDispatchStart();
+      return { sent: false, retryable: true, deliveryOutcome: 'uncertain' };
+    });
+    await withServer(async (baseUrl) => { await send(baseUrl); });
+    expect(insertAttemptSpy).toHaveBeenCalled();
+    expect(deleteAttemptSpy).not.toHaveBeenCalled();
+  });
+
+  test('a plain reply with no consultation link never touches the attempt marker', async () => {
+    bearerSpy.mockResolvedValue({ ok: true }); // no consultationLeadId
+    sendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM-plain' });
+    await withServer(async (baseUrl) => {
+      await send(baseUrl, { body: 'Running a bit late today.' });
+    });
+    const { onDispatchStart, onDispatchAbort } = sendCustomerMessage.mock.calls[0][0];
+    expect(onDispatchStart).toBeUndefined();
+    expect(onDispatchAbort).toBeUndefined();
+    expect(insertAttemptSpy).not.toHaveBeenCalled();
+  });
+});

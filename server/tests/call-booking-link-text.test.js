@@ -75,6 +75,8 @@ const {
   HANDOFF_MARKER_TABLE,
   HANDOFF_MARKER_RETENTION_MS,
   DISPATCH_BATCH,
+  CONSULTATION_ATTEMPT_TABLE,
+  linkSentRecently,
 } = require('../services/call-booking-link-text');
 
 // ── computeSendAt — 2h delay, 6pm ET cutoff → 8am ET next morning ─────────
@@ -1249,6 +1251,80 @@ describe('consentedDestination', () => {
   });
 });
 
+// ── linkSentRecently: consultation_link_send_attempts scoping (codex #5196) ──
+// Query-construction proof on a mocked conn — the real cross-sender,
+// rollback-surviving behavior is proven against a real Postgres connection
+// in call-booking-link-text-postgres.test.js (the P1/P2 scenarios).
+describe('linkSentRecently: consultation_link_send_attempts scoping (codex #5196)', () => {
+  const LEAD_ID = 'lead-attempt-1';
+  const NOW = new Date('2026-09-28T18:00:00Z');
+
+  function attemptConn({ attemptRow = undefined } = {}) {
+    const calls = { whereRaw: [], where: [] };
+    const conn = jest.fn((table) => {
+      const chain = {};
+      ['whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'whereExists', 'orderBy', 'limit', 'modify', 'forUpdate', 'join', 'select']
+        .forEach((m) => { chain[m] = jest.fn(() => chain); });
+      chain.whereRaw = jest.fn((...args) => { if (table === CONSULTATION_ATTEMPT_TABLE) calls.whereRaw.push(args); return chain; });
+      chain.where = jest.fn((...args) => { if (table === CONSULTATION_ATTEMPT_TABLE) calls.where.push(args); return chain; });
+      chain.first = jest.fn(async () => (table === CONSULTATION_ATTEMPT_TABLE ? attemptRow : undefined));
+      return chain;
+    });
+    conn.calls = calls;
+    return conn;
+  }
+
+  // The lane's own 14-day dedupe call (dispatchIneligibleReason, no
+  // matchPhone) stays lead-wide — "has ANY current number for this lead
+  // already gotten this link."
+  test('lead-wide (no matchPhone): scoped by lead_id + started_at only, never phone-scoped', async () => {
+    const conn = attemptConn();
+    await linkSentRecently(conn, LEAD_ID, NOW);
+    expect(conn.calls.where).toEqual(expect.arrayContaining([['lead_id', LEAD_ID]]));
+    expect(conn.calls.whereRaw).toEqual([]); // no phone scope applied to the attempts table
+  });
+
+  // codex #5196 P2: the manual guards pass matchPhone — an attempt to
+  // phone A must never block a send to a DIFFERENT phone B for the same
+  // lead (the exact false refusal the old lead-wide handoff join produced).
+  test('matchPhone with a full NANP number scopes the attempts query to that destination', async () => {
+    const conn = attemptConn();
+    await linkSentRecently(conn, LEAD_ID, NOW, { matchPhone: '+19415550111' });
+    expect(conn.calls.whereRaw).toHaveLength(1);
+    expect(conn.calls.whereRaw[0][1]).toEqual(['9415550111']);
+  });
+
+  // An international/partial number never NANP-matches 10 digits — the
+  // same fallback applyPhoneScope already uses for sms_log.to_phone.
+  test('a non-10-digit matchPhone key is never applied as a phone scope', async () => {
+    const conn = attemptConn();
+    await linkSentRecently(conn, LEAD_ID, NOW, { matchPhone: '+442071234567' });
+    expect(conn.calls.whereRaw).toEqual([]);
+  });
+
+  test('a recent attempt row (within the window) short-circuits the whole check to true', async () => {
+    const conn = attemptConn({ attemptRow: { id: 1 } });
+    await expect(linkSentRecently(conn, LEAD_ID, NOW)).resolves.toBe(true);
+  });
+
+  test('no attempt row falls through to the sms_log/short-code checks (still false when those are empty too)', async () => {
+    const conn = attemptConn({ attemptRow: undefined });
+    await expect(linkSentRecently(conn, LEAD_ID, NOW)).resolves.toBe(false);
+  });
+
+  // windowMs bounds `started_at >= since` — rows outside the passed window
+  // are never even matched by the WHERE clause a real Postgres connection
+  // would send (the mocked chain can't prove the boundary itself; that
+  // proof is the Postgres suite's own "rows outside window ignored" case).
+  test('the started_at filter uses `since` derived from windowMs, not the default 14-day window', async () => {
+    const conn = attemptConn();
+    const windowMs = 10 * 60 * 1000;
+    await linkSentRecently(conn, LEAD_ID, NOW, { windowMs });
+    const sinceCall = conn.calls.where.find(([col]) => col === 'started_at');
+    expect(sinceCall[2].getTime()).toBe(NOW.getTime() - windowMs);
+  });
+});
+
 // ── neverSendRecheck — the providerPreSendCheck hook ──────────────────────
 // codex r2 P2: re-runs the MUTABLE never-send predicates on the connection
 // send-customer-message.js hands this callback, right before Twilio's own
@@ -1666,6 +1742,12 @@ describe('dispatchClaimedCall', () => {
     callLogUpdate = jest.fn(async () => 1), activityInsert = jest.fn(async () => {}), capture = {}, freshCall = CALL,
     markerInsert = jest.fn(() => ({ onConflict: jest.fn(() => ({ ignore: jest.fn(async () => {}) })) })),
     markerDel = jest.fn(async () => 1),
+    // codex #5196: the shared consultation_link_send_attempts row — the
+    // automated lane's own onDispatchStart INSERTs it in the SAME markerDb()
+    // transaction as the handoff marker (insertConsultationLinkAttempt's
+    // own `.insert(...).returning('id')` shape, unlike the marker's plain
+    // ON CONFLICT DO NOTHING insert).
+    consultationAttemptInsert = jest.fn(() => ({ returning: jest.fn(async () => [{ id: 'attempt-mock-1' }]) })),
     // codex #5018 r15/r16 P1 follow-up: withSmsHandoff's phone-match
     // customer lookup, called TWICE per handoff (once before locks, once as
     // the post-lock re-check) — a plain array default keeps every existing
@@ -1698,11 +1780,17 @@ describe('dispatchClaimedCall', () => {
       chain.update = table === 'call_log' ? callLogUpdate : jest.fn(async () => 1);
       // The handoff marker (codex #5018 r13 P1) INSERTs into its own table,
       // never call_log — activity_log keeps its own dedicated insert stub.
+      // consultation_link_send_attempts (codex #5196) gets its own too —
+      // its insert chain ends in `.returning('id')`, never ON CONFLICT.
       chain.insert = table === 'activity_log' ? activityInsert
-        : (table === HANDOFF_MARKER_TABLE ? markerInsert : jest.fn(async () => {}));
+        : table === HANDOFF_MARKER_TABLE ? markerInsert
+          : table === CONSULTATION_ATTEMPT_TABLE ? consultationAttemptInsert
+            : jest.fn(async () => {});
       // codex #5018 pre-push P1 (round 3): recordSendOutcome's own stale-
       // marker cleanup DELETEs from this same table on a definitely
-      // retryable outcome.
+      // retryable outcome. consultation_link_send_attempts (codex #5196)
+      // is cleared alongside it — no dedicated tracking needed by default,
+      // the generic no-op below is enough unless a test opts in.
       chain.del = table === HANDOFF_MARKER_TABLE ? markerDel : jest.fn(async () => 0);
       return chain;
     });

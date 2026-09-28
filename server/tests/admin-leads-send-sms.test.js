@@ -20,9 +20,15 @@ jest.mock('../services/lead-funnel-bridge', () => ({ bridgeLeadFunnelStage: jest
 // linkSentRecently read, lazily required inside withSmsHandoff — mocked so
 // its behavior (hit vs. no hit) is asserted directly rather than through a
 // real DB read.
+// codex #5196: insertConsultationLinkAttempt/deleteConsultationLinkAttempt
+// (the shared consultation_link_send_attempts writer/deleter) mocked the
+// same way linkSentRecently is — asserted directly rather than through a
+// real DB write.
 jest.mock('../services/call-booking-link-text', () => ({
   linkSentRecently: jest.fn(async () => false),
   MANUAL_SEND_RACE_GUARD_WINDOW_MS: 10 * 60 * 1000,
+  insertConsultationLinkAttempt: jest.fn(async () => 'attempt-42'),
+  deleteConsultationLinkAttempt: jest.fn(async () => {}),
 }));
 // Deterministic fromNumber validation only — mediaFromOutboundAttachments
 // is left real (pure, no I/O) so attachment shape assertions below exercise
@@ -36,7 +42,7 @@ const db = require('../models/db');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { logFirstResponse } = require('../services/lead-attribution');
 const { bridgeLeadFunnelStage } = require('../services/lead-funnel-bridge');
-const { linkSentRecently } = require('../services/call-booking-link-text');
+const { linkSentRecently, insertConsultationLinkAttempt, deleteConsultationLinkAttempt } = require('../services/call-booking-link-text');
 const router = require('../routes/admin-leads');
 let lead;
 let activities;
@@ -187,6 +193,79 @@ describe('the manual-send race guard (codex #5018 r15 P2 follow-up)', () => {
     const response = await send();
     expect(response.status).toBe(409);
     expect(response.body.error).toMatch(/just texted/i);
+  });
+});
+
+// codex #5196 P1: the durable consultation_link_send_attempts marker —
+// written at twilio.js's REAL attempt boundary (onDispatchStart) and
+// cleared on an abort or a definite post-send failure — only for a send
+// that carries a validated consultation link (bearerCheck.consultationLeadId,
+// the SAME condition that runs the manual-race guard above).
+describe('the consultation-link attempt marker (codex #5196 P1)', () => {
+  let bearerSpy;
+  beforeEach(() => {
+    bearerSpy = jest.spyOn(require('../services/composer-customer-links'), 'bearerLinkSendCheck')
+      .mockResolvedValue({ ok: true, consultationLeadId: 'lead-qa' });
+  });
+  afterEach(() => { bearerSpy.mockRestore(); });
+
+  test('a consultation send passes onDispatchStart/onDispatchAbort that write and clear the shared attempt row', async () => {
+    await send();
+    const { onDispatchStart, onDispatchAbort } = sendCustomerMessage.mock.calls[0][0];
+    expect(typeof onDispatchStart).toBe('function');
+    expect(typeof onDispatchAbort).toBe('function');
+    await onDispatchStart();
+    expect(insertConsultationLinkAttempt).toHaveBeenCalledWith({
+      leadId: 'lead-qa', toPhone: lead.phone, source: 'admin_leads_send_sms',
+    });
+    await onDispatchAbort();
+    expect(deleteConsultationLinkAttempt).toHaveBeenCalledWith('attempt-42');
+  });
+
+  // Mirrors production ordering: twilio.js invokes onDispatchStart BEFORE
+  // sendCustomerMessage resolves, so the mock does the same here — proving
+  // the ROUTE's own post-send cleanup (not just the hook's own definition)
+  // fires for a definite failure.
+  test('a definite send failure (never real, never ambiguous) deletes the attempt row', async () => {
+    sendCustomerMessage.mockImplementation(async (opts) => {
+      if (opts.onDispatchStart) await opts.onDispatchStart();
+      return { sent: false, blocked: true, code: 'SOME_DEFINITE_FAILURE' };
+    });
+    await send();
+    expect(insertConsultationLinkAttempt).toHaveBeenCalled();
+    expect(deleteConsultationLinkAttempt).toHaveBeenCalledWith('attempt-42');
+  });
+
+  test('a real provider send keeps the attempt row (no cleanup call)', async () => {
+    sendCustomerMessage.mockImplementation(async (opts) => {
+      if (opts.onDispatchStart) await opts.onDispatchStart();
+      return { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM_qa_lead' };
+    });
+    await send();
+    expect(insertConsultationLinkAttempt).toHaveBeenCalled();
+    expect(deleteConsultationLinkAttempt).not.toHaveBeenCalled();
+  });
+
+  test('an ambiguous provider outcome keeps the attempt row (no cleanup call)', async () => {
+    const { isAmbiguousProviderOutcome } = jest.requireActual('../services/sms-auto-send');
+    const ambiguous = { sent: false, retryable: true, deliveryOutcome: 'uncertain' };
+    expect(isAmbiguousProviderOutcome(ambiguous)).toBe(true);
+    sendCustomerMessage.mockImplementation(async (opts) => {
+      if (opts.onDispatchStart) await opts.onDispatchStart();
+      return ambiguous;
+    });
+    await send();
+    expect(insertConsultationLinkAttempt).toHaveBeenCalled();
+    expect(deleteConsultationLinkAttempt).not.toHaveBeenCalled();
+  });
+
+  test('a plain reply with no consultation link never touches the attempt marker', async () => {
+    bearerSpy.mockResolvedValue({ ok: true }); // no consultationLeadId
+    await send({ message: 'Sounds good, see you then!', to: '+19415550103' });
+    const { onDispatchStart, onDispatchAbort } = sendCustomerMessage.mock.calls[0][0];
+    expect(onDispatchStart).toBeUndefined();
+    expect(onDispatchAbort).toBeUndefined();
+    expect(insertConsultationLinkAttempt).not.toHaveBeenCalled();
   });
 });
 
