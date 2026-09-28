@@ -98,6 +98,11 @@ export default function BiometricGate({ children }) {
   // (a prompt under the camera can't tell the Face ID sheet's own resign from a real
   // one, and an iPad popover picker can stay open on a visible page).
   const unlockAfterPickerRef = useRef(false);
+  // Older iOS may send neither change nor cancel; a full-screen picker's own
+  // hidden → visible round trip then closes it. Only a hide with no real resign
+  // since the picker opened counts (a real switch resigns before it hides).
+  const pickerHidPageRef = useRef(false);
+  const resignedSincePickerRef = useRef(false);
   const pickerOpen = () => Date.now() < pickerOpenUntilRef.current;
 
   const attempt = useCallback(async () => {
@@ -156,10 +161,14 @@ export default function BiometricGate({ children }) {
     };
     const onVisibility = () => {
       if (document.visibilityState === 'visible') {
+        if (pickerOpen() && pickerHidPageRef.current) { pickerDone(); return; }
         unlockAfterPicker();
         return;
       }
-      if (pickerOpen()) return;
+      if (pickerOpen()) {
+        if (!resignedSincePickerRef.current) pickerHidPageRef.current = true;
+        return;
+      }
       if (document.visibilityState === 'hidden' && isNativeApp() && hasSessionToken()) {
         setLocked(true);
         lockedRef.current = true;
@@ -171,6 +180,8 @@ export default function BiometricGate({ children }) {
     let graceTimer = null;
     const pickerOpened = () => {
       pickerOpenUntilRef.current = Date.now() + PICKER_GRACE_MS;
+      pickerHidPageRef.current = false;
+      resignedSincePickerRef.current = false;
       clearTimeout(graceTimer);
       graceTimer = setTimeout(unlockAfterPicker, PICKER_GRACE_MS + 50);
     };
@@ -178,6 +189,7 @@ export default function BiometricGate({ children }) {
     // unlock then waits for the page to become visible.
     const pickerDone = () => {
       pickerOpenUntilRef.current = 0;
+      pickerHidPageRef.current = false;
       clearTimeout(graceTimer);
       unlockAfterPicker();
     };
@@ -210,7 +222,10 @@ export default function BiometricGate({ children }) {
           // app-switcher snapshot.
           setLocked(true);
           lockedRef.current = true;
-          if (pickerOpen()) unlockAfterPickerRef.current = true;
+          if (pickerOpen()) {
+            unlockAfterPickerRef.current = true;
+            resignedSincePickerRef.current = true;
+          }
         }
       }))
       .then((l) => { listener = l; })

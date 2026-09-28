@@ -219,3 +219,15 @@ it('runs the deferred Face ID prompt when a picker never reports back', async ()
     vi.useRealTimers();
   }
 });
+
+it('treats the camera\'s own hide → show as closing it when no change/cancel comes (older iOS)', async () => {
+  await renderUnlocked();
+  fireEvent.click(screen.getByTestId('camera'));
+  setVisibility('hidden');   // camera covers the page
+  setVisibility('visible');  // camera dismissed, no change/cancel event
+  await act(async () => { await new Promise((r) => setTimeout(r, 750)); }); // launch prompt's suppression window
+
+  appState(false); // real app switch afterwards
+  appState(true);
+  await waitFor(() => expect(authenticateBiometric).toHaveBeenCalledTimes(2));
+});
