@@ -196,14 +196,30 @@ describe('gratitudeCandidatePage — discovery filter accepts EITHER recognized 
     jest.resetModules();
   });
 
-  test('the candidate query filters on BOTH PROMPT_VERSION and REAL_ANSWERS_PROMPT_VERSION, never just the static one', () => {
+  test('the candidate query matches PROMPT_VERSION, the bare REAL_ANSWERS_PROMPT_VERSION, or any +category-suffixed variant of it', () => {
+    // A fixed 2-value whereIn (the round-1 fix) would stop matching the
+    // moment a per-category gate joins the master one, since
+    // currentPromptVersion() then suffixes the version with the active
+    // category tags (pre-push audit P1 round 2) — this must be a LIKE-
+    // prefix match instead, covering every such variant without
+    // enumerating them.
     jest.resetModules();
-    const whereInCalls = [];
+    const whereCalls = [];
+    const orWhereCalls = [];
     const query = {};
     for (const method of [
-      'join', 'where', 'whereNotNull', 'whereRaw', 'orderBy', 'limit', 'select', 'whereNotExists',
+      'join', 'whereNotNull', 'whereRaw', 'orderBy', 'limit', 'select', 'whereNotExists', 'whereIn',
     ]) query[method] = jest.fn(() => query);
-    query.whereIn = jest.fn((...args) => { whereInCalls.push(args); return query; });
+    // Knex's own subquery convention (a `this`-bound function, called with
+    // NO positional argument) — the exact shape the real query builder AND
+    // this mock both support; an arrow function relying on a parameter
+    // would silently receive undefined here.
+    query.where = jest.fn((...args) => {
+      whereCalls.push(args);
+      if (typeof args[0] === 'function') args[0].call(query);
+      return query;
+    });
+    query.orWhere = jest.fn((...args) => { orWhereCalls.push(args); return query; });
     const mockDb = jest.fn(() => query);
     jest.doMock('../models/db', () => mockDb);
     const drafter = require('../services/sms-shadow-drafter');
@@ -211,11 +227,11 @@ describe('gratitudeCandidatePage — discovery filter accepts EITHER recognized 
     const fresh = require('../services/sms-auto-send');
     fresh.gratitudeCandidatePage({ activatedAt: new Date(0), now: new Date(), cursor: null, pageSize: 100 });
 
-    expect(whereInCalls).toHaveLength(1);
-    expect(whereInCalls[0][0]).toBe('md.prompt_version');
-    expect(whereInCalls[0][1]).toEqual(
-      expect.arrayContaining([drafter.PROMPT_VERSION, drafter.REAL_ANSWERS_PROMPT_VERSION])
-    );
-    expect(whereInCalls[0][1]).toHaveLength(2);
+    const versionWhere = whereCalls.find(([col]) => col === 'md.prompt_version');
+    expect(versionWhere).toEqual(['md.prompt_version', drafter.PROMPT_VERSION]);
+    expect(orWhereCalls).toEqual([
+      ['md.prompt_version', drafter.REAL_ANSWERS_PROMPT_VERSION],
+      ['md.prompt_version', 'like', `${drafter.REAL_ANSWERS_PROMPT_VERSION}+%`],
+    ]);
   });
 });

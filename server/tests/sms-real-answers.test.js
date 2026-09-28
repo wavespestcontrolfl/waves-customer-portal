@@ -224,6 +224,55 @@ describe('GATE_SMS_REAL_ANSWERS on — the rewritten prompt', () => {
   test('currentPromptVersion() resolves to REAL_ANSWERS_PROMPT_VERSION while the gate is on', () => {
     expect(currentPromptVersion()).toBe(REAL_ANSWERS_PROMPT_VERSION);
   });
+
+  test('currentPromptVersion() folds in whichever category gates are ALSO on — a different combination is a different version (pre-push audit P1 round 2)', () => {
+    // Flipping a category gate changes the RENDERED prompt (it moves that
+    // category off HELD-FOR-A-PERSON and swaps in its own instruction) —
+    // without this, every combination would share the bare v12 identity,
+    // pooling graduation evidence and sealed-eval exam-pass checks across
+    // genuinely different behaviors.
+    process.env.GATE_SMS_AGENT_COMPLAINTS = 'true';
+    const complaintsOnly = currentPromptVersion();
+    expect(complaintsOnly).toBe(`${REAL_ANSWERS_PROMPT_VERSION}+complaints`);
+
+    process.env.GATE_SMS_AGENT_BILLING_DISPUTES = 'true';
+    const complaintsAndBilling = currentPromptVersion();
+    // sorted, so flip ORDER never changes the identity
+    expect(complaintsAndBilling).toBe(`${REAL_ANSWERS_PROMPT_VERSION}+billing_disputes,complaints`);
+    expect(complaintsAndBilling).not.toBe(complaintsOnly);
+
+    delete process.env.GATE_SMS_AGENT_COMPLAINTS;
+    const billingOnly = currentPromptVersion();
+    expect(billingOnly).toBe(`${REAL_ANSWERS_PROMPT_VERSION}+billing_disputes`);
+    expect(billingOnly).not.toBe(complaintsOnly);
+    expect(billingOnly).not.toBe(complaintsAndBilling);
+
+    delete process.env.GATE_SMS_AGENT_BILLING_DISPUTES;
+    expect(currentPromptVersion()).toBe(REAL_ANSWERS_PROMPT_VERSION); // back to the bare identity
+  });
+
+  test('generateGroundedDraft stamps the SAME category-aware identity currentPromptVersion() would compute', async () => {
+    process.env.GATE_SMS_AGENT_LEGAL = 'true';
+    jest.resetModules();
+    jest.doMock('../services/llm/call', () => ({
+      dispatchWithFallback: jest.fn(async () => ({
+        ok: true, text: JSON.stringify({ reply: 'ok', intended_actions: [], missing_info: null }), model: 'fixture',
+      })),
+    }));
+    jest.doMock('@anthropic-ai/sdk', () => jest.fn(() => ({ messages: { create: jest.fn() } })));
+    process.env.SHADOW_DRAFT_VERIFY = 'false';
+    const drafter = require('../services/sms-shadow-drafter');
+    const result = await drafter.generateGroundedDraft({
+      client: {}, context: { summary: 'X', upcomingServices: [] }, inboundMessage: 'hi',
+      intent: { intent: 'GENERAL' }, schedulingIntent: false, voiceProfile: null,
+    });
+    expect(result.promptVersion).toBe(drafter.currentPromptVersion());
+    expect(result.promptVersion).toBe(`${REAL_ANSWERS_PROMPT_VERSION}+legal`);
+    delete process.env.SHADOW_DRAFT_VERIFY;
+    jest.dontMock('../services/llm/call');
+    jest.dontMock('@anthropic-ai/sdk');
+    jest.resetModules();
+  });
 });
 
 describe('followupSlaPhrase — the 1-business-hour SLA, computed off the ET clock', () => {

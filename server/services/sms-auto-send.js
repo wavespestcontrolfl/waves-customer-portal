@@ -848,16 +848,22 @@ const SWEEP_PAGE_SIZE = 100;
  */
 function gratitudeCandidatePage({ activatedAt, now, cursor, pageSize }) {
   const drafter = require('./sms-shadow-drafter');
-  // Both currently-recognized live prompt versions are eligible candidates —
-  // not just PROMPT_VERSION (which never moves once GATE_SMS_REAL_ANSWERS
-  // goes live; it stays 'house_voice_v11' forever by design). The gratitude
-  // special-case text is identical in both v11 and the real-answers
-  // rewrite, so which one drafted a row makes no safety difference to the
-  // sweep — but a v11-only filter would silently stop discovering v12
-  // candidates the moment the gate flips on, and never resume until it
-  // flips back off. This is a DISCOVERY filter (no single row to compare
-  // against yet), so it's a membership check rather than the per-row
-  // "whichever version this draft actually used" the claim/reload sites use.
+  // Every currently-recognized live prompt version is an eligible candidate —
+  // not just the static PROMPT_VERSION (which never moves once
+  // GATE_SMS_REAL_ANSWERS goes live; it stays 'house_voice_v11' forever by
+  // design). The gratitude special-case text is identical across all of
+  // them, so which one drafted a row makes no safety difference to the
+  // sweep — but a v11-only filter would silently stop discovering real-
+  // answers candidates the moment the gate flips on, and never resume until
+  // it flips back off. A LIKE-prefix match (not a fixed whereIn list, pre-
+  // push audit P1 round 2): currentPromptVersion() suffixes
+  // REAL_ANSWERS_PROMPT_VERSION with whichever per-category gates are also
+  // on (e.g. '...+complaints'), so an exact 2-value list would stop
+  // matching the moment any category gate joins the master one — the
+  // prefix recognizes every such variant without enumerating them. This is
+  // a DISCOVERY filter (no single row to compare against yet), so it's a
+  // membership check rather than the per-row "whichever version this draft
+  // actually used" the claim/reload sites use.
   const q = db('message_drafts as md')
     .join('sms_log as s', 'md.sms_log_id', 's.id')
     .where({
@@ -865,7 +871,14 @@ function gratitudeCandidatePage({ activatedAt, now, cursor, pageSize }) {
       'md.intent': GRATITUDE_INTENT,
       's.direction': 'inbound',
     })
-    .whereIn('md.prompt_version', [drafter.PROMPT_VERSION, drafter.REAL_ANSWERS_PROMPT_VERSION].filter(Boolean))
+    .where(function versionMatch() {
+      // A `this`-bound function, not an arrow — the Knex-documented
+      // subquery convention this codebase already uses elsewhere
+      // (availability.js's whereNotExists(function linkedVisit() {...})).
+      this.where('md.prompt_version', drafter.PROMPT_VERSION)
+        .orWhere('md.prompt_version', drafter.REAL_ANSWERS_PROMPT_VERSION)
+        .orWhere('md.prompt_version', 'like', `${drafter.REAL_ANSWERS_PROMPT_VERSION}+%`);
+    })
     .whereNotNull('md.model')
     .where('s.created_at', '>', activatedAt)
     .where('s.created_at', '>=', new Date(now.getTime() - MAX_REPLY_AGE_MS))

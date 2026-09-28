@@ -102,22 +102,39 @@ const SHADOW_STATUS = 'shadow';
 
 /**
  * The prompt version a draft generated RIGHT NOW would stamp — PROMPT_VERSION
- * with the gate off, REAL_ANSWERS_PROMPT_VERSION with it on. This module's own
- * generateGroundedDraft already resolves this per draft off the ACTUAL
- * buildSystemPromptWithProfile.realAnswersApplied result (never guessed from
- * the gate alone, so a compose failure that fell back to the base prompt is
- * never mis-stamped). Exported so OTHER "what counts as current" readers —
- * sms-graduation's cohort-version default, sms-auto-send's gratitude
- * expectedPromptVersion checks — can resolve the SAME effective version
- * instead of the static PROMPT_VERSION constant, which stays v11 forever.
- * While GATE_SMS_REAL_ANSWERS stays off (the default) this is identical to
- * PROMPT_VERSION, so today's call sites are unaffected either way; the day
- * the gate is turned on for real, those call sites need to switch to this
- * (or an equivalent per-row check) or they will treat v12 draft rows as a
- * version mismatch — see the PR's pre-push note.
+ * with the gate off; with it on, REAL_ANSWERS_PROMPT_VERSION, PLUS a suffix
+ * naming every per-category gate (GATE_SMS_AGENT_COMPLAINTS/
+ * _BILLING_DISPUTES/_CHEMICAL_MEDICAL/_LEGAL) that is ALSO on — e.g.
+ * 'house_voice_v12_real_answers+billing_disputes,complaints' (sorted, so the
+ * flip order never changes the identity). Pre-push audit P1 (round 2):
+ * flipping a category gate changes the RENDERED prompt (realAnswersHandoffBullets
+ * moves that category off the HELD-FOR-A-PERSON list and swaps in its own
+ * instruction) without this suffix, every category-gate combination would
+ * share the bare v12 identity — pooling graduation evidence across genuinely
+ * different behaviors, and letting a sealed-eval run completed BEFORE a
+ * category flip keep satisfying GRAD_REQUIRE_SEALED_EXAM for behavior it
+ * never examined. This module's own generateGroundedDraft calls this same
+ * function to stamp each draft (never re-derives the ternary itself), so
+ * draft rows, graduation cohorts, and exam checks all share one identity.
+ * Exported so OTHER "what counts as current" readers — sms-graduation's
+ * cohort-version default, sms-auto-send's gratitude expectedPromptVersion
+ * checks and its gratitudeCandidatePage discovery filter (a LIKE-prefix
+ * match against REAL_ANSWERS_PROMPT_VERSION, since it must recognize every
+ * suffixed variant, not just the bare one) — can resolve the SAME effective
+ * version instead of the static PROMPT_VERSION constant, which stays v11
+ * forever. While GATE_SMS_REAL_ANSWERS stays off (the default) this is
+ * identical to PROMPT_VERSION, so today's call sites are unaffected either
+ * way.
  */
 function currentPromptVersion() {
-  return gateEnvValue('GATE_SMS_REAL_ANSWERS') ? REAL_ANSWERS_PROMPT_VERSION : PROMPT_VERSION;
+  if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return PROMPT_VERSION;
+  const activeCategoryTags = REAL_ANSWERS_HANDOFF_CATEGORIES
+    .filter((c) => gateEnvValue(c.gate))
+    .map((c) => c.tag)
+    .sort();
+  return activeCategoryTags.length
+    ? `${REAL_ANSWERS_PROMPT_VERSION}+${activeCategoryTags.join(',')}`
+    : REAL_ANSWERS_PROMPT_VERSION;
 }
 
 // Few-shot tunables. SHADOW_FEWSHOT=false disables corpus injection (v7 then
@@ -143,11 +160,16 @@ const INTENDED_ACTION_TYPES = [
 // Cancellations are NOT in this list: the owner ruling drops cancellations
 // out of escalation entirely (see the cancellation bullet below), independent
 // of any of these four gates.
+// `tag` is the stable identifier currentPromptVersion() folds into the
+// effective version string when a category gate is on (see below) — kept
+// separate from `label` (the human-readable prompt text) so a future
+// wording tweak to `label` can never silently change what graduation/
+// sealed-eval treat as "the same version".
 const REAL_ANSWERS_HANDOFF_CATEGORIES = [
-  { gate: 'GATE_SMS_AGENT_COMPLAINTS', label: 'complaints' },
-  { gate: 'GATE_SMS_AGENT_BILLING_DISPUTES', label: 'billing disputes' },
-  { gate: 'GATE_SMS_AGENT_CHEMICAL_MEDICAL', label: 'chemical/medical concerns' },
-  { gate: 'GATE_SMS_AGENT_LEGAL', label: 'legal threats' },
+  { gate: 'GATE_SMS_AGENT_COMPLAINTS', label: 'complaints', tag: 'complaints' },
+  { gate: 'GATE_SMS_AGENT_BILLING_DISPUTES', label: 'billing disputes', tag: 'billing_disputes' },
+  { gate: 'GATE_SMS_AGENT_CHEMICAL_MEDICAL', label: 'chemical/medical concerns', tag: 'chemical_medical' },
+  { gate: 'GATE_SMS_AGENT_LEGAL', label: 'legal threats', tag: 'legal' },
 ];
 
 // 1-business-hour follow-up SLA (owner ruling 2026-09-27): 8am-8pm ET reads
@@ -978,8 +1000,13 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   // Only the drafts that actually saw the rewritten (real-answers) prompt
   // stamp the bumped version — a base-prompt draft (gate off) keeps v11, the
   // same "applied is the stamped signal" rule the voice profile already
-  // follows just above.
-  const promptVersion = realAnswersApplied ? REAL_ANSWERS_PROMPT_VERSION : PROMPT_VERSION;
+  // follows just above. currentPromptVersion() (never a bare
+  // REAL_ANSWERS_PROMPT_VERSION ternary, pre-push audit P1 round 2): it also
+  // folds in whichever per-category gates are on, so a draft actually
+  // rendered under e.g. "complaints handled" stamps a version distinct from
+  // one rendered with complaints still held — the one identity every other
+  // consumer (graduation cohorts, sealed-eval exam checks) shares.
+  const promptVersion = realAnswersApplied ? currentPromptVersion() : PROMPT_VERSION;
   // presetFactsBlock (sealed-eval exam) replays the FROZEN facts the drafter
   // saw the day of the original message — building from a live context here
   // would grade the draft against today's schedule/balance (the exact drift
