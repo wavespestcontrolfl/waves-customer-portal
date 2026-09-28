@@ -1034,9 +1034,13 @@ const SLOT_UNAVAILABLE_RESPONSE_RE = /\b(?:no\s+longer\s+(?:open|available)|not\
 const HISTORICAL_SLOT_MENTION_RE = /\b(?:antes\s+)?(?:estaba|era|hab[ií]a\s+sido|fue)\s+(?:abiert[oa]|disponible|una\s+opci[oó]n)|\b(?:ofrec(?:[ií]|imos|ieron)|se\s+ofreci[oó]|hab[ií]amos\s+ofrecido)(?![a-záéíóúñü])/i;
 const CURRENT_SLOT_AVAILABILITY_RE = /\b(?:sigue|todav[ií]a)\s+(?:estando\s+)?disponible|\b(?:est[aá]|queda)\s+disponible\b/i;
 const SLOT_HISTORY_BOUNDARY_RE = /[.!?;]|\b(?:pero|sino|aunque|sin\s+embargo|ahora\s+bien)\b/i;
-const SLOT_COORDINATE_LEAD = '(?:(?:ahora\\s+)|(?:antes\\s+)?(?:estaba|era|hab[ií]a\\s+sido)\\s+(?:disponible|una\\s+opci[oó]n)\\s+)?';
-const SLOT_COORDINATE_BOUNDARY_RE = new RegExp(`\\by\\s+(?=${SLOT_COORDINATE_LEAD}(?:el\\s+)?(?:${Object.values(WEEKDAY_ES).join('|')}|(?:\\d{1,2}|${DAY_WORDS_ES})\\s+de\\s+(?:${Object.values(MONTH_ES).join('|')})))`, 'gi');
-const SPANISH_RETURNED_SLOT_DATE_RE = new RegExp(`\\b(?:el\\s+)?(?:${Object.values(WEEKDAY_ES).join('|')}|(?:\\d{1,2}|${DAY_WORDS_ES})\\s+de\\s+(?:${Object.values(MONTH_ES).join('|')}))`, 'i');
+const SPANISH_RETURNED_SLOT_DATE_SOURCE = `(?:el\\s+)?(?:${Object.values(WEEKDAY_ES).join('|')}|(?:\\d{1,2}|${DAY_WORDS_ES})\\s+de\\s+(?:${Object.values(MONTH_ES).join('|')}))`;
+// The current exact slot match already owns any conjunction inside its date
+// or clock. A "y" outside that span starts a neighboring slot claim whenever
+// another slot date follows in the same short clause, whatever predicate
+// introduces it ("y todavía tengo...", "y antes ofrecí...").
+const SLOT_COORDINATE_BOUNDARY_RE = new RegExp(`\\by\\s+(?=[^.!?;]{0,80}(?:\\b${SPANISH_RETURNED_SLOT_DATE_SOURCE}|${GROUNDED_TIME_MARKER}))`, 'gi');
+const SPANISH_RETURNED_SLOT_DATE_RE = new RegExp(`\\b${SPANISH_RETURNED_SLOT_DATE_SOURCE}`, 'i');
 
 function slotsFromToolText(text) {
   const slots = [];
@@ -1109,7 +1113,8 @@ function returnedSlotStripper(slots, mentionAllowed = () => true) {
 function inactiveSlotMentionIsHistorical(text, offset, length) {
   const leftClause = text.slice(0, offset).split(SLOT_HISTORY_BOUNDARY_RE).pop();
   SLOT_COORDINATE_BOUNDARY_RE.lastIndex = 0;
-  const leftBoundary = [...`${leftClause}${text.slice(offset, offset + length)}`.matchAll(SLOT_COORDINATE_BOUNDARY_RE)].pop();
+  const leftBoundary = [...`${leftClause}${text.slice(offset, offset + length)}`.matchAll(SLOT_COORDINATE_BOUNDARY_RE)]
+    .filter((match) => match.index < leftClause.length).pop();
   let before = leftBoundary ? leftClause.slice(leftBoundary.index + leftBoundary[0].length) : leftClause;
   const inherited = leftBoundary ? leftClause.slice(0, leftBoundary.index) : '';
   const priorSlotAt = [inherited.indexOf(GROUNDED_TIME_MARKER), SPANISH_RETURNED_SLOT_DATE_RE.exec(inherited)?.index]

@@ -6784,6 +6784,10 @@ describe('voice relay eval — named spoken checks', () => {
     expect(status('Antes estaba disponible el sábado 3 de octubre a las nueve de la mañana, pero ahora el sábado 3 de octubre a las nueve de la mañana sigue disponible.', [first, rejected, refreshed])).toBe('fail');
     expect(status('El sábado 3 de octubre a las nueve de la mañana sigue disponible y el domingo 4 de octubre a la una de la tarde ya no está disponible.', [first, rejected, refreshed])).toBe('fail');
     expect(status('El sábado 3 de octubre a las nueve de la mañana sigue disponible y antes estaba disponible el domingo 4 de octubre a la una de la tarde.', [first, rejected, refreshed])).toBe('fail');
+    expect(status('Antes ofrecí el sábado 3 de octubre a las nueve de la mañana y todavía tengo el domingo 4 de octubre a la una de la tarde disponible.', [first, rejected, refreshed])).toBe('fail');
+    expect(status('Todavía tengo el domingo 4 de octubre a la una de la tarde disponible y antes ofrecí el sábado 3 de octubre a las nueve de la mañana.', [first, rejected, refreshed])).toBe('fail');
+    expect(status('El sábado 3 de octubre a las nueve de la mañana ya no está disponible y todavía tengo el domingo 4 de octubre a la una de la tarde disponible.', [first, rejected, refreshed])).toBe('fail');
+    expect(status('Todavía tengo el domingo 4 de octubre a la una de la tarde disponible y el sábado 3 de octubre a las nueve de la mañana ya no está disponible.', [first, rejected, refreshed])).toBe('fail');
     expect(status('El lunes 5 de octubre a las diez de la mañana está disponible.', [first, rejected, refreshed])).toBe('pass');
 
     const transportFailure = { ...rejected, text: 'Temporary upstream error; please try again.', ok: false };
