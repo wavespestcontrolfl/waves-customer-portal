@@ -48,7 +48,7 @@ const OUTREACH_TEMPLATES = [
     id: 'friendly_ask',
     name: 'Friendly Ask',
     sentiment: 'happy',
-    body: "Hey {first}! Adam with Waves here. If we earned it, a quick Google review would mean the world:\n\n{review_url}",
+    body: "Hey {first}, it's Waves. If we earned it, a quick Google review would mean the world:\n\n{review_url}",
   },
   {
     id: 'soft_reminder',
@@ -85,7 +85,7 @@ const OUTREACH_TEMPLATES = [
     name: 'Issue Resolution Check',
     sentiment: 'issue',
     // No review link — this is a private check-in, not an ask.
-    body: "Hi {first}, Adam with Waves. Just making sure everything has been taken care of - if there is anything else we can do, reply here anytime.",
+    body: "Hi {first}, it's Waves. Just making sure everything has been taken care of - if there is anything else we can do, reply here anytime.",
   },
   {
     id: 'satisfaction_confirm',
