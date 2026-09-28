@@ -29,40 +29,16 @@ jest.mock('../services/newsletter-subscribers', () => {
   };
 });
 jest.mock('../services/logger', () => ({ error: jest.fn(), info: jest.fn(), warn: jest.fn() }));
+// The route is now a thin delegation to the reconciler (its own behavioral
+// coverage — candidates, exclusions, writes — lives in
+// newsletter-list-reconcile.test.js); mocked here to pin the ROUTE contract.
+jest.mock('../services/newsletter-list-reconcile', () => ({ reconcileCustomers: jest.fn(async ({ dryRun }) => ({ dryRun })) }));
 
 const express = require('express');
 const db = require('../models/db');
-const { subscribeOrResubscribe, linkManyToCustomers } = require('../services/newsletter-subscribers');
+const { reconcileCustomers } = require('../services/newsletter-list-reconcile');
+const { linkManyToCustomers } = require('../services/newsletter-subscribers');
 const adminNewsletterRouter = require('../routes/admin-newsletter');
-
-// Archive (DELETE /api/admin/customers/:id) sets deleted_at only — active stays
-// true. Rows mirror that: an archived customer is active AND deleted.
-const CUSTOMERS = [
-  { id: 1, email: 'live@example.com', first_name: 'L', last_name: 'One', city: null, active: true, deleted_at: null },
-  { id: 2, email: 'archived@example.com', first_name: 'A', last_name: 'Two', city: null, active: true, deleted_at: new Date('2026-08-01') },
-];
-
-// Minimal knex stand-in that actually applies whereNull('deleted_at') so the
-// test fails if the scope is dropped, not just if a method name changes.
-function customersChain() {
-  let rows = CUSTOMERS;
-  const q = {};
-  ['whereNotNull', 'where', 'select'].forEach((m) => { q[m] = jest.fn(() => q); });
-  q.whereNull = jest.fn((col) => {
-    if (col === 'deleted_at' || col === 'customers.deleted_at') rows = rows.filter((r) => r.deleted_at == null);
-    return q;
-  });
-  q.then = (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
-  return q;
-}
-
-function subscribersChain() {
-  const q = {};
-  ['where', 'whereNull'].forEach((m) => { q[m] = jest.fn(() => q); });
-  q.first = jest.fn(async () => null);
-  q.update = jest.fn(async () => 0);
-  return q;
-}
 
 async function withServer(fn) {
   const app = express();
@@ -77,29 +53,32 @@ async function withServer(fn) {
   }
 }
 
-describe('POST /subscribers/import-customers archived-customer scope', () => {
-  let customersQuery;
-  beforeEach(() => {
-    jest.clearAllMocks();
-    customersQuery = null;
-    db.mockImplementation((table) => {
-      if (table === 'customers') { customersQuery = customersChain(); return customersQuery; }
-      if (table === 'newsletter_subscribers') return subscribersChain();
-      throw new Error(`Unexpected table ${table}`);
-    });
-  });
+// /subscribers/import-customers is now a thin, safety-preserving alias for
+// the filtered reconciler (kept only so an existing no-body caller gets a
+// safe dry-run reply instead of a 404); /subscribers/reconcile-customers is
+// the same delegation under its own name. Both share one contract: a write
+// needs BOTH dryRun:false AND confirm:'IMPORT' — anything else dry-runs.
+describe.each([
+  ['/subscribers/import-customers'],
+  ['/subscribers/reconcile-customers'],
+])('POST %s — default dry run, write needs dryRun:false AND confirm:"IMPORT"', (path) => {
+  beforeEach(() => jest.clearAllMocks());
 
-  test('scopes the candidate list on deleted_at and never subscribes an archived customer', async () => {
+  test.each([
+    ['no body', undefined, true],
+    ['dryRun:false alone', { dryRun: false }, true],
+    ['confirm:"IMPORT" alone', { confirm: 'IMPORT' }, true],
+    ['dryRun:false + confirm:"IMPORT"', { dryRun: false, confirm: 'IMPORT' }, false],
+  ])('%s -> reconcileCustomers({ dryRun: %s })', async (_label, body, expectedDryRun) => {
     await withServer(async (baseUrl) => {
-      const res = await fetch(`${baseUrl}/admin/newsletter/subscribers/import-customers`, { method: 'POST' });
+      const res = await fetch(`${baseUrl}/admin/newsletter${path}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: body ? JSON.stringify(body) : undefined,
+      });
       expect(res.status).toBe(200);
     });
-
-    expect(customersQuery.whereNull).toHaveBeenCalledWith('deleted_at');
-    expect(subscribeOrResubscribe).toHaveBeenCalledTimes(1);
-    expect(subscribeOrResubscribe).toHaveBeenCalledWith(expect.objectContaining({ email: 'live@example.com' }));
-    const emails = subscribeOrResubscribe.mock.calls.map(([args]) => args.email);
-    expect(emails).not.toContain('archived@example.com');
+    expect(reconcileCustomers).toHaveBeenCalledWith({ dryRun: expectedDryRun });
   });
 });
 
