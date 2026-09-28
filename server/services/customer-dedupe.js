@@ -656,7 +656,10 @@ async function mergeSingletonPrefRow(trx, table, column, winnerId, loserId) {
   if (!loserRow) return 'no loser row';
   const winnerRow = lockedRows.get(winnerId);
   if (!winnerRow) {
-    const count = await trx(table).where(column, loserId).update({ [column]: winnerId });
+    // A moved row sheds a legacy receipts-off flag too (see the merge below).
+    const receiptsOn = table === 'notification_prefs' && loserRow.payment_receipt === false
+      ? { payment_receipt: true } : {};
+    const count = await trx(table).where(column, loserId).update({ [column]: winnerId, ...receiptsOn });
     return count;
   }
   const booleanMode = SINGLETON_BOOLEAN_SEMANTICS[table] || 'and';
