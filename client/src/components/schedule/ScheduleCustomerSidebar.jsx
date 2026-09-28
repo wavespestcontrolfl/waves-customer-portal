@@ -7,6 +7,7 @@ import CancelFeeNotice from './CancelFeeNotice';
 import { TIMEZONE } from '../../lib/timezone';
 import { appointmentHistory as buildAppointmentHistory } from './customerAppointments';
 import CallBridgeLink from '../admin/CallBridgeLink';
+import { siblingCoverageCopy } from '../../lib/siblingInvoiceCoverage';
 
 function money(value) {
   const n = Number(value || 0);
@@ -139,9 +140,61 @@ export default function ScheduleCustomerSidebar({
   const payments = data?.payments || [];
   const cards = data?.cards || [];
 
-  const basePrice = service?.estimatedPrice != null
-    ? Number(service.estimatedPrice)
-    : Number(service?.monthlyRate || c.monthlyRate || 0);
+  // Display-only preview (nothing here feeds a charge or invoice mint). For
+  // an unpriced visit, monthlyRate is only ever the right fallback for a
+  // monthly-membership customer — everywhere else (per_application's own
+  // acceptance fee, a plain per_visit/one_time lane, sibling-covered
+  // first-application visits…) the AUTHORITATIVE amount is the visit's own
+  // resolved billingLane.prediction, computed server-side by the exact same
+  // predictCompletionBilling / completionInvoiceAmount (billing-lane.js)
+  // completion itself uses — never re-derived locally, so this can't drift
+  // from what completion actually bills (mirrors the CompletionPanel /
+  // detail-sheet / checkout-sheet fix). c.billingMode is the customer
+  // record's raw column, used only as a last-resort fallback when the visit
+  // payload carries no billingLane at all (older cached payloads).
+  // A 'prepaid' kind's amount is what was ALREADY collected out of band —
+  // informational (BillingLaneCard's own "already paid $X" line), never a
+  // balance still due — so it reads as $0 here, matching the detail sheet
+  // and CompletionPanel (codex pre-push P1: displayed the prepaid figure
+  // itself as "Total" above the Take-payment action).
+  // Positive-price precedence — matches completionInvoiceAmount /
+  // predictCompletionBilling (server/services/billing-lane.js), which both
+  // treat `estimatedPrice != null && Number(estimatedPrice) > 0` as "this
+  // visit has its own authoritative price," never a bare != null. A
+  // stamped 0 means the SAME server resolver already fell through to the
+  // per-application fee / rate for this row's own prediction, so a $0
+  // estimatedPrice must defer to the prediction exactly like a null one
+  // does (mirrors the MobileCheckoutSheet / detail-sheet / CompletionPanel
+  // fix — codex pre-push P1).
+  const rawPrice = service?.estimatedPrice != null ? Number(service.estimatedPrice) : null;
+  const hasOwnPrice = rawPrice != null && rawPrice > 0;
+  // `billingLane.siblingCoverage` (billing-lane.js siblingCoverageForSchedule)
+  // is the ONE canonical per-visit collection verdict the server computes
+  // (owner decision — narrow + fail closed). A 'review' verdict carries a
+  // null amount — the mint resolver (resolveScheduledServiceCharge,
+  // admin-schedule.js) refuses to charge this visit at all until the
+  // combined-trip invoice is reconciled. `Number(null) || 0` alone renders
+  // an ordinary $0.00 Total with no explanation, which reads as "nothing to
+  // collect" rather than "go resolve this" — surface the review state
+  // explicitly (mirrors MobileAppointmentDetailSheet / MobileCheckoutSheet /
+  // BillingLaneCard).
+  const siblingNeedsReview = service?.billingLane?.siblingCoverage?.state === 'review';
+  // A 'collect_on_combined_invoice' verdict must not read as a silent $0
+  // total — the combined trip invoice still has a real balance due.
+  // siblingCoverageCopy is pure copy formatting of the server verdict, never
+  // its own classifier.
+  const siblingCoverage = service?.billingLane?.prediction?.kind === 'covered_sibling_invoice'
+    ? siblingCoverageCopy(service.billingLane.siblingCoverage, {
+      siblingServiceType: service.billingLane.prediction?.siblingServiceType || null,
+    })
+    : null;
+  const basePrice = hasOwnPrice
+    ? rawPrice
+    : service?.billingLane
+      ? (service.billingLane.prediction?.kind === 'prepaid'
+        ? 0
+        : Number(service.billingLane?.prediction?.amount) || 0)
+      : (!!c.billingMode && c.billingMode !== 'monthly_membership' ? 0 : Number(c.monthlyRate || 0));
   const appointmentAddons = Array.isArray(service?.serviceAddons) ? service.serviceAddons : [];
   const appointmentAddonTotal = Math.round(
     appointmentAddons.reduce((sum, addon) => sum + (Number(addon.estimatedPrice) || 0), 0) * 100
@@ -392,6 +445,27 @@ export default function ScheduleCustomerSidebar({
               <div className="text-14 font-medium text-zinc-900">Total</div>
               <div className="u-nums text-14 font-medium text-zinc-900">{money(total)}</div>
             </div>
+            {siblingNeedsReview && (
+              <div className="text-14 mt-1" style={{ color: '#92400E' }}>
+                Combined-trip invoice needs review — resolve on Customer 360 before charging.
+              </div>
+            )}
+            {siblingCoverage && siblingCoverage.collectible && (
+              <div className="text-14 mt-1" style={{ color: '#92400E' }}>
+                {siblingCoverage.detail}
+                {siblingCoverage.invoiceHref && (
+                  <>
+                    {' '}
+                    <a href={siblingCoverage.invoiceHref} style={{ color: '#92400E', textDecoration: 'underline' }}>
+                      Open invoice
+                    </a>
+                  </>
+                )}
+              </div>
+            )}
+            {siblingCoverage && !siblingCoverage.collectible && (
+              <div className="text-14 text-ink-secondary mt-1">{siblingCoverage.detail}</div>
+            )}
             <a
               href={`/admin/invoices?customer=${encodeURIComponent(service.customerId)}`}
               className="mt-4 inline-flex h-10 w-full items-center justify-center rounded-sm bg-zinc-900 px-4 text-13 font-medium uppercase tracking-label text-white no-underline u-focus-ring"

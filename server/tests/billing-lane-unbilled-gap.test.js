@@ -38,14 +38,14 @@ describe('no_charge reason split', () => {
     // a $0 amount is covered by any positive cash/Zelle stamp, so the sheet
     // must not warn (or offer a card link) on a visit the office collected.
     const p = predictCompletionBilling({ ...unbilledShape, prepaidAmount: 50, prepaidMethod: 'cash' });
-    expect(p).toEqual({ kind: 'prepaid', amount: 50, conflictStampedPrice: false });
+    expect(p).toEqual({ kind: 'prepaid', amount: 50, grossAmount: 0, conflictStampedPrice: false });
     expect(unbilledCompletionGap({ prediction: p })).toBeNull();
     // Per-application lane, same shape: no fee on file but a hand prepayment.
     const perApp = predictCompletionBilling({
       ...unbilledShape, lane: 'per_application', billingMode: 'per_application', perApplicationFee: null,
       prepaidAmount: 25, prepaidMethod: 'zelle',
     });
-    expect(perApp).toEqual({ kind: 'prepaid', amount: 25, conflictStampedPrice: false });
+    expect(perApp).toEqual({ kind: 'prepaid', amount: 25, grossAmount: 0, conflictStampedPrice: false });
     // A zero/null stamp is not coverage; a STALE annual stamp never counts.
     expect(predictCompletionBilling({ ...unbilledShape, prepaidAmount: 0, prepaidMethod: 'cash' }).reason).toBe('no_amount_on_file');
     expect(predictCompletionBilling({ ...unbilledShape, prepaidAmount: 50, prepaidMethod: 'annual_prepay_invoice' }).reason).toBe('no_amount_on_file');
@@ -196,6 +196,31 @@ describe('payer-billed visits', () => {
 
     const pricedFree = predictCompletionBilling({ ...payer, serviceType: 'Pest Control Re-Service', estimatedPrice: 129 });
     expect(pricedFree).toMatchObject({ kind: 'payer', amount: 129 });
+  });
+
+  // Codex round 7 P2: a payer-billed visit carrying the authoritative-zero
+  // shape (estimatedPrice stamped 0 alongside a positive primaryLinePrice —
+  // a fully-discounted application, e.g. a promo that zeroed the line) hit
+  // the SAME `hasVisitPrice` branch as a real priced payer visit and
+  // resolved to `{ kind: 'payer', amount: 0 }` — which the "an UNPRICED
+  // payer visit" test above proves unbilledCompletionGap reads as a genuine
+  // `no_amount_on_file` gap. That flagged a deliberately free visit as a
+  // missing AP charge. It must read as `no_charge`/`fully_discounted`
+  // instead, same as the per_application/self-pay lanes' own exemption, and
+  // report no gap at all.
+  test('an authoritative-zero (fully-discounted) payer visit predicts no_charge, never { kind: payer, amount: 0 } (Codex r7 P2)', () => {
+    const discounted = predictCompletionBilling({ ...payer, estimatedPrice: 0, primaryLinePrice: 62.5 });
+    expect(discounted).toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason: 'fully_discounted' });
+    expect(unbilledCompletionGap({ prediction: discounted })).toBeNull();
+
+    // Same shape in the per_application lane — a payer whose accepted
+    // application was discounted to $0 still must not read as amountless.
+    const discountedPerApp = predictCompletionBilling({
+      ...payer, lane: 'per_application', billingMode: 'per_application',
+      estimatedPrice: 0, primaryLinePrice: 62.5, perApplicationFee: 98,
+    });
+    expect(discountedPerApp).toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason: 'fully_discounted' });
+    expect(unbilledCompletionGap({ prediction: discountedPerApp })).toBeNull();
   });
 });
 

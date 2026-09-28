@@ -1,0 +1,79 @@
+// Billing emails that are never re-sent from their stored copy (owner ruling
+// 2026-09-27: "never replay; next stage covers"). The amount, due date and
+// dunning or verification state each one froze can all change before a
+// provider retry or a bounce resend, and each fact would have to be
+// re-proven at the provider boundary. A blocked or bounced one settles as
+// not sent; the sender renders fresh from live data at its next stage:
+// late payment 7→14→30→60→90 days, follow-ups 3→7→14→30(→60→90) and the
+// micro-deposit email on the next dunning touch. The legacy pre-visit
+// balance email has no next stage: that visit's reminder is not re-sent by
+// email (accepted cost; its text leg is separate).
+const SENDER_RENDERED_TEMPLATES = new Set([
+  'billing_late_payment_7_day', 'billing_late_payment_14_day', 'billing_late_payment_30_day',
+  'billing_late_payment_60_day', 'billing_late_payment_90_day',
+  'invoice.followup_3_day', 'invoice.followup_7_day', 'invoice.followup_14_day', 'invoice.followup_30_day',
+  // The Day 90 ladder's steps (GATE_DUNNING_LADDER_90).
+  'invoice.followup_60_day', 'invoice.followup_90_day',
+  // The dunning diversion's email arm (microdeposit-verification-email.js).
+  'payment.microdeposit_verification',
+  // The legacy pre-visit balance email (no billing channel choice). The
+  // explicit-choice pre-visit email is a billing.notice row that re-quotes
+  // the balance on retry (billing-email-provider-replay.js).
+  'billing.previsit_balance',
+]);
+
+function isSenderRenderedEmail(message) {
+  return SENDER_RENDERED_TEMPLATES.has(String(message?.template_key || '').trim());
+}
+
+// A skipped email with no later stage: nothing else re-sends it, so staff
+// must follow up by hand. The Day 30 follow-up is final unless the Day 90
+// ladder (GATE_DUNNING_LADDER_90, read now) carries the invoice on.
+// The micro-deposit email names its dunning touch at the end of its
+// trigger_event_id (microdeposit_verification_email:<invoice>:<touch>):
+// the late-payment tier ('90d') or the follow-up step id.
+function isFinalSenderRenderedEmail(message) {
+  const ladderLive = process.env.GATE_DUNNING_LADDER_90 === 'true';
+  const key = String(message?.template_key || '').trim();
+  if (key === 'invoice.followup_30_day') return !ladderLive;
+  if (key === 'payment.microdeposit_verification') {
+    const touch = String(message?.trigger_event_id || '').split(':').pop();
+    return touch === '90d' || touch === 'd90_final_notice' || (touch === 'd30_final' && !ladderLive);
+  }
+  return ['billing_late_payment_90_day', 'invoice.followup_90_day', 'billing.previsit_balance'].includes(key);
+}
+
+const FINAL_NOTICE_CAUSES = {
+  blocked: 'SendGrid blocked it',
+  bounced: 'it hard-bounced',
+};
+
+// A final notice that will never be re-sent gets its own staff alert, once
+// per email, whatever else is said about the address: fixing the address
+// does not deliver it, so someone has to contact the customer.
+async function alertFinalNoticeMissed(message, cause) {
+  if (!isFinalSenderRenderedEmail(message) || !message?.id) return;
+  if (String(message.recipient_type || '').toLowerCase() === 'test') return;
+  const logger = require('./logger');
+  const dedupeKey = `billing-final-notice-missed:${message.id}`;
+  try {
+    const customerId = String(message.recipient_type || '').toLowerCase() === 'customer' ? message.recipient_id || null : null;
+    await require('./notification-service').notifyAdmin(
+      'alert',
+      'Final billing notice not delivered',
+      `A final ${message.template_key} email was not delivered (${FINAL_NOTICE_CAUSES[cause] || cause}) and will not be re-sent; no later reminder follows. Contact the customer directly.`,
+      {
+        link: customerId ? `/admin/customers?customerId=${customerId}` : '/admin/communications',
+        // notifyAdmin's own dedupe (advisory lock + metadata key): once per email.
+        dedupeKey,
+        metadata: { customer_id: customerId, original_message_id: message.id, template_key: message.template_key, cause },
+      },
+    );
+  } catch (err) {
+    logger.warn(`[billing-email-no-replay] final-notice alert failed for ${message.id}: ${err.message}`);
+  }
+}
+
+module.exports = {
+  SENDER_RENDERED_TEMPLATES, isSenderRenderedEmail, isFinalSenderRenderedEmail, alertFinalNoticeMissed,
+};

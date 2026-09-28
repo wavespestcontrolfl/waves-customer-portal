@@ -723,12 +723,20 @@ function confirmationDisplayParams(toolName, params, preview) {
     // carries this display line as a billing effect.
     const pinnedPrice = preview?.pinned_price;
     const { price, ...unpriced } = params;
-    const shown = !pinnedPrice ? params : {
-      ...unpriced,
-      price: pinnedPrice.amount != null
-        ? `$${Number(pinnedPrice.amount).toFixed(2)} (${pinnedPrice.source === 'stated' ? 'as stated' : `catalog price, ${pinnedPrice.service_name}`}) — invoiced when the visit is completed`
-        : 'none on the visit — billed by the customer\'s plan or per-application fee, or a free visit type',
-    };
+    const money = (n) => `$${Number(n).toFixed(2)}`;
+    // A member discount names itself and the list price it came off (owner
+    // 2026-09-27: members get the WaveGuard member discount on a one-off).
+    const discounted = pinnedPrice?.discount_name
+      ? `catalog price ${money(pinnedPrice.list_price)} less ${pinnedPrice.discount_percent != null ? `${pinnedPrice.discount_percent}% ` : ''}${pinnedPrice.discount_name}`
+      : null;
+    let priceLine = null;
+    if (pinnedPrice && pinnedPrice.amount == null) {
+      priceLine = 'none on the visit — billed by the customer\'s plan or per-application fee, or a free visit type';
+    } else if (pinnedPrice) {
+      const basis = pinnedPrice.source === 'stated' ? 'as stated' : (discounted || `catalog price, ${pinnedPrice.service_name}`);
+      priceLine = `${money(pinnedPrice.amount)} (${basis}) — invoiced when the visit is completed`;
+    }
+    const shown = !pinnedPrice ? params : { ...unpriced, price: priceLine };
     if (!preview?.pinned_technician) return shown;
     // Show the pinned tech by NAME (the id is opaque on a card) — the visit
     // binds to exactly this technician at commit.
@@ -974,12 +982,30 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       if (!booking) return { failed: true, modelResult: { error: 'No customer matches that id — nothing was proposed.' } };
       if (booking.error) return { failed: true, modelResult: { error: booking.error } };
       // Server pins, set unconditionally so a model-supplied value can never
-      // stand in for them.
+      // stand in for them. The discount identity/terms (Codex r2 on #5093,
+      // P1) ride alongside the net price and service id: the card shows the
+      // GROSS list price and the discount's name/percent, so a drift in
+      // EITHER at commit — a different discount row, a re-typed percent, or
+      // a preset swapped for one that happens to net the same dollars —
+      // must refuse the same way a net-price mismatch already does, not
+      // silently commit a visit the card never actually showed.
       params._booking_price = booking.price;
       params._booking_service_id = booking.serviceId;
+      params._booking_list_price = booking.listPrice;
+      params._booking_discount_id = booking.discountId;
+      params._booking_discount_name = booking.discountName;
+      params._booking_discount_type = booking.discountType;
+      params._booking_discount_amount = booking.discountAmount;
       preview = {
         ...preview,
-        pinned_price: { amount: booking.price, source: booking.source, service_name: booking.serviceName },
+        pinned_price: {
+          amount: booking.price,
+          source: booking.source,
+          service_name: booking.serviceName,
+          list_price: booking.listPrice,
+          discount_name: booking.discountName,
+          discount_percent: booking.discountPercent,
+        },
       };
     }
     if (toolUse.name === 'reschedule_appointment' && params.appointment_id) {
