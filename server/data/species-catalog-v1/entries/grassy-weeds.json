@@ -97,8 +97,9 @@
       "https://gardeningsolutions.ifas.ufl.edu/care/weeds-and-invasive-plants/weedy-grasses/"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "570abb4528b73e249a60472f967854802d095c6d5aee3c9a6c07a393ac71e6a6"
     },
     "role": "weed",
     "risk": "low",
@@ -222,8 +223,9 @@
       "https://gardeningsolutions.ifas.ufl.edu/care/weeds-and-invasive-plants/weedy-grasses/"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "df9685bc08f4c183b06738b0a2aa3474b8e0c0c453818d0c8f78bfddc0b4277a"
     },
     "role": "weed",
     "risk": "low",
@@ -344,8 +346,9 @@
       "https://gardeningsolutions.ifas.ufl.edu/care/weeds-and-invasive-plants/weedy-grasses/"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "e36b7d7bbcc8da41f482b9ec751ad290656e7ba66b060d710a9d41ac4ef39baa"
     },
     "role": "weed",
     "risk": "low",
@@ -465,8 +468,9 @@
       "https://plant-directory.ifas.ufl.edu/plant-directory/urochloa-plantaginea"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "81e6a63b85937f387ac527c9f9fcef083da37281c09a9c4088ac57259aeced5f"
     },
     "role": "weed",
     "risk": "low",
@@ -586,8 +590,9 @@
       "https://florida.plantatlas.usf.edu/plant/species/429"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "816ab67d7ff3f0e4395b857c25b52c7bf9c4a6cafefd12520ded118501e7f2e1"
     },
     "role": "weed",
     "risk": "low",
@@ -712,8 +717,9 @@
       "https://plants.sc.egov.usda.gov/DocumentLibrary/factsheet/pdf/fs_pase5.pdf"
     ],
     "review": {
-      "status": "draft",
-      "notes": "SWFL-specific range and seasonal peak are a best-estimate judgment call; the cited USDA NRCS fact sheet gives only a broad Atlantic/Gulf Coastal Plain range with no Florida county-level detail."
+      "status": "owner_approved",
+      "notes": "SWFL-specific range and seasonal peak are a best-estimate judgment call; the cited USDA NRCS fact sheet gives only a broad Atlantic/Gulf Coastal Plain range with no Florida county-level detail.",
+      "approval_hash": "637da06f7933be4e88c3894b6c169416fc4fe7c0d0bfa3a691964d1cdbcda9b5"
     },
     "role": "weed",
     "risk": "low",
@@ -831,8 +837,9 @@
       "https://ask.ifas.ufl.edu/publication/aa261"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "bbfb873a1611b3db408aadee4f6044a651f2e1c57fe352440b37ed24946bd0cb"
     },
     "role": "weed",
     "risk": "low",
@@ -951,8 +958,9 @@
       "https://ask.ifas.ufl.edu/ep141"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "e7e179f8020c91568b372a32feb71eb89daade2039bd2b77614ec9f0a7bc2e06"
     },
     "role": "weed",
     "risk": "low",

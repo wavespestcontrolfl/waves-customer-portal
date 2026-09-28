@@ -101,8 +101,9 @@
       "https://gardeningsolutions.ifas.ufl.edu/care/weeds-and-invasive-plants/reading-the-weeds/"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "d03b64646a6a0422da6430ec70c642a6acad15bbd49c96be7733d78e6496a52d"
     },
     "role": "weed",
     "risk": "low",
@@ -154,7 +155,7 @@
       {
         "slug": "spotted-spurge",
         "difference": "Florida pusley has hairy stems and leaves with white star-shaped flowers; spotted spurge has smooth leaves with a maroon spot and oozes milky sap when broken.",
-        "next_photo": "A close-up of a broken stem (milky sap or not) and the leaf surface (hairy vs. smooth with a center spot).",
+        "next_photo": "Wearing gloves, a close-up of a broken stem (milky sap or not) and the leaf surface (hairy vs. smooth with a center spot); keep any sap away from your eyes.",
         "photo_can_confirm": true
       },
       {
@@ -229,8 +230,9 @@
       "https://ask.ifas.ufl.edu/publication/EP634"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "46c881600d8e853b71207f73e2880c0581735291b5948cec8c37b215c029a298"
     },
     "role": "weed",
     "risk": "low",
@@ -283,13 +285,13 @@
       {
         "slug": "florida-pusley",
         "difference": "Spotted spurge has smooth leaves with a maroon spot and milky sap when broken; Florida pusley has hairy stems, no sap, and clustered white star-shaped flowers.",
-        "next_photo": "A close-up of a broken stem (milky sap or not) and the leaf surface (spotted and smooth vs. hairy).",
+        "next_photo": "Wearing gloves, a close-up of a broken stem (milky sap or not) and the leaf surface (spotted and smooth vs. hairy); keep any sap away from your eyes.",
         "photo_can_confirm": true
       },
       {
         "slug": "matchweed",
         "difference": "Spotted spurge has a maroon leaf spot and oozes milky sap when broken; matchweed has plain green leaves, no sap, and a purple-and-white \"match head\" flower.",
-        "next_photo": "A close-up of a broken stem and the leaf surface.",
+        "next_photo": "Wearing gloves, a close-up of a broken stem and the leaf surface; keep any sap away from your eyes.",
         "photo_can_confirm": true
       }
     ],
@@ -342,7 +344,7 @@
     "urgency": "low",
     "copy": {
       "what_it_means": "A low mat-forming weed that moves into thin, dry, or stressed turf and produces seed quickly once established. A technician looks at how thin the surrounding turf is, the season, and coverage before recommending an approach, since a thicker lawn is what keeps it from coming back.",
-      "fact": "Breaking a stem releases a milky white sap \u2014 a quick tell apart from look-alikes that don't ooze sap, but wash it off afterward since the sap can irritate skin.",
+      "fact": "Breaking a stem releases a milky white sap \u2014 a quick tell apart from look-alikes that don't ooze sap. Wear gloves, keep the sap away from your eyes, and wash off any that touches skin, since it can irritate.",
       "blurb": "A ground-hugging weed with a milky sap and a spot on each leaf, thriving in thin or dry turf."
     },
     "tech_notes": "Present in both dry and overwatered thin turf; sometimes cited alongside pusley as a possible nematode indicator \u2014 do not diagnose nematodes from the weed alone. Per label if herbicide is used. Sap can irritate skin or eyes on contact; wash exposed skin.",
@@ -357,8 +359,9 @@
       "https://plants.ces.ncsu.edu/plants/euphorbia-maculata/"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "c3b9402fec1ff5b8292dbf70fbe634e1802b21ceb851a84dac5a064f44a8dc2a"
     },
     "role": "weed",
     "risk": "irritant",
@@ -477,8 +480,9 @@
       "https://gardeningsolutions.ifas.ufl.edu/care/weeds-and-invasive-plants/florida-weed-id/"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "d049bd584ca9e7c9157131301d2486e32d64266d83423892701b6c69a257f2fd"
     },
     "role": "weed",
     "risk": "low",
@@ -546,7 +550,7 @@
       {
         "slug": "spotted-spurge",
         "difference": "Matchweed has plain green leaves, no sap, and a round match-head flower; spotted spurge has a maroon leaf spot and oozes milky sap when a stem is broken.",
-        "next_photo": "A close-up of a broken stem (sap or not) and the leaf surface (spotted vs. plain).",
+        "next_photo": "Wearing gloves, a close-up of a broken stem (sap or not) and the leaf surface (spotted vs. plain); keep any sap away from your eyes.",
         "photo_can_confirm": true
       }
     ],
@@ -616,8 +620,9 @@
       "https://gardeningsolutions.ifas.ufl.edu/plants/ornamentals/frogfruit/"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "cd06582109e535a2ff73140dd87cb79048111243e041bf0e6aec16b24e310469"
     },
     "role": "weed",
     "risk": "low",
@@ -744,8 +749,9 @@
       "https://gardeningsolutions.ifas.ufl.edu/care/weeds-and-invasive-plants/reading-the-weeds/"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "b4cea85cf391d50de02f7d4683edeabc2f026972cf849363b5262d2ea8605bd3"
     },
     "role": "weed",
     "risk": "low",
@@ -877,8 +883,9 @@
       "https://gardeningsolutions.ifas.ufl.edu/care/weeds-and-invasive-plants/florida-weed-id/"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "685ff2a1fba46b71907937b35444efc2932daff4612ba099bd86c867153e5525"
     },
     "role": "weed",
     "risk": "low",
@@ -1002,8 +1009,9 @@
       "https://gardeningsolutions.ifas.ufl.edu/care/weeds-and-invasive-plants/florida-weed-id/"
     ],
     "review": {
-      "status": "draft",
-      "notes": "County-level SWFL prevalence (Sarasota/Charlotte/Manatee/Lee/Collier) is unconfirmed \u2014 the Atlas of Florida Plants distribution map is JS-rendered and did not yield county voucher text in this pass; life cycle is confirmed annual per UF/IFAS Mid-Florida REC."
+      "status": "owner_approved",
+      "notes": "County-level SWFL prevalence (Sarasota/Charlotte/Manatee/Lee/Collier) is unconfirmed \u2014 the Atlas of Florida Plants distribution map is JS-rendered and did not yield county voucher text in this pass; life cycle is confirmed annual per UF/IFAS Mid-Florida REC.",
+      "approval_hash": "3148a53f45f65f5cd03327702e9b55de29667130e8848a6c74219d70447c819b"
     },
     "role": "weed",
     "risk": "low",
@@ -1118,8 +1126,9 @@
       "https://gardeningsolutions.ifas.ufl.edu/care/weeds-and-invasive-plants/florida-weed-id/"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "6ece699c3f7dbfffdbd35a3d0fd3c41d589c23eeb130a5ea26b4992f0e841275"
     },
     "role": "weed",
     "risk": "low",
@@ -1248,8 +1257,9 @@
       "https://blogs.ifas.ufl.edu/osceolaco/2019/09/26/creeping-beggarweed-in-the-landscape-desmodium-incanum/"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "5fa7b16e246b1753cf1680790a69d281290d1c3d6d53ba377c95d4cae7a15cfa"
     },
     "role": "weed",
     "risk": "low",
@@ -1371,8 +1381,9 @@
       "https://blogs.ifas.ufl.edu/nassauco/2017/07/16/q-can-identify-weed-yard/"
     ],
     "review": {
-      "status": "draft",
-      "notes": "No dedicated UF/IFAS EDIS publication for this species was found live; core ID facts (trifoliate leaflets, low-N/centipedegrass association, July\u2013Oct flowering) are corroborated by a UF/IFAS Nassau County Extension post and Clemson HGIC rather than a core EDIS page."
+      "status": "owner_approved",
+      "notes": "No dedicated UF/IFAS EDIS publication for this species was found live; core ID facts (trifoliate leaflets, low-N/centipedegrass association, July\u2013Oct flowering) are corroborated by a UF/IFAS Nassau County Extension post and Clemson HGIC rather than a core EDIS page.",
+      "approval_hash": "c2482128fd64e84595406d1253f9626e5100e35cd0c8ea9805c0bd474263b24c"
     },
     "role": "weed",
     "risk": "low",
@@ -1494,8 +1505,9 @@
       "https://gardeningsolutions.ifas.ufl.edu/care/weeds-and-invasive-plants/florida-weed-id/"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "55db6985d7fe7b040a57090fa08e997429bcc74cdcd2b0de041373a213cb2cbf"
     },
     "role": "weed",
     "risk": "low",
@@ -1548,7 +1560,7 @@
       {
         "slug": "spotted-spurge",
         "difference": "Artilleryweed has tiny fern-like leaves on soft stems, growing in shaded mulch beds and cracks; spotted spurge has a maroon leaf spot, milky sap, sunnier spots.",
-        "next_photo": "A close-up of the stem (soft and translucent vs. oozing milky sap when broken) and the growing location (shaded bed vs. sunny thin turf).",
+        "next_photo": "A close-up of the stem (soft and translucent vs. oozing milky sap when broken; wear gloves if you break one) and the growing location (shaded bed vs. sunny thin turf).",
         "photo_can_confirm": true
       }
     ],
@@ -1618,8 +1630,9 @@
       "https://ask.ifas.ufl.edu/publication/EP535"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "9b73422717094acfe166bbce6c434c467af501a20f4381e2b02092aac44241af"
     },
     "role": "weed",
     "risk": "low",
@@ -1738,8 +1751,9 @@
       "https://blogs.ifas.ufl.edu/escambiaco/2024/07/03/video-mimosa-as-a-lawn-companion-plant"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Whether a given Mimosa specimen is the thornless native M. strigillosa or the thorned M. pudica is a per-photo call, not a fact this entry can settle generically \u2014 thorns indicate M. pudica, a thornless mat indicates M. strigillosa."
+      "status": "owner_approved",
+      "notes": "Whether a given Mimosa specimen is the thornless native M. strigillosa or the thorned M. pudica is a per-photo call, not a fact this entry can settle generically \u2014 thorns indicate M. pudica, a thornless mat indicates M. strigillosa.",
+      "approval_hash": "57eff17d09c740ae213ccd9759267e4b35b252b442802b08ee67cbcb9f3558ee"
     },
     "role": "weed",
     "risk": "low",
@@ -1852,8 +1866,9 @@
       "https://blogs.ifas.ufl.edu/lakeco/2026/08/06/identifying-florida-lawn-weeds/"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "77dffbae967c1e7153b98941cb750851c442393e38e10837a8ed5855f22c006d"
     },
     "role": "weed",
     "risk": "low",
@@ -1979,8 +1994,9 @@
       "https://gardeningsolutions.ifas.ufl.edu/care/weeds-and-invasive-plants/doveweed/"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "4735a4992bd1f4c04c0cd2c82d0c672a5026b122107de3981140186e5ca82d84"
     },
     "role": "weed",
     "risk": "low",
@@ -2100,8 +2116,9 @@
       "https://gardeningsolutions.ifas.ufl.edu/care/weeds-and-invasive-plants/reading-the-weeds/"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "f502743359dad324a22ff75897a68ee48d0dcdd23f9008d354376be2da953209"
     },
     "role": "weed",
     "risk": "low",

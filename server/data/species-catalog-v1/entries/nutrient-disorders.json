@@ -88,8 +88,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "45735be9d4e6a341e5904ed708819ea3d098b3025dfc7066d9716034064dedbf"
     },
     "condition": {
       "hosts": [
@@ -217,8 +218,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "410d85e2f231ab624c32acdfc2daf78091f74ecce8fc88a5aecd7b75a653df8a"
     },
     "condition": {
       "hosts": [
@@ -355,8 +357,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "a463819fc8f9fb17212adab56591644e2bfe4c0ffa857857501a6f4d6fe043b3"
     },
     "condition": {
       "hosts": [
@@ -493,8 +496,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "170b8dbdd1f35c8c80e04d8525b51c92dae2276634242030ba4a04183c527640"
     },
     "condition": {
       "hosts": [
@@ -631,8 +635,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "bc1739f1c426bc7b137a8921bf7837fe43661052b6caaba660cc95381ca82e9f"
     },
     "condition": {
       "hosts": [
@@ -766,8 +771,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "2b186680bfe4d28c2926e50d29a07bde57123ca7949ddef7b4ad2cba06b842ca"
     },
     "condition": {
       "hosts": [
@@ -897,8 +903,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "833286f8dc8bc9fc59fc43a7a53c9157ed71b55759561e4ad4ba3fe44c10d9f9"
     },
     "condition": {
       "hosts": [
@@ -927,7 +934,7 @@
         {
           "slug": "palm-bud-rot",
           "difference": "Boron deficiency keeps the spear leaf attached even if it will not open; bud rot leaves discolor, wilt and pull free easily from the crown.",
-          "next_observation": "Gently check whether the spear leaf pulls free, or have a technician check it.",
+          "next_observation": "A technician checks whether the spear leaf pulls free; don't climb a ladder to reach it yourself.",
           "photo_can_confirm": false
         },
         {
@@ -1035,8 +1042,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "58cd6ba4ecd354b42ac3e387bed6f4329e1e8e9c6f277598b5452f81059b7f7a"
     },
     "condition": {
       "hosts": [

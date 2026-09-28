@@ -83,8 +83,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "785d95345cafa6ff4cd74d502f90a3f687f7da62ed6a3da023a507d0be417115"
     },
     "condition": {
       "hosts": [
@@ -246,8 +247,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "481d9fc15494291721c98f1c1a2885639550e0fdbfdd4047b9778418bff611a7"
     },
     "condition": {
       "hosts": [
@@ -393,8 +395,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "6d51e383d5261319e55c7ba23e9db9c1d9e13240accb969b00e1644f09ca5be1"
     },
     "condition": {
       "hosts": [
@@ -525,8 +528,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "c44dcdd287e8003839a65513201a767d3577f168a7159bcc72e2fb4822017b8c"
     },
     "condition": {
       "hosts": [
@@ -651,8 +655,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "c916526b2688f42f016837f44871cd22ad6d70a41e9ba574ea84ec1e07c4331f"
     },
     "condition": {
       "hosts": [
@@ -783,8 +788,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "e1dc487e2e12848f26e8c1d236e19675bee3e81650b16d567d8c2d2c7c4db030"
     },
     "condition": {
       "hosts": [
@@ -917,8 +923,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "dcac44b47c84b83b66ccc19bcd252e24202ada6127878c60cd420b5fd5a569bd"
     },
     "condition": {
       "hosts": [
@@ -1060,8 +1067,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "73bf182a73b5bf8664629ce727c99e22e827f1e9d94eee41452c3e8515f0de41"
     },
     "condition": {
       "hosts": [

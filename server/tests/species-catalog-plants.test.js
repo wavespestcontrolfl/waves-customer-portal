@@ -86,16 +86,16 @@ describe('L1b catalog size (72 plant + 47 condition + 239 pest = 358)', () => {
     }
   });
 
-  test('every entry is a draft — L1b lands no owner approval', () => {
+  test('every entry is owner-approved against its current content (owner decision 2026-09-28)', () => {
     for (const e of l1bEntries) {
-      expect(e.review.status).toBe('draft');
-      expect(catalog.isApproved(e)).toBe(false);
+      expect(e.review.status).toBe('owner_approved');
+      expect(catalog.isApproved(e)).toBe(true);
     }
   });
 });
 
 describe('L1b: service.key is null for every plant/condition entry', () => {
-  test.each(l1bEntries.map((e) => [e.slug, e]))('%s carries service.key: null (owner decision 4 pending — nothing auto-prices)', (_slug, e) => {
+  test.each(l1bEntries.map((e) => [e.slug, e]))('%s carries service.key: null (owner decision 4, 2026-09-27: nothing auto-prices)', (_slug, e) => {
     expect(e.service.key).toBeNull();
   });
 });
