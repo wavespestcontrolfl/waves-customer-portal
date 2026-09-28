@@ -272,17 +272,26 @@ function matchingPreSlabWarrantyRow(target, rows = [], targets = [target]) {
   return null;
 }
 
+// The same order as reconcilePricedTrenchingWarrantyEvidence: a live engine
+// row or an explicit priced removal decides first; otherwise the current
+// saved rows, then the priced row, then historical fallback rows (an older
+// engineResult). Historical evidence never outranks a priced snapshot's own
+// removal (pre-push audit P1 on 41b0b242a9).
 function reconcilePricedPreSlabWarrantyEvidence(target, evidenceGroups = [], pricing = {}, targets = [target]) {
+  const [current = [], ...fallback] = evidenceGroups;
   const liveEnginePricing = pricing.source === 'engine_invocation' && pricing.snapshotHit !== true;
-  const ordered = liveEnginePricing ? [[target], ...evidenceGroups] : [...evidenceGroups, [target]];
-  let fallback = target;
+  const pricedRemoval = preSlabWarrantyDecision(target) === 'basic';
+  const ordered = liveEnginePricing || pricedRemoval
+    ? [[target], current, ...fallback]
+    : [current, [target], ...fallback];
+  let fallbackRow = target;
   for (const rows of ordered) {
     const match = matchingPreSlabWarrantyRow(target, rows, targets);
     if (!match) continue;
-    fallback = match;
+    fallbackRow = match;
     if (preSlabWarrantyDecision(match) !== 'unset') return match;
   }
-  return fallback;
+  return fallbackRow;
 }
 
 module.exports = {
