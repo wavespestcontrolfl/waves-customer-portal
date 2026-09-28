@@ -243,7 +243,34 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const InvoiceService = require('./invoice');
-const { INVOICE_UNCOLLECTIBLE_STATUSES } = require('./invoice-helpers');
+const { INVOICE_UNCOLLECTIBLE_STATUSES, VISIT_NEVER_RAN_STATUSES } = require('./invoice-helpers');
+
+// The canonical "this visit will never be serviced" vocabulary (Codex P1,
+// PR #5021 r8): reused from invoice-helpers.js rather than hardcoding just
+// 'cancelled' — 'skipped' and 'no_show' are equally terminal, equally
+// never-serviced statuses on the same scheduled_services.status CHECK
+// constraint (AGENTS.md), and every one of them leaves a same-trip
+// sibling's charge on the combined invoice exactly the way a cancellation
+// does. 'canceled' (single L) is in the shared list defensively but is not
+// a value the CHECK constraint accepts for scheduled_services — harmless
+// to check for, never actually matched. Deliberately NOT 'completed': work
+// WAS performed, so it is never a "will not be serviced" status.
+function neverRan(status) {
+  return VISIT_NEVER_RAN_STATUSES.includes(String(status || ''));
+}
+
+// Per-status alert phrasing for a never-ran member (raiseDivergenceAlert) —
+// falls back to a neutral phrase for any future addition to the shared
+// vocabulary this module hasn't been taught specific wording for yet.
+const NEVER_RAN_PHRASE = Object.freeze({
+  cancelled: 'was cancelled',
+  canceled: 'was cancelled',
+  skipped: 'was skipped',
+  no_show: 'was a no-show',
+});
+function neverRanPhrase(status) {
+  return NEVER_RAN_PHRASE[String(status || '')] || 'will not be serviced';
+}
 
 // The canonical "this invoice will never collect any more money" vocabulary
 // (Codex P2, this fix): was a locally-duplicated ['paid', 'prepaid', ...
@@ -308,33 +335,37 @@ function evaluateGroupDivergence({ anchor, members, invoiceStatus }) {
   // A diverging sibling that has already picked up its OWN live invoice
   // (linked to its own scheduled_service_id) has been split off by hand —
   // the office completed the instructed manual split for that visit, so it
-  // no longer needs an alert. A CANCELLED diverging sibling is handled
-  // separately below (cancelledNeedingReview), never here — it needs
-  // different alert copy and, unlike a plain diverging sibling, needs
-  // review even when it never diverged by date at all.
-  const unresolvedDiverging = diverging.filter((m) => !m.has_own_live_invoice && m.status !== 'cancelled');
+  // no longer needs an alert. A NEVER-RAN diverging sibling (cancelled,
+  // skipped, or no-show) is handled separately below (neverRanNeedingReview),
+  // never here — it needs different alert copy and, unlike a plain
+  // diverging sibling, needs review even when it never diverged by date at
+  // all.
+  const unresolvedDiverging = diverging.filter((m) => !m.has_own_live_invoice && !neverRan(m.status));
 
-  // A CANCELLED top-level sibling still covered by the combined invoice
-  // (Codex P1 on this fix): cancelling a visit never removes its share of
-  // the combined charge — voidOpenInvoicesForCancelledService only voids
-  // an invoice linked to the CANCELLED service's OWN scheduled_service_id,
-  // never the anchor's shared one — so it leaves a stale charge whether or
-  // not its date ever diverged from the anchor's (a same-day cancellation
-  // is just as stale a charge as one that also moved). "Covered" mirrors
-  // has_own_live_invoice's own scope: once the sibling has its own live
-  // invoice (its charge has genuinely been moved off the combined one), it
-  // no longer needs review here.
-  const cancelledNeedingReview = members.filter((m) => String(m.id) !== String(anchor.id)
-    && m.status === 'cancelled' && !m.has_own_live_invoice);
+  // A top-level sibling in ANY "work will not be performed" terminal status
+  // (cancelled, skipped, or no-show — Codex P1, PR #5021 r8: 'skipped' was
+  // originally missed, covering only 'cancelled') still covered by the
+  // combined invoice: none of those statuses removes its share of the
+  // combined charge — voidOpenInvoicesForCancelledService (and the
+  // equivalent skip/no-show paths) only void an invoice linked to that
+  // service's OWN scheduled_service_id, never the anchor's shared one — so
+  // it leaves a stale charge whether or not its date ever diverged from the
+  // anchor's (a same-day cancellation/skip/no-show is just as stale a
+  // charge as one that also moved). "Covered" mirrors has_own_live_invoice's
+  // own scope: once the sibling has its own live invoice (its charge has
+  // genuinely been moved off the combined one), it no longer needs review
+  // here.
+  const neverRanNeedingReview = members.filter((m) => String(m.id) !== String(anchor.id)
+    && neverRan(m.status) && !m.has_own_live_invoice);
 
-  const unresolved = [...unresolvedDiverging, ...cancelledNeedingReview];
+  const unresolved = [...unresolvedDiverging, ...neverRanNeedingReview];
   if (!unresolved.length) {
     // 'split_completed' whenever there was ever something here needing
-    // hand resolution (a diverging or cancelled-covered sibling) that has
-    // since been resolved — 'realigned' only when the group never had
+    // hand resolution (a diverging or never-ran-and-covered sibling) that
+    // has since been resolved — 'realigned' only when the group never had
     // anything beyond a plain date mismatch to begin with.
     const everNeededResolution = diverging.length > 0
-      || members.some((m) => String(m.id) !== String(anchor.id) && m.status === 'cancelled');
+      || members.some((m) => String(m.id) !== String(anchor.id) && neverRan(m.status));
     return { action: 'clear', reason: everNeededResolution ? 'split_completed' : 'realigned' };
   }
   return { action: 'alert', reason: 'diverged', diverging: unresolved };
@@ -351,13 +382,19 @@ function evaluateGroupDivergence({ anchor, members, invoiceStatus }) {
 // dismissed.
 function divergenceStateFingerprint({ anchor, diverging, invoiceId, invoiceTotal }) {
   const anchorDate = dateOnly(anchor.scheduled_date);
-  // Cancellation status is folded in explicitly (Codex P1 on the
-  // cancelled-sibling-review fix) rather than relying on the incidental
-  // body-text diff to trigger a refresh: a sibling going diverged→cancelled,
-  // or gaining its own live invoice while cancelled (resolved), is a
-  // genuine state change and must reopen a dismissed alert on its own.
+  // Never-ran status (cancelled/skipped/no-show) is folded in explicitly as
+  // a coarse bucket (Codex P1 on the never-ran-sibling-review fix; widened
+  // in PR #5021 r8 from 'cancelled' alone to every never-ran status) rather
+  // than relying on the incidental body-text diff to trigger a refresh: a
+  // sibling going diverged→never-ran, or gaining its own live invoice while
+  // never-ran (resolved), is a genuine state change and must reopen a
+  // dismissed alert on its own. Deliberately a bucket, not the raw status
+  // string: an ACTIVE member's status churning through its normal lifecycle
+  // (confirmed → en_route → on_site) while still diverging is lifecycle
+  // noise, never a real change in the billing conflict, and must not reopen
+  // a dismissal.
   const parts = diverging
-    .map((d) => `${d.id}:${dateOnly(d.scheduled_date)}:${d.status === 'cancelled' ? 'cancelled' : 'active'}`)
+    .map((d) => `${d.id}:${dateOnly(d.scheduled_date)}:${neverRan(d.status) ? 'never_ran' : 'active'}`)
     .sort();
   const total = invoiceTotal != null && Number.isFinite(Number(invoiceTotal)) ? Number(invoiceTotal).toFixed(2) : null;
   return JSON.stringify({
@@ -467,23 +504,28 @@ async function loadEstablishedAnchorsByEstimate(conn, estimateIds) {
 // (estimated_price NOT NULL) and a recurring program, and it must have at
 // least one live, top-level, ALSO-recurring sibling under the same
 // customer + estimate that is STILL COVERED by the anchor's shared invoice
-// — either it was deliberately left UNPRICED (estimated_price IS NULL, the
-// acceptance-time marker), OR it has no LIVE invoice of its own yet
-// (checked against the same InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES
-// vocabulary has_own_live_invoice uses). The OR matters: a sibling that
-// picks up its own estimated_price BEFORE ever getting split off — the
-// exact "a priced sibling still diverges" scenario this module's own P1
-// fix already guarantees — would otherwise silently fall out of candidate
-// discovery on its very first tick. Checked with a correlated EXISTS
-// against scheduled_services (bounded by the same
-// customer_id/source_estimate_id shape loadGroupMembers already queries
-// by, on the existing idx_scheduled_services_source_estimate index) plus a
-// nested EXISTS/NOT EXISTS against invoices on its own indexed
-// scheduled_service_id column. This also still rules out a normal
-// single-program estimate (no sibling row exists at all) and a normal
-// multi-program estimate where every program was independently priced AND
-// invoiced from day one (neither OR branch matches for such a sibling).
-// Invoice title/notes text is never consulted.
+// — it has no LIVE invoice of its own yet (checked against the same
+// InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES vocabulary
+// has_own_live_invoice uses). This single condition subsumes the ORIGINAL
+// two-branch OR ("unpriced, OR no live invoice yet") — Codex P2, PR #5021
+// r8: an UNPRICED sibling that already has its own live invoice (the
+// manual split completed without ever touching estimated_price) used to
+// match the old "unpriced" branch regardless, so it stayed a candidate
+// forever while the combined invoice sat open, bypassing the fresh-batch
+// limit (see runSweepInner). "No live invoice" alone still covers a
+// sibling that picks up its own estimated_price BEFORE ever getting split
+// off — the "a priced sibling still diverges" scenario this module's own
+// P1 fix already guarantees — since it has no bearing on whether an
+// invoice exists; only "has its own live invoice yet" ever removes a
+// sibling from candidacy. Checked with a correlated EXISTS against
+// scheduled_services (bounded by the same customer_id/source_estimate_id
+// shape loadGroupMembers already queries by, on the existing
+// idx_scheduled_services_source_estimate index) plus a nested NOT EXISTS
+// against invoices on its own indexed scheduled_service_id column. This
+// also still rules out a normal single-program estimate (no sibling row
+// exists at all) and a normal multi-program estimate where every program
+// was independently priced AND invoiced from day one. Invoice title/notes
+// text is never consulted.
 //
 // Deliberately UNBOUNDED by row count (Codex P1): the set this query
 // selects is already bounded by "currently non-settled" — operationally
@@ -509,30 +551,28 @@ async function loadCandidates(conn, { limit = SWEEP_LIMIT } = {}) {
         .whereRaw('sib.id <> anchor.id')
         .whereNull('sib.recurring_parent_id')
         .where('sib.is_recurring', true)
-        .where((stillCovered) => {
-          stillCovered.whereNull('sib.estimated_price')
-            .orWhereNotExists(function siblingOwnLiveInvoiceExists() {
-              this.select(1)
-                .from('invoices as sib_invoice')
-                .whereRaw('sib_invoice.scheduled_service_id = sib.id')
-                .whereNotIn('sib_invoice.status', InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES);
-            });
+        .whereNotExists(function siblingOwnLiveInvoiceExists() {
+          this.select(1)
+            .from('invoices as sib_invoice')
+            .whereRaw('sib_invoice.scheduled_service_id = sib.id')
+            .whereNotIn('sib_invoice.status', InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES);
         })
         // Cheap exclusion of ALIGNED groups (Codex P2, this fix): the
         // check above alone matches every ordinary same-day multi-program
-        // estimate from its very first tick — a sibling deliberately left
-        // estimated_price NULL is "still covered" forever until the
-        // invoice is paid, aligned or not. That is exactly the historical
-        // backlog of accepted-but-unpaid (sent/viewed/overdue) invoices
-        // the load concern is about, and evaluateGroupDivergence would
-        // clear every one of them as 'realigned' anyway. Mirror its own
-        // gate here: a sibling only needs review once it has actually
-        // diverged by date OR been cancelled — the same two conditions
-        // evaluateGroupDivergence's unresolvedDiverging/
-        // cancelledNeedingReview check.
+        // estimate from its very first tick — a sibling with no live
+        // invoice of its own is "still covered" forever until the invoice
+        // is paid, aligned or not. That is exactly the historical backlog
+        // of accepted-but-unpaid (sent/viewed/overdue) invoices the load
+        // concern is about, and evaluateGroupDivergence would clear every
+        // one of them as 'realigned' anyway. Mirror its own gate here: a
+        // sibling only needs review once it has actually diverged by date
+        // OR entered a never-ran terminal status (cancelled/skipped/
+        // no-show, VISIT_NEVER_RAN_STATUSES — Codex P1, r8: widened from
+        // 'cancelled' alone) — the same conditions evaluateGroupDivergence's
+        // unresolvedDiverging/neverRanNeedingReview check.
         .andWhere((needsReview) => {
           needsReview.whereRaw('sib.scheduled_date::date <> anchor.scheduled_date::date')
-            .orWhere('sib.status', 'cancelled');
+            .orWhereIn('sib.status', VISIT_NEVER_RAN_STATUSES);
         });
     })
     .orderBy('anchor.source_estimate_id', 'asc')
@@ -603,22 +643,34 @@ async function loadCandidates(conn, { limit = SWEEP_LIMIT } = {}) {
 // invoice falsely clear the alert while the sibling still has no real
 // replacement charge), not just 'void'.
 //
-// A CANCELLED top-level visit is no longer excluded here (Codex P1 on this
-// fix): cancelling a sibling still covered by the combined invoice never
-// removes its charge — voidOpenInvoicesForCancelledService only voids an
-// invoice linked to the CANCELLED service's OWN scheduled_service_id,
-// never the anchor's shared one — so a cancelled-but-covered sibling stays
-// a real billing conflict, not a settled fact (see the module header and
-// evaluateGroupDivergence's cancelledNeedingReview). A COMPLETED sibling
-// likewise stays a member (divergingSiblings no longer excludes it either;
-// see its own comment) because completing a visit never settles or
-// rewrites the still-open combined invoice. `status` is selected so
-// callers can classify a cancelled member distinctly. Cheap and bounded:
-// one extra query keyed on this small group's own ids.
+// A CANCELLED (or skipped/no-show — see neverRan) top-level visit is no
+// longer excluded here (Codex P1 on this fix): none of those statuses
+// removes its charge — voidOpenInvoicesForCancelledService (and the
+// skip/no-show equivalents) only void an invoice linked to THAT service's
+// OWN scheduled_service_id, never the anchor's shared one — so a
+// never-ran-but-covered sibling stays a real billing conflict, not a
+// settled fact (see the module header and evaluateGroupDivergence's
+// neverRanNeedingReview). A COMPLETED sibling likewise stays a member
+// (divergingSiblings no longer excludes it either; see its own comment)
+// because completing a visit never settles or rewrites the still-open
+// combined invoice. `status` is selected so callers can classify a
+// never-ran member distinctly. Cheap and bounded: one extra query keyed on
+// this small group's own ids.
+//
+// Restricted to RECURRING top-level rows (Codex P2, PR #5021 r8): without
+// this, a one-time, non-recurring appointment booked under the same
+// source_estimate_id (an add-on sold alongside the recurring programs, not
+// itself part of the same-trip pair candidate discovery reasons about) was
+// pulled in as a "member" and could diverge/alert on its own unrelated
+// schedule. Candidate discovery's own structural scan already requires
+// `sib.is_recurring = true` for a sibling to count at all — this mirrors
+// that same predicate so the group loadGroupMembers assembles is exactly
+// the set candidate discovery reasons about, never a superset of it.
 async function loadGroupMembers(conn, { customerId, sourceEstimateId }) {
   const members = await conn('scheduled_services')
     .where({ customer_id: customerId, source_estimate_id: sourceEstimateId })
     .whereNull('recurring_parent_id')
+    .where('is_recurring', true)
     .orderBy('id')
     .select('id', 'scheduled_date', 'completed_at', 'status');
   if (!members.length) return members;
@@ -691,17 +743,18 @@ async function raiseDivergenceAlert(conn, {
   const generation = wasAutoCleared ? priorGeneration + 1 : priorGeneration;
   const dedupeVersion = `${baseFingerprint}::g${generation}`;
   const anchorDate = dateOnly(anchor.scheduled_date);
-  // Cancelled members get distinct copy (Codex P1 on this fix): the office
-  // action isn't "split it by hand" — the visit already isn't happening —
-  // it's removing that sibling's share of the still-open combined charge.
-  // A cancelled member can ALSO have moved off the anchor's date; the
-  // cancellation copy always wins for it since that's the actual remaining
-  // action, regardless of date.
-  const cancelledMembers = diverging.filter((d) => d.status === 'cancelled');
-  const movedMembers = diverging.filter((d) => d.status !== 'cancelled');
+  // Never-ran members (cancelled/skipped/no-show — Codex P1, r8: widened
+  // from 'cancelled' alone) get distinct copy: the office action isn't
+  // "split it by hand" — the visit already isn't happening — it's removing
+  // that sibling's share of the still-open combined charge. A never-ran
+  // member can ALSO have moved off the anchor's date; the never-ran copy
+  // always wins for it since that's the actual remaining action, regardless
+  // of date.
+  const neverRanMembers = diverging.filter((d) => neverRan(d.status));
+  const movedMembers = diverging.filter((d) => !neverRan(d.status));
   const detailParts = [
     ...movedMembers.map((d) => `visit ${d.id} now on ${dateOnly(d.scheduled_date)} (was ${anchorDate})`),
-    ...cancelledMembers.map((d) => `visit ${d.id} was cancelled — remove its charge from the combined invoice`),
+    ...neverRanMembers.map((d) => `visit ${d.id} ${neverRanPhrase(d.status)} — remove its charge from the combined invoice`),
   ];
   const detail = detailParts.join('; ');
   const invoiceRef = invoice
@@ -709,13 +762,13 @@ async function raiseDivergenceAlert(conn, {
     : `Check the first-application invoice for estimate #${estimateId}.`;
   // The lead sentence and the required action both depend on whether any
   // member actually still needs a hand split (movedMembers) versus only a
-  // cancelled member's charge needing removal — a Postgres regression test
+  // never-ran member's charge needing removal — a Postgres regression test
   // (first-application-sibling-split.postgres.test.js) asserts the exact
   // "split it by hand" substring survives whenever a moved member is
   // present, so that phrase is never rewritten for that case.
   const leadSentence = movedMembers.length
     ? 'Same-trip visits from one estimate landed on different days'
-    : 'A same-trip visit from one estimate was cancelled';
+    : 'A same-trip visit from one estimate will not be serviced';
   const actionSentence = movedMembers.length
     ? 'The combined first-application invoice still charges for both — split it by hand.'
     : 'The combined first-application invoice still charges for it — remove that charge.';

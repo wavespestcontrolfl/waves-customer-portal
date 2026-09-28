@@ -207,6 +207,39 @@ describe('evaluateGroupDivergence', () => {
     expect(verdict.action).toBe('alert');
     expect(verdict.diverging.map((m) => m.id).sort()).toEqual(['cancelled', 'moved']);
   });
+
+  // Codex P1 (PR #5021 r8): 'skipped' and 'no_show' are equally terminal,
+  // equally never-serviced statuses (scheduled_services.status CHECK
+  // constraint, AGENTS.md) and must be covered exactly like 'cancelled' —
+  // never excluded from divergence detection just because they aren't the
+  // one status this module originally handled.
+  test.each(['skipped', 'no_show'])('a %s sibling that NEVER diverged by date still alerts', (status) => {
+    const a = anchor();
+    const neverRanSibling = member('never-ran-same-day', { scheduled_date: '2026-10-01', status });
+    const verdict = evaluateGroupDivergence({ anchor: a, members: [a, neverRanSibling], invoiceStatus: 'sent' });
+    expect(verdict.action).toBe('alert');
+    expect(verdict.diverging.map((m) => m.id)).toEqual(['never-ran-same-day']);
+  });
+
+  test.each(['skipped', 'no_show'])('a %s sibling with its OWN live invoice already → clear, split_completed', (status) => {
+    const a = anchor();
+    const resolved = member('resolved', { scheduled_date: '2026-10-01', status, has_own_live_invoice: true });
+    const verdict = evaluateGroupDivergence({ anchor: a, members: [a, resolved], invoiceStatus: 'sent' });
+    expect(verdict).toEqual({ action: 'clear', reason: 'split_completed' });
+  });
+
+  // A still-active status (confirmed, en_route, on_site, rescheduled,
+  // pending) must never be swept into the never-ran bucket — only a
+  // genuinely diverging OR never-ran member gets flagged.
+  test.each(['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site'])(
+    'a sibling with active status %s and no date divergence is never flagged',
+    (status) => {
+      const a = anchor();
+      const active = member('active', { scheduled_date: '2026-10-01', status });
+      const verdict = evaluateGroupDivergence({ anchor: a, members: [a, active], invoiceStatus: 'sent' });
+      expect(verdict).toEqual({ action: 'clear', reason: 'realigned' });
+    },
+  );
 });
 
 describe('divergenceStateFingerprint', () => {
@@ -248,6 +281,30 @@ describe('divergenceStateFingerprint', () => {
     const bCancelled = member('b', { scheduled_date: '2026-10-05', status: 'cancelled' });
     const fp2 = divergenceStateFingerprint({ anchor: a, diverging: [bCancelled], invoiceId: 'inv-1', invoiceTotal: 100 });
     expect(fp1).not.toBe(fp2);
+  });
+
+  // Codex P1 (PR #5021 r8): widened from 'cancelled' alone to every
+  // never-ran status — skipped/no_show must be just as fingerprint-visible.
+  test.each(['skipped', 'no_show'])('a member becoming %s (same date, same invoice) changes the fingerprint', (status) => {
+    const fp1 = divergenceStateFingerprint({ anchor: a, diverging: [b], invoiceId: 'inv-1', invoiceTotal: 100 });
+    const bNeverRan = member('b', { scheduled_date: '2026-10-05', status });
+    const fp2 = divergenceStateFingerprint({ anchor: a, diverging: [bNeverRan], invoiceId: 'inv-1', invoiceTotal: 100 });
+    expect(fp1).not.toBe(fp2);
+  });
+
+  // Every never-ran status buckets to the SAME fingerprint value — moving
+  // between two never-ran statuses (a real but rare transition) still
+  // registers as unchanged here; that's fine, since neither state needs a
+  // fresh alert. What must never happen is treating an ACTIVE lifecycle
+  // change (confirmed → en_route → on_site) as fingerprint-significant —
+  // that's pure visit-lifecycle noise for an otherwise-unresolved diverging
+  // member, never a real change in the billing conflict.
+  test('active-status churn (confirmed → en_route → on_site) never changes the fingerprint on its own', () => {
+    const fp1 = divergenceStateFingerprint({ anchor: a, diverging: [b], invoiceId: 'inv-1', invoiceTotal: 100 });
+    for (const status of ['en_route', 'on_site', 'rescheduled', 'pending']) {
+      const bActive = member('b', { scheduled_date: '2026-10-05', status });
+      expect(divergenceStateFingerprint({ anchor: a, diverging: [bActive], invoiceId: 'inv-1', invoiceTotal: 100 })).toBe(fp1);
+    }
   });
 });
 

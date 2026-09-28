@@ -42,6 +42,7 @@ suite('first-application-sibling-split — periodic sweep', () => {
     clearStandingAlerts,
     loadSweepCursor,
     saveSweepCursor,
+    loadGroupMembers,
   } = require('../services/first-application-sibling-split');
 
   beforeAll(() => { db = require('knex')({ client: 'pg', connection: testUrl }); });
@@ -1006,6 +1007,112 @@ suite('first-application-sibling-split — periodic sweep', () => {
     expect(resolved.action).toBe('cleared');
     expect(resolved.reason).toBe('split_completed');
     expect((await readBell(trx, dedupeKey)).read_at).not.toBeNull();
+  }));
+
+  // Codex P1 (PR #5021 r8): 'skipped' and 'no_show' are equally terminal,
+  // equally never-serviced statuses on the scheduled_services CHECK
+  // constraint (AGENTS.md) and must get the same billing-review treatment
+  // as 'cancelled' — the fix generalizes from a single hardcoded status to
+  // the shared VISIT_NEVER_RAN_STATUSES vocabulary (invoice-helpers.js).
+  test.each(['skipped', 'no_show'])('a %s sibling still alerts — its charge is still on the combined invoice', (status) => rollbackTest(async (trx) => {
+    const ids = await fixture(trx);
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ status });
+    const [result] = await sweepOnce(trx, ids.estimateId);
+    expect(result.action).toBe('alerted');
+    expect(result.divergingSiblingIds).toEqual([ids.lawnId]);
+
+    const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
+    const bell = await readBell(trx, dedupeKey);
+    expect(bell.body).toContain('remove its charge from the combined invoice');
+    expect(bell.body).not.toContain('split it by hand');
+  }));
+
+  // Codex P2 (PR #5021 r8): an UNPRICED sibling that already has its own
+  // live invoice (the manual split completed) used to still count as a
+  // fresh structural candidate forever — the "unpriced" branch matched
+  // regardless of the invoice — bypassing the fresh-batch limit
+  // (selectFreshBatch/FRESH_BATCH_LIMIT) since it never graduated off the
+  // structural scan. Fixed by requiring "no own live invoice" alone. Once
+  // resolved (autoCleared), the estimate must drop out of loadCandidates
+  // entirely on the next tick — not just clear its alert, but stop being
+  // evaluated every tick at all. If the split invoice is later voided,
+  // recovery still finds it through the alert-history (established-anchor)
+  // path, never through this structural branch again.
+  test('a resolved unpriced sibling (own live invoice, never priced) drops out of candidate discovery once autoCleared', () => rollbackTest(async (trx) => {
+    const ids = await fixture(trx);
+    // Diverge first so an alert actually gets raised and established.
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+    const [alerted] = await sweepOnce(trx, ids.estimateId);
+    expect(alerted.action).toBe('alerted');
+
+    // The office splits the charge off WITHOUT ever pricing the sibling row
+    // itself — estimated_price stays NULL, only its own invoice appears.
+    const lawn = await trx('scheduled_services').where({ id: ids.lawnId }).first();
+    expect(lawn.estimated_price).toBeNull();
+    await trx('invoices').insert({
+      id: randomUUID(), customer_id: ids.customerId, scheduled_service_id: ids.lawnId,
+      token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
+      status: 'draft', title: 'Lawn Care', notes: 'Hand-split from the combined first-application invoice.',
+      line_items: JSON.stringify([{ description: 'Lawn Care', quantity: 1, unit_price: 42, amount: 42 }]),
+      subtotal: 42, total: 42,
+    });
+    const [resolved] = await sweepOnce(trx, ids.estimateId);
+    expect(resolved.action).toBe('cleared');
+    expect(resolved.reason).toBe('split_completed');
+
+    const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
+    const cleared = await readBell(trx, dedupeKey);
+    const clearedMeta = typeof cleared.metadata === 'string' ? JSON.parse(cleared.metadata) : cleared.metadata;
+    expect(clearedMeta.autoCleared).toBe(true);
+
+    // The combined invoice is STILL open (never paid) — before this fix,
+    // the unpriced sibling would keep matching the structural scan's
+    // "unpriced" branch forever regardless of its own live invoice. Now
+    // the estimate must be entirely ABSENT from loadCandidates: not a
+    // fresh candidate (excluded by "no own live invoice"), and not an
+    // established one either (its alert is confirmed autoCleared).
+    const stillOpenInvoice = await trx('invoices').where({ id: ids.invoiceId }).first('status');
+    expect(['draft', 'sent', 'viewed', 'overdue']).toContain(stillOpenInvoice.status);
+    const candidatesAfter = await loadCandidates(trx);
+    expect(candidatesAfter.some((c) => c.source_estimate_id === ids.estimateId)).toBe(false);
+
+    // Recovery still works through alert history if the split is undone:
+    // voiding the split invoice re-establishes the same anchor via
+    // loadEstablishedAnchorsByEstimate's own "not yet confirmed-resolved"
+    // scope — this estimate's alert IS confirmed-resolved (autoCleared),
+    // so voiding alone does not resurrect it from THAT branch; but the
+    // group is still structurally "still covered" again (no live invoice),
+    // so the fresh scan picks it right back up.
+    await trx('invoices').where({ scheduled_service_id: ids.lawnId }).update({ status: 'void' });
+    const candidatesAfterVoid = await loadCandidates(trx);
+    expect(candidatesAfterVoid.some((c) => c.source_estimate_id === ids.estimateId)).toBe(true);
+    const [reopened] = await sweepOnce(trx, ids.estimateId);
+    expect(reopened.action).toBe('alerted');
+  }));
+
+  // Codex P2 (PR #5021 r8): loadGroupMembers used to pull in EVERY
+  // top-level row under the source_estimate_id, including a one-time
+  // (non-recurring) add-on booked alongside the recurring programs —
+  // candidate discovery's own structural scan already requires
+  // `is_recurring = true` for a sibling to count; loadGroupMembers now
+  // mirrors that predicate so it never evaluates a superset of what
+  // discovery reasons about.
+  test('a one-time (non-recurring) appointment under the same estimate is never treated as a member — no alert for its own date', () => rollbackTest(async (trx) => {
+    const ids = await fixture(trx);
+    const oneTimeId = randomUUID();
+    await trx('scheduled_services').insert({
+      id: oneTimeId, customer_id: ids.customerId, source_estimate_id: ids.estimateId, scheduled_date: '2026-11-20',
+      service_type: 'One-Time Initial Cleanup', status: 'confirmed', is_recurring: false, estimated_price: 75,
+    });
+    // Both recurring programs stay aligned — only the one-time add-on sits
+    // on a wildly different date, which must never itself trigger an
+    // alert (it is not a same-trip sibling at all).
+    const results = await sweepOnce(trx, ids.estimateId);
+    expect(results.every((r) => r.action !== 'alerted')).toBe(true);
+
+    const members = await loadGroupMembers(trx, { customerId: ids.customerId, sourceEstimateId: ids.estimateId });
+    expect(members.map((m) => m.id).sort()).toEqual([ids.lawnId, ids.pestId].sort());
+    expect(members.some((m) => m.id === oneTimeId)).toBe(false);
   }));
 
   test('the priced (invoice-holding) row itself moving off the sibling\'s date raises the same alert', () => rollbackTest(async (trx) => {
