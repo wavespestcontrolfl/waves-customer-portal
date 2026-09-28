@@ -3951,8 +3951,32 @@ this test (`metadata.feed` is already `'activity'` unconditionally for
 those rows). Every ring also stamps `metadata.rungAt` (an ISO timestamp) —
 the 7-day comparison window is measured from a row's own last ring, not
 its `created_at`. `count`, `newCount`, `rungAt`, `itemKeys`, and
-`itemSetHash` (in-process item identity; this route never accepts them)
-join the reserved metadata keys above.
+`itemSetHash` join the reserved metadata keys above.
+Date-only key follow-up (2026-09-28, codex r8 P1): the date-stripped-key
+comparison above only counts as proof of "the same set" when that key
+still carries something BEYOND the alert class itself — a check whose key
+is shaped exactly `<check-id>:<finding>-<date>`, nothing else variable
+(e22's "N overlapping visits" is the production example), collapses to the
+alert class once its date is stripped and proves nothing about which items
+the finding names. Such a key's identity is UNKNOWN: the ring decision
+falls back to `count`/`newCount` (an equal or absent count with no item
+evidence on either side still RINGS — the pre-admin-alerts-ring behavior
+for these checks — rather than silently reading a different day's finding
+as the same one). A check that wants a quiet re-run for a genuinely
+repeated finding despite a date-only key sends the new `itemIds` field
+instead: an array of strings, at most 2000 entries, each 1-200 chars after
+trim (any other shape, or an explicit `null`, → 400; omitted leaves any
+previously stored identity alone, same convention as `count`/`newCount`).
+It carries the finding's own item identity — deduped, sorted, and capped
+at 500 for the stored `metadata.itemKeys` list exactly like an in-process
+sender's own `itemKeys` above; the full-set SHA-256 (`metadata.itemSetHash`)
+is kept regardless of size, so a set past the cap still proves a swap at an
+equal count. It feeds the SAME ring test as `metadata.itemKeys`, on both
+the fresh-insert and the refresh path — a current id absent from the prior
+list rings even at an equal or smaller `count`; the same set at an equal
+count stays quiet. `itemIds` itself is never stored; only its derived
+`metadata.itemKeys`/`metadata.itemSetHash` are (already reserved keys,
+above).
 `/api/client-errors` (POST; unauthenticated client error telemetry. An
 anonymous surface — /admin/login, a public token route, or any page — can
 crash in the browser, so the reporter cannot require auth. Error reports

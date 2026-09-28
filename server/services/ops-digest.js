@@ -314,6 +314,20 @@ async function findPriorRungRow(conn, { alertClass, source, key }) {
   return q.orderBy(conn.raw(`${RUNG_AT_EXPR} DESC`)).first('metadata');
 }
 
+// A date-only ops-cron key's set identity (follow-up to #5269, codex r8 P1):
+// setKeyFor strips only run dates, so a key shaped `<check-id>:<finding>-
+// <date>` — nothing else variable — collapses to exactly the alert class
+// once the date is gone (alertClassFor already strips that same date via
+// trimVariableTail). Comparing such a setKeyFor to itself day over day
+// proves nothing about which items the finding actually names — e22's
+// "N overlapping visits" is the real example (the fixture's key carries no
+// hash, only a date). Only when the date-stripped key still carries
+// something BEYOND the class does the comparison mean anything — d15/d19's
+// own hash or id suffix, or c32's embedded gate name.
+function keySetProvesIdentity(opsKey, alertClass) {
+  return setKeyFor(opsKey) !== alertClass;
+}
+
 // Ring decision for a row about to be INSERTED fresh (no standing dedupe row
 // to refresh) — the comparison point is the most recent matching row found
 // above, not the specific row a dedupeKey would find (there may be none).
@@ -321,15 +335,27 @@ async function decideRingForNewRow(conn, { alertClass, source, key, opsKey = nul
   const prior = await findPriorRungRow(conn, { alertClass, source, key });
   if (!prior) return true;
   const priorMeta = parseMeta(prior.metadata);
-  // Ops-crons: same items only when the date-stripped keys match. In-process
-  // senders pass no opsKey — one class is one list.
-  // A prior row with no stored key (not a real ops-crons shape) can't prove a
-  // different set, so it falls back to the counts alone.
-  // A mapped check with a stable class (data-hygiene) embeds its run
-  // counters in the key, so its keys never describe an item set — its
-  // parsed counts are the whole comparison.
-  const sameSet = !opsKey || !priorMeta.opsKey || Boolean(stableRouteFor(opsKey))
-    || setKeyFor(opsKey) === setKeyFor(priorMeta.opsKey);
+  // Ops-crons: same items only when the date-stripped keys match AND that
+  // date-stripped key actually carries identity (see keySetProvesIdentity
+  // above) — a date-only key proves nothing either way, so it is UNKNOWN
+  // rather than "same": sameSet then reflects item evidence alone (both
+  // sides' itemSetHash present), which ringDecision's own hash-diff check
+  // resolves; with no item evidence at all this is `false` (not same),
+  // which — via ringDecision's equal/no-count fallback — rings exactly like
+  // these checks did before the admin-alerts-ring scope (owner ruling).
+  // In-process senders pass no opsKey — one class is one list. A prior row
+  // with no stored key (not a real ops-crons shape) can't prove a different
+  // set, so it falls back to the counts alone. A mapped check with a stable
+  // class (data-hygiene) embeds its run counters in the key, so its keys
+  // never describe an item set — its parsed counts are the whole comparison.
+  let sameSet;
+  if (!opsKey || !priorMeta.opsKey || Boolean(stableRouteFor(opsKey))) {
+    sameSet = true;
+  } else if (!keySetProvesIdentity(opsKey, alertClass)) {
+    sameSet = Boolean(itemSetHash) && Boolean(priorMeta.itemSetHash);
+  } else {
+    sameSet = setKeyFor(opsKey) === setKeyFor(priorMeta.opsKey);
+  }
   return ringDecision({
     newCount, count, priorCount: metaCount(priorMeta), sameSet,
     itemKeys, priorItemKeys: Array.isArray(priorMeta.itemKeys) ? priorMeta.itemKeys : undefined,
@@ -695,5 +721,5 @@ module.exports = {
   deliverOpsDigest, resolveOpsDigest, readCleanWatermark, cleanWatermarkKey, inAppEnabled, htmlToText, CATEGORY,
   deriveKind, defaultAudienceFor, fallbackHeadline, truncateAtWord, digestRowFields,
   alertClassFor, ringDecision, findPriorRungRow, decideRingForNewRow, ringOnRefreshFrom, setKeyFor,
-  normalizeItemKeys, hasNewItemKeys, fullSetItemKeys, itemSetHashFor,
+  normalizeItemKeys, hasNewItemKeys, fullSetItemKeys, itemSetHashFor, itemKeysMetaFor,
 };

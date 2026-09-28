@@ -304,6 +304,71 @@ describe('setKeyFor + the item-set comparison', () => {
   });
 });
 
+// Follow-up to #5269 (codex r8 P1): a key shaped `<check-id>:<finding>-
+// <date>` with NOTHING else variable collapses to exactly the alert class
+// once the date is stripped (setKeyFor(opsKey) === alertClass) — the
+// date-stripped comparison proves nothing about which items the finding
+// names, so it must not read as "same set". e22's real key ("N overlapping
+// visits") is the production example.
+describe('decideRingForNewRow: a date-only key carries no identity (UNKNOWN, not "same")', () => {
+  test('no count, no itemIds -> rings (the pre-#5269 behavior for such a check)', async () => {
+    const conn = makeConn({ metadata: { opsKey: 'e22-schedule-integrity:overlaps-2026-09-10' } });
+    await expect(decideRingForNewRow(conn, {
+      alertClass: 'e22-schedule-integrity:overlaps', source: 'ops-crons', key: null,
+      opsKey: 'e22-schedule-integrity:overlaps-2026-09-11', count: null, newCount: null,
+    })).resolves.toBe(true);
+  });
+
+  test('a count that grew still rings; an equal count with no item evidence still rings (never falsely "same")', async () => {
+    const grown = makeConn({ metadata: { opsKey: 'e22-schedule-integrity:overlaps-2026-09-10', count: 2 } });
+    await expect(decideRingForNewRow(grown, {
+      alertClass: 'e22-schedule-integrity:overlaps', source: 'ops-crons', key: null,
+      opsKey: 'e22-schedule-integrity:overlaps-2026-09-11', count: 3, newCount: null,
+    })).resolves.toBe(true);
+    const flat = makeConn({ metadata: { opsKey: 'e22-schedule-integrity:overlaps-2026-09-10', count: 3 } });
+    await expect(decideRingForNewRow(flat, {
+      alertClass: 'e22-schedule-integrity:overlaps', source: 'ops-crons', key: null,
+      opsKey: 'e22-schedule-integrity:overlaps-2026-09-11', count: 3, newCount: null,
+    })).resolves.toBe(true); // unknown identity + flat count -> still rings, never quiet on a guess
+  });
+
+  test('a shrinking count never rings, even with unknown identity', async () => {
+    const conn = makeConn({ metadata: { opsKey: 'e22-schedule-integrity:overlaps-2026-09-10', count: 5 } });
+    await expect(decideRingForNewRow(conn, {
+      alertClass: 'e22-schedule-integrity:overlaps', source: 'ops-crons', key: null,
+      opsKey: 'e22-schedule-integrity:overlaps-2026-09-11', count: 3, newCount: null,
+    })).resolves.toBe(false);
+  });
+
+  test('itemIds evidence rescues the comparison: the same set stays quiet, a swapped item rings', async () => {
+    const { itemSetHashFor } = require('../services/ops-digest');
+    const prior = () => makeConn({
+      metadata: { opsKey: 'e22-schedule-integrity:overlaps-2026-09-10', itemKeys: ['a', 'b'], itemSetHash: itemSetHashFor(['a', 'b']) },
+    });
+    await expect(decideRingForNewRow(prior(), {
+      alertClass: 'e22-schedule-integrity:overlaps', source: 'ops-crons', key: null,
+      opsKey: 'e22-schedule-integrity:overlaps-2026-09-11', count: null, newCount: null,
+      itemKeys: ['b', 'a'], itemSetHash: itemSetHashFor(['b', 'a']),
+    })).resolves.toBe(false);
+    await expect(decideRingForNewRow(prior(), {
+      alertClass: 'e22-schedule-integrity:overlaps', source: 'ops-crons', key: null,
+      opsKey: 'e22-schedule-integrity:overlaps-2026-09-11', count: null, newCount: null,
+      itemKeys: ['a', 'c'], itemSetHash: itemSetHashFor(['a', 'c']),
+    })).resolves.toBe(true);
+  });
+
+  // A key that DOES carry identity beyond the class (d19's own hash suffix)
+  // is unaffected by this fix — proven above in "setKeyFor + the item-set
+  // comparison" and repeated here as the contrast case.
+  test('contrast: a key with an identifying suffix still uses the key comparison, unaffected', async () => {
+    const conn = makeConn({ metadata: { opsKey: 'd19-committed-bookings:gap-17ed9362' } });
+    await expect(decideRingForNewRow(conn, {
+      alertClass: 'd19-committed-bookings:gap', source: 'ops-crons', key: null,
+      opsKey: 'd19-committed-bookings:gap-17ed9362', count: null, newCount: null,
+    })).resolves.toBe(false); // same hash -> same set -> quiet, no count evidence needed
+  });
+});
+
 // Item identity (admin-alerts-ring-v2 follow-up): a count-only standing
 // digest (promised-estimate) can't tell "same N" from "N different items"
 // on its own — itemKeys closes that gap.
