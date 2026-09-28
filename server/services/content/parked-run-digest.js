@@ -538,6 +538,8 @@ async function runParkedRunDigest(opts = {}) {
       html: composed.bodyHtml,
       headline: composed.headline,
       summary: composed.summary,
+      count: composed.total,
+      newCount: composed.newCount,
       link: '/admin/blog?tab=autopilot',
       sendEmail: () => mailer.send({
         to,

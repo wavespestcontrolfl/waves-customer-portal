@@ -103,6 +103,141 @@ function digestRowFields({ subject, text = null, html = null, headline = null, s
     feed: resolvedAudience === 'owner' ? null : 'activity',
   };
 }
+
+// Ring-only-on-change (admin-alerts-ring scope, owner ruling 2026-09-28,
+// "ring only when something changed"): a standing check must update quietly
+// and ring the bell again only when something new appears or the count
+// grows. A quiet row still lands in the Activity feed (metadata.feed =
+// 'activity', metadata.quiet = true) — excludeActivityOnlyFromBell already
+// keeps it out of the bell list/unread count/read-all, so this reuses that
+// one filter instead of adding a second one.
+//
+// Alert class: the identity the ring decision groups findings by.
+//   - In-process senders (this module's own `key` param): the class IS the
+//     key, verbatim — one class per sender already.
+//   - Ops-crons ingest keys carry the check id plus a generated finding-key
+//     suffix (dates, hex/uuid hashes, underscore/dot-joined id lists, bare
+//     numbers) that make every run's key unique on its own. The class strips
+//     that suffix from the END of the finding key ONLY (never the check id
+//     before the first ':'), one trailing separator+token at a time, while
+//     the token is entirely hex digits (0-9a-f — a superset that covers a
+//     plain decimal number too, and a YYYY-MM-DD date reduces to three such
+//     tokens in a row). A token that isn't hex-only — a gate NAME like
+//     GATE_SCHEDULING_CAPACITY — stops the trim, so identity embedded in the
+//     middle of a key survives.
+const TRAILING_VARIABLE_TOKEN_RE = /[-_.]([0-9a-f]+)$/i;
+function trimVariableTail(s) {
+  let next = s;
+  let m;
+  while ((m = TRAILING_VARIABLE_TOKEN_RE.exec(next))) {
+    next = next.slice(0, next.length - m[0].length);
+  }
+  return next;
+}
+function alertClassFor(key, source) {
+  const k = String(key || '');
+  if (source !== 'ops-crons') return k;
+  const i = k.indexOf(':');
+  if (i === -1) return trimVariableTail(k);
+  return k.slice(0, i + 1) + trimVariableTail(k.slice(i + 1));
+}
+
+// The new-news test (owner audience only): ring when the caller reports
+// newCount>0, or its count is higher than the comparison point's — or that
+// point has no count at all (a sender that only started reporting counts
+// after PR 2, or a comparison row from before it).
+function ringDecision({ newCount, count, priorCount }) {
+  if (Number(newCount) > 0) return true;
+  if (count === undefined || count === null) return false;
+  return priorCount === undefined || priorCount === null || Number(count) > Number(priorCount);
+}
+
+function parseMeta(raw) {
+  if (raw == null) return {};
+  if (typeof raw === 'object') return raw;
+  try { return JSON.parse(raw) || {}; } catch { return {}; }
+}
+
+function metaCount(meta) {
+  const c = meta ? meta.count : undefined;
+  return c === undefined || c === null ? null : Number(c);
+}
+
+const NEWS_WINDOW = `7 days`;
+
+// The most recent RUNG (not quiet, not resolved) row of the same alert class
+// and source scope, within the last 7 days — the comparison point for a
+// fresh insert (no existing dedupe row to refresh). Ops-crons rows scope on
+// metadata.source = 'ops-crons'; in-process rows (source null) scope on no
+// source at all. Rows written before this scope have no alertClass: an
+// in-process row (source null) falls back to matching by its stable opsKey
+// (`key`); an ops-crons legacy row is NOT matched this way — its raw key was
+// one-shot anyway, so the first post-deploy row for that check just rings
+// once, which is acceptable (owner ruling).
+async function findPriorRungRow(conn, { alertClass, source, key }) {
+  let q = conn('notifications')
+    .where({ recipient_type: 'admin', category: CATEGORY })
+    .whereRaw("COALESCE(metadata->>'resolved', '') <> 'true'")
+    .whereRaw("COALESCE(metadata->>'quiet', '') <> 'true'")
+    .where('created_at', '>', conn.raw(`NOW() - interval '${NEWS_WINDOW}'`));
+  q = source === null
+    ? q.whereRaw("metadata->>'source' IS NULL")
+    : q.whereRaw("metadata->>'source' = ?", [String(source)]);
+  q = q.where((m) => {
+    m.whereRaw("metadata->>'alertClass' = ?", [alertClass]);
+    if (source === null && key) {
+      m.orWhere((legacy) => legacy.whereRaw("metadata->>'alertClass' IS NULL").whereRaw("metadata->>'opsKey' = ?", [key]));
+    }
+  });
+  return q.orderBy('created_at', 'desc').first('metadata');
+}
+
+// Ring decision for a row about to be INSERTED fresh (no standing dedupe row
+// to refresh) — the comparison point is the most recent matching row found
+// above, not the specific row a dedupeKey would find (there may be none).
+async function decideRingForNewRow(conn, { alertClass, source, key, count, newCount }) {
+  const prior = await findPriorRungRow(conn, { alertClass, source, key });
+  if (!prior) return true;
+  return ringDecision({ newCount, count, priorCount: metaCount(parseMeta(prior.metadata)) });
+}
+
+// notifyAdmin's `ringOnRefresh` contract (PR 2): evaluated against the
+// EXISTING standing row a dedupeKey found, so a refresh only re-bells on
+// genuine new news — a resolved standing row (should not normally happen:
+// resolveOpsDigest drops the dedupeKey on resolve) also rings, for safety.
+function ringOnRefreshFrom({ count, newCount }) {
+  return (existingRow, existingMeta) => {
+    if (existingMeta?.resolved === true) return true;
+    return ringDecision({ newCount, count, priorCount: metaCount(existingMeta) });
+  };
+}
+
+// deliverOpsDigest's notifyAdmin options for the two ring-only-on-change
+// mechanisms — see deliverOpsDigest's own comment for which sender shape
+// uses which. OWNER AUDIENCE ONLY (spec item 3): an engineering/fyi row is
+// never gated (no ringGate) and never given ringOnRefresh, so notifyAdmin's
+// own default applies to its refresh — any content change re-bells, exactly
+// as before this scope (llm-dispatch-metrics; owned-url-health's FIX
+// variant). Audience is read from THIS call's own `resolvedAudience`, so a
+// sender whose kind flips between runs (gbp-sync-health FIX<->ACT) is always
+// gated by the CURRENT emission's audience, never a cached one. Pulled out
+// to keep deliverOpsDigest's own complexity down.
+function ringOptionsFor({ dedupeKey, dedupeWindowMs, refreshOnDedupe, resolvedAudience, alertClass, key, count, newCount }) {
+  const ownerAudience = resolvedAudience === 'owner';
+  if (dedupeKey) {
+    return {
+      dedupeKey,
+      ...(dedupeWindowMs ? { dedupeWindowMs } : {}),
+      ...(refreshOnDedupe ? {
+        refreshOnDedupe: true,
+        ...(ownerAudience ? { ringOnRefresh: ringOnRefreshFrom({ count, newCount }) } : {}),
+      } : {}),
+    };
+  }
+  if (!ownerAudience) return {};
+  return { ringGate: (conn) => decideRingForNewRow(conn, { alertClass, source: null, key, count, newCount }) };
+}
+
 // system_settings.key is varchar(100); a full SHA-256 digest keeps even the
 // longest allowed source/key pair within it, without sharing a watermark.
 function cleanWatermarkKey(lockKey) {
@@ -185,6 +320,12 @@ function inAppEnabled() {
  *                               from the subject's kind (ACT/[Review] → owner, FIX →
  *                               engineering, else fyi); a non-owner audience is
  *                               Activity-only (metadata.feed = 'activity', never the bell).
+ * @param {number} [p.count]     the headline number this finding reports (its backlog
+ *                               size, its list length, …) — the ring-only-on-change test
+ *                               (owner audience only) rings when this is higher than the
+ *                               comparable point's own count, or that point has none.
+ * @param {number} [p.newCount]  how many of `count` are new since the last time this was
+ *                               reported — >0 always rings, regardless of `count`.
  * @param {string} [p.dedupeKey]      one standing row per key (notifyAdmin dedupe)
  * @param {number} [p.dedupeWindowMs] rolling window for that dedupe
  * @param {boolean} [p.refreshOnDedupe] rewrite the standing row (and re-bell it) when the content changed
@@ -198,13 +339,34 @@ function inAppEnabled() {
  * eval) still get an ops_digest row here: that row is what the Activity feed
  * lists, and it is created only on the email's cadence.
  */
-async function deliverOpsDigest({ key, subject, text, html, link = null, metadata = {}, headline = null, summary = null, audience = null, dedupeKey, dedupeWindowMs, refreshOnDedupe, fallOff = false, trx = null, sendEmail }) {
+async function deliverOpsDigest({ key, subject, text, html, link = null, metadata = {}, headline = null, summary = null, audience = null, count, newCount, dedupeKey, dedupeWindowMs, refreshOnDedupe, fallOff = false, trx = null, sendEmail }) {
   if (typeof sendEmail !== 'function') throw new Error('deliverOpsDigest: sendEmail is required');
   if (!inAppEnabled()) {
     const result = await sendEmail();
     return emailOutcome(result);
   }
   const fields = digestRowFields({ subject, text, html, headline, summary, audience });
+  // In-process senders' own `key` IS the alert class (one class per sender).
+  const alertClass = alertClassFor(key, null);
+  const countMeta = Number.isFinite(Number(count)) ? { count: Number(count) } : {};
+  const newCountMeta = Number.isFinite(Number(newCount)) ? { newCount: Number(newCount) } : {};
+  // Ring-only-on-change (owner audience only — see ringOptionsFor). Two
+  // different mechanisms, matching the two ways a sender's row reaches the
+  // table:
+  //   - No dedupeKey (most senders: one fresh INSERT every run): notifyAdmin's
+  //     `ringGate` decides, evaluated inside its OWN lock/transaction (never a
+  //     second pool connection opened here while one is held) — see
+  //     decideRingForNewRow's 7-day alert-class lookback.
+  //   - dedupeKey + refreshOnDedupe (promised-estimate, gbp-sync-health,
+  //     llm-dispatch-metrics, owned-url-health — one STANDING row, refreshed
+  //     in place): the first-ever insert has no prior row to compare against
+  //     (ring=true, same as decideRingForNewRow's own "no such row" rule)
+  //     and every later call is a refresh notifyAdmin's own dedupe finds —
+  //     `ringOnRefresh` decides those against that row's own content. An
+  //     engineering/fyi sender (llm-dispatch-metrics; owned-url-health's FIX
+  //     variant) never gets ringOnRefresh at all, so notifyAdmin's own
+  //     default (any content change re-bells) applies, byte-identical to
+  //     before PR 2 — those rows were never bell-visible either way.
   let row = null;
   try {
     row = await notificationService().notifyAdmin(CATEGORY, fields.title, fields.body, {
@@ -220,10 +382,13 @@ async function deliverOpsDigest({ key, subject, text, html, link = null, metadat
       // Optional dedupe (2026-09-11 email shutoff): a daily digest that
       // reports the same standing list must hold ONE row, refreshed when
       // the list changes, not one unread row per morning.
-      ...(dedupeKey ? { dedupeKey, ...(dedupeWindowMs ? { dedupeWindowMs } : {}), ...(refreshOnDedupe ? { refreshOnDedupe: true } : {}) } : {}),
+      ...ringOptionsFor({ dedupeKey, dedupeWindowMs, refreshOnDedupe, resolvedAudience: fields.audience, alertClass, key, count, newCount }),
       metadata: {
         opsKey: key,
         subject,
+        alertClass,
+        ...countMeta,
+        ...newCountMeta,
         ...(fallOff ? { fallOff: true } : {}),
         ...metadata,
         // kind/audience/feed are the seam's classification, written after the
@@ -239,8 +404,16 @@ async function deliverOpsDigest({ key, subject, text, html, link = null, metadat
         // again — an omitted key would leave the old value standing and the
         // row would never reach the bell (notification-service.js's
         // excludeActivityOnlyFromBell). A sender's own `...metadata` above
-        // can never shadow this.
+        // can never shadow this. `quiet` defaults to false (this call rings)
+        // — notifyAdmin's `ringGate` rewrites both keys to true/'activity'
+        // when the ring-only-on-change test says otherwise; a refresh with
+        // no `ringOnRefresh` ring drops both keys from ITS merge instead, so
+        // an already-quiet-or-rung standing row keeps its own visibility.
+        // Owner-audience only (ringOptionsFor never gates a non-owner row):
+        // an engineering/fyi row gets no `quiet` key and `fields.feed` is
+        // already 'activity' unconditionally.
         feed: fields.feed,
+        ...(fields.audience === 'owner' ? { quiet: false } : {}),
       },
     });
   } catch (err) {
@@ -363,4 +536,5 @@ async function resolveOpsDigest({ key, source, resolvedBy = 'ops-crons', lockKey
 module.exports = {
   deliverOpsDigest, resolveOpsDigest, readCleanWatermark, cleanWatermarkKey, inAppEnabled, htmlToText, CATEGORY,
   deriveKind, defaultAudienceFor, fallbackHeadline, truncateAtWord, digestRowFields,
+  alertClassFor, ringDecision, findPriorRungRow, decideRingForNewRow, ringOnRefreshFrom,
 };

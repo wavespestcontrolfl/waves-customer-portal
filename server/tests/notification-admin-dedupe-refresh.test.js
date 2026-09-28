@@ -90,6 +90,90 @@ test('a content refresh without a supplied link preserves the existing destinati
   expect(mockRows.notifications[0].link).toBe('/admin/customers?customerId=fixture');
 });
 
+// ringOnRefresh (admin-alerts-ring scope, owner ruling 2026-09-28): a
+// refresh's CONTENT still updates either way — only whether it re-bells
+// (clears read_at) is gated, and a non-ringing refresh must not let its own
+// feed/quiet opinion flip the row's current bell visibility.
+test('ringOnRefresh(false): content updates, read_at stays, and feed/quiet are dropped from the merge — the row keeps its current visibility', async () => {
+  await NotificationService.notifyAdmin('ops_digest', 'Backlog check', 'body v1', {
+    dedupeKey: 'ring-fixture', refreshOnDedupe: true, metadata: { count: 5, feed: null, quiet: false },
+  });
+  mockRows.notifications[0].read_at = new Date('2026-09-01T12:00:00Z');
+  const refreshed = await NotificationService.notifyAdmin('ops_digest', 'Backlog check', 'body v2', {
+    dedupeKey: 'ring-fixture', refreshOnDedupe: true, ringOnRefresh: () => false,
+    // This call's OWN feed/quiet opinion (as if it were a fresh, quiet
+    // insert) — ignored, because this refresh does not ring.
+    metadata: { count: 5, feed: 'activity', quiet: true },
+  });
+  expect(refreshed.refreshed).toBe(true);
+  expect(refreshed.rung).toBe(false);
+  const row = mockRows.notifications[0];
+  expect(row.body).toBe('body v2');
+  expect(row.read_at).not.toBeNull();
+  const meta = JSON.parse(row.metadata);
+  expect(meta.feed).toBeNull(); // kept from before the refresh, not flipped to 'activity'
+  expect(meta.quiet).toBe(false); // kept from before the refresh, not flipped to true
+  expect(meta.count).toBe(5); // every other field still merges normally
+});
+
+test('ringOnRefresh(true): read_at clears and the caller\'s own feed/quiet apply like any other field', async () => {
+  await NotificationService.notifyAdmin('ops_digest', 'Backlog check', 'body v1', {
+    dedupeKey: 'ring-fixture-2', refreshOnDedupe: true, metadata: { count: 5, feed: 'activity', quiet: true },
+  });
+  mockRows.notifications[0].read_at = new Date('2026-09-01T12:00:00Z');
+  const refreshed = await NotificationService.notifyAdmin('ops_digest', 'Backlog check', 'body v2', {
+    dedupeKey: 'ring-fixture-2', refreshOnDedupe: true, ringOnRefresh: () => true,
+    metadata: { count: 9, feed: null, quiet: false },
+  });
+  expect(refreshed.rung).toBe(true);
+  const row = mockRows.notifications[0];
+  expect(row.read_at).toBeNull();
+  const meta = JSON.parse(row.metadata);
+  expect(meta.feed).toBeNull();
+  expect(meta.quiet).toBe(false);
+  expect(meta.count).toBe(9);
+});
+
+test('omitting ringOnRefresh preserves today\'s behavior exactly — any content change still re-bells', async () => {
+  await NotificationService.notifyAdmin('ops_digest', 'Backlog check', 'body v1', { dedupeKey: 'ring-default', refreshOnDedupe: true });
+  mockRows.notifications[0].read_at = new Date('2026-09-01T12:00:00Z');
+  const refreshed = await NotificationService.notifyAdmin('ops_digest', 'Backlog check', 'body v2', { dedupeKey: 'ring-default', refreshOnDedupe: true });
+  expect(refreshed.refreshed).toBe(true);
+  expect(refreshed.rung).toBe(true);
+  expect(mockRows.notifications[0].read_at).toBeNull();
+});
+
+// ringGate (admin-alerts-ring scope 2026-09-28): for a PLAIN (no dedupeKey)
+// admin row — the shape most senders use, one fresh insert per run — this
+// decides whether THIS insert rings, inside the same transaction as the
+// insert itself.
+describe('ringGate (no dedupeKey)', () => {
+  test('ringGate() -> true leaves the caller\'s own metadata untouched', async () => {
+    const row = await NotificationService.notifyAdmin('ops_digest', 'Backlog check', 'body', {
+      metadata: { count: 5, feed: null, quiet: false },
+      ringGate: async () => true,
+    });
+    expect(row.suppressed).toBeUndefined();
+    const meta = JSON.parse(mockRows.notifications[0].metadata);
+    expect(meta).toEqual({ count: 5, feed: null, quiet: false });
+  });
+
+  test('ringGate() -> false rewrites ONLY quiet/feed — every other field the caller composed stands', async () => {
+    await NotificationService.notifyAdmin('ops_digest', 'Backlog check', 'body', {
+      metadata: { count: 5, feed: null, quiet: false, opsKey: 'k' },
+      ringGate: async () => false,
+    });
+    const meta = JSON.parse(mockRows.notifications[0].metadata);
+    expect(meta).toEqual({ count: 5, feed: 'activity', quiet: true, opsKey: 'k' });
+  });
+
+  test('omitting ringGate is a plain insert, unaffected — every other admin emitter with no dedupeKey', async () => {
+    await NotificationService.notifyAdmin('service', 'Plain alert', 'body', { metadata: { anything: 1 } });
+    expect(mockRows.notifications).toHaveLength(1);
+    expect(JSON.parse(mockRows.notifications[0].metadata)).toEqual({ anything: 1 });
+  });
+});
+
 test('a changed backlog version refreshes the same bell once even when the count and wording stay the same', async () => {
   const opts = { dedupeKey: 'callback-backlog', refreshOnDedupe: true, dedupeVersion: 'initial' };
   const first = await NotificationService.notifyAdmin('alert', '6 callbacks are due', 'Open the callbacks', opts);

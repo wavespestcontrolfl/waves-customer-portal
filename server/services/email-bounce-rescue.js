@@ -592,6 +592,10 @@ async function sendSuggestionEmail({ rescueRowId, bouncedEmail, candidate, tier,
     text: body,
     headline,
     summary,
+    // One row per address; a repeat bounce of the SAME address is already
+    // deduped upstream (email-rescue:${bouncedEmail} on the auto-corrected
+    // bell above) before this path ever runs for it.
+    count: 1,
     link: '/admin/customers',
     sendEmail: () => email.send({
       to: suggestionRecipient(),

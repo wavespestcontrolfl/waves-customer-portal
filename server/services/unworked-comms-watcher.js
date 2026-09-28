@@ -768,6 +768,7 @@ async function runUnworkedCommsWatcher(opts = {}) {
       text: composed.text,
       headline: composed.headline,
       summary: composed.summary,
+      count: composed.total,
       link: '/admin/communications',
       // No dedupe/refresh here on purpose (pre-push audit P1): the loaders
       // drop callbacks, follow-ups and texts older than 30 days, so a

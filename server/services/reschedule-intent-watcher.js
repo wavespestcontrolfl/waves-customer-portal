@@ -431,6 +431,7 @@ async function runRescheduleIntentWatcher(opts = {}) {
       text: composed.text,
       headline: composed.headline,
       summary: composed.summary,
+      count: composed.count,
       link: '/admin/communications',
       sendEmail: () => mailer.sendOne({
         to,

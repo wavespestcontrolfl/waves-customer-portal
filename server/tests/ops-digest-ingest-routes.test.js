@@ -294,6 +294,83 @@ describe('the check -> destination map fills in what the caller did not send', (
     expect(opts.link).toBe('/admin/agents?tab=activity'); // no better page than Activity for hygiene
   });
 
+  // admin-alerts-ring scope (2026-09-28): the data-hygiene sweep's own
+  // subject already carries count + newCount ("N fixed, M exceptions (K
+  // new)") via config/ops-alert-routes.js's dataHygieneCounts — a "(0 new)"
+  // day with the SAME backlog size as the standing comparison row goes
+  // quiet; a "(2 new)" day always rings, whatever the backlog size did.
+  describe('data-hygiene end to end: "(K new)" drives the ring decision', () => {
+    test('"(0 new)" with an unchanged backlog size goes quiet — Activity-only, not new bell news', async () => {
+      mockNotifyAdmin.mockResolvedValue({ id: 'n-hygiene-quiet', deduped: false });
+      mockStanding.row = { metadata: { count: 63 } }; // the last RUNG row's own backlog size
+      await post({
+        ...good(), key: 'local:data-hygiene_sweep_1_fixed_63_exceptions_0_new_',
+        subject: 'data-hygiene sweep — 1 fixed, 63 exceptions (0 new)',
+        link: undefined,
+      });
+      const opts = mockNotifyAdmin.mock.calls[0][3];
+      expect(opts.metadata.count).toBe(63);
+      expect(opts.metadata.newCount).toBe(0);
+      expect(opts.metadata.quiet).toBe(true);
+      expect(opts.metadata.feed).toBe('activity'); // out of the bell list/unread count/read-all
+    });
+
+    test('"(2 new)" rings, even against the same or a larger standing backlog', async () => {
+      mockNotifyAdmin.mockResolvedValue({ id: 'n-hygiene-ring', deduped: false });
+      mockStanding.row = { metadata: { count: 66 } };
+      await post({
+        ...good(), key: 'local:data-hygiene_sweep_3_fixed_66_exceptions_2_new_',
+        subject: 'data-hygiene sweep — 3 fixed, 66 exceptions (2 new)',
+        link: undefined,
+      });
+      const opts = mockNotifyAdmin.mock.calls[0][3];
+      expect(opts.metadata.count).toBe(66);
+      expect(opts.metadata.newCount).toBe(2);
+      expect(opts.metadata.quiet).toBe(false);
+      expect(opts.metadata.feed).toBeNull(); // reaches the bell
+    });
+
+    test('a caller-supplied count/newCount always wins over the subject parse', async () => {
+      mockNotifyAdmin.mockResolvedValue({ id: 'n-hygiene-override', deduped: false });
+      mockStanding.row = { metadata: { count: 63 } };
+      await post({
+        ...good(), key: 'local:data-hygiene_sweep_1_fixed_63_exceptions_0_new_',
+        subject: 'data-hygiene sweep — 1 fixed, 63 exceptions (0 new)',
+        link: undefined,
+        count: 90,
+        newCount: 5,
+      });
+      const opts = mockNotifyAdmin.mock.calls[0][3];
+      expect(opts.metadata.count).toBe(90);
+      expect(opts.metadata.newCount).toBe(5);
+      expect(opts.metadata.quiet).toBe(false);
+    });
+
+    test('no standing row at all — the first post-deploy row for this class — rings once', async () => {
+      mockNotifyAdmin.mockResolvedValue({ id: 'n-hygiene-first', deduped: false });
+      mockStanding.row = null;
+      await post({
+        ...good(), key: 'local:data-hygiene_sweep_1_fixed_63_exceptions_0_new_',
+        subject: 'data-hygiene sweep — 1 fixed, 63 exceptions (0 new)',
+        link: undefined,
+      });
+      const opts = mockNotifyAdmin.mock.calls[0][3];
+      expect(opts.metadata.quiet).toBe(false);
+      expect(opts.metadata.feed).toBeNull();
+    });
+  });
+
+  // For an unmapped check with no route.counts(), the generic fallback is
+  // the first integer anywhere in the subject (never a newCount — a bare
+  // number's meaning isn't safely guessable for an unconverted check).
+  test('an unmapped check with no caller count falls back to the first integer in the subject', async () => {
+    mockNotifyAdmin.mockResolvedValue({ id: 'n-generic-count', deduped: false });
+    await post({ ...good(), key: 'z99-brand-new-check:x', subject: '7 things need attention', link: undefined });
+    const opts = mockNotifyAdmin.mock.calls[0][3];
+    expect(opts.metadata.count).toBe(7);
+    expect(opts.metadata.newCount).toBeUndefined();
+  });
+
   test('title never carries the KIND: prefix any more — kind rides in metadata only', async () => {
     mockNotifyAdmin.mockResolvedValue({ id: 'n-noprefix', deduped: false });
     await post(good());
@@ -329,6 +406,9 @@ describe('bell write', () => {
       dedupeWindowMs: 24 * 60 * 60 * 1000,
       // a later run's recurrence refreshes the standing row (observedAt above all)
       refreshOnDedupe: true,
+      // admin-alerts-ring scope: the ring-only-on-change decision for the
+      // dedupeKey's refresh path (never exercised on this FIRST insert).
+      ringOnRefresh: expect.any(Function),
       dedupeVersion: undefined,
       // probe + write share one advisory-locked transaction
       trx: expect.anything(),
@@ -343,6 +423,13 @@ describe('bell write', () => {
         feed: null,
         source: 'ops-crons',
         observedAt: expect.any(String),
+        // admin-alerts-ring scope: the check id survives, its generated
+        // hash/date suffix is trimmed; no caller count, so the subject's
+        // own first integer ("3 overlapping visits") is the fallback; this
+        // first-ever row for the class has no prior row to compare — rings.
+        alertClass: 'e22-schedule-integrity:overlaps',
+        count: 3,
+        quiet: false,
       },
     });
   });
@@ -461,6 +548,9 @@ describe('bell write', () => {
       feed: null,
       source: 'ops-crons',
       observedAt: expect.any(String),
+      alertClass: 'e22-schedule-integrity:overlaps',
+      count: 3,
+      quiet: false,
     });
     expect(opts.metadata.resolved).toBeUndefined();
     expect(validateDigest({ ...good(), metadata: { resolved: true } }).value.metadata).toEqual({});

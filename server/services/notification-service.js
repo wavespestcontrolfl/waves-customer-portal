@@ -187,6 +187,46 @@ function normalizeAdminNotificationText({ category, title, body, detail }) {
 // digestRowFields); a change to any of them is a real refresh.
 const ROUTING_METADATA_KEYS = ['kind', 'audience', 'feed'];
 
+// notifyAdmin's refreshOnDedupe branch (admin-alerts-ring scope 2026-09-28):
+// omitted `ringOnRefresh` defaults to true — byte-identical to the
+// pre-existing "any content change re-bells" behavior.
+async function resolveRingOnRefresh(ringOnRefresh, existing, existingMeta) {
+  return typeof ringOnRefresh === 'function' ? ringOnRefresh(existing, existingMeta) : true;
+}
+
+// Not ringing: keep the row's current bell visibility — `feed`/`quiet` are
+// dropped from this refresh's own metadata so existingMeta's values stand,
+// while every other field still merges normally. EXCEPT an audience flip
+// (owner<->engineering, codex r3 follow-up): that changes which surface the
+// row belongs to at all, not merely whether it rings, so its `feed` (and
+// whatever `quiet` this emission carries alongside it) always applies even
+// on a quiet refresh — a FIX->ACT flip must never leave the owner's action
+// hidden behind a stale feed:'activity'.
+function mergeRefreshMetadata(existingMeta, metadata, shouldRing) {
+  if (shouldRing) return { ...existingMeta, ...metadata };
+  const audienceFlipped = Object.prototype.hasOwnProperty.call(metadata, 'audience')
+    && (existingMeta.audience ?? null) !== (metadata.audience ?? null);
+  if (audienceFlipped) return { ...existingMeta, ...metadata };
+  const { feed: _feed, quiet: _quiet, ...rest } = metadata;
+  return { ...existingMeta, ...rest };
+}
+
+// notifyAdmin's no-dedupeKey path (admin-alerts-ring scope 2026-09-28):
+// plain create(), unless the caller supplied `ringGate` — see notifyAdmin's
+// own doc comment for the full contract. Pulled out of notifyAdmin to keep
+// its own complexity down; `service` is `this` from the caller.
+function createPlainAdmin(service, { category, title, body, createOpts, ringGate, callerTrx }) {
+  if (typeof ringGate !== 'function') {
+    return service.create({ recipientType: 'admin', category, title, body, ...createOpts, ...(callerTrx ? { connection: callerTrx } : {}) });
+  }
+  const gated = async (conn) => {
+    const ring = await ringGate(conn);
+    const meta = ring ? createOpts.metadata : { ...(createOpts.metadata || {}), quiet: true, feed: 'activity' };
+    return service.create({ recipientType: 'admin', category, title, body, ...createOpts, metadata: meta, connection: conn });
+  };
+  return callerTrx ? gated(callerTrx) : db.transaction(gated);
+}
+
 const NotificationService = {
   scopeAdminFeedToRole,
   // The admin row text exactly as create() would persist it (emoji-stripped,
@@ -311,16 +351,34 @@ const NotificationService = {
     // so a recurring signal (an estimate re-opened again tomorrow) can ring
     // again once the window passes while two opens inside it contend on the
     // same stable lock. One mechanism for every admin emitter (rule 15).
-    // trx (optional, with dedupeKey): run the lock + probe + insert on the
-    // CALLER's open transaction instead of one of our own, so a caller that
-    // retires earlier rows and raises the replacement commits both together
-    // (termite station retrieval: staff must never see the old instruction
-    // unread beside the new one). Errors then PROPAGATE — swallowing one
-    // inside a caller's transaction would leave it aborted and doom the
-    // commit — so the caller owns containment.
-    const { dedupeKey, dedupeWindowMs, dedupeVersion, refreshOnDedupe = false, trx: callerTrx = null, relayFailureCall = null, ...createOpts } = opts;
+    // trx (optional, with dedupeKey OR ringGate): run the lock + probe +
+    // insert on the CALLER's open transaction instead of one of our own, so
+    // a caller that retires earlier rows and raises the replacement commits
+    // both together (termite station retrieval: staff must never see the
+    // old instruction unread beside the new one). Errors then PROPAGATE —
+    // swallowing one inside a caller's transaction would leave it aborted
+    // and doom the commit — so the caller owns containment.
+    // ringOnRefresh (optional, with refreshOnDedupe; admin-alerts-ring scope
+    // 2026-09-28): `(existingRow, existingMeta) => boolean` — when the
+    // standing row's content changed, this decides whether the refresh also
+    // re-bells it (read_at cleared) or only updates its content quietly
+    // (read_at left as-is). Omitted, it defaults to true everywhere —
+    // BYTE-IDENTICAL to today's "any content change re-bells" behavior. When
+    // it returns false, the metadata merge below also drops `feed`/`quiet`
+    // from the caller's own metadata so an already-rung-or-quiet row keeps
+    // its current bell visibility — only a ringing refresh may flip it.
+    // ringGate (optional, NO dedupeKey; admin-alerts-ring scope 2026-09-28):
+    // `(conn) => Promise<boolean>` — for a plain (non-deduped) admin row,
+    // decides whether THIS insert rings: false rewrites the caller's own
+    // `quiet`/`feed` to `true`/`'activity'` (only those two keys — every
+    // other field the caller composed stands); true leaves the caller's
+    // metadata untouched (its own default already assumes it rings). Runs
+    // inside the SAME transaction as the insert (the caller's own `trx`
+    // when given, else one this call opens) so the lookup a gate performs
+    // and the row it gates can never observe each other's in-between state.
+    const { dedupeKey, dedupeWindowMs, dedupeVersion, refreshOnDedupe = false, ringOnRefresh = null, ringGate = null, trx: callerTrx = null, relayFailureCall = null, ...createOpts } = opts;
     if (!dedupeKey) {
-      return this.create({ recipientType: 'admin', category, title, body, ...createOpts, ...(callerTrx ? { connection: callerTrx } : {}) });
+      return createPlainAdmin(this, { category, title, body, createOpts, ringGate, callerTrx });
     }
     const windowMs = Number(dedupeWindowMs);
     const metadata = { ...createOpts.metadata, dedupeKey, ...(dedupeVersion === undefined ? {} : { dedupeVersion }) };
@@ -357,10 +415,12 @@ const NotificationService = {
           const routingChanged = ROUTING_METADATA_KEYS.some((k) => Object.prototype.hasOwnProperty.call(metadata, k)
             && (existingMeta[k] ?? null) !== (metadata[k] ?? null));
           if (refreshOnDedupe && (versionChanged || existing.title !== nextTitle || existing.body !== nextBody || existing.link !== nextLink || detailChanged || routingChanged)) {
+            const shouldRing = await resolveRingOnRefresh(ringOnRefresh, existing, existingMeta);
+            const mergedMetadata = mergeRefreshMetadata(existingMeta, metadata, shouldRing);
             const refreshed = { title: nextTitle, body: nextBody, ...(detailChanged ? { detail: nextDetail } : {}), link: nextLink,
-              metadata: JSON.stringify({ ...existingMeta, ...metadata }), read_at: null };
+              metadata: JSON.stringify(mergedMetadata), ...(shouldRing ? { read_at: null } : {}) };
             await trx('notifications').where({ id: existing.id }).update(refreshed);
-            return { notification: { ...existing, ...refreshed, metadata: { ...existingMeta, ...metadata } }, deduped: true, refreshed: true };
+            return { notification: { ...existing, ...refreshed, metadata: mergedMetadata }, deduped: true, refreshed: true, rung: shouldRing };
           }
           return { notification: existing, deduped: true };
         }
@@ -374,7 +434,7 @@ const NotificationService = {
         if (!created) throw new Error('admin notification insert failed');
         return { notification: created, deduped: false };
     };
-    const shape = (persisted) => ({ ...persisted.notification, deduped: persisted.deduped, ...(persisted.refreshed ? { refreshed: true } : {}) });
+    const shape = (persisted) => ({ ...persisted.notification, deduped: persisted.deduped, ...(persisted.refreshed ? { refreshed: true, rung: persisted.rung } : {}) });
     if (callerTrx) return shape(await dedupeAndInsert(callerTrx));
     try {
       let callbackStamp;

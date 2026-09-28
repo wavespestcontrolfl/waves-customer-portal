@@ -307,6 +307,7 @@ async function runPromisedEstimateWatcher(opts = {}) {
       text: composed.text,
       headline: composed.headline,
       summary: composed.summary,
+      count: composed.count,
       link: '/admin/pipeline',
       // No rolling window: notifyAdmin's window is measured from created_at,
       // which refreshOnDedupe never advances, so a gap standing longer than

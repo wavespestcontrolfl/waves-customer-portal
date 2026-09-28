@@ -216,6 +216,7 @@ async function runTurfVarianceDigest(opts = {}) {
       text: composed.text,
       headline: composed.headline,
       summary: composed.summary,
+      count: composed.samples,
       link: '/admin/estimates',
       sendEmail: () => mailer.sendOne({
         to,

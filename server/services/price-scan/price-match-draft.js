@@ -164,6 +164,10 @@ async function notifyOwnerOfStagedDraft(row, composed, opts = {}) {
       text: `${banner}\n\n----\n\n${composed.text}`,
       headline,
       summary,
+      // Each staged draft is its own new news — count and newCount are the
+      // same number, so the ring test's newCount>0 branch always fires.
+      count: n,
+      newCount: n,
       link: '/admin/price-match',
       sendEmail: () => mailer.sendOne({
         to,

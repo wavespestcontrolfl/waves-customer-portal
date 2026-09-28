@@ -39,6 +39,21 @@ function dataHygieneHeadline(subject) {
   return `Data hygiene — ${open} open issue${open === 1 ? '' : 's'}, none new`;
 }
 
+// admin-alerts-ring scope (2026-09-28): the sweep's own subject already
+// carries both numbers the ring decision needs — the open backlog size
+// (`count`) and how many of those are new (`newCount`) — so a "0 new" day
+// goes quiet instead of the generic first-integer-in-the-subject fallback
+// (which would read the FIXED count, not the open backlog). Null when the
+// subject doesn't match, same as dataHygieneHeadline above.
+function dataHygieneCounts(subject) {
+  const m = DATA_HYGIENE_SUBJECT_RE.exec(String(subject || ''));
+  if (!m) return null;
+  const open = Number(m[1]);
+  const fresh = Number(m[2]);
+  if (!Number.isFinite(open) || !Number.isFinite(fresh)) return null;
+  return { count: open, newCount: fresh };
+}
+
 // Owner audience: the fix happens somewhere specific, and that's where the
 // bell should land.
 const OWNER_ROUTES = [
@@ -52,7 +67,7 @@ const OWNER_ROUTES = [
   { id: 'c10-membership-truth', area: 'Members', link: '/admin/customers' },
   { id: 'd16-drafts-pipeline-aging', area: 'Drafts', link: '/admin/communications' },
   // Regex: the data-hygiene sweep's key carries its own generated suffix.
-  { id: /^local:data-hygiene/i, area: 'Data hygiene', link: null, headline: dataHygieneHeadline },
+  { id: /^local:data-hygiene/i, area: 'Data hygiene', link: null, headline: dataHygieneHeadline, counts: dataHygieneCounts },
 ];
 
 // Engineering audience: broken plumbing, Activity feed only — never the bell.
@@ -98,11 +113,13 @@ function humanizeCheckId(id) {
   return words.map((w, i) => (i === 0 ? w[0].toUpperCase() + w.slice(1) : w)).join(' ');
 }
 
-// { area, link, audience, headline } for a check id/kind. A matched route
-// wins outright; an unknown check falls back to a humanized area, the
+// { area, link, audience, headline, counts } for a check id/kind. A matched
+// route wins outright; an unknown check falls back to a humanized area, the
 // Activity feed, and an audience derived from `kind` (ACT -> owner, FIX ->
 // engineering — the only two kinds the ingest route accepts). `headline` is
-// the matched entry's own headline(subject) function, or null.
+// the matched entry's own headline(subject) function, or null; `counts` is
+// its own counts(subject) => {count, newCount}|null function, or null (the
+// admin-alerts-ring scope's fallback when the caller sent neither number).
 function routeFor(key, kind) {
   const matched = resolveRoute(key);
   if (matched) {
@@ -111,6 +128,7 @@ function routeFor(key, kind) {
       link: matched.link || ACTIVITY_LINK,
       audience: matched.audience,
       headline: typeof matched.headline === 'function' ? matched.headline : null,
+      counts: typeof matched.counts === 'function' ? matched.counts : null,
     };
   }
   return {
@@ -118,7 +136,8 @@ function routeFor(key, kind) {
     link: ACTIVITY_LINK,
     audience: kind === 'FIX' ? 'engineering' : 'owner',
     headline: null,
+    counts: null,
   };
 }
 
-module.exports = { ACTIVITY_LINK, ROUTES, checkId, humanizeCheckId, resolveRoute, routeFor, dataHygieneHeadline };
+module.exports = { ACTIVITY_LINK, ROUTES, checkId, humanizeCheckId, resolveRoute, routeFor, dataHygieneHeadline, dataHygieneCounts };

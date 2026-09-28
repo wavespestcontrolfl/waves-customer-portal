@@ -43,7 +43,7 @@ const { safeEqual } = require('../middleware/hermes-auth');
 const { notFoundBody } = require('../middleware/errors');
 const { noStore } = require('../middleware/no-store');
 const { unauthenticatedAuthLimitKey } = require('../middleware/rate-limit-key');
-const { inAppEnabled, resolveOpsDigest, readCleanWatermark, CATEGORY, truncateAtWord } = require('../services/ops-digest');
+const { inAppEnabled, resolveOpsDigest, readCleanWatermark, CATEGORY, truncateAtWord, alertClassFor, decideRingForNewRow, ringOnRefreshFrom } = require('../services/ops-digest');
 const { ACTIVITY_LINK, routeFor } = require('../config/ops-alert-routes');
 
 const router = express.Router();
@@ -64,6 +64,9 @@ const MAX_METADATA_BYTES = 4096;
 const MAX_HEADLINE_CHARS = 60;
 const MAX_SUMMARY_CHARS = 110;
 const AUDIENCES = new Set(['owner', 'engineering', 'fyi']);
+// admin-alerts-ring scope (2026-09-28): the ring-only-on-change test's two
+// numbers — see validateCount below.
+const MAX_COUNT = Number.MAX_SAFE_INTEGER;
 const DEDUPE_WINDOW_MS = 24 * 60 * 60 * 1000;
 const SOURCE = 'ops-crons';
 
@@ -150,13 +153,36 @@ function validateDigest(body) {
   if (summary.error) return summary;
   const audience = validateAudience(body.audience);
   if (audience.error) return audience;
+  const count = validateCount(body.count, 'count');
+  if (count.error) return count;
+  const newCount = validateCount(body.newCount, 'newCount');
+  if (newCount.error) return newCount;
   return {
     value: {
       key, kind, subject, text, link: link.value, metadata: metadata.value,
       observedAt: observedAtFrom(body.observedAt),
       headline: headline.value, summary: summary.value, audience: audience.value,
+      count: count.value, newCount: newCount.value,
     },
   };
+}
+
+// The caller's own count/newCount always win. Otherwise the check-map's own
+// counts(subject) (data-hygiene: open backlog + how many are new) — falling
+// back to the first integer anywhere in the subject as a generic `count`
+// (never a `newCount`: a bare number's meaning isn't safely guessable for an
+// unconverted check, so an unmatched check simply never reports newCount).
+function firstIntegerInSubject(subject) {
+  const m = /\d+/.exec(String(subject || ''));
+  return m ? Number(m[0]) : null;
+}
+function resolveCounts({ count, newCount, subject, route }) {
+  if (count !== null && count !== undefined) return { count, newCount: newCount ?? null };
+  const routeCounts = typeof route.counts === 'function' ? route.counts(subject) : null;
+  if (routeCounts && Number.isFinite(routeCounts.count)) {
+    return { count: routeCounts.count, newCount: Number.isFinite(routeCounts.newCount) ? routeCounts.newCount : null };
+  }
+  return { count: firstIntegerInSubject(subject), newCount: null };
 }
 
 // A caller-composed bell title, 60 chars or less. Optional — the route
@@ -193,6 +219,16 @@ function validateAudience(raw) {
   return { value: audience };
 }
 
+// admin-alerts-ring scope (2026-09-28): the ring-only-on-change test's
+// headline number (`count`) and how many of it are new (`newCount`) — both
+// optional; absent, the route falls back to the check-map's own counts(),
+// then to the first integer in the subject (see resolveCounts below).
+function validateCount(raw, label) {
+  if (raw === undefined || raw === null) return { value: null };
+  if (!Number.isInteger(raw) || raw < 0 || raw > MAX_COUNT) return { error: `${label} must be a non-negative integer` };
+  return { value: raw };
+}
+
 // Admin-relative only: a digest never deep-links off the portal, and a
 // stored absolute URL would be a phishing seam in the bell.
 function validateLink(raw) {
@@ -207,7 +243,7 @@ function validateLink(raw) {
 // render as cleared), re-key it, or spoof its source; the route sets these
 // after the caller's fields and the fall-off path is the only writer of
 // the resolved* stamps.
-const RESERVED_METADATA_KEYS = ['opsKey', 'subject', 'kind', 'audience', 'feed', 'source', 'dedupeKey', 'dedupeVersion', 'resolved', 'resolvedAt', 'resolvedBy', 'observedAt'];
+const RESERVED_METADATA_KEYS = ['opsKey', 'subject', 'kind', 'audience', 'feed', 'source', 'dedupeKey', 'dedupeVersion', 'resolved', 'resolvedAt', 'resolvedBy', 'observedAt', 'alertClass', 'count', 'newCount', 'quiet'];
 
 // Observation time of a finding / clean run: the caller's ISO timestamp when
 // valid and not in the future, else now. Ordering resolves against ingests
@@ -235,7 +271,7 @@ router.post('/', darkUnlessConfigured, ingestAuth, async (req, res) => {
   const { error, value } = validateDigest(req.body);
   if (error) return res.status(400).json({ ok: false, reason: 'invalid_payload', error });
 
-  const { key, kind, subject, text, link, metadata, observedAt, headline, summary, audience } = value;
+  const { key, kind, subject, text, link, metadata, observedAt, headline, summary, audience, count, newCount } = value;
   // The check → destination map fills in what an unconverted ops-crons
   // check doesn't send itself: a fallback title area, where the bell should
   // land, and who it's for. A caller's own headline/summary/audience/link
@@ -254,6 +290,11 @@ router.post('/', darkUnlessConfigured, ingestAuth, async (req, res) => {
   // feed its own row will sit in gets the map's more specific page instead.
   const resolvedLink = (!link || link === ACTIVITY_LINK) ? route.link : link;
   const dedupeKey = `${SOURCE}:${key}`;
+  // admin-alerts-ring scope (2026-09-28): the ring-only-on-change identity
+  // and its two numbers — caller-supplied count/newCount win outright, else
+  // the check-map's own counts(subject), else the subject's first integer.
+  const alertClass = alertClassFor(key, SOURCE);
+  const { count: resolvedCount, newCount: resolvedNewCount } = resolveCounts({ count, newCount, subject, route });
   let outcome = null;
   try {
     // ONE transaction under the dedupe's advisory lock — the same lock
@@ -275,6 +316,14 @@ router.post('/', darkUnlessConfigured, ingestAuth, async (req, res) => {
       const standing = await standingObservation(trx, dedupeKey);
       if (standing && Date.parse(observedAt) < Date.parse(standing)) return { stale: true };
       const effectiveObservedAt = laterOf(standing, observedAt);
+      // Ring-only-on-change (owner audience only), decided under the SAME
+      // lock/transaction taken above — see ops-digest.js's own comment for
+      // the full rationale. This covers the FRESH-insert case only (no
+      // standing row yet for this dedupeKey); a REFRESH of an existing row
+      // is decided by ringOnRefresh below, against that row's own content.
+      const quiet = resolvedAudience === 'owner'
+        ? !(await decideRingForNewRow(trx, { alertClass, source: SOURCE, key: null, count: resolvedCount, newCount: resolvedNewCount }))
+        : false;
       // A later run's recurrence changes dedupeVersion and refreshes the
       // standing row. A repeat of the same observation remains deduped.
       // The full report goes to `detail` — the bell shows only the short
@@ -292,6 +341,7 @@ router.post('/', darkUnlessConfigured, ingestAuth, async (req, res) => {
         dedupeKey,
         dedupeWindowMs: DEDUPE_WINDOW_MS,
         refreshOnDedupe: true,
+        ringOnRefresh: ringOnRefreshFrom({ count: resolvedCount, newCount: resolvedNewCount }),
         // Without a caller timestamp, identical content has no new event
         // identity. Let content changes refresh; retries keep their read state.
         dedupeVersion: req.body.observedAt == null ? undefined : effectiveObservedAt,
@@ -303,6 +353,9 @@ router.post('/', darkUnlessConfigured, ingestAuth, async (req, res) => {
           audience: resolvedAudience,
           source: SOURCE,
           observedAt: effectiveObservedAt,
+          alertClass,
+          ...(Number.isFinite(resolvedCount) ? { count: resolvedCount } : {}),
+          ...(Number.isFinite(resolvedNewCount) ? { newCount: resolvedNewCount } : {}),
           // Written LAST and unconditionally: a check whose kind flips
           // between runs under the SAME dedupeKey must have notifyAdmin's
           // refresh merge actually overwrite a stale feed value — an
@@ -310,8 +363,11 @@ router.post('/', darkUnlessConfigured, ingestAuth, async (req, res) => {
           // became owner-audience again would never reach the bell
           // (notification-service.js's excludeActivityOnlyFromBell). The
           // caller's own metadata (RESERVED_METADATA_KEYS-stripped above)
-          // can never shadow this either way.
-          feed: resolvedAudience === 'owner' ? null : 'activity',
+          // can never shadow this either way. `quiet` is the same kind of
+          // ring-decision output (see ops-digest.js's deliverOpsDigest for
+          // why a refresh that doesn't ring drops both from its merge).
+          feed: resolvedAudience === 'owner' ? (quiet ? 'activity' : null) : 'activity',
+          ...(resolvedAudience === 'owner' ? { quiet } : {}),
         },
         trx,
       });
@@ -392,4 +448,5 @@ module.exports._private = {
   validateDigest, ingestAuth, darkUnlessConfigured, ingestBodyErrorHandler, genericNotFound,
   observedAtFrom, standingObservation, laterOf, KINDS, RESERVED_METADATA_KEYS,
   validateHeadline, validateSummary, validateAudience, MAX_HEADLINE_CHARS, MAX_SUMMARY_CHARS,
+  validateCount, resolveCounts, firstIntegerInSubject,
 };

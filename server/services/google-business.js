@@ -1944,6 +1944,7 @@ class GoogleBusinessService {
               text: body,
               headline,
               summary,
+              count: findings.length,
               link: '/admin/reviews',
               metadata: { observedAt },
               trx: savepoint,
