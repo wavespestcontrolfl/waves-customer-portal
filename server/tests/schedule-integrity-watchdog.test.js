@@ -1,11 +1,14 @@
 // Schedule-integrity watchdog (2026-08-04). Born from a Tree & Shrub
 // recurring series found live with no price on any row and its first visit
 // stuck in on_site for two weeks — never completed, never billed — plus 89
-// past-dated visits parked in on_site/en_route the same prod sweep. These
-// tests pin the pure classifiers (stale in-progress, unpriced-series with
-// parent-price inheritance, series-root collapsing), the runInner alert loop
-// (forever-dedupe, one bell per series, per-run cap, loud insert failure),
-// and the gate-off no-op. All fixture identities are synthetic.
+// past-dated visits parked in on_site/en_route the same prod sweep. The
+// stale in-progress class (isStaleInProgress, STALE_STATUSES, the
+// stale-visit: dedupe key) was removed 2026-09-28, superseded by the 7 PM ET
+// tech text about today's open visits. These tests pin the pure classifiers
+// (unpriced-series with parent-price inheritance, series-root collapsing),
+// the runInner alert loop (forever-dedupe, one bell per series, per-run cap,
+// loud insert failure), the gate-off no-op, and a regression proving the
+// removed class never pages. All fixture identities are synthetic.
 jest.mock('../models/db', () => {
   const fn = jest.fn();
   fn.raw = jest.fn((sql) => ({ __raw: sql }));
@@ -40,7 +43,6 @@ const {
   runScheduleIntegrityWatchdog,
   runInner,
   rowHasPrice,
-  isStaleInProgress,
   isUnpricedSeriesVisit,
   seriesRootId,
   MAX_ALERTS_PER_RUN,
@@ -49,8 +51,9 @@ const {
 
 // 2026-08-04 noon ET.
 const NOW = new Date('2026-08-04T16:00:00Z');
-const TODAY_ET = '2026-08-04';
 
+// Shaped like a visit the removed stale in-progress class used to page —
+// kept only for the regression proving it no longer produces a bell.
 function staleVisit(over = {}) {
   return {
     id: 'sv-1', customer_id: 'cust-1', status: 'on_site',
@@ -103,15 +106,6 @@ describe('classifiers', () => {
     expect(rowHasPrice({ primary_line_price: 117 })).toBe(true);
     expect(rowHasPrice({ estimated_price: '0.00', primary_line_price: null })).toBe(false);
     expect(rowHasPrice({})).toBe(false);
-  });
-
-  test('isStaleInProgress: past-dated on_site/en_route only', () => {
-    expect(isStaleInProgress(staleVisit(), TODAY_ET)).toBe(true);
-    expect(isStaleInProgress(staleVisit({ status: 'en_route' }), TODAY_ET)).toBe(true);
-    // Today's visit is legitimately mid-service — never page during it.
-    expect(isStaleInProgress(staleVisit({ service_date: TODAY_ET }), TODAY_ET)).toBe(false);
-    expect(isStaleInProgress(staleVisit({ status: 'confirmed' }), TODAY_ET)).toBe(false);
-    expect(isStaleInProgress(staleVisit({ service_date: null }), TODAY_ET)).toBe(false);
   });
 
   test('isUnpricedSeriesVisit: a price ANYWHERE in the series suppresses', () => {
@@ -176,35 +170,27 @@ describe('runScheduleIntegrityWatchdog gate', () => {
     isEnabled.mockReturnValue(true);
     makeDbMock();
     const result = await runScheduleIntegrityWatchdog({ now: NOW });
-    expect(result).toMatchObject({ skipped: false, stale: 0, unpricedSeries: 0, alerted: 0 });
+    expect(result).toMatchObject({ skipped: false, unpricedSeries: 0, alerted: 0 });
   });
 });
 
 describe('runInner alerting', () => {
-  test('a stale visit rings once with its dedupe key and dispatch link', async () => {
-    makeDbMock({ staleRows: [staleVisit()] });
+  test('a past-dated on_site/en_route visit rings no bell (removed class); an unpriced series still pages', async () => {
+    // The stale in-progress class was removed 2026-09-28 — the 7 PM ET tech
+    // text about today's open visits supersedes it. This shape used to page
+    // as `stale-visit:sv-1` / "Visit stuck on_site since … — never
+    // completed"; makeDbMock still wires it through the 'scheduled_services'
+    // table key for realism, but runInner no longer queries that table at
+    // all, so it produces nothing.
+    makeDbMock({ staleRows: [staleVisit()], coverageRows: [unpricedChild()] });
     const result = await runInner({ now: NOW });
-    expect(result).toMatchObject({ stale: 1, alerted: 1 });
+    expect(result.stale).toBeUndefined();
+    expect(result).toMatchObject({ unpricedSeries: 1, alerted: 1 });
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
-    const [kind, title, , opts] = NotificationService.notifyAdmin.mock.calls[0];
-    expect(kind).toBe('alert');
-    expect(title).toContain('stuck on_site since 2026-07-21');
-    expect(opts.link).toBe('/admin/dispatch');
-    expect(opts.metadata.dedupeKey).toBe('stale-visit:sv-1');
-    // 'alert' is silenced-by-default under GATE_ADMIN_BELL_POLICY — the
-    // explicit site-level bell tag is what makes these pages actually ring.
-    expect(opts.bell).toBe(true);
-  });
-
-  test('an already-alerted subject never rings twice', async () => {
-    makeDbMock({ staleRows: [staleVisit()], alertedKeys: new Set(['stale-visit:sv-1']) });
-    const result = await runInner({ now: NOW });
-    expect(result).toMatchObject({ stale: 1, alerted: 0 });
-    // notifyAdmin's own dedupe now decides — it IS called (with the
-    // dedupeKey), it just answers deduped:true and does not count as a new
-    // alert.
-    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
-    expect(NotificationService.notifyAdmin.mock.calls[0][3].dedupeKey).toBe('stale-visit:sv-1');
+    const [, title, , opts] = NotificationService.notifyAdmin.mock.calls[0];
+    expect(title).not.toContain('never completed');
+    expect(opts.metadata.dedupeKey).not.toMatch(/^stale-visit:/);
+    expect(opts.metadata.dedupeKey).toBe('unpriced-series:ss-parent-1');
   });
 
   test('an unpriced series rings ONE bell for many child visits', async () => {
@@ -245,24 +231,28 @@ describe('runInner alerting', () => {
   });
 
   test('per-run cap stops at MAX_ALERTS_PER_RUN and leaves the rest for next tick', async () => {
-    const staleRows = Array.from({ length: MAX_ALERTS_PER_RUN + 3 }, (_, i) => staleVisit({ id: `sv-${i}` }));
-    makeDbMock({ staleRows });
+    findLawnEmailAudienceGaps.mockResolvedValueOnce(Array.from({ length: MAX_ALERTS_PER_RUN + 3 }, (_, i) => (
+      { customerId: `cust-${i}`, fixable: ['no_coordinates'] }
+    )));
+    makeDbMock();
     const result = await runInner({ now: NOW });
     expect(result.alerted).toBe(MAX_ALERTS_PER_RUN);
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(MAX_ALERTS_PER_RUN);
   });
 
-  test('unpriced series ring BEFORE the stale backlog consumes the cap', async () => {
-    // First-enable shape: a stale backlog bigger than the whole per-run cap
-    // plus one same-day money-loss series. The series must still page today —
-    // it can invoice at $0 while the backlog drains over days.
-    const staleRows = Array.from({ length: MAX_ALERTS_PER_RUN + 5 }, (_, i) => staleVisit({ id: `sv-${i}` }));
-    makeDbMock({ staleRows, coverageRows: [unpricedChild()] });
+  test('unpriced series ring BEFORE a bulk backlog in another class consumes the cap', async () => {
+    // First-enable shape: a backlog bigger than the whole per-run cap plus
+    // one same-day money-loss series. The series must still page today — it
+    // can invoice at $0 while the backlog drains over days.
+    findLawnEmailAudienceGaps.mockResolvedValueOnce(Array.from({ length: MAX_ALERTS_PER_RUN + 5 }, (_, i) => (
+      { customerId: `cust-${i}`, fixable: ['no_coordinates'] }
+    )));
+    makeDbMock({ coverageRows: [unpricedChild()] });
     const result = await runInner({ now: NOW });
     expect(result.alerted).toBe(MAX_ALERTS_PER_RUN);
     const keys = NotificationService.notifyAdmin.mock.calls.map(([, , , opts]) => opts.metadata.dedupeKey);
     expect(keys[0]).toBe('unpriced-series:ss-parent-1');
-    expect(keys.filter((k) => k.startsWith('stale-visit:'))).toHaveLength(MAX_ALERTS_PER_RUN - 1);
+    expect(keys.filter((k) => k.startsWith('lawn-email-gap:'))).toHaveLength(MAX_ALERTS_PER_RUN - 1);
   });
 
   test('a fixable lawn-email audience gap rings with its dedupe key', async () => {
@@ -325,14 +315,14 @@ describe('runInner alerting', () => {
 
   test('a failed lawn-gap check is REPORTED, never silently zero — and other classes still page', async () => {
     findLawnEmailAudienceGaps.mockRejectedValueOnce(new Error('db exploded'));
-    makeDbMock({ staleRows: [staleVisit()] });
+    makeDbMock({ coverageRows: [unpricedChild()] });
     const result = await runInner({ now: NOW });
-    expect(result).toMatchObject({ lawnGapCheckFailed: true, lawnEmailGaps: 0, stale: 1, alerted: 1 });
-    expect(NotificationService.notifyAdmin.mock.calls[0][3].metadata.dedupeKey).toBe('stale-visit:sv-1');
+    expect(result).toMatchObject({ lawnGapCheckFailed: true, lawnEmailGaps: 0, unpricedSeries: 1, alerted: 1 });
+    expect(NotificationService.notifyAdmin.mock.calls[0][3].metadata.dedupeKey).toBe('unpriced-series:ss-parent-1');
   });
 
   test('a swallowed notification insert fails the run loudly', async () => {
-    makeDbMock({ staleRows: [staleVisit()] });
+    makeDbMock({ coverageRows: [unpricedChild()] });
     NotificationService.notifyAdmin.mockImplementation(async () => null);
     await expect(runInner({ now: NOW })).rejects.toThrow('pager output lost');
   });
@@ -479,7 +469,7 @@ describe('accepted-plan schedule detection', () => {
 
   test('an unavailable acceptance check is reported while existing checks keep running', async () => {
     findAcceptedRecurringScheduleGaps.mockRejectedValueOnce(new Error('read failed'));
-    makeDbMock({ staleRows: [staleVisit()] });
+    makeDbMock({ coverageRows: [unpricedChild()] });
     expect(await runInner({ now: NOW })).toMatchObject({ acceptedScheduleCheckFailed: true, alerted: 1 });
   });
 });

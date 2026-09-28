@@ -1346,7 +1346,32 @@ const TwilioService = {
           channel: 'sms', providerAcceptedAt: handoffAt, metadata: providerSmsMetadata(),
         });
         providerCoordination.recordProviderOutcome(providerHandoffReservation, { deliveryOutcome: 'uncertain' });
-        message = await c.messages.create(msgPayload);
+        try {
+          message = await c.messages.create(msgPayload);
+        } catch (createErr) {
+          // codex #5196 r4 P2: a definitive rejection here still has the
+          // caller's withSmsHandoff transaction open — lockSmsPhone is
+          // still held. Give the caller a chance to clear its own
+          // pre-provider marker (onDispatchAbort's sibling for THIS
+          // outcome) before that lock releases, instead of only after
+          // sendCustomerMessage returns. Same predicate as the outer catch
+          // below, so the two can never disagree. Best-effort: never lets
+          // a hook failure change the original error.
+          // 21610 is excluded: its opt-out is recorded only in the outer
+          // catch (recordSyncProviderOptOut), after this lock releases, so
+          // the marker must stay until then or a queued sender could see
+          // neither and text an opted-out number. The caller's post-return
+          // cleanup removes it after that write.
+          if (typeof options.onDispatchRejected === 'function' && isDefinitiveTwilioRejection(createErr)
+              && String(createErr.code) !== '21610') {
+            try {
+              await options.onDispatchRejected();
+            } catch (hookErr) {
+              logger.error(`[twilio] onDispatchRejected failed: ${hookErr.message}`);
+            }
+          }
+          throw createErr;
+        }
         if (!message?.sid) throw new Error("Twilio messages.create returned no SID");
         acceptedMessage = message;
         deliveryOutcome = "accepted";

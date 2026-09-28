@@ -97,6 +97,36 @@ describe('Twilio messaging provider adapter', () => {
     expect(providerPreSendCheck).not.toHaveBeenCalled();
   });
 
+  // codex #5196 r4 P2: onDispatchRejected threads through unchanged,
+  // alongside onDispatchStart/onDispatchAbort — sendViaTwilio itself never
+  // invokes any of the three; twilio.js's own dispatch() does.
+  test('forwards onDispatchStart/onDispatchAbort/onDispatchRejected unchanged', async () => {
+    const onDispatchStart = jest.fn(async () => {});
+    const onDispatchAbort = jest.fn(async () => {});
+    const onDispatchRejected = jest.fn(async () => {});
+
+    await sendViaTwilio(baseInput(), { onDispatchStart, onDispatchAbort, onDispatchRejected });
+
+    expect(TwilioService.sendSMS).toHaveBeenCalledWith(
+      '+15551230000',
+      'Hello from Waves',
+      expect.objectContaining({ onDispatchStart, onDispatchAbort, onDispatchRejected }),
+    );
+    expect(onDispatchStart).not.toHaveBeenCalled();
+    expect(onDispatchAbort).not.toHaveBeenCalled();
+    expect(onDispatchRejected).not.toHaveBeenCalled();
+  });
+
+  test('a caller with no onDispatchRejected forwards it as undefined', async () => {
+    await sendViaTwilio(baseInput());
+
+    expect(TwilioService.sendSMS).toHaveBeenCalledWith(
+      '+15551230000',
+      'Hello from Waves',
+      expect.objectContaining({ onDispatchRejected: undefined }),
+    );
+  });
+
   test('returns sanitized provider details when Twilio throws', async () => {
     const err = new Error('The To number +15551230000 is not a valid mobile number.');
     err.code = 21614;

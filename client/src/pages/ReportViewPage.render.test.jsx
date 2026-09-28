@@ -723,6 +723,52 @@ describe('ReportViewPage — legacy lawn fallback (historical tokens, reportV2 n
     expect(note.textContent).toMatch(/FDACS ID card #JE000001/);
   });
 
+  // GATE_REPORT_PRODUCT_COPY (owner-approved 2026-09-28): the server omits
+  // `product.report_copy` entirely when the gate is off or the product has
+  // no approved wording — the client renders purely off that key's presence,
+  // so these two payloads stand in for gate-off and gate-on.
+  it('renders "How it works" / "Also labeled for" / "Pets & kids" when the server includes report_copy', async () => {
+    const withCopy = JSON.parse(JSON.stringify(legacyLawnReport));
+    withCopy.applications[0].product.name = 'Taurus SC';
+    withCopy.applications[0].product.report_copy = {
+      how_it_works: 'Pests can’t detect it, so they walk right through the treated band.',
+      also_labeled_for: 'Big-headed, crazy, carpenter and pharaoh ants.',
+      pets_kids: 'Keep people and pets off treated areas until the spray has dried.',
+    };
+    const { container } = renderReport(withCopy);
+    await screen.findByText('Visit Summary');
+    const card = within(container.querySelector('#products-applied')).getByRole('heading', { name: 'Taurus SC' }).closest('.applied-product-card');
+    expect(within(card).getByText('How it works')).toBeInTheDocument();
+    expect(within(card).getByText(/walk right through the treated band/)).toBeInTheDocument();
+    expect(within(card).getByText('Also labeled for')).toBeInTheDocument();
+    expect(within(card).getByText(/Big-headed, crazy, carpenter and pharaoh ants/)).toBeInTheDocument();
+    expect(within(card).getByText('Pets & kids')).toBeInTheDocument();
+    expect(within(card).getByText(/Keep people and pets off treated areas/)).toBeInTheDocument();
+  });
+
+  it('never renders "Also labeled for" when report_copy carries no such key (the LESCO ruling), and renders nothing when report_copy is absent', async () => {
+    const lescoCopy = JSON.parse(JSON.stringify(legacyLawnReport));
+    lescoCopy.applications[0].product.name = 'LESCO 90/10 Nonionic Surfactant';
+    lescoCopy.applications[0].product.report_copy = {
+      how_it_works: 'A spreader added to the spray so it covers evenly and sticks to surfaces.',
+      pets_kids: 'Follows the spray it’s mixed into.',
+    };
+    const { container } = renderReport(lescoCopy);
+    await screen.findByText('Visit Summary');
+    const lescoCard = within(container.querySelector('#products-applied')).getByRole('heading', { name: 'LESCO 90/10 Nonionic Surfactant' }).closest('.applied-product-card');
+    expect(within(lescoCard).getByText('How it works')).toBeInTheDocument();
+    expect(within(lescoCard).queryByText('Also labeled for')).toBeNull();
+    expect(within(lescoCard).getByText('Pets & kids')).toBeInTheDocument();
+
+    // Base fixture (no report_copy on any application) — gate-off shape.
+    const { container: plainContainer } = renderReport(legacyLawnReport);
+    await screen.findByText('Visit Summary');
+    const plainProducts = plainContainer.querySelector('#products-applied');
+    expect(within(plainProducts).queryByText('How it works')).toBeNull();
+    expect(within(plainProducts).queryByText('Also labeled for')).toBeNull();
+    expect(within(plainProducts).queryByText('Pets & kids')).toBeNull();
+  });
+
   it('a bait-station check or an unknown verdict gets Poison Control but names no applicator', async () => {
     const rodentBait = { id: 'rb-2', method: 'station_check', product: { name: 'Protecta Rodent Bait Station' } };
     for (const payload of [

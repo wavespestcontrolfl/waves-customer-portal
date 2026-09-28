@@ -55,7 +55,7 @@ import {
   docTransition,
 } from '../theme-doc';
 import { CustomerColumn, PublicStateCard } from '../components/brand';
-import ServiceReportDocument from './ServiceReportDocument';
+import ServiceReportDocument, { sanitizeReentryCopy } from './ServiceReportDocument';
 import { useWavesShell } from '../components/brand/WavesShellContext';
 import { useGlassSurface } from '../glass/glass-engine';
 import PestPressureCard from '../components/PestPressureCard';
@@ -1523,6 +1523,13 @@ function applicationReentrySummary(app = {}) {
 
 function applicationManufacturer(app = {}) {
   return app.product?.manufacturer || '';
+}
+
+// GATE_REPORT_PRODUCT_COPY (owner-approved 2026-09-28) — the server omits
+// `report_copy` entirely when the gate is off or the product has no
+// approved wording, so this reads as absent, never a placeholder.
+function applicationReportCopy(app = {}) {
+  return app.product?.report_copy || null;
 }
 
 // Product-specific watering guidance for the lawn report, sourced ONLY from the
@@ -3471,14 +3478,6 @@ function CrossSellCard({ data, token, mode }) {
   };
   return (
     <section data-glass="card" className="report-card cross-sell-card" data-section="cross-sell">
-      {/* GATE_REPORT_CROSS_SELL_V2 only: short, honest, reason-tied copy for
-          a findings/season-picked offer ("We noted roach activity today...").
-          Absent for the unchanged ladder pick. */}
-      {offer.reason && (
-        <p style={{ margin: '0 0 12px', color: 'var(--muted)', fontSize: 14, lineHeight: 1.5, textAlign: 'center' }}>
-          {offer.reason}
-        </p>
-      )}
       <div className="cross-sell-cta-row">
         {requestState === 'sent' ? (
           <p className="cross-sell-confirm">
@@ -3650,6 +3649,7 @@ function AppliedProductsSection({ data, mode = 'live' }) {
             const precautionSummary = applicationPrecautionSummary(app);
             const reentrySummary = applicationReentrySummary(app);
             const manufacturer = applicationManufacturer(app);
+            const reportCopy = applicationReportCopy(app);
             const watering = isLawn ? lawnWateringGuidance(app) : null;
             const substitution = substitutionByName.get(String(productName).toLowerCase());
             const technicalFacts = [
@@ -3709,6 +3709,26 @@ function AppliedProductsSection({ data, mode = 'live' }) {
                   <div className="product-why">
                     <div className="sr-cell-label">Product note</div>
                     <p>{productSummary}</p>
+                  </div>
+                )}
+                {/* Owner-approved product wording (GATE_REPORT_PRODUCT_COPY,
+                    2026-09-28) — customer-display only, never fed into the
+                    AI report writer. "Also labeled for" describes the
+                    LABEL, never what was treated on this visit, so it never
+                    reads next to "Why used today" above. LESCO carries no
+                    also_labeled_for key at all (owner ruling). */}
+                {reportCopy && (
+                  <div className="product-why">
+                    <div className="sr-cell-label">How it works</div>
+                    <p>{reportCopy.how_it_works}</p>
+                    {reportCopy.also_labeled_for && (
+                      <>
+                        <div className="sr-cell-label">Also labeled for</div>
+                        <p>{reportCopy.also_labeled_for}</p>
+                      </>
+                    )}
+                    <div className="sr-cell-label">Pets &amp; kids</div>
+                    <p>{sanitizeReentryCopy(reportCopy.pets_kids)}</p>
                   </div>
                 )}
               <details className="solution-detail report-accordion" open={mode !== 'live'}>

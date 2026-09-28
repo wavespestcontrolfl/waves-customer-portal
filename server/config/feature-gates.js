@@ -84,6 +84,7 @@
  *   GATE_SOUTH_ZONE_DAY_FUNNEL=true (estimate picker funnels far-south zones onto days with an existing zone stop, seeding one day when none exists)
  *   GATE_JOB_CARD=true (Service Protocol drawer "Job card" tab: customer paragraph (FAST-tier rewrite of portal fields, template fallback, cached on scheduled_services.job_card), per-product spray check from NWS hourly at the property, tank mix search; read at call time; unset = tab hidden, endpoint answers {enabled:false})
  *   GATE_REPORT_PHOTO_CONTENT=true (tech-reviewed completion-photo captions/summary ground the AI report writer; read at call time via reportPhotoContentLive(), off unless exactly 'true')
+ *   GATE_REPORT_PRODUCT_COPY=true (owner-approved 2026-09-28 wording page: three short customer-facing lines per applied product on the service report — "How it works", "Also labeled for", "Pets & kids" — matched to the applied catalog product by EPA registration number primarily, an explicit name-alias list otherwise; server/config/report-product-copy.js. Unmatched products get NO copy — fail closed, never guessed. Customer-display only — never fed into the AI report writer's grounding. Off unless exactly 'true', read at call time via reportProductCopyGateOn() in report-product-copy.js; the gates-map entry below is for logGateStatus only)
  *   GATE_VAN_SCENE=true (the "look for this van" scene under the appointment header card and on the booking confirmation step; dev-open (every non-production NODE_ENV renders it regardless), prod dark; prod kill = unset)
  *   GATE_SLOT_TRAVEL_GAP=true (every customer-facing picker + commit gate requires modeled drive time + SLOT_TRAVEL_BUFFER_MINUTES (default 15) between consecutive stops; read at call time; unset = pure-overlap legacy)
  *   GATE_BOOKING_LUNCH_BLOCK=true (restores the 12:00-13:00 lunch block on every customer-facing offer + commit surface (/book, public reschedule, public re-service, the legacy zone availability engine); read at call time via scheduling/customer-windows.js lunchBlockEnabled(); unset = noon is a normal offerable/reservable hour, owner ruling 2026-09-23)
@@ -523,6 +524,17 @@ const gates = {
   // that bypass the resolver read directly, so a flip needs no redeploy.
   // Off = byte-identical to today on every path.
   stampedZeroFree: process.env.GATE_STAMPED_ZERO_FREE === 'true',
+  // Product-copy lines on the service report (owner-approved 2026-09-28) —
+  // "How it works" / "Also labeled for" / "Pets & kids" per applied product,
+  // matched against the static reviewed config in
+  // server/config/report-product-copy.js. Live view only, like
+  // planSummary/nearYou above — PDF/static/sms_preview never carry it at any
+  // setting (stripLiveOnlyReportProductCopy), and termite-line reports never
+  // get it. This map entry is for logGateStatus only — the
+  // canonical CALL-TIME reader is reportProductCopyGateOn() in
+  // server/services/service-report/report-product-copy.js, same posture as
+  // pestReportExpectationsGateOn().
+  reportProductCopy: process.env.GATE_REPORT_PRODUCT_COPY === 'true',
 
   // Report-lane completion text for a visit that DOES have a bill. The
   // service_report_v1_with_invoice template ("Your {service_type} report is
@@ -652,6 +664,20 @@ const gates = {
   // GATE_DISCOUNT_STACKING) — every caller (relay-conversation.js's session
   // allowlist, the eval harness, the benchmark runner) must use that.
   voiceRelayOpenai: process.env.GATE_VOICE_RELAY_OPENAI === 'true',
+
+  // Voice relay (Sandy) production INBOUND on an OpenAI model (owner
+  // ruling 2026-09-28: GPT-6 Luna after the benchmark). Ships DARK — off
+  // unless exactly 'true'. This is deliberately a SEPARATE gate from
+  // GATE_VOICE_RELAY_OPENAI above, which is already live in prod for the
+  // sandbox/eval lane alone: that gate must never be what opens production
+  // inbound to an OpenAI model. This map entry is for logGateStatus only;
+  // the canonical CALL-TIME reader is voiceRelayOpenaiInboundLive() below
+  // (strict 'true') — relay-conversation.js's resolveSessionModel reads it,
+  // at session construction, to decide whether a PRODUCTION inbound session
+  // may resolve VOICE_RELAY_INBOUND_MODEL to a voice-eligible OpenAI id. The
+  // shared VOICE_RELAY_MODEL / MODEL_VOICE chain stays Anthropic-only either
+  // way (collections-conversation.js shares it).
+  voiceRelayOpenaiInbound: process.env.GATE_VOICE_RELAY_OPENAI_INBOUND === 'true',
 
   // Collective series moves on every staff surface (owner rulings 2026-07-30
   // + 2026-08-28): with the gate on, ANY date move of a cadence visit that
@@ -1939,6 +1965,9 @@ const gates = {
 
   // Owner-authorized unattended blog publishing. Explicit false disables
   // competitor autopublishing; comparison/content checks remain mandatory.
+  // On, a blog still publishes only when every named competitor is on the
+  // owner list (competitor-facts OWNER_APPROVED_AUTOPUBLISH_IDS, rulings
+  // 2026-09-27 D2 + 2026-09-28).
   namedCompetitorAutopublish: process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH == null || process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH === 'true',
 
   // Affiliate links in blog bodies (owner monetization pilot 2026-08-31).
@@ -3039,6 +3068,17 @@ const gates = {
   // registry; this entry is for logGateStatus.
   techLines: gateEnvValue('GATE_TECH_LINES'),
 
+  // Tech open-visit nudge (owner ask 2026-09-28: "just do an afternoon
+  // nudge, at 7 pm" — ~1/3 of visits a week sit open past their day because
+  // nothing reminds the tech to tap Complete). ON: one 7 PM ET text
+  // (services/tech-open-visit-nudge.js, scheduler.js daily cron) to each
+  // assignable technician who still has a pending/confirmed/en_route/on_site
+  // visit scheduled for today, at most once per technician per ET day. OFF
+  // unless exactly 'true', dev AND prod; unset is the kill switch. The
+  // service reads process.env directly (strict '==='), so a flip needs no
+  // redeploy; this entry is for logGateStatus.
+  techOpenVisitNudge: process.env.GATE_TECH_OPEN_VISIT_NUDGE === 'true',
+
   opsDigestsInApp: gateEnvValue('GATE_OPS_DIGESTS_IN_APP'),
 
   // Ops digest ingest — routes/ops-digest-ingest.js, POST /api/ops/digest.
@@ -3328,6 +3368,23 @@ function voiceRelayOpenaiLive() {
   return process.env.GATE_VOICE_RELAY_OPENAI === 'true';
 }
 
+// GATE_VOICE_RELAY_OPENAI_INBOUND read at CALL time — ships DARK, off unless
+// exactly 'true' (owner ruling 2026-09-28: GPT-6 Luna for Sandy's inbound
+// phone agent after the benchmark). The ONE reader relay-conversation.js's
+// resolveSessionModel uses, at session construction, to decide whether a
+// PRODUCTION inbound session (sandbox === false, evalHarness === false) may
+// resolve VOICE_RELAY_INBOUND_MODEL to a voice-eligible OpenAI id — a
+// DELIBERATELY SEPARATE gate from voiceRelayOpenaiLive() above, which is
+// already live in prod for the sandbox/eval lane and must never be read as
+// authorizing production inbound. Off: production inbound rejects any
+// OpenAI override exactly as before this gate existed — byte-identical. On:
+// the model-switchboard's voice_relay row (inboundOverrideParse /
+// inboundOverrideAllowed) reads this same function so the Models tab shows
+// what production inbound actually resolves.
+function voiceRelayOpenaiInboundLive() {
+  return process.env.GATE_VOICE_RELAY_OPENAI_INBOUND === 'true';
+}
+
 // GATE_CUSTOMER_INTEL_AI read at CALL time — the ONE reader for every entry
 // point into the customer-intelligence AI legs (nightly sentiment mining in
 // signal-detector, retention drafting in retention-engine, and the admin
@@ -3525,5 +3582,5 @@ function logGateStatus() {
   }
 }
 
-module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive, stampedZeroFreeLive };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, voiceRelayOpenaiInboundLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive, stampedZeroFreeLive };
 // gates 1775330914

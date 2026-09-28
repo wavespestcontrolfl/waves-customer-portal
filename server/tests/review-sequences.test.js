@@ -4813,7 +4813,7 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
 
       expect(result.started).toBe(true);
       const sentBody = mockSendCustomerMessage.mock.calls[0][0].body;
-      expect(sentBody).toContain('Hi Mae! Waves Pest Control. If we earned it');
+      expect(sentBody).toContain("Hi Mae! It's Waves. If we earned it");
       expect(sentBody).not.toContain('Your tech');
     });
 
@@ -4901,7 +4901,7 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       const bodies = mockSendCustomerMessage.mock.calls.map((c) => c[0].body);
       expect(bodies[0]).toContain('Hi Lee! Christopher with Waves.');
       expect(bodies[0]).not.toContain('Longname');
-      expect(bodies[1]).toContain('Hi Kim! Waves Pest Control.');
+      expect(bodies[1]).toContain("Hi Kim! It's Waves.");
       expect(bodies[1]).not.toContain('Our team');
     });
 
