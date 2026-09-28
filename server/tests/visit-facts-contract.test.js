@@ -523,6 +523,26 @@ describe('visit facts contract registry', () => {
     expect(problems).toEqual([]);
   });
 
+  test('each pesticideOnly compliance fact names its own server condition, and that predicate exists', () => {
+    const closeout = readRepoFile('server/services/tree-shrub-closeout.js') || '';
+    const problems = [];
+    for (const [line, def] of typedLines) {
+      const cfg = PROJECT_TYPES[def.typedForm];
+      for (const field of (cfg?.findingsFields || []).filter((f) => f.pesticideOnly)) {
+        const fact = def.facts.find((f) => f.key === field.key);
+        const reader = fact?.readers.find((r) => r.file === 'server/services/tree-shrub-closeout.js');
+        const predicate = reader && (reader.section.match(/\((hasInsectProduct|productNeedsIracFracLog)\)/) || [])[1];
+        if (!predicate) problems.push(`${line}.${field.key}: server reader does not name its own condition`);
+        else if (!closeout.includes(predicate)) problems.push(`${line}.${field.key}: ${predicate} not found in tree-shrub-closeout.js`);
+      }
+    }
+    expect(problems).toEqual([]);
+  });
+
+  test('bora_care registers no pest activity rating (never captured for a termite-classified service)', () => {
+    expect(VISIT_FACTS_CONTRACT.bora_care.facts.map((f) => f.key)).not.toContain('pest_activity_rating');
+  });
+
   test('typed builders read exactly the keys registered for them, all defined by the form', () => {
     const problems = [];
     for (const [name, builder] of Object.entries(TYPED_REPORT_BUILDERS)) {

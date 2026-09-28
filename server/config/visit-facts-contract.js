@@ -206,6 +206,8 @@ const REENTRY = 'server/services/service-report/reentry.js';
 const ACTIVITY_SCORES_STORE = 'server/services/service-report/activity-scores-store.js';
 const METRICS_BAND = 'server/services/service-report/metrics-band.js';
 const TREE_SHRUB_CLOSEOUT = 'server/services/tree-shrub-closeout.js';
+const ADMIN_DISPATCH = 'server/routes/admin-dispatch.js';
+const INTERIOR_REENTRY_BACKFILL = 'server/scripts/backfill-interior-reentry-advisory.js';
 
 /** A writer that submits the fact under `writerSymbol` instead of the storage key. */
 const via = (file, writerSymbol) => Object.freeze({ file, writerSymbol });
@@ -489,7 +491,9 @@ function genericCompletionFacts(opts = {}) {
       label: 'Protocol action scopes completed (interior/exterior/treatment metadata per action)',
       capture: ['derived'],
       storage: 'structured_notes.protocolActionScopesCompleted',
-      writers: [COMPLETE_SERVICE, SCHEDULE_PAGE],
+      // The interior re-entry backfill (--apply) also rebuilds this array on
+      // historical records it repairs.
+      writers: [COMPLETE_SERVICE, SCHEDULE_PAGE, INTERIOR_REENTRY_BACKFILL],
       readers: withExtra('protocol_action_scopes_completed', [
         { file: REPORT_DATA, section: 'Treatment scope (interior/exterior) + re-entry countdown retained/zeroed decision (structuredActionScope / treatmentScope / normalizeAdvisoryForTreatmentScope)' },
       ]),
@@ -547,7 +551,9 @@ function genericCompletionFacts(opts = {}) {
       label: 'Visit time on site (minutes, "Time on site")',
       capture: ['derived', 'tap'],
       storage: 'structured_notes.timeOnSite',
-      writers: [COMPLETE_SERVICE, SCHEDULE_PAGE],
+      // PATCH /api/admin/dispatch/:serviceId/time-on-site rewrites it on a
+      // completed visit; the report reads the corrected value.
+      writers: [COMPLETE_SERVICE, SCHEDULE_PAGE, ADMIN_DISPATCH],
       readers: withExtra('visit_time_on_site', [
         { file: METRICS_BAND, section: 'computeOnSiteMin (customer-visible on-site duration, primary source)' },
         { file: REPORT_DATA, section: 'visitTiming.onSiteMinutes' },
@@ -889,6 +895,14 @@ function typedFormFacts(typedForm, overrides = {}) {
   });
 }
 
+/** When tree-shrub-closeout.js requires each pesticideOnly field. The
+ * client's pre-submit gate is broader: it requires every pesticideOnly field
+ * once any pesticide product is recorded. */
+const PESTICIDE_COMPLIANCE_CONDITIONS = Object.freeze({
+  pollinator_status: 'required when an insect-family product (insecticide, miticide, IGR) is recorded (hasInsectProduct)',
+  irac_frac_logged: 'required when any insecticide, fungicide or herbicide, or a product with an IRAC/FRAC/HRAC group, is recorded (productNeedsIracFracLog)',
+});
+
 /** Every reader edge for one typed field: the generic findings list, the
  * areas-treated reader, its TYPED_REPORT_BUILDERS entry (if any), the
  * pesticide compliance gate (pesticideOnly fields only — internal, so
@@ -907,11 +921,11 @@ function typedFieldReaders(field, builder, extraReaders) {
   if (field.pesticideOnly) {
     readers.push({
       file: TREE_SHRUB_CLOSEOUT,
-      section: 'Pesticide compliance gate — required whenever an insecticide/other pesticide product is recorded on the visit (validateTreeShrubTypedCompliance)',
+      section: `Pesticide compliance gate (validateTreeShrubTypedCompliance) — ${PESTICIDE_COMPLIANCE_CONDITIONS[field.key] || 'conditionally required'}`,
     });
     readers.push({
       file: SCHEDULE_PAGE,
-      section: 'Client pre-submit pesticide compliance gate (mirrors validateTreeShrubTypedCompliance so the tech is guided to the field pre-submit, codex P2 r13)',
+      section: 'Client pre-submit pesticide gate — shows and requires every pesticideOnly field once any pesticide product is recorded (broader than the server condition)',
       readerSymbol: 'pesticideOnly',
     });
   }
@@ -931,7 +945,7 @@ function typedFieldNotes(field, extraNotes, required) {
     if (required.has(field.key)) {
       notes.push('Internal field (never shown on the report); registered because REQUIRED_FINDINGS_FIELDS requires it.');
     } else if (field.pesticideOnly) {
-      notes.push('Internal field (never shown on the report); CONDITIONALLY required whenever an insecticide/other pesticide product is applied — enforced by validateTreeShrubTypedCompliance (tree-shrub-closeout.js) and mirrored pre-submit by the client (SchedulePage.jsx, gated on f.pesticideOnly). Not in REQUIRED_FINDINGS_FIELDS (which names only unconditional requirements), so whenMissing below reflects only the unconditional (never-required) case.');
+      notes.push(`Internal field (never shown on the report); CONDITIONALLY required: the server ${PESTICIDE_COMPLIANCE_CONDITIONS[field.key] || 'requires it for pesticide applications'} (validateTreeShrubTypedCompliance), while the client pre-submit gate requires it once any pesticide product is recorded. Not in REQUIRED_FINDINGS_FIELDS (which names only unconditional requirements), so whenMissing below reflects only the unconditional (never-required) case.`);
     }
   }
   if (field.companionOnly) notes.push('companionOnly: this value is only ever recorded when the form runs as a COMPANION section (service_data.companionReportSnapshots[]) beside a different primary type; a primary submission of this form carrying it is rejected as an unknown field.');
@@ -1617,9 +1631,12 @@ const VISIT_FACTS_CONTRACT = {
     label: 'Bora-Care wood treatment (basic form: one-time termite-adjacent wood treatment)',
     catalogKeys: ['bora_care'],
     voiceFill: true,
+    // No pestActivityRatingFact: detectServiceLine reads "bora" as termite
+    // (service-line-configs.js), and the Pest Pressure rating is enabled
+    // only for its configured service lines (default pest + mosquito), so a
+    // Bora-Care completion never captures one.
     facts: [
       ...genericCompletionFacts(),
-      pestActivityRatingFact(),
       ...productFacts(),
       ...photoFacts(),
     ],

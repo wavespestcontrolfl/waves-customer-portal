@@ -453,8 +453,10 @@ Catalog: `bora_care`. A one-time termite-adjacent wood treatment completed
 through the SAME basic Complete Service form as `one_time_pest` / `lawn`'s
 one-time add-ons (`completion-lane-registry.js` `ONE_TIME_GENERIC_BY_DESIGN`)
 — the form doesn't branch UI by catalog key, so it carries the same basic
-form facts, the pest activity rating picker, product facts and photos as
-`one_time_pest`. Its beetle/wood-decay-fungi targets don't exist in
+form facts, product facts and photos as `one_time_pest`. It does not carry
+the pest activity rating: `detectServiceLine` reads "bora" as termite and the
+Pest Pressure rating is only enabled for its configured service lines
+(default pest + mosquito), so a Bora-Care completion never captures one. Its beetle/wood-decay-fungi targets don't exist in
 `termite_treatment`'s option list and it doesn't share `one_time_pest`'s pest
 vocabulary or `lawn`'s condition vocabulary, so it stays its own basic-form
 line rather than joining either one (codex follow-up on #5190; was
@@ -682,8 +684,8 @@ means the field is legal on a primary OR a companion submission.
 | `pre_emergent_applied` | Pre-emergent applied | select | companion | hidden | — |
 | `mulch_depth_concern` | Mulch depth concern | select | companion | hidden | — |
 | `weed_breakthrough_areas` | Weed breakthrough areas | text | companion | hidden | — |
-| `pollinator_status` | Flowering / pollinator status (internal) | select | both | hidden | Pesticide compliance gate — required whenever an insecticide/other pesticide product is recorded on the visit (validateTreeShrubTypedCompliance) (tree-shrub-closeout.js); Client pre-submit pesticide compliance gate (mirrors validateTreeShrubTypedCompliance so the tech is guided to the field pre-submit, codex P2 r13) (SchedulePage.jsx) |
-| `irac_frac_logged` | IRAC / FRAC rotation checked & logged (internal) | select | both | hidden | Pesticide compliance gate — required whenever an insecticide/other pesticide product is recorded on the visit (validateTreeShrubTypedCompliance) (tree-shrub-closeout.js); Client pre-submit pesticide compliance gate (mirrors validateTreeShrubTypedCompliance so the tech is guided to the field pre-submit, codex P2 r13) (SchedulePage.jsx) |
+| `pollinator_status` | Flowering / pollinator status (internal) | select | both | hidden | Pesticide compliance gate (validateTreeShrubTypedCompliance) — required when an insect-family product (insecticide, miticide, IGR) is recorded (hasInsectProduct) (tree-shrub-closeout.js); Client pre-submit pesticide gate — shows and requires every pesticideOnly field once any pesticide product is recorded (broader than the server condition) (SchedulePage.jsx) |
+| `irac_frac_logged` | IRAC / FRAC rotation checked & logged (internal) | select | both | hidden | Pesticide compliance gate (validateTreeShrubTypedCompliance) — required when any insecticide, fungicide or herbicide, or a product with an IRAC/FRAC/HRAC group, is recorded (productNeedsIracFracLog) (tree-shrub-closeout.js); Client pre-submit pesticide gate — shows and requires every pesticideOnly field once any pesticide product is recorded (broader than the server condition) (SchedulePage.jsx) |
 | `customer_recommendations` | Customer recommendations | multi_select | both | hidden | — |
 
 ### `cockroach` — typed `cockroach` form
