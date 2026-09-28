@@ -306,6 +306,29 @@ function sequenceAnchor(row) {
   return row.anchor_at || row.invoice_sent_at || row.invoice_sms_sent_at || row.invoice_created_at || row.created_at;
 }
 
+// The due time of a step on one specific cadence (legacy or Day 90 ladder),
+// whatever the gate says: the switch needs both to tell which cadence
+// scheduled a stored touch.
+function cadenceTouchAt(steps, anchorDate, stepIndex) {
+  const step = steps[stepIndex];
+  if (!step) return null;
+  return anchorTo10amNY(new Date(anchorDate), step.daysAfterSend, config.sendWindow.hour);
+}
+
+// Gate off after the Day 90 ladder scheduled a touch: a stored time that is
+// exactly the ladder's Day 10 or Day 17 goes back to the legacy Day 7 or
+// Day 14, unless that day already passed its send window, in which case the
+// ladder's later day stands so the touch is not lost (codex #5126 r2).
+function legacyTouchFor(row, now = new Date()) {
+  const index = Number(row.step_index);
+  if (!row.next_touch_at || config.steps[index]?.daysAfterSend === config.stepsThrough90[index]?.daysAfterSend) return null;
+  const anchor = sequenceAnchor(row);
+  const ladderAt = cadenceTouchAt(config.stepsThrough90, anchor, index);
+  const legacyAt = cadenceTouchAt(config.steps, anchor, index);
+  if (!ladderAt || !legacyAt || ladderAt.getTime() !== new Date(row.next_touch_at).getTime()) return null;
+  return isStaleTouch(legacyAt, now) ? null : legacyAt;
+}
+
 function computeNextTouchAt(anchorDate, stepIndex) {
   const step = followupSteps()[stepIndex];
   if (!step) return null;
@@ -556,7 +579,8 @@ async function runPending() {
     return { sent: 0, skipped: 0 };
   }
 
-  if (ladderThrough90Live()) await reviveLegacyFinishedSequences();
+  const ladder = ladderThrough90Live();
+  if (ladder) await reviveLegacyFinishedSequences();
 
   // No deleted-customer filter here: fireStep() pauses those sequences
   // (status='paused', next_touch_at=null) so they're handled terminally
@@ -565,7 +589,21 @@ async function runPending() {
   const rows = await db('invoice_followup_sequences as s')
     .join('invoices as i', 's.invoice_id', 'i.id')
     .where('s.status', 'active')
-    .where('s.next_touch_at', '<=', now)
+    .where(function dueNowOrLadderScheduled() {
+      this.where('s.next_touch_at', '<=', now);
+      // Gate off after the Day 90 ladder scheduled a Day 10/17 touch (codex
+      // #5126 r2): pick it up while its earlier legacy day is due, so
+      // turning the ladder off restores the legacy reminder instead of
+      // holding the invoice, and the late-payment checker, until the
+      // ladder's day. The loop below leaves every other early row alone.
+      if (!ladder && LADDER_MOVED_STEPS.length) {
+        this.orWhere(function ladderScheduledTouch() {
+          this.where('s.step_index', '>=', Math.min(...LADDER_MOVED_STEPS))
+            .where('s.step_index', '<=', Math.max(...LADDER_MOVED_STEPS))
+            .where('s.next_touch_at', '<=', new Date(now.getTime() + LADDER_MAX_SHIFT_MS));
+        });
+      }
+    })
     .whereNotIn('i.status', TERMINAL_INVOICE_STATUSES)
     // Third-party Bill-To: never dun a payer-billed invoice through this
     // homeowner sequence — fireStep would text the payer's bearer /pay/:token to
@@ -597,7 +635,8 @@ async function runPending() {
       // on that new day in this same run when the new day is today (pre-push
       // audit P1): skipping it would let the next tick find it past its
       // stale grace and pass it over.
-      const retimed = await deferToLadderDay(row);
+      const retimed = ladder ? await deferToLadderDay(row) : await restoreLegacyDay(row, now);
+      if (retimed === EARLY_ROW) continue;
       if (retimed) {
         if (!retimed.moved || retimed.due.getTime() > now.getTime()) { skipped++; continue; }
         row = { ...row, next_touch_at: retimed.due };
@@ -667,6 +706,38 @@ async function reviveLegacyFinishedSequences() {
   }
   if (revived) logger.info(`[invoice-followups] Day 90 ladder: ${revived} finished sequence(s) resumed at Day 60 or Day 90`);
   return revived;
+}
+
+// Steps the two cadences time differently (Day 7 vs 10, Day 14 vs 17), and
+// the widest gap between them plus a day's margin.
+const LADDER_MOVED_STEPS = config.steps
+  .map((_step, index) => index)
+  .filter((index) => config.steps[index].daysAfterSend !== config.stepsThrough90[index]?.daysAfterSend);
+const LADDER_MAX_SHIFT_MS = (Math.max(0, ...LADDER_MOVED_STEPS.map((index) => (
+  config.stepsThrough90[index].daysAfterSend - config.steps[index].daysAfterSend
+))) + 1) * 24 * 60 * 60 * 1000;
+const EARLY_ROW = Symbol('early');
+
+/**
+ * Gate off (codex #5126 r2): a row still waiting on a time the Day 90 ladder
+ * scheduled goes back to its legacy day. Returns EARLY_ROW for a row the
+ * widened batch select picked up that is not due on either cadence (left
+ * alone), otherwise null (a due row, processed as before) or
+ * { moved, due }, guarded like deferToLadderDay. A legacy day still ahead
+ * is written back so every reader sees it; the legacy stale rule applies
+ * (legacyTouchFor keeps the ladder's day when the legacy day already passed).
+ */
+async function restoreLegacyDay(row, now) {
+  if (!row.next_touch_at || new Date(row.next_touch_at).getTime() <= now.getTime()) return null;
+  const legacyAt = legacyTouchFor(row, now);
+  if (!legacyAt) return EARLY_ROW;
+  const updated = await db('invoice_followup_sequences')
+    .where({ id: row.id, status: 'active', step_index: row.step_index })
+    .where('next_touch_at', row.next_touch_at)
+    .update({ updated_at: db.fn.now(), next_touch_at: legacyAt });
+  logger.info(`[invoice-followups] Day 90 ladder off: invoice ${row.invoice_id} step ${row.step_index} `
+    + `${updated ? `moved back to ${legacyAt.toISOString()}` : 'unchanged (sequence moved since batch select)'}`);
+  return { moved: Number(updated) === 1, due: legacyAt };
 }
 
 /**
@@ -2124,7 +2195,10 @@ async function liveNextTouchAt(invoiceId, seq, now = new Date()) {
   const pendingRevival = ladderThrough90Live() && seq.status === 'completed'
     && index >= config.steps.length && index < steps.length;
   if (!pendingRevival && (!seq.next_touch_at || index >= steps.length)) return null;
-  if (!ladderThrough90Live()) return seq.next_touch_at;
+  // Gate off, only a step the two cadences time differently can need the
+  // anchor: a touch the ladder scheduled goes back to its legacy day.
+  const cadencesDiffer = config.steps[index]?.daysAfterSend !== config.stepsThrough90[index]?.daysAfterSend;
+  if (!ladderThrough90Live() && !cadencesDiffer) return seq.next_touch_at;
   let anchored = seq;
   if (!seq.anchor_at) {
     const invoice = await db('invoices').where({ id: invoiceId }).first('sent_at', 'sms_sent_at', 'created_at');
@@ -2132,6 +2206,7 @@ async function liveNextTouchAt(invoiceId, seq, now = new Date()) {
       ...seq, invoice_sent_at: invoice?.sent_at, invoice_sms_sent_at: invoice?.sms_sent_at, invoice_created_at: invoice?.created_at,
     };
   }
+  if (!ladderThrough90Live()) return legacyTouchFor(anchored, now) || seq.next_touch_at;
   if (pendingRevival) {
     let step = index;
     let due = computeNextTouchAt(sequenceAnchor(anchored), step);

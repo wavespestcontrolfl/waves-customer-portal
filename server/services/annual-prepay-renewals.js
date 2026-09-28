@@ -7709,13 +7709,12 @@ async function invoiceDunningActiveToday(invoiceId, { now = new Date(), todayYmd
       // no dunning ran either day — the customer would reach the visit with no
       // pre-visit contact at all.
       const followupConfig = require('../config/invoice-followups');
-      // The day the touch really fires (codex #5126 r1): this 10:12 check
-      // runs before the follow-up job, which under the Day 90 ladder
-      // (GATE_DUNNING_LADDER_90) moves a legacy Day 7/14 touch to Day 10/17
-      // without sending it today. A step past the live cadence fires nothing.
-      const nextTouchAt = ladder90
-        ? await require('./invoice-followups').liveNextTouchAt(invoiceId, row, now)
-        : (Number(row.step_index) >= followupConfig.steps.length ? null : row.next_touch_at);
+      // The day the touch really fires (codex #5126 r1/r2): this 10:12 check
+      // runs before the follow-up job, which moves a touch between the legacy
+      // and Day 90 ladder cadences (GATE_DUNNING_LADDER_90) as the gate
+      // says, without sending it on the old day. A step past the live
+      // cadence fires nothing.
+      const nextTouchAt = await require('./invoice-followups').liveNextTouchAt(invoiceId, row, now);
       const sendDays = new Set(followupConfig?.sendWindow?.daysOfWeek || []);
       const today = todayYmd || etDateString(now);
       const todayEtDow = new Date(`${today}T12:00:00Z`).getUTCDay();

@@ -152,10 +152,16 @@ describe('which sequences own their invoice', () => {
 });
 
 describe('when the next touch really fires (liveNextTouchAt)', () => {
-  test('gate off: the stored time, and nothing for a step past the legacy cadence', async () => {
-    const at = tenAmET('2026-08-05');
-    await expect(liveNextTouchAt('inv-1', { step_index: 1, next_touch_at: at })).resolves.toBe(at);
-    await expect(liveNextTouchAt('inv-1', { step_index: 4, next_touch_at: at })).resolves.toBeNull();
+  test('gate off: the stored time, the legacy day for a ladder-scheduled touch, and nothing past the legacy cadence', async () => {
+    const anchored = { anchor_at: tenAmET('2026-07-29') };
+    const legacyDay7 = tenAmET('2026-08-05');
+    await expect(liveNextTouchAt('inv-1', { ...anchored, step_index: 1, next_touch_at: legacyDay7 }, NOW)).resolves.toBe(legacyDay7);
+    // Ladder Day 10 (Sat 08-08) goes back to legacy Day 7 (Wed 08-05), which is today and still sendable.
+    await expect(liveNextTouchAt('inv-1', { ...anchored, step_index: 1, next_touch_at: tenAmET('2026-08-08') }, NOW))
+      .resolves.toEqual(legacyDay7);
+    // Steps timed alike by both cadences need no anchor.
+    await expect(liveNextTouchAt('inv-1', { step_index: 0, next_touch_at: legacyDay7 }, NOW)).resolves.toBe(legacyDay7);
+    await expect(liveNextTouchAt('inv-1', { step_index: 4, next_touch_at: legacyDay7 }, NOW)).resolves.toBeNull();
   });
 
   test('gate on: a legacy Day 7 touch really fires on its Day 10; a touch past the ladder fires nothing', async () => {
@@ -196,11 +202,53 @@ describe('when the next touch really fires (liveNextTouchAt)', () => {
 describe('runPending under the Day 90 ladder', () => {
   test('gate off: no revival read, and a Day 7 touch fires as before', async () => {
     const row = seqRow({ step_index: 1, next_touch_at: tenAmET('2026-08-05') });
-    const { joined, transaction } = setupDb({ joinedReads: [[row]] });
+    const { joined, seqUpdates, transaction } = setupDb({ joinedReads: [[row]] });
     const result = await runPending();
     expect(joined).toHaveLength(1);
+    expect(joined[0].wheres).toEqual(expect.arrayContaining([['s.status', 'active']]));
+    expect(seqUpdates).toHaveLength(0);
     expect(transaction).toHaveBeenCalledTimes(1);
     expect(result).toEqual({ sent: 1, skipped: 0 });
+  });
+
+  // codex #5126 r2: turning the ladder off restores the legacy day.
+  test('gate off: a touch the ladder put on Day 10 goes back to its legacy Day 7', async () => {
+    jest.setSystemTime(new Date('2026-08-04T14:16:00Z')); // Tue 08-04 10:16 ET
+    // Sent Wed 07-29: ladder Day 10 = Sat 08-08, legacy Day 7 = Wed 08-05.
+    const ladderRow = seqRow({ step_index: 1, next_touch_at: tenAmET('2026-08-08') });
+    const { seqUpdates, transaction } = setupDb({ joinedReads: [[ladderRow]] });
+    const result = await runPending();
+    expect(seqUpdates).toHaveLength(1);
+    expect(seqUpdates[0].wheres).toEqual([
+      [{ id: 'seq-1', status: 'active', step_index: 1 }],
+      ['next_touch_at', tenAmET('2026-08-08')],
+    ]);
+    expect(seqUpdates[0].patch.next_touch_at).toEqual(tenAmET('2026-08-05'));
+    expect(transaction).not.toHaveBeenCalled();
+    expect(result).toEqual({ sent: 0, skipped: 1 });
+  });
+
+  test('gate off: a ladder touch whose legacy day is today is moved back and sent in the same run', async () => {
+    // NOW Wed 08-05; sent Wed 07-29: legacy Day 7 = today 10:00.
+    const ladderRow = seqRow({ step_index: 1, next_touch_at: tenAmET('2026-08-08') });
+    const { seqUpdates, transaction } = setupDb({ joinedReads: [[ladderRow]] });
+    const result = await runPending();
+    expect(seqUpdates[0].patch.next_touch_at).toEqual(tenAmET('2026-08-05'));
+    expect(transaction).toHaveBeenCalledTimes(1);
+    expect(result).toEqual({ sent: 1, skipped: 0 });
+  });
+
+  test('gate off: the ladder day stands when the legacy day already passed, and early legacy rows are left alone', async () => {
+    // NOW Wed 08-05; sent Mon 07-27: legacy Day 7 = Mon 08-03 (first fire Tue 08-04, past its grace),
+    // ladder Day 10 = Thu 08-06.
+    const late = seqRow({ id: 'seq-2', step_index: 1, invoice_sent_at: tenAmET('2026-07-27'), next_touch_at: tenAmET('2026-08-06') });
+    // A legacy-scheduled row not yet due (Day 14 = Wed 08-12) is not a ladder time.
+    const legacy = seqRow({ id: 'seq-3', step_index: 2, next_touch_at: tenAmET('2026-08-07') });
+    const { seqUpdates, transaction } = setupDb({ joinedReads: [[late, legacy]] });
+    const result = await runPending();
+    expect(seqUpdates).toHaveLength(0);
+    expect(transaction).not.toHaveBeenCalled();
+    expect(result).toEqual({ sent: 0, skipped: 0 });
   });
 
   test('a sequence that finished at Day 30 on an open invoice resumes at its Day 60 step', async () => {

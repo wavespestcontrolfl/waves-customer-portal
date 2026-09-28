@@ -23,7 +23,11 @@ jest.mock('../utils/portal-url', () => ({
 // The reminder now consults the collections rail-guard (gate-on only) and
 // records-then-sends through the always-on contact ledger — mocked healthy
 // so the delivery-path tests exercise the send.
-jest.mock('../services/invoice-followups', () => ({ liveNextTouchAt: jest.fn() }));
+// The follow-up cadence authority: by default the stored time is the day
+// the touch fires (the real rule is covered in invoice-followups-ladder-90).
+jest.mock('../services/invoice-followups', () => ({
+  liveNextTouchAt: jest.fn(async (_invoiceId, row) => row?.next_touch_at ?? null),
+}));
 jest.mock('../services/collections/rail-guard', () => ({
   collectionsChannelPermitted: jest.fn(async () => true),
 }));
@@ -356,7 +360,14 @@ describe('annual prepay pre-visit payment reminders', () => {
 
     test('gate off: a row the Day 90 ladder advanced past Day 30 fires nothing, so it does not suppress', async () => {
       const advanced = { status: 'active', last_touch_at: null, next_touch_at: new Date('2026-07-08T14:00:00Z'), step_index: 4 };
+      InvoiceFollowUps.liveNextTouchAt.mockResolvedValueOnce(null);
       setDbQueues({ invoice_followup_sequences: [query({ first: { ...advanced } })] });
+      await expect(_private.invoiceDunningActiveToday('inv-1', { todayYmd: '2026-07-08' })).resolves.toBe(false);
+      expect(InvoiceFollowUps.liveNextTouchAt).toHaveBeenCalledWith('inv-1', expect.objectContaining({ step_index: 4 }), expect.any(Date));
+    });
+
+    test('gate off: a completed sequence is never checked for a next touch', async () => {
+      setDbQueues({ invoice_followup_sequences: [query({ first: { status: 'completed', last_touch_at: null, next_touch_at: null, step_index: 4 } })] });
       await expect(_private.invoiceDunningActiveToday('inv-1', { todayYmd: '2026-07-08' })).resolves.toBe(false);
       expect(InvoiceFollowUps.liveNextTouchAt).not.toHaveBeenCalled();
     });
