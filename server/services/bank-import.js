@@ -1340,12 +1340,22 @@ function strongExpenseMatch(row, c) {
     && !methodIncompatible(row.account_type, c.payment_method);
 }
 
+// A Plaid row the bank corrected or withdrew AFTER it was reviewed keeps
+// its flag (plaidModified / plaidRemoved) when the operator unlinks it, and
+// still carries the OLD values — the matcher must not re-link it before the
+// operator applies or dismisses the change. Selection is the only gate
+// needed: the sync never flags an UNMATCHED row (it replaces or deletes
+// it), so a row the matcher selected unflagged cannot become flagged
+// before its claim.
+const BANK_CHANGE_UNRESOLVED_SQL_NOT = "(suggestion->'plaidModified') is null and (suggestion->'plaidRemoved') is null";
+
 async function runDeterministicMatching({ limit } = {}) {
   const healed = await resetDanglingLinks();
   const reconciliation = await retryPendingReconciliations();
   const bounded = Number.isFinite(limit) && limit > 0;
   const baseSelect = () => db('bank_transactions')
     .where({ status: 'unmatched' })
+    .whereRaw(BANK_CHANGE_UNRESOLVED_SQL_NOT)
     .orderBy('txn_date', 'asc')
     .select('id', 'txn_date', 'description', 'amount', 'direction', 'account_type', 'account_label', 'suggestion');
   // Rows the matcher already examined (transfer-flagged, parked candidates)
@@ -1420,6 +1430,7 @@ async function runDeterministicMatching({ limit } = {}) {
       // out of the leftover budget by an older sibling.
       const examined = await db('bank_transactions')
         .where({ status: 'unmatched' })
+        .whereRaw(BANK_CHANGE_UNRESOLVED_SQL_NOT)
         .whereRaw(`suggestion is not null and ${EXAMINED_SQL}`)
         .orderBy('updated_at', 'asc')
         .limit(fill + 1)

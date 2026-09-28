@@ -258,25 +258,20 @@ async function connectItem({ publicToken, institutionName }) {
     const e = new Error('no encryption key configured (PLAID_TOKEN_KEY) — refusing to store a bank token'); e.status = 503; throw e;
   }
   const { accessToken, itemId } = await plaid.exchangePublicToken(publicToken);
-  let accounts;
-  let institutionId;
-  try {
-    ({ accounts, institutionId } = await plaid.getAccounts(accessToken));
-  } catch (err) {
-    await plaid.removeItem(accessToken).catch(() => {});
-    throw err;
-  }
-  const instName = String(institutionName || '').trim().slice(0, 200) || null;
-  const defaults = [];
-  const usedLabels = new Set();
-  for (const a of accounts) {
-    let label = defaultLabel(instName, a);
-    for (let n = 2; usedLabels.has(label.toUpperCase()); n++) label = `${defaultLabel(instName, a).slice(0, 95)}-${n}`;
-    usedLabels.add(label.toUpperCase());
-    defaults.push({ a, label, syncFrom: await defaultSyncFrom(label) });
-  }
+  // From here on the connection is LIVE at Plaid: any failure before it is
+  // stored must revoke it, or it would be invisible and undisconnectable.
   let created;
   try {
+    const { accounts, institutionId } = await plaid.getAccounts(accessToken);
+    const instName = String(institutionName || '').trim().slice(0, 200) || null;
+    const defaults = [];
+    const usedLabels = new Set();
+    for (const a of accounts) {
+      let label = defaultLabel(instName, a);
+      for (let n = 2; usedLabels.has(label.toUpperCase()); n++) label = `${defaultLabel(instName, a).slice(0, 95)}-${n}`;
+      usedLabels.add(label.toUpperCase());
+      defaults.push({ a, label, syncFrom: await defaultSyncFrom(label) });
+    }
     created = await db.transaction(async (trx) => {
       const [item] = await trx('plaid_items').insert({
         item_id: itemId,
@@ -302,9 +297,9 @@ async function connectItem({ publicToken, institutionName }) {
       return item;
     });
   } catch (err) {
-    // the token is live at Plaid but not stored here — revoke it rather than
-    // leave a connection nobody can see or disconnect
     await plaid.removeItem(accessToken).catch(() => {});
+    if (err instanceof plaid.PlaidError) throw err;
+    // sanitized: knex messages carry bindings (the token and the key)
     throw new Error(`could not save the bank connection: ${err.code ? `database error ${err.code}` : 'database error'}`);
   }
   return created.id;

@@ -167,6 +167,28 @@ async function activate(itemId, overrides = {}) {
     process.env.PLAID_TOKEN_KEY = saved;
   });
 
+  test('a failure after the token exchange (before the connection is stored) revokes it at Plaid', async () => {
+    plaid.exchangePublicToken.mockResolvedValueOnce({ accessToken: 'access-orphan', itemId: 'item-orphan' });
+    plaid.getAccounts.mockResolvedValueOnce({ accounts: ACCOUNTS, institutionId: 'ins_1' });
+    // make the account-default read (a bank_transactions query) fail
+    const real = mockPg;
+    const failing = (...args) => {
+      if (args[0] === 'bank_transactions') throw Object.assign(new Error('connection terminated'), { code: '57P01' });
+      return real(...args);
+    };
+    failing.raw = real.raw.bind(real);
+    failing.transaction = real.transaction.bind(real);
+    failing.fn = real.fn;
+    mockPg = failing;
+    try {
+      await expect(plaidSync.connectItem({ publicToken: 'public-x', institutionName: 'Bank' })).rejects.toThrow(/could not save the bank connection: database error 57P01/);
+    } finally {
+      mockPg = real;
+    }
+    expect(plaid.removeItem).toHaveBeenCalledWith('access-orphan');
+    expect(await mockPg('plaid_items').where({ item_id: 'item-orphan' }).first()).toBeUndefined();
+  });
+
   test('setup enforces the label→type invariant and unique labels', async () => {
     await mockPg('bank_transactions').insert({
       account_label: 'capone-checking', account_type: 'bank', txn_date: '2026-08-01',

@@ -101,6 +101,10 @@ function makeBuilder(table) {
           });
       }
     }
+    // the matcher's selection skips Plaid rows with an unresolved bank change
+    if (table === 'bank_transactions' && b.whereRaw.mock.calls.some(c => String(c[0]).includes("(suggestion->'plaidModified') is null"))) {
+      rows = rows.filter(r => !(r.suggestion && (r.suggestion.plaidModified || r.suggestion.plaidRemoved)));
+    }
     // the payout survey is amount-aware against the EFFECTIVE banked amount
     // (lateral latest-confirmed join) — mirror the mapping and the filter
     if (table === 'stripe_payouts' && b.joinRaw.mock.calls.some(c => String(c[0]).includes('actual_amount'))) {
@@ -441,6 +445,15 @@ describe('date helpers', () => {
 });
 
 describe('runDeterministicMatching', () => {
+  test('a row with an unresolved bank change (unlinked after the bank corrected it) is never auto-linked', async () => {
+    state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', description: 'STRIPE PAYOUT', amount: 2418.66, direction: 'credit', account_type: 'bank',
+      suggestion: { plaidModified: { amount: 2400, direction: 'credit', txn_date: '2026-08-11', description: 'STRIPE PAYOUT' } } }];
+    state.payouts = [{ id: 'po-1', amount: '2418.66', reconciled: false }];
+    const summary = await runDeterministicMatching();
+    expect(summary.payoutsLinked).toBe(0);
+    expect(state.updates.find(u => u.patch.status === 'matched_payout')).toBeUndefined();
+  });
+
   test('a credit with exactly one payout candidate links through a status CAS and echoes reconciliation', async () => {
     state.bankRows = [{ id: 'bt-1', txn_date: '2026-08-11', description: 'STRIPE PAYOUT', amount: 2418.66, direction: 'credit', account_type: 'bank', suggestion: null }];
     state.payouts = [{ id: 'po-1', amount: '2418.66', reconciled: false }];
