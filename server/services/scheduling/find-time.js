@@ -146,6 +146,21 @@ async function findArrivalWindowSlots(opts) {
   return { slots: slots.slice(0, topN).map((slot, i) => ({ rank: i + 1, ...slot })), evaluated, total_feasible: slots.length };
 }
 
+// findCapacitySlots' allowInsertion boolean, factored out (rather than
+// inlining the `||`) so it adds no branch to that function's own cyclomatic
+// complexity — findCapacitySlots is already well past the 20-max warning
+// threshold on unrelated pre-existing branching, and this diff's own
+// complexity delta must stay at zero (AGENTS.md: a touched function's
+// complexity rising is a review finding). opts.capacityPlacement is the
+// estimate picker's own insertion request (estimate-slot-availability.js);
+// opts.insertProspective is the newer, narrower request (owner 2026-09-28)
+// that admits insertion WITHOUT also disabling the conservative_travel
+// no-traffic fallback probe below, which stays keyed on capacityPlacement
+// alone.
+function insertionAllowed(opts) {
+  return opts.capacityPlacement === true || opts.insertProspective === true;
+}
+
 async function findCapacitySlots(opts) {
   const { dateFrom, dateTo, durationMinutes = 30, technicianId, topN = 10 } = opts;
   let query = applyAssignable(db('technicians'));
@@ -223,7 +238,7 @@ async function findCapacitySlots(opts) {
         candidates.push({ context, date, tech, start, options: {
           windowStart: minutesToTime(start), windowEnd: minutesToTime(start + durationMinutes),
           // Owner policy: ordinary setup/closeout is already in the on-site allowance.
-          durationMinutes, bufferMinutes: 0, allowInsertion: opts.capacityPlacement === true,
+          durationMinutes, bufferMinutes: 0, allowInsertion: insertionAllowed(opts),
         } });
       }
     }
@@ -719,6 +734,20 @@ function candidatesForDay(date, tech, params) {
 // @param {string} opts.dateTo               YYYY-MM-DD
 // @param {string} [opts.technicianId]       Restrict to one tech
 // @param {number} [opts.topN=10]            How many slots to return
+// @param {boolean} [opts.insertProspective=false] Capacity mode only (findCapacitySlots,
+//   not read here — normalizeFindTimeOptions serves the legacy non-capacity path). Lets
+//   the prospective candidate be tried BETWEEN a day's existing stops (arrival-route.js
+//   buildCandidateOrders' insertion orders), not only appended after the last one.
+//   Candidates get allowInsertion when this OR opts.capacityPlacement is true (see
+//   insertionAllowed above findCapacitySlots). Owner 2026-09-28: on a day whose stored
+//   route_order is complete and not stale, the sequencer is currentOrder and a
+//   no-route_order prospective sorts LAST, so every candidate before the day's final stop
+//   failed arrival_window — /book (buildBookingAvailability) offered 0 of 9 hours on a day
+//   with real mid-route capacity. Unlike capacityPlacement, this does NOT also skip the
+//   conservative_travel no-traffic fallback check below, which stays keyed on
+//   capacityPlacement alone — /book still requires the no-traffic fallback to fit; only the
+//   estimate picker (capacityPlacement: true) skips it. Default false = legacy append-only
+//   ordering.
 // @param {number} [opts.dayStartHour=8]
 // @param {number} [opts.dayEndHour=17]
 // @param {boolean} [opts.includeWeekends=false] Include Sundays in addition to Saturdays

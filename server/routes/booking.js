@@ -1455,6 +1455,14 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     // packed inside find-time (no `insertion` to key off here), and
     // unassigned committed visits anchor the route (push-audit P1).
     packEnds: true,
+    // Owner 2026-09-28: offers were append-only after a complete stored
+    // route order — every commit path this builder feeds (createSelfBooking,
+    // the rebooker's customer probes, phone booking, and /book's own
+    // capacity commit check) already accepts an inserted placement, so
+    // offers here were stricter than every commit they lead to. Staff save
+    // probes (checkArrivalPlacement) stay append-only; this does not touch
+    // them.
+    insertProspective: true,
     dateFrom: rangeFrom,
     dateTo: rangeTo,
     // Travel gap (GATE_SLOT_TRAVEL_GAP): customer-facing turnaround buffer

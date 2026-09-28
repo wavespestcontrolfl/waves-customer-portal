@@ -529,7 +529,13 @@ provider legs or exact route coordinates. Scheduling traffic lookups share a
 HTTP requests and fall back to the conservative model when exhausted; response
 data remains request-local. Existing stops are planned at the owner planning
 minutes (`scheduling/planning-minutes.js`, owner 2026-09-25) rather than their
-window span; the visit being offered keeps its own resolved allowance. Detour
+window span; the visit being offered keeps its own resolved allowance.
+Customer-facing capacity offers (the `/book` availability builder and every
+caller it serves — public reschedule, public re-service, inspection-public,
+the voice agent — and the estimate slot routes) evaluate the new visit at
+every position in the technician's route, including BETWEEN two existing
+stops, not only appended after the stored order (owner 2026-09-28); the staff
+save probe (`checkArrivalPlacement`) stays append-only. Detour
 cap (owner 2026-09-25): self-serve callers that pass `customerFacing` (the
 /book availability engine behind /api/booking/availability and the public
 reschedule/re-service pickers, and the estimate slot routes) omit a feasible slot whose added round-trip drive exceeds
