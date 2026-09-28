@@ -1989,12 +1989,12 @@ describe('Missing-contact capture (contactLastName/contactEmail) — owner rulin
     }
   });
 
-  test('a placeholder-name estimate collects a first name too, and the new profile never gets a placeholder first name', async () => {
+  test('a nameless estimate collects a first name too, and the new profile never gets a placeholder first name', async () => {
     resetStore(recurringPestEstimate({
       id: 'est-contact-20',
       token: 'tok-contact-20-x0123456789',
       customer_id: null,
-      customer_name: 'Unknown caller',
+      customer_name: '',
       customer_email: 'testy@example.com',
     }));
     conversionOk();
@@ -2013,10 +2013,10 @@ describe('Missing-contact capture (contactLastName/contactEmail) — owner rulin
       token: 'tok-contact-22-x0123456789',
       customer_id: 'cust-noname',
       customer_phone: null,
-      customer_name: 'Unknown caller',
+      customer_name: 'Sample',
       customer_email: 'testy@example.com',
     }));
-    db.__state.tables.customers = [{ id: 'cust-noname', first_name: 'New', last_name: 'Sample', email: 'testy@example.com', phone: null }];
+    db.__state.tables.customers = [{ id: 'cust-noname', first_name: '', last_name: 'Sample', email: 'testy@example.com', phone: null }];
     conversionOk('cust-noname');
 
     const res = await putAccept('tok-contact-22-x0123456789', { contactFirstName: 'testy' });
@@ -2029,14 +2029,14 @@ describe('Missing-contact capture (contactLastName/contactEmail) — owner rulin
       id: 'est-contact-21',
       token: 'tok-contact-21-x0123456789',
       customer_id: null,
-      customer_name: 'Unknown caller',
+      customer_name: '',
       customer_email: 'testy@example.com',
     }));
     conversionOk();
 
     const res = await putAccept('tok-contact-21-x0123456789', { contactLastName: 'Sample' });
     expect(res.status).toBe(200);
-    expect(storedEstimate().customer_name).toBe('Unknown caller');
+    expect(storedEstimate().customer_name).toBe('');
     const cust = db.__state.tables.customers.find((c) => c.id === storedEstimate().customer_id);
     expect(cust.first_name).not.toBe('Customer');
   });
@@ -2087,16 +2087,16 @@ describe('Missing-contact capture (contactLastName/contactEmail) — owner rulin
     expect(cust.last_name).toBe('Sample');
   });
 
-  test('the explicitly linked profile with a placeholder first name takes the collected first name and surname', async () => {
+  test('the explicitly linked profile with a blank first name takes the collected first name and surname', async () => {
     resetStore(recurringPestEstimate({
       id: 'est-contact-25',
       token: 'tok-contact-25-x0123456789',
       customer_id: 'cust-unknown',
       customer_phone: null,
-      customer_name: 'Unknown caller',
+      customer_name: '',
       customer_email: 'testy@example.com',
     }));
-    db.__state.tables.customers = [{ id: 'cust-unknown', first_name: 'Unknown', last_name: 'caller', email: 'testy@example.com', phone: null }];
+    db.__state.tables.customers = [{ id: 'cust-unknown', first_name: '', last_name: null, email: 'testy@example.com', phone: null }];
     conversionOk('cust-unknown');
 
     const res = await putAccept('tok-contact-25-x0123456789', { contactFirstName: 'testy', contactLastName: 'sample' });
@@ -2108,48 +2108,17 @@ describe('Missing-contact capture (contactLastName/contactEmail) — owner rulin
     expect(nameFanoutSpy).toHaveBeenCalled();
   });
 
-  test('a placeholder typed into the surname field is rejected before any mutation', async () => {
-    resetStore(recurringPestEstimate({
-      id: 'est-contact-26',
-      token: 'tok-contact-26-x0123456789',
-      customer_id: null,
-      customer_name: 'Testy',
-    }));
-    const res = await putAccept('tok-contact-26-x0123456789', { contactLastName: 'Customer' });
-    expect(res.status).toBe(400);
-    expect(res.data.code).toBe('CONTACT_LAST_NAME_INVALID');
-    expect(storedEstimate().status).toBe('sent');
-  });
-
-  test('"Unknown Smith" collects the first name and keeps the real surname on a new profile', async () => {
-    resetStore(recurringPestEstimate({
-      id: 'est-contact-27',
-      token: 'tok-contact-27-x0123456789',
-      customer_id: null,
-      customer_name: 'Unknown Sample',
-      customer_email: 'testy@example.com',
-    }));
-    conversionOk();
-
-    const res = await putAccept('tok-contact-27-x0123456789', { contactFirstName: 'testy' });
-    expect(res.status).toBe(200);
-    expect(storedEstimate().customer_name).toBe('Testy Sample');
-    const cust = db.__state.tables.customers.find((c) => c.id === storedEstimate().customer_id);
-    expect(cust.first_name).toBe('Testy');
-    expect(cust.last_name).toBe('Sample');
-  });
-
-  test('a multi-word collected first name keeps the existing surname whole on a new profile', async () => {
+  test('a multi-word collected first name stays whole on a new profile', async () => {
     resetStore(recurringPestEstimate({
       id: 'est-contact-28',
       token: 'tok-contact-28-x0123456789',
       customer_id: null,
-      customer_name: 'Unknown Sample',
+      customer_name: '',
       customer_email: 'testy@example.com',
     }));
     conversionOk();
 
-    const res = await putAccept('tok-contact-28-x0123456789', { contactFirstName: 'mary ann' });
+    const res = await putAccept('tok-contact-28-x0123456789', { contactFirstName: 'mary ann', contactLastName: 'sample' });
     expect(res.status).toBe(200);
     expect(storedEstimate().customer_name).toBe('Mary Ann Sample');
     const cust = db.__state.tables.customers.find((c) => c.id === storedEstimate().customer_id);

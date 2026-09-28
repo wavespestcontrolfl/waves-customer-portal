@@ -35,7 +35,6 @@ const {
   hasRealFirstName: contactGapHasRealFirstName,
   hasRealLastName: contactGapHasRealLastName,
   fillLinkedCustomerFirstName,
-  hasPlaceholderGivenName: contactGapHasPlaceholderGivenName,
   capCodePoints: contactGapCapCodePoints,
 } = require('../services/estimate-contact-gaps');
 
@@ -10855,12 +10854,8 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           const estimateNameIsLinkedFirst = lockedNameTokens.length > 1
             && contactGapHasRealFirstName(linkedFirst)
             && lockedNameTokens.join(' ').toLowerCase() === linkedFirst.toLowerCase();
-          // "Unknown Smith": the leading placeholder is no first name, the
-          // rest is the real surname (kept below).
-          const lockedGivenIsPlaceholder = contactGapHasPlaceholderGivenName(lockedNameTokens);
           const patchFirstName = contactFillFirstName
-            || (lockedGivenIsPlaceholder ? null
-              : (estimateNameIsLinkedFirst ? lockedNameTokens.join(' ') : lockedNameTokens[0]))
+            || (estimateNameIsLinkedFirst ? lockedNameTokens.join(' ') : lockedNameTokens[0])
             || (contactGapHasRealFirstName(linkedCustomerForGaps?.first_name) ? String(linkedCustomerForGaps.first_name).trim() : null);
           if (!patchFirstName) {
             contactFillLastName = null;
@@ -10876,7 +10871,6 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             // real one. varchar(100) column.
             const linkedLast = String(linkedCustomerForGaps?.last_name ?? '').trim();
             const patchLastName = contactFillLastName
-              || (lockedGivenIsPlaceholder ? lockedNameTokens.slice(1).join(' ') : '')
               || (contactGapHasRealLastName(linkedLast) ? linkedLast : '');
             acceptContactSurname = patchLastName || null;
             contactWrite.customer_name = contactGapCapCodePoints(`${patchFirstName} ${patchLastName}`.trim(), 100);

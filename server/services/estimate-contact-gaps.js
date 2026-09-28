@@ -19,28 +19,6 @@ const CONTACT_EMAIL_MAX = 150;
 
 const CONTROL_CHARS_RE = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/;
 
-// Mirrors estimate-public.js's cleanStoredName: strips the legacy
-// "undefined"/"null" concatenation artifacts before counting name tokens,
-// so a row poisoned by that old bug doesn't read as having a real last name.
-// System fallbacks stored when no name was captured: call-derived drafts
-// stamp 'Unknown caller', accept/service-request default 'New Customer',
-// booking pre-drafts 'Customer', legacy profiles 'Unknown Customer'. A name
-// made ONLY of these words carries no real name and reads as missing
-// (codex #5102 r2, r9).
-// 'undefined' / 'null' are the legacy concatenation artifacts. ONE
-// predicate (isPlaceholderName) is the verdict everywhere: the gap check,
-// both name columns of a linked profile, and the accept-card input itself
-// (codex #5102 r10).
-const PLACEHOLDER_NAME_WORDS = new Set(['unknown', 'customer', 'new', 'caller', 'undefined', 'null']);
-
-// "Unknown Smith" — a placeholder given name in front of a real surname
-// (lead-webhook stores first_name 'Unknown' beside a captured last name):
-// the surname is real, the first name is missing (codex #5102 r11).
-function hasPlaceholderGivenName(tokens) {
-  return Array.isArray(tokens) && tokens.length >= 2
-    && PLACEHOLDER_NAME_WORDS.has(String(tokens[0]).toLowerCase());
-}
-
 // Cap by whole Unicode code points (Postgres varchar counts characters, and
 // String#slice can split a surrogate pair into a corrupt half).
 function capCodePoints(value, max) {
@@ -49,67 +27,60 @@ function capCodePoints(value, max) {
 
 const LONE_SURROGATE_RE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
 
-function isPlaceholderName(value) {
-  const words = String(value == null ? '' : value).trim().toLowerCase().split(/\s+/).filter(Boolean);
-  return !words.length || words.every((w) => PLACEHOLDER_NAME_WORDS.has(w));
-}
-
+// Name gaps are judged from structure, not by guessing which stored words
+// are placeholders (owner ruling 2026-09-28 after codex #5102 r12: rounds
+// contradicted each other — "New" is a fallback, but "New Smith" is a real
+// person). Two exact exceptions remain, both artifacts THIS codebase mints:
+//   - the literal 'undefined' / 'null' tokens of the old concatenation bug
+//     (mirrors estimate-public.js's cleanStoredName);
+//   - the 'Customer' surname the accept stamped when it had one name token.
 function cleanedNameTokens(value) {
-  const rawWords = String(value == null ? '' : value).trim().toLowerCase().split(/\s+/).filter(Boolean);
-  if (rawWords.length && rawWords.every((w) => PLACEHOLDER_NAME_WORDS.has(w))) return [];
   return String(value == null ? '' : value)
     .trim()
     .replace(/(?:^|\s)(?:undefined|null)(?=\s|$)/gi, ' ')
     .replace(/\s{2,}/g, ' ')
     .trim()
     .split(/\s+/)
-    .filter(Boolean)
-    // A trailing 'Customer' is the accept placeholder surname appended to a
-    // single real name ("Pat Customer") — not a surname (codex #5102 r4 P2).
-    .filter((token, i, all) => !(i > 0 && i === all.length - 1 && token.toLowerCase() === 'customer'));
+    .filter(Boolean);
 }
 
-// The 'Customer' placeholder is what splitName/estimate-accept stamp when
-// the estimate carried only one name token — never a real surname, so it
-// must count as a gap, not a filled field.
+function nameKey(value) {
+  return String(value ?? '').trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
 function hasRealLastName(value) {
-  return !isPlaceholderName(value);
+  const key = nameKey(value);
+  return !!key && key !== 'customer';
 }
 
-// A usable first name on a linked profile — any non-placeholder value.
 function hasRealFirstName(value) {
-  return !isPlaceholderName(value);
+  return !!nameKey(value);
 }
 
 function hasEmail(value) {
   return !!(collapseWhitespace(value || '') || '');
 }
 
-// gaps.lastName: the estimate's own customer_name has fewer than 2 tokens
-// AND (no linked customer, or the linked customer has no real last name).
-// gaps.email: the estimate carries no customer_email AND (no linked
-// customer, or the linked customer has no email on file).
-// `linkedCustomer` is the row at estimate.customer_id (or null/undefined
-// when unlinked) — only its last_name/email are read, and never returned.
-// gaps.firstName: no usable first name anywhere (the estimate carries only
-// a placeholder like 'Unknown caller', or nothing) — asked only then, so the
-// accept never mints a placeholder first name (codex #5102 r6).
+// gaps.lastName: the estimate name has fewer than 2 tokens (or is exactly
+// the linked profile's multi-word first name, "Mary Ann") AND the linked
+// profile (if any) has no real surname.
+// gaps.firstName: no name at all on the estimate — or the estimate name is
+// exactly the linked profile's surname while its first name is blank — AND
+// the linked profile has no first name.
+// gaps.email: neither the estimate nor the linked profile has an email.
+// `linkedCustomer` is the row at estimate.customer_id (null when unlinked);
+// its values are read here and never returned — booleans only.
 function computeContactGaps({ estimate = {}, linkedCustomer = null } = {}) {
   const tokens = cleanedNameTokens(estimate.customer_name);
-  // A multi-word given name ("Mary Ann") is two tokens with no surname:
-  // when the whole estimate name IS the linked profile's first name, the
-  // surname is still missing (codex #5102 r8).
+  const estimateKey = nameKey(tokens.join(' '));
+  const linkedFirst = linkedCustomer?.first_name;
+  const linkedLast = linkedCustomer?.last_name;
   const nameIsLinkedFirstName = tokens.length > 1
-    && hasRealFirstName(linkedCustomer?.first_name)
-    && tokens.join(' ').toLowerCase() === String(linkedCustomer.first_name).trim().replace(/\s+/g, ' ').toLowerCase();
-  // A linked profile whose two columns together are only placeholders
-  // ('Unknown' + 'caller') has no real surname either.
-  const linkedPairIsPlaceholder = !!linkedCustomer
-    && isPlaceholderName(`${linkedCustomer.first_name ?? ''} ${linkedCustomer.last_name ?? ''}`);
-  const lastName = (tokens.length < 2 || nameIsLinkedFirstName)
-    && (!hasRealLastName(linkedCustomer?.last_name) || linkedPairIsPlaceholder);
-  const firstName = (tokens.length === 0 || hasPlaceholderGivenName(tokens))
-    && !hasRealFirstName(linkedCustomer?.first_name);
+    && hasRealFirstName(linkedFirst) && estimateKey === nameKey(linkedFirst);
+  const nameIsLinkedLastName = tokens.length > 0
+    && !hasRealFirstName(linkedFirst) && hasRealLastName(linkedLast) && estimateKey === nameKey(linkedLast);
+  const lastName = (tokens.length < 2 || nameIsLinkedFirstName) && !hasRealLastName(linkedLast);
+  const firstName = (tokens.length === 0 || nameIsLinkedLastName) && !hasRealFirstName(linkedFirst);
   const email = !hasEmail(estimate.customer_email) && !hasEmail(linkedCustomer?.email);
   return { firstName, lastName, email };
 }
@@ -130,11 +101,6 @@ function sanitizeContactNamePart(raw, code, label) {
     return { value: null, error: { code, message: `Please enter a valid ${label}.` } };
   }
   const normalized = String(normalizeContactName(collapsed) || collapsed);
-  // A placeholder typed back in ('Customer', 'Unknown', 'undefined') would
-  // re-create the exact gap this card exists to close.
-  if (isPlaceholderName(normalized)) {
-    return { value: null, error: { code, message: `Please enter your real ${label}.` } };
-  }
   return { value: capCodePoints(normalized, CONTACT_LAST_NAME_MAX), error: null };
 }
 
@@ -187,7 +153,6 @@ function firstNameKey(value) {
 function identityMatches(row, expectedName) {
   const name = firstNameKey(expectedName);
   const first = firstNameKey(row?.first_name);
-  // A placeholder first name ('Unknown') proves nothing about who this is.
   if (!hasRealFirstName(row?.first_name)) return false;
   return !!name && !!first && (name === first || name.startsWith(`${first} `));
 }
@@ -206,8 +171,7 @@ async function fillExistingCustomerLastName(trx, customerId, lastName, { expecte
 }
 
 // The LINKED profile (estimate.customer_id — the office tied this estimate
-// to it) with a placeholder first name ('New', 'Unknown') takes the first
-// name the page collected, through the same name fan-out an operator edit
+// to it) with a blank first name takes the first name the page collected, through the same name fan-out an operator edit
 // runs, so onboarding and later sends stop greeting "Hi New". There is no
 // real first name to prove identity against, so this is never applied to a
 // phone-matched or sibling profile — only the explicit link (codex #5102 r10).
@@ -215,14 +179,10 @@ async function fillLinkedCustomerFirstName(trx, customerId, firstName) {
   if (!customerId || !firstName) return { applied: false, reason: null };
   const row = await trx('customers').where({ id: customerId }).forUpdate().first('id', 'first_name', 'last_name');
   if (!row || hasRealFirstName(row.first_name)) return { applied: false, reason: 'first name already on file' };
-  // A placeholder surname stored beside it ('Unknown' + 'caller') is part of
-  // the same fallback — cleared so the surname fill below can land.
-  const clearPlaceholderLast = isPlaceholderName(`${row.first_name ?? ''} ${row.last_name ?? ''}`) && !!row.last_name;
-  const next = { first_name: firstName, ...(clearPlaceholderLast ? { last_name: null } : {}) };
-  await trx('customers').where({ id: customerId }).update({ ...next, updated_at: new Date() });
+  await trx('customers').where({ id: customerId }).update({ first_name: firstName, updated_at: new Date() });
   await require('./customer-contact-fanout').propagateCustomerNameChange({
     before: row,
-    after: { ...row, ...next },
+    after: { ...row, first_name: firstName },
   }, trx);
   return { applied: true, reason: null };
 }
@@ -243,9 +203,7 @@ async function fillExistingCustomerEmail(trx, customerId, email, { expectedName 
 
 module.exports = {
   IDENTITY_MISMATCH,
-  hasPlaceholderGivenName,
   capCodePoints,
-  isPlaceholderName,
   hasRealLastName,
   fillLinkedCustomerFirstName,
   hasRealFirstName,

@@ -367,20 +367,19 @@ the linked customer has an email. The linked customer's name/email are never
 returned. The page renders "Last name" (required client-side) and "Email (for
 your service reports and receipts)" (optional) above Accept for whichever is
 true, and blocks Accept on a typed-but-malformed email.
-`firstName` is true only when there is no usable first name anywhere (the
-estimate holds only a placeholder such as `Unknown caller`, and the linked
-profile has none), and the page then also asks for "First name" (required).
-Names are normalized with `normalizeContactName` (proper case) before the cap.
-One placeholder rule applies everywhere: a name made only of the words
-unknown / customer / new / caller / undefined / null is no name. That holds for the
-estimate name, both name columns of a linked profile (so `Unknown` + `caller`
-is missing both), and the typed input, which answers 400 `CONTACT_*_NAME_INVALID`.
-The explicitly linked profile (`estimates.customer_id`) with a placeholder
-first name takes the collected first name through `propagateCustomerNameChange`;
-phone-matched or sibling profiles never do, because there is no real name to
-prove identity against.
+`firstName` is true only when there is no name at all (blank estimate name and
+no linked first name), or the estimate name is exactly the linked profile's
+surname while its first name is blank; the page then also asks for "First
+name" (required). Name gaps are judged from structure, not by guessing which
+stored words are placeholders (owner ruling 2026-09-28): the only exceptions
+are the literal `undefined` / `null` tokens of the old concatenation bug and
+the `Customer` surname the accept itself used to stamp. Names are normalized
+with `normalizeContactName` (proper case) and capped by whole code points.
 Without a usable first name the surname is not applied, so the accept never
-creates a placeholder first name.
+creates a placeholder first name. The explicitly linked profile
+(`estimates.customer_id`) with a blank first name takes the collected first
+name through `propagateCustomerNameChange`; phone-matched or sibling profiles
+never do.
 `PUT /api/estimates/:token/accept` accepts optional `contactFirstName`, `contactLastName`
 (trimmed, whitespace-collapsed, ≤50 chars — the customers.last_name width) and `contactEmail` (lowercased,
 ≤150 chars — the customers.email width — `EMAIL_RE`). A malformed non-empty value answers 400

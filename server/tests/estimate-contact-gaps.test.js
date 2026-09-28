@@ -122,31 +122,9 @@ describe('sanitizeContactEmail', () => {
   });
 });
 
-describe('computeContactGaps — stored placeholder names', () => {
-  test.each(['Unknown caller', 'New Customer', '  unknown   CALLER '])('%s reads as a missing last name', (name) => {
-    expect(computeContactGaps({ estimate: { customer_name: name, customer_email: 'x@example.com' } }).lastName).toBe(true);
-  });
-});
-
-describe('computeContactGaps — legacy surname sentinels on the linked customer', () => {
-  test.each(['undefined', 'NULL', ' Null '])('linked last_name %p does not close the gap', (last) => {
-    const gaps = computeContactGaps({ estimate: { customer_name: 'Pat', customer_email: 'x@example.com' }, linkedCustomer: { last_name: last, email: 'x@example.com' } });
-    expect(gaps.lastName).toBe(true);
-  });
-});
-
-describe('computeContactGaps — appended placeholder surname', () => {
-  test('"Pat Customer" reads as a missing last name', () => {
-    expect(computeContactGaps({ estimate: { customer_name: 'Pat Customer', customer_email: 'x@example.com' } }).lastName).toBe(true);
-  });
-  test('a real two-word name is untouched', () => {
-    expect(computeContactGaps({ estimate: { customer_name: 'Customer Sample', customer_email: 'x@example.com' } }).lastName).toBe(false);
-  });
-});
-
 describe('computeContactGaps — first name only when there is none anywhere', () => {
-  test('a placeholder-only estimate with no linked profile asks for a first name', () => {
-    expect(computeContactGaps({ estimate: { customer_name: 'Unknown caller', customer_email: 'x@example.com' } }).firstName).toBe(true);
+  test('an estimate with no name and no linked profile asks for a first name', () => {
+    expect(computeContactGaps({ estimate: { customer_name: '', customer_email: 'x@example.com' } }).firstName).toBe(true);
   });
   test('an estimate with a real first name never asks for one', () => {
     expect(computeContactGaps({ estimate: { customer_name: 'Pat', customer_email: 'x@example.com' } }).firstName).toBe(false);
@@ -154,8 +132,15 @@ describe('computeContactGaps — first name only when there is none anywhere', (
   test('a linked profile with a real first name closes the first-name gap', () => {
     expect(computeContactGaps({ estimate: { customer_name: '' }, linkedCustomer: { first_name: 'Pat' } }).firstName).toBe(false);
   });
-  test('a linked placeholder first name ("New") does not', () => {
-    expect(computeContactGaps({ estimate: { customer_name: '' }, linkedCustomer: { first_name: 'New' } }).firstName).toBe(true);
+  test('an estimate name equal to the linked surname, with a blank linked first name, asks for the first name', () => {
+    const gaps = computeContactGaps({ estimate: { customer_name: 'Sample', customer_email: 'x@example.com' }, linkedCustomer: { first_name: '', last_name: 'Sample', email: 'x@example.com' } });
+    expect(gaps.firstName).toBe(true);
+    expect(gaps.lastName).toBe(false);
+  });
+  test('stored words like "New Smith" are a real name — no guessing', () => {
+    const gaps = computeContactGaps({ estimate: { customer_name: 'New Smith', customer_email: 'x@example.com' } });
+    expect(gaps.firstName).toBe(false);
+    expect(gaps.lastName).toBe(false);
   });
 });
 
@@ -174,45 +159,8 @@ describe('computeContactGaps — multi-word given name with no surname', () => {
     const gaps = computeContactGaps({ estimate: { customer_name: 'Mary Ann', customer_email: 'x@example.com' }, linkedCustomer: { first_name: 'Mary Ann', last_name: null } });
     expect(gaps.lastName).toBe(true);
   });
-  test('the legacy "Mary Ann Customer" shape too', () => {
-    const gaps = computeContactGaps({ estimate: { customer_name: 'Mary Ann Customer' }, linkedCustomer: { first_name: 'Mary Ann', last_name: 'Customer' } });
-    expect(gaps.lastName).toBe(true);
-  });
   test('a real surname on the profile still closes it', () => {
     const gaps = computeContactGaps({ estimate: { customer_name: 'Mary Ann' }, linkedCustomer: { first_name: 'Mary Ann', last_name: 'Sample' } });
-    expect(gaps.lastName).toBe(false);
-  });
-});
-
-describe('computeContactGaps — every placeholder-only name shape', () => {
-  test.each(['Customer', 'Unknown', 'Unknown Customer', 'unknown caller', 'New Customer'])('%p asks for a first name too', (name) => {
-    const gaps = computeContactGaps({ estimate: { customer_name: name, customer_email: 'x@example.com' } });
-    expect(gaps.firstName).toBe(true);
-    expect(gaps.lastName).toBe(true);
-  });
-  test('a real name that merely contains a placeholder word is kept', () => {
-    // A placeholder word as the SURNAME of a real given name is kept
-    // (a leading placeholder is a missing first name — covered below).
-    expect(computeContactGaps({ estimate: { customer_name: 'Pat New', customer_email: 'x@example.com' } }).firstName).toBe(false);
-  });
-});
-
-describe('one placeholder rule everywhere', () => {
-  test.each(['Customer', 'undefined', 'NULL', 'Unknown', 'unknown caller'])('typed %p is rejected as a name', (v) => {
-    expect(sanitizeContactLastName(v).error.code).toBe('CONTACT_LAST_NAME_INVALID');
-    expect(sanitizeContactFirstName(v).error.code).toBe('CONTACT_FIRST_NAME_INVALID');
-  });
-  test('a linked profile split as Unknown + caller is missing both names', () => {
-    const gaps = computeContactGaps({ estimate: { customer_name: 'Unknown caller', customer_email: 'x@example.com' }, linkedCustomer: { first_name: 'Unknown', last_name: 'caller', email: 'x@example.com' } });
-    expect(gaps.firstName).toBe(true);
-    expect(gaps.lastName).toBe(true);
-  });
-});
-
-describe('leading placeholder given name ("Unknown Smith")', () => {
-  test('asks for the first name but keeps the real surname', () => {
-    const gaps = computeContactGaps({ estimate: { customer_name: 'Unknown Smith', customer_email: 'x@example.com' } });
-    expect(gaps.firstName).toBe(true);
     expect(gaps.lastName).toBe(false);
   });
 });
