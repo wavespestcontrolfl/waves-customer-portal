@@ -1600,7 +1600,8 @@ describe('dispatchClaimedCall', () => {
   // explicitly overrides `freshCall`.
   function makeDb({ lead = OPEN_LEAD, bookedSince = null, visitCreatedAt = null, consultationCodes = [], smsWithLink = null,
     callLogUpdate = jest.fn(async () => 1), activityInsert = jest.fn(async () => {}), capture = {}, freshCall = CALL,
-    markerInsert = jest.fn(() => ({ onConflict: jest.fn(() => ({ ignore: jest.fn(async () => {}) })) })) } = {}) {
+    markerInsert = jest.fn(() => ({ onConflict: jest.fn(() => ({ ignore: jest.fn(async () => {}) })) })),
+    markerDel = jest.fn(async () => 1) } = {}) {
     const conn = jest.fn((table) => {
       const chain = {};
       ['whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'whereRaw', 'whereExists', 'orderBy', 'limit', 'modify', 'forUpdate', 'join']
@@ -1625,6 +1626,10 @@ describe('dispatchClaimedCall', () => {
       // never call_log — activity_log keeps its own dedicated insert stub.
       chain.insert = table === 'activity_log' ? activityInsert
         : (table === HANDOFF_MARKER_TABLE ? markerInsert : jest.fn(async () => {}));
+      // codex #5018 pre-push P1 (round 3): recordSendOutcome's own stale-
+      // marker cleanup DELETEs from this same table on a definitely
+      // retryable outcome.
+      chain.del = table === HANDOFF_MARKER_TABLE ? markerDel : jest.fn(async () => 0);
       return chain;
     });
     conn.raw = jest.fn(() => 'RAW_FRAGMENT');
@@ -2274,6 +2279,49 @@ describe('dispatchClaimedCall', () => {
       });
       const outcome = await recoverAbandonedClaim(conn, CALL, NOW);
       expect(outcome).toEqual({ ambiguous: true });
+    });
+
+    // codex #5018 pre-push P1 (round 3): a DEFINITELY retryable rejection
+    // (e.g. Twilio's own 429/20429 rate-limit response) can arrive AFTER
+    // onDispatchStart already wrote the marker — this is never the
+    // isAmbiguousProviderOutcome branch, since send-customer-message.js/
+    // twilio.js have already determined the attempt did NOT reach an
+    // ambiguous state. recordSendOutcome's own retryable/deferred requeue
+    // must clear that marker: left in place, a LATER attempt that crashes
+    // before ever reaching Twilio again would find it and
+    // recoverAbandonedClaim would wrongly call THAT unsent follow-up
+    // 'ambiguous, never resend'.
+    test('a definite retryable rejection AFTER onDispatchStart clears the stale marker when requeuing, so a later pre-provider crash is safe to retry', async () => {
+      const markerDel = jest.fn(async () => 1);
+      const conn = makeDb({ markerDel });
+      sendCustomerMessage.mockImplementation(async (opts) => {
+        const verdict = await opts.providerPreSendCheck({ dbi: conn });
+        expect(verdict).toEqual({ ok: true });
+        await opts.onDispatchStart(); // the marker is written here
+        // Twilio's own definite rejection (429/20429) — retryable, never
+        // ambiguous, unlike a thrown timeout/network error.
+        return { sent: false, retryable: true, code: 'TWILIO_RATE_LIMITED', reason: '429 Too Many Requests' };
+      });
+      const result = await dispatchClaimedCall(conn, CALL, NOW);
+      expect(result).toMatchObject({ sent: false, skipped: 'TWILIO_RATE_LIMITED', deferred: true });
+      // The stale marker from THIS attempt was cleared as part of the requeue.
+      expect(markerDel).toHaveBeenCalledTimes(1);
+
+      // A later attempt (a fresh claim of the now-'pending' row) that
+      // crashes before ever reaching Twilio again must be safe to retry —
+      // recoverAbandonedClaim reads the marker table fresh, and with the
+      // stale row cleared it correctly finds none.
+      conn.mockImplementation((table) => {
+        const chain = {};
+        ['whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'whereRaw', 'orderBy', 'limit', 'modify', 'forUpdate', 'where', 'join']
+          .forEach((m) => { chain[m] = jest.fn(() => chain); });
+        chain.first = jest.fn(async () => undefined); // no marker row — cleared above
+        chain.update = jest.fn(async () => 1);
+        chain.insert = jest.fn(async () => {});
+        return chain;
+      });
+      const outcome = await recoverAbandonedClaim(conn, CALL, NOW);
+      expect(outcome.ambiguous).toBe(false);
     });
 
     // The actual r8 P2 fix: a failure in sendCustomerMessage's OWN

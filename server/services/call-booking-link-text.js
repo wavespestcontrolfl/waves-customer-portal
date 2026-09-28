@@ -1499,6 +1499,25 @@ async function recordSendOutcome(conn, call, entry, leadId, now, result) {
   // record a reason.
   if (result.retryable || result.deferred) {
     if (pastRetryDeadline(entry, now)) return skip(result.code || result.reason || 'send_retry_timeout');
+    // codex #5018 pre-push P1 (round 3): a DEFINITELY retryable outcome
+    // (e.g. Twilio's own 429/20429 rate-limit rejection — twilio-sms.js's
+    // own retryableTwilioCodes classification) can still arrive AFTER
+    // onDispatchStart already wrote the durable handoff marker: the marker
+    // only proves "messages.create() may have run," and reaching this
+    // branch (never isAmbiguousProviderOutcome above) means send-customer-
+    // message.js/twilio.js have ALREADY determined this exact attempt did
+    // NOT reach an ambiguous state — so a marker from it is safe to clear.
+    // Left in place, a LATER retry that crashes or throws before ever
+    // reaching Twilio again would find this stale marker and
+    // recoverAbandonedClaim would misclassify it 'ambiguous, never resend'
+    // for a follow-up that in fact never sent at all. Best-effort: a
+    // cleanup failure just leaves the stale marker for that same
+    // (already-handled) misclassification, never a duplicate send.
+    try {
+      await markerDb()(HANDOFF_MARKER_TABLE).where({ call_log_id: call.id }).del();
+    } catch (markerErr) {
+      logger.warn(`[call-booking-link-text] stale handoff marker cleanup failed for call ${call.id} (${markerErr.code || markerErr.name || 'error'})`);
+    }
     const nextAllowedAt = result.nextAllowedAt ? new Date(result.nextAllowedAt) : null;
     const send_at = (nextAllowedAt && !Number.isNaN(nextAllowedAt.getTime()) ? nextAllowedAt : new Date(now.getTime() + RETRY_BACKOFF_MS)).toISOString();
     // original_send_at carries forward UNCHANGED through every deferral —
