@@ -147,7 +147,9 @@ describe('runTechOpenVisitNudge — grouping, eligibility, sends', () => {
     expect(TwilioService.sendSMS).toHaveBeenCalledWith(
       '+19415550101',
       expect.any(String),
-      expect.objectContaining({ messageType: 'internal_alert', allowUnknownInternalAlertRecipient: true }),
+      // allowOwnerSms: the owner is the only tech, so without it twilio.js
+      // turns the text into an admin-bell notice instead of an SMS.
+      expect.objectContaining({ messageType: 'internal_alert', allowUnknownInternalAlertRecipient: true, allowOwnerSms: true }),
     );
   });
 
@@ -232,6 +234,9 @@ describe('dedupe — one text per technician per ET day', () => {
       technician_id: 'tech-a',
       type: 'tech_open_visit_nudge',
       dedupe_key: 'tech_open_visit_nudge:tech-a:2026-09-28',
+      // Born read + dismissed: a send marker, never a tech-home card.
+      read: true,
+      dismissed_at: expect.any(Date),
     }));
     expect(notifChain.onConflict).toHaveBeenCalledWith('dedupe_key');
     expect(notifChain.ignore).toHaveBeenCalled();

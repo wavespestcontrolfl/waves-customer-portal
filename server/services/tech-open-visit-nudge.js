@@ -37,7 +37,9 @@
  * has been read fresh off the technicians row and cleared by
  * technician-eligibility's isAssignable() + tech-line's usableCell(), i.e.
  * the verified phone of a currently active, field-dispatchable technician,
- * never an arbitrary caller-supplied number.
+ * never an arbitrary caller-supplied number. It also passes `allowOwnerSms`:
+ * the owner is the only tech today, and an owner-phone internal_alert is
+ * otherwise redirected into the admin bell rather than texted.
  */
 const db = require('../models/db');
 const logger = require('./logger');
@@ -171,8 +173,11 @@ function dedupeKeyFor(technicianId, etDate) {
 // either an earlier run today already claimed it, or a concurrent replica
 // just did. onConflict/ignore is the same idempotent-insert shape
 // tech-visit-notifications.js's recordTrackingNotice uses against the same
-// column.
+// column. The row is born read + dismissed: it is the send marker, not a
+// card — GET /api/tech/notifications skips dismissed rows, so the tech home
+// never renders the SMS body (raw link included) as a second notice.
 async function claimToday(technicianId, etDate, message, payload) {
+  const now = new Date();
   const inserted = await db('tech_notifications')
     .insert({
       technician_id: technicianId,
@@ -180,6 +185,8 @@ async function claimToday(technicianId, etDate, message, payload) {
       dedupe_key: dedupeKeyFor(technicianId, etDate),
       message,
       payload: JSON.stringify(payload),
+      read: true,
+      dismissed_at: now,
     })
     .onConflict('dedupe_key')
     .ignore()
@@ -242,6 +249,12 @@ async function runTechOpenVisitNudge({ now = new Date() } = {}) {
         // this run just read, and `cell` is that SAME row's own usable
         // phone — never a caller-supplied or unverified number.
         allowUnknownInternalAlertRecipient: true,
+        // The owner is today's only tech, so this phone IS a known owner
+        // phone — without the opt-out, twilio.js redirects an owner-phone
+        // internal_alert into the admin bell instead of texting it, and the
+        // bell is exactly the channel this nudge exists to replace.
+        // OWNER_SMS_DISABLED still silences it (checked separately).
+        allowOwnerSms: true,
       });
       if (result && result.success === false) {
         logger.warn(`[tech-open-visit-nudge] send failed for ${tech.id}: ${result.error || result.code || 'unknown'}`);
