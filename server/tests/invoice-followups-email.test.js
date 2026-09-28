@@ -767,6 +767,35 @@ describe('invoice follow-up email sidecar', () => {
     expect(credit.reverseAppliedCredit).not.toHaveBeenCalled();
   });
 
+  test('a prior Email with uncertain legacy SMS keeps the credit for a possibly delivered text', async () => {
+    const credit = require('../services/customer-credit');
+    credit.autoApplyAccountCreditIfEnabled.mockResolvedValueOnce({ applied: 50 });
+    EmailTemplates.sendTemplate.mockResolvedValueOnce({ sent: true, deduped: true });
+    sendCustomerMessage.mockResolvedValueOnce({ sent: false, blocked: false,
+      deliveryOutcome: 'uncertain', code: 'PROVIDER_FAILURE', retryable: false, deferred: false });
+    const sequenceUpdate = chain();
+    const priorAt = new Date('2026-05-20T14:00:00Z');
+    setDbQueues({
+      'invoice_followup_sequences as s': [chain({ result: [followupRow({ last_touch_at: priorAt })] })],
+      customers: [chain({ first: customer() })],
+      invoices: [chain({ first: invoice({ credit_applied: '70.00' }) }),
+        chain({ first: invoice() }), chain({ first: invoice() }), chain({ first: invoice() }), chain({ first: invoice() })],
+      notification_prefs: [chain({ first: { email_enabled: true } })],
+      customer_interactions: [chain()],
+      invoice_followup_sequences: [
+        chain({ first: { id: 'seq-1', customer_id: 'cust-1', status: 'active', step_index: 0,
+          next_touch_at: '2026-05-26T13:00:00.000Z', anchor_at: null } }),
+        chain({ result: 1 }), sequenceUpdate, chain({ result: 1 }),
+      ],
+    });
+
+    await InvoiceFollowUps.runPending();
+
+    expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ channel: 'sms', customerId: 'cust-1' }));
+    expect(sequenceUpdate.update).toHaveBeenCalledWith(expect.objectContaining({ step_index: 1, last_touch_at: priorAt }));
+    expect(credit.reverseAppliedCredit).not.toHaveBeenCalled();
+  });
+
   test.each(['QUIET_HOURS_HOLD', 'PUSH_IN_FLIGHT'])('%s with a failed enqueue holds the current follow-up step for retry', async (code) => {
     // Email delivered, the text crossed the 20:00 ET cutoff, and the
     // scheduled-rail insert then failed — nothing durable owns the

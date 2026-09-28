@@ -1076,6 +1076,7 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
   let smsSkipReason = null;
   let smsDeferUntil = null;
   let smsDeferredOwned = false;
+  let smsOutcomeMayHaveDelivered = false;
   // The held SMS leg failed to reach the scheduled rail: nothing durable
   // owns it, so this touch must stay retryable (codex r21).
   let smsHoldUnowned = false;
@@ -1224,6 +1225,7 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
         preDispatchCheck: invoiceHelpers.selfPayAtDispatch(row.invoice_id, db),
       }) : null;
       if (sendResult && (sendResult.blocked || sendResult.sent === false)) {
+        smsOutcomeMayHaveDelivered = ['accepted', 'uncertain'].includes(sendResult.deliveryOutcome);
         await ContactLedger.markSendFailed(smsLedger, { code: sendResult.code || 'sms_blocked' });
         smsSkipReason = sendResult.code || 'sms_blocked';
         // Send-window block (this cron runs hourly, incl. nights): not a
@@ -1368,7 +1370,7 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
     ? new Date(Math.max(...originalDeliveryTimes.map((time) => new Date(time).getTime()))) : row.last_touch_at;
   // Only an earlier accepted leg reached the customer on this path. Return
   // this run's credit draw; the previous attempt's applied credit stays put.
-  if (!freshDelivery && !smsDeferredOwned && dunAppliedCredit > 0) {
+  if (!freshDelivery && !smsDeferredOwned && !smsOutcomeMayHaveDelivered && dunAppliedCredit > 0) {
     try {
       const { reverseAppliedCredit } = require('./customer-credit');
       await reverseAppliedCredit({ invoiceId: row.invoice_id, amount: dunAppliedCredit, createdBy: 'system:dun_undelivered' });
