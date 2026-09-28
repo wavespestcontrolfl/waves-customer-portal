@@ -73,7 +73,7 @@ const ACTIVE_STATUSES = ['active', 'renewal_pending'];
 // never 'status'.
 // missedClaimCol (Codex #4921 r7): the combined send's other-rung claim,
 // fed by noticeClaimColumnForDaysOut — pinned below to never be 'status'.
-const SANCTIONED_KEY_IDENTIFIERS = ['noticeCol', 'claimCol', 'sentCol', 'lateCol', 'escalatedCol', 'missedClaimCol'];
+const SANCTIONED_KEY_IDENTIFIERS = ['noticeCol', 'claimCol', 'sentCol', 'lateCol', 'escalatedCol', 'missedClaimCol', 'attemptColumn'];
 
 // Non-literal `status:` expressions the scanner accepts, each one a pass-
 // through of a value that is itself CHECK-valid: a constant pinned below, the
@@ -743,7 +743,8 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
   test('sanctioned computed-key identifiers (*Col) can never be status: the column helpers return only notice_/payment_reminder_ names', () => {
     for (const days of [30, 15, 7, 3, 1, 0, 99, null]) {
       for (const fn of [_private.noticeColumnForDaysOut, _private.noticeClaimColumnForDaysOut,
-        _private.paymentReminderColumnForDaysOut, _private.paymentReminderClaimColumnForDaysOut]) {
+        _private.paymentReminderColumnForDaysOut, _private.paymentReminderClaimColumnForDaysOut,
+        _private.paymentReminderAttemptColumnForDaysOut]) {
         const col = fn(days);
         if (col !== null) expect(col).toMatch(/^(notice|payment_reminder)_/);
         expect(col).not.toBe('status');

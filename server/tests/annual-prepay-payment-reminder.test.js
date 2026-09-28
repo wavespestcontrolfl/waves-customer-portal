@@ -140,6 +140,9 @@ describe('annual prepay pre-visit payment reminders', () => {
     expect(_private.paymentReminderColumnForDaysOut(7)).toBe(null);
     expect(_private.paymentReminderClaimColumnForDaysOut(3)).toBe('payment_reminder_3d_claimed_at');
     expect(_private.paymentReminderClaimColumnForDaysOut(1)).toBe('payment_reminder_1d_claimed_at');
+    expect(_private.paymentReminderAttemptColumnForDaysOut(3)).toBe('payment_reminder_3d_attempted_for');
+    expect(_private.paymentReminderAttemptColumnForDaysOut(1)).toBe('payment_reminder_1d_attempted_for');
+    expect(_private.paymentReminderAttemptColumnForDaysOut(7)).toBe(null);
   });
 
   test('happy path: claims, renders the template with amount/visit/pay link, sends payment_link SMS, marks sent', async () => {

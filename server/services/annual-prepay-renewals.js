@@ -7671,6 +7671,13 @@ function paymentReminderClaimColumnForDaysOut(daysOut) {
   return null;
 }
 
+function paymentReminderAttemptColumnForDaysOut(daysOut) {
+  const n = Number(daysOut);
+  if (n === 3) return 'payment_reminder_3d_attempted_for';
+  if (n === 1) return 'payment_reminder_1d_attempted_for';
+  return null;
+}
+
 // The invoice follow-up engine (send-anchored dunning) and this visit-anchored
 // reminder both text the same pay link, and both crons fire at 10 AM ET — so
 // suppress a pre-visit reminder when that invoice's sequence either touched
@@ -7948,7 +7955,7 @@ async function claimPaymentReminderEpisode(termOrId, daysOut, opts) {
   ].find(([, refused]) => refused);
   if (termRefusal) return { sent: false, reason: termRefusal[0] };
 
-  const attemptColumn = `payment_reminder_${Number(daysOut)}d_attempted_for`;
+  const attemptColumn = paymentReminderAttemptColumnForDaysOut(daysOut);
   const trackAttempt = Boolean(cols[attemptColumn]);
   let explicitAttempt = false;
   if (trackAttempt) {
@@ -7963,7 +7970,7 @@ async function claimPaymentReminderEpisode(termOrId, daysOut, opts) {
   const now = new Date();
   const staleClaimCutoff = new Date(now.getTime() - NOTICE_CLAIM_TTL_MS);
   const attemptedFor = effectiveFirstVisitDate(term);
-  const [claimedTerm] = await db('annual_prepay_terms')
+  const claimQuery = db('annual_prepay_terms')
     .where({ id: term.id, status: PAYMENT_PENDING_STATUS })
     .whereNull(sentCol)
     .modify((query) => {
@@ -7976,10 +7983,14 @@ async function claimPaymentReminderEpisode(termOrId, daysOut, opts) {
     })
     .where(function paymentClaimAvailable() {
       this.whereNull(claimCol).orWhere(claimCol, '<', staleClaimCutoff);
-    })
-    .update({ [claimCol]: now, updated_at: now,
-      ...(trackAttempt ? { [attemptColumn]: explicitAttempt ? attemptedFor : null } : {}) })
-    .returning('*');
+    });
+  // Both branches are one atomic UPDATE. On older schemas, the absent marker
+  // column cannot appear in the payload; on migrated schemas, it is stamped
+  // with the claim under the same row/date predicates.
+  const [claimedTerm] = await (trackAttempt
+    ? claimQuery.update({ [claimCol]: now, updated_at: now,
+      [attemptColumn]: explicitAttempt ? attemptedFor : null })
+    : claimQuery.update({ [claimCol]: now, updated_at: now })).returning('*');
   if (!claimedTerm) return { sent: false, reason: 'already_claimed' };
 
   return { claimedTerm, sentCol, claimCol, trackAttempt, explicitAttempt };
@@ -9308,6 +9319,7 @@ module.exports = {
     TERMITE_NOTICE_MISSED_ESCALATION_COLUMN,
     paymentReminderColumnForDaysOut,
     paymentReminderClaimColumnForDaysOut,
+    paymentReminderAttemptColumnForDaysOut,
     invoiceStillOwedAsQuoted,
     invoiceDunningActiveToday,
     shouldAlertTerm,
