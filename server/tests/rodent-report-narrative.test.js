@@ -269,7 +269,8 @@ test('ungrounded numbers and unsupported capture/consumption claims are rejected
   expect(ungroundedClaims('2 traps were inspected today.', roleFacts)).toContain('uncorroborated_count:2 traps');
   expect(ungroundedClaims('5 of 7 traps were inspected, and 2 traps were not accessible.', roleFacts)).toEqual([]);
 
-  expect(ungroundedClaims('See you on September 3.', facts)).toEqual(['visit_timing_stated:september 3']);
+  // the hidden date's numbers never ground a count either (codex P1 on #5262 r2)
+  expect(ungroundedClaims('See you on September 3.', facts)).toEqual(['ungrounded_number:3', 'visit_timing_stated:september 3']);
   // with no grounded next visit, any window/date mention rejects
   const noVisit = groundingFacts(input({ nextAppointment: null }));
   expect(ungroundedClaims('We will arrive 8–10 AM.', noVisit).some((p) => p.startsWith('ungrounded_window'))).toBe(true);
@@ -638,7 +639,9 @@ describe('next-visit claims fixture table', () => {
     ['Since our visit on Aug. 1, activity has dropped.', []],
     ['Our last visit was Aug. 1.', []],
     ['Our technician visited on Sep. 3.', []],
-    ['We treated on Sep. 3 and will return Sep. 10.', ['visit_timing_stated:sep. 3', 'visit_timing_stated:sep. 10']],
+    // timing binds to the claim clause: the past treatment date is judged
+    // against the schedule like any date outside a claim
+    ['We treated on Sep. 3 and will return Sep. 10.', ['visit_timing_stated:sep. 10', 'ungrounded_date:Sep. 3']],
     ['Our technician came by Sep. 3 and returns Sep. 10.', ['visit_timing_stated:sep. 3', 'visit_timing_stated:sep. 10']],
     ['Our technician inspected the traps, and the follow-up is Tuesday.', ['visit_timing_stated:tuesday']],
     ['We treated the yard, follow-up Tuesday.', ['visit_timing_stated:tuesday']],
@@ -765,6 +768,44 @@ describe('next-visit claims fixture table', () => {
     expect(unscheduledProblems(text)).toEqual(unscheduled);
   });
 
+  // Codex round 2 on #5262.
+  test.each([
+    // a provider after an unpunctuated lead-in still carries
+    ['Today we carefully inspected all interior and exterior bait stations and will return tomorrow.', ['visit_timing_stated:tomorrow']],
+    // any timeframe word in a promise of our return says when
+    ['We will return later in the week.', ['visit_timing_stated:later', 'visit_timing_stated:week']],
+    ['We will return in 10 business days.', ['visit_timing_stated:days']],
+    ['We will return soon.', ['visit_timing_stated:soon']],
+    // preparation anchored on an adjective-qualified visit is not our timing
+    ['Mow the lawn the day before your scheduled visit.', []],
+    ['Mow the lawn the day before the upcoming visit.', []],
+    ['We will return the day before your scheduled visit.', ['visit_timing_stated:the day before your scheduled visit']],
+    // a date in a care clause joined to a timing-free claim times the care
+    ['Water the lawn Monday, and we will check the traps at your next visit.', []],
+    // a range's "and" never splits the claim clause
+    ['We will arrive between 7 and 8 on Monday, August 3.', ['visit_timing_stated:between 7 and 8', 'visit_timing_stated:monday, august 3']],
+  ])('%s', (text, expected) => {
+    expect(problemsFor(text)).toEqual(expected);
+  });
+
+  test('ratified copy keeps care and prep timing, loses vague return timing', () => {
+    expect(withoutTimedVisitClaims('Mow the lawn the day before your scheduled visit. We will return later in the week. '
+      + 'Water the lawn Monday, and we will check the traps at your next visit.', facts.nextVisit))
+      .toBe('Mow the lawn the day before your scheduled visit. Water the lawn Monday, and we will check the traps at your next visit.');
+  });
+
+  test('an adverb between another subject and its verb still stops the provider carry', () => {
+    expect(isVisitClaim('We treated the area and activity gradually subsided but may return tomorrow.')).toBe(false);
+  });
+
+  test('with nothing scheduled, a return duration grounds only a promise of OUR return', () => {
+    expect(unscheduledProblems('We will be back within 2 weeks.', ['Activity may return within 2 weeks.']))
+      .toEqual(['ungrounded_relative_date:within 2 weeks']);
+    expect(unscheduledProblems('We will return after 2 hours.', ['You may return indoors after 2 hours.']))
+      .toEqual(['ungrounded_relative_date:after 2 hours']);
+    expect(unscheduledProblems('We will return in 2 weeks.', ['We will return in 2 weeks to recheck the traps.'])).toEqual([]);
+  });
+
   test('a clause with its own noun subject never inherits the provider', () => {
     expect(isVisitClaim('We treated the area and activity subsided but may return tomorrow.')).toBe(false);
     expect(isVisitClaim('We carefully inspected all interior and exterior bait stations throughout the property and will return tomorrow.')).toBe(true);
@@ -845,6 +886,17 @@ test('grounded numerals cannot launder a relative visit date or a prose window',
   const noVisit = groundingFacts(input({ nextAppointment: null }));
   expect(ungroundedClaims('Your next visit is in 7 days.', noVisit)).toContain('ungrounded_relative_date:in 7 days');
   expect(ungroundedClaims('We will arrive from 7 to 8.', noVisit)).toContain('ungrounded_window:FROM 7 TO 8');
+});
+
+test('the hidden next-visit numbers never ground a count, and a scheduled visit cannot be denied (codex r2 on #5262)', () => {
+  const facts = groundingFacts(input());
+  expect(ungroundedClaims('We completed 3 steps today.', facts)).toContain('ungrounded_number:3');
+  for (const denial of ['We do not plan to return.', 'We have no plans to return.', 'This was our final visit.', 'No return is planned.']) {
+    expect(ungroundedClaims(denial, facts)).toContain('contradicted_scheduled_visit');
+  }
+  expect(ungroundedClaims('Since your last visit, activity dropped.', facts)).not.toContain('contradicted_scheduled_visit');
+  const noVisit = groundingFacts(input({ nextAppointment: null }));
+  expect(ungroundedClaims('This was our final visit.', noVisit)).not.toContain('contradicted_scheduled_visit');
 });
 
 test('the model never sees the next visit date, only that one is scheduled (owner ruling 2026-09-28)', () => {

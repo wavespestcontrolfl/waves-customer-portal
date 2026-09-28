@@ -116,7 +116,7 @@ const RELATIONAL_DATE_RE = new RegExp(
 // the sentence is itself a provider visit promise ("We will return the day
 // before your next visit" still states timing for our return and must be
 // judged like any other relational date).
-const RELATIONAL_DATE_ANCHOR_RE = /^(?:your|the|our|this|each|every)\s+(?:next\s+)?(?:visit|appointment|service|treatment|application)\b/i;
+const RELATIONAL_DATE_ANCHOR_RE = /^(?:your|the|our|this|each|every)\s+(?:(?:next|scheduled|upcoming|planned|booked|follow[-\s]?up|return|regular|second)\s+){0,2}(?:visit|appointment|service|treatment|application)s?\b/i;
 // Every other relative date, judged inside a visit claim: "today" (not the
 // possessive "today's visit", which names the completed visit), "this
 // afternoon", "next weekend", "the following week".
@@ -187,7 +187,8 @@ const VISIT_VERB = String.raw`(?:return\w*|com(?:e|es|ing)|came|arriv\w*|visit\w
 // lookbehind this replaces). A bare "back" needs an auxiliary ("and will be
 // back") so "the front and back yard" is never a visit.
 const OTHER_CLAUSE_SUBJECT_RE = String.raw`\b(?:you|your|they|them|customers?|homeowners?|tenants?)\b`;
-const CLAUSE_COORDINATOR_RE = String.raw`(?:,\s*)?\b(?:and|but|then)\b\s*|;\s*`;
+// "and" before a number joins a range ("between 7 and 8"), not two clauses.
+const CLAUSE_COORDINATOR_RE = String.raw`(?:,\s*)?\b(?:and|but|then)\b(?!\s*\d)\s*|;\s*`;
 const CLAUSE_AUX = String.raw`(?:will|would|shall|should|can|could|may|might|must|also|then|soon|likely|definitely|be|is|are|am|plans?\s+to|planning\s+to|going\s+to|gonna|expect\s+to|intend\s+to)`;
 // A leading adverb, or a short introductory phrase ending in a comma, that
 // may sit before a coordinated clause's real subject or verb ("and then
@@ -205,9 +206,22 @@ const CLAUSE_OWN_OTHER_RE = new RegExp(`^${CLAUSE_LEAD_RE}${OTHER_CLAUSE_SUBJECT
 // distinguished from a noun-phrase continuation of the PREVIOUS clause's
 // object ("exterior bait stations", which has no verb after "exterior").
 const CLAUSE_OWN_VERB_SUBJECT_RE = new RegExp(
-  `^${CLAUSE_LEAD_RE}[a-z][a-z'-]*\\s+(?:(?:has|have|had|is|are|was|were|will|would|shall|should|can|could|may|might|must)\\b|[a-z]{2,}(?:ed|s)\\b)`,
+  `^${CLAUSE_LEAD_RE}[a-z][a-z'-]*\\s+(?:[a-z]+ly\\s+)?(?:(?:has|have|had|is|are|was|were|will|would|shall|should|can|could|may|might|must)\\b|[a-z]{2,}(?:ed|s)\\b)`,
   'i',
 );
+
+// The opening clause's subject is whichever comes first in it — a provider
+// ("Today we carefully inspected…", "After checking every trap, our
+// technician…") or anyone else ("You can mow…") — so an unpunctuated
+// lead-in never hides it.
+const OPENING_SUBJECT_RE = new RegExp(`\\b${PROVIDER_SUBJECT}\\b|${OTHER_CLAUSE_SUBJECT_RE}`, 'i');
+const PROVIDER_ONLY_RE = new RegExp(`^${PROVIDER_SUBJECT}$`, 'i');
+function openingSubject(text) {
+  const first = new RegExp(CLAUSE_COORDINATOR_RE, 'i').exec(text);
+  const found = OPENING_SUBJECT_RE.exec(first ? text.slice(0, first.index) : text);
+  if (!found) return null;
+  return PROVIDER_ONLY_RE.test(found[0]) ? 'provider' : 'other';
+}
 
 // The visit-verb claim carried by a coordinated clause with no subject of
 // its own — walks every coordinator in the sentence, tracking which
@@ -215,7 +229,7 @@ const CLAUSE_OWN_VERB_SUBJECT_RE = new RegExp(
 // window back to the last provider mention.
 function coordinatedClauseClaims(text) {
   const claims = [];
-  let subject = CLAUSE_OWN_PROVIDER_RE.test(text) ? 'provider' : (CLAUSE_OWN_OTHER_RE.test(text) ? 'other' : null);
+  let subject = openingSubject(text);
   const re = new RegExp(CLAUSE_COORDINATOR_RE, 'gi');
   let m;
   while ((m = re.exec(text)) !== null) {
@@ -395,15 +409,28 @@ function dayPeriod(text) {
   return meridiem ? `${meridiem[1].toUpperCase()}M` : null;
 }
 
-// A duration governed by a visit word just before it: "visit in 10–14
-// days", "return within 2 weeks", "follow-up in 30 days".
-const VISIT_DURATION_RE = new RegExp(
-  String.raw`\b(?:${VISIT_VERB}|visits?|appointments?|follow[-\s]?ups?|rechecks?|re-?treatments?)\b(?:\s+[a-z’']+){0,2}?\s+(${RELATIVE_DURATION_RE.source})`,
+// A duration governed by a visit word just before it: a visit noun
+// ("visit in 10–14 days", "follow-up in 30 days"), or a visit verb only
+// when the sentence promises OUR return ("we will return within 2
+// weeks") — "Activity may return within 2 weeks" and "You may return
+// indoors after 2 hours" time something else.
+const VISIT_NOUN_DURATION_RE = new RegExp(
+  String.raw`\b(?:visits?|appointments?|follow[-\s]?ups?|rechecks?|re-?treatments?)\b(?:\s+[a-z’']+){0,2}?\s+(${RELATIVE_DURATION_RE.source})`,
+  'gi',
+);
+const VISIT_VERB_DURATION_RE = new RegExp(
+  String.raw`\b${VISIT_VERB}\b(?:\s+[a-z’']+){0,2}?\s+(${RELATIVE_DURATION_RE.source})`,
   'gi',
 );
 
+function attachedDurations(text) {
+  const matches = [...String(text).matchAll(VISIT_NOUN_DURATION_RE)];
+  if (isProviderVisitPromise(text)) matches.push(...String(text).matchAll(VISIT_VERB_DURATION_RE));
+  return matches.map((match) => ({ index: match.index + match[0].length - match[1].length, raw: match[1] }));
+}
+
 function visitDurationSpans(text) {
-  return [...String(text).matchAll(VISIT_DURATION_RE)].map((match) => durationSpan(match[1]));
+  return attachedDurations(text).map(({ raw }) => durationSpan(raw));
 }
 
 function durationSpan(text) {
@@ -521,7 +548,8 @@ const TOKEN_RULES = [
     // visit" does not).
     claimOnly: true,
     find: (text) => regexTokens(RELATIONAL_DATE_RE, text)
-      .filter(({ match }) => !(RELATIONAL_DATE_ANCHOR_RE.test(match[1]) && !isProviderVisitPromise(text))),
+      .filter(({ match, index }) => !(RELATIONAL_DATE_ANCHOR_RE.test(match[1])
+        && !isProviderVisitPromise(`${text.slice(0, index)} ${text.slice(index + match[0].length)}`))),
     problem: ({ raw }) => `ungrounded_relative_date:${lower(raw)}`,
   },
   {
@@ -534,7 +562,7 @@ const TOKEN_RULES = [
     find: (text) => {
       const tokens = regexTokens(RELATIVE_DURATION_RE, text);
       if (isProviderVisitPromise(text)) return tokens;
-      const attached = [...text.matchAll(VISIT_DURATION_RE)].map((m) => m.index + m[0].length - m[1].length);
+      const attached = attachedDurations(text).map(({ index }) => index);
       return tokens.filter(({ index }) => attached.includes(index));
     },
     problem: ({ raw }, expected) => {
@@ -642,6 +670,58 @@ function temporalTokens(sentence, claim) {
   return tokens.sort((a, b) => a.index - b.index);
 }
 
+// The timing a future visit claim states, bound to the clause that makes
+// the claim: a date in a care clause joined to it ("Water the lawn Monday,
+// and we will check the traps at your next visit") times the watering, not
+// the visit. In a promise of our return any timeframe word counts too —
+// "later in the week", "in 10 business days", "soon" all say when.
+const CLAUSE_PREFIX_RE = /^(?:,\s*)?\b(?:and|but|then)\b\s*|^;\s*/i;
+const RETURN_TIMEFRAME_RE = /\b(?:later|soon|shortly|sometime|eventually|days?|weeks?|months?|weekends?|mornings?|afternoons?|evenings?|nights?|tonight|tomorrow|holidays?)\b/gi;
+
+// Visit-anchored preparation timing ("the day before your scheduled
+// visit") times the customer's step, so it never makes a clause a promise of
+// our return or supplies its timeframe words.
+function withoutVisitAnchoredTiming(text) {
+  return text.replace(new RegExp(RELATIONAL_DATE_RE.source, 'gi'), (phrase, anchor) => (
+    RELATIONAL_DATE_ANCHOR_RE.test(anchor) ? ' '.repeat(phrase.length) : phrase));
+}
+
+function claimClauses(text) {
+  const cuts = [0, ...[...text.matchAll(new RegExp(CLAUSE_COORDINATOR_RE, 'gi'))].map((m) => m.index), text.length];
+  const coordinated = coordinatedClauseClaims(text).map(({ match }) => match.index);
+  return cuts.slice(0, -1).map((start, i) => {
+    const end = cuts[i + 1];
+    const raw = text.slice(start, end);
+    const offset = start + (CLAUSE_PREFIX_RE.exec(raw)?.[0].length || 0);
+    const body = text.slice(offset, end);
+    const carried = coordinated.some((index) => index >= start && index < end);
+    const unanchored = withoutVisitAnchoredTiming(body);
+    return {
+      start,
+      end,
+      offset,
+      body: unanchored,
+      claim: carried || isVisitClaim(body),
+      promise: carried || isProviderVisitPromise(unanchored),
+    };
+  });
+}
+
+function visitTimingTokens(sentence) {
+  const text = normalizeTemporalText(sentence);
+  const clauses = claimClauses(text);
+  const clauseAt = (index) => clauses.find((clause) => index >= clause.start && index < clause.end);
+  const tokens = temporalTokens(text, true).filter((token) => clauseAt(token.index)?.claim);
+  const covered = (index) => tokens.some((token) => index >= token.index && index < token.index + token.raw.length);
+  for (const clause of clauses.filter(({ promise }) => promise)) {
+    for (const match of clause.body.matchAll(RETURN_TIMEFRAME_RE)) {
+      const index = clause.offset + match.index;
+      if (!covered(index)) tokens.push({ index, raw: match[0] });
+    }
+  }
+  return { text, clauses, clauseAt, tokens: tokens.sort((a, b) => a.index - b.index) };
+}
+
 function expectedAppointment(facts, groundedCare) {
   const nextVisit = facts?.nextVisit || {};
   const date = new RegExp(`^(?:(${WEEKDAY_NAMES}),?\\s+)?(${MONTH_NAMES})\\s+(\\d{1,2})$`, 'i')
@@ -682,12 +762,16 @@ function nextVisitProblems(text, facts, options = {}) {
   const problems = [];
   for (const sentence of splitSentences(exemptText)) {
     if (describesCompletedVisit(sentence)) continue;
-    const claim = isVisitClaim(sentence);
-    for (const token of temporalTokens(normalizeTemporalText(sentence), claim)) {
-      if (scheduled && claim) {
-        problems.push(`visit_timing_stated:${lower(token.raw)}`);
-        continue;
+    if (scheduled) {
+      const { text, clauseAt, tokens } = visitTimingTokens(sentence);
+      problems.push(...tokens.map((token) => `visit_timing_stated:${lower(token.raw)}`));
+      // tokens outside any claim clause keep their ordinary schedule check
+      for (const token of temporalTokens(text, false).filter(({ index }) => !clauseAt(index)?.claim)) {
+        problems.push(...[token.rule.problem(token, expected)].flat().filter(Boolean));
       }
+      continue;
+    }
+    for (const token of temporalTokens(normalizeTemporalText(sentence), isVisitClaim(sentence))) {
       problems.push(...[token.rule.problem(token, expected)].flat().filter(Boolean));
     }
   }
@@ -705,8 +789,7 @@ function nextVisitProblems(text, facts, options = {}) {
 function withoutTimedVisitClaims(block, nextVisit) {
   if (!nextVisit) return block;
   return splitSentences(block)
-    .filter((sentence) => !isFutureVisitClaim(sentence)
-      || !temporalTokens(normalizeTemporalText(sentence), true).length)
+    .filter((sentence) => !isFutureVisitClaim(sentence) || !visitTimingTokens(sentence).tokens.length)
     .join(' ');
 }
 

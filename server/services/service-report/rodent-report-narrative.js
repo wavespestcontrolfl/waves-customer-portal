@@ -444,7 +444,11 @@ function collectNumbers(set, value) {
 
 function groundedNumberSet(facts) {
   const set = new Set();
-  collectNumbers(set, facts);
+  // The next visit's date and window never ground a number: the model is
+  // never shown them and may never state them (owner ruling 2026-09-28), so
+  // "3" and "5" from a 3–5 PM window must not authorize "5 improvements".
+  const { nextVisit: _hiddenNextVisit, ...rest } = facts;
+  collectNumbers(set, rest);
   return set;
 }
 
@@ -1335,6 +1339,9 @@ const SCHEDULED_VISIT_DENIAL_RE = new RegExp([
   String.raw`\bwe\s+(?:won[’']?t|will\s+not)\s+(?:need\s+to\s+|have\s+to\s+)?(?:return|come\s+back|be\s+back)\b`,
   String.raw`\b(?:follow[-\s]?ups?|another\s+visit|return\s+visits?)\s+(?:is\s+|are\s+)?(?:not|n[’']?t)\s+(?:needed|necessary|required)\b`,
   String.raw`\bno\s+need\s+(?:for\s+(?:a\s+|another\s+)?(?:follow[-\s]?up|visit|return)|to\s+(?:come\s+back|return))\b`,
+  String.raw`\bwe\s+(?:do\s+not|don[’']?t|have\s+no|had\s+no)\s+(?:plans?|intention)\s+(?:to|of)\s+(?:return\w*|com\w*\s+back|visit\w*)\b`,
+  String.raw`\bno\s+(?:returns?|return\s+trips?|follow[-\s]?ups?|further\s+(?:visits?|service|treatments?))\s+(?:is|are|was|were|will\s+be)\s+(?:planned|scheduled|needed|necessary|required)\b`,
+  String.raw`\b(?:this|today(?:[’']s)?(?:\s+(?:visit|service|treatment))?)\s+(?:was|is)\s+(?:our|the|your)\s+(?:final|last)\s+(?:visit|service|treatment|appointment|stop)\b`,
 ].join('|'), 'i');
 
 function deniedScheduledVisit(text, facts) {
