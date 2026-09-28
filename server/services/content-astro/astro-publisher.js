@@ -47,19 +47,26 @@ const competitorLinks = require('../content/competitor-links');
 const ASTRO_BLOG_DIR = 'src/content/blog';
 
 // Owner ruling 2026-09-28: "I do not want to link to a competitor's website,
-// whatsoever." The last step before EVERY blog commit (publishAstro,
+// whatsoever." The last step before EVERY BLOG commit (publishAstro,
 // publishOrUpdatePage, publishRefresh, publishMetadataRewrite): each link to
 // a competitor host becomes its anchor text, in body and frontmatter —
 // deterministic, no LLM. A competitor URL that somehow survives refuses the
 // publish. `validate` is the frontmatter check the lane already ran (blog
 // schema for blog targets): unlinking a frontmatter URL shortens the string,
 // so the transformed frontmatter is re-validated before it is committed.
-function competitorFreeMarkdown(frontmatter, body, { validate = null } = {}) {
-  const hosts = competitorLinks.competitorHosts();
-  const b = competitorLinks.unlinkCompetitorLinks(body, hosts);
-  const f = competitorLinks.unlinkCompetitorLinksDeep(frontmatter, hosts);
+// `skipUnlink` is for publishRefresh/publishMetadataRewrite's non-blog
+// (service/location) targets: those sit outside the policy AND outside the
+// blog schema `validate` checks against, so the whole pass — unlink AND
+// the leftover-survivor throw below — is skipped; an existing unrelated
+// citation on such a page must survive a metadata-only PR untouched, never
+// trip the same "competitor link survived" refusal a blog draft would.
+function competitorFreeMarkdown(frontmatter, body, { validate = null, skipUnlink = false } = {}) {
+  const hosts = skipUnlink ? null : competitorLinks.competitorHosts();
+  const b = skipUnlink ? { text: body, unlinked: [] } : competitorLinks.unlinkCompetitorLinks(body, hosts);
+  const f = skipUnlink ? { value: frontmatter, unlinked: [] } : competitorLinks.unlinkCompetitorLinksDeep(frontmatter, hosts);
   if (f.unlinked.length && validate) validate(f.value);
   const markdown = fm.stringify(f.value, b.text);
+  if (skipUnlink) return { markdown, unlinked: [] };
   const left = competitorLinks.competitorLinkUrls(markdown, hosts);
   if (left.length) {
     const err = new Error(`competitor link "${left[0]}" survived unlinking — publish refused (owner ruling: no links to competitor sites)`);
@@ -3426,6 +3433,12 @@ async function publishOrUpdatePage(draft, brief = {}) {
   assertValidBlogFrontmatter(frontmatter);
 
   const { markdown, unlinked: competitorUnlinked } = competitorFreeMarkdown(frontmatter, `${finalBody}\n`, { validate: assertValidBlogFrontmatter });
+  // emit_draft already unlinked competitor links at capture (brief-driven-
+  // tools.js) — this commit-time pass on the captured draft normally finds
+  // nothing left, so competitorUnlinked alone would under-report what
+  // actually changed. Merge in the capture-time removals so the PR notes
+  // show the whole story.
+  const capturedCompetitorUnlinked = Array.isArray(draft.competitor_links_unlinked) ? draft.competitor_links_unlinked : [];
   const editorialFiles = await editorialEvidence.filesForDocument({ document: markdown, path: filePath, brief });
 
   await gh.createBranch(branch);
@@ -3473,7 +3486,7 @@ async function publishOrUpdatePage(draft, brief = {}) {
   const pr = await gh.createPr({
     head: branch,
     title: `Blog: ${frontmatter.title}`.slice(0, 72),
-    body: withCompetitorUnlinkNote(buildDraftPrBody({ frontmatter, slug, branch, content: finalBody, brief, images: { hero, body: bodyImages.images } }), competitorUnlinked),
+    body: withCompetitorUnlinkNote(buildDraftPrBody({ frontmatter, slug, branch, content: finalBody, brief, images: { hero, body: bodyImages.images } }), [...capturedCompetitorUnlinked, ...competitorUnlinked]),
   });
   await requestCodexReview({
     pr,
@@ -3606,7 +3619,7 @@ async function publishMetadataRewrite(draft, brief = {}) {
     assertValidBlogFrontmatter(nextFrontmatter);
   }
 
-  const { markdown, unlinked: competitorUnlinked } = competitorFreeMarkdown(nextFrontmatter, parsed.content || '', { validate: isBlogTarget(filePath) ? assertValidBlogFrontmatter : null });
+  const { markdown, unlinked: competitorUnlinked } = competitorFreeMarkdown(nextFrontmatter, parsed.content || '', { validate: assertValidBlogFrontmatter, skipUnlink: !isBlogTarget(filePath) });
   if (markdown === existing.content) {
     return {
       url: canonicalForExistingPage(targetUrl, currentFrontmatter, filePath),
@@ -3905,7 +3918,7 @@ async function publishRefresh(draft, brief = {}) {
     }
   }
   const finalBody = refreshImages.body;
-  const { markdown, unlinked: competitorUnlinked } = competitorFreeMarkdown(nextFrontmatter, `${finalBody}\n`, { validate: isBlogTarget(filePath) ? assertValidBlogFrontmatter : null });
+  const { markdown, unlinked: competitorUnlinked } = competitorFreeMarkdown(nextFrontmatter, `${finalBody}\n`, { validate: assertValidBlogFrontmatter, skipUnlink: !isBlogTarget(filePath) });
   const editorialFiles = await editorialEvidence.filesForDocument({ document: markdown, path: filePath, brief });
 
   const branchSlug = slugify(filePath.replace(/^src\/content\//, '').replace(/\.mdx?$/, '').replace(/\//g, ' '));

@@ -97,6 +97,49 @@ describe('unlinkCompetitorLinks', () => {
     expect(un('![Orkin logo](https://www.orkin.com/logo.png)').text).toBe('Orkin logo');
   });
 
+  test('CommonMark backslash-escaped link destinations are decoded before host matching (Codex r1 P1)', () => {
+    // [Orkin](https://orkin\.com/plans) renders as a link to orkin.com — the
+    // backslash never reaches the browser and must not defeat matching.
+    const r = un('Per [Orkin](https://orkin\\.com/plans) as of June 2026.');
+    expect(r.text).toBe('Per Orkin as of June 2026.');
+    expect(r.unlinked).toHaveLength(1);
+    // The leftover scan (competitorLinkUrls) must catch a surviving
+    // escaped destination the same way, or the publisher's post-unlink
+    // survivor check would miss it.
+    expect(competitorLinkUrls('raw https://orkin\\.com/x')).toEqual(['https://orkin\\.com/x']);
+  });
+
+  test('a bare protocol-relative URL in prose is reduced to the plain domain (Codex r1 P2)', () => {
+    expect(un('See //orkin.com/plans for details.').text).toBe('See orkin.com for details.');
+    expect(un('a path like //not-a-host is untouched').text).toBe('a path like //not-a-host is untouched');
+  });
+
+  test('MDX string-expression link props ({"…"} / {\'…\'}) are recognized structurally (Codex r1 P2)', () => {
+    const r = un('<a href={"https://www.orkin.com/x"}>Orkin</a> and <InlineCTA ctaHref={\'https://orkin.com/y\'} caption="ok" />');
+    expect(r.text).toBe('Orkin and <InlineCTA caption="ok" />');
+    expect(r.unlinked.map((u) => u.url)).toEqual(['https://www.orkin.com/x', 'https://orkin.com/y']);
+  });
+
+  test('a duplicate reference label resolves to its FIRST definition, per CommonMark (Codex r1 P2)', () => {
+    // The rendered link legitimately targets EPA (the first definition) —
+    // the later competitor redefinition must not steal resolution, though
+    // its own raw URL is still stripped so it never survives as text.
+    const text = '[study][src] backs this up.\n\n[src]: https://edis.ifas.ufl.edu/study\n[src]: https://www.orkin.com/study\n';
+    const r = un(text);
+    expect(r.text).toContain('[study][src] backs this up.');
+    expect(r.text).toContain('[src]: https://edis.ifas.ufl.edu/study');
+    expect(r.text).not.toMatch(/orkin\.com/);
+    expect(competitorLinkUrls(r.text)).toEqual([]);
+
+    // The reverse: an earlier competitor definition stays authoritative —
+    // a later non-competitor "override" never resolves the reference.
+    const reversed = '[study][src] backs this up.\n\n[src]: https://www.orkin.com/study\n[src]: https://edis.ifas.ufl.edu/study\n';
+    const r2 = un(reversed);
+    expect(r2.text).toContain('backs this up.');
+    expect(r2.text).not.toMatch(/\[study\]\[src\]/);
+    expect(r2.text).not.toMatch(/orkin\.com/);
+  });
+
   test('links to non-competitor sites are untouched (UF/IFAS, BBB, EPA, ConsumerAffairs, archives, our own pages)', () => {
     const text = [
       'Per [UF/IFAS](https://edis.ifas.ufl.edu/IG098) and [BBB](https://www.bbb.org/us/fl/x).',

@@ -140,4 +140,19 @@ describe('emit_draft strips at capture', () => {
     expect(res.ok).toBe(true);
     expect(getDraft(SESSION).citation_residue_stripped).toBe(false);
   });
+
+  it('emit_metadata_only unlinks competitor links in title/description at capture too (Codex r1 P2)', async () => {
+    const res = await executeBriefTool('emit_metadata_only', {
+      title: 'Compare us to Orkin',
+      meta_description: 'See https://www.orkin.com/plans for their pricing before you book with Waves.',
+    }, { sessionId: SESSION });
+    expect(res.ok).toBe(true);
+    const draft = getDraft(SESSION);
+    expect(draft.title).toBe('Compare us to Orkin');
+    expect(draft.meta_description).toBe('See orkin.com for their pricing before you book with Waves.');
+    expect(draft.competitor_links_unlinked.map((u) => u.url)).toEqual(['https://www.orkin.com/plans']);
+    // The reported char counts reflect the UNLINKED text — what actually
+    // gets captured — not the raw input the agent proposed.
+    expect(res.meta_chars).toBe(draft.meta_description.length);
+  });
 });

@@ -485,6 +485,31 @@ describe('autonomous-runner._snapshotInterceptSources', () => {
     const persisted = JSON.parse(update.mock.calls[0][0].signal_metadata);
     expect(persisted.intercept_snapshots).toEqual(snapshots);
   });
+
+  test('a competitor URL already unlinked out of the body at capture is still fed into the snapshot sources (Codex r1 P2)', async () => {
+    // Owner ruling 2026-09-28 unlinks a competitor URL out of the draft body
+    // before this ever runs, so a manifest source described only in prose
+    // ("Orkin's terms page") that the agent cited as a link would otherwise
+    // vanish from both the sources list and the archive audit — it is never
+    // re-added to the post, only archived as evidence.
+    jest.spyOn(seeder, 'snapshotSources').mockResolvedValueOnce({ attempted: 1, ok: 1, snapshots: [] });
+    const update = jest.fn(() => Promise.resolve(1));
+    const where = jest.fn(() => ({ update }));
+    db.mockImplementation(() => ({ where }));
+
+    const opp = {
+      id: 'opp-1',
+      bucket: 'operator_intercept',
+      signal_metadata: { intercept_brief: { sources: [] } },
+    };
+    const draft = {
+      body: 'Per Orkin\'s terms, pricing is quote-based.',
+      competitor_links_unlinked: [{ url: 'https://www.orkin.com/terms', text: "Orkin's terms" }],
+    };
+    await runner._snapshotInterceptSources(opp, draft, {});
+
+    expect(seeder.snapshotSources).toHaveBeenCalledWith(['https://www.orkin.com/terms']);
+  });
 });
 
 // ── manifest source contract: URLs (snapshot targets) vs directives ─

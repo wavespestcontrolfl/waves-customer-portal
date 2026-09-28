@@ -606,6 +606,34 @@ describe('blog Astro frontmatter validation', () => {
     expect(gh.createPr.mock.calls[0][0].body).toMatch(/Competitor links removed[\s\S]*turnerpest\.com\/ants/);
   });
 
+  test('publishOrUpdatePage lists CAPTURE-TIME competitor removals in the PR body too (Codex r1 P2)', async () => {
+    // The normal autonomous path: emit_draft (brief-driven-tools.js) already
+    // unlinked competitor links before this draft was ever persisted, so
+    // the commit-time pass here finds nothing left to unlink — without
+    // reading draft.competitor_links_unlinked the PR would silently omit
+    // the "Competitor links removed" section entirely.
+    jest.clearAllMocks();
+    gh.createBranch.mockResolvedValue({});
+    gh.getFile.mockResolvedValue(null);
+    gh.putFile.mockResolvedValue({ commit: { sha: 'file-sha' } });
+    gh.createPr.mockResolvedValue({ number: 125, html_url: 'https://github.com/wavespestcontrolfl/waves-astro/pull/125' });
+    gh.createIssueComment.mockResolvedValue({});
+    mockHeroGeneration();
+
+    await AstroPublisher.publishOrUpdatePage(
+      {
+        type: 'draft',
+        frontmatter: validFrontmatter({ slug: '/ant-trails-bradenton/' }),
+        body: 'Waves Pest Control guidance. Turner lists ant tips; so does [UF/IFAS](https://edis.ifas.ufl.edu/x).',
+        competitor_links_unlinked: [{ url: 'https://www.turnerpest.com/ants', text: 'Turner' }],
+      },
+      { action_type: 'new_supporting_blog' }
+    );
+    const written = gh.putFile.mock.calls[0][0].content;
+    expect(written).toContain('Turner lists ant tips');
+    expect(gh.createPr.mock.calls[0][0].body).toMatch(/Competitor links removed[\s\S]*turnerpest\.com\/ants/);
+  });
+
   test('a spoke-routed draft with an OFF-SITE emitted canonical parks — spoke routing must not erase the canonical before the guard (Codex r5)', async () => {
     jest.clearAllMocks();
     gh.createBranch.mockResolvedValue({});
@@ -1287,7 +1315,44 @@ describe('every blog commit serializes through the competitor unlink (owner ruli
 });
 
 describe('publishMetadataRewrite unlinks competitor links already on the page (owner ruling 2026-09-28)', () => {
-  test('the commit carries the new meta and the body with competitor links as plain text', async () => {
+  test('a BLOG target: the commit carries the new meta and the body with competitor links as plain text', async () => {
+    jest.clearAllMocks();
+    gh.createBranch.mockResolvedValue({});
+    const fmModule = require('../services/content-astro/frontmatter');
+    gh.getFile.mockResolvedValue({
+      sha: 'existing-sha',
+      content: fmModule.stringify(
+        validFrontmatter({
+          slug: '/lakewood-ranch-pest-guide/',
+          title: 'Old Lakewood Ranch Pest Guide Title',
+          meta_description: 'An old meta description for the Lakewood Ranch pest guide that satisfies the blog schema length bound here.',
+          canonical: 'https://www.wavespestcontrol.com/lakewood-ranch-pest-guide/',
+        }),
+        'Compare [Orkin](https://www.orkin.com/) before you sign.',
+      ),
+    });
+    gh.putFile.mockResolvedValue({ commit: { sha: 'metadata-sha' } });
+    gh.createPr.mockResolvedValue({ number: 56, html_url: 'https://github.com/x/y/pull/56', head: { sha: 'h' } });
+    gh.createIssueComment.mockResolvedValue({});
+
+    await AstroPublisher.publishMetadataRewrite({
+      type: 'metadata',
+      title: 'Pest Control in Lakewood Ranch, FL | Waves',
+      meta_description: 'Need pest control in Lakewood Ranch? Waves helps identify, treat, and prevent common Southwest Florida pest problems.',
+    }, {
+      action_type: 'rewrite_title_meta',
+      target_url: 'https://www.wavespestcontrol.com/blog/lakewood-ranch-pest-guide/',
+      target_keyword: 'pest control lakewood ranch fl',
+      city: 'Lakewood Ranch',
+      service: 'pest',
+    });
+    const written = gh.putFile.mock.calls[0][0].content;
+    expect(written).toContain('Compare Orkin before you sign.');
+    expect(written).not.toMatch(/orkin\.com/);
+    expect(gh.createPr.mock.calls[0][0].body).toMatch(/Competitor links removed/);
+  });
+
+  test('a SERVICE/LOCATION target: an existing competitor link is left untouched — the policy is scoped to blog posts (Codex r1 P2)', async () => {
     jest.clearAllMocks();
     gh.createBranch.mockResolvedValue({});
     gh.getFile.mockResolvedValue({
@@ -1303,7 +1368,7 @@ describe('publishMetadataRewrite unlinks competitor links already on the page (o
       ].join('\n'),
     });
     gh.putFile.mockResolvedValue({ commit: { sha: 'metadata-sha' } });
-    gh.createPr.mockResolvedValue({ number: 56, html_url: 'https://github.com/x/y/pull/56', head: { sha: 'h' } });
+    gh.createPr.mockResolvedValue({ number: 57, html_url: 'https://github.com/x/y/pull/57', head: { sha: 'h' } });
     gh.createIssueComment.mockResolvedValue({});
 
     await AstroPublisher.publishMetadataRewrite({
@@ -1318,9 +1383,8 @@ describe('publishMetadataRewrite unlinks competitor links already on the page (o
       service: 'pest',
     });
     const written = gh.putFile.mock.calls[0][0].content;
-    expect(written).toContain('Compare Orkin before you sign.');
-    expect(written).not.toMatch(/orkin\.com/);
-    expect(gh.createPr.mock.calls[0][0].body).toMatch(/Competitor links removed/);
+    expect(written).toContain('Compare [Orkin](https://www.orkin.com/) before you sign.');
+    expect(gh.createPr.mock.calls[0][0].body).not.toMatch(/Competitor links removed/);
   });
 });
 

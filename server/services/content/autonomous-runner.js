@@ -2062,9 +2062,21 @@ class AutonomousRunner {
       const citedUrls = typeof seeder.externalUrlsFromMarkdown === 'function'
         ? seeder.externalUrlsFromMarkdown(draft?.body || '')
         : [];
+      // Owner ruling 2026-09-28 unlinks a competitor URL out of the body at
+      // draft capture (brief-driven-tools.js emit_draft) — before this body
+      // sweep ever runs — so a manifest source described only in prose
+      // ("Orkin's terms page") that the agent cited as a competitor link
+      // would otherwise vanish from both the sources list AND the archive
+      // audit. Its removed URL is still stamped on the draft; feed it in too
+      // (a Wayback snapshot is archival evidence, not a published link — it
+      // never re-adds the link to the post).
+      const unlinkedCompetitorUrls = Array.isArray(draft?.competitor_links_unlinked)
+        ? draft.competitor_links_unlinked.map((u) => u?.url).filter(Boolean)
+        : [];
       const sources = Array.from(new Set([
         ...(Array.isArray(manifestSources) ? manifestSources : []),
         ...citedUrls,
+        ...unlinkedCompetitorUrls,
       ]));
       if (sources.length === 0) return;
 

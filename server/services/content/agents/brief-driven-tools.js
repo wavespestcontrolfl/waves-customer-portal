@@ -658,8 +658,30 @@ async function executeBriefTool(toolName, input, { sessionId } = {}) {
 
     case 'emit_metadata_only': {
       if (!sessionId) return { error: 'session context missing — dispatcher must pass sessionId' };
-      const { title, meta_description, notes_for_reviewer } = input || {};
-      if (!title || !meta_description) return { error: 'title + meta_description required' };
+      const { title: rawTitle, meta_description: rawMetaDescription, notes_for_reviewer } = input || {};
+      if (!rawTitle || !rawMetaDescription) return { error: 'title + meta_description required' };
+      // Owner ruling 2026-09-28: never link a competitor's own site — mirrors
+      // emit_draft's capture-time unlink above. Without this, a competitor
+      // URL in the title/description trips the authoritative metadata
+      // guardrail (which runs the SAME unlink-then-check policy) before
+      // publishMetadataRewrite ever gets a chance to unlink it — that lane
+      // only unlinks blog targets at commit, and a metadata rewrite can also
+      // target a non-blog (service/location) page.
+      let title = rawTitle;
+      let meta_description = rawMetaDescription;
+      const metaCompetitorLinksUnlinked = [];
+      const metaCompetitorLinks = getCompetitorLinks();
+      if (metaCompetitorLinks) {
+        const hosts = metaCompetitorLinks.competitorHosts();
+        const t = metaCompetitorLinks.unlinkCompetitorLinks(title, hosts);
+        const d = metaCompetitorLinks.unlinkCompetitorLinks(meta_description, hosts);
+        title = t.text;
+        meta_description = d.text;
+        metaCompetitorLinksUnlinked.push(...t.unlinked, ...d.unlinked);
+        if (metaCompetitorLinksUnlinked.length) {
+          logger.info(`[brief-driven-tools] emit_metadata_only(${sessionId}): unlinked ${metaCompetitorLinksUnlinked.length} competitor link(s) (owner ruling: no links to competitor sites)`);
+        }
+      }
       // W1 in-loop self-lint, metadata edition: meta text ships on every
       // customer surface, so the publishable-text guardrails (compliance,
       // price, product claims, prevention promises, tenure) run at capture
@@ -739,6 +761,7 @@ async function executeBriefTool(toolName, input, { sessionId } = {}) {
         title,
         meta_description,
         notes_for_reviewer: notes_for_reviewer || null,
+        competitor_links_unlinked: metaCompetitorLinksUnlinked,
         // Same audit trail full drafts carry (null when lint not armed).
         self_lint: metaSelfLintAudit,
         captured_at: new Date(),
