@@ -4847,6 +4847,15 @@ function nextDay(dateStr) {
   return d.toISOString().slice(0, 10);
 }
 
+// the bank change exactly as displayed — the server applies/dismisses only
+// if the row still carries this version
+function shownBankChange(r) {
+  return {
+    plaidModified: r.suggestion?.plaidModified || null,
+    plaidRemoved: r.suggestion?.plaidRemoved || null,
+  };
+}
+
 function syncSummary(sync) {
   if (!sync) return "";
   if (sync.error) return `Sync failed: ${sync.error}`;
@@ -6024,7 +6033,7 @@ function BankImportTab() {
                                   act(
                                     "bank-change",
                                     `/admin/tax/bank-import/plaid/rows/${r.id}/bank-change`,
-                                    { action: "apply" },
+                                    { action: "apply", expected: shownBankChange(r) },
                                   )
                                 }
                               >
@@ -6039,7 +6048,7 @@ function BankImportTab() {
                               act(
                                 "bank-change",
                                 `/admin/tax/bank-import/plaid/rows/${r.id}/bank-change`,
-                                { action: "dismiss" },
+                                { action: "dismiss", expected: shownBankChange(r) },
                               )
                             }
                           >

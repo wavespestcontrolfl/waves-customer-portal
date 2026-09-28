@@ -485,7 +485,7 @@ describe("Finance workflow preservation", () => {
     fireEvent.click(apply[0]);
     await waitFor(() =>
       expect(requests.find((r) => r.key === "POST /api/admin/tax/bank-import/plaid/rows/row-open/bank-change")?.body)
-        .toEqual({ action: "apply" }));
+        .toEqual({ action: "apply", expected: { plaidModified: { amount: 9, direction: "debit", txn_date: "2026-09-07", description: "FIXED 2" }, plaidRemoved: null } }));
   });
   it("keeps the bank-import gate closed on a failed status read", async () => {
     overrides.set("GET /api/admin/tax/bank-import/status", () =>

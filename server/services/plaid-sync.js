@@ -110,15 +110,19 @@ function plaidRowHash(transactionId) {
 // Plaid → staging row, or { skip: reason }. Plaid's sign convention: a
 // POSITIVE amount is money leaving the account (purchase / debit) for both
 // depository and credit accounts; negative is money coming in.
-function mapTransaction(txn, account) {
+// `correction`: the transaction is already staged, so the NEW-row gates
+// (account enabled, start-date cutoff) don't apply — a bank correction to a
+// row we hold must never be dropped because it moved the date earlier or
+// the feed was since switched off. Label/type stay the staged row's own.
+function mapTransaction(txn, account, { correction = false } = {}) {
   if (!txn || !txn.transaction_id) return { skip: 'no_id' };
-  if (!account) return { skip: 'unknown_account' };
-  if (!account.enabled) return { skip: 'account_disabled' };
+  if (!account && !correction) return { skip: 'unknown_account' };
+  if (!correction && !account.enabled) return { skip: 'account_disabled' };
   if (txn.pending) return { skip: 'pending' };
   if (txn.iso_currency_code && txn.iso_currency_code !== 'USD') return { skip: 'currency' };
   const date = txn.date;
   if (!isDateStr(date)) return { skip: 'bad_date' };
-  const syncFrom = typeof account.sync_from === 'string' ? account.sync_from : toDateOnly(account.sync_from);
+  const syncFrom = correction ? null : (typeof account.sync_from === 'string' ? account.sync_from : toDateOnly(account.sync_from));
   if (syncFrom && date < syncFrom) return { skip: 'before_sync_from' };
   const n = Number(txn.amount);
   if (!Number.isFinite(n)) return { skip: 'bad_amount' };
@@ -128,8 +132,8 @@ function mapTransaction(txn, account) {
   const description = String(txn.name || txn.merchant_name || 'Plaid transaction').replace(/\s+/g, ' ').trim().slice(0, 500) || 'Plaid transaction';
   return {
     row: {
-      account_label: account.account_label,
-      account_type: account.account_type,
+      account_label: account ? account.account_label : null,
+      account_type: account ? account.account_type : null,
       txn_date: date,
       description,
       amount,
@@ -468,13 +472,14 @@ async function applyChanges(trx, accountsById, changes) {
   }
 
   for (const txn of changes.modified) {
-    const m = mapTransaction(txn, accountsById.get(txn.account_id));
-    if (m.skip) { skip(m.skip); continue; }
-    const r = m.row;
+    if (!txn || !txn.transaction_id) { skip('no_id'); continue; }
     // Row-locked: the matcher or an operator claiming this row between the
     // read and the write would otherwise make a status-conditional update
     // miss, and the correction would be lost as the cursor moves past it.
-    const existing = await trx('bank_transactions').where({ plaid_transaction_id: r.plaid_transaction_id }).forUpdate().first('id', 'status');
+    const existing = await trx('bank_transactions').where({ plaid_transaction_id: txn.transaction_id }).forUpdate().first('id', 'status');
+    const m = mapTransaction(txn, accountsById.get(txn.account_id), { correction: !!existing });
+    if (m.skip) { skip(m.skip); continue; }
+    const r = m.row;
     if (!existing) { toInsert.push(r); continue; }
     if (existing.status === 'unmatched') {
       // the bank's newest values win, and any correction still parked from

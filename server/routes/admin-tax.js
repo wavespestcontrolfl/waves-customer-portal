@@ -1970,33 +1970,49 @@ router.post('/bank-import/plaid/items/:plaidItemId/sync', async (req, res, next)
 // (unlink it first), and only for the exact flag the operator saw.
 router.post('/bank-import/plaid/rows/:plaidRowId/bank-change', async (req, res, next) => {
   try {
-    const { action } = req.body || {};
+    const { action, expected } = req.body || {};
     if (!['apply', 'dismiss'].includes(action)) return res.status(400).json({ error: "action must be 'apply' or 'dismiss'" });
+    // `expected` = the flags exactly as the operator saw them. Both actions
+    // are conditioned on it, so a correction or withdrawal that arrived
+    // after the page loaded is never applied or erased unseen.
+    if (!expected || typeof expected !== 'object' || Array.isArray(expected)) {
+      return res.status(400).json({ error: 'expected (the bank change shown) is required' });
+    }
+    const seenModified = expected.plaidModified ?? null;
+    const seenRemoved = expected.plaidRemoved ?? null;
+    if (!seenModified && !seenRemoved) return res.status(400).json({ error: 'expected (the bank change shown) is required' });
+    const sameVersion = (q) => q.whereRaw(
+      "coalesce(suggestion->'plaidModified', 'null'::jsonb) = ?::jsonb AND coalesce(suggestion->'plaidRemoved', 'null'::jsonb) = ?::jsonb",
+      [JSON.stringify(seenModified), JSON.stringify(seenRemoved)],
+    );
     const row = await db('bank_transactions').where({ id: req.params.plaidRowId, source: 'plaid' }).first('id', 'status', 'suggestion');
-    const flags = row && row.suggestion ? { modified: row.suggestion.plaidModified, removed: row.suggestion.plaidRemoved } : {};
-    if (!row || (!flags.modified && !flags.removed)) return res.status(404).json({ error: 'no bank change on this row' });
+    if (!row || (!row.suggestion?.plaidModified && !row.suggestion?.plaidRemoved)) {
+      return res.status(404).json({ error: 'no bank change on this row' });
+    }
+    const stale = () => res.status(409).json({ error: 'the bank changed this row again — reload and review the latest change' });
     if (action === 'dismiss') {
-      await db('bank_transactions').where({ id: row.id }).update({
+      const changed = await sameVersion(db('bank_transactions').where({ id: row.id })).update({
         suggestion: bankImport.suggestionMerge({}, ['plaidModified', 'plaidRemoved']),
         updated_at: new Date(),
       });
-      return res.json({ success: true });
+      return changed ? res.json({ success: true }) : stale();
     }
-    if (!flags.modified) return res.status(409).json({ error: 'the bank withdrew this transaction — dismiss it, or unlink and ignore the row' });
+    if (seenRemoved || !seenModified) return res.status(409).json({ error: 'the bank withdrew this transaction — dismiss it, or unlink and ignore the row' });
     if (row.status !== 'unmatched') return res.status(409).json({ error: 'unlink this row before applying the bank\'s correction' });
-    const m = flags.modified;
-    const changed = await db('bank_transactions')
-      .where({ id: row.id, status: 'unmatched' })
-      .whereRaw("suggestion->'plaidModified' = ?::jsonb", [JSON.stringify(m)])
-      .update({
-        txn_date: m.txn_date,
-        amount: m.amount,
-        direction: m.direction,
-        description: m.description,
-        suggestion: bankImport.suggestionMerge({}, ['plaidModified']),
-        updated_at: new Date(),
-      });
-    if (!changed) return res.status(409).json({ error: 'this row changed — reload and try again' });
+    const m = seenModified;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(m.txn_date)) || !(Number(m.amount) > 0)
+      || !['debit', 'credit'].includes(m.direction) || typeof m.description !== 'string') {
+      return res.status(400).json({ error: 'expected correction is malformed' });
+    }
+    const changed = await sameVersion(db('bank_transactions').where({ id: row.id, status: 'unmatched' })).update({
+      txn_date: m.txn_date,
+      amount: m.amount,
+      direction: m.direction,
+      description: m.description.slice(0, 500),
+      suggestion: bankImport.suggestionMerge({}, ['plaidModified']),
+      updated_at: new Date(),
+    });
+    if (!changed) return stale();
     res.json({ success: true });
   } catch (err) { plaidRouteError(res, next, err); }
 });
