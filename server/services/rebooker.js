@@ -1442,6 +1442,11 @@ class SmartRebooker {
         serviceId,
         date: newDateStr,
         technicianId: keptTechId,
+        // The row's NEW window as a change, not only an evaluation option:
+        // loadArrivalRouteContext sets insertTarget (try every position)
+        // from changes.window_start on a same-day same-tech move; without it
+        // the stop is evaluated at its old route_order (Codex r3 P1, #5267).
+        changes: { window_start: updates.window_start, window_end: occupancyGateEnd },
         windowStart: updates.window_start,
         windowEnd: occupancyGateEnd,
         durationMinutes: service.estimated_duration_minutes || undefined,

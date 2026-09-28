@@ -282,6 +282,10 @@ describe('rescheduleOnce — mid-route insertion certification (options.capacity
     expect(result.success).toBe(true);
     expect(prepareArrivalCapacity).toHaveBeenCalledWith(expect.objectContaining({
       serviceId: 'svc-1', date: BASE, technicianId: TECH, windowStart: '13:00', windowEnd: '15:00',
+      // loadArrivalRouteContext only tries every insertion position on a
+      // same-day same-tech move when the new window arrives as a CHANGE
+      // (Codex r3 P1) — the evaluation option alone keeps the old position.
+      changes: expect.objectContaining({ window_start: '13:00' }),
     }));
     expect(verifyArrivalCapacity).toHaveBeenCalled();
     expect(persistArrivalOrder).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ feasible: true }), 'svc-1');
