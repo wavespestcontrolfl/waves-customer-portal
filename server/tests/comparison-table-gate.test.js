@@ -2829,3 +2829,63 @@ describe('operator authorization: detection-only unknowns + feature-flag exempti
     expect(r.requiresHumanReview).toBe(true);
   });
 });
+
+// Owner rulings 2026-09-27 (D2) + 2026-09-28: the verdict carries every
+// competitor it detected (namedCompetitorListVerdict holds unattended blog
+// publishing to the owner list), and COMPARISON_UNVERIFIED_NEGATIVE_CLAIM
+// flags the one fact-rule shape nothing else caught — an unconfirmed
+// "does not offer" / "no guarantee" about a named competitor.
+describe('owner competitor list + fact rule', () => {
+  const OPTS = { namedCompetitorEnabled: true, operatorBriefText: 'Orkin, Terminix, Massey and Truly Nolen alternatives' };
+  const factRule = (body) => gate.evaluate({ body, title: 'Pest control alternatives in Sarasota' }, OPTS)
+    .findings.filter((f) => f.code === 'COMPARISON_UNVERIFIED_NEGATIVE_CLAIM');
+
+  test.each([
+    'Orkin does not offer a termite bond in Sarasota.',
+    "Orkin doesn't offer same-week scheduling.",
+    'Terminix has no guarantee on mosquito service.',
+    "Orkin's plan comes with no written warranty.",
+    'Orkin offers quarterly visits, but it does not offer a termite bond.',
+    'Massey offers quarterly visits and does not include lawn care.',
+  ])('flags an unverified negative claim about a named competitor: %s', (sentence) => {
+    const found = factRule(`Some intro prose. ${sentence} Closing prose.`);
+    expect(found).toHaveLength(1);
+    expect(found[0].severity).toBe('P2');
+  });
+
+  test.each([
+    'Whether Orkin offers a termite bond in Sarasota is not verified.',
+    'Unlike Orkin, Waves does not offer long contracts.',
+    'Our plan does not include a sign-up fee, and Orkin publishes its own terms.',
+    'Whether you hire Orkin or a local company, there is no guarantee one visit clears ants.',
+    'Orkin offers recurring residential plans across the US.',
+    'Most sprays do not offer lasting control.',
+  ])('leaves neutral, Waves-subject, and competitor-free sentences alone: %s', (sentence) => {
+    expect(factRule(`Some intro prose. ${sentence} Closing prose.`)).toHaveLength(0);
+  });
+
+  test('the finding never fails the gate on its own — it only steers the unattended lane', () => {
+    const r = gate.evaluate({ body: 'Orkin does not offer a termite bond.', title: 'Orkin alternatives' }, OPTS);
+    expect(r.pass).toBe(true);
+    expect(gate.namedCompetitorListVerdict(r)).toMatchObject({ ok: false, reason: 'named_competitor_fact_rule' });
+  });
+
+  test('namedCompetitors lists every detected name; the verdict clears only the owner list', () => {
+    const approved = gate.evaluate({ body: 'Orkin and Massey both offer recurring residential plans.', title: 'x' }, OPTS);
+    expect(approved.namedCompetitors).toEqual(['Massey Services', 'Orkin']);
+    expect(gate.namedCompetitorListVerdict(approved)).toEqual({ ok: true, approved: ['Massey Services', 'Orkin'] });
+
+    const offList = gate.evaluate({ body: 'Orkin and Truly Nolen both offer recurring residential plans.', title: 'x' }, OPTS);
+    expect(gate.namedCompetitorListVerdict(offList)).toMatchObject({ ok: false, reason: 'named_competitor_off_list', offList: ['Truly Nolen'] });
+
+    // A name only a link destination carries still counts.
+    const linked = gate.evaluate({ body: 'Compare plans on [their site](https://www.trulynolen.com/plans).', title: 'x' }, OPTS);
+    expect(linked.namedCompetitors).toContain('Truly Nolen');
+  });
+
+  test('a verdict without recorded names fails closed', () => {
+    expect(gate.namedCompetitorListVerdict({ pass: true, findings: [], requiresHumanReview: true }))
+      .toMatchObject({ ok: false, reason: 'named_competitor_off_list' });
+    expect(gate.namedCompetitorListVerdict(null)).toMatchObject({ ok: false });
+  });
+});

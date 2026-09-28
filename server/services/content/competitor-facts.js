@@ -7,12 +7,12 @@
  *   - CATEGORY mode (always allowed): compares provider CATEGORIES
  *     ("National chain" / "Local SWFL company" / "DIY") on neutral buying
  *     criteria. Names no real business — zero verification/legal surface.
- *   - NAMED-COMPETITOR mode (gated + always human-reviewed): names real
- *     competitors. To stay honest and legally safe, a competitor may be named
- *     ONLY if it appears in COMPETITORS below, and the post is ALWAYS routed to
- *     human review before it can publish (comparison-table-gate.js enforces the
- *     allowlist, the attribution requirement, and the no-disparagement /
- *     no-rigged-ranking rules).
+ *   - NAMED-COMPETITOR mode (gated): names real competitors. To stay honest
+ *     and legally safe, a competitor may be named ONLY if it appears in
+ *     COMPETITORS below (comparison-table-gate.js enforces the allowlist, the
+ *     attribution requirement, and the no-disparagement / no-rigged-ranking
+ *     rules). An autonomous blog publishes unattended only when every name is
+ *     on OWNER_APPROVED_AUTOPUBLISH_IDS; other lanes route to human review.
  *
  * MAINTENANCE (owner): this is a hand-curated, first-party reference — like
  * gbp-reviews.json. Only NEUTRAL, PUBLICLY-VERIFIABLE, NON-COMPARATIVE
@@ -159,7 +159,12 @@ const COMPETITORS = [
   {
     id: 'hometeam-pest-defense',
     name: 'HomeTeam Pest Defense',
-    aliases: ['hometeam pest', 'home team pest defense'], // not bare 'hometeam'
+    // TAEXX is HomeTeam's tubes-in-the-wall product name, sold under the
+    // brand (owner ruling 2026-09-27, D2: "HomeTeam (also sold as TAEXX)").
+    aliases: ['hometeam pest', 'home team pest defense', 'taexx'], // not bare case-insensitive 'hometeam'
+    // Case-sensitive bare brand: "HomeTeam" / "HOMETEAM" name the company;
+    // lowercase "hometeam" / "home team" stay ordinary prose.
+    aliasesCS: ['HomeTeam'],
     attributes: {
       reach: { value: 'Multi-state (US, incl. Florida)', source: 'https://pestdefense.com', asOf: '2026-06-22' },
       residential_recurring: { value: 'Yes — recurring residential plans', source: 'https://pestdefense.com', asOf: '2026-06-22' },
@@ -211,6 +216,18 @@ const COMPETITORS = [
     },
   },
 ];
+
+// Competitors the owner approved for UNATTENDED blog publishing (owner
+// rulings 2026-09-27 D2 + 2026-09-28: comparison/alternatives blog posts may
+// name Orkin, Terminix, HomeTeam (also sold as TAEXX), Turner, Massey and
+// TruGreen and publish with no human sign-off). A draft naming ANY other
+// business — including a COMPETITORS record not listed here, or a name only
+// an operator brief authorized — does not autopublish; naming anyone else
+// needs a new owner ruling. Ids, not display names, so every alias of an
+// approved record resolves through findCompetitor().
+const OWNER_APPROVED_AUTOPUBLISH_IDS = Object.freeze([
+  'orkin', 'terminix', 'hometeam-pest-defense', 'turner-pest', 'massey-services', 'trugreen',
+]);
 
 // Detection-only list of pest-control BUSINESS names that may plausibly appear
 // in a draft. Used purely to recognize that "a real business is being named"
@@ -301,6 +318,12 @@ function isKnownCompetitor(name) {
   return ALLOWLIST_INDEX.has(normalize(name));
 }
 
+/** isOwnerApprovedForAutopublish(name) → true iff `name` resolves to a record on OWNER_APPROVED_AUTOPUBLISH_IDS. */
+function isOwnerApprovedForAutopublish(name) {
+  const rec = findCompetitor(name);
+  return Boolean(rec && OWNER_APPROVED_AUTOPUBLISH_IDS.includes(rec.id));
+}
+
 /**
  * attributeValues(name) → the curated attribute value strings for a competitor
  * (e.g. ["National (US)", "Yes — recurring residential plans"]). The comparison
@@ -383,8 +406,10 @@ function listForPrompt() {
 module.exports = {
   COMPETITORS,
   COMPETITOR_BRAND_SIGNALS,
+  OWNER_APPROVED_AUTOPUBLISH_IDS,
   findCompetitor,
   isKnownCompetitor,
+  isOwnerApprovedForAutopublish,
   attributeValues,
   findBusinessMentions,
   listForPrompt,

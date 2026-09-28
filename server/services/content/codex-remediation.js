@@ -71,7 +71,7 @@ const CODEX_LOGINS = new Set(['chatgpt-codex-connector', 'chatgpt-codex-connecto
 // eligibility predicate lives in comparison-table-gate (PR #3508 r4 P1) —
 // every call site (runner, both remediation parks, the PR poller's merge
 // gate) imports it from there.
-const { namedCompetitorAutopublishEligible } = require('./comparison-table-gate');
+const { namedCompetitorAutopublishEligible, namedCompetitorListVerdict } = require('./comparison-table-gate');
 
 // RAW eligibility load (PR #3508 r11 + r13 P1s): only the brief row's own
 // PERSISTED gsc_signal marker counts for the autopublish decision —
@@ -1317,6 +1317,14 @@ async function validateAutonomousRunGates(fixedMarkdown, run, deps = {}) {
       if (!namedCompetitorAutopublishEligible(strictBrief)) {
         return { ok: false, reason: 'fix introduces named-competitor content under run context (requires human sign-off)' };
       }
+      // Owner list + fact rules on the FIXED body (owner rulings 2026-09-27
+      // D2 + 2026-09-28) — a fix must not add an unapproved name or an
+      // unverified "does not offer" claim to an unattended PR.
+      const list = namedCompetitorListVerdict(comparisonResult);
+      if (!list.ok) {
+        return { ok: false, reason: `fix breaks the named-competitor owner list (${list.reason}${list.offList ? `: ${list.offList.join(', ')}` : ''})` };
+      }
+      comparisonResult.competitors_approved_by_list = list.approved;
     }
 
     // 1. Blog-corpus dedup (same env default as the runner: on unless

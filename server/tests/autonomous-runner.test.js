@@ -3145,7 +3145,7 @@ describe('runNext post-publish bookkeeping', () => {
 describe('named-competitor autopublish gate', () => {
   const SLUG = '/pest-control/taexx-system-comparison/';
 
-  function namedCompetitorScenario({ publisher, comparisonGate, intercept = true, contentGuardrails = null, body = null }) {
+  function namedCompetitorScenario({ publisher, comparisonGate, intercept = true, contentGuardrails = null, body = null, operatorBrief = null }) {
     const claimedAt = new Date('2026-08-26T05:30:00Z');
     const queue = {
       claimNext: jest.fn().mockResolvedValue({
@@ -3171,7 +3171,7 @@ describe('named-competitor autopublish gate', () => {
         // the pin path has its own coverage above.
         gsc_signal: { bucket: 'operator_intercept', intercept },
         voice_constraints: {
-          operator_brief: {
+          operator_brief: operatorBrief || {
             working_title: 'In-Wall Systems Compared for SWFL Homes',
             primary_kw: 'taexx system review',
             thesis: 'Compare in-wall systems for SWFL homes.',
@@ -3216,8 +3216,9 @@ describe('named-competitor autopublish gate', () => {
       // same module (comparison-table-gate owns it).
       comparisonTableGate: {
         namedCompetitorAutopublishEligible: jest.requireActual('../services/content/comparison-table-gate').namedCompetitorAutopublishEligible,
+        namedCompetitorListVerdict: jest.requireActual('../services/content/comparison-table-gate').namedCompetitorListVerdict,
         ...(comparisonGate
-          || { evaluate: jest.fn().mockReturnValue({ pass: true, findings: [], requiresHumanReview: true }) }),
+          || { evaluate: jest.fn().mockReturnValue({ pass: true, findings: [], requiresHumanReview: true, namedCompetitors: ['Orkin'] }) }),
       },
     });
     return { runner, queue, claimedAt };
@@ -3252,6 +3253,91 @@ describe('named-competitor autopublish gate', () => {
     expect(publisher.publishOrUpdatePage).not.toHaveBeenCalled();
     expect(queue.pendingReview).not.toHaveBeenCalled();
     expect(queue.skip).toHaveBeenCalled();
+  });
+
+  // Owner rulings 2026-09-27 (D2) + 2026-09-28: unattended only when every
+  // named competitor is on the owner list and no fact rule is broken. These
+  // run the REAL comparison gate over synthetic drafts, with the names
+  // authorized by the (synthetic) operator brief.
+  describe('owner-approved competitor list (real comparison gate)', () => {
+    const realGate = jest.requireActual('../services/content/comparison-table-gate');
+    const prPublisher = (n) => ({ publishOrUpdatePage: jest.fn().mockResolvedValue({
+      url: `https://www.wavespestcontrol.com${SLUG}`, status: 'pr_open', live: false,
+      pr_url: `https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/${n}`,
+    }) });
+    const brief = (names) => ({
+      working_title: `${names} alternatives in Sarasota`,
+      primary_kw: 'in-wall termite system review',
+      thesis: `Compare ${names} with a local SWFL provider.`,
+    });
+
+    test('approved names only (incl. the TAEXX and bare HomeTeam spellings) publish and record the names the list cleared', async () => {
+      delete process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH;
+      const publisher = prPublisher(911);
+      const { runner, queue } = namedCompetitorScenario({
+        publisher, comparisonGate: realGate,
+        operatorBrief: brief('Orkin and HomeTeam'),
+        body: 'HomeTeam installs TAEXX tubes in new walls. Orkin offers recurring residential plans. Whether either includes a termite bond in Sarasota is not verified.',
+      });
+
+      const result = await runner.runNext();
+
+      expect(result.skip_reason).toBe('astro_pr_pending_merge');
+      expect(publisher.publishOrUpdatePage).toHaveBeenCalledTimes(1);
+      expect(result.comparison_table_result.competitors_approved_by_list).toEqual(['HomeTeam Pest Defense', 'Orkin']);
+      expect(queue.skip).not.toHaveBeenCalled();
+    });
+
+    test('one name off the owner list skips as named_competitor_off_list — never published, never queued for approval', async () => {
+      process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH = 'true';
+      const publisher = prPublisher(912);
+      const { runner, queue, claimedAt } = namedCompetitorScenario({
+        publisher, comparisonGate: realGate,
+        operatorBrief: brief('Orkin and Truly Nolen'),
+        body: 'Orkin offers recurring residential plans. Truly Nolen offers recurring residential plans too.',
+      });
+
+      const result = await runner.runNext();
+
+      expect(result).toMatchObject({ outcome: 'skipped', skip_reason: 'named_competitor_off_list' });
+      expect(result.reviewer_notes).toMatch(/Truly Nolen/);
+      expect(result.comparison_table_result.competitors_approved_by_list).toBeUndefined();
+      expect(publisher.publishOrUpdatePage).not.toHaveBeenCalled();
+      expect(queue.pendingReview).not.toHaveBeenCalled();
+      expect(queue.skip).toHaveBeenCalledWith('opp_named_1', 'named_competitor_off_list', { claimToken: claimedAt });
+    });
+
+    test('an unverified "does not offer" claim about an approved competitor skips as named_competitor_fact_rule', async () => {
+      process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH = 'true';
+      const publisher = prPublisher(913);
+      const { runner, queue, claimedAt } = namedCompetitorScenario({
+        publisher, comparisonGate: realGate,
+        operatorBrief: brief('Orkin'),
+        body: 'Orkin offers recurring residential plans, but it does not offer a termite bond in Sarasota.',
+      });
+
+      const result = await runner.runNext();
+
+      expect(result).toMatchObject({ outcome: 'skipped', skip_reason: 'named_competitor_fact_rule' });
+      expect(publisher.publishOrUpdatePage).not.toHaveBeenCalled();
+      expect(queue.skip).toHaveBeenCalledWith('opp_named_1', 'named_competitor_fact_rule', { claimToken: claimedAt });
+    });
+
+    test('kill switch off: an approved-names-only draft is skipped exactly as before (named_competitor_disabled)', async () => {
+      process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH = 'false';
+      const publisher = prPublisher(914);
+      const { runner, queue, claimedAt } = namedCompetitorScenario({
+        publisher, comparisonGate: realGate,
+        operatorBrief: brief('Orkin'),
+        body: 'Orkin offers recurring residential plans.',
+      });
+
+      const result = await runner.runNext();
+
+      expect(result).toMatchObject({ outcome: 'skipped', skip_reason: 'named_competitor_disabled' });
+      expect(publisher.publishOrUpdatePage).not.toHaveBeenCalled();
+      expect(queue.skip).toHaveBeenCalledWith('opp_named_1', 'named_competitor_disabled', { claimToken: claimedAt });
+    });
   });
 
   test('clean affiliate blogs publish with no trust credit, approval, or intercept marker', async () => {

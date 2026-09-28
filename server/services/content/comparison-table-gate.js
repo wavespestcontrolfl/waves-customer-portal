@@ -1348,6 +1348,61 @@ function buildOperatorAuthorized(operatorBriefText) {
   };
 }
 
+// Owner fact rules for named competitors (2026-09-27, D2): a competitor fact
+// we can't confirm is written "not verified", never "does not offer"; no
+// claim about a competitor's guarantee unless verifiable. This catches
+// exactly two prose shapes, in a clause whose subject is a named competitor
+// (or a pronoun / elided subject in a sentence that names one):
+//   1. negative capability — does not / doesn't / do not / don't / did not /
+//      won't / cannot / can't / no longer + offer / provide / include /
+//      cover / guarantee ("Orkin does not offer a termite bond")
+//   2. no guarantee — "no [written] guarantee/warranty", "without a
+//      guarantee" ("Terminix has no guarantee on mosquito service")
+// A clause whose subject is Waves ("we", "our", "Waves") is skipped.
+// Competitor PRICES are not handled here: content-guardrails HARDCODED_PRICE
+// already rejects a dollar figure unless it carries a citation link AND an
+// "as of <date>" in its paragraph on a competitor-intercept brief (every
+// other draft gets no competitor-price exemption at all), and a competitor
+// named in prose on a mined draft is COMPARISON_COMPETITOR_IN_PROSE here.
+// Table cells are validated against curated competitor-facts, so only prose
+// (title/meta included) is scanned.
+const NEG_CAPABILITY_RE = /\b(?:does\s+not|doesn['’]?t|do\s+not|don['’]?t|did\s+not|didn['’]?t|will\s+not|won['’]?t|cannot|can['’]?t|no\s+longer)\s+(?:(?:currently|even|actually|always)\s+)?(?:offers?|provides?|includes?|covers?|guarantees?)\b/gi;
+const NO_GUARANTEE_RE = /\b(?:no|without(?:\s+(?:a|an|any))?)\s+(?:[\w'’-]+\s+){0,2}?(?:guarantees?|warrant(?:y|ies))\b/gi;
+const FACT_RULE_OWN_SUBJECT_RE = /\b(?:waves|we|our|us)\b/i;
+const FACT_RULE_CLAUSE_SPLIT_RE = /[,;:—–()]|\s-\s|\b(?:and|but|while|whereas|although|though|unlike|however)\b/i;
+const FACT_RULE_PRONOUN_LEAD_RE = /^(?:it|they|its|their|the\s+company|that\s+company|this\s+company)\b/i;
+
+function unverifiedNegativeClaim(text) {
+  for (const sentence of String(text || '').split(/(?<=[.!?])\s+|\n+/)) {
+    const hits = [...sentence.matchAll(NEG_CAPABILITY_RE), ...sentence.matchAll(NO_GUARANTEE_RE)];
+    if (!hits.length || !competitorFacts.findBusinessMentions(sentence).length) continue;
+    for (const m of hits) {
+      const before = sentence.slice(0, m.index);
+      const parts = before.split(FACT_RULE_CLAUSE_SPLIT_RE);
+      const lead = parts[parts.length - 1];
+      if (FACT_RULE_OWN_SUBJECT_RE.test(lead)) continue;
+      const trimmed = lead.trim();
+      const subjectIsCompetitor = competitorFacts.findBusinessMentions(lead).length > 0
+        || FACT_RULE_PRONOUN_LEAD_RE.test(trimmed)
+        // Elided subject ("Orkin offers X and does not offer Y") inherits
+        // the sentence's — unless Waves is anywhere before it.
+        || (trimmed === '' && !FACT_RULE_OWN_SUBJECT_RE.test(before));
+      if (subjectIsCompetitor) return sentence.trim();
+    }
+  }
+  return null;
+}
+
+function unverifiedNegativeClaimFinding(text) {
+  const hit = unverifiedNegativeClaim(text);
+  if (!hit) return null;
+  // P2: never fails the gate. Every draft that names a competitor already
+  // routes on requiresHumanReview; namedCompetitorListVerdict keeps this
+  // draft off the unattended blog lane (owner fact rule).
+  return finding('P2', 'COMPARISON_UNVERIFIED_NEGATIVE_CLAIM',
+    `States that a named competitor does not offer / has no guarantee for something ("${hit.slice(0, 160)}"). Owner fact rule: write "not verified" for anything we cannot confirm, never "does not offer".`);
+}
+
 function evaluateProse(draft, body, { operatorBriefText = '', namedCompetitorEnabled = false } = {}) {
   const findings = [];
   const scanText = draftScanTexts(draft, body);
@@ -1560,7 +1615,9 @@ function evaluateProse(draft, body, { operatorBriefText = '', namedCompetitorEna
   // competitor still routes to named-competitor review even though the
   // blanked URL is not a prose mention.
   const linkedDisabledNames = new Set();
+  const linkedNames = new Set();
   for (const lk of linkedCompetitorMentions(scanText)) {
+    linkedNames.add(lk.name);
     if (lk.inAllowlist) {
       // Link-only allowlisted competitor: named-competitor usage. With the
       // feature gate off this must surface, not silently pass (Codex r6 —
@@ -1606,9 +1663,19 @@ function evaluateProse(draft, body, { operatorBriefText = '', namedCompetitorEna
     findings.push(finding('P1', 'COMPARISON_COMPETITOR_IN_PROSE',
       `Names competitor "${nm}" in prose/title/meta with no comparison table — claims there are not validated against competitor-facts.js. Name a competitor ONLY inside a <ComparisonTable> (every cell is checked).`));
   }
+  const factRule = unverifiedNegativeClaimFinding(nameScanText);
+  if (factRule) findings.push(factRule);
 
   const pass = !findings.some((f) => f.severity === 'P0' || f.severity === 'P1');
-  return { pass, findings, requiresHumanReview };
+  return { pass, findings, requiresHumanReview, namedCompetitors: sortedNames(known, unknown, linkedNames) };
+}
+
+// Every competitor the draft names (prose, table, title/meta, or link
+// destination), de-duplicated and sorted — persisted with the verdict so
+// namedCompetitorListVerdict can hold unattended publishing to the owner
+// list at run time AND at merge time.
+function sortedNames(...sets) {
+  return [...new Set(sets.flatMap((set) => [...set]))].sort();
 }
 
 // URL boundary shared by every URL-aware name-scan transform. The class
@@ -1725,7 +1792,7 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
   // Empty body alone doesn't skip the scan — a metadata-only draft can
   // still carry a disparaging title/meta (draftScanTexts covers both the
   // top-level and frontmatter shapes).
-  if (!body && !draftScanTexts(draft, '').trim()) return { pass: true, findings, requiresHumanReview: false };
+  if (!body && !draftScanTexts(draft, '').trim()) return { pass: true, findings, requiresHumanReview: false, namedCompetitors: [] };
   if (blocks.length === 0) return evaluateProse(draft, body, { operatorBriefText, namedCompetitorEnabled });
 
   // Same collector as draftScanTexts: the prose-only competitor check below
@@ -2407,17 +2474,22 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
       `Names a competitor (${[...unsourcedKnown].join(', ')}) without an "as of <date>" + source caption on the table that names it. Add e.g. caption="Attributes as of June 2026, per each company's public website."`));
   }
 
+  const factRule = unverifiedNegativeClaimFinding(proseNameText);
+  if (factRule) findings.push(factRule);
+
   const pass = !findings.some((f) => f.severity === 'P0' || f.severity === 'P1');
   // Preserve the review signal for other content lanes. The supporting-blog
   // runner uses namedCompetitorAutopublishEligible to process clean drafts
   // automatically while retaining the comparison and sourcing checks.
   const requiresHumanReview = pass
     && ((namedCompetitorEnabled && (known.size > 0 || linkedKnown.size > 0)) || operatorAuthorizedProse);
-  return { pass, findings, requiresHumanReview };
+  return { pass, findings, requiresHumanReview, namedCompetitors: sortedNames(known, unknown) };
 }
 
 // Clean autonomous blogs need no human sign-off. The content gate and
 // explicit autopublish kill switch still apply at drafting and merge time.
+// This is the LANE check (action + both gates); every caller holding a
+// comparison verdict also requires namedCompetitorListVerdict(verdict).ok.
 function namedCompetitorAutopublishEligible(brief) {
   try {
     // Only the fully-automatable blog action qualifies (PR #3508 r6 P1):
@@ -2433,10 +2505,36 @@ function namedCompetitorAutopublishEligible(brief) {
   } catch (_) { return false; }
 }
 
+// Owner rulings 2026-09-27 (D2) + 2026-09-28: a competitor blog publishes
+// unattended only when EVERY competitor it names is on
+// competitor-facts OWNER_APPROVED_AUTOPUBLISH_IDS — including names an
+// operator brief authorized — and no owner fact rule is broken. Reads the
+// PERSISTED evaluate() result, so the runner's decision and the poller's
+// merge-time recheck judge the same thing. A verdict without
+// `namedCompetitors` (written before this check existed, or unparseable)
+// fails closed.
+//   → { ok: true, approved }                                  publish
+//   → { ok: false, reason: 'named_competitor_off_list', offList, approved }
+//   → { ok: false, reason: 'named_competitor_fact_rule', approved }
+function namedCompetitorListVerdict(comparisonResult) {
+  const names = comparisonResult && Array.isArray(comparisonResult.namedCompetitors)
+    ? comparisonResult.namedCompetitors : null;
+  if (!names) return { ok: false, reason: 'named_competitor_off_list', offList: ['(names not recorded)'], approved: [] };
+  const approved = names.filter((n) => competitorFacts.isOwnerApprovedForAutopublish(n));
+  const offList = names.filter((n) => !competitorFacts.isOwnerApprovedForAutopublish(n));
+  if (offList.length) return { ok: false, reason: 'named_competitor_off_list', offList, approved };
+  const findings = Array.isArray(comparisonResult.findings) ? comparisonResult.findings : [];
+  if (findings.some((f) => f && f.code === 'COMPARISON_UNVERIFIED_NEGATIVE_CLAIM')) {
+    return { ok: false, reason: 'named_competitor_fact_rule', approved };
+  }
+  return { ok: true, approved };
+}
+
 module.exports = {
   evaluate,
   evaluateProse,
   namedCompetitorAutopublishEligible,
+  namedCompetitorListVerdict,
   extractComparisonBlocks,
   extractCaption,
   extractColumns,

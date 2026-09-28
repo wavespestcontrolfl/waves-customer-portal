@@ -1660,13 +1660,22 @@ describe('validateAutonomousRunGates', () => {
       deps.autonomousRunner._loadReviewedBrief = async () => ({
         page_type: 'supporting-blog', action_type: 'new_supporting_blog', gsc_signal: { intercept: true },
       });
-      deps.comparisonTableGate.evaluate = () => ({ pass: true, findings: [], requiresHumanReview: true });
+      deps.comparisonTableGate.evaluate = () => ({ pass: true, findings: [], requiresHumanReview: true, namedCompetitors: ['Orkin'] });
       const r = await rem.validateAutonomousRunGates(MD, RUN_REF, deps);
       expect(r.ok).toBe(true);
+      // The owner list cleared the fix — recorded on the returned verdict
+      // the autonomous caller persists with the head pin.
+      expect(r.comparisonResult.competitors_approved_by_list).toEqual(['Orkin']);
       // No verdict persistence anywhere in this validator (PR r3 P2: the
       // poller's merge gate re-evaluates the current head itself).
       const row = deps.db._tables.autonomous_runs.find((x) => x.id === 'run-1');
       expect(row.comparison_table_result).toBeUndefined();
+
+      // Owner rulings 2026-09-27 (D2) + 2026-09-28: a fix that adds a name
+      // off the owner list never rides the unattended lane.
+      deps.comparisonTableGate.evaluate = () => ({ pass: true, findings: [], requiresHumanReview: true, namedCompetitors: ['Orkin', 'Truly Nolen'] });
+      const offList = await rem.validateAutonomousRunGates(MD, RUN_REF, deps);
+      expect(offList).toMatchObject({ ok: false, reason: expect.stringMatching(/named_competitor_off_list: Truly Nolen/) });
     } finally {
       fg.isEnabled.mockRestore();
     }

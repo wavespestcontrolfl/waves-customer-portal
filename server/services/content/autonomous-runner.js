@@ -1141,15 +1141,32 @@ class AutonomousRunner {
     const unattendedBlog = run.action_type === 'new_supporting_blog';
     const autoPublish = autoPublishEnabled(run.action_type);
     const trustBuildCount = await this._getTrustBuildCount(run.action_type).catch(() => 0);
-    // Named-competitor blogs use the shared automated eligibility check.
-    // Comparison, sourcing, and merge-time head checks remain mandatory.
-    let namedCompetitorAutopublish = false;
+    // Named-competitor blogs use the shared automated eligibility check:
+    // the lane (action + GATE_NAMED_COMPETITOR_AUTOPUBLISH + comparison
+    // gate) AND the owner list (every name approved, no fact-rule finding —
+    // owner rulings 2026-09-27 D2 + 2026-09-28). Comparison, sourcing, and
+    // merge-time head checks remain mandatory.
+    let namedCompetitorLaneOpen = false;
+    let namedCompetitorList = null;
     try {
-      namedCompetitorAutopublish = require('./comparison-table-gate')
-        .namedCompetitorAutopublishEligible(brief) === true;
-    } catch (_) { namedCompetitorAutopublish = false; }
+      const comparisonTableGate = require('./comparison-table-gate');
+      namedCompetitorLaneOpen = comparisonTableGate.namedCompetitorAutopublishEligible(brief) === true;
+      if (run.comparison_requires_review === true) {
+        namedCompetitorList = comparisonTableGate.namedCompetitorListVerdict(run.comparison_table_result);
+      }
+    } catch (_) { namedCompetitorLaneOpen = false; namedCompetitorList = null; }
+    const namedCompetitorAutopublish = namedCompetitorLaneOpen && namedCompetitorList?.ok === true;
     const forceNamedCompetitorReview = run.comparison_requires_review === true
       && !namedCompetitorAutopublish;
+    if (namedCompetitorAutopublish) {
+      // Audit trail: which names the owner list cleared on this run, kept
+      // on the persisted comparison verdict.
+      run.comparison_table_result = {
+        ...run.comparison_table_result,
+        competitors_approved_by_list: namedCompetitorList.approved,
+      };
+      logger.info(`[autonomous-runner] named-competitor autopublish: ${namedCompetitorList.approved.join(', ')} approved by owner list (opportunity ${opp.id})`);
+    }
     // A named-competitor run the scoped eligibility cleared also satisfies
     // the general trust-build ramp (hook r9 P1): the owner directive is a
     // no-human-queue lane, and eligibility only applies when the comparison
@@ -1168,12 +1185,22 @@ class AutonomousRunner {
     const affiliateReview = !unattendedBlog && affiliateProductIds.length > 0;
 
     // Blog risk flags fail closed without asking an operator to override them.
+    // A named-competitor blog with the lane open but a name off the owner
+    // list (or a fact-rule finding) skips with that distinct reason; lane
+    // closed (kill switch off) stays named_competitor_disabled.
     if (unattendedBlog && (brief.human_review_required || !autoPublish || forceNamedCompetitorReview)) {
       const reason = !autoPublish ? 'auto_publish_disabled'
-        : forceNamedCompetitorReview ? 'named_competitor_disabled' : 'brief_risk_blocked';
+        : forceNamedCompetitorReview
+          ? ((namedCompetitorLaneOpen && namedCompetitorList?.reason) || 'named_competitor_disabled')
+          : 'brief_risk_blocked';
+      const listNote = namedCompetitorLaneOpen && reason === namedCompetitorList?.reason
+        ? (reason === 'named_competitor_off_list'
+          ? `Names competitor(s) outside the owner-approved list: ${namedCompetitorList.offList.join(', ')} (a new owner ruling is needed to name them).`
+          : 'States a named competitor does not offer / has no guarantee for something (owner fact rule: write "not verified").')
+        : null;
       const finalized = await finalize(run, t0, {
         outcome: 'skipped', skip_reason: reason,
-        reviewer_notes: this._summarizeForReviewer(uniquenessResult, qualityResult, seoCompletionResult, brief),
+        reviewer_notes: [this._summarizeForReviewer(uniquenessResult, qualityResult, seoCompletionResult, brief), listNote].filter(Boolean).join(' | '),
       });
       await this._skipClaimOrThrow(queue, opp.id, reason, { claimToken });
       return finalized;

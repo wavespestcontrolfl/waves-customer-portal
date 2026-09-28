@@ -1673,7 +1673,7 @@ describe('auto-merge gating (each condition individually blocking)', () => {
   // human approved (trust_build_approved_head_sha) — any foreign push waits
   // for a human. Intercept-class runs additionally re-check the scoped
   // eligibility (raw brief marker + both gates) at the last instant.
-  function governedRun({ pin = 'HEADSHA1', approvedAt = null, approvedSha = null, verdict = { pass: true, findings: [], requiresHumanReview: true }, briefId = 'brief-1' } = {}) {
+  function governedRun({ pin = 'HEADSHA1', approvedAt = null, approvedSha = null, verdict = { pass: true, findings: [], requiresHumanReview: true, namedCompetitors: ['Orkin'] }, briefId = 'brief-1' } = {}) {
     return {
       comparison_table_result: verdict,
       draft_payload: JSON.stringify({
@@ -1707,6 +1707,27 @@ describe('auto-merge gating (each condition individually blocking)', () => {
 
       expect(gh.mergePr).toHaveBeenCalledTimes(1);
       expect(res.results[0]).toMatchObject({ merged: true, autoMerged: true });
+    });
+  });
+
+  // Owner rulings 2026-09-27 (D2) + 2026-09-28: the merge-time recheck
+  // holds the persisted verdict to the owner list too — an off-list name, a
+  // fact-rule finding, or a verdict recorded before names were persisted
+  // leaves the PR for a human.
+  test.each([
+    ['names a competitor off the owner list', { pass: true, findings: [], requiresHumanReview: true, namedCompetitors: ['Orkin', 'Truly Nolen'] }],
+    ['carries an unverified negative claim', { pass: true, requiresHumanReview: true, namedCompetitors: ['Orkin'], findings: [{ severity: 'P2', code: 'COMPARISON_UNVERIFIED_NEGATIVE_CLAIM', message: 'x' }] }],
+    ['has no recorded names (pre-list verdict)', { pass: true, findings: [], requiresHumanReview: true }],
+  ])('governed run whose verdict %s is withheld at merge time', async (_label, verdict) => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    await withGatesOn(async () => {
+      setupDb({ pending: [makeRun({ brief_id: 'brief-1' })], briefs: INTERCEPT_BRIEFS, runFirst: governedRun({ verdict }) });
+      greenMergePath();
+
+      const res = await poller.pollPending();
+
+      expect(gh.mergePr).not.toHaveBeenCalled();
+      expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_autopublish_revoked' });
     });
   });
 

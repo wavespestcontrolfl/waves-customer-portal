@@ -1429,6 +1429,7 @@ async function maybeAutoMerge(run, pr) {
     let pinnedShaOk = false;
     let approvedAt = null;
     let briefId = null;
+    let comparisonVerdict = null;
     try {
       const stableContextValue = (value) => {
         if (Array.isArray(value)) return value.map(stableContextValue);
@@ -1451,7 +1452,7 @@ async function maybeAutoMerge(run, pr) {
         const pinned = String(dp?.autopublish_head_sha || '').toLowerCase();
         const approved = fresh.trust_build_approved_at || null;
         const approvedSha = String(dp?.trust_build_approved_head_sha || '').toLowerCase();
-        return { flagged, pinned, approvedAt: approved,
+        return { flagged, comparison: ctr, pinned, approvedAt: approved,
           approvedAtKey: approved instanceof Date ? approved.toISOString() : String(approved || ''),
           approvedSha, briefId: fresh.brief_id || null,
           comparisonKey: JSON.stringify(stableContextValue(ctr)),
@@ -1471,6 +1472,7 @@ async function maybeAutoMerge(run, pr) {
         approvedAt = context.approvedAt;
         approvedShaOk = Boolean(approvedAt && context.approvedSha && headSha && context.approvedSha === headSha);
         briefId = context.briefId;
+        comparisonVerdict = context.comparison;
 
         // The trusted editorial signer may add only authenticated evidence
         // sidecars after either trusted content anchor. Prefer a live human
@@ -1544,8 +1546,12 @@ async function maybeAutoMerge(run, pr) {
               rawBrief = { action_type: row.action_type, gsc_signal: gs };
             }
           }
-          const { namedCompetitorAutopublishEligible } = require('./comparison-table-gate');
-          eligible = namedCompetitorAutopublishEligible(rawBrief) === true;
+          // Lane (kill switch + action) AND the owner list on the persisted
+          // verdict — the same two checks the runner applied, so a name
+          // off the owner list or a fact-rule finding never merges unattended.
+          const { namedCompetitorAutopublishEligible, namedCompetitorListVerdict } = require('./comparison-table-gate');
+          eligible = namedCompetitorAutopublishEligible(rawBrief) === true
+            && namedCompetitorListVerdict(comparisonVerdict).ok === true;
         } catch (_) { eligible = false; }
         if (!eligible) {
           logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id}: named-competitor autopublish not (or no longer) eligible — PR left open for a human decision`);
