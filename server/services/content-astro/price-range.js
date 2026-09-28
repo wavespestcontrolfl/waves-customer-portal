@@ -23,6 +23,7 @@
  * the card's numbers come from the feed at Astro build time.
  */
 const { computePublicPricingRanges, PURCHASE_GATED_ROWS } = require('../pricing-engine/public-ranges');
+const { COMMERCIAL_RISK_TYPE_TERMS } = require('../pricing-engine/commercial-risk-type');
 const logger = require('../logger');
 
 // The card prices ONLY the service the post names. The primary keyword is
@@ -32,7 +33,13 @@ const logger = require('../logger');
 // guide filed under pest-control must not show general pest plans. A post
 // that names no row here gets no card. Commercial work is custom-quoted and
 // the feed is residential list price, so a commercial topic gets none.
-const COMMERCIAL = /\b(?:commercial|business(?:es)?|restaurants?|offices?|warehouses?)\b/;
+// Commercial terms = the canonical commercial risk-type buckets' property
+// terms (pricing-engine/commercial-risk-type.js) plus the generic words.
+const escapeRe = (term) => term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const COMMERCIAL = new RegExp(`\\b(?:${[
+  'commercial', 'business', 'businesses',
+  ...Object.values(COMMERCIAL_RISK_TYPE_TERMS).flat(),
+].map(escapeRe).join('|')})\\b`);
 
 const TERMITE = /\btermites?\b/;
 const RODENT = /\b(?:rodents?|rats?|mice|mouse)\b/;
@@ -49,14 +56,26 @@ const RECURRING = /\b(?:program|plans?|recurring|quarterly|monthly|bi-?monthly|s
 // a family's full row set is the fallback for a post naming just the family.
 // keys: [] marks a named service the feed has no honest row for (no card).
 const RODENT_FAMILY = ['rodent_bait_program', 'rodent_trapping', 'rodent_exclusion'];
+// Purchase-gated rows (public-ranges PURCHASE_GATED_ROWS) are never mapped —
+// a key frozen into a post outlives a gate flip — and a post that NAMES one
+// of those products gets no card rather than a different product's prices.
+// One intent per gated row; the rules below are derived from the gated list
+// and a test fails when a gated row has no intent here.
+const GATED_ROW_INTENTS = {
+  termite_bond: [TERMITE, /\bbonds?\b/],
+  // Station/bait context plus rental wording: "termite treatment cost for
+  // rental properties" is about the property, not the rented-station product.
+  termite_station_rental: [TERMITE, /\b(?:bait|stations?)\b/, /\b(?:rent(?:al|als|ed|ing)?|leas(?:e|ed|ing))\b/],
+};
+const GATED_RULES = Object.keys(PURCHASE_GATED_ROWS)
+  .filter((key) => GATED_ROW_INTENTS[key])
+  .map((key) => ({ match: GATED_ROW_INTENTS[key], keys: [], gatedRow: key }));
+
 const VARIANT_RULES = [
+  ...GATED_RULES,
   { match: [/\b(?:wdo|wood[- ]destroying)\b/], keys: ['wdo_inspection'] },
   // A standalone termite inspection is not the real-estate WDO report.
   { match: [TERMITE, /\binspections?\b/], keys: [] },
-  // No rule for a purchase-gated row (termite_bond, termite_station_rental —
-  // public-ranges PURCHASE_GATED_ROWS): the key would be frozen into the post
-  // and outlive a gate flip. A bond or rental guide falls through to the
-  // termite family's stable rows.
   { match: [TERMITE, /\bfoam\b/, RECURRING], keys: ['recurring_foam'] },
   { match: [TERMITE, /\bfoam\b/], keys: ['foam_drill'] },
   { match: [/\bpre[- ]?(?:slab|construction)\b/], keys: ['pre_slab_termiticide'] },
@@ -165,4 +184,4 @@ function applyCostGuidePriceRange(frontmatter, liveFrontmatter = null) {
   return frontmatter;
 }
 
-module.exports = { costGuidePriceRange, applyCostGuidePriceRange, SERVICE_PRICE_KEYS };
+module.exports = { costGuidePriceRange, applyCostGuidePriceRange, SERVICE_PRICE_KEYS, GATED_ROW_INTENTS };

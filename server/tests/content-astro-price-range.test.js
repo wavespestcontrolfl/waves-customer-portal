@@ -4,8 +4,9 @@
 // publishes, and anything else must fail closed to "no price_range".
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
-const { costGuidePriceRange, SERVICE_PRICE_KEYS } = require('../services/content-astro/price-range');
+const { costGuidePriceRange, SERVICE_PRICE_KEYS, GATED_ROW_INTENTS } = require('../services/content-astro/price-range');
 const { computePublicPricingRanges, PURCHASE_GATED_ROWS } = require('../services/pricing-engine/public-ranges');
+const { COMMERCIAL_RISK_TYPES, COMMERCIAL_RISK_TYPE_TERMS } = require('../services/pricing-engine/commercial-risk-type');
 
 const cost = (overrides = {}) => ({ post_type: 'cost', category: 'pest-control', title: 'What It Costs', ...overrides });
 
@@ -21,12 +22,34 @@ describe('costGuidePriceRange', () => {
     expect(gated.length).toBeGreaterThan(0);
     const mapped = new Set(SERVICE_PRICE_KEYS.flatMap((rule) => rule.keys));
     expect(gated.filter((key) => mapped.has(key))).toEqual([]);
-    // Even a feed that publishes them (gate on) never yields one.
-    const everything = new Set([...mapped, ...gated]);
-    for (const primary_keyword of ['termite bond cost', 'termite bait station rental cost']) {
-      const keys = costGuidePriceRange(cost({ primary_keyword }), { knownKeys: everything });
-      expect(keys.some((key) => gated.includes(key))).toBe(false);
+  });
+
+  test('a post naming a gated product gets NO card — never another product\'s prices; every gated row has an intent rule', () => {
+    expect(Object.keys(PURCHASE_GATED_ROWS).filter((key) => !GATED_ROW_INTENTS[key])).toEqual([]);
+    // Even a feed that publishes the gated rows (gate on) yields nothing.
+    const everything = new Set([...SERVICE_PRICE_KEYS.flatMap((rule) => rule.keys), ...Object.keys(PURCHASE_GATED_ROWS)]);
+    for (const primary_keyword of ['termite bond cost', 'termite bait station rental cost', 'leased termite bait stations cost']) {
+      expect(costGuidePriceRange(cost({ primary_keyword }), { knownKeys: everything })).toBeNull();
+      expect(costGuidePriceRange(cost({ primary_keyword }))).toBeNull();
     }
+    // Property tenancy wording without station context is not the rental product.
+    expect(costGuidePriceRange(cost({ primary_keyword: 'termite treatment cost for rental properties' })))
+      .toEqual(['termite_bait_install', 'termite_bait_monitoring', 'termite_trenching']);
+    expect(costGuidePriceRange(cost({ primary_keyword: 'termite treatment cost for a leased home' })))
+      .toEqual(['termite_bait_install', 'termite_bait_monitoring', 'termite_trenching']);
+  });
+
+  test('commercial property buckets (canonical commercial-risk-type terms) get no card, before any residential rule', () => {
+    expect(COMMERCIAL_RISK_TYPES.filter((bucket) => !(COMMERCIAL_RISK_TYPE_TERMS[bucket.value] || []).length)).toEqual([]);
+    for (const primary_keyword of [
+      'hotel pest control cost', 'retail pest control cost', 'HOA pest control cost', 'multifamily pest control cost',
+      'apartment complex termite treatment cost', 'restaurant rodent control cost', 'warehouse rodent exclusion cost',
+      'daycare pest control cost', 'office building pest control cost', 'commercial pest control cost',
+    ]) {
+      expect(costGuidePriceRange(cost({ primary_keyword }))).toBeNull();
+    }
+    // A commercial title also blocks a residential-looking keyword.
+    expect(costGuidePriceRange(cost({ primary_keyword: 'pest control cost', title: 'Pest Control Pricing for Hotels' }))).toBeNull();
   });
 
   const TERMITE_ALL = ['termite_bait_install', 'termite_bait_monitoring', 'termite_trenching'];
@@ -46,12 +69,9 @@ describe('costGuidePriceRange', () => {
     ['pre-slab termite treatment cost', ['pre_slab_termiticide']],
     ['bora-care treatment cost', ['bora_care']],
     ['wdo inspection cost', ['wdo_inspection']],
-    // Gated rows are never mapped: bond guides fall through to the family's
-    // stable rows; tenancy wording is not the rented-station product.
-    ['termite bond cost', TERMITE_ALL],
+    // Tenancy wording is not the rented-station product (gated products: see below).
     ['termite treatment cost for rental properties', TERMITE_ALL],
     ['termite treatment cost for a leased home', TERMITE_ALL],
-    ['termite bait station rental cost', ['termite_bait_install', 'termite_bait_monitoring']],
     // rodent
     ['rodent control cost', RODENT_ALL],
     ['how much do rats cost to remove', RODENT_ALL],
@@ -139,6 +159,7 @@ describe('costGuidePriceRange', () => {
     jest.isolateModules(() => {
       jest.doMock('../services/pricing-engine/public-ranges', () => ({
         computePublicPricingRanges: () => { throw new Error('pricing constants unavailable'); },
+        PURCHASE_GATED_ROWS: jest.requireActual('../services/pricing-engine/public-ranges').PURCHASE_GATED_ROWS,
       }));
       const isolated = require('../services/content-astro/price-range');
       expect(isolated.costGuidePriceRange(cost({ primary_keyword: 'pest control cost' }))).toBeNull();

@@ -3559,6 +3559,9 @@ async function publishMetadataRewrite(draft, brief = {}) {
   let backfilledFields = [];
   if (isBlogTarget(filePath)) {
     backfilledFields = backfillLegacyBlogRequiredFields(nextFrontmatter, brief);
+    // Cost-guide price card (owner D1): added only when the live post has no
+    // price_range at all — an owner-set list (or an explicit []) stays frozen.
+    applyCostGuidePriceRange(nextFrontmatter, currentFrontmatter);
     assertValidBlogFrontmatter(nextFrontmatter);
   }
 
@@ -4608,6 +4611,10 @@ function buildMetadataPrBody({ filePath, targetUrl, branch, before = {}, after =
     ``,
     ...(backfilledFields.length ? [
       `**Backfilled schema-required fields (inferred — legacy pre-schema-v2 post):** ${backfilledFields.map((f) => `\`${f}\``).join(', ')}. Review the inferred values in the diff.`,
+      ``,
+    ] : []),
+    ...(before.price_range == null && Array.isArray(after.price_range) ? [
+      `**Added cost-guide price card (\`price_range\`):** ${formatList(after.price_range)}.`,
       ``,
     ] : []),
     `Body, slug, canonical, and schema are intentionally unchanged${backfilledFields.length ? ' (other than the backfilled fields above)' : ''}.`,
