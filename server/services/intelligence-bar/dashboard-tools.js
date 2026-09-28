@@ -173,7 +173,7 @@ period can be: "this_week", "last_week", "this_month", "last_month", "this_quart
   },
   {
     name: 'get_report_engagement',
-    description: `Service-report engagement: of the completed-visit reports SENT to customers in a period (report email via the delivery queue and/or the completion SMS), how many were opened, the open rate, the median minutes from first send to first open, and what customers did inside the report (PDF download, photo opened, map interacted, re-entry timer viewed, review link clicked, referral clicked, add-on requested, follow-up requested, question asked). Split by service line (pest, lawn, tree_shrub, mosquito, termite, rodent, palm; 'unknown' for older records) plus a total row. Use for "are customers opening their reports?", "report open rate", "which service line reads its report least?", "how fast do people open the report?". Defaults to the last 30 days.`,
+    description: `Service-report engagement: of the completed-visit reports SENT to customers in a period (report email via the delivery queue and/or the completion SMS), how many were opened, the open rate, the median minutes from first send to first open, and what customers did inside the report (PDF download, photo opened, map interacted, re-entry timer viewed, review link clicked, referral clicked, add-on requested, follow-up requested, question asked). Split by service line (pest, lawn, tree_shrub, mosquito, termite, rodent, palm; 'unknown' for older records) plus a total row. Each service line also carries reserviceWithin14Days (pest and lawn only: of the completed visits on that line in the window whose 14-day follow-up window has fully closed, how many got a same-customer same-line re-service 1-14 days later, plus the rate). Use for "are customers opening their reports?", "report open rate", "which service line reads its report least?", "how fast do people open the report?", "does the pest report content cut re-services?". Defaults to the last 30 days.`,
     input_schema: {
       type: 'object',
       properties: {
@@ -918,6 +918,78 @@ const REPORT_ACTION_EVENTS = [
   'report_question_asked',
 ];
 
+// 14-day re-service tracking (owner ask 2026-09-28): pest and lawn are the
+// only two lines with a re-service concept (server/services/re-service.js's
+// RE_SERVICE_SERVICE_KEYS), keyed off scheduled_services.service_key_snapshot
+// ('pest_re_service' / 'lawn_re_service'). There is NO foreign key from a
+// re-service row to the visit it follows up on, so this is inferred: same
+// customer, same derived service line, scheduled 1-14 days after a
+// non-re-service completed visit. scheduled_services carries no service_line
+// column, so a row's line is derived the same way the rest of this tool
+// derives one — through its completed service_records row
+// (service_records.scheduled_service_id, service_records.service_line) —
+// which also covers a keyless is_callback row (no service_key_snapshot):
+// if that join can't resolve a line, the row is excluded rather than guessed.
+//
+// Right-censoring: a visit from the last 14 days hasn't had its full 14-day
+// follow-up window pass yet, so counting it as a "no re-service" visit
+// biases the rate low. `cutoff` (the caller's ET "today" minus 14 days) is
+// an ADDITIONAL upper bound on the visit's own scheduled_date — never on the
+// [from, to] window itself — so only visits whose window has fully closed
+// are counted at all.
+const RESERVICE_LINES = ['pest', 'lawn'];
+
+async function getReserviceWithin14Days(from, to, cutoff) {
+  const { rows } = await db.raw(`
+    WITH visits AS (
+      SELECT sched.id, sched.customer_id, sched.scheduled_date,
+             COALESCE(NULLIF(vsrec.service_line, ''), 'unknown') AS service_line
+      FROM scheduled_services sched
+      LEFT JOIN service_records vsrec ON vsrec.scheduled_service_id = sched.id
+      WHERE sched.status = 'completed'
+        AND sched.scheduled_date >= ? AND sched.scheduled_date <= LEAST(?::date, ?::date)
+        AND COALESCE(sched.is_callback, false) = false
+        AND (sched.service_key_snapshot IS NULL OR sched.service_key_snapshot NOT IN ('pest_re_service', 'lawn_re_service'))
+    ),
+    reservices AS (
+      SELECT sched.id, sched.customer_id, sched.scheduled_date,
+             CASE
+               WHEN sched.service_key_snapshot = 'pest_re_service' THEN 'pest'
+               WHEN sched.service_key_snapshot = 'lawn_re_service' THEN 'lawn'
+               ELSE NULLIF(rsrec.service_line, '')
+             END AS service_line
+      FROM scheduled_services sched
+      LEFT JOIN service_records rsrec ON rsrec.scheduled_service_id = sched.id
+      WHERE sched.status = 'completed'
+        AND (COALESCE(sched.is_callback, false) = true
+             OR sched.service_key_snapshot IN ('pest_re_service', 'lawn_re_service'))
+    )
+    SELECT v.service_line,
+           COUNT(DISTINCT v.id)::int AS visits,
+           (COUNT(DISTINCT v.id) FILTER (WHERE r.id IS NOT NULL))::int AS reserviced
+    FROM visits v
+    LEFT JOIN reservices r
+      ON r.customer_id = v.customer_id
+     AND r.service_line = v.service_line
+     AND r.scheduled_date > v.scheduled_date
+     AND r.scheduled_date <= v.scheduled_date + INTERVAL '14 days'
+    WHERE v.service_line IN (${RESERVICE_LINES.map(() => '?').join(', ')})
+    GROUP BY v.service_line
+  `, [from, to, cutoff, ...RESERVICE_LINES]);
+
+  const byLine = {};
+  for (const row of rows) {
+    const visits = parseInt(row.visits, 10) || 0;
+    const reserviced = parseInt(row.reserviced, 10) || 0;
+    byLine[row.service_line] = {
+      visits,
+      reserviced,
+      rate: visits > 0 ? Math.round((reserviced / visits) * 1000) / 1000 : null,
+    };
+  }
+  return byLine;
+}
+
 async function getReportEngagement(input = {}) {
   const now = new Date();
   // Inclusive lower bound: 29 days back + today = exactly 30 ET calendar days.
@@ -1027,16 +1099,31 @@ async function getReportEngagement(input = {}) {
   const totalRow = rows.find((r) => Number(r.is_total) === 1);
   const byLine = rows.filter((r) => Number(r.is_total) !== 1);
 
+  // Independent of the send/open cohort above: reserviceWithin14Days is keyed
+  // off visit scheduled_date, not report-send date — it uses the same [from,
+  // to] window the caller asked for, but doesn't require the line to have
+  // had a report actually sent in that window. reserviceCutoff (today ET
+  // minus 14 days, from the same `now` this tool's own window defaults use)
+  // right-censors it: a visit whose 14-day follow-up window hasn't fully
+  // passed yet is excluded rather than counted as "no re-service".
+  const reserviceCutoff = etDateString(addETDays(now, -14));
+  const reserviceByLine = await getReserviceWithin14Days(from, to, reserviceCutoff);
+
   return {
     period: { from, to },
     cohort: 'service_report_v1 records first sent to the customer (report email per the email ledger / delivery queue, or the completion SMS/MMS per the server-stamped send status) in the period',
     total: totalRow ? shape(totalRow) : shape({ sent: 0, opened: 0 }),
-    by_service_line: byLine.map((r) => ({ service_line: r.service_line, ...shape(r) })),
+    by_service_line: byLine.map((r) => ({
+      service_line: r.service_line,
+      ...shape(r),
+      reserviceWithin14Days: RESERVICE_LINES.includes(r.service_line) ? (reserviceByLine[r.service_line] || { visits: 0, reserviced: 0, rate: null }) : null,
+    })),
     notes: [
       'opened = the report was first viewed at or after the first send, per the customer-only page-load event or the first-view stamp. Staff previews with a staff JWT and portal static views never count, but a staff download through the plain customer PDF link stamps the first view (that link cannot carry the staff JWT), so a small share of opens can be internal QA. A view that predates every send does not count, and does not hide a later real open.',
       'median_minutes_to_open is over those post-send first opens',
       'action counts are distinct reports with at least one such event at or after the first send (pdf_downloaded shares the staff-download caveat above)',
       "service_line 'unknown' = records completed before the line was stamped on the record",
+      'reserviceWithin14Days (pest and lawn only) counts completed, non-re-service visits scheduled in the period that got a same-customer same-line re-service 1-14 days later; rate is null when there were no such visits; visits from the last 14 days are left out until their follow-up window closes',
     ],
   };
 }

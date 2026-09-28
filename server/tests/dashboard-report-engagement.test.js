@@ -13,20 +13,27 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const rawCalls = [];
+// The tool fires 2 db.raw calls in a fixed order: the main engagement
+// ROLLUP (index 0), then reserviceWithin14Days (index 1). Each gets its own
+// queued row set so a test can control one without affecting the other.
 let rawRows = [];
+let reserviceRows = [];
 const mockDb = jest.fn(() => { throw new Error('get_report_engagement must not use the builder'); });
 mockDb.raw = jest.fn((sql, bindings) => {
+  const idx = rawCalls.length;
   rawCalls.push({ sql, bindings });
-  return Promise.resolve({ rows: rawRows });
+  const queued = [rawRows, reserviceRows][idx] || [];
+  return Promise.resolve({ rows: queued });
 });
 jest.mock('../models/db', () => mockDb);
 
 const { executeDashboardTool, DASHBOARD_TOOLS } = require('../services/intelligence-bar/dashboard-tools');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, addETDays } = require('../utils/datetime-et');
 
 beforeEach(() => {
   rawCalls.length = 0;
   rawRows = [];
+  reserviceRows = [];
 });
 
 describe('get_report_engagement', () => {
@@ -39,7 +46,8 @@ describe('get_report_engagement', () => {
 
   test('binds the window as real Dates spanning ET midnight to the day after date_to', async () => {
     await executeDashboardTool('get_report_engagement', { date_from: '2026-08-01', date_to: '2026-08-31' });
-    expect(rawCalls).toHaveLength(1);
+    // Main ROLLUP query, then reserviceWithin14Days.
+    expect(rawCalls).toHaveLength(2);
     const [fromTs, toTs] = rawCalls[0].bindings;
     expect(fromTs).toBeInstanceOf(Date);
     expect(toTs).toBeInstanceOf(Date);
@@ -106,13 +114,18 @@ describe('get_report_engagement', () => {
     const res = await executeDashboardTool('get_report_engagement', { date_from: '2026-08-01', date_to: '2026-08-31' });
     expect(res.period).toEqual({ from: '2026-08-01', to: '2026-08-31' });
     expect(res.total).toMatchObject({ sent: 40, opened: 25, open_rate_pct: 63, median_minutes_to_open: 42, photo_opened: 8, review_request_clicked: 3 });
+    expect(res.total.reserviceWithin14Days).toBeUndefined();
     expect(res.by_service_line).toHaveLength(2);
     expect(res.by_service_line[0]).toMatchObject({ service_line: 'pest', sent: 25, opened: 18, open_rate_pct: 72, median_minutes_to_open: 30 });
     expect(res.by_service_line[1]).toMatchObject({ service_line: 'lawn', sent: 15, opened: 7, open_rate_pct: 47, median_minutes_to_open: null });
-    // Every value the model will read is a number or null — never a string.
+    // reserviceWithin14Days defaults when the reservice query has no matching
+    // rows for a line that DID have reports sent.
+    expect(res.by_service_line[0].reserviceWithin14Days).toEqual({ visits: 0, reserviced: 0, rate: null });
+    // Every value the model will read is a number or null — never a string —
+    // except the one new structured field.
     for (const row of [res.total, ...res.by_service_line]) {
       for (const [k, v] of Object.entries(row)) {
-        if (k === 'service_line') continue;
+        if (['service_line', 'reserviceWithin14Days'].includes(k)) continue;
         expect(v === null || typeof v === 'number').toBe(true);
       }
     }
@@ -123,6 +136,44 @@ describe('get_report_engagement', () => {
     const res = await executeDashboardTool('get_report_engagement', { date_from: '2026-08-01', date_to: '2026-08-31' });
     expect(res.total).toMatchObject({ sent: 0, opened: 0, open_rate_pct: 0, median_minutes_to_open: null });
     expect(res.by_service_line).toEqual([]);
+  });
+
+  test('reserviceWithin14Days is null for a line with no re-service concept', async () => {
+    rawRows = [
+      { service_line: 'tree_shrub', is_total: 0, sent: '5', opened: '3', median_minutes_to_open: '20', pdf_downloaded: '0', photo_opened: '0', map_interacted: '0', reentry_timer_viewed: '0', review_request_clicked: '0', referral_cta_clicked: '0', cross_sell_requested: '0', followup_requested: '0', report_question_asked: '0' },
+    ];
+    const res = await executeDashboardTool('get_report_engagement', { date_from: '2026-08-01', date_to: '2026-08-31' });
+    expect(res.by_service_line[0]).toMatchObject({ service_line: 'tree_shrub', reserviceWithin14Days: null });
+  });
+
+  test('reserviceWithin14Days reports visits/reserviced/rate per line from the reservice query', async () => {
+    rawRows = [
+      { service_line: 'pest', is_total: 0, sent: '10', opened: '5', median_minutes_to_open: null, pdf_downloaded: '0', photo_opened: '0', map_interacted: '0', reentry_timer_viewed: '0', review_request_clicked: '0', referral_cta_clicked: '0', cross_sell_requested: '0', followup_requested: '0', report_question_asked: '0' },
+      { service_line: 'lawn', is_total: 0, sent: '4', opened: '2', median_minutes_to_open: null, pdf_downloaded: '0', photo_opened: '0', map_interacted: '0', reentry_timer_viewed: '0', review_request_clicked: '0', referral_cta_clicked: '0', cross_sell_requested: '0', followup_requested: '0', report_question_asked: '0' },
+    ];
+    reserviceRows = [
+      { service_line: 'pest', visits: '20', reserviced: '5' },
+      { service_line: 'lawn', visits: '8', reserviced: '0' },
+    ];
+    const res = await executeDashboardTool('get_report_engagement', { date_from: '2026-08-01', date_to: '2026-08-31' });
+    const byLine = Object.fromEntries(res.by_service_line.map((r) => [r.service_line, r]));
+    expect(byLine.pest.reserviceWithin14Days).toEqual({ visits: 20, reserviced: 5, rate: 0.25 });
+    // No re-services at all still returns a rate (0), not null — null is
+    // reserved for zero VISITS, which the query can't produce either
+    // (a zero-visit line drops out of the GROUP BY, not surfaces as a row).
+    expect(byLine.lawn.reserviceWithin14Days).toEqual({ visits: 8, reserviced: 0, rate: 0 });
+    // reservice query bindings are [from, to, cutoff, 'pest', 'lawn'] — plain
+    // date strings, not the ET timestamptz bounds the main query uses.
+    // cutoff is the tool's own ET "today" minus 14 days (right-censoring),
+    // never a UTC-derived value.
+    const expectedCutoff = etDateString(addETDays(new Date(), -14));
+    expect(rawCalls[1].bindings).toEqual(['2026-08-01', '2026-08-31', expectedCutoff, 'pest', 'lawn']);
+    expect(rawCalls[1].sql).toMatch(/r\.scheduled_date > v\.scheduled_date/);
+    expect(rawCalls[1].sql).toMatch(/r\.scheduled_date <= v\.scheduled_date \+ INTERVAL '14 days'/);
+    // The cutoff bounds the VISIT's own scheduled_date, not the [from, to]
+    // window — it rides in the same LEAST(...) as `to`, so a visit inside
+    // the last 14 days is excluded from the visits CTE entirely.
+    expect(rawCalls[1].sql).toMatch(/scheduled_date <= LEAST\(\?::date, \?::date\)/);
   });
 
   test('rejects malformed or inverted dates before touching the DB', async () => {
