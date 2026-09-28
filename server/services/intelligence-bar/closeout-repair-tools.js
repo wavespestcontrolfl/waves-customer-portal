@@ -257,6 +257,10 @@ async function executeCloseoutRepair(steps, { knex = db } = {}) {
   return receipt;
 }
 
+function stepsKey(steps) {
+  return JSON.stringify((steps || []).map((s) => [s.step, s.service_record_id || null, s.invoice_id || null, s.depends_on || null]));
+}
+
 function previewFromPlan(serviceId, status, plan) {
   return {
     preview: true,
@@ -299,7 +303,18 @@ async function repairCloseout(input, actionContext = {}) {
     return previewFromPlan(serviceId, status, plan);
   }
 
-  if (!plan.steps.length) return { error: 'Nothing left to repair — the plan changed after the card was shown.', preview_changed: true };
+  // Run ONLY the steps the confirm route just fingerprint-verified against
+  // the card (_verified_repair_steps), and only while the live plan is still
+  // exactly that set — a step that appeared since (an invoice paid in
+  // between) is never added to an approved run. Each step's writer dedupes
+  // on its own unique row, so a replay cannot double-send.
+  const approved = actionContext.executionPins?._verified_repair_steps;
+  if (!Array.isArray(approved) || !approved.length) {
+    return { error: 'This repair has no verified plan attached. Ask again for a fresh confirmation card.', preview_changed: true };
+  }
+  if (stepsKey(approved) !== stepsKey(plan.steps)) {
+    return { error: 'What this repair would do changed after the card was shown. Ask again for a fresh confirmation card.', preview_changed: true };
+  }
   const receipt = await executeCloseoutRepair(plan.steps);
   const completed = receipt.filter((r) => r.status === 'completed').length;
   logger.info(`[intelligence-bar:closeout-repair] ${serviceId}: ${completed}/${receipt.length} steps completed`);

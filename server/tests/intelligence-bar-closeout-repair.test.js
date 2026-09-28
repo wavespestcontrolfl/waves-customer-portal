@@ -180,7 +180,11 @@ test('confirmed: runs the steps in order and returns an itemized receipt', async
   ensureReportToken.mockImplementation(async () => { tokenMinted = true; return 'b'.repeat(32); });
   enqueueServiceReportV1EmailDelivery.mockResolvedValue({ ok: true, queued: true, delivery: { id: 'del-9', status: 'queued' } });
 
-  const result = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC }, { confirmed: true });
+  const approved = [
+    { step: 'publish_report', service_record_id: 'rec-1' },
+    { step: 'queue_report_email', service_record_id: 'rec-1', depends_on: 'publish_report' },
+  ];
+  const result = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC }, { confirmed: true, executionPins: { _verified_repair_steps: approved } });
   expect(result.success).toBe(true);
   expect(executionOutcome(result)).toBe('completed');
   expect(result.receipt.map((r) => [r.step, r.status])).toEqual([['publish_report', 'completed'], ['queue_report_email', 'completed']]);
@@ -201,7 +205,12 @@ test('confirmed: a failed prerequisite leaves its dependent not_attempted and th
   ensureReportToken.mockRejectedValue(new Error('db down'));
   enqueueReceiptDelivery.mockResolvedValue({ enqueued: true, job: { id: 'job-2' } });
 
-  const result = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC }, { confirmed: true });
+  const approved = [
+    { step: 'publish_report', service_record_id: 'rec-1' },
+    { step: 'queue_report_email', service_record_id: 'rec-1', depends_on: 'publish_report' },
+    { step: 'queue_receipt', invoice_id: 'inv-1' },
+  ];
+  const result = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC }, { confirmed: true, executionPins: { _verified_repair_steps: approved } });
   expect(result.partial).toBe(true);
   expect(executionOutcome(result)).toBe('partially_completed');
   expect(result.receipt.map((r) => [r.step, r.status])).toEqual([
@@ -219,4 +228,25 @@ test('a params-level confirmed without the route signal still only plans', async
   const res = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC, confirmed: true });
   expect(res.preview).toBe(true);
   expect(ensureReportToken).not.toHaveBeenCalled();
+});
+
+test('confirmed: never runs without the verified plan, and never adds a step the card lacked', async () => {
+  const facts = {
+    report: { state: 'pending', reason: 'no_report_artifact', posture: 'internal_only' },
+    reportDelivery: { state: 'not_required', reason: 'frozen_posture_internal_only' },
+    invoiceDelivery: { state: 'pending', reason: 'paid_receipt_not_sent', invoiceId: 'inv-1' },
+  };
+  getCloseoutStatus.mockResolvedValue(status({ facts }));
+  db.mockImplementation(fakeDb({ service_records: [RECORD], invoices: [{ id: 'inv-1', status: 'paid', receipt_sent_at: null }] }));
+
+  const unpinned = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC }, { confirmed: true });
+  expect(unpinned.preview_changed).toBe(true);
+
+  // The card approved only the report; the invoice was paid after it was shown.
+  const drifted = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC }, {
+    confirmed: true, executionPins: { _verified_repair_steps: [{ step: 'publish_report', service_record_id: 'rec-1' }] },
+  });
+  expect(drifted.preview_changed).toBe(true);
+  expect(ensureReportToken).not.toHaveBeenCalled();
+  expect(enqueueReceiptDelivery).not.toHaveBeenCalled();
 });

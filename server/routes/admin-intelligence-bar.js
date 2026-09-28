@@ -3285,6 +3285,12 @@ router.post('/confirm-action', async (req, res, next) => {
         if (action.tool_name === 'assign_technician' && livePreview?.would_assign_to_id) {
           execParams._verified_tech_id = String(livePreview.would_assign_to_id);
         }
+        // repair_closeout: the verified preview's step list IS the approved
+        // plan — the executor runs exactly these and refuses if its own
+        // re-plan differs (pre-push P1: never add a step the card lacked).
+        if (action.tool_name === 'repair_closeout' && Array.isArray(livePreview?.steps)) {
+          execParams._verified_repair_steps = livePreview.steps;
+        }
         // set_estimate_presentation: the verified preview's previous-name
         // snapshot rides to the executor to re-assert under the estimate
         // row lock (GH r10 P2) — the stable engine key would still match a
