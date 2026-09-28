@@ -1519,6 +1519,7 @@ function unbilledCompletionGap({ prediction, hasChargeableMethod = null, willMin
 }
 
 module.exports = {
+  stampedZeroFreeLive,
   BILLING_MODES,
   hasAuthoritativeZeroPrice,
   UNBILLED_MONEY_GAP_REASONS,

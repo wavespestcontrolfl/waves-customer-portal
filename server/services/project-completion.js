@@ -21,14 +21,9 @@ const { resolveWdoInspectionFee, wdoFeeIsExplicitZero } = require('./wdo-inspect
 const { settleOwedCompletionSupplies, completionSuppliesOwed, completionSuppliesOwedMarker } = require('./supplies-consumption');
 const { INVOICE_DELIVERED_STATUSES } = require('./closeout-status');
 const { hasAuthoritativeZeroPrice } = require('./billing-lane');
-// GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28): read at call time.
-// Fallback to a direct env read when a test's partial
-// `jest.mock('../config/feature-gates', ...)` predates this export — same
-// strict `=== 'true'` semantics either way; production always has the real
-// export.
-const featureGatesForStampedZero = require('../config/feature-gates');
-const stampedZeroFreeLive = featureGatesForStampedZero.stampedZeroFreeLive
-  || (() => process.env.GATE_STAMPED_ZERO_FREE === 'true');
+// GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28): read at call time through
+// billing-lane's one resolver (lazy, so no require cycle).
+const stampedZeroFreeLive = () => require('./billing-lane').stampedZeroFreeLive();
 
 const NON_MEMBERSHIP_TIER_KEYS = new Set(['none', 'onetime', 'na', 'no', 'notset', 'commercial']);
 const TERMINAL_NON_COMPLETABLE_STATUSES = new Set(['cancelled', 'skipped', 'no_show']);

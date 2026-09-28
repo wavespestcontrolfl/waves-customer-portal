@@ -30,14 +30,9 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { completionInvoiceAmount, hasAuthoritativeZeroPrice } = require('./billing-lane');
 const { isAlwaysFreeServiceType } = require('./no-cost-visit-types');
-// GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28): read at call time.
-// Fallback to a direct env read when a test's partial
-// `jest.mock('../config/feature-gates', ...)` predates this export — same
-// strict `=== 'true'` semantics either way; production always has the real
-// export.
-const featureGatesForStampedZero = require('../config/feature-gates');
-const stampedZeroFreeLive = featureGatesForStampedZero.stampedZeroFreeLive
-  || (() => process.env.GATE_STAMPED_ZERO_FREE === 'true');
+// GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28): read at call time through
+// billing-lane's one resolver (lazy, so no require cycle).
+const stampedZeroFreeLive = () => require('./billing-lane').stampedZeroFreeLive();
 
 async function resolveAppointmentCardLane({
   svc, invoice, alreadyPaid, visitPerformed, perApplicationBilling, annualPrepayBilling, explicitMembershipLane,

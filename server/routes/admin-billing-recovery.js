@@ -33,15 +33,9 @@ const { listAtRiskMrrAccounts } = require('../services/mrr-breakdown');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { ALWAYS_FREE_SERVICE_TYPE_SQL_REGEX } = require('../services/no-cost-visit-types');
-// GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28): read at call time so a
-// flip needs no redeploy. Off = byte-identical to today's NULLIF-based leak
-// query below. Fallback to a direct env read when a test's partial
-// `jest.mock('../config/feature-gates', ...)` predates this export — same
-// strict `=== 'true'` semantics either way; production always has the real
-// export.
-const featureGatesForStampedZero = require('../config/feature-gates');
-const stampedZeroFreeLive = featureGatesForStampedZero.stampedZeroFreeLive
-  || (() => process.env.GATE_STAMPED_ZERO_FREE === 'true');
+// GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28): read at call time through
+// billing-lane's one resolver (lazy, so no require cycle).
+const stampedZeroFreeLive = () => require('../services/billing-lane').stampedZeroFreeLive();
 const {
   executeDashboardTool,
   INTERNAL_TEST_CUSTOMERS,

@@ -13,14 +13,9 @@ const {
   isVariableOrCustomDiscountPreset,
 } = require("./discount-stack");
 const { discountStackingLive } = require("../config/feature-gates");
-// GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28): read at call time.
-// Fallback to a direct env read when a test's partial
-// `jest.mock('../config/feature-gates', ...)` predates this export — same
-// strict `=== 'true'` semantics either way; production always has the real
-// export.
-const featureGatesForStampedZero = require("../config/feature-gates");
-const stampedZeroFreeLive = featureGatesForStampedZero.stampedZeroFreeLive
-  || (() => process.env.GATE_STAMPED_ZERO_FREE === "true");
+// GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28): read at call time through
+// billing-lane's one resolver (lazy, so no require cycle).
+const stampedZeroFreeLive = () => require("./billing-lane").stampedZeroFreeLive();
 const { etDateString, addETDays, etCalendarDayOf } = require("../utils/datetime-et");
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require("./short-url");
 const { publicPortalUrl } = require("../utils/portal-url");
