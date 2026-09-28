@@ -252,6 +252,17 @@ describeOrSkip('buildCurationCandidateQuery admits a genuine first-of-year stale
     expect(policyDrops.map((d) => d.id)).toContain(String(id));
   });
 
+  test('an operator-reset row is never a curation candidate, even after its curated_at is re-opened', async () => {
+    const id = await insertEvent({
+      title: 'TEST Operator Reset Revived Show',
+      event_type: 'one_time', recurrence_type: 'none', freshness_status: 'fresh_one_time',
+      approved_via: 'operator_reset', curated_at: null,
+      start_at: etAt(sameYearDays().laterDay),
+    });
+    const rows = await buildCurationCandidateQuery(500);
+    expect(rows.map((r) => r.id)).not.toContain(id);
+  });
+
   test('expired and needs_review rows remain excluded unconditionally, even with no earlier sibling at all', async () => {
     const expiredId = await insertEvent({
       title: 'TEST Expired Row No Sibling',

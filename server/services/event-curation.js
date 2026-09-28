@@ -181,6 +181,9 @@ function buildCurationCandidateQuery(limit = CURATION_RUN_LIMIT) {
     .select(...CANDIDATE_COLUMNS, 's.name as source_name')
     .where('e.admin_status', 'pending')
     .whereNull('e.curated_at')
+    // An operator who returned a row to pending decides it by hand, whatever
+    // later re-opens curated_at (a revival, a date change).
+    .where((q) => q.whereNull('e.approved_via').orWhereNot('e.approved_via', 'operator_reset'))
     .where('e.start_at', '>=', etMidnight)
     .where('e.start_at', '<=', horizon);
 
