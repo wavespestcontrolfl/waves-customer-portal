@@ -34,6 +34,7 @@ const contentGuardrails = require('../content/content-guardrails');
 const { decodeHTMLStrict } = require('entities');
 const { refineFootprintFindings } = require('../content/footprint-claim-classifier');
 const comparisonTableGate = require('../content/comparison-table-gate');
+const { assertOwnerListForCommit } = require('../content/business-name-confirmer');
 const factCheckGate = require('../content/fact-check-gate');
 const editorialEvidence = require('../content/editorial-evidence');
 const complianceGate = require('../content/compliance-gate');
@@ -1202,7 +1203,7 @@ async function assertComplianceClear({ title, body, meta = [], city, keyword, ta
   }
 }
 
-async function publishAstro(postId) {
+async function publishAstro(postId, { humanApproved = false } = {}) {
   const post = await db('blog_posts').where({ id: postId }).first();
   if (!post) throw new Error(`blog_post ${postId} not found`);
   if (!post.title) throw new Error('post missing title');
@@ -1564,6 +1565,12 @@ async function publishAstro(postId) {
     applyCostGuidePriceRange(data, liveFile ? liveFrontmatterOf(liveFile) : null);
     assertValidBlogFrontmatter(data);
     const markdown = fm.stringify(data, finalBody + '\n');
+    // Owner competitor list on the FINAL text (Codex r6 on #5146): the
+    // scheduler's publish auto-merges through pages-poll, so an off-list
+    // company is refused before any branch; competitor content naming only
+    // owner-list competitors keeps the human-merge stamp. An admin publish (humanApproved)
+    // is a human decision: the check stamps its PR for an admin merge.
+    const ownerList = await assertOwnerListForCommit({ draft: null, brief: {}, frontmatter: data, body: finalBody, humanApproved, humanMergeFallback: true });
     const editorialFiles = await editorialEvidence.filesForDocument({ document: markdown, path: filePath });
 
     await gh.createBranch(branch);
@@ -1639,7 +1646,7 @@ async function publishAstro(postId) {
       // (GATE_NAMED_COMPETITOR_AUTOPUBLISH deliberately does NOT reach this
       // lane: publishAstro serves manual/calendar posts with no
       // operator-intercept provenance, so the human merge stays.)
-      astro_requires_human_merge: comparison.requiresHumanReview === true,
+      astro_requires_human_merge: comparison.requiresHumanReview === true || ownerList.requiresHumanMerge === true,
       updated_at: new Date(),
     });
 
@@ -3237,7 +3244,7 @@ async function dropUnreferencedBranch(branch, why) {
   }
 }
 
-async function publishOrUpdatePage(draft, brief = {}) {
+async function publishOrUpdatePage(draft, brief = {}, { humanApproved = false } = {}) {
   if (!canPublishDraftBrief(draft, brief)) {
     throw new Error(`unsupported autonomous draft for Astro publish: ${brief.action_type || 'unknown'}`);
   }
@@ -3435,6 +3442,9 @@ async function publishOrUpdatePage(draft, brief = {}) {
   assertValidBlogFrontmatter(frontmatter);
 
   const markdown = fm.stringify(frontmatter, `${finalBody}\n`);
+  // Owner competitor list on the FINAL committed text — hero / body-image
+  // alts included (Codex r5 on #5146). Throws before any branch exists.
+  await assertOwnerListForCommit({ draft, brief, frontmatter, body: finalBody, humanApproved });
   const editorialFiles = await editorialEvidence.filesForDocument({ document: markdown, path: filePath, brief });
 
   await gh.createBranch(branch);
@@ -3708,10 +3718,20 @@ async function publishMetadataRewrite(draft, brief = {}) {
 // programmatically, only when the body actually changed.
 const REFRESH_EDITABLE_META_FIELDS = ['title', 'metaTitle', 'meta_description', 'metaDescription'];
 
-async function publishRefresh(draft, brief = {}) {
+function assertRefreshLaneEnabled(brief) {
+  if (brief.gsc_signal?.bucket === 'citability_backfill'
+    && !require('../content/opportunity-queue')._internals.citabilityBackfillLaneOpen()) {
+    const err = new Error('Citability backfill is disabled; refresh publication withheld');
+    err.code = 'CITABILITY_BACKFILL_DISABLED';
+    throw err;
+  }
+}
+
+async function publishRefresh(draft, brief = {}, { humanApproved = false } = {}) {
   if (!canPublishRefresh(draft, brief)) {
     throw new Error(`unsupported refresh for Astro publish: ${brief.action_type || 'unknown'}`);
   }
+  assertRefreshLaneEnabled(brief);
 
   const targetUrl = brief.target_url || brief.page_url || draft.page_url;
   const target = draft.file_path || urlToAstroPath(targetUrl);
@@ -3915,10 +3935,14 @@ async function publishRefresh(draft, brief = {}) {
   }
   const finalBody = refreshImages.body;
   const markdown = fm.stringify(nextFrontmatter, `${finalBody}\n`);
+  // Same owner-list chokepoint as the new-post lane: refreshes auto-merge
+  // under AUTONOMOUS_BLOG_AUTO_MERGE too (Codex r5 on #5146).
+  await assertOwnerListForCommit({ draft, brief, frontmatter: nextFrontmatter, body: finalBody, humanApproved });
   const editorialFiles = await editorialEvidence.filesForDocument({ document: markdown, path: filePath, brief });
 
   const branchSlug = slugify(filePath.replace(/^src\/content\//, '').replace(/\.mdx?$/, '').replace(/\//g, ' '));
   const branch = `content/refresh-${branchSlug}-${shortId()}`;
+  assertRefreshLaneEnabled(brief);
   await gh.createBranch(branch);
   // Optimistic lock on the multi-file path: the tree write replaces paths
   // unconditionally (no per-file SHA like putFile), and image generation
@@ -3945,6 +3969,12 @@ async function publishRefresh(draft, brief = {}) {
   }
   // New image bytes ride the SAME commit as the post (atomic, like the
   // autonomous lane); with nothing to add the single-file put stays.
+  try {
+    assertRefreshLaneEnabled(brief);
+  } catch (err) {
+    await dropUnreferencedBranch(branch, 'a disabled citability backfill');
+    throw err;
+  }
   const fileCommit = (editorialFiles.length || refreshImages.files.length || (refreshImages.deletes || []).length)
     ? await gh.commitFiles({
       branch,
@@ -3960,6 +3990,12 @@ async function publishRefresh(draft, brief = {}) {
       sha: existing.sha,
     });
 
+  try {
+    assertRefreshLaneEnabled(brief);
+  } catch (err) {
+    await dropUnreferencedBranch(branch, 'a disabled citability backfill');
+    throw err;
+  }
   const pr = await gh.createPr({
     head: branch,
     title: `Refresh: ${nextFrontmatter.title || nextFrontmatter.metaTitle || publicPathFromAstroFile(filePath)}`.slice(0, 72),

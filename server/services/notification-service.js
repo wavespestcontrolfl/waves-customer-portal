@@ -597,6 +597,7 @@ function getCategoryIcon(category) {
     knowledge: '\u{1F4DA}',
     service: '\u{1F3E0}', appointment: '\u{1F4C5}', billing: '\u{1F4B3}', document: '\u{1F4C4}',
     lawn_health: '\u{1F331}', referral: '\u{1F381}', account: '\u{1F464}',
+    visit_prep_photos: '\u{1F4F7}',
   };
   return icons[category] || '\u{1F514}';
 }

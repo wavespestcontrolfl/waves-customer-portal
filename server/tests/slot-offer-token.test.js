@@ -12,6 +12,7 @@
 const {
   SLOT_OFFER_TTL_MS,
   CAPACITY_OFFER_POLICY,
+  BOOK_INSERTION_OFFER_POLICY,
   signSlotOffer,
   verifySlotOffer,
   appendOfferToSlotId,
@@ -116,6 +117,32 @@ describe('signSlotOffer / verifySlotOffer', () => {
     const future = Date.now() + 365 * 24 * 3600 * 1000;
     const { exp: farExp, sig: farSig } = signSlotOffer(OFFER, future);
     expect(verifySlotOffer({ ...OFFER, exp: farExp }, farSig)).toBe(false);
+  });
+});
+
+describe('BOOK_INSERTION_OFFER_POLICY — /book mid-route insertion offers (Codex round 2, PR #5231)', () => {
+  const BOOKING = {
+    surface: 'booking', scopeId: '', serviceKey: 'pest_control', locationKey: '27.34,-82.53',
+    date: '2027-05-20', startMinutes: 540, technicianId: 'tech-1', durationMinutes: 60,
+  };
+
+  test('a field minted WITH the policy verifies only WITH the same policy', () => {
+    const field = mintSlotOfferField({ ...BOOKING, policy: BOOK_INSERTION_OFFER_POLICY });
+    expect(verifySlotOfferField({ ...BOOKING, policy: BOOK_INSERTION_OFFER_POLICY }, field)).toBe(true);
+    // Minted tagged, verified untagged (the gate flipped off after mint) — mismatch.
+    expect(verifySlotOfferField(BOOKING, field)).toBe(false);
+  });
+
+  test('a field minted WITHOUT the policy verifies only WITHOUT it', () => {
+    const field = mintSlotOfferField(BOOKING);
+    expect(verifySlotOfferField(BOOKING, field)).toBe(true);
+    // Minted untagged, verified tagged (the gate flipped on after mint) — mismatch.
+    expect(verifySlotOfferField({ ...BOOKING, policy: BOOK_INSERTION_OFFER_POLICY }, field)).toBe(false);
+  });
+
+  test('distinct from CAPACITY_OFFER_POLICY — one policy tag never redeems for the other', () => {
+    const field = mintSlotOfferField({ ...BOOKING, policy: BOOK_INSERTION_OFFER_POLICY });
+    expect(verifySlotOfferField({ ...BOOKING, policy: CAPACITY_OFFER_POLICY }, field)).toBe(false);
   });
 });
 

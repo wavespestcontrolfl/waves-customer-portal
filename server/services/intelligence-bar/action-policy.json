@@ -1295,6 +1295,14 @@
     "approval": null,
     "scope": "broad"
   },
+  "list_gap_reports": {
+    "module": "gap-report-tools.js",
+    "domain": "ops",
+    "kind": "read",
+    "role": "admin",
+    "approval": null,
+    "scope": "broad"
+  },
   "list_open_closeouts": {
     "module": "closeout-tools.js",
     "domain": "closeout",

@@ -13,6 +13,7 @@ jest.mock('../services/content-astro/github-client', () => ({
   putFile: jest.fn(),
   createPr: jest.fn(),
   createIssueComment: jest.fn(),
+  deleteRef: jest.fn(),
 }));
 
 const gh = require('../services/content-astro/github-client');
@@ -58,8 +59,13 @@ function refreshDraft(overrides = {}) {
 }
 const BRIEF = { action_type: 'refresh_existing_page', target_url: '/pest-control-sarasota-fl/', city: 'Sarasota', service: 'pest' };
 
+// The publisher's owner-list chokepoint makes one company-extraction model
+// call on the final text; these pages name no company unless a test says so
+// (the chokepoint's own decision logic stays real).
+const businessNameConfirmer = require('../services/content/business-name-confirmer');
 beforeEach(() => {
   db.mockReset();
+  jest.spyOn(businessNameConfirmer, 'extractCompanyNames').mockResolvedValue({ ok: true, key: 'k', companies: [] });
 });
 
 function registryQuery(row, seen = []) {
@@ -100,6 +106,63 @@ describe('publishRefresh frontmatter freeze', () => {
     gh.putFile.mockResolvedValue({ commit: { sha: 'new-sha' } });
     gh.createPr.mockResolvedValue({ number: 77, html_url: 'https://github.com/x/y/pull/77', head: { sha: 'h' } });
     gh.createIssueComment.mockResolvedValue({});
+  });
+
+  test.each(['false', 'true'])('citability publication honors the live gate (%s)', async (enabled) => {
+    const gates = require('../config/feature-gates').gates;
+    const previous = gates.citabilityBackfill;
+    gates.citabilityBackfill = enabled === 'true';
+    try {
+      const result = pub.publishRefresh(refreshDraft(), { ...BRIEF, gsc_signal: { bucket: 'citability_backfill' } });
+      if (enabled === 'true') {
+        await expect(result).resolves.toMatchObject({ status: 'pr_open' });
+        expect(gh.createPr).toHaveBeenCalledTimes(1);
+      } else {
+        await expect(result).rejects.toMatchObject({ code: 'CITABILITY_BACKFILL_DISABLED' });
+        expect(gh.createBranch).not.toHaveBeenCalled();
+        expect(gh.putFile).not.toHaveBeenCalled();
+        expect(gh.createPr).not.toHaveBeenCalled();
+      }
+    } finally {
+      gates.citabilityBackfill = previous;
+    }
+  });
+
+  test.each(['getFile', 'createBranch', 'putFile'])('a stop during %s prevents the next publishing write', async (method) => {
+    const gates = require('../config/feature-gates').gates;
+    const previous = gates.citabilityBackfill;
+    gates.citabilityBackfill = true;
+    gh[method].mockImplementationOnce(async () => {
+      gates.citabilityBackfill = false;
+      return method === 'getFile' ? { content: EXISTING, sha: 'existing-sha' } : {};
+    });
+    try {
+      await expect(pub.publishRefresh(refreshDraft(), { ...BRIEF, gsc_signal: { bucket: 'citability_backfill' } }))
+        .rejects.toMatchObject({ code: 'CITABILITY_BACKFILL_DISABLED' });
+      expect(gh.createPr).not.toHaveBeenCalled();
+      if (method !== 'putFile') expect(gh.putFile).not.toHaveBeenCalled();
+      if (method === 'getFile') expect(gh.createBranch).not.toHaveBeenCalled();
+      else expect(gh.deleteRef).toHaveBeenCalledTimes(1);
+    } finally {
+      gates.citabilityBackfill = previous;
+    }
+  });
+
+  // Refreshes auto-merge too, so the owner-list chokepoint runs on the final
+  // refreshed text (Codex r5 on #5146).
+  test('a refresh naming an off-list company is refused before any branch is cut, and the check saw the final text', async () => {
+    businessNameConfirmer.extractCompanyNames.mockImplementation(async (finalDraft) => ({
+      ok: true, key: 'k', companies: /Bug Out/.test(finalDraft.body) ? ['Bug Out'] : [],
+    }));
+    const draft = refreshDraft({ body: 'Bug Out competes with local providers in Sarasota for recurring plans.' });
+
+    await expect(pub.publishRefresh(draft, BRIEF)).rejects.toMatchObject({ code: 'BLOG_OWNER_LIST_BLOCKED' });
+
+    expect(businessNameConfirmer.extractCompanyNames.mock.calls[0][0].body).toContain('Bug Out competes');
+    expect(businessNameConfirmer.extractCompanyNames.mock.calls[0][1]).toMatchObject({ final: true });
+    expect(gh.createBranch).not.toHaveBeenCalled();
+    expect(gh.putFile).not.toHaveBeenCalled();
+    expect(draft.company_extraction).toMatchObject({ companies: ['Bug Out'] });
   });
 
   test('preserves protected frontmatter and changes only meta + body + modified', async () => {

@@ -50,10 +50,26 @@ jest.mock('../services/track-transition-alerts', () => ({
   recordTrackTransitionFailure: jest.fn(async () => {}),
   recordTrackTransitionResultFailure: jest.fn(async () => {}),
 }));
-jest.mock('../services/invoice', () => ({
-  CANCELLED_SERVICE_RESOLVED_STATUSES: ['void', 'refunded', 'canceled', 'cancelled'],
-  voidOpenInvoicesForCancelledService: jest.fn(async () => {}),
+const mockPreviewCancelFee = jest.fn();
+jest.mock('../services/appointment-cancel-impact', () => ({
+  previewCancelFee: (...a) => mockPreviewCancelFee(...a),
+  feeRailClear: jest.requireActual('../services/appointment-cancel-impact').feeRailClear,
 }));
+jest.mock('../services/invoice', () => {
+  const RESOLVED = ['void', 'refunded', 'canceled', 'cancelled'];
+  return {
+    CANCELLED_SERVICE_RESOLVED_STATUSES: RESOLVED,
+    voidOpenInvoicesForCancelledService: jest.fn(async () => {}),
+    // The shared post-void scope (direct or service-record link).
+    unresolvedInvoicesForCancelledService: jest.fn((_conn, id) => ({
+      first: jest.fn(async () => {
+        if (mockInvoiceReadFails) throw new Error('invoice lookup unavailable');
+        return mockInvoices.find((row) => (row.scheduled_service_id === id || row.service_record_scheduled_service_id === id)
+          && !RESOLVED.includes(row.status));
+      }),
+    })),
+  };
+});
 
 describe('visit-cancellation-followthrough', () => {
   beforeEach(() => { jest.clearAllMocks(); mockCancellationTime = '2030-01-09T18:00:00Z'; });
@@ -222,5 +238,82 @@ describe('silent invoice cleanup skips', () => {
     expect(mockApptCancel).not.toHaveBeenCalled();
     expect(mockAlertUnresolved).toHaveBeenCalledWith({ scheduledServiceId: 'svc-1', outcome: { released: false, reason: 'fee_step_error' } });
     expect(require('../services/track-transitions').cancel).toHaveBeenCalled();
+  });
+});
+
+// Intelligence Bar cancel_appointment confirms against a card that listed
+// its invoices and credit (appointment-cancel-impact.js), and only for a
+// visit with NO card fee rail (owner ruling 2026-09-28, simple visits only).
+// The follow-through settles exactly that and never runs a card rail.
+describe('pinned effects (a card-confirmed cancel)', () => {
+  const NO_RAIL = { applies: false, amount: null, unresolved: false, rail: 'none', blocked_by_invoice: false };
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockCancellationTime = new Date(Date.now() - 60 * 1000).toISOString();
+    mockHoldCancel.mockResolvedValue({ charged: true });
+    mockPreviewCancelFee.mockResolvedValue({ ...NO_RAIL });
+  });
+
+  it('voids only the invoices the card listed, at their amounts, and reverses only the credit it showed', async () => {
+    const invoices = [{ id: 'inv-1', total: 89, credit_applied: 0, deposit_credit: 0 }];
+    const { runVisitCancellationFollowThrough } = require('../services/visit-cancellation-followthrough');
+    await runVisitCancellationFollowThrough({ targetIds: ['svc-1'], pinnedEffects: { 'svc-1': { invoices, fee: NO_RAIL, creditReversalOfferIds: ['offer-1'] } } });
+    expect(require('../services/invoice').voidOpenInvoicesForCancelledService).toHaveBeenCalledWith('svc-1', {
+      pinnedInvoices: invoices, pinnedCreditReversalOfferIds: ['offer-1'],
+    });
+  });
+
+  it('never runs a card rail — and a clean no-rail cancel raises no alert', async () => {
+    const { runVisitCancellationFollowThrough } = require('../services/visit-cancellation-followthrough');
+    await runVisitCancellationFollowThrough({ targetIds: ['svc-1'], pinnedEffects: { 'svc-1': { invoices: [], fee: NO_RAIL } } });
+    expect(mockPreviewCancelFee).toHaveBeenCalledWith('svc-1', new Date(mockCancellationTime));
+    expect(mockHoldCancel).not.toHaveBeenCalled();
+    expect(mockApptCancel).not.toHaveBeenCalled();
+    expect(mockAlertUnresolved).toHaveBeenCalledWith({ scheduledServiceId: 'svc-1', outcome: { released: true, reason: 'pinned_no_card_rail' } });
+  });
+
+  it('a card rail that appeared since the card is sent to office review, never charged or released', async () => {
+    mockPreviewCancelFee.mockResolvedValue({ applies: true, amount: 49, unresolved: false, rail: 'card_hold' });
+    const { runVisitCancellationFollowThrough } = require('../services/visit-cancellation-followthrough');
+    await runVisitCancellationFollowThrough({ targetIds: ['svc-1'], pinnedEffects: { 'svc-1': { invoices: [], fee: NO_RAIL } } });
+    expect(mockHoldCancel).not.toHaveBeenCalled();
+    expect(mockApptCancel).not.toHaveBeenCalled();
+    expect(mockAlertUnresolved).toHaveBeenCalledWith({ scheduledServiceId: 'svc-1', outcome: { released: false, reason: 'fee_step_error' } });
+  });
+
+  it('an unreadable card lane (unresolved, no rail named) is sent to office review too', async () => {
+    mockPreviewCancelFee.mockResolvedValue({ applies: true, amount: null, unresolved: true, rail: 'none' });
+    const { runVisitCancellationFollowThrough } = require('../services/visit-cancellation-followthrough');
+    await runVisitCancellationFollowThrough({ targetIds: ['svc-1'], pinnedEffects: { 'svc-1': { invoices: [], fee: NO_RAIL } } });
+    expect(mockHoldCancel).not.toHaveBeenCalled();
+    expect(mockAlertUnresolved).toHaveBeenCalledWith({ scheduledServiceId: 'svc-1', outcome: { released: false, reason: 'fee_step_error' } });
+  });
+
+  it('a waived (missing/stale clock) pinned cancel still runs no card rail', async () => {
+    const { runVisitCancellationFollowThrough } = require('../services/visit-cancellation-followthrough');
+    await runVisitCancellationFollowThrough({ targetIds: ['svc-1'], waiveFee: true, pinnedEffects: { 'svc-1': { invoices: [], fee: NO_RAIL } } });
+    expect(mockHoldCancel).not.toHaveBeenCalled();
+    expect(mockApptCancel).not.toHaveBeenCalled();
+  });
+
+  it('a service-record-linked invoice still holding money blocks the fee step for pinned AND unpinned cancels', async () => {
+    mockInvoices = [{ id: 'inv-sr', service_record_scheduled_service_id: 'svc-1', status: 'paid' }];
+    const { runVisitCancellationFollowThrough } = require('../services/visit-cancellation-followthrough');
+    await runVisitCancellationFollowThrough({ targetIds: ['svc-1'], pinnedEffects: { 'svc-1': { invoices: [], fee: NO_RAIL } } });
+    expect(mockAlertUnresolved).toHaveBeenCalledWith({ scheduledServiceId: 'svc-1', outcome: { released: false, reason: 'fee_step_error' } });
+
+    jest.clearAllMocks();
+    mockHoldCancel.mockResolvedValue({ charged: true });
+    await runVisitCancellationFollowThrough({ targetIds: ['svc-1'] });
+    expect(mockHoldCancel).not.toHaveBeenCalled();
+    expect(mockAlertUnresolved).toHaveBeenCalledWith({ scheduledServiceId: 'svc-1', outcome: { released: false, reason: 'fee_step_error' } });
+  });
+
+  it('an unpinned target is unchanged: unrestricted void, no rail re-check, rails run', async () => {
+    const { runVisitCancellationFollowThrough } = require('../services/visit-cancellation-followthrough');
+    await runVisitCancellationFollowThrough({ targetIds: ['svc-1'], pinnedEffects: { 'svc-other': { invoices: [], fee: NO_RAIL } } });
+    expect(require('../services/invoice').voidOpenInvoicesForCancelledService).toHaveBeenCalledWith('svc-1');
+    expect(mockPreviewCancelFee).not.toHaveBeenCalled();
+    expect(mockHoldCancel).toHaveBeenCalled();
   });
 });

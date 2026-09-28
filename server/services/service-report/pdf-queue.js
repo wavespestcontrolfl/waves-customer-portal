@@ -2,7 +2,7 @@ const crypto = require('crypto');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { buildServiceReportDynamicContext } = require('./dynamic-context');
-const { buildReportV1Data, stripLiveOnlyScheduleFields, lawnAssessmentPdfSignature, resolveCanonicalLawnRender } = require('./report-data');
+const { buildReportV1Data, stripLiveOnlyScheduleFields, stripLiveOnlyReportProductCopy, lawnAssessmentPdfSignature, resolveCanonicalLawnRender } = require('./report-data');
 const { applyReportIdentitySnapshot } = require('./report-identity-snapshot');
 const { nextEtMidnight } = require('./application-conditions');
 const { renderServiceReportV1Pdf, countUnreachableReportPhotos } = require('./pdf');
@@ -250,6 +250,12 @@ async function renderAndStoreServiceReportPdf(recordId, {
     // (nextAppointment, reportV2.snapshot.nextVisit) must never fossilize
     // into them (codex P2 r2: this path bypasses the route helper's strip).
     stripLiveOnlyScheduleFields(data);
+    // report_copy (GATE_REPORT_PRODUCT_COPY) is LIVE-VIEW ONLY (codex P1
+    // 2026-09-28): the PDF cache key does not vary on this gate, so a
+    // rolling deploy could otherwise cache copy under the worker's OWN gate
+    // state rather than what the browser rendered. This path bypasses the
+    // route helper's strip the same way stripLiveOnlyScheduleFields does.
+    stripLiveOnlyReportProductCopy(data);
     data.dynamicContext = await buildServiceReportDynamicContext({
       recordId,
       mode: 'static',

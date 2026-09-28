@@ -79,6 +79,32 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(link).toHaveAttribute('rel', 'noopener noreferrer');
   });
 
+  // GATE_REPORT_PRODUCT_COPY (owner-approved 2026-09-28) is LIVE-VIEW ONLY
+  // (codex P1 2026-09-28): the server strips `report_copy` from every PDF
+  // payload before it reaches this document (stripLiveOnlyReportProductCopy,
+  // report-data.js), so the PDF never renders it even if a caller somehow
+  // still handed the component a `report_copy` key.
+  it('never renders "How it works" / "Also labeled for" / "Pets & kids", even if report_copy is present on the payload', () => {
+    const data = {
+      ...BASE_DATA,
+      applications: [{
+        ...BASE_DATA.applications[0],
+        product: {
+          ...BASE_DATA.applications[0].product,
+          report_copy: {
+            how_it_works: 'A fast-acting non-repellent that reaches ants you never see.',
+            also_labeled_for: 'Cockroaches, crickets, earwigs and silverfish.',
+            pets_kids: 'Keep people and pets off treated areas until the spray has dried.',
+          },
+        },
+      }],
+    };
+    render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(screen.queryByText(/How it works:/)).toBeNull();
+    expect(screen.queryByText(/Also labeled for:/)).toBeNull();
+    expect(screen.queryByText(/Pets & kids:/)).toBeNull();
+  });
+
   it('is a service record, not an invoice — no pricing ever renders', () => {
     const { container } = render(<ServiceReportDocument data={BASE_DATA} token="tok123" />);
     expect(container.textContent).toContain('This is not an invoice.');

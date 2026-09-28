@@ -610,7 +610,7 @@ function buildInputSnapshot({ body, customer, estimate, lead, from, to, shortCod
  * phone re-lookup could aggregate a DIFFERENT account's facts into the prompt
  * (shared numbers) — lead-only estimate threads keep the template.
  */
-async function generateLlmReviewDraft({ customer, body, decision, estimate }) {
+async function generateLlmReviewDraft({ customer, body, decision, estimate, estimateLinked = true }) {
   if (process.env.AGENT_REVIEW_LLM_DRAFTS === 'false') return null;
   if (!customer) return null;
   try {
@@ -639,7 +639,14 @@ async function generateLlmReviewDraft({ customer, body, decision, estimate }) {
       // above this call in processInboundSms) so the offered slots reflect
       // THAT estimate's own service minutes — the same second argument
       // check_availability itself passes to getAvailableSlots.
-      estimateId: estimate?.id || null,
+      // A message linked to the estimate (its short code, or estimate or
+      // quote wording — Codex #5194 r2) is priced with it. An unlinked open
+      // estimate is one of the jobs the reply may be about: the drafter's
+      // service identity step decides between it, the customer's visits
+      // and any service they ask for ("can you add lawn service Tuesday?"
+      // is about lawn, never the estimate — Codex #5194 r3/r4).
+      estimateId: estimate?.id && estimateLinked ? estimate.id : null,
+      openEstimate: estimate?.id && !estimateLinked ? { id: estimate.id, service: estimate.service_interest || null } : null,
     });
     // Only a verified-clean draft may replace the template: unconverged means
     // the reply still asserts facts the context doesn't support after the
@@ -721,7 +728,16 @@ async function processInboundSms({ customer, from, to, body, smsLogId, sourceMes
       if (existing) return null; // same semantics as the ignored insert: nothing new
     }
 
-    const llmDraft = await generateLlmReviewDraft({ customer, body, decision, estimate });
+    // Follow-up #8 (Codex r9): the resolved estimate reaches the drafter's
+    // availability lookup only when the inbound is routed as an ESTIMATE
+    // interaction — a reschedule of an existing visit is priced with that
+    // visit's service, not an unrelated open estimate's service_interest.
+    // Only the estimate's own short code pins it (Codex #5194 r2/r8): "about
+    // my estimate" or "can you quote lawn service?" leaves it one job the
+    // reply may be about, and the drafter's service identity step weighs it
+    // against the customer's visits and the service they name.
+    const estimateLinked = Boolean(shortCode);
+    const llmDraft = await generateLlmReviewDraft({ customer, body, decision, estimate: workflow === WORKFLOW ? estimate : null, estimateLinked });
     // The house no-price rule applies to WHATEVER text lands in the composer
     // card — the deterministic scheduling templates echo raw inbound text, so
     // a customer's own "Tuesday for $50 works" would flow into the draft

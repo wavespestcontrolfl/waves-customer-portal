@@ -82,6 +82,7 @@ const SERVICE_FOOTPRINT_CITIES_LIST = (() => {
 })();
 
 const { HUMAN_PROSE_RULES } = require('../../llm/human-prose-rules');
+const { CITABILITY_AGENT_GUIDANCE } = require('./citability-agent-guidance');
 
 const WRITER_AGENT_CONFIG = {
   name: 'waves-content-writer',
@@ -498,6 +499,8 @@ look_alike — see licensed-photo-library.js).
   so an unrelated fourth image, even a brief-approved one, has nowhere to go
   and hard-fails. If a diagnostic draft genuinely needs a non-slot visual,
   use an MDX component from the catalog above (never a raw Markdown image).
+
+${CITABILITY_AGENT_GUIDANCE}
 
 FAQ POLICY (binding — the publish guardrail hard-fails violations as P0
 FAQ_BLOCKED_SERVICE; this list is loaded from the same module the guardrail

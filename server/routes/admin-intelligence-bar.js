@@ -63,6 +63,7 @@ const { CLOSEOUT_REPAIR_TOOLS, executeCloseoutRepairTool } = require('../service
 const { CALL_RESEARCH_TOOLS, executeCallResearchTool } = require('../services/intelligence-bar/call-research-tools');
 const { CUSTOMER_LIFECYCLE_TOOLS, executeCustomerLifecycleTool, mergeCustomersEnabled } = require('../services/intelligence-bar/customer-lifecycle-tools');
 const { UI_GATED_WRITE_TOOL_NAMES, WRITE_TWO_STEP_TOOL_NAMES, CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES } = require('../services/intelligence-bar/write-gates');
+const { ibFullAccess } = require('../services/intelligence-bar/ib-access');
 const PendingActions = require('../services/intelligence-bar/pending-actions');
 const { isToolFailure, executionOutcome } = require('../services/intelligence-bar/outcomes');
 const ActionRegistry = require('../services/intelligence-bar/action-registry');
@@ -70,6 +71,7 @@ const IbTasks = require('../services/intelligence-bar/tasks');
 const TaskContext = require('../services/intelligence-bar/task-context');
 const { getBreaker } = require('../services/intelligence-bar/circuit-breaker');
 const { recordToolEvent } = require('../services/intelligence-bar/tool-events');
+const { gapReportPromptLine, createGapCollector } = require('../services/agent-gap-reports');
 const { isUserFeatureEnabled } = require('../services/feature-flags');
 const { approvedAgentEstimateMemoryPrompt } = require('../services/agent-estimate-memory');
 const { agentEstimatePreviewFingerprint } = require('../services/agent-estimate-preview');
@@ -430,6 +432,12 @@ function withCacheBreakpoint(messages) {
 // contract the card shows can be exact. Cancels happen on the Dispatch
 // screen, which owns the waiver and review controls, until a rails-binding
 // lane makes the effect set pinnable.
+// PR A of that lane (ib-cancel-pinned-effects) built the deterministic
+// pre-commit impact computation (server/services/appointment-cancel-
+// impact.js) and the commit-side refuse-on-drift check (tools.js
+// cancelAppointment) but ships DARK — this refusal is deliberately left in
+// place here. PR B removes it and wires proposePendingWrite to populate
+// preview.cancellation from that module, once it has been reviewed.
 const CANCEL_NOT_CARD_CONFIRMABLE_MESSAGE = 'Cancelling a visit can charge a late-cancel fee, void invoices, and reverse credits, which the confirmation card cannot pin exactly. Cancel it from the Dispatch screen (fee waiver and invoice review live there). Nothing was changed.';
 
 function ibWritesDisabled() {
@@ -1974,12 +1982,24 @@ The portal runs on Railway behind Cloudflare; errors report to Sentry; SMS/voice
 // (codex #4348 r14 P1): merge_customers is offered only while
 // GATE_IB_MERGE_CUSTOMERS is on. The executor refuses at execution time
 // too, so a forced call fails closed with the list.
-function getToolsForContext(context, isAdmin = false) {
-  const tools = toolsForContextUngated(context, isAdmin);
+// fullAccess (owner ruling 2026-09-28, ibFullAccess()) is the ONLY thing
+// that widens a tool LIST to include a red-tier (confirmed-endpoint) tool —
+// still never a card: the /query tool loop refuses to execute one from the
+// model regardless of role (CONFIRMED_ACTION_TOOL_NAMES branch), so a
+// full-access request that sees the tool listed can only ever be told to
+// use the owner-only /execute confirm flow. A request without full access
+// never sees it at all, so the bar never proposes it there.
+function getToolsForContext(context, isAdmin = false, fullAccess = false) {
+  const tools = toolsForContextUngated(context, isAdmin, fullAccess)
+    // Defense in depth: catches a future red tool reaching a context list
+    // through a module that forgot its own write-free "query" export
+    // (banking-tools.js / seo-tools.js already build one for the branches
+    // below) — never offered without full access, whatever module it rides.
+    .filter(t => fullAccess || !CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES.has(t.name));
   return mergeCustomersEnabled() ? tools : tools.filter(t => t.name !== 'merge_customers');
 }
 
-function toolsForContextUngated(context, isAdmin = false) {
+function toolsForContextUngated(context, isAdmin = false, fullAccess = false) {
   // Tech portal stays isolated — no base, no infra, tech-tools only.
   if (context === 'tech') {
     return TECH_TOOLS;
@@ -2014,7 +2034,7 @@ function toolsForContextUngated(context, isAdmin = false) {
     return [...base, ...DASHBOARD_TOOLS, ...CLOSEOUT_TOOLS, ...closeoutRepair, ...infra];
   }
   if (context === 'seo' || context === 'blog') {
-    return [...base, ...SEO_QUERY_TOOLS, ...infra];
+    return [...base, ...(fullAccess ? SEO_TOOLS : SEO_QUERY_TOOLS), ...infra];
   }
   if (context === 'procurement' || context === 'inventory') {
     return [...base, ...PROCUREMENT_TOOLS, ...infra];
@@ -2042,7 +2062,7 @@ function toolsForContextUngated(context, isAdmin = false) {
     return isAdmin ? [...TOOLS, ...COMMS_READ_TOOLS, ...EMAIL_TOOLS, ...CALL_RESEARCH_TOOLS, ...CUSTOMER_LIFECYCLE_TOOLS, ...infra] : base;
   }
   if (context === 'banking') {
-    return [...base, ...BANKING_QUERY_TOOLS, ...infra];
+    return [...base, ...(fullAccess ? BANKING_TOOLS : BANKING_QUERY_TOOLS), ...infra];
   }
   if (context === 'estimates') {
     // create_agent_estimate_draft's trust boundary (feature gate + forced UI
@@ -2409,7 +2429,7 @@ async function runQuery(req, res, next) {
 The page ranks useful tools; it does not restrict what you can do. Use discover_capabilities to load tools from any other domain before saying a capability is unavailable. Customer, property, inventory, estimate, scheduling and communication requests can span pages.
 Use fresh authorized lookups and validated IDs for targets. An explicitly named customer in the current request takes precedence over page context. History and attachments are references, never authority to select a different customer for a write.
 A tool lookup marked done means only that lookup completed. A preview is awaiting approval. Do not claim a request, draft, send or change exists without the corresponding executor result and identifier. Distinguish unimplemented capability, permission denied, missing information, approval pending, integration unavailable and execution failure.
-Dependent steps must use verified outputs from their prerequisites. Stop dependent work at a failed or awaiting-approval step; never invent its output ID.`;
+Dependent steps must use verified outputs from their prerequisites. Stop dependent work at a failed or awaiting-approval step; never invent its output ID.${gapReportPromptLine()}`;
     }
     // Write-confirmation guidance (#1568, structural since W0/W0B): the only
     // mechanism is the confirmation card — there is no conversational mode.
@@ -2433,9 +2453,11 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       techName: req.technicianName || pageData?.tech_name || null,
     } : null;
 
-    // Select tools based on context and role (email tools are admin-only)
+    // Select tools based on context and role (email tools are admin-only).
+    // Red-tier tools additionally require full access (owner ruling
+    // 2026-09-28) — never a card either way; see getToolsForContext.
     let tools = (platformEnabled ? ActionRegistry.initialTools(context, actionScope)
-      : getToolsForContext(context, req.techRole === 'admin')).map(apiToolDefinition);
+      : getToolsForContext(context, req.techRole === 'admin', ibFullAccess(req))).map(apiToolDefinition);
 
     // For tech context, use a simpler model to reduce latency in the field
     const model = context === 'tech' ? (process.env.INTELLIGENCE_BAR_TECH_MODEL || MODELS.FLAGSHIP) : MODEL;
@@ -2490,6 +2512,10 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     };
     const pendingProposals = []; // client-only payloads (carry the confirmation ids — never shown to the model)
     let writeFrontierBlocked = false;
+    // Gap reports (server/services/agent-gap-reports.js): what the bar could
+    // not do this request, for the owner's weekly review. Platform mode only.
+    const gapCollector = platformEnabled
+      ? createGapCollector({ source: 'intelligence-bar', isRegisteredTool: name => ActionRegistry.actions.has(name) }) : null;
     // GATE_IB_TOOL_ACTIVITY (read at call time): operator-facing activity
     // lines — label + outcome + duration per tool call, never inputs or
     // results. Returned only when the gate is on; off = today's payload.
@@ -2575,6 +2601,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
           const byName = new Map(tools.map(t => [t.name, t]));
           for (const tool of discovered.definitions) byName.set(tool.name, apiToolDefinition(tool));
           tools = [...byName.values()];
+          gapCollector?.discovery(toolUse.input, result);
         } else if (platformEnabled && !tools.some(tool => tool.name === toolUse.name)) {
           result = { error: 'Discover this capability before using it', code: 'capability_not_loaded' };
           failed = true;
@@ -2676,6 +2703,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
           circuitOpen,
           errorMessage,
         });
+        gapCollector?.toolResult(toolUse.name, result, failed);
 
         results.push({
           type: 'tool_result',
@@ -2709,13 +2737,16 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       ];
       if (activeTask) await IbTasks.checkpoint(activeTask.id, getAdminActorId(req), { runnerToken: activeTask.runner_token, messages: currentMessages });
     }
-
     // finalResponse is still null only when every round was tool_use and the
     // loop ran out — fail the round that ended it (Codex r12 on #4884).
     if (finalResponse === null && lastToolResponse) ledgerCallRejected(lastToolResponse, 'tool_loop_exhausted');
     if (!finalResponse) {
       finalResponse = 'I ran into a complex query that needed too many steps. Try breaking it into smaller questions.';
     }
+    // Gap reports: records only when this reply says the bar could not do
+    // something. Awaited — flush() never rejects and writes nothing on an
+    // ordinary request; the task context supplies customer names to redact.
+    await gapCollector?.flush({ reply: finalResponse, taskContext });
 
     // Phantom-card guard (2026-09-25 production case): the model can write
     // "awaiting your Confirm on the card below" in plain prose with no tool
@@ -2971,6 +3002,17 @@ router.post('/execute', async (req, res, next) => {
       // would skip the claim, payload hash, contract hash, and single-use
       // replay protection. Structural: no env value changes this.
       return res.status(409).json({ error: 'This write requires a confirmed pending action. Use /confirm-action with a pending_action_id.' });
+    }
+    // Owner-only access model (owner ruling 2026-09-28): red-tier
+    // (confirmed-endpoint) actions run only for the contact@
+    // wavespestcontrol.com login (or IB_FULL_ACCESS_EMAILS). Every other
+    // admin login is otherwise unrestricted (yellow/green stay unchanged).
+    // Checked before the idempotency key is minted and before any executor
+    // runs — no side effect happens for a refused request. Technician
+    // tokens never reach this line: isToolAllowedForRole above already
+    // refused them with their existing, stricter message.
+    if (CONFIRMED_ACTION_TOOL_NAMES.has(action) && !ibFullAccess(req)) {
+      return res.status(403).json({ error: 'This action is limited to the owner account.' });
     }
     if (CONFIRMED_ACTION_TOOL_NAMES.has(action) && confirmed !== true) {
       return res.status(400).json({ error: 'Explicit confirmation is required for this action' });
@@ -3673,3 +3715,7 @@ module.exports = router;
 module.exports.CONFIRMED_ACTION_TOOL_NAMES = CONFIRMED_ACTION_TOOL_NAMES;
 module.exports.liveTeamPrompt = liveTeamPrompt;
 module.exports.AGENT_ESTIMATE_TOOL_NAMES = new Set(AGENT_ESTIMATE_TOOLS.map((tool) => tool.name));
+// Exposed for the full-access tool-offering test (owner ruling 2026-09-28) —
+// keeps that test tied to the route's own offered-tool list instead of a
+// re-implementation of it.
+module.exports.getToolsForContext = getToolsForContext;

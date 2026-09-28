@@ -35,7 +35,7 @@ const { findReportFollowupAppointment } = require('../services/report-followup-a
 // re-exported below so existing consumers/tests keep their import path.
 const { storedRevisionMatches, writeOrRefreshCtaRequest } = require('../services/cta-service-request');
 
-const { buildReportV1Data, stripLiveOnlyScheduleFields, PIN_NO_ASSESSMENT, lawnAssessmentPdfSignature, resolveCanonicalLawnRender, resolveProjectReportPreviewFields, completedProtocolActionLabels, completedProtocolActionEntries } = require('../services/service-report/report-data');
+const { buildReportV1Data, stripLiveOnlyScheduleFields, stripLiveOnlyReportProductCopy, PIN_NO_ASSESSMENT, lawnAssessmentPdfSignature, resolveCanonicalLawnRender, resolveProjectReportPreviewFields, completedProtocolActionLabels, completedProtocolActionEntries } = require('../services/service-report/report-data');
 const { applyReportIdentitySnapshot } = require('../services/service-report/report-identity-snapshot');
 
 // lawn_assessments.id is a Postgres uuid — anything else must be refused
@@ -262,10 +262,8 @@ const {
 const { buildPestPressureCustomerView } = require('../services/pest-pressure/customer-view');
 const { isOneTimePressureExcludedRecord } = require('../services/pest-pressure/one-time-exclusion');
 const { renderServiceReportV1Pdf, countUnreachableReportPhotos } = require('../services/service-report/pdf');
-const { stripFixedReentryTiming, sanitizeProductTargets } = require('../services/social-media');
+const { stripFixedReentryTiming, sanitizeProductTargets, REENTRY_SAFE_COPY } = require('../services/social-media');
 const { publicOriginPdfSignature } = require('../utils/portal-url');
-// The approved idiom that replaces a stripped fixed-timing clause.
-const REENTRY_SAFE_COPY = 'Ready once dry — your technician confirms timing.';
 const { dateOnlyStamp } = require('../services/service-report/time-format');
 const {
   getHealthyStoredReportPdf,
@@ -566,6 +564,14 @@ async function buildServiceReportV1ResponseData(service, token, {
       if (app.product.precaution_summary) app.product.precaution_summary = strip(app.product.precaution_summary);
       if (app.product.reentry_summary) app.product.reentry_summary = strip(app.product.reentry_summary);
     });
+    // report_copy (GATE_REPORT_PRODUCT_COPY) is LIVE-VIEW ONLY (codex P1
+    // 2026-09-28): the PDF/static/sms_preview cache keys don't vary on this
+    // gate, so a rolling deploy could otherwise cache copy under the
+    // worker's OWN gate state rather than what the browser actually
+    // rendered. Stripped here at the SAME payload boundary every other
+    // live-only field uses (stripLiveOnlyReportProductCopy — report-data.js,
+    // same shape as stripLiveOnlyScheduleFields).
+    stripLiveOnlyReportProductCopy(data);
     if (data.reportV2?.aftercare?.reentry) {
       data.reportV2.aftercare.reentry = strip(data.reportV2.aftercare.reentry);
     }
@@ -1411,18 +1417,6 @@ router.post('/:token/events', reportEventLimiter, crossSellActionLimiter, async 
             // service_date/created_at feed the historical-report recency
             // gate (PR r9) — the click path must classify identically.
             'sr.service_date', 'sr.created_at',
-            // GATE_REPORT_CROSS_SELL_V2's findings priority reads the
-            // visit's typed companion identity off service_data (roach
-            // COMPANION vs a cockroach-PRIMARY report) — without it here
-            // the click path always resolved roachesIndoors === false via
-            // that leg (the service_findings-text leg still worked, since
-            // it queries by sr.id independently), silently re-deriving a
-            // DIFFERENT V2 offer than what the render path showed, on top
-            // of which the click/accept flow's own drift check would then
-            // 409 a fingerprint the customer actually saw. The click path
-            // must classify identically to the read path (same doctrine as
-            // scheduled_service_id/service_date above).
-            'sr.service_data',
             db.raw('COALESCE(ss.service_address_line1, c.address_line1) as address_line1'),
             db.raw(`${stampedLine2Sql('ss', 'c')} as address_line2`),
             db.raw('COALESCE(ss.service_address_city, c.city) as city'),
