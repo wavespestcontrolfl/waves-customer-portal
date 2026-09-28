@@ -1918,23 +1918,27 @@ async function verifyClosedPrRetirement(run, pr, gh) {
 // producer and refresh merge path, so a supersession and this close cannot
 // cross at the write boundary.
 async function closeSupersededCitabilityPr(run, pr, gh, queue, pendingReason) {
-  let current = null;
-  const state = await db.transaction(async (trx) => {
+  // Verify the park under the page-edit lock, then do the GitHub I/O after
+  // COMMIT: a slow GitHub call must never hold the lock every page-edit
+  // producer waits on. The gap is safe because supersession is permanent
+  // (the marker is never removed) and every refresh merge re-checks it
+  // under the same lock (queueRowStillParkedLocked) before merging.
+  const parked = await db.transaction(async (trx) => {
     await trx.raw("SELECT pg_advisory_xact_lock(hashtext('opportunity_page_edit'))");
     const queueRow = await trx('opportunity_queue').where('id', run.opportunity_id).forUpdate()
       .first('id', 'status', 'skip_reason', 'claim_id', 'bucket', 'signal_metadata');
-    if (!queueRow || !sameQueueClaim(queueRow, run)
-      || queueRow.bucket !== 'citability_backfill' || !queue.pageEditSuperseded(queueRow)
-      || queueRow.status !== 'pending_review' || queueRow.skip_reason !== pendingReason) return 'queue_moved';
-    current = await gh.getPr(pr.number);
-    if (!current) return 'pr_unreadable';
-    if (current.merged || current.merged_at) return 'merged';
-    if (current.head?.sha !== pr.head?.sha) return 'head_moved';
-    if (current.state === 'open') await gh.closePr(pr.number);
-    else if (current.state !== 'closed') return 'state_changed';
-    return 'closed';
+    return !!queueRow && sameQueueClaim(queueRow, run)
+      && queueRow.bucket === 'citability_backfill' && queue.pageEditSuperseded(queueRow)
+      && queueRow.status === 'pending_review' && queueRow.skip_reason === pendingReason;
   });
-  return { state, current };
+  if (!parked) return { state: 'queue_moved', current: null };
+  const current = await gh.getPr(pr.number);
+  if (!current) return { state: 'pr_unreadable', current };
+  if (current.merged || current.merged_at) return { state: 'merged', current };
+  if (current.head?.sha !== pr.head?.sha) return { state: 'head_moved', current };
+  if (current.state === 'open') await gh.closePr(pr.number);
+  else if (current.state !== 'closed') return { state: 'state_changed', current };
+  return { state: 'closed', current };
 }
 
 async function finalizeSupersededCitabilityRetirement(run, pr, gh, queue, pendingReason) {
@@ -2020,6 +2024,17 @@ async function retireSupersededCitabilityPr(run, pr, gh) {
   }
   if (state !== 'closed') return { pending: true, transient: true, reason: `citability_retirement_${state}` };
   return finalizeSupersededCitabilityRetirement(run, pr, gh, queue, pendingReason);
+}
+
+// The batch keeps polling a run while its queue row is still parked on it,
+// or while a superseded citability row is still claimed by the same claim:
+// stale-claim/approval recovery then owns restoring the park for terminal
+// retirement, so the run must not be annotated away first.
+function queueRowKeepsRunPolled(queueRow, run) {
+  if (!queueRow || !sameQueueClaim(queueRow, run)) return false;
+  if (queueRow.status === 'pending_review') return queueRow.skip_reason === pendingSkipReasonForRun(run);
+  return queueRow.status === 'claimed' && queueRow.bucket === 'citability_backfill'
+    && require('./opportunity-queue')._internals.pageEditSuperseded(queueRow);
 }
 
 async function pollRun(run, { allowMerge = true } = {}) {
@@ -2327,16 +2342,7 @@ async function pollPending() {
     }
     if (run.opportunity_id) {
       const queueRow = queueById.get(run.opportunity_id) || null;
-      const stillParked = !!queueRow
-        && sameQueueClaim(queueRow, run)
-        && queueRow.status === 'pending_review'
-        && queueRow.skip_reason === pendingSkipReasonForRun(run);
-      const currentClaimPrRecovery = !!queueRow
-        && sameQueueClaim(queueRow, run)
-        && queueRow.bucket === 'citability_backfill'
-        && require('./opportunity-queue')._internals.pageEditSuperseded(queueRow)
-        && queueRow.status === 'claimed';
-      if (!stillParked && !currentClaimPrRecovery) {
+      if (!queueRowKeepsRunPolled(queueRow, run)) {
         const r = await supersedeRun(run, queueRow);
         await reconcileSupersededPr(run);
         results.push({ id: run.id, pr_url: run.astro_pr_url, ...r });

@@ -861,11 +861,22 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     // Initial read + locked pre-close recheck, then every retirement
     // verification sees the same closed head.
     gh.getPr.mockResolvedValueOnce(open).mockResolvedValueOnce(open).mockResolvedValue(closed);
+    // GitHub I/O must run after the page-edit-lock transaction commits, never
+    // inside it: record whether a transaction is open when closePr fires.
+    let openTransactions = 0;
+    const baseTransaction = db.transaction;
+    db.transaction = jest.fn(async (fn) => {
+      openTransactions += 1;
+      try { return await baseTransaction(fn); } finally { openTransactions -= 1; }
+    });
+    let transactionsOpenAtClose = null;
+    gh.closePr.mockImplementationOnce(async () => { transactionsOpenAtClose = openTransactions; return {}; });
 
     const result = await poller.pollPending();
 
     expect(result.results[0]).toMatchObject({ skipped: true, retired: true, reason: 'citability_backfill_superseded' });
     expect(gh.closePr).toHaveBeenCalledWith(42);
+    expect(transactionsOpenAtClose).toBe(0);
     expect(gh.retireBranch).toHaveBeenCalledWith('content/autonomous-test');
     expect(updates).toContainEqual(expect.objectContaining({
       table: 'opportunity_queue',
