@@ -4204,13 +4204,16 @@ class GscOpportunityMiner {
   //     edit (it re-mines once that edit is done and the cooldown passes);
   //   - pages with a question write CLAIMED or in review are returned, and
   //     other buckets' edits of those pages wait a mine.
-  // Runs only while the bucket's gate is on.
+  // Runs only while the bucket's gate is on. The rows are read FOR UPDATE:
+  // claimNext skips locked rows (SKIP LOCKED), so a pending row cannot be
+  // claimed between this classification and its expiry.
   async _reconcileAeoQuestionPages(runner, arbitrated) {
     if (!isEnabled('aeoQuestionGapMining')) return new Set();
     const rows = await runner('opportunity_queue')
       .where({ bucket: AEO_QUESTION_GAP_BUCKET })
       .whereIn('status', ['pending', 'claimed', 'pending_review'])
       .whereNotNull('page_url')
+      .forUpdate()
       .select('id', 'page_url', 'status');
     const busy = new Set();
     const losers = [];

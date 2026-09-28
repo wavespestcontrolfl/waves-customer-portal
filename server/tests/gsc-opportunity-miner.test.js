@@ -3217,7 +3217,14 @@ describe('aeo_question_gap bucket', () => {
       q.where = (arg) => { if (typeof arg === 'object') Object.assign(q.filters, arg); else q.filters.status = 'pending'; return q; };
       q.whereIn = (col, vals) => { q.filters[col] = vals; return q; };
       q.whereNotNull = () => q;
-      q.select = async () => queue.filter((r) => r.bucket === q.filters.bucket && q.filters.status.includes(r.status));
+      // Rows must be locked before classification: claimNext skips locked
+      // rows, so an unlocked read could classify a row a concurrent claim
+      // then takes (and the competing edit would land beside it).
+      q.forUpdate = () => { q.locked = true; return q; };
+      q.select = async () => {
+        expect(q.locked).toBe(true);
+        return queue.filter((r) => r.bucket === q.filters.bucket && q.filters.status.includes(r.status));
+      };
       q.update = async (patch) => { updates.push({ ids: q.filters.id, patch }); for (const r of queue) if (q.filters.id.includes(r.id)) Object.assign(r, patch); return q.filters.id.length; };
       return q;
     };
