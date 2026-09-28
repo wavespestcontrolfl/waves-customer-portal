@@ -13,9 +13,11 @@
  * ELIGIBILITY IS PER ADDRESS, NOT PER PROFILE. Two profiles can share one
  * mailbox, and the subscriber row is one row per address, linked to
  * whichever profile linkToCustomer's canonical picker chooses — so every
- * check below runs across EVERY non-archived profile whose email
- * normalizes (LOWER(TRIM)) to the address, and an exclusion on ANY of them
- * excludes the address. Every exclusion is checked in ONE fixed priority
+ * check below runs across EVERY non-archived profile whose email is the
+ * same MAILBOX (LOWER(TRIM), plus Google's dot/+tag/googlemail identity —
+ * sameMailboxSql), and an exclusion on ANY of them excludes the address;
+ * existing subscriber rows and suppressions match by that same mailbox
+ * identity, in both directions. Every exclusion is checked in ONE fixed priority
  * order — an existing subscriber-state row always outranks a
  * preference/suppression check, so a both-unsubscribed-AND-opted-out
  * address counts once, under the higher reason:
@@ -88,7 +90,7 @@
  * lands on — never whichever sharing profile the candidate scan returned
  * first), and the orphan link embeds liveTwinSubselect as its target. The
  * zone fill (fillZoneForSubscriber) is one locked read-then-write shared by
- * the fill sweep and the import: it re-reads the linked customer's live
+ * the fill sweep, the import, and each orphan link: it re-reads the linked customer's live
  * status and CURRENT city under that customer's comms lock and a row lock,
  * so a city edit can never land between the read and the zone write.
  */
@@ -99,7 +101,9 @@ const { cityToZone } = require('./event-freshness');
 const { activeSuppressionsFor } = require('./email-template-library');
 const { linkToCustomer, liveTwinSubselect } = require('./newsletter-subscribers');
 const { CUSTOMER_STAGES } = require('./customer-stages');
-const { lockCustomerComms, lockCustomerEmail } = require('../utils/customer-comms-lock');
+const {
+  lockCustomerComms, lockCustomerEmail, googleMailboxIdentity, GOOGLE_MAILBOX_SQL,
+} = require('../utils/customer-comms-lock');
 // The SAME channel-resolution rule the email-division sender pipeline
 // uses (server/services/email-division/eligibility.js) — never a
 // re-derived copy: a missing row / null / unrecognised value reads as the
@@ -167,6 +171,30 @@ async function countInvalidEmailCandidates(conn) {
 const normalizeEmail = (email) => String(email || '').trim().toLowerCase();
 const sortedUnique = (ids) => [...new Set(ids.map(String))].sort();
 
+// "Is this stored column the SAME MAILBOX as `email`?" — for EXCLUSION
+// matching only (sharing profiles, existing subscriber rows, suppressions);
+// it never rewrites or chooses a stored address. Exact LOWER(TRIM) match,
+// plus, for a Google address, Google's mailbox identity: gmail.com /
+// googlemail.com ignore local-part dots and everything after '+', so
+// j.o.h.n+news@gmail.com and john@googlemail.com deliver to john@gmail.com's
+// inbox. Symmetric by construction (both sides reduce to the identity), so
+// an unsubscribe or opt-out recorded under either spelling excludes the
+// other. The identity is the repo's one canonical rule —
+// customer-comms-lock.js googleMailboxIdentity (JS) / GOOGLE_MAILBOX_SQL
+// (SQL), the same identity the address lock this module takes keys on —
+// never a local copy. Non-Google addresses keep the exact comparison: dots
+// and tags are significant everywhere else.
+function sameMailboxSql(column, email) {
+  const exact = normalizeEmail(email);
+  const identity = googleMailboxIdentity(exact);
+  if (!identity) return { sql: `LOWER(TRIM(${column})) = ?`, bindings: [exact] };
+  const trimmed = `TRIM(${column})`;
+  return {
+    sql: `(LOWER(TRIM(${column})) = ? OR (${GOOGLE_MAILBOX_SQL.isGoogle(trimmed)} AND ${GOOGLE_MAILBOX_SQL.mailbox(trimmed)} = ?))`,
+    bindings: [exact, identity.split('@')[0]],
+  };
+}
+
 // Re-verifies ONE customer is STILL a live candidate (same predicate as
 // fetchCandidateRows) and returns its CURRENT email/name/city — closes the
 // gap where an archive, pipeline-stage change, or email edit mid-batch would
@@ -196,29 +224,35 @@ async function fetchLiveCandidate(conn, customerId, { forShare = false } = {}) {
   return result.rows?.[0] || null;
 }
 
-// EVERY profile whose customers.email is this normalized address — any
-// stage, any `active` flag, only archived (deleted_at) rows left out: the
-// SAME population linkToCustomer's canonical picker (liveTwinSubselect,
+// EVERY profile whose customers.email is this MAILBOX (sameMailboxSql —
+// exact, or a Google dot/tag/googlemail alias of it) — any stage, any
+// `active` flag, only archived (deleted_at) rows left out. A superset of the
+// population linkToCustomer's canonical picker (liveTwinSubselect,
 // newsletter-subscribers.js) chooses the subscriber's customer_id from, so
-// no profile the new row can end up attached to is ever left unchecked.
+// no profile the new row can end up attached to is ever left unchecked, and
+// an opt-out on an alias profile of the same inbox excludes it too.
 async function profilesSharingAddress(conn, email) {
+  const mailbox = sameMailboxSql('c.email', email);
   const result = await conn.raw(
     `SELECT c.id AS profile_id
        FROM customers c
-      WHERE LOWER(TRIM(c.email)) = ?
+      WHERE ${mailbox.sql}
         AND c.deleted_at IS NULL`,
-    [normalizeEmail(email)],
+    mailbox.bindings,
   );
   return (result.rows || []).map((r) => r.profile_id);
 }
 
-// Highest-priority existing subscriber row for this ADDRESS: any row whose
-// email normalizes to it, or that is linked to ANY profile sharing it.
-// Ordered so a still-active row always wins the read.
+// Highest-priority existing subscriber row for this MAILBOX: any row whose
+// email is the same mailbox (sameMailboxSql — an unsubscribed
+// john.doe+news@gmail.com row blocks johndoe@gmail.com and vice versa), or
+// that is linked to ANY profile sharing it. Ordered so a still-active row
+// always wins the read.
 async function existingAddressStatus(conn, profileIds, email) {
+  const mailbox = sameMailboxSql('email', email);
   const result = await conn.raw(
     `SELECT status FROM newsletter_subscribers
-      WHERE customer_id = ANY(?::uuid[]) OR LOWER(TRIM(email)) = ?
+      WHERE customer_id = ANY(?::uuid[]) OR ${mailbox.sql}
       ORDER BY CASE status
                  WHEN 'active' THEN 0
                  WHEN 'unsubscribed' THEN 1
@@ -228,9 +262,29 @@ async function existingAddressStatus(conn, profileIds, email) {
                  ELSE 4
                END
       LIMIT 1`,
-    [profileIds, normalizeEmail(email)],
+    [profileIds, ...mailbox.bindings],
   );
   return result.rows?.[0]?.status || null;
+}
+
+// Active suppressions for this MAILBOX. activeSuppressionsFor stays the
+// single source of truth for which rows count (status, group, global
+// types); it matches one exact address, so it runs once per stored spelling
+// of the same mailbox (sameMailboxSql) — a suppression recorded for any
+// Google alias of the address suppresses it, in both directions.
+async function mailboxSuppressions(conn, email) {
+  const mailbox = sameMailboxSql('email', email);
+  const variants = await conn.raw(
+    `SELECT DISTINCT LOWER(TRIM(email)) AS email FROM email_suppressions
+      WHERE status = 'active' AND ${mailbox.sql}`,
+    mailbox.bindings,
+  );
+  const spellings = [...new Set([normalizeEmail(email), ...(variants.rows || []).map((r) => r.email)])];
+  const found = [];
+  for (const spelling of spellings) {
+    found.push(...await activeSuppressionsFor(null, spelling, 'marketing_newsletter', conn));
+  }
+  return found;
 }
 
 // Classifies ONE ADDRESS (never one profile) against the fixed priority
@@ -246,7 +300,7 @@ async function classifyAddress(conn, { email, profileIds }) {
   if (status === 'pending') return 'pending_confirmation';
   if (status === 'inactive' || status === 'waitlist') return 'inactive_subscriber';
 
-  const suppressions = await activeSuppressionsFor(null, email, 'marketing_newsletter', conn);
+  const suppressions = await mailboxSuppressions(conn, email);
   if (suppressions.length) return 'suppressed';
 
   const prefsRows = await conn('notification_prefs').whereIn('customer_id', profileIds);
@@ -289,6 +343,13 @@ const MAX_DECISION_ATTEMPTS = 3;
 //   4. the per-address email key (fences suppression writers and an email
 //      assignment that would add a new sharer);
 //   5. re-resolve the sharing set — anyone new since step 1 retries.
+// Step 5 covers every assignment that took the key FIRST: this decision
+// waits on the key, the assignment commits, and the re-read sees the new
+// sharer (proven in newsletter-list-reconcile-postgres.test.js). An
+// assignment that is still waiting for the key while this decision holds
+// it cannot be seen by any read here (its email is uncommitted and names a
+// profile this decision has no reason to lock); it commits strictly AFTER
+// this import, exactly as if it had started after it.
 async function decideAddress(trx, customerId) {
   const peek = await fetchLiveCandidate(trx, customerId);
   if (!peek) return { outcome: 'no_longer_live' };
@@ -352,8 +413,10 @@ async function withAddressDecision(conn, customerId, then) {
 // write: an ACTIVE subscriber missing a region_zone, linked to a live
 // customer (canonical whereLiveCustomer stages). The zone itself always
 // comes from cityToZone(c.city) of the row this predicate just read.
-const ZONE_FILL_FROM = `FROM newsletter_subscribers ns
-       JOIN customers c ON c.id = ns.customer_id
+// `customerRef` defaults to the row's own link; the orphan projection
+// passes the link target it WOULD set, so it reads the identical predicate.
+const zoneFillFrom = (customerRef = 'ns.customer_id') => `FROM newsletter_subscribers ns
+       JOIN customers c ON c.id = ${customerRef}
       WHERE ns.status = 'active'
         AND (ns.region_zone IS NULL OR TRIM(ns.region_zone) = '')
         AND c.deleted_at IS NULL
@@ -365,7 +428,7 @@ const ZONE_FILL_FROM = `FROM newsletter_subscribers ns
 async function fetchZoneFillCandidates(conn) {
   const result = await conn.raw(
     `SELECT ns.id AS subscriber_id, c.city
-       ${ZONE_FILL_FROM}`,
+       ${zoneFillFrom()}`,
     [CUSTOMER_STAGES],
   );
   return (result.rows || [])
@@ -391,7 +454,7 @@ async function fillZoneForSubscriber(trx, subscriberId) {
   await lockCustomerComms(trx, customerId);
   const locked = await trx.raw(
     `SELECT ns.id AS subscriber_id, c.city
-       ${ZONE_FILL_FROM}
+       ${zoneFillFrom()}
         AND ns.id = ?
         AND ns.customer_id = ?
       FOR UPDATE OF ns FOR SHARE OF c`,
@@ -452,13 +515,31 @@ async function orphanLinkTarget(conn, subscriberId) {
   return rows.length === 1 ? rows[0].id : null;
 }
 
+// Projection of the zone fills successful orphan links run: the SAME
+// predicate fillZoneForSubscriber re-checks, read as if each orphan were
+// already linked to its projected `customerId`.
+async function projectedOrphanZoneFills(conn, links) {
+  let fills = 0;
+  for (const { subscriberId, customerId } of links) {
+    const result = await conn.raw(
+      `SELECT c.city ${zoneFillFrom('?')} AND ns.id = ?`,
+      [customerId, CUSTOMER_STAGES, subscriberId],
+    );
+    if (result.rows?.[0] && cityToZone(result.rows[0].city)) fills += 1;
+  }
+  return fills;
+}
+
 // Links ONE orphan. Resolve → lock → re-check: the target's customer-comms
 // lock (the same lock every import of that customer's address holds while
 // it inserts and links) is taken BEFORE the one-active-subscription check
 // that matters, and the UPDATE re-evaluates the WHOLE predicate in its own
 // statement after the lock — so two reconciles linking different orphans
 // to one customer serialize, and the second sees the first's committed
-// link and refuses. Returns true only when a row was actually updated.
+// link and refuses. A landed link then runs the SAME locked zone fill in
+// the same transaction — the fill sweep ran before any link, and its
+// predicate joins through customer_id, so a newly linked orphan would
+// otherwise wait for a second run. Returns { linked, zoneFilled }.
 async function applyOrphanLink(conn, subscriberId) {
   return conn.transaction(async (trx) => {
     const target = await orphanLinkTarget(trx, subscriberId);
@@ -474,7 +555,8 @@ async function applyOrphanLink(conn, subscriberId) {
         RETURNING ns.id`,
       [...bindings, subscriberId, target],
     );
-    return (result.rows || []).length > 0;
+    if (!(result.rows || []).length) return { linked: false, zoneFilled: false };
+    return { linked: true, zoneFilled: await fillZoneForSubscriber(trx, subscriberId) };
   });
 }
 
@@ -638,7 +720,9 @@ async function reconcileCustomers({ dryRun = true, conn = db } = {}) {
     });
 
     await guardedEach(orphanLinks, (link) => ({ subscriberId: link.subscriberId }), async (link) => {
-      if (await applyOrphanLink(conn, link.subscriberId)) orphanLinksApplied += 1;
+      const { linked, zoneFilled } = await applyOrphanLink(conn, link.subscriberId);
+      if (linked) orphanLinksApplied += 1;
+      if (zoneFilled) zoneFillsApplied += 1;
     });
   }
 
@@ -651,7 +735,9 @@ async function reconcileCustomers({ dryRun = true, conn = db } = {}) {
     // Dry run reports the projection (what WOULD happen); write mode
     // reports what was ACTUALLY applied — a change landing between the two
     // can make these differ, never the rules themselves.
-    zoneFills: write ? zoneFillsApplied : zoneFillCandidates.length,
+    // The dry run adds the fills its projected orphan links would run, as
+    // the write counts the fills its links actually made.
+    zoneFills: write ? zoneFillsApplied : zoneFillCandidates.length + await projectedOrphanZoneFills(conn, orphanLinks),
     orphanLinks: write ? orphanLinksApplied : orphanLinks.length,
     byCity,
     errors,

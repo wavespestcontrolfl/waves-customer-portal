@@ -17,12 +17,17 @@ jest.mock('../services/logger', () => ({ error: jest.fn(), info: jest.fn(), warn
 // The comms/email advisory locks are real Postgres behavior (proven against
 // real Postgres in newsletter-list-reconcile-postgres.test.js) — no-op here
 // so the fully-mocked conn doesn't need to fake pg_advisory_xact_lock SQL.
+// The mailbox identity (googleMailboxIdentity / GOOGLE_MAILBOX_SQL) is the
+// REAL one — the module embeds it in its exclusion SQL.
 jest.mock('../utils/customer-comms-lock', () => ({
   lockCustomerComms: jest.fn(async () => {}),
   lockCustomerEmail: jest.fn(async () => {}),
+  googleMailboxIdentity: jest.requireActual('../utils/customer-comms-lock').googleMailboxIdentity,
+  GOOGLE_MAILBOX_SQL: jest.requireActual('../utils/customer-comms-lock').GOOGLE_MAILBOX_SQL,
 }));
 
 const { linkToCustomer } = require('../services/newsletter-subscribers');
+const { googleMailboxIdentity } = jest.requireActual('../utils/customer-comms-lock');
 const { activeSuppressionsFor } = require('../services/email-template-library');
 const { CUSTOMER_STAGES } = require('../services/customer-stages');
 const { reconcileCustomers } = require('../services/newsletter-list-reconcile');
@@ -101,6 +106,9 @@ function makeConn(state) {
   const hasActive = (c) => state.subscribers.some((s) => s.status === 'active'
     && (s.customer_id === c.id || (s.email || '').trim().toLowerCase() === c.email.trim().toLowerCase()));
   const key = (v) => String(v).trim().toLowerCase();
+  // sameMailboxSql's semantics: exact LOWER(TRIM), or one Google mailbox.
+  const sameMailbox = (a, b) => key(a) === key(b)
+    || (!!googleMailboxIdentity(key(a)) && googleMailboxIdentity(key(a)) === googleMailboxIdentity(key(b)));
 
   // THE canonical twin picker (liveTwinSubselect, newsletter-subscribers.js):
   // every NON-ARCHIVED profile on the normalized address, any stage, ordered
@@ -197,7 +205,21 @@ function makeConn(state) {
     // any stage (the same population linkToCustomer's picker chooses from).
     if (sql.includes('AS profile_id')) {
       const [email] = bindings;
-      return { rows: state.customers.filter((c) => !c.deleted_at && key(c.email || '') === key(email)).map((c) => ({ profile_id: c.id })) };
+      return { rows: state.customers.filter((c) => !c.deleted_at && c.email && sameMailbox(c.email, email)).map((c) => ({ profile_id: c.id })) };
+    }
+    // mailboxSuppressions: every stored spelling of the same mailbox.
+    if (sql.includes('FROM email_suppressions')) {
+      const [email] = bindings;
+      return { rows: [...new Set((state.suppressions || []).filter((e) => sameMailbox(e, email)).map(key))].map((e) => ({ email: e })) };
+    }
+    // projectedOrphanZoneFill — the zone-fill predicate read against the
+    // link target (checked BEFORE the generic zone-candidate branch).
+    if (sql.includes('JOIN customers c ON c.id = ?')) {
+      const [customerId, , subscriberId] = bindings;
+      const row = state.subscribers.find((s) => s.id === subscriberId);
+      const c = state.customers.find((x) => x.id === customerId);
+      const ok = row && row.status === 'active' && (!row.region_zone || !row.region_zone.trim()) && c && isLive(c);
+      return { rows: ok ? [{ city: c.city }] : [] };
     }
     if (sql.includes('FROM customers c') && sql.includes('NOT EXISTS')) {
       return { rows: state.customers.filter(isCandidate).filter((c) => !hasActive(c)).map((c) => ({ customer_id: c.id, email: c.email, first_name: c.first_name, last_name: c.last_name, city: c.city })) };
@@ -209,7 +231,7 @@ function makeConn(state) {
     }
     if (sql.includes('ORDER BY CASE status')) {
       const [profileIds, email] = bindings;
-      const matches = state.subscribers.filter((s) => profileIds.includes(s.customer_id) || (s.email || '').trim().toLowerCase() === key(email));
+      const matches = state.subscribers.filter((s) => profileIds.includes(s.customer_id) || (s.email && sameMailbox(s.email, email)));
       const best = matches.reduce((acc, m) => {
         const p = PRIORITY[m.status] ?? 4;
         return !acc || p < acc.p ? { status: m.status, p } : acc;
@@ -716,4 +738,75 @@ test('two orphans resolving to one customer: the dry run projects ONE link, matc
   const write = await reconcileCustomers({ dryRun: false, conn: makeConn(state) });
   expect(write.orphanLinks).toBe(1);
   expect(state.subscribers.filter((s) => s.customer_id === 'c1')).toHaveLength(1);
+});
+
+// Codex #5165 (Gmail aliases): Google ignores local-part dots and '+tags'
+// and googlemail.com is gmail.com, so an unsubscribe, suppression, or opt-out
+// recorded under ANY spelling of one Google mailbox excludes every other
+// spelling — in both directions. Non-Google addresses keep exact matching.
+test.each([
+  ['an unsubscribed alias row blocks the plain address', 'john@gmail.com', 'j.o.h.n+news@gmail.com'],
+  ['an unsubscribed plain row blocks a dotted/tagged googlemail alias', 'J.O.H.N+promo@googlemail.com', 'john@gmail.com'],
+])('%s', async (_label, customerEmail, unsubscribedEmail) => {
+  const state = {
+    customers: [cust({ email: customerEmail })],
+    subscribers: [{ id: 's1', customer_id: null, email: unsubscribedEmail, status: 'unsubscribed' }],
+    prefs: [],
+  };
+  const dry = await reconcileCustomers({ conn: makeConn(state) });
+  expect(dry.importable).toBe(0);
+  expect(dry.excluded.previously_unsubscribed).toBe(1);
+  const write = await reconcileCustomers({ dryRun: false, conn: makeConn(state) });
+  expect(write.imported).toBe(0);
+  expect(state.subscribers).toHaveLength(1);
+  expect(state.subscribers[0].status).toBe('unsubscribed'); // never resubscribed
+});
+
+test('a suppression recorded under a Google alias suppresses the address (activeSuppressionsFor still decides which rows count)', async () => {
+  const state = { customers: [cust({ email: 'johndoe@gmail.com' })], subscribers: [], prefs: [], suppressions: ['john.doe+x@gmail.com'] };
+  activeSuppressionsFor.mockImplementation(async (_t, email) => (email === 'john.doe+x@gmail.com' ? [{ id: 'sup1' }] : []));
+  const dry = await reconcileCustomers({ conn: makeConn(state) });
+  expect(dry.excluded.suppressed).toBe(1);
+  expect(activeSuppressionsFor).toHaveBeenCalledWith(null, 'john.doe+x@gmail.com', 'marketing_newsletter', expect.anything());
+  const write = await reconcileCustomers({ dryRun: false, conn: makeConn(state) });
+  expect(write.imported).toBe(0);
+  expect(state.subscribers).toHaveLength(0);
+});
+
+test('an explicit opt-out on a profile holding a Google alias of the address excludes it', async () => {
+  const state = {
+    customers: [cust({ id: 'c1', email: 'johndoe@gmail.com' }), cust({ id: 'c2', email: 'John.Doe+work@gmail.com', pipeline_stage: 'new_lead' })],
+    subscribers: [],
+    prefs: [{ customer_id: 'c2', marketing_offers: false }],
+  };
+  const dry = await reconcileCustomers({ conn: makeConn(state) });
+  expect(dry.excluded.marketing_opted_out).toBe(1);
+  const write = await reconcileCustomers({ dryRun: false, conn: makeConn(state) });
+  expect(write.imported).toBe(0);
+});
+
+test('non-Google addresses keep exact matching: an unsubscribed john+news@example.com does not block john@example.com', async () => {
+  const state = {
+    customers: [cust({ email: 'john@example.com' })],
+    subscribers: [{ id: 's1', customer_id: null, email: 'john+news@example.com', status: 'unsubscribed' }],
+    prefs: [],
+  };
+  const write = await reconcileCustomers({ dryRun: false, conn: makeConn(state) });
+  expect(write.imported).toBe(1);
+});
+
+// Codex #5165 (orphan zone): the fill sweep joins through customer_id, so a
+// just-linked orphan was never in it — the link now runs the same locked
+// zone fill, and the dry run projects that fill too.
+test('a linked orphan gets its zone in the same run, and the dry run counts that fill', async () => {
+  const state = {
+    customers: [cust({ id: 'c1', email: 'orphan@e.com', city: 'Venice' })],
+    subscribers: [{ id: 's1', customer_id: null, email: 'orphan@e.com', status: 'active', region_zone: null }],
+    prefs: [],
+  };
+  const dry = await reconcileCustomers({ conn: makeConn(state) });
+  expect(dry).toMatchObject({ orphanLinks: 1, zoneFills: 1 });
+  const write = await reconcileCustomers({ dryRun: false, conn: makeConn(state) });
+  expect(write).toMatchObject({ orphanLinks: 1, zoneFills: 1 });
+  expect(state.subscribers[0]).toMatchObject({ customer_id: 'c1', region_zone: 'south_sarasota' });
 });

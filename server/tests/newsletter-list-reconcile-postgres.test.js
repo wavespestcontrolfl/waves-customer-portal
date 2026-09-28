@@ -12,7 +12,7 @@
 jest.setTimeout(30000);
 const { randomUUID } = require('crypto');
 const knexFactory = require('knex');
-const { lockCustomerComms } = require('../utils/customer-comms-lock');
+const { lockCustomerComms, lockCustomerEmail } = require('../utils/customer-comms-lock');
 
 const connection = process.env.RECONCILE_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
@@ -319,6 +319,75 @@ postgres('newsletter-list-reconcile — real Postgres', () => {
     await db('customers').whereIn('id', customerIds).del();
   }
 
+  // Codex #5165: Google ignores local-part dots and '+tags' and
+  // googlemail.com is gmail.com, so exclusions match on that mailbox
+  // identity in both directions — the real SQL (GOOGLE_MAILBOX_SQL), not a
+  // mocked matcher. Non-Google addresses stay exact.
+  test('an unsubscribe, a suppression, or an opt-out recorded under a Google alias excludes the address; a non-Google +tag does not (real Postgres)', () => rollbackTest(async (trx) => {
+    const tag = randomUUID().slice(0, 8).replace(/-/g, '');
+    const unsub = synthCustomer({ email: `unsub${tag}@gmail.com` });
+    const suppressed = synthCustomer({ email: `U.N.S.U.P${tag}+promo@googlemail.com` });
+    const optedIn = synthCustomer({ email: `optout${tag}@gmail.com` });
+    const optedOutAlias = synthCustomer({ email: `Opt.Out${tag}+work@gmail.com`, pipeline_stage: 'new_lead' });
+    const control = synthCustomer({ email: `ctrl${tag}@example.invalid` });
+    await trx('customers').insert([unsub, suppressed, optedIn, optedOutAlias, control]);
+    await trx('notification_prefs').insert({ customer_id: optedOutAlias.id, marketing_offers: false, email_enabled: true });
+    await trx('newsletter_subscribers').insert([
+      { email: `u.n.s.u.b${tag}+news@googlemail.com`, status: 'unsubscribed', source: 'public_form' },
+      { email: `ctrl${tag}+news@example.invalid`, status: 'unsubscribed', source: 'public_form' },
+    ]);
+    await trx('email_suppressions').insert({ email: `unsup${tag}@gmail.com`, suppression_type: 'unsubscribe', status: 'active' });
+
+    const dry = await reconcileCustomers({ conn: trx });
+    expect(dry.excluded).toMatchObject({ previously_unsubscribed: 1, suppressed: 1, marketing_opted_out: 1 });
+    expect(dry.importable).toBe(1); // the non-Google control only
+    const write = await reconcileCustomers({ dryRun: false, conn: trx });
+    expect(write.imported).toBe(1);
+    const active = await trx('newsletter_subscribers').where({ status: 'active' }).whereRaw('email LIKE ?', [`%${tag}%`]);
+    expect(active.map((r) => r.email)).toEqual([`ctrl${tag}@example.invalid`]);
+  }));
+
+  // Codex #5165 (recheck sharers): an email assignment that took the address
+  // key FIRST (customer-email-write.js order: row FOR UPDATE, then the key)
+  // makes the decision wait on that key; once it commits, the re-read sees
+  // the new sharer, the decision retries from scratch, and the new sharer's
+  // opt-out is honoured.
+  test('an email assignment holding the address key blocks the decision, and the new (opted-out) sharer it commits is honoured on retry', async () => {
+    const primary = synthCustomer();
+    const joiner = synthCustomer({ pipeline_stage: 'new_lead' });
+    await seedCommitted([primary, joiner], [
+      { customer_id: primary.id, marketing_offers: true, email_enabled: true },
+      { customer_id: joiner.id, marketing_offers: false, email_enabled: true },
+    ]);
+    const writer = knexFactory({ client: 'pg', connection, pool: POOL });
+    const connA = knexFactory({ client: 'pg', connection, pool: POOL });
+    let writerTrx;
+    try {
+      writerTrx = await writer.transaction();
+      await writerTrx('customers').where({ id: joiner.id }).forUpdate().first('id');
+      await lockCustomerEmail(writerTrx, primary.email);
+      await writerTrx('customers').where({ id: joiner.id }).update({ email: primary.email });
+
+      let settled = false;
+      const resultPromise = reconcileCustomers({ dryRun: false, conn: connA }).then((r) => { settled = true; return r; });
+      await new Promise((resolve) => { setTimeout(resolve, 200); });
+      expect(settled).toBe(false); // waiting on the address key
+
+      await writerTrx.commit();
+      const result = await resultPromise;
+      expect(result.errors).toEqual([]);
+      expect(result.imported).toBe(0);
+      expect(result.excluded.marketing_opted_out).toBe(1);
+      const rows = await db('newsletter_subscribers').whereRaw('LOWER(TRIM(email)) = ?', [primary.email.toLowerCase()]);
+      expect(rows).toHaveLength(0);
+    } finally {
+      if (writerTrx && !writerTrx.isCompleted()) await writerTrx.rollback();
+      await writer.destroy();
+      await connA.destroy();
+      await cleanupCommitted([primary.id, joiner.id], [primary.email]);
+    }
+  });
+
   test('a lead-stage profile sharing the address with an explicit opt-out excludes it (real Postgres) — the dry run and the write agree', () => rollbackTest(async (trx) => {
     const primary = synthCustomer();
     const sharer = synthCustomer({ email: ` ${primary.email.toUpperCase()}`, pipeline_stage: 'new_lead' });
@@ -465,6 +534,18 @@ postgres('newsletter-list-reconcile — real Postgres', () => {
     await reconcileCustomers({ dryRun: false, conn: trx });
     const row = await trx('newsletter_subscribers').where({ email: orphanEmail }).first();
     expect(row.customer_id).toBe(lead.id);
+  }));
+
+  test('a linked orphan gets its zone in the same run — the dry run projects that fill and the write applies it (real Postgres)', () => rollbackTest(async (trx) => {
+    const owner = synthCustomer({ city: 'Venice' });
+    await trx('customers').insert(owner);
+    await trx('newsletter_subscribers').insert({ email: owner.email.toLowerCase(), status: 'active', source: 'public_form' });
+    const dry = await reconcileCustomers({ conn: trx });
+    expect(dry).toMatchObject({ orphanLinks: 1, zoneFills: 1 });
+    const write = await reconcileCustomers({ dryRun: false, conn: trx });
+    expect(write).toMatchObject({ orphanLinks: 1, zoneFills: 1, errors: [] });
+    const row = await trx('newsletter_subscribers').where({ email: owner.email.toLowerCase() }).first();
+    expect(row).toMatchObject({ customer_id: owner.id, region_zone: 'south_sarasota' });
   }));
 
   test('an imported row carries the CANONICAL profile\'s name and is linked to it — never a secondary sharer\'s (real Postgres)', () => rollbackTest(async (trx) => {
