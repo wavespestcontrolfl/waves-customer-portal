@@ -191,7 +191,9 @@ describe('computeContactGaps — every placeholder-only name shape', () => {
     expect(gaps.lastName).toBe(true);
   });
   test('a real name that merely contains a placeholder word is kept', () => {
-    expect(computeContactGaps({ estimate: { customer_name: 'Unknown Sample', customer_email: 'x@example.com' } }).firstName).toBe(false);
+    // A placeholder word as the SURNAME of a real given name is kept
+    // (a leading placeholder is a missing first name — covered below).
+    expect(computeContactGaps({ estimate: { customer_name: 'Pat New', customer_email: 'x@example.com' } }).firstName).toBe(false);
   });
 });
 
@@ -204,5 +206,24 @@ describe('one placeholder rule everywhere', () => {
     const gaps = computeContactGaps({ estimate: { customer_name: 'Unknown caller', customer_email: 'x@example.com' }, linkedCustomer: { first_name: 'Unknown', last_name: 'caller', email: 'x@example.com' } });
     expect(gaps.firstName).toBe(true);
     expect(gaps.lastName).toBe(true);
+  });
+});
+
+describe('leading placeholder given name ("Unknown Smith")', () => {
+  test('asks for the first name but keeps the real surname', () => {
+    const gaps = computeContactGaps({ estimate: { customer_name: 'Unknown Smith', customer_email: 'x@example.com' } });
+    expect(gaps.firstName).toBe(true);
+    expect(gaps.lastName).toBe(false);
+  });
+});
+
+describe('code-point-safe name cap', () => {
+  test('never splits a surrogate pair at the 50-character boundary', () => {
+    const v = sanitizeContactLastName(`${'a'.repeat(49)}\u{1F600}b`).value;
+    expect(Array.from(v)).toHaveLength(50);
+    expect(v.endsWith('\u{1F600}')).toBe(true);
+  });
+  test('a lone surrogate is rejected', () => {
+    expect(sanitizeContactLastName('Sam\uD800ple').error.code).toBe('CONTACT_LAST_NAME_INVALID');
   });
 });

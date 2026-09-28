@@ -2121,6 +2121,24 @@ describe('Missing-contact capture (contactLastName/contactEmail) — owner rulin
     expect(storedEstimate().status).toBe('sent');
   });
 
+  test('"Unknown Smith" collects the first name and keeps the real surname on a new profile', async () => {
+    resetStore(recurringPestEstimate({
+      id: 'est-contact-27',
+      token: 'tok-contact-27-x0123456789',
+      customer_id: null,
+      customer_name: 'Unknown Sample',
+      customer_email: 'testy@example.com',
+    }));
+    conversionOk();
+
+    const res = await putAccept('tok-contact-27-x0123456789', { contactFirstName: 'testy' });
+    expect(res.status).toBe(200);
+    expect(storedEstimate().customer_name).toBe('Testy Sample');
+    const cust = db.__state.tables.customers.find((c) => c.id === storedEstimate().customer_id);
+    expect(cust.first_name).toBe('Testy');
+    expect(cust.last_name).toBe('Sample');
+  });
+
   test('a crafted request for a field the page never offered writes nothing (estimate already has full name + email)', async () => {
     resetStore(recurringPestEstimate({
       id: 'est-contact-10',

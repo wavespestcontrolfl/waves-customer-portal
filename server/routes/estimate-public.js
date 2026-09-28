@@ -35,6 +35,8 @@ const {
   hasRealFirstName: contactGapHasRealFirstName,
   hasRealLastName: contactGapHasRealLastName,
   fillLinkedCustomerFirstName,
+  hasPlaceholderGivenName: contactGapHasPlaceholderGivenName,
+  capCodePoints: contactGapCapCodePoints,
 } = require('../services/estimate-contact-gaps');
 
 // Gate pass for the accepted-estimate /book links (GATE_BOOKING_CUSTOMERS_ONLY):
@@ -10850,8 +10852,12 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           const estimateNameIsLinkedFirst = lockedNameTokens.length > 1
             && contactGapHasRealFirstName(linkedFirst)
             && lockedNameTokens.join(' ').toLowerCase() === linkedFirst.toLowerCase();
+          // "Unknown Smith": the leading placeholder is no first name, the
+          // rest is the real surname (kept below).
+          const lockedGivenIsPlaceholder = contactGapHasPlaceholderGivenName(lockedNameTokens);
           const patchFirstName = contactFillFirstName
-            || (estimateNameIsLinkedFirst ? lockedNameTokens.join(' ') : lockedNameTokens[0])
+            || (lockedGivenIsPlaceholder ? null
+              : (estimateNameIsLinkedFirst ? lockedNameTokens.join(' ') : lockedNameTokens[0]))
             || (contactGapHasRealFirstName(linkedCustomerForGaps?.first_name) ? String(linkedCustomerForGaps.first_name).trim() : null);
           if (!patchFirstName) {
             contactFillLastName = null;
@@ -10867,8 +10873,9 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             // real one. varchar(100) column.
             const linkedLast = String(linkedCustomerForGaps?.last_name ?? '').trim();
             const patchLastName = contactFillLastName
+              || (lockedGivenIsPlaceholder ? lockedNameTokens.slice(1).join(' ') : '')
               || (contactGapHasRealLastName(linkedLast) ? linkedLast : '');
-            contactWrite.customer_name = `${patchFirstName} ${patchLastName}`.trim().slice(0, 100);
+            contactWrite.customer_name = contactGapCapCodePoints(`${patchFirstName} ${patchLastName}`.trim(), 100);
             // An authored proposal snapshots its own preparedFor, which
             // normalizeProposal PREFERS over the column (codex #5102 r3 P1).
             // Same rule as customer-contact-fanout's name sync: a

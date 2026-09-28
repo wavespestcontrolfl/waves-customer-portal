@@ -33,6 +33,22 @@ const CONTROL_CHARS_RE = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/;
 // (codex #5102 r10).
 const PLACEHOLDER_NAME_WORDS = new Set(['unknown', 'customer', 'new', 'caller', 'undefined', 'null']);
 
+// "Unknown Smith" — a placeholder given name in front of a real surname
+// (lead-webhook stores first_name 'Unknown' beside a captured last name):
+// the surname is real, the first name is missing (codex #5102 r11).
+function hasPlaceholderGivenName(tokens) {
+  return Array.isArray(tokens) && tokens.length >= 2
+    && PLACEHOLDER_NAME_WORDS.has(String(tokens[0]).toLowerCase());
+}
+
+// Cap by whole Unicode code points (Postgres varchar counts characters, and
+// String#slice can split a surrogate pair into a corrupt half).
+function capCodePoints(value, max) {
+  return Array.from(String(value ?? '')).slice(0, max).join('');
+}
+
+const LONE_SURROGATE_RE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
 function isPlaceholderName(value) {
   const words = String(value == null ? '' : value).trim().toLowerCase().split(/\s+/).filter(Boolean);
   return !words.length || words.every((w) => PLACEHOLDER_NAME_WORDS.has(w));
@@ -92,7 +108,8 @@ function computeContactGaps({ estimate = {}, linkedCustomer = null } = {}) {
     && isPlaceholderName(`${linkedCustomer.first_name ?? ''} ${linkedCustomer.last_name ?? ''}`);
   const lastName = (tokens.length < 2 || nameIsLinkedFirstName)
     && (!hasRealLastName(linkedCustomer?.last_name) || linkedPairIsPlaceholder);
-  const firstName = tokens.length === 0 && !hasRealFirstName(linkedCustomer?.first_name);
+  const firstName = (tokens.length === 0 || hasPlaceholderGivenName(tokens))
+    && !hasRealFirstName(linkedCustomer?.first_name);
   const email = !hasEmail(estimate.customer_email) && !hasEmail(linkedCustomer?.email);
   return { firstName, lastName, email };
 }
@@ -109,7 +126,7 @@ function sanitizeContactNamePart(raw, code, label) {
   if (typeof raw !== 'string') return { value: null, error: null };
   const collapsed = collapseWhitespace(raw) || '';
   if (!collapsed) return { value: null, error: null };
-  if (CONTROL_CHARS_RE.test(collapsed)) {
+  if (CONTROL_CHARS_RE.test(collapsed) || LONE_SURROGATE_RE.test(collapsed)) {
     return { value: null, error: { code, message: `Please enter a valid ${label}.` } };
   }
   const normalized = String(normalizeContactName(collapsed) || collapsed);
@@ -118,7 +135,7 @@ function sanitizeContactNamePart(raw, code, label) {
   if (isPlaceholderName(normalized)) {
     return { value: null, error: { code, message: `Please enter your real ${label}.` } };
   }
-  return { value: normalized.slice(0, CONTACT_LAST_NAME_MAX), error: null };
+  return { value: capCodePoints(normalized, CONTACT_LAST_NAME_MAX), error: null };
 }
 
 function sanitizeContactLastName(raw) {
@@ -170,6 +187,8 @@ function firstNameKey(value) {
 function identityMatches(row, expectedName) {
   const name = firstNameKey(expectedName);
   const first = firstNameKey(row?.first_name);
+  // A placeholder first name ('Unknown') proves nothing about who this is.
+  if (!hasRealFirstName(row?.first_name)) return false;
   return !!name && !!first && (name === first || name.startsWith(`${first} `));
 }
 
@@ -224,6 +243,8 @@ async function fillExistingCustomerEmail(trx, customerId, email, { expectedName 
 
 module.exports = {
   IDENTITY_MISMATCH,
+  hasPlaceholderGivenName,
+  capCodePoints,
   isPlaceholderName,
   hasRealLastName,
   fillLinkedCustomerFirstName,
