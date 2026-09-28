@@ -132,6 +132,10 @@ function fakeTable(initialRows) {
       return found.length;
     });
     q.insert = jest.fn(async () => [{ id: 'interaction-1' }]);
+    // Some callers (currentStepLedgerIds/currentCombinedStepLedgerIds)
+    // await the query directly, with no .first()/.update() — same
+    // thenable shape the batch-select mock already uses.
+    q.then = (resolve, reject) => Promise.resolve(matches(filters)).then(resolve, reject);
     return q;
   }
   return { query, rows, updateCalls };
@@ -159,12 +163,16 @@ function invoiceRow(overrides = {}) {
 
 // Wires up the batch-select ('invoice_followup_sequences as s'), the claim/
 // advance table ('invoice_followup_sequences'), invoices, and customers.
-function setupCombinedDb({ batchRows, invoices, customers = [{ id: 'cust-1', first_name: 'Taylor', phone: '+19410000000', deleted_at: null }] }) {
+function setupCombinedDb({
+  batchRows, invoices, customers = [{ id: 'cust-1', first_name: 'Taylor', phone: '+19410000000', deleted_at: null }],
+  ledgerRows = [],
+}) {
   const seqTable = fakeTable(batchRows);
   const invoiceTable = fakeTable(invoices);
   const customerTable = fakeTable(customers);
   const notificationPrefsTable = fakeTable([]);
   const customerInteractionsTable = fakeTable([]);
+  const contactLedgerTable = fakeTable(ledgerRows);
   db.fn = { now: jest.fn(() => 'CURRENT_TIMESTAMP') };
   db.transaction = jest.fn(async (cb) => cb(db));
   db.mockImplementation((table) => {
@@ -181,9 +189,12 @@ function setupCombinedDb({ batchRows, invoices, customers = [{ id: 'cust-1', fir
     if (table === 'customers') return customerTable.query();
     if (table === 'notification_prefs') return notificationPrefsTable.query();
     if (table === 'customer_interactions') return customerInteractionsTable.query();
+    if (table === 'collections_contact_ledger') return contactLedgerTable.query();
     throw new Error(`unexpected table in test: ${table}`);
   });
-  return { seqTable, invoiceTable, customerTable };
+  return {
+    seqTable, invoiceTable, customerTable, contactLedgerTable,
+  };
 }
 
 describe('gate off: byte-identical — two due rows for one customer fire two per-invoice touches', () => {
@@ -315,16 +326,21 @@ describe('gate on: a customer with 2 due rows gets ONE combined message', () => 
     expect(call.triggerEventId).toBe('invoice_followup_combined:cust-1:d3_friendly:inv-A,inv-B');
   });
 
-  test('the combined pay-balance link is used only when it covers every included invoice; otherwise the anchor\'s own link is used', async () => {
+  test('when no link covers every included invoice, the combined message is never sent — every included invoice falls back to its own per-invoice touch instead', async () => {
     const { seqTable } = twoInvoiceSetup();
     // The balance link only covers inv-A (e.g. GATE_PAY_INCLUDE_BALANCE off,
-    // or inv-B excluded from the combined charge for its own reason) — the
-    // message must not promise a link that can't settle inv-B too.
+    // or inv-B excluded from the combined charge for its own reason) — never
+    // send a "pay them all" combined message whose link can't settle inv-B.
     buildPayBalanceLink.mockResolvedValue({ url: 'https://portal.wavespestcontrol.com/pay/combined', coveredInvoiceIds: ['inv-A'] });
-    await runPending();
-    const smsVars = smsTemplatesRouter.getTemplate.mock.calls[0][1];
-    expect(smsVars.pay_url).toBe('https://portal.wavespestcontrol.com/pay/tok-1'); // anchor's own token, shortenOrPassthrough passthrough
-    expect(seqTable.rows.get('seq-A').step_index).toBe(1); // still sends and advances — just not via the combined link
+    const result = await runPending();
+    expect(result).toEqual({ sent: 1, skipped: 0 });
+    // No combined SMS template render at all; each invoice fires through
+    // sendCustomerMessage/sendTemplate independently (2 calls, not 1).
+    expect(smsTemplatesRouter.getTemplate).not.toHaveBeenCalledWith('invoice_followup_combined_3day', expect.anything(), expect.anything());
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(2);
+    expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledTimes(2);
+    expect(seqTable.rows.get('seq-A').step_index).toBe(1);
+    expect(seqTable.rows.get('seq-B').step_index).toBe(1);
   });
 
   test('one leg delivers but the other is only transiently policy-denied: the whole touch holds, neither sequence advances', async () => {
@@ -348,6 +364,34 @@ describe('gate on: a customer with 2 due rows gets ONE combined message', () => 
     expect(result).toEqual({ sent: 1, skipped: 0 });
     expect(ContactLedger.markSendFailed).not.toHaveBeenCalled();
     expect(seqTable.rows.get('seq-A').step_index).toBe(0);
+    expect(seqTable.rows.get('seq-B').step_index).toBe(0);
+  });
+
+  test('the combined touch excludes its OWN prior combined-keyed ledger reservations from the policy consult (not just per-invoice keys)', async () => {
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    const etDay = '2026-08-05';
+    const priorLedgerRow = {
+      id: 'ledger-99', source: 'invoice_followups',
+      idempotency_key: `invoice_followups:combined:cust-1:d3_friendly:${etDay}:sms`,
+    };
+    twoInvoiceSetup({ ledgerRows: [priorLedgerRow] });
+    await runPending();
+    for (const call of collectionsChannelPermitted.mock.calls) {
+      expect(call[0].excludeLedgerIds).toContain('ledger-99');
+    }
+  });
+
+  test('a retryable (non-terminal) email refusal holds the touch even though SMS delivered', async () => {
+    const { seqTable } = twoInvoiceSetup();
+    EmailTemplateLibrary.sendTemplate.mockResolvedValue({ sent: false, blocked: false, message: {} });
+    // A plain not-terminal refusal: not blocked, no deliveryOutcome/retryable
+    // markers that would read as "uncertain" either — an ordinary retryable
+    // failure settleFollowupEmailLedger alone would treat as "settled".
+    billingEmailSendOutcome.mockImplementation(async () => ({ ok: false, reason: 'transient_provider_error' }));
+    const result = await runPending();
+    expect(result).toEqual({ sent: 1, skipped: 0 });
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1); // SMS attempted and delivered
+    expect(seqTable.rows.get('seq-A').step_index).toBe(0); // held anyway — email still pending
     expect(seqTable.rows.get('seq-B').step_index).toBe(0);
   });
 

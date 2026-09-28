@@ -125,6 +125,22 @@ async function currentStepLedgerIds(row, step, channels) {
   return (rows || []).map((entry) => entry.id);
 }
 
+// Combined-touch twin of currentStepLedgerIds: the combined lane's own
+// reservations use a DIFFERENT idempotency-key shape
+// (invoice_followups:combined:<customerId>:<step.id>:<etDay>:<channel>,
+// not the per-invoice followupLedgerKey), so a same-day retry after a
+// partial success must exclude THESE keys too, or the policy consult can
+// see the earlier partial attempt's own contact and deny the retry
+// (Codex pre-push r2).
+async function currentCombinedStepLedgerIds(customerId, step, etDay, channels) {
+  if (process.env.GATE_COLLECTIONS_POLICY !== 'true') return [];
+  if (!channels.length) return [];
+  const rows = await db('collections_contact_ledger')
+    .where({ source: 'invoice_followups' })
+    .whereIn('idempotency_key', channels.map((channel) => `invoice_followups:combined:${customerId}:${step.id}:${etDay}:${channel}`));
+  return (rows || []).map((entry) => entry.id);
+}
+
 function terminalFollowupEmailRefusal(result) {
   if (result?.resolved === true) return true;
   return result?.ok === false && result.retryable !== true && result.deferred !== true
@@ -1243,6 +1259,37 @@ async function fireCombinedTouchClaimed(rows) {
   const emailTemplateKey = COMBINED_EMAIL_TEMPLATE_BY_STEP_ID[step.id];
   if (!smsTemplateKey && !emailTemplateKey) return;
 
+  const includedIds = includedIdsOf(included);
+
+  // The combined message says "pay them all" through ONE link — only send
+  // it combined when a link exists that will actually settle EVERY
+  // included invoice (GATE_PAY_INCLUDE_BALANCE on, no payer/incomplete-read
+  // degradation, no sibling excluded for its own reason). Short of full
+  // coverage, do NOT send a combined message with a link (or copy) that
+  // overclaims what it can charge — fall back to firing every included
+  // invoice through its own per-invoice touch instead, same as the
+  // single-survivor fallback above (Codex pre-push r2).
+  const { buildPayBalanceLink } = require('./composer-customer-links');
+  let payUrl = null;
+  try {
+    const balanceLink = await buildPayBalanceLink([customer.id]);
+    const coveredIds = new Set((balanceLink?.coveredInvoiceIds || []).map(String));
+    const coversEveryIncludedInvoice = includedIds.every((id) => coveredIds.has(String(id)));
+    payUrl = coversEveryIncludedInvoice ? (balanceLink?.url || null) : null;
+  } catch (err) {
+    logger.warn(`[invoice-followups] combined pay-balance link failed for customer ${customerId}: ${err.message}`);
+  }
+  if (!payUrl) {
+    logger.info(`[invoice-followups] no pay link covers every invoice in the combined touch for customer ${customerId} — falling back to ${included.length} individual touches`);
+    for (const inv of included) {
+      // Sequential, not Promise.all: each fireTouch owns its own DB writes
+      // and must not race a sibling invoice for the same customer.
+      const individualRow = rows.find((r) => r.invoice_id === inv.invoice_id);
+      await fireTouch(individualRow, {});
+    }
+    return;
+  }
+
   const category = 'invoice'; // mdPending invoices are excluded above
   let explicitChannels = null;
   try {
@@ -1257,12 +1304,29 @@ async function fireCombinedTouchClaimed(rows) {
   const emailSelected = explicitChannels === null || explicitChannels.includes('email');
   const policyChannels = [...nonEmailChannels, ...(emailSelected ? ['email'] : [])];
 
-  const includedIds = includedIdsOf(included);
+  const etDay = etDateString(new Date());
+  const combinedLedgerKey = (channel) => `invoice_followups:combined:${customerId}:${step.id}:${etDay}:${channel}`;
+  const ContactLedger = require('./collections/contact-ledger');
+  // A stable identity for THIS combined touch's included set — the same
+  // step id recurs for a customer as new invoices reach it later, so the
+  // email template's own provider-level idempotency key must be scoped to
+  // which invoices it is quoting THIS time, or a later different pair
+  // reaching the same step dedupes against a stale prior send (pre-push
+  // audit P1).
+  const includedIdsKey = includedIds.map(String).sort().join(',');
+
+  // excludeLedgerIds: THIS touch's own reservations must not count against
+  // itself on a same-day retry — both the per-invoice-keyed rows a legacy
+  // single touch at this step might have left, AND this lane's own
+  // combined-keyed rows (a partial success earlier today already wrote
+  // one), which currentStepLedgerIds' per-invoice key format never matches
+  // (Codex pre-push r2).
   const ownLedgerIdsPerRow = await Promise.all(included.map((inv) => {
     const originalRow = rows.find((r) => r.invoice_id === inv.invoice_id);
     return currentStepLedgerIds(originalRow, step, policyChannels).catch(() => []);
   }));
-  const excludeLedgerIds = [...new Set(ownLedgerIdsPerRow.flat())];
+  const ownCombinedLedgerIds = await currentCombinedStepLedgerIds(customerId, step, etDay, policyChannels).catch(() => []);
+  const excludeLedgerIds = [...new Set([...ownLedgerIdsPerRow.flat(), ...ownCombinedLedgerIds])];
 
   const policyResults = await Promise.all(policyChannels.map((channel) =>
     collectionsChannelPermitted(customer.id, null, channel, excludeLedgerIds, true, includedIds)));
@@ -1274,40 +1338,6 @@ async function fireCombinedTouchClaimed(rows) {
 
   const totalDueNum = included.reduce((sum, inv) => sum + invoiceAmountDue(inv), 0);
   const totalDue = totalDueNum.toFixed(2);
-
-  const { buildPayBalanceLink } = require('./composer-customer-links');
-  let payUrl = null;
-  try {
-    const balanceLink = await buildPayBalanceLink([customer.id]);
-    // The combined message says "pay them all" through ONE link — only
-    // trust it when the linked page will actually settle EVERY included
-    // invoice (GATE_PAY_INCLUDE_BALANCE on, no payer/incomplete-read
-    // degradation, no sibling excluded for its own reason). Anything short
-    // of full coverage falls back to the anchor's own single-invoice link
-    // below, which never overclaims what it can charge (Codex pre-push).
-    const coveredIds = new Set((balanceLink?.coveredInvoiceIds || []).map(String));
-    const coversEveryIncludedInvoice = includedIds.every((id) => coveredIds.has(String(id)));
-    payUrl = coversEveryIncludedInvoice ? (balanceLink?.url || null) : null;
-  } catch (err) {
-    logger.warn(`[invoice-followups] combined pay-balance link failed for customer ${customerId}: ${err.message}`);
-  }
-  if (!payUrl) {
-    payUrl = await shortenOrPassthrough(`${publicPortalUrl()}/pay/${anchorRow.token}`, {
-      kind: 'invoice', entityType: 'invoices', entityId: anchorRow.invoice_id, customerId: customer.id,
-      codePrefix: invoiceShortCodePrefix(anchorRow),
-    });
-  }
-
-  const etDay = etDateString(new Date());
-  const combinedLedgerKey = (channel) => `invoice_followups:combined:${customerId}:${step.id}:${etDay}:${channel}`;
-  const ContactLedger = require('./collections/contact-ledger');
-  // A stable identity for THIS combined touch's included set — the same
-  // step id recurs for a customer as new invoices reach it later, so the
-  // email template's own provider-level idempotency key must be scoped to
-  // which invoices it is quoting THIS time, or a later different pair
-  // reaching the same step dedupes against a stale prior send (pre-push
-  // audit P1).
-  const includedIdsKey = includedIds.map(String).sort().join(',');
 
   // Durable vs transient policy denials, per selected channel — a
   // transient denial (spacing window, a releasable hold) must HOLD the
@@ -1435,10 +1465,17 @@ async function fireCombinedTouchClaimed(rows) {
         });
         // settleFollowupEmailLedger stamps the ledger row (delivered /
         // send_failed) and returns whether the step should stay HELD —
-        // delivery itself is emailResult.ok.
+        // delivery itself is emailResult.ok. It returns NOT-held for any
+        // stamped failure, including a merely RETRYABLE refusal, so mirror
+        // fireTouch's own additional check: an unsuccessful, non-durably-
+        // denied result that is not a genuinely TERMINAL refusal still
+        // holds (Codex pre-push r2) — settling only on delivery or a true
+        // terminal refusal (missing address, template unavailable, a
+        // suppression), never on an ordinary retryable not-sent.
         const held = await settleFollowupEmailLedger(ContactLedger, emailLedger, emailResult, true, []);
         emailOk = emailResult.ok === true;
-        emailHold = emailHold || held;
+        emailHold = emailHold || held
+          || (!durablyDenied.email && emailOk !== true && !terminalFollowupEmailRefusal(emailResult));
       } else {
         emailHold = true; // a prior attempt's outcome is still unconfirmed
       }
