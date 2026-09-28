@@ -5,7 +5,7 @@ function getGoogle() {
   return _googleapis;
 }
 const logger = require('./logger');
-const { deliverOpsDigest, readCleanWatermark, digestRowFields } = require('./ops-digest');
+const { deliverOpsDigest, readCleanWatermark, digestRowFields, alertClassFor, ringOnRefreshFrom } = require('./ops-digest');
 const { retireIfClean } = require('./ops-digest-fall-off');
 const db = require('../models/db');
 const { WAVES_LOCATIONS } = require('../config/locations');
@@ -138,6 +138,53 @@ async function readJsonOrThrow(res, label) {
   }
   try { return JSON.parse(text); }
   catch (e) { throw new Error(`${label} returned malformed JSON (status ${res.status}): ${e.message}`); }
+}
+
+// The same-signature repeat path's digest rewrite: same row shape
+// deliverOpsDigest writes (short title/body, full report in `detail`,
+// kind/audience/feed), normalized exactly as create() persists it — a
+// rewrite in the old subject/body form would leave a superseded finding's
+// report in `detail` and a stale `feed` after a FIX <-> ACT flip (codex r2
+// P1 on #5236). Only the NEWEST unresolved digest is the standing row:
+// older unresolved duplicates (the pre-fix production state) must not all
+// flip back to unread on every detail change (codex r1 P2).
+//
+// Ring-only-on-change (owner audience only, admin-alerts-ring scope
+// 2026-09-28): this bypasses notifyAdmin entirely, so it applies the SAME
+// test ringOnRefreshFrom encodes by hand — a quiet standing row (no growth
+// in findings.length, no prior row to compare) keeps read_at and its own
+// feed/quiet; only a ringing rewrite may flip them. Engineering/fyi (anyFix)
+// never gates — notifyAdmin's own default behavior applies, byte-identical
+// to before this scope.
+async function rewriteStandingGbpDigest(trx, { subject, body, headline, summary, observedAt, findings }) {
+  const fields = digestRowFields({ subject, text: body, headline, summary });
+  const next = NotificationService.normalizeAdminText({
+    category: 'ops_digest', title: fields.title, body: fields.body, detail: fields.detail,
+  });
+  const standingRow = await trx('notifications').select('id', 'title', 'body', 'detail', 'metadata')
+    .where({ recipient_type: 'admin', category: 'ops_digest' })
+    .whereRaw("metadata->>'opsKey' = ?", ['gbp-sync-health'])
+    .whereRaw("metadata->>'source' IS NULL")
+    .whereRaw("COALESCE(metadata->>'resolved', '') <> 'true'")
+    .orderBy('created_at', 'desc').limit(1).first();
+  if (!standingRow) return;
+  const standingMeta = parseJsonObject(standingRow.metadata);
+  const contentChanged = standingRow.title !== next.title || next.body !== (standingRow.body ?? null)
+    || next.detail !== (standingRow.detail ?? null) || standingMeta.kind !== fields.kind;
+  if (!contentChanged) return;
+  const shouldRing = fields.audience !== 'owner'
+    || ringOnRefreshFrom({ count: findings.length })(standingRow, standingMeta);
+  await trx('notifications').where({ id: standingRow.id }).update({
+    title: next.title,
+    body: next.body,
+    detail: next.detail,
+    ...(shouldRing ? { read_at: null } : {}),
+    metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({
+      subject, observedAt, kind: fields.kind, audience: fields.audience,
+      alertClass: alertClassFor('gbp-sync-health', null), count: findings.length,
+      ...(shouldRing ? { feed: fields.feed, quiet: false } : {}),
+    })]),
+  });
 }
 
 class GoogleBusinessService {
@@ -1880,38 +1927,7 @@ class GoogleBusinessService {
           // is still unresolved (so no re-bell), but the standing digest
           // describes B. Rewrite the digest to the CURRENT findings when its
           // text differs, surfacing it unread again (pre-push audit P1).
-          // Only the NEWEST unresolved digest is the standing row: older
-          // unresolved duplicates (the pre-fix production state) must not all
-          // flip back to unread on every detail change (codex r1 P2).
-          // Same row shape deliverOpsDigest writes (short title/body, full
-          // report in `detail`, kind/audience/feed), normalized exactly as
-          // create() persists it — a rewrite in the old subject/body form
-          // would leave B's report in `detail` and a stale `feed` after a
-          // FIX <-> ACT flip (codex r2 P1 on #5236).
-          const fields = digestRowFields({ subject, text: body, headline, summary });
-          const next = NotificationService.normalizeAdminText({
-            category: 'ops_digest', title: fields.title, body: fields.body, detail: fields.detail,
-          });
-          const standingDigest = trx('notifications').select('id')
-            .where({ recipient_type: 'admin', category: 'ops_digest' })
-            .whereRaw("metadata->>'opsKey' = ?", ['gbp-sync-health'])
-            .whereRaw("metadata->>'source' IS NULL")
-            .whereRaw("COALESCE(metadata->>'resolved', '') <> 'true'")
-            .orderBy('created_at', 'desc').limit(1);
-          await trx('notifications').whereIn('id', standingDigest)
-            .where((q) => q.whereNot('title', next.title)
-              .orWhereRaw('body IS DISTINCT FROM ?', [next.body])
-              .orWhereRaw('detail IS DISTINCT FROM ?', [next.detail])
-              .orWhereRaw("metadata->>'kind' IS DISTINCT FROM ?", [fields.kind]))
-            .update({
-              title: next.title,
-              body: next.body,
-              detail: next.detail,
-              read_at: null,
-              metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({
-                subject, observedAt, kind: fields.kind, audience: fields.audience, feed: fields.feed,
-              })]),
-            });
+          await rewriteStandingGbpDigest(trx, { subject, body, headline, summary, observedAt, findings });
           return { deduped: true };
         }
 
