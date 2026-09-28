@@ -177,11 +177,19 @@ function applyAdminBrevityGuard({ category, title, body, detail }) {
 function normalizeAdminNotificationText({ category, title, body, detail }) {
   const strippedTitle = stripEmoji(title) || title;
   const strippedBody = stripEmoji(body) || null;
-  return applyAdminBrevityGuard({ category, title: strippedTitle, body: strippedBody, detail });
+  // `detail` is admin notification text too — the Activity feed renders it
+  // — so the no-emoji rule covers it like title/body (codex r2 P2 on #5236).
+  const strippedDetail = stripEmoji(detail) || null;
+  return applyAdminBrevityGuard({ category, title: strippedTitle, body: strippedBody, detail: strippedDetail });
 }
 
 const NotificationService = {
   scopeAdminFeedToRole,
+  // The admin row text exactly as create() would persist it (emoji-stripped,
+  // brevity-cut for ops_digest) — for a caller that rewrites a standing row
+  // directly instead of through notifyAdmin (google-business.js's
+  // same-signature digest refresh), so its stored text can't drift.
+  normalizeAdminText: normalizeAdminNotificationText,
   // Create a notification.
   // `bell` (admin recipients only) is an explicit site-level policy tag:
   // true always rings, false never rings — see notification-bell-policy.js.

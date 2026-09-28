@@ -161,6 +161,13 @@ describe('NotificationService.create — admin brevity guard end to end', () => 
     expect(notif.detail).toBe(body);
   });
 
+  test('detail is emoji-stripped like title/body — the Activity feed renders it (codex r2 P2 on #5236)', async () => {
+    const detail = 'Autopay mismatch report\n\u26a0 2 customers texted while autopay is off';
+    const notif = await NotificationService.create({ recipientType: 'admin', category: DIGEST_CATEGORY, title: 'Autopay', body: null, detail });
+    expect(notif.detail).not.toMatch(/\u26a0/);
+    expect(notif.detail).toMatch(/2 customers texted while autopay is off/);
+  });
+
   test('a long body on any OTHER admin category is stored unchanged, with a null detail', async () => {
     const body = 'sentence '.repeat(30).trim();
     const notif = await NotificationService.create({ recipientType: 'admin', category: 'alert', title: 'Short title', body });

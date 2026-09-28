@@ -5,7 +5,7 @@ function getGoogle() {
   return _googleapis;
 }
 const logger = require('./logger');
-const { deliverOpsDigest, readCleanWatermark } = require('./ops-digest');
+const { deliverOpsDigest, readCleanWatermark, digestRowFields } = require('./ops-digest');
 const { retireIfClean } = require('./ops-digest-fall-off');
 const db = require('../models/db');
 const { WAVES_LOCATIONS } = require('../config/locations');
@@ -1883,7 +1883,15 @@ class GoogleBusinessService {
           // Only the NEWEST unresolved digest is the standing row: older
           // unresolved duplicates (the pre-fix production state) must not all
           // flip back to unread on every detail change (codex r1 P2).
-          const digestTitle = subject.slice(0, 200);
+          // Same row shape deliverOpsDigest writes (short title/body, full
+          // report in `detail`, kind/audience/feed), normalized exactly as
+          // create() persists it — a rewrite in the old subject/body form
+          // would leave B's report in `detail` and a stale `feed` after a
+          // FIX <-> ACT flip (codex r2 P1 on #5236).
+          const fields = digestRowFields({ subject, text: body, headline, summary });
+          const next = NotificationService.normalizeAdminText({
+            category: 'ops_digest', title: fields.title, body: fields.body, detail: fields.detail,
+          });
           const standingDigest = trx('notifications').select('id')
             .where({ recipient_type: 'admin', category: 'ops_digest' })
             .whereRaw("metadata->>'opsKey' = ?", ['gbp-sync-health'])
@@ -1891,12 +1899,18 @@ class GoogleBusinessService {
             .whereRaw("COALESCE(metadata->>'resolved', '') <> 'true'")
             .orderBy('created_at', 'desc').limit(1);
           await trx('notifications').whereIn('id', standingDigest)
-            .where((q) => q.whereNot('title', digestTitle).orWhereNot('body', body).orWhereNull('body'))
+            .where((q) => q.whereNot('title', next.title)
+              .orWhereRaw('body IS DISTINCT FROM ?', [next.body])
+              .orWhereRaw('detail IS DISTINCT FROM ?', [next.detail])
+              .orWhereRaw("metadata->>'kind' IS DISTINCT FROM ?", [fields.kind]))
             .update({
-              title: digestTitle,
-              body,
+              title: next.title,
+              body: next.body,
+              detail: next.detail,
               read_at: null,
-              metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ subject, observedAt })]),
+              metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({
+                subject, observedAt, kind: fields.kind, audience: fields.audience, feed: fields.feed,
+              })]),
             });
           return { deduped: true };
         }

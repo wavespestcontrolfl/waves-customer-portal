@@ -182,10 +182,15 @@ function validateSummary(raw) {
 }
 
 // Overrides the check-map's derived audience. Optional.
+// Trimmed like headline/summary; blank reads as omitted (the documented
+// contract — codex r2 P0 on #5236).
 function validateAudience(raw) {
   if (raw === undefined || raw === null) return { value: null };
-  if (typeof raw !== 'string' || !AUDIENCES.has(raw)) return { error: "audience must be 'owner', 'engineering', or 'fyi'" };
-  return { value: raw };
+  if (typeof raw !== 'string') return { error: "audience must be 'owner', 'engineering', or 'fyi'" };
+  const audience = raw.trim();
+  if (!audience) return { value: null };
+  if (!AUDIENCES.has(audience)) return { error: "audience must be 'owner', 'engineering', or 'fyi'" };
+  return { value: audience };
 }
 
 // Admin-relative only: a digest never deep-links off the portal, and a

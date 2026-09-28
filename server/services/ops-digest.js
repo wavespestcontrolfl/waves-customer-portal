@@ -84,6 +84,25 @@ function truncateAtWord(text, max) {
 function fallbackHeadline(subject) {
   return truncateAtWord(String(subject || '').replace(SUBJECT_PREFIX_RE, '').trim(), MAX_HEADLINE_CHARS);
 }
+// The bell-row shape every ops_digest writer persists: the short title, an
+// optional one-line body, the whole finding in `detail` (with the email
+// skipped it is the only copy), and the kind/audience/feed stamps.
+// deliverOpsDigest and google-business.js's same-signature refresh both build
+// from here, so a direct rewrite of a standing digest can't drift from the
+// seam (codex r2 P1 on #5236). Subjects carry aggregated text (customer
+// names, bucket lists); the full subject stays in metadata, never the title.
+function digestRowFields({ subject, text = null, html = null, headline = null, summary = null, audience = null }) {
+  const kind = deriveKind(subject);
+  const resolvedAudience = audience || defaultAudienceFor(kind);
+  return {
+    title: String(headline || fallbackHeadline(subject)).slice(0, MAX_TITLE_CHARS),
+    body: summary ? String(summary) : null,
+    detail: String(text || htmlToText(html) || ''),
+    kind,
+    audience: resolvedAudience,
+    feed: resolvedAudience === 'owner' ? null : 'activity',
+  };
+}
 // system_settings.key is varchar(100); a full SHA-256 digest keeps even the
 // longest allowed source/key pair within it, without sharing a watermark.
 function cleanWatermarkKey(lockKey) {
@@ -185,20 +204,13 @@ async function deliverOpsDigest({ key, subject, text, html, link = null, metadat
     const result = await sendEmail();
     return emailOutcome(result);
   }
-  // The full finding: with the email skipped, `detail` is the only copy.
-  const fullText = String(text || htmlToText(html) || '');
-  const kind = deriveKind(subject);
-  const resolvedAudience = audience || defaultAudienceFor(kind);
-  // Subjects carry aggregated text (customer names, bucket lists); the row
-  // keeps the full subject in metadata while the bell title stays short.
-  const title = String(headline || fallbackHeadline(subject)).slice(0, MAX_TITLE_CHARS);
-  const bellBody = summary ? String(summary) : null;
+  const fields = digestRowFields({ subject, text, html, headline, summary, audience });
   let row = null;
   try {
-    row = await notificationService().notifyAdmin(CATEGORY, title, bellBody, {
+    row = await notificationService().notifyAdmin(CATEGORY, fields.title, fields.body, {
       link,
       bell: true,
-      detail: fullText,
+      detail: fields.detail,
       ...(trx ? { trx } : {}),
       // Optional dedupe (2026-09-11 email shutoff): a daily digest that
       // reports the same standing list must hold ONE row, refreshed when
@@ -207,8 +219,8 @@ async function deliverOpsDigest({ key, subject, text, html, link = null, metadat
       metadata: {
         opsKey: key,
         subject,
-        kind,
-        audience: resolvedAudience,
+        kind: fields.kind,
+        audience: fields.audience,
         ...(fallOff ? { fallOff: true } : {}),
         ...metadata,
         // Written LAST and unconditionally (never spread-omitted): a sender
@@ -220,7 +232,7 @@ async function deliverOpsDigest({ key, subject, text, html, link = null, metadat
         // row would never reach the bell (notification-service.js's
         // excludeActivityOnlyFromBell). A sender's own `...metadata` above
         // can never shadow this.
-        feed: resolvedAudience === 'owner' ? null : 'activity',
+        feed: fields.feed,
       },
     });
   } catch (err) {
@@ -342,5 +354,5 @@ async function resolveOpsDigest({ key, source, resolvedBy = 'ops-crons', lockKey
 
 module.exports = {
   deliverOpsDigest, resolveOpsDigest, readCleanWatermark, cleanWatermarkKey, inAppEnabled, htmlToText, CATEGORY,
-  deriveKind, defaultAudienceFor, fallbackHeadline, truncateAtWord,
+  deriveKind, defaultAudienceFor, fallbackHeadline, truncateAtWord, digestRowFields,
 };

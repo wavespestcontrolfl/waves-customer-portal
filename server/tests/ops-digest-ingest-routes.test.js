@@ -232,6 +232,12 @@ describe('payload', () => {
     }
     expect(validateDigest({ ...good() }).value.audience).toBeNull();
     expect(validateDigest({ ...good(), audience: 'urgent' }).error).toMatch(/audience must be/);
+    // Trimmed like headline/summary; blank reads as omitted (the documented
+    // contract — codex r2 P0 on #5236).
+    expect(validateDigest({ ...good(), audience: ' owner ' }).value.audience).toBe('owner');
+    expect(validateDigest({ ...good(), audience: '   ' }).value.audience).toBeNull();
+    expect(validateDigest({ ...good(), audience: ' urgent ' }).error).toMatch(/audience must be/);
+    expect(validateDigest({ ...good(), audience: 3 }).error).toMatch(/audience must be/);
   });
 });
 
