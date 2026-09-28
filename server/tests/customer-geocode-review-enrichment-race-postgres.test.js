@@ -103,8 +103,7 @@ postgres('geocode review enrichment serialization in PostgreSQL', () => {
     });
     await locked;
 
-    let enrichmentSettled = false;
-    const enrichment = withReviewWriteFence({ propertyId, customerId }, async (conn) => {
+    const enrich = () => withReviewWriteFence({ propertyId, customerId }, async (conn) => {
       const attempts = [];
       for (const [table, where, values] of [
         ['customer_properties', { id: propertyId }, { latitude: 27.6, longitude: -82.4 }],
@@ -116,24 +115,20 @@ postgres('geocode review enrichment serialization in PostgreSQL', () => {
         attempts.push(await update.update(values));
       }
       return attempts;
-    }).finally(() => { enrichmentSettled = true; });
-    const deadline = Date.now() + 5000;
-    let blocked = false;
-    while (!blocked && Date.now() < deadline) {
-      const waiting = await admin('pg_stat_activity')
-        .where({ datname: new URL(connection).pathname.slice(1), application_name: 'geocode-enrichment-race' })
-        .where({ state: 'active', wait_event_type: 'Lock' })
-        .count('* as count').first();
-      blocked = Number(waiting?.count || 0) > 0;
-      if (!blocked) await new Promise(resolve => setImmediate(resolve));
-    }
+    });
+    // While the decision holds the rows, the background write backs off at
+    // once instead of queueing behind it.
+    let busy;
     try {
-      expect(blocked).toBe(true);
-      expect(enrichmentSettled).toBe(false);
+      await expect(enrich()).rejects.toMatchObject({ code: expect.stringMatching(/^(review_fence_busy|55P03)$/) });
+      busy = true;
     } finally {
       releaseDecision();
     }
+    expect(busy).toBe(true);
     await decision;
+    // Its retry after the decision commits still cannot restore the pin.
+    const enrichment = enrich();
     expect(await enrichment).toEqual([0, 0, 0]);
     expect(await mockConnection('customer_properties').where({ id: propertyId }).first()).toMatchObject({
       latitude: null, longitude: null,

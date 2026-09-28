@@ -80,6 +80,12 @@ function setupDb({ joinedReads = [], invoiceAtLock = { status: 'overdue', payer_
       q.then = (resolve, reject) => Promise.resolve(legacyLedgerRows).then(resolve, reject);
       return q;
     }
+    if (table === 'activity_log') {
+      // The checker's pre-ledger dedupe record: none by default.
+      const q = { where: jest.fn((arg) => { if (typeof arg === 'function') arg.call(q, q); return q; }), whereRaw: jest.fn(() => q), orWhereRaw: jest.fn(() => q) };
+      q.first = jest.fn(async () => undefined);
+      return q;
+    }
     throw new Error(`unexpected table in test: ${table}`);
   };
   db.mockImplementation(route);

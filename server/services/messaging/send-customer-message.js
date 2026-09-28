@@ -356,10 +356,15 @@ async function sendCustomerMessageCore(input) {
     providerPreSendCheck: suppliedProviderPreSendCheck,
     onDispatchStart,
     onDispatchAbort,
+    // codex #5196 r4 P2: same shape as onDispatchAbort, fired instead when
+    // twilio.js's own messages.create() throws a definitive rejection —
+    // the phone lock is still held at that point (onDispatchAbort's own
+    // comment explains why).
+    onDispatchRejected,
     // codex #5018 structural fix (post-r7): opts a caller's sms_log insert
     // INTO the handoff transaction (twilio.js's dispatch() reads this same
-    // option). Threaded unchanged, alongside onDispatchStart/onDispatchAbort,
-    // through dispatchToProvider -> providers/twilio-sms.js -> twilio.js.
+    // option). Threaded unchanged, alongside onDispatchStart/onDispatchAbort/
+    // onDispatchRejected, through dispatchToProvider -> providers/twilio-sms.js -> twilio.js.
     // Omitted (the default for every caller that doesn't name it), twilio.js
     // falls back to origin/main's own post-handoff, out-of-transaction insert.
     logInHandoff,
@@ -1078,9 +1083,14 @@ async function sendCustomerMessageCore(input) {
     // window has closed — otherwise a send that never reached
     // messages.create() would be misclassified as ambiguous forever.
     onDispatchAbort,
+    // codex #5196 r4 P2: fired instead of onDispatchAbort when
+    // messages.create() itself throws a definitive rejection — still
+    // inside the handoff, lock held. See twilio.js's dispatch().
+    onDispatchRejected,
     // codex #5018 structural fix (post-r7): threaded straight through, same
-    // as onDispatchStart/onDispatchAbort above — see this file's own
-    // destructure comment and twilio.js's dispatch() for what it gates.
+    // as onDispatchStart/onDispatchAbort/onDispatchRejected above — see
+    // this file's own destructure comment and twilio.js's dispatch() for
+    // what it gates.
     logInHandoff,
     providerHandoffReservation,
   });
@@ -1304,14 +1314,19 @@ async function recordPromiseEvidenceFallback(sendInput, providerOutcome, audit) 
   // window (codex P1, PR #4403 round 15).
   const seriesMoveId = sendInput.metadata?.original_message_type === 'reschedule_series_confirmation'
     ? sendInput.metadata?.series_move_id || null : null;
-  const knownSlot = sendInput.renderedSlotMs != null && Number.isFinite(Number(sendInput.renderedSlotMs));
-  if (!knownSlot && !seriesMoveId) return;
+  // A notice that quoted no window (promisedWindowUnknown — a windowless
+  // reschedule) records an UNKNOWN-window promise: its renderedSlotMs only
+  // guarded the send, and skipping it would leave the visit on its older
+  // window.
+  const windowUnknown = sendInput.promisedWindowUnknown === true;
+  const knownSlot = !windowUnknown && sendInput.renderedSlotMs != null && Number.isFinite(Number(sendInput.renderedSlotMs));
+  if (!knownSlot && !seriesMoveId && !windowUnknown) return;
   const providerSid = String(providerOutcome.providerMessageId || '');
   const deliverable = /^(SM|MM)[a-f0-9]{32}$/i.test(providerSid)
     || (providerOutcome.provider === 'push' && providerOutcome.deliveryOutcome === 'accepted');
   if (!deliverable) return;
   await require('../no-show-detector').recordSentWindowFallback({
-    visitId: sendInput.appointmentId, startAtMs: knownSlot ? sendInput.renderedSlotMs : null,
+    visitId: sendInput.appointmentId, startAtMs: knownSlot ? sendInput.renderedSlotMs : null, windowUnknown,
     communicatedAt: providerOutcome.sentAt || new Date(),
     providerSid: providerOutcome.provider === 'push' ? null : providerSid,
     // ONLY the series confirmation proves the siblings were superseded, and
@@ -1403,6 +1418,7 @@ module.exports = {
   // Exposed for tests
   _internals: {
     validateContract,
+    recordPromiseEvidenceFallback,
     nextProviderRetryAt,
     isAutopayCustomerSms,
     checkAutopayCustomerSmsGate,

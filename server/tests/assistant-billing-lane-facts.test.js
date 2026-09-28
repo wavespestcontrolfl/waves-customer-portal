@@ -30,6 +30,7 @@ const {
 
 const drafter = fs.readFileSync(path.join(__dirname, '../services/sms-shadow-drafter.js'), 'utf8');
 const scheduler = fs.readFileSync(path.join(__dirname, '../services/scheduler.js'), 'utf8');
+const amountRecheck = fs.readFileSync(path.join(__dirname, '../services/sms-amount-recheck.js'), 'utf8');
 const agent = fs.readFileSync(path.join(__dirname, '../services/ai-assistant/managed-agent-config.js'), 'utf8');
 
 const CREDIT_CARD = { method_type: 'card', card_funding: 'credit' };
@@ -334,8 +335,14 @@ describe('the amounts the facts publish are the amounts the guards authorize', (
     // The draft-time guard and the scheduler's fire-time revalidation had
     // already drifted: a reviewed dues reply that an operator scheduled was
     // retired as a stale amount, so the lane could be approved but never sent.
+    // Since #5194 both read ONE function, the drafter's billingAmountCents
+    // (owed: balance, open invoice, authorizedDuesCents): the draft-time
+    // guard directly, and the fire-time revalidation through the shared
+    // send-time recheck the scheduler calls.
     expect(drafter).toContain("require('./context-aggregator').authorizedDuesCents(context)");
-    expect(scheduler).toContain('ContextAggregator.authorizedDuesCents(ctx)');
+    expect(drafter).toContain('billingAmountCents(context, { settledOnly: realAnswers })');
+    expect(scheduler).toContain("require('./sms-amount-recheck')");
+    expect(amountRecheck).toContain('drafter.billingAmountCents(ctx)');
   });
 
   test('the published dues come from the priced fact, never the raw rate', () => {

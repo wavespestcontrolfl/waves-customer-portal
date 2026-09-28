@@ -5,31 +5,36 @@
  * live with NO price on any row (parent or children) and its first visit
  * stuck in on_site since 7/21 — never completed, never billed, invisible to
  * every dashboard metric (completion never fired, so no service_records row,
- * no invoice, no report, no post-service SMS). A prod sweep found 89
- * past-dated visits parked in on_site/en_route the same way. Nothing in the
- * portal surfaces either state; both classes silently cost money.
+ * no invoice, no report, no post-service SMS). A prod sweep also found 89
+ * past-dated visits parked in on_site/en_route the same way — that stale
+ * in-progress class shipped here first and was removed 2026-09-28 (see
+ * below). Nothing in the portal surfaces an unpriced series; it silently
+ * costs money.
  *
  * Exception classes, one pager:
- *  1. STALE IN-PROGRESS — a visit whose scheduled_date is before today (ET)
- *     still sitting in on_site/en_route. The tech went out; the completion
- *     never happened in the system.
- *  2. UNPRICED RECURRING SERIES — an upcoming recurring visit (within
+ *  1. UNPRICED RECURRING SERIES — an upcoming recurring visit (within
  *     UPCOMING_WINDOW_DAYS) where neither the row nor its recurring parent
  *     carries a price (estimated_price / primary_line_price). Children
  *     legitimately ride with NULL price and inherit from their parent at
  *     invoice time, so only a series with no price ANYWHERE pages. One bell
  *     per series (root id), not per visit.
- *  3. LAWN-EMAIL AUDIENCE GAP — a customer with live recurring-lawn
+ *  2. LAWN-EMAIL AUDIENCE GAP — a customer with live recurring-lawn
  *     evidence who cannot receive the Monday irrigation email (no email /
  *     no coordinates / lead-stage / inactive). The email's audience is
  *     computed at send time via the same predicate this check reuses, so
  *     adds and drops are automatic — only prerequisite failures page.
- *  4. PREPAY COVERAGE GAPS — annual stamps the completion validator cannot
+ *  3. PREPAY COVERAGE GAPS — annual stamps the completion validator cannot
  *     verify, missing or conflicting stamps on linked paid terms, or a missing
  *     or replaced manual series allocation. Includes overdue live visits.
  *
  * Accepted-plan gaps also start from the accepted estimate, covering missing
  * recurrence, applications, and matching cadence/property evidence.
+ *
+ * The STALE IN-PROGRESS class (a visit whose scheduled_date was before today
+ * ET still sitting in on_site/en_route) was removed 2026-09-28: the 7 PM ET
+ * tech text about today's still-open visits (server/services/tech-open-visit-nudge.js)
+ * reaches the person who can actually act on it same-day, superseding the
+ * ~70/week admin-only bell nobody was acting on.
  *
  * Alerting mirrors call-booking-miss-watchdog: one bell per subject, deduped
  * forever via the notifications metadata dedupeKey, with a per-run cap so
@@ -50,11 +55,9 @@ const { etDateString } = require('../utils/datetime-et');
 // long-tail future visits (a bimonthly series stretches 10 months out)
 // don't page months early.
 const UPCOMING_WINDOW_DAYS = 14;
-// A first enable scans the whole backlog (89 stale visits on 2026-08-04);
-// cap the bells per run so it drains over ticks instead of flooding.
+// A first enable can scan a real backlog across the remaining classes; cap
+// the bells per run so it drains over ticks instead of flooding.
 const MAX_ALERTS_PER_RUN = 10;
-
-const STALE_STATUSES = ['on_site', 'en_route'];
 
 function toMoney(value) {
   const n = Number(value);
@@ -64,16 +67,6 @@ function toMoney(value) {
 // A row is priced if it carries either price field itself.
 function rowHasPrice(row) {
   return toMoney(row?.estimated_price) != null || toMoney(row?.primary_line_price) != null;
-}
-
-// Stale = past its ET service date and still in an in-progress status.
-// scheduled_date is a DATE column rendered via to_char in SQL — no JS Date
-// round-trip across the UTC boundary (pg's default parser lands DATE at
-// machine-local midnight, which is the PREVIOUS ET day on a UTC host).
-function isStaleInProgress(row, todayET) {
-  if (!row || !STALE_STATUSES.includes(row.status)) return false;
-  const d = String(row.service_date || '').slice(0, 10);
-  return /^\d{4}-\d{2}-\d{2}$/.test(d) && d < todayET;
 }
 
 // An upcoming visit pages when nothing that will actually bill it carries a
@@ -166,28 +159,15 @@ async function runScheduleIntegrityWatchdog({ now = new Date() } = {}) {
     return { skipped: true, reason: 'gated_off' };
   }
   // notifyAdmin's dedupe takes its own per-key advisory lock, but a run's
-  // classification pass (which rows are stale/unpriced/etc.) is not itself
-  // locked — serialize ticks so deploy overlap can't build two different
-  // alert sets from an overlapping read.
+  // classification pass (which rows are unpriced/etc.) is not itself locked
+  // — serialize ticks so deploy overlap can't build two different alert sets
+  // from an overlapping read.
   const { runExclusive } = require('../utils/cron-lock');
   return runExclusive('schedule-integrity-watchdog', () => runInner({ now }));
 }
 
 async function runInner({ now = new Date() } = {}) {
   const todayET = etDateString(now);
-
-  // Class 1 — stale in-progress visits. The status filter narrows to the
-  // two in-progress states; the ET date guard re-checks in JS so a row
-  // scheduled today never pages mid-visit.
-  const staleRows = await db('scheduled_services')
-    .whereIn('status', STALE_STATUSES)
-    .where('scheduled_date', '<', todayET)
-    .select(
-      'id', 'customer_id', 'status', 'service_type',
-      db.raw("to_char(scheduled_date, 'YYYY-MM-DD') as service_date"),
-    )
-    .orderBy('scheduled_date', 'asc');
-  const stale = staleRows.filter((r) => isStaleInProgress(r, todayET));
 
   // Coverage can still be lost on an overdue visit that staff complete later.
   // Match the annual writer's null-or-live status predicate. The existing
@@ -342,9 +322,7 @@ async function runInner({ now = new Date() } = {}) {
   };
 
   // Unpriced series ring FIRST: they are same-day money loss (a visit can
-  // complete and invoice at $0 today), while the stale backlog is historic
-  // and safely drains across ticks. On first enable the 89-row stale backlog
-  // would otherwise consume the whole per-run cap for days and starve these.
+  // complete and invoice at $0 today).
   const alerts = Array.from(unpricedByRoot, ([root, v]) => {
     const d = v.service_date;
     return [
@@ -356,7 +334,7 @@ async function runInner({ now = new Date() } = {}) {
     ];
   });
 
-  // Class 3 — recurring-lawn customers invisible to the Monday irrigation
+  // Class 2 — recurring-lawn customers invisible to the Monday irrigation
   // email (owner directive 2026-08-05: check daily). The email's audience is
   // computed at send time, so there is no enrollment list to reconcile — the
   // only drift class is a customer WITH recurring-lawn evidence failing a
@@ -463,18 +441,6 @@ async function runInner({ now = new Date() } = {}) {
       { link: `/admin/customers?customerId=${encodeURIComponent(gap.customerId)}`, refreshOnDedupe: true, dedupeVersion: gap.evidenceKey },
   ]));
 
-  alerts.push(...stale.map((v) => {
-    const d = v.service_date;
-    return [
-      `stale-visit:${v.id}`,
-      `Visit stuck ${v.status} since ${d} — never completed`,
-      `${v.service_type || 'A visit'} on ${d} is still "${v.status}". If it was performed, complete it so the ` +
-      'service record, invoice, and report fire; if it never happened, cancel it from admin dispatch ' +
-      '(admin path — not the customer app).',
-      { scheduled_service_id: v.id, customer_id: v.customer_id || null, stale_status: v.status, service_date: d },
-    ];
-  }));
-
   for (const alert of alerts) {
     if (capped()) break;
     await ring(...alert);
@@ -483,7 +449,6 @@ async function runInner({ now = new Date() } = {}) {
   return {
     skipped: false,
     todayET,
-    stale: stale.length,
     unpricedSeries: unpricedByRoot.size,
     lawnEmailGaps: lawnGaps.length,
     lawnGapCheckFailed,
@@ -500,12 +465,10 @@ module.exports = {
   runScheduleIntegrityWatchdog,
   runInner,
   rowHasPrice,
-  isStaleInProgress,
   isUnpricedSeriesVisit,
   hasOutOfBandPrepaidStamp,
   hasAnnualPrepaidStamp,
   seriesRootId,
   UPCOMING_WINDOW_DAYS,
   MAX_ALERTS_PER_RUN,
-  STALE_STATUSES,
 };

@@ -305,6 +305,28 @@ describe('atomic publishing claim', () => {
     expect(retried).toBeUndefined();
   });
 
+  test('an off-list competitor refusal (BLOG_OWNER_LIST_BLOCKED) parks as failed; a company-check outage stays transient (#5146)', async () => {
+    mockState.pendingBlogs = [blog];
+    AstroPublisher.publishAstro.mockRejectedValue(Object.assign(new Error('final text names competitor(s) outside the owner-approved list: Bug Out'), { code: 'BLOG_OWNER_LIST_BLOCKED' }));
+
+    await ContentScheduler.processScheduledPosts();
+
+    expect(mockState.updates.find((u) => u.table === 'blog_posts' && u.updates.publish_status === 'failed' && u.filters.some(([col, val]) => col === 'id' && val === 7))).toBeDefined();
+  });
+
+  test('a NON-retryable company-check failure parks as failed; a retryable outage is left to the transient retry (#5146)', async () => {
+    mockState.pendingBlogs = [blog];
+    AstroPublisher.publishAstro.mockRejectedValue(Object.assign(new Error('company-name check unavailable for the final text (draft_too_long_for_extraction)'), { code: 'BLOG_OWNER_LIST_UNVERIFIED', retryable: false }));
+    await ContentScheduler.processScheduledPosts();
+    expect(mockState.updates.find((u) => u.table === 'blog_posts' && u.updates.publish_status === 'failed' && u.filters.some(([col, val]) => col === 'id' && val === 7))).toBeDefined();
+
+    mockState.updates.length = 0;
+    mockState.pendingBlogs = [blog];
+    AstroPublisher.publishAstro.mockRejectedValue(Object.assign(new Error('company-name check unavailable for the final text (timeout)'), { code: 'BLOG_OWNER_LIST_UNVERIFIED', retryable: true }));
+    await ContentScheduler.processScheduledPosts();
+    expect(mockState.updates.find((u) => u.table === 'blog_posts' && u.updates.publish_status === 'failed' && u.filters.some(([col, val]) => col === 'id' && val === 7))).toBeUndefined();
+  });
+
   test('a body-image contract failure (BLOG_BODY_IMAGES_FAILED) parks like the other deterministic codes (PR #3567)', async () => {
     mockState.pendingBlogs = [blog];
     const imgErr = new Error('autonomous blog body images: only 1 of 2 insertion slot(s) found');

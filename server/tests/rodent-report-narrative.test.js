@@ -23,6 +23,10 @@ const {
   _cache,
 } = _test;
 
+const {
+  nextVisitProblems, isVisitClaim, splitSentences, withoutStaleVisitClaims,
+} = require('../services/service-report/next-visit-claims');
+
 const RECAP = 'Today we completed your Rodent Trapping Service. We treated the accessible service areas. - Waves';
 
 let seq = 0;
@@ -210,11 +214,42 @@ test('ungrounded numbers and unsupported capture/consumption claims are rejected
   // roster references without a role verb claim nothing
   expect(ungroundedClaims('The service covers all of the traps around your home.', facts)).toEqual([]);
 
-  // standalone clock times validate against the window boundaries (codex
-  // round-8 P1): a reformatted single time keeps the meridiem honest
+  // Standalone clock times cannot turn either endpoint of the customer-facing
+  // window into an exact arrival promise.
   expect(ungroundedClaims('Your next visit is Monday, August 3 at 8 PM.', facts))
     .toContain('ungrounded_time:8 PM');
-  expect(ungroundedClaims('We arrive Monday, August 3 starting at 8 AM.', facts)).toEqual([]);
+  expect(ungroundedClaims('Arriving Monday, August 3 at 8 PM.', facts))
+    .toContain('ungrounded_time:8 PM');
+  expect(ungroundedClaims('Your next visit is Monday, August 3, arriving 8–10 AM. Arrival is at 8 PM.', facts))
+    .toContain('ungrounded_time:8 PM');
+  expect(ungroundedClaims('We arrive Monday, August 3 starting at 8 AM.', facts))
+    .toContain('ungrounded_time:8 AM');
+  expect(ungroundedClaims('Your next visit is Monday, August 3, arriving 8–10 AM, specifically at 10 AM.', facts))
+    .toContain('ungrounded_time:10 AM');
+  expect(ungroundedClaims('Your next visit is Monday, August 3, arriving 8–10 AM, specifically at noon.', facts))
+    .toContain('ungrounded_time:NOON');
+  expect(ungroundedClaims('Your next visit is Monday, August 3, arriving 8–10 AM, specifically at midnight.', facts))
+    .toContain('ungrounded_time:MIDNIGHT');
+  expect(ungroundedClaims('Your next visit is Monday, August 3, arriving 8–10 AM, specifically at 20:00.', facts))
+    .toContain('ungrounded_time:20:00');
+  expect(ungroundedClaims('Your next visit is Monday, August 3 at eight AM.', facts))
+    .toContain('ungrounded_time:8 AM');
+  expect(ungroundedClaims("Your next visit is Monday, August 3 at eight o'clock.", facts))
+    .toContain("ungrounded_time:8 O'CLOCK");
+  expect(ungroundedClaims('Your next visit is Monday, August 3, arriving 8–10 AM.', facts)).toEqual([]);
+  expect(ungroundedClaims('Your next visit is tomorrow, Monday, August 3, arriving 8–10 AM.', facts))
+    .toContain('ungrounded_relative_date:tomorrow');
+  expect(ungroundedClaims('Your next visit is Monday, August 3, arriving 8–10 AM tomorrow.', facts))
+    .toContain('ungrounded_relative_date:tomorrow');
+  expect(ungroundedClaims('Your next visit is next Monday, arriving 8–10 AM.', facts))
+    .toContain('ungrounded_relative_date:next monday');
+  expect(ungroundedClaims('Your next visit is this Monday, arriving 8–10 AM.', facts))
+    .toContain('ungrounded_relative_date:this monday');
+  expect(ungroundedClaims('Today we completed service. Your next visit is Monday, August 3, arriving 8–10 AM.', facts))
+    .toEqual([]);
+  expect(ungroundedClaims('Service was completed this afternoon.', facts)).toEqual([]);
+  expect(ungroundedClaims('Your next visit is Monday, August 3 in 2027, arriving 8–10 AM.', facts)
+    .some((problem) => problem.includes('ungrounded_date:') && problem.includes('in 2027'))).toBe(true);
 
   // standalone weekday mentions validate against the grounded visit (codex
   // round-6 P1): no month-day needed for "Tuesday" to contradict a Monday
@@ -261,8 +296,20 @@ test('ungrounded numbers and unsupported capture/consumption claims are rejected
   expect(ungroundedClaims('Your next visit is Monday, August 3, arriving 8–10 PM.', facts))
     .toContain('ungrounded_window:8–10 PM');
   expect(ungroundedClaims('Your next visit is Tuesday, August 3, arriving 8–10 AM.', facts))
-    .toContain('ungrounded_date:Tuesday, August 3');
+    .toContain('ungrounded_weekday:Tuesday');
+  expect(ungroundedClaims(
+    'Your next visit is Monday, August 3, arriving 8–10 AM. The technician will return Tuesday, August 4.',
+    facts,
+  )).toEqual(expect.arrayContaining(['ungrounded_weekday:Tuesday']));
   expect(ungroundedClaims('See you on September 3.', facts)).toContain('ungrounded_date:September 3');
+  expect(ungroundedClaims('Your next visit is Sep 3, arriving 8–10 AM.', facts))
+    .toContain('ungrounded_date:Sep 3');
+  expect(ungroundedClaims('Your next visit is Sep. 3, arriving 8–10 AM.', facts))
+    .toContain('ungrounded_date:Sep. 3');
+  expect(ungroundedClaims('Your next visit is Sept. 3, arriving 8–10 AM.', facts))
+    .toContain('ungrounded_date:Sept. 3');
+  expect(ungroundedClaims('Your next visit is Monday, Aug 3, arriving 8–10 AM.', facts)).toEqual([]);
+  expect(ungroundedClaims('Your next visit is Monday, Aug. 3, arriving 8–10 AM.', facts)).toEqual([]);
   // with no grounded next visit, any window/date mention rejects
   const noVisit = groundingFacts(input({ nextAppointment: null }));
   expect(ungroundedClaims('We will arrive 8–10 AM.', noVisit).some((p) => p.startsWith('ungrounded_window'))).toBe(true);
@@ -370,6 +417,441 @@ test('model copy is used when clean, and caches on the facts hash', async () => 
   const again = await applyRodentReportNarrative(one, { callModel });
   expect(again).toBe(first);
   expect(callModel).toHaveBeenCalledTimes(1);
+});
+
+test('grounded relative care timing survives without authorizing a relative appointment', async () => {
+  const args = input();
+  args.typedReport = {
+    ...args.typedReport,
+    todaysResult: {
+      ...args.typedReport.todaysResult,
+      nextStep: 'Contact us tomorrow if activity returns.',
+    },
+  };
+  const facts = groundingFacts(args);
+  const summary = 'Today we completed your rodent trapping visit and inspected all 7 traps, with no captures recorded. '
+    + 'We documented droppings in the attic insulation, and today’s moderate activity reading sets the baseline for your program. '
+    + 'Contact us tomorrow if activity returns. Your next visit is Monday, August 3, arriving 8–10 AM.';
+  expect(ungroundedClaims(summary, facts)).toEqual([]);
+  expect(ungroundedClaims(
+    `${summary} Your next visit is tomorrow.`,
+    facts,
+  )).toContain('ungrounded_relative_date:tomorrow');
+  for (const appointmentCare of [
+    'We will visit tomorrow.',
+    'Your service is scheduled for tomorrow.',
+    'We will be there tomorrow.',
+    'We are returning tomorrow.',
+    'The technician returns tomorrow.',
+  ]) {
+    const appointmentArgs = {
+      ...args,
+      recap: `${args.recap} ${appointmentCare}`,
+      typedReport: {
+        ...args.typedReport,
+        todaysResult: { ...args.typedReport.todaysResult, nextStep: appointmentCare },
+      },
+    };
+    const appointmentFacts = {
+      ...facts,
+      todaysResult: { ...facts.todaysResult, nextStep: appointmentCare },
+    };
+    const invalidSummary = summary.replace('Contact us tomorrow if activity returns.', appointmentCare);
+    expect(ungroundedClaims(
+      invalidSummary,
+      appointmentFacts,
+    )).toContain('ungrounded_relative_date:tomorrow');
+    const rejected = await applyRodentReportNarrative(appointmentArgs, {
+      callModel: jest.fn().mockResolvedValue({ ok: true, json: { summary: invalidSummary } }),
+    });
+    expect(rejected).not.toContain(appointmentCare);
+  }
+  const out = await applyRodentReportNarrative(args, {
+    callModel: jest.fn().mockResolvedValue({ ok: true, json: { summary } }),
+  });
+  expect(out).toContain(summary);
+  expect(out).toContain('Contact us tomorrow if activity returns.');
+
+  const timedCare = 'Contact us at 8 AM if activity returns.';
+  const timedArgs = {
+    ...args,
+    typedReport: {
+      ...args.typedReport,
+      todaysResult: { ...args.typedReport.todaysResult, nextStep: timedCare },
+    },
+  };
+  const timedFacts = groundingFacts(timedArgs);
+  const timedSummary = summary.replace('Contact us tomorrow if activity returns.', timedCare);
+  expect(ungroundedClaims(timedSummary, timedFacts)).toEqual([]);
+  const timedOut = await applyRodentReportNarrative(timedArgs, {
+    callModel: jest.fn().mockResolvedValue({ ok: true, json: { summary: timedSummary } }),
+  });
+  expect(timedOut).toContain(timedSummary);
+  expect(timedOut).toContain(timedCare);
+
+  const dottedArgs = input();
+  dottedArgs.typedReport = {
+    ...dottedArgs.typedReport,
+    todaysResult: {
+      ...dottedArgs.typedReport.todaysResult,
+      nextStep: 'Contact us tomorrow if activity returns.',
+    },
+  };
+  const dottedSummary = summary.replace('Monday, August 3', 'Sep. 3');
+  const dottedOut = await applyRodentReportNarrative(dottedArgs, {
+    callModel: jest.fn().mockResolvedValue({ ok: true, json: { summary: dottedSummary } }),
+  });
+  expect(dottedOut).not.toContain('Sep. 3');
+
+  // Source punctuation never detaches a date or time from its visit claim
+  // (independent review P1 on #5055, L1349): the ratified sentence stays
+  // whole, so it is validated as a claim instead of leaving an exempt "3.".
+  for (const [sourceCare, modelCare, expectedProblem] of [
+    [
+      'Your next visit is Monday, Aug. 3, arriving 8–10 a.m. tomorrow.',
+      'Your next visit is Monday, Aug. 3, arriving 8–10 a.m. tomorrow.',
+      'ungrounded_relative_date:tomorrow',
+    ],
+    [
+      'Your next visit is Sep. 3.',
+      'Your next appointment is Sep. 3.',
+      'ungrounded_date:Sep. 3',
+    ],
+    [
+      'Your next visit is Monday, Aug. 4.',
+      'Your next visit is Monday, Aug. 4.',
+      'ungrounded_date:Monday, Aug. 4',
+    ],
+  ]) {
+    const appointmentArgs = {
+      ...args,
+      typedReport: {
+        ...args.typedReport,
+        todaysResult: { ...args.typedReport.todaysResult, nextStep: sourceCare },
+      },
+    };
+    const appointmentFacts = groundingFacts(appointmentArgs);
+    const invalidSummary = summary.replace('Contact us tomorrow if activity returns.', modelCare);
+    expect(ungroundedClaims(invalidSummary, appointmentFacts)).toContain(expectedProblem);
+    const rejected = await applyRodentReportNarrative(appointmentArgs, {
+      callModel: jest.fn().mockResolvedValue({ ok: true, json: { summary: invalidSummary } }),
+    });
+    expect(rejected).not.toContain(modelCare);
+    expect(rejected).not.toContain(sourceCare);
+  }
+
+  const weatherCare = 'Rain is expected Sep. 3, ending at 8 a.m. tomorrow, so keep the traps dry.';
+  const weatherArgs = {
+    ...args,
+    typedReport: {
+      ...args.typedReport,
+      todaysResult: { ...args.typedReport.todaysResult, nextStep: weatherCare },
+    },
+  };
+  const weatherFacts = groundingFacts(weatherArgs);
+  const weatherSummary = summary.replace('Contact us tomorrow if activity returns.', weatherCare);
+  expect(ungroundedClaims(weatherSummary, weatherFacts)).toEqual([]);
+  const weatherOut = await applyRodentReportNarrative(weatherArgs, {
+    callModel: jest.fn().mockResolvedValue({ ok: true, json: { summary: weatherSummary } }),
+  });
+  expect(weatherOut).toContain(weatherSummary);
+
+  const sentenceBoundaryCare = 'Contact us at 8 a.m. Your next visit is Monday, August 3, arriving 8–10 AM.';
+  const sentenceBoundaryArgs = {
+    ...args,
+    typedReport: {
+      ...args.typedReport,
+      todaysResult: { ...args.typedReport.todaysResult, nextStep: sentenceBoundaryCare },
+    },
+  };
+  const sentenceBoundaryFacts = groundingFacts(sentenceBoundaryArgs);
+  const sentenceBoundarySummary = summary.replace(
+    'Contact us tomorrow if activity returns. Your next visit is Monday, August 3, arriving 8–10 AM.',
+    sentenceBoundaryCare,
+  );
+  expect(ungroundedClaims(sentenceBoundarySummary, sentenceBoundaryFacts)).toEqual([]);
+  const sentenceBoundaryOut = await applyRodentReportNarrative(sentenceBoundaryArgs, {
+    callModel: jest.fn().mockResolvedValue({ ok: true, json: { summary: sentenceBoundarySummary } }),
+  });
+  expect(sentenceBoundaryOut).toContain(sentenceBoundarySummary);
+});
+
+describe('next-visit claims fixture table', () => {
+  const facts = { nextVisit: { date: 'Monday, August 3', window: '8–10 AM' } };
+  const problemsFor = (text, care = []) => nextVisitProblems(text, facts, { groundedCareExemptions: care });
+
+  // Temporal forms: every spelling of an exact time, date, weekday, or
+  // relative date is judged like its digit form. [text, expected problems]
+  test.each([
+    ['Your next visit is Monday, August 3, arriving 8–10 AM.', []],
+    ['Your next visit is Monday, Aug. 3, arriving eight–ten AM.', []],
+    ['Service was completed this afternoon.', []],
+    ['We inspected all 7 traps and recorded a capture at 2 traps.', []],
+    ['Results usually show after 2 or 3 days.', []],
+    ['Captures were recorded at 2 of 7 stations; one may need moving.', []],
+    // word-form exact arrival promises (codex P1 on #5055, L6)
+    ['Your next visit is Monday, August 3 at eight AM.', ['ungrounded_time:8 AM']],
+    ["Your next visit is Monday, August 3 at eight o'clock.", ["ungrounded_time:8 O'CLOCK"]],
+    ['Your next visit is Monday, August 3 at 8 o’clock.', ['ungrounded_time:8 O’CLOCK']],
+    ['We arrive Monday, August 3 at nine in the morning.', ['ungrounded_time:9 IN THE MORNING']],
+    ['We arrive Monday, August 3 at eight thirty a.m.', ['ungrounded_time:8 30 AM']],
+    ['We arrive Monday, August 3 at half past eight.', ['ungrounded_time:HALF PAST 8']],
+    ['We arrive Monday, August 3 at eight.', ['ungrounded_time:AT 8']],
+    ['We arrive Monday, August 3 at 8 sharp.', ['ungrounded_time:AT 8']],
+    ['We arrive Monday, August 3 at noon.', ['ungrounded_time:NOON']],
+    ['Your next visit is Monday, August 3, arriving 8–10 AM, specifically at 10 AM.', ['ungrounded_time:10 AM']],
+    // dates, weekdays, relative dates
+    ['Your next visit is Monday, September third.', ['ungrounded_date:Monday, September 3rd']],
+    ['Your next visit is on the 3rd of September.', ['ungrounded_date:3rd of September']],
+    ['Your next visit is Monday, August the third.', []],
+    ['Your next visit is Tue., Aug 3.', ['ungrounded_date:Tue., Aug 3']],
+    ['Your next visit is Sep 3, arriving 8–10 AM.', ['ungrounded_date:Sep 3']],
+    ['Your next visit is next Monday.', ['ungrounded_relative_date:next monday']],
+    ['Your next visit is this coming Monday.', ['ungrounded_relative_date:this coming monday']],
+    ['Your next visit is Monday after next.', ['ungrounded_relative_date:monday after next']],
+    ['Your next visit is tomorrow.', ['ungrounded_relative_date:tomorrow']],
+    ['We will be back Tuesday.', ['ungrounded_weekday:Tuesday']],
+    // relative durations used as the visit date (codex P1 on #5055, L56):
+    // only a visit claim makes a span of time an appointment date
+    ['Your next visit is in 7 days.', ['ungrounded_relative_date:in 7 days']],
+    ['We will be back in seven days.', ['ungrounded_relative_date:in 7 days']],
+    ['Our technician returns within two weeks.', ['ungrounded_relative_date:within 2 weeks']],
+    ['We will be back in a couple of days.', ['ungrounded_relative_date:in a couple of days']],
+    ['Your follow-up is 10 days from now.', ['ungrounded_relative_date:10 days from now']],
+    ['A follow-up visit in 10–14 days is recommended.', ['ungrounded_relative_date:in 10–14 days']],
+    ['Results should appear within two weeks.', []],
+    ['Results should appear within two weeks. We will be back in 7 days.', ['ungrounded_relative_date:in 7 days']],
+    // prose arrival ranges are windows, compared by value (codex P1 on
+    // #5055, L46); counts written as ranges are not
+    ['Your next visit is Monday, August 3, arriving between 7 and 8.', ['ungrounded_window:BETWEEN 7 AND 8']],
+    ['Your next visit is Monday, August 3, arriving from 7 to 8.', ['ungrounded_window:FROM 7 TO 8']],
+    ['We will arrive between 7 and 8 on Monday, August 3.', ['ungrounded_window:BETWEEN 7 AND 8']],
+    ['Your next visit is Monday, August 3, arriving 9 to 11 AM.', ['ungrounded_window:9 TO 11 AM']],
+    ['Your next visit is Monday, August 3, arriving eight to ten in the evening.', ['ungrounded_window:8 TO 10 IN THE EVENING']],
+    ['Your next visit is Monday, August 3, arriving 8–10 PM.', ['ungrounded_window:8–10 PM']],
+    ['Your next visit is Monday, August 3, arriving between eight and ten.', []],
+    ['Your next visit is Monday, August 3, arriving between 8 and 10 AM.', []],
+    ['Your next visit is Monday, August 3, arriving 8 to 10 in the morning.', []],
+    ['Your next visit is Monday, August 3, arriving 8 AM to 10 AM.', []],
+    ['Your next visit is Monday, August 3, arriving from 8:00 until 10:00 a.m.', []],
+    ['We arrive Monday, August 3 between 8 and 10 AM, specifically at 9 AM.', ['ungrounded_time:9 AM']],
+    ['Captures were recorded at between 2 and 3 traps.', []],
+    ['Activity dropped from 3 to 2 stations.', []],
+    // Fail closed (codex r3 on #5055): inside a future visit claim every
+    // temporal token must agree with the one authoritative appointment, so
+    // an unlisted phrasing is rejected instead of passing unseen.
+    // lowercase months are months unless a verb follows (L304)
+    ['Your next visit is mar 3, arriving 8–10 AM.', ['ungrounded_date:mar 3']],
+    ['Your next visit is may 4, arriving 8–10 AM.', ['ungrounded_date:may 4']],
+    ['Your next visit is may the 4th.', ['ungrounded_date:may the 4th']],
+    ['We will be back in May.', ['ungrounded_date:May']],
+    ['We will be back in March when activity peaks.', ['ungrounded_date:March']],
+    ['Some traps may need moving before your next visit.', []],
+    ['Stains may mar the finish before your next visit.', []],
+    // a part of the day must be one the arrival window covers (L260)
+    ['Your next visit is Monday afternoon.', ['ungrounded_day_period:afternoon']],
+    ['We will be back Monday evening.', ['ungrounded_day_period:evening']],
+    ['We will be back Monday PM.', ['ungrounded_day_period:pm']],
+    ['Your next visit is tomorrow morning.', ['ungrounded_relative_date:tomorrow']],
+    ['Your next visit is this afternoon.', ['ungrounded_relative_date:this afternoon']],
+    ['Your next visit is Monday morning, arriving 8–10 AM.', []],
+    // every other token type: relative words, spans, ordinals, numeric
+    // dates, bare arrival ranges and hours, abbreviated weekdays
+    ['Your next visit is next week.', ['ungrounded_relative_date:next week']],
+    ['We will be back over the weekend.', ['ungrounded_relative_date:weekend']],
+    ['We will be back a week from Monday.', ['ungrounded_relative_date:a week from monday']],
+    ['We will be back on the 4th.', ['ungrounded_date:on the 4th']],
+    ['We will be back on the 3rd.', []],
+    ['Your next visit is 8/4.', ['ungrounded_date:8/4']],
+    ['Your next visit is 8/3.', []],
+    ['We will be back Monday, 7–8.', ['ungrounded_window:7–8']],
+    ['We will be back Monday by 9.', ['ungrounded_time:BY 9']],
+    ['We will be back Tue.', ['ungrounded_weekday:Tue']],
+    ['Your second visit is Monday, August 3.', []],
+    // completed visits are history, not appointments (L332); anything short
+    // of clearly past stays under validation
+    ["At today's September 28 visit, we inspected the traps.", []],
+    ['We treated on Sep. 3.', []],
+    ['Since our visit on Aug. 1, activity has dropped.', []],
+    ['Our last visit was Aug. 1.', []],
+    ['Our technician visited on Sep. 3.', []],
+    ['We treated on Sep. 3 and will return Sep. 10.', ['ungrounded_date:Sep. 3', 'ungrounded_date:Sep. 10']],
+    ['Our technician came by Sep. 3 and returns Sep. 10.', ['ungrounded_date:Sep. 3', 'ungrounded_date:Sep. 10']],
+    ['Our technician inspected the traps, and the follow-up is Tuesday.', ['ungrounded_weekday:Tuesday']],
+    ['We treated the yard, follow-up Tuesday.', ['ungrounded_weekday:Tuesday']],
+    ['We noted your follow-up as Tuesday.', ['ungrounded_weekday:Tuesday']],
+    ['We set the follow-up for Tuesday.', ['ungrounded_weekday:Tuesday']],
+    // care copy that makes no visit claim keeps its ordinary time words
+    ['Keep pets inside this afternoon.', []],
+    ['Water the lawn in the morning.', []],
+  ])('%s', (text, expected) => {
+    expect(problemsFor(text)).toEqual(expected);
+  });
+
+  // Visit claims: which ratified care sentences stay under validation.
+  // [ratified sentence, is a visit claim]
+  test.each([
+    // appointment claims, including return phrasing (codex P1 on #5055, L15)
+    ['We are returning tomorrow.', true],
+    ['The technician returns tomorrow.', true],
+    ["We'll be back Tuesday.", true],
+    ['We’ll be back Tuesday.', true],
+    ['We return tomorrow to check the traps.', true],
+    ['Our team is scheduled to come out tomorrow.', true],
+    ['Your technician will stop by tomorrow at 8 AM.', true],
+    ['Back Tuesday to check traps.', true],
+    ['Returning tomorrow for the trap check.', true],
+    ['See you tomorrow.', true],
+    ['Expect our technician tomorrow morning.', true],
+    ['We will visit tomorrow.', true],
+    ['Your service is scheduled for tomorrow.', true],
+    ['We will be there tomorrow.', true],
+    ['Keep pets inside until we return at 8 AM.', true],
+    ['Visit Tuesday at 9 AM.', true],
+    ['Please schedule your visit for Tuesday.', true],
+    ["We'll do another visit Tuesday.", true],
+    ['Water for 20 minutes at 6 AM before your next visit.', true],
+    // non-appointment care instructions (codex P1 on #5055, L32)
+    ['Contact us at 8 AM if activity returns.', false],
+    ['Contact us tomorrow if activity returns.', false],
+    ['Water for 20 minutes at 6 AM.', false],
+    ['Keep pets off the treated lawn until 2 PM.', false],
+    ['If they come back tomorrow, call us.', false],
+    ['Contact our team at 8 AM if activity returns.', false],
+    ['Call us at 8 AM to book a visit.', false],
+    ['We recommend watering at 6 AM on Tuesday.', false],
+  ])('%s', (sentence, claim) => {
+    expect(isVisitClaim(sentence)).toBe(claim);
+    const text = `${sentence} Your next visit is Monday, August 3, arriving 8–10 AM.`;
+    if (claim) {
+      expect(problemsFor(text, [sentence])).toEqual(problemsFor(text));
+    } else {
+      expect(problemsFor(text, [sentence])).toEqual([]);
+    }
+  });
+
+  test('a visit-claim span is grounded only by a span the ratified care states', () => {
+    const care = 'A follow-up visit in 10–14 days is recommended.';
+    expect(problemsFor('A follow-up visit in fourteen days keeps you ahead of new activity.', [care])).toEqual([]);
+    expect(problemsFor('Your next visit is in 7 days.', [care])).toEqual(['ungrounded_relative_date:in 7 days']);
+    expect(problemsFor('We will be back in 14 weeks.', [care])).toEqual(['ungrounded_relative_date:in 14 weeks']);
+  });
+
+  test('ratified copy loses only the visit claims the dated visit contradicts', () => {
+    const block = 'We checked 7 traps today. We will return tomorrow. '
+      + 'A follow-up visit in 10–14 days is recommended. We will arrive between 7 and 8. '
+      + 'Contact us tomorrow if activity returns.';
+    expect(withoutStaleVisitClaims(block, facts.nextVisit)).toBe('We checked 7 traps today. '
+      + 'A follow-up visit in 10–14 days is recommended. Contact us tomorrow if activity returns.');
+    expect(withoutStaleVisitClaims(block, null)).toBe(block);
+    // a sentence about the completed visit is ratified history, never a
+    // stale appointment (codex r3 on #5055, L332)
+    const october = { date: 'Monday, October 5', window: '8–10 AM' };
+    expect(withoutStaleVisitClaims(
+      "At today's September 28 visit, we inspected the traps. We will return tomorrow.",
+      october,
+    )).toBe("At today's September 28 visit, we inspected the traps.");
+    expect(withoutStaleVisitClaims('Since our visit on Aug. 1, activity has dropped.', october))
+      .toBe('Since our visit on Aug. 1, activity has dropped.');
+    // an abbreviation that ends a clause ends the sentence, so only the
+    // stale promise leaves (codex r3 on #5055, L154)
+    expect(withoutStaleVisitClaims('Keep food sealed and remove clutter, etc. We will return tomorrow.', october))
+      .toBe('Keep food sealed and remove clutter, etc.');
+  });
+
+  // Sentence boundaries: abbreviations and decimals never end a sentence,
+  // so a date or time stays inside its claim (independent review P1, L1349).
+  test.each([
+    ['Your next visit is Sep. 3.', ['Your next visit is Sep. 3.']],
+    ['Your next visit is Monday, Aug. 4.', ['Your next visit is Monday, Aug. 4.']],
+    ['Arriving at 8 a.m. Monday.', ['Arriving at 8 a.m. Monday.']],
+    ['Your next visit is Monday, Aug. 3, arriving 8–10 a.m. tomorrow.', ['Your next visit is Monday, Aug. 3, arriving 8–10 a.m. tomorrow.']],
+    ['Rain is expected Sep. 3, ending at 8 a.m. tomorrow, so keep the traps dry.', ['Rain is expected Sep. 3, ending at 8 a.m. tomorrow, so keep the traps dry.']],
+    ['Contact us at 8 a.m. Your next visit is Monday, August 3, arriving 8–10 AM.', ['Contact us at 8 a.m.', 'Your next visit is Monday, August 3, arriving 8–10 AM.']],
+    ['Ask for Dr. Lee at the St. Mark office. Keep pets inside.', ['Ask for Dr. Lee at the St. Mark office.', 'Keep pets inside.']],
+    ['J. Smith approved the plan. Keep pets inside.', ['J. Smith approved the plan.', 'Keep pets inside.']],
+    ['Water 1.5 inches weekly. Keep pets inside.', ['Water 1.5 inches weekly.', 'Keep pets inside.']],
+    ['We checked the traps! Keep pets inside? Yes.', ['We checked the traps!', 'Keep pets inside?', 'Yes.']],
+    // "etc."-style abbreviations end the sentence before a capitalized word
+    // (codex r3 on #5055, L154); a lowercase word or a date still continues
+    ['Keep food sealed and remove clutter, etc. We will return tomorrow.', ['Keep food sealed and remove clutter, etc.', 'We will return tomorrow.']],
+    ['Bring in pet food, etc. before dusk. Keep pets inside.', ['Bring in pet food, etc. before dusk.', 'Keep pets inside.']],
+    ['Seal gaps, vents, etc. Monday works too.', ['Seal gaps, vents, etc. Monday works too.']],
+  ])('sentences of %s', (block, expected) => {
+    expect(splitSentences(block)).toEqual(expected);
+  });
+
+  test('an abbreviated date or time is judged inside its claim', () => {
+    expect(withoutStaleVisitClaims('We checked 7 traps today. Your next visit is Sep. 3.', facts.nextVisit))
+      .toBe('We checked 7 traps today.');
+    expect(withoutStaleVisitClaims('We checked 7 traps today. Your next visit is Monday, Aug. 4.', facts.nextVisit))
+      .toBe('We checked 7 traps today.');
+    expect(problemsFor('Arriving at 8 a.m. Monday.')).toEqual(['ungrounded_time:8 AM']);
+    expect(problemsFor('Your next appointment is Sep. 3.', ['Your next visit is Sep. 3.'])).toEqual(['ungrounded_date:Sep. 3']);
+  });
+
+  test('an exempt care sentence exempts only its verbatim copy', () => {
+    const care = 'Contact us at 8 AM if activity returns.';
+    expect(problemsFor(`${care} We will arrive at 8 AM.`, [care])).toEqual(['ungrounded_time:8 AM']);
+    expect(problemsFor('Contact us at 9 AM if activity returns.', [care])).toEqual(['ungrounded_time:9 AM']);
+  });
+});
+
+test('grounded numerals cannot launder a relative visit date or a prose window', () => {
+  // 7 traps grounds the numerals 7 and 8–10 AM grounds 8, so only the
+  // temporal rules can catch these (codex P1 on #5055, L46 + L56).
+  const facts = groundingFacts(input());
+  expect(ungroundedClaims('Your next visit is in 7 days.', facts)).toContain('ungrounded_relative_date:in 7 days');
+  expect(ungroundedClaims('Your next visit is Monday, August 3, arriving between 7 and 8.', facts))
+    .toContain('ungrounded_window:BETWEEN 7 AND 8');
+  expect(ungroundedClaims('Your next visit is Monday, August 3, arriving from 7 to 8.', facts))
+    .toContain('ungrounded_window:FROM 7 TO 8');
+});
+
+test('stale appointment copy in the ratified result never reaches the published summary', async () => {
+  // Frozen Today's Result copy that contradicts the dated next visit (codex
+  // P1 on #5055, L1350). Before the fix the stale sentence was published
+  // either way: the fallback copied the body verbatim, and the care append
+  // re-added it after the model's copy had passed the guard.
+  const stale = 'We will return tomorrow.';
+  const staleStep = 'We will be back Tuesday.';
+  const care = 'Contact us tomorrow if activity returns.';
+  const args = input();
+  args.typedReport = {
+    ...args.typedReport,
+    todaysResult: {
+      ...args.typedReport.todaysResult,
+      body: `We checked 7 traps today. ${stale} ${care}`,
+      nextStep: staleStep,
+    },
+  };
+  const facts = groundingFacts(args);
+  expect(facts.todaysResult.body).toBe(`We checked 7 traps today. ${care}`);
+  expect(facts.todaysResult.nextStep).toBeNull();
+  const clean = 'Today we completed your rodent trapping visit and inspected all 7 traps, with no captures recorded. '
+    + 'We documented droppings in the attic insulation, and today’s moderate activity reading sets the baseline for your program. '
+    + 'Your next visit is Monday, August 3, arriving 8–10 AM.';
+  // the model omits the stale sentence: the care append adds only live care
+  const omitted = await applyRodentReportNarrative(args, {
+    callModel: jest.fn().mockResolvedValue({ ok: true, json: { summary: clean } }),
+  });
+  expect(omitted).toContain(clean);
+  expect(omitted).toContain(care);
+  expect(omitted).not.toContain(stale);
+  expect(omitted).not.toContain(staleStep);
+  // the model repeats it: rejected, and the fallback no longer copies it
+  _cache.clear();
+  const repeated = await applyRodentReportNarrative(args, {
+    callModel: jest.fn().mockResolvedValue({ ok: true, json: { summary: `${clean} ${stale}` } }),
+  });
+  expect(repeated).toContain('Your next visit is scheduled for Monday, August 3, arriving 8–10 AM.');
+  expect(repeated).toContain(care);
+  expect(repeated).not.toContain(stale);
+  expect(repeated).not.toContain(staleStep);
+  // with no dated visit there is nothing to contradict: the copy stays
+  const undated = groundingFacts({ ...args, nextAppointment: null });
+  expect(undated.todaysResult.body).toBe(`We checked 7 traps today. ${stale} ${care}`);
+  expect(undated.todaysResult.nextStep).toBe(staleStep);
 });
 
 test('banned copy, bad length, and withheld-name echoes fall back deterministically', async () => {
