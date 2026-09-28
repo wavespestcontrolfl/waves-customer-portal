@@ -604,10 +604,11 @@ async function applyChanges(trx, accountsById, changes) {
     if (!existing) { toInsert.push(r); continue; }
     if (sameMoneyFields(existing, r)) {
       // a re-send (cursor reset) or a correction the bank reverted: nothing
-      // to change — but a parked correction it undid is now obsolete
-      if (existing.suggestion && existing.suggestion.plaidModified) {
+      // to change — but a parked correction or withdrawal it undid is now
+      // obsolete
+      if (existing.suggestion && (existing.suggestion.plaidModified || existing.suggestion.plaidRemoved)) {
         await trx('bank_transactions').where({ id: existing.id }).update({
-          suggestion: trx.raw("coalesce(suggestion, '{}'::jsonb) - 'plaidModified'"),
+          suggestion: trx.raw("coalesce(suggestion, '{}'::jsonb) - 'plaidModified' - 'plaidRemoved'"),
           updated_at: trx.fn.now(),
         });
       }
@@ -623,7 +624,8 @@ async function applyChanges(trx, accountsById, changes) {
       // a reviewed row is never rewritten under the operator — the change
       // parks on the row (replacing an older parked one) for them to judge
       await trx('bank_transactions').where({ id: existing.id }).update({
-        suggestion: trx.raw("coalesce(suggestion, '{}'::jsonb) || ?::jsonb", [JSON.stringify({
+        // a valid version supersedes an earlier withdrawal (e.g. zeroed, then restored)
+        suggestion: trx.raw("(coalesce(suggestion, '{}'::jsonb) - 'plaidRemoved') || ?::jsonb", [JSON.stringify({
           plaidModified: { txn_date: r.txn_date, amount: r.amount, direction: r.direction, description: r.description },
         })]),
         updated_at: trx.fn.now(),
@@ -679,6 +681,7 @@ async function supersedeUnmatchedRow(trx, rowId, values) {
   if (!old) return null;
   const carried = { ...(old.suggestion || {}) };
   delete carried.plaidModified;
+  delete carried.plaidRemoved;
   await trx('bank_transactions').where({ id: rowId, status: 'unmatched' }).del();
   const [row] = await trx('bank_transactions').insert({
     account_label: old.account_label,

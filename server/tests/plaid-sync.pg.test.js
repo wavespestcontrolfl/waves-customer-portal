@@ -408,6 +408,18 @@ async function activate(itemId, overrides = {}) {
     expect(await plaidSync.syncItem(itemId)).toMatchObject({ deleted: 1, flagged: 1, skips: { zero_amount: 2 } });
     expect(await mockPg('bank_transactions').where({ plaid_transaction_id: 't-u' }).first()).toBeUndefined();
     expect((await mockPg('bank_transactions').where({ plaid_transaction_id: 't-r' }).first()).suggestion).toEqual({ plaidRemoved: true });
+
+    // the bank restores a valid amount: the withdrawal flag gives way to the correction
+    plaid.transactionsSync.mockResolvedValueOnce(page([], [txn('t-r', 'acc-card', 22, '2026-09-05')], [], 'cursor-3'));
+    expect(await plaidSync.syncItem(itemId)).toMatchObject({ flagged: 1 });
+    const restored = await mockPg('bank_transactions').where({ plaid_transaction_id: 't-r' }).first();
+    expect(restored.suggestion.plaidRemoved).toBeUndefined();
+    expect(restored.suggestion.plaidModified).toMatchObject({ amount: 22 });
+    // …and restoring the ORIGINAL values clears every flag
+    await mockPg('bank_transactions').where({ id: restored.id }).update({ suggestion: { plaidRemoved: true } });
+    plaid.transactionsSync.mockResolvedValueOnce(page([], [txn('t-r', 'acc-card', 20, '2026-09-05')], [], 'cursor-4'));
+    await plaidSync.syncItem(itemId);
+    expect((await mockPg('bank_transactions').where({ id: restored.id }).first()).suggestion).toEqual({});
   });
 
   test('a concurrent run that already moved the cursor wins', async () => {
