@@ -276,6 +276,23 @@ function isHourToken(t) {
   return (/^\d+$/.test(t) && !/^0+$/.test(t)) || Object.hasOwn(HOUR_WORDS, t) || t === 'noon' || t === 'midnight';
 }
 
+// Words that, right after an hour, are its minutes ("two thirty", "2 15",
+// "two oh five"), and words that, right before it, count minutes to or past
+// it ("quarter past two", "ten to two", "half past", "twenty of two").
+const MINUTE_WORDS = new Set([
+  'oh', 'ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen', 'sixteen', 'seventeen', 'eighteen', 'nineteen',
+  'twenty', 'thirty', 'forty', 'fifty', 'quarter', 'half',
+]);
+const MINUTES_BEFORE = new Set(['past', 'after', 'to', 'til', 'till', 'of']);
+
+// Does the hour in this quote carry minutes, on either side? Appointment
+// starts are on the hour, so such a quote never states the slot.
+function hourHasMinutes(toks, [ha, hb]) {
+  const next = toks[hb] || '';
+  return (/^\d+$/.test(next) && !/^0+$/.test(next)) || MINUTE_WORDS.has(next) || Object.hasOwn(HOUR_WORDS, next)
+    || MINUTES_BEFORE.has(toks[ha - 1]);
+}
+
 // Every token span where `words` sits in `toks`.
 function spans(toks, words) {
   const w = normalize(words).split(' ');
@@ -284,14 +301,19 @@ function spans(toks, words) {
   return out;
 }
 
-// Do the period words belong to the recorded hour in this quote? Some
+// Is the recorded hour said on the hour, and do the period words belong to
+// it in this quote? Some
 // occurrence of each must sit with no other hour between them, so the PM of
 // "between 10 and 2 PM" is never lent to the 10. No period words: nothing
 // to check.
 function periodIsTheHours(quote, words) {
-  if (typeof words.period !== 'string') return true;
   const toks = normalize(quote).split(' ');
-  return spans(toks, words.hour).some(([ha, hb]) => spans(toks, words.period).some(([pa, pb]) => {
+  const hours = spans(toks, words.hour);
+  // Every place the hour is said must be on the hour ("two thirty" never
+  // grounds "two").
+  if (hours.some((span) => hourHasMinutes(toks, span))) return false;
+  if (typeof words.period !== 'string') return true;
+  return hours.some(([ha, hb]) => spans(toks, words.period).some(([pa, pb]) => {
     const between = pa >= hb ? toks.slice(hb, pa) : toks.slice(pb, ha);
     return !between.some(isHourToken);
   }));

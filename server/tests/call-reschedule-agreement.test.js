@@ -174,6 +174,11 @@ describe('groundRescheduleAgreement', () => {
       .toMatchObject({ ok: false, reason: 'agreed_slot_words_mismatch' });
     expect(agreedAt(THURSDAY_2PM, 'We will see you Thursday afternoon at two.', { day: 'Thursday', hour: 'two', period: 'afternoon' }).ok).toBe(true);
     expect(agreedAt(THURSDAY_2PM, 'We will see you Thursday at 2:00 PM.', { day: 'Thursday', hour: '2', period: 'PM' }).ok).toBe(true);
+    // Codex #5092 r14: minutes on either side of the hour never ground it.
+    for (const said of ['Thursday at two thirty PM', 'Thursday at 2 15 PM', 'Thursday at two oh five PM', 'Thursday at quarter past two PM', 'Thursday at ten to two PM']) {
+      expect([said, agreedAt(THURSDAY_2PM, `We will see you ${said}.`, { day: 'Thursday', hour: said.includes(' 2 ') ? '2' : 'two', period: 'PM' }).reason])
+        .toEqual([said, 'agreed_slot_ungrounded']);
+    }
     // Codex #5092 r13: twelve with a part of the day states no hour; with am/pm it does.
     expect(agreedAt('2026-09-23T12:00:00-04:00', 'We will see you at 12 tonight.', { day: 'tonight', hour: '12', period: 'tonight' }))
       .toMatchObject({ ok: false, reason: 'agreed_slot_words_mismatch' });
