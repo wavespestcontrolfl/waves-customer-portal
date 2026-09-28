@@ -654,6 +654,27 @@ function leadingVerdictBox(body) {
   };
 }
 
+// A yes/no-shaped question is one that opens with an auxiliary/modal —
+// "Can…", "Do…", "Is…" — where a direct answer word alone (not a repeated
+// question noun) IS the answer ("Yes, some species can.").
+const YES_NO_QUESTION_RE = /^\s*(can|do|does|did|is|are|will|should|could|would|has|have)\b/i;
+const DIRECT_ANSWER_WORD_RE = /^\s*(yes|no|usually|rarely|sometimes|often|generally|mostly|not|only|it\s+depends)\b/i;
+
+// Codex r5 on #5216 ("Require the verdict to answer the customer question"):
+// r4 accepted ANY nonempty short verdict once the box was first, so a
+// generic "Professional help is available." verdict passed as long as SOME
+// text was there. Judged by the SAME rule the plain-paragraph path below
+// uses (a question noun >4 chars appears in the answer) OR, for a
+// yes/no-shaped question, a verdict that leads with a direct answer word —
+// "Yes, some species can." answers "Can cockroaches fly?" without repeating
+// "cockroaches". Kept deliberately small: no growing phrase list beyond this.
+function verdictAnswersQuestion(question, verdictText) {
+  const qNouns = String(question || '').toLowerCase().split(/\s+/).filter((w) => w.length > 4);
+  const v = String(verdictText || '').toLowerCase();
+  if (qNouns.some((n) => v.includes(n))) return true;
+  return YES_NO_QUESTION_RE.test(question) && DIRECT_ANSWER_WORD_RE.test(String(verdictText || '').trim());
+}
+
 function checkAnswerInFirstParagraph(draft, brief) {
   const body = String(draft.body || '');
   const q = brief.customer_signal?.normalized_question || brief.target_keyword || '';
@@ -662,6 +683,7 @@ function checkAnswerInFirstParagraph(draft, brief) {
   if (box) {
     if (!box.verdict) return { ok: false, reason: 'verdict_box_has_no_verdict' };
     if (`${box.verdict} ${box.recommendation}`.length > 600) return { ok: false, reason: 'first_paragraph_too_long_for_quick_answer' };
+    if (!verdictAnswersQuestion(q, box.verdict)) return { ok: false, reason: 'verdict_does_not_answer_question' };
     return { ok: true };
   }
   const firstParagraph = body.split(/\n\s*\n/)[0] || '';
@@ -891,7 +913,15 @@ function scanPublicFieldForPii(where, raw, { titleCased }) {
 // ("name=Jane+Doe", "%40") so the redactor sees what a visitor would.
 // Title-Case semantics: link labels are UI furniture, and the heading-pair
 // name check also catches a lowercase name in a query string.
-function checkNextStepsRedacted(draft) {
+// Codex r5 on #5216 ("Skip draft next-step PII checks on refreshes"):
+// publishRefresh keeps the LIVE frontmatter and applies only the title/meta
+// fields (astro-publisher.js) — a refresh draft's own next_steps never ship,
+// so scanning them can only park a clean refresh on text that will never
+// publish. Same refresh predicate content-guardrails.evaluate() uses to skip
+// next_steps there (nextStepsLinks = isRefresh ? '' : nextStepsLinkMarkdown
+// (frontmatter)) — the two must agree on what "a refresh" is.
+function checkNextStepsRedacted(draft, brief) {
+  if (brief?.action_type === 'refresh_existing_page') return { ok: true, reason: 'refresh_frontmatter_not_published' };
   const text = decodeLinkText(require('./content-guardrails').nextStepsLinkMarkdown(draft?.frontmatter || {}));
   if (!text.trim()) return { ok: true, reason: 'no_next_steps' };
   try {
@@ -1171,13 +1201,20 @@ function isIdentificationDraft(draft, brief, context) {
   return isIdentificationPost(effectiveFrontmatter(draft, brief, context));
 }
 // A customer-question page keeps its answer-first contract through a
-// refresh: the refresh brief's page_type is the generic 'refresh', so the
-// effective (live, on a refresh) frontmatter's page_type counts too (Codex
-// r4 on #5216).
+// refresh. Codex r5 on #5216 ("Persist customer-question identity across
+// publication"): the r4 fix keyed this on liveFrontmatter.page_type, but
+// page_type is not in the blog schema (packages/blog-schema/schema.json)
+// and normalizeAutonomousBlogFrontmatter never writes it — no live post
+// actually carries it. The durable marker is the LIVE BODY itself: a
+// refresh whose live body (context.previousVersion.body — the runner
+// already hands this in) opens with a BottomLineBox as its first block was
+// published under the answer-first contract, whatever its frontmatter says,
+// so the refresh is held to it too. Same test as leadingVerdictBox / the
+// `^<BottomLineBox` check checkVerdictBoxFirst runs on the DRAFT.
 function isIdentificationOrQuestionDraft(draft, brief, context) {
   if (isIdentificationDraft(draft, brief, context) || brief?.page_type === 'customer-question') return true;
-  const live = brief?.action_type === 'refresh_existing_page' ? context?.liveFrontmatter : null;
-  return String(live?.page_type || '').trim().toLowerCase() === 'customer-question';
+  if (brief?.action_type === 'refresh_existing_page' && leadingVerdictBox(context?.previousVersion?.body)) return true;
+  return false;
 }
 
 // C2: the verdict box (BottomLineBox) must be the LITERAL first block of
@@ -1251,31 +1288,35 @@ function validateLibraryPhoto(photo, alt, url, renderedBody) {
   if (!renderedBody.includes(photoAttributionLine(photo))) return { ok: false, reason: `identification_photo_attribution_missing:${url}` };
   return null;
 }
-// Every rendered image FORM is collected (Codex P1: a raw <img> or a
-// reference-style image slipped past an inline-only scan). An MDX component
-// is not an image source today — SAFE_MDX_COMPONENTS carries none with an
-// image-shaped prop; add an entry here if one is ever added.
-const INLINE_IMAGE_RE = /!\[([^\]]*)\]\(([^)]+)\)/g;
-// Full (`![alt][ref]`) and collapsed (`![alt][]`) reference forms.
-const REFERENCE_IMAGE_RE = /!\[([^\]]*)\]\[([^\]]*)\]/g;
+// Every rendered image FORM is collected — Codex r5 on #5216 (3rd round on
+// image parsing): the gate's OWN inline/reference regexes missed the
+// CommonMark shortcut form (`![alt]` + `[alt]: /path`), which the publisher
+// DOES render. There is now exactly ONE parser for "what Markdown images does
+// this body render": the publisher's own bodyImageRefs (astro-publisher.js,
+// built on renderedBodyView + contentGuardrails.eachMarkdownLink), lazily
+// required — the gate must accept exactly what the publisher publishes, no
+// more and no less. `mdx: true` matches the publisher's own default for the
+// autonomous lane that mints identification posts (resolveBodyImages:
+// "filePath is always `.mdx` here" — see astro-publisher.js). A raw `<img>`
+// (src and srcset) is OUTSIDE that Markdown subset — validateBodyImageRefs parks
+// it at publish — so it is still scanned separately here and tagged its own
+// form, never folded into 'markdown'. An MDX component is not an image
+// source today — SAFE_MDX_COMPONENTS carries none with an image-shaped prop;
+// add an entry here if one is ever added.
 const RAW_IMG_TAG_RE = /<img\b((?:[^>"']|"[^"]*"|'[^']*')*)>/gi; // quote-aware (see BOTTOM_LINE_BOX_TAG_RE)
 const { htmlAttrValue: attrValue, isIdentificationPost, photoAttributionLine, libraryPhotoBySrc } = require('./licensed-photo-library');
 // alt is trimmed in every form.
-function collectBodyImageOccurrences(body) {
+function collectBodyImageOccurrences(body, { mdx = true } = {}) {
   const out = [];
-  let m;
-  INLINE_IMAGE_RE.lastIndex = 0;
-  while ((m = INLINE_IMAGE_RE.exec(body))) out.push({ alt: String(m[1] || '').trim(), url: String(m[2] || '').trim(), form: 'inline' });
-
-  const refDefs = require('./content-guardrails').markdownReferenceDefinitions(body);
-  REFERENCE_IMAGE_RE.lastIndex = 0;
-  while ((m = REFERENCE_IMAGE_RE.exec(body))) {
-    const alt = String(m[1] || '').trim();
-    const label = String(m[2] || '').trim() || alt; // collapsed `![alt][]` resolves via alt
-    const dest = refDefs.get(label.trim().toLowerCase());
-    if (dest) out.push({ alt, url: String(dest).trim(), form: 'reference' });
+  // bodyImageRefs is an internal (astro-publisher requires this module at
+  // load time for DANGLING_META_ENDINGS, so this stays a lazy, in-function
+  // require — never top-level, or the two modules deadlock on load).
+  const { bodyImageRefs } = require('../content-astro/astro-publisher')._internals;
+  for (const ref of bodyImageRefs(body, { mdx })) {
+    out.push({ alt: String(ref.alt || '').trim(), url: String(ref.src || '').trim(), form: 'markdown' });
   }
 
+  let m;
   RAW_IMG_TAG_RE.lastIndex = 0;
   while ((m = RAW_IMG_TAG_RE.exec(body))) {
     const attrs = m[1] || '';
@@ -1309,9 +1350,11 @@ function allowedIdentificationPhotoSrcs(brief, context) {
   );
   const prior = context?.previousVersion?.body;
   if (brief?.action_type === 'refresh_existing_page' && typeof prior === 'string' && prior.trim()) {
-    const rendered = require('./content-guardrails').blankNonRenderedMarkdown(prior);
-    for (const { url, form } of collectBodyImageOccurrences(rendered)) {
-      if (form === 'inline' && libraryPhotoBySrc(url)) allowed.add(url);
+    // Same parser as everywhere else here (bodyImageRefs, via
+    // collectBodyImageOccurrences) — a shortcut or reference-style photo the
+    // live body already carried grandfathers exactly like an inline one now.
+    for (const { url, form } of collectBodyImageOccurrences(prior)) {
+      if (form === 'markdown' && libraryPhotoBySrc(url)) allowed.add(url);
     }
   }
   return allowed;
@@ -1325,10 +1368,12 @@ function checkPhotoSlotsLicensedOnly(draft, brief, context) {
   for (const { alt, url, form } of collectBodyImageOccurrences(body)) {
     const failure = validateLibraryPhoto(libraryPhotoBySrc(url), alt, url, renderedBody);
     if (failure) return failure;
-    // The publisher only accepts plain Markdown images (validateBodyImage
-    // Refs parks a raw <img>), so a library photo in any other form would
-    // pass here and fail at publish.
-    if (form !== 'inline') return { ok: false, reason: `identification_photo_unsupported_form:${form}:${url}` };
+    // Raw <img> (src or srcset) is outside the publisher's Markdown subset —
+    // validateBodyImageRefs parks it at publish — so a library photo shipped
+    // that way still fails here. Every Markdown FORM bodyImageRefs resolves
+    // (inline, full/collapsed reference, shortcut) is accepted, matching
+    // what the publisher actually ships.
+    if (form !== 'markdown') return { ok: false, reason: `identification_photo_unsupported_form:${form}:${url}` };
     if (!allowed.has(url)) return { ok: false, reason: `identification_photo_not_in_brief_slots:${url}` };
   }
   return { ok: true };

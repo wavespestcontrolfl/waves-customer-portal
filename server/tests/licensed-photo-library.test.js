@@ -166,6 +166,24 @@ describe('matchSpecies — ambiguity guard (Codex P1)', () => {
     expect(matchSpecies('how to get rid of fire ants in your yard')).toBe('fire ant');
   });
 
+  // Codex r5 on #5216 ("Do not classify identification phrasing as
+  // comparison"): the bare `like` alternative made ordinary terminal
+  // identification phrasing — "what do X look like" — comparison-shaped,
+  // nulling every photo slot on the most common identification phrasing
+  // there is. Only a TERMINAL "look(s) like" is exempted; "like" anywhere
+  // else in the topic still reads as a comparison.
+  test('terminal "what do X look like" phrasing is not comparison-shaped', () => {
+    expect(matchSpecies('what do fire ants look like')).toBe('fire ant');
+    expect(matchSpecies('what does a fire ant look like?')).toBe('fire ant');
+    expect(matchSpecies('what do ghost ants look like')).toBe('ghost ant');
+  });
+
+  test('"like" mid-topic still reads as a comparison and stays null', () => {
+    expect(matchSpecies('bugs that look like fire ants')).toBeNull();
+    expect(matchSpecies('what looks like a fire ant but isn\'t')).toBeNull();
+    expect(matchSpecies('fire ant-like insects in Florida')).toBeNull();
+  });
+
   test('a multi-species-ambiguous topic flags every photo slot rather than guessing', () => {
     const slots = buildPhotoSlots('fire ant vs huntsman spider: which is more dangerous');
     for (const s of slots) {

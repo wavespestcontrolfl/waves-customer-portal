@@ -196,6 +196,16 @@ function escapeRegExp(value) {
 // pest. Deliberately broad; a false trigger only sends a slot to a human.
 const COMPARISON_RE = /\b(vs\.?|versus|or|from|not|and|between|compared\s+to|than|instead\s+of|mistaken\s+for|confused\s+with|like|look-?alikes?|difference|differences)\b/i;
 
+// Codex r5 on #5216 ("Do not classify identification phrasing as
+// comparison"): the bare `like` alternative above makes ordinary TERMINAL
+// identification phrasing — "what do fire ants look like", optional
+// trailing "?" — comparison-shaped, nulling every photo slot on the most
+// common identification-post phrasing there is. Only a trailing "look(s)
+// like" is stripped before the comparison test; "bugs that look like fire
+// ants" and "fire ant-like insects" still have "like" mid-string and stay
+// comparison-shaped (fail closed, unchanged).
+const TERMINAL_LOOKS_LIKE_RE = /\blooks?\s+like\s*\??\s*$/i;
+
 /**
  * matchSpecies(topic) → the ONE library entry whose alias matches `topic`
  * as a whole word/phrase, or null when none matches, more than one
@@ -203,7 +213,9 @@ const COMPARISON_RE = /\b(vs\.?|versus|or|from|not|and|between|compared\s+to|tha
  */
 function matchSpeciesEntry(topic) {
   const norm = String(topic || '').trim().toLowerCase();
-  if (!norm || COMPARISON_RE.test(norm)) return null;
+  if (!norm) return null;
+  const comparisonTestText = norm.replace(TERMINAL_LOOKS_LIKE_RE, '').trim();
+  if (COMPARISON_RE.test(comparisonTestText)) return null;
   const matched = new Set();
   for (const entry of PHOTO_LIBRARY) {
     // Trailing e?s? tolerates the ordinary plural ("fire ants").

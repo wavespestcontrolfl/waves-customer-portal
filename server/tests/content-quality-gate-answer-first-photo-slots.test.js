@@ -324,13 +324,26 @@ describe('checkPhotoSlotsLicensedOnly', () => {
       .toBe(false);
   });
 
-  test('reference-style images: unlicensed fails as unlicensed, a library photo as an unsupported form', () => {
+  // Codex r5 on #5216 ("Scan shortcut-reference images before licensing
+  // approval"): the gate's set of Markdown images is now the publisher's own
+  // bodyImageRefs — which validateBodyImageRefs (the publish-time check)
+  // accepts equally for inline, full/collapsed reference, and shortcut
+  // forms — so a library photo in any of those forms now PASSES here too;
+  // only a raw <img> (outside the publisher's Markdown subset) still fails
+  // with the unsupported-form reason.
+  test('reference-style and shortcut images: unlicensed fails as unlicensed, a library photo in the brief slots passes', () => {
     expect(checkPhotoSlotsLicensedOnly(diag('![fire ant][pic]\n\n[pic]: https://ai-art.example.com/x.png'), brief()).reason)
       .toMatch(/^unlicensed_or_unknown_identification_photo:/);
-    expect(checkPhotoSlotsLicensedOnly(diag(`![${PHOTO.alt}][pic]\n\n${ATTR}\n\n[pic]: ${PHOTO_URL}`), brief()).reason)
-      .toBe(`identification_photo_unsupported_form:reference:${PHOTO_URL}`);
-    expect(checkPhotoSlotsLicensedOnly(diag(`![${PHOTO.alt}][]\n\n${ATTR}\n\n[${PHOTO.alt}]: ${PHOTO_URL}`), brief()).reason)
-      .toBe(`identification_photo_unsupported_form:reference:${PHOTO_URL}`);
+    expect(checkPhotoSlotsLicensedOnly(diag(`![${PHOTO.alt}][pic]\n\n${ATTR}\n\n[pic]: ${PHOTO_URL}`), slotsBrief()))
+      .toEqual({ ok: true });
+    expect(checkPhotoSlotsLicensedOnly(diag(`![${PHOTO.alt}][]\n\n${ATTR}\n\n[${PHOTO.alt}]: ${PHOTO_URL}`), slotsBrief()))
+      .toEqual({ ok: true });
+    expect(checkPhotoSlotsLicensedOnly(diag(`![${PHOTO.alt}]\n\n${ATTR}\n\n[${PHOTO.alt}]: ${PHOTO_URL}`), slotsBrief()))
+      .toEqual({ ok: true });
+    // Still not in ANY brief's slots → the ordinary not-in-slots reason,
+    // not an unsupported-form one.
+    expect(checkPhotoSlotsLicensedOnly(diag(`![${PHOTO.alt}][pic]\n\n${ATTR}\n\n[pic]: ${PHOTO_URL}`), brief()))
+      .toEqual({ ok: false, reason: `identification_photo_not_in_brief_slots:${PHOTO_URL}` });
   });
 
   test('incidental whitespace around the alt does not false-fail', () => {
@@ -463,6 +476,22 @@ describe('next_steps PII scan (common hard check, next_steps only)', () => {
     expect(checkNextStepsRedacted({ body: BODY, frontmatter: { next_steps: steps } })).toEqual({ ok: true });
   });
 
+  // Codex r5 on #5216 ("Skip draft next-step PII checks on refreshes"):
+  // publishRefresh keeps the LIVE frontmatter and ships only the title/meta
+  // fields, so a refresh draft's own next_steps never publish — scanning
+  // them can only park a clean refresh on text that never ships.
+  test('a refresh draft with PII in next_steps is skipped (its next_steps never publish)', () => {
+    const dirty = { body: BODY, frontmatter: { next_steps: [{ label: 'Call Jane Doe', href: '/contact/' }] } };
+    expect(checkNextStepsRedacted(dirty, { action_type: 'refresh_existing_page' }))
+      .toEqual({ ok: true, reason: 'refresh_frontmatter_not_published' });
+  });
+
+  test('a non-refresh draft with the same PII still fails (the skip is refresh-only)', () => {
+    const dirty = { body: BODY, frontmatter: { next_steps: [{ label: 'Call Jane Doe', href: '/contact/' }] } };
+    expect(checkNextStepsRedacted(dirty, { action_type: 'new_supporting_blog' }).ok).toBe(false);
+    expect(checkNextStepsRedacted(dirty).ok).toBe(false); // no brief at all defaults to scanning
+  });
+
   // Codex r4 on #5216 ("Run next-step redaction for supporting blogs").
   test.each([
     ['a name', { label: 'Call Jane Doe', href: '/contact/' }],
@@ -489,6 +518,16 @@ describe('next_steps PII scan (common hard check, next_steps only)', () => {
     expect(result.checks.redaction_passed).toBeUndefined();
   });
 
+  test('a refresh draft with dirty next_steps does not hard-fail the full gate on them', () => {
+    const result = gate.evaluate(
+      { body: BODY, frontmatter: { next_steps: [{ label: 'Call Jane Doe', href: '/contact/' }] } },
+      { page_type: 'refresh', action_type: 'refresh_existing_page' },
+      {},
+    );
+    expect(result.checks.next_steps_redacted).toMatchObject({ ok: true, reason: 'refresh_frontmatter_not_published' });
+    expect(result.hard_failures.map((f) => f.name)).not.toContain('next_steps_redacted');
+  });
+
   test('checkRedactionPassed no longer scans next_steps itself (one path)', () => {
     expect(checkRedactionPassed({ body: BODY, frontmatter: { next_steps: [{ label: 'Call Jane Doe', href: '/contact/' }] } })).toEqual({ ok: true });
   });
@@ -499,18 +538,24 @@ describe('next_steps PII scan (common hard check, next_steps only)', () => {
   });
 });
 
-// Codex r4 on #5216 ("Retain customer-question classification during
-// refreshes"): the live frontmatter's page_type keeps the answer-first
-// contract on a refresh.
+// Codex r5 on #5216 ("Persist customer-question identity across
+// publication"): page_type is not in the blog schema and no live post ever
+// carries it, so the durable marker is the LIVE BODY — a refresh whose live
+// body already opens on BottomLineBox keeps the answer-first contract,
+// whatever its frontmatter says.
 describe('refresh of a customer-question page keeps answer-first', () => {
   const refreshBrief = () => brief({ action_type: 'refresh_existing_page', page_type: 'refresh' });
   const noBoxBody = 'Intro prose first.\n\n<BottomLineBox verdict="v" recommendation="r" />';
-  test('live page_type customer-question → verdict box must be first', () => {
-    expect(checkVerdictBoxFirst({ frontmatter: {}, body: noBoxBody }, refreshBrief(), { liveFrontmatter: { page_type: 'customer-question' } }))
+  const liveWithBox = '<BottomLineBox verdict="Yes." recommendation="Call a pro." />\n\nOld swarmer prose.';
+  const liveWithoutBox = 'Old prose with no leading verdict box at all.';
+
+  test('a refresh whose LIVE body opens on BottomLineBox is held to answer-first, even when the draft moves/removes it', () => {
+    expect(checkVerdictBoxFirst({ frontmatter: {}, body: noBoxBody }, refreshBrief(), { previousVersion: { body: liveWithBox } }))
       .toEqual({ ok: false, reason: 'verdict_box_not_first_block' });
   });
-  test('any other live page_type is not held to it', () => {
-    expect(checkVerdictBoxFirst({ frontmatter: {}, body: noBoxBody }, refreshBrief(), { liveFrontmatter: { page_type: 'city-service' } }).ok).toBe(true);
+  test('a refresh whose live body has no leading box, on a non-diagnostic live post, is not held to it', () => {
+    expect(checkVerdictBoxFirst({ frontmatter: {}, body: noBoxBody }, refreshBrief(), { previousVersion: { body: liveWithoutBox } }).ok).toBe(true);
+    expect(checkVerdictBoxFirst({ frontmatter: {}, body: noBoxBody }, refreshBrief(), {}).ok).toBe(true);
   });
   test('a new post\'s draft page_type does not change its classification', () => {
     expect(checkVerdictBoxFirst({ frontmatter: { page_type: 'customer-question' }, body: noBoxBody }, brief()).ok).toBe(true);
@@ -533,5 +578,21 @@ describe('answer_in_first_paragraph reads the leading verdict box', () => {
     expect(checkAnswerInFirstParagraph({ body: 'Yes, some species can.\n\nMore.' }, q))
       .toEqual({ ok: false, reason: 'first_paragraph_doesnt_address_question' });
     expect(checkAnswerInFirstParagraph({ body: 'Some cockroaches can fly short distances.\n\nMore.' }, q)).toEqual({ ok: true });
+  });
+
+  // Codex r5 on #5216 ("Require the verdict to answer the customer
+  // question"): r4 accepted ANY nonempty short verdict once the box was
+  // first — a generic verdict that never touches the question passed.
+  test('"Can cockroaches fly?" with a generic verdict that never answers it fails', () => {
+    const body = '<BottomLineBox verdict="Professional help is available." recommendation="Call us today." />\n\nMore prose.';
+    expect(checkAnswerInFirstParagraph({ body }, q)).toEqual({ ok: false, reason: 'verdict_does_not_answer_question' });
+  });
+
+  test('"How do I get rid of ghost ants?" with a verdict naming ghost ants passes; a generic CTA verdict fails', () => {
+    const ghostQ = { target_keyword: 'How do I get rid of ghost ants?' };
+    const named = '<BottomLineBox verdict="Ghost ants trail along kitchen counters looking for sugar." recommendation="Wipe trails and bait the colony." />\n\nMore.';
+    expect(checkAnswerInFirstParagraph({ body: named }, ghostQ)).toEqual({ ok: true });
+    const generic = '<BottomLineBox verdict="Professional treatment gets the best results." recommendation="Call for a free estimate." />\n\nMore.';
+    expect(checkAnswerInFirstParagraph({ body: generic }, ghostQ)).toEqual({ ok: false, reason: 'verdict_does_not_answer_question' });
   });
 });
