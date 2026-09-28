@@ -4834,6 +4834,28 @@ function loadPlaidLink() {
   return plaidScriptPromise;
 }
 
+// OAuth banks on a phone send the whole page to the bank and back to
+// PLAID_REDIRECT_URI (this page + ?oauth_state_id=…). Link then has to be
+// re-created with the SAME link token and that callback URL, so the token
+// (short-lived; it only opens Link, never reaches an account) is kept here
+// until Link finishes. Unreadable storage = no resume, never a crash.
+const PLAID_LINK_RESUME_KEY = "waves_plaid_link_resume";
+function saveLinkResume(value) {
+  try {
+    if (value) localStorage.setItem(PLAID_LINK_RESUME_KEY, JSON.stringify(value));
+    else localStorage.removeItem(PLAID_LINK_RESUME_KEY);
+  } catch {
+    /* storage blocked — the redirect flow just can't resume */
+  }
+}
+function readLinkResume() {
+  try {
+    return JSON.parse(localStorage.getItem(PLAID_LINK_RESUME_KEY) || "null");
+  } catch {
+    return null;
+  }
+}
+
 const PLAID_ITEM_STATUS = {
   setup: "Needs setup",
   active: "Syncing",
@@ -4854,6 +4876,17 @@ function shownBankChange(r) {
     plaidModified: r.suggestion?.plaidModified || null,
     plaidRemoved: r.suggestion?.plaidRemoved || null,
   };
+}
+
+// a row the bank changed after review still holds the OLD values — the
+// server refuses every claim on it until the change is applied or
+// dismissed, so its match / create / link / refund actions stay hidden
+function bankRowClaimable(r) {
+  return (
+    r.status === "unmatched" &&
+    !r.suggestion?.plaidModified &&
+    !r.suggestion?.plaidRemoved
+  );
 }
 
 function syncSummary(sync) {
@@ -5046,16 +5079,21 @@ function PlaidFeedsPanel({ onSynced }) {
     }
   };
 
-  // itemId present = re-login for an existing connection (update mode)
-  const openLink = (itemId) =>
+  // itemId present = re-login for an existing connection (update mode).
+  // `resume` = returning from a bank's OAuth redirect: the stored token and
+  // the URL the bank sent us back to.
+  const openLink = (itemId, resume = null) =>
     run(itemId ? `reconnect-${itemId}` : "connect", async () => {
       const [Plaid, tok] = await Promise.all([
         loadPlaidLink(),
-        post("/admin/tax/bank-import/plaid/link-token", itemId ? { itemId } : {}),
+        resume ||
+          post("/admin/tax/bank-import/plaid/link-token", itemId ? { itemId } : {}),
       ]);
+      saveLinkResume({ linkToken: tok.linkToken, itemId: itemId || null });
       const outcome = await new Promise((resolve, reject) => {
         const handler = Plaid.create({
           token: tok.linkToken,
+          ...(resume ? { receivedRedirectUri: resume.receivedRedirectUri } : {}),
           onSuccess: (publicToken, metadata) => {
             handler.destroy();
             resolve({ publicToken, metadata });
@@ -5070,7 +5108,7 @@ function PlaidFeedsPanel({ onSynced }) {
           },
         });
         handler.open();
-      });
+      }).finally(() => saveLinkResume(null));
       if (!outcome) return;
       if (itemId) {
         reportSync(await post(`/admin/tax/bank-import/plaid/items/${itemId}/reconnected`));
@@ -5085,6 +5123,22 @@ function PlaidFeedsPanel({ onSynced }) {
         });
       }
     });
+
+  // back from a bank's OAuth page: finish the Link session it interrupted
+  useEffect(() => {
+    if (!new URLSearchParams(window.location.search).has("oauth_state_id")) return;
+    const receivedRedirectUri = window.location.href;
+    window.history.replaceState(null, "", window.location.pathname);
+    const resume = readLinkResume();
+    if (resume?.linkToken)
+      openLink(resume.itemId, { linkToken: resume.linkToken, receivedRedirectUri });
+    else
+      setNotice({
+        error: true,
+        text: "The bank sent you back, but this browser no longer has the connection in progress — connect again.",
+      });
+    // once, on the redirect landing
+  }, []);
 
   if (loadError)
     return (
@@ -6085,7 +6139,7 @@ function BankImportTab() {
                   ) &&
                   !r.suggestion?.candidates?.length ? (
                     "internal transfer?"
-                  ) : r.status === "unmatched" &&
+                  ) : bankRowClaimable(r) &&
                     (r.suggestion?.candidates?.length ||
                       /* after the SOLE candidate is unlinked, the parked list is
               empty but the on-demand endpoint is rejection-agnostic —
@@ -6173,7 +6227,7 @@ function BankImportTab() {
                         )}
                       </Select>
                     </Field>
-                  ) : r.status === "unmatched" &&
+                  ) : bankRowClaimable(r) &&
                     r.direction === "credit" &&
                     (r.suggestion?.refundCandidates?.length ||
                       r.suggestion?.payoutCandidates?.length ||
@@ -6334,7 +6388,7 @@ function BankImportTab() {
                     whiteSpace: "nowrap",
                   }}
                 >
-                  {r.status === "unmatched" &&
+                  {bankRowClaimable(r) &&
                     r.direction === "debit" &&
                     linkPick[r.id] && (
                       <Button
@@ -6367,7 +6421,7 @@ function BankImportTab() {
                         Link
                       </Button>
                     )}
-                  {r.status === "unmatched" &&
+                  {bankRowClaimable(r) &&
                     r.direction === "credit" &&
                     linkPick[r.id] && (
                       <Button
@@ -6420,7 +6474,7 @@ function BankImportTab() {
                       The category selector lives HERE so it stays reachable
                       in every review state (transfer warning, parked
                       candidates). Refund credits go through Apply refund. */}
-                  {r.status === "unmatched" &&
+                  {bankRowClaimable(r) &&
                     r.direction === "debit" &&
                     !linkPick[r.id] && (
                       <>
@@ -6611,7 +6665,13 @@ function BankImportTab() {
 }
 export default function TaxPage() {
   const isMobile = useIsMobile(640);
-  const [activeTab, setActiveTab] = useState("overview");
+  // a bank's OAuth redirect lands here (PLAID_REDIRECT_URI) — open Bank
+  // Import so its feeds panel can finish the Plaid Link session
+  const [activeTab, setActiveTab] = useState(() =>
+    new URLSearchParams(window.location.search).has("oauth_state_id")
+      ? "bankimport"
+      : "overview",
+  );
   // GATE_BANK_IMPORT: the leaf only exists when the server says the gate is
   // on (status is the one bank-import endpoint that answers while dark).
   const [bankImportOn, setBankImportOn] = useState(false);

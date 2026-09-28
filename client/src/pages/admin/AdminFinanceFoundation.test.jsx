@@ -475,6 +475,7 @@ describe("Finance workflow preservation", () => {
           suggestion: { plaidModified: { amount: 8, direction: "debit", txn_date: "2026-09-04", description: "FIXED 3" } } },
         { ...base, id: "row-open", description: "Open purchase", status: "unmatched",
           suggestion: { plaidModified: { amount: 9, direction: "debit", txn_date: "2026-09-07", description: "FIXED 2" } } },
+        { ...base, id: "row-plain", description: "Plain purchase", status: "unmatched", suggestion: null },
       ],
     }));
     overrides.set("POST /api/admin/tax/bank-import/plaid/rows/row-open/bank-change", () => response({ success: true }));
@@ -485,10 +486,49 @@ describe("Finance workflow preservation", () => {
     expect(screen.getByText(/\$8\.00 debit on 2026-09-04 — edit the expense created from this row to match, then dismiss\./)).toBeInTheDocument();
     const apply = screen.getAllByRole("button", { name: "Apply bank's change" });
     expect(apply).toHaveLength(1); // only the unlinked row
+    // the unlinked row still holds the pre-correction values: the server
+    // refuses claims on it, so only the plain row offers Create expense
+    expect(screen.getAllByRole("button", { name: "Create expense" })).toHaveLength(1);
+    expect(
+      within(screen.getByText("Open purchase").closest("tr")).queryByRole("button", { name: "Create expense" }),
+    ).not.toBeInTheDocument();
     fireEvent.click(apply[0]);
     await waitFor(() =>
       expect(requests.find((r) => r.key === "POST /api/admin/tax/bank-import/plaid/rows/row-open/bank-change")?.body)
         .toEqual({ action: "apply", expected: { plaidModified: { amount: 9, direction: "debit", txn_date: "2026-09-07", description: "FIXED 2" }, plaidRemoved: null } }));
+  });
+  it("resumes Plaid Link on the Bank Import tab after a bank's OAuth redirect", async () => {
+    overrides.set("GET /api/admin/tax/bank-import/status", () =>
+      response({ enabled: true, plaidEnabled: true, counts: {} }));
+    overrides.set("GET /api/admin/tax/bank-import/coverage", () => response({ months: [] }));
+    overrides.set("GET /api/admin/tax/bank-import/transactions", () => response({ transactions: [], hasMore: false }));
+    overrides.set("GET /api/admin/tax/bank-import/plaid/status", () =>
+      response({ configured: true, tokenKey: true, env: "sandbox", existingLabels: [], items: [] }));
+    overrides.set("POST /api/admin/tax/bank-import/plaid/connect", () => response({ success: true, itemId: "item-9" }));
+    const create = vi.fn((config) => ({
+      open: () => config.onSuccess("public-sandbox-1", { institution: { name: "Synthetic Bank" } }),
+      destroy: () => {},
+    }));
+    vi.stubGlobal("Plaid", { create });
+    localStorage.setItem("waves_plaid_link_resume", JSON.stringify({ linkToken: "link-sandbox-1", itemId: null }));
+    window.history.pushState(null, "", "/admin/tax?oauth_state_id=state-1");
+    try {
+      open(TaxPage);
+      await waitFor(() => expect(create).toHaveBeenCalledTimes(1));
+      expect(create.mock.calls[0][0]).toMatchObject({
+        token: "link-sandbox-1",
+        receivedRedirectUri: `${window.location.origin}/admin/tax?oauth_state_id=state-1`,
+      });
+      expect(window.location.search).toBe("");
+      await waitFor(() =>
+        expect(requests.find((r) => r.key === "POST /api/admin/tax/bank-import/plaid/connect")?.body)
+          .toEqual({ publicToken: "public-sandbox-1", institutionName: "Synthetic Bank" }));
+      expect(requests.some((r) => r.key === "POST /api/admin/tax/bank-import/plaid/link-token")).toBe(false);
+      await waitFor(() => expect(localStorage.getItem("waves_plaid_link_resume")).toBeNull());
+    } finally {
+      localStorage.removeItem("waves_plaid_link_resume");
+      window.history.replaceState(null, "", "/");
+    }
   });
   it("keeps the bank-import gate closed on a failed status read", async () => {
     overrides.set("GET /api/admin/tax/bank-import/status", () =>

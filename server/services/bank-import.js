@@ -1342,11 +1342,16 @@ function strongExpenseMatch(row, c) {
 
 // A Plaid row the bank corrected or withdrew AFTER it was reviewed keeps
 // its flag (plaidModified / plaidRemoved) when the operator unlinks it, and
-// still carries the OLD values — the matcher must not re-link it before the
-// operator applies or dismisses the change. Enforced at selection AND at
-// each claim (a row can be linked elsewhere, flagged, and unlinked between
-// this pass's read and its claim).
+// still carries the OLD values — no claim path (the matcher, or an
+// operator's create / link / refund) may book it before the operator
+// applies or dismisses the change. Enforced at selection AND at each claim
+// (a row can be linked elsewhere, flagged, and unlinked between a read and
+// its claim).
 const BANK_CHANGE_UNRESOLVED_SQL_NOT = "(suggestion->'plaidModified') is null and (suggestion->'plaidRemoved') is null";
+
+function hasUnresolvedBankChange(row) {
+  return !!(row && row.suggestion && (row.suggestion.plaidModified || row.suggestion.plaidRemoved));
+}
 
 async function runDeterministicMatching({ limit } = {}) {
   const healed = await resetDanglingLinks();
@@ -1970,6 +1975,8 @@ module.exports = {
   methodIncompatible,
   effectivePayoutAmount,
   suggestionMerge,
+  BANK_CHANGE_UNRESOLVED_SQL_NOT,
+  hasUnresolvedBankChange,
   ledgerCoverage,
   // exported for tests
   parseAmount,

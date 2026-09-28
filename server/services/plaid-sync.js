@@ -25,11 +25,13 @@ const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
 const plaid = require('./plaid-client');
+const bankImport = require('./bank-import');
 const { isInfrastructureError } = require('./vendor-credentials');
 const { etDateString } = require('../utils/datetime-et');
 
 const MAX_SYNC_PAGES = 400;             // 400 × 500 = 200k transactions per run (two years for a small business is a few thousand)
 const MAX_PAGINATION_RESTARTS = 3;
+const MAX_MATCHING_PASSES = 20;           // × 500 rows per hourly run; the next hour continues
 const MAX_AMOUNT = 9999999999.99;       // numeric(12,2) ceiling, as the CSV parser
 
 // ── token vault ─────────────────────────────────────────────────────────────
@@ -107,36 +109,41 @@ function plaidRowHash(transactionId) {
   return crypto.createHash('sha256').update(`plaid|${transactionId}`).digest('hex');
 }
 
+// Why a Plaid transaction is not staged — checked in order, the first hit
+// names the skip. `correction`: the transaction is already staged, so the
+// NEW-row gates (account known + enabled, start-date cutoff) don't apply — a
+// bank correction to a row we hold must never be dropped because it moved
+// the date earlier or the feed was since switched off.
+const SKIP_RULES = [
+  ['no_id', c => !c.txn || !c.txn.transaction_id],
+  ['unknown_account', c => !c.correction && !c.account],
+  ['account_disabled', c => !c.correction && !c.account.enabled],
+  ['pending', c => !!c.txn.pending],
+  ['currency', c => !!c.txn.iso_currency_code && c.txn.iso_currency_code !== 'USD'],
+  ['bad_date', c => !isDateStr(c.txn.date)],
+  ['before_sync_from', c => !c.correction && c.txn.date < (toDateOnly(c.account.sync_from) || '')],
+  ['bad_amount', c => !Number.isFinite(c.n)],
+  ['zero_amount', c => c.amount === 0],
+  ['amount_too_large', c => c.amount > MAX_AMOUNT],
+];
+
 // Plaid → staging row, or { skip: reason }. Plaid's sign convention: a
 // POSITIVE amount is money leaving the account (purchase / debit) for both
-// depository and credit accounts; negative is money coming in.
-// `correction`: the transaction is already staged, so the NEW-row gates
-// (account enabled, start-date cutoff) don't apply — a bank correction to a
-// row we hold must never be dropped because it moved the date earlier or
-// the feed was since switched off. Label/type stay the staged row's own.
+// depository and credit accounts; negative is money coming in. On a
+// correction, label/type stay the staged row's own (supersedeUnmatchedRow).
 function mapTransaction(txn, account, { correction = false } = {}) {
-  if (!txn || !txn.transaction_id) return { skip: 'no_id' };
-  if (!account && !correction) return { skip: 'unknown_account' };
-  if (!correction && !account.enabled) return { skip: 'account_disabled' };
-  if (txn.pending) return { skip: 'pending' };
-  if (txn.iso_currency_code && txn.iso_currency_code !== 'USD') return { skip: 'currency' };
-  const date = txn.date;
-  if (!isDateStr(date)) return { skip: 'bad_date' };
-  const syncFrom = correction ? null : (typeof account.sync_from === 'string' ? account.sync_from : toDateOnly(account.sync_from));
-  if (syncFrom && date < syncFrom) return { skip: 'before_sync_from' };
-  const n = Number(txn.amount);
-  if (!Number.isFinite(n)) return { skip: 'bad_amount' };
-  const amount = Math.round(Math.abs(n) * 100) / 100;
-  if (amount === 0) return { skip: 'zero_amount' };
-  if (amount > MAX_AMOUNT) return { skip: 'amount_too_large' };
+  const n = Number(txn && txn.amount);
+  const ctx = { txn, account, correction, n, amount: Math.round(Math.abs(n) * 100) / 100 };
+  const failed = SKIP_RULES.find(([, fails]) => fails(ctx));
+  if (failed) return { skip: failed[0] };
   const description = String(txn.name || txn.merchant_name || 'Plaid transaction').replace(/\s+/g, ' ').trim().slice(0, 500) || 'Plaid transaction';
   return {
     row: {
       account_label: account ? account.account_label : null,
       account_type: account ? account.account_type : null,
-      txn_date: date,
+      txn_date: txn.date,
       description,
-      amount,
+      amount: ctx.amount,
       direction: n > 0 ? 'debit' : 'credit',
       source: 'plaid',
       source_file: null,
@@ -370,6 +377,8 @@ async function connectItem({ publicToken, institutionName }) {
   return created.id;
 }
 
+const ACCOUNT_TYPE_NOUN = { bank: 'a bank account', card: 'a credit card' };
+
 function badRequest(msg) {
   const e = new Error(msg); e.status = 400; return e;
 }
@@ -400,19 +409,18 @@ async function setupItem(itemId, input) {
     const item = await trx('plaid_items').where({ id: itemId }).forUpdate().first();
     if (!item || item.status === 'removed') { const e = new Error('connection not found'); e.status = 404; throw e; }
     const current = await trx('plaid_accounts').where({ plaid_item_id: itemId });
-    const byId = new Map(current.map(a => [a.id, a]));
     // exactly the stored account set: every id once, none missing
-    if (cleaned.some(a => !byId.has(a.id)) || cleaned.length !== current.length
-      || new Set(cleaned.map(a => a.id)).size !== cleaned.length) {
+    const idList = (list) => list.map(a => a.id).sort().join(',');
+    if (idList(cleaned) !== idList(current)) {
       throw badRequest('account list does not match this connection — reload and try again');
     }
+    const byId = new Map(current.map(a => [a.id, a]));
     // Every enabled label's lock FIRST (sorted — a fixed order across
     // concurrent setups and syncs), THEN the ownership + type reads: a
     // concurrent setup of another connection claiming the same label either
     // committed before these reads (and is seen) or waits behind the lock.
     // Same lock the CSV upload takes for the label→type invariant.
-    const lockLabels = [...new Set(cleaned.filter(a => a.enabled).map(a => a.label.toUpperCase()))].sort();
-    for (const label of lockLabels) {
+    for (const label of [...enabledLabels].sort()) {
       await trx.raw('select pg_advisory_xact_lock(hashtext(?))', [`bank-import-label:${label}`]);
     }
     const others = await trx('plaid_accounts as pa')
@@ -422,39 +430,37 @@ async function setupItem(itemId, input) {
       .where('pa.enabled', true)
       .select('pa.account_label');
     const otherLabels = new Set(others.map(o => String(o.account_label).trim().toUpperCase()));
+    for (const a of cleaned.filter(x => x.enabled)) {
+      if (otherLabels.has(a.label.toUpperCase())) {
+        throw badRequest(`"${a.label}" is already fed by another bank connection`);
+      }
+      const existing = await trx('bank_transactions')
+        .whereRaw('upper(trim(account_label)) = upper(?)', [a.label])
+        .first('account_type');
+      if (existing && existing.account_type !== a.accountType) {
+        throw badRequest(`"${a.label}" is already imported as ${ACCOUNT_TYPE_NOUN[existing.account_type]} — keep that type, or use a different label`);
+      }
+      // Rows from another source for this label — a CSV statement, or an
+      // EARLIER feed of the same bank account (a replacement connection
+      // gets new transaction ids) — can't be deduped against this feed,
+      // so it must start AFTER the last day they cover. This account's
+      // own rows are excluded: re-syncing them is idempotent by id.
+      // Checked under the label lock the CSV upload also takes.
+      const prior = await trx('bank_transactions')
+        .whereRaw('upper(trim(account_label)) = upper(?)', [a.label])
+        .where(q => q.where({ source: 'csv' })
+          .orWhere(q2 => q2.where({ source: 'plaid' }).whereRaw('plaid_account_id is distinct from ?', [byId.get(a.id).account_id])))
+        .max('txn_date as last_date')
+        .first();
+      const lastPrior = toDateOnly(prior.last_date);
+      if (lastPrior && a.syncFrom <= lastPrior) {
+        throw badRequest(`"${a.label}" already has rows from a statement or an earlier feed through ${lastPrior} — start the feed on ${addDaysStr(lastPrior, 1)} or later`);
+      }
+    }
     let resetCursor = false;
     for (const a of cleaned) {
       const prev = byId.get(a.id);
-      if (a.enabled && otherLabels.has(a.label.toUpperCase())) {
-        throw badRequest(`"${a.label}" is already fed by another bank connection`);
-      }
-      if (a.enabled) {
-        const existing = await trx('bank_transactions')
-          .whereRaw('upper(trim(account_label)) = upper(?)', [a.label])
-          .first('account_type');
-        if (existing && existing.account_type !== a.accountType) {
-          const asWhat = existing.account_type === 'bank' ? 'a bank account' : 'a credit card';
-          throw badRequest(`"${a.label}" is already imported as ${asWhat} — keep that type, or use a different label`);
-        }
-        // Rows from another source for this label — a CSV statement, or an
-        // EARLIER feed of the same bank account (a replacement connection
-        // gets new transaction ids) — can't be deduped against this feed,
-        // so it must start AFTER the last day they cover. This account's
-        // own rows are excluded: re-syncing them is idempotent by id.
-        // Checked under the label lock the CSV upload also takes.
-        const prior = await trx('bank_transactions')
-          .whereRaw('upper(trim(account_label)) = upper(?)', [a.label])
-          .where(q => q.where({ source: 'csv' })
-            .orWhere(q2 => q2.where({ source: 'plaid' }).whereRaw('plaid_account_id is distinct from ?', [prev.account_id])))
-          .max('txn_date as last_date')
-          .first();
-        const lastPrior = toDateOnly(prior && prior.last_date);
-        if (lastPrior && a.syncFrom <= lastPrior) {
-          throw badRequest(`"${a.label}" already has rows from a statement or an earlier feed through ${lastPrior} — start the feed on ${addDaysStr(lastPrior, 1)} or later`);
-        }
-      }
-      const prevFrom = toDateOnly(prev.sync_from);
-      if (a.enabled && (!prev.enabled || a.syncFrom < prevFrom)) resetCursor = true;
+      if (a.enabled && (!prev.enabled || a.syncFrom < toDateOnly(prev.sync_from))) resetCursor = true;
       await trx('plaid_accounts').where({ id: a.id }).update({
         account_label: a.label,
         account_type: a.accountType,
@@ -527,12 +533,13 @@ async function fetchAllChanges(accessToken, startCursor) {
         // not a valid restart point — only a complete run may be committed
         if (++pages > MAX_SYNC_PAGES) throw new Error(`more than ${MAX_SYNC_PAGES * 500} changed transactions in one sync — nothing applied`);
         const page = await plaid.transactionsSync(accessToken, cursor);
-        for (const t of [...(page.added || []), ...(page.modified || [])]) {
-          if (t && t.transaction_id) latest.set(t.transaction_id, { txn: t });
-        }
-        for (const r of page.removed || []) {
-          if (r && r.transaction_id) latest.set(r.transaction_id, { removed: true });
-        }
+        // removals after additions: a transaction both added and removed on
+        // one page ends removed
+        const entries = [
+          ...[...(page.added || []), ...(page.modified || [])].map(t => [t, { txn: t }]),
+          ...(page.removed || []).map(r => [r, { removed: true }]),
+        ].filter(([t]) => t && t.transaction_id);
+        for (const [t, state] of entries) latest.set(t.transaction_id, state);
         cursor = page.next_cursor || cursor;
         hasMore = !!page.has_more;
       }
@@ -606,7 +613,7 @@ async function applyChanges(trx, accountsById, changes) {
       // a re-send (cursor reset) or a correction the bank reverted: nothing
       // to change — but a parked correction or withdrawal it undid is now
       // obsolete
-      if (existing.suggestion && (existing.suggestion.plaidModified || existing.suggestion.plaidRemoved)) {
+      if (bankImport.hasUnresolvedBankChange(existing)) {
         await trx('bank_transactions').where({ id: existing.id }).update({
           suggestion: trx.raw("coalesce(suggestion, '{}'::jsonb) - 'plaidModified' - 'plaidRemoved'"),
           updated_at: trx.fn.now(),
@@ -620,9 +627,11 @@ async function applyChanges(trx, accountsById, changes) {
       // its money fields in place; see supersedeUnmatchedRow
       await supersedeUnmatchedRow(trx, existing.id, r);
       counts.updated++;
-    } else {
+    } else if (!(existing.suggestion && existing.suggestion.plaidDismissed && sameMoneyFields(existing.suggestion.plaidDismissed, r))) {
       // a reviewed row is never rewritten under the operator — the change
-      // parks on the row (replacing an older parked one) for them to judge
+      // parks on the row (replacing an older parked one) for them to judge.
+      // The exact version the operator already dismissed is not raised
+      // again (a cursor reset replays the bank's current version).
       await trx('bank_transactions').where({ id: existing.id }).update({
         // a valid version supersedes an earlier withdrawal (e.g. zeroed, then restored)
         suggestion: trx.raw("(coalesce(suggestion, '{}'::jsonb) - 'plaidRemoved') || ?::jsonb", [JSON.stringify({
@@ -651,9 +660,10 @@ async function applyChanges(trx, accountsById, changes) {
     const locked = await trx('bank_transactions')
       .whereIn('plaid_transaction_id', removedIds.slice(i, i + 500))
       .forUpdate()
-      .select('id', 'status');
+      .select('id', 'status', 'suggestion');
     const unmatched = locked.filter(r => r.status === 'unmatched').map(r => r.id);
-    const reviewed = locked.filter(r => r.status !== 'unmatched').map(r => r.id);
+    // a withdrawal the operator already dismissed is not raised again
+    const reviewed = locked.filter(r => r.status !== 'unmatched' && !(r.suggestion && r.suggestion.plaidDismissed && r.suggestion.plaidDismissed.removed)).map(r => r.id);
     if (unmatched.length) counts.deleted += await trx('bank_transactions').whereIn('id', unmatched).del();
     if (reviewed.length) {
       counts.flagged += await trx('bank_transactions').whereIn('id', reviewed).update({
@@ -672,16 +682,19 @@ async function applyChanges(trx, accountsById, changes) {
 // A correction instead deletes the unmatched row and inserts a fresh one
 // with the same Plaid identity — a racing claim then finds its row gone,
 // its CAS affects nothing, and it rolls back as it already does for a lost
-// race. Caller holds the row lock (FOR UPDATE) inside `trx`. The review
-// history in `suggestion` (human rejections, last unlink) carries over so
-// the matcher can't re-propose a link the operator already turned down;
-// the parked correction itself is dropped.
+// race. Caller holds the row lock (FOR UPDATE) inside `trx`. Only the
+// durable human history in `suggestion` carries over — rejected / unlinked
+// targets (so the matcher can't re-propose a link the operator already
+// turned down) and audit records. Everything DERIVED from the old values
+// (category, transfer flag, noMatch, parked candidates) and the parked
+// bank change itself is dropped: the replacement is a fresh row the
+// matcher and categorizer judge on its new values.
+const DURABLE_SUGGESTION_KEYS = ['lastUnlink', 'rejectedExpenseIds', 'rejectedPayoutIds', 'bankingRejectedPayoutIds', 'autoRevert', 'releasedRefundOf'];
+
 async function supersedeUnmatchedRow(trx, rowId, values) {
   const old = await trx('bank_transactions').where({ id: rowId, status: 'unmatched' }).first('*');
   if (!old) return null;
-  const carried = { ...(old.suggestion || {}) };
-  delete carried.plaidModified;
-  delete carried.plaidRemoved;
+  const carried = Object.fromEntries(DURABLE_SUGGESTION_KEYS.filter(k => old.suggestion && old.suggestion[k] !== undefined).map(k => [k, old.suggestion[k]]));
   await trx('bank_transactions').where({ id: rowId, status: 'unmatched' }).del();
   const [row] = await trx('bank_transactions').insert({
     account_label: old.account_label,
@@ -819,7 +832,7 @@ async function syncItem(itemId, { runMatching = true } = {}) {
   let matchingError = null;
   if (runMatching && result.inserted > 0) {
     try {
-      matching = await require('./bank-import').runDeterministicMatching({ limit: 500 });
+      matching = await bankImport.runDeterministicMatching({ limit: 500 });
     } catch (err) {
       logger.warn(`[plaid-sync] item ${itemId} synced but the matching pass failed: ${err.message}`);
       matchingError = 'transactions synced, but the matching pass failed — use "Run matching" to retry';
@@ -829,19 +842,36 @@ async function syncItem(itemId, { runMatching = true } = {}) {
 }
 
 // Cron entry: every connected item that isn't waiting on a human re-auth.
-// Items are independent — one bank's failure never stops the next.
+// Items are independent — one bank's failure never stops the next. Matching
+// runs here on its own, not only when this hour's sync inserted rows: one
+// bounded pass after a large first sync leaves work behind, and a quiet feed
+// would otherwise never pick it up. Passes repeat while work remains.
 async function syncAllItems() {
   if (!plaid.isConfigured()) return { skipped: 'not_configured' };
   const items = await db('plaid_items').whereIn('status', ['active', 'error']).select('id');
   const results = [];
   for (const { id } of items) {
     try {
-      results.push(await syncItem(id));
+      results.push(await syncItem(id, { runMatching: false }));
     } catch (err) {
       results.push({ itemId: id, error: err.message });
     }
   }
-  return { items: results.length, results };
+  let matchingPasses = 0;
+  let matchingError = null;
+  if (items.length) {
+    try {
+      let more = true;
+      while (more && matchingPasses < MAX_MATCHING_PASSES) {
+        matchingPasses++;
+        more = (await bankImport.runDeterministicMatching({ limit: 500 })).moreRemaining;
+      }
+    } catch (err) {
+      logger.warn(`[plaid-sync] hourly matching pass failed: ${err.message}`);
+      matchingError = err.message;
+    }
+  }
+  return { items: results.length, results, matchingPasses, matchingError };
 }
 
 module.exports = {
@@ -863,5 +893,6 @@ module.exports = {
   toDateOnly,
   supersedeUnmatchedRow,
   feedCoverageForLabel,
+  ACCOUNT_TYPE_NOUN,
   _private: { applyChanges, fetchAllChanges, decryptToken, defaultSyncFrom, existingLabels },
 };

@@ -5,7 +5,9 @@
  *
  * Env: PLAID_CLIENT_ID, PLAID_SECRET, PLAID_ENV ('sandbox' | 'production',
  * default sandbox), optional PLAID_REDIRECT_URI (only needed for OAuth
- * banks on mobile; desktop Link opens the bank's OAuth in a popup).
+ * banks on mobile; desktop Link opens the bank's OAuth in a popup). It must
+ * be the Tax page itself (…/admin/tax), registered in the Plaid dashboard:
+ * the page reopens Bank Import on ?oauth_state_id and resumes Link there.
  *
  * Errors carry Plaid's error_type/error_code (e.g. ITEM_LOGIN_REQUIRED) and
  * NEVER the request body — it holds the client secret and access token.

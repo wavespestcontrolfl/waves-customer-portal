@@ -1965,9 +1965,11 @@ router.post('/bank-import/plaid/items/:plaidItemId/sync', async (req, res, next)
 
 // A reviewed row the bank later corrected (plaidModified) or withdrew
 // (plaidRemoved) is never rewritten under the operator; this is where they
-// resolve it. 'dismiss' keeps the row as reviewed and clears the flag.
-// 'apply' takes the bank's corrected values — only on an UNMATCHED row
-// (unlink it first), and only for the exact flag the operator saw.
+// resolve it. 'dismiss' keeps the row as reviewed, clears the flag and
+// records the dismissed version (plaidDismissed) so a later full re-sync
+// of that same version doesn't raise it again. 'apply' takes the bank's
+// corrected values — only on an UNMATCHED row (unlink it first), and only
+// for the exact flag the operator saw.
 router.post('/bank-import/plaid/rows/:plaidRowId/bank-change', async (req, res, next) => {
   try {
     const { action, expected } = req.body || {};
@@ -1975,45 +1977,34 @@ router.post('/bank-import/plaid/rows/:plaidRowId/bank-change', async (req, res, 
     // `expected` = the flags exactly as the operator saw them. Both actions
     // are conditioned on it, so a correction or withdrawal that arrived
     // after the page loaded is never applied or erased unseen.
-    if (!expected || typeof expected !== 'object' || Array.isArray(expected)) {
-      return res.status(400).json({ error: 'expected (the bank change shown) is required' });
-    }
-    const seenModified = expected.plaidModified ?? null;
-    const seenRemoved = expected.plaidRemoved ?? null;
+    const seenModified = expected?.plaidModified ?? null;
+    const seenRemoved = expected?.plaidRemoved ?? null;
     if (!seenModified && !seenRemoved) return res.status(400).json({ error: 'expected (the bank change shown) is required' });
     const sameVersion = (q) => q.whereRaw(
       "coalesce(suggestion->'plaidModified', 'null'::jsonb) = ?::jsonb AND coalesce(suggestion->'plaidRemoved', 'null'::jsonb) = ?::jsonb",
       [JSON.stringify(seenModified), JSON.stringify(seenRemoved)],
     );
     const row = await db('bank_transactions').where({ id: req.params.plaidRowId, source: 'plaid' }).first('id', 'status', 'suggestion');
-    if (!row || (!row.suggestion?.plaidModified && !row.suggestion?.plaidRemoved)) {
-      return res.status(404).json({ error: 'no bank change on this row' });
-    }
+    if (!bankImport.hasUnresolvedBankChange(row)) return res.status(404).json({ error: 'no bank change on this row' });
     const stale = () => res.status(409).json({ error: 'the bank changed this row again — reload and review the latest change' });
     if (action === 'dismiss') {
       const changed = await sameVersion(db('bank_transactions').where({ id: row.id })).update({
-        suggestion: bankImport.suggestionMerge({}, ['plaidModified', 'plaidRemoved']),
+        suggestion: bankImport.suggestionMerge({ plaidDismissed: seenRemoved ? { removed: true } : seenModified }, ['plaidModified', 'plaidRemoved']),
         updated_at: new Date(),
       });
       return changed ? res.json({ success: true }) : stale();
     }
-    if (seenRemoved || !seenModified) return res.status(409).json({ error: 'the bank withdrew this transaction — dismiss it, or unlink and ignore the row' });
+    if (seenRemoved) return res.status(409).json({ error: 'the bank withdrew this transaction — dismiss it, or unlink and ignore the row' });
     if (row.status !== 'unmatched') return res.status(409).json({ error: 'unlink this row before applying the bank\'s correction' });
-    const m = seenModified;
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(m.txn_date)) || !(Number(m.amount) > 0)
-      || !['debit', 'credit'].includes(m.direction) || typeof m.description !== 'string') {
-      return res.status(400).json({ error: 'expected correction is malformed' });
-    }
     // replaced, not edited in place (see plaidSync.supersedeUnmatchedRow):
-    // under the row lock, re-check status + the exact version shown
+    // under the row lock, re-check status + the exact version shown. The
+    // values applied are the STORED flag the CAS just matched — never the
+    // request body's copy.
     const replaced = await db.transaction(async (trx) => {
-      const locked = await sameVersion(trx('bank_transactions').where({ id: row.id, status: 'unmatched' })).forUpdate().first('id');
-      if (!locked) return null;
-      return plaidSync.supersedeUnmatchedRow(trx, row.id, m);
+      const locked = await sameVersion(trx('bank_transactions').where({ id: row.id, status: 'unmatched' })).forUpdate().first('id', 'suggestion');
+      return locked ? plaidSync.supersedeUnmatchedRow(trx, row.id, locked.suggestion.plaidModified) : null;
     });
-    const changed = !!replaced;
-    if (!changed) return stale();
-    res.json({ success: true });
+    return replaced ? res.json({ success: true }) : stale();
   } catch (err) { plaidRouteError(res, next, err); }
 });
 
@@ -2101,10 +2092,9 @@ router.post('/bank-import/upload', async (req, res, next) => {
       // (they hash differently), so those days are skipped here and
       // reported — never imported as silent duplicates. Read under the same
       // label lock the feed setup takes.
-      feedCoverage = await require('../services/plaid-sync').feedCoverageForLabel(trx, label, toInsert.map(r => r.txn_date));
+      feedCoverage = await plaidSync.feedCoverageForLabel(trx, label, toInsert.map(r => r.txn_date));
       if (feedCoverage.liveType && feedCoverage.liveType !== accountType) {
-        const asWhat = feedCoverage.liveType === 'bank' ? 'a bank account' : 'a credit card';
-        const e = new Error(`"${label}" is fed by a live bank connection as ${asWhat} — keep that type, or use a different label`);
+        const e = new Error(`"${label}" is fed by a live bank connection as ${plaidSync.ACCOUNT_TYPE_NOUN[feedCoverage.liveType]} — keep that type, or use a different label`);
         e.status = 400;
         throw e; // rolls back before any insert
       }
@@ -2338,6 +2328,10 @@ router.post('/bank-import/suggest', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// every manual claim below refuses a Plaid row with an unresolved bank
+// change: it still holds the pre-correction values (bankImport.hasUnresolvedBankChange)
+const BANK_CHANGE_BLOCKS_CLAIM = 'the bank changed this transaction after it was reviewed — apply or dismiss the bank change first';
+
 // Create a real expense from a staged debit. Card-statement credits
 // (refunds) do NOT create rows here — negative expenses would violate the
 // ledger's [0, amount] deductible invariant and the P&L clamps; refunds go
@@ -2352,6 +2346,7 @@ router.post('/bank-import/:id/create-expense', async (req, res, next) => {
     if (!row) return res.status(404).json({ error: 'row not found' });
     if (row.direction !== 'debit') return res.status(400).json({ error: 'only debits become expenses — refund credits use apply-refund' });
     if (row.status !== 'unmatched') return res.status(409).json({ error: `row is ${row.status}, not unmatched` });
+    if (bankImport.hasUnresolvedBankChange(row)) return res.status(409).json({ error: BANK_CHANGE_BLOCKS_CLAIM });
 
     const suggested = row.suggestion?.categoryId || null;
     const categoryId = req.body?.categoryId || suggested;
@@ -2385,6 +2380,7 @@ router.post('/bank-import/:id/create-expense', async (req, res, next) => {
         }).returning('*');
         const claimed = await trx('bank_transactions')
           .where({ id: row.id, status: 'unmatched' })
+          .whereRaw(bankImport.BANK_CHANGE_UNRESOLVED_SQL_NOT)
           .update({ status: 'created_expense', matched_expense_id: inserted.id, match_method: 'created', matched_at: new Date(), updated_at: new Date() });
         if (!claimed) {
           const e = new Error('row was matched by someone else mid-flight');
@@ -2409,10 +2405,11 @@ router.post('/bank-import/:id/link-expense', async (req, res, next) => {
   try {
     const { expenseId } = req.body || {};
     if (!expenseId) return res.status(400).json({ error: 'expenseId is required' });
-    const row = await db('bank_transactions').where({ id: req.params.id }).first('id', 'direction', 'status', 'amount', 'txn_date');
+    const row = await db('bank_transactions').where({ id: req.params.id }).first('id', 'direction', 'status', 'amount', 'txn_date', 'suggestion');
     if (!row) return res.status(404).json({ error: 'row not found' });
     if (row.direction !== 'debit') return res.status(400).json({ error: 'only debits link to expenses' });
     if (row.status !== 'unmatched') return res.status(409).json({ error: `row is ${row.status}, not unmatched` });
+    if (bankImport.hasUnresolvedBankChange(row)) return res.status(409).json({ error: BANK_CHANGE_BLOCKS_CLAIM });
     // Plausibility is judged and the claim committed in ONE transaction
     // with the expense row LOCKED — a concurrent expense edit or refund
     // between an unlocked validation and the claim could otherwise leave
@@ -2443,6 +2440,7 @@ router.post('/bank-import/:id/link-expense', async (req, res, next) => {
         }
         return trx('bank_transactions')
           .where({ id: row.id, status: 'unmatched' })
+          .whereRaw(bankImport.BANK_CHANGE_UNRESOLVED_SQL_NOT)
           .update({ status: 'matched_expense', matched_expense_id: expenseId, match_method: 'manual', matched_at: new Date(), updated_at: new Date() });
       });
     } catch (err) {
@@ -2476,6 +2474,7 @@ router.post('/bank-import/:id/apply-refund', async (req, res, next) => {
       return res.status(400).json({ error: 'only statement credits apply as refunds' });
     }
     if (row.status !== 'unmatched') return res.status(409).json({ error: `row is ${row.status}, not unmatched` });
+    if (bankImport.hasUnresolvedBankChange(row)) return res.status(409).json({ error: BANK_CHANGE_BLOCKS_CLAIM });
     // a credit RELEASED against this expense already reduced it once — a
     // second application would double-reduce the ledger
     if (row.suggestion?.releasedRefundOf && String(row.suggestion.releasedRefundOf) === String(expenseId)) {
@@ -2537,6 +2536,7 @@ router.post('/bank-import/:id/apply-refund', async (req, res, next) => {
         }).returning(['id', 'amount', 'tax_deductible_amount']);
         const claimed = await trx('bank_transactions')
           .where({ id: row.id, status: 'unmatched' })
+          .whereRaw(bankImport.BANK_CHANGE_UNRESOLVED_SQL_NOT)
           .update({
             status: 'refund_applied',
             match_method: 'refund',
@@ -2605,6 +2605,7 @@ router.post('/bank-import/:id/link-payout', async (req, res, next) => {
       return res.status(400).json({ error: 'only bank-account credits link to payouts' });
     }
     if (row.status !== 'unmatched') return res.status(409).json({ error: `row is ${row.status}, not unmatched` });
+    if (bankImport.hasUnresolvedBankChange(row)) return res.status(409).json({ error: BANK_CHANGE_BLOCKS_CLAIM });
     const payout = await db('stripe_payouts').where({ id: payoutId }).first('id', 'status', 'amount', 'arrival_date', 'reconciled');
     if (!payout) return res.status(404).json({ error: 'payout not found' });
     // Only money that actually REACHED the bank can explain a bank credit —
@@ -2626,6 +2627,7 @@ router.post('/bank-import/:id/link-payout', async (req, res, next) => {
     try {
       claimed = await db('bank_transactions')
         .where({ id: row.id, status: 'unmatched' })
+        .whereRaw(bankImport.BANK_CHANGE_UNRESOLVED_SQL_NOT)
         .update({
           status: 'matched_payout',
           matched_payout_id: payoutId,

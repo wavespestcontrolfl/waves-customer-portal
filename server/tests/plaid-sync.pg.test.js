@@ -366,13 +366,17 @@ async function activate(itemId, overrides = {}) {
     expect(row.suggestion.plaidModified).toMatchObject({ amount: 11 });
   });
 
-  test('a correction replaces the unmatched row: a racing status-CAS claim misses; review history carries over', async () => {
+  test('a correction replaces the unmatched row: a racing status-CAS claim misses; review history carries over, derived suggestions do not', async () => {
     const itemId = await connect();
     await activate(itemId);
     plaid.transactionsSync.mockResolvedValueOnce(page([txn('t-a', 'acc-card', 10, '2026-09-05')], [], [], 'cursor-1'));
     await plaidSync.syncItem(itemId);
     const before = await mockPg('bank_transactions').where({ plaid_transaction_id: 't-a' }).first();
-    await mockPg('bank_transactions').where({ id: before.id }).update({ suggestion: { rejectedExpenseIds: ['x'], categoryId: 'c1' } });
+    await mockPg('bank_transactions').where({ id: before.id }).update({ suggestion: {
+      rejectedExpenseIds: ['x'], lastUnlink: { expenseId: 'y' },
+      // derived from the $10 version — obsolete once the bank corrects it
+      categoryId: 'c1', noMatch: true, ignore: true, candidates: [{ id: 'z' }],
+    } });
     // create-expense has READ the row at $10 (unlocked) and is about to claim it
     plaid.transactionsSync.mockResolvedValueOnce(page([], [txn('t-a', 'acc-card', 25, '2026-09-05')], [], 'cursor-2'));
     await plaidSync.syncItem(itemId);
@@ -385,7 +389,7 @@ async function activate(itemId, overrides = {}) {
     expect(now.id).not.toBe(before.id);
     expect(Number(now.amount)).toBe(25);
     expect(now.row_hash).toBe(before.row_hash);
-    expect(now.suggestion).toEqual({ rejectedExpenseIds: ['x'], categoryId: 'c1' });
+    expect(now.suggestion).toEqual({ rejectedExpenseIds: ['x'], lastUnlink: { expenseId: 'y' } });
   });
 
   test('setup accepts tomorrow as the start date (CSV already covers today)', async () => {
@@ -487,6 +491,13 @@ async function activate(itemId, overrides = {}) {
       expect((await post(`/plaid/rows/${rRow.id}/bank-change`, { action: 'apply', expected: seen(rRow) })).status).toBe(409); // withdrawn
 
       await mockPg('bank_transactions').where({ id: mRow.id }).update({ status: 'unmatched', matched_expense_id: null });
+      // unlinked but unresolved: still the OLD $10 values, so no manual claim
+      for (const [path, body] of [['create-expense', {}], ['link-expense', { expenseId: e1.id }]]) {
+        const r = await post(`/${mRow.id}/${path}`, body);
+        expect([path, r.status]).toEqual([path, 409]);
+        expect((await r.json()).error).toMatch(/apply or dismiss the bank change first/);
+      }
+      expect(await mockPg('bank_transactions').where({ id: mRow.id }).first('status')).toEqual({ status: 'unmatched' });
       // a correction the operator never saw lands after the page loaded
       const shown = seen(mRow);
       await mockPg('bank_transactions').where({ id: mRow.id }).update({
@@ -505,12 +516,54 @@ async function activate(itemId, overrides = {}) {
       const dismissed = await mockPg('bank_transactions').where({ id: rRow.id }).first();
       expect(dismissed).toMatchObject({ status: 'matched_expense', matched_expense_id: e2.id });
       expect(dismissed.suggestion.plaidRemoved).toBeUndefined();
+      expect(dismissed.suggestion.plaidDismissed).toEqual({ removed: true });
       expect((await (await fetch(`${base}/status`)).json()).bankChanges).toBe(0);
     } finally {
       server.close();
       delete process.env.GATE_BANK_IMPORT;
       delete process.env.GATE_PLAID_SYNC;
     }
+  });
+
+  test('a dismissed bank change is not raised again when a re-sync replays that same version', async () => {
+    const itemId = await connect();
+    await activate(itemId);
+    plaid.transactionsSync.mockResolvedValueOnce(page([txn('t-a', 'acc-card', 10, '2026-09-05'), txn('t-b', 'acc-card', 20, '2026-09-05')], [], [], 'cursor-1'));
+    await plaidSync.syncItem(itemId);
+    const [e1] = await mockPg('expenses').insert({}).returning(['id']);
+    const [e2] = await mockPg('expenses').insert({}).returning(['id']);
+    await mockPg('bank_transactions').where({ plaid_transaction_id: 't-a' }).update({
+      status: 'matched_expense', matched_expense_id: e1.id,
+      suggestion: { plaidDismissed: { txn_date: '2026-09-06', amount: 11, direction: 'debit', description: 'TXN t-a' } },
+    });
+    await mockPg('bank_transactions').where({ plaid_transaction_id: 't-b' }).update({
+      status: 'matched_expense', matched_expense_id: e2.id, suggestion: { plaidDismissed: { removed: true } },
+    });
+    // a cursor reset replays the bank's current version / withdrawal
+    plaid.transactionsSync.mockResolvedValueOnce(page([], [txn('t-a', 'acc-card', 11, '2026-09-06')], [{ transaction_id: 't-b' }], 'cursor-2'));
+    expect(await plaidSync.syncItem(itemId)).toMatchObject({ flagged: 0 });
+    // a genuinely different version is raised
+    plaid.transactionsSync.mockResolvedValueOnce(page([], [txn('t-a', 'acc-card', 12, '2026-09-06')], [], 'cursor-3'));
+    expect(await plaidSync.syncItem(itemId)).toMatchObject({ flagged: 1 });
+    const row = await mockPg('bank_transactions').where({ plaid_transaction_id: 't-a' }).first();
+    expect(row.suggestion.plaidModified).toMatchObject({ amount: 12 });
+  });
+
+  test('the hourly run keeps matching while work remains, even when nothing new synced', async () => {
+    const bankImport = require('../services/bank-import');
+    const itemId = await connect();
+    await activate(itemId);
+    plaid.transactionsSync.mockResolvedValueOnce(page([], [], [], 'cursor-1'));
+    bankImport.runDeterministicMatching.mockClear();
+    bankImport.runDeterministicMatching
+      .mockResolvedValueOnce({ moreRemaining: true })
+      .mockResolvedValueOnce({ moreRemaining: true })
+      .mockResolvedValueOnce({ moreRemaining: false });
+    const out = await plaidSync.syncAllItems();
+    expect(out).toMatchObject({ items: 1, matchingPasses: 3, matchingError: null });
+    expect(out.results[0]).toMatchObject({ inserted: 0, matching: null }); // no per-item pass in the cron
+    expect(bankImport.runDeterministicMatching).toHaveBeenCalledTimes(3);
+    await plaidSync.disconnectItem(itemId);
   });
 
   test('CSV and feed never cover the same days for one label', async () => {
@@ -644,7 +697,7 @@ async function activate(itemId, overrides = {}) {
     expect(item.status).toBe('login_required');
     expect(item.last_error).toMatch(/ITEM_LOGIN_REQUIRED/);
 
-    expect(await plaidSync.syncAllItems()).toEqual({ items: 0, results: [] });
+    expect(await plaidSync.syncAllItems()).toEqual({ items: 0, results: [], matchingPasses: 0, matchingError: null });
     expect(await plaidSync.markReconnected(itemId)).toBe(true);
     expect((await mockPg('plaid_items').where({ id: itemId }).first()).status).toBe('active');
   });
