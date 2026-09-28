@@ -876,11 +876,15 @@ async function anchorSeriesAddress(target, parentId, cols, conn = db) {
   const sibling = await mostRecentAddressedSeriesSibling(parentId, target.customer_id, cols, conn);
   if (sibling) {
     const { recurringServiceAddress } = require('./booking/visit-financial-stamps');
-    // == null (not === undefined): copyStampedServiceAddressFields above may
-    // already have stamped an explicit NULL from an addressless parent, and
-    // that is exactly the blank this precedence step fills.
+    // The sibling's address is adopted as ONE unit. The parent stamped no
+    // address (checked above), so any lat/lng it left on the row describe
+    // some other place, usually the customer's main-address geocode; keeping
+    // them would pin the new visit at a different house than its address.
+    // A null sibling zone keeps the parent's zone rather than blanking it.
     for (const [field, value] of Object.entries(recurringServiceAddress(sibling))) {
-      if (cols[field] && target[field] == null) target[field] = value;
+      if (!cols[field]) continue;
+      if (field === 'zone' && value == null) continue;
+      target[field] = value;
     }
   }
   await anchorSoleProperty(target, cols, conn);

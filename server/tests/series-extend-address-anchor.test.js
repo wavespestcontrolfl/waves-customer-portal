@@ -164,6 +164,31 @@ describe('anchorSeriesAddress', () => {
     expect(target.lat).toBe(27.5);
   });
 
+  test('precedence 2: the sibling address replaces main-address coordinates an addressless parent left on the row', async () => {
+    const sibling = {
+      ...SIBLING_FIELDS, id: 'sib-rental', property_id: 'p-rental',
+      service_address_line1: '20 Rental Ln', service_address_city: 'Sarasota',
+      service_address_state: 'FL', service_address_zip: '34231',
+      lat: 27.38, lng: -82.39, zone: null,
+    };
+    const conn = fakeConn({
+      scheduled_services: [sibling],
+      customer_properties: [{ id: 'p-rental', customer_id: 'cust-1', active: true }],
+    });
+    // What copyStampedServiceAddressFields leaves from a parent with no
+    // address but a main-address geocode and a routing zone.
+    const target = {
+      customer_id: 'cust-1', property_id: null, service_address_line1: null,
+      lat: 27.51, lng: -82.37, zone: 'north',
+    };
+    await anchorSeriesAddress(target, 'parent-1', COLS, conn);
+    expect(target.property_id).toBe('p-rental');
+    expect(target.service_address_city).toBe('Sarasota');
+    expect(target.lat).toBe(27.38);
+    expect(target.lng).toBe(-82.39);
+    expect(target.zone).toBe('north');
+  });
+
   test('precedence 2: a sibling with only a stamped address (no property_id) still anchors the row', async () => {
     const sibling = {
       ...SIBLING_FIELDS, id: 'sib-legacy', property_id: null,
