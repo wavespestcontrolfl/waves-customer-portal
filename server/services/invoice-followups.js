@@ -554,30 +554,33 @@ async function scheduleForInvoice(invoiceId, { adoption = false } = {}) {
     if (activePlan) return null;
 
     const customer = await trx('customers').where({ id: invoice.customer_id }).first();
-    // Adoption fails closed on an unreadable payment method (Codex #5202 r1
-    // P1): the default swallows the read error as "not on autopay" and would
-    // arm an ACTIVE row for an enrolled customer. The throw rolls this
-    // transaction back, so no row exists and the next sweep retries.
-    const onAutopay = await customerOnAutopay(customer, { db: trx, ...(adoption ? { failClosed: true } : {}) });
-    if (adoption && onAutopay) {
-      // An autopay customer whose retries already failed is left for a
-      // person (Codex #5202 r1 P1): a fresh hold would wait for webhooks
-      // that may never come, and seeding the counter from ach_failure_log
-      // double-counts a failure the webhook has logged but not yet passed
-      // to handleAutopayFailure. The webhook's own per-customer lock
-      // (stripe-webhook.js 'ach.escalation') fences the read: a failure
-      // logged before it is seen here and the invoice is skipped; one
-      // still in flight waits for this row to commit, and its
-      // handleAutopayFailure then counts it against this row as usual.
+    if (adoption) {
+      // An invoice whose customer has unresolved ACH failures is left for a
+      // person (Codex #5202 r1 P1): a fresh autopay hold would wait for
+      // webhooks that may never come, and seeding the counter from
+      // ach_failure_log double-counts a failure the webhook has logged but
+      // not yet passed to handleAutopayFailure. Checked for EVERY adoption,
+      // before autopay eligibility (Codex #5202 r2 P1): failures that
+      // committed since selection can have already moved the customer off
+      // autopay, which would otherwise arm an ACTIVE row. The webhook's own
+      // per-customer lock (stripe-webhook.js 'ach.escalation') fences the
+      // read: a failure logged before it is seen here; one still in flight
+      // waits for this row to commit, and its handleAutopayFailure then
+      // counts it against this row as usual.
       await trx.raw(
         'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
         ['ach.escalation', String(invoice.customer_id)],
       );
       if (await unresolvedAchFailureCount(invoice.customer_id, trx)) {
-        logger.info(`[invoice-followups] adoption left invoice ${invoiceId} for a person: autopay customer has unresolved ACH failures`);
+        logger.info(`[invoice-followups] adoption left invoice ${invoiceId} for a person: customer has unresolved ACH failures`);
         return null;
       }
     }
+    // Adoption fails closed on an unreadable payment method (Codex #5202 r1
+    // P1): the default swallows the read error as "not on autopay" and would
+    // arm an ACTIVE row for an enrolled customer. The throw rolls this
+    // transaction back, so no row exists and the next sweep retries.
+    const onAutopay = await customerOnAutopay(customer, { db: trx, ...(adoption ? { failClosed: true } : {}) });
 
     // Anchor the cadence to when the invoice went out. Falls back through
     // sent_at → sms_sent_at → created_at so edge cases (manual-only, email-only,
@@ -708,9 +711,7 @@ async function selectAdoptionCandidates() {
       continue;
     }
     if (!adoptionLanding(candidate.sent_at, now)) { skip('past_final_step'); continue; }
-    // Reported for every customer with failures (scheduleForInvoice's locked
-    // re-check applies to autopay customers only), so the hand list is a
-    // superset of what the sweep would decline.
+    // Same rule scheduleForInvoice re-checks under the ACH lock.
     let achFailures;
     try {
       achFailures = await unresolvedAchFailureCount(candidate.customer_id);
@@ -808,7 +809,15 @@ async function runPending() {
   }
   // Adoption runs BEFORE the batch select; an adopted row is always dated
   // after this run, so the batch never picks it up today.
-  if (adoptOrphanInvoicesLive()) await adoptOrphanInvoices();
+  // A sweep failure never costs the day's due touches (Codex #5202 r2 P1): a
+  // touch missed at this tick is past its stale grace by the next one.
+  if (adoptOrphanInvoicesLive()) {
+    try {
+      await adoptOrphanInvoices();
+    } catch (err) {
+      logger.error(`[invoice-followups] orphan adoption sweep failed — due touches still run: ${err.message}`);
+    }
+  }
 
   // No deleted-customer filter here: fireStep() pauses those sequences
   // (status='paused', next_touch_at=null) so they're handled terminally

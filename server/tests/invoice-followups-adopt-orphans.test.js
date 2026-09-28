@@ -16,8 +16,10 @@
 // independent of autopay standing), ach_history_unreadable. A survivor is
 // hand ed to `scheduleForInvoice(id, { adoption: true })` — the exact path a
 // normal invoice send takes — which computes its OWN landing under the
-// invoice lock: an autopay customer takes the 'ach.escalation' advisory
-// lock, is left for a person on any unresolved failure, and otherwise lands
+// invoice lock: EVERY adoption takes the 'ach.escalation' advisory lock and
+// is left for a person on any unresolved failure (r2: before the autopay
+// read, since failures can move a customer off autopay); otherwise an
+// autopay customer lands
 // an autopay_hold row (next_touch_at null) at `adoptionLanding`'s step; a
 // non-autopay customer lands an active row directly at the first step whose
 // send day is not stale, re-dated to the next send-window day if that step
@@ -409,7 +411,24 @@ describe('scheduleForInvoice(id, { adoption: true })', () => {
       'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
       ['ach.escalation', 'cust-1'],
     );
-    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('adoption left invoice inv-1 for a person: autopay customer has unresolved ACH failures'));
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('adoption left invoice inv-1 for a person: customer has unresolved ACH failures'));
+  });
+
+  test('a customer failures already moved OFF autopay is still left for a person: the lock and count run before the autopay read (Codex r2)', async () => {
+    const anchor = tenAmET('2026-08-04');
+    const previewInvoice = { id: 'inv-1', status: 'sent', payer_id: null, scheduled_send_error: null, customer_id: 'cust-1', sent_at: anchor };
+    const { insertCalls } = setupFullDb({ previewInvoice, customer: { id: 'cust-1' }, achFailureCount: 2 });
+    customerOnAutopay.mockResolvedValue(false);
+
+    const result = await scheduleForInvoice('inv-1', { adoption: true });
+
+    expect(result).toBeNull();
+    expect(insertCalls).toHaveLength(0);
+    expect(db.raw).toHaveBeenCalledWith(
+      'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+      ['ach.escalation', 'cust-1'],
+    );
+    expect(customerOnAutopay).not.toHaveBeenCalled();
   });
 
   test('an autopay customer with no unresolved ACH failures lands an autopay_hold row at the landing step, next_touch_at null', async () => {
@@ -618,6 +637,21 @@ describe('adoptOrphanInvoices: live sweep locking', () => {
 });
 
 describe('runPending and the orphan sweep', () => {
+  test('a failed adoption sweep never costs the day\'s due touches (Codex r2)', async () => {
+    process.env.GATE_DUNNING_ADOPT_ORPHANS = 'true';
+    process.env.GATE_LATE_PAYMENT_CHECKER_OFF = 'true';
+    process.env.GATE_DUNNING_LADDER_90 = 'true';
+    const row = seqRow({ step_index: 1, next_touch_at: tenAmET('2026-08-05') });
+    setupFullDb({ batchReads: [[row]] });
+    // The sweep itself fails (e.g. its candidate query times out).
+    runExclusive.mockRejectedValueOnce(new Error('statement timeout'));
+
+    const result = await runPending();
+
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('orphan adoption sweep failed — due touches still run'));
+    expect(result.sent).toBe(1);
+  });
+
   test('gate off: runPending never looks for orphans (no invoices-as-i query) and behaves as before', async () => {
     const row = seqRow({ step_index: 1, next_touch_at: tenAmET('2026-08-05') });
     // 'invoices as i' is deliberately NOT registered — a call to it throws,
