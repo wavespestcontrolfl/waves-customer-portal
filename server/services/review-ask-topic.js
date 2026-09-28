@@ -323,7 +323,8 @@ function isTopicGrounded(topic, citedText) {
 // draftTopicFollowupBody), so the concern is checked against closed word
 // lists rather than trusted because it overlaps the topic: a place ("the
 // kitchen"), a service action ("wasp nest treatment") or any word not listed
-// here gets the generic follow-up text. Singular forms (singularForm).
+// here gets the generic follow-up text. Both lists go through singularForm,
+// the same as the concern, so "fungus" matches "fungus" ("fungu" both sides).
 // Heads name the pest, plant or condition itself; a concern needs one.
 const CONCERN_HEADS = new Set([
   "ant", "roach", "cockroach", "spider", "wasp", "hornet", "yellowjacket", "bee", "flea", "tick", "silverfish",
@@ -334,7 +335,7 @@ const CONCERN_HEADS = new Set([
   "dandelion", "chickweed", "grass", "lawn", "turf", "sod", "patch", "fungus", "disease", "mold", "mildew",
   "rot", "blight", "hedge", "shrub", "bush", "tree", "palm", "plant", "frond", "leaf", "hibiscus", "ixora",
   "croton", "citrus", "spot",
-]);
+].map(singularForm));
 // Words that only describe a head ("roof rats", "Bermuda grass", "grass dying").
 const CONCERN_MODIFIERS = new Set([
   "fire", "ghost", "sugar", "carpenter", "crazy", "acrobat", "pharaoh", "argentine", "german", "american",
@@ -342,7 +343,7 @@ const CONCERN_MODIFIERS = new Set([
   "norway", "house", "fruit", "drain", "flying", "winged", "stink", "drywood", "subterranean", "formosan",
   "mole", "sod", "scale", "bermuda", "st", "augustine", "zoysia", "bahia", "floratam", "black", "brown",
   "yellow", "yellowing", "dead", "dying", "thin", "thinning", "bare", "large", "dollar", "sooty",
-]);
+].map(singularForm));
 
 /**
  * The concern as the follow-up question may print it, or null. Every word

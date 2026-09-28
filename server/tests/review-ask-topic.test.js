@@ -494,6 +494,8 @@ describe('followupConcernPhrase — only listed pest, plant and condition words 
       expect([c, followupConcernPhrase(c)]).toEqual([c, c]);
     }
     expect(followupConcernPhrase('  ANTS ')).toBe('ants');
+    // A singular that ends in s (codex r7 on #5246).
+    for (const c of ['fungus', 'hibiscus', 'citrus', 'brown patch fungus']) expect([c, followupConcernPhrase(c)]).toEqual([c, c]);
   });
 
   test('a place, a claim of work, a stripped stem, a modifier alone, or too many words → null', () => {
