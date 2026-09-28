@@ -4,7 +4,7 @@
 // publishes, and anything else must fail closed to "no price_range".
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
-const { costGuidePriceRange, SERVICE_PRICE_KEYS, GATED_ROW_INTENTS } = require('../services/content-astro/price-range');
+const { costGuidePriceRange, applyCostGuidePriceRange, SERVICE_PRICE_KEYS, GATED_ROW_INTENTS } = require('../services/content-astro/price-range');
 const { computePublicPricingRanges, PURCHASE_GATED_ROWS } = require('../services/pricing-engine/public-ranges');
 const { COMMERCIAL_RISK_TYPES, COMMERCIAL_RISK_TYPE_TERMS } = require('../services/pricing-engine/commercial-risk-type');
 
@@ -69,6 +69,10 @@ describe('costGuidePriceRange', () => {
     ['pre-slab termite treatment cost', ['pre_slab_termiticide']],
     ['bora-care treatment cost', ['bora_care']],
     ['wdo inspection cost', ['wdo_inspection']],
+    ['wood-destroying organism report cost', ['wdo_inspection']],
+    ['wdo letter cost for a real estate closing', ['wdo_inspection']],
+    // Wood-destroying wording without inspection context is not the WDO report.
+    ['wood-destroying termite treatment cost', TERMITE_ALL],
     // Tenancy wording is not the rented-station product (gated products: see below).
     ['termite treatment cost for rental properties', TERMITE_ALL],
     ['termite treatment cost for a leased home', TERMITE_ALL],
@@ -110,6 +114,14 @@ describe('costGuidePriceRange', () => {
     ['quarterly pest control cost', ['general_pest_quarterly']],
     ['single-family home pest control cost', ['general_pest_quarterly', 'one_time_pest']],
     ['one-time rat exterminator cost', RODENT_ALL],
+    // General-pest species (pest-identification library, service_key 'pest').
+    ['ant control cost', ['general_pest_quarterly', 'one_time_pest']],
+    ['spider treatment cost', ['general_pest_quarterly', 'one_time_pest']],
+    ['silverfish control cost', ['general_pest_quarterly', 'one_time_pest']],
+    ['carpenter ant treatment cost', ['general_pest_quarterly', 'one_time_pest']],
+    ['one-time ant treatment cost', ['one_time_pest']],
+    ['stink bug control plan cost', ['general_pest_quarterly']],
+    ['palmetto treatment cost', ['cockroach_treatment']],
     // single-row services
     ['bed bug treatment cost', ['bed_bug_treatment']],
     ['flea treatment cost', ['flea_elimination']],
@@ -136,6 +148,11 @@ describe('costGuidePriceRange', () => {
     expect(costGuidePriceRange(cost({ primary_keyword: 'commercial pest control cost' }))).toBeNull();
     expect(costGuidePriceRange(cost({ primary_keyword: 'restaurant pest control cost' }))).toBeNull();
     expect(costGuidePriceRange(cost({ primary_keyword: 'termite inspection cost', category: 'termite' }))).toBeNull();
+    // Not a Waves pest (library not_a_pest species, the saw-palmetto plant),
+    // or wood-destroying wording with no row: no card.
+    expect(costGuidePriceRange(cost({ primary_keyword: 'love bug control cost' }))).toBeNull();
+    expect(costGuidePriceRange(cost({ primary_keyword: 'saw palmetto trimming cost' }))).toBeNull();
+    expect(costGuidePriceRange(cost({ primary_keyword: 'wood-destroying beetle treatment cost' }))).toBeNull();
     // Palms and trees without care context: no card (not a care-program guide).
     expect(costGuidePriceRange(cost({ primary_keyword: 'palm tree removal cost' }))).toBeNull();
     // A no-row keyword stops there — the title does not reopen it.
@@ -153,6 +170,35 @@ describe('costGuidePriceRange', () => {
     expect(costGuidePriceRange(termite, { knownKeys: new Set(['termite_bait_install', 'termite_bait_monitoring']) }))
       .toEqual(['termite_bait_install', 'termite_bait_monitoring']);
     expect(costGuidePriceRange(termite, { knownKeys: new Set() })).toBeNull();
+  });
+
+  test('a retained list keeps only keys the feed publishes now — never substituted; [] stays []', () => {
+    const known = new Set(['termite_trenching', 'termite_bait_install', 'termite_bond']);
+    const apply = (price_range, frontmatter = cost({ primary_keyword: 'termite treatment cost' })) =>
+      applyCostGuidePriceRange({ ...frontmatter }, { price_range }, { knownKeys: known });
+    // A renamed/removed key and a purchase-gated key (even while published) drop.
+    expect(apply(['termite_trenching', 'renamed_key', 'termite_bond']).price_range).toEqual(['termite_trenching']);
+    // Nothing left → the field is omitted, not replaced by the mapped keys.
+    const allStale = apply(['renamed_key', 'termite_bond']);
+    expect(allStale).not.toHaveProperty('price_range');
+    // An explicit [] (owner cleared the card) stays [].
+    expect(apply([]).price_range).toEqual([]);
+    // Non-cost posts are checked too: a stale key breaks the build either way.
+    expect(apply(['renamed_key'], { post_type: 'diagnostic' })).not.toHaveProperty('price_range');
+  });
+
+  test('a retained list is never shipped unchecked or deleted when the feed is down', () => {
+    jest.isolateModules(() => {
+      jest.doMock('../services/pricing-engine/public-ranges', () => ({
+        computePublicPricingRanges: () => { throw new Error('pricing constants unavailable'); },
+        PURCHASE_GATED_ROWS: jest.requireActual('../services/pricing-engine/public-ranges').PURCHASE_GATED_ROWS,
+      }));
+      const isolated = require('../services/content-astro/price-range');
+      expect(() => isolated.applyCostGuidePriceRange(cost(), { price_range: ['termite_trenching'] }))
+        .toThrow(expect.objectContaining({ code: 'BLOG_PRICE_FEED_UNAVAILABLE' }));
+      // No retained list → simply no card.
+      expect(isolated.applyCostGuidePriceRange(cost({ primary_keyword: 'pest control cost' }), null)).not.toHaveProperty('price_range');
+    });
   });
 
   test('fails closed when the pricing feed cannot be computed', () => {

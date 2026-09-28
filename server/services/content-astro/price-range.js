@@ -24,6 +24,7 @@
  */
 const { computePublicPricingRanges, PURCHASE_GATED_ROWS } = require('../pricing-engine/public-ranges');
 const { COMMERCIAL_RISK_TYPE_TERMS } = require('../pricing-engine/commercial-risk-type');
+const { PEST_LIBRARY } = require('../pest-identification');
 const logger = require('../logger');
 
 // The card prices ONLY the service the post names. The primary keyword is
@@ -46,7 +47,22 @@ const RODENT = /\b(?:rodents?|rats?|mice|mouse)\b/;
 const GERMAN_ROACH = /\bgerman (?:cock)?roach(?:es)?\b/;
 const MOSQUITO = /\bmosquito(?:e?s)?\b/;
 const LAWN = /\b(?:lawns?|turf|grass)\b/;
-const GENERAL_PEST = /\b(?:pest control|exterminat\w*)\b/;
+// General pest = "pest control" / exterminator wording, or a species the
+// pest-identification library files under General Pest Control (service_key
+// 'pest': ants, spiders, silverfish, earwigs, millipedes, centipedes, stink
+// bugs…) — by its aliases, its label, and the label's head noun ("Ghost Ants"
+// → "ants"). Roaches and wasps are in that library too but have their own
+// feed rows, and their rules run first.
+const GENERAL_PEST_SPECIES_TERMS = [...new Set(PEST_LIBRARY
+  .filter((entry) => entry.service_key === 'pest')
+  .flatMap((entry) => {
+    const label = String(entry.label || '').replace(/\(.*?\)/g, '').trim().toLowerCase();
+    return [...(entry.aliases || []), label, label.split(/\s+/).pop()];
+  })
+  .map((term) => String(term).toLowerCase().trim().replace(/s$/, ''))
+  .filter(Boolean))];
+const GENERAL_PEST = new RegExp(`\\b(?:pest control|exterminat\\w*|(?:${GENERAL_PEST_SPECIES_TERMS
+  .map((term) => term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})(?:e?s)?)\\b`);
 const ONE_TIME = /\b(?:one[- ]?time|single[- ](?:visit|treatment|service)|one[- ]off)\b/;
 const RECURRING = /\b(?:program|plans?|recurring|quarterly|monthly|bi-?monthly|seasonal|annual|yearly|subscriptions?|contracts?)\b/;
 
@@ -73,7 +89,10 @@ const GATED_RULES = Object.keys(PURCHASE_GATED_ROWS)
 
 const VARIANT_RULES = [
   ...GATED_RULES,
-  { match: [/\b(?:wdo|wood[- ]destroying)\b/], keys: ['wdo_inspection'] },
+  // The WDO row prices the FDACS inspection/report — only an inspection,
+  // report, letter or real-estate/closing guide gets it, never a
+  // "wood-destroying termite treatment" guide.
+  { match: [/\b(?:wdo|wood[- ]destroying)\b/, /\b(?:inspections?|reports?|letters?|real estate|closings?)\b/], keys: ['wdo_inspection'] },
   // A standalone termite inspection is not the real-estate WDO report.
   { match: [TERMITE, /\binspections?\b/], keys: [] },
   { match: [TERMITE, /\bfoam\b/, RECURRING], keys: ['recurring_foam'] },
@@ -112,7 +131,7 @@ const FAMILY_RULES = [
   { match: [TERMITE], keys: ['termite_bait_install', 'termite_bait_monitoring', 'termite_trenching'] },
   { match: [RODENT], keys: RODENT_FAMILY },
   { match: [GERMAN_ROACH], keys: ['german_roach_cleanout', 'german_roach_initial'] },
-  { match: [/\b(?:(?:cock)?roach(?:es)?|palmetto bugs?)\b/], keys: ['cockroach_treatment'] },
+  { match: [/\b(?:(?:cock)?roach(?:es)?|palmettos?(?: bugs?)?)\b/], keys: ['cockroach_treatment'] },
   { match: [/\bbed ?bugs?\b/], keys: ['bed_bug_treatment'] },
   { match: [/\bfleas?\b/], keys: ['flea_elimination'] },
   { match: [/\b(?:wasps?|hornets?|yellow ?jackets?)\b/], keys: ['wasp_hornet_removal'] },
@@ -130,9 +149,20 @@ const FAMILY_RULES = [
 
 const SERVICE_PRICE_KEYS = [...VARIANT_RULES, ...FAMILY_RULES];
 
+// Words that name something other than a Waves pest: the library's
+// not-a-pest species (lovebugs, ladybugs, lizards…) and the saw-palmetto
+// plant (the publisher's service-area inference scrubs it the same way) —
+// removed before matching, so "love bug" never reads as a general pest.
+const NOT_A_PEST = new RegExp(`\\b(?:saw palmettos?|${PEST_LIBRARY
+  .filter((entry) => entry.category === 'not_a_pest')
+  .flatMap((entry) => entry.aliases || [])
+  .map((term) => String(term).toLowerCase().trim().replace(/s$/, '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+  .filter(Boolean)
+  .join('|')})(?:e?s)?\\b`, 'g');
+
 function keysForText(value) {
-  const text = String(value || '').toLowerCase();
-  if (!text) return null;
+  const text = String(value || '').toLowerCase().replace(NOT_A_PEST, ' ');
+  if (!text.trim()) return null;
   return SERVICE_PRICE_KEYS.find(({ match }) => match.every((re) => re.test(text)))?.keys || null;
 }
 
@@ -141,13 +171,24 @@ function mappedKeys(frontmatter) {
   return keysForText(frontmatter.primary_keyword) || keysForText(frontmatter.title) || [];
 }
 
+// The feed's current keys, or null when the feed cannot be computed.
 function publishedPriceKeys() {
   try {
     return new Set((computePublicPricingRanges().services || []).map((row) => row.key));
   } catch (err) {
-    logger.warn(`[price-range] public pricing feed unavailable — cost guide ships without a price card: ${err.message}`);
-    return new Set();
+    logger.warn(`[price-range] public pricing feed unavailable: ${err.message}`);
+    return null;
   }
+}
+
+// The keys that may ship: published by the feed now, and not purchase-gated.
+function usableKeys(keys, known) {
+  const usable = (key) => known.has(key) && !PURCHASE_GATED_ROWS[key];
+  const dropped = keys.filter((key) => !usable(key));
+  if (dropped.length) {
+    logger.warn(`[price-range] dropped price_range keys the public pricing feed does not publish (or publishes only behind a purchase gate): ${dropped.join(', ')}`);
+  }
+  return keys.filter(usable);
 }
 
 // → the price_range list for a cost guide, or null (not a cost guide, no
@@ -157,25 +198,39 @@ function costGuidePriceRange(frontmatter = {}, { knownKeys } = {}) {
   const keys = mappedKeys(frontmatter);
   if (!keys.length) return null;
   const known = knownKeys || publishedPriceKeys();
-  const usable = (key) => known.has(key) && !PURCHASE_GATED_ROWS[key];
-  const valid = keys.filter(usable);
-  const dropped = keys.filter((key) => !usable(key));
-  if (dropped.length) {
-    logger.warn(`[price-range] dropped price_range keys the public pricing feed does not publish (or publishes only behind a purchase gate): ${dropped.join(', ')}`);
-  }
+  if (!known) return null; // feed down → no card
+  const valid = usableKeys(keys, known);
   return valid.length ? valid : null;
 }
 
 // The ONE place a publish lane sets the card, called by every lane that
 // writes a blog post (scheduled/admin publishAstro, autonomous
-// publishOrUpdatePage, refresh) once it has read the live post. A
-// price_range the live post already carries — owner-set, or an explicit []
-// clearing it — is kept verbatim; otherwise a cost guide gets the mapped
-// keys. Mutates and returns `frontmatter`.
-function applyCostGuidePriceRange(frontmatter, liveFrontmatter = null) {
+// publishOrUpdatePage, refresh, title/meta rewrite) once it has read the
+// live post. A price_range the live post already carries (owner-set) is
+// kept, minus any key the feed no longer publishes or now gates — a stale
+// key would fail the hub build or advertise an unavailable product. Nothing
+// is ever substituted: all keys stale → the field is omitted; an explicit []
+// stays []. Otherwise a cost guide gets the mapped keys. Mutates and returns
+// `frontmatter`. Throws (code BLOG_PRICE_FEED_UNAVAILABLE, retried like any
+// transient publish error) when a retained list cannot be checked because
+// the feed is down: neither shipping unchecked keys nor deleting the
+// owner's list is acceptable.
+function applyCostGuidePriceRange(frontmatter, liveFrontmatter = null, { knownKeys } = {}) {
   const live = liveFrontmatter?.price_range;
   if (live != null) {
-    frontmatter.price_range = live;
+    if (!Array.isArray(live) || live.length === 0) {
+      frontmatter.price_range = live; // [] stays []; a malformed value fails schema validation
+      return frontmatter;
+    }
+    const known = knownKeys || publishedPriceKeys();
+    if (!known) {
+      const err = new Error('public pricing feed unavailable — cannot verify the post\'s existing price_range keys');
+      err.code = 'BLOG_PRICE_FEED_UNAVAILABLE';
+      throw err;
+    }
+    const kept = usableKeys(live, known);
+    if (kept.length) frontmatter.price_range = kept;
+    else delete frontmatter.price_range;
     return frontmatter;
   }
   delete frontmatter.price_range;
