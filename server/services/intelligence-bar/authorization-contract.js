@@ -59,6 +59,7 @@ const IRREVERSIBLE_TOOL_NAMES = new Set([
   'submit_review_reply',
   'request_instant_payout',
   'request_standard_payout',
+  'cancel_pending_payout',
   'run_seo_pipeline',
 ]);
 
@@ -102,6 +103,7 @@ const BILLING_TOOL_NAMES = new Set([
   'save_customer_estimate',
   'request_instant_payout',
   'request_standard_payout',
+  'cancel_pending_payout',
   'approve_price',
   'create_pending_estimate',
   'create_agent_estimate_draft',
@@ -147,6 +149,7 @@ const ACTION_LABELS = {
   update_restock_request: 'Update a restock request',
   request_instant_payout: 'Request an INSTANT payout',
   request_standard_payout: 'Request a standard payout',
+  cancel_pending_payout: 'Cancel a pending payout',
   run_seo_pipeline: 'Run the SEO pipeline',
   approve_seo_action: 'Approve an SEO action',
 };
@@ -606,7 +609,7 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   if (toolName === 'repair_closeout' && Array.isArray(preview?.steps)) {
     push('customer', `Visit: ${preview.visit || preview.service_id} — ${preview.customer_name || preview.customer_id || 'customer unresolved'}`);
     for (const st of preview.steps) {
-      push(/email/i.test(st.step) ? 'comms' : 'operational', String(st.effect || st.step));
+      push(/email|receipt/i.test(st.step) ? 'comms' : 'operational', String(st.effect || st.step));
     }
     if (Array.isArray(preview.manual) && preview.manual.length) {
       push('operational', `Not touched (${preview.manual.length}): ${preview.manual.map((m) => m.fact).join(', ')}`);

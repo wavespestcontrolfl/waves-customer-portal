@@ -45,8 +45,17 @@ const TEMPLATE_KEY = 'previsit_balance_reminder';
 const EMAIL_TEMPLATE_KEY = 'billing.previsit_balance';
 const BILLING_PORTAL_URL = 'https://portal.wavespestcontrol.com/?tab=billing';
 // Days before the visit the reminder goes out — far enough to pay, close
-// enough to matter.
-const LEAD_DAYS = 3;
+// enough to matter. Owner decision 6 (2026-09-27, dunning unification): the
+// balance note moves to 5 days before the visit — ahead of the 72-hour
+// appointment reminder — under GATE_PREVISIT_BALANCE_5DAY (strict 'true',
+// read at call time, unset = kill). Gate off keeps the original 3-day lead
+// byte-identical. Widening the window on a gated-on run also claims 4-5-day
+// -out visits that were not yet claimed, but the one-per-appointment claim
+// on scheduled_services.balance_reminder_sent_at (below) guarantees no
+// visit is ever sent twice.
+function leadDays() {
+  return process.env.GATE_PREVISIT_BALANCE_5DAY === 'true' ? 5 : 3;
+}
 // Dues are "late" this many days after the billing day, not the moment the
 // cron runs — the 2-day retry ladder gets a chance first.
 const DUES_GRACE_DAYS = 3;
@@ -705,13 +714,13 @@ async function runSweepHeld(now) {
   const iso = (dt) => dt.toISOString().slice(0, 10);
   // WINDOW, not a single day: the claim releases on a failed send, and a
   // single exact-date target would never re-see that visit on later daily
-  // runs (Codex r3). Tomorrow → today+LEAD_DAYS keeps one send per
-  // appointment (the claim dedupes) while giving failures LEAD_DAYS-1
+  // runs (Codex r3). Tomorrow → today+leadDays() keeps one send per
+  // appointment (the claim dedupes) while giving failures leadDays()-1
   // retry days.
   const windowStart = new Date(`${todayEt}T12:00:00Z`);
   windowStart.setUTCDate(windowStart.getUTCDate() + 1);
   const target = new Date(`${todayEt}T12:00:00Z`);
-  target.setUTCDate(target.getUTCDate() + LEAD_DAYS);
+  target.setUTCDate(target.getUTCDate() + leadDays());
   const windowStartDate = iso(windowStart);
   const targetDate = iso(target);
 
@@ -762,7 +771,7 @@ module.exports = {
   overdueRecurringInvoices,
   TEMPLATE_KEY,
   EMAIL_TEMPLATE_KEY,
-  LEAD_DAYS,
+  leadDays,
   DUES_GRACE_DAYS,
   OVERDUE_AFTER_DAYS,
   _test: { previsitQuoteAuthority },

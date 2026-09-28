@@ -173,6 +173,20 @@ describe('astro-publisher: spoke domain + canonical routing', () => {
     expect(_internals.resolveSpokeTarget({ target_sites: ['sarasotaflpestcontrol.com', 'veniceflpestcontrol.com'] })).toBeNull();
     // falls back to the persisted operator_brief copy
     expect(_internals.resolveSpokeTarget({ voice_constraints: { operator_brief: { target_sites: ['veniceflpestcontrol.com'] } } })).toBe('veniceflpestcontrol.com');
+    // A related-post selection marker is persisted in voice_constraints and
+    // takes precedence over stale operator metadata after a brief reload.
+    expect(_internals.resolveSpokeTarget({
+      voice_constraints: {
+        related_posts_target_sites: ['wavespestcontrol.com'],
+        operator_brief: { target_sites: ['veniceflpestcontrol.com'] },
+      },
+    })).toBeNull();
+    expect(_internals.resolveSpokeTarget({
+      voice_constraints: {
+        related_posts_target_sites: ['sarasotaflpestcontrol.com'],
+        operator_brief: { target_sites: ['veniceflpestcontrol.com'] },
+      },
+    })).toBe('sarasotaflpestcontrol.com');
   });
 
   test('kill switch: a queued spoke target does NOT fan out when the network is disabled (publishes hub-only)', () => {
@@ -469,7 +483,13 @@ describe('content-brief-builder: spoke overlay precedence + target_sites threadi
       city: null,
     };
     const decision = { action_type: 'new_supporting_blog', page_type: 'supporting-blog', final_score: 80, score_breakdown: {}, human_review_required: false };
-    const brief = builder._composeBrief({ opportunity, signals: { serp_profile: null, customer_signal: null, conversion_feedback: null }, decision, existingBriefVersions: 0 });
+    const brief = builder._composeBrief({
+      opportunity,
+      signals: { serp_profile: null, customer_signal: null, conversion_feedback: null },
+      decision,
+      existingBriefVersions: 0,
+      publishTargetSites: ['sarasotaflpestcontrol.com'],
+    });
 
     expect(brief.target_sites).toEqual(['sarasotaflpestcontrol.com']);
     expect(brief.voice_constraints.operator_brief.spoke_seed).toBe(true);

@@ -624,23 +624,14 @@ function routedReceiptRefusal(block, { atHandoff = false } = {}) {
   return { ok: false, error: String(block.reason || block.code || 'Receipt email refused'), code: 'receipt_handoff_aborted' };
 }
 
-async function sendReceiptEmail(invoiceId, options = {}) {
-  let memo = typeof options.memo === 'string' ? options.memo.trim().slice(0, 400) : '';
-  // Optional dedupe key. Auto-send paths (Stripe webhook) pass one so a
-  // retried delivery doesn't email the customer twice; manual operator
-  // resends from /admin/invoices intentionally omit it so the operator
-  // can always force a fresh send.
-  const idempotencyKey = typeof options.idempotencyKey === 'string' && options.idempotencyKey.trim()
-    ? options.idempotencyKey.trim()
-    : null;
-  const invoice = await db('invoices').where({ id: invoiceId }).first();
-  if (!invoice) return { ok: false, error: 'Invoice not found' };
-  if (invoice.status !== 'paid') return { ok: false, error: 'Invoice not paid' };
-
-  // An open inspection-credit promise rides the receipt (dark behind the
-  // gate). An explicit caller memo always wins — never silently replaced.
-  if (!memo) memo = await inspectionCreditMemoForInvoice(invoice);
-
+// The one answer to "who gets this paid receipt by email" — shared by
+// sendReceiptEmail (the receipt worker and the operator resends) and the
+// Intelligence Bar closeout repair's confirmation card, so the card can never
+// name a different inbox than the send reaches. Attaches the payer to
+// `invoice` (callers read invoice.payer afterwards). Returns
+// { ok: true, recipient, customer, authorityInput } or the same refusal sendReceiptEmail
+// answers with ({ ok: false, error, code? }).
+async function resolveReceiptEmailRecipient(invoice, { billingDeliveryCategory = null } = {}) {
   const customer = await db('customers').where({ id: invoice.customer_id })
     .select('id', 'first_name', 'last_name', 'email', 'phone', 'address_line1', 'city', 'state', 'zip', 'property_type', 'company_name')
     .first();
@@ -649,9 +640,9 @@ async function sendReceiptEmail(invoiceId, options = {}) {
   // portal-wide switch come from the shared billing email authority (owner
   // ruling 2026-09-27), read here and again under its locks at the provider
   // handoff. A payer-billed receipt goes to the payer's AP inbox instead.
-  const authorityInput = options.billingDeliveryCategory && !invoice.payer_id ? {
+  const authorityInput = billingDeliveryCategory && !invoice.payer_id ? {
     customerId: invoice.customer_id, invoiceId: invoice.id, channel: 'email',
-    metadata: { billingDeliveryCategory: options.billingDeliveryCategory },
+    metadata: { billingDeliveryCategory: billingDeliveryCategory },
   } : null;
   let routedRecipient = null;
   if (authorityInput) {
@@ -682,6 +673,29 @@ async function sendReceiptEmail(invoiceId, options = {}) {
     ? (invoice.payer ? PayerService.payerRecipient(invoice.payer) : null)
     : routedRecipient || getReceiptEmailRecipients(customer, prefs || {})[0];
   if (!recipient?.email) return { ok: false, error: 'No receipt recipient email' };
+  return { ok: true, recipient, customer, authorityInput };
+}
+
+async function sendReceiptEmail(invoiceId, options = {}) {
+  let memo = typeof options.memo === 'string' ? options.memo.trim().slice(0, 400) : '';
+  // Optional dedupe key. Auto-send paths (Stripe webhook) pass one so a
+  // retried delivery doesn't email the customer twice; manual operator
+  // resends from /admin/invoices intentionally omit it so the operator
+  // can always force a fresh send.
+  const idempotencyKey = typeof options.idempotencyKey === 'string' && options.idempotencyKey.trim()
+    ? options.idempotencyKey.trim()
+    : null;
+  const invoice = await db('invoices').where({ id: invoiceId }).first();
+  if (!invoice) return { ok: false, error: 'Invoice not found' };
+  if (invoice.status !== 'paid') return { ok: false, error: 'Invoice not paid' };
+
+  // An open inspection-credit promise rides the receipt (dark behind the
+  // gate). An explicit caller memo always wins — never silently replaced.
+  if (!memo) memo = await inspectionCreditMemoForInvoice(invoice);
+
+  const resolved = await resolveReceiptEmailRecipient(invoice, { billingDeliveryCategory: options.billingDeliveryCategory || null });
+  if (!resolved.ok) return resolved;
+  const { recipient, customer, authorityInput } = resolved;
 
   const payment = await db('payments')
     .where({ customer_id: invoice.customer_id })
@@ -861,6 +875,7 @@ async function sendReceiptEmail(invoiceId, options = {}) {
 module.exports = {
   sendInvoiceEmail,
   sendReceiptEmail,
+  resolveReceiptEmailRecipient,
   inspectionCreditMemoForInvoice,
   _private: {
     invoiceRecipientFor,
