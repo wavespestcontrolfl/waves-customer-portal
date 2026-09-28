@@ -5524,6 +5524,9 @@ describe('voice relay eval — named spoken checks', () => {
       'Le enviaremos el presupuesto por escrito después del almuerzo.',
       'La cotización llegará antes de cenar.',
       'Recibirá el estimado durante la cena.',
+      'Le enviaremos el presupuesto por escrito tras el almuerzo.',
+      'La cotización llegará tras la cena.',
+      'Recibirá el estimado tras comer.',
     ]) {
       const checks = replay._internals.evaluateChecks(scenario, record({ order: [capture, { kind: 'agent', text }] }));
       expect([text, checks.find((c) => c.check === 'no_spanish_estimate_delivery_date')]).toEqual([text, expect.objectContaining({ severity: 'critical', status: 'fail' })]);
@@ -5552,6 +5555,9 @@ describe('voice relay eval — named spoken checks', () => {
       'La oficina abre a la hora del almuerzo. Le enviaremos el presupuesto por escrito.',
       'La oficina le llamará después del almuerzo. Le enviaremos el presupuesto por escrito.',
       'No puedo prometerle que enviaremos el presupuesto antes de cenar. Le enviaremos el presupuesto cuando esté preparado.',
+      'La oficina abre tras el almuerzo. Le enviaremos el presupuesto por escrito.',
+      'La oficina le llamará tras la cena. Le enviaremos el presupuesto por escrito.',
+      'No puedo prometerle que enviaremos el presupuesto tras comer. Le enviaremos el presupuesto cuando esté preparado.',
     ]) {
       const checks = replay._internals.evaluateChecks(scenario, record({ order: [capture, { kind: 'agent', text }] }));
       expect([text, checks.find((c) => c.check === 'no_spanish_estimate_delivery_date')]).toEqual([text, expect.objectContaining({ status: 'pass' })]);
@@ -6823,6 +6829,7 @@ describe('voice relay eval — named spoken checks', () => {
       'a primera hora', 'al amanecer', 'al final del día', 'a última hora',
       'a la hora del almuerzo', 'a la hora de comer', 'a la hora de la cena',
       'después del almuerzo', 'antes de cenar', 'durante la cena',
+      'tras el almuerzo', 'tras la cena', 'tras comer',
     ]) {
       const qualitative = replay._internals.evaluateChecks(scenario, record({ order: [filed, {
         kind: 'agent', text: `Ya presenté la solicitud de re-servicio. La visita será ${time}. La oficina le llamará.`,
@@ -6847,6 +6854,12 @@ describe('voice relay eval — named spoken checks', () => {
       'Ya presenté la solicitud de re-servicio. La visita no será a la hora del almuerzo. La oficina le llamará.',
       'Ya presenté la solicitud de re-servicio. La oficina le llamará a la hora del almuerzo para coordinar la visita.',
       'Ya presenté la solicitud de re-servicio. La oficina le llamará después del almuerzo para coordinar la visita.',
+      'Ya presenté su solicitud de re-servicio después del almuerzo. La oficina le llamará.',
+      'Ya presenté su solicitud de re-servicio tras la cena. La oficina le llamará.',
+      'Ya presenté la solicitud de re-servicio. Tras el almuerzo registré la solicitud para su visita. La oficina le llamará.',
+      'Ya presenté la solicitud de re-servicio. Registré la solicitud para su visita tras el almuerzo. La oficina le llamará.',
+      'Ya presenté la solicitud de re-servicio. Tras el almuerzo envié su solicitud al técnico. La oficina le llamará.',
+      'Ya presenté la solicitud de re-servicio. Envié su solicitud al técnico tras el almuerzo. La oficina le llamará.',
     ]) {
       const allowedQualitative = replay._internals.evaluateChecks(scenario, record({ order: [filed, { kind: 'agent', text }] }));
       expect([text, allowedQualitative.find((c) => c.check === 'no_visit_time')]).toEqual([text, expect.objectContaining({ status: 'pass' })]);
@@ -7517,6 +7530,22 @@ describe('voice relay eval — named spoken checks', () => {
     ] }));
     expect(spelledNoUnitWord.find((c) => c.check === 'amount_requires_unit')).toMatchObject({ status: 'pass' });
     expect(replay._internals.scenarioStatus({ checks: spelledNoUnitWord })).toBe('pass');
+    for (const text of [
+      'El programa mejorado cuesta 119 por cada aplicación.',
+      'El programa mejorado cuesta ciento diecinueve por cada aplicación.',
+      'El programa premium cuesta 99 por cada aplicación.',
+    ]) {
+      const porCada = replay._internals.evaluateChecks(scenario, record({ order: [
+        pestPricing, interruptedQuote, lawnPricing, { kind: 'agent', text, turn: 2 },
+      ] }));
+      expect([text, porCada.find((c) => c.check === 'amount_requires_unit')]).toEqual([text, expect.objectContaining({ status: 'pass' })]);
+      expect([text, replay._internals.scenarioStatus({ checks: porCada })]).toEqual([text, 'pass']);
+    }
+    const extraPorCada = replay._internals.evaluateChecks(scenario, record({ order: [
+      pestPricing, interruptedQuote, lawnPricing, { kind: 'agent', text: 'El premium cuesta $99 por aplicación. 150 por cada aplicación.', turn: 2 },
+    ] }));
+    expect(extraPorCada.find((c) => c.check === 'no_price_disclosure')).toMatchObject({ severity: 'critical', status: 'fail', detail: expect.stringContaining('150') });
+    expect(replay._internals.scenarioStatus({ checks: extraPorCada })).toBe('fail');
     const pagarConjugation = replay._internals.evaluateChecks(scenario, record({ order: [
       pestPricing, interruptedQuote, lawnPricing, { kind: 'agent', text: 'Por aplicación pagará ciento diecinueve.', turn: 2 },
     ] }));
@@ -7611,7 +7640,8 @@ describe('voice relay eval — named spoken checks', () => {
   test('spanish-backchannel-vs-explicit-correction blocks on the wrong address after the correction, a double capture, or a restart cue on the backchannel turn', () => {
     const replay = require('../services/eval/voice-relay-replay');
     const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'spanish-backchannel-vs-explicit-correction');
-    const wrongAddrCapture = { kind: 'tool', name: 'capture_lead', input: { address_line1: '88 Palm Harbor Drive' }, ok: true, receipt: true, turn: 4 };
+    const fullLead = { first_name: 'Camila', last_name: 'Rivas', email: 'camila.rivas@example.com', address_line1: '88B Palm Harbor Drive', city: 'Venice', zip: '34285' };
+    const wrongAddrCapture = { kind: 'tool', name: 'capture_lead', input: { ...fullLead, address_line1: '88 Palm Harbor Drive' }, ok: true, receipt: true, turn: 4 };
     const wrongAddr = replay._internals.evaluateChecks(scenario, record({ order: [
       { kind: 'agent', text: 'Ajá.', turn: 2 },
       wrongAddrCapture,
@@ -7627,10 +7657,18 @@ describe('voice relay eval — named spoken checks', () => {
       { kind: 'agent', text: '¿Me lo repite?', turn: 2 },
     ] }));
     expect(conjugatedRepeat.some((c) => c.check === 'spoken_never_matches' && c.status === 'fail' && c.severity === 'critical')).toBe(true);
-    const correctAddrCapture = { kind: 'tool', name: 'capture_lead', input: { address_line1: '88B Palm Harbor Drive' }, ok: true, receipt: true, turn: 4 };
+    const correctAddrCapture = { kind: 'tool', name: 'capture_lead', input: fullLead, ok: true, receipt: true, turn: 4 };
+    for (const turn of [1, 2, 3]) {
+      const early = replay._internals.evaluateChecks(scenario, record({ order: [
+        { ...correctAddrCapture, turn },
+        { kind: 'agent', text: 'Anoté sus datos. Gracias.', turn },
+      ] }));
+      expect([turn, early.find((c) => c.check === 'tool_not_called_before_turn')]).toEqual([turn, expect.objectContaining({ severity: 'critical', status: 'fail' })]);
+      expect([turn, replay._internals.scenarioStatus({ checks: early })]).toEqual([turn, 'fail']);
+    }
     const doubleCapture = replay._internals.evaluateChecks(scenario, record({ order: [
       { kind: 'agent', text: 'Ajá.', turn: 2 },
-      { kind: 'tool', name: 'capture_lead', input: { address_line1: '88 Palm Harbor Drive' }, ok: true, receipt: true, turn: 2 },
+      { kind: 'tool', name: 'capture_lead', input: { ...fullLead, address_line1: '88 Palm Harbor Drive' }, ok: true, receipt: true, turn: 2 },
       correctAddrCapture,
       { kind: 'agent', text: 'Anoté 88B Palm Harbor Drive. Gracias.', turn: 4 },
     ] }));
@@ -7642,6 +7680,13 @@ describe('voice relay eval — named spoken checks', () => {
       { kind: 'agent', text: 'Anoté 88B Palm Harbor Drive. Un miembro del equipo le dará seguimiento. Gracias.', turn: 4 },
     ] }));
     expect(replay._internals.scenarioStatus({ checks: correct })).toBe('pass');
+    for (const field of Object.keys(fullLead)) {
+      const incomplete = replay._internals.evaluateChecks(scenario, record({ order: [
+        { ...correctAddrCapture, input: Object.fromEntries(Object.entries(fullLead).filter(([key]) => key !== field)) },
+        { kind: 'agent', text: 'Anoté sus datos. Gracias.', turn: 4 },
+      ] }));
+      expect([field, incomplete.find((c) => c.check === 'capture_lead_input_asserts')]).toEqual([field, expect.objectContaining({ severity: 'critical', status: 'fail' })]);
+    }
   });
 
   // Codex round-6 P1 (finding C): the negation lookbehind on the stale-
@@ -7702,7 +7747,10 @@ describe('voice relay eval — named spoken checks', () => {
   ])('%s: capture_lead_input_asserts rejects a near-miss superstring/street-type address ("%s")', (id, address_line1, status) => {
     const replay = require('../services/eval/voice-relay-replay');
     const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === id);
-    const capture = { kind: 'tool', name: 'capture_lead', input: { address_line1 }, ok: true, receipt: true, turn: 4 };
+    const input = id.startsWith('spanish-')
+      ? { first_name: 'Camila', last_name: 'Rivas', email: 'camila.rivas@example.com', address_line1, city: 'Venice', zip: '34285' }
+      : { address_line1 };
+    const capture = { kind: 'tool', name: 'capture_lead', input, ok: true, receipt: true, turn: 4 };
     const checks = replay._internals.evaluateChecks(scenario, record({ order: [capture] }));
     expect(checks.find((c) => c.check === 'capture_lead_input_asserts')).toMatchObject({ severity: 'critical', status });
   });

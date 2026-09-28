@@ -3193,7 +3193,8 @@
    "spec": {
     "fixture_facts": [
      "Turn 2 is a bare backchannel, not new information or a correction",
-     "Turn 3 interrupts to correct the house number to 88B"
+     "Turn 3 interrupts to correct the house number to 88B",
+     "Turn 4 supplies Camila's email and completes the contact record"
     ],
     "required_facts": [
      "The address on file is 88B Palm Harbor Drive"
@@ -3203,7 +3204,7 @@
      "Treating the backchannel as a request to repeat or restart",
      "Any English sentence to the caller"
     ],
-    "required_action": "capture_lead with address_line1 88B Palm Harbor Drive",
+    "required_action": "capture_lead on turn 4 with Camila Rivas's name, email, 88B Palm Harbor Drive, Venice and ZIP 34285",
     "acceptable_actions": [
      "capture_lead"
     ],
@@ -3226,7 +3227,12 @@
     {
      "check": "capture_lead_input_asserts",
      "value": {
-      "address_line1": ["^\\s*88b\\s+palm\\s+harbor\\s+dr(?:ive)?\\.?\\s*$"]
+      "first_name": ["^\\s*camila\\s*$"],
+      "last_name": ["^\\s*rivas\\s*$"],
+      "email": ["^\\s*camila\\.rivas@example\\.com\\s*$"],
+      "address_line1": ["^\\s*88b\\s+palm\\s+harbor\\s+dr(?:ive)?\\.?\\s*$"],
+      "city": ["^\\s*venice\\s*$"],
+      "zip": ["^\\s*34285\\s*$"]
      },
      "severity": "critical"
     },
@@ -3275,7 +3281,7 @@
      "check": "tool_not_called_before_turn",
      "value": {
       "tool": "capture_lead",
-      "turn": 3
+      "turn": 4
      },
      "severity": "critical"
     }

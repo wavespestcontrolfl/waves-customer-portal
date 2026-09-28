@@ -590,6 +590,7 @@ const COUNT_NOUN_AHEAD = '(?!\\s*(?:%|por\\s*ciento|percent|aplicaciones|applica
 // amount_requires_unit so disclosure and unit enforcement see the same construction.
 const PLAN_NOUN = '(?:programa|plan|premium|mejorado|b[aá]sico|servicio|tratamiento|precio|opci[oó]n|paquete|costo|tarifa|program|enhanced|basic|service|treatment|price|option|package|cost|rate)';
 const PLAN_COPULA = `\\b${PLAN_NOUN}\\b[^.!?;,\\d$]{0,30}?\\b(?:es|son|ser[íi]an?|queda\\s+en|est[áa]\\s+en|is|are|would\\s+be|will\\s+be)\\s+(?:de\\s+|about\\s+|around\\s+)?`;
+const PER_UNIT_CONNECTOR = '(?:per|an?|each|every|for each|for every|por(?:\\s+cada)?|cada)';
 const AMOUNT_RES = Object.freeze([
   new RegExp(`\\$\\s?(${DIGITS})`, 'gi'),
   new RegExp(`(?<![\\d.,$])\\b(${DIGITS})\\s*(?:dollars?|bucks|d[oó]lares?|pesos?)\\b`, 'gi'),
@@ -597,7 +598,7 @@ const AMOUNT_RES = Object.freeze([
   new RegExp(`\\b(${NUMBER_RUN_ES})(?:d[oó]lares?|pesos?)\\b`, 'gi'),
   // Bare billing amounts are prices except annual application counts. The
   // unit capture applies the same count rule as amount_requires_unit below.
-  new RegExp(`(?<![\\d.,$-])\\b(${DIGITS}|${NUMBER_RUN_EN_STRICT}|${NUMBER_RUN_ES})\\s*(?:per|an?|each|every|for each|for every|por|cada|al|a la)\\s+(application|treatment|service|visit|month|quarter|year|aplicaci[oó]n|tratamiento|servicio|visita|mes|trimestre|a[ñn]o)s?\\b`, 'gi'),
+  new RegExp(`(?<![\\d.,$-])\\b(${DIGITS}|${NUMBER_RUN_EN_STRICT}|${NUMBER_RUN_ES})\\s*(?:${PER_UNIT_CONNECTOR}|al|a la)\\s+(application|treatment|service|visit|month|quarter|year|aplicaci[oó]n|tratamiento|servicio|visita|mes|trimestre|a[ñn]o)s?\\b`, 'gi'),
   // … but the day of a date ("the invoice from August 14") and an identifier
   // right after the noun ("invoice 2026-0812 is $129", "invoice number 4471",
   // "account 88213") are not amounts.
@@ -671,7 +672,7 @@ const BARE_YEAR_NUMBER = `(?:${PRICE_NUMBER}|\\b${NUMBER_RUN_ES})`;
 // a quantity, not a price).
 // Codex r11 on #4946: a copular plan price ("el premium es 150", "premium
 // is 150") — a plan/price noun, a copula, then the figure — is a price too.
-const priceRe = (unit) => new RegExp(`\\$\\s?(${PRICE_NUMBER})|(${PRICE_NUMBER})\\s*(?:dollars?|bucks|d[oó]lares?)\\b|(${PRICE_NUMBER})\\s*(?:per|an?|each|every|for each|for every|por|cada)\\s+${unit}s?\\b|(${BARE_BILLED_NUMBER})\\s*(?:per|each|every|por|cada)\\s+${SERVICE_BILLING_UNIT}(?![a-záéíóúñ])|(${BARE_BILLED_NUMBER})\\s*(?:per|each|every|por|cada|al)\\s+${PERIOD_BILLING_UNIT}(?![a-záéíóúñ])|(${BARE_YEAR_NUMBER})\\s*(?:per|each|every|por|cada|al)\\s+${YEAR_BILLING_UNIT}(?![a-záéíóúñ])|\\b${PRICE_VERB}\\s+(?:de\\s+|about\\s+|around\\s+)?(${BARE_BILLED_NUMBER})${COUNT_NOUN_AHEAD}|${PLAN_COPULA}(${BARE_BILLED_NUMBER})${COUNT_NOUN_AHEAD}`, 'gi');
+const priceRe = (unit) => new RegExp(`\\$\\s?(${PRICE_NUMBER})|(${PRICE_NUMBER})\\s*(?:dollars?|bucks|d[oó]lares?)\\b|(${PRICE_NUMBER})\\s*${PER_UNIT_CONNECTOR}\\s+${unit}s?\\b|(${BARE_BILLED_NUMBER})\\s*(?:per|each|every|por(?:\\s+cada)?|cada)\\s+${SERVICE_BILLING_UNIT}(?![a-záéíóúñ])|(${BARE_BILLED_NUMBER})\\s*(?:per|each|every|por(?:\\s+cada)?|cada|al)\\s+${PERIOD_BILLING_UNIT}(?![a-záéíóúñ])|(${BARE_YEAR_NUMBER})\\s*(?:per|each|every|por(?:\\s+cada)?|cada|al)\\s+${YEAR_BILLING_UNIT}(?![a-záéíóúñ])|\\b${PRICE_VERB}\\s+(?:de\\s+|about\\s+|around\\s+)?(${BARE_BILLED_NUMBER})${COUNT_NOUN_AHEAD}|${PLAN_COPULA}(${BARE_BILLED_NUMBER})${COUNT_NOUN_AHEAD}|\\b(${NUMBER_RUN_ES})\\s*${PER_UNIT_CONNECTOR}\\s+${unit}s?\\b`, 'gi');
 // Customer-facing price copy reads "per application"/"por aplicación" —
 // AGENTS.md; "per visit"/"por visita"/"cada visita" is banned outright,
 // negated or not: "not per visit" is still the prohibited phrase in the
@@ -706,8 +707,10 @@ const BANNED_TOTAL_RE = new RegExp(`(?:${PRICED_TOTAL_LEAD}|${BARE_TOTAL_NUMBER}
 // this runs, a spelled Spanish number is normally already digits (the
 // shared normalizer), but a compound this can't parse is left as words, and
 // "cuarenta Y nueve" must still read as one number, not two clauses.
-const PRICE_CLAUSE_SPLIT_RE = /,|\b(?:or|but|while|whereas|o|pero|mientras)\b|(?<!\b(?:hundred|thousand|diez|veinte|treinta|cuarenta|cincuenta|sesenta|setenta|ochenta|noventa|cien|ciento)\s)\b(?:and|y)\b/i;
-const unitRe = (unit) => new RegExp(`\\b(?:per|an?|each|every|for each|for every|por|cada)\\s+${unit}s?\\b`, 'i');
+const PRICE_CLAUSE_SPLIT_RE = /,|\b(?:or|but|while|whereas|pero|mientras)\b|(?<![a-záéíóúñü])o(?![a-záéíóúñü])|(?<!\b(?:hundred|thousand|diez|veinte|treinta|cuarenta|cincuenta|sesenta|setenta|ochenta|noventa|cien|ciento)\s)(?:\band\b|(?<![a-záéíóúñü])y(?![a-záéíóúñü]))/i;
+const BARE_COORDINATED_PRICE_RE = new RegExp(`${BARE_BILLED_NUMBER}\\b${COUNT_NOUN_AHEAD}`, 'gi');
+const COORDINATED_YEAR_COUNT_RE = new RegExp(`${BARE_YEAR_TOTAL_NUMBER}${YEAR_TOTAL_TAIL}`, 'i');
+const unitRe = (unit) => new RegExp(`\\b${PER_UNIT_CONNECTOR}\\s+${unit}s?\\b`, 'i');
 // The harness marks the words a caller interrupted as `<heard> [interrupted]`
 // (voice-relay-replay.js). A figure at that tail, followed by nothing or only
 // the start of a unit ("per", "por", "cada"), had its unit cut off.
@@ -746,12 +749,19 @@ function amount_requires_unit(value, record, { spoken }) {
       || !isBareAnnualCount(parseBillingAmount(m.groups.bareYear)));
     if (total) return ['fail', `plan total "${total[0]}" spoken: "${clip(text, 160)}"`];
     for (const sentence of text.split(SENTENCE_SPLIT_RE)) {
+      let priorPrice = false;
       for (const clause of sentence.split(PRICE_CLAUSE_SPLIT_RE)) {
         price.lastIndex = 0;
-        const amounts = [...clause.matchAll(price)]
+        let amounts = [...clause.matchAll(price)]
           .filter((m) => !m[6] || !isBareAnnualCount(parseBillingAmount(m[6])))
-          .map((m) => parseBillingAmount(m[1] || m[2] || m[3] || m[4] || m[5] || m[6] || m[7] || m[8]));
+          .map((m) => parseBillingAmount(m[1] || m[2] || m[3] || m[4] || m[5] || m[6] || m[7] || m[8] || m[9]));
+        if (!amounts.length && priorPrice) {
+          amounts = [...clause.matchAll(BARE_COORDINATED_PRICE_RE)]
+            .map((m) => parseBillingAmount(m[0]))
+            .filter((amount) => !isBareAnnualCount(amount) || !COORDINATED_YEAR_COUNT_RE.test(clause));
+        }
         if (!amounts.length) continue;
+        priorPrice = true;
         if (!unit.test(clause)) {
           // The caller cut Sandy off right after the figure, before its unit
           // could be spoken ("runs $129 per [interrupted]"): words she never
@@ -833,7 +843,7 @@ const meridiemOf = (s) => { const t = String(s || '').toLowerCase(); return /^a(
 // then a SECOND hour. A lone Spanish number elsewhere (a count, a price, a
 // house number) never sits in that exact shape, so it never collides.
 const RANGE_HOUR = `(?:${HOUR}|${HOUR_WORDS_ES})`;
-const SPANISH_QUALITATIVE_VISIT_TIME_RE = /\b(?:(?:(?:a|para)\s+la\s+hora|antes|despu[eé]s)\s+(?:del\s+(?:desayuno|almuerzo)|de\s+la\s+(?:comida|cena)|de\s+(?:desayunar|almorzar|comer|cenar))|durante\s+(?:el\s+(?:desayuno|almuerzo)|la\s+(?:comida|cena))|a\s+(?:primera|[uú]ltima)\s+hora(?:\s+(?:de\s+la\s+(?:mañana|tarde|noche)|del\s+d[ií]a))?|a\s+media\s+(?:mañana|tarde)|al\s+(?:amanecer|anochecer|(?:principio|comienzo|inicio|final|cierre)\s+del\s+d[ií]a))\b/i;
+const SPANISH_QUALITATIVE_VISIT_TIME_RE = /\b(?:(?:(?:a|para)\s+la\s+hora|antes|despu[eé]s)\s+(?:del\s+(?:desayuno|almuerzo)|de\s+la\s+(?:comida|cena)|de\s+(?:desayunar|almorzar|comer|cenar))|tras\s+(?:el\s+(?:desayuno|almuerzo)|la\s+(?:comida|cena)|(?:desayunar|almorzar|comer|cenar))|durante\s+(?:el\s+(?:desayuno|almuerzo)|la\s+(?:comida|cena))|a\s+(?:primera|[uú]ltima)\s+hora(?:\s+(?:de\s+la\s+(?:mañana|tarde|noche)|del\s+d[ií]a))?|a\s+media\s+(?:mañana|tarde)|al\s+(?:amanecer|anochecer|(?:principio|comienzo|inicio|final|cierre)\s+del\s+d[ií]a))\b/i;
 
 // A time or date wherever it appears: a clock time, a calendar date, a
 // weekday with a part of day, a window between two hours, or an hour that
@@ -930,6 +940,9 @@ const NEW_OR_CHANGED_VISIT_RE = /\b(?:(?:new|another|replacement|rescheduled|reb
 
 const CLAUSE_SPLIT_RE = /,|\b(?:and|but|so|then|while|y|pero|aunque)\b/i;
 const SPANISH_VISIT_PURPOSE_RE = /\bpara\s+[a-záéíóúñü]+(?:ar|er|ir)(?:le|les|nos|se)?\s+(?:(?!que\b)[a-záéíóúñü]+\s+){0,3}(?:(?:la|el|su)\s+)?(?:visita|cita|servicio|tratamiento)\b/gi;
+const SPANISH_QUALITATIVE_VISIT_SUBJECT = '(?:visita|cita|servicio|tratamiento|t[eé]cnico)';
+const SPANISH_QUALITATIVE_VISIT_PREDICATE = '(?:es|ser[aá]|ser[ií]a|est[aá]|estar[aá]|estar[ií]a|queda|quedar[aá]|ocurre|ocurrir[aá]|tiene\\s+lugar|tendr[aá]\\s+lugar|llega|llegar[aá]|llegar[ií]a|viene|vendr[aá]|vendr[ií]a|comienza|comenzar[aá]|empieza|empezar[aá]|program[a-záéíóúñü]*|agend[a-záéíóúñü]*|reserv[a-záéíóúñü]*)';
+const SPANISH_QUALITATIVE_VISIT_SUBJECT_RE = new RegExp(`\\b(?:${SPANISH_QUALITATIVE_VISIT_SUBJECT}(?![a-záéíóúñü])[^.!?;,]{0,45}\\b${SPANISH_QUALITATIVE_VISIT_PREDICATE}(?![a-záéíóúñü])|${SPANISH_QUALITATIVE_VISIT_PREDICATE}(?![a-záéíóúñü])[^.!?;,]{0,45}\\b${SPANISH_QUALITATIVE_VISIT_SUBJECT}(?![a-záéíóúñü]))`, 'i');
 function spanishQualitativeTimeEvidence(text, subject) {
   return String(text || '').replace(new RegExp(SPANISH_QUALITATIVE_VISIT_TIME_RE.source, 'gi'), (match, offset, source) => {
     const before = source.slice(0, offset).split(CLAUSE_SPLIT_RE).pop();
@@ -1119,7 +1132,7 @@ function no_visit_time(value, record, { utterances }) {
     // regular hours" carries the caller's date, not a reopening one.
     const units = subject ? text.split(SENTENCE_SPLIT_RE).flatMap((s) => s.split(CLAUSE_SPLIT_RE)).filter((c) => subject.test(c)) : text.split(SENTENCE_SPLIT_RE);
     for (const raw of units) {
-      const timeEvidence = spanishQualitativeTimeEvidence(raw, SCHEDULE_PREDICATES.visit);
+      const timeEvidence = spanishQualitativeTimeEvidence(raw, SPANISH_QUALITATIVE_VISIT_SUBJECT_RE);
       const sentence = activeStrip ? activeStrip(timeEvidence) : timeEvidence;
       const anywhere = TIME_ANYWHERE_RES.map((re) => re.exec(sentence)).find(Boolean);
       if (anywhere) return ['fail', `"${anywhere[0]}" spoken${grounded ? '' : ` before ${opts.afterTool} ever succeeded`}: "${clip(raw, 160)}"`];
