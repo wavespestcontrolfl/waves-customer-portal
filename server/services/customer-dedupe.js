@@ -2327,6 +2327,13 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
         }
       }
     }
+    // Customers cannot turn payment receipts off (owner ruling 2026-09-26).
+    // When the sweep moved a duplicate's prefs row whole (no collision, so
+    // mergeSingletonPrefRow never ran), clear a legacy opt-out it carried.
+    if (typeof repointed['notification_prefs.customer_id'] === 'number') {
+      await trx('notification_prefs').where({ customer_id: winnerId, payment_receipt: false })
+        .update({ payment_receipt: true });
+    }
     // An operator's customer link on a call (call_log.metadata.
     // customer_link_override — admin relink) embeds the customer id in
     // jsonb, so the FK repoint above never sees it; the next processing

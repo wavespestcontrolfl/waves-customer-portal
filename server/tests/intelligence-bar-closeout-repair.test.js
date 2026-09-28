@@ -10,12 +10,23 @@ jest.mock('../services/service-report/delivery-queue', () => ({ enqueueServiceRe
 jest.mock('../services/feature-flags', () => ({ isUserFeatureEnabled: jest.fn().mockResolvedValue(false) }));
 jest.mock('../utils/portal-url', () => ({ publicPortalUrl: () => 'https://portal.example.test' }));
 jest.mock('../services/completion-followup-booking', () => ({ bookCompletionFollowup: jest.fn() }));
+jest.mock('../services/receipt-delivery-queue', () => ({
+  enqueueReceiptDelivery: jest.fn(),
+  receiptEmailOptOutState: jest.fn(async () => ({ receiptKillSwitch: false, prefsLookupFailed: false })),
+  // The worker's real classification.
+  expectedEmailSkip: jest.requireActual('../services/receipt-delivery-queue').expectedEmailSkip,
+}));
+jest.mock('../services/invoice-email', () => ({ resolveReceiptEmailRecipient: jest.fn() }));
+jest.mock('../services/invoice', () => ({ explicitBillingAppSelected: jest.fn(async () => false), receiptAmountFor: jest.fn(async () => '129.00') }));
 
 const db = require('../models/db');
 const { getCloseoutStatus } = require('../services/closeout-status');
 const { ensureReportToken } = require('../services/service-report/pdf-queue');
 const { enqueueServiceReportV1EmailDelivery } = require('../services/service-report/delivery-queue');
 const { bookCompletionFollowup } = require('../services/completion-followup-booking');
+const { enqueueReceiptDelivery, receiptEmailOptOutState } = require('../services/receipt-delivery-queue');
+const { resolveReceiptEmailRecipient } = require('../services/invoice-email');
+const { explicitBillingAppSelected } = require('../services/invoice');
 const { CLOSEOUT_REPAIR_TOOLS, executeCloseoutRepairTool } = require('../services/intelligence-bar/closeout-repair-tools');
 const gates = require('../services/intelligence-bar/write-gates');
 const { executionOutcome } = require('../services/intelligence-bar/outcomes');
@@ -161,15 +172,6 @@ test('field evidence, billing and unknown facts are listed manual, never planned
   expect(res.code).toBe('nothing_repairable');
   expect(res.manual.map((m) => m.fact).sort()).toEqual(['invoice', 'license', 'photos']);
   expect(res.manual.find((m) => m.fact === 'license').fix).toMatch(/unverified, not missing/);
-});
-
-test('an unsent paid receipt is manual — its recipients are routed per invoice by the receipt worker', async () => {
-  const facts = { invoiceDelivery: { state: 'pending', reason: 'paid_receipt_not_sent', invoiceId: 'inv-1' } };
-  getCloseoutStatus.mockResolvedValue(status({ facts }));
-  db.mockImplementation(fakeDb({ service_records: [RECORD], invoices: [{ id: 'inv-1', status: 'paid', receipt_sent_at: null }] }));
-  const res = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
-  expect(res.code).toBe('nothing_repairable');
-  expect(res.manual).toEqual([expect.objectContaining({ fact: 'invoiceDelivery', fix: expect.stringMatching(/invoice page/) })]);
 });
 
 test('confirmed: runs the steps in order and returns an itemized receipt', async () => {
@@ -330,6 +332,137 @@ test('a recipient swapped behind the same mask changes the plan: fingerprint and
   expect(run.preview_changed).toBe(true);
   expect(ensureReportToken).not.toHaveBeenCalled();
 });
+
+describe('queue_receipt — the receipt worker, with its own recipient resolution on the card', () => {
+  const UNSENT = { invoiceDelivery: { state: 'pending', reason: 'paid_receipt_not_sent', invoiceId: 'inv-1' } };
+  const PAID = { id: 'inv-1', invoice_number: 'INV-00042', status: 'paid', receipt_sent_at: null, customer_id: 'cust-1', payer_id: null };
+
+  test('names the resolved receipt email and a conditional text; the worker resolver gets the payment_receipt category', async () => {
+    getCloseoutStatus.mockResolvedValue(status({ facts: UNSENT }));
+    db.mockImplementation(fakeDb({ service_records: [RECORD], invoices: [PAID] }));
+    resolveReceiptEmailRecipient.mockResolvedValue({ ok: true, recipient: { email: 'Billing@Example.com' }, customer: { phone: '9415550100' } });
+    const preview = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
+    expect(resolveReceiptEmailRecipient).toHaveBeenCalledWith(expect.objectContaining({ id: 'inv-1' }), { billingDeliveryCategory: 'payment_receipt' });
+    expect(preview.steps).toEqual([expect.objectContaining({ step: 'queue_receipt', invoice_id: 'inv-1', recipients: ['b***@example.com'], text_to: '***0100', payer_billed: false })]);
+    expect(preview.notifies_customer).toBe(true);
+    expect(JSON.stringify(preview)).not.toMatch(/billing@example\.com|9415550100/i);
+    const contract = buildContract({ toolName: 'repair_closeout', params: { service_id: SVC }, preview });
+    expect(contract.notifies_customer).toBe(true);
+    expect(contract.effects).toEqual(expect.arrayContaining([expect.objectContaining({
+      kind: 'comms', label: expect.stringMatching(/receipt for invoice INV-00042, \$129\.00 paid — email to b\*\*\*@example\.com; may also send text \*\*\*0100, per the customer's receipt settings \(texts wait for 8 AM–8 PM\)/),
+    })]));
+  });
+
+  test("a payer-billed receipt names the payer's inbox and no text", async () => {
+    getCloseoutStatus.mockResolvedValue(status({ facts: UNSENT }));
+    db.mockImplementation(fakeDb({ service_records: [RECORD], invoices: [{ ...PAID, payer_id: 'payer-1' }] }));
+    resolveReceiptEmailRecipient.mockResolvedValue({ ok: true, recipient: { email: 'ap@builder.example' }, customer: { phone: '9415550100' } });
+    const preview = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
+    expect(preview.steps[0]).toEqual(expect.objectContaining({ recipients: ['a***@builder.example'], text_to: null, payer_billed: true }));
+    expect(preview.steps[0].effect).toMatch(/payer's billing inbox — a payer-billed receipt is never texted/);
+    expect(explicitBillingAppSelected).not.toHaveBeenCalled();
+  });
+
+  test('a phone-less customer who chose App for receipts is still reachable, and the card says so (GH Codex P1)', async () => {
+    getCloseoutStatus.mockResolvedValue(status({ facts: UNSENT }));
+    db.mockImplementation(fakeDb({ service_records: [RECORD], invoices: [PAID], customers: [{ ...CUSTOMER, phone: null }] }));
+    // The real routedReceiptRefusal shape for "Email is not the chosen receipt channel".
+    resolveReceiptEmailRecipient.mockResolvedValue({ ok: false, skipped: true, error: 'billing_email_not_selected', code: 'billing_email_not_selected' });
+    explicitBillingAppSelected.mockResolvedValueOnce(true);
+    const preview = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
+    expect(explicitBillingAppSelected).toHaveBeenCalledWith('cust-1', 'payment_receipt');
+    expect(preview.steps[0]).toEqual(expect.objectContaining({ step: 'queue_receipt', recipients: [], text_to: null, app: true }));
+    expect(preview.steps[0].effect).toMatch(/may also send a Waves app notification/);
+  });
+
+  test('an email-resolution outage blocks the step even with a phone on file (GH Codex P1)', async () => {
+    getCloseoutStatus.mockResolvedValue(status({ facts: UNSENT }));
+    db.mockImplementation(fakeDb({ service_records: [RECORD], invoices: [PAID] }));
+    resolveReceiptEmailRecipient.mockResolvedValueOnce({ ok: false, error: 'Receipt delivery preferences unavailable', code: 'billing_prefs_unavailable' });
+    const res = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
+    expect(res.code).toBe('nothing_repairable');
+    expect(res.manual).toEqual([expect.objectContaining({ fact: 'invoiceDelivery', fix: expect.stringMatching(/could not be verified \(Receipt delivery preferences unavailable\)/) })]);
+  });
+
+  test('opted out, unreadable settings, no recipient, or an existing job → manual, never planned', async () => {
+    getCloseoutStatus.mockResolvedValue(status({ facts: UNSENT }));
+    db.mockImplementation(fakeDb({ service_records: [RECORD], invoices: [PAID] }));
+    receiptEmailOptOutState.mockResolvedValueOnce({ receiptKillSwitch: true, prefsLookupFailed: false });
+    let res = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
+    expect(res.manual[0].fix).toMatch(/opted out of payment receipts/);
+
+    receiptEmailOptOutState.mockResolvedValueOnce({ receiptKillSwitch: false, prefsLookupFailed: true });
+    res = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
+    expect(res.manual[0].fix).toMatch(/could not be read/);
+
+    resolveReceiptEmailRecipient.mockResolvedValueOnce({ ok: false, error: 'No receipt recipient email' });
+    db.mockImplementation(fakeDb({ service_records: [RECORD], invoices: [PAID], customers: [{ ...CUSTOMER, phone: null }] }));
+    res = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
+    expect(res.manual[0].fix).toMatch(/No receipt recipient email/);
+
+    db.mockImplementation(fakeDb({ service_records: [RECORD], invoices: [PAID], receipt_delivery_jobs: [{ id: 'job-1' }] }));
+    res = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
+    expect(res.manual[0].fix).toMatch(/receipt job already exists/);
+  });
+
+  test('confirmed: queues through enqueueReceiptDelivery as a machine receipt; a recipient change refuses', async () => {
+    getCloseoutStatus.mockResolvedValue(status({ facts: UNSENT }));
+    db.mockImplementation(fakeDb({ service_records: [RECORD], invoices: [PAID] }));
+    resolveReceiptEmailRecipient.mockResolvedValue({ ok: true, recipient: { email: 'billing@example.com' }, customer: { phone: '9415550100' } });
+    const { steps: approved } = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
+    enqueueReceiptDelivery.mockResolvedValue({ enqueued: true, job: { id: 'job-9' } });
+    const txDb = fakeDb({ service_records: [RECORD], invoices: [PAID] });
+    db.transaction = jest.fn(async (fn) => fn((table) => { const q = txDb(table); q.forUpdate = () => q; return q; }));
+    const run = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC }, { confirmed: true, executionPins: { _verified_repair_steps: approved } });
+    expect(run.success).toBe(true);
+    expect(enqueueReceiptDelivery).toHaveBeenCalledWith(expect.objectContaining({ invoiceId: 'inv-1', source: 'ib_closeout_repair', customerInitiated: false }));
+
+    enqueueReceiptDelivery.mockClear();
+    resolveReceiptEmailRecipient.mockResolvedValue({ ok: true, recipient: { email: 'bob@example.com' }, customer: { phone: '9415550100' } });
+    const drift = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC }, { confirmed: true, executionPins: { _verified_repair_steps: approved } });
+    expect(drift.preview_changed).toBe(true);
+    expect(enqueueReceiptDelivery).not.toHaveBeenCalled();
+  });
+});
+
+test('queue_receipt: an unreadable payment amount blocks the plan; a receipt sent by hand in between refuses the enqueue', async () => {
+  const UNSENT = { invoiceDelivery: { state: 'pending', reason: 'paid_receipt_not_sent', invoiceId: 'inv-1' } };
+  const PAID = { id: 'inv-1', invoice_number: 'INV-00042', status: 'paid', receipt_sent_at: null, customer_id: 'cust-1', payer_id: null };
+  getCloseoutStatus.mockResolvedValue(status({ facts: UNSENT }));
+  db.mockImplementation(fakeDb({ service_records: [RECORD], invoices: [PAID] }));
+  resolveReceiptEmailRecipient.mockResolvedValue({ ok: true, recipient: { email: 'billing@example.com' }, customer: { phone: '9415550100' } });
+  const Invoice = require('../services/invoice');
+  Invoice.receiptAmountFor.mockRejectedValueOnce(new Error('payments read failed'));
+  const blocked = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
+  expect(blocked.manual).toEqual([expect.objectContaining({ fact: 'invoiceDelivery', fix: expect.stringMatching(/amount could not be verified/) })]);
+  expect(Invoice.receiptAmountFor).toHaveBeenCalledWith(expect.objectContaining({ id: 'inv-1' }), { failClosed: true });
+
+  const { steps: approved } = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
+  // The locked re-read inside the enqueue transaction sees the hand-sent stamp.
+  const plain = fakeDb({ service_records: [RECORD], invoices: [PAID] });
+  const trxDb = fakeDb({ invoices: [{ ...PAID, receipt_sent_at: '2026-09-28T10:00:00Z' }] });
+  db.mockImplementation(plain);
+  db.transaction = jest.fn(async (fn) => {
+    const trx = (table) => { const q = trxDb(table); q.forUpdate = () => q; return q; };
+    return fn(trx);
+  });
+  enqueueReceiptDelivery.mockClear();
+  const run = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC }, { confirmed: true, executionPins: { _verified_repair_steps: approved } });
+  expect(run.receipt).toEqual([expect.objectContaining({ step: 'queue_receipt', status: 'failed', detail: expect.stringMatching(/sent in the meantime/) })]);
+  expect(enqueueReceiptDelivery).not.toHaveBeenCalled();
+});
+
+test('queue_receipt: a legacy payment_receipt_channel of push shows the App leg for a phone-bearing customer', async () => {
+  const UNSENT = { invoiceDelivery: { state: 'pending', reason: 'paid_receipt_not_sent', invoiceId: 'inv-1' } };
+  const PAID = { id: 'inv-1', invoice_number: 'INV-00042', status: 'paid', receipt_sent_at: null, customer_id: 'cust-1', payer_id: null };
+  getCloseoutStatus.mockResolvedValue(status({ facts: UNSENT }));
+  db.mockImplementation(fakeDb({ service_records: [RECORD], invoices: [PAID], notification_prefs: [{ customer_id: 'cust-1', payment_receipt_channel: 'push' }] }));
+  resolveReceiptEmailRecipient.mockResolvedValue({ ok: true, recipient: { email: 'billing@example.com' }, customer: { phone: '9415550100' } });
+  const preview = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
+  expect(preview.steps[0]).toEqual(expect.objectContaining({ step: 'queue_receipt', app: true, text_to: '***0100' }));
+  expect(preview.steps[0].effect).toMatch(/may also send text \*\*\*0100 or a Waves app notification/);
+});
+
 
 describe('book_followup — the Dispatch follow-up action as a repair step', () => {
   const OWED = { followUp: { state: 'pending', reason: 'followup_required_not_booked', windowDays: 14, frozen: true } };
