@@ -23,6 +23,7 @@
  * address counts once, under the higher reason:
  *   1. an existing row for the address, or linked to any sharing profile:
  *      active (already claimed) / unsubscribed / pending / inactive+waitlist
+ *      (and any other stored status, fail closed, with inactive)
  *   2. an active suppression, global or group 'marketing_newsletter'
  *      (activeSuppressionsFor is the single source of truth here)
  *   3. notification_prefs.email_enabled === false on any sharing profile
@@ -298,7 +299,10 @@ async function classifyAddress(conn, { email, profileIds }) {
   if (status === 'active') return 'already_active';
   if (status === 'unsubscribed') return 'previously_unsubscribed';
   if (status === 'pending') return 'pending_confirmation';
-  if (status === 'inactive' || status === 'waitlist') return 'inactive_subscriber';
+  // Fail closed: newsletter_subscribers.status has no CHECK constraint, so
+  // any other stored value (a bounce/complaint label, a future status) is a
+  // row this import must not route around — counted with the inactive rows.
+  if (status) return 'inactive_subscriber';
 
   const suppressions = await mailboxSuppressions(conn, email);
   if (suppressions.length) return 'suppressed';

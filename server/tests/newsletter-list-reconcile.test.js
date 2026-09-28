@@ -810,3 +810,16 @@ test('a linked orphan gets its zone in the same run, and the dry run counts that
   expect(write).toMatchObject({ orphanLinks: 1, zoneFills: 1 });
   expect(state.subscribers[0]).toMatchObject({ customer_id: 'c1', region_zone: 'south_sarasota' });
 });
+
+test('an unrecognised subscriber status on the same mailbox fails closed (no CHECK constraint on status)', async () => {
+  const state = {
+    customers: [cust({ email: 'johndoe@gmail.com' })],
+    subscribers: [{ id: 's1', customer_id: null, email: 'john.doe+x@gmail.com', status: 'bounced' }],
+    prefs: [],
+  };
+  const dry = await reconcileCustomers({ conn: makeConn(state) });
+  expect(dry.excluded.inactive_subscriber).toBe(1);
+  const write = await reconcileCustomers({ dryRun: false, conn: makeConn(state) });
+  expect(write.imported).toBe(0);
+  expect(state.subscribers).toHaveLength(1);
+});
