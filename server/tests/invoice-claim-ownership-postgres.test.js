@@ -20,6 +20,7 @@ jest.mock('../services/lead-estimate-link', () => ({ convertLeadFromEvent: async
 jest.mock('../config/feature-gates', () => ({ gateEnvTimestamp: () => null, isEnabled: () => false }));
 const { randomUUID } = require('node:crypto');
 const Invoice = require('../services/invoice');
+const { settledLegTimes } = require('../services/messaging/billing-prior-delivery');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const migration = require('../models/migrations/20260911000001_invoice_send_claim_token');
 
@@ -186,6 +187,26 @@ postgres('invoice send episode ownership', () => {
     expect(require('../services/invoice-email').sendInvoiceEmail).not.toHaveBeenCalled();
   });
 
+  test('a direct legacy fresh decline Text without channelResults still owns its SMS rail', async () => {
+    const token = randomUUID();
+    const result = { sent: true, channel: 'sms', deliveryOutcome: 'accepted' };
+    const legs = (result.channelResults || result.deduped === true) && settledLegTimes(result);
+    expect(legs).toBe(false);
+    await trx('invoices').where({ id: invoiceId }).update({ status: 'sending', send_claim_token: token });
+    await Invoice.markDeliverySent(invoiceId, {
+      sms: legs ? legs.smsAccepted : true,
+      email: legs?.emailAccepted || false,
+      source: 'payment_failed_notice', claimToken: token,
+      deduped: result.deduped === true,
+    });
+    const invoice = await read();
+    expect(invoice).toMatchObject({ status: 'sent', send_claim_token: null, email_sent_at: null });
+    expect(invoice.sent_at).toEqual(expect.any(Date));
+    expect(invoice.sms_sent_at).toEqual(expect.any(Date));
+    expect(await trx('activity_log').where({ action: 'invoice_sent' }).count('* as count').first())
+      .toMatchObject({ count: '1' });
+  });
+
   test('successful direct send releases its token, and a resend mints a new one', async () => {
     const tokens = [];
     sendCustomerMessage.mockImplementation(async ({ withProviderHandoff }) => {
@@ -277,6 +298,63 @@ postgres('invoice send episode ownership', () => {
     expect(result).toMatchObject({ status: 'sent', send_claim_token: null });
     expect(await read()).toMatchObject({ status: 'sent', send_claim_token: null });
     expect((await read()).sms_sent_at).toBeTruthy();
+  });
+
+  test('a previously visible decline bell uses its original time under the same claim and creates no new activity', async () => {
+    const token = randomUUID();
+    const priorAt = new Date('2026-08-21T15:30:00.000Z');
+    await trx('invoices').where({ id: invoiceId }).update({ status: 'sending', send_claim_token: token });
+    const result = await Invoice.markDeliverySent(invoiceId, {
+      sms: true, source: 'payment_failed_notice', claimToken: token,
+      deduped: true, eventVisibleAt: priorAt,
+    });
+    expect(result).toMatchObject({ status: 'sent', send_claim_token: null });
+    const settled = await read();
+    expect(settled.sent_at).toEqual(priorAt);
+    expect(settled.sms_sent_at).toEqual(priorAt);
+    expect(await trx('activity_log').where({ action: 'invoice_sent' }).count('* as count').first()).toMatchObject({ count: '0' });
+  });
+
+  test.each([
+    ['old App and later old Email', 'app_email', true],
+    ['old Email only', 'email_only', true],
+    ['old App with missing time and later old Email', 'missing_app_time', true],
+    ['old App beside fresh Email', 'fresh_email', false],
+    ['old Email beside fresh Text', 'fresh_text', false],
+  ])('claim-scoped decline finalization preserves each rail: %s', async (_label, shape, allOld) => {
+    const token = randomUUID();
+    const appAt = new Date('2026-08-21T15:30:00.000Z');
+    const emailAt = new Date('2026-08-22T15:30:00.000Z');
+    const oldApp = { sent: false, deduped: true, deliveryOutcome: 'not_sent',
+      reason: 'app_event_already_visible', eventVisibleAt: shape === 'missing_app_time' ? null : appAt };
+    const email = shape === 'fresh_email'
+      ? { ok: true, deliveryOutcome: 'accepted' }
+      : { ok: true, deduped: true, deliveryOutcome: 'accepted', sentAt: emailAt };
+    const result = { sent: true, deduped: allOld, channelResults: {
+      ...(shape === 'email_only' || shape === 'fresh_text' ? {} : { push: oldApp }),
+      ...(shape === 'fresh_text' ? { sms: { sent: true, deliveryOutcome: 'accepted' } } : {}),
+      email,
+    } };
+    const legs = settledLegTimes(result);
+    await trx('invoices').where({ id: invoiceId }).update({ status: 'sending', send_claim_token: token });
+    await Invoice.markDeliverySent(invoiceId, {
+      source: 'payment_failed_notice', claimToken: token,
+      sms: legs.smsAccepted, email: legs.emailAccepted, deduped: allOld,
+      eventVisibleAt: allOld ? legs.eventAt : new Date(),
+      smsEventVisibleAt: legs.smsAccepted && !legs.freshSms ? legs.smsAt : undefined,
+      emailEventVisibleAt: legs.emailAccepted && !legs.freshEmail ? legs.emailAt : undefined,
+    });
+    const invoice = await read();
+    expect(invoice).toMatchObject({ status: 'sent', send_claim_token: null });
+    if (allOld) expect(invoice.sent_at).toEqual(emailAt);
+    else expect(invoice.sent_at.getTime()).toBeGreaterThan(emailAt.getTime());
+    expect(invoice.email_sent_at).toEqual(shape === 'fresh_email' ? expect.any(Date) : emailAt);
+    expect(invoice.sms_sent_at).toEqual(
+      shape === 'fresh_text' ? expect.any(Date)
+        : shape === 'email_only' || shape === 'missing_app_time' ? null : appAt,
+    );
+    expect(await trx('activity_log').where({ action: 'invoice_sent' }).count('* as count').first())
+      .toMatchObject({ count: allOld ? '0' : '1' });
   });
 
   test('markDeliverySent with a claimToken that no longer owns the row refuses to finalize — a replacement episode is never clobbered', async () => {

@@ -89,4 +89,5 @@ function invoiceDeliveryStampUpdates(db, options) {
   };
 }
 
-module.exports = { scheduledPriorInvoiceEvidence, priorInvoiceFinalizeOptions, invoiceDeliveryStampUpdates };
+module.exports = { scheduledPriorInvoiceEvidence, priorInvoiceFinalizeOptions, invoiceDeliveryStampUpdates,
+  settledLegTimes };
