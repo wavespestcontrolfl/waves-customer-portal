@@ -1549,13 +1549,13 @@ async function safeSend(customerId, phone, body, messageType = 'appointment_remi
     logger.warn(`[appt-remind] No phone for customer ${customerId}, skipping SMS`);
     return false;
   }
-  // guard_slot_ms feeds the move guard only. A notice that quotes no window
-  // (a windowless reschedule: "at a time we'll confirm") still needs the
-  // slot check, but must not RECORD its bookkeeping 08:00 as
-  // rendered_slot_ms — the no-show detector reads that key as the window
-  // the customer was promised.
-  const { guard_slot_ms: guardSlotMs, ...recordedMeta } = metaExtra;
-  const renderedSlotMs = Number.isFinite(metaExtra.rendered_slot_ms) ? metaExtra.rendered_slot_ms : guardSlotMs;
+  // window_unknown: the body quotes no arrival window (a windowless
+  // reschedule: "at a time we'll confirm"). Its rendered_slot_ms still feeds
+  // the move guard, but is never recorded as the promised window — the
+  // no-show detector reads that key as the window the customer was told.
+  const windowUnknown = metaExtra.window_unknown === true;
+  const recordedMeta = { ...metaExtra };
+  if (windowUnknown) delete recordedMeta.rendered_slot_ms;
 
   const appSelected = await require('./messaging/push-channel-routing').wantsAppFirst({
     to: phone, channel: 'sms', audience: 'customer', customerId, purpose, operatorInitiated,
@@ -1617,7 +1617,8 @@ async function safeSend(customerId, phone, body, messageType = 'appointment_remi
     ...(metaExtra.scheduled_service_id ? { appointmentId: String(metaExtra.scheduled_service_id) } : {}),
     // ABA guard input (codex r39): the slot this body was rendered against,
     // verified live at both canonical move-hold checkpoints.
-    ...(Number.isFinite(renderedSlotMs) ? { renderedSlotMs } : {}),
+    ...(Number.isFinite(metaExtra.rendered_slot_ms) ? { renderedSlotMs: metaExtra.rendered_slot_ms } : {}),
+    ...(windowUnknown ? { promisedWindowUnknown: true } : {}),
     // Optional caller-supplied final recheck at the provider handoff —
     // race-sensitive senders (the admin reschedule notice) abort here if
     // the appointment moved or went terminal while validators ran. (The
@@ -4313,9 +4314,10 @@ const AppointmentReminders = {
             });
           }, 'appointment_rescheduled', 'appointment_confirmation', {
             scheduled_service_id: scheduledServiceId,
-            // A windowless notice promised no window: guard the send on the
-            // slot, but record it as an unknown-window promise.
-            ...(resolved?.windowless ? { guard_slot_ms: newApptTime.getTime() } : { rendered_slot_ms: newApptTime.getTime() }),
+            rendered_slot_ms: newApptTime.getTime(),
+            // A windowless notice promised no window: the slot still guards
+            // the send, but it is recorded as an unknown-window promise.
+            ...(resolved?.windowless ? { window_unknown: true } : {}),
           }, { sendOutcome: rescheduleNoticeOutcome });
           if (noticeSent) {
             await this.markRescheduleNoticeSent(scheduledServiceId);
