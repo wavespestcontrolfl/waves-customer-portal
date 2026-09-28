@@ -347,9 +347,13 @@ function isFirstOccurrenceOfYear(event, pool, reference = new Date()) {
   // though it never actually lost to a genuinely distinct earlier occurrence.
   if (hasEarlierOccurrenceThisYear(event, pool, reference)) return false; // (a)
 
-  const hasPriorYearOccurrence = siblings.some((sibling) => (
-    sibling.start_at && etYearOf(sibling.start_at, reference) === eventYear - 1
-  ));
+  // Continuity evidence: a same-identity row dated last ET year, or a shipped
+  // occurrence stamped last year (last_featured_occurrence_at) on this row or
+  // a sibling. The stamp matters because RSS/iCal feeds advance the same
+  // GUID/UID row in place, leaving no separate prior-year row behind.
+  const inPriorYear = (value) => Boolean(value) && etYearOf(value, reference) === eventYear - 1;
+  const hasPriorYearOccurrence = inPriorYear(event.last_featured_occurrence_at)
+    || siblings.some((sibling) => inPriorYear(sibling.start_at) || inPriorYear(sibling.last_featured_occurrence_at));
   if (hasPriorYearOccurrence) return true; // (b) continuity
 
   if (event.freshness_status === 'fresh_series_launch' && isSeriesDebutEvent(event)) return true; // (b) debut
@@ -384,7 +388,7 @@ async function loadYearIdentityPool(knex, events, reference = new Date()) {
     // event_type / recurrence_type / description to inherit last year's
     // recurring label.
     .select('id', 'title', 'start_at', 'venue_name', 'city', 'merged_into',
-      'event_type', 'recurrence_type', 'description')
+      'event_type', 'recurrence_type', 'description', 'last_featured_occurrence_at')
     .where('start_at', '>=', parseETDateTime(`${minYear}-01-01T00:00:00`))
     .where('start_at', '<=', parseETDateTime(`${maxYear}-12-31T23:59:59`));
 }

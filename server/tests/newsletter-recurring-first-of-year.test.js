@@ -454,4 +454,18 @@ describe('operator star override still bypasses the calendar-year rule', () => {
     const rows = await filterPreviouslyFeaturedIdentities([june], { knex, reference: REFERENCE, yearPool: [march, june] });
     expect(rows).toEqual([]);
   });
+
+  test('a feed row advanced in place counts its stamped prior-year shipped occurrence as continuity', async () => {
+    const advanced = weeklyEvent('same-row', {
+      start_at: '2026-01-10T14:00:00Z',
+      times_featured: 1,
+      last_featured_at: '2025-08-01T10:00:00Z',
+      last_featured_occurrence_at: '2025-08-02T14:00:00Z',
+    });
+    const rows = await filterRepeatedDateIdentities([advanced], {
+      reference: REFERENCE, identityPool: [advanced], yearPool: [advanced],
+    });
+    expect(rows.map((r) => r.id)).toEqual(['same-row']);
+    expect(rows[0].__recurringFirstOfYear).toBe(true);
+  });
 });
