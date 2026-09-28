@@ -10,8 +10,9 @@
     "safety_line": "Toxic enough to make a pet vomit or act ill if eaten; call your vet if that happens. Its defensive foam can also irritate skin and eyes — avoid handling it and keep pets away.",
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "4c66507e402791893cab21bece0c8a2a5b79bb1a3809e955e52c9456becd0ccf"
     },
     "slug": "lubber-grasshopper",
     "common_name": "Eastern Lubber Grasshopper",
@@ -442,8 +443,9 @@
       "https://en.wikipedia.org/wiki/Rhaphidophoridae"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Re-searched this session specifically for a UF/IFAS Featured Creatures page or EDIS document on camel crickets (Ceuthophilus/Rhaphidophoridae, including the general 'Crickets' EDIS document, ENY-230/IG146, which covers only field and house crickets); none exists. Rather than guess a seasonal peak, peak_months is set equal to active_months (present year-round, tied more to indoor moisture/harborage than season) and season_basis is set to 'year_round'."
+      "status": "owner_approved",
+      "notes": "Re-searched this session specifically for a UF/IFAS Featured Creatures page or EDIS document on camel crickets (Ceuthophilus/Rhaphidophoridae, including the general 'Crickets' EDIS document, ENY-230/IG146, which covers only field and house crickets); none exists. Rather than guess a seasonal peak, peak_months is set equal to active_months (present year-round, tied more to indoor moisture/harborage than season) and season_basis is set to 'year_round'.",
+      "approval_hash": "7bb8b12c5ddf7c37e7977d0020f99ebdfbeebf4b90522875e10e844adfb0bcb7"
     },
     "role": "harmless_visitor",
     "risk": "low",
@@ -552,8 +554,9 @@
       "https://edis.ifas.ufl.edu/in1109"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Peak months narrowed to June-August, the general adult-katydid abundance window (Capinera, Scott & Walker 2004) cited directly in UF/IFAS EDIS EENY638/IN1109 (Oblong-Winged Katydid), now added to sources. IN1109 also documents the Florida false katydid (Amblycorypha floridana, the species relevant to SWFL yards) as 'commonly encountered throughout its range in Florida.' This remains a general entomological reference rather than a species- or SWFL-specific study, so season_basis moves from 'unverified' to 'observed' rather than asserting a precisely-confirmed SWFL curve."
+      "status": "owner_approved",
+      "notes": "Peak months narrowed to June-August, the general adult-katydid abundance window (Capinera, Scott & Walker 2004) cited directly in UF/IFAS EDIS EENY638/IN1109 (Oblong-Winged Katydid), now added to sources. IN1109 also documents the Florida false katydid (Amblycorypha floridana, the species relevant to SWFL yards) as 'commonly encountered throughout its range in Florida.' This remains a general entomological reference rather than a species- or SWFL-specific study, so season_basis moves from 'unverified' to 'observed' rather than asserting a precisely-confirmed SWFL curve.",
+      "approval_hash": "a5d5b98378bce4cb4e3132a359aa0ae091dd65f614f4c0a67cb6bdb99f56665b"
     },
     "role": "harmless_visitor",
     "risk": "low",

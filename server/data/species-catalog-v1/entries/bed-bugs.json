@@ -16,8 +16,9 @@
     "safety_line": "Bites are a nuisance and can itch for days; no disease is known to spread through bed bug bites. See a doctor if a bite site looks infected.",
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "0d811bb0f584f64fc7d6586c432c75db1080bd420400fe0a6ad9bb582d92d9fc"
     },
     "slug": "bed-bug",
     "common_name": "Bed Bug",
@@ -211,8 +212,9 @@
       "https://pmc.ncbi.nlm.nih.gov/articles/PMC10146278/"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Found and confirmed a peer-reviewed source this session: \"Cimicids of Medical and Veterinary Importance\" (Insects, 2023, PMC10146278), a peer-reviewed review of the family Cimicidae. It confirms C. adjunctus as \"a widespread ectoparasite of different species of bats in North America, especially in the eastern United States\" (consistent with occurring in Florida); describes the distinguishing trait as \"long and thin pronotal bristles (0.2mm)\" versus bed bugs' shorter hairs, matching this entry's look-alike distinction; and confirms it \"occasionally feed[s] on human blood when their preferred bat host is not available\" and \"is known to move to occupied rooms and bite people during the night\" -- matching this entry's traits and framing exactly. It also notes a novel Bartonella detected in wild C. adjunctus but no evidence of human disease transmission, supporting disease_vector staying false. Still no dedicated UF/IFAS Featured Creatures page exists for this species (checked against the full 771-title collection list), and IN297 covers only C. lectularius/C. hemipterus, but the traits/range claim is now resolved via peer-reviewed literature."
+      "status": "owner_approved",
+      "notes": "Found and confirmed a peer-reviewed source this session: \"Cimicids of Medical and Veterinary Importance\" (Insects, 2023, PMC10146278), a peer-reviewed review of the family Cimicidae. It confirms C. adjunctus as \"a widespread ectoparasite of different species of bats in North America, especially in the eastern United States\" (consistent with occurring in Florida); describes the distinguishing trait as \"long and thin pronotal bristles (0.2mm)\" versus bed bugs' shorter hairs, matching this entry's look-alike distinction; and confirms it \"occasionally feed[s] on human blood when their preferred bat host is not available\" and \"is known to move to occupied rooms and bite people during the night\" -- matching this entry's traits and framing exactly. It also notes a novel Bartonella detected in wild C. adjunctus but no evidence of human disease transmission, supporting disease_vector staying false. Still no dedicated UF/IFAS Featured Creatures page exists for this species (checked against the full 771-title collection list), and IN297 covers only C. lectularius/C. hemipterus, but the traits/range claim is now resolved via peer-reviewed literature.",
+      "approval_hash": "fdc3e53e3713e13d43dd3347a3ffc431d7b055d40c76a7cd8a4df15660688a3f"
     }
   },
   {
@@ -331,8 +333,9 @@
       "https://en.wikipedia.org/wiki/Cimex_lectularius"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "35fd4231f58459c667ce312122fb18d537fa51a2143e66f891152a204e568a5c"
     }
   }
 ]

@@ -9,8 +9,9 @@
     "safety_line": "Rodents can carry disease and chew wiring. See a doctor if you have a bite or scratch, or contact with droppings and feel unwell.",
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
-      "notes": "Resolved 2026-09-26: ENY-224 \"Rat and Mouse Control\" (Koehler & Kern, UF/IFAS) is back up at the FLVC/EDIS journal host (the ask.ifas.ufl.edu short URL still 404s, but the article record loads directly). It confirms: roof rats nest in attics/roof spaces/palm trees/shrubbery, are climbers, gnaw citrus fruit and are destructive to citrus groves, gnaw electrical wires/rafters in attics, and have a tail longer than the combined head and body, and that rats travel wires, pipes and rough walls using their sense of balance. Source URL added; ENY-224 re-verification note is resolved."
+      "status": "owner_approved",
+      "notes": "Resolved 2026-09-26: ENY-224 \"Rat and Mouse Control\" (Koehler & Kern, UF/IFAS) is back up at the FLVC/EDIS journal host (the ask.ifas.ufl.edu short URL still 404s, but the article record loads directly). It confirms: roof rats nest in attics/roof spaces/palm trees/shrubbery, are climbers, gnaw citrus fruit and are destructive to citrus groves, gnaw electrical wires/rafters in attics, and have a tail longer than the combined head and body, and that rats travel wires, pipes and rough walls using their sense of balance. Source URL added; ENY-224 re-verification note is resolved.",
+      "approval_hash": "da90159091b9906231f9756c7fbf6a90d92538917b81b70dc2e6004a9ec2e9e9"
     },
     "slug": "roof-rat",
     "common_name": "Roof Rat",
@@ -115,8 +116,9 @@
     "safety_line": "Rodents can carry disease and chew wiring. See a doctor if you have a bite or scratch, or contact with droppings and feel unwell.",
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
-      "notes": "Resolved 2026-09-26: ENY-224 (UF/IFAS, link above) confirms Norway rats are burrowers that dig under buildings/concrete slabs and along walls/rubbish (foundation-level activity). Its tail-length phrasing for Norway rats (\"about as long as the combined head and body\") is ambiguous next to the entry's \"tail shorter than the body,\" so also checked icwdm.org (Internet Center for Wildlife Damage Management, University of Nebraska-Lincoln Extension), which states the Norway rat's tail \"does not reach the tip of the nose\" -- i.e., shorter than head+body -- and confirms ground-level burrowing near walls/buildings. Entry traits left as written; both URLs added to sources."
+      "status": "owner_approved",
+      "notes": "Resolved 2026-09-26: ENY-224 (UF/IFAS, link above) confirms Norway rats are burrowers that dig under buildings/concrete slabs and along walls/rubbish (foundation-level activity). Its tail-length phrasing for Norway rats (\"about as long as the combined head and body\") is ambiguous next to the entry's \"tail shorter than the body,\" so also checked icwdm.org (Internet Center for Wildlife Damage Management, University of Nebraska-Lincoln Extension), which states the Norway rat's tail \"does not reach the tip of the nose\" -- i.e., shorter than head+body -- and confirms ground-level burrowing near walls/buildings. Entry traits left as written; both URLs added to sources.",
+      "approval_hash": "6c4254a1e61c6ef9e17a39e7b0a37c82535e932db4445f74687167800b7067bc"
     },
     "slug": "norway-rat",
     "common_name": "Norway Rat",
@@ -221,8 +223,9 @@
     "safety_line": "Rodents can carry disease. See a doctor if you have a bite or scratch, or contact with droppings and feel unwell.",
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
-      "notes": "Resolved 2026-09-26: ENY-224 (UF/IFAS, link above) confirms house mice nibble at a wide variety of food sources (consistent with the \"20-30 food sites a night\" copy) and states mice can squeeze through a 1/4-inch crack (\"any place a pencil can be poked, a mouse can go\"), and gives dropping length as 1/8 inch (rice-grain sized, matching the entry). A 1/4-inch gap is narrower than a dime's diameter (~0.7 in), so the entry's \"gap the width of a dime\" is a true but more conservative comparison than the source's precise figure; left as written since it is not contradicted. Source URL added."
+      "status": "owner_approved",
+      "notes": "Resolved 2026-09-26: ENY-224 (UF/IFAS, link above) confirms house mice nibble at a wide variety of food sources (consistent with the \"20-30 food sites a night\" copy) and states mice can squeeze through a 1/4-inch crack (\"any place a pencil can be poked, a mouse can go\"), and gives dropping length as 1/8 inch (rice-grain sized, matching the entry). A 1/4-inch gap is narrower than a dime's diameter (~0.7 in), so the entry's \"gap the width of a dime\" is a true but more conservative comparison than the source's precise figure; left as written since it is not contradicted. Source URL added.",
+      "approval_hash": "34f9dc7d33c397cc5bd7a15802be7d7fdf2d9895a7993ff1a46078de8c6d7916"
     },
     "slug": "house-mouse",
     "common_name": "House Mouse",
@@ -421,8 +424,9 @@
       "https://www.fs.usda.gov/database/feis/animals/mammal/sihi/all.html"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Both items resolved this session. Hantavirus risk: the Florida Department of Health's own hantavirus page confirms the virus \"has been identified in cotton rats in Florida\" and that most US cases are western, with only occasional eastern cases; multiple news reports citing CDC/FDOH figures put confirmed human hantavirus cases in Florida at about three total between 1993 and 2023 (including the original 1993 Dade County case that led to Black Creek Canal virus's discovery, PubMed 7623004) -- confirming this entry's 'rare' framing and calibrated (not overstated) safety_line/urgency. Peak months: the USDA Forest Service Fire Effects Information System (FEIS) species report states hispid cotton rat populations \"usually exhibit a bimodal breeding season, with peak litter production occurring in late spring and in late summer-early fall,\" which matches this entry's peak_months (Apr-Jun and Sep-Oct) closely; it's a general/federal rather than Florida-specific source, but settles the qualitative bimodal-peak claim. Per audit item 38: safety.structural changed from true to false since this entry makes no structural-damage claim anywhere -- it lives in grassy runways outdoors, not wall voids or wood."
+      "status": "owner_approved",
+      "notes": "Both items resolved this session. Hantavirus risk: the Florida Department of Health's own hantavirus page confirms the virus \"has been identified in cotton rats in Florida\" and that most US cases are western, with only occasional eastern cases; multiple news reports citing CDC/FDOH figures put confirmed human hantavirus cases in Florida at about three total between 1993 and 2023 (including the original 1993 Dade County case that led to Black Creek Canal virus's discovery, PubMed 7623004) -- confirming this entry's 'rare' framing and calibrated (not overstated) safety_line/urgency. Peak months: the USDA Forest Service Fire Effects Information System (FEIS) species report states hispid cotton rat populations \"usually exhibit a bimodal breeding season, with peak litter production occurring in late spring and in late summer-early fall,\" which matches this entry's peak_months (Apr-Jun and Sep-Oct) closely; it's a general/federal rather than Florida-specific source, but settles the qualitative bimodal-peak claim. Per audit item 38: safety.structural changed from true to false since this entry makes no structural-damage claim anywhere -- it lives in grassy runways outdoors, not wall voids or wood.",
+      "approval_hash": "e40c9f852b8c079c6ba9d355f50b875a7a6819865514ac2ca37ad59105a0fc2c"
     },
     "role": "health_pest",
     "risk": "medical",
@@ -536,8 +540,9 @@
       "https://www.cdc.gov/hantavirus/about/index.html"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "736394223e4dabf85484fa04aaf302007ad7afdfe68a1a5afa7f5eff301b1306"
     },
     "role": "health_pest",
     "risk": "medical",
@@ -650,8 +655,9 @@
       "https://edis.ifas.ufl.edu/dh044"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Found and confirmed a dedicated, rodent-specific UF/IFAS EDIS page this session: ENY-224/DH044, \"Rat and Mouse Control\" (Koehler & Kern). Its 'Recognizing Rat and Mouse Signs' section directly confirms gnaw marks as a documented sign: \"Teeth marks on food, building materials, wire, and edges of beams are indications of gnawing... Fresh gnawing in wood is usually light-colored with sharp, splintery edges. Old gnawing is smooth and darker\" — matching this entry's traits almost verbatim (light/fresh vs. darker/older gouges, wire and structural gnawing, fire-risk framing)."
+      "status": "owner_approved",
+      "notes": "Found and confirmed a dedicated, rodent-specific UF/IFAS EDIS page this session: ENY-224/DH044, \"Rat and Mouse Control\" (Koehler & Kern). Its 'Recognizing Rat and Mouse Signs' section directly confirms gnaw marks as a documented sign: \"Teeth marks on food, building materials, wire, and edges of beams are indications of gnawing... Fresh gnawing in wood is usually light-colored with sharp, splintery edges. Old gnawing is smooth and darker\" — matching this entry's traits almost verbatim (light/fresh vs. darker/older gouges, wire and structural gnawing, fire-risk framing).",
+      "approval_hash": "5a4190a0e07700ec4103e0d8ecbad64c5d4e423d9cf644eb272e590dbd1d32f8"
     },
     "role": "structural_pest",
     "risk": "low",
@@ -764,8 +770,9 @@
       "https://edis.ifas.ufl.edu/dh044"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Found and confirmed a dedicated, rodent-specific UF/IFAS EDIS page this session: ENY-224/DH044, \"Rat and Mouse Control\" (Koehler & Kern). Its 'Recognizing Rat and Mouse Signs' section directly confirms rub marks: \"Along runways, dark greasy rubmarks appear from contact with the rodent's body. Rubmarks on walls appear as black smudges left by the rodent. New rubmarks are soft and will smudge. Old rubmarks are brittle and will flake when scratched. Rafters may show swing marks of roof rats\" — matching this entry's traits closely (dark greasy smudge, builds up over repeated contact, along the same travel spot)."
+      "status": "owner_approved",
+      "notes": "Found and confirmed a dedicated, rodent-specific UF/IFAS EDIS page this session: ENY-224/DH044, \"Rat and Mouse Control\" (Koehler & Kern). Its 'Recognizing Rat and Mouse Signs' section directly confirms rub marks: \"Along runways, dark greasy rubmarks appear from contact with the rodent's body. Rubmarks on walls appear as black smudges left by the rodent. New rubmarks are soft and will smudge. Old rubmarks are brittle and will flake when scratched. Rafters may show swing marks of roof rats\" — matching this entry's traits closely (dark greasy smudge, builds up over repeated contact, along the same travel spot).",
+      "approval_hash": "057f5ef2d8ade16558e2ba5a0407d0512f03b44c3bd1f5e9093e88b4fd990d03"
     },
     "role": "structural_pest",
     "risk": "low",

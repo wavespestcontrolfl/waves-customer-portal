@@ -98,8 +98,9 @@
       "https://en.wikipedia.org/wiki/Muscovy_duck"
     ],
     "review": {
-      "status": "draft",
-      "notes": "No genuinely similar-looking bird exists elsewhere in this 239-entry catalog (only 3 bird slugs total, all owned by this worker), so the required look-alike pairs it with burrowing owl on setting/size/color rather than close visual resemblance; flagging this catalog gap for the owner."
+      "status": "owner_approved",
+      "notes": "No genuinely similar-looking bird exists elsewhere in this 239-entry catalog (only 3 bird slugs total, all owned by this worker), so the required look-alike pairs it with burrowing owl on setting/size/color rather than close visual resemblance; flagging this catalog gap for the owner.",
+      "approval_hash": "57a826d4cc9c9bd2182c34a0d0dc082dfa8676fd56fba8cc8f028e73fa7b14f0"
     },
     "role": "wildlife",
     "risk": "defensive",
@@ -212,8 +213,9 @@
       "https://www.fws.gov/law/migratory-bird-treaty-act-1918"
     ],
     "review": {
-      "status": "draft",
-      "notes": "No standalone woodpecker organism slug exists anywhere in the 239-entry master list, only this damage sign, so sign_of self-references this slug; flagging for the owner in case a woodpecker organism entry should exist (audit item 56, acceptable for now). Federal protection confirmed directly: USFWS's official 2023 list of birds protected under the Migratory Bird Treaty Act (50 CFR 10.13) includes the woodpecker family Picidae; USFWS's own MBTA summary page confirms the Act prohibits take/possession without a permit. Per audit item 36: added a look-alike to carpenter-bee (A entry) since woodpeckers sometimes drill right at a bee hole to reach the larvae inside, a real and common confusion; A-side (carpenter-bee) should add the reciprocal look-alike."
+      "status": "owner_approved",
+      "notes": "No standalone woodpecker organism slug exists anywhere in the 239-entry master list, only this damage sign, so sign_of self-references this slug; flagging for the owner in case a woodpecker organism entry should exist (audit item 56, acceptable for now). Federal protection confirmed directly: USFWS's official 2023 list of birds protected under the Migratory Bird Treaty Act (50 CFR 10.13) includes the woodpecker family Picidae; USFWS's own MBTA summary page confirms the Act prohibits take/possession without a permit. Per audit item 36: added a look-alike to carpenter-bee (A entry) since woodpeckers sometimes drill right at a bee hole to reach the larvae inside, a real and common confusion; A-side (carpenter-bee) should add the reciprocal look-alike.",
+      "approval_hash": "4aa54a67da9d99bfc6d93502e1c121aacc19dc7ffe3cca0aa37a6bf033ca3526"
     },
     "role": "protected_wildlife",
     "risk": "low",
@@ -321,8 +323,9 @@
       "https://en.wikipedia.org/wiki/Burrowing_owl"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Range marked 'occasional' since the known concentrations (Cape Coral, Marco Island, and other specific open lots) are geographically clustered rather than spread evenly across all five SWFL counties; within those specific areas it is closer to 'common.'"
+      "status": "owner_approved",
+      "notes": "Range marked 'occasional' since the known concentrations (Cape Coral, Marco Island, and other specific open lots) are geographically clustered rather than spread evenly across all five SWFL counties; within those specific areas it is closer to 'common.'",
+      "approval_hash": "c41a481768712a51acb025546f63e7464a737aa83b95d22ea453c7af589d5bb4"
     },
     "role": "protected_wildlife",
     "risk": "low",

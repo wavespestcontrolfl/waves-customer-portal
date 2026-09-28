@@ -8,8 +8,9 @@
     "sign_of": [],
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "3fd84d9cf3428d47fe8630012e0e4208e94f03dcd7b7d00cfe95ab818ab4ed3c"
     },
     "slug": "armadillo",
     "common_name": "Nine-banded Armadillo",
@@ -203,8 +204,9 @@
       "https://ufdcimages.uflib.ufl.edu/IR/00/00/58/89/00001/UW04200.PDF"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Peak months confirmed and corrected this session: UF/IFAS Fact Sheet SS-WIS-33, \"Squirrels of Florida\" (Huegel, Dept. of Wildlife Ecology & Conservation), states Florida squirrels \"usually produce 2 litters of 2-4 young each year. The first litter is born in January or February while the second arrives in mid-summer.\" peak_months corrected from the previously unsupported Feb-Mar/Sep-Oct window to Jan-Feb and Jun-Jul, matching this Florida-specific source's two birth pulses."
+      "status": "owner_approved",
+      "notes": "Peak months confirmed and corrected this session: UF/IFAS Fact Sheet SS-WIS-33, \"Squirrels of Florida\" (Huegel, Dept. of Wildlife Ecology & Conservation), states Florida squirrels \"usually produce 2 litters of 2-4 young each year. The first litter is born in January or February while the second arrives in mid-summer.\" peak_months corrected from the previously unsupported Feb-Mar/Sep-Oct window to Jan-Feb and Jun-Jul, matching this Florida-specific source's two birth pulses.",
+      "approval_hash": "83b653584adf05e03706361b06d2b10609055b6414de4cc6ae740215061353a6"
     },
     "role": "wildlife",
     "risk": "defensive",
@@ -319,8 +321,9 @@
       "https://ufdcimages.uflib.ufl.edu/IR/00/00/58/89/00001/UW04200.PDF"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Habitat-dependency claim confirmed this session: UF/IFAS Fact Sheet SS-WIS-33, \"Squirrels of Florida\" (Huegel), states this species is \"found statewide, primarily in hardwood forests and mixed woodlands of pine and hardwood\" and \"require[s] habitat that contains at least some large trees,\" directly supporting the 'favors mature hardwood canopy more than typical new SWFL subdivisions' reasoning behind the 'occasional' range call. No county-level SWFL density figure exists, but the qualitative habitat claim is resolved."
+      "status": "owner_approved",
+      "notes": "Habitat-dependency claim confirmed this session: UF/IFAS Fact Sheet SS-WIS-33, \"Squirrels of Florida\" (Huegel), states this species is \"found statewide, primarily in hardwood forests and mixed woodlands of pine and hardwood\" and \"require[s] habitat that contains at least some large trees,\" directly supporting the 'favors mature hardwood canopy more than typical new SWFL subdivisions' reasoning behind the 'occasional' range call. No county-level SWFL density figure exists, but the qualitative habitat claim is resolved.",
+      "approval_hash": "9e91dfb4e9d4fcf18f0712443a95013240a86585cec31ffad6dbb09bc88f673a"
     },
     "role": "wildlife",
     "risk": "defensive",
@@ -429,8 +432,9 @@
       "https://ask.ifas.ufl.edu/uw033"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Peak months confirmed and corrected this session: UF/IFAS EDIS WEC-34/UW033 (\"Northern Raccoon\") states raccoons have one litter per year and that birth \"generally occurs in March and April\" in Florida. Given a roughly two-month gestation, that puts mating around January-February, so peak_months is narrowed to January-April (mating through birth) and the previously unsupported October-December spike is removed as not backed by this or any other source checked."
+      "status": "owner_approved",
+      "notes": "Peak months confirmed and corrected this session: UF/IFAS EDIS WEC-34/UW033 (\"Northern Raccoon\") states raccoons have one litter per year and that birth \"generally occurs in March and April\" in Florida. Given a roughly two-month gestation, that puts mating around January-February, so peak_months is narrowed to January-April (mating through birth) and the previously unsupported October-December spike is removed as not backed by this or any other source checked.",
+      "approval_hash": "e516339213a43b733a982fbc7b1d29da77c3fc2207624c3eb48ea2d29515644d"
     },
     "role": "wildlife",
     "risk": "medical",
@@ -543,8 +547,9 @@
       "https://ask.ifas.ufl.edu/publication/UW471/pdf"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Peak months confirmed and corrected this session: UF/IFAS \"Wildlife of Florida Factsheet: Virginia Opossum\" (WEC426/UW471, UF/IFAS Range Cattle Research and Education Center, Ona FL) states \"most young are born between February and June, though breeding may continue through November,\" and flags spring/summer as the breeding icons. peak_months corrected from the previously unsupported Sep-Jan window to Feb-Jun, matching this Florida-specific source directly."
+      "status": "owner_approved",
+      "notes": "Peak months confirmed and corrected this session: UF/IFAS \"Wildlife of Florida Factsheet: Virginia Opossum\" (WEC426/UW471, UF/IFAS Range Cattle Research and Education Center, Ona FL) states \"most young are born between February and June, though breeding may continue through November,\" and flags spring/summer as the breeding icons. peak_months corrected from the previously unsupported Sep-Jan window to Feb-Jun, matching this Florida-specific source directly.",
+      "approval_hash": "36c2fd05eec3401279be13546867c7b700004f07c0732d1021c9f4056dfa636e"
     },
     "role": "wildlife",
     "risk": "defensive",
@@ -656,8 +661,9 @@
       "https://en.wikipedia.org/wiki/Mexican_free-tailed_bat"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Included 'bat'/'bats' as aliases even though this is the only bat organism entry; note there is also a 'bat-bug' insect slug elsewhere in the catalog whose name contains the word 'bat', so alias matching logic should be checked for false-positive overlap. Per audit item 20: label and tech_notes now say 'exclusion only, never trapping' since trapping this protected species is illegal; kept referral wildlife_trapper (the enum has no separate exclusion-only referral value, and the same wildlife professional performs legal exclusion) and action specialist."
+      "status": "owner_approved",
+      "notes": "Included 'bat'/'bats' as aliases even though this is the only bat organism entry; note there is also a 'bat-bug' insect slug elsewhere in the catalog whose name contains the word 'bat', so alias matching logic should be checked for false-positive overlap. Per audit item 20: label and tech_notes now say 'exclusion only, never trapping' since trapping this protected species is illegal; kept referral wildlife_trapper (the enum has no separate exclusion-only referral value, and the same wildlife professional performs legal exclusion) and action specialist.",
+      "approval_hash": "e11475ffdb69c5568001b8c6d87d6f4906625e9dda58297dd5fec044c68c8a6d"
     },
     "role": "protected_wildlife",
     "risk": "medical",
@@ -767,8 +773,9 @@
       "https://ask.ifas.ufl.edu/publication/UW080"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Peak months partly confirmed this session: UF/IFAS \"Wildlife of Florida Factsheet: Eastern Mole\" (UW080) states young \"are born in March after a 45-day gestation period,\" which places mating around mid-January -- consistent with this entry's Jan-Mar peak window. The source doesn't separately address general tunneling-activity peaks (as opposed to breeding), so the Nov-Dec portion of peak_months remains a reasonable but not separately source-confirmed estimate tied to cooler/moister soil conditions. Per audit item 7 / BRIEF Revision 3 wildlife routing: service.line changed from lawn to none with a wildlife_trapper referral (site_category stays \"Lawn\" per slugs.tsv, which only governs the website category)."
+      "status": "owner_approved",
+      "notes": "Peak months partly confirmed this session: UF/IFAS \"Wildlife of Florida Factsheet: Eastern Mole\" (UW080) states young \"are born in March after a 45-day gestation period,\" which places mating around mid-January -- consistent with this entry's Jan-Mar peak window. The source doesn't separately address general tunneling-activity peaks (as opposed to breeding), so the Nov-Dec portion of peak_months remains a reasonable but not separately source-confirmed estimate tied to cooler/moister soil conditions. Per audit item 7 / BRIEF Revision 3 wildlife routing: service.line changed from lawn to none with a wildlife_trapper referral (site_category stays \"Lawn\" per slugs.tsv, which only governs the website category).",
+      "approval_hash": "658d54769553fae01ac1cf44879c9fd72448c50e64312d392436641c85f76be3"
     },
     "role": "wildlife",
     "risk": "low",
@@ -878,8 +885,9 @@
       "https://myfwc.com/wildlifehabitats/profiles/mammals/land/pocket-gopher/"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Contradicted and corrected this session: FWC's own Land Mammals profile page states plainly, \"Southeastern pocket gophers are found in the northern half of the state,\" with range extending north into Alabama and Georgia -- it does not name Southwest Florida or central Florida as part of the range. This contradicts the draft's 'occasional' range (which implied at least patchy SWFL presence); range corrected to 'rare' and copy/tech_notes reworded to flag it as mainly a north/central Florida species included here as a look-alike for eastern mole damage, not as a species commonly expected in SWFL yards. Per audit item 7 / BRIEF Revision 3 wildlife routing: service.line changed from lawn to none with a wildlife_trapper referral (site_category stays \"Lawn\" per slugs.tsv, which only governs the website category)."
+      "status": "owner_approved",
+      "notes": "Contradicted and corrected this session: FWC's own Land Mammals profile page states plainly, \"Southeastern pocket gophers are found in the northern half of the state,\" with range extending north into Alabama and Georgia -- it does not name Southwest Florida or central Florida as part of the range. This contradicts the draft's 'occasional' range (which implied at least patchy SWFL presence); range corrected to 'rare' and copy/tech_notes reworded to flag it as mainly a north/central Florida species included here as a look-alike for eastern mole damage, not as a species commonly expected in SWFL yards. Per audit item 7 / BRIEF Revision 3 wildlife routing: service.line changed from lawn to none with a wildlife_trapper referral (site_category stays \"Lawn\" per slugs.tsv, which only governs the website category).",
+      "approval_hash": "e90bfa63f0d96df97ec6a732819e2f3f985840d3b6c6ea9172b8c6403275c6b0"
     },
     "role": "wildlife",
     "risk": "low",
@@ -986,8 +994,9 @@
       "https://myfwc.com/wildlifehabitats/profiles/mammals/land/wild-hog/"
     ],
     "review": {
-      "status": "draft",
-      "notes": "No standalone feral hog organism slug exists anywhere in the 239-entry master list, only this rooting sign, so sign_of self-references this slug; flagging for the owner in case a hog organism entry should exist. Claim confirmed this session: FWC's Land Mammals profile states wild hogs \"occur in all 67 counties of Florida\" (so the species itself is genuinely statewide, not a niche presence), but the same page notes they prefer \"oak-cabbage palm hammocks, freshwater marshes and sloughs, pine flatwoods, and more open agricultural areas\" and that \"adequate fencing should keep them out of small yards and gardens\" -- supporting this entry's framing that rooting concentrates near undeveloped land/canals rather than showing up in an ordinary fenced SWFL yard. Range 'occasional' is consistent with that pattern and is now source-backed rather than a bare judgment call."
+      "status": "owner_approved",
+      "notes": "No standalone feral hog organism slug exists anywhere in the 239-entry master list, only this rooting sign, so sign_of self-references this slug; flagging for the owner in case a hog organism entry should exist. Claim confirmed this session: FWC's Land Mammals profile states wild hogs \"occur in all 67 counties of Florida\" (so the species itself is genuinely statewide, not a niche presence), but the same page notes they prefer \"oak-cabbage palm hammocks, freshwater marshes and sloughs, pine flatwoods, and more open agricultural areas\" and that \"adequate fencing should keep them out of small yards and gardens\" -- supporting this entry's framing that rooting concentrates near undeveloped land/canals rather than showing up in an ordinary fenced SWFL yard. Range 'occasional' is consistent with that pattern and is now source-backed rather than a bare judgment call.",
+      "approval_hash": "5d0a890f609a2b587c90b722f8853f2fa8034d47791d3cc93913cdc07bcbbc60"
     },
     "role": "wildlife",
     "risk": "defensive",

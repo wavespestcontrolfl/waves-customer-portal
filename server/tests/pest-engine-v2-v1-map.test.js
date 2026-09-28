@@ -374,9 +374,11 @@ describe('inherited v1 identity keeps the named v2 entry service contract', () =
   // service line or 'high' urgency shared by the whole node).
   test('every audited draft special fallback stays unnamed and keeps its mapped medical hazards', () => {
     const safetyFields = { stinging: 'stings', venomous: 'venomous', disease_vector: 'disease_vector' };
-    const audited = catalog.listEntries().filter((entry) => entry.review.status === 'draft'
-      && (entry.service.referral || entry.safety.protected || entry.risk === 'medical'));
-    expect(audited).toHaveLength(55);
+    // Every such entry, forced to draft (answerFor approved:false), whatever
+    // its catalog review status.
+    const audited = catalog.listEntries().filter((entry) => entry.service.referral
+      || entry.safety.protected || entry.risk === 'medical');
+    expect(audited).toHaveLength(59);
 
     for (const entry of audited) {
       const built = answerFor(entry.slug, { approved: false });

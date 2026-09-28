@@ -243,8 +243,9 @@
     "safety_line": "German roach infestations can trigger allergies and asthma and can adulterate food with feces and shed skins. Keep food sealed and surfaces clean while treatment is underway.",
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "2f97adc40f7220c3d146f7332d6167e4b42361e6e32bc30118cfc11f09cb5aab"
     },
     "slug": "german-cockroach",
     "common_name": "German Cockroach",
@@ -454,8 +455,9 @@
       "https://journals.flvc.org/edis/article/view/119483"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Per audit item 55: removed the 'palmetto bug' alias/aka, which also appears on american-cockroach (A entry) -- that is the more classic Florida usage for the American cockroach specifically, so it's kept there and dropped here to avoid a shared-name collision. 'Stink roach' and 'skunk cockroach' remain distinctive to this species."
+      "status": "owner_approved",
+      "notes": "Per audit item 55: removed the 'palmetto bug' alias/aka, which also appears on american-cockroach (A entry) -- that is the more classic Florida usage for the American cockroach specifically, so it's kept there and dropped here to avoid a shared-name collision. 'Stink roach' and 'skunk cockroach' remain distinctive to this species.",
+      "approval_hash": "ab9afb7c5b63447e34342e4a161b3fdedcda765175670ad33db698e75819c1d5"
     }
   },
   {
@@ -786,8 +788,9 @@
       "https://blogs.ifas.ufl.edu/pestalert/2020/04/17/which-roach-is-around-your-yard/"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "53682a7799d17d2b538d88a70a9470bc77d9830e02d8c1fe0c0e8c17e1a2f9c8"
     }
   },
   {
@@ -904,8 +907,9 @@
       "https://www.fws.gov/species/brownbanded-cockroach-supella-longipalpa"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "0769f0bf6013b4f3ca540a1868cfc4e6a201957be3d89f6925d9bc1d56ef3f76"
     }
   },
   {
@@ -1261,8 +1265,9 @@
       "https://journals.flvc.org/edis/article/view/119483"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "76145c6a43c2533e0547857736488f236981a33e5ee52df4deeaf156b6d9e05e"
     }
   }
 ]

@@ -15,8 +15,9 @@
     "safety_line": "Can spread dengue, Zika, and chikungunya locally. See a doctor if you develop fever, rash, or joint pain after being bitten.",
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "da022a9120d6b2abafda4eac93419e014036165a360585308d86243eff962988"
     },
     "slug": "aedes-mosquito",
     "common_name": "Yellow Fever Mosquito",
@@ -124,8 +125,9 @@
     "safety_line": "Capable of spreading dengue, chikungunya, and other viruses. See a doctor if you develop fever, rash, or joint pain after being bitten.",
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "c75e13e3ec40577d7c38f1aca17ffffc6eda6aff34d4a22fabce26e576714092"
     },
     "slug": "asian-tiger-mosquito",
     "common_name": "Asian Tiger Mosquito",
@@ -323,8 +325,9 @@
       "https://ask.ifas.ufl.edu/publication/IN837"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "ac94c79ef82c9fb98a5ea54a6645a9bcb2f9821b90af5cfa9af92dfb513e6a57"
     }
   },
   {
@@ -430,8 +433,9 @@
       "https://blogs.ifas.ufl.edu/news/2013/03/04/huge-aggressive-mosquito-may-be-abundant-in-florida-this-summer-ufifas-expert-warns"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "3ccaeece320276c5a070da41fc41eb29657ab5ad832cf764f6113cce6d8640e8"
     }
   },
   {
@@ -542,8 +546,9 @@
       "https://ask.ifas.ufl.edu/publication/IN1035"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Confirmed against UF/IFAS EDIS IN1035: it explicitly says this species \"is not a primary vector of major concern\" for human disease, acting only as a secondary/bridge vector for EEE and VEE, and is \"a nuisance in Florida\" mainly through aggressive biting after rain and flooding. disease_vector stays true for its documented dog-heartworm vectoring; copy and tech_notes already frame it as a nuisance/pet-risk mosquito rather than a major human-disease threat, matching the source."
+      "status": "owner_approved",
+      "notes": "Confirmed against UF/IFAS EDIS IN1035: it explicitly says this species \"is not a primary vector of major concern\" for human disease, acting only as a secondary/bridge vector for EEE and VEE, and is \"a nuisance in Florida\" mainly through aggressive biting after rain and flooding. disease_vector stays true for its documented dog-heartworm vectoring; copy and tech_notes already frame it as a nuisance/pet-risk mosquito rather than a major human-disease threat, matching the source.",
+      "approval_hash": "9f6aa22e9946a38126babf0cf90e79c1a5824c8a3619be55b52e2c712d04154b"
     }
   },
   {
@@ -655,8 +660,9 @@
       "https://edis.ifas.ufl.edu/publication/in594"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "2ab00713b8f217d851f4f602e3845343eb498f3ad75431fc208d561c3a74da6d"
     }
   }
 ]

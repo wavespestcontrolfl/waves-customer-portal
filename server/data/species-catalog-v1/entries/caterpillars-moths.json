@@ -234,8 +234,9 @@
     "safety_line": "The most venomous caterpillar in the US — hidden spines under the fur cause intense pain. Never touch it. See a doctor if pain or swelling worsens. Call 911 if someone has trouble breathing.",
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "22c50a8e8f006e6f50262b4f96e2d2775fa7af666b65b440725d6076a368b942"
     },
     "slug": "puss-caterpillar",
     "common_name": "Puss Caterpillar",
@@ -336,8 +337,9 @@
     "safety_line": "Spines sting like nettles and can cause a burning, itchy welt. See a doctor for a strong allergic reaction. Call 911 if someone has trouble breathing.",
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "cf182e76eb180b8e529d9c0f5025a955d0a9ac743f419be6233d12084af72d6d"
     },
     "slug": "io-moth-caterpillar",
     "common_name": "Io Moth Caterpillar",
@@ -517,8 +519,9 @@
       "https://en.wikipedia.org/wiki/Acharia_stimulea"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "b19a8ad5ce9bf1dbcf5661c6b4ea8c2e07cba6b2d13d0c11110fc35771ef0df0"
     },
     "role": "stinging_pest",
     "risk": "medical",
@@ -618,8 +621,9 @@
       "https://en.wikipedia.org/wiki/Phobetron_pithecium"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "92e830e3146d6bb0aff456f1fb95c222aad9d75d698460ca39e869b84d81e7db"
     },
     "role": "stinging_pest",
     "risk": "irritant",
@@ -716,8 +720,9 @@
       "https://ask.ifas.ufl.edu/publication/IN834"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Corrected against UF/IFAS EDIS IN834 (Featured Creatures: Buck Moth): eggs laid Oct-Dec, hatch in spring with new plant growth, larvae feed through early summer before pupating near the ground -- peak months (Mar-May) match this documented cycle. IN834 describes the species' range as Maine to Florida and characterizes it as more of a north/central Florida oak-scrub specialist; it gives no SWFL-specific commonness figure. Range stays 'occasional' as the cautious, source-consistent default, and no SWFL-specific commonality is asserted in copy."
+      "status": "owner_approved",
+      "notes": "Corrected against UF/IFAS EDIS IN834 (Featured Creatures: Buck Moth): eggs laid Oct-Dec, hatch in spring with new plant growth, larvae feed through early summer before pupating near the ground -- peak months (Mar-May) match this documented cycle. IN834 describes the species' range as Maine to Florida and characterizes it as more of a north/central Florida oak-scrub specialist; it gives no SWFL-specific commonness figure. Range stays 'occasional' as the cautious, source-consistent default, and no SWFL-specific commonality is asserted in copy.",
+      "approval_hash": "94582bcafd7556bc30d851e439130215d69d7b6b8dbb437a6b5f65763b36da1e"
     },
     "role": "stinging_pest",
     "risk": "medical",
@@ -816,8 +821,9 @@
       "https://ask.ifas.ufl.edu/publication/IN1032"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Confirmed against UF/IFAS EDIS IN1032 (Featured Creatures: Fir Tussock Moth, Orgyia detrita): hair pencils, dorsal tussocks and two Florida color forms match this entry's traits; O. detrita is univoltine with eggs hatching late February, larvae maturing early April, adults emerging mid-April to early May -- peak months (Mar-Apr) match that documented cycle. Active_months is kept broader (through September) because UF/IFAS IPM community and county-extension resources independently confirm (without giving exact months) that the two rarer Florida Orgyia species (O. leucostigma, O. definita) do have a second, summer generation; no specific summer peak is claimed for the genus, only the well-documented spring peak of the common species."
+      "status": "owner_approved",
+      "notes": "Confirmed against UF/IFAS EDIS IN1032 (Featured Creatures: Fir Tussock Moth, Orgyia detrita): hair pencils, dorsal tussocks and two Florida color forms match this entry's traits; O. detrita is univoltine with eggs hatching late February, larvae maturing early April, adults emerging mid-April to early May -- peak months (Mar-Apr) match that documented cycle. Active_months is kept broader (through September) because UF/IFAS IPM community and county-extension resources independently confirm (without giving exact months) that the two rarer Florida Orgyia species (O. leucostigma, O. definita) do have a second, summer generation; no specific summer peak is claimed for the genus, only the well-documented spring peak of the common species.",
+      "approval_hash": "f33a9023562734c0103fa564359213b46d2f5c981f9e01a111978275c4d578dc"
     },
     "role": "stinging_pest",
     "risk": "irritant",
@@ -922,8 +928,9 @@
       "https://en.wikipedia.org/wiki/Syntomeida_epilais"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Returned to draft after restoring the qualified related-host range in customer-facing copy; owner re-approval is required."
+      "status": "owner_approved",
+      "notes": "Returned to draft after restoring the qualified related-host range in customer-facing copy; owner re-approval is required.",
+      "approval_hash": "e08b82d51e98547beabeea94de07fb3d1d2c6811c6e5afe7ef90e3093826f0a6"
     },
     "role": "plant_pest",
     "risk": "low",
@@ -1249,8 +1256,9 @@
       "https://ask.ifas.ufl.edu/publication/IN780"
     ],
     "review": {
-      "status": "draft",
-      "notes": "UF/IFAS EDIS IN780 (Featured Creatures: Monarch Butterfly) confirms larvae accumulate milkweed cardiac glycosides that make the caterpillar and adult distasteful/toxic to predators. The ASPCA Animal Poison Control Center confirms milkweed (Asclepias) itself is toxic to pets via the same glycosides, though poisoning is uncommon due to the plant's bitter taste. No source (UF/IFAS, ASPCA, or general veterinary literature) documents a specific case of a pet becoming ill from eating a monarch caterpillar itself, so safety_line and copy state only the general glycoside-mechanism caution (toxic_to_pets true, risk low) and do not claim a documented case."
+      "status": "owner_approved",
+      "notes": "UF/IFAS EDIS IN780 (Featured Creatures: Monarch Butterfly) confirms larvae accumulate milkweed cardiac glycosides that make the caterpillar and adult distasteful/toxic to predators. The ASPCA Animal Poison Control Center confirms milkweed (Asclepias) itself is toxic to pets via the same glycosides, though poisoning is uncommon due to the plant's bitter taste. No source (UF/IFAS, ASPCA, or general veterinary literature) documents a specific case of a pet becoming ill from eating a monarch caterpillar itself, so safety_line and copy state only the general glycoside-mechanism caution (toxic_to_pets true, risk low) and do not claim a documented case.",
+      "approval_hash": "bd5809b6403904756159902b9326bf45b53febad52582ae6ee12885f9c289f3b"
     },
     "role": "beneficial",
     "risk": "low",
@@ -1356,8 +1364,9 @@
       "https://en.wikipedia.org/wiki/Psychidae"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Approval is pending after the resolver added not_matches for plaster bagworm / household casebearer. Per audit item 54: the citrus-leafminer pairing here is a low-value, same-category match rather than a real visual confusion. The genuine, well-documented bagworm mix-up is with the 'household casebearer' / 'plaster bagworm' (Phereoeca uterella) -- a small case-building moth larva homeowners commonly call a bagworm indoors (Waves' own site already has a blog post on plaster bagworms). That species has no slug anywhere in the 239-entry master list, so it can't be added as a look_alikes target without creating a new entry, which is outside this pass's scope; flagging for the owner as a catalog gap worth adding in a future slug batch."
+      "status": "owner_approved",
+      "notes": "Approval is pending after the resolver added not_matches for plaster bagworm / household casebearer. Per audit item 54: the citrus-leafminer pairing here is a low-value, same-category match rather than a real visual confusion. The genuine, well-documented bagworm mix-up is with the 'household casebearer' / 'plaster bagworm' (Phereoeca uterella) -- a small case-building moth larva homeowners commonly call a bagworm indoors (Waves' own site already has a blog post on plaster bagworms). That species has no slug anywhere in the 239-entry master list, so it can't be added as a look_alikes target without creating a new entry, which is outside this pass's scope; flagging for the owner as a catalog gap worth adding in a future slug batch.",
+      "approval_hash": "0ec8c238cd09685b56a048589f0d7bb7e7a075e592ac094afe818c63ff5d429b"
     },
     "role": "plant_pest",
     "risk": "low",
@@ -1467,8 +1476,9 @@
       "https://en.wikipedia.org/wiki/Syntomeida_epilais"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "75e831837255734460a6ef8f412cecd2c121c46edfbc91bb8576deaa179feaca"
     },
     "role": "harmless_visitor",
     "risk": "low",

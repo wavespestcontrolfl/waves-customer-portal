@@ -869,8 +869,9 @@
       "https://gardeningsolutions.ifas.ufl.edu/home/care/pests-and-diseases/pests/lobate-lac-scale"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Source corrected to IN471 (the actual Lobate Lac Scale Featured Creature). IN471 documents spread from Broward County (1999) through Miami-Dade and Palm Beach; UF/IFAS Gardening Solutions broadens this to 'a potentially damaging landscape pest in southern Florida.' Neither source names a Southwest Florida county, so SWFL-specific density stays unconfirmed; range is kept at 'occasional' as the cautious, source-consistent regional default (southern Florida generally), not a specific SWFL claim."
+      "status": "owner_approved",
+      "notes": "Source corrected to IN471 (the actual Lobate Lac Scale Featured Creature). IN471 documents spread from Broward County (1999) through Miami-Dade and Palm Beach; UF/IFAS Gardening Solutions broadens this to 'a potentially damaging landscape pest in southern Florida.' Neither source names a Southwest Florida county, so SWFL-specific density stays unconfirmed; range is kept at 'occasional' as the cautious, source-consistent regional default (southern Florida generally), not a specific SWFL claim.",
+      "approval_hash": "2791fed5abbc83b3f738734075bacb711d6b6d8fcbe05f99540a985155cef556"
     },
     "role": "plant_pest",
     "risk": "low",
@@ -983,8 +984,9 @@
       "https://blogs.ifas.ufl.edu/okaloosaco/sooty-mold/"
     ],
     "review": {
-      "status": "draft",
-      "notes": "sign_of list is illustrative of common causes, not exhaustive; any sap-feeding, honeydew-producing insect on the plant or an overhanging tree can be the true source. Returned to draft after correcting the visible trait so an old honeydew deposit does not require live feeders to remain visible; owner re-approval is required."
+      "status": "owner_approved",
+      "notes": "sign_of list is illustrative of common causes, not exhaustive; any sap-feeding, honeydew-producing insect on the plant or an overhanging tree can be the true source. Returned to draft after correcting the visible trait so an old honeydew deposit does not require live feeders to remain visible; owner re-approval is required.",
+      "approval_hash": "2242d788855f8b080bc3ab9f063a33a341a5ec8466aeab03231ad4276105b9e1"
     },
     "role": "plant_pest",
     "risk": "low",
