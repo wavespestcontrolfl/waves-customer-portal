@@ -236,6 +236,37 @@ postgres('parent-decision lock — real Postgres advisory-lock mechanics', () =>
     expect(() => assertParentDecisionLockAlive()).not.toThrow();
   });
 
+  // Codex #4971 r19 P1: once the session is lost, PostgreSQL has released its
+  // locks — a nested writer must take its OWN transaction lock again instead
+  // of skipping it because the ALS store still named the key as held.
+  test('a nested writer re-takes the transaction lock after the held session is lost', async () => {
+    const termId = await insertTerm({ annualPlanVersion: 'v3', status: 'active' });
+    const { acquireTermiteGateAtEntry } = require('../services/annual-prepay-renewals');
+    let nestedLockCount = null;
+    await withParentDecisionLock(termId, async () => {
+      const pidRow = await holder.raw(
+        "SELECT pid FROM pg_locks WHERE locktype = 'advisory' AND granted AND classid = hashtext(?) AND objid = hashtext(?::text)",
+        ['annual-prepay-parent-decision', String(termId)],
+      );
+      await holder.raw('SELECT pg_terminate_backend(?)', [pidRow.rows[0].pid]);
+      for (let waited = 0; waited < 3000 && (await advisoryLockCount(termId)) > 0; waited += 25) await sleep(25);
+      for (let waited = 0; waited < 3000; waited += 25) {
+        try {
+          require('../services/annual-prepay-renewals').assertParentDecisionLockAlive();
+        } catch (err) {
+          break;
+        }
+        await sleep(25);
+      }
+      await db.transaction(async (trx) => {
+        await acquireTermiteGateAtEntry(trx, { termIds: [termId] });
+        nestedLockCount = await advisoryLockCount(termId);
+      });
+    });
+    // Before the fix the nested writer saw the key as held and took nothing.
+    expect(nestedLockCount).toBe(1);
+  });
+
   test('(b) the unlock runs on the SAME session that took the lock — pg_locks clears the instant fn() resolves', async () => {
     const termId = 'lock-same-session-1';
     let sawHeld = false;

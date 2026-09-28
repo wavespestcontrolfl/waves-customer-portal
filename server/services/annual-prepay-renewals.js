@@ -8917,7 +8917,19 @@ const PARENT_DECISION_LOCK_TIMEOUT_MS = 5000;
 // lock connection, so every writer takes any pair in the one global order,
 // and nested gates on either key are skipped as held.
 const heldParentDecisionLockStore = new AsyncLocalStorage();
-const heldDecisionKeys = () => heldParentDecisionLockStore.getStore()?.keys || new Set();
+// Codex #4971 r19 P1: the store keeps each session's own keys and loss
+// state ({ keys, lockHeld } per session, outermost first). A key counts as
+// held only while ITS session is alive — once PostgreSQL has released a lost
+// session's locks, nested writers must take their own transaction locks
+// again instead of trusting the stale marker.
+const heldDecisionSessions = () => heldParentDecisionLockStore.getStore()?.sessions || [];
+const heldDecisionKeys = () => {
+  const live = new Set();
+  for (const session of heldDecisionSessions()) {
+    if (!session.lockHeld.lost) session.keys.forEach((key) => live.add(key));
+  }
+  return live;
+};
 
 // Codex #4971 r15 P1: the lock SESSION's own liveness, threaded through the
 // same store as the keys it holds. The dedicated raw connection backing
@@ -8931,8 +8943,15 @@ const heldDecisionKeys = () => heldParentDecisionLockStore.getStore()?.keys || n
 // loss can land at any point while fn() is running. A no-op outside any
 // held gate (nothing to assert).
 function assertParentDecisionLockAlive() {
-  const assertAlive = heldParentDecisionLockStore.getStore()?.assertAlive;
-  if (assertAlive) assertAlive();
+  // Every enclosing session, not just the innermost: a lost OUTER session
+  // releases its keys even while a nested one is still alive.
+  const lost = heldDecisionSessions().find((session) => session.lockHeld.lost);
+  if (lost) {
+    throw Object.assign(
+      new Error(`the parent-decision lock session for term ${[...lost.keys][0]} was lost before this action reached its provider — never attempted`),
+      { code: 'PARENT_DECISION_LOCK_LOST', deliveryNeverAttempted: true },
+    );
+  }
 }
 
 // Extracted from recordDecision (Codex round-7 P2 self-review, AGENTS.md
@@ -9245,7 +9264,10 @@ async function withParentDecisionLock(termId, fn, { timeoutMs = PARENT_DECISION_
     await takeSessionDecisionLocks(lockConn, keys, locked, boundedTimeoutMs);
     // Mark these terms as session-lock-held for the lifetime of fn()'s own
     // async tree — see heldParentDecisionLockStore's doc above.
-    return await heldParentDecisionLockStore.run({ keys: new Set([...held, ...keys]), assertAlive }, () => fn());
+    return await heldParentDecisionLockStore.run(
+      { sessions: [...heldDecisionSessions(), { keys: new Set(keys), lockHeld }] },
+      () => fn(),
+    );
   } finally {
     if (lockConn) await releaseSessionDecisionLocks(lockConn, locked);
   }
