@@ -2862,7 +2862,9 @@ question was routed to, one of `REPORT_QUESTION_TOPICS` (`reentry`, `watering`,
 `unrouted`); the response body is unchanged. Only this route writes that
 event: the public `POST /api/reports/:token/events` refuses
 `report_question_asked` with the same 400 as an unknown event, so a token
-holder cannot add question rows the engagement tools would count. This route and the
+holder cannot add question rows the engagement tools would count. A staff
+reader's question (the report page sends the portal JWT, verified exactly like
+the `/data` staff read) is answered the same way but writes no row. This route and the
 service-report `/api/reports/:token/ask` both answer with
 `Cache-Control: no-store` and `X-Robots-Tag: noindex, nofollow` on every
 response, including CORS preflights, the global `/api` limiter's 429 and

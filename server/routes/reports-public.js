@@ -1827,10 +1827,15 @@ router.post('/:token/ask', async (req, res, next) => {
     // The question's text is never stored — only its length and the topic
     // the answer came from (report-assistant.js REPORT_QUESTION_TOPICS), so
     // the engagement stats can say what customers ask about per report type.
-    await recordServiceReportEvent(service, 'report_question_asked', 'public_report', req, {
-      question_length: question.length,
-      topic,
-    });
+    // A staff QA question (the report page sends the portal JWT, as on the
+    // /data read) is answered but never recorded as customer engagement
+    // (codex P2 on #5167).
+    if (!(await staffCanViewSuppressed(req))) {
+      await recordServiceReportEvent(service, 'report_question_asked', 'public_report', req, {
+        question_length: question.length,
+        topic,
+      });
+    }
     return res.json({ answer });
   } catch (err) { next(err); }
 });
