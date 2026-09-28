@@ -139,6 +139,8 @@ describe('groundRescheduleAgreement', () => {
     // Codex #5092 r5: "this evening" is the call's day, and a window ending at
     // noon puts its start in the morning.
     expect(agreedAt('2026-09-23T18:00:00-04:00', 'We can come by at six this evening.', { day: 'this evening', hour: 'six', period: 'this evening' }).ok).toBe(true);
+    // Codex #5092 r10: punctuation kept in the recorded words.
+    expect(agreedAt('2026-09-23T18:00:00-04:00', 'We can come by at six this evening.', { day: 'this evening.', hour: 'six', period: 'this evening.' }).ok).toBe(true);
     expect(agreedAt('2026-09-24T10:00:00-04:00', 'We will be there between 10 and noon tomorrow.', { day: 'tomorrow', hour: '10', period: 'noon' }).ok).toBe(true);
     expect(agreedAt('2026-09-24T22:00:00-04:00', 'We will be there between 10 and noon tomorrow.', { day: 'tomorrow', hour: '10', period: 'noon' }))
       .toMatchObject({ ok: false, reason: 'agreed_slot_words_mismatch' });
@@ -185,6 +187,8 @@ describe('groundRescheduleAgreement', () => {
     });
     expect(jan31('the 30th', '2027-03-30T14:00:00-04:00').ok).toBe(true);
     expect(jan31('the 30th', '2027-02-28T14:00:00-05:00').ok).toBe(false);
+    // Codex #5092 r10: "February 29" waits for the next leap year.
+    expect(jan31('February 29th', '2028-02-29T14:00:00-05:00').ok).toBe(true);
   });
 
   test('a weekday beside an explicit date describes that date', () => {

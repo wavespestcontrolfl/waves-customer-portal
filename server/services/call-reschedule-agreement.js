@@ -172,7 +172,8 @@ function statedHour(hourWords, periodWords) {
 // "Next Thursday" / "this coming Thursday" read as the weekday (both are
 // bounded to this week or next below); "tonight", "this morning", "this
 // afternoon" and "this evening" are the call's own day.
-const TODAY_WORDS = /^\s*(?:tonight|this (?:morning|afternoon|evening))\s*$/i;
+// Matched on the normalized words, so "tonight." reads as "tonight".
+const TODAY_WORDS = /^(?:tonight|this (?:morning|afternoon|evening))$/;
 // "This Thursday" / "this coming Thursday" is the nearest one. "Next
 // Thursday" is left to the grammar, which does not read it: it can mean
 // either of two dates, so it grounds none.
@@ -191,8 +192,13 @@ function nearestDate(said, started) {
   const [ty, tm] = today.split('-').map(Number);
   if (said.year !== undefined) return isoDate(said.year, said.month, said.day);
   if (said.month !== undefined) {
-    const thisYear = isoDate(ty, said.month, said.day);
-    return thisYear >= today ? thisYear : isoDate(ty + 1, said.month, said.day);
+    // This year's if still ahead, else the first later year that has it
+    // ("February 29" waits for a leap year).
+    for (let k = 0; k <= 8; k += 1) {
+      const candidate = isoDate(ty + k, said.month, said.day);
+      if (candidate >= today && validCalendarDate(candidate)) return candidate;
+    }
+    return null;
   }
   if (said.day !== undefined) {
     // This month's if still ahead, else the first later month that has
@@ -214,7 +220,7 @@ function nearestDate(said, started) {
 // state must be the date's, and the date must be the one they name — the
 // next that fits (nearestDate), never a later one.
 function namesDate(words, date, started) {
-  const said = statedDateComponents(String(words).replace(TODAY_WORDS, 'today').replace(NEAREST_LEAD, ''), started);
+  const said = statedDateComponents(TODAY_WORDS.test(normalize(words)) ? 'today' : String(words).replace(NEAREST_LEAD, ''), started);
   if (!said) return false;
   const weekday = new Date(`${date}T12:00:00Z`).getUTCDay();
   return (said.weekday === undefined || said.weekday === weekday) && nearestDate(said, started) === date;
