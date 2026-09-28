@@ -140,7 +140,15 @@ describe('MobileCheckoutSheet attached-invoice preview', () => {
     expect(screen.getByRole('button', { name: 'Add Service' })).toBeInTheDocument();
   });
 
-  it('never presents a payer-billed visit\'s attached invoice as collectible', () => {
+  // codex pre-push P2 (round 15, Codex r12 finding): this used to assert the
+  // visit's OWN price ($115) stayed chargeable even though the attached
+  // invoice was correctly suppressed — but the server's payer guard (POST
+  // /:id/invoice, PayerService.resolveForInvoice) refuses in-person
+  // collection for EVERY payer-resolved visit unconditionally, with no
+  // price check at all, so a priced payer-billed visit 400'd on every tap
+  // of that "Charge $115.00" button. Neither the attached invoice NOR the
+  // visit's own price is chargeable through this sheet now.
+  it('never presents a payer-billed visit\'s attached invoice — or its own price — as collectible', () => {
     render(
       <MobileCheckoutSheet
         service={{
@@ -155,7 +163,8 @@ describe('MobileCheckoutSheet attached-invoice preview', () => {
     // visits — the sheet must not promise the attached invoice.
     expect(screen.queryByText(/Invoice on file/)).not.toBeInTheDocument();
     expect(screen.queryByText(/Charging collects this invoice as-is/)).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Charge $115.00' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Charge $115.00' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'No charge — complete from job' })).toBeDisabled();
   });
 
   it('suppresses the branch when the INVOICE itself is payer-billed', () => {

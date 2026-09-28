@@ -734,10 +734,9 @@ describe('getCardExpiryExemptCustomerIds — visits judged by predictCompletionB
   // ever minted" — before this fix, that read as a genuine 'none' verdict
   // and this projection kept the card-expiry warning alive for a charge
   // completion's own REFUSE AFTER A VOID guard actually holds for manual
-  // review. Scoped to per_application ONLY — the annual_prepay-lane
-  // sibling tests just above (baseVisit's own default lane) are unaffected
-  // by design (perApplicationCompletionVoidHold is a per_application-only
-  // check, verified separately in billing-lane's own tests).
+  // review. Keyed on the VISIT's shape (unpriced, estimate-linked, not a
+  // callback), never the customer's current billing_mode — see the lane
+  // test below.
   test('a voided combined invoice with no live replacement (per_application lane) holds the projection — stays exempt', async () => {
     route({
       terms: coveredAlways(['c-prepaid']),
@@ -749,19 +748,20 @@ describe('getCardExpiryExemptCustomerIds — visits judged by predictCompletionB
     expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
   });
 
-  // The lane this ruling does NOT touch: an annual_prepay visit (baseVisit's
-  // own default lane) with the SAME voided-sibling shape is unaffected —
-  // perApplicationCompletionVoidHold is a per_application-only check, so it
-  // never runs for this lane at all, and the void row (excluded by
-  // findFirstApplicationInvoiceForEstimateService's own query either way)
-  // reads as the ordinary 'none' it always has.
-  test('a voided sibling on an annual_prepay visit is unaffected — no equivalent hold for this lane', async () => {
+  // Codex r12 P2 (PR #5023): the hold must NOT depend on the customer's
+  // CURRENT lane. Completion's REFUSE AFTER A VOID park checks only the
+  // visit's shape, so a customer moved from per_application to another
+  // lane after the void is still parked at completion — this projection
+  // has to agree, or it keeps a card-expiry warning alive for a charge
+  // completion never makes. Same voided-sibling shape on baseVisit's own
+  // default (annual_prepay) lane → held → exempt.
+  test('a voided combined invoice holds the projection whatever lane the customer sits in today — stays exempt', async () => {
     route({
       terms: coveredAlways(['c-prepaid']),
-      visits: [baseVisit({ source_estimate_id: 'est-1' })],
+      visits: [baseVisit({ source_estimate_id: 'est-1', estimated_price: null })],
       invoices: (own) => (isSiblingInvoiceLookup(own) ? [siblingInvoice('void')] : []),
     });
-    expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
+    expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
   });
 
   test('a hold row closes the EXTENDED lane even under auto_charge — the hold rail alone decides', async () => {

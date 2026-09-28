@@ -1061,14 +1061,23 @@ async function combinedInvoiceVoidedWithoutLiveReplacement(svc, dbConn, { lockRo
 // decision) — a lookup FAILURE fails toward null (the caller's ordinary
 // prediction stands), never toward inventing a hold; only a mint decision
 // fails closed the other way. Returns the voided invoice row when this
-// exact shape is held, null otherwise (every non-per_application lane,
-// every priced visit, a customer with no estimate link at all —
-// isSiblingCoverageEligibleVisit gates it the SAME way the Charge Now
-// resolver's own guard does).
+// exact shape is held, null otherwise (every priced visit, a callback, a
+// visit with no estimate link at all — isSiblingCoverageEligibleVisit
+// gates it the SAME way the Charge Now resolver's own guard does).
+//
+// Deliberately NOT gated on the customer's CURRENT billing_mode (Codex r12
+// P2): completion's own REFUSE AFTER A VOID park
+// (complete-scheduled-service.js, the isSiblingCoverageEligibleVisit +
+// combinedInvoiceVoidedWithoutLiveReplacement pair) checks only the
+// VISIT's shape — the lane is mutable, and a customer switched from
+// per_application to monthly, legacy-null or any other lane after the
+// void still gets parked at completion. An earlier `billingMode !==
+// 'per_application'` early return here let both projections (closeout
+// status, card-expiry warning) show a charge completion never makes for
+// exactly that customer. Same lane-independent predicate as completion.
 async function perApplicationCompletionVoidHold({
-  billingMode, isCallback, serviceType, svc, dbConn,
+  isCallback, serviceType, svc, dbConn,
 }) {
-  if (billingMode !== 'per_application') return null;
   const hasOwnPrice = (svc?.estimated_price != null && Number(svc.estimated_price) > 0)
     || hasAuthoritativeZeroPrice(svc?.estimated_price, svc?.primary_line_price);
   if (!isSiblingCoverageEligibleVisit({

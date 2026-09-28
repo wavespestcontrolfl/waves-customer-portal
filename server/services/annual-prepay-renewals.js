@@ -5155,7 +5155,7 @@ async function computeCardExpiryExemptions(horizon = etDateString(), conn = db) 
         // three can never disagree.
         if (!split.existing) {
           const voidHold = await perApplicationCompletionVoidHold({
-            billingMode: v.billing_mode || null, isCallback: !!v.is_callback, serviceType: v.service_type, svc: v, dbConn: conn,
+            isCallback: !!v.is_callback, serviceType: v.service_type, svc: v, dbConn: conn,
           });
           if (voidHold) continue;
         }

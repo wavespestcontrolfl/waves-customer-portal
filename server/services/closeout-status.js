@@ -534,10 +534,11 @@ async function loadCloseoutInputs(serviceId, { knex = db, now = new Date(), _res
   // 'invoice'/'auto_charge' amount here. One shared, read-only check
   // (perApplicationCompletionVoidHold) so this can never drift from the
   // Charge Now guard or from annual-prepay-renewals.js's own card-expiry
-  // projection, which reuses the SAME helper. Every other lane is a no-op
-  // (returns null immediately).
+  // projection, which reuses the SAME helper. Keyed on the VISIT's shape
+  // only, never the customer's current (mutable) billing_mode — completion
+  // parks the same visit whatever lane the customer sits in today (Codex
+  // r12 P2).
   const perApplicationVoidHoldProbe = await probe('per_application void hold', unavailable, () => perApplicationCompletionVoidHold({
-    billingMode: inputs.customer?.billing_mode || null,
     isCallback: visit.is_callback === true,
     serviceType: visit.service_type,
     svc: visit,

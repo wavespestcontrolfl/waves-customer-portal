@@ -581,6 +581,36 @@ describe('MobileAppointmentDetailSheet monthlyRate fallback', () => {
     );
     expect(screen.queryByRole('button', { name: /Review & checkout/i })).not.toBeInTheDocument();
   });
+
+  // codex pre-push P2 (round 15, Codex r12 finding): this used to be scoped
+  // to `!hasOwnPrice` on isPayerBilled — but the server's payer guard
+  // (POST /:id/invoice, PayerService.resolveForInvoice) refuses the mint
+  // for EVERY payer-resolved visit unconditionally, with no price check at
+  // all. A PRICED payer-billed visit (BASE_SERVICE's own $100
+  // estimatedPrice, untouched here) previewed "Review & checkout" and then
+  // 400'd on the tap. Both payer signals proven separately, matching the
+  // two tests above.
+  it.each([
+    ['prediction kind \'payer\'', { billedToPayer: undefined, prediction: { kind: 'payer', amount: 100, conflictStampedPrice: false } }],
+    ['the billedToPayer stamp', { billedToPayer: true, prediction: { kind: 'invoice', amount: 100, conflictStampedPrice: false } }],
+  ])('a PRICED payer-billed visit never offers "Review & checkout" — signal: %s', (_label, { billedToPayer, prediction }) => {
+    render(
+      <MobileAppointmentDetailSheet
+        service={{
+          ...BASE_SERVICE,
+          billedToPayer,
+          billingLane: {
+            mode: 'per_application',
+            source: 'explicit',
+            monthlyRate: null,
+            prediction,
+          },
+        }}
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.queryByRole('button', { name: /Review & checkout/i })).not.toBeInTheDocument();
+  });
 });
 
 // Codex round 5 P2: the sibling lookup came back needs_review/error

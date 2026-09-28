@@ -347,11 +347,17 @@ export default function MobileAppointmentDetailSheet({
   // acceptance fee: `price` above falls through to
   // billingLane.prediction.amount for ANY non-callback/non-prepaid kind,
   // 'payer' included, making `total` positive with nothing this sheet may
-  // offer to collect. Scoped to `!hasOwnPrice` — a visit with its OWN
-  // stamped price never reads the prediction for `price` at all (mirrors
-  // MobileCheckoutSheet), so it stays the existing, separately-tested
-  // self-pay flow regardless of a payer stamp.
-  const isPayerBilled = !hasOwnPrice && (predictionKind === 'payer' || !!service.billedToPayer);
+  // offer to collect.
+  //
+  // codex pre-push P2 (round 15, Codex r12 finding): this used to be scoped
+  // to `!hasOwnPrice` — but the server's payer guard
+  // (admin-schedule.js POST /:id/invoice, PayerService.resolveForInvoice)
+  // refuses the mint for EVERY payer-resolved visit unconditionally, with
+  // no price check at all. A PRICED payer-billed visit previewed "Review &
+  // checkout" here (hasChargeableAmount true) and then 400'd on the tap.
+  // Suppress checkout whenever either payer signal is present, priced or
+  // not, matching the server exactly.
+  const isPayerBilled = predictionKind === 'payer' || !!service.billedToPayer;
   const hasChargeableAmount = total > 0 && !coveredByMembership && !prepaidCovered
     && !siblingCoveredInvoice && !isPayerBilled && !siblingNeedsReview;
   // Fully prepay-covered visits collect nothing, so the line items and total

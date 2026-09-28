@@ -459,15 +459,20 @@ export default function MobileCheckoutSheet({
   // same principle as the server round-2 fix: an unconfirmed/unsafe base
   // must never be diluted by stacking an extra on top of it and calling
   // the sum safe (codex round-2 P2).
-  // An UNPRICED payer-billed visit with no already-attached collectible
-  // invoice (openVisitInvoice/processingVisitInvoice are already null for
-  // it, above) has nothing THIS sheet may collect in person — `price`
-  // above fell through to the prediction's acceptance-fee amount, and the
-  // AR is the payer's AP inbox; the server refuses the mint categorically.
-  // Scoped to `!hasOwnPrice`: a visit with its OWN stamped price is an
-  // existing, separately-tested self-pay flow this must not disable.
+  // A payer-billed visit with no already-attached collectible invoice
+  // (openVisitInvoice/processingVisitInvoice are already null for it,
+  // above — both exclude payerBilled at their own definitions) has nothing
+  // THIS sheet may collect in person; the AR is the payer's AP inbox.
+  //
+  // codex pre-push P2 (round 15, Codex r12 finding): this used to be scoped
+  // to `!hasOwnPrice` — but the server's payer guard (POST /:id/invoice,
+  // PayerService.resolveForInvoice) refuses the mint for EVERY
+  // payer-resolved visit unconditionally, with no price check at all — a
+  // PRICED payer-billed visit's own `price` (rawPrice) still previewed a
+  // live "Charge $X" button here, which then 400'd on every tap. Disabled
+  // regardless of hasOwnPrice, matching the server exactly.
   const nothingToCharge = priceRefreshBlocksCharge || totalBeforePrepaid <= 0 || !!processingVisitInvoice
-    || (!hasOwnPrice && payerBilled && !invoicePreview)
+    || (payerBilled && !invoicePreview)
     || siblingBlocksCharge
     || attachedInvoiceRefusedForFeeAtCompletion;
 
