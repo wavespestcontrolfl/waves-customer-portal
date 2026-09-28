@@ -84,11 +84,20 @@ const UNVERIFIED_CLAIM_RULES = [
 // words is that denial stated correctly, not the false claim.
 const NEGATION_RE = /\b(?:not|isn'?t|is\s+not|never|no)\b/i;
 
-function nearbyWindow(body, match, radius) {
+// The exemption keyword ("drywood", "flea") must belong to the SAME
+// sentence as the matched claim — a fixed character radius bleeds across
+// sentence boundaries and lets an unrelated earlier/later sentence about a
+// different pest wrongly clear this one (Codex: "Drywood termites may fly
+// in fall. Native subterranean termites have a second swarm after
+// storms." must still block on the second sentence). Bounded the same way
+// the rule patterns themselves are ([^.]) — from the period before the
+// match (or the start of the text) to the period after it (or the end).
+function sentenceWindow(body, match) {
   const idx = match.index ?? 0;
-  const start = Math.max(0, idx - radius);
-  const end = Math.min(body.length, idx + match[0].length + radius);
-  return body.slice(start, end);
+  const end = idx + match[0].length;
+  const start = body.lastIndexOf('.', idx) + 1; // 0 when no prior '.'
+  const stop = body.indexOf('.', end);
+  return body.slice(start, stop === -1 ? body.length : stop);
 }
 
 // A global clone of a rule's pattern — matchAll needs the 'g' flag, and a
@@ -111,15 +120,16 @@ function isExemptOccurrence(body, match, rule, negatable) {
     // fact-west-indian-drywood-termite-dispersal and
     // fact-western-drywood-termite-flight-season both correctly document
     // drywood species flying across most of the year, including late
-    // summer and repeat/near-any-month flights. A mention of "drywood"
-    // near the match is that correct, wider window, not the false claim.
-    if (/\bdrywood\b/i.test(nearbyWindow(body, match, 200))) return true;
+    // summer and repeat/near-any-month flights. A mention of "drywood" in
+    // the SAME SENTENCE as the match is that correct, wider window, not
+    // the false claim.
+    if (/\bdrywood\b/i.test(sentenceWindow(body, match))) return true;
   }
   if (rule === 'non_flea_vacuum_advice') {
     const negated = !!match[1];
     // A negated instruction ("do not"/"avoid" vacuuming for N days) is
     // never correct — flagged regardless of flea context.
-    if (!negated && /\bflea/i.test(nearbyWindow(body, match, 200))) return true;
+    if (!negated && /\bflea/i.test(sentenceWindow(body, match))) return true;
   }
   return false;
 }

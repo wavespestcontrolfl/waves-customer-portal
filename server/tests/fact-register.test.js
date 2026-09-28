@@ -77,6 +77,11 @@ describe('findUnverifiedClaims', () => {
     expect(claims.some((c) => c.rule === 'termite_second_swarm')).toBe(true);
   });
 
+  test('a correct drywood sentence does NOT exempt a false claim about a DIFFERENT sentence/species', () => {
+    const claims = findUnverifiedClaims('Drywood termites may fly in fall. Native subterranean termites have a second swarm after storms.');
+    expect(claims.some((c) => c.rule === 'termite_second_swarm')).toBe(true);
+  });
+
   test('flags brown/large patch mis-described as a summer disease', () => {
     const claims = findUnverifiedClaims('Watch for large patch this summer as temperatures climb.');
     expect(claims.some((c) => c.rule === 'large_patch_summer_disease')).toBe(true);
@@ -108,6 +113,11 @@ describe('findUnverifiedClaims', () => {
 
   test('a later non-exempt occurrence still blocks after an earlier exempt one', () => {
     const claims = findUnverifiedClaims('For fleas, vacuum daily for 14 days. For fleas, avoid vacuuming for 14 days.');
+    expect(claims.some((c) => c.rule === 'non_flea_vacuum_advice')).toBe(true);
+  });
+
+  test('correct flea guidance in one sentence does NOT exempt a false claim about a DIFFERENT pest in another', () => {
+    const claims = findUnverifiedClaims('For fleas, vacuum daily for about 14 days so pupae hatch into the residual. Vacuum daily for 14 days after your ant treatment.');
     expect(claims.some((c) => c.rule === 'non_flea_vacuum_advice')).toBe(true);
   });
 
