@@ -2959,9 +2959,9 @@ describe('termite annual renewal charge', () => {
       expect(Number.isFinite(lastAssert)).toBe(true);
     });
 
-    test('Codex #4971 r24 P1: a gate session lost before retrieval raises NOTHING — the lapse throws and resumes next tick', async () => {
+    test('Codex #4971 r24/r26 P1: a gate session lost before the irreversible steps voids NOTHING and raises NOTHING — the lapse throws and resumes next tick', async () => {
       mockCommon();
-      const { raiseTermiteRetrievalTask, recordDecision } = mockLapseDeps({
+      const { raiseTermiteRetrievalTask, recordDecision, voidInvoice } = mockLapseDeps({
         assertParentDecisionLockAliveImpl: () => { throw Object.assign(new Error('parent-decision lock session lost'), { code: 'PARENT_DECISION_LOCK_LOST' }); },
       });
       jest.doMock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'n1' })) }));
@@ -2975,6 +2975,8 @@ describe('termite annual renewal charge', () => {
         renewal_lapse_started_at: new Date('2026-10-01T00:00:00Z'),
       };
       await expect(_private.processGraceLapseForTerm(term, conn)).rejects.toThrow('lock session lost');
+      // r26: the assertion precedes the void itself, the first irreversible step.
+      expect(voidInvoice).not.toHaveBeenCalled();
       expect(raiseTermiteRetrievalTask).not.toHaveBeenCalled();
       expect(recordDecision).not.toHaveBeenCalled();
       expect(completedUpdate).not.toHaveBeenCalledWith(expect.objectContaining({ renewal_lapse_outcome: 'lapsed' }));

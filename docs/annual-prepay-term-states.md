@@ -70,9 +70,9 @@ overwritten in that window could then re-activate through move 2's
 | 17 | `active` / `renewal_pending` | `cancelled` **(b)** | Termite annual plan only: the renewal successor's own payment grace deadline passes unpaid (its invoice was actually presented to the customer — see `TR`'s grace-lapse pass) — the successor's invoice voids (cascading the successor itself to `cancelled` **(a)** through move 9) and, in the SAME tick, `TR`'s `processGraceLapseForTerm` calls `recordDecision('cancel')` on the PARENT, recording the decided lapse. Reuses the SAME writer an operator's manual "cancel" click uses (move 8). | `TR` `processGraceLapseForTerm` (calls `recordDecision('cancel')`) | `where({ id: termId }) AND status IN ACTIVE_STATUSES AND renewal_decision IS NULL` |
 
 Everything not in the table is not a move. In particular there is **no**
-`switch_plan → *` or `cancelled(b) → *` (other than move 13), `renewed → *`
-only through the customer's unprocessed-renew supersession (move 14), and
-nothing ever writes `canceled` or `refunded`. Moves 16 and 17 are both
+`switch_plan → *` or `cancelled(b) → *` (move 13 now refuses a decided
+term), `renewed → *` only through the customer's unprocessed-renew
+supersession (move 14), and nothing ever writes `canceled` or `refunded`. Moves 16 and 17 are both
 automated *triggers* of the SAME `recordDecision` writer moves 6 and 8 use —
 neither is a new status-write site in `annual-prepay-renewals.js`, and
 neither reads or writes a row already carrying a `renewal_decision`

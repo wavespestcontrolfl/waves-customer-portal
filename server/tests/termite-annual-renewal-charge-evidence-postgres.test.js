@@ -1511,6 +1511,77 @@ describeOrSkip('termite renewal charge — chokepoint A payment evidence, real P
     });
   });
 
+  // Codex #4971 r26 P1: the pay link's USE. A delivered renewal pay link
+  // whose parent has since been cancelled / moved must not start or finalize
+  // a payment at the public pay page.
+  describe('r26: the public payment boundary re-checks the renewal', () => {
+    async function deliveredRenewal(parentFields = {}) {
+      const parent = await insertParent({ term_end: daysFromToday(-5), ...parentFields });
+      const invoice = await insertInvoice({ status: 'sent', sent_at: new Date() });
+      const inserted = await insertSuccessor(parent, invoice, { term_start: daysFromToday(-4), created_at: new Date() });
+      return { parent, successor: inserted, invoice: { id: invoice.id, annual_prepay_term_id: inserted.id } };
+    }
+
+    test('an eligible renewal is payable; an ordinary invoice is never even looked up', async () => {
+      const { invoice } = await deliveredRenewal();
+      await expect(Charge.renewalPaymentRefusal(invoice, db)).resolves.toBeNull();
+      const plain = jest.fn(() => { throw new Error('an ordinary invoice must not query'); });
+      await expect(Charge.renewalPaymentRefusal({ id: randomUUID(), annual_prepay_term_id: null }, plain)).resolves.toBeNull();
+      expect(plain).not.toHaveBeenCalled();
+    });
+
+    test('a parent cancelled after delivery refuses the payment, with a customer-safe message', async () => {
+      const { parent, invoice } = await deliveredRenewal();
+      await db('annual_prepay_terms').where({ id: parent.id }).update({ status: 'cancelled', renewal_decision: 'cancel', renewal_decision_at: new Date() });
+      const refusal = await Charge.renewalPaymentRefusal(invoice, db);
+      expect(refusal).toMatchObject({ message: expect.stringMatching(/no longer be paid online/i) });
+      expect(refusal.reason).toMatch(/parent/);
+    });
+
+    test('withRenewalPaymentClearance: a refused renewal never reaches pay(); an eligible one does, under the gate', async () => {
+      const blocked = await deliveredRenewal();
+      await db('annual_prepay_terms').where({ id: blocked.parent.id }).update({ status: 'cancelled', renewal_decision: 'cancel', renewal_decision_at: new Date() });
+      const pay = jest.fn(async () => 'paid');
+      await expect(Charge.withRenewalPaymentClearance(blocked.invoice, pay, db)).rejects.toMatchObject({ code: 'RENEWAL_NOT_PAYABLE' });
+      expect(pay).not.toHaveBeenCalled();
+
+      const ok = await deliveredRenewal();
+      const gate = jest.fn((_termId, fn) => fn());
+      const previous = Renewals.withParentDecisionLock;
+      Renewals.withParentDecisionLock = gate;
+      try {
+        await expect(Charge.withRenewalPaymentClearance(ok.invoice, pay, db)).resolves.toBe('paid');
+      } finally {
+        Renewals.withParentDecisionLock = previous;
+      }
+      expect(pay).toHaveBeenCalledTimes(1);
+      expect(gate).toHaveBeenCalledWith(ok.parent.id, expect.any(Function), { alsoTermIds: [ok.successor.id] });
+    });
+  });
+
+  // Codex #4971 r27 P1: the AUTOMATIC charge is capped at the parent's own
+  // renewal window (term_end + grace days) even though the successor's own
+  // payment grace runs from the later of its term_start / created_at.
+  describe('r27: automatic charges are capped at the parent renewal window', () => {
+    async function mintedLate(parentEndDaysAgo) {
+      const parent = await insertParent({ term_end: daysFromToday(-parentEndDaysAgo) });
+      const invoice = await insertInvoice({ status: 'draft' });
+      const inserted = await insertSuccessor(parent, invoice, { term_start: daysFromToday(-parentEndDaysAgo + 1), created_at: new Date() });
+      return inserted;
+    }
+
+    test('31 days past the parent term_end: no automatic charge, even inside the successor\'s own grace', async () => {
+      const successor = await mintedLate(31);
+      await expect(Charge._private.resolveChargeEligibility(successor.id, db)).resolves.toMatchObject({ eligible: false, reason: 'past_renewal_charge_window' });
+      expect((await db('annual_prepay_terms').where({ id: successor.id }).first('renewal_charge_attempted_at')).renewal_charge_attempted_at).toBeNull();
+    });
+
+    test('inside the parent window the charge fence is claimed as before', async () => {
+      const successor = await mintedLate(29);
+      await expect(Charge._private.resolveChargeEligibility(successor.id, db)).resolves.toEqual({ eligible: true });
+    });
+  });
+
   // Codex #4971 r10 P1s — the charge's provider boundary (stripe.js, under
   // the invoice / customer locks; its own suite) refuses a payer-stamped
   // invoice (PAYER_BILLED_GUARD) and a deleted account (CUSTOMER_DELETED).

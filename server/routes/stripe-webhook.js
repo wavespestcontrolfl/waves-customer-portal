@@ -3087,7 +3087,16 @@ async function handlePaymentIntentFailed(paymentIntent, eventId) {
   // notice with a link back to retry or update their card. Idempotency
   // is per (PI, attempt) so a re-emitted webhook doesn't double-send.
   const isAutopay = paymentIntent.metadata?.type === 'monthly_autopay';
-  if (pmType !== 'us_bank_account' && !isAutopay) {
+  // Codex #4971 r27 P1: an off-session termite RENEWAL charge (source
+  // admin_card_on_file, initiated_by machine — not monthly_autopay) has its
+  // own failure follow-through (leg 7d: one renewal failure notice + pay
+  // link); this generic payment.failed email/SMS would be a second notice
+  // for the same failure. Same rule as the ACH branch: only while the
+  // renewal reconciler is live.
+  const renewalOwnsFailureNotice = Boolean(failedAttemptInvoice?.id)
+    && termiteRenewalReconcilerLive()
+    && (await isTermiteRenewalPrepayInvoice(failedAttemptInvoice.id));
+  if (pmType !== 'us_bank_account' && !isAutopay && !renewalOwnsFailureNotice) {
     const attemptId = paymentIntent.latest_charge || eventId || 'no_charge';
     // Combined full-balance PI (codex r7 P2): resolve the ANCHOR invoice and
     // pass the allocation total, so the failure email names the combined

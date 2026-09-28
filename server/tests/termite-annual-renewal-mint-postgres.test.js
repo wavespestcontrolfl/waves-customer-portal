@@ -78,6 +78,7 @@ const TODAY = '2026-09-27';
 
 describeOrSkip('mintRenewalSuccessor — DB-level idempotency anchor, real Postgres', () => {
   let fixture;
+  let notifyAdmin;
   let db;
   let parentId;
   let customerId;
@@ -104,6 +105,11 @@ describeOrSkip('mintRenewalSuccessor — DB-level idempotency anchor, real Postg
     await db('customers').insert({ id: customerId });
 
     jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+    // The mint's fee guards ring a staff bell (Codex #4971 r23/r24) — kept
+    // hermetic here: the real notification service would open its own pool
+    // on the ambient database and keep Jest from exiting.
+    notifyAdmin = jest.fn(async () => ({ id: 'n1' }));
+    jest.doMock('../services/notification-service', () => ({ notifyAdmin }));
     jest.doMock('../routes/admin-customers', () => ({
       _private: { lockAndAssertNoAnnualPrepayOverlap: jest.fn(async () => undefined) },
     }));
@@ -185,6 +191,8 @@ describeOrSkip('mintRenewalSuccessor — DB-level idempotency anchor, real Postg
     await expect(_private.mintRenewalSuccessor(parentId, db, TODAY)).resolves.toBeNull();
     expect(await db('annual_prepay_terms').where({ renewed_from_term_id: parentId })).toHaveLength(0);
     expect(await db('invoices')).toHaveLength(0);
+    expect(notifyAdmin).toHaveBeenCalledWith('billing', expect.stringMatching(/fee changed after the renewal notice/i), expect.any(String),
+      expect.objectContaining({ dedupeKey: `termite-renewal-charge:${parentId}:fee_changed_after_notice` }));
 
     await db('annual_prepay_terms').where({ id: parentId }).update({ renewal_noticed_fee: 249 });
     const result = await _private.mintRenewalSuccessor(parentId, db, TODAY);
@@ -200,6 +208,8 @@ describeOrSkip('mintRenewalSuccessor — DB-level idempotency anchor, real Postg
     await expect(_private.mintRenewalSuccessor(parentId, db, TODAY)).resolves.toBeNull();
     expect(await db('annual_prepay_terms').where({ renewed_from_term_id: parentId })).toHaveLength(0);
     expect(await db('invoices')).toHaveLength(0);
+    expect(notifyAdmin).toHaveBeenCalledWith('billing', expect.stringMatching(/noticed fee not on record/i), expect.any(String),
+      expect.objectContaining({ dedupeKey: `termite-renewal-charge:${parentId}:notice_fee_unfrozen` }));
   });
 
   test('a parent whose on-time 45-day notice witness is gone mints nothing', async () => {

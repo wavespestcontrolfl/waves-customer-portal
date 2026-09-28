@@ -1116,7 +1116,7 @@ async function mintRenewalSuccessorUnderGate(
 // with nothing claimed and nothing charged.
 async function resolveChargeEligibility(successorId, conn = db) {
   return conn.transaction(async (trx) => {
-    const blocker = await successorActionBlocker(trx, successorId, { lock: true });
+    const blocker = await successorActionBlocker(trx, successorId, { lock: true, chargeWindow: true });
     if (blocker) return { eligible: false, ...blocker };
 
     // The ONE Stripe-attempt fence: claimed in the SAME transaction as
@@ -1183,7 +1183,17 @@ function whereSuccessorNotDisputeSuspended(builder, alias) {
 //            back of its scan (stampSweepDeferred)
 // A refusal with neither is already resolved elsewhere (paid, voided, no
 // longer payment_pending, already attempted).
-async function successorActionBlocker(conn, successorId, { lock = false } = {}) {
+// `chargeWindow` (Codex #4971 r27 P1): the AUTOMATIC charge is additionally
+// capped at the parent's own renewal window — parent.term_end + the grace
+// days, the same bound whereWithinRenewalWindow applies to the mint. The
+// successor's coverage grace is anchored on the later of its term_start /
+// created_at (a successor minted on the last allowed day still gets its
+// full payment grace), but a charge recovered by leg 7a under that extended
+// deadline could land almost 60 days after the renewal date, which the
+// window promises becomes a manual renewal. Read from the parent row this
+// function already holds — no extra query. Pay-link sends and the fallback
+// checks do not pass it: only the charge is capped.
+async function successorActionBlocker(conn, successorId, { lock = false, chargeWindow = false } = {}) {
   const read = (query) => (lock ? query.forUpdate() : query);
   const fresh = await read(conn('annual_prepay_terms').where({ id: successorId })).first();
   if (!fresh) return { reason: 'successor_not_found' };
@@ -1199,6 +1209,10 @@ async function successorActionBlocker(conn, successorId, { lock = false } = {}) 
       return parentEligibility.durable
         ? { reason: parentEligibility.reason, retire: true }
         : { reason: parentEligibility.reason, defer: true };
+    }
+    if (chargeWindow && parent?.term_end
+      && etDateString() > addDaysYmd(dateOnlyString(parent.term_end), graceDays())) {
+      return { reason: 'past_renewal_charge_window' };
     }
   }
 
@@ -2604,6 +2618,50 @@ async function payLinkVerdict(successor, conn) {
   return refusal ? { kind: 'refused', durable: Boolean(refusal.retire), reason: refusal.reason, refusal, fresh: stillPending } : null;
 }
 
+// Codex #4971 r26 P1 — the pay link's USE, not only its sending. A delivered
+// renewal pay link stays in the customer's hands; if the parent is
+// cancelled, refunded or moved afterwards, the successor invoice stays
+// collectible until the next sweep withdraws it, and the public pay page
+// (routes/pay-v2.js) would mint or finalize a payment for a renewal the
+// parent no longer backs. Both helpers key on the invoice's own term link
+// (invoices.annual_prepay_term_id) so an ordinary invoice costs no query.
+async function renewalSuccessorForPayment(invoice, conn = db) {
+  if (!invoice?.id || !invoice.annual_prepay_term_id) return null;
+  return conn('annual_prepay_terms')
+    .where({ id: invoice.annual_prepay_term_id, prepay_invoice_id: invoice.id })
+    .whereNotNull('renewed_from_term_id')
+    .whereNotNull('annual_plan_version')
+    .first();
+}
+
+const RENEWAL_NOT_PAYABLE_MESSAGE = 'This renewal can no longer be paid online. Please call or text us and we will sort it out.';
+
+// Read-only: null = payable (or not a renewal at all); else { reason, message }.
+// 'handled' (the successor already left payment_pending) is left to the
+// invoice's own collectible checks.
+async function renewalPaymentRefusal(invoice, conn = db) {
+  const successor = await renewalSuccessorForPayment(invoice, conn);
+  if (!successor) return null;
+  const verdict = await payLinkVerdict(successor, conn);
+  if (!verdict || verdict.kind === 'handled') return null;
+  return { reason: verdict.reason, message: RENEWAL_NOT_PAYABLE_MESSAGE };
+}
+
+// The money-moving step (the pay page's finalize): re-checked UNDER the
+// renewal gate and held through pay(), exactly like the automatic charge —
+// a parent change waits for it, or is seen by it. Throws code
+// RENEWAL_NOT_PAYABLE when refused.
+async function withRenewalPaymentClearance(invoice, pay, conn = db) {
+  const successor = await renewalSuccessorForPayment(invoice, conn);
+  if (!successor) return pay();
+  return withRenewalGate(successor, async () => {
+    const refusal = await renewalPaymentRefusal(invoice, conn);
+    if (refusal) throw Object.assign(new Error(refusal.message), { code: 'RENEWAL_NOT_PAYABLE', reason: refusal.reason });
+    assertRenewalLockAlive();
+    return pay();
+  });
+}
+
 async function actOnPayLinkVerdict(successor, verdict, conn, context) {
   if (verdict.kind === 'handled') return 'handled';
   if (verdict.kind === 'dispute') {
@@ -3448,6 +3506,11 @@ async function processGraceLapseSequence(term, conn) {
   }
   if (eligibility.outcome === 'retired') return retireSettledLapse(term, conn, eligibility.reason);
 
+  // Codex #4971 r26 P1: the void is the FIRST irreversible step (invoice +
+  // coverage), so the gate session is re-asserted before it too — a gate
+  // lost after the eligibility read would let a concurrent manual renew /
+  // switch commit while this still voided the successor.
+  assertRenewalLockAlive();
   const voidOutcome = await voidLapsedInvoice(term, conn);
   if (voidOutcome) return voidOutcome;
   // Codex #4971 r24 P1: the station-retrieval task is a durable side effect
@@ -3460,6 +3523,8 @@ async function processGraceLapseSequence(term, conn) {
   if (!(await raiseGraceLapseRetrievalTask(term, conn))) {
     return holdLapse(term, conn, { manualReview: false, reason: 'the station-retrieval step is not confirmed yet' });
   }
+  // ...and before the parent decision, the last gated write of the lapse.
+  assertRenewalLockAlive();
   if (!(await decideParentLapse(term, conn))) {
     return holdLapse(term, conn, { manualReview: false, reason: 'the parent lapse decision did not record' });
   }
@@ -4160,6 +4225,8 @@ module.exports = {
   withRenewalSendClearance,
   withRenewalGate,
   withCustomerDeletionGate,
+  renewalPaymentRefusal,
+  withRenewalPaymentClearance,
   termiteAnnualRenewalChargeLive,
   renewalMoneyInMotionForParent,
   renewalMoneyInMotionForTerm,

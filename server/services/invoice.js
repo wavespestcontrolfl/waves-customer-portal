@@ -6435,6 +6435,19 @@ const InvoiceService = {
     // flips the now-'sending' invoice to 'prepaid' — nothing to collect, report it
     // covered; on a delivery failure the !ok path below restores the claim and
     // reverses this seam's applied credit.
+    // Codex #4971 r27 P1: consuming account credit is a money-moving step of
+    // a renewal send — and a fully credit-covered renewal returns below
+    // without ever reaching a provider handoff's own assertion — so the
+    // renewal gate is re-asserted here first. A lost gate restores the send
+    // claim and throws; nothing was applied, nothing was sent.
+    if (_underRenewalGate) {
+      try {
+        assertRenewalGateAlive();
+      } catch (gateErr) {
+        await restoreSendClaim(invoiceId, claim.previousStatus, claim.claimed, consumedQueuedSendRows, db, claim.invoice.send_claim_token);
+        throw gateErr;
+      }
+    }
     const { autoApplyAccountCreditIfEnabled } = require("./customer-credit");
     const sendCreditResult = await autoApplyAccountCreditIfEnabled(invoiceId);
     if (sendCreditResult?.fullyCovered) {
