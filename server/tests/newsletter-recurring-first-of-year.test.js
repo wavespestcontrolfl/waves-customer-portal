@@ -412,4 +412,17 @@ describe('operator star override still bypasses the calendar-year rule', () => {
     const rows = await filterPreviouslyFeaturedIdentities([candidate], { knex, reference: REFERENCE, yearPool: pool });
     expect(rows.map((r) => r.id)).toEqual(['first-2026']);
   });
+
+  test('needs_review blocks a verified first-of-year occurrence in planning and at send', async () => {
+    const priorYear = weeklyEvent('prior-2025', { start_at: '2025-08-02T14:00:00Z' });
+    const flagged = weeklyEvent('first-2026', { start_at: '2026-08-08T14:00:00Z', freshness_status: 'needs_review' });
+    const later = weeklyEvent('second-2026', { start_at: '2026-08-15T14:00:00Z' });
+
+    const planned = await filterRepeatedDateIdentities([flagged], {
+      reference: REFERENCE, identityPool: [priorYear, flagged, later], yearPool: [priorYear, flagged, later],
+    });
+    expect(planned).toHaveLength(1);
+    expect(planned[0].__recurringFirstOfYear).toBe(true);
+    expect(isEligibleForFreshDigest(planned[0], REFERENCE)).toBe(false);
+  });
 });

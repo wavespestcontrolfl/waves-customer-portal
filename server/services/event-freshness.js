@@ -559,6 +559,9 @@ function isEligibleForFreshDigest(event, reference = new Date()) {
   // pool access and can't know about continuity) — isSeriesDebut is the
   // pool-verified override for that one case.
   if (event.freshness_status === 'expired') return false;
+  // An operator's needs_review blocks every path, including the debut and
+  // first-of-year carve-outs below.
+  if (event.freshness_status === 'needs_review') return false;
   if (event.freshness_status === 'stale_recurring' && !isSeriesDebut) return false;
 
   if (event.start_at) {
@@ -580,8 +583,7 @@ function isEligibleForFreshDigest(event, reference = new Date()) {
   // Routine-recurring types reach here only through the debut carve-out.
   if (isSeriesDebut) return true;
 
-  // Reject needs_review and unknown — require explicit classification before digest
-  if (event.freshness_status === 'needs_review') return false;
+  // Reject unknown — require explicit classification before digest
   if (event.event_type === 'unknown') return false;
 
   return false;
