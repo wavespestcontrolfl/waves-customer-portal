@@ -1306,11 +1306,13 @@ const VISIT_FACTS_CONTRACT = {
     voiceFill: true,
     facts: [
       ...typedFormFacts('termite_bait_station', {
-        readers: {
-          termite_activity: [{ file: CROSS_SELL, section: 'Cross-sell V2 findings signal (termite)' }],
-        },
+        // No cross-sell reader: #5200 took termite out of the offer ladder,
+        // so cross-sell.js no longer reads any termite snapshot key. The
+        // registry test caught the stale edge on main (#5190 merged before
+        // #5200's change was in its base).
         notes: {
-          bait_consumption: 'cross-sell.js reads bait_consumption only for rodent_bait_station snapshots; the termite signal is termite_activity alone.',
+          termite_activity: 'Not a cross-sell signal since #5200 (termite left the offer ladder).',
+          bait_consumption: 'cross-sell.js reads bait_consumption only for rodent_bait_station snapshots.',
         },
       }),
       ...typedSharedCompletionFacts(),
