@@ -149,6 +149,32 @@ it.each(['Protocol', 'Protocol optional', 'Action'])('removes an edited generate
   expect(submit.mock.calls[0][1].technicianNotes).not.toContain(label);
 });
 
+it('removes a detached marker with no space after the tag, matching the server grammar', async () => {
+  const label = 'Inspected the recorded lawn service areas.';
+  completionActions = integrityActionList({ label, scope: 'exterior', treatmentApplied: false });
+  mountIntegrity();
+
+  const select = await screen.findByLabelText('Add protocol action');
+  await screen.findByRole('option', { name: label });
+  fireEvent.change(select, { target: { value: 'integrity-action' } });
+  fireEvent.click(screen.getAllByRole('button', { name: /generate ai/i })[0]);
+  const notes = screen.getByPlaceholderText(/Notes about this service/);
+  await waitFor(() => expect(notes.value).toContain('WHAT WE DID'));
+  // taggedCompletionNoteLines (server, complete-scheduled-service.js) matches
+  // /^\[([^\]]+)\]\s*(.+)$/ — the space after the closing bracket is
+  // optional, so a technician-typed "[Protocol]Label" with no space still
+  // reconstructs the action server-side. The client cleanup must delete it
+  // too (codex P2 #5051, SchedulePage.jsx:15660).
+  fireEvent.change(notes, { target: { value: `Reviewed generated prose.\n[Protocol]${label}` } });
+  fireEvent.click(await screen.findByRole('button', { name: `Remove protocol item: ${label}` }));
+  expect(notes.value).toBe('Reviewed generated prose.');
+
+  fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  expect(submit.mock.calls[0][1].protocolActionsCompleted).not.toContain(label);
+  expect(submit.mock.calls[0][1].technicianNotes).not.toContain(label);
+});
+
 it.each([
   ['spray application', {}, 1],
   ['no-dry-down application', { dryDown: false }, 0],
@@ -266,6 +292,41 @@ it('keeps saved scope for a visible restored catalog action', async () => {
     protocolActionsCompleted: [action],
     protocolActionScopesCompleted: [{ label: action, scope: 'exterior', treatmentApplied: true }],
   });
+});
+
+it('drops a restored lawn action the current allowlist no longer offers even with saved scope provenance', async () => {
+  // No appointment-plan defaults here (defaultsEnabled stays false), so the
+  // panel falls through to the legacy completion-actions fetch and sets
+  // protocolActionsLoaded=true against a real (non-empty) list — same path
+  // the "keeps saved scope" test above exercises with an empty list.
+  const label = 'Retired granular lawn treatment';
+  const currentLabel = 'Applied granular fertilizer';
+  // Lawn closeouts list only product-backed rows from this endpoint (see
+  // the `rows.filter((a) => a?.product?.id)` comment above) — the current
+  // action needs a `product` to survive that filter and land in
+  // `protocolActions`.
+  completionActions = {
+    actions: [{ id: 'lawn-current', label: currentLabel, note: currentLabel, raw: currentLabel, scope: 'exterior', treatmentApplied: true, product: { id: 'current-lawn-product' } }],
+  };
+  localStorage.setItem(`waves_completion_draft_${service.id}`, JSON.stringify({
+    serviceId: service.id, savedAt: Date.now(), notes: `[Protocol] ${label}`,
+    selectedProducts: [{ productId: 'test-k', rate: 3, rateUnit: 'fl_oz', totalAmount: 15, amountUnit: 'fl_oz', areaValue: 5000, areaUnit: 'sqft' }],
+    areasServiced: ['Front yard'], selectedProtocolActionLabels: [label],
+    // A saved scope from before the protocol/appointment plan changed must
+    // not bypass a successfully loaded current list that no longer offers
+    // this label (codex P2 #5051, SchedulePage.jsx:16838).
+    actionScopeByLabel: { [label]: { scope: 'exterior', treatmentApplied: true } },
+    chipLinesDetached: false,
+  }));
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  // Wait for the loaded (non-empty) current list to actually land, not just
+  // for the request to have fired.
+  await screen.findByText(currentLabel);
+  fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  expect(submit.mock.calls[0][1].protocolActionsCompleted).not.toContain(label);
+  expect(submit.mock.calls[0][1].technicianNotes).not.toContain(label);
 });
 
 it.each(['marker', 'mixed-case marker', 'generated'])('omits retired lawn actions without saved choice or scope provenance: %s', async (mode) => {

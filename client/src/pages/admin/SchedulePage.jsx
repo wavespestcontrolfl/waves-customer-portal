@@ -15654,10 +15654,15 @@ export function CompletionPanel({
     const normalizedLabel = String(label || "").trim().toLowerCase();
     // Marker lines reconstruct structured selections on the server. Remove a
     // matching marker even when edited generated prose remains detached.
+    // Grammar matches the server parser (taggedCompletionNoteLines,
+    // complete-scheduled-service.js): optional whitespace after the closing
+    // bracket, not required — a tech-typed "[Action]Label" with no space
+    // still reconstructs on the server, so the client must delete it too
+    // (codex P2 r3, thread on SchedulePage.jsx:15660).
     setNotes((current) => current
       .split("\n")
       .filter((line) => {
-        const match = line.match(/^\s*\[([^\]]+)\]\s+(.+)$/);
+        const match = line.match(/^\s*\[([^\]]+)\]\s*(.+)$/);
         return !match
           || !markerTags.has(match[1].trim().toLowerCase())
           || match[2].trim().toLowerCase() !== normalizedLabel;
@@ -16831,11 +16836,23 @@ export function CompletionPanel({
       if (specialtyProtocolActions.length > 0) {
         return specialtyProtocolActions.some((action) => action.label === label);
       }
-      // Saved treatment scope remains authoritative when a visible draft is
-      // restored after its action list becomes unavailable. Specialty
-      // membership stays first and cannot be bypassed by saved scope.
+      // Saved treatment scope remains authoritative only while the current
+      // action source is unavailable — still loading, or loaded with no
+      // items (this service type has no assigned protocol program, so
+      // there is no allowlist to check against). Once a successful
+      // completion-actions load returns actual items, THAT list is the
+      // allowlist and a saved scope from a since-changed protocol or
+      // appointment plan must not bypass it (codex P2 r13 #5051: a restored
+      // label the loaded list no longer offers stayed selected, and its
+      // marker survived into technicianNotes for the customer report).
+      // Specialty membership stays first and cannot be bypassed by saved
+      // scope either way.
       const savedScope = actionScopeByLabel[label];
-      if (savedScope?.scope === "interior" || savedScope?.scope === "exterior") return true;
+      const currentListHasItems = protocolActionsLoaded && protocolActions.length > 0;
+      if (
+        !currentListHasItems &&
+        (savedScope?.scope === "interior" || savedScope?.scope === "exterior")
+      ) return true;
       return !isLawn ||
         (completionImprovements && LAWN_FIELD_ACTIONS.some((action) => action.note === label)) ||
         (protocolActionsLoaded &&
