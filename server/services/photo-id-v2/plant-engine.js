@@ -52,7 +52,11 @@ const {
 } = require('./plant-engine-prompts');
 
 const PROMPT_VERSION = 'photo-id-v2-plant-1';
-const MAX_OUTPUT_TOKENS = 2048;
+// Gemini's reasoning shares this budget with the JSON answer, and the plant
+// prompts (three identity slots, a condition index) run longer than the pest
+// ones: at 2048 a lawn read came back cut off in the 2026-09-28 photo eval,
+// which the ladder can only treat as a miss.
+const MAX_OUTPUT_TOKENS = 4096;
 const PRETTY_SURE_MIN = 0.80;
 const LIKELY_MIN = 0.55;
 const LINEAGE_CLIMB_MIN = 0.60;
@@ -60,6 +64,9 @@ const OUTCOME_CLASS_ALT_MIN = 0.20;
 // Host candidates at or above this verified confidence all feed the
 // tree/shrub/palm condition index (Codex #5186 r1 P1).
 const HOST_UNION_MIN = 0.20;
+// A same-group runner-up at or above this confidence makes a slot's read a
+// close call (see `closeCallIn`).
+const CLOSE_CALL_MIN = 0.20;
 const SUBJECTS = ['lawn', 'tree_shrub', 'palm'];
 // `quality.shows` when the providers disagreed on what the photos show.
 const SHOWS_CONFLICTING = 'conflicting';
@@ -1592,7 +1599,7 @@ async function runConditionLadder(run, identity) {
   };
 }
 
-const REASON_ORDER = ['gemini_missed', 'no_identity_candidate', 'low_confidence', 'self_contradiction', 'different_outcome_classes'];
+const REASON_ORDER = ['gemini_missed', 'no_identity_candidate', 'low_confidence', 'close_call', 'self_contradiction', 'different_outcome_classes'];
 function reasonsFrom(pairs) {
   return pairs.filter(([applies]) => applies).map(([, reason]) => reason);
 }
@@ -1613,6 +1620,23 @@ function identifyLaneSlotsFor(subject) {
  * off-catalog guess with no valid group, or nothing that climbs) is a miss
  * of its own for those lanes (`no_identity_candidate`, Codex #5186 r2 + r4
  * P1) — one inconclusive read must not skip the second opinion. */
+/** A slot's top two catalog candidates belong to the same group (two
+ * grasses, two broadleaf weeds, two palms) and the runner-up still reads
+ * >= 0.20: the model itself sees a same-kind alternative, and a photo
+ * separates same-kind plants worst, so the read gets the second opinion even
+ * at high confidence. The 2026-09-28 photo eval read a textbook bahiagrass
+ * photo (Y-shaped seed heads) as "Likely: Bermudagrass" with bahia as the
+ * runner-up and no escalation; with the second opinion it read bahiagrass. */
+// Slots that hold ONE identity (the lawn's grass, the host plant). A lawn can
+// hold several weeds at once, so two weeds are not rival answers and never a
+// close call (Codex #5255 r1 P2): treating them as one would let a provider
+// ranking them the other way mark the whole weed slot disagreed.
+const SINGLE_IDENTITY_SLOTS = ['turf', 'host'];
+function closeCallIn(candidates) {
+  const [top, second] = candidates.filter((c) => c.entry);
+  return !!(top && second && top.entry.group === second.entry.group && second.confidence >= CLOSE_CALL_MIN);
+}
+
 function identitySlotTriggers(identity, run) {
   const laneSlots = identifyLaneSlotsFor(run.subject);
   const noLaneAnswer = run.mode === 'identify' && !!identity.candidatesJson
@@ -1621,6 +1645,7 @@ function identitySlotTriggers(identity, run) {
     [!identity.candidatesJson || identity.verifyMissedSlots[slot], 'gemini_missed'],
     [noLaneAnswer && laneSlots.includes(slot), 'no_identity_candidate'],
     [identity.slots[slot].length > 0 && identity.slots[slot][0].confidence < escalateBelow(), 'low_confidence'],
+    [SINGLE_IDENTITY_SLOTS.includes(slot) && closeCallIn(identity.slots[slot]), 'close_call'],
     [identity.flippedSlots[slot], 'self_contradiction'],
   ]));
 }

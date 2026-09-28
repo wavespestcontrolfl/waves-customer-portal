@@ -58,6 +58,11 @@ const SELECTORS = [
   { key: 'VISION', env: 'MODEL_VISION', description: 'Claude photo scoring', accepts: { providers: ['anthropic'], cap: 'vision' } },
   { key: 'LAWN_CHALLENGE', env: 'MODEL_LAWN_CHALLENGE', description: 'Lawn diagnostic adversarial challenge', accepts: { providers: ['anthropic'], cap: 'text' } },
   { key: 'VOICE_JUDGE', env: 'MODEL_VOICE_JUDGE', description: 'Voice relay eval judge (pinned: moving it re-baselines the Sandy scorecard)', accepts: { providers: ['anthropic'], cap: 'text' } },
+  // deep: true — its only call sites are the newsletterWriter policy through
+  // llm/call.js, whose wire cap gives always-thinking models (Opus 5.5, Fable)
+  // the same thinking floor deep.js does and reads past thinking blocks and
+  // refusals, so the Opus 5.5 default and the models like it are pickable.
+  { key: 'NEWSLETTER', env: 'MODEL_NEWSLETTER', description: 'Newsletter writer + event curation scoring (owner ruling 2026-09-27: Opus 5.5, effort max)', accepts: { providers: ['anthropic'], cap: 'text', deep: true } },
   { key: 'SMS_SONNET', env: 'MODEL_SMS_SONNET', description: 'Every SMS draft route', accepts: { providers: ['anthropic'], cap: 'text' } },
   { key: 'CALL_EXTRACTION_ANTHROPIC', env: 'MODEL_CALL_EXTRACTION_ANTHROPIC', description: 'Call extraction Claude fallback leg', accepts: { providers: ['anthropic'], cap: 'text' }, lock: { kind: 'benchmark', label: 'Bake-off pinned', detail: 'fallback leg of the 25-call bake-off route; run a new bake-off to move it' } },
   { key: 'CALL_RESEARCH_ANTHROPIC', env: 'MODEL_CALL_RESEARCH_ANTHROPIC', description: 'Call-research miner Claude fallback leg', accepts: { providers: ['anthropic'], cap: 'text' }, lock: { kind: 'benchmark', label: 'Bake-off pinned', detail: 'fallback leg of the 7-arm bake-off route' } },
@@ -114,6 +119,7 @@ const POLICY_SELECTOR = {
   deepAnalysis: { primary: 'DEEP', fallback: 'OPENAI_REPORT_WRITER' },
   imageScreen: { primary: 'OPENAI_IMAGE_SCREEN', fallback: 'VISION' },
   voiceJudge: { primary: 'VOICE_JUDGE', fallback: 'OPENAI_REPORT_WRITER' },
+  newsletterWriter: { primary: 'NEWSLETTER', fallback: 'OPENAI_BALANCED' },
 };
 
 // ── Lane refs ─────────────────────────────────────────────────────────
@@ -260,24 +266,35 @@ const L = (id, name, file, policy, primary, fallback = null, extra = {}) => ({ i
 // fallback that happens to carry the same id.
 function inboundOverrideParse(raw) {
   const { isAllowedOverrideModel } = require('./voice-agent/relay-conversation');
-  return isAllowedOverrideModel(raw) ? raw : null;
+  // { inboundOpenaiContext: true } — the SAME flag resolveSessionModel passes
+  // for an ordinary production inbound session (never sandbox/eval): an
+  // OpenAI id parses here only while GATE_VOICE_RELAY_OPENAI_INBOUND is
+  // live, so the card is truthful about what production inbound actually
+  // resolves whether the gate is on or off. GATE_VOICE_RELAY_OPENAI (the
+  // sandbox/eval gate) has no effect on this row either way.
+  return isAllowedOverrideModel(raw, { inboundOpenaiContext: true }) ? raw : null;
 }
 // The shared chain under the inbound pin — VOICE_RELAY_MODEL, then the VOICE
 // tier: the relay takes each only as an allowlisted Anthropic id
 // (resolveSessionModel — collections reads the same env and speaks only
 // Anthropic), falling to the next link and finally MODELS.DEFAULTS.VOICE, so
 // a refused value shows as rejected here rather than as what inbound runs on.
+// Deliberately NOT passed inboundOpenaiContext — the shared chain stays
+// Anthropic-only regardless of GATE_VOICE_RELAY_OPENAI_INBOUND (relay-
+// conversation.js's resolveSessionModel validates it against
+// ALLOWED_OVERRIDE_MODEL_IDS alone, never the gated allowlist).
 function inboundSharedModelParse(raw) {
   const { ALLOWED_OVERRIDE_MODEL_IDS } = require('./voice-agent/relay-conversation');
   return ALLOWED_OVERRIDE_MODEL_IDS.has(raw) ? raw : null;
 }
 function inboundOverrideAllowed() {
-  // The production inbound allowlist — Anthropic-only even with
-  // GATE_VOICE_RELAY_OPENAI live, since OpenAI candidates resolve only in
-  // sandbox / eval-harness sessions — so the tab's displayed allowlist never
+  // The production inbound allowlist — Anthropic-only unless
+  // GATE_VOICE_RELAY_OPENAI_INBOUND is live (a SEPARATE gate from
+  // GATE_VOICE_RELAY_OPENAI, which only ever widens the sandbox/eval
+  // allowlist, never this row) — so the tab's displayed allowlist never
   // goes stale relative to what resolveSessionModel accepts for this row.
   const { allowedOverrideModelIds } = require('./voice-agent/relay-conversation');
-  return [...allowedOverrideModelIds()];
+  return [...allowedOverrideModelIds({ inboundOpenaiContext: true })];
 }
 
 // The audited call-site map (server/, 2026-09-02). Grouped by the kind of
@@ -309,7 +326,14 @@ const LANES = [
   L('signup_classifier', 'Backlink signup classifier', 'seo/signup-classifier.js', 'fastText', E('MODEL_SIGNUP_CLASSIFIER', T('FAST'))),
   L('mentions_sentiment', 'LLM-mention sentiment classification', 'seo/llm-mention-prober.js', 'fastText', T('FAST')),
   L('events', 'Community events ingestion', 'event-ingestion.js', 'fastText', T('WORKHORSE')),
-  L('events_editorial', 'Community events curation + normalizing', 'event-curation.js, event-normalizer.js', 'fastText', P('contentDraft', 'primary'), P('contentDraft', 'fallback')),
+  // Split from the old combined 'events_editorial' lane (2026-09-27):
+  // curation now runs its own laneId ('events_curation') on the newsletter
+  // writer policy (owner ruling — Opus 5.5 max, stop starving the weekly
+  // issue at 0 approved events); normalizing stays on contentDraft. Two
+  // laneIds means two lane rows, matching hero_alt/image_screen's precedent
+  // for one file's two policies.
+  L('events_curation', 'Community events curation (scoring)', 'event-curation.js', 'fastText', P('newsletterWriter', 'primary'), P('newsletterWriter', 'fallback')),
+  L('events_editorial', 'Community events normalizing (venue/type cleanup)', 'event-normalizer.js', 'fastText', P('contentDraft', 'primary'), P('contentDraft', 'fallback')),
   L('expense_categorize', 'Expense categorization', 'expense-categorizer.js', 'fastText', P('highStakes', 'primary'), P('highStakes', 'fallback'), { note: 'routine categories on the flagship tier' }),
 
   // ── Multimodal ──
@@ -381,7 +405,7 @@ const LANES = [
   L('email_reply', 'Email reply drafting', 'email/email-actions.js', 'voice', P('customerCopy', 'primary'), P('customerCopy', 'fallback'), { inbound: true }),
   L('invoice_summary', 'Invoice AI summary', 'invoice-ai-summary.js', 'voice', P('customerCopy', 'primary'), P('customerCopy', 'fallback')),
   L('blog_draft', 'Blog post drafts', 'content/blog-writer.js', 'voice', P('contentDraft', 'primary'), P('contentDraft', 'fallback')),
-  L('newsletter', 'Newsletter drafts + autopilot rerank', 'newsletter-draft.js, newsletter-autopilot.js, routes/admin-newsletter.js', 'voice', P('contentDraft', 'primary'), P('contentDraft', 'fallback')),
+  L('newsletter', 'Newsletter drafts + autopilot rerank', 'newsletter-draft.js, newsletter-autopilot.js, routes/admin-newsletter.js', 'voice', P('newsletterWriter', 'primary'), P('newsletterWriter', 'fallback'), { note: 'owner ruling 2026-09-27: Opus 5.5 effort max; the admin Compose UI overrides effort to high per-call so an interactive draft cannot hang the request' }),
   L('content_misc', 'Content ideas, scheduler copy, automation emails', 'routes/admin-content-v2.js, content-scheduler.js, routes/admin-automations.js', 'voice', P('contentDraft', 'primary'), P('contentDraft', 'fallback')),
   L('previsit_brief', 'Pre-visit brief', 'previsit-brief.js', 'voice', P('visitBrief', 'primary'), P('visitBrief', 'fallback')),
   L('job_card_paragraph', 'Job card customer paragraph', 'job-card.js', 'voice', P('jobCardParagraph', 'primary'), P('jobCardParagraph', 'fallback'), { note: 'GATE_JOB_CARD, dark' }),
@@ -400,7 +424,7 @@ const LANES = [
   // it would draft an env value inboundOverrideParse() (and the runtime's own
   // resolveSessionModel) reject outright, falling back after the restart the
   // owner thought would apply it.
-  L('voice_relay', 'Inbound voice relay (Sandy)', 'voice-agent/relay-conversation.js', 'voice', E('VOICE_RELAY_INBOUND_MODEL', E('VOICE_RELAY_MODEL', T('VOICE', { parse: inboundSharedModelParse, fallbackModel: () => MODELS.DEFAULTS.VOICE }), { parse: inboundSharedModelParse }), { parse: inboundOverrideParse, catalogOnly: true, allowed: inboundOverrideAllowed }), null, { note: 'sandbox test calls (VOICE_RELAY_SANDBOX_NUMBER) prefer VOICE_RELAY_SANDBOX_MODEL ahead of this chain; an unknown override id falls back with a logged warning + model_fallback_reason stamp — allowlist is config/models.js MODEL_CATALOG, Anthropic text models only, excluding requires:"deep" ids' }),
+  L('voice_relay', 'Inbound voice relay (Sandy)', 'voice-agent/relay-conversation.js', 'voice', E('VOICE_RELAY_INBOUND_MODEL', E('VOICE_RELAY_MODEL', T('VOICE', { parse: inboundSharedModelParse, fallbackModel: () => MODELS.DEFAULTS.VOICE }), { parse: inboundSharedModelParse }), { parse: inboundOverrideParse, catalogOnly: true, allowed: inboundOverrideAllowed }), null, { note: 'sandbox test calls (VOICE_RELAY_SANDBOX_NUMBER) prefer VOICE_RELAY_SANDBOX_MODEL ahead of this chain; an unknown override id falls back with a logged warning + model_fallback_reason stamp — allowlist is config/models.js MODEL_CATALOG, Anthropic text models only, excluding requires:"deep" ids, PLUS any voice-eligible OpenAI id while GATE_VOICE_RELAY_OPENAI_INBOUND is exactly "true" (dark by default; owner ruling 2026-09-28, GPT-6 Luna); an OpenAI round that fails for a provider reason falls back to the shared Anthropic chain once, mid-call, and stays there for the rest of that call' }),
   L('voice_relay_collections', 'Collections outbound calls', 'collections/outbound-voice/collections-conversation.js', 'voice', E('VOICE_RELAY_MODEL', T('VOICE', { parse: inboundSharedModelParse, fallbackModel: () => MODELS.DEFAULTS.VOICE }), { parse: inboundSharedModelParse }), null, { note: 'shares VOICE_RELAY_MODEL with inbound and the same allowlist walk (VOICE_RELAY_MODEL, then MODEL_VOICE, then the code default); VOICE_RELAY_INBOUND_MODEL / VOICE_RELAY_SANDBOX_MODEL are inbound-only and never reach this lane' }),
   L('outreach_drafter', 'Backlink outreach drafting', 'seo/backlink-outreach-drafter.js', 'voice', E('MODEL_OUTREACH_DRAFTER', T('WORKHORSE'))),
 
@@ -633,6 +657,7 @@ const LANE_AREA = {
   video_gen: 'content',
   events: 'content',
   events_editorial: 'content',
+  events_curation: 'content',
   ads_advisor: 'content',
   ib_admin: 'ib',
   ib_tech: 'ib',
@@ -775,7 +800,8 @@ const LANE_DESCRIBE = {
   social_image_gen: 'Generates social post images',
   video_gen: 'Generates Reels clips',
   events: 'Finds community events',
-  events_editorial: 'Scores community events and cleans up their venue details',
+  events_editorial: 'Cleans up event venue/type details',
+  events_curation: 'Scores and auto-approves community events for the newsletter',
   ads_advisor: 'Daily Google Ads advice',
   ib_admin: 'The admin command bar',
   ib_tech: 'The tech command bar',
@@ -911,7 +937,12 @@ function resolveEnvChain(ref) {
   const dependsOnEnvs = own ? [] : [...(base.pinEnv ? [base.pinEnv] : []), ...(base.dependsOnEnvs || [])];
   const chain = [link, ...(base.chain || [])];
   const chainBase = base.chainBase || { selector: base.selector || null, model: base.model };
-  const accepts = ref.catalogOnly ? { ...base.accepts, catalogOnly: true, allowedIds: ref.allowed ? ref.allowed() : null } : base.accepts;
+  const allowedIds = ref.catalogOnly && ref.allowed ? ref.allowed() : null;
+  // A gated allowlist can name another provider's model (voice_relay: GPT-6
+  // Luna under GATE_VOICE_RELAY_OPENAI_INBOUND); the picker filters by
+  // `providers` before `allowedIds`, so every allowed id's provider joins.
+  const providers = base.accepts && allowedIds ? [...new Set([...base.accepts.providers, ...allowedIds.map(providerOf)])] : null;
+  const accepts = ref.catalogOnly ? { ...base.accepts, ...(providers ? { providers } : {}), catalogOnly: true, allowedIds } : base.accepts;
   const via = own ? `${link.setEnv} (pinned)` : link.setEnv ? `${link.setEnv} rejected → ${base.via}` : `${link.env} → ${base.via}`;
   return {
     model: own ? link.model : base.model,

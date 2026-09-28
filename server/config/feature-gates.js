@@ -643,6 +643,20 @@ const gates = {
   // allowlist, the eval harness, the benchmark runner) must use that.
   voiceRelayOpenai: process.env.GATE_VOICE_RELAY_OPENAI === 'true',
 
+  // Voice relay (Sandy) production INBOUND on an OpenAI model (owner
+  // ruling 2026-09-28: GPT-6 Luna after the benchmark). Ships DARK — off
+  // unless exactly 'true'. This is deliberately a SEPARATE gate from
+  // GATE_VOICE_RELAY_OPENAI above, which is already live in prod for the
+  // sandbox/eval lane alone: that gate must never be what opens production
+  // inbound to an OpenAI model. This map entry is for logGateStatus only;
+  // the canonical CALL-TIME reader is voiceRelayOpenaiInboundLive() below
+  // (strict 'true') — relay-conversation.js's resolveSessionModel reads it,
+  // at session construction, to decide whether a PRODUCTION inbound session
+  // may resolve VOICE_RELAY_INBOUND_MODEL to a voice-eligible OpenAI id. The
+  // shared VOICE_RELAY_MODEL / MODEL_VOICE chain stays Anthropic-only either
+  // way (collections-conversation.js shares it).
+  voiceRelayOpenaiInbound: process.env.GATE_VOICE_RELAY_OPENAI_INBOUND === 'true',
+
   // Collective series moves on every staff surface (owner rulings 2026-07-30
   // + 2026-08-28): with the gate on, ANY date move of a cadence visit that
   // reaches SmartRebooker.reschedule — dispatch drag, the Edit appointment
@@ -3032,6 +3046,17 @@ const gates = {
   // registry; this entry is for logGateStatus.
   techLines: gateEnvValue('GATE_TECH_LINES'),
 
+  // Tech open-visit nudge (owner ask 2026-09-28: "just do an afternoon
+  // nudge, at 7 pm" — ~1/3 of visits a week sit open past their day because
+  // nothing reminds the tech to tap Complete). ON: one 7 PM ET text
+  // (services/tech-open-visit-nudge.js, scheduler.js daily cron) to each
+  // assignable technician who still has a pending/confirmed/en_route/on_site
+  // visit scheduled for today, at most once per technician per ET day. OFF
+  // unless exactly 'true', dev AND prod; unset is the kill switch. The
+  // service reads process.env directly (strict '==='), so a flip needs no
+  // redeploy; this entry is for logGateStatus.
+  techOpenVisitNudge: process.env.GATE_TECH_OPEN_VISIT_NUDGE === 'true',
+
   opsDigestsInApp: gateEnvValue('GATE_OPS_DIGESTS_IN_APP'),
 
   // Ops digest ingest — routes/ops-digest-ingest.js, POST /api/ops/digest.
@@ -3321,6 +3346,23 @@ function voiceRelayOpenaiLive() {
   return process.env.GATE_VOICE_RELAY_OPENAI === 'true';
 }
 
+// GATE_VOICE_RELAY_OPENAI_INBOUND read at CALL time — ships DARK, off unless
+// exactly 'true' (owner ruling 2026-09-28: GPT-6 Luna for Sandy's inbound
+// phone agent after the benchmark). The ONE reader relay-conversation.js's
+// resolveSessionModel uses, at session construction, to decide whether a
+// PRODUCTION inbound session (sandbox === false, evalHarness === false) may
+// resolve VOICE_RELAY_INBOUND_MODEL to a voice-eligible OpenAI id — a
+// DELIBERATELY SEPARATE gate from voiceRelayOpenaiLive() above, which is
+// already live in prod for the sandbox/eval lane and must never be read as
+// authorizing production inbound. Off: production inbound rejects any
+// OpenAI override exactly as before this gate existed — byte-identical. On:
+// the model-switchboard's voice_relay row (inboundOverrideParse /
+// inboundOverrideAllowed) reads this same function so the Models tab shows
+// what production inbound actually resolves.
+function voiceRelayOpenaiInboundLive() {
+  return process.env.GATE_VOICE_RELAY_OPENAI_INBOUND === 'true';
+}
+
 // GATE_CUSTOMER_INTEL_AI read at CALL time — the ONE reader for every entry
 // point into the customer-intelligence AI legs (nightly sentiment mining in
 // signal-detector, retention drafting in retention-engine, and the admin
@@ -3508,5 +3550,5 @@ function logGateStatus() {
   }
 }
 
-module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, voiceRelayOpenaiInboundLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive };
 // gates 1775330914

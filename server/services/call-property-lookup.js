@@ -39,6 +39,46 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { gateEnvValue } = require('../config/feature-gates');
 const { normalizePropertyType } = require('./pricing-engine/commercial-helpers');
+const geocodeReview = require('./customer-geocode-review');
+
+const REVIEW_FENCE_BUSY = 'review_fence_busy';
+
+// 55P03 lock_not_available: a NOWAIT row lock found the row already held.
+function isReviewFenceBusy(err) {
+  return err?.code === REVIEW_FENCE_BUSY || err?.code === '55P03';
+}
+
+async function withReviewWriteFence({ propertyId, customerId, visitIds }, write) {
+  if (!geocodeReview.reviewEnabled()) return write(db);
+  return db.transaction(async (trx) => {
+    // This fence only ever guards BACKGROUND enrichment writes, so it never
+    // WAITS for a lock. A waiter can close a deadlock cycle with any staff
+    // path that locks the same customer's rows in another order (a staff
+    // geocode decision locks the customer and then its visits; the
+    // annual-prepay switch locks a visit, the customer, then the rest of
+    // its series), and keeping every such order in step is not something a
+    // background writer can own. Every lock here is a try-lock: contention
+    // throws REVIEW_FENCE_BUSY, the transaction rolls back having written
+    // nothing, and the caller leaves the write to its retry or the next
+    // reconciliation sweep. write() must only touch the rows locked here.
+    // The property-preferences advisory lock still comes first (the global
+    // order: prefs advisory → row locks).
+    const advisory = await trx.raw('SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?::text)) AS locked',
+      ['property-preferences', String(customerId)]);
+    if (advisory?.rows?.[0]?.locked !== true) {
+      throw Object.assign(new Error('Geocode review write fence is busy'), { code: REVIEW_FENCE_BUSY });
+    }
+    if (visitIds?.length) {
+      await trx('scheduled_services').whereIn('id', visitIds).orderBy('id').forUpdate().noWait().select('id');
+    }
+    const customer = await trx('customers').where({ id: customerId }).forUpdate().noWait().first('id');
+    if (!customer) return null;
+    const property = await trx('customer_properties')
+      .where({ id: propertyId, customer_id: customerId, active: true }).forUpdate().noWait().first('id');
+    if (!property) return null;
+    return write(trx);
+  });
+}
 
 /**
  * One-line lookup address from a customer_properties row (empty → '').
@@ -236,9 +276,28 @@ async function enrichPropertyById(propertyId) {
     // authoritative values (this lookup's, or a concurrent writer's that
     // the CASE/COALESCE correctly preserved) that everything downstream
     // derives from.
-    const rows = await db('customer_properties')
-      .where({ id: propertyId, address_key: row.address_key, active: true })
-      .update(patch, ['latitude', 'longitude', 'property_type']);
+    let rows;
+    try {
+      rows = await withReviewWriteFence({ propertyId, customerId: row.customer_id }, async (conn) => {
+        let propertyUpdate = conn('customer_properties')
+          .where({ id: propertyId, address_key: row.address_key, active: true });
+        if (patch.latitude) propertyUpdate = geocodeReview.excludePrimaryPropertyReviewForId(propertyUpdate, propertyId);
+        const updated = await propertyUpdate.update(patch, ['latitude', 'longitude', 'property_type']);
+        if (updated?.length || !patch.latitude) return updated;
+        const metadataPatch = { updated_at: patch.updated_at };
+        if (patch.property_type) metadataPatch.property_type = patch.property_type;
+        return conn('customer_properties')
+          .where({ id: propertyId, address_key: row.address_key, active: true })
+          .update(metadataPatch, ['latitude', 'longitude', 'property_type']);
+      });
+    } catch (err) {
+      if (!isReviewFenceBusy(err)) throw err;
+      // A staff action holds this customer's rows: nothing was written. The
+      // lookup result is cached, so the retry (enqueue's ladder, or the
+      // sweep, which keeps the row's place) is a cheap cache hit.
+      logger.info('[call-property-lookup] review fence busy — write deferred', { propertyId });
+      return { skipped: REVIEW_FENCE_BUSY };
+    }
     after = rows && rows[0];
     if (!after) {
       logger.info('[call-property-lookup] row changed during lookup — result discarded', {
@@ -324,11 +383,14 @@ async function enrichPropertyById(propertyId) {
           }) === propKey)
           .map((v) => v.id);
         if (matchedIds.length) {
-          await db('scheduled_services')
-            .whereIn('id', matchedIds)
-            .whereNull('lat')
-            .whereNull('lng')
-            .update({ lat: mirrorLat, lng: mirrorLng });
+          await withReviewWriteFence({ propertyId, customerId: row.customer_id, visitIds: matchedIds }, async (conn) => {
+            let visitUpdate = conn('scheduled_services')
+              .whereIn('id', matchedIds)
+              .whereNull('lat')
+              .whereNull('lng');
+            visitUpdate = geocodeReview.excludePrimaryPropertyReviewForId(visitUpdate, propertyId);
+            return visitUpdate.update({ lat: mirrorLat, lng: mirrorLng });
+          });
         }
       }
     }
@@ -375,13 +437,24 @@ async function enrichPropertyById(propertyId) {
           mirror.property_type = db.raw("COALESCE(NULLIF(TRIM(property_type), ''), ?)", [afterType]);
         }
         if (Object.keys(mirror).length) {
-          mirror.updated_at = db.fn.now();
-          await db('customers')
-            .where({ id: liveRole.customer_id })
-            .whereRaw("COALESCE(address_line1, '') = ? AND COALESCE(address_line2, '') = ? AND COALESCE(city, '') = ? AND COALESCE(zip, '') = ?", [
-              customer.address_line1 || '', customer.address_line2 || '', customer.city || '', customer.zip || '',
-            ])
-            .update(mirror);
+          // Same split as reconcileCustomerMirrors: a blocking staff review
+          // quarantines only the COORDINATES — a residential type fill is not
+          // location evidence and still mirrors while the review is open.
+          await withReviewWriteFence({ propertyId, customerId: liveRole.customer_id }, async (conn) => {
+            const customerUpdate = () => conn('customers')
+              .where({ id: liveRole.customer_id })
+              .whereRaw("COALESCE(address_line1, '') = ? AND COALESCE(address_line2, '') = ? AND COALESCE(city, '') = ? AND COALESCE(zip, '') = ?", [
+                customer.address_line1 || '', customer.address_line2 || '', customer.city || '', customer.zip || '',
+              ]);
+            if (mirror.property_type) {
+              await customerUpdate().update({ property_type: mirror.property_type, updated_at: db.fn.now() });
+            }
+            if (mirror.latitude) {
+              await geocodeReview.excludePrimaryPropertyReviewForId(customerUpdate(), propertyId).update({
+                latitude: mirror.latitude, longitude: mirror.longitude, updated_at: db.fn.now(),
+              });
+            }
+          });
         }
       }
     }
@@ -451,7 +524,8 @@ function enqueueCallPropertyLookup({ propertyId, retryAttempt = 0 } = {}) {
   setImmediate(() => {
     runCallPropertyLookup({ propertyId })
       .then((res) => {
-        if (res?.skipped === 'lookup_in_flight' && retryAttempt < IN_FLIGHT_RETRY_DELAYS_MS.length) {
+        if ((res?.skipped === 'lookup_in_flight' || res?.skipped === REVIEW_FENCE_BUSY)
+          && retryAttempt < IN_FLIGHT_RETRY_DELAYS_MS.length) {
           scheduleRetry(IN_FLIGHT_RETRY_DELAYS_MS[retryAttempt]);
         } else if (res?.enriched === false && retryAttempt < 1) {
           scheduleRetry(FAILURE_RETRY_MS);
@@ -780,7 +854,7 @@ async function reconcileVisitCoordinates() {
     let resumed = Boolean(cursor);
     let exhausted = false;
     for (let page = 0; page < RECONCILE_VISIT_MAX_PAGES; page += 1) {
-      const q = db('scheduled_services as ss')
+      let q = db('scheduled_services as ss')
         .join('customer_properties as cp', 'cp.id', 'ss.property_id')
         .whereNull('ss.lat')
         .whereNull('ss.lng')
@@ -788,15 +862,15 @@ async function reconcileVisitCoordinates() {
         .whereNotNull('cp.longitude')
         .where('cp.active', true)
         .whereRaw("COALESCE(TRIM(ss.service_address_line1), '') <> ''")
-        .whereRaw("LEFT(TRIM(COALESCE(ss.service_address_zip, '')), 5) = LEFT(TRIM(COALESCE(cp.zip, '')), 5)")
-        .select(
+        .whereRaw("LEFT(TRIM(COALESCE(ss.service_address_zip, '')), 5) = LEFT(TRIM(COALESCE(cp.zip, '')), 5)");
+      q = q.select(
           'ss.id as visit_id',
           // ::text — the cursor must survive the round trip at the
           // database's own precision (see cursor comment above).
           db.raw('ss.created_at::text as visit_created_key'),
           'ss.service_address_line1', 'ss.service_address_line2',
           'ss.service_address_city', 'ss.service_address_zip',
-          'cp.latitude', 'cp.longitude',
+          'cp.id as property_id', 'cp.customer_id as property_customer_id', 'cp.latitude', 'cp.longitude',
           'cp.address_line1', 'cp.address_line2', 'cp.city', 'cp.zip',
         )
         .orderBy([{ column: 'ss.created_at', order: 'asc' }, { column: 'ss.id', order: 'asc' }])
@@ -830,12 +904,21 @@ async function reconcileVisitCoordinates() {
         const lng = Number(r.longitude);
         if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
         // Null-pair re-asserted: fill-only under concurrent writers.
-        await db('scheduled_services')
-          .where({ id: r.visit_id })
-          .whereNull('lat')
-          .whereNull('lng')
-          .update({ lat, lng });
-        filled += 1;
+        try {
+          filled += (await withReviewWriteFence({
+            propertyId: r.property_id, customerId: r.property_customer_id, visitIds: [r.visit_id],
+          }, async (conn) => {
+            let visitUpdate = conn('scheduled_services')
+              .where({ id: r.visit_id })
+              .whereNull('lat')
+              .whereNull('lng');
+            visitUpdate = geocodeReview.excludePrimaryPropertyReviewForId(visitUpdate, r.property_id);
+            return visitUpdate.update({ lat, lng });
+          })) || 0;
+        } catch (err) {
+          // A staff action holds this row: leave it for the next night.
+          if (!isReviewFenceBusy(err)) throw err;
+        }
       }
       if (rows.length < RECONCILE_VISIT_PAGE) {
         exhausted = true;
@@ -875,7 +958,7 @@ async function reconcileCustomerMirrors() {
     let resumed = Boolean(cursor);
     let exhausted = false;
     for (let page = 0; page < RECONCILE_VISIT_MAX_PAGES; page += 1) {
-      const q = db('customers as c')
+      let q = db('customers as c')
         .join('customer_properties as cp', 'cp.customer_id', 'c.id')
         .where('cp.is_primary', true)
         .where('cp.active', true)
@@ -883,11 +966,12 @@ async function reconcileCustomerMirrors() {
         .whereRaw(`(
           (c.latitude IS NULL AND c.longitude IS NULL AND cp.latitude IS NOT NULL AND cp.longitude IS NOT NULL)
           OR (NULLIF(TRIM(c.property_type), '') IS NULL AND NULLIF(TRIM(cp.property_type), '') IS NOT NULL AND cp.property_type <> 'commercial')
-        )`)
-        .select(
+        )`);
+      q = q.select(
           'c.id as customer_id',
           db.raw('c.created_at::text as customer_created_key'),
           'c.address_line1 as c_line1', 'c.address_line2 as c_line2', 'c.city as c_city', 'c.zip as c_zip',
+          'cp.id as property_id', 'cp.customer_id as property_customer_id',
           'cp.latitude', 'cp.longitude', 'cp.property_type as cp_type',
           'cp.address_line1', 'cp.address_line2', 'cp.city', 'cp.zip',
         )
@@ -928,14 +1012,37 @@ async function reconcileCustomerMirrors() {
           mirror.property_type = db.raw("COALESCE(NULLIF(TRIM(property_type), ''), ?)", [cpType]);
         }
         if (!Object.keys(mirror).length) continue;
-        mirror.updated_at = db.fn.now();
-        await db('customers')
-          .where({ id: r.customer_id })
-          .whereRaw("COALESCE(address_line1, '') = ? AND COALESCE(address_line2, '') = ? AND COALESCE(city, '') = ? AND COALESCE(zip, '') = ?", [
-            r.c_line1 || '', r.c_line2 || '', r.c_city || '', r.c_zip || '',
-          ])
-          .update(mirror);
-        filled += 1;
+        try {
+          filled += (await withReviewWriteFence({
+            propertyId: r.property_id, customerId: r.property_customer_id,
+          }, async (conn) => {
+            let metadataRows = 0;
+            if (mirror.property_type) {
+              metadataRows = await conn('customers')
+                .where({ id: r.customer_id })
+                .whereRaw("COALESCE(address_line1, '') = ? AND COALESCE(address_line2, '') = ? AND COALESCE(city, '') = ? AND COALESCE(zip, '') = ?", [
+                  r.c_line1 || '', r.c_line2 || '', r.c_city || '', r.c_zip || '',
+                ])
+                .update({ property_type: mirror.property_type, updated_at: db.fn.now() });
+            }
+            let coordinateRows = 0;
+            if (mirror.latitude) {
+              let coordinateUpdate = conn('customers')
+                .where({ id: r.customer_id })
+                .whereRaw("COALESCE(address_line1, '') = ? AND COALESCE(address_line2, '') = ? AND COALESCE(city, '') = ? AND COALESCE(zip, '') = ?", [
+                  r.c_line1 || '', r.c_line2 || '', r.c_city || '', r.c_zip || '',
+                ]);
+              coordinateUpdate = geocodeReview.excludePrimaryPropertyReviewForId(coordinateUpdate, r.property_id);
+              coordinateRows = await coordinateUpdate.update({
+                latitude: mirror.latitude, longitude: mirror.longitude, updated_at: db.fn.now(),
+              });
+            }
+            return Math.max(Number(metadataRows) || 0, Number(coordinateRows) || 0);
+          })) || 0;
+        } catch (err) {
+          // A staff action holds this row: leave it for the next night.
+          if (!isReviewFenceBusy(err)) throw err;
+        }
       }
       if (rows.length < RECONCILE_VISIT_PAGE) {
         exhausted = true;
@@ -1071,6 +1178,6 @@ module.exports = {
   sweepUnenrichedProperties,
   _private: {
     snakePropertyType, propertyRowAddress, fetchBackfillCandidates, recentLookupVerdict, backfillBatchSize,
-    reconcileVisitCoordinates, reconcileCustomerMirrors, SQL_PRIMARY_NUMBER_RE, SQL_LEADING_UNIT_RE,
+    reconcileVisitCoordinates, reconcileCustomerMirrors, withReviewWriteFence, SQL_PRIMARY_NUMBER_RE, SQL_LEADING_UNIT_RE,
   },
 };

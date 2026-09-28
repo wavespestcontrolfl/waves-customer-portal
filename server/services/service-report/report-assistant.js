@@ -1,4 +1,7 @@
 const { customerVisiblePressureIndex } = require('../pest-pressure/display');
+const {
+  aftercareCustomerTask, hasCreditableWaterIn, normalizeLawnAftercare, renderedWeekPlan, wateringPlanCondition, wateringRestrictionAction,
+} = require('./lawn-aftercare');
 
 const { WAVES_SUPPORT_PHONE_DISPLAY: WAVES_PHONE_DISPLAY } = require('../../constants/business');
 
@@ -385,6 +388,10 @@ function targetsFromApplications(applications = []) {
 }
 
 function answerNextSteps({ data = {}, nextAppointment } = {}) {
+  // Scoped to the visit's own plan week — a reopened report's generic
+  // "what's next" answer must never promote a historical confirmation/
+  // credit as though it were this visit's task (codex P2 #5033 r7).
+  const wateringTask = aftercareCustomerTask(normalizeLawnAftercare(data.reportV2?.aftercare), data.reportV2?.water?.weekPlan);
   const dynamic = data.dynamicContext || {};
   const lawnAssessment = data.lawnAssessment || null;
   if (data.serviceLine === 'lawn' && lawnAssessment?.snapshot) {
@@ -401,6 +408,7 @@ function answerNextSteps({ data = {}, nextAppointment } = {}) {
       ? `Visible improvement usually takes ${expected.minDays}-${expected.maxDays} days, depending on irrigation, mowing, rainfall, and site conditions.`
       : '';
     return [
+      wateringTask,
       cardLines.length ? `Recommended next step: ${cardLines[0]}` : '',
       cardLines.length > 1 ? `Also noted: ${cardLines.slice(1).join(' ')}` : '',
       watchItems.length ? `What we are watching: ${watchItems.slice(0, 2).join(' ')}` : '',
@@ -422,6 +430,7 @@ function answerNextSteps({ data = {}, nextAppointment } = {}) {
 
   if (primaryMove || recommendations.length) {
     return [
+      wateringTask,
       primaryMove ? `Priority next step: ${primaryMove}` : `Recommended next step: ${recommendations[0]}`,
       recommendations.length > 1 ? `Also noted: ${recommendations.slice(1, 3).join(' ')}` : '',
       reentry ? `Re-entry: ${reentry}` : '',
@@ -442,7 +451,7 @@ function answerNextSteps({ data = {}, nextAppointment } = {}) {
     : '';
 
   return [
-    'No special repair or prep was flagged for you on this report.',
+    wateringTask || 'No special repair or prep was flagged for you on this report.',
     scopeLine,
     reentry ? `Re-entry: ${reentry}` : '',
     rinseLine,
@@ -551,15 +560,21 @@ function answerWateringAftercare({ data, weekPlan, aftercare }) {
   // Same guards as the rendered card: a credited watering-in only for a
   // REQUIRED watering-in, on a visit inside the plan week, on a plan that
   // prescribes a run (codex gh-r31).
-  const credited = aftercare.waterInRequired === true && weekPlan?.visitInPlanWeek === true && weekPlan?.prescribesRun === true;
-  const reduced = credited && weekPlan?.afterTreatment?.title ? weekPlan.afterTreatment : null;
-  // A HOLD plan beside a required watering-in: the answer must carry the
-  // plan's no-extra-runs guidance too — the label instruction alone reads
-  // as permission to resume the normal schedule (codex gh-r45).
-  const holdBeside = !reduced && aftercare.waterInRequired === true
-    && weekPlan?.visitInPlanWeek === true && weekPlan?.prescribesRun === false && weekPlan?.title
+  const recordedWaterIn = hasCreditableWaterIn(aftercare, weekPlan);
+  const shown = renderedWeekPlan(aftercare, weekPlan);
+  const reduced = shown && shown !== weekPlan ? shown : null;
+  // Keep the full plan beside uncredited aftercare. A HOLD plan also stays
+  // beside an affirmative water-in so it cannot read as permission to resume.
+  const planBeside = !reduced && weekPlan?.title
+    && (!recordedWaterIn
+      || (weekPlan?.visitInPlanWeek === true && weekPlan?.prescribesRun === false))
     ? weekPlan : null;
-  return [aftercare.watering, reduced ? `${reduced.title}. ${reduced.detail}` : (holdBeside ? `${holdBeside.title}. ${holdBeside.detail}` : null)].filter(Boolean).join(' ');
+  return [aftercare.watering, reduced ? `${reduced.title}. ${reduced.detail}` : (planBeside ? `${planBeside.title}. ${planBeside.detail}` : null)].filter(Boolean).join(' ');
+}
+
+function answerConditionalWateringPlan({ weekPlan, aftercare }) {
+  const plan = weekPlan?.title ? [weekPlan.title, weekPlan.detail].filter(Boolean).join('. ') : '';
+  return [aftercare.watering, wateringPlanCondition(aftercare, weekPlan), plan].filter(Boolean).join(' ');
 }
 
 // AW-06 / codex #4839 round-4 (4109926463): first-match precedence rules,
@@ -572,8 +587,19 @@ function questionRoutingRules({
   data, nextAppointment, weekPlan, aftercare, wateringIntent,
 }) {
   return [
-    // Aftercare/watering answers first — never re-entry or generic copy
-    // under the plan shown on the same page (codex #3565 gh-r29).
+    // Preserve unverified or restricted aftercare before any watering plan.
+    {
+      // Deliberately unscoped: a direct watering question still states the
+      // recorded note beside the plan even for a historical (visitInPlanWeek
+      // === false) aftercare — report-assistant-honesty.test.js pins this;
+      // wateringPlanCondition below (which IS scoped) already keeps such a
+      // visit from gating the CURRENT plan on an unresolved historical note.
+      test: () => wateringIntent
+        && Boolean(aftercare?.watering)
+        && Boolean(wateringRestrictionAction(aftercare)),
+      topic: 'watering',
+      answer: () => answerConditionalWateringPlan({ weekPlan, aftercare }),
+    },
     {
       test: (q) => wateringIntent && Boolean(aftercare?.watering) && /\b(treat\w*|application|applied|product|spray\w*|today)\b/.test(q),
       topic: 'watering',
@@ -680,7 +706,7 @@ function routeServiceReportQuestion({
   }
 
   const weekPlan = data?.reportV2?.water?.weekPlan;
-  const aftercare = data?.reportV2?.aftercare;
+  const aftercare = normalizeLawnAftercare(data?.reportV2?.aftercare);
   // Controller phrasing without the word "water" — "How long should I run
   // each zone?", "how many minutes per zone" — is a watering question too
   // (codex gh-r38); the safety-intent guard above still wins.

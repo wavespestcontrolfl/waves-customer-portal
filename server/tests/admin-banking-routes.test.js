@@ -22,7 +22,13 @@ jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, res, next) => {
     const token = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
     const users = {
-      admin: { id: 'admin-1', role: 'admin', email: 'owner@example.com', name: 'Owner' },
+      // The default IB_FULL_ACCESS_EMAILS allow-list (ib-access.js) is
+      // real/unmocked here, so this admin's email must be the owner
+      // account for the "owner reaches the service" assertions to hold.
+      admin: { id: 'admin-1', role: 'admin', email: 'contact@wavespestcontrol.com', name: 'Owner' },
+      // A second, non-owner admin — same role, ordinary admin login — for
+      // the owner-only payout guard (owner ruling 2026-09-28).
+      admin2: { id: 'admin-2', role: 'admin', email: 'other-admin@example.com', name: 'Other Admin' },
       tech: { id: 'tech-1', role: 'technician', email: 'tech@example.com', name: 'Tech' },
     };
     const user = users[token];
@@ -175,6 +181,68 @@ describe('admin banking routes', () => {
       expect(res.status).toBe(400);
       expect(body.error).toBe('Invalid amount — must be a positive number');
       expect(StripeBanking.createStandardPayout).not.toHaveBeenCalled();
+    });
+  });
+
+  // Owner ruling 2026-09-28: the same red-tier restriction the Intelligence
+  // Bar enforces (contact@wavespestcontrol.com only) applies to these page
+  // routes too — every admin can reach the page, but only the owner account
+  // can actually request a payout.
+  describe('owner-only payout guard', () => {
+    test('non-owner admin gets 403 on instant payout and the service is never called', async () => {
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/admin/banking/payouts/instant`, {
+          method: 'POST',
+          headers: { Authorization: 'Bearer admin2', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ amount: 50, idempotency_key: 'ipo_attempt_456' }),
+        });
+        const body = await res.json();
+        expect(res.status).toBe(403);
+        expect(body.error).toBe('This action is limited to the owner account.');
+        expect(StripeBanking.createInstantPayout).not.toHaveBeenCalled();
+      });
+    });
+
+    test('non-owner admin gets 403 on standard payout and the service is never called', async () => {
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/admin/banking/payouts/standard`, {
+          method: 'POST',
+          headers: { Authorization: 'Bearer admin2', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ amount: 75, idempotency_key: 'spo_attempt_456' }),
+        });
+        const body = await res.json();
+        expect(res.status).toBe(403);
+        expect(body.error).toBe('This action is limited to the owner account.');
+        expect(StripeBanking.createStandardPayout).not.toHaveBeenCalled();
+      });
+    });
+
+    test('owner admin reaches the instant payout service', async () => {
+      StripeBanking.createInstantPayout.mockResolvedValue({ payout_id: 'po_owner', status: 'pending' });
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/admin/banking/payouts/instant`, {
+          method: 'POST',
+          headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ amount: 50, idempotency_key: 'ipo_attempt_789' }),
+        });
+        expect(res.status).toBe(200);
+        expect(StripeBanking.createInstantPayout).toHaveBeenCalledWith(50, {
+          requestedBy: 'admin-1',
+          idempotencyKey: 'ipo_attempt_789',
+        });
+      });
+    });
+
+    test('a read route on the same router stays open to a non-owner admin', async () => {
+      StripeBanking.getBalance.mockResolvedValue({ total_available: 123 });
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/admin/banking/balance`, {
+          headers: { Authorization: 'Bearer admin2' },
+        });
+        const body = await res.json();
+        expect(res.status).toBe(200);
+        expect(body).toEqual({ total_available: 123 });
+      });
     });
   });
 });

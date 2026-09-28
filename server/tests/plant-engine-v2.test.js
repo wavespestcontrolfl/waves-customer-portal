@@ -1088,7 +1088,8 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
           MISS,
         );
         const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn' });
-        expect(result.internal.escalation_reasons).toEqual(['self_contradiction']);
+        // The flipped pair are two grasses, so the read is a close call as well.
+        expect(result.internal.escalation_reasons).toEqual(['close_call', 'self_contradiction']);
       });
 
       test('a turf/weed confidence swap is not a contradiction', async () => {
@@ -1606,7 +1607,8 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
         escalationLeg(),
       );
       const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn' });
-      expect(result.internal.identity.trigger_reasons).toEqual(['self_contradiction']);
+      // The flipped pair are two grasses, so the read is a close call as well.
+      expect(result.internal.identity.trigger_reasons).toEqual(['close_call', 'self_contradiction']);
       expect(result.v2.subject.plant).toMatchObject({ slug: 'fixture-bahia', wording: 'likely' });
     });
 
@@ -1743,6 +1745,57 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
       // A look-alike with no warning adds none.
       const paspalum = engine.buildIdentityResult([cand('fixture-seashore-paspalum', 0.95)], { subject: 'lawn', currentMonth: 6 });
       expect(paspalum.next_photo).not.toHaveProperty('safety_line');
+    });
+  });
+
+  describe('photo eval 2026-09-28 follow-ups', () => {
+    const PHOTOS = [{ data: 'x', mimeType: 'image/jpeg' }];
+    const OK_QUALITY = { usable: true, issue: 'none' };
+    const idItem = (slug, confidence) => ({
+      slug, off_catalog_name: '', group_id: null, confidence,
+    });
+    const verified = (slug, confidence) => ({
+      slug, entry: catalog.getEntry(slug), confidence, verified: true, checked: true, uncovered: false, cuesVisible: [1], cuesNotVisible: [], offCatalogName: null, groupId: catalog.getEntry(slug).group,
+    });
+    const triggersForSlot = (slot, list) => engine._test.identitySlotTriggers({
+      candidatesJson: {}, slots: { turf: [], weeds: [], host: [], [slot]: list }, verifyMissedSlots: { turf: false, weeds: false, host: false }, flippedSlots: { turf: false, weeds: false, host: false },
+    }, { subject: 'lawn', mode: 'workup' })[slot];
+    const triggersFor = (turf) => triggersForSlot('turf', turf);
+
+    test('a confident read with a same-group runner-up is a close call that gets the second opinion', () => {
+      expect(triggersFor([verified('fixture-st-augustine', 0.95), verified('fixture-bahia', 0.30)])).toEqual(['close_call']);
+      // A runner-up of another group, or one too weak to be a real contender, is not a close call.
+      expect(triggersFor([verified('fixture-st-augustine', 0.95), verified('fixture-nutsedge', 0.40)])).toEqual([]);
+      expect(triggersFor([verified('fixture-st-augustine', 0.95), verified('fixture-bahia', 0.10)])).toEqual([]);
+      expect(triggersFor([verified('fixture-st-augustine', 0.95)])).toEqual([]);
+      // Codex #5255 r1: two weeds in one lawn are not rival answers — the weeds slot is never a close call.
+      const secondWeed = { ...verified('fixture-nutsedge', 0.40), slug: 'fixture-other-weed' };
+      expect(triggersForSlot('weeds', [verified('fixture-nutsedge', 0.95), secondWeed])).toEqual([]);
+    });
+
+    test('identify mode: a close call between two grasses runs the escalation, and a disagreement names neither', async () => {
+      const candidatesLeg = { ok: true, json: { quality: OK_QUALITY, shows: 'plant', turf: [idItem('fixture-st-augustine', 0.95), idItem('fixture-bahia', 0.30)], weeds: [], host: [] } };
+      const verifyLeg = {
+        ok: true,
+        json: {
+          candidates: [
+            { slug: 'fixture-st-augustine', confidence: 0.95, cues_visible: [1], cues_not_visible: [] },
+            { slug: 'fixture-bahia', confidence: 0.30, cues_visible: [1], cues_not_visible: [] },
+          ],
+        },
+      };
+      const escalationLeg = {
+        ok: true,
+        json: {
+          quality: OK_QUALITY, shows: 'plant', turf: [{ slug: 'fixture-bahia', off_catalog_name: '', group_id: null, confidence: 0.9, cues_visible: [1], cues_not_visible: [] }], weeds: [], host: [], observed_terms: [], conditions: [],
+        },
+      };
+      [candidatesLeg, verifyLeg, escalationLeg].forEach((leg) => dispatch.mockResolvedValueOnce(leg));
+      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn', mode: 'identify' });
+      expect(result.ok).toBe(true);
+      expect(dispatch).toHaveBeenCalledTimes(3);
+      expect(result.internal.escalation_reasons).toEqual(['close_call']);
+      expect(result.v2.answer).toMatchObject({ level: 'group', node_id: 'turfgrasses' });
     });
   });
 });
