@@ -5614,10 +5614,19 @@ const InvoiceService = {
     // existing stale-claim recovery to park for operator review — never a
     // half-committed "stamped but the retry vanished" state.
     const smsFinalizationStamp = (trx) => {
-      if (acceptedChannelResults?.sms?.deduped) return trx.raw("COALESCE(sms_sent_at, ?::timestamptz)",
-        [acceptedChannelResults.sms.sentAt || settledEvent.eventVisibleAt || null]);
+      if (acceptedChannelResults?.sms?.deduped) {
+        const time = acceptedChannelResults.sms.sentAt || acceptedChannelResults.sms.eventVisibleAt;
+        return trx.raw("COALESCE(sms_sent_at, ?::timestamptz)",
+          [time && !Number.isNaN(new Date(time).getTime()) ? new Date(time) : null]);
+      }
       if (legAccepted(acceptedChannelResults?.sms)) return new Date();
-      return settledEvent.eventVisibleAt || new Date();
+      const priorApp = acceptedChannelResults?.push;
+      if (billingLegDeliveryState("push", priorApp) === "deduped") {
+        const time = priorApp.eventVisibleAt;
+        return trx.raw("COALESCE(sms_sent_at, ?::timestamptz)",
+          [time && !Number.isNaN(new Date(time).getTime()) ? new Date(time) : null]);
+      }
+      return new Date();
     };
     const finalizeInvoiceAfterSms = () => db.transaction(async (trx) => {
       // Stamp each channel's OWN durable delivery evidence (the same

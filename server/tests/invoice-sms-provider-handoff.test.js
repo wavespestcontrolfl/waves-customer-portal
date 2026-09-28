@@ -500,7 +500,8 @@ describe('invoice SMS provider handoff', () => {
       expect(result.pendingChannelQueued === true).toBe(['bell+email', 'prior+email'].includes(mode));
       expect(claimWasRestored(invoiceQueries)).toBe(false);
       const stamp = invoiceQueries.flatMap(q => q.update.mock.calls.map(([change]) => change)).find(change => change.sent_at);
-      expect(stamp.sms_sent_at).toEqual(mode === 'prior+old-text' ? 'COALESCE(sms_sent_at, ?::timestamptz)' : mode.startsWith('bell') ? expect.any(Date) : visibleAt);
+      expect(stamp.sms_sent_at).toEqual(mode.startsWith('bell') ? expect.any(Date) : 'COALESCE(sms_sent_at, ?::timestamptz)');
+      if (!mode.startsWith('bell')) expect(db.raw).toHaveBeenCalledWith('COALESCE(sms_sent_at, ?::timestamptz)', [visibleAt]);
       if (mode === 'prior+old-email') {
         expect(stamp.email_sent_at).toBe('COALESCE(email_sent_at, ?::timestamptz)');
         expect(db.raw).toHaveBeenCalledWith('COALESCE(email_sent_at, ?::timestamptz)', [visibleAt]);
@@ -512,6 +513,33 @@ describe('invoice SMS provider handoff', () => {
         expect(db.raw).toHaveBeenCalledWith('COALESCE(sent_at, ?::timestamptz)', [visibleAt]);
         expect(activityInserts).toHaveLength(0);
       }
+    });
+
+    test('old App and later old Email repair their own stamps while aggregate time follows the latest original event', async () => {
+      const appAt = new Date('2026-05-20T14:00:00Z');
+      const emailAt = new Date('2026-05-21T14:00:00Z');
+      const activityInserts = [];
+      const { invoiceQueries, mock } = invoiceQueryDb({ activityInserts });
+      db.mockImplementation(mock);
+      sendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted', deduped: true,
+        channelResults: {
+          push: { sent: false, deliveryOutcome: 'not_sent', reason: 'app_event_already_visible', eventVisibleAt: appAt },
+          email: { sent: true, deliveryOutcome: 'accepted', deduped: true, sentAt: emailAt },
+        } });
+
+      await expect(InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1' }))
+        .resolves.toMatchObject({ sent: true, deduped: true, eventVisibleAt: emailAt });
+
+      const stamp = invoiceQueries.flatMap(q => q.update.mock.calls.map(([change]) => change)).find(change => change.sent_at);
+      expect(stamp).toMatchObject({
+        sent_at: 'COALESCE(sent_at, ?::timestamptz)',
+        sms_sent_at: 'COALESCE(sms_sent_at, ?::timestamptz)',
+        email_sent_at: 'COALESCE(email_sent_at, ?::timestamptz)',
+      });
+      expect(db.raw).toHaveBeenCalledWith('COALESCE(sent_at, ?::timestamptz)', [emailAt]);
+      expect(db.raw).toHaveBeenCalledWith('COALESCE(sms_sent_at, ?::timestamptz)', [appAt]);
+      expect(db.raw).toHaveBeenCalledWith('COALESCE(email_sent_at, ?::timestamptz)', [emailAt]);
+      expect(activityInserts).toHaveLength(0);
     });
 
     test.each([
