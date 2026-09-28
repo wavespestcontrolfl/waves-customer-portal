@@ -192,6 +192,54 @@ describe('checkPhotoSlotsLicensedOnly', () => {
     expect(r.ok).toBe(true);
   });
 
+  test('fails when a licensed URL is reused with a MISLABELED alt (Codex P1)', () => {
+    const b = brief({
+      voice_constraints: {
+        photo_slots: [
+          { slot: 'pest', photo: { url: 'https://upload.wikimedia.org/real-fire-ant.jpg', alt: 'fire ant', credit: 'Judy Gallagher', license: 'CC BY 2.0' }, flagged_for_human: false },
+        ],
+      },
+    });
+    const r = checkPhotoSlotsLicensedOnly(
+      // Real fire-ant URL, but relabeled as a termite — the URL alone must not vouch for the caption.
+      { frontmatter: { post_type: 'diagnostic' }, body: '![a termite](https://upload.wikimedia.org/real-fire-ant.jpg)\n\nPhoto: Judy Gallagher (CC BY 2.0)' },
+      b,
+    );
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/^identification_photo_alt_mismatch:/);
+  });
+
+  test('fails when the credit/license attribution is dropped from the body (Codex P1)', () => {
+    const b = brief({
+      voice_constraints: {
+        photo_slots: [
+          { slot: 'pest', photo: { url: 'https://upload.wikimedia.org/real-fire-ant.jpg', alt: 'fire ant', credit: 'Judy Gallagher', license: 'CC BY 2.0' }, flagged_for_human: false },
+        ],
+      },
+    });
+    const r = checkPhotoSlotsLicensedOnly(
+      { frontmatter: { post_type: 'diagnostic' }, body: '![fire ant](https://upload.wikimedia.org/real-fire-ant.jpg)' },
+      b,
+    );
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/^identification_photo_credit_missing:/);
+  });
+
+  test('passes when alt, credit, and license all match the catalog entry exactly', () => {
+    const b = brief({
+      voice_constraints: {
+        photo_slots: [
+          { slot: 'pest', photo: { url: 'https://upload.wikimedia.org/real-fire-ant.jpg', alt: 'fire ant', credit: 'Judy Gallagher', license: 'CC BY 2.0' }, flagged_for_human: false },
+        ],
+      },
+    });
+    const r = checkPhotoSlotsLicensedOnly(
+      { frontmatter: { post_type: 'diagnostic' }, body: '![fire ant](https://upload.wikimedia.org/real-fire-ant.jpg)\n\nPhoto: Judy Gallagher (CC BY 2.0)' },
+      b,
+    );
+    expect(r.ok).toBe(true);
+  });
+
   test('passes when a flagged slot is correctly omitted (no image for it at all)', () => {
     const b = brief({
       voice_constraints: {
@@ -225,6 +273,25 @@ describe('checkNextStepsRelatedPostsClosedSet', () => {
     );
     expect(r.ok).toBe(false);
     expect(r.reason).toBe('next_steps_exceeds_max_4');
+  });
+
+  test('fails an off-site absolute URL even when its PATH matches an allowed route (Codex P1)', () => {
+    // https://unrelated.example/contact/ must never pass just because its
+    // pathname happens to match a real allowed path on OUR site.
+    const r = checkNextStepsRelatedPostsClosedSet(
+      { frontmatter: { next_steps: [{ label: 'Contact us', href: 'https://unrelated.example/contact/' }] } },
+      brief({ internal_links_to_add: ['/contact/'] }),
+    );
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/^next_steps_entry_not_verified:/);
+  });
+
+  test('passes an absolute URL on the real hub host matching an allowed route', () => {
+    const r = checkNextStepsRelatedPostsClosedSet(
+      { frontmatter: { next_steps: [{ label: 'Contact us', href: 'https://www.wavespestcontrol.com/contact/' }] } },
+      brief({ internal_links_to_add: ['/contact/'] }),
+    );
+    expect(r.ok).toBe(true);
   });
 
   test('fails when a related_posts entry is not on the brief-verified list', () => {

@@ -1133,17 +1133,29 @@ function checkCtaAfterVerdictBox(draft, brief) {
 // No brief photo_slots at all (non-diagnostic drafts, or a diagnostic
 // draft on a page type the composer never attaches slots to) means this
 // check has nothing to enforce and defers.
+// Codex P1: URL membership alone let a real licensed URL carry a
+// MISLABELED alt (e.g. the fire-ant photo captioned "Termite") with no
+// credit/license reproduced at all — both explicitly required by the
+// PHOTO SLOTS writer instruction. Every embedded slot photo must now match
+// its catalog entry's URL AND alt text exactly, and the body must carry
+// that entry's credit and license string somewhere (the instructed
+// attribution line), not merely the bare image markdown.
 function checkPhotoSlotsLicensedOnly(draft, brief) {
   if (draft?.frontmatter?.post_type !== 'diagnostic') return { ok: true, reason: 'not_identification_post' };
   const slots = Array.isArray(brief?.voice_constraints?.photo_slots) ? brief.voice_constraints.photo_slots : [];
   if (!slots.length) return { ok: true, reason: 'no_photo_slots_on_brief' };
-  const allowedUrls = new Set(slots.map((s) => s?.photo?.url).filter(Boolean));
+  const byUrl = new Map(slots.filter((s) => s?.photo?.url).map((s) => [s.photo.url, s.photo]));
   const body = String(draft.body || '');
-  const imgRe = /!\[[^\]]*\]\(([^)]+)\)/g;
+  const imgRe = /!\[([^\]]*)\]\(([^)]+)\)/g;
   let m;
   while ((m = imgRe.exec(body))) {
-    const url = String(m[1] || '').trim();
-    if (!allowedUrls.has(url)) return { ok: false, reason: `unlicensed_or_unknown_identification_photo:${url}` };
+    const alt = String(m[1] || '');
+    const url = String(m[2] || '').trim();
+    const photo = byUrl.get(url);
+    if (!photo) return { ok: false, reason: `unlicensed_or_unknown_identification_photo:${url}` };
+    if (alt !== photo.alt) return { ok: false, reason: `identification_photo_alt_mismatch:${url}` };
+    if (photo.credit && !body.includes(photo.credit)) return { ok: false, reason: `identification_photo_credit_missing:${url}` };
+    if (photo.license && !body.includes(photo.license)) return { ok: false, reason: `identification_photo_license_missing:${url}` };
   }
   return { ok: true };
 }
@@ -1154,11 +1166,19 @@ function checkPhotoSlotsLicensedOnly(draft, brief) {
 // voice_constraints.related_posts' paths, internal_links_to_add, or the
 // static allowlist / known city-service pattern (isKnownGoodInternalRoute)
 // — the same closed-set posture the body's own internal-route gate applies.
+// Codex P1: the earlier version took `.pathname` off ANY absolute URL,
+// so "https://unrelated.example/contact/" normalized to "/contact/" and
+// matched the allowed set even though it points off-site. An absolute URL
+// must name one of OUR OWN hub/spoke hosts (hubHostSet — the same allowance
+// internalRouteFinding/isKnownGoodInternalRoute apply to body links) or it
+// is rejected outright, never silently reduced to its pathname.
 function normalizeFrontmatterPath(value) {
   if (!value) return null;
+  const { hubHostSet } = require('./content-guardrails');
   let candidate = String(value);
   try {
     const u = new URL(candidate);
+    if (!hubHostSet().has(u.hostname.toLowerCase())) return null; // off-site: never a match
     candidate = u.pathname || '/';
   } catch { /* not absolute — use as-is */ }
   if (!candidate.startsWith('/')) candidate = `/${candidate}`;
