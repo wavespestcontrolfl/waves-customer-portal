@@ -114,15 +114,25 @@ describe('cancellation is serialized with series maintenance (P0-2b)', () => {
   });
 
   test('the maintenance re-reads recurring_ongoing INSIDE the lock, both before and after its insert', () => {
-    // Pre-insert re-check and post-insert compensating re-check both live in
-    // extendSeriesOnceLocked — extracted from runRecurringSeriesMaintenanceLocked
-    // so the nightly top-up horizon loop (topUpRecurringSeriesLocked) shares
-    // the exact same insert step — called only after the per-parent lock is
-    // taken (both callers already hold it when they call in).
-    const locked = scheduleSrc.indexOf('async function extendSeriesOnceLocked');
+    // Pre-insert re-check (extendSeriesOnceLocked's own candidate-search
+    // loop) and post-insert compensating re-check (insertSeriesOccurrenceLocked,
+    // the canonical occurrence writer extracted FROM extendSeriesOnceLocked
+    // in PR #5268 round-3 — extendSeriesOnceLocked now calls it once it has
+    // a date, and rider-series.js#writeRiderPlan shares the exact same
+    // insert step for its own occurrences) — both live in this pair of
+    // functions, immediately adjacent in source, called only after the
+    // per-parent lock is taken (every caller already holds it when it
+    // calls in).
+    const locked = scheduleSrc.indexOf('async function insertSeriesOccurrenceLocked');
     const lockedEnd = scheduleSrc.indexOf('async function runRecurringSeriesMaintenanceLocked');
     expect(locked).toBeGreaterThan(-1);
     expect(lockedEnd).toBeGreaterThan(locked);
+    // insertSeriesOccurrenceLocked must sit immediately before
+    // extendSeriesOnceLocked — no other function's own recurring_ongoing
+    // read should be able to inflate this count.
+    const middle = scheduleSrc.indexOf('async function extendSeriesOnceLocked');
+    expect(middle).toBeGreaterThan(locked);
+    expect(middle).toBeLessThan(lockedEnd);
     const body = scheduleSrc.slice(locked, lockedEnd);
     expect((body.match(/\.first\('recurring_ongoing'\)/g) || []).length).toBeGreaterThanOrEqual(2);
     expect(body).toContain('stillOngoing = !!(freshParent && freshParent.recurring_ongoing);');

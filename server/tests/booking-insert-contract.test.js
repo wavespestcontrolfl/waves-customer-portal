@@ -86,7 +86,15 @@ const FROZEN_LEGACY_INSERT_SITES_2026_09 = {
     "post / :: const [boosterRow] = await trx( scheduled_services').insert(boosterData",
     "put /:id/update-details :: const [childRow] = await trx( scheduled_services').insert(childData",
     "reconcileRecurringSeriesVisitCount :: const [row] = await trx( scheduled_services').insert(data",
-    "extendSeriesOnceLocked :: const [autoExtRow] = await conn( scheduled_services').insert(nextData",
+    // Was "extendSeriesOnceLocked :: ... insert(nextData" — PR #5268 round-3
+    // structural fix extracted this exact bare insert (unchanged statement,
+    // unchanged mechanism) into its own named function,
+    // insertSeriesOccurrenceLocked, so the rider-series module could call
+    // the same writer instead of hand-building a row. A mechanical rename
+    // of the enclosing scope, not a rework of the insert — the fingerprint
+    // moves with it rather than being "adopted" into the booking contract,
+    // which stays a SEPARATE, deliberately out-of-scope migration.
+    "insertSeriesOccurrenceLocked :: const [insertedRow] = await conn( scheduled_services').insert(nextData",
     "runLocked / action === 'extend' :: const [row] = await trx( scheduled_services').insert(data",
     "runLocked / action === 'convert_ongoing' :: const [row] = await trx( scheduled_services').insert(data",
   ],

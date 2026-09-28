@@ -289,10 +289,18 @@ describe('admin-schedule child-insert sites (source)', () => {
   });
 
   test('reminder registrations for spawned children carry the resolved label', () => {
-    // 3 in-transaction registrations + the 2 alert-action spawn records the
-    // post-commit registration reads back.
-    expect(src.match(/serviceType: childIdentity\.service_type/g)).toHaveLength(5);
-    expect(src).toContain("spawned.push({ id: row?.id, date: nd, serviceType: childIdentity.service_type });");
+    // 2 in-transaction registrations + the 2 alert-action spawn records the
+    // post-commit registration reads back. The completion auto-extend's own
+    // registration (spawnedVisit, extendSeriesOnceLocked) used to be a 3rd
+    // in-transaction site written here as `childIdentity.service_type`
+    // directly; PR #5268 round-3 extracted the insert (and childIdentity
+    // itself) into insertSeriesOccurrenceLocked, which RETURNS the inserted
+    // row — extendSeriesOnceLocked now reads the identical, already-
+    // persisted value off that row (serviceType: autoExtRow.service_type)
+    // rather than re-deriving it from a variable no longer in its own
+    // scope. Same value, same guarantee (it's literally what was inserted).
+    expect(src.match(/serviceType: childIdentity\.service_type/g)).toHaveLength(4);
+    expect(src).toContain('serviceType: autoExtRow.service_type,');
     expect(src).toContain('serviceType: row.serviceType || parent.service_type,');
   });
 });

@@ -2,6 +2,7 @@
 // Scope doc: ~/lawn-pest-rhythm-scope-20260928.md, "Date rule".
 const {
   planRiderDates, MIN_GAP_DAYS, TARGET_GAP_DAYS, MAX_WAIT_DAYS, OVERDUE_WAIT_DAYS,
+  _internals: { computeRiderHorizon },
 } = require('../services/rider-series');
 
 function addDays(dateStr, days) {
@@ -176,6 +177,27 @@ describe('rider-series planRiderDates', () => {
     });
     expect(plan[0] >= floor).toBe(true);
     expect(plan[0]).toBe('2026-10-12'); // Monday
+  });
+
+  // --- P1 fallback count (PR #5268 round 2): plannedVisitCountForPattern
+  // is a TOTAL occurrence count that already includes the anchor visit
+  // itself (e.g. quarterly = 4 visits/year, the first of which IS the
+  // anchor) — computeRiderHorizon must plan count-1 FUTURE gaps past it,
+  // never the raw count (which plans one extra TARGET_GAP_DAYS step past
+  // the real one-year horizon).
+  test('computeRiderHorizon: a quarterly rider whose host ends plans exactly 3 future standalone dates after the anchor (P1 fallback count, fail-without-fix evidence)', () => {
+    const anchor = '2026-01-01';
+    const horizon = computeRiderHorizon(anchor, [], 'quarterly');
+    // fail-without-fix: the pre-fix formula (count * TARGET_GAP_DAYS) would
+    // put the horizon a full extra 84-day step past this.
+    expect(horizon).toBe(addDays(anchor, 3 * TARGET_GAP_DAYS));
+    expect(horizon).not.toBe(addDays(anchor, 4 * TARGET_GAP_DAYS));
+    const plan = planRiderDates({ hostDates: [], lastRiderDate: anchor, horizonDate: horizon });
+    expect(plan).toEqual([
+      addDays(anchor, TARGET_GAP_DAYS),
+      addDays(anchor, 2 * TARGET_GAP_DAYS),
+      addDays(anchor, 3 * TARGET_GAP_DAYS),
+    ]);
   });
 
   test('earliestDate does not change a plan whose anchor is recent', () => {

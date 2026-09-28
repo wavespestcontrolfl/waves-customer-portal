@@ -783,18 +783,23 @@ describe('reconcileRecurringSeriesVisitCount — billable-amount gate on extend 
   test('every OFFICE series writer consults the shared verdict; the completion auto-extend deliberately does not (owner ruling: warn at completion)', () => {
     // reconcile (count raise + ongoing flip) + the two alert-action loops.
     expect((src.match(/await seriesExtensionUnbillable\(trx, \{/g) || []).length).toBe(3);
-    // The single-visit insert step (candidate search → insert → prepay →
-    // add-ons → visit-groups) was extracted out of
-    // runRecurringSeriesMaintenanceLocked into extendSeriesOnceLocked so the
-    // nightly top-up loop (below) can share it, gated behind
-    // opts.checkUnbillable — the shared function's body now legitimately
-    // contains the call, but the COMPLETION call site never opts in, so its
-    // own behavior (never consulting the gate) is unchanged.
+    // The single-occurrence insert step (template → insert → prepay →
+    // add-ons → visit-groups) was extracted out of extendSeriesOnceLocked
+    // into insertSeriesOccurrenceLocked (PR #5268 round-3 structural fix)
+    // so BOTH the nightly top-up loop (below) AND the rider-series module
+    // can share it — extendSeriesOnceLocked's own candidate-search loop
+    // now calls it with checkUnbillable: !!opts.checkUnbillable, so the
+    // COMPLETION call site (which passes no opts.checkUnbillable) still
+    // never opts in and its own behavior is unchanged.
     expect(src).toContain('spawnedVisit = await extendSeriesOnceLocked(conn, parent, parentId, cols, svc);');
-    const fnFrom = src.indexOf('async function extendSeriesOnceLocked(');
-    const fnBody = src.slice(fnFrom, src.indexOf('\nasync function ', fnFrom + 10));
+    const fnFrom = src.indexOf('async function insertSeriesOccurrenceLocked(');
+    const fnTo = src.indexOf('\nasync function runRecurringSeriesMaintenanceLocked(');
+    expect(fnFrom).toBeGreaterThan(-1);
+    expect(fnTo).toBeGreaterThan(fnFrom);
+    const fnBody = src.slice(fnFrom, fnTo);
     expect(fnBody).toContain('insert(nextData)');
-    expect(fnBody).toContain('if (opts.checkUnbillable) {');
+    expect(fnBody).toContain('if (checkUnbillable) {');
+    expect(fnBody).toContain('checkUnbillable: !!opts.checkUnbillable,');
   });
 
   test('the nightly top-up DOES consult the shared verdict — it is not the completion auto-extend, and it can mint many unattended rows in one run', () => {

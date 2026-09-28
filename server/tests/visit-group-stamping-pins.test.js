@@ -65,14 +65,20 @@ describe('every booking path stamps or deliberately skips', () => {
     expect(src).toMatch(/if \(fuRow\?\.id\) \{\s*\n\s*await require\('\.\/visit-groups'\)\.maybeGroupRow\(fuRow\.id, \{ database: sp, createdBy: 'dispatch' \}\);/);
   });
 
-  test('auto-extend stamps ONLY after the post-insert cancellation re-check passes', () => {
+  test('the canonical occurrence writer stamps ONLY after the post-insert cancellation re-check passes', () => {
+    // insertSeriesOccurrenceLocked (PR #5268 round-3 structural fix) is the
+    // extraction of extendSeriesOnceLocked's own insert step — auto-extend,
+    // top-up and the rider-series module's own inserts all share this one
+    // stamp call now, so the pin follows it there (variable names live/
+    // insertedRow, was autoExtLive/autoExtRow before the extraction).
     const src = read('routes/admin-schedule.js');
-    expect(src).toMatch(/if \(autoExtLive && autoExtRow\?\.id\) \{[\s\S]{0,500}maybeGroupRow\(autoExtRow\.id, \{ database: conn, createdBy: 'dispatch' \}\);/);
+    expect(src).toMatch(/if \(!live \|\| !insertedRow\?\.id\) return null;[\s\S]{0,500}maybeGroupRow\(insertedRow\.id, \{ database: conn, createdBy: 'dispatch' \}\);/);
     // And never before the re-check (the compensating delete would orphan a
-    // freshly minted visit): no stamp between the insert and autoExtLive.
+    // freshly minted visit): no stamp between the insert and the `live`
+    // guard.
     const between = src.slice(
-      src.indexOf("const [autoExtRow] = await conn('scheduled_services')"),
-      src.indexOf('let autoExtLive = true;'),
+      src.indexOf("const [insertedRow] = await conn('scheduled_services')"),
+      src.indexOf('let live = true;'),
     );
     expect(between).not.toContain('maybeGroupRow');
   });

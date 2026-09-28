@@ -17837,6 +17837,205 @@ function normalizeTopUpWindow(windowStart, durationMinutes, windowEnd) {
   return { start: validated.window_start, end: validated.window_end };
 }
 
+// Inserts ONE occurrence for a series — the canonical writer every
+// date-bearing series insert in this codebase now shares (extracted from
+// extendSeriesOnceLocked's own auto-extend insert, PR #5268 round-3
+// structural fix: rounds 1 and 2 each found ~8 true P1s, every one a new
+// place the rider-series module's own hand-built insert had drifted from
+// THIS logic — template resolution, technician eligibility, price/discount
+// computation, add-on due-date filtering, the ongoing-flag race guard).
+// extendSeriesOnceLocked below calls this with EXACTLY its own prior inline
+// values, so its behavior is byte-for-byte unchanged by the extraction.
+// server/services/rider-series.js#writeRiderPlan calls it too (lazy
+// require, avoiding the route-load cycle) for its own inserts — the rider
+// module decides DATES ONLY (see docs/design/rider-series-scheduling.md);
+// every occurrence it creates goes through this same writer.
+//
+// `parent`/`parentId`/`cols` are the SERIES this occurrence belongs to (the
+// host for extendSeriesOnceLocked; the rider's OWN parent — already run
+// through overlayRecurringTemplateOverrides, same as `parent` always is by
+// the time it reaches here — for a rider's insert) — never derived from
+// `svcLike`, which is only the prepay-coverage lookup's own row.
+//
+// opts:
+//   date               - the occurrence's scheduled_date. This function
+//                         does no candidate search; the caller has already
+//                         decided the date (extendSeriesOnceLocked's own
+//                         candidate walk; planRiderDates for a rider).
+//   windowStart/windowEnd - the row's window. The CALLER decides whether
+//                         these need off-hour normalization
+//                         (normalizeTopUpWindow) before calling in — never
+//                         re-normalized here, so extendSeriesOnceLocked's
+//                         own opts.normalizeOffHourStart posture (top-up
+//                         only) is unchanged by this extraction.
+//   preferredTechnicianId - when given (a host row's own tech, for a rider
+//                         joining its stop), validated for `date` through
+//                         assignableRecurringTemplateTechnicianId's own
+//                         eligibility rules (called with
+//                         `{ ...parent, technician_id: preferredTechnicianId }`)
+//                         and nulled if ineligible/absent that day. Omitted
+//                         (undefined): technician_id resolves off `parent`
+//                         itself, byte-identical to before this extraction.
+//   svcLike            - threaded to applyExtensionPrepayCoverage only.
+//   blackoutDates      - the {dates, weeklyDaysOff} layer used for the
+//                         add-on due-date filter (filterAddonLinesForDate)
+//                         — the same shape loadSeriesBlackoutDates and
+//                         scheduling/blackout-dates#getBlackoutLayers both
+//                         return.
+//   skipParent/skipParentStamp/dirParent - the caller's own effective/
+//                         stamped weekend fields (see extendSeriesOnceLocked's
+//                         own B6 comment) — never recomputed here.
+//   checkUnbillable    - opt-in (top-up only; unset by the rider and the
+//                         completion path): runs seriesExtensionUnbillable
+//                         against THIS date before inserting.
+//   onSkip(reason)     - called instead of a silent null return when
+//                         checkUnbillable refuses ('unbillable').
+//
+// Returns the inserted row, or null when checkUnbillable refused it, or the
+// series stopped between the pre-checks and the insert (the stopped-series
+// rollback — a cancellation landing while this function's own price/add-on
+// math ran).
+async function insertSeriesOccurrenceLocked(conn, parent, parentId, cols, opts = {}) {
+  const {
+    date, windowStart, windowEnd, preferredTechnicianId, svcLike,
+    blackoutDates = null, skipParent = false, skipParentStamp = false,
+    dirParent = 'forward', checkUnbillable = false, onSkip,
+  } = opts;
+
+  const childIdentity = await resolveSeriesChildIdentity(conn, parent);
+  const technicianId = preferredTechnicianId !== undefined
+    ? await assignableRecurringTemplateTechnicianId(conn, { ...parent, technician_id: preferredTechnicianId }, date)
+    : await assignableRecurringTemplateTechnicianId(conn, parent, date);
+  const nextData = {
+    customer_id: parent.customer_id,
+    technician_id: technicianId,
+    scheduled_date: date,
+    window_start: windowStart, window_end: windowEnd,
+    service_type: childIdentity.service_type, status: 'pending',
+    time_window: parent.time_window, zone: parent.zone,
+    estimated_duration_minutes: parent.estimated_duration_minutes,
+    is_recurring: true, recurring_pattern: parent.recurring_pattern,
+    recurring_parent_id: parentId,
+  };
+  if (cols.recurring_ongoing) nextData.recurring_ongoing = true;
+  if (cols.skip_weekends) nextData.skip_weekends = skipParentStamp;
+  if (cols.weekend_shift && skipParent) nextData.weekend_shift = dirParent;
+  if (cols.service_id && childIdentity.service_id) nextData.service_id = childIdentity.service_id;
+  if (cols.appointment_type) nextData.appointment_type = classifyAppointmentTag(childIdentity.service_type);
+  const extensionPriceParent = await resolveSeriesExtensionPriceTemplate(conn, parentId, parent);
+  copyLineDiscountFields(nextData, extensionPriceParent, cols);
+  if (cols.service_key_snapshot && childIdentity.service_key) nextData.service_key_snapshot = childIdentity.service_key;
+  copyAppointmentDiscountFields(nextData, parent, cols);
+  copyBillToFields(nextData, parent, cols);
+  copyStampedServiceAddressFields(nextData, parent, cols);
+  await anchorSoleProperty(nextData, cols, conn);
+  // Required scope must be readable before creating any child.
+  const parentAddons = await conn('scheduled_service_addons').where({ scheduled_service_id: parentId });
+  // Legacy-series root freeze (Codex round 2 P1) — see
+  // freezeLegacySeriesRootCaps's own comment. Only one date is ever placed
+  // per call, so no per-date loop to hoist this out of.
+  await freezeLegacySeriesRootCaps(conn, parent, cols, parentAddons);
+  const storedDiscountScope = await loadStoredDiscountScope(conn, parent, parentAddons);
+  const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, date, blackoutDates, skipParent);
+  // Anchored-split series (self-booked funnels, wizard plans): the PARENT's
+  // estimated_price carries the annual's remainder cents and every seeded
+  // follow-up bills the even quotient. Templating the extension off the
+  // parent re-billed those cents on every renewal visit (owner ruling
+  // 2026-08-27). Use the series' per-visit amount instead when the parent
+  // is a remainder-bearing anchor — an existing follow-up priced within $1
+  // below it.
+  applyStoredVisitFinancials(nextData, cols, extensionPriceParent, dueAddons, parentAddons, storedDiscountScope);
+  // Canonical restack (GATE_DISCOUNT_STACKING): restates the frozen fields
+  // the two copy* calls and applyStoredVisitFinancials just wrote —
+  // line_discount_dollars, discount_dollars, estimated_price — against THIS
+  // occurrence's own due add-ons; no-op off (see applyDiscountStackRestack).
+  // The returned array threads through to insertRecurringChildAddons below
+  // so each due add-on's own discount restates the same way. discountCaps
+  // is the REAL catalog cap for the primary + every due add-on's own
+  // discount.
+  const discountCaps = discountStackingLive()
+    ? await loadDiscountCapsById(conn, [extensionPriceParent.line_discount_id, ...dueAddons.map((a) => a.discount_id)])
+    : null;
+  const restackedAddonDollars = applyDiscountStackRestack(nextData, cols, extensionPriceParent, dueAddons, storedDiscountScope, discountCaps);
+  // Pricing-regime provenance — see restackStoredVisitFinancials's own
+  // comment.
+  if (discountStackingLive()) stampPricingRegimeMarker(nextData, cols, resolveStoredDiscountCaps(extensionPriceParent, discountCaps).snapshot);
+  // Extension rows keep invoice-on-complete stamping — sibling-resolved so
+  // the freshest office billing intent wins (see
+  // resolveSeriesCreateInvoiceOnComplete). Without it a pay-per-visit
+  // customer's occurrence completes UNINVOICED.
+  if (cols.create_invoice_on_complete) {
+    const seriesCioc = await resolveSeriesCreateInvoiceOnComplete(conn, parentId, parent);
+    if (seriesCioc !== undefined) nextData.create_invoice_on_complete = seriesCioc;
+  }
+  // opts.checkUnbillable (topUp only): the SAME shared verdict every OFFICE
+  // series writer consults, run against THIS ACTUAL candidate date and its
+  // real due add-ons — price varies by date (e.g. an annual-only add-on not
+  // due on every occurrence), so a single upfront probe date could pass
+  // while a later candidate in the same horizon run is genuinely unbillable
+  // (Codex pre-push P1). Refuses rather than inserts — never a compensating
+  // delete.
+  if (checkUnbillable) {
+    const unbillable = await seriesExtensionUnbillable(conn, {
+      parent, dates: [date], cols, parentAddons, storedDiscountScope,
+      blackoutDates, skipParent,
+      seriesCioc: nextData.create_invoice_on_complete,
+    });
+    if (unbillable) {
+      logger.warn(`[recurring-topup] Insert skipped for parent=${parentId} — ${date} would be unbillable`);
+      if (onSkip) onSkip('unbillable');
+      return null;
+    }
+  }
+  const [insertedRow] = await conn('scheduled_services').insert(nextData).returning('*');
+  // Annual-prepay coverage for the row we just inserted.
+  //
+  // The auto-extend used to build its next visit with no prepay field at
+  // all, so a prepay customer's extension read as UNCOVERED and billed
+  // again for service the prepay had already bought. Deliberately
+  // delegated rather than computed here: the coverage budget has ONE
+  // authority. applyPrepaidCoverageForTerm selects through
+  // coverageRowsForTerm, which caps the set at coverage_visit_count
+  // (committed rows first, date-ordered), skips completed rows for
+  // reconcilePendingWindowCompletions to settle, skips rows a different
+  // term or an out-of-band cash/check/Zelle payment already covers, and
+  // slices by position so the remainder cents land on the final visit. A
+  // second allocator here could only disagree with it.
+  //
+  // Runs on `conn`, so it commits or rolls back with the occurrence.
+  await applyExtensionPrepayCoverage(conn, parent, svcLike, date);
+  // Post-insert re-check closes the remaining race: a cancellation can stop
+  // the series between the pre-insert read above and this insert. The row
+  // hasn't been mirrored, broadcast, or given a reminder yet, so
+  // compensating is a plain delete — guarded on status='pending' so if the
+  // cancellation sweep already flipped it, the cancelled row (and its
+  // history) is left intact. Either way the add-on mirror + reminder
+  // registration below are skipped, so a stale reminder can't be minted
+  // after the sweep's reminder-cancel step already ran.
+  let live = true;
+  if (cols.recurring_ongoing && insertedRow?.id) {
+    const parentNow = await conn('scheduled_services')
+      .where({ id: parentId })
+      .first('recurring_ongoing');
+    if (!parentNow || !parentNow.recurring_ongoing) {
+      live = false;
+      const removed = await conn('scheduled_services')
+        .where({ id: insertedRow.id, status: 'pending' })
+        .del();
+      logger.info(`[recurring] Insert ${removed ? 'rolled back' : 'left to the cancellation sweep'} for parent=${parentId} — series stopped while this occurrence was being written`);
+    }
+  }
+  if (!live || !insertedRow?.id) return null;
+  // Persist all due scope before the wrapper can observe a committed
+  // occurrence or register its reminder.
+  await insertRecurringChildAddons(conn, insertedRow.id, dueAddons, restackedAddonDollars);
+  // Visit groups: stamp ONLY after the post-insert cancellation re-check
+  // passes — stamping earlier could mint a visit whose member this same
+  // transaction compensating-deletes.
+  await require('../services/visit-groups').maybeGroupRow(insertedRow.id, { database: conn, createdBy: 'dispatch' });
+  return insertedRow;
+}
+
 // Returns the spawned-visit payload (for the caller's post-commit reminder
 // registration) when a row landed and survived the cancellation re-check,
 // else null.
@@ -17994,155 +18193,31 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
     } else if (!stillOngoing) {
       logger.info(`[recurring] Auto-extend skipped for parent=${parentId} — series stopped while the completion was processing`);
     } else {
-      const childIdentity = await resolveSeriesChildIdentity(conn, parent);
-      const nextData = {
-        customer_id: parent.customer_id,
-        technician_id: await assignableRecurringTemplateTechnicianId(conn, parent, nextStr),
-        scheduled_date: nextStr,
-        window_start: nextWindowStart, window_end: nextWindowEnd,
-        service_type: childIdentity.service_type, status: 'pending',
-        time_window: parent.time_window, zone: parent.zone,
-        estimated_duration_minutes: parent.estimated_duration_minutes,
-        is_recurring: true, recurring_pattern: parent.recurring_pattern,
-        recurring_parent_id: parentId,
-      };
-      if (cols.recurring_ongoing) nextData.recurring_ongoing = true;
-      if (cols.skip_weekends) nextData.skip_weekends = skipParentStamp;
-      if (cols.weekend_shift && skipParent) nextData.weekend_shift = dirParent;
-      if (cols.service_id && childIdentity.service_id) nextData.service_id = childIdentity.service_id;
-      if (cols.appointment_type) nextData.appointment_type = classifyAppointmentTag(childIdentity.service_type);
-      const extensionPriceParent = await resolveSeriesExtensionPriceTemplate(conn, parentId, parent);
-      copyLineDiscountFields(nextData, extensionPriceParent, cols);
-      if (cols.service_key_snapshot && childIdentity.service_key) nextData.service_key_snapshot = childIdentity.service_key;
-      copyAppointmentDiscountFields(nextData, parent, cols);
-      copyBillToFields(nextData, parent, cols);
-      copyStampedServiceAddressFields(nextData, parent, cols);
-      await anchorSoleProperty(nextData, cols, conn);
-      // Required scope must be readable before creating any child.
-      const parentAddons = await conn('scheduled_service_addons').where({ scheduled_service_id: parentId });
-      // Legacy-series root freeze (Codex round 2 P1) — see
-      // freezeLegacySeriesRootCaps's own comment. Only one date is
-      // ever placed per auto-extend call, so no per-date loop to hoist
-      // this out of.
-      await freezeLegacySeriesRootCaps(conn, parent, cols, parentAddons);
-      const storedDiscountScope = await loadStoredDiscountScope(conn, parent, parentAddons);
-      const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nextStr, autoExtendBlackoutDates, skipParent);
-      // Anchored-split series (self-booked funnels, wizard plans): the
-      // PARENT's estimated_price carries the annual's remainder cents
-      // and every seeded follow-up bills the even quotient. Templating
-      // the extension off the parent re-billed those cents on every
-      // renewal visit (owner ruling 2026-08-27). Use the series'
-      // per-visit amount instead when the parent is a remainder-bearing
-      // anchor — an existing follow-up priced within $1 below it.
-      applyStoredVisitFinancials(nextData, cols, extensionPriceParent, dueAddons, parentAddons, storedDiscountScope);
-      // Canonical restack (GATE_DISCOUNT_STACKING): restates the frozen
-      // fields the two copy* calls and applyStoredVisitFinancials just
-      // wrote — line_discount_dollars, discount_dollars, estimated_price
-      // — against THIS occurrence's own due add-ons; no-op off (see
-      // applyDiscountStackRestack). The returned array threads through
-      // to insertRecurringChildAddons below so each due add-on's own
-      // discount restates the same way. discountCaps is the REAL
-      // catalog cap for the primary + every due add-on's own discount.
-      const discountCaps = discountStackingLive()
-        ? await loadDiscountCapsById(conn, [extensionPriceParent.line_discount_id, ...dueAddons.map((a) => a.discount_id)])
-        : null;
-      const restackedAddonDollars = applyDiscountStackRestack(nextData, cols, extensionPriceParent, dueAddons, storedDiscountScope, discountCaps);
-      // Pricing-regime provenance — see restackStoredVisitFinancials's
-      // own comment.
-      if (discountStackingLive()) stampPricingRegimeMarker(nextData, cols, resolveStoredDiscountCaps(extensionPriceParent, discountCaps).snapshot);
-      // Extension rows keep invoice-on-complete stamping — sibling-
-      // resolved so the freshest office billing intent wins (see
-      // resolveSeriesCreateInvoiceOnComplete). Without it a
-      // pay-per-visit customer's extension visit completes UNINVOICED.
-      if (cols.create_invoice_on_complete) {
-        const seriesCioc = await resolveSeriesCreateInvoiceOnComplete(conn, parentId, parent);
-        if (seriesCioc !== undefined) nextData.create_invoice_on_complete = seriesCioc;
-      }
-      // opts.checkUnbillable (topUp only — never set by the completion
-      // path, so its own behavior is unchanged): the SAME shared verdict
-      // every OFFICE series writer consults, run against THIS ACTUAL
-      // candidate date and its real due add-ons — price varies by date
-      // (e.g. an annual-only add-on not due on every occurrence), so a
-      // single upfront probe date could pass while a later candidate in
-      // the same horizon run is genuinely unbillable (Codex pre-push P1).
-      // Refuses rather than inserts — never a compensating delete.
-      if (opts.checkUnbillable) {
-        const unbillable = await seriesExtensionUnbillable(conn, {
-          parent, dates: [nextStr], cols, parentAddons, storedDiscountScope,
-          blackoutDates: autoExtendBlackoutDates, skipParent,
-          seriesCioc: nextData.create_invoice_on_complete,
-        });
-        if (unbillable) {
-          logger.warn(`[recurring-topup] Auto-extend skipped for parent=${parentId} — ${nextStr} would be unbillable`);
-          // Lets topUpRecurringSeriesLocked report skipped: 'unbillable'
-          // instead of the false "already at horizon" the ops script used
-          // to print for a series whose horizon math was fine but whose
-          // FIRST candidate the billable gate refused. Never set by the
-          // completion path (no onSkip passed there) or by any other
-          // extendSeriesOnceLocked caller (reconcile, etc.) — this is
-          // top-up-only plumbing.
-          if (onSkip) onSkip('unbillable');
-          return spawnedVisit;
-        }
-      }
-      const [autoExtRow] = await conn('scheduled_services').insert(nextData).returning('*');
-      // Annual-prepay coverage for the row we just inserted.
-      //
-      // The auto-extend used to build its next visit with no prepay
-      // field at all, so a prepay customer's extension read as UNCOVERED
-      // and billed again for service the prepay had already bought.
-      // Deliberately delegated rather than computed here: the coverage
-      // budget has ONE authority. applyPrepaidCoverageForTerm selects
-      // through coverageRowsForTerm, which caps the set at
-      // coverage_visit_count (committed rows first, date-ordered), skips
-      // completed rows for reconcilePendingWindowCompletions to settle,
-      // skips rows a different term or an out-of-band cash/check/Zelle
-      // payment already covers, and slices by position so the remainder
-      // cents land on the final visit. A second allocator here could
-      // only disagree with it.
-      //
-      // Runs on `conn`, so it commits or rolls back with the extension.
-      // The transient completion-race bell is quiet (this fires per
-      // generated visit and reconciliation settles that case); the
-      // cancelled-paid-slot bell still rings — nothing re-seeds it.
-      await applyExtensionPrepayCoverage(conn, parent, svcLike, nextStr);
-      // Post-insert re-check closes the remaining race: a
-      // cancellation can stop the series between the pre-insert
-      // read above and this insert. The row hasn't been mirrored,
-      // broadcast, or given a reminder yet, so compensating is a
-      // plain delete — guarded on status='pending' so if the
-      // cancellation sweep already flipped it, the cancelled row
-      // (and its history) is left intact. Either way the add-on
-      // mirror + reminder registration below are skipped, so a
-      // stale reminder can't be minted after the sweep's
-      // reminder-cancel step already ran.
-      let autoExtLive = true;
-      if (cols.recurring_ongoing && autoExtRow?.id) {
-        const parentNow = await conn('scheduled_services')
-          .where({ id: parentId })
-          .first('recurring_ongoing');
-        if (!parentNow || !parentNow.recurring_ongoing) {
-          autoExtLive = false;
-          const removed = await conn('scheduled_services')
-            .where({ id: autoExtRow.id, status: 'pending' })
-            .del();
-          logger.info(`[recurring] Auto-extend ${removed ? 'rolled back' : 'left to the cancellation sweep'} for parent=${parentId} — series stopped during completion processing`);
-        }
-      }
-      // Persist all due scope before the wrapper can observe a committed
-      // extension or register its reminder.
-      if (autoExtLive && autoExtRow?.id) {
-        await insertRecurringChildAddons(conn, autoExtRow.id, dueAddons, restackedAddonDollars);
-        // Visit groups: stamp ONLY after the post-insert cancellation
-        // re-check passes — stamping earlier could mint a visit whose
-        // member this same transaction compensating-deletes.
-        await require('../services/visit-groups').maybeGroupRow(autoExtRow.id, { database: conn, createdBy: 'dispatch' });
+      // The candidate walk above is this function's own — everything past
+      // "we have a date" (template resolution, technician eligibility,
+      // price/discount computation, add-on due-date filtering, the
+      // ongoing-flag race guard, the actual insert) is the canonical
+      // occurrence writer, shared with the rider-series module. See
+      // insertSeriesOccurrenceLocked's own header.
+      const autoExtRow = await insertSeriesOccurrenceLocked(conn, parent, parentId, cols, {
+        date: nextStr,
+        windowStart: nextWindowStart,
+        windowEnd: nextWindowEnd,
+        svcLike,
+        blackoutDates: autoExtendBlackoutDates,
+        skipParent,
+        skipParentStamp,
+        dirParent,
+        checkUnbillable: !!opts.checkUnbillable,
+        onSkip,
+      });
+      if (autoExtRow?.id) {
         spawnedVisit = {
           scheduledServiceId: autoExtRow.id,
           customerId: parent.customer_id,
           scheduledDate: nextStr,
           windowStart: parent.window_start,
-          serviceType: childIdentity.service_type,
+          serviceType: autoExtRow.service_type,
         };
         // Rider series (pest-rides-the-lawn-rhythm PR 1): a HOST series
         // gaining a row here (completion auto-extend OR top-up — both
@@ -24760,7 +24835,17 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
               .where('is_recurring', true)
               .update({ recurring_ongoing: true });
           }
-          riderSync = await require('../services/rider-series').syncRiderSeries(sp, parentId, { source: 'alert_action' });
+          // revive:true (P1 revival, PR #5268 round 2) — a convert_ongoing
+          // reviving a rider whose LATEST resolved decision is still
+          // let_lapse (the decision this action exists to undo) would
+          // otherwise always hit syncRiderSeries' own plan_stopped gate,
+          // because the flip above and this sync run BEFORE the alert row
+          // convert_ongoing is about to resolve exists — see
+          // riderLivenessSkipReason's own comment. Every other liveness
+          // gate still applies.
+          riderSync = await require('../services/rider-series').syncRiderSeries(sp, parentId, {
+            source: 'alert_action', revive: action === 'convert_ongoing',
+          });
           if (riderSync.skipped) throw skippedSync;
         });
       } catch (err) {
@@ -25623,6 +25708,7 @@ router._test = {
   seriesTermIds,
   coveringTermForDate,
   extendSeriesOnceLocked,
+  insertSeriesOccurrenceLocked,
   topUpRecurringSeries,
   topUpRecurringSeriesWithLocks,
   topUpRecurringSeriesLocked,
@@ -25725,3 +25811,13 @@ module.exports.filterAddonLinesForDate = filterAddonLinesForDate;
 module.exports.insertRecurringChildAddons = insertRecurringChildAddons;
 module.exports.seriesCandidateDateClashes = seriesCandidateDateClashes;
 module.exports.assignableRecurringTemplateTechnicianId = assignableRecurringTemplateTechnicianId;
+// The canonical occurrence writer itself (extracted from extendSeriesOnceLocked,
+// PR #5268 round-3 structural fix) — rider-series.js#writeRiderPlan calls
+// this directly for its own inserts instead of hand-building a row, so
+// price/discount, template resolution, technician eligibility and add-on
+// due-date filtering can never drift from the auto-extend/top-up path
+// again.
+module.exports.insertSeriesOccurrenceLocked = insertSeriesOccurrenceLocked;
+// Shared off-hour window normalization (see its own header) — rider-series.js
+// applies it unconditionally to every host window it joins.
+module.exports.normalizeTopUpWindow = normalizeTopUpWindow;
