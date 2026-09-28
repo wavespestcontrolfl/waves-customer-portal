@@ -58,7 +58,9 @@ exports.up = async function up(knex) {
       .where({ name: fix.name })
       .whereIn('unit_size_oz', [fix.oldOz, fix.oz])
       .select('id', 'container_size', 'unit_size_oz');
-     
+    if (!products.length) continue;
+    // Loaded only when a row needs repair: the canonical per-oz and
+    // best-price writers the inventory screens use.
     const { approvedPerOzFields, recalcBestPrice } = require('../../routes/admin-inventory');
     for (const product of products) {
       if (product.container_size !== fix.container || Number(product.unit_size_oz) !== fix.oz) {
