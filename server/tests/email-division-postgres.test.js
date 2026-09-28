@@ -108,6 +108,27 @@ suite('email division against real Postgres', () => {
     }
   });
 
+  test('readVisitProducts: scopes the Taurus SC note/fact slug to fipronil products only, never Alpine WSG', async () => {
+    const customerId = await makeCustomer();
+    const visitId = await makeVisit(customerId);
+    await trx('service_products').insert([
+      { id: randomUUID(), service_record_id: visitId, product_name: 'Taurus SC', active_ingredient: 'fipronil', applied_at: new Date('2026-09-10T10:00:00Z') },
+      { id: randomUUID(), service_record_id: visitId, product_name: 'Alpine WSG', active_ingredient: 'dinotefuran', applied_at: new Date('2026-09-10T10:15:00Z') },
+    ]);
+    const { products } = await readVisitProducts(visitId, { conn: trx });
+    const taurus = products.find((p) => p.productName === 'Taurus SC');
+    expect(taurus).toMatchObject({ family: 'non_repellent', verified: true });
+    expect(taurus.notes.length).toBeGreaterThan(0);
+    expect(taurus.factSlugs).toContain('fact-taurus-sc-non-repellent');
+    const alpine = products.find((p) => p.productName === 'Alpine WSG');
+    // Same family, still shown — but the Taurus-SC-sourced note/fact slug
+    // never rides along on a different active ingredient. The generic,
+    // unsourced "stay off treated areas until dry" instruction is NOT a
+    // product-specific citation, so it still applies to Alpine WSG too.
+    expect(alpine).toMatchObject({ family: 'non_repellent', verified: false, notes: [], factSlugs: [] });
+    expect(alpine.dryRule).toEqual({ hours: null, text: 'Stay off treated areas until dry.' });
+  });
+
   test('readVisitSummary: structured fields, advisory/conditions keys, and pests named', async () => {
     const customerId = await makeCustomer();
     const visitId = await makeVisit(customerId, {
@@ -136,6 +157,24 @@ suite('email division against real Postgres', () => {
     const nextDate = summary.nextVisitDate instanceof Date
       ? summary.nextVisitDate.toISOString().slice(0, 10) : String(summary.nextVisitDate).slice(0, 10);
     expect(nextDate).toBe('2026-12-10'); // never the earlier, abandoned 'rescheduled' row
+  });
+
+  test('readVisitSummary: excludes a past appointment between the service date and today from "next visit"', async () => {
+    const customerId = await makeCustomer();
+    const visitId = await makeVisit(customerId, { service_date: '2026-01-15' });
+    // Still 'pending' in the database, but its date has long since passed —
+    // reading this summary well after the visit must not surface a stale
+    // appointment as "next" just because it postdates the completed visit.
+    await trx('scheduled_services').insert({
+      id: randomUUID(), customer_id: customerId, scheduled_date: '2026-03-01', service_type: 'Pest Control', status: 'pending',
+    });
+    await trx('scheduled_services').insert({
+      id: randomUUID(), customer_id: customerId, scheduled_date: '2028-01-01', service_type: 'Pest Control', status: 'confirmed',
+    });
+    const summary = await readVisitSummary(visitId, { conn: trx });
+    const nextDate = summary.nextVisitDate instanceof Date
+      ? summary.nextVisitDate.toISOString().slice(0, 10) : String(summary.nextVisitDate).slice(0, 10);
+    expect(nextDate).toBe('2028-01-01');
   });
 
   test('getActivityRatingAverages: partitions by service_line and omits a cohort with fewer than 20 rated visits', async () => {

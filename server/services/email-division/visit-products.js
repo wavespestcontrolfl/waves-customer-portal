@@ -3,10 +3,12 @@
 // Verified families cite a real source; unverified ones get a plain
 // generic phrase and empty notes — never an invented timeline.
 const db = require('../../models/db');
+const { etDateString } = require('../../utils/datetime-et');
+const { dateOnlyString } = require('../../utils/date-only');
 
 const FAMILIES = {
-  non_repellent: { ai: ['fipronil', 'dinotefuran'], name: ['taurus sc', 'alpine wsg'], phrase: 'a non-repellent that ants and roaches cannot detect, so they walk through it and carry it back to the colony', dryRule: { hours: null, text: 'Stay off treated areas until dry.' }, notes: [{ text: 'It works through the colony rather than killing on contact, so you may still see ants for a while after the visit.', source: 'Control Solutions, Taurus SC product page' }], factSlugs: ['fact-taurus-sc-non-repellent'], customerVisible: true, verified: true },
-  contact_residual: { ai: ['bifenthrin', 'lambda-cyhalothrin', 'lambda cyhalothrin', 'deltamethrin', 'cyfluthrin'], name: ['talstar p', 'bifen i/t', 'talak', 'demand cs', 'delta dust'], phrase: 'a contact product that works on the surfaces it is sprayed on', dryRule: { hours: 24, text: 'The label asks for application when rain is not predicted for the next 24 hours; people and pets stay off treated surfaces until the spray has dried.' }, notes: [], factSlugs: ['fact-bifenthrin-residual', 'fact-talstar-p-label'], customerVisible: true, verified: true, sourceScope: { ai: ['bifenthrin'], name: ['talstar p', 'bifen i/t', 'talak'] } },
+  non_repellent: { ai: ['fipronil', 'dinotefuran'], name: ['taurus sc', 'alpine wsg'], phrase: 'a non-repellent that ants and roaches cannot detect, so they walk through it and carry it back to the colony', dryRule: { hours: null, text: 'Stay off treated areas until dry.' }, notes: [{ text: 'It works through the colony rather than killing on contact, so you may still see ants for a while after the visit.', source: 'Control Solutions, Taurus SC product page' }], factSlugs: ['fact-taurus-sc-non-repellent'], customerVisible: true, verified: true, sourceScope: { ai: ['fipronil'], name: ['taurus sc'] } },
+  contact_residual: { ai: ['bifenthrin', 'lambda-cyhalothrin', 'lambda cyhalothrin', 'deltamethrin', 'cyfluthrin'], name: ['talstar p', 'bifen i/t', 'talak', 'demand cs', 'delta dust'], phrase: 'a contact product that works on the surfaces it is sprayed on', dryRule: { hours: 24, text: 'The label asks for application when rain is not predicted for the next 24 hours; people and pets stay off treated surfaces until the spray has dried.', sourced: true }, notes: [], factSlugs: ['fact-bifenthrin-residual', 'fact-talstar-p-label'], customerVisible: true, verified: true, sourceScope: { ai: ['bifenthrin'], name: ['talstar p', 'bifen i/t', 'talak'] } },
   igr: { ai: ['hydroprene', 'pyriproxyfen', 'methoprene'], name: ['gentrol'], phrase: 'a growth regulator: immature roaches exposed to it become adults that cannot reproduce', dryRule: null, notes: [{ text: 'The Gentrol IGR (hydroprene) label states 120 days of control.', source: 'Gentrol IGR label' }], factSlugs: ['fact-gentrol-igr'], customerVisible: true, verified: true, sourceScope: { ai: ['hydroprene'], name: ['gentrol'] } },
   fungicide: { ai: ['azoxystrobin', 'thiophanate-methyl', 'thiophanate methyl', 'propiconazole'], name: ['artavia', 't-storm', 't storm'], phrase: 'a fungicide', dryRule: null, notes: [], factSlugs: ['fact-fungicide-unverified-timeline'], customerVisible: true, verified: false },
   herbicide: { ai: ['thiencarbazone', 'iodosulfuron', 'dicamba', 'halosulfuron', 'sulfentrazone'], name: ['celsius', 'sedgehammer'], phrase: 'a weed control', dryRule: null, notes: [], factSlugs: ['fact-herbicide-unverified-timeline'], customerVisible: true, verified: false },
@@ -43,15 +45,20 @@ async function readVisitProducts(serviceRecordId, { conn = db } = {}) {
   const products = rows.map((row) => {
     const family = classifyProduct({ productName: row.product_name, activeIngredient: row.active_ingredient });
     const def = FAMILIES[family];
-    // sourceScope narrows dryRule/notes/factSlugs/verified to the matching
-    // product — e.g. igr's 120-day claim is hydroprene-only, and
-    // contact_residual's "spray has dried" rain instruction is the Talstar
-    // P/bifenthrin liquid label, not Delta Dust (a dust, not a spray) or
-    // Demand CS (lambda-cyhalothrin).
+    // sourceScope narrows notes/factSlugs/verified (and a SOURCED dryRule —
+    // one citing a specific label, `dryRule.sourced`) to the matching
+    // product — e.g. non_repellent's Taurus-SC note is fipronil-only (not
+    // Alpine WSG/dinotefuran), igr's 120-day claim is hydroprene-only, and
+    // contact_residual's sourced "spray has dried" rain instruction is the
+    // Talstar P/bifenthrin liquid label, not Delta Dust (a dust, not a
+    // spray) or Demand CS (lambda-cyhalothrin). A generic, unsourced
+    // dryRule (non_repellent's "stay off treated areas until dry" — no
+    // product-specific citation) applies to the whole family regardless.
     const inScope = !def.sourceScope || matchesAny(def.sourceScope, row.product_name, row.active_ingredient);
+    const dryRuleInScope = inScope || !def.dryRule?.sourced;
     return {
       productName: row.product_name, activeIngredient: row.active_ingredient || null, family,
-      phrase: def.phrase, dryRule: inScope ? def.dryRule : null, notes: inScope ? def.notes : [],
+      phrase: def.phrase, dryRule: dryRuleInScope ? def.dryRule : null, notes: inScope ? def.notes : [],
       factSlugs: inScope ? def.factSlugs : [], customerVisible: def.customerVisible, verified: inScope && def.verified,
       applicationMethod: row.application_method || null, applicationArea: row.application_area || null,
       appliedAt: row.applied_at || row.created_at || null,
@@ -103,11 +110,21 @@ function expandElidedSpeciesLists(text) {
   return extra ? `${text} ${extra}` : text;
 }
 
+// A generic key whose specific subtype(s) also matched is suppressed — "widow
+// spiders" matches both its own regex and the generic "spiders" one, and the
+// specific finding is the one worth keeping (duplicate-free, and the more
+// informative pest for a tied-count area-intel sentence). Generalised as a
+// map so a future generic/specific pair added to PEST_KEYWORDS needs only an
+// entry here, not new suppression logic.
+const GENERIC_PARENTS = { spiders: ['widow spiders'] };
+
 function parsePestsNamed(technicianNotes) {
   const raw = String(technicianNotes || '').toLowerCase();
   if (!raw) return [];
   const expanded = expandElidedSpeciesLists(raw);
-  return PEST_KEYWORDS.filter(([, pattern]) => pattern.test(expanded)).map(([canonical]) => canonical);
+  const found = PEST_KEYWORDS.filter(([, pattern]) => pattern.test(expanded)).map(([canonical]) => canonical);
+  const foundSet = new Set(found);
+  return found.filter((key) => !GENERIC_PARENTS[key]?.some((specific) => foundSet.has(specific)));
 }
 
 // pg already parses jsonb into objects/arrays; these guard null/wrong-shape.
@@ -128,10 +145,18 @@ async function readVisitSummary(serviceRecordId, { conn = db } = {}) {
     // 'rescheduled' marks the OLD row a move abandoned, not a live booking
     // (admin-schedule.js's live-visit convention: whereNotIn 'cancelled'/
     // 'rescheduled'); a genuinely moved visit is a separate live row.
+    // Lower bound is the LATER of today (ET) and the completed service
+    // date, matching every other next-visit reader (e.g.
+    // context-aggregator.js) — reading this summary well after the visit
+    // must never surface a stale pending/confirmed appointment that has
+    // since passed between the service date and today.
+    const todayET = etDateString();
+    const serviceDateStr = dateOnlyString(service.service_date) || todayET;
+    const lowerBound = serviceDateStr > todayET ? serviceDateStr : todayET;
     const next = await conn('scheduled_services')
       .where({ customer_id: service.customer_id })
       .whereNotIn('status', ['cancelled', 'rescheduled', 'completed', 'skipped', 'no_show'])
-      .where('scheduled_date', '>=', service.service_date || new Date())
+      .where('scheduled_date', '>=', lowerBound)
       .orderBy('scheduled_date', 'asc')
       .first('scheduled_date');
     nextVisitDate = next?.scheduled_date || null;

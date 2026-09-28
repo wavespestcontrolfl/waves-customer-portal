@@ -7621,33 +7621,44 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
-  // DAILY 5:10 AM ET — Email division area-intel recompute (current month;
-  // also previous month through the first 3 days of the new month — a
-  // rolling catch-up window, not just day one, so a gate enabled after the
-  // 1st or a failed/missed day-one tick still gets the previous month's
-  // final aggregate; computeAreaIntel replaces the whole month atomically,
-  // so repeating it on days 2-3 is idempotent, not a double-count). Dark
+  // DAILY 5:10 AM ET — Email division area-intel recompute: the current
+  // month every tick, and the previous month on EVERY tick until one run
+  // for it succeeds (persisted marker below) — not a fixed day-N window,
+  // so a gate enabled on day 4+ or a string of failed ticks still catches
+  // up. computeAreaIntel replaces the whole month atomically, so repeating
+  // an already-succeeded month is idempotent, not a double-count. Dark
   // behind GATE_EMAIL_AREA_INTEL (emailAreaIntelLive) — unset returns
   // immediately. No caller sends anything. See
   // server/services/email-division/area-intel.js.
+  const EMAIL_AREA_INTEL_PREV_MONTH_KEY = 'email_area_intel_previous_month_computed';
   cron.schedule('10 5 * * *', async () => {
     const { emailAreaIntelLive } = require('../config/feature-gates');
     if (!emailAreaIntelLive()) return;
     try {
       const { computeAreaIntel } = require('./email-division/area-intel');
-      const { etParts, etMonthStart } = require('../utils/datetime-et');
+      const { etMonthStart } = require('../utils/datetime-et');
       await runExclusive('email-area-intel-recompute', async () => {
         const now = new Date();
         const result = await computeAreaIntel({ month: now });
         logger.info(`[email-area-intel] recomputed ${result.month}: ${result.citiesProcessed} cities`);
-        if (etParts(now).day <= 3) {
-          // etMonthStart's offset resolves the TRUE previous calendar month
-          // regardless of which day in the 1-3 window this tick runs on
-          // (a plain "now minus 1 day" would still land inside the CURRENT
-          // month on day 2 or 3).
-          const prevMonth = new Date(`${etMonthStart(now, -1)}T12:00:00Z`);
-          const prevResult = await computeAreaIntel({ month: prevMonth });
+        // etMonthStart's offset resolves the TRUE previous calendar month on
+        // any day of the current month (a plain "now minus 1 day" only
+        // works on day 1 itself). The marker records the last previous-
+        // month value actually recomputed; a mismatch (unset, or still
+        // naming an earlier month) means that catch-up has not succeeded
+        // yet, so this tick retries it — and only writes the marker AFTER
+        // computeAreaIntel resolves, so a failed run leaves it unset and
+        // the very next tick tries again.
+        const prevMonthStr = etMonthStart(now, -1);
+        const marker = await db('system_settings').where({ key: EMAIL_AREA_INTEL_PREV_MONTH_KEY }).first('value');
+        if (marker?.value !== prevMonthStr) {
+          const prevResult = await computeAreaIntel({ month: new Date(`${prevMonthStr}T12:00:00Z`) });
           logger.info(`[email-area-intel] recomputed ${prevResult.month} (previous month): ${prevResult.citiesProcessed} cities`);
+          await db('system_settings').insert({
+            key: EMAIL_AREA_INTEL_PREV_MONTH_KEY, value: prevMonthStr, category: 'email_area_intel',
+            description: 'Latest previous-month email_area_intel_monthly recompute that succeeded; the daily tick retries until this matches.',
+            updated_at: new Date(),
+          }).onConflict('key').merge();
         }
       });
     } catch (err) {

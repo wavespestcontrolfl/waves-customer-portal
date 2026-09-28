@@ -66,6 +66,10 @@ describe('parsePestsNamed', () => {
     ['', []],
     [null, []],
     ['WHAT WE DID: sprayed for German cockroaches under the sink and saw a few fire ants outside.', ['fire ants', 'German cockroaches']],
+    // "widow spiders" also matches the generic "spiders" regex — the
+    // specific subtype suppresses its generic parent so it's reported once.
+    ['WHAT WE DID: found widow spiders in the garage.', ['widow spiders']],
+    ['WHAT WE DID: swept spider webs from the eaves.', ['spiders']], // no specific subtype -> generic still reports
   ])('%s -> %j (canonical names only, never free text)', (notes, expected) => {
     expect(parsePestsNamed(notes)).toEqual(expected);
   });
