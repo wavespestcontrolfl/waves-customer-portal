@@ -214,7 +214,7 @@ test('create_appointment: card bookings are credit-free by construction; a windo
 test('create_appointment with a time texts the booking confirmation, as on the Schedule screen (owner 2026-09-27)', () => {
   const c = buildContract({ toolName: 'create_appointment', params: { customer_id: 'c1', time_window: '9:00 AM' }, displayParams: { customer_id: 'c1', date: '2026-09-02' }, preview: { proposal: true, inspection_credit: { amount: 0 } } });
   const labels = c.effects.map((e) => e.label);
-  expect(labels).toContainEqual(expect.stringMatching(/^Customer gets a booking confirmation, as on the Schedule screen: by text, email or both/));
+  expect(labels).toContainEqual(expect.stringMatching(/^Customer is sent a booking confirmation unless their appointment-confirmation setting is off, as on the Schedule screen: by text, email or both/));
   expect(labels).toContainEqual(expect.stringMatching(/^Registers the 72h\/24h reminder rows/));
   expect(c.notifies_customer).toBe(true);
 });
@@ -227,7 +227,7 @@ test('create_appointment with a time texts the booking confirmation, as on the S
 test('the after-8PM hold is disclosed as a TEXT-only hold — an email confirmation still goes right away', () => {
   const c = buildContract({ toolName: 'create_appointment', params: { customer_id: 'c1', time_window: '9:00 AM' }, displayParams: { customer_id: 'c1', date: '2026-09-02' }, preview: { proposal: true, inspection_credit: { amount: 0 } } });
   const labels = c.effects.map((e) => e.label);
-  const confirmationLabel = labels.find((l) => l.startsWith('Customer gets a booking confirmation'));
+  const confirmationLabel = labels.find((l) => l.startsWith('Customer is sent a booking confirmation'));
   expect(confirmationLabel).toMatch(/a text after 8 PM waits until 8 AM, but an email goes right away/);
   expect(confirmationLabel).not.toMatch(/after 8 PM it waits for 8 AM/);
 });

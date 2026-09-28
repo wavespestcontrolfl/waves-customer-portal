@@ -2629,21 +2629,22 @@ async function ibBookingPricing({ customer, serviceType, statedPrice, conn = db 
   // catalog less the member 15% like any other one-off member booking below.
   // Ownership reuses the canonical lifecycle set (loadOwnedRecurringServiceKeys)
   // against the booked row's OWN family (ownershipKeysForRow) — never a fresh
-  // approximation. Fail TOWARD not billing (today's behavior: unpriced,
-  // dues-covered) when the booked family is unknown/empty (an uninformative
-  // catalog row can't be checked either way) or the loader throws.
+  // approximation. Only a POSITIVE ownership match is dues coverage (Codex
+  // r6): a row with no ownership family (a termite bond is recurring and
+  // priced, yet owns no family) prices as a one-off, shown on the card; a
+  // failed ownership read refuses rather than guess either way.
   if (!stated && catalogRow.billing_type === 'recurring' && !customer?.payer_id
     && resolveBillingLane(customer).mode === 'monthly_membership') {
     const { loadOwnedRecurringServiceKeys, ownershipKeysForRow } = require('../waveguard-existing-services');
     const bookedFamilyKeys = ownershipKeysForRow({ service_key: catalogRow.service_key, service_name: catalogRow.name });
-    let duesCovered = true;
+    let duesCovered = false;
     if (bookedFamilyKeys.length && customer?.id) {
       try {
         ownedRecurringKeys = ownedRecurringKeys ?? await loadOwnedRecurringServiceKeys(conn, customer.id);
         duesCovered = ownedRecurringKeys.some((key) => bookedFamilyKeys.includes(key));
       } catch (err) {
-        logger.warn(`[intelligence-bar] loadOwnedRecurringServiceKeys failed for monthly-lane customer ${customer.id}; defaulting to dues-covered: ${err.message}`);
-        duesCovered = true;
+        logger.warn(`[intelligence-bar] loadOwnedRecurringServiceKeys failed for monthly-lane customer ${customer.id}: ${err.message}`);
+        return { error: 'Could not read which plan services this member owns, so whether their dues cover this visit is unknown. Try again in a moment, or state the price. Nothing was booked.' };
       }
     }
     if (duesCovered) {

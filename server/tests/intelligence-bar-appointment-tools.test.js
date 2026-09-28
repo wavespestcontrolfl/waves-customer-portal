@@ -785,6 +785,35 @@ describe('create_appointment — the visit carries a price like a Schedule-scree
     expect(payload).toMatchObject({ estimated_price: 124.1, primary_line_price: 146, line_discount_id: 'disc-member', create_invoice_on_complete: true });
   });
 
+  test('a monthly member booking a recurring catalog row with no ownership family (a termite bond) is priced, never waived as dues-covered (Codex r6)', async () => {
+    const bond = {
+      id: 'svc-bond', name: 'Termite Bond (1 Year)', short_name: null, service_key: 'termite_bond_1yr',
+      price_range_min: null, base_price: '199.00', category: 'termite', billing_type: 'recurring',
+    };
+    loadOwnedRecurringServiceKeys.mockResolvedValue(['pest_control']);
+    wireDb({
+      customers: [chain({ first: jest.fn().mockResolvedValue({ ...PER_VISIT, ...MEMBER_BILLING }) })],
+      services: [catalog([bond])],
+      scheduled_services: [chain()],
+    });
+    const result = await ibBookingProposal('cust-1', bond.name, undefined);
+    expect(result).toMatchObject({ price: 199 });
+  });
+
+  test('a failed ownership read refuses the monthly member\'s plan-service booking instead of guessing either way (Codex r6)', async () => {
+    const pest = {
+      id: 'svc-pest-plan', name: 'Recurring Pest Control Service', short_name: null, service_key: 'pest_general_quarterly',
+      price_range_min: '146.00', base_price: '164.00', category: 'pest', billing_type: 'recurring',
+    };
+    loadOwnedRecurringServiceKeys.mockRejectedValue(new Error('ownership catalog join failed'));
+    wireDb({
+      customers: [chain({ first: jest.fn().mockResolvedValue({ ...PER_VISIT, ...MEMBER_BILLING }) })],
+      services: [catalog([pest])],
+    });
+    const result = await ibBookingProposal('cust-1', pest.name, undefined);
+    expect(result.error).toMatch(/whether their dues cover this visit is unknown/);
+  });
+
   test('the same plan service for a per-visit customer carries the catalog default, and a member\'s stated price still stands', async () => {
     const foam = {
       id: 'svc-foam', name: 'Recurring Termite Foam Service', short_name: null, service_key: 'foam_recurring',

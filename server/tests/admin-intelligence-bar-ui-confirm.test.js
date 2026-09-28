@@ -1073,7 +1073,7 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
       expect(Object.keys(body.pendingActions[0].params).filter((k) => k.startsWith('_'))).toEqual([]);
       // A timed booking texts its confirmation — the contract says so.
       const labels = (body.pendingActions[0].contract?.effects || []).map((e) => e.label);
-      expect(labels).toContainEqual(expect.stringMatching(/^Customer gets a booking confirmation, as on the Schedule screen: by text, email or both/));
+      expect(labels).toContainEqual(expect.stringMatching(/^Customer is sent a booking confirmation unless their appointment-confirmation setting is off, as on the Schedule screen: by text, email or both/));
     });
   });
 
