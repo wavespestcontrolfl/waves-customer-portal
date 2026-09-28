@@ -425,3 +425,50 @@ describe('assertLicensedPhotoUrlAllowed / fetchAndVerifyLicensedPhoto — host a
       .rejects.toMatchObject({ code: 'BLOG_BODY_IMAGES_FAILED' });
   });
 });
+
+// Codex P1 (r10): on a diagnostic REFRESH draft, the stale managed-image
+// strip removes lines from the body. The licensed re-host pass now runs
+// AFTER it, so the photo is spliced back at its own position, not one
+// shifted by the lines the strip removed.
+describe('resolveBodyImages — licensed photo position survives the refresh stale-strip', () => {
+  afterEach(() => { delete global.fetch; jest.clearAllMocks(); gh.getFile.mockResolvedValue(null); gh.listDir.mockResolvedValue([]); });
+
+  test('a stale managed image ABOVE the licensed photo does not shift where the photo lands', async () => {
+    const png = await tinyPngBuffer();
+    mockFetchOnce({ contentType: 'image/jpeg', body: png });
+    const body = [
+      '<BottomLineBox verdict="Yes." recommendation="Call a pro." />',
+      '',
+      '## What they look like',
+      '',
+      'Reddish workers on sandy soil.',
+      '',
+      '![an old managed picture](/images/blog/fire-ant-id/body-7.webp)',
+      '',
+      '## Where you find them',
+      '',
+      'Open, sunny lawns.',
+      '',
+      `![${LICENSED_ALT}](${LICENSED_URL})`,
+      '',
+      'Photo credit line.',
+    ].join('\n');
+    // The LIVE file never carried body-7 under that heading → the refresh
+    // stale-strip removes it before the licensed pass runs.
+    const existingFile = { path: 'src/content/blog/pest-control/fire-ant-id.mdx', file: { content: '---\ntitle: x\n---\nOld live body with no images.' } };
+    const result = await resolveBodyImages({
+      frontmatter: { post_type: 'diagnostic', title: 'Fire Ant Identification', hero_image: { src: '/images/blog/fire-ant-id/hero.webp' } },
+      slug: 'fire-ant-id', body, existingFile, brief: photoSlotsBrief(), siblings: [], mdx: true,
+    });
+    expect(result.body).not.toContain('body-7.webp');
+    const lines = result.body.split('\n');
+    const photoAt = lines.findIndex((l) => l.includes('/images/blog/fire-ant-id/body-1.webp'));
+    expect(photoAt).toBeGreaterThan(-1);
+    // Lands after "Open, sunny lawns." and before the credit line — its
+    // original neighbours — not two lines off.
+    const prose = lines.findIndex((l) => l === 'Open, sunny lawns.');
+    const credit = lines.findIndex((l) => l === 'Photo credit line.');
+    expect(photoAt).toBeGreaterThan(prose);
+    expect(photoAt).toBeLessThan(credit);
+  });
+});

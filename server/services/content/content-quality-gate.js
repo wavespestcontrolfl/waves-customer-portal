@@ -1127,10 +1127,14 @@ function checkVerdictBoxFirst(draft, brief) {
 // this is the fail-closed backstop for whatever reaches this check
 // without that having held.
 const ANY_MD_LINK_RE = /\[[^\]]*\]\([^)]+\)/g;
+const BOTTOM_LINE_BOX_TAG_RE = /<BottomLineBox\b(?:[^>"']|"[^"]*"|'[^']*')*\/?>/;
 function checkCtaAfterVerdictBox(draft, brief) {
   if (!isIdentificationOrQuestionDraft(draft, brief)) return { ok: true, reason: 'not_identification_or_question' };
   const body = String(draft.body || '');
-  const boxMatch = body.match(/<BottomLineBox\b[^>]*\/?>/);
+  // Codex P1 (r10): quote-aware — a naive `[^>]*` stopped at the first
+  // literal `>` INSIDE a prop value ("more than > 1/4 inch"), truncating the
+  // tag so a link later in the same prop escaped both checks below.
+  const boxMatch = body.match(BOTTOM_LINE_BOX_TAG_RE);
   if (!boxMatch) return { ok: true, reason: 'no_verdict_box_present' }; // verdict_box_first already fails this
   const boxStart = boxMatch.index;
   ANY_MD_LINK_RE.lastIndex = 0;

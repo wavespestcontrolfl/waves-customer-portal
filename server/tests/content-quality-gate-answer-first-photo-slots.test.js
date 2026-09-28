@@ -734,3 +734,17 @@ test('checkPhotoSlotsLicensedOnly: incidental whitespace around the alt does not
     expect(checkPhotoSlotsLicensedOnly({ frontmatter: { post_type: 'diagnostic' }, body }, b).ok).toBe(true);
   }
 });
+
+// Codex P1 (r10): the box-tag match must be quote-aware — a literal `>`
+// inside a prop value used to truncate it, hiding a link later in the prop.
+test('checkCtaAfterVerdictBox: a link after a literal ">" inside a box prop is still caught', () => {
+  const r = checkCtaAfterVerdictBox(
+    {
+      frontmatter: { post_type: 'diagnostic' },
+      body: '<BottomLineBox verdict="Workers can be > 1/4 inch long." recommendation="Book at [our page](/contact/)." />\n\nProse.',
+    },
+    brief(),
+  );
+  expect(r.ok).toBe(false);
+  expect(r.reason).toBe('link_inside_verdict_box');
+});

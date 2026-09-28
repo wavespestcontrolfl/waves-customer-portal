@@ -3075,10 +3075,6 @@ async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief 
   const none = { body, files: [], images: [], newAlts: [], deletes: [], pinned: [] };
   if (!bodyImagesEnabled()) return none;
   const isDiagnostic = frontmatter?.post_type === 'diagnostic';
-  const licensed = isDiagnostic
-    ? await rehostLicensedIdentificationPhotos({ body, slug, brief, mdx })
-    : { body, files: [], images: [], newAlts: [], placements: [] };
-  body = licensed.body;
   // A refresh draft may RETAIN a publisher-managed reference while
   // rewriting its section: the picture then ships under prose it may no
   // longer describe, bypassing the reuse context check (GH r28). Managed
@@ -3099,6 +3095,16 @@ async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief 
     }
     if (stale.size) body = stripManagedBodyImages(body, slug, { only: stale });
   }
+  // Licensed identification photos are stripped + re-hosted HERE — after
+  // every other edit to `body` (the refresh stale-strip above) and right
+  // before validation — so each placement's recorded line index is taken
+  // against the exact body the early-return path splices it back into;
+  // nothing between here and insertBodyImages() reassigns `body` (Codex P1
+  // r10: running this first let the stale-strip shift the indices).
+  const licensed = isDiagnostic
+    ? await rehostLicensedIdentificationPhotos({ body, slug, brief, mdx })
+    : { body, files: [], images: [], newAlts: [], placements: [] };
+  body = licensed.body;
   const valid = await validateBodyImageRefs({ body, heroSrc: frontmatter?.hero_image?.src, getFile: (path) => gh.getFile(path), legacyHeroSrcs, mdx, slug });
   if (!valid.ok) {
     const err = new Error(`autonomous blog body images: draft for ${slug} ${valid.reason}`);
