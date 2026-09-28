@@ -1769,6 +1769,7 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
   const blockNamedKnown = new Set();
   const unsupportedFacts = new Set();
   const negativeReliability = new Set();
+  const comparedProviders = new Set();
 
   // Business names are collected BEFORE the tone scans: the prose-scoped
   // disparagement/ranking checks below need the full name inventory as
@@ -2180,9 +2181,24 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
     const options = extractColumns(block).slice(1);
     const rows = extractRows(block);
     const blockKnown = new Set();
+    // A PROVIDER table (any column is a competitor or Waves): every other
+    // column that reads as a NAME — a single word or a Title-Cased phrase
+    // ("Home Depot", "Amazon") — is a compared provider by construction,
+    // so it joins the recorded names and the owner list judges it
+    // (Codex r5 on #5146). Sentence-case category columns ("Local SWFL
+    // company", "Full exterior + interior IPM") stay categories.
+    const classes = options.map((opt) => classifyOption(opt));
+    if (classes.some((c) => c === 'own' || c === 'known_competitor' || c === 'unknown_competitor')) {
+      options.forEach((opt, j) => {
+        const words = String(opt).trim().split(/\s+/).filter(Boolean);
+        if (classes[j] === 'category' && words.length && (words.length === 1 || isTitleCasedPhrase(opt))) {
+          comparedProviders.add(String(opt).trim());
+        }
+      });
+    }
 
     options.forEach((opt, j) => {
-      const cls = classifyOption(opt);
+      const cls = classes[j];
       if (cls === 'known_competitor') {
         const allowlisted = competitorFacts.findBusinessMentions(opt).filter((x) => x.inAllowlist);
         const distinctNames = [...new Set(allowlisted.map((x) => x.name))];
@@ -2426,7 +2442,7 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
   // automatically while retaining the comparison and sourcing checks.
   const requiresHumanReview = pass
     && ((namedCompetitorEnabled && (known.size > 0 || linkedKnown.size > 0)) || operatorAuthorizedProse);
-  return { pass, findings, requiresHumanReview, namedCompetitors: sortedNames(known, unknown) };
+  return { pass, findings, requiresHumanReview, namedCompetitors: sortedNames(known, unknown, comparedProviders) };
 }
 
 // Clean autonomous blogs need no human sign-off. The content gate and
@@ -2461,18 +2477,22 @@ function namedCompetitorAutopublishEligible(brief) {
 //   → { ok: true, approved }                                  publish
 //   → { ok: false, reason: 'named_competitor_off_list', offList, approved }
 //   → { ok: false, reason: 'named_competitor_unverified_names', approved }
-function namedCompetitorListVerdict(comparisonResult) {
+function namedCompetitorListVerdict(comparisonResult, { requireExtraction = true } = {}) {
   let names = comparisonResult && Array.isArray(comparisonResult.namedCompetitors)
     ? comparisonResult.namedCompetitors : null;
   if (!names) return { ok: false, reason: 'named_competitor_off_list', offList: ['(names not recorded)'], approved: [] };
   // Every company the whole-draft extraction (business-name-confirmer.js)
   // found joins the deterministic names; a missing or failed extraction
-  // fails closed.
+  // fails closed. `requireExtraction: false` is ONLY the runner's early,
+  // pre-publish look at the deterministic names (the publisher's commit
+  // chokepoint then applies the full verdict on the final text).
   const extraction = comparisonResult.companyExtraction;
-  if (!extraction || extraction.ok !== true || !Array.isArray(extraction.companies)) {
+  if (requireExtraction && (!extraction || extraction.ok !== true || !Array.isArray(extraction.companies))) {
     return { ok: false, reason: 'named_competitor_unverified_names', approved: [] };
   }
-  names = sortedNames(new Set(names), new Set(extraction.companies));
+  if (extraction && extraction.ok === true && Array.isArray(extraction.companies)) {
+    names = sortedNames(new Set(names), new Set(extraction.companies));
+  }
   const approved = names.filter((n) => competitorFacts.isOwnerApprovedForAutopublish(n));
   const offList = names.filter((n) => !competitorFacts.isOwnerApprovedForAutopublish(n));
   if (offList.length) return { ok: false, reason: 'named_competitor_off_list', offList, approved };

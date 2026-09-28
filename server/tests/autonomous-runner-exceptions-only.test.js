@@ -50,8 +50,6 @@ function loadRunner({ queue, briefBuilder, dispatcher = {}, contentGuardrails, u
   jest.doMock('../services/content/content-brief-builder', () => briefBuilder);
   jest.doMock('../services/content/agents/agent-dispatcher', () => dispatcher);
   jest.doMock('../services/content/protected-pages', () => ({ isProtected: jest.fn().mockResolvedValue({ protected: false }) }));
-  // The whole-draft company-name check makes a model call; these drafts name no company.
-  jest.doMock('../services/content/business-name-confirmer', () => ({ extractCompanyNames: jest.fn().mockResolvedValue({ ok: true, key: 'k', companies: [] }) }));
   jest.doMock('../services/content/seo-completion-gate', () => ({ evaluate: jest.fn().mockReturnValue({ passed: true, score: 100, summary: { p0: 0, p1: 0, p2: 0 }, findings: [] }) }));
   jest.doMock('../services/content/ai-visibility-gate', () => ({ evaluateStatic: jest.fn().mockReturnValue({ passed: true, findings: [], summary: { p0: 0, p1: 0, p2: 0, p3: 0, needs_review: false } }) }));
   if (contentGuardrails) jest.doMock('../services/content/content-guardrails', () => contentGuardrails);

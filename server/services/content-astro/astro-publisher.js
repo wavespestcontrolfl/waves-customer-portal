@@ -32,6 +32,7 @@ const contentGuardrails = require('../content/content-guardrails');
 const { decodeHTMLStrict } = require('entities');
 const { refineFootprintFindings } = require('../content/footprint-claim-classifier');
 const comparisonTableGate = require('../content/comparison-table-gate');
+const { assertOwnerListForCommit } = require('../content/business-name-confirmer');
 const factCheckGate = require('../content/fact-check-gate');
 const editorialEvidence = require('../content/editorial-evidence');
 const complianceGate = require('../content/compliance-gate');
@@ -3177,7 +3178,7 @@ async function dropUnreferencedBranch(branch, why) {
   }
 }
 
-async function publishOrUpdatePage(draft, brief = {}) {
+async function publishOrUpdatePage(draft, brief = {}, { humanApproved = false } = {}) {
   if (!canPublishDraftBrief(draft, brief)) {
     throw new Error(`unsupported autonomous draft for Astro publish: ${brief.action_type || 'unknown'}`);
   }
@@ -3370,6 +3371,9 @@ async function publishOrUpdatePage(draft, brief = {}) {
   assertValidBlogFrontmatter(frontmatter);
 
   const markdown = fm.stringify(frontmatter, `${finalBody}\n`);
+  // Owner competitor list on the FINAL committed text — hero / body-image
+  // alts included (Codex r5 on #5146). Throws before any branch exists.
+  await assertOwnerListForCommit({ draft, brief, frontmatter, body: finalBody, humanApproved });
   const editorialFiles = await editorialEvidence.filesForDocument({ document: markdown, path: filePath, brief });
 
   await gh.createBranch(branch);
@@ -3640,7 +3644,7 @@ async function publishMetadataRewrite(draft, brief = {}) {
 // programmatically, only when the body actually changed.
 const REFRESH_EDITABLE_META_FIELDS = ['title', 'metaTitle', 'meta_description', 'metaDescription'];
 
-async function publishRefresh(draft, brief = {}) {
+async function publishRefresh(draft, brief = {}, { humanApproved = false } = {}) {
   if (!canPublishRefresh(draft, brief)) {
     throw new Error(`unsupported refresh for Astro publish: ${brief.action_type || 'unknown'}`);
   }
@@ -3844,6 +3848,9 @@ async function publishRefresh(draft, brief = {}) {
   }
   const finalBody = refreshImages.body;
   const markdown = fm.stringify(nextFrontmatter, `${finalBody}\n`);
+  // Same owner-list chokepoint as the new-post lane: refreshes auto-merge
+  // under AUTONOMOUS_BLOG_AUTO_MERGE too (Codex r5 on #5146).
+  await assertOwnerListForCommit({ draft, brief, frontmatter: nextFrontmatter, body: finalBody, humanApproved });
   const editorialFiles = await editorialEvidence.filesForDocument({ document: markdown, path: filePath, brief });
 
   const branchSlug = slugify(filePath.replace(/^src\/content\//, '').replace(/\.mdx?$/, '').replace(/\//g, ' '));

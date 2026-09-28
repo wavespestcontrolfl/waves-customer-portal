@@ -1985,7 +1985,7 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     setupDb({
       pending: [makeRun({ action_type: 'refresh_existing_page', brief_id: 'brief-1' })],
       briefs: [{ id: 'brief-1', action_type: 'refresh_existing_page', gsc_signal: { intercept: true } }],
-      runFirst: { comparison_table_result: { pass: true, findings: [], requiresHumanReview: false }, draft_payload: JSON.stringify({ autopublish_head_sha: 'headsha1' }), trust_build_approved_at: null, brief_id: 'brief-1' },
+      runFirst: { comparison_table_result: CLEAN_BLOG_VERDICT, draft_payload: JSON.stringify({ autopublish_head_sha: 'headsha1' }), trust_build_approved_at: null, brief_id: 'brief-1' },
     });
     greenMergePath();
     gh.mergePr.mockResolvedValue({ merged: true });
@@ -1995,6 +1995,24 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     const res = await poller.pollPending();
 
     expect(gh.mergePr).toHaveBeenCalledTimes(1);
+  });
+
+  // Refreshes auto-merge too, and commit only through the publisher's
+  // owner-list chokepoint: a refresh verdict WITHOUT its extraction (opened
+  // before the chokepoint shipped) waits for a human (Codex r5 on #5146).
+  test('a refresh PR whose verdict has no company extraction is withheld', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    setupDb({
+      pending: [makeRun({ action_type: 'refresh_existing_page', brief_id: 'brief-1' })],
+      briefs: [{ id: 'brief-1', action_type: 'refresh_existing_page', gsc_signal: { intercept: true } }],
+      runFirst: { comparison_table_result: { pass: true, findings: [], requiresHumanReview: false, namedCompetitors: [] }, draft_payload: JSON.stringify({ autopublish_head_sha: 'headsha1' }), trust_build_approved_at: null, brief_id: 'brief-1' },
+    });
+    greenMergePath();
+
+    const res = await poller.pollPending();
+
+    expect(gh.mergePr).not.toHaveBeenCalled();
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_autopublish_revoked' });
   });
 
   test('a competitor-free run whose head is NOT the pinned commit is withheld — the pin is universal on these lanes (PR r14 P1)', async () => {

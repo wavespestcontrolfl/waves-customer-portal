@@ -68,6 +68,13 @@ function grantTopicMergeLock(locked = true) {
   db.transaction = jest.fn(async (fn) => fn({ raw: jest.fn().mockResolvedValue({ rows: [{ locked }] }) }));
 }
 beforeEach(() => grantTopicMergeLock(true));
+// The publisher's owner-list chokepoint makes one company-extraction model
+// call on the final text; these posts name no company unless a test says so
+// (the chokepoint's own decision logic stays real).
+const businessNameConfirmer = require('../services/content/business-name-confirmer');
+beforeEach(() => {
+  jest.spyOn(businessNameConfirmer, 'extractCompanyNames').mockResolvedValue({ ok: true, key: 'k', companies: [] });
+});
 const gh = require('../services/content-astro/github-client');
 const authorService = require('../services/content-astro/author-service');
 const { validateBlogFrontmatter } = require('../services/content-astro/schema-validator');
@@ -4313,6 +4320,35 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
       expect(altPass).toBeTruthy();
       expect(altPass[0].body).toContain('Generated alt two');
     } finally { spy.mockRestore(); }
+  });
+
+  // The owner-list chokepoint runs on the FINAL committed text: a company
+  // named only in a REUSED live image alt is caught there (Codex r5 on #5146).
+  test('update run: an off-list company only in a publisher-reused image alt blocks the commit', async () => {
+    const liveMd = fmModule.stringify(
+      { ...draft().frontmatter, slug: '/pest-control/drywood-frass-venice/', hero_image: { src: '/images/blog/pest-control/drywood-frass-venice/hero.webp', alt: 'live hero' }, og_image: '/images/blog/pest-control/drywood-frass-venice/hero.webp' },
+      'Old body.\n\n## Reading the pellets\n\nDrywood frass is hexagonal in cross-section. See [our guide](/termite-control/) for more.\n\n![Bug Out technician checking pellets](/images/blog/pest-control/drywood-frass-venice/body-1.webp)\n',
+    );
+    const b64 = (dataUrl) => dataUrl.split(',')[1];
+    gh.getFile.mockImplementation(async (path) => {
+      if (path === 'src/content/blog/pest-control/drywood-frass-venice.mdx') return { content: liveMd, sha: 'live-sha' };
+      if (path === 'public/images/blog/pest-control/drywood-frass-venice/hero.webp') return { content: '', sha: 'h', raw: { content: b64(PATTERNS[0]) } };
+      if (path === 'public/images/blog/pest-control/drywood-frass-venice/body-1.webp') return { content: '', sha: 'b1', raw: { content: b64(PATTERNS[1]) } };
+      return null;
+    });
+    heroImageGenerator.generate.mockImplementation(async () => ({ dataUrl: PATTERNS[4], model: 'm', alt: 'Generated alt two' }));
+    businessNameConfirmer.extractCompanyNames.mockImplementation(async (finalDraft) => ({
+      ok: true, key: 'k', companies: /Bug Out/.test(finalDraft.body) ? ['Bug Out'] : [],
+    }));
+    const d = draft();
+    expect(d.body).not.toMatch(/Bug Out/);
+
+    await expect(AstroPublisher.publishOrUpdatePage(d, { action_type: 'new_supporting_blog' }))
+      .rejects.toMatchObject({ code: 'BLOG_OWNER_LIST_BLOCKED', reason: 'named_competitor_disabled' });
+
+    expect(businessNameConfirmer.extractCompanyNames.mock.calls[0][0].body).toContain('![Bug Out technician checking pellets]');
+    expect(gh.createBranch).not.toHaveBeenCalled();
+    expect(gh.commitFiles).not.toHaveBeenCalled();
   });
 
   test('update run: intro-slot reuse compares against the LIVE title — a retitled article does not inherit its old intro illustration (GH r2)', async () => {

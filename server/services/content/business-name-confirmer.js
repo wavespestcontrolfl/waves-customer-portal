@@ -12,8 +12,10 @@
  * named-competitor FLAG and the audit trail; this extraction only ADDS
  * names, which namedCompetitorListVerdict holds to the owner list.
  *
- * One structured FAST-tier call per unattended blog draft (about ten a
- * week), on the fastStructured two-provider policy, lane
+ * Called at the publisher's commit chokepoint (assertOwnerListForCommit,
+ * below) and by Codex remediation on a fix. One structured FAST-tier call
+ * per unattended blog commit (about ten a week), on the fastStructured
+ * two-provider policy, lane
  * business_name_confirm. The input is every text field of the frontmatter
  * that ships (the publisher's own normalizer) plus the writer's raw
  * frontmatter and top-level metadata, the link destinations, and the body,
@@ -37,7 +39,7 @@ const competitorFacts = require('./competitor-facts');
 // unseen) — it fails closed instead.
 const MAX_INPUT_CHARS = 60_000;
 const CALL_TIMEOUT_MS = 30_000;
-const PROMPT_VERSION = 'company-extraction-v2';
+const PROMPT_VERSION = 'company-extraction-v3';
 
 // Our OWN names, matched as exact whole names (case/punctuation-insensitive)
 // — never "contains the word Waves" (pre-push r4: "Making Waves Pest
@@ -72,7 +74,8 @@ const SYSTEM_PROMPT = [
   'You review a blog draft written for Waves Pest Control, a Florida pest control and lawn care company that also publishes under local site names such as "Sarasota Pest Control" and "Bradenton Lawn Care".',
   'List every pest control, lawn care, landscaping, termite, mosquito, wildlife, or other home-service COMPANY that the draft names, links to, or refers to — in the title, slug/URL, meta description, body, or link destinations.',
   'Include a company even when it is named only once, only in a link or URL slug, or only in a heading, and include it if ANY use in the draft refers to the company (a name used generically in one sentence and as a company in another is still a company).',
-  'Do NOT list: Waves Pest Control or its own websites; retailers (e.g. Home Depot, Lowe\'s, Amazon); universities, extension services, government bodies, and laws; product or chemical brands; publications and news outlets; generic service phrases or methods ("pest control", "Biological Pest Control", "Yard Mosquito Control").',
+  'ALSO list any business of any kind — including a retailer (e.g. Home Depot, Lowe\'s, Amazon) or a product brand — that the draft PRESENTS as a provider, an alternative, or a comparison option (for example a column or row being compared, or "instead of hiring a company, use X").',
+  'Do NOT list: Waves Pest Control or its own websites; a retailer or product brand mentioned only as a source or incidentally ("buy it at Home Depot", "a Bayer product"); universities, extension services, government bodies, and laws; publications and news outlets; generic service phrases or methods ("pest control", "Biological Pest Control", "Yard Mosquito Control").',
   'Return each company once, spelled as the draft spells it. Return an empty list when the draft names no such company.',
 ].join('\n');
 
@@ -119,8 +122,13 @@ function publishedFrontmatter(draft, brief) {
   }
 }
 
-/** extractionInput(draft, brief) → the exact text sent (null when over the bound). */
-function extractionInput(draft, brief = null) {
+/**
+ * extractionInput(draft, brief, { final }) → the exact text sent (null when
+ * over the bound). `final: true` — draft.frontmatter IS the committed
+ * frontmatter (the publisher's commit chokepoint), so it is scanned as-is
+ * rather than re-normalized.
+ */
+function extractionInput(draft, brief = null, { final = false } = {}) {
   const body = String(draft?.body || draft?.content || '');
   const links = [...new Set(body.match(LINK_RE) || [])];
   const topLevel = {
@@ -128,7 +136,7 @@ function extractionInput(draft, brief = null) {
     metaTitle: draft?.metaTitle, metaDescription: draft?.metaDescription,
   };
   const lines = [...new Set([
-    ...textFields(publishedFrontmatter(draft, brief), '', []),
+    ...(final ? [] : textFields(publishedFrontmatter(draft, brief), '', [])),
     ...textFields(draft?.frontmatter || {}, '', []),
     ...textFields(topLevel, '', []),
   ])];
@@ -162,8 +170,8 @@ function canonicalCompanies(names) {
  * `retryable: true` marks provider / output failures (an outage should
  * delay the post); an over-long draft is `retryable: false`.
  */
-async function extractCompanyNames(draft, { prior = null, brief = null } = {}) {
-  const text = extractionInput(draft, brief);
+async function extractCompanyNames(draft, { prior = null, brief = null, final = false } = {}) {
+  const text = extractionInput(draft, brief, { final });
   if (text === null) return { ok: false, key: null, reason: 'draft_too_long_for_extraction', retryable: false };
   const key = inputKey(text);
   if (prior && prior.ok === true && prior.key === key && Array.isArray(prior.companies)) return prior;
@@ -194,7 +202,72 @@ async function extractCompanyNames(draft, { prior = null, brief = null } = {}) {
   }
 }
 
+function ownerListError(code, message, fields) {
+  const err = new Error(message);
+  err.code = code;
+  Object.assign(err, fields);
+  return err;
+}
+
+/**
+ * assertOwnerListForCommit({ draft, brief, frontmatter, body, humanApproved })
+ * — the owner-list check at the ONE chokepoint every unattended blog commit
+ * passes: astro-publisher publishOrUpdatePage / publishRefresh, right before
+ * the branch is cut, on the FINAL frontmatter + body (after hero / body-image
+ * alt text and every other publisher transform — Codex r5 on #5146).
+ *
+ * Deterministic names (comparison gate: curated, operator, link, compared
+ * table providers) + the whole-draft company extraction on the final text
+ * (a stored draft.company_extraction is reused when the final text hashes
+ * to the same key). Competitor content commits only on the unattended
+ * named-competitor lane (namedCompetitorAutopublishEligible) with every
+ * name on the owner list. The result is left on the draft
+ * (draft.company_extraction, draft.competitors_approved_by_list) for the
+ * runner to persist with the verdict the merge-time poller judges.
+ *
+ * Throws (no commit):
+ *   BLOG_OWNER_LIST_UNVERIFIED { retryable } — extraction failed / too long
+ *   BLOG_OWNER_LIST_BLOCKED    { reason, offList } — off-list name, or
+ *     competitor content outside the unattended lane
+ * humanApproved (the operator approval path) skips the check entirely.
+ */
+async function assertOwnerListForCommit({ draft, brief = {}, frontmatter = {}, body = '', humanApproved = false } = {}) {
+  if (humanApproved) return null;
+  const gate = require('./comparison-table-gate');
+  const finalDraft = {
+    frontmatter, body, title: frontmatter.title, meta_description: frontmatter.meta_description,
+  };
+  const comparison = gate.evaluate(finalDraft, { namedCompetitorEnabled: true, operatorBriefText: '' });
+  // Through module.exports so a suite exercising the publisher can stub the
+  // model call alone and keep this chokepoint's real decision logic.
+  const extraction = await module.exports.extractCompanyNames(finalDraft, {
+    prior: draft && draft.company_extraction, brief, final: true,
+  });
+  if (draft && typeof draft === 'object') draft.company_extraction = extraction;
+  if (extraction.ok !== true) {
+    throw ownerListError('BLOG_OWNER_LIST_UNVERIFIED',
+      `company-name check unavailable for the final text (${extraction.reason || 'unknown'})`,
+      { retryable: extraction.retryable === true, extraction });
+  }
+  const names = Array.isArray(comparison.namedCompetitors) ? comparison.namedCompetitors : [];
+  if (!names.length && !extraction.companies.length) return extraction;
+  if (!gate.namedCompetitorAutopublishEligible(brief)) {
+    throw ownerListError('BLOG_OWNER_LIST_BLOCKED',
+      `final text names ${[...names, ...extraction.companies].join(', ')} outside the unattended named-competitor lane`,
+      { reason: brief.action_type === 'new_supporting_blog' ? 'named_competitor_disabled' : 'named_competitor_review', offList: [], extraction });
+  }
+  const verdict = gate.namedCompetitorListVerdict({ namedCompetitors: names, companyExtraction: extraction });
+  if (!verdict.ok) {
+    throw ownerListError('BLOG_OWNER_LIST_BLOCKED',
+      `final text names competitor(s) outside the owner-approved list: ${(verdict.offList || []).join(', ')}`,
+      { reason: verdict.reason, offList: verdict.offList || [], extraction });
+  }
+  if (draft && typeof draft === 'object') draft.competitors_approved_by_list = verdict.approved;
+  return extraction;
+}
+
 module.exports = {
   extractCompanyNames,
+  assertOwnerListForCommit,
   _internals: { SYSTEM_PROMPT, MAX_INPUT_CHARS, extractionInput, inputKey, canonicalCompanies, ownNames, normalizeOwnName },
 };

@@ -1318,14 +1318,17 @@ async function validateAutonomousRunGates(fixedMarkdown, run, deps = {}) {
         return { ok: false, reason: 'fix introduces named-competitor content under run context (requires human sign-off)' };
       }
     }
-    // Whole-draft company extraction on the FIXED draft: the run's stored
-    // extraction is reused when the input text is unchanged (same key);
-    // otherwise one fresh call. A failed extraction refuses the fix.
+    // Whole-draft company extraction on the FIXED file — a fix commit
+    // bypasses the publisher's owner-list chokepoint, so the same check runs
+    // here on the committed text (final: its frontmatter IS what ships). The
+    // run's stored extraction is reused when the text is unchanged (same
+    // key); otherwise one fresh call. A failed extraction refuses the fix.
     const stored = parseJsonMaybe(run.comparison_table_result);
     const extractor = deps.businessNameConfirmer || require('./business-name-confirmer');
     comparisonResult.companyExtraction = await extractor.extractCompanyNames(draft, {
       prior: stored && stored.companyExtraction,
       brief,
+      final: true,
     });
     if (comparisonResult.companyExtraction.ok !== true) {
       return { ok: false, reason: `company-name check unavailable for the fix (${comparisonResult.companyExtraction.reason || 'unknown'})` };

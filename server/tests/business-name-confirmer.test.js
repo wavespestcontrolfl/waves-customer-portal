@@ -3,7 +3,8 @@ jest.mock('../services/llm/call', () => ({ dispatchWithFallback: jest.fn() }));
 
 const { dispatchWithFallback } = require('../services/llm/call');
 const MODELS = require('../config/models');
-const { extractCompanyNames, _internals } = require('../services/content/business-name-confirmer');
+const confirmer = require('../services/content/business-name-confirmer');
+const { extractCompanyNames, assertOwnerListForCommit, _internals } = confirmer;
 
 // Synthetic drafts only. One structured FAST call per unattended blog draft
 // lists every home-service company the whole draft names, links or
@@ -104,5 +105,49 @@ describe('extractCompanyNames', () => {
     const huge = { ...DRAFT, body: 'x'.repeat(_internals.MAX_INPUT_CHARS) };
     expect(await extractCompanyNames(huge)).toMatchObject({ ok: false, retryable: false, reason: 'draft_too_long_for_extraction' });
     expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
+  });
+});
+
+// The owner-list check at the publisher's commit chokepoint, on the FINAL
+// committed text (Codex r5 on #5146).
+describe('assertOwnerListForCommit', () => {
+  const BLOG_BRIEF = { action_type: 'new_supporting_blog' };
+  const TABLE = (cols) => `Intro.\n\n<ComparisonTable columns={${JSON.stringify(cols)}} rows={[{ label: "Recurring plans", values: ["Yes","Yes","Yes"] }]} caption="Attributes as of June 2026, per each company public website." />\n\nOutro.`;
+  const finalFm = { title: 'Orkin alternatives in Sarasota', slug: '/pest-control/orkin-alternatives/', meta_description: 'Compare plans.' };
+
+  test('an unchanged final text reuses the stored result (no model call)', async () => {
+    const body = 'Orkin offers recurring residential plans.';
+    const key = _internals.inputKey(_internals.extractionInput({ frontmatter: finalFm, body, title: finalFm.title, meta_description: finalFm.meta_description }, BLOG_BRIEF, { final: true }));
+    const draft = { company_extraction: { ok: true, key, companies: ['Orkin'] } };
+
+    await assertOwnerListForCommit({ draft, brief: BLOG_BRIEF, frontmatter: finalFm, body });
+
+    expect(dispatchWithFallback).not.toHaveBeenCalled();
+    expect(draft.competitors_approved_by_list).toEqual(['Orkin']);
+  });
+
+  test('every provider column of a comparison table is a compared provider: Orkin + Home Depot columns go off-list without the model', async () => {
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { companies: [] } });
+    await expect(assertOwnerListForCommit({ draft: {}, brief: BLOG_BRIEF, frontmatter: finalFm, body: TABLE(['What to weigh', 'Orkin', 'Home Depot', 'Waves']) }))
+      .rejects.toMatchObject({ code: 'BLOG_OWNER_LIST_BLOCKED', reason: 'named_competitor_off_list', offList: ['Home Depot'] });
+  });
+
+  test('an incidental retailer mention the model does not list is not off-list', async () => {
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { companies: [] } });
+    const draft = {};
+    await assertOwnerListForCommit({ draft, brief: BLOG_BRIEF, frontmatter: finalFm, body: 'Buy a pump sprayer at Home Depot before you start.' });
+    expect(draft.company_extraction).toMatchObject({ ok: true, companies: [] });
+    // The prompt keeps retailers presented as providers, drops incidental ones.
+    expect(_internals.SYSTEM_PROMPT).toMatch(/PRESENTS as a provider, an alternative, or a comparison option/);
+    expect(_internals.SYSTEM_PROMPT).toMatch(/only as a source or incidentally/);
+  });
+
+  test('a failed check refuses the commit; a human-approved publish skips the check', async () => {
+    dispatchWithFallback.mockResolvedValue({ ok: false, reason: 'no_key' });
+    await expect(assertOwnerListForCommit({ draft: {}, brief: BLOG_BRIEF, frontmatter: finalFm, body: 'Plain body.' }))
+      .rejects.toMatchObject({ code: 'BLOG_OWNER_LIST_UNVERIFIED', retryable: true });
+    dispatchWithFallback.mockClear();
+    expect(await assertOwnerListForCommit({ draft: {}, brief: BLOG_BRIEF, frontmatter: finalFm, body: 'Bug Out competes.', humanApproved: true })).toBeNull();
+    expect(dispatchWithFallback).not.toHaveBeenCalled();
   });
 });

@@ -2877,6 +2877,14 @@ describe('owner competitor list', () => {
     expect(gate.namedCompetitorListVerdict(ext(r, ['Orkin']))).toEqual({ ok: true, approved: ['Orkin'] });
   });
 
+  test('every name-shaped column of a PROVIDER table is a compared provider; sentence-case category columns are not (Codex r5)', () => {
+    const T = (cols) => `Intro.\n\n<ComparisonTable columns={${JSON.stringify(cols)}} rows={[{ label: "Recurring plans", values: ["Yes","Yes","Yes"] }]} caption="Attributes as of June 2026, per each company public website." />\n\nOutro.`;
+    expect(gate.evaluate({ body: T(['What to weigh', 'Orkin', 'Home Depot', 'Waves']), title: 'x' }, OPTS).namedCompetitors).toEqual(['Home Depot', 'Orkin']);
+    expect(gate.evaluate({ body: T(['What to weigh', 'Orkin (national)', 'Local SWFL company', 'Waves']), title: 'x' }, OPTS).namedCompetitors).toEqual(['Orkin']);
+    // A pure category table names no provider at all.
+    expect(gate.evaluate({ body: T(['What to weigh', 'National chain', 'Local SWFL company', 'DIY']), title: 'x' }, OPTS).namedCompetitors).toEqual([]);
+  });
+
   test('a verdict without recorded names fails closed', () => {
     expect(gate.namedCompetitorListVerdict({ pass: true, findings: [], requiresHumanReview: true }))
       .toMatchObject({ ok: false, reason: 'named_competitor_off_list' });

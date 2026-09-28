@@ -79,7 +79,6 @@ const getProtectedPages = lazy('protected-pages', './protected-pages');
 const getContentGuardrails = lazy('content-guardrails', './content-guardrails');
 const getFootprintClassifier = lazy('footprint-claim-classifier', './footprint-claim-classifier');
 const getComparisonTableGate = lazy('comparison-table-gate', './comparison-table-gate');
-const getBusinessNameConfirmer = lazy('business-name-confirmer', './business-name-confirmer');
 const getImpactTracker = lazy('impact-tracker', '../seo/impact-tracker');
 const getSocialMedia = lazy('social-media', '../social-media');
 const getInterceptSeeder = lazy('intercept-brief-seeder', './intercept-brief-seeder');
@@ -940,44 +939,6 @@ class AutonomousRunner {
           claimToken, skipReason: 'comparison_table_failed', notes, blocking,
         });
       }
-      // 3d'. Unattended blogs: ONE structured call lists every home-service
-      // company the whole draft names, links or references
-      // (business-name-confirmer.js); stored on the verdict so the merge-
-      // time recheck reuses it. The owner-list decision below reads it.
-      // A provider outage or bad output DEFERS the draft an hour rather
-      // than dropping it, at most COMPANY_CHECK_MAX_RETRIES times (counted
-      // on the opportunity — queue.defer refunds the claim attempt, so the
-      // lifetime attempt budget alone would never stop it); then, or for an
-      // unextractable draft (over the input bound), it is skipped.
-      if (run.action_type === 'new_supporting_blog') {
-        const extractor = getBusinessNameConfirmer();
-        const extraction = extractor
-          ? await extractor.extractCompanyNames(draft, { brief })
-          : { ok: false, reason: 'business_name_confirmer_unavailable', retryable: true };
-        comparisonResult.companyExtraction = extraction;
-        run.comparison_table_result = comparisonResult;
-        if (extraction.ok !== true) {
-          const notes = `Company-name check unavailable (${extraction.reason || 'unknown'}) — the owner competitor list could not be applied.`;
-          const retriesSoFar = Number(opp.signal_metadata?.company_check_retries) || 0;
-          if (extraction.retryable === true && retriesSoFar < COMPANY_CHECK_MAX_RETRIES
-            && await this._recordCompanyCheckRetry(opp, retriesSoFar + 1, claimToken).catch(() => false)) {
-            const finalized = await finalize(run, t0, {
-              outcome: 'deferred_company_check',
-              skip_reason: 'named_competitor_unverified_names',
-              reviewer_notes: `${notes} Deferred one hour for retry ${retriesSoFar + 1} of ${COMPANY_CHECK_MAX_RETRIES}.`,
-            });
-            await this._deferClaimOrThrow(queue, opp.id, new Date(Date.now() + COMPANY_CHECK_RETRY_MS), { claimToken });
-            return finalized;
-          }
-          const finalized = await finalize(run, t0, {
-            outcome: 'skipped',
-            skip_reason: 'named_competitor_unverified_names',
-            reviewer_notes: extraction.retryable === true ? `${notes} Retries exhausted (${retriesSoFar}).` : notes,
-          });
-          await this._skipClaimOrThrow(queue, opp.id, 'named_competitor_unverified_names', { claimToken });
-          return finalized;
-        }
-      }
     }
 
     // 4. Uniqueness gate. City-service/customer-question run the full
@@ -1189,20 +1150,21 @@ class AutonomousRunner {
     // gate) AND the owner list (every name approved — owner rulings
     // 2026-09-27 D2 + 2026-09-28). Comparison, sourcing, and
     // merge-time head checks remain mandatory.
-    // A company the whole-draft extraction found makes the post competitor
-    // content even when the deterministic detection did not flag it.
+    // Early look at the DETERMINISTIC names only (skips an off-list draft
+    // before image spend); the publisher's commit chokepoint
+    // (business-name-confirmer assertOwnerListForCommit) applies the full
+    // verdict — deterministic names + company extraction — on the final
+    // committed text.
     let namedCompetitorLaneOpen = false;
     let namedCompetitorList = null;
-    const extractedCompanies = unattendedBlog
-      && (run.comparison_table_result?.companyExtraction?.companies?.length || 0) > 0;
     try {
       const comparisonTableGate = require('./comparison-table-gate');
       namedCompetitorLaneOpen = comparisonTableGate.namedCompetitorAutopublishEligible(brief) === true;
-      if (run.comparison_requires_review === true || extractedCompanies) {
-        namedCompetitorList = comparisonTableGate.namedCompetitorListVerdict(run.comparison_table_result);
+      if (run.comparison_requires_review === true) {
+        namedCompetitorList = comparisonTableGate.namedCompetitorListVerdict(run.comparison_table_result, { requireExtraction: false });
       }
     } catch (_) { namedCompetitorLaneOpen = false; namedCompetitorList = null; }
-    const competitorContent = run.comparison_requires_review === true || extractedCompanies;
+    const competitorContent = run.comparison_requires_review === true;
     const namedCompetitorAutopublish = namedCompetitorLaneOpen && namedCompetitorList?.ok === true;
     const forceNamedCompetitorReview = competitorContent && !namedCompetitorAutopublish;
     if (namedCompetitorAutopublish && competitorContent) {
@@ -1401,6 +1363,9 @@ class AutonomousRunner {
     try {
       publishOutcome = await this._publishAndDistribute(draft, brief, run);
     } catch (err) {
+      if (err.code === 'BLOG_OWNER_LIST_BLOCKED' || err.code === 'BLOG_OWNER_LIST_UNVERIFIED') {
+        return this._ownerListCommitRefused(queue, opp, run, t0, finalize, { claimToken, err, unattendedBlog });
+      }
       if (['BLOG_EDITORIAL_REVIEW_FAILED', 'BLOG_EDITORIAL_REVIEW_UNAVAILABLE'].includes(err.code)) {
         return this._gateFailRetryOrSkip(queue, opp, run, t0, finalize, {
           claimToken, skipReason: 'editorial_review_failed', notes: err.message, blocking: err.findings,
@@ -1424,6 +1389,16 @@ class AutonomousRunner {
     }
 
     Object.assign(run, publishOutcome);
+    // The owner-list chokepoint's result on the COMMITTED text rides the
+    // persisted verdict — the merge-time poller judges exactly this.
+    if (draft?.company_extraction) {
+      run.comparison_table_result = {
+        ...(run.comparison_table_result || {}),
+        companyExtraction: draft.company_extraction,
+        ...(Array.isArray(draft.competitors_approved_by_list) && draft.competitors_approved_by_list.length
+          ? { competitors_approved_by_list: draft.competitors_approved_by_list } : {}),
+      };
+    }
 
     // No-op refresh: the live page already matched the draft, so nothing was
     // published. Complete the queue item (don't park it for a PR that doesn't
@@ -2024,6 +1999,44 @@ class AutonomousRunner {
    * was actually written. Guarded to the active claim so a stale worker
    * can't stamp feedback over another attempt.
    */
+  /**
+   * The publisher refused to commit on the owner competitor list
+   * (business-name-confirmer assertOwnerListForCommit). The verdict it
+   * judged is persisted with the run. Unattended blogs: an off-list name
+   * (or competitor content with the lane closed) skips silently; a company
+   * check outage DEFERS one hour, at most COMPANY_CHECK_MAX_RETRIES times
+   * (counted on the opportunity — queue.defer refunds the claim attempt),
+   * then skips. Other lanes (refresh) park for review with the reason.
+   */
+  async _ownerListCommitRefused(queue, opp, run, t0, finalize, { claimToken, err, unattendedBlog }) {
+    if (err.extraction) {
+      run.comparison_table_result = { ...(run.comparison_table_result || {}), companyExtraction: err.extraction };
+    }
+    const reason = err.code === 'BLOG_OWNER_LIST_UNVERIFIED' ? 'named_competitor_unverified_names' : (err.reason || 'named_competitor_off_list');
+    const notes = reason === 'named_competitor_off_list' && err.offList?.length
+      ? `Names competitor(s) outside the owner-approved list: ${err.offList.join(', ')} (a new owner ruling is needed to name them).`
+      : err.message;
+    const retriesSoFar = Number(opp.signal_metadata?.company_check_retries) || 0;
+    if (err.code === 'BLOG_OWNER_LIST_UNVERIFIED' && err.retryable === true && retriesSoFar < COMPANY_CHECK_MAX_RETRIES
+      && await this._recordCompanyCheckRetry(opp, retriesSoFar + 1, claimToken).catch(() => false)) {
+      const finalized = await finalize(run, t0, {
+        outcome: 'deferred_company_check', skip_reason: reason,
+        reviewer_notes: `${notes} Deferred one hour for retry ${retriesSoFar + 1} of ${COMPANY_CHECK_MAX_RETRIES}.`,
+      });
+      await this._deferClaimOrThrow(queue, opp.id, new Date(Date.now() + COMPANY_CHECK_RETRY_MS), { claimToken });
+      return finalized;
+    }
+    const exhausted = err.code === 'BLOG_OWNER_LIST_UNVERIFIED' && err.retryable === true ? ` Retries exhausted (${retriesSoFar}).` : '';
+    if (unattendedBlog) {
+      const finalized = await finalize(run, t0, { outcome: 'skipped', skip_reason: reason, reviewer_notes: `${notes}${exhausted}` });
+      await this._skipClaimOrThrow(queue, opp.id, reason, { claimToken });
+      return finalized;
+    }
+    const finalized = await finalize(run, t0, { outcome: 'completed_pending_review', skip_reason: reason, reviewer_notes: `${notes}${exhausted}` });
+    await this._pendingReviewClaimOrThrow(queue, opp.id, reason, { claimToken }, run.action_type);
+    return finalized;
+  }
+
   // Company-check retry counter on the opportunity (same claim-guarded
   // signal_metadata write as _recordGateRetry). True only when written.
   async _recordCompanyCheckRetry(opp, count, claimToken) {
@@ -3270,7 +3283,9 @@ class AutonomousRunner {
 
     let patch;
     try {
-      patch = await this._publishAndDistribute(draft, brief, { ...run, opportunity_id: opportunityId });
+      // A human approved this exact draft: the publisher's owner-list
+      // chokepoint defers to that decision.
+      patch = await this._publishAndDistribute(draft, brief, { ...run, opportunity_id: opportunityId }, { humanApproved: true });
     } catch (err) {
       await revertClaims(); // let the operator retry
       throw err;
@@ -3608,7 +3623,7 @@ class AutonomousRunner {
     return out;
   }
 
-  async _publishAndDistribute(draft, brief, run) {
+  async _publishAndDistribute(draft, brief, run, { humanApproved = false } = {}) {
     const out = {};
     const publisher = getAstroPublisher();
     const indexNow = getIndexNow();
@@ -3626,7 +3641,7 @@ class AutonomousRunner {
       ? publisher.publishRefresh.bind(publisher)
       : publisher?.publishOrUpdatePage?.bind(publisher);
     if (usePublish) {
-      const r = await usePublish(draft, brief);
+      const r = await usePublish(draft, brief, { humanApproved });
       // A refresh whose body + editable meta already match the live page is a
       // completed no-op: publishRefresh returns status:'no_changes' (no PR, no
       // commit, nothing republished). Leave published_url UNSET so the impact

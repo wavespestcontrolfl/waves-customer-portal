@@ -1697,7 +1697,7 @@ describe('validateAutonomousRunGates', () => {
     expect(cleared.ok).toBe(true);
     expect(deps.businessNameConfirmer.extractCompanyNames).toHaveBeenCalledWith(
       expect.objectContaining({ body: expect.any(String) }),
-      { prior: stored, brief: expect.objectContaining({ action_type: 'new_supporting_blog' }) },
+      { prior: stored, brief: expect.objectContaining({ action_type: 'new_supporting_blog' }), final: true },
     );
     expect(cleared.comparisonResult.companyExtraction).toEqual(stored);
 
