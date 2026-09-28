@@ -75,6 +75,13 @@ function competitorFreeMarkdown(frontmatter, body, { validate = null } = {}) {
 }
 
 // The generated PR's own description lists what was unlinked.
+// Links the writer's capture step already turned into plain text (emit_draft /
+// emit_metadata_only stamp them on the draft), so a lane's PR notes list
+// every removal, not only the ones its own commit-time pass found.
+function capturedUnlinks(draft) {
+  return Array.isArray(draft?.competitor_links_unlinked) ? draft.competitor_links_unlinked : [];
+}
+
 function withCompetitorUnlinkNote(prBody, unlinked = []) {
   if (!unlinked.length) return prBody;
   const lines = unlinked.map((u) => `- \`${String(u.url).replace(/`/g, '')}\` → "${String(u.text).replace(/\s+/g, ' ').slice(0, 80)}"`);
@@ -3435,7 +3442,7 @@ async function publishOrUpdatePage(draft, brief = {}) {
   // nothing left, so competitorUnlinked alone would under-report what
   // actually changed. Merge in the capture-time removals so the PR notes
   // show the whole story.
-  const capturedCompetitorUnlinked = Array.isArray(draft.competitor_links_unlinked) ? draft.competitor_links_unlinked : [];
+  const capturedCompetitorUnlinked = capturedUnlinks(draft);
   const editorialFiles = await editorialEvidence.filesForDocument({ document: markdown, path: filePath, brief,
     evidenceUrls: editorialEvidence.unlinkedCompetitorUrls(draft, competitorUnlinked) });
 
@@ -3683,7 +3690,7 @@ async function publishMetadataRewrite(draft, brief = {}) {
       metaField,
       brief,
       backfilledFields,
-    }), competitorUnlinked),
+    }), [...capturedUnlinks(draft), ...competitorUnlinked]),
   });
   await requestCodexReview({
     pr,
@@ -3967,7 +3974,7 @@ async function publishRefresh(draft, brief = {}) {
   const pr = await gh.createPr({
     head: branch,
     title: `Refresh: ${nextFrontmatter.title || nextFrontmatter.metaTitle || publicPathFromAstroFile(filePath)}`.slice(0, 72),
-    body: withCompetitorUnlinkNote(buildRefreshPrBody({ filePath, targetUrl, branch, before: currentFrontmatter, after: nextFrontmatter, oldBody, newBody: finalBody, brief, backfilledFields, images: { hero: null, body: refreshImages.images || [] } }), competitorUnlinked),
+    body: withCompetitorUnlinkNote(buildRefreshPrBody({ filePath, targetUrl, branch, before: currentFrontmatter, after: nextFrontmatter, oldBody, newBody: finalBody, brief, backfilledFields, images: { hero: null, body: refreshImages.images || [] } }), [...capturedUnlinks(draft), ...competitorUnlinked]),
   });
   await requestCodexReview({
     pr,

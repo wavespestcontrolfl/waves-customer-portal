@@ -145,6 +145,28 @@ describe('publishRefresh frontmatter freeze', () => {
     expect(gh.createPr.mock.calls[0][0].body).toMatch(/Competitor links removed[\s\S]*https:\/\/www\.orkin\.com\/terms/);
   });
 
+  test('the PR notes also list links the capture step already removed (refresh + metadata lanes)', async () => {
+    const captured = [{ url: 'https://www.orkin.com/terms', text: "Orkin's terms" }];
+    const res = await pub.publishRefresh({ ...refreshDraft({ body: "Fresh Sarasota guidance. Per Orkin's terms, plans renew yearly." }), competitor_links_unlinked: captured }, BRIEF);
+    expect(res.status).toBe('pr_open');
+    expect(gh.createPr.mock.calls[0][0].body).toMatch(/Competitor links removed[\s\S]*https:\/\/www\.orkin\.com\/terms/);
+
+    jest.clearAllMocks();
+    gh.createBranch.mockResolvedValue({});
+    gh.getFile.mockResolvedValue({ content: EXISTING, sha: 'svc-sha' });
+    gh.putFile.mockResolvedValue({ commit: { sha: 'new-sha' } });
+    gh.createPr.mockResolvedValue({ number: 78, html_url: 'https://github.com/x/y/pull/78', head: { sha: 'h' } });
+    const meta = await pub.publishMetadataRewrite({
+      type: 'metadata',
+      file_path: FILE_PATH,
+      title: 'ignored (protected metaTitle)',
+      meta_description: 'A brand-new Sarasota pest control meta description for the service page rewrite lane.',
+      competitor_links_unlinked: captured,
+    }, { action_type: 'rewrite_title_meta', target_url: '/pest-control-sarasota-fl/' });
+    expect(meta.status).toBe('pr_open');
+    expect(gh.createPr.mock.calls[0][0].body).toMatch(/Competitor links removed[\s\S]*https:\/\/www\.orkin\.com\/terms/);
+  });
+
   test('no_changes when body and meta are identical to live', async () => {
     const draft = {
       type: 'draft',
