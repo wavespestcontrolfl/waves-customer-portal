@@ -28,7 +28,9 @@ beforeEach(() => {
   // test's persistent mockRejectedValue/mockImplementation can't leak.
   AutomationExecutor.processTrigger.mockReset();
   AutomationExecutor.processTrigger.mockImplementation(async () => ({ automation_count: 1, results: [] }));
+  isEnabled.mockReset();
   isEnabled.mockReturnValue(true);
+  emailTemplateAutomationsMode.mockReset();
   emailTemplateAutomationsMode.mockReturnValue('live');
 });
 
@@ -192,7 +194,7 @@ describe('marker settlement (emitTrigger / settleIntent)', () => {
   // pre-push audit P1 — attempts ceiling: ANY persistent failure, not just
   // the recipient-email one, stops being retried at MAX_INTENT_ATTEMPTS.
   test('the failure that reaches MAX_INTENT_ATTEMPTS settles the marker unrecoverable', async () => {
-    AutomationExecutor.processTrigger.mockRejectedValue(new Error('automation xyz does not define an idempotency key template'));
+    AutomationExecutor.processTrigger.mockRejectedValue(new Error('Connection terminated unexpectedly'));
     const rows = mockIntentsTable([{ id: 'intent-1', status: 'pending', attempts: MAX_INTENT_ATTEMPTS - 2 }]);
 
     await emitEstimateExpired({ id: 'est-1', customer_email: 'sam@example.com' }, 'intent-1');
@@ -200,7 +202,7 @@ describe('marker settlement (emitTrigger / settleIntent)', () => {
 
     await emitEstimateExpired({ id: 'est-1', customer_email: 'sam@example.com' }, 'intent-1');
     expect(rows[0]).toMatchObject({ status: 'unrecoverable', attempts: MAX_INTENT_ATTEMPTS });
-    expect(rows[0].last_error).toContain('idempotency key template');
+    expect(rows[0].last_error).toContain('Connection terminated');
     expect(MAX_INTENT_ATTEMPTS).toBeGreaterThan(1);
   });
 
@@ -225,7 +227,7 @@ describe('marker settlement (emitTrigger / settleIntent)', () => {
     expect(logged).not.toContain('555-0142');
   });
 
-  test('the recipient-email-required error is classified by its CODE, independent of the message text', async () => {
+  test('the recipient-email-required error is classified by its CODE, independent of the message text and status', async () => {
     const err = new Error('some reworded message');
     err.code = 'AUTOMATION_RECIPIENT_EMAIL_REQUIRED';
     AutomationExecutor.processTrigger.mockRejectedValueOnce(err);
@@ -250,7 +252,7 @@ describe('marker settlement (emitTrigger / settleIntent)', () => {
     expect(rows[1]).toMatchObject({ status: 'unrecoverable', last_error: 'marker payload is not a linked 5-star review' });
   });
 
-  test('the ONE unresolvable-recipient error settles the marker unrecoverable (never retried) — codex P2: it must not pin the sweep batch', async () => {
+  test('the unresolvable-recipient error settles the marker unrecoverable (never retried) — codex P2: it must not pin the sweep batch', async () => {
     const err = new Error('recipient email is required for automation execution');
     err.status = 400;
     AutomationExecutor.processTrigger.mockRejectedValueOnce(err);
@@ -262,15 +264,88 @@ describe('marker settlement (emitTrigger / settleIntent)', () => {
     expect(rows[0].last_error).toBe('recipient email is required for automation execution');
   });
 
-  test('a DIFFERENT 400 error (not the recipient-email message) stays pending, not unrecoverable', async () => {
-    const err = new Error('automation xyz does not define an idempotency key template');
+  // codex P2 round 4 — every executor 400 is a deterministic
+  // configuration/validation error (blank idempotency template, a key
+  // variable the payload never provides, ...): retrying the same marker can
+  // only fail the same way, so it terminalizes on the first failure.
+  test.each([
+    'automation xyz does not define an idempotency key template',
+    'idempotency key missing variable(s): appointment_id',
+  ])('a deterministic executor 400 (%s) settles the marker unrecoverable immediately', async (message) => {
+    const err = new Error(message);
     err.status = 400;
     AutomationExecutor.processTrigger.mockRejectedValueOnce(err);
     const rows = mockIntentsTable([{ id: 'intent-1', status: 'pending' }]);
 
     await emitEstimateExpired({ id: 'est-1', customer_email: 'sam@example.com' }, 'intent-1');
 
-    expect(rows[0].status).toBe('pending');
+    expect(rows[0]).toMatchObject({ status: 'unrecoverable', attempts: 1, last_error: message });
+  });
+
+  test('a non-400 failure (no status, e.g. a DB hiccup) stays pending for another attempt', async () => {
+    const err = new Error('Connection terminated unexpectedly');
+    err.code = 'ECONNRESET';
+    AutomationExecutor.processTrigger.mockRejectedValueOnce(err);
+    const rows = mockIntentsTable([{ id: 'intent-1', status: 'pending' }]);
+
+    await emitEstimateExpired({ id: 'est-1', customer_email: 'sam@example.com' }, 'intent-1');
+
+    expect(rows[0]).toMatchObject({ status: 'pending', attempts: 1 });
+  });
+
+  // codex P1 round 4 — the executor's off-mode no-op evaluated nothing, so
+  // it must never settle the marker 'processed' (covers a mode flip between
+  // the emitter's gate read and the executor's own).
+  test('an off-mode (disabled) executor result leaves the marker pending and untouched', async () => {
+    AutomationExecutor.processTrigger.mockResolvedValueOnce({
+      trigger_event_key: 'estimate.expired', automation_count: 0, results: [], disabled: true,
+    });
+    const rows = mockIntentsTable([{ id: 'intent-1', status: 'pending', attempts: 0 }]);
+
+    const result = await emitEstimateExpired({ id: 'est-1', customer_email: 'sam@example.com' }, 'intent-1');
+
+    expect(result).toBeNull();
+    expect(rows[0]).toMatchObject({ status: 'pending', attempts: 0 });
+    expect(rows[0].last_error).toBeUndefined();
+  });
+
+  test('a LIVE zero-automation result (no disabled flag) still settles processed', async () => {
+    AutomationExecutor.processTrigger.mockResolvedValueOnce({ trigger_event_key: 'estimate.expired', automation_count: 0, results: [] });
+    const rows = mockIntentsTable([{ id: 'intent-1', status: 'pending' }]);
+
+    await emitEstimateExpired({ id: 'est-1', customer_email: 'sam@example.com' }, 'intent-1');
+
+    expect(rows[0].status).toBe('processed');
+  });
+
+  // codex P1 round 4 — through the REAL gate reader: a non-prod explicit
+  // kill switch makes the emitter a no-op that leaves its marker pending.
+  test.each(['false', 'off'])('NODE_ENV=development + GATE_EMAIL_TEMPLATE_AUTOMATIONS=%s (real gate): the emitter leaves the marker pending and never reaches the executor', async (gateValue) => {
+    const realGates = jest.requireActual('../config/feature-gates');
+    const savedGate = process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS;
+    const savedNodeEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'development';
+    process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = gateValue;
+    isEnabled.mockImplementation((gate) => realGates.isEnabled(gate));
+    emailTemplateAutomationsMode.mockImplementation(() => realGates.emailTemplateAutomationsMode());
+    try {
+      const rows = mockIntentsTable([{ id: 'intent-1', status: 'pending', trigger_event_key: 'estimate.expired', occurred_at: new Date('2026-01-01T00:00:00Z'), payload: { id: 'est-1', customer_email: 'sam@example.com' } }]);
+
+      const direct = await emitEstimateExpired({ id: 'est-1', customer_email: 'sam@example.com' }, 'intent-1');
+      const sweep = await sweepMissedLifecycleEvents();
+
+      expect(direct).toBeNull();
+      expect(sweep).toEqual({ intentsRetried: 0 });
+      expect(AutomationExecutor.processTrigger).not.toHaveBeenCalled();
+      expect(db).not.toHaveBeenCalled();
+      expect(rows[0]).toMatchObject({ status: 'pending', attempts: 0 });
+    } finally {
+      if (savedGate === undefined) delete process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS;
+      else process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = savedGate;
+      process.env.NODE_ENV = savedNodeEnv;
+      isEnabled.mockReset();
+      emailTemplateAutomationsMode.mockReset();
+    }
   });
 
   test('gate off never touches the marker (left for a later replay once the gate is live/shadow)', async () => {

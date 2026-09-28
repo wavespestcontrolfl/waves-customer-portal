@@ -1860,9 +1860,19 @@ const gates = {
   // lives (executeRun's dispatch chokepoint). A producer must read this
   // boolean ONLY when every one of its own sends already goes exclusively
   // through the executor with no direct-send fallback of its own.
-  emailTemplateAutomations: isProd
-    ? ['shadow', 'true'].includes(String(process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS || '').trim().toLowerCase())
-    : true,
+  //
+  // ONE SOURCE OF TRUTH (codex P1 round 4): this boolean is DERIVED from
+  // emailTemplateAutomationsMode() at call time — on exactly when the mode
+  // is 'shadow' or 'live' — in every environment. It used to be computed
+  // separately (always true outside production), so a non-prod explicit
+  // 'false'/'off' kill switch left it on while the mode read 'off': the
+  // lifecycle emitters then passed their gate check, got the executor's
+  // off-mode no-op and settled their intent markers 'processed', and the
+  // admin trigger route reported success instead of "disabled". In
+  // production the result is unchanged ('shadow'/'true' on, anything else
+  // off); it now also follows a mid-process env change the same way the
+  // mode reader always has.
+  get emailTemplateAutomations() { return emailTemplateAutomationsMode() !== 'off'; },
 
   // Treatment Automation Enroll — for wired pests (bed_bug only for now; the
   // per-pest map in appointment-tagger.js controls which, so flipping this

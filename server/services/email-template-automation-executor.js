@@ -886,7 +886,11 @@ async function processTrigger({
   // stop dispatch once execution reaches the executor).
   const mode = emailTemplateAutomationsMode();
   if (mode === 'off') {
-    return { trigger_event_key: eventKey, automation_count: 0, results: [] };
+    // disabled:true tells a caller holding a durable intent marker that
+    // NOTHING was evaluated (codex P1 round 4) — distinct from a live
+    // zero-automation result — so it leaves the marker pending for replay
+    // instead of settling it 'processed'.
+    return { trigger_event_key: eventKey, automation_count: 0, results: [], disabled: true };
   }
   const automations = await loadAutomations(eventKey, targetAutomationKey);
   const results = [];

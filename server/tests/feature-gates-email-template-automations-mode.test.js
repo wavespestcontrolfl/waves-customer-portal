@@ -1,4 +1,4 @@
-const { emailTemplateAutomationsMode } = require('../config/feature-gates');
+const { emailTemplateAutomationsMode, isEnabled } = require('../config/feature-gates');
 
 // Read at CALL time (no resetModules needed) — see feature-gates.js's own
 // comment above the function for the convention this mirrors.
@@ -58,5 +58,37 @@ describe('emailTemplateAutomationsMode', () => {
     expect(emailTemplateAutomationsMode()).toBe('off');
     set('off', 'test');
     expect(emailTemplateAutomationsMode()).toBe('off');
+  });
+});
+
+// codex P1 round 4 — the boolean gate is DERIVED from the mode (one source
+// of truth), read at call time, in every environment.
+describe('isEnabled(\'emailTemplateAutomations\') follows emailTemplateAutomationsMode()', () => {
+  const savedGate = process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS;
+  const savedEnv = process.env.NODE_ENV;
+
+  afterEach(() => {
+    if (savedGate === undefined) delete process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS;
+    else process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = savedGate;
+    process.env.NODE_ENV = savedEnv;
+  });
+
+  test.each([
+    ['development', 'false', false],
+    ['development', 'off', false],
+    ['development', undefined, true],
+    ['development', 'shadow', true],
+    ['development', 'true', true],
+    ['production', undefined, false],
+    ['production', 'false', false],
+    ['production', 'nonsense', false],
+    ['production', 'shadow', true],
+    ['production', 'true', true],
+  ])('NODE_ENV=%s gate=%s → %s', (nodeEnv, gate, expected) => {
+    if (gate === undefined) delete process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS;
+    else process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = gate;
+    process.env.NODE_ENV = nodeEnv;
+    expect(isEnabled('emailTemplateAutomations')).toBe(expected);
+    expect(isEnabled('emailTemplateAutomations')).toBe(emailTemplateAutomationsMode() !== 'off');
   });
 });

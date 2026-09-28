@@ -1852,7 +1852,7 @@ describe('email template automation executor', () => {
       db.mockClear();
       try {
         const result = await AutomationExecutor.processTrigger({ triggerEventKey: 'estimate.auto_renewed', payload: { estimate_id: 'est-1' } });
-        expect(result).toEqual({ trigger_event_key: 'estimate.auto_renewed', automation_count: 0, results: [] });
+        expect(result).toEqual({ trigger_event_key: 'estimate.auto_renewed', automation_count: 0, results: [], disabled: true });
         expect(db).not.toHaveBeenCalled();
         expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
       } finally {

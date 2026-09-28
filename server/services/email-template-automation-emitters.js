@@ -20,7 +20,7 @@
  * automation owed, and both looked exactly like a fresh event the sweep had
  * missed. Recovery now comes from a durable INTENT MARKER
  * (email_template_automation_intents, migration
- * 20260928120000_email_template_automation_intents.js) written in the SAME
+ * 20260928220000_email_template_automation_intents.js) written in the SAME
  * transaction as the transition that earns it — the estimate-expiry flip
  * (estimate-expiration.js's flipExpiredBatch) and the review-attribution
  * writes (google-business.js's two sync paths, review-incentives.js's
@@ -48,31 +48,36 @@ const { scrubSentryText } = require('../utils/sentry-scrub');
 // constraint error or a provider error can echo the email/phone values it
 // was handed, and Knex prefixes the failing SQL (quoted literals included)
 // onto err.message. Classification never reads this text — it matches on
-// the raw error's code (see isRecipientEmailRequired) — only what leaves
-// the process is scrubbed.
+// the raw error's status/code (see isDeterministicAutomationError) — only
+// what leaves the process is scrubbed.
 function safeErrorText(err) {
   return scrubSentryText(err && err.message ? err.message : err);
 }
 
-// The one error recipientFor throws when no resolvable recipient email
-// exists at all (executor.js) — a business-permanent condition (a
-// phone-only lead/estimate with no email on file), not a transient one.
-// Retrying this exact marker would only let it pin an ordered, limited
-// sweep batch (codex P2 round 3) — so this error settles a marker
-// 'unrecoverable' on its FIRST failure; every other failure is retried up to
+// Deterministic (non-retryable) processTrigger failures settle a marker
+// 'unrecoverable' on their FIRST occurrence — retrying the same marker
+// against the same automation config can only fail the same way, and would
+// just cost sweep work until the attempts ceiling (codex P2 rounds 3 + 4).
+// Classified on the raw error's machine fields, never its message text:
+//  - status 400: every validation/configuration error the executor throws
+//    (recipientFor's no-resolvable-recipient-email error — a phone-only
+//    lead/estimate, or a soft-deleted customer — a blank idempotency key
+//    template, an idempotency key variable the payload never provides, a
+//    malformed rendered key, a blank trigger key);
+//  - the recipient error's code, as belt-and-braces should its status ever
+//    change.
+// Anything else (DB/connection/provider hiccups) is retried up to
 // MAX_INTENT_ATTEMPTS below.
-// Matched on the executor's error CODE first (a stable machine token), with
-// the message as a fallback for any thrower that predates the code.
 const RECIPIENT_EMAIL_REQUIRED_CODE = 'AUTOMATION_RECIPIENT_EMAIL_REQUIRED';
-const RECIPIENT_EMAIL_REQUIRED_MESSAGE = 'recipient email is required for automation execution';
-function isRecipientEmailRequired(err) {
-  return Boolean(err) && (err.code === RECIPIENT_EMAIL_REQUIRED_CODE || err.message === RECIPIENT_EMAIL_REQUIRED_MESSAGE);
+function isDeterministicAutomationError(err) {
+  if (!err) return false;
+  return err.code === RECIPIENT_EMAIL_REQUIRED_CODE || Number(err.status) === 400;
 }
 
 // Attempts ceiling for a marker (pre-push audit P1): every failed dispatch
 // of a marker — the direct emit right after its transition AND each sweep
-// replay — counts one attempt. A marker that fails for ANY reason (not just
-// the recipient-email-required case above) settles 'unrecoverable' with its
+// replay — counts one attempt. A marker that keeps failing for ANY reason
+// (not just the deterministic ones above) settles 'unrecoverable' with its
 // scrubbed last_error on its MAX_INTENT_ATTEMPTS-th failure, so no
 // persistent failure can keep a row 'pending' forever. 10 = the direct
 // attempt plus nine 15-minute sweep ticks, ~2h15m of retrying: long enough
@@ -122,11 +127,16 @@ async function emitTrigger(eventKey, args, intentId = null) {
   try {
     const AutomationExecutor = require('./email-template-automation-executor');
     const result = await AutomationExecutor.processTrigger({ triggerEventKey: eventKey, executeImmediately: true, ...args });
+    // The executor's own off-mode no-op (codex P1 round 4): nothing was
+    // evaluated, so the marker is NOT processed — leave it pending,
+    // untouched (no attempt counted), for a replay once the mode is on.
+    // Covers a mode flip between the gate read above and the executor's.
+    if (result && result.disabled) return null;
     await settleIntent(intentId, { status: 'processed' });
     return result;
   } catch (err) {
     const errorText = safeErrorText(err);
-    if (isRecipientEmailRequired(err)) {
+    if (isDeterministicAutomationError(err)) {
       await settleIntent(intentId, { status: 'unrecoverable', last_error: errorText, attempts: db.raw('attempts + 1') });
     } else {
       await recordFailedAttempt(intentId, errorText);
