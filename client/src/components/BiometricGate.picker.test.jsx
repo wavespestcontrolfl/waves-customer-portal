@@ -108,17 +108,34 @@ it('still locks on a real background when no picker was opened', async () => {
   expect(lockShown()).toBeInTheDocument();
 });
 
-it('keeps a Face ID success that lands while the camera still hides the page', async () => {
+it('waits for the camera to close before asking Face ID after a real app switch', async () => {
   await renderUnlocked();
-  // Locked by a real background before the camera opened.
+  fireEvent.click(screen.getByTestId('camera'));
+  setVisibility('hidden');
+
+  appState(false); // real app switch with the camera up
+  appState(true);  // back to the app, camera still covering the page
+  expect(lockShown()).toBeInTheDocument();
+  expect(authenticateBiometric).toHaveBeenCalledTimes(1); // no prompt under the camera
+
+  setVisibility('visible'); // camera closed
+  await waitFor(() => expect(lockShown()).not.toBeInTheDocument());
+  expect(authenticateBiometric).toHaveBeenCalledTimes(2);
+});
+
+it('discards a Face ID success when a real background hides the page mid-prompt, even under a picker', async () => {
+  await renderUnlocked();
   appState(false);
   expect(lockShown()).toBeInTheDocument();
 
+  let finish;
+  authenticateBiometric.mockImplementationOnce(() => new Promise((r) => { finish = r; }));
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: /Unlock/i })); });
   fireEvent.click(screen.getByTestId('camera'));
   setVisibility('hidden');
-  await act(async () => { fireEvent.click(screen.getByRole('button', { name: /Unlock/i })); });
+  await act(async () => { finish(true); });
 
-  await waitFor(() => expect(lockShown()).not.toBeInTheDocument());
+  expect(lockShown()).toBeInTheDocument();
 });
 
 it('discards a Face ID success when a picker opened but a real background hid the page', async () => {
