@@ -20,6 +20,9 @@ const { buildPestPressureCustomerView } = require('../pest-pressure/customer-vie
 const { lawnScoreValue, resolveStressDamage } = require('../../../shared/lawn-scores.cjs');
 const { loadLinkedLawnAssessment } = require('./report-data');
 const { redactAccessCodes } = require('../context-aggregator');
+const {
+  pestReportExpectationsGateOn, buildRainExpectation, buildWhatToExpect,
+} = require('./pest-report-expectations');
 
 function cleanText(value) {
   return String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
@@ -406,7 +409,7 @@ async function loadProductSafety(products, knex) {
       })
       .select('id', 'name', 'category', 'product_type', 'active_ingredient', 'epa_reg_number',
         'rei_hours', 'rainfast_minutes', 'reentry_text', 'reentry_summary', 'irrigation_required',
-        'approved_for_service_report');
+        'approved_for_service_report', 'moa_group');
     const approvedRows = rows.filter(catalogApprovedForReport);
     const safetyFacts = approvedRows.map((r) => ({
       name: cleanText(r.name),
@@ -419,6 +422,11 @@ async function loadProductSafety(products, knex) {
       // Tri-state: true = label requires watering-in, false = label says no
       // irrigation needed, null = unknown (omitted from the prompt).
       irrigationRequired: r.irrigation_required == null ? null : Boolean(r.irrigation_required),
+      // Pest Report V2 "expectations" classification (GATE_PEST_REPORT_EXPECTATIONS)
+      // — feeds the EXPECTATIONS grounding section below, same classifier the
+      // customer-facing report uses (pest-report-expectations.js).
+      category: cleanText(r.category) || null,
+      moaGroup: cleanText(r.moa_group) || null,
     }));
     const rowsById = new Map(approvedRows.map((row) => [String(row.id), row]));
     const rowsByName = new Map(approvedRows.map((row) => [cleanText(row.name).toLowerCase(), row]));
@@ -686,6 +694,25 @@ async function buildReportCopyContext({
       weekWeather?.rainInches != null ? `Rainfall in the 7 days ending on the service date: ${weekWeather.rainInches}".` : null,
     ].filter(Boolean).join(' ');
     if (wx) sections.push(`WEATHER: ${wx}`);
+  }
+
+  // Same facts, same classifier as the customer-facing Pest Report V2
+  // "expectations" blocks (pest-report-expectations.js) — dark behind the
+  // same gate, so generated copy never diverges from what the dashboard
+  // itself says once both are live. Live-forecast heavy-rain phrasing is
+  // deliberately NOT re-derived here (a second live NWS fetch just for
+  // grounding); the deterministic weekly-rain + rainy-season facts still
+  // ground the model honestly.
+  if (line === 'pest' && pestReportExpectationsGateOn()) {
+    const expectationProducts = productSafety.map((p) => ({
+      activeIngredient: p.activeIngredient, category: p.category, moaGroup: p.moaGroup, rainfastMinutes: p.rainfastMinutes,
+    }));
+    const rainExpectation = buildRainExpectation({ weekWeather, products: expectationProducts, serviceMonth: monthNum });
+    const whatToExpect = buildWhatToExpect({ products: expectationProducts });
+    const expectationLines = [...(rainExpectation?.lines || []), ...(whatToExpect?.lines || [])];
+    if (expectationLines.length) {
+      sections.push(`EXPECTATIONS (honest, deterministic facts about this treatment — reflect these, never contradict them; never promise elimination or a guarantee):\n${expectationLines.map((l) => `- ${l}`).join('\n')}`);
+    }
   }
 
   if (productSafety.length) {

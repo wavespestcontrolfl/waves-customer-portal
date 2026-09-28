@@ -203,6 +203,13 @@ function approvedReportProductFacts(catalog = {}) {
     irrigationRequired: catalog.irrigation_required == null ? null : Boolean(catalog.irrigation_required),
     labelVerifiedAt: catalog.label_verified_at || null,
     labelVersion: catalog.label_version || null,
+    // Pest Report V2 "expectations" blocks (GATE_PEST_REPORT_EXPECTATIONS) —
+    // moa_group classifies the product's mode of action (e.g. "Group 2B") for
+    // the "what to expect" copy; rainfast_minutes feeds the rain line's
+    // rain-fast clause when the catalog has it. Both null-safe; neither is
+    // rendered directly, only classified deterministically.
+    moaGroup: catalog.moa_group || null,
+    rainfastMinutes: Number.isFinite(Number(catalog.rainfast_minutes)) ? Number(catalog.rainfast_minutes) : null,
   };
 }
 
@@ -282,6 +289,8 @@ async function attachApprovedReportProductFacts(knex, products = [], { frozenFac
         'label_verified_at',
         'label_version',
         'approved_for_service_report',
+        'moa_group',
+        'rainfast_minutes',
       );
   } catch {
     // Signal the failure instead of silently returning bare rows (codex P2
@@ -708,6 +717,23 @@ function structuredActionScope(service = {}) {
     else if (scope === 'exterior') { hasExterior = true; hasTreatment = true; }
   }
   return { hasInterior, hasExterior, hasTreatment, hasDryDownTreatment, hasActions, hasNonChemicalTreatment, hasReentryWait };
+}
+
+// Raw completed-action LABELS for the visit (same two sources
+// structuredActionScope reads), regardless of treatmentApplied — a sweep
+// action ("Swept eaves, window frames, door frames, and lanai") is
+// treatmentApplied: false but is still real completed work. Feeds the Pest
+// Report V2 spider expectation (GATE_PEST_REPORT_EXPECTATIONS): a dedicated
+// list rather than reusing structuredActionScope's scope-only booleans,
+// which discard the label text this needs.
+function completedProtocolActionLabels(service = {}) {
+  const structured = parseJsonObject(service.structured_notes);
+  const entries = []
+    .concat(Array.isArray(service.protocolActionScopesCompleted) ? service.protocolActionScopesCompleted : [])
+    .concat(Array.isArray(structured.protocolActionScopesCompleted) ? structured.protocolActionScopesCompleted : []);
+  return [...new Set(
+    entries.map((entry) => String(entry?.label || '').trim()).filter(Boolean),
+  )];
 }
 
 // Controlled treatment-area labels carry an explicit scope
@@ -3761,6 +3787,10 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         label_verified_at: product.approved_report_product_facts?.labelVerifiedAt || null,
         label_version: product.approved_report_product_facts?.labelVersion || null,
         facts_approved: !!product.approved_report_product_facts,
+        // Pest Report V2 "expectations" blocks (GATE_PEST_REPORT_EXPECTATIONS) —
+        // see attachApprovedReportProductFacts / approvedReportProductFacts.
+        moa_group: product.approved_report_product_facts?.moaGroup || null,
+        rainfast_minutes: product.approved_report_product_facts?.rainfastMinutes ?? null,
       },
       method,
       // Explicit vs inferred decides whether pesticide identity may override
@@ -5522,6 +5552,10 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     // flagged" card (reports-public passes it to buildPestReportV2). Lawn and
     // tree & shrub already consume it inside their own V2 builders.
     customerConcern: structuredCustomerConcern(structured),
+    // Raw completed-action labels — feeds the Pest V2 spider expectation
+    // (GATE_PEST_REPORT_EXPECTATIONS; reports-public.js passes it to
+    // buildPestReportV2). Cheap and line-agnostic; computed unconditionally.
+    protocolActionLabels: completedProtocolActionLabels(service),
     customerInteraction: service.customer_interaction || structured.customerInteraction || null,
     serviceAreas: areaLabels,
     measurements: {
@@ -5769,6 +5803,7 @@ module.exports = {
   inferCatalogProductType,
   approvedReportProductFacts,
   attachApprovedReportProductFacts,
+  completedProtocolActionLabels,
   loadLawnProgramOverviewContext,
   normalizeAdvisoryForTreatmentScope,
   buildCompletionAdvisory,

@@ -78,6 +78,52 @@ async function fetchSeasonalForecastSafe(zip) {
   }
 }
 
+// Pest Report V2 "expectations" blocks (GATE_PEST_REPORT_EXPECTATIONS,
+// dark). Best-effort, fail-soft — a weather hiccup must never block the
+// report. weekWeather is the trailing 7-day rainfall at the property
+// (application-conditions.js — the same source the lawn report uses,
+// fetched independently here rather than through the lawn "freeze"
+// machinery: this block is not a permanent water-balance narrative, it's a
+// short deterministic sentence, and application-conditions.js already
+// caches by coordinate+date for 6h).
+async function fetchPestWeekWeatherSafe(service) {
+  try {
+    const { fetchServiceWeekWeather, toCoordinate } = require('../services/service-report/application-conditions');
+    const lat = toCoordinate(service.customer_latitude ?? service.latitude ?? service.lat);
+    const lng = toCoordinate(service.customer_longitude ?? service.longitude ?? service.lng);
+    if (lat == null || lng == null) return null;
+    return await fetchServiceWeekWeather({ latitude: lat, longitude: lng, serviceDate: service.service_date });
+  } catch {
+    return null;
+  }
+}
+
+// LIVE VIEW ONLY — never called for a PDF/static render (see the call site).
+// True when the NWS forecast (weather-forecast.js — the same source the tech
+// rain-out badges use) shows a high rain chance or a storm in roughly the
+// next few forecast periods. Fail-open (false) on any miss; bounded to a
+// short deadline so a slow NWS response never holds up the live report.
+async function fetchPestRainForecastHeavySafe(service) {
+  try {
+    const { getDailyRainOutlookBounded } = require('../services/weather-forecast');
+    const lat = service.customer_latitude ?? service.latitude ?? service.lat;
+    const lng = service.customer_longitude ?? service.longitude ?? service.lng;
+    const outlook = await getDailyRainOutlookBounded(lat, lng, { deadlineMs: 1200 });
+    if (!outlook) return false;
+    return Object.values(outlook).slice(0, 3).some((day) => (
+      (Number.isFinite(day?.rainChance) && day.rainChance >= 70)
+      || /storm|thunderstorm|heavy rain/i.test(String(day?.shortForecast || ''))
+    ));
+  } catch {
+    return false;
+  }
+}
+
+function monthFromDate(dateStr) {
+  const d = new Date(dateStr);
+  return Number.isNaN(d.getTime()) ? null : d.getUTCMonth() + 1;
+}
+
 async function staffCanViewSuppressed(req) {
   try {
     const header = String(req.headers.authorization || '');
@@ -482,7 +528,7 @@ async function buildServiceReportV1ResponseData(service, token, {
   // Summary (narrative slot), the What-we-found tiles, and the activity
   // gauge, all of which the dashboard would otherwise suppress. The same
   // classifier drives the PDF cache suffix (pest-report-v2.js).
-  const { buildPestReportV2, buildCustomerConcernCard, isCockroachTypedReportType } = require('../services/service-report/pest-report-v2');
+  const { buildPestReportV2, buildCustomerConcernCard, isCockroachTypedReportType, pestReportExpectationsGateOn } = require('../services/service-report/pest-report-v2');
   if (
     process.env.PEST_REPORT_V2 === 'true'
     && data.serviceLine === 'pest'
@@ -491,6 +537,17 @@ async function buildServiceReportV1ResponseData(service, token, {
   ) {
     try {
       const forecast = await fetchSeasonalForecastSafe(service.zip);
+      // Rain/spiders/what-to-expect facts — computed only when the
+      // expectations gate is on, so a dark gate costs nothing extra.
+      // forecastHeavyRain is LIVE VIEW ONLY (never PDF/static — the report's
+      // mutable-content rule): a non-live render always passes false.
+      const expectationsGateOn = pestReportExpectationsGateOn();
+      const [weekWeather, forecastHeavyRain] = expectationsGateOn
+        ? await Promise.all([
+          fetchPestWeekWeatherSafe(service),
+          mode === 'live' ? fetchPestRainForecastHeavySafe(service) : Promise.resolve(false),
+        ])
+        : [null, false];
       const pestReportV2 = buildPestReportV2({
         premiumExperience: dynamicContext.premiumExperience,
         pestPressure: data.pestPressure,
@@ -519,6 +576,11 @@ async function buildServiceReportV1ResponseData(service, token, {
         // isCallback rides the payload ungated (report-data), so the gate
         // term here is what makes the suppression killable.
         suppressDefense: data.isCallback === true && reserviceReportCopyGateOn(),
+        applications: data.applications || [],
+        actionLabels: data.protocolActionLabels || [],
+        weekWeather,
+        forecastHeavyRain,
+        serviceMonth: monthFromDate(service.service_date),
       });
       if (pestReportV2) data.pestReportV2 = pestReportV2;
     } catch { /* best-effort — never block the report */ }

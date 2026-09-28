@@ -24,6 +24,7 @@
 
 const { validateCustomerCopy } = require('./premium-experience');
 const { detectServiceLine } = require('./service-line-configs');
+const { pestReportExpectationsGateOn, buildPestExpectations } = require('./pest-report-expectations');
 
 // propertyDefenseStatus.overallLabel → the customer-facing protection status.
 // tone drives the client accent (good = green, watch = amber, attention = red).
@@ -218,6 +219,20 @@ function buildPestReportV2({
   technicianReport = null,
   customerConcern = null,
   suppressDefense = false,
+  // "Expectations" blocks (owner-approved 2026-09-27, dark behind
+  // GATE_PEST_REPORT_EXPECTATIONS): applications carries the same shape
+  // report-data.js's `data.applications` already builds
+  // ({ product: { active_ingredient, category, moa_group, rainfast_minutes },
+  // targets: [...] }); actionLabels is data.protocolActionLabels;
+  // weekWeather is application-conditions.js's fetchServiceWeekWeather
+  // result ({ rainInches, rainConfidence }); forecastHeavyRain is LIVE VIEW
+  // ONLY (see pest-report-expectations.js) and must be false/omitted for
+  // any PDF/static render; serviceMonth is 1–12.
+  applications = [],
+  actionLabels = [],
+  weekWeather = null,
+  forecastHeavyRain = false,
+  serviceMonth = null,
 } = {}) {
   if (!premiumExperience) return null;
   const defenseStatus = premiumExperience.propertyDefenseStatus;
@@ -282,6 +297,15 @@ function buildPestReportV2({
     'Your service is complete and your protection plan is on track.',
   );
 
+  // Rain / spiders / what-to-expect — dark behind GATE_PEST_REPORT_EXPECTATIONS.
+  // Gate off => expectations is null, same always-present-but-possibly-null
+  // convention as `defense` / `aiSummary` / `forecast` below.
+  const expectations = pestReportExpectationsGateOn()
+    ? buildPestExpectations({
+      weekWeather, applications, actionLabels, serviceMonth, forecastHeavyRain,
+    })
+    : null;
+
   return {
     status,
     statusSummary,
@@ -294,6 +318,7 @@ function buildPestReportV2({
     weatherCall: premiumExperience.weatherCall || null,
     aiSummary,
     forecast: forecastCard,
+    expectations,
   };
 }
 
@@ -341,7 +366,12 @@ function pestReportV2PdfSignature(service = {}) {
   // INDEPENDENTLY of PEST_REPORT_V2 (codex P1): the schematic suppression
   // applies to every pest PDF, V2 dashboard or not.
   const tonSuffix = pestTraceOrNothingGateOn() ? '-ton1' : '';
-  if (process.env.PEST_REPORT_V2 !== 'true') return tonSuffix;
+  // '-pex1' rides every pest-line key while the expectations gate is on —
+  // same append-not-switch pattern as '-ton1' above, and independent of
+  // PEST_REPORT_V2 for the same reason: computed before the V2 early-return
+  // so a flip re-renders cached documents once regardless of dashboard state.
+  const pexSuffix = pestReportExpectationsGateOn() ? '-pex1' : '';
+  if (process.env.PEST_REPORT_V2 !== 'true') return `${tonSuffix}${pexSuffix}`;
   // Cockroach-family typed reports dropped the V2 dashboard entirely (owner
   // 2026-07-27) — their PDFs compose from the typed record instead, so a
   // cockroach PDF cached under '-pestv2b' would keep serving the perimeter
@@ -350,7 +380,7 @@ function pestReportV2PdfSignature(service = {}) {
     const data = typeof service.service_data === 'string'
       ? JSON.parse(service.service_data)
       : service.service_data;
-    if (isCockroachTypedReportType(data?.typedReportSnapshot?.type)) return `-roachtyped2${tonSuffix}`;
+    if (isCockroachTypedReportType(data?.typedReportSnapshot?.type)) return `-roachtyped2${tonSuffix}${pexSuffix}`;
   } catch { /* fall through to the line suffix */ }
   // 'c' = the trust-fix composition (codex P2 #3043): the customer-concern
   // card, softened no-activity copy, facts-only weather, and property-gated
@@ -359,7 +389,7 @@ function pestReportV2PdfSignature(service = {}) {
   // ('b' was the typed-activity composition, owner ruling 2026-07-14.)
   // Bump this suffix whenever the pest-line report COMPOSITION changes —
   // each pest PDF re-renders once on next view.
-  return `-pestv2c${tonSuffix}`;
+  return `-pestv2c${tonSuffix}${pexSuffix}`;
 }
 
 module.exports = {
@@ -367,6 +397,7 @@ module.exports = {
   buildCustomerConcernCard,
   pestReportV2PdfSignature,
   pestTraceOrNothingGateOn,
+  pestReportExpectationsGateOn,
   isCockroachTypedReportType,
   // exported for tests
   stripZoneLetter,
