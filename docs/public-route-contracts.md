@@ -2779,8 +2779,11 @@ twice: by `server/index.js` on the `/api/public/appointment` prefix AHEAD
 of the shared `express.json`/`urlencoded` parsers (so a dark or malformed
 photos request 404s before a parser can answer an oversized or malformed
 `application/json` body with its own 413/400), and again as the route's
-own first step. It applies the SAME `TOKEN_RE` format check the GET uses
-and the sub-gate; either failing answers the identical generic 404, BEFORE
+own first step. It applies the SAME `TOKEN_RE` format check the GET uses,
+the sub-gate, and a multipart-only body rule (the route accepts nothing
+else, so a JSON / urlencoded / other body never reaches the shared parsers
+even for a well-formed token it cannot yet know is unknown — Codex r4 P0);
+any of them failing answers the identical generic 404, BEFORE
 this route's own limiter runs (the house dark-`GATE_*` contract: a probe
 never sees a revealing 429). THEN a dedicated 6-per-min limiter keyed by
 the shared `/64`-collapsing `unauthenticatedAuthLimitKey` (never the raw

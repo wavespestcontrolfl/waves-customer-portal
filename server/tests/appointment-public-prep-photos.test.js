@@ -705,11 +705,36 @@ describe('visitPrepPreParserGuard — mounted by index.js AHEAD of the shared bo
     }
   });
 
-  test('gate on + well-formed token: the guard steps aside (the parser answers next — here its 413 proves the ordering)', async () => {
+  test('gate on + well-formed (possibly unknown) token: a non-multipart body is the generic 404, never the parser 400/413', async () => {
+    // Codex #5176 r4 P0: the guard cannot know whether the token exists, so
+    // no body the route would never accept may reach the shared parsers.
     process.env.GATE_VISIT_PREP_PHOTOS = 'true';
     await withGuardApp(async (baseUrl) => {
-      const res = await post(baseUrl, TOKEN);
-      expect(res.status).toBe(413);
+      for (const [contentType, body] of [
+        ['application/json', bigJson],
+        ['application/json', '{'],
+        ['application/x-www-form-urlencoded', `pad=${'x'.repeat(4096)}`],
+        ['text/plain', 'hello'],
+      ]) {
+        const res = await fetch(`${baseUrl}/api/public/appointment/${TOKEN}/photos`, {
+          method: 'POST', headers: { 'content-type': contentType }, body,
+        });
+        expect({ contentType, status: res.status, body: await res.json() })
+          .toEqual({ contentType, status: 404, body: { error: 'Not found' } });
+      }
+      const empty = await fetch(`${baseUrl}/api/public/appointment/${TOKEN}/photos`, { method: 'POST' });
+      expect(empty.status).toBe(404);
+    });
+  });
+
+  test('gate on + well-formed token + multipart body: the guard steps aside for the route', async () => {
+    process.env.GATE_VISIT_PREP_PHOTOS = 'true';
+    await withGuardApp(async (baseUrl) => {
+      const form = new FormData();
+      form.append('note', 'hello');
+      const res = await fetch(`${baseUrl}/api/public/appointment/${TOKEN}/photos`, { method: 'POST', body: form });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ reached: true });
     });
   });
 

@@ -1193,12 +1193,19 @@ const visitPrepLimiter = rateLimit(VISIT_PREP_LIMITER_OPTIONS);
 // a revealing 429). `req.path` is mount-relative in both places. Express
 // matches routes case-insensitively, so the path test is too — otherwise
 // `/<token>/PHOTOS` would reach the route (and the shared parsers) while
-// slipping past this guard (pre-push audit P0).
+// slipping past this guard (pre-push audit P0). The route takes multipart
+// only, and the shared parsers read only JSON / urlencoded bodies, so any
+// other body type 404s here too (Codex #5176 r4 P0): a well-formed but
+// unknown or ineligible token would otherwise reach those parsers before
+// loadByToken and get their 400/413 instead of the generic 404. A
+// multipart body is left for multer, which runs only after eligibility.
 const VISIT_PREP_PHOTOS_PATH_RE = /^\/([^/]+)\/photos\/?$/i;
 function visitPrepPreParserGuard(req, res, next) {
   const match = VISIT_PREP_PHOTOS_PATH_RE.exec(req.path || '');
   if (!match) return next();
-  if (!TOKEN_RE.test(match[1]) || !visitPrepPhotosLive()) return res.status(404).json({ error: 'Not found' });
+  if (!TOKEN_RE.test(match[1]) || !visitPrepPhotosLive() || !req.is('multipart/form-data')) {
+    return res.status(404).json({ error: 'Not found' });
+  }
   return next();
 }
 

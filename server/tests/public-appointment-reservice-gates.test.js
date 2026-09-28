@@ -174,6 +174,22 @@ test.each(SURFACES.filter(([, , method]) => method === 'POST'))(
   },
 );
 
+test('visit-prep photos, gate on: a well-formed unknown token with a malformed or oversized JSON body is the generic 404, not the shared parser 400/413', async () => {
+  // Codex #5176 r4 P0: the photos route takes multipart only, so index.js's
+  // pre-parser guard refuses every other body before the shared parsers.
+  const prevPrep = process.env.GATE_VISIT_PREP_PHOTOS;
+  process.env.GATE_VISIT_PREP_PHOTOS = 'true';
+  try {
+    for (const body of ['{', JSON.stringify({ data: 'x'.repeat(1024 * 1024) })]) {
+      expectPrivate404(await request(composedOrigin, `${PREFIXES[0]}/${TOKEN}/photos`, { method: 'POST', body }));
+    }
+    expect(db).not.toHaveBeenCalled();
+  } finally {
+    if (prevPrep === undefined) delete process.env.GATE_VISIT_PREP_PHOTOS;
+    else process.env.GATE_VISIT_PREP_PHOTOS = prevPrep;
+  }
+});
+
 test.each(SURFACES)('%s retains its local budget while enabled and bypasses it while dark', async (_name, family, method, suffix, budget) => {
   const invalidUrl = `${PREFIXES[family]}/invalid${suffix}`;
   for (let i = 0; i < budget; i += 1) {
