@@ -43,7 +43,13 @@ test('paymentReceipt=false alone is not a valid field and writes nothing', async
   expect(updates).toHaveLength(0);
 });
 
-test('a full save never writes payment_receipt but keeps the receipt channel', async () => {
+test('paymentReceipt=true clears a legacy opt-out', async () => {
+  const res = await put({ paymentReceipt: true });
+  expect(res.status).toBe(200);
+  expect(updates[0]).toMatchObject({ payment_receipt: true });
+});
+
+test('a full save never writes payment_receipt=false but keeps the receipt channel', async () => {
   const res = await put({ paymentReceipt: false, paymentReceiptChannel: 'email', weatherAlerts: false });
   expect(res.status).toBe(200);
   expect(updates).toHaveLength(1);
