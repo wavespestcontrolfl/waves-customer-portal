@@ -948,8 +948,12 @@ async function reconcileLegacyKey(sourceId, currentKey, legacyKey) {
 // a 7 PM event's shifted key equals a real 3 PM showtime's correct key), so
 // after a pull such a row is QUARANTINED instead: rejected with a suppression
 // reason, which keeps it out of every newsletter unless an operator
-// re-approves it. Only rows this pull did not refresh are touched; nothing
-// is deleted or re-timed.
+// re-approves it. Only PENDING rows this pull did not refresh are touched,
+// because that same key can be a genuine matinee a partial pull left out:
+// an approved or featured row is an editorial decision this guess never
+// overrides (every known pre-fix pair in prod was pending/pending at
+// 2026-09-28), and a quarantined pending row carries the reason an operator
+// needs to restore it. Nothing is deleted or re-timed.
 const TZ_SHIFT_QUARANTINE = 'tz_shift_quarantine';
 
 function shiftedLegacyKey(title, start, urlKey) {
@@ -974,7 +978,7 @@ async function quarantineShiftedLegacyRows(sourceId, pulledRows, batchStartedAt)
       .where({ source_id: sourceId, external_id: key })
       .whereNull('merged_into')
       .where('pulled_at', '<', batchStartedAt)
-      .whereNot('admin_status', 'rejected')
+      .where('admin_status', 'pending')
       .where((q) => q.whereNull('approved_via').orWhereNot('approved_via', TZ_SHIFT_QUARANTINE))
       .update({
         admin_status: 'rejected',

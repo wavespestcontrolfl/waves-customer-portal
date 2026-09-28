@@ -294,7 +294,7 @@ describeOrSkip('upsertExtractedEvents — legacy dedup-key migration on real Pos
     expect(legacy.merged_into).toBe(finalId);
   });
 
-  test('a real matinee whose correct key equals the evening show\'s shifted key is never touched, even when only the evening is pulled', async () => {
+  test('an approved matinee whose correct key equals the evening show\'s shifted key is never touched, even when only the evening is pulled', async () => {
     const source = { id: sourceId, coverage_geo: [] };
     const title = 'TEST Matinee And Evening';
     const url = 'https://test.invalid/matinee-and-evening/';
@@ -309,13 +309,15 @@ describeOrSkip('upsertExtractedEvents — legacy dedup-key migration on real Pos
     const matinee = parseExtractedStartAt(matineeIso);
     const { legacyExternalId: matineeLegacyKey } = extractedEventDedupKeys(title, matinee, url);
 
+    // Pulled days ago, so the pull below does not refresh it.
     const [matineeRow] = await db('events_raw').insert({
       source_id: sourceId, external_id: matineeLegacyKey, title, start_at: matinee, event_url: url,
+      admin_status: 'approved', pulled_at: new Date(Date.now() - 2 * 24 * 3600 * 1000),
     }).returning(['id']);
     const matineeId = matineeRow.id || matineeRow;
 
     // Even when a pull returns only the evening show (a capped or partial
-    // extraction), the matinee row must not be matched or moved.
+    // extraction), the matinee row must not be matched, moved or rejected.
     await upsertExtractedEvents(source, [
       { title, startAt: eveningIso, eventUrl: url },
     ]);
@@ -324,6 +326,8 @@ describeOrSkip('upsertExtractedEvents — legacy dedup-key migration on real Pos
     expect(live).toHaveLength(2);
     const kept = live.find((r) => r.id === matineeId);
     expect(kept.external_id).toBe(matineeLegacyKey);
+    expect(kept.admin_status).toBe('approved');
+    expect(kept.approved_via).toBeNull();
     expect(new Date(kept.start_at).toISOString()).toBe(matinee.toISOString());
   });
 
@@ -365,7 +369,7 @@ describeOrSkip('upsertExtractedEvents — legacy dedup-key migration on real Pos
     const shiftedKey = `${title.toLowerCase()}|${shiftedIso}|${url}`;
     const [stale] = await db('events_raw').insert({
       source_id: sourceId, external_id: shiftedKey, title, start_at: new Date(shiftedIso), event_url: url,
-      admin_status: 'approved', freshness_status: 'needs_review', normalized_at: null,
+      admin_status: 'pending', freshness_status: 'needs_review', normalized_at: null,
       pulled_at: new Date(Date.now() - 2 * 24 * 3600 * 1000),
     }).returning(['id']);
     const staleId = stale.id || stale;
@@ -378,11 +382,15 @@ describeOrSkip('upsertExtractedEvents — legacy dedup-key migration on real Pos
     expect(old.suppression_reason).toMatch(/time-shifted duplicate/);
 
     // The operator decides it is a real showtime and re-approves it; the next
-    // pull (still listing only the evening) must not reject it again.
+    // pull (still listing only the evening) must not reject it again, nor
+    // after the operator later returns it to pending.
     await db('events_raw').where({ id: staleId }).update({ admin_status: 'approved', suppression_reason: null });
     await upsertExtractedEvents(source, [{ title, startAt: startIso, eventUrl: url }]);
     const kept = await db('events_raw').where({ id: staleId }).first();
     expect(kept.admin_status).toBe('approved');
+    await db('events_raw').where({ id: staleId }).update({ admin_status: 'pending', pulled_at: new Date(Date.now() - 2 * 24 * 3600 * 1000) });
+    await upsertExtractedEvents(source, [{ title, startAt: startIso, eventUrl: url }]);
+    expect((await db('events_raw').where({ id: staleId }).first()).admin_status).toBe('pending');
     expect(new Date(old.start_at).toISOString()).toBe(shiftedIso);
     const fresh = await db('events_raw').where({ source_id: sourceId, title }).whereNot({ id: staleId });
     expect(fresh).toHaveLength(1);
