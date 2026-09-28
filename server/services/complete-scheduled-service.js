@@ -11898,6 +11898,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
                   message_type: 'payment_failed',
                   metadata: JSON.stringify({
                     entry_point: 'autopay_completion_decline_deferred',
+                    // The frozen payment_failed body's template row; the
+                    // scheduler replay forwards it.
+                    template_key: 'payment_failed',
                     notificationEventKey: `payment-problem:service:${record.id}`,
                     service_record_id: record.id,
                     invoice_id: invoice.id,

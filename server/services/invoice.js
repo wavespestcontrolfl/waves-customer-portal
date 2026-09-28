@@ -2590,7 +2590,7 @@ async function restoreConsumedQueuedSend(consumedRows, database = db, claimToken
 // line. Runs under `database` (the caller's own transaction) so the
 // enqueue commits or fails together with the delivery stamp.
 async function queuePendingChannelReplay({
-  invoiceId, customerId, toPhone, body, scheduledFor, originalBlockCode, hasEmailLeg = false, database = db,
+  invoiceId, customerId, toPhone, body, scheduledFor, originalBlockCode, hasEmailLeg = false, templateKey = null, database = db,
 }) {
   // Adopting ANY live invoice_send_deferred row for this invoice is safe, even
   // though sendViaSMSAndEmail's held-SMS leg uses the same rail: this runs in
@@ -2630,6 +2630,8 @@ async function queuePendingChannelReplay({
       // which keep finalizeDeferredCompletionSend's SMS-only stamp).
       partial_fanout_retry: true,
       original_block_code: originalBlockCode,
+      // The frozen body's template row; the scheduler replay forwards it.
+      ...(templateKey ? { template_key: templateKey } : {}),
       // sendViaSMSAndEmail's nested leg: the wrapper's own sendInvoiceEmail
       // already owns (and sent) this notice's Email, so the replay must keep
       // Email out of its fan-out exactly like the nested call did; the
@@ -6051,6 +6053,7 @@ const InvoiceService = {
       if (updated && pendingChannelToQueue) {
         const queueOutcome = await queuePendingChannelReplay({
           invoiceId, customerId: customer.id, toPhone: customer.phone || "", body,
+          templateKey: renderedTemplateKey,
           database: trx, ...pendingChannelToQueue,
         });
         pendingChannelQueued = queueOutcome.queued === true;
@@ -6238,6 +6241,7 @@ const InvoiceService = {
         if (sendResult.nextAllowedAt) err.nextAllowedAt = sendResult.nextAllowedAt;
         if (sendResult.retryAfterMs) err.retryAfterMs = sendResult.retryAfterMs;
         err.smsBody = body;
+        if (renderedTemplateKey) err.smsTemplateKey = renderedTemplateKey;
         err.toPhone = customer.phone;
         throw err;
       }
@@ -6781,6 +6785,7 @@ const InvoiceService = {
         if (err.nextAllowedAt) sms.nextAllowedAt = err.nextAllowedAt;
         if (err.retryAfterMs) sms.retryAfterMs = err.retryAfterMs;
         if (err.smsBody) sms.heldBody = err.smsBody;
+        if (err.smsTemplateKey) sms.heldTemplateKey = err.smsTemplateKey;
         if (err.toPhone) sms.heldToPhone = err.toPhone;
       }
     }
@@ -6829,6 +6834,8 @@ const InvoiceService = {
               billingDeliveryCategory: "invoice",
               notificationEventKey: `invoice:${invoiceId}:sent`,
               hasEmailLeg: true,
+              // The held body's template row; the scheduler replay forwards it.
+              ...(sms.heldTemplateKey ? { template_key: sms.heldTemplateKey } : {}),
               original_block_code: sms.code,
               replay_purpose: "payment_link",
               refresh_customer_phone: true,
@@ -6858,6 +6865,7 @@ const InvoiceService = {
       }
     }
     delete sms.heldBody;
+    delete sms.heldTemplateKey;
     delete sms.heldToPhone;
 
     // A send-window hold on a SCHEDULED delivery defers the WHOLE send: a

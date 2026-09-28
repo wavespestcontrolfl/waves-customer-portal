@@ -910,6 +910,8 @@ describe('invoice SMS provider handoff', () => {
         // partial_fanout_attempt: a replay just re-fans-out everything.
         partial_fanout_retry: true,
         original_block_code: 'BILLING_CHANNEL_FAILED',
+        // The frozen body's template row, forwarded by the scheduler replay.
+        template_key: 'invoice_sent',
         replay_purpose: 'payment_link',
         refresh_customer_phone: true,
         resolve_from_by_customer: true,

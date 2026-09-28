@@ -148,3 +148,20 @@ describe('every accepted-send record keeps the template evidence (codex #5284 r1
     expect(route).toMatch(/COALESCE\(metadata->>'templateKey', metadata->>'original_message_type', purpose, 'unknown'\) as template_key/);
   });
 });
+
+describe('held invoice and payment-failure texts keep their template key (codex #5284 r3)', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const inv = fs.readFileSync(path.join(__dirname, '../services/invoice.js'), 'utf8');
+  test('both invoice_send_deferred producers store template_key', () => {
+    expect(inv).toMatch(/templateKey: renderedTemplateKey,\n\s*database: trx, \.\.\.pendingChannelToQueue/);
+    expect(inv).toMatch(/partial_fanout_retry: true,[\s\S]{0,200}template_key: templateKey/);
+    expect(inv).toMatch(/if \(renderedTemplateKey\) err\.smsTemplateKey = renderedTemplateKey;/);
+    expect(inv).toMatch(/hasEmailLeg: true,[\s\S]{0,250}template_key: sms\.heldTemplateKey/);
+  });
+  test('the deferred payment_failed row stores its key', () => {
+    const css = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
+    const row = css.slice(css.indexOf("entry_point: 'autopay_completion_decline_deferred'"));
+    expect(row.slice(0, 250)).toMatch(/template_key: 'payment_failed'/);
+  });
+});
