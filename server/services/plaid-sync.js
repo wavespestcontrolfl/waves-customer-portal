@@ -397,7 +397,9 @@ async function setupItem(itemId, input) {
     if (!item || item.status === 'removed') { const e = new Error('connection not found'); e.status = 404; throw e; }
     const current = await trx('plaid_accounts').where({ plaid_item_id: itemId });
     const byId = new Map(current.map(a => [a.id, a]));
-    if (cleaned.some(a => !byId.has(a.id)) || cleaned.length !== current.length) {
+    // exactly the stored account set: every id once, none missing
+    if (cleaned.some(a => !byId.has(a.id)) || cleaned.length !== current.length
+      || new Set(cleaned.map(a => a.id)).size !== cleaned.length) {
       throw badRequest('account list does not match this connection — reload and try again');
     }
     // Every enabled label's lock FIRST (sorted — a fixed order across

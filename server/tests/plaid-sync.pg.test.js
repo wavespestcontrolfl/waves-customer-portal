@@ -221,6 +221,10 @@ async function activate(itemId, overrides = {}) {
     await expect(activate(itemId, { 'acc-card': { accountLabel: 'same' }, 'acc-chk': { accountLabel: 'same' } }))
       .rejects.toThrow(/cannot share a label/);
     await expect(activate(itemId, { 'acc-card': { syncFrom: '2999-01-01' } })).rejects.toThrow(/at most tomorrow/);
+    // the same account twice (and another left out) is refused before any write
+    const accts = await accountsOf(itemId);
+    const dup = accts.map(x => ({ id: accts[0].id, accountLabel: `l-${x.account_id}`, accountType: 'bank', syncFrom: '2026-09-01', enabled: true }));
+    await expect(plaidSync.setupItem(itemId, dup)).rejects.toThrow(/does not match this connection/);
     expect((await mockPg('plaid_items').where({ id: itemId }).first()).status).toBe('setup');
     await activate(itemId, { 'acc-chk': { accountLabel: 'capone-checking' } });
     expect((await mockPg('plaid_items').where({ id: itemId }).first()).status).toBe('active');
