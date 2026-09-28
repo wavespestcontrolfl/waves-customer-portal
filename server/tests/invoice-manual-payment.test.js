@@ -489,6 +489,15 @@ describe('recordManualPayment — settlement', () => {
     expect(InvoiceService.sendReceipt).not.toHaveBeenCalled();
   });
 
+  test('a receipt the claim step found already delivered is not sent again', async () => {
+    settle(openInvoice());
+    ReceiptDeliveryQueue.claimReceiptJobForOperatorSend.mockResolvedValueOnce({ alreadySent: true });
+    const out = await recordManualPayment('inv-1', { method: 'cash' });
+    expect(out.receipt).toEqual({ email: { ok: false, error: 'receipt already sent' }, sms: null });
+    expect(sendReceiptEmail).not.toHaveBeenCalled();
+    expect(InvoiceService.sendReceipt).not.toHaveBeenCalled();
+  });
+
   test('a claim failure skips the receipt but never fails the recorded payment', async () => {
     settle(openInvoice());
     ReceiptDeliveryQueue.claimReceiptJobForOperatorSend.mockRejectedValueOnce(new Error('db blip'));

@@ -220,13 +220,14 @@ postgres('operator receipt claim on PostgreSQL', () => {
     expect(await job(syntheticId)).toBeUndefined();
 
     // A stale claim whose own email was recorded: closed (and the invoice
-    // stamped), so the new send holds nothing that could re-send it.
+    // stamped), and THIS send is refused — the receipt already went out.
     const sentId = await seedJob();
     await mockPg('invoices').insert({ id: sentId, receipt_sent_at: null });
     const sentClaim = await claimReceiptJobForOperatorSend(sentId);
     await recordOperatorReceiptEmail(sentClaim);
     await mockPg('receipt_delivery_jobs').where({ id: sentClaim.id }).update({ locked_at: stale });
-    expect(await claimReceiptJobForOperatorSend(sentId)).toEqual({ id: null });
+    expect(await claimReceiptJobForOperatorSend(sentId)).toEqual({ alreadySent: true });
+    expect((await mockPg('invoices').where({ id: sentId }).first()).receipt_sent_at).toBeInstanceOf(Date);
     expect(await job(sentId)).toMatchObject({ status: 'completed', email_result: { operator_claim: sentClaim.token } });
   });
 

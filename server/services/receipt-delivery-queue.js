@@ -91,7 +91,7 @@ async function recoverStaleLocks({ invoiceId = null } = {}) {
     .whereNull('receipt_sent_at')
     .whereIn('id', staleOperatorClaims().whereRaw(ownEmailSent).select('invoice_id'))
     .update({ receipt_sent_at: db.fn.now() });
-  await staleOperatorClaims()
+  const closedDelivered = await staleOperatorClaims()
     .whereRaw(ownEmailSent)
     .update({
       status: 'completed',
@@ -107,7 +107,7 @@ async function recoverStaleLocks({ invoiceId = null } = {}) {
   await staleOperatorClaims().where({ source: 'operator_send' }).del();
   // Everything else stale — a drain worker's job, or a queued job an
   // operator held — may still owe its email and is requeued.
-  return scoped(db('receipt_delivery_jobs'))
+  const requeued = await scoped(db('receipt_delivery_jobs'))
     .where({ status: 'running' })
     .where('locked_at', '<', db.raw(`now() - interval '${STALE_LOCK_MINUTES} minutes'`))
     .update({
@@ -117,6 +117,7 @@ async function recoverStaleLocks({ invoiceId = null } = {}) {
       next_attempt_at: db.fn.now(),
       updated_at: db.fn.now(),
     });
+  return { requeued, closedDelivered };
 }
 
 async function claimDueReceiptDeliveryJobs({ limit = 10, id = workerId() } = {}) {
@@ -370,7 +371,7 @@ async function processReceiptDeliveryJob(job) {
 }
 
 async function processDueReceiptDeliveryJobs({ limit = 10, id = workerId() } = {}) {
-  const recovered = await recoverStaleLocks();
+  const { requeued: recovered } = await recoverStaleLocks();
   const jobs = await claimDueReceiptDeliveryJobs({ limit, id });
   let succeeded = 0;
   let failed = 0;
@@ -391,7 +392,9 @@ async function processDueReceiptDeliveryJobs({ limit = 10, id = workerId() } = {
 // an enqueue either dedupes on it or, on a row the claim created, takes that
 // row over for release to re-queue — and hands it back afterwards
 // (releaseOperatorReceiptClaim). A job the drain is delivering right now
-// refuses the operator send ({ inFlight: true }) rather than racing it.
+// refuses the operator send ({ inFlight: true }) rather than racing it, and
+// one whose stale claim this call finds already delivered refuses it too
+// ({ alreadySent: true }).
 // A short transaction only: never held across the sends. A process that dies
 // holding the claim is settled by recoverStaleLocks after
 // STALE_LOCK_MINUTES: closed when its own email was recorded as sent
@@ -400,8 +403,11 @@ async function processDueReceiptDeliveryJobs({ limit = 10, id = workerId() } = {
 async function claimReceiptJobForOperatorSend(invoiceId) {
   // A stale row is settled first by the same rules as the drain's recovery
   // (closed on its own recorded email, removed when a claim created it,
-  // otherwise requeued), so what is left running is genuinely in flight.
-  await recoverStaleLocks({ invoiceId });
+  // otherwise requeued), so what is left running is genuinely in flight. A
+  // settled claim whose email already went out means this receipt was sent:
+  // the caller must not send it again ({ alreadySent: true }).
+  const settled = await recoverStaleLocks({ invoiceId });
+  if (settled.closedDelivered > 0) return { alreadySent: true };
   const token = `operator:${workerId()}:${randomUUID()}`;
   return db.transaction(async (trx) => {
     const inserted = await trx('receipt_delivery_jobs')

@@ -498,6 +498,8 @@ async function recordManualPayment(id, {
     if (claim.inFlight) {
       // A queued job for this invoice is delivering the receipt right now.
       queued = true;
+    } else if (claim.alreadySent) {
+      emailResult = { ok: false, error: 'receipt already sent' };
     } else if (claim.error) {
       emailResult = { ok: false, error: `receipt claim failed: ${claim.error}` };
     } else {

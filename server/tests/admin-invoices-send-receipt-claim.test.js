@@ -129,6 +129,16 @@ describe('POST /:id/send-receipt', () => {
   });
 });
 
+test('POST /:id/send-receipt: a stale claim the claim step found already delivered → 409 receipt_already_sent, nothing sent', async () => {
+  claimReceiptJobForOperatorSend.mockResolvedValueOnce({ alreadySent: true });
+  const r = await withServer((base) => post(base, `/${INVOICE_ID}/send-receipt`, { via: 'both' }));
+  expect(r.status).toBe(409);
+  expect(r.body.code).toBe('receipt_already_sent');
+  expect(sendReceiptEmail).not.toHaveBeenCalled();
+  expect(InvoiceService.sendReceipt).not.toHaveBeenCalled();
+  expect(releaseOperatorReceiptClaim).not.toHaveBeenCalled();
+});
+
 describe('POST /batch/send-receipts', () => {
   test('each invoice is claimed and released around its legs; an in-flight one is skipped and a claim failure fails only that one', async () => {
     const ids = ['a1111111-1111-4111-8111-111111111111', 'a2222222-2222-4222-8222-222222222222', 'a3333333-3333-4333-8333-333333333333'];

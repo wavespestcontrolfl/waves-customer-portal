@@ -1527,8 +1527,8 @@ router.post('/batch/send-receipts', requireAdmin, async (req, res, next) => {
         failed.push({ invoiceId, error: `receipt claim failed: ${err.message}` });
         continue;
       }
-      if (claim.inFlight) {
-        skipped.push({ invoiceId, reason: 'receipt_delivery_in_flight' });
+      if (claim.inFlight || claim.alreadySent) {
+        skipped.push({ invoiceId, reason: claim.inFlight ? 'receipt_delivery_in_flight' : 'receipt_already_sent' });
         continue;
       }
 
@@ -2522,6 +2522,12 @@ router.post('/:id/send-receipt', requireAdmin, async (req, res, next) => {
       return res.status(409).json({
         error: 'The automatic receipt for this invoice is being delivered right now — refresh in a minute before resending.',
         code: 'receipt_delivery_in_flight',
+      });
+    }
+    if (claim.alreadySent) {
+      return res.status(409).json({
+        error: 'This receipt was already sent — refresh the page.',
+        code: 'receipt_already_sent',
       });
     }
 
