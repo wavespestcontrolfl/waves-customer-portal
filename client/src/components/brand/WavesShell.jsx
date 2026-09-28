@@ -64,7 +64,7 @@ export default function WavesShell({
           <nav aria-label="Waves" style={{
             width: 'min(100%, 1120px)',
             margin: '0 auto',
-            padding: '14px 20px',
+            padding: '14px calc(20px + env(safe-area-inset-right, 0px)) 14px calc(20px + env(safe-area-inset-left, 0px))',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'space-between',
@@ -100,7 +100,14 @@ export default function WavesShell({
         {/* tabIndex=-1: WebKit/Safari only moves focus to fragment targets
             that are programmatically focusable — without it the skip link
             scrolls but Tab keeps walking the header. */}
-        <main id="waves-shell-main" tabIndex={-1} style={{ flex: 1, display: 'flex', flexDirection: 'column', outline: 'none' }}>
+        <main id="waves-shell-main" tabIndex={-1} style={{
+          flex: 1, display: 'flex', flexDirection: 'column', outline: 'none',
+          // Native contentInset="never" leaves notch clearance to the shell.
+          // Keep each page's own gutters inside that safe content area.
+          paddingLeft: 'env(safe-area-inset-left, 0px)',
+          paddingRight: 'env(safe-area-inset-right, 0px)',
+          boxSizing: 'border-box',
+        }}>
           {children}
         </main>
         {/* The ONE contentinfo landmark. Owning the footer here (not in each
@@ -108,7 +115,11 @@ export default function WavesShell({
             stops short pages from sinking the legal lines under an empty
             band (chrome audit 2026-09-03). */}
         {showFooter && (
-          <footer role="contentinfo" data-waves-shell-footer="">
+          <footer role="contentinfo" data-waves-shell-footer="" style={{
+            paddingLeft: 'env(safe-area-inset-left, 0px)',
+            paddingRight: 'env(safe-area-inset-right, 0px)',
+            boxSizing: 'border-box',
+          }}>
             {variant === 'customer' ? <BrandFooter /> : null}
             <TrustFooter tone={resolvedFooterTone} variant={variant} />
           </footer>

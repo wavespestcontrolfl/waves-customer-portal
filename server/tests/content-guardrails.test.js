@@ -5912,3 +5912,14 @@ describe('offFootprintCityFinding — metro-named compounds (PR #3549 hook)', ()
     expect(guardrails._internals.offFootprintCityFinding('We proudly serve Portland homes every week.')).not.toBeNull();
   });
 });
+
+// Shared corpus with the Ask Waves intake chokepoint (see the fixture's
+// header): every entry must be flagged by the shared rule set here, and the
+// intake suite requires its local chokepoint to flag the same entries.
+describe('reentrySafetyClaimFinding — shared claim corpus', () => {
+  const { reentrySafetyClaimFinding } = require('../services/content/content-guardrails');
+  const { FLAGGED_CLAIMS } = require('./fixtures/safety-claim-corpus');
+  test.each(FLAGGED_CLAIMS)('%s', (text) => {
+    expect(reentrySafetyClaimFinding(text)).toBeTruthy();
+  });
+});

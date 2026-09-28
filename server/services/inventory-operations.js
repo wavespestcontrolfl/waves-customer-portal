@@ -231,6 +231,166 @@ async function createRestockRequest(productId, raw, options = {}) {
   });
 }
 
+/**
+ * The ONE "add a product" write, shared by the admin "add product" route
+ * (admin-inventory.js POST /) and the purchase-receipt inventory agent
+ * (purchase-receipts/inventory-agent.js) — so a catalog row created from a
+ * purchase line never diverges from the admin insert's defaults (unknown
+ * active ingredient / EPA reg placeholder, formulation, active=true via the
+ * column default). Callers validate their own inputs first (the admin
+ * route's 400s stay in the route); this just performs the insert and the
+ * optional initial-stock movement, unchanged from the route's prior inline
+ * version. options.trx runs on an already-open transaction; options.source
+ * / options.actorId label the initial movement the same way adjustStock's
+ * do. Every call takes CATALOG_CREATE_LOCK; options.guard(trx), checked
+ * under it, can refuse the insert (the call then returns null).
+ */
+// Every catalog insert takes this transaction-level lock (see
+// createCatalogProduct), so one caller's duplicate check sees every product
+// another caller committed before it: the admin screen and the inventory
+// agent never create the same item side by side.
+const CATALOG_CREATE_LOCK = 'catalog:create-product';
+
+// The same transaction-level lock createCatalogProduct takes, exported so
+// every OTHER writer of a brand-new products_catalog row (the sheet-pricing
+// importer, admin-import-sheets.js) serializes against it too — one
+// caller's duplicate check must see every product another caller committed
+// before it, catalog insert or not. Lock order: take this BEFORE locking any
+// products_catalog row in the same transaction (the inventory agent's
+// applyDecision does) — an alias or pricing insert made under it takes KEY
+// SHARE on its product for the foreign-key check, so the reverse order can
+// deadlock.
+function lockCatalogCreate(trx) {
+  return trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [CATALOG_CREATE_LOCK]);
+}
+
+// The same exact-active-name duplicate check createCatalogProduct runs
+// under the lock above — exported so a caller that inserts its own row (the
+// importer) re-checks it identically instead of drifting from this one.
+async function findActiveProductByExactName(trx, name) {
+  return trx('products_catalog').where({ active: true })
+    .whereRaw('lower(btrim(name)) = ?', [String(name || '').trim().toLowerCase()]).first();
+}
+
+// The same case/whitespace-insensitive alias lookup BOTH catalog-identity
+// alias writers — the admin alias endpoint (POST /api/admin/inventory/aliases)
+// and the inventory agent's own createAgentAlias — run UNDER lockCatalogCreate
+// before inserting a new alias, checked against ANY product (never scoped to
+// one), so a concurrent insert from the other writer is always seen (item 2,
+// 2026-09-27 round 7 review). `(alias_name, vendor_id)` uniqueness alone lets
+// two products each claim the same alias text with a NULL vendor (NULL <>
+// NULL in Postgres, so the constraint never fires) — this lookup is what
+// actually catches that.
+//
+// Scoped to an ACTIVE owner only (item 3, 2026-09-27 round 10 review):
+// product-matcher.js's own deterministic matcher joins active products only,
+// so an alias still sitting on a RETIRED product must never read as a
+// conflict here — a NEW active product (or the agent) must be free to claim
+// the same exact text. The `(alias_name, vendor_id)` unique index doesn't
+// know about `active` at all, though, so a real DB collision against a
+// stale inactive row is still possible with a non-null vendor_id —
+// findStaleInactiveAlias below is the separate lookup that catches THAT one.
+async function findAliasByNormalizedName(trx, aliasName) {
+  return trx('product_aliases as pa')
+    .join('products_catalog as pc', 'pc.id', 'pa.product_id')
+    .where('pc.active', true)
+    .whereRaw('lower(btrim(pa.alias_name)) = lower(btrim(?))', [String(aliasName || '')])
+    .first('pa.*');
+}
+
+// The (alias_name, vendor_id) unique index's own exact match, owner's
+// `active` flag ignored — the one case findAliasByNormalizedName's
+// active-only join can't see: a RETIRED product's alias row with the SAME
+// text and the SAME non-null vendor_id would otherwise throw a unique
+// violation on insert. Never reachable with a NULL vendor_id (NULL <> NULL
+// never collides at the index), so the agent's own createAgentAlias —
+// vendor_id always null — never needs this lookup at all.
+async function findStaleInactiveAlias(trx, aliasName, vendorId) {
+  if (!vendorId) return null;
+  return trx('product_aliases').where({ vendor_id: vendorId })
+    .whereRaw('lower(btrim(alias_name)) = lower(btrim(?))', [String(aliasName || '')]).first();
+}
+
+// The admin alias endpoint's own writer (POST /api/admin/inventory/aliases),
+// pulled out here so the same lock + lookup it shares with the inventory
+// agent's createAgentAlias is exercised from one place, testable without a
+// live HTTP layer. An existing alias with the same normalized name on THIS
+// product is a quiet no-op success (the prior onConflict-ignore behavior,
+// preserved); on a DIFFERENT product it's a conflict the route turns into a
+// 409, never a silently-created duplicate.
+async function createProductAlias(fields, options = {}) {
+  const { productId, aliasName, vendorId } = fields;
+  const run = async (trx) => {
+    await lockCatalogCreate(trx);
+    const existing = await findAliasByNormalizedName(trx, aliasName);
+    if (existing) return existing.product_id === productId ? { success: true } : { success: false, conflict: existing };
+    // No ACTIVE owner conflicts — but a stale row still sitting on a RETIRED
+    // product, with the SAME exact alias_name and the SAME non-null
+    // vendor_id, would still throw a unique-violation on a plain insert
+    // (the index doesn't know about `active`). Transfer that row to the
+    // active product instead of colliding (item 3, 2026-09-27 round 10).
+    const stale = await findStaleInactiveAlias(trx, aliasName, vendorId || null);
+    if (stale) {
+      const [transferred] = await trx('product_aliases').where({ id: stale.id }).update({ product_id: productId }).returning('*');
+      return { success: true, transferred };
+    }
+    await trx('product_aliases').insert({ product_id: productId, alias_name: aliasName, vendor_id: vendorId || null });
+    return { success: true };
+  };
+  return options.trx ? run(options.trx) : db.transaction(run);
+}
+
+async function createCatalogProduct(fields, options = {}) {
+  const {
+    name, category, subcategory, activeIngredient, epaRegNumber, formulation, moaGroup,
+    defaultUnit, unitSize, inventoryOnHand, inventoryUnit, lowStockThreshold, bestVendor, autoReorderEnabled,
+  } = fields;
+  const initialStock = numberOrNull(inventoryOnHand);
+  const run = async (trx) => {
+    await lockCatalogCreate(trx);
+    // Under the lock, for every caller: an active product with the same
+    // name (trimmed, case-insensitive) means this item already exists, so
+    // nothing is inserted and the call returns null. options.guard(trx) adds
+    // a caller's own refusal the same way (the agent's stricter check).
+    const sameName = await findActiveProductByExactName(trx, name);
+    if (sameName) return null;
+    if (options.guard && await options.guard(trx)) return null;
+    const [inserted] = await trx('products_catalog').insert({
+      name, category: category || null, subcategory: subcategory || null,
+      active_ingredient: activeIngredient || 'Unknown - pending SDS',
+      epa_reg_number: epaRegNumber || 'N/A',
+      moa_group: moaGroup || null,
+      default_unit: defaultUnit || 'oz',
+      container_size: unitSize || null,
+      formulation: formulation || 'unspecified',
+      inventory_on_hand: initialStock,
+      inventory_unit: inventoryUnit || null,
+      low_stock_threshold: numberOrNull(lowStockThreshold),
+      ...(bestVendor !== undefined ? { best_vendor: bestVendor || null } : {}),
+      ...(autoReorderEnabled !== undefined ? { auto_reorder_enabled: Boolean(autoReorderEnabled) } : {}),
+    }).returning('*');
+
+    if (initialStock != null) {
+      await trx('product_inventory_movements').insert({
+        product_id: inserted.id,
+        movement_type: 'correction',
+        quantity: initialStock,
+        unit: inventoryUnit,
+        stock_before: 0,
+        stock_after: initialStock,
+        metadata: {
+          source: options.source || 'admin_product_create',
+          reason: 'Initial stock',
+          delta: initialStock,
+          adjustedBy: options.actorId || null,
+        },
+      });
+    }
+    return inserted;
+  };
+  return options.trx ? run(options.trx) : db.transaction(run);
+}
+
 async function loadRequest(requestId, conn = db, lock = false) {
   let query = conn('product_restock_requests').where({ id: requestId }).select('*', conn.raw('updated_at::text as row_version'));
   if (lock) query = query.forUpdate();
@@ -329,4 +489,5 @@ async function updateRestockRequest(requestId, raw, options = {}) {
 }
 
 module.exports = { previewStockAdjustment, adjustStock, previewRestockRequest, createRestockRequest,
-  previewRestockAction, updateRestockRequest, productIdentity };
+  previewRestockAction, updateRestockRequest, productIdentity, createCatalogProduct,
+  lockCatalogCreate, findActiveProductByExactName, findAliasByNormalizedName, createProductAlias };

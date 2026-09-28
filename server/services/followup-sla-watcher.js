@@ -37,7 +37,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const NotificationService = require('./notification-service');
 const commitments = require('./call-commitments');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, etCalendarDayOf, etParts } = require('../utils/datetime-et');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
 
 // Same trigger as the overdue watchdog: registered tech-visible, so the
@@ -168,15 +168,101 @@ function evidenceFrom(r) {
   return stated && !Number.isNaN(stated.getTime()) && (!at || stated > at) ? stated : at;
 }
 
-async function followedUpIds(conn, rows) {
+// A WAVES promise staff RE-OPENED or edited moves the evidence boundary
+// forward to that renewal (call-commitments' own resolveFulfillment rule):
+// the record that kept the promise before is not proof it was kept again.
+// This pager's own candidates never carry a human_state (isPagerScope
+// excludes them — reviewed work stays with the Owed queue), so this stays
+// a no-op for every row the pager itself passes in regardless of kind; it
+// matters for another caller (the promise-chaser bell) that reuses this
+// evidence check on a promise staff have since touched — including a
+// send_estimate / schedule_visit promise, not only a callback (Codex #5019
+// r12 P1: a lead texted BEFORE a reopen, then calling back AFTER it, was
+// wrongly read as already kept by that stale pre-renewal text, since this
+// function skipped the renewal check entirely for those kinds even though
+// obligationRenewedAt itself already supports them). No kind filter here
+// at all now — obligationRenewedAt is the single source of truth for which
+// kinds/party/human_state combinations it renews, so this never duplicates
+// (or drifts from) that decision.
+// A lookup failure here PROPAGATES rather than reading as "no renewal" —
+// every caller of followedUpIds already wraps it in its own fail-closed
+// .catch (unproven evidence must never count as fulfillment, here specifically:
+// old evidence from BEFORE a reopen must never count as kept AFTER it). Both
+// existing callers already treat a thrown followedUpIds as "unverified, hold
+// for retry" (runFollowUpSlaWatcher's own .catch, promise-chaser-bell's).
+async function renewedFloors(conn, rows) {
+  const floors = new Map();
+  for (const r of rows || []) {
+    const renewed = await commitments.obligationRenewedAt(conn, r);
+    if (renewed) floors.set(String(r.id), renewed);
+  }
+  return floors;
+}
+
+// The stated time of a scheduling promise is usually the appointment itself
+// ("I'll put you on the schedule for around 3"), and its booking always
+// comes before it: a visit booked after the call FOR exactly that slot — the
+// stated ET day, arriving at the stated minute — is the promised appointment
+// and keeps the promise early. Every other early booking waits for the
+// stated time: an unrelated visit ("schedule it after the 2 PM inspection"),
+// or any booking on another kind of promise (booking Thursday's inspection
+// does not send the quote promised after it). A booking linked to the call
+// itself is the fulfillment proof's to close (visit_booked_from_this_call).
+// The stated slot ({ day, minute } in ET), or null when there is none to wait for.
+function appointmentSlot(r) {
+  if (r.kind !== 'schedule_visit') return null;
+  const since = evidenceFrom(r);
+  const at = promisedAt(r);
+  if (!since || !at || since.getTime() <= at.getTime()) return null;
+  const { hour, minute } = etParts(since);
+  return { day: etDateString(since), minute: hour * 60 + minute };
+}
+
+// A TIME column's HH:MM[:SS] as minutes past midnight (NaN when unreadable).
+function minuteOfDay(time) {
+  const [h, m] = String(time).split(':').map(Number);
+  return h * 60 + m;
+}
+
+// `renewed`: a caller that already loaded every row's renewal time (a
+// Map of id -> Date, promise-chaser-bell) passes it to skip a second
+// serial lookup per row.
+async function followedUpIds(conn, rows, { renewed: preloaded } = {}) {
+  const renewed = preloaded || await renewedFloors(conn, rows);
   // A caller with no customer record is matched by a USABLE number only —
   // an 'anonymous' or client: caller ID normalizes to nothing and gives the
   // row no contact to match on (never a match between two unusable values).
-  const scoped = (rows || []).map((r) => ({ r, since: evidenceFrom(r), phone: r.customer_id ? null : phoneKey(contactPhone(r)) }))
-    .filter((x) => x.since && (x.r.customer_id || x.phone));
+  // A renewal floor (below) now applies to every alertable SLA kind, not
+  // only callbacks (Codex #5019 r11/r12 P2/P1) — including schedule_visit,
+  // which also carries its own appointment slot. The two matching paths
+  // (`since`, and the exact-slot booking check below) each carry the
+  // renewal forward in their own terms — `since` directly, `slotFloor`
+  // below — so a schedule_visit reopened after an earlier matching-slot
+  // booking is never read as already kept by that stale booking (Codex
+  // #5019 r13 P1: the exact-slot path used to ignore the renewal floor
+  // entirely, checking only against the ORIGINAL promisedAt).
+  const scoped = (rows || []).map((r) => {
+    const base = evidenceFrom(r);
+    const floor = renewed.get(String(r.id));
+    const since = floor && (!base || floor.getTime() > base.getTime()) ? floor : base;
+    const promised = promisedAt(r);
+    // The exact-slot booking match counts from the call's end — or a
+    // renewal, whichever is LATER — never from evidenceFrom's own
+    // separately-stated floor ("send it after the inspection"): booking
+    // the promised slot IS the fulfillment, regardless of any other
+    // stated floor time, but a booking from before staff reopened the
+    // promise is not fulfillment for the reopened one. appointmentSlot
+    // itself never returns non-null without a valid promisedAt, so
+    // `slot` implies `promised` is set whenever this value is read.
+    const slotFloor = floor && promised && floor.getTime() > promised.getTime() ? floor : promised;
+    return { r, since, slotFloor, slot: appointmentSlot(r), phone: r.customer_id ? null : phoneKey(contactPhone(r)) };
+  }).filter((x) => x.since && (x.r.customer_id || x.phone));
   const done = new Set();
   if (!scoped.length) return done;
   const floor = new Date(Math.min(...scoped.map((x) => x.since.getTime())));
+  // A booking for a scheduling promise's own slot counts from the call's
+  // end, or its renewal (slotFloor, above), whichever is later.
+  const bookedFloor = new Date(Math.min(...scoped.map((x) => (x.slot ? x.slotFloor : x.since).getTime())));
   const customerIds = [...new Set(scoped.filter((x) => x.r.customer_id).map((x) => x.r.customer_id))];
   // Numbers match however they were written (9415550123, +19415550123,
   // (941) 555-0123) — call-commitments' phoneWhere rule, batched.
@@ -201,8 +287,8 @@ async function followedUpIds(conn, rows) {
   // (the nightly series top-up, a booking's seeded follow-ups) and never one
   // later cancelled (the proof's own rule).
   const visits = visitCustomerIds.length ? await conn('scheduled_services').whereIn('customer_id', visitCustomerIds)
-    .where('created_at', '>', floor).whereNull('recurring_parent_id').whereNull('parent_service_id')
-    .whereNotIn('status', ['cancelled', 'canceled']).select('customer_id', 'created_at') : [];
+    .where('created_at', '>', bookedFloor).whereNull('recurring_parent_id').whereNull('parent_service_id')
+    .whereNotIn('status', ['cancelled', 'canceled']).select('customer_id', 'created_at', 'scheduled_date', 'window_start') : [];
   // A call that reached the customer — the proof's bar for a returned
   // callback (completed customer leg of 60 s or more, affirmatively not
   // voicemail), applied to every SLA kind; never a voice-relay sandbox call.
@@ -246,13 +332,36 @@ async function followedUpIds(conn, rows) {
     const matched = new Date(f?.matched_at || 0).getTime();
     if (f?.kind === 'estimate_sent' && matched > (sinceById.get(String(h.id))?.getTime() ?? Infinity)) done.add(h.id);
   }
+  // A quote promise staff confirmed, edited or typed has a human verdict,
+  // which refreshFulfillment never rewrites — so its stored hint above is
+  // never populated, and a quote sent after the review would read as still
+  // owed. Look the delivery up live for those rows, read-only (the verdict
+  // stays the office's). A lookup that throws propagates: every caller
+  // already treats that as unverified, never as kept.
+  const reviewedQuotes = scoped.filter((x) => x.r.kind === 'send_estimate' && x.r.human_state && !done.has(x.r.id) && x.r.call_log_id);
+  if (reviewedQuotes.length) {
+    const quoteCalls = await conn('call_log').whereIn('id', [...new Set(reviewedQuotes.map((x) => x.r.call_log_id))])
+      .select('id', 'twilio_call_sid', 'customer_id', 'from_phone', 'to_phone', 'direction', 'created_at', 'bridged_at', 'duration_seconds', 'metadata');
+    const callById = new Map(quoteCalls.map((c) => [String(c.id), c]));
+    for (const x of reviewedQuotes) {
+      const call = callById.get(String(x.r.call_log_id));
+      if (!call) continue;
+      const live = await conn('call_commitments').where({ id: x.r.id }).first();
+      if (!live) continue;
+      const proof = await commitments.resolveFulfillment(conn, live, call);
+      if (proof?.kind === 'estimate_sent' && new Date(proof.matched_at || 0).getTime() > x.since.getTime()) done.add(x.r.id);
+    }
+  }
   const after = (rec, since) => new Date(rec.created_at).getTime() > since.getTime();
   const mine = (rec, x) => (x.r.customer_id ? String(rec.customer_id) === String(x.r.customer_id)
     : phoneKey(rec.to_phone) === x.phone);
   const visitFor = (v, x) => (x.r.customer_id ? String(v.customer_id) === String(x.r.customer_id)
     : (customersByPhone.get(x.phone) || []).includes(String(v.customer_id)));
+  const booked = (v, x) => after(v, x.since)
+    || (!!x.slot && !!v.scheduled_date && !!v.window_start && after(v, x.slotFloor)
+      && etCalendarDayOf(v.scheduled_date) === x.slot.day && minuteOfDay(v.window_start) === x.slot.minute);
   for (const x of scoped) {
-    if (visits.some((v) => visitFor(v, x) && after(v, x.since))
+    if (visits.some((v) => visitFor(v, x) && booked(v, x))
       || calls.some((c) => c.id !== x.r.call_log_id && mine(c, x) && after(c, x.since))
       || texts.some((t) => mine(t, x) && after(t, x.since))) done.add(x.r.id);
   }
@@ -507,4 +616,5 @@ module.exports = {
   followedUpIds,
   SLA_KINDS,
   ROLLING_KEY,
+  WHAT,
 };

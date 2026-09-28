@@ -17,12 +17,30 @@ import { useEffect } from 'react';
 let lockCount = 0;
 let savedScrollY = 0;
 let savedBody = null;
+let savedRoot = null;
+let lockMode = null;
 
-function lock() {
+function lock(preserveSticky) {
   lockCount += 1;
   if (lockCount > 1) return; // already locked by an outer overlay
 
   savedScrollY = window.scrollY || window.pageYOffset || 0;
+  lockMode = preserveSticky ? 'root' : 'body';
+
+  // Header-anchored menus must keep their sticky containing block in place.
+  // Pinning <body> moves the entire sticky header by -scrollY, so these
+  // surfaces lock the root scroller without changing body positioning.
+  if (preserveSticky) {
+    const { style } = document.documentElement;
+    savedRoot = {
+      overflow: style.overflow,
+      overscrollBehavior: style.overscrollBehavior,
+    };
+    style.overflow = 'hidden';
+    style.overscrollBehavior = 'none';
+    return;
+  }
+
   const { style } = document.body;
   savedBody = {
     position: style.position,
@@ -45,24 +63,34 @@ function unlock() {
   lockCount = Math.max(0, lockCount - 1);
   if (lockCount > 0) return; // an outer overlay is still open
 
-  const { style } = document.body;
-  if (savedBody) {
-    style.position = savedBody.position;
-    style.top = savedBody.top;
-    style.left = savedBody.left;
-    style.right = savedBody.right;
-    style.width = savedBody.width;
-    style.overflow = savedBody.overflow;
-    savedBody = null;
+  if (lockMode === 'root') {
+    const { style } = document.documentElement;
+    if (savedRoot) {
+      style.overflow = savedRoot.overflow;
+      style.overscrollBehavior = savedRoot.overscrollBehavior;
+      savedRoot = null;
+    }
+  } else {
+    const { style } = document.body;
+    if (savedBody) {
+      style.position = savedBody.position;
+      style.top = savedBody.top;
+      style.left = savedBody.left;
+      style.right = savedBody.right;
+      style.width = savedBody.width;
+      style.overflow = savedBody.overflow;
+      savedBody = null;
+    }
   }
+  lockMode = null;
   // Restore the scroll position the body was pinned at.
   window.scrollTo(0, savedScrollY);
 }
 
-export default function useLockBodyScroll(active = true) {
+export default function useLockBodyScroll(active = true, { preserveSticky = false } = {}) {
   useEffect(() => {
     if (!active) return undefined;
-    lock();
+    lock(preserveSticky);
     return unlock;
-  }, [active]);
+  }, [active, preserveSticky]);
 }

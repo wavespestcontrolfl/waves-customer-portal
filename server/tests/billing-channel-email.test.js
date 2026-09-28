@@ -171,6 +171,29 @@ describe('billing channel email adapter', () => {
     expect(mockSendTemplate.mock.calls[0][0]).not.toHaveProperty('billingReplayContext');
   });
 
+  test.each([
+    ['a registered source whose context is incomplete', 'invoice_followup_sequence', true],
+    ['a registered source with normalized surrounding space', ' invoice_followup_sequence ', true],
+    ['an unregistered receipt source', 'monthly_billing_success', false],
+  ])('declares the replay contract only for %s', async (_label, entryPoint, declared) => {
+    mockLoadBillingEmailContext.mockResolvedValue(baseContext({ invoice: { id: 'inv-1', customer_id: 'cust-1' } }));
+    await sendBillingChannelEmail(input({ entryPoint, invoiceId: 'inv-1' }));
+    expect(mockSendTemplate.mock.calls[0][0]).toMatchObject({ billingReplayDeclared: declared });
+  });
+
+  test.each([['invoice_send_deferred', true], ['invoice_receipt_sms', false]])(
+    'invalid scheduled context preserves the normalized declaration for %s', async (originalEntryPoint, declared) => {
+      mockLoadBillingEmailContext.mockResolvedValue(baseContext({
+        category: 'invoice', invoice: { id: 'inv-1', customer_id: 'cust-1' },
+      }));
+      await sendBillingChannelEmail(input({ entryPoint: 'scheduled_sms_cron', invoiceId: 'inv-1',
+        metadata: { ...input().metadata, billingDeliveryCategory: 'invoice',
+          original_entry_point: originalEntryPoint, rendered_amount: 'invalid' } }));
+      expect(mockSendTemplate.mock.calls[0][0]).not.toHaveProperty('billingReplayContext');
+      expect(mockSendTemplate.mock.calls[0][0]).toMatchObject({ billingReplayDeclared: declared });
+    },
+  );
+
   test('routes a payment_receipt-category send through billing.receipt_notice', async () => {
     mockLoadBillingEmailContext.mockResolvedValue(baseContext({
       category: 'payment_receipt', categoryLabel: 'Payment receipt',
@@ -420,24 +443,33 @@ describe('billing channel email adapter', () => {
     });
   });
 
-  test('classifies SENDGRID_NOT_CONFIGURED as not sent even after handoff started (no provider request was ever made)', async () => {
+  // A definite rejection after the handoff accepted nothing, and only a
+  // SendGrid webhook schedules the provider retry rail, which never follows a
+  // synchronous refusal. The notice is held for a replay under the same key,
+  // or an Email-only notice would be lost (#4843 gate checklist).
+  test('holds SENDGRID_NOT_CONFIGURED after handoff started for a replay (no provider request was ever made)', async () => {
     mockSendTemplate.mockImplementation(async (opts) => opts.withProviderHandoff(async () => {
       throw Object.assign(new Error('SENDGRID_API_KEY not configured'), { code: 'SENDGRID_NOT_CONFIGURED' });
     }));
     await expect(sendBillingChannelEmail(input())).resolves.toMatchObject({
-      sent: false, deliveryOutcome: 'not_sent', retryable: true, code: 'SENDGRID_NOT_CONFIGURED',
+      sent: false, blocked: true, deliveryOutcome: 'not_sent', retryable: true, deferred: true,
+      code: 'BILLING_EMAIL_PREPARATION_HOLD', originalCode: 'SENDGRID_NOT_CONFIGURED',
     });
   });
 
   test.each([400, 401, 403, 404, 405, 413, 415, 422, 429])(
-    'classifies a definite SendGrid %s rejection after handoff as not sent',
+    'holds a definite SendGrid %s rejection after handoff for a replay of the notice',
     async (status) => {
       mockSendTemplate.mockImplementation(async (opts) => opts.withProviderHandoff(async () => {
         throw Object.assign(new Error(`SendGrid ${status}: rejected`), { status });
       }));
-      await expect(sendBillingChannelEmail(input())).resolves.toMatchObject({
-        sent: false, deliveryOutcome: 'not_sent', retryable: true, code: 'EMAIL_PROVIDER_ERROR',
+      const result = await sendBillingChannelEmail(input());
+      expect(result).toMatchObject({
+        sent: false, blocked: true, deliveryOutcome: 'not_sent', retryable: true, deferred: true,
+        code: 'BILLING_EMAIL_PREPARATION_HOLD', originalCode: 'EMAIL_PROVIDER_ERROR',
       });
+      expect(Date.parse(result.nextAllowedAt)).toBeGreaterThan(Date.now());
+      expect(require('../services/messaging/billing-channel-routing').isReplayHold(result)).toBe(true);
     },
   );
 
