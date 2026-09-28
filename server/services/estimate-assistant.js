@@ -433,6 +433,10 @@ function mergeServiceRows(primaryRows = [], fallbackRows = [], options = {}) {
         // An authoritative row can remove a previously sold warranty. Its
         // empty terms array must clear the saved benefit, not inherit it.
         if (key === 'purchasedTerms') return Array.isArray(value);
+        // A pre-slab row's warranty selection is authoritative either way:
+        // false must survive the merge, or the row falls back to stale
+        // detail text that still names the removed extended warranty.
+        if (key === 'warrantyExtendedSelected') return typeof value === 'boolean';
         if (typeof value === 'number') return Number.isFinite(value) && value > 0;
         return cleanText(value);
       })),
@@ -498,6 +502,20 @@ function mergeOneTimeServiceRows(primaryRows = [], fallbackRows = []) {
   ];
 }
 
+// A pre-slab row's authoritative warranty selection travels with its
+// projection (warrantyExtendedSelected, else its warrantyStatus text), so
+// preSlabSelectedWarrantyPart reads the selection, never stale detail text
+// that still names the removed extended warranty (pre-push audit P1 on
+// 5c8876e256). Other rows carry nothing extra.
+function preSlabProjectionFields(item = {}) {
+  if (!isPreSlabTreatmentItem(item)) return {};
+  return {
+    warrantyTerms: preSlabWarrantyTerms(item),
+    ...(typeof item.warrantyExtendedSelected === 'boolean' ? { warrantyExtendedSelected: item.warrantyExtendedSelected } : {}),
+    ...(cleanText(item.warrantyStatus) ? { warrantyStatus: cleanText(item.warrantyStatus) } : {}),
+  };
+}
+
 function oneTimeRowsFromPricing(pricingBundle = {}, evidenceGroups = []) {
   const items = Array.isArray(pricingBundle.oneTimeBreakdown?.items)
     ? pricingBundle.oneTimeBreakdown.items
@@ -520,7 +538,7 @@ function oneTimeRowsFromPricing(pricingBundle = {}, evidenceGroups = []) {
         ...(trenchingServiceIdentity(item) === 'termite_trenching'
           ? { purchasedTerms: purchasedTermsForRow(evidence) }
           : {}),
-        ...(isPreSlabTreatmentItem(item) ? { warrantyTerms: preSlabWarrantyTerms(item) } : {}),
+        ...preSlabProjectionFields(item),
         ...(item.isCommercial === true ? { isCommercial: true } : {}),
         oneTime: true,
       };
@@ -564,7 +582,7 @@ function oneTimeRowsFromResult(result = {}) {
         label: cleanText(item.label || item.displayName || item.name || item.service || 'One-time service'),
         detail: detailParts.join(' - '),
         amount: Number.isFinite(amount) && amount > 0 ? amount : null,
-        ...(isPreSlabTreatmentItem(item) ? { warrantyTerms: preSlabWarrantyTerms(item) } : {}),
+        ...preSlabProjectionFields(item),
         ...(item.isCommercial === true ? { isCommercial: true } : {}),
         oneTime: true,
       };

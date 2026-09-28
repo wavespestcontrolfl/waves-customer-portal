@@ -219,6 +219,30 @@ describe('estimate assistant no-guarantee context', () => {
     },
   );
 
+  test.each([
+    ['the engine flag says removed', { warrantyExtendedSelected: false }],
+    ['a legacy status says removed', { warrantyStatus: 'No extended warranty' }],
+  ])('a pre-slab job whose extended warranty was removed drops the stale detail part: %s', (_name, selection) => {
+    for (const source of ['pricing', 'estimate_data']) {
+      const item = {
+        service: 'pre_slab_termiticide', label: 'Pre-Slab Termiticide Treatment', price: 1400, amount: 1400, ...selection,
+        detail: 'Termite soil treatment before the slab pour | Extended 5-yr warranty',
+      };
+      const context = buildEstimateAssistantContext({
+        estimate: { onetime_total: 1400 },
+        ...(source === 'pricing'
+          ? { pricingBundle: { anchorOneTimePrice: 1400, oneTimeBreakdown: { items: [item] } } }
+          : { estData: { result: { oneTime: { items: [item] } } } }),
+        serviceMode: 'one_time',
+        noGuaranteeClaims: true,
+      });
+      expect(context.oneTime.items[0].detail).toBe('Termite soil treatment before the slab pour');
+      expect(context.oneTime.items[0].warrantyTerms.join(' ')).toContain('No extended warranty selected.');
+      const answer = answerEstimateQuestionFallback('What is included?', context);
+      expect(answer).not.toMatch(/extended 5-yr warranty/i);
+    }
+  });
+
   test('a pre-slab job keeps its selected extended warranty part on a no-guarantee estimate, as the page does', () => {
     const context = buildEstimateAssistantContext({
       estimate: { onetime_total: 1400 },
