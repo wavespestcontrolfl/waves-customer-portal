@@ -24,7 +24,8 @@ const source = (message_body, direction = 'inbound') => ({
 });
 const obligation = (quote, extra = {}) => ({
   party: 'waves', kind: 'send_estimate', description: quote, quote,
-  basis: 'request', property_id: PROPERTY_ID, due_text: null, due_at: null, answered_by_payment: false, ...extra,
+  basis: 'request', property_id: PROPERTY_ID, due_text: null, due_at: null,
+  answered_by_payment: false, answered_by_reply: false, ...extra,
 });
 const fact = (extra = {}) => ({ field: 'irrigation_controller_location', value: 'The controller is on the side of the house',
   quote: 'The controller is on the side of the house', property_id: PROPERTY_ID, duration: 'durable', ...extra });
@@ -923,6 +924,30 @@ describe('fulfillment proof', () => {
     expect(admissibleWitness({ type: 'call', status: 'completed', duration_seconds: 90 }, { kind: 'callback' })).toBe(true);
   });
 
+  test('owner ruling 2026-09-28 partly reverses R3: a plain-information "other" ask (reply_answerable) admits an operator-sent staff sms; an unstamped or action-request ask keeps R3', () => {
+    const info = { kind: 'other', sms_context: { reply_answerable: true } };
+    const humanSms = { type: 'sms', status: 'delivered', message_type: 'manual', operator_sent: true };
+    const humanCall = { type: 'call', status: 'completed', duration_seconds: 90 };
+    expect(admissibleWitness(humanSms, info)).toBe(true);
+    // Staff draft-approval sends carry their own provenance type.
+    expect(admissibleWitness({ ...humanSms, operator_sent: false, message_type: 'ai_approved' }, info)).toBe(true);
+    // Codex #5169 r1 P1: a bare 'manual' type is overloaded across automated
+    // senders, and call_log records no human provenance at all.
+    expect(admissibleWitness({ ...humanSms, operator_sent: false }, info)).toBe(false);
+    expect(admissibleWitness(humanCall, info)).toBe(false);
+    // An automated notice never answers, even on a reply-answerable row.
+    expect(admissibleWitness({ ...humanSms, message_type: 'confirmation' }, info)).toBe(false);
+    // Unstamped (a row from before this lane, the R3 "separate the charges"
+    // case) or explicitly false: sms/call stay refused, R3 unchanged.
+    expect(admissibleWitness(humanSms, { kind: 'other' })).toBe(false);
+    expect(admissibleWitness(humanCall, { kind: 'other' })).toBe(false);
+    expect(admissibleWitness(humanSms, { kind: 'other', sms_context: { reply_answerable: false } })).toBe(false);
+    // Payment admissibility is untouched: still gated by money_answerable alone.
+    const paid = { type: 'payment', payment_source: 'ledger' };
+    expect(admissibleWitness(paid, { kind: 'other', sms_context: { reply_answerable: true, money_answerable: false } })).toBe(false);
+    expect(admissibleWitness(paid, { kind: 'other', sms_context: { reply_answerable: true, money_answerable: true } })).toBe(true);
+  });
+
   test('Codex #4816 r1: a visit never system-closes a schedule_visit or technician_follow_up (service match stays with the model)', () => {
     const visitWitness = { id: 'visit-1', ref: 'visit:visit-1', type: 'visit', status: 'completed', property_id: PROPERTY_ID,
       created_at: '2040-03-11T15:00:00Z', booked_at: '2040-03-11T15:00:00Z', completed_at: '2040-03-12T15:00:00Z', transitioned_at: '2040-03-12T15:00:00Z',
@@ -1291,6 +1316,27 @@ describe('R2 payment evidence (owner ruling 2026-09-25): money landing (a paid i
     await verifySmsFulfillment({ kind: 'other', description: 'Did my payment go through?', sms_context: ctx }, { records: [invoicePaid], failures: [] });
     expect(dispatchWithFallback.mock.calls.at(-1)[1].text)
       .toContain('it never answers money going back to the customer (a refund, reversal, reimbursement or chargeback, however worded)');
+  });
+
+  test('owner ruling 2026-09-28: the extraction schema and prompt carry answered_by_reply for a plain-information "other" ask', () => {
+    const { buildPrompt, SCHEMA } = require('../services/sms-operational-extractor');
+    const obligationSchema = SCHEMA.properties.obligations.items;
+    expect(obligationSchema.required).toContain('answered_by_reply');
+    expect(obligationSchema.properties.answered_by_reply).toEqual({ type: 'boolean' });
+    const prompt = buildPrompt({ message: source("What's the Zelle number?") });
+    expect(prompt).toContain('answered_by_reply is true only when the obligation is a plain question');
+    for (const phrase of ['change, cancel, book, come out, fix, send a document', 'a complaint', 'a customer-owned promise']) {
+      expect(prompt).toContain(phrase);
+    }
+  });
+
+  test('owner ruling 2026-09-28: the completion check tells the model a staff reply must actually answer the question, not just acknowledge it', async () => {
+    dispatchWithFallback.mockReset().mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
+    const staffSms = { ref: 'sms:1', type: 'sms', status: 'delivered', message_type: 'manual', created_at: '2040-03-11T15:00:00Z', text: 'The Zelle number is 941-555-0101' };
+    await verifySmsFulfillment({ kind: 'other', description: "What's the Zelle number?", sms_context: { ...ctx, reply_answerable: true, money_answerable: false } },
+      { records: [staffSms], failures: [] });
+    expect(dispatchWithFallback.mock.calls.at(-1)[1].text)
+      .toContain('it answers only when it actually gives the asked-for information');
   });
 
   test('rule 6: a property-scoped ask refuses only a payment tied to another property; an unscoped ask admits any of the customer\'s own payments', () => {

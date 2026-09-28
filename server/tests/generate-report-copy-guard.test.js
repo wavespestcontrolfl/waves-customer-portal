@@ -380,8 +380,8 @@ describe('Generate tree/shrub reviewed-photo payload contract', () => {
   test('lets a valid photo-only review open Generate but sends no photo fact into deterministic completed work', () => {
     const start = scheduleSource.indexOf("router.post('/generate-report'");
     const block = scheduleSource.slice(start, start + 60000);
-    expect(block).toMatch(/const hasReportInput =[^;]+\|\| suppliedTreeShrubReview;/s);
-    expect(block).toContain('|| Object.keys(treeShrubReviewGrounding?.scores || {}).length > 0;');
+    expect(block).toMatch(/const hasReportInput =[^;]+\|\| suppliedTreeShrubReview[^;]*\|\| cappedPhotoCaptions\.length > 0;/s);
+    expect(block).toContain('|| Object.keys(treeShrubReviewGrounding?.scores || {}).length > 0\n      || cappedPhotoCaptions.length > 0;');
     expect(block).toContain('treeShrubReviewGrounding,');
     expect(block).not.toMatch(/buildDeterministicReportCopy\(\{[^}]*treeShrubReview/s);
   });
