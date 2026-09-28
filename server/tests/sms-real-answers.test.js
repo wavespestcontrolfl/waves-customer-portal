@@ -1828,6 +1828,28 @@ describe('follow-up #5: a NEW booking is priced with the requested service, not 
     await expect(drafter.requestedServiceType('lawn please')).resolves.toBeNull();
   });
 
+  test('a RESCHEDULE of a combined visit keeps the visit\'s own service; a service already on the calendar is not a new booking (audit P1)', async () => {
+    jest.doMock('../services/customer-pricing-ai', () => ({ serviceKeyFromText: (t) => (/lawn/i.test(t) ? 'lawn_care' : null) }));
+    jest.doMock('../services/service-library', () => ({ resolveServiceType: async () => ({ name: 'Lawn Care' }) }));
+    const getAvailableSlots = jest.fn(async () => ({ days: [] }));
+    jest.doMock('../services/availability', () => ({ getAvailableSlots }));
+    const drafter = require('../services/sms-shadow-drafter');
+    const combined = { summary: 'x', upcomingServices: [{ type: 'Lawn + Tree & Shrub', date: '2026-10-01' }], customer: { id: 'c1' } };
+    const client = { messages: { create: async () => ({ content: [{ text: JSON.stringify({ reply: 'Sure — let me check.', intended_actions: [], missing_info: null }) }] }) } };
+    const args = (inboundMessage, context) => ({ client, context, inboundMessage, intent: { intent: 'general_customer_sms_needs_review' }, schedulingIntent: true, city: 'Venice' });
+    await drafter.generateGroundedDraft(args('Can we move my lawn and shrub visit?', combined));
+    expect(getAvailableSlots).toHaveBeenLastCalledWith('Venice', null, expect.objectContaining({ serviceType: 'Lawn + Tree & Shrub' }));
+    // naming a service already scheduled, without reschedule wording, is still about that visit
+    await drafter.generateGroundedDraft(args('Question about my lawn service', combined));
+    expect(getAvailableSlots).toHaveBeenLastCalledWith('Venice', null, expect.objectContaining({ serviceType: 'Lawn + Tree & Shrub' }));
+    // a genuinely new service on a pest-only account → the requested one
+    const pestOnly = { ...combined, upcomingServices: [{ type: 'Quarterly Pest', date: '2026-10-01' }] };
+    await drafter.generateGroundedDraft(args('Can you add lawn service?', pestOnly));
+    expect(getAvailableSlots).toHaveBeenLastCalledWith('Venice', null, expect.objectContaining({ serviceType: 'Lawn Care' }));
+    // unit: the gate words alone veto the override
+    await expect(drafter.newBookingServiceType('Please reschedule my lawn visit', pestOnly)).resolves.toBeNull();
+  });
+
   test('the availability lookup uses the requested service; a message naming none falls back to the next visit', async () => {
     jest.doMock('../services/customer-pricing-ai', () => ({ serviceKeyFromText: (t) => (/lawn/i.test(t) ? 'lawn_care' : null) }));
     jest.doMock('../services/service-library', () => ({ resolveServiceType: async () => ({ name: 'Lawn Care' }) }));

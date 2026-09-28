@@ -471,6 +471,24 @@ async function requestedServiceType(inboundMessage) {
   }
 }
 
+// The requested service counts only for a NEW booking (pre-push audit P1):
+// a reschedule, cancellation or skip is about an existing visit, and so is
+// any message naming a service the customer already has on the calendar —
+// "move my lawn and shrub visit" must keep the visit's own combined
+// service, not collapse to standalone lawn care. Null → caller falls back
+// to the customer's own visit.
+const EXISTING_VISIT_WORDS_RE = /\b(?:move|moving|reschedul\w*|change|changing|cancel\w*|skip\w*|push(?:ed|ing)?\s+(?:back|out)|bump\w*|postpone\w*|delay\w*|earlier|later)\b/i;
+async function newBookingServiceType(inboundMessage, context) {
+  const text = String(inboundMessage || '');
+  if (EXISTING_VISIT_WORDS_RE.test(text)) return null;
+  const requested = await requestedServiceType(text);
+  if (!requested) return null;
+  const head = requested.toLowerCase().split(/[\s&+/-]+/)[0];
+  const alreadyScheduled = (context?.upcomingServices || [])
+    .some((s) => s && s.type && head && String(s.type).toLowerCase().includes(head));
+  return alreadyScheduled ? null : requested;
+}
+
 // The service a live (non-estimate) scheduling reply is about: the next
 // scheduled visit's type, else the most recent completed one. Null when the
 // context names neither (the engine then keeps its own default).
@@ -1759,7 +1777,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   // must be priced with lawn minutes. The requested service is resolved
   // from the inbound text through the existing catalog resolvers; when the
   // message names none, the customer's own next (else last) visit stands.
-  const serviceType = (await requestedServiceType(inboundMessage)) || liveServiceType(context);
+  const serviceType = (await newBookingServiceType(inboundMessage, context)) || liveServiceType(context);
   const needsOpenTimes = Boolean(schedulingIntent)
     || SAVE_SALE_INTENT_RE.test(String(intent?.intent || ''))
     || SAVE_SALE_TEXT_RE.test(String(inboundMessage || ''));
@@ -2391,6 +2409,7 @@ module.exports = {
   replyBindsDeclaredDays,
   liveServiceType,
   requestedServiceType,
+  newBookingServiceType,
   fetchReserviceLanes,
   reserviceFactLine,
   validateReserviceOffer,
