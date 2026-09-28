@@ -14,7 +14,7 @@ jest.mock('../services/pricing-engine', () => {
 
 const logger = require('../services/logger');
 const { generateEstimate } = require('../services/pricing-engine');
-const { estimateMakesNoGuaranteeClaim, estimateCarriesPlanTerms } = require('../routes/estimate-public');
+const { estimateMakesNoGuaranteeClaim, estimateCarriesPlanTerms, estimateHasCommercialScope } = require('../routes/estimate-public');
 
 const inputsOnly = (services) => ({ engineInputs: { homeSqFt: 2000, lotSqFt: 8000, services } });
 
@@ -60,5 +60,33 @@ describe('inputs-only guarantee classification replays the engine once per estim
     expect(estimateMakesNoGuaranteeClaim(estData)).toBe(true);
     expect(generateEstimate).toHaveBeenCalledTimes(1);
     expect(logger.warn).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('an inputs-only commercial quote decides like its saved engine result', () => {
+  const GATE = 'GATE_COMMERCIAL_ONETIME_SCOPED';
+  let priorGate;
+  beforeAll(() => { priorGate = process.env[GATE]; process.env[GATE] = '1'; });
+  afterAll(() => { if (priorGate === undefined) delete process.env[GATE]; else process.env[GATE] = priorGate; });
+
+  const commercialBedBug = () => ({
+    engineInputs: {
+      isCommercial: true, category: 'COMMERCIAL', propertyType: 'commercial', commercialRiskType: 'retail_standard',
+      homeSqFt: 1500, footprintSqFt: 1500, lotSqFt: 8000,
+      services: { bedBug: { method: 'CHEMICAL', rooms: 3, severity: 'light', prepStatus: 'ready', occupancyType: 'hotel' } },
+    },
+  });
+
+  test('the replayed rows carry the commercial mark (Codex on 236d3956d6)', () => {
+    const inputsOnlyQuote = commercialBedBug();
+    const { generateEstimate: realGenerate } = jest.requireActual('../services/pricing-engine');
+    const saved = { ...commercialBedBug(), engineResult: realGenerate(inputsOnlyQuote.engineInputs) };
+    expect(saved.engineResult.lineItems.map((row) => [row.service, row.isCommercial])).toEqual([['bed_bug', true]]);
+    expect(estimateHasCommercialScope(saved)).toBe(true);
+    expect(estimateCarriesPlanTerms(saved)).toBe(false);
+    expect(estimateHasCommercialScope(inputsOnlyQuote)).toBe(true);
+    expect(estimateCarriesPlanTerms(inputsOnlyQuote)).toBe(false);
+    expect(estimateMakesNoGuaranteeClaim(inputsOnlyQuote)).toBe(estimateMakesNoGuaranteeClaim(saved));
+    expect(generateEstimate).toHaveBeenCalledTimes(1);
   });
 });

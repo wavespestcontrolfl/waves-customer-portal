@@ -20148,7 +20148,16 @@ function serviceMixCarriesPlanTerms(recurringServices = [], oneTimeItems = []) {
 // work, and the raw marker on any other saved row.
 function estimateHasCommercialRow(estData = {}) {
   if (require('../services/estimate-converter').estimateHasCommercialOneTime(estData || {})) return true;
-  const roots = [estData?.result, estData?.engineResult, estData].filter((root) => root && typeof root === 'object');
+  const persisted = [estData?.result, estData?.engineResult].filter((root) => root && typeof root === 'object');
+  const roots = [...persisted, estData].filter((root) => root && typeof root === 'object');
+  // An inputs-only save carries its commercial marks only on the replayed
+  // engine rows (Codex on #4982, 236d3956d6): read the same memoized replay
+  // the guarantee rows classify, so a commercial bed-bug quote saved as
+  // inputs decides like the identical saved engine result.
+  if (!persisted.length) {
+    const replay = guaranteeReplayForInputsOnly(estData);
+    if (replay.result) roots.push(replay.result);
+  }
   return roots.some((root) => collapseMirroredRows([
     root.oneTime?.items, root.oneTime?.specItems, root.results?.oneTime?.items, root.results?.oneTime?.specItems,
     root.specItems, root.lineItems, root.recurring?.services, root.results?.recurring?.services,
@@ -27933,6 +27942,7 @@ module.exports.serviceCategoryForOneTimeItem = serviceCategoryForOneTimeItem;
 module.exports.serviceMixMakesNoGuaranteeClaim = serviceMixMakesNoGuaranteeClaim;
 module.exports.estimateMakesNoGuaranteeClaim = estimateMakesNoGuaranteeClaim;
 module.exports.estimateCarriesPlanTerms = estimateCarriesPlanTerms;
+module.exports.estimateHasCommercialScope = estimateHasCommercialScope;
 module.exports.serviceMixCarriesPlanTerms = serviceMixCarriesPlanTerms;
 module.exports.serviceRowTermsScope = serviceRowTermsScope;
 module.exports.guaranteeRecurringRows = guaranteeRecurringRows;
