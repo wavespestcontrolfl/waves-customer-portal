@@ -24,6 +24,7 @@ import { useEffect, useRef, useState } from 'react';
 import { COLORS, FONTS } from '../../theme-brand';
 import { CUSTOMER_SURFACE as S } from '../../theme-customer';
 import Icon from '../Icon';
+import { mimeFromName, resizeImageFile } from '../../lib/image-resize';
 
 // Mirrors server/utils/request-photo-validation.js (MAX_PHOTOS,
 // MAX_PHOTO_BYTES — shared by visit-prep.js's VISIT_PREP_LIMITS) so an
@@ -32,6 +33,9 @@ const MAX_PHOTOS_PER_SUBMISSION = 3;
 const MAX_PHOTO_BYTES = 5 * 1024 * 1024;
 const NOTE_MAX_CHARS = 500;
 const ALLOWED_TYPE_RE = /^image\/(jpeg|jpg|png|webp|heic|heif)$/i;
+const RESIZE_MAX_EDGE = 1600;
+const RESIZE_QUALITY = 0.85;
+const REJECTED_MESSAGE = 'Photos must be JPEG, PNG, WebP, or HEIC, 5 MB or smaller.';
 
 // Same value sets server/services/visit-prep.js's TOPICS and
 // server/routes/requests.js's VALID_LOCATIONS accept. Labels are this
@@ -124,6 +128,7 @@ export default function VisitPrepPhotoForm({ photosRemaining, onSubmit }) {
   const [sentCount, setSentCount] = useState(0);
   const fileInputRef = useRef(null);
   const mountedRef = useRef(true);
+  const ackHeadingRef = useRef(null);
 
   // Explicitly set true on run, not just false on cleanup — React 18
   // StrictMode's dev-only mount/cleanup/remount cycle runs this cleanup
@@ -135,20 +140,73 @@ export default function VisitPrepPhotoForm({ photosRemaining, onSubmit }) {
     return () => { mountedRef.current = false; };
   }, []);
 
+  // The Send button (and the rest of the form) unmounts the instant the
+  // acknowledgment replaces it, so `role="status"` alone isn't guaranteed
+  // to be read by every screen reader — moving focus to the heading makes
+  // the confirmation impossible to miss.
+  useEffect(() => {
+    if (phase === 'sent') ackHeadingRef.current?.focus();
+  }, [phase]);
+
   const maxPickable = Math.max(
     0,
     Math.min(MAX_PHOTOS_PER_SUBMISSION, photosRemaining == null ? MAX_PHOTOS_PER_SUBMISSION : photosRemaining),
   );
 
+  // Every picked file is downscaled to a <=1600px JPEG at 0.85 quality
+  // before it ever reaches FormData — the same figures PhotoId.jsx's,
+  // LawnAssessmentPanel.jsx's, TechLawnDiagnosticPage.jsx's and
+  // TechSocialPostPage.jsx's own private copies use (client/src/lib/
+  // image-resize.js). A normal iPhone camera JPEG is routinely well over
+  // 5 MB straight off the camera roll — checking the ORIGINAL byte size
+  // (the earlier version of this file did) silently drops it before the
+  // resize ever gets a chance to shrink it under the cap. An empty/generic
+  // `file.type` (some browsers report this for HEIC/HEIF) is corrected
+  // from the filename extension so the multipart part still declares the
+  // right Content-Type — the server checks the DECLARED type against its
+  // allowlist, and an empty type goes out as application/octet-stream.
+  // A pick this loop drops for ANY reason (unsupported type, still over
+  // 5 MB after the resize attempt, or beyond the remaining photo count)
+  // shows one short line rather than silently vanishing.
   const handleFiles = async (fileList) => {
+    const all = Array.from(fileList || []);
+    if (!all.length) return;
     const room = maxPickable - photos.length;
     if (room <= 0) return;
-    const picked = Array.from(fileList || [])
-      .filter((file) => ALLOWED_TYPE_RE.test(file.type || '') && file.size <= MAX_PHOTO_BYTES)
-      .slice(0, room);
-    if (!picked.length) return;
-    const prepared = await Promise.all(picked.map(async (file) => ({ file, preview: await fileToPreview(file) })));
-    setPhotos((prev) => [...prev, ...prepared].slice(0, maxPickable));
+
+    const picked = all.slice(0, room);
+    const overflowCount = all.length - picked.length;
+    let rejectedForTypeOrSize = false;
+
+    const results = await Promise.all(picked.map(async (file) => {
+      const declaredMime = file.type || mimeFromName(file.name);
+      if (!declaredMime || !ALLOWED_TYPE_RE.test(declaredMime)) return null;
+
+      let outFile = await resizeImageFile(file, { maxEdge: RESIZE_MAX_EDGE, quality: RESIZE_QUALITY });
+      if (!outFile) {
+        // The browser couldn't decode this image at all (e.g. HEIC outside
+        // Safari) — fall back to the original bytes, re-typed, when they
+        // already fit; the server converts HEIC itself either way.
+        if (file.size > MAX_PHOTO_BYTES) return null;
+        outFile = new File([file], file.name, { type: declaredMime });
+      }
+      if (outFile.size > MAX_PHOTO_BYTES) return null;
+
+      const preview = await fileToPreview(outFile);
+      return { file: outFile, preview };
+    }));
+
+    const accepted = [];
+    for (const result of results) {
+      if (result) accepted.push(result);
+      else rejectedForTypeOrSize = true;
+    }
+
+    setError(overflowCount > 0
+      ? `You can add up to ${maxPickable} photos.`
+      : rejectedForTypeOrSize ? REJECTED_MESSAGE : null);
+    if (!accepted.length) return;
+    setPhotos((prev) => [...prev, ...accepted].slice(0, maxPickable));
   };
 
   const removePhoto = (index) => {
@@ -207,7 +265,11 @@ export default function VisitPrepPhotoForm({ photosRemaining, onSubmit }) {
   if (phase === 'sent') {
     return (
       <div data-testid="visit-prep-sent" role="status">
-        <div style={{ fontSize: 22, fontWeight: 700, fontFamily: FONTS.heading, color: S.text, marginBottom: 8 }}>
+        <div
+          ref={ackHeadingRef}
+          tabIndex={-1}
+          style={{ fontSize: 22, fontWeight: 700, fontFamily: FONTS.heading, color: S.text, marginBottom: 8, outline: 'none' }}
+        >
           Got it.
         </div>
         <div style={{ fontSize: 16, color: S.body, lineHeight: 1.55 }}>

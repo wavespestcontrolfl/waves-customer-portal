@@ -3,8 +3,22 @@ import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import AppointmentPage from './AppointmentPage';
+
+// jsdom has no canvas, so VisitPrepPhotoForm's real photo picker (which
+// downscales through an Image + canvas — client/src/lib/image-resize.js)
+// never resolves without this. Dimensions at the 1600px resize threshold
+// take resizeDataUrl's short-circuit branch, same fixture shape as
+// PhotoId.test.jsx's own FixtureImage; the picker's own resize/decode-
+// failure branches are covered by VisitPrepPhotoForm.test.jsx directly.
+class SmallFixtureImage {
+  set src(_value) {
+    this.width = 800;
+    this.height = 600;
+    this.onload();
+  }
+}
 
 // PublicStateCard and BrandCard come through for real: they are leaf
 // presentational components, and these suites assert on the terminal-state
@@ -53,9 +67,14 @@ function renderPage() {
   );
 }
 
+beforeEach(() => {
+  vi.stubGlobal('Image', SmallFixtureImage);
+});
+
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 function stubFetch({ get, post } = {}) {
