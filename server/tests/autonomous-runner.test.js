@@ -3753,6 +3753,33 @@ describe('citability reconciliation after publisher-boundary failures', () => {
       expect.objectContaining({ id: 'run-recovery', astro_pr_url: 'https://github.com/waves/pull/77' }),
     );
   });
+
+  test('evidence insert failure still parks the claim for reconciliation instead of leaving it claimed', async () => {
+    jest.resetModules();
+    const dbMock = jest.fn(() => ({
+      insert: jest.fn(() => ({ returning: jest.fn().mockRejectedValue(new Error('db unavailable')) })),
+    }));
+    jest.doMock('../models/db', () => dbMock);
+    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+    const { AutonomousRunner } = require('../services/content/autonomous-runner');
+    const runner = new AutonomousRunner();
+    runner._pendingReviewClaimOrThrow = jest.fn().mockResolvedValue(undefined);
+    const claimedAt = new Date('2026-09-27T03:05:00Z');
+    const queue = { getById: jest.fn().mockResolvedValue({ id: 'opp-cite', bucket: 'citability_backfill' }) };
+    const run = {
+      opportunity_id: 'opp-cite', queue_claim_id: 'claim-current', action_type: 'refresh_existing_page',
+      astro_pr_url: 'https://github.com/waves/pull/78', claimed_at: claimedAt,
+    };
+
+    await runner._parkPublishedClaimForReconciliation(
+      queue, 'opp-cite', 'astro_pr_audit_failed', { claimToken: claimedAt }, new Error('full audit rejected'), run,
+    );
+
+    expect(runner._pendingReviewClaimOrThrow).toHaveBeenCalledTimes(1);
+    expect(runner._pendingReviewClaimOrThrow).toHaveBeenCalledWith(
+      queue, 'opp-cite', 'astro_pr_audit_failed', { claimToken: claimedAt }, null,
+    );
+  });
 });
 
 describe('approveAndPublishNamedCompetitor — superseded in-flight approval', () => {

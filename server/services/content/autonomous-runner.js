@@ -2260,8 +2260,10 @@ class AutonomousRunner {
     // Persist minimal current-claim evidence first so supersession logic and
     // the PR poller can retire that PR instead of terminalizing an apparently
     // PR-less queue row. Retrying the small insert can succeed when the full
-    // audit failed on a payload/column value; if storage is unavailable, keep
-    // the claim in place rather than falsely presenting it as reconcilable.
+    // audit failed on a payload/column value. If that also fails, fall back
+    // to the ordinary reconciliation park below: leaving the row claimed would
+    // let stale-claim recovery re-pend it (a second PR) or skip it (orphaning
+    // the first), while the park keeps it visible for a person.
     if (run?.action_type === 'refresh_existing_page' && run.astro_pr_url
       && typeof queue.getById === 'function') {
       try {
@@ -2293,7 +2295,6 @@ class AutonomousRunner {
         }
       } catch (err) {
         logger.error(`[autonomous-runner] failed to persist refresh PR reconciliation evidence for ${opportunityId}: ${err.message}`);
-        return;
       }
     }
     try {
