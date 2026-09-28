@@ -1540,4 +1540,128 @@ describe('email template automation executor', () => {
       expect(dueQuery.whereIn).not.toHaveBeenCalledWith('id', expect.anything());
     });
   });
+
+  describe('shadow mode (GATE_EMAIL_TEMPLATE_AUTOMATIONS=shadow)', () => {
+    const savedGate = process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS;
+    afterEach(() => {
+      if (savedGate === undefined) delete process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS;
+      else process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = savedGate;
+    });
+
+    test('never calls the email library; finalizes shadow with a domain+hash would_send event', async () => {
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'shadow';
+      // entity_type '' short-circuits livePayloadForRun with no extra query.
+      const queuedRun = run({ entity_type: '', entity_id: '' });
+      const runningRunQuery = chain({ returning: [{ ...queuedRun, status: 'running', attempts: 1 }] });
+      const shadowRunQuery = chain({ returning: [{ ...queuedRun, status: 'shadow' }] });
+      const attemptLogQuery = chain({ returning: [{ id: 'event-1' }] });
+      const wouldSendLogQuery = chain({ returning: [{ id: 'event-2' }] });
+      setDbQueues({
+        email_template_automation_runs: [runningRunQuery, shadowRunQuery],
+        email_template_automation_run_events: [attemptLogQuery, wouldSendLogQuery],
+      });
+
+      const result = await AutomationExecutor.executeRun(queuedRun, { automation: automation() });
+
+      expect(result.status).toBe('shadow');
+      expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+      expect(wouldSendLogQuery.insert).toHaveBeenCalledWith(expect.objectContaining({
+        run_id: 'run-1',
+        event_type: 'would_send',
+      }));
+      const metadata = JSON.parse(wouldSendLogQuery.insert.mock.calls[0][0].metadata);
+      expect(metadata).toEqual(expect.objectContaining({
+        automation_key: 'estimate.extension_notice',
+        template_key: 'estimate.extension_notice',
+        trigger_event_key: 'estimate.auto_renewed',
+        recipient_domain: 'example.com',
+      }));
+      expect(metadata.recipient_hash).toEqual(expect.stringMatching(/^[0-9a-f]{12}$/));
+      // Never the full address in the event.
+      expect(JSON.stringify(metadata)).not.toContain('sam@example.com');
+    });
+  });
+
+  describe('idempotency: a shadow run does not block a later live attempt', () => {
+    test('promotes the existing shadow row in place instead of deduping or inserting a second row', async () => {
+      const existingShadowRun = run({ status: 'shadow' });
+      const existingRunQuery = chain({ first: existingShadowRun });
+      // delay_minutes:60 -> status 'scheduled', so processTrigger never
+      // reaches executeRun/dispatch — isolates the promotion mechanism.
+      const promotedRunQuery = chain({ returning: [{ ...existingShadowRun, status: 'scheduled' }] });
+      const promotedLogQuery = chain({ returning: [{ id: 'event-1' }] });
+      setDbQueues({
+        'email_template_automations as a': [chain({ result: [automation({ delay_minutes: 60 })] })],
+        customers: [chain({ first: { id: 'cust-1', email: 'sam@example.com', deleted_at: null } })],
+        email_template_automation_runs: [existingRunQuery, promotedRunQuery],
+        email_template_automation_run_events: [promotedLogQuery],
+      });
+
+      const result = await AutomationExecutor.processTrigger({
+        triggerEventKey: 'estimate.auto_renewed',
+        triggerEventId: 'estimate_auto_renew:est-1',
+        payload: {
+          estimate_id: 'est-1',
+          customer_id: 'cust-1',
+          customer_email: 'Sam@Example.com',
+          first_name: 'Sam',
+          estimate_url: 'https://example.com/estimate/est-1',
+          new_expires_at: '2026-06-01',
+          renewal_count: 1,
+          status: 'sent',
+        },
+        now: new Date('2026-05-18T12:00:00.000Z'),
+      });
+
+      expect(result.results[0].deduped).toBe(false);
+      expect(promotedRunQuery.insert).not.toHaveBeenCalled();
+      expect(promotedRunQuery.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'scheduled' }));
+      expect(promotedLogQuery.insert).toHaveBeenCalledWith(expect.objectContaining({
+        event_type: 'promoted_from_shadow',
+      }));
+    });
+
+    test('a shadow replay of an existing shadow row still dedupes (no promotion while mode stays shadow)', async () => {
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'shadow';
+      try {
+        const existingShadowRun = run({ status: 'shadow' });
+        const existingRunQuery = chain({ first: existingShadowRun });
+        const dedupeLogQuery = chain({ returning: [{ id: 'event-1' }] });
+        setDbQueues({
+          'email_template_automations as a': [chain({ result: [automation({ delay_minutes: 60 })] })],
+          customers: [chain({ first: { id: 'cust-1', email: 'sam@example.com', deleted_at: null } })],
+          email_template_automation_runs: [existingRunQuery],
+          email_template_automation_run_events: [dedupeLogQuery],
+        });
+
+        const result = await AutomationExecutor.processTrigger({
+          triggerEventKey: 'estimate.auto_renewed',
+          triggerEventId: 'estimate_auto_renew:est-1',
+          payload: {
+            estimate_id: 'est-1', customer_id: 'cust-1', customer_email: 'sam@example.com',
+            first_name: 'Sam', new_expires_at: '2026-06-01', renewal_count: 1, status: 'sent',
+          },
+        });
+
+        expect(result.results[0].deduped).toBe(true);
+        expect(dedupeLogQuery.insert).toHaveBeenCalledWith(expect.objectContaining({ event_type: 'deduped' }));
+      } finally {
+        delete process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS;
+      }
+    });
+  });
+
+  describe('unknown trigger keys', () => {
+    test('processTrigger is a harmless no-op: empty results, zero writes', async () => {
+      db.mockClear();
+      setDbQueues({ 'email_template_automations as a': [chain({ result: [] })] });
+
+      const result = await AutomationExecutor.processTrigger({ triggerEventKey: 'no.such.trigger', payload: {} });
+
+      expect(result).toEqual({ trigger_event_key: 'no.such.trigger', automation_count: 0, results: [] });
+      // loadAutomations is the only db access; no run/customer/event write.
+      expect(globalDbAccesses).toEqual(['email_template_automations as a']);
+      expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    });
+  });
 });

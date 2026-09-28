@@ -1132,6 +1132,16 @@ class GoogleBusinessService {
             source: 'google_review',
           });
         }, (outcome) => outcome && outcome.reason === 'error');
+        // review.linked_5star (email_template_automation, dark/shadow) —
+        // same attribution moment, 5-star only. Never throws (emitter's own
+        // contract); this is a SEPARATE catalog from the thank-you sequence
+        // above, so a failure here must never affect it.
+        await sideEffect('review.linked_5star emit', async () => {
+          const { emitReviewLinked5Star } = require('./email-template-automation-emitters');
+          return emitReviewLinked5Star({
+            reviewId: result.id, customerId: row.customer_id, locationId: row.location_id, starRating: row.star_rating,
+          });
+        });
       }
     } else if (result.inserted) {
       // New review we couldn't tie to a customer — alert the office to match
@@ -1290,6 +1300,10 @@ class GoogleBusinessService {
       }
       const ownerReply = review.owner_response?.text || null;
       const customerId = await this._findCustomerIdByReviewerName(reviewerName);
+      // Named ahead of the branch below so the review.linked_5star emitter
+      // (after both branches) has the row's id either way — existing.id on
+      // the update path, the freshly inserted id on the insert path.
+      let placesReviewRowId = existing?.id || null;
       if (existing) {
         // A row in Google's CURRENT Places sample is proof a review is live —
         // but proof about THIS row only when the identity corroborates.
@@ -1404,7 +1418,7 @@ class GoogleBusinessService {
         // chance to enter the pipeline.
         const { autoReplyInsertFields } = require('./review-reply/runner');
         const placesCreatedAt = new Date(review.time * 1000).toISOString();
-        await db('google_reviews').insert({
+        const [insertedReview] = await db('google_reviews').insert({
           google_review_id: googleId,
           location_id: loc.id,
           reviewer_name: reviewerName,
@@ -1418,6 +1432,7 @@ class GoogleBusinessService {
           synced_at: sampleSyncStart.toISOString(),
           ...autoReplyInsertFields({ location_id: loc.id, reviewer_name: reviewerName, owner_reply: ownerReply, review_created_at: placesCreatedAt, star_rating: review.rating || 0 }),
         }).returning('id');
+        placesReviewRowId = insertedReview?.id || null;
         newCount++;
       }
       // Existing-link-first, matching the persisted field above: a late name
@@ -1437,6 +1452,18 @@ class GoogleBusinessService {
             starRating: review.rating || 0,
             source: 'google_review_places',
           });
+          // review.linked_5star (email_template_automation, dark/shadow) —
+          // same attribution moment as the GBP feed path. Never throws
+          // (emitter's own contract); a failure here must not touch the
+          // thank-you sequence above (a separate catalog).
+          try {
+            const { emitReviewLinked5Star } = require('./email-template-automation-emitters');
+            await emitReviewLinked5Star({
+              reviewId: placesReviewRowId, customerId: effectiveCustomerId, locationId: loc.id, starRating: review.rating || 0,
+            });
+          } catch (emitErr) {
+            logger.warn(`[gbp] review.linked_5star emit failed for review ${placesReviewRowId}: ${emitErr.message}`);
+          }
         }
       } else if (!existing) {
         // Newly inserted, unmatched → alert the office to match it. Deferred

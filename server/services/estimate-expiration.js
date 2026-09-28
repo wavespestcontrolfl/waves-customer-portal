@@ -81,8 +81,10 @@ async function runEstimateExpiration() {
     .modify(excludePendingFirstBookings)
     // RETURNING the flipped rows so the admin bell can name who walked away
     // (owner ruling 2026-07-30: a bell that says "Customer expired without a
-    // decision" is not actionable).
-    .update(expiredUpdate(now), ['id', 'customer_name', 'monthly_total', 'annual_total', 'onetime_total', 'disposition']);
+    // decision" is not actionable). customer_id/customer_email/category/
+    // service_interest/expires_at ride along for the estimate.expired
+    // email_template_automation emitter below (dark/shadow).
+    .update(expiredUpdate(now), ['id', 'customer_name', 'monthly_total', 'annual_total', 'onetime_total', 'disposition', 'customer_id', 'customer_email', 'category', 'service_interest', 'expires_at']);
 
   // Rule 2: explicit expires_at — any non-terminal row whose expires_at has
   // passed. Accepted/declined estimates are left alone.
@@ -101,7 +103,7 @@ async function runEstimateExpiration() {
     // before the customer booked doesn't make expiring their live courtship
     // any less wrong.
     .modify(excludePendingFirstBookings)
-    .update(expiredUpdate(now), ['id', 'customer_name', 'monthly_total', 'annual_total', 'onetime_total', 'disposition']);
+    .update(expiredUpdate(now), ['id', 'customer_name', 'monthly_total', 'annual_total', 'onetime_total', 'disposition', 'customer_id', 'customer_email', 'category', 'service_interest', 'expires_at']);
 
   const agedRows = Array.isArray(agedResult) ? agedResult : [];
   const dateRows = Array.isArray(dateResult) ? dateResult : [];
@@ -140,6 +142,21 @@ async function runEstimateExpiration() {
       });
     } catch (e) {
       logger.warn(`[estimate-expiration] notification trigger failed: ${e.message}`);
+    }
+  }
+
+  // estimate.expired (email_template_automation, dark/shadow): one emit per
+  // flipped row. Never blocks the sweep — each is its own try/catch so one
+  // bad row can't stop the rest, and the emitter itself is a no-op when the
+  // gate is off.
+  if (expiredRows.length) {
+    const { emitEstimateExpired } = require('./email-template-automation-emitters');
+    for (const row of expiredRows) {
+      try {
+        await emitEstimateExpired(row);
+      } catch (e) {
+        logger.warn(`[estimate-expiration] estimate.expired emit failed for ${row.id}: ${e.message}`);
+      }
     }
   }
 
