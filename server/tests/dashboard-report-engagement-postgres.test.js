@@ -58,7 +58,23 @@ postgres('get_report_engagement reserviceWithin14Days against migrated PostgreSQ
 
   // A completed, sent, service_report_v1 visit — makes its line appear in
   // by_service_line so the reservice/question fields have somewhere to land.
-  async function sentVisit({ customerId, date, line, isCallback = false, serviceKeySnapshot = null }) {
+  // The frozen completion-time evidence the metric reads: the record's own
+  // is_callback, service_data.completedServiceKey and structured_notes. By
+  // default it matches the booking; `record` overrides it to model a booking
+  // edited after closeout, or a non-performed outcome.
+  function frozenRecordFields({ isCallback, serviceKeySnapshot, record = {} }) {
+    const completedServiceKey = 'completedServiceKey' in record ? record.completedServiceKey : serviceKeySnapshot;
+    const notes = {};
+    if (record.visitOutcome) notes.visitOutcome = record.visitOutcome;
+    if (record.typedReportDelivery) notes.typedReportDelivery = record.typedReportDelivery;
+    return {
+      is_callback: 'isCallback' in record ? record.isCallback : isCallback,
+      service_data: JSON.stringify(completedServiceKey ? { completedServiceKey } : {}),
+      structured_notes: JSON.stringify(notes),
+    };
+  }
+
+  async function sentVisit({ customerId, date, line, isCallback = false, serviceKeySnapshot = null, record = {} }) {
     const [sched] = await trx('scheduled_services').insert({
       customer_id: customerId, scheduled_date: date, service_type: 'Test Visit', status: 'completed',
       is_callback: isCallback, service_key_snapshot: serviceKeySnapshot,
@@ -66,6 +82,7 @@ postgres('get_report_engagement reserviceWithin14Days against migrated PostgreSQ
     const [rec] = await trx('service_records').insert({
       customer_id: customerId, service_date: date, service_type: 'Test Visit', status: 'completed',
       scheduled_service_id: sched.id, service_line: line, report_template_version: 'service_report_v1',
+      ...frozenRecordFields({ isCallback, serviceKeySnapshot, record }),
     }).returning('*');
     await trx('service_report_deliveries').insert({
       service_record_id: rec.id, customer_id: customerId, channel: 'email',
@@ -76,7 +93,7 @@ postgres('get_report_engagement reserviceWithin14Days against migrated PostgreSQ
 
   // A plain completed visit with no report sent — used for reservice-only
   // fixtures where the visit itself need not show up as a "sent" report.
-  async function completedVisit({ customerId, date, line, isCallback = false, serviceKeySnapshot = null }) {
+  async function completedVisit({ customerId, date, line, isCallback = false, serviceKeySnapshot = null, record = {} }) {
     const [sched] = await trx('scheduled_services').insert({
       customer_id: customerId, scheduled_date: date, service_type: 'Test Visit', status: 'completed',
       is_callback: isCallback, service_key_snapshot: serviceKeySnapshot,
@@ -85,6 +102,7 @@ postgres('get_report_engagement reserviceWithin14Days against migrated PostgreSQ
       await trx('service_records').insert({
         customer_id: customerId, service_date: date, service_type: 'Test Visit', status: 'completed',
         scheduled_service_id: sched.id, service_line: line,
+        ...frozenRecordFields({ isCallback, serviceKeySnapshot, record }),
       });
     }
     return sched;
@@ -97,7 +115,7 @@ postgres('get_report_engagement reserviceWithin14Days against migrated PostgreSQ
     await completedVisit({ customerId: cust, date: '2026-08-15', line: 'pest', serviceKeySnapshot: 'pest_re_service' });
 
     const res = await executeDashboardTool('get_report_engagement', { date_from: FROM, date_to: TO });
-    expect(res.reserviceWithin14Days.pest).toEqual({ visits: 1, reserviced: 1, rate: 1 });
+    expect(res.reserviceWithin14Days.pest).toEqual({ visits: 1, reserviced: 1, rate_pct: 100 });
   });
 
   test('a same-customer same-line re-service 20 days later does not count', async () => {
@@ -106,7 +124,7 @@ postgres('get_report_engagement reserviceWithin14Days against migrated PostgreSQ
     await completedVisit({ customerId: cust, date: '2026-08-21', line: 'pest', serviceKeySnapshot: 'pest_re_service' });
 
     const res = await executeDashboardTool('get_report_engagement', { date_from: FROM, date_to: TO });
-    expect(res.reserviceWithin14Days.pest).toEqual({ visits: 1, reserviced: 0, rate: 0 });
+    expect(res.reserviceWithin14Days.pest).toEqual({ visits: 1, reserviced: 0, rate_pct: 0 });
   });
 
   test('a re-service on the other line does not count', async () => {
@@ -116,7 +134,7 @@ postgres('get_report_engagement reserviceWithin14Days against migrated PostgreSQ
     await completedVisit({ customerId: cust, date: '2026-08-10', line: 'lawn', serviceKeySnapshot: 'lawn_re_service' });
 
     const res = await executeDashboardTool('get_report_engagement', { date_from: FROM, date_to: TO });
-    expect(res.reserviceWithin14Days.pest).toEqual({ visits: 1, reserviced: 0, rate: 0 });
+    expect(res.reserviceWithin14Days.pest).toEqual({ visits: 1, reserviced: 0, rate_pct: 0 });
   });
 
   test('a re-service visit is not itself counted as a visit', async () => {
@@ -126,7 +144,36 @@ postgres('get_report_engagement reserviceWithin14Days against migrated PostgreSQ
     await sentVisit({ customerId: cust, date: '2026-08-05', line: 'pest', serviceKeySnapshot: 'pest_re_service' });
 
     const res = await executeDashboardTool('get_report_engagement', { date_from: FROM, date_to: TO });
-    expect(res.reserviceWithin14Days.pest).toEqual({ visits: 0, reserviced: 0, rate: null });
+    expect(res.reserviceWithin14Days.pest).toEqual({ visits: 0, reserviced: 0, rate_pct: null });
+  });
+
+  test('classification reads the frozen record, not a booking edited after closeout (both directions)', async () => {
+    // Booking repointed to a re-service after closeout; the record says a
+    // regular visit: it stays a visit (and is not an invented callback).
+    const custA = await customer();
+    await sentVisit({ customerId: custA, date: '2026-08-05', line: 'pest', isCallback: true, serviceKeySnapshot: 'pest_re_service', record: { isCallback: false, completedServiceKey: null } });
+    // A real callback whose booking was edited back to a regular visit: the
+    // frozen record still makes it a re-service of custB's earlier visit.
+    const custB = await customer();
+    await sentVisit({ customerId: custB, date: '2026-08-05', line: 'pest' });
+    await completedVisit({ customerId: custB, date: '2026-08-12', line: 'pest', record: { isCallback: true } });
+    const res = await executeDashboardTool('get_report_engagement', { date_from: FROM, date_to: TO });
+    expect(res.reserviceWithin14Days.pest).toEqual({ visits: 2, reserviced: 1, rate_pct: 50 });
+  });
+
+  test('declined, incomplete, inspection-only and internal-only visits are not in the denominator', async () => {
+    const cust = await customer();
+    await sentVisit({ customerId: cust, date: '2026-08-05', line: 'pest' });
+    for (const [date, record] of [
+      ['2026-08-06', { visitOutcome: 'customer_declined' }],
+      ['2026-08-07', { visitOutcome: 'incomplete' }],
+      ['2026-08-08', { visitOutcome: 'inspection_only' }],
+      ['2026-08-09', { typedReportDelivery: 'internal_only' }],
+    ]) {
+      await sentVisit({ customerId: await customer(), date, line: 'pest', record });
+    }
+    const res = await executeDashboardTool('get_report_engagement', { date_from: FROM, date_to: TO });
+    expect(res.reserviceWithin14Days.pest).toEqual({ visits: 1, reserviced: 0, rate_pct: 0 });
   });
 
   test('right-censoring: a visit inside the last 14 days is excluded even with a re-service; one outside it counts', async () => {
@@ -151,7 +198,7 @@ postgres('get_report_engagement reserviceWithin14Days against migrated PostgreSQ
     const res = await executeDashboardTool('get_report_engagement', {}); // default: last 30 ET days ending today
     // Only visit B counts: 1 visit, 1 reserviced. Visit A never appears —
     // not as an uncounted zero, not as a false reservice match.
-    expect(res.reserviceWithin14Days.pest).toEqual({ visits: 1, reserviced: 1, rate: 1 });
+    expect(res.reserviceWithin14Days.pest).toEqual({ visits: 1, reserviced: 1, rate_pct: 100 });
   });
 
   test('right-censoring boundary: a visit exactly 14 days ago is excluded; one exactly 15 days ago is included', async () => {
@@ -169,6 +216,6 @@ postgres('get_report_engagement reserviceWithin14Days against migrated PostgreSQ
 
     const res = await executeDashboardTool('get_report_engagement', {});
     // If the 14-days-ago visit were included, visits would be 2 — it isn't.
-    expect(res.reserviceWithin14Days.pest).toEqual({ visits: 1, reserviced: 0, rate: 0 });
+    expect(res.reserviceWithin14Days.pest).toEqual({ visits: 1, reserviced: 0, rate_pct: 0 });
   });
 });

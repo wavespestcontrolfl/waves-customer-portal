@@ -20,6 +20,8 @@ const { etDateString, etMonthStart, etMonthEnd, etQuarterStart, etYearStart, etW
 // can't sneak past. Add new names here as they come up.
 // Shared so the MRR breakdown + snapshot exclude the same accounts this tool does.
 const { INTERNAL_TEST_CUSTOMERS } = require('../internal-test-customers');
+const { NON_PERFORMED_VISIT_OUTCOMES } = require('../pest-pressure/first-visit');
+const { customerVisibleServiceRecordPredicate } = require('../pest-pressure/history-filter');
 
 // Returns a Knex builder with the standard exclusion applied to a
 // query against the `estimates` table aliased as `e`. Use this on every
@@ -173,7 +175,7 @@ period can be: "this_week", "last_week", "this_month", "last_month", "this_quart
   },
   {
     name: 'get_report_engagement',
-    description: `Service-report engagement: of the completed-visit reports SENT to customers in a period (report email via the delivery queue and/or the completion SMS), how many were opened, the open rate, the median minutes from first send to first open, and what customers did inside the report (PDF download, photo opened, map interacted, re-entry timer viewed, review link clicked, referral clicked, add-on requested, follow-up requested, question asked). Split by service line (pest, lawn, tree_shrub, mosquito, termite, rodent, palm; 'unknown' for older records) plus a total row. Also returns a top-level reserviceWithin14Days: { pest, lawn } (each {visits, reserviced, rate}) — of the completed visits on that line in the period whose 14-day follow-up window has fully closed, how many got a same-customer same-line re-service 1-14 days later; this is independent of report sends, so it's always present even for a line with no reports sent in the period. Use for "are customers opening their reports?", "report open rate", "which service line reads its report least?", "how fast do people open the report?", "does the pest report content cut re-services?". Defaults to the last 30 days.`,
+    description: `Service-report engagement: of the completed-visit reports SENT to customers in a period (report email via the delivery queue and/or the completion SMS), how many were opened, the open rate, the median minutes from first send to first open, and what customers did inside the report (PDF download, photo opened, map interacted, re-entry timer viewed, review link clicked, referral clicked, add-on requested, follow-up requested, question asked). Split by service line (pest, lawn, tree_shrub, mosquito, termite, rodent, palm; 'unknown' for older records) plus a total row. Also returns a top-level reserviceWithin14Days: { pest, lawn } (each {visits, reserviced, rate_pct}, rate_pct in percent 0-100) — of the performed visits on that line in the period whose 14-day follow-up window has fully closed, how many got a same-customer same-line re-service 1-14 days later; this is independent of report sends, so it's always present even for a line with no reports sent in the period. Use for "are customers opening their reports?", "report open rate", "which service line reads its report least?", "how fast do people open the report?", "does the pest report content cut re-services?". Defaults to the last 30 days.`,
     input_schema: {
       type: 'object',
       properties: {
@@ -919,17 +921,22 @@ const REPORT_ACTION_EVENTS = [
 ];
 
 // 14-day re-service tracking (owner ask 2026-09-28): pest and lawn are the
-// only two lines with a re-service concept (server/services/re-service.js's
-// RE_SERVICE_SERVICE_KEYS), keyed off scheduled_services.service_key_snapshot
-// ('pest_re_service' / 'lawn_re_service'). There is NO foreign key from a
-// re-service row to the visit it follows up on, so this is inferred: same
-// customer, same derived service line, scheduled 1-14 days after a
-// non-re-service completed visit. scheduled_services carries no service_line
-// column, so a row's line is derived the same way the rest of this tool
-// derives one — through its completed service_records row
-// (service_records.scheduled_service_id, service_records.service_line) —
-// which also covers a keyless is_callback row (no service_key_snapshot):
-// if that join can't resolve a line, the row is excluded rather than guessed.
+// only two lines with a re-service program. There is NO foreign key from a
+// re-service to the visit it follows up on, so a match is inferred: same
+// customer, same service line, 1-14 days after a performed visit.
+//
+// Everything is classified from the service record's FROZEN completion-time
+// evidence, never the booking row an admin can still edit or repoint after
+// closeout (20260830000051_repair_recap_callback_flags.js): the record's
+// is_callback and its service_data.completedServiceKey decide "re-service",
+// and its service_line decides the line (a row with no line is excluded,
+// never guessed).
+//
+// Visits (the denominator) are PERFORMED, customer-visible visits only — the
+// Pest Pressure prior-visit rule (pest-pressure/first-visit.js): an
+// incomplete, declined or inspection-only closeout leaves its booking
+// 'completed' but delivered no treatment or report. A re-service counts
+// whatever its outcome: the callback itself is the signal.
 //
 // Right-censoring: a visit from the last 14 days hasn't had its full 14-day
 // follow-up window pass yet, so counting it as a "no re-service" visit
@@ -943,28 +950,37 @@ const RESERVICE_LINES = ['pest', 'lawn'];
 
 async function getReserviceWithin14Days(from, to, cutoff) {
   const { rows } = await db.raw(`
-    WITH visits AS (
+    WITH completed AS (
       SELECT sched.id, sched.customer_id, sched.scheduled_date,
-             COALESCE(NULLIF(vsrec.service_line, ''), 'unknown') AS service_line
+             NULLIF(srec.service_line, '') AS record_line,
+             srec.service_data->>'completedServiceKey' AS frozen_key,
+             -- COALESCE both sides: a record with no frozen key must read
+             -- false here, never NULL (NOT NULL would drop the visit).
+             (COALESCE(srec.is_callback, false) = true
+              OR COALESCE(srec.service_data->>'completedServiceKey', '') IN ('pest_re_service', 'lawn_re_service')) AS is_reservice,
+             COALESCE(srec.structured_notes->>'visitOutcome', '') AS visit_outcome,
+             (${customerVisibleServiceRecordPredicate('srec')}) AS customer_visible
       FROM scheduled_services sched
-      LEFT JOIN service_records vsrec ON vsrec.scheduled_service_id = sched.id
-      WHERE sched.status = 'completed'
-        AND sched.scheduled_date >= ? AND sched.scheduled_date <= LEAST(?::date, ?::date)
-        AND COALESCE(sched.is_callback, false) = false
-        AND (sched.service_key_snapshot IS NULL OR sched.service_key_snapshot NOT IN ('pest_re_service', 'lawn_re_service'))
+      JOIN service_records srec ON srec.scheduled_service_id = sched.id
+      WHERE sched.status = 'completed' AND srec.status = 'completed'
+    ),
+    visits AS (
+      SELECT id, customer_id, scheduled_date, record_line AS service_line
+      FROM completed
+      WHERE NOT is_reservice
+        AND customer_visible
+        AND visit_outcome NOT IN (${NON_PERFORMED_VISIT_OUTCOMES.map(() => '?').join(', ')})
+        AND scheduled_date >= ? AND scheduled_date <= LEAST(?::date, ?::date)
     ),
     reservices AS (
-      SELECT sched.id, sched.customer_id, sched.scheduled_date,
+      SELECT id, customer_id, scheduled_date,
              CASE
-               WHEN sched.service_key_snapshot = 'pest_re_service' THEN 'pest'
-               WHEN sched.service_key_snapshot = 'lawn_re_service' THEN 'lawn'
-               ELSE NULLIF(rsrec.service_line, '')
+               WHEN frozen_key = 'pest_re_service' THEN 'pest'
+               WHEN frozen_key = 'lawn_re_service' THEN 'lawn'
+               ELSE record_line
              END AS service_line
-      FROM scheduled_services sched
-      LEFT JOIN service_records rsrec ON rsrec.scheduled_service_id = sched.id
-      WHERE sched.status = 'completed'
-        AND (COALESCE(sched.is_callback, false) = true
-             OR sched.service_key_snapshot IN ('pest_re_service', 'lawn_re_service'))
+      FROM completed
+      WHERE is_reservice
     )
     SELECT v.service_line,
            COUNT(DISTINCT v.id)::int AS visits,
@@ -977,7 +993,7 @@ async function getReserviceWithin14Days(from, to, cutoff) {
      AND r.scheduled_date <= v.scheduled_date + INTERVAL '14 days'
     WHERE v.service_line IN (${RESERVICE_LINES.map(() => '?').join(', ')})
     GROUP BY v.service_line
-  `, [from, to, cutoff, ...RESERVICE_LINES]);
+  `, [...NON_PERFORMED_VISIT_OUTCOMES, from, to, cutoff, ...RESERVICE_LINES]);
 
   const byLine = {};
   for (const row of rows) {
@@ -986,7 +1002,9 @@ async function getReserviceWithin14Days(from, to, cutoff) {
     byLine[row.service_line] = {
       visits,
       reserviced,
-      rate: visits > 0 ? Math.round((reserviced / visits) * 1000) / 1000 : null,
+      // Percent (0-100), like this module's other rates (view_rate,
+      // open_rate_pct); null when there were no visits to measure.
+      rate_pct: visits > 0 ? Math.round((reserviced / visits) * 100) : null,
     };
   }
   return byLine;
@@ -1115,7 +1133,7 @@ async function getReportEngagement(input = {}) {
   const reserviceByLine = await getReserviceWithin14Days(from, to, reserviceCutoff);
   const reserviceWithin14Days = {};
   for (const line of RESERVICE_LINES) {
-    reserviceWithin14Days[line] = reserviceByLine[line] || { visits: 0, reserviced: 0, rate: null };
+    reserviceWithin14Days[line] = reserviceByLine[line] || { visits: 0, reserviced: 0, rate_pct: null };
   }
 
   return {
@@ -1129,7 +1147,7 @@ async function getReportEngagement(input = {}) {
       'median_minutes_to_open is over those post-send first opens',
       'action counts are distinct reports with at least one such event at or after the first send (pdf_downloaded shares the staff-download caveat above)',
       "service_line 'unknown' = records completed before the line was stamped on the record",
-      'reserviceWithin14Days (pest and lawn only, top-level — independent of whether a report was sent) counts completed, non-re-service visits scheduled in the period that got a same-customer same-line re-service 1-14 days later; rate is null when there were no such visits; a visit is only counted once its 14-day follow-up window has fully closed (excluded until the day after)',
+      'reserviceWithin14Days (pest and lawn only, top-level — independent of whether a report was sent) counts performed, customer-visible, non-re-service visits scheduled in the period that got a same-customer same-line re-service 1-14 days later, classified from each service record as completed (not the editable booking); rate_pct is a percent (0-100), null when there were no such visits; a visit is only counted once its 14-day follow-up window has fully closed (excluded until the day after)',
     ],
   };
 }

@@ -143,12 +143,12 @@ describe('get_report_engagement', () => {
     reserviceRows = [];
     const res = await executeDashboardTool('get_report_engagement', { date_from: '2026-08-01', date_to: '2026-08-31' });
     expect(res.reserviceWithin14Days).toEqual({
-      pest: { visits: 0, reserviced: 0, rate: null },
-      lawn: { visits: 0, reserviced: 0, rate: null },
+      pest: { visits: 0, reserviced: 0, rate_pct: null },
+      lawn: { visits: 0, reserviced: 0, rate_pct: null },
     });
   });
 
-  test('reserviceWithin14Days reports visits/reserviced/rate per line from the reservice query, independent of by_service_line', async () => {
+  test('reserviceWithin14Days reports visits/reserviced/rate_pct (percent) per line from the reservice query, independent of by_service_line', async () => {
     rawRows = [
       { service_line: 'pest', is_total: 0, sent: '10', opened: '5', median_minutes_to_open: null, pdf_downloaded: '0', photo_opened: '0', map_interacted: '0', reentry_timer_viewed: '0', review_request_clicked: '0', referral_cta_clicked: '0', cross_sell_requested: '0', followup_requested: '0', report_question_asked: '0' },
       { service_line: 'lawn', is_total: 0, sent: '4', opened: '2', median_minutes_to_open: null, pdf_downloaded: '0', photo_opened: '0', map_interacted: '0', reentry_timer_viewed: '0', review_request_clicked: '0', referral_cta_clicked: '0', cross_sell_requested: '0', followup_requested: '0', report_question_asked: '0' },
@@ -158,11 +158,11 @@ describe('get_report_engagement', () => {
       { service_line: 'lawn', visits: '8', reserviced: '0' },
     ];
     const res = await executeDashboardTool('get_report_engagement', { date_from: '2026-08-01', date_to: '2026-08-31' });
-    expect(res.reserviceWithin14Days.pest).toEqual({ visits: 20, reserviced: 5, rate: 0.25 });
+    expect(res.reserviceWithin14Days.pest).toEqual({ visits: 20, reserviced: 5, rate_pct: 25 });
     // No re-services at all still returns a rate (0), not null — null is
     // reserved for zero VISITS, which the query can't produce either
     // (a zero-visit line drops out of the GROUP BY, not surfaces as a row).
-    expect(res.reserviceWithin14Days.lawn).toEqual({ visits: 8, reserviced: 0, rate: 0 });
+    expect(res.reserviceWithin14Days.lawn).toEqual({ visits: 8, reserviced: 0, rate_pct: 0 });
     // reservice query bindings are [from, to, cutoff, 'pest', 'lawn'] — plain
     // date strings, not the ET timestamptz bounds the main query uses.
     // cutoff is the tool's own ET "today" minus 15 days: a visit exactly 14
@@ -170,7 +170,8 @@ describe('get_report_engagement', () => {
     // inclusive cutoff must be one day further back — never a UTC-derived
     // value.
     const expectedCutoff = etDateString(addETDays(new Date(), -15));
-    expect(rawCalls[1].bindings).toEqual(['2026-08-01', '2026-08-31', expectedCutoff, 'pest', 'lawn']);
+    // The performed-visit rule's outcomes lead (pest-pressure/first-visit.js).
+    expect(rawCalls[1].bindings).toEqual(['inspection_only', 'customer_declined', 'incomplete', '2026-08-01', '2026-08-31', expectedCutoff, 'pest', 'lawn']);
     expect(rawCalls[1].sql).toMatch(/r\.scheduled_date > v\.scheduled_date/);
     expect(rawCalls[1].sql).toMatch(/r\.scheduled_date <= v\.scheduled_date \+ INTERVAL '14 days'/);
     // The cutoff bounds the VISIT's own scheduled_date, not the [from, to]
@@ -189,8 +190,8 @@ describe('get_report_engagement', () => {
     const res = await executeDashboardTool('get_report_engagement', { date_from: '2026-08-01', date_to: '2026-08-31' });
     expect(res.by_service_line).toEqual([]);
     expect(res.reserviceWithin14Days).toEqual({
-      pest: { visits: 3, reserviced: 1, rate: 0.333 },
-      lawn: { visits: 0, reserviced: 0, rate: null },
+      pest: { visits: 3, reserviced: 1, rate_pct: 33 },
+      lawn: { visits: 0, reserviced: 0, rate_pct: null },
     });
   });
 
