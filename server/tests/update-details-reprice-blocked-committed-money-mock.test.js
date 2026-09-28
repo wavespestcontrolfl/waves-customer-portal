@@ -332,3 +332,14 @@ test("the 'following' sibling locks and refusals run before the Bill-To Stripe s
   // The propagation itself still re-runs the same phase (re-entrant locks).
   expect(src).toMatch(/const targets = await lockAndGuardFollowingSiblings\(conn, \{/);
 });
+
+test('estimate accept onto ANY existing appointment takes the mint lock before its first row lock', () => {
+  // Codex r5 P1 on #5253: re-price holds mint → customer row; the accept
+  // updated the customer before its adopt-block mint acquisition (ABBA).
+  const fs = require('fs');
+  const src = fs.readFileSync(require.resolve('../routes/estimate-public.js'), 'utf8');
+  const earlyAt = src.indexOf("if (existingAppointmentRow?.id && existingAppointmentRow.id !== acceptHoldRow?.id) {");
+  const firstCommsAt = src.indexOf('let acceptPreLockedCommsId = estimate.customer_id || null;');
+  expect(earlyAt).toBeGreaterThan(-1);
+  expect(earlyAt).toBeLessThan(firstCommsAt);
+});
