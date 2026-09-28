@@ -12,6 +12,7 @@
  */
 const db = require('../models/db');
 const logger = require('./logger');
+const { scrubSentryText } = require('../utils/sentry-scrub');
 const { excludePendingFirstBookings } = require('./estimate-conversion-guard');
 const { ESTIMATE_SEND_EXPIRY_DAYS } = require('./admin-estimate-persistence');
 const { EXPIRED_DISPOSITION_SQL } = require('./estimate-disposition');
@@ -197,7 +198,7 @@ async function runEstimateExpiration() {
       try {
         await emitEstimateExpired(row, intentIdByEstimateId.get(String(row.id)) || null);
       } catch (e) {
-        logger.warn(`[estimate-expiration] estimate.expired emit failed for ${row.id}: ${e.message}`);
+        logger.warn(`[estimate-expiration] estimate.expired emit failed for ${row.id}: ${scrubSentryText(e && e.message ? e.message : e)}`);
       }
     }
   }

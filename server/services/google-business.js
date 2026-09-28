@@ -5,6 +5,7 @@ function getGoogle() {
   return _googleapis;
 }
 const logger = require('./logger');
+const { scrubSentryText } = require('../utils/sentry-scrub');
 const { deliverOpsDigest, readCleanWatermark } = require('./ops-digest');
 const { retireIfClean } = require('./ops-digest-fall-off');
 const db = require('../models/db');
@@ -1573,7 +1574,7 @@ class GoogleBusinessService {
               reviewId: placesReviewRowId, customerId: effectiveCustomerId, locationId: loc.id, starRating: review.rating || 0,
             }, placesAttributionIntentId);
           } catch (emitErr) {
-            logger.warn(`[gbp] review.linked_5star emit failed for review ${placesReviewRowId}: ${emitErr.message}`);
+            logger.warn(`[gbp] review.linked_5star emit failed for review ${placesReviewRowId}: ${scrubSentryText(emitErr && emitErr.message ? emitErr.message : emitErr)}`);
           }
         }
       } else if (!existing) {

@@ -1,5 +1,6 @@
 const db = require('../models/db');
 const logger = require('./logger');
+const { scrubSentryText } = require('../utils/sentry-scrub');
 const { etParts, etDateString, addETDays } = require('../utils/datetime-et');
 const { runExclusive, wasLockSkipped } = require('../utils/cron-lock');
 
@@ -1284,7 +1285,7 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
         reviewId: review.id, customerId, locationId: review.location_id, starRating: review.star_rating,
       }, manualAttributionIntentId);
     } catch (emitErr) {
-      logger.warn(`[review-incentives] review.linked_5star emit failed for review ${review.id}: ${emitErr.message}`);
+      logger.warn(`[review-incentives] review.linked_5star emit failed for review ${review.id}: ${scrubSentryText(emitErr && emitErr.message ? emitErr.message : emitErr)}`);
     }
   }
 

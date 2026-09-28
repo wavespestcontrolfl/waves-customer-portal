@@ -2,6 +2,7 @@ const crypto = require('crypto');
 const db = require('../models/db');
 const EmailTemplates = require('./email-template-library');
 const logger = require('./logger');
+const { scrubSentryText } = require('../utils/sentry-scrub');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { formatDisplayDate, dateOnlyString } = require('../utils/date-only');
 const { etDateString } = require('../utils/datetime-et');
@@ -376,6 +377,9 @@ function recipientFor(triggerEventKey, input = {}, automation = {}) {
   if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
     const err = new Error('recipient email is required for automation execution');
     err.status = 400;
+    // Stable token the lifecycle emitters classify on (a permanent
+    // condition: the intent marker settles 'unrecoverable', never retried).
+    err.code = 'AUTOMATION_RECIPIENT_EMAIL_REQUIRED';
     throw err;
   }
   const type = cleanString(rawRecipient.type || rawRecipient.recipient_type || mapping.recipientType || automation.audience || 'customer');
@@ -427,10 +431,16 @@ async function resolveEmailForTrigger(eventKey, payload, recipient) {
   const customerId = cleanString(recipient?.id || firstDefined(payload, mapping.recipientIdKeys), '');
   if (!customerId) return payload;
   try {
-    const row = await db('customers').where({ id: customerId }).first('email');
+    // Live customers only (pre-push audit P1) — the same whereNull('deleted_at')
+    // predicate every customer-addressed sender uses (automation-enroll.js's
+    // review thank-you enrollment, prep-guide-sender.js). A soft-deleted /
+    // merged-away customer resolves NO address, so recipientFor's
+    // recipient-email-required error skips the trigger instead of mailing a
+    // retired record.
+    const row = await db('customers').where({ id: customerId }).whereNull('deleted_at').first('email');
     if (row && row.email) return { ...payload, customer_email: row.email };
   } catch (err) {
-    logger.warn(`[email-template-automation] recipient email lookup failed for ${eventKey} customer ${customerId}: ${err.message}`);
+    logger.warn(`[email-template-automation] recipient email lookup failed for ${eventKey} customer ${customerId}: ${scrubSentryText(err && err.message ? err.message : err)}`);
   }
   return payload;
 }
@@ -1327,7 +1337,7 @@ async function shadowPreflight(run, executionPayload, automation) {
       suppressionGroupKey: automation.suppression_group_key || undefined,
     });
   } catch (err) {
-    logger.warn(`[email-template-automation] shadow preflight failed for run ${run.id}: ${err.message}`);
+    logger.warn(`[email-template-automation] shadow preflight failed for run ${run.id}: ${scrubSentryText(err && err.message ? err.message : err)}`);
     return { ok: true };
   }
 }

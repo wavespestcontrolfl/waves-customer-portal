@@ -11,7 +11,11 @@
  *    replayed by retryPendingIntents/sweepMissedLifecycleEvents;
  *  - an unrecoverable marker is excluded from the very next 'pending' query
  *    (real WHERE status = 'pending' semantics) so it can never pin the
- *    sweep's batch, while a co-batched sibling still gets through.
+ *    sweep's batch, while a co-batched sibling still gets through;
+ *  - the attempts ceiling's single-statement CASE really reads the
+ *    PRE-update attempts value (Postgres SET semantics), and the sweep's
+ *    ORDER BY attempts, occurred_at really puts a fresh marker ahead of an
+ *    older, repeatedly failing one (pre-push audit P1).
  */
 const SKIP = !process.env.DATABASE_URL;
 const { randomUUID } = require('crypto');
@@ -43,6 +47,7 @@ jest.mock('../services/email-template-automation-executor', () => ({
 
   beforeEach(() => {
     jest.clearAllMocks();
+    AutomationExecutor.processTrigger.mockReset();
     AutomationExecutor.processTrigger.mockResolvedValue({ automation_count: 1, results: [] });
   });
 
@@ -218,6 +223,86 @@ jest.mock('../services/email-template-automation-executor', () => ({
       expect(AutomationExecutor.processTrigger).not.toHaveBeenCalled();
     } finally {
       await cleanup({ markerIds: [unresolvableId, resolvableId] });
+    }
+  });
+
+  test('attempts ceiling: the failure that reaches MAX_INTENT_ATTEMPTS settles unrecoverable in one statement, with a scrubbed last_error', async () => {
+    const markerId = randomUUID();
+    await db('email_template_automation_intents').insert({
+      id: markerId,
+      trigger_event_key: 'estimate.expired',
+      entity_type: 'estimate',
+      entity_id: 'est-pg-ceiling',
+      occurred_at: new Date(Date.now() - 10 * 60 * 1000),
+      status: 'pending',
+      attempts: emitters.MAX_INTENT_ATTEMPTS - 2,
+      payload: JSON.stringify({ id: 'est-pg-ceiling', customer_email: 'sweep-qa@example.com' }),
+    });
+    AutomationExecutor.processTrigger.mockRejectedValue(new Error(
+      'duplicate key value violates unique constraint: Key (recipient_email)=(sweep-qa@example.com)',
+    ));
+
+    try {
+      await emitters.emitEstimateExpired({ id: 'est-pg-ceiling', customer_email: 'sweep-qa@example.com' }, markerId);
+      const afterFirst = await db('email_template_automation_intents').where({ id: markerId }).first();
+      expect(afterFirst.status).toBe('pending');
+      expect(afterFirst.attempts).toBe(emitters.MAX_INTENT_ATTEMPTS - 1);
+
+      await emitters.emitEstimateExpired({ id: 'est-pg-ceiling', customer_email: 'sweep-qa@example.com' }, markerId);
+      const afterSecond = await db('email_template_automation_intents').where({ id: markerId }).first();
+      expect(afterSecond.status).toBe('unrecoverable');
+      expect(afterSecond.attempts).toBe(emitters.MAX_INTENT_ATTEMPTS);
+      expect(afterSecond.last_error).toContain('duplicate key value');
+      expect(afterSecond.last_error).not.toContain('sweep-qa@example.com');
+    } finally {
+      await cleanup({ markerIds: [markerId] });
+    }
+  });
+
+  test('the sweep reaches a fresh marker ahead of an older, repeatedly failing one (ORDER BY attempts, occurred_at)', async () => {
+    const stuckId = randomUUID();
+    const freshId = randomUUID();
+    const base = Date.now() - 60 * 60 * 1000;
+    await db('email_template_automation_intents').insert([
+      {
+        id: stuckId,
+        trigger_event_key: 'estimate.expired',
+        entity_type: 'estimate',
+        entity_id: 'est-pg-stuck',
+        occurred_at: new Date(base), // OLDER — would lead a pure oldest-first batch
+        status: 'pending',
+        attempts: 5,
+        payload: JSON.stringify({ id: 'est-pg-stuck', customer_email: 'sweep-qa@example.com' }),
+      },
+      {
+        id: freshId,
+        trigger_event_key: 'estimate.expired',
+        entity_type: 'estimate',
+        entity_id: 'est-pg-fresh',
+        occurred_at: new Date(base + 30 * 60 * 1000),
+        status: 'pending',
+        payload: JSON.stringify({ id: 'est-pg-fresh', customer_email: 'sweep-qa@example.com' }),
+      },
+    ]);
+    AutomationExecutor.processTrigger.mockImplementation(async ({ entityId }) => {
+      if (entityId === 'est-pg-stuck') throw new Error('persistent failure');
+      return { automation_count: 1, results: [] };
+    });
+
+    try {
+      await emitters.sweepMissedLifecycleEvents();
+
+      const order = AutomationExecutor.processTrigger.mock.calls
+        .map((c) => c[0].entityId)
+        .filter((id) => id === 'est-pg-stuck' || id === 'est-pg-fresh');
+      expect(order).toEqual(['est-pg-fresh', 'est-pg-stuck']);
+      const stuckAfter = await db('email_template_automation_intents').where({ id: stuckId }).first();
+      expect(stuckAfter).toMatchObject({ status: 'pending', attempts: 6, last_error: 'persistent failure' });
+      const freshAfter = await db('email_template_automation_intents').where({ id: freshId }).first();
+      expect(freshAfter.status).toBe('processed');
+    } finally {
+      AutomationExecutor.processTrigger.mockReset();
+      await cleanup({ markerIds: [stuckId, freshId] });
     }
   });
 });

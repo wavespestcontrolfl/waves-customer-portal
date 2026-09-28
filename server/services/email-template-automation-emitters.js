@@ -41,23 +41,78 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { isEnabled, emailTemplateAutomationsMode } = require('../config/feature-gates');
+const { scrubSentryText } = require('../utils/sentry-scrub');
+
+// Every error text this module logs or persists (intents.last_error) goes
+// through the shared PII scrubber first (pre-push audit P1): a Postgres
+// constraint error or a provider error can echo the email/phone values it
+// was handed, and Knex prefixes the failing SQL (quoted literals included)
+// onto err.message. Classification never reads this text — it matches on
+// the raw error's code (see isRecipientEmailRequired) — only what leaves
+// the process is scrubbed.
+function safeErrorText(err) {
+  return scrubSentryText(err && err.message ? err.message : err);
+}
 
 // The one error recipientFor throws when no resolvable recipient email
 // exists at all (executor.js) — a business-permanent condition (a
 // phone-only lead/estimate with no email on file), not a transient one.
-// Retrying this exact marker forever would let it pin an ordered, limited
-// sweep batch and starve every later candidate (codex P2 round 3) — so this
-// one error, and only this one, settles a marker 'unrecoverable' instead of
-// leaving it 'pending' for another attempt.
+// Retrying this exact marker would only let it pin an ordered, limited
+// sweep batch (codex P2 round 3) — so this error settles a marker
+// 'unrecoverable' on its FIRST failure; every other failure is retried up to
+// MAX_INTENT_ATTEMPTS below.
+// Matched on the executor's error CODE first (a stable machine token), with
+// the message as a fallback for any thrower that predates the code.
+const RECIPIENT_EMAIL_REQUIRED_CODE = 'AUTOMATION_RECIPIENT_EMAIL_REQUIRED';
 const RECIPIENT_EMAIL_REQUIRED_MESSAGE = 'recipient email is required for automation execution';
+function isRecipientEmailRequired(err) {
+  return Boolean(err) && (err.code === RECIPIENT_EMAIL_REQUIRED_CODE || err.message === RECIPIENT_EMAIL_REQUIRED_MESSAGE);
+}
+
+// Attempts ceiling for a marker (pre-push audit P1): every failed dispatch
+// of a marker — the direct emit right after its transition AND each sweep
+// replay — counts one attempt. A marker that fails for ANY reason (not just
+// the recipient-email-required case above) settles 'unrecoverable' with its
+// scrubbed last_error on its MAX_INTENT_ATTEMPTS-th failure, so no
+// persistent failure can keep a row 'pending' forever. 10 = the direct
+// attempt plus nine 15-minute sweep ticks, ~2h15m of retrying: long enough
+// to ride out a deploy, a DB failover or a provider incident, short enough
+// that a genuinely broken marker stops costing sweep work the same
+// afternoon. The sweep ALSO orders by attempts first (retryPendingIntents),
+// so even before the ceiling a repeatedly failing row sorts behind every
+// fresher marker instead of pinning the head of the LIMIT batch.
+const MAX_INTENT_ATTEMPTS = 10;
 
 async function settleIntent(intentId, patch) {
   if (!intentId) return;
   try {
     await db('email_template_automation_intents').where({ id: intentId }).update({ ...patch, updated_at: new Date() });
   } catch (err) {
-    logger.warn(`[email-template-automation-emitters] failed to settle intent ${intentId}: ${err.message}`);
+    logger.warn(`[email-template-automation-emitters] failed to settle intent ${intentId}: ${safeErrorText(err)}`);
   }
+}
+
+// One failed dispatch attempt: bump attempts and keep the marker 'pending'
+// for another try, or settle it 'unrecoverable' once this failure reaches
+// MAX_INTENT_ATTEMPTS. Decided in ONE statement (Postgres evaluates every
+// SET expression against the pre-update row, so the CASE sees the same
+// attempts value the increment starts from) — no read-modify-write race
+// between a direct emit and a concurrent sweep replay of the same marker.
+async function recordFailedAttempt(intentId, errorText) {
+  await settleIntent(intentId, {
+    status: db.raw("CASE WHEN attempts + 1 >= ? THEN 'unrecoverable' ELSE 'pending' END", [MAX_INTENT_ATTEMPTS]),
+    last_error: String(errorText || '').slice(0, 2000),
+    attempts: db.raw('attempts + 1'),
+  });
+}
+
+// A marker whose own payload fails the emitter's eligibility guard can never
+// dispatch on any retry — settle it now (gate-independent: this is a fact
+// about the stored payload, not about the rollout). No-op without a marker,
+// so a plain direct call with an ineligible event still touches nothing.
+async function settleUndispatchable(intentId, reason) {
+  if (!intentId) return;
+  await settleIntent(intentId, { status: 'unrecoverable', last_error: reason, attempts: db.raw('attempts + 1') });
 }
 
 // intentId is optional (a caller with no marker — e.g. a future direct
@@ -70,11 +125,13 @@ async function emitTrigger(eventKey, args, intentId = null) {
     await settleIntent(intentId, { status: 'processed' });
     return result;
   } catch (err) {
-    const unrecoverable = err && err.message === RECIPIENT_EMAIL_REQUIRED_MESSAGE;
-    await settleIntent(intentId, unrecoverable
-      ? { status: 'unrecoverable', last_error: err.message }
-      : { status: 'pending', last_error: String(err.message || err).slice(0, 2000), attempts: db.raw('attempts + 1') });
-    logger.warn(`[email-template-automation-emitters] ${eventKey} emit failed: ${err.message}`);
+    const errorText = safeErrorText(err);
+    if (isRecipientEmailRequired(err)) {
+      await settleIntent(intentId, { status: 'unrecoverable', last_error: errorText, attempts: db.raw('attempts + 1') });
+    } else {
+      await recordFailedAttempt(intentId, errorText);
+    }
+    logger.warn(`[email-template-automation-emitters] ${eventKey} emit failed: ${errorText}`);
     return null;
   }
 }
@@ -83,7 +140,12 @@ async function emitTrigger(eventKey, args, intentId = null) {
 // flipExpiredBatch flips, immediately after that row's own transaction
 // (which also recorded the intent marker below) commits.
 async function emitEstimateExpired({ id, customer_id: customerId, customer_email: customerEmail, category, service_interest: serviceInterest, expires_at: expiresAt } = {}, intentId = null) {
-  if (!id) return null;
+  if (!id) {
+    // A marker whose payload can never be dispatched is settled, never left
+    // pending to pin the sweep batch.
+    await settleUndispatchable(intentId, 'marker payload has no estimate id');
+    return null;
+  }
   return emitTrigger('estimate.expired', {
     triggerEventId: `estimate_expired:${id}`,
     entityType: 'estimate',
@@ -108,7 +170,10 @@ async function emitEstimateExpired({ id, customer_id: customerId, customer_email
 // marker inside the SAME transaction as the attribution write and passes
 // its id through.
 async function emitReviewLinked5Star({ reviewId, customerId, locationId, starRating }, intentId = null) {
-  if (!customerId || !reviewId || Number(starRating) !== 5) return null;
+  if (!customerId || !reviewId || Number(starRating) !== 5) {
+    await settleUndispatchable(intentId, 'marker payload is not a linked 5-star review');
+    return null;
+  }
   return emitTrigger('review.linked_5star', {
     triggerEventId: `review_linked_5star:${reviewId}`,
     entityType: 'review',
@@ -142,7 +207,7 @@ async function recordAutomationIntent(conn, {
       .returning(['id', 'entity_id']);
     return (rows && rows[0]) || null;
   } catch (err) {
-    logger.warn(`[email-template-automation-emitters] failed to record intent for ${triggerEventKey}/${entityId}: ${err.message}`);
+    logger.warn(`[email-template-automation-emitters] failed to record intent for ${triggerEventKey}/${entityId}: ${safeErrorText(err)}`);
     return null;
   }
 }
@@ -164,7 +229,7 @@ async function recordAutomationIntents(conn, entries) {
       .ignore()
       .returning(['id', 'entity_id']);
   } catch (err) {
-    logger.warn(`[email-template-automation-emitters] failed to record intents: ${err.message}`);
+    logger.warn(`[email-template-automation-emitters] failed to record intents: ${safeErrorText(err)}`);
     return [];
   }
 }
@@ -183,21 +248,27 @@ const INTENT_MIN_AGE_MS = 5 * 60 * 1000;
 const INTENT_ROW_LIMIT = 100;
 
 // The retry safety net (codex P2 x2 round 2, restructured P1 x3 + P2 round
-// 3): replays 'pending' intent markers, oldest first, so an unrecoverable
-// row (settled immediately by emitTrigger above) never sits in the batch
-// and blocks later candidates from being reached (codex P2 round 3) — the
-// ORDER BY + the unrecoverable-row exclusion together mean the LIMIT window
-// always advances past anything it cannot fix.
+// 3, attempts ceiling pre-push audit P1): replays 'pending' intent markers.
+// No row can pin the LIMIT window: every marker the loop visits leaves it
+// either settled (processed / unrecoverable) or with attempts + 1 — an
+// unknown trigger key and an unexpected throw count as failed attempts too —
+// and the ORDER BY puts the fewest-attempted markers first (oldest first
+// within a tier), so a repeatedly failing row falls behind every fresher
+// marker on the very next tick and leaves 'pending' altogether at
+// MAX_INTENT_ATTEMPTS.
 async function retryPendingIntents() {
+  // Mirrors emitTrigger's own gate read: with the boolean gate off every
+  // replay would be a no-op that settles nothing, so don't query at all.
+  if (!isEnabled('emailTemplateAutomations')) return 0;
   let markers;
   try {
     markers = await db('email_template_automation_intents')
       .where('status', 'pending')
       .where('occurred_at', '<=', new Date(Date.now() - INTENT_MIN_AGE_MS))
-      .orderBy('occurred_at', 'asc')
+      .orderBy([{ column: 'attempts', order: 'asc' }, { column: 'occurred_at', order: 'asc' }])
       .limit(INTENT_ROW_LIMIT);
   } catch (err) {
-    logger.warn(`[email-template-automation-emitters] pending-intent query failed: ${err.message}`);
+    logger.warn(`[email-template-automation-emitters] pending-intent query failed: ${safeErrorText(err)}`);
     return 0;
   }
   let retried = 0;
@@ -212,14 +283,19 @@ async function retryPendingIntents() {
           reviewId: payload.review_id, customerId: payload.customer_id, locationId: payload.location_id, starRating: payload.star_rating,
         }, marker.id);
       } else {
-        // A marker for a trigger key this module has no replay logic for —
-        // leave it pending rather than guessing; nothing here can resolve
-        // it, but nothing here should silently drop it either.
+        // A marker for a trigger key this module has no replay logic for
+        // (e.g. written by a newer build mid rolling deploy) — counted as a
+        // failed attempt rather than dropped outright, so a build that DOES
+        // know the key still gets its window; the attempts ceiling settles
+        // it if none ever does, and it never pins the batch meanwhile.
+        await recordFailedAttempt(marker.id, `no replay handler for trigger ${marker.trigger_event_key}`);
         continue;
       }
       if (result) retried += 1;
     } catch (err) {
-      logger.warn(`[email-template-automation-emitters] pending-intent retry failed for ${marker.id}: ${err.message}`);
+      const errorText = safeErrorText(err);
+      await recordFailedAttempt(marker.id, errorText);
+      logger.warn(`[email-template-automation-emitters] pending-intent retry failed for ${marker.id}: ${errorText}`);
     }
   }
   return retried;
@@ -241,6 +317,7 @@ async function sweepMissedLifecycleEvents() {
 }
 
 module.exports = {
+  MAX_INTENT_ATTEMPTS,
   emitEstimateExpired,
   emitReviewLinked5Star,
   recordAutomationIntent,

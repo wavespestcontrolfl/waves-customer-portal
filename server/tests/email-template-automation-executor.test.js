@@ -1900,4 +1900,36 @@ describe('email template automation executor', () => {
       expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
     });
   });
+
+  // pre-push audit P1 — resolveEmailForTrigger resolves a customer-only
+  // recipient's address from LIVE customers only (whereNull deleted_at, the
+  // predicate every customer-addressed sender uses). A soft-deleted
+  // customer resolves no address, so the trigger fails with the coded
+  // recipient-email-required error (the emitters settle that marker
+  // unrecoverable) and nothing is written or sent.
+  describe('recipient email lookup (resolveEmailForTrigger)', () => {
+    test('filters soft-deleted customers; a retired customer resolves no address and nothing is written', async () => {
+      const lookup = chain({ first: undefined }); // what whereNull('deleted_at') yields for a soft-deleted row
+      setDbQueues({
+        'email_template_automations as a': [chain({ result: [automation({
+          automation_key: 'review.thank_you', trigger_event_key: 'review.linked_5star', template_key: 'review.thank_you',
+        })] })],
+        customers: [lookup],
+      });
+
+      await expect(AutomationExecutor.processTrigger({
+        triggerEventKey: 'review.linked_5star',
+        triggerEventId: 'review_linked_5star:rev-1',
+        entityType: 'review',
+        entityId: 'rev-1',
+        recipient: { type: 'customer', id: 'cust-1' },
+        payload: { review_id: 'rev-1', customer_id: 'cust-1', location_id: 'venice' },
+      })).rejects.toMatchObject({ code: 'AUTOMATION_RECIPIENT_EMAIL_REQUIRED', status: 400 });
+
+      expect(lookup.where).toHaveBeenCalledWith({ id: 'cust-1' });
+      expect(lookup.whereNull).toHaveBeenCalledWith('deleted_at');
+      expect(globalDbAccesses).not.toContain('email_template_automation_runs');
+      expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    });
+  });
 });

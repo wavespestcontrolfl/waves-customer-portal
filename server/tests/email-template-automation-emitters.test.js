@@ -1,6 +1,6 @@
 jest.mock('../models/db', () => {
   const fn = jest.fn();
-  fn.raw = jest.fn((sql) => ({ __raw: sql }));
+  fn.raw = jest.fn((sql, bindings) => ({ __raw: sql, bindings }));
   return fn;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -19,11 +19,15 @@ const db = require('../models/db');
 const { isEnabled, emailTemplateAutomationsMode } = require('../config/feature-gates');
 const AutomationExecutor = require('../services/email-template-automation-executor');
 const {
-  emitEstimateExpired, emitReviewLinked5Star, recordAutomationIntent, recordAutomationIntents, sweepMissedLifecycleEvents,
+  MAX_INTENT_ATTEMPTS, emitEstimateExpired, emitReviewLinked5Star, recordAutomationIntent, recordAutomationIntents, sweepMissedLifecycleEvents,
 } = require('../services/email-template-automation-emitters');
 
 beforeEach(() => {
   jest.clearAllMocks();
+  // clearAllMocks keeps implementations — reset the executor stub so a
+  // test's persistent mockRejectedValue/mockImplementation can't leak.
+  AutomationExecutor.processTrigger.mockReset();
+  AutomationExecutor.processTrigger.mockImplementation(async () => ({ automation_count: 1, results: [] }));
   isEnabled.mockReturnValue(true);
   emailTemplateAutomationsMode.mockReturnValue('live');
 });
@@ -44,15 +48,25 @@ function mockIntentsTable(seedRows = []) {
         wheres.push(args);
         return q;
       }),
-      orderBy: jest.fn(() => { order = true; return q; }),
+      orderBy: jest.fn((spec) => { order = spec; return q; }),
       limit: jest.fn((n) => { cap = n; return q; }),
+      // Emulates Postgres UPDATE semantics for the two raw expressions this
+      // module writes: every SET expression reads the PRE-update row, so the
+      // status CASE and the attempts increment both start from the same
+      // attempts value (the real-SQL proof is in the -postgres suite).
       update: jest.fn(async (patch) => {
         const [idArgs] = wheres;
         const id = idArgs && idArgs[0] && idArgs[0].id;
         const row = rows.find((r) => r.id === id);
         if (row) {
-          Object.assign(row, patch);
-          if (patch.attempts && patch.attempts.__raw) row.attempts = (row.attempts || 0) + 1;
+          const before = row.attempts || 0;
+          const next = { ...patch };
+          if (next.attempts && next.attempts.__raw) next.attempts = before + 1;
+          if (next.status && next.status.__raw) {
+            const [ceiling] = next.status.bindings;
+            next.status = before + 1 >= ceiling ? 'unrecoverable' : 'pending';
+          }
+          Object.assign(row, next);
         }
         return row ? 1 : 0;
       }),
@@ -73,7 +87,12 @@ function mockIntentsTable(seedRows = []) {
       })),
       then(resolve, reject) {
         let result = rows.filter((r) => r.status === 'pending');
-        if (order) result = [...result].sort((a, b) => new Date(a.occurred_at) - new Date(b.occurred_at));
+        if (order) {
+          // Honors the (attempts asc, occurred_at asc) ORDER BY the sweep
+          // declares — asserted against the declared spec in a test below.
+          result = [...result].sort((a, b) => ((a.attempts || 0) - (b.attempts || 0))
+            || (new Date(a.occurred_at) - new Date(b.occurred_at)));
+        }
         if (cap != null) result = result.slice(0, cap);
         return Promise.resolve(result).then(resolve, reject);
       },
@@ -166,7 +185,69 @@ describe('marker settlement (emitTrigger / settleIntent)', () => {
 
     expect(result).toBeNull();
     expect(rows[0].status).toBe('pending');
+    expect(rows[0].attempts).toBe(3);
     expect(rows[0].last_error).toContain('connection reset');
+  });
+
+  // pre-push audit P1 — attempts ceiling: ANY persistent failure, not just
+  // the recipient-email one, stops being retried at MAX_INTENT_ATTEMPTS.
+  test('the failure that reaches MAX_INTENT_ATTEMPTS settles the marker unrecoverable', async () => {
+    AutomationExecutor.processTrigger.mockRejectedValue(new Error('automation xyz does not define an idempotency key template'));
+    const rows = mockIntentsTable([{ id: 'intent-1', status: 'pending', attempts: MAX_INTENT_ATTEMPTS - 2 }]);
+
+    await emitEstimateExpired({ id: 'est-1', customer_email: 'sam@example.com' }, 'intent-1');
+    expect(rows[0]).toMatchObject({ status: 'pending', attempts: MAX_INTENT_ATTEMPTS - 1 });
+
+    await emitEstimateExpired({ id: 'est-1', customer_email: 'sam@example.com' }, 'intent-1');
+    expect(rows[0]).toMatchObject({ status: 'unrecoverable', attempts: MAX_INTENT_ATTEMPTS });
+    expect(rows[0].last_error).toContain('idempotency key template');
+    expect(MAX_INTENT_ATTEMPTS).toBeGreaterThan(1);
+  });
+
+  // pre-push audit P1 — PII in logs: a Postgres constraint error / Knex SQL
+  // prefix can echo the email and phone it was handed. Neither the log line
+  // nor the persisted last_error may carry them.
+  test('the logged and persisted error text is PII-scrubbed', async () => {
+    const logger = require('../services/logger');
+    AutomationExecutor.processTrigger.mockRejectedValueOnce(new Error(
+      "insert into \"email_template_automation_runs\" (\"recipient_email\") values ('sam@example.com') - duplicate key value violates unique constraint: Key (recipient_email)=(sam@example.com), phone +1 (941) 555-0142",
+    ));
+    const rows = mockIntentsTable([{ id: 'intent-1', status: 'pending' }]);
+
+    await emitEstimateExpired({ id: 'est-1', customer_email: 'sam@example.com' }, 'intent-1');
+
+    expect(rows[0].last_error).toContain('duplicate key value');
+    expect(rows[0].last_error).not.toContain('sam@example.com');
+    expect(rows[0].last_error).not.toContain('555-0142');
+    const logged = logger.warn.mock.calls.map((c) => c[0]).join('\n');
+    expect(logged).toContain('estimate.expired emit failed');
+    expect(logged).not.toContain('sam@example.com');
+    expect(logged).not.toContain('555-0142');
+  });
+
+  test('the recipient-email-required error is classified by its CODE, independent of the message text', async () => {
+    const err = new Error('some reworded message');
+    err.code = 'AUTOMATION_RECIPIENT_EMAIL_REQUIRED';
+    AutomationExecutor.processTrigger.mockRejectedValueOnce(err);
+    const rows = mockIntentsTable([{ id: 'intent-1', status: 'pending' }]);
+
+    await emitReviewLinked5Star({ reviewId: 'rev-1', customerId: 'cust-1', starRating: 5 }, 'intent-1');
+
+    expect(rows[0].status).toBe('unrecoverable');
+  });
+
+  test('a marker whose payload fails the emitter guard is settled unrecoverable, never left pending', async () => {
+    const rows = mockIntentsTable([
+      { id: 'intent-1', status: 'pending' },
+      { id: 'intent-2', status: 'pending' },
+    ]);
+
+    await emitEstimateExpired({}, 'intent-1');
+    await emitReviewLinked5Star({ reviewId: 'rev-1', customerId: 'cust-1', starRating: 4 }, 'intent-2');
+
+    expect(AutomationExecutor.processTrigger).not.toHaveBeenCalled();
+    expect(rows[0]).toMatchObject({ status: 'unrecoverable', last_error: 'marker payload has no estimate id' });
+    expect(rows[1]).toMatchObject({ status: 'unrecoverable', last_error: 'marker payload is not a linked 5-star review' });
   });
 
   test('the ONE unresolvable-recipient error settles the marker unrecoverable (never retried) — codex P2: it must not pin the sweep batch', async () => {
@@ -298,8 +379,8 @@ describe('sweepMissedLifecycleEvents / retryPendingIntents', () => {
     }));
   });
 
-  test('a marker for a trigger key this module has no replay logic for is left pending, never counted', async () => {
-    mockIntentsTable([{
+  test('a marker for a trigger key this module has no replay logic for counts a failed attempt (never dropped outright, never counted)', async () => {
+    const rows = mockIntentsTable([{
       id: 'intent-1',
       trigger_event_key: 'some.other.trigger',
       occurred_at: new Date('2026-01-01T00:00:00Z'),
@@ -310,6 +391,72 @@ describe('sweepMissedLifecycleEvents / retryPendingIntents', () => {
 
     expect(result.intentsRetried).toBe(0);
     expect(AutomationExecutor.processTrigger).not.toHaveBeenCalled();
+    expect(rows[0]).toMatchObject({ status: 'pending', attempts: 1, last_error: 'no replay handler for trigger some.other.trigger' });
+  });
+
+  test('no query at all when the boolean gate is off (every replay would be a no-op)', async () => {
+    isEnabled.mockReturnValue(false);
+    mockIntentsTable([{ id: 'intent-1', trigger_event_key: 'estimate.expired' }]);
+
+    const result = await sweepMissedLifecycleEvents();
+
+    expect(result).toEqual({ intentsRetried: 0 });
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('orders the batch fewest-attempts first, oldest first within a tier', async () => {
+    mockIntentsTable([]);
+
+    await sweepMissedLifecycleEvents();
+
+    const query = db.mock.results[0].value;
+    expect(query.orderBy).toHaveBeenCalledWith([
+      { column: 'attempts', order: 'asc' },
+      { column: 'occurred_at', order: 'asc' },
+    ]);
+  });
+
+  // pre-push audit P1 — a persistently failing backlog bigger than the
+  // LIMIT must not starve later markers: after one tick every failing row
+  // carries attempts=1, so the next tick reaches the never-attempted marker
+  // behind them; and a failing row stops being retried at the ceiling.
+  test('a backlog of failing markers larger than the batch never starves a later marker, and each failing row settles at the ceiling', async () => {
+    const failing = Array.from({ length: 100 }, (_, i) => ({
+      id: `stuck-${i}`,
+      trigger_event_key: 'estimate.expired',
+      occurred_at: new Date(Date.UTC(2026, 0, 1, 0, i)),
+      payload: { id: `est-stuck-${i}`, customer_email: 'stuck@example.com' },
+    }));
+    const fresh = {
+      id: 'fresh-1',
+      trigger_event_key: 'estimate.expired',
+      occurred_at: new Date('2026-01-02T00:00:00Z'),
+      payload: { id: 'est-fresh', customer_email: 'fresh@example.com' },
+    };
+    const rows = mockIntentsTable([...failing, fresh]);
+    AutomationExecutor.processTrigger.mockImplementation(async ({ entityId }) => {
+      if (String(entityId).startsWith('est-stuck-')) throw new Error('persistent failure');
+      return { automation_count: 1, results: [] };
+    });
+
+    const first = await sweepMissedLifecycleEvents();
+    expect(first.intentsRetried).toBe(0); // the 100 oldest filled the batch and all failed
+    expect(rows.find((r) => r.id === 'fresh-1').status).toBe('pending');
+
+    const second = await sweepMissedLifecycleEvents();
+    expect(second.intentsRetried).toBe(1); // the fresh marker sorts ahead of every attempts=1 row
+    expect(rows.find((r) => r.id === 'fresh-1').status).toBe('processed');
+
+    for (let tick = 0; tick < MAX_INTENT_ATTEMPTS + 2; tick += 1) {
+      await sweepMissedLifecycleEvents();
+    }
+    const stuck = rows.filter((r) => r.id.startsWith('stuck-'));
+    expect(stuck.every((r) => r.status === 'unrecoverable' && r.attempts === MAX_INTENT_ATTEMPTS)).toBe(true);
+    expect(stuck[0].last_error).toBe('persistent failure');
+
+    AutomationExecutor.processTrigger.mockClear();
+    await sweepMissedLifecycleEvents();
+    expect(AutomationExecutor.processTrigger).not.toHaveBeenCalled(); // nothing left pending to pin anything
   });
 
   test('nothing pending is a no-op result', async () => {

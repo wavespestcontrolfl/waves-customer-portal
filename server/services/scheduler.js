@@ -6,6 +6,7 @@ const db = require('../models/db');
 const PROCESS_BOOT_AT = new Date();
 const TwilioService = require('./twilio');
 const logger = require('./logger');
+const { scrubSentryText } = require('../utils/sentry-scrub');
 const { etDateString, addETDays, etParts, parseETDateTime } = require('../utils/datetime-et');
 const { dateOnlyString } = require('../utils/date-only');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
@@ -3342,7 +3343,7 @@ function initScheduledJobs() {
     try {
       await require('./email-template-automation-emitters').sweepMissedLifecycleEvents();
     } catch (err) {
-      logger.error(`[email-template-automation] lifecycle sweep tick failed: ${err.message}`);
+      logger.error(`[email-template-automation] lifecycle sweep tick failed: ${scrubSentryText(err && err.message ? err.message : err)}`);
     }
   }, { timezone: 'America/New_York' });
 
