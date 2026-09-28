@@ -4956,7 +4956,7 @@ async function computeCardExpiryExemptions(horizon = etDateString(), conn = db) 
 
     // (b) still-completable visits inside the window, judged by the shared
     // completion predicate with the schedule sheet's inputs.
-    const { predictCompletionBilling, resolveBillingLane } = require('./billing-lane');
+    const { predictCompletionBilling, resolveBillingLane, perApplicationCompletionVoidHold } = require('./billing-lane');
     const { resolveForInvoice } = require('./payer');
     const { isCardHoldEnabled } = require('./estimate-card-holds');
     const { findFirstApplicationInvoiceForEstimateService } = require('./estimate-first-application-invoice');
@@ -4994,7 +4994,7 @@ async function computeCardExpiryExemptions(horizon = etDateString(), conn = db) 
       })
       .where('ss.scheduled_date', '<=', horizon)
       .select(
-        'ss.id', 'ss.customer_id', 'ss.status', 'ss.estimated_price', 'ss.is_callback', 'ss.service_type',
+        'ss.id', 'ss.customer_id', 'ss.status', 'ss.estimated_price', 'ss.primary_line_price', 'ss.is_callback', 'ss.service_type',
         'ss.prepaid_amount', 'ss.prepaid_method', 'ss.annual_prepay_term_id', 'ss.is_recurring',
         'ss.source_estimate_id', 'ss.scheduled_date', 'ss.recurring_parent_id', 'ss.recurring_pattern',
         'c.billing_mode', 'c.waveguard_tier', 'c.monthly_rate', 'c.autopay_enabled',
@@ -5038,6 +5038,7 @@ async function computeCardExpiryExemptions(horizon = etDateString(), conn = db) 
         billingMode: v.billing_mode || null,
         autopayActive,
         estimatedPrice: v.estimated_price != null ? Number(v.estimated_price) : null,
+        primaryLinePrice: v.primary_line_price,
         monthlyRate: v.monthly_rate,
         perApplicationFee: v.per_application_fee,
         isRecurring: !!v.is_recurring,
@@ -5137,6 +5138,23 @@ async function computeCardExpiryExemptions(horizon = etDateString(), conn = db) 
         const split = splitTerminalCompletionInvoice(sibling.invoice);
         if (split.terminal) continue;
         if (!split.existing && sibling.canceledSetupFee) continue;
+        // Owner ruling (round 13, codex pre-push P2): "propagate the new
+        // void hold to billing projections". findFirstApplicationInvoiceForEstimateService's
+        // own query excludes 'void' entirely, so a voided combined invoice
+        // with no live replacement reports the SAME `{invoice: null}` as
+        // "nothing was ever minted" — this projection would otherwise still
+        // treat `prediction.amount` below as an upcoming card charge and
+        // keep the card-expiry warning alive for a charge completion's own
+        // REFUSE AFTER A VOID guard actually holds for manual review. Same
+        // shared, read-only check the Charge Now guard and
+        // closeout-status.js's deriveBillingExpectation both use, so all
+        // three can never disagree.
+        if (!split.existing) {
+          const voidHold = await perApplicationCompletionVoidHold({
+            isCallback: !!v.is_callback, serviceType: v.service_type, svc: v, dbConn: conn,
+          });
+          if (voidHold) continue;
+        }
         reused = split.existing || null;
       }
       if (mintsNothing && !reused) continue;

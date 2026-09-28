@@ -21,6 +21,7 @@ const { explicitBillingChannels } = require("./billing-delivery-channels");
 const PhotoService = require("./photos");
 const config = require("../config");
 const { customerSafeServiceNotes } = require("./project-types");
+const { hasAuthoritativeZeroPrice } = require("./billing-lane");
 const {
   SEND_CLAIMABLE_STATUSES,
   SEND_FINALIZABLE_STATUSES,
@@ -1760,7 +1761,53 @@ async function buildScheduledServiceInvoiceLines(
     : null;
   if (appointmentDiscount) lineItems.push(appointmentDiscount);
 
-  const storedNetAmount = hasNumericValue(scheduled.estimated_price)
+  // Codex pre-push P1: a stamped estimated_price of 0 is not the visit's
+  // authoritative frozen net the way a stamped POSITIVE price is — it's
+  // the same "no price on this row" shape as null, and completionInvoiceAmount
+  // / predictCompletionBilling / resolveScheduledServiceCharge (billing-lane.js,
+  // admin-schedule.js) all defer to their fee/rate fallback for exactly that
+  // shape. Anchoring the reconciliation on a bare hasNumericValue(0) === true
+  // read 0 as the real net and wiped the freshly-computed fee-fallback
+  // primaryBase (above, via firstPositiveNumber — which already treats 0 the
+  // same as absent) straight back down to $0 through a "Scheduled price
+  // adjustment" line, so a $97.20 fee visit with a $40 checkout extra minted
+  // $40, not the $137.20 the checkout preview showed. `scheduledAmount`
+  // above uses the same positive-price precedence for primaryBase; mirror it
+  // here so the two never disagree on what "no price" means. The legacy
+  // callback-reconciliation shape this guards (a stale gross primary_line_price
+  // beside a genuinely-zero estimated_price AND a genuinely-zero fallbackAmount)
+  // is unaffected — both sides still resolve to 0 there.
+  //
+  // Codex pre-push P1 (round 3): that same bare-0 check ALSO caught the
+  // opposite, supported shape — completion-pricing's discount engine froze
+  // a fully-discounted application at a genuine $0 net (a positive
+  // primary_line_price gross base stamped alongside it — see
+  // hasAuthoritativeZeroPrice, billing-lane.js), which is exactly
+  // `primaryBaseKnown` above. Treating it as "no price, use the fallback"
+  // let a positive fallbackAmount (e.g. the per-application fee another
+  // caller resolved for a DIFFERENT reason) reconcile a real $0 invoice
+  // back up to that fee. completion-pricing.postgres.test.js's "fully
+  // discounted application stays zero" pins this with fallbackAmount
+  // matching (0) — this guard is for a caller whose fallback does NOT.
+  // Codex round 4 P0: this used to re-derive the check inline as
+  // `Number(scheduled.estimated_price) === 0`, and Number(null) === 0 —
+  // so a NEVER-PRICED row (estimated_price null, no reconciliation
+  // authority at all) with a positive primary_line_price misread as an
+  // authoritative zero, reconciling a genuinely-owed fee (e.g. the
+  // fallbackAmount another caller correctly resolved) back down to $0.
+  // Delegate to the shared predicate so this can never drift from
+  // completionInvoiceAmount / predictCompletionBilling's own reading of
+  // the same provenance signal.
+  const authoritativeZero = primaryBaseKnown
+    && hasAuthoritativeZeroPrice(scheduled.estimated_price, scheduled.primary_line_price);
+  // Whether storedNetAmount below actually came from a stamped price on this
+  // row (a real positive estimated_price, or the provenance-backed genuine
+  // $0) versus the fee/rate fallback another caller resolved because this
+  // row was NEVER priced. Only the stamped case is trustworthy enough to
+  // reconcile the replay DOWN to (below) — the fallback case is the ground
+  // truth net either way, so it must reconcile in BOTH directions.
+  const storedNetIsAuthoritative = Number(scheduled.estimated_price) > 0 || authoritativeZero;
+  const storedNetAmount = storedNetIsAuthoritative
     ? roundMoney(scheduled.estimated_price)
     : roundMoney(fallbackAmount);
   const replayNetAmount = roundMoney(
@@ -1782,6 +1829,30 @@ async function buildScheduledServiceInvoiceLines(
       discount_dollars: adjustment,
       use_stored_discount: true,
       stored_discount_source: "scheduled_service",
+    });
+  } else if (
+    // Codex round 5 P1: with no authoritative net on this row, a stale
+    // positive primary_line_price left over from a different pricing
+    // regime (e.g. a per-application row that was never priced but still
+    // carries an old primary_line_price) fed a replay total BELOW the
+    // fee/rate fallback another caller resolved as the intended net —
+    // the checkout preview shows the fallback (e.g. a $97.20 acceptance
+    // fee) while the minted invoice only totaled the stale $50 primary
+    // line, because the reconciliation above only ever corrected DOWNWARD.
+    // fallbackAmount is the ground truth here (nothing stamped on the row
+    // to contradict it), so top the replay UP to match it too.
+    !storedNetIsAuthoritative
+    && hasNumericValue(storedNetAmount)
+    && replayNetAmount < storedNetAmount
+  ) {
+    const adjustment = roundMoney(storedNetAmount - replayNetAmount);
+    lineItems.push({
+      client_id: `scheduled_price_topup_${scheduledServiceId}`,
+      description: "Scheduled price adjustment",
+      quantity: 1,
+      unit_price: adjustment,
+      amount: adjustment,
+      category: null,
     });
   }
 
