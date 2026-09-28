@@ -878,41 +878,24 @@ async function buildReportCrossSell(service, database, {
         .where({ id: service.scheduled_service_id })
         .first('service_address_line1', 'service_address_line2', 'service_address_city',
           'service_address_zip', 'source', 'is_recurring', 'source_estimate_id', 'property_id');
-      if (linkedVisit && linkedVisit.service_address_line1) {
-        const rawKey = linkage.normalizedStampedStreet(
-          linkedVisit.service_address_line1, linkedVisit.service_address_line2,
-          linkedVisit.service_address_city, linkedVisit.service_address_zip
-        );
-        if (!rawKey || linkage.scopeKeyLacksLocality(rawKey)) return null;
-        if (!linkage.sameScopeKey(rawKey, primaryStreet)) return null;
+      // Shared stamp → property_id → source_estimate_id resolver (codex
+      // round-4 P1: server/services/service-report/visit-property-scope.js
+      // — one implementation, no re-derived per-caller chain to miss a
+      // leg on again). hasEvidence false (linkedVisit missing entirely, OR
+      // found with no stamp/property_id/source_estimate_id at all) proves
+      // nothing and falls through to the single-premises proof below,
+      // exactly as before; hasEvidence true with a null key is an
+      // unresolvable/unprovable link — fail closed, no card, same as the
+      // per-leg checks this replaces.
+      const { resolveVisitPropertyScope } = require('./visit-property-scope');
+      const scope = await resolveVisitPropertyScope(linkedVisit || {}, database);
+      if (scope.hasEvidence) {
+        if (!scope.key) return null;
+        if (!linkage.sameScopeKey(scope.key, primaryStreet)) return null;
         // Both keys carry locality, but possibly in DISJOINT fields
         // (city-only vs zip-only) — sameScopeKey's per-field wildcard
         // accepts that across cities; require one shared proof (PR r6).
-        if (!scopeKeysShareLocality(rawKey, primaryStreet)) return null;
-        premisesProven = true;
-      } else if (linkedVisit && (linkedVisit.property_id || linkedVisit.source_estimate_id)) {
-        // Unstamped but LINKED (codex #3367 PR r7): dispatch's own rule
-        // resolves an unstamped row through its property row / creating
-        // estimate before falling back to primary — assuming primary here
-        // would publish a primary-profile price for a secondary-property
-        // visit. Same proofs as a raw stamp; unresolvable = no card.
-        let resolvedKey = null;
-        if (linkedVisit.property_id) {
-          const prop = await database('customer_properties')
-            .where({ id: linkedVisit.property_id })
-            .first('address_line1', 'address_line2', 'city', 'zip');
-          resolvedKey = prop
-            ? linkage.normalizedStampedStreet(prop.address_line1, prop.address_line2, prop.city, prop.zip)
-            : null;
-        } else {
-          const src = await database('estimates')
-            .where({ id: linkedVisit.source_estimate_id })
-            .first('address');
-          resolvedKey = linkage.normalizedEstimateStreet(src?.address);
-        }
-        if (!resolvedKey || linkage.scopeKeyLacksLocality(resolvedKey)) return null;
-        if (!linkage.sameScopeKey(resolvedKey, primaryStreet)) return null;
-        if (!scopeKeysShareLocality(resolvedKey, primaryStreet)) return null;
+        if (!scopeKeysShareLocality(scope.key, primaryStreet)) return null;
         premisesProven = true;
       }
       // A linked row that is MISSING, or carries no stamp and no

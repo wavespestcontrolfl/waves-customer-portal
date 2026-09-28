@@ -5059,27 +5059,32 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   let upcomingVisitsCard = null;
   if (opts.mode === 'live' && process.env.GATE_REPORT_UPCOMING_VISITS === 'true') {
     try {
-      const { addressKey } = require('../customer-properties');
-      // A street-only addressKey (no city, no zip) is UNPROVABLE (codex
-      // round-2 P1) — two different premises that happen to share a
-      // street/unit collapse to the SAME opaque key once locality is
-      // stripped away by addressKey's own normalization. Reuses the exact
-      // rule estimate-property-linkage.js's scopeKeyLacksLocality already
-      // applies to cross-sell's own property scoping (a key "lacks
-      // locality" only when BOTH city and zip are absent; either one alone
-      // is usable evidence) — same standard, applied here directly against
-      // the raw fields since addressKey's output has no delimiter to parse
-      // a scope key back out of.
-      const hasLocality = (fields = {}) => !!String(fields.city || '').trim() || !!String(fields.zip || '').trim();
+      // Shared stamp → property_id → source_estimate_id resolver (codex
+      // round-4 P1 — a FOURTH consecutive parallel reimplementation of
+      // this exact chain missed the source_estimate_id leg, so a
+      // secondary-property visit that is unstamped and carries no
+      // property_id — but WAS created from an estimate for that secondary
+      // property — was silently classified as the customer's primary
+      // property). server/services/service-report/visit-property-scope.js
+      // is the ONE implementation cross-sell.js's report-identity proof
+      // and this card both call — no more per-caller re-derivation to
+      // miss a leg on again. Key format is estimate-property-linkage.js's
+      // own `street|city|zip` scope key (not customer-properties.js's
+      // opaque addressKey hash) — only that format can be produced from
+      // an estimate's free-text address and carries the locality-lacks /
+      // locality-shares proofs a real property-equality compare needs.
+      const linkage = require('../estimate-property-linkage');
+      const { resolveVisitPropertyScope, sameResolvedProperty } = require('./visit-property-scope');
+
       // THIS report's property identity. A linked visit's own stamp /
-      // property_id is the truth (a phone-booked rental's report must
-      // never list another property's visits) — an unlinked/legacy report
-      // falls back to the route's already-COALESCEd mirror address
-      // (service.address_line1/city/zip), the SAME premise every other
-      // live-only field on this report (map, cross-sell) is anchored to.
-      let reportPropertyId = null;
-      let reportStampAddressKey = null;
-      let reportStampHasLocality = false;
+      // property_id / source_estimate_id is the truth (a phone-booked
+      // rental's report must never list another property's visits) — a
+      // linked row with NONE of the three (hasEvidence false), or a
+      // genuinely unlinked/legacy report, falls back to the route's
+      // already-COALESCEd mirror address (service.address_line1/city/zip),
+      // the SAME premise every other live-only field on this report (map,
+      // cross-sell) is anchored to.
+      //
       // A link was EXPECTED (scheduled_service_id present) but the row
       // could not be resolved — a transient read error is indistinguishable
       // here from a genuinely missing/deleted row, and EITHER must fail
@@ -5089,78 +5094,34 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       // actually linked to — exposing that other property's visits on a
       // secondary-property report's token.
       let reportLinkUnresolved = false;
+      let reportScope = null;
       if (service.scheduled_service_id) {
         const reportSs = await knex('scheduled_services')
           .where({ id: service.scheduled_service_id })
-          .first('property_id', 'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip')
+          .first('property_id', 'source_estimate_id', 'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip')
           .catch(() => null);
         if (reportSs) {
-          reportPropertyId = reportSs.property_id || null;
-          if (reportSs.service_address_line1) {
-            // address_line2 (the unit) MUST ride every key: a condo/
-            // apartment building's units share a street address, and
-            // dropping the unit here would key this report against the
-            // whole BUILDING instead of the customer's own unit (P1
-            // privacy finding 2026-09-28).
-            reportStampAddressKey = addressKey({
-              address_line1: reportSs.service_address_line1,
-              address_line2: reportSs.service_address_line2,
-              city: reportSs.service_address_city,
-              zip: reportSs.service_address_zip,
-            }) || null;
-            reportStampHasLocality = hasLocality({ city: reportSs.service_address_city, zip: reportSs.service_address_zip });
-          }
+          reportScope = await resolveVisitPropertyScope(reportSs, knex);
         } else {
           reportLinkUnresolved = true;
         }
       }
-      const mirrorAddressKey = addressKey({
-        address_line1: service.address_line1,
-        address_line2: service.address_line2,
-        city: service.city,
-        zip: service.zip,
-      }) || null;
-      const mirrorAddressHasLocality = hasLocality({ city: service.city, zip: service.zip });
-      // Resolve THIS report's own property address when it's linked but
-      // unstamped (property_id and the stamp are normally written
-      // together — an edge case). PRIVACY (P1 2026-09-28): a linked
-      // property that cannot be resolved (e.g. deleted) fails CLOSED —
-      // never falls back to the customer mirror, which names a DIFFERENT
-      // property for a multi-property account. Only a report with NO
-      // property link at all may use the mirror fallback (the ordinary
-      // single-property case).
-      let reportPropertyOwnAddressKey = null;
-      let reportPropertyOwnHasLocality = false;
-      if (reportPropertyId && !reportStampAddressKey) {
-        const ownPropertyRow = await knex('customer_properties')
-          .where({ id: reportPropertyId })
-          .first('address_line1', 'address_line2', 'city', 'zip')
-          .catch(() => null);
-        reportPropertyOwnAddressKey = ownPropertyRow ? (addressKey(ownPropertyRow) || null) : null;
-        reportPropertyOwnHasLocality = ownPropertyRow ? hasLocality(ownPropertyRow) : false;
-      }
-      const reportAddressKey = reportLinkUnresolved
-        // A link was expected but its row could not be read — fail closed,
-        // never the mirror (see reportLinkUnresolved above).
+      const mirrorKey = linkage.normalizedStampedStreet(
+        service.address_line1, service.address_line2, service.city, service.zip
+      ) || null;
+      // PRIVACY (P1 2026-09-28): a linked row whose stamp/property_id/
+      // source_estimate_id was present but UNRESOLVABLE (e.g. a deleted
+      // property row) fails CLOSED — never falls back to the customer
+      // mirror, which names a DIFFERENT property for a multi-property
+      // account. Only a report with NO identity evidence at all — linked
+      // or not — may use the mirror fallback (the ordinary single-property
+      // case, and the pre-existing "linked but predates these columns"
+      // case).
+      const reportPropertyKey = reportLinkUnresolved
         ? null
-        : (reportPropertyId
-          // Linked: the visit's own stamp, else the linked property's own
-          // resolved address — NEVER the mirror. Null (fail closed) when
-          // neither resolves, so the block below never runs.
-          ? (reportStampAddressKey || reportPropertyOwnAddressKey || null)
-          // Unlinked/legacy: the mirror is the only candidate (the property
-          // this report belongs to IS the customer's primary in that case).
-          : (reportStampAddressKey || mirrorAddressKey));
-      // Locality flag for whichever source actually won reportAddressKey
-      // above — mirrors the SAME fallback order so it can never disagree
-      // about which source resolved the key.
-      const reportAddressHasLocality = reportLinkUnresolved
-        ? false
-        : (reportPropertyId
-          ? (reportStampAddressKey ? reportStampHasLocality : reportPropertyOwnHasLocality)
-          : (reportStampAddressKey ? reportStampHasLocality : mirrorAddressHasLocality));
+        : (reportScope && reportScope.hasEvidence ? reportScope.key : mirrorKey);
 
-      if (reportAddressKey) {
+      if (reportPropertyKey) {
         // ET CALENDAR days, not elapsed 24h periods (codex round-1 P1): a
         // fixed 90 * 24h window built off Date.now() crosses a DST change
         // at a different wall-clock instant than the ET calendar does, so
@@ -5186,10 +5147,15 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         const PAGE_SIZE = 60;
         const MAX_PAGES = 5;
         const matched = [];
-        const propertyKeyById = new Map();
-        let mirrorKey = null;
-        let mirrorKeyHasLocality = false;
-        let mirrorKeyResolved = false;
+        // Batched per-page caches for resolveVisitPropertyScope — one
+        // `.whereIn()` read per distinct property_id/source_estimate_id
+        // per page instead of a query per candidate row (the same
+        // optimization the previous property_id-only implementation used,
+        // now covering the estimate leg too).
+        const propertyById = new Map();
+        const estimateById = new Map();
+        let candidateMirrorKey = null;
+        let candidateMirrorKeyResolved = false;
 
         for (let page = 0; page < MAX_PAGES && matched.length < 6; page += 1) {
           const candidates = await knex('scheduled_services')
@@ -5210,92 +5176,74 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
             .orderBy('id', 'asc')
             .limit(PAGE_SIZE)
             .offset(page * PAGE_SIZE)
-            .select('id', 'service_type', 'scheduled_date', 'window_start', 'property_id',
+            .select('id', 'service_type', 'scheduled_date', 'window_start', 'property_id', 'source_estimate_id',
               'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip')
             .catch(() => null);
 
           if (!Array.isArray(candidates) || !candidates.length) break;
 
-          // Resolve every CANDIDATE property_id in one batched read per
-          // page (the report's own property, if linked, was already
-          // resolved above — fail-closed, never re-attempted here); ids
-          // already resolved by an earlier page are skipped. Each
-          // candidate's OWN premises prefers its own stamp, then its
-          // property_id link, then — unstamped legacy rows — the same
-          // customer-mirror fallback every reader COALESCEs to.
+          // Batch-resolve every CANDIDATE property_id / source_estimate_id
+          // in one read apiece per page (the report's own property, if
+          // linked, was already resolved above — fail-closed, never
+          // re-attempted here); ids already cached by an earlier page are
+          // skipped, and an id the batched read didn't return is cached as
+          // null (unresolvable) so resolveVisitPropertyScope's per-row
+          // cache lookup never re-queries it.
           const newPropertyIds = [...new Set(candidates.map((row) => row.property_id).filter(Boolean))]
-            .filter((id) => !propertyKeyById.has(id));
+            .filter((id) => !propertyById.has(id));
           if (newPropertyIds.length) {
             const propertyRows = await knex('customer_properties')
               .whereIn('id', newPropertyIds)
               .select('id', 'address_line1', 'address_line2', 'city', 'zip')
               .catch(() => []);
+            const foundIds = new Set();
             for (const row of (Array.isArray(propertyRows) ? propertyRows : [])) {
-              propertyKeyById.set(row.id, { key: addressKey(row) || null, hasLocality: hasLocality(row) });
+              propertyById.set(row.id, row);
+              foundIds.add(row.id);
             }
+            for (const id of newPropertyIds) if (!foundIds.has(id)) propertyById.set(id, null);
           }
 
-          if (!mirrorKeyResolved && candidates.some((row) => !row.service_address_line1 && !row.property_id)) {
+          const newEstimateIds = [...new Set(candidates.map((row) => row.source_estimate_id).filter(Boolean))]
+            .filter((id) => !estimateById.has(id));
+          if (newEstimateIds.length) {
+            const estimateRows = await knex('estimates')
+              .whereIn('id', newEstimateIds)
+              .select('id', 'address')
+              .catch(() => []);
+            const foundIds = new Set();
+            for (const row of (Array.isArray(estimateRows) ? estimateRows : [])) {
+              estimateById.set(row.id, row);
+              foundIds.add(row.id);
+            }
+            for (const id of newEstimateIds) if (!foundIds.has(id)) estimateById.set(id, null);
+          }
+
+          // The customer mirror is the ONLY fallback for a candidate with
+          // NO stamp, property_id, or source_estimate_id at all (an
+          // unstamped legacy row) — resolveVisitPropertyScope's hasEvidence
+          // flag says so per row; this is resolved once per report, lazily,
+          // the first page that actually needs it.
+          if (!candidateMirrorKeyResolved
+            && candidates.some((row) => !row.service_address_line1 && !row.property_id && !row.source_estimate_id)) {
             const customerRow = await knex('customers')
               .where({ id: service.customer_id })
               .first('address_line1', 'address_line2', 'city', 'zip')
               .catch(() => null);
-            mirrorKey = customerRow ? (addressKey(customerRow) || null) : null;
-            mirrorKeyHasLocality = customerRow ? hasLocality(customerRow) : false;
-            mirrorKeyResolved = true;
+            candidateMirrorKey = customerRow
+              ? (linkage.normalizedStampedStreet(customerRow.address_line1, customerRow.address_line2, customerRow.city, customerRow.zip) || null)
+              : null;
+            candidateMirrorKeyResolved = true;
           }
-
-          const matchesReportProperty = (row) => {
-            // NO property_id shortcut at all (codex round-1 P1, second
-            // finding — the first fix still let two DIFFERENT property_ids
-            // that happened to equal each other stand in for an address
-            // match): a shared property_id does not prove the same
-            // premises TODAY, because a property record's own address can
-            // change (an edit, or a merge) after an older report stamped
-            // its OLD address. property_id only ever serves as the
-            // POINTER into propertyKeyById, which resolves that row's
-            // CURRENT address — every candidate always reduces to an
-            // address key (its own stamp, else its property's current
-            // address, else the customer mirror) and is included only
-            // when that key resolves and equals reportAddressKey (itself
-            // already resolved the same way, above). Fails closed when
-            // either key does not resolve.
-            let rowKey = null;
-            let rowHasLocality = false;
-            if (row.service_address_line1) {
-              // address_line2 rides this key too — same unit-privacy rule
-              // as reportStampAddressKey/mirrorAddressKey above: a keyless
-              // unit comparison would let one condo unit's report see
-              // another unit's visits.
-              rowKey = addressKey({
-                address_line1: row.service_address_line1,
-                address_line2: row.service_address_line2,
-                city: row.service_address_city,
-                zip: row.service_address_zip,
-              }) || null;
-              rowHasLocality = hasLocality({ city: row.service_address_city, zip: row.service_address_zip });
-            } else if (row.property_id) {
-              const resolved = propertyKeyById.get(row.property_id);
-              rowKey = resolved ? resolved.key : null;
-              rowHasLocality = resolved ? resolved.hasLocality : false;
-            } else {
-              rowKey = mirrorKey;
-              rowHasLocality = mirrorKeyHasLocality;
-            }
-            // Locality guard (codex round-2 P1): refuse a match — even a
-            // key-equal one — unless BOTH sides carry at least one
-            // locality field. A street-only stamp/address is unprovable:
-            // two different premises sharing a street/unit name (a
-            // different city, or a different building on the same named
-            // road elsewhere) would otherwise collapse to the same opaque
-            // addressKey once locality is stripped away.
-            return !!rowKey && !!reportAddressKey && rowKey === reportAddressKey
-              && reportAddressHasLocality && rowHasLocality;
-          };
 
           for (const row of candidates) {
             if (matched.length >= 6) break;
-            if (matchesReportProperty(row)) matched.push(row);
+            // Bounded (PAGE_SIZE rows/page, MAX_PAGES pages), and the
+            // property_id/source_estimate_id lookups below are cache hits
+            // after the batched reads above.
+            const scope = await resolveVisitPropertyScope(row, knex, { propertyById, estimateById });
+            const rowKey = scope.hasEvidence ? scope.key : candidateMirrorKey;
+            if (sameResolvedProperty(rowKey, reportPropertyKey)) matched.push(row);
           }
 
           if (candidates.length < PAGE_SIZE) break;

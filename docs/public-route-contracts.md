@@ -495,24 +495,36 @@ the report's own service line (`nextAppointment` above is unchanged and
 stays same-line-first with a cross-line fallback), for the next 90 days,
 capped at 6, excluding cancelled/completed/rescheduled rows (same
 disclosable-status allow-list as `nextAppointment`: pending/confirmed/
-en_route/on_site). Scoped to THIS report's property only: the linked
-visit's own `scheduled_services.property_id` or stamped `service_address_*`
-is authoritative; an unlinked/legacy report falls back to the
-already-COALESCEd customer-mirror address. Every address key folds in
-`address_line2` (the unit — a normalized "Apt 4"/"#4"/"Unit 4" all key
-identically), so a condo/apartment building's units never compare equal
-(a unit on one side and none on the other is a NON-match, not a fallback
-match). PRIVACY (P1 2026-09-28): a report whose visit IS property-linked
-but whose `property_id` cannot be RESOLVED (row deleted, bad link) fails
-CLOSED — the card is omitted entirely, never falling back to the customer
-mirror (which would name a DIFFERENT property on a multi-property
-account). Only a report with NO property link at all may use the mirror
-fallback (the ordinary single-property case). Each candidate row is
-resolved the same way (its own stamp, else its `property_id`'s resolved
-`customer_properties` address, else the customer mirror) before being
-compared to the report's property, so a multi-property account's report can
-never list another property's visits. Gate off (default): the field is
-absent and the payload is byte-identical to today.
+en_route/on_site). Scoped to THIS report's property only, resolved through
+the shared `server/services/service-report/visit-property-scope.js`
+module (the SAME resolver `cross-sell.js`'s report-identity proof uses —
+codex round-4 P1: a parallel per-caller reimplementation of this chain had
+missed a case in each of three earlier rounds): the linked visit's own
+stamped `service_address_*` is authoritative when present; else its
+`scheduled_services.property_id`'s resolved `customer_properties` address;
+else its `scheduled_services.source_estimate_id`'s resolved
+`estimates.address` — `customer_properties.js` deliberately leaves an
+estimate-backed row unanchored (no `property_id`), so this third leg is
+the only way such a row resolves to its actual (possibly secondary)
+premises; an unlinked/legacy report, or a linked visit carrying NONE of
+the three, falls back to the already-COALESCEd customer-mirror address.
+Every address key folds in `address_line2` (the unit — a normalized
+"Apt 4"/"#4"/"Unit 4" all key identically), so a condo/apartment
+building's units never compare equal (a unit on one side and none on the
+other is a NON-match, not a fallback match), and a key with neither city
+nor zip at all is rejected as unprovable rather than compared. PRIVACY
+(P1 2026-09-28, extended round-4): a report whose visit IS
+property/estimate-linked but whose `property_id` or `source_estimate_id`
+cannot be RESOLVED (row deleted, bad link, or the address it names has no
+locality) fails CLOSED — the card is omitted entirely, never falling back
+to the customer mirror (which would name a DIFFERENT property on a
+multi-property account). Only a report carrying NONE of stamp/
+`property_id`/`source_estimate_id` may use the mirror fallback (the
+ordinary single-property case). Each candidate row is resolved through the
+SAME shared module before being compared to the report's property, so a
+multi-property account's report can never list another property's visits.
+Gate off (default): the field is absent and the payload is byte-identical
+to today.
 
 Findings- and season-aware cross-sell priority (owner-approved 2026-09-27,
 rewritten structurally 2026-09-28 after FOUR rounds of "claim inferred

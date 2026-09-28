@@ -577,6 +577,100 @@ describe('multi-property scoping', () => {
     expect(data.upcomingVisitsCard.visits.map((v) => v.serviceType)).toEqual(['Lawn Care Treatment']);
   });
 
+  // P1 fix (codex round-4, fourth consecutive property-scoping finding on
+  // this card): customer-properties.js deliberately leaves an
+  // estimate-backed scheduled_services row unanchored (no property_id), so
+  // an unstamped, property_id-less candidate can still belong to a
+  // SECONDARY property through its source_estimate_id — the leg every
+  // earlier fix here kept missing. Structural fix: both the report's own
+  // identity and every candidate now resolve through the shared
+  // server/services/service-report/visit-property-scope.js module
+  // (stamp → property_id → source_estimate_id), the SAME resolver
+  // cross-sell.js's report-identity proof uses.
+  describe('estimate-backed (source_estimate_id) property scoping', () => {
+    test('unstamped, property_id-less candidate created from a SECONDARY-property estimate → excluded', async () => {
+      process.env.GATE_REPORT_UPCOMING_VISITS = 'true';
+      const knex = makeKnex({
+        ...BASE_FIXTURES,
+        customer_properties: [PROP_A],
+        estimates: [
+          // Resolves to PROP_B's address — a different premises than the
+          // report's own (PROP_A, via property_id).
+          { id: 'est-secondary', address: `${PROP_B.address_line1}, ${PROP_B.city}, FL ${PROP_B.zip}` },
+        ],
+        scheduled_services: [
+          { id: 'scheduled-current', customer_id: 'customer-1', scheduled_date: '2026-05-16', status: 'completed', service_type: 'Quarterly Pest Control Service', property_id: 'prop-a' },
+          // No stamp, no property_id — resolves ONLY through its creating
+          // estimate, which names the SECONDARY property.
+          {
+            id: 'scheduled-estimate-secondary', customer_id: 'customer-1', scheduled_date: todayPlus(5), status: 'confirmed',
+            service_type: 'Should never appear (estimate resolves to the secondary property)', window_start: '09:00:00',
+            source_estimate_id: 'est-secondary',
+          },
+        ],
+      });
+      const data = await buildReportV1Data(
+        { ...BASE_SERVICE, service_date: '2026-05-16' },
+        'token-estimate-secondary',
+        knex,
+        LIVE,
+      );
+      expect(data.upcomingVisitsCard).toBeNull();
+    });
+
+    test('unstamped, property_id-less candidate created from an estimate resolving to the SAME (primary) property → included', async () => {
+      process.env.GATE_REPORT_UPCOMING_VISITS = 'true';
+      const knex = makeKnex({
+        ...BASE_FIXTURES,
+        customer_properties: [PROP_A],
+        estimates: [
+          { id: 'est-primary', address: `${PROP_A.address_line1}, ${PROP_A.city}, FL ${PROP_A.zip}` },
+        ],
+        scheduled_services: [
+          { id: 'scheduled-current', customer_id: 'customer-1', scheduled_date: '2026-05-16', status: 'completed', service_type: 'Quarterly Pest Control Service', property_id: 'prop-a' },
+          {
+            id: 'scheduled-estimate-primary', customer_id: 'customer-1', scheduled_date: todayPlus(5), status: 'confirmed',
+            service_type: 'Lawn Care Treatment', window_start: '09:00:00',
+            source_estimate_id: 'est-primary',
+          },
+        ],
+      });
+      const data = await buildReportV1Data(
+        { ...BASE_SERVICE, service_date: '2026-05-16' },
+        'token-estimate-primary',
+        knex,
+        LIVE,
+      );
+      expect(data.upcomingVisitsCard.visits.map((v) => v.serviceType)).toEqual(['Lawn Care Treatment']);
+    });
+
+    test('source_estimate_id present but its estimate row does not exist → excluded (fail closed, no mirror fallback)', async () => {
+      process.env.GATE_REPORT_UPCOMING_VISITS = 'true';
+      const knex = makeKnex({
+        ...BASE_FIXTURES,
+        customer_properties: [PROP_A],
+        // 'est-gone' deliberately absent from `estimates` — the candidate's
+        // creating-estimate link is unresolvable.
+        estimates: [],
+        scheduled_services: [
+          { id: 'scheduled-current', customer_id: 'customer-1', scheduled_date: '2026-05-16', status: 'completed', service_type: 'Quarterly Pest Control Service', property_id: 'prop-a' },
+          {
+            id: 'scheduled-estimate-gone', customer_id: 'customer-1', scheduled_date: todayPlus(5), status: 'confirmed',
+            service_type: 'Should never appear (unresolvable estimate link)', window_start: '09:00:00',
+            source_estimate_id: 'est-gone',
+          },
+        ],
+      });
+      const data = await buildReportV1Data(
+        { ...BASE_SERVICE, service_date: '2026-05-16' },
+        'token-estimate-unresolvable',
+        knex,
+        LIVE,
+      );
+      expect(data.upcomingVisitsCard).toBeNull();
+    });
+  });
+
   // P1 privacy fix (2026-09-28): every address-key comparison in the
   // upcoming-visits scoping must include the normalized unit (address_line2,
   // or a unit token embedded in line1) — dropping it let a condo/apartment
