@@ -45,7 +45,9 @@ function withTypedSnapshot({ primary = null, companions = [] } = {}) {
     id: 'sr-1',
     service_data: JSON.stringify({
       ...(primary ? { typedReportSnapshot: primary } : {}),
-      ...(companions.length ? { companionReportSnapshots: companions } : {}),
+      // Customer-visible by default; a test that needs a staff-only
+      // companion passes delivery explicitly.
+      ...(companions.length ? { companionReportSnapshots: companions.map((c) => ({ delivery: 'auto_send', ...c })) } : {}),
     }),
   };
 }
@@ -58,7 +60,7 @@ function withTypedSnapshot({ primary = null, companions = [] } = {}) {
 describe('detectReportFindingsSignal', () => {
   test('an untyped (general pest) visit with no typed snapshot at all → no signal on any pest', () => {
     const signal = detectReportFindingsSignal({ id: 'sr-1', service_data: '{}' });
-    expect(signal).toEqual({ roachesIndoors: false, rodentEvidence: false, termiteActivity: false });
+    expect(signal).toEqual({ roachActivity: false, rodentEvidence: false, termiteActivity: false });
   });
 
   describe('cockroach (companion only)', () => {
@@ -67,7 +69,7 @@ describe('detectReportFindingsSignal', () => {
         primary: { type: 'pest' },
         companions: [{ type: 'cockroach', values: { activity_level: 'Moderate' } }],
       });
-      expect(detectReportFindingsSignal(service).roachesIndoors).toBe(true);
+      expect(detectReportFindingsSignal(service).roachActivity).toBe(true);
     });
 
     test('activity_level "None observed" is NOT a signal', () => {
@@ -75,7 +77,7 @@ describe('detectReportFindingsSignal', () => {
         primary: { type: 'pest' },
         companions: [{ type: 'cockroach', values: { activity_level: 'None observed' } }],
       });
-      expect(detectReportFindingsSignal(service).roachesIndoors).toBe(false);
+      expect(detectReportFindingsSignal(service).roachActivity).toBe(false);
     });
 
     test('a missing/empty activity_level is NOT a signal (unknown → no signal)', () => {
@@ -83,12 +85,12 @@ describe('detectReportFindingsSignal', () => {
         primary: { type: 'pest' },
         companions: [{ type: 'cockroach', values: {} }],
       });
-      expect(detectReportFindingsSignal(service).roachesIndoors).toBe(false);
+      expect(detectReportFindingsSignal(service).roachActivity).toBe(false);
     });
 
     test('a PRIMARY cockroach snapshot is NOT the signal even with a positive activity_level (already mid-program today)', () => {
       const service = withTypedSnapshot({ primary: { type: 'cockroach', values: { activity_level: 'Heavy' } } });
-      expect(detectReportFindingsSignal(service).roachesIndoors).toBe(false);
+      expect(detectReportFindingsSignal(service).roachActivity).toBe(false);
     });
 
     test('when BOTH primary and a companion are typed cockroach, the companion is still excluded (primary wins the exclusion)', () => {
@@ -96,8 +98,21 @@ describe('detectReportFindingsSignal', () => {
         primary: { type: 'cockroach', values: { activity_level: 'None observed' } },
         companions: [{ type: 'cockroach', values: { activity_level: 'Severe' } }],
       });
-      expect(detectReportFindingsSignal(service).roachesIndoors).toBe(false);
+      expect(detectReportFindingsSignal(service).roachActivity).toBe(false);
     });
+  });
+
+  test('an internal_only / disabled companion never drives a customer-facing signal (pre-push audit)', () => {
+    for (const delivery of ['internal_only', 'disabled']) {
+      const service = withTypedSnapshot({
+        companions: [
+          { type: 'cockroach', delivery, values: { activity_level: 'Heavy' } },
+          { type: 'rodent_trapping', delivery, values: { captures: 3 } },
+          { type: 'termite_bait_station', delivery, values: { termite_activity: 'Active termites present' } },
+        ],
+      });
+      expect(detectReportFindingsSignal(service)).toEqual({ roachActivity: false, rodentEvidence: false, termiteActivity: false });
+    }
   });
 
   describe('rodent', () => {
@@ -187,7 +202,7 @@ describe('detectReportFindingsSignal', () => {
 
   test('an unrelated typed snapshot (e.g. tree_shrub) contributes no signal on any pest', () => {
     const service = withTypedSnapshot({ primary: { type: 'tree_shrub', values: { activity_level: 'Heavy' } } });
-    expect(detectReportFindingsSignal(service)).toEqual({ roachesIndoors: false, rodentEvidence: false, termiteActivity: false });
+    expect(detectReportFindingsSignal(service)).toEqual({ roachActivity: false, rodentEvidence: false, termiteActivity: false });
   });
 });
 
@@ -589,7 +604,7 @@ describe('render/click parity for a findings-driven offer (service_data must rid
     process.env.GATE_REPORT_CROSS_SELL_V2 = 'true';
     const serviceData = JSON.stringify({
       typedReportSnapshot: { type: 'pest' },
-      companionReportSnapshots: [{ type: 'cockroach', values: { activity_level: 'Low' } }],
+      companionReportSnapshots: [{ type: 'cockroach', delivery: 'auto_send', values: { activity_level: 'Low' } }],
     });
     const db = dbFor({
       serviceTypes: ['Pest Control'],
@@ -649,7 +664,7 @@ describe('render/click parity for a findings-driven offer (service_data must rid
       ...SERVICE(),
       service_data: JSON.stringify({
         typedReportSnapshot: { type: 'pest' },
-        companionReportSnapshots: [{ type: 'cockroach', values: { activity_level: 'Low' } }],
+        companionReportSnapshots: [{ type: 'cockroach', delivery: 'auto_send', values: { activity_level: 'Low' } }],
       }),
     };
     const withoutServiceData = { ...SERVICE() }; // service_data undefined — the pre-fix click-path shape

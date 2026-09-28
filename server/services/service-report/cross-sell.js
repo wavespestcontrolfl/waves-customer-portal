@@ -599,8 +599,14 @@ function typedSnapshotsFor(service) {
   const primary = serviceData.typedReportSnapshot && typeof serviceData.typedReportSnapshot === 'object'
     ? serviceData.typedReportSnapshot
     : null;
+  // Only customer-visible companions may drive customer-facing offer copy —
+  // an internal_only / disabled companion is staff-only evidence (pre-push
+  // audit on the cross-sell branch). Same delivery rule the recommendation
+  // history uses (snapshot.delivery === 'auto_send').
   const companions = Array.isArray(serviceData.companionReportSnapshots)
-    ? serviceData.companionReportSnapshots.filter((snap) => snap && typeof snap === 'object')
+    ? serviceData.companionReportSnapshots.filter((snap) => snap
+      && typeof snap === 'object'
+      && snap.delivery === 'auto_send')
     : [];
   return { primary, companions, all: [primary, ...companions].filter(Boolean) };
 }
@@ -608,7 +614,7 @@ function typedSnapshotsFor(service) {
 function detectReportFindingsSignal(service) {
   const { primary, companions, all } = typedSnapshotsFor(service);
 
-  const roachesIndoors = companions.some((snap) => {
+  const roachActivity = companions.some((snap) => {
     if (snap.type !== 'cockroach' || primary?.type === 'cockroach') return false;
     const level = String(snap.values?.activity_level || '');
     return !!level && level !== COCKROACH_ACTIVITY_BASELINE;
@@ -632,7 +638,7 @@ function detectReportFindingsSignal(service) {
     return false;
   });
 
-  return { roachesIndoors, rodentEvidence, termiteActivity };
+  return { roachActivity, rodentEvidence, termiteActivity };
 }
 
 // buildCockroachFindingsOffer(service, database) → fingerprinted payload | null.
@@ -710,7 +716,7 @@ async function resolveReportCrossSellV2({ service, database, ladderEvidence, pla
   let signal = null;
   try { signal = detectReportFindingsSignal(service); } catch { /* best-effort: unreadable service_data reads as no signal */ }
   if (signal) {
-    if (signal.roachesIndoors) {
+    if (signal.roachActivity) {
       const cockroachOffer = await buildCockroachFindingsOffer(service, database);
       if (cockroachOffer) return cockroachOffer;
       // Catalog unavailable, or already mid-program: fall through to the
