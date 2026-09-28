@@ -233,8 +233,13 @@ async function planCloseoutRepair(status, { knex = db } = {}) {
     // The same read-only checks the Bill button re-runs before minting: a
     // refusal (autopay, payer, prepaid, callback, unpriced…) is the manual fix.
     const assessed = await BillingRecoveryBill.assessVisitBillable(status.serviceId, { database: knex });
+    // Deposit-bearing visits stay manual: the mint would consume estimate
+    // deposit money, an effect this card does not preview or bind.
+    const deposit = assessed.ok ? await BillingRecoveryBill.pendingDepositForVisit(status.serviceId, knex) : 0;
     if (!assessed.ok) skipped.push({ fact: 'invoice', reason: invoiceFact.reason, why: String(assessed.error).replace(/\.$/, '') });
-    else {
+    else if (deposit > 0) {
+      skipped.push({ fact: 'invoice', reason: invoiceFact.reason, why: `an unapplied estimate deposit ($${deposit.toFixed(2)}) would apply — bill it from Billing Recovery` });
+    } else {
       steps.push({
         step: 'bill_visit',
         fact: 'invoice',
@@ -268,7 +273,7 @@ async function runStep(step, { knex = db } = {}) {
   switch (step.step) {
     case 'bill_visit': {
       const billed = await BillingRecoveryBill.billVisit(step.scheduled_service_id, {
-        actorId: step.actor_id || null, expectedPrice: step.amount, database: knex,
+        actorId: step.actor_id || null, expectedPrice: step.amount, refuseDepositCredit: true, database: knex,
       });
       if (!billed.ok) return { status: 'failed', detail: billed.error };
       return { status: 'completed', detail: `draft invoice created (not sent)`, invoice_id: billed.invoice.id, total: billed.invoice.total ?? null };

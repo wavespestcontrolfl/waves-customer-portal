@@ -9,7 +9,7 @@ jest.mock('../services/service-report/pdf-queue', () => ({ ensureReportToken: je
 jest.mock('../services/service-report/delivery-queue', () => ({ enqueueServiceReportV1EmailDelivery: jest.fn() }));
 jest.mock('../services/feature-flags', () => ({ isUserFeatureEnabled: jest.fn().mockResolvedValue(false) }));
 jest.mock('../utils/portal-url', () => ({ publicPortalUrl: () => 'https://portal.example.test' }));
-jest.mock('../services/billing-recovery-bill', () => ({ assessVisitBillable: jest.fn(), billVisit: jest.fn() }));
+jest.mock('../services/billing-recovery-bill', () => ({ assessVisitBillable: jest.fn(), billVisit: jest.fn(), pendingDepositForVisit: jest.fn().mockResolvedValue(0) }));
 
 const db = require('../models/db');
 const { getCloseoutStatus } = require('../services/closeout-status');
@@ -348,6 +348,16 @@ describe('bill_visit — the Billing Recovery "Bill" action as a repair step', (
     expect(contract.notifies_customer).toBe(false);
   });
 
+  test('a visit carrying unapplied estimate deposit money stays manual', async () => {
+    getCloseoutStatus.mockResolvedValue({ ...status({ facts: UNBILLED }), serviceId: SVC });
+    db.mockImplementation(fakeDb({ service_records: [RECORD] }));
+    BillingRecoveryBill.assessVisitBillable.mockResolvedValue({ ok: true, price: 129, rowPrice: 129, visit: {} });
+    BillingRecoveryBill.pendingDepositForVisit.mockResolvedValueOnce(50);
+    const res = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
+    expect(res.code).toBe('nothing_repairable');
+    expect(res.manual).toEqual([expect.objectContaining({ fact: 'invoice', fix: expect.stringMatching(/deposit \(\$50\.00\)/) })]);
+  });
+
   test('a Bill refusal (autopay, payer, prepaid…) is the manual fix; payer / auto-charge reasons never reach Bill', async () => {
     getCloseoutStatus.mockResolvedValue({ ...status({ facts: UNBILLED }), serviceId: SVC });
     db.mockImplementation(fakeDb({ service_records: [RECORD] }));
@@ -376,7 +386,7 @@ describe('bill_visit — the Billing Recovery "Bill" action as a repair step', (
     });
     expect(run.success).toBe(true);
     expect(run.receipt).toEqual([expect.objectContaining({ step: 'bill_visit', status: 'completed', invoice_id: 'inv-9' })]);
-    expect(BillingRecoveryBill.billVisit).toHaveBeenCalledWith(SVC, expect.objectContaining({ actorId: 'tech-admin', expectedPrice: 129 }));
+    expect(BillingRecoveryBill.billVisit).toHaveBeenCalledWith(SVC, expect.objectContaining({ actorId: 'tech-admin', expectedPrice: 129, refuseDepositCredit: true }));
 
     // Repriced after the card: the executor's plan no longer matches.
     BillingRecoveryBill.billVisit.mockClear();

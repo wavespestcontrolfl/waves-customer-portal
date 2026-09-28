@@ -181,10 +181,26 @@ async function assessVisitBillable(scheduledServiceId, { database = db } = {}) {
 
 const cents = (n) => Math.round(Number(n) * 100);
 
+// Unapplied deposit money createFromService would roll onto this visit's
+// invoice (scheduled_services.source_estimate_id → estimate_deposits), in
+// dollars; 0 when the visit has no source estimate or nothing is open.
+async function pendingDepositForVisit(scheduledServiceId, database = db) {
+  const ss = await database('scheduled_services').where({ id: scheduledServiceId }).first('source_estimate_id');
+  if (!ss?.source_estimate_id) return 0;
+  const { pendingDepositCredit } = require('./estimate-deposits');
+  const credit = await pendingDepositCredit(ss.source_estimate_id, database);
+  return credit ? Number(credit.amount) || 0 : 0;
+}
+
 // expectedPrice: the amount an approval showed (IB closeout repair). The
 // assessment runs under the mint lock, so a reprice between the approval
 // and this write refuses instead of minting a different figure.
-async function billVisit(scheduledServiceId, { actorId = null, expectedPrice = null, database = db } = {}) {
+// refuseDepositCredit: the approval did not cover consuming deposit money
+// (the IB repair leaves deposit-bearing visits manual) — refuse under the
+// lock if any unapplied deposit would roll onto this invoice.
+async function billVisit(scheduledServiceId, {
+  actorId = null, expectedPrice = null, refuseDepositCredit = false, database = db,
+} = {}) {
   try {
     // Serialize concurrent bills on the same visit, assess inside the lock,
     // then create the invoice + disposition. Prevents duplicate draft invoices.
@@ -197,6 +213,11 @@ async function billVisit(scheduledServiceId, { actorId = null, expectedPrice = n
         throw e;
       }
       const { visit, price, rowPrice } = assessed;
+      if (refuseDepositCredit && (await pendingDepositForVisit(scheduledServiceId, trx)) > 0) {
+        const e = new Error('An estimate deposit credit would apply to this invoice — bill it from Billing Recovery.');
+        e.status = 409;
+        throw e;
+      }
       if (expectedPrice !== null && cents(price) !== cents(expectedPrice)) {
         const e = new Error(`The visit's price changed since it was approved ($${Number(expectedPrice).toFixed(2)} → $${price.toFixed(2)}).`);
         e.status = 409;
@@ -269,4 +290,4 @@ async function billVisit(scheduledServiceId, { actorId = null, expectedPrice = n
   }
 }
 
-module.exports = { assessVisitBillable, billVisit, dueDateFromVisit };
+module.exports = { assessVisitBillable, billVisit, pendingDepositForVisit, dueDateFromVisit };
