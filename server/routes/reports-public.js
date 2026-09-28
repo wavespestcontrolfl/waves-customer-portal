@@ -45,6 +45,7 @@ const { verifyAssessmentPin } = require('../services/service-report/assessment-p
 const jwt = require('jsonwebtoken');
 const config = require('../config');
 const { isStaffAccessToken, staffTokenVersionMatches } = require('../middleware/admin-auth');
+const { etDateString, addETDays } = require('../utils/datetime-et');
 
 // internal_only / disabled typed completions (Phase-1b shadow, kill switch)
 // store a report for STAFF review only. These public token routes serve them
@@ -124,6 +125,30 @@ async function fetchSeasonalForecastSafe(zip) {
 // amount to fall back on (only `rainChance` / `shortForecast` — see its own
 // return-shape doc comment), so intensity is read ONLY from the forecast
 // TEXT (storm/thunderstorm/heavy rain), never the bare percentage.
+// codex P1 2026-09-29 round 4: a report reopened weeks after the visit is
+// still a LIVE view (mode === 'live' never expires), so without this floor
+// it would run TODAY's NWS forecast and, on a storm forecast, print "heavy
+// rain right after a treatment can wash it out" against a treatment applied
+// long ago — a caveat about the wrong moment in time. "Recent" = the
+// service date falls within the last 2 ET calendar days (today, yesterday,
+// or the day before) — an ET-calendar-day comparison via the shared
+// etDateString/addETDays helpers, never raw epoch-ms/24h arithmetic (which
+// drifts across a DST transition and is blind to calendar days entirely).
+// `service_date` is a plain calendar day (a Postgres DATE column arrives as
+// a UTC-midnight Date, or an equivalent date-only string) — its UTC
+// calendar fields ARE the intended day (same convention monthFromDate
+// above uses), so it is read directly rather than reinterpreted through
+// etDateString, which would roll a UTC-midnight instant back to the PRIOR
+// ET calendar day.
+function isRecentServiceDate(serviceDateRaw, now = new Date()) {
+  if (!serviceDateRaw) return false;
+  const d = serviceDateRaw instanceof Date ? serviceDateRaw : new Date(serviceDateRaw);
+  if (Number.isNaN(d.getTime())) return false;
+  const svcYmd = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+  const cutoffYmd = etDateString(addETDays(now, -2));
+  return svcYmd >= cutoffYmd;
+}
+
 async function fetchPestRainForecastHeavySafe(service) {
   try {
     const { getDailyRainOutlookBounded } = require('../services/weather-forecast');
@@ -483,6 +508,9 @@ async function buildServiceReportV1ResponseData(service, token, {
   const data = await buildReportV1Data(service, token, db, {
     pestPressureConfig, staffViewer, mode, pinnedLawnAssessmentId, pinnedWeekPlanAvailableAt,
     propertyHistoryEnabled, lawnHistory, pinnedLawnHistoryIdentity, expectationFactsOut, planSummary, upcomingVisitsCard,
+    // pest week-weather is opt-in (codex P2 round 4): this builder renders
+    // the expectations block (live /data + the direct PDF route), so it pays.
+    pestWeekWeather: true,
   });
   if (service?.report_template_version !== 'service_report_v1') return data;
 
@@ -592,9 +620,13 @@ async function buildServiceReportV1ResponseData(service, token, {
       // Rain/spiders/what-to-expect facts — computed only when the
       // expectations gate is on, so a dark gate costs nothing extra.
       // forecastHeavyRain is LIVE VIEW ONLY (never PDF/static — the report's
-      // mutable-content rule): a non-live render always passes false.
+      // mutable-content rule): a non-live render always passes false. Also
+      // bounded to a RECENT service (codex P1 2026-09-29 round 4): a report
+      // reopened weeks later is still a live view, and today's forecast has
+      // nothing to do with a treatment from long ago — see
+      // isRecentServiceDate's own comment.
       const expectationsGateOn = pestReportExpectationsGateOn();
-      const forecastHeavyRain = expectationsGateOn && mode === 'live'
+      const forecastHeavyRain = expectationsGateOn && mode === 'live' && isRecentServiceDate(service.service_date)
         ? await fetchPestRainForecastHeavySafe(service)
         : false;
       // codex P1 2026-09-29 round 3: weekWeather is no longer fetched here —
@@ -2730,3 +2762,4 @@ module.exports.storedRevisionMatches = storedRevisionMatches;
 module.exports.suppressedTypedReport = suppressedTypedReport;
 module.exports.settledWeekWeatherForRender = settledWeekWeatherForRender;
 module.exports.fetchPestRainForecastHeavySafe = fetchPestRainForecastHeavySafe;
+module.exports.isRecentServiceDate = isRecentServiceDate;

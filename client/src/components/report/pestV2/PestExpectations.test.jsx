@@ -136,3 +136,26 @@ describe('PestReportV2Section — expectations composition', () => {
     expect(screen.queryByText('Spiders')).toBeNull();
   });
 });
+
+describe('expectation body copy meets the 16px customer text floor', () => {
+  afterEach(cleanup);
+
+  it('rain, spider and what-to-expect body text render at 16px; eyebrows stay 14px', () => {
+    render(
+      <>
+        <PestRainExpectation rain={{ lines: ['It\'s rained about 1.2" at your property over the past week.'] }} />
+        <PestSpiderExpectation spiders={{ headline: 'Spiders', whatWeDid: 'We swept webs from the eaves.', expectation: 'Expect fewer webs over the next two weeks.', nextStep: 'Text us if they keep coming back.' }} />
+        <PestWhatToExpect whatToExpect={{ lines: ['With gel bait, dead roaches may show up for a week or two.'] }} />
+      </>,
+    );
+    const body = [
+      screen.getByText(/rained about 1\.2"/),
+      screen.getByText('We swept webs from the eaves.'),
+      screen.getByText('Expect fewer webs over the next two weeks.'),
+      screen.getByText('Text us if they keep coming back.'),
+      screen.getByText(/dead roaches may show up/),
+    ];
+    for (const node of body) expect(node.style.fontSize).toBe('16px');
+    expect(screen.getByText('Rain and your treatment').style.fontSize).toBe('14px');
+  });
+});

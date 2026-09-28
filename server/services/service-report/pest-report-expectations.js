@@ -217,9 +217,14 @@ function buildRainExpectation({
     // product, not by application) — it always fails this check and gets
     // the neutral wording too, so generated copy can never claim more than
     // the customer-facing card does.
+    // ...AND that band must have been applied FOR ANTS (codex P1 round 4:
+    // `targets` is the tech's own structured tag list) — otherwise the
+    // colony/trail claim is pest-neutral wording only.
     const perimeterTreatmentEvidence = (products || []).some((product) => {
       const cls = classifyProductExpectation(product);
-      return (cls === 'non_repellent' || cls === 'pyrethroid') && hasExteriorApplicationEvidence(product);
+      return (cls === 'non_repellent' || cls === 'pyrethroid')
+        && hasExteriorApplicationEvidence(product)
+        && hasAntTargetEvidence(product);
     });
     lines.push(perimeterTreatmentEvidence
       ? 'Heavy rain pushes ants indoors; trails over the next few days usually mean the colony is moving through the treated band.'
@@ -251,6 +256,15 @@ function buildRainExpectation({
 // builds ({ product: {...}, targets: [...], applicationArea, ... }).
 const SPIDER_ACTION_RE = /\b(eave|eaves|web|webs|webbing|soffit|cobweb)\b/i;
 const SPIDER_TARGET_RE = /spider/i;
+// Ant-specific wording (colony, "ants may show up more", the treated-band
+// trail claim) needs an application the tech actually TAGGED for ants —
+// codex P1 2026-09-28 round 4: a non-repellent applied for roaches only, or
+// the auto-seeded pest mix on a visit with no ant target, must not tell the
+// customer to expect ants. Word-bounded so "pants"/"giant" never match.
+const ANT_TARGET_RE = /\bants?\b/i;
+function hasAntTargetEvidence(product) {
+  return Array.isArray(product?.targets) && product.targets.some((t) => ANT_TARGET_RE.test(t));
+}
 // Structured application-area evidence that the eaves/soffit specifically
 // were worked (owner ruling 2026-09-28, P1 audit round 2: a spider-targeted
 // pyrethroid applied ANYWHERE previously earned the residual/treated
@@ -384,6 +398,11 @@ function classifyProductExpectation(product = {}) {
 const EXPECTATION_TEXT = {
   non_repellent: 'Non-repellent products (like what we used) work by transfer — ants may show up more for a '
     + 'few days as they carry it back to the colony, then drop off over about 1–2 weeks.',
+  // Same class, but no application on this visit was tagged for ants
+  // (codex P1 2026-09-28 round 4) — pest-neutral transfer wording.
+  non_repellent_general: 'Non-repellent products (like what we used) work by transfer — insects that cross the '
+    + 'treated area carry it back to where they nest, so activity can pick up for a few days before dropping '
+    + 'off over about 1–2 weeks.',
   ant_bait: 'Ants that find the bait carry it back to the colony, so you may see a few more ants near the '
     + 'placements for a few days before they drop off.',
   roach_gel_bait: 'With gel bait, dead roaches may show up out in the open for a week or two as the colony '
@@ -442,6 +461,9 @@ function buildWhatToExpect({ products = [] } = {}) {
   // one confirmed application is enough to earn the barrier line even if
   // another pyrethroid application this visit has unknown method/area.
   let pyrethroidExteriorConfirmed = false;
+  // Ant-specific non-repellent wording needs an ant-TAGGED non-repellent
+  // application (codex P1 round 4); otherwise the pest-neutral variant.
+  let nonRepellentAntTagged = false;
   for (const product of products) {
     const cls = classifyProductExpectation(product);
     if (!cls) continue;
@@ -449,14 +471,19 @@ function buildWhatToExpect({ products = [] } = {}) {
     if (cls === 'pyrethroid' && hasExteriorApplicationEvidence(product)) {
       pyrethroidExteriorConfirmed = true;
     }
+    if (cls === 'non_repellent' && hasAntTargetEvidence(product)) {
+      nonRepellentAntTagged = true;
+    }
   }
   if (!classes.size) return null;
   const lines = EXPECTATION_PRIORITY
     .filter((cls) => classes.has(cls))
     .slice(0, 3)
-    .map((cls) => ((cls === 'pyrethroid' && !pyrethroidExteriorConfirmed)
-      ? EXPECTATION_TEXT.pyrethroid_unconfirmed
-      : EXPECTATION_TEXT[cls]))
+    .map((cls) => {
+      if (cls === 'pyrethroid' && !pyrethroidExteriorConfirmed) return EXPECTATION_TEXT.pyrethroid_unconfirmed;
+      if (cls === 'non_repellent' && !nonRepellentAntTagged) return EXPECTATION_TEXT.non_repellent_general;
+      return EXPECTATION_TEXT[cls];
+    })
     .filter((line) => validateCustomerCopy(line));
   return lines.length ? { lines } : null;
 }
@@ -504,6 +531,9 @@ function toExpectationProduct(raw = {}) {
     method: isPlainObject(raw) ? (raw.method ?? null) : null,
     methodInferred: isPlainObject(raw) && typeof raw.methodInferred === 'boolean' ? raw.methodInferred : null,
     applicationArea: pickEither(raw, 'applicationArea', 'application_area'),
+    // The tech's structured target tags for THIS application (codex P1
+    // round 4) — null when the caller has no per-application data.
+    targets: Array.isArray(raw?.targets) ? raw.targets.map((t) => cleanText(t)).filter(Boolean) : null,
   };
 }
 

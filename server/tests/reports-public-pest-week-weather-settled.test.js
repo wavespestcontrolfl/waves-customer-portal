@@ -171,13 +171,13 @@ describe('resolvePestWeekWeather / resolvePestWeekWeatherForBuild — the pin (r
     expect(fetchServiceWeekWeather).not.toHaveBeenCalled();
   });
 
-  test('no coordinates: a permanent, legitimately-cacheable absence — never fetches', async () => {
+  test('no coordinates: PENDING (the geocoder backstop may fill them) — never fetches, but uncacheable so no PDF is stored blank', async () => {
     const fetchServiceWeekWeather = jest.fn();
     mockWeekWeather(fetchServiceWeekWeather);
     const { resolvePestWeekWeather } = require('../services/service-report/report-data');
     const { knex } = makePestKnex();
     const noCoords = { ...GEOCODED, customer_latitude: null, customer_longitude: null };
-    await expect(resolvePestWeekWeather(noCoords, 'pest', knex)).resolves.toEqual({ weekWeather: null, uncacheable: false });
+    await expect(resolvePestWeekWeather(noCoords, 'pest', knex)).resolves.toEqual({ weekWeather: null, uncacheable: true });
     expect(fetchServiceWeekWeather).not.toHaveBeenCalled();
   });
 
@@ -480,5 +480,83 @@ describe('fetchPestRainForecastHeavySafe — probability alone never marks heavy
     }));
     const { fetchPestRainForecastHeavySafe } = require('../routes/reports-public');
     await expect(fetchPestRainForecastHeavySafe(SERVICE)).resolves.toBe(false);
+  });
+});
+
+// codex P1 2026-09-29 round 4: a report reopened weeks after the visit is
+// still a LIVE view — without a recency floor it would run TODAY's NWS
+// forecast and print a "heavy rain right after a treatment" caveat against
+// a treatment applied long ago. "Recent" = within the last 2 ET calendar
+// days (today, yesterday, or the day before).
+describe('isRecentServiceDate — recency floor for the live forecast fetch', () => {
+  const { isRecentServiceDate } = require('../routes/reports-public');
+  // Anchor "now" at a fixed ET noon so the test is not sensitive to when it
+  // actually runs.
+  const NOW = new Date('2026-07-16T16:00:00Z'); // noon ET (UTC-4, July)
+
+  test('service today: recent', () => {
+    expect(isRecentServiceDate('2026-07-16', NOW)).toBe(true);
+  });
+
+  test('service yesterday: recent', () => {
+    expect(isRecentServiceDate('2026-07-15', NOW)).toBe(true);
+  });
+
+  test('service 2 days ago (the boundary): recent', () => {
+    expect(isRecentServiceDate('2026-07-14', NOW)).toBe(true);
+  });
+
+  test('service 3 days ago: not recent', () => {
+    expect(isRecentServiceDate('2026-07-13', NOW)).toBe(false);
+  });
+
+  test('service 10 days ago: not recent', () => {
+    expect(isRecentServiceDate('2026-07-06', NOW)).toBe(false);
+  });
+
+  test('a Date object (as a Postgres DATE column arrives) works the same as its equivalent string', () => {
+    expect(isRecentServiceDate(new Date('2026-07-16T00:00:00.000Z'), NOW)).toBe(true);
+    expect(isRecentServiceDate(new Date('2026-07-06T00:00:00.000Z'), NOW)).toBe(false);
+  });
+
+  test('missing or unparseable service_date: not recent (fail closed, no forecast)', () => {
+    expect(isRecentServiceDate(null, NOW)).toBe(false);
+    expect(isRecentServiceDate(undefined, NOW)).toBe(false);
+    expect(isRecentServiceDate('not-a-date', NOW)).toBe(false);
+  });
+
+  test('the live forecast fetch is wired behind isRecentServiceDate (source wiring)', () => {
+    const source = fs.readFileSync(path.join(__dirname, '..', 'routes', 'reports-public.js'), 'utf8');
+    expect(source).toMatch(/expectationsGateOn && mode === 'live' && isRecentServiceDate\(service\.service_date\)\s*\n\s*\? await fetchPestRainForecastHeavySafe\(service\)/);
+  });
+});
+
+// codex P2 2026-09-28 round 4: the week-weather lookup is OPT-IN. Only the
+// callers that render the expectations block pay for it; a caller that
+// passes no options (the public map.svg handler) never fetches, never pins,
+// and stays cacheable.
+describe('pest week-weather lookup is opt-in per caller (source wiring)', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const read = (rel) => fs.readFileSync(path.join(__dirname, '..', rel), 'utf8');
+
+  test('buildReportV1Data resolves the week only when opts.pestWeekWeather === true', () => {
+    const src = read('services/service-report/report-data.js');
+    expect(src).toMatch(/opts\.pestWeekWeather === true\n\s*\? await resolvePestWeekWeatherForBuild\(service, serviceLine, knex, opts\.mode\)\n\s*: \{ weekWeather: null, uncacheable: false \}/);
+  });
+
+  test('the /data response builder (which also serves the direct PDF route) opts in', () => {
+    const src = read('routes/reports-public.js');
+    expect(src).toMatch(/pinnedLawnHistoryIdentity,[^\n]*\bexpectationFactsOut,[\s\S]{0,400}?pestWeekWeather: true,\n\s*\}\);/);
+  });
+
+  test('pdf-queue opts in', () => {
+    const src = read('services/service-report/pdf-queue.js');
+    expect(src).toMatch(/buildReportV1Data\(service, reportToken, knex, \{[^\n]*pestWeekWeather: true \}\);/);
+  });
+
+  test('the public map.svg handler passes no options and so never resolves weather', () => {
+    const src = read('routes/reports-public.js');
+    expect(src).toMatch(/const data = await buildReportV1Data\(service, req\.params\.token\);/);
   });
 });

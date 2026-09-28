@@ -116,10 +116,17 @@ round 2: `rainChance` alone is the probability of ANY precipitation, not its
 intensity, and `getDailyRainOutlookBounded` exposes no quantitative amount
 to fall back on, so a high chance of light rain must never trigger this
 caveat on the bare percentage) — `reports-public.js` computes that forecast
-signal only when `mode === 'live'` and always passes `false` for the PDF and
-any other static render, so the PDF/static payload's `rain.lines` can only
-ever be the trailing-week fact + optional rainfast clause, never the
-forecast sentence — and a PDF/static render carries the trailing-week fact
+signal only when `mode === 'live'` AND the visit's `service_date` is RECENT
+(codex P1 2026-09-29 round 4: within the last 2 ET calendar days —
+`isRecentServiceDate`, an ET-calendar-day comparison via `etDateString`/
+`addETDays`, never 24h epoch-ms arithmetic — today, yesterday, or the day
+before; older never fetches the forecast at all), and always passes `false`
+for the PDF and any other static render or an older live reopen, so the
+PDF/static payload's `rain.lines` can only ever be the trailing-week fact +
+optional rainfast clause, never the forecast sentence, and a customer who
+reopens a weeks-old live report link never gets a heavy-rain caveat dated
+to TODAY's weather framed as being about that old treatment — a PDF/static
+render carries the trailing-week fact
 ONLY once that 7-day window has closed (`application-conditions.js` stamps
 each result with `windowClosed`; `reports-public.js`
 `settledWeekWeatherForRender` drops an open, still-accumulating week from
@@ -149,7 +156,14 @@ area string never qualifies, fail closed. No applications at all
 (inspection/sweep-only visit), an interior-only application, or unknown
 method/area all fall back to a treatment-neutral sentence (rain pushes ants
 indoors; text us if activity persists) that states the same honest
-biological fact without claiming a treatment is responsible. The same
+biological fact without claiming a treatment is responsible. The
+treated-band claim, and the ant/colony-specific non-repellent what-to-expect
+line, additionally require an application the technician TAGGED for ants
+(the structured `targets` list, word-bounded match on "ant"/"ants" — codex
+P1 2026-09-28 round 4): a non-repellent applied for roaches only, or the
+auto-seeded pest mix on a visit with no ant target, gets pest-neutral
+transfer wording instead. Ant bait keeps its ant wording (the product is
+an ant bait by definition). The same
 predicate feeds the `EXPECTATIONS` grounding section below; that path is
 structurally incapable of proving perimeter evidence (its product list is
 deduped by catalog product, not by application) and so always gets the
@@ -162,6 +176,14 @@ for the identical reason): `report-data.js`'s `resolvePestWeekWeather` /
 itself, is the ONE canonical resolution every caller shares — the direct
 PDF route's pre-render pass, `pdf-queue.js`'s pre-render pass, AND the
 browser's own independent live `/data` fetch all call `buildReportV1Data`.
+The lookup is OPT-IN (codex P2 2026-09-28 round 4, `pestWeekWeather: true`
+in `buildReportV1Data`'s options): only the `/data` response builder
+(which also serves the direct PDF route) and `pdf-queue.js` pass it; every
+other caller — e.g. the public `/:token/map.svg` handler, which renders no
+expectations — skips the resolution entirely (no fetch, no pin write, and
+`pestWeekWeatherUncacheable` stays false), so a cold provider outage can
+never hold a request that has no use for the weather. Live requests bound
+the lookup at 1.2 s; PDF pre-renders stay unbounded.
 The first successful render freezes the settled week onto
 `service_records.structured_notes.pestWeekWeather` (first-writer-wins, an
 atomic conditional UPDATE guarded on the key's absence — no preceding
@@ -180,9 +202,11 @@ separate fetch anywhere to disagree with the render.
 returns (sibling of `pestReportV2`, which is composed later in
 `reports-public.js`'s wrapper — so the marker survives even when
 `pestReportV2` itself composes to nothing), TRUE whenever the gate is on,
-coordinates exist (a fetch was attempted at all — no coordinates is the
-one legitimate, permanently-cacheable absence, and never fetches), and the
-result is not both SETTLED (`windowClosed === true`) AND POPULATED
+either the visit has NO coordinates yet (codex P2 2026-09-28 round 4:
+that state is PENDING, not permanent — the hourly geocoder backstop fills
+null customer/service-location coordinates, the same `no_coordinates`
+rule the lawn water balance uses — so nothing is fetched but nothing is
+cached either) or a fetch was attempted and the result is not both SETTLED (`windowClosed === true`) AND POPULATED
 (`rainInches != null`) AND successfully FROZEN — an open window, a
 provider outage disguised as a "settled" empty reading
 (`fetchServiceWeekWeather`'s own fallback can legitimately return
@@ -285,30 +309,24 @@ when the method/area is unknown or indicates an interior application, the
 report uses different, non-barrier wording for the SAME product class
 rather than silently asserting the claim. Never a "guarantee"
 or "eliminate" claim (screened through the existing `validateCustomerCopy`
-banned-copy guard). The same rain + what-to-expect facts (never the spider
-block, never the live forecast clause) also feed an `EXPECTATIONS` section
+banned-copy guard). The what-to-expect facts (never the rain block, never
+the spider block, never the live forecast clause) also feed an `EXPECTATIONS` section
 into the AI report writer's grounding context
 (`report-copy-context.js`'s `buildReportCopyContext`) under the same gate,
 so generated copy never contradicts the deterministic blocks — that
 grounding text is a prompt input, not part of any customer-fetchable
-payload; that caller has no per-application method/area data (its product
+payload. The grounding carries NO rain or ants-after-rain lines at all
+(codex P1 2026-09-28 round 4): the writer runs at completion, the same day
+as the visit, when the trailing 7-day window is by definition still
+accumulating, so any total would be a partial reading baked permanently
+into saved summary text while the PDF deliberately withholds that same
+number until `windowClosed` — only the product-class what-to-expect lines
+ground the writer; that caller has no per-application method/area data (its product
 list is deduped by catalog product, not by application), so it always
 falls back to the non-barrier pyrethroid wording rather than assuming a
 barrier — the same fail-closed default, never a contradiction with the
-deterministic card. The grounding's own weekWeather fetch resolves through
-the visit's SERVICED PARCEL — the same COALESCE/divergence coordinate rule
-`report-data.js` and `reports-public.js` use for the deterministic card's
-fetch, preferring an already-pinned
-`service_records.structured_notes.pestWeekWeather` when one exists (codex
-P2 2026-09-29 round 3: it used to read the customer's PRIMARY coordinates
-unconditionally, so a visit at a stamped alternate property — e.g. a
-rental — could ground rain/ant copy for the WRONG home while the
-deterministic card used the visit's own coordinates). An unresolvable
-visit (no `scheduledServiceId`-linked row, or no coordinates on either
-side) fails closed — no rain/ants grounding lines at all — rather than
-ever falling back to the primary; a visit with no `scheduledServiceId` at
-all (nothing that could diverge from the primary) uses the customer's own
-primary coordinates directly, same as before. `moa_group` and `rainfast_minutes` (the catalog facts
+deterministic card. The grounding never resolves weekly weather for the visit (no
+serviced-parcel lookup, no pin read) — rain is a render-time card only. `moa_group` and `rainfast_minutes` (the catalog facts
 that drive this classification) are SERVER-INTERNAL ONLY (codex P0
 2026-09-28): they are never present on `data.applications[].product` in any
 render (gate on or off, every service line) — `report-data.js`'s

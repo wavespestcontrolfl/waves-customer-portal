@@ -2725,11 +2725,11 @@ async function freezePestWeekWeather(serviceRecordId, weekWeather, knex = db) {
 // pin settles on whichever render happens first, live or not. Returns
 // { weekWeather, uncacheable }: weekWeather is the raw fetched/frozen
 // object ({ rainInches, et0Inches, dailyRain, rainConfidence, rainSource,
-// windowClosed }) or null (no coordinates, or gate off — a permanent,
-// legitimately-cacheable absence); uncacheable is true whenever a fetch
-// was attempted and the result is not both settled and persisted — an
-// open window, a provider outage, or a freeze that could not be written
-// are all treated alike, matching pestWeekWeatherUncacheable's existing
+// windowClosed }) or null (no coordinates, or gate off); uncacheable is
+// true whenever the visit has no coordinates yet (the geocoder backstop
+// may still fill them) or a fetch was attempted and the result is not both
+// settled and persisted — an open window, a provider outage, or a freeze
+// that could not be written are all treated alike, matching pestWeekWeatherUncacheable's existing
 // contract (docs/public-route-contracts.md).
 async function resolvePestWeekWeather(service, serviceLine, knex = db) {
   if (serviceLine !== 'pest' || !pestReportExpectationsGateOn()) {
@@ -2743,8 +2743,11 @@ async function resolvePestWeekWeather(service, serviceLine, knex = db) {
   const latN = toCoordinate(latitude);
   const lonN = toCoordinate(longitude);
   if (latN == null || lonN == null || (latN === 0 && lonN === 0)) {
-    // No coordinates — nothing to fetch, nothing that will ever change.
-    return { weekWeather: null, uncacheable: false };
+    // No coordinates is PENDING, not permanent (codex P2 2026-09-28 round
+    // 4): the hourly geocoder backstop fills null customer/service-location
+    // coordinates, so a PDF stored now would keep serving without its rain
+    // block after geocoding. Same rule as the lawn path's `no_coordinates`.
+    return { weekWeather: null, uncacheable: true };
   }
   try {
     const fetched = await fetchServiceWeekWeather({ latitude, longitude, serviceDate: service.service_date });
@@ -4014,7 +4017,14 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   // browser's own independent live /data fetch), so there is no separate
   // preflight fetch left to disagree with whatever the browser actually
   // renders — see resolvePestWeekWeather's own comment.
-  const { weekWeather: pestWeekWeather, uncacheable: pestWeekWeatherUncacheable } = await resolvePestWeekWeatherForBuild(service, serviceLine, knex, opts.mode);
+  // OPT-IN (codex P2 2026-09-28 round 4): only callers that render the
+  // expectations block pay for the lookup — the /data response builder
+  // (live, bounded) and the PDF builders (direct route + pdf-queue,
+  // unbounded). Every other caller (e.g. the public map.svg handler, which
+  // passes no options) skips it entirely: no fetch, no pin write, cacheable.
+  const { weekWeather: pestWeekWeather, uncacheable: pestWeekWeatherUncacheable } = opts.pestWeekWeather === true
+    ? await resolvePestWeekWeatherForBuild(service, serviceLine, knex, opts.mode)
+    : { weekWeather: null, uncacheable: false };
   if (opts.expectationFactsOut && typeof opts.expectationFactsOut === 'object') {
     opts.expectationFactsOut.applications = applications.map((app, index) => ({
       id: app.id,

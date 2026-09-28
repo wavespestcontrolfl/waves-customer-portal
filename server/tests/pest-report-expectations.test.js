@@ -230,22 +230,53 @@ describe('buildRainExpectation', () => {
       expect(out.lines[1]).not.toMatch(/treated band/);
     });
 
-    it('an EXPLICIT perimeter spray (non_repellent) earns the treated-band wording', () => {
+    it('an EXPLICIT perimeter spray (non_repellent) TAGGED for ants earns the treated-band wording', () => {
       const out = buildRainExpectation({
         weekWeather: HEAVY_WEEK,
-        products: [{ name: 'Taurus SC', method: 'perimeter_spray', methodInferred: false }],
+        products: [{ name: 'Taurus SC', method: 'perimeter_spray', methodInferred: false, targets: ['Ants'] }],
         serviceMonth: 7,
       });
       expect(out.lines[1]).toMatch(/treated band/);
     });
 
-    it('an applicationArea naming an exterior/perimeter chip (no explicit method) also earns the treated-band wording', () => {
+    it('an applicationArea naming an exterior/perimeter chip (no explicit method), tagged for ants, also earns the treated-band wording', () => {
       const out = buildRainExpectation({
         weekWeather: HEAVY_WEEK,
-        products: [{ name: 'Demand CS', applicationArea: 'Foundation perimeter' }],
+        products: [{ name: 'Demand CS', applicationArea: 'Foundation perimeter', targets: ['ants', 'spiders'] }],
         serviceMonth: 7,
       });
       expect(out.lines[1]).toMatch(/treated band/);
+    });
+
+    // codex P1 2026-09-28 round 4: the colony/trail claim is ANT-specific —
+    // a confirmed perimeter band applied for roaches only, or with no targets
+    // recorded, gets the pest-neutral wording.
+    it('a confirmed perimeter spray tagged ONLY for roaches never earns the treated-band wording', () => {
+      const out = buildRainExpectation({
+        weekWeather: HEAVY_WEEK,
+        products: [{ name: 'Taurus SC', method: 'perimeter_spray', methodInferred: false, targets: ['Roaches'] }],
+        serviceMonth: 7,
+      });
+      expect(out.lines[1]).toMatch(/Heavy rain pushes ants indoors/);
+      expect(out.lines[1]).not.toMatch(/treated band/);
+    });
+
+    it('a confirmed perimeter spray with NO targets recorded never earns the treated-band wording', () => {
+      const out = buildRainExpectation({
+        weekWeather: HEAVY_WEEK,
+        products: [{ name: 'Taurus SC', method: 'perimeter_spray', methodInferred: false }],
+        serviceMonth: 7,
+      });
+      expect(out.lines[1]).not.toMatch(/treated band/);
+    });
+
+    it('the ant target match is word-bounded ("Giant water bugs" is not an ant tag)', () => {
+      const out = buildRainExpectation({
+        weekWeather: HEAVY_WEEK,
+        products: [{ name: 'Taurus SC', method: 'perimeter_spray', methodInferred: false, targets: ['Giant water bugs', 'pantry pests'] }],
+        serviceMonth: 7,
+      });
+      expect(out.lines[1]).not.toMatch(/treated band/);
     });
 
     // codex P1 2026-09-29 (pre-push audit round 3): same collision as the
@@ -431,6 +462,41 @@ describe('buildWhatToExpect', () => {
     expect(out.lines).toHaveLength(1);
     expect(out.lines[0]).toMatch(/carry it back to the colony/);
     expect(out.lines[0]).not.toMatch(/dead roaches/);
+  });
+
+  // codex P1 2026-09-28 round 4: "ants may show up more" is ant-specific
+  // copy — it needs a non-repellent application the tech TAGGED for ants.
+  describe('non-repellent ant wording requires an ant-tagged application', () => {
+    it('tagged for ants → the ant/colony transfer line', () => {
+      const out = buildWhatToExpect({ products: [{ name: 'Taurus SC', targets: ['Ants'] }] });
+      expect(out.lines[0]).toMatch(/ants may show up more/);
+    });
+
+    it('tagged for roaches only → pest-neutral transfer wording, no ants', () => {
+      const out = buildWhatToExpect({ products: [{ name: 'Alpine WSG', targets: ['Roaches'] }] });
+      expect(out.lines[0]).toMatch(/Non-repellent products/);
+      expect(out.lines[0]).not.toMatch(/ants/i);
+      expect(out.lines[0]).not.toMatch(/colony/i);
+    });
+
+    it('no targets recorded (e.g. the grounding path) → pest-neutral transfer wording', () => {
+      const out = buildWhatToExpect({ products: [{ name: 'Taurus SC' }] });
+      expect(out.lines[0]).toMatch(/Non-repellent products/);
+      expect(out.lines[0]).not.toMatch(/ants/i);
+    });
+
+    it('one ant-tagged non-repellent among several applications is enough', () => {
+      const out = buildWhatToExpect({ products: [
+        { name: 'Alpine WSG', targets: ['Roaches'] },
+        { name: 'Taurus SC', targets: ['ants'] },
+      ] });
+      expect(out.lines[0]).toMatch(/ants may show up more/);
+    });
+
+    it('toExpectationProduct carries the application targets (trimmed), null when absent', () => {
+      expect(toExpectationProduct({ product: { name: 'Taurus SC' }, targets: [' Ants ', '', 'Spiders'] }).targets).toEqual(['Ants', 'Spiders']);
+      expect(toExpectationProduct({ product: { name: 'Taurus SC' } }).targets).toBeNull();
+    });
   });
 
   it('Advion WDG Granular also classifies ant_bait', () => {

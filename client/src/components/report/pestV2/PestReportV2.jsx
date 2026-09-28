@@ -725,13 +725,16 @@ function Line({ label, value }) {
 // (server/services/service-report/pest-report-expectations.js). Each renders
 // nothing when its own payload key is absent — the gate being off, or that
 // visit simply having no relevant data, look identical to the client.
+// Body copy in these three expectation cards is 16px — the customer-surface
+// body floor (docs/design/waves-customer-facing-design-brief.md); 14px is
+// reserved for the eyebrow labels (codex P2 #5137 round 4).
 export function PestRainExpectation({ rain }) {
   if (!rain?.lines?.length) return null;
   return (
     <section data-glass="card" style={card}>
       <div data-gt="eyebrow" style={eyebrow}>Rain and your treatment</div>
       {rain.lines.map((line) => (
-        <p key={line} style={{ fontSize: 14, color: BODY, lineHeight: 1.5, margin: '4px 0' }}>{line}</p>
+        <p key={line} style={{ fontSize: 16, color: BODY, lineHeight: 1.5, margin: '4px 0' }}>{line}</p>
       ))}
     </section>
   );
@@ -742,9 +745,9 @@ export function PestSpiderExpectation({ spiders }) {
   return (
     <section data-glass="card" style={{ ...card, borderLeft: `4px solid ${COLORS.glassNavy}` }}>
       <div data-gt="eyebrow" style={eyebrow}>{spiders.headline || 'Spiders'}</div>
-      {spiders.whatWeDid ? <p style={{ fontSize: 14, color: BODY, lineHeight: 1.5, margin: '0 0 6px' }}>{spiders.whatWeDid}</p> : null}
-      <p style={{ fontSize: 14, color: BODY, lineHeight: 1.5, margin: '0 0 6px' }}>{spiders.expectation}</p>
-      {spiders.nextStep ? <p style={{ fontSize: 14, color: MUTED, lineHeight: 1.5, margin: 0 }}>{spiders.nextStep}</p> : null}
+      {spiders.whatWeDid ? <p style={{ fontSize: 16, color: BODY, lineHeight: 1.5, margin: '0 0 6px' }}>{spiders.whatWeDid}</p> : null}
+      <p style={{ fontSize: 16, color: BODY, lineHeight: 1.5, margin: '0 0 6px' }}>{spiders.expectation}</p>
+      {spiders.nextStep ? <p style={{ fontSize: 16, color: MUTED, lineHeight: 1.5, margin: 0 }}>{spiders.nextStep}</p> : null}
     </section>
   );
 }
@@ -756,7 +759,7 @@ export function PestWhatToExpect({ whatToExpect }) {
       <div data-gt="eyebrow" style={eyebrow}>What to expect</div>
       <ul style={{ margin: '4px 0 0', paddingLeft: 18 }}>
         {whatToExpect.lines.map((line) => (
-          <li key={line} style={{ fontSize: 14, color: BODY, lineHeight: 1.5, marginBottom: 6 }}>{line}</li>
+          <li key={line} style={{ fontSize: 16, color: BODY, lineHeight: 1.5, marginBottom: 6 }}>{line}</li>
         ))}
       </ul>
     </section>
