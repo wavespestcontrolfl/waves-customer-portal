@@ -68,11 +68,15 @@ jest.mock('../services/invoice', () => {
   return {
     voidOpenInvoicesForCancelledService: jest.fn().mockResolvedValue([]),
     CANCELLED_SERVICE_RESOLVED_STATUSES: RESOLVED,
-    // The shared post-void scope, run against this suite's db mock (the
-    // direct-or-service-record SQL itself is covered where it lives).
-    unresolvedInvoicesForCancelledService: (conn, id) => conn('invoices')
-      .where({ scheduled_service_id: id })
-      .whereNotIn('status', RESOLVED),
+    // The shared post-void scope over this suite's in-memory tables: direct
+    // link OR a service-record link (the SQL itself is tested in
+    // invoice-cancel-void-amounts.test.js).
+    unresolvedInvoicesForCancelledService: jest.fn((conn, id) => ({
+      select: async () => (conn.__tables.invoices || [])
+        .filter((r) => (r.scheduled_service_id === id || r.service_record_scheduled_service_id === id)
+          && !RESOLVED.includes(r.status))
+        .map((r) => ({ id: r.id })),
+    })),
   };
 });
 
@@ -501,6 +505,8 @@ describe('processCancellationRequest', () => {
       { id: 'inv3', scheduled_service_id: 'other', status: 'sent' },   // other visit — untouched
       { id: 'inv4', scheduled_service_id: 's1', status: 'paid' },      // captured money — review
       { id: 'inv5', scheduled_service_id: 's1', status: 'refunded' },  // already resolved — fine
+      // linked only through the visit's service record, money captured — review
+      { id: 'inv6', scheduled_service_id: null, service_record_scheduled_service_id: 's1', status: 'paid' },
     ];
     db.__tables.customers = [{ id: 'c1', pipeline_stage: 'active_customer', active: true }];
     db.__tables.payments = [];
@@ -509,8 +515,9 @@ describe('processCancellationRequest', () => {
     const result = await processCancellationRequest({ customerId: 'c1', requestId: 'req6' });
 
     expect(result.cancelledCount).toBe(1);
-    expect(result.errors).toEqual(['invoice_review:inv1', 'invoice_review:inv4']);
+    expect(result.errors).toEqual(['invoice_review:inv1', 'invoice_review:inv4', 'invoice_review:inv6']);
     expect(result.ok).toBe(false);
+    expect(require('../services/invoice').unresolvedInvoicesForCancelledService).toHaveBeenCalledWith(db, 's1');
   });
 
   test('a reminder row left uncancelled after the helper runs is surfaced for manual review', async () => {
