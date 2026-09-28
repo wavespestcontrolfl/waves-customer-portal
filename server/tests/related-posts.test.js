@@ -10,6 +10,7 @@ jest.mock('../models/db', () => jest.fn());
 const {
   rankRelatedPosts,
   getRelatedPostsForBrief,
+  getLiveRelatedPaths,
   candidateFromRow,
   candidateFromAutonomousRun,
   candidateFromRegistryRow,
@@ -396,6 +397,14 @@ describe('candidateFromRegistryRow', () => {
     }
   });
 
+  test('rejects an astro_changed_since_sync row that is DB-matched (db_blog_id set) — not Astro-only lineage', () => {
+    expect(candidateFromRegistryRow({
+      ...liveAstroOnly,
+      reconciliation_status: 'astro_changed_since_sync',
+      db_blog_id: 'blog-123',
+    })).toBeNull();
+  });
+
   test('rejects db_changed_since_sync — that status is only reachable from a DB-matched row the blog_posts query already covers', () => {
     expect(candidateFromRegistryRow({
       ...liveAstroOnly,
@@ -529,6 +538,46 @@ describe('getRelatedPostsForBrief — DB wrapper', () => {
     ]);
     expect(out.some((r) => r.path.includes('termite-legacy-slug'))).toBe(false);
     expect(out.some((r) => r.path.includes('failed-build'))).toBe(false);
+  });
+
+  test('getLiveRelatedPaths keeps only frozen paths that are still verified live', async () => {
+    const registryRows = [{
+      id: 'registry-1',
+      canonical_url_normalized: '/termite/direct-astro-post/',
+      content_type: 'blog',
+      reconciliation_status: 'astro_only',
+      workflow_status: 'published',
+      astro_status: 'present',
+      live_status: 'live',
+      noindex_detected: false,
+      title: 'Direct Astro Termite Post',
+      metadata: { frontmatter: {} },
+    }];
+    const database = fakeDb({ registryRows });
+    const live = await getLiveRelatedPaths(['/termite/direct-astro-post/', '/termite/unpublished-since/'], { database });
+    expect([...live]).toEqual(['/termite/direct-astro-post/']);
+    expect([...(await getLiveRelatedPaths([], { database }))]).toEqual([]);
+  });
+
+  test('getLiveRelatedPaths requires the path to be live on the frozen publish host', async () => {
+    // The selected hub post has since moved to a spoke: its path is still
+    // live in the fleet, but not on the hub the draft publishes to.
+    const registryRows = [{
+      id: 'registry-moved',
+      canonical_url_normalized: '/termite/moved-post/',
+      live_url: 'https://www.sarasotaflpestcontrol.com/termite/moved-post/',
+      content_type: 'blog',
+      reconciliation_status: 'astro_only',
+      workflow_status: 'published',
+      astro_status: 'present',
+      live_status: 'live',
+      noindex_detected: false,
+      title: 'Moved Termite Post',
+      metadata: { frontmatter: { domains: ['sarasotaflpestcontrol.com'] } },
+    }];
+    const database = fakeDb({ registryRows });
+    expect([...(await getLiveRelatedPaths(['/termite/moved-post/'], { database, hosts: ['wavespestcontrol.com'] }))]).toEqual([]);
+    expect([...(await getLiveRelatedPaths(['/termite/moved-post/'], { database, hosts: ['sarasotaflpestcontrol.com'] }))]).toEqual(['/termite/moved-post/']);
   });
 
   test('matches current registry health to an absolute spoke URL by domain and path', async () => {

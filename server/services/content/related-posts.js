@@ -337,12 +337,11 @@ function candidateFromAutonomousRun(row) {
 }
 
 // Reconciliation statuses that still mean "this IS the Astro-only row for
-// this post" — astro_only is the steady state; astro_changed_since_sync is
-// the SAME lineage (content-registry.js only assigns it in the astro-item,
-// no-db-match branch) with a transient astro_file_hash drift flagged on top,
-// cleared by the next unchanged sync. Never db_changed_since_sync (that
-// status is reachable from a DB-MATCHED row, which the blog_posts query
-// already covers) and never conflict/db_only/etc.
+// this post" — astro_only is the steady state. astro_changed_since_sync is
+// assigned to BOTH DB-matched and unmatched rows whose Astro hash drifted
+// (content-registry.js changeStatus), so it counts as Astro-only lineage
+// only when the row has no db_blog_id; a DB-matched row is covered by the
+// blog_posts query instead. Never db_changed_since_sync, conflict, etc.
 const REGISTRY_ASTRO_OWNED_STATUSES = new Set(['astro_only', 'astro_changed_since_sync']);
 
 // The registry is the only durable inventory for Astro-authored posts that
@@ -359,6 +358,7 @@ function candidateFromRegistryRow(row) {
   const frontmatter = registryFrontmatter(safeRow);
   const path = registryRowLivePath(safeRow);
   if (!path || !REGISTRY_ASTRO_OWNED_STATUSES.has(safeRow.reconciliation_status)) return null;
+  if (safeRow.reconciliation_status === 'astro_changed_since_sync' && safeRow.db_blog_id != null) return null;
   const verifiedSites = registryRowVerifiedSites(safeRow);
   if (!verifiedSites.length) return null;
   return {
@@ -383,7 +383,10 @@ function candidateFromRegistryRow(row) {
  * rankRelatedPosts' first argument. `opts.database` overrides the knex
  * connection (tests inject a mock); `opts.limit` overrides the cap.
  */
-async function getRelatedPostsForBrief(target = {}, { database = db, limit = RELATED_POSTS_DEFAULT_LIMIT } = {}) {
+// Every related-post candidate that is verified live right now (blog_posts,
+// autonomous runs and the content registry, cross-checked). Shared by brief
+// composition (ranked) and the publish-time recheck (paths only).
+async function loadVerifiedCandidates(database) {
   const rows = await database('blog_posts')
     .select('id', 'title', 'keyword', 'tag', 'category', 'slug', 'city', 'target_sites', 'status', 'astro_status', 'astro_live_url');
   // The audit table is append-only and draft_payload carries the full
@@ -422,6 +425,7 @@ async function getRelatedPostsForBrief(target = {}, { database = db, limit = REL
       'astro_status',
       'live_status',
       'reconciliation_status',
+      'db_blog_id',
       'noindex_detected',
       'title',
       'target_keyword',
@@ -493,7 +497,23 @@ async function getRelatedPostsForBrief(target = {}, { database = db, limit = REL
   for (const candidate of registryCandidatesByPath.values()) {
     if (!autonomousPaths.has(candidate.path)) candidates.push(candidate);
   }
-  return rankRelatedPosts(target, candidates, { limit });
+  return candidates;
+}
+
+async function getRelatedPostsForBrief(target = {}, { database = db, limit = RELATED_POSTS_DEFAULT_LIMIT } = {}) {
+  return rankRelatedPosts(target, await loadVerifiedCandidates(database), { limit });
+}
+
+// Publish-time recheck: of the frozen related paths, the ones still verified
+// live NOW on every frozen publish host (a post can be unpublished,
+// noindexed or moved to another fleet domain while a draft that links it
+// waits for review). Hosts default to the hub, like candidate targetSites.
+async function getLiveRelatedPaths(paths = [], { database = db, hosts = [] } = {}) {
+  const wanted = new Set((Array.isArray(paths) ? paths : []).map(normalizePathForCompare).filter(Boolean));
+  if (!wanted.size) return new Set();
+  const sites = Array.isArray(hosts) && hosts.length ? hosts : HUB_SITE_KEYS;
+  const liveKeys = new Set((await loadVerifiedCandidates(database)).flatMap(candidateLiveKeys));
+  return new Set([...wanted].filter((p) => sites.every((site) => liveKeys.has(`${site}|${p}`))));
 }
 
 module.exports = {
@@ -506,5 +526,6 @@ module.exports = {
   registryRowLivePath,
   registryRowLiveKeys,
   getRelatedPostsForBrief,
+  getLiveRelatedPaths,
   _internals: { extractTokens, entityCandidates, candidateRendersOnDomains, normalizePathForCompare, GENERIC_TOPIC_TOKENS },
 };

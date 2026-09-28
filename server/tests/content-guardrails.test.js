@@ -2558,6 +2558,31 @@ describe('internal-route allowlist (UNKNOWN_INTERNAL_ROUTE)', () => {
     expect(wrongHostAbsolute.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(false);
   });
 
+  test('a related path that failed the publish-time liveness recheck is denied, even via the generic allowlist', () => {
+    const options = {
+      relatedPostLinks: ['/termite/swarmers/', '/termite/live-post/'],
+      relatedPostHosts: ['wavespestcontrol.com'],
+      relatedPostLinksLive: true,
+      staleRelatedPostLinks: ['/termite/swarmers/'],
+    };
+    const stale = guardrails.evaluate({ body: '[Swarmers](/termite/swarmers/)', checked_existing_routes: ['/termite/swarmers/'] }, options);
+    expect(stale.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
+    const live = guardrails.evaluate({ body: '[Live](/termite/live-post/)' }, options);
+    expect(live.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(false);
+  });
+
+  test('related-post paths match with their canonical case', () => {
+    const options = {
+      relatedPostLinks: ['/termite/swarmers/'],
+      relatedPostHosts: ['wavespestcontrol.com'],
+      relatedPostLinksLive: true,
+    };
+    const exact = guardrails.evaluate({ body: '[Swarmers](/termite/swarmers/)' }, options);
+    expect(exact.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(false);
+    const recased = guardrails.evaluate({ body: '[Swarmers](/Termite/Swarmers/)' }, options);
+    expect(recased.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
+  });
+
   test('member-expression components are rejected (Codex round 2)', () => {
     const r = guardrails.evaluate({ body: 'See <ComparisonTable.Row label="x" /> for details.' }, {});
     expect(r.findings.some((f) => f.code === 'UNCATALOGED_COMPONENT')).toBe(true);
