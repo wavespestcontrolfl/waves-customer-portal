@@ -58,7 +58,9 @@ const DESCRIBES_CURRENT_SQL = (t) => `${t}.d = scheduled_services.scheduled_date
 //     promise Waves made is never closed by a later reply.
 // 20: a staff promise carries the day it named (sms_context.due_date), and
 //     the check is told a promise is kept only by doing it on that day.
-const FULFILLMENT_POLICY = 20;
+// 21: a general staff promise admits any delivered text written after it and
+//     an email to the customer's account as delivery of the promised item.
+const FULFILLMENT_POLICY = 21;
 const SCHEMA = {
   type: 'object', additionalProperties: false, required: ['verdict', 'record_ref', 'quote'],
   properties: {
@@ -145,6 +147,12 @@ const writtenAfterAsk = (record, commitment) => !record.scheduled_at
 // 'request'). A promise Waves made (basis 'promise') is kept by doing it,
 // never by a later reply ("Thanks!" is no prep guide): the model judges it.
 const customerAsk = (commitment) => commitment.kind === 'other' && commitment.sms_context?.basis === 'request';
+// A general promise staff texted (basis 'promise') is kept by delivering or
+// doing the thing, whoever pressed send: any delivered text, or email to the
+// customer's account, may carry the promised item — the model judges which
+// one does — besides a visit, money or a call back that reached the customer
+// (Codex #5248 r2 P1). The ask-only person-reply limits do not apply.
+const staffPromise = (commitment) => commitment.kind === 'other' && commitment.sms_context?.basis === 'promise';
 // A call a person placed: the staff bridge rings a staff phone first and
 // dials the customer only after that person presses 1 (call-bridge.js,
 // sourced by admin-communications.js and tech-line.js). Automated outbound
@@ -306,7 +314,7 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
         this.where((q) => q.where('sent_at', '>', after).where('sent_at', '<=', now))
           .orWhere((q) => q.where('delivered_at', '>', after).where('delivered_at', '<=', now));
       }).orderByRaw('COALESCE(delivered_at, sent_at) DESC').limit(LIMIT + 1)
-      .select('id', 'status', 'trigger_event_id', 'recipient_email_snapshot', 'text_snapshot', 'subject_snapshot', 'sent_at', 'delivered_at', 'opened_at', 'clicked_at', 'bounced_at', 'created_at'),
+      .select('id', 'status', 'trigger_event_id', 'recipient_type', 'recipient_id', 'recipient_email_snapshot', 'text_snapshot', 'subject_snapshot', 'sent_at', 'delivered_at', 'opened_at', 'clicked_at', 'bounced_at', 'created_at'),
     estimate: conn('estimates').modify((q) => whereEstimateCustomerOwnership(q, customerId))
       .modify((q) => handedOffWithin(q, after, now)).orderByRaw(handoffOrder(conn, after, now)).limit(LIMIT + 1)
       .select(...HANDOFF_COLS(conn), 'property_id', 'service_interest', 'address'),
@@ -623,7 +631,12 @@ function smsDelivered(record) {
 function automatedNoticeInScope(record, commitment) {
   const propertyId = commitment.sms_context?.property_id;
   if (!propertyId || HUMAN_SMS_TYPES.includes(record.message_type)) return true;
-  return !!record.linked_property_id && String(record.linked_property_id) === String(propertyId);
+  // A general staff promise is kept by the promised item itself (a prep
+  // guide, a link), which no visit stamps: an unstamped text may carry it,
+  // for the model to judge; one stamped with another property never does
+  // (Codex #5248 r2).
+  if (!record.linked_property_id) return staffPromise(commitment);
+  return String(record.linked_property_id) === String(propertyId);
 }
 
 function visitWitnessAt(record, commitment) {
@@ -708,10 +721,11 @@ function admissibleWitness(record, commitment, records = []) {
   const deliveredEstimate = () => !!linkedEstimate(record, commitment, records) && new Date(record.sent_at) > after;
   const witnesses = {
     sms: () => smsDelivered(record)
-      && (SMS_TYPES[commitment.kind] || HUMAN_SMS_TYPES).includes(record.message_type)
+      && (staffPromise(commitment) || (SMS_TYPES[commitment.kind] || HUMAN_SMS_TYPES).includes(record.message_type))
       && automatedNoticeInScope(record, commitment)
-      // A general ask takes only a reply a person wrote after it, never an automated notice.
-      && (commitment.kind !== 'other' || (operatorReply(record) && writtenAfterAsk(record, commitment))),
+      // A general ask takes only a reply a person wrote after it, never an
+      // automated notice; a staff promise, any text written after it.
+      && (commitment.kind !== 'other' || (writtenAfterAsk(record, commitment) && (staffPromise(commitment) || operatorReply(record)))),
     call: () => record.status === 'completed' && Number(record.duration_seconds) >= 60
       // A general ask takes only a call back that reached the customer.
       && (commitment.kind !== 'other' || personCallBack(record)),
@@ -720,7 +734,11 @@ function admissibleWitness(record, commitment, records = []) {
     // delivery event was lost.
     email_delivery: () => (['delivered', 'opened', 'clicked'].includes(record.status) || !!record.opened_at || !!record.clicked_at)
       && !!record.sent_at && !record.bounced_at
-      && emails.size === 1 && emails.has(normalized(record.recipient_email_snapshot))
+      // A staff promise naming no address is delivered by an email to the
+      // customer's own account; one naming an address needs that address.
+      && (staffPromise(commitment) && !emails.size
+        ? record.recipient_type === 'customer' && String(record.recipient_id) === String(commitment.sms_context?.customer_id)
+        : emails.size === 1 && emails.has(normalized(record.recipient_email_snapshot)))
       && (!estimateDelivery || deliveredEstimate()),
     estimate: () => !!witnessAt(record, new Date(commitment.sms_context?.source_at)),
     visit: () => visitStatusAdmits(record, commitment.kind) && !!visitWitnessAt(record, commitment),
@@ -764,7 +782,9 @@ function witnessTypes(commitment) {
   // close a customer's ask without the model (replyFulfillment) and are
   // judged by the model for a promise Waves made, as well as by a visit event
   // (R1) or money landing (R2), which the model still judges.
-  if (PAYMENT_WITNESS_KINDS.includes(commitment.kind)) return ['visit', 'payment', 'sms', 'call'];
+  if (PAYMENT_WITNESS_KINDS.includes(commitment.kind)) {
+    return staffPromise(commitment) ? ['visit', 'payment', 'sms', 'call', 'email_delivery'] : ['visit', 'payment', 'sms', 'call'];
+  }
   // `callback` keeps its existing mix: a real call back, or the same visible
   // field progress that answers an "other" ask (owner ruling 2026-09-24).
   if (commitment.kind === 'callback') return [...REQUIRED_TYPES.callback, 'visit'];

@@ -146,13 +146,24 @@ function quotedDayParts(dayText, reference) {
 // "end of day"), a weekday or "tomorrow" with a part of the day ("tomorrow
 // morning"), and the two spans the SMS staff-promise plan rules on (owner
 // ruling 2026-09-28): "this weekend" is its Sunday and "next week" is next
-// week's Friday. A leading "by / on / before / until / to / for" is read
-// through. Anything else ("next Wednesday", "in two weeks", a clock), a past
-// date or a date that does not exist is null.
+// week's Friday. Common weekday abbreviations read as the day ("Wed",
+// "Thurs"). A leading "by / on / until / to / for" is read through;
+// "before" is exclusive, so "before Wednesday" is Tuesday (Codex #5248 r2).
+// Anything else ("next Wednesday", "in two weeks", a clock), a past date or
+// a date that does not exist is null.
+const WEEKDAY_ABBREVIATIONS = { mon: 'monday', tue: 'tuesday', tues: 'tuesday', wed: 'wednesday', weds: 'wednesday',
+  thu: 'thursday', thur: 'thursday', thurs: 'thursday', fri: 'friday', sat: 'saturday', sun: 'sunday' };
 function parseQuotedETDay(text, reference) {
   if (!text || !(reference instanceof Date) || Number.isNaN(reference.getTime())) return null;
-  const phrase = String(text).trim().toLowerCase().replace(/[.!]+$/, '')
-    .replace(/^(?:by|on|before|until|till|to|for)\s+/, '');
+  const quoted = String(text).trim().toLowerCase().replace(/[.!]+$/, '');
+  const before = /^before\s+/.test(quoted);
+  if (before) {
+    const boundary = parseQuotedETDay(quoted.replace(/^before\s+/, ''), reference);
+    const dayBefore = boundary && etDateString(addETDays(parseETDateTime(`${boundary}T12:00`), -1));
+    return dayBefore && dayBefore >= etDateString(reference) ? dayBefore : null;
+  }
+  const phrase = quoted.replace(/^(?:by|on|until|till|to|for)\s+/, '')
+    .replace(/^(this\s+)?(mon|tues?|weds?|thu(?:rs?)?|fri|sat|sun)\.?(?=\s|$)/, (_, lead, abbr) => `${lead || ''}${WEEKDAY_ABBREVIATIONS[abbr]}`);
   const offset = (days) => etDateString(addETDays(reference, days));
   const dow = etParts(reference).dayOfWeek;
   if (/^(?:tonight|this (?:morning|afternoon|evening)|later today|end of (?:the )?day|eod)$/.test(phrase)) return offset(0);

@@ -220,6 +220,21 @@ function statesClock(text) {
   return (value.match(CLOCK_TOKEN) || []).length > 0 || CLOCK_PREPOSITION.test(value);
 }
 
+// The day expressions a promise's timing can name, as parseQuotedETDay reads
+// them. Bare "sat" / "sun" count only after a day preposition, as in
+// STATED_TIMING, since both are ordinary words.
+const DAY_EXPRESSION = /\b(?:today|tonight|tomorrow|tmrw|weekend|next week|(?:sun|mon|tues?|wednes|thurs?|fri|satur)day|mon|tues?|weds?|thu(?:rs?)?|fri|(?:on|by|this|before|until|till) (?:sat|sun)|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.? \d{1,2}|\d{1,2}\/\d{1,2}(?:\/\d{4})?|\d{4}-\d{2}-\d{2})\b/gi;
+const WEEKDAY_OF = { sun: 'sunday', mon: 'monday', tue: 'tuesday', tues: 'tuesday', wed: 'wednesday', weds: 'wednesday',
+  thu: 'thursday', thur: 'thursday', thurs: 'thursday', fri: 'friday', sat: 'saturday' };
+// True when a promise's quote names exactly one day, however often.
+function namesOneDay(quote) {
+  const days = new Set((String(quote || '').match(DAY_EXPRESSION) || []).map((token) => {
+    const bare = token.toLowerCase().replace(/^(?:on|by|this|before|until|till) /, '');
+    return WEEKDAY_OF[bare] || bare;
+  }));
+  return days.size === 1;
+}
+
 // The calendar day a staff promise names (due_date): the extraction's day
 // must be the one its quoted timing resolves to (parseQuotedETDay), as a
 // due_at must match parseQuotedETDeadline (Codex #5248 r1 P1), and fall on
@@ -249,10 +264,15 @@ function groundExtraction(parsed, { message, properties = [], captureCommitments
   // word for word (owner-approved staff-promise plan, 2026-09-28).
   const outbound = message.direction === 'outbound';
   const kindEvident = (item) => item.kind === 'other' || !!KIND_EVIDENCE[item.kind]?.test(item.description);
+  // A staff promise keeps its kind only when the kind is Waves' and its words
+  // name it; anything else ("I'll send you photos" is a customer kind) is a
+  // general promise, never a reason to drop it (Codex #5248 r2 P1).
+  const promiseKind = (item) => (kindBelongsToParty('waves', item.kind) && kindEvident(item) ? item.kind : 'other');
   const obligations = (captureCommitments && message.message_body.length <= 600 ? parsed.obligations : []).filter((item) => {
-    if (!grounded(item) || !kindBelongsToParty(item.party, item.kind)) return false;
+    if (!grounded(item)) return false;
     if (!normalize(item.quote).includes(normalize(item.description))) return false;
     if (outbound) return item.party === 'waves' && item.basis === 'promise' && item.promise_firm === true;
+    if (!kindBelongsToParty(item.party, item.kind)) return false;
     if (item.basis === 'promise' && isQuestionSource(message.message_body)) return false;
     // Mixed/negated instructions need a human reading of scope; a keyword
     // in an affirmative substring cannot authorize the opposite action.
@@ -282,12 +302,15 @@ function groundExtraction(parsed, { message, properties = [], captureCommitments
     return { ...item, property_id: properties.length === 1 ? item.property_id : null,
       // A staff promise whose words do not name its type ("I'll stop by
       // today" is no "visit") stays tracked as a general promise.
-      kind: kindEvident(item) ? item.kind : 'other',
+      kind: outbound ? promiseKind(item) : item.kind,
       due_text: timingGrounded ? item.due_text : null,
       due_at: due instanceof Date ? due.toISOString() : null,
       // The day a staff promise names without a clock: only with its timing
       // quoted and no clock anywhere in the text (that is due_at's job).
-      due_date: outbound && timingGrounded && !clockStated ? promiseDueDate(item.due_text, item.due_date, message.created_at) : null,
+      // A hedge or a second day ("Wednesday or Thursday") leaves no single
+      // day, whatever the extraction shortened due_text to (Codex #5248 r2).
+      due_date: outbound && timingGrounded && !clockStated && !timingAmbiguous && namesOneDay(item.quote)
+        ? promiseDueDate(item.due_text, item.due_date, message.created_at) : null,
       timing_unverified: !!clockStated && !(due instanceof Date) };
   });
   // Sentence punctuation cannot establish semantic independence: "And only

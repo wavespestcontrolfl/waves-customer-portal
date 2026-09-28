@@ -750,6 +750,49 @@ describe('Owner-approved staff-promise plan (2026-09-28): a promise staff texted
     expect(kept.due_date).toBe(expected);
   });
 
+  test('Codex #5248 r2: a customer-side kind on a staff promise makes it general, never dropped', () => {
+    const message = staff("I'll send you photos tomorrow");
+    const [kept] = groundExtraction(extracted([promise("I'll send you photos tomorrow", { kind: 'send_photos' })]), { message, properties }).obligations;
+    expect(kept).toMatchObject({ kind: 'other', basis: 'promise' });
+  });
+
+  test.each([
+    ['"before" a day is the day before it', "I'll send it before Wednesday", 'before Wednesday', '2040-03-13', '2040-03-13'],
+    ['"before" read as the day itself is refused', "I'll send it before Wednesday", 'before Wednesday', '2040-03-14', null],
+    ['a weekday abbreviation', "I'll call you Wed", 'Wed', '2040-03-14', '2040-03-14'],
+    ['a second day in the promise', "I'll stop by Wednesday or Thursday", 'Wednesday', '2040-03-14', null],
+    ['a hedge in the text', "I'll probably stop by Wednesday", 'Wednesday', '2040-03-14', null],
+    ['one day named twice', 'Wednesday works, see you Wednesday', 'Wednesday', '2040-03-14', '2040-03-14'],
+  ])('Codex #5248 r2 due_date: %s', (_label, body, dueText, dueDate, expected) => {
+    const [kept] = groundExtraction(extracted([promise(body, { due_text: dueText, due_date: dueDate })]), { message: staff(body), properties }).obligations;
+    expect(kept.due_date).toBe(expected);
+  });
+
+  test('Codex #5248 r2: a general staff promise admits any delivered text written after it and an email to the customer; an ask does not', () => {
+    const sms_context = { source_at: '2040-03-10T15:00:00Z', customer_id: CUSTOMER_ID };
+    const staffPromise = { kind: 'other', sms_context: { ...sms_context, basis: 'promise' } };
+    const ask = { kind: 'other', sms_context: { ...sms_context, basis: 'request' } };
+    const guide = { type: 'sms', status: 'delivered', message_type: 'prep_guide', operator_sent: false };
+    expect(admissibleWitness(guide, staffPromise)).toBe(true);
+    expect(admissibleWitness(guide, ask)).toBe(false);
+    // Queued before the promise: not written after it.
+    expect(admissibleWitness({ ...guide, scheduled_at: '2040-03-10T14:00:00Z' }, staffPromise)).toBe(false);
+    // Property-scoped: an unstamped text may carry the item; one stamped with another property never does.
+    const scoped = { kind: 'other', sms_context: { ...sms_context, basis: 'promise', property_id: 'home' } };
+    expect(admissibleWitness(guide, scoped)).toBe(true);
+    expect(admissibleWitness({ ...guide, linked_property_id: 'rental' }, scoped)).toBe(false);
+    expect(admissibleWitness({ ...guide, linked_property_id: 'home' }, scoped)).toBe(true);
+    // A scoped promise of a typed kind keeps the stamp rule (Codex #4816 r39).
+    expect(admissibleWitness({ ...guide, message_type: 'confirmation' },
+      { kind: 'send_appointment_confirmation', sms_context: { ...sms_context, basis: 'promise', property_id: 'home' } })).toBe(false);
+    const email = { type: 'email_delivery', status: 'delivered', sent_at: '2040-03-10T16:00:00Z', recipient_type: 'customer', recipient_id: CUSTOMER_ID };
+    expect(admissibleWitness(email, staffPromise)).toBe(true);
+    expect(admissibleWitness({ ...email, recipient_id: '00000000-0000-4000-8000-000000000999' }, staffPromise)).toBe(false);
+    expect(admissibleWitness({ ...email, recipient_type: 'lead' }, staffPromise)).toBe(false);
+    expect(admissibleWitness({ ...email, bounced_at: '2040-03-10T16:01:00Z' }, staffPromise)).toBe(false);
+    expect(admissibleWitness(email, ask)).toBe(false);
+  });
+
   test('due_date is never taken with a clock in the text, nor for a customer ask', () => {
     const clocked = staff("I'll be there tomorrow at 3pm");
     expect(groundExtraction(extracted([promise("I'll be there tomorrow at 3pm", { due_text: 'tomorrow at 3pm', due_date: '2040-03-11' })]),

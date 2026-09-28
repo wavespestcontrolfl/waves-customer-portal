@@ -56,6 +56,9 @@ describe('quoted Eastern days with no clock (SMS staff-promise plan, owner rulin
     ['this weekend', '2040-03-11'], ['the weekend', '2040-03-11'], ['over the weekend', '2040-03-11'],
     ['next week', '2040-03-16'],
     ['March 24', '2040-03-24'], ['3/24', '2040-03-24'], ['2040-03-24', '2040-03-24'], ['Mar 24th.', '2040-03-24'],
+    // Codex #5248 r2: weekday abbreviations, and "before" is exclusive.
+    ['Wed', '2040-03-14'], ['wed.', '2040-03-14'], ['this Wed', '2040-03-14'], ['Wed afternoon', '2040-03-14'], ['Thurs', '2040-03-15'],
+    ['tues', '2040-03-13'], ['Sun', '2040-03-11'], ['before Wednesday', '2040-03-13'], ['before tomorrow', '2040-03-10'], ['before Wed', '2040-03-13'],
   ])('%s resolves to %s', (text, expected) => {
     expect(parseQuotedETDay(text, saturday)).toBe(expected);
   });
@@ -65,7 +68,7 @@ describe('quoted Eastern days with no clock (SMS staff-promise plan, owner rulin
     expect(parseQuotedETDay('next week', sunday)).toBe('2040-03-16');
   });
 
-  test.each(['next Wednesday', 'in two weeks', 'tomorrow at 3pm', 'soon', 'this week', '3/9', 'February 30', 'Marchish 24', '', null])(
+  test.each(['next Wednesday', 'in two weeks', 'tomorrow at 3pm', 'soon', 'this week', '3/9', 'February 30', 'Marchish 24', 'before today', '', null])(
     'cannot place %p on one day', (text) => {
       expect(parseQuotedETDay(text, saturday)).toBeNull();
     });
