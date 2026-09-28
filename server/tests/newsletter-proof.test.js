@@ -487,6 +487,55 @@ describe('maybeHandleProofApproval', () => {
     expect(mockSendCampaign).not.toHaveBeenCalled();
   });
 
+  describe('Pest Insider kill switch at approval time', () => {
+    const INSIDER = { ...PROOFED_DRAFT, id: 'send-pi-1', newsletter_type: 'pest-insider-monthly', subject: 'Pest Insider — September' };
+
+    afterEach(() => { delete process.env.GATE_PEST_INSIDER_PROOF; });
+
+    test('gate off: an APPROVED reply is refused, nothing is claimed or sent, and the draft is untouched', async () => {
+      delete process.env.GATE_PEST_INSIDER_PROOF;
+      const { sendsChain } = wireDb({ sends: { first: INSIDER } });
+
+      const r = await maybeHandleProofApproval(APPROVAL_EMAIL);
+
+      expect(r).toBe(true);
+      expect(sendsChain.update).not.toHaveBeenCalled();
+      expect(mockSendCampaign).not.toHaveBeenCalled();
+      expect(mockTrigger).toHaveBeenCalledWith('newsletter_proof_blocked', expect.objectContaining({
+        errors: expect.arrayContaining([expect.stringContaining('Pest Insider proof approval is switched off')]),
+      }));
+    });
+
+    test('gate off does not touch the weekly flagship', async () => {
+      delete process.env.GATE_PEST_INSIDER_PROOF;
+      const { sendsChain } = wireDb({ sends: { first: PROOFED_DRAFT } });
+
+      await maybeHandleProofApproval(APPROVAL_EMAIL);
+
+      expect(sendsChain.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'scheduled' }));
+    });
+
+    test('gate on: the approval is claimed and the issue dispatched', async () => {
+      process.env.GATE_PEST_INSIDER_PROOF = 'true';
+      mockValidateEventSelection.mockResolvedValue({ valid: true, errors: [], flagship: false });
+      const { sendsChain } = wireDb({ sends: { first: INSIDER }, subscribers: { first: { count: 5 } } });
+
+      const r = await maybeHandleProofApproval(APPROVAL_EMAIL);
+
+      expect(r).toBe(true);
+      expect(sendsChain.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'scheduled', proof_approved_at: expect.any(Date) }));
+    });
+
+    test('a reply that does not say approved is handled before the gate, with no blocked notice', async () => {
+      delete process.env.GATE_PEST_INSIDER_PROOF;
+      wireDb({ sends: { first: INSIDER } });
+
+      await maybeHandleProofApproval({ ...APPROVAL_EMAIL, body_text: 'hold this one' });
+
+      expect(mockTrigger).not.toHaveBeenCalledWith('newsletter_proof_blocked', expect.anything());
+    });
+  });
+
   test('draft edited AFTER the proof → approval refused, proof invalidated + reissued', async () => {
     const edited = { ...PROOFED_DRAFT, updated_at: new Date(PROOF_STAMP.getTime() + 60_000) };
     const { sendsChain } = wireDb({ sends: { first: edited } });

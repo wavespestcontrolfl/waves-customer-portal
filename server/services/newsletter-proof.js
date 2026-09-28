@@ -26,6 +26,8 @@ const { requiresClaimValidation, isFlagshipType } = require('../config/newslette
 const { isFlagshipTargetForWeek } = require('./event-freshness');
 const { validateFlagshipEventSelection, parseLockedEventIds } = require('./newsletter-event-selection');
 const { reverifyEvents } = require('./event-reverify');
+const { pestInsiderProofLive } = require('../config/feature-gates');
+const { PEST_INSIDER_TYPE } = require('./pest-insider-autopilot');
 
 /**
  * Internal diagnostics panel rendered ABOVE the recipient preview in the
@@ -597,6 +599,20 @@ async function maybeHandleProofApproval(email) {
   const replyText = extractTopReplyText(email.body_text || htmlReplyToText(email.body_html));
   if (!isApprovalReply(replyText)) {
     logger.info(`[newsletter-proof] reply for send ${send.id} did not say "approved" — leaving draft untouched`);
+    return true;
+  }
+
+  // The Pest Insider kill switch governs APPROVAL, not only proofing. A
+  // proof that went out while GATE_PEST_INSIDER_PROOF was on must not be
+  // approvable once the gate is off: off means draft-only. The draft and
+  // its proof are left untouched, so turning the gate back on and replying
+  // again approves the same proof.
+  if (send.newsletter_type === PEST_INSIDER_TYPE && !pestInsiderProofLive()) {
+    logger.info(`[newsletter-proof] send ${send.id} is a Pest Insider issue and GATE_PEST_INSIDER_PROOF is off — approval refused, draft untouched`);
+    await notifyProof('newsletter_proof_blocked', {
+      subject: send.subject,
+      errors: ['Approved, but Pest Insider proof approval is switched off — nothing sent and the draft is unchanged. Turn the switch back on and reply APPROVED again, or send the issue from the Newsletter page.'],
+    });
     return true;
   }
 

@@ -44,6 +44,10 @@ async function listFacts({ tags, limit = 50 } = {}) {
 const REPEAT_SWARM = '(?:second|another|again|repeat(?:ed)?|late[-\\s]?summer|post[-\\s]?storm|storm[-\\s]?(?:triggered|induced|driven)?)';
 const NEGATOR = "(?:do(?:es)?\\s+not|don'?t|doesn'?t|did\\s+not|didn'?t|will\\s+not|won'?t|cannot|can'?t|never)";
 const SWARM_VERB = '(?:have|throw|produce|swarm|get|trigger|stage)';
+// The same idea when the modifier comes FIRST ("a second termite swarm",
+// "another termite swarm"). "again" and a bare "storm" are left out here:
+// they only make the claim false after the verb.
+const REPEAT_MODIFIER = '(?:second|another|repeat(?:ed)?|late[-\\s]?summer|post[-\\s]?storm|storm[-\\s]?(?:triggered|induced|driven))';
 
 // Known-false or overreaching claim shapes an AI-written newsletter draft
 // must never state. `denials` lists the ONLY phrasings that exempt an
@@ -62,7 +66,10 @@ const UNVERIFIED_CLAIM_RULES = [
     rule: 'termite_second_swarm',
     pattern: new RegExp(
       `\\b(?<!drywood[\\s-])termites?\\b[^.]{0,150}?\\b${REPEAT_SWARM}\\b[^.]{0,60}?\\bswarm`
-      + `|\\b(?<!drywood[\\s-])termites?\\b[^.]{0,80}?\\bswarm(?:s|ed|ing)?\\s+(?:again|a\\s+second\\s+time|twice|once\\s+more)\\b`,
+      + `|\\b(?<!drywood[\\s-])termites?\\b[^.]{0,80}?\\bswarm(?:s|ed|ing)?\\s+(?:again|a\\s+second\\s+time|twice|once\\s+more)\\b`
+      // modifier first: "a second termite swarm", "another subterranean
+      // termite swarm" — never when the termite named is a drywood.
+      + `|\\b${REPEAT_MODIFIER}\\s+(?!(?:[\\w-]+\\s+){0,2}?drywood\\b)(?:[\\w-]+\\s+){0,2}?termite\\s+swarm`,
       'i',
     ),
     denials: [
@@ -72,6 +79,11 @@ const UNVERIFIED_CLAIM_RULES = [
       new RegExp(`\\bno\\s+(?:[\\w-]+\\s+){0,4}?termites?\\s+${SWARM_VERB}\\b[^.,;]{0,60}?\\b${REPEAT_SWARM}`, 'i'),
       // "there is no second swarm" (never "there is no doubt ...")
       new RegExp(`\\b(?:there\\s+is|there'?s|there\\s+are)\\s+no\\s+(?:such\\s+)?${REPEAT_SWARM}\\b`, 'i'),
+      // "no second termite swarm", "not a second termite swarm" — the
+      // negation must sit directly on the modifier, so "no doubt a second
+      // termite swarm" is still the false claim.
+      new RegExp(`\\b(?:no|never)\\s+(?:such\\s+)?${REPEAT_MODIFIER}\\b`, 'i'),
+      new RegExp(`\\bnot\\s+(?:a|an|any)\\s+${REPEAT_MODIFIER}\\b`, 'i'),
     ],
   },
   {
@@ -103,10 +115,12 @@ const UNVERIFIED_CLAIM_RULES = [
     pattern: /\b((?:do\s*not|don'?t|avoid)\s+)?vacuum(?:ing)?\b[^.]{0,80}?\b\d+\s*(?:days?|weeks?)\b/i,
   },
   {
-    // Absolute safety guarantees no label supports — mirrors the existing
-    // pet/child-safety block in newsletter-validator.js, extended to bees.
+    // Absolute safety guarantees no label supports (AGENTS.md: no safety or
+    // efficacy claims). The label's own wording is the only safe one:
+    // "Do not allow people or pets on treated surfaces until the spray has
+    // dried." Covers bees, pets, kids and the family spellings.
     rule: 'absolute_safety_claim',
-    pattern: /\b(?:bee[-\s]?safe|safe\s+for\s+bees|pet[-\s]?safe|safe\s+for\s+pets?)\b/i,
+    pattern: /\b(?:bee|pet|family|kid|child|baby)[-\s]?safe\b|\bsafe\s+for\s+(?:bees|pets?|kids?|children|babies|(?:the\s+|your\s+)?(?:whole\s+|entire\s+)?family)\b/i,
   },
 ];
 
@@ -177,4 +191,30 @@ function findUnverifiedClaims(text) {
   return results;
 }
 
-module.exports = { listFacts, findUnverifiedClaims };
+/**
+ * The register as a prompt block for an AI writer: every active fact with
+ * its quoted source text and the note on what the source does not state,
+ * followed by the rule that binds the writer to it. Throws when no fact can
+ * be loaded — a Pest Insider draft written without its facts is exactly the
+ * ungrounded copy this register exists to stop, so the draft fails instead.
+ */
+async function factsPromptBlock({ limit = 40 } = {}) {
+  const facts = await listFacts({ limit });
+  if (!facts.length) throw new Error('fact register is empty: no verified facts to ground the draft');
+  const lines = facts.map((fact) => {
+    const meta = typeof fact.metadata === 'string' ? JSON.parse(fact.metadata || '{}') : (fact.metadata || {});
+    return `- ${fact.title}\n  Source text: ${fact.summary}\n  What this means and what the source does NOT say: ${fact.content}\n  Source: ${meta.source_url || 'on file'}`;
+  });
+  return `
+
+VERIFIED FACTS — the ONLY source for statements about when a pest is active, how a product works, how long anything takes, and what a rule requires:
+${lines.join('\n')}
+
+RULES FOR FACTS:
+- State such a fact only if it is in the list above, and keep its numbers and months exactly as written there.
+- If the list does not cover a claim, leave the claim out. Do not estimate, round, or supply a number from general knowledge.
+- Never write a number of days, weeks or months that does not appear in the list.
+- Where a fact says its source does not state something, do not state it.`;
+}
+
+module.exports = { listFacts, findUnverifiedClaims, factsPromptBlock };

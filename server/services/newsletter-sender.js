@@ -33,6 +33,7 @@ const { hasFeedbackToken, ensureFeedbackToken, buildFeedbackSubstitutions } = re
 const { isFlagshipDeliveryWindow, isCurrentFlagshipTarget } = require('./event-freshness');
 const { validateFlagshipEventSelection, parseLockedEventIds } = require('./newsletter-event-selection');
 const { reverifyEvents, reverifyEnabled } = require('./event-reverify');
+const { pestInsiderProofLive } = require('../config/feature-gates');
 const NewsletterSubscribers = require('./newsletter-subscribers');
 
 // CITY_TOKEN / GRASS_TYPE_TOKEN + their neutral defaults are defined once in
@@ -1207,6 +1208,14 @@ async function processScheduledSends() {
       // is deliberately re-enabled.
       if (row.proof_approved_at && process.env.GATE_NEWSLETTER_PROOF_APPROVAL !== 'true') {
         logger.warn(`[newsletter-scheduler] send ${row.id} is proof-approved but the proof gate is off — leaving it scheduled`);
+        continue;
+      }
+      // Same rule for the type-specific switch: a proof-approved Pest
+      // Insider issue stays queued while GATE_PEST_INSIDER_PROOF is off. A
+      // Pest Insider issue scheduled by hand has no proof_approved_at and is
+      // unaffected.
+      if (row.proof_approved_at && row.newsletter_type === 'pest-insider-monthly' && !pestInsiderProofLive()) {
+        logger.warn(`[newsletter-scheduler] send ${row.id} is a proof-approved Pest Insider issue but GATE_PEST_INSIDER_PROOF is off — leaving it scheduled`);
         continue;
       }
       const eventSelection = await validateFlagshipEventSelection(row);

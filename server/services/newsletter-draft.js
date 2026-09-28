@@ -1748,8 +1748,13 @@ async function createNewsletterDraft({
   //    prompt (no events, no anchoring); everything else gets the
   //    flagship events prompt.
   const isPestInsider = typeConfig?.key === 'pest-insider-monthly';
+  // Pest Insider is grounded in the email fact register: the verified facts
+  // and the rule binding the writer to them are part of its system prompt.
+  // A draft that cannot load its facts fails rather than being written
+  // ungrounded.
   const systemPrompt = isPestInsider
     ? buildPestInsiderSystemPrompt(voice, month)
+      + await require('./email-division/fact-register').factsPromptBlock()
     : buildFlagshipSystemPrompt(voice, month);
 
   // Homeowner Minute RETIRED from the flagship (owner 2026-07-30) —

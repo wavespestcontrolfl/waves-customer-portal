@@ -15,7 +15,7 @@ function chain(rows) {
 jest.mock('../models/db', () => jest.fn());
 
 const db = require('../models/db');
-const { listFacts, findUnverifiedClaims } = require('../services/email-division/fact-register');
+const { listFacts, findUnverifiedClaims, factsPromptBlock } = require('../services/email-division/fact-register');
 
 const FACTS = [
   { id: 'f1', title: 'Native subterranean termite swarm season', tags: ['termites', 'swarm-season'], active: true },
@@ -127,6 +127,24 @@ describe('findUnverifiedClaims', () => {
     expect(claims.some((c) => c.rule === 'large_patch_summer_disease')).toBe(true);
   });
 
+  test.each([
+    'Expect a second termite swarm after the next storm.',
+    'Storms can trigger another termite swarm.',
+    'A second subterranean termite swarm follows hurricanes.',
+    'No doubt a second termite swarm is coming.',
+  ])('flags the claim when the modifier comes before "termite swarm": %s', (sentence) => {
+    expect(findUnverifiedClaims(sentence).some((c) => c.rule === 'termite_second_swarm')).toBe(true);
+  });
+
+  test.each([
+    'There is no second termite swarm after storms.',
+    'UF documents no second termite swarm.',
+    'This is not a second termite swarm.',
+    'A second drywood termite swarm is possible in fall.',
+  ])('does NOT flag a denial or a drywood subject in that word order: %s', (sentence) => {
+    expect(findUnverifiedClaims(sentence).some((c) => c.rule === 'termite_second_swarm')).toBe(false);
+  });
+
   test('flags brown/large patch mis-described as a summer disease', () => {
     const claims = findUnverifiedClaims('Watch for large patch this summer as temperatures climb.');
     expect(claims.some((c) => c.rule === 'large_patch_summer_disease')).toBe(true);
@@ -177,6 +195,20 @@ describe('findUnverifiedClaims', () => {
     expect(claims.some((c) => c.rule === 'non_flea_vacuum_advice')).toBe(true);
   });
 
+  test.each([
+    'Our family-safe treatment keeps everyone comfortable.',
+    'It is safe for the whole family.',
+    'Kid-safe once it dries.',
+    'Safe for children and pets.',
+    'A child-safe barrier.',
+  ])('flags family, kid and child safety claims: %s', (sentence) => {
+    expect(findUnverifiedClaims(sentence).some((c) => c.rule === 'absolute_safety_claim')).toBe(true);
+  });
+
+  test('the label\'s own re-entry wording is not a safety claim', () => {
+    expect(findUnverifiedClaims('Do not allow people or pets on treated surfaces until the spray has dried.')).toEqual([]);
+  });
+
   test('flags absolute "bee-safe" / "pet-safe" claims', () => {
     expect(findUnverifiedClaims('Our spray is completely bee-safe.').some((c) => c.rule === 'absolute_safety_claim')).toBe(true);
     expect(findUnverifiedClaims('This treatment is pet-safe for the whole family.').some((c) => c.rule === 'absolute_safety_claim')).toBe(true);
@@ -189,5 +221,47 @@ describe('findUnverifiedClaims', () => {
   test('empty/undefined input returns an empty array', () => {
     expect(findUnverifiedClaims('')).toEqual([]);
     expect(findUnverifiedClaims(undefined)).toEqual([]);
+  });
+});
+
+describe('factsPromptBlock', () => {
+  function wire(rows) {
+    const q = {};
+    ['where', 'orderBy'].forEach((m) => { q[m] = jest.fn(() => q); });
+    q.then = (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
+    db.mockImplementation(() => q);
+  }
+
+  test('lists every fact with its source text, its limits and its source, then binds the writer to the list', async () => {
+    wire([
+      {
+        title: 'Aedes mosquitoes: containers and the 7–10 day life cycle',
+        summary: '"A mosquito egg takes 7–10 days to develop into an adult mosquito."',
+        content: 'Per CDC, an egg takes 7 to 10 days to develop into an adult.',
+        metadata: JSON.stringify({ source_url: 'https://www.cdc.gov/mosquitoes/about/life-cycle-of-aedes-mosquitoes.html' }),
+        tags: ['mosquitoes'],
+      },
+      {
+        title: 'Taurus SC: non-repellent',
+        summary: '"Taurus SC is a non-repellent insecticide"',
+        content: 'The manufacturer states no time to control.',
+        metadata: { source_url: 'https://www.controlsolutionsinc.com/csi-pest/products/taurus-sc' },
+        tags: ['products'],
+      },
+    ]);
+
+    const block = await factsPromptBlock();
+
+    expect(block).toContain('VERIFIED FACTS');
+    expect(block).toContain('A mosquito egg takes 7–10 days');
+    expect(block).toContain('https://www.cdc.gov/mosquitoes/about/life-cycle-of-aedes-mosquitoes.html');
+    expect(block).toContain('The manufacturer states no time to control.');
+    expect(block).toContain('If the list does not cover a claim, leave the claim out');
+    expect(block).toContain('Never write a number of days, weeks or months that does not appear in the list');
+  });
+
+  test('throws when the register is empty, so a draft is never written ungrounded', async () => {
+    wire([]);
+    await expect(factsPromptBlock()).rejects.toThrow(/fact register is empty/);
   });
 });

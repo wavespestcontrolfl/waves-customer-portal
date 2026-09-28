@@ -43,7 +43,7 @@ const PEST_INSIDER_TYPE = 'pest-insider-monthly';
 const PROOF_RETRY_LAST_DAY = 10;
 
 function proofGateOn() {
-  return process.env.GATE_PEST_INSIDER_PROOF === 'true';
+  return require('../config/feature-gates').pestInsiderProofLive();
 }
 
 // sendNewsletterProof is itself gated behind GATE_NEWSLETTER_PROOF_APPROVAL

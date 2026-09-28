@@ -3180,6 +3180,17 @@ function gateEnvValue(envName) {
 // from what the endpoint reports (Codex pre-push audit P1: the route used
 // to read the load-time gates-map value via isEnabled(), which never sees a
 // flip until the process restarts).
+// Pest Insider proof approval — read at CALL time so turning the gate off
+// takes effect without a redeploy at every point that matters: proofing
+// (pest-insider-autopilot.js), approval (newsletter-proof.js
+// maybeHandleProofApproval) and dispatch of an already-approved issue
+// (newsletter-sender.js processScheduledSends). Off = draft-only, which is
+// what "kill switch" has to mean: a proof that went out while the gate was
+// on cannot be approved or dispatched after it is turned off.
+function pestInsiderProofLive() {
+  return process.env.GATE_PEST_INSIDER_PROOF === 'true';
+}
+
 function discountStackingLive() {
   return process.env.GATE_DISCOUNT_STACKING === 'true';
 }
@@ -3368,5 +3379,5 @@ function logGateStatus() {
   }
 }
 
-module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, autoDispatchSharedModelLive, bookCapacityCommitLive };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, autoDispatchSharedModelLive, bookCapacityCommitLive, pestInsiderProofLive };
 // gates 1775330914
