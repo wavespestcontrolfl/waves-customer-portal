@@ -2,6 +2,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
+// A browser SpeechRecognition session ends itself after a few seconds of
+// silence even with `continuous = true`. The SPEECH path below restarts the
+// same instance on every such `onend` so dictation keeps listening through
+// normal pauses, until the tech taps stop. See IDLE_STOP_MS below for the
+// one time-based cutoff that still ends it on its own.
+const IDLE_STOP_MS = 60000;
+
 /**
  * Voice dictation, extracted from CommunicationsPageV2 so the completion
  * notes box (and any other field) can reuse it.
@@ -11,9 +18,23 @@ const API_BASE = import.meta.env.VITE_API_URL || "/api";
  *     setNotes((b) => (b ? `${b} ${text}` : text)));
  *
  * `onTranscript(text)` fires with each FINAL transcript chunk (trimmed); the
- * caller decides how to append. Continuous capture toggles off on a second
- * tap. Falls back to an alert on browsers without support (Firefox); iOS
- * Safari ships `webkitSpeechRecognition`.
+ * caller decides how to append. Falls back to an alert on browsers without
+ * support (Firefox); iOS Safari ships `webkitSpeechRecognition`.
+ *
+ * Keep-listening (SPEECH path only): the browser ends a recognition session
+ * on its own after a pause, so `onend` restarts the same instance and
+ * `listening` stays true, UNLESS one of these holds, in which case the
+ * session finishes (`listening` false, the ref cleared) instead:
+ *   - the tech tapped stop (second tap calls `stop()`)
+ *   - the hook unmounted (existing abort + handler nulling)
+ *   - a recognition error fired other than `no-speech` (`aborted` included)
+ *   - no FINAL transcript for IDLE_STOP_MS since the session started or the
+ *     last final result
+ *   - the page is hidden (`document.visibilityState === "hidden"`)
+ *   - 3 consecutive sessions each ended under 1000ms after their own
+ *     `start()` with no final result (a fast-end loop, e.g. mic denied by OS)
+ *   - `recognitionRef.current` no longer points at this instance
+ * If the restart `start()` itself throws, the session also finishes normally.
  *
  * Upload fallback (GATE_TECH_DICTATION_UPLOAD): pass
  * `{ uploadServiceId }` and, ONLY where SpeechRecognition is missing, the
@@ -41,6 +62,15 @@ export default function useSpeechDictation(onTranscript, options = {}) {
   // Keep the latest callback without re-creating `toggle` each render.
   const onTranscriptRef = useRef(onTranscript);
   onTranscriptRef.current = onTranscript;
+
+  // SPEECH path keep-listening state (see the hook's doc comment for the
+  // stop conditions these back). All reset at the start of a fresh toggle().
+  const stopRequestedRef = useRef(false); // set by the second (stop) tap
+  const fatalErrorRef = useRef(false); // set by onerror, except for no-speech
+  const lastFinalAtRef = useRef(0); // session start, bumped by each final result
+  const sessionStartedAtRef = useRef(0); // this internal session's start() time
+  const fastEndStreakRef = useRef(0); // consecutive fast, empty sessions
+  const gotResultThisSessionRef = useRef(false); // final result in this session
 
   const speechSupported =
     typeof window !== "undefined" &&
@@ -207,8 +237,10 @@ export default function useSpeechDictation(onTranscript, options = {}) {
       );
       return;
     }
-    // Second tap stops an in-progress session.
+    // Second tap stops an in-progress session; onend sees stopRequestedRef
+    // and finishes instead of restarting.
     if (recognitionRef.current) {
+      stopRequestedRef.current = true;
       recognitionRef.current.stop();
       return;
     }
@@ -222,18 +254,65 @@ export default function useSpeechDictation(onTranscript, options = {}) {
         if (ev.results[i].isFinal) append += ev.results[i][0].transcript;
       }
       const text = append.trim();
-      if (text && onTranscriptRef.current) onTranscriptRef.current(text);
+      if (text) {
+        gotResultThisSessionRef.current = true;
+        lastFinalAtRef.current = Date.now();
+        if (onTranscriptRef.current) onTranscriptRef.current(text);
+      }
     };
     rec.onerror = (e) => {
-      if (e.error !== "aborted" && e.error !== "no-speech") {
-        alert(`Dictation error: ${e.error}`);
+      if (e.error === "not-allowed" || e.error === "service-not-allowed") {
+        fatalErrorRef.current = true;
+        alert(
+          "Microphone access is blocked. Allow mic permission for this site, or use the keyboard mic on your phone.",
+        );
+      } else if (e.error === "no-speech") {
+        // Not fatal — onend below still restarts unless another condition applies.
+      } else {
+        // Includes "aborted": ends the session, but (like the prior behavior)
+        // never alerts for it.
+        fatalErrorRef.current = true;
+        if (e.error !== "aborted") alert(`Dictation error: ${e.error}`);
       }
-      setListening(false);
     };
     rec.onend = () => {
-      setListening(false);
-      recognitionRef.current = null;
+      const now = Date.now();
+      const sessionDurationMs = now - sessionStartedAtRef.current;
+      const isFastEmptySession = sessionDurationMs < 1000 && !gotResultThisSessionRef.current;
+      fastEndStreakRef.current = isFastEmptySession ? fastEndStreakRef.current + 1 : 0;
+
+      const pageHidden =
+        typeof document !== "undefined" && document.visibilityState === "hidden";
+      const idleTooLong = now - lastFinalAtRef.current >= IDLE_STOP_MS;
+      const shouldStop =
+        stopRequestedRef.current ||
+        fatalErrorRef.current ||
+        recognitionRef.current !== rec ||
+        pageHidden ||
+        idleTooLong ||
+        fastEndStreakRef.current >= 3;
+
+      if (shouldStop) {
+        setListening(false);
+        recognitionRef.current = null;
+        return;
+      }
+
+      try {
+        sessionStartedAtRef.current = Date.now();
+        gotResultThisSessionRef.current = false;
+        rec.start();
+      } catch {
+        setListening(false);
+        recognitionRef.current = null;
+      }
     };
+    stopRequestedRef.current = false;
+    fatalErrorRef.current = false;
+    fastEndStreakRef.current = 0;
+    gotResultThisSessionRef.current = false;
+    lastFinalAtRef.current = Date.now();
+    sessionStartedAtRef.current = Date.now();
     recognitionRef.current = rec;
     rec.start();
     setListening(true);

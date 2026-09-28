@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from "react";
 import { Button } from "../ui";
+import useSpeechDictation from "../../hooks/useSpeechDictation";
 
 /**
  * DictationButton — small Web Speech API mic that transcribes speech to text.
@@ -26,68 +26,7 @@ export default function DictationButton({
 }) {
   const migrated = presentation === "admin";
   const Control = migrated ? Button : "button";
-  const [listening, setListening] = useState(false);
-  const [supported, setSupported] = useState(true);
-  const recognitionRef = useRef(null);
-  const onAppendRef = useRef(onAppend);
-  onAppendRef.current = onAppend;
-
-  useEffect(() => {
-    const SR =
-      typeof window !== "undefined"
-        ? window.SpeechRecognition || window.webkitSpeechRecognition
-        : null;
-    setSupported(!!SR);
-    return () => {
-      try {
-        recognitionRef.current?.stop();
-      } catch {
-        /* already stopped */
-      }
-    };
-  }, []);
-
-  const toggle = () => {
-    const SR =
-      typeof window !== "undefined"
-        ? window.SpeechRecognition || window.webkitSpeechRecognition
-        : null;
-    if (!SR) return;
-    if (listening && recognitionRef.current) {
-      recognitionRef.current.stop();
-      return;
-    }
-    const rec = new SR();
-    rec.continuous = true;
-    rec.interimResults = false;
-    rec.lang = "en-US";
-    rec.onresult = (ev) => {
-      let append = "";
-      for (let i = ev.resultIndex; i < ev.results.length; i++) {
-        if (ev.results[i].isFinal) append += ev.results[i][0].transcript;
-      }
-      if (append.trim()) onAppendRef.current?.(append.trim());
-    };
-    rec.onerror = (e) => {
-      if (e.error === "not-allowed" || e.error === "service-not-allowed") {
-        alert(
-          "Microphone access is blocked. Allow mic permission for this site, or use the keyboard mic on your phone.",
-        );
-      }
-      setListening(false);
-    };
-    rec.onend = () => {
-      setListening(false);
-      recognitionRef.current = null;
-    };
-    recognitionRef.current = rec;
-    try {
-      rec.start();
-      setListening(true);
-    } catch {
-      /* start can throw if already running */
-    }
-  };
+  const { listening, supported, toggle } = useSpeechDictation(onAppend);
 
   if (!supported) return null;
 
