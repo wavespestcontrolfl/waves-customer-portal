@@ -357,7 +357,7 @@ grandfathered and untouched by this gate; it only blocks a NEW self-serve
 accept from landing on the retired cadence.
 
 Missing-contact capture (owner ruling 2026-09-27). GET
-`/api/estimates/:token/data` carries `contactGaps: { lastName, email }` —
+`/api/estimates/:token/data` carries `contactGaps: { firstName, lastName, email }` —
 booleans only — while the estimate is accept-active (never on
 accepted/declined/expired/off-surface estimates or the PDF render pass).
 `lastName` is true when the estimate's `customer_name` has fewer than two
@@ -367,10 +367,16 @@ the linked customer has an email. The linked customer's name/email are never
 returned. The page renders "Last name" (required client-side) and "Email (for
 your service reports and receipts)" (optional) above Accept for whichever is
 true, and blocks Accept on a typed-but-malformed email.
-`PUT /api/estimates/:token/accept` accepts optional `contactLastName`
+`firstName` is true only when there is no usable first name anywhere (the
+estimate holds only a placeholder such as `Unknown caller`, and the linked
+profile has none), and the page then also asks for "First name" (required).
+Names are normalized with `normalizeContactName` (proper case) before the cap.
+Without a usable first name the surname is not applied, so the accept never
+creates a placeholder first name.
+`PUT /api/estimates/:token/accept` accepts optional `contactFirstName`, `contactLastName`
 (trimmed, whitespace-collapsed, ≤50 chars — the customers.last_name width) and `contactEmail` (lowercased,
 ≤150 chars — the customers.email width — `EMAIL_RE`). A malformed non-empty value answers 400
-`{ error, code: 'CONTACT_LAST_NAME_INVALID' | 'CONTACT_EMAIL_INVALID' }` before
+`{ error, code: 'CONTACT_FIRST_NAME_INVALID' | 'CONTACT_LAST_NAME_INVALID' | 'CONTACT_EMAIL_INVALID' }` before
 any mutation; a blank or absent value is never an error (a tab loaded before
 this shipped still accepts). Values fill GAPS only and never overwrite: the
 gap verdict is recomputed and the estimate row written inside the acceptance

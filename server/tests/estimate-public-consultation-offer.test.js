@@ -491,28 +491,28 @@ describe('composeEstimateDataPayload — contactGaps wiring', () => {
     const row = estimateRow({ customer_name: 'Testy', customer_email: null, customer_id: null });
     dbRows = { estimates: row };
     const payload = await composeEstimateDataPayload(row, {});
-    expect(payload.contactGaps).toEqual({ lastName: true, email: true });
+    expect(payload.contactGaps).toEqual({ firstName: false, lastName: true, email: true });
   });
 
   test('unlinked estimate with a full name and an email: both gaps false, field still present', async () => {
     const row = estimateRow({ customer_name: 'Testy Sample', customer_email: 'testy@example.com', customer_id: null });
     dbRows = { estimates: row };
     const payload = await composeEstimateDataPayload(row, {});
-    expect(payload.contactGaps).toEqual({ lastName: false, email: false });
+    expect(payload.contactGaps).toEqual({ firstName: false, lastName: false, email: false });
   });
 
   test('linked customer with a real last name/email on file closes both gaps even off a single-token estimate name', async () => {
     const row = estimateRow({ customer_name: 'Testy', customer_email: null, customer_id: 'cust-1' });
     dbRows = { estimates: row, customers: { last_name: 'Sample', email: 'testy@example.com' } };
     const payload = await composeEstimateDataPayload(row, {});
-    expect(payload.contactGaps).toEqual({ lastName: false, email: false });
+    expect(payload.contactGaps).toEqual({ firstName: false, lastName: false, email: false });
   });
 
   test('linked customer with the "Customer" placeholder and no email leaves both gaps open', async () => {
     const row = estimateRow({ customer_name: 'Testy', customer_email: null, customer_id: 'cust-1' });
     dbRows = { estimates: row, customers: { last_name: 'Customer', email: null } };
     const payload = await composeEstimateDataPayload(row, {});
-    expect(payload.contactGaps).toEqual({ lastName: true, email: true });
+    expect(payload.contactGaps).toEqual({ firstName: false, lastName: true, email: true });
   });
 
   test('a terminal (accepted) estimate never carries contactGaps (isEstimateAcceptActive false)', async () => {

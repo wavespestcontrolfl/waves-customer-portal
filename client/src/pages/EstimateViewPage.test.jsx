@@ -1571,6 +1571,15 @@ describe('ContactGapFields — missing-contact capture on accept', () => {
     expect(onLastNameChange).toHaveBeenCalledWith('Sample');
     expect(onEmailChange).toHaveBeenCalledWith('sample@example.com');
   });
+  it('renders a required first-name field only when the first-name gap is set', () => {
+    const { rerender } = render(<ContactGapFields gaps={{ firstName: false, lastName: true, email: false }} lastName="" onLastNameChange={noop} />);
+    expect(screen.queryByPlaceholderText('First name')).not.toBeInTheDocument();
+    rerender(<ContactGapFields gaps={{ firstName: true, lastName: true, email: false }} firstName="" onFirstNameChange={noop} lastName="" onLastNameChange={noop} />);
+    const input = screen.getByPlaceholderText('First name');
+    expect(input).toHaveAttribute('aria-required', 'true');
+    expect(input).toHaveAttribute('autoComplete', 'given-name');
+  });
+
   it('shows the email format error only when the caller flags it invalid', () => {
     const { rerender } = render(<ContactGapFields gaps={{ lastName: false, email: true }} email="sample@" onEmailChange={noop} />);
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();

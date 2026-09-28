@@ -1989,6 +1989,41 @@ describe('Missing-contact capture (contactLastName/contactEmail) — owner rulin
     }
   });
 
+  test('a placeholder-name estimate collects a first name too, and the new profile never gets a placeholder first name', async () => {
+    resetStore(recurringPestEstimate({
+      id: 'est-contact-20',
+      token: 'tok-contact-20-x0123456789',
+      customer_id: null,
+      customer_name: 'Unknown caller',
+      customer_email: 'testy@example.com',
+    }));
+    conversionOk();
+
+    const res = await putAccept('tok-contact-20-x0123456789', { contactFirstName: 'mary ann', contactLastName: 'sample' });
+    expect(res.status).toBe(200);
+    expect(storedEstimate().customer_name).toBe('Mary Ann Sample');
+    const cust = db.__state.tables.customers.find((c) => c.id === storedEstimate().customer_id);
+    expect(cust.first_name).toBe('Mary Ann');
+    expect(cust.last_name).toBe('Sample');
+  });
+
+  test('a stale tab that sends only a surname for a nameless estimate applies nothing to the name', async () => {
+    resetStore(recurringPestEstimate({
+      id: 'est-contact-21',
+      token: 'tok-contact-21-x0123456789',
+      customer_id: null,
+      customer_name: 'Unknown caller',
+      customer_email: 'testy@example.com',
+    }));
+    conversionOk();
+
+    const res = await putAccept('tok-contact-21-x0123456789', { contactLastName: 'Sample' });
+    expect(res.status).toBe(200);
+    expect(storedEstimate().customer_name).toBe('Unknown caller');
+    const cust = db.__state.tables.customers.find((c) => c.id === storedEstimate().customer_id);
+    expect(cust.first_name).not.toBe('Customer');
+  });
+
   test('a crafted request for a field the page never offered writes nothing (estimate already has full name + email)', async () => {
     resetStore(recurringPestEstimate({
       id: 'est-contact-10',

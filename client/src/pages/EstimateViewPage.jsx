@@ -3723,6 +3723,10 @@ function AcceptanceRecordCard({ acceptance }) {
 // server's own 400 — this component just collects the value).
 export function ContactGapFields({
   gaps = null,
+  firstName = '',
+  onFirstNameChange,
+  onFirstNameBlur,
+  firstNameTouched = false,
   lastName = '',
   onLastNameChange,
   onLastNameBlur,
@@ -3733,10 +3737,32 @@ export function ContactGapFields({
   emailInvalid = false,
   disabled = false,
 }) {
-  if (!gaps || (!gaps.lastName && !gaps.email)) return null;
+  if (!gaps || (!gaps.firstName && !gaps.lastName && !gaps.email)) return null;
+  const firstNameMissing = gaps.firstName && firstNameTouched && !firstName.trim();
   const lastNameMissing = gaps.lastName && lastNameTouched && !lastName.trim();
   return (
     <div style={{ display: 'grid', gap: 12, marginTop: 16 }}>
+      {gaps.firstName ? (
+        <label style={{ display: 'grid', gap: 6 }}>
+          <span style={{ fontSize: 14, fontWeight: 600, color: COLORS.navy }}>First name</span>
+          <input
+            type="text"
+            value={firstName}
+            onChange={(e) => onFirstNameChange?.(e.target.value)}
+            onBlur={onFirstNameBlur}
+            autoComplete="given-name"
+            maxLength={50}
+            disabled={disabled}
+            aria-required="true"
+            aria-invalid={firstNameMissing || undefined}
+            placeholder="First name"
+            style={{ ...softExitInputStyle, ...(firstNameMissing ? { borderColor: W.red } : {}) }}
+          />
+          {firstNameMissing ? (
+            <span role="alert" style={{ fontSize: 13, color: W.red }}>Please enter your first name.</span>
+          ) : null}
+        </label>
+      ) : null}
       {gaps.lastName ? (
         <label style={{ display: 'grid', gap: 6 }}>
           <span style={{ fontSize: 14, fontWeight: 600, color: COLORS.navy }}>Last name</span>
@@ -5570,6 +5596,8 @@ function EstimateViewPageInner({ websiteMode = false }) {
   // until filled); email is optional and skippable. contactLastNameTouched
   // gates the inline error to after the customer has actually left the
   // field, so it doesn't render red on first paint.
+  const [contactFirstName, setContactFirstName] = useState('');
+  const [contactFirstNameTouched, setContactFirstNameTouched] = useState(false);
   const [contactLastName, setContactLastName] = useState('');
   const [contactEmail, setContactEmail] = useState('');
   const [contactLastNameTouched, setContactLastNameTouched] = useState(false);
@@ -6895,6 +6923,8 @@ function EstimateViewPageInner({ websiteMode = false }) {
   // real name/email) — lastName is REQUIRED (Accept stays disabled and shows
   // an inline error until filled); email is optional/skippable, so a blank
   // field never blocks the confirm.
+  const contactFirstNameGap = !!data?.contactGaps?.firstName;
+  const contactFirstNameMissing = contactFirstNameGap && !contactFirstName.trim();
   const contactLastNameGap = !!data?.contactGaps?.lastName;
   const contactEmailGap = !!data?.contactGaps?.email;
   const contactLastNameMissing = contactLastNameGap && !contactLastName.trim();
@@ -6914,6 +6944,11 @@ function EstimateViewPageInner({ websiteMode = false }) {
     // Required-field guard mirrors confirmDisabled below (defense in depth —
     // the button is disabled while this is true, but a stale disabled-state
     // read should never let a request through with a required field blank).
+    if (contactFirstNameMissing) {
+      setContactFirstNameTouched(true);
+      setError('Please enter your first name to continue.');
+      return;
+    }
     if (contactLastNameGap && !contactLastName.trim()) {
       setContactLastNameTouched(true);
       setError('Please enter your last name to continue.');
@@ -7034,6 +7069,7 @@ function EstimateViewPageInner({ websiteMode = false }) {
           // rendered (a real contactGaps gap) and the customer typed
           // something — email is optional/skippable, so a blank field sends
           // nothing rather than an empty string.
+          contactFirstName: contactFirstNameGap && contactFirstName.trim() ? contactFirstName.trim() : undefined,
           contactLastName: contactLastNameGap && contactLastName.trim() ? contactLastName.trim() : undefined,
           contactEmail: contactEmailGap && contactEmail.trim() ? contactEmail.trim() : undefined,
         }),
@@ -7214,7 +7250,7 @@ function EstimateViewPageInner({ websiteMode = false }) {
     } finally {
       acceptInFlightRef.current = false;
     }
-  }, [readOnlyPreview, data, existingAppointment, loadEstimate, token, selectedSlotId, paymentPreference, serviceMode, selectedFrequency, serviceCadences, extendHoldAndSettle, recoverFromDeadHold, contactLastNameGap, contactEmailGap, contactLastName, contactEmail, contactEmailInvalid]);
+  }, [readOnlyPreview, data, existingAppointment, loadEstimate, token, selectedSlotId, paymentPreference, serviceMode, selectedFrequency, serviceCadences, extendHoldAndSettle, recoverFromDeadHold, contactFirstNameGap, contactFirstNameMissing, contactFirstName, contactLastNameGap, contactEmailGap, contactLastName, contactEmail, contactEmailInvalid]);
 
   // Deposit-gated confirm (flat $49/$99, PR #1660). When the resolved policy
   // requires a deposit and none is collected yet, mint the intent and open
@@ -9010,6 +9046,10 @@ function EstimateViewPageInner({ websiteMode = false }) {
             contactSlot={data?.contactGaps ? (
               <ContactGapFields
                 gaps={data.contactGaps}
+                firstName={contactFirstName}
+                onFirstNameChange={setContactFirstName}
+                onFirstNameBlur={() => setContactFirstNameTouched(true)}
+                firstNameTouched={contactFirstNameTouched}
                 lastName={contactLastName}
                 onLastNameChange={setContactLastName}
                 onLastNameBlur={() => setContactLastNameTouched(true)}
@@ -9034,6 +9074,7 @@ function EstimateViewPageInner({ websiteMode = false }) {
               // only confirm — the underlying review CTA stays disabled so
               // a plain confirm can't race the payment authorization
               // (pre-push Codex P0 r2).
+              || contactFirstNameMissing
               || contactLastNameMissing
               || contactEmailInvalid
               || (inlineAutoPayActive && inlineCardIntent

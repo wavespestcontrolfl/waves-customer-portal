@@ -26,11 +26,13 @@ const { EstimateOwnerMovedError, lockEstimateOwnerForUpdate } = require('../serv
 const {
   computeContactGaps,
   sanitizeContactLastName,
+  sanitizeContactFirstName,
   sanitizeContactEmail,
   fillExistingCustomerLastName,
   fillExistingCustomerEmail,
   cleanedNameTokens: contactGapNameTokens,
   IDENTITY_MISMATCH: CONTACT_IDENTITY_MISMATCH,
+  hasRealFirstName: contactGapHasRealFirstName,
 } = require('../services/estimate-contact-gaps');
 
 // Gate pass for the accepted-estimate /book links (GATE_BOOKING_CUSTOMERS_ONLY):
@@ -9088,6 +9090,10 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     if (contactLastNameError) {
       return res.status(400).json({ error: contactLastNameError.message, code: contactLastNameError.code });
     }
+    const { value: sanitizedContactFirstName, error: contactFirstNameError } = sanitizeContactFirstName(req.body?.contactFirstName);
+    if (contactFirstNameError) {
+      return res.status(400).json({ error: contactFirstNameError.message, code: contactFirstNameError.code });
+    }
     const { value: sanitizedContactEmail, error: contactEmailError } = sanitizeContactEmail(req.body?.contactEmail);
     if (contactEmailError) {
       return res.status(400).json({ error: contactEmailError.message, code: contactEmailError.code });
@@ -9100,6 +9106,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // what the customer typed. Nothing touches the in-memory estimate
     // before customer resolution (codex #5102 r4 P1): a submitted email
     // must never steer matchAcceptCustomerByPhone toward another profile.
+    let contactFillFirstName = null;
     let contactFillLastName = null;
     let contactFillEmail = null;
     let acceptContactView = null;
@@ -10808,23 +10815,35 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       // (a concurrent writer's value simply closes the gap) and the write
       // rolls back with the transaction on any later failure. A read error
       // propagates and fails the accept rather than discarding the input.
-      if (sanitizedContactLastName || sanitizedContactEmail) {
+      if (sanitizedContactLastName || sanitizedContactEmail || sanitizedContactFirstName) {
         const lockedContact = await trx('estimates').where({ id: estimate.id })
           .first('customer_id', 'customer_name', 'customer_email', 'estimate_data');
         if (lockedContact) {
           const linkedCustomerForGaps = lockedContact.customer_id
-            ? await trx('customers').where({ id: lockedContact.customer_id }).first('last_name', 'email')
+            ? await trx('customers').where({ id: lockedContact.customer_id }).first('first_name', 'last_name', 'email')
             : null;
           const lockedGaps = computeContactGaps({ estimate: lockedContact, linkedCustomer: linkedCustomerForGaps });
           acceptContactFirstName = contactGapNameTokens(lockedContact.customer_name)[0] || null;
           if (sanitizedContactLastName && lockedGaps.lastName) contactFillLastName = sanitizedContactLastName;
+          // The first name the patched estimate name starts with: the one
+          // the page asked for when there was none (gaps.firstName), else the
+          // estimate's own, else the linked profile's. With none at all (a
+          // stale tab that never showed the first-name field) the surname is
+          // not applied — the accept never mints a placeholder first name.
+          contactFillFirstName = (sanitizedContactFirstName && lockedGaps.firstName) ? sanitizedContactFirstName : null;
+          const patchFirstName = contactFillFirstName
+            || contactGapNameTokens(lockedContact.customer_name)[0]
+            || (contactGapHasRealFirstName(linkedCustomerForGaps?.first_name) ? String(linkedCustomerForGaps.first_name).trim() : null);
+          if (!patchFirstName) {
+            contactFillLastName = null;
+            contactFillFirstName = null;
+          }
           if (sanitizedContactEmail && lockedGaps.email) contactFillEmail = sanitizedContactEmail;
           const contactWrite = {};
           if (contactFillLastName) {
             // Cleaned tokens (codex #5102 r1 P2): a legacy "undefined Smith"
             // row keeps no 'undefined' first name. varchar(100) column.
-            const firstToken = contactGapNameTokens(lockedContact.customer_name)[0] || 'Customer';
-            contactWrite.customer_name = `${firstToken} ${contactFillLastName}`.slice(0, 100);
+            contactWrite.customer_name = `${patchFirstName} ${contactFillLastName}`.slice(0, 100);
             // An authored proposal snapshots its own preparedFor, which
             // normalizeProposal PREFERS over the column (codex #5102 r3 P1).
             // Same rule as customer-contact-fanout's name sync: a
@@ -10986,7 +11005,8 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           // Lazy require: admin-customers is a route module (load-cycle risk).
           const { ensureCustomerAccount } = require('./admin-customers');
           const account = await ensureCustomerAccount(trx, {
-            firstName: nameParts[0] || 'New',
+            // A multi-word first name the page collected stays whole.
+            firstName: contactFillFirstName || nameParts[0] || 'New',
             // The accept-card surname verbatim (codex #5102 r3 P2): the
             // estimates.customer_name snapshot is capped at 100 chars and
             // could clip it; customers.last_name holds the full 50.
@@ -11004,7 +11024,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             account_id: account.accountId,
             is_primary_profile: !account.existingCustomer,
             profile_label: account.existingCustomer ? 'Additional property' : 'Primary',
-            first_name: nameParts[0] || 'New',
+            first_name: contactFillFirstName || nameParts[0] || 'New',
             last_name: contactFillLastName || nameParts.slice(1).join(' ') || 'Customer',
             phone: estimate.customer_phone,
             email: newProfileEmail,

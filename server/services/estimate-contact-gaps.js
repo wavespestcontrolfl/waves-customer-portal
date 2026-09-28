@@ -9,7 +9,7 @@
 // contactGaps is BOOLEANS ONLY — the linked customer's actual name/email
 // must never leave the server through this payload.
 const { collapseWhitespace } = require('../utils/contact-normalize');
-const { EMAIL_RE } = require('../utils/intake-normalize');
+const { EMAIL_RE, normalizeContactName } = require('../utils/intake-normalize');
 
 // Match the destination columns: customers.last_name and
 // customer_accounts.last_name are varchar(50); both email columns are
@@ -52,6 +52,14 @@ function hasRealLastName(value) {
   return !!cleaned && !['customer', 'undefined', 'null'].includes(cleaned.toLowerCase());
 }
 
+// A usable first name on the linked profile: present and not one of the
+// system placeholders the accept/intake paths mint ('New', 'Unknown',
+// 'Customer').
+function hasRealFirstName(value) {
+  const cleaned = collapseWhitespace(value || '') || '';
+  return !!cleaned && !['new', 'unknown', 'customer'].includes(cleaned.toLowerCase());
+}
+
 function hasEmail(value) {
   return !!(collapseWhitespace(value || '') || '');
 }
@@ -62,11 +70,16 @@ function hasEmail(value) {
 // customer, or the linked customer has no email on file).
 // `linkedCustomer` is the row at estimate.customer_id (or null/undefined
 // when unlinked) — only its last_name/email are read, and never returned.
+// gaps.firstName: no usable first name anywhere (the estimate carries only
+// a placeholder like 'Unknown caller', or nothing) — asked only then, so the
+// accept never mints a placeholder first name (codex #5102 r6).
 function computeContactGaps({ estimate = {}, linkedCustomer = null } = {}) {
-  const lastName = cleanedNameTokens(estimate.customer_name).length < 2
+  const tokens = cleanedNameTokens(estimate.customer_name);
+  const lastName = tokens.length < 2
     && !hasRealLastName(linkedCustomer?.last_name);
+  const firstName = tokens.length === 0 && !hasRealFirstName(linkedCustomer?.first_name);
   const email = !hasEmail(estimate.customer_email) && !hasEmail(linkedCustomer?.email);
-  return { lastName, email };
+  return { firstName, lastName, email };
 }
 
 // Returns { value, error }. value is null when nothing usable was supplied
@@ -74,14 +87,27 @@ function computeContactGaps({ estimate = {}, linkedCustomer = null } = {}) {
 // that's fine (both fields are server-optional; the client enforces last
 // name as required). error is only ever set for a genuinely malformed
 // non-empty value, never for "nothing typed".
-function sanitizeContactLastName(raw) {
+// Names go through the repo-wide contact normalizer (properCase) BEFORE the
+// length cap, so the estimate, the proposal, the customer row and every
+// fan-out copy carry one spelling (codex #5102 r6).
+function sanitizeContactNamePart(raw, code, label) {
   if (typeof raw !== 'string') return { value: null, error: null };
   const collapsed = collapseWhitespace(raw) || '';
   if (!collapsed) return { value: null, error: null };
   if (CONTROL_CHARS_RE.test(collapsed)) {
-    return { value: null, error: { code: 'CONTACT_LAST_NAME_INVALID', message: 'Please enter a valid last name.' } };
+    return { value: null, error: { code, message: `Please enter a valid ${label}.` } };
   }
-  return { value: collapsed.slice(0, CONTACT_LAST_NAME_MAX), error: null };
+  const normalized = String(normalizeContactName(collapsed) || collapsed);
+  return { value: normalized.slice(0, CONTACT_LAST_NAME_MAX), error: null };
+}
+
+function sanitizeContactLastName(raw) {
+  return sanitizeContactNamePart(raw, 'CONTACT_LAST_NAME_INVALID', 'last name');
+}
+
+// customers.first_name is varchar(50), same cap as the surname.
+function sanitizeContactFirstName(raw) {
+  return sanitizeContactNamePart(raw, 'CONTACT_FIRST_NAME_INVALID', 'first name');
 }
 
 function sanitizeContactEmail(raw) {
@@ -153,6 +179,8 @@ async function fillExistingCustomerEmail(trx, customerId, email, { expectedFirst
 
 module.exports = {
   IDENTITY_MISMATCH,
+  hasRealFirstName,
+  sanitizeContactFirstName,
   hasEmail,
   cleanedNameTokens,
   CONTACT_LAST_NAME_MAX,

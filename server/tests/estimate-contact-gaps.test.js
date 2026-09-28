@@ -7,6 +7,7 @@
 const {
   computeContactGaps,
   sanitizeContactLastName,
+  sanitizeContactFirstName,
   sanitizeContactEmail,
   CONTACT_LAST_NAME_MAX,
   CONTACT_EMAIL_MAX,
@@ -15,14 +16,14 @@ const {
 describe('computeContactGaps', () => {
   test('unlinked estimate, single-token name, no email: both gaps true', () => {
     const gaps = computeContactGaps({ estimate: { customer_name: 'Testy', customer_email: null } });
-    expect(gaps).toEqual({ lastName: true, email: true });
+    expect(gaps).toEqual({ firstName: false, lastName: true, email: true });
   });
 
   test('unlinked estimate with a full two-token name and an email: no gaps', () => {
     const gaps = computeContactGaps({
       estimate: { customer_name: 'Testy Sample', customer_email: 'testy@example.com' },
     });
-    expect(gaps).toEqual({ lastName: false, email: false });
+    expect(gaps).toEqual({ firstName: false, lastName: false, email: false });
   });
 
   test('the legacy "Testy undefined" concatenation artifact still reads as a lastName gap', () => {
@@ -35,7 +36,7 @@ describe('computeContactGaps', () => {
       estimate: { customer_name: 'Testy', customer_email: null },
       linkedCustomer: { last_name: 'Sample', email: 'testy@example.com' },
     });
-    expect(gaps).toEqual({ lastName: false, email: false });
+    expect(gaps).toEqual({ firstName: false, lastName: false, email: false });
   });
 
   test('the "Customer" placeholder on the linked customer does NOT close the lastName gap', () => {
@@ -43,7 +44,7 @@ describe('computeContactGaps', () => {
       estimate: { customer_name: 'Testy', customer_email: null },
       linkedCustomer: { last_name: 'Customer', email: null },
     });
-    expect(gaps).toEqual({ lastName: true, email: true });
+    expect(gaps).toEqual({ firstName: false, lastName: true, email: true });
   });
 
   test('a blank/null linked customer last_name or email still gaps', () => {
@@ -51,14 +52,14 @@ describe('computeContactGaps', () => {
       estimate: { customer_name: 'Testy', customer_email: '' },
       linkedCustomer: { last_name: '', email: null },
     });
-    expect(gaps).toEqual({ lastName: true, email: true });
+    expect(gaps).toEqual({ firstName: false, lastName: true, email: true });
   });
 
   test('nothing to ask when the estimate already carries both fields, even unlinked', () => {
     const gaps = computeContactGaps({
       estimate: { customer_name: 'Testy Sample', customer_email: 'testy@example.com' },
     });
-    expect(gaps).toEqual({ lastName: false, email: false });
+    expect(gaps).toEqual({ firstName: false, lastName: false, email: false });
   });
 });
 
@@ -140,5 +141,30 @@ describe('computeContactGaps — appended placeholder surname', () => {
   });
   test('a real two-word name is untouched', () => {
     expect(computeContactGaps({ estimate: { customer_name: 'Customer Sample', customer_email: 'x@example.com' } }).lastName).toBe(false);
+  });
+});
+
+describe('computeContactGaps — first name only when there is none anywhere', () => {
+  test('a placeholder-only estimate with no linked profile asks for a first name', () => {
+    expect(computeContactGaps({ estimate: { customer_name: 'Unknown caller', customer_email: 'x@example.com' } }).firstName).toBe(true);
+  });
+  test('an estimate with a real first name never asks for one', () => {
+    expect(computeContactGaps({ estimate: { customer_name: 'Pat', customer_email: 'x@example.com' } }).firstName).toBe(false);
+  });
+  test('a linked profile with a real first name closes the first-name gap', () => {
+    expect(computeContactGaps({ estimate: { customer_name: '' }, linkedCustomer: { first_name: 'Pat' } }).firstName).toBe(false);
+  });
+  test('a linked placeholder first name ("New") does not', () => {
+    expect(computeContactGaps({ estimate: { customer_name: '' }, linkedCustomer: { first_name: 'New' } }).firstName).toBe(true);
+  });
+});
+
+describe('name sanitizers — canonical contact normalization', () => {
+  test('surname casing is normalized once, before the cap', () => {
+    expect(sanitizeContactLastName("o'BRIEN").value).toBe("O'Brien");
+  });
+  test('first name goes through the same normalizer', () => {
+    expect(sanitizeContactFirstName('testy').value).toBe('Testy');
+    expect(sanitizeContactFirstName('Sample\u0001').error.code).toBe('CONTACT_FIRST_NAME_INVALID');
   });
 });
