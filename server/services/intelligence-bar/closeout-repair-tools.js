@@ -16,16 +16,21 @@
  * exact step set (owner rulings 7–8). A partial run reports `partial: true`
  * (outcome partially_completed, ruling 9) and is never re-run automatically.
  *
- * v1 only reuses remedies that are clean, idempotent service functions:
+ * Steps reuse the canonical service functions only:
  *   publish_report      ensureReportToken — mints the report link (internal)
  *   queue_report_email  enqueueServiceReportV1EmailDelivery — the delivery
  *                       worker emails the customer (one row per record)
+ *   bill_visit          billing-recovery-bill billVisit — the Billing
+ *                       Recovery "Bill" action: a DRAFT invoice + 'billed'
+ *                       disposition under the scheduled mint lock (never
+ *                       sent, never charged)
  * Everything else stays manual. Paid receipts too: the receipt worker routes
  * per invoice (payer AP inbox, billing-email authority, channel settings), so
  * a card here could not name the real recipients without a second copy of
  * that routing. Otherwise: field evidence (application log, photos,
- * license) is never generated, billing / follow-up booking live inline in
- * their routes, and exhausted deliveries have no safe re-queue.
+ * license) is never generated, payer / auto-charge / parked billing stays
+ * with its own flows, follow-up booking lives inline in its route, and
+ * exhausted deliveries have no safe re-queue.
  *
  * Results carry ids, states and reasons — no customer names, phones or
  * addresses.
@@ -39,6 +44,7 @@ const { enqueueServiceReportV1EmailDelivery } = require('../service-report/deliv
 const { isUserFeatureEnabled } = require('../feature-flags');
 const { publicPortalUrl } = require('../../utils/portal-url');
 const { detectServiceLine } = require('../service-report/service-line-configs');
+const BillingRecoveryBill = require('../billing-recovery-bill');
 const {
   getServiceReportEmailRecipients, PREFS_UNAVAILABLE,
 } = require('../customer-contact');
@@ -47,8 +53,8 @@ const CLOSEOUT_REPAIR_TOOLS = [
   {
     name: 'repair_closeout',
     description: `Finish the closeout gaps the server can safely repair for ONE completed visit (scheduled_services id). The first call returns a PLAN and changes nothing: the repair steps it would run and the open items it will NOT touch (with where to fix them). The operator approves the exact plan on the confirmation card; the confirmed run executes only those steps and returns an itemized receipt (completed / failed / not attempted).
-Repairable today: publish a missing service report link, and queue a service-report email that was never queued (the customer gets an email).
-Never repaired here: application log, photos, technician license (field evidence — never generated), billing, invoice and receipt sends, follow-up booking, completion texts, and exhausted/failed deliveries.
+Repairable today: publish a missing service report link, queue a service-report email that was never queued (the customer gets an email), and bill a completed self-pay visit that was never invoiced (a DRAFT invoice through the Billing Recovery "Bill" checks — never sent or charged).
+Never repaired here: application log, photos, technician license (field evidence — never generated), payer-billed / autopay / prepaid billing, invoice and receipt sends, follow-up booking, completion texts, and exhausted/failed deliveries.
 Use for: "fix the closeout for this visit", "finish what's missing on the job we just completed". Call get_closeout_status first when the operator only wants to know what is missing.`,
     input_schema: {
       type: 'object',
@@ -77,7 +83,14 @@ const MANUAL_REMEDY = {
 const STEP_EFFECTS = {
   publish_report: { kind: 'operational', label: 'Publish the service report link (internal — no message is sent by this step)' },
   queue_report_email: { kind: 'comms', label: 'Queue the service-report email — the delivery worker emails the customer the report on file' },
+  bill_visit: { kind: 'billing', label: 'Create a DRAFT invoice (the Billing Recovery "Bill" action) — not sent, not charged' },
 };
+
+// Invoice reasons that mean "a customer self-pay invoice was expected and
+// never minted". Payer, auto-charge and parked-manual reasons stay manual
+// (closeout-alerts.js ACTIONABLE lists): those belong to the AP flow, the
+// charge lane, or a deliberate human call.
+const BILLABLE_INVOICE_REASONS = new Set(['expected_invoice_not_minted', 'frozen_required_mint_not_minted']);
 
 function parseNotes(value) {
   if (!value) return {};
@@ -213,6 +226,23 @@ async function planCloseoutRepair(status, { knex = db } = {}) {
     }
   }
 
+  const invoiceFact = facts.invoice;
+  if (invoiceFact?.state === 'pending' && BILLABLE_INVOICE_REASONS.has(invoiceFact.reason)) {
+    // The same read-only checks the Bill button re-runs before minting: a
+    // refusal (autopay, payer, prepaid, callback, unpriced…) is the manual fix.
+    const assessed = await BillingRecoveryBill.assessVisitBillable(status.serviceId, { database: knex });
+    if (!assessed.ok) skipped.push({ fact: 'invoice', reason: invoiceFact.reason, why: String(assessed.error).replace(/\.$/, '') });
+    else {
+      steps.push({
+        step: 'bill_visit',
+        fact: 'invoice',
+        reason: invoiceFact.reason,
+        scheduled_service_id: status.serviceId,
+        amount: Number(assessed.price.toFixed(2)),
+      });
+    }
+  }
+
   const planned = new Set(steps.map((s) => s.fact));
   const skippedFacts = new Set(skipped.map((s) => s.fact));
   for (const [name, f] of Object.entries(facts)) {
@@ -234,6 +264,11 @@ async function planCloseoutRepair(status, { knex = db } = {}) {
 
 async function runStep(step, { knex = db } = {}) {
   switch (step.step) {
+    case 'bill_visit': {
+      const billed = await BillingRecoveryBill.billVisit(step.scheduled_service_id, { actorId: step.actor_id || null, database: knex });
+      if (!billed.ok) return { status: 'failed', detail: billed.error };
+      return { status: 'completed', detail: `draft invoice created (not sent)`, invoice_id: billed.invoice.id, total: billed.invoice.total ?? null };
+    }
     case 'publish_report': {
       const token = await ensureReportToken(step.service_record_id, knex);
       if (!token) return { status: 'failed', detail: 'service record not found' };
@@ -284,7 +319,9 @@ async function executeCloseoutRepair(steps, { knex = db } = {}) {
 }
 
 function stepsKey(steps) {
-  return JSON.stringify((steps || []).map((s) => [s.step, s.service_record_id || null, s.depends_on || null, s.recipients_key || null]));
+  return JSON.stringify((steps || []).map((s) => [
+    s.step, s.service_record_id || null, s.scheduled_service_id || null, s.depends_on || null, s.recipients_key || null, s.amount ?? null,
+  ]));
 }
 
 function previewFromPlan(serviceId, status, plan) {
@@ -297,7 +334,10 @@ function previewFromPlan(serviceId, status, plan) {
     visit: [status.visit?.scheduledDate, status.visit?.serviceType].filter(Boolean).join(' · ') || null,
     steps: plan.steps.map((s) => ({
       ...s,
-      effect: s.recipients ? `${STEP_EFFECTS[s.step].label} — to ${s.recipients.length ? s.recipients.join(', ') : 'no recipient on file'}` : STEP_EFFECTS[s.step].label,
+      kind: STEP_EFFECTS[s.step].kind,
+      effect: s.step === 'bill_visit'
+        ? `${STEP_EFFECTS[s.step].label}: $${s.amount.toFixed(2)} before tax, line items replayed from the visit`
+        : s.recipients ? `${STEP_EFFECTS[s.step].label} — to ${s.recipients.length ? s.recipients.join(', ') : 'no recipient on file'}` : STEP_EFFECTS[s.step].label,
     })),
     manual: plan.manual,
     notifies_customer: plan.steps.some((s) => STEP_EFFECTS[s.step].kind === 'comms'),
@@ -346,7 +386,9 @@ async function repairCloseout(input, actionContext = {}) {
   if (stepsKey(approved) !== stepsKey(plan.steps)) {
     return { error: 'What this repair would do changed after the card was shown. Ask again for a fresh confirmation card.', preview_changed: true };
   }
-  const receipt = await executeCloseoutRepair(plan.steps);
+  // The confirming operator is recorded on anything a step writes (the
+  // Bill disposition's actor_user_id) — route-derived, never a model param.
+  const receipt = await executeCloseoutRepair(plan.steps.map((st) => ({ ...st, actor_id: actionContext.technicianId || null })));
   const completed = receipt.filter((r) => r.status === 'completed').length;
   logger.info(`[intelligence-bar:closeout-repair] ${serviceId}: ${completed}/${receipt.length} steps completed`);
   const allDone = completed === receipt.length;

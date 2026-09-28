@@ -9,11 +9,13 @@ jest.mock('../services/service-report/pdf-queue', () => ({ ensureReportToken: je
 jest.mock('../services/service-report/delivery-queue', () => ({ enqueueServiceReportV1EmailDelivery: jest.fn() }));
 jest.mock('../services/feature-flags', () => ({ isUserFeatureEnabled: jest.fn().mockResolvedValue(false) }));
 jest.mock('../utils/portal-url', () => ({ publicPortalUrl: () => 'https://portal.example.test' }));
+jest.mock('../services/billing-recovery-bill', () => ({ assessVisitBillable: jest.fn(), billVisit: jest.fn() }));
 
 const db = require('../models/db');
 const { getCloseoutStatus } = require('../services/closeout-status');
 const { ensureReportToken } = require('../services/service-report/pdf-queue');
 const { enqueueServiceReportV1EmailDelivery } = require('../services/service-report/delivery-queue');
+const BillingRecoveryBill = require('../services/billing-recovery-bill');
 const { CLOSEOUT_REPAIR_TOOLS, executeCloseoutRepairTool } = require('../services/intelligence-bar/closeout-repair-tools');
 const gates = require('../services/intelligence-bar/write-gates');
 const { executionOutcome } = require('../services/intelligence-bar/outcomes');
@@ -148,10 +150,10 @@ test('completion not done: nothing planned, completion is the only manual item',
   expect(res.manual.map((m) => m.fact)).toEqual(['completion']);
 });
 
-test('field evidence, billing and unknown facts are listed manual, never planned', async () => {
+test('field evidence, payer billing and unknown facts are listed manual, never planned', async () => {
   getCloseoutStatus.mockResolvedValue(status({ facts: {
     photos: { state: 'pending', reason: 'photo_count_short' },
-    invoice: { state: 'pending', reason: 'expected_invoice_not_minted' },
+    invoice: { state: 'pending', reason: 'expected_payer_not_minted' },
     license: { state: 'unknown', reason: 'technicians_lookup_failed' },
   } }));
   db.mockImplementation(fakeDb({ service_records: [RECORD] }));
@@ -327,4 +329,62 @@ test('a recipient swapped behind the same mask changes the plan: fingerprint and
   });
   expect(run.preview_changed).toBe(true);
   expect(ensureReportToken).not.toHaveBeenCalled();
+});
+
+describe('bill_visit — the Billing Recovery "Bill" action as a repair step', () => {
+  const UNBILLED = { invoice: { state: 'pending', reason: 'expected_invoice_not_minted', expectation: 'invoice', amount: 129 } };
+
+  test('plans a draft invoice at the Bill amount; the card says draft, not sent, before tax', async () => {
+    getCloseoutStatus.mockResolvedValue({ ...status({ facts: UNBILLED }), serviceId: SVC });
+    db.mockImplementation(fakeDb({ service_records: [RECORD] }));
+    BillingRecoveryBill.assessVisitBillable.mockResolvedValue({ ok: true, price: 129, rowPrice: 129, visit: {} });
+    const preview = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
+    expect(BillingRecoveryBill.assessVisitBillable).toHaveBeenCalledWith(SVC, expect.anything());
+    expect(preview.steps).toEqual([expect.objectContaining({ step: 'bill_visit', scheduled_service_id: SVC, amount: 129, kind: 'billing' })]);
+    expect(preview.notifies_customer).toBe(false);
+    expect(BillingRecoveryBill.billVisit).not.toHaveBeenCalled();
+    const contract = buildContract({ toolName: 'repair_closeout', params: { service_id: SVC }, preview });
+    expect(contract.effects).toEqual(expect.arrayContaining([expect.objectContaining({ kind: 'billing', label: expect.stringMatching(/DRAFT invoice.*not sent, not charged.*\$129\.00 before tax/) })]));
+    expect(contract.notifies_customer).toBe(false);
+  });
+
+  test('a Bill refusal (autopay, payer, prepaid…) is the manual fix; payer / auto-charge reasons never reach Bill', async () => {
+    getCloseoutStatus.mockResolvedValue({ ...status({ facts: UNBILLED }), serviceId: SVC });
+    db.mockImplementation(fakeDb({ service_records: [RECORD] }));
+    BillingRecoveryBill.assessVisitBillable.mockResolvedValue({ ok: false, status: 409, error: 'Customer is on active autopay — billing-cron charges monthly_rate; invoicing would double-charge.' });
+    const refused = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
+    expect(refused.code).toBe('nothing_repairable');
+    expect(refused.manual).toEqual([expect.objectContaining({ fact: 'invoice', fix: expect.stringMatching(/active autopay/) })]);
+
+    BillingRecoveryBill.assessVisitBillable.mockClear();
+    for (const reason of ['expected_payer_not_minted', 'expected_auto_charge_not_minted', 'parked_manual_refunded_invoice']) {
+      getCloseoutStatus.mockResolvedValue({ ...status({ facts: { invoice: { state: 'pending', reason } } }), serviceId: SVC });
+      const res = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
+      expect(res.code).toBe('nothing_repairable');
+    }
+    expect(BillingRecoveryBill.assessVisitBillable).not.toHaveBeenCalled();
+  });
+
+  test('confirmed: bills through billVisit with the confirming operator as actor; an amount change refuses', async () => {
+    getCloseoutStatus.mockResolvedValue({ ...status({ facts: UNBILLED }), serviceId: SVC });
+    db.mockImplementation(fakeDb({ service_records: [RECORD] }));
+    BillingRecoveryBill.assessVisitBillable.mockResolvedValue({ ok: true, price: 129, rowPrice: 129, visit: {} });
+    const { steps: approved } = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
+    BillingRecoveryBill.billVisit.mockResolvedValue({ ok: true, price: 129, invoice: { id: 'inv-9', total: '138.03', status: 'draft' } });
+    const run = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC }, {
+      confirmed: true, technicianId: 'tech-admin', executionPins: { _verified_repair_steps: approved },
+    });
+    expect(run.success).toBe(true);
+    expect(run.receipt).toEqual([expect.objectContaining({ step: 'bill_visit', status: 'completed', invoice_id: 'inv-9' })]);
+    expect(BillingRecoveryBill.billVisit).toHaveBeenCalledWith(SVC, expect.objectContaining({ actorId: 'tech-admin' }));
+
+    // Repriced after the card: the executor's plan no longer matches.
+    BillingRecoveryBill.billVisit.mockClear();
+    BillingRecoveryBill.assessVisitBillable.mockResolvedValue({ ok: true, price: 149, rowPrice: 149, visit: {} });
+    const drift = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC }, {
+      confirmed: true, technicianId: 'tech-admin', executionPins: { _verified_repair_steps: approved },
+    });
+    expect(drift.preview_changed).toBe(true);
+    expect(BillingRecoveryBill.billVisit).not.toHaveBeenCalled();
+  });
 });
