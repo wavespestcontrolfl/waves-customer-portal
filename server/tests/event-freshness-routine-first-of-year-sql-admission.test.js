@@ -29,6 +29,24 @@
  */
 
 const { randomUUID } = require('crypto');
+const { parseETDateTime, etDateString, addETDays } = require('../utils/datetime-et');
+
+// Fixtures anchored at explicit ET wall-clock times so no run date can push a
+// pair across an ET midnight or New Year. `later` is ~10 days out (inside the
+// curation window); `earlier` is 7 days before it in the SAME ET year. If that
+// would cross into the prior year, both move to Jan 2 / Jan 9 of later's year,
+// which is still within 90 days of any late-December run.
+function etAt(day, time = '12:00:00') { return parseETDateTime(`${day}T${time}`); }
+function sameYearDays() {
+  let laterDay = etDateString(addETDays(new Date(), 10));
+  let earlierDay = etDateString(addETDays(etAt(laterDay), -7));
+  if (earlierDay.slice(0, 4) !== laterDay.slice(0, 4)) {
+    const year = laterDay.slice(0, 4);
+    laterDay = `${year}-01-09`;
+    earlierDay = `${year}-01-02`;
+  }
+  return { laterDay, earlierDay };
+}
 
 const SKIP = !process.env.DATABASE_URL;
 const describeOrSkip = SKIP ? describe.skip : describe;
@@ -85,7 +103,7 @@ describeOrSkip('buildCurationCandidateQuery admits a genuine first-of-year stale
   test('a routine stale_recurring row with NO earlier-this-ET-year sibling IS admitted (the fix)', async () => {
     const id = await insertEvent({
       title: 'TEST Weekly Trivia First Of Year',
-      start_at: new Date(Date.now() + 10 * 24 * 3600 * 1000),
+      start_at: etAt(sameYearDays().laterDay),
     });
     const rows = await buildCurationCandidateQuery(500);
     expect(rows.map((r) => r.id)).toContain(id);
@@ -103,11 +121,11 @@ describeOrSkip('buildCurationCandidateQuery admits a genuine first-of-year stale
     // / occurrenceDayKey) — a sibling on the SAME day is the SAME
     // occurrence, never "earlier" (see the same-day test below). So this
     // fixture needs a sibling on a genuinely EARLIER ET calendar day, not
-    // merely an earlier timestamp on the same day. A few days apart keeps
-    // both comfortably inside the same ET year for any run more than a few
-    // days from the Dec 31/Jan 1 boundary.
-    const laterStart = new Date(Date.now() + 10 * 24 * 3600 * 1000);
-    const earlierDayStart = new Date(Date.now() + 3 * 24 * 3600 * 1000);
+    // merely an earlier timestamp on the same day. sameYearDays() keeps both
+    // in one ET year whatever the run date.
+    const { laterDay, earlierDay } = sameYearDays();
+    const laterStart = etAt(laterDay);
+    const earlierDayStart = etAt(earlierDay);
     await insertEvent({
       title,
       admin_status: 'approved',
@@ -123,8 +141,9 @@ describeOrSkip('buildCurationCandidateQuery admits a genuine first-of-year stale
 
   test('two same-day same-identity rows 20 minutes apart are the SAME occurrence — the later is still admitted (Codex P2, re-raised)', async () => {
     const title = 'TEST Weekly Trivia Same Day Twenty Minutes Apart';
-    const laterStart = new Date(Date.now() + 10 * 24 * 3600 * 1000);
-    const earlierSameDay = new Date(laterStart.getTime() - 20 * 60 * 1000);
+    const { laterDay } = sameYearDays();
+    const laterStart = etAt(laterDay, '12:00:00');
+    const earlierSameDay = etAt(laterDay, '11:40:00');
     await insertEvent({
       title,
       admin_status: 'approved',
@@ -140,12 +159,9 @@ describeOrSkip('buildCurationCandidateQuery admits a genuine first-of-year stale
 
   test('a merged-away duplicate a few minutes earlier does not count as an earlier occurrence', async () => {
     const title = 'TEST Weekly Trivia With Merged Duplicate';
-    const survivorStart = new Date(Date.now() + 10 * 24 * 3600 * 1000);
-    const survivorId = await insertEvent({ title, start_at: survivorStart });
-    const loserId = await insertEvent({
-      title,
-      start_at: new Date(survivorStart.getTime() - 15 * 60 * 1000),
-    });
+    const { laterDay } = sameYearDays();
+    const survivorId = await insertEvent({ title, start_at: etAt(laterDay, '12:00:00') });
+    const loserId = await insertEvent({ title, start_at: etAt(laterDay, '11:45:00') });
     await db('events_raw').where({ id: loserId }).update({ merged_into: survivorId });
     const rows = await buildCurationCandidateQuery(500);
     expect(rows.map((r) => r.id)).toContain(survivorId);
