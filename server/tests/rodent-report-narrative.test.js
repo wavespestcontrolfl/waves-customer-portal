@@ -23,7 +23,9 @@ const {
   _cache,
 } = _test;
 
-const { nextVisitProblems, isVisitClaim, withoutStaleVisitClaims } = require('../services/service-report/next-visit-claims');
+const {
+  nextVisitProblems, isVisitClaim, splitSentences, withoutStaleVisitClaims,
+} = require('../services/service-report/next-visit-claims');
 
 const RECAP = 'Today we completed your Rodent Trapping Service. We treated the accessible service areas. - Waves';
 
@@ -500,6 +502,78 @@ test('grounded relative care timing survives without authorizing a relative appo
     callModel: jest.fn().mockResolvedValue({ ok: true, json: { summary: dottedSummary } }),
   });
   expect(dottedOut).not.toContain('Sep. 3');
+
+  // Source punctuation never detaches a date or time from its visit claim
+  // (independent review P1 on #5055, L1349): the ratified sentence stays
+  // whole, so it is validated as a claim instead of leaving an exempt "3.".
+  for (const [sourceCare, modelCare, expectedProblem] of [
+    [
+      'Your next visit is Monday, Aug. 3, arriving 8–10 a.m. tomorrow.',
+      'Your next visit is Monday, Aug. 3, arriving 8–10 a.m. tomorrow.',
+      'ungrounded_relative_date:tomorrow',
+    ],
+    [
+      'Your next visit is Sep. 3.',
+      'Your next appointment is Sep. 3.',
+      'ungrounded_date:Sep. 3',
+    ],
+    [
+      'Your next visit is Monday, Aug. 4.',
+      'Your next visit is Monday, Aug. 4.',
+      'ungrounded_date:Monday, Aug. 4',
+    ],
+  ]) {
+    const appointmentArgs = {
+      ...args,
+      typedReport: {
+        ...args.typedReport,
+        todaysResult: { ...args.typedReport.todaysResult, nextStep: sourceCare },
+      },
+    };
+    const appointmentFacts = groundingFacts(appointmentArgs);
+    const invalidSummary = summary.replace('Contact us tomorrow if activity returns.', modelCare);
+    expect(ungroundedClaims(invalidSummary, appointmentFacts)).toContain(expectedProblem);
+    const rejected = await applyRodentReportNarrative(appointmentArgs, {
+      callModel: jest.fn().mockResolvedValue({ ok: true, json: { summary: invalidSummary } }),
+    });
+    expect(rejected).not.toContain(modelCare);
+    expect(rejected).not.toContain(sourceCare);
+  }
+
+  const weatherCare = 'Rain is expected Sep. 3, ending at 8 a.m. tomorrow, so keep the traps dry.';
+  const weatherArgs = {
+    ...args,
+    typedReport: {
+      ...args.typedReport,
+      todaysResult: { ...args.typedReport.todaysResult, nextStep: weatherCare },
+    },
+  };
+  const weatherFacts = groundingFacts(weatherArgs);
+  const weatherSummary = summary.replace('Contact us tomorrow if activity returns.', weatherCare);
+  expect(ungroundedClaims(weatherSummary, weatherFacts)).toEqual([]);
+  const weatherOut = await applyRodentReportNarrative(weatherArgs, {
+    callModel: jest.fn().mockResolvedValue({ ok: true, json: { summary: weatherSummary } }),
+  });
+  expect(weatherOut).toContain(weatherSummary);
+
+  const sentenceBoundaryCare = 'Contact us at 8 a.m. Your next visit is Monday, August 3, arriving 8–10 AM.';
+  const sentenceBoundaryArgs = {
+    ...args,
+    typedReport: {
+      ...args.typedReport,
+      todaysResult: { ...args.typedReport.todaysResult, nextStep: sentenceBoundaryCare },
+    },
+  };
+  const sentenceBoundaryFacts = groundingFacts(sentenceBoundaryArgs);
+  const sentenceBoundarySummary = summary.replace(
+    'Contact us tomorrow if activity returns. Your next visit is Monday, August 3, arriving 8–10 AM.',
+    sentenceBoundaryCare,
+  );
+  expect(ungroundedClaims(sentenceBoundarySummary, sentenceBoundaryFacts)).toEqual([]);
+  const sentenceBoundaryOut = await applyRodentReportNarrative(sentenceBoundaryArgs, {
+    callModel: jest.fn().mockResolvedValue({ ok: true, json: { summary: sentenceBoundarySummary } }),
+  });
+  expect(sentenceBoundaryOut).toContain(sentenceBoundarySummary);
 });
 
 describe('next-visit claims fixture table', () => {
@@ -623,6 +697,32 @@ describe('next-visit claims fixture table', () => {
     expect(withoutStaleVisitClaims(block, facts.nextVisit)).toBe('We checked 7 traps today. '
       + 'A follow-up visit in 10–14 days is recommended. Contact us tomorrow if activity returns.');
     expect(withoutStaleVisitClaims(block, null)).toBe(block);
+  });
+
+  // Sentence boundaries: abbreviations and decimals never end a sentence,
+  // so a date or time stays inside its claim (independent review P1, L1349).
+  test.each([
+    ['Your next visit is Sep. 3.', ['Your next visit is Sep. 3.']],
+    ['Your next visit is Monday, Aug. 4.', ['Your next visit is Monday, Aug. 4.']],
+    ['Arriving at 8 a.m. Monday.', ['Arriving at 8 a.m. Monday.']],
+    ['Your next visit is Monday, Aug. 3, arriving 8–10 a.m. tomorrow.', ['Your next visit is Monday, Aug. 3, arriving 8–10 a.m. tomorrow.']],
+    ['Rain is expected Sep. 3, ending at 8 a.m. tomorrow, so keep the traps dry.', ['Rain is expected Sep. 3, ending at 8 a.m. tomorrow, so keep the traps dry.']],
+    ['Contact us at 8 a.m. Your next visit is Monday, August 3, arriving 8–10 AM.', ['Contact us at 8 a.m.', 'Your next visit is Monday, August 3, arriving 8–10 AM.']],
+    ['Ask for Dr. Lee at the St. Mark office. Keep pets inside.', ['Ask for Dr. Lee at the St. Mark office.', 'Keep pets inside.']],
+    ['J. Smith approved the plan. Keep pets inside.', ['J. Smith approved the plan.', 'Keep pets inside.']],
+    ['Water 1.5 inches weekly. Keep pets inside.', ['Water 1.5 inches weekly.', 'Keep pets inside.']],
+    ['We checked the traps! Keep pets inside? Yes.', ['We checked the traps!', 'Keep pets inside?', 'Yes.']],
+  ])('sentences of %s', (block, expected) => {
+    expect(splitSentences(block)).toEqual(expected);
+  });
+
+  test('an abbreviated date or time is judged inside its claim', () => {
+    expect(withoutStaleVisitClaims('We checked 7 traps today. Your next visit is Sep. 3.', facts.nextVisit))
+      .toBe('We checked 7 traps today.');
+    expect(withoutStaleVisitClaims('We checked 7 traps today. Your next visit is Monday, Aug. 4.', facts.nextVisit))
+      .toBe('We checked 7 traps today.');
+    expect(problemsFor('Arriving at 8 a.m. Monday.')).toEqual(['ungrounded_time:8 AM']);
+    expect(problemsFor('Your next appointment is Sep. 3.', ['Your next visit is Sep. 3.'])).toEqual(['ungrounded_date:Sep. 3']);
   });
 
   test('an exempt care sentence exempts only its verbatim copy', () => {

@@ -133,9 +133,40 @@ function isVisitClaim(sentence) {
 
 // One sentence splitter for everything that judges copy sentence by
 // sentence: the visit-claim scope of a duration, the ratified-care list, and
-// the stale-claim filter below.
+// the stale-claim filter below. A period that closes an abbreviation is not a
+// sentence end, so a date or time never detaches from its visit claim
+// ("Your next visit is Sep. 3." is one sentence, not a claim plus an exempt
+// "3."). Decimals ("1.5") never reach it: no space follows their period.
+const CALENDAR_ABBR_END = /\b(?:Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sept?|Oct|Nov|Dec|Mon|Tues?|Wed|Thu(?:rs?)?|Fri|Sat|Sun)\.$/;
+const CALENDAR_START = new RegExp(`^(?:${WEEKDAY_NAMES}|${MONTH_NAMES}|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sept?|Oct|Nov|Dec|Mon|Tues?|Wed|Thu(?:rs?)?|Fri|Sat|Sun)\\b`);
+const MERIDIEM_END = /\b[ap]\.m\.$/i;
+// Titles, "etc."-style abbreviations, and single-letter initials ("J.",
+// "U.S.").
+const TITLE_ABBR_END = /(?:^|[\s(.])(?:mrs?|ms|dr|st|jr|sr|etc|vs|approx|e\.g|i\.e|[a-z])\.$/i;
+
+function continuesSentence(before, after) {
+  // "a.m. tomorrow", "approx. five": a lowercase word never opens a sentence.
+  if (/^[a-z]/.test(after)) return true;
+  // "8 a.m. Monday" stays one time; "at 8 a.m. Your next visit" is two.
+  if (MERIDIEM_END.test(before)) return CALENDAR_START.test(after);
+  // "Sep. 3", "Mon. Aug. 4"
+  if (CALENDAR_ABBR_END.test(before)) return /^\d/.test(after) || CALENDAR_START.test(after);
+  return TITLE_ABBR_END.test(before);
+}
+
 function splitSentences(block) {
-  return String(block || '').split(/(?<=[.!?])\s+/).map((sentence) => sentence.trim()).filter(Boolean);
+  const text = String(block || '');
+  const sentences = [];
+  let start = 0;
+  for (const boundary of text.matchAll(/[.!?]\s+/g)) {
+    const end = boundary.index + 1;
+    const next = boundary.index + boundary[0].length;
+    if (text[boundary.index] === '.' && continuesSentence(text.slice(start, end), text.slice(next))) continue;
+    sentences.push(text.slice(start, end).trim());
+    start = next;
+  }
+  sentences.push(text.slice(start).trim());
+  return sentences.filter(Boolean);
 }
 
 function normalizeWindowText(value) {
