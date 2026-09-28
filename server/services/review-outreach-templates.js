@@ -29,8 +29,14 @@
 
 // {sender} when no technician resolves: the company speaks ("Hi Sam! It's
 // Waves. If we earned it…"), never a person's name and never the full
-// "Waves Pest Control" (owner rulings 2026-09-28).
+// "Waves Pest Control" (owner rulings 2026-09-28). "It's Waves" is a whole
+// sentence, so it only fits where {sender} stands alone as one ("Hi Sam!
+// {sender}. If…"); an operator-edited body that uses {sender} inside a
+// sentence ("this is {sender}.", "{sender} here.") gets the bare name.
 const SENDER_FALLBACK = "It's Waves";
+const SENDER_FALLBACK_IN_SENTENCE = 'Waves';
+const SENTENCE_START_RE = /(?:^|[.!?]\s+)$/;
+const SENTENCE_END_RE = /^[.!?]/;
 
 const OUTREACH_TEMPLATES = [
   {
@@ -261,7 +267,11 @@ function renderOutreachBody(body, vars = {}, opts = {}) {
     .replace(/\{first\}/g, v.first)
     .replace(/\{name\}/g, v.name)
     .replace(/\{tech\}/g, v.tech)
-    .replace(/\{sender\}/g, v.sender)
+    .replace(/\{sender\}/g, (token, offset, text) => (
+      v.sender === SENDER_FALLBACK
+        && !(SENTENCE_START_RE.test(text.slice(0, offset)) && SENTENCE_END_RE.test(text.slice(offset + token.length)))
+        ? SENDER_FALLBACK_IN_SENTENCE
+        : v.sender))
     .replace(/\{service_type\}/g, v.service_type)
     .replace(/\{review_url\}/g, v.review_url)
     .replace(/\{date\}/g, v.date);

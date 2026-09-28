@@ -111,6 +111,10 @@ describe('review outreach templates', () => {
   test('{sender} is the tech on the record, else the company — never the "Your tech" fallback', () => {
     expect(renderOutreachBody('{sender}.', { tech: 'Adam' })).toBe('Adam with Waves.');
     expect(renderOutreachBody('{sender}.', {})).toBe("It's Waves.");
+    // "It's Waves" is a whole sentence: inside one (an operator-edited body)
+    // the company is just "Waves".
+    expect(renderOutreachBody('Hi {first}, this is {sender}. Thanks!', { first: 'Sam' })).toBe('Hi Sam, this is Waves. Thanks!');
+    expect(renderOutreachBody('{sender} here.', {})).toBe('Waves here.');
     expect(renderOutreachBody('{sender}.', { sender: 'Sam with Waves', tech: 'Adam' })).toBe('Sam with Waves.');
   });
 

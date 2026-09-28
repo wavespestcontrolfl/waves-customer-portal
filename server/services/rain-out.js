@@ -132,20 +132,24 @@ function customLinkClause(rescheduleUrl) {
 // ("Hey Sam, the cleaner was there today…"), but the template already
 // greets the customer ("Hi {first_name} - "), so the text read "Hi Sam -
 // Hey Sam, …" (owner 2026-09-28). Drop that leading greeting: the greeting
-// word, then "there" or up to three capitalized name words, ended by a
-// comma / "!" / "." / ":" / dash — or the greeting word and the customer's
-// own first name with no punctuation ("Hey Sam the tech is out…").
+// word, then "there" or up to three capitalized name words (any script:
+// "José", "Zoë"), ended by a comma / "!" / "." / ":" / dash — or the
+// greeting word and the customer's own first name with no punctuation
+// ("Hey Sam the tech is out…") — the name must end at a space, punctuation
+// or the end, so "Hey Sam's gate…" is a sentence, not a greeting — unless
+// the salutation goes on to someone else ("Hi Sam and Pat, …" is left as
+// typed rather than cut mid-address).
 // Anything else is left exactly as typed; a note that was only a greeting
 // falls back to the default line.
 const NOTE_GREETING_WORD = '(?:[Hh]i|[Hh]ello|[Hh]ey|[Gg]ood (?:[Mm]orning|[Aa]fternoon|[Ee]vening))';
-const NOTE_LEADING_GREETING_RE = new RegExp(`^${NOTE_GREETING_WORD}(?:\\s+(?:there|[A-Z][A-Za-z'.-]*)){0,3}\\s*[,!.:\u2013\u2014-]+(?:\\s+|$)`);
+const NOTE_LEADING_GREETING_RE = new RegExp(`^${NOTE_GREETING_WORD}(?:\\s+(?:there|\\p{Lu}[\\p{L}'.-]*)){0,3}\\s*[,!.:\u2013\u2014-]+(?:\\s+|$)`, 'u');
 function withoutLeadingGreeting(note, firstName) {
   const text = String(note || '');
   const stripped = text.replace(NOTE_LEADING_GREETING_RE, '');
   if (stripped !== text || !firstName) return stripped;
   const name = String(firstName).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   if (!name) return text;
-  return text.replace(new RegExp(`^${NOTE_GREETING_WORD}\\s+${name}\\b[\\s,!.:\u2013\u2014-]*`, 'i'), '');
+  return text.replace(new RegExp(`^${NOTE_GREETING_WORD}\\s+${name}(?=[\\s,!.:\u2013\u2014-]|$)(?!\\s*(?:and|&|\\+|or)(?![\\p{L}\\p{N}]))[\\s,!.:\u2013\u2014-]*`, 'iu'), '');
 }
 
 async function renderCustomMovedBody({ firstName, serviceType, date, window, customMessage, rescheduleUrl, serviceId }) {

@@ -3785,6 +3785,21 @@ describe('custom rung: the dispatcher note never re-greets the customer (owner 2
     expect(await noteAsSent(typed)).toBe(typed);
   });
 
+  test('an accented name is a name: the greeting still goes (any script)', async () => {
+    expect(await noteAsSent('Hi José, the gate was locked.', 'José')).toBe('the gate was locked.');
+    expect(await noteAsSent('Hey Zoë the tech is out sick today.', 'Zoë')).toBe('the tech is out sick today.');
+    expect(await noteAsSent('Hello Renée, see you Thursday.')).toBe('see you Thursday.');
+  });
+
+  test("a possessive after the name is part of the sentence, not a greeting", async () => {
+    expect(await noteAsSent("Hey Sam's gate was locked, so we moved the visit.")).toBe("Hey Sam's gate was locked, so we moved the visit.");
+  });
+
+  test('a salutation that goes on to someone else is left as typed, never cut mid-address', async () => {
+    expect(await noteAsSent('Hi Sam and Pat, the tech is out sick today.')).toBe('Hi Sam and Pat, the tech is out sick today.');
+    expect(await noteAsSent('Hey Sam & Pat the gate was locked.')).toBe('Hey Sam & Pat the gate was locked.');
+  });
+
   test('a note that was only a greeting falls back to the default line', async () => {
     expect(await noteAsSent('Hi Sam!')).toBe('quick update on your upcoming appointment.');
   });
