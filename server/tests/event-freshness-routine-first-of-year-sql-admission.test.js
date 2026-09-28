@@ -300,6 +300,26 @@ describeOrSkip('buildCurationCandidateQuery admits a genuine first-of-year stale
     expect(rows.map((r) => r.id)).toContain(id);
   });
 
+  test('annual and seasonal rows typed "unknown" reach the first-of-year check; a plain unknown row does not', async () => {
+    const start = new Date(Date.now() + 10 * 24 * 3600 * 1000);
+    const annualId = await insertEvent({
+      title: 'TEST Unknown Type Annual Fair', event_type: 'unknown', recurrence_type: 'annual',
+      freshness_status: 'fresh_annual', start_at: start,
+    });
+    const seasonalId = await insertEvent({
+      title: 'TEST Unknown Type Seasonal Festival', event_type: 'unknown', recurrence_type: 'seasonal',
+      freshness_status: 'fresh_annual', start_at: start,
+    });
+    const plainId = await insertEvent({
+      title: 'TEST Unknown Type No Recurrence', event_type: 'unknown', recurrence_type: 'none',
+      freshness_status: 'fresh_one_time', start_at: start,
+    });
+    const ids = (await buildCurationCandidateQuery(500)).map((r) => r.id);
+    expect(ids).toContain(annualId);
+    expect(ids).toContain(seasonalId);
+    expect(ids).not.toContain(plainId);
+  });
+
   test('expired and needs_review rows remain excluded unconditionally, even with no earlier sibling at all', async () => {
     const expiredId = await insertEvent({
       title: 'TEST Expired Row No Sibling',

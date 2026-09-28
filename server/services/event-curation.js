@@ -44,6 +44,7 @@ const {
   excludeRoutineRecurringFromQuery,
   isEligibleForFreshDigest,
   ROUTINE_RECURRENCE_TYPES,
+  YEARLY_RECURRENCE_TYPES,
 } = require('./event-freshness');
 const {
   filterPreviouslyFeaturedIdentities,
@@ -160,9 +161,11 @@ function applyCurationHardGates(query, alias = 'e') {
       .whereNotNull(col('normalized_at'))
       .whereNotIn(col('freshness_status'), CURATION_FRESHNESS_EXCLUSIONS)
       // Unknown type is excluded only without recurrence evidence: a row
-      // typed 'unknown' but classified weekly/monthly is a routine series the
-      // first-of-year gate below decides.
-      .where((q) => q.whereNot(col('event_type'), 'unknown').orWhereIn(col('recurrence_type'), ROUTINE_RECURRENCE_TYPES)),
+      // typed 'unknown' but classified weekly/monthly is a routine series, and
+      // one classified annual/seasonal a once-a-year identity; the
+      // first-of-year gates below decide both.
+      .where((q) => q.whereNot(col('event_type'), 'unknown')
+        .orWhereIn(col('recurrence_type'), [...ROUTINE_RECURRENCE_TYPES, ...YEARLY_RECURRENCE_TYPES])),
     alias,
   );
 }

@@ -11,6 +11,7 @@
  */
 
 const {
+  classifyFreshness,
   isEligibleForFreshDigest,
   isEditoriallyNewEvent,
   isRecurringIdentityEvent,
@@ -234,6 +235,46 @@ describe('annual identities: eligible only once per ET calendar year (replaces t
 
     expect(isPreviouslyFeaturedIdentity(currentYearOccurrence, [priorRowSameYear], REFERENCE)).toBe(true);
     expect(isPreviouslyFeaturedIdentity(currentYearOccurrence, [priorRowLastYear], REFERENCE)).toBe(false);
+  });
+});
+
+describe('an "unknown" event type with annual or seasonal recurrence is a once-a-year identity', () => {
+  const yearlyUnknown = (recurrence, overrides = {}) => {
+    const row = {
+      admin_status: 'approved',
+      event_url: 'https://events.example/harvest-fair',
+      event_type: 'unknown',
+      recurrence_type: recurrence,
+      times_featured: 0,
+      last_featured_at: null,
+      merged_into: null,
+      start_at: '2026-09-12T14:00:00Z',
+      title: 'Harvest Fair',
+      ...overrides,
+    };
+    return { ...row, ...classifyFreshness(row), ...overrides };
+  };
+
+  test.each(['annual', 'seasonal'])('%s recurrence classifies as fresh_annual, not needs_review', (recurrence) => {
+    expect(yearlyUnknown(recurrence).freshness_status).toBe('fresh_annual');
+  });
+
+  test.each(['annual', 'seasonal'])('%s: eligible until featured this ET year, then again the next year', (recurrence) => {
+    expect(isEligibleForFreshDigest(yearlyUnknown(recurrence), REFERENCE)).toBe(true);
+    expect(isEligibleForFreshDigest(yearlyUnknown(recurrence, {
+      times_featured: 1, last_featured_at: '2026-03-01T12:00:00Z',
+    }), REFERENCE)).toBe(false);
+    expect(isEligibleForFreshDigest(yearlyUnknown(recurrence, {
+      times_featured: 1, last_featured_at: '2025-09-13T12:00:00Z',
+    }), REFERENCE)).toBe(true);
+  });
+
+  test('no recurrence evidence still needs an explicit classification', () => {
+    for (const recurrence of ['none', 'unknown']) {
+      const row = yearlyUnknown(recurrence);
+      expect(row.freshness_status).toBe('needs_review');
+      expect(isEligibleForFreshDigest({ ...row, freshness_status: 'fresh_one_time' }, REFERENCE)).toBe(false);
+    }
   });
 });
 

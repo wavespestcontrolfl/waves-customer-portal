@@ -267,19 +267,35 @@ function parseDateOrNull(raw) {
 // see its own header) and falls back to `new Date(input)` for anything else
 // (an explicit offset, a trailing Z, or unparseable text), matching
 // parseDateOrNull's behavior exactly in those cases.
+// Date.UTC and new Date() both roll an impossible component forward into a
+// later valid instant (Feb 30 -> Mar 2, 24:00 -> the next midnight,
+// 99:00 -> four days on). A written date/time is real only if its components
+// survive the round trip unchanged.
+function isRealCalendarDateTime(year, month, day, hour = 0, minute = 0, second = 0) {
+  const t = new Date(Date.UTC(year, month - 1, day, hour, minute, second));
+  return t.getUTCFullYear() === year && t.getUTCMonth() === month - 1 && t.getUTCDate() === day
+    && t.getUTCHours() === hour && t.getUTCMinutes() === minute && t.getUTCSeconds() === second;
+}
+
 function parseExtractedStartAt(raw) {
   if (!raw || typeof raw !== 'string') return null;
   const text = raw.trim();
   // An explicit offset or Z is unambiguous.
-  if (/(?:Z|[+-]\d{2}:?\d{2})$/i.test(text) && /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/.test(text)) {
+  const offsetForm = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(text)
+    && text.match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?/);
+  if (offsetForm) {
+    const [, y, mo, dd, h, mi, s] = offsetForm;
+    if (!isRealCalendarDateTime(+y, +mo, +dd, +h, +mi, +(s || 0))) return null;
     const d = new Date(text.replace(' ', 'T'));
     return Number.isNaN(d.getTime()) ? null : d;
   }
   // Every naive form (T or space separator, optional seconds/fraction, or a
   // bare date) is an ET wall-clock time; a bare date is ET midnight.
-  const m = text.match(/^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}:\d{2})(?::(\d{2})(?:\.\d+)?)?)?$/);
+  const m = text.match(/^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?)?$/);
   if (!m) return null; // free text ("Sept 19, 7:30 PM") would parse in server-local time: reject
-  const d = parseETDateTime(`${m[1]}T${m[2] || '00:00'}:${m[3] || '00'}`);
+  const [, y, mo, dd, h = '00', mi = '00', s = '00'] = m;
+  if (!isRealCalendarDateTime(+y, +mo, +dd, +h, +mi, +s)) return null;
+  const d = parseETDateTime(`${y}-${mo}-${dd}T${h}:${mi}:${s}`);
   return d instanceof Date && !Number.isNaN(d.getTime()) ? d : null;
 }
 

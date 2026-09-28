@@ -160,6 +160,17 @@ function isAnnualEvent(event = {}) {
   return event.event_type === 'annual' || event.recurrence_type === 'annual';
 }
 
+// Once-a-year recurrence (owner ruling 2026-09-27: first occurrence of the ET
+// calendar year only). An 'unknown' event_type carrying one of these is
+// classified by its recurrence instead, the same way an 'unknown' type with a
+// routine recurrence is a routine series.
+const YEARLY_RECURRENCE_TYPES = Object.freeze(['annual', 'seasonal']);
+
+function isYearlyByRecurrenceOnly(event = {}) {
+  return String(event.event_type || '').toLowerCase() === 'unknown'
+    && YEARLY_RECURRENCE_TYPES.includes(String(event.recurrence_type || '').toLowerCase());
+}
+
 /**
  * Broader than isRoutineRecurringEvent: true for ANY identity the owner's
  * 2026-09-27 ruling treats as recurring — the routine daily/weekly/monthly/
@@ -486,7 +497,7 @@ function classifyFreshness(event) {
     return { freshness_status: 'fresh_one_time', freshness_score: FRESHNESS_SCORES.fresh_one_time };
   }
 
-  if (event_type === 'annual') {
+  if (event_type === 'annual' || isYearlyByRecurrenceOnly(event)) {
     return { freshness_status: 'fresh_annual', freshness_score: FRESHNESS_SCORES.fresh_annual };
   }
 
@@ -617,6 +628,8 @@ function isFreshDigestDateTypeEligible(event, reference, isSeriesDebut) {
 
   if (event.event_type === 'one_time') return true;
   if (event.event_type === 'annual') return true;
+  // Stage 2 already held this identity to its first occurrence of the year.
+  if (isYearlyByRecurrenceOnly(event)) return true;
   if (event.event_type === 'special_edition') return true;
 
   if (event.event_type === 'limited_run') {
@@ -874,12 +887,14 @@ module.exports = {
   FRESHNESS_SCORES,
   ROUTINE_EVENT_TYPES,
   ROUTINE_RECURRENCE_TYPES,
+  YEARLY_RECURRENCE_TYPES,
   FLAGSHIP_SEND_HOUR_ET,
   FLAGSHIP_SEND_TOLERANCE_MINUTES,
   FEATURED_ISSUE_LOOKAHEAD_MS,
   isRoutineRecurringEvent,
   isSeriesDebutEvent,
   isAnnualEvent,
+  isYearlyByRecurrenceOnly,
   isRecurringIdentityEvent,
   etYearOf,
   isEditoriallyNewEvent,

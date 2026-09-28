@@ -69,6 +69,16 @@ describe('parseExtractedStartAt — ET wall-clock parsing for Claude-extracted s
     expect(parseExtractedStartAt(undefined)).toBeNull();
   });
 
+  test('an impossible date or time is rejected instead of rolling forward to a later day', () => {
+    for (const raw of [
+      '2026-09-19T99:00:00', '2026-09-19 24:00', '2026-09-19T19:60', '2026-02-30', '2026-13-01T10:00',
+      '2026-09-19T99:00:00-04:00', '2026-02-30T10:00:00-05:00', '2026-09-19T24:00:00Z',
+    ]) {
+      expect(parseExtractedStartAt(raw)).toBeNull();
+    }
+    expect(parseExtractedStartAt('2028-02-29T10:00').toISOString()).toBe('2028-02-29T15:00:00.000Z');
+  });
+
   test('a trailing Z is honored as UTC, not re-interpreted as ET', () => {
     const d = parseExtractedStartAt('2026-06-01T12:00:00Z');
     expect(d.toISOString()).toBe('2026-06-01T12:00:00.000Z');
