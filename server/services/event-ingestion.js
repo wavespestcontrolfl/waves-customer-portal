@@ -953,7 +953,10 @@ async function reconcileLegacyKey(sourceId, currentKey, legacyKey) {
 // an approved or featured row is an editorial decision this guess never
 // overrides (every known pre-fix pair in prod was pending/pending at
 // 2026-09-28), and a quarantined pending row carries the reason an operator
-// needs to restore it. Nothing is deleted or re-timed.
+// needs to restore it. Nothing is deleted or re-timed. The sweep can only
+// ever match a pre-fix row: since the fix, extraction writes the ET
+// wall-clock key (no ':00.000Z' instant), and RSS/iCal rows key on their
+// guid, link or uid, so no row written later can hold a shifted legacy key.
 const TZ_SHIFT_QUARANTINE = 'tz_shift_quarantine';
 
 function shiftedLegacyKey(title, start, urlKey) {
