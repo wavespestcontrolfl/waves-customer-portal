@@ -400,7 +400,7 @@ function mergeCapGate(ctx) {
   return ctx.allowMerge ? null : { hold: 'merge_cap_reached' };
 }
 
-const MERGE_GATES = [publishedCleanupGate, mergeInFlightGate, prStateGate, provenanceGate, productionBaseGate, codexFindingsGate, linkOnlyDiffGate, previewBuildGate, codexGraceGate, targetStillValidGate, sourceProtectionMergeGate, publishCapGate, mergeCapGate];
+const MERGE_GATES = [mergeInFlightGate, prStateGate, provenanceGate, productionBaseGate, codexFindingsGate, linkOnlyDiffGate, previewBuildGate, codexGraceGate, targetStillValidGate, sourceProtectionMergeGate, publishCapGate, mergeCapGate];
 
 class InternalLinkPrExecutor {
   async runDryRun({ limit = DEFAULT_LIMIT, taskIds = null } = {}) {
@@ -575,6 +575,14 @@ class InternalLinkPrExecutor {
   async runCandidateSweep({ limit = envInt('AUTONOMOUS_INTERNAL_LINK_MAX_LINKS_PER_PR', 3) } = {}) {
     if (!envBool('AUTONOMOUS_INTERNAL_LINK_CANDIDATE_SWEEP', true)) return { status: 'disabled' };
     if (!shadowOff()) return { status: 'shadow' };
+    // Post-merge link planning that failed (a protected-registry or corpus
+    // outage) stamped the publishing run's link_planning_failed_at and has no
+    // other retry route — replan those recent publishes first.
+    try {
+      await this._replanUnplannedPublishes();
+    } catch (err) {
+      logger.warn(`[internal-link-pr-executor] unplanned-publish replan failed: ${err.message}`);
+    }
     // Settle finished PRs first (merged/closed → off pr_open) and recover
     // crash-orphaned reservations (runPostMergeVerification runs that sweep),
     // so a finished or dead PR never blocks runPrBatch's one-open-PR guard.
@@ -584,6 +592,63 @@ class InternalLinkPrExecutor {
       logger.warn(`[internal-link-pr-executor] pre-sweep reconciliation failed: ${err.message}`);
     }
     return this.runPrBatch({ limit, scanLimit: envInt('AUTONOMOUS_INTERNAL_LINK_SWEEP_SCAN_LIMIT', 15) });
+  }
+
+  // Recent autonomous blog publishes whose post-merge link planning failed or
+  // could not run (the poller stamps link_planning_failed_at). One transient
+  // outage must not leave a new post without inbound links for good.
+  // No age window: a marked run stays eligible until planning succeeds (an
+  // outage or kill switch can outlast any window). Oldest attempt first, and
+  // a failed retry re-stamps the marker, so a persistently failing run
+  // rotates to the back instead of starving the rest of the batch.
+  async _replanUnplannedPublishes({ limit = 5 } = {}) {
+    const runs = await db('autonomous_runs')
+      .where({ action_type: 'new_supporting_blog', outcome: 'completed_published', shadow_mode: false })
+      .whereNotNull('link_planning_failed_at')
+      .whereNotNull('published_url')
+      .orderBy('link_planning_failed_at', 'asc')
+      .limit(limit)
+      .select('*');
+    if (!runs.length) return 0;
+    const { resolveTargetForRun } = require('./autonomous-pr-poller')._internals;
+    const publisher = require('../content-astro/astro-publisher');
+    // Same kill switch finalizeMerged honors; markers wait while it is on.
+    if (publisher.internalLinkPlanningDisabled?.()) return 0;
+    let replanned = 0;
+    for (const run of runs) {
+      try {
+        // published_url is authoritative: finalizeMerged may have replaced a
+        // stale draft canonical with the verified route. The draft target is
+        // used for metadata (keyword/city/title) only; off-hub URLs are
+        // rejected by the planner's hub-only canonicalization anyway.
+        const target = await resolveTargetForRun(run);
+        const result = await publisher.planInternalLinksForTarget({
+          keyword: target?.keyword || null,
+          city: target?.city || null,
+          title: target?.title || null,
+          url: run.published_url,
+        });
+        // null = planning could not run (no corpus): the marker stays (moved
+        // to the back of the queue), same result guard as finalizeMerged.
+        if (!result) {
+          await this._restampPlanningMarker(run.id);
+          continue;
+        }
+        await db('autonomous_runs').where({ id: run.id }).whereNotNull('link_planning_failed_at')
+          .update({ link_tasks_queued: result.queued || 0, link_planning_failed_at: null, updated_at: new Date() });
+        replanned += 1;
+      } catch (err) {
+        // Marker kept (moved to the back) → retried on a later daily sweep.
+        logger.warn(`[internal-link-pr-executor] replan failed for run ${run.id}: ${err.message}`);
+        await this._restampPlanningMarker(run.id).catch(() => {});
+      }
+    }
+    return replanned;
+  }
+
+  async _restampPlanningMarker(runId) {
+    await db('autonomous_runs').where({ id: runId }).whereNotNull('link_planning_failed_at')
+      .update({ link_planning_failed_at: new Date(), updated_at: new Date() });
   }
 
   // Unattended merge for internal-link PRs (owner 2026-09-27: "fully
@@ -604,11 +669,18 @@ class InternalLinkPrExecutor {
   // passes allowMerge=false once its per-tick merge cap is spent: checks
   // still run (and close failures), the merge waits for a later tick.
   async runAutoMerge({ now = new Date(), allowMerge = true } = {}) {
-    if (!envBool('AUTONOMOUS_INTERNAL_LINK_AUTO_MERGE', true)) return { status: 'disabled' };
-    if (!require('../../config/feature-gates').isEnabled('autonomousContentEngine')) return { status: 'disabled' };
-    if (!shadowOff()) return { status: 'shadow' };
-    const tasks = await db(TABLE).where('status', 'pr_open').whereNotNull('astro_pr_url').orderBy('updated_at', 'asc').select('*');
-    if (!tasks.length) return { status: 'no_open_pr' };
+    // Already-published rows (merged_at recorded, PR cleanup unfinished) are
+    // settled regardless of the switches below: the merge happened, only its
+    // fencing remains, and verifyMergedTask leaves such rows to this path. A
+    // kill switch stops NEW merges, never the cleanup of a finished one.
+    const settled = await this._settlePublishedRows();
+    if (!envBool('AUTONOMOUS_INTERNAL_LINK_AUTO_MERGE', true)) return { status: 'disabled', settled };
+    if (!require('../../config/feature-gates').isEnabled('autonomousContentEngine')) return { status: 'disabled', settled };
+    if (!shadowOff()) return { status: 'shadow', settled };
+    // Published rows (merged_at) belong to _settlePublishedRows above.
+    const tasks = (await db(TABLE).where('status', 'pr_open').whereNotNull('astro_pr_url').whereNull('merged_at')
+      .orderBy('updated_at', 'asc').select('*')).filter((t) => !t.merged_at);
+    if (!tasks.length) return { status: settled ? 'settled' : 'no_open_pr', settled };
     const prUrl = tasks[0].astro_pr_url;
     const prNumber = parsePrNumber(prUrl);
     if (!prNumber) return { status: 'pr_number_unknown', pr_url: prUrl };
@@ -625,6 +697,27 @@ class InternalLinkPrExecutor {
       if (outcome) return this._applyGateOutcome(ctx, outcome);
     }
     return this._mergeLinkPr(ctx);
+  }
+
+  // pr_open rows that already carry merged_at, grouped per PR, through
+  // publishedCleanupGate only (close if open, confirm branch retired, mark
+  // merged). Never merges anything. Returns how many PRs settled.
+  async _settlePublishedRows() {
+    const rows = (await db(TABLE).where('status', 'pr_open').whereNotNull('merged_at').whereNotNull('astro_pr_url').select('*'))
+      .filter((r) => r.merged_at && r.astro_pr_url);
+    let settled = 0;
+    for (const prUrl of [...new Set(rows.map((r) => r.astro_pr_url))]) {
+      const prNumber = parsePrNumber(prUrl);
+      if (!prNumber) continue;
+      try {
+        const pr = await GitHubClient.getPr(prNumber);
+        const outcome = await publishedCleanupGate.call(this, { prNumber, pr, prTasks: rows.filter((r) => r.astro_pr_url === prUrl) });
+        if (outcome?.result) settled += 1;
+      } catch (err) {
+        logger.warn(`[internal-link-pr-executor] published cleanup failed for PR #${prNumber} (retrying next tick): ${err.message}`);
+      }
+    }
+    return settled;
   }
 
   // A gate outcome is { result } (report as-is), { hold } (wait for a later
