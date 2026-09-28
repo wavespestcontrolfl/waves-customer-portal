@@ -336,15 +336,29 @@ function candidateFromAutonomousRun(row) {
   };
 }
 
+// Reconciliation statuses that still mean "this IS the Astro-only row for
+// this post" — astro_only is the steady state; astro_changed_since_sync is
+// the SAME lineage (content-registry.js only assigns it in the astro-item,
+// no-db-match branch) with a transient astro_file_hash drift flagged on top,
+// cleared by the next unchanged sync. Never db_changed_since_sync (that
+// status is reachable from a DB-MATCHED row, which the blog_posts query
+// already covers) and never conflict/db_only/etc.
+const REGISTRY_ASTRO_OWNED_STATUSES = new Set(['astro_only', 'astro_changed_since_sync']);
+
 // The registry is the only durable inventory for Astro-authored posts that
 // have neither a blog_posts row nor an autonomous run. Accept only its
 // strongest state: an Astro source is present, the workflow is published,
-// and the live-status sweep verified the canonical route.
+// and the live-status sweep verified the canonical route. A transient
+// changed-since-sync flag does not itself mean unverified — the live-status
+// fields (workflow/astro/live/noindex, checked below via registryRowLivePath)
+// are preserved across a resync (Codex #4984 r7 P2: excluding this status
+// dropped a republished post from related-post candidates until the NEXT
+// unchanged daily sync happened to restore astro_only).
 function candidateFromRegistryRow(row) {
   const safeRow = row || {};
   const frontmatter = registryFrontmatter(safeRow);
   const path = registryRowLivePath(safeRow);
-  if (!path || safeRow.reconciliation_status !== 'astro_only') return null;
+  if (!path || !REGISTRY_ASTRO_OWNED_STATUSES.has(safeRow.reconciliation_status)) return null;
   const verifiedSites = registryRowVerifiedSites(safeRow);
   if (!verifiedSites.length) return null;
   return {
