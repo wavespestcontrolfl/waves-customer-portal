@@ -11,6 +11,13 @@ const {
   draftReplyToMessageIdSql,
 } = require('./sms-response-policy');
 
+// Owner ruling 2026-09-28: the Messages "needs a reply" badge and its
+// Unanswered-filtered inbox only count inbound texts from this instant
+// forward, not the full historical backlog. Production callers pass this
+// constant as `since`; tests pass null/an earlier date to keep old fixtures
+// pending without rewriting their timestamps.
+const NEEDS_REPLY_SINCE = '2026-09-28T09:25:00Z';
+
 // Shared source for the Messages needs-response badge, filtered inbox, and
 // unanswered-text watcher. The watcher opts into legacy-only rows so a failed
 // canonical write cannot erase historical work; badge IDs remain canonical.
@@ -19,6 +26,7 @@ async function loadPendingSmsConversations({
   customerId = null,
   includeLegacyOnly = false,
   cutoff = null,
+  since = null,
   includeExpired = true,
   limit = null,
 } = {}) {
@@ -258,11 +266,13 @@ async function loadPendingSmsConversations({
     WHERE answered.inbound_id IS NULL
       AND (stop.stopped_at IS NULL OR stop.stopped_at <= li.created_at)
       AND (CAST(:includeLegacyOnly AS boolean) OR li.source = 'canonical')
+      AND (CAST(:since AS timestamptz) IS NULL OR li.created_at >= CAST(:since AS timestamptz))
   `, {
     customerId: customerId || null,
     excludePhones,
     includeLegacyOnly,
     cutoff: cutoff || null,
+    since: since || null,
     includeExpired,
     ignoredInboundTypes: NON_ACTIONABLE_INBOUND_TYPES,
     humanReplyTypes: HUMAN_REPLY_TYPES,
@@ -280,9 +290,9 @@ async function loadPendingSmsConversations({
 }
 
 async function countPendingSmsConversations({
-  excludePhones = [], customerId = null, includePending = false,
+  excludePhones = [], customerId = null, includePending = false, since = null,
 } = {}) {
-  const actionable = await loadPendingSmsConversations({ excludePhones, customerId });
+  const actionable = await loadPendingSmsConversations({ excludePhones, customerId, since });
   const result = {
     conversations: new Set(actionable.map((row) => row.peer)).size,
     messages: actionable.length,
@@ -295,4 +305,4 @@ async function countPendingSmsConversations({
   return result;
 }
 
-module.exports = { loadPendingSmsConversations, countPendingSmsConversations };
+module.exports = { loadPendingSmsConversations, countPendingSmsConversations, NEEDS_REPLY_SINCE };

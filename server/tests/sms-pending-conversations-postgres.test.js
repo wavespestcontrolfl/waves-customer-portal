@@ -7,7 +7,7 @@ jest.mock('../models/db', () => {
 
 const { randomUUID } = require('node:crypto');
 const { createSmsResponseTables } = require('./fixtures/sms-response-postgres');
-const { loadPendingSmsConversations, countPendingSmsConversations } = require('../services/sms-pending-conversations');
+const { loadPendingSmsConversations, countPendingSmsConversations, NEEDS_REPLY_SINCE } = require('../services/sms-pending-conversations');
 
 const connection = process.env.UNREAD_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
@@ -449,6 +449,40 @@ postgres('pending SMS conversation query (PostgreSQL)', () => {
       // Both legacy rows are ambiguous; neither may stamp canonical metadata.
     }
     await expect(countPendingSmsConversations()).resolves.toEqual({ conversations: 1, messages: 1 });
+  });
+
+  test('exports the owner-ruling constant that production callers pass as since', () => {
+    // Owner ruling 2026-09-28 (badge "needs a reply" starts at current day/time).
+    expect(NEEDS_REPLY_SINCE).toBe('2026-09-28T09:25:00Z');
+  });
+
+  test('a since lower bound excludes a pending inbound before it and counts one at or after it', async () => {
+    const early = await seed({ body: 'Older question, never answered' });
+    const sinceAfterEarly = new Date(early.createdAt.getTime() + 500).toISOString();
+    await expect(countPendingSmsConversations({ since: sinceAfterEarly }))
+      .resolves.toEqual({ conversations: 0, messages: 0 });
+    await expect(loadPendingSmsConversations({ since: sinceAfterEarly })).resolves.toEqual([]);
+
+    // Exactly at the boundary still counts (a lower bound, not a strict one).
+    await expect(countPendingSmsConversations({ since: early.createdAt.toISOString() }))
+      .resolves.toEqual({ conversations: 1, messages: 1 });
+
+    const later = await seed({ phone: '+19415550101', body: 'Newer question, never answered' });
+    await expect(countPendingSmsConversations({ since: sinceAfterEarly, includePending: true }))
+      .resolves.toEqual({ conversations: 1, messages: 1, pendingMessageIds: [later.messageId] });
+  });
+
+  test('since floors each conversation by its own latest pending inbound, not the whole thread', async () => {
+    const oldPending = await seed({ body: 'Old unanswered question' });
+    const since = new Date(oldPending.createdAt.getTime() + 500).toISOString();
+    await expect(countPendingSmsConversations({ since })).resolves.toEqual({ conversations: 0, messages: 0 });
+
+    // A newer inbound on the SAME conversation (still unanswered) becomes
+    // that conversation's latest pending inbound, which lands after `since`.
+    const newPending = await seed({ body: 'A newer, still-unanswered question' });
+    await expect(countPendingSmsConversations({ since, includePending: true })).resolves.toEqual({
+      conversations: 1, messages: 1, pendingMessageIds: [newPending.messageId],
+    });
   });
 
   test('planner materializes outbound history once', async () => {
