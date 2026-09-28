@@ -38,8 +38,7 @@ function reportProductCopyForApplicationProduct(product = {}) {
   // plus the shared compliance-language screen ("pet-safe", "EPA-approved").
   if (!passesReportCopyScreen(copy.how_it_works)) return null;
   if (copy.also_labeled_for && !passesReportCopyScreen(copy.also_labeled_for)) return null;
-  if (!passesReportCopyScreen(copy.pets_kids)) return null;
-  // pets_kids is a re-entry-adjacent claim, screened at the SOURCE — every
+  // pets_kids is a re-entry-adjacent claim, sanitized at the SOURCE — every
   // mode (live, PDF, static, sms_preview) reads applications through this
   // one function, so stripping here (rather than only in reports-public.js's
   // existing `mode !== 'live'` compliance sweep for precaution_summary /
@@ -48,23 +47,21 @@ function reportProductCopyForApplicationProduct(product = {}) {
   // on any customer surface; none of the 12 owner-approved lines carry one
   // today (pinned by report-product-copy-reentry-compliance.test.js), so
   // this is a no-op now and a guard against a future config edit.
+  //
+  // Order matters (codex P2 2026-09-28): stripFixedReentryTiming runs FIRST
+  // and passesReportCopyScreen screens the SANITIZED text. A fixed-minute
+  // claim ("Wait 30 minutes before re-entering treated areas.") itself trips
+  // the compliance screen's own fixed-reentry-time check — screening the raw
+  // text first would drop the whole copy block as unapproved, when the
+  // sanitizer exists precisely to replace that clause with the safe idiom
+  // and let the (now-compliant) line through.
   const pets = stripFixedReentryTiming(copy.pets_kids, REENTRY_SAFE_COPY);
+  if (!passesReportCopyScreen(pets.text)) return null;
   return pets.changed ? { ...copy, pets_kids: pets.text } : copy;
-}
-
-// PDF cache-key component — same append-not-switch pattern as
-// photo-marks.js's photoMarksPdfSignature: this copy can render on ANY
-// service line's "Products Applied" section (not pest-only, so it does not
-// ride pest-report-v2.js's pest-line suffix), so '-rpc1' rides EVERY report
-// PDF key while the gate is on. A flip re-renders each cached PDF exactly
-// once in either direction; empty while off leaves pre-flip keys untouched.
-function reportProductCopyPdfSignature() {
-  return reportProductCopyGateOn() ? '-rpc1' : '';
 }
 
 module.exports = {
   reportProductCopyGateOn,
   reportProductCopyForApplicationProduct,
-  reportProductCopyPdfSignature,
   passesReportCopyScreen,
 };

@@ -79,10 +79,12 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(link).toHaveAttribute('rel', 'noopener noreferrer');
   });
 
-  // GATE_REPORT_PRODUCT_COPY (owner-approved 2026-09-28): the server omits
-  // `report_copy` entirely when the gate is off or the product has no
-  // approved wording — the PDF document renders purely off that key.
-  it('renders How it works / Also labeled for / Pets & kids when report_copy is present', () => {
+  // GATE_REPORT_PRODUCT_COPY (owner-approved 2026-09-28) is LIVE-VIEW ONLY
+  // (codex P1 2026-09-28): the server strips `report_copy` from every PDF
+  // payload before it reaches this document (stripLiveOnlyReportProductCopy,
+  // report-data.js), so the PDF never renders it even if a caller somehow
+  // still handed the component a `report_copy` key.
+  it('never renders "How it works" / "Also labeled for" / "Pets & kids", even if report_copy is present on the payload', () => {
     const data = {
       ...BASE_DATA,
       applications: [{
@@ -98,36 +100,6 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
       }],
     };
     render(<ServiceReportDocument data={data} token="tok123" />);
-    expect(screen.getByText(/How it works:/)).toBeInTheDocument();
-    expect(screen.getByText(/reaches ants you never see/)).toBeInTheDocument();
-    expect(screen.getByText(/Also labeled for:/)).toBeInTheDocument();
-    expect(screen.getByText(/Cockroaches, crickets, earwigs and silverfish/)).toBeInTheDocument();
-    expect(screen.getByText(/Pets & kids:/)).toBeInTheDocument();
-  });
-
-  it('omits Also labeled for when report_copy carries no such key (the LESCO ruling), and renders nothing when report_copy is absent', () => {
-    const lescoData = {
-      ...BASE_DATA,
-      applications: [{
-        ...BASE_DATA.applications[0],
-        product: {
-          ...BASE_DATA.applications[0].product,
-          name: 'LESCO 90/10 Nonionic Surfactant',
-          report_copy: {
-            how_it_works: 'A spreader added to the spray so it covers evenly and sticks to surfaces.',
-            pets_kids: 'Follows the spray it’s mixed into.',
-          },
-        },
-      }],
-    };
-    render(<ServiceReportDocument data={lescoData} token="tok123" />);
-    expect(screen.getByText(/How it works:/)).toBeInTheDocument();
-    expect(screen.queryByText(/Also labeled for:/)).toBeNull();
-    expect(screen.getByText(/Pets & kids:/)).toBeInTheDocument();
-
-    cleanup();
-    // Base fixture carries no report_copy at all — gate-off shape.
-    render(<ServiceReportDocument data={BASE_DATA} token="tok123" />);
     expect(screen.queryByText(/How it works:/)).toBeNull();
     expect(screen.queryByText(/Also labeled for:/)).toBeNull();
     expect(screen.queryByText(/Pets & kids:/)).toBeNull();

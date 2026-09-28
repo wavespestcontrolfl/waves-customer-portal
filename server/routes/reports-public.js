@@ -35,7 +35,7 @@ const { findReportFollowupAppointment } = require('../services/report-followup-a
 // re-exported below so existing consumers/tests keep their import path.
 const { storedRevisionMatches, writeOrRefreshCtaRequest } = require('../services/cta-service-request');
 
-const { buildReportV1Data, stripLiveOnlyScheduleFields, PIN_NO_ASSESSMENT, lawnAssessmentPdfSignature, resolveCanonicalLawnRender, resolveProjectReportPreviewFields, completedProtocolActionLabels, completedProtocolActionEntries } = require('../services/service-report/report-data');
+const { buildReportV1Data, stripLiveOnlyScheduleFields, stripLiveOnlyReportProductCopy, PIN_NO_ASSESSMENT, lawnAssessmentPdfSignature, resolveCanonicalLawnRender, resolveProjectReportPreviewFields, completedProtocolActionLabels, completedProtocolActionEntries } = require('../services/service-report/report-data');
 const { applyReportIdentitySnapshot } = require('../services/service-report/report-identity-snapshot');
 
 // lawn_assessments.id is a Postgres uuid — anything else must be refused
@@ -288,7 +288,6 @@ const { reserviceReportPdfSignature, reserviceReportRenderedSignature, reservice
 const { reportPhotoSetPdfSignature } = require('../services/service-report/photo-set-signature');
 const { treatmentZonePdfSignature } = require('../services/treatment-zone-maps');
 const { photoMarksPdfSignature } = require('../services/service-report/photo-marks');
-const { reportProductCopyPdfSignature } = require('../services/service-report/report-product-copy');
 const { stationMapPdfSignature } = require('../services/termite-stations');
 const { treatmentNarrativePdfSignature } = require('../services/service-report/treatment-narrative');
 const { enqueuePdfRenderRetry } = require('../services/service-report/pdf-queue');
@@ -564,13 +563,15 @@ async function buildServiceReportV1ResponseData(service, token, {
       if (!app?.product) return;
       if (app.product.precaution_summary) app.product.precaution_summary = strip(app.product.precaution_summary);
       if (app.product.reentry_summary) app.product.reentry_summary = strip(app.product.reentry_summary);
-      // report_copy.pets_kids (GATE_REPORT_PRODUCT_COPY) is NOT swept here:
-      // unlike the two free-text catalog fields above, it is screened at its
-      // SOURCE for every mode, live included (reportProductCopyForApplication
-      // Product in report-product-copy.js) — see that module for why a new
-      // field can take the stricter, mode-independent posture the two
-      // already-shipped fields above deliberately do not.
     });
+    // report_copy (GATE_REPORT_PRODUCT_COPY) is LIVE-VIEW ONLY (codex P1
+    // 2026-09-28): the PDF/static/sms_preview cache keys don't vary on this
+    // gate, so a rolling deploy could otherwise cache copy under the
+    // worker's OWN gate state rather than what the browser actually
+    // rendered. Stripped here at the SAME payload boundary every other
+    // live-only field uses (stripLiveOnlyReportProductCopy — report-data.js,
+    // same shape as stripLiveOnlyScheduleFields).
+    stripLiveOnlyReportProductCopy(data);
     if (data.reportV2?.aftercare?.reentry) {
       data.reportV2.aftercare.reentry = strip(data.reportV2.aftercare.reentry);
     }
@@ -2211,7 +2212,7 @@ router.get('/:token', async (req, res, next) => {
       // bypassing it into a generic 500.
       const laSignature = await lawnAssessmentPdfSignature(service, db);
       const expectedPdfStorageKey = reportPdfStorageKey(service.id, {
-        visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + cockroachV2Signature + reserviceV2Signature + reserviceTrendsSignature + photoSetSignature + tzSignature + smSignature + tnSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + treeShrubReviewPdfSignature(service) + apSignature + laSignature + photoMarksPdfSignature() + reportProductCopyPdfSignature() + publicOriginPdfSignature(),
+        visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + cockroachV2Signature + reserviceV2Signature + reserviceTrendsSignature + photoSetSignature + tzSignature + smSignature + tnSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + treeShrubReviewPdfSignature(service) + apSignature + laSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
       });
       const storedPdf = service.pdf_storage_key === expectedPdfStorageKey
         ? await getHealthyStoredReportPdf(service.pdf_storage_key)
@@ -2355,7 +2356,7 @@ router.get('/:token', async (req, res, next) => {
           logger.warn(`[reports-public] ${unreachablePhotos} report photo(s) unreachable for ${service.id} — serving without storing`);
         } else {
           const key = await putReportPdf(service.id, pdf, {
-            visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + cockroachRenderedSignature + reserviceRenderedSignature + reserviceTrendsSignature + photoSetSignature + tzSignature + smSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + treeShrubReviewPdfSignature(service) + apRenderedSignature + laRenderSignature + photoMarksPdfSignature() + reportProductCopyPdfSignature() + publicOriginPdfSignature(),
+            visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + cockroachRenderedSignature + reserviceRenderedSignature + reserviceTrendsSignature + photoSetSignature + tzSignature + smSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + treeShrubReviewPdfSignature(service) + apRenderedSignature + laRenderSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
           });
           await db('service_records').where({ id: service.id }).update({ pdf_storage_key: key });
         }

@@ -1295,28 +1295,16 @@ export default function ServiceReportDocument({ data, token }) {
                               <div><strong style={{ color: INK, fontWeight: 600 }}>Label safety:</strong> {[product.precaution_summary, product.reentry_summary].map(sanitizeReentryCopy).filter(Boolean).filter((part, i, all) => all.indexOf(part) === i).join(' ')}</div>
                             )}
                             {/* Owner-approved product wording
-                                (GATE_REPORT_PRODUCT_COPY, 2026-09-28) — the
-                                server omits `report_copy` entirely when the
-                                gate is off or the product has no approved
-                                wording. "Also labeled for" describes the
-                                LABEL, never this visit's treatment.
-                                pets_kids also runs through the SAME
-                                sanitizeReentryCopy backstop as the "Label
-                                safety" line above — belt-and-suspenders on
-                                top of the SOURCE-level screen every mode
-                                already gets (reportProductCopyForApplication
-                                Product in report-product-copy.js), same
-                                re-entry-adjacent claim, same compliance
-                                pass. */}
-                            {product.report_copy && (
-                              <>
-                                <div><strong style={{ color: INK, fontWeight: 600 }}>How it works:</strong> {product.report_copy.how_it_works}</div>
-                                {product.report_copy.also_labeled_for && (
-                                  <div><strong style={{ color: INK, fontWeight: 600 }}>Also labeled for:</strong> {product.report_copy.also_labeled_for}</div>
-                                )}
-                                <div><strong style={{ color: INK, fontWeight: 600 }}>Pets &amp; kids:</strong> {sanitizeReentryCopy(product.report_copy.pets_kids)}</div>
-                              </>
-                            )}
+                                (GATE_REPORT_PRODUCT_COPY, 2026-09-28) is
+                                LIVE-VIEW ONLY (codex P1 2026-09-28): the
+                                server strips `report_copy` from every
+                                pdf/static/sms_preview payload before it
+                                reaches this document (the PDF cache key
+                                doesn't vary on the gate), so there is
+                                nothing to render here — see
+                                stripLiveOnlyReportProductCopy in
+                                report-data.js and ReportViewPage.jsx for the
+                                live-view rendering of this field. */}
                             {/* Legacy lawn reports (no reportV2) carry approved
                                 watering-in guidance ONLY here — dropping it
                                 loses a required instruction. */}

@@ -414,16 +414,31 @@ wording page): `GATE_REPORT_PRODUCT_COPY` (off unless exactly `true`, read at
 CALL time via `reportProductCopyGateOn()` in
 `server/services/service-report/report-product-copy.js` — the
 `reportProductCopy` feature-gates map entry is for `logGateStatus` only).
-Unlike `planSummary`/`nearYou` above, this is NOT live-view-only: it is an
-attribute of the applied-products list itself
-(`/api/reports/:token/data`'s `applications[].product`), which already
-renders identically on the live report, the PDF, and static/sms_preview
-renders, so `stripLiveOnlyScheduleFields` does not touch it. On, an applied
+Unlike `planSummary`/`nearYou` above, this field is attached unconditionally
+by `buildReportV1Data` (not behind an opt-in param) but IS live-view-only in
+its own right (codex P1 2026-09-28): the PDF/static/sms_preview cache keys
+never varied on this gate, so caching it under the worker's own gate state
+(rather than what the browser actually rendered, on a rolling deploy where
+old and new workers disagree) would serve stale or mismatched copy. It is
+therefore stripped from every non-live mode at the same payload boundary
+`stripLiveOnlyScheduleFields` uses —
+`stripLiveOnlyReportProductCopy(data)` (`server/services/service-report/
+report-data.js`), called from `buildServiceReportV1ResponseData`'s
+`mode !== 'live'` block (covers the `/data` route's pdf/static/sms_preview
+modes and the direct PDF route, which shares that function) and
+unconditionally from `pdf-queue.js`'s queued renderer (which builds its
+payload outside that function, mirroring how it also calls
+`stripLiveOnlyScheduleFields` directly). On a live render, an applied
 product that matches the static reviewed config
 (`server/config/report-product-copy.js`) — by EPA registration number
 primarily (`product.epa_reg_number`, resolved off the catalog join the same
-way the existing product-safety fields are), or by an explicit
-normalized-name alias list otherwise (a hand-entered row with no catalog
+way the existing product-safety fields are; a NON-EMPTY EPA reg is
+authoritative and never falls back to a name alias) and NOT on a
+termite-family report (`serviceLine !== 'termite'`, `detectServiceLine` /
+`service.service_line` from `service-line-configs.js` — Taurus SC and other
+pest-line products carry ant/roach-specific wording that does not belong on
+a termite liquid/trench/bait visit), or by an explicit normalized-name alias
+list when no EPA reg is recorded at all (a hand-entered row with no catalog
 `product_id` still carries its snapshotted `product_name`) — gets
 `applications[N].product.report_copy: { how_it_works, also_labeled_for,
 pets_kids }`. `also_labeled_for` is OMITTED (never a null/empty string) for
@@ -434,22 +449,21 @@ never a substring/fuzzy match, same posture as
 absent from the config (every catalog product not on the owner-approved
 page) gets NO `report_copy` key at all, fail closed. Every line clears the
 shared banned-copy screen (`premium-experience.js`'s `validateCustomerCopy`)
-before it can render, and `pets_kids` additionally runs through
+before it can render, and `pets_kids` is sanitized through
 `stripFixedReentryTiming` (the same AGENTS.md fixed-minute-reentry-figure
 guard `precaution_summary`/`reentry_summary` are swept with, reused from
-`social-media.js`) at the SOURCE inside
-`reportProductCopyForApplicationProduct` — mode-independent, unlike the
-non-live-only sweep those two pre-existing catalog fields still carry — so
-the live report gets the same guard the PDF does. Customer-display only: this copy is never read by the
-AI report writer's grounding (`report-copy-context.js` builds its own
-product-evidence list independently of `buildReportV1Data`'s `applications`,
-so it never sees `report_copy`). The PDF's content-insensitive storage key
-carries a `-rpc1` suffix while the gate is on
-(`reportProductCopyPdfSignature()`, same append-not-switch convention as
-`photo-marks.js`'s `photoMarksPdfSignature`), so a gate flip re-renders every
-cached PDF exactly once in either direction rather than serving a stale
-document. No new route and no write; auth, headers and rate limits are
-unchanged.
+`social-media.js`) BEFORE the banned-copy screen runs on it — the sanitized
+text is what gets screened, so a fixed-minute claim is replaced with the
+safe idiom rather than dropping the whole copy block — at the SOURCE inside
+`reportProductCopyForApplicationProduct`, live included, so the live report
+gets the same guard the PDF does. Customer-display only: this copy is never
+read by the AI report writer's grounding (`report-copy-context.js` builds
+its own product-evidence list independently of `buildReportV1Data`'s
+`applications`, so it never sees `report_copy`), and it never reaches the
+PDF's rendered document at all (`ServiceReportDocument.jsx` carries no
+`report_copy` render) — the PDF's content-insensitive storage key is
+therefore unaffected by this gate. No new route and no write; auth, headers
+and rate limits are unchanged.
 
 Invoice line-item ownership metadata: `/api/pay/:token` and
 `/api/receipt/:token` return the invoice's persisted `line_items` as `lineItems`.

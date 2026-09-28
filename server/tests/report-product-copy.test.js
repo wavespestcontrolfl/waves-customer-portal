@@ -6,7 +6,6 @@ const { REPORT_PRODUCT_COPY, findReportProductCopyEntry, reportProductCopyFor } 
 const {
   reportProductCopyGateOn,
   reportProductCopyForApplicationProduct,
-  reportProductCopyPdfSignature,
 } = require('../services/service-report/report-product-copy');
 
 describe('reportProductCopyGateOn', () => {
@@ -44,21 +43,6 @@ const APPROVED_CATALOG_PRODUCTS = [
   { name: 'Delta Dust', epaReg: '432-772' },
   { name: 'LESCO 90/10 Nonionic Surfactant', epaReg: null }, // adjuvant, not a pesticide
 ];
-
-describe('reportProductCopyPdfSignature — cache-key component', () => {
-  const ORIGINAL = process.env.GATE_REPORT_PRODUCT_COPY;
-  afterEach(() => { process.env.GATE_REPORT_PRODUCT_COPY = ORIGINAL; });
-
-  it('appends -rpc1 while the gate is on, so a flip re-renders cached PDFs once', () => {
-    process.env.GATE_REPORT_PRODUCT_COPY = 'true';
-    expect(reportProductCopyPdfSignature()).toBe('-rpc1');
-  });
-
-  it('is empty (pre-flip keys untouched) while the gate is off', () => {
-    delete process.env.GATE_REPORT_PRODUCT_COPY;
-    expect(reportProductCopyPdfSignature()).toBe('');
-  });
-});
 
 describe('REPORT_PRODUCT_COPY config', () => {
   it('carries exactly the 12 owner-approved products, no more, no fewer', () => {
@@ -121,6 +105,23 @@ describe('findReportProductCopyEntry / reportProductCopyFor — matching', () =>
     expect(findReportProductCopyEntry({ epaReg: null, name: 'Demand' })).toBeNull();
   });
 
+  it('a present but UNRECOGNIZED EPA reg is authoritative — never falls back to a name alias for a different product (codex P1 2026-09-28)', () => {
+    // Talstar XTRA's real EPA reg (279-3206) is not in the config; "Taurus
+    // SC" IS an alias, but for a DIFFERENT product's entry. Before the fix
+    // this returned the Taurus SC entry — a mismatched match.
+    expect(findReportProductCopyEntry({ epaReg: '279-3206', name: 'Taurus SC' })).toBeNull();
+    expect(reportProductCopyFor({ epaReg: '279-3206', name: 'Taurus SC' })).toBeNull();
+  });
+
+  it('name-alias matching only applies when NO EPA reg is recorded at all', () => {
+    // Empty string / null / undefined EPA reg still falls through to the
+    // name alias — only a non-empty, unrecognized reg is treated as
+    // authoritative-and-absent.
+    expect(findReportProductCopyEntry({ epaReg: '', name: 'Taurus SC' })).not.toBeNull();
+    expect(findReportProductCopyEntry({ epaReg: null, name: 'Taurus SC' })).not.toBeNull();
+    expect(findReportProductCopyEntry({ name: 'Taurus SC' })).not.toBeNull();
+  });
+
   it('an unapproved/unlisted product gets no copy at all — fail closed', () => {
     for (const name of ['Adjourn SC', 'Cyper TC', 'Talstar XTRA', 'Tim-bor', 'Temprid FX', 'Suspend SC', 'Random Fertilizer']) {
       expect(reportProductCopyFor({ epaReg: null, name })).toBeNull();
@@ -173,5 +174,9 @@ describe('reportProductCopyForApplicationProduct — report-data.js shape', () =
 
   it('an unapproved product on the applied-products list gets no report_copy', () => {
     expect(reportProductCopyForApplicationProduct({ product_name: 'Talstar XTRA', epa_reg_number: '279-3206' })).toBeNull();
+  });
+
+  it('an unrecognized EPA reg never borrows another product\'s wording via a coincidental name alias', () => {
+    expect(reportProductCopyForApplicationProduct({ product_name: 'Taurus SC', epa_reg_number: '279-3206' })).toBeNull();
   });
 });

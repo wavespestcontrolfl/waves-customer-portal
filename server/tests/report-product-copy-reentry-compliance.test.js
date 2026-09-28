@@ -31,3 +31,35 @@ describe('report_copy.pets_kids vs the fixed-reentry-timing compliance screen', 
     expect(text).toBe(REENTRY_SAFE_COPY);
   });
 });
+
+// codex P2 2026-09-28: reportProductCopyForApplicationProduct must run
+// stripFixedReentryTiming on pets_kids BEFORE screening it, not after — a
+// fixed-minute claim itself trips the compliance screen's own fixed-reentry
+// check, so screening the RAW text first would drop the whole copy block
+// (how_it_works + also_labeled_for too) instead of letting the now-sanitized
+// pets_kids line through. Synthetic config entry — jest.mock isolates this
+// from the real 12 owner-approved lines, none of which carry a fixed figure.
+describe('reportProductCopyForApplicationProduct — screen runs AFTER the reentry-timing sanitizer', () => {
+  const ORIGINAL = process.env.GATE_REPORT_PRODUCT_COPY;
+  afterEach(() => {
+    process.env.GATE_REPORT_PRODUCT_COPY = ORIGINAL;
+    jest.resetModules();
+  });
+
+  it('carries the REENTRY_SAFE_COPY replacement rather than dropping the block', () => {
+    jest.resetModules();
+    jest.doMock('../config/report-product-copy', () => ({
+      reportProductCopyFor: () => ({
+        how_it_works: 'A synthetic test entry for the reorder guard.',
+        also_labeled_for: 'Synthetic pests.',
+        pets_kids: 'Wait 30 minutes before re-entering treated areas.',
+      }),
+    }));
+    const { reportProductCopyForApplicationProduct } = require('../services/service-report/report-product-copy');
+    const copy = reportProductCopyForApplicationProduct({ product_name: 'Synthetic Product', epa_reg_number: '00000-0000' });
+    expect(copy).not.toBeNull();
+    expect(copy.pets_kids).toBe(REENTRY_SAFE_COPY);
+    expect(copy.how_it_works).toBe('A synthetic test entry for the reorder guard.');
+    jest.dontMock('../config/report-product-copy');
+  });
+});

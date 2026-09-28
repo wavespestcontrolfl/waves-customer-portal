@@ -189,4 +189,66 @@ describe('report_copy on applications[].product (GATE_REPORT_PRODUCT_COPY)', () 
     const taurus = data.applications.find((a) => a.product.name === 'Taurus SC');
     expect(Object.keys(taurus.product.report_copy).sort()).toEqual(['also_labeled_for', 'how_it_works', 'pets_kids']);
   });
+
+  // Termite exclusion (codex P1 2026-09-28): Taurus SC's approved wording is
+  // written for the pest line (ant/spider/roach labeled-for text) and is
+  // wrong on a termite liquid/trench/bait visit that happens to use the same
+  // product. Reuses the same serviceLine classifier every other
+  // termite-vs-not branch in report-data.js already reads
+  // (service.service_line || detectServiceLine(service.service_type)).
+  test('gate ON: a termite-family service gets NO report_copy, even for an otherwise-approved product', async () => {
+    process.env.GATE_REPORT_PRODUCT_COPY = 'true';
+    const termiteService = { ...SERVICE, id: 'svc-product-copy-termite', service_line: 'termite', service_type: 'Termite Liquid Treatment' };
+    const termiteFixtures = {
+      ...FIXTURES,
+      service_products: FIXTURES.service_products.map((row) => ({ ...row, service_record_id: termiteService.id })),
+    };
+    const data = await buildReportV1Data(termiteService, 'token-product-copy-termite', makeKnex(termiteFixtures));
+    const taurus = data.applications.find((a) => a.product.name === 'Taurus SC');
+    expect(taurus.product).not.toHaveProperty('report_copy');
+  });
+
+  test('gate ON: the same product on a general pest service still gets report_copy (control)', async () => {
+    process.env.GATE_REPORT_PRODUCT_COPY = 'true';
+    const data = await buildReportV1Data(SERVICE, 'token-product-copy-pest-control', makeKnex(FIXTURES));
+    const taurus = data.applications.find((a) => a.product.name === 'Taurus SC');
+    expect(taurus.product.report_copy).not.toBeNull();
+    expect(taurus.product.report_copy.how_it_works).toMatch(/treated band/);
+  });
+});
+
+// report_copy is LIVE-VIEW ONLY (codex P1 2026-09-28) — stripLiveOnlyReportProductCopy
+// removes it from the payload at the same boundary stripLiveOnlyScheduleFields
+// uses. buildReportV1Data itself always attaches it (mode-blind); the strip
+// is the route helper's / pdf-queue's job, exercised directly here.
+describe('stripLiveOnlyReportProductCopy', () => {
+  const { stripLiveOnlyReportProductCopy } = require('../services/service-report/report-data');
+  const ORIGINAL = process.env.GATE_REPORT_PRODUCT_COPY;
+  afterEach(() => { process.env.GATE_REPORT_PRODUCT_COPY = ORIGINAL; });
+
+  test('removes report_copy from every application product', async () => {
+    process.env.GATE_REPORT_PRODUCT_COPY = 'true';
+    const data = await buildReportV1Data(SERVICE, 'token-product-copy-strip', makeKnex(FIXTURES));
+    const taurusBefore = data.applications.find((a) => a.product.name === 'Taurus SC');
+    expect(taurusBefore.product.report_copy).not.toBeNull();
+    stripLiveOnlyReportProductCopy(data);
+    for (const app of data.applications) {
+      expect(app.product).not.toHaveProperty('report_copy');
+    }
+  });
+
+  test('is a no-op when no application carries report_copy (gate off)', async () => {
+    delete process.env.GATE_REPORT_PRODUCT_COPY;
+    const data = await buildReportV1Data(SERVICE, 'token-product-copy-strip-off', makeKnex(FIXTURES));
+    expect(() => stripLiveOnlyReportProductCopy(data)).not.toThrow();
+    for (const app of data.applications) {
+      expect(app.product).not.toHaveProperty('report_copy');
+    }
+  });
+
+  test('handles missing/malformed input without throwing', () => {
+    expect(stripLiveOnlyReportProductCopy(null)).toBeNull();
+    expect(stripLiveOnlyReportProductCopy(undefined)).toBeUndefined();
+    expect(stripLiveOnlyReportProductCopy({})).toEqual({});
+  });
 });

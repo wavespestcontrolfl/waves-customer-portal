@@ -147,13 +147,19 @@ for (const entry of REPORT_PRODUCT_COPY) {
   }
 }
 
-// EPA registration number FIRST (it is on the label, so it survives any
-// catalog display-name spelling); the normalized name list is the fallback
-// for rows with no `epa_reg_number` at all. Exact lookups only — never a
-// substring/regex match.
+// EPA registration number is AUTHORITATIVE when present (it is on the
+// label, so it survives any catalog display-name spelling): a non-empty
+// `epaReg` either matches the config or the product gets no copy at all —
+// it never falls through to a name alias, which could belong to a
+// different, unrelated product sharing that display name (codex P1
+// 2026-09-28: an unrecognized EPA reg alongside a name that happens to
+// alias an approved product must never borrow that product's copy). The
+// normalized name list is the fallback ONLY for rows with no `epa_reg_number`
+// recorded at all (the LESCO surfactant; a hand-entered row with no catalog
+// join). Exact lookups only — never a substring/regex match.
 function findReportProductCopyEntry({ epaReg, name } = {}) {
   const reg = normalizeEpaReg(epaReg);
-  if (reg && BY_EPA_REG.has(reg)) return BY_EPA_REG.get(reg);
+  if (reg) return BY_EPA_REG.get(reg) || null;
   const key = normalizeProductName(name);
   if (key && BY_NAME.has(key)) return BY_NAME.get(key);
   return null;
