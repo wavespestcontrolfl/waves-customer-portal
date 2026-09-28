@@ -253,7 +253,19 @@ async function assertOwnerListForCommit({ draft, brief = {}, frontmatter = {}, b
   let namedCompetitorEnabled = false;
   try { namedCompetitorEnabled = require('../../config/feature-gates').isEnabled('namedCompetitorComparison') === true; } catch (_) { namedCompetitorEnabled = false; }
   const { operatorBriefTextForComparisonGate } = require('./guardrail-options');
-  const comparison = gate.evaluate(finalDraft, {
+  // Every publisher-set text field of the final frontmatter (hero alt
+  // included — Codex r8) is scanned, derived by the SAME walk the company
+  // extraction uses (textFields), appended to the body as its own
+  // paragraphs so the prose scans see them; the gate itself reads only
+  // title/meta from frontmatter.
+  // The byline blocks are the only exclusion: they come from the curated
+  // author registry (author-service), not from the writer or an image
+  // model, and a credential such as "FDACS Licensed Pest Control Operator"
+  // is business-shaped by construction.
+  const frontmatterText = [...new Set(textFields(frontmatter, '', [])
+    .filter((line) => !/^(?:author|technically_reviewed_by)\./.test(line))
+    .map((line) => line.replace(/^[^:]*: /, '')))].join('\n\n');
+  const comparison = gate.evaluate({ ...finalDraft, body: frontmatterText ? `${body}\n\n${frontmatterText}` : body }, {
     namedCompetitorEnabled,
     operatorBriefText: operatorBriefTextForComparisonGate({ bucket: brief?.gsc_signal?.bucket }, brief),
   });
@@ -307,5 +319,5 @@ async function assertOwnerListForCommit({ draft, brief = {}, frontmatter = {}, b
 module.exports = {
   extractCompanyNames,
   assertOwnerListForCommit,
-  _internals: { SYSTEM_PROMPT, MAX_INPUT_CHARS, extractionInput, inputKey, canonicalCompanies, ownNames, normalizeOwnName },
+  _internals: { SYSTEM_PROMPT, MAX_INPUT_CHARS, extractionInput, inputKey, canonicalCompanies, ownNames, normalizeOwnName, textFields },
 };

@@ -146,7 +146,11 @@ const COMPETITORS = [
     // "Turner", and intercept copy uses the short form): "Turner" /
     // "TURNER" only — never a lowercase word.
     aliasesCS: ['Turner'],
-    urlAliases: ['turner'],
+    // Link destinations: "turnerpest" (turnerpest.com, /turnerpest/) is
+    // specific; bare "turner" is a surname / common noun ("/tina-turner/",
+    // "compost-turner"), so it counts only in a pest-context URL (#5146 r8).
+    urlAliases: ['turnerpest'],
+    urlAliasesInContext: ['turner'],
     attributes: {
       reach: { value: 'Florida (statewide)', source: 'https://www.turnerpest.com', asOf: '2026-06-22' },
       residential_recurring: { value: 'Yes — recurring residential plans', source: 'https://www.turnerpest.com', asOf: '2026-06-22' },
@@ -171,8 +175,9 @@ const COMPETITORS = [
     // lowercase "hometeam" / "home team" stay ordinary prose.
     aliasesCS: ['HomeTeam'],
     // Link destinations lowercase their slugs ("/providers/hometeam"): the
-    // bare brand matches case-insensitively in URL tokens ONLY.
-    urlAliases: ['hometeam'],
+    // bare brand matches case-insensitively in URL tokens ONLY, and only in
+    // a pest-context URL ("hometeam" is also a sports word).
+    urlAliasesInContext: ['hometeam'],
     attributes: {
       reach: { value: 'Multi-state (US, incl. Florida)', source: 'https://pestdefense.com', asOf: '2026-06-22' },
       residential_recurring: { value: 'Yes — recurring residential plans', source: 'https://pestdefense.com', asOf: '2026-06-22' },
@@ -312,7 +317,7 @@ for (const c of COMPETITORS) {
   ALLOWLIST_INDEX.set(normalize(c.name), c);
   for (const a of c.aliases || []) ALLOWLIST_INDEX.set(normalize(a), c);
   for (const a of c.aliasesCS || []) ALLOWLIST_INDEX.set(normalize(a), c);
-  for (const a of c.urlAliases || []) ALLOWLIST_INDEX.set(normalize(a), c);
+  for (const a of [...(c.urlAliases || []), ...(c.urlAliasesInContext || [])]) ALLOWLIST_INDEX.set(normalize(a), c);
 }
 
 // Case-INSENSITIVE detectable tokens: allowlist names/aliases + detection-only
@@ -336,12 +341,22 @@ const DETECTABLE_NAMES_CS = (() => {
   return [...set].sort((a, b) => b.length - a.length);
 })();
 
-// Case-INSENSITIVE aliases honored in link-destination tokens only.
+// Case-INSENSITIVE aliases honored in link-destination tokens only:
+// `urlAliases` are specific on their own ("goaptive", "turnerpest");
+// `urlAliasesInContext` ("turner", "hometeam") count only when the same URL
+// carries pest / provider wording (URL_PEST_CONTEXT_RE) — never
+// "/wiki/Tina_Turner" or "/tools/compost-turner" (#5146 r8).
 const URL_ALIAS_NAMES = (() => {
   const set = new Set();
   for (const c of COMPETITORS) for (const a of c.urlAliases || []) set.add(a);
   return [...set].sort((a, b) => b.length - a.length);
 })();
+const URL_CONTEXT_ALIAS_NAMES = (() => {
+  const set = new Set();
+  for (const c of COMPETITORS) for (const a of c.urlAliasesInContext || []) set.add(a);
+  return [...set].sort((a, b) => b.length - a.length);
+})();
+const URL_PEST_CONTEXT_RE = /\b(?:pests?|termites?|exterminat\w*|bugs?|lawns?|mosquito(?:es)?|rodents?|wildlife|providers?|compan(?:y|ies)|reviews?|alternatives?|vs|versus|plans?|pricing|cancel\w*|contracts?)\b/i;
 
 // Trailing legal / corporate suffixes stripped (repeatedly) when an exact
 // name/alias lookup misses: "Orkin, LLC", "Massey Services, Inc.",
@@ -406,13 +421,17 @@ function findBusinessMentions(text, { url = false } = {}) {
   const claimedRanges = []; // [start,end) already attributed to a longer name
   // Case-insensitive tokens + case-sensitive ones (generic-word brands), merged
   // longest-first so the longest match wins regardless of which list it came from.
-  // `url: true` — the text is link-destination tokens: bare brand aliases
-  // that are case-sensitive in prose (HomeTeam, Turner) also match their
-  // lowercase slug form there (urlAliases).
+  // `url: true` — the text is link-destination tokens: specific URL aliases
+  // (urlAliases) always match; bare brand aliases that are case-sensitive
+  // in prose (HomeTeam, Turner) match their lowercase slug form only in a
+  // pest-context URL (urlAliasesInContext).
   const candidates = [
     ...DETECTABLE_NAMES.map((display) => ({ display, ci: true })),
-    ...DETECTABLE_NAMES_CS.map((display) => ({ display, ci: false })),
+    // Prose-casing aliases say nothing in a URL ("/wiki/Tina_Turner"): link
+    // tokens use the URL alias lists instead.
+    ...(url ? [] : DETECTABLE_NAMES_CS.map((display) => ({ display, ci: false }))),
     ...(url ? URL_ALIAS_NAMES.map((display) => ({ display, ci: true })) : []),
+    ...(url && URL_PEST_CONTEXT_RE.test(haystack) ? URL_CONTEXT_ALIAS_NAMES.map((display) => ({ display, ci: true })) : []),
   ].sort((a, b) => b.display.length - a.display.length);
   for (const { display, ci } of candidates) {
     // Escape regex metachars, then let any whitespace match between words so

@@ -2874,6 +2874,19 @@ describe('owner competitor list', () => {
       expect(r).toMatchObject({ pass: true, requiresHumanReview: true, namedCompetitors: [name] });
     }
     expect(gate.evaluate({ body: 'Cheer the home team; hometeam spirit; a pancake turner.', title: 'x' }, {}).namedCompetitors).toEqual([]);
+    // …but only in a pest / provider context URL: a surname or common noun
+    // in an unrelated link is not Turner or HomeTeam (Codex r8 on #5146).
+    for (const [url, names] of [
+      ['https://www.turnerpest.com/plans', ['Turner Pest Control']],
+      ['https://example.com/turnerpest/', ['Turner Pest Control']],
+      ['https://example.com/wiki/Tina_Turner', []],
+      ['https://example.com/tools/compost-turner', []],
+      ['https://example.com/turner-field', []],
+      ['https://example.com/sports/hometeam-advantage', []],
+      ['https://www.goaptive.com/terms', ['Aptive Environmental']],
+    ]) {
+      expect(gate.evaluate({ body: `See [this](${url}).`, title: 'x' }, { namedCompetitorEnabled: true }).namedCompetitors).toEqual(names);
+    }
 
     // The owner's short "Turner" is recognized (Codex r1 P1 on #5146).
     const turner = gate.evaluate({ body: 'Turner does not offer a termite bond in every county.', title: 'x' }, OPTS);

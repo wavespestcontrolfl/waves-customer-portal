@@ -3143,7 +3143,9 @@ describe('runNext post-publish bookkeeping', () => {
 // publish path (astro PR → Codex-gated auto-merge) instead. Comparison-gate
 // FAILURES are unaffected either way.
 describe('named-competitor autopublish gate', () => {
-  const SLUG = '/pest-control/taexx-system-comparison/';
+  // A neutral slug: the publisher's final-text comparison gate scans the
+  // slug too, and "taexx" in it would name HomeTeam.
+  const SLUG = '/pest-control/in-wall-system-comparison/';
 
   function namedCompetitorScenario({ publisher, comparisonGate, intercept = true, contentGuardrails = null, body = null, operatorBrief = null, slug = SLUG, signalMetadata = undefined, frontmatterExtra = {} }) {
     const claimedAt = new Date('2026-08-26T05:30:00Z');
@@ -3346,11 +3348,13 @@ describe('named-competitor autopublish gate', () => {
     // Companies the deterministic detection cannot see (Codex r3 on #5146):
     // the chokepoint's extraction adds them, and any name off the six skips.
     test.each([
-      ['a suffix-less brand ("Bug Out")', { body: 'Bug Out competes with local providers in Sarasota.' }, ['Bug Out']],
-      ['a name only in the slug', { body: 'How to compare local termite providers before you switch.', slug: '/pest-control/hulett-alternatives/' }, ['Hulett']],
-      ['a name used both generically and as a company', { body: 'Lawn Doctor can be an informal term for a turf specialist. Lawn Doctor competes with local providers for recurring plans.' }, ['Lawn Doctor']],
-      ['a name only in secondary_keywords', { body: 'How to compare local pest providers.', frontmatterExtra: { secondary_keywords: ['bug out alternatives sarasota'] } }, ['Bug Out']],
-    ])('%s the model lists is off the owner list — the commit is refused and the run skips', async (_label, draftOpts, companies) => {
+      ['a suffix-less brand ("Bug Out")', { body: 'Bug Out competes with local providers in Sarasota.' }, ['Bug Out'], 'named_competitor_off_list'],
+      // A detection-only brand in the slug is now also caught deterministically
+      // by the final-text comparison gate, which scans the slug (Codex r8).
+      ['a name only in the slug', { body: 'How to compare local termite providers before you switch.', slug: '/pest-control/hulett-alternatives/' }, ['Hulett'], 'comparison_table_failed'],
+      ['a name used both generically and as a company', { body: 'Lawn Doctor can be an informal term for a turf specialist. Lawn Doctor competes with local providers for recurring plans.' }, ['Lawn Doctor'], 'named_competitor_off_list'],
+      ['a name only in secondary_keywords', { body: 'How to compare local pest providers.', frontmatterExtra: { secondary_keywords: ['bug out alternatives sarasota'] } }, ['Bug Out'], 'named_competitor_off_list'],
+    ])('%s the model lists is refused at the commit and the run skips', async (_label, draftOpts, companies, reason) => {
       process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH = 'true';
       const publisher = chokepointPublisher(915, () => companies);
       const { runner, queue, claimedAt } = namedCompetitorScenario({ publisher, comparisonGate: realGate, intercept: false, ...draftOpts });
@@ -3358,10 +3362,12 @@ describe('named-competitor autopublish gate', () => {
       const result = await runner.runNext();
 
       expect(publisher.publishOrUpdatePage).toHaveBeenCalledTimes(1);
-      expect(result).toMatchObject({ outcome: 'skipped', skip_reason: 'named_competitor_off_list' });
-      expect(result.reviewer_notes).toContain(companies[0]);
-      expect(result.comparison_table_result.companyExtraction).toMatchObject({ companies });
-      expect(queue.skip).toHaveBeenCalledWith('opp_named_1', 'named_competitor_off_list', { claimToken: claimedAt });
+      expect(result).toMatchObject({ outcome: 'skipped', skip_reason: reason });
+      if (reason === 'named_competitor_off_list') {
+        expect(result.reviewer_notes).toContain(companies[0]);
+        expect(result.comparison_table_result.companyExtraction).toMatchObject({ companies });
+      }
+      expect(queue.skip).toHaveBeenCalledWith('opp_named_1', reason, { claimToken: claimedAt });
     });
 
     test('deterministic names found only in the FINAL text (publisher-added) are persisted on the verdict (pre-push r11)', async () => {

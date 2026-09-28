@@ -167,6 +167,26 @@ describe('assertOwnerListForCommit', () => {
     expect(draft.competitors_approved_by_list).toEqual(['Orkin']);
   });
 
+  test('the hero alt (and every other publisher-set frontmatter text field) goes through the final comparison gate (Codex r8)', async () => {
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { companies: ['Orkin'] } });
+    await expect(assertOwnerListForCommit({ draft: {}, brief: BLOG_BRIEF, body: 'Orkin offers recurring residential plans.',
+      frontmatter: { ...finalFm, hero_image: { src: '/images/blog/x/hero.webp', alt: 'Orkin scams customers with hidden fees' } } }))
+      .rejects.toMatchObject({ code: 'BLOG_OWNER_LIST_BLOCKED', reason: 'comparison_table_failed' });
+
+    // An off-list company named only in the hero alt is refused too (the
+    // extraction reads the same final frontmatter).
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { companies: ['Bug Out'] } });
+    await expect(assertOwnerListForCommit({ draft: {}, brief: BLOG_BRIEF, body: 'Plain body about ants.',
+      frontmatter: { ...finalFm, hero_image: { src: '/images/blog/x/hero.webp', alt: 'A Bug Out technician at a lanai' } } }))
+      .rejects.toMatchObject({ code: 'BLOG_OWNER_LIST_BLOCKED', reason: 'named_competitor_off_list', offList: ['Bug Out'] });
+    expect(dispatchWithFallback.mock.calls.at(-1)[1].text).toContain('hero_image.alt: A Bug Out technician at a lanai');
+
+    // The curated byline credential is not scanned as a business.
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { companies: [] } });
+    await expect(assertOwnerListForCommit({ draft: {}, brief: BLOG_BRIEF, body: 'Plain body about ants.',
+      frontmatter: { ...finalFm, technically_reviewed_by: { name: 'Adam Benetti', credential: 'FDACS Licensed Pest Control Operator' } } })).resolves.toBeTruthy();
+  });
+
   test('legal-name variants of an approved competitor map to its record, not off-list (Codex r7)', async () => {
     dispatchWithFallback.mockResolvedValue({ ok: true, json: { companies: ['Orkin, LLC', 'Terminix Global Holdings', 'Aptive Environmental, Inc.'] } });
     const draft = {};
