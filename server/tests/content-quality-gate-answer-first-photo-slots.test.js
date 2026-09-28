@@ -150,13 +150,21 @@ describe('checkPhotoSlotsLicensedOnly', () => {
     expect(r.reason).toBe('not_identification_post');
   });
 
-  test('defers when the brief carries no photo_slots at all', () => {
+  test('a diagnostic draft with NO photo_slots on the brief still fails on any embedded image — never fails open (Codex P1)', () => {
     const r = checkPhotoSlotsLicensedOnly(
       { frontmatter: { post_type: 'diagnostic' }, body: '![a fire ant](https://example.com/ai-art.png)' },
       brief(),
     );
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/^unlicensed_or_unknown_identification_photo:/);
+  });
+
+  test('a diagnostic draft with NO photo_slots and NO body image passes (nothing to enforce)', () => {
+    const r = checkPhotoSlotsLicensedOnly(
+      { frontmatter: { post_type: 'diagnostic' }, body: 'Fire ants sting. Call a pro.' },
+      brief(),
+    );
     expect(r.ok).toBe(true);
-    expect(r.reason).toBe('no_photo_slots_on_brief');
   });
 
   test('fails when the body embeds an image URL NOT in the brief photo_slots (e.g. AI-generated art)', () => {

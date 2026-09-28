@@ -13,6 +13,7 @@ jest.mock('../models/db', () => jest.fn());
 
 const { deriveSyncGuardrailOptions } = require('../services/content/guardrail-options');
 const { evaluate } = require('../services/content/content-guardrails');
+const { PHOTO_LIBRARY } = require('../services/content/licensed-photo-library');
 
 const PHOTO_SLOTS = [
   {
@@ -78,6 +79,37 @@ describe('deriveSyncGuardrailOptions — photo_slots requiredSourceUrls allowanc
     const result = evaluate({ frontmatter: { post_type: 'diagnostic' }, body }, opts);
     const externalLinkFailures = result.findings.filter((f) => f.code === 'DISALLOWED_EXTERNAL_LINK');
     expect(externalLinkFailures).toEqual([]);
+  });
+
+  test('end-to-end with the REAL catalog entries whose source_page/url contain encoded parentheses (Codex P1: earlier test used a simplified paren-free URL and missed this)', () => {
+    // Every PHOTO_LIBRARY entry whose source_page/url originally carried a
+    // literal unescaped "(" / ")" — the fire-ant pest+sign entries and the
+    // huntsman pest entry — run through the SAME markdown-link scanner the
+    // publish gate uses. A malformed/truncated destination here (the link
+    // closing at the first bare ")") would show up as an unmatched
+    // DISALLOWED_EXTERNAL_LINK even though requiredSourceUrls carries the
+    // correct, full, percent-encoded string.
+    const withParenUrls = PHOTO_LIBRARY.filter((e) => /\(|%28/.test(e.source_page) || /\(|%28/.test(e.url));
+    expect(withParenUrls.length).toBeGreaterThan(0); // sanity: the catalog still has these entries
+    for (const entry of withParenUrls) {
+      const photoSlots = [{ slot: entry.slot, caption: 'test', flagged_for_human: false, photo: entry }];
+      const opts = deriveSyncGuardrailOptions(
+        { id: 'opp-1', bucket: 'customer_need', service: 'pest' },
+        { action_type: 'new_supporting_blog', page_type: 'supporting-blog', service: 'pest', voice_constraints: { photo_slots: photoSlots } },
+      );
+      const body = [
+        '<BottomLineBox verdict="Yes." recommendation="Call a pro." />',
+        '',
+        'Some identifying prose.',
+        '',
+        `![${entry.alt}](${entry.url})`,
+        '',
+        `Photo: [${entry.credit}](${entry.source_page}) ([${entry.license}](${entry.license_url}))`,
+      ].join('\n');
+      const result = evaluate({ frontmatter: { post_type: 'diagnostic' }, body }, opts);
+      const externalLinkFailures = result.findings.filter((f) => f.code === 'DISALLOWED_EXTERNAL_LINK');
+      expect(externalLinkFailures).toEqual([]);
+    }
   });
 
   test('requiredSourceUrls is allowance-only: a draft that never embeds any photo_slots photo is never penalized for skipping them (Codex P1 double-check)', () => {

@@ -1163,8 +1163,12 @@ function validateSlotPhotoAttribution(photo, alt, url, body) {
 }
 function checkPhotoSlotsLicensedOnly(draft, brief) {
   if (draft?.frontmatter?.post_type !== 'diagnostic') return { ok: true, reason: 'not_identification_post' };
+  // Codex P1: an EMPTY or missing photo_slots list must NEVER fail open — a
+  // diagnostic draft on a page type the composer doesn't attach slots to
+  // (or a stored brief that predates this change) still carries the owner
+  // rule "AI art never fills an identification slot" unconditionally, so an
+  // empty list is an EMPTY ALLOWLIST: any body image at all is unlicensed.
   const slots = Array.isArray(brief?.voice_constraints?.photo_slots) ? brief.voice_constraints.photo_slots : [];
-  if (!slots.length) return { ok: true, reason: 'no_photo_slots_on_brief' };
   const byUrl = new Map(slots.filter((s) => s?.photo?.url).map((s) => [s.photo.url, s.photo]));
   const body = String(draft.body || '');
   const imgRe = /!\[([^\]]*)\]\(([^)]+)\)/g;
