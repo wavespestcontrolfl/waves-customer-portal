@@ -4263,12 +4263,19 @@ async function cancelTermWithRestorations(termId, conn = db, { throwOnError = fa
   // stamp and credit writes below). A caller passing its own transaction
   // took the gate at ITS entry (voidInvoice's sync runs here on the root
   // handle; admin-invoices' remove-flag route acquires it first thing).
-  return typeof conn.transaction === 'function' && !conn.isTransaction
+  const cancelled = await (typeof conn.transaction === 'function' && !conn.isTransaction
     ? conn.transaction(async (t) => {
       await acquireTermiteGateAtEntry(t, { termIds: [termId] });
       return runCancel(t);
     })
-    : runCancel(conn);
+    : runCancel(conn));
+  // Synchronous withdrawal (owner ruling 2026-09-28): a termite parent
+  // cancelled by a refund / void of its own invoice no longer backs its
+  // unpaid renewal — withdraw it right after this commit.
+  if (cancelled && cancelled.annual_plan_version) {
+    await require('./termite-annual-renewal-charge').afterParentChange(conn, termId, 'the prior term was cancelled (its invoice refunded or voided)');
+  }
+  return cancelled;
 }
 
 // Move 15 (docs/annual-prepay-term-states.md): a payment_pending term the
@@ -6630,12 +6637,13 @@ async function createTermForAnnualPrepay({
     // schema without the column just skips the stamp) and VALUE-compared,
     // never presence-compared — resupplying the SAME dates (the estimate
     // re-run path, a no-op save) must not read as a move.
+    const startMoved = Object.prototype.hasOwnProperty.call(updates, 'term_start')
+      && dateOnly(existing.term_start) !== updates.term_start;
+    const endMoved = Object.prototype.hasOwnProperty.call(updates, 'term_end')
+      && dateOnly(existing.term_end) !== updates.term_end;
+    const windowMoved = startMoved || endMoved;
     if (termCols.term_window_changed_at) {
-      const startMoved = Object.prototype.hasOwnProperty.call(updates, 'term_start')
-        && dateOnly(existing.term_start) !== updates.term_start;
-      const endMoved = Object.prototype.hasOwnProperty.call(updates, 'term_end')
-        && dateOnly(existing.term_end) !== updates.term_end;
-      if (startMoved || endMoved) {
+      if (windowMoved) {
         // Codex #4971 r25 P1: keep the FIRST move made after the current
         // renewal successor was minted. A later correction must not push
         // the stamp past a payment that followed the first invalidating
@@ -6677,6 +6685,12 @@ async function createTermForAnnualPrepay({
     if (carryForward.renewedFromTermId !== undefined) updates.renewed_from_term_id = carryForward.renewedFromTermId;
     if (carryForward.renewalChargeConsentAt !== undefined) updates.renewal_charge_consent_at = carryForward.renewalChargeConsentAt;
     await conn('annual_prepay_terms').where({ id: existing.id }).update(updates);
+    // Synchronous withdrawal (owner ruling 2026-09-28): a window move on a
+    // termite parent is a durable parent_term_moved refusal for its unpaid
+    // renewal — withdraw it right after this edit commits.
+    if (windowMoved && existing.annual_plan_version) {
+      await require('./termite-annual-renewal-charge').afterParentChange(conn, existing.id, 'the prior term dates were changed');
+    }
     // When the coverage window is edited (start/end actually supplied), detach
     // any visits attachScheduledServices() stamped under the old window that now
     // fall outside it — refreshTermSnapshot only re-attaches in-window visits, it
@@ -9134,7 +9148,16 @@ async function recordDecision({ termId, action, adminUserId = null, notes = null
   // session lock, doubling pool use even when this write already runs
   // inside an open transaction, e.g. stampParentRenewedForSuccessor's
   // `conn: t`) — see writeDecisionUnderTermiteLock's own doc.
-  return writeDecisionUnderTermiteLock(conn, termId, guardedUpdate);
+  const decided = await writeDecisionUnderTermiteLock(conn, termId, guardedUpdate);
+  // Synchronous withdrawal (owner ruling 2026-09-28): a cancel / switch on a
+  // termite parent kills its unpaid renewal's pay link right after this
+  // decision commits (afterParentChange defers to the outermost commit when
+  // `conn` is a transaction). A 'renew' authorizes; 'contacted' changes
+  // nothing.
+  if (decided && decided.annual_plan_version && (action === 'cancel' || action === 'switch_plan')) {
+    await require('./termite-annual-renewal-charge').afterParentChange(conn, termId, `the prior term's renewal was decided '${action}'`);
+  }
+  return decided;
 }
 
 // Codex #4971 r4 P1 — no parent decision while an ACH renewal is clearing.

@@ -256,6 +256,7 @@ const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-
 const { addMonthsSameDay, dateOnlyString } = require('../utils/date-only');
 const { gateEnvValue } = require('../config/feature-gates');
 const { INVOICE_CANCELLED_STATUSES } = require('./annual-prepay-invoice-statuses');
+const { commitPromiseOf } = require('../utils/trx-commit-promise');
 
 const RENEWABLE_STATUSES = ['active', 'renewal_pending'];
 const PAYMENT_PENDING_STATUS = 'payment_pending';
@@ -1433,10 +1434,86 @@ function assertRenewalLockAlive() {
 // transaction, nothing locked.
 async function withCustomerDeletionGate(customerIds, fn) {
   const ids = [...new Set((Array.isArray(customerIds) ? customerIds : [customerIds]).filter(Boolean).map(String))];
-  return db.transaction(async (trx) => {
+  const result = await db.transaction(async (trx) => {
     if (ids.length) await require('./annual-prepay-renewals').acquireTermiteGateAtEntry(trx, { customerIds: ids });
     return fn(trx);
   });
+  // Synchronous withdrawal (owner ruling 2026-09-28): the deleted account's
+  // unpaid renewal pay links die now, not at the next sweep — after the
+  // deletion committed and its transaction-level gate released, on the
+  // renewal gate the withdrawal itself takes.
+  if (ids.length) await withdrawUnpaidSuccessorsOfCustomers(ids, 'the customer deleted their account');
+  return result;
+}
+
+// ---- synchronous withdrawal (owner ruling 2026-09-28) --------------------
+//
+// A delivered renewal pay link stays in the customer's hands, and the bank
+// and Express Checkout rails confirm at Stripe directly — once the
+// PaymentIntent exists no server check can stop them (Codex #4971 r26/r28).
+// So the pay link is killed the moment the prior plan stops backing the
+// renewal: every writer that moves a termite PARENT out of authorizing its
+// renewal (a cancel / switch decision — recordDecision; a refund or void of
+// its invoice — cancelTermWithRestorations; a window move —
+// createTermForAnnualPrepay; the account's deletion —
+// withCustomerDeletionGate) calls afterParentChange, which withdraws the
+// unpaid successor RIGHT AFTER that writer's own transaction commits:
+// withdrawIfParentDurablyIneligible re-judges the parent UNDER the renewal
+// gate (a transient refusal — a dispute — defers, never withdraws), voids
+// the successor's invoice (voidInvoice cancels any open PaymentIntent,
+// fail-closed on money in flight) and cancels the successor. The daily
+// sweep (withdrawSuccessorsOfIneligibleParents) stays as the backstop for
+// anything this path could not finish. Gated like the sweep.
+async function withdrawUnpaidSuccessorOfParent(parentTermId, reason, conn = db) {
+  if (!parentTermId || !termiteAnnualRenewalChargeLive()) return null;
+  const successor = await conn('annual_prepay_terms')
+    .where({ renewed_from_term_id: parentTermId, status: PAYMENT_PENDING_STATUS })
+    .whereNotNull('annual_plan_version')
+    .first();
+  if (!successor) return null;
+  logger.info(`[termite-annual-renewal] withdrawing successor ${successor.id} now — ${reason}`);
+  return withdrawIfParentDurablyIneligible(successor, conn);
+}
+
+async function withdrawUnpaidSuccessorsOfCustomers(customerIds, reason, conn = db) {
+  const ids = (customerIds || []).filter(Boolean).map(String);
+  if (!ids.length || !termiteAnnualRenewalChargeLive()) return [];
+  const successors = await conn('annual_prepay_terms')
+    .whereIn('customer_id', ids)
+    .where({ status: PAYMENT_PENDING_STATUS })
+    .whereNotNull('renewed_from_term_id')
+    .whereNotNull('annual_plan_version')
+    .select('*');
+  const outcomes = [];
+  for (const successor of successors) {
+    try {
+      logger.info(`[termite-annual-renewal] withdrawing successor ${successor.id} now — ${reason}`);
+      outcomes.push(await withdrawIfParentDurablyIneligible(successor, conn));
+    } catch (err) {
+      logger.error(`[termite-annual-renewal] synchronous withdrawal failed for successor ${successor.id}: ${err.message}`);
+      outcomes.push(null);
+    }
+  }
+  return outcomes;
+}
+
+// The one entry every parent-change writer calls. `conn` is the writer's
+// own handle: a transaction (or a savepoint inside one) defers the
+// withdrawal to the OUTERMOST commit (commitPromiseOf — a rollback runs
+// nothing); the root handle means the write already committed, so the
+// withdrawal runs now and the caller awaits it. Never throws: the sweep is
+// the backstop, and a writer's own success must not depend on this.
+function afterParentChange(conn, parentTermId, reason) {
+  const run = () => withdrawUnpaidSuccessorOfParent(parentTermId, reason).catch((err) => {
+    logger.error(`[termite-annual-renewal] synchronous withdrawal after parent change failed for term ${parentTermId}: ${err.message}`);
+    return null;
+  });
+  const commit = commitPromiseOf(conn);
+  if (commit) {
+    commit.then(run, () => null);
+    return Promise.resolve(null);
+  }
+  return run();
 }
 
 async function withdrawSuccessorUnderGate(original, label, conn) {
@@ -4259,6 +4336,8 @@ module.exports = {
   withRenewalSendClearance,
   withRenewalGate,
   withCustomerDeletionGate,
+  afterParentChange,
+  withdrawUnpaidSuccessorOfParent,
   renewalPaymentRefusal,
   withRenewalPaymentClearance,
   termiteAnnualRenewalChargeLive,

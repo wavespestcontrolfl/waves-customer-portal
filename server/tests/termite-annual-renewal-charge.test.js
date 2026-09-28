@@ -242,6 +242,71 @@ describe('termite annual renewal charge', () => {
     });
   });
 
+  // Synchronous withdrawal (owner ruling 2026-09-28): afterParentChange runs
+  // the withdrawal after the writer's OUTERMOST commit when handed a
+  // transaction, now when handed the root handle, never on a rollback, and
+  // not at all while the gate is off.
+  describe('afterParentChange (synchronous withdrawal dispatch)', () => {
+    function withdrawalDb() {
+      const successorLookup = jest.fn(async () => null);
+      const db = Object.assign(jest.fn(() => ({
+        where: jest.fn(() => ({ whereNotNull: jest.fn(() => ({ first: successorLookup })) })),
+      })), { transaction: jest.fn() });
+      return { db, successorLookup };
+    }
+    const flush = async () => { await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); };
+
+    test('a transaction: nothing runs until the outermost commit, then the withdrawal looks the successor up', async () => {
+      mockCommon();
+      process.env.GATE_TERMITE_ANNUAL_PLAN = 'true';
+      const { db, successorLookup } = withdrawalDb();
+      jest.doMock('../models/db', () => db);
+      const { afterParentChange } = require('../services/termite-annual-renewal-charge');
+      let commit;
+      const root = { executionPromise: new Promise((resolve) => { commit = resolve; }) };
+      const savepoint = { parentTransaction: root, executionPromise: Promise.resolve() };
+      await afterParentChange(savepoint, 'parent-1', 'test');
+      await flush();
+      expect(successorLookup).not.toHaveBeenCalled();
+      commit();
+      await flush();
+      expect(successorLookup).toHaveBeenCalledTimes(1);
+    });
+
+    test('a rolled-back transaction runs nothing', async () => {
+      mockCommon();
+      process.env.GATE_TERMITE_ANNUAL_PLAN = 'true';
+      const { db, successorLookup } = withdrawalDb();
+      jest.doMock('../models/db', () => db);
+      const { afterParentChange } = require('../services/termite-annual-renewal-charge');
+      const rolledBack = { executionPromise: Promise.reject(new Error('rolled back')) };
+      rolledBack.executionPromise.catch(() => {});
+      await afterParentChange(rolledBack, 'parent-1', 'test');
+      await flush();
+      expect(successorLookup).not.toHaveBeenCalled();
+    });
+
+    test('the root handle: the write already committed, so the withdrawal runs now and is awaited', async () => {
+      mockCommon();
+      process.env.GATE_TERMITE_ANNUAL_PLAN = 'true';
+      const { db, successorLookup } = withdrawalDb();
+      jest.doMock('../models/db', () => db);
+      const { afterParentChange } = require('../services/termite-annual-renewal-charge');
+      await afterParentChange(db, 'parent-1', 'test');
+      expect(successorLookup).toHaveBeenCalledTimes(1);
+    });
+
+    test('gate off: nothing is looked up (the feature is dark)', async () => {
+      mockCommon();
+      delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+      const { db, successorLookup } = withdrawalDb();
+      jest.doMock('../models/db', () => db);
+      const { afterParentChange } = require('../services/termite-annual-renewal-charge');
+      await afterParentChange(db, 'parent-1', 'test');
+      expect(successorLookup).not.toHaveBeenCalled();
+    });
+  });
+
   describe('ringRenewalBell — declined amount', () => {
     function attemptQuery(amount) {
       const q = {};
