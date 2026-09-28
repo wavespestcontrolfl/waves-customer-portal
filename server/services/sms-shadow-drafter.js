@@ -526,19 +526,54 @@ function planOpenTimesRecheck({ snapshot, outgoingBody, originalBody = null }) {
     if (!knownDays.has(m.toLowerCase())) return { action: 'refuse', reason: 'edited_offer_unknown_day' };
   }
 
-  const original = String(originalBody || '').toLowerCase();
+  // Pre-push audit P1: day and window must be checked as a BOUND pair, not
+  // independently — "Tuesday 9-11 or Wednesday 2-4" edited to "Tuesday 2-4
+  // or Wednesday 9-11" has every day and every window present. The binding
+  // the drafter's verifier already grounded lives in the ORIGINAL text, so
+  // each pair's offer span (the shortest stretch of the drafted reply that
+  // holds its day name and its window text) must survive the edit verbatim.
+  const original = String(originalBody || '');
   const lowerBody = body.toLowerCase();
   const kept = [];
   for (const w of pairs) {
-    const day = String(w.date || '').split(',')[0].trim().toLowerCase();
-    const dayRequired = Boolean(day) && original.includes(day);
-    const hasWindow = countQuotedWindow(body, w.window) > 0;
-    const hasDay = Boolean(day) && lowerBody.includes(day);
-    if (hasWindow && (!dayRequired || hasDay)) { kept.push(w); continue; }
-    if (!hasWindow && (!dayRequired || !hasDay)) continue; // dropped outright
+    const day = String(w.date || '').split(',')[0].trim();
+    const span = offerSpanInText(original, day, w.window);
+    if (span && body.includes(span)) { kept.push(w); continue; }
+    // Dropped outright: when the drafted reply named the day, the day name
+    // is gone (the window text may legitimately survive on another day's
+    // kept offer); otherwise the window text itself is gone.
+    const dayInOriginal = Boolean(day) && original.toLowerCase().includes(day.toLowerCase());
+    const dropped = dayInOriginal ? !lowerBody.includes(day.toLowerCase()) : countQuotedWindow(body, w.window) === 0;
+    if (dropped) continue;
     return { action: 'refuse', reason: 'edited_offer_text' };
   }
   return kept.length ? { action: 'recheck', quotedWindows: kept } : { action: 'skip' };
+}
+
+// The shortest substring of `text` containing both `day` (case-insensitive)
+// and `window` (exact), whichever order; just the window text when the day
+// is not named at all; null when the window is absent.
+function offerSpanInText(text, day, window) {
+  const positions = (needle, haystack) => {
+    const out = [];
+    if (!needle) return out;
+    let i = haystack.indexOf(needle);
+    while (i !== -1) { out.push(i); i = haystack.indexOf(needle, i + 1); }
+    return out;
+  };
+  const windowAt = positions(window, text);
+  if (!windowAt.length) return null;
+  const dayAt = day ? positions(day.toLowerCase(), text.toLowerCase()) : [];
+  if (!dayAt.length) return window;
+  let best = null;
+  for (const wi of windowAt) {
+    for (const di of dayAt) {
+      const start = Math.min(wi, di);
+      const end = Math.max(wi + window.length, di + day.length);
+      if (!best || end - start < best.end - best.start) best = { start, end };
+    }
+  }
+  return text.slice(best.start, best.end);
 }
 
 // The minimum needed to recheck a draft's quoted OPEN TIMES at send time —

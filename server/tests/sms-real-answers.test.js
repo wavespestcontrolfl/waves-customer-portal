@@ -1337,6 +1337,22 @@ describe('planOpenTimesRecheck — what a send path rechecks given the body that
     expect(planOpenTimesRecheck({ snapshot, outgoingBody: body, originalBody: original })).toEqual({ action: 'refuse', reason: 'edited_offer_text' });
   });
 
+  test('edited: the two offers SWAPPED (every day and window still present, bindings broken) → refuse', () => {
+    const body = 'How about Tuesday 2:00 PM - 4:00 PM or Wednesday 9:00 AM - 11:00 AM?';
+    expect(planOpenTimesRecheck({ snapshot, outgoingBody: body, originalBody: original })).toEqual({ action: 'refuse', reason: 'edited_offer_text' });
+  });
+
+  test('edited: the same window on two days, one day\'s offer dropped, the other kept verbatim → recheck only the kept pair', () => {
+    const snap = { lookup: {}, quotedWindows: [
+      { date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' },
+      { date: 'Wednesday, September 30', window: '9:00 AM - 11:00 AM' },
+    ] };
+    const orig = 'How about Tuesday 9:00 AM - 11:00 AM or Wednesday 9:00 AM - 11:00 AM?';
+    expect(planOpenTimesRecheck({ snapshot: snap, outgoingBody: 'How about Wednesday 9:00 AM - 11:00 AM? Thanks!', originalBody: orig })).toEqual({
+      action: 'recheck', quotedWindows: [snap.quotedWindows[1]],
+    });
+  });
+
   test('edited: a full time range the snapshot never offered → refuse', () => {
     const body = 'How about Tuesday 9:00 AM - 11:00 AM or Wednesday 4:00 PM - 6:00 PM?';
     expect(planOpenTimesRecheck({ snapshot, outgoingBody: body, originalBody: original })).toEqual({ action: 'refuse', reason: 'edited_offer_unknown_window' });
