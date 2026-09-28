@@ -11,6 +11,7 @@
  *   GATE_TWILIO_SMS=true        (enable real SMS sending)
  *   GATE_TECH_ARRIVED_SMS=true  (enable customer "tech has arrived" SMS)
  *   GATE_TECH_LINES=true        (per-tech Twilio lines: a text/call to a tech line reaches that tech; dark = office-line semantics)
+ *   GATE_SMS_LINE_ADDRESS_FALLBACK=true (customer location line: blank/unmapped city falls through ZIP → geocode instead of the Bradenton default; mapped cities unchanged)
  *   GATE_SERVICE_REPORT_COMPLETION_CHOICES=true (searchable completion choices plus prior same-line recommendations; dark by default)
  *   GATE_TWILIO_VOICE=true      (enable voice call handling)
  *   GATE_VOICE_AI_AGENT=true    (enable bilingual AI voice backstop on unanswered calls)
@@ -3002,6 +3003,14 @@ const gates = {
   // nothing dropped, nothing tech-specific. Read at CALL time by the
   // registry; this entry is for logGateStatus.
   techLines: gateEnvValue('GATE_TECH_LINES'),
+
+  // Customer location line (services/twilio.js deriveOutboundNumber →
+  // config/locations.js resolveServiceLocation). ON: a customer whose city is
+  // blank or unmapped gets the line of the office their ZIP, then geocode,
+  // resolves to. OFF (unset is the kill switch, dev AND prod): city-only, so
+  // those customers default to the Bradenton line. Mapped cities resolve the
+  // same either way. Read at CALL time; this entry is for logGateStatus.
+  smsLineAddressFallback: gateEnvValue('GATE_SMS_LINE_ADDRESS_FALLBACK'),
 
   opsDigestsInApp: gateEnvValue('GATE_OPS_DIGESTS_IN_APP'),
 

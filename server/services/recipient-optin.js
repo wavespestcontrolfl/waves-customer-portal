@@ -326,6 +326,9 @@ async function dispatchRecipientOptins(claims = [], customer = null) {
                 // registry): the ask only sends if this row is still pending.
                 optin_phone_key: claim.key,
                 optin_customer_id: claim.customerId || null,
+                // from_phone above is the NOT NULL placeholder; replay on
+                // the customer's location line like the immediate send.
+                ...(customer?.id ? { resolve_from_by_customer: true } : {}),
               }),
             });
             const marked = await trx('recipient_optin')

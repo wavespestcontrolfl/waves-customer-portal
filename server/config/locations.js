@@ -331,6 +331,51 @@ function resolveReviewLocationId(customer = {}, opts = {}) {
   return resolveReviewLocation(customer, opts).id;
 }
 
+/**
+ * The office that owns a customer's address, for picking their location
+ * line (outbound SMS From). A MAPPED city always wins and resolves exactly
+ * like resolveLocation(city) — so no customer whose city maps today changes
+ * lines. Only a blank/unmapped city falls through: ZIP (canonical
+ * zip-to-city → CITY_TO_LOCATION), then nearest office by geocode, then the
+ * default office.
+ *
+ * Deliberately NOT resolveReviewLocation: its review overrides (Longboat Key
+ * → bradenton) and ZIP_CITY_CONFLICTS would move customers whose city maps
+ * today onto a different line mid-conversation.
+ *
+ * @param {object} customer  { city, zip, latitude, longitude }
+ * @returns {object} a WAVES_LOCATIONS entry (never null)
+ */
+function resolveServiceLocation(customer = {}) {
+  const byId = (id) => WAVES_LOCATIONS.find((l) => l.id === id) || null;
+
+  const city = String(customer.city || '').toLowerCase().trim();
+  if (city && CITY_TO_LOCATION[city]) {
+    const hit = byId(CITY_TO_LOCATION[city]);
+    if (hit) return hit;
+  }
+
+  const zip = String(customer.zip || '').trim().slice(0, 5);
+  if (zip) {
+    const { zipToCity } = require('../utils/zip-to-city');
+    const zipCity = String(zipToCity(zip) || '').toLowerCase().trim();
+    if (zipCity && CITY_TO_LOCATION[zipCity]) {
+      const hit = byId(CITY_TO_LOCATION[zipCity]);
+      if (hit) return hit;
+    }
+  }
+
+  // Same null/blank guard as resolveReviewLocation: Number(null) === 0.
+  const lat = customer.latitude == null || customer.latitude === '' ? NaN : Number(customer.latitude);
+  const lng = customer.longitude == null || customer.longitude === '' ? NaN : Number(customer.longitude);
+  if (Number.isFinite(lat) && Number.isFinite(lng)) {
+    const hit = nearestLocation(lat, lng);
+    if (hit) return hit;
+  }
+
+  return WAVES_LOCATIONS[0];
+}
+
 // True when a string is a known office city in CITY_TO_LOCATION. Used to keep a
 // non-city source area (e.g. "SW Florida" for the brand-wide lawn domain, or
 // arbitrary Google Ads utm_content) from being stored as a customer's city.
@@ -366,6 +411,7 @@ module.exports = {
   gbpTrackingUrlForLocation,
   isGbpUtmCampaign,
   resolveLocation,
+  resolveServiceLocation,
   resolveLocationFromCandidates,
   isOfficeCity,
   nearestLocation,
