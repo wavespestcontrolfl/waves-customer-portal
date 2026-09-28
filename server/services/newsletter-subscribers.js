@@ -441,12 +441,18 @@ function liveTwinSubselect(emailExprSql, { excludeCustomerId = null } = {}) {
  * Without this, the "Customers only" / "Leads only" segment filters in
  * the composer match ~zero subscribers because customer_id was NULL on
  * every legacy row.
+ *
+ * `conn` defaults to the shared pool (every existing call site keeps its
+ * behavior unchanged); a caller running its own write inside a transaction
+ * — e.g. newsletter-list-reconcile.js's per-customer import — passes that
+ * transaction so the link commits on the SAME connection as the insert it
+ * follows, never crossing a database boundary the caller didn't choose.
  */
-async function linkToCustomer(email) {
+async function linkToCustomer(email, conn = db) {
   if (!email) return;
   const lc = email.toLowerCase();
   const twin = liveTwinSubselect('?');
-  await db.raw(
+  await conn.raw(
     `UPDATE newsletter_subscribers
        SET customer_id = twin.id, updated_at = NOW()
        FROM ${twin.sql} twin

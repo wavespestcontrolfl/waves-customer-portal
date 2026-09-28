@@ -5,8 +5,10 @@
  * CANDIDATE: a live customer — the canonical whereLiveCustomer/CUSTOMER_STAGES
  * rule from customer-stages.js (active, not deleted, pipeline_stage IN
  * active_customer/won/at_risk; a NULL pipeline_stage is NOT a candidate) —
- * with a non-empty email and no ACTIVE subscriber row (by customer_id or
- * lower(email)). Every exclusion is checked in ONE fixed priority order —
+ * with a non-empty, minimally-valid email ("@" present, matching
+ * subscribeOrResubscribe's own strict:false floor) and no ACTIVE subscriber
+ * row (by customer_id or lower(email)). Every exclusion is checked in ONE
+ * fixed priority order —
  * an existing subscriber-state row always outranks a preference/suppression
  * check, so a both-unsubscribed-AND-marketing-off customer counts once, under the higher reason:
  *   1. existing non-active row: unsubscribed / pending / inactive+waitlist
@@ -30,7 +32,18 @@
  * subscriber (status 'active', confirmed_at, source 'customer_import';
  * subscribed_at and unsubscribe_token take their column defaults, exactly as
  * insertNewSubscriber leaves them), then reuses the canonical linkToCustomer
- * picker for customer_id — same as every other trusted caller.
+ * picker for customer_id, on the SAME connection — same as every other
+ * trusted caller.
+ *
+ * The consent decision and the insert are NOT two separate operations: each
+ * import runs in its own transaction (importOneCustomer) that takes the
+ * shared `customer-comms` lock (customer-comms-lock.js, the SAME lock
+ * notification_prefs's own writer takes) and the shared per-email lock (the
+ * SAME lock email-suppression writers take) before re-classifying — so a
+ * concurrent opt-out or suppression fully serializes behind this decision,
+ * never slips in between it and the write. The orphan-link UPDATE also
+ * never attaches a second active subscriber to one customer (a NOT EXISTS
+ * guard mirrors the candidate query's own one-active-subscription rule).
  */
 
 const db = require('../models/db');
@@ -39,6 +52,12 @@ const { cityToZone } = require('./event-freshness');
 const { activeSuppressionsFor } = require('./email-template-library');
 const { linkToCustomer } = require('./newsletter-subscribers');
 const { CUSTOMER_STAGES } = require('./customer-stages');
+const { lockCustomerComms, lockCustomerEmail } = require('../utils/customer-comms-lock');
+
+// A minimal address shape — the same floor subscribeOrResubscribe's own
+// strict:false path enforces ("@" present). SQL-side so a malformed address
+// is never even a candidate; also used JS-side for the invalid-email count.
+const HAS_AT = (alias) => `${alias}.email LIKE '%@%'`;
 
 // The ONE canonical candidate-stage predicate, named and reused verbatim by
 // every query below that needs it, so they can never drift out of sync with
@@ -59,6 +78,7 @@ async function fetchCandidateRows(conn) {
        AND ${candidateStageSql('c')}
        AND c.email IS NOT NULL
        AND TRIM(c.email) <> ''
+       AND ${HAS_AT('c')}
        AND NOT EXISTS (
              SELECT 1 FROM newsletter_subscribers ns
               WHERE (ns.customer_id = c.id OR LOWER(ns.email) = LOWER(TRIM(c.email)))
@@ -66,6 +86,29 @@ async function fetchCandidateRows(conn) {
            )
   `, [CUSTOMER_STAGES]);
   return result.rows || [];
+}
+
+// Counts otherwise-eligible live customers a malformed (non-empty, no "@")
+// email keeps out of fetchCandidateRows above — same predicate, flipped
+// email check — so the response can report WHY they never became
+// candidates instead of silently dropping them.
+async function countInvalidEmailCandidates(conn) {
+  const result = await conn.raw(`
+    SELECT count(*) AS n
+      FROM customers c
+     WHERE c.deleted_at IS NULL
+       AND c.active = true
+       AND ${candidateStageSql('c')}
+       AND c.email IS NOT NULL
+       AND TRIM(c.email) <> ''
+       AND NOT ${HAS_AT('c')}
+       AND NOT EXISTS (
+             SELECT 1 FROM newsletter_subscribers ns
+              WHERE (ns.customer_id = c.id OR LOWER(ns.email) = LOWER(TRIM(c.email)))
+                AND ns.status = 'active'
+           )
+  `, [CUSTOMER_STAGES]);
+  return Number(result.rows?.[0]?.n || 0);
 }
 
 // Re-verifies ONE customer is STILL a live candidate (same predicate as
@@ -81,7 +124,8 @@ async function fetchLiveCandidateNow(conn, customerId) {
         AND c.active = true
         AND ${candidateStageSql('c')}
         AND c.email IS NOT NULL
-        AND TRIM(c.email) <> ''`,
+        AND TRIM(c.email) <> ''
+        AND ${HAS_AT('c')}`,
     [customerId, CUSTOMER_STAGES],
   );
   return result.rows?.[0] || null;
@@ -197,30 +241,108 @@ async function applyOrphanLink(conn, link) {
                WHERE LOWER(TRIM(c2.email)) = LOWER(TRIM(?))
                  AND c2.deleted_at IS NULL AND c2.active = true AND c2.pipeline_stage = ANY(?)
             ) = 1
+        AND NOT EXISTS (
+              -- never a second active subscriber for one customer — the
+              -- candidate query enforces this same one-active-subscription
+              -- rule by customer_id, and the orphan path must match it.
+              SELECT 1 FROM newsletter_subscribers ns2
+               WHERE ns2.customer_id = twin.id AND ns2.status = 'active'
+            )
       RETURNING ns.id`,
     [link.email, CUSTOMER_STAGES, link.subscriberId, link.email, link.email, CUSTOMER_STAGES],
   );
   return (result.rows || []).length > 0;
 }
 
+// Imports ONE customer in its own transaction, with the consent decision
+// and the insert serialized under the same locking protocol the app's other
+// comms/suppression writers use — never a separate read then a trusted
+// write. `notification_prefs`'s own writer (routes/notifications.js PUT
+// /preferences) takes lockCustomerComms before its update; email
+// suppression writers (e.g. webhooks-sendgrid.js) take lockCustomerEmail
+// before their insert — taking BOTH here means a concurrent opt-out OR a
+// concurrent suppression fully serializes behind this decision (whichever
+// commits first is the one that's honoured; there is no window between
+// them). Returns one of:
+//   { outcome: 'imported' }
+//   { outcome: 'excluded', reason }   — a real classifyCustomer reason
+//   { outcome: 'row_appeared' }       — the INSERT's own ON CONFLICT fired,
+//                                       or the fresh reload found an ALREADY
+//                                       active row (the same "someone else
+//                                       already claimed this address" story)
+//   { outcome: 'no_longer_live' }     — archived/re-staged out since the read
+async function importOneCustomer(conn, row) {
+  return conn.transaction(async (trx) => {
+    await lockCustomerComms(trx, row.customer_id);
+
+    // Re-check immediately before writing, INSIDE the lock: reload the
+    // customer (an archive, pipeline-stage change, or email edit mid-batch
+    // drops it) and re-classify consent/suppression on the FRESH row.
+    const fresh = await fetchLiveCandidateNow(trx, row.customer_id);
+    if (!fresh) return { outcome: 'no_longer_live' };
+
+    await lockCustomerEmail(trx, fresh.email);
+    // FOR SHARE the customer's own prefs row so this decision is fenced
+    // against the SAME row the PUT /preferences writer takes FOR UPDATE
+    // under the comms lock above — the two can never interleave.
+    await trx('notification_prefs').where({ customer_id: row.customer_id }).forShare();
+
+    const reason = await classifyCustomer(trx, fresh);
+    if (reason === 'already_active') return { outcome: 'row_appeared' };
+    if (reason) return { outcome: 'excluded', reason };
+
+    const lc = fresh.email.trim().toLowerCase();
+    // INSERT-only: no UPDATE branch exists for this statement to take, so
+    // a row that appeared for this email in the instant between the
+    // recheck above and this write is left completely untouched — the
+    // conflict just yields zero returned rows.
+    const inserted = await trx('newsletter_subscribers')
+      .insert({
+        email: lc,
+        first_name: fresh.first_name || null,
+        last_name: fresh.last_name || null,
+        source: 'customer_import',
+        status: 'active',
+        confirmed_at: new Date(),
+      })
+      .onConflict('email')
+      .ignore()
+      .returning('id');
+    if (!inserted.length) return { outcome: 'row_appeared' };
+
+    await linkToCustomer(lc, trx); // canonical picker, same connection — never crosses a database boundary
+    const zone = cityToZone(fresh.city);
+    if (zone) {
+      await trx('newsletter_subscribers')
+        .where({ id: inserted[0].id })
+        .whereNull('region_zone')
+        .update({ region_zone: zone });
+    }
+    return { outcome: 'imported' };
+  });
+}
+
 /**
  * Reconcile the newsletter list against live customers. Read-only unless
  * `dryRun === false` — the route is responsible for requiring an explicit
- * confirmation before ever passing that. `conn` runs the READS AND the
- * INSERT-only import write on a connection of the caller's choosing
- * (default the shared db pool); `linkToCustomer` always writes through the
- * shared pool (no connection override, same as every other trusted caller),
- * so a write-mode call is never fully wrapped in one outer transaction.
+ * confirmation before ever passing that. `conn` runs every read on a
+ * connection of the caller's choosing (default the shared db pool); each
+ * write-mode import runs in its OWN transaction opened on that SAME `conn`
+ * (a nested transaction/savepoint when `conn` is already one), so the
+ * consent decision, the insert, and the customer link never cross a
+ * connection or database boundary the caller didn't choose.
  */
 async function reconcileCustomers({ dryRun = true, conn = db } = {}) {
   const write = dryRun === false;
   const excluded = {
     previously_unsubscribed: 0, pending_confirmation: 0, inactive_subscriber: 0,
     suppressed: 0, marketing_flag_not_on: 0, email_switch_off: 0, row_appeared: 0,
+    no_longer_live: 0, invalid_email: 0,
   };
   const errors = [];
 
   const candidateRows = await fetchCandidateRows(conn);
+  excluded.invalid_email = await countInvalidEmailCandidates(conn);
   const importableRows = [];
   const cityCounts = new Map();
 
@@ -233,7 +355,13 @@ async function reconcileCustomers({ dryRun = true, conn = db } = {}) {
       logger.error(`[newsletter-list-reconcile] classify customer id=${row.customer_id} failed: ${e.message}`);
       continue;
     }
-    if (reason === 'already_active') continue; // no longer a candidate — a race with the fetch above
+    // 'already_active' means a concurrent writer already made this address
+    // active between the candidate fetch and this read — the SAME
+    // "someone else already claimed it" story as a write-time row_appeared,
+    // so it's counted there too rather than silently dropped (a customer
+    // whose race lands during THIS read, not the write-time recheck, must
+    // still show up in the total).
+    if (reason === 'already_active') { excluded.row_appeared += 1; continue; }
     if (reason) {
       excluded[reason] += 1;
       continue;
@@ -273,45 +401,13 @@ async function reconcileCustomers({ dryRun = true, conn = db } = {}) {
   let orphanLinksApplied = 0;
   if (write) {
     await guardedEach(importableRows, (row) => ({ customerId: row.customer_id }), async (row) => {
-      // Re-check immediately before writing: reload the customer (an
-      // archive, pipeline-stage change, or email edit mid-batch drops it)
-      // and re-classify consent/suppression on the FRESH row — a customer
-      // who unsubscribes, gets suppressed, or flips marketing_offers off
-      // in between must be skipped, never imported.
-      const fresh = await fetchLiveCandidateNow(conn, row.customer_id);
-      if (!fresh || await classifyCustomer(conn, fresh)) return;
-
-      const lc = fresh.email.trim().toLowerCase();
-      // INSERT-only: no UPDATE branch exists for this statement to take, so
-      // a row that appeared for this email in the instant between the
-      // recheck above and this write is left completely untouched — the
-      // conflict just yields zero returned rows.
-      const inserted = await conn('newsletter_subscribers')
-        .insert({
-          email: lc,
-          first_name: fresh.first_name || null,
-          last_name: fresh.last_name || null,
-          source: 'customer_import',
-          status: 'active',
-          confirmed_at: new Date(),
-        })
-        .onConflict('email')
-        .ignore()
-        .returning('id');
-      if (!inserted.length) {
-        excluded.row_appeared += 1;
-        return;
-      }
-
-      imported += 1;
-      await linkToCustomer(lc); // canonical picker — same as every other trusted caller
-      const zone = cityToZone(fresh.city);
-      if (zone) {
-        await conn('newsletter_subscribers')
-          .where({ id: inserted[0].id })
-          .whereNull('region_zone')
-          .update({ region_zone: zone });
-      }
+      const result = await importOneCustomer(conn, row);
+      if (result.outcome === 'imported') { imported += 1; return; }
+      if (result.outcome === 'excluded') { excluded[result.reason] = (excluded[result.reason] || 0) + 1; return; }
+      // 'row_appeared' and 'no_longer_live' each have their own bucket —
+      // a rejected candidate always keeps its reason and is counted,
+      // never silently dropped as importable-with-imported:0.
+      excluded[result.outcome] += 1;
     });
 
     await guardedEach(zoneFillCandidates, (fill) => ({ subscriberId: fill.subscriberId }), async (fill) => {

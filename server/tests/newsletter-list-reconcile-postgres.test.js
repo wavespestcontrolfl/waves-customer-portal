@@ -18,37 +18,50 @@ const postgres = connection ? describe : describe.skip;
 
 // Pauses the Nth query against one table, AFTER Postgres has already
 // returned it, until the caller explicitly releases it — a deterministic
-// rendezvous point, not a timing guess. `notification_prefs` is read twice
-// per candidate (the batch classification pass, then the write-time
-// recheck); pausing occurrence 2 traps exactly the read immediately before
-// the reconcile's own INSERT, so a race inserted between `reached` and
-// `release()` is guaranteed to land in that exact gap. Same technique as
+// rendezvous point, not a timing guess. For ONE candidate, notification_prefs
+// is read THREE times: #1 the batch classification pass (before the write
+// phase even opens a transaction), #2 importOneCustomer's own FOR SHARE
+// (right after taking both locks), #3 classifyCustomer's write-time
+// re-check — the LAST read before the INSERT. Pausing #2 traps the moment
+// right after the lock is taken; pausing #3 traps the moment right before
+// the write, so a race landed between `reached` and `release()` is
+// guaranteed to fall in that exact gap. Same technique as
 // reschedule-link-promises-postgres.test.js's pauseFirstTableRead,
 // generalized to the Nth occurrence.
+//
+// The wrap is RECURSIVE through `.transaction()`: importOneCustomer opens
+// its own per-row transaction on the connection it's given, so a table
+// call made on the trx a nested `.transaction()` callback receives must be
+// counted too — an unwrapped inner trx would make every pause here silently
+// count nothing and never fire, since ALL of importOneCustomer's reads run
+// inside that nested transaction, never directly on `base`.
 function pauseNthTableRead(base, table, n) {
   let count = 0;
   let reachedResolve;
   let releaseResolve;
   const reached = new Promise((resolve) => { reachedResolve = resolve; });
   const released = new Promise((resolve) => { releaseResolve = resolve; });
-  const wrapped = (name, ...args) => {
-    const qb = base(name, ...args);
-    if (name !== table) return qb;
-    count += 1;
-    const mine = count === n;
-    if (!mine) return qb;
-    const originalThen = qb.then.bind(qb);
-    qb.then = (onFulfilled, onRejected) => originalThen(async (result) => {
-      reachedResolve();
-      await released;
-      return result;
-    }).then(onFulfilled, onRejected);
-    return qb;
-  };
-  wrapped.transaction = (...args) => base.transaction(...args);
-  wrapped.raw = (...args) => base.raw(...args);
-  wrapped.fn = base.fn;
-  return { conn: wrapped, reached, release: releaseResolve };
+  function wrapConn(conn) {
+    const wrapped = (name, ...args) => {
+      const qb = conn(name, ...args);
+      if (name !== table) return qb;
+      count += 1;
+      const mine = count === n;
+      if (!mine) return qb;
+      const originalThen = qb.then.bind(qb);
+      qb.then = (onFulfilled, onRejected) => originalThen(async (result) => {
+        reachedResolve();
+        await released;
+        return result;
+      }).then(onFulfilled, onRejected);
+      return qb;
+    };
+    wrapped.transaction = (cb, ...args) => conn.transaction((trx) => cb(wrapConn(trx)), ...args);
+    wrapped.raw = (...args) => conn.raw(...args);
+    wrapped.fn = conn.fn;
+    return wrapped;
+  }
+  return { conn: wrapConn(base), reached, release: releaseResolve };
 }
 
 const POOL = { min: 0, max: 8 };
@@ -56,6 +69,13 @@ const POOL = { min: 0, max: 8 };
 postgres('newsletter-list-reconcile — real Postgres', () => {
   let db;
   const { reconcileCustomers } = require('../services/newsletter-list-reconcile');
+
+  // Only set when THIS run's insert actually created the row (a fresh
+  // migrated database with no fixture yet) — never torn down when it
+  // already existed (e.g. a shared/reused QA database, or a second suite
+  // run against the same connection), since that row wasn't this run's to
+  // delete.
+  let virginiaRowCreatedByThisRun = false;
 
   beforeAll(async () => {
     db = knexFactory({ client: 'pg', connection, pool: POOL });
@@ -65,12 +85,21 @@ postgres('newsletter-list-reconcile — real Postgres', () => {
     // competes with this file's own synthetic candidates — real Postgres
     // rules, not a mocked table, so the fixture itself must be excluded
     // the same way a real duplicate would be.
-    await db('newsletter_subscribers')
+    const inserted = await db('newsletter_subscribers')
       .insert({ email: 'virginia@wavespestcontrol.com', status: 'active', source: 'test_fixture_exclusion' })
       .onConflict('email')
-      .ignore();
+      .ignore()
+      .returning('id');
+    virginiaRowCreatedByThisRun = inserted.length > 0;
   });
-  afterAll(async () => { await db.destroy(); });
+  afterAll(async () => {
+    if (virginiaRowCreatedByThisRun) {
+      await db('newsletter_subscribers')
+        .where({ email: 'virginia@wavespestcontrol.com', source: 'test_fixture_exclusion' })
+        .del();
+    }
+    await db.destroy();
+  });
 
   async function rollbackTest(fn) {
     const trx = await db.transaction();
@@ -103,11 +132,13 @@ postgres('newsletter-list-reconcile — real Postgres', () => {
     const cust = await seedLiveConsentingCustomer(trx);
     const lc = cust.email.toLowerCase();
 
-    // notification_prefs read #2 is the LAST read the write-time recheck
-    // performs before the INSERT. Pause it there, insert the conflicting
-    // row from a genuinely separate connection, then release — the INSERT
-    // is guaranteed to run strictly after that commit.
-    const { conn: paused, reached, release } = pauseNthTableRead(trx, 'notification_prefs', 2);
+    // notification_prefs is read THREE times total for this one candidate:
+    // #1 the batch classification pass, #2 importOneCustomer's own FOR
+    // SHARE (right after taking both locks), #3 classifyCustomer's
+    // write-time re-check — the LAST read before the INSERT. Pause #3,
+    // insert the conflicting row from a genuinely separate connection, then
+    // release — the INSERT is guaranteed to run strictly after that commit.
+    const { conn: paused, reached, release } = pauseNthTableRead(trx, 'notification_prefs', 3);
     const reconcilePromise = reconcileCustomers({ dryRun: false, conn: paused });
     const other = knexFactory({ client: 'pg', connection, pool: POOL });
     try {
@@ -131,7 +162,7 @@ postgres('newsletter-list-reconcile — real Postgres', () => {
     }
   }));
 
-  test('two concurrent imports of the same customer produce exactly one row', async () => {
+  test('two concurrent imports of the same customer produce exactly one row — proven as a genuine mutual-exclusion block on the shared customer-comms lock, not a lucky UNIQUE-constraint race', async () => {
     const cust = synthCustomer();
     const lc = cust.email.toLowerCase();
     await db('customers').insert(cust);
@@ -140,14 +171,33 @@ postgres('newsletter-list-reconcile — real Postgres', () => {
       const connA = knexFactory({ client: 'pg', connection, pool: POOL });
       const connB = knexFactory({ client: 'pg', connection, pool: POOL });
       try {
-        const [resultA, resultB] = await Promise.all([
-          reconcileCustomers({ dryRun: false, conn: connA }),
-          reconcileCustomers({ dryRun: false, conn: connB }),
-        ]);
+        // Rendezvous: pause connA's import right after it takes the
+        // customer-comms lock. notification_prefs occurrence #1 is the
+        // batch classification pass (before the write-phase transaction
+        // even opens); #2 is importOneCustomer's own FOR SHARE, taken
+        // immediately after acquiring BOTH locks — pausing there holds the
+        // lock open. It's transaction-scoped — held until connA's
+        // transaction commits or rolls back — so while paused, connB's own
+        // lock attempt for the SAME customer_id is a real, provable block,
+        // not a timing guess.
+        const { conn: pausedA, reached: aReached, release: releaseA } = pauseNthTableRead(connA, 'notification_prefs', 2);
+        const resultAPromise = reconcileCustomers({ dryRun: false, conn: pausedA });
+        await aReached; // connA holds the lock now; paused before its own read
+
+        let bSettled = false;
+        const resultBPromise = reconcileCustomers({ dryRun: false, conn: connB })
+          .then((r) => { bSettled = true; return r; });
+        // Give connB every opportunity to finish if it were (wrongly) not
+        // actually blocked on the lock.
+        await new Promise((resolve) => { setTimeout(resolve, 200); });
+        expect(bSettled).toBe(false); // still blocked on the SAME advisory lock key
+
+        releaseA();
+        const [resultA, resultB] = await Promise.all([resultAPromise, resultBPromise]);
         const imported = resultA.imported + resultB.imported;
         const rowAppeared = resultA.excluded.row_appeared + resultB.excluded.row_appeared;
         expect(imported).toBe(1); // exactly one of the two actually inserted
-        expect(rowAppeared).toBe(1); // the other found the real UNIQUE constraint had already won
+        expect(rowAppeared).toBe(1); // the other's re-check, run strictly AFTER, found it already active
         const rows = await db('newsletter_subscribers').where({ email: lc });
         expect(rows).toHaveLength(1);
       } finally {

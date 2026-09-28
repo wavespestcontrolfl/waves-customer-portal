@@ -9,6 +9,13 @@
 jest.mock('../services/newsletter-subscribers', () => ({ linkToCustomer: jest.fn(async () => {}) }));
 jest.mock('../services/email-template-library', () => ({ activeSuppressionsFor: jest.fn(async () => []) }));
 jest.mock('../services/logger', () => ({ error: jest.fn(), info: jest.fn(), warn: jest.fn() }));
+// The comms/email advisory locks are real Postgres behavior (proven against
+// real Postgres in newsletter-list-reconcile-postgres.test.js) — no-op here
+// so the fully-mocked conn doesn't need to fake pg_advisory_xact_lock SQL.
+jest.mock('../utils/customer-comms-lock', () => ({
+  lockCustomerComms: jest.fn(async () => {}),
+  lockCustomerEmail: jest.fn(async () => {}),
+}));
 
 const { linkToCustomer } = require('../services/newsletter-subscribers');
 const { activeSuppressionsFor } = require('../services/email-template-library');
@@ -21,7 +28,10 @@ const PRIORITY = { active: 0, unsubscribed: 1, pending: 2, inactive: 3, waitlist
 // fill, orphan link): active, not deleted, pipeline_stage IN CUSTOMER_STAGES.
 // A NULL pipeline_stage does NOT match (owner ruling 2026-09-28).
 const isLive = (c) => !c.deleted_at && c.active === true && CUSTOMER_STAGES.includes(c.pipeline_stage);
-const isCandidate = (c) => isLive(c) && !!(c.email && c.email.trim());
+// Matches subscribeOrResubscribe's own strict:false floor ("@" present) —
+// mirrors the production HAS_AT SQL filter added to every candidate query.
+const hasValidEmail = (c) => !!(c.email && c.email.trim()) && c.email.includes('@');
+const isCandidate = (c) => isLive(c) && hasValidEmail(c);
 
 // Fake knex-like `conn`: table-call handlers for the plain reads/writes,
 // `.raw(sql, bindings)` dispatched on SQL shape for everything else.
@@ -29,7 +39,15 @@ function makeConn(state) {
   let nextId = 1;
   const conn = (table) => {
     if (table === 'notification_prefs') {
-      return { where: (cond) => ({ first: async () => state.prefs.find((p) => p.customer_id === cond.customer_id) || null }) };
+      return {
+        where: (cond) => ({
+          first: async () => state.prefs.find((p) => p.customer_id === cond.customer_id) || null,
+          // importOneCustomer takes this FOR SHARE and never reads the
+          // result — a no-op here is faithful (the row-lock itself is real
+          // Postgres behavior, proved in the Postgres suite).
+          forShare: async () => {},
+        }),
+      };
     }
     if (table === 'newsletter_subscribers') {
       return {
@@ -72,6 +90,32 @@ function makeConn(state) {
   const key = (v) => String(v).trim().toLowerCase();
 
   conn.raw = jest.fn(async (sql, bindings = []) => {
+    // Checked FIRST, and by the most specific literal available: this SQL
+    // text also contains "FROM customers c2" (a substring match for the
+    // generic "FROM customers c" check below) and, since the NOT EXISTS
+    // orphan guard was added, "NOT EXISTS" too — both of which would
+    // otherwise mis-route this into the candidate-rows branch.
+    if (sql.includes('UPDATE newsletter_subscribers ns')) {
+      const [email, , subscriberId, whereEmail] = bindings;
+      const matches = state.customers.filter((c) => (c.email || '').trim().toLowerCase() === key(email) && isLive(c));
+      const row = state.subscribers.find((s) => s.id === subscriberId);
+      // NOT EXISTS guard: never a second active subscriber for one customer.
+      const twinAlreadyLinked = matches.length === 1
+        && state.subscribers.some((s) => s.id !== subscriberId && s.customer_id === matches[0].id && s.status === 'active');
+      if (row && matches.length === 1 && !twinAlreadyLinked && row.status === 'active' && row.customer_id == null
+          && (row.email || '').toLowerCase() === key(whereEmail)) {
+        row.customer_id = matches[0].id;
+        return { rows: [{ id: row.id }] };
+      }
+      return { rows: [] };
+    }
+    // countInvalidEmailCandidates — checked BEFORE the generic
+    // "FROM customers c ... NOT EXISTS" branch below, since its SQL text
+    // also contains both those substrings.
+    if (sql.includes('count(*) AS n')) {
+      const n = state.customers.filter((c) => isLive(c) && c.email && c.email.trim() && !c.email.includes('@') && !hasActive(c)).length;
+      return { rows: [{ n: String(n) }] };
+    }
     if (sql.includes('FROM customers c') && sql.includes('NOT EXISTS')) {
       return { rows: state.customers.filter(isCandidate).filter((c) => !hasActive(c)).map((c) => ({ customer_id: c.id, email: c.email, first_name: c.first_name, last_name: c.last_name, city: c.city })) };
     }
@@ -97,17 +141,6 @@ function makeConn(state) {
     if (sql.includes('customer_id IS NULL') && sql.includes('SELECT id, email')) {
       return { rows: state.subscribers.filter((s) => s.status === 'active' && s.customer_id == null).map((s) => ({ id: s.id, email: s.email })) };
     }
-    if (sql.includes('UPDATE newsletter_subscribers ns')) {
-      const [email, , subscriberId, whereEmail] = bindings;
-      const matches = state.customers.filter((c) => (c.email || '').trim().toLowerCase() === key(email) && isLive(c));
-      const row = state.subscribers.find((s) => s.id === subscriberId);
-      if (row && matches.length === 1 && row.status === 'active' && row.customer_id == null
-          && (row.email || '').toLowerCase() === key(whereEmail)) {
-        row.customer_id = matches[0].id;
-        return { rows: [{ id: row.id }] };
-      }
-      return { rows: [] };
-    }
     if (sql.includes('SELECT id FROM customers') || sql.includes('SELECT count(*) FROM customers')) {
       const [email] = bindings;
       const matches = state.customers.filter((c) => (c.email || '').trim().toLowerCase() === key(email) && isLive(c));
@@ -116,6 +149,13 @@ function makeConn(state) {
     }
     throw new Error(`Unhandled raw SQL: ${sql.slice(0, 80)}`);
   });
+
+  // importOneCustomer opens its own transaction per import — the fake conn
+  // has no real connection/savepoint to open, so trx IS conn: every table
+  // call and .raw dispatch inside the callback runs against this same
+  // in-memory state, which is exactly how the real nested-transaction
+  // (savepoint) behavior reads from the caller's point of view.
+  conn.transaction = jest.fn(async (cb) => cb(conn));
 
   return conn;
 }
@@ -185,7 +225,20 @@ test('dry run performs zero writes (importable + byCity still computed); write m
   const created = state.subscribers.find((s) => s.email === 'ok@example.com');
   expect(created).toMatchObject({ status: 'active', source: 'customer_import', first_name: 'F', last_name: 'L', region_zone: 'south_sarasota' });
   expect(created.confirmed_at).toBeInstanceOf(Date);
-  expect(linkToCustomer).toHaveBeenCalledWith('ok@example.com');
+  // Called on the SAME connection importOneCustomer opened its transaction
+  // on — never a second linker, never crosses a connection boundary.
+  expect(linkToCustomer).toHaveBeenCalledWith('ok@example.com', expect.anything());
+});
+
+test('a malformed email ("@" missing) is never a candidate, and is counted under excluded.invalid_email — not silently dropped', async () => {
+  const state = {
+    customers: [cust({ id: 'c1', email: 'ok@example.com', city: 'Venice' }), cust({ id: 'c2', email: 'noatsign.example.com' })],
+    subscribers: [],
+    prefs: [{ customer_id: 'c1', marketing_offers: true }, { customer_id: 'c2', marketing_offers: true }],
+  };
+  const result = await reconcileCustomers({ conn: makeConn(state) });
+  expect(result.candidates).toBe(1); // only the well-formed address
+  expect(result.excluded.invalid_email).toBe(1);
 });
 
 test.each(['unsubscribed', 'pending', 'inactive'])(
@@ -264,10 +317,12 @@ test('a row that appears for the same email in the instant between the recheck a
           }
           return result;
         },
+        forShare: async () => {}, // the pre-classify row lock — not a read this test counts
       }),
     };
   };
   wrapped.raw = conn.raw;
+  wrapped.transaction = jest.fn(async (cb) => cb(wrapped));
   const result = await reconcileCustomers({ dryRun: false, conn: wrapped });
   expect(result.imported).toBe(0);
   expect(result.excluded.row_appeared).toBe(1);
@@ -325,4 +380,40 @@ test('orphan link is atomic with the match check: a second live customer sharing
   const result = await reconcileCustomers({ dryRun: false, conn });
   expect(result.orphanLinks).toBe(0); // NOT the read-phase snapshot — what was actually applied
   expect(state.subscribers[0].customer_id).toBeNull(); // the atomic write found it now ambiguous
+});
+
+test('orphan link NEVER attaches a second active subscriber to one customer — a customer already linked to an active subscriber stays unlinked from a second orphan sharing its email', async () => {
+  const state = {
+    customers: [cust({ id: 'c1', email: 'orphan@e.com' })],
+    subscribers: [
+      { id: 's-already', customer_id: 'c1', email: 'other@e.com', status: 'active' }, // already the customer's one active subscriber
+      { id: 's-orphan', customer_id: null, email: 'orphan@e.com', status: 'active' },
+    ],
+    prefs: [],
+  };
+  const result = await reconcileCustomers({ dryRun: false, conn: makeConn(state) });
+  expect(result.orphanLinks).toBe(0);
+  expect(state.subscribers.find((s) => s.id === 's-orphan').customer_id).toBeNull();
+});
+
+test('write-time recheck rejections keep their specific reason and are counted — never dropped as importable-with-imported:0', async () => {
+  const state = { customers: [cust({ email: 'flips@example.com' })], subscribers: [], prefs: [{ customer_id: 'c1', marketing_offers: true }] };
+  const conn = makeConn(state);
+  let firstRead = true;
+  const rawImpl = conn.raw.getMockImplementation();
+  conn.raw = jest.fn(async (sql, bindings) => {
+    if (sql.includes('ORDER BY CASE status')) {
+      if (!firstRead) state.subscribers.push({ id: 's-new', customer_id: 'c1', email: 'flips@example.com', status: 'unsubscribed' });
+      firstRead = false;
+    }
+    return rawImpl(sql, bindings);
+  });
+  const result = await reconcileCustomers({ dryRun: false, conn });
+  expect(result.importable).toBe(1);
+  expect(result.imported).toBe(0);
+  // The rejection reason from the SECOND (write-time) classification is
+  // the one that's counted — never silently absorbed into imported:0 with
+  // no reason anywhere in the response.
+  expect(result.excluded.previously_unsubscribed).toBe(1);
+  expect(Object.values(result.excluded).reduce((a, b) => a + b, 0)).toBe(1); // exactly one exclusion, nowhere else
 });
