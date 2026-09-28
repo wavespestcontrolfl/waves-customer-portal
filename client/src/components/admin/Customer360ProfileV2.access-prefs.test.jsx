@@ -293,7 +293,7 @@ describe('Customer 360 → Property → Access & Preferences', () => {
     expect(screen.getByRole('button', { name: 'Save' })).toBeInTheDocument();
   });
 
-  it('masks access codes for a technician, and shows them to an admin', async () => {
+  it('masks access codes and access notes for a technician', async () => {
     localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'technician' }));
     vi.stubGlobal('fetch', vi.fn((url) => {
       const path = String(url);
@@ -309,7 +309,9 @@ describe('Customer 360 → Property → Access & Preferences', () => {
     expect(screen.queryByText('4477')).not.toBeInTheDocument();
     expect(screen.queryByText('2299')).not.toBeInTheDocument();
     expect(screen.queryByText('8810')).not.toBeInTheDocument();
-    expect(screen.getAllByText('Shown in the tech app on service day')).toHaveLength(3);
+    expect(screen.queryByText('Latch is on the left')).not.toBeInTheDocument();
+    // Three codes plus the side-gate note; empty parking/access notes stay "Not set".
+    expect(screen.getAllByText('Shown in the tech app on service day')).toHaveLength(4);
     expect(screen.queryByRole('button', { name: 'Edit Access & Preferences' })).not.toBeInTheDocument();
   });
 

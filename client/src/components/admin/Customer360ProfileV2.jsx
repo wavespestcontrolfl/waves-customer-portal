@@ -6761,15 +6761,19 @@ function accessPrefsSavePayload(draft, keys) {
   );
 }
 
-// Access-code values are shown to office admins only. The portal tells
-// customers codes go to the assigned technician on service day, and a
-// technician's Customer 360 scope isn't limited to that day — the tech app
-// shows them on the visit itself.
-const ACCESS_PREFS_CODE_ROWS = [
+// Access codes and the free-text access fields (which often hold codes —
+// data hygiene classes access/parking notes as sensitive) show to office
+// admins only. The portal tells customers codes go to the assigned
+// technician on service day, and a technician's Customer 360 scope isn't
+// limited to that day — the tech app shows them on the visit itself.
+const ACCESS_PREFS_SENSITIVE_ROWS = [
   ["Property/Yard Gate", "property_gate_code"],
   ["Neighborhood Gate", "neighborhood_gate_code"],
   ["Garage Code", "garage_code"],
   ["Lockbox Code", "lockbox_code"],
+  ["Side Gate", "side_gate_access"],
+  ["Parking Notes", "parking_notes"],
+  ["Access Notes", "access_notes"],
 ];
 
 function accessPrefsOptionLabel(options, value) {
@@ -6974,12 +6978,9 @@ function AccessPrefsReadView({ p, isAdmin, onEdit }) {
         )}
       </div>
       <AccessPrefsSubheading>Access</AccessPrefsSubheading>
-      {ACCESS_PREFS_CODE_ROWS.map(([label, key]) => (
+      {ACCESS_PREFS_SENSITIVE_ROWS.map(([label, key]) => (
         <AccessPrefRow key={key} label={label} value={code(p[key])} />
       ))}
-      <AccessPrefRow label="Side Gate" value={p.side_gate_access} />
-      <AccessPrefRow label="Parking Notes" value={p.parking_notes} />
-      <AccessPrefRow label="Access Notes" value={p.access_notes} />
 
       <AccessPrefsSubheading>Pets</AccessPrefsSubheading>
       <AccessPrefRow label="Pet Count" value={p.pet_count || null} />
