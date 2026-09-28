@@ -407,12 +407,12 @@ describe('watering questions answer with the weekly plan when the report carries
       ...withAftercare(HELD, 'snapshot'),
       lawnAssessment: {
         snapshot: {},
-        recommendationCards: ['Run each zone for 20 minutes.', 'Add another cycle this week.', 'Resume the normal schedule tomorrow.', 'Set the sprinklers for 20 minutes tomorrow.', 'Schedule two irrigation cycles this week.', 'Turn the sprinkler heads back on tonight.', 'Keep mowing at 3.5 inches.']
+        recommendationCards: ['Run each zone for 20 minutes.', 'Add another cycle this week.', 'Resume the normal schedule tomorrow.', 'Set the sprinklers for 20 minutes tomorrow.', 'Schedule two irrigation cycles this week.', 'Turn the sprinkler heads back on tonight.', 'Turn the damaged irrigation system back on tomorrow.', 'Keep mowing at 3.5 inches.']
           .map((customerCopy) => ({ customerCopy })),
       },
     };
     const answer = answerServiceReportQuestion({ question: 'What should I do next?', data });
-    expect(answer).not.toMatch(/each zone|another cycle|normal schedule|Set the sprinklers|irrigation cycles|sprinkler heads/);
+    expect(answer).not.toMatch(/each zone|another cycle|normal schedule|Set the sprinklers|irrigation cycles|sprinkler heads|damaged irrigation/);
     expect(answer).toContain('Keep mowing at 3.5 inches.');
     // A watering noun with no watering action is not a directive (round 2).
     for (const keep of ['Watch the sprinkler area for recurring mushrooms.', 'Replace the damaged controller battery.', 'Set a timer to inspect the treated area tomorrow.']) {
@@ -440,6 +440,10 @@ describe('watering questions answer with the weekly plan when the report carries
     ['What action should I take after spraying?', 'next_steps'],
     ['What can we do to move our next service?', 'next_visit'],
     ['Can I turn the sprinkler heads back on?', 'watering'],
+    ['Can I turn the damaged sprinklers back on?', 'watering'],
+    ['Did you find fungus near sprinklers?', 'findings'],
+    ['Were mushrooms found around sprinkler heads?', 'findings'],
+    ['I found brown spots, do they indicate damage?', 'findings'],
     ['Any action needed for what you spotted?', 'next_steps'],
   ])('"%s" routes to %s (PR #5258 P2)', (question, topic) => {
     const data = withAftercare(REVIEW, 'none');

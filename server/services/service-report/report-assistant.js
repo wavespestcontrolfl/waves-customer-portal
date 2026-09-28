@@ -47,9 +47,9 @@ const OBSERVATION_QUESTION_RE = /\b(?:what|which|anything)\b[^?.!]{0,20}\bdid\s+
 const WATERING_WORD_RE = /\b(?:water|waters|watered|watering|irrigat\w*|sprinklers?|run\s?times?)\b/;
 const INCIDENTAL_WATERING_PHRASE_RE = new RegExp([
   String.raw`\b(?:water|irrigation|sprinkler)\s+(?:damage|stains?|meters?|leaks?|bills?|pooling|puddles?|heaters?|softeners?|filters?|bowls?|features?|areas?)\b|\bwater\s+(?:lines?|pipes?|mains?)\b`,
-  String.raw`\b(?:broken|damaged|leaking|leaky|clogged|cracked|missing|misaligned|faulty)\s+(?:sprinklers?|sprinkler\s+\w+|irrigation(?:\s+\w+)?|water\s+lines?)\b`,
+  String.raw`(?<!\b(?:turn|switch|run|start|restart|resume|set|keep|leave|use|kick)\s+(?:(?:the|my|our|your|those|these)\s+)?)\b(?:broken|damaged|leaking|leaky|clogged|cracked|missing|misaligned|faulty)\s+(?:sprinklers?|sprinkler\s+\w+|irrigation(?:\s+\w+)?|water\s+lines?)\b`,
   String.raw`\b(?:standing|pooling|pooled|surface|salt|rain)\s+water\b`,
-  String.raw`\b(?:by|near|around|at|under|beside|next\s+to|close\s+to|along)\s+(?:the|my|a|your|our)\s+(?:sprinklers?|sprinkler\s+(?:heads?|lines?|zones?|area)|irrigation\s+(?:zones?|heads?|lines?|area))\b`,
+  String.raw`\b(?:by|near|around|at|under|beside|next\s+to|close\s+to|along)\s+(?:(?:the|my|a|your|our|some|any)\s+)?(?:sprinklers?|sprinkler\s+(?:heads?|lines?|zones?|area)|irrigation\s+(?:zones?|heads?|lines?|area))\b`,
 ].join('|'), 'g');
 // Recommendation copy about watering, withheld while the aftercare
 // restricts watering. Same inversion as the question matcher: any watering
@@ -68,12 +68,13 @@ function isWateringRecommendation(text) {
 // the mushrooms I observed?", "Anything we should do…", "Any action needed…",
 // "How do I handle…"). Observation words inside it qualify the request; they
 // do not turn it into a findings recap. "…, do you know what they are?" asks
-// Waves, not the customer. "Action" counts only as an action requested of
-// the customer ("Any action needed…", "What action should I take?"), never
+// Waves, not the customer, and "I" or "we" must be the subject of "do" ("I
+// found brown spots, do they indicate damage?" asks about the spots).
+// "Action" counts only as an action requested of the customer ("Any action needed…", "What action should I take?"), never
 // what Waves did ("What action did you take…?", "…was taken…") or a cause
 // ("What mowing action caused the damage?").
 const CUSTOMER_ACTION_SRC = String.raw`\b(?:any|what|which)\s+actions?\s+(?:is\s+|are\s+)?(?:needed|required|necessary|recommended)\b|\bactions?\s+(?:needed|required|necessary|items?|to\s+take)\b|\bactions?\s+(?:should|do|can|could|must|would)\s+(?:i|we)\b`;
-const CUSTOMER_ACTION_RE = new RegExp(String.raw`\b(?:i|we)\b[^?.!]{0,24}\b(?:do|handle)\b(?!\s+you\b)|${CUSTOMER_ACTION_SRC}|\bnext\s+steps?\b`);
+const CUSTOMER_ACTION_RE = new RegExp(String.raw`\b(?:i|we)\s+(?:(?:can|could|should|must|will|would|need\s+to|have\s+to|ought\s+to|want\s+to|going\s+to)\s+)?(?:do|handle)\b(?!\s+you\b)|\b(?:do|does|should|can|could|must|would)\s+(?:i|we)\s+(?:(?:need\s+to|have\s+to)\s+)?(?:do|handle)\b|${CUSTOMER_ACTION_SRC}|\bnext\s+steps?\b`);
 // Future treatment timing ("When are you spraying next?", "What are you
 // treating next?", "When is the next treatment?") is a scheduling question.
 const FUTURE_TREATMENT_RE = /\b(?:next|again|upcoming|will\s+you|are\s+you\s+(?:going\s+to|coming)|when\s+(?:are|will|do|does|is|can|could|would|should)\b)/;
