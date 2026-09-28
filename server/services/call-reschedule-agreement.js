@@ -384,7 +384,7 @@ function mayStatePeriod(text) {
   const toks = normalize(text).split(' ');
   return toks.some((t, i) => PERIOD_SIGNS.has(t)
     || ((t === 'a' || t === 'p') && toks[i + 1] === 'm') // "a m" / "p m" spelled apart
-    || (t === 'am' && toks[i - 1] !== 'i' && toks[i - 2] !== 'i'));
+    || (t === 'am' && !isVerbAm(toks, i)));
 }
 
 // Does this agent commitment quote commit to the recorded slot? It must say
@@ -418,19 +418,20 @@ function namesAnyDay(quote) {
 const HALF_WORDS = { am: 'am', morning: 'am', pm: 'pm', afternoon: 'pm', evening: 'pm', tonight: 'pm', night: 'pm' };
 // Every half of the day said, whatever it describes: "your morning
 // appointment" may be the old visit or the new one, and the words cannot
-// tell which, so an unstated hour beside it fails closed (Codex #5163 r1).
+// tell which (Codex #5163 r1). "a m" / "p m" spelled apart count, and "am"
+// anywhere counts unless it is the verb right after "I" ("I am", "I really
+// am") — the same reading as mayStatePeriod.
 function halvesSaid(quote) {
   const toks = normalize(quote).split(' ');
-  return toks.filter((t, i) => Object.hasOwn(HALF_WORDS, t) && (t !== 'am' || amIsMeridiem(toks[i - 1], toks[i - 2])))
-    .map((t) => HALF_WORDS[t]);
+  return toks.flatMap((t, i) => {
+    if ((t === 'a' || t === 'p') && toks[i + 1] === 'm') return [t === 'a' ? 'am' : 'pm'];
+    if (t === 'am') return isVerbAm(toks, i) ? [] : ['am'];
+    return Object.hasOwn(HALF_WORDS, t) ? [HALF_WORDS[t]] : [];
+  });
 }
 
-// "Am" is also the verb ("I am moving you to two"): it is the morning only
-// right after a number, "o'clock", a day or "in the" ("10 AM", "Thursday
-// AM", "two in the a.m.").
-function amIsMeridiem(prev, prev2) {
-  return Boolean(prev) && (/^\d+$/.test(prev) || Object.hasOwn(HOUR_WORDS, prev) || prev === 'clock' || prev === 'oclock'
-    || DAY_WORDS.has(prev) || (prev === 'the' && prev2 === 'in'));
+function isVerbAm(toks, i) {
+  return toks[i - 1] === 'i' || toks[i - 2] === 'i';
 }
 
 // The recorded words the slot quote must hold.

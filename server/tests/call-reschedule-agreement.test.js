@@ -122,6 +122,8 @@ describe('groundRescheduleAgreement', () => {
     expect(committed('We will see you Friday at three')).toMatchObject({ ok: false, reason: 'agent_commitment_not_the_slot' });
     expect(committed('Okay we will see you then')).toMatchObject({ ok: false, reason: 'agent_commitment_not_the_slot' });
     expect(committed('We will see you Thursday at two AM')).toMatchObject({ ok: false, reason: 'agent_commitment_not_the_slot' });
+    expect(committed('We will see you Thursday at two sharp a.m')).toMatchObject({ ok: false, reason: 'agent_commitment_not_the_slot' });
+    expect(committed('I am seeing you Thursday at two')).toMatchObject({ ok: true });
     expect(ground(v2({ evidence: [
       quote('/scheduling/agent_committed_booking', 'agent', 'We will see you Thursday at two'),
       quote('/scheduling/confirmed_start_at', 'caller', 'Thursday at two in the afternoon works for me'),
