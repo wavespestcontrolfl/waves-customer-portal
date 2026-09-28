@@ -56,6 +56,9 @@ const FOLLOWUP_EMAIL_TEMPLATE_BY_STEP_ID = {
   d7_reminder: 'invoice.followup_7_day',
   d14_firmer: 'invoice.followup_14_day',
   d30_final: 'invoice.followup_30_day',
+  // Day 90 ladder only (GATE_DUNNING_LADDER_90).
+  d60_reminder: 'invoice.followup_60_day',
+  d90_final_notice: 'invoice.followup_90_day',
 };
 
 const TERMINAL_INVOICE_STATUSES = ['paid', 'prepaid', 'void', 'processing', 'refunded', 'canceled', 'cancelled'];
@@ -288,8 +291,23 @@ async function sendFollowupEmail({ row, customer, step, ctx, enforceBillingPrefe
  * invoice was sent (so "3-day friendly nudge" = 3 days after send), lands at
  * 10:00 AM America/New_York regardless of server timezone or DST.
  */
+// GATE_DUNNING_LADDER_90, read at call time (strict 'true'): the ladder runs
+// Day 3/10/17/30/60/90 (config.stepsThrough90) and owns its invoice to the
+// end. Off: the legacy Day 3/7/14/30 cadence, byte-identical.
+function ladderThrough90Live() {
+  return process.env.GATE_DUNNING_LADDER_90 === 'true';
+}
+
+function followupSteps() {
+  return ladderThrough90Live() ? config.stepsThrough90 : config.steps;
+}
+
+function sequenceAnchor(row) {
+  return row.anchor_at || row.invoice_sent_at || row.invoice_sms_sent_at || row.invoice_created_at || row.created_at;
+}
+
 function computeNextTouchAt(anchorDate, stepIndex) {
-  const step = config.steps[stepIndex];
+  const step = followupSteps()[stepIndex];
   if (!step) return null;
   return anchorTo10amNY(new Date(anchorDate), step.daysAfterSend, config.sendWindow.hour);
 }
@@ -538,6 +556,8 @@ async function runPending() {
     return { sent: 0, skipped: 0 };
   }
 
+  if (ladderThrough90Live()) await reviveLegacyFinishedSequences();
+
   // No deleted-customer filter here: fireStep() pauses those sequences
   // (status='paused', next_touch_at=null) so they're handled terminally
   // rather than staying armed and past-due until a restore fires a
@@ -572,6 +592,7 @@ async function runPending() {
   let sent = 0, skipped = 0;
   for (const row of rows) {
     try {
+      if (await deferToLadderDay(row)) { skipped++; continue; }
       if (row.next_touch_at && isStaleTouch(row.next_touch_at, now)) {
         const skip = await skipStaleTouches(row, now);
         skipped++;
@@ -597,6 +618,62 @@ async function runPending() {
   }
   logger.info(`[invoice-followups] runPending: ${sent} sent, ${skipped} skipped`);
   return { sent, skipped };
+}
+
+/**
+ * Day 90 ladder (GATE_DUNNING_LADDER_90): a sequence that ran out of the
+ * legacy Day 3/7/14/30 steps on a still-open invoice picks up again at its
+ * Day 60 step. Only a natural finish qualifies: step_index is exactly the
+ * legacy step count, while a payment or settlement finish keeps an earlier
+ * index. The same invoice guards as the send batch apply. Each revival is
+ * guarded on the row still being that finished sequence, and a Day 60 or
+ * Day 90 step already past its send day is passed over by the stale-touch
+ * pass in the same run, never sent late.
+ */
+async function reviveLegacyFinishedSequences() {
+  const legacyCount = config.steps.length;
+  const rows = await db('invoice_followup_sequences as s')
+    .join('invoices as i', 's.invoice_id', 'i.id')
+    .where('s.status', 'completed')
+    .where('s.step_index', legacyCount)
+    .whereNotIn('i.status', TERMINAL_INVOICE_STATUSES)
+    .whereNull('i.payer_id')
+    .where(function withdrawnExcluded() {
+      this.whereNull('i.scheduled_send_error').orWhereNot('i.scheduled_send_error', 'like', 'payer_billed:%');
+    })
+    .select(
+      's.id', 's.anchor_at', 's.created_at',
+      'i.sent_at as invoice_sent_at', 'i.sms_sent_at as invoice_sms_sent_at', 'i.created_at as invoice_created_at',
+    );
+  let revived = 0;
+  for (const row of rows) {
+    const nextAt = computeNextTouchAt(sequenceAnchor(row), legacyCount);
+    if (!nextAt) continue;
+    const updated = await db('invoice_followup_sequences')
+      .where({ id: row.id, status: 'completed', step_index: legacyCount })
+      .update({ updated_at: db.fn.now(), status: 'active', next_touch_at: nextAt });
+    revived += Number(updated) || 0;
+  }
+  if (revived) logger.info(`[invoice-followups] Day 90 ladder: ${revived} finished Day 30 sequence(s) resumed at Day 60`);
+  return revived;
+}
+
+/**
+ * Day 90 ladder: a touch stored on the legacy cadence (Day 7 or Day 14)
+ * waits for its new day (Day 10 or Day 17). Guarded on the batch snapshot,
+ * like the stale skip; true when this run should leave the row alone.
+ */
+async function deferToLadderDay(row) {
+  if (!ladderThrough90Live() || !row.next_touch_at) return false;
+  const due = computeNextTouchAt(sequenceAnchor(row), row.step_index);
+  if (!due || due.getTime() <= new Date(row.next_touch_at).getTime()) return false;
+  const updated = await db('invoice_followup_sequences')
+    .where({ id: row.id, status: 'active', step_index: row.step_index })
+    .where('next_touch_at', row.next_touch_at)
+    .update({ updated_at: db.fn.now(), next_touch_at: due });
+  logger.info(`[invoice-followups] Day 90 ladder: invoice ${row.invoice_id} step ${row.step_index} `
+    + `${updated ? `moved to ${due.toISOString()}` : 'unchanged (sequence moved since batch select)'}`);
+  return true;
 }
 
 // NY weekday of a touch's anchor (touches always sit at 10:00 NY, so the
@@ -652,7 +729,7 @@ async function skipStaleTouches(row, now) {
   let nextAt = new Date(row.next_touch_at);
   const skippedSteps = [];
   while (nextAt && isStaleTouch(nextAt, now)) {
-    skippedSteps.push(config.steps[nextIndex]?.id || `step_${nextIndex}`);
+    skippedSteps.push(followupSteps()[nextIndex]?.id || `step_${nextIndex}`);
     nextIndex += 1;
     nextAt = computeNextTouchAt(anchorAt, nextIndex);
   }
@@ -803,7 +880,7 @@ async function fireStep(row, { operatorInitiated = false } = {}) {
 }
 
 async function fireTouch(row, { operatorInitiated = false } = {}) {
-  const step = config.steps[row.step_index];
+  const step = followupSteps()[row.step_index];
   if (!step) {
     await db('invoice_followup_sequences').where({ id: row.id }).update({
       updated_at: db.fn.now(),
@@ -1381,7 +1458,7 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
       interaction_type: selectedChannels === null || actualSmsSent ? 'sms_outbound'
         : appSent ? 'app_outbound' : 'email_outbound',
       subject: `Invoice follow-up — ${step.label} (${row.invoice_number || row.invoice_id})`,
-      body: `Step ${row.step_index + 1}/${config.steps.length} fired. Amount: $${amount}.`,
+      body: `Step ${row.step_index + 1}/${followupSteps().length} fired. Amount: $${amount}.`,
       metadata: JSON.stringify({
         invoice_id: row.invoice_id,
         step_id: step.id,
@@ -1985,9 +2062,14 @@ async function sendNextTouchNow(invoiceId, { operatorInitiated = false } = {}) {
  * handled by the per-invoice sequence (so we skip the account-level reminder).
  */
 async function hasActiveSequence(invoiceId) {
+  // Under the Day 90 ladder a finished sequence still owns its invoice: the
+  // ladder ran the invoice's whole life, so the late-payment checker and the
+  // balance workflow must not pick it up afterwards. That handoff was behind
+  // most customers reminded by two systems within a week.
+  const owned = ['active', 'paused', 'autopay_hold', ...(ladderThrough90Live() ? ['completed'] : [])];
   const seq = await db('invoice_followup_sequences')
     .where({ invoice_id: invoiceId })
-    .whereIn('status', ['active', 'paused', 'autopay_hold'])
+    .whereIn('status', owned)
     .first();
   return !!seq;
 }
@@ -2025,6 +2107,7 @@ module.exports = {
   sendNextTouchNow,
   hasActiveSequence,
   isDunningStopped,
+  followupSteps,
   skipStaleTouches,
   firstEligibleFireAt,
   STALE_TOUCH_GRACE_MS,
