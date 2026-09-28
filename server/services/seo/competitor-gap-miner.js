@@ -387,7 +387,20 @@ class CompetitorGapMiner {
            SET score = EXCLUDED.score,
                score_breakdown = EXCLUDED.score_breakdown,
                claim_id = CASE WHEN opportunity_queue.status = 'expired' THEN NULL ELSE opportunity_queue.claim_id END,
-               signal_metadata = EXCLUDED.signal_metadata,
+               -- Preserve the runner's bounded retry budgets across this
+               -- unattended quarterly refresh. Replacing the metadata would
+               -- make a previously retried row look like a first attempt.
+               signal_metadata = EXCLUDED.signal_metadata
+                 || CASE
+                   WHEN jsonb_exists(COALESCE(opportunity_queue.signal_metadata, '{}'::jsonb), 'gate_retry')
+                   THEN jsonb_build_object('gate_retry', opportunity_queue.signal_metadata->'gate_retry')
+                   ELSE '{}'::jsonb
+                 END
+                 || CASE
+                   WHEN jsonb_exists(COALESCE(opportunity_queue.signal_metadata, '{}'::jsonb), 'infrastructure_retry')
+                   THEN jsonb_build_object('infrastructure_retry', opportunity_queue.signal_metadata->'infrastructure_retry')
+                   ELSE '{}'::jsonb
+                 END,
                mined_at = EXCLUDED.mined_at,
                expires_at = EXCLUDED.expires_at,
                action_type = EXCLUDED.action_type,

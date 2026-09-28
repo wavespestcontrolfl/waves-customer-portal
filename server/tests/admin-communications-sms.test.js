@@ -3485,6 +3485,22 @@ describe('/sms — follow-up SLA phrase send-time recheck (Codex r3 P2)', () => 
     expect(require('../services/sms-suggest-mode').supersedeStaleDecision).not.toHaveBeenCalled();
   });
 
+  test('follow-up #1: the promised timing edited into "within 60 minutes" refuses the send and supersedes, even inside the window', async () => {
+    jest.useFakeTimers(FAKE_TIMERS_OPTS);
+    jest.setSystemTime(new Date('2026-09-28T14:00:00.000Z')); // 10:00 ET — inside the window
+    const claimUpdates = [];
+    mockDb({ decision: decisionRow(), claimUpdates });
+    await withServer(async (baseUrl) => {
+      const res = await send(baseUrl, {
+        agentDraft: 'Sorry about that — someone will follow up within 60 minutes.',
+        body: 'Sorry about that — someone will follow up within 60 minutes.',
+      });
+      expect(res.status).toBe(409);
+    });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(require('../services/sms-suggest-mode').supersedeStaleDecision).toHaveBeenCalledWith({ decisionId: 'dec-1' });
+  });
+
   test('the SAME stale wording on a draft that recorded NO escalation sends normally — "within the hour" is ordinary English (Codex r5)', async () => {
     jest.useFakeTimers(FAKE_TIMERS_OPTS);
     jest.setSystemTime(new Date('2026-09-28T01:30:00.000Z')); // 21:30 ET, outside the window

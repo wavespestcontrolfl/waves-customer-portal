@@ -299,8 +299,38 @@ describe('evaluateGroupDivergence', () => {
       expect(verdict.diverging.map((m) => m.id)).toEqual(['anchor-1']);
     });
 
-    test('an OPEN invoice with a cancelled anchor is unchanged — the anchor is never in the open-invoice review', () => {
-      const a = anchor({ status: 'cancelled' });
+    // Codex round 19 P2: voidOpenInvoicesForCancelledService (job-status.js)
+    // is fired-and-forget off the anchor's own cancel/skip/no-show — when it
+    // fails, a still-OPEN combined invoice keeps charging for an anchor that
+    // will never run. The open-invoice review now includes the anchor the
+    // same way the paid/processing one already does, so this case raises
+    // (or keeps) the alert instead of silently reading the group as
+    // realigned.
+    test.each(['cancelled', 'skipped', 'no_show'])('an OPEN invoice with a %s anchor (sibling active) → alert naming the anchor', (status) => {
+      const a = anchor({ status });
+      const b = member('b', { status: 'confirmed' });
+      const verdict = evaluateGroupDivergence({ anchor: a, members: [a, b], invoiceStatus: 'sent' });
+      expect(verdict.action).toBe('alert');
+      expect(verdict.reason).toBe('diverged');
+      expect(verdict.diverging.map((m) => m.id)).toEqual(['anchor-1']);
+    });
+
+    test('an OPEN invoice with a cancelled anchor WITH a separate live invoice on it → still alerts (the combined charge never moved)', () => {
+      const a = anchor({ status: 'cancelled', has_own_live_invoice: true });
+      const b = member('b', { status: 'confirmed' });
+      const verdict = evaluateGroupDivergence({ anchor: a, members: [a, b], invoiceStatus: 'sent' });
+      expect(verdict.action).toBe('alert');
+      expect(verdict.reason).toBe('diverged');
+      expect(verdict.diverging.map((m) => m.id)).toEqual(['anchor-1']);
+    });
+
+    test('an OPEN invoice, anchor back to an active status, no other divergence → clear, realigned (unaffected by the anchor fix)', () => {
+      // An anchor that is NOT currently never-ran can never reach the alert
+      // branch through neverRanCoveredMembers, whatever its status history —
+      // the verdict is purely a function of current state. This pins that
+      // the round 19 P2 fix only widens the ALERT case and leaves an
+      // ordinary aligned, active group clearing exactly as before.
+      const a = anchor({ status: 'confirmed' });
       const b = member('b', { status: 'confirmed' });
       const verdict = evaluateGroupDivergence({ anchor: a, members: [a, b], invoiceStatus: 'sent' });
       expect(verdict).toEqual({ action: 'clear', reason: 'realigned' });
