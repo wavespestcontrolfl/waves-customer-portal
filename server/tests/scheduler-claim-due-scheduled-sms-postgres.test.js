@@ -94,6 +94,22 @@ jest.setTimeout(30000);
     expect(await statusOf(otherEntryPoint.id)).toBe('scheduled');
   });
 
+  test('claim -> retry -> claim: after the first accelerated attempt, a failure backoff is honored', async () => {
+    const queuedFor8am = row({
+      scheduled_for: new Date(NOW.getTime() + 8 * 60 * 60 * 1000),
+      metadata: { entry_point: 'voicemail_lead_sms_deferred', original_block_code: 'QUIET_HOURS_HOLD' },
+    });
+    await database('sms_log').insert(queuedFor8am);
+    expect((await claimDueScheduledSms(NOW)).map((r) => r.id)).toEqual([queuedFor8am.id]);
+    // The send fails retryably: the scheduler re-queues it 15 minutes out,
+    // keeping the metadata (original_block_code included) it was claimed with.
+    const retryAt = new Date(NOW.getTime() + 15 * 60 * 1000);
+    await database('sms_log').where({ id: queuedFor8am.id }).update({ status: 'scheduled', scheduled_for: retryAt });
+    expect(await claimDueScheduledSms(new Date(NOW.getTime() + 2 * 60 * 1000))).toEqual([]);
+    expect(await statusOf(queuedFor8am.id)).toBe('scheduled');
+    expect((await claimDueScheduledSms(retryAt)).map((r) => r.id)).toEqual([queuedFor8am.id]);
+  });
+
   test('a row with no scheduled_for at all is never claimed', async () => {
     const noSchedule = row({ scheduled_for: null });
     await database('sms_log').insert(noSchedule);

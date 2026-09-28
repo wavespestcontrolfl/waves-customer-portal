@@ -360,9 +360,14 @@ async function claimDueScheduledSms(now) {
           -- was queued before this code shipped, or by an old instance
           -- still running mid-deploy. Every OTHER voicemail_lead_sms_deferred
           -- retry reason (suppression retry, an in-flight dedupe wait, …)
-          -- keeps its own scheduled_for.
+          -- keeps its own scheduled_for. Only a row never claimed yet
+          -- (no scheduled_sms_attempts) is pulled forward: original_block_code
+          -- survives retries, so once the first accelerated attempt has run,
+          -- a failure's backoff (scheduled_for) must be honored rather than
+          -- re-claimed every tick until its attempts are exhausted.
           OR (metadata->>'entry_point' = 'voicemail_lead_sms_deferred'
-              AND metadata->>'original_block_code' = 'QUIET_HOURS_HOLD')
+              AND metadata->>'original_block_code' = 'QUIET_HOURS_HOLD'
+              AND COALESCE(NULLIF(metadata->>'scheduled_sms_attempts', ''), '0') = '0')
         )
       ORDER BY scheduled_for ASC, created_at ASC
       FOR UPDATE SKIP LOCKED
