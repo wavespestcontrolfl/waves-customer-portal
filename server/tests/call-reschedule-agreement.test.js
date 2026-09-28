@@ -297,6 +297,10 @@ describe('groundRescheduleAgreement', () => {
       ],
     }), 'Caller: Can we move my visit?\nAgent: We will see you Thursday at two.\nCaller: Yes, Thursday at two AM works for me.'))
       .toMatchObject({ ok: false, reason: 'agreed_slot_ungrounded' });
+    // Codex #5163 r3: "I mean a.m." / "I said AM" / "I prefer AM" are the morning.
+    for (const said of ['We will move it to Thursday at two, I mean a.m.', 'We will move it to Thursday at two, I said AM.', 'I prefer AM, we will move it to Thursday at two.']) {
+      expect([said, plain(THURSDAY_2PM, said, 'two').reason]).toEqual([said, 'agreed_slot_ungrounded']);
+    }
     // "Am" the verb is not a period.
     expect(plain(THURSDAY_2PM, 'I am moving you to Thursday at two.', 'two').ok).toBe(true);
     // Nor one said just past the end of the quote, in the same sentence.

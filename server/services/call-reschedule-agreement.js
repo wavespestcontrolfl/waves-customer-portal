@@ -430,8 +430,11 @@ function halvesSaid(quote) {
   });
 }
 
+// Only "I am" and "I <adverb> am" are the verb; "I mean AM", "I said AM",
+// "I prefer AM" state the morning.
+const AM_ADVERBS = new Set(['really', 'also', 'just', 'still', 'actually', 'now', 'definitely', 'certainly']);
 function isVerbAm(toks, i) {
-  return toks[i - 1] === 'i' || toks[i - 2] === 'i';
+  return toks[i - 1] === 'i' || (AM_ADVERBS.has(toks[i - 1]) && toks[i - 2] === 'i');
 }
 
 // The recorded words the slot quote must hold.
