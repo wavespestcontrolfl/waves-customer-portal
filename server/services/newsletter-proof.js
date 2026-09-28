@@ -26,6 +26,8 @@ const { requiresClaimValidation, isFlagshipType } = require('../config/newslette
 const { isFlagshipTargetForWeek } = require('./event-freshness');
 const { validateFlagshipEventSelection, parseLockedEventIds } = require('./newsletter-event-selection');
 const { reverifyEvents } = require('./event-reverify');
+const { pestInsiderProofLive } = require('../config/feature-gates');
+const { PEST_INSIDER_TYPE } = require('./pest-insider-autopilot');
 
 /**
  * Internal diagnostics panel rendered ABOVE the recipient preview in the
@@ -365,15 +367,27 @@ async function renderSendPreview(send, toEmail) {
   return { html, text, unsubscribeUrl: demoUrl };
 }
 
-function proofBannerHtml(recipientCount) {
+// The flagship's calendar-linked target is a future Tuesday 6:00 AM ET —
+// approval only QUEUES it, the scheduler tick dispatches it later. Every
+// other type (Pest Insider included) schedules for approval time itself
+// (newsletter-proof.js's own `scheduledFor = new Date()` when
+// !eventSelection.flagship), so the very next scheduler tick — at most a
+// minute later — sends it. Codex P1: the banner promised the Tuesday
+// target unconditionally, so an approver of a non-flagship proof could
+// think they had until Tuesday and instead broadcast within a minute.
+function proofTimingCopy(flagship) {
+  return flagship ? 'Tuesday at 6:00 AM ET' : 'immediately (the next scheduler check, usually within a minute)';
+}
+
+function proofBannerHtml(recipientCount, flagship) {
   return `<div class="dm-box" style="border:2px solid #04395E;border-radius:8px;padding:14px 16px;margin:0 0 20px;background:#f4f8fb;font-family:Arial,Helvetica,sans-serif;">
 <p style="margin:0 0 6px;font-size:15px;font-weight:bold;color:#04395E;">Proof — not yet sent to the list</p>
-<p style="margin:0;font-size:14px;color:#1f2937;">Reply <strong>APPROVED</strong> to queue this issue for <strong>Tuesday at 6:00 AM ET</strong> to <strong>${recipientCount}</strong> active subscribers. Any other reply — or no reply — and it stays a draft in the composer.</p>
+<p style="margin:0;font-size:14px;color:#1f2937;">Reply <strong>APPROVED</strong> to send this issue <strong>${proofTimingCopy(flagship)}</strong> to <strong>${recipientCount}</strong> active subscribers. Any other reply — or no reply — and it stays a draft in the composer.</p>
 </div>\n`;
 }
 
-function proofBannerText(recipientCount) {
-  return `PROOF — NOT YET SENT TO THE LIST\nReply APPROVED to queue this issue for Tuesday at 6:00 AM ET to ${recipientCount} active subscribers. Any other reply (or no reply) and it stays a draft.\n\n----------------------------------------\n\n`;
+function proofBannerText(recipientCount, flagship) {
+  return `PROOF — NOT YET SENT TO THE LIST\nReply APPROVED to send this issue ${proofTimingCopy(flagship)} to ${recipientCount} active subscribers. Any other reply (or no reply) and it stays a draft.\n\n----------------------------------------\n\n`;
 }
 
 async function countRecipients(send) {
@@ -496,8 +510,8 @@ async function sendNewsletterProof(sendId) {
     );
     const { html, text } = await renderSendPreview({
       ...send,
-      html_body: proofBannerHtml(recipientCount) + diagnosticsHtml + (send.html_body || ''),
-      text_body: send.text_body ? proofBannerText(recipientCount) + send.text_body : send.text_body,
+      html_body: proofBannerHtml(recipientCount, calendarContext.flagship) + diagnosticsHtml + (send.html_body || ''),
+      text_body: send.text_body ? proofBannerText(recipientCount, calendarContext.flagship) + send.text_body : send.text_body,
     }, to);
 
     const result = await sendgrid.sendOne({
@@ -585,6 +599,20 @@ async function maybeHandleProofApproval(email) {
   const replyText = extractTopReplyText(email.body_text || htmlReplyToText(email.body_html));
   if (!isApprovalReply(replyText)) {
     logger.info(`[newsletter-proof] reply for send ${send.id} did not say "approved" — leaving draft untouched`);
+    return true;
+  }
+
+  // The Pest Insider kill switch governs APPROVAL, not only proofing. A
+  // proof that went out while GATE_PEST_INSIDER_PROOF was on must not be
+  // approvable once the gate is off: off means draft-only. The draft and
+  // its proof are left untouched, so turning the gate back on and replying
+  // again approves the same proof.
+  if (send.newsletter_type === PEST_INSIDER_TYPE && !pestInsiderProofLive()) {
+    logger.info(`[newsletter-proof] send ${send.id} is a Pest Insider issue and GATE_PEST_INSIDER_PROOF is off — approval refused, draft untouched`);
+    await notifyProof('newsletter_proof_blocked', {
+      subject: send.subject,
+      errors: ['Approved, but Pest Insider proof approval is switched off — nothing sent and the draft is unchanged. Turn the switch back on and reply APPROVED again, or send the issue from the Newsletter page.'],
+    });
     return true;
   }
 

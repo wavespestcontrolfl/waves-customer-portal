@@ -303,6 +303,20 @@ describe('sendNewsletterProof', () => {
     }));
   });
 
+  test('a non-flagship (Pest Insider) proof discloses immediate delivery, never the Tuesday target', async () => {
+    const pestInsiderDraft = {
+      ...FLAGSHIP_DRAFT,
+      newsletter_type: 'pest-insider-monthly',
+      proof_token: null,
+    };
+    wireDb({ sends: { first: pestInsiderDraft } });
+    const r = await sendNewsletterProof('send-1');
+    expect(r.sent).toBe(true);
+    const args = mockSendOne.mock.calls[0][0];
+    expect(args.html).toContain('immediately');
+    expect(args.html).not.toContain('Tuesday at 6:00 AM ET');
+  });
+
   test('future-issue proof validates its lineup against the linked issue Tuesday', async () => {
     const futureTarget = new Date('2026-07-28T10:00:00Z');
     wireDb({
@@ -471,6 +485,58 @@ describe('maybeHandleProofApproval', () => {
     });
     expect(r).toBe(true);
     expect(mockSendCampaign).not.toHaveBeenCalled();
+  });
+
+  describe('Pest Insider kill switch at approval time', () => {
+    const INSIDER = { ...PROOFED_DRAFT, id: 'send-pi-1', newsletter_type: 'pest-insider-monthly', subject: 'Pest Insider — September' };
+
+    afterEach(() => { delete process.env.GATE_PEST_INSIDER_PROOF; });
+
+    test('gate off: an APPROVED reply is refused, nothing is claimed or sent, and the draft is untouched', async () => {
+      delete process.env.GATE_PEST_INSIDER_PROOF;
+      const { sendsChain } = wireDb({ sends: { first: INSIDER } });
+
+      const r = await maybeHandleProofApproval(APPROVAL_EMAIL);
+
+      expect(r).toBe(true);
+      expect(sendsChain.update).not.toHaveBeenCalled();
+      expect(mockSendCampaign).not.toHaveBeenCalled();
+      expect(mockTrigger).toHaveBeenCalledWith('newsletter_proof_blocked', expect.objectContaining({
+        errors: expect.arrayContaining([expect.stringContaining('Pest Insider proof approval is switched off')]),
+      }));
+    });
+
+    test('gate off does not touch the weekly flagship', async () => {
+      delete process.env.GATE_PEST_INSIDER_PROOF;
+      const { sendsChain } = wireDb({ sends: { first: PROOFED_DRAFT } });
+
+      await maybeHandleProofApproval(APPROVAL_EMAIL);
+
+      expect(sendsChain.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'scheduled' }));
+    });
+
+    test('gate on: the approval is claimed and the issue dispatched', async () => {
+      process.env.GATE_PEST_INSIDER_PROOF = 'true';
+      mockValidateEventSelection.mockResolvedValue({ valid: true, errors: [], flagship: false });
+      const { sendsChain } = wireDb({ sends: { first: INSIDER }, subscribers: { first: { count: 5 } } });
+
+      const r = await maybeHandleProofApproval(APPROVAL_EMAIL);
+
+      expect(r).toBe(true);
+      expect(sendsChain.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'scheduled', proof_approved_at: expect.any(Date) }));
+      // Non-flagship approvals take the direct dispatch path: the issue is
+      // actually handed to the sender, not just marked scheduled.
+      expect(mockSendCampaign).toHaveBeenCalledWith('send-pi-1');
+    });
+
+    test('a reply that does not say approved is handled before the gate, with no blocked notice', async () => {
+      delete process.env.GATE_PEST_INSIDER_PROOF;
+      wireDb({ sends: { first: INSIDER } });
+
+      await maybeHandleProofApproval({ ...APPROVAL_EMAIL, body_text: 'hold this one' });
+
+      expect(mockTrigger).not.toHaveBeenCalledWith('newsletter_proof_blocked', expect.anything());
+    });
   });
 
   test('draft edited AFTER the proof → approval refused, proof invalidated + reissued', async () => {

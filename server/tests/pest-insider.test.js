@@ -215,6 +215,31 @@ describe('pest-insider claim validation at the send gates', () => {
     const { errors } = validateNewsletterDraft(baseSend, { recipientCount: 100 });
     expect(errors).toEqual([]);
   });
+
+  test('a storm-triggered "second swarm" termite claim hard-blocks the send (email-division fact register)', () => {
+    const draft = {
+      ...baseSend,
+      html_body: baseSend.html_body + '<p>Termites will throw a second swarm event after significant rain and storm activity.</p>',
+    };
+    const { errors } = validateNewsletterDraft(draft, { recipientCount: 100 });
+    expect(errors.some((e) => e.includes('Unverified claim (termite_second_swarm)'))).toBe(true);
+  });
+
+  test.each([
+    ['HTML entities', 'Termites will throw a &#115;econd swarm event after storms.'],
+    ['fullwidth look-alike letters', 'Termites will throw a ｓecond swarm event after storms.'],
+    ['a non-breaking space entity', 'Termites will throw a second&nbsp;swarm event after storms.'],
+  ])('an encoded or homoglyph termite claim (%s) renders as the claim and still hard-blocks', (_label, sentence) => {
+    const draft = { ...baseSend, html_body: `${baseSend.html_body}<p>${sentence}</p>` };
+    const { errors } = validateNewsletterDraft(draft, { recipientCount: 100 });
+    expect(errors.some((e) => e.includes('Unverified claim (termite_second_swarm)'))).toBe(true);
+  });
+
+  test('an entity-encoded DENIAL is decoded before the scan and does not block', () => {
+    const draft = { ...baseSend, html_body: `${baseSend.html_body}<p>Termites don&#39;t have a second swarm after storms.</p>` };
+    const { errors } = validateNewsletterDraft(draft, { recipientCount: 100 });
+    expect(errors.some((e) => e.includes('Unverified claim (termite_second_swarm)'))).toBe(false);
+  });
 });
 
 describe('pest-insider cron guards', () => {
