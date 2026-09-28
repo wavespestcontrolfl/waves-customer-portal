@@ -2452,11 +2452,11 @@ visit is recurring-lineage (a one-time visit is out of scope for this lane),
 and the visit is not `dispatchOwnedUnreviewed` (the office hasn't reviewed
 it yet — same invariant the confirm write enforces; the eligibility RULE
 is one function, `visitPrepEligibility`, that both this pre-check and the
-late recheck below feed — only the way `state` is READ differs, see below)
-— THEN a cheap,
-unlocked cap pre-check (409 `PREP_CAP_REACHED` via the shared `capReached()`
-rule — the visit already has 3 submissions, or one more photo would push it
-past 6) that runs BEFORE multer ever buffers a byte. ONLY THEN does `multer`
+late recheck below feed — only the way `state` is READ differs, see below).
+The photo CAP is deliberately NOT pre-checked before the body is parsed: it
+is decided only under the lock, after dedupe (below), so a retry of an
+already-stored submission on a visit that is now full still answers the
+idempotent 200 rather than a misleading "limit reached". ONLY THEN does `multer`
 (memory storage; 5 MB/file, 3 files, 6 fields, 2 KB field size, 10 parts)
 parse the body — a multer size limit is 413, every other multer limit is
 400, both customer-safe and generic. Each file's declared mimetype AND its
@@ -2505,7 +2505,8 @@ that column is a point-in-time record only) — so two members racing to
 add photos to the same stop can never together exceed the cap, photos added
 before a visit was grouped still count against the stop, and a member moved
 out of a stop takes its photos with it — the loser
-gets 409 `PREP_CAP_REACHED` and its uploaded object is deleted. `property_id`,
+gets 409 `PREP_CAP_REACHED` (the visit already has 3 submissions, or the new
+photos would push it past 6) and its uploaded object is deleted. `property_id`,
 `customer_id`, and `visit_id` on the inserted rows come from the RECHECKED
 row, never the pre-lock read and never the request body. The response is
 `{ ok: true, prepPhotos: { eligible, photoCount, photosRemaining } }` — 201

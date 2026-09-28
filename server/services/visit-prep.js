@@ -127,10 +127,11 @@ function visitPrepEligibility({ svc, state, visitUnknown, dispatchOwnedUnreviewe
   return { eligible: true, reason: null };
 }
 
-// The ONE cap rule. `adding` is how many NEW photos this decision covers —
-// the route's cheap pre-check (files not parsed yet) asks "would even one
-// more be over?" (adding=1, the default); the locked check under the stop
-// lock asks with the real count about to be inserted.
+// The ONE cap rule, applied only under the stop lock with the real number
+// of NEW (post-dedupe) photos about to be inserted. Deliberately not
+// pre-checked before the body is parsed: a retry of an already-stored
+// submission on a visit that is now full must still resolve to the
+// idempotent duplicate-only answer, which needs the photos in hand.
 function capReached(summary, adding = 1) {
   return summary.submissionCount >= VISIT_PREP_LIMITS.submissionsPerVisit
     || summary.photoCount + adding > VISIT_PREP_LIMITS.photosPerVisit;

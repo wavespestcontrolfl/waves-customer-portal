@@ -132,14 +132,14 @@ describe('visitPrepEligibility', () => {
   });
 });
 
-describe('capReached — the ONE cap rule (route pre-check and the locked check both call this)', () => {
+describe('capReached — the ONE cap rule, applied under the stop lock', () => {
   test('submission count at/over the cap is reached regardless of photos', () => {
     expect(capReached({ submissionCount: 3, photoCount: 0 }, 1)).toBe(true);
     expect(capReached({ submissionCount: 2, photoCount: 0 }, 1)).toBe(false);
   });
   test('adding N photos past the photo cap is reached', () => {
     expect(capReached({ submissionCount: 0, photoCount: 5 }, 1)).toBe(false); // 5+1=6, at the cap, not over
-    expect(capReached({ submissionCount: 0, photoCount: 6 }, 1)).toBe(true); // the route's cheap pre-check shape
+    expect(capReached({ submissionCount: 0, photoCount: 6 }, 1)).toBe(true); // full visit, one more
     expect(capReached({ submissionCount: 0, photoCount: 5 }, 2)).toBe(true); // 5+2=7 > 6
   });
 });

@@ -288,13 +288,31 @@ describe('POST /api/public/appointment/:token/photos', () => {
     });
   });
 
-  test('cap already reached: 409 PREP_CAP_REACHED without ever parsing the body', async () => {
-    resetDbState({ submissionCount: 3 });
+  test('visit already full + NEW photo: 409 PREP_CAP_REACHED decided under the lock, upload cleaned up', async () => {
+    resetDbState({ photoCount: 6 });
     await withServer(async (baseUrl) => {
       const res = await postPhotos(baseUrl, { files: [{ bytes: JPEG_BYTES, mimetype: 'image/jpeg' }] });
       expect(res.status).toBe(409);
       expect((await res.json()).code).toBe('PREP_CAP_REACHED');
-      expect(mockUploadFunnelPhotoToS3).not.toHaveBeenCalled();
+      expect(dbState.inserted.submissions).toHaveLength(0);
+      expect(mockUploadFunnelPhotoToS3).toHaveBeenCalledTimes(1);
+      expect(mockDeletePhoto).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  test('visit already full + a RETRY of photos already stored: still the idempotent 200, never "limit reached"', async () => {
+    // A double-tap after the submission that filled the visit: the cap is
+    // decided only under the lock, AFTER dedupe, so the retry is recognized
+    // as already stored rather than refused (pre-push audit P1).
+    resetDbState({ photoCount: 6, existingHashes: [crypto.createHash('sha256').update(JPEG_BYTES).digest('hex')] });
+    await withServer(async (baseUrl) => {
+      const res = await postPhotos(baseUrl, { files: [{ bytes: JPEG_BYTES, mimetype: 'image/jpeg' }] });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.ok).toBe(true);
+      expect(body.prepPhotos).toMatchObject({ photoCount: 6, photosRemaining: 0 });
+      expect(dbState.inserted.submissions).toHaveLength(0);
+      expect(mockDeletePhoto).toHaveBeenCalledTimes(1);
     });
   });
 

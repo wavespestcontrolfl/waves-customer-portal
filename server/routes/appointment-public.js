@@ -1269,10 +1269,13 @@ router.post(
     return next();
   },
   visitPrepLimiter,
-  // Load the token row, prove eligibility, and run the cheap (unlocked) cap
-  // pre-check — all BEFORE multer ever buffers a byte, so an ineligible or
-  // already-capped request never costs the memory or the S3 round trip.
-  // This is advisory only: the write re-proves both under the stop lock.
+  // Load the token row and prove eligibility BEFORE multer ever buffers a
+  // byte, so an ineligible request never costs the memory or the S3 round
+  // trip. This is advisory only: the write re-proves it under the stop
+  // lock. The photo CAP is deliberately NOT pre-checked here (pre-push
+  // audit P1): the cap is decided only under the lock, after dedupe, so a
+  // retry of an already-stored submission on a visit that is now full still
+  // answers the idempotent 200 instead of a misleading "limit reached".
   async (req, res, next) => {
     try {
       const svc = await loadByToken(req.params.token);
@@ -1281,11 +1284,6 @@ router.post(
       const eligibility = await deriveVisitPrepEligibility(svc);
       if (!eligibility.eligible) {
         return res.status(409).json({ error: "Photos can't be added to this visit online.", code: 'PREP_NOT_AVAILABLE' });
-      }
-
-      const summary = await visitPrep.visitPrepSummary(svc);
-      if (visitPrep.capReached(summary, 1)) {
-        return res.status(409).json({ error: "You've reached the photo limit for this visit.", code: 'PREP_CAP_REACHED' });
       }
 
       req.visitPrepSvc = svc;
