@@ -1665,7 +1665,13 @@ describe('dispatchClaimedCall', () => {
   function makeDb({ lead = OPEN_LEAD, bookedSince = null, visitCreatedAt = null, consultationCodes = [], smsWithLink = null,
     callLogUpdate = jest.fn(async () => 1), activityInsert = jest.fn(async () => {}), capture = {}, freshCall = CALL,
     markerInsert = jest.fn(() => ({ onConflict: jest.fn(() => ({ ignore: jest.fn(async () => {}) })) })),
-    markerDel = jest.fn(async () => 1) } = {}) {
+    markerDel = jest.fn(async () => 1),
+    // codex #5018 r15/r16 P1 follow-up: withSmsHandoff's phone-match
+    // customer lookup, called TWICE per handoff (once before locks, once as
+    // the post-lock re-check) — a plain array default keeps every existing
+    // test's two calls identical (never widened); a test proving the
+    // widened-set defer supplies a stateful function instead.
+    customersPluck = jest.fn(async () => []) } = {}) {
     const conn = jest.fn((table) => {
       const chain = {};
       ['whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'whereRaw', 'whereExists', 'orderBy', 'limit', 'modify', 'forUpdate', 'join', 'select']
@@ -1684,7 +1690,11 @@ describe('dispatchClaimedCall', () => {
         if (table === 'call_log') return freshCall;
         return undefined;
       });
-      chain.pluck = jest.fn(async () => (table === 'short_codes' ? consultationCodes : []));
+      chain.pluck = jest.fn(async () => {
+        if (table === 'short_codes') return consultationCodes;
+        if (table === 'customers') return customersPluck();
+        return [];
+      });
       chain.update = table === 'call_log' ? callLogUpdate : jest.fn(async () => 1);
       // The handoff marker (codex #5018 r13 P1) INSERTs into its own table,
       // never call_log — activity_log keeps its own dedicated insert stub.
@@ -2072,6 +2082,53 @@ describe('dispatchClaimedCall', () => {
     expect(conn.raw).toHaveBeenCalledWith(expect.stringContaining('pg_advisory_xact_lock'), [OPEN_LEAD.phone]);
     // The caller's handoff ran on the transaction's own connection (the
     // mock's stand-in for a real trx), not a second, unlocked one.
+    expect(handoff).toHaveBeenCalledWith(conn);
+    expect(verdict).toEqual({ ok: true, trx: conn });
+  });
+
+  // codex #5018 r15/r16 P1 follow-up: the phone-match candidate customer
+  // ids withSmsHandoff locks with lockCustomerComms are read BEFORE those
+  // locks — a customer quick-added for this exact destination phone in the
+  // gap is never locked, so a booking committed for it between
+  // bookedSinceCall's own read and the actual provider request is never
+  // fenced. The handoff now re-resolves the SAME phone-match query after
+  // every lock is held and bails out retryable, never calling the
+  // caller-supplied handoff, when that re-check finds an id the first pass
+  // missed — proven here with a real Postgres advisory lock in
+  // call-booking-link-text-postgres.test.js (a mocked knex cannot prove a
+  // concurrent insert actually happened in the gap).
+  test('a customer newly matching the destination phone after the initial lock snapshot defers to the next sweep instead of sending unfenced', async () => {
+    let calls = 0;
+    const customersPluck = jest.fn(async () => (calls++ === 0 ? [] : ['new-cust-1']));
+    const conn = makeDb({ customersPluck });
+    await dispatchClaimedCall(conn, CALL, NOW);
+    const sendInput = sendCustomerMessage.mock.calls[0][0];
+    const handoff = jest.fn(async (trx) => ({ ok: true, trx }));
+    const verdict = await sendInput.withSmsHandoff(handoff);
+
+    expect(customersPluck).toHaveBeenCalledTimes(2);
+    expect(handoff).not.toHaveBeenCalled();
+    expect(verdict).toEqual({
+      ok: false,
+      code: 'candidate_customer_set_changed',
+      reason: expect.any(String),
+      retryable: true,
+    });
+  });
+
+  // The mirror case: a re-check that finds exactly the SAME ids (however
+  // many) already locked is not a widened set — the handoff proceeds
+  // normally. Guards against a false positive from set-membership order or
+  // an id appearing in both passes.
+  test('a re-check that resolves the SAME candidate ids as the first pass proceeds normally', async () => {
+    const customersPluck = jest.fn(async () => ['same-cust-1']);
+    const conn = makeDb({ customersPluck });
+    await dispatchClaimedCall(conn, CALL, NOW);
+    const sendInput = sendCustomerMessage.mock.calls[0][0];
+    const handoff = jest.fn(async (trx) => ({ ok: true, trx }));
+    const verdict = await sendInput.withSmsHandoff(handoff);
+
+    expect(customersPluck).toHaveBeenCalledTimes(2);
     expect(handoff).toHaveBeenCalledWith(conn);
     expect(verdict).toEqual({ ok: true, trx: conn });
   });

@@ -693,6 +693,84 @@ postgres('call-booking-link-text against PostgreSQL', () => {
     expect(result).toEqual({ sent: false, skipped: 'booked_since_call' });
   }, 10000);
 
+  // codex #5018 r15/r16 P1 follow-up: the phone-match candidate ids
+  // withSmsHandoff locks with lockCustomerComms are read BEFORE any of its
+  // own locks — a customer quick-added for this exact destination phone in
+  // the gap between that read and the handoff's own lockSmsPhone
+  // acquisition is never locked at all, so a booking committed for it could
+  // race straight past bookedSinceCall's own fenced read. Proof a mocked
+  // knex cannot give: hold the REAL phone lock before the handoff starts
+  // (forcing it to block AFTER its own initial, empty candidate read but
+  // BEFORE its post-lock re-check), insert the new customer while it waits,
+  // then release — the re-check must see the widened set and defer through
+  // the ordinary retry rail rather than sending to someone the handoff
+  // never actually fenced.
+  test('a customer inserted for this destination phone while the handoff waits on the phone lock defers to the next sweep, never sending unfenced', async () => {
+    const leadId = await insertLead(mockPg, { phone: '+15555551050', customer_id: null });
+    const send_at = new Date(NOW.getTime() - 60 * 60 * 1000).toISOString();
+    const callId = await insertCall(mockPg, {
+      from_phone: '+15555551050',
+      metadata: { lead_id: leadId, call_booking_link_text: { status: 'claimed', lead_id: leadId, send_at, original_send_at: send_at } },
+    });
+    buildLeadConsultationSmsLine.mockResolvedValue({ url: 'https://portal.example.com/inspection/tok-9c', line: 'Pick a time.\n\n', phone: '+15555551050' });
+    sendCustomerMessage.mockImplementation(async ({ withSmsHandoff, providerPreSendCheck, onDispatchStart }) => {
+      const verdict = await withSmsHandoff(async (trx) => {
+        const v = await providerPreSendCheck({ dbi: trx });
+        if (v.ok) await onDispatchStart();
+        return v;
+      });
+      // deliveryOutcome: 'not_sent' (real twilio.js's own mapping for a
+      // withSmsHandoff verdict that never reached dispatch — see its
+      // `preSendBlocked` branch) — without it, isAmbiguousProviderOutcome's
+      // OWN real implementation (unmocked in this file) reads a bare
+      // `retryable: true` with no deliveryOutcome as ambiguous, not
+      // retryable, the same way a genuinely uncertain provider outcome
+      // would. The candidate-set-changed verdict below is never ambiguous
+      // — dispatch was never entered at all.
+      return verdict.ok
+        ? { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SMtest000000000000000000000000c' }
+        : { sent: false, deliveryOutcome: 'not_sent', ...verdict };
+    });
+
+    const { lockSmsPhone } = require('../utils/customer-comms-lock');
+    let releasePhoneHold;
+    const phoneHoldHeld = new Promise((resolve) => { releasePhoneHold = resolve; });
+    const phoneHoldTx = mockPg.transaction(async (trx) => {
+      await lockSmsPhone(trx, '+15555551050');
+      await phoneHoldHeld; // held open until this test explicitly releases it
+    });
+
+    // Give the phone-hold transaction a moment to actually acquire the
+    // lock before the handoff starts — its own initial (empty) candidate
+    // read runs BEFORE it ever reaches lockSmsPhone, so this only blocks
+    // the handoff AFTER that first read has already found nothing.
+    await new Promise((r) => setTimeout(r, 100));
+
+    const call = await mockPg('call_log').where({ id: callId }).first();
+    const handoffPromise = callBookingLinkText.dispatchClaimedCall(mockPg, call, NOW);
+
+    // The handoff is now genuinely blocked on lockSmsPhone. Quick-add the
+    // matching customer WHILE it waits — landing squarely in the gap this
+    // follow-up closes.
+    await new Promise((r) => setTimeout(r, 200));
+    const quickAddedCustomerId = randomUUID();
+    await mockPg('customers').insert({
+      id: quickAddedCustomerId, first_name: 'Quick', last_name: 'Added', phone: '+15555551050',
+      address_line1: '9 Example St', city: 'Bradenton', zip: '34205',
+    });
+    releasePhoneHold();
+    await phoneHoldTx;
+
+    const result = await handoffPromise;
+    expect(result).toEqual({ sent: false, skipped: 'candidate_customer_set_changed', deferred: true });
+    expect(sendCustomerMessage).toHaveBeenCalled();
+    // The row requeues as pending rather than a permanent skip — the next
+    // sweep tick re-resolves the full candidate set, quick-added customer
+    // included, under its own fresh locks.
+    const refreshed = await mockPg('call_log').where({ id: callId }).first('metadata');
+    expect(refreshed.metadata.call_booking_link_text.status).toBe('pending');
+  }, 10000);
+
   // codex #5018 r15 P2: proof a mocked knex/sendCustomerMessage cannot give
   // — a manual send (admin-leads.js's own withSmsHandoff, the SAME
   // lockSmsPhone key) already holding the phone lock genuinely blocks this

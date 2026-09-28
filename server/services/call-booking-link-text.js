@@ -1629,28 +1629,61 @@ async function dispatchClaimedCall(conn, call, now) {
       // order (estimate lock before comms) instead closes it.
       const { acquireAutomatedEstimateLocks } = require('./estimate-automation-duplicates');
       await acquireAutomatedEstimateLocks(trx, destinationPhone);
-      // Both candidate sources are closure-stable — no speculative read
-      // needed: leadLinkedToExistingCustomer (inside neverSendRecheck)
-      // refuses whenever lead.customer_id is truthy and differs from
-      // call.metadata.created_customer_id, so the ONLY value
-      // lead.customer_id can hold by the time bookedSinceCall actually runs
-      // is either null or exactly that id; destinationPhone is the same
-      // phone bookedSinceCall's own phone-match branch resolves against,
-      // enforced by neverSendRecheck's own phone_changed_before_send check.
+      // created_customer_id is closure-stable — no speculative read needed:
+      // leadLinkedToExistingCustomer (inside neverSendRecheck) refuses
+      // whenever lead.customer_id is truthy and differs from
+      // call.metadata.created_customer_id, so the ONLY value lead.customer_id
+      // can hold by the time bookedSinceCall actually runs is either null or
+      // exactly that id. The PHONE-MATCH source below is NOT: it is a live
+      // SELECT against `customers`, and a customer created by
+      // /customers/quick-add for this exact destinationPhone AFTER this read
+      // but before the re-check just below would never be locked at all —
+      // see that re-check's own comment (codex #5018 r15/r16 P1 follow-up).
       const candidateCustomerIds = new Set();
       const createdCustomerId = parseMetadata(call).created_customer_id;
       if (createdCustomerId) candidateCustomerIds.add(String(createdCustomerId));
       const phoneKey = phoneIdentityKey(destinationPhone);
-      if (phoneKey && phoneKey.length === 10) {
-        const { nanpStoredPhoneClause } = require('./outbound-call-reason');
-        const phoneMatches = await trx('customers').whereNull('deleted_at')
+      const { nanpStoredPhoneClause } = require('./outbound-call-reason');
+      const phoneMatchedCustomerIds = async () => {
+        if (!phoneKey || phoneKey.length !== 10) return [];
+        return trx('customers').whereNull('deleted_at')
           .whereRaw(nanpStoredPhoneClause('phone'), [phoneKey]).pluck('id');
-        for (const id of phoneMatches) candidateCustomerIds.add(String(id));
-      }
+      };
+      for (const id of await phoneMatchedCustomerIds()) candidateCustomerIds.add(String(id));
       for (const id of [...candidateCustomerIds].sort()) {
         await lockCustomerComms(trx, id);
       }
       await lockSmsPhone(trx, destinationPhone);
+      // codex #5018 r15/r16 P1 follow-up: candidateCustomerIds' phone-match
+      // half was read BEFORE any lockCustomerComms call above — a customer
+      // quick-added for this SAME destinationPhone in the gap between that
+      // read and this handoff's own locks is not among them, so a booking
+      // committed for it between bookedSinceCall's own read (inside
+      // neverSendRecheck, below, on this same `trx`) and the actual
+      // provider request is never fenced by this handoff at all — exactly
+      // the race lockCustomerComms exists to close. Re-resolve the SAME
+      // phone-match query now that every lock above is held: a newly
+      // visible id proves the candidate set changed between the two reads.
+      // It cannot simply be locked NOW — LOCK ORDER above requires comms
+      // BEFORE lockSmsPhone, already taken, and acquiring comms after phone
+      // here would invert that order against every OTHER lockCustomerComms
+      // caller (the exact two-resource cycle the comment above lockSmsPhone
+      // explains) — so this bails out through the ordinary retryable rail
+      // instead of the send. recordSendOutcome requeues it, and the next
+      // sweep tick re-resolves the full candidate set from scratch under
+      // its own fresh locks — never a send to a customer this handoff never
+      // actually fenced.
+      const freshPhoneMatchedIds = await phoneMatchedCustomerIds();
+      const widenedCandidateSet = freshPhoneMatchedIds.some((id) => !candidateCustomerIds.has(String(id)));
+      if (widenedCandidateSet) {
+        logger.warn(`[call-booking-link-text] candidate customer set widened under lock for call ${call.id} — deferring to the next sweep`);
+        return {
+          ok: false,
+          code: 'candidate_customer_set_changed',
+          reason: 'A new customer matched this destination phone after the initial lock snapshot',
+          retryable: true,
+        };
+      }
       return handoff(trx);
     }),
   }).catch((err) => (isRealProviderSend(err?.providerOutcome) || isAmbiguousProviderOutcome(err?.providerOutcome)) ? err.providerOutcome : Promise.reject(err));
