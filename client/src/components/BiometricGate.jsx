@@ -89,6 +89,7 @@ export default function BiometricGate({ children }) {
   // not leaving the app. A real app switch still resigns the app, and that always
   // locks (appStateChange below) — the picker only excuses the hidden document.
   const pickerOpenUntilRef = useRef(0);
+  const pickerCoveringRef = useRef(false); // that picker is hiding the page right now
   const pickerOpen = () => Date.now() < pickerOpenUntilRef.current;
 
   const attempt = useCallback(async () => {
@@ -114,7 +115,7 @@ export default function BiometricGate({ children }) {
       // listener has already re-locked — don't let a stale success overwrite that
       // newer lock and expose content on the next return.
       const stillForeground = typeof document === 'undefined' || document.visibilityState === 'visible'
-        || pickerOpen();
+        || pickerCoveringRef.current;
       const unlocked = ok && stillForeground;
       setLocked(!unlocked);
       lockedRef.current = !unlocked;
@@ -141,9 +142,14 @@ export default function BiometricGate({ children }) {
     // it the authoritative signal that a fresh unlock is required on return, and it
     // can't be confused with the Face ID prompt's own resign/activate churn.
     const onVisibility = () => {
-      if (pickerOpen()) {
+      if (document.visibilityState === 'visible') {
         // The picker has closed once the page is visible again.
-        if (document.visibilityState === 'visible') pickerOpenUntilRef.current = 0;
+        pickerOpenUntilRef.current = 0;
+        pickerCoveringRef.current = false;
+        return;
+      }
+      if (pickerOpen()) {
+        pickerCoveringRef.current = true;
         return;
       }
       if (document.visibilityState === 'hidden' && isNativeApp() && hasSessionToken()) {
@@ -157,7 +163,10 @@ export default function BiometricGate({ children }) {
       if (isFileInput(e.target)) pickerOpenUntilRef.current = Date.now() + PICKER_GRACE_MS;
     };
     const onPickerDone = (e) => {
-      if (isFileInput(e.target)) pickerOpenUntilRef.current = 0;
+      if (isFileInput(e.target)) {
+        pickerOpenUntilRef.current = 0;
+        pickerCoveringRef.current = false;
+      }
     };
     // Capture phase: the picker's input is usually hidden and clicked from code, and
     // `cancel` doesn't bubble.

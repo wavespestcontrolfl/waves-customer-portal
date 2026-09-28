@@ -115,8 +115,24 @@ it('keeps a Face ID success that lands while the camera still hides the page', a
   expect(lockShown()).toBeInTheDocument();
 
   fireEvent.click(screen.getByTestId('camera'));
-  visibility = 'hidden';
+  setVisibility('hidden');
   await act(async () => { fireEvent.click(screen.getByRole('button', { name: /Unlock/i })); });
 
   await waitFor(() => expect(lockShown()).not.toBeInTheDocument());
+});
+
+it('discards a Face ID success when a picker opened but a real background hid the page', async () => {
+  await renderUnlocked();
+  appState(false);
+  expect(lockShown()).toBeInTheDocument();
+
+  // Picker opened and dismissed without reporting back, and without ever hiding the page.
+  fireEvent.click(screen.getByTestId('camera'));
+  let finish;
+  authenticateBiometric.mockImplementationOnce(() => new Promise((r) => { finish = r; }));
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: /Unlock/i })); });
+  visibility = 'hidden'; // a real background lands mid-prompt
+  await act(async () => { finish(true); });
+
+  expect(lockShown()).toBeInTheDocument();
 });
