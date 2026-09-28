@@ -383,7 +383,10 @@ function candidateFromRegistryRow(row) {
  * rankRelatedPosts' first argument. `opts.database` overrides the knex
  * connection (tests inject a mock); `opts.limit` overrides the cap.
  */
-async function getRelatedPostsForBrief(target = {}, { database = db, limit = RELATED_POSTS_DEFAULT_LIMIT } = {}) {
+// Every related-post candidate that is verified live right now (blog_posts,
+// autonomous runs and the content registry, cross-checked). Shared by brief
+// composition (ranked) and the publish-time recheck (paths only).
+async function loadVerifiedCandidates(database) {
   const rows = await database('blog_posts')
     .select('id', 'title', 'keyword', 'tag', 'category', 'slug', 'city', 'target_sites', 'status', 'astro_status', 'astro_live_url');
   // The audit table is append-only and draft_payload carries the full
@@ -442,11 +445,25 @@ async function getRelatedPostsForBrief(target = {}, { database = db, limit = REL
     // never offer a build_failed or still-pending target to a hard link gate.
     .filter((c) => c && c.path && c.pathVerified && c.astroStatus === 'live'
       && c.workflowStatus === 'published' && candidateLiveKeys(c).some((key) => liveRegistryKeys.has(key)));
-  const registryCandidatesByPath = new Map();
+  // Keyed by the row's own domain+path keys, not pathname alone: two live
+  // rows can share a pathname on different fleet hosts, and each must stay
+  // a candidate for briefs targeting its host.
+  const registryCandidatesByKey = new Map();
+  const registryCandidateList = [];
+  // Every qualifying registry row's domain+path keys, BEFORE rows that share
+  // a pathname on different fleet hosts collapse into one candidate by path
+  // (the publish-time recheck must see each host).
+  const qualifyingRegistryKeys = [];
   for (const row of registryRows || []) {
     try {
       const candidate = candidateFromRegistryRow(row);
-      if (candidate) registryCandidatesByPath.set(candidate.path, candidate);
+      if (candidate) {
+        registryCandidateList.push(candidate);
+        for (const key of candidateLiveKeys(candidate)) {
+          if (!registryCandidatesByKey.has(key)) registryCandidatesByKey.set(key, candidate);
+          qualifyingRegistryKeys.push(key);
+        }
+      }
     } catch { /* malformed registry row: exclude it */ }
   }
   // A slug can be reused across fleet domains over time, so two different
@@ -471,17 +488,16 @@ async function getRelatedPostsForBrief(target = {}, { database = db, limit = REL
       newestAutonomousByKey.set(key, { candidate, completedAt });
     }
   }
-  const autonomousPaths = new Set();
+  const consumedRegistry = new Set();
   for (const { candidate } of newestAutonomousByKey.values()) {
-    const registryCandidate = registryCandidatesByPath.get(candidate.path);
     // A path match alone is not enough — the run and the current registry
     // row must share a live domain+path key, or an old hub run can donate
     // its metadata to an unrelated spoke page whose pathname was reused.
-    const verified = registryCandidate
-      && candidateLiveKeys(candidate).some((key) => candidateLiveKeys(registryCandidate).includes(key))
-      ? registryCandidate
-      : null;
+    const verified = candidateLiveKeys(candidate)
+      .map((key) => registryCandidatesByKey.get(key))
+      .find(Boolean) || null;
     if (!verified) continue;
+    consumedRegistry.add(verified);
     // Current registry truth controls both rendering and topical identity.
     // Historical run metadata fills only fields the live registry lacks.
     for (const field of ['title', 'keyword', 'city', 'service', 'category']) {
@@ -489,12 +505,29 @@ async function getRelatedPostsForBrief(target = {}, { database = db, limit = REL
     }
     candidate.targetSites = verified.targetSites;
     candidates.push(candidate);
-    autonomousPaths.add(candidate.path);
   }
-  for (const candidate of registryCandidatesByPath.values()) {
-    if (!autonomousPaths.has(candidate.path)) candidates.push(candidate);
+  for (const candidate of registryCandidateList) {
+    if (!consumedRegistry.has(candidate)) candidates.push(candidate);
   }
+  const liveKeys = new Set([...candidates.flatMap(candidateLiveKeys), ...qualifyingRegistryKeys]);
+  return { candidates, liveKeys };
+}
+
+async function getRelatedPostsForBrief(target = {}, { database = db, limit = RELATED_POSTS_DEFAULT_LIMIT } = {}) {
+  const { candidates } = await loadVerifiedCandidates(database);
   return rankRelatedPosts(target, candidates, { limit });
+}
+
+// Publish-time recheck: of the frozen related paths, the ones still verified
+// live NOW on every frozen publish host (a post can be unpublished,
+// noindexed or moved to another fleet domain while a draft that links it
+// waits for review). Hosts default to the hub, like candidate targetSites.
+async function getLiveRelatedPaths(paths = [], { database = db, hosts = [] } = {}) {
+  const wanted = new Set((Array.isArray(paths) ? paths : []).map(normalizePathForCompare).filter(Boolean));
+  if (!wanted.size) return new Set();
+  const sites = Array.isArray(hosts) && hosts.length ? hosts : HUB_SITE_KEYS;
+  const { liveKeys } = await loadVerifiedCandidates(database);
+  return new Set([...wanted].filter((p) => sites.every((site) => liveKeys.has(`${site}|${p}`))));
 }
 
 module.exports = {
@@ -507,5 +540,6 @@ module.exports = {
   registryRowLivePath,
   registryRowLiveKeys,
   getRelatedPostsForBrief,
+  getLiveRelatedPaths,
   _internals: { extractTokens, entityCandidates, candidateRendersOnDomains, normalizePathForCompare, GENERIC_TOPIC_TOKENS },
 };

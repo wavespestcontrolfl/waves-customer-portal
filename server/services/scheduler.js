@@ -4149,8 +4149,93 @@ function initScheduledJobs() {
                 }
               }
             }
-            if (anchorStale || amountsStale) {
-              const blockedReason = anchorStale ? 'stale_agent_decision' : 'stale_amount_agent_decision';
+            // OPEN TIMES revalidation (Codex P2): the same "can't see it
+            // from an inbound-anchored check" gap as the amount check above
+            // — a scheduled send can sit hours past drafting, and the
+            // calendar it quoted is never re-read before firing. Only when
+            // the anchor and amount checks already passed, and only for
+            // pairs the OUTGOING body still carries (planOpenTimesRecheck:
+            // a human-edited reply that dropped every quoted window needs
+            // no recheck; an unverifiable edit refuses).
+            // Fail closed on a gone slot, a fetch error, or a timeout — same
+            // block+retire path as the checks above, no new mechanism.
+            let openTimesStale = false;
+            let openTimesReason = null;
+            if (!anchorStale && !amountsStale) {
+              try {
+                const decisionRow = await db('agent_decisions')
+                  .where({ id: claimMeta.agent_decision_id })
+                  .first('input_snapshot', 'suggested_message');
+                let snapshot = decisionRow?.input_snapshot;
+                if (typeof snapshot === 'string') {
+                  try { snapshot = JSON.parse(snapshot); } catch { snapshot = null; }
+                }
+                const openTimesSnapshot = snapshot?.open_times_snapshot;
+                if (openTimesSnapshot?.quotedWindows?.length) {
+                  // Same planner as the queue-time seam (Codex r2): a
+                  // reviewer-edited body is matched to its snapshot pair by
+                  // pair against the drafted text, so a dropped day that
+                  // shares its window with a kept day is not rechecked, and
+                  // an unverifiable edit refuses here too.
+                  const { openTimesStillOffered, planOpenTimesRecheck } = require('./sms-shadow-drafter');
+                  const plan = planOpenTimesRecheck({
+                    snapshot: openTimesSnapshot,
+                    outgoingBody: msg.message_body,
+                    originalBody: decisionRow?.suggested_message ?? null,
+                  });
+                  if (plan.action === 'refuse') {
+                    openTimesStale = true;
+                    openTimesReason = plan.reason;
+                  } else if (plan.action === 'recheck') {
+                    const recheck = await openTimesStillOffered({
+                      city: openTimesSnapshot.lookup?.city || null,
+                      customerId: openTimesSnapshot.lookup?.customerId || null,
+                      estimateId: openTimesSnapshot.lookup?.estimateId || null,
+                      ...(openTimesSnapshot.lookup?.serviceType ? { serviceType: openTimesSnapshot.lookup.serviceType } : {}),
+                      quotedWindows: plan.quotedWindows,
+                    });
+                    if (!recheck.ok) {
+                      openTimesStale = true;
+                      openTimesReason = recheck.reason;
+                    }
+                  }
+                }
+              } catch (err) {
+                logger.warn(`[scheduler] open-times revalidation failed for scheduled sms ${msg.id}: ${err.message}; blocking send`);
+                openTimesStale = true;
+                openTimesReason = 'open_times_recheck_failed';
+              }
+            }
+            // Follow-up SLA phrase revalidation (Codex r3 P2): the relative
+            // wording ("within the hour" / "by 9 AM this morning"/"tomorrow
+            // morning") is frozen at draft time, but this scheduled reply can
+            // fire hours later, past the 8am/8pm ET boundary the phrase was
+            // computed against — the exact "quoted a window that's gone"
+            // staleness the open-times check above covers, for the SLA
+            // phrase. Same fail-closed block+retire path, no new mechanism.
+            let slaStale = false;
+            if (!anchorStale && !amountsStale && !openTimesStale) {
+              try {
+                // Scoped to drafts that recorded an escalation (Codex r5):
+                // wording alone never blocks a scheduled reply.
+                const { followupPromiseIsStale } = require('./sms-followup-sla');
+                const slaDecision = await db('agent_decisions')
+                  .where({ id: claimMeta.agent_decision_id })
+                  .first('input_snapshot', 'prompt_version');
+                if (followupPromiseIsStale({ inputSnapshot: slaDecision?.input_snapshot, promptVersion: slaDecision?.prompt_version, body: msg.message_body })) slaStale = true;
+              } catch (err) {
+                logger.warn(`[scheduler] SLA phrase revalidation failed for scheduled sms ${msg.id}: ${err.message}; blocking send`);
+                slaStale = true;
+              }
+            }
+            if (anchorStale || amountsStale || openTimesStale || slaStale) {
+              const blockedReason = anchorStale
+                ? 'stale_agent_decision'
+                : amountsStale
+                  ? 'stale_amount_agent_decision'
+                  : openTimesStale
+                    ? 'stale_open_times_agent_decision'
+                    : 'stale_sla_agent_decision';
               const threadKey = String(msg.to_phone || '').replace(/\D/g, '').slice(-10) || msg.customer_id || msg.id;
               // Everything under the lock, metadata read THROUGH the trx
               // AFTER acquiring it — the cancel route can transfer parked
@@ -4176,7 +4261,11 @@ function initScheduledJobs() {
                   fromStatus: 'scheduled',
                   note: anchorStale
                     ? 'A newer customer message arrived before this scheduled reply fired — review the thread.'
-                    : 'This scheduled reply quoted a price — house rule: no prices in SMS. Review the thread.',
+                    : amountsStale
+                      ? 'This scheduled reply quoted a price — house rule: no prices in SMS. Review the thread.'
+                      : openTimesStale
+                        ? `This scheduled reply quoted an appointment time that is no longer open (${openTimesReason}) — review the thread.`
+                        : 'This scheduled reply’s follow-up timing no longer matches the current window — review the thread.',
                   dbi: trx,
                   strict: true,
                 });

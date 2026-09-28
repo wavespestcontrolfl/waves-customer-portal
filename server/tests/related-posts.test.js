@@ -10,6 +10,7 @@ jest.mock('../models/db', () => jest.fn());
 const {
   rankRelatedPosts,
   getRelatedPostsForBrief,
+  getLiveRelatedPaths,
   candidateFromRow,
   candidateFromAutonomousRun,
   candidateFromRegistryRow,
@@ -537,6 +538,94 @@ describe('getRelatedPostsForBrief — DB wrapper', () => {
     ]);
     expect(out.some((r) => r.path.includes('termite-legacy-slug'))).toBe(false);
     expect(out.some((r) => r.path.includes('failed-build'))).toBe(false);
+  });
+
+  test('getLiveRelatedPaths keeps only frozen paths that are still verified live', async () => {
+    const registryRows = [{
+      id: 'registry-1',
+      canonical_url_normalized: '/termite/direct-astro-post/',
+      content_type: 'blog',
+      reconciliation_status: 'astro_only',
+      workflow_status: 'published',
+      astro_status: 'present',
+      live_status: 'live',
+      noindex_detected: false,
+      title: 'Direct Astro Termite Post',
+      metadata: { frontmatter: {} },
+    }];
+    const database = fakeDb({ registryRows });
+    const live = await getLiveRelatedPaths(['/termite/direct-astro-post/', '/termite/unpublished-since/'], { database });
+    expect([...live]).toEqual(['/termite/direct-astro-post/']);
+    expect([...(await getLiveRelatedPaths([], { database }))]).toEqual([]);
+  });
+
+  test('getLiveRelatedPaths sees every host when two live rows share a pathname', async () => {
+    const base = {
+      canonical_url_normalized: '/termite/shared-path/',
+      content_type: 'blog',
+      reconciliation_status: 'astro_only',
+      workflow_status: 'published',
+      astro_status: 'present',
+      live_status: 'live',
+      noindex_detected: false,
+      title: 'Shared Path Post',
+    };
+    const registryRows = [
+      { ...base, id: 'hub-row', metadata: { frontmatter: {} } },
+      { ...base, id: 'spoke-row', live_url: 'https://www.sarasotaflpestcontrol.com/termite/shared-path/', metadata: { frontmatter: { domains: ['sarasotaflpestcontrol.com'] } } },
+    ];
+    for (const rows of [registryRows, [...registryRows].reverse()]) {
+      const database = fakeDb({ registryRows: rows });
+      expect([...(await getLiveRelatedPaths(['/termite/shared-path/'], { database, hosts: ['wavespestcontrol.com'] }))]).toEqual(['/termite/shared-path/']);
+      expect([...(await getLiveRelatedPaths(['/termite/shared-path/'], { database, hosts: ['sarasotaflpestcontrol.com'] }))]).toEqual(['/termite/shared-path/']);
+    }
+  });
+
+  test('a spoke brief still gets its spoke row when a hub row shares the pathname', async () => {
+    const base = {
+      canonical_url_normalized: '/termite/shared-path/',
+      content_type: 'blog',
+      reconciliation_status: 'astro_only',
+      workflow_status: 'published',
+      astro_status: 'present',
+      live_status: 'live',
+      noindex_detected: false,
+      title: 'Termite swarm season guide',
+      target_keyword: 'termite swarm season',
+      target_service: 'termite',
+    };
+    const registryRows = [
+      { ...base, id: 'hub-row', metadata: { frontmatter: {} } },
+      { ...base, id: 'spoke-row', live_url: 'https://www.sarasotaflpestcontrol.com/termite/shared-path/', metadata: { frontmatter: { domains: ['sarasotaflpestcontrol.com'] } } },
+    ];
+    for (const rows of [registryRows, [...registryRows].reverse()]) {
+      const out = await getRelatedPostsForBrief(
+        { service: 'termite', keyword: 'termite swarm season', domains: ['sarasotaflpestcontrol.com'] },
+        { database: fakeDb({ registryRows: rows }) }
+      );
+      expect(out.map((r) => r.path)).toEqual(['/termite/shared-path/']);
+    }
+  });
+
+  test('getLiveRelatedPaths requires the path to be live on the frozen publish host', async () => {
+    // The selected hub post has since moved to a spoke: its path is still
+    // live in the fleet, but not on the hub the draft publishes to.
+    const registryRows = [{
+      id: 'registry-moved',
+      canonical_url_normalized: '/termite/moved-post/',
+      live_url: 'https://www.sarasotaflpestcontrol.com/termite/moved-post/',
+      content_type: 'blog',
+      reconciliation_status: 'astro_only',
+      workflow_status: 'published',
+      astro_status: 'present',
+      live_status: 'live',
+      noindex_detected: false,
+      title: 'Moved Termite Post',
+      metadata: { frontmatter: { domains: ['sarasotaflpestcontrol.com'] } },
+    }];
+    const database = fakeDb({ registryRows });
+    expect([...(await getLiveRelatedPaths(['/termite/moved-post/'], { database, hosts: ['wavespestcontrol.com'] }))]).toEqual([]);
+    expect([...(await getLiveRelatedPaths(['/termite/moved-post/'], { database, hosts: ['sarasotaflpestcontrol.com'] }))]).toEqual(['/termite/moved-post/']);
   });
 
   test('matches current registry health to an absolute spoke URL by domain and path', async () => {

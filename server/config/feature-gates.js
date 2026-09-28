@@ -908,6 +908,28 @@ const gates = {
   // Separate activation for commitment capture, follow-up bells and staff closure.
   smsCommitmentFollowup: gateEnvValue('GATE_SMS_COMMITMENT_FOLLOWUP'),
 
+  // SMS real answers (owner ruling 2026-09-27) — the shadow drafter answers
+  // from the facts (real OPEN TIMES from AvailabilityEngine for booking/
+  // rescheduling, exact amounts + send_payment_link, portal/estimate links)
+  // instead of defaulting to "we'll confirm and follow up", and answers
+  // CANCELLATIONS (skip/reschedule from OPEN TIMES only, never an invented
+  // discount/credit/refund) instead of escalating them. Dark in every
+  // environment: gate off keeps the drafter's prompts, facts block and
+  // behavior byte-identical (draft rows keep stamping prompt_version
+  // house_voice_v11). The one canonical reader is server/services/
+  // sms-shadow-drafter.js, which re-reads gateEnvValue('GATE_SMS_REAL_ANSWERS')
+  // at draft time — this entry is for logGateStatus only.
+  smsRealAnswers: gateEnvValue('GATE_SMS_REAL_ANSWERS'),
+  // Per-category hand-off gates (owner ruling 2026-09-27): each one, ON,
+  // removes exactly that category from the HELD-FOR-A-PERSON list in the
+  // real-answers prompt (smsRealAnswers must ALSO be on, or there is no
+  // real-answers prompt to remove it from). All default off, dark in every
+  // environment, read at call time by the same drafter module.
+  smsAgentComplaints: gateEnvValue('GATE_SMS_AGENT_COMPLAINTS'),
+  smsAgentBillingDisputes: gateEnvValue('GATE_SMS_AGENT_BILLING_DISPUTES'),
+  smsAgentChemicalMedical: gateEnvValue('GATE_SMS_AGENT_CHEMICAL_MEDICAL'),
+  smsAgentLegal: gateEnvValue('GATE_SMS_AGENT_LEGAL'),
+
   // Voice-Corpus Miner (brand-voice loop, Phase A) — nightly mining of
   // human-authored SMS replies + consent-gated call transcripts into
   // voice_corpus_examples (redacted text only, reader-not-ingestor).
@@ -2793,6 +2815,15 @@ const gates = {
   // flip needs no redeploy. Kill switch: unset GATE_PEST_TRACE_OR_NOTHING.
   pestTraceOrNothing: gateEnvValue('GATE_PEST_TRACE_OR_NOTHING'),
 
+  // Pest Report V2 "expectations" blocks (owner-approved 2026-09-27): rain +
+  // treatment, spiders (#1 callback), and a short "what to expect" list keyed
+  // to product class. OFF everywhere until Adam flips it (exact 'true' —
+  // read directly, not through gateEnvValue's looser '1'/'on' parse, by
+  // pestReportExpectationsGateOn() in pest-report-expectations.js). Kill
+  // switch: unset GATE_PEST_REPORT_EXPECTATIONS. This entry is the
+  // status/log listing only.
+  pestReportExpectations: process.env.GATE_PEST_REPORT_EXPECTATIONS === 'true',
+
   // Re-service (callback) report copy (2026-08-30): the customer report for
   // a callback visit keys off `service_records.is_callback` instead of the
   // editable display name, drops below the honest V2 status branches, splits
@@ -3185,6 +3216,14 @@ const gates = {
   // GATE_PEST_INSIDER_PROOF at call time. Kill = unset — today's behavior:
   // draft + notification only, no proof attempt.
   pestInsiderProof: process.env.GATE_PEST_INSIDER_PROOF === 'true',
+
+  // Pre-visit balance reminder window widens from 3 to 5 days before the
+  // visit (dunning unification, owner ruling 2026-09-27, decision 6) — ahead
+  // of the 72-hour appointment reminder. Ships DARK: off unless exactly
+  // 'true'. This entry is for logGateStatus only:
+  // services/previsit-balance-reminder.js's leadDays() reads
+  // GATE_PREVISIT_BALANCE_5DAY at call time.
+  previsitBalance5Day: process.env.GATE_PREVISIT_BALANCE_5DAY === 'true',
 };
 
 // Parse a gate env var at CALL time (for request-time availability checks

@@ -1627,3 +1627,47 @@ describe('ServiceReportDocument — re-service (callback) block', () => {
     expect(screen.queryByText(reservice.result)).toBeNull();
   });
 });
+
+describe('ServiceReportDocument — Pest V2 expectations (GATE_PEST_REPORT_EXPECTATIONS, dark)', () => {
+  it('renders the rain, spider, and what-to-expect blocks when present on pestReportV2.expectations', () => {
+    render(<ServiceReportDocument data={{
+      ...BASE_DATA,
+      pestReportV2: {
+        expectations: {
+          rain: { lines: ['It\'s rained about 1.2" at your property over the past week.'] },
+          // whatWeDid is server-fixed wording (never a raw protocol-action
+          // label — owner ruling 2026-09-28); this matches the actual
+          // server output.
+          spiders: {
+            headline: 'Spiders',
+            whatWeDid: 'We knocked down webs and treated the eaves and entry points where spiders build.',
+            expectation: 'Webbing should noticeably thin out over about two weeks.',
+            nextStep: 'If it hasn\'t thinned out by then, text us and we\'ll come take another look.',
+          },
+          whatToExpect: { lines: ['Non-repellent products (like what we used) work by transfer.'] },
+        },
+      },
+    }} token="tok123" />);
+    expect(screen.getByText('Rain and your treatment')).toBeInTheDocument();
+    expect(screen.getByText(/rained about 1\.2"/)).toBeInTheDocument();
+    expect(screen.getByText('Spiders')).toBeInTheDocument();
+    expect(screen.getByText(/knocked down webs/)).toBeInTheDocument();
+    expect(screen.getByText('What to expect')).toBeInTheDocument();
+    expect(screen.getByText(/Non-repellent products/)).toBeInTheDocument();
+  });
+
+  it('omits all three blocks when expectations is absent (gate off — the common case today)', () => {
+    render(<ServiceReportDocument data={BASE_DATA} token="tok123" />);
+    expect(screen.queryByText('Rain and your treatment')).toBeNull();
+    expect(screen.queryByText('Spiders')).toBeNull();
+    expect(screen.queryByText('What to expect')).toBeNull();
+  });
+
+  it('the PDF/static render never carries the live-forecast heavy-rain caveat — server-side, forecastHeavyRain is only ever true for mode==="live" (reports-public.js), so a PDF payload\'s rain.lines can only ever be the trailing-week facts, never this sentence', () => {
+    render(<ServiceReportDocument data={{
+      ...BASE_DATA,
+      pestReportV2: { expectations: { rain: { lines: ['It\'s rained about 0.2" at your property over the past week.'] } } },
+    }} token="tok123" />);
+    expect(screen.queryByText(/Heavy rain right after a treatment/)).toBeNull();
+  });
+});
