@@ -585,11 +585,10 @@ describe('MobileCheckoutSheet unpriced-visit billingLane.prediction fallback', (
     expect(screen.getByRole('button', { name: 'Charge $154.00' })).toBeInTheDocument();
   });
 
-  // Codex r1 on #5181: a BARE stamped $0 (no primaryLinePrice base) with an
-  // attached invoice keeps the refusal — the invoice may be a stale priced
-  // one left from before the visit was re-priced to $0, so the sheet must
-  // not collect it; the office reconciles and bills it.
-  it('keeps refusing checkout for a per_application visit with a BARE stamped $0 (no base) and an attached invoice', () => {
+  // Owner ruling 2026-09-28: a BARE stamped $0 (no base) is the visit's own
+  // price, so its attached invoice (checkout extras) stays collectible; a
+  // stale priced invoice is refused by the server, not guessed at here.
+  it('does not refuse checkout for a per_application visit with a BARE stamped $0 (no base) and an attached invoice', () => {
     render(
       <MobileCheckoutSheet
         service={{
@@ -610,8 +609,8 @@ describe('MobileCheckoutSheet unpriced-visit billingLane.prediction fallback', (
         onClose={() => {}}
       />,
     );
-    expect(screen.getByRole('button', { name: 'Bills at completion — see the invoice or set a price' })).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Charge $154.00' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Bills at completion — see the invoice or set a price' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Charge $154.00' })).toBeInTheDocument();
   });
 
   // Codex pre-push P2 (round 3): predictionFromAttachedInvoice returns

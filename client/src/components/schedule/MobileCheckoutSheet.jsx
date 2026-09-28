@@ -376,18 +376,15 @@ export default function MobileCheckoutSheet({
   const siblingCollectible = !!siblingCoverage?.collectible;
   const siblingBlocksCharge = !!siblingCoverageVerdict && siblingCoverageVerdict.state !== 'none';
   const openVisitInvoice = !payerBilled && inv && inv.open && inv.total > 0 ? inv : null;
-  // codex pre-push P1 (round 14, Codex r11 finding): a fully-discounted
-  // application — estimatedPrice stamped 0 alongside a positive
-  // primaryLinePrice (the discount engine's own provenance) — keeps its
-  // attached invoice collectible (e.g. a genuine extras-only invoice on a
-  // $0-net application). Deliberately NOT widened to a bare stamped $0
-  // (Codex r1 on #5181): an ordinary visit re-priced to a bare $0 can still
-  // carry its old priced invoice (the update route voids invoices only for a
-  // re-service conversion), and this sheet would collect that stale amount —
-  // the bare shape keeps the refusal below and is billed from the office.
+  // A stamped $0 — with or without a primaryLinePrice base — is the visit's
+  // own price (owner ruling 2026-09-28, "$0 means charge nothing"), so the
+  // per-application fee refusal below does not apply and its attached
+  // invoice (e.g. checkout extras on a $0 visit) stays collectible. A STALE
+  // priced invoice left from before a re-price to $0 is refused by the
+  // server (POST /:id/invoice, stale_invoice_on_zero_price) and the sheet
+  // shows that refusal — the server is the authority here.
   const attachedInvoiceHasAuthoritativeZeroPrice = service.estimatedPrice != null && service.estimatedPrice !== ''
-    && Number(service.estimatedPrice) === 0
-    && service.primaryLinePrice != null && Number(service.primaryLinePrice) > 0;
+    && Number(service.estimatedPrice) === 0;
   // Codex pre-push P1 (round 13, Codex r11 finding): resolveScheduledServiceCharge
   // refuses the per_application_fee_at_completion shape UNCONDITIONALLY —
   // even when this visit already has an open, otherwise-collectible
