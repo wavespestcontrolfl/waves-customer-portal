@@ -16,19 +16,35 @@ const {
   isInvoiceSettled,
   dateOnly,
   SETTLED_INVOICE_STATUSES,
+  selectFreshBatch,
+  FRESH_BATCH_LIMIT,
 } = require('../services/first-application-sibling-split');
 
 const anchor = (over = {}) => ({ id: 'anchor-1', scheduled_date: '2026-10-01', completed_at: null, ...over });
-const member = (id, over = {}) => ({ id, scheduled_date: '2026-10-01', completed_at: null, estimated_price: null, ...over });
+const member = (id, over = {}) => ({
+  id, scheduled_date: '2026-10-01', completed_at: null, estimated_price: null, status: 'confirmed', ...over,
+});
 
 describe('isInvoiceSettled', () => {
-  test('paid/prepaid/void/refunded/canceled/cancelled are all settled', () => {
+  test('paid/prepaid/processing/void/refunded/canceled/cancelled are all settled', () => {
     for (const status of SETTLED_INVOICE_STATUSES) {
       expect(isInvoiceSettled(status)).toBe(true);
     }
   });
+
+  // Codex P2 (PR #5021 r7): 'processing' used to be missing from this
+  // module's own locally-duplicated settled list even though
+  // invoice-helpers.js's canonical INVOICE_UNCOLLECTIBLE_STATUSES already
+  // treated a mid-settlement (card charging) invoice as uncollectible —
+  // a drift that could raise a live alert against an invoice that is,
+  // everywhere else in the app, already settled.
+  test("'processing' is settled — SETTLED_INVOICE_STATUSES now reuses invoice-helpers.js's canonical list", () => {
+    expect(SETTLED_INVOICE_STATUSES).toContain('processing');
+    expect(isInvoiceSettled('processing')).toBe(true);
+  });
+
   test('draft/sent/viewed/overdue are not settled', () => {
-    for (const status of ['draft', 'sent', 'viewed', 'overdue', 'processing']) {
+    for (const status of ['draft', 'sent', 'viewed', 'overdue']) {
       expect(isInvoiceSettled(status)).toBe(false);
     }
   });
@@ -141,6 +157,56 @@ describe('evaluateGroupDivergence', () => {
     expect(verdict.action).toBe('alert');
     expect(verdict.diverging.map((m) => m.id)).toEqual(['b']);
   });
+
+  // Codex P1 (PR #5021 r7): cancelling a sibling never removes its share of
+  // the still-open combined invoice (voidOpenInvoicesForCancelledService
+  // only voids an invoice linked to the CANCELLED service's OWN
+  // scheduled_service_id) — a cancelled top-level sibling needs review even
+  // when it NEVER diverged by date at all, since a same-day cancellation
+  // leaves exactly as stale a charge as one that also moved.
+  test('a cancelled sibling that NEVER diverged by date still alerts (stale charge, not a realign)', () => {
+    const a = anchor();
+    const cancelled = member('cancelled-same-day', { scheduled_date: '2026-10-01', status: 'cancelled' });
+    const verdict = evaluateGroupDivergence({ anchor: a, members: [a, cancelled], invoiceStatus: 'sent' });
+    expect(verdict.action).toBe('alert');
+    expect(verdict.diverging.map((m) => m.id)).toEqual(['cancelled-same-day']);
+  });
+
+  test('a cancelled sibling that ALSO diverged by date still alerts, once, with cancelled status on it', () => {
+    const a = anchor();
+    const cancelled = member('cancelled-moved', { scheduled_date: '2026-10-09', status: 'cancelled' });
+    const verdict = evaluateGroupDivergence({ anchor: a, members: [a, cancelled], invoiceStatus: 'sent' });
+    expect(verdict.action).toBe('alert');
+    expect(verdict.diverging).toHaveLength(1);
+    expect(verdict.diverging[0]).toMatchObject({ id: 'cancelled-moved', status: 'cancelled' });
+  });
+
+  test('a cancelled sibling that already has its OWN live invoice → clear, split_completed', () => {
+    const a = anchor();
+    const cancelled = member('cancelled-resolved', { scheduled_date: '2026-10-01', status: 'cancelled', has_own_live_invoice: true });
+    const verdict = evaluateGroupDivergence({ anchor: a, members: [a, cancelled], invoiceStatus: 'sent' });
+    expect(verdict).toEqual({ action: 'clear', reason: 'split_completed' });
+  });
+
+  test('a cancelled sibling never triggers a plain "realigned" clear — always split_completed once resolved', () => {
+    const a = anchor();
+    // Cancelled same-day, but resolved (own live invoice) — even though it
+    // never diverged by date, the reason must say something WAS resolved,
+    // never the misleading "realigned" (there was never a date mismatch to
+    // realign).
+    const cancelled = member('c', { scheduled_date: '2026-10-01', status: 'cancelled', has_own_live_invoice: true });
+    const verdict = evaluateGroupDivergence({ anchor: a, members: [a, cancelled], invoiceStatus: 'sent' });
+    expect(verdict.reason).toBe('split_completed');
+  });
+
+  test('a genuinely diverged-then-cancelled sibling and a plain diverged sibling are both reported together', () => {
+    const a = anchor();
+    const cancelled = member('cancelled', { scheduled_date: '2026-10-09', status: 'cancelled' });
+    const moved = member('moved', { scheduled_date: '2026-10-12' });
+    const verdict = evaluateGroupDivergence({ anchor: a, members: [a, cancelled, moved], invoiceStatus: 'sent' });
+    expect(verdict.action).toBe('alert');
+    expect(verdict.diverging.map((m) => m.id).sort()).toEqual(['cancelled', 'moved']);
+  });
 });
 
 describe('divergenceStateFingerprint', () => {
@@ -170,6 +236,17 @@ describe('divergenceStateFingerprint', () => {
   test('a different invoice total changes the fingerprint', () => {
     const fp1 = divergenceStateFingerprint({ anchor: a, diverging: [b], invoiceId: 'inv-1', invoiceTotal: 100 });
     const fp2 = divergenceStateFingerprint({ anchor: a, diverging: [b], invoiceId: 'inv-1', invoiceTotal: 142.50 });
+    expect(fp1).not.toBe(fp2);
+  });
+
+  // Codex P1 (PR #5021 r7): a member going diverged→cancelled (or a
+  // cancelled member gaining its own live invoice — resolved) is a genuine
+  // state change and must reopen a dismissed alert on its own, never rely
+  // on the incidental body-text diff to trigger a refresh.
+  test('a member becoming cancelled (same date, same invoice) changes the fingerprint', () => {
+    const fp1 = divergenceStateFingerprint({ anchor: a, diverging: [b], invoiceId: 'inv-1', invoiceTotal: 100 });
+    const bCancelled = member('b', { scheduled_date: '2026-10-05', status: 'cancelled' });
+    const fp2 = divergenceStateFingerprint({ anchor: a, diverging: [bCancelled], invoiceId: 'inv-1', invoiceTotal: 100 });
     expect(fp1).not.toBe(fp2);
   });
 });
@@ -209,5 +286,57 @@ describe('dateOnly', () => {
     expect(dateOnly('2026-10-01T00:00:00.000Z')).toBe('2026-10-01');
     expect(dateOnly('2026-10-01')).toBe('2026-10-01');
     expect(dateOnly(null)).toBeNull();
+  });
+});
+
+// Codex P2 (PR #5021 r7): bound the FRESH structural sweep in fair,
+// wrapping keyset batches so no single tick runs unbounded and no
+// candidate is starved behind an always-same head of the list. Never
+// applies to established-anchor groups (see runSweepInner) — this is
+// purely the fresh-candidate pagination helper.
+describe('selectFreshBatch', () => {
+  const freshGroup = (estimateId) => [{ source_estimate_id: estimateId, candidate_source: 'fresh' }];
+  // Sorted ascending, exactly like loadCandidates' own ORDER BY.
+  const ids = Array.from({ length: FRESH_BATCH_LIMIT + 50 }, (_, i) => `est-${String(i).padStart(4, '0')}`);
+  const groups = ids.map(freshGroup);
+
+  test('at or under the limit, every group is returned untouched regardless of cursor', () => {
+    const small = groups.slice(0, FRESH_BATCH_LIMIT);
+    expect(selectFreshBatch(small, null)).toBe(small);
+    expect(selectFreshBatch(small, 'est-0005')).toBe(small);
+  });
+
+  test('over the limit with no cursor, starts from the beginning', () => {
+    const batch = selectFreshBatch(groups, null);
+    expect(batch).toHaveLength(FRESH_BATCH_LIMIT);
+    expect(batch[0][0].source_estimate_id).toBe(ids[0]);
+    expect(batch[batch.length - 1][0].source_estimate_id).toBe(ids[FRESH_BATCH_LIMIT - 1]);
+  });
+
+  test('resumes strictly after the cursor', () => {
+    const cursor = ids[10];
+    const batch = selectFreshBatch(groups, cursor);
+    expect(batch[0][0].source_estimate_id).toBe(ids[11]);
+    expect(batch).toHaveLength(FRESH_BATCH_LIMIT);
+  });
+
+  test('wraps around to the start once the cursor is near the end — nothing is starved forever', () => {
+    const cursor = ids[ids.length - 5];
+    const batch = selectFreshBatch(groups, cursor);
+    expect(batch).toHaveLength(FRESH_BATCH_LIMIT);
+    // The last 4 ids, then wraps to the beginning.
+    expect(batch.slice(0, 4).map((g) => g[0].source_estimate_id)).toEqual(ids.slice(ids.length - 4));
+    expect(batch[4][0].source_estimate_id).toBe(ids[0]);
+  });
+
+  test('a cursor for an estimate no longer present (evaluated then resolved) still resumes from the next-highest id', () => {
+    const withoutTen = groups.filter((g) => g[0].source_estimate_id !== ids[10]);
+    const batch = selectFreshBatch(withoutTen, ids[10]);
+    expect(batch[0][0].source_estimate_id).toBe(ids[11]);
+  });
+
+  test('a cursor past every remaining id wraps to the start', () => {
+    const batch = selectFreshBatch(groups, ids[ids.length - 1]);
+    expect(batch[0][0].source_estimate_id).toBe(ids[0]);
   });
 });

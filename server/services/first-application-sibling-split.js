@@ -212,6 +212,29 @@
 // trade-off toward a redundant/early alert rather than a missed one, never
 // the reverse.
 //
+// A CANCELLED top-level sibling still needs review, not a free clear
+// (Codex P1, this fix): cancelling a diverged (or even same-day) sibling
+// used to drop it from divergingSiblings entirely, so the alert
+// auto-cleared as "realigned" — but voidOpenInvoicesForCancelledService
+// only voids an invoice linked to the CANCELLED service's OWN
+// scheduled_service_id, never the anchor's shared combined invoice, so the
+// customer stays billed for a visit that never happened. loadGroupMembers
+// no longer excludes cancelled top-level members; evaluateGroupDivergence's
+// cancelledNeedingReview flags any cancelled, non-anchor member that has
+// not yet picked up its own live invoice — regardless of whether it ever
+// diverged by date, since a same-day cancellation leaves exactly as stale
+// a charge as one that also moved. It clears the same way every other
+// unresolved member does: has_own_live_invoice going true (staff moved its
+// charge off the combined invoice by hand) or the combined invoice itself
+// settling/voiding. raiseDivergenceAlert gives it its own copy ("was
+// cancelled — remove its charge from the combined invoice") rather than
+// the "split it by hand" phrasing, since there is no visit left to
+// reschedule — only a charge to remove. divergenceStateFingerprint folds
+// each member's cancelled/active status in explicitly, so a
+// diverged-then-cancelled (or cancelled-then-resolved) transition reopens
+// a dismissed alert on its own, the same "dismissal is keyed on state"
+// contract as every other field in the fingerprint.
+//
 // Durability: each candidate ESTIMATE (every row for it together) is
 // evaluated in its OWN transaction. A failure on one estimate is logged
 // and left for the next tick to retry — it never blocks or rolls back any
@@ -220,8 +243,17 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const InvoiceService = require('./invoice');
+const { INVOICE_UNCOLLECTIBLE_STATUSES } = require('./invoice-helpers');
 
-const SETTLED_INVOICE_STATUSES = Object.freeze(['paid', 'prepaid', ...InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES]);
+// The canonical "this invoice will never collect any more money" vocabulary
+// (Codex P2, this fix): was a locally-duplicated ['paid', 'prepaid', ...
+// CANCELLED_SERVICE_RESOLVED_STATUSES] list that silently drifted from
+// invoice-helpers.js's own list by missing 'processing' — a card charge
+// mid-settlement read as still "open" here and could raise a live alert for
+// an invoice that is, for every other purpose in the app, already settled.
+// Reusing the shared constant means this module can never drift from it
+// again.
+const SETTLED_INVOICE_STATUSES = INVOICE_UNCOLLECTIBLE_STATUSES;
 const SWEEP_LIMIT = 500;
 const DEDUPE_PREFIX = (estimateId) => `first_application_sibling_divergence:${estimateId}:`;
 
@@ -239,18 +271,17 @@ function isInvoiceSettled(status) {
 // itself — deliberately NOT filtered on estimated_price (Codex P1: a
 // sibling that has picked up its own price still shares the same combined
 // charge on the invoice until someone actually splits it), and
-// deliberately NOT filtered on completed_at either (Codex round-6 P1 at
-// head 2168cb0877: a moved sibling that COMPLETES before the next sweep
-// used to be excluded here, so the group read as "realigned" even though
+// deliberately NOT filtered on completed_at (Codex round-6 P1 at head
+// 2168cb0877: a moved sibling that COMPLETES before the next sweep used to
+// be excluded here, so the group read as "realigned" even though
 // completing a visit never settles or rewrites the still-open COMBINED
-// invoice — the office lost the alert entirely). Only cancelled top-level
-// visits are excluded, and that exclusion lives in loadGroupMembers's own
-// query (a cancelled visit was never going to be serviced, so it is never
-// a real billing conflict to resolve) — never here, since divergingSiblings
-// is a pure function over whatever loadGroupMembers already decided counts
-// as a member. Also deliberately NOT filtered on has_own_live_invoice here
-// — this is the RAW divergence (dates disagree); evaluateGroupDivergence is
-// the one that decides which of these still need an alert.
+// invoice — the office lost the alert entirely) or on status at all — a
+// cancelled member can still appear here if it also happens to have moved
+// off the anchor's date; evaluateGroupDivergence's own cancelledNeedingReview
+// is what actually decides a cancelled member's fate, date-diverged or not.
+// Also deliberately NOT filtered on has_own_live_invoice here — this is the
+// RAW divergence (dates disagree); evaluateGroupDivergence is the one that
+// decides which of these still need an alert.
 function divergingSiblings(anchor, members) {
   const anchorDate = dateOnly(anchor.scheduled_date);
   return members.filter((m) => String(m.id) !== String(anchor.id)
@@ -259,12 +290,13 @@ function divergingSiblings(anchor, members) {
 
 // The pure detection predicate: given the group's anchor row, every member
 // row (each optionally carrying has_own_live_invoice — loadGroupMembers
-// stamps this from a real invoices.scheduled_service_id lookup), and the
-// shared invoice's current status, decide whether to alert, clear a
-// standing alert, or do nothing. No DB access — the sweep and every unit
-// test call this the same way. See the module header ("has_own_live_invoice
-// is signal (a) ALONE") for why this is signal (a) alone, deliberately,
-// and not a dollar comparison against the combined invoice.
+// stamps this from a real invoices.scheduled_service_id lookup — and
+// status), and the shared invoice's current status, decide whether to
+// alert, clear a standing alert, or do nothing. No DB access — the sweep
+// and every unit test call this the same way. See the module header
+// ("has_own_live_invoice is signal (a) ALONE") for why has_own_live_invoice
+// is the resolution signal, deliberately, and not a dollar comparison
+// against the combined invoice.
 function evaluateGroupDivergence({ anchor, members, invoiceStatus }) {
   if (!anchor || !Array.isArray(members) || members.length < 2) {
     return { action: 'clear', reason: 'no_group' };
@@ -273,17 +305,37 @@ function evaluateGroupDivergence({ anchor, members, invoiceStatus }) {
     return { action: 'clear', reason: 'invoice_settled' };
   }
   const diverging = divergingSiblings(anchor, members);
-  if (!diverging.length) {
-    return { action: 'clear', reason: 'realigned' };
-  }
   // A diverging sibling that has already picked up its OWN live invoice
   // (linked to its own scheduled_service_id) has been split off by hand —
   // the office completed the instructed manual split for that visit, so it
-  // no longer needs an alert. Only the still-unresolved diverging siblings
-  // are reported/alerted on.
-  const unresolved = diverging.filter((m) => !m.has_own_live_invoice);
+  // no longer needs an alert. A CANCELLED diverging sibling is handled
+  // separately below (cancelledNeedingReview), never here — it needs
+  // different alert copy and, unlike a plain diverging sibling, needs
+  // review even when it never diverged by date at all.
+  const unresolvedDiverging = diverging.filter((m) => !m.has_own_live_invoice && m.status !== 'cancelled');
+
+  // A CANCELLED top-level sibling still covered by the combined invoice
+  // (Codex P1 on this fix): cancelling a visit never removes its share of
+  // the combined charge — voidOpenInvoicesForCancelledService only voids
+  // an invoice linked to the CANCELLED service's OWN scheduled_service_id,
+  // never the anchor's shared one — so it leaves a stale charge whether or
+  // not its date ever diverged from the anchor's (a same-day cancellation
+  // is just as stale a charge as one that also moved). "Covered" mirrors
+  // has_own_live_invoice's own scope: once the sibling has its own live
+  // invoice (its charge has genuinely been moved off the combined one), it
+  // no longer needs review here.
+  const cancelledNeedingReview = members.filter((m) => String(m.id) !== String(anchor.id)
+    && m.status === 'cancelled' && !m.has_own_live_invoice);
+
+  const unresolved = [...unresolvedDiverging, ...cancelledNeedingReview];
   if (!unresolved.length) {
-    return { action: 'clear', reason: 'split_completed' };
+    // 'split_completed' whenever there was ever something here needing
+    // hand resolution (a diverging or cancelled-covered sibling) that has
+    // since been resolved — 'realigned' only when the group never had
+    // anything beyond a plain date mismatch to begin with.
+    const everNeededResolution = diverging.length > 0
+      || members.some((m) => String(m.id) !== String(anchor.id) && m.status === 'cancelled');
+    return { action: 'clear', reason: everNeededResolution ? 'split_completed' : 'realigned' };
   }
   return { action: 'alert', reason: 'diverged', diverging: unresolved };
 }
@@ -299,7 +351,14 @@ function evaluateGroupDivergence({ anchor, members, invoiceStatus }) {
 // dismissed.
 function divergenceStateFingerprint({ anchor, diverging, invoiceId, invoiceTotal }) {
   const anchorDate = dateOnly(anchor.scheduled_date);
-  const parts = diverging.map((d) => `${d.id}:${dateOnly(d.scheduled_date)}`).sort();
+  // Cancellation status is folded in explicitly (Codex P1 on the
+  // cancelled-sibling-review fix) rather than relying on the incidental
+  // body-text diff to trigger a refresh: a sibling going diverged→cancelled,
+  // or gaining its own live invoice while cancelled (resolved), is a
+  // genuine state change and must reopen a dismissed alert on its own.
+  const parts = diverging
+    .map((d) => `${d.id}:${dateOnly(d.scheduled_date)}:${d.status === 'cancelled' ? 'cancelled' : 'active'}`)
+    .sort();
   const total = invoiceTotal != null && Number.isFinite(Number(invoiceTotal)) ? Number(invoiceTotal).toFixed(2) : null;
   return JSON.stringify({
     anchorDate,
@@ -458,10 +517,26 @@ async function loadCandidates(conn, { limit = SWEEP_LIMIT } = {}) {
                 .whereRaw('sib_invoice.scheduled_service_id = sib.id')
                 .whereNotIn('sib_invoice.status', InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES);
             });
+        })
+        // Cheap exclusion of ALIGNED groups (Codex P2, this fix): the
+        // check above alone matches every ordinary same-day multi-program
+        // estimate from its very first tick — a sibling deliberately left
+        // estimated_price NULL is "still covered" forever until the
+        // invoice is paid, aligned or not. That is exactly the historical
+        // backlog of accepted-but-unpaid (sent/viewed/overdue) invoices
+        // the load concern is about, and evaluateGroupDivergence would
+        // clear every one of them as 'realigned' anyway. Mirror its own
+        // gate here: a sibling only needs review once it has actually
+        // diverged by date OR been cancelled — the same two conditions
+        // evaluateGroupDivergence's unresolvedDiverging/
+        // cancelledNeedingReview check.
+        .andWhere((needsReview) => {
+          needsReview.whereRaw('sib.scheduled_date::date <> anchor.scheduled_date::date')
+            .orWhere('sib.status', 'cancelled');
         });
     })
-    .orderBy('i.created_at', 'asc')
-    .select(CANDIDATE_COLUMNS);
+    .orderBy('anchor.source_estimate_id', 'asc')
+    .select([...CANDIDATE_COLUMNS, conn.raw("'fresh' as candidate_source")]);
 
   // Scoped to exactly the estimates the structural scan above found —
   // keeps loadEstablishedAnchorsByEstimate's own history lookup bounded by
@@ -504,7 +579,11 @@ async function loadCandidates(conn, { limit = SWEEP_LIMIT } = {}) {
         if (rowCreated > currentCreated) byAnchor.set(row.anchor_id, row);
       }
     }
-    establishedRows = [...byAnchor.values()];
+    // Tagged 'established' (never 'fresh'): this is the stale-alert
+    // recovery path (a standing alert whose invoice has since settled, or
+    // whose group has since realigned/split) and runs in FULL every tick,
+    // never subject to the fresh-only sweep cursor below (Codex P2).
+    establishedRows = [...byAnchor.values()].map((row) => ({ ...row, candidate_source: 'established' }));
   }
 
   const candidates = [...fresh, ...establishedRows];
@@ -514,9 +593,9 @@ async function loadCandidates(conn, { limit = SWEEP_LIMIT } = {}) {
   return candidates;
 }
 
-// Every LIVE member of the estimate group, each stamped with
-// has_own_live_invoice: true when a LIVE invoice is linked to that member's
-// OWN scheduled_service_id — the real-data signal that the office has
+// Every member of the estimate group, each stamped with has_own_live_invoice:
+// true when a LIVE invoice is linked to that member's OWN
+// scheduled_service_id — the real-data signal that the office has
 // already hand-split that visit off the shared invoice (see the module
 // header). "Live" excludes the FULL canonical canceled vocabulary
 // (InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES: void, refunded,
@@ -524,21 +603,24 @@ async function loadCandidates(conn, { limit = SWEEP_LIMIT } = {}) {
 // invoice falsely clear the alert while the sibling still has no real
 // replacement charge), not just 'void'.
 //
-// A CANCELLED top-level visit is excluded from the group here, at the
-// query level (PR #5021 Codex r6, head 2168cb0877): it was never going to
-// be serviced, so it is never a real billing conflict for the office to
-// resolve, and its date is irrelevant. This is the ONLY status excluded —
-// a COMPLETED sibling stays a member (divergingSiblings no longer excludes
-// it either; see its own comment) because completing a visit never settles
-// or rewrites the still-open combined invoice. Cheap and bounded: one
-// extra query keyed on this small group's own ids.
+// A CANCELLED top-level visit is no longer excluded here (Codex P1 on this
+// fix): cancelling a sibling still covered by the combined invoice never
+// removes its charge — voidOpenInvoicesForCancelledService only voids an
+// invoice linked to the CANCELLED service's OWN scheduled_service_id,
+// never the anchor's shared one — so a cancelled-but-covered sibling stays
+// a real billing conflict, not a settled fact (see the module header and
+// evaluateGroupDivergence's cancelledNeedingReview). A COMPLETED sibling
+// likewise stays a member (divergingSiblings no longer excludes it either;
+// see its own comment) because completing a visit never settles or
+// rewrites the still-open combined invoice. `status` is selected so
+// callers can classify a cancelled member distinctly. Cheap and bounded:
+// one extra query keyed on this small group's own ids.
 async function loadGroupMembers(conn, { customerId, sourceEstimateId }) {
   const members = await conn('scheduled_services')
     .where({ customer_id: customerId, source_estimate_id: sourceEstimateId })
     .whereNull('recurring_parent_id')
-    .whereNot('status', 'cancelled')
     .orderBy('id')
-    .select('id', 'scheduled_date', 'completed_at');
+    .select('id', 'scheduled_date', 'completed_at', 'status');
   if (!members.length) return members;
   const ownInvoiceIds = await conn('invoices')
     .whereIn('scheduled_service_id', members.map((m) => m.id))
@@ -609,14 +691,38 @@ async function raiseDivergenceAlert(conn, {
   const generation = wasAutoCleared ? priorGeneration + 1 : priorGeneration;
   const dedupeVersion = `${baseFingerprint}::g${generation}`;
   const anchorDate = dateOnly(anchor.scheduled_date);
-  const detail = diverging.map((d) => `visit ${d.id} now on ${dateOnly(d.scheduled_date)} (was ${anchorDate})`).join('; ');
+  // Cancelled members get distinct copy (Codex P1 on this fix): the office
+  // action isn't "split it by hand" — the visit already isn't happening —
+  // it's removing that sibling's share of the still-open combined charge.
+  // A cancelled member can ALSO have moved off the anchor's date; the
+  // cancellation copy always wins for it since that's the actual remaining
+  // action, regardless of date.
+  const cancelledMembers = diverging.filter((d) => d.status === 'cancelled');
+  const movedMembers = diverging.filter((d) => d.status !== 'cancelled');
+  const detailParts = [
+    ...movedMembers.map((d) => `visit ${d.id} now on ${dateOnly(d.scheduled_date)} (was ${anchorDate})`),
+    ...cancelledMembers.map((d) => `visit ${d.id} was cancelled — remove its charge from the combined invoice`),
+  ];
+  const detail = detailParts.join('; ');
   const invoiceRef = invoice
     ? `Invoice ${invoice.invoice_number || invoice.invoice_id}.`
     : `Check the first-application invoice for estimate #${estimateId}.`;
+  // The lead sentence and the required action both depend on whether any
+  // member actually still needs a hand split (movedMembers) versus only a
+  // cancelled member's charge needing removal — a Postgres regression test
+  // (first-application-sibling-split.postgres.test.js) asserts the exact
+  // "split it by hand" substring survives whenever a moved member is
+  // present, so that phrase is never rewritten for that case.
+  const leadSentence = movedMembers.length
+    ? 'Same-trip visits from one estimate landed on different days'
+    : 'A same-trip visit from one estimate was cancelled';
+  const actionSentence = movedMembers.length
+    ? 'The combined first-application invoice still charges for both — split it by hand.'
+    : 'The combined first-application invoice still charges for it — remove that charge.';
   await require('./notification-service').notifyAdmin(
     'billing',
     'First-application invoice may need to be split by hand',
-    `Same-trip visits from one estimate landed on different days: ${detail}. The combined first-application invoice still charges for both — split it by hand. ${invoiceRef}`,
+    `${leadSentence}: ${detail}. ${actionSentence} ${invoiceRef}`,
     {
       link: invoice ? `/admin/invoices?invoice=${invoice.invoice_id}` : `/admin/estimates/${estimateId}`,
       bell: true,
@@ -661,18 +767,37 @@ async function evaluateEstimateCandidates(conn, candidatesForEstimate) {
   const members = await loadGroupMembers(conn, { customerId, sourceEstimateId: estimateId });
   const prefix = DEDUPE_PREFIX(estimateId);
 
+  // loadCandidates' invoice_status/invoice_total are read OUTSIDE this
+  // transaction (plain `db`, not `conn` — see loadCandidates/runSweepInner),
+  // so by the time this estimate's own transaction opens, the invoice can
+  // already have settled underneath the candidate row (Codex P2). Re-read
+  // every distinct invoice this estimate's rows reference here, under
+  // FOR UPDATE (the same lock convention invoice.js itself takes before
+  // acting on an invoice row), and decide settled vs. open from THIS fresh
+  // read, never the stale one loadCandidates returned.
+  const invoiceIds = [...new Set(candidatesForEstimate.map((c) => c.invoice_id).filter((id) => id != null).map(String))];
+  const freshInvoicesById = new Map();
+  if (invoiceIds.length) {
+    const freshRows = await conn('invoices').whereIn('id', invoiceIds).forUpdate()
+      .select('id', 'status', 'invoice_number', 'total');
+    for (const row of freshRows) freshInvoicesById.set(String(row.id), row);
+  }
+
   const perAnchor = candidatesForEstimate.map((candidate) => {
     const {
-      anchor_id: anchorId, invoice_id: invoiceId, invoice_status: invoiceStatus,
-      invoice_number: invoiceNumber, invoice_total: invoiceTotal,
+      anchor_id: anchorId, invoice_id: invoiceId,
       anchor_scheduled_date: anchorScheduledDate, anchor_completed_at: anchorCompletedAt,
     } = candidate;
+    const freshInvoice = invoiceId != null ? freshInvoicesById.get(String(invoiceId)) : null;
+    const invoiceStatus = freshInvoice ? freshInvoice.status : null;
     const anchor = members.find((m) => String(m.id) === String(anchorId))
       || { id: anchorId, scheduled_date: anchorScheduledDate, completed_at: anchorCompletedAt };
     return {
       anchor,
       verdict: evaluateGroupDivergence({ anchor, members, invoiceStatus }),
-      invoice: invoiceId ? { invoice_id: invoiceId, invoice_number: invoiceNumber, total: invoiceTotal } : null,
+      invoice: freshInvoice
+        ? { invoice_id: freshInvoice.id, invoice_number: freshInvoice.invoice_number, total: freshInvoice.total }
+        : null,
     };
   });
 
@@ -705,11 +830,65 @@ async function evaluateEstimateCandidates(conn, candidatesForEstimate) {
   return { estimateId, action: 'alerted', divergingSiblingIds: sortedIds };
 }
 
+const SWEEP_CURSOR_TABLE = 'first_application_sibling_split_sweep_cursor';
+const FRESH_BATCH_LIMIT = 200;
+
+// The one persisted row's last-visited estimate id among the FRESH
+// (not-yet-established) candidates — see the cursor table's own migration
+// comment. Best-effort: a missing row (pre-migration, or a deleted row) is
+// treated as "start from the beginning", never a sweep failure.
+async function loadSweepCursor(conn) {
+  const row = await conn(SWEEP_CURSOR_TABLE).where({ id: 1 }).first('last_estimate_id');
+  return row ? row.last_estimate_id : null;
+}
+
+async function saveSweepCursor(conn, lastEstimateId) {
+  await conn(SWEEP_CURSOR_TABLE).where({ id: 1 })
+    .update({ last_estimate_id: lastEstimateId, updated_at: conn.fn.now() });
+}
+
+// Bound the FRESH structural candidates to a fair, per-tick batch so one
+// tick can never run unbounded (Codex P2) — but NEVER bound the
+// established-anchor groups: those are the stale-alert-recovery path
+// (a standing alert whose invoice has since settled, or whose group has
+// since realigned/split — see loadCandidates), and skipping any of them
+// even one tick would leave a resolved alert standing or a genuinely
+// reopened one silent. groups is ordered the same way loadCandidates'
+// structural query is (anchor.source_estimate_id ascending), so slicing
+// after the cursor and wrapping is a stable keyset walk: every fresh
+// candidate is visited within ceil(freshCount / FRESH_BATCH_LIMIT) ticks,
+// never starved behind an always-same head of the list.
+function selectFreshBatch(freshGroups, cursor) {
+  if (freshGroups.length <= FRESH_BATCH_LIMIT) return freshGroups;
+  const estimateIdOf = (group) => String(group[0].source_estimate_id);
+  let startIndex = 0;
+  if (cursor != null) {
+    const afterCursor = freshGroups.findIndex((group) => estimateIdOf(group) > String(cursor));
+    startIndex = afterCursor === -1 ? 0 : afterCursor;
+  }
+  const batch = [];
+  for (let i = 0; i < freshGroups.length && batch.length < FRESH_BATCH_LIMIT; i += 1) {
+    batch.push(freshGroups[(startIndex + i) % freshGroups.length]);
+  }
+  return batch;
+}
+
 async function runSweepInner() {
   const candidates = await loadCandidates(db);
   // Every row for an estimate is evaluated TOGETHER (see the module
   // header) — never a picked-by-heuristic representative.
-  const groups = groupCandidatesByEstimate(candidates);
+  const allGroups = groupCandidatesByEstimate(candidates);
+  // A group's rows are all 'fresh' or all 'established' — loadCandidates
+  // never lets the same estimate appear in both (an established anchor is
+  // re-derived directly, never through the structural scan — see its own
+  // comment).
+  const establishedGroups = allGroups.filter((group) => group[0].candidate_source === 'established');
+  const freshGroups = allGroups.filter((group) => group[0].candidate_source !== 'established');
+
+  const cursor = freshGroups.length > FRESH_BATCH_LIMIT ? await loadSweepCursor(db) : null;
+  const freshBatch = selectFreshBatch(freshGroups, cursor);
+  const groups = [...establishedGroups, ...freshBatch];
+
   let alerted = 0;
   let cleared = 0;
   let failed = 0;
@@ -723,11 +902,23 @@ async function runSweepInner() {
       logger.error(`[first-application-sibling-split] sweep failed for estimate ${group[0].source_estimate_id}: ${err.message}`);
     }
   }
+  // Advance the cursor to the LAST fresh estimate this tick actually
+  // touched, so the next tick resumes right after it — even a batch that
+  // included a failure still advances (the failed estimate is retried on
+  // its own next natural pass through the rotation, same as the
+  // unbounded-loop's own existing retry contract; it never blocks the
+  // cursor from moving forward and starving everyone behind it).
+  if (freshGroups.length > FRESH_BATCH_LIMIT && freshBatch.length) {
+    const lastEstimateId = freshBatch[freshBatch.length - 1][0].source_estimate_id;
+    try { await saveSweepCursor(db, lastEstimateId); } catch (err) {
+      logger.warn(`[first-application-sibling-split] sweep cursor save failed (non-fatal): ${err.message}`);
+    }
+  }
   if (failed) {
     throw new Error(`${failed} of ${groups.length} first-application sibling-split group(s) failed this tick — left for the next run`);
   }
   return {
-    scanned: candidates.length, alerted, cleared, failed,
+    scanned: candidates.length, alerted, cleared, failed, freshTotal: freshGroups.length, freshBatch: freshBatch.length,
   };
 }
 
@@ -751,4 +942,9 @@ module.exports = {
   raiseDivergenceAlert,
   evaluateEstimateCandidates,
   SETTLED_INVOICE_STATUSES,
+  selectFreshBatch,
+  loadSweepCursor,
+  saveSweepCursor,
+  FRESH_BATCH_LIMIT,
+  runSweepInner,
 };

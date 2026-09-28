@@ -3257,19 +3257,27 @@ function initScheduledJobs() {
   // gate: same always-on shape as tech-late-detector/unassigned-overdue-
   // detector above (an internal, idempotent, dedupe-keyed alert, no
   // customer-facing side effect). runExclusive lives INSIDE
-  // runFirstApplicationSiblingSplitSweep itself (same shape as
-  // runFollowUpSlaWatcher above), so this tick just calls it and reports a
-  // genuine skip to job_health.
+  // runFirstApplicationSiblingSplitSweep itself, and this tick runs as a
+  // SCHEDULED tick (registered through utils/scheduled-cron, not node-cron
+  // directly), so runExclusive always takes runScheduled's waitForSlot
+  // path here — never the fire-and-forget request path. On a genuine
+  // 'no_connection' skip, runScheduled's own "no lock slot within
+  // SLOT_WAIT_MAX_MS" branch has ALREADY called recordMissedTick before
+  // returning (cron-lock.js) — a second recordJobStart/recordJobEnd pair
+  // here recorded the SAME missed tick twice (Codex P2: the adjacent
+  // followup-sla-watcher.js and call-commitments-watchdog.js cron entries
+  // carry this identical extra write and are not a correct model to copy;
+  // left as-is here since fixing shared cron-lock plumbing or those other
+  // jobs' entries is outside this module). This tick only throws, so the
+  // skip is still logged and the tick still counts as failed to whatever
+  // is watching this promise — job_health itself is left to the
+  // cron-lock wrapper alone.
   // =========================================================================
   cron.schedule('*/15 * * * *', async () => {
     try {
       const { runFirstApplicationSiblingSplitSweep } = require('./first-application-sibling-split');
       const result = await runFirstApplicationSiblingSplitSweep();
       if (result?.skipped && result.reason !== 'lease_held') {
-        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
-        const t0 = Date.now();
-        await recordJobStart('first-application-sibling-split-sweep').catch(() => {});
-        await recordJobEnd('first-application-sibling-split-sweep', t0, new Error(`tick skipped: ${result.reason || 'no_connection'}`)).catch(() => {});
         throw new Error(`First-application sibling-split sweep tick skipped: ${result.reason || 'no_connection'}`);
       }
     } catch (err) {

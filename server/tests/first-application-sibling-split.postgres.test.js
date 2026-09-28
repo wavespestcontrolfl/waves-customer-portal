@@ -40,6 +40,8 @@ suite('first-application-sibling-split — periodic sweep', () => {
     groupCandidatesByEstimate,
     evaluateEstimateCandidates,
     clearStandingAlerts,
+    loadSweepCursor,
+    saveSweepCursor,
   } = require('../services/first-application-sibling-split');
 
   beforeAll(() => { db = require('knex')({ client: 'pg', connection: testUrl }); });
@@ -201,6 +203,51 @@ suite('first-application-sibling-split — periodic sweep', () => {
     expect(result.action).toBe('cleared');
     expect(result.reason).toBe('invoice_settled');
     expect((await readBell(trx, dedupeKey)).read_at).not.toBeNull();
+  }));
+
+  // Codex P2 (PR #5021 r7): a card charge landing 'processing' between the
+  // last tick and this one must clear the standing alert too — the
+  // canonical INVOICE_UNCOLLECTIBLE_STATUSES (invoice-helpers.js) already
+  // treats 'processing' as uncollectible everywhere else in the app, and
+  // this module's own settled set now reuses that list directly.
+  test("the invoice moves to 'processing' on a later tick — the standing alert clears too", () => rollbackTest(async (trx) => {
+    const ids = await fixture(trx);
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+    await sweepOnce(trx, ids.estimateId);
+    const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
+    expect((await readBell(trx, dedupeKey)).read_at).toBeNull();
+
+    await trx('invoices').where({ id: ids.invoiceId }).update({ status: 'processing' });
+    const [result] = await sweepOnce(trx, ids.estimateId);
+    expect(result.action).toBe('cleared');
+    expect(result.reason).toBe('invoice_settled');
+    expect((await readBell(trx, dedupeKey)).read_at).not.toBeNull();
+  }));
+
+  // Codex P2 (PR #5021 r7): loadCandidates' invoice_status is read OUTSIDE
+  // this estimate's own evaluation transaction (plain `db`, before any
+  // per-estimate `db.transaction` opens), so it can already be stale by
+  // the time evaluateEstimateCandidates runs. Simulates that race
+  // directly: use a candidate row loadCandidates already returned with the
+  // invoice still 'sent', then settle the invoice, then feed that STALE
+  // row into evaluateEstimateCandidates — it must re-read the invoice
+  // fresh under FOR UPDATE and clear, never alert off the stale status.
+  test('evaluateEstimateCandidates re-reads the invoice fresh — a settle that lands after loadCandidates still clears', () => rollbackTest(async (trx) => {
+    const ids = await fixture(trx);
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+
+    const staleCandidates = await loadCandidates(trx);
+    const staleGroup = groupCandidatesByEstimate(staleCandidates).find((g) => g[0].source_estimate_id === ids.estimateId);
+    expect(staleGroup[0].invoice_status).toBe('draft');
+
+    // The invoice settles AFTER loadCandidates already read it.
+    await trx('invoices').where({ id: ids.invoiceId }).update({ status: 'paid' });
+
+    const result = await evaluateEstimateCandidates(trx, staleGroup);
+    expect(result.action).toBe('cleared');
+    expect(result.reason).toBe('invoice_settled');
+    const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
+    expect(await readBell(trx, dedupeKey)).toBeUndefined();
   }));
 
   // Codex round-1 P1 on the pre-push fix: a divergence the SWEEP ITSELF
@@ -554,6 +601,20 @@ suite('first-application-sibling-split — periodic sweep', () => {
     expect(results).toEqual([]);
   }));
 
+  // Codex P2 (PR #5021 r7): the load concern is the historical backlog of
+  // ordinary, ALIGNED same-day multi-program invoices sitting open
+  // (sent/viewed/overdue) for weeks — every one of them was structurally
+  // "still covered" from day one (the unpriced sibling shares the invoice)
+  // regardless of whether anything ever diverged, so the old query re-swept
+  // every one of them, every tick, forever. Excluded cheaply in SQL now: a
+  // sibling that never diverged by date and was never cancelled is not a
+  // candidate at all, aligned or not, open invoice or not.
+  test('an ALIGNED, never-diverged, non-cancelled group is never a sweep candidate, even with a long-open invoice', () => rollbackTest(async (trx) => {
+    const ids = await fixture(trx, { invoiceStatus: 'overdue' });
+    const results = await sweepOnce(trx, ids.estimateId);
+    expect(results).toEqual([]);
+  }));
+
   // False-positive coverage for the structural candidacy signal (PR #5021
   // Codex r6, head 2168cb0877): a normal single-program estimate has no
   // sibling top-level visit at all, so it must never become a candidate —
@@ -877,19 +938,74 @@ suite('first-application-sibling-split — periodic sweep', () => {
     expect(result.divergingSiblingIds).toEqual([ids.lawnId]);
   }));
 
-  // The ONLY exclusion divergingSiblings still relies on (Codex round-6 P1
-  // at head 2168cb0877): a CANCELLED sibling was never going to be
-  // serviced, so it drops out of the group entirely at loadGroupMembers's
-  // own query level — never treated as diverging, never alerted on.
-  test('a cancelled sibling is excluded from the group entirely — no alert even though its date diverges', () => rollbackTest(async (trx) => {
+  // Codex P1 (PR #5021 r7): a CANCELLED top-level sibling used to be
+  // excluded from the group entirely at loadGroupMembers's own query level
+  // (the group then dissolved to 'no_group', never alerting) — but
+  // cancelling a visit never removes its share of the still-open combined
+  // invoice (voidOpenInvoicesForCancelledService only voids an invoice
+  // linked to the CANCELLED service's OWN scheduled_service_id, never the
+  // anchor's shared one), so the customer stayed billed for work that
+  // never happened with nothing telling the office. It now stays a member
+  // and alerts, with copy telling the office to remove its charge rather
+  // than split it by hand.
+  test('a cancelled sibling still alerts — its charge is still on the combined invoice', () => rollbackTest(async (trx) => {
     const ids = await fixture(trx);
     await trx('scheduled_services').where({ id: ids.lawnId })
       .update({ scheduled_date: '2026-10-02', status: 'cancelled' });
-    const results = await sweepOnce(trx, ids.estimateId);
-    // The cancelled sibling drops out at loadGroupMembers, leaving only the
-    // anchor — fewer than two members, so the group itself dissolves
-    // ('no_group'), never an 'alerted' verdict.
-    expect(results.every((r) => r.action !== 'alerted')).toBe(true);
+    const [result] = await sweepOnce(trx, ids.estimateId);
+    expect(result.action).toBe('alerted');
+    expect(result.divergingSiblingIds).toEqual([ids.lawnId]);
+
+    const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
+    const bell = await readBell(trx, dedupeKey);
+    expect(bell.body).toContain('was cancelled');
+    expect(bell.body).toContain('remove its charge from the combined invoice');
+    // Never the hand-a-visit-off phrasing — there is no visit left to move.
+    expect(bell.body).not.toContain('split it by hand');
+  }));
+
+  // Reconsidered explicitly in the same fix: a sibling cancelled WITHOUT
+  // ever diverging by date (same-trip, same day, just called off) still
+  // leaves exactly as stale a charge on the combined invoice.
+  test('a sibling cancelled on the SAME day as the anchor (never diverged by date) still alerts', () => rollbackTest(async (trx) => {
+    const ids = await fixture(trx);
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ status: 'cancelled' });
+    const [result] = await sweepOnce(trx, ids.estimateId);
+    expect(result.action).toBe('alerted');
+    expect(result.divergingSiblingIds).toEqual([ids.lawnId]);
+    const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
+    expect((await readBell(trx, dedupeKey)).body).toContain('remove its charge from the combined invoice');
+  }));
+
+  // The fingerprinted dismissal is the office's own "done" signal for the
+  // cancelled case too: unchanged state (still cancelled, still no own
+  // invoice) stays dismissed; the office actually moving the charge off
+  // (its own live invoice appears) is a genuine state change and reopens.
+  test('a dismissed cancelled-sibling alert stays dismissed while unchanged, reopens once the charge is actually moved off', () => rollbackTest(async (trx) => {
+    const ids = await fixture(trx);
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ status: 'cancelled' });
+    await sweepOnce(trx, ids.estimateId);
+    const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
+    const original = await readBell(trx, dedupeKey);
+    await trx('notifications').where({ id: original.id }).update({ read_at: new Date() });
+
+    // Unchanged state — another tick must not reopen it.
+    const [unchanged] = await sweepOnce(trx, ids.estimateId);
+    expect(unchanged.action).toBe('alerted');
+    expect((await readBell(trx, dedupeKey)).read_at).not.toBeNull();
+
+    // The office actually splits the charge off the cancelled sibling.
+    await trx('invoices').insert({
+      id: randomUUID(), customer_id: ids.customerId, scheduled_service_id: ids.lawnId,
+      token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
+      status: 'draft', title: 'Lawn Care', notes: 'Charge removed from the combined invoice and rebilled standalone.',
+      line_items: JSON.stringify([{ description: 'Lawn Care', quantity: 1, unit_price: 42, amount: 42 }]),
+      subtotal: 42, total: 42,
+    });
+    const [resolved] = await sweepOnce(trx, ids.estimateId);
+    expect(resolved.action).toBe('cleared');
+    expect(resolved.reason).toBe('split_completed');
+    expect((await readBell(trx, dedupeKey)).read_at).not.toBeNull();
   }));
 
   test('the priced (invoice-holding) row itself moving off the sibling\'s date raises the same alert', () => rollbackTest(async (trx) => {
@@ -938,5 +1054,20 @@ suite('first-application-sibling-split — periodic sweep', () => {
     } finally {
       spy.mockRestore();
     }
+  }));
+
+  // Codex P2 (PR #5021 r7): the fresh-candidate sweep cursor
+  // (first_application_sibling_split_sweep_cursor, id=1) is the durable
+  // keyset bookmark runSweepInner advances so a large fresh backlog is
+  // visited fairly over successive ticks instead of the same head every
+  // time. Round-tripped here directly against the real table (rolled back
+  // like every other fixture in this suite).
+  test('the sweep cursor round-trips through the real table and is restored on rollback', () => rollbackTest(async (trx) => {
+    const before = await loadSweepCursor(trx);
+    const sentinel = randomUUID();
+    await saveSweepCursor(trx, sentinel);
+    expect(await loadSweepCursor(trx)).toBe(sentinel);
+    // Never observable outside this rolled-back transaction.
+    expect(await loadSweepCursor(db)).toBe(before);
   }));
 });
