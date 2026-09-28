@@ -118,6 +118,8 @@ describe('review outreach templates', () => {
     // …and a line break or the end of the message ends the sentence too.
     expect(renderOutreachBody('Hi {first}! {sender}', { first: 'Sam' })).toBe("Hi Sam! It's Waves");
     expect(renderOutreachBody('Hi {first}! {sender}\n\n{review_url}', { first: 'Sam', review_url: 'x.co/r' })).toBe("Hi Sam! It's Waves\n\nx.co/r");
+    // The check reads finished words, never an unfilled placeholder.
+    expect(renderOutreachBody('{date}. {sender}.', { date: '6/26' })).toBe("6/26. It's Waves.");
     expect(renderOutreachBody('{sender}.', { sender: 'Sam with Waves', tech: 'Adam' })).toBe('Sam with Waves.');
   });
 

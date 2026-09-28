@@ -267,14 +267,15 @@ function renderOutreachBody(body, vars = {}, opts = {}) {
     .replace(/\{first\}/g, v.first)
     .replace(/\{name\}/g, v.name)
     .replace(/\{tech\}/g, v.tech)
+    .replace(/\{service_type\}/g, v.service_type)
+    .replace(/\{review_url\}/g, v.review_url)
+    .replace(/\{date\}/g, v.date)
+    // Last, so the sentence check reads the finished words around {sender}.
     .replace(/\{sender\}/g, (token, offset, text) => (
       v.sender === SENDER_FALLBACK
         && !(SENTENCE_START_RE.test(text.slice(0, offset)) && SENTENCE_END_RE.test(text.slice(offset + token.length)))
         ? SENDER_FALLBACK_IN_SENTENCE
-        : v.sender))
-    .replace(/\{service_type\}/g, v.service_type)
-    .replace(/\{review_url\}/g, v.review_url)
-    .replace(/\{date\}/g, v.date);
+        : v.sender));
 
   // Safety net: if a link is required but the body no longer contains it
   // (operator deleted the token while editing), append it so the ask is never
