@@ -481,29 +481,43 @@ const PRICING_KEY_TO_CATALOG_KEYS = Object.freeze({
 //   - one-time / initial pest (Codex #5194 r2): the pricing resolver's
 //     special-intent branch returns null for pest, which would fall through
 //     to the 45-minute General Pest default although a cleanout runs 90;
+//   - named termite treatments (Codex #5194 r6): liquid, pretreatment, slab
+//     pre-treat, trenching and spot treatment are catalog services of their
+//     own, never the bait-system family default;
 //   - rodent trapping / exclusion (Codex #5194 r4): distinct catalog
 //     services with different durations (audit P1) — trapping alone → the
 //     trapping row, exclusion alone → exclusion-only, both → the combined row.
 const PEST_WORDS_RE = /\b(?:pest|bugs?|roach(?:es)?|ants?|spiders?|general)\b/i;
-const RODENT_WORDS_RE = /\b(?:rodent|rats?|mice|mouse)\b/i;
+const RODENT_WORDS_RE = /\b(?:rodents?|rats?|mice|mouse)\b/i;
+const TERMITE_WORDS_RE = /\btermites?\b/i;
 const INSPECTION_RE = /\binspection\b/i;
+const PRETREAT_RE = /\bpre[-\s]?treat/i;
 const TRAPPING_RE = /\b(?:trapping|traps?)\b/i;
 const EXCLUSION_RE = /\bexclusion\b/i;
 const EXPLICIT_SERVICE_INTENTS = Object.freeze([
   { patterns: [/\bwdo\b/i], keys: ['wdo_inspection'] },
-  { patterns: [INSPECTION_RE, /\btermite/i], keys: ['termite_inspection'] },
+  { patterns: [INSPECTION_RE, TERMITE_WORDS_RE], keys: ['termite_inspection'] },
   { patterns: [INSPECTION_RE, RODENT_WORDS_RE], keys: ['rodent_inspection'] },
   { patterns: [INSPECTION_RE, PEST_WORDS_RE], keys: ['pest_inspection'] },
   { patterns: [/\b(?:one[-\s]?time|initial|clean\s?out|knock\s?down)\b/i, PEST_WORDS_RE], keys: ['pest_initial_cleanout'] },
+  { patterns: [/\bslab\b/i, PRETREAT_RE], keys: ['termite_slab_pretreat'] },
+  { patterns: [TERMITE_WORDS_RE, PRETREAT_RE], keys: ['termite_pretreatment'] },
+  { patterns: [TERMITE_WORDS_RE, /\bliquid\b/i], keys: ['termite_liquid'] },
+  { patterns: [TERMITE_WORDS_RE, /\btrench/i], keys: ['termite_trenching'] },
+  { patterns: [TERMITE_WORDS_RE, /\bspot[-\s]?treat/i], keys: ['termite_spot_treatment'] },
   { patterns: [RODENT_WORDS_RE, TRAPPING_RE, EXCLUSION_RE], keys: ['rodent_exclusion', 'rodent_exclusion_only', 'rodent_trapping'] },
   { patterns: [RODENT_WORDS_RE, TRAPPING_RE], keys: ['rodent_trapping', 'rodent_exclusion'] },
   { patterns: [RODENT_WORDS_RE, EXCLUSION_RE], keys: ['rodent_exclusion_only', 'rodent_exclusion'] },
 ]);
-// Pricing-resolver results that already name one-time work rather than the
-// family's recurring program are explicit too (pre-push audit P1): "a
-// one-time mosquito treatment for a party" beside a scheduled monthly visit
-// is a NEW booking, priced with the one-time treatment's own duration.
-const EXPLICIT_PRICING_KEYS = new Set(['one_time_lawn', 'one_time_mosquito']);
+// A one-time pricing family is explicit work only when the message says so
+// (pre-push audit P1: "a one-time mosquito treatment for a party" beside a
+// scheduled monthly visit is a NEW booking). The pricing resolver also
+// files routine lawn words ("weed treatment", "fertilization", "brown
+// patch") under one_time_lawn, and those stay about the lawn program.
+const ONE_TIME_PRICING_WORDS = Object.freeze({
+  one_time_lawn: /\bone[-\s]?time\b/i,
+  one_time_mosquito: /\b(?:one[-\s]?time|event|party)\b/i,
+});
 
 async function requestedServiceType(inboundMessage) {
   return (await resolveRequestedService(inboundMessage))?.name || null;
@@ -511,11 +525,11 @@ async function requestedServiceType(inboundMessage) {
 // The service a customer is asking FOR in an inbound message: the first
 // bookable catalog row among its candidate keys, as { name, explicit } —
 // `explicit` for specific work (EXPLICIT_SERVICE_INTENTS, or a one-time
-// pricing family) as opposed to a family-level request ("pest control",
-// "lawn service") resolved through the pricing resolver (customer-pricing-ai
-// serviceKeyFromText). Null when the message names no service, no candidate
-// is bookable, or on any resolver error (fail-safe: the caller falls back
-// to the customer's own visit).
+// pricing family the message calls one-time) as opposed to a family-level
+// request ("pest control", "lawn service") resolved through the pricing
+// resolver (customer-pricing-ai serviceKeyFromText). Null when the message
+// names no service, no candidate is bookable, or on any resolver error
+// (fail-safe: the caller falls back to the customer's own visit).
 async function resolveRequestedService(inboundMessage) {
   const text = String(inboundMessage || '').trim();
   if (!text) return null;
@@ -523,7 +537,7 @@ async function resolveRequestedService(inboundMessage) {
     const intent = EXPLICIT_SERVICE_INTENTS.find(({ patterns }) => patterns.every((re) => re.test(text)));
     const pricingKey = intent ? null : require('./customer-pricing-ai').serviceKeyFromText(text);
     const candidates = intent ? intent.keys : PRICING_KEY_TO_CATALOG_KEYS[pricingKey];
-    const explicit = Boolean(intent) || EXPLICIT_PRICING_KEYS.has(pricingKey);
+    const explicit = Boolean(intent) || Boolean(ONE_TIME_PRICING_WORDS[pricingKey]?.test(text));
     const { resolveServiceType } = require('./service-library');
     for (const catalogKey of candidates || []) {
       const row = await resolveServiceType(catalogKey);
@@ -547,13 +561,15 @@ async function resolveRequestedService(inboundMessage) {
 // "move my lawn and shrub visit" must keep the visit's own combined
 // service, not collapse to standalone lawn care.
 const EXISTING_VISIT_WORDS_RE = /\b(?:move|moving|reschedul\w*|change|changing|cancel\w*|skip\w*|push(?:ed|ing)?\s+(?:back|out)|bump\w*|postpone\w*|delay\w*|earlier|later)\b/i;
+// Identity terms per service family, singular or plural: they read catalog
+// and visit labels AND the customer's own text (serviceIdentityFor).
 const SERVICE_FAMILY_ALIASES = Object.freeze({
-  pest: /\b(?:pest|bugs?|general pest|cleanout|roach(?:es)?|ants?|spiders?)\b/i, // identity terms only — never a cadence word (Codex #5194 r3)
-  lawn: /\b(?:lawn|turf|grass|fert\w*|weed)\b/i,
-  mosquito: /\bmosquito/i,
-  tree_shrub: /\b(?:tree|shrub|ornamental)\b/i,
-  palm: /\bpalm/i,
-  termite: /\b(?:termite|wdo)\b/i,
+  pest: /\b(?:pests?|bugs?|general pest|cleanouts?|(?:cock)?roach(?:es)?|ants?|spiders?)\b/i, // identity terms only — never a cadence word (Codex #5194 r3)
+  lawn: /\b(?:lawns?|turf|grass|fert\w*|weeds?)\b/i,
+  mosquito: /\bmosquito(?:e?s)?\b/i,
+  tree_shrub: /\b(?:trees?|shrubs?|ornamentals?)\b/i,
+  palm: /\bpalms?\b/i, // never "Palmetto", a city in the service area
+  termite: /\b(?:termites?|wdo)\b/i,
   rodent: RODENT_WORDS_RE,
 });
 function serviceFamilyOf(serviceName) {
@@ -569,28 +585,35 @@ function serviceFamilyOf(serviceName) {
 // The service identity an OPEN TIMES lookup should price, with a certainty
 // flag (Codex #5194 r4, structural): availability with the WRONG duration
 // is worse than no availability, so an uncertain identity withholds OPEN
-// TIMES and the draft defers ("we'll confirm a time"). Certain when:
-//   - the message names a service (resolveRequestedService) that refers to
-//     exactly one scheduled visit type (scheduledTypesFor) — that visit's
-//     own (possibly combined) label — or to none, and is not about an
-//     existing visit — the requested catalog service as a NEW booking;
-//   - the customer has exactly one upcoming visit (a reschedule, callback
-//     or "when can you come" is about it);
-//   - no upcoming visit but a completed one (a callback on it — Codex
-//     #5194 r1: "the mosquitoes came back" is about the completed combined
-//     visit, never a new standalone booking).
-// Uncertain when the named service refers to several scheduled visit types,
-// or several visits are scheduled and the message names none of them.
+// TIMES and the draft defers ("we'll confirm a time"). When the message
+// names a service (resolveRequestedService), the identity is:
+//   - the one visit type it refers to (visitTypesFor): upcoming, or — for
+//     existing-visit wording with no upcoming match — the last completed
+//     visit (a callback, Codex #5194 r1: "the mosquitoes came back" is about
+//     the completed combined visit, never a new standalone booking);
+//   - else, with no existing-visit wording and one service family named,
+//     the requested catalog service as a NEW booking;
+//   - else uncertain (Codex #5194 r6): several visit types match; several
+//     families are named and no one visit covers them all; or existing-visit
+//     wording goes with a service that has no visit on file — "The
+//     mosquitoes came back, but can you add lawn service Tuesday?" is
+//     neither the mosquito visit nor a plain lawn booking.
+// With no service named: the one upcoming visit (a reschedule or "when can
+// you come" is about it), uncertain for several, else the last completed
+// visit, else the engine's own default.
 async function serviceIdentityFor(inboundMessage, context) {
   const text = String(inboundMessage || '');
   const upcoming = (context?.upcomingServices || []).filter((s) => s && s.type);
   const resolved = await resolveRequestedService(text);
   if (resolved) {
     const aboutExisting = EXISTING_VISIT_WORDS_RE.test(text) || SAVE_SALE_TEXT_RE.test(text);
-    const scheduled = scheduledTypesFor(resolved, upcoming, aboutExisting);
-    if (scheduled.length === 1) return { serviceType: scheduled[0], certain: true, reason: 'named_scheduled_visit' };
-    if (scheduled.length > 1) return { serviceType: null, certain: false, reason: 'ambiguous_named_visit' };
-    if (!aboutExisting) return { serviceType: resolved.name, certain: true, reason: 'new_booking' };
+    const families = new Set([serviceFamilyOf(resolved.name), ...Object.keys(SERVICE_FAMILY_ALIASES).filter((f) => SERVICE_FAMILY_ALIASES[f].test(text))].filter(Boolean));
+    const scheduled = visitTypesFor(resolved, families, upcoming, aboutExisting);
+    const lastCompleted = (context?.serviceHistory || []).filter((s) => s && s.type).slice(0, 1);
+    const matched = scheduled.length || !aboutExisting ? scheduled : visitTypesFor(resolved, families, lastCompleted, true);
+    if (matched.length === 1) return { serviceType: matched[0], certain: true, reason: scheduled.length ? 'named_scheduled_visit' : 'named_completed_visit' };
+    if (!matched.length && !aboutExisting && families.size === 1) return { serviceType: resolved.name, certain: true, reason: 'new_booking' };
+    return { serviceType: null, certain: false, reason: matched.length ? 'ambiguous_named_visit' : 'unmatched_named_service' };
   }
   if (upcoming.length === 1) return { serviceType: String(upcoming[0].type), certain: true, reason: 'single_upcoming' };
   if (upcoming.length > 1) return { serviceType: null, certain: false, reason: 'ambiguous_upcoming' };
@@ -601,23 +624,24 @@ async function serviceIdentityFor(inboundMessage, context) {
   return { serviceType: null, certain: true, reason: 'engine_default' };
 }
 
-// The distinct scheduled visit types a requested service refers to. A visit
-// booked as exactly that catalog service wins (Codex #5194 r5): "reschedule
-// my rodent trapping" must not land on a Rodent Monitoring visit listed
-// before it. Otherwise every type in the service's FAMILY (Codex #5194 r2:
+// The distinct visit types among `visits` a requested service refers to,
+// counting only types that cover EVERY service family the message names
+// (a combined "Lawn + Tree & Shrub" answers for "my lawn and shrub visit").
+// A visit booked as exactly that catalog service wins (Codex #5194 r5):
+// "reschedule my rodent trapping" must not land on a Rodent Monitoring
+// visit listed before it. Otherwise every covering type (Codex #5194 r2:
 // "General Pest Control (Quarterly)" and a scheduled "Quarterly Pest +
 // Termite Bait Station" share the pest family though no first word
-// matches; the aliases mirror the pricing resolver's matchers) — which
-// explicitly distinct work joins only when the message is about an
-// existing visit (audit P1): trapping beside scheduled monitoring, or a WDO
-// inspection beside treatment, is a NEW booking.
-function scheduledTypesFor(resolved, upcoming, aboutExisting) {
-  const types = [...new Set(upcoming.map((s) => String(s.type)))];
+// matches) — which explicitly distinct work joins only when the message is
+// about an existing visit (audit P1): trapping beside scheduled
+// monitoring, or a WDO inspection beside treatment, is a NEW booking.
+function visitTypesFor(resolved, families, visits, aboutExisting) {
+  const types = [...new Set(visits.map((s) => String(s.type)))];
+  const covers = (t) => [...families].every((f) => SERVICE_FAMILY_ALIASES[f].test(t));
   const name = resolved.name.trim().toLowerCase();
-  const exact = types.filter((t) => t.trim().toLowerCase() === name);
-  if (exact.length || (resolved.explicit && !aboutExisting)) return exact;
-  const family = serviceFamilyOf(resolved.name);
-  return family ? types.filter((t) => SERVICE_FAMILY_ALIASES[family].test(t)) : [];
+  const exact = types.filter((t) => t.trim().toLowerCase() === name && covers(t));
+  if (exact.length || (resolved.explicit && !aboutExisting) || !families.size) return exact;
+  return types.filter(covers);
 }
 
 // The service a live (non-estimate) scheduling reply is about: the next

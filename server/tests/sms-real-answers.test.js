@@ -1848,8 +1848,8 @@ describe('follow-up #5: a NEW booking is priced with the requested service, not 
     const pestOnly = { ...combined, upcomingServices: [{ type: 'Quarterly Pest', date: '2026-10-01' }] };
     await drafter.generateGroundedDraft(args('Can you add lawn service?', pestOnly));
     expect(getAvailableSlots).toHaveBeenLastCalledWith('Venice', null, expect.objectContaining({ serviceType: 'Lawn Care' }));
-    // unit: the reschedule words alone veto a new booking — the one visit on file stands
-    await expect(drafter.serviceIdentityFor('Please reschedule my lawn visit', pestOnly)).resolves.toMatchObject({ serviceType: 'Quarterly Pest', reason: 'single_upcoming' });
+    // unit: reschedule words veto a new booking, and a named service with no visit on file is uncertain (never the pest visit)
+    await expect(drafter.serviceIdentityFor('Please reschedule my lawn visit', pestOnly)).resolves.toMatchObject({ serviceType: null, certain: false, reason: 'unmatched_named_service' });
   });
 
   test('the availability lookup uses the requested service; a message naming none falls back to the next visit', async () => {
@@ -1946,7 +1946,7 @@ describe('#5194 round 1', () => {
     mockCatalog();
     const drafter = require('../services/sms-shadow-drafter');
     const ctx = { summary: 'x', upcomingServices: [], serviceHistory: [{ type: 'Pest + Mosquito', date: '2026-09-20' }], customer: { id: 'c1' } };
-    await expect(drafter.serviceIdentityFor('The mosquitoes came back after the last visit', ctx)).resolves.toMatchObject({ serviceType: 'Pest + Mosquito', reason: 'last_completed' });
+    await expect(drafter.serviceIdentityFor('The mosquitoes came back after the last visit', ctx)).resolves.toMatchObject({ serviceType: 'Pest + Mosquito', reason: 'named_completed_visit' });
     await expect(drafter.serviceIdentityFor('Can you add mosquito service?', ctx)).resolves.toMatchObject({ serviceType: 'Mosquito Control', reason: 'new_booking' });
   });
 
@@ -2168,5 +2168,67 @@ describe('#5194 round 5', () => {
     expect([...paid].sort((a, b) => a - b)).toEqual([6000, 9500]);
     expect([...billingAmountCents(context, { settledOnly: true }).paid]).toEqual([9500]);
     expect(billingAmountCents(null)).toEqual({ owed: new Set(), paid: new Set() });
+  });
+});
+
+
+describe('#5194 round 6', () => {
+  const priorGate = process.env.GATE_SMS_REAL_ANSWERS;
+  beforeEach(() => { process.env.GATE_SMS_REAL_ANSWERS = 'true'; jest.resetModules(); });
+  afterEach(() => {
+    if (priorGate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = priorGate;
+    jest.dontMock('../services/service-library'); jest.dontMock('../services/availability'); jest.resetModules();
+  });
+  const CATALOG = {
+    termite_bait: 'Termite Bait Station System Service', termite_liquid: 'Termite Liquid Treatment Service', termite_pretreatment: 'Termite Pretreatment Service',
+    termite_slab_pretreat: 'Slab Pre-Treat Termite Service', lawn_care_monthly: 'Monthly Lawn Care Service', lawn_care_one_time: 'One-Time Lawn Care Service',
+    mosquito_monthly: 'Mosquito Control Service (Monthly)', pest_general_quarterly: 'Quarterly Pest Control Service',
+  };
+  const mockCatalog = () => jest.doMock('../services/service-library', () => ({ resolveServiceType: async (key) => (CATALOG[key] ? { name: CATALOG[key], is_active: true, is_archived: false } : null) }));
+
+  test('a named termite treatment resolves to its own catalog service and is new work beside a bait visit (real keyword resolver)', async () => {
+    mockCatalog();
+    const drafter = require('../services/sms-shadow-drafter');
+    await expect(drafter.requestedServiceType('Can you add liquid termite treatment Tuesday?')).resolves.toBe('Termite Liquid Treatment Service');
+    await expect(drafter.requestedServiceType('Do you do termite pre-treatment for new construction?')).resolves.toBe('Termite Pretreatment Service');
+    await expect(drafter.requestedServiceType('We need a slab pretreat before the pour')).resolves.toBe('Slab Pre-Treat Termite Service');
+    await expect(drafter.requestedServiceType('Can you add termite protection?')).resolves.toBe('Termite Bait Station System Service'); // the family default is unchanged
+    const bait = { upcomingServices: [{ type: 'Termite Bait Station System Service', date: '2026-10-01' }] };
+    await expect(drafter.serviceIdentityFor('Can you add liquid termite treatment Tuesday?', bait)).resolves.toMatchObject({ serviceType: 'Termite Liquid Treatment Service', reason: 'new_booking' });
+  });
+
+  test('complaint wording beside a service with no visit on file withholds OPEN TIMES instead of pricing the other visit', async () => {
+    mockCatalog();
+    const getAvailableSlots = jest.fn(async () => ({ days: [] }));
+    jest.doMock('../services/availability', () => ({ getAvailableSlots }));
+    const drafter = require('../services/sms-shadow-drafter');
+    const mosquitoOnly = { summary: 'x', upcomingServices: [{ type: 'Mosquito Control Service (Monthly)', date: '2026-10-01' }], customer: { id: 'c1' } };
+    const inbound = 'The mosquitoes came back, but can you add lawn service Tuesday?';
+    await expect(drafter.serviceIdentityFor(inbound, mosquitoOnly)).resolves.toMatchObject({ serviceType: null, certain: false, reason: 'unmatched_named_service' });
+    const client = { messages: { create: async () => ({ content: [{ text: JSON.stringify({ reply: 'Let me check with the team and get right back to you.', intended_actions: [], missing_info: null }) }] }) } };
+    await drafter.generateGroundedDraft({ client, context: mosquitoOnly, inboundMessage: inbound, intent: { intent: 'general_customer_sms_needs_review' }, schedulingIntent: true, city: 'Venice' });
+    expect(getAvailableSlots).not.toHaveBeenCalled();
+    // a callback still finds the completed visit it names; one it does not name is uncertain
+    const history = (type) => ({ upcomingServices: [], serviceHistory: [{ type, date: '2026-09-01' }] });
+    await expect(drafter.serviceIdentityFor('The ants came back', history('Quarterly Pest Control Service'))).resolves.toMatchObject({ serviceType: 'Quarterly Pest Control Service', reason: 'named_completed_visit' });
+    await expect(drafter.serviceIdentityFor('The ants came back', history('Monthly Lawn Care Service'))).resolves.toMatchObject({ certain: false, reason: 'unmatched_named_service' });
+  });
+
+  test('several service families named: only one visit covering them all is certain; a new booking of several is not', async () => {
+    mockCatalog();
+    const { serviceIdentityFor } = require('../services/sms-shadow-drafter');
+    await expect(serviceIdentityFor('Can you add mosquito and lawn service?', { upcomingServices: [] })).resolves.toMatchObject({ serviceType: null, certain: false, reason: 'unmatched_named_service' });
+    const combined = { upcomingServices: [{ type: 'Lawn + Tree & Shrub', date: '2026-10-01' }, { type: 'Quarterly Pest Control Service', date: '2026-10-02' }] };
+    await expect(serviceIdentityFor('Can we move my lawn and shrub visit?', combined)).resolves.toMatchObject({ serviceType: 'Lawn + Tree & Shrub', certain: true });
+    // a city name is not a service: "Palmetto" never reads as palm work
+    await expect(serviceIdentityFor("I'm in Palmetto, can you add pest control?", { upcomingServices: [] })).resolves.toMatchObject({ serviceType: 'Quarterly Pest Control Service', reason: 'new_booking' });
+  });
+
+  test('routine lawn words the pricing resolver files as one-time stay about the scheduled lawn program', async () => {
+    mockCatalog();
+    const { serviceIdentityFor } = require('../services/sms-shadow-drafter');
+    const program = { upcomingServices: [{ type: 'Monthly Lawn Care Service', date: '2026-10-01' }] };
+    await expect(serviceIdentityFor('Can you do a weed treatment at my next visit?', program)).resolves.toMatchObject({ serviceType: 'Monthly Lawn Care Service', reason: 'named_scheduled_visit' });
+    await expect(serviceIdentityFor('Can I get a one-time weed treatment?', program)).resolves.toMatchObject({ serviceType: 'One-Time Lawn Care Service', reason: 'new_booking' });
   });
 });
