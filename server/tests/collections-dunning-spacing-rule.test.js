@@ -159,6 +159,20 @@ describe('dunning spacing replay event reduction', () => {
     expect(result).toMatchObject({ candidatesInWindow: 4, spacedWithin7d: 1, customersAffected: 1 });
   });
 
+  test('historical keyless follow-up legs of one step collapse by invoice + step; other steps and rails stay separate', () => {
+    const legacy = (id, hours, overrides = {}) => event(id, hours, {
+      source: 'invoice_followups', invoice_ids: ['inv-1'], metadata: { step_id: 'd3_friendly' }, ...overrides,
+    });
+    const collapsed = collapseDunningReminderEvents([
+      legacy('fu-email', 1, { channel: 'email' }),
+      legacy('fu-sms', 1 + 1 / 3600, { channel: 'sms', invoice_ids: '["inv-1"]' }),
+      legacy('fu-next-step', 24 * 7 + 2, { metadata: { step_id: 'd10_reminder' } }),
+      legacy('other-invoice', 3, { invoice_ids: ['inv-2'] }),
+      event('checker-keyless', 4, { source: 'late_payment_checker', invoice_ids: ['inv-1'], metadata: { step_id: 'd3_friendly' } }),
+    ]);
+    expect(collapsed.map(({ id }) => id)).toEqual(['fu-sms', 'other-invoice', 'checker-keyless', 'fu-next-step']);
+  });
+
   test('JSON metadata dedupes and the latest sent retry wins with an id-stable timestamp tie', () => {
     const events = collapseDunningReminderEvents([
       event('first', 1, { source: 'invoice_followups', metadata: JSON.stringify({ notificationEventKey: 'retry' }) }),

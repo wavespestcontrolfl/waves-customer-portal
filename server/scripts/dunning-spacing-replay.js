@@ -86,7 +86,7 @@ function bucketLabel(hours) {
     // otherwise slip into a report labeled as ending at `now` (codex r2 P2).
     .where('occurred_at', '<=', now)
     .orderBy(['customer_id', 'occurred_at', 'id'])
-    .select('id', 'customer_id', 'source', 'occurred_at', 'metadata');
+    .select('id', 'customer_id', 'source', 'occurred_at', 'metadata', 'invoice_ids');
 
   const {
     spacingHits, candidatesInWindow, spacedWithin7d, customersAffected,

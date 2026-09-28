@@ -90,15 +90,31 @@ function compareReplayRows(a, b) {
 // One notification event may write a row per selected channel. For replay
 // evidence it is one customer contact: discard confirmed undelivered attempts
 // first, then use the latest sent row as the event's representative. Keyless
-// legacy rows remain independent contacts. Sorting here makes the reducer
+// legacy rows remain independent contacts, except historical follow-up legs
+// (legacyFollowupEventKey). Sorting here makes the reducer
 // deterministic even when it is exercised without the replay query.
+// Follow-up ledger rows written before invoice-followups stamped a shared
+// notificationEventKey carry only metadata.step_id (Codex #5189 r2). One
+// step of one invoice's sequence is one touch (the step advances once it
+// sends), so source + invoice + step groups those historical legs.
+function legacyFollowupEventKey(row) {
+  if (row?.source !== 'invoice_followups') return null;
+  const stepId = metadataOf(row).step_id;
+  let invoiceIds = row.invoice_ids;
+  if (typeof invoiceIds === 'string') {
+    try { invoiceIds = JSON.parse(invoiceIds); } catch { invoiceIds = null; }
+  }
+  if (!stepId || !Array.isArray(invoiceIds) || invoiceIds.length !== 1) return null;
+  return `invoice-followup-legacy:${invoiceIds[0]}:${stepId}`;
+}
+
 function collapseDunningReminderEvents(rows) {
   const sent = [...(rows || [])].filter(countsAsSent).sort(compareReplayRows);
   const events = [];
   const keyedEventIndexes = new Map();
   for (const row of sent) {
     const rawEventKey = metadataOf(row).notificationEventKey;
-    const eventKey = typeof rawEventKey === 'string' && rawEventKey.trim() ? rawEventKey : null;
+    const eventKey = typeof rawEventKey === 'string' && rawEventKey.trim() ? rawEventKey : legacyFollowupEventKey(row);
     if (!eventKey) {
       events.push(row);
       continue;
