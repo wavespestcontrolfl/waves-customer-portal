@@ -445,6 +445,7 @@ describe('classifyCallBookingConflict', () => {
         code: 'duplicate_call_booking',
         existingVisits: [{ id: 'visit-1', serviceType: 'General Pest Control', scheduledDate: '2026-09-14', windowStart: '09:00', status: 'confirmed' }],
         key: 'quarterly',
+        separateProgram: null,
       },
       firstError: { label: 'Quarterly', message: 'The phone agent already booked this visit for this customer.', duplicate: true },
     });
@@ -468,6 +469,17 @@ describe('classifyGroupSubmitFailure', () => {
     expect(decision.recoverable).toBe(false);
     expect(decision.duplicateConflict).toBeNull();
     expect(decision.callBookingConflict).toMatchObject({ code: 'duplicate_call_booking', key: 'quarterly' });
+  });
+
+  it('a group that hit BOTH guards keeps its separate-program approval on the phone-agent conflict, so "Book another anyway" re-sends it (pre-push audit P1)', () => {
+    const e = Object.assign(new Error('The phone agent already booked this visit for this customer.'), {
+      body: { code: 'duplicate_call_booking', existingVisits: [] },
+    });
+    const separateProgram = { key: 'quarterly', existingSeries: [{ id: 's1' }] };
+    const decision = classifyGroupSubmitFailure(e, {
+      group: { seasonalIndex: 0 }, linkedEstimate: null, separateProgram, key: 'quarterly', groupLabelText: 'Quarterly',
+    });
+    expect(decision.callBookingConflict.separateProgram).toBe(separateProgram);
   });
 
   it('falls through to the duplicate-series classification for every other failure', () => {

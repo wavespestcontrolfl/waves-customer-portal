@@ -809,12 +809,15 @@ export function canSubmitGroup({
 // ahead of it, at the one call site in submitAppointments) purely to keep
 // that function's own complexity at its pre-existing baseline — this check
 // is independent of every duplicate-SERIES branch below it.
-export function classifyCallBookingConflict(e, { key, groupLabelText }) {
+// separateProgram: the separate-recurring-program approval the refused
+// submit already carried — "Book another anyway" re-sends it, so a group
+// that hit BOTH guards is not bounced back to the series conflict.
+export function classifyCallBookingConflict(e, { key, groupLabelText, separateProgram = null }) {
   if (e?.body?.code !== 'duplicate_call_booking') return null;
   return {
     recoverable: false,
     duplicateConflict: null,
-    callBookingConflict: { ...e.body, key },
+    callBookingConflict: { ...e.body, key, separateProgram: separateProgram || null },
     firstError: { label: groupLabelText, message: e.message, duplicate: true },
   };
 }
@@ -872,7 +875,7 @@ export function classifySubmitGroupFailure(e, {
 export function classifyGroupSubmitFailure(e, {
   group, linkedEstimate, separateProgram, key, groupLabelText, carriesAppointmentDiscount,
 }) {
-  return classifyCallBookingConflict(e, { key, groupLabelText })
+  return classifyCallBookingConflict(e, { key, groupLabelText, separateProgram })
     || classifySubmitGroupFailure(e, { group, linkedEstimate, separateProgram, key, groupLabelText, carriesAppointmentDiscount });
 }
 
@@ -6299,7 +6302,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               // later ordinary save never carries the override.
               callBookingDuplicateOverrideRef.current = callBookingConflict.key;
               try {
-                await handleSubmit();
+                await handleSubmit(callBookingConflict.separateProgram || undefined);
               } finally {
                 callBookingDuplicateOverrideRef.current = null;
               }
