@@ -1913,6 +1913,9 @@ postgres('rider-series sync against migrated PostgreSQL', () => {
     // calls land on a connection that is still usable once `trx` closes).
     require('../models/db').connection = database;
     await trx.commit();
+    // This test commits, so it must remove what it wrote: CI runs every
+    // DATABASE_URL suite against one shared database.
+    try {
 
     // The status flip landed inside the (now-committed) sync transaction
     // itself; the tracker transition is the deferred, post-commit part —
@@ -1929,5 +1932,17 @@ postgres('rider-series sync against migrated PostgreSQL', () => {
     // forever (this row's own precondition, asserted above), because
     // nothing called trackTransitions.cancel for a rider resync cancel.
     expect(cancelledRow.cancelled_at).toBeTruthy();
+    } finally {
+      const rows = await database('scheduled_services').where({ customer_id: customerId }).select('id', 'technician_id');
+      const ids = rows.map((r) => r.id);
+      const techIds = [...new Set(rows.map((r) => r.technician_id).filter(Boolean))];
+      await database('job_status_history').whereIn('job_id', ids).del();
+      await database('scheduled_service_addons').whereIn('scheduled_service_id', ids).del();
+      await database('scheduled_services').whereIn('id', ids).whereNotNull('recurring_parent_id').del();
+      await database('scheduled_services').whereIn('id', ids).del();
+      await database('customer_properties').where({ customer_id: customerId }).del();
+      await database('customers').where({ id: customerId }).del();
+      if (techIds.length) await database('technicians').whereIn('id', techIds).where('name', 'like', 'Synthetic%').del();
+    }
   });
 });
