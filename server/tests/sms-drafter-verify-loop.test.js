@@ -172,7 +172,8 @@ describe('generateGroundedDraft — offered_times structural check shares the re
     // draft + verify — the deterministic check passed, so it spent no EXTRA call.
     expect(client.calls).toHaveLength(2);
     expect(r.openTimesSnapshot).toEqual({
-      lookup: { city: 'Venice', customerId: null, estimateId: null },
+      // serviceType = CTX's next visit (Codex r3): the recheck asks the engine the same question
+      lookup: { city: 'Venice', customerId: null, estimateId: null, serviceType: 'Quarterly Pest' },
       quotedWindows: [{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }],
     });
   });
@@ -423,5 +424,39 @@ describe('generateGroundedDraft — single-pass mode (SHADOW_DRAFT_VERIFY=false)
     expect(r.converged).toBe(false);
     expect(r.openTimesSnapshot).toBeNull();
     expect(r.parsed.reply).toMatch(/9:00 AM - 11:00 AM/); // the draft itself is still returned for telemetry
+  });
+});
+
+// Codex r3: with the LLM verifier OFF nothing can judge whether a quoted
+// window is a confirmation of a booked visit or an undeclared offer, so the
+// single-pass check runs WITHOUT the grounded-elsewhere allowance.
+describe('generateGroundedDraft — single-pass mode gives no grounded-elsewhere allowance', () => {
+  const priorGate = process.env.GATE_SMS_REAL_ANSWERS;
+  const priorVerify = process.env.SHADOW_DRAFT_VERIFY;
+  beforeEach(() => { process.env.GATE_SMS_REAL_ANSWERS = 'true'; process.env.SHADOW_DRAFT_VERIFY = 'false'; });
+  afterEach(() => {
+    if (priorGate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = priorGate;
+    if (priorVerify === undefined) delete process.env.SHADOW_DRAFT_VERIFY; else process.env.SHADOW_DRAFT_VERIFY = priorVerify;
+    jest.dontMock('../services/availability');
+    jest.resetModules();
+  });
+
+  test('booked Tuesday 9-11, open Wednesday 9-11, reply quotes 9-11 with offered_times [] → NOT converged, no snapshot', async () => {
+    jest.resetModules();
+    jest.doMock('../services/availability', () => ({
+      getAvailableSlots: jest.fn(async () => ({ days: [{ fullDate: 'Wednesday, September 30', slots: [{ startTime24: '09:00' }] }] })),
+    }));
+    const drafter = require('../services/sms-shadow-drafter');
+    const context = {
+      summary: 'Dana — Quarterly Pest, Venice',
+      upcomingServices: [{ type: 'Quarterly Pest', date: '2026-09-29', window: '9:00 AM - 11:00 AM', tech: 'Sam' }],
+    };
+    const client = makeClient([{ reply: 'How about Wednesday 9:00 AM - 11:00 AM?', intended_actions: [], missing_info: null, offered_times: [] }]);
+    const r = await drafter.generateGroundedDraft({
+      client, context, inboundMessage: 'Can we move it?', intent: { intent: 'general_customer_sms_needs_review' }, schedulingIntent: true, city: 'Venice',
+    });
+    expect(client.calls).toHaveLength(1);
+    expect(r.converged).toBe(false);
+    expect(r.openTimesSnapshot).toBeNull();
   });
 });

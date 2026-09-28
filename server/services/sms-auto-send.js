@@ -576,6 +576,18 @@ async function autoSendReadiness(params, gratitudeLane) {
     return { reason: 'price_quote' };
   }
 
+  // (3.8) A promised human follow-up must be OWNED (PR #5119 Codex r3 P1):
+  //       the real-answers prompt has the model quote the follow-up SLA
+  //       phrase when the facts can't answer, and the prompt now requires an
+  //       escalate action alongside it — but the prompt is not the boundary.
+  //       Deterministic backstop: an SLA phrase in the reply with no
+  //       escalate action means nobody owns the promise; never auto-send it.
+  if (require('./sms-followup-sla').replyPromisesFollowup(reply)
+      && !(Array.isArray(intendedActions) && intendedActions.some((a) => a && a.type === 'escalate'))) {
+    logger.warn(`[sms-auto-send] reply promises a follow-up with no escalate action — refusing auto-send (intent=${intent})`);
+    return { reason: 'unowned_followup' };
+  }
+
   // (4) Server-enforced graduation eligibility — re-checked live every send.
   const elig = await require('./sms-graduation').evaluateAutoSendEligibility({
     intent,

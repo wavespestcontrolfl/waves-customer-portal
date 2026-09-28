@@ -1400,3 +1400,106 @@ describe('planOpenTimesRecheck — what a send path rechecks given the body that
     expect(planOpenTimesRecheck({ snapshot: snap, outgoingBody: 'I will confirm and follow up.', originalBody: orig })).toEqual({ action: 'skip' });
   });
 });
+
+describe('follow-up SLA helpers (Codex r3): a promised follow-up is detectable, and its phrase can go stale', () => {
+  const { SLA_PHRASES, replyPromisesFollowup, slaPhraseStatus, followupSlaPhrase } = require('../services/sms-shadow-drafter');
+  const direct = require('../services/sms-followup-sla');
+  // EDT (UTC-4) instants: 10:00 ET, 21:00 ET, 06:00 ET
+  const DAY = new Date('2026-09-29T14:00:00Z');
+  const NIGHT = new Date('2026-09-30T01:00:00Z');
+  const DAWN = new Date('2026-09-29T10:00:00Z');
+
+  test('the module and the drafter export the same helpers, and SLA_PHRASES is exactly what followupSlaPhrase can emit', () => {
+    expect(direct.replyPromisesFollowup).toBe(replyPromisesFollowup);
+    expect(direct.slaPhraseStatus).toBe(slaPhraseStatus);
+    expect(new Set(SLA_PHRASES)).toEqual(new Set([followupSlaPhrase(DAY), followupSlaPhrase(NIGHT), followupSlaPhrase(DAWN)]));
+  });
+
+  test('replyPromisesFollowup: any SLA phrase, case-insensitive; nothing else', () => {
+    expect(replyPromisesFollowup("I'll check with the office and get back to you within the hour.")).toBe(true);
+    expect(replyPromisesFollowup('Someone will confirm BY 9 AM TOMORROW MORNING.')).toBe(true);
+    expect(replyPromisesFollowup("I'll confirm and get right back to you.")).toBe(false);
+    expect(replyPromisesFollowup('')).toBe(false);
+    expect(replyPromisesFollowup(null)).toBe(false);
+  });
+
+  test('slaPhraseStatus: none / current / stale against the ET window at send time', () => {
+    const body = "I'll check and get back to you within the hour.";
+    expect(slaPhraseStatus('Thanks, see you Tuesday.', DAY)).toBe('none');
+    expect(slaPhraseStatus(body, DAY)).toBe('current');
+    expect(slaPhraseStatus(body, NIGHT)).toBe('stale'); // drafted at 7 PM, sent after close
+    expect(slaPhraseStatus("We'll have an answer by 9 AM this morning.", DAWN)).toBe('current');
+    expect(slaPhraseStatus("We'll have an answer by 9 AM this morning.", DAY)).toBe('stale'); // sent after 9 AM
+    expect(slaPhraseStatus("by 9 AM tomorrow morning", NIGHT)).toBe('current');
+  });
+});
+
+describe('system prompt, gate ON (Codex r3): no-appointment → OPEN TIMES; follow-up promise → escalate; PENDING ESTIMATE is not an amount source', () => {
+  const priorGate = process.env.GATE_SMS_REAL_ANSWERS;
+  afterEach(() => {
+    if (priorGate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS;
+    else process.env.GATE_SMS_REAL_ANSWERS = priorGate;
+  });
+
+  test('gate on: the three rules read as intended', () => {
+    process.env.GATE_SMS_REAL_ANSWERS = 'true';
+    const { buildSystemPrompt } = require('../services/sms-shadow-drafter');
+    const prompt = buildSystemPrompt();
+    expect(prompt).toContain("no confirmed appointment is shown, do NOT invent a time — offer 2–3 SPECIFIC times from OPEN TIMES (declared in offered_times)");
+    expect(prompt).not.toContain("no confirmed appointment is shown, do NOT name a time — say you'll confirm it");
+    expect(prompt).toContain('ALWAYS add {"type":"escalate","note":"followup_promised"} to intended_actions');
+    expect(prompt).toContain('state the exact amount from BILLING and add {"type":"send_payment_link"}. PENDING ESTIMATE carries no amounts here');
+    expect(prompt).not.toContain('exact amount from BILLING or PENDING ESTIMATE');
+  });
+
+  test('gate off: the v11 literals are untouched', () => {
+    process.env.GATE_SMS_REAL_ANSWERS = 'false';
+    const { buildSystemPrompt } = require('../services/sms-shadow-drafter');
+    const prompt = buildSystemPrompt();
+    expect(prompt).toContain("If the customer asks when we're coming and no confirmed appointment is shown, do NOT name a time — say you'll confirm it and get right back to them.");
+    expect(prompt).not.toContain('followup_promised');
+    expect(prompt).not.toContain('offered_times');
+  });
+});
+
+describe('liveServiceType (Codex r3): the service a live scheduling reply is about', () => {
+  const { liveServiceType } = require('../services/sms-shadow-drafter');
+  test('next scheduled visit wins, else the most recent history entry, else null', () => {
+    expect(liveServiceType({ upcomingServices: [{ type: 'Lawn Fertilization', date: '2026-10-01' }], serviceHistory: [{ type: 'Quarterly Pest', date: '2026-07-01' }] })).toBe('Lawn Fertilization');
+    expect(liveServiceType({ upcomingServices: [], serviceHistory: [{ type: 'Quarterly Pest', date: '2026-07-01' }] })).toBe('Quarterly Pest');
+    expect(liveServiceType({ upcomingServices: [{ date: '2026-10-01' }], serviceHistory: [] })).toBeNull();
+    expect(liveServiceType(null)).toBeNull();
+  });
+});
+
+describe('fetchOpenTimesData / openTimesStillOffered forward serviceType to the engine only when known (Codex r3)', () => {
+  const priorGate = process.env.GATE_SMS_REAL_ANSWERS;
+  beforeEach(() => { process.env.GATE_SMS_REAL_ANSWERS = 'true'; jest.resetModules(); });
+  afterEach(() => {
+    if (priorGate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS;
+    else process.env.GATE_SMS_REAL_ANSWERS = priorGate;
+    jest.dontMock('../services/availability');
+    jest.resetModules();
+  });
+
+  test('a known serviceType rides in the options; the recheck asks with the same one', async () => {
+    const getAvailableSlots = jest.fn(async () => ({ days: [{ fullDate: 'Tuesday, September 29', slots: [{ startTime24: '09:00' }] }] }));
+    jest.doMock('../services/availability', () => ({ getAvailableSlots }));
+    const drafter = require('../services/sms-shadow-drafter');
+    await drafter.fetchOpenTimesData({ city: 'Venice', customerId: 'cust-1', schedulingIntent: true, serviceType: 'Lawn Fertilization' });
+    expect(getAvailableSlots).toHaveBeenLastCalledWith('Venice', null, { customerId: 'cust-1', serviceType: 'Lawn Fertilization' });
+    await drafter.openTimesStillOffered({
+      city: 'Venice', customerId: 'cust-1', serviceType: 'Lawn Fertilization',
+      quotedWindows: [{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }],
+    });
+    expect(getAvailableSlots).toHaveBeenLastCalledWith('Venice', null, { customerId: 'cust-1', serviceType: 'Lawn Fertilization' });
+  });
+
+  test('the snapshot carries serviceType only when known, so existing rows and callers keep their shape', () => {
+    const { computeOpenTimesSnapshot } = require('../services/sms-shadow-drafter');
+    const offered = [{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }];
+    expect(computeOpenTimesSnapshot({ openTimesBlock: '- x: y', offeredTimes: offered, city: 'Venice' }).lookup).toEqual({ city: 'Venice', customerId: null, estimateId: null });
+    expect(computeOpenTimesSnapshot({ openTimesBlock: '- x: y', offeredTimes: offered, city: 'Venice', serviceType: 'Lawn Fertilization' }).lookup)
+      .toEqual({ city: 'Venice', customerId: null, estimateId: null, serviceType: 'Lawn Fertilization' });
+  });
+});

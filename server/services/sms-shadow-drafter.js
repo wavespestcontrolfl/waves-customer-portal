@@ -222,6 +222,9 @@ function followupSlaPhrase(now = new Date()) {
   if (hour >= 8 && hour < 20) return 'within the hour';
   return hour < 8 ? 'by 9 AM this morning' : 'by 9 AM tomorrow morning';
 }
+// SLA_PHRASES / replyPromisesFollowup / slaPhraseStatus live in
+// ./sms-followup-sla (Codex r3) and are re-exported below.
+const followupSla = require('./sms-followup-sla');
 
 // The real-answers ALSO-section hand-off bullets: a dynamic HELD-FOR-A-PERSON
 // line (only the categories whose own gate is still off), one instruction
@@ -288,7 +291,7 @@ function openTimesDayLabel(d) {
 // [{date, windows: [...]}]), which validateOfferedTimes checks the model's
 // own offered_times declaration against — one fetch, two views of the same
 // data, so they can never drift apart.
-async function fetchOpenTimesData({ city, customerId, schedulingIntent, estimateId = null } = {}) {
+async function fetchOpenTimesData({ city, customerId, schedulingIntent, estimateId = null, serviceType = null } = {}) {
   if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return { block: null, days: [] };
   if (!schedulingIntent || !city) return { block: null, days: [] };
   let timer = null;
@@ -302,7 +305,7 @@ async function fetchOpenTimesData({ city, customerId, schedulingIntent, estimate
     // second argument check_availability itself passes — when the inbound
     // thread already resolved to a specific estimate, the offered slots
     // must reflect THAT estimate's service minutes, not a generic default.
-    const result = await Promise.race([Availability.getAvailableSlots(city, estimateId, { customerId }), timeout]);
+    const result = await Promise.race([Availability.getAvailableSlots(city, estimateId, { customerId, ...(serviceType ? { serviceType } : {}) }), timeout]);
     const lines = [];
     const days = [];
     for (const d of (result?.days || [])) {
@@ -330,6 +333,16 @@ async function fetchOpenTimesData({ city, customerId, schedulingIntent, estimate
     // fast-resolving fetch too, not just on an actual timeout).
     if (timer) clearTimeout(timer);
   }
+}
+
+// The service a live (non-estimate) scheduling reply is about: the next
+// scheduled visit's type, else the most recent completed one. Null when the
+// context names neither (the engine then keeps its own default).
+function liveServiceType(context) {
+  const next = (context?.upcomingServices || []).find((s) => s && s.type);
+  if (next) return String(next.type);
+  const last = (context?.serviceHistory || []).find((s) => s && s.type);
+  return last ? String(last.type) : null;
 }
 
 async function fetchOpenTimesBlock(args) {
@@ -601,6 +614,43 @@ function offerSpanInText(text, day, window) {
   return text.slice(best.start, best.end);
 }
 
+// Deterministic amount guard shared by every delivery boundary (Codex r3:
+// the estimate-review lane reused only hasPriceQuote and threw away every
+// grounded v12 answer). true when the reply carries an amount the facts
+// block did not authorize, or price grammar the extractor cannot verify.
+function replyQuotesUngroundedAmount(reply, context) {
+  const suggestMode = require('./sms-suggest-mode');
+  const centsOf = (v) => Math.round(Number(v) * 100);
+  const authorizedCents = new Set([
+    context.billing?.outstandingBalance > 0 ? centsOf(context.billing.outstandingBalance) : null,
+    context.billing?.openInvoice?.amountDue != null ? centsOf(context.billing.openInvoice.amountDue) : null,
+    ...require('./context-aggregator').authorizedDuesCents(context),
+    ...((context.billing?.recentPayments || []).map((p) => (p?.amount != null ? centsOf(p.amount) : null))),
+  ].filter((v) => Number.isFinite(v)));
+  // Every amount syntax hasPriceQuote recognizes (Codex r7): $-prefixed,
+  // USD-prefixed, and number-with-unit ("50 dollars"/"50 bucks"). Bare
+  // unit-less numerals stay out of the deterministic guard (dates, house
+  // numbers, zone counts would false-positive) — those remain the
+  // verifier's + reviewer's territory.
+  const AMOUNT_FORMS_RE = /(?:\$|\bUSD\s?)\s?\d[\d,]*(?:\.\d{1,2})?|\b\d[\d,]*(?:\.\d{1,2})?\s?(?:dollars|bucks|usd)\b/gi;
+  const replyAmounts = (reply.match(AMOUNT_FORMS_RE) || [])
+    .map((a) => centsOf(a.replace(/[^\d.]/g, '')));
+  // FAIL CLOSED on grammar the numeric extractor can't verify (Codex r8):
+  // hasPriceQuote recognizes spelled amounts ("fifty dollars"), cents,
+  // Spanish forms, and cadence ("45/mo") — if the price grammar fires and
+  // we cannot positively match EVERY numeric to an authorized value, the
+  // draft stays shadow. An authorized "$120.00" reply extracts and passes;
+  // "fifty dollars" stays unverifiable and withholds. Cadence follows the
+  // same rule as any other amount now that dues are authorized: "$98.50/mo"
+  // extracts $98.50 and passes for a monthly member, while a bare "45/mo"
+  // carries no currency marker, extracts nothing, and still withholds.
+  const priceGrammarFires = suggestMode.hasPriceQuote(reply);
+  const ungrounded = priceGrammarFires
+    ? (replyAmounts.length === 0 || replyAmounts.some((a) => !authorizedCents.has(a)))
+    : replyAmounts.some((a) => !authorizedCents.has(a));
+  return ungrounded;
+}
+
 // The minimum needed to recheck a draft's quoted OPEN TIMES at send time —
 // computed once per generation and carried on whichever row the caller
 // persists it to (message_drafts.intended_actions for the live SMS lane,
@@ -609,7 +659,7 @@ function offerSpanInText(text, day, window) {
 // offered_times declaration (owner-directed structural fix) rather than
 // re-deriving quoted pairs from reply text. null when there's nothing to
 // recheck: no OPEN TIMES was fetched, or the draft declared no times.
-function computeOpenTimesSnapshot({ openTimesBlock, offeredTimes, city, customerId, estimateId }) {
+function computeOpenTimesSnapshot({ openTimesBlock, offeredTimes, city, customerId, estimateId, serviceType = null }) {
   if (!openTimesBlock) return null;
   const quotedWindows = Array.isArray(offeredTimes)
     ? offeredTimes
@@ -617,7 +667,9 @@ function computeOpenTimesSnapshot({ openTimesBlock, offeredTimes, city, customer
         .map((e) => ({ date: e.date, window: e.window }))
     : [];
   if (!quotedWindows.length) return null;
-  return { lookup: { city, customerId: customerId || null, estimateId: estimateId || null }, quotedWindows };
+  // serviceType only when known — keeps the persisted shape unchanged for
+  // every caller that has none (and every existing snapshot row).
+  return { lookup: { city, customerId: customerId || null, estimateId: estimateId || null, ...(serviceType ? { serviceType } : {}) }, quotedWindows };
 }
 
 // Re-fetch availability at SEND time and verify every quoted (date, window)
@@ -628,7 +680,7 @@ function computeOpenTimesSnapshot({ openTimesBlock, offeredTimes, city, customer
 // all resolve to "not still offered" — the one thing this function must
 // never do is silently assume a quoted time is fine when it couldn't
 // actually confirm that.
-async function openTimesStillOffered({ city, customerId, estimateId = null, quotedWindows } = {}) {
+async function openTimesStillOffered({ city, customerId, estimateId = null, serviceType = null, quotedWindows } = {}) {
   if (!Array.isArray(quotedWindows) || !quotedWindows.length) return { ok: true };
   if (!city) return { ok: false, reason: 'open_times_recheck_no_city' };
   let timer = null;
@@ -638,7 +690,7 @@ async function openTimesStillOffered({ city, customerId, estimateId = null, quot
     const timeout = new Promise((_, reject) => {
       timer = setTimeout(() => reject(new Error('open-times recheck timeout')), OPEN_TIMES_TIMEOUT_MS);
     });
-    const result = await Promise.race([Availability.getAvailableSlots(city, estimateId, { customerId }), timeout]);
+    const result = await Promise.race([Availability.getAvailableSlots(city, estimateId, { customerId, ...(serviceType ? { serviceType } : {}) }), timeout]);
     const currentWindows = new Set();
     for (const d of (result?.days || [])) {
       const date = openTimesDayLabel(d);
@@ -709,8 +761,15 @@ function buildSystemPromptWithProfile(voiceProfileText = '') {
   const factSourceList = `SERVICE HISTORY, UPCOMING SERVICES${realAnswersOn ? ', OPEN TIMES' : ''}, BILLING, PENDING ESTIMATE, PROPERTY & PREFERENCES, LAWN HEALTH, ACCOUNT FLAGS, RECENT PHONE CALLS, LATEST CALL TRANSCRIPT, the thread`;
   const upcomingOrThread = realAnswersOn ? 'UPCOMING SERVICES, OPEN TIMES, or the thread' : 'UPCOMING SERVICES, or the thread';
   const deferRule = realAnswersOn
-    ? `Answer from the facts you have — that is the BEST reply, not a fallback. When the customer wants to book, reschedule, or change a visit, offer 2–3 SPECIFIC times straight from OPEN TIMES (verbatim — never invent one), record EACH one you offer in offered_times as {"date": ..., "window": ...} copied EXACTLY from its OPEN TIMES line (the date label AND the window text, verbatim — never paraphrase either), and add {"type":"book_appointment"} to intended_actions once they confirm the one they want. Every time mentioned anywhere in the reply must have a matching offered_times entry (if the same window is offered on two days, write the time out once per day and declare each day), and every offered_times entry must exist verbatim in OPEN TIMES; leave offered_times as an empty array when the reply offers no times. When money is due, state the exact amount from BILLING or PENDING ESTIMATE and add {"type":"send_payment_link"}. Use {"type":"send_portal_link"} or {"type":"send_estimate_link"} wherever they fit what the customer is asking for. Only hand off to a person when the facts genuinely can't answer — and when you do, say CONCRETELY when they'll hear back, using the EXACT wording from FOLLOW-UP SLA RIGHT NOW in the facts below (never invent your own timing; that fact IS the 1-business-hour follow-up SLA, 8am–8pm ET). Record the gap in missing_info either way.`
+    ? `Answer from the facts you have — that is the BEST reply, not a fallback. When the customer wants to book, reschedule, or change a visit, offer 2–3 SPECIFIC times straight from OPEN TIMES (verbatim — never invent one), record EACH one you offer in offered_times as {"date": ..., "window": ...} copied EXACTLY from its OPEN TIMES line (the date label AND the window text, verbatim — never paraphrase either), and add {"type":"book_appointment"} to intended_actions once they confirm the one they want. Every time mentioned anywhere in the reply must have a matching offered_times entry (if the same window is offered on two days, write the time out once per day and declare each day), and every offered_times entry must exist verbatim in OPEN TIMES; leave offered_times as an empty array when the reply offers no times. When money is due, state the exact amount from BILLING and add {"type":"send_payment_link"}. PENDING ESTIMATE carries no amounts here — for estimate pricing, point them to their estimate and add {"type":"send_estimate_link"}; never state or derive an estimate figure. Use {"type":"send_portal_link"} or {"type":"send_estimate_link"} wherever they fit what the customer is asking for. Only hand off to a person when the facts genuinely can't answer — and when you do, say CONCRETELY when they'll hear back, using the EXACT wording from FOLLOW-UP SLA RIGHT NOW in the facts below (never invent your own timing; that fact IS the 1-business-hour follow-up SLA, 8am–8pm ET), and ALWAYS add {"type":"escalate","note":"followup_promised"} to intended_actions so a person owns that follow-up. Record the gap in missing_info either way.`
     : "When you lack a fact the customer needs, the BEST reply acknowledges warmly and says you'll confirm and follow up — that is correct and safe, not a failure, and often better than the answer a human gave. Record the gap in missing_info.";
+  // Codex r3: the v11 "do NOT name a time" branch and the v12 "offer OPEN
+  // TIMES" rule both fired on "when can you come?", and the more specific
+  // prohibition won. Gate-on, the no-appointment case explicitly routes to
+  // OPEN TIMES; gate-off keeps the v11 literal.
+  const noAppointmentRule = realAnswersOn
+    ? "If the customer asks when we're coming and no confirmed appointment is shown, do NOT invent a time — offer 2–3 SPECIFIC times from OPEN TIMES (declared in offered_times) so they can pick one; only if OPEN TIMES is absent or empty, say you'll confirm it and get right back to them."
+    : "If the customer asks when we're coming and no confirmed appointment is shown, do NOT name a time — say you'll confirm it and get right back to them.";
   const handoffBullet = realAnswersOn
     ? realAnswersHandoffBullets()
     : '- If the message warrants a human (cancellation, complaint, billing dispute, chemical/medical concern, legal threat), the reply should acknowledge warmly without resolving, and intended_actions must include {"type":"escalate"}.';
@@ -720,7 +779,7 @@ function buildSystemPromptWithProfile(voiceProfileText = '') {
 ${CUSTOMER_SMS_HOUSE_VOICE}
 
 FACT DISCIPLINE — the single most important rule. A fabricated detail is the worst error you can make, worse than a plain reply. You may ONLY state facts that appear in the context block below (${factSourceList}). A plausible-sounding guess is still a fabrication. You must NEVER:
-- State a specific day, date, time, or arrival window ("tomorrow", "Tuesday", "2 PM", "10–10:30am") unless it appears verbatim in SERVICE HISTORY (past visits), ${upcomingOrThread}. If the customer asks when we're coming and no confirmed appointment is shown, do NOT name a time — say you'll confirm it and get right back to them.
+- State a specific day, date, time, or arrival window ("tomorrow", "Tuesday", "2 PM", "10–10:30am") unless it appears verbatim in SERVICE HISTORY (past visits), ${upcomingOrThread}. ${noAppointmentRule}
 - Name a technician, or say who is coming or on the way, unless UPCOMING SERVICES names the tech for that visit.
 - Say the tech is on the way, running late, running ahead, or nearby unless TODAY's visit line shows LIVE STATUS en route or on site. If a customer asks where the tech is TODAY and there is no LIVE STATUS, you genuinely don't know — never guess an ETA or invent a delay story; say you'll check with the office and get right back to them.
 - Claim what a trap caught, what was found, or what was treated, unless the context states it.
@@ -1410,6 +1469,13 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   // file's own save-the-sale routing already applies to intent + raw text
   // (SAVE_SALE_INTENT_RE / SAVE_SALE_TEXT_RE), so the two decisions can't
   // drift apart.
+  // Codex r3: the live inbound path has no estimate, so the engine fell
+  // back to General Pest Control minutes for every customer. The customer's
+  // own next visit (else last visit) names the service a reschedule/
+  // cancellation/complaint reply is about; an estimate's service_interest
+  // still wins inside the engine when estimateId is set. Carried on the
+  // snapshot so the send-time recheck asks the same question.
+  const serviceType = liveServiceType(context);
   const needsOpenTimes = Boolean(schedulingIntent)
     || SAVE_SALE_INTENT_RE.test(String(intent?.intent || ''))
     || SAVE_SALE_TEXT_RE.test(String(inboundMessage || ''));
@@ -1419,7 +1485,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   const { block: openTimesBlock, days: openTimesDays } = presetFactsBlock
     ? { block: null, days: parseOpenTimesDaysFromFactsBlock(presetFactsBlock) }
     : await fetchOpenTimesData({
-      city, customerId: context?.customer?.id || null, schedulingIntent: needsOpenTimes, estimateId,
+      city, customerId: context?.customer?.id || null, schedulingIntent: needsOpenTimes, estimateId, serviceType,
     });
   const factsBlock = presetFactsBlock || buildFactsBlock(context, { openTimesBlock });
   // Few-shot voice grounding: intent-matched real human replies (redacted),
@@ -1465,7 +1531,11 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   // revise loop does — converged:false, which every consumer already
   // refuses to publish or send.
   if (!VERIFY_ENABLED) {
-    const singlePassCheck = validateOfferedTimes({ offeredTimes: parsed?.offered_times, openTimesDays, reply: parsed?.reply, factsBlock });
+    // No facts block here on purpose (Codex r3): the grounded-elsewhere
+    // allowance exists so the LLM verifier can judge a confirmation of a
+    // booked visit; with that verifier OFF nothing can, so an undeclared
+    // quote of any OPEN TIMES window is a violation outright.
+    const singlePassCheck = validateOfferedTimes({ offeredTimes: parsed?.offered_times, openTimesDays, reply: parsed?.reply });
     if (!singlePassCheck.ok) {
       logger.warn(`[sms-shadow] single-pass draft failed the offered_times check (${singlePassCheck.violations.join('; ')}); not converged`);
       return {
@@ -1476,7 +1546,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     return {
       parsed, passes: 1, converged: true, model, servedModel, voiceProfileVersion, verifierModels: [], factsBlock, promptVersion,
       openTimesSnapshot: computeOpenTimesSnapshot({
-        openTimesBlock, offeredTimes: parsed?.offered_times, city, customerId: context?.customer?.id || null, estimateId,
+        openTimesBlock, offeredTimes: parsed?.offered_times, city, customerId: context?.customer?.id || null, estimateId, serviceType,
       }),
     };
   }
@@ -1558,7 +1628,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     // earlier draft may have quoted a window a REVISION dropped, or vice
     // versa; only what's actually about to be sent matters here.
     openTimesSnapshot: computeOpenTimesSnapshot({
-      openTimesBlock, offeredTimes: parsed?.offered_times, city, customerId: context?.customer?.id || null, estimateId,
+      openTimesBlock, offeredTimes: parsed?.offered_times, city, customerId: context?.customer?.id || null, estimateId, serviceType,
     }),
   };
 }
@@ -1823,33 +1893,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // draft that accurately repeats "the $2.85 credit-card fee" must not read
     // as ungrounded. It is shared with the scheduler's fire-time
     // revalidation because two copies of this list had already drifted.
-    const authorizedCents = new Set([
-      context.billing?.outstandingBalance > 0 ? centsOf(context.billing.outstandingBalance) : null,
-      context.billing?.openInvoice?.amountDue != null ? centsOf(context.billing.openInvoice.amountDue) : null,
-      ...require('./context-aggregator').authorizedDuesCents(context),
-      ...((context.billing?.recentPayments || []).map((p) => (p?.amount != null ? centsOf(p.amount) : null))),
-    ].filter((v) => Number.isFinite(v)));
-    // Every amount syntax hasPriceQuote recognizes (Codex r7): $-prefixed,
-    // USD-prefixed, and number-with-unit ("50 dollars"/"50 bucks"). Bare
-    // unit-less numerals stay out of the deterministic guard (dates, house
-    // numbers, zone counts would false-positive) — those remain the
-    // verifier's + reviewer's territory.
-    const AMOUNT_FORMS_RE = /(?:\$|\bUSD\s?)\s?\d[\d,]*(?:\.\d{1,2})?|\b\d[\d,]*(?:\.\d{1,2})?\s?(?:dollars|bucks|usd)\b/gi;
-    const replyAmounts = (parsed.reply.match(AMOUNT_FORMS_RE) || [])
-      .map((a) => centsOf(a.replace(/[^\d.]/g, '')));
-    // FAIL CLOSED on grammar the numeric extractor can't verify (Codex r8):
-    // hasPriceQuote recognizes spelled amounts ("fifty dollars"), cents,
-    // Spanish forms, and cadence ("45/mo") — if the price grammar fires and
-    // we cannot positively match EVERY numeric to an authorized value, the
-    // draft stays shadow. An authorized "$120.00" reply extracts and passes;
-    // "fifty dollars" stays unverifiable and withholds. Cadence follows the
-    // same rule as any other amount now that dues are authorized: "$98.50/mo"
-    // extracts $98.50 and passes for a monthly member, while a bare "45/mo"
-    // carries no currency marker, extracts nothing, and still withholds.
-    const priceGrammarFires = suggestMode.hasPriceQuote(parsed.reply);
-    const replyHasUngroundedAmount = priceGrammarFires
-      ? (replyAmounts.length === 0 || replyAmounts.some((a) => !authorizedCents.has(a)))
-      : replyAmounts.some((a) => !authorizedCents.has(a));
+    const replyHasUngroundedAmount = replyQuotesUngroundedAmount(parsed.reply, context);
     if (replyHasUngroundedAmount) {
       logger.warn(`[sms-shadow] draft quotes an amount absent from the facts block — kept shadow (customer=${customer?.id || 'unknown'} intent=${intentName})`);
     }
@@ -1918,6 +1962,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
               promptVersion,
               lintFailures: lint.failures,
               openTimesSnapshot,
+              intendedActions: parsed.intended_actions,
             });
             if (decisionId) deliveredAs = suggestMode.SUGGESTED_STATUS;
           }
@@ -1966,6 +2011,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
             promptVersion,
             lintFailures: lint.failures,
             openTimesSnapshot,
+            intendedActions: parsed.intended_actions,
           });
           if (decisionId) deliveredAs = suggestMode.SUGGESTED_STATUS;
         }
@@ -2037,4 +2083,9 @@ module.exports = {
   looksLikeOfferText,
   computeOpenTimesSnapshot,
   openTimesStillOffered,
+  SLA_PHRASES: followupSla.SLA_PHRASES,
+  replyPromisesFollowup: followupSla.replyPromisesFollowup,
+  slaPhraseStatus: followupSla.slaPhraseStatus,
+  replyQuotesUngroundedAmount,
+  liveServiceType,
 };

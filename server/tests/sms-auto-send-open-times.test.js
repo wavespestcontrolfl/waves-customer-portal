@@ -133,3 +133,25 @@ test('a reply that dropped every quoted window (edited before send) skips the re
   })).resolves.toMatchObject({ sent: true });
   expect(drafter.openTimesStillOffered).not.toHaveBeenCalled();
 });
+
+// PR #5119 Codex r3 P1: a reply that promises the follow-up SLA must be
+// OWNED by an escalate action, or nobody works the promise. Deterministic at
+// the autonomy boundary, independent of the prompt and the LLM verifier.
+describe('auto-send refuses an unowned follow-up promise', () => {
+  test('an SLA phrase with no escalate action → refused (unowned_followup), provider never called', async () => {
+    await expect(attempt({ reply: "I'll check with the office and get back to you within the hour.", intendedActions: [] })).resolves.toMatchObject({
+      sent: false, reason: 'unowned_followup',
+    });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('the same phrase WITH an escalate action is past this check (stopped later by the action gate, never by this one)', async () => {
+    const r = await attempt({ reply: "I'll check with the office and get back to you within the hour.", intendedActions: [{ type: 'escalate', note: 'followup_promised' }] });
+    expect(r.reason).not.toBe('unowned_followup');
+    expect(sendCustomerMessage).not.toHaveBeenCalled(); // an escalate action is never auto-send-safe
+  });
+
+  test('no SLA phrase → unaffected', async () => {
+    await expect(attempt({ reply: 'Sounds good, thanks!' })).resolves.toMatchObject({ sent: true });
+  });
+});
