@@ -272,6 +272,28 @@ async function publishCapGate(ctx) {
   return null;
 }
 
+// Re-prove each link TARGET at merge time: a target deleted, renamed, made
+// noindex or re-canonicalized while the PR waited would ship a broken or
+// wasted link that the source-only diff check cannot see. Missing → close;
+// a GitHub read error → hold.
+async function targetStillValidGate(ctx) {
+  for (const task of ctx.prTasks) {
+    let target;
+    try {
+      target = await this._loadTargetPage(task);
+    } catch (err) {
+      const reason = String(err?.message || err);
+      if (!MISSING_FILE_RE.test(reason)) return { hold: 'target_check_unavailable' };
+      return { reason: 'target_gone', close: { status: 'failed', failureReason: 'internal_link_target_gone', note: `Link target ${task.target_url} no longer exists on main; PR closed without merging.` } };
+    }
+    const targetUrl = policy.normalizeInternalUrl(task.target_url);
+    if (target.indexable !== true || !policy.canonicalMatches(targetUrl, target.canonical_url)) {
+      return { reason: 'target_not_linkable', close: { status: 'failed', failureReason: 'internal_link_target_not_linkable', note: `Link target ${task.target_url} is now noindex or canonicalized elsewhere; PR closed without merging.` } };
+    }
+  }
+  return null;
+}
+
 // Re-prove source protection at merge time: a page protected AFTER the PR
 // opened (while it waited on preview, Codex or a cap) must not be edited
 // unattended. A lookup error fails closed (hold).
@@ -296,7 +318,7 @@ function mergeCapGate(ctx) {
   return ctx.allowMerge ? null : { hold: 'merge_cap_reached' };
 }
 
-const MERGE_GATES = [prStateGate, provenanceGate, productionBaseGate, codexFindingsGate, linkOnlyDiffGate, previewBuildGate, codexGraceGate, sourceProtectionMergeGate, publishCapGate, mergeCapGate];
+const MERGE_GATES = [prStateGate, provenanceGate, productionBaseGate, codexFindingsGate, linkOnlyDiffGate, previewBuildGate, codexGraceGate, targetStillValidGate, sourceProtectionMergeGate, publishCapGate, mergeCapGate];
 
 class InternalLinkPrExecutor {
   async runDryRun({ limit = DEFAULT_LIMIT, taskIds = null } = {}) {

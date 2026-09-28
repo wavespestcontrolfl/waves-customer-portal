@@ -4259,9 +4259,10 @@ async function planInternalLinksForTarget(target = {}) {
   if (!url) return null;
   const corpus = await loadAstroCorpusForPlanning(planner);
   if (!corpus.length) return null;
+  const excludeSource = await require('../content/protected-pages').protectedSourcePredicate({ db });
   const tasks = planner.planForTarget(
     { url, keyword: target.keyword, city: target.city, title: target.title },
-    { corpus }
+    { corpus, excludeSource }
   );
   // Same insert-or-refresh helper as the runner's planning paths — a raw
   // onConflict().ignore() here discarded the current plan's keyword and

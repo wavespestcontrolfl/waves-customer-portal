@@ -54,7 +54,7 @@ async function judgeLink({ anchor, paragraph, sourceTitle, sourceUrl, targetTitl
   ].join('\n\n');
   let resp;
   try {
-    resp = await dispatchWithFallback(MODELS.TEXT_POLICIES.balancedAnswer, {
+    resp = await dispatchWithFallback(MODELS.TEXT_POLICIES.fastStructured, {
       laneId: 'internal_link_judge',
       maxTokens: 1024,
       jsonMode: true,

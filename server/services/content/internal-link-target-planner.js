@@ -91,6 +91,7 @@ async function planGscTargets({
   if (!corpus.length) return { status: 'no_corpus', targets: pages.length, queued: 0, candidates: 0 };
 
   const { queueInternalLinkTaskForDryRun } = require('./autonomous-runner')._internals;
+  const excludeSource = await require('./protected-pages').protectedSourcePredicate({ db });
   const taskIds = [];
   const summary = [];
   for (const page of pages) {
@@ -99,7 +100,7 @@ async function planGscTargets({
       summary.push({ url: page.url, queued: 0, reason: 'not_in_corpus' });
       continue;
     }
-    const tasks = planner.planForTarget(target, { corpus });
+    const tasks = planner.planForTarget(target, { corpus, excludeSource });
     const ids = [];
     for (const task of tasks) {
       const queued = await queueInternalLinkTaskForDryRun({ ...task, target_priority: page.impressions }, null);

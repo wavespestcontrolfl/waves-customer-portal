@@ -179,8 +179,29 @@ async function autoPopulate({ db, impressionThreshold = DEFAULT_IMPRESSION_THRES
   return { added, skipped, scanned: rows.length, impression_threshold: impressionThreshold };
 }
 
+/**
+ * protectedSourcePredicate({ db }) → (url) => boolean, for sync callers that
+ * must screen many URLs at once (the internal-link planner's corpus scan).
+ * Pattern layer + one registry read. Fails CLOSED like isProtected: if the
+ * registry can't be read, every URL counts as protected.
+ */
+async function protectedSourcePredicate({ db } = {}) {
+  let registry = new Set();
+  if (db) {
+    try {
+      const rows = await db('protected_pages').select('page_url');
+      registry = new Set(rows.map((r) => normalizePath(r.page_url)));
+    } catch (err) {
+      logger.warn(`[protected-pages] registry list failed: ${err.message} — treating every source as protected`);
+      return () => true;
+    }
+  }
+  return (url) => isProtectedByPattern(url).protected || registry.has(normalizePath(url));
+}
+
 module.exports = {
   isProtected,
+  protectedSourcePredicate,
   isProtectedByPattern,
   normalizePath,
   add,

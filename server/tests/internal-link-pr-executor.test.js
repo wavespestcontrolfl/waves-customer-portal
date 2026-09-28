@@ -1280,6 +1280,7 @@ describe('internal-link PR auto-merge', () => {
     instance = new InternalLinkPrExecutor();
     instance._markTaskMerged = jest.fn();
     instance._closeLinkPr = jest.fn(async () => true);
+    instance._loadTargetPage = jest.fn(async () => page('src/content/services/termite-inspection.md', targetBody));
     jest.spyOn(require('../services/content-astro/pages-poll'), 'latestDeploymentForBranch')
       .mockResolvedValue({ latest_stage: { status: 'success' }, deployment_trigger: { metadata: { branch: 'content/internal-link-x', commit_hash: HEAD } } });
   });
@@ -1472,6 +1473,16 @@ describe('internal-link PR auto-merge', () => {
     expect(protectedPages.isProtected).toHaveBeenCalledWith('/a/', expect.any(Object));
     protectedPages.isProtected.mockResolvedValueOnce({ protected: true, reason: 'protected_check_error', source: 'error' });
     expect(await instance.runAutoMerge()).toMatchObject({ status: 'hold', reason: 'protection_check_unavailable' });
+    expect(GitHubClient.mergePr).not.toHaveBeenCalled();
+  });
+
+  test('a target that vanished, went noindex, or failed to load blocks the merge', async () => {
+    instance._loadTargetPage.mockRejectedValueOnce(new Error('target_file_not_found:src/content/services/termite-inspection.md'));
+    expect(await instance.runAutoMerge()).toMatchObject({ status: 'closed', reason: 'target_gone' });
+    instance._loadTargetPage.mockResolvedValueOnce({ ...page('src/content/services/termite-inspection.md', targetBody), indexable: false });
+    expect(await instance.runAutoMerge()).toMatchObject({ status: 'closed', reason: 'target_not_linkable' });
+    instance._loadTargetPage.mockRejectedValueOnce(new Error('GitHub 502'));
+    expect(await instance.runAutoMerge()).toMatchObject({ status: 'hold', reason: 'target_check_unavailable' });
     expect(GitHubClient.mergePr).not.toHaveBeenCalled();
   });
 

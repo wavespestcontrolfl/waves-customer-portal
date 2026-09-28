@@ -2488,9 +2488,10 @@ class AutonomousRunner {
 
     const t = Date.now();
     const corpus = await this._loadAstroCorpus({ required: false });
+    const excludeSource = await getProtectedPages()?.protectedSourcePredicate?.({ db });
     const tasks = planner.planForTarget(
       { url: brief.target_url, keyword: brief.target_keyword, city: brief.city, service: brief.service, title: brief.title },
-      { corpus, opportunityId: run.opportunity_id }
+      { corpus, opportunityId: run.opportunity_id, excludeSource }
     );
     if (!tasks.length) {
       // No keyword in the log line — brief.target_keyword can carry the
@@ -2508,10 +2509,10 @@ class AutonomousRunner {
     let dryRunResult = null;
     if (executor?.runDryRun && taskIds.length) {
       const t2 = Date.now();
-      dryRunResult = await executor.runDryRun({
-        taskIds,
-        limit: envInt('AUTONOMOUS_INTERNAL_LINK_DRY_RUN_LIMIT', taskIds.length),
-      });
+      // Every planned task is dry-run before the claim completes: the sweep
+      // ships only patch_candidate rows, so a task left queued here would
+      // never be evaluated again.
+      dryRunResult = await executor.runDryRun({ taskIds, limit: taskIds.length });
       run.link_execute_ms = Date.now() - t2;
     }
     const candidates = Number((dryRunResult?.results || []).filter((result) => result.status === 'patch_candidate').length);

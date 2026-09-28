@@ -606,7 +606,7 @@ class InternalLinkPlanner {
    * Returns [{ source_file, target_url, anchor_text, context_snippet,
    *            source_offset, opportunity_id }]
    */
-  planForTarget(target, { corpus = [], opportunityId = null, cap = DEFAULT_LINK_CAP, perPageCap = DEFAULT_PER_PAGE_CAP } = {}) {
+  planForTarget(target, { corpus = [], opportunityId = null, cap = DEFAULT_LINK_CAP, perPageCap = DEFAULT_PER_PAGE_CAP, excludeSource = null } = {}) {
     // Deliberately NOT per-call options: the executor resolves these from
     // its own env/defaults, and a caller overriding only the planner side
     // would plan tasks the gate rejects (or starve valid ones).
@@ -654,6 +654,9 @@ class InternalLinkPlanner {
     for (const page of corpus) {
       const pageUrl = page.url || deriveUrlFromSourceFile(page.file, page.body);
       if (sameUrl(pageUrl, targetPath)) continue; // never link page to itself
+      // Protected pages (money / high-traffic / manual) are never edited
+      // unattended, so they must not occupy a planned slot either.
+      if (excludeSource && excludeSource(pageUrl)) continue;
       const front = fm.parse(String(page.body || '')).data || {};
       // Every executor precondition knowable from the corpus runs HERE,
       // before the cap — a source the gate would reject must never occupy
