@@ -1166,6 +1166,10 @@ function deriveCloseoutFacts(inputs) {
     contradictions,
     packet,
     posture,
+    // The record the report + reportDelivery facts were read from (the one
+    // carrying the report artifact, else the primary record) — a repair of
+    // those facts must act on this record, never a sibling.
+    reportRecordId: tokenRecord?.id || null,
     billing: {
       lane: inputs.lane?.mode || null,
       laneSource: inputs.lane?.source || null,
@@ -1254,6 +1258,7 @@ async function getCloseoutStatus(serviceId, { knex = db, now = new Date() } = {}
       posture: derived.posture,
     } : null,
     packet: derived.packet,
+    reportRecordId: derived.reportRecordId,
     visitReRead: inputs.visitReRead || null,
     requirements: requirements ? {
       ...requirements,
