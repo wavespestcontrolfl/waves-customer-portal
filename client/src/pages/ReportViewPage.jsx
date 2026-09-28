@@ -55,7 +55,7 @@ import {
   docTransition,
 } from '../theme-doc';
 import { CustomerColumn, PublicStateCard } from '../components/brand';
-import ServiceReportDocument from './ServiceReportDocument';
+import ServiceReportDocument, { sanitizeReentryCopy } from './ServiceReportDocument';
 import { useWavesShell } from '../components/brand/WavesShellContext';
 import { useGlassSurface } from '../glass/glass-engine';
 import PestPressureCard from '../components/PestPressureCard';
@@ -3736,7 +3736,7 @@ function AppliedProductsSection({ data, mode = 'live' }) {
                       </>
                     )}
                     <div className="sr-cell-label">Pets &amp; kids</div>
-                    <p>{reportCopy.pets_kids}</p>
+                    <p>{sanitizeReentryCopy(reportCopy.pets_kids)}</p>
                   </div>
                 )}
               <details className="solution-detail report-accordion" open={mode !== 'live'}>

@@ -251,7 +251,7 @@ const REENTRY_SAFE_COPY = 'Ready once dry — your technician confirms timing.';
 // that consolidation necessary; this local pass stays as a backstop for any
 // path that reaches the document without going through that boundary, and
 // must never become the primary enforcement point again.
-function sanitizeReentryCopy(value) {
+export function sanitizeReentryCopy(value) {
   const text = String(value || '').trim();
   if (!text) return '';
   const sentences = text.split(/(?<=[.!?])\s+/).filter(Boolean);
