@@ -19,6 +19,7 @@ const db = require('../models/db');
 const { deliverOpsDigest } = require('./ops-digest');
 const { isInternalEmailRecipient } = require('../utils/internal-email-recipients');
 const { etWeekStart } = require('../utils/datetime-et');
+const { gapReportsEnabled } = require('./agent-gap-reports');
 
 const digestEmail = () => process.env.AGENT_GAP_DIGEST_EMAIL || 'contact@wavespestcontrol.com';
 const fromEmail = () => process.env.SENDGRID_FROM_EMAIL || 'contact@wavespestcontrol.com';
@@ -63,11 +64,43 @@ function composeAgentGapDigest(rows) {
   return { subject, text, count };
 }
 
+// Durable weekly-send guard, same as turf-variance-digest (codex #3230 P1):
+// runExclusive only serializes CONCURRENT ticks, so a deploy-overlap
+// instance entering after the first released the lock would send again.
+// The dedupeKey below already holds the bell to one row per ET week; this
+// marker covers the email path. It stamps only after a delivery succeeded.
+// Read failure sends anyway (a rare double beats a silently skipped week).
+const SEND_MARKER_KEY = 'agent-gap-digest';
+const SIX_DAYS_MS = 6 * 24 * 60 * 60 * 1000;
+
+async function sentRecently() {
+  try {
+    const row = await db('ops_email_send_state').where({ email_key: SEND_MARKER_KEY }).first('last_sent_at');
+    return Boolean(row?.last_sent_at && (Date.now() - new Date(row.last_sent_at).getTime()) < SIX_DAYS_MS);
+  } catch (err) {
+    logger.warn(`[agent-gap-digest] send-marker read failed (${err.code || err.name || 'error'}) — proceeding without the guard`);
+    return false;
+  }
+}
+
+async function stampSendMarker() {
+  try {
+    const now = new Date();
+    await db('ops_email_send_state')
+      .insert({ email_key: SEND_MARKER_KEY, last_sent_at: now, updated_at: now })
+      .onConflict('email_key')
+      .merge({ last_sent_at: now, updated_at: now });
+  } catch (err) {
+    logger.warn(`[agent-gap-digest] send-marker write failed (${err.code || err.name || 'error'}) — next tick may re-send`);
+  }
+}
+
 function dedupeKeyFor(now = new Date()) {
   return `agent-gap-digest:${etWeekStart(now)}`;
 }
 
 async function runAgentGapDigest(opts = {}) {
+  if (!gapReportsEnabled()) return { skipped: 'disabled' };
   let rows;
   try {
     rows = await (opts.loadRows || loadRecentGaps)();
@@ -78,6 +111,8 @@ async function runAgentGapDigest(opts = {}) {
 
   const composed = composeAgentGapDigest(rows);
   if (!composed) return { skipped: 'empty' };
+
+  if (await (opts.sentRecently || sentRecently)()) return { skipped: 'recent_send' };
 
   const mailer = opts.sendgrid || sendgrid;
   if (typeof mailer.isConfigured === 'function' && !mailer.isConfigured()) {
@@ -92,8 +127,9 @@ async function runAgentGapDigest(opts = {}) {
     return { skipped: 'recipient', ...composed };
   }
 
+  let delivered;
   try {
-    await deliverOpsDigest({
+    delivered = await deliverOpsDigest({
       key: 'agent-gap-digest',
       subject: composed.subject,
       text: BELL_BODY,
@@ -112,7 +148,14 @@ async function runAgentGapDigest(opts = {}) {
     logger.error(`[agent-gap-digest] send failed (status ${Number.isInteger(err?.status) ? err.status : 'network'})`);
     return { sent: false, error: true, ...composed };
   }
-  logger.info(`[agent-gap-digest] sent: ${composed.count} gap(s)`);
+  // deliverOpsDigest resolves { ok: false } for a mailer that reports failure
+  // instead of throwing — that is not a delivery either.
+  if (delivered?.ok === false) {
+    logger.error('[agent-gap-digest] send failed (delivery reported not ok)');
+    return { sent: false, error: true, ...composed };
+  }
+  await (opts.stampSendMarker || stampSendMarker)();
+  logger.info(`[agent-gap-digest] sent: ${composed.count} gap(s) via ${delivered?.channel || 'unknown'}`);
   return { sent: true, ...composed };
 }
 

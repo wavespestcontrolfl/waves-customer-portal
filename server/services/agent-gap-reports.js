@@ -23,6 +23,13 @@ const { redactText } = require('./agent-decision-training');
 const policy = require('./intelligence-bar/action-policy.json');
 
 const KINDS = new Set(['missing_capability', 'tool_failure', 'blocked']);
+
+// Kill switch (CLAUDE.md rule 14): AGENT_GAP_REPORTS=off stops the bar
+// offering report_gap, the per-request collector, every write here and the
+// Monday digest. Read at call time, so a flip needs no redeploy. Default on.
+function gapReportsEnabled() {
+  return String(process.env.AGENT_GAP_REPORTS || '').trim().toLowerCase() !== 'off';
+}
 const MAX_TEXT = 300;
 const TOOL_NAME_RE = /^[a-z0-9_]{1,64}$/;
 const UUID_RE = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi;
@@ -78,7 +85,7 @@ function fingerprintFor({ source, kind, closestTool, summary }) {
  */
 async function recordGapReport({ source, kind, summary, attempted, closestTool, domain } = {}) {
   try {
-    if (!KINDS.has(kind)) return null;
+    if (!gapReportsEnabled() || !KINDS.has(kind)) return null;
     const cleanSummary = cleanText(summary);
     if (!cleanSummary) return null;
     const tool = cleanTool(closestTool);
@@ -115,6 +122,18 @@ async function recordGapReport({ source, kind, summary, attempted, closestTool, 
   }
 }
 
+// report_gap calls one request may record; later ones answer limit_reached.
+const REPORT_CALL_LIMIT = 3;
+const PROMPT_LINE = '\nWhen you tell the operator you cannot do something they asked because a capability is missing, '
+  + 'a tool failed or misbehaved, or a rule blocks it, call report_gap once for that gap before your final answer. '
+  + 'Do not report missing information, pending approvals, or requests you completed.';
+
+// The platform prompt's report_gap instruction — empty while the kill switch
+// is off, so the prompt never names a tool the bar is not offering.
+function gapReportPromptLine() {
+  return gapReportsEnabled() ? PROMPT_LINE : '';
+}
+
 const IGNORED_TOOL_NAMES = new Set(['discover_capabilities', 'report_gap']);
 // A tool that failed only because it was never discover_capabilities-loaded
 // yet is a routing artifact of the loop, not a real capability gap.
@@ -132,6 +151,7 @@ function createGapCollector({ source }) {
   const toolFailures = new Map(); // toolName -> { count, lastCode }
   const reportedTools = new Set();
   let anyReported = false;
+  let reportCalls = 0;
 
   function discovery(input, result) {
     if (result?.status === 'capability_unimplemented') {
@@ -165,9 +185,29 @@ function createGapCollector({ source }) {
     }
   }
 
-  function reported(input) {
+  // The model's own report_gap call. Its intent to report suppresses the
+  // automatic discovery signal for this request even when the call is capped
+  // or the write fails. Returns the model-facing tool result (never an error).
+  async function fileReport(input) {
     anyReported = true;
     if (input?.tool) reportedTools.add(String(input.tool));
+    if (reportCalls >= REPORT_CALL_LIMIT) return { status: 'limit_reached' };
+    reportCalls += 1;
+    const recorded = await recordGapReport({
+      source,
+      kind: input?.kind,
+      summary: input?.wanted,
+      attempted: input?.tried,
+      closestTool: input?.tool,
+      domain: input?.domain,
+    });
+    if (!recorded) return { status: 'not_recorded', note: 'Tell the operator plainly what you could not do.' };
+    return {
+      status: 'recorded',
+      gap_id: recorded.id,
+      times_seen: recorded.occurrences,
+      note: `Recorded for the owner's weekly review. Tell the operator plainly what you could not do and mention gap #${recorded.id} in one short clause. Do not promise it will be built.`,
+    };
   }
 
   async function flush() {
@@ -195,7 +235,7 @@ function createGapCollector({ source }) {
     }
   }
 
-  return { discovery, toolResult, reported, flush };
+  return { discovery, toolResult, fileReport, flush };
 }
 
-module.exports = { recordGapReport, createGapCollector };
+module.exports = { gapReportsEnabled, gapReportPromptLine, recordGapReport, createGapCollector };

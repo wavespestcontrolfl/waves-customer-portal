@@ -50,6 +50,30 @@ describe('agent-gap-reports', () => {
       expect(dbMock).not.toHaveBeenCalled();
     });
 
+    test('the AGENT_GAP_REPORTS=off kill switch records nothing and never touches the database', async () => {
+      process.env.AGENT_GAP_REPORTS = 'off';
+      try {
+        const { recordGapReport, gapReportsEnabled } = load();
+        expect(gapReportsEnabled()).toBe(false);
+        const result = await recordGapReport({ source: 'intelligence-bar', kind: 'missing_capability', summary: 'Add a second service address' });
+        expect(result).toBeNull();
+        expect(dbMock).not.toHaveBeenCalled();
+      } finally {
+        delete process.env.AGENT_GAP_REPORTS;
+      }
+    });
+
+    test('the platform prompt line names report_gap only while the kill switch is on', () => {
+      const { gapReportPromptLine } = load();
+      expect(gapReportPromptLine()).toContain('report_gap');
+      process.env.AGENT_GAP_REPORTS = 'off';
+      try {
+        expect(gapReportPromptLine()).toBe('');
+      } finally {
+        delete process.env.AGENT_GAP_REPORTS;
+      }
+    });
+
     test('two summaries that differ only in word order dedupe to the same fingerprint', async () => {
       const { recordGapReport } = load();
       await recordGapReport({ source: 'intelligence-bar', kind: 'missing_capability', summary: 'add property to customer' });
@@ -139,6 +163,27 @@ describe('agent-gap-reports', () => {
   });
 
   describe('createGapCollector', () => {
+    test('fileReport returns the recorded gap number and answers limit_reached after three calls without writing', async () => {
+      const { createGapCollector } = load();
+      const collector = createGapCollector({ source: 'intelligence-bar' });
+      const first = await collector.fileReport({ kind: 'blocked', wanted: 'refund a card payment' });
+      expect(first).toMatchObject({ status: 'recorded', gap_id: 7, times_seen: 1 });
+      expect(first.note).toContain('gap #7');
+      await collector.fileReport({ kind: 'blocked', wanted: 'refund an ACH payment' });
+      await collector.fileReport({ kind: 'blocked', wanted: 'void a paid invoice' });
+      expect(await collector.fileReport({ kind: 'blocked', wanted: 'charge a stored card' })).toEqual({ status: 'limit_reached' });
+      expect(insertedRows).toHaveLength(3);
+    });
+
+    test('fileReport answers not_recorded (never an error) when the write fails', async () => {
+      const { createGapCollector } = load();
+      dbMock.mockImplementation(() => { throw Object.assign(new Error('down'), { code: 'ECONNREFUSED' }); });
+      const collector = createGapCollector({ source: 'intelligence-bar' });
+      const result = await collector.fileReport({ kind: 'missing_capability', wanted: 'add a second service address' });
+      expect(result.status).toBe('not_recorded');
+      expect(result).not.toHaveProperty('error');
+    });
+
     test('a recovered discovery (capabilities_found) drops the earlier missing_capability signal', async () => {
       const { createGapCollector } = load();
       const collector = createGapCollector({ source: 'intelligence-bar' });
@@ -162,9 +207,11 @@ describe('agent-gap-reports', () => {
       const { createGapCollector } = load();
       const collector = createGapCollector({ source: 'intelligence-bar' });
       collector.discovery({ query: 'add second address' }, { status: 'capability_unimplemented' });
-      collector.reported({ tool: null });
+      await collector.fileReport({ kind: 'missing_capability', wanted: 'add a second service address to a customer' });
       await collector.flush();
-      expect(insertedRows).toHaveLength(0);
+      // Only the model's own report was written; the automatic signal was dropped.
+      expect(insertedRows).toHaveLength(1);
+      expect(insertedRows[0].summary).toBe('add a second service address to a customer');
     });
 
     test('a tool that fails twice in one request records one tool_failure gap with the error code, never the raw message', async () => {
@@ -194,9 +241,11 @@ describe('agent-gap-reports', () => {
       const collector = createGapCollector({ source: 'intelligence-bar' });
       collector.toolResult('send_sms', { error: 'oops', code: 'oops' }, true);
       collector.toolResult('send_sms', { error: 'oops', code: 'oops' }, true);
-      collector.reported({ tool: 'send_sms' });
+      await collector.fileReport({ kind: 'tool_failure', wanted: 'send a text to a customer', tool: 'send_sms' });
       await collector.flush();
-      expect(insertedRows).toHaveLength(0);
+      expect(insertedRows).toHaveLength(1);
+      expect(insertedRows[0].kind).toBe('tool_failure');
+      expect(insertedRows[0].summary).toBe('send a text to a customer');
     });
 
     test('capability_not_loaded failures are ignored — a routing artifact, not a real gap', async () => {

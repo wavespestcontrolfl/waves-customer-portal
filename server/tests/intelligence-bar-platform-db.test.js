@@ -1249,15 +1249,6 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     // assertions below must not look like one.
     const uniqueToken = () => `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 
-    async function waitFor(check, { tries = 40, delayMs = 25 } = {}) {
-      for (let i = 0; i < tries; i += 1) {
-        const result = await check();
-        if (result) return result;
-        await new Promise((resolve) => setTimeout(resolve, delayMs));
-      }
-      throw new Error('condition not met in time');
-    }
-
     test('report_gap records a row and returns its gap_id to the model', async () => {
       const wanted = `Synthetic gap ${uniqueToken()}: add a second service address to a customer`;
       mockModel.mockResolvedValueOnce(tools('report_gap', {
@@ -1300,7 +1291,8 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
         .mockResolvedValueOnce(answer('I could not find a way to do that.'));
       const result = await api('/query', request('Do something that does not exist'));
       expect(result.status).toBe(200);
-      const row = await waitFor(() => db('agent_gap_reports').where({ source: 'intelligence-bar', kind: 'missing_capability', summary: query }).first());
+      // flush() is awaited before the reply, so the row exists once the request returns.
+      const row = await db('agent_gap_reports').where({ source: 'intelligence-bar', kind: 'missing_capability', summary: query }).first();
       expect(row.occurrences).toBe(1);
       await db('agent_gap_reports').where('id', row.id).del();
     }, 30000);
@@ -1313,9 +1305,8 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
         .mockResolvedValueOnce(answer('Found a way after all — awaiting confirmation.'));
       const result = await api('/query', request('First try something odd, then update this customer'));
       expect(result.status).toBe(200);
-      // The response already returned; the miss's discoverySignal was cleared
-      // synchronously inside the tool loop (before flush ever ran), so there
-      // is nothing to wait for here — its absence is structural, not timing.
+      // The miss's signal was cleared inside the tool loop when the second
+      // discovery found capabilities, so the awaited flush wrote nothing.
       const row = await db('agent_gap_reports').where({ source: 'intelligence-bar', kind: 'missing_capability', summary: query }).first();
       expect(row).toBeUndefined();
     }, 30000);

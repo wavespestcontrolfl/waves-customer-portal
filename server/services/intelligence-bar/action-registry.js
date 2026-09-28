@@ -12,6 +12,7 @@ const { mergeCustomersEnabled } = require('./customer-lifecycle-tools');
 const AGENT_ESTIMATE_TOOL_NAMES = require('./agent-estimate-policy');
 const apiToolDefinition = require('./tool-definition');
 const { validScope } = require('./scope-policy');
+const { gapReportsEnabled } = require('../agent-gap-reports');
 
 const MODULES = [
   ['customer-estimate-tools', 'CUSTOMER_ESTIMATE_TOOLS', 'executeCustomerEstimateTool'],
@@ -186,7 +187,8 @@ function discover(input, scope) {
 function initialTools(context, scope) {
   const domain = { estimates: 'estimate', agent_estimate: 'estimate', inventory: 'procurement', dispatch: 'schedule', reviews: 'review', blog: 'seo' }[context] || context;
   const common = new Set(['query_customers', 'get_customer_detail', 'get_schedule_view', 'query_products', 'query_leads', 'list_gap_reports']);
-  const discovery = scope.role === 'admin' && !['tech', 'agent_estimate'].includes(context) ? [DISCOVERY_TOOL, GAP_REPORT_TOOL] : [];
+  const discovery = scope.role === 'admin' && !['tech', 'agent_estimate'].includes(context)
+    ? [DISCOVERY_TOOL, ...(gapReportsEnabled() ? [GAP_REPORT_TOOL] : [])] : [];
   return [...discovery, ...[...actions.values()]
     .filter(a => allowed(a, { ...scope, context }) && a.approval !== 'confirmed_endpoint' && (context === 'agent_estimate' || common.has(a.id) || a.domain === domain))
     .map(a => a.definition)];

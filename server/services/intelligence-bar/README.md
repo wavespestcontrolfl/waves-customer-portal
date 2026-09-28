@@ -46,7 +46,8 @@ kind, closest tool and cleaned-summary word set (so word-order variants of
 the same ask collapse into one row with a bumped `occurrences`), and writes
 through `recordGapReport()`, which never throws. The same module's
 `createGapCollector()` runs alongside the tool loop in
-`admin-intelligence-bar.js` and files its own `missing_capability` /
+`admin-intelligence-bar.js`, handles the model's `report_gap` calls
+(`fileReport`, capped at 3 per request), and files its own `missing_capability` /
 `tool_failure` signals for gaps the model noticed (a `discover_capabilities`
 miss that never recovered, a tool that failed repeatedly) but never reported
 itself — so an operator-visible "I can't do that" leaves a record even when
@@ -55,7 +56,12 @@ the model forgets to call `report_gap`. `list_gap_reports`
 most-hit first, for "what has the bar not been able to do" and "what should
 we build next". `server/services/agent-gap-digest.js` sends the owner a
 short weekly reminder (Monday 8:15am ET, `scheduler.js`) when the last 7
-days recorded anything open; a quiet week sends nothing.
+days recorded anything open; a quiet week sends nothing. The bell carries a
+fixed two-line instruction; the full list is in the bar and in the email
+fallback (`AGENT_GAP_DIGEST_EMAIL`, internal recipients only, default
+contact@). Kill switch: `AGENT_GAP_REPORTS=off` (read at call time) stops
+offering `report_gap`, drops its prompt line, stops every write, and skips the
+digest; `list_gap_reports` keeps reading what was already recorded.
 
 ## Retained context modules
 

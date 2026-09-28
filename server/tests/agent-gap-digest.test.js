@@ -39,6 +39,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   sendgrid.isConfigured.mockReturnValue(true);
   delete process.env.AGENT_GAP_DIGEST_EMAIL;
+  delete process.env.AGENT_GAP_REPORTS;
 });
 
 describe('composeAgentGapDigest', () => {
@@ -98,15 +99,41 @@ describe('dedupeKeyFor', () => {
 
 describe('runAgentGapDigest', () => {
   const rows = [gapRow({ id: 5 })];
+  // Injected so these cases never reach the real ops_email_send_state marker.
+  let stampSendMarker;
+  const run = (opts = {}) => runAgentGapDigest({ sentRecently: async () => false, stampSendMarker, ...opts });
+  beforeEach(() => { stampSendMarker = jest.fn(async () => {}); });
+
+  test('the AGENT_GAP_REPORTS=off kill switch skips before reading anything', async () => {
+    process.env.AGENT_GAP_REPORTS = 'off';
+    const loadRows = jest.fn(async () => rows);
+    const result = await run({ loadRows });
+    expect(result.skipped).toBe('disabled');
+    expect(loadRows).not.toHaveBeenCalled();
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  });
+
+  test('a digest already delivered in the last six days is not sent again (deploy-overlap tick)', async () => {
+    const result = await run({ loadRows: async () => rows, sentRecently: async () => true });
+    expect(result.skipped).toBe('recent_send');
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(stampSendMarker).not.toHaveBeenCalled();
+  });
+
+  test('a successful delivery stamps the weekly send marker once', async () => {
+    const result = await run({ loadRows: async () => rows });
+    expect(result.sent).toBe(true);
+    expect(stampSendMarker).toHaveBeenCalledTimes(1);
+  });
 
   test('empty window skips without sending', async () => {
-    const result = await runAgentGapDigest({ loadRows: async () => [] });
+    const result = await run({ loadRows: async () => [] });
     expect(result.skipped).toBe('empty');
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
   });
 
   test('sends the ACT email to the internal default recipient with the full list, and a short bell body', async () => {
-    const result = await runAgentGapDigest({ loadRows: async () => rows });
+    const result = await run({ loadRows: async () => rows });
     expect(result.sent).toBe(true);
     expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
     const args = sendgrid.sendOne.mock.calls[0][0];
@@ -118,29 +145,30 @@ describe('runAgentGapDigest', () => {
 
   test('mailer not configured skips the send (delivery-blocking preflight)', async () => {
     sendgrid.isConfigured.mockReturnValue(false);
-    const result = await runAgentGapDigest({ loadRows: async () => rows });
+    const result = await run({ loadRows: async () => rows });
     expect(result.skipped).toBe('unconfigured');
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
   });
 
   test('fails closed on a non-internal recipient (delivery-blocking preflight)', async () => {
     process.env.AGENT_GAP_DIGEST_EMAIL = 'stranger@example.com';
-    const result = await runAgentGapDigest({ loadRows: async () => rows });
+    const result = await run({ loadRows: async () => rows });
     expect(result.skipped).toBe('recipient');
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('not an internal address'));
   });
 
   test('query failure is reported, never thrown', async () => {
-    const result = await runAgentGapDigest({ loadRows: async () => { throw new Error('boom'); } });
+    const result = await run({ loadRows: async () => { throw new Error('boom'); } });
     expect(result.skipped).toBe('query_failed');
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
   });
 
   test('send failure reports error without throwing', async () => {
     sendgrid.sendOne.mockRejectedValueOnce(Object.assign(new Error('nope'), { status: 500 }));
-    const result = await runAgentGapDigest({ loadRows: async () => rows });
+    const result = await run({ loadRows: async () => rows });
     expect(result.sent).toBe(false);
     expect(result.error).toBe(true);
+    expect(stampSendMarker).not.toHaveBeenCalled();
   });
 });
