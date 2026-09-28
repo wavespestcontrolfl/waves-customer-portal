@@ -216,11 +216,13 @@ async function siblingCoverageStatus(visit, database, { trustRowStamp = false } 
   };
   if (hasOwnPrice && trustRowStamp && visit.first_application_invoice_id === null) return 'none';
   const firstApp = require('./estimate-first-application-invoice');
-  const isPricedCoveredMember = hasOwnPrice ? await firstApp.isPricedCoveredMemberVisit(svc, database) : false;
-  if (!isSiblingCoverageEligibleVisit({
-    sourceEstimateId: visit.source_estimate_id, hasOwnPrice, isCallback, serviceType: visit.service_type, isPricedCoveredMember,
-  })) return 'none';
   try {
+    // isPricedCoveredMemberVisit already reads true on its own read error
+    // (fail closed); inside the try so any other failure is 'error' too.
+    const isPricedCoveredMember = hasOwnPrice ? await firstApp.isPricedCoveredMemberVisit(svc, database) : false;
+    if (!isSiblingCoverageEligibleVisit({
+      sourceEstimateId: visit.source_estimate_id, hasOwnPrice, isCallback, serviceType: visit.service_type, isPricedCoveredMember,
+    })) return 'none';
     if (isPricedCoveredMember && await firstApp.pricedCoveredMemberOwnRefundHold(svc, database)) return 'needs_review';
     return (await siblingInvoiceCoverageVerdict(svc, database)).status;
   } catch {
