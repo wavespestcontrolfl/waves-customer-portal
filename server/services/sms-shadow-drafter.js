@@ -281,9 +281,16 @@ function openTimesDayLabel(d) {
   return d?.fullDate || [d?.dayOfWeek, d?.month, d?.dayNum].filter(Boolean).join(' ');
 }
 
-async function fetchOpenTimesBlock({ city, customerId, schedulingIntent, estimateId = null } = {}) {
-  if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return null;
-  if (!schedulingIntent || !city) return null;
+// The read-only AvailabilityEngine call, ONE per draft generation — returns
+// both the rendered OPEN TIMES text (block, unchanged contract:
+// fetchOpenTimesBlock below is a thin wrapper over this that every existing
+// caller/test keeps using) and the SAME days in structured form (days:
+// [{date, windows: [...]}]), which validateOfferedTimes checks the model's
+// own offered_times declaration against — one fetch, two views of the same
+// data, so they can never drift apart.
+async function fetchOpenTimesData({ city, customerId, schedulingIntent, estimateId = null } = {}) {
+  if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return { block: null, days: [] };
+  if (!schedulingIntent || !city) return { block: null, days: [] };
   let timer = null;
   try {
     const Availability = require('./availability');
@@ -297,6 +304,7 @@ async function fetchOpenTimesBlock({ city, customerId, schedulingIntent, estimat
     // must reflect THAT estimate's service minutes, not a generic default.
     const result = await Promise.race([Availability.getAvailableSlots(city, estimateId, { customerId }), timeout]);
     const lines = [];
+    const days = [];
     for (const d of (result?.days || [])) {
       const windows = (d.slots || [])
         .map((s) => {
@@ -306,13 +314,15 @@ async function fetchOpenTimesBlock({ city, customerId, schedulingIntent, estimat
         .filter(Boolean)
         .slice(0, OPEN_TIMES_MAX_SLOTS_PER_DAY);
       if (!windows.length) continue; // no slot on this day survived arrival-window formatting
-      lines.push(`- ${openTimesDayLabel(d)}: ${windows.join(', ')}`);
+      const date = openTimesDayLabel(d);
+      lines.push(`- ${date}: ${windows.join(', ')}`);
+      days.push({ date, windows });
       if (lines.length >= OPEN_TIMES_MAX_DAYS) break;
     }
-    return lines.length ? lines.join('\n') : null;
+    return { block: lines.length ? lines.join('\n') : null, days };
   } catch (err) {
     logger.warn(`[sms-shadow] open-times fetch failed (${err.message}); omitting OPEN TIMES section`);
-    return null;
+    return { block: null, days: [] };
   } finally {
     // Whichever side of the race wins, the timer must never outlive this
     // call — an uncleared setTimeout is a real leaked handle (it kept the
@@ -322,81 +332,90 @@ async function fetchOpenTimesBlock({ city, customerId, schedulingIntent, estimat
   }
 }
 
-// Pre-push audit P2 — OPEN TIMES is a SNAPSHOT taken at draft time, but a
-// draft can sit in human review for up to 48h (suggest-mode /
-// Agent Review) or be scheduled for later, and nothing on those send paths
-// re-checked availability before this fix: a reviewer or the scheduler
-// could send a specific time the drafter offered that is no longer open.
+async function fetchOpenTimesBlock(args) {
+  return (await fetchOpenTimesData(args)).block;
+}
+
+// Owner-directed structural fix, replacing the prose date-parsing that took
+// 3 non-converging local-audit rounds to get subtly wrong in a new way each
+// time (pooling a window's time text across every day that offers it, then
+// over-correcting to require every one of those days to hold, then
+// over-correcting AGAIN with a weekday-text heuristic that still produced a
+// cross-product on a genuinely multi-option reply). The root cause was
+// re-deriving which day the model meant AFTER the fact, from plain reply
+// text — so the model now DECLARES it directly: offered_times is part of
+// its own JSON output (gate-on schema only), and this function is the
+// deterministic, draft-time check of that declaration against the ACTUAL
+// OPEN TIMES list — no prose parsing anywhere in this path. Pure/sync.
 //
-// Which offered (date, window) pairs (from an already-rendered OPEN TIMES
-// block) does `reply` actually quote? Pure/sync — FACT DISCIPLINE requires
-// the model to copy a window's TIME text verbatim, so a plain substring
-// check on that text is a reliable detector; no NLP needed for the time
-// itself. The DATE is disambiguated the same way when possible (pre-push
-// local-audit P1 round 1: pooling window strings across every returned date
-// let a reply quoting "Tuesday 9-11" pass a recheck off a still-open
-// Wednesday 9-11, even with Tuesday fully booked) — but round 2 flagged the
-// opposite failure: requiring EVERY same-time day to hold, unconditionally,
-// retires a perfectly valid "Tuesday 9-11" reply the moment an UNRELATED
-// Wednesday 9-11 gets booked by someone else. So: a window text offered on
-// only one day needs no disambiguation. A window text offered on more than
-// one day is narrowed to whichever of those day(s) the reply's text
-// actually names (its weekday, e.g. "Tuesday", copied the same way OPEN
-// TIMES renders it) — conservative "every candidate day must still hold"
-// applies ONLY when the reply's plain text doesn't name any of the
-// candidate days at all, which is the one case where we genuinely can't
-// tell which day the model meant. Returns [] when the reply quotes no
-// window text (including no OPEN TIMES at all).
-function extractQuotedOpenTimesWindows(openTimesBlock, reply) {
-  if (!openTimesBlock || !reply) return [];
-  const days = [];
-  for (const line of String(openTimesBlock).split('\n')) {
-    const idx = line.indexOf(': ');
-    if (idx === -1) continue;
-    const date = line.slice(2, idx); // strip the leading "- "
-    const weekday = date.split(',')[0].trim(); // "Tuesday, September 29" -> "Tuesday"
-    const windows = line.slice(idx + 2).split(', ').map((w) => w.trim()).filter(Boolean);
-    days.push({ date, weekday, windows });
-  }
-  // Every weekday that offers each window text, so a same-time window
-  // spanning more than one day can be narrowed to the day(s) the reply
-  // names.
-  const weekdaysOfferingWindow = new Map();
-  for (const d of days) {
-    for (const window of d.windows) {
-      if (!weekdaysOfferingWindow.has(window)) weekdaysOfferingWindow.set(window, []);
-      weekdaysOfferingWindow.get(window).push(d.weekday);
+// A violation here is fed into the SAME revise/verify loop
+// generateGroundedDraft already runs for every other grounding failure —
+// exhausting the revision budget still ungrounded fails the draft closed
+// exactly like an ordinary fact-check miss (no draft, no card), never a
+// silent pass-through.
+function validateOfferedTimes({ offeredTimes, openTimesDays, reply }) {
+  const violations = [];
+  const list = Array.isArray(offeredTimes) ? offeredTimes : [];
+  const replyText = reply || '';
+
+  const validPairs = new Set();
+  const windowsByText = new Map(); // window text -> Set(dates that offer it), for the reverse check below
+  for (const d of (openTimesDays || [])) {
+    for (const window of (d.windows || [])) {
+      validPairs.add(`${d.date}|${window}`);
+      if (!windowsByText.has(window)) windowsByText.set(window, new Set());
+      windowsByText.get(window).add(d.date);
     }
   }
-  const replyLower = reply.toLowerCase();
-  const pairs = [];
-  const seen = new Set();
-  for (const d of days) {
-    for (const window of d.windows) {
-      if (!reply.includes(window)) continue;
-      const offeringWeekdays = weekdaysOfferingWindow.get(window) || [];
-      const namedWeekdays = offeringWeekdays.filter((wd) => wd && replyLower.includes(wd.toLowerCase()));
-      // Ambiguous (>1 day offers this time) AND the reply named at least
-      // one of those days, but NOT this one -> the reply pointed elsewhere.
-      if (offeringWeekdays.length > 1 && namedWeekdays.length && !namedWeekdays.includes(d.weekday)) continue;
-      const key = `${d.date}|${window}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      pairs.push({ date: d.date, window });
+
+  const declaredWindows = new Set();
+  for (const entry of list) {
+    const date = entry && typeof entry.date === 'string' ? entry.date : '';
+    const window = entry && typeof entry.window === 'string' ? entry.window : '';
+    if (!date || !window) {
+      violations.push(`offered_times has an entry missing a date or window: ${JSON.stringify(entry)}`);
+      continue;
+    }
+    if (!validPairs.has(`${date}|${window}`)) {
+      violations.push(`offered_times claims "${date}: ${window}" but that is not an OPEN TIMES slot`);
+      continue;
+    }
+    if (!replyText.includes(window)) {
+      violations.push(`offered_times lists "${date}: ${window}" but the reply never quotes that time`);
+      continue;
+    }
+    declaredWindows.add(window);
+  }
+
+  // Reverse check: every OPEN TIMES window the reply actually quotes must
+  // have a declared offered_times entry — an undeclared quote is exactly
+  // the structural gap the date-parsing heuristics existed to patch, and
+  // this replaces that patch with a draft-time requirement instead.
+  for (const [window, dates] of windowsByText) {
+    if (replyText.includes(window) && !declaredWindows.has(window)) {
+      const dateHint = dates.size === 1 ? ` (offered on ${[...dates][0]})` : '';
+      violations.push(`the reply quotes "${window}" from OPEN TIMES${dateHint} but it is not listed in offered_times`);
     }
   }
-  return pairs;
+
+  return { ok: violations.length === 0, violations };
 }
 
 // The minimum needed to recheck a draft's quoted OPEN TIMES at send time —
 // computed once per generation and carried on whichever row the caller
 // persists it to (message_drafts.intended_actions for the live SMS lane,
 // agent_decisions.input_snapshot for the estimate-follow-up lane and every
-// suggest-mode/auto-send decision). null when there's nothing to recheck:
-// no OPEN TIMES was fetched, or the reply didn't end up quoting any of it.
-function computeOpenTimesSnapshot({ openTimesBlock, reply, city, customerId, estimateId }) {
+// suggest-mode/auto-send decision). Persists the model's own VALIDATED
+// offered_times declaration (owner-directed structural fix) rather than
+// re-deriving quoted pairs from reply text. null when there's nothing to
+// recheck: no OPEN TIMES was fetched, or the draft declared no times.
+function computeOpenTimesSnapshot({ openTimesBlock, offeredTimes, city, customerId, estimateId }) {
   if (!openTimesBlock) return null;
-  const quotedWindows = extractQuotedOpenTimesWindows(openTimesBlock, reply || '');
+  const quotedWindows = Array.isArray(offeredTimes)
+    ? offeredTimes
+        .filter((e) => e && typeof e.date === 'string' && e.date && typeof e.window === 'string' && e.window)
+        .map((e) => ({ date: e.date, window: e.window }))
+    : [];
   if (!quotedWindows.length) return null;
   return { lookup: { city, customerId: customerId || null, estimateId: estimateId || null }, quotedWindows };
 }
@@ -490,7 +509,7 @@ function buildSystemPromptWithProfile(voiceProfileText = '') {
   const factSourceList = `SERVICE HISTORY, UPCOMING SERVICES${realAnswersOn ? ', OPEN TIMES' : ''}, BILLING, PENDING ESTIMATE, PROPERTY & PREFERENCES, LAWN HEALTH, ACCOUNT FLAGS, RECENT PHONE CALLS, LATEST CALL TRANSCRIPT, the thread`;
   const upcomingOrThread = realAnswersOn ? 'UPCOMING SERVICES, OPEN TIMES, or the thread' : 'UPCOMING SERVICES, or the thread';
   const deferRule = realAnswersOn
-    ? `Answer from the facts you have — that is the BEST reply, not a fallback. When the customer wants to book, reschedule, or change a visit, offer 2–3 SPECIFIC times straight from OPEN TIMES (verbatim — never invent one) and add {"type":"book_appointment"} to intended_actions once they confirm the one they want. When money is due, state the exact amount from BILLING or PENDING ESTIMATE and add {"type":"send_payment_link"}. Use {"type":"send_portal_link"} or {"type":"send_estimate_link"} wherever they fit what the customer is asking for. Only hand off to a person when the facts genuinely can't answer — and when you do, say CONCRETELY when they'll hear back, using the EXACT wording from FOLLOW-UP SLA RIGHT NOW in the facts below (never invent your own timing; that fact IS the 1-business-hour follow-up SLA, 8am–8pm ET). Record the gap in missing_info either way.`
+    ? `Answer from the facts you have — that is the BEST reply, not a fallback. When the customer wants to book, reschedule, or change a visit, offer 2–3 SPECIFIC times straight from OPEN TIMES (verbatim — never invent one), record EACH one you offer in offered_times as {"date": ..., "window": ...} copied EXACTLY from its OPEN TIMES line (the date label AND the window text, verbatim — never paraphrase either), and add {"type":"book_appointment"} to intended_actions once they confirm the one they want. Every time mentioned anywhere in the reply must have a matching offered_times entry, and every offered_times entry must exist verbatim in OPEN TIMES; leave offered_times as an empty array when the reply offers no times. When money is due, state the exact amount from BILLING or PENDING ESTIMATE and add {"type":"send_payment_link"}. Use {"type":"send_portal_link"} or {"type":"send_estimate_link"} wherever they fit what the customer is asking for. Only hand off to a person when the facts genuinely can't answer — and when you do, say CONCRETELY when they'll hear back, using the EXACT wording from FOLLOW-UP SLA RIGHT NOW in the facts below (never invent your own timing; that fact IS the 1-business-hour follow-up SLA, 8am–8pm ET). Record the gap in missing_info either way.`
     : "When you lack a fact the customer needs, the BEST reply acknowledges warmly and says you'll confirm and follow up — that is correct and safe, not a failure, and often better than the answer a human gave. Record the gap in missing_info.";
   const handoffBullet = realAnswersOn
     ? realAnswersHandoffBullets()
@@ -532,7 +551,8 @@ Respond with ONLY a JSON object, no prose, no code fences:
 {
   "reply": "the SMS you would send",
   "intended_actions": [{"type": "escalate", "note": "optional short reason"}],
-  "missing_info": "facts you needed but the context lacked, or null"
+  "missing_info": "facts you needed but the context lacked, or null"${realAnswersOn ? `,
+  "offered_times": [{"date": "the OPEN TIMES date label, verbatim", "window": "the OPEN TIMES window text, verbatim"}]` : ''}
 }`;
 
   // Owner-approved voice profile rides in via the SAME sanitize/compose path
@@ -1193,9 +1213,9 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   const needsOpenTimes = Boolean(schedulingIntent)
     || SAVE_SALE_INTENT_RE.test(String(intent?.intent || ''))
     || SAVE_SALE_TEXT_RE.test(String(inboundMessage || ''));
-  const openTimesBlock = presetFactsBlock
-    ? null
-    : await fetchOpenTimesBlock({
+  const { block: openTimesBlock, days: openTimesDays } = presetFactsBlock
+    ? { block: null, days: [] }
+    : await fetchOpenTimesData({
       city, customerId: context?.customer?.id || null, schedulingIntent: needsOpenTimes, estimateId,
     });
   const factsBlock = presetFactsBlock || buildFactsBlock(context, { openTimesBlock });
@@ -1238,7 +1258,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   if (!VERIFY_ENABLED) return {
     parsed, passes: 1, converged: true, model, servedModel, voiceProfileVersion, verifierModels: [], factsBlock, promptVersion,
     openTimesSnapshot: computeOpenTimesSnapshot({
-      openTimesBlock, reply: parsed?.reply, city, customerId: context?.customer?.id || null, estimateId,
+      openTimesBlock, offeredTimes: parsed?.offered_times, city, customerId: context?.customer?.id || null, estimateId,
     }),
   };
 
@@ -1251,25 +1271,36 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     // An empty reply ("no reply warranted") asserts nothing — nothing to check.
     if (!parsed.reply) { converged = true; break; }
 
+    // Owner-directed structural fix: check the model's own offered_times
+    // declaration deterministically FIRST, before spending a verifier call —
+    // any violation is a verifier-grade failure and feeds the SAME
+    // revise/verify loop below via a synthesized verdict, exactly like an
+    // LLM-caught fact-check miss.
+    const timesCheck = validateOfferedTimes({ offeredTimes: parsed.offered_times, openTimesDays, reply: parsed.reply });
+
     let verdict;
-    try {
-      const vResp = await createDeepMessage(client, {
-        laneId: 'sms_verifier',
-        model: verifier.VERIFIER_MODEL,
-        max_tokens: 4096, // DEEP: thinking spends from max_tokens — keep headroom for the verdict JSON
-        effort: 'medium', // a yes/no supported-check needs no high-effort reasoning; caps Opus 5.5 spend on a short verdict
-        system: verifier.buildVerifierSystemPrompt(),
-        messages: [{ role: 'user', content: verifier.buildVerifierUserPrompt(factsBlock, inboundMessage, parsed.reply) }],
-      });
-      // createDeepMessage can transparently cross providers. Preserve the
-      // model that actually served each verdict so sealed qualification can
-      // prove that its pinned verifier route ran instead of its fallback.
-      verifierModels.push(typeof vResp?.model === 'string' ? vResp.model : null);
-      verdict = verifier.parseVerifierResponse(vResp.content?.[0]?.text || '');
-    } catch (err) {
-      logger.warn(`[sms-shadow] verify pass failed (${err.message}); keeping current draft`);
-      converged = false;
-      break;
+    if (!timesCheck.ok) {
+      verdict = { supported: false, violations: timesCheck.violations };
+    } else {
+      try {
+        const vResp = await createDeepMessage(client, {
+          laneId: 'sms_verifier',
+          model: verifier.VERIFIER_MODEL,
+          max_tokens: 4096, // DEEP: thinking spends from max_tokens — keep headroom for the verdict JSON
+          effort: 'medium', // a yes/no supported-check needs no high-effort reasoning; caps Opus 5.5 spend on a short verdict
+          system: verifier.buildVerifierSystemPrompt(),
+          messages: [{ role: 'user', content: verifier.buildVerifierUserPrompt(factsBlock, inboundMessage, parsed.reply) }],
+        });
+        // createDeepMessage can transparently cross providers. Preserve the
+        // model that actually served each verdict so sealed qualification can
+        // prove that its pinned verifier route ran instead of its fallback.
+        verifierModels.push(typeof vResp?.model === 'string' ? vResp.model : null);
+        verdict = verifier.parseVerifierResponse(vResp.content?.[0]?.text || '');
+      } catch (err) {
+        logger.warn(`[sms-shadow] verify pass failed (${err.message}); keeping current draft`);
+        converged = false;
+        break;
+      }
     }
 
     if (!verdict) { converged = false; break; } // unparseable verdict — stop, don't loop
@@ -1308,7 +1339,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     // earlier draft may have quoted a window a REVISION dropped, or vice
     // versa; only what's actually about to be sent matters here.
     openTimesSnapshot: computeOpenTimesSnapshot({
-      openTimesBlock, reply: parsed?.reply, city, customerId: context?.customer?.id || null, estimateId,
+      openTimesBlock, offeredTimes: parsed?.offered_times, city, customerId: context?.customer?.id || null, estimateId,
     }),
   };
 }
@@ -1358,11 +1389,31 @@ function parseShadowResponse(text) {
         .map((a) => ({ type: a.type, note: typeof a.note === 'string' ? a.note.slice(0, 200) : undefined }))
     : [];
 
+  // Structural fix (owner directive, replacing the prose date-parsing that
+  // took 3 non-converging local-audit rounds to get wrong in a new way each
+  // time): the model now DECLARES which OPEN TIMES (date, window) pairs it
+  // offered, instead of that binding being re-derived after the fact from
+  // plain reply text. Raw here — generateGroundedDraft's deterministic
+  // validateOfferedTimes checks each entry against the actual OPEN TIMES
+  // list and against the reply text; a malformed entry (missing/non-string
+  // date or window) is dropped rather than crashing the parse, so it reads
+  // as an ungrounded time and fails that check instead.
+  const offeredTimes = Array.isArray(parsed.offered_times)
+    ? parsed.offered_times
+        .filter((e) => e && typeof e === 'object')
+        .map((e) => ({
+          date: typeof e.date === 'string' ? e.date.trim().slice(0, 100) : '',
+          window: typeof e.window === 'string' ? e.window.trim().slice(0, 60) : '',
+        }))
+        .filter((e) => e.date && e.window)
+    : [];
+
   return {
     reply: parsed.reply.trim(),
     intended_actions: intendedActions,
     auto_send_safe: autoSendSafe,
     missing_info: typeof parsed.missing_info === 'string' ? parsed.missing_info.slice(0, 500) : null,
+    offered_times: offeredTimes,
   };
 }
 
@@ -1758,7 +1809,8 @@ module.exports = {
   REAL_ANSWERS_HANDOFF_CATEGORIES,
   followupSlaPhrase,
   fetchOpenTimesBlock,
-  extractQuotedOpenTimesWindows,
+  fetchOpenTimesData,
+  validateOfferedTimes,
   computeOpenTimesSnapshot,
   openTimesStillOffered,
 };

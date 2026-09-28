@@ -115,3 +115,117 @@ describe('generateGroundedDraft — convergence loop', () => {
     expect(r.converged).toBe(false);
   });
 });
+
+// Owner-directed structural fix (PR #5119, after 3 non-converging local-audit
+// rounds trying to re-derive date binding from prose): the model now
+// DECLARES offered_times directly, and generateGroundedDraft validates it
+// DETERMINISTICALLY — before spending a verifier call — feeding any
+// violation into this SAME revise/verify loop exactly like an ordinary
+// fact-check miss.
+describe('generateGroundedDraft — offered_times structural check shares the revise/verify loop', () => {
+  const priorGate = process.env.GATE_SMS_REAL_ANSWERS;
+
+  function freshDrafter() {
+    jest.resetModules();
+    return require('../services/sms-shadow-drafter');
+  }
+
+  beforeEach(() => {
+    process.env.GATE_SMS_REAL_ANSWERS = 'true';
+  });
+
+  afterEach(() => {
+    if (priorGate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS;
+    else process.env.GATE_SMS_REAL_ANSWERS = priorGate;
+    jest.dontMock('../services/availability');
+    jest.resetModules();
+  });
+
+  function argsFor(client) {
+    return {
+      client, context: CTX, inboundMessage: 'Can we book a visit?',
+      intent: { intent: 'general_customer_sms_needs_review' }, schedulingIntent: true, city: 'Venice',
+    };
+  }
+
+  function mockOneOpenSlot() {
+    const getAvailableSlots = jest.fn(async () => ({
+      zone: 'Venice Zone',
+      days: [{ fullDate: 'Tuesday, September 29', slots: [{ startTime24: '09:00' }] }],
+    }));
+    jest.doMock('../services/availability', () => ({ getAvailableSlots }));
+  }
+
+  test('a correctly-declared offered_times converges on the first pass, persisted onto openTimesSnapshot', async () => {
+    mockOneOpenSlot();
+    const drafter = freshDrafter();
+    const client = makeClient([
+      {
+        reply: 'How about Tuesday 9:00 AM - 11:00 AM?', intended_actions: [{ type: 'book_appointment' }], missing_info: null,
+        offered_times: [{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }],
+      },
+      { supported: true, violations: [] },
+    ]);
+    const r = await drafter.generateGroundedDraft(argsFor(client));
+    expect(r.converged).toBe(true);
+    expect(r.passes).toBe(1);
+    // draft + verify — the deterministic check passed, so it spent no EXTRA call.
+    expect(client.calls).toHaveLength(2);
+    expect(r.openTimesSnapshot).toEqual({
+      lookup: { city: 'Venice', customerId: null, estimateId: null },
+      quotedWindows: [{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }],
+    });
+  });
+
+  test('an offered_times entry not actually in OPEN TIMES is caught DETERMINISTICALLY (no verifier call spent) and revises to a grounded one', async () => {
+    mockOneOpenSlot();
+    const drafter = freshDrafter();
+    const client = makeClient([
+      // pass 1: claims a slot that was never offered
+      {
+        reply: 'How about Tuesday 3:00 PM - 5:00 PM?', intended_actions: [], missing_info: null,
+        offered_times: [{ date: 'Tuesday, September 29', window: '3:00 PM - 5:00 PM' }],
+      },
+      // revised draft: now grounded
+      {
+        reply: 'How about Tuesday 9:00 AM - 11:00 AM?', intended_actions: [], missing_info: null,
+        offered_times: [{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }],
+      },
+      { supported: true, violations: [] },
+    ]);
+    const r = await drafter.generateGroundedDraft(argsFor(client));
+    expect(r.converged).toBe(true);
+    expect(r.passes).toBe(2);
+    // draft + revise + verify = 3 — the FIRST pass's failure never reached
+    // the (paid) LLM verifier; it was caught deterministically.
+    expect(client.calls).toHaveLength(3);
+    expect(r.parsed.reply).toMatch(/9:00 AM - 11:00 AM/);
+  });
+
+  test('a reply that quotes a time missing from offered_times exhausts the revision budget → not converged, never reaches the verifier', async () => {
+    mockOneOpenSlot();
+    const drafter = freshDrafter();
+    // Quotes a real OPEN TIMES window but never declares it in offered_times
+    // — the same bug on every attempt, so it never converges.
+    const bad = { reply: 'How about Tuesday 9:00 AM - 11:00 AM?', intended_actions: [], missing_info: null, offered_times: [] };
+    const client = makeClient([bad, bad, bad]); // draft + MAX_REVISIONS(2) revisions, same bug each time
+    const r = await drafter.generateGroundedDraft(argsFor(client));
+    expect(r.converged).toBe(false);
+    expect(r.passes).toBe(3);
+    // Every pass caught deterministically — the verifier is NEVER reached.
+    expect(client.calls).toHaveLength(3);
+  });
+
+  test('a no-times draft (offered_times absent, reply names none) is completely unaffected by the check', async () => {
+    mockOneOpenSlot();
+    const drafter = freshDrafter();
+    const client = makeClient([
+      { reply: 'Sure — I will check on that and get right back to you.', intended_actions: [], missing_info: null },
+      { supported: true, violations: [] },
+    ]);
+    const r = await drafter.generateGroundedDraft(argsFor(client));
+    expect(r.converged).toBe(true);
+    expect(r.passes).toBe(1);
+    expect(r.openTimesSnapshot).toBeNull();
+  });
+});

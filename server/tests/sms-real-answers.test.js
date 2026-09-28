@@ -536,76 +536,147 @@ describe('fetchOpenTimesBlock — read-only AvailabilityEngine call, fully fail-
   });
 });
 
-describe('extractQuotedOpenTimesWindows — pure detector: which (date, window) pairs did the reply actually quote', () => {
-  const { extractQuotedOpenTimesWindows } = require('../services/sms-shadow-drafter');
-  const block = '- Tuesday, September 29: 9:00 AM - 11:00 AM, 11:00 AM - 1:00 PM\n- Wednesday, September 30: 9:00 AM - 11:00 AM';
+describe('validateOfferedTimes — deterministic draft-time check of the model\'s OWN offered_times declaration (structural fix, replacing prose date-parsing)', () => {
+  const { validateOfferedTimes } = require('../services/sms-shadow-drafter');
+  // The SAME window text on two different days — exactly the shape that
+  // broke three rounds of prose-parsing heuristics (pooling across dates,
+  // then over-correcting, then a weekday-text cross-product). With the
+  // model declaring offered_times directly, no parsing of `reply` text is
+  // needed at all to bind a date to a window.
+  const openTimesDays = [
+    { date: 'Tuesday, September 29', windows: ['9:00 AM - 11:00 AM', '11:00 AM - 1:00 PM'] },
+    { date: 'Wednesday, September 30', windows: ['9:00 AM - 11:00 AM'] },
+  ];
 
-  test('no OPEN TIMES block, or no reply → []', () => {
-    expect(extractQuotedOpenTimesWindows(null, 'Does 9:00 AM - 11:00 AM work?')).toEqual([]);
-    expect(extractQuotedOpenTimesWindows(block, null)).toEqual([]);
-    expect(extractQuotedOpenTimesWindows(block, '')).toEqual([]);
+  test('a single correctly-declared time → ok:true, no violations', () => {
+    const result = validateOfferedTimes({
+      offeredTimes: [{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }],
+      openTimesDays,
+      reply: 'How about Tuesday 9:00 AM - 11:00 AM?',
+    });
+    expect(result).toEqual({ ok: true, violations: [] });
   });
 
-  test('a reply that quotes none of the offered windows → []', () => {
-    expect(extractQuotedOpenTimesWindows(block, 'Sure, I will confirm a time and get back to you.')).toEqual([]);
+  test('no OPEN TIMES, no offered_times, no reply-quoted times → ok:true (a draft that never touches OPEN TIMES is untouched)', () => {
+    expect(validateOfferedTimes({ offeredTimes: [], openTimesDays: [], reply: "I'll confirm and follow up." })).toEqual({ ok: true, violations: [] });
   });
 
-  test('a reply that quotes exactly one window text → the (date, window) pair for the ONE day that offers it', () => {
-    expect(extractQuotedOpenTimesWindows(block, 'How about 11:00 AM - 1:00 PM on Tuesday?')).toEqual([
-      { date: 'Tuesday, September 29', window: '11:00 AM - 1:00 PM' },
+  // The exact multi-option case the coordinator specified: two different
+  // days, two different windows, both correctly declared. An UNRELATED
+  // day's slot (Wednesday 9-11, not offered here) being booked must not
+  // affect this — validateOfferedTimes only ever looks at what's actually
+  // in openTimesDays right now, which already reflects the current state.
+  test('a multi-option reply ("Tuesday 9-11 or Wednesday 2-4") with BOTH correctly declared → ok:true', () => {
+    const days = [
+      { date: 'Tuesday, September 29', windows: ['9:00 AM - 11:00 AM'] },
+      { date: 'Wednesday, September 30', windows: ['2:00 PM - 4:00 PM'] },
+    ];
+    const result = validateOfferedTimes({
+      offeredTimes: [
+        { date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' },
+        { date: 'Wednesday, September 30', window: '2:00 PM - 4:00 PM' },
+      ],
+      openTimesDays: days,
+      reply: 'How about Tuesday 9:00 AM - 11:00 AM or Wednesday 2:00 PM - 4:00 PM?',
+    });
+    expect(result).toEqual({ ok: true, violations: [] });
+  });
+
+  // If Tuesday's OWN declared slot is the one that's gone (not in
+  // openTimesDays any more), that specific entry must fail — this is what
+  // "Tuesday being booked must [block]" means at the deterministic-check
+  // layer: openTimesDays is the FRESH read, so a gone Tuesday slot is
+  // simply absent from it.
+  test('a multi-option reply where the DECLARED Tuesday slot is no longer in OPEN TIMES → blocked, only Tuesday flagged', () => {
+    const days = [
+      { date: 'Wednesday, September 30', windows: ['2:00 PM - 4:00 PM'] }, // Tuesday's own slot is gone
+    ];
+    const result = validateOfferedTimes({
+      offeredTimes: [
+        { date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' },
+        { date: 'Wednesday, September 30', window: '2:00 PM - 4:00 PM' },
+      ],
+      openTimesDays: days,
+      reply: 'How about Tuesday 9:00 AM - 11:00 AM or Wednesday 2:00 PM - 4:00 PM?',
+    });
+    expect(result.ok).toBe(false);
+    expect(result.violations).toEqual([
+      'offered_times claims "Tuesday, September 29: 9:00 AM - 11:00 AM" but that is not an OPEN TIMES slot',
     ]);
   });
 
-  // Pre-push local-audit P1: "9:00 AM - 11:00 AM" is offered on BOTH Tuesday
-  // and Wednesday in this block. The reply's plain text can't prove which
-  // day the model meant, so this must NOT collapse to one pooled window
-  // string (the bug) — it returns ONE PAIR PER DAY that offers it, so the
-  // send-time recheck can fail closed unless BOTH still hold.
-  test('a window text offered on MULTIPLE days → one (date, window) pair per day, not pooled into a single date-less window', () => {
-    expect(extractQuotedOpenTimesWindows(block, 'How about 9:00 AM - 11:00 AM?')).toEqual([
-      { date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' },
-      { date: 'Wednesday, September 30', window: '9:00 AM - 11:00 AM' },
+  test('an offered_times entry naming a (date, window) pair NOT in OPEN TIMES → blocked', () => {
+    const result = validateOfferedTimes({
+      offeredTimes: [{ date: 'Tuesday, September 29', window: '3:00 PM - 5:00 PM' }], // never offered
+      openTimesDays,
+      reply: 'How about Tuesday 3:00 PM - 5:00 PM?',
+    });
+    expect(result.ok).toBe(false);
+    expect(result.violations).toEqual([
+      'offered_times claims "Tuesday, September 29: 3:00 PM - 5:00 PM" but that is not an OPEN TIMES slot',
     ]);
   });
 
-  test('a reply that quotes two distinct window texts → a pair for each, deduplicated per (date, window)', () => {
-    const reply = 'We have 9:00 AM - 11:00 AM or 11:00 AM - 1:00 PM Tuesday — 9:00 AM - 11:00 AM also works Wednesday.';
-    expect(extractQuotedOpenTimesWindows(block, reply)).toEqual([
-      { date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' },
-      { date: 'Tuesday, September 29', window: '11:00 AM - 1:00 PM' },
-      { date: 'Wednesday, September 30', window: '9:00 AM - 11:00 AM' },
+  test('a window quoted in the reply but MISSING from offered_times → blocked (the reverse check)', () => {
+    const result = validateOfferedTimes({
+      offeredTimes: [],
+      openTimesDays: [{ date: 'Tuesday, September 29', windows: ['9:00 AM - 11:00 AM'] }], // offered on ONE day only
+      reply: 'How about Tuesday 9:00 AM - 11:00 AM?',
+    });
+    expect(result.ok).toBe(false);
+    expect(result.violations).toEqual([
+      'the reply quotes "9:00 AM - 11:00 AM" from OPEN TIMES (offered on Tuesday, September 29) but it is not listed in offered_times',
     ]);
   });
 
-  // Codex round-2 P1: requiring EVERY same-time day to hold unconditionally
-  // would retire a perfectly valid "Tuesday 9-11" reply the moment an
-  // unrelated Wednesday 9-11 gets booked by someone else. When the reply
-  // names ONE of the candidate days, narrow to just that day.
-  test('a reply that names ONE specific day for an otherwise-ambiguous window → only that day\'s pair', () => {
-    expect(extractQuotedOpenTimesWindows(block, 'How about Tuesday 9:00 AM - 11:00 AM?')).toEqual([
-      { date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' },
+  test('an offered_times entry whose window text does not actually appear in the reply → blocked', () => {
+    const result = validateOfferedTimes({
+      offeredTimes: [{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }],
+      openTimesDays,
+      reply: "I'll confirm a time and get back to you.", // never quoted the declared window
+    });
+    expect(result.ok).toBe(false);
+    expect(result.violations).toEqual([
+      'offered_times lists "Tuesday, September 29: 9:00 AM - 11:00 AM" but the reply never quotes that time',
     ]);
-    expect(extractQuotedOpenTimesWindows(block, 'How about Wednesday 9:00 AM - 11:00 AM?')).toEqual([
-      { date: 'Wednesday, September 30', window: '9:00 AM - 11:00 AM' },
-    ]);
+  });
+
+  test('a malformed entry (missing date or window) → blocked, does not throw', () => {
+    const result = validateOfferedTimes({
+      offeredTimes: [{ date: 'Tuesday, September 29' }, { window: '9:00 AM - 11:00 AM' }, {}],
+      openTimesDays,
+      reply: 'Hello',
+    });
+    expect(result.ok).toBe(false);
+    expect(result.violations).toHaveLength(3);
+  });
+
+  test('offered_times is not an array (malformed model output) → treated as empty, reverse check still runs', () => {
+    const result = validateOfferedTimes({ offeredTimes: 'not an array', openTimesDays, reply: 'plain reply' });
+    expect(result).toEqual({ ok: true, violations: [] });
   });
 });
 
-describe('computeOpenTimesSnapshot — the minimum needed to recheck at send time (Codex P2)', () => {
+describe('computeOpenTimesSnapshot — the minimum needed to recheck at send time (persists the VALIDATED offered_times declaration)', () => {
   const { computeOpenTimesSnapshot } = require('../services/sms-shadow-drafter');
   const block = '- Tuesday, September 29: 9:00 AM - 11:00 AM';
 
   test('no OPEN TIMES block fetched → null (nothing to recheck)', () => {
-    expect(computeOpenTimesSnapshot({ openTimesBlock: null, reply: '9:00 AM - 11:00 AM works.', city: 'Venice' })).toBeNull();
-  });
-
-  test('OPEN TIMES fetched but the reply quotes none of it → null', () => {
-    expect(computeOpenTimesSnapshot({ openTimesBlock: block, reply: "I'll confirm and follow up.", city: 'Venice' })).toBeNull();
-  });
-
-  test('OPEN TIMES fetched and quoted → the quoted (date, window) pairs plus the exact lookup inputs', () => {
     expect(computeOpenTimesSnapshot({
-      openTimesBlock: block, reply: 'How about 9:00 AM - 11:00 AM?', city: 'Venice', customerId: 'cust-9', estimateId: 'estimate-42',
+      openTimesBlock: null, offeredTimes: [{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }], city: 'Venice',
+    })).toBeNull();
+  });
+
+  test('OPEN TIMES fetched but the draft declared no offered_times → null', () => {
+    expect(computeOpenTimesSnapshot({ openTimesBlock: block, offeredTimes: [], city: 'Venice' })).toBeNull();
+    expect(computeOpenTimesSnapshot({ openTimesBlock: block, offeredTimes: undefined, city: 'Venice' })).toBeNull();
+  });
+
+  test('OPEN TIMES fetched and offered_times declared → the declared (date, window) pairs plus the exact lookup inputs', () => {
+    expect(computeOpenTimesSnapshot({
+      openTimesBlock: block,
+      offeredTimes: [{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }],
+      city: 'Venice', customerId: 'cust-9', estimateId: 'estimate-42',
     })).toEqual({
       lookup: { city: 'Venice', customerId: 'cust-9', estimateId: 'estimate-42' },
       quotedWindows: [{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }],
@@ -613,7 +684,20 @@ describe('computeOpenTimesSnapshot — the minimum needed to recheck at send tim
   });
 
   test('omitted customerId/estimateId default to null, not undefined (JSON-stable)', () => {
-    expect(computeOpenTimesSnapshot({ openTimesBlock: block, reply: '9:00 AM - 11:00 AM works.', city: 'Venice' })).toEqual({
+    expect(computeOpenTimesSnapshot({
+      openTimesBlock: block, offeredTimes: [{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }], city: 'Venice',
+    })).toEqual({
+      lookup: { city: 'Venice', customerId: null, estimateId: null },
+      quotedWindows: [{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }],
+    });
+  });
+
+  test('a malformed offered_times entry (missing date or window) is dropped, not persisted', () => {
+    expect(computeOpenTimesSnapshot({
+      openTimesBlock: block,
+      offeredTimes: [{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }, { date: 'Wednesday, September 30' }],
+      city: 'Venice',
+    })).toEqual({
       lookup: { city: 'Venice', customerId: null, estimateId: null },
       quotedWindows: [{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }],
     });
