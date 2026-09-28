@@ -1191,6 +1191,134 @@ async function siblingInvoiceCoverageVerdict(svc, dbConn, { lockRows = false, no
 // of it, never its own classifier.
 const NO_SIBLING_COVERAGE = Object.freeze({ state: 'none', invoiceId: null, invoiceNumber: null, amountDue: null, reason: null });
 
+// The 'error'/'needs_review' half of the schedule-sheet verdict (Codex round-14
+// complexity cleanup — extracted verbatim from siblingCoverageForSchedule,
+// same branches, same reason precedence, no behavior change). An 'error'
+// verdict (lookup failed) and a 'needs_review' verdict (terminal/refunded
+// match, or a canceled acceptance invoice that carried the setup fee with no
+// live replacement) both render the sheet's review card — see this module's
+// header on siblingInvoiceCoverageVerdict for why they're never told apart
+// from "covered". A needs_review verdict that carries its own explicit
+// `reason` (combinedInvoiceVoidedWithoutLiveReplacement's
+// 'combined_invoice_voided' — owner ruling, REFUSE AFTER A VOID) always
+// wins, even when `invoice` is also set (the voided invoice itself, for the
+// review card's link) — never silently overridden by the generic
+// 'terminal_invoice' label. Falls back to the shape-based derivation only
+// for verdicts that never set `reason` themselves (the own-visit/sibling
+// terminal-match branch, and the canceledSetupFee shape).
+function siblingReviewCoverage(verdict) {
+  const inv = verdict.invoice || null;
+  const reason = verdict.status === 'error'
+    ? 'lookup_failed'
+    : (verdict.reason || (inv ? 'terminal_invoice' : 'canceled_setup_fee'));
+  const coverage = {
+    state: 'review',
+    invoiceId: inv?.id || null,
+    invoiceNumber: inv?.invoice_number || null,
+    amountDue: null,
+    reason,
+  };
+  return {
+    coverage,
+    prediction: {
+      kind: 'sibling_needs_review',
+      amount: null,
+      conflictStampedPrice: false,
+      invoiceId: coverage.invoiceId,
+      invoiceNumber: coverage.invoiceNumber,
+    },
+  };
+}
+
+// The collection-state half of a 'covered' verdict (Codex round-14 complexity
+// cleanup — extracted verbatim, same branches/order/reasons, no behavior
+// change): invoice-helpers' own collectibility checks —
+// invoiceWithdrawnFromCustomer, payer ownership (payer_id), the invoice's own
+// collectible-status set, and credit fully covering the total (amountDue <=
+// 0) — never a second classifier. Returns only the `coverage` shape;
+// `prediction` is built alongside it by the caller.
+function collectionStateForCoveredInvoice(inv, amountDue) {
+  // codex round-8 P1: a draft/sent sibling invoice with payer_id set, or
+  // withdrawn from the homeowner via the `payer_billed:` stamp, is not
+  // collectible from THIS customer at all — the payment paths reject it
+  // (invoiceWithdrawnFromCustomer, payer ownership,
+  // server/services/invoice-helpers.js) — so it reads settled here (nothing
+  // for a technician to collect from the homeowner), never "collect on
+  // that invoice."
+  if (invoiceWithdrawnFromCustomer(inv)) {
+    return { state: 'settled', invoiceId: inv.id, invoiceNumber: inv.invoice_number || null, amountDue: 0, reason: 'withdrawn_from_customer' };
+  }
+  if (inv.payer_id) {
+    return { state: 'settled', invoiceId: inv.id, invoiceNumber: inv.invoice_number || null, amountDue: 0, reason: 'payer_billed' };
+  }
+  if (!isInvoiceCollectibleStatus(inv.status)) {
+    // paid / prepaid / processing — a technician never collects any of
+    // these (there's nothing left for THEM to charge), but 'processing' is
+    // NOT the same fact as paid/prepaid: it's a payment still in flight
+    // (e.g. a pending ACH debit) that can still fail to settle. codex
+    // round-9 P2: lumping it into the same 'invoice_settled' reason read as
+    // fully paid to every consumer that branches on `reason` — the
+    // schedule sheet's CompletionPanel previewed an immediate review
+    // request for it, while complete-scheduled-service.js's own
+    // invoiceBlocksReview holds the ask for every status except literal
+    // 'paid'/'prepaid'. Keep the reason distinct (state stays 'settled' —
+    // a technician still collects nothing either way) so a consumer that
+    // needs the finer distinction (review timing) can ask for it, without
+    // reclassifying what a technician does at the door.
+    return {
+      state: 'settled',
+      invoiceId: inv.id,
+      invoiceNumber: inv.invoice_number || null,
+      amountDue: 0,
+      reason: String(inv.status) === 'processing' ? 'invoice_processing' : 'invoice_settled',
+    };
+  }
+  if (!(amountDue > 0)) {
+    // A draft/sent/... invoice fully covered by account credit.
+    return { state: 'settled', invoiceId: inv.id, invoiceNumber: inv.invoice_number || null, amountDue: 0, reason: 'credit_applied' };
+  }
+  return { state: 'collect_on_combined_invoice', invoiceId: inv.id, invoiceNumber: inv.invoice_number || null, amountDue, reason: null };
+}
+
+// The covered-invoice prediction enrichment (Codex round-14 complexity
+// cleanup — extracted verbatim, same lookups/order, no behavior change):
+// the sibling's own service-type label plus the same-trip per-visit
+// breakdown (sameTripFirstApplicationBreakdown) when the anchored per-visit
+// splits reconcile to the invoice total. Read-only/advisory — a lookup
+// failure leaves the coverage verdict standing exactly as it already does.
+// Mutates and returns the passed-in `prediction` object.
+async function enrichCoveredSiblingPrediction(prediction, svc, inv, dbConn) {
+  try {
+    const siblingVisit = await dbConn('scheduled_services').where({ id: inv.scheduled_service_id }).first('id', 'service_type');
+    if (siblingVisit?.service_type) prediction.siblingServiceType = siblingVisit.service_type;
+  } catch { /* no service-type label — the coverage verdict still stands */ }
+  try {
+    const breakdown = await sameTripFirstApplicationBreakdown({
+      svc, invoiceTotal: inv.total, invoiceLineItems: inv.line_items, dbConn,
+    });
+    if (breakdown) prediction.breakdown = breakdown;
+  } catch { /* no breakdown — the coverage verdict still stands */ }
+  return prediction;
+}
+
+// Eligibility gate for the schedule-sheet's sibling-coverage lookup (Codex
+// round-14 complexity cleanup — extracted verbatim, same shape/order, no
+// behavior change). Owner ruling — REFUSE AFTER A VOID: the priced row is
+// never refused — completing or charging it bills the combined amount once,
+// which is correct — so this prediction stays exclusively for UNPRICED,
+// sibling-eligible visits. The visit's own provenance-aware price shape
+// (hasAuthoritativeZeroPrice credited the same way completion's own guard
+// credits it) feeds the SAME isSiblingCoverageEligibleVisit shape predicate
+// every other sibling-coverage caller gates on, plus the DB/estimate/date
+// fields this lookup itself needs in order to run at all.
+function scheduleSiblingCoverageEligible(svc, dbConn) {
+  const hasOwnPrice = (svc?.estimated_price != null && Number(svc.estimated_price) > 0)
+    || hasAuthoritativeZeroPrice(svc?.estimated_price, svc?.primary_line_price ?? null);
+  const baseShape = { sourceEstimateId: svc?.source_estimate_id, hasOwnPrice, isCallback: !!svc?.is_callback, serviceType: svc?.service_type };
+  const hasBaseFields = !!(svc?.source_estimate_id && svc?.customer_id && svc?.scheduled_date && dbConn);
+  return hasBaseFields && isSiblingCoverageEligibleVisit(baseShape);
+}
+
 /**
  * Schedule-payload builder: resolves the canonical sibling-coverage verdict
  * above AND (only when it is non-'none') the matching `billingLane.prediction`
@@ -1214,16 +1342,7 @@ const NO_SIBLING_COVERAGE = Object.freeze({ state: 'none', invoiceId: null, invo
  * except where a caller opts in, same as monthlyDuesCollected above.
  */
 async function siblingCoverageForSchedule({ svc, dbConn } = {}) {
-  const hasOwnPrice = (svc?.estimated_price != null && Number(svc.estimated_price) > 0)
-    || hasAuthoritativeZeroPrice(svc?.estimated_price, svc?.primary_line_price ?? null);
-  const baseShape = { sourceEstimateId: svc?.source_estimate_id, hasOwnPrice, isCallback: !!svc?.is_callback, serviceType: svc?.service_type };
-  const hasBaseFields = !!(svc?.source_estimate_id && svc?.customer_id && svc?.scheduled_date && dbConn);
-  // Owner ruling — REFUSE AFTER A VOID: the priced row is never refused —
-  // completing or charging it bills the combined amount once, which is
-  // correct — so this schedule prediction stays exclusively for UNPRICED,
-  // sibling-eligible visits, exactly as before the round-10 priced-branch
-  // detour (removed).
-  if (!hasBaseFields || !isSiblingCoverageEligibleVisit(baseShape)) {
+  if (!scheduleSiblingCoverageEligible(svc, dbConn)) {
     return { coverage: NO_SIBLING_COVERAGE, prediction: null };
   }
   let verdict;
@@ -1233,80 +1352,13 @@ async function siblingCoverageForSchedule({ svc, dbConn } = {}) {
     verdict = { status: 'error' };
   }
   if (verdict.status === 'error' || verdict.status === 'needs_review') {
-    const inv = verdict.invoice || null;
-    // A needs_review verdict that carries its own explicit `reason`
-    // (combinedInvoiceVoidedWithoutLiveReplacement's 'combined_invoice_voided'
-    // — owner ruling, REFUSE AFTER A VOID) always wins, even when `invoice`
-    // is also set (the voided invoice itself, for the review card's link) —
-    // never silently overridden by the generic 'terminal_invoice' label
-    // below. Falls back to the pre-existing shape-based derivation only for
-    // verdicts that never set `reason` themselves (the own-visit/sibling
-    // terminal-match branch, and the canceledSetupFee shape).
-    const reason = verdict.status === 'error'
-      ? 'lookup_failed'
-      : (verdict.reason || (inv ? 'terminal_invoice' : 'canceled_setup_fee'));
-    const coverage = {
-      state: 'review',
-      invoiceId: inv?.id || null,
-      invoiceNumber: inv?.invoice_number || null,
-      amountDue: null,
-      reason,
-    };
-    return {
-      coverage,
-      prediction: {
-        kind: 'sibling_needs_review',
-        amount: null,
-        conflictStampedPrice: false,
-        invoiceId: coverage.invoiceId,
-        invoiceNumber: coverage.invoiceNumber,
-      },
-    };
+    return siblingReviewCoverage(verdict);
   }
   if (verdict.status !== 'covered') return { coverage: NO_SIBLING_COVERAGE, prediction: null };
 
   const inv = verdict.invoice;
   const amountDue = invoiceAmountDue(inv);
-  let coverage;
-  // codex round-8 P1: a draft/sent sibling invoice with payer_id set, or
-  // withdrawn from the homeowner via the `payer_billed:` stamp, is not
-  // collectible from THIS customer at all — the payment paths reject it
-  // (invoiceWithdrawnFromCustomer, payer ownership,
-  // server/services/invoice-helpers.js) — so it reads settled here (nothing
-  // for a technician to collect from the homeowner), never "collect on
-  // that invoice."
-  if (invoiceWithdrawnFromCustomer(inv)) {
-    coverage = { state: 'settled', invoiceId: inv.id, invoiceNumber: inv.invoice_number || null, amountDue: 0, reason: 'withdrawn_from_customer' };
-  } else if (inv.payer_id) {
-    coverage = { state: 'settled', invoiceId: inv.id, invoiceNumber: inv.invoice_number || null, amountDue: 0, reason: 'payer_billed' };
-  } else if (!isInvoiceCollectibleStatus(inv.status)) {
-    // paid / prepaid / processing — a technician never collects any of
-    // these (there's nothing left for THEM to charge), but 'processing' is
-    // NOT the same fact as paid/prepaid: it's a payment still in flight
-    // (e.g. a pending ACH debit) that can still fail to settle. codex
-    // round-9 P2: lumping it into the same 'invoice_settled' reason read as
-    // fully paid to every consumer that branches on `reason` — the
-    // schedule sheet's CompletionPanel previewed an immediate review
-    // request for it, while complete-scheduled-service.js's own
-    // invoiceBlocksReview holds the ask for every status except literal
-    // 'paid'/'prepaid'. Keep the reason distinct (state stays 'settled' —
-    // a technician still collects nothing either way) so a consumer that
-    // needs the finer distinction (review timing) can ask for it, without
-    // reclassifying what a technician does at the door.
-    coverage = {
-      state: 'settled',
-      invoiceId: inv.id,
-      invoiceNumber: inv.invoice_number || null,
-      amountDue: 0,
-      reason: String(inv.status) === 'processing' ? 'invoice_processing' : 'invoice_settled',
-    };
-  } else if (!(amountDue > 0)) {
-    // A draft/sent/... invoice fully covered by account credit.
-    coverage = { state: 'settled', invoiceId: inv.id, invoiceNumber: inv.invoice_number || null, amountDue: 0, reason: 'credit_applied' };
-  } else {
-    coverage = { state: 'collect_on_combined_invoice', invoiceId: inv.id, invoiceNumber: inv.invoice_number || null, amountDue, reason: null };
-  }
-
+  const coverage = collectionStateForCoveredInvoice(inv, amountDue);
   const prediction = {
     kind: 'covered_sibling_invoice',
     amount: null,
@@ -1314,16 +1366,7 @@ async function siblingCoverageForSchedule({ svc, dbConn } = {}) {
     invoiceId: coverage.invoiceId,
     invoiceNumber: coverage.invoiceNumber,
   };
-  try {
-    const siblingVisit = await dbConn('scheduled_services').where({ id: inv.scheduled_service_id }).first('id', 'service_type');
-    if (siblingVisit?.service_type) prediction.siblingServiceType = siblingVisit.service_type;
-  } catch { /* no service-type label — the coverage verdict still stands */ }
-  try {
-    const breakdown = await sameTripFirstApplicationBreakdown({
-      svc, invoiceTotal: inv.total, invoiceLineItems: inv.line_items, dbConn,
-    });
-    if (breakdown) prediction.breakdown = breakdown;
-  } catch { /* no breakdown — the coverage verdict still stands */ }
+  await enrichCoveredSiblingPrediction(prediction, svc, inv, dbConn);
   return { coverage, prediction };
 }
 

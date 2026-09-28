@@ -446,12 +446,12 @@ export default function ScheduleCustomerSidebar({
               <div className="u-nums text-14 font-medium text-zinc-900">{money(total)}</div>
             </div>
             {siblingNeedsReview && (
-              <div className="text-13 mt-1" style={{ color: '#92400E' }}>
+              <div className="text-14 mt-1" style={{ color: '#92400E' }}>
                 Combined-trip invoice needs review — resolve on Customer 360 before charging.
               </div>
             )}
             {siblingCoverage && siblingCoverage.collectible && (
-              <div className="text-13 mt-1" style={{ color: '#92400E' }}>
+              <div className="text-14 mt-1" style={{ color: '#92400E' }}>
                 {siblingCoverage.detail}
                 {siblingCoverage.invoiceHref && (
                   <>
@@ -464,7 +464,7 @@ export default function ScheduleCustomerSidebar({
               </div>
             )}
             {siblingCoverage && !siblingCoverage.collectible && (
-              <div className="text-13 text-ink-secondary mt-1">{siblingCoverage.detail}</div>
+              <div className="text-14 text-ink-secondary mt-1">{siblingCoverage.detail}</div>
             )}
             <a
               href={`/admin/invoices?customer=${encodeURIComponent(service.customerId)}`}

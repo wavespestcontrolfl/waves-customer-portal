@@ -15703,6 +15703,40 @@ router.put('/:id/assign', requireAdmin, async (req, res, next) => {
 // mint ANYTHING (base or extras) — before extras are even parsed. Only a
 // definitive 'none' (genuinely no relevant sibling invoice at all) falls
 // through to the ordinary precedence below.
+// The three sibling-coverage refusal outcomes resolveScheduledServiceCharge's
+// lookup can land on (Codex round-14 complexity cleanup — extracted
+// verbatim, same reasons/messages/precedence, no behavior change). EVERY
+// non-'none' verdict from siblingInvoiceCoverageVerdict refuses the mint
+// outright (owner decision, round-8 P1 — see this resolver's own header):
+// 'covered' (a live sibling invoice already bills this trip), 'needs_review'
+// (a terminal/refunded match, or a canceled acceptance invoice that carried
+// the setup fee with no live replacement — either needs a human), and a bare
+// lookup failure all refuse the same way, since a MINT decision must fail
+// CLOSED. Returns the structured refusal, or null for a definitive 'none'
+// (nothing to refuse — the ordinary precedence below runs).
+function siblingCoverageRefusal(verdict) {
+  if (verdict.status === 'none') return null;
+  if (verdict.status === 'covered') {
+    return {
+      refused: true,
+      reason: 'sibling_invoice_covered',
+      message: 'This visit is billed on the combined trip invoice — collect on that invoice, or set a price on this visit first.',
+    };
+  }
+  if (verdict.status === 'needs_review') {
+    return {
+      refused: true,
+      reason: 'sibling_invoice_needs_review',
+      message: 'This visit’s combined-trip invoice needs manual review before charging — handle it from Customer 360, or refresh and try again.',
+    };
+  }
+  return {
+    refused: true,
+    reason: 'sibling_lookup_failed',
+    message: 'Could not confirm whether this visit’s combined-trip invoice already covers it — refresh and try again.',
+  };
+}
+
 async function resolveScheduledServiceCharge({
   estimatedPrice, isCallback, monthlyRate, billingMode, serviceType, svc = null, dbConn = null,
 }) {
@@ -15741,19 +15775,8 @@ async function resolveScheduledServiceCharge({
     } catch {
       verdict = { status: 'error' };
     }
-    if (verdict.status !== 'none') {
-      return {
-        refused: true,
-        reason: verdict.status === 'covered'
-          ? 'sibling_invoice_covered'
-          : (verdict.status === 'needs_review' ? 'sibling_invoice_needs_review' : 'sibling_lookup_failed'),
-        message: verdict.status === 'covered'
-          ? 'This visit is billed on the combined trip invoice — collect on that invoice, or set a price on this visit first.'
-          : (verdict.status === 'needs_review'
-            ? 'This visit’s combined-trip invoice needs manual review before charging — handle it from Customer 360, or refresh and try again.'
-            : 'Could not confirm whether this visit’s combined-trip invoice already covers it — refresh and try again.'),
-      };
-    }
+    const refusal = siblingCoverageRefusal(verdict);
+    if (refusal) return refusal;
   }
   // Owner ruling — REFUSE AFTER A VOID: the priced row is never refused
   // here. The unpriced-sibling verdict above (siblingInvoiceCoverageVerdict)

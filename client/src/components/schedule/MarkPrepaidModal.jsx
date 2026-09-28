@@ -96,8 +96,12 @@ const RECEIPT_REASON_TEXT = {
   // its acceptance fee at completion, not here — resolveScheduledServiceCharge
   // refuses this mint outright (never an extras-only invoice that would
   // strand the fee) so no receipt/invoice exists for this visit yet.
+  // Codex r14 P2: never promise a receipt "once the visit completes" —
+  // when the recorded prepayment covers the fee, completion's prepaidCovered
+  // path (complete-scheduled-service.js shouldAutoInvoiceCompletion)
+  // suppresses the invoice entirely, so nothing is ever minted or sent.
   per_application_fee_at_completion:
-    'The prepayment was recorded, but this visit bills its application fee at completion, so no receipt was sent yet — it will go out once the visit completes.',
+    'The prepayment was recorded, but this visit bills its application fee at completion and has no invoice yet, so no receipt was sent. If the prepayment covers that fee, completion records it without a receipt — send one by hand if the customer needs it.',
   send_failed:
     'The prepayment was recorded, but the receipt couldn’t be sent just now. You can resend it from the invoice.',
   error: 'The prepayment was recorded, but the receipt couldn’t be sent just now.',
