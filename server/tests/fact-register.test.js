@@ -536,8 +536,18 @@ describe('findUnverifiedClaims', () => {
       'Brown patch loves the rainy season.',
       'Large patch thrives in summer unlike gray leaf spot.',
       'Large patch, rather than chinch damage, is what you see in summer.',
+      'Large patch normally appears in spring. It thrives in summer.',
+      'Brown patch shows up after cold snaps. This disease peaks in July.',
     ])('flags: %s', (sentence) => {
       expect(rule(sentence, 'large_patch_summer_disease')).toBe(true);
+    });
+
+    test.each([
+      'Gray leaf spot is a summer disease. It thrives in the rainy season.',
+      'Large patch appears in spring and fall. It is not a summer disease.',
+      'Chinch bugs peak in July. They love summer heat.',
+    ])('a pronoun whose lawn antecedent is not large patch, or a denial, passes: %s', (sentence) => {
+      expect(rule(sentence, 'large_patch_summer_disease')).toBe(false);
     });
 
     test.each([
@@ -550,6 +560,49 @@ describe('findUnverifiedClaims', () => {
       'A summer patch is often mistaken for large patch.',
       'Unlike large patch, gray leaf spot is a summer disease.',
     ])('UF\'s own wording and the correct contrasts pass: %s', (sentence) => {
+      expect(rule(sentence, 'large_patch_summer_disease')).toBe(false);
+    });
+
+    test.each([
+      'Large patch thrives when temperatures exceed 80°F.',
+      'Large patch thrives above 85°F.',
+      'Large patch normally appears in spring. It flares up in the 90s.',
+      'Large patch spreads fast once temperatures top ninety degrees.',
+      'Large patch is worst when it is more than 85 degrees out.',
+      'Large patch thrives in temperatures north of 80.',
+      'Large patch loves the upper 80s.',
+      'Large patch thrives at 90°F.',
+      'Large patch thrives in 90-degree weather.',
+      'Large patch explodes in hot, humid weather.',
+      'Large patch peaks during the warmest months.',
+      'Large patch is common when temps climb to eighty-five.',
+    ])('a rewrite of the 80°F threshold or the heat is still the claim: %s', (sentence) => {
+      expect(rule(sentence, 'large_patch_summer_disease')).toBe(true);
+    });
+
+    test.each([
+      'Large patch thrives in summer as the grass slows down.',
+      "Large patch doesn't slow down in summer.",
+      'Large patch never goes dormant when it is above 80.',
+      'Large patch is not uncommon in summer.',
+    ])('a receding verb that belongs to something else, or is itself negated, does not clear the claim: %s', (sentence) => {
+      expect(rule(sentence, 'large_patch_summer_disease')).toBe(true);
+    });
+
+    test.each([
+      'Large patch is active when temperatures are below 80°F.',
+      'Large patch slows once temperatures climb above 80°F.',
+      'Large patch goes dormant in summer.',
+      'Large patch fades in the heat.',
+      'Large patch normally appears in spring. It slows down in the 90s.',
+      'Large patch stops spreading when it gets above 85 degrees.',
+      'Large patch is rare in the summer months.',
+      'Large patch is less common in the hot months.',
+      'Large patch, which spreads in cool weather, dies back once it is over 80 degrees.',
+      "Large patch doesn't slow down until temperatures climb above 80.",
+      'Large patch is active between 60 and 75 degrees.',
+      'Large patch can cover over 80 square feet of lawn.',
+    ])('a downward threshold, large patch receding in the heat, or a figure that is not a temperature passes: %s', (sentence) => {
       expect(rule(sentence, 'large_patch_summer_disease')).toBe(false);
     });
   });
@@ -622,8 +675,19 @@ describe('findUnverifiedClaims', () => {
       // The repo-wide compliance predicate flags these too; its verdict is authoritative here.
       'Keep your family safe from mosquitoes this summer.',
       'Once the treated areas have dried they are safe to use again — your technician confirms the timing at the visit.',
+      // The idiom is exactly "safe" — a comparative or adverb is never exempt.
+      'Our treatment is safer once dry; your technician confirms timing.',
+      'The lawn is safest once dry, and your technician will confirm the timing.',
+      'It can be used safely once dry; your technician confirms timing.',
     ])('flags: %s', (sentence) => {
       expect(rule(sentence, 'absolute_safety_claim')).toBe(true);
+    });
+
+    test.each([
+      'The lawn is safe once dry, and your technician will confirm the timing.',
+      'Once it has dried, the lawn is safe again; your technician confirms the timing.',
+    ])('the plain "safe once dry" idiom with the technician confirming passes: %s', (sentence) => {
+      expect(rule(sentence, 'absolute_safety_claim')).toBe(false);
     });
 
     test.each([

@@ -831,6 +831,17 @@ const TRIGGER_REGISTRY = {
       link: '/admin/newsletter?tab=history',
     }),
   },
+  newsletter_send_not_dispatched: {
+    label: 'Newsletter send cancelled: the draft changed after Send was clicked',
+    category: 'newsletter',
+    priority: 'high',
+    group: 'Marketing',
+    build: (p) => ({
+      title: 'Newsletter not sent',
+      body: `"${p.subject || 'Untitled'}" changed after Send was clicked — nothing went out. Review the draft and send it again.`,
+      link: '/admin/newsletter?tab=compose',
+    }),
+  },
   newsletter_proof_blocked: {
     label: 'Newsletter proof/approval blocked by validation',
     category: 'newsletter',

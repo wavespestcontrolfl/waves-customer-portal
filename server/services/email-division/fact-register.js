@@ -248,7 +248,17 @@ async function auditHold(trx, hasAuditLog, row, plan) {
   });
 }
 
-async function applyFactPlan(trx, fact, row, plan, { now, today, hasAuditLog, result }) {
+// The hybrid knowledge index (knowledge-index/connectors.js loadKb) chunks
+// knowledge_base rows into knowledge_embeddings under source 'kb' and
+// source_id = slug, and prunes stale chunks only on its own nightly sync.
+// A retired fact must leave that index NOW, not up to a day later (codex
+// round 9): drop its chunks in the same transaction.
+async function dropIndexChunks(trx, hasEmbeddings, slug) {
+  if (!hasEmbeddings || !slug) return;
+  await trx('knowledge_embeddings').where({ source: 'kb', source_id: slug }).del();
+}
+
+async function applyFactPlan(trx, fact, row, plan, { now, today, hasAuditLog, hasEmbeddings, result }) {
   switch (plan.action) {
     case 'insert': {
       // ON CONFLICT DO NOTHING on any constraint: a concurrent insert of the
@@ -332,6 +342,7 @@ async function applyFactPlan(trx, fact, row, plan, { now, today, hasAuditLog, re
           ...(plan.keepDeactivation ? { deactivated_by_person: true } : {}),
         }),
       });
+      await dropIndexChunks(trx, hasEmbeddings, row.slug);
       await audit(trx, hasAuditLog, AUDIT_ACTIONS.retired, row, {
         reason: plan.reason, status_before_retire: row.status, deactivated_by_person: plan.keepDeactivation === true,
       });
@@ -376,6 +387,7 @@ async function syncFactRegister({ conn = db, now = new Date(), facts = FACTS, re
     return result;
   }
   const hasAuditLog = await conn.schema.hasTable('audit_log');
+  const hasEmbeddings = await conn.schema.hasTable('knowledge_embeddings');
   const today = etDateString(now);
 
   for (const fact of facts) {
@@ -384,7 +396,7 @@ async function syncFactRegister({ conn = db, now = new Date(), facts = FACTS, re
         const row = await trx('knowledge_base').where({ slug: fact.slug }).forUpdate().first();
         const priorSeed = row ? false : await seededBefore(trx, hasAuditLog, fact.slug);
         const plan = planFactSync(fact, row, { today, priorSeed });
-        await applyFactPlan(trx, fact, row, plan, { now, today, hasAuditLog, result });
+        await applyFactPlan(trx, fact, row, plan, { now, today, hasAuditLog, hasEmbeddings, result });
       });
     } catch (err) {
       result.errors.push({ slug: fact.slug, error: err.message });
@@ -404,7 +416,7 @@ async function syncFactRegister({ conn = db, now = new Date(), facts = FACTS, re
           const row = await trx('knowledge_base').where({ id: stray.id }).forUpdate().first();
           const plan = planStraySync(row);
           if (plan.action === 'ignore') return;
-          await applyFactPlan(trx, { slug: row.slug }, row, plan, { now, today, hasAuditLog, result });
+          await applyFactPlan(trx, { slug: row.slug }, row, plan, { now, today, hasAuditLog, hasEmbeddings, result });
         });
       } catch (err) {
         result.errors.push({ slug: stray.slug, error: err.message });
@@ -619,10 +631,49 @@ function termiteClaimInSentence(sentence, previousSentence) {
 // Large patch is "most likely to be observed from November through May when
 // temperatures are below 80°F" and "normally not observed in the summer
 // months" (fact-large-patch, UF/IFAS LH044). A clause naming large/brown
-// patch together with summer, the summer months, the rainy season or
-// above-80°F is the claim; UF's own "occurs in warm, humid weather" is not.
+// patch together with summer or heat, or with a temperature at or past the
+// 80°F line in any wording, is the claim; UF's own "occurs in warm, humid
+// weather" and "below 80°F" are not.
 const PATCH = /\b(?:brown|large)\s+patch\b/i;
-const PATCH_TRIGGER = /\b(?:summer(?:s|time)?|above[-\s]?80|june|july|august|september|rainy\s+season|hot\s+months?)\b/i;
+// The trigger is the CLASS of the threshold, not the one literal "above 80"
+// (codex round 10 P1): (i) the season or heat itself; (ii) any upward
+// comparator ("exceeds", "more than", "tops", "climbs to", "north of")
+// before a figure from 80 to 129, in digits or words, that is not a count
+// of something else ("over 80 lawns"); (iii) "the (upper/high/mid) 80s /
+// 90s / eighties / nineties / triple digits"; (iv) a figure of 80+ given
+// in degrees ("at 85°F", "in 90-degree weather"). A downward comparator
+// ("below 80°F", "under 85", "cooler than 90") is never a trigger.
+const HOT_FIGURE = '(?:(?:8|9)\\d|1[0-2]\\d)(?!\\d|,\\d{3})(?:\'?s)?|(?:eighty|ninety)(?:[-\\s](?:one|two|three|four|five|six|seven|eight|nine))?|(?:one|a)\\s+hundred';
+const UPWARD_COMPARATOR = '(?:above|over|past|beyond|exceed(?:s|ed|ing)?|(?:more|greater|higher|warmer|hotter)\\s+than|upwards\\s+of|in\\s+excess\\s+of|north\\s+of|at\\s+least|top(?:s|ped|ping)?|reach(?:es|ed|ing)?|hit(?:s|ting)?|(?:climb(?:s|ed|ing)?|ris(?:e|es|ing|en)|rose|go(?:es|ing)?|went|push(?:es|ed|ing)?|soar(?:s|ed|ing)?|stay(?:s|ed|ing)?|remain(?:s|ed|ing)?|get(?:s|ting)?|got)\\s+(?:up\\s+)?(?:to|past|above|over|into|beyond|at))';
+const NOT_A_TEMPERATURE = '(?!\\s*(?:%|percent|per\\s*cent|square|sq\\b|acres?|feet|foot|ft\\b|yards?|miles?|pounds?|lbs?|years?|days?|weeks?|months?|hours?|minutes?|dollars?|homes?|houses?|lawns?|yards?|customers?|people|samples?|species|cases?|times?|calls?|visits?))';
+const PATCH_TRIGGER = new RegExp(
+  '\\b(?:summer(?:s|time)?|june|july|august|september|rainy\\s+season|hot(?:ter|test)?|heat(?:waves?)?|warm(?:er|est)\\s+months?|dog\\s+days)\\b'
+  + `|\\b${UPWARD_COMPARATOR}[-\\s]+(?:the\\s+)?(?:${HOT_FIGURE})${NOT_A_TEMPERATURE}`
+  + '|\\bthe\\s+(?:(?:upper|high|mid|low|mid-to-upper)[-\\s]+)?(?:(?:8|9)0\'?s|eighties|nineties|100\'?s|hundreds|triple[-\\s]+digits)\\b'
+  + `|\\b(?:at|around|about|near|approximately|roughly|in|during|on)\\s+(?:the\\s+)?(?:${HOT_FIGURE})\\s*(?:°|-?\\s*degrees?\\b|-degree\\b)`,
+  'i',
+);
+// A clause that says large patch RECEDES in the heat is the fact, not the
+// myth: "Large patch slows once temperatures climb above 80°F" (codex round
+// 10 P1). The receding verb must come before any activity verb in the
+// clause — "Large patch thrives in summer as the grass slows down" is
+// still the claim — and must not itself be negated: "Large patch doesn't
+// slow down in summer" asserts the claim, whatever a negation elsewhere
+// would otherwise clear.
+const RECEDE_SOURCE = '(?:stop(?:s|ped|ping)?\\s+spreading|slow(?:s|ed|ing)?(?:\\s+down)?|stop(?:s|ped|ping)?|fad(?:e|es|ed|ing)(?:\\s+away|\\s+out)?|subsid(?:e|es|ed|ing)|(?:go(?:es)?|went|going|gone)\\s+(?:dormant|quiet|away)|dorman(?:t|cy)|back(?:s|ed|ing)?\\s+off|eas(?:e|es|ed|ing)(?:\\s+off|\\s+up)?|declin(?:e|es|ed|ing)|wan(?:e|es|ed|ing)|disappear(?:s|ed|ing)?|clear(?:s|ed|ing)?\\s+up|(?:di(?:e|es|ed)|dying)\\s+(?:back|down|out|off)|shut(?:s|ting)?\\s+down|quiet(?:s|ed|ing)?\\s+down|inactive|recover(?:s|ed|ing)?|(?:grow(?:s|ing)?|grew)\\s+out|retreat(?:s|ed|ing)?|diminish(?:es|ed|ing)?|abat(?:e|es|ed|ing)|halt(?:s|ed|ing)?|end(?:s|ed)?|rare|uncommon|unlikely|less\\s+(?:common|likely|active|prevalent|severe|of\\s+a\\s+problem))';
+const RECEDE = new RegExp(`\\b${RECEDE_SOURCE}\\b`, 'i');
+const PATCH_ACTIVE = /\b(?:thriv\w*|flar\w*|spread\w*|peak\w*|explod\w*|surg\w*|take[sn]?\s+off|taking\s+off|took\s+off|worst|strik\w*|attack\w*|appear\w*|show(?:s|ed|ing)?\s+up|develop\w*|active|activit\w*|lov(?:e|es|ed|ing)|prefer\w*|favou?r\w*|grow(?:s|ing)?|kick\w*\s+in|ramp\w*\s+up|common|prevalent|rampant|big\w*\s+problem|problem|damag\w*|kill\w*|infect\w*|return\w*|come\w*\s+back|comes)\b/i;
+const NEGATED_RECEDE = new RegExp(`\\b(?:not|never|no\\s+longer|hardly|rarely|seldom|cannot|\\w+n't)\\s+(?:\\w+\\s+){0,2}?${RECEDE_SOURCE}\\b(?![^]*\\b(?:until|before)\\b)`, 'i');
+const MYTH_WORD = /\b(?:myth|misconception|misunderstanding|folklore|old\s+wives'?\s+tales?|false|untrue|wrong)\b/i;
+
+// The clause is the fact that large patch recedes: a receding verb, not
+// negated, ahead of any activity verb.
+function patchRecedes(clause) {
+  const recede = clause.match(RECEDE);
+  if (!recede || NEGATED_RECEDE.test(clause)) return false;
+  const active = clause.replace(new RegExp(RECEDE.source, 'gi'), (m) => ' '.repeat(m.length)).match(PATCH_ACTIVE);
+  return !active || active.index > recede.index;
+}
 // The contrast must be ABOUT large patch — the words sit directly before
 // the patch noun ("mistaken for large patch", "unlike large patch"); a
 // contrast elsewhere in the clause ("Large patch thrives in summer unlike
@@ -633,19 +684,46 @@ const PATCH_CONTRAST = /\b(?:unlike|differs?\s+from|different\s+from|distinct\s+
 // spot is a summer disease") is not large patch.
 const OTHER_LAWN_SUBJECT = /\b(?:gray\s+leaf\s+spot|chinch\s+bugs?|chinch\s+damage|dollar\s*weed|dove\s*weed|take-?all(?:\s+root\s+rot)?|root\s+rot|sod\s+webworms?|army\s*worms?|grubs?|mole\s+crickets?|nematodes?|drought|dry\s+spots?|dog\s+spots?|pythium|rhizoctonia\s+leaf|leaf\s+and\s+sheath\s+spot|fairy\s+ring|rust|weeds?)\b/i;
 
-function patchClaimInSentence(sentence) {
+// "Large patch normally appears in spring. It thrives in summer." — the
+// pronoun means the disease named in the sentence before (codex round 9).
+const LAWN_PRONOUN_SUBJECT = /\b(?:it|this\s+(?:disease|fungus|patch|problem)|the\s+disease|the\s+fungus)\b/i;
+
+// The last lawn subject named in `text`: 'patch', 'other', or null.
+function lastLawnSubject(text) {
+  let kind = null;
+  let at = -1;
+  for (const match of text.matchAll(new RegExp(PATCH.source, 'gi'))) {
+    if (match.index > at) { at = match.index; kind = 'patch'; }
+  }
+  for (const match of text.matchAll(new RegExp(OTHER_LAWN_SUBJECT.source, 'gi'))) {
+    if (match.index > at) { at = match.index; kind = 'other'; }
+  }
+  return kind;
+}
+
+function patchClaimInSentence(sentence, previousSentence = '') {
   const clauses = splitClauses(sentence);
   // The subject carries across clauses the same way it does for termites:
   // "Large patch, rather than chinch damage, is what you see in summer"
-  // asserts the claim in its third clause (codex round 8).
+  // asserts the claim in its third clause (codex round 8); a leading pronoun
+  // takes the previous sentence's lawn subject (codex round 9).
   let subject = null;
   for (let i = 0; i < clauses.length; i += 1) {
     const clause = clauses[i];
     if (PATCH.test(clause)) subject = 'patch';
     else if (CONTRAST_LEAD_IN.test(clause)) { /* names the other party, subject unchanged */ }
     else if (OTHER_LAWN_SUBJECT.test(clause)) subject = 'other';
+    if (subject === null && LAWN_PRONOUN_SUBJECT.test(clause)) subject = lastLawnSubject(previousSentence);
     if (subject !== 'patch' || !PATCH_TRIGGER.test(clause)) continue;
-    if (clauseDenies(clause, PATCH_CONTRAST) || previousClauseIsMythLabel(clauses, i)) continue;
+    if (previousClauseIsMythLabel(clauses, i)) continue;
+    // "Large patch doesn't slow down in summer": the negation is on the
+    // receding verb, so it asserts the claim — unless the clause calls it
+    // a myth.
+    if (NEGATED_RECEDE.test(clause)) {
+      if (MYTH_WORD.test(clause)) continue;
+      return clause;
+    }
+    if (patchRecedes(clause) || clauseDenies(clause, PATCH_CONTRAST)) continue;
     return clause;
   }
   return null;
@@ -727,6 +805,8 @@ const DRY_STATE = /\b(?:once|when|after|until)\b[^.,;]{0,40}?\b(?:dry|dried|drie
 const FIXED_REENTRY_TIME = /\b(?:\d+|one|two|three|four|five|six|eight|ten|twelve|fifteen|twenty|thirty|forty-?five|sixty|ninety|half\s+an|a\s+couple\s+of|a\s+few|an?)\s*(?:minutes?|mins?|hours?|hrs?)\b/i;
 // Every protected audience, in every degree ("safer for pets", "safest for
 // pollinators"): never inside the dry-state idiom (codex round 8 P1).
+// Any degree of "safe" other than the plain adjective (codex round 10 P1).
+const SAFE_COMPARATIVE = /\bsafe(?:r|st)\b|\bsafely\b/i;
 const AUDIENCE_ABSOLUTE = /\bsafe(?:r|st)?\s+(?:for|around|near|with)\s+(?:the\s+|your\s+|our\s+)?(?:bees?|pollinators?|butterfl(?:y|ies)|birds?|fish|wildlife|pets?|kids?|children|babies|infants?|toddlers?|dogs?|cats?|puppies|kittens?|people|humans?|everyone|everybody|(?:whole\s+|entire\s+)?family|the\s+environment)\b/i;
 
 // The dry-state + technician exemption is bound to the CLAIM's clause: the
@@ -755,7 +835,11 @@ function safetyClaimInSentence(sentence) {
     const clause = clauses[i];
     if (!SAFE_CLAIM.test(clause)) continue;
     const beside = [clauses[i - 1], clause, clauses[i + 1]].filter(Boolean).join(' ');
-    const dryStateWithTechnician = DRY_STATE.test(beside) && TECHNICIAN_CONFIRMS.test(beside)
+    // The idiom is exactly "safe" once dry: "safer once dry", "the safest
+    // once it dries" and "used safely once dry" are comparative or
+    // absolute claims, technician or not (codex round 10 P1).
+    const dryStateWithTechnician = !SAFE_COMPARATIVE.test(clause)
+      && DRY_STATE.test(beside) && TECHNICIAN_CONFIRMS.test(beside)
       && !FIXED_REENTRY_TIME.test(clause) && !AUDIENCE_ABSOLUTE.test(clause);
     if (!dryStateWithTechnician) return clause;
   }
@@ -788,7 +872,7 @@ function reentryTimeInSentence(sentence) {
 
 const CLAIM_RULES = [
   { rule: 'termite_second_swarm', find: (sentence, previous) => termiteClaimInSentence(sentence, previous) },
-  { rule: 'large_patch_summer_disease', find: (sentence) => patchClaimInSentence(sentence) },
+  { rule: 'large_patch_summer_disease', find: (sentence, previous) => patchClaimInSentence(sentence, previous) },
   { rule: 'non_flea_vacuum_advice', find: (sentence) => vacuumClaimInSentence(sentence) },
   { rule: 'absolute_safety_claim', find: (sentence) => safetyClaimInSentence(sentence) },
   { rule: 'fixed_reentry_time', find: (sentence) => reentryTimeInSentence(sentence) },

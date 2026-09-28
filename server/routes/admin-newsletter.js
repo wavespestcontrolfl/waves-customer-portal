@@ -934,7 +934,17 @@ router.post('/sends/:id/send', async (req, res) => {
         return;
       }
       if (err.code === 'VERSION_CHANGED') {
+        // The route already answered 202: tell the operator the send did
+        // NOT happen (the draft changed under them), instead of letting the
+        // row sit as an edited draft they believe was dispatched (codex
+        // round 9).
         logger.info(`[newsletter] background send ${req.params.id} changed after validation — not dispatching that version`);
+        try {
+          const { triggerNotification } = require('../services/notification-triggers');
+          await triggerNotification('newsletter_send_not_dispatched', { sendId: req.params.id, subject: send.subject });
+        } catch (notifyErr) {
+          logger.warn(`[newsletter] not-dispatched notice failed: ${notifyErr.message}`);
+        }
         return;
       }
       if (err.code === 'EVENT_REVERIFY_FAILED' || err.code === 'EVENT_SELECTION_INVALID') {

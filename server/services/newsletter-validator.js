@@ -139,6 +139,31 @@ function findHallucinatedClaims(body, lockedPrices = [], mode = 'text') {
  * hallucinated-claim check, deduped by rule so one draft never reports the
  * same claim twice.
  */
+// Inline tags render with no gap: "pet-<strong>safe</strong>" reads
+// "pet-safe" to a subscriber, so the scan removes them without a space
+// (codex round 10 P1). Block-level closers and <br> end a sentence; any
+// other tag is a space.
+const BLOCK_BREAK_TAG = /<\/(?:p|li|h[1-6]|div|tr|td|th|blockquote|section|article|ul|ol|table)\s*>|<br\s*\/?>/gi;
+const INLINE_TAG = /<\/?(?:strong|em|b|i|u|s|span|a|mark|small|sup|sub|code|font|abbr|del|ins|q|cite|time|label)\b[^>]*>/gi;
+// Markdown emphasis in text_body: "pet-**safe**", "sec*ond*", "_pet_-safe",
+// "`safe`". An asterisk touching a letter or digit is emphasis even inside
+// a word; an underscore is a marker only where it opens or closes a word,
+// so snake_case identifiers and URL underscores are left alone.
+const MARKDOWN_PAIR = /\*\*|__|~~|`/g;
+const MARKDOWN_SINGLE = /(?<=[\p{L}\p{N}])\*+|\*+(?=[\p{L}\p{N}])|(?<![\p{L}\p{N}])_+(?=[\p{L}\p{N}])|(?<=[\p{L}\p{N}])_+(?![\p{L}\p{N}])/gu;
+
+function claimScanText(body) {
+  return decodeEntities(String(body)
+    .replace(BLOCK_BREAK_TAG, '. ')
+    .replace(INLINE_TAG, '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&(?:rsquo|lsquo|#8217|#8216);/gi, "'")
+    .replace(/&(?:rdquo|ldquo|#8221|#8220);/gi, '"'))
+    .normalize('NFKC')
+    .replace(MARKDOWN_PAIR, '')
+    .replace(MARKDOWN_SINGLE, '');
+}
+
 function scanUnverifiedClaims(send) {
   const errors = [];
   const seen = new Set();
@@ -148,16 +173,12 @@ function scanUnverifiedClaims(send) {
     if (!body) continue;
     // Block-level tags end a sentence (a heading glued to the paragraph
     // under it must not read as one sentence — the register's denial
-    // windows are sentence- and clause-bound); every other tag is a space.
-    // Then the same normalisation as the hallucinated-claim scan: an
-    // entity-encoded or homoglyph "&#115;econd" / "ｓecond swarm" / "don&rsquo;t"
-    // renders as the claim to subscribers and must not slip past the rules.
-    const bodyText = decodeEntities(body
-      .replace(/<\/(?:p|li|h[1-6]|div|tr|td|th|blockquote|section|article|ul|ol|table)\s*>|<br\s*\/?>/gi, '. ')
-      .replace(/<[^>]+>/g, ' ')
-      .replace(/&(?:rsquo|lsquo|#8217|#8216);/gi, "'")
-      .replace(/&(?:rdquo|ldquo|#8221|#8220);/gi, '"'))
-      .normalize('NFKC');
+    // windows are sentence- and clause-bound); inline tags vanish; every
+    // other tag is a space. Then the same normalisation as the
+    // hallucinated-claim scan: an entity-encoded or homoglyph "&#115;econd"
+    // / "ｓecond swarm" / "don&rsquo;t" renders as the claim to subscribers
+    // and must not slip past the rules; Markdown emphasis markers go too.
+    const bodyText = claimScanText(body);
     for (const { rule, excerpt } of findUnverifiedClaims(bodyText)) {
       if (seen.has(rule)) continue;
       seen.add(rule);

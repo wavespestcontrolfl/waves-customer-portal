@@ -196,6 +196,11 @@ postgres('email-division fact register sync against migrated PostgreSQL', () => 
     const facts = [fact(1)];
     await sync(facts);
     const before = await rowOf(facts[0].slug);
+    // The hybrid index has chunked this fact; retirement must drop those chunks now.
+    await trx('knowledge_embeddings').insert({
+      source: 'kb', source_id: facts[0].slug, chunk_index: 0, title: facts[0].title, content: facts[0].content,
+      content_hash: 'synthetic-hash', metadata: JSON.stringify({ category: 'facts' }),
+    });
 
     const expired = [{ ...facts[0], expiresOn: '2026-09-28' }];
     const r = await sync(expired);
@@ -205,6 +210,7 @@ postgres('email-division fact register sync against migrated PostgreSQL', () => 
     expect(after.status).toBe('archived');
     expect(after.metadata).toMatchObject({ retired_on: '2026-09-28', retired_reason: 'expired', status_before_retire: 'active' });
     expect(await audits(before.id, 'knowledge_base.fact_retired')).toHaveLength(1);
+    expect(await trx('knowledge_embeddings').where({ source: 'kb', source_id: facts[0].slug })).toHaveLength(0);
     // The shared knowledge-base search reads status: the retired fact is gone
     // from it. (search_vector covers title + content; the title carries
     // "Synthetic", and the still-live second fact proves the search works.)

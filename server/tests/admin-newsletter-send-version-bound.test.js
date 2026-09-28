@@ -40,6 +40,8 @@ jest.mock('../services/newsletter-validator', () => ({
   findHallucinatedClaims: jest.fn(() => []),
 }));
 jest.mock('../services/logger', () => ({ error: jest.fn(), info: jest.fn(), warn: jest.fn() }));
+const mockTrigger = jest.fn(async () => ({ bellWritten: true }));
+jest.mock('../services/notification-triggers', () => ({ triggerNotification: mockTrigger }));
 
 const express = require('express');
 const db = require('../models/db');
@@ -107,4 +109,6 @@ test('a VERSION_CHANGED claim from the background send is a benign no-op (no fai
   await new Promise((r) => setTimeout(r, 20));
   const updates = db.mock.results.flatMap((r) => r.value?.update?.mock?.calls || []);
   expect(updates.some((c) => c[0]?.status === 'failed')).toBe(false);
+  // …but the operator is told the send did not happen (the route already answered 202).
+  expect(mockTrigger).toHaveBeenCalledWith('newsletter_send_not_dispatched', expect.objectContaining({ sendId: SEND_UUID, subject: DRAFT.subject }));
 });

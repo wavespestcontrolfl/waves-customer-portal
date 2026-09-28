@@ -3046,14 +3046,16 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // DAILY 4:05AM ET — Email division fact register sync. Brings the code
+  // DAILY 2:15AM ET — Email division fact register sync. Brings the code
   // register (services/email-division/fact-register-data.js) into
   // knowledge_base: inserts missing facts, updates rows still carrying what
   // the register last wrote, retires expired/withdrawn ones, and HOLDS any
-  // row a person edited (never overwritten; audited once). The Pest Insider
-  // draft also syncs on demand; this keeps the admin knowledge base current.
+  // row a person edited (never overwritten; audited once). Runs BEFORE the
+  // 2:40 AM knowledge-index sync so an expired fact is out of knowledge_base
+  // (and its index chunks dropped) by the time the index rebuilds (codex
+  // round 9). The Pest Insider draft also syncs on demand.
   // =========================================================================
-  cron.schedule('5 4 * * *', async () => {
+  cron.schedule('15 2 * * *', async () => {
     try {
       await runExclusive('email-division-fact-sync', async () => {
         const { ensureFactRegister } = require('./email-division/fact-register');

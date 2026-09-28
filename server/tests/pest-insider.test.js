@@ -270,6 +270,28 @@ describe('pest-insider claim validation at the send gates', () => {
     expect(validateNewsletterDraft(priced, { recipientCount: 100 }).errors.some((e) => e.includes('Hallucinated claim'))).toBe(true);
   });
 
+  test.each([
+    ['an inline HTML tag', 'html_body', '<p>We are pet-<strong>safe</strong> certified.</p>', 'absolute_safety_claim'],
+    ['an inline tag with attributes', 'html_body', '<p>Kid-<span style="color:#0a0">safe</span> fun.</p>', 'absolute_safety_claim'],
+    ['an inline tag inside a word', 'html_body', '<p>Termites have a sec<b>ond</b> swarm.</p>', 'termite_second_swarm'],
+    ['Markdown bold', 'text_body', 'We are pet-**safe** certified.', 'absolute_safety_claim'],
+    ['Markdown italics', 'text_body', 'Kid-_safe_ fun.', 'absolute_safety_claim'],
+    ['Markdown code', 'text_body', 'Pet-`safe`.', 'absolute_safety_claim'],
+    ['Markdown bold inside a word', 'text_body', 'Termites have a sec**ond** swarm.', 'termite_second_swarm'],
+    ['Markdown italics inside a word', 'text_body', 'Termites have a sec*ond* swarm.', 'termite_second_swarm'],
+    ['Markdown strikethrough inside a word', 'text_body', 'Termites have a sec~~~~ond swarm.', 'termite_second_swarm'],
+  ])('a claim split by %s renders as one word and still hard-blocks', (_label, field, body, ruleName) => {
+    const draft = { ...baseSend, [field]: field === 'html_body' ? baseSend.html_body + body : body };
+    const { errors } = validateNewsletterDraft(draft, { recipientCount: 100 });
+    expect(errors.some((e) => e.includes(`Unverified claim (${ruleName})`))).toBe(true);
+  });
+
+  test('a heading still ends a sentence: a large-patch heading does not join the summer paragraph under it', () => {
+    const draft = { ...baseSend, html_body: `${baseSend.html_body}<h2>Large <em>patch</em></h2><p>Summer lawns need deep watering.</p>` };
+    const { errors } = validateNewsletterDraft(draft, { recipientCount: 100 });
+    expect(errors.some((e) => e.includes('Unverified claim (large_patch_summer_disease)'))).toBe(false);
+  });
+
   test('an entity-encoded DENIAL is decoded before the scan and does not block', () => {
     const draft = { ...baseSend, html_body: `${baseSend.html_body}<p>Termites don&#39;t have a second swarm after storms.</p>` };
     const { errors } = validateNewsletterDraft(draft, { recipientCount: 100 });

@@ -1108,7 +1108,15 @@ async function prepareResumeCampaign(sendId) {
     const lockedPrices = await lockedPricesForSend(send, db);
     const { errors } = validateNewsletterDraft(send, { recipientCount: 1, lockedPrices });
     if (errors.length > 0) {
-      const err = new Error(`campaign no longer passes validation: ${errors.join('; ')}`);
+      // Nothing is claimed. Return the campaign to an editable draft (PATCH
+      // accepts draft/scheduled only) with its approval cleared; the
+      // per-recipient delivery ledger is untouched, so a later send of the
+      // corrected copy reaches only the recipients still outstanding
+      // (codex round 9).
+      await db('newsletter_sends').where({ id: send.id }).whereIn('status', ['failed', 'sent', 'sending']).update({
+        status: 'draft', scheduled_for: null, proof_token: null, proof_sent_at: null, proof_approved_at: null, updated_at: new Date(),
+      });
+      const err = new Error(`campaign no longer passes validation and was returned to draft for editing: ${errors.join('; ')}`);
       err.code = 'VALIDATION_FAILED';
       err.errors = errors;
       throw err;
