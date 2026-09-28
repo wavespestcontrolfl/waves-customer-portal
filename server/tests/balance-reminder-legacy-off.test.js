@@ -1,0 +1,249 @@
+/**
+ * Retire the dormant legacy balance-reminder runs (dunning unification,
+ * owner ruling 2026-09-27): balanceReminder.dailyCheck() (gentle/firm/urgent
+ * pre-visit tiers) and .latePaymentCheck() (account-level 7/14/30/60/90 late
+ * check) sent 0 messages in the last 30 days — the invoice follow-up
+ * ladder, late-payment-checker.js, and the pre-visit balance reminder own
+ * these now.
+ *
+ * GATE_BALANCE_REMINDER_LEGACY_OFF is checked inside BOTH methods
+ * themselves (not just the scheduler's cron body), so an explicit call from
+ * anywhere else is also inert. Gate off is byte-identical to before this
+ * lane — proven by balance-reminder-late-payment-email.test.js (unchanged,
+ * gate never set) continuing to pass unmodified alongside this suite.
+ *
+ * Each method has its OWN coupling to its OWN replacement (Codex round-2
+ * review, dunning unification):
+ *   - dailyCheck() retires ONLY once the pre-visit balance reminder is
+ *     actually live: PREVISIT_BALANCE_REMINDER=true AND its seeded SMS
+ *     template active. GATE_PREVISIT_BALANCE_5DAY only widens that
+ *     reminder's lead window and says nothing about whether it runs at all.
+ *     The one duty dailyCheck carried that the pre-visit reminder has no
+ *     equivalent for — the internal owner alert for a balance ≥30 days
+ *     overdue with service today/tomorrow — keeps running
+ *     (imminentOverdueOwnerAlertSweep) even while dailyCheck retires.
+ *   - latePaymentCheck() retires ONLY together with GATE_DUNNING_LADDER_90
+ *     also live (its Day 60/90 steps are what actually replace it).
+ */
+
+jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/logger', () => ({
+  info: jest.fn(), warn: jest.fn(), error: jest.fn(),
+}));
+jest.mock('../services/previsit-balance-reminder', () => ({
+  gateEnabled: jest.fn(() => false),
+  smsTemplateActive: jest.fn(async () => false),
+}));
+jest.mock('../services/twilio', () => ({ sendSMS: jest.fn(async () => ({})) }));
+// customerDunningStopped (module-private in balance-reminder.js) lazily
+// requires invoice-followups.js for its sequence/stop checks — stub it so
+// the alert-sweep tests below don't drag in the real dunning-stop machinery.
+jest.mock('../services/invoice-followups', () => ({
+  hasActiveSequence: jest.fn(async () => false),
+  isDunningStopped: jest.fn(async () => false),
+}));
+
+const db = require('../models/db');
+const logger = require('../services/logger');
+const PrevisitBalanceReminder = require('../services/previsit-balance-reminder');
+const TwilioService = require('../services/twilio');
+const balanceReminder = require('../services/workflows/balance-reminder');
+
+const DAILY_RETIRED_LOG = '[balance-reminders] dailyCheck retired: GATE_BALANCE_REMINDER_LEGACY_OFF, the pre-visit balance reminder owns these now';
+const DAILY_IGNORED_WARN = '[balance-reminders] GATE_BALANCE_REMINDER_LEGACY_OFF ignored for dailyCheck: the pre-visit balance reminder replacement (PREVISIT_BALANCE_REMINDER + its SMS template) is not live yet';
+const LATE_RETIRED_LOG = '[balance-reminders] latePaymentCheck retired: GATE_BALANCE_REMINDER_LEGACY_OFF, the invoice follow-up ladder and late-payment-checker.js own these';
+const LATE_IGNORED_WARN = '[balance-reminders] GATE_BALANCE_REMINDER_LEGACY_OFF ignored for latePaymentCheck: GATE_DUNNING_LADDER_90 is not live';
+
+beforeEach(() => {
+  // resetAllMocks (not clearAllMocks): db's per-test mockImplementation must
+  // not leak into the next test — an unmocked db() call should throw
+  // "unexpected table", proving the legacy body actually ran, not silently
+  // resolve against the PREVIOUS test's table stub.
+  jest.resetAllMocks();
+  delete process.env.GATE_BALANCE_REMINDER_LEGACY_OFF;
+  delete process.env.GATE_DUNNING_LADDER_90;
+  PrevisitBalanceReminder.gateEnabled.mockReturnValue(false);
+  PrevisitBalanceReminder.smsTemplateActive.mockResolvedValue(false);
+});
+
+afterAll(() => {
+  delete process.env.GATE_BALANCE_REMINDER_LEGACY_OFF;
+  delete process.env.GATE_DUNNING_LADDER_90;
+});
+
+// A minimal, chainable stand-in for the imminent-overdue alert sweep's own
+// scheduled_services query (where/where/whereIn/leftJoin/where/whereNull/
+// whereNotNull/select) — every method returns the same object so any call
+// order/count on it resolves, and `select()` is the terminal read.
+function scheduledServicesChain(rows) {
+  const q = {};
+  ['where', 'whereIn', 'leftJoin', 'whereNull', 'whereNotNull'].forEach((method) => {
+    q[method] = jest.fn(() => q);
+  });
+  q.select = jest.fn(() => Promise.resolve(rows));
+  return q;
+}
+
+describe('dailyCheck', () => {
+  test('gate on, previsit replacement fully live: retires, runs no legacy query, logs the retirement line', async () => {
+    process.env.GATE_BALANCE_REMINDER_LEGACY_OFF = 'true';
+    PrevisitBalanceReminder.gateEnabled.mockReturnValue(true);
+    PrevisitBalanceReminder.smsTemplateActive.mockResolvedValue(true);
+    // The imminent-overdue owner-alert sweep still queries (see the
+    // dedicated alert-sweep tests below for that duty) — empty result here
+    // means it finds nothing and sends nothing, which is all this test
+    // cares about; the legacy dailyCheck body's OWN queries never run.
+    db.mockImplementation((table) => {
+      if (table === 'scheduled_services') return scheduledServicesChain([]);
+      throw new Error(`unexpected query on table ${table}`);
+    });
+
+    await expect(balanceReminder.dailyCheck()).resolves.toBeUndefined();
+    expect(logger.info).toHaveBeenCalledWith(DAILY_RETIRED_LOG);
+    expect(logger.warn).not.toHaveBeenCalledWith(DAILY_IGNORED_WARN);
+  });
+
+  test('gate on, PREVISIT_BALANCE_REMINDER dark: warns and runs the legacy body unchanged', async () => {
+    process.env.GATE_BALANCE_REMINDER_LEGACY_OFF = 'true';
+    PrevisitBalanceReminder.gateEnabled.mockReturnValue(false);
+    PrevisitBalanceReminder.smsTemplateActive.mockResolvedValue(true);
+    await expect(balanceReminder.dailyCheck()).rejects.toThrow();
+    expect(db).toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(DAILY_IGNORED_WARN);
+    expect(logger.info).not.toHaveBeenCalledWith(DAILY_RETIRED_LOG);
+  });
+
+  test('gate on, SMS template dark: warns and runs the legacy body unchanged', async () => {
+    process.env.GATE_BALANCE_REMINDER_LEGACY_OFF = 'true';
+    PrevisitBalanceReminder.gateEnabled.mockReturnValue(true);
+    PrevisitBalanceReminder.smsTemplateActive.mockResolvedValue(false);
+    await expect(balanceReminder.dailyCheck()).rejects.toThrow();
+    expect(db).toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(DAILY_IGNORED_WARN);
+    expect(logger.info).not.toHaveBeenCalledWith(DAILY_RETIRED_LOG);
+  });
+
+  test('gate unset: legacy body runs unchanged, no warn, no retirement log', async () => {
+    await expect(balanceReminder.dailyCheck()).rejects.toThrow();
+    expect(db).toHaveBeenCalled();
+    expect(logger.warn).not.toHaveBeenCalledWith(DAILY_IGNORED_WARN);
+    expect(logger.info).not.toHaveBeenCalledWith(DAILY_RETIRED_LOG);
+    expect(PrevisitBalanceReminder.gateEnabled).not.toHaveBeenCalled();
+  });
+
+  test('a non-strict spelling never disables it (strict === "true" only)', async () => {
+    process.env.GATE_BALANCE_REMINDER_LEGACY_OFF = 'TRUE';
+    await expect(balanceReminder.dailyCheck()).rejects.toThrow();
+    expect(db).toHaveBeenCalled();
+    expect(PrevisitBalanceReminder.gateEnabled).not.toHaveBeenCalled();
+  });
+});
+
+describe('imminentOverdueOwnerAlertSweep (the one dailyCheck duty with no pre-visit equivalent)', () => {
+  // Pinned clock: daysUntil compares scheduled_date against `new Date()`
+  // taken live inside the sweep, so a real clock and a fixed scheduled_date
+  // race by however many ms elapse between test setup and that read.
+  beforeEach(() => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-05-26T14:00:00.000Z'));
+  });
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  test('a customer 30+ days overdue with service today gets the owner alert even though dailyCheck retired', async () => {
+    process.env.GATE_BALANCE_REMINDER_LEGACY_OFF = 'true';
+    PrevisitBalanceReminder.gateEnabled.mockReturnValue(true);
+    PrevisitBalanceReminder.smsTemplateActive.mockResolvedValue(true);
+    const service = {
+      id: 'ss-1', cust_id: 'cust-1', first_name: 'Taylor', last_name: 'Morgan',
+      // Fixed to the SAME instant the fake clock is set to below — daysUntil
+      // must land exactly on 0, and comparing two independently-taken
+      // `new Date()` calls (test setup vs. the sweep's own clock read) is a
+      // real-clock race that flakes under load (jitter can floor to -1).
+      scheduled_date: new Date('2026-05-26T14:00:00.000Z'), waveguard_tier: 'Gold',
+    };
+    db.mockImplementation((table) => {
+      if (table === 'scheduled_services') return scheduledServicesChain([service]);
+      throw new Error(`unexpected table ${table}`);
+    });
+    jest.spyOn(balanceReminder, 'getCustomerBalance').mockResolvedValue({
+      totalBalance: 250, daysOverdue: 35, invoiceIds: [], oldestInvoiceId: null,
+    });
+
+    await balanceReminder.dailyCheck();
+
+    expect(TwilioService.sendSMS).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.stringContaining('Taylor Morgan'),
+      expect.objectContaining({ messageType: 'internal_alert' }),
+    );
+  });
+
+  test('a customer under 30 days overdue gets no alert', async () => {
+    process.env.GATE_BALANCE_REMINDER_LEGACY_OFF = 'true';
+    PrevisitBalanceReminder.gateEnabled.mockReturnValue(true);
+    PrevisitBalanceReminder.smsTemplateActive.mockResolvedValue(true);
+    const service = {
+      id: 'ss-1', cust_id: 'cust-1', first_name: 'Taylor', last_name: 'Morgan',
+      scheduled_date: new Date('2026-05-26T14:00:00.000Z'), waveguard_tier: 'Gold',
+    };
+    db.mockImplementation((table) => {
+      if (table === 'scheduled_services') return scheduledServicesChain([service]);
+      throw new Error(`unexpected table ${table}`);
+    });
+    jest.spyOn(balanceReminder, 'getCustomerBalance').mockResolvedValue({
+      totalBalance: 40, daysOverdue: 10, invoiceIds: [], oldestInvoiceId: 'inv-1',
+    });
+
+    await balanceReminder.dailyCheck();
+
+    expect(TwilioService.sendSMS).not.toHaveBeenCalled();
+  });
+});
+
+describe('latePaymentCheck', () => {
+  test('both gates on: retires — returns without querying or sending, logs the retirement line', async () => {
+    process.env.GATE_BALANCE_REMINDER_LEGACY_OFF = 'true';
+    process.env.GATE_DUNNING_LADDER_90 = 'true';
+    await expect(balanceReminder.latePaymentCheck()).resolves.toBeUndefined();
+    expect(db).not.toHaveBeenCalled();
+    expect(logger.info).toHaveBeenCalledWith(LATE_RETIRED_LOG);
+    expect(logger.warn).not.toHaveBeenCalledWith(LATE_IGNORED_WARN);
+  });
+
+  test('legacy-off alone (ladder gate unset): warns and runs the legacy body unchanged', async () => {
+    process.env.GATE_BALANCE_REMINDER_LEGACY_OFF = 'true';
+    delete process.env.GATE_DUNNING_LADDER_90;
+    await expect(balanceReminder.latePaymentCheck()).rejects.toThrow();
+    expect(db).toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(LATE_IGNORED_WARN);
+    expect(logger.info).not.toHaveBeenCalledWith(LATE_RETIRED_LOG);
+  });
+
+  test('legacy-off alone (ladder gate non-strict spelling): warns and runs the legacy body unchanged', async () => {
+    process.env.GATE_BALANCE_REMINDER_LEGACY_OFF = 'true';
+    process.env.GATE_DUNNING_LADDER_90 = 'TRUE';
+    await expect(balanceReminder.latePaymentCheck()).rejects.toThrow();
+    expect(db).toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(LATE_IGNORED_WARN);
+    expect(logger.info).not.toHaveBeenCalledWith(LATE_RETIRED_LOG);
+  });
+
+  test('neither gate set: runs the legacy body unchanged, no warn, no retirement log', async () => {
+    delete process.env.GATE_BALANCE_REMINDER_LEGACY_OFF;
+    delete process.env.GATE_DUNNING_LADDER_90;
+    await expect(balanceReminder.latePaymentCheck()).rejects.toThrow();
+    expect(db).toHaveBeenCalled();
+    expect(logger.warn).not.toHaveBeenCalledWith(LATE_IGNORED_WARN);
+    expect(logger.info).not.toHaveBeenCalledWith(LATE_RETIRED_LOG);
+  });
+
+  test('a non-strict spelling on the legacy-off gate never disables it (strict === "true" only)', async () => {
+    process.env.GATE_BALANCE_REMINDER_LEGACY_OFF = '1';
+    process.env.GATE_DUNNING_LADDER_90 = 'true';
+    await expect(balanceReminder.latePaymentCheck()).rejects.toThrow();
+    expect(db).toHaveBeenCalled();
+    expect(logger.warn).not.toHaveBeenCalledWith(LATE_IGNORED_WARN);
+    expect(logger.info).not.toHaveBeenCalledWith(LATE_RETIRED_LOG);
+  });
+});

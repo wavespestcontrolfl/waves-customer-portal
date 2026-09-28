@@ -326,6 +326,30 @@ function followupSteps() {
   return ladderThrough90Live() ? config.stepsThrough90 : config.steps;
 }
 
+// Shared at-risk pipeline_stage stamp for 60/90-day debt-age tiers — one
+// implementation for every caller that reaches that tier (this ladder's own
+// Day 60/90 steps, late-payment-checker.js's tiers, and balance-reminder.js's
+// legacy branches while they still run) so they can never drift on which
+// fields this stamps or which rows it's safe to touch. No predicate on
+// balance/invoice state — the caller has already confirmed the tier and a
+// delivery. Guarded (dunning unification round-2 review, Codex P1) against a
+// CHURNED/archived customer: fireTouch excludes only deleted customers, and
+// an unconditional update would flip a churned row's pipeline_stage back to
+// 'at_risk' while leaving active=false and the churn fields intact —
+// corrupting lifecycle reporting and the plan_restart flow's churned-state
+// check. Restricting to active, non-former-customer-stage rows preserves the
+// stage instead.
+async function markAtRiskForLongOverdue(customerId, database = db) {
+  const { FORMER_CUSTOMER_STAGES } = require('./customer-stages');
+  await database('customers').where({ id: customerId })
+    .where('active', true)
+    .whereNotIn('pipeline_stage', FORMER_CUSTOMER_STAGES)
+    .update({
+      pipeline_stage: 'at_risk',
+      pipeline_stage_changed_at: new Date(),
+    });
+}
+
 function sequenceAnchor(row) {
   return row.anchor_at || row.invoice_sent_at || row.invoice_sms_sent_at || row.invoice_created_at || row.created_at;
 }
@@ -1937,6 +1961,21 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
   // (Contact-ledger rows were written BEFORE each leg's delivery attempt —
   // record-then-send, codex 2026-08-14 — so there is nothing to record here.)
 
+  // Day 60/90 (Day 90 ladder, GATE_DUNNING_LADDER_90) inherits the legacy
+  // balance-reminder's at-risk stamp for these same debt-age tiers (Codex
+  // P2, dunning unification): retiring the legacy cron under
+  // GATE_BALANCE_REMINDER_LEGACY_OFF must not drop it. Stamped here — ABOVE
+  // the freshDelivery early return below — because reaching this point
+  // already means a channel confirmed delivery, fresh OR deduped (the
+  // no-channel-delivered branch above returns before here). A dun replay
+  // that only re-confirms an already-delivered leg (freshDelivery === false)
+  // still owes this stamp (Codex P2, round 2): the legacy implicit-channel
+  // branch stamped unconditionally at template selection, so a deduped
+  // Day 60/90 replay must not lose the transition the legacy code never did.
+  if (ladderThrough90Live() && (step.id === 'd60_reminder' || step.id === 'd90_final_notice')) {
+    await markAtRiskForLongOverdue(row.customer_id);
+  }
+
   // An already delivered leg advances its step without a new outbound touch.
   if (!freshDelivery) return;
 
@@ -2664,6 +2703,8 @@ module.exports = {
   skipStaleTouches,
   firstEligibleFireAt,
   STALE_TOUCH_GRACE_MS,
+  ladderThrough90Live,
+  markAtRiskForLongOverdue,
   // Pure predicates, exported for tests only.
   _test: { canSystemResume, isSystemStopStamp },
 };

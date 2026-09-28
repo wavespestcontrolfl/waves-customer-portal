@@ -835,6 +835,12 @@ const LatePaymentService = {
             const freshEmail = Number(!emailResult.deduped);
             notified += freshEmail;
             skipped += 1 - freshEmail;
+            // Sequence-less invoice, confirmed delivery on repair — same
+            // shared stamp as the normal path below (dunning unification,
+            // owner note: this checker is the only sender left for a 60/90
+            // -day invoice with no invoice_followup_sequences row once the
+            // legacy balance-reminder retires).
+            if (tierDays >= 60) await require('./invoice-followups').markAtRiskForLongOverdue(customer.id, db);
           } else if (emailResult?.resolved === true
             || (isTerminalEmailRefusal(emailResult)
               && await resolvePendingEmailEpisode({ emailLedgerId: emailLedger?.id }, 'email_terminal_refusal'))
@@ -900,6 +906,16 @@ const LatePaymentService = {
           skipped++;
           continue;
         }
+
+        // Sequence-less invoice, confirmed delivery this tier (dunning
+        // unification, owner note): once the legacy balance-reminder's
+        // account-level 60/90-day late check retires, this checker is the
+        // only sender left for an invoice with no invoice_followup_sequences
+        // row (adoption, GATE_DUNNING_ADOPT_ORPHANS, is dark by default), so
+        // it now owns the shared at-risk stamp for those same tiers — same
+        // helper invoice-followups.js's fireTouch uses for its Day 60/90
+        // steps, so the two callers can't drift on which fields it stamps.
+        if (tierDays >= 60) await require('./invoice-followups').markAtRiskForLongOverdue(customer.id, db);
 
         const activityInsert = db('activity_log').insert({
           ...(repair?.originalAt ? { created_at: repair.originalAt } : {}),
