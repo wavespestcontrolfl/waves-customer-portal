@@ -2102,6 +2102,12 @@ router.post('/bank-import/upload', async (req, res, next) => {
       // reported — never imported as silent duplicates. Read under the same
       // label lock the feed setup takes.
       feedCoverage = await require('../services/plaid-sync').feedCoverageForLabel(trx, label, toInsert.map(r => r.txn_date));
+      if (feedCoverage.liveType && feedCoverage.liveType !== accountType) {
+        const asWhat = feedCoverage.liveType === 'bank' ? 'a bank account' : 'a credit card';
+        const e = new Error(`"${label}" is fed by a live bank connection as ${asWhat} — keep that type, or use a different label`);
+        e.status = 400;
+        throw e; // rolls back before any insert
+      }
       const kept = [];
       for (const r of toInsert) {
         if (feedCoverage.isCovered(r.txn_date)) feedCoveredHashes.add(r.row_hash); else kept.push(r);

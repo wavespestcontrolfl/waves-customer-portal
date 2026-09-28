@@ -537,6 +537,18 @@ async function activate(itemId, overrides = {}) {
       // 09-12 and 09-15 were fed (skipped); 09-13 (no feed rows) and 09-16 import
       expect(await res2.json()).toMatchObject({ imported: 2, feedCovered: 2, feedLiveFrom: null, feedDays: ['2026-09-12', '2026-09-15'] });
       expect((await mockPg('bank_transactions').where({ source: 'csv' }).whereIn('description', ['GAP DAY', 'AFTER FEED'])).length).toBe(2);
+
+      // a configured feed with no rows yet still fixes the label's type
+      const other = await connect('-t');
+      const tomorrow = new Date(`${new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' })}T00:00:00Z`);
+      tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
+      await activate(other, { 'acc-card-t': { accountLabel: 'fresh-card', syncFrom: tomorrow.toISOString().slice(0, 10) }, 'acc-chk-t': { accountLabel: 'fresh-chk' } });
+      const res3 = await fetch(`http://127.0.0.1:${server.address().port}/admin/tax/bank-import/upload`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ accountLabel: 'fresh-card', accountType: 'bank', filename: 'x.csv', csv: 'Date,Description,Amount\n2026-08-01,OLD,-1.00' }),
+      });
+      expect(res3.status).toBe(400);
+      expect((await res3.json()).error).toMatch(/fed by a live bank connection as a credit card/);
     } finally {
       server.close();
       delete process.env.GATE_BANK_IMPORT;

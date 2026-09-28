@@ -231,6 +231,7 @@ async function feedCoverageForLabel(conn, label, dates = []) {
     .where('pa.enabled', true)
     .whereRaw('upper(trim(pa.account_label)) = upper(?)', [canonical])
     .min('pa.sync_from as cutoff')
+    .min('pa.account_type as account_type')
     .first();
   const liveFrom = toDateOnly(live && live.cutoff);
   const fedDays = new Set();
@@ -245,6 +246,9 @@ async function feedCoverageForLabel(conn, label, dates = []) {
   }
   return {
     liveFrom,
+    // a feed configured on this label fixes its account type even before
+    // its first row lands (label uniqueness ⇒ at most one live account)
+    liveType: liveFrom ? (live.account_type || null) : null,
     fedDays: [...fedDays].sort(),
     isCovered: (d) => (!!liveFrom && d >= liveFrom) || fedDays.has(d),
   };
