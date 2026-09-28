@@ -497,7 +497,9 @@ function containsSubordinateAccessCredential(text) {
 }
 
 const REPORT_DIRECT_ACCESS_DEVICE_TARGET_TEXT = String.raw`(?:(?:the|a|an)\s+)?(?:(?:your|our|their|customer['’]s)\s+)?(?:(?!(?:turf|soil|lawn|area|ground|field|near|by|at|around|beside|along)\b)[a-z][a-z'’\-]*\s+){0,2}(?:gate|door|garage|entry|keypad|lock\s?box|lock)`;
-const REPORT_NUMERIC_ACCESS_ACTION_LINK_TEXT = String.raw`(?:(?:(?:to|for)|(?:will|would|should|shall|must|might|may|can|could)(?:\s+(?:now|currently|still|today|temporarily|again|recently|just|always|directly|immediately|automatically|not|never))?)\s+)?`;
+const REPORT_ACCESS_ACTION_MANNER_TEXT = String.raw`(?:manually|easily|readily|directly|immediately|automatically|successfully)`;
+const REPORT_NUMERIC_ACCESS_CAUSATIVE_TEXT = String.raw`(?:let(?:s|ting)?|allow(?:s|ed|ing)?|enable(?:s|d|ing)?)\s+(?:you|us|them|(?:the|your|our)\s+(?:technician|tech|team|crew|specialist))(?:\s+to)?`;
+const REPORT_NUMERIC_ACCESS_ACTION_LINK_TEXT = String.raw`(?:(?:(?:to|for|will|would|should|shall|must|might|may|can|could)(?:\s+(?:now|currently|still|today|temporarily|again|recently|just|always|${REPORT_ACCESS_ACTION_MANNER_TEXT}|not|never))?(?:\s+${REPORT_NUMERIC_ACCESS_CAUSATIVE_TEXT})?|${REPORT_NUMERIC_ACCESS_CAUSATIVE_TEXT})\s+)?`;
 // Access instructions can place a connector between the credential and the
 // access action. Screen that whole relationship before measurement masking.
 const REPORT_INPUT_ACTION_TEXT = String.raw`(?:enter(?:s|ed|ing)?|typ(?:e|es|ed|ing)|press(?:es|ed|ing)?|punch(?:es|ed|ing)?|input(?:s|ted|ting)?|tr(?:y|ies|ied|ying))`;
@@ -507,7 +509,6 @@ const REPORT_DIRECT_ACCESS_ACTION_TEXT = String.raw`(?:open(?:s|ed|ing)?|unlock(
 const REPORT_ACCESS_CONDITION_SUBJECT_TEXT = String.raw`(?:you|we|they|the\s*technician|the\s*customer)`;
 const REPORT_ACCESS_CONDITION_FREQUENCY_TEXT = String.raw`(?:ever|still|again|now|later|occasionally|sometimes)`;
 const REPORT_ACCESS_CONDITION_AUX_TEXT = String.raw`(?:can|could|will|would|should|may|might|must|need(?:s|ed)?(?:\s+to)?|want(?:s|ed)?(?:\s+to)?|(?:have|has|had)(?:\s+to)?|(?:am|are|is|was|were)\s+able\s+to)`;
-const REPORT_ACCESS_ACTION_MANNER_TEXT = String.raw`(?:easily|readily|directly|successfully)`;
 const REPORT_CONDITIONAL_ACCESS_LINK_TEXT = String.raw`(?:(?:so(?:\s+that)?|if|when(?:ever)?|before|after|once)\s+(?:${REPORT_ACCESS_CONDITION_SUBJECT_TEXT}\s+)?(?:${REPORT_ACCESS_CONDITION_FREQUENCY_TEXT}\s+)?(?:${REPORT_ACCESS_CONDITION_AUX_TEXT}\s+)?|(?:and\s+)?then\s+)`;
 const REPORT_ACTIVE_ACCESS_DEVICE_CODE_RE = new RegExp(
   String.raw`\b${REPORT_DIRECT_ACCESS_ACTION_TEXT}\b[^\n.!?]{0,25}\b${REPORT_DIRECT_ACCESS_DEVICE_TARGET_TEXT}\b(?:\s+(?!${REPORT_WORK_ACTION_TEXT}\b)[a-z][a-z'’\-]*){0,5}(?:\s+(?:with|using|via|code|pin|combo|combination)|\s*[:=])\s*(${REPORT_STRUCTURED_DATE_TEXT}|${REPORT_NUMERIC_CREDENTIAL_TOKEN})(?=$|[^A-Za-z0-9])`,
@@ -565,7 +566,7 @@ function containsPositionalCredentialInterface(text) {
 const REPORT_DIRECT_ACCESS_CODE_RES = [
   /\b(?:gate|door|garage|entry|keypad|lock\s?box|lock|alarm)\b\s*(?:is|:|=|was|were|reads?)\s*\d{3,8}\s*(?:gallons?|gal|ml|millilit(?:er|re)s?|lit(?:er|re)s?|fl\.?\s*oz|oz|ounces?|pounds?|lbs?|grams?|kg)\b/i,
   new RegExp(String.raw`\b(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?|enter(?:s|ed|ing)?)\b[^\n.!?]{0,25}\b(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b\s*(?:with|using|via|code|pin|combo|combination|[:=])\s*${REPORT_STRUCTURED_DATE_TEXT}\b`, 'i'),
-  new RegExp(String.raw`\b\d{3,8}\b\s+(?:${REPORT_MEASUREMENT_UNIT_TEXT}\s+)?${REPORT_NUMERIC_ACCESS_ACTION_LINK_TEXT}(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?|enter(?:s|ed|ing)?)\s+${REPORT_DIRECT_ACCESS_DEVICE_TARGET_TEXT}\b`, 'i'),
+  new RegExp(String.raw`\b\d{3,8}\b\s+(?:${REPORT_MEASUREMENT_UNIT_TEXT}\s+)?${REPORT_NUMERIC_ACCESS_ACTION_LINK_TEXT}(?:${REPORT_ACCESS_ACTION_MANNER_TEXT}\s+)?${REPORT_DIRECT_ACCESS_ACTION_TEXT}\s+${REPORT_DIRECT_ACCESS_DEVICE_TARGET_TEXT}\b`, 'i'),
   new RegExp(String.raw`\b${REPORT_INPUT_ACTION_TEXT}\s+\d{3,8}\b\s+(?:${REPORT_MEASUREMENT_UNIT_TEXT}\s+)?(?:at|for|on|into|near|by)\s+(?:the\s+)?(?:[a-z]+\s+){0,2}(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b`, 'i'),
   new RegExp(String.raw`\b${REPORT_ACCESS_INSTRUCTION_ACTION_TEXT}\s+\d{3,8}\b\s+(?:${REPORT_MEASUREMENT_UNIT_TEXT}(?:\s+|(?=,)))?(?:,\s*)?${REPORT_INPUT_ACCESS_LINK_TEXT}\s+(?:(?:we|you|they|the\s+technician|the\s+customer)\s+)?${REPORT_DIRECT_ACCESS_ACTION_TEXT}\s+${REPORT_DIRECT_ACCESS_DEVICE_TARGET_TEXT}\b`, 'i'),
   new RegExp(String.raw`\b(?:use|using)\s+\d{3,8}\b\s+(?:${REPORT_MEASUREMENT_UNIT_TEXT}\s+)?(?:at|for|on|into|near|by)\s+(?:the\s+)?(?:[a-z]+\s+){0,2}(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b\s+(?:to|for)\s+(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?|enter(?:s|ed|ing)?)\b`, 'i'),
