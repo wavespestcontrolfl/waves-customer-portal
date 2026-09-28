@@ -39,6 +39,7 @@ const { randomUUID } = require('crypto');
 const EmailTemplates = require('../services/email-template-library');
 const seedMigration = require('../models/migrations/20260928080000_seed_email_division_templates');
 const fixMigration = require('../models/migrations/20260928080100_fix_email_division_lc_copy_p1');
+const ufFixMigration = require('../models/migrations/20260928080200_remove_uf_fipronil_timing_claim');
 
 const TABLES = ['email_templates', 'email_template_versions', 'email_template_fixtures', 'email_template_automations'];
 const PLACEHOLDER_RE = /\{\{\s*[a-zA-Z][a-zA-Z0-9_]*\s*\}\}/;
@@ -52,6 +53,10 @@ const BANNED_PHRASES = [
   // minute figure is an AGENTS.md compliance violation ("safe once dry" +
   // technician confirms timing), and the stale pre-revision preview line.
   'one-hour rule', 'for 30 minutes and off the interior baseboards for 2 hours',
+  // Coordinator correction 2026-09-28: UF/IFAS LH059 (the source behind
+  // this timing claim) is withdrawn (HTTP 410) — no citable source remains,
+  // so the claim is removed outright, not re-sourced. 20260928080200 fixes.
+  'four weeks', 'university of florida notes that fipronil',
 ];
 // Scoped to the pet-advisory/re-entry variable specifically —
 // irrigation_hold_hours and the label-verified 24-hour no-rain-forecast
@@ -82,6 +87,10 @@ function fakeKnex(tableNames) {
       return out;
     };
     b.first = async () => { const r = b._filtered()[0]; return r ? { ...r } : undefined; };
+    // Awaiting a builder directly (no .first()) resolves to the matching
+    // row array, same as real knex — used by the UF-claim fix migration's
+    // "every version for this template" read.
+    b.then = (resolve, reject) => Promise.resolve(b._filtered().map((r) => ({ ...r }))).then(resolve, reject);
     b.max = (expr) => { b._maxCol = String(expr).split(' ')[0]; return { first: async () => {
       const filtered = b._filtered();
       if (!filtered.length) return { max: null };
@@ -119,6 +128,7 @@ async function seededKnex() {
   const knex = fakeKnex(TABLES);
   await seedMigration.up(knex);
   await fixMigration.up(knex);
+  await ufFixMigration.up(knex);
   return knex;
 }
 
@@ -270,6 +280,53 @@ describe('fix migration 20260928080100 (Codex round-0 P1)', () => {
     await fixMigration.down(knex);
     const pest = finalStateFor(knex, 'lc.first_visit_pest');
     expect(pest.fixtures.full.pet_advisory_sentence).toBe(fixMigration.__private.FIXED_PET_ADVISORY);
+  });
+});
+
+describe('fix migration 20260928080200 (uncitable UF timing claim)', () => {
+  test('removes the withdrawn-source claim from the list item and the source line, and is idempotent', async () => {
+    const knex = await seededKnex(); // already ran once inside seededKnex()
+    await ufFixMigration.up(knex); // run again — must not error or double-apply
+
+    const pest = finalStateFor(knex, 'lc.first_visit_pest');
+    const listBlock = pest.version.blocks.find((b) => b.type === 'list');
+    expect(listBlock.items).not.toContain(ufFixMigration.__private.OLD_LIST_ITEM);
+    expect(listBlock.items).toContain(ufFixMigration.__private.NEW_LIST_ITEM);
+    expect(listBlock.items.join(' ')).not.toMatch(/university of florida notes that fipronil/i);
+
+    const sourceBlock = pest.version.blocks.find((b) => b.type === 'small_note' && /^Source:/.test(b.content));
+    expect(sourceBlock.content).toBe(ufFixMigration.__private.NEW_SOURCE_NOTE);
+    expect(sourceBlock.content).not.toMatch(/university of florida/i);
+  });
+
+  test('never touches a version that no longer contains the exact old sentence (preserves an edit made in between)', async () => {
+    // Deliberately stop BEFORE ufFixMigration so the version still carries
+    // OLD_LIST_ITEM, then simulate an operator hand-edit of that bullet —
+    // the exact-string guard should no longer match, and up() must leave
+    // the operator's own wording alone rather than reverting/re-fixing it.
+    const knex = fakeKnex(TABLES);
+    await seedMigration.up(knex);
+    await fixMigration.up(knex);
+    const pestTemplate = knex.__store.email_templates.find((t) => t.template_key === 'lc.first_visit_pest');
+    const version = knex.__store.email_template_versions.find((v) => v.template_id === pestTemplate.id);
+    const blocks = JSON.parse(version.blocks).map((b) => (b.type === 'list'
+      ? { ...b, items: b.items.map((item) => (item === ufFixMigration.__private.OLD_LIST_ITEM ? 'An operator already rewrote this bullet by hand.' : item)) }
+      : b));
+    version.blocks = JSON.stringify(blocks);
+
+    await ufFixMigration.up(knex);
+
+    const reread = JSON.parse(knex.__store.email_template_versions.find((v) => v.id === version.id).blocks);
+    expect(reread.find((b) => b.type === 'list').items).toContain('An operator already rewrote this bullet by hand.');
+    expect(reread.find((b) => b.type === 'list').items).not.toContain(ufFixMigration.__private.NEW_LIST_ITEM);
+  });
+
+  test('down() is a documented no-op — it never restores the uncitable claim', async () => {
+    const knex = await seededKnex();
+    await ufFixMigration.down(knex);
+    const pest = finalStateFor(knex, 'lc.first_visit_pest');
+    const listBlock = pest.version.blocks.find((b) => b.type === 'list');
+    expect(listBlock.items).not.toContain(ufFixMigration.__private.OLD_LIST_ITEM);
   });
 });
 
