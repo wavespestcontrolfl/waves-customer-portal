@@ -915,6 +915,91 @@ describe("CustomerGeocodeReviewPanel", () => {
     await act(async () => pendingSave.resolve(await response({ enabled: true, ...record(), review: { status: "verified" } })));
   });
 
+  it("clears the active draft and its disabled-warning signal when a refresh reports the queue disabled", async () => {
+    const onDraftActiveChange = vi.fn();
+    let reads = 0;
+    vi.stubGlobal("fetch", vi.fn(() => {
+      reads += 1;
+      return reads === 1
+        ? response({ enabled: true, records: [record()], total: 1 })
+        : response({ enabled: false });
+    }));
+
+    const view = render(<CustomerGeocodeReviewPanel refreshToken={1} onDraftActiveChange={onDraftActiveChange} />);
+    fireEvent.click(await screen.findByRole("button", { name: /Address review queue/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Review location" }));
+    fireEvent.change(screen.getByLabelText("Evidence"), { target: { value: "Should not survive a disabled refresh." } });
+    expect(onDraftActiveChange).toHaveBeenLastCalledWith(true);
+
+    // A refresh that reports the gate disabled while a draft is open must
+    // not leave activeId set — an invisible panel (it renders nothing once
+    // disabled) can never keep reporting a draft as active or keep the
+    // beforeunload warning armed for a form nobody can see.
+    view.rerender(<CustomerGeocodeReviewPanel refreshToken={2} onDraftActiveChange={onDraftActiveChange} />);
+    await waitFor(() => expect(view.container).toBeEmptyDOMElement());
+    expect(onDraftActiveChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it("clears the active draft when a resolve 404 means the whole review route or gate went away", async () => {
+    const onDraftActiveChange = vi.fn();
+    vi.stubGlobal("fetch", vi.fn((url, options = {}) => {
+      if (options.method === "POST") return response({ error: "Not found" }, 404);
+      return response({ enabled: true, records: [record()], total: 1 });
+    }));
+
+    render(<CustomerGeocodeReviewPanel onDraftActiveChange={onDraftActiveChange} />);
+    fireEvent.click(await screen.findByRole("button", { name: /Address review queue/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Review location" }));
+    fireEvent.change(screen.getByLabelText("Evidence"), { target: { value: "Should not survive a vanished route." } });
+    fireEvent.click(screen.getByLabelText("I confirmed this is the primary service location"));
+    expect(onDraftActiveChange).toHaveBeenLastCalledWith(true);
+    fireEvent.click(screen.getByRole("button", { name: "Verify pin" }));
+
+    // A resolve 404 with no customer_not_found code means the whole route or
+    // gate disappeared, not just this one record — the same disabled
+    // transition as the refresh path above, and it must clear the draft the
+    // same way.
+    await waitFor(() => expect(onDraftActiveChange).toHaveBeenLastCalledWith(false));
+  });
+
+  it("reloads the authoritative record and softens the wording after a non-409, non-404 resolve failure", async () => {
+    const original = record();
+    const latest = record({
+      revision: "revision-2",
+      customer: { ...record().customer, address_line1: "300 Recovered After Timeout Ave" },
+    });
+    const bodies = [];
+    let reads = 0;
+    vi.stubGlobal("fetch", vi.fn((url, options = {}) => {
+      if (options.method === "POST") {
+        bodies.push(JSON.parse(options.body));
+        return response({ error: "Synthetic gateway timeout" }, 502);
+      }
+      reads += 1;
+      return response({ enabled: true, records: [reads === 1 ? original : latest], total: 1 });
+    }));
+
+    render(<CustomerGeocodeReviewPanel />);
+    fireEvent.click(await screen.findByRole("button", { name: /Address review queue/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Review location" }));
+    fireEvent.change(screen.getByLabelText("Evidence"), { target: { value: "Confirmed while the gateway is flaky." } });
+    fireEvent.click(screen.getByLabelText("I confirmed this is the primary service location"));
+    fireEvent.click(screen.getByRole("button", { name: "Verify pin" }));
+
+    // A non-409, non-404 failure can still arrive after the server actually
+    // committed (retry commits before ensureCustomerGeocoded, and every
+    // action does a final getReviewDetail after commit) — the panel must
+    // reload the authoritative record rather than assert the save
+    // definitely failed, and keep the draft open to compare against it.
+    expect(await screen.findByText("300 Recovered After Timeout Ave, Bradenton, FL, 34205")).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Address review may not have saved. The latest record is loaded; check it before trying again.",
+    );
+    expect(screen.getByLabelText("Evidence")).toHaveValue("Confirmed while the gateway is flaky.");
+    expect(screen.getByLabelText("Address")).toHaveValue("100 Test Ave");
+    expect(bodies).toHaveLength(1);
+  });
+
   it("does not let an old customer save refresh or replace the next customer", async () => {
     const oldSave = deferred();
     const onResolved = vi.fn();

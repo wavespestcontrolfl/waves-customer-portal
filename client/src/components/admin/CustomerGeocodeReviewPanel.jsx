@@ -218,12 +218,24 @@ function useGeocodeReview({ customerId, onResolved, refreshToken, onDraftActiveC
     return () => window.removeEventListener("beforeunload", warn);
   }, [activeId]);
 
+  // The one place that owns the "queue became disabled/unavailable" transition
+  // (a refresh reporting enabled:false, or a resolve 404 whose code means the
+  // whole route/gate went away) — clears every piece of active-draft state so
+  // an invisible, disabled panel can never keep reporting a draft as active
+  // (onDraftActiveChange, the beforeunload warning) or hold a stale conflict.
+  const disablePanel = useCallback(() => {
+    activeIdRef.current = null;
+    setActiveId(null);
+    setConflictId(null);
+    setState({ enabled: false, records: [], total: 0 });
+    setLoadError("");
+    setError("");
+  }, []);
+
   const acceptLoad = useCallback((payload, { preserveDraft, editingId }) => {
     const { records, total, previousRecord, refreshedRecord } = loadedReviewRecords(payload, customerId, recordsRef.current, editingId);
     if (payload?.enabled !== true) {
-      setState({ enabled: false, records: [], total: 0 });
-      setLoadError("");
-      setError("");
+      disablePanel();
       return false;
     }
     if (previousRecord && !refreshedRecord) {
@@ -251,7 +263,7 @@ function useGeocodeReview({ customerId, onResolved, refreshToken, onDraftActiveC
       setError("This review changed elsewhere. Your entries are preserved, but saving is paused until you review the latest address and pin.");
     } else if (!preserveDraft) setError("");
     return true;
-  }, [customerId, offset]);
+  }, [customerId, offset, disablePanel]);
 
   const load = useCallback(async ({ preserveDraft = false } = {}) => {
     const scope = scopeRef.current;
@@ -325,7 +337,7 @@ function useGeocodeReview({ customerId, onResolved, refreshToken, onDraftActiveC
   // Split out so `resolve`'s own branching stays under the complexity cap.
   const handleResolveNotFound = useCallback(async (saveError) => {
     if (saveError.code !== "customer_not_found") {
-      setState({ enabled: false, records: [], total: 0 });
+      disablePanel();
       return;
     }
     // This one queued customer disappeared (deleted elsewhere) — the review
@@ -335,7 +347,7 @@ function useGeocodeReview({ customerId, onResolved, refreshToken, onDraftActiveC
     setActiveId(null);
     setConflictId(null);
     await load({ preserveDraft: false });
-  }, [load]);
+  }, [load, disablePanel]);
 
   const resolve = async (record, body) => {
     if (saveAbortRef.current) return;
@@ -395,7 +407,14 @@ function useGeocodeReview({ customerId, onResolved, refreshToken, onDraftActiveC
         setConflictId(record.customer.id);
         setError(`${conflictMessage}${/[.!?]$/.test(conflictMessage) ? "" : "."} Your entries are preserved, but saving is paused until you review the latest address and pin.`);
       } else {
-        setError(saveError.message || "Address review could not be saved.");
+        // Retry commits pending before ensureCustomerGeocoded, and every
+        // action does a final getReviewDetail after commit — so a non-409,
+        // non-404 failure here can still arrive after the server committed.
+        // Reload the authoritative queue rather than assert the save
+        // definitely failed.
+        await load({ preserveDraft: true });
+        if (!current()) return;
+        setError("Address review may not have saved. The latest record is loaded; check it before trying again.");
       }
     } finally {
       if (current()) setSavingId(null);
