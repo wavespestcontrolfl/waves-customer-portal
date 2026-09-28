@@ -2336,14 +2336,15 @@ function calculateDiscountDollars(row, baseAmount, clientAmount) {
 // conn defaults to the module db so every existing caller (invoice create,
 // discount presets, the restack replay) is unaffected; a locked recheck
 // (the IB create_appointment executor's trx re-derivation, ADMIN-BUG-R12)
-// passes its trx so this read joins the same locked snapshot as the
-// customer row it re-priced against, instead of racing a commit that
-// deactivated or changed the discount between the trx opening and here.
+// passes its trx, and the row is share-locked there (Codex r13 on #5093):
+// the discount editor updates it FOR UPDATE, so an edit or deactivation
+// either commits first — and this read sees it — or waits for the booking.
 async function loadInvoiceDiscount(discountId, conn = db) {
   if (!discountId) return null;
-  const discount = await conn('discounts')
-    .where({ id: discountId, is_active: true, show_in_invoices: true })
-    .first();
+  let query = conn('discounts')
+    .where({ id: discountId, is_active: true, show_in_invoices: true });
+  if (conn !== db) query = query.forShare();
+  const discount = await query.first();
   if (!discount) throw httpError(400, 'Selected discount is not available for invoices');
   return discount;
 }

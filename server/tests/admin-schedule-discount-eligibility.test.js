@@ -29,6 +29,7 @@ const {
 function discountQuery(discount) {
   return {
     where: jest.fn().mockReturnThis(),
+    forShare: jest.fn().mockReturnThis(),
     first: jest.fn().mockResolvedValue(discount),
   };
 }
@@ -121,7 +122,8 @@ describe('admin schedule appointment discount eligibility', () => {
     DiscountEngine.manualEligibilityFailures.mockResolvedValue([]);
 
     const trxDiscount = { id: 'disc-trx', name: 'Locked (trx read)', discount_type: 'percentage', amount: 15 };
-    const conn = jest.fn(() => discountQuery(trxDiscount));
+    const queries = [];
+    const conn = jest.fn(() => { const q = discountQuery(trxDiscount); queries.push(q); return q; });
 
     const pricing = await buildAppointmentPricing({
       serviceRecord: { service_key: 'one_time_pest_control', category: 'pest', base_price: 250 },
@@ -133,6 +135,9 @@ describe('admin schedule appointment discount eligibility', () => {
 
     expect(conn).toHaveBeenCalledWith('discounts');
     expect(db).not.toHaveBeenCalled();
+    // Share-locked on the transaction, so a concurrent edit or deactivation
+    // (FOR UPDATE in admin-discounts) either lands first or waits.
+    expect(queries[0].forShare).toHaveBeenCalled();
     expect(pricing.primaryDiscount).toMatchObject({ discountId: 'disc-trx', discountName: 'Locked (trx read)', discountAmount: 15 });
     expect(DiscountEngine.manualEligibilityFailures).toHaveBeenCalledWith(
       trxDiscount,
