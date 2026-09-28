@@ -73,9 +73,16 @@
 // never ambiguous. Once discovered, the anchor's identity — its
 // scheduled_service_id, NOT its invoice id — is remembered in the standing
 // alert's own metadata (raiseDivergenceAlert stamps `anchorId`) and reused
-// directly on every later tick (loadEstablishedAnchorsByEstimate), which
-// re-derives that SAME anchor's current invoice fresh each time — live or
-// settled, original or reissued — without ever re-running the now-ambiguous
+// directly on EVERY later tick FOREVER (loadEstablishedAnchorsByEstimate
+// reads the estimate's whole alert HISTORY, read or unread — Codex P1 on
+// this fix: scoping to unread alerts made the estimate forget its own
+// established anchor the instant it genuinely resolved, resurrecting the
+// same ambiguity the moment a later tick found the estimate structurally
+// "in play" again for an unrelated reason, e.g. one sibling that stays
+// permanently unpriced with no real billing problem because it is
+// perfectly aligned with the true anchor). loadCandidates re-derives that
+// SAME anchor's current invoice fresh each time — live or settled,
+// original or reissued — without ever re-running the now-ambiguous
 // structural scan for that estimate again.
 //
 // Divergence identification (evaluateGroupDivergence/divergingSiblings) is
@@ -330,27 +337,47 @@ function groupCandidatesByEstimate(candidates) {
   return [...byEstimate.values()];
 }
 
-// The ONE anchor scheduled_service id each estimate's CURRENTLY-UNREAD
-// standing alert already names, keyed by estimateId (stamped in
+// The ONE anchor scheduled_service id each of the given estimates' standing
+// alert HISTORY already names, keyed by estimateId (stamped in
 // metadata.anchorId when raised — see raiseDivergenceAlert). Once
 // established, this identity is THE authoritative anchor/reference frame
-// for that estimate — never re-derived via the structural scan below,
-// which can no longer tell "the true combined invoice, reissued" apart
-// from "a split-off sibling's own separate invoice" once a split exists
-// (see the module header). Small and cheap by construction: bounded by
-// however many alerts are presently unread, never by total invoice
-// history.
-async function loadEstablishedAnchorsByEstimate(conn) {
+// for that estimate FOREVER, not only while an alert is unread — never
+// re-derived via the structural scan below, which can no longer tell "the
+// true combined invoice, reissued" apart from "a split-off sibling's own
+// separate invoice" once a split exists (see the module header).
+//
+// Deliberately NOT scoped to ONLY whereNull('read_at') (Codex P1 on this
+// fix): scoping to unread alerts alone made the estimate FORGET its own
+// established anchor the instant the group genuinely resolved and the
+// alert was marked read/autoCleared — exactly the moment a later, still-
+// structurally-qualifying tick (an unrelated sibling can remain
+// permanently unpriced with no real billing problem, e.g. one perfectly
+// aligned with the true anchor) most needed the durable reference frame,
+// resurrecting the same ambiguity as a "forgotten" identity. So this reads
+// TWO bounded sources, unioned: every currently-UNREAD alert (regardless
+// of `estimateIds` — a SETTLED invoice deliberately drops out of the
+// structural scan below, which is exactly the transition an unread alert
+// must still be re-derived and reported for), PLUS any alert, read or not,
+// for an estimate the structural scan ALSO currently found (`estimateIds`
+// — already "bounded by currently non-settled — operationally small").
+// Neither source scans notification history beyond these two small sets,
+// and neither grows with total invoice history.
+async function loadEstablishedAnchorsByEstimate(conn, estimateIds) {
   const alerts = await conn('notifications')
     .where({ recipient_type: 'admin' })
-    .whereNull('read_at')
     .whereRaw("metadata->>'dedupeKey' LIKE 'first_application_sibling_divergence:%'")
+    .where((scope) => {
+      scope.whereNull('read_at');
+      if (estimateIds.length) scope.orWhereIn(conn.raw("metadata->>'estimateId'"), estimateIds);
+    })
     .select('metadata');
   const byEstimate = new Map();
   for (const row of alerts) {
     let meta = row.metadata;
     if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
-    if (meta?.estimateId && meta?.anchorId) byEstimate.set(String(meta.estimateId), String(meta.anchorId));
+    if (meta?.estimateId && meta?.anchorId && !byEstimate.has(String(meta.estimateId))) {
+      byEstimate.set(String(meta.estimateId), String(meta.anchorId));
+    }
   }
   return byEstimate;
 }
@@ -392,8 +419,6 @@ async function loadEstablishedAnchorsByEstimate(conn) {
 // enough to be its own problem, worth an ops signal, never a reason to
 // evaluate fewer of them.
 async function loadCandidates(conn, { limit = SWEEP_LIMIT } = {}) {
-  const establishedByEstimate = await loadEstablishedAnchorsByEstimate(conn);
-
   const structuralRows = await conn('invoices as i')
     .join('scheduled_services as anchor', 'anchor.id', 'i.scheduled_service_id')
     .whereNotIn('i.status', SETTLED_INVOICE_STATUSES)
@@ -421,6 +446,14 @@ async function loadCandidates(conn, { limit = SWEEP_LIMIT } = {}) {
     })
     .orderBy('i.created_at', 'asc')
     .select(CANDIDATE_COLUMNS);
+
+  // Scoped to exactly the estimates the structural scan above found —
+  // keeps loadEstablishedAnchorsByEstimate's own history lookup bounded by
+  // that same small, "currently non-settled" set instead of a read_at
+  // filter (see its own comment for why read_at can't be the bound here).
+  const structuralEstimateIds = [...new Set(structuralRows.map((row) => String(row.source_estimate_id)))];
+  const establishedByEstimate = await loadEstablishedAnchorsByEstimate(conn, structuralEstimateIds);
+
   // Estimates with an established anchor are re-derived directly below —
   // never through this (now ambiguous, once a split exists) structural
   // scan, even if it also happens to find a row for them.

@@ -700,7 +700,7 @@ suite('first-application-sibling-split — periodic sweep', () => {
   // sibling that needs no action whatsoever. The established-anchor
   // mechanism must never let B become a reference frame in the first
   // place once A is already established.
-  test('C stays aligned with A after B splits off — never a false alert about C', () => rollbackTest(async (trx) => {
+  test('C stays aligned with A after B splits off — never a false alert about C, even across repeated sweeps and a dismissal', () => rollbackTest(async (trx) => {
     const customerId = randomUUID();
     const estimateId = randomUUID();
     const anchorId = randomUUID();
@@ -761,8 +761,30 @@ suite('first-application-sibling-split — periodic sweep', () => {
     expect(cleared.read_at).not.toBeNull();
 
     // No NEW alert about C was ever raised.
-    const bogusCAlert = await readBell(trx, DEDUPE_KEY(estimateId, [cId]));
-    expect(bogusCAlert).toBeUndefined();
+    const cDedupeKey = DEDUPE_KEY(estimateId, [cId]);
+    expect(await readBell(trx, cDedupeKey)).toBeUndefined();
+
+    // Codex P1 on this fix: the FIRST fix scoped the established-anchor
+    // lookup to currently-UNREAD alerts only, so the estimate FORGOT its
+    // own anchor the instant this alert cleared — C is permanently
+    // unpriced (though perfectly aligned with A, no real problem), so it
+    // keeps the estimate structurally "in play" forever, and the very NEXT
+    // tick re-ran the (now ambiguous) structural scan and resurrected a
+    // bogus alert about C from B's own invoice's point of view. Repeated
+    // sweeps here — with the ORIGINAL alert both left alone (still
+    // cleared) and explicitly re-dismissed — must never resurrect it.
+    for (let tick = 0; tick < 3; tick += 1) {
+      const [repeat] = await sweepOnce(trx, estimateId);
+      expect(repeat.action).toBe('cleared');
+      expect(await readBell(trx, cDedupeKey)).toBeUndefined();
+    }
+
+    // Even an explicit re-dismissal of the (already-cleared) original
+    // alert changes nothing about the estimate's remembered anchor.
+    await trx('notifications').where({ id: cleared.id }).update({ read_at: new Date() });
+    const [afterDismiss] = await sweepOnce(trx, estimateId);
+    expect(afterDismiss.action).toBe('cleared');
+    expect(await readBell(trx, cDedupeKey)).toBeUndefined();
   }));
 
   test('a priced (but still diverging) sibling still alerts (Codex P1 fix)', () => rollbackTest(async (trx) => {
