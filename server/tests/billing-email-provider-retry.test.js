@@ -14,8 +14,10 @@ jest.mock('../services/billing-channel-email-authority', () => ({ dispatchUnderB
 jest.mock('../services/messaging/billing-email-replay-eligibility', () => ({ billingEmailReplayEligible: jest.fn() }));
 jest.mock('../services/billing-email-reservation', () => ({
   BILLING_EMAIL_TERMINAL_REFUSAL_PREFIX: 'Billing email terminal refusal: ',
+  BILLING_EMAIL_REQUOTE_REFUSAL_PREFIX: 'Billing email re-quote required: ',
   markBillingEmailReservationDelivered: jest.fn(async () => true),
   resolveBillingEmailReservationRefusal: jest.fn(async () => true),
+  releaseBillingEmailReservationForRequote: jest.fn(async () => true),
 }));
 
 const db = require('../models/db');
@@ -63,7 +65,10 @@ beforeEach(() => {
   db.raw = jest.fn((sql) => sql);
   db.transaction = jest.fn(async (callback) => callback(db));
   heldDatabase = jest.fn();
-  heldDatabase.mockReturnValue(query);
+  // The autopay notice's receipt switch is read on the held transaction
+  // (left on); every other read keeps the shared query double.
+  heldDatabase.mockImplementation((table) => (table === 'notification_prefs'
+    ? { where: () => ({ first: async () => ({ payment_receipt: null }) }) } : query));
   heldDatabase.raw = db.raw;
   templates.loadTemplateByKey.mockResolvedValue({ template: { template_key: 'billing.notice' } });
   templates.activeSuppressionFor.mockResolvedValue(null);
@@ -134,6 +139,48 @@ test.each([
   expect(query.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'blocked', provider_retry_next_at: null }));
 });
 
+// #4843 gate checklist: a billing row whose producer stored no replay
+// contract used to retry on the generic path (suppression only). It now
+// re-authorizes its own customer notice through the Email authority.
+test('a billing row with no stored contract retries only through the Email authority', async () => {
+  const unregistered = storedMessage({ payload_snapshot: JSON.stringify({ notification_body: 'Your upcoming payment' }) });
+  const accepted = { ...unregistered, status: 'sent', sent_at: new Date() };
+  query.first = jest.fn(async () => accepted);
+  query.returning = jest.fn(async () => [accepted]);
+  const result = await retryOne(unregistered);
+  expect(result).toMatchObject({ sent: true });
+  expect(authority.dispatchUnderBillingEmailAuthority).toHaveBeenCalledWith(expect.objectContaining({
+    input: expect.objectContaining({ customerId: 'customer-1', invoiceId: null,
+      metadata: { billingDeliveryCategory: 'billing', notificationEventKey: event } }),
+  }));
+  expect(billingEmailReplayEligible).not.toHaveBeenCalled();
+  expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({ database: heldDatabase }));
+  // No reservation backs an unregistered notice.
+  expect(reservation.markBillingEmailReservationDelivered).not.toHaveBeenCalled();
+});
+
+test('an authority refusal stops an unregistered billing retry before any provider work', async () => {
+  authority.dispatchUnderBillingEmailAuthority.mockImplementationOnce(async (options) => {
+    options.state.boundaryBlock = { code: 'BILLING_PREFERENCES_CHANGED', reason: 'Email is not selected for this billing category' };
+    return { ok: false };
+  });
+  const unregistered = storedMessage({ payload_snapshot: JSON.stringify({ notification_body: 'Your upcoming payment' }) });
+  await expect(retryOne(unregistered)).resolves.toMatchObject({ sent: false, stopped: true });
+  expect(sendgrid.clearBlockedAddress).not.toHaveBeenCalled();
+  expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  expect(query.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'blocked', provider_retry_next_at: null }));
+});
+
+test('an unregistered row that does not carry its notice identity is refused, never resent', async () => {
+  const unregistered = storedMessage({
+    payload_snapshot: JSON.stringify({ notification_body: 'Your upcoming payment' }),
+    idempotency_key: 'billing_channel_email:another-event:email',
+  });
+  await expect(retryOne(unregistered)).resolves.toMatchObject({ sent: false, stopped: true });
+  expect(authority.dispatchUnderBillingEmailAuthority).not.toHaveBeenCalled();
+  expect(sendgrid.sendOne).not.toHaveBeenCalled();
+});
+
 test('a stale producer reason terminates before provider preparation or a provider request', async () => {
   billingEmailReplayEligible.mockResolvedValue({ eligible: false, reason: 'charge-date-passed', retryable: false });
   await expect(retryOne(storedMessage())).resolves.toMatchObject({ sent: false, stopped: true, reason: 'charge-date-passed' });
@@ -176,6 +223,40 @@ test('a temporary eligibility failure stays on the bounded retry schedule withou
   expect(sendgrid.sendOne).not.toHaveBeenCalled();
   expect(reservation.resolveBillingEmailReservationRefusal).not.toHaveBeenCalled();
 });
+
+test.each(['previsit-quote-changed', 'balance-reminder-copy-stale', 'balance-reminder-visit-changed']
+  .flatMap((reason) => [[reason, false], [reason, true]]))(
+  '%s retires the frozen Email for fresh rendering (provider boundary: %s)', async (reason, finalBoundary) => {
+    const stored = storedMessage();
+    const notificationEventKey = 'previsit-balance:visit-1';
+    stored.trigger_event_id = notificationEventKey;
+    stored.idempotency_key = `billing_channel_email:${notificationEventKey}:email`;
+    stored.payload_snapshot = JSON.stringify({ __billing_replay_context: {
+      schema_version: 1, customer_id: 'customer-1', category: 'billing',
+      source_entry_point: 'previsit_balance_reminder', notificationEventKey,
+      collections_ledger_id: 'ledger-1', appointment_id: 'visit-1', appointment_date: '2030-06-10',
+      appointment_rendered_on: '2030-06-09', appointment_service_type: 'Pest Control',
+      rendered_amount: '100.00', invoice_ids: ['invoice-1', 'invoice-2'],
+      invoice_quotes: [{ id: 'invoice-1', dueCents: 4000 }, { id: 'invoice-2', dueCents: 6000 }],
+      dues_cents: 0, selected_channels: ['email'],
+    } });
+    billingEmailReplayEligible.mockResolvedValue({ eligible: false, reason, retryable: true });
+    if (finalBoundary) billingEmailReplayEligible.mockResolvedValueOnce({ eligible: true });
+    // The worker reads the row returned by its conditional stop update.
+    query.returning.mockResolvedValueOnce([{ ...stored, status: 'failed' }]);
+    await expect(retryOne(stored)).resolves.toMatchObject({ sent: false, stopped: true, reason });
+    if (finalBoundary) {
+      expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({ providerBoundaryCheck: expect.any(Function) }));
+    } else expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(reservation.resolveBillingEmailReservationRefusal).not.toHaveBeenCalled();
+    expect(reservation.releaseBillingEmailReservationForRequote).toHaveBeenCalledTimes(1);
+    expect(query.update).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'failed', provider_retry_next_at: null, provider_retry_exhausted_at: expect.any(Date),
+      provider_handoff_phase: finalBoundary ? 'rejected' : 'pending',
+      error_message: `${reservation.BILLING_EMAIL_REQUOTE_REFUSAL_PREFIX}${reason}`,
+    }));
+  },
+);
 
 test('changing the selected billing channel defers the stored Email for retry', async () => {
   authority.dispatchUnderBillingEmailAuthority.mockImplementation(async (options) => {

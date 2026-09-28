@@ -135,14 +135,18 @@ test('an unavailable invoice guard keeps a retry without falling back around the
 
 test('temporary native failures retain their delay and never invoke a Text fallback', async () => {
   prefs.invoice_channel = 'push';
-  Twilio.sendSMS.mockResolvedValue({ success: false, appRetryable: true, deliveryOutcome: 'uncertain', error: 'native_provider_retryable', retryAfterMs: 900000 });
+  Twilio.sendSMS.mockResolvedValue({ success: false, appRetryable: true, deliveryOutcome: 'uncertain', error: 'native_provider_retryable', retryAfterMs: 900000, bellPersisted: true });
   const startedAt = Date.now();
   const result = await sendCustomerMessage({ ...input, purpose: 'payment_link', metadata: { original_message_type: 'invoice' } });
   expect(result).toMatchObject({ sent: false, blocked: false, code: 'APP_PROVIDER_RETRY',
-    deliveryOutcome: 'uncertain', retryable: true, deferred: true, retryAfterMs: 900000 });
+    deliveryOutcome: 'uncertain', retryable: true, deferred: true, retryAfterMs: 900000, bellPersisted: true });
   expect(new Date(result.nextAllowedAt).getTime()).toBeGreaterThanOrEqual(startedAt + 900000);
   expect(Twilio.sendSMS).toHaveBeenCalledTimes(1);
   expect(Twilio.sendSMS.mock.calls[0][2].explicitPushOnly).toBe(true);
+
+  Twilio.sendSMS.mockResolvedValue({ success: false, appRetryable: true, deliveryOutcome: 'uncertain', error: 'native_provider_retryable', retryAfterMs: 900000 });
+  const stale = await sendCustomerMessage({ ...input, purpose: 'payment_link', metadata: { original_message_type: 'invoice' } });
+  expect(stale.bellPersisted).toBeUndefined();
 });
 
 test.each(['opt_out_keyword', 'wrong_number', 'manual_dnc'])('hard suppression %s still blocks app delivery', async (reason) => {
@@ -196,9 +200,12 @@ test('a fallback rechecks a new opt-out rather than bypassing it', async () => {
 });
 
 test('an event already being pushed defers without racing a backup text', async () => {
-  Twilio.sendSMS.mockResolvedValue({ success: false, appPending: true });
-  expect(await sendCustomerMessage(input)).toMatchObject({ sent: false, deferred: true, reason: 'push_in_flight' });
+  Twilio.sendSMS.mockResolvedValue({ success: false, appPending: true, deliveryOutcome: 'uncertain', bellPersisted: true });
+  expect(await sendCustomerMessage(input)).toMatchObject({ sent: false, deferred: true, reason: 'push_in_flight', deliveryOutcome: 'uncertain', bellPersisted: true });
   expect(Twilio.sendSMS).toHaveBeenCalledTimes(1);
+
+  Twilio.sendSMS.mockResolvedValue({ success: false, appPending: true, deliveryOutcome: 'uncertain' });
+  expect((await sendCustomerMessage(input)).bellPersisted).toBeUndefined();
 });
 
 test.each([{ bundled_review_request_id: 'qa-review' }, { mms_fallback_reason: 'fixture-failure' }])('excluded review and media fallback keep their text delivery: %j', async (metadata) => {
@@ -1144,6 +1151,37 @@ describe('explicit billing channel combinations', () => {
 // providerPreparationCheck and invoked exactly as the Email authority does
 // (channel:'email', database: the locked trx) — see invoice.js's
 // checkInvoiceDeliveryPreconditions for the shared check.
+// #4843 gate checklist: a definite SendGrid rejection after the handoff comes
+// back from the billing Email adapter as its blocked replay hold. The
+// messaging wrapper must keep that code, or producers (which replay only
+// REPLAY_HOLD_CODES) would drop an Email-only notice again.
+describe('billing Email replay hold survives the messaging wrapper', () => {
+  beforeEach(() => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-01-05T12:00:00-05:00'));
+  });
+  afterEach(() => jest.useRealTimers());
+
+  test('an Email-only notice rejected by SendGrid stays a replay hold for its producer', async () => {
+    prefs.billing_channels = ['email'];
+    const nextAllowedAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
+    sendBillingChannelEmail.mockResolvedValueOnce({
+      sent: false, provider: 'email', providerMessageId: null, deliveryOutcome: 'not_sent', blocked: true,
+      code: 'BILLING_EMAIL_PREPARATION_HOLD', originalCode: 'EMAIL_PROVIDER_ERROR', reason: 'SendGrid 429: rejected',
+      retryable: true, providerRejected: true, deferred: true, nextAllowedAt,
+    });
+    const result = await sendCustomerMessage({
+      to: '+19415550142', body: 'Your payment is due soon.', channel: 'sms', audience: 'customer',
+      purpose: 'billing', customerId, entryPoint: 'autopay_pre_charge_reminder',
+      metadata: { original_message_type: 'autopay_pre_charge', billingDeliveryCategory: 'billing',
+        notificationEventKey: 'precharge:qa:2026-01-06' },
+    });
+    expect(result.channelResults.email).toMatchObject({
+      sent: false, blocked: true, code: 'BILLING_EMAIL_PREPARATION_HOLD', deferred: true, retryable: true, nextAllowedAt,
+    });
+    expect(require('../services/messaging/billing-channel-routing').isReplayHold(result)).toBe(true);
+  });
+});
+
 describe('invoice_send_via_sms explicit billing Email leg (send-customer-message.js billingEmailPreSendCheck guard)', () => {
   // Mirrors the shape InvoiceService.sendViaSMS actually sends to
   // sendCustomerMessage — entryPoint/purpose/audience gate both the

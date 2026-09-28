@@ -1230,6 +1230,19 @@ describe('email template library rendering', () => {
     expect(snapshot).toEqual({});
   });
 
+  test('keeps a fail-closed marker when a declared producer context is invalid', () => {
+    const facts = {
+      templateKey: 'billing.notice', recipientType: 'customer', recipientId: 'cust-1', triggerEventId: 'event-1',
+      idempotencyKey: 'billing_channel_email:different-event:email', categories: ['billing'],
+    };
+    const snapshot = EmailTemplates.payloadSnapshotForSend(
+      { first_name: 'Taylor' }, null, facts, { replayDeclared: true },
+    );
+    expect(snapshot).toEqual({ first_name: 'Taylor', __billing_replay_context: null });
+    expect(EmailTemplates.payloadSnapshotForSend({ first_name: 'Taylor' }, null, facts))
+      .toEqual({ first_name: 'Taylor' });
+  });
+
   test('a reclaimed send persists fresh rendered content and replay context from the same attempt', async () => {
     const eventKey = 'precharge:cust-1:2026-09-29';
     const idempotencyKey = `billing_channel_email:${eventKey}:email`;

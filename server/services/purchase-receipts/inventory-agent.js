@@ -752,6 +752,17 @@ async function candidateAliases(conn, productIds) {
 
 // A canonical lowercase set of the catalog's own categories — messy
 // spellings ('Insecticide' vs 'insecticide') collapse to one entry each.
+// The active catalog one decision is validated against: every active
+// product and its aliases. The live agent reloads it per line (an earlier
+// line in the same run may have just created a product or alias), and the
+// read-only replay tool (ops/agents/inventory-agent-replay.js) loads the
+// same view, so a replay decides exactly as the live agent would.
+async function loadActiveCatalog(conn) {
+  const activeProducts = await conn('products_catalog').where({ active: true }).select('id', 'name');
+  const activeProductAliases = await candidateAliases(conn, activeProducts.map((p) => p.id));
+  return { activeProducts, activeProductAliases };
+}
+
 async function loadAllowedCategories(conn) {
   const rows = await conn('products_catalog').whereNotNull('category').distinct('category');
   return new Set(rows.map((row) => String(row.category).trim().toLowerCase()).filter(Boolean));
@@ -1729,8 +1740,7 @@ async function runInventoryAgent({ conn = db, llm, notifyAdmin, limit = BATCH_LI
       // otherwise collide with (item 1 of the 2026-09-27 review; aliases
       // added by item 4, 2026-09-27 round 9 review) — validateNewProduct's
       // collision check must see it.
-      const activeProducts = await conn('products_catalog').where({ active: true }).select('id', 'name');
-      const activeProductAliases = await candidateAliases(conn, activeProducts.map((p) => p.id));
+      const { activeProducts, activeProductAliases } = await loadActiveCatalog(conn);
       const outcome = await processOneLine(conn, line, { dispatch, notifyAdmin: notify, allowedCategories, activeProducts, activeProductAliases, since });
       if (outcome.status === 'logged') totals.logged += 1;
       else if (outcome.status === 'still_pending' || outcome.status === 'no_longer_pending') totals.stillPending += 1;
@@ -1860,4 +1870,10 @@ module.exports = {
   // re-classification already resolves the title (item 2a, 2026-09-27 round
   // 9 review).
   decideForTitle,
+  // The same catalog view the live agent decides against, for the read-only
+  // replay tool (ops/agents/inventory-agent-replay.js).
+  loadAllowedCategories, loadActiveCatalog,
+  // The SiteOne invoice evidence (unit price, total, UOM) processOneLine
+  // gives the model, read the same way for the replay.
+  siteOneLineFields,
 };

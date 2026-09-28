@@ -859,6 +859,16 @@ const gates = {
   // an auto-send — so dev is open like aiAssistantAutoReply; prod ships dark
   // until Adam sets GATE_ASK_WAVES=true.
   askWaves: isProd ? process.env.GATE_ASK_WAVES === 'true' : true,
+  // Ask Waves topic routing — a safety, re-entry or medical-emergency question
+  // gets reviewed copy instead of the model's own answer. Dark everywhere;
+  // read at call time through askWavesTopicRoutingLive() (this entry is for
+  // logGateStatus only).
+  askWavesTopicRouting: process.env.GATE_ASK_WAVES_TOPIC_ROUTING === 'true',
+  // Ask Waves emergency second opinion (#4899) — a fast classifier asks only
+  // "is anyone in medical danger?" alongside every chat turn, and a yes turns
+  // a non-emergency answer into the emergency script. Dark everywhere; read at
+  // call time through askWavesEmergencyCheckLive() (logGateStatus only here).
+  askWavesEmergencyCheck: process.env.GATE_ASK_WAVES_EMERGENCY_CHECK === 'true',
 
   // Legacy SMS AI Drafts — creates message_drafts rows and owner "Approve"
   // alerts from inbound customer SMS. Off by default in prod until the
@@ -1504,6 +1514,14 @@ const gates = {
   // everything missed in the last 24 hours. Internal only. Needs
   // callCommitments. Off → no-op. See services/followup-sla-watcher.js.
   followupSlaAlerts: process.env.GATE_FOLLOWUP_SLA_ALERTS === 'true',
+  // Admin bell when a LEAD calls back on a number that still carries an
+  // open, unkept Waves promise (a callback, a quote, a time to come out)
+  // from an earlier unbooked call — the repeat-caller bell above only rings
+  // on 3+ calls in 3 hours and misses a single, hours-later callback (owner
+  // audit 2026-09-26: 41 such leads in 60 days). Needs callCommitments.
+  // Bell only — no customer comms. Ships dark. See
+  // services/promise-chaser-bell.js.
+  promiseChaserBell: process.env.GATE_PROMISE_CHASER_BELL === 'true',
   // Call reschedule apply: a matched existing customer's agent-committed move
   // of a visit already on the books (V2 reschedule_requested + confirmed
   // start) is applied to that visit through the rebooker, the access note
@@ -3059,6 +3077,18 @@ const gates = {
   // explicit offset, read by gateEnvTimestamp) set, independently of this
   // gate, or the lane does nothing (see sweep.js).
   purchaseReceiptRestock: gateEnvValue('GATE_PURCHASE_RECEIPT_RESTOCK'),
+  // Fast Complete for pest re-services (PR C): the tech portal opens a
+  // one-screen completion sheet for pest_re_service (free callback) visits
+  // instead of the full ServiceRecapModal. Read once at load and mirrored
+  // onto the schedule payload as `reserviceFastCompleteEnabled` per service
+  // (server/routes/admin-schedule.js, same pattern as `inspectionCredit`
+  // below) — so TechHomePage learns the gate state from the job payload it
+  // already fetches, no new endpoint. **Ships DARK: off unless exactly
+  // `true`.** Off = the tech portal routes pest re-services to
+  // ServiceRecapModal exactly as before. Kill switch: unset
+  // GATE_RESERVICE_FAST_COMPLETE.
+  reserviceFastComplete: process.env.GATE_RESERVICE_FAST_COMPLETE === 'true',
+
   // Inventory agent (server/services/purchase-receipts/inventory-agent.js):
   // an LLM-backed resolver for a purchase-receipt line the deterministic
   // classifier held as unmatched/needs_size/size_mismatch — every proposal
@@ -3272,6 +3302,20 @@ function gateEnvTimestamp(envName) {
   return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
+// GATE_ASK_WAVES_TOPIC_ROUTING read at CALL time — strict `=== 'true'`, same
+// convention as estimateConsultationOfferLive(). The `askWavesTopicRouting`
+// gates-map entry above is for logGateStatus only; this is the one canonical
+// reader server/services/ask-waves-intake.js uses, so a flip (or an unset
+// kill) needs no restart.
+function askWavesTopicRoutingLive() {
+  return process.env.GATE_ASK_WAVES_TOPIC_ROUTING === 'true';
+}
+
+// Same live-read convention for the #4899 emergency second opinion.
+function askWavesEmergencyCheckLive() {
+  return process.env.GATE_ASK_WAVES_EMERGENCY_CHECK === 'true';
+}
+
 function isEnabled(gate) {
   const enabled = gates[gate];
   if (enabled === undefined) {
@@ -3288,5 +3332,5 @@ function logGateStatus() {
   }
 }
 
-module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, commercialSuiteSizingLive, autoDispatchSharedModelLive, bookCapacityCommitLive };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, autoDispatchSharedModelLive, bookCapacityCommitLive };
 // gates 1775330914

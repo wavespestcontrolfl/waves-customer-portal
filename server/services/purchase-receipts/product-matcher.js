@@ -40,20 +40,28 @@ function containsWholeWords(haystackNorm, needleNorm) {
   return pattern.test(haystackNorm);
 }
 
-async function matchTitleToProduct(title, conn = db) {
-  const normTitle = normalizeForMatch(title);
-  if (!normTitle) return { matched: false, reason: 'empty_title' };
-
+// Everything the matcher reads: active products, and each alias joined to
+// its (active) product row. Split from the match itself so the read-only
+// replay (ops/agents/inventory-agent-replay.js) can match against the
+// catalog plus the changes it has proposed so far, with the same rules.
+async function loadMatchCatalog(conn = db) {
   const aliasRows = await conn('product_aliases as pa')
     .join('products_catalog as pc', 'pc.id', 'pa.product_id')
     .where('pc.active', true)
     .select('pa.alias_name', 'pc.*');
+  const products = await conn('products_catalog').where({ active: true }).select('*');
+  return { aliasRows, products };
+}
+
+function matchTitleInCatalog(title, { aliasRows, products }) {
+  const normTitle = normalizeForMatch(title);
+  if (!normTitle) return { matched: false, reason: 'empty_title' };
+
   const aliasHits = aliasRows.filter((row) => normalizeForMatch(row.alias_name) === normTitle);
   const aliasProductIds = [...new Set(aliasHits.map((row) => row.id))];
   if (aliasProductIds.length === 1) return { matched: true, product: aliasHits[0], matchType: 'alias' };
   if (aliasProductIds.length > 1) return { matched: false, reason: 'ambiguous', matchType: 'alias', candidates: aliasProductIds };
 
-  const products = await conn('products_catalog').where({ active: true }).select('*');
   const containmentHits = products.filter((product) => containsWholeWords(normTitle, normalizeForMatch(product.name)));
   if (containmentHits.length === 1) return { matched: true, product: containmentHits[0], matchType: 'containment' };
   if (containmentHits.length > 1) {
@@ -63,4 +71,9 @@ async function matchTitleToProduct(title, conn = db) {
   return { matched: false, reason: 'unmatched' };
 }
 
-module.exports = { matchTitleToProduct, normalizeForMatch, containsWholeWords };
+async function matchTitleToProduct(title, conn = db) {
+  if (!normalizeForMatch(title)) return { matched: false, reason: 'empty_title' };
+  return matchTitleInCatalog(title, await loadMatchCatalog(conn));
+}
+
+module.exports = { matchTitleToProduct, matchTitleInCatalog, loadMatchCatalog, normalizeForMatch, containsWholeWords };

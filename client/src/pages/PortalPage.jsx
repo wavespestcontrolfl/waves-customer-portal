@@ -1,4 +1,4 @@
-import { Fragment, useState, useEffect, useRef, useCallback, createContext, useContext } from 'react';
+import { Fragment, useState, useEffect, useRef, useCallback, useId, createContext, useContext } from 'react';
 import { createPortal } from 'react-dom';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useAuth, tokenCustomerId } from '../hooks/useAuth';
@@ -24,6 +24,7 @@ import Icon from '../components/Icon';
 import { StationMapCard, STATION_CARD_PROGRAM_META } from '../components/StationMapCard';
 import CancelFlow from '../components/portal/CancelFlow';
 import WeeklyWateringPlanCard from '../components/portal/WeeklyWateringPlanCard';
+import CustomerSelect from '../components/portal/CustomerSelect';
 import CancelledPlanPanel, { CancelledBanner } from '../components/portal/CancelledPlan';
 import { PhotoIdFab, PhotoIdSheet, usePhotoIdGate } from '../components/portal/PhotoId';
 import { etDateString, formatETDateTime } from '../lib/timezone';
@@ -307,10 +308,13 @@ function WavesAiBar({ tab, onAsk }) {
     // The shared sheet owns the card's margin (a top-only shorthand), so the
     // gap to the tab content below lives on this wrapper.
     <div style={{ marginBottom: 16 }}>
-    <section className="waves-ask-card" data-glass="card" aria-label="Ask Waves AI" style={PORTAL_CARD_STYLE}>
-      <div className="waves-ask-eyebrow" data-gt="eyebrow" style={{ color: PORTAL_SHELL.muted, fontSize: 14, fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase' }}>
-        Waves AI
-      </div>
+    <section className="waves-ask-card" data-portal-ask="" data-glass="card" aria-label="Ask Waves AI" style={PORTAL_CARD_STYLE}>
+      <details key={tab}>
+      <summary style={{ minHeight: 44, display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', color: PORTAL_SHELL.text, fontSize: 16, fontWeight: 700 }}>
+        <Icon name="chat" size={18} />
+        <span style={{ flex: 1 }}>Ask Waves AI</span>
+        <Icon name="chevronDown" size={16} />
+      </summary>
       <form className="waves-ask-form" onSubmit={(e) => { e.preventDefault(); submit(); }}>
         <input
           type="text"
@@ -334,6 +338,7 @@ function WavesAiBar({ tab, onAsk }) {
           </div>
         ))}
       </div>
+      </details>
     </section>
     </div>
   );
@@ -3006,8 +3011,8 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
     ? Number(referralStats?.rewardPerReferral) || 0
     : 0;
   const quickActions = [
-    { icon: 'wrench', label: 'Request', sub: 'New service', action: () => onSwitchTab?.('request') },
-    { icon: 'chat', label: 'Message', sub: 'Text the team', action: () => { window.location.href = 'sms:+19412975749'; } },
+    { icon: 'wrench', label: 'Request', sub: 'New service', accent: true, action: () => onSwitchTab?.('request') },
+    { icon: 'chat', label: 'Message', sub: 'Text the team', accent: true, action: () => { window.location.href = 'sms:+19412975749'; } },
     { icon: 'card', label: hasBalance ? 'Pay now' : 'Billing', sub: billingSub, action: () => onSwitchTab?.('billing') },
     { icon: 'gift', label: 'Refer', sub: referralReward > 0 ? `$${referralReward} credit` : 'View details', action: () => onSwitchTab?.('refer') },
   ];
@@ -3086,7 +3091,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
             320-390px viewports. */}
         <div style={{ display: 'grid', gridTemplateColumns: compact ? 'repeat(2, minmax(0, 1fr))' : 'repeat(4, minmax(0, 1fr))', gap: compact ? 8 : 10, marginTop: 22 }}>
           {quickActions.map((item) => (
-            <button key={item.label} type="button" onClick={item.action} data-glass="chip" style={dashboardActionCard}>
+            <button key={item.label} type="button" onClick={item.action} {...(item.accent ? { 'data-glass-accent': '' } : { 'data-glass': 'chip' })} style={dashboardActionCard}>
               <ShellIconTile icon={item.icon} size={compact ? 30 : 34} />
               <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy, lineHeight: 1.15 }}>{item.label}</div>
               {!compact && <div style={{ marginTop: 2, fontSize: 14, color: muted }}>{item.sub}</div>}
@@ -3106,7 +3111,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
               <div style={{ minWidth: 0 }}>
                 <div data-glass="chip" style={dashboardLabel}><Icon name="calendar" size={14} strokeWidth={2} />Next Visit</div>
                 <div style={{ marginTop: 8, fontSize: 26, fontWeight: 700, color: B.glassNavy }}>{nextDateLabel}</div>
-                <div style={{ marginTop: 6, fontSize: 15, fontWeight: 700, color: B.navy }}>
+                <div style={{ marginTop: 6, fontSize: 15, fontWeight: 700, color: B.glassNavy }}>
                   {nextService?.serviceType || 'Request service when you need us.'}
                 </div>
                 {nextService?.windowStart && (
@@ -4178,7 +4183,11 @@ function GoldSwitch({ on, onChange, label, disabled = false, locked = false }) {
 }
 
 function AppNotificationSettings({ prefs, app, saving, onSave }) {
+  const [expanded, setExpanded] = useState(false);
+  const settingsId = useId();
   if (!prefs.appPreferencesAvailable) return null;
+  const { fresh, registered } = app.status ?? {};
+  const connected = fresh === true;
   const connectionCopy = {
     checking: 'Checking this device…',
     granted: 'This device is connected.',
@@ -4189,51 +4198,65 @@ function AppNotificationSettings({ prefs, app, saving, onSave }) {
     permission_unavailable: 'Waves did not receive a notification permission response. Check Waves in your device’s notification Settings, then try again.',
     registration_unavailable: 'This device could not connect. Check your connection and try again.',
     unavailable: 'App notification setup is unavailable on this device.',
-    web: 'Open the Waves app on your phone to connect a device.',
+    web: connected ? 'Connected to your Waves app.' : 'Open the Waves app on your phone to connect a device.',
   };
-  const connected = app.status?.fresh === true;
+  const needsSetup = prefs.pushEnabled === false || (app.deviceState !== 'checking' && !app.ready);
+  const showSettings = expanded || needsSetup;
+  const disclosureLabel = expanded ? 'Hide' : 'Manage';
   return (
-    <div style={{ marginTop: 16, padding: 16, background: GLASS_SUBTLE, border: '1px solid #E7E2D7', borderRadius: 8 }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16, alignItems: 'center' }}>
-        <div>
-          <div style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy }}>App notifications</div>
-          <div role="status" style={{ marginTop: 4, fontSize: 16, lineHeight: 1.5, color: B.grayDark }}>
-            {app.deviceState === 'web' && connected ? 'Connected to your Waves app.' : connectionCopy[app.deviceState] || connectionCopy.registration_unavailable}
-          </div>
+    <div style={{ marginTop: 16 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+        <div role="status" style={{ fontSize: 16, lineHeight: 1.5, color: B.grayDark }}>
+          {prefs.pushEnabled === false ? 'App notifications are off.'
+            : connectionCopy[app.deviceState] || connectionCopy.registration_unavailable}
         </div>
-        <GoldSwitch on={prefs.pushEnabled !== false} onChange={() => onSave({ pushEnabled: prefs.pushEnabled === false })} label="App notifications for my account" disabled={saving} />
-      </div>
-      {(prefs.pushEnabled === false || (!connected && app.status?.registered)) && (
-        <p style={{ margin: '8px 0 0', fontSize: 16, color: B.grayDark, lineHeight: 1.5 }}>
-          {prefs.pushEnabled === false ? 'App notifications are off. Your notification history is still available.'
-            : 'Open the app to refresh its connection.'}
-        </p>
-      )}
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 12 }}>
-        {isNativeApp() && app.deviceState !== 'granted' && (
-          <button type="button" data-glass-accent="" disabled={app.busy} onClick={app.enable} style={{ ...PORTAL_SECONDARY_ACTION, minHeight: 44 }}>
-            {app.busy ? 'Connecting…' : 'Connect this device'}
+        {!needsSetup && (
+          <button type="button" data-glass="chip" aria-expanded={expanded} aria-controls={settingsId}
+            aria-label={`${disclosureLabel} app notification settings`}
+            onClick={() => setExpanded((previous) => !previous)}
+            style={{ ...PORTAL_SECONDARY_ACTION, minHeight: 44, flexShrink: 0 }}>
+            {disclosureLabel}
           </button>
         )}
-        <button type="button" data-glass-accent="" disabled={saving || !app.ready} onClick={() => onSave(Object.fromEntries(VISIT_APP_CHANNEL_KEYS.map((key) => [key, 'push'])))} style={{ ...PORTAL_SECONDARY_ACTION, minHeight: 44, opacity: app.ready ? 1 : 0.5 }}>
-          Use app for visit updates
-        </button>
       </div>
-      <details style={{ marginTop: 8, fontSize: 16, lineHeight: 1.5, color: B.grayDark }}>
-        <summary data-glass="chip" style={{ cursor: 'pointer', fontSize: 14, fontWeight: 700, minHeight: 44, alignContent: 'center', width: 'fit-content', padding: '0 10px', borderRadius: 8, color: B.glassNavy, position: 'relative' }}>Delivery details</summary>
-        <p style={{ margin: '4px 0 12px' }}>
-          Use app notifications for appointments, reminders, technician updates, reports and requests. Alerts you have turned off stay off.
-        </p>
-        <p style={{ margin: '0 0 12px' }}>
-          If an app notification cannot be delivered, we may use text or email where available, following your preferences.
-          {prefs.smsEnabled === false ? ' Text backup is off.' : ''}
-          {prefs.emailEnabled === false ? ' Email backup is off.' : ''}
-        </p>
-        <p style={{ margin: '0 0 12px' }}>
-          Request confirmations continue by email. Manage invoices and payment notifications in Billing. Messages with attachments, review requests, conversations, security codes and marketing keep their current delivery methods.
-        </p>
-        <button type="button" data-glass-accent="" onClick={app.refresh} disabled={app.busy} style={{ ...PORTAL_SECONDARY_ACTION, minHeight: 44 }}>Check connection</button>
-      </details>
+      <div id={settingsId} hidden={!showSettings} style={{ marginTop: 12, padding: 16, background: GLASS_SUBTLE, border: '1px solid #E7E2D7', borderRadius: 8 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16, alignItems: 'center' }}>
+          <div style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy }}>Allow app notifications</div>
+          <GoldSwitch on={prefs.pushEnabled !== false} onChange={() => onSave({ pushEnabled: prefs.pushEnabled === false })} label="App notifications for my account" disabled={saving} />
+        </div>
+        {(prefs.pushEnabled === false || (!connected && registered)) && (
+          <p style={{ margin: '8px 0 0', fontSize: 16, color: B.grayDark, lineHeight: 1.5 }}>
+            {prefs.pushEnabled === false ? 'Your notification history is still available.'
+              : 'Open the app to refresh its connection.'}
+          </p>
+        )}
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 12 }}>
+          {isNativeApp() && app.deviceState !== 'granted' && (
+            <button type="button" data-glass-accent="" disabled={app.busy} onClick={app.enable} style={{ ...PORTAL_SECONDARY_ACTION, minHeight: 44 }}>
+              {app.busy ? 'Connecting…' : 'Connect this device'}
+            </button>
+          )}
+          <button type="button" data-glass-accent="" disabled={saving || !app.ready} onClick={() => onSave(Object.fromEntries(VISIT_APP_CHANNEL_KEYS.map((key) => [key, 'push'])))} style={{ ...PORTAL_SECONDARY_ACTION, minHeight: 44, opacity: app.ready ? 1 : 0.5 }}>
+            Use app for visit updates
+          </button>
+        </div>
+        <details style={{ marginTop: 8, fontSize: 16, lineHeight: 1.5, color: B.grayDark }}>
+          <summary data-glass="chip" style={{ cursor: 'pointer', fontSize: 14, fontWeight: 700, minHeight: 44, alignContent: 'center', width: 'fit-content', padding: '0 10px', borderRadius: 8, color: B.glassNavy, position: 'relative' }}>Delivery details</summary>
+          <p style={{ margin: '4px 0 12px' }}>
+            Use app notifications for appointments, reminders, technician updates, reports and requests. Alerts you have turned off stay off.
+          </p>
+          <p style={{ margin: '0 0 12px' }}>
+            If an app notification cannot be delivered, we may use text or email where available, following your preferences.
+            {Object.entries({ smsEnabled: 'Text', emailEnabled: 'Email' })
+              .filter(([key]) => prefs[key] === false)
+              .map(([, label]) => ` ${label} backup is off.`)}
+          </p>
+          <p style={{ margin: '0 0 12px' }}>
+            Request confirmations continue by email. Manage invoices and payment notifications in Billing. Messages with attachments, review requests, conversations, security codes and marketing keep their current delivery methods.
+          </p>
+          <button type="button" data-glass-accent="" onClick={app.refresh} disabled={app.busy} style={{ ...PORTAL_SECONDARY_ACTION, minHeight: 44 }}>Check connection</button>
+        </details>
+      </div>
     </div>
   );
 }
@@ -5365,16 +5388,15 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
               const propertyOwned = perPropertyTexts && PROPERTY_OWNED_PREF_KEYS.includes(p.key);
               return (
                 <div key={p.key} data-reminder-row="" style={{
-                  // Keep paired controls together on compact screens. A
-                  // property-owned alert has only a select here, so it fits
-                  // beside its label without repeating the property hint.
+                  // Let each label and its controls share a row while they
+                  // fit, then wrap the control group together on narrow screens.
                   display: 'flex', justifyContent: 'space-between', alignItems: 'center',
                   flexWrap: 'wrap',
                   padding: '12px 0',
                   borderBottom: i < items.length - 1 ? '1px solid #E7E2D7' : 'none',
                   gap: 12,
                 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: propertyOwned ? '1 1 140px' : '1 1 160px', minWidth: 0 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: '1 1 140px', minWidth: 0 }}>
                     <span style={{ width: 34, height: 34, borderRadius: 8, background: subtle, border: '1px solid #E7E2D7', color: B.glassNavy, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
                       <Icon name={p.icon} size={18} strokeWidth={1.75} />
                     </span>
@@ -5390,9 +5412,9 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
                       the controls across lines. */}
                   <div style={{
                     display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0,
-                    marginLeft: compact ? 0 : 'auto',
-                    flex: compact && p.channelKey && !propertyOwned ? '1 0 100%' : '0 0 auto',
-                    justifyContent: compact ? 'flex-end' : undefined,
+                    marginLeft: 'auto',
+                    flex: '0 0 auto',
+                    justifyContent: 'flex-end',
                   }}>
                   {p.channelKey && (() => {
                     // Email/Both can only be offered once an email is on file —
@@ -5417,22 +5439,16 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
                       : isOn;
                     const selectable = alertOn && opts.length > 1;
                     return (
-                      <select
+                      <CustomerSelect
                         data-testid={propertyOwned ? `per-property-${p.key}` : undefined}
                         value={prefs[p.channelKey] === 'push' || hasEmail ? (prefs[p.channelKey] || 'sms') : 'sms'}
                         onChange={(e) => handleChannelChange(p.channelKey, e.target.value)}
                         disabled={!selectable || !!prefsLocked[p.channelKey]}
                         aria-label={`Delivery method for ${p.label}`}
                         aria-describedby={propertyOwned ? 'appointment-delivery-note' : undefined}
-                        style={{
-                          fontSize: 16, fontWeight: 700, color: B.glassNavy,
-                          border: '1px solid #D8D0C0', borderRadius: 8, padding: '7px 10px', minHeight: 44,
-                          background: '#fff', fontFamily: 'inherit', flexShrink: 0,
-                          cursor: selectable ? 'pointer' : 'not-allowed', opacity: selectable ? 1 : 0.4,
-                        }}
                       >
                         {opts.map(o => <option key={o.value} value={o.value} disabled={o.value === 'push' && !app.ready}>{o.label}</option>)}
-                      </select>
+                      </CustomerSelect>
                     );
                   })()}
                   {!propertyOwned && (
@@ -5454,12 +5470,11 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
                   <GlassTile name="mail" size={34} />
                   <div style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy }}>Request updates</div>
                 </div>
-                <select aria-label="Delivery method for request updates" value={prefs.requestChannel || 'email'}
-                  disabled={!!prefsLocked.requestChannel} onChange={(e) => handleChannelChange('requestChannel', e.target.value)}
-                  style={{ fontSize: 16, fontWeight: 700, fontFamily: 'inherit', padding: '7px 10px', minHeight: 44, borderRadius: 8, border: '1px solid #D8D0C0', background: '#fff', color: B.glassNavy, marginLeft: 'auto' }}>
+                <CustomerSelect aria-label="Delivery method for request updates" value={prefs.requestChannel || 'email'}
+                  disabled={!!prefsLocked.requestChannel} onChange={(e) => handleChannelChange('requestChannel', e.target.value)}>
                   <option value="email">Email</option>
                   <option value="push" disabled={!app.ready && prefs.requestChannel !== 'push'}>App</option>
-                </select>
+                </CustomerSelect>
               </div>
             )}
           </div>
@@ -7347,13 +7362,9 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
           ].map(f => (
             <label key={f.key} style={{ display: 'block', minWidth: 0 }}>
               <div style={{ fontSize: 14, fontWeight: 700, color: muted, textTransform: 'uppercase', letterSpacing: 0, marginBottom: 6 }}>{f.label}</div>
-              <select value={f.value} onChange={e => f.set(e.target.value)} className="waves-focus-ring" style={{
-                width: '100%', minHeight: 44, padding: '10px 12px', borderRadius: 8,
-                border: '1px solid #D8D0C0', background: '#fff', color: B.glassNavy,
-                fontSize: 14, fontFamily: FONTS.body, boxSizing: 'border-box',
-              }}>
+              <CustomerSelect fullWidth value={f.value} onChange={e => f.set(e.target.value)} className="waves-focus-ring">
                 {f.options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-              </select>
+              </CustomerSelect>
             </label>
           ))}
         </div>
@@ -7361,8 +7372,8 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
         {filteredPayments.length === 0 && (
           <PortalInlineState
             icon="search"
-            title="No payments match your filters"
-            message="Try a different year or payment type to view more billing history."
+            title={payments.length ? 'No payments match your filters' : 'No payments yet'}
+            message={payments.length ? 'Try a different year or payment type to view more billing history.' : 'Your payments and receipts will appear here after your first payment.'}
           />
         )}
         {filteredPayments.map(p => (
@@ -7770,7 +7781,7 @@ function PasswordField({ value, onChange, placeholder, label }) {
           className="waves-focus-ring"
           style={{
             width: '100%',
-            padding: '10px 42px 10px 12px',
+            padding: '10px 52px 10px 12px', minHeight: 44,
             borderRadius: 8,
             border: '1px solid #D8D0C0',
             fontSize: 14,
@@ -7785,7 +7796,7 @@ function PasswordField({ value, onChange, placeholder, label }) {
         <button type="button" onClick={() => setShow(!show)} aria-label={show ? `Hide ${inputLabel}` : `Show ${inputLabel}`} style={{
           position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)',
           background: 'transparent', border: 'none', cursor: 'pointer',
-          color: '#475569', padding: 4, width: 32, height: 32,
+          color: PORTAL_SHELL.muted, padding: 10, width: 44, height: 44,
         }}><Icon name={show ? 'eyeOff' : 'eye'} size={18} strokeWidth={2} /></button>
       </div>
     </div>
@@ -7830,13 +7841,13 @@ function NumberStepper({ value, onChange, min = 0, max = 99, label = 'Value' }) 
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
       <button type="button" onClick={() => onChange(Math.max(min, v - 1))} aria-label={`Decrease ${label}`} style={{
-        width: 38, height: 38, borderRadius: 8, border: '1px solid #D8D0C0',
+        width: 44, height: 44, borderRadius: 8, border: '1px solid #D8D0C0',
         background: '#fff', cursor: 'pointer', color: B.glassNavy,
         display: 'flex', alignItems: 'center', justifyContent: 'center',
       }}><Icon name="minus" size={16} strokeWidth={2} /></button>
       <span style={{ fontSize: 20, fontWeight: 700, color: B.glassNavy, fontFamily: FONTS.ui, minWidth: 28, textAlign: 'center' }}>{v}</span>
       <button type="button" onClick={() => onChange(Math.min(max, v + 1))} aria-label={`Increase ${label}`} style={{
-        width: 38, height: 38, borderRadius: 8, border: '1px solid #D8D0C0',
+        width: 44, height: 44, borderRadius: 8, border: '1px solid #D8D0C0',
         background: '#fff', cursor: 'pointer', color: B.glassNavy,
         display: 'flex', alignItems: 'center', justifyContent: 'center',
       }}><Icon name="plus" size={16} strokeWidth={2} /></button>
@@ -7856,20 +7867,19 @@ function ToggleSwitch({ checked, onChange, disabled, label }) {
       disabled={disabled}
       style={{
         width: 50,
-        height: 30,
+        height: 44,
         borderRadius: 999,
         border: 'none',
         cursor: disabled ? 'wait' : 'pointer',
-        // Gold = on, pale gold = off — same treatment as every other portal
-        // switch (owner 2026-08-28: sliders are yellow in both states; no
-        // blue or grey tracks in the customer portal).
-        background: checked ? B.yellow : `${B.yellow}55`,
+        background: 'transparent',
         position: 'relative',
         flexShrink: 0,
-        transition: 'background 0.18s ease',
         opacity: disabled ? 0.7 : 1,
       }}
     >
+      {/* Preserve the 30px gold track inside a full-height touch target. */}
+      <span aria-hidden="true" style={{ position: 'absolute', inset: '7px 0', borderRadius: 999,
+        background: checked ? B.yellow : `${B.yellow}55`, transition: 'background 0.18s ease' }}>
       <span style={{
         position: 'absolute',
         top: 4,
@@ -7881,6 +7891,7 @@ function ToggleSwitch({ checked, onChange, disabled, label }) {
         boxShadow: '0 1px 3px rgba(15,23,42,0.22)',
         transition: 'left 0.18s ease',
       }} />
+      </span>
     </button>
   );
 }
@@ -11713,6 +11724,7 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
                 const completedMonths = getCompletedMonths(svc.id);
                 return (
                   <div key={svc.id} style={{
+                    position: 'relative',
                     background: subtle,
                     border: '1px solid rgba(255,255,255,0.65)',
                     borderRadius: 14,
@@ -11722,7 +11734,7 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
                       <Icon name={iconName(svc.icon)} size={15} strokeWidth={1.8} />
                       <span>{svc.name.replace(/ Program| Barrier Treatment/g, '')}</span>
                     </div>
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(12, minmax(0, 1fr))', gap: 2 }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(44px, 1fr))', gap: 2 }}>
                       {MONTH_LABELS.map((month, mi) => {
                         const hasActualEvent = getCalendarEventsForMonth(svc.id, mi).length > 0;
                         const isScheduled = hasActualEvent || scheduleMonths.includes(mi);
@@ -11737,7 +11749,7 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
                         const tooltipKey = `${svc.id}-${mi}`;
                         const isHovered = isScheduled && hoveredCalendarItem === tooltipKey;
                         return (
-                          <div key={month} style={{ position: 'relative', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4, minWidth: 0 }}>
+                          <div key={month} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4, minWidth: 0 }}>
                             <button
                               type="button"
                               disabled={!isScheduled}
@@ -11745,10 +11757,11 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
                               onMouseLeave={() => setHoveredCalendarItem(null)}
                               onFocus={() => isScheduled && setHoveredCalendarItem(tooltipKey)}
                               onBlur={() => setHoveredCalendarItem(null)}
+                              onClick={() => setHoveredCalendarItem(tooltipKey)}
                               aria-label={isScheduled ? `${svc.name} on ${detail.date}, ${detail.time}` : `${svc.name}: no ${month} service`}
                               style={{
                                 width: '100%',
-                                height: 26,
+                                height: 44,
                                 display: 'flex',
                                 alignItems: 'center',
                                 justifyContent: 'center',
@@ -11780,10 +11793,8 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
                                 position: 'absolute',
                                 zIndex: 30,
                                 bottom: 'calc(100% + 8px)',
-                                left: mi > 8 ? 'auto' : '50%',
-                                right: mi > 8 ? 0 : 'auto',
-                                transform: mi > 8 ? 'none' : 'translateX(-50%)',
-                                width: 190,
+                                left: 12,
+                                right: 12,
                                 padding: 10,
                                 borderRadius: 8,
                                 background: B.glassNavy,
@@ -11805,7 +11816,7 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
                               fontWeight: isCurrentMonth ? 700 : 600,
                               letterSpacing: '0.02em',
                               color: isCurrentMonth ? B.wavesBlue : 'rgba(4,57,94,0.5)',
-                            }}>{month[0]}</div>
+                            }}>{month}</div>
                           </div>
                         );
                       })}
@@ -14068,7 +14079,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
               Service reports, agreements, real estate reports, insurance certificates, and compliance paperwork.
             </div>
           </div>
-          <div style={{
+          {currentTotal > 0 && <div style={{
             minWidth: compact ? '100%' : 210,
             padding: '14px 16px',
             borderRadius: 8,
@@ -14085,10 +14096,10 @@ function DocumentsTab({ customer, onSwitchTab }) {
             <div style={{ marginTop: 2, fontSize: 14, color: muted }}>
               {totalDocs > currentTotal ? `${totalDocs} total on file` : 'Customer documents'}
             </div>
-          </div>
+          </div>}
         </div>
 
-        <div style={{
+        {currentTotal > 0 ? <div style={{
           display: 'grid',
           gridTemplateColumns: compact ? '1fr 1fr' : 'repeat(4, 1fr)',
           gap: 10,
@@ -14124,10 +14135,11 @@ function DocumentsTab({ customer, onSwitchTab }) {
               <div style={{ marginTop: 3, color: muted, fontSize: 14, lineHeight: 1.3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.sub}</div>
             </div>
           ))}
-        </div>
+        </div> : <PortalInlineState icon="document" title="No documents yet"
+          message="Your paperwork will appear here when it is available. You can still view completed visits or request paperwork below." />}
       </section>
 
-      <section data-glass="card" style={{ ...card, padding: 20 }}>
+      {currentTotal > 0 && <section data-glass="card" style={{ ...card, padding: 20 }}>
         {/* Search + Type on one grid with labels — same control as the
             Visits / Payment History filters (owner 08-28). */}
         <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : '2fr 1fr', gap: 10 }}>
@@ -14151,13 +14163,9 @@ function DocumentsTab({ customer, onSwitchTab }) {
           </label>
           <label style={{ display: 'block', minWidth: 0 }}>
             <div style={{ fontSize: 14, fontWeight: 700, color: muted, textTransform: 'uppercase', letterSpacing: 0, marginBottom: 6 }}>Type</div>
-            <select value={typeFilter} onChange={e => setTypeFilter(e.target.value)} aria-label="Document type" className="waves-focus-ring" style={{
-              width: '100%', minHeight: 44, padding: '10px 12px', borderRadius: 8,
-              border: '1px solid #D8D0C0', background: '#fff', color: B.glassNavy,
-              fontSize: 14, fontFamily: FONTS.body, boxSizing: 'border-box',
-            }}>
+            <CustomerSelect fullWidth value={typeFilter} onChange={e => setTypeFilter(e.target.value)} aria-label="Document type" className="waves-focus-ring">
               {typeFilters.map(f => <option key={f.value} value={f.value}>{f.label}</option>)}
-            </select>
+            </CustomerSelect>
           </label>
         </div>
         {hasActiveFilter && (
@@ -14165,7 +14173,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
             Showing {resultCount} matching document{resultCount === 1 ? '' : 's'}.
           </div>
         )}
-      </section>
+      </section>}
 
       <section data-glass="card" style={{
         ...card,
@@ -14187,7 +14195,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
       </section>
 
       {/* Document Categories */}
-      {filteredCategories.map(cat => (
+      {currentTotal > 0 && filteredCategories.map(cat => (
         <DocumentSection
           key={cat.id}
           section={cat}
@@ -15895,15 +15903,32 @@ const MORE_TABS = [
 const CANCELLED_TABS = ['plan', 'visits', 'billing', 'documents'];
 // The sub-tabs on Visits surface their own IDs, so "Visits" stays lit
 // whether the customer is on Upcoming or Completed.
-function BottomNav({ activeTab, onSelect, onOpenMore, moreActive, tabs = PRIMARY_TABS, moreTabs = MORE_TABS }) {
+function BottomNav({ activeTab, onSelect, onOpenMore, moreActive, moreButtonRef, tabs = PRIMARY_TABS, moreTabs = MORE_TABS }) {
+  const navRef = useRef(null);
+  useEffect(() => {
+    const measure = () => {
+      const height = navRef.current?.getBoundingClientRect().height;
+      if (height) document.documentElement.style.setProperty('--portal-bottom-nav-height', `${height}px`);
+    };
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure);
+    observer?.observe(navRef.current);
+    measure();
+    window.addEventListener('resize', measure);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener('resize', measure);
+      document.documentElement.style.removeProperty('--portal-bottom-nav-height');
+    };
+  }, []);
   const button = (t, onClick, isActive) => (
     <button
       key={t.id}
+      ref={t.id === 'more' ? moreButtonRef : undefined}
       type="button"
       onClick={onClick}
       aria-current={isActive ? 'page' : undefined}
       style={{
-        flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', alignItems: 'center',
+        flex: '1 0 auto', minWidth: 44, display: 'flex', flexDirection: 'column', alignItems: 'center',
         justifyContent: 'center', gap: 4, padding: '7px 2px', border: 'none',
         background: 'transparent', cursor: 'pointer', minHeight: 58,
         color: isActive ? PORTAL_SHELL.text : PORTAL_SHELL.muted,
@@ -15920,17 +15945,15 @@ function BottomNav({ activeTab, onSelect, onOpenMore, moreActive, tabs = PRIMARY
         background: B.yellow,
       }} />}
       <Icon name={t.icon} size={21} strokeWidth={isActive ? 2.25 : 1.75} />
-      {/* 14px label floor (owner 2026-09-03); the ellipsis below is the
-          fallback if a caption ever outgrows its sixth of a 320px bar. */}
+      {/* Large labels move to another row; the measured bar lifts the FAB. */}
       <span style={{
         fontSize: 14, fontWeight: isActive ? 700 : 600, letterSpacing: 0,
-        maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis',
         whiteSpace: 'nowrap', lineHeight: 1.2,
       }}>{t.label}</span>
     </button>
   );
   return (
-    <nav aria-label="Main" data-glass="" style={{
+    <nav ref={navRef} aria-label="Main" data-glass="" style={{
       position: 'fixed',
       bottom: 8,
       left: 'calc(10px + env(safe-area-inset-left, 0px))',
@@ -15940,7 +15963,7 @@ function BottomNav({ activeTab, onSelect, onOpenMore, moreActive, tabs = PRIMARY
       border: `1px solid ${PORTAL_SHELL.border}`,
       borderRadius: 8,
       boxShadow: '0 14px 32px rgba(15,23,42,0.16)',
-      display: 'flex', maxWidth: 700, margin: '0 auto',
+      display: 'flex', flexWrap: 'wrap', maxWidth: 700, margin: '0 auto',
       padding: '4px 8px max(6px, env(safe-area-inset-bottom))',
       boxSizing: 'border-box',
     }}>
@@ -16256,7 +16279,7 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
   };
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    messagesEndRef.current?.scrollIntoView({ behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' });
   }, [messages]);
 
   const viewport = useSheetViewport(true, dialogRef);
@@ -16358,7 +16381,7 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
           <ShellCloseButton onClick={onClose} label="Close chat" />
         </div>
 
-        <div style={{
+        <div role="log" aria-label="Conversation" aria-live="polite" aria-relevant="additions text" style={{
           flex: compact ? '1 1 300px' : '1 1 360px',
           minHeight: 0,
           overflowY: 'auto',
@@ -16406,7 +16429,7 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
                     style={{
                       border: 'none', background: 'transparent', cursor: 'pointer',
                       fontSize: 14, fontFamily: FONTS.body, color: PORTAL_SHELL.muted,
-                      textDecoration: 'underline', padding: '2px 4px', marginTop: 2,
+                      textDecoration: 'underline', padding: '8px 4px', minHeight: 44, marginTop: 2,
                     }}
                   >
                     {reportState[i] === 'sending' ? 'Reporting…'
@@ -16510,6 +16533,15 @@ export default function PortalPage() {
   const [activeTab, setActiveTab] = useState(
     cancelledAccount && !CANCELLED_TABS.includes(initialTab) ? 'plan' : initialTab,
   );
+  const resetTabScroll = useRef(false);
+  const moreButtonRef = useRef(null);
+  useEffect(() => {
+    if (!resetTabScroll.current) return;
+    resetTabScroll.current = false;
+    // After outgoing sheets unlock the body, open explicit destinations
+    // at the top. History and focused deep links keep their own behavior.
+    window.scrollTo({ top: 0, left: 0, behavior: 'instant' });
+  }, [activeTab]);
   // Which My Plan service row to open expanded on the next Plan mount —
   // deep-link above or the home lawn teaser; nav clicks reset it.
   const [planFocusService, setPlanFocusService] = useState(initialPlanService);
@@ -16581,6 +16613,8 @@ export default function PortalPage() {
     // Plain nav clears any pending row focus so Plan doesn't keep
     // re-expanding a row the customer already closed.
     setPlanFocusService(null);
+    const nextTab = ['schedule', 'services'].includes(id) ? 'visits' : id;
+    resetTabScroll.current = nextTab !== 'request' && nextTab !== activeTab;
     if (id === 'schedule') { setVisitsSubTab('upcoming'); setActiveTab('visits'); syncTabUrl('schedule'); return; }
     if (id === 'services') { setVisitsSubTab('completed'); setActiveTab('visits'); syncTabUrl('services'); return; }
     if (id === 'request') { setShowReportIssue(true); return; }
@@ -16682,8 +16716,10 @@ export default function PortalPage() {
       if (headerRef.current) setNavStickyTop(headerRef.current.offsetHeight);
     };
     measure();
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure);
+    if (headerRef.current) observer?.observe(headerRef.current);
     window.addEventListener('resize', measure);
-    return () => window.removeEventListener('resize', measure);
+    return () => { observer?.disconnect(); window.removeEventListener('resize', measure); };
   }, []);
   const [requestRefreshKey, setRequestRefreshKey] = useState(0);
   const [switchingPropertyId, setSwitchingPropertyId] = useState(null);
@@ -16888,16 +16924,16 @@ export default function PortalPage() {
         gap: 12,
         position: 'sticky', top: 0, zIndex: 100,
       }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: '0 0 auto' }}>
-          <img src="/waves-logo.png" alt="Waves" style={{ height: 34, width: 'auto', display: 'block' }} />
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: '1 1 auto', minWidth: 0 }}>
+          <img src="/waves-logo.png" alt="Waves" style={{ height: 34, width: 'auto', display: 'block', flexShrink: 0 }} />
           <div style={{ minWidth: 0 }}>
-            <div style={{ fontSize: 16, fontWeight: 700, color: PORTAL_SHELL.text, lineHeight: 1.2 }}>Customer Portal</div>
+            <div style={{ fontSize: 16, fontWeight: 700, color: PORTAL_SHELL.text, lineHeight: 1.2, overflowWrap: 'anywhere' }}>Customer Portal</div>
           </div>
         </div>
         {/* Desktop tab nav moved out of this bar (owner 2026-07-09) — it now
             renders as a glass card above the Waves AI bar in the content
             column. Mobile keeps the bottom nav untouched. */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: 'auto' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: 'auto', flexShrink: 0 }}>
           {/* The header Request button creates work — hidden for a cancelled
               account (C4), which keeps Call / Text in the account menu. */}
           {!isMobileShell && !cancelledAccount && (
@@ -16941,12 +16977,12 @@ export default function PortalPage() {
               data-glass="chip"
               style={{
                 minHeight: 44,
-                width: isMobileShell ? 44 : 'auto',
+                minWidth: 44,
                 borderRadius: 10,
                 background: PORTAL_SHELL.surface,
                 border: `1px solid ${PORTAL_SHELL.borderStrong}`,
                 position: 'relative',
-                padding: isMobileShell ? 0 : '4px 8px 4px 4px',
+                padding: isMobileShell ? 6 : '4px 8px 4px 4px',
                 display: 'inline-flex',
                 alignItems: 'center',
                 justifyContent: 'center',
@@ -16960,8 +16996,9 @@ export default function PortalPage() {
               }}
             >
               <span style={{
-                width: 30,
-                height: 30,
+                minWidth: 30,
+                minHeight: 30,
+                padding: '0 3px', boxSizing: 'border-box',
                 borderRadius: 10,
                 background: PORTAL_SHELL.text,
                 color: '#fff',
@@ -17330,7 +17367,7 @@ export default function PortalPage() {
           card underneath the bar on notched phones. */}
       <main id="portal-main" tabIndex={-1} style={{
         padding: isMobileShell
-          ? '24px calc(16px + env(safe-area-inset-right, 0px)) calc(108px + env(safe-area-inset-bottom, 0px)) calc(16px + env(safe-area-inset-left, 0px))'
+          ? '24px calc(16px + env(safe-area-inset-right, 0px)) calc(var(--portal-bottom-nav-height, 78px) + 30px + env(safe-area-inset-bottom, 0px)) calc(16px + env(safe-area-inset-left, 0px))'
           : '24px calc(16px + env(safe-area-inset-right, 0px)) 32px calc(16px + env(safe-area-inset-left, 0px))',
         // shellMaxWidth is the content cap. Preserve the existing 760px
         // desktop content column now that safe-area padding is border-box.
@@ -17399,6 +17436,7 @@ export default function PortalPage() {
           onSelect={switchTab}
           onOpenMore={() => setShowMoreSheet(true)}
           moreActive={showMoreSheet}
+          moreButtonRef={moreButtonRef}
           tabs={cancelledAccount ? cancelledPrimaryTabs : PRIMARY_TABS}
           moreTabs={cancelledAccount ? cancelledMoreTabs : MORE_TABS}
         />
@@ -17408,17 +17446,17 @@ export default function PortalPage() {
           activeTab={activeTab}
           onSelect={(id) => { switchTab(id); setShowMoreSheet(false); }}
           onClose={() => setShowMoreSheet(false)}
-          onRequest={cancelledAccount ? null : () => setShowReportIssue(true)}
-          onChat={cancelledAccount ? null : () => setShowChat(true)}
-          onOpenPhotoId={photoIdAvailable ? () => { setShowPhotoId(true); setShowMoreSheet(false); } : null}
+          onRequest={cancelledAccount ? null : () => { moreButtonRef.current?.focus({ preventScroll: true }); setShowReportIssue(true); }}
+          onChat={cancelledAccount ? null : () => { moreButtonRef.current?.focus({ preventScroll: true }); setShowChat(true); }}
+          onOpenPhotoId={photoIdAvailable ? () => { moreButtonRef.current?.focus({ preventScroll: true }); setShowPhotoId(true); setShowMoreSheet(false); } : null}
           tabs={cancelledAccount ? cancelledMoreTabs : MORE_TABS}
         />
       )}
 
       {/* Photo ID — floating button + sheet (GATE_CUSTOMER_PHOTO_ID; hidden
           entirely on a 404 from GET /api/photo-id, see usePhotoIdGate). */}
-      {photoIdAvailable && !showPhotoId && (
-        <PhotoIdFab onOpen={() => setShowPhotoId(true)} hasBottomNav={isMobileShell} />
+      {photoIdAvailable && (
+        <PhotoIdFab onOpen={() => setShowPhotoId(true)} hasBottomNav={isMobileShell} hidden={showPhotoId} />
       )}
       <PhotoIdSheet
         open={showPhotoId && photoIdAvailable}

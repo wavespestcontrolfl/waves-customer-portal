@@ -58,7 +58,10 @@ const MIN_EXPECTED_REPORT_BYTES = 50000;
 // FDACS ID card number on reports that applied product (owner ruling
 // 2026-09-26, F.S. 482.2265(1)(b)). Cached p9 objects carry neither line, so
 // they re-render on next open. Supersedes p9, whose bust it subsumes.
-const SERVICE_REPORT_PDF_STORAGE_VERSION = 'p10-poison-control-20260926';
+// p11: every record's footer now links to the public Products & Safety page
+// (owner 2026-09-28). Cached p10 objects lack the line, so they re-render on
+// next open. Supersedes p10, whose bust it subsumes.
+const SERVICE_REPORT_PDF_STORAGE_VERSION = 'p11-products-safety-20260928';
 
 const s3 = new S3Client({
   region: config.s3?.region,

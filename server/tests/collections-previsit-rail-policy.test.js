@@ -14,6 +14,7 @@ jest.mock('../services/logger', () => ({
   info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(),
 }));
 jest.mock('../models/db', () => jest.fn());
+jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn(async (_name, run) => run()) }));
 jest.mock('../services/billing-lane', () => ({
   resolveBillingLane: jest.fn(() => ({ mode: 'per_visit' })),
   monthlyDuesCollected: jest.fn(async () => false),
@@ -45,6 +46,14 @@ jest.mock('../services/collections/contact-ledger', () => ({
   markDelivered: jest.fn(async () => true),
 }));
 
+jest.mock('../services/billing-reminder-delivery', () => ({
+  reminderProgress: jest.fn(async () => []),
+  sendReminderChannels: jest.fn(async (input) => {
+    for (const channel of input.channels) await input.send(channel, { id: `ledger-${channel}` });
+    return { complete: true, deliveredNow: input.channels };
+  }),
+}));
+
 const db = require('../models/db');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const AccountMembershipEmail = require('../services/account-membership-email');
@@ -66,6 +75,7 @@ function chain({ result = [], first } = {}) {
 }
 
 function setDbQueues(queues) {
+  queues = { notification_prefs: [chain({ first: null })], ...queues };
   const tableQueues = new Map(Object.entries(queues));
   db.mockImplementation((table) => {
     const queue = tableQueues.get(table);
@@ -239,7 +249,7 @@ test('late dues do not authorize a reminder from an incomplete empty invoice sna
   });
   await expect(runSweep({ now: new Date('2026-08-14T15:00:00Z') }))
     .resolves.toMatchObject({ sent: 0, skipped: 1 });
-  expect(collectionsChannelVerdict).toHaveBeenCalledTimes(2);
+  expect(collectionsChannelVerdict).toHaveBeenCalledTimes(1);
   expect(collectionsChannelVerdict).toHaveBeenCalledWith(expect.objectContaining({ offLedgerBalanceCents: 6900 }));
   expect(claimChain.update).not.toHaveBeenCalled();
   expect(sendCustomerMessage).not.toHaveBeenCalled();
@@ -340,4 +350,110 @@ test('a policy-excluded invoice is filtered out of the quoted amount and the led
   // The quoted amount is inv-9's $96.60 alone — never inv-77's $500.
   expect(renderSmsTemplate).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ amount: '96.60' }), );
   expect(ContactLedger.recordContact).toHaveBeenCalledWith(expect.objectContaining({ invoiceIds: ['inv-9'] }));
+});
+
+function armExplicit(channels, overrides = {}) {
+  const claim = chain({ result: 1 });
+  setDbQueues({ sms_templates: [chain({ first: { is_active: true } })],
+    notification_prefs: [chain({ first: { billing_channels: channels } })],
+    scheduled_services: [chain({ result: [VISIT] }), claim, chain({ result: 1 })],
+    invoices: [chain({ result: [OVERDUE_INVOICE] })], activity_log: [chain({ result: [] })], ...overrides });
+  return claim;
+}
+
+test.each([['email'], ['sms'], ['push'], ['email', 'sms', 'push']])('stored explicit methods %j use keyed live delivery with policy gate off', async (...channels) => {
+  delete process.env.GATE_COLLECTIONS_POLICY;
+  armExplicit(channels);
+  await expect(runSweep({ now: new Date('2026-08-14T15:00:00Z') })).resolves.toMatchObject({ sent: 1 });
+  const helper = require('../services/billing-reminder-delivery').sendReminderChannels;
+  expect(helper).toHaveBeenCalledWith(expect.objectContaining({ channels, eventKey: `previsit-balance:${VISIT.id}` }));
+  expect(sendCustomerMessage.mock.calls.map(([input]) => input.metadata.billingDeliveryLeg)).toEqual(channels);
+  for (const [input] of sendCustomerMessage.mock.calls) {
+    expect(input.metadata).toMatchObject({ invoice_ids: ['inv-9'], invoice_quotes: [{ id: 'inv-9', dueCents: 9660 }],
+      dues_cents: 0, appointment_date: VISIT.scheduled_date, collections_ledger_id: expect.any(String) });
+    if (input.metadata.billingDeliveryLeg === 'sms') {
+      expect(input.withSmsHandoff).toEqual(expect.any(Function));
+      expect(input.preSendCheck).toBeUndefined();
+    } else expect(input.preSendCheck).toEqual(expect.any(Function));
+  }
+  expect(AccountMembershipEmail.sendPrevisitBalanceReminder).not.toHaveBeenCalled();
+});
+
+test('an explicit empty choice or unreadable preference leaves the appointment unclaimed', async () => {
+  let claim = armExplicit([]);
+  await runSweep({ now: new Date('2026-08-14T15:00:00Z') });
+  expect(claim.update).not.toHaveBeenCalled();
+  claim = armExplicit(['email'], { notification_prefs: [chain({ first: Promise.reject(new Error('choice unreadable')) })] });
+  await runSweep({ now: new Date('2026-08-14T15:00:00Z') });
+  expect(claim.update).not.toHaveBeenCalled();
+  expect(sendCustomerMessage).not.toHaveBeenCalled();
+});
+
+test('the first partial explicit policy read stops before reservation and claim', async () => {
+  const claim = armExplicit(['email', 'sms']);
+  collectionsChannelVerdict.mockImplementation(async ({ channel }) => ({ permitted: true,
+    eligibleInvoiceIds: ['inv-9'], ...(channel === 'email' ? { balanceIncomplete: 'read_failed' } : {}) }));
+  await runSweep({ now: new Date('2026-08-14T15:00:00Z') });
+  expect(claim.update).not.toHaveBeenCalled();
+  expect(require('../services/billing-reminder-delivery').sendReminderChannels).not.toHaveBeenCalled();
+});
+
+test('explicit quotes intersect selected allowed balances and exclude only this appointment episode', async () => {
+  armExplicit(['email', 'sms']);
+  require('../services/billing-reminder-delivery').reminderProgress.mockResolvedValueOnce([
+    { metadata: { notificationEventKey: 'previsit-balance:unrelated' }, entries: [{ id: 'other' }] },
+    { metadata: { notificationEventKey: `previsit-balance:${VISIT.id}` },
+      entries: [{ id: 'own-email', metadata: { send_failed: true } }] },
+  ]);
+  collectionsChannelVerdict.mockImplementation(async ({ channel }) => ({ permitted: true,
+    eligibleInvoiceIds: channel === 'email' ? ['inv-9'] : ['inv-9', 'other'] }));
+  await runSweep({ now: new Date('2026-08-14T15:00:00Z') });
+  expect(collectionsChannelVerdict).toHaveBeenCalledWith(expect.objectContaining({ excludeLedgerIds: ['own-email'] }));
+  expect(require('../services/billing-reminder-delivery').sendReminderChannels)
+    .toHaveBeenCalledWith(expect.objectContaining({ invoiceIds: ['inv-9'] }));
+});
+
+function priorQuoteMetadata(overrides = {}) {
+  return { notificationEventKey: `previsit-balance:${VISIT.id}`, scheduled_service_id: VISIT.id,
+    appointment_date: VISIT.scheduled_date, appointment_service_type: VISIT.service_type,
+    appointment_rendered_on: '2026-08-13', rendered_amount: '96.60',
+    invoice_ids: ['inv-9'], invoice_quotes: [{ id: 'inv-9', dueCents: 9660 }],
+    dues_cents: 0, selected_channels: ['email', 'sms'], ...overrides };
+}
+
+test.each([true, false])('a partial retry retains a delivered=%s sibling quote after the balance changes', async (delivered) => {
+  armExplicit(['email', 'sms'], { invoices: [chain({ result: [
+    { ...OVERDUE_INVOICE, total: '60.00' }, { ...OVERDUE_INVOICE, id: 'new-invoice', total: '200.00' },
+  ] })] });
+  const helper = require('../services/billing-reminder-delivery');
+  helper.reminderProgress.mockResolvedValueOnce([{
+    metadata: priorQuoteMetadata(), delivered: new Set(delivered ? ['email'] : []),
+    entries: [
+      { id: 'sms', channel: 'sms', metadata: priorQuoteMetadata({ send_failed: true, rendered_amount: '260.00' }) },
+      { id: 'email', channel: 'email', metadata: priorQuoteMetadata({ delivered, send_failed: false }) },
+    ],
+  }]);
+  helper.sendReminderChannels.mockImplementationOnce(async (input) => {
+    await input.send('sms', { id: 'sms' });
+    return { complete: delivered, deliveredNow: ['sms'] };
+  });
+  await runSweep({ now: new Date('2026-08-14T15:00:00Z') });
+  expect(helper.sendReminderChannels).toHaveBeenCalledWith(expect.objectContaining({
+    invoiceIds: ['inv-9'], offLedgerBalanceCents: 0,
+    metadata: expect.objectContaining({ rendered_amount: '96.60', invoice_quotes: [{ id: 'inv-9', dueCents: 9660 }] }),
+  }));
+  expect(require('../services/sms-template-renderer').renderSmsTemplate)
+    .toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ amount: '96.60' }));
+  expect(sendCustomerMessage.mock.calls.map(([input]) => input.metadata.billingDeliveryLeg)).toEqual(['sms']);
+});
+
+test('an unreadable delivered quote holds the episode before taking the visit claim', async () => {
+  const claim = armExplicit(['email', 'sms']);
+  require('../services/billing-reminder-delivery').reminderProgress.mockResolvedValueOnce([{
+    metadata: priorQuoteMetadata(), delivered: new Set(['email']),
+    entries: [{ id: 'email', channel: 'email', metadata: priorQuoteMetadata({ invoice_quotes: null, delivered: true }) }],
+  }]);
+  await runSweep({ now: new Date('2026-08-14T15:00:00Z') });
+  expect(claim.update).not.toHaveBeenCalled();
+  expect(sendCustomerMessage).not.toHaveBeenCalled();
 });

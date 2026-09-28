@@ -3,7 +3,7 @@ const { isDeepStrictEqual } = require("node:util");
 const db = require("../models/db");
 const logger = require("./logger");
 const TaxCalculator = require("./tax-calculator");
-const { REPLAY_HOLD_CODES, isReplayHold } = require("./messaging/billing-channel-routing");
+const { REPLAY_HOLD_CODES, isReplayHold, billingLegDeliveryState } = require("./messaging/billing-channel-routing");
 const DiscountEngine = require("./discount-engine");
 const {
   percentageDiscountDollars,
@@ -2320,8 +2320,9 @@ async function checkDeferredInvoiceEmailDelivery(meta, { database } = {}) {
 // reports `sent: true` but never delivered anything). `sent` alone is
 // never enough; every predicate below that decides "was this channel
 // accepted" shares this ONE check so they can't drift apart.
-function legAccepted(leg) {
-  return leg?.sent === true && leg?.deliveryOutcome === "accepted";
+function legAccepted(leg, channel) {
+  return (leg?.sent === true && leg?.deliveryOutcome === "accepted")
+    || (channel === "push" && Boolean(billingLegDeliveryState(channel, leg || {})));
 }
 
 // Whether ANY leg of a dispatchBillingChannels fan-out (channelResults,
@@ -2335,7 +2336,7 @@ function legAccepted(leg) {
 // the plain `sent` flag, byte-identical to before this existed.
 function anyBillingChannelAccepted(channelResults, sent) {
   if (!channelResults) return sent === true;
-  return Object.values(channelResults).some(legAccepted);
+  return Object.entries(channelResults).some(([channel, leg]) => legAccepted(leg, channel));
 }
 
 // Staff-facing wording for which channel(s) actually delivered, built from
@@ -2349,7 +2350,7 @@ function describeInvoiceDeliveryChannels(channelResults) {
   const labels = [];
   if (legAccepted(channelResults.email)) labels.push("Email");
   if (legAccepted(channelResults.sms)) labels.push("SMS");
-  if (legAccepted(channelResults.push)) labels.push("App");
+  if (legAccepted(channelResults.push, "push")) labels.push("App");
   if (!labels.length) return "SMS";
   if (labels.length === 1) return labels[0];
   if (labels.length === 2) return labels.join(" and ");
@@ -5623,7 +5624,7 @@ const InvoiceService = {
       // definitionally the plain SMS path — byte-identical to before.
       const emailAccepted = legAccepted(acceptedChannelResults?.email);
       const smsOrAppAccepted = acceptedChannelResults
-        ? (legAccepted(acceptedChannelResults.sms) || legAccepted(acceptedChannelResults.push))
+        ? (legAccepted(acceptedChannelResults.sms) || legAccepted(acceptedChannelResults.push, "push"))
         : true;
       const updated = await whereSendClaimOwned(
         trx("invoices").where({ id: invoiceId }).whereIn("status", SEND_FINALIZABLE_STATUSES),
@@ -5795,7 +5796,7 @@ const InvoiceService = {
       // single-channel API response/log line (retryable wins — the
       // actionable one — else uncertain, else permanently blocked).
       const nonAcceptedLegs = acceptedChannelResults && anyChannelAccepted
-        ? Object.entries(acceptedChannelResults).filter(([, leg]) => !legAccepted(leg))
+        ? Object.entries(acceptedChannelResults).filter(([channel, leg]) => !legAccepted(leg, channel))
         : [];
       // A deferred replay hold (PUSH_IN_FLIGHT, APP_PROVIDER_RETRY,
       // APP_DELIVERY_HOLD) is labelled uncertain but is a deliberate retry
