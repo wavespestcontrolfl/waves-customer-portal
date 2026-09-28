@@ -582,8 +582,7 @@ postgres('call-booking-link-text against PostgreSQL', () => {
     sendCustomerMessage.mockImplementation(async ({ withSmsHandoff, providerPreSendCheck }) => {
       // Simulates a reprocess landing in the gap between dispatch's own
       // (stale) consent check and this handoff's own reload — withdrawn
-      // to null, never an explicit `false`, the exact shape the earlier,
-      // broader sms_consent_refused staging check cannot catch.
+      // to null — staging never judges the destination number itself.
       await mockPg('call_log').where({ id: callId }).update({
         ai_extraction_enriched: JSON.stringify({ ...eligibleExtraction(), caller: { phone_e164: SPOKEN_DESTINATION }, consent: {} }),
       });

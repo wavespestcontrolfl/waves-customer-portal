@@ -278,7 +278,7 @@ const WANTS_ONSITE_INTENTS = new Set([
 // this transactional follow-up may go to a caller who never explicitly
 // opted in, as long as it rides the consented destination (consentedDestination's
 // ANI/dialed-number path, implied consent); explicit refusals (do_not_contact,
-// sms_consent_given === false) and destination_not_consented still block it.
+// STOP suppression) and destination_not_consented still block it.
 const EXCLUDED_TRIAGE_FLAGS = new Set([
   'out_of_service_area', 'hoa_common_area_requires_approval', 'commercial_requires_quote',
   'caller_not_authorized', 'do_not_contact_requested',
@@ -693,7 +693,11 @@ const STAGING_CHECKS = [
     return (disposition === 'booked' || disposition === 'no_action_needed') ? `disposition_${disposition}` : null;
   },
   (call, extraction) => (extraction.consent?.do_not_contact_request === true ? 'do_not_contact' : null),
-  (call, extraction) => (extraction.consent?.sms_consent_given === false ? 'sms_consent_refused' : null),
+  // No sms_consent_given === false check (dry run 2026-09-28): the field is a
+  // required boolean the prompt sets true ONLY on an explicit yes, so false
+  // means "never asked", not "refused" — it blocked 151 of 159 real new-lead
+  // calls, the exact opt-in requirement the owner ruling removed. Refusals
+  // still block through do_not_contact above and STOP suppression at send.
   // Owner rule: never text someone who said the number isn't theirs (codex
   // pre-push P1). Read straight off the extraction: callback_number_needed
   // is derived into the processor's final flags, and the canonical sender
@@ -1411,10 +1415,9 @@ const NEVER_SEND_RECHECK_STEPS = [
   // earlier entry above judged (codex #5018 r14 P1): a reprocess can
   // correct the spoken alternate number, or withdraw its explicit
   // sms_consent_given, between that earlier check and this hook's own
-  // reload — stagingIneligibleReason's own sms_consent_refused entry
-  // only catches an EXPLICIT false for the call's general eligibility,
-  // never this narrower "is THIS destination number itself consented"
-  // question. Sending on stale consent evidence would violate the
+  // reload — stagingIneligibleReason judges the call's general
+  // eligibility, never this narrower "is THIS destination number itself
+  // consented" question. Sending on stale consent evidence would violate the
   // TCPA-consent-before-SMS invariant.
   (ctx) => (!consentedDestination(ctx.freshCall, extractionOf(ctx.freshCall), ctx.destinationPhone) ? { code: 'destination_not_consented' } : null),
   // Re-verified against the FRESH row (codex #5018 r15 P1):

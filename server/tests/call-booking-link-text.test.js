@@ -410,7 +410,6 @@ describe('stagingIneligibleReason', () => {
     ['disposition already booked', { recommended_disposition: 'booked' }, 'disposition_booked'],
     ['disposition no action needed', { recommended_disposition: 'no_action_needed' }, 'disposition_no_action_needed'],
     ['explicit do-not-contact', { consent: { do_not_contact_request: true } }, 'do_not_contact'],
-    ['explicit SMS consent refusal', { consent: { sms_consent_given: false } }, 'sms_consent_refused'],
     ['caller prefers a phone call', { caller: { preferred_contact_method: 'phone' } }, 'prefers_phone_contact'],
     ['wrong-number lead quality', { sentiment_and_lead: { lead_quality: 'wrong_number' } }, 'lead_quality_wrong_number'],
     ['spam/solicitation lead quality', { sentiment_and_lead: { lead_quality: 'spam_or_solicitation' } }, 'lead_quality_spam_or_solicitation'],
@@ -445,11 +444,18 @@ describe('stagingIneligibleReason', () => {
   // caller who never explicitly opted in to SMS, as long as it rides the
   // consented destination (consentedDestination's ANI/dialed-number path) —
   // no_sms_consent_captured removed from EXCLUDED_TRIAGE_FLAGS. Every OTHER
-  // block still holds: do_not_contact_requested (test below) and an
-  // EXPLICIT sms_consent_given: false ('explicit SMS consent refusal',
-  // covered in the table above) are unaffected by this removal.
+  // block still holds: do_not_contact_requested (test below) and the
+  // explicit do-not-contact request (table above).
   test('no_sms_consent_captured alone no longer blocks (owner ruling 2026-09-28)', () => {
     const extraction = { ...baseExtraction(), triage_flags: ['no_sms_consent_captured'] };
+    expect(stagingIneligibleReason(baseCall, extraction, leadId)).toBeNull();
+  });
+
+  // Dry run 2026-09-28: sms_consent_given is a required boolean that the
+  // prompt sets true only on an explicit yes, so false = "never asked". It
+  // blocked 151 of 159 real new-lead calls; it must not block staging.
+  test('sms_consent_given: false (never asked) does not block', () => {
+    const extraction = { ...baseExtraction(), consent: { ...baseExtraction().consent, sms_consent_given: false }, triage_flags: ['no_sms_consent_captured'] };
     expect(stagingIneligibleReason(baseCall, extraction, leadId)).toBeNull();
   });
 
@@ -1508,8 +1514,8 @@ describe('neverSendRecheck', () => {
   // codex #5018 r14 P1: consentedDestination's EARLIER check (this hook's
   // own opening lines) judges the STALE `call` — a reprocess can correct
   // the spoken alternate number or withdraw its explicit sms_consent_given
-  // (to undefined, never necessarily an explicit `false` — stagingIneligibleReason's
-  // own sms_consent_refused entry only catches THAT, not this) between that
+  // (to undefined or false — stagingIneligibleReason never judges the
+  // destination number itself) between that
   // check and this hook's own call_log reload. Sending on stale consent
   // evidence would violate the TCPA-consent-before-SMS invariant, so the
   // SAME check must re-run against the FRESH row too.
