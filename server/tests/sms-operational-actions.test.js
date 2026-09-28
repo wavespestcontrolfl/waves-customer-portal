@@ -1492,7 +1492,10 @@ describe('R2 payment evidence (owner ruling 2026-09-25): money landing (a paid i
     // A promise Waves made is kept by doing it, never by a later reply: the model judges it.
     expect(await verifySmsFulfillment({ ...ask, description: "we'll get the prep guide today", sms_context: { ...ask.sms_context, basis: 'promise' } },
       { records: [reply('thanks', '2040-03-11T15:00:00Z', 'Thanks!')], failures: [] })).toMatchObject({ verdict: 'open' });
-    expect(dispatchWithFallback).toHaveBeenCalledTimes(4);
+    // No basis recorded (intake always stamps one): it fails toward the model, never the shortcut.
+    const { basis: _basis, ...noBasis } = ask.sms_context;
+    await verifySmsFulfillment({ ...ask, sms_context: noBasis }, { records: [first], failures: [] });
+    expect(dispatchWithFallback).toHaveBeenCalledTimes(5);
   });
 
   test('rule 6: a property-scoped ask refuses only a payment tied to another property; an unscoped ask admits any of the customer\'s own payments', () => {

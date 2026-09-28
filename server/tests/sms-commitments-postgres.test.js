@@ -2894,10 +2894,10 @@ postgres('SMS commitments on PostgreSQL', () => {
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
   });
 
-  test('owner ruling 2026-09-28: intake no longer stamps reply_answerable; money_answerable is unchanged', async () => {
+  test('owner ruling 2026-09-28: intake stamps the ask\'s basis, no longer reply_answerable; money_answerable is unchanged', async () => {
     await generalAsk("What's the Zelle number?");
     const { sms_context: smsContext } = await mockPg('call_commitments').first();
-    expect(smsContext).toMatchObject({ money_answerable: false });
+    expect(smsContext).toMatchObject({ basis: 'request', money_answerable: false });
     expect(smsContext).not.toHaveProperty('reply_answerable');
   });
 
