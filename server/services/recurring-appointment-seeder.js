@@ -1468,6 +1468,17 @@ async function seedFollowUpsForParent(conn, parent, opts = {}) {
   } catch (vgErr) {
     require('./logger').warn(`[recurring-seeder] visit-group seam failed for parent ${parent.id}: ${vgErr.message}`);
   }
+  // Rider series (pest-rides-the-lawn-rhythm PR 1): this parent just
+  // gained rows — sync every rider whose rides_parent_id points at it, so
+  // a rider immediately gets a matching date rather than waiting for the
+  // nightly reconcile. Best-effort + logged, never fails this seed — dark
+  // until rides_parent_id is set on real data (PR 2/3), so this is a no-op
+  // today.
+  try {
+    await require('./rider-series').syncRidersOfHost(conn, parent.id, { source: 'seed' });
+  } catch (riderErr) {
+    require('./logger').warn(`[recurring-seeder] rider-series sync seam failed for host parent ${parent.id}: ${riderErr.message}`);
+  }
   await syncCustomerTierAfterSeeding(conn, parent.customer_id);
   notifyShortfallAfterCommit();
   return {

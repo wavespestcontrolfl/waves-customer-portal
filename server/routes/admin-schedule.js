@@ -18087,6 +18087,18 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
           windowStart: parent.window_start,
           serviceType: childIdentity.service_type,
         };
+        // Rider series (pest-rides-the-lawn-rhythm PR 1): a HOST series
+        // gaining a row here (completion auto-extend OR top-up — both
+        // callers share this function) is exactly when every rider whose
+        // rides_parent_id points at THIS parent needs a fresh date to ride.
+        // Best-effort + logged, never fails this extension — dark until
+        // rides_parent_id is set on real data (PR 2/3), so this is a no-op
+        // today.
+        try {
+          await require('../services/rider-series').syncRidersOfHost(conn, parentId, { source: 'host_extend' });
+        } catch (err) {
+          logger.error(`[rider-series] syncRidersOfHost failed after extending host parent=${parentId}: ${err.message}`);
+        }
       }
     }
   }
@@ -18121,6 +18133,21 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
   // everything this extension copies (allowlisted keys only; no-op while
   // the gate is off or nothing is stamped).
   parent = overlayRecurringTemplateOverrides(parent, cols);
+  // Rider series (pest-rides-the-lawn-rhythm PR 1) never walk their own
+  // cadence — dark until a series parent's rides_parent_id is set (PR 2/3).
+  // A rider's own completion re-syncs it from the host instead of the
+  // own-interval auto-extend/plan-ending-alert logic below. No spawnedVisit
+  // is returned: the sync's inserted/moved rows get their reminder rows
+  // from the existing self-heal sweep / silent-move DB trigger, never a
+  // fresh confirmation text (see rider-series.js's own header).
+  if (parent && cols.rides_parent_id && parent.rides_parent_id) {
+    try {
+      await require('../services/rider-series').syncRiderSeries(conn, parentId, { source: 'completion' });
+    } catch (err) {
+      logger.error(`[rider-series] sync failed after visit completion for rider parent=${parentId}: ${err.message}`);
+    }
+    return spawnedVisit;
+  }
   if (parent && parent.is_recurring && parent.recurring_pattern) {
     // upcomingCount + latest must reflect the BASE recurring series
     // only — see countUpcomingSeriesVisits for the booster and
@@ -18536,6 +18563,19 @@ async function topUpRecurringSeriesLocked(conn, parentId, { horizonDays = 365 } 
   }
   const isOngoing = cols.recurring_ongoing ? !!parent.recurring_ongoing : false;
   if (!isOngoing) return { spawnedVisits: [], skipped: 'not_ongoing' };
+
+  // Rider series never walk their own horizon top-up — resync from the
+  // host instead (see runRecurringSeriesMaintenanceLocked's identical
+  // guard for the completion path, and rider-series.js's own header).
+  if (cols.rides_parent_id && parent.rides_parent_id) {
+    try {
+      const riderSync = await require('../services/rider-series').syncRiderSeries(conn, parentId, { source: 'topup' });
+      return { spawnedVisits: [], skipped: 'rider_series', riderSync };
+    } catch (err) {
+      logger.error(`[rider-series] sync failed during top-up for rider parent=${parentId}: ${err.message}`);
+      return { spawnedVisits: [], skipped: 'rider_sync_failed' };
+    }
+  }
 
   // FOR UPDATE (Codex GitHub r3 P1): the SAME row lock PUT /:id/stage takes
   // (admin-customers.js) before it writes pipeline_stage — same row, same
@@ -24639,6 +24679,19 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
     // everything the extend/convert spawn loops copy (allowlisted keys only;
     // no-op while the gate is off or nothing is stamped).
     parent = overlayRecurringTemplateOverrides(parent, cols);
+    // Rider series never walk their own plan-ending alert either — a stale
+    // alert on a rider parent (rare: the sync engine keeps a rider topped
+    // up, so this alert should not normally exist for one) resyncs from the
+    // host instead of spawning independent dates. Dark until rides_parent_id
+    // is set on real data (PR 2/3).
+    if (cols.rides_parent_id && parent.rides_parent_id) {
+      const riderSync = await require('../services/rider-series').syncRiderSeries(trx, parentId, { source: 'alert_action' });
+      outcome = {
+        status: 200,
+        body: { success: true, action, created: (riderSync.insertedRows || []).length, riderSynced: true },
+      };
+      return;
+    }
     const parentOngoing = cols.recurring_ongoing ? !!parent.recurring_ongoing : false;
     if (!alert) {
       // Derived alerts have no row to claim, so recompute the derived-scan

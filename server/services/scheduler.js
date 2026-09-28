@@ -7365,6 +7365,31 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // =========================================================================
+  // DAILY 1:55AM — Rider-series reconcile sweep (pest-rides-the-lawn-rhythm
+  // PR 1). Safety net behind the in-band sync hooks (host seeding/auto-
+  // extend/top-up, and a rider's own completion/top-up/alert-action) — see
+  // services/rider-series.js and services/rider-series-reconcile.js. Scans
+  // every scheduled_services row with rides_parent_id set and resyncs it;
+  // a no-op scan today, since nothing in the codebase sets that column yet
+  // (PR 2 = estimate accept, PR 3 = existing-customer backfill). No
+  // customer communication (syncRiderSeries never sends any). runExclusive:
+  // a deploy overlap must not double-run the same sweep.
+  // =========================================================================
+  cron.schedule('55 1 * * *', async () => {
+    try {
+      await runExclusive('rider-series-reconcile', async () => {
+        const { runRiderSeriesReconcileSweep } = require('./rider-series-reconcile');
+        const summary = await runRiderSeriesReconcileSweep();
+        if (summary.errors.length) {
+          throw new Error(`rider-series-reconcile: ${summary.errors.length}/${summary.scanned} riders failed — first: ${summary.errors[0].parentId}: ${summary.errors[0].error}`);
+        }
+      });
+    } catch (err) {
+      logger.error(`Rider-series reconcile sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // EVERY 5 MIN — Orphaned-validated handoff sweeper
   //
   // Targets rows where /validate-handoff burned the jti but /payment-intent

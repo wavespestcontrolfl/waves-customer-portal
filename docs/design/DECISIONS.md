@@ -2608,3 +2608,51 @@ the upload unresolved: no species is named and the report is a generic,
 inspection-first consultation. It supersedes the 2026-09-24 "Claude only when Gemini
 returns nothing" rule for this lane only; lawn and tree & shrub scoring keep
 it until they move to the photo ID v2 engine.
+
+## 2026-09-28 — Rider series: pest rides the lawn rhythm (PR 1, core)
+
+**Decision:** A recurring series can carry `scheduled_services.rides_parent_id`,
+pointing at another series' parent (the host). A rider's future dates are
+derived from the host's actual dates instead of the rider walking its own
+interval: the first live host date at least 77 days after the rider's last
+visit, or its own 84-day standalone date when no host date falls within 105
+days. Ships schema-and-engine only — nothing sets the link on real data yet.
+
+**Context:** Owner ruling 2026-09-28: for lawn every 6 weeks + quarterly
+pest, pest should ride every other lawn visit (one trip, not two) instead of
+running an independent quarterly series that drifts apart from the lawn
+schedule over time (see `~/lawn-pest-rhythm-scope-20260928.md`). A shared
+interval alone doesn't hold: the completion auto-extend walks each series
+from its own latest date (nudges become anchors), and the schedule's own
+clash probe reads the customer's own lawn visit as a conflict and skips the
+aligned pest date — so the link has to be explicit and enforced by an
+engine, not just a matching cadence.
+
+**Reasoning:** `server/services/rider-series.js` is the new authority:
+`planRiderDates` is the pure date rule (MIN_GAP 77 / TARGET 84 / MAX_WAIT
+105), `syncRiderSeries` diffs that plan against the rider's current movable
+future rows (keep / move / insert / cancel) and never touches an immovable
+one (started, invoiced, prepaid, card-held, packet-owned, a live completion
+claim, or customer/field-confirmed). Every automated path that would
+otherwise walk a rider's own interval (completion auto-extend, the
+visit-count top-up, the plan-ending alert action) checks
+`rides_parent_id` first and calls `syncRiderSeries` instead; every path
+where a HOST series gains rows (the seeder, auto-extend, top-up) syncs that
+host's riders in the same breath. A nightly reconcile sweep is the backstop
+for anything left un-hooked (admin cadence/day edits) or skipped by a lock
+race. Locking uses the SAME per-parent recurring-series-maintenance
+advisory lock every other series writer uses, for both the host's and the
+rider's parent id, but acquired NON-BLOCKING: this module is reached from
+both directions (a rider's own hook already holds the rider's lock before
+calling in; a host's hook already holds the host's lock before calling in),
+so a fixed blocking order isn't achievable everywhere, and non-blocking
+acquisition makes a deadlock structurally impossible instead of relying on
+a codebase-wide ordering proof.
+
+**Revisit if:** PR 2 (estimate accept sets the link) or PR 3 (existing-
+customer backfill) surface a case this diffing rule handles wrong — in
+particular, the anchor row itself (the latest completed-or-immovable rider
+date, or the series parent's own date when none exists yet) is deliberately
+excluded from the movable set, so a rider whose FIRST visit is still pending
+and mis-dated relative to the host stays untouched until it completes or an
+office edit fixes it by hand.
