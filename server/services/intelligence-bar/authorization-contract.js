@@ -829,10 +829,19 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       ? 'Customer will be contacted'
       : 'Customer may be contacted (conditional double-opt-in re-send only)';
     if (toolName === 'cancel_appointment' && cancelCustomerNotice !== 'none') {
-      // Evidence-independent wording (see cancelCustomerNotice above): this
-      // never claims to know WHEN it sends, only that the existing hook
-      // may still text the customer for this visit.
-      contactLabel = 'The customer MAY be texted a cancellation notice by the existing notice system — right away if a reminder or confirmation for this visit was already delivered, otherwise automatically once one is (up to 72 hours later); never sent if another live visit already covers them at this same time';
+      // Evidence-independent wording (Codex round-3 P1, fixing a round-3
+      // push finding: the FIRST draft of this line asserted precise,
+      // evidence/survivor-dependent mechanics — "right away if already
+      // delivered", "never sent if another live visit covers them" — built
+      // on exactly the mutable DB-backed conditions cancelCustomerNotice
+      // deliberately stopped checking (round-2/round-3b: a live survivor,
+      // or whether a reminders row exists, can both change before commit).
+      // An operator could be told a notice will "never" send when it
+      // actually does. This wording asserts nothing about WHEN or whether
+      // any specific condition rules it out — only that the hook may text
+      // the customer for this visit, matching what the verdict actually
+      // knows.
+      contactLabel = 'The customer MAY be texted a cancellation notice by the existing notice system, depending on conditions at the moment it processes the cancellation';
     }
     if (bookingConfirmationText) {
       // Codex r2 on #5093 (P1): only the SMS leg holds for the 8 AM-8 PM
