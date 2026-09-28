@@ -580,6 +580,7 @@ function parsePositiveEnvInt(value, fallback) {
 async function runContentRegistryMaintenance({
   registry = require('./content/content-registry'),
   liveStatus = require('./content/content-registry-live-status'),
+  ownedUrlHealth = require('./seo/owned-url-health'),
 } = {}) {
   const contentType = String(process.env.CONTENT_REGISTRY_MAINTENANCE_CONTENT_TYPE || '').trim() || null;
   const syncResult = await registry.runContentRegistrySync({
@@ -603,9 +604,29 @@ async function runContentRegistryMaintenance({
     throw new Error(`live status failed: ${liveResult.error || 'unknown error'}`);
   }
 
+  // Owned cited-URL health rides the same maintenance run (AGENTS.md: one
+  // fetcher/sweep, not a parallel cron) — it reuses this run's live-status
+  // checker but reads a DIFFERENT candidate list (mention data, not registry
+  // rows), so it is additionally gated on GATE_SEO_INTELLIGENCE, the gate
+  // that owns the mention data it depends on. Fails soft: a health-check
+  // hiccup must never fail the registry sync/live-status refresh that owns
+  // this run (that failure is the one this function fails closed for).
+  let ownedUrlHealthResult = null;
+  if (isEnabled('seoIntelligence')) {
+    try {
+      const result = await ownedUrlHealth.runOwnedUrlHealthCheck();
+      ownedUrlHealthResult = { checked: result.checked, bad: result.bad };
+      logger.info(`[content-registry] owned cited-URL health: checked=${result.checked} bad=${result.bad}`);
+    } catch (err) {
+      logger.error(`[content-registry] owned cited-URL health check failed: ${err.message}`);
+      ownedUrlHealthResult = { error: err.message };
+    }
+  }
+
   return {
     sync: syncResult.summary,
     live: liveResult.summary,
+    ownedUrlHealth: ownedUrlHealthResult,
     sync_run_id: syncResult.sync_run_id,
     statuses,
     limit,
@@ -1932,24 +1953,6 @@ function initScheduledJobs() {
       const prober = require('./seo/llm-mention-prober');
       await prober.runDaily();
     } catch (err) { logger.error(`LLM mention probe failed: ${err.message}`); }
-  }, { timezone: 'America/New_York' });
-
-  // DAILY 3:45AM — Owned cited-URL health check. Runs after the 3:00AM probe
-  // so it can see that day's freshly-recorded citations; fetches every owned
-  // URL an answer engine cited in the last 30 days and flags a silent break
-  // (owner finding 2026-09-27: a 39x/30d-cited page had gone 301->404).
-  // runExclusive: a deploy-overlap or slow prior tick must not double-check
-  // (and double-digest) the same day.
-  cron.schedule('45 3 * * *', async () => {
-    if (!isEnabled('seoIntelligence')) return;
-    logger.info('Running: Owned cited-URL health check');
-    try {
-      await runExclusive('owned-url-health-check', async () => {
-        const { runOwnedUrlHealthCheck } = require('./seo/owned-url-health');
-        const result = await runOwnedUrlHealthCheck();
-        logger.info(`[owned-url-health] checked=${result.checked} bad=${result.bad}`);
-      });
-    } catch (err) { logger.error(`Owned cited-URL health check failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 
   // MONTHLY (1st, 4AM) — Competitor keyword gap mining. Pulls tracked
@@ -5338,13 +5341,16 @@ function initScheduledJobs() {
 
   // =========================================================================
   // DAILY 1:20AM ET — Content registry maintenance.
-  // Syncs the registry from the pinned GitHub Astro source, then refreshes
-  // live HTTP/sitemap status for published/reconciled rows.
+  // Syncs the registry from the pinned GitHub Astro source, refreshes live
+  // HTTP/sitemap status for published/reconciled rows, then (gated on
+  // GATE_SEO_INTELLIGENCE) checks every owned URL an AI answer engine cited
+  // in the last 30 days for a silent break the registry sweep alone
+  // wouldn't see (server/services/seo/owned-url-health.js).
   // =========================================================================
   cron.schedule('20 1 * * *', async () => {
     try {
       const result = await runContentRegistryMaintenance();
-      logger.info(`[content-registry] maintenance complete: sync=${JSON.stringify(result.sync)} live=${JSON.stringify(result.live)}`);
+      logger.info(`[content-registry] maintenance complete: sync=${JSON.stringify(result.sync)} live=${JSON.stringify(result.live)} ownedUrlHealth=${JSON.stringify(result.ownedUrlHealth)}`);
     } catch (err) {
       logger.error(`[content-registry] maintenance failed: ${err.message}`);
     }

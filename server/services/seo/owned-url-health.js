@@ -3,23 +3,32 @@
  * bradentonflpestcontrol.com/pest-control-costs/ was cited 39x/30d by
  * answer engines while it had gone 301 -> 404, and nobody knew.
  *
- * Daily job: collect the distinct owned URLs answer engines actually cited
- * (seo_llm_mentions.waves_cited_urls over the trailing 30 days), fetch each
- * one with a SAFE fetcher, and classify what a human would find there — not
- * just the HTTP status. A redirect chain that lands on a healthy owned page
- * is fine; a 2xx that renders the site's own "Page Not Found" template is a
- * silent break a bare status check would miss entirely.
+ * Collects the distinct owned URLs answer engines actually cited
+ * (seo_llm_mentions.waves_cited_urls over the trailing 30 days) and checks
+ * each one through the SAME URL-level checker + classifier the
+ * content-registry live-status sweep uses — content-registry-live-status.js's
+ * `checkUrlLiveStatus` (per AGENTS.md "extend the existing mechanism": one
+ * fetcher, one classifier, not a parallel copy). This module's own job is
+ * narrower: pick the candidate URLs (from mention data, not registry rows),
+ * map the shared checker's registry-flavored verdict into this module's
+ * richer vocabulary, persist to its own table (seo_owned_url_health —
+ * cited URLs include dead legacy pages that must NEVER become
+ * content_registry rows), and drive the dashboard block + ops digest.
+ *
+ * Runs as a step inside runContentRegistryMaintenance (server/services/
+ * scheduler.js), after the registry's own live-status refresh — not a
+ * separate cron — additionally gated on GATE_SEO_INTELLIGENCE since the
+ * candidate list depends on mention data that gate controls.
  *
  * Safety (owned hosts only — the hub + the 16 fleet spoke domains, reusing
  * content-registry.js's isContentFleetUrl so this can never drift from the
- * canonical fleet list):
- *   - https only, every redirect hop re-validated against the allowlist
- *     before it is fetched (never Node's automatic follow mode)
- *   - private/internal IPs blocked on the real socket connection via
- *     contact-finder.js's rejectingLookup (reused, not reimplemented) —
- *     closes the DNS-rebinding gap a preflight-only check leaves open
- *   - ~10s per-hop timeout, ~1.5MB response cap, bounded redirect chain
- *   - concurrency <= 3, identifying User-Agent
+ * canonical fleet list): https only, every redirect hop re-validated against
+ * the allowlist before it is fetched (fetchText, shared), private/internal
+ * IPs blocked on the real socket connection via contact-finder.js's
+ * rejectingLookup (shared, via safeFetchImpl), ~8s per-hop timeout (shared
+ * default), ~1.5MB response cap (shared default; a truncated body is
+ * fetch_blocked, never risked as ok), bounded redirect chain, concurrency
+ * bounded to the shared default, identifying User-Agent (shared).
  *
  * fetch_blocked (timeout/DNS/TLS/size/disallowed host) is NEVER reported as
  * not_found — a checker outage must never read as "the page is gone".
@@ -27,12 +36,10 @@
 
 'use strict';
 
-const http = require('http');
-const https = require('https');
 const db = require('../../models/db');
 const logger = require('../logger');
 const registry = require('../content/content-registry');
-const { _internals: contactFinderInternals } = require('./contact-finder');
+const liveStatus = require('../content/content-registry-live-status');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 const { ownedCitations } = require('./aeo-measurement');
 const { deliverOpsDigest } = require('../ops-digest');
@@ -40,19 +47,26 @@ const { retireIfClean } = require('../ops-digest-fall-off');
 const sendgrid = require('../sendgrid-mail');
 const { isInternalEmailRecipient } = require('../../utils/internal-email-recipients');
 
-const { rejectingLookup } = contactFinderInternals;
-
 const CITATION_WINDOW_DAYS = 30;
-const FETCH_TIMEOUT_MS = 10000;
-const MAX_RESPONSE_BYTES = 1_500_000; // ~1.5MB
-const MAX_REDIRECT_HOPS = 5;
-const CONCURRENCY = 3;
-const USER_AGENT = 'WavesOwnedUrlHealthCheck/1.0 (+https://www.wavespestcontrol.com)';
+// A 2xx with no visible text (or a 204) is never a confirmed-healthy owned
+// page — a rule specific to this module's stricter bar for a page an answer
+// engine is actively citing. The shared checker deliberately leaves this
+// judgment to the caller (see content-registry-live-status.js's
+// checkUrlLiveStatus doc comment) since a thin registry page is not by
+// itself wrong.
+const MIN_VISIBLE_TEXT_CHARS = 64;
 
 const VERDICTS = Object.freeze([
   'ok', 'redirect_ok', 'soft_404', 'not_found', 'server_error',
   'challenge', 'noindex', 'canonical_elsewhere', 'fetch_blocked',
 ]);
+
+// Every verdict except a clean live page. noindex and challenge are included
+// deliberately: an engine-cited page that tells crawlers not to index it, or
+// that we could not get past a bot wall to verify, is neither confirmed
+// healthy nor something a clean run should ever retire a standing FIX alert
+// over.
+const BAD_VERDICTS = new Set(['soft_404', 'not_found', 'server_error', 'canonical_elsewhere', 'fetch_blocked', 'noindex', 'challenge']);
 
 // Tracking params stripped before a URL is treated as an identity — an
 // engine-attached ?utm_source=chatgpt must not create a duplicate row for a
@@ -63,7 +77,10 @@ const TRACKING_PARAM_RE = /^(utm_[a-z_]+|mc_[a-z]+|fbclid|gclid|msclkid|igshid|r
  * Normalizes a cited URL to a stable identity for dedupe/persistence:
  * strips the fragment and tracking params, lowercases the host, and keeps
  * one consistent trailing-slash form (a trailing slash on every extension-
- * less path, matching the fleet's own URL convention).
+ * less path, matching the fleet's own URL convention). Not the same job as
+ * content-registry.js's normalizeContentUrl, which collapses the hub host
+ * to a relative path — this module's table keys on the full absolute URL
+ * across every fleet host, so that normalization does not apply here.
  */
 function normalizeOwnedUrl(value) {
   let parsed;
@@ -125,292 +142,89 @@ async function collectCitedOwnedUrls({ database = db, windowDays = CITATION_WIND
     .sort((a, b) => b.citationCount - a.citationCount);
 }
 
-// ── SSRF-safe fetcher ────────────────────────────────────────────────────
-// Manual GET over Node http/https, private-IP pinned to the real connection
-// via contact-finder's rejectingLookup (reused, not reimplemented). Redirect
-// handling lives one level up (fetchOwnedUrlChain) so every hop is
-// re-validated against the owned-fleet allowlist before it is requested —
-// this function never follows a redirect itself.
-function nodeGet(url, { timeoutMs = FETCH_TIMEOUT_MS, maxBytes = MAX_RESPONSE_BYTES } = {}) {
-  return new Promise((resolve) => {
-    let settled = false;
-    // req.setTimeout only bounds socket INACTIVITY (a gap with no data at
-    // all) — a response trickling one byte every few seconds would never
-    // trip it and could hold this fetch, and with it the whole runExclusive
-    // sweep and every alert waiting on it, open indefinitely (codex pre-push
-    // audit finding). This is a hard ceiling on the TOTAL request instead,
-    // cleared as soon as the request settles any other way.
-    const deadline = setTimeout(() => { req?.destroy(new Error('timeout')); done({ error: 'timeout' }); }, timeoutMs);
-    const done = (v) => { if (!settled) { settled = true; clearTimeout(deadline); resolve(v); } };
-    let parsed;
-    try { parsed = new URL(url); } catch { return done({ error: 'invalid_url' }); }
-    const mod = parsed.protocol === 'http:' ? http : https;
-    let req;
-    try {
-      req = mod.request(parsed, {
-        method: 'GET',
-        lookup: rejectingLookup,
-        headers: { 'User-Agent': USER_AGENT, Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8' },
-      }, (res) => {
-        const status = res.statusCode || 0;
-        const headers = res.headers || {};
-        // Redirect: headers are all this hop needs. Drop the body.
-        if (status >= 300 && status < 400) { res.destroy(); return done({ status, headers }); }
-        let data = '';
-        let truncated = false;
-        res.setEncoding('utf8');
-        res.on('data', (chunk) => {
-          if (truncated) return;
-          data += chunk;
-          if (Buffer.byteLength(data, 'utf8') >= maxBytes) {
-            truncated = true;
-            data = data.slice(0, maxBytes);
-            res.destroy();
-            done({ status, headers, body: data, truncated: true });
-          }
-        });
-        res.on('end', () => done({ status, headers, body: data, truncated: false }));
-        res.on('close', () => done({ status, headers, body: data, truncated }));
-        res.on('error', (err) => done({ error: err.message || 'stream_error' }));
-      });
-    } catch (err) {
-      return done({ error: err.message || 'request_failed' });
+// ── Shared-checker result -> this module's verdict vocabulary ──────────────
+// content-registry-live-status.js's checkUrlLiveStatus already does the
+// fetch, the redirect walk, the SSRF/allowlist guards, and classification
+// into its own (now body-aware) live_status vocabulary. This maps that
+// result onto owned-url-health's richer, cited-URL-specific verdicts.
+const CLEAN_LIVE_STATUSES = new Set(['live', 'redirected']);
+
+function mapSharedResultToVerdict(shared) {
+  const httpStatusNum = Number(shared.http_status);
+  const detailBase = {
+    requestedUrl: shared.target_url,
+    finalUrl: shared.final_url,
+    httpStatus: shared.http_status,
+    finalHttpStatus: shared.final_http_status,
+    redirectTargetUrl: shared.redirect_target_url,
+    title: shared.page_title,
+  };
+
+  switch (shared.live_status) {
+    case 'error':
+      // A 429 is a rate-limit/block signal, not a random failure — surfaced
+      // as challenge rather than the generic fetch_blocked bucket.
+      if (httpStatusNum === 429) {
+        return { verdict: 'challenge', httpStatus: shared.http_status, finalUrl: shared.final_url, detail: { ...detailBase, reason: 'rate_limited' } };
+      }
+      return { verdict: 'fetch_blocked', httpStatus: shared.http_status === 'error' ? null : shared.http_status, finalUrl: shared.final_url, detail: { ...detailBase, reason: shared.error || 'checker_error' } };
+    case 'unknown':
+      // Off-fleet/disallowed host, or no URL at all — never fetched.
+      return { verdict: 'fetch_blocked', httpStatus: null, finalUrl: null, detail: { ...detailBase, reason: shared.error || 'unresolved' } };
+    case 'missing':
+      return { verdict: 'not_found', httpStatus: shared.http_status, finalUrl: shared.final_url, detail: detailBase };
+    case 'server_error':
+      return { verdict: 'server_error', httpStatus: shared.http_status, finalUrl: shared.final_url, detail: detailBase };
+    case 'blocked': // 401/403
+      return { verdict: 'challenge', httpStatus: shared.http_status, finalUrl: shared.final_url, detail: { ...detailBase, reason: 'blocked_status' } };
+    case 'challenge':
+      return { verdict: 'challenge', httpStatus: shared.http_status, finalUrl: shared.final_url, detail: detailBase };
+    case 'soft_404':
+      return { verdict: 'soft_404', httpStatus: shared.http_status, finalUrl: shared.final_url, detail: detailBase };
+    case 'noindex':
+      return { verdict: 'noindex', httpStatus: shared.http_status, finalUrl: shared.final_url, detail: detailBase };
+    case 'canonicalized':
+      return { verdict: 'canonical_elsewhere', httpStatus: shared.http_status, finalUrl: shared.final_url, detail: { ...detailBase, canonicalUrl: shared.canonical_target_url } };
+    default:
+      break;
+  }
+
+  if (CLEAN_LIVE_STATUSES.has(shared.live_status)) {
+    // A truncated body (the shared ~1.5MB cap tripped, or the socket closed
+    // early) is never enough evidence to call a page healthy — the markers
+    // above can all live past the cutoff point.
+    if (shared.truncated) {
+      return { verdict: 'fetch_blocked', httpStatus: shared.http_status, finalUrl: shared.final_url, detail: { ...detailBase, reason: 'response_truncated' } };
     }
-    req.setTimeout(timeoutMs, () => req.destroy(new Error('timeout'))); // socket-inactivity backstop
-    req.on('error', (err) => done({ error: err.message || 'network_error' }));
-    req.end();
-  });
-}
-
-/**
- * Walks a redirect chain manually, one hop at a time, re-validating EVERY
- * hop's host against the owned-fleet allowlist before it is fetched — a
- * redirect off the fleet (even to another public, otherwise-safe host)
- * stops the chain rather than following it.
- *   → { finalUrl, status, headers, body, truncated, hops } on a resolved
- *     (non-redirect) response, or { blockedReason | fetchError, hops } on
- *     any failure — both map to verdict fetch_blocked, never not_found.
- */
-async function fetchOwnedUrlChain(startUrl, { getImpl = nodeGet, ...opts } = {}) {
-  let current = startUrl;
-  const hops = [];
-  for (let hop = 0; hop <= MAX_REDIRECT_HOPS; hop++) {
-    let parsed;
-    try { parsed = new URL(current); } catch { return { blockedReason: 'invalid_url', hops }; }
-    if (parsed.protocol !== 'https:') return { blockedReason: 'disallowed_protocol', hops };
-    if (!isOwnedFleetUrl(current)) return { blockedReason: 'disallowed_host', hops };
-
-    const result = await getImpl(current, opts);
-    if (!result || result.error) return { fetchError: (result && result.error) || 'no_response', hops };
-
-    if (result.status >= 300 && result.status < 400) {
-      hops.push({ url: current, status: result.status });
-      const location = result.headers?.location;
-      if (!location) return { blockedReason: 'redirect_without_location', hops };
-      let next;
-      try { next = new URL(location, current).toString(); } catch { return { blockedReason: 'invalid_redirect_target', hops }; }
-      current = next;
-      continue;
+    const visibleChars = shared.visible_text_length;
+    const landedStatus = Number(shared.final_http_status || shared.http_status);
+    if (landedStatus === 204 || (visibleChars != null && visibleChars < MIN_VISIBLE_TEXT_CHARS)) {
+      return { verdict: 'soft_404', httpStatus: shared.http_status, finalUrl: shared.final_url, detail: { ...detailBase, reason: 'empty_body', visibleChars } };
     }
-
-    hops.push({ url: current, status: result.status });
-    return {
-      finalUrl: current,
-      status: result.status,
-      headers: result.headers || {},
-      body: result.body || '',
-      truncated: !!result.truncated,
-      hops,
-    };
+    // redirect_ok specifically means a 301/308 (permanent) chain landing
+    // clean — a temporary redirect (302/307) landing clean is still just ok.
+    const permanentRedirect = !!shared.redirect_target_url && (httpStatusNum === 301 || httpStatusNum === 308);
+    return { verdict: permanentRedirect ? 'redirect_ok' : 'ok', httpStatus: shared.http_status, finalUrl: shared.final_url, detail: detailBase };
   }
-  return { blockedReason: 'redirect_budget_exceeded', hops };
+
+  // Defensive fallback — an unrecognized shared live_status must never be
+  // mistaken for a confirmed-healthy page.
+  return { verdict: 'fetch_blocked', httpStatus: shared.http_status || null, finalUrl: shared.final_url || null, detail: { ...detailBase, reason: `unmapped_live_status_${shared.live_status}` } };
 }
 
-// ── Classification ────────────────────────────────────────────────────────
-
-function extractTitle(html) {
-  const m = String(html || '').match(/<title[^>]*>([\s\S]*?)<\/title>/i);
-  return m ? m[1].replace(/\s+/g, ' ').trim() : '';
-}
-
-function extractMetaRobots(html) {
-  const values = [];
-  for (const match of String(html || '').matchAll(/<meta\b[^>]*>/gi)) {
-    const tag = match[0];
-    const nameMatch = tag.match(/\bname\s*=\s*["']?robots["']?/i);
-    if (!nameMatch) continue;
-    const contentMatch = tag.match(/\bcontent\s*=\s*"([^"]*)"|\bcontent\s*=\s*'([^']*)'/i);
-    if (contentMatch) values.push(contentMatch[1] ?? contentMatch[2] ?? '');
-  }
-  return values.join(',');
-}
-
-function extractCanonicalHref(html, requestedUrl) {
-  for (const match of String(html || '').matchAll(/<link\b[^>]*>/gi)) {
-    const tag = match[0];
-    if (!/\brel\s*=\s*["']?canonical["']?/i.test(tag)) continue;
-    const hrefMatch = tag.match(/\bhref\s*=\s*"([^"]*)"|\bhref\s*=\s*'([^']*)'/i);
-    const href = hrefMatch ? (hrefMatch[1] ?? hrefMatch[2] ?? '') : '';
-    if (!href) continue;
-    try { return new URL(href, requestedUrl).toString(); } catch { return ''; }
-  }
-  return '';
-}
-
-// The Astro fleet's own 404.astro renders "Page Not Found" in <title> (and
-// h1) with robots noindex,nofollow — a stable marker across every spoke
-// since every site shares the same BaseLayout template. Cast a slightly
-// wider net for any other soft-404 wording a page might carry.
-const SOFT_404_RE = /\b(page not found|404[\s:—-]|we can.?t find that page|this page (doesn.?t|does not) exist)\b/i;
-// Challenge detection uses interstitial-SPECIFIC evidence only — never generic
-// words in the raw HTML (a healthy page with a `<div id="captcha">` form
-// widget, or "access denied" in its copy, must stay ok). Three signals:
-// an interstitial <title>; interstitial-only Cloudflare markup (cf_chl_opt /
-// chl_page / challenge-form — NOT the /cdn-cgi/challenge-platform/scripts/jsd
-// script that Cloudflare's JavaScript Detections inject into normal pages);
-// or challenge wording as the visible text of a SHORT page.
-const CHALLENGE_TITLE_RE = /^\s*(just a moment|attention required|access denied|verify you are human|checking your browser|security check|please wait)\b/i;
-const CHALLENGE_MARKUP_RE = /(cf_chl_opt|window\._cf_chl|\bchl_page\b|id=["']challenge-(form|running|stage)["']|cf-browser-verification)/i;
-const CHALLENGE_TEXT_RE = /\b(verify you are human|checking (your browser|if the site connection is secure)|enable javascript and cookies to continue|complete the security check)\b/i;
-const CHALLENGE_MAX_VISIBLE_CHARS = 1500;
-
-function isChallengePage(title, body) {
-  if (CHALLENGE_TITLE_RE.test(title)) return true;
-  if (CHALLENGE_MARKUP_RE.test(body)) return true;
-  const text = visibleText(body);
-  return text.length <= CHALLENGE_MAX_VISIBLE_CHARS && CHALLENGE_TEXT_RE.test(text);
-}
-
-const MIN_VISIBLE_TEXT_CHARS = 64;
-
-function visibleText(html) {
-  return String(html || '')
-    .replace(/<script\b[\s\S]*?<\/script>|<style\b[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function isNoindexSignal(metaRobots, headers) {
-  const xRobots = String(headers?.['x-robots-tag'] || '');
-  return /\bnoindex\b/i.test(metaRobots) || /\bnoindex\b/i.test(xRobots);
-}
-
-/**
- * Classifies one chain result into a verdict + detail payload. Pure and
- * synchronous so it is exhaustively unit-testable without a network mock.
- */
-function classifyOwnedUrlHealth(requestedUrl, chain) {
-  if (chain.blockedReason || chain.fetchError) {
-    return {
-      verdict: 'fetch_blocked',
-      httpStatus: null,
-      finalUrl: null,
-      detail: { reason: chain.blockedReason || chain.fetchError, hops: chain.hops || [] },
-    };
-  }
-
-  const { finalUrl, status, headers = {}, body = '', truncated, hops } = chain;
-  const detailBase = { hops, truncated: !!truncated };
-
-  if (status >= 500) {
-    return { verdict: 'server_error', httpStatus: status, finalUrl, detail: detailBase };
-  }
-  if (status === 401 || status === 403 || status === 429) {
-    return { verdict: 'challenge', httpStatus: status, finalUrl, detail: { ...detailBase, reason: 'blocked_status' } };
-  }
-  if (status === 404 || status === 410) {
-    return { verdict: 'not_found', httpStatus: status, finalUrl, detail: detailBase };
-  }
-  if (status >= 400) {
-    // Any other unexpected 4xx is reported as blocked, not as "gone" — the
-    // checker itself may be what's being refused (fetch_blocked must never
-    // be conflated with not_found).
-    return { verdict: 'fetch_blocked', httpStatus: status, finalUrl, detail: { ...detailBase, reason: `unexpected_status_${status}` } };
-  }
-  if (status < 200 || status >= 300) {
-    return { verdict: 'fetch_blocked', httpStatus: status, finalUrl, detail: { ...detailBase, reason: `unexpected_status_${status}` } };
-  }
-
-  // 2xx from here down. A truncated body (the ~1.5MB cap tripped, or the
-  // socket closed before 'end') is never enough evidence to call a page
-  // healthy — soft_404/challenge/noindex/canonical markers can all live past
-  // the cutoff point, so an incomplete read is reported as blocked rather
-  // than risking a false "ok" (or worse, retiring an existing FIX alert).
-  if (truncated) {
-    return { verdict: 'fetch_blocked', httpStatus: status, finalUrl, detail: { ...detailBase, reason: 'response_truncated' } };
-  }
-  const title = extractTitle(body);
-  if (isChallengePage(title, body)) {
-    return { verdict: 'challenge', httpStatus: status, finalUrl, detail: { ...detailBase, title } };
-  }
-  if (SOFT_404_RE.test(title) || SOFT_404_RE.test(body.slice(0, 4000))) {
-    return { verdict: 'soft_404', httpStatus: status, finalUrl, detail: { ...detailBase, title } };
-  }
-  const metaRobots = extractMetaRobots(body);
-  if (isNoindexSignal(metaRobots, headers)) {
-    return { verdict: 'noindex', httpStatus: status, finalUrl, detail: { ...detailBase, title, metaRobots } };
-  }
-  const canonicalUrl = extractCanonicalHref(body, finalUrl);
-  if (canonicalUrl) {
-    const normalizedCanonical = normalizeOwnedUrl(canonicalUrl);
-    const normalizedFinal = normalizeOwnedUrl(finalUrl);
-    if (normalizedCanonical && normalizedFinal && normalizedCanonical !== normalizedFinal) {
-      return { verdict: 'canonical_elsewhere', httpStatus: status, finalUrl, detail: { ...detailBase, title, canonicalUrl } };
-    }
-  }
-
-  // A 204, or a 2xx with no visible text, is a page a human cannot read —
-  // never a clean result (e.g. a broken deploy or edge rule serving a blank
-  // body). Real fleet pages carry thousands of visible characters.
-  const visibleChars = visibleText(body).length;
-  if (status === 204 || visibleChars < MIN_VISIBLE_TEXT_CHARS) {
-    return { verdict: 'soft_404', httpStatus: status, finalUrl, detail: { ...detailBase, title, reason: 'empty_body', visibleChars } };
-  }
-
-  const permanentRedirectChain = hops.length > 1 && hops.slice(0, -1).every((h) => h.status === 301 || h.status === 308);
-  if (permanentRedirectChain) {
-    return { verdict: 'redirect_ok', httpStatus: status, finalUrl, detail: { ...detailBase, title } };
-  }
-  return { verdict: 'ok', httpStatus: status, finalUrl, detail: { ...detailBase, title } };
-}
-
-/** Fetches + classifies one owned URL. Never throws. */
-async function checkOwnedUrlHealth(url, opts = {}) {
+/** Fetches + classifies one owned URL via the shared checker. Never throws. */
+async function checkOwnedUrlHealth(url, {
+  fetchImpl = liveStatus.safeFetchImpl,
+  timeoutMs = liveStatus.DEFAULT_TIMEOUT_MS,
+} = {}) {
   const requestedUrl = normalizeOwnedUrl(url) || url;
-  if (!isOwnedFleetUrl(requestedUrl)) {
-    return { url: requestedUrl, verdict: 'fetch_blocked', httpStatus: null, finalUrl: null, detail: { reason: 'disallowed_host' } };
-  }
   try {
-    const chain = await fetchOwnedUrlChain(requestedUrl, opts);
-    const classified = classifyOwnedUrlHealth(requestedUrl, chain);
-    return { url: requestedUrl, ...classified };
+    const shared = await liveStatus.checkUrlLiveStatus(requestedUrl, { fetchImpl, timeoutMs });
+    return { url: requestedUrl, ...mapSharedResultToVerdict(shared) };
   } catch (err) {
     return { url: requestedUrl, verdict: 'fetch_blocked', httpStatus: null, finalUrl: null, detail: { reason: err.message || 'check_failed' } };
   }
 }
-
-async function runWithConcurrency(items, limit, worker) {
-  const out = new Array(items.length);
-  let next = 0;
-  const bound = Math.max(1, Math.min(limit, items.length || 1));
-  const workers = Array.from({ length: bound }, async () => {
-    while (next < items.length) {
-      const idx = next;
-      next += 1;
-      out[idx] = await worker(items[idx], idx);
-    }
-  });
-  await Promise.all(workers);
-  return out;
-}
-
-// Every verdict except a clean live page. noindex and challenge are included
-// deliberately: an engine-cited page that tells crawlers not to index it, or
-// that we could not get past a bot wall to verify, is neither confirmed
-// healthy nor something a clean run should ever retire a standing FIX alert
-// over (codex pre-push audit finding).
-const BAD_VERDICTS = new Set(['soft_404', 'not_found', 'server_error', 'canonical_elsewhere', 'fetch_blocked', 'noindex', 'challenge']);
 
 const OPS_DIGEST_KEY = 'owned-url-health';
 const digestEmail = () => process.env.OWNED_URL_HEALTH_DIGEST_EMAIL || 'contact@wavespestcontrol.com';
@@ -489,19 +303,21 @@ async function postOwnedUrlHealthDigest(bad) {
 }
 
 /**
- * Runs the full daily sweep: collect cited owned URLs, check each (bounded
- * concurrency), persist one row per (url, checked_on), and return a summary
- * the ops-digest sender and the admin dashboard both consume.
+ * Runs the full sweep: collect cited owned URLs, check each (bounded
+ * concurrency, shared checker), persist one row per (url, checked_on), and
+ * return a summary the ops-digest sender and the admin dashboard both
+ * consume. Called as a step inside scheduler.js's runContentRegistryMaintenance
+ * — not its own cron.
  */
 async function runOwnedUrlHealthCheck({
   database = db,
-  concurrency = CONCURRENCY,
+  concurrency = liveStatus.DEFAULT_CONCURRENCY,
   now = new Date(),
 } = {}) {
   const checkedOn = etDateString(now);
   const candidates = await collectCitedOwnedUrls({ database, now });
 
-  const results = await runWithConcurrency(candidates, concurrency, async ({ url, citationCount }) => {
+  const results = await liveStatus.runWithConcurrency(candidates, concurrency, async ({ url, citationCount }) => {
     const result = await checkOwnedUrlHealth(url);
     return { ...result, citationCount };
   });
@@ -581,13 +397,9 @@ module.exports = {
   normalizeOwnedUrl,
   isOwnedFleetUrl,
   collectCitedOwnedUrls,
-  fetchOwnedUrlChain,
-  classifyOwnedUrlHealth,
+  mapSharedResultToVerdict,
   checkOwnedUrlHealth,
   runOwnedUrlHealthCheck,
   getCitedUrlHealthDashboard,
   postOwnedUrlHealthDigest,
-  extractTitle,
-  extractCanonicalHref,
-  extractMetaRobots,
 };

@@ -161,6 +161,14 @@ test('a removed engine\'s leftover rows cannot offset a configured engine\'s gap
   expect(dashboard.benchmark).toMatchObject({ expectedObservations: 1, missing: 1 });
 });
 
+test('an explicitly EMPTY configured provider set stays empty — never repopulated from history', () => {
+  const oneQuestion = [{ query: benchmark.questions[0].query, active: true }];
+  const rows = [measured()]; // historical chatgpt rows exist, but nothing is configured now
+  const dashboard = buildDashboard(rows, oneQuestion, { configuredPlatforms: [] });
+  expect(dashboard.benchmark).toMatchObject({ expectedObservations: 0, missing: 0 });
+  expect(dashboard.summary.configuredPlatforms).toEqual([]);
+});
+
 test('Gemini attributes only supported chunks and ignores thinking text', async () => {
   process.env.GEMINI_API_KEY = 'test-key';
   global.fetch.mockResolvedValue({ ok: true, json: async () => ({ candidates: [{

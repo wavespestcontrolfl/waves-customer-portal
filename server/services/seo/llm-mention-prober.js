@@ -118,7 +118,10 @@ function buildDashboard(rows, queries, { configuredPlatforms = null } = {}) {
   // no config fall back to the observed engines.
   const activeQuestionCount = benchmark.questions.filter(q => managed.has(q.query)).length;
   const observedEngines = [...new Set(grid.map(row => row.llm_platform))];
-  const configuredEngines = Array.isArray(configuredPlatforms) && configuredPlatforms.length
+  // Only an OMITTED option falls back to the observed set — an explicitly
+  // passed EMPTY array (every provider disabled) must stay empty, not read
+  // as "not configured" and silently repopulate from history (codex P1).
+  const configuredEngines = Array.isArray(configuredPlatforms)
     ? [...new Set(configuredPlatforms)]
     : observedEngines;
   const configuredSet = new Set(configuredEngines);

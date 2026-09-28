@@ -212,6 +212,70 @@ describe('content registry live status helpers', () => {
     }));
   });
 
+  test('a 5xx classifies as server_error, distinct from a generic checker error', async () => {
+    await expect(liveStatus.checkRegistryRowLiveStatus(
+      { id: 'row-5xx', canonical_url_normalized: '/down/' },
+      { fetchImpl: fetchMap({ 'https://www.wavespestcontrol.com/down/': response(503) }) },
+    )).resolves.toEqual(expect.objectContaining({
+      http_status: '503',
+      live_status: 'server_error',
+    }));
+  });
+
+  // Shared body-aware detection (owner finding 2026-09-27, dedup'd with
+  // owned-url-health.js): a registry row now benefits from the same
+  // soft-404/challenge signals a bare HTTP status cannot see.
+  test('a 2xx page rendering a not-found template classifies as soft_404, not live', async () => {
+    await expect(liveStatus.checkRegistryRowLiveStatus(
+      { id: 'row-soft-404', canonical_url_normalized: '/ghost/' },
+      {
+        fetchImpl: fetchMap({
+          'https://www.wavespestcontrol.com/ghost/': response(200, '<html><head><title>Page Not Found — Waves Pest Control</title></head><body>Page Not Found</body></html>'),
+        }),
+      },
+    )).resolves.toEqual(expect.objectContaining({
+      http_status: '200',
+      live_status: 'soft_404',
+    }));
+  });
+
+  test('a redirect landing on a soft-404 template classifies as soft_404, not redirected', async () => {
+    await expect(liveStatus.checkRegistryRowLiveStatus(
+      { id: 'row-redirect-soft-404', canonical_url_normalized: '/legacy-ghost/' },
+      {
+        fetchImpl: fetchMap({
+          'https://www.wavespestcontrol.com/legacy-ghost/': response(301, '', { location: '/ghost/' }),
+          'https://www.wavespestcontrol.com/ghost/': response(200, '<html><head><title>Page Not Found</title></head></html>', {}, 'https://www.wavespestcontrol.com/ghost/'),
+        }),
+      },
+    )).resolves.toEqual(expect.objectContaining({
+      http_status: '301',
+      live_status: 'soft_404',
+    }));
+  });
+
+  test('an interstitial-only Cloudflare challenge classifies as challenge, never a generic error', async () => {
+    const body = '<html><head><title>Just a moment...</title></head><body>Checking your browser before access.</body></html>';
+    await expect(liveStatus.checkRegistryRowLiveStatus(
+      { id: 'row-challenge', canonical_url_normalized: '/blocked/' },
+      { fetchImpl: fetchMap({ 'https://www.wavespestcontrol.com/blocked/': response(200, body) }) },
+    )).resolves.toEqual(expect.objectContaining({
+      http_status: '200',
+      live_status: 'challenge',
+    }));
+  });
+
+  test('a healthy page mentioning captcha/access in its own copy is never misread as a challenge', async () => {
+    const body = '<html><head><title>Report a Break-In or Access Denied Area</title></head><body>Our CAPTCHA-protected contact form keeps spam out, and our technicians never deny access to a scheduled visit.</body></html>';
+    await expect(liveStatus.checkRegistryRowLiveStatus(
+      { id: 'row-safe-words', canonical_url_normalized: '/faq/' },
+      { fetchImpl: fetchMap({ 'https://www.wavespestcontrol.com/faq/': response(200, body) }) },
+    )).resolves.toEqual(expect.objectContaining({
+      http_status: '200',
+      live_status: 'live',
+    }));
+  });
+
   test('fetch errors keep sitemap signal from loaded sitemap paths', async () => {
     const result = await liveStatus.checkRegistryRowLiveStatus(
       { id: 'row-fetch-error', canonical_url_normalized: '/known-in-sitemap/' },
