@@ -1212,11 +1212,7 @@ const INLINE_IMAGE_RE = /!\[([^\]]*)\]\(([^)]+)\)/g;
 // general unsupported-body-syntax gate.
 const REFERENCE_IMAGE_RE = /!\[([^\]]*)\]\[([^\]]*)\]/g;
 const RAW_IMG_TAG_RE = /<img\b([^>]*)>/gi;
-function attrValue(attrs, name) {
-  const re = new RegExp(`\\b${name}\\s*=\\s*("([^"]*)"|'([^']*)')`, 'i');
-  const m = re.exec(attrs);
-  return m ? (m[2] ?? m[3] ?? '') : null;
-}
+const { htmlAttrValue: attrValue, matchStandaloneImageLine } = require('./licensed-photo-library');
 function collectBodyImageOccurrences(body) {
   const out = [];
   let m;
@@ -1255,22 +1251,15 @@ function collectBodyImageOccurrences(body) {
 // markdown image or a src-only <img> tag, ALONE on its own line. Anything
 // else (mid-paragraph, reference-style, srcset) previously passed here and
 // then hard-failed BLOG_BODY_IMAGES_FAILED at publish, so a green gate did
-// not mean a publishable draft. These anchored patterns mirror the
-// publisher's own exactly; per-URL occurrence counts (not mere membership)
-// catch a URL used once standalone AND once inline.
-const STANDALONE_INLINE_IMAGE_LINE_RE = /^\s*!\[([^\]]*)\]\(([^)]+)\)\s*$/;
-const STANDALONE_IMG_TAG_LINE_RE = /^\s*<img\b([^>]*)>\s*$/i;
+// not mean a publishable draft. Standalone-ness comes from the SAME shared
+// matcher the publisher uses (licensed-photo-library.matchStandaloneImage
+// Line — Codex P1 r8: no second hand-kept copy to drift); per-URL
+// occurrence counts catch a URL used once standalone AND once inline.
 function standaloneImageUrlCounts(body) {
   const counts = new Map();
   for (const line of String(body || '').split('\n')) {
-    let url = null;
-    const inline = STANDALONE_INLINE_IMAGE_LINE_RE.exec(line);
-    if (inline) url = String(inline[2] || '').trim();
-    else {
-      const tag = STANDALONE_IMG_TAG_LINE_RE.exec(line);
-      if (tag && !attrValue(tag[1] || '', 'srcset')) url = (attrValue(tag[1] || '', 'src') || '').trim() || null;
-    }
-    if (url) counts.set(url, (counts.get(url) || 0) + 1);
+    const match = matchStandaloneImageLine(line);
+    if (match) counts.set(match.url, (counts.get(match.url) || 0) + 1);
   }
   return counts;
 }

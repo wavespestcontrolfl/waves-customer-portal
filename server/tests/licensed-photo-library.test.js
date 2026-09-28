@@ -177,3 +177,32 @@ describe('buildPhotoSlots', () => {
     }
   });
 });
+
+// Codex P1 (8th round): the gate (content-quality-gate) and the publisher
+// (astro-publisher) previously each kept their own copy of "is this line a
+// standalone licensed-photo placement" — every gate/publisher split on
+// #5216 came from those copies drifting. There is now exactly one.
+describe('matchStandaloneImageLine — the single shared placement definition', () => {
+  const { matchStandaloneImageLine } = require('../services/content/licensed-photo-library');
+  const URL_ = 'https://upload.wikimedia.org/x.jpg';
+
+  test('matches a bare inline image and a src-only <img>, each alone on its line', () => {
+    expect(matchStandaloneImageLine(`![a fire ant](${URL_})`)).toEqual({ alt: 'a fire ant', url: URL_ });
+    expect(matchStandaloneImageLine(`  <img src="${URL_}" alt="a fire ant">  `)).toEqual({ alt: 'a fire ant', url: URL_ });
+  });
+
+  test('rejects mid-paragraph placement, an <img> with srcset, and an <img> with no src', () => {
+    expect(matchStandaloneImageLine(`See ![a](${URL_}) here.`)).toBeNull();
+    expect(matchStandaloneImageLine(`<img src="${URL_}" srcset="${URL_} 2x" alt="a">`)).toBeNull();
+    expect(matchStandaloneImageLine('<img alt="a">')).toBeNull();
+  });
+
+  test('the publisher uses this exact function (no second copy)', () => {
+    jest.isolateModules(() => {
+      jest.doMock('../models/db', () => jest.fn());
+      const pub = require('../services/content-astro/astro-publisher');
+      const lib = require('../services/content/licensed-photo-library');
+      expect(pub._internals.matchLicensedPhotoLine).toBe(lib.matchStandaloneImageLine);
+    });
+  });
+});

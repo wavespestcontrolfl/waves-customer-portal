@@ -202,4 +202,34 @@ function buildPhotoSlots(topic) {
   });
 }
 
-module.exports = { PHOTO_LIBRARY, matchSpecies, findPhotoForSlot, buildPhotoSlots };
+// ── The ONE definition of a publishable identification-photo placement ──
+// content-quality-gate (what it approves) and astro-publisher (what it
+// re-hosts) both import this, so the two can never disagree about which
+// placements are valid — every prior gate/publisher split on #5216 came
+// from two hand-kept copies of this logic drifting. A placement is a bare
+// inline markdown image `![alt](url)` or a src-only `<img src alt>` tag,
+// ALONE on its own line. An <img> carrying srcset is not a match (the
+// publisher re-hosts src only and would silently drop the other sources).
+const STANDALONE_INLINE_IMAGE_LINE_RE = /^\s*!\[([^\]]*)\]\(([^)]+)\)\s*$/;
+const STANDALONE_IMG_TAG_LINE_RE = /^\s*<img\b([^>]*)>\s*$/i;
+
+function htmlAttrValue(attrs, name) {
+  const re = new RegExp(`\\b${name}\\s*=\\s*("([^"]*)"|'([^']*)')`, 'i');
+  const m = re.exec(String(attrs || ''));
+  return m ? (m[2] ?? m[3] ?? '') : null;
+}
+
+// → { alt, url } for a standalone licensed-photo placement, or null.
+function matchStandaloneImageLine(line) {
+  const inline = STANDALONE_INLINE_IMAGE_LINE_RE.exec(String(line || ''));
+  if (inline) return { alt: String(inline[1] || '').trim(), url: String(inline[2] || '').trim() };
+  const tag = STANDALONE_IMG_TAG_LINE_RE.exec(String(line || ''));
+  if (!tag) return null;
+  const attrs = tag[1] || '';
+  if (htmlAttrValue(attrs, 'srcset') != null) return null;
+  const src = (htmlAttrValue(attrs, 'src') || '').trim();
+  if (!src) return null;
+  return { alt: String(htmlAttrValue(attrs, 'alt') || '').trim(), url: src };
+}
+
+module.exports = { PHOTO_LIBRARY, matchSpecies, findPhotoForSlot, buildPhotoSlots, matchStandaloneImageLine, htmlAttrValue };

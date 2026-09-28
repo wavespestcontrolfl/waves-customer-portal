@@ -2914,34 +2914,15 @@ const LICENSED_PHOTO_MAX_BYTES = 8 * 1024 * 1024;
 // unresponsive host would hang the async publish job forever. A fixed,
 // generous timeout fails closed (BLOG_BODY_IMAGES_FAILED) instead.
 const LICENSED_PHOTO_FETCH_TIMEOUT_MS = 20000;
-// Only a bare `![alt](url)` alone on its own line is recognized — exactly
-// how the writer prompt instructs it to be embedded, and how every other
-// body image in this file is placed. An inline or otherwise-decorated
-// occurrence is left for validateBodyImageRefs to reject normally
-// (fail-closed: parked for human review, never silently mishandled).
-const LICENSED_PHOTO_LINE_RE = /^\s*!\[([^\]]*)\]\(([^)]+)\)\s*$/;
-// Codex P1 (6th round): content-quality-gate's photo_slots_licensed_only
-// (collectBodyImageOccurrences) approves a licensed photo embedded as a
-// raw `<img>` tag too — content-guardrails allowlists `img` as passive
-// markup, so a gate-approved draft could reach this point with one. This
-// pass now re-hosts that form as well, so a gate-approved draft can never
-// reach validateBodyImageRefs with an un-rehosted remote URL still in the
-// body (which would otherwise park with BLOG_BODY_IMAGES_FAILED even
-// though the gate already cleared it). Reference-style images
-// (`![alt][ref]` + a separate `[ref]: url` definition) are DELIBERATELY
-// NOT re-hosted here: the writer prompt instructs the single inline form
-// only, the gate's reference-style recognition exists purely as a
-// defense-in-depth detection net (never a form the writer is told to
-// produce), and validateBodyImageRefs already fails CLOSED (parks for
-// human review, never a silent hotlink) on one if it's ever used — the
-// same "reference-style image is validated like an inline one" contract
-// blog-astro-pipeline.test.js already pins.
-const LICENSED_PHOTO_IMG_TAG_RE = /^\s*<img\b([^>]*)>\s*$/i;
-function attrValue(attrs, name) {
-  const re = new RegExp(`\\b${name}\\s*=\\s*("([^"]*)"|'([^']*)')`, 'i');
-  const m = re.exec(attrs);
-  return m ? (m[2] ?? m[3] ?? '') : null;
-}
+// Which placements count as a licensed identification photo is defined
+// ONCE, in licensed-photo-library.matchStandaloneImageLine, and shared with
+// content-quality-gate's photo_slots_licensed_only — so what the gate
+// approves is exactly what this pass re-hosts (Codex P1 r6-r8: every prior
+// split came from two hand-kept copies drifting). A bare inline image or a
+// src-only <img>, alone on its own line. Anything else is rejected at the
+// gate; if it ever reached here it would be left in the body and
+// validateBodyImageRefs would fail closed (park, never a hotlink).
+const { matchStandaloneImageLine } = require('../content/licensed-photo-library');
 function licensedPhotoError(slug, url, detail) {
   const err = new Error(`autonomous blog body images: licensed identification photo for ${slug} (${url}) ${detail}`);
   err.code = 'BLOG_BODY_IMAGES_FAILED';
@@ -3059,20 +3040,6 @@ async function allocateLicensedPhotoName(slug, takenNames, counter) {
   }
 }
 
-// Matches a single body line against either recognized licensed-photo
-// form (bare inline markdown, or a raw <img> tag alone on the line) and
-// returns { alt, url } for whichever one hits, or null.
-function matchLicensedPhotoLine(line) {
-  const inline = LICENSED_PHOTO_LINE_RE.exec(line);
-  if (inline) return { alt: String(inline[1] || '').trim(), url: String(inline[2] || '').trim() };
-  const imgTag = LICENSED_PHOTO_IMG_TAG_RE.exec(line);
-  if (imgTag) {
-    const src = attrValue(imgTag[1] || '', 'src');
-    if (!src) return null;
-    return { alt: String(attrValue(imgTag[1] || '', 'alt') || '').trim(), url: src.trim() };
-  }
-  return null;
-}
 
 async function rehostLicensedIdentificationPhotos({ body, slug, brief, mdx }) {
   const slots = Array.isArray(brief?.voice_constraints?.photo_slots) ? brief.voice_constraints.photo_slots : [];
@@ -3088,7 +3055,7 @@ async function rehostLicensedIdentificationPhotos({ body, slug, brief, mdx }) {
   const takenNames = new Set();
   const out = [];
   for (let i = 0; i < lines.length; i++) {
-    const match = matchLicensedPhotoLine(lines[i]);
+    const match = matchStandaloneImageLine(lines[i]);
     const photo = match ? byUrl.get(match.url) : null;
     if (!photo) { out.push(lines[i]); continue; }
     const buffer = await fetchAndVerifyLicensedPhoto(photo.url, slug);
@@ -5528,7 +5495,7 @@ module.exports = {
     resolveAutonomousHero,
     resolveBodyImages,
     rehostLicensedIdentificationPhotos,
-    matchLicensedPhotoLine,
+    matchLicensedPhotoLine: matchStandaloneImageLine,
     fetchAndVerifyLicensedPhoto,
     assertLicensedPhotoUrlAllowed,
     readCappedResponseBody,
