@@ -212,6 +212,20 @@ describe('TwilioService.sendSMS preSendCheck (provider-handoff gate)', () => {
     const trxInsert = jest.fn(async () => {});
     // knex convention: calling the trx itself as a function selects a table.
     const trx = jest.fn((_table) => ({ insert: trxInsert }));
+    // codex #5018 r15/r16 P1 follow-up: dispatch()'s own in-transaction
+    // insert now takes a transaction-scoped advisory lock on `trx` (the
+    // SAME key the recovery insert already does) right before it inserts —
+    // a real knex trx carries `.raw` directly on the transaction object,
+    // same as `db`.
+    trx.raw = jest.fn(async () => ({}));
+    // codex #5196 P1-B: the in-handoff insert now runs inside a SAVEPOINT
+    // (`trx.transaction(...)`) so a failed insert doesn't abort the whole
+    // handoff transaction — a real knex trx exposes `.transaction()` for
+    // this the same way it exposes `.raw()`; forwarding the SAME mock trx
+    // to the callback is enough to exercise the real code path here, since
+    // this repo's own convention treats a savepoint connection identically
+    // to its parent for table access.
+    trx.transaction = jest.fn((cb) => cb(trx));
     require('../models/db').mockImplementation(() => ({
       insert: jest.fn(async () => { throw new Error('sms_log must not write on the plain db when a trx is held'); }),
     }));
@@ -225,6 +239,58 @@ describe('TwilioService.sendSMS preSendCheck (provider-handoff gate)', () => {
       });
       expect(result.success).toBe(true);
       expect(trxInsert).toHaveBeenCalledTimes(1);
+    } finally { require('../models/db').mockReset(); }
+  });
+
+  // codex #5018 r15/r16 P1 follow-up: the ORIGINAL in-handoff insert now
+  // takes the SAME advisory lock key the recovery insert already does
+  // (hashtextextended('sms_log_sid:'||sid, 0)), transaction-scoped on the
+  // held trx, right before it inserts — closing the window where recovery
+  // could run its own check-then-insert while this original was still open
+  // (its insert made but not yet committed, invisible under READ
+  // COMMITTED) and land a genuine duplicate. Real cross-connection blocking
+  // behavior is proven with a real Postgres advisory lock in
+  // call-booking-link-text-postgres.test.js (a mocked trx cannot prove a
+  // second session actually waits); this pins the key + ordering.
+  test('the original in-handoff insert takes the same sms_log_sid advisory lock, on trx, before it inserts', async () => {
+    const order = [];
+    const trxInsert = jest.fn(async () => { order.push('insert'); });
+    const trx = jest.fn((_table) => ({ insert: trxInsert }));
+    trx.raw = jest.fn(async (...args) => { order.push('raw'); return args; });
+    trx.transaction = jest.fn((cb) => cb(trx));
+    require('../models/db').mockImplementation(() => ({ insert: jest.fn(async () => {}) }));
+    try {
+      const result = await TwilioService.sendSMS(TO, 'Reminder body', {
+        messageType: 'manual', fromNumber: FROM,
+        logInHandoff: true,
+        withSmsHandoff: async dispatch => { await dispatch(trx); return { ok: true }; },
+      });
+      expect(result.success).toBe(true);
+      expect(trx.raw).toHaveBeenCalledWith(
+        expect.stringContaining('pg_advisory_xact_lock(hashtextextended('),
+        ['sms_log_sid:SM_ok'],
+      );
+      // Same key derivation the recovery insert below uses (`sms_log_sid:`
+      // + the exact twilio_sid) — never a different namespace.
+      expect(trx.raw.mock.calls[0][1]).toEqual([`sms_log_sid:${result.sid}`]);
+      expect(order).toEqual(['raw', 'insert']); // lock acquired BEFORE the insert
+    } finally { require('../models/db').mockReset(); }
+  });
+
+  // The lock is transaction-scoped (pg_advisory_xact_lock, never taken on
+  // the plain base connection) — a bare dispatch() call with no trx has
+  // nothing to scope it to, so it is skipped entirely; the insert still
+  // runs on the plain db unchanged.
+  test('a bare dispatch() call with no trx never attempts the advisory lock', async () => {
+    const baseRaw = jest.fn(async () => {});
+    require('../models/db').mockImplementation(() => ({ insert: jest.fn(async () => {}) }));
+    require('../models/db').raw = baseRaw;
+    try {
+      const result = await TwilioService.sendSMS(TO, 'Reminder body', {
+        messageType: 'manual', fromNumber: FROM, logInHandoff: true,
+      });
+      expect(result.success).toBe(true);
+      expect(baseRaw).not.toHaveBeenCalled();
     } finally { require('../models/db').mockReset(); }
   });
 
@@ -243,6 +309,13 @@ describe('TwilioService.sendSMS preSendCheck (provider-handoff gate)', () => {
     const trxInsert = jest.fn(async () => {});
     // knex convention: calling the trx itself as a function selects a table.
     const trx = jest.fn((_table) => ({ insert: trxInsert }));
+    // codex #5018 r15/r16 P1 follow-up: dispatch()'s own in-transaction
+    // insert now takes a transaction-scoped advisory lock on `trx` (the
+    // SAME key the recovery insert already does) right before it inserts —
+    // a real knex trx carries `.raw` directly on the transaction object,
+    // same as `db`.
+    trx.raw = jest.fn(async () => ({}));
+    trx.transaction = jest.fn((cb) => cb(trx));
     const baseInserted = [];
     require('../models/db').mockImplementation((table) => {
       if (table !== 'sms_log') throw new Error(`unexpected table: ${table}`);
@@ -303,6 +376,13 @@ describe('TwilioService.sendSMS preSendCheck (provider-handoff gate)', () => {
   test('a caller transaction whose commit actually succeeded, but which threw a later error, does not duplicate the sms_log row', async () => {
     const trxInsert = jest.fn(async () => {});
     const trx = jest.fn((_table) => ({ insert: trxInsert }));
+    // codex #5018 r15/r16 P1 follow-up: dispatch()'s own in-transaction
+    // insert now takes a transaction-scoped advisory lock on `trx` (the
+    // SAME key the recovery insert already does) right before it inserts —
+    // a real knex trx carries `.raw` directly on the transaction object,
+    // same as `db`.
+    trx.raw = jest.fn(async () => ({}));
+    trx.transaction = jest.fn((cb) => cb(trx));
     const baseInsert = jest.fn(async () => {});
     require('../models/db').mockImplementation((table) => {
       if (table !== 'sms_log') throw new Error(`unexpected table: ${table}`);
@@ -345,6 +425,13 @@ describe('TwilioService.sendSMS preSendCheck (provider-handoff gate)', () => {
     const insertError = Object.assign(new Error('duplicate key value violates unique constraint'), { code: '23505' });
     const trxInsert = jest.fn(async () => { throw insertError; });
     const trx = jest.fn((_table) => ({ insert: trxInsert }));
+    // codex #5018 r15/r16 P1 follow-up: dispatch()'s own in-transaction
+    // insert now takes a transaction-scoped advisory lock on `trx` (the
+    // SAME key the recovery insert already does) right before it inserts —
+    // a real knex trx carries `.raw` directly on the transaction object,
+    // same as `db`.
+    trx.raw = jest.fn(async () => ({}));
+    trx.transaction = jest.fn((cb) => cb(trx));
     const baseInserted = [];
     require('../models/db').mockImplementation((table) => {
       if (table !== 'sms_log') throw new Error(`unexpected table: ${table}`);
@@ -391,6 +478,12 @@ describe('TwilioService.sendSMS preSendCheck (provider-handoff gate)', () => {
   test('a withSmsHandoff caller that does not opt into logInHandoff gets the post-handoff insert on the plain db, never on its own trx (origin/main behavior)', async () => {
     const trxInsert = jest.fn(async () => { throw new Error('non-opt-in caller must never insert on trx'); });
     const trx = jest.fn((_table) => ({ insert: trxInsert }));
+    // codex #5018 r15/r16 P1 follow-up: dispatch()'s own in-transaction
+    // insert now takes a transaction-scoped advisory lock on `trx` (the
+    // SAME key the recovery insert already does) right before it inserts —
+    // a real knex trx carries `.raw` directly on the transaction object,
+    // same as `db`.
+    trx.raw = jest.fn(async () => ({}));
     const baseInserted = [];
     const events = [];
     require('../models/db').mockImplementation((table) => {

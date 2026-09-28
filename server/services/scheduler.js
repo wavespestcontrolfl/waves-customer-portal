@@ -1753,7 +1753,10 @@ function initScheduledJobs() {
   // same 5-minute cadence as reschedule-link-promises: stages newly-extracted
   // calls and dispatches whatever 2-hour/8am-ET delay has elapsed.
   cron.schedule('0 */5 * * * *', async () => {
-    if (!isEnabled('callBookingLinkText')) return;
+    // codex round-3 P2: no top-level gate return here — sweep() itself
+    // still runs (and still gates staging/dispatch internally) with the
+    // gate off, because it also owns the manual-send consultation-link
+    // attempt row housekeeping, which must not depend on this gate.
     try {
       const { runExclusive } = require('../utils/cron-lock');
       const result = await runExclusive('call-booking-link-text', () => callBookingLinkText.sweep());
@@ -3386,6 +3389,51 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY 15 MIN — Same-trip first-application billing-alert sweep. A
+  // reserved-accept slot that sells 2+ recurring programs mints ONE
+  // combined first-application invoice, linked to the reserved (priced)
+  // visit; the same-trip sibling is left unpriced on purpose (covered by
+  // that invoice while both share a date). If a later reschedule pulls the
+  // sibling onto a different day, the invoice still charges for both. This
+  // sweep re-derives every OPEN (non-settled) first-application invoice's
+  // estimate group fresh and opens/refreshes or clears ONE durable admin
+  // billing alert per estimate, telling the office to split it by hand —
+  // it never touches the invoice or any visit row, and never holds
+  // collection (owner ruling, 2026-09-27 redesign of #5021 — see
+  // first-application-sibling-split.js; supersedes the per-writer
+  // in-transaction alert that design used through round 9). No dedicated
+  // gate: same always-on shape as tech-late-detector/unassigned-overdue-
+  // detector above (an internal, idempotent, dedupe-keyed alert, no
+  // customer-facing side effect). runExclusive lives INSIDE
+  // runFirstApplicationSiblingSplitSweep itself, and this tick runs as a
+  // SCHEDULED tick (registered through utils/scheduled-cron, not node-cron
+  // directly), so runExclusive always takes runScheduled's waitForSlot
+  // path here — never the fire-and-forget request path. On a genuine
+  // 'no_connection' skip, runScheduled's own "no lock slot within
+  // SLOT_WAIT_MAX_MS" branch has ALREADY called recordMissedTick before
+  // returning (cron-lock.js) — a second recordJobStart/recordJobEnd pair
+  // here recorded the SAME missed tick twice (Codex P2: the adjacent
+  // followup-sla-watcher.js and call-commitments-watchdog.js cron entries
+  // carry this identical extra write and are not a correct model to copy;
+  // left as-is here since fixing shared cron-lock plumbing or those other
+  // jobs' entries is outside this module). This tick only throws, so the
+  // skip is still logged and the tick still counts as failed to whatever
+  // is watching this promise — job_health itself is left to the
+  // cron-lock wrapper alone.
+  // =========================================================================
+  cron.schedule('*/15 * * * *', async () => {
+    try {
+      const { runFirstApplicationSiblingSplitSweep } = require('./first-application-sibling-split');
+      const result = await runFirstApplicationSiblingSplitSweep();
+      if (result?.skipped && result.reason !== 'lease_held') {
+        throw new Error(`First-application sibling-split sweep tick skipped: ${result.reason || 'no_connection'}`);
+      }
+    } catch (err) {
+      logger.error(`[first-application-sibling-split] sweep tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY 2 MIN — Cloudflare Pages build status for open blog-publish PRs.
   // Updates astro_preview_url once the preview deploy succeeds, or flips
   // the post to build_failed if it blows up. runExclusive: this tick
@@ -4071,52 +4119,15 @@ function initScheduledJobs() {
             // any error — an unknowable account state must not send figures.
             let amountsStale = false;
             if (!anchorStale && claimMeta.human_authored !== true && msg.customer_id) {
-              const AMOUNT_FORMS_RE = /(?:\$|\bUSD\s?)\s?\d[\d,]*(?:\.\d{1,2})?|\b\d[\d,]*(?:\.\d{1,2})?\s?(?:dollars|bucks|usd)\b/gi;
-              const bodyAmounts = (String(msg.message_body || '').match(AMOUNT_FORMS_RE) || [])
-                .map((a) => Math.round(Number(a.replace(/[^\d.]/g, '')) * 100));
-              if (bodyAmounts.length) {
-                try {
-                  const ContextAggregator = require('./context-aggregator');
-                  const customerRow = await db('customers').where({ id: msg.customer_id }).first();
-                  const ctx = customerRow ? await ContextAggregator.getContextForCustomer(customerRow) : null;
-                  const cents = (v) => Math.round(Number(v) * 100);
-                  // CURRENT OBLIGATIONS ONLY (Codex r10): a paid balance
-                  // moves the same figure into recent payments, so a union
-                  // set would keep authorizing the stale "your balance is
-                  // $X" claim. At fire time only what the customer still
-                  // owes may validate an amount; a just-paid figure blocks.
-                  // Payment ACKNOWLEDGEMENTS may cite payment-history
-                  // amounts (Codex r11: "we received your $95 payment") —
-                  // but only when the body actually reads as an ack, so a
-                  // stale "your balance is $X" can never re-authorize via
-                  // the payment row (r10).
-                  // "payment" must appear NEAR the ack verb (Codex r12) — a
-                  // generic "Thanks for reaching out — your balance is $X"
-                  // must not unlock payment-history amounts.
-                  const ackBody = /\b(?:received|processed|went through)\b[^.\n]{0,30}\bpayment\b|\bpayment\b[^.\n]{0,30}\b(?:received|processed|went through)\b|\bthank(?:s| you)\b[^.\n]{0,25}\bpayment\b/i.test(String(msg.message_body || ''));
-                  // Monthly-membership dues are a CURRENT obligation, so they
-                  // belong in this set on the same terms as the balance
-                  // (codex #3141 r3). Without them a reviewed "$98.50/mo"
-                  // reply that an operator scheduled instead of sending
-                  // immediately was deterministically retired here as a stale
-                  // amount, so the monthly lane could be drafted and approved
-                  // but never actually sent. Shared definition with the
-                  // drafter's draft-time guard — these two lists had already
-                  // drifted once — and it re-reads the FRESH context above,
-                  // so a lane that stopped collecting between review and fire
-                  // publishes nothing and correctly blocks the send.
-                  const authorized = new Set([
-                    ctx?.billing?.outstandingBalance > 0 ? cents(ctx.billing.outstandingBalance) : null,
-                    ctx?.billing?.openInvoice?.amountDue != null ? cents(ctx.billing.openInvoice.amountDue) : null,
-                    ...ContextAggregator.authorizedDuesCents(ctx),
-                    ...(ackBody ? (ctx?.billing?.recentPayments || []).map((p) => (p?.amount != null ? cents(p.amount) : null)) : []),
-                  ].filter((v) => Number.isFinite(v)));
-                  amountsStale = bodyAmounts.some((a) => !authorized.has(a));
-                } catch (err) {
-                  logger.warn(`[scheduler] amount revalidation failed for scheduled sms ${msg.id}: ${err.message}; blocking send`);
-                  amountsStale = true;
-                }
-              }
+              // Shared with the immediate Agent Review send since PR #5119
+              // follow-up #2 (sms-amount-recheck): fresh context, current
+              // obligations only, payment history only for an ack, fail
+              // closed on any error.
+              const { outgoingAmountsStale } = require('./sms-amount-recheck');
+              const amountDecision = await db('agent_decisions').where({ id: claimMeta.agent_decision_id }).first('prompt_version');
+              amountsStale = (await outgoingAmountsStale({
+                customerId: msg.customer_id, body: msg.message_body, promptVersion: amountDecision?.prompt_version ?? null,
+              })).stale;
             }
             // OPEN TIMES revalidation (Codex P2): the same "can't see it
             // from an inbound-anchored check" gap as the amount check above
@@ -4187,11 +4198,15 @@ function initScheduledJobs() {
               try {
                 // Scoped to drafts that recorded an escalation (Codex r5):
                 // wording alone never blocks a scheduled reply.
-                const { followupPromiseIsStale } = require('./sms-followup-sla');
+                const { followupPromiseBlockReason } = require('./sms-followup-sla');
                 const slaDecision = await db('agent_decisions')
                   .where({ id: claimMeta.agent_decision_id })
-                  .first('input_snapshot', 'prompt_version');
-                if (followupPromiseIsStale({ inputSnapshot: slaDecision?.input_snapshot, promptVersion: slaDecision?.prompt_version, body: msg.message_body })) slaStale = true;
+                  .first('input_snapshot', 'prompt_version', 'suggested_message', 'created_at');
+                if (followupPromiseBlockReason({
+                  inputSnapshot: slaDecision?.input_snapshot, promptVersion: slaDecision?.prompt_version,
+                  originalBody: slaDecision?.suggested_message ?? null, body: msg.message_body,
+                  draftedAt: slaDecision?.created_at ?? null,
+                })) slaStale = true;
               } catch (err) {
                 logger.warn(`[scheduler] SLA phrase revalidation failed for scheduled sms ${msg.id}: ${err.message}; blocking send`);
                 slaStale = true;

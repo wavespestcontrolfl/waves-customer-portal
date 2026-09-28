@@ -276,7 +276,13 @@ function evaluate(draft, brief, context = {}) {
 
 // ── HARD checks ──────────────────────────────────────────────────────
 
-function checkSchemaValid(draft) {
+function checkSchemaValid(draft, brief) {
+  // A refresh cannot change schema: publishRefresh starts from the live
+  // frontmatter and overrides only the editable meta fields
+  // (REFRESH_EDITABLE_META_FIELDS), and the layout renders the page's
+  // JSON-LD. Grading the draft's own schema block hard-failed refreshes
+  // over a field that never publishes (prod run b48a687d: no_schema_block).
+  if (brief?.action_type === 'refresh_existing_page') return { ok: true, reason: 'refresh_schema_frozen_to_live_page' };
   const schema = draft.schema || draft.frontmatter?.schema;
   if (!schema) return { ok: false, reason: 'no_schema_block' };
   if (typeof schema === 'object') return { ok: true };

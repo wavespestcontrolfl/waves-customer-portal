@@ -36,6 +36,7 @@ const { CARD_HOLD } = require('./pricing-engine/constants');
 const { isInvoiceCollectibleStatus } = require('./invoice-helpers');
 const { etDateString } = require('../utils/datetime-et');
 const { explicitBillingChannels } = require('./billing-delivery-channels');
+const { isRecurringLineageVisit } = require('../utils/recurring-lineage');
 
 function isCardHoldEnabled() {
   const flag = process.env.ONE_TIME_CARD_HOLD;
@@ -641,10 +642,11 @@ const DEAD_VISIT_STATUSES = ['cancelled', 'rescheduled'];
 // visit keeps the stricter cancelled/rescheduled test above: only those
 // two states say "the booking moved", which is the orphan premise.
 const NON_LIVE_VISIT_STATUSES = ['cancelled', 'rescheduled', 'completed', 'skipped', 'no_show'];
-// Canonical recurring-lineage test (pay-v2.js): a series "booster" visit
-// deliberately carries is_recurring=false with recurring_parent_id set —
-// a bare is_recurring check admits it as one-time (r3 P1).
-const isRecurringLineageVisit = (v) => !!(v && (v.is_recurring === true || v.recurring_parent_id || v.recurring_pattern));
+// Canonical recurring-lineage test — extracted to utils/recurring-lineage.js
+// (pay-v2.js origin; a series "booster" visit deliberately carries
+// is_recurring=false with recurring_parent_id set, so a bare is_recurring
+// check admits it as one-time, r3 P1) so visit-prep.js shares the exact
+// same predicate.
 
 async function detectOrphanedHoldForCompletion(scheduledServiceId) {
   if (!isRescheduleAdoptEnabled()) return null;
