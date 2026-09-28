@@ -37,6 +37,9 @@ const { enqueueServiceReportV1EmailDelivery } = require('../service-report/deliv
 const { enqueueReceiptDelivery } = require('../receipt-delivery-queue');
 const { isUserFeatureEnabled } = require('../feature-flags');
 const { publicPortalUrl } = require('../../utils/portal-url');
+const {
+  getServiceReportEmailRecipients, getReceiptEmailRecipients, getPrimaryContact, PREFS_UNAVAILABLE,
+} = require('../customer-contact');
 
 const CLOSEOUT_REPAIR_TOOLS = [
   {
@@ -126,6 +129,26 @@ async function receiptBlocker(invoiceId, knex) {
   return null;
 }
 
+function maskEmail(address) {
+  const [local, domain] = String(address || '').split('@');
+  return domain ? `${local.slice(0, 1)}***@${domain}` : null;
+}
+
+function maskPhone(phone) {
+  const digits = String(phone || '').replace(/\D/g, '');
+  return digits.length >= 4 ? `***${digits.slice(-4)}` : null;
+}
+
+// The customer + contact prefs the delivery workers resolve recipients from,
+// read once per plan. A failed prefs read stays PREFS_UNAVAILABLE so the
+// shared resolvers fail closed (no recipients) exactly as the workers do.
+async function loadContact(customerId, knex) {
+  if (!customerId) return { customer: null, prefs: PREFS_UNAVAILABLE };
+  const customer = await knex('customers').where({ id: customerId }).first();
+  const prefs = await knex('notification_prefs').where({ customer_id: customerId }).first().catch(() => PREFS_UNAVAILABLE);
+  return { customer: customer || null, prefs: prefs || {} };
+}
+
 /**
  * Build the repair plan for a loaded closeout status. Pure apart from the
  * precondition reads — never writes. Deterministic for the same state so the
@@ -155,6 +178,12 @@ async function planCloseoutRepair(status, { knex = db } = {}) {
       .first('id', 'status', 'report_template_version', 'report_view_token', 'structured_notes', 'recap_sms_sent_at', 'customer_id')
     : null;
 
+  let contact = null;
+  const getContact = async () => {
+    contact = contact || await loadContact(status.visit?.customerId || null, knex);
+    return contact;
+  };
+
   const reportFact = facts.report;
   const publishable = reportFact?.state === 'pending'
     && ['no_report_artifact', 'form_submitted_not_published'].includes(reportFact.reason)
@@ -167,7 +196,12 @@ async function planCloseoutRepair(status, { knex = db } = {}) {
   const emailCandidate = deliveryFact?.state === 'pending'
     && (deliveryFact.reason === 'not_enqueued' || (publishable && deliveryFact.reason === 'report_not_published'));
   if (emailCandidate) {
-    const blocker = await reportEmailBlocker(status, recordRow, knex);
+    let blocker = await reportEmailBlocker(status, recordRow, knex);
+    // Same resolver the delivery worker sends through — the card names who
+    // gets the email, and a plan with nobody to email is not offered.
+    const { customer, prefs } = blocker ? {} : await getContact();
+    const recipients = blocker ? [] : getServiceReportEmailRecipients(customer, prefs).map((r) => maskEmail(r.email)).filter(Boolean);
+    if (!blocker && !recipients.length) blocker = 'no report email recipient on file, or report emails are turned off';
     if (blocker) skipped.push({ fact: 'reportDelivery', reason: deliveryFact.reason, why: blocker });
     else {
       steps.push({
@@ -175,6 +209,7 @@ async function planCloseoutRepair(status, { knex = db } = {}) {
         fact: 'reportDelivery',
         reason: deliveryFact.reason,
         service_record_id: recordRow.id,
+        recipients,
         ...(publishable ? { depends_on: 'publish_report' } : {}),
       });
     }
@@ -184,7 +219,16 @@ async function planCloseoutRepair(status, { knex = db } = {}) {
   if (invDelivery?.state === 'pending' && invDelivery.reason === 'paid_receipt_not_sent' && invDelivery.invoiceId) {
     const blocker = await receiptBlocker(invDelivery.invoiceId, knex);
     if (blocker) skipped.push({ fact: 'invoiceDelivery', reason: invDelivery.reason, why: blocker });
-    else steps.push({ step: 'queue_receipt', fact: 'invoiceDelivery', reason: invDelivery.reason, invoice_id: invDelivery.invoiceId });
+    else {
+      // The receipt worker's own resolvers: the billing/primary email and
+      // the primary phone; the customer's receipt settings pick the legs.
+      const { customer, prefs } = await getContact();
+      const recipients = [
+        ...getReceiptEmailRecipients(customer, prefs).map((r) => maskEmail(r.email)),
+        maskPhone(customer ? getPrimaryContact(customer).phone : null),
+      ].filter(Boolean);
+      steps.push({ step: 'queue_receipt', fact: 'invoiceDelivery', reason: invDelivery.reason, invoice_id: invDelivery.invoiceId, recipients });
+    }
   }
 
   const planned = new Set(steps.map((s) => s.fact));
@@ -200,7 +244,10 @@ async function planCloseoutRepair(status, { knex = db } = {}) {
     }
   }
   for (const s of skipped) manual.push({ fact: s.fact, state: facts[s.fact].state, reason: s.reason, fix: `Not repairable here: ${s.why}.` });
-  return { steps, manual, skipped };
+  // Who the card is about — resolved by the server, never the model.
+  const who = steps.length ? (await getContact()).customer : null;
+  const customerName = who ? [who.first_name, who.last_name].filter(Boolean).join(' ') || null : null;
+  return { steps, manual, skipped, customerName };
 }
 
 async function runStep(step, { knex = db } = {}) {
@@ -270,7 +317,12 @@ function previewFromPlan(serviceId, status, plan) {
     service_id: serviceId,
     service_record_id: status.reportRecordId || null,
     customer_id: status.visit?.customerId || null,
-    steps: plan.steps.map((s) => ({ ...s, effect: STEP_EFFECTS[s.step].label })),
+    customer_name: plan.customerName || null,
+    visit: [status.visit?.scheduledDate, status.visit?.serviceType].filter(Boolean).join(' · ') || null,
+    steps: plan.steps.map((s) => ({
+      ...s,
+      effect: s.recipients ? `${STEP_EFFECTS[s.step].label} — to ${s.recipients.length ? s.recipients.join(', ') : 'no recipient on file'}` : STEP_EFFECTS[s.step].label,
+    })),
     manual: plan.manual,
     notifies_customer: plan.steps.some((s) => STEP_EFFECTS[s.step].kind === 'comms'),
     note_to_operator: 'PLAN ONLY — nothing was changed. Confirm runs exactly these steps; the open items under manual are not touched.',

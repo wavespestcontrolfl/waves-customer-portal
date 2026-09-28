@@ -25,11 +25,15 @@ const SVC = '00000000-0000-0000-0000-00000000d001';
 
 // Table-keyed fake: first() answers from `tables`, writes are not expected
 // through this handle (every write goes through a mocked service function).
+// Fixture customer (no real PII): the recipient resolvers read it.
+const CUSTOMER = { id: 'cust-1', first_name: 'Pat', last_name: 'Tester', email: 'pat@example.com', phone: '9415550100' };
+
 function fakeDb(tables) {
+  const all = { customers: [CUSTOMER], ...tables };
   return jest.fn((table) => {
     const chain = {
       where: () => chain,
-      first: async () => (tables[table] || [])[0],
+      first: async () => (all[table] || [])[0],
     };
     return chain;
   });
@@ -175,7 +179,10 @@ test('confirmed: runs the steps in order and returns an itemized receipt', async
   const minted = { ...RECORD, report_view_token: 'b'.repeat(32) };
   let tokenMinted = false;
   db.mockImplementation(jest.fn((table) => {
-    const chain = { where: () => chain, first: async () => (table === 'service_records' ? (tokenMinted ? minted : RECORD) : undefined) };
+    const chain = {
+      where: () => chain,
+      first: async () => (table === 'service_records' ? (tokenMinted ? minted : RECORD) : table === 'customers' ? CUSTOMER : undefined),
+    };
     return chain;
   }));
   ensureReportToken.mockImplementation(async () => { tokenMinted = true; return 'b'.repeat(32); });
@@ -263,7 +270,7 @@ test('report steps bind to the record owning the report artifact, not the primar
   db.mockImplementation(jest.fn((table) => {
     const chain = {
       where: (w) => { if (table === 'service_records') seen.push(w.id); return chain; },
-      first: async () => (table === 'service_records' ? sibling : undefined),
+      first: async () => (table === 'service_records' ? sibling : table === 'customers' ? CUSTOMER : undefined),
     };
     return chain;
   }));
@@ -271,4 +278,32 @@ test('report steps bind to the record owning the report artifact, not the primar
   expect(preview.steps).toEqual([expect.objectContaining({ step: 'queue_report_email', service_record_id: 'rec-sibling' })]);
   expect(preview.service_record_id).toBe('rec-sibling');
   expect(seen).not.toContain('rec-primary');
+});
+
+test('the card names the customer, the visit and the masked recipients, and nobody-to-email is not offered', async () => {
+  getCloseoutStatus.mockResolvedValue({
+    ...status({ facts: {
+      ...MISSING_REPORT,
+      invoiceDelivery: { state: 'pending', reason: 'paid_receipt_not_sent', invoiceId: 'inv-1' },
+    } }),
+    visit: { customerId: 'cust-1', technicianId: 'tech-1', scheduledDate: '2026-09-27', serviceType: 'Pest Control' },
+  });
+  db.mockImplementation(fakeDb({ service_records: [RECORD], invoices: [{ id: 'inv-1', status: 'paid', receipt_sent_at: null }] }));
+  const preview = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
+  expect(preview.customer_name).toBe('Pat Tester');
+  expect(preview.visit).toBe('2026-09-27 · Pest Control');
+  const email = preview.steps.find((s) => s.step === 'queue_report_email');
+  expect(email.recipients).toEqual(['p***@example.com']);
+  expect(preview.steps.find((s) => s.step === 'queue_receipt').recipients).toEqual(['p***@example.com', '***0100']);
+  expect(JSON.stringify(preview)).not.toMatch(/pat@example\.com|9415550100/);
+  const contract = buildContract({ toolName: 'repair_closeout', params: { service_id: SVC }, preview });
+  const labels = contract.effects.map((e) => e.label).join('\n');
+  expect(labels).toMatch(/Visit: 2026-09-27 · Pest Control — Pat Tester/);
+  expect(labels).toMatch(/report email.*to p\*\*\*@example\.com/);
+
+  // Report emails turned off for this customer: the email step is not offered.
+  db.mockImplementation(fakeDb({ service_records: [RECORD], notification_prefs: [{ customer_id: 'cust-1', service_completed: false }], invoices: [{ id: 'inv-1', status: 'paid', receipt_sent_at: null }] }));
+  const off = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
+  expect(off.steps.map((s) => s.step)).toEqual(['publish_report', 'queue_receipt']);
+  expect(off.manual).toEqual(expect.arrayContaining([expect.objectContaining({ fact: 'reportDelivery', fix: expect.stringMatching(/no report email recipient/) })]));
 });

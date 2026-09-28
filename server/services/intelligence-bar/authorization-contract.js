@@ -604,6 +604,7 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   // the open items the confirm will NOT touch — never a flattened dump of
   // the plan object.
   if (toolName === 'repair_closeout' && Array.isArray(preview?.steps)) {
+    push('customer', `Visit: ${preview.visit || preview.service_id} — ${preview.customer_name || preview.customer_id || 'customer unresolved'}`);
     for (const st of preview.steps) {
       push(st.effect && /email|receipt/i.test(st.step) ? 'comms' : 'operational', String(st.effect || st.step));
     }
