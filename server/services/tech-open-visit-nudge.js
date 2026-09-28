@@ -37,14 +37,18 @@
  * has been read fresh off the technicians row and cleared by
  * technician-eligibility's isAssignable() + tech-line's usableCell(), i.e.
  * the verified phone of a currently active, field-dispatchable technician,
- * never an arbitrary caller-supplied number. It also passes `allowOwnerSms`:
- * the owner is the only tech today, and an owner-phone internal_alert is
- * otherwise redirected into the admin bell rather than texted.
+ * never an arbitrary caller-supplied number. The owner's technicians.phone is
+ * the office line, so for a tech whose phone is a known owner number the text
+ * goes to the owner's personal cell (ADAM_PHONE) instead (recipientFor). It
+ * also passes `allowOwnerSms`: the owner is the only tech today, and an
+ * owner-phone internal_alert is otherwise redirected into the admin bell
+ * rather than texted. A tech marked out for today (technician_absences) is
+ * skipped.
  */
 const db = require('../models/db');
 const logger = require('./logger');
 const TwilioService = require('./twilio');
-const { isAssignable } = require('./technician-eligibility');
+const { isAssignable, absentTechDays } = require('./technician-eligibility');
 const { usableCell } = require('./tech-line');
 const { etDateString, etParts } = require('../utils/datetime-et');
 const { publicPortalUrl } = require('../utils/portal-url');
@@ -179,6 +183,24 @@ function dedupeKeyFor(technicianId, etDate) {
   return `${NOTIFICATION_TYPE}:${technicianId}:${etDate}`;
 }
 
+// Where the text goes: the tech's own cell, or — for the owner, whose
+// technicians.phone is the office line (tech-line.js usableCell note) — the
+// owner's personal cell (ADAM_PHONE, the number owner alerts already use).
+// Both pass usableCell, so a Waves line is never the recipient.
+function recipientFor(tech) {
+  const cell = usableCell(tech);
+  if (cell) return cell;
+  if (!tech.phone || !TwilioService.isKnownOwnerPhone(tech.phone)) return null;
+  return usableCell({ id: tech.id, phone: process.env.ADAM_PHONE });
+}
+
+// True only when nothing reached the provider. 'uncertain' may already be
+// on the handset and 'accepted' is sent; a result with no outcome is a local
+// refusal (guard, not configured) and sent nothing.
+function definitelyNotSent(deliveryOutcome) {
+  return deliveryOutcome !== 'uncertain' && deliveryOutcome !== 'accepted';
+}
+
 // Claims today's slot for this technician. Returns true when THIS call won
 // the claim (the row was inserted) — false when a dedupe_key collision means
 // either an earlier run today already claimed it, or a concurrent replica
@@ -233,6 +255,11 @@ async function runTechOpenVisitNudge({ now = new Date() } = {}) {
 
   let sent = 0;
   let skipped = 0;
+  // A tech marked out today keeps their stops until a dispatcher moves them
+  // (tech-out.js) — never tell them to close visits they didn't run.
+  const absent = groups.length
+    ? await absentTechDays(db, { dateFrom: etDate, dateTo: etDate, technicianIds: groups.map((g) => g.tech.id) })
+    : new Set();
 
   for (const { tech, visits } of groups) {
     if (!isAssignable(tech)) {
@@ -240,7 +267,12 @@ async function runTechOpenVisitNudge({ now = new Date() } = {}) {
       skipped += 1;
       continue;
     }
-    const cell = usableCell(tech);
+    if (absent.has(`${tech.id}:${etDate}`)) {
+      logger.info(`[tech-open-visit-nudge] skip ${tech.id}: marked out today`);
+      skipped += 1;
+      continue;
+    }
+    const cell = recipientFor(tech);
     if (!cell) {
       logger.info(`[tech-open-visit-nudge] skip ${tech.id}: no usable phone`);
       skipped += 1;
@@ -270,7 +302,8 @@ async function runTechOpenVisitNudge({ now = new Date() } = {}) {
         messageType: 'internal_alert',
         // Cleared above: tech.id came off the assignable-technician row
         // this run just read, and `cell` is that SAME row's own usable
-        // phone — never a caller-supplied or unverified number.
+        // phone (or, for the owner, the configured ADAM_PHONE) — never a
+        // caller-supplied or unverified number.
         allowUnknownInternalAlertRecipient: true,
         // The owner is today's only tech, so this phone IS a known owner
         // phone — without the opt-out, twilio.js redirects an owner-phone
@@ -280,17 +313,21 @@ async function runTechOpenVisitNudge({ now = new Date() } = {}) {
         allowOwnerSms: true,
       });
       if (result && result.success === false) {
-        // A definite refusal sent nothing — give the day's slot back so a
-        // re-run can retry. A throw (below) keeps it: the text may already
-        // be out, and a second copy is worse than a missed one.
+        // Nothing went out → give the day's slot back so a re-run can
+        // retry. An uncertain outcome keeps it: the text may already be on
+        // the phone, and a second copy is worse than a missed one.
         logger.warn(`[tech-open-visit-nudge] send failed for ${tech.id}: ${result.error || result.code || 'unknown'}`);
-        await releaseClaim(tech.id, etDate);
+        if (definitelyNotSent(result.deliveryOutcome)) await releaseClaim(tech.id, etDate);
         skipped += 1;
       } else {
         sent += 1;
       }
     } catch (err) {
+      // sendSMS throws a provider rejection with providerOutcome attached;
+      // only an explicit not_sent is safe to retry — a bare throw keeps the
+      // claim for the same reason an uncertain outcome does.
       logger.error(`[tech-open-visit-nudge] send threw for ${tech.id}: ${err.message}`);
+      if (err?.providerOutcome?.deliveryOutcome === 'not_sent') await releaseClaim(tech.id, etDate);
       skipped += 1;
     }
   }
@@ -312,5 +349,7 @@ module.exports = {
     dedupeKeyFor,
     claimToday,
     releaseClaim,
+    recipientFor,
+    definitelyNotSent,
   },
 };

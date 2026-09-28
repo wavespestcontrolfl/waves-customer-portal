@@ -5,7 +5,7 @@
 // the internal-alert recipient override.
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../services/twilio', () => ({ sendSMS: jest.fn() }));
+jest.mock('../services/twilio', () => ({ sendSMS: jest.fn(), isKnownOwnerPhone: jest.fn(() => false) }));
 
 const db = require('../models/db');
 const TwilioService = require('../services/twilio');
@@ -20,6 +20,8 @@ function chain(overrides = {}) {
     where: jest.fn(() => c),
     whereIn: jest.fn(() => c),
     whereNotNull: jest.fn(() => c),
+    whereNull: jest.fn(() => c),
+    whereBetween: jest.fn(() => c),
     orderBy: jest.fn(() => c),
     select: jest.fn().mockResolvedValue([]),
     insert: jest.fn(() => c),
@@ -56,6 +58,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   delete process.env[GATE];
   TwilioService.sendSMS.mockResolvedValue({ success: true, sid: 'SM123' });
+  TwilioService.isKnownOwnerPhone.mockReturnValue(false);
 });
 
 describe('gate', () => {
@@ -326,5 +329,76 @@ describe('pure helpers', () => {
 
   test('dedupeKeyFor is stable per technician + ET date', () => {
     expect(_test.dedupeKeyFor('tech-a', '2026-09-28')).toBe('tech_open_visit_nudge:tech-a:2026-09-28');
+  });
+});
+
+describe('recipient, absence, and failure outcomes (Codex r1)', () => {
+  beforeEach(() => { process.env[GATE] = 'true'; });
+  afterEach(() => { delete process.env.ADAM_PHONE; });
+
+  test("the owner's office-line tech phone is swapped for the owner's own cell", async () => {
+    // Waves-owned office line on the owner's technicians row (usableCell refuses it).
+    const officeLine = '+19413187612';
+    process.env.ADAM_PHONE = '941-555-0199';
+    TwilioService.isKnownOwnerPhone.mockImplementation((p) => String(p).replace(/\D/g, '').endsWith('9413187612'));
+    const rows = [visitRow({ id: 'v1', techId: 'tech-owner', techPhone: officeLine })];
+    db.mockImplementation((table) => {
+      if (table === 'scheduled_services as s') return chain({ select: jest.fn().mockResolvedValue(rows) });
+      return chain();
+    });
+    const r = await runTechOpenVisitNudge({ now: new Date('2026-09-28T23:00:00Z') });
+    expect(r.sent).toBe(1);
+    expect(TwilioService.sendSMS).toHaveBeenCalledWith('+19415550199', expect.any(String), expect.objectContaining({ allowOwnerSms: true }));
+    expect(TwilioService.sendSMS.mock.calls[0][0]).not.toBe(officeLine);
+  });
+
+  test('a Waves line that is NOT an owner phone still gets no text', async () => {
+    process.env.ADAM_PHONE = '941-555-0199';
+    const rows = [visitRow({ id: 'v1', techId: 'tech-b', techPhone: '+19413187612' })];
+    db.mockImplementation((table) => {
+      if (table === 'scheduled_services as s') return chain({ select: jest.fn().mockResolvedValue(rows) });
+      return chain();
+    });
+    const r = await runTechOpenVisitNudge({ now: new Date('2026-09-28T23:00:00Z') });
+    expect(r).toMatchObject({ sent: 0, skipped: 1 });
+    expect(TwilioService.sendSMS).not.toHaveBeenCalled();
+  });
+
+  test('a tech marked out today is skipped — no claim, no text', async () => {
+    const rows = [visitRow({ id: 'v1', techId: 'tech-a' })];
+    let notifChain;
+    db.mockImplementation((table) => {
+      if (table === 'scheduled_services as s') return chain({ select: jest.fn().mockResolvedValue(rows) });
+      if (table === 'technician_absences') {
+        return chain({ select: jest.fn().mockResolvedValue([{ technician_id: 'tech-a', absence_date: '2026-09-28' }]) });
+      }
+      if (table === 'tech_notifications') { notifChain = chain(); return notifChain; }
+      return chain();
+    });
+    const r = await runTechOpenVisitNudge({ now: new Date('2026-09-28T23:00:00Z') });
+    expect(r).toMatchObject({ sent: 0, skipped: 1 });
+    expect(TwilioService.sendSMS).not.toHaveBeenCalled();
+    expect(notifChain).toBeUndefined();
+  });
+
+  test('a thrown send marked not_sent releases the claim; an uncertain result keeps it', async () => {
+    const rows = [visitRow({ id: 'v1', techId: 'tech-a' })];
+    const run = async () => {
+      const chains = [];
+      db.mockImplementation((table) => {
+        if (table === 'scheduled_services as s') return chain({ select: jest.fn().mockResolvedValue(rows) });
+        if (table === 'tech_notifications') { const c = chain({ del: jest.fn().mockResolvedValue(1) }); chains.push(c); return c; }
+        return chain();
+      });
+      await runTechOpenVisitNudge({ now: new Date('2026-09-28T23:00:00Z') });
+      return chains.some((c) => c.del.mock.calls.length > 0);
+    };
+
+    const rejected = Object.assign(new Error('Failed to send SMS: 21211'), { providerOutcome: { sent: false, deliveryOutcome: 'not_sent' } });
+    TwilioService.sendSMS.mockRejectedValueOnce(rejected);
+    expect(await run()).toBe(true);
+
+    TwilioService.sendSMS.mockResolvedValueOnce({ success: false, deliveryOutcome: 'uncertain', error: 'timeout' });
+    expect(await run()).toBe(false);
   });
 });
