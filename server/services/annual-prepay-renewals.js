@@ -7683,7 +7683,7 @@ async function invoiceDunningActiveToday(invoiceId, { now = new Date(), todayYmd
   try {
     const row = await db('invoice_followup_sequences')
       .where({ invoice_id: invoiceId })
-      .first('status', 'last_touch_at', 'next_touch_at');
+      .first('status', 'last_touch_at', 'next_touch_at', 'step_index', 'anchor_at', 'created_at');
     if (!row) return false;
     // A REAL recent send suppresses regardless of status — the FINAL step of
     // a sequence stamps last_touch_at and flips the row to 'completed' in the
@@ -7705,12 +7705,19 @@ async function invoiceDunningActiveToday(invoiceId, { now = new Date(), todayYmd
       // no dunning ran either day — the customer would reach the visit with no
       // pre-visit contact at all.
       const followupConfig = require('../config/invoice-followups');
+      // The day the touch really fires (codex #5126 r1): this 10:12 check
+      // runs before the follow-up job, which under the Day 90 ladder
+      // (GATE_DUNNING_LADDER_90) moves a legacy Day 7/14 touch to Day 10/17
+      // without sending it today. A step past the live cadence fires nothing.
+      const nextTouchAt = process.env.GATE_DUNNING_LADDER_90 === 'true'
+        ? await require('./invoice-followups').liveNextTouchAt(invoiceId, row)
+        : (Number(row.step_index) >= followupConfig.steps.length ? null : row.next_touch_at);
       const sendDays = new Set(followupConfig?.sendWindow?.daysOfWeek || []);
       const today = todayYmd || etDateString(now);
       const todayEtDow = new Date(`${today}T12:00:00Z`).getUTCDay();
-      if (sendDays.has(todayEtDow)) {
+      if (nextTouchAt && sendDays.has(todayEtDow)) {
         const endOfTodayEt = parseETDateTime(`${today} 23:59:59`);
-        if (new Date(row.next_touch_at) <= endOfTodayEt) return true;
+        if (new Date(nextTouchAt) <= endOfTodayEt) return true;
       }
     }
     return false;

@@ -630,40 +630,42 @@ async function runPending() {
 }
 
 /**
- * Day 90 ladder (GATE_DUNNING_LADDER_90): a sequence that ran out of the
- * legacy Day 3/7/14/30 steps on a still-open invoice picks up again at its
- * Day 60 step. Only a natural finish qualifies: step_index is exactly the
- * legacy step count, while a payment or settlement finish keeps an earlier
- * index. The same invoice guards as the send batch apply. Each revival is
- * guarded on the row still being that finished sequence, and a Day 60 or
- * Day 90 step already past its send day is passed over by the stale-touch
- * pass in the same run, never sent late.
+ * Day 90 ladder (GATE_DUNNING_LADDER_90): a sequence finished at the Day 60
+ * or Day 90 step on a still-open invoice picks up again at that step. That
+ * is a sequence that ran out of the legacy Day 3/7/14/30 steps, or one a
+ * payment finished at Day 60 or Day 90 whose invoice a dispute reopened.
+ * A payment finish before Day 30 keeps its lower index and stays with the
+ * legacy checker (hasActiveSequence). The same invoice guards as the send
+ * batch apply. Each revival is guarded on the row still being that
+ * finished sequence, and a step already past its send day is passed over by
+ * the stale-touch pass in the same run, never sent late.
  */
 async function reviveLegacyFinishedSequences() {
   const legacyCount = config.steps.length;
   const rows = await db('invoice_followup_sequences as s')
     .join('invoices as i', 's.invoice_id', 'i.id')
     .where('s.status', 'completed')
-    .where('s.step_index', legacyCount)
+    .where('s.step_index', '>=', legacyCount)
+    .where('s.step_index', '<', followupSteps().length)
     .whereNotIn('i.status', TERMINAL_INVOICE_STATUSES)
     .whereNull('i.payer_id')
     .where(function withdrawnExcluded() {
       this.whereNull('i.scheduled_send_error').orWhereNot('i.scheduled_send_error', 'like', 'payer_billed:%');
     })
     .select(
-      's.id', 's.anchor_at', 's.created_at',
+      's.id', 's.step_index', 's.anchor_at', 's.created_at',
       'i.sent_at as invoice_sent_at', 'i.sms_sent_at as invoice_sms_sent_at', 'i.created_at as invoice_created_at',
     );
   let revived = 0;
   for (const row of rows) {
-    const nextAt = computeNextTouchAt(sequenceAnchor(row), legacyCount);
+    const nextAt = computeNextTouchAt(sequenceAnchor(row), row.step_index);
     if (!nextAt) continue;
     const updated = await db('invoice_followup_sequences')
-      .where({ id: row.id, status: 'completed', step_index: legacyCount })
+      .where({ id: row.id, status: 'completed', step_index: row.step_index })
       .update({ updated_at: db.fn.now(), status: 'active', next_touch_at: nextAt });
     revived += Number(updated) || 0;
   }
-  if (revived) logger.info(`[invoice-followups] Day 90 ladder: ${revived} finished Day 30 sequence(s) resumed at Day 60`);
+  if (revived) logger.info(`[invoice-followups] Day 90 ladder: ${revived} finished sequence(s) resumed at Day 60 or Day 90`);
   return revived;
 }
 
@@ -2073,16 +2075,58 @@ async function sendNextTouchNow(invoiceId, { operatorInitiated = false } = {}) {
  * handled by the per-invoice sequence (so we skip the account-level reminder).
  */
 async function hasActiveSequence(invoiceId) {
-  // Under the Day 90 ladder a finished sequence still owns its invoice: the
-  // ladder ran the invoice's whole life, so the late-payment checker and the
-  // balance workflow must not pick it up afterwards. That handoff was behind
-  // most customers reminded by two systems within a week.
-  const owned = ['active', 'paused', 'autopay_hold', ...(ladderThrough90Live() ? ['completed'] : [])];
-  const seq = await db('invoice_followup_sequences')
+  const ladder = ladderThrough90Live();
+  const legacyCount = config.steps.length;
+  const query = db('invoice_followup_sequences')
     .where({ invoice_id: invoiceId })
-    .whereIn('status', owned)
-    .first();
+    .whereIn('status', ['active', 'paused', 'autopay_hold', ...(ladder ? ['completed'] : [])]);
+  if (ladder) {
+    // Under the Day 90 ladder a sequence that ran past the Day 30 end still
+    // owns its invoice, so the late-payment checker and the balance workflow
+    // do not pick it up afterwards (the handoff behind most customers
+    // reminded by two systems within a week). A payment finish before that
+    // (a lower step) does not: if a dispute reopens that invoice, the
+    // checker handles it as before (codex #5126 r1). Finishes at Day 60 or
+    // Day 90 on an open invoice are resumed by the ladder's next run.
+    query.whereNot(function paidBeforeDay30End() {
+      this.where('status', 'completed').where('step_index', '<', legacyCount);
+    });
+  } else {
+    // Gate off after the Day 90 ladder advanced an active row past Day 30:
+    // the legacy cadence never fires that step, so the row no longer holds
+    // the invoice and the legacy checker takes over (codex #5126 r1).
+    // Pauses and autopay holds keep holding it. Legacy rows never have an
+    // active step past the legacy count.
+    query.whereNot(function advancedByLadder() {
+      this.where('status', 'active').where('step_index', '>=', legacyCount);
+    });
+  }
+  const seq = await query.first();
   return !!seq;
+}
+
+/**
+ * When a sequence's next touch will actually fire, for readers outside this
+ * module that run before it (the annual-prepay reminder's same-day
+ * suppression, codex #5126 r1). Under the Day 90 ladder a touch stored on
+ * the legacy Day 7 or Day 14 fires on its Day 10 or Day 17, which this
+ * module's next run writes back. A step past the live cadence fires no
+ * touch at all. `seq` carries step_index, next_touch_at, anchor_at and
+ * created_at; the invoice supplies the send-time anchor when needed.
+ */
+async function liveNextTouchAt(invoiceId, seq) {
+  if (!seq?.next_touch_at) return null;
+  if (Number(seq.step_index) >= followupSteps().length) return null;
+  if (!ladderThrough90Live()) return seq.next_touch_at;
+  let anchored = seq;
+  if (!seq.anchor_at) {
+    const invoice = await db('invoices').where({ id: invoiceId }).first('sent_at', 'sms_sent_at', 'created_at');
+    anchored = {
+      ...seq, invoice_sent_at: invoice?.sent_at, invoice_sms_sent_at: invoice?.sms_sent_at, invoice_created_at: invoice?.created_at,
+    };
+  }
+  const due = computeNextTouchAt(sequenceAnchor(anchored), Number(seq.step_index));
+  return due && due.getTime() > new Date(seq.next_touch_at).getTime() ? due : seq.next_touch_at;
 }
 
 /**
@@ -2119,6 +2163,7 @@ module.exports = {
   hasActiveSequence,
   isDunningStopped,
   followupSteps,
+  liveNextTouchAt,
   skipStaleTouches,
   firstEligibleFireAt,
   STALE_TOUCH_GRACE_MS,

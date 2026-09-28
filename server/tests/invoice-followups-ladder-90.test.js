@@ -26,7 +26,9 @@ jest.mock('../utils/date-only', () => ({ formatDateOnly: jest.fn() }));
 
 const db = require('../models/db');
 const config = require('../config/invoice-followups');
-const { runPending, hasActiveSequence, followupSteps } = require('../services/invoice-followups');
+const {
+  runPending, hasActiveSequence, followupSteps, liveNextTouchAt,
+} = require('../services/invoice-followups');
 
 // Wednesday 2026-08-05 10:16 AM ET, inside the Tue–Fri send window.
 const NOW = new Date('2026-08-05T14:16:00Z');
@@ -111,26 +113,64 @@ describe('the cadence', () => {
   });
 });
 
-describe('a finished sequence still owns its invoice', () => {
-  test('gate off: only live sequences count', async () => {
-    let whereInArgs;
+describe('which sequences own their invoice', () => {
+  // Records the ownership query, including the whereNot clause's inner where().
+  function ownershipQuery(first) {
+    const recorded = { whereIn: null, notClauses: [] };
     db.mockImplementation(() => {
-      const q = { where: jest.fn(() => q), whereIn: jest.fn((...args) => { whereInArgs = args; return q; }), first: jest.fn(async () => undefined) };
+      const q = {
+        where: jest.fn(() => q),
+        whereIn: jest.fn((...args) => { recorded.whereIn = args; return q; }),
+        whereNot: jest.fn((fn) => {
+          const clause = [];
+          const b = { where: jest.fn((...args) => { clause.push(args); return b; }) };
+          fn.call(b, b);
+          recorded.notClauses.push(clause);
+          return q;
+        }),
+        first: jest.fn(async () => first),
+      };
       return q;
     });
+    return recorded;
+  }
+
+  test('gate off: live sequences, except an active one the Day 90 ladder moved past Day 30', async () => {
+    const recorded = ownershipQuery(undefined);
     await hasActiveSequence('inv-1');
-    expect(whereInArgs).toEqual(['status', ['active', 'paused', 'autopay_hold']]);
+    expect(recorded.whereIn).toEqual(['status', ['active', 'paused', 'autopay_hold']]);
+    expect(recorded.notClauses).toEqual([[['status', 'active'], ['step_index', '>=', 4]]]);
   });
 
-  test('gate on: a completed sequence counts too', async () => {
+  test('gate on: a sequence finished past the Day 30 end counts too; a payment finish before it does not', async () => {
     process.env.GATE_DUNNING_LADDER_90 = 'true';
-    let whereInArgs;
-    db.mockImplementation(() => {
-      const q = { where: jest.fn(() => q), whereIn: jest.fn((...args) => { whereInArgs = args; return q; }), first: jest.fn(async () => ({ id: 'seq-1' })) };
+    const recorded = ownershipQuery({ id: 'seq-1' });
+    await expect(hasActiveSequence('inv-1')).resolves.toBe(true);
+    expect(recorded.whereIn).toEqual(['status', ['active', 'paused', 'autopay_hold', 'completed']]);
+    expect(recorded.notClauses).toEqual([[['status', 'completed'], ['step_index', '<', 4]]]);
+  });
+});
+
+describe('when the next touch really fires (liveNextTouchAt)', () => {
+  test('gate off: the stored time, and nothing for a step past the legacy cadence', async () => {
+    const at = tenAmET('2026-08-05');
+    await expect(liveNextTouchAt('inv-1', { step_index: 1, next_touch_at: at })).resolves.toBe(at);
+    await expect(liveNextTouchAt('inv-1', { step_index: 4, next_touch_at: at })).resolves.toBeNull();
+  });
+
+  test('gate on: a legacy Day 7 touch really fires on its Day 10; a touch past the ladder fires nothing', async () => {
+    process.env.GATE_DUNNING_LADDER_90 = 'true';
+    db.mockImplementation((table) => {
+      if (table !== 'invoices') throw new Error(`unexpected table ${table}`);
+      const q = { where: jest.fn(() => q), first: jest.fn(async () => ({ sent_at: tenAmET('2026-07-29'), sms_sent_at: null, created_at: tenAmET('2026-07-29') })) };
       return q;
     });
-    await expect(hasActiveSequence('inv-1')).resolves.toBe(true);
-    expect(whereInArgs).toEqual(['status', ['active', 'paused', 'autopay_hold', 'completed']]);
+    await expect(liveNextTouchAt('inv-1', { step_index: 1, next_touch_at: tenAmET('2026-08-05') }))
+      .resolves.toEqual(tenAmET('2026-08-08'));
+    // An admin-shifted anchor needs no invoice read.
+    await expect(liveNextTouchAt('inv-1', { step_index: 0, anchor_at: tenAmET('2026-08-02'), next_touch_at: tenAmET('2026-08-05') }))
+      .resolves.toEqual(tenAmET('2026-08-05'));
+    await expect(liveNextTouchAt('inv-1', { step_index: 6, next_touch_at: tenAmET('2026-08-05') })).resolves.toBeNull();
   });
 });
 
@@ -149,9 +189,11 @@ describe('runPending under the Day 90 ladder', () => {
     const finished = seqRow({ id: 'seq-9', status: 'completed', step_index: 4, invoice_sent_at: tenAmET('2026-06-20') });
     const { joined, seqUpdates, transaction } = setupDb({ joinedReads: [[finished], []] });
     await runPending();
-    // The revival read selects only natural Day 30 finishes on open invoices.
+    // The revival read selects finishes at Day 60 or Day 90 on open invoices.
     const revivalWheres = joined[0].wheres;
-    expect(revivalWheres).toEqual(expect.arrayContaining([['s.status', 'completed'], ['s.step_index', 4]]));
+    expect(revivalWheres).toEqual(expect.arrayContaining([
+      ['s.status', 'completed'], ['s.step_index', '>=', 4], ['s.step_index', '<', 6],
+    ]));
     expect(joined[0].whereNotIn).toHaveBeenCalledWith('i.status', expect.arrayContaining(['paid', 'void']));
     expect(joined[0].whereNull).toHaveBeenCalledWith('i.payer_id');
     // Guarded on the row still being that finished sequence.
@@ -175,6 +217,18 @@ describe('runPending under the Day 90 ladder', () => {
     ]);
     // Wed 07-29 + 10 days = Sat 08-08 at 10:00 ET (it fires the next Tuesday).
     expect(seqUpdates[0].patch.next_touch_at).toEqual(tenAmET('2026-08-08'));
+  });
+
+  // codex #5126 r1: a payment finish at the Day 90 step whose invoice a
+  // dispute reopened resumes at that step.
+  test('a sequence finished at the Day 90 step on a reopened invoice resumes there', async () => {
+    process.env.GATE_DUNNING_LADDER_90 = 'true';
+    const finished = seqRow({ id: 'seq-7', status: 'completed', step_index: 5, invoice_sent_at: tenAmET('2026-05-20') });
+    const { seqUpdates } = setupDb({ joinedReads: [[finished], []] });
+    await runPending();
+    expect(seqUpdates[0].wheres).toEqual([[{ id: 'seq-7', status: 'completed', step_index: 5 }]]);
+    // Wed 05-20 + 90 days = Tue 08-18 at 10:00 ET.
+    expect(seqUpdates[0].patch).toMatchObject({ status: 'active', next_touch_at: tenAmET('2026-08-18') });
   });
 
   // Pre-push audit P1: a touch moved to a new day that is TODAY must go out

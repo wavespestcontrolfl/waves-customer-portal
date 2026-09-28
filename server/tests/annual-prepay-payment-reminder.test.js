@@ -23,6 +23,7 @@ jest.mock('../utils/portal-url', () => ({
 // The reminder now consults the collections rail-guard (gate-on only) and
 // records-then-sends through the always-on contact ledger — mocked healthy
 // so the delivery-path tests exercise the send.
+jest.mock('../services/invoice-followups', () => ({ liveNextTouchAt: jest.fn() }));
 jest.mock('../services/collections/rail-guard', () => ({
   collectionsChannelPermitted: jest.fn(async () => true),
 }));
@@ -319,6 +320,34 @@ describe('annual prepay pre-visit payment reminders', () => {
     // Saturday 2026-07-11: same.
     setDbQueues({ invoice_followup_sequences: [query({ first: { ...dueRow } })] });
     await expect(_private.invoiceDunningActiveToday('inv-1', { todayYmd: '2026-07-11' })).resolves.toBe(false);
+  });
+
+  // codex #5126 r1: this 10:12 check runs before the follow-up job, which
+  // under the Day 90 ladder moves a legacy Day 7/14 touch to Day 10/17
+  // without sending it that day.
+  describe('the day the follow-up touch really fires', () => {
+    const InvoiceFollowUps = require('../services/invoice-followups');
+    afterEach(() => { delete process.env.GATE_DUNNING_LADDER_90; });
+
+    test('Day 90 ladder: a legacy touch moved past today no longer suppresses', async () => {
+      process.env.GATE_DUNNING_LADDER_90 = 'true';
+      const dueRow = { status: 'active', last_touch_at: null, next_touch_at: new Date('2026-07-08T14:00:00Z'), step_index: 1 };
+      InvoiceFollowUps.liveNextTouchAt.mockResolvedValueOnce(new Date('2026-07-11T14:00:00Z'));
+      setDbQueues({ invoice_followup_sequences: [query({ first: { ...dueRow } })] });
+      await expect(_private.invoiceDunningActiveToday('inv-1', { todayYmd: '2026-07-08' })).resolves.toBe(false);
+      expect(InvoiceFollowUps.liveNextTouchAt).toHaveBeenCalledWith('inv-1', expect.objectContaining({ step_index: 1 }));
+
+      InvoiceFollowUps.liveNextTouchAt.mockResolvedValueOnce(new Date('2026-07-08T14:00:00Z'));
+      setDbQueues({ invoice_followup_sequences: [query({ first: { ...dueRow } })] });
+      await expect(_private.invoiceDunningActiveToday('inv-1', { todayYmd: '2026-07-08' })).resolves.toBe(true);
+    });
+
+    test('gate off: a row the Day 90 ladder advanced past Day 30 fires nothing, so it does not suppress', async () => {
+      const advanced = { status: 'active', last_touch_at: null, next_touch_at: new Date('2026-07-08T14:00:00Z'), step_index: 4 };
+      setDbQueues({ invoice_followup_sequences: [query({ first: { ...advanced } })] });
+      await expect(_private.invoiceDunningActiveToday('inv-1', { todayYmd: '2026-07-08' })).resolves.toBe(false);
+      expect(InvoiceFollowUps.liveNextTouchAt).not.toHaveBeenCalled();
+    });
   });
 
   test('derives the dunning send day from the supplied clock when todayYmd is omitted', async () => {
