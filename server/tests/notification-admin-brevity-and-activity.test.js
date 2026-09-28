@@ -172,20 +172,20 @@ describe('NotificationService.create — admin brevity guard end to end', () => 
     const body = 'sentence '.repeat(30).trim();
     const notif = await NotificationService.create({ recipientType: 'admin', category: 'alert', title: 'Short title', body });
     expect(notif.body).toBe(body);
-    expect(notif.detail).toBeNull();
+    expect(notif).not.toHaveProperty('detail'); // column not written without a detail
   });
 
   test('a customer row is never touched by the guard', async () => {
     const body = 'sentence '.repeat(30).trim();
     const notif = await NotificationService.create({ recipientType: 'customer', recipientId: 'c1', category: 'service', title: 'Short title', body });
     expect(notif.body).toBe(body);
-    expect(notif.detail).toBeNull();
+    expect(notif).not.toHaveProperty('detail'); // column not written without a detail
   });
 
   test('a short body is untouched and detail stays null when none was given', async () => {
     const notif = await NotificationService.create({ recipientType: 'admin', category: 'alert', title: 'Short', body: 'short body' });
     expect(notif.body).toBe('short body');
-    expect(notif.detail).toBeNull();
+    expect(notif).not.toHaveProperty('detail'); // column not written without a detail
   });
 });
 

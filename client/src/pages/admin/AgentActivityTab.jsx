@@ -252,8 +252,8 @@ export default function AgentActivityTab() {
       // it's read and older than the window (server/routes/admin-agents.js
       // -> agent-activity.js's loadDigestRows) — otherwise the bell's deep
       // link can point at a row this fetch would never otherwise return.
-      const url = `/admin/agents/activity?hours=${hours}${focusParam ? `&focus=${encodeURIComponent(focusParam)}` : ""}`;
-      const next = await adminFetch(url);
+      const focusQuery = focusParam ? `&focus=${encodeURIComponent(focusParam)}` : "";
+      const next = await adminFetch(`/admin/agents/activity?hours=${hours}${focusQuery}`);
       if (isCurrent()) setFeed(next);
     } catch (e) {
       if (isCurrent()) setError(e?.message || "Failed to load activity");

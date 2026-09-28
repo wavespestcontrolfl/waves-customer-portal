@@ -351,7 +351,6 @@ describe('codex r1 — converted raw-insert sites (gate off = identical rows, ga
       category: 'email_digest',
       title: 'Morning Email Digest',
       body: '12 emails overnight. 2 new leads. Check /admin/email for details.',
-      detail: null,
       icon: '📧',
       link: '/admin/email',
       metadata: JSON.stringify({ severity: 'low' }),
@@ -407,7 +406,6 @@ describe('codex r1 — converted raw-insert sites (gate off = identical rows, ga
       category: 'eval_regression',
       title: 'Incident eval: 1 regression(s) in LLM gates',
       body: 'fact-check/case-1: drift',
-      detail: null,
       icon: '🧪',
       link: '/admin/dashboard',
       metadata: JSON.stringify({ summary: { total: 1 } }),
@@ -417,8 +415,8 @@ describe('codex r1 — converted raw-insert sites (gate off = identical rows, ga
   // This body is 149 chars — over the admin brevity guard's 110-char cap —
   // but the guard's cut is scoped to category ops_digest ONLY (only the
   // Activity feed ever reads `detail`, and only for ops_digest rows), so
-  // this 'email_rescue_review' row matches the pre-guard raw insert exactly,
-  // aside from the new `detail: null` column.
+  // this 'email_rescue_review' row matches the pre-guard raw insert exactly
+  // (no `detail` column is written when there is no detail).
   test('email spam-rescue-review row matches the old raw insert gate-off (non-ops_digest body is never cut)', async () => {
     const notifications = chainMock([{ id: 'd4' }]);
     mockTables({ notifications });
@@ -437,7 +435,6 @@ describe('codex r1 — converted raw-insert sites (gate off = identical rows, ga
       category: 'email_rescue_review',
       title: 'Spam-foldered mail claims a known sender (unverified)',
       body: fullBody,
-      detail: null,
       icon: '⚠️',
       link: '/admin/email',
       metadata: JSON.stringify({ gmail_message_id: 'g1' }),
@@ -557,7 +554,6 @@ describe('converted raw-insert sites (gate off = identical rows)', () => {
       category: 'payout',
       title: 'Payout deposited: $12.34',
       body: 'Stripe payout of $12.34 has been deposited to your Capital One account.',
-      detail: null,
       icon: '🏦',
       link: '/admin/banking',
       metadata: null,
@@ -581,7 +577,6 @@ describe('converted raw-insert sites (gate off = identical rows)', () => {
       category: 'dispute',
       title: 'Dispute opened: $80.00',
       body: 'Reason: fraudulent. Respond by soon. Charge: ch_123',
-      detail: null,
       icon: '⚠️',
       link: '/admin/invoices',
       metadata: null,
@@ -604,7 +599,6 @@ describe('converted raw-insert sites (gate off = identical rows)', () => {
       category: 'call_pipeline_drift',
       title: 'Call pipeline drift alert',
       body: 'Nightly self-audit breached thresholds: auditor down. Sample: 0 calls.',
-      detail: null,
       // The service fills the category-default icon where the raw insert
       // left the column null — the only intentional field difference.
       icon: '🔔',

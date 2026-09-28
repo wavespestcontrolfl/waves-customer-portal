@@ -277,7 +277,9 @@ const NotificationService = {
         category,
         title: normalized.title,
         body: normalized.body,
-        detail: normalized.detail,
+        // Only rows that carry a detail write the column: customer rows and
+        // short admin rows insert exactly the columns they did before it.
+        ...(normalized.detail ? { detail: normalized.detail } : {}),
         icon: icon || getCategoryIcon(category),
         link: link || null,
         metadata: metadata ? JSON.stringify(metadata) : null,
@@ -355,7 +357,7 @@ const NotificationService = {
           const routingChanged = ROUTING_METADATA_KEYS.some((k) => Object.prototype.hasOwnProperty.call(metadata, k)
             && (existingMeta[k] ?? null) !== (metadata[k] ?? null));
           if (refreshOnDedupe && (versionChanged || existing.title !== nextTitle || existing.body !== nextBody || existing.link !== nextLink || detailChanged || routingChanged)) {
-            const refreshed = { title: nextTitle, body: nextBody, detail: nextDetail, link: nextLink,
+            const refreshed = { title: nextTitle, body: nextBody, ...(detailChanged ? { detail: nextDetail } : {}), link: nextLink,
               metadata: JSON.stringify({ ...existingMeta, ...metadata }), read_at: null };
             await trx('notifications').where({ id: existing.id }).update(refreshed);
             return { notification: { ...existing, ...refreshed, metadata: { ...existingMeta, ...metadata } }, deduped: true, refreshed: true };
