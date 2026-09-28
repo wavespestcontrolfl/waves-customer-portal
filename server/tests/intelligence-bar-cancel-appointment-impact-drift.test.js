@@ -154,7 +154,7 @@ test('an impact that cannot be read is REFUSED, never treated as "no effect"', a
   expect(mockFollowThrough).not.toHaveBeenCalled();
 });
 
-const PINNED = { 'svc-synthetic-1': { invoiceIds: ['inv-1'], fee: FROZEN.fee } };
+const PINNED = { 'svc-synthetic-1': { invoices: FROZEN.invoices, fee: FROZEN.fee, creditReversalOfferIds: [] } };
 
 test('a matched confirm carries the pin into the follow-through (only the listed invoices, the shown fee)', async () => {
   mockComputeImpact.mockResolvedValue(FROZEN);

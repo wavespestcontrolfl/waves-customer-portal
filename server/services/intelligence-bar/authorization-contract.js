@@ -568,16 +568,26 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
         : `Late-cancel fee of ${amt} will be charged to the card on file (a failed charge goes to office review, never silently dropped)`);
     } else if (c.fee?.rail === 'card_hold') {
       // Frozen disposition (pinned in the fingerprint), not a disjunction.
-      push('billing', c.fee.hold_disposition === 'parked'
-        ? 'No late-cancel fee (outside the fee window) — the card hold is PARKED for the rebooked visit'
-        : 'No late-cancel fee (outside the fee window) — the card hold is RELEASED');
+      // 'review' = the hold's outcome is not determined by the preview (rail
+      // off, fee settled elsewhere): a pinned cancel runs no rail on it.
+      if (c.fee.hold_disposition === 'review') {
+        push('billing', 'No late-cancel fee is charged and the card hold is left as it is — its outcome cannot be pinned on this card, so the office is alerted to review it');
+      } else {
+        push('billing', c.fee.hold_disposition === 'parked'
+          ? 'No late-cancel fee (outside the fee window) — the card hold is PARKED for the rebooked visit'
+          : 'No late-cancel fee (outside the fee window) — the card hold is RELEASED');
+      }
     } else if (c.fee?.rail && c.fee.rail !== 'none') {
       push('billing', 'No late-cancel fee (outside the fee window) — the appointment-card agreement is released');
     }
     for (const inv of c.invoices || []) {
       const total = inv.total != null ? `$${Number(inv.total).toFixed(2)}` : '';
-      const credit = Number(inv.credit_applied) > 0 ? `; $${Number(inv.credit_applied).toFixed(2)} account credit restored` : '';
-      push('billing', `Void invoice ${inv.invoice_number || inv.id} (${inv.status}${total ? `, ${total}` : ''}) — applied credits/deposits restored${credit}; skipped for office review if a payment is in flight or it sits on a finalized statement`);
+      const restored = [
+        Number(inv.credit_applied) > 0 ? `$${Number(inv.credit_applied).toFixed(2)} account credit` : null,
+        Number(inv.deposit_credit) > 0 ? `$${Number(inv.deposit_credit).toFixed(2)} deposit credit` : null,
+      ].filter(Boolean);
+      const restoredText = restored.length ? `; ${restored.join(' and ')} restored` : '';
+      push('billing', `Void invoice ${inv.invoice_number || inv.id} (${inv.status}${total ? `, ${total}` : ''})${restoredText} — skipped for office review if a payment is in flight, it sits on a finalized statement, or its amounts change first`);
     }
     if ((c.invoices || []).length) {
       push('billing', 'Only the invoices listed above are voided — anything created after this card is left for office review');

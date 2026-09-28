@@ -82,7 +82,7 @@ async function previewCancelFee(scheduledServiceId, now) {
     ? (holdPreview.held ? 'card_hold' : 'none')
     : (merged.held ? 'appointment_card' : 'none');
   const holdDisposition = (rail === 'card_hold' && merged.feeApplies !== true)
-    ? (merged.parked === true ? 'parked' : 'released')
+    ? CardHolds.cardHoldCancelDisposition(merged)
     : null;
 
   return {
@@ -147,6 +147,7 @@ async function computeCancelAppointmentImpact(scheduledServiceId, { now = new Da
       status: inv.status,
       total: inv.total,
       credit_applied: inv.credit_applied,
+      deposit_credit: inv.deposit_credit,
     })),
     inspection_credit_reversal: creditReversal,
   };

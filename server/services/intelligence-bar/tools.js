@@ -3645,8 +3645,11 @@ function pinnedCancelEffects(appointmentId, frozen) {
   if (!frozen) return null;
   return {
     [appointmentId]: {
-      invoiceIds: (frozen.invoices || []).map((inv) => inv.id),
+      invoices: frozen.invoices || [],
       fee: frozen.fee || null,
+      creditReversalOfferIds: (frozen.inspection_credit_reversal || [])
+        .filter((credit) => credit.would_reverse === true)
+        .map((credit) => credit.id),
     },
   };
 }

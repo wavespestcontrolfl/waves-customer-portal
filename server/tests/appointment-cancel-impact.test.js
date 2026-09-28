@@ -28,8 +28,12 @@ jest.mock('../models/db', () => {
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const mockCardHoldPreview = jest.fn();
+// The disposition rule itself is tested beside the handler it mirrors
+// (estimate-card-holds.test.js); here it only has to be the one consulted.
+const mockDisposition = jest.fn((p) => (p?.parked === true ? 'parked' : 'released'));
 jest.mock('../services/estimate-card-holds', () => ({
   cardHoldCancelPreview: (...a) => mockCardHoldPreview(...a),
+  cardHoldCancelDisposition: (...a) => mockDisposition(...a),
 }));
 const mockApptCardPreview = jest.fn();
 jest.mock('../services/appointment-card-request', () => ({
@@ -143,13 +147,13 @@ test('invoice void: the exact set is passed through with amounts and ids', async
   mockCardHoldPreview.mockResolvedValue({ held: false, feeApplies: false, rule: { code: 'no_card' } });
   mockApptCardPreview.mockResolvedValue({ secured: false, feeApplies: false, rule: { code: 'no_card' } });
   mockInvoicePreview.mockResolvedValue([
-    { id: 'inv-1', invoice_number: 'WPC-2026-9001', status: 'sent', total: 89, credit_applied: 0 },
+    { id: 'inv-1', invoice_number: 'WPC-2026-9001', status: 'sent', total: 89, credit_applied: 0, deposit_credit: 0 },
   ]);
 
   const impact = await computeCancelAppointmentImpact('svc-synthetic-1');
 
   expect(impact.invoices).toEqual([
-    { id: 'inv-1', invoice_number: 'WPC-2026-9001', status: 'sent', total: 89, credit_applied: 0 },
+    { id: 'inv-1', invoice_number: 'WPC-2026-9001', status: 'sent', total: 89, credit_applied: 0, deposit_credit: 0 },
   ]);
 });
 
@@ -210,6 +214,28 @@ test.each([
   mockApptCardPreview.mockResolvedValue({ secured: false, feeApplies: false, rule: { code: 'no_card' } });
   arrange();
   await expect(computeCancelAppointmentImpact('svc-synthetic-1')).rejects.toThrow();
+});
+
+test('a card-hold outcome comes from the card-hold module rule (e.g. review when the rail is off)', async () => {
+  mockCardHoldPreview.mockResolvedValue({ held: true, feeApplies: false, feeAmount: 49, rule: { code: 'rail_off' } });
+  mockDisposition.mockReturnValueOnce('review');
+
+  const impact = await computeCancelAppointmentImpact('svc-synthetic-1');
+
+  expect(mockDisposition).toHaveBeenCalledWith(expect.objectContaining({ rule: { code: 'rail_off' } }));
+  expect(impact.fee.hold_disposition).toBe('review');
+});
+
+test('invoices carry the deposit credit the void would restore', async () => {
+  mockCardHoldPreview.mockResolvedValue({ held: false, feeApplies: false, rule: { code: 'no_card' } });
+  mockApptCardPreview.mockResolvedValue({ secured: false, feeApplies: false, rule: { code: 'no_card' } });
+  mockInvoicePreview.mockResolvedValue([
+    { id: 'inv-1', invoice_number: 'WPC-2026-9001', status: 'sent', total: 50, credit_applied: 0, deposit_credit: 75 },
+  ]);
+
+  const impact = await computeCancelAppointmentImpact('svc-synthetic-1');
+
+  expect(impact.invoices[0].deposit_credit).toBe(75);
 });
 
 describe('cancelFeesMatch (the follow-through re-check before any card rail)', () => {

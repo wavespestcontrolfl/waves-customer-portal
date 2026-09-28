@@ -105,6 +105,7 @@ const {
   isWithinCancelWindow,
   handleCardHoldCancellation,
   cardHoldCancelPreview,
+  cardHoldCancelDisposition,
   cardHoldReminderLine,
   cardHoldReminderNote,
   recordCardHoldHeld,
@@ -1931,6 +1932,36 @@ describe('reschedule-orphan DETECTION at completion (GATE_CARD_HOLD_RESCHEDULE_A
     const r = await chargeCardHoldOnCompletion({ scheduledServiceId: 'svc-new', invoiceId: 'inv-1' });
     expect(r).toEqual({ charged: false, reason: 'no_hold' });
     expect(mockNotifyAdmin).not.toHaveBeenCalled();
+  });
+});
+
+describe('cardHoldCancelDisposition — what the cancel handler does to a hold when no fee applies', () => {
+  const setPark = (on) => {
+    if (on) {
+      process.env.GATE_CARD_HOLD_PARK_ON_CANCEL = 'true';
+      process.env.GATE_CARD_HOLD_RESCHEDULE_ADOPT = 'true';
+    } else {
+      delete process.env.GATE_CARD_HOLD_PARK_ON_CANCEL;
+      delete process.env.GATE_CARD_HOLD_RESCHEDULE_ADOPT;
+    }
+  };
+  afterEach(() => setPark(false));
+
+  it('an already-parked hold stays parked', () => {
+    expect(cardHoldCancelDisposition({ held: true, feeApplies: false, parked: true, rule: { code: 'hold_parked' } })).toBe('parked');
+  });
+  it.each(['outside_window', 'past_start', 'booking_age'])('a free %s cancel parks with park-on-cancel on, releases with it off', (code) => {
+    setPark(true);
+    expect(cardHoldCancelDisposition({ held: true, feeApplies: false, rule: { code } })).toBe('parked');
+    setPark(false);
+    expect(cardHoldCancelDisposition({ held: true, feeApplies: false, rule: { code } })).toBe('released');
+  });
+  it.each(['card_removed', 'no_time'])('%s always releases', (code) => {
+    setPark(true);
+    expect(cardHoldCancelDisposition({ held: true, feeApplies: false, rule: { code } })).toBe('released');
+  });
+  it.each(['rail_off', 'fee_settled', 'something_new', undefined])('%s is not determined by the preview → review', (code) => {
+    expect(cardHoldCancelDisposition({ held: true, feeApplies: false, rule: code ? { code } : undefined })).toBe('review');
   });
 });
 

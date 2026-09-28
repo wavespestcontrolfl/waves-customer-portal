@@ -1672,6 +1672,12 @@ async function reverseInspectionCreditForBooking({
   scheduledServiceId,
   createdBy = 'system:inspection_credit_reversal',
   now = new Date(),
+  // A cancel confirmed from a card (Intelligence Bar cancel_appointment)
+  // takes back credit ONLY for the offers the card showed as taken back;
+  // any other offer is left bound for the hourly sweep. Rebinds and office
+  // deferrals move no money and run as always. null = unpinned (every
+  // other caller).
+  pinnedReversalOfferIds = null,
 }) {
   // Deliberately NOT gate-checked (Codex #3178 r3 P1): once an offer has
   // redeemed, its money is in the customer's general balance. Turning the
@@ -1699,10 +1705,8 @@ async function reverseInspectionCreditForBooking({
         // hourly sweep retries and rebind/reversal proceeds normally.
         // Fail CLOSED on a failed check — never move money blind.
         try {
-          const { CANCELLED_SERVICE_RESOLVED_STATUSES } = require('./invoice');
-          const unresolved = await db('invoices')
-            .where({ scheduled_service_id: scheduledServiceId })
-            .whereNotIn('status', CANCELLED_SERVICE_RESOLVED_STATUSES)
+          const unresolved = await require('./invoice')
+            .unresolvedInvoicesForCancelledService(db, scheduledServiceId)
             .first('id');
           if (unresolved) {
             await alertReversalNeedsOffice(offer, scheduledServiceId, {
@@ -1735,6 +1739,10 @@ async function reverseInspectionCreditForBooking({
         const { seriesChild } = await findLiveSeriesChildForReversal(offer, scheduledServiceId);
         if (seriesChild && await rebindRedeemedOffer(offer.id, seriesChild.id)) {
           logger.info(`[inspection-credit] offer ${offer.id} rebound to live series child ${seriesChild.id} — anchor cancelled, series continues`);
+          continue;
+        }
+        if (Array.isArray(pinnedReversalOfferIds) && !pinnedReversalOfferIds.map(String).includes(String(offer.id))) {
+          logger.info(`[inspection-credit] offer ${offer.id} not reversed — the confirmed cancel card did not show it; left for the hourly sweep`);
           continue;
         }
         await db.transaction(async (trx) => {

@@ -468,9 +468,30 @@ test('cancel_appointment: invoice void is listed with number, status, total and 
   });
   expect(c.effects).toContainEqual({
     kind: 'billing',
-    label: 'Void invoice WPC-2026-9001 (sent, $89.00) — applied credits/deposits restored; $20.00 account credit restored; skipped for office review if a payment is in flight or it sits on a finalized statement',
+    label: 'Void invoice WPC-2026-9001 (sent, $89.00); $20.00 account credit restored — skipped for office review if a payment is in flight, it sits on a finalized statement, or its amounts change first',
   });
   expect(c.effects).toContainEqual({ kind: 'billing', label: 'Only the invoices listed above are voided — anything created after this card is left for office review' });
+});
+
+test('cancel_appointment: a restored deposit credit is stated with its amount and binds the hash', () => {
+  const make = (deposit) => buildContract({
+    toolName: 'cancel_appointment', params: {}, displayParams: {},
+    preview: { cancellation: { ...synthCancellationBase(), invoices: [{ id: 'inv-1', invoice_number: 'WPC-2026-9001', status: 'sent', total: 50, credit_applied: 10, deposit_credit: deposit }] } },
+  });
+  expect(make(75).effects).toContainEqual({
+    kind: 'billing',
+    label: 'Void invoice WPC-2026-9001 (sent, $50.00); $10.00 account credit and $75.00 deposit credit restored — skipped for office review if a payment is in flight, it sits on a finalized statement, or its amounts change first',
+  });
+  expect(contractHash(make(75))).not.toBe(contractHash(make(60)));
+});
+
+test('cancel_appointment: a hold outcome the preview cannot pin is left for office review, never promised as released', () => {
+  const c = buildContract({
+    toolName: 'cancel_appointment', params: {}, displayParams: {},
+    preview: { cancellation: { ...synthCancellationBase(), fee: { applies: false, amount: 49, unresolved: false, rail: 'card_hold', hold_disposition: 'review' } } },
+  });
+  expect(c.effects).toContainEqual({ kind: 'billing', label: 'No late-cancel fee is charged and the card hold is left as it is — its outcome cannot be pinned on this card, so the office is alerted to review it' });
+  expect(c.effects.some((e) => /RELEASED|PARKED/.test(e.label))).toBe(false);
 });
 
 test('cancel_appointment: no invoices means no void disclosure at all', () => {

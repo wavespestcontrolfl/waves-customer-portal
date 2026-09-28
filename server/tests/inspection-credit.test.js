@@ -546,6 +546,22 @@ describe('reverseInspectionCreditForBooking — a cancelled booking gives it bac
     expect(mockUpdates[0]).toMatchObject({ redeemed_scheduled_service_id: 'svc-other', reversal_alerted_at: null });
   });
 
+  it('a card-confirmed cancel takes back credit only for the offers the card showed', async () => {
+    mockOffers = [{
+      id: 'offer-1', customer_id: 'cust-1', amount: '75.00',
+      created_at: new Date('2026-08-01'), expires_at: new Date('2099-01-01'),
+      credit_ledger_id: 'ledger-1', source_scheduled_service_id: 'svc-insp',
+    }];
+    const skipped = await reverseInspectionCreditForBooking({ scheduledServiceId: 'svc-2', pinnedReversalOfferIds: [] });
+    expect(skipped).toEqual({ reversed: 0 });
+    expect(mockPostCreditMovement).not.toHaveBeenCalled();
+    expect(mockUpdates).toEqual([]);
+
+    const taken = await reverseInspectionCreditForBooking({ scheduledServiceId: 'svc-2', pinnedReversalOfferIds: ['offer-1'] });
+    expect(taken).toEqual({ reversed: 1 });
+    expect(mockPostCreditMovement).toHaveBeenCalledWith(expect.objectContaining({ delta: -75 }), expect.anything());
+  });
+
   it('a lapsed offer closes out instead of dangling reopened', async () => {
     mockOffers = [{
       id: 'offer-1', customer_id: 'cust-1', amount: '75.00',

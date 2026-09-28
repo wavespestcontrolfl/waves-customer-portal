@@ -3921,6 +3921,35 @@ async function assertInvoiceGenuinelyUnsettledLocked(trx, id) {
   await require("./stripe").assertNoInvoiceChargeReconciliationPending(id, trx);
 }
 
+// The money a cancel's void moves for one invoice, as the confirmation card
+// shows and pins it: the invoice total, the account credit applied to it
+// (restoreAccountCreditForVoidedInvoice), and the estimate deposit credit
+// its deposit_credit lines carry (restoreDepositCreditForVoidedInvoice sums
+// the same lines the same way). Cents-rounded so a pg numeric string and a
+// pinned JSON number compare equal.
+function cancelVoidInvoiceAmounts(row) {
+  const cents = (v) => Math.round(Number(v || 0) * 100);
+  let items = [];
+  try {
+    const raw = row?.line_items;
+    const arr = typeof raw === "string" ? JSON.parse(raw) : raw;
+    items = Array.isArray(arr) ? arr : [];
+  } catch { items = []; }
+  const depositCents = items
+    .filter((item) => item?.category === "deposit_credit")
+    .reduce((sum, line) => sum + Math.abs(cents(line.amount ?? line.unit_price ?? 0)), 0);
+  return {
+    total: row?.total != null ? cents(row.total) / 100 : null,
+    credit_applied: cents(row?.credit_applied) / 100,
+    deposit_credit: depositCents / 100,
+  };
+}
+
+function cancelVoidAmountsMatch(a, b) {
+  if (!a || !b) return false;
+  return ["total", "credit_applied", "deposit_credit"].every((k) => (a[k] ?? null) === (b[k] ?? null));
+}
+
 const InvoiceService = {
   async buildLineItemsForScheduledService(scheduledServiceId, options = {}) {
     return buildScheduledServiceInvoiceLines(scheduledServiceId, options);
@@ -10927,11 +10956,16 @@ const InvoiceService = {
    */
   async voidOpenInvoicesForCancelledService(
     scheduledServiceId,
-    { invoiceId = null, refusedClaimToken = null, onlyInvoiceIds = null } = {},
+    { invoiceId = null, refusedClaimToken = null, pinnedInvoices = null, pinnedCreditReversalOfferIds = null } = {},
   ) {
     const voided = [];
     if (!scheduledServiceId) return voided;
     const refusedSendCleanup = Boolean(invoiceId && refusedClaimToken);
+    const pinnedById = Array.isArray(pinnedInvoices)
+      ? new Map(pinnedInvoices.map((inv) => [String(inv.id), inv]))
+      : null;
+    const pinnedMismatch = (row) => pinnedById
+      && !cancelVoidAmountsMatch(cancelVoidInvoiceAmounts(row), pinnedById.get(String(row.id)));
     try {
       const candidateQuery = db("invoices");
       if (refusedSendCleanup) {
@@ -10954,17 +10988,26 @@ const InvoiceService = {
           .whereIn("status", CANCELLED_SERVICE_VOIDABLE_STATUSES);
         // A cancel confirmed from a card that listed the invoices it voids
         // (Intelligence Bar cancel_appointment, via the follow-through's
-        // pinned effects) voids ONLY those; an invoice created after the
-        // card is left open, and the follow-through's post-void gate then
-        // sends the fee to office review.
-        if (Array.isArray(onlyInvoiceIds)) candidateQuery.whereIn("id", onlyInvoiceIds);
+        // pinned effects) voids ONLY those, and only at the amounts shown
+        // (checked below, before any Stripe call and again under the row
+        // lock); an invoice created or changed after the card is left
+        // open, and the follow-through's post-void gate then sends the fee
+        // to office review.
+        if (pinnedById) candidateQuery.whereIn("id", [...pinnedById.keys()]);
       }
       const candidates = await candidateQuery
-        .select("id", "invoice_number", "stripe_payment_intent_id", "payer_statement_id");
+        .select("id", "invoice_number", "stripe_payment_intent_id", "payer_statement_id",
+          "total", "credit_applied", "line_items");
       if (candidates.length === 0) return voided;
       const StripeService = require("./stripe");
       for (const candidate of candidates) {
         try {
+          if (pinnedMismatch(candidate)) {
+            logger.warn(
+              `[invoice] NOT auto-voiding ${candidate.invoice_number} for cancelled service ${scheduledServiceId} — amounts changed since the confirmed card; needs office review`,
+            );
+            continue;
+          }
           // ── Stripe PI triage (pre-lock) ────────────────────────────────
           const triagedPiId = candidate.stripe_payment_intent_id || null;
           // The refused-send cleanup runs after provider preparation. Never
@@ -11076,6 +11119,8 @@ const InvoiceService = {
               }
             } else if (!CANCELLED_SERVICE_VOIDABLE_STATUSES.includes(locked.status)) {
               return { skipped: `status moved to ${locked.status}`, invoice: locked };
+            } else if (pinnedMismatch(locked)) {
+              return { skipped: "amounts changed since the confirmed card; needs office review", invoice: locked };
             }
             // A different/new PI attached after triage means a customer is
             // actively starting a payment — skip.
@@ -11178,6 +11223,7 @@ const InvoiceService = {
           const rev = await require('./inspection-credit').reverseInspectionCreditForBooking({
             scheduledServiceId,
             createdBy: 'system:inspection_credit_cancellation_void_hook',
+            ...(pinnedCreditReversalOfferIds ? { pinnedReversalOfferIds: pinnedCreditReversalOfferIds } : {}),
           });
           // Surfaced for callers that COUNT reversals (the hourly sweep,
           // which now routes through this seam — Codex #3178 r33 P2): a
@@ -11224,7 +11270,7 @@ const InvoiceService = {
       })
       .whereIn("status", CANCELLED_SERVICE_VOIDABLE_STATUSES)
       .orderBy("id")
-      .select("id", "invoice_number", "status", "total", "credit_applied",
+      .select("id", "invoice_number", "status", "total", "credit_applied", "line_items",
         "payment_recorded_at", "stripe_payment_intent_id", "payer_statement_id");
     for (const candidate of candidates) {
       if (candidate.payer_statement_id) {
@@ -11244,8 +11290,7 @@ const InvoiceService = {
         id: candidate.id,
         invoice_number: candidate.invoice_number,
         status: candidate.status,
-        total: candidate.total != null ? Number(candidate.total) : null,
-        credit_applied: candidate.credit_applied != null ? Number(candidate.credit_applied) : 0,
+        ...cancelVoidInvoiceAmounts(candidate),
       });
     }
     return would;
@@ -11260,17 +11305,36 @@ const InvoiceService = {
    * reverseInspectionCreditForBooking defer (office alerted). The real gate
    * runs AFTER the void, so the invoices the void preview says it would void
    * (`voidedInvoiceIds`) are treated as resolved here. Same query as both
-   * gates (scheduled_service_id only). Returns true when an invoice would
-   * still be unresolved. Throws when the read fails: the caller treats the
-   * effect set as undeterminable rather than guessing either way.
+   * gates (unresolvedInvoicesForCancelledService). Returns true when an
+   * invoice would still be unresolved. Throws when the read fails: the
+   * caller treats the effect set as undeterminable rather than guessing.
    */
   async previewUnresolvedInvoiceAfterCancelVoid(scheduledServiceId, { voidedInvoiceIds = [] } = {}) {
     if (!scheduledServiceId) return false;
-    const query = db("invoices")
-      .where({ scheduled_service_id: scheduledServiceId })
-      .whereNotIn("status", InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES);
+    const query = InvoiceService.unresolvedInvoicesForCancelledService(db, scheduledServiceId);
     if (voidedInvoiceIds.length) query.whereNotIn("id", voidedInvoiceIds);
     return Boolean(await query.first("id"));
+  },
+
+  /**
+   * The invoices of a cancelled scheduled service that still hold money
+   * (outside CANCELLED_SERVICE_RESOLVED_STATUSES), linked directly OR through
+   * a service record — the same two links the void sweep scans, since most
+   * post-completion invoices carry only service_record_id. The ONE scope for
+   * every post-void gate: the follow-through's fee gate, the inspection-
+   * credit reversal's invoice guard, and the Intelligence Bar preview.
+   * Returns a query builder.
+   */
+  unresolvedInvoicesForCancelledService(conn, scheduledServiceId) {
+    return conn("invoices")
+      .where((q) => {
+        q.where({ scheduled_service_id: scheduledServiceId })
+          .orWhereIn(
+            "service_record_id",
+            conn("service_records").where({ scheduled_service_id: scheduledServiceId }).select("id"),
+          );
+      })
+      .whereNotIn("status", InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES);
   },
 
   async getStats() {
@@ -11388,10 +11452,9 @@ module.exports._parseInvoiceLineItems = parseInvoiceLineItems;
 // repair card so it describes the same reach sendReceipt has.
 module.exports.explicitBillingAppSelected = explicitBillingAppSelected;
 module.exports.CANCELLED_SERVICE_VOIDABLE_STATUSES = CANCELLED_SERVICE_VOIDABLE_STATUSES;
-// Exposed so a read-only preview outside this file (appointment-cancel-
-// impact.js) can classify a live PaymentIntent exactly like the real void
-// sweep, without duplicating the status list.
-module.exports.PI_MONEY_IN_FLIGHT_STATUSES = PI_MONEY_IN_FLIGHT_STATUSES;
+module.exports._cancelVoidInvoiceAmounts = cancelVoidInvoiceAmounts;
+module.exports._cancelVoidAmountsMatch = cancelVoidAmountsMatch;
+
 module.exports._s3KeyFromStoredUrl = s3KeyFromStoredUrl;
 module.exports._withFreshServicePhotoUrls = withFreshServicePhotoUrls;
 // Test-only seam (#4131 slice 4): exercises the atomic attempt-increment
