@@ -1164,7 +1164,7 @@ async function assertComplianceClear({ title, body, meta = [], city, keyword, ta
   }
 }
 
-async function publishAstro(postId) {
+async function publishAstro(postId, { humanApproved = false } = {}) {
   const post = await db('blog_posts').where({ id: postId }).first();
   if (!post) throw new Error(`blog_post ${postId} not found`);
   if (!post.title) throw new Error('post missing title');
@@ -1522,6 +1522,12 @@ async function publishAstro(postId) {
     }
     const finalBody = bodyImages.body;
     const markdown = fm.stringify(data, finalBody + '\n');
+    // Owner competitor list on the FINAL text (Codex r6 on #5146): the
+    // scheduler's publish auto-merges through pages-poll, so an off-list
+    // company is refused before any branch; competitor content naming only
+    // the six keeps the human-merge stamp. An admin publish (humanApproved)
+    // is a human decision and its PR waits for an admin merge anyway.
+    const ownerList = await assertOwnerListForCommit({ draft: null, brief: {}, frontmatter: data, body: finalBody, humanApproved, humanMergeFallback: true });
     const editorialFiles = await editorialEvidence.filesForDocument({ document: markdown, path: filePath });
 
     await gh.createBranch(branch);
@@ -1597,7 +1603,7 @@ async function publishAstro(postId) {
       // (GATE_NAMED_COMPETITOR_AUTOPUBLISH deliberately does NOT reach this
       // lane: publishAstro serves manual/calendar posts with no
       // operator-intercept provenance, so the human merge stays.)
-      astro_requires_human_merge: comparison.requiresHumanReview === true,
+      astro_requires_human_merge: comparison.requiresHumanReview === true || ownerList.requiresHumanMerge === true,
       updated_at: new Date(),
     });
 

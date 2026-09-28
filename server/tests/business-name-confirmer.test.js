@@ -142,12 +142,22 @@ describe('assertOwnerListForCommit', () => {
     expect(_internals.SYSTEM_PROMPT).toMatch(/only as a source or incidentally/);
   });
 
+  test('scheduler lane (humanMergeFallback): only-six competitor content asks for a human merge; an off-list company is refused (Codex r6)', async () => {
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { companies: ['Orkin'] } });
+    expect(await assertOwnerListForCommit({ draft: null, brief: {}, frontmatter: finalFm, body: 'Orkin offers plans.', humanMergeFallback: true }))
+      .toMatchObject({ requiresHumanMerge: true });
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { companies: ['Bug Out'] } });
+    await expect(assertOwnerListForCommit({ draft: null, brief: {}, frontmatter: finalFm, body: 'Bug Out competes with local providers.', humanMergeFallback: true }))
+      .rejects.toMatchObject({ code: 'BLOG_OWNER_LIST_BLOCKED', reason: 'named_competitor_off_list', offList: ['Bug Out'] });
+  });
+
   test('a failed check refuses the commit; a human-approved publish skips the check', async () => {
     dispatchWithFallback.mockResolvedValue({ ok: false, reason: 'no_key' });
     await expect(assertOwnerListForCommit({ draft: {}, brief: BLOG_BRIEF, frontmatter: finalFm, body: 'Plain body.' }))
       .rejects.toMatchObject({ code: 'BLOG_OWNER_LIST_UNVERIFIED', retryable: true });
     dispatchWithFallback.mockClear();
-    expect(await assertOwnerListForCommit({ draft: {}, brief: BLOG_BRIEF, frontmatter: finalFm, body: 'Bug Out competes.', humanApproved: true })).toBeNull();
+    expect(await assertOwnerListForCommit({ draft: {}, brief: BLOG_BRIEF, frontmatter: finalFm, body: 'Bug Out competes.', humanApproved: true }))
+      .toEqual({ extraction: null, requiresHumanMerge: false });
     expect(dispatchWithFallback).not.toHaveBeenCalled();
   });
 });

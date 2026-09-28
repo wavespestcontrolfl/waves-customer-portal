@@ -1331,7 +1331,13 @@ async function validateAutonomousRunGates(fixedMarkdown, run, deps = {}) {
       final: true,
     });
     if (comparisonResult.companyExtraction.ok !== true) {
-      return { ok: false, reason: `company-name check unavailable for the fix (${comparisonResult.companyExtraction.reason || 'unknown'})` };
+      // A provider outage is transient (Codex r6): the caller retries it on
+      // the remediation's bounded transient-round budget instead of parking.
+      return {
+        ok: false,
+        transient: comparisonResult.companyExtraction.retryable === true,
+        reason: `company-name check unavailable for the fix (${comparisonResult.companyExtraction.reason || 'unknown'})`,
+      };
     }
     if (comparisonResult.requiresHumanReview === true || comparisonResult.companyExtraction.companies.length) {
       // Owner list on the FIXED body (owner rulings 2026-09-27 D2 +
@@ -1988,6 +1994,14 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   if (typeof revalidateFix === 'function') {
     let recheck;
     try { recheck = await revalidateFix(fixed); } catch (e) { recheck = { ok: false, reason: e.message }; }
+    if (recheck && recheck.transient === true) {
+      // Same bounded transient-round budget as the content-gate outage above.
+      const attempt = (state.rounds || 0) + 1;
+      await saveState(db, prNumber, { branch, status: 'active', rounds: attempt });
+      const reason = `fix lane gates temporarily unavailable: ${recheck.reason}`;
+      if (atRoundLimit(attempt)) return park(db, prNumber, `${reason} (exhausted ${MAX_ROUNDS} remediation rounds)`, onPark, headSha, PARK_PRE_PUSH);
+      return { skipped: true, transient: true, reason: `${reason} (will retry)` };
+    }
     if (!recheck || recheck.ok !== true) {
       return park(db, prNumber, `fix failed lane gates: ${(recheck && recheck.reason) || 'no result'}`, onPark, headSha, PARK_PRE_PUSH);
     }

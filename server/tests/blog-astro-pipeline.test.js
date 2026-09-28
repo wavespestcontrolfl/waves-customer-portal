@@ -1994,6 +1994,42 @@ describe('publishAstro stamps astro_requires_human_merge (audit lane 4b)', () =>
     }));
   });
 
+  // The scheduler's publish auto-merges through pages-poll, so it goes
+  // through the same owner-list chokepoint on its final text (Codex r6).
+  test('a scheduled post naming an off-list company is refused before any branch', async () => {
+    businessNameConfirmer.extractCompanyNames.mockImplementation(async (finalDraft) => ({
+      ok: true, key: 'k', companies: /Bug Out/.test(finalDraft.body) ? ['Bug Out'] : [],
+    }));
+    const read = chain({ first: jest.fn().mockResolvedValue({ ...plainPost(), content: '## Choosing a provider\n\nBug Out competes with local providers in Bradenton.' }) });
+    const update = chain();
+    const queries = [read, update];
+    db.mockImplementation(() => queries.shift() || chain());
+
+    await expect(AstroPublisher.publishAstro('post-1')).rejects.toMatchObject({ code: 'BLOG_OWNER_LIST_BLOCKED', reason: 'named_competitor_off_list' });
+
+    expect(businessNameConfirmer.extractCompanyNames.mock.calls[0][0].body).toContain('Bug Out competes');
+    expect(gh.createBranch).not.toHaveBeenCalled();
+    expect(update.update).not.toHaveBeenCalledWith(expect.objectContaining({ astro_status: 'pr_open' }));
+  });
+
+  test('a scheduled post naming only the six keeps the human-merge stamp; an admin publish skips the check', async () => {
+    businessNameConfirmer.extractCompanyNames.mockResolvedValue({ ok: true, key: 'k', companies: ['Orkin'] });
+    let read = chain({ first: jest.fn().mockResolvedValue(plainPost()) });
+    let update = chain();
+    let queries = [read, update];
+    db.mockImplementation(() => queries.shift() || chain());
+
+    await AstroPublisher.publishAstro('post-1');
+    expect(update.update).toHaveBeenCalledWith(expect.objectContaining({ astro_status: 'pr_open', astro_requires_human_merge: true }));
+
+    businessNameConfirmer.extractCompanyNames.mockClear();
+    read = chain({ first: jest.fn().mockResolvedValue(plainPost()) });
+    update = chain();
+    queries = [read, update];
+    await AstroPublisher.publishAstro('post-1', { humanApproved: true });
+    expect(businessNameConfirmer.extractCompanyNames).not.toHaveBeenCalled();
+  });
+
   test('namedCompetitorAutopublish never reaches this lane — the stamp stays TRUE even with the flag on (manual/calendar posts keep their human merge)', async () => {
     // Owner directive 2026-08-26 scopes autopublish to operator-intercept
     // runs; publishAstro serves manual/calendar posts with no such
@@ -4344,7 +4380,7 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     expect(d.body).not.toMatch(/Bug Out/);
 
     await expect(AstroPublisher.publishOrUpdatePage(d, { action_type: 'new_supporting_blog' }))
-      .rejects.toMatchObject({ code: 'BLOG_OWNER_LIST_BLOCKED', reason: 'named_competitor_disabled' });
+      .rejects.toMatchObject({ code: 'BLOG_OWNER_LIST_BLOCKED', reason: 'named_competitor_off_list', offList: ['Bug Out'] });
 
     expect(businessNameConfirmer.extractCompanyNames.mock.calls[0][0].body).toContain('![Bug Out technician checking pellets]');
     expect(gh.createBranch).not.toHaveBeenCalled();

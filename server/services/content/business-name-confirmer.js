@@ -230,10 +230,14 @@ function ownerListError(code, message, fields) {
  *   BLOG_OWNER_LIST_UNVERIFIED { retryable } — extraction failed / too long
  *   BLOG_OWNER_LIST_BLOCKED    { reason, offList } — off-list name, or
  *     competitor content outside the unattended lane
- * humanApproved (the operator approval path) skips the check entirely.
+ * humanApproved (the operator approval / admin publish) skips the check.
+ * humanMergeFallback (the scheduler's publishAstro): competitor content
+ * naming only the six returns { requiresHumanMerge: true } for the PR's
+ * human-merge stamp instead of throwing. Returns { extraction,
+ * requiresHumanMerge }.
  */
-async function assertOwnerListForCommit({ draft, brief = {}, frontmatter = {}, body = '', humanApproved = false } = {}) {
-  if (humanApproved) return null;
+async function assertOwnerListForCommit({ draft, brief = {}, frontmatter = {}, body = '', humanApproved = false, humanMergeFallback = false } = {}) {
+  if (humanApproved) return { extraction: null, requiresHumanMerge: false };
   const gate = require('./comparison-table-gate');
   const finalDraft = {
     frontmatter, body, title: frontmatter.title, meta_description: frontmatter.meta_description,
@@ -255,20 +259,28 @@ async function assertOwnerListForCommit({ draft, brief = {}, frontmatter = {}, b
   // merge-time recheck (kill switch included) governs a run whose
   // publisher-added text named a competitor (pre-push r11).
   if (draft && typeof draft === 'object') draft.final_named_competitors = names;
-  if (!names.length && !extraction.companies.length) return extraction;
-  if (!gate.namedCompetitorAutopublishEligible(brief)) {
-    throw ownerListError('BLOG_OWNER_LIST_BLOCKED',
-      `final text names ${[...names, ...extraction.companies].join(', ')} outside the unattended named-competitor lane`,
-      { reason: brief.action_type === 'new_supporting_blog' ? 'named_competitor_disabled' : 'named_competitor_review', offList: [], extraction });
-  }
+  if (!names.length && !extraction.companies.length) return { extraction, requiresHumanMerge: false };
   const verdict = gate.namedCompetitorListVerdict({ namedCompetitors: names, companyExtraction: extraction });
+  if (!gate.namedCompetitorAutopublishEligible(brief)) {
+    // The scheduler lane (publishAstro) keeps its human-merge stamp for
+    // competitor content naming only the six; anything off the list is
+    // refused like every other unattended commit.
+    if (humanMergeFallback && verdict.ok) return { extraction, requiresHumanMerge: true };
+    throw ownerListError('BLOG_OWNER_LIST_BLOCKED',
+      verdict.ok
+        ? `final text names ${[...names, ...extraction.companies].join(', ')} outside the unattended named-competitor lane`
+        : `final text names competitor(s) outside the owner-approved list: ${(verdict.offList || []).join(', ')}`,
+      verdict.ok
+        ? { reason: brief.action_type === 'new_supporting_blog' ? 'named_competitor_disabled' : 'named_competitor_review', offList: [], extraction }
+        : { reason: verdict.reason, offList: verdict.offList || [], extraction });
+  }
   if (!verdict.ok) {
     throw ownerListError('BLOG_OWNER_LIST_BLOCKED',
       `final text names competitor(s) outside the owner-approved list: ${(verdict.offList || []).join(', ')}`,
       { reason: verdict.reason, offList: verdict.offList || [], extraction });
   }
   if (draft && typeof draft === 'object') draft.competitors_approved_by_list = verdict.approved;
-  return extraction;
+  return { extraction, requiresHumanMerge: false };
 }
 
 module.exports = {

@@ -353,6 +353,26 @@ describe('runRemediationForPr', () => {
     expect(second).toEqual(expect.objectContaining({ remediated: true, round: 2 }));
   });
 
+  test('a company-name check outage in the lane revalidation retries on the transient-round budget instead of parking (Codex r6)', async () => {
+    const db = makeDb();
+    const gh = makeGh({ preHead: HEAD });
+    const onPark = jest.fn();
+    const revalidateFix = jest.fn()
+      .mockResolvedValueOnce({ ok: false, transient: true, reason: 'company-name check unavailable for the fix (timeout)' })
+      .mockResolvedValue({ ok: true });
+    const editorialEvidence = { filesForDocument: jest.fn(async () => []) };
+    const ctx = { ...CTX, expectedParentSha: HEAD, prePushCheck: jest.fn(async () => true), onPark, revalidateFix };
+    const deps = { db, gh, editorialEvidence, callAnthropic: jest.fn(makeCall('FIXED BODY')), validateFixedBlogFile: PASS };
+
+    const first = await runRemediationForPr(ctx, deps);
+    expect(first).toEqual(expect.objectContaining({ skipped: true, transient: true, reason: expect.stringContaining('will retry') }));
+    expect(onPark).not.toHaveBeenCalled();
+    expect(db._tables.codex_remediation_state[0]).toEqual(expect.objectContaining({ status: 'active', rounds: 1 }));
+
+    const second = await runRemediationForPr(ctx, deps);
+    expect(second).toEqual(expect.objectContaining({ remediated: true, round: 2 }));
+  });
+
   test('an editorial provider outage retries on the same head with retained budget, then atomically commits after recovery', async () => {
     const db = makeDb();
     const gh = makeGh({ preHead: HEAD });
@@ -1707,7 +1727,7 @@ describe('validateAutonomousRunGates', () => {
 
     deps.businessNameConfirmer.extractCompanyNames = jest.fn(async () => ({ ok: false, key: 'k2', reason: 'timeout', retryable: true }));
     expect(await rem.validateAutonomousRunGates(MD, RUN_REF, deps))
-      .toMatchObject({ ok: false, reason: expect.stringMatching(/company-name check unavailable/) });
+      .toMatchObject({ ok: false, transient: true, reason: expect.stringMatching(/company-name check unavailable/) });
   });
 
   test('missing opportunity row -> fail closed (no guardrail context)', async () => {

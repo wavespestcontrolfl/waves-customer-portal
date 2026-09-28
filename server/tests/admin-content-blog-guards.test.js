@@ -381,7 +381,8 @@ describe('publish-astro atomic claim (publish_claimed_at — lane-neutral, invis
     AstroPublisher.publishAstro.mockResolvedValue({ pr_number: 13 });
     const r = await invoke('post', '/blog/:id/publish-astro', { params: { id: POST_ID } });
     expect(r.statusCode).toBe(200);
-    expect(AstroPublisher.publishAstro).toHaveBeenCalledWith(POST_ID);
+    // An admin click is a human publish: the owner-list chokepoint defers to it.
+    expect(AstroPublisher.publishAstro).toHaveBeenCalledWith(POST_ID, { humanApproved: true });
   });
 
   test('PUT refuses a mid-publish row and CAS-guards against a concurrent status flip', async () => {
