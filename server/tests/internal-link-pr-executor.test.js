@@ -1149,6 +1149,7 @@ describe('internal-link candidate sweep', () => {
     process.env.SHADOW_MODE_ADD_INTERNAL_LINKS = 'false';
     process.env.AUTONOMOUS_INTERNAL_LINK_MAX_LINKS_PER_PR = '2';
     const instance = new InternalLinkPrExecutor();
+    instance._replanUnplannedPublishes = jest.fn(async () => 0);
     const order = [];
     instance.runPostMergeVerification = jest.fn(async () => { order.push('verify'); return { count: 0, results: [] }; });
     instance.runPrBatch = jest.fn(async () => { order.push('batch'); return { status: 'pr_open', count: 2 }; });
@@ -1281,6 +1282,7 @@ describe('internal-link PR auto-merge', () => {
     const q = {
       where: jest.fn(() => q),
       whereNotNull: jest.fn(() => q),
+      whereNull: jest.fn(() => q),
       orderBy: jest.fn(() => q),
       select: jest.fn(async () => rows),
       countDistinct: jest.fn(() => q),
@@ -1384,13 +1386,13 @@ describe('internal-link PR auto-merge', () => {
     openTasks([{ id: 't1', status: 'pr_open', astro_pr_url: prUrl, pr_commit_sha: HEAD, merged_at: new Date().toISOString(), executor_version: 'internal-link-pr-executor-v2', source_file: 'src/content/blog/a.md', source_url: '/a/', target_url: '/termite-inspection/' }]);
     GitHubClient.getPr.mockResolvedValue({ number: 77, state: 'closed', head: { sha: 'c'.repeat(40), ref: 'content/internal-link-x' }, base: { ref: 'main' } });
     GitHubClient.retireBranch.mockResolvedValueOnce(false);
-    expect(await instance.runAutoMerge()).toMatchObject({ status: 'hold', reason: 'published_branch_retire_pending' });
+    expect(await instance.runAutoMerge()).toMatchObject({ settled: 0 });
     expect(instance._markTaskMerged).not.toHaveBeenCalled();
 
     // Next tick: the rows carry merged_at, so cleanup finishes (never "unmerged").
     openTasks([{ id: 't1', status: 'pr_open', astro_pr_url: prUrl, pr_commit_sha: HEAD, merged_at: new Date().toISOString(), executor_version: 'internal-link-pr-executor-v2', source_file: 'src/content/blog/a.md', source_url: '/a/', target_url: '/termite-inspection/' }]);
     GitHubClient.getPr.mockResolvedValue({ number: 77, state: 'open', head: { sha: 'c'.repeat(40), ref: 'content/internal-link-x' }, base: { ref: 'main' } });
-    expect(await instance.runAutoMerge()).toMatchObject({ status: 'merged', reason: 'published_settled' });
+    expect(await instance.runAutoMerge()).toMatchObject({ settled: 1 });
     expect(GitHubClient.closePr).toHaveBeenLastCalledWith(77);
     expect(instance._markTaskMerged).toHaveBeenCalledWith('t1', expect.any(Object));
     expect(GitHubClient.mergePr).toHaveBeenCalledTimes(1);
@@ -1609,12 +1611,26 @@ describe('internal-link PR auto-merge', () => {
     expect(GitHubClient.mergePr).toHaveBeenCalledTimes(1);
   });
 
+  test('a published PR still settles when the auto-merge kill switch is off (no new merges)', async () => {
+    process.env.AUTONOMOUS_INTERNAL_LINK_AUTO_MERGE = 'false';
+    try {
+      openTasks([{ id: 't1', status: 'pr_open', astro_pr_url: prUrl, pr_commit_sha: HEAD, merged_at: new Date().toISOString(), executor_version: 'internal-link-pr-executor-v2', source_file: 'src/content/blog/a.md', source_url: '/a/', target_url: '/termite-inspection/' }]);
+      GitHubClient.getPr.mockResolvedValue({ number: 77, state: 'open', head: { sha: 'c'.repeat(40), ref: 'content/internal-link-x' }, base: { ref: 'main' } });
+      expect(await instance.runAutoMerge()).toEqual({ status: 'disabled', settled: 1 });
+      expect(GitHubClient.closePr).toHaveBeenCalledWith(77);
+      expect(instance._markTaskMerged).toHaveBeenCalledWith('t1', expect.any(Object));
+      expect(GitHubClient.mergePr).not.toHaveBeenCalled();
+    } finally {
+      delete process.env.AUTONOMOUS_INTERNAL_LINK_AUTO_MERGE;
+    }
+  });
+
   test('kill switch and shadow mode disable it', async () => {
     process.env.AUTONOMOUS_INTERNAL_LINK_AUTO_MERGE = 'false';
-    expect(await instance.runAutoMerge()).toEqual({ status: 'disabled' });
+    expect(await instance.runAutoMerge()).toEqual({ status: 'disabled', settled: 0 });
     delete process.env.AUTONOMOUS_INTERNAL_LINK_AUTO_MERGE;
     process.env.SHADOW_MODE_ADD_INTERNAL_LINKS = 'true';
-    expect(await instance.runAutoMerge()).toEqual({ status: 'shadow' });
+    expect(await instance.runAutoMerge()).toEqual({ status: 'shadow', settled: 0 });
   });
 });
 
@@ -1805,5 +1821,33 @@ describe('internal-link verification vs a concurrent publication', () => {
     const result = await instance.verifyMergedTask({ id: 't1', status: 'pr_open', astro_pr_url: 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/77' });
     expect(result).toMatchObject({ transient: true, skipped: 'publication_state_changed' });
     expect(instance._failAbandonedPrTask).toHaveBeenCalledWith('t1', 'internal_link_pr_closed_unmerged', { onlyIf: expect.any(Function) });
+  });
+});
+
+describe('internal-link replan of publishes whose post-merge planning failed', () => {
+  test('replans recent publishes with link_tasks_queued NULL and stamps the result', async () => {
+    jest.resetModules();
+    const updates = [];
+    jest.doMock('../models/db', () => {
+      const db = jest.fn((table) => {
+        const q = {};
+        for (const m of ['where', 'whereNull', 'whereNotNull', 'orderBy', 'limit']) q[m] = jest.fn(() => q);
+        q.select = jest.fn(async () => (table === 'autonomous_runs' ? [{ id: 'run1', published_url: 'https://www.wavespestcontrol.com/new-post/', action_type: 'new_supporting_blog' }] : []));
+        q.update = jest.fn(async (patch) => { updates.push({ table, patch }); return 1; });
+        return q;
+      });
+      return db;
+    });
+    jest.doMock('../services/content/autonomous-pr-poller', () => ({ _internals: { resolveTargetForRun: jest.fn(async () => ({ url: 'https://www.wavespestcontrol.com/new-post/', planLinks: true })) } }));
+    const planInternalLinksForTarget = jest.fn(async () => ({ queued: 4 }));
+    jest.doMock('../services/content-astro/astro-publisher', () => ({ planInternalLinksForTarget }));
+    const fresh = require('../services/content/internal-link-pr-executor');
+    const replanned = await new fresh.InternalLinkPrExecutor()._replanUnplannedPublishes();
+    expect(replanned).toBe(1);
+    expect(planInternalLinksForTarget).toHaveBeenCalledWith(expect.objectContaining({ url: 'https://www.wavespestcontrol.com/new-post/' }));
+    expect(updates).toEqual([{ table: 'autonomous_runs', patch: expect.objectContaining({ link_tasks_queued: 4 }) }]);
+    jest.dontMock('../models/db');
+    jest.dontMock('../services/content/autonomous-pr-poller');
+    jest.dontMock('../services/content-astro/astro-publisher');
   });
 });

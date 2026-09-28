@@ -16,6 +16,8 @@
  */
 
 jest.mock('../models/db', () => jest.fn());
+// The internal-link lane rides pollPending's tick; it has its own suite.
+jest.mock('../services/content/internal-link-pr-executor', () => ({ runAutoMerge: jest.fn(async () => ({ status: 'no_open_pr' })) }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/content-astro/github-client', () => ({
   getPr: jest.fn(),
