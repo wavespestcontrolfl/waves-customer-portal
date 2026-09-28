@@ -107,8 +107,9 @@
       "https://en.wikipedia.org/wiki/Coluber_constrictor"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "e66b1a33dc57b95f31695b2e618b369e041da2db711b3e4ea110844afd45d4ab"
     },
     "role": "wildlife",
     "risk": "defensive",
@@ -218,8 +219,9 @@
       "https://www.floridamuseum.ufl.edu/florida-snake-id/snake/eastern-ratsnake/"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Color-form claim confirmed directly: the Florida Museum of Natural History (University of Florida) species-ID page states adults in the Florida peninsula \"can be yellow, orange, tan, or gray with four dark longitudinal stripes\" and lists 'Yellow Ratsnake' and 'Everglades Ratsnake' among the accepted common names, matching this entry's traits/aka."
+      "status": "owner_approved",
+      "notes": "Color-form claim confirmed directly: the Florida Museum of Natural History (University of Florida) species-ID page states adults in the Florida peninsula \"can be yellow, orange, tan, or gray with four dark longitudinal stripes\" and lists 'Yellow Ratsnake' and 'Everglades Ratsnake' among the accepted common names, matching this entry's traits/aka. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "1a4d5242bd23f6568a8ac7a8c7aa311f27cb78ae67de479a08a051f785a315c9"
     },
     "role": "wildlife",
     "risk": "defensive",
@@ -329,8 +331,9 @@
       "https://en.wikipedia.org/wiki/Corn_snake"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "afe6c09018535ee5883baf038041f67b42abfb868944fa55e85cc63b4ef8b568"
     },
     "role": "wildlife",
     "risk": "defensive",
@@ -435,8 +438,9 @@
       "https://en.wikipedia.org/wiki/Ring-necked_snake"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Per audit item 44: safety.bites changed from false to true (rule 5: capability, not danger) since it can bite if handled, even though it strongly prefers to flip and flash its belly instead; risk changed from low to defensive to match, consistent with other harmless-but-technically-can-bite snakes in this file."
+      "status": "owner_approved",
+      "notes": "Per audit item 44: safety.bites changed from false to true (rule 5: capability, not danger) since it can bite if handled, even though it strongly prefers to flip and flash its belly instead; risk changed from low to defensive to match, consistent with other harmless-but-technically-can-bite snakes in this file. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "c4d5ffefb04b2e698abed02bdecf0959b062fdb68aa7f964106ca6d0eb3a5ff2"
     },
     "role": "wildlife",
     "risk": "defensive",
@@ -663,8 +667,9 @@
       "https://myfwc.com/wildlifehabitats/profiles/reptiles/snakes/cottonmouth/"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Per audit item 18: head shape alone is not a reliable cottonmouth tell (water snakes flatten/widen the head defensively) — UF/IFAS UW229 confirms harmless water snakes are often mistaken for cottonmouths and recommends leaving all water snakes alone rather than sorting them visually. Added FWC-confirmed pupil/facial-pit/eye-visibility cues (myfwc.com cottonmouth profile, loaded this session) as the more reliable tell, but look_alikes.photo_can_confirm set to false since getting a safe, clear photo of pupil/eye detail on a snake at the water's edge isn't realistic for a homeowner; the copy tells them to treat an uncertain sighting as a cottonmouth rather than try to confirm from a distance photo. Returned to draft after removing the generic 'water snake' alias, which cannot identify this one species; owner re-approval is required."
+      "status": "owner_approved",
+      "notes": "Per audit item 18: head shape alone is not a reliable cottonmouth tell (water snakes flatten/widen the head defensively) — UF/IFAS UW229 confirms harmless water snakes are often mistaken for cottonmouths and recommends leaving all water snakes alone rather than sorting them visually. Added FWC-confirmed pupil/facial-pit/eye-visibility cues (myfwc.com cottonmouth profile, loaded this session) as the more reliable tell, but look_alikes.photo_can_confirm set to false since getting a safe, clear photo of pupil/eye detail on a snake at the water's edge isn't realistic for a homeowner; the copy tells them to treat an uncertain sighting as a cottonmouth rather than try to confirm from a distance photo. Returned to draft after removing the generic 'water snake' alias, which cannot identify this one species; owner re-approval is required. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "4548a842311f64fe06239d7f5391d84c8ebf9be1f6b59e1c3800eb7ce4d2ec56"
     },
     "role": "wildlife",
     "risk": "defensive",
@@ -769,8 +774,9 @@
       "https://www.floridamuseum.ufl.edu/florida-snake-id/snake/scarlet-kingsnake/"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Corrected a dangerous band-pattern inversion: an earlier draft had this kingsnake's red bands touching yellow and the coral snake's touching black, backwards from UF/IFAS EDIS UW229 (\"in the two non-venomous species, the red bands touch only black bands, but in coral snakes the red bands only touch yellow bands\"; coral snake has a blunt black snout followed by yellow, this kingsnake has a pointed red snout). Traits, look_alikes, safety_line and tech_notes now correctly say red touches black here, red touches yellow on the coral snake. Range 'occasional' confirmed directly: the Florida Museum of Natural History Snake ID guide states scarlet kingsnakes \"can be locally abundant\" but \"are not commonly seen due to their secretive nature,\" matching a statewide-common-but-rarely-encountered profile rather than a species you'd expect to spot often; no SWFL-county-specific sighting count exists, but this settles the qualitative claim."
+      "status": "owner_approved",
+      "notes": "Corrected a dangerous band-pattern inversion: an earlier draft had this kingsnake's red bands touching yellow and the coral snake's touching black, backwards from UF/IFAS EDIS UW229 (\"in the two non-venomous species, the red bands touch only black bands, but in coral snakes the red bands only touch yellow bands\"; coral snake has a blunt black snout followed by yellow, this kingsnake has a pointed red snout). Traits, look_alikes, safety_line and tech_notes now correctly say red touches black here, red touches yellow on the coral snake. Range 'occasional' confirmed directly: the Florida Museum of Natural History Snake ID guide states scarlet kingsnakes \"can be locally abundant\" but \"are not commonly seen due to their secretive nature,\" matching a statewide-common-but-rarely-encountered profile rather than a species you'd expect to spot often; no SWFL-county-specific sighting count exists, but this settles the qualitative claim. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "c9cfebf6a5ca8a2cd439c78afc7122ca56f392ff9570163c6ebd0edde3939826"
     },
     "role": "wildlife",
     "risk": "low",
@@ -875,8 +881,9 @@
       "https://www.federalregister.gov/documents/2025/10/31/2025-19732/endangered-and-threatened-wildlife-and-plants-review-of-species-that-are-candidates-for-listing-as"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Range set to 'occasional' given documented steep population decline (source cites ~3% of historical numbers) and its preference for scrub/flatwoods over developed yards. Protected-status confirmed this session with two live, current, authoritative sources: (1) Florida Administrative Code 68A-27.003, the state's current Endangered and Threatened Species List (effective 2026), does not include Crotalus adamanteus among its listed reptiles — confirming no state threatened/endangered designation. (2) The Federal Register's Oct 31, 2025 FWS candidate-species notice (2025-19732) lists 'Eastern diamondback rattlesnake' with pending action '12-month finding' — i.e. its 2012 ESA petition is still open/under review with no final listing decision as of this notice, so it is not currently federally listed either. safety.protected: false is correct; tech_notes updated to reflect the confirmed (not just assumed) status."
+      "status": "owner_approved",
+      "notes": "Range set to 'occasional' given documented steep population decline (source cites ~3% of historical numbers) and its preference for scrub/flatwoods over developed yards. Protected-status confirmed this session with two live, current, authoritative sources: (1) Florida Administrative Code 68A-27.003, the state's current Endangered and Threatened Species List (effective 2026), does not include Crotalus adamanteus among its listed reptiles — confirming no state threatened/endangered designation. (2) The Federal Register's Oct 31, 2025 FWS candidate-species notice (2025-19732) lists 'Eastern diamondback rattlesnake' with pending action '12-month finding' — i.e. its 2012 ESA petition is still open/under review with no final listing decision as of this notice, so it is not currently federally listed either. safety.protected: false is correct; tech_notes updated to reflect the confirmed (not just assumed) status. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "44a2ead97e4224f31cf2fbb5519f2cbcf6ca32e012b93bf45513c9fa299e617b"
     },
     "role": "wildlife",
     "risk": "medical",
@@ -995,8 +1002,9 @@
       "https://en.wikipedia.org/wiki/Sistrurus_miliarius"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "8ef7dddd2b7edff25fa22a00f939a79f1627882a2cd510c36c3115e18eccfc13"
     },
     "role": "wildlife",
     "risk": "medical",
@@ -1108,8 +1116,9 @@
       "https://myfwc.com/wildlifehabitats/profiles/reptiles/snakes/cottonmouth/"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Per audit item 18: removed head-shape-alone as the confirming tell (UF/IFAS UW229 notes water snakes are commonly mistaken for cottonmouths and recommends leaving all water snakes alone rather than sorting them visually, since both flatten/widen the head defensively). Added FWC-confirmed cues (myfwc.com cottonmouth profile, loaded this session): vertical pupil, eyes hidden from directly above by the brow ridge, and a facial pit that water snakes lack. look_alikes.photo_can_confirm set to false since a homeowner cannot safely get close enough for a clear pupil/facial-pit photo; next_photo instead tells them to keep distance and treat an uncertain sighting as this species."
+      "status": "owner_approved",
+      "notes": "Per audit item 18: removed head-shape-alone as the confirming tell (UF/IFAS UW229 notes water snakes are commonly mistaken for cottonmouths and recommends leaving all water snakes alone rather than sorting them visually, since both flatten/widen the head defensively). Added FWC-confirmed cues (myfwc.com cottonmouth profile, loaded this session): vertical pupil, eyes hidden from directly above by the brow ridge, and a facial pit that water snakes lack. look_alikes.photo_can_confirm set to false since a homeowner cannot safely get close enough for a clear pupil/facial-pit photo; next_photo instead tells them to keep distance and treat an uncertain sighting as this species. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "53a5a9467400c6f51d929abc8f20adbb455d82d1eeb534124b4e27515bef4f51"
     },
     "role": "wildlife",
     "risk": "medical",
@@ -1214,8 +1223,9 @@
       "https://www.floridamuseum.ufl.edu/florida-snake-id/snake/harlequin-coralsnake/"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Corrected an inverted look_alikes.difference that contradicted this entry's own traits/fact: it had said this coral snake's red touches black and the scarlet kingsnake's red touches yellow, backwards. Confirmed against UF/IFAS EDIS UW229: coral snake has a blunt black snout with red bands touching yellow; the kingsnake has a pointed red snout with red bordered by black. Range 'occasional' and the 'rarely aggressive/mostly stays hidden' copy are now confirmed directly by the Florida Museum of Natural History Snake ID guide: \"Harlequin Coralsnakes are extremely secretive and rarely seen\" and \"Bites from this species are extremely rare,\" occurring almost only when the snake is deliberately handled — matching this entry's low encounter/bite framing. No SWFL-county-specific sighting count exists, but the qualitative claim is settled."
+      "status": "owner_approved",
+      "notes": "Corrected an inverted look_alikes.difference that contradicted this entry's own traits/fact: it had said this coral snake's red touches black and the scarlet kingsnake's red touches yellow, backwards. Confirmed against UF/IFAS EDIS UW229: coral snake has a blunt black snout with red bands touching yellow; the kingsnake has a pointed red snout with red bordered by black. Range 'occasional' and the 'rarely aggressive/mostly stays hidden' copy are now confirmed directly by the Florida Museum of Natural History Snake ID guide: \"Harlequin Coralsnakes are extremely secretive and rarely seen\" and \"Bites from this species are extremely rare,\" occurring almost only when the snake is deliberately handled — matching this entry's low encounter/bite framing. No SWFL-county-specific sighting count exists, but the qualitative claim is settled. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "59554b73aeaab6875791aaed292462019c8be4bdfc0db176c5ccc279db1fc997"
     },
     "role": "wildlife",
     "risk": "medical",
