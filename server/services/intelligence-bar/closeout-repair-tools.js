@@ -268,6 +268,17 @@ async function planInvoiceStep(status, knex) {
   return send.step ? { steps: [bill, send.step] } : { steps: [bill], skip: send.skip };
 }
 
+// Account credit the Send action would consume: sendViaSMSAndEmail runs
+// autoApplyAccountCreditIfEnabled first (deploy gate + the customer's own
+// auto-apply switch + a positive balance). That money movement is not on the
+// card and the send can't pin an amount, so such sends stay manual.
+async function accountCreditTheSendWouldApply(customerId, knex) {
+  if (!require('../../config/feature-gates').gates.autoApplyAccountCredit) return 0;
+  const CustomerCredit = require('../customer-credit');
+  if (!(await CustomerCredit.customerAutoApplyEnabled(customerId, knex))) return 0;
+  return Number(await CustomerCredit.getBalance(customerId, knex)) || 0;
+}
+
 // Who the Send action reaches — its own resolver (invoiceRecipientFor over
 // the customer's billing contact) for the email, and the phone on file for
 // the pay-link text (the messaging pipeline's consent rules apply at send).
@@ -280,6 +291,10 @@ async function planInvoiceSend(status, knex) {
   const email = recipient?.email ? String(recipient.email).trim().toLowerCase() : null;
   const phone = customer.phone || null;
   if (!email && !phone) return why('no invoice email or phone on file — the invoice is created; send it from the Invoices page');
+  const credit = await accountCreditTheSendWouldApply(customer.id, knex);
+  if (credit > 0) {
+    return why(`the send would apply $${credit.toFixed(2)} of the customer's account credit — the invoice is created; send it from the Invoices page`);
+  }
   return {
     step: {
       step: 'send_invoice',
@@ -383,6 +398,12 @@ const STEP_RUNNERS = {
       .where({ scheduled_service_id: step.scheduled_service_id, disposition: 'billed' })
       .first('invoice_id');
     if (!disposition?.invoice_id) return { status: 'failed', detail: 'the created invoice could not be found' };
+    // Re-checked right before the send: credit that appeared since the card
+    // was shown would be consumed by the send — refuse instead.
+    const invoiceRow = await knex('invoices').where({ id: disposition.invoice_id }).first('customer_id');
+    if (invoiceRow && (await accountCreditTheSendWouldApply(invoiceRow.customer_id, knex)) > 0) {
+      return { status: 'failed', detail: 'the customer now has account credit the send would apply — send it from the Invoices page', invoice_id: disposition.invoice_id };
+    }
     try {
       const result = await require('../invoice').sendViaSMSAndEmail(disposition.invoice_id, {
         firstDeliveryOnly: true, operatorInitiated: true, actorTechnicianId: step.actor_id || null,

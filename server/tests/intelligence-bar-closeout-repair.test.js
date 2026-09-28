@@ -17,6 +17,8 @@ jest.mock('../services/billing-recovery-bill', () => ({
 // The Send action's own recipient resolver and send.
 jest.mock('../services/invoice-email', () => ({ invoiceRecipientFor: jest.fn(() => ({ recipient: { email: 'Pat@Example.com' } })) }));
 jest.mock('../services/invoice', () => ({ sendViaSMSAndEmail: jest.fn() }));
+jest.mock('../config/feature-gates', () => ({ gates: { autoApplyAccountCredit: false } }));
+jest.mock('../services/customer-credit', () => ({ customerAutoApplyEnabled: jest.fn(async () => true), getBalance: jest.fn(async () => 25) }));
 
 const db = require('../models/db');
 const { getCloseoutStatus } = require('../services/closeout-status');
@@ -473,4 +475,31 @@ describe('bill_visit — the Billing Recovery "Bill" action as a repair step', (
     expect(partial.partial).toBe(true);
     expect(partial.receipt[1]).toEqual(expect.objectContaining({ status: 'failed', detail: 'No invoice recipient email' }));
   });
+});
+
+test('send_invoice: account credit the send would apply keeps the send manual (plan) and refuses it (run)', async () => {
+  const gates = require('../config/feature-gates').gates;
+  gates.autoApplyAccountCredit = true;
+  try {
+    getCloseoutStatus.mockResolvedValue({ ...status({ facts: { invoice: { state: 'pending', reason: 'expected_invoice_not_minted' } } }), serviceId: SVC });
+    db.mockImplementation(fakeDb({ service_records: [RECORD], invoices: [{ id: 'inv-9', customer_id: 'cust-1' }], visit_billing_dispositions: [{ invoice_id: 'inv-9' }] }));
+    BillingRecoveryBill.assessVisitBillable.mockResolvedValue({ ok: true, price: 129, rowPrice: 129, visit: {} });
+    const preview = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
+    expect(preview.steps.map((st) => st.step)).toEqual(['bill_visit']);
+    expect(preview.manual).toEqual(expect.arrayContaining([expect.objectContaining({ fact: 'invoiceDelivery', fix: expect.stringMatching(/apply \$25\.00 of the customer's account credit/) })]));
+
+    // Credit that appears after an approved card: the run refuses the send.
+    gates.autoApplyAccountCredit = false;
+    const { steps: approved } = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
+    gates.autoApplyAccountCredit = true;
+    BillingRecoveryBill.billVisit.mockResolvedValue({ ok: true, price: 129, invoice: { id: 'inv-9', total: '138.03' } });
+    // Keep the executor's re-plan identical to the approval (credit shows up only at send time).
+    const CustomerCredit = require('../services/customer-credit');
+    CustomerCredit.getBalance.mockResolvedValueOnce(0).mockResolvedValueOnce(25);
+    const run = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC }, { confirmed: true, executionPins: { _verified_repair_steps: approved } });
+    expect(run.receipt[1]).toEqual(expect.objectContaining({ step: 'send_invoice', status: 'failed', detail: expect.stringMatching(/account credit/) }));
+    expect(InvoiceService.sendViaSMSAndEmail).not.toHaveBeenCalled();
+  } finally {
+    gates.autoApplyAccountCredit = false;
+  }
 });
