@@ -261,6 +261,19 @@ postgres('get_report_engagement reserviceWithin14Days against migrated PostgreSQ
     expect(res.reserviceWithin14Days.pest).toEqual({ visits: 1, reserviced: 0, rate_pct: 0 });
   });
 
+  test('a callback after an internal-only treatment credits that treatment, not an older visible visit', async () => {
+    const cust = await customer();
+    await sentVisit({ customerId: cust, date: '2026-08-03', line: 'pest' }); // visible, in the denominator
+    await visitWithRecords({ customerId: cust, scheduledDate: '2026-08-06', records: [
+      { serviceDate: '2026-08-06', createdAt: '2026-08-06T10:00:00Z', typedReportDelivery: 'internal_only' },
+    ] });
+    await completedVisit({ customerId: cust, date: '2026-08-09', line: 'pest', serviceKeySnapshot: 'pest_re_service' });
+    const res = await executeDashboardTool('get_report_engagement', { date_from: FROM, date_to: TO });
+    // The internal-only treatment is out of the denominator but still the
+    // nearest visit before the callback, so the 08-03 visit is not credited.
+    expect(res.reserviceWithin14Days.pest).toEqual({ visits: 1, reserviced: 0, rate_pct: 0 });
+  });
+
   test('right-censoring: a visit inside the last 14 days is excluded even with a re-service; one outside it counts', async () => {
     const cust = await customer();
     // Visit A: 5 days ago — its 14-day follow-up window hasn't closed yet,

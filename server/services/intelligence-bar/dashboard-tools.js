@@ -987,17 +987,20 @@ async function getReserviceWithin14Days(from, to, cutoff) {
       WHERE ss.status = 'completed'
     ),
     performed AS (
-      SELECT id, customer_id, service_date, record_line AS service_line
+      -- Every performed treatment, visible or not: the nearest-visit choice
+      -- below must see an internal-only treatment too, or its callback would
+      -- land on an older visit. Visibility limits only the denominator.
+      SELECT id, customer_id, service_date, record_line AS service_line, customer_visible
       FROM completed
       WHERE NOT is_reservice
         AND record_status = 'completed'
-        AND customer_visible
         AND visit_outcome NOT IN (${NON_PERFORMED_VISIT_OUTCOMES.map(() => '?').join(', ')})
     ),
     visits AS (
       SELECT id, customer_id, service_date, service_line
       FROM performed
-      WHERE service_date >= ?::date AND service_date <= LEAST(?::date, ?::date)
+      WHERE customer_visible
+        AND service_date >= ?::date AND service_date <= LEAST(?::date, ?::date)
     ),
     reservices AS (
       SELECT id, customer_id, service_date,
