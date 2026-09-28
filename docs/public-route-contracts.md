@@ -356,6 +356,60 @@ cadence, visit count, cadence wording, catalog key, or an explicit tier field
 grandfathered and untouched by this gate; it only blocks a NEW self-serve
 accept from landing on the retired cadence.
 
+Missing-contact capture (owner ruling 2026-09-27). GET
+`/api/estimates/:token/data` carries `contactGaps: { firstName, lastName, email }` —
+booleans only — while the estimate is accept-active (never on
+accepted/declined/expired/off-surface estimates or the PDF render pass).
+`lastName` is true when the estimate's `customer_name` has fewer than two
+name tokens AND the linked customer (if any) has no real last name (blank or
+the `'Customer'` placeholder); `email` is true when neither the estimate nor
+the linked customer has an email. The linked customer's name/email are never
+returned. The page renders "Last name" (required client-side) and "Email (for
+your service reports and receipts)" (optional) above Accept for whichever is
+true, and blocks Accept on a typed-but-malformed email.
+`firstName` is true only when there is no name at all (blank estimate name and
+no linked first name), or the estimate name is exactly the linked profile's
+surname while its first name is blank; the page then also asks for "First
+name" (required). Name gaps are judged from structure, not by guessing which
+stored words are placeholders (owner ruling 2026-09-28): the only exceptions
+are the literal `undefined` / `null` tokens of the old concatenation bug and
+the `Customer` surname the accept itself used to stamp. Names are normalized
+with `normalizeContactName` (proper case) and capped by whole code points.
+Without a usable first name the surname is not applied, so the accept never
+creates a placeholder first name. The explicitly linked profile
+(`estimates.customer_id`) with a blank first name takes the collected first
+name through `propagateCustomerNameChange`; phone-matched or sibling profiles
+never do.
+`PUT /api/estimates/:token/accept` accepts optional `contactFirstName`, `contactLastName`
+(trimmed, whitespace-collapsed, ≤50 chars — the customers.last_name width) and `contactEmail` (lowercased,
+≤150 chars — the customers.email width — `EMAIL_RE`). A malformed non-empty value answers 400
+`{ error, code: 'CONTACT_FIRST_NAME_INVALID' | 'CONTACT_LAST_NAME_INVALID' | 'CONTACT_EMAIL_INVALID' }` before
+any mutation; a blank or absent value is never an error (a tab loaded before
+this shipped still accepts). Values fill GAPS only and never overwrite: the
+gap verdict is recomputed and the estimate row written inside the acceptance
+transaction on the locked row, after the eligibility checks, so a rejected
+accept changes nothing and a failed check fails the accept (retryable) rather
+than dropping the input. Customer resolution (phone match) runs on the
+pre-fill identity, so a submitted email never steers which profile the accept
+lands on; an authored proposal's `preparedFor` that matched the old name moves
+with it (and `proposalDelivery` drops), as in the contact-fanout name sync; the
+new customer is created with the supplied values; an EXISTING matched, linked
+or grouped-sibling profile is filled only when the estimate's own first name
+matches the profile's (an estimate addressed to a tenant under a landlord's
+record keeps the values on the estimate only), and then `last_name` only when
+blank or `'Customer'` and `email` only when blank (whitespace-only counts as
+blank). Each existing-profile fill stamps `customers.updated_at`, and a surname
+fill runs `propagateCustomerNameChange` in the same transaction. Only fields the
+server's own `contactGaps` verdict flags are ever written — a value for a field
+the page never offered is ignored. The customer email fill runs through the
+shared email-claim guard (`backfillCustomerEmailInTrx`: row lock, then the
+`customer-email:` advisory lock, then the undone-merge holder recheck) in a
+savepoint, so a guard failure drops only the email fill, not the accept. An
+accept-active estimate with a contact gap always gets the React view: the
+`/estimate/` mount skips the legacy renderer and the GrowthBook holdback, and
+the `/api/estimates` mount redirects to `/estimate/:token`. No message is sent
+because of these fields.
+
 GET `/api/estimates/:token/data` narrows to match (2026-09-24): a saved
 estimate's `pricing.frequencies` tree & shrub ladder omits any 4x/Light (and
 12x/Premium) entry, so only Standard 6x / Enhanced 9x cards render. What the
@@ -741,7 +795,40 @@ the new-lead / existing-customer Customer 360 note so the office can give
 the sign host the $25 thank-you credit. STAFF-ONLY: it never joins
 `message`, the AI triage prose or the Lead Response Agent's message, and
 the agent's `get_lead_details` tool strips it; a missing, blank or
-non-string value is a no-op),
+non-string value is a no-op; and both accept an OPTIONAL `heard_about` —
+the quote form's self-reported "How did you hear about us?" answer,
+validated against a FIXED allowlist (`server/routes/lead-webhook.js`
+`sanitizeHeardAbout`): `google_search`, `google_maps`, `chatgpt`,
+`other_ai`, `facebook_instagram`, `nextdoor`, `yelp`, `friend_neighbor`,
+`truck_yard_sign`, `other`. Any other value — including free text — is
+SILENTLY DROPPED (never stored; the request still succeeds as if the field
+were absent). A valid value is stored verbatim in `leads.heard_about`
+(nullable column, migration `20260928020000_leads_heard_about.js`) and
+surfaced on the admin lead detail. It is DELIBERATELY SEPARATE from
+`leads.lead_source_id` / the classified `lead_source` — self-reported, never
+merged into technically-observed attribution, and "unknown" (the field
+omitted or invalid) stores NULL rather than a guess. Separately and
+independently of `heard_about`, the SAME technically-observed attribution
+pipeline both endpoints already run (UTM/click-id/referrer →
+`server/services/lead-source-classify.js`) now also classifies an
+AI-assistant referral: a visitor who asked ChatGPT, Perplexity, Gemini,
+Copilot, Claude, or another AI answer engine and followed its citation
+link — matched by EITHER `utm_source` (`chatgpt.com` / `chatgpt` / `openai`
+for ChatGPT, and the analogous values per assistant) OR the raw
+`document.referrer` host (`chatgpt.com`, `chat.openai.com`,
+`perplexity.ai`, `gemini.google.com`, `bard.google.com`,
+`copilot.microsoft.com`, `claude.ai`, `you.com`, …; the shared table is
+`server/services/ai-referral-sources.js`) — checked after every paid/GBP/
+Meta UTM or click-id branch (those still win) and before the domain/hub
+fallback. A match resolves `lead_source = 'ai_assistant'`
+(`server/services/source-names.js` label: "AI Assistant") and, via the
+seeded `lead_sources` row (migration
+`20260928030000_ai_assistant_lead_source.js`), a real `lead_source_id`.
+The identical detection table is shared with `resolveLeadSource`
+(`server/services/lead-source-resolver.js`), the classifier
+`/api/public/estimator/property-lookup` and `/api/public/quote/calculate`
+use — see those entries below — so an AI-referred visitor is classified
+the same way regardless of which endpoint their lead lands on),
 `/api/public/newsletter/*` (subscribe, confirm, unsubscribe, posts,
 posts/by-slug/:slug, rss, quiz/:token/:quizId/:answer,
 feedback/:token/:reaction, e/:token/:eventId (event click-through:
@@ -1130,6 +1217,13 @@ same pair is accepted by `/api/webhooks/lead` and its `/api/leads` alias
 with identical semantics. Also accepts the OPTIONAL `timeline` described
 under `/api/webhooks/lead` above, with the same storage and urgency
 semantics; it survives the later `/api/public/quote/calculate` snapshot).
+Attribution (referrer/UTM/click-ids) resolves through
+`server/services/lead-source-resolver.js`, which shares its AI-assistant
+referral detection table with `/api/webhooks/lead`'s classifier (see that
+entry above) — a ChatGPT/Perplexity/Gemini/Copilot/Claude referral
+classifies `ai_assistant` here identically. `heard_about` (also described
+under `/api/webhooks/lead` above) is NOT currently read by this endpoint —
+only `/api/webhooks/lead` / `/api/leads` persist it.
 The returned and lead-stored `enriched` profile is the admin lookup's profile
 MINUS the staff-only `subdivisionMedian` block (the plat name, county, and
 assessed-neighbor sample/range that back the admin estimator's home-size

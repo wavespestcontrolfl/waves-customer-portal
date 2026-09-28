@@ -76,6 +76,17 @@ const SOURCE_TYPE_ATTRIBUTION = {
   // in fetchChannelAttribution (admin-ads.js) — so a referred lead that calls in
   // lands on the card as its own high-LTV, low-CAC channel instead of vanishing.
   referral:        { leadSource: 'referral',        isPaid: false },
+  // AI-assistant referral (owner-approved 2026-09-27) — a visitor who asked
+  // ChatGPT/Perplexity/Gemini/Copilot/Claude/etc. and followed its citation
+  // link. Not click-paid. Seeded lead_sources row: migration
+  // 20260928030000_ai_assistant_lead_source.js. Resolved by BOTH
+  // lead-source-classify.js (the /api/leads webhook + self-booking) and
+  // lead-source-resolver.js (the quote-wizard) via the shared
+  // ./ai-referral-sources.js table — without this entry a quote-wizard
+  // AI-referred lead would resolve sourceType='ai_assistant' but get no
+  // ad_service_attribution funnel row (null ⇒ no funnel row, same as an
+  // unmapped source_type).
+  ai_assistant:    { leadSource: 'ai_assistant',    isPaid: false },
 };
 
 /**
