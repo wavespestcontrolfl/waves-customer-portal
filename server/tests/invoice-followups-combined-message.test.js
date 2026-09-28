@@ -104,6 +104,8 @@ beforeEach(() => {
     // fallback-audit P1). 150 (inv-A) + 80 (inv-B: 80.5 total − 0.5
     // credit_applied) = 230.00, matching the two-invoice group's default.
     balance: { total: 230, count: 2 },
+    // Each covered invoice's share, from the same read as balance.total.
+    coveredInvoiceCents: { 'inv-A': 15000, 'inv-B': 8000 },
   });
   smsTemplatesRouter.getTemplate.mockResolvedValue('rendered sms body');
   sendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted' });
@@ -385,6 +387,7 @@ describe('gate on: a customer with 2 due rows gets ONE combined message', () => 
     });
     buildPayBalanceLink.mockResolvedValue({
       url: 'https://portal.wavespestcontrol.com/pay/combined', coveredInvoiceIds: [invIdA, invIdB], balance: { total: 200, count: 2 },
+      coveredInvoiceCents: { [invIdA]: 12000, [invIdB]: 8000 },
     });
     await runPending();
     const smsCall = ContactLedger.recordContact.mock.calls.find((c) => c[0].channel === 'sms')[0];
@@ -673,6 +676,7 @@ describe('gate on: a customer with 2 due rows gets ONE combined message', () => 
     });
     buildPayBalanceLink.mockResolvedValue({
       url: 'https://portal.wavespestcontrol.com/pay/combined', coveredInvoiceIds: ['inv-A', 'inv-C'], balance: { total: 200, count: 2 },
+      coveredInvoiceCents: { 'inv-A': 12000, 'inv-C': 8000 },
     });
     const result = await runPending();
     expect(result).toEqual({ sent: 1, skipped: 0 });
@@ -767,13 +771,31 @@ describe('gate on: a customer with 2 due rows gets ONE combined message', () => 
       url: 'https://portal.wavespestcontrol.com/pay/combined',
       coveredInvoiceIds: ['inv-A', 'inv-B'],
       balance: { total: 230.01, count: 2 },
+      coveredInvoiceCents: { 'inv-A': 15001, 'inv-B': 8000 },
     });
     await runPending();
     const smsVars = smsTemplatesRouter.getTemplate.mock.calls[0][1];
     expect(smsVars.total_due).toBe('230.01'); // the pay link's figure, not the independently-summed 230.00
     const emailPayload = EmailTemplateLibrary.sendTemplate.mock.calls[0][0].payload;
     expect(emailPayload.total_due).toBe('$230.01');
+    // The itemized lines come from the same read, so they add up to the total.
+    expect(emailPayload.invoices.map((line) => line.amount_due)).toEqual(['$150.01', '$80.00']);
     void invA; void invB;
+  });
+
+  test('lines that do not add up to the pay link total fall back to individual touches (pre-push audit P1)', async () => {
+    twoInvoiceSetup();
+    buildPayBalanceLink.mockResolvedValue({
+      url: 'https://portal.wavespestcontrol.com/pay/combined',
+      coveredInvoiceIds: ['inv-A', 'inv-B'],
+      balance: { total: 230, count: 2 },
+      coveredInvoiceCents: { 'inv-A': 15000, 'inv-B': 7999 },
+    });
+    await runPending();
+    expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalledWith(expect.objectContaining({
+      payload: expect.objectContaining({ invoice_count: '2' }),
+    }));
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(2); // individual fallback
   });
 
   test('the combined send never quotes an amount when the pay link reports no positive balance — falls back to individual touches', async () => {

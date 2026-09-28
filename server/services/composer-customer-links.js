@@ -155,6 +155,9 @@ async function buildPayBalanceLink(customerIds) {
   // trusting the link to cover every invoice its own message quotes;
   // existing callers that only read url/line/balance are unaffected).
   let coveredInvoiceIds = null;
+  // Each covered invoice's own share in cents, from the SAME read as
+  // balance.total (additive, for the combined follow-up's itemized lines).
+  let coveredInvoiceCents = null;
   if (!anchorIncomplete) {
     const { combinedEligibleSiblings, amountDueCents } = require('./pay-combined');
     const siblings = (await combinedEligibleSiblings(invoice)) || [];
@@ -162,6 +165,7 @@ async function buildPayBalanceLink(customerIds) {
       + siblings.reduce((sum, sib) => sum + amountDueCents(sib), 0);
     balance = { total: totalCents / 100, count: 1 + siblings.length };
     coveredInvoiceIds = [invoice.id, ...siblings.map((sib) => sib.id)];
+    coveredInvoiceCents = Object.fromEntries([invoice, ...siblings].map((inv) => [String(inv.id), amountDueCents(inv)]));
   }
   const url = await shortenOrPassthrough(`${publicPortalUrl()}/pay/${invoice.token}`, {
     kind: 'invoice',
@@ -180,6 +184,7 @@ async function buildPayBalanceLink(customerIds) {
     // figure (the open-balance SMS-line rule). balance stays null then.
     balance,
     coveredInvoiceIds,
+    coveredInvoiceCents,
   };
 }
 

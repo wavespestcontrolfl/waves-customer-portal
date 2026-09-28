@@ -1585,7 +1585,7 @@ async function fireCombinedTouchClaimed(rows) {
   // exact match falls back to firing every included invoice through its
   // own per-invoice touch instead, same as the single-survivor fallback
   // above (Codex pre-push r2 + r4).
-  const { payUrl, totalDue: linkTotalDue } = await resolveCombinedPayLink(customer, includedIds);
+  const { payUrl, totalDue: linkTotalDue, lineCents } = await resolveCombinedPayLink(customer, includedIds);
   if (!payUrl) {
     logger.info(`[invoice-followups] no pay link covers every invoice in the combined touch for customer ${customerId} — falling back to ${included.length} individual touches`);
     await fireIndividualTouchesForCombined(included, rows);
@@ -1689,7 +1689,7 @@ async function fireCombinedTouchClaimed(rows) {
     nonEmailChannels, channelPolicy, durablyDenied, emailSelected, anchorRow, combinedLedgerKey, ContactLedger, category,
   });
   const { emailOk, emailHold } = await sendCombinedEmailLeg({
-    customer, included, includedIds, includedIdsKey, step, emailTemplateKey, payUrl, totalDue,
+    customer, included, includedIds, includedIdsKey, step, emailTemplateKey, payUrl, totalDue, lineCents,
     channelPolicy, durablyDenied, emailSelected, combinedLedgerKey, ContactLedger, anchorRow,
   });
 
@@ -1915,7 +1915,17 @@ async function resolveCombinedPayLink(customer, includedIds) {
     if (!matchesIncludedSetExactly || !balanceLink?.url || !(balanceLink?.balance?.total > 0)) {
       return { payUrl: null, totalDue: null };
     }
-    return { payUrl: balanceLink.url, totalDue: balanceLink.balance.total };
+    // The itemized lines come from the same read as the total, and must add
+    // up to it exactly, or the message is not sent combined (pre-push audit
+    // P1: lines re-derived from the batch rows could disagree by a payment
+    // that landed between the two reads).
+    const lineCents = balanceLink.coveredInvoiceCents || {};
+    const lines = includedIds.map((id) => lineCents[String(id)]);
+    const linesTotal = lines.reduce((sum, cents) => sum + (Number.isInteger(cents) ? cents : NaN), 0);
+    if (!Number.isInteger(linesTotal) || linesTotal !== Math.round(balanceLink.balance.total * 100)) {
+      return { payUrl: null, totalDue: null };
+    }
+    return { payUrl: balanceLink.url, totalDue: balanceLink.balance.total, lineCents };
   } catch (err) {
     logger.warn(`[invoice-followups] combined pay-balance link failed for customer ${customer.id}: ${err.message}`);
     return { payUrl: null, totalDue: null };
@@ -2133,7 +2143,7 @@ async function interpretCombinedSmsOutcome({ smsChannel, result, ledger, Contact
  * deliver decisions for its single-invoice email leg.
  */
 async function sendCombinedEmailLeg({
-  customer, included, includedIds, includedIdsKey, step, emailTemplateKey, payUrl, totalDue,
+  customer, included, includedIds, includedIdsKey, step, emailTemplateKey, payUrl, totalDue, lineCents,
   channelPolicy, durablyDenied, emailSelected, combinedLedgerKey, ContactLedger, anchorRow,
 }) {
   let emailOk = false;
@@ -2169,7 +2179,7 @@ async function sendCombinedEmailLeg({
       invoices: included.map((inv) => ({
         invoice_number: inv.invoice_number || '',
         invoice_title: inv.title || 'your service',
-        amount_due: currency(invoiceAmountDue(inv)),
+        amount_due: currency(lineCents[String(inv.invoice_id ?? inv.id)] / 100),
       })),
     },
   });
