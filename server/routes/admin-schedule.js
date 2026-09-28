@@ -4669,8 +4669,15 @@ const ANCHORED_PRICE_AUTHORITY_KEYS = new Set(['estimated_price', 'primary_line_
 // and voids the remaining safe open invoices so completion re-mints at
 // the new price instead of collecting a stale amount (completion reuses a
 // non-void invoice by scheduled_service_id).
-async function propagatePriceServiceToFollowingSiblings(conn, {
-  editedId, editedRow = null, parentId, fromDateStr, fields, serviceChanged, priceChanged, cols,
+// The 'following' propagation's lock-and-refuse phase, split out so
+// update-details can run it BEFORE its first route-owned write and the
+// Bill-To combined-session Stripe cancel (Codex r4 P1 on #5253): a refusal
+// here rolls the transaction back, but a Stripe cancel cannot roll back.
+// propagatePriceServiceToFollowingSiblings runs it again on the same
+// inputs — row locks and xact advisory locks are re-entrant, so the second
+// pass only re-checks. Returns the locked sibling targets.
+async function lockAndGuardFollowingSiblings(conn, {
+  editedId, editedRow = null, parentId, fromDateStr, serviceChanged, priceChanged,
 }) {
   // C (owner ruling 2026-09-28): this loop re-derives and writes a sibling's
   // estimated_price below whenever billingRelevant, so each affected sibling
@@ -4781,6 +4788,16 @@ async function propagatePriceServiceToFollowingSiblings(conn, {
       }
     }
   }
+  return targets;
+}
+
+async function propagatePriceServiceToFollowingSiblings(conn, {
+  editedId, editedRow = null, parentId, fromDateStr, fields, serviceChanged, priceChanged, cols,
+}) {
+  const targets = await lockAndGuardFollowingSiblings(conn, {
+    editedId, editedRow, parentId, fromDateStr, serviceChanged, priceChanged,
+  });
+  const billingRelevant = priceChanged || serviceChanged;
   // Missing-table compat probe, ONCE — inside the loop the add-on reads run
   // bare so an operational failure aborts the save (see below).
   const addonTableExists = billingRelevant && targets.length > 0
@@ -13509,6 +13526,35 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
                 { code: 'REPRICE_BLOCKED_COMMITTED_MONEY', isOperational: true },
               );
             }
+          }
+        }
+      }
+
+      // The 'following' price/service propagation's sibling locks and
+      // refusals, decided HERE — before the first route-owned write and the
+      // Bill-To combined-session Stripe cancel further down (Codex r4 P1 on
+      // #5253). Same conditions and inputs as the propagation call below;
+      // nothing between here and there writes the edited row's price,
+      // service, date or series fields, so the sibling set is the same.
+      if (wantsPriceServiceScope && !reServiceTransition
+        && normalizePriceServiceScope(priceServiceScope) === 'following') {
+        const earlyBeforeRow = await trx('scheduled_services').where({ id: req.params.id }).forUpdate().first();
+        if (earlyBeforeRow && !earlyBeforeRow.is_recurring && earlyBeforeRow.recurring_parent_id) {
+          throw httpError(400, 'Booster visits keep their own pricing — a price/service change can only be applied to following visits from a base series appointment.');
+        }
+        if (earlyBeforeRow?.is_recurring) {
+          const earlyGroups = computePriceServiceGroupChanges(earlyBeforeRow, updates);
+          if (earlyGroups.changed) {
+            await lockAndGuardFollowingSiblings(trx, {
+              editedId: req.params.id,
+              editedRow: earlyBeforeRow,
+              parentId: earlyBeforeRow.recurring_parent_id || req.params.id,
+              fromDateStr: earlyBeforeRow.recurring_parent_id
+                ? (dateOnly(earlyBeforeRow.scheduled_date) || etDateString())
+                : null,
+              serviceChanged: earlyGroups.serviceChanged,
+              priceChanged: earlyGroups.priceChanged,
+            });
           }
         }
       }

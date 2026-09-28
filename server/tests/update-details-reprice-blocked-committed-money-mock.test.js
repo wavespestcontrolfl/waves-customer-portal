@@ -316,3 +316,19 @@ test('the refusal happens BEFORE the Bill-To session release (the first Stripe c
   expect(body.code).toBe('REPRICE_BLOCKED_COMMITTED_MONEY');
   expect(mockReleaseCombined).not.toHaveBeenCalled();
 });
+
+test("the 'following' sibling locks and refusals run before the Bill-To Stripe session release", () => {
+  // Codex r4 P1 on #5253: a sibling refusal after the combined-session
+  // cancel rolls back the DB but not Stripe. Source-order contract, same
+  // technique as the conversion guard test above.
+  const fs = require('fs');
+  const src = fs.readFileSync(require.resolve('../routes/admin-schedule.js'), 'utf8');
+  const earlyAt = src.indexOf('await lockAndGuardFollowingSiblings(trx, {');
+  const releaseAt = src.indexOf('.releaseUnconfirmedCombinedSessionsForScheduledServices(trx, fencedVisitIds);');
+  const firstWriteAt = src.indexOf('if (addressPlan) addressUpdatedIds = await applyAppointmentAddress(trx, addressPlan, req.technicianId);');
+  expect(earlyAt).toBeGreaterThan(-1);
+  expect(earlyAt).toBeLessThan(firstWriteAt);
+  expect(earlyAt).toBeLessThan(releaseAt);
+  // The propagation itself still re-runs the same phase (re-entrant locks).
+  expect(src).toMatch(/const targets = await lockAndGuardFollowingSiblings\(conn, \{/);
+});
