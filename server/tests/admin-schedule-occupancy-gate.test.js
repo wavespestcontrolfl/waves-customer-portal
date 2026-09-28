@@ -396,6 +396,83 @@ describe('POST / — admin create', () => {
     sendConfirmationSms: false,
   };
 
+  // Phone-agent double-booking guard preflight (findExistingCallBookings,
+  // routes/admin-schedule.js) reads scheduled_services through `db`, same as
+  // this describe's other preflight reads — the outer beforeEach's default
+  // scheduled_services row (a full SVC fixture) would otherwise look like a
+  // phone-agent-booked match on every create here and 409 this whole
+  // describe. Shadow it back to "no match" by default; the guard's own
+  // tests below override db.mockImplementation per case.
+  beforeEach(() => {
+    db.mockImplementation((table) => chain(table === 'customers'
+      ? { id: 'cust-1', first_name: 'Test', last_name: 'Customer', phone: null, email: null }
+      : undefined));
+  });
+
+  const CUSTOMER_ROW = { id: 'cust-1', first_name: 'Test', last_name: 'Customer', phone: null, email: null };
+
+  describe('phone-agent double-booking guard', () => {
+    const logger = require('../services/logger');
+    const callBookedVisit = {
+      id: 'call-visit-1', status: 'confirmed', service_type: 'General Pest Control',
+      scheduled_date_label: '2099-07-03', window_start_label: '09:00',
+    };
+
+    test('a live phone-agent-booked visit refuses the create with the conflict payload', async () => {
+      db.mockImplementation((table) => chain(
+        table === 'customers' ? CUSTOMER_ROW : (table === 'scheduled_services' ? callBookedVisit : undefined),
+      ));
+
+      const result = await post(createBody);
+
+      expect(result.status).toBe(409);
+      expect(result.body).toMatchObject({
+        code: 'duplicate_call_booking',
+        existingVisits: [{
+          id: 'call-visit-1', serviceType: 'General Pest Control',
+          scheduledDate: '2099-07-03', windowStart: '09:00', status: 'confirmed',
+        }],
+      });
+      expect(db.transaction).not.toHaveBeenCalled();
+    });
+
+    test('allowCallBookingDuplicate overrides the guard, proceeds, and logs the override', async () => {
+      db.mockImplementation((table) => chain(
+        table === 'customers' ? CUSTOMER_ROW : (table === 'scheduled_services' ? callBookedVisit : undefined),
+      ));
+
+      const result = await post({ ...createBody, allowCallBookingDuplicate: true });
+
+      expect(result.status).toBe(201);
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('allowCallBookingDuplicate override'));
+    });
+
+    test('no matching phone-agent visit proceeds without a conflict', async () => {
+      const result = await post(createBody);
+      expect(result.status).toBe(201);
+    });
+
+    test('a guard query error fails open and still books', async () => {
+      db.mockImplementation((table) => {
+        if (table === 'customers') return chain(CUSTOMER_ROW);
+        if (table === 'scheduled_services') {
+          const c = chain(undefined);
+          // A real thenable's `.then` must invoke the passed reject callback
+          // itself — returning a rejected promise from `.then()` is not the
+          // same thing and leaves `await`ers hanging forever.
+          c.then = (resolve, reject) => reject(new Error('guard query failed'));
+          return c;
+        }
+        return chain(undefined);
+      });
+
+      const result = await post(createBody);
+
+      expect(result.status).toBe(201);
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('call-booking duplicate guard failed'));
+    });
+  });
+
   test('takes rung 1 before the comms lock and BOOKS with a warning when the parent window is occupied', async () => {
     findConflictingVisits.mockResolvedValueOnce([{ id: 'svc-other' }]);
 

@@ -7139,6 +7139,77 @@ function assertPriceMatchesPricing({ expectedPrice, finalPrice }) {
   }
 }
 
+// Phone-agent double-booking guard (owner ruling 2026-09-28).
+//
+// The AI phone agent books visits straight from calls — inbound always, and
+// outbound too once GATE_CALL_OUTBOUND_BOOKING is on. Nothing stopped a
+// staff member from then booking the SAME visit again by hand on this
+// screen: the agent's booking and the office's hand-booking never checked
+// each other. The reverse order (office books first, the agent's call tries
+// to book the same visit) is already covered at call-processing time by
+// call-recording-processor's findAttachableCallAppointment, which attaches
+// to or holds the existing visit instead of creating a duplicate. This is
+// the uncovered direction — the agent books first, so it's the office's
+// manual create that needs the check.
+//
+// Same shape as the duplicate-series guard above: a fast preflight before
+// any pricing/tech/insert work, fail-open on a query error (protective, not
+// load-bearing), and an explicit, logged override
+// (allowCallBookingDuplicate: true) for the rare intentional second visit.
+function callBookingConflictBody(existingVisits) {
+  return {
+    code: 'duplicate_call_booking',
+    error: 'The phone agent already booked this visit for this customer.',
+    existingVisits: existingVisits.map((v) => ({
+      id: v.id,
+      serviceType: v.service_type,
+      scheduledDate: v.scheduled_date_label,
+      windowStart: v.window_start_label || null,
+      status: v.status,
+    })),
+  };
+}
+
+async function findExistingCallBookings({ customerId, serviceType, scheduledDate, propertyId }) {
+  const query = db('scheduled_services')
+    .where({ customer_id: customerId })
+    .whereNull('parent_service_id')
+    // Live visits only (scheduled-service-statuses.js): a completed, skipped
+    // or no-show call booking is not a visit the office could double-book.
+    .whereIn('status', require('../services/scheduled-service-statuses').NONTERMINAL_SCHEDULED_SERVICE_STATUSES)
+    .where((qb) => qb.where('booking_source', 'phone_call').orWhereNotNull('source_call_log_id'))
+    .whereRaw('LOWER(TRIM(service_type)) = LOWER(TRIM(?))', [serviceType])
+    .whereRaw('scheduled_date BETWEEN ?::date - 1 AND ?::date + 1', [scheduledDate, scheduledDate]);
+  if (propertyId) {
+    query.where((qb) => qb.where('property_id', propertyId).orWhereNull('property_id'));
+  }
+  return query
+    .select(
+      'id', 'status', 'service_type',
+      db.raw("to_char(scheduled_date, 'YYYY-MM-DD') as scheduled_date_label"),
+      db.raw("to_char(window_start, 'HH24:MI') as window_start_label"),
+    )
+    .orderBy('scheduled_date', 'asc')
+    .orderBy('window_start', 'asc');
+}
+
+// The guard's verdict for one create: the 409 body, or null to proceed (no
+// match, an explicit logged override, or a failed lookup — fail open).
+async function callBookingDuplicateConflict({ override, customerId, serviceType, scheduledDate, bookingProperty }) {
+  try {
+    const existing = await findExistingCallBookings({
+      customerId, serviceType, scheduledDate, propertyId: bookingProperty?.property_id || null,
+    });
+    if (!existing.length) return null;
+    if (!override) return callBookingConflictBody(existing);
+    logger.warn(`[schedule] allowCallBookingDuplicate override: booking customer ${customerId} again for "${serviceType}" alongside phone-agent-booked visit(s) ${existing.map((v) => v.id).join(', ')}`);
+    return null;
+  } catch (guardErr) {
+    logger.warn(`[schedule] call-booking duplicate guard failed (booking proceeds): ${guardErr.message}`);
+    return null;
+  }
+}
+
 router.post('/', requireAdmin, async (req, res, next) => {
   try {
     const {
@@ -7275,6 +7346,13 @@ router.post('/', requireAdmin, async (req, res, next) => {
         logger.warn(`[schedule] duplicate-series guard failed (booking proceeds): ${guardErr.message}`);
       }
     }
+
+    // Phone-agent double-booking guard: applies to one-off AND recurring
+    // creates alike (scheduledDate is the recurring series' first visit).
+    const callBookingConflict = await callBookingDuplicateConflict({
+      override: req.body.allowCallBookingDuplicate === true, customerId, serviceType, scheduledDate, bookingProperty,
+    });
+    if (callBookingConflict) return res.status(409).json(callBookingConflict);
 
     const linkedEstimateId = sourceEstimateId || req.body.source_estimate_id || null;
     // Optional: accept the linked open quote as annual prepay on book (creates

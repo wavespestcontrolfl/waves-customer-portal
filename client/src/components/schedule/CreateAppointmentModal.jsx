@@ -801,6 +801,24 @@ export function canSubmitGroup({
 // Multiple same-family seasonal lines on one estimate are not producible by
 // the estimate builder today, so this conservative surface is the
 // operator-decides path, not a workflow regression.
+// Phone-agent double-booking guard (server/routes/admin-schedule.js): a
+// 409 duplicate_call_booking is NOT recoverable, same as a genuine
+// (non-owned) duplicate-series conflict — the submit loop must stop here
+// so the operator sees the phone agent's existing visit before choosing to
+// book another anyway. Split out of classifySubmitGroupFailure (called
+// ahead of it, at the one call site in submitAppointments) purely to keep
+// that function's own complexity at its pre-existing baseline — this check
+// is independent of every duplicate-SERIES branch below it.
+export function classifyCallBookingConflict(e, { key, groupLabelText }) {
+  if (e?.body?.code !== 'duplicate_call_booking') return null;
+  return {
+    recoverable: false,
+    duplicateConflict: null,
+    callBookingConflict: { ...e.body, key },
+    firstError: { label: groupLabelText, message: e.message, duplicate: true },
+  };
+}
+
 export function classifySubmitGroupFailure(e, {
   group, linkedEstimate, separateProgram, key, groupLabelText, carriesAppointmentDiscount = false,
 }) {
@@ -829,7 +847,7 @@ export function classifySubmitGroupFailure(e, {
   // separately — not this slice's file-ownership scope for
   // duplicateSeriesConflictBody itself).
   if (ownSeriesProven && !carriesAppointmentDiscount) {
-    return { recoverable: true, duplicateConflict: null, firstError: null };
+    return { recoverable: true, duplicateConflict: null, callBookingConflict: null, firstError: null };
   }
   const duplicateConflict = dupBody
     ? { ...dupBody, key, retryUncertain: separateProgram?.key === key }
@@ -840,8 +858,34 @@ export function classifySubmitGroupFailure(e, {
   return {
     recoverable: false,
     duplicateConflict,
+    callBookingConflict: null,
     firstError: { label: groupLabelText, message, duplicate: !!dupBody },
   };
+}
+
+// One call site (submitAppointments' catch block) for both classifiers,
+// kept as its own function purely so that call site stays a single
+// function call — adding the branch here instead of inline in
+// submitAppointments keeps that already-large function's complexity at
+// its pre-existing baseline (a bare `||` inline would have added a branch
+// there too).
+export function classifyGroupSubmitFailure(e, {
+  group, linkedEstimate, separateProgram, key, groupLabelText, carriesAppointmentDiscount,
+}) {
+  return classifyCallBookingConflict(e, { key, groupLabelText })
+    || classifySubmitGroupFailure(e, { group, linkedEstimate, separateProgram, key, groupLabelText, carriesAppointmentDiscount });
+}
+
+// Applies a submit-failure classification's conflict state. Split out of
+// submitAppointments' catch block for the same complexity-baseline reason
+// as classifyGroupSubmitFailure above — two independent `if`s inline there
+// would each count toward that function's own complexity.
+function applySubmitConflictState(decision, { setDuplicateConflict, setSeparateProgramReason, setCallBookingConflict }) {
+  if (decision.duplicateConflict) {
+    setDuplicateConflict(decision.duplicateConflict);
+    setSeparateProgramReason('');
+  }
+  if (decision.callBookingConflict) setCallBookingConflict(decision.callBookingConflict);
 }
 
 // The 5-key discount shape a request-body line carries — the primary line
@@ -965,6 +1009,12 @@ export function appointmentGroupRequestBody({
   // has no field for an operator-chosen override, so this slice never sends
   // one (see the PR body's "Not in this slice").
   appointmentDiscount,
+  // Phone-agent double-booking guard override: true only for the ONE group
+  // this specific "Book another anyway" retry targets (threaded from a
+  // ref the caller sets just for that retry — see callBookingConflict's
+  // "Book another anyway" button — never a persisted flag on the form, so
+  // it never rides along on a later, unrelated submit).
+  callBookingOverride = false,
 }) {
   return {
     ...(appointmentDiscount ? {
@@ -979,6 +1029,7 @@ export function appointmentGroupRequestBody({
         existingSeriesIds: separateProgram.existingSeries.map((series) => series.id),
       },
     } : {}),
+    ...(callBookingOverride ? { allowCallBookingDuplicate: true } : {}),
     customerId,
     scheduledDate,
     serviceType: primaryName,
@@ -1403,6 +1454,36 @@ export function lineIsRetiredSale(line) {
     ? `every ${Number(line.intervalDays)} days`
     : String(line.cadence || '').replace(/_/g, ' ');
   return labelNamesRetiredSale(name) || labelNamesRetiredSale(`${name} ${cadence}`);
+}
+
+// Phone-agent double-booking conflict banner. A separate component (not
+// inlined in CreateAppointmentModal's own render, unlike the older
+// duplicate-series section above it) purely to keep this JSX's own
+// branches (the visit-list guard, the per-visit "No time set" fallback,
+// the disabled Save-gated button) off CreateAppointmentModal's own
+// complexity count — that function is already far over the repo's
+// threshold, so any avoidable addition to it moves into its own helper.
+function CallBookingConflictSection({ conflict, sectionRef, canSubmit, onBookAnother }) {
+  if (!conflict) return null;
+  return (
+    <section ref={sectionRef} aria-label="Visit already booked by the phone agent" style={{ padding: 16, marginBottom: 16, border: `1px solid ${D.border}`, borderRadius: 8, fontSize: 14, lineHeight: 1.5 }}>
+      <div style={{ fontWeight: 500 }}>The phone agent already booked this</div>
+      {conflict.existingVisits?.map((visit) => (
+        <div key={visit.id} style={{ padding: '10px 0', borderBottom: `1px solid ${D.border}` }}>
+          <div>{visit.serviceType} · {visit.scheduledDate} · {visit.windowStart || 'No time set'} · {visit.status}</div>
+          <a href={`/admin/dispatch?tab=schedule&date=${encodeURIComponent(visit.scheduledDate)}&appointment=${encodeURIComponent(visit.id)}`}
+            target="_blank" rel="noopener noreferrer" style={{ display: 'inline-flex', alignItems: 'center', minHeight: 44, color: D.text, textDecoration: 'underline' }}>Open existing visit</a>
+        </div>
+      ))}
+      <div style={{ marginTop: 12 }}>
+        <button type="button" disabled={!canSubmit}
+          onClick={onBookAnother}
+          style={{ minHeight: 44, padding: '10px 16px', fontSize: 14, borderRadius: 6, background: D.text, color: D.white, border: 'none', opacity: !canSubmit ? 0.5 : 1 }}>
+          Book another anyway
+        </button>
+      </div>
+    </section>
+  );
 }
 
 export default function CreateAppointmentModal({ defaultDate, defaultWindowStart, defaultDurationMinutes, defaultTechId, defaultCustomer = null, defaultEstimateId = null, onClose, onCreated, onChange }) {
@@ -2066,13 +2147,31 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const [separateProgramReason, setSeparateProgramReason] = useState('');
   const duplicateConflictRef = useRef(null);
   const submitLockRef = useRef(false);
+  // Phone-agent double-booking guard: mirrors duplicateConflict/
+  // duplicateConflictRef above. callBookingDuplicateOverrideRef carries
+  // the ONE group key a "Book another anyway" click targets — set right
+  // before that retry's handleSubmit() call and consumed (read + cleared)
+  // at the very start of the next submitAppointments run, so it can never
+  // apply to a later, unrelated submit.
+  const [callBookingConflict, setCallBookingConflict] = useState(null);
+  const callBookingConflictRef = useRef(null);
+  const callBookingDuplicateOverrideRef = useRef(null);
   useEffect(() => {
     if (duplicateConflict) duplicateConflictRef.current?.scrollIntoView?.({ block: 'center', behavior: 'smooth' });
   }, [duplicateConflict]);
   useEffect(() => {
+    if (callBookingConflict) callBookingConflictRef.current?.scrollIntoView?.({ block: 'center', behavior: 'smooth' });
+  }, [callBookingConflict]);
+  useEffect(() => {
     setDuplicateConflict(null);
     setSeparateProgramReason('');
+    setCallBookingConflict(null);
   }, [selectedCustomer?.id, selectedPropertyId, services]);
+  // The phone agent's visit was matched to THIS date (±1 day): a new date is
+  // a new check, so the stale box never offers "Book another anyway" for it.
+  useEffect(() => {
+    setCallBookingConflict(null);
+  }, [apptDate]);
 
   // Per-line helpers. Each entry in `services` carries its own `price`
   // string (so an operator can override goodwill / loyalty pricing on one
@@ -3842,6 +3941,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
 
   // Submit
   const submitAppointments = async (separateProgram) => {
+    // Consumed once, atomically, at the top of this submit — never read
+    // again after this line, so a "Book another anyway" click can only
+    // ever affect the ONE submit it triggered, never a later unrelated one.
+    const callBookingOverrideKey = callBookingDuplicateOverrideRef.current;
+    callBookingDuplicateOverrideRef.current = null;
     submittingRef.current = true;
     setSaving(true);
     const releaseSubmit = () => {
@@ -4030,6 +4134,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               customerNotes,
               internalNotes,
               appointmentDiscount: carriesAppointmentDiscount ? appointmentDiscount : undefined,
+              callBookingOverride: callBookingOverrideKey === key,
             }),
             // Only the FIRST created group of a booking asks for the customer
             // confirmation text and carries the card-link flag — a split
@@ -4221,7 +4326,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         } catch (e) {
           // A late failure must not update a closed draft.
           assertSubmitCurrent();
-          const decision = classifySubmitGroupFailure(e, {
+          const decision = classifyGroupSubmitFailure(e, {
             group, linkedEstimate, separateProgram, key, groupLabelText: groupLabel(group),
             carriesAppointmentDiscount,
           });
@@ -4240,10 +4345,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             if (carriesAppointmentDiscount) appointmentDiscountCommittedGroupKeyRef.current = key;
             continue;
           }
-          if (decision.duplicateConflict) {
-            setDuplicateConflict(decision.duplicateConflict);
-            setSeparateProgramReason('');
-          }
+          applySubmitConflictState(decision, { setDuplicateConflict, setSeparateProgramReason, setCallBookingConflict });
           firstError = decision.firstError;
           break;
         }
@@ -6187,6 +6289,22 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               )}
             </section>
           )}
+          <CallBookingConflictSection
+            conflict={callBookingConflict}
+            sectionRef={callBookingConflictRef}
+            canSubmit={canSubmit}
+            onBookAnother={async () => {
+              // One submit only: cleared even when handleSubmit returns
+              // before the submit loop reads it (a blocked save), so a
+              // later ordinary save never carries the override.
+              callBookingDuplicateOverrideRef.current = callBookingConflict.key;
+              try {
+                await handleSubmit();
+              } finally {
+                callBookingDuplicateOverrideRef.current = null;
+              }
+            }}
+          />
           <SlotConflictNotice conflicts={slotConflicts} style={{ marginBottom: 10 }} />
           <BestTimeHint
             bestTimes={bestTimes}
