@@ -330,15 +330,18 @@ let lastEnsureAt = null;
 
 /**
  * Sync unless this process synced within ENSURE_INTERVAL_MS (or `force`).
- * The stamp is set only after a successful run, so a failure is retried on
- * the next call.
+ * The stamp is set only after a run with NO per-fact error (a thrown failure
+ * or a result carrying `errors` leaves it unset), so a transient database
+ * failure on one fact is retried on the very next call — the next draft or
+ * the next cron tick — instead of waiting out the interval with that fact
+ * missing or superseded.
  */
 async function ensureFactRegister({ now = new Date(), force = false, sync = syncFactRegister } = {}) {
   if (!force && lastEnsureAt && (now.getTime() - lastEnsureAt) < ENSURE_INTERVAL_MS) {
     return { skipped: true, reason: 'recently synced' };
   }
   const result = await sync({ now });
-  lastEnsureAt = now.getTime();
+  if (Array.isArray(result?.errors) && result.errors.length === 0) lastEnsureAt = now.getTime();
   return result;
 }
 

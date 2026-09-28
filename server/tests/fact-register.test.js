@@ -294,9 +294,26 @@ describe('ensureFactRegister', () => {
   });
 
   test('runs again after the interval has passed', async () => {
-    const sync = jest.fn(async () => ({}));
+    const sync = jest.fn(async () => ({ errors: [] }));
     await ensureFactRegister({ now: NOW, sync });
+    await ensureFactRegister({ now: new Date(NOW.getTime() + 60 * 60e3), sync });
+    expect(sync).toHaveBeenCalledTimes(1);
     await ensureFactRegister({ now: new Date(NOW.getTime() + 7 * 60 * 60e3), sync });
+    expect(sync).toHaveBeenCalledTimes(2);
+  });
+
+  test('a sync that RESOLVED with a per-fact error is not a success: the next call retries at once', async () => {
+    const sync = jest.fn()
+      .mockResolvedValueOnce({ inserted: ['a'], updated: [], retired: [], held: [], unchanged: [], skipped: [], errors: [{ slug: 'b', error: 'connection reset' }] })
+      .mockResolvedValueOnce({ inserted: ['b'], updated: [], retired: [], held: [], unchanged: ['a'], skipped: [], errors: [] })
+      .mockResolvedValueOnce({ errors: [] });
+    const first = await ensureFactRegister({ now: NOW, sync });
+    expect(first.errors).toHaveLength(1);
+    const second = await ensureFactRegister({ now: new Date(NOW.getTime() + 1000), sync });
+    expect(second.inserted).toEqual(['b']);
+    // …and a clean run stamps, so the third call within the interval is skipped.
+    const third = await ensureFactRegister({ now: new Date(NOW.getTime() + 2000), sync });
+    expect(third).toEqual({ skipped: true, reason: 'recently synced' });
     expect(sync).toHaveBeenCalledTimes(2);
   });
 
