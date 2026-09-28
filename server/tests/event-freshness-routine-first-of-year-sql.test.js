@@ -45,7 +45,8 @@ describe('excludeRoutineRecurringFromQuery admits a genuine first-of-year routin
     // blank on either side) — mirrors newsletter-event-selection.js's
     // isSameSeriesSibling as closely as SQL reasonably can.
     expect(sql).toMatch(/regexp_replace\(lower\(routine_sibling\.title\)/i);
-    expect(sql).toMatch(/routine_sibling\.venue_name is not null/i);
+    // A venue counts only when it normalizes to non-empty text (blank = missing).
+    expect(sql).toMatch(/COALESCE\(btrim\(regexp_replace\(lower\(routine_sibling\.venue_name\)/i);
     expect(sql).toMatch(/routine_sibling\.city is not null/i);
   });
 

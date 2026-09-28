@@ -365,4 +365,20 @@ describe('operator star override still bypasses the calendar-year rule', () => {
     };
     expect(isEditoriallyNewEvent(nextYear, new Date('2027-12-20T12:00:00Z'))).toBe(true);
   });
+
+  test('rows re-labeled one_time are still held to first-of-year when last year\'s rows were weekly', async () => {
+    const priorYearWeekly = weeklyEvent('prior-2025', { start_at: '2025-08-02T14:00:00Z' });
+    const relabeled = (id, start) => weeklyEvent(id, {
+      start_at: start, event_type: 'one_time', recurrence_type: 'none', freshness_status: 'fresh_one_time',
+    });
+    const march = relabeled('march-2026', '2026-03-07T15:00:00Z');
+    const june = relabeled('june-2026', '2026-06-06T14:00:00Z');
+
+    const rows = await filterRepeatedDateIdentities([march, june], {
+      reference: REFERENCE,
+      identityPool: [june],
+      yearPool: [priorYearWeekly, march, june],
+    });
+    expect(rows.map((row) => row.id)).toEqual(['march-2026']);
+  });
 });

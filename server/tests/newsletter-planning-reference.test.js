@@ -1,7 +1,7 @@
 const mockRepeatedFilter = jest.fn(async (rows) => rows);
 const mockFeaturedFilter = jest.fn(async (rows) => rows);
-// mockRows below is a plain one_time event, so mayNeedYearPool(mockRows) is
-// false and buildDigestPlan's real loadSharedYearPool never even calls db() —
+// buildDigestPlan now always loads the shared year pool (identityIsRecurring
+// needs prior rows even for one_time candidates), so it is mocked here —
 // this mock only needs to exist so the module shape matches (Codex P2,
 // 2026-09-27: "Reuse the calendar-year pool across eligibility filters").
 const mockLoadSharedYearPool = jest.fn(async () => []);

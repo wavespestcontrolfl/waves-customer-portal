@@ -353,15 +353,21 @@ function buildRoutineFirstOfYearAdmission(alias) {
       AND ${sqlEtYear(sib('start_at'))} = ${sqlEtYear(outer('start_at'))}
       AND ${sqlNormalizedTitle(sib('title'))} = ${sqlNormalizedTitle(outer('title'))}
       AND (
-        (${sib('venue_name')} IS NOT NULL AND ${outer('venue_name')} IS NOT NULL
+        (${venuePresent(sib('venue_name'))} AND ${venuePresent(outer('venue_name'))}
           AND ${sqlNormalizedTitle(sib('venue_name'))} = ${sqlNormalizedTitle(outer('venue_name'))})
         OR (
-          (${sib('venue_name')} IS NULL OR ${outer('venue_name')} IS NULL)
+          (NOT ${venuePresent(sib('venue_name'))} OR NOT ${venuePresent(outer('venue_name'))})
           AND ${sib('city')} IS NOT NULL AND ${outer('city')} IS NOT NULL
           AND lower(${sib('city')}) = lower(${outer('city')})
         )
       )
   )`;
+}
+
+// A venue counts as present only when it normalizes to non-empty text — the
+// same rule the JS identity predicate applies ('' and whitespace are missing).
+function venuePresent(column) {
+  return `(COALESCE(btrim(${sqlNormalizedTitle(column)}), '') <> '')`;
 }
 
 /**
@@ -391,9 +397,15 @@ function excludeRoutineRecurringFromQuery(query, alias = 'e') {
   // Grouped so the carve-out ORs against all three conditions without
   // leaking past any other conditions the caller has chained.
   return query.where(function routineRecurringExclusion() {
+    // A stale NON-routine row (e.g. a limited_run between its opening and
+    // closing weeks) never qualifies: the JS gate would reject it and leave
+    // curated_at NULL, so admitting it here would let such rows fill the
+    // capped, start-ordered curation query every run. stale_recurring is
+    // re-admitted only for routine series, through the first-of-year branch.
     this.where(function nonRoutineMetadata() {
       this.whereNotIn(col('event_type'), ROUTINE_EVENT_TYPES)
-        .whereNotIn(col('recurrence_type'), ROUTINE_RECURRENCE_TYPES);
+        .whereNotIn(col('recurrence_type'), ROUTINE_RECURRENCE_TYPES)
+        .whereNot(col('freshness_status'), 'stale_recurring');
     }).orWhere(col('freshness_status'), 'fresh_series_launch');
 
     // Only meaningful once the row is aliased into the query (every real
@@ -401,7 +413,14 @@ function excludeRoutineRecurringFromQuery(query, alias = 'e') {
     // identifier to correlate the subquery against, so it falls back to the
     // pre-existing two-branch gate rather than guess at one.
     if (alias) {
-      this.orWhereRaw(buildRoutineFirstOfYearAdmission(alias));
+      // Only routine series use the first-of-year admission; any other row
+      // was already decided by the metadata branch above.
+      this.orWhere(function routineFirstOfYear() {
+        this.where(function routineMetadata() {
+          this.whereIn(col('event_type'), ROUTINE_EVENT_TYPES)
+            .orWhereIn(col('recurrence_type'), ROUTINE_RECURRENCE_TYPES);
+        }).whereRaw(buildRoutineFirstOfYearAdmission(alias));
+      });
     }
   });
 }

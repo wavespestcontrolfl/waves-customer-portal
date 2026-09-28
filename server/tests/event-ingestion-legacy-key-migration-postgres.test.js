@@ -233,6 +233,81 @@ describeOrSkip('upsertExtractedEvents — legacy dedup-key migration on real Pos
     expect(await db('events_raw').where({ source_id: sourceId, title: otherTitle })).toHaveLength(1);
   });
 
+  test('a row stored at the old timezone-dropped time is updated in place to the corrected time', async () => {
+    const source = { id: sourceId, coverage_geo: [] };
+    const title = 'TEST Timezone Dropped Row';
+    const url = 'https://test.invalid/tz-dropped-row/';
+    const startIso = daysFromNowIso(36, 23); // 23:00Z = 7:00 PM EDT / 6:00 PM EST
+    const start = parseExtractedStartAt(startIso);
+    const { tzDroppedExternalId } = extractedEventDedupKeys(title, start, url);
+    const wrongStart = new Date(tzDroppedExternalId.split('|')[1]);
+    const [wrong] = await db('events_raw').insert({
+      source_id: sourceId, external_id: tzDroppedExternalId, title, start_at: wrongStart, event_url: url,
+    }).returning(['id']);
+    const wrongId = wrong.id || wrong;
+
+    await upsertExtractedEvents(source, [{ title, startAt: startIso, eventUrl: url }]);
+
+    const rows = await db('events_raw').where({ source_id: sourceId, title }).whereNull('merged_into');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].id).toBe(wrongId);
+    expect(new Date(rows[0].start_at).toISOString()).toBe(start.toISOString());
+  });
+
+  test('a wrong-time copy next to a correct copy collapses to one live row at the corrected time', async () => {
+    const source = { id: sourceId, coverage_geo: [] };
+    const title = 'TEST Wrong And Right Copies';
+    const url = 'https://test.invalid/wrong-and-right-copies/';
+    const startIso = daysFromNowIso(37, 23);
+    const start = parseExtractedStartAt(startIso);
+    const { legacyExternalId, tzDroppedExternalId } = extractedEventDedupKeys(title, start, url);
+    await db('events_raw').insert({
+      source_id: sourceId, external_id: legacyExternalId, title, start_at: start, event_url: url,
+    });
+    await db('events_raw').insert({
+      source_id: sourceId, external_id: tzDroppedExternalId, title,
+      start_at: new Date(tzDroppedExternalId.split('|')[1]), event_url: url,
+    });
+
+    await upsertExtractedEvents(source, [{ title, startAt: startIso, eventUrl: url }]);
+
+    const live = await db('events_raw').where({ source_id: sourceId, title }).whereNull('merged_into');
+    expect(live).toHaveLength(1);
+    expect(new Date(live[0].start_at).toISOString()).toBe(start.toISOString());
+  });
+
+  test('a legacy row follows a two-hop merge chain to the final survivor', async () => {
+    const source = { id: sourceId, coverage_geo: [] };
+    const title = 'TEST Two Hop Merge Chain';
+    const url = 'https://test.invalid/two-hop-merge-chain/';
+    const startIso = daysFromNowIso(38);
+    const start = parseExtractedStartAt(startIso);
+    const { externalId: newKey, legacyExternalId: legacyKey } = extractedEventDedupKeys(title, start, url);
+
+    const [finalRow] = await db('events_raw').insert({
+      source_id: sourceId, external_id: `final-${Date.now()}`, title, start_at: start, event_url: url,
+    }).returning(['id']);
+    const finalId = finalRow.id || finalRow;
+    const [middleRow] = await db('events_raw').insert({
+      source_id: sourceId, external_id: `middle-${Date.now()}`, title, start_at: start, event_url: url,
+      merged_into: finalId, admin_status: 'rejected',
+    }).returning(['id']);
+    const middleId = middleRow.id || middleRow;
+    await db('events_raw').insert({
+      source_id: sourceId, external_id: newKey, title, start_at: start, event_url: url,
+      merged_into: middleId, admin_status: 'rejected',
+    });
+    const [legacyRow] = await db('events_raw').insert({
+      source_id: sourceId, external_id: legacyKey, title, start_at: start, event_url: url,
+    }).returning(['id']);
+    const legacyId = legacyRow.id || legacyRow;
+
+    await upsertExtractedEvents(source, [{ title, startAt: startIso, eventUrl: url }]);
+
+    const legacy = await db('events_raw').where({ id: legacyId }).first();
+    expect(legacy.merged_into).toBe(finalId);
+  });
+
   test('with no legacy row present, a fresh pull inserts once under the new key', async () => {
     const source = { id: sourceId, coverage_geo: [] };
     const title = 'TEST Fresh Pull Event';

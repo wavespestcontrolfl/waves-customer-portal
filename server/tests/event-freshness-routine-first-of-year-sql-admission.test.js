@@ -167,6 +167,27 @@ describeOrSkip('buildCurationCandidateQuery admits a genuine first-of-year stale
     expect(rows.map((r) => r.id)).toContain(survivorId);
   });
 
+  test('a stale NON-routine row (limited run between its weeks) is kept out of the capped query', async () => {
+    const id = await insertEvent({
+      title: 'TEST Limited Run Between Weeks',
+      event_type: 'limited_run',
+      recurrence_type: 'none',
+      freshness_status: 'stale_recurring',
+      start_at: etAt(sameYearDays().laterDay),
+    });
+    const rows = await buildCurationCandidateQuery(500);
+    expect(rows.map((r) => r.id)).not.toContain(id);
+  });
+
+  test('blank venues fall back to city: an earlier row in another city does not suppress this one', async () => {
+    const title = 'TEST Weekly Trivia Blank Venue';
+    const { laterDay, earlierDay } = sameYearDays();
+    await insertEvent({ title, venue_name: '', city: 'Tampa', admin_status: 'approved', start_at: etAt(earlierDay) });
+    const laterId = await insertEvent({ title, venue_name: '  ', city: 'Venice', start_at: etAt(laterDay) });
+    const rows = await buildCurationCandidateQuery(500);
+    expect(rows.map((r) => r.id)).toContain(laterId);
+  });
+
   test('expired and needs_review rows remain excluded unconditionally, even with no earlier sibling at all', async () => {
     const expiredId = await insertEvent({
       title: 'TEST Expired Row No Sibling',

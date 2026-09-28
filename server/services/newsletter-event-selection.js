@@ -110,9 +110,8 @@ async function loadFeaturedIdentityHistory(knex = db) {
  * Remove logical events already featured on a different ingestion row.
  * `yearPool` lets a caller that already loaded the full-calendar-year
  * identity pool (loadYearIdentityPool) share it instead of paying for a
- * second DB round trip; otherwise this loads its own, gated by
- * mayNeedYearPool exactly like filterRepeatedDateIdentities, so a batch of
- * plain one-time events never pays for it.
+ * second DB round trip; otherwise this loads its own through
+ * loadSharedYearPool, like filterRepeatedDateIdentities.
  */
 async function filterPreviouslyFeaturedIdentities(events, { knex = db, reference = new Date(), yearPool = null } = {}) {
   const rows = Array.isArray(events) ? events : [];
@@ -362,9 +361,21 @@ async function loadYearIdentityPool(knex, events, reference = new Date()) {
 /** Cheap, over-inclusive check for whether any row in a batch could possibly
  * need the calendar-year pool, so a batch of plain one-time events never
  * pays for (or, in tests, unexpectedly triggers) the extra DB round trip. */
-function mayNeedYearPool(events) {
-  return (Array.isArray(events) ? events : []).some((event) => (
-    isRecurringIdentityEvent(event, { occurrenceCount: Infinity })
+/**
+ * Whether an identity is recurring: the row's own metadata, pool-derived
+ * repeat evidence, OR any live same-identity row in the year pool labeled
+ * recurring. A re-scrape can normalize this year's rows as one_time while
+ * last year's rows said weekly/annual; planning and final validation both
+ * call this, so they agree on it.
+ */
+function identityIsRecurring(event, pool, occurrenceCount) {
+  if (isRecurringIdentityEvent(event, { occurrenceCount })) return true;
+  return (Array.isArray(pool) ? pool : []).some((sibling) => (
+    sibling
+    && String(sibling.id) !== String(event?.id)
+    && !isMergedAwaySibling(sibling)
+    && isSameSeriesSibling(event, sibling)
+    && isRecurringIdentityEvent(sibling, { occurrenceCount })
   ));
 }
 
@@ -378,11 +389,12 @@ function mayNeedYearPool(events) {
  * filterRepeatedDateIdentities / filterPreviouslyFeaturedIdentities /
  * assessFlagshipEventSelection via their `yearPool` option (Codex P2,
  * 2026-09-27: "Reuse the calendar-year pool across eligibility filters").
- * Returns `[]` (no DB round trip) when nothing in `rows` could possibly need
- * it — mayNeedYearPool's own cheap, over-inclusive check.
+ * Returns `[]` (no DB round trip) only for an empty batch.
  */
 async function loadSharedYearPool(knex, rows, reference = new Date()) {
-  return mayNeedYearPool(rows) ? loadYearIdentityPool(knex, rows, reference) : [];
+  // Always loaded for a non-empty batch: a row labeled one_time can still be
+  // a recurring identity through last year's rows (identityIsRecurring).
+  return Array.isArray(rows) && rows.length ? loadYearIdentityPool(knex, rows, reference) : [];
 }
 
 /**
@@ -439,7 +451,7 @@ async function filterRepeatedDateIdentities(
     // never covered — is eligible only for its first occurrence of the ET
     // calendar year.
     const occurrenceCount = identityOccurrenceCount(event, calendarYearPool);
-    const isRecurringIdentity = isRecurringIdentityEvent(event, { occurrenceCount });
+    const isRecurringIdentity = identityIsRecurring(event, calendarYearPool, occurrenceCount);
 
     if (event?.admin_status === 'featured') {
       // The star bypasses this filter's drops, but still carries the same
@@ -542,7 +554,7 @@ function assessFlagshipEventSelection(
     // cleared, so it gets the same pool-verified marker
     // filterRepeatedDateIdentities stamps.
     const occurrenceCount = identityOccurrenceCount(event, yearIdentityPool);
-    const isRecurringIdentity = isRecurringIdentityEvent(event, { occurrenceCount });
+    const isRecurringIdentity = identityIsRecurring(event, yearIdentityPool, occurrenceCount);
     const firstOfYear = !isRecurringIdentity || isFirstOccurrenceOfYear(event, yearIdentityPool, reference);
     // __recurrenceOccurrenceCount rides along regardless of the
     // __recurringFirstOfYear branch, same reasoning as
@@ -636,7 +648,6 @@ module.exports = {
   identityOccurrenceCount,
   isFirstOccurrenceOfYear,
   loadYearIdentityPool,
-  mayNeedYearPool,
   loadSharedYearPool,
   isPreviouslyFeaturedIdentity,
   loadFeaturedIdentityHistory,

@@ -306,7 +306,12 @@ function extractedEventDedupKeys(title, start, urlKey) {
   const externalId = `${titleKey}|${startKey}|${urlKey}`.slice(0, 256);
   const legacyStartKey = start ? start.toISOString() : '';
   const legacyExternalId = `${titleKey}|${legacyStartKey}|${urlKey}`.slice(0, 256);
-  return { externalId, legacyExternalId };
+  // Pre-fix rows extracted from a naive time were stored with the ET wall
+  // clock read as UTC (e.g. 7:30 PM ET -> 19:30Z), so their legacy key embeds
+  // that shifted instant, not the corrected one.
+  const tzDroppedStartKey = start ? `${etDateString(start)}T${etWallClockHHMM(start)}:00.000Z` : '';
+  const tzDroppedExternalId = `${titleKey}|${tzDroppedStartKey}|${urlKey}`.slice(0, 256);
+  return { externalId, legacyExternalId, tzDroppedExternalId };
 }
 
 // Allowlist URL protocols. RSS data is external/untrusted; rendering a
@@ -775,7 +780,7 @@ function normalizeExtractedEvent(source, ev, nowMs, opts = {}) {
   // don't have a UID/guid, so we key on the post-normalization fields.
   // Title is lowercased so casing drift from Claude (e.g. "Boat Parade" vs
   // "BOAT PARADE") doesn't create duplicates either.
-  const { externalId, legacyExternalId } = extractedEventDedupKeys(title, start, eventUrl || '');
+  const { externalId, legacyExternalId, tzDroppedExternalId } = extractedEventDedupKeys(title, start, eventUrl || '');
 
   // Clamp to varchar(128) — events_raw.city per migration
   // 20260427000003. Claude can return long location strings; without
@@ -805,7 +810,73 @@ function normalizeExtractedEvent(source, ev, nowMs, opts = {}) {
       image_url: imageUrl,
     },
     legacyExternalId,
+    legacyExternalIds: [...new Set([legacyExternalId, tzDroppedExternalId])]
+      .filter((key) => key && key !== externalId),
   };
+}
+
+// Follow merged_into to the row a merge chain finally points at. mergeEvents
+// lets a former survivor be merged again later, so one hop is not enough.
+async function finalSurvivorId(id) {
+  let current = id;
+  for (let hop = 0; hop < 10; hop += 1) {
+    const found = await db('events_raw').select('id', 'merged_into').where({ id: current }).first();
+    if (!found || !found.merged_into) return found ? found.id : null;
+    current = found.merged_into;
+  }
+  return null;
+}
+
+// Move an existing row stored under an older dedup-key shape onto the current
+// key, so this pull updates it instead of minting a duplicate. Two older
+// shapes exist: the full UTC instant (legacyExternalId) and that instant as
+// the pre-fix naive-time bug stored it (tzDroppedExternalId). When a row
+// already holds the current key (a rolling deploy, or a correct pull and a
+// timezone-dropped pull of the same event), the pair is merged instead:
+// pickSurvivor's featured > approved > pending precedence decides which row
+// lives, and a merged-away current-key row sends the legacy row to its final
+// survivor. The upsert that follows then writes the corrected start time.
+async function reconcileLegacyKey(sourceId, currentKey, legacyKey) {
+  const renamed = await db('events_raw')
+    .where({ source_id: sourceId, external_id: legacyKey })
+    .whereNotExists(db('events_raw').select(1).where({ source_id: sourceId, external_id: currentKey }))
+    .update({ external_id: currentKey });
+  if (renamed) return;
+
+  const legacyRow = await db('events_raw')
+    .where({ source_id: sourceId, external_id: legacyKey })
+    .whereNull('merged_into')
+    .first();
+  if (!legacyRow) return;
+  const currentRow = await db('events_raw').where({ source_id: sourceId, external_id: currentKey }).first();
+  if (!currentRow || currentRow.id === legacyRow.id) return;
+
+  try {
+    if (currentRow.merged_into) {
+      const survivorId = await finalSurvivorId(currentRow.merged_into);
+      if (survivorId && survivorId !== legacyRow.id) await mergeEvents(survivorId, [legacyRow.id]);
+      return;
+    }
+    if (pickSurvivor([currentRow, legacyRow]).id === currentRow.id) {
+      await mergeEvents(currentRow.id, [legacyRow.id]);
+      return;
+    }
+    // The legacy row survives and takes the current key in the same
+    // transaction as the merge; the loser moves to a bounded retired key
+    // (external_id is varchar(256)).
+    await mergeEvents(legacyRow.id, [currentRow.id], {
+      afterMerge: async (trx) => {
+        await trx('events_raw').where({ id: currentRow.id })
+          .update({ external_id: `retired:${currentRow.id}`, updated_at: trx.fn.now() });
+        await trx('events_raw').where({ id: legacyRow.id })
+          .update({ external_id: currentKey, updated_at: trx.fn.now() });
+      },
+    });
+  } catch (err) {
+    // A concurrent pull or merge already resolved this pair; the next pull
+    // retries if it is still unresolved.
+    logger.warn(`[event-ingestion] legacy-key merge skipped for source ${sourceId}: ${err.message}`);
+  }
 }
 
 async function upsertExtractedEvents(source, claudeEvents, opts = {}) {
@@ -816,88 +887,9 @@ async function upsertExtractedEvents(source, claudeEvents, opts = {}) {
   for (const ev of claudeEvents) {
     const normalized = normalizeExtractedEvent(source, ev, nowMs, opts);
     if (!normalized) { dropped += 1; continue; }
-    const { row, legacyExternalId } = normalized;
-
-    // Migrate an existing legacy-shaped row (the pre-fix full-ISO-instant
-    // key) onto the new key shape FIRST, so the upsert below lands on that
-    // SAME row instead of minting a duplicate purely from the key-format
-    // change — this pull's `row.external_id` uses the new shape, but a row
-    // pulled before this change may still be stored under the old one for
-    // the identical title+start+url. Only renames when a legacy row exists
-    // AND no row already claims the new key for this source (that would
-    // violate the (source_id, external_id) unique constraint) — in that
-    // rare case the rename below is skipped and the merge-away path just
-    // below handles it instead.
-    if (legacyExternalId && legacyExternalId !== row.external_id) {
-      const renamed = await db('events_raw')
-        .where({ source_id: source.id, external_id: legacyExternalId })
-        .whereNotExists(
-          db('events_raw').select(1).where({ source_id: source.id, external_id: row.external_id }),
-        )
-        .update({ external_id: row.external_id });
-
-      // Codex P2, 2026-09-27: "Collapse legacy rows when the new dedup key
-      // already exists". A rolling deploy can leave BOTH shapes on disk for
-      // the same identity — a straggler instance still running pre-fix
-      // logic re-inserts a fresh legacy-shaped row after this migration
-      // already renamed the original onto the new key. The rename above
-      // can't apply then (the unique (source_id, external_id) constraint
-      // already claims the new key), so without this the legacy row would
-      // sit forever under a key nothing else ever looks up — invisible to
-      // every dedup/eligibility pass. Reconcile the pair through the SAME
-      // merge mechanism cross-source dedup uses, keeping whichever row
-      // carries the stronger editorial decision
-      // (merged_into set, admin_status rejected, calendars rewritten —
-      // event-dedup.js's mergeEvents), so it disappears from the
-      // digest/pipeline exactly like any other merged duplicate while its
-      // own history (times_featured, last_featured_at, any admin
-      // decision) stays on the row rather than being deleted. Idempotent:
-      // a legacy row already merged_into something is excluded by the
-      // whereNull('merged_into') below, so a re-pull is a no-op here.
-      if (!renamed) {
-        const legacyRow = await db('events_raw')
-          .where({ source_id: source.id, external_id: legacyExternalId })
-          .whereNull('merged_into')
-          .first();
-        if (legacyRow) {
-          const newKeyRow = await db('events_raw')
-            .where({ source_id: source.id, external_id: row.external_id })
-            .first();
-          if (newKeyRow && newKeyRow.id !== legacyRow.id) {
-            try {
-              // The stronger editorial decision survives (pickSurvivor's
-              // featured > approved > pending precedence, same as dedup).
-              // When that is the legacy row, it also takes over the new key
-              // so later pulls keep updating the survivor; the merged loser
-              // moves to a retired key to free it.
-              if (newKeyRow.merged_into) {
-                // The new-key row was already merged away by dedup: this
-                // identity is a duplicate of that survivor, so the live
-                // legacy row follows it there too.
-                await mergeEvents(newKeyRow.merged_into, [legacyRow.id]);
-              } else if (pickSurvivor([newKeyRow, legacyRow]).id === newKeyRow.id) {
-                await mergeEvents(newKeyRow.id, [legacyRow.id]);
-              } else {
-                // Key transfer commits atomically with the merge. The retired
-                // key is bounded (external_id is varchar(256)) and unique.
-                await mergeEvents(legacyRow.id, [newKeyRow.id], {
-                  afterMerge: async (trx) => {
-                    await trx('events_raw').where({ id: newKeyRow.id })
-                      .update({ external_id: `retired:${newKeyRow.id}`, updated_at: trx.fn.now() });
-                    await trx('events_raw').where({ id: legacyRow.id })
-                      .update({ external_id: row.external_id, updated_at: trx.fn.now() });
-                  },
-                });
-              }
-            } catch (err) {
-              // A concurrent pull/merge already resolved this pair — non-fatal,
-              // same as autoMergeDuplicates' own per-cluster handling; the
-              // next pull retries if it's still unresolved.
-              logger.warn(`[event-ingestion] legacy-key merge skipped for source ${source.id}: ${err.message}`);
-            }
-          }
-        }
-      }
+    const { row, legacyExternalIds } = normalized;
+    for (const legacyKey of legacyExternalIds) {
+      await reconcileLegacyKey(source.id, row.external_id, legacyKey);
     }
 
     await db('events_raw')
