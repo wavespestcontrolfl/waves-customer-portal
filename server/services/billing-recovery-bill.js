@@ -10,10 +10,11 @@
  *                         billable (not autopay-covered, payer-billed,
  *                         callback, always-free, prepaid, unpriced) and
  *                         returns the amount the draft would carry.
- *   billVisit           — assess, then serialize per visit on the scheduled
- *                         invoice mint lock, recheck inside the lock, and
- *                         create the invoice + 'billed' disposition in one
- *                         transaction.
+ *   billVisit           — serialize per visit on the scheduled invoice mint
+ *                         lock, run the assessment INSIDE the lock (and, for
+ *                         an approved amount, refuse if the price moved),
+ *                         then create the invoice + 'billed' disposition in
+ *                         one transaction.
  *
  * Refusals come back as { ok: false, status, error } — never thrown — so the
  * route maps them to HTTP and the IB plan lists them as manual items.
@@ -178,15 +179,29 @@ async function assessVisitBillable(scheduledServiceId, { database = db } = {}) {
   return { ok: true, visit, price, rowPrice };
 }
 
-async function billVisit(scheduledServiceId, { actorId = null, database = db } = {}) {
-  const assessed = await assessVisitBillable(scheduledServiceId, { database });
-  if (!assessed.ok) return assessed;
-  const { visit, price, rowPrice } = assessed;
+const cents = (n) => Math.round(Number(n) * 100);
+
+// expectedPrice: the amount an approval showed (IB closeout repair). The
+// assessment runs under the mint lock, so a reprice between the approval
+// and this write refuses instead of minting a different figure.
+async function billVisit(scheduledServiceId, { actorId = null, expectedPrice = null, database = db } = {}) {
   try {
-    // Serialize concurrent bills on the same visit, recheck inside the lock,
+    // Serialize concurrent bills on the same visit, assess inside the lock,
     // then create the invoice + disposition. Prevents duplicate draft invoices.
-    const invoice = await database.transaction(async (trx) => {
+    const { invoice, price } = await database.transaction(async (trx) => {
       await acquireScheduledInvoiceMintLock(trx, scheduledServiceId);
+      const assessed = await assessVisitBillable(scheduledServiceId, { database: trx });
+      if (!assessed.ok) {
+        const e = new Error(assessed.error);
+        e.refusal = assessed;
+        throw e;
+      }
+      const { visit, price, rowPrice } = assessed;
+      if (expectedPrice !== null && cents(price) !== cents(expectedPrice)) {
+        const e = new Error(`The visit's price changed since it was approved ($${Number(expectedPrice).toFixed(2)} → $${price.toFixed(2)}).`);
+        e.status = 409;
+        throw e;
+      }
 
       const existingInvoice = await trx('invoices')
         .where(function () {
@@ -243,10 +258,11 @@ async function billVisit(scheduledServiceId, { actorId = null, database = db } =
         actor_user_id: actorId,
       });
 
-      return created;
+      return { invoice: created, price };
     });
     return { ok: true, invoice, price };
   } catch (err) {
+    if (err && err.refusal) return err.refusal;
     if (err && err.status === 409) return refuse(409, err.message);
     if (err && err.code === '23505') return refuse(409, 'Visit has already been handled.');
     throw err;

@@ -344,7 +344,7 @@ describe('bill_visit — the Billing Recovery "Bill" action as a repair step', (
     expect(preview.notifies_customer).toBe(false);
     expect(BillingRecoveryBill.billVisit).not.toHaveBeenCalled();
     const contract = buildContract({ toolName: 'repair_closeout', params: { service_id: SVC }, preview });
-    expect(contract.effects).toEqual(expect.arrayContaining([expect.objectContaining({ kind: 'billing', label: expect.stringMatching(/DRAFT invoice.*not sent, not charged.*\$129\.00 before tax/) })]));
+    expect(contract.effects).toEqual(expect.arrayContaining([expect.objectContaining({ kind: 'billing', label: expect.stringMatching(/DRAFT invoice.*not sent, not charged.*visit price \$129\.00/) })]));
     expect(contract.notifies_customer).toBe(false);
   });
 
@@ -357,7 +357,7 @@ describe('bill_visit — the Billing Recovery "Bill" action as a repair step', (
     expect(refused.manual).toEqual([expect.objectContaining({ fact: 'invoice', fix: expect.stringMatching(/active autopay/) })]);
 
     BillingRecoveryBill.assessVisitBillable.mockClear();
-    for (const reason of ['expected_payer_not_minted', 'expected_auto_charge_not_minted', 'parked_manual_refunded_invoice']) {
+    for (const reason of ['expected_payer_not_minted', 'expected_auto_charge_not_minted', 'parked_manual_refunded_invoice', 'frozen_required_mint_not_minted']) {
       getCloseoutStatus.mockResolvedValue({ ...status({ facts: { invoice: { state: 'pending', reason } } }), serviceId: SVC });
       const res = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
       expect(res.code).toBe('nothing_repairable');
@@ -376,7 +376,7 @@ describe('bill_visit — the Billing Recovery "Bill" action as a repair step', (
     });
     expect(run.success).toBe(true);
     expect(run.receipt).toEqual([expect.objectContaining({ step: 'bill_visit', status: 'completed', invoice_id: 'inv-9' })]);
-    expect(BillingRecoveryBill.billVisit).toHaveBeenCalledWith(SVC, expect.objectContaining({ actorId: 'tech-admin' }));
+    expect(BillingRecoveryBill.billVisit).toHaveBeenCalledWith(SVC, expect.objectContaining({ actorId: 'tech-admin', expectedPrice: 129 }));
 
     // Repriced after the card: the executor's plan no longer matches.
     BillingRecoveryBill.billVisit.mockClear();

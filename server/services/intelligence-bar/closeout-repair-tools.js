@@ -86,11 +86,13 @@ const STEP_EFFECTS = {
   bill_visit: { kind: 'billing', label: 'Create a DRAFT invoice (the Billing Recovery "Bill" action) — not sent, not charged' },
 };
 
-// Invoice reasons that mean "a customer self-pay invoice was expected and
-// never minted". Payer, auto-charge and parked-manual reasons stay manual
-// (closeout-alerts.js ACTIONABLE lists): those belong to the AP flow, the
-// charge lane, or a deliberate human call.
-const BILLABLE_INVOICE_REASONS = new Set(['expected_invoice_not_minted', 'frozen_required_mint_not_minted']);
+// Invoice reason meaning "a customer self-pay invoice was expected and never
+// minted" on the LIVE billing expectation. Everything else stays manual:
+// payer / auto-charge belong to the AP flow and the charge lane, parked
+// reasons are a deliberate human call, and frozen_required_mint_not_minted
+// carries the completion's frozen amount/tax/payer contract, which the
+// ordinary Bill replay (current price, current tax) would not honour.
+const BILLABLE_INVOICE_REASONS = new Set(['expected_invoice_not_minted']);
 
 function parseNotes(value) {
   if (!value) return {};
@@ -265,7 +267,9 @@ async function planCloseoutRepair(status, { knex = db } = {}) {
 async function runStep(step, { knex = db } = {}) {
   switch (step.step) {
     case 'bill_visit': {
-      const billed = await BillingRecoveryBill.billVisit(step.scheduled_service_id, { actorId: step.actor_id || null, database: knex });
+      const billed = await BillingRecoveryBill.billVisit(step.scheduled_service_id, {
+        actorId: step.actor_id || null, expectedPrice: step.amount, database: knex,
+      });
       if (!billed.ok) return { status: 'failed', detail: billed.error };
       return { status: 'completed', detail: `draft invoice created (not sent)`, invoice_id: billed.invoice.id, total: billed.invoice.total ?? null };
     }
@@ -336,7 +340,7 @@ function previewFromPlan(serviceId, status, plan) {
       ...s,
       kind: STEP_EFFECTS[s.step].kind,
       effect: s.step === 'bill_visit'
-        ? `${STEP_EFFECTS[s.step].label}: $${s.amount.toFixed(2)} before tax, line items replayed from the visit`
+        ? `${STEP_EFFECTS[s.step].label}: visit price $${s.amount.toFixed(2)} — the draft replays the visit's line items and discounts and adds tax; review it before sending`
         : s.recipients ? `${STEP_EFFECTS[s.step].label} — to ${s.recipients.length ? s.recipients.join(', ') : 'no recipient on file'}` : STEP_EFFECTS[s.step].label,
     })),
     manual: plan.manual,

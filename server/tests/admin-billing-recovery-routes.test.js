@@ -56,11 +56,16 @@ function makeQB({ rows = [], first = null, insert = undefined } = {}) {
   return qb;
 }
 
-// Install a db.transaction(cb) that routes trx(table) like db and supports trx.raw.
-function installTransaction(routeTable) {
+// Install a db.transaction(cb) whose trx(table) serves the in-lock tables
+// from routeTable and every other read (the billability assessment, which
+// runs inside the lock) from the db mock, and supports trx.raw / schema.
+function installTransaction(routeTable = () => { throw new Error('no trx tables'); }) {
   db.transaction = jest.fn(async (cb) => {
-    const trx = (arg) => routeTable(arg);
-    trx.raw = jest.fn(() => Promise.resolve());
+    const trx = (arg) => {
+      try { return routeTable(arg); } catch { return db(arg); }
+    };
+    trx.raw = jest.fn((sql) => (typeof sql === 'string' ? sql : Promise.resolve()));
+    trx.schema = db.schema;
     return cb(trx);
   });
 }
@@ -87,7 +92,11 @@ const BILLABLE_VISIT = {
 };
 
 describe('admin billing-recovery routes', () => {
-  beforeEach(() => { jest.clearAllMocks(); });
+  beforeEach(() => {
+    jest.clearAllMocks();
+    // Refusals now surface from inside the mint transaction.
+    installTransaction();
+  });
 
   test('technician cannot bill a visit (write requires admin)', async () => {
     await withServer(async (baseUrl) => {
@@ -435,5 +444,26 @@ describe('admin billing-recovery routes', () => {
       const res = await fetch(`${baseUrl}/admin/billing-recovery/aging`, { headers: { Authorization: 'Bearer admin' } });
       expect(res.status).toBe(502);
     });
+  });
+});
+
+describe('billing-recovery-bill billVisit (shared with the IB closeout repair)', () => {
+  beforeEach(() => { jest.clearAllMocks(); });
+
+  test('an approved amount that no longer matches the in-lock price refuses and mints nothing', async () => {
+    const { billVisit } = require('../services/billing-recovery-bill');
+    db.mockImplementation((arg) => {
+      if (typeof arg === 'object' && arg.ss) return makeQB({ first: { ...BILLABLE_VISIT, estimated_price: '149.00' } });
+      return makeQB({ first: null });
+    });
+    customerOnAutopay.mockResolvedValue(false);
+    installTransaction((arg) => {
+      if (arg === 'invoices' || arg === 'visit_billing_dispositions') return makeQB({ first: null });
+      throw new Error('fall through');
+    });
+    const result = await billVisit('ss-1', { actorId: 'admin-1', expectedPrice: 129 });
+    expect(result).toEqual(expect.objectContaining({ ok: false, status: 409, error: expect.stringMatching(/\$129\.00 → \$149\.00/) }));
+    expect(db.transaction).toHaveBeenCalled();
+    expect(InvoiceService.createFromService).not.toHaveBeenCalled();
   });
 });
