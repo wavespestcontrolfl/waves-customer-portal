@@ -1509,6 +1509,67 @@ describe('citability nudges (weight-0, signal-only)', () => {
     expect(softened).toEqual({ ok: false, reason: 'refresh_dropped_measurements_1_to_0' });
   });
 
+  test('concrete_specifics on refresh compares each prior measurement, not the total count (Codex r4 P2)', () => {
+    const prev = { body: 'Mow at 4 inches and wait 10–14 days.' };
+    // Same count, but a retained value repeated in place of the dropped one.
+    expect(checkCitabilityConcreteSpecifics({ body: 'Mow at 4 inches. Keep it at 4 inches.' }, {}, { previousVersion: prev }))
+      .toEqual({ ok: false, reason: 'refresh_dropped_measurements_2_to_1' });
+    // Same count, but an unrelated new number in place of the dropped one.
+    expect(checkCitabilityConcreteSpecifics({ body: 'Mow at 4 inches and water 30 minutes.' }, {}, { previousVersion: prev }))
+      .toEqual({ ok: false, reason: 'refresh_dropped_measurements_2_to_1' });
+    // Rephrased units and range dashes still count as the same value.
+    expect(checkCitabilityConcreteSpecifics(
+      { body: 'Use a 4-inch mowing height and a 10-14 day wait. Season runs June 1 to September 30th.' },
+      {},
+      { previousVersion: { body: 'Mow at 4 inches, wait 10–14 days. Season runs Jun 1 – Sept 30.' } },
+    )).toEqual({ ok: true });
+  });
+
+  test('named_sources accepts specific centers, surveys, and clinics but not generic ones (Codex r4 P2)', () => {
+    expect(checkCitabilityNamedSources({ body: 'According to the National Hurricane Center, storms peak in September.' }).ok).toBe(true);
+    expect(checkCitabilityNamedSources({ body: 'According to the U.S. Geological Survey, the aquifer sits close to the surface.' }).ok).toBe(true);
+    expect(checkCitabilityNamedSources({ body: 'Per USGS, the aquifer sits close to the surface.' }).ok).toBe(true);
+    expect(checkCitabilityNamedSources({ body: 'The Mayo Clinic notes that stings can cause reactions.' }).ok).toBe(true);
+    expect(checkCitabilityNamedSources({ body: 'According to the Research Center, ants are common.' }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: 'According to the Local Health Clinic, ants are common.' }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: 'According to the County Hospital, ants are common.' }).ok).toBe(false);
+    // Unnamed institutional placeholders (5013 Codex r2 P2) stay unnamed.
+    expect(checkCitabilityNamedSources({ body: 'According to Trusted Research Institute, ants are common.' }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: 'According to Leading Industry Association, ants are common.' }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: 'According to Local Government Agency, ants are common.' }).ok).toBe(false);
+  });
+
+  test('choice framing reads rendered heading text only (Codex r4 P2)', () => {
+    expect(checkCitabilityComparison({ title: 'Ghost Ants in Venice', body: '## [Related guide](/bait-vs-spray/)\nText.' }))
+      .toEqual({ ok: true, reason: 'no_choice_framed' });
+    expect(checkCitabilityComparison({ title: 'Ghost Ants in Venice', body: '## [Bait or spray?](/bait-or-spray/)\nText.' }).ok).toBe(false);
+    const table = '<ComparisonTable columns={["a"]} rows={[]} />\n';
+    const bullets = '- If A → B\n- If C → D\n- If E → F';
+    expect(checkCitabilityHowToChoose({ body: `${table}## [Overview](/guide/ "How to choose")\n${bullets}` }))
+      .toEqual({ ok: false, reason: 'no_how_to_choose_section' });
+    expect(checkCitabilityHowToChoose({ body: `${table}## [How to choose](/guide/)\n${bullets}` }).ok).toBe(true);
+  });
+
+  test('"which is better" and "which … should you choose" headings frame a choice (5013 Codex r1/r2 P2)', () => {
+    for (const heading of [
+      '## Which is better: bait or spray?',
+      '## Which works better, bait or spray?',
+      '## Which termite treatment should you choose?',
+      '## Which of these options is best for a slab home?',
+    ]) {
+      expect(checkCitabilityComparison({ title: 'Ghost Ants in Venice', body: `${heading}\nText.` }).reason)
+        .toBe('choice_framed_without_ComparisonTable');
+    }
+    expect(checkCitabilityComparison({ title: 'Ghost Ants in Venice', body: '## Which ants bite?\nText.' }).reason)
+      .toBe('no_choice_framed');
+  });
+
+  test('a seasonal word with no measurement is a vague-qualifier nudge; a calendar window satisfies it (5013 Codex r2 P2)', () => {
+    expect(checkCitabilityConcreteSpecifics({ body: 'Mosquitoes peak in summer.' }).reason)
+      .toBe('vague_qualifier_without_measurement:in summer');
+    expect(checkCitabilityConcreteSpecifics({ body: 'Mosquitoes peak in summer, roughly June 1 – Sept 30.' }).ok).toBe(true);
+  });
+
   test('comparison: a post that frames no choice passes without a table', () => {
     const r = checkCitabilityComparison({ title: 'Do Mud Daubers Sting?', body: '## What they are\nMud daubers are solitary wasps. DIY removal is fine.' });
     expect(r.ok).toBe(true);

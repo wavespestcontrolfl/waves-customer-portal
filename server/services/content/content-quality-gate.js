@@ -1130,7 +1130,7 @@ function draftPostType(draft) {
 // ComparisonTable, so neither may count toward this nudge.
 // The county prefix is REQUIRED: a bare "Mosquito Control" is our own
 // service name and must not count as an external authority (fallback P2).
-const NAMED_AUTHORITY = String.raw`(?:UF\s*\/\s*IFAS|IFAS|University of Florida|USDA|NOAA|National Weather Service|Cooperative Extension|FDACS|Florida Department of Agriculture|Florida Department of Health|(?:U\.?S\.? )?EPA\b|Environmental Protection Agency|CDC\b|Centers for Disease Control|National Pesticide Information Center|NPIC|NPMA|FPMA|National Pest Management Association|Florida Pest Management Association|Florida Statutes?|[A-Z][a-z]+ County Mosquito (?:Control|Management)|Mosquito Control District)`;
+const NAMED_AUTHORITY = String.raw`(?:UF\s*\/\s*IFAS|IFAS|University of Florida|USDA|NOAA|National Weather Service|Cooperative Extension|FDACS|Florida Department of Agriculture|Florida Department of Health|(?:U\.?S\.? )?EPA\b|Environmental Protection Agency|CDC\b|Centers for Disease Control|National Pesticide Information Center|NPIC|NPMA|FPMA|National Pest Management Association|Florida Pest Management Association|National Hurricane Center|USGS|U\.S\. Geological Survey|Florida Statutes?|[A-Z][a-z]+ County Mosquito (?:Control|Management)|Mosquito Control District)`;
 // Bare mentions are NOT attribution (Codex P2, 2026-09-26): "an
 // EPA-registered product" names EPA without citing it for any claim. A named
 // authority counts only in a citation frame — led by an attribution phrase,
@@ -1185,14 +1185,14 @@ const ATTRIBUTED_SOURCE_RE = /\b(?:[Aa]ccording to|[Pp]er|[Rr]eported by|[Pp]ubl
 // finite authority list ("Florida Forest Service reports ..."). Require an
 // institutional head noun so a sentence-leading generic group such as
 // "Homeowners report" does not become a named source merely by casing.
-const DIRECT_INSTITUTION_SOURCE_RE = /\b((?:The\s+)?(?:[A-Z][\w&.'’-]*\s+){1,7}(?:Service|Laboratory|Department|Agency|Institute|University|Extension|District|Center|Centre|Commission|Council|Office|Association|Society|Foundation|Administration|Bureau|Authority|Program))(?:'s|’s)?\s+(?:recommends?|says|notes?|reports?|advises?|found|finds|warns?|tracks?|lists?|states?|requires?|publishes?|estimates?|confirms?|defines?)\b/g;
+const DIRECT_INSTITUTION_SOURCE_RE = /\b((?:The\s+)?(?:[A-Z][\w&.'’-]*\s+){1,7}(?:Service|Laboratory|Department|Agency|Institute|University|Extension|District|Center|Centre|Commission|Council|Office|Association|Society|Foundation|Administration|Bureau|Authority|Program|Survey|Clinic|Hospital))(?:'s|’s)?\s+(?:recommends?|says|notes?|reports?|advises?|found|finds|warns?|tracks?|lists?|states?|requires?|publishes?|estimates?|confirms?|defines?)\b/g;
 const OWN_COMPANY_RE = /^(?:the\s+)?Waves\b/i;
 // Capitalization is not evidence that a source is specific. These generic
 // source head nouns are common LLM attribution filler and must not satisfy
 // the named-source contract even when arbitrary title-cased modifiers make
 // the whole phrase look proper ("Leading Experts", "Trusted Research").
 const GENERIC_SOURCE_HEAD_RE = /\b(?:authorities|authority|experts?|officials?|professionals?|research|researchers?|scientists?|specialists?|studies|study)\s*$/i;
-const SPECIFIC_SOURCE_ORG_RE = /\b(?:Service|Laboratory|Department|Agency|Institute|University|Extension|District|Center|Centre|Commission|Council|Office|Association|Society|Foundation|Administration|Bureau|Authority|Program)\b/i;
+const SPECIFIC_SOURCE_ORG_RE = /\b(?:Service|Laboratory|Department|Agency|Institute|University|Extension|District|Center|Centre|Commission|Council|Office|Association|Society|Foundation|Administration|Bureau|Authority|Program|Survey|Clinic|Hospital)\b/i;
 const GENERIC_ORG_NAME_TOKEN_RE = /^(?:local|county|state|federal|national|regional|city|municipal|government|public|health|pest|control|industry|professional|professionals|management|community|trusted|leading|independent|official|recognized|respected|expert|research|science|scientific)$/i;
 const CREDENTIALED_PERSON_RE = /^(?:Dr|Prof|Professor)\.?\s+[A-Z][\w.'’-]+(?:\s+[A-Z][\w.'’-]+)+$/;
 const NAMED_PUBLICATION_RE = /^(?:Nature|Science|Consumer Reports|Scientific American|Journal of(?:\s+[A-Z][\w&.'’-]*){1,6}|(?:[A-Z][\w&.'’-]*\s+){0,5}(?:Journal|Review|Times|Tribune|Post|Herald|Magazine))$/;
@@ -1213,10 +1213,12 @@ function hasSpecificOrganizationName(source) {
     && !GENERIC_ORG_NAME_TOKEN_RE.test(word));
   // Universities, extension offices, services, and laboratories commonly
   // have one distinctive name token (Cornell University, University of
-  // Miami, Florida Forest Service). Looser heads such as Program and
-  // Association need two, so locality-shaped filler like "Sarasota County
-  // Program" does not become evidence merely through capitalization.
-  const distinctiveHead = /^(?:University|Extension|Service|Laboratory)$/i.test(words[head]);
+  // Miami, Florida Forest Service), and so do centers, surveys, and clinics
+  // (National Hurricane Center, U.S. Geological Survey, Mayo Clinic) once
+  // the generic tokens are gone (Codex r4 P2). Looser heads such as Program
+  // and Association need two, so locality-shaped filler like "Sarasota
+  // County Program" does not become evidence merely through capitalization.
+  const distinctiveHead = /^(?:University|Extension|Service|Laboratory|Center|Centre|Survey|Clinic|Hospital)$/i.test(words[head]);
   return identifying.length >= (distinctiveHead ? 1 : 2);
 }
 
@@ -1268,13 +1270,73 @@ const CALENDAR_WINDOW_RE = /\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)
 // "a couple of weeks", "deeply"). Softening is what the nudge targets.
 const VAGUE_QUALIFIER_RE = /\b(?:a (?:couple|few) (?:of )?(?:days|weeks|months|hours|inches|feet)|several (?:days|weeks|months|hours|inches)|(?:water|soak)(?:ing)? deeply|mow(?:ing)? (?:it )?(?:tall|high|short|low)|a while|(?:in|during|this|next|last|early|late|each|every|throughout|by|before|after) (?:the )?(?:spring|summer|fall|autumn|winter)|(?:spring|summer|fall|autumn|winter) (?:season|months?|weather|rains?|rainfall|temperatures?|conditions?|timing|window|applications?|treatments?|service|pressure|activity)|(?:rainy|dry) season)\b/i;
 
-function countConcreteSpecifics(body) {
+const UNIT_KEYS = [
+  [/^(?:%|percent)$/, '%'],
+  [/^inch(?:es)?$/, 'inch'],
+  [/^(?:feet|foot|ft)$/, 'foot'],
+  [/^(?:sq\.? ?ft|square feet)$/, 'sq ft'],
+  [/^(?:°\s?f|degrees)$/, 'degree'],
+  [/^(?:lbs?|pounds?)$/, 'pound'],
+  [/^(?:oz|ounces?)$/, 'ounce'],
+  [/^(?:mm|millimeters?)$/, 'mm'],
+  [/^(?:cm|centimeters?)$/, 'cm'],
+];
+
+// One comparable key per measurement: the number (range dashes unified) and
+// its unit in a single spelling, so "14 days", "14-day", and "14 day"
+// compare equal while "4 inches" never stands in for "10–14 days".
+function measurementKey(match) {
+  const m = match.toLowerCase().replace(/\s+/g, ' ').trim();
+  const num = m.match(/^(\d+(?:\.\d+)?)(?:\s?(?:-|–|to)\s?(\d+(?:\.\d+)?))?/);
+  let unit = m.slice(num[0].length).replace(/^[\s\-–—]+/, '').trim();
+  unit = unit.replace(/^times? (?:a|per) /, 'times per ');
+  const alias = UNIT_KEYS.find(([re]) => re.test(unit));
+  if (alias) unit = alias[1];
+  else unit = unit.split(' ').map((w) => w.replace(/s$/, '')).join(' ');
+  return `${num[1]}${num[2] ? `-${num[2]}` : ''} ${unit}`;
+}
+
+function calendarKey(match) {
+  const t = match.toLowerCase()
+    .replace(/(\d)(?:st|nd|rd|th)\b/g, '$1')
+    .replace(/\s*(?:–|—|-|\bto\b|\bthrough\b)\s*/g, '-')
+    .replace(/\b([a-z]{3})[a-z]*\.?/g, '$1')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return `cal:${t}`;
+}
+
+function concreteSpecificKeys(body) {
   // Remove complete dollar literals before scanning. Otherwise a
   // comma-formatted price such as "$1,200 per year" can be entered midway
   // at "200 per year" and masquerade as a non-price measurement.
   const text = visibleInlineText(body).replace(/\$\s*\d[\d,]*(?:\.\d+)?(?:\s*(?:-|–|—|to)\s*\$?\s*\d[\d,]*(?:\.\d+)?)?/g, ' ');
-  return (text.match(CONCRETE_SPECIFIC_RE) || []).length
-    + (text.match(CALENDAR_WINDOW_RE) || []).length;
+  return [
+    ...(text.match(CONCRETE_SPECIFIC_RE) || []).map(measurementKey),
+    ...(text.match(CALENDAR_WINDOW_RE) || []).map(calendarKey),
+  ];
+}
+
+function countConcreteSpecifics(body) {
+  return concreteSpecificKeys(body).length;
+}
+
+// How many of the prior page's measurements the refresh still states, each
+// counted at most as often as the draft repeats it — an unrelated new
+// number or a repeated retained one cannot stand in for a dropped value
+// (Codex r4 P2).
+function retainedMeasurements(beforeKeys, afterKeys) {
+  const available = new Map();
+  for (const key of afterKeys) available.set(key, (available.get(key) || 0) + 1);
+  let retained = 0;
+  for (const key of beforeKeys) {
+    const left = available.get(key) || 0;
+    if (left > 0) {
+      retained += 1;
+      available.set(key, left - 1);
+    }
+  }
+  return retained;
 }
 
 // NOT a count quota (Codex P2, 2026-09-26): a fixed minimum fired on every
@@ -1285,11 +1347,15 @@ function countConcreteSpecifics(body) {
 // all that leans on a vague stand-in instead.
 function checkCitabilityConcreteSpecifics(draft, brief, context) {
   if (nonBlogTarget(brief)) return { ok: true, reason: 'non_blog_target' };
-  const n = countConcreteSpecifics(renderedCitabilityBody(draft.body));
+  const keys = concreteSpecificKeys(renderedCitabilityBody(draft.body));
+  const n = keys.length;
   const prev = context?.previousVersion?.body;
   if (prev != null) {
-    const before = countConcreteSpecifics(renderedCitabilityBody(prev));
-    if (n < before) return { ok: false, reason: `refresh_dropped_measurements_${before}_to_${n}` };
+    const beforeKeys = concreteSpecificKeys(renderedCitabilityBody(prev));
+    const retained = retainedMeasurements(beforeKeys, keys);
+    if (retained < beforeKeys.length) {
+      return { ok: false, reason: `refresh_dropped_measurements_${beforeKeys.length}_to_${retained}` };
+    }
   }
   if (n === 0) {
     const vague = renderedCitabilityBody(draft.body).match(VAGUE_QUALIFIER_RE);
@@ -1307,7 +1373,7 @@ const COMPARISON_TABLE_RE = /<ComparisonTable\b/;
 // "which option/approach…". A bare "Should you…?" or a yes/no question is
 // NOT a two-path comparison (it fired on 73% of the live corpus in the
 // 2026-09-25 calibration run — most were single-answer questions).
-const CHOICE_FRAMING_RE = /\bvs\.?\b|\bversus\b|^ {0,3}#*\s*[\w'’-]+(?: [\w'’-]+){0,3} or [\w'’-]+(?: [\w'’-]+){0,3}(?:\s*[:—-]\s*[^?\n]{1,80})?\??\s*$|\bwhich (?:one|option|approach|method|plan|treatment|service) (?:is|fits|works|makes|do)\b/i;
+const CHOICE_FRAMING_RE = /\bvs\.?\b|\bversus\b|^ {0,3}#*\s*[\w'’-]+(?: [\w'’-]+){0,3} or [\w'’-]+(?: [\w'’-]+){0,3}(?:\s*[:—-]\s*[^?\n]{1,80})?\??\s*$|\bwhich (?:[\w'’-]+ ){0,2}?(?:one|option|approach|method|plan|product|treatment|service)s? (?:is|are|fits|works|makes|do|does|should)\b|\bwhich (?:one |option )?(?:is|works|fits) (?:better|best)\b/i;
 
 function headingLines(body) {
   return String(body || '').split(/\r?\n/).filter((l) => /^ {0,3}#{1,3}\s+\S/.test(l));
@@ -1316,8 +1382,11 @@ function headingLines(body) {
 function postFramesAChoice(draft) {
   if (CHOICE_POST_TYPES.has(draftPostType(draft))) return true;
   const title = String(draft.title || draft.frontmatter?.title || '');
-  if (CHOICE_FRAMING_RE.test(title)) return true;
-  return headingLines(renderedCitabilityBody(draft.body)).some((h) => CHOICE_FRAMING_RE.test(h));
+  if (CHOICE_FRAMING_RE.test(visibleInlineText(title))) return true;
+  // Rendered heading text only: a link destination such as
+  // "(/bait-vs-spray/)" is invisible to the reader (Codex r4 P2).
+  return headingLines(renderedCitabilityBody(draft.body))
+    .some((h) => CHOICE_FRAMING_RE.test(visibleInlineText(h)));
 }
 
 function checkCitabilityComparison(draft, brief) {
@@ -1340,7 +1409,7 @@ function howToChooseSectionCriteria(body) {
   const lines = String(body || '').split(/\r?\n/);
   let best = -1;
   for (let i = 0; i < lines.length; i += 1) {
-    if (!/^ {0,3}##\s+\S/.test(lines[i]) || !HOW_TO_CHOOSE_HEADING_RE.test(lines[i])) continue;
+    if (!/^ {0,3}##\s+\S/.test(lines[i]) || !HOW_TO_CHOOSE_HEADING_RE.test(visibleInlineText(lines[i]))) continue;
     // Top-level criteria only; nested explanation bullets never count.
     let items = 0;
     let topContentColumn = null;
@@ -1374,6 +1443,29 @@ function checkCitabilityHowToChoose(draft, brief) {
   if (criteria < HOW_TO_CHOOSE_MIN_CRITERIA) return { ok: false, reason: `how_to_choose_has_${criteria}_criteria_need_${HOW_TO_CHOOSE_MIN_CRITERIA}+` };
   if (criteria > HOW_TO_CHOOSE_MAX_CRITERIA) return { ok: false, reason: `how_to_choose_has_${criteria}_criteria_max_${HOW_TO_CHOOSE_MAX_CRITERIA}` };
   return { ok: true };
+}
+
+// The four optional signals as retry advisories ({ code, message }), for
+// the writer's in-session emit_draft redraft, which runs before any
+// run-level evaluate() (5013 Codex r2 P2). Same checks, same codes as the
+// run-level soft_failures path.
+const CITABILITY_CHECKS = [
+  ['citability_named_sources', checkCitabilityNamedSources],
+  ['citability_concrete_specifics', checkCitabilityConcreteSpecifics],
+  ['citability_comparison', checkCitabilityComparison],
+  ['citability_how_to_choose', checkCitabilityHowToChoose],
+];
+
+function citabilityAdvisories(draft, brief, context) {
+  const out = [];
+  for (const [name, check] of CITABILITY_CHECKS) {
+    let result;
+    try { result = check(draft, brief, context); } catch { continue; }
+    if (result && result.ok === false) {
+      out.push({ code: name.toUpperCase(), message: String(result.reason || 'optional citability signal').slice(0, 300) });
+    }
+  }
+  return out;
 }
 
 // ── metadata checks ─────────────────────────────────────────────────
@@ -1535,7 +1627,7 @@ function checkNoDuplicateTitle(draft, _brief, context) {
 // DANGLING_META_ENDINGS is exported as the single source of truth for
 // "words a meta may not end on" — astro-publisher's clamp fallback strips
 // against the SAME set so a clamped meta can never fail this gate.
-module.exports = { evaluate, MIN_TOTAL_SCORES, minTotalScoreFor, DANGLING_META_ENDINGS };
+module.exports = { evaluate, MIN_TOTAL_SCORES, minTotalScoreFor, DANGLING_META_ENDINGS, citabilityAdvisories };
 module.exports._internals = {
   HARD_CHECKS,
   PAGE_TYPE_CHECKS,
