@@ -23,8 +23,9 @@
  *   - an agreed-slot quote (/scheduling/confirmed_start_at) appears word for
  *     word in one turn and contains every recorded slot word; the hour word
  *     is one hour ("two", "2", "noon") and is the slot's; the period words
- *     state the slot's AM/PM (required unless the hour is noon or midnight:
- *     a time nobody put in the morning or afternoon is not agreed); the day
+ *     state the slot's AM/PM — or, when none were said (owner decision
+ *     2026-09-28), the hour reads as business hours (7-11 morning, 12 and
+ *     1-6 afternoon) and the quote must say no period at all; the day
  *     words name the slot's date, or are absent only when the slot keeps the
  *     moved appointment's date;
  *   - when the extraction names the moved appointment, a quote pinned to
@@ -178,6 +179,12 @@ function hourNumber(hourWords) {
   return n >= 1 && n <= 12 ? n : null;
 }
 
+function businessHour(n) {
+  if (n >= 7 && n <= 11) return n;
+  if (n === 12) return 12;
+  return n >= 1 && n <= 6 ? n + 12 : null;
+}
+
 function statedHour(hourWords, periodWords) {
   const toks = normalize(hourWords).split(' ');
   if (toks.length !== 1) return null;
@@ -186,6 +193,10 @@ function statedHour(hourWords, periodWords) {
   if (tok === 'midnight') return 0;
   const n = /^\d{1,2}$/.test(tok) ? Number(tok) : HOUR_WORDS[tok];
   if (!(n >= 1 && n <= 12)) return null;
+  // No period said (owner decision 2026-09-28, reschedules): business
+  // hours — 7-11 the morning, 12 and 1-6 the afternoon; other hours state
+  // nothing. The slot quote must then say no period at all (statesSlotWords).
+  if (typeof periodWords !== 'string') return businessHour(n);
   const periodToks = normalize(periodWords).split(' ');
   // "12 noon" / "12 midnight" name the hour itself; for any other hour noon
   // or midnight is a window's end (see PERIOD_PHRASES). Twelve beside a
@@ -344,7 +355,9 @@ function periodIsTheHours(quote, words) {
 // Does this slot quote hold every recorded word, with the period its hour's
 // and the hour on the hour?
 function statesSlotWords(quote, words) {
-  return slotPhrases(words).every((w) => holds(quote, w)) && periodIsTheHours(quote, words) && twelveSaidTogether(quote, words);
+  return slotPhrases(words).every((w) => holds(quote, w)) && periodIsTheHours(quote, words) && twelveSaidTogether(quote, words)
+    // An hour read as business hours: the quote must state no half of the day.
+    && (typeof words.period === 'string' || /^(?:noon|midnight)$/.test(normalize(words.hour)) || !halvesSaid(quote).length);
 }
 
 // Does this agent commitment quote commit to the recorded slot? It must say

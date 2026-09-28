@@ -153,8 +153,9 @@ describe('groundRescheduleAgreement', () => {
     expect(at({ hour: 'two thirty' })).toMatchObject({ ok: false, reason: 'agreed_slot_words_mismatch' });
     expect(at({ day: 'Friday' })).toMatchObject({ ok: false, reason: 'agreed_slot_words_mismatch' });
     expect(at({ period: 'in the morning' })).toMatchObject({ ok: false, reason: 'agreed_slot_words_mismatch' });
-    // Nobody said which half of the day: not an agreed time.
-    expect(at({ period: null })).toMatchObject({ ok: false, reason: 'agreed_slot_words_mismatch' });
+    // No period recorded while the quote does say one: the recorded words
+    // do not match what was said.
+    expect(at({ period: null })).toMatchObject({ ok: false, reason: 'agreed_slot_ungrounded' });
     expect(at({ period: 'morning or afternoon' })).toMatchObject({ ok: false, reason: 'agreed_slot_words_mismatch' });
     // The same words for the slot they do state.
     expect(agreedAt('2026-09-24T10:00:00-04:00', 'We will see you Thursday at 10 AM.', { day: 'Thursday', hour: '10', period: 'AM' }).ok).toBe(true);
@@ -254,6 +255,21 @@ describe('groundRescheduleAgreement', () => {
     expect(jan31('the 30th', '2027-02-28T14:00:00-05:00').ok).toBe(false);
     // Codex #5092 r10: "February 29" waits for the next leap year.
     expect(jan31('February 29th', '2028-02-29T14:00:00-05:00').ok).toBe(true);
+  });
+
+  // Owner decision 2026-09-28: a reschedule's hour said with no AM/PM reads
+  // as business hours (7-11 morning, 12 and 1-6 afternoon).
+  test('an hour said without AM/PM reads as business hours', () => {
+    const plain = (slot, text, hour) => agreedAt(slot, text, { day: 'Thursday', hour, period: null });
+    expect(plain(THURSDAY_2PM, 'We will move it to Thursday, 2 to 4.', '2').ok).toBe(true);
+    expect(plain('2026-09-24T02:00:00-04:00', 'We will move it to Thursday, 2 to 4.', '2')).toMatchObject({ ok: false, reason: 'agreed_slot_words_mismatch' });
+    expect(plain('2026-09-24T10:00:00-04:00', 'We will see you Thursday at ten.', 'ten').ok).toBe(true);
+    expect(plain('2026-09-24T12:00:00-04:00', 'We will see you Thursday at twelve.', 'twelve').ok).toBe(true);
+    // Outside business hours an unstated hour states nothing.
+    expect(plain('2026-09-24T20:00:00-04:00', 'We will see you Thursday at eight.', 'eight')).toMatchObject({ ok: false, reason: 'agreed_slot_words_mismatch' });
+    expect(plain('2026-09-24T08:00:00-04:00', 'We will see you Thursday at eight.', 'eight').ok).toBe(true);
+    // A period said in the quote but not recorded never falls back.
+    expect(plain(THURSDAY_2PM, 'We will see you Thursday at two in the morning.', 'two')).toMatchObject({ ok: false, reason: 'agreed_slot_ungrounded' });
   });
 
   test('a weekday beside an explicit date describes that date', () => {
