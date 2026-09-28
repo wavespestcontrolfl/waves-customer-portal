@@ -111,6 +111,10 @@ async function renderedSourceStage(ctx) {
   const rendered = await this._validateRenderedSourceAnchor(ctx.task, ctx.validation);
   if (rendered.ok) return null;
   const failed = rendered.status === 'failed';
+  // A live fetch that failed for any reason other than the page being gone
+  // (404/410) — network error, 5xx, CDN blip — is retried next sweep, never
+  // persisted as a terminal failure.
+  if (failed && !/live_http_(404|410)\b/.test(String(rendered.reason || ''))) return { retry: true };
   return {
     persist: {
       ...ctx.validation,

@@ -1184,6 +1184,22 @@ describe('internal-link PR batch guards', () => {
     expect(instance._reserveTasksForPr).toHaveBeenCalledWith([expect.objectContaining({ task: expect.objectContaining({ id: 'good' }) })], expect.any(Object));
   });
 
+  test('a transient live-page fetch failure is retried; a 404 is terminal', async () => {
+    const instance = new InternalLinkPrExecutor();
+    instance._loadPatchCandidateTasks = jest.fn(async () => [
+      { id: 't1', source_file: 'src/content/blog/termite-swarmers-bathroom.md', target_url: '/termite-inspection/', anchor_text: 'termite inspection in Florida' },
+    ]);
+    instance._loadSourcePage = jest.fn(async () => ({ ...page('src/content/blog/termite-swarmers-bathroom.md', sourceBody), sha: 's' }));
+    instance._loadTargetPage = jest.fn(async () => page('src/content/services/termite-inspection.md', targetBody));
+    instance._persistDryRunResult = jest.fn();
+    instance._validateRenderedSourceAnchor = jest.fn(async () => ({ ok: false, status: 'failed', reason: 'source_rendered_fetch_failed:live_http_503' }));
+    await instance.runPrBatch({ limit: 1 });
+    expect(instance._persistDryRunResult).not.toHaveBeenCalled();
+    instance._validateRenderedSourceAnchor = jest.fn(async () => ({ ok: false, status: 'failed', reason: 'source_rendered_fetch_failed:live_http_404' }));
+    await instance.runPrBatch({ limit: 1 });
+    expect(instance._persistDryRunResult).toHaveBeenCalledWith('t1', expect.objectContaining({ status: 'failed' }));
+  });
+
   test('a transient GitHub failure leaves the candidate untouched for the next sweep', async () => {
     const instance = new InternalLinkPrExecutor();
     instance._loadPatchCandidateTasks = jest.fn(async () => [

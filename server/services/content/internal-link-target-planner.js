@@ -35,7 +35,7 @@ function enabled() {
 }
 
 // Hub pages averaging position 8–20 (impression-weighted) over 28 days.
-async function strikingDistancePages({ limit, minImpressions }) {
+async function strikingDistancePages({ limit, minImpressions, offset = 0 }) {
   const rows = await db('gsc_pages')
     .where('date', '>=', db.raw("now() - interval '28 days'"))
     .where('page_url', 'like', `${HUB_ORIGIN}%`)
@@ -43,8 +43,9 @@ async function strikingDistancePages({ limit, minImpressions }) {
     .groupBy('page_url')
     .havingRaw('sum(impressions) >= ?', [minImpressions])
     .havingRaw('sum(position * impressions) / nullif(sum(impressions), 0) between 8 and 20')
-    .orderByRaw('sum(impressions) desc')
+    .orderByRaw('sum(impressions) desc, page_url')
     .limit(limit)
+    .offset(offset)
     .select('page_url', db.raw('sum(impressions)::int as impressions'),
       db.raw('sum(position * impressions) / nullif(sum(impressions), 0) as position'));
   return rows.map((r) => ({ url: r.page_url, impressions: Number(r.impressions) || 0, position: Number(r.position) || null }));
@@ -85,26 +86,30 @@ async function planGscTargets({
   minImpressions = envInt('AUTONOMOUS_INTERNAL_LINK_GSC_MIN_IMPRESSIONS', 100),
 } = {}) {
   if (!enabled()) return { status: 'disabled' };
-  // Over-fetch: Search Console keeps impressions for deleted/renamed URLs,
-  // so the cap applies AFTER dropping pages no longer in the corpus.
-  const pages = await strikingDistancePages({ limit: limit * 3, minImpressions });
-  if (!pages.length) return { status: 'no_targets', targets: 0, queued: 0, candidates: 0 };
+  // Search Console keeps impressions for deleted/renamed URLs, so pages
+  // are fetched in batches and the cap applies AFTER dropping pages no
+  // longer in the corpus — fetching continues until the cap is filled or
+  // the qualifying rows run out.
   const corpus = await loadCorpus();
-  if (!corpus.length) return { status: 'no_corpus', targets: pages.length, queued: 0, candidates: 0 };
+  if (!corpus.length) return { status: 'no_corpus', targets: 0, queued: 0, candidates: 0 };
+  const batchSize = Math.max(limit * 3, 30);
+  const pages = [];
+  for (let offset = 0; ; offset += batchSize) {
+    const batch = await strikingDistancePages({ limit: batchSize, minImpressions, offset });
+    for (const page of batch) {
+      if (targetFacts(page.url, corpus)) pages.push(page);
+      if (pages.length >= limit) break;
+    }
+    if (pages.length >= limit || batch.length < batchSize) break;
+  }
+  if (!pages.length) return { status: 'no_targets', targets: 0, queued: 0, candidates: 0 };
 
   const { queueInternalLinkTaskForDryRun } = require('./autonomous-runner')._internals;
   const excludeSource = await require('./protected-pages').protectedSourcePredicate({ db });
   const taskIds = [];
   const summary = [];
-  let planned = 0;
   for (const page of pages) {
-    if (planned >= limit) break;
     const target = targetFacts(page.url, corpus);
-    if (!target) {
-      summary.push({ url: page.url, queued: 0, reason: 'not_in_corpus' });
-      continue;
-    }
-    planned += 1;
     const tasks = planner.planForTarget(target, { corpus, excludeSource });
     const ids = [];
     for (const task of tasks) {
@@ -124,8 +129,8 @@ async function planGscTargets({
     const dryRun = await executor.runDryRun({ taskIds, limit: taskIds.length });
     candidates = (dryRun?.results || []).filter((r) => r.status === 'patch_candidate').length;
   }
-  logger.info(`[internal-link-target-planner] ${planned} GSC target(s): queued=${taskIds.length} candidates=${candidates}`);
-  return { status: 'ok', targets: planned, queued: taskIds.length, candidates, summary };
+  logger.info(`[internal-link-target-planner] ${pages.length} GSC target(s): queued=${taskIds.length} candidates=${candidates}`);
+  return { status: 'ok', targets: pages.length, queued: taskIds.length, candidates, summary };
 }
 
 module.exports = { planGscTargets, strikingDistancePages, targetFacts };

@@ -182,8 +182,10 @@ async function autoPopulate({ db, impressionThreshold = DEFAULT_IMPRESSION_THRES
 /**
  * protectedSourcePredicate({ db }) → (url) => boolean, for sync callers that
  * must screen many URLs at once (the internal-link planner's corpus scan).
- * Pattern layer + one registry read. Fails CLOSED like isProtected: if the
- * registry can't be read, every URL counts as protected.
+ * Pattern layer + one registry read. An unreadable registry THROWS
+ * (code PROTECTED_REGISTRY_UNAVAILABLE) instead of returning a predicate:
+ * nothing is planned (fail closed) AND the caller sees an outage it can
+ * retry, rather than a silent "no candidates" verdict.
  */
 async function protectedSourcePredicate({ db } = {}) {
   let registry = new Set();
@@ -192,8 +194,10 @@ async function protectedSourcePredicate({ db } = {}) {
       const rows = await db('protected_pages').select('page_url');
       registry = new Set(rows.map((r) => normalizePath(r.page_url)));
     } catch (err) {
-      logger.warn(`[protected-pages] registry list failed: ${err.message} — treating every source as protected`);
-      return () => true;
+      logger.warn(`[protected-pages] registry list failed: ${err.message}`);
+      const unavailable = new Error(`protected_registry_unavailable:${err.message}`);
+      unavailable.code = 'PROTECTED_REGISTRY_UNAVAILABLE';
+      throw unavailable;
     }
   }
   return (url) => isProtectedByPattern(url).protected || registry.has(normalizePath(url));

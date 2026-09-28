@@ -10,8 +10,7 @@ test('screens money-page patterns and registry rows in one read', async () => {
   expect(db).toHaveBeenCalledTimes(1);
 });
 
-test('fails closed: an unreadable registry protects every source', async () => {
+test('an unreadable registry throws a retryable outage instead of a predicate', async () => {
   const db = jest.fn(() => ({ select: jest.fn(async () => { throw new Error('db down'); }) }));
-  const isProtected = await protectedSourcePredicate({ db });
-  expect(isProtected('/garden-pests/')).toBe(true);
+  await expect(protectedSourcePredicate({ db })).rejects.toMatchObject({ code: 'PROTECTED_REGISTRY_UNAVAILABLE' });
 });
