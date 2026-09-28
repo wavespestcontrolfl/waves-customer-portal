@@ -1753,7 +1753,10 @@ function initScheduledJobs() {
   // same 5-minute cadence as reschedule-link-promises: stages newly-extracted
   // calls and dispatches whatever 2-hour/8am-ET delay has elapsed.
   cron.schedule('0 */5 * * * *', async () => {
-    if (!isEnabled('callBookingLinkText')) return;
+    // codex round-3 P2: no top-level gate return here — sweep() itself
+    // still runs (and still gates staging/dispatch internally) with the
+    // gate off, because it also owns the manual-send consultation-link
+    // attempt row housekeeping, which must not depend on this gate.
     try {
       const { runExclusive } = require('../utils/cron-lock');
       const result = await runExclusive('call-booking-link-text', () => callBookingLinkText.sweep());

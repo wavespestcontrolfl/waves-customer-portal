@@ -171,6 +171,14 @@ this skill.
   within existing budgets or skip with a recorded reason. Do not add a
   portal approval queue or email-reply hold to this blog lane. Product
   eligibility, facts, content checks, publish caps, and kill switches remain.
+- Named competitors (owner rulings 2026-09-27 D2 + 2026-09-28): a blog
+  publishes unattended only when EVERY competitor it names is on
+  `OWNER_APPROVED_AUTOPUBLISH_IDS` in `competitor-facts.js` (Orkin, Terminix,
+  HomeTeam/TAEXX, Turner, Massey, TruGreen, Aptive, Truly Nolen — the last
+  two added 2026-09-28). Otherwise it skips as
+  `named_competitor_off_list`; naming anyone else needs a new owner ruling.
+  Kill switch: `GATE_NAMED_COMPETITOR_AUTOPUBLISH=false` (skips every
+  named-competitor blog as `named_competitor_disabled`).
 - The portal already has a full autonomous content engine
   (`server/services/content*` + seo services) — audit the gap first, never
   rebuild it. Competitor-intercept briefs run fully autonomous; the
