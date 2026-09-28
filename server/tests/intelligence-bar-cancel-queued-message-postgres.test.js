@@ -134,6 +134,28 @@ postgres('cancel_queued_message / list_queued_messages (real PostgreSQL)', () =>
     expect((await trx('sms_log').where({ id: workflowOwnedId }).first()).status).toBe('scheduled');
   });
 
+  // Claude fallback auditor P1 on #5224 (round 2): "Recruiting threads are
+  // answered from Recruiting only" — a recruiting-typed row with NO
+  // entry_point at all (so the deferred-replay terminal-hook check above
+  // never catches it) must still be excluded/refused, via the SAME
+  // message_type-keyed guard (excludeRecruitingSmsLog) every other sms_log
+  // reader in comms-tools.js already applies.
+  test('a recruiting-typed scheduled text (job_* message_type, no entry_point) is excluded from the list and refused in the preview', async () => {
+    const custId = await customer();
+    const recruitingId = await scheduledSms(custId, { message_type: 'job_application_received', metadata: {} });
+    const ordinaryId = await scheduledSms(custId);
+
+    const listed = await executeCommsTool('list_queued_messages', { customer_id: custId, channel: 'sms' });
+    expect(listed.messages.map((m) => m.message_id)).toEqual([ordinaryId]);
+
+    const refused = await executeCommsTool('cancel_queued_message', { message_id: recruitingId, customer_id: custId, channel: 'sms' });
+    expect(refused.proposal).not.toBe(true);
+    expect(refused.error).toBeTruthy();
+
+    // Completely untouched — not merely refused-but-mutated.
+    expect((await trx('sms_log').where({ id: recruitingId }).first()).status).toBe('scheduled');
+  });
+
   test.each([
     ['finalize_only', { finalize_only: true }],
     ['review_delivery_uncertain_exhausted', { review_delivery_uncertain_exhausted: true }],

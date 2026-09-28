@@ -67,7 +67,7 @@ test('an unconfirmed call never reaches either store\'s cancel function', async 
   // Row not found is enough to prove the preview path never commits —
   // real "found and eligible" preview behavior is proven end to end
   // against Postgres.
-  const builder = { where: () => builder, first: () => Promise.resolve(undefined) };
+  const builder = { where: () => builder, modify: () => builder, first: () => Promise.resolve(undefined) };
   db.mockImplementation(() => builder);
   const out = await executeCommsTool('cancel_queued_message', { message_id: MESSAGE_ID, customer_id: CUSTOMER_ID, channel: 'sms' });
   expect(out.error).toMatch(/could not be found/i);
@@ -80,7 +80,7 @@ test('confirmed:true with no pinned _verified_message_version refuses instead of
     id: MESSAGE_ID, customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled',
     to_phone: '+19415550100', message_type: 'manual', scheduled_for: new Date('2099-01-01T12:00:00Z'),
   };
-  const builder = { where: () => builder, first: () => Promise.resolve(row) };
+  const builder = { where: () => builder, modify: () => builder, first: () => Promise.resolve(row) };
   db.mockImplementation((table) => (table === 'customers' ? { where: () => ({ first: () => Promise.resolve(undefined) }) } : builder));
   const out = await executeCommsTool('cancel_queued_message', {
     message_id: MESSAGE_ID, customer_id: CUSTOMER_ID, channel: 'sms', confirmed: true,
@@ -95,14 +95,14 @@ test('a message resolved for a different customer refuses before it ever reaches
     id: MESSAGE_ID, customer_id: otherCustomer, direction: 'outbound', status: 'scheduled',
     to_phone: '+19415550100', message_type: 'manual', scheduled_for: new Date('2099-01-01T12:00:00Z'),
   };
-  const builder = { where: () => builder, first: () => Promise.resolve(row) };
+  const builder = { where: () => builder, modify: () => builder, first: () => Promise.resolve(row) };
   db.mockImplementation((table) => (table === 'customers' ? { where: () => ({ first: () => Promise.resolve({ first_name: 'Synthetic', last_name: 'Fixture' }) }) } : builder));
   const out = await executeCommsTool('cancel_queued_message', { message_id: MESSAGE_ID, customer_id: CUSTOMER_ID, channel: 'sms' });
   expect(out.error).toMatch(/does not belong to the named customer/i);
 });
 
 test('list_queued_messages refuses "customer not found" instead of an empty list for an unresolved customer', async () => {
-  const builder = { where: () => builder, first: () => Promise.resolve(undefined) };
+  const builder = { where: () => builder, modify: () => builder, first: () => Promise.resolve(undefined) };
   db.mockImplementation(() => builder);
   const out = await executeCommsTool('list_queued_messages', { customer_id: CUSTOMER_ID });
   expect(out.error).toMatch(/customer not found/i);
@@ -126,7 +126,7 @@ test('a workflow-owned sms_log row (entry_point with an onTerminal hook) is excl
 
   // list_queued_messages excludes it entirely.
   const listBuilder = {
-    where: () => listBuilder, orderBy: () => listBuilder, select: () => Promise.resolve([row]),
+    where: () => listBuilder, orderBy: () => listBuilder, modify: () => listBuilder, select: () => Promise.resolve([row]),
     first: () => Promise.resolve({ id: CUSTOMER_ID, first_name: 'Synthetic', last_name: 'Fixture' }),
   };
   db.mockImplementation((table) => (table === 'email_messages' ? { ...listBuilder, select: () => Promise.resolve([]) } : listBuilder));
@@ -134,7 +134,7 @@ test('a workflow-owned sms_log row (entry_point with an onTerminal hook) is excl
   expect(listed.messages).toEqual([]);
 
   // cancel_queued_message's preview refuses it by name, pointing at the inbox.
-  const previewBuilder = { where: () => previewBuilder, first: () => Promise.resolve(row) };
+  const previewBuilder = { where: () => previewBuilder, modify: () => previewBuilder, first: () => Promise.resolve(row) };
   db.mockImplementation((table) => (table === 'customers' ? { where: () => ({ first: () => Promise.resolve({ first_name: 'Synthetic', last_name: 'Fixture' }) }) } : previewBuilder));
   const out = await executeCommsTool('cancel_queued_message', { message_id: MESSAGE_ID, customer_id: CUSTOMER_ID, channel: 'sms' });
   expect(out.error).toMatch(/workflow/i);
@@ -153,12 +153,12 @@ const CUSTOMER_ROW = { id: CUSTOMER_ID, first_name: 'Synthetic', last_name: 'Fix
 // `.first()`; the row's OWN table answers `.select()` (list) or `.first()`
 // (preview) with `matchRows`; the OTHER message table answers empty.
 function makeMessageDbMock(matchTable, matchRows) {
-  const customersQ = { where: () => customersQ, first: () => Promise.resolve(CUSTOMER_ROW) };
+  const customersQ = { where: () => customersQ, modify: () => customersQ, first: () => Promise.resolve(CUSTOMER_ROW) };
   const matchQ = {
-    where: () => matchQ, orderBy: () => matchQ,
+    where: () => matchQ, orderBy: () => matchQ, modify: () => matchQ,
     select: () => Promise.resolve(matchRows), first: () => Promise.resolve(matchRows[0]),
   };
-  const emptyQ = { where: () => emptyQ, orderBy: () => emptyQ, select: () => Promise.resolve([]), first: () => Promise.resolve(undefined) };
+  const emptyQ = { where: () => emptyQ, orderBy: () => emptyQ, modify: () => emptyQ, select: () => Promise.resolve([]), first: () => Promise.resolve(undefined) };
   return (table) => (table === 'customers' ? customersQ : table === matchTable ? matchQ : emptyQ);
 }
 
@@ -210,7 +210,7 @@ test('the SMS commit calls the shared cancel workflow with the pinned scheduled_
     id: MESSAGE_ID, customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled',
     to_phone: '+19415550100', message_type: 'manual', scheduled_for: scheduledFor,
   };
-  const builder = { where: () => builder, first: () => Promise.resolve(row) };
+  const builder = { where: () => builder, modify: () => builder, first: () => Promise.resolve(row) };
   db.mockImplementation((table) => (table === 'customers' ? { where: () => ({ first: () => Promise.resolve({ first_name: 'Synthetic', last_name: 'Fixture' }) }) } : builder));
 
   const preview = await executeCommsTool('cancel_queued_message', { message_id: MESSAGE_ID, customer_id: CUSTOMER_ID, channel: 'sms' });

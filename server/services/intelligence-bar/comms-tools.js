@@ -468,10 +468,19 @@ const CHANNEL_STORE = {
     // commit refuses a message that started sending or was rescheduled.
     version: (row, scheduledIso) => ({ scheduled_for: scheduledIso }),
     ineligibilityReason: smsIneligibilityReason,
+    // "Recruiting threads are answered from Recruiting only" — the same
+    // guard every other sms_log reader in this file applies. The
+    // deferred-replay entry_point check above only catches ONE recruiting
+    // path (recruiting_comms_deferred); this is the general, message_type-
+    // keyed backstop for any recruiting send this tool must never surface,
+    // list, or cancel regardless of how it was queued (Claude fallback
+    // auditor P1 on #5224, round 2).
+    modify: (q) => q.modify((qb) => excludeRecruitingSmsLog(qb)),
   },
   email: {
     table: 'email_messages',
     baseWhere: {},
+    modify: (q) => q,
     liveStatus: 'queued',
     sentStatuses: ['sent', 'delivered', 'opened', 'clicked'],
     alreadySentError: 'This email has already been sent — it cannot be recalled.',
@@ -503,7 +512,7 @@ const CHANNEL_STORE = {
 async function queuedMessagePreview(conn, messageId, channel, { forUpdate = false } = {}) {
   const store = CHANNEL_STORE[channel];
   if (!store) throw new Error('channel must be "email" or "sms".');
-  let q = conn(store.table).where({ id: messageId, ...store.baseWhere });
+  let q = store.modify(conn(store.table).where({ id: messageId, ...store.baseWhere }));
   if (forUpdate) q = q.forUpdate();
   const row = await q.first();
   if (!row) throw new Error('That message could not be found.');
@@ -538,6 +547,7 @@ async function listQueuedMessages(input) {
   if (!channelFilter || channelFilter === 'sms') {
     const rows = await db('sms_log')
       .where({ customer_id: customer.id, direction: 'outbound', status: 'scheduled' })
+      .modify((qb) => excludeRecruitingSmsLog(qb))
       .orderBy('scheduled_for', 'asc')
       .select('id', 'to_phone', 'message_type', 'scheduled_for', 'metadata');
     for (const row of rows) {
