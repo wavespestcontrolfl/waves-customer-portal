@@ -78,13 +78,23 @@ function cacheSet(key, value) {
 // Keyed by what the card SHOWS, never by token: a moved or cancelled
 // appointment resolves new content and so renders a new image, and two links
 // with the same words share one render.
+// Identical misses that arrive while a render is running share it, so a
+// burst of crawlers on a freshly shared link renders the card once.
+const inFlight = new Map();
+
 async function renderCached(content) {
   const cacheKey = JSON.stringify([content.eyebrow, content.headline, content.subline]);
   const cached = cacheGet(cacheKey);
   if (cached) return cached;
-  const buffer = await renderLinkPreviewJpeg(content);
-  cacheSet(cacheKey, buffer);
-  return buffer;
+  if (inFlight.has(cacheKey)) return inFlight.get(cacheKey);
+  const pending = renderLinkPreviewJpeg(content)
+    .then((buffer) => {
+      cacheSet(cacheKey, buffer);
+      return buffer;
+    })
+    .finally(() => inFlight.delete(cacheKey));
+  inFlight.set(cacheKey, pending);
+  return pending;
 }
 
 function sendJpeg(res, buffer) {
@@ -144,4 +154,4 @@ router.get('/:kind/:tokenFile', async (req, res) => {
 });
 
 module.exports = router;
-module.exports._internals = { cache, DEFAULT_CONTENT };
+module.exports._internals = { cache, inFlight, DEFAULT_CONTENT };

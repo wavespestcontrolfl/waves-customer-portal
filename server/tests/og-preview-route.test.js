@@ -87,3 +87,21 @@ test('token-free cards are public and cacheable; an unknown name gets the defaul
   expect(resolveCardContent).not.toHaveBeenCalled();
   expect(renderLinkPreviewJpeg).toHaveBeenCalled();
 }));
+
+test('a burst of identical first requests renders the card once', async () => withServer(async (base) => {
+  renderLinkPreviewJpeg.mockClear();
+  const results = await Promise.all(Array.from({ length: 8 }, () => get(base, '/og/pay.jpg')));
+  expect(new Set(results.map((r) => r.body)).size).toBe(1);
+  expect(renderLinkPreviewJpeg).toHaveBeenCalledTimes(1);
+  expect(router._internals.inFlight.size).toBe(0);
+}));
+
+test('a failed render is not cached and the next request tries again', async () => withServer(async (base) => {
+  renderLinkPreviewJpeg.mockClear();
+  renderLinkPreviewJpeg.mockRejectedValueOnce(Object.assign(new Error('boom'), { code: 'EBOOM' }));
+  const first = await get(base, '/og/pay.jpg');
+  expect(first.status).toBe(200); // falls back to the default card
+  const second = await get(base, '/og/pay.jpg');
+  expect(second.body).toContain('Your invoice');
+  expect(router._internals.inFlight.size).toBe(0);
+}));
