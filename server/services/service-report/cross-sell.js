@@ -1018,6 +1018,14 @@ async function buildReportCrossSell(service, database, {
     // connection succeeded milliseconds earlier.
     const ladderEvidence = [...ownedKeys, ...reportFamilies];
 
+    // Owner ruling 2026-09-28: a customer who owns all three pillars gets NO
+    // card at all — before the V2 layer below, which would otherwise still
+    // pitch a season/findings target to them (pre-push P1 on this change).
+    {
+      const pillars = offerVocabulary(ladderEvidence);
+      if (pillars.has('pest_control') && pillars.has('lawn_care') && pillars.has('tree_shrub')) return null;
+    }
+
     // GATE_REPORT_CROSS_SELL_V2 (owner-approved 2026-09-27): findings- and
     // season-aware priority, layered on the ladder above. Read directly at
     // call time (see the block's own header comment). `null` (gate off, or

@@ -813,3 +813,38 @@ describe('render/click parity for a findings-driven offer (service_data must rid
     expect(control.serviceKey).toBe('cockroach_control');
   });
 });
+
+// Owner ruling 2026-09-28 (pre-push P1 on the three-pillars change): owning
+// all three pillars means NO card, even with the V2 layer on and a V2
+// signal live — V2 must never pitch mosquito/rodent to a fully-covered
+// customer.
+describe('all three pillars owned → no card, even with GATE_REPORT_CROSS_SELL_V2 on', () => {
+  test('June (mosquito season) + pest, lawn, tree & shrub owned → null', async () => {
+    process.env.GATE_REPORT_CROSS_SELL_V2 = 'true';
+    etDateString.mockReturnValue('2026-06-15');
+    const result = await buildReportCrossSell(
+      SERVICE(),
+      dbFor({
+        serviceTypes: ['Pest Control', 'Lawn Care', 'Tree & Shrub Care'],
+        turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
+      }),
+      { propertyLookup: missLookup },
+    );
+    expect(result).toBeNull();
+  });
+
+  test('a rodent finding on a fully-covered customer → null too', async () => {
+    process.env.GATE_REPORT_CROSS_SELL_V2 = 'true';
+    etDateString.mockReturnValue('2026-11-01');
+    const service = { ...SERVICE(), ...withTypedSnapshot({ primary: { type: 'rodent_trapping', values: { captures: 3 } } }) };
+    const result = await buildReportCrossSell(
+      service,
+      dbFor({
+        serviceTypes: ['Pest Control', 'Lawn Care', 'Tree & Shrub Care'],
+        turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
+      }),
+      { propertyLookup: missLookup },
+    );
+    expect(result).toBeNull();
+  });
+});
