@@ -370,6 +370,16 @@ function saidExactly(quote, words, turns) {
   return holding.length > 0 && holding.every((t) => hourExactIn(t.raw, words));
 }
 
+// Days that may lead straight into an hour ("Tuesday, 2 to 4"). Never a
+// month: the "2" of "March 2" is the date, not a time.
+const HOUR_LEAD_DAYS = new Set([
+  'sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday',
+  'sun', 'mon', 'tue', 'tues', 'wed', 'thu', 'thur', 'thurs', 'fri', 'sat', 'today', 'tonight', 'tomorrow',
+]);
+// Once the exact hour is said, the rest of the turn may not correct it or
+// offer another: "at two, actually three", "at two, or four".
+const AFTER_HOUR_REJECTS = new Set(['or', 'actually', 'instead', 'rather']);
+
 function hourExactIn(text, words) {
   // Tokens keeping clause punctuation, so "at two, a tech will call" ends
   // the hour at the comma.
@@ -379,11 +389,13 @@ function hourExactIn(text, words) {
     const prev = toks[ha - 1];
     const hb = toks[end] === '00' ? end + 1 : end; // "2:00" is exact; what follows it decides
     const next = toks[hb];
-    const lead = EXACT_LEADS.has(prev) || DAY_WORDS.has(prev) || (prev === ',' && DAY_WORDS.has(toks[ha - 2]));
+    const lead = EXACT_LEADS.has(prev) || HOUR_LEAD_DAYS.has(prev) || (prev === ',' && HOUR_LEAD_DAYS.has(toks[ha - 2]));
     const rangeEnd = (next === 'to' || next === 'through' || (next === 'and' && prev === 'between'))
       && (hourNumber(toks[hb + 1]) != null || /^(?:noon|midnight)$/.test(toks[hb + 1] || ''));
-    const tail = next === undefined || next === ',' || EXACT_TAILS.has(next) || DAY_WORDS.has(next) || rangeEnd;
-    return lead && tail && (prev !== 'between' || rangeEnd);
+    const tail = next === undefined || next === ',' || EXACT_TAILS.has(next) || HOUR_LEAD_DAYS.has(next) || rangeEnd;
+    const rest = toks.slice(rangeEnd ? hb + 2 : hb);
+    const clean = !rest.some((t) => AFTER_HOUR_REJECTS.has(t) || /^\d+$/.test(t) || hourNumber(t) != null || t === 'noon' || t === 'midnight');
+    return lead && tail && clean && (prev !== 'between' || rangeEnd);
   });
 }
 

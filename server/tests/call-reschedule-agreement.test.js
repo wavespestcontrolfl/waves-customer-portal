@@ -307,6 +307,12 @@ describe('groundRescheduleAgreement', () => {
     }
     expect(plain(THURSDAY_2PM, 'We will move it to Thursday between two and four.', 'two').ok).toBe(true);
     expect(plain(THURSDAY_2PM, 'We will move it to Thursday at 2:00.', '2').ok).toBe(true);
+    // Codex #5163 r5: nothing after the hour may correct it or offer another,
+    // and a month's day number is never the hour.
+    for (const said of ['We will move it to Thursday at two, actually three.', 'We will move it to Thursday at two, or four.', 'We will move it to Thursday at two sharp or four.']) {
+      expect([said, plain(THURSDAY_2PM, said, 'two').ok]).toEqual([said, false]);
+    }
+    expect(agreedAt('2027-03-02T14:00:00-05:00', 'We will move it to March 2.', { day: 'March 2', hour: '2', period: null }).ok).toBe(false);
     expect(plain(THURSDAY_2PM, 'We will move it to Thursday at 2:00 or 4:00.', '2').ok).toBe(false);
     // A quote cut short before a qualifier is judged by its whole turn.
     expect(ground(v2({
