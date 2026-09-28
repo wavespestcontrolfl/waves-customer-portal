@@ -274,6 +274,25 @@ export const TEXT_LINK   = { ...BTN_BASE, ...BUTTON_TERTIARY };
 // 6. TYPOGRAPHY PATTERNS — reusable style objects for section rhythm
 // =============================================================================
 
+// Compact customer-portal section label. Pair with data-glass="chip" so the
+// shared glass engine supplies translucency while this token keeps label
+// spacing and type consistent across portal sections.
+export const CUSTOMER_SECTION_LABEL = {
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: 8,
+  padding: '6px 10px',
+  borderRadius: 8,
+  background: 'rgba(248, 252, 254, 0.72)',
+  border: '1px solid #CFE7F5',
+  color: COLORS.glassNavy,
+  fontFamily: FONTS.body,
+  fontSize: 14,
+  fontWeight: 700,
+  marginLeft: -10,
+  position: 'relative',
+};
+
 // Section H2 on white bg — matches Astro pattern: font-heading text-3xl md:text-5xl font-bold text-brand-blueDeeper leading-tight
 export const SECTION_HEADING = {
   fontFamily: FONTS.display,

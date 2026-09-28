@@ -75,6 +75,9 @@ import {
   pestDefaultMixSelections,
 } from "../../lib/pest-default-mix";
 import {
+  protocolCompletionDefaultSelections,
+} from "../../lib/protocol-completion-defaults";
+import {
   exclusiveProtocolProductConflict,
   exclusiveProtocolSelectionConflict,
   reconcileDependentFindingSelections,
@@ -131,6 +134,7 @@ import {
 import ServiceScore from "../../components/payGrowth/ServiceScore";
 import { request as payGrowthRequest } from "../../components/payGrowth/common";
 import usePayGrowthAvailable from "../../hooks/usePayGrowthAvailable";
+import { shouldResetCompletionIdempotencyKey } from "../../lib/completion-idempotency";
 // Round 14 P2 (:2494): sentinel <option> value for the row's own stored appointment discount.
 const STORED_APPOINTMENT_DISCOUNT_OPTION = "__stored_appointment_discount";
 const { TERMITE_PERIMETER_METHODS } = termiteTreatmentMethods;
@@ -897,12 +901,6 @@ export function createCompletionIdempotencyKey(serviceId) {
   return `complete_${serviceId}_${randomPart}`;
 }
 
-export function shouldResetCompletionIdempotencyKey(error) {
-  const status = Number(error?.status);
-  if (!Number.isFinite(status) || status < 400 || status >= 500) return false;
-  if (status !== 409) return true;
-  return ["lawn_assessment_stale", "completion_pricing_changed"].includes(error?.code);
-}
 
 // completion_side_effects_running means the completion COMMITTED (the claim
 // only returns it for an attempt that already has a service_record) and the
@@ -9520,6 +9518,22 @@ export function typedFieldLabel(schemaType, field, values = {}) {
 // chips + optional AI-drafted recommendations. Shared by the mobile and
 // desktop renders of CompletionPanel — `variant` only switches the
 // palette/label chrome between the CP mobile tokens and the D palette.
+// Draft-restore rule for a typed activity score. A derive-mapped indicator
+// has no gauge to pin any more (owner ruling 2026-09-26), so a pin saved by
+// an older draft is dropped and the score follows the restored findings —
+// otherwise it would keep steering validation and the AI payload from a
+// picker the tech can't see. Tech-set-only indicators keep their saved pin.
+export function restoredActivityScoreState(activity, values, savedScore, savedTouched) {
+  if (activity?.deriveField) {
+    const derived = activity.deriveScores?.[String((values || {})[activity.deriveField])];
+    return { score: derived == null ? null : derived, touched: false };
+  }
+  return {
+    score: Number.isInteger(savedScore) ? savedScore : null,
+    touched: !!savedTouched,
+  };
+}
+
 export function TypedFindingsSection({
   variant,
   schema,
@@ -9662,7 +9676,15 @@ export function TypedFindingsSection({
           {detailFields.map(renderField)}
         </details>
       )}
-      {schema.activity && (
+      {/* Owner ruling 2026-09-26: the gauge is redundant with the typed
+          findings field for every indicator with a derive mapping (e.g.
+          cockroach's Activity level) — it only ever showed the same value
+          back, asking the tech to re-confirm it. Hidden here; the score
+          still auto-recomputes from deriveScores[values[deriveField]] via
+          onFieldChange (contract §4) and completion derives it server-side
+          when the tech never touches the removed picker. Tech-set-only
+          indicators (no derive field) keep the gauge unchanged. */}
+      {schema.activity && !schema.activity.deriveField && (
         <div style={{ marginBottom: 12 }}>
           <div style={fieldLabelStyle}>
             {schema.activity.label}
@@ -13576,27 +13598,49 @@ export function CompletionPanel({
       ));
     }
   }, [areasTreatedHidden, areasServiced, selectedProducts, typedTreatmentArea?.key]);
-  // Default pest tank mix (owner 2026-08-29): recurring general-pest and
-  // pest re-service completions open with Taurus SC + Talstar P + the
-  // non-ionic surfactant already on the Products list, totals prefilled
+  // Default pest tank mix (owner ruling 2026-09-26, supersedes 2026-08-29):
+  // recurring general-pest, one-time pest, and pest re-service completions
+  // open with Taurus SC + Atticus Talak 7.9 F + the LESCO 90/10 Nonionic
+  // Surfactant already on the Products list, totals prefilled
   // (4 oz / 4 oz / 0.25 oz, marked manual so a rate/area edit can't
   // recompute them). Seeds ONCE per panel open, only into an empty list —
   // a restored draft or a hand-built list is never touched, and a default
   // the tech removes is not re-added. The snapshot lets the draft autosave
   // ignore the untouched seed (merely opening the panel must not mint a
-  // restore-prompt draft).
+  // restore-prompt draft). "Completed" only, and each row is flagged
+  // pestDefaultMixProduct (Codex r3 P1, PR #5049) — picking inspection_only
+  // / customer_declined after this seeds must not leave Taurus/Talak/LESCO
+  // selected: the outcome-driven clearing effect below removes rows this
+  // flag names and re-arms the seed for a return to "completed", exactly
+  // like protocolDefaultProduct's own clearing.
+  // A DELIBERATE per-row removal of a seeded default — the protocol seed
+  // AND the pest tank mix (via removeProduct, below) — mirrors lawnRemovedDefaultIds exactly (pre-push audit P1, PR
+  // #5049 r2): without this, removing every seeded row empties
+  // selectedProducts, hasDraftContent goes false, no draft saves, and the
+  // next open silently re-seeds what the tech took off. Ids only (no
+  // names map) — nothing here renders a "skipped" summary the way lawn's
+  // does. Never touched by the non-performed-outcome clear below — that
+  // removal is OUTCOME-driven, not the tech's own, and must stay eligible
+  // to reseed.
+  // Declared ahead of both seed effects: each reads it (pre-push audit on
+  // #5049 r3 — a pest-mix row the tech removed must not come back when the
+  // outcome goes declined → completed).
+  const [protocolCompletionDefaultsRemovedIds, setProtocolCompletionDefaultsRemovedIds] = useState([]);
   const pestDefaultMixSeededRef = useRef(false);
   const pestDefaultMixSnapshotRef = useRef(null);
   useEffect(() => {
     if (pestDefaultMixSeededRef.current) return;
     if (isTypedFindings || isBedBugVisit || !isPestDefaultMixVisit(service)) return;
+    if (visitOutcome !== "completed") return;
     if (!Array.isArray(products) || products.length === 0) return;
     if (selectedProducts.length) {
       pestDefaultMixSeededRef.current = true;
       return;
     }
     pestDefaultMixSeededRef.current = true;
-    const rows = pestDefaultMixSelections(products).map(({ product, totalAmount }) => ({
+    const rows = pestDefaultMixSelections(products)
+      .filter(({ product }) => !protocolCompletionDefaultsRemovedIds.includes(String(product.id)))
+      .map(({ product, totalAmount }) => ({
       ...buildSelectedProduct(product),
       totalAmount,
       totalAmountManual: true,
@@ -13604,11 +13648,100 @@ export function CompletionPanel({
       // default — but it is a seed, not the tech's own number, so stating a
       // carrier volume replaces it (Codex r5 P1).
       totalAmountSeeded: true,
+      // Provenance flag (Codex r3 P1, PR #5049) — lets the non-performed-
+      // outcome clearing effect find and drop this row without touching a
+      // product the tech added or removed by hand.
+      pestDefaultMixProduct: true,
     }));
     if (!rows.length) return;
     pestDefaultMixSnapshotRef.current = JSON.stringify(rows);
     setSelectedProducts(rows);
-  }, [products, service, selectedProducts, isTypedFindings, isBedBugVisit]);
+  }, [products, service, selectedProducts, isTypedFindings, isBedBugVisit, visitOutcome, protocolCompletionDefaultsRemovedIds]);
+  // Server-curated protocol/default-products prefill (owner ruling
+  // 2026-09-26) for every non-lawn, non-pest program the server has a
+  // curated product list for — cockroach today (Alpine WSG + Gentrol IGR +
+  // Advion Cockroach Gel Bait), more as protocols.json grows
+  // completionDefaultProducts entries. Lawn and pest already seed
+  // themselves through their own mechanisms; lib/protocol-completion-
+  // defaults.js keeps this hook out of their way.
+  const [protocolCompletionDefaults, setProtocolCompletionDefaults] = useState(null);
+  useEffect(() => {
+    let cancelled = false;
+    setProtocolCompletionDefaults(null);
+    if (!service.id) return undefined;
+    adminFetch(`/admin/dispatch/${service.id}/default-products`)
+      .then((data) => { if (!cancelled) setProtocolCompletionDefaults(data); })
+      // Fail-soft on the client too: a failed lookup just means no prefill,
+      // never a blocked drawer.
+      .catch(() => { if (!cancelled) setProtocolCompletionDefaults(null); });
+    return () => { cancelled = true; };
+  }, [service.id]);
+  const protocolCompletionDefaultsSeededRef = useRef(false);
+  // Lets the draft autosave treat an untouched seed as starting state, not
+  // tech input — mirrors pestDefaultMixSnapshotRef / lawnDefaultMixSnapshotRef
+  // exactly (pre-push audit P2, PR #5049 r1): merely opening a cockroach
+  // completion must not mint a draft or a restore prompt on its own.
+  const protocolCompletionDefaultsSnapshotRef = useRef(null);
+  useEffect(() => {
+    if (protocolCompletionDefaultsSeededRef.current) return;
+    // NOT gated on isTypedFindings: the "Products Applied" section renders
+    // unconditionally in every completion lane, typed or not (it sits right
+    // after the typed findings/companion sections, never inside an
+    // isTypedFindings guard) — cockroach_control IS a typed visit
+    // (findingsType 'cockroach'), and it is the one program this hook is
+    // FOR today. bed bug stays excluded (it carries no
+    // completionDefaultProducts, so this is belt-and-suspenders, not load-
+    // bearing); lawn keeps its own governed mechanism.
+    if (isBedBugVisit || isLawn) return;
+    // "Completed" only — a declined or inspection-only visit applied no
+    // products, so it must not seed a Products list that implies it did.
+    if (visitOutcome !== "completed") return;
+    // No restored draft in flight: a draft carries its own rows/removals,
+    // and this must never race it into a double seed.
+    if (!draftReadyRef.current || draftLoading || showDraftPrompt) return;
+    if (!Array.isArray(products) || products.length === 0) return;
+    if (selectedProducts.length) {
+      protocolCompletionDefaultsSeededRef.current = true;
+      return;
+    }
+    const rows = protocolCompletionDefaultSelections(protocolCompletionDefaults, products, buildSelectedProduct)
+      // A row the tech already removed by hand never comes back, even
+      // into a freshly emptied list (a sibling's removal, or the outage
+      // clearing effect, both restart from empty).
+      .filter((row) => !protocolCompletionDefaultsRemovedIds.includes(String(row.productId)));
+    if (!rows.length) return;
+    protocolCompletionDefaultsSeededRef.current = true;
+    protocolCompletionDefaultsSnapshotRef.current = JSON.stringify(rows);
+    setSelectedProducts(rows);
+  }, [protocolCompletionDefaults, products, service, isBedBugVisit, isLawn, visitOutcome, selectedProducts, draftLoading, showDraftPrompt, protocolCompletionDefaultsRemovedIds]);
+  // Pre-push audit P1, PR #5049 r1 (cockroach/protocol rows) + Codex r3 P1
+  // (pest-mix rows): an inspection_only / customer_declined outcome bills
+  // as NOTHING applied (shared/specialty-service-closeouts.js's own
+  // NO_APPLICATION_OUTCOMES — the exact pair the submit-time
+  // noApplicationOutcomeConflict guard treats as "no application
+  // performed"). That guard never runs for cockroach OR general/one-time
+  // pest — it is scoped to specialty-service-closeouts.json's own service
+  // list (dethatching, plugging, mosquito, fire_ant, tick_control,
+  // bee/wasp/mud-dauber removal, bed bug), which neither is in — so a
+  // seeded default left on the form after switching to one of these
+  // outcomes would still submit real service_products rows, compliance
+  // records, and inventory deductions for a visit declared not performed.
+  // Rather than widen that server-side invariant to programs it was never
+  // scoped to, this effect polices only what the two client-side seeds
+  // themselves added: it drops rows flagged protocolDefaultProduct OR
+  // pestDefaultMixProduct (never a tech's own row) and clears both seeds'
+  // refs so either is eligible to run again if the outcome returns to
+  // "completed" with an empty list — a removal DRIVEN BY THE OUTCOME, not
+  // the tech's own deliberate deletion, which must never be re-added.
+  useEffect(() => {
+    if (visitOutcome !== "inspection_only" && visitOutcome !== "customer_declined") return;
+    if (!selectedProducts.some((p) => p.protocolDefaultProduct || p.pestDefaultMixProduct)) return;
+    setSelectedProducts((current) => current.filter((p) => !p.protocolDefaultProduct && !p.pestDefaultMixProduct));
+    protocolCompletionDefaultsSeededRef.current = false;
+    protocolCompletionDefaultsSnapshotRef.current = null;
+    pestDefaultMixSeededRef.current = false;
+    pestDefaultMixSnapshotRef.current = null;
+  }, [visitOutcome, selectedProducts]);
   const lawnDefaultMixSeededRef = useRef(false);
   const lawnDefaultMixSnapshotRef = useRef(null);
   useEffect(() => {
@@ -14643,7 +14776,8 @@ export function CompletionPanel({
       // drafts as before.
       ((selectedProducts.length > 0 || lawnDefaultMixSnapshotRef.current) &&
         JSON.stringify(selectedProducts) !== pestDefaultMixSnapshotRef.current &&
-        JSON.stringify(selectedProducts) !== lawnDefaultMixSnapshotRef.current) ||
+        JSON.stringify(selectedProducts) !== lawnDefaultMixSnapshotRef.current &&
+        JSON.stringify(selectedProducts) !== protocolCompletionDefaultsSnapshotRef.current) ||
       JSON.stringify(areasServiced) !== JSON.stringify(lawnDefaultAreas) ||
       // Governed state restored under a plan outage (no live defaults) is
       // still draft content: the next autosave must not drop it (Codex #4113 P2).
@@ -14654,6 +14788,7 @@ export function CompletionPanel({
       // batch 12, follow-up). Shared with the V2 page through CompletionPanel.
       (completionImprovements && isLawn && lawnAreaOverride !== undefined) ||
       lawnRemovedDefaultIds.length > 0 ||
+      protocolCompletionDefaultsRemovedIds.length > 0 ||
       customerInteraction ||
       customerConcern.trim() ||
       selectedProtocolActionLabels.length ||
@@ -14725,6 +14860,10 @@ export function CompletionPanel({
         notes,
         selectedProducts,
         lawnDefaultMixSnapshot: lawnDefaultMixSnapshotRef.current,
+        // Same round-trip as the lawn snapshot: an untouched protocol seed
+        // restored from a draft must still read as the baseline, not as
+        // tech-authored rows (pre-push audit on #5049).
+        protocolCompletionDefaultsSnapshot: protocolCompletionDefaultsSnapshotRef.current,
         lawnAreaOverride,
         // Persisted whenever removed defaults exist, not only while live
         // defaults are loaded: a draft restored during a plan outage would
@@ -14732,6 +14871,7 @@ export function CompletionPanel({
         // ledger's unlisted-skip audit with them (Codex #4113 P2).
         lawnRemovedDefaultIds: lawnDefaultsEnabled || lawnRemovedDefaultIds.length > 0 ? lawnRemovedDefaultIds : undefined,
         lawnRemovedDefaultNames: lawnDefaultsEnabled || lawnRemovedDefaultIds.length > 0 ? lawnRemovedDefaultNamesRef.current : undefined,
+        protocolCompletionDefaultsRemovedIds: protocolCompletionDefaultsRemovedIds.length > 0 ? protocolCompletionDefaultsRemovedIds : undefined,
         lawnDefaultsSeedSuppressed,
         sendSms,
         includePayLink,
@@ -14897,6 +15037,7 @@ export function CompletionPanel({
     completionImprovements,
     lawnAreaOverride,
     lawnRemovedDefaultIds,
+    protocolCompletionDefaultsRemovedIds,
     lawnDefaultsSeedSuppressed,
     stationNew,
     stationMoves,
@@ -14955,7 +15096,25 @@ export function CompletionPanel({
     );
     lawnAreasInitializedRef.current = true;
     lawnDefaultMixSeededRef.current = true;
+    // Pre-push audit P1: a draft that saved an EMPTY product list (the tech
+    // removed every prefilled default before the page closed) must not
+    // come back seeded — selectedProducts.length is falsy either way, so
+    // the seed effect's own "already has products" check can't tell "never
+    // ran" apart from "restored empty on purpose". Marking done HERE, once,
+    // regardless of how many products the draft actually carried, is the
+    // only signal that distinguishes them.
+    protocolCompletionDefaultsSeededRef.current = true;
+    // The tech's own deliberate removals ride with the draft (pre-push
+    // audit P1, PR #5049 r2) — restoring them keeps a removed default from
+    // silently coming back on a LATER reseed attempt (e.g. the outcome
+    // clearing effect resets the seeded ref, and this list is what keeps
+    // that reseed from re-adding what was already taken off by hand).
+    setProtocolCompletionDefaultsRemovedIds(Array.isArray(savedDraft.protocolCompletionDefaultsRemovedIds)
+      ? [...new Set(savedDraft.protocolCompletionDefaultsRemovedIds.map(String))] : []);
     if (savedDraft.lawnDefaultMixSnapshot) lawnDefaultMixSnapshotRef.current = savedDraft.lawnDefaultMixSnapshot;
+    if (savedDraft.protocolCompletionDefaultsSnapshot) {
+      protocolCompletionDefaultsSnapshotRef.current = savedDraft.protocolCompletionDefaultsSnapshot;
+    }
     setLawnAreaOverride(savedDraft.lawnAreaOverride);
     setLawnRemovedDefaultIds(Array.isArray(savedDraft.lawnRemovedDefaultIds) ? [...new Set(savedDraft.lawnRemovedDefaultIds.map(String))] : []);
     lawnRemovedDefaultNamesRef.current = savedDraft.lawnRemovedDefaultNames && typeof savedDraft.lawnRemovedDefaultNames === 'object' && !Array.isArray(savedDraft.lawnRemovedDefaultNames)
@@ -15233,12 +15392,18 @@ export function CompletionPanel({
       pruneRestoredFindingsValues(restoredFindings, typedFindingsSchema.fields, typedFindingsSchema.type);
       if (JSON.stringify(restoredFindings) !== prePruneFindings) restorePruned = true;
       setFindingsValues(restoredFindings);
-      setTypedActivityScore(
-        Number.isInteger(savedDraft.typedActivityScore)
-          ? savedDraft.typedActivityScore
-          : null,
+      const restoredActivity = restoredActivityScoreState(
+        typedFindingsSchema.activity,
+        restoredFindings,
+        savedDraft.typedActivityScore,
+        savedDraft.typedActivityTouched,
       );
-      setTypedActivityTouched(!!savedDraft.typedActivityTouched);
+      // A generated report built from a score this restore just replaced is
+      // stale — flag it like any other pruned input so it gets invalidated.
+      if ((Number.isInteger(savedDraft.typedActivityScore) ? savedDraft.typedActivityScore : null)
+        !== restoredActivity.score) restorePruned = true;
+      setTypedActivityScore(restoredActivity.score);
+      setTypedActivityTouched(restoredActivity.touched);
       const restoredChips = Array.isArray(savedDraft.typedNextStepChips)
         ? savedDraft.typedNextStepChips
         : [];
@@ -15313,8 +15478,15 @@ export function CompletionPanel({
             {
               values,
               chips,
-              score: Number.isInteger(saved.score) ? saved.score : null,
-              scoreTouched: !!saved.scoreTouched,
+              ...(() => {
+                const restored = restoredActivityScoreState(
+                  schema.activity, values, saved.score, saved.scoreTouched,
+                );
+                if ((Number.isInteger(saved.score) ? saved.score : null) !== restored.score) {
+                  restorePruned = true;
+                }
+                return { score: restored.score, scoreTouched: restored.touched };
+              })(),
             },
           ];
         }),
@@ -15781,7 +15953,9 @@ export function CompletionPanel({
             type: schema.type,
             values: entry.values,
             nextStepChips: entry.chips,
-            activityScore: Number.isInteger(entry.score) ? entry.score : null,
+            activityScore: Number.isInteger(entry.score) && !schema.activity?.deriveField
+              ? entry.score
+              : null,
           };
         }),
       }
@@ -16060,8 +16234,16 @@ export function CompletionPanel({
   }
   // One construction path for a selected-product row — the picker
   // (addProduct) and the default pest tank-mix seed build identical rows.
-  function buildSelectedProduct(product) {
-    const applicationMethod = defaultApplicationMethod(product, serviceTypeForArea, { interiorLane: isBedBugVisit });
+  function buildSelectedProduct(product, { applicationMethodOverride } = {}) {
+    // The protocol visit's own method for this line (e.g. Alpine WSG's
+    // crack-and-crevice work on the German-roach protocol) wins over the
+    // catalog-inferred default — Codex r2, PR #5049: Alpine WSG and
+    // Gentrol IGR carry no catalog application_method, so the inferred
+    // default falls to 'perimeter_spray' and wrongly demands linear
+    // footage for an interior placement. Passed in by the protocol
+    // completion-defaults seed only; every other caller is unaffected.
+    const applicationMethod = applicationMethodOverride
+      || defaultApplicationMethod(product, serviceTypeForArea, { interiorLane: isBedBugVisit });
     const areaRequirement = requiredApplicationArea(
       applicationMethod,
       serviceTypeForArea,
@@ -16231,6 +16413,15 @@ export function CompletionPanel({
       const removedName = selectedProducts.find((p) => p.productId === productId)?.name || (products || []).find((row) => String(row.id) === String(productId))?.name;
       if (removedName) lawnRemovedDefaultNamesRef.current = { ...lawnRemovedDefaultNamesRef.current, [String(productId)]: removedName };
       setLawnRemovedDefaultIds(ids => [...new Set([...ids, String(productId)])]);
+    }
+    // Same ledger, for the protocol-defaults seed (pre-push audit P1, PR
+    // #5049 r2) — a deliberate removal of a seeded default must survive
+    // the list going empty, or a later open re-seeds what the tech took
+    // off. Only THIS function (the tech's own tap) records one; the
+    // non-performed-outcome clearing effect deliberately does not.
+    const removedRow = selectedProducts.find((p) => p.productId === productId);
+    if (removedRow?.protocolDefaultProduct || removedRow?.pestDefaultMixProduct) {
+      setProtocolCompletionDefaultsRemovedIds((ids) => [...new Set([...ids, String(productId)])]);
     }
     invalidateGeneratedReportOnTypedEdit();
     setSelectedProducts((prev) =>
@@ -16859,11 +17050,16 @@ export function CompletionPanel({
           }
         }
       }
-      // Gauge types require a score on any completed-side outcome — the
-      // server 422s (activity_score_required) when findings are submitted
-      // without one and the derive field can't fill it.
+      // Tech-set-only gauge types (no derive field) still require a score
+      // on any completed-side outcome — the server 422s
+      // (activity_score_required) the same way. A derive-mapped type has
+      // no gauge to fill any more (owner ruling 2026-09-26): its score
+      // comes from the findings field alone, so a missing one is never a
+      // blocker here.
       const typedScoreMissing =
-        !!typedFindingsSchema.activity && typedActivityScore == null;
+        !!typedFindingsSchema.activity
+        && !typedFindingsSchema.activity.deriveField
+        && typedActivityScore == null;
       // Mirror the server's next_step_required 422 pre-submit so the tech
       // gets the same inline validation as other required fields.
       const nextStepMissing =
@@ -16979,7 +17175,11 @@ export function CompletionPanel({
             }
           }
         }
-        const companionScoreMissing = !!schema.activity && entry.score == null;
+        // Same derive-mapped exemption as the primary (owner ruling
+        // 2026-09-26): a companion gauge with a findings-derived score is
+        // never blocked here, only a tech-set-only one.
+        const companionScoreMissing =
+          !!schema.activity && !schema.activity.deriveField && entry.score == null;
         const companionNextStepMissing =
           !!schema.nextStepRequired && !entry.chips.length;
         if (
@@ -17495,7 +17695,11 @@ export function CompletionPanel({
           type: typedFindingsSchema.type,
           values: findingsValues,
         };
-        if (typedActivityScore != null) {
+        // A derive-mapped type has no gauge to pin any more (owner ruling
+        // 2026-09-26), so never submit a score the tech can't see — a
+        // pin restored from an older draft would otherwise ride along
+        // invisibly. The server derives it from the findings field.
+        if (typedActivityScore != null && !typedFindingsSchema.activity?.deriveField) {
           body.activityScore = typedActivityScore;
           body.activityScoreSource = typedActivityTouched
             ? "technician"
@@ -17544,7 +17748,7 @@ export function CompletionPanel({
             nextStepChips: entry.chips,
             // Same pin semantics as the primary: untouched-and-derived
             // submits as 'derived', any tap pins 'technician'.
-            ...(entry.score != null
+            ...(entry.score != null && !schema.activity?.deriveField
               ? {
                   activityScore: entry.score,
                   activityScoreSource: entry.scoreTouched

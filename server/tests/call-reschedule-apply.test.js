@@ -6,6 +6,12 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../routes/admin-dispatch', () => ({ applySeriesMoveEffects: jest.fn().mockResolvedValue({}) }));
 jest.mock('../services/appointment-reminders', () => ({ handleReschedule: jest.fn().mockResolvedValue({}) }));
 jest.mock('../services/dispatch-assignment', () => ({ emitDispatchJobUpdate: jest.fn().mockResolvedValue({}) }));
+// Pass-through by default; one selection test stubs it to reach a target
+// the strict evidence window cannot ground yet.
+jest.mock('../services/call-triage-flags', () => {
+  const actual = jest.requireActual('../services/call-triage-flags');
+  return { ...actual, hasAgentCommittedEvidence: jest.fn(actual.hasAgentCommittedEvidence) };
+});
 jest.mock('../config/feature-gates', () => {
   const actual = jest.requireActual('../config/feature-gates');
   return { ...actual, isEnabled: jest.fn((name) => name === 'callAgentCommitTrustedLabels' || actual.isEnabled(name)) };
@@ -74,6 +80,8 @@ const call = (overrides = {}) => ({
 // Each call carries only ITS OWN commitment (#4806 single-sentence rule: any
 // later non-acknowledgement sentence — such as a second, different
 // commitment bundled into one fixture transcript — ungrounds the first).
+// A same-day time change, as a real "9 is early, make it noon" call says it.
+const RETIME_TRANSCRIPT = `Agent: You are on September 24th at 9 AM.\nCaller: Can it be later?\nAgent: ${QUOTE}\nCaller: Thank you.`;
 const callFor = (startAt, overrides = {}) => call({ transcription: `Agent: ${quoteFor(startAt)}\nCaller: Thank you.`, ...overrides });
 const customer = (overrides = {}) => ({ id: CUSTOMER_ID, phone: PHONE, ...ADDRESS, ...overrides });
 const visit = (overrides = {}) => {
@@ -100,10 +108,115 @@ describe('planRescheduleFromCall', () => {
     expect(planRescheduleFromCall({ ...args, candidates: [visit(), ...args.candidates.slice(1)] })).toMatchObject({ action: 'apply', visitId: VISIT_ID });
   });
 
-  test('a coarse category or an ambiguous program name needs staff review', () => {
-    const args = { v2: v2({ service_request: { specific_service_name: null } }), call: call(), customer: customer(), now: NOW, candidates: [visit()] };
-    expect(planRescheduleFromCall(args).reason).toBe('service_needs_review');
-    expect(planRescheduleFromCall({ ...args, v2: v2(), candidates: [visit(), visit({ id: 'other-program', service_id: 'different-program', scheduled_date: '2026-12-01' })] }).reason).toBe('service_needs_review');
+  // Coarse categories cannot tell programs apart: a call that names no
+  // service stays in review, even when V2 is sure of the category and the
+  // property holds one visit.
+  test('a call that names no service stays in review', () => {
+    const noName = v2({ service_request: { specific_service_name: null, primary_service_category: 'pest_general' },
+      confidence: { primary_service_category: 0.99 } });
+    expect(planRescheduleFromCall({ v2: noName, call: call(), customer: customer(), now: NOW, candidates: [visit()] }).reason)
+      .toBe('service_needs_review');
+  });
+
+  // A named service that matches nothing is an explicit mismatch, never a
+  // fallback: the call asked about quarterly pest, so the property's only
+  // in-span visit (monthly mosquito) must not stand in for it.
+  test('an explicitly named service that matches nothing stays in review', () => {
+    const mosquito = visit({ id: 'mosquito-visit', service_id: 'mosquito-monthly', service_type: 'Monthly Mosquito Control Service' });
+    expect(planRescheduleFromCall({ v2: v2(), call: call(), customer: customer(), now: NOW, candidates: [mosquito] }).reason)
+      .toBe('service_needs_review');
+  });
+
+  // A name matching two programs resolves only among THOSE programs and
+  // never picks between them, near the destination or not; another
+  // program the name does not match is no candidate at all.
+  test('a name matching two programs never picks between them', () => {
+    const base = { v2: v2(), call: call(), customer: customer(), now: NOW };
+    const farTwin = visit({ id: 'other-program', service_id: 'different-program', scheduled_date: '2026-12-01' });
+    expect(planRescheduleFromCall({ ...base, candidates: [visit(), farTwin] }))
+      .toMatchObject({ reason: 'ambiguous_visit', candidateIds: [VISIT_ID, 'other-program'] });
+    const nearTwin = visit({ id: 'other-program', service_id: 'different-program', scheduled_date: '2026-09-26' });
+    expect(planRescheduleFromCall({ ...base, candidates: [visit(), nearTwin] }))
+      .toMatchObject({ reason: 'ambiguous_visit', candidateIds: [VISIT_ID, 'other-program'] });
+    const lawn = visit({ id: 'lawn-visit', service_id: 'lawn-program', service_type: 'Lawn Care Service', scheduled_date: '2026-12-01' });
+    expect(planRescheduleFromCall({ ...base, candidates: [visit(), lawn] })).toMatchObject({ action: 'apply', visitId: VISIT_ID });
+  });
+
+  // A call about two services may cover a visit this path would leave
+  // unmoved while it resolves the card: secondary categories keep it in
+  // review even when the named service matches one visit.
+  test('a call V2 files under more than one service category stays in review', () => {
+    const base = { call: call(), customer: customer(), now: NOW, candidates: [visit()] };
+    expect(planRescheduleFromCall({ ...base, v2: v2({ service_request: { secondary_categories: ['lawn_care'] } }) }).reason)
+      .toBe('service_needs_review');
+    expect(planRescheduleFromCall({ ...base, v2: v2({ service_request: { secondary_categories: [] } }) }))
+      .toMatchObject({ action: 'apply', visitId: VISIT_ID });
+  });
+
+  // The catch-all booking placeholder names no service yet: a visit on it
+  // may be the one the caller means, so the call stays in review, and the
+  // placeholder is never moved as the named service's visit.
+  test('a visit on the catch-all placeholder service keeps the call in review', () => {
+    const placeholder = (overrides) => visit({ service_id: 'general-appointment', catalog_service_key: 'general_appointment',
+      catalog_service_name: 'Waves Pest Control Appointment', ...overrides });
+    const base = { call: call(), customer: customer(), now: NOW };
+    expect(planRescheduleFromCall({ ...base, v2: v2(), candidates: [visit(), placeholder({ id: 'placeholder', scheduled_date: '2026-12-01' })] }).reason)
+      .toBe('service_needs_review');
+    expect(planRescheduleFromCall({ ...base, v2: v2({ service_request: { specific_service_name: 'Waves Pest Control Appointment' } }),
+      candidates: [placeholder()] }).reason).toBe('service_needs_review');
+  });
+
+  // An orphaned in-span row may be the caller's target, so it keeps even a
+  // coarse two-program name in review rather than being narrowed away.
+  test('an unresolved in-span visit keeps a multi-program name in review', () => {
+    const farTwin = visit({ id: 'other-program', service_id: 'different-program', scheduled_date: '2026-12-01' });
+    const orphan = visit({ id: 'orphan', service_id: 'retired-program', catalog_service_name: null, scheduled_date: '2026-09-25' });
+    expect(planRescheduleFromCall({ v2: v2(), call: call(), customer: customer(), now: NOW, candidates: [visit(), farTwin, orphan] }).reason)
+      .toBe('service_needs_review');
+  });
+
+  // V2 records only the new slot, so nothing on the call says which of
+  // several upcoming visits it replaces: with more than one, the call stays
+  // in review, even for a time change on a visit's own day.
+  test('with several upcoming visits the call stays in review', () => {
+    const { hasAgentCommittedEvidence } = require('../services/call-triage-flags');
+    const december = visit({ id: 'dec-visit', scheduled_date: '2026-12-24' });
+    const plan = (startAt, transcription, now = NOW) => {
+      hasAgentCommittedEvidence.mockReturnValueOnce(true);
+      return planRescheduleFromCall({ v2: v2({ scheduling: { confirmed_start_at: startAt } }), customer: customer(),
+        candidates: [visit(), december], call: call({ transcription }), now });
+    };
+    // Moves to another day, whichever visit is nearer: September moved to
+    // December 17, December moved to October 1.
+    expect(plan('2026-12-17T12:00:00-05:00', 'Caller: Move my September 24th visit to December 17th.\nAgent: Okay.'))
+      .toMatchObject({ reason: 'ambiguous_visit', candidateIds: [VISIT_ID, 'dec-visit'] });
+    expect(plan('2026-10-01T12:00:00-04:00', 'Caller: Move my December 24th visit to October 1st.\nAgent: Okay.'))
+      .toMatchObject({ reason: 'ambiguous_visit', candidateIds: [VISIT_ID, 'dec-visit'] });
+    // A time change on September 24 itself: the call may be moving December's
+    // visit onto that day, whether or not it says so in words a parser reads.
+    expect(plan('2026-09-24T12:00:00-04:00', RETIME_TRANSCRIPT))
+      .toMatchObject({ reason: 'ambiguous_visit', candidateIds: [VISIT_ID, 'dec-visit'] });
+    expect(plan('2026-09-24T12:00:00-04:00', `Caller: Move the later quarterly visit to September 24 at noon.\nAgent: ${QUOTE}`).reason)
+      .toBe('ambiguous_visit');
+    // Once September is behind today, December 24 is the only upcoming visit.
+    expect(plan('2026-12-17T12:00:00-05:00', 'Caller: Move it to December 17th.\nAgent: Okay.', new Date('2026-09-25T19:00:00Z')))
+      .toMatchObject({ action: 'apply', visitId: 'dec-visit' });
+  });
+
+  // The unresolved-catalog guard covers the single-program path too: an
+  // orphaned in-span visit may be the one the named service really means.
+  // Ahead of the span, too: an orphaned December visit may be the one the
+  // caller is moving, and it can never be weighed against the others.
+  test('an unresolved upcoming visit outside the span keeps the call in review', () => {
+    const orphanDecember = visit({ id: 'orphan-dec', service_id: 'retired-program', catalog_service_name: null, scheduled_date: '2026-12-24' });
+    expect(planRescheduleFromCall({ v2: v2(), call: call(), customer: customer(), now: NOW, candidates: [visit(), orphanDecember] }).reason)
+      .toBe('service_needs_review');
+  });
+
+  test('an unresolved in-span visit keeps even a single matched program in review', () => {
+    const orphan = visit({ id: 'orphan', service_id: 'retired-program', catalog_service_name: null, scheduled_date: '2026-09-25' });
+    expect(planRescheduleFromCall({ v2: v2(), call: call(), customer: customer(), now: NOW, candidates: [visit(), orphan] }).reason)
+      .toBe('service_needs_review');
   });
 
   // A repoint leaves service_type stale, so the label alone can name the
@@ -121,6 +234,13 @@ describe('planRescheduleFromCall', () => {
     // The catalog name still carries the alias contract.
     expect(planRescheduleFromCall({ v2: v2(), call: call(), customer: customer(), now: NOW,
       candidates: [visit({ catalog_service_name: 'Quarterly Pest Control Service - 1 hour - $117' })] }).action).toBe('apply');
+    // A row that lost its catalog row (ON DELETE SET NULL clears service_id,
+    // the key snapshot survives) has no identity left to match, whatever its
+    // label says, and one that lost the placeholder names no service.
+    for (const snapshot of ['pest_general_quarterly', 'general_appointment']) {
+      expect(planRescheduleFromCall({ v2: v2(), call: call(), customer: customer(), now: NOW,
+        candidates: [visit({ service_id: null, catalog_service_name: null, service_key_snapshot: snapshot })] }).reason).toBe('service_needs_review');
+    }
     // A row that never named a catalog service cannot have been repointed —
     // its free-text label is the only identity it has ever had, so it keeps
     // matching on that.
@@ -262,7 +382,7 @@ describe('planRescheduleFromCall', () => {
     expect(out.action).toBe('apply');
   });
 
-  test('visit selection: none, ambiguous, grouped, dispatch-owned pending, far cadence sibling', () => {
+  test('visit selection: none, ambiguous (in span), grouped, dispatch-owned pending, a second upcoming visit', () => {
     expect(planRescheduleFromCall({ v2: v2(), call: call(), customer: customer(), candidates: [], now: NOW }).reason).toBe('no_visit_on_books');
     const two = planRescheduleFromCall({
       v2: v2(), call: call(), customer: customer(), now: NOW,
@@ -271,12 +391,25 @@ describe('planRescheduleFromCall', () => {
     expect(two).toMatchObject({ reason: 'ambiguous_visit', candidateIds: [VISIT_ID, '70000000-0000-4000-8000-000000000002'] });
     expect(planRescheduleFromCall({ v2: v2(), call: call(), customer: customer(), candidates: [visit({ visit_id: 'v1' })], now: NOW }).reason).toBe('grouped_visit');
     expect(planRescheduleFromCall({ v2: v2(), call: call(), customer: customer(), candidates: [visit({ source_action: 'ai_call_pipeline_followup' })], now: NOW }).reason).toBe('dispatch_owned_pending');
-    // The agreed destination does not identify which quarterly occurrence the caller meant.
-    const withSibling = planRescheduleFromCall({
-      v2: v2(), call: call(), customer: customer(), now: NOW,
+    // A same-program sibling months out still counts: the call names the new
+    // slot, not which visit it replaces, so a second upcoming visit keeps it
+    // in review.
+    const farSibling = planRescheduleFromCall({
+      v2: v2(), call: call({ transcription: RETIME_TRANSCRIPT }), customer: customer(), now: NOW,
       candidates: [visit(), visit({ id: '70000000-0000-4000-8000-000000000003', scheduled_date: '2026-12-17', window_start: '14:00:00', window_end: '15:00:00' })],
     });
-    expect(withSibling).toMatchObject({ action: 'skip', reason: 'ambiguous_visit', candidateIds: [VISIT_ID, '70000000-0000-4000-8000-000000000003'] });
+    expect(farSibling).toMatchObject({ reason: 'ambiguous_visit', candidateIds: [VISIT_ID, '70000000-0000-4000-8000-000000000003'] });
+  });
+
+  // Only visits from today on are ones the call could mean: a quarterly
+  // customer whose next visit is the only one ahead resolves on it.
+  test('visits behind today do not make the one upcoming visit ambiguous', () => {
+    const candidates = [
+      visit({ id: 'q-past', scheduled_date: '2026-06-24' }),
+      visit({ id: VISIT_ID, scheduled_date: '2026-09-24' }),
+    ];
+    expect(planRescheduleFromCall({ v2: v2(), call: call({ transcription: RETIME_TRANSCRIPT }), customer: customer(), candidates, now: NOW }))
+      .toMatchObject({ action: 'apply', visitId: VISIT_ID });
   });
 
   test('duration falls back to estimated_duration_minutes, then 60', () => {

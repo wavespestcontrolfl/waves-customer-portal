@@ -1,3 +1,4 @@
+const { billingLegDeliveryState } = require('./messaging/billing-channel-routing');
 /**
  * Late Payment Checker
  *
@@ -130,6 +131,13 @@ async function claimReservedEmail(ContactLedger, ledger) {
     ? await ContactLedger.claimAttempt(ledger)
     : { allowed: true };
   if (claim.delivered) return { allowed: false, delivered: true };
+  if (claim.resolved) {
+    return {
+      allowed: false,
+      resolved: true,
+      resolution: claim.resolution || ledger?.metadata?.resolution || 'prior_email_terminally_settled',
+    };
+  }
   return claim.allowed ? { allowed: true } : { allowed: false, held: true };
 }
 
@@ -153,7 +161,7 @@ function pendingDeliveryChannel(row) {
   return activityMetadata(row).channel || 'sms';
 }
 
-async function dispatchReservedText(ContactLedger, ledger, dispatch) {
+async function dispatchReservedText(ContactLedger, ledger, dispatch, channel = 'sms') {
   const claim = typeof ContactLedger.claimAttempt === 'function'
     ? await ContactLedger.claimAttempt(ledger)
     : { allowed: true };
@@ -164,20 +172,21 @@ async function dispatchReservedText(ContactLedger, ledger, dispatch) {
   catch (err) {
     // A throw that carries the provider's own outcome keeps it; anything
     // else is an unconfirmed attempt.
-    result = err.providerOutcome || {};
-    if (!['accepted', 'not_sent'].includes(result.deliveryOutcome)) {
-      return { sent: false, deferred: true, deliveryOutcome: 'uncertain', code: 'TEXT_OUTCOME_UNCONFIRMED' };
-    }
-    result = { ...result, sent: result.deliveryOutcome === 'accepted', retryable: result.deliveryOutcome === 'not_sent' };
+    result = err.providerOutcome || { deliveryOutcome: 'uncertain' };
+    // Classify the same way as a returned outcome, including a bell that
+    // committed before a later audit/provider failure.
+    result = { ...result, retryable: true };
   }
   // A legacy blocked result with no outcome is a definite non-send.
   const outcome = result?.deliveryOutcome ?? (result?.blocked === true ? 'not_sent' : 'unconfirmed');
-  if (!['accepted', 'not_sent'].includes(outcome)) {
-    return { sent: false, deferred: true, code: 'TEXT_OUTCOME_UNCONFIRMED' };
+  const delivery = billingLegDeliveryState(channel, result || {});
+  if (!delivery && !['accepted', 'not_sent'].includes(outcome)) {
+    return { sent: false, deferred: true, deliveryOutcome: 'uncertain', code: 'TEXT_OUTCOME_UNCONFIRMED' };
   }
-  const accepted = outcome === 'accepted';
+  const accepted = !!delivery;
   const stamped = accepted
-    ? (typeof ContactLedger.markDelivered === 'function' ? await ContactLedger.markDelivered(ledger) : true)
+    ? (typeof ContactLedger.markDelivered === 'function'
+      ? await ContactLedger.markDelivered(ledger) : true)
     : await ContactLedger.markSendFailed(ledger, { code: result.code || 'blocked' });
   return stamped ? { ...result, sent: accepted } : { sent: false, deferred: true, code: 'TEXT_OUTCOME_STAMP_FAILED' };
 }
@@ -233,7 +242,7 @@ async function dispatchSelectedNonEmail({ ContactLedger, customer, invoice, body
       },
       hasEmailLeg: true,
       ...(preDispatchCheck ? { preDispatchCheck } : {}),
-    }));
+    }), channel);
   }
   return { results, ledgers, sentChannels: deliveredChannelLabel(results),
     willRetry: Object.values(results).some((result) => !result.sent && isTransientSmsResult(result)) };
@@ -334,6 +343,10 @@ async function maybeDivertToMicrodepositReminder(inv, daysSince, domain, now = n
       await completePendingEmail(pendingEmailActivity, `${pendingDeliveryChannel(pendingEmailActivity)}+email`);
       return 'sent';
     }
+    if (claim.resolved) {
+      await completePendingEmail(pendingEmailActivity, pendingDeliveryChannel(pendingEmailActivity));
+      return 'deduped';
+    }
     if (!claim.allowed) return 'skip';
     const result = await sendMicrodepositVerificationEmail({
       invoice: inv, customer, touchKey: `${tierDays}d`, enforceBillingPreference: true,
@@ -399,6 +412,10 @@ async function maybeDivertToMicrodepositReminder(inv, daysSince, domain, now = n
         emailDelivered = true;
         return;
       }
+      if (claim.resolved) {
+        emailResult = { ok: false, resolved: true, reason: claim.resolution };
+        return;
+      }
       if (!claim.allowed) return;
       emailResult = await sendMicrodepositVerificationEmail({
         invoice: inv,
@@ -424,8 +441,9 @@ async function maybeDivertToMicrodepositReminder(inv, daysSince, domain, now = n
     await attemptEmail();
     if (delivery.willRetry) return 'skip';
     if (!delivery.sentChannels && !emailDelivered) return 'skip';
-    const terminalEmailResolved = !!delivery.sentChannels && isTerminalEmailRefusal(emailResult)
-      && await resolvePendingEmailEpisode({ emailLedgerId: emailLedger?.id }, 'email_terminal_refusal');
+    const terminalEmailResolved = !!delivery.sentChannels && (emailResult?.resolved === true
+      || (isTerminalEmailRefusal(emailResult)
+        && await resolvePendingEmailEpisode({ emailLedgerId: emailLedger?.id }, 'email_terminal_refusal')));
     const pendingEmail = !!delivery.sentChannels && explicitEmailSelected && !emailDurablyDenied
       && !emailDelivered && !terminalEmailResolved;
     const activityInsert = db('activity_log').insert({
@@ -732,6 +750,10 @@ const LatePaymentService = {
             emailResult = { ok: true, deduped: true };
             return emailResult;
           }
+          if (claim.resolved) {
+            emailResult = { ok: false, resolved: true, reason: claim.resolution };
+            return emailResult;
+          }
           if (!claim.allowed) {
             emailResult = { ok: false, retryable: true, reason: 'prior_email_outcome_unconfirmed' };
             return emailResult;
@@ -769,8 +791,9 @@ const LatePaymentService = {
           if (emailResult?.ok === true) {
             await completePendingEmail(pendingEmailActivity, `${pendingDeliveryChannel(pendingEmailActivity)}+email`);
             notified++;
-          } else if ((isTerminalEmailRefusal(emailResult)
-            && await resolvePendingEmailEpisode({ emailLedgerId: emailLedger?.id }, 'email_terminal_refusal'))
+          } else if (emailResult?.resolved === true
+            || (isTerminalEmailRefusal(emailResult)
+              && await resolvePendingEmailEpisode({ emailLedgerId: emailLedger?.id }, 'email_terminal_refusal'))
             || (emailDurablyDenied && await resolvePendingEmailEpisode(pendingEmailEpisode, 'email_policy_denied'))) {
             await completePendingEmail(pendingEmailActivity, pendingDeliveryChannel(pendingEmailActivity));
             skipped++;
@@ -805,8 +828,9 @@ const LatePaymentService = {
         await attemptEmail();
 
         const emailDelivered = emailResult?.ok === true;
-        const terminalEmailResolved = !!delivery.sentChannels && isTerminalEmailRefusal(emailResult)
-          && await resolvePendingEmailEpisode({ emailLedgerId: emailLedger?.id }, 'email_terminal_refusal');
+        const terminalEmailResolved = !!delivery.sentChannels && (emailResult?.resolved === true
+          || (isTerminalEmailRefusal(emailResult)
+            && await resolvePendingEmailEpisode({ emailLedgerId: emailLedger?.id }, 'email_terminal_refusal')));
         // A durably denied Email (flag, suppression) is not owed for this
         // tier and must not leave a pending hold that blocks later tiers.
         const pendingEmail = !!delivery.sentChannels && explicitEmailSelected && !emailDurablyDenied

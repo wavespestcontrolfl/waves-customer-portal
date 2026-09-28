@@ -1,5 +1,12 @@
 jest.mock('../models/db', () => jest.fn());
-jest.mock('../utils/customer-comms-lock', () => ({ withCustomerCommsLock: jest.fn() }));
+// The follow-up email rides the shared billing email authority (owner ruling
+// 2026-09-27). Its own locks, rechecks and suppression reads are pinned in
+// billing-channel-email-authority.test.js and the Postgres suite; here it is
+// mocked so this suite tests the sequence's wiring and outcome mapping.
+jest.mock('../services/billing-channel-email-authority', () => ({
+  loadBillingEmailContext: jest.fn(),
+  dispatchUnderBillingEmailAuthority: jest.fn(),
+}));
 // Collections contact ledger (record-then-send, codex 2026-08-14): the rails
 // now insert a ledger row BEFORE each delivery attempt and SKIP the send if
 // the insert fails. Mock it as always-succeeding so this suite keeps testing
@@ -36,7 +43,7 @@ jest.mock('../services/customer-contact', () => ({
 }));
 
 const db = require('../models/db');
-const { withCustomerCommsLock } = require('../utils/customer-comms-lock');
+const BillingEmailAuthority = require('../services/billing-channel-email-authority');
 const smsTemplates = require('../routes/admin-sms-templates');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const EmailTemplates = require('../services/email-template-library');
@@ -138,7 +145,18 @@ describe('invoice follow-up email sidecar', () => {
   beforeEach(() => {
     jest.useFakeTimers().setSystemTime(new Date('2026-05-26T14:00:00.000Z'));
     jest.clearAllMocks();
-    withCustomerCommsLock.mockReset();
+    BillingEmailAuthority.loadBillingEmailContext.mockReset().mockResolvedValue({
+      category: 'invoice',
+      recipient: { email: 'billing@example.com', name: 'Taylor' },
+      recipientEmail: 'billing@example.com',
+    });
+    BillingEmailAuthority.dispatchUnderBillingEmailAuthority.mockReset()
+      .mockImplementation(async ({ dispatch, state }) => {
+        state.handoffStarted = true;
+        await dispatch('authority-trx');
+        state.providerAccepted = true;
+        return { ok: true };
+      });
     // fireStep claims inside a transaction that locks the invoice row —
     // pass-through so the queued table chains serve it.
     db.transaction = jest.fn(async (fn) => fn(db));
@@ -223,21 +241,29 @@ describe('invoice follow-up email sidecar', () => {
     }));
   });
 
+  // The customer's choice is read by the shared authority, first at
+  // preparation and again under its locks at the provider handoff. Its
+  // refusals map onto the reasons the sequence already settles on.
+  // A terminal refusal the shared authority can actually still produce (the
+  // portal-wide email switch no longer can — owner ruling 2026-09-26).
+  const noRecipient = { code: 'NO_EMAIL_RECIPIENT', blocked: true, reason: 'No billing email on file' };
   test.each([
-    ['enabled', { email_enabled: true }, {}, true],
-    ['missing row', undefined, {}, true],
-    ['missing flag', {}, {}, true],
-    ['disabled legacy', { email_enabled: false }, {}, false],
-    ['disabled selected Email and Text', { email_enabled: false, invoice_channels: ['email', 'sms'] }, {}, false],
-    ['disabled Email only', { email_enabled: false, invoice_channels: ['email'] }, { noSms: true }, false],
-    ['operator-initiated', { email_enabled: false, invoice_channels: ['sms'] }, { operator: true }, true],
-    ['initial email prefs read failure', {}, { readFailure: true }, true],
-    ['opt-out at handoff', { email_enabled: true, invoice_channels: ['email', 'sms'] }, { handoffOptOut: true }, false],
-  ])('%s preserves email opt-out, SMS delivery, and sequence progress', async (_label, prefs, options, emailSent) => {
+    ['enabled', { email_enabled: true }, {}, null],
+    ['missing row', undefined, {}, null],
+    ['missing flag', {}, {}, null],
+    ['portal-wide switch off (legacy)', { email_enabled: false }, {}, null],
+    ['portal-wide switch off with explicit Email and Text', { email_enabled: false, invoice_channels: ['email', 'sms'] }, {}, null],
+    ['no recipient email, legacy', { email_enabled: true }, { firstRead: noRecipient }, 'missing_email'],
+    ['no recipient email, Email only', { email_enabled: true, invoice_channels: ['email'] }, { firstRead: noRecipient, noSms: true }, 'missing_email'],
+    ['operator-initiated', { email_enabled: false, invoice_channels: ['sms'] }, { operator: true }, null],
+    ['unreadable authority context', {}, { readFailure: true }, 'billing_email_context_unavailable'],
+    ['no recipient email at handoff', { email_enabled: true, invoice_channels: ['email', 'sms'] }, { handoff: noRecipient }, 'missing_email'],
+  ])('%s: the email outcome, SMS delivery, and sequence progress', async (_label, prefs, options, emailReason) => {
+    const emailSent = emailReason === null;
+    // A send or a handoff refusal writes its own email audit row first.
+    const reachedHandoff = emailSent || !!options.handoff;
     const interaction = chain();
     const sequenceUpdate = chain();
-    const emailPrefs = chain({ first: prefs });
-    if (options.readFailure) emailPrefs.first.mockRejectedValueOnce(new Error('prefs unavailable'));
     const sequence = followupRow();
     setDbQueues({
       'invoice_followup_sequences as s': [chain({ result: [sequence], first: sequence })],
@@ -245,64 +271,62 @@ describe('invoice follow-up email sidecar', () => {
       invoices: Array.from({ length: options.operator ? 6 : 5 }, () => chain({ first: invoice() })),
       notification_prefs: [
         ...(!options.operator ? [chain({ first: prefs })] : []),
-        emailPrefs,
+        ...(options.operator ? [chain({ first: prefs })] : []),
       ],
-      customer_interactions: emailSent ? [chain(), interaction] : [interaction],
+      customer_interactions: reachedHandoff ? [chain(), interaction] : [interaction],
       invoice_followup_sequences: [
         ...(options.operator ? [chain({ first: sequence }), chain()] : []),
         chain({ first: sequence }), chain({ result: 1 }), sequenceUpdate, chain({ result: 1 }),
       ],
     });
-    let lockHeld = false;
-    const freshPrefs = chain({ first: options.handoffOptOut ? { ...prefs, email_enabled: false } : prefs });
-    const trx = jest.fn((table) => {
-      expect(lockHeld).toBe(true);
-      expect(table).toBe('notification_prefs');
-      return freshPrefs;
-    });
-    withCustomerCommsLock.mockImplementationOnce(async (_db, _customerId, fn) => {
-      lockHeld = true;
-      try { return await fn(trx); } finally { lockHeld = false; }
-    });
-    const dispatch = jest.fn(async (database) => {
-      expect(lockHeld).toBe(!options.operator);
-      expect(database).toBe(options.operator ? undefined : trx);
-      await Promise.resolve();
-      expect(lockHeld).toBe(!options.operator);
-    });
+    if (options.readFailure) BillingEmailAuthority.loadBillingEmailContext.mockRejectedValueOnce(new Error('prefs unavailable'));
+    if (options.firstRead) BillingEmailAuthority.loadBillingEmailContext.mockResolvedValueOnce({ error: options.firstRead });
+    if (options.handoff) {
+      BillingEmailAuthority.dispatchUnderBillingEmailAuthority.mockImplementationOnce(async ({ state }) => {
+        state.boundaryBlock = options.handoff;
+        return { ok: false };
+      });
+    }
+    const dispatch = jest.fn(async () => {});
     const invoiceHelpers = require('../services/invoice-helpers');
     const ownership = jest.spyOn(invoiceHelpers, 'selfPayAtDispatch').mockReturnValue(async () => ({ ok: true }));
-    if (options.handoffOptOut || emailSent) {
+    if (reachedHandoff) {
       EmailTemplates.sendTemplate.mockImplementationOnce(async ({ withProviderHandoff }) => {
         const verdict = await withProviderHandoff(dispatch);
         return verdict.ok ? { sent: true } : { sent: false, aborted: true, reason: 'aborted_before_dispatch' };
       });
     }
+    let ownershipCalls;
     try {
       if (options.operator) await InvoiceFollowUps.sendNextTouchNow('inv-1', { operatorInitiated: true });
       else await InvoiceFollowUps.runPending();
-      if (!options.operator && (emailSent || options.handoffOptOut)) {
-        expect(withCustomerCommsLock).toHaveBeenCalledWith(db, 'cust-1', expect.any(Function));
-        expect(ownership).toHaveBeenCalledWith('inv-1', trx);
-        expect(trx).toHaveBeenCalledWith('notification_prefs');
-        expect(freshPrefs.where).toHaveBeenCalledWith({ customer_id: 'cust-1' });
-        expect(freshPrefs.first).toHaveBeenCalledTimes(1);
-      } else {
-        expect(withCustomerCommsLock).not.toHaveBeenCalled();
-      }
+      ownershipCalls = ownership.mock.calls.slice();
     } finally {
       ownership.mockRestore();
     }
 
-    expect(EmailTemplates.sendTemplate).toHaveBeenCalledTimes(emailSent || options.handoffOptOut ? 1 : 0);
-    expect(sendCustomerMessage).toHaveBeenCalledTimes(options.noSms ? 0 : 1);
-    if (options.handoffOptOut) expect(dispatch).not.toHaveBeenCalled();
-    if (emailSent) {
-      expect(dispatch).toHaveBeenCalledTimes(1);
-      if (options.operator) expect(dispatch).toHaveBeenCalledWith();
-      else expect(dispatch).toHaveBeenCalledWith(trx);
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledTimes(reachedHandoff ? 1 : 0);
+    if (options.operator) {
+      // An operator's explicit send skips the customer's choices; it
+      // rechecks ownership only.
+      expect(BillingEmailAuthority.loadBillingEmailContext).not.toHaveBeenCalled();
+      expect(BillingEmailAuthority.dispatchUnderBillingEmailAuthority).not.toHaveBeenCalled();
+      expect(ownershipCalls).toContainEqual(['inv-1', db]);
+      expect(dispatch).toHaveBeenCalledWith();
+    } else {
+      const input = {
+        customerId: 'cust-1', invoiceId: 'inv-1', channel: 'email', metadata: { billingDeliveryCategory: 'invoice' },
+      };
+      expect(BillingEmailAuthority.loadBillingEmailContext).toHaveBeenCalledWith(input);
+      if (reachedHandoff) {
+        expect(BillingEmailAuthority.dispatchUnderBillingEmailAuthority).toHaveBeenCalledWith(expect.objectContaining({
+          input, recipientEmail: 'billing@example.com', templateKey: 'invoice.followup_3_day',
+        }));
+      }
+      if (emailSent) expect(dispatch).toHaveBeenCalledWith('authority-trx');
+      else expect(dispatch).not.toHaveBeenCalled();
     }
-    expect(lockHeld).toBe(false);
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(options.noSms ? 0 : 1);
     if (options.noSms) {
       expect(sequenceUpdate.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'paused' }));
       expect(sequenceUpdate.update.mock.calls[0][0]).not.toHaveProperty('step_index');
@@ -310,17 +334,153 @@ describe('invoice follow-up email sidecar', () => {
     } else {
       expect(sequenceUpdate.update).toHaveBeenCalledWith(expect.objectContaining({ step_index: 1 }));
       expect(JSON.parse(interaction.insert.mock.calls[0][0].metadata)).toMatchObject({
-        email_sent: emailSent, sms_sent: true, ...(!emailSent ? { email_reason: 'email_disabled' } : {}),
+        email_sent: emailSent, sms_sent: true, ...(!emailSent ? { email_reason: emailReason } : {}),
       });
     }
     if (!emailSent) {
+      const terminal = emailReason === 'missing_email' && !!prefs?.invoice_channels;
       expect(require('../services/collections/contact-ledger').markSendFailed).toHaveBeenCalledWith(
         expect.anything(), expect.objectContaining({
-          reason: 'email_disabled',
-          ...(prefs.invoice_channels ? { resolved: true, resolution: 'email_terminal_refusal' } : {}),
+          reason: emailReason,
+          ...(terminal ? { resolved: true, resolution: 'email_terminal_refusal' } : {}),
         }),
       );
     }
+  });
+
+  // An Email-only customer who switches to Text-only after fireTouch read
+  // the choice: the handoff's preference-change hold keeps the touch due for
+  // a re-fan-out on the current choice; the sequence is never paused on the
+  // stale Email-only snapshot.
+  // The cron fires once a day (10:16 NY, Tue–Fri), so a held step must land on
+  // a time the NEXT tick still treats as due and fresh, or skipStaleTouches
+  // passes it by. A Friday hold rolls to Tuesday's anchor.
+  test('a Friday hold is retried, not stale-skipped, at the Tuesday tick', async () => {
+    jest.setSystemTime(new Date('2026-05-29T14:16:00.000Z')); // Fri 10:16 NY
+    const sequence = followupRow({ next_touch_at: '2026-05-29T14:00:00.000Z' });
+    const sequenceUpdate = chain();
+    setDbQueues({
+      'invoice_followup_sequences as s': [chain({ result: [sequence], first: sequence })],
+      customers: [chain({ first: customer({ phone: null }) })],
+      invoices: Array.from({ length: 6 }, () => chain({ first: invoice() })),
+      notification_prefs: [chain({ first: {} })],
+      customer_interactions: [chain(), chain()],
+      invoice_followup_sequences: [chain({ first: sequence }), chain({ result: 1 }), sequenceUpdate, chain({ result: 1 })],
+    });
+    BillingEmailAuthority.loadBillingEmailContext.mockRejectedValueOnce(new Error('connection terminated'));
+    await InvoiceFollowUps.runPending();
+    const heldAt = sequenceUpdate.update.mock.calls[0][0].next_touch_at;
+    const tuesdayTick = new Date('2026-06-02T14:16:00.000Z'); // Tue 10:16 NY
+    expect(heldAt <= tuesdayTick).toBe(true);
+    expect(tuesdayTick - InvoiceFollowUps.firstEligibleFireAt(heldAt)).toBeLessThanOrEqual(InvoiceFollowUps.STALE_TOUCH_GRACE_MS);
+  });
+
+  // No explicit channel choice and no phone: the email is the only leg, so a
+  // retryable refusal from the shared check must hold the touch rather than
+  // fall to the pause branch and end every remaining follow-up.
+  test('a retryable email refusal holds the touch for a customer with no channel choice and no phone', async () => {
+    const sequence = followupRow();
+    const sequenceUpdate = chain();
+    setDbQueues({
+      'invoice_followup_sequences as s': [chain({ result: [sequence], first: sequence })],
+      customers: [chain({ first: customer({ phone: null }) })],
+      invoices: Array.from({ length: 6 }, () => chain({ first: invoice() })),
+      notification_prefs: [chain({ first: {} })],
+      customer_interactions: [chain(), chain()],
+      invoice_followup_sequences: [chain({ first: sequence }), chain({ result: 1 }), sequenceUpdate, chain({ result: 1 })],
+    });
+    BillingEmailAuthority.loadBillingEmailContext.mockRejectedValueOnce(new Error('connection terminated'));
+    await InvoiceFollowUps.runPending();
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    const [update] = sequenceUpdate.update.mock.calls[0];
+    expect(update).not.toHaveProperty('status');
+    // The next NY calendar day: tomorrow's tick retries it, not a stale-skip.
+    expect(update.next_touch_at).toEqual(new Date('2026-05-27T04:00:00.000Z'));
+    // The attempt never left, so its unkeyed ledger row must not fill the
+    // collections window the held retry is judged by.
+    expect(require('../services/collections/contact-ledger').markSendFailed).toHaveBeenCalledWith(
+      expect.anything(), expect.objectContaining({ reason: 'billing_email_context_unavailable', never_contacted: true }),
+    );
+  });
+
+  test.each([
+    ['a preference change', { code: 'BILLING_PREFERENCES_CHANGED', blocked: true, retryable: true, deferred: true,
+      deliveryOutcome: 'not_sent', reason: 'Email is not selected for this billing category' }],
+    // A profile merge that moves the invoice to the winner after fireTouch
+    // loaded this customer: the next run reloads the owner.
+    ['an invoice moved to another customer', { code: 'INVOICE_CUSTOMER_MISMATCH', blocked: true,
+      deliveryOutcome: 'not_sent', reason: 'Invoice does not belong to this customer' }],
+  ])('%s at the handoff holds the touch instead of pausing the sequence', async (_label, block) => {
+    const sequence = followupRow();
+    const sequenceUpdate = chain();
+    setDbQueues({
+      'invoice_followup_sequences as s': [chain({ result: [sequence], first: sequence })],
+      customers: [chain({ first: customer() })],
+      invoices: Array.from({ length: 5 }, () => chain({ first: invoice() })),
+      notification_prefs: [chain({ first: { invoice_channels: ['email'] } })],
+      customer_interactions: [chain(), chain()],
+      invoice_followup_sequences: [chain({ first: sequence }), chain({ result: 1 }), sequenceUpdate, chain({ result: 1 })],
+    });
+    BillingEmailAuthority.dispatchUnderBillingEmailAuthority.mockImplementationOnce(async ({ state }) => {
+      state.boundaryBlock = block;
+      return { ok: false };
+    });
+    EmailTemplates.sendTemplate.mockImplementationOnce(async ({ withProviderHandoff }) => {
+      const verdict = await withProviderHandoff(jest.fn());
+      return verdict.ok ? { sent: true } : { sent: false, aborted: true, reason: 'aborted_before_dispatch' };
+    });
+    await InvoiceFollowUps.runPending();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    const [update] = sequenceUpdate.update.mock.calls[0];
+    expect(update).not.toHaveProperty('status');
+    // The next NY calendar day: tomorrow's tick retries it, not a stale-skip.
+    expect(update.next_touch_at).toEqual(new Date('2026-05-27T04:00:00.000Z'));
+    // An explicit selection's keyed reservation is excluded from its own
+    // step's consult, so it is not stamped never_contacted.
+    const [[, stamp]] = require('../services/collections/contact-ledger').markSendFailed.mock.calls;
+    expect(stamp).not.toHaveProperty('resolved');
+    expect(stamp).not.toHaveProperty('never_contacted');
+  });
+
+  test.each([
+    ['a billing address changed before dispatch', { code: 'EMAIL_RECIPIENT_CHANGED', blocked: true, retryable: true, reason: 'changed' },
+      { ok: false, retryable: true, deliveryOutcome: 'not_sent', reason: 'EMAIL_RECIPIENT_CHANGED' }],
+    ['Email deselected before dispatch', { code: 'BILLING_PREFERENCES_CHANGED', blocked: true, retryable: true, deferred: true },
+      { ok: false, retryable: true, deliveryOutcome: 'not_sent', reason: 'BILLING_PREFERENCES_CHANGED' }],
+    ['a staff do-not-contact', { code: 'SUPPRESSED_MANUAL_DNC', blocked: true, reason: 'Recipient was manually added to the do-not-contact list by an operator' },
+      { ok: false, blocked: true, reason: 'Suppressed: Recipient was manually added to the do-not-contact list by an operator' }],
+    ['an address suppression', { code: 'EMAIL_SUPPRESSED', blocked: true, reason: 'Suppressed: bounce' },
+      { ok: false, blocked: true, reason: 'Suppressed: bounce' }],
+    ['a payer assigned before dispatch', { code: 'INVOICE_PAYER_BILLED', blocked: true, reason: 'payer' },
+      { ok: false, skipped: true, reason: 'invoice_payer_billed' }],
+    ['an invoice moved to another customer before dispatch', { code: 'INVOICE_CUSTOMER_MISMATCH', blocked: true, reason: 'moved' },
+      { ok: false, retryable: true, deliveryOutcome: 'not_sent', reason: 'INVOICE_CUSTOMER_MISMATCH' }],
+    // A profile merge soft-deletes the loser the sequence was loaded for.
+    ['the loaded customer merged away before dispatch', { code: 'CUSTOMER_NOT_FOUND', blocked: true, reason: 'gone' },
+      { ok: false, retryable: true, deliveryOutcome: 'not_sent', reason: 'CUSTOMER_NOT_FOUND' }],
+  ])('%s at the handoff maps onto the sequence outcome', async (_label, block, expected) => {
+    const sequence = followupRow();
+    setDbQueues({
+      'invoice_followup_sequences as s': [chain({ result: [sequence], first: sequence })],
+      customers: [chain({ first: customer() })],
+      invoices: Array.from({ length: 5 }, () => chain({ first: invoice() })),
+      notification_prefs: [chain({ first: { invoice_channels: ['email', 'sms'] } })],
+      customer_interactions: [chain(), chain()],
+      invoice_followup_sequences: [chain({ first: sequence }), chain({ result: 1 }), chain(), chain({ result: 1 })],
+    });
+    BillingEmailAuthority.dispatchUnderBillingEmailAuthority.mockImplementationOnce(async ({ state }) => {
+      state.boundaryBlock = block;
+      return { ok: false };
+    });
+    EmailTemplates.sendTemplate.mockImplementationOnce(async ({ withProviderHandoff }) => {
+      const verdict = await withProviderHandoff(jest.fn());
+      return verdict.ok ? { sent: true } : { sent: false, aborted: true, reason: 'aborted_before_dispatch' };
+    });
+    await InvoiceFollowUps.runPending();
+    expect(require('../services/collections/contact-ledger').markSendFailed).toHaveBeenCalledWith(
+      expect.anything(), expect.objectContaining({ reason: expected.reason }),
+    );
   });
 
   test('skips a touch whose sequence was postponed between the batch select and the claim', async () => {
@@ -470,7 +630,7 @@ describe('invoice follow-up email sidecar', () => {
     await expect(InvoiceFollowUps.resumeSequence('inv-1')).resolves.toBeUndefined();
   });
 
-  test.each([false, true])('advances a no-phone sequence through selected App (%s) or legacy email', async (appSelected) => {
+  test.each([false, true, 'bell'])('advances a no-phone sequence through selected App (%s) or legacy email', async (appSelected) => {
     const prefs = { email_enabled: true, ...(appSelected ? { invoice_channels: ['push'] } : {}) };
     const emailInteraction = chain();
     const finalInteraction = chain();
@@ -494,6 +654,7 @@ describe('invoice follow-up email sidecar', () => {
       ],
     });
 
+    if (appSelected === 'bell') sendCustomerMessage.mockResolvedValueOnce({ sent: false, deliveryOutcome: 'uncertain', bellPersisted: true });
     await InvoiceFollowUps.runPending();
 
     if (appSelected) {

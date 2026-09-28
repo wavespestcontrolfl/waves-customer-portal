@@ -39,7 +39,7 @@ const engine = require('../services/photo-id-v2/pest-engine');
 
 const {
   buildAnswer, mapToV1, resolveCandidate, dedupeCandidates, isConsequential, isApproved,
-  identifyPestV2, REFERRAL_TEMPLATES,
+  identifyPestV2, REFERRAL_TEMPLATES, UNNAMED_NEXT_PHOTO, NO_PHOTO_CONFIRMS,
 } = engine;
 
 // ── ctx-builder helpers for buildAnswer unit tests ─────────────────────────
@@ -133,6 +133,17 @@ describe('buildAnswer — entry-level naming', () => {
     expect(built.answer.level).toBe('group');
   });
 
+  test('owner_approved content with a stale hash cannot be named', () => {
+    const candidate = cand('ghost-ant', 0.95);
+    candidate.entry = JSON.parse(JSON.stringify(candidate.entry));
+    candidate.entry.copy.fact = 'Changed after approval.';
+    expect(isApproved(candidate.entry)).toBe(false);
+
+    const built = buildAnswer(baseCtx({ candidates: [candidate] }));
+    expect(built.answer).toMatchObject({ level: 'group', node_id: 'ants' });
+    expect(built.entry).toBeNull();
+  });
+
   test('an escalation trigger with no OpenAI answer can never read pretty_sure, even at 0.90', () => {
     const built = buildAnswer(baseCtx({
       candidates: [cand('fire-ant', 0.90)], escalationTriggered: true, openaiAnswered: false,
@@ -200,7 +211,7 @@ describe('buildAnswer — lineage climb', () => {
     expect(built.answer).toMatchObject({ level: 'unknown', wording: 'unknown', node_id: null, headline: "We couldn't tell from these photos" });
     expect(built.tier).toBe('needs_more_evidence');
     // Still gets retake guidance (pre-push audit on Codex #4916 r4).
-    expect(built.nextPhoto).toEqual({ ask: 'Other retake photo', why: 'Other retake why', photo_can_confirm: true });
+    expect(built.nextPhoto).toEqual(UNNAMED_NEXT_PHOTO);
   });
 });
 
@@ -239,6 +250,12 @@ describe('buildAnswer — tier', () => {
     expect(built.nextPhoto.photo_can_confirm).toBe(true);
   });
 
+  test('a sign-only read never names an organism entry (Codex #4974 r7)', () => {
+    const built = buildAnswer(baseCtx({ candidates: [cand('fire-ant', 0.95, { traitsVisible: [1] })], evidenceKind: { shownKind: 'sign', hiddenKind: 'organism' } }));
+    expect(built.answer.level).not.toBe('entry');
+    expect(built.entry).toBeNull();
+  });
+
   test('a subject conflict also caps the wording below pretty_sure (Codex #4916 r4)', () => {
     const built = buildAnswer(baseCtx({ candidates: [cand('fire-ant', 0.9, { traitsVisible: [1] })], subjectConflict: true }));
     expect(built.answer.wording).toBe('likely');
@@ -271,6 +288,34 @@ describe('buildAnswer — tier', () => {
     expect(built.nextPhoto).not.toBeNull();
     expect(built.nextPhoto.photo_can_confirm).toBe(false);
     expect(built.tier).toBe('needs_more_evidence');
+  });
+
+  test('a sign-only bite-pattern veto does not block a clear organism photo', () => {
+    const built = buildAnswer(baseCtx({
+      candidates: [cand('no-photo-pair-a', 0.95)], evidenceKind: { shownKind: 'organism', hiddenKind: 'sign' }, currentMonth: CURRENT_MONTH,
+    }));
+    expect(built.answer.wording).toBe('pretty_sure');
+    expect(built.nextPhoto).toBeNull();
+    expect(built.tier).toBe('ai_suggestion');
+
+    const a = catalog.getEntry('no-photo-pair-a');
+    const b = catalog.getEntry('no-photo-pair-b');
+    expect(engine._test.pairBetween(a, b, 'sign').photo_can_confirm).toBe(false);
+    expect(engine._test.pairBetween(a, b, 'organism')).toBeNull();
+
+    const likely = buildAnswer(baseCtx({
+      candidates: [cand('no-photo-pair-a', 0.60)], evidenceKind: { shownKind: 'organism', hiddenKind: 'sign' }, currentMonth: CURRENT_MONTH,
+    }));
+    expect(likely.nextPhoto).toEqual(UNNAMED_NEXT_PHOTO);
+  });
+
+  test("a sign-only veto does not govern when shows='both'", () => {
+    const built = buildAnswer(baseCtx({
+      candidates: [cand('no-photo-pair-a', 0.95)], evidenceKind: { shownKind: 'both', hiddenKind: null }, currentMonth: CURRENT_MONTH,
+    }));
+    expect(built.answer.wording).toBe('pretty_sure');
+    expect(built.nextPhoto).toBeNull();
+    expect(built.tier).toBe('ai_suggestion');
   });
 
   test('a second candidate that is NOT the curated pair still falls back to the top entry\'s own unconfirmable pair — Codex round-0 P1 (round 7)', () => {
@@ -309,9 +354,19 @@ describe('buildAnswer — next_photo', () => {
     });
   });
 
-  test('falls back to the node next_photo when there is no curated pair', () => {
+  test('an unapproved answer with no look-alike pair gets the fixed retake prompt', () => {
+    const built = buildAnswer(baseCtx({ candidates: [cand('pending-verification-ant', 0.95)] }));
+    expect(built.entry).toBeNull();
+    expect(built.nextPhoto).toEqual(UNNAMED_NEXT_PHOTO);
+  });
+
+  // Codex #5106 r1: climbing to a node withholds a look-alike pair's prose
+  // but must keep its "no photo can confirm" veto (another fixture entry
+  // lists unreviewed-ant as photo_can_confirm: false).
+  test('an unapproved answer that climbs to a node keeps a look-alike veto', () => {
     const built = buildAnswer(baseCtx({ candidates: [cand('unreviewed-ant', 0.95)] }));
-    expect(built.nextPhoto).toEqual({ ask: 'Ant group node photo', why: 'Ant group why', photo_can_confirm: true });
+    expect(built.entry).toBeNull();
+    expect(built.nextPhoto).toEqual(NO_PHOTO_CONFIRMS);
   });
 
   test('a single entry-level candidate (no second candidate) preserves its own first look-alike\'s photo_can_confirm:false — Codex round-0 P1', () => {
@@ -337,7 +392,28 @@ describe('buildAnswer — look-alike identities respect the review gate (Codex r
     const built = buildAnswer(baseCtx({ candidates: [cand('fire-ant', 0.55)] })); // fire-ant's only look-alike is unapproved
     expect(built.answer.wording).toBe('likely');
     // The group's generic prompt stands in; nothing names the unapproved ant.
-    expect(built.nextPhoto).toEqual({ ask: 'Ant group node photo', why: 'Ant group why', photo_can_confirm: true });
+    expect(built.nextPhoto).toEqual(UNNAMED_NEXT_PHOTO);
+  });
+
+  test('a stale look-alike approval hash blocks its name and pair prose on every pair path', () => {
+    const staleTarget = catalog.getEntry('white-footed-ant');
+    const originalFact = staleTarget.copy.fact;
+    staleTarget.copy.fact = 'Changed after approval.';
+    try {
+      const built = buildAnswer(baseCtx({ candidates: [cand('ghost-ant', 0.65), cand('white-footed-ant', 0.3)] }));
+      expect(built.entry.look_alikes).toEqual([]);
+      expect(built.nextPhoto).toEqual(UNNAMED_NEXT_PHOTO);
+      expect(JSON.stringify(built)).not.toMatch(/white-footed|black all over/i);
+    } finally {
+      staleTarget.copy.fact = originalFact;
+    }
+  });
+
+  test('a reverse-edge veto brings its own safe wording, not the forward tip (Codex #4974 r6)', () => {
+    const { pairBetween } = engine._test;
+    const top = { slug: 'a', look_alikes: [{ slug: 'b', difference: 'Forward diff', next_photo: 'A close-up of the marking', photo_can_confirm: true }] };
+    const other = { slug: 'b', look_alikes: [{ slug: 'a', difference: 'Reverse diff', next_photo: 'Needs magnification; do not handle it', photo_can_confirm: false }] };
+    expect(pairBetween(top, other)).toEqual({ slug: 'b', difference: 'Reverse diff', next_photo: 'Needs magnification; do not handle it', photo_can_confirm: false });
   });
 
   test('a one-way curated pair is found from the runner-up\'s side (Codex #4916 r3)', () => {
@@ -402,6 +478,32 @@ describe('buildAnswer — candidates block hides an unapproved candidate\'s iden
     expect(unreviewed.scientific_name).toBeNull();
     expect(JSON.stringify(built)).not.toContain('Unreviewed Ant');
   });
+
+  test('indistinguishable draft candidates collapse without overstating confidence or local range', () => {
+    const draft = cand('unreviewed-ant', 0.8);
+    const candidates = [
+      draft,
+      { ...draft, entry: { ...draft.entry, slug: 'draft-ant-two', range: 'rare' }, confidence: 0.7 },
+      { ...draft, entry: { ...draft.entry, slug: 'draft-ant-three', range: 'occasional' }, confidence: 0.3 },
+    ];
+    expect(engine.candidatesBlockFor(candidates, CURRENT_MONTH)).toEqual([{
+      slug: null,
+      common_name: 'an ant',
+      scientific_name: null,
+      strength: 'possible',
+      difference_from_top: null,
+      local: null,
+    }]);
+  });
+
+  test('approved candidates remain separate named rows', () => {
+    const visible = engine.candidatesBlockFor([
+      cand('fire-ant', 0.85), cand('ghost-ant', 0.7), cand('white-footed-ant', 0.3),
+    ], CURRENT_MONTH);
+    expect(visible.map((candidate) => candidate.slug)).toEqual([
+      'fire-ant', 'ghost-ant', 'white-footed-ant',
+    ]);
+  });
 });
 
 describe('buildAnswer — evidence', () => {
@@ -453,6 +555,15 @@ describe('isConsequential', () => {
   });
   test('disease_vector makes a candidate consequential', () => {
     expect(isConsequential({ verdict: 'watch', safety: { disease_vector: true } })).toBe(true);
+  });
+  test('protected status makes a candidate consequential', () => {
+    expect(isConsequential({ verdict: 'watch', safety: { protected: true } })).toBe(true);
+  });
+  test.each([
+    ['medical risk', { verdict: 'watch', risk: 'medical', safety: {} }],
+    ['allergen safety', { verdict: 'watch', risk: 'low', safety: { allergen: true } }],
+  ])('%s makes a candidate consequential', (_label, entry) => {
+    expect(isConsequential(entry)).toBe(true);
   });
   test('inspection-first makes a candidate consequential', () => {
     expect(isConsequential({ verdict: 'watch', safety: {}, service: { inspection_first: true } })).toBe(true);
@@ -536,11 +647,12 @@ describe('mapToV1', () => {
     expect(v1.report_contract.urgency).toBe('high');
   });
 
-  test('an unapproved/climbed answer (no named entry at all) maps to the fully generic v1 default', () => {
+  test('an unapproved/climbed answer keeps its selected catalog category with generic v1 service defaults', () => {
     const built = buildAnswer(baseCtx({ candidates: [cand('unreviewed-ant', 0.95)] }));
     const v1 = mapToV1({ ...built, disagreed: false });
     expect(v1.species_slug).toBeNull();
-    expect(v1.category).toBe('other');
+    expect(v1.category).toBe('insect');
+    expect(v1.report_contract.identification.category).toBe('insect');
     expect(v1.report_contract.service.inspection_required).toBe(true);
   });
 
@@ -561,6 +673,20 @@ function candidatesReply(candidates, quality = { usable: true, issue: 'none' }, 
 }
 
 describe('identifyPestV2 — escalation triggers', () => {
+  test("preserves shows='both' so a sign-only veto does not govern the final answer", async () => {
+    dispatch
+      .mockResolvedValueOnce(candidatesReply([{ slug: 'no-photo-pair-a', confidence: 0.95 }], undefined, 'both'))
+      .mockResolvedValueOnce({ ok: true, json: { candidates: [
+        { slug: 'no-photo-pair-a', confidence: 0.95, traits_visible: [1], traits_not_visible: [] },
+      ] } });
+
+    const result = await identifyPestV2([PHOTO]);
+    expect(result.internal.escalation_triggered).toBe(false);
+    expect(result.v2.answer).toMatchObject({ node_id: 'no-photo-pair-a', wording: 'pretty_sure' });
+    expect(result.v2.next_photo).toBeNull();
+    expect(result.v2.tier).toBe('ai_suggestion');
+  });
+
   test('Gemini missed entirely + OpenAI stands in ALONE with EMPTY trait arrays never reads pretty_sure — Codex round-0 P1 (round 10)', async () => {
     // Gemini's total failure means candidateContextFor had nothing to hand
     // OpenAI — its own escalation prompt tells it to report empty trait
@@ -641,6 +767,75 @@ describe('identifyPestV2 — escalation triggers', () => {
     expect(result.internal.escalation_reasons).toContain('low_confidence');
     expect(result.internal.disagreed).toBe(false);
     expect(result.v2.answer.wording).toBe('pretty_sure'); // bumped to the higher (0.85) of the two
+  });
+
+  test('provider agreement is recomputed after an organism-only read removes sign candidates', async () => {
+    dispatch
+      .mockResolvedValueOnce(candidatesReply([
+        { slug: 'roof-rat', confidence: 0.60 }, { slug: 'fire-ant', confidence: 0.50 },
+      ], undefined, 'organism'))
+      .mockResolvedValueOnce({ ok: true, json: { candidates: [
+        { slug: 'roof-rat', confidence: 0.60, traits_visible: [1], traits_not_visible: [] },
+        { slug: 'fire-ant', confidence: 0.50, traits_visible: [1], traits_not_visible: [] },
+      ] } })
+      .mockResolvedValueOnce({ ok: true, json: {
+        quality: { usable: true, issue: 'none' }, shows: 'organism',
+        candidates: [{ slug: 'fire-ant', confidence: 0.80, traits_visible: [1], traits_not_visible: [] }],
+      } });
+
+    const result = await identifyPestV2([PHOTO]);
+    expect(result.internal.escalation_triggered).toBe(true);
+    expect(result.internal.disagreed).toBe(false);
+    expect(result.v2.entry.slug).toBe('fire-ant');
+    expect(result.v2.candidates.map((candidate) => candidate.slug)).not.toContain('roof-rat');
+  });
+
+  test.each([
+    ['organism', 'roof-rat', 'fire-ant'],
+    ['sign', 'fire-ant', 'roof-rat'],
+  ])('a high-confidence wrong-kind candidate cannot suppress %s escalation', async (shows, hiddenSlug, visibleSlug) => {
+    dispatch
+      .mockResolvedValueOnce(candidatesReply([
+        { slug: hiddenSlug, confidence: 0.95 }, { slug: visibleSlug, confidence: 0.60 },
+      ], undefined, shows))
+      .mockResolvedValueOnce({ ok: true, json: { candidates: [
+        { slug: hiddenSlug, confidence: 0.95, traits_visible: [1], traits_not_visible: [] },
+        { slug: visibleSlug, confidence: 0.60, traits_visible: [1], traits_not_visible: [] },
+      ] } })
+      .mockResolvedValueOnce({ ok: true, json: {
+        quality: { usable: true, issue: 'none' }, shows,
+        candidates: [{ slug: visibleSlug, confidence: 0.85, traits_visible: [1], traits_not_visible: [] }],
+      } });
+    const result = await identifyPestV2([PHOTO]);
+    expect(dispatch).toHaveBeenCalledTimes(3);
+    expect(result.internal.escalation_reasons).toContain('low_confidence');
+    expect(result.internal.disagreed).toBe(false);
+    expect(result.v2.candidates.map(candidate => candidate.slug)).not.toContain(hiddenSlug);
+  });
+
+  test.each([
+    ['invalid', { ok: true, json: { quality: { usable: true, issue: 'none' }, shows: 'organism', candidates: {} } }],
+    ['timed out', { ok: false, reason: 'openai_timeout' }],
+  ])('an organism read cannot restore a sign candidate when escalation is %s', async (_outcome, escalationResult) => {
+    dispatch
+      .mockResolvedValueOnce(candidatesReply([{ slug: 'termite-mud-tubes', confidence: 0.95 }], undefined, 'organism'))
+      .mockResolvedValueOnce({ ok: true, json: { candidates: [
+        { slug: 'termite-mud-tubes', confidence: 0.95, traits_visible: [1], traits_not_visible: [] },
+      ] } })
+      .mockResolvedValueOnce(escalationResult);
+
+    const result = await identifyPestV2([PHOTO]);
+    expect(dispatch).toHaveBeenCalledTimes(3);
+    expect(result.ok).toBe(true);
+    expect(result.internal.escalation_reasons).toContain('low_confidence');
+    expect(result.v2.answer).toMatchObject({ level: 'unknown', node_id: null });
+    expect(result.v2.entry).toBeNull();
+    expect(result.v2.candidates).toEqual([]);
+    expect(result.v2.answer.headline).not.toMatch(/termite/i);
+    expect(result.v1).toMatchObject({ species_slug: null, service_line: 'pest', urgency: 'low' });
+    expect(result.v1.report_contract.safety).toMatchObject({
+      disease_vector: false, structural_threat: false,
+    });
   });
 
   test('agreement carries the WINNING side\'s own trait evidence, not Gemini\'s stale/empty verify — Codex round-0 P1 (PR-2b wiring round 2)', async () => {
@@ -1055,6 +1250,14 @@ describe('combineEscalation — agreement only takes a CHECKED confidence (Codex
     const out = combineEscalation([geminiTop(0.97, false)], escalation(0.7), new Set(['fire-ant']));
     expect(out.finalCandidates[0].confidence).toBe(0.7);
     expect(out.finalCandidates[0].traitsVisible).toEqual([1, 2]);
+  });
+
+  test('provider disagreement is computed after candidates of the contradicted kind are removed', () => {
+    const gemini = [cand('roof-rat', 0.9), cand('fire-ant', 0.6)];
+    const out = combineEscalation(gemini, escalation(0.8), new Set(['fire-ant']), 'sign');
+    expect(out.disagreed).toBe(false);
+    expect(out.finalCandidates[0].slug).toBe('fire-ant');
+    expect(out.finalCandidates.every((candidate) => candidate.entry?.kind !== 'sign')).toBe(true);
   });
 });
 

@@ -24,6 +24,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const sendgrid = require('./sendgrid-mail');
 const emailLib = require('./email-template-library');
+const billingReplay = require('./billing-email-provider-replay');
 const NotificationService = require('./notification-service');
 const { correctEmailDomain, meetsConfidence } = require('../utils/email-typo-correction');
 
@@ -137,7 +138,10 @@ function recoveryIdFromMessage(message) {
  * whether the corrected address is itself suppressed, decide what to do.
  * Extracted so the gating logic is unit-testable without a DB.
  */
-function decideRecoveryAction({ candidate, suppressed, ownedByOther, hasAttachments, addressOnFile = true, min = 'high' }) {
+function decideRecoveryAction({
+  candidate, suppressed, ownedByOther, hasAttachments,
+  addressOnFile = true, min = 'high',
+}) {
   if (!candidate) return { action: 'skip', status: 'no_candidate' };
   if (!meetsConfidence(candidate.confidence, min)) {
     return { action: 'skip', status: 'skipped_low_confidence' };
@@ -352,25 +356,25 @@ async function correctedAddressOwnedByOther(correctedEmail, ownCustomerId, datab
   try {
     const customerRows = await database('customers')
       .where((q) => {
-        for (const f of CUSTOMER_EMAIL_FIELDS) q.orWhereRaw(`LOWER(${f}) = ?`, [email]);
+        for (const f of CUSTOMER_EMAIL_FIELDS) q.orWhereRaw(`LOWER(BTRIM(${f})) = ?`, [email]);
       })
       .select('id');
     if (customerRows.some((r) => String(r.id) !== own)) return true;
 
     // Estimates / leads carry a customer_id link; a record not tied to our own
     // customer (incl. prospect rows with no customer_id) is another party.
-    const estRows = await database('estimates').whereRaw('LOWER(customer_email) = ?', [email]).select('customer_id');
+    const estRows = await database('estimates').whereRaw('LOWER(BTRIM(customer_email)) = ?', [email]).select('customer_id');
     if (estRows.some((r) => isOther(r.customer_id))) return true;
 
-    const leadRows = await database('leads').whereRaw('LOWER(email) = ?', [email]).select('customer_id');
+    const leadRows = await database('leads').whereRaw('LOWER(BTRIM(email)) = ?', [email]).select('customer_id');
     if (leadRows.some((r) => isOther(r.customer_id))) return true;
 
     // notification_prefs.billing_email is also a sendable customer address
     // (getInvoiceEmailRecipients), so it can belong to another customer too.
-    const prefRows = await database('notification_prefs').whereRaw('LOWER(billing_email) = ?', [email]).select('customer_id');
+    const prefRows = await database('notification_prefs').whereRaw('LOWER(BTRIM(billing_email)) = ?', [email]).select('customer_id');
     if (prefRows.some((r) => isOther(r.customer_id))) return true;
   } catch (err) {
-    logger.warn(`[bounce-recovery] ownership lookup failed — treating as owned by other: ${err.message}`);
+    logger.warn(`[bounce-recovery] ownership lookup failed — treating as owned by other: ${err.code || 'db_error'}`);
     return true;
   }
   // Gmail ignores local-part dots and everything after '+': a corrected
@@ -401,8 +405,8 @@ async function gmailMailboxOwnedByOther(email, ownCustomerId, database = db) {
   // The SQL identity is shared with the operator email conflict check
   // (utils/customer-comms-lock.js GOOGLE_MAILBOX_SQL).
   const { GOOGLE_MAILBOX_SQL } = require('../utils/customer-comms-lock');
-  const CANON = GOOGLE_MAILBOX_SQL.mailbox;
-  const GOOGLE = GOOGLE_MAILBOX_SQL.isGoogle;
+  const CANON = (field) => GOOGLE_MAILBOX_SQL.mailbox(`BTRIM(${field})`);
+  const GOOGLE = (field) => GOOGLE_MAILBOX_SQL.isGoogle(`BTRIM(${field})`);
   try {
     const customerRows = await database('customers')
       .where((q) => {
@@ -426,7 +430,7 @@ async function gmailMailboxOwnedByOther(email, ownCustomerId, database = db) {
       .select('customer_id');
     if (prefRows.some((r) => isOther(r.customer_id))) return true;
   } catch (err) {
-    logger.warn(`[bounce-recovery] gmail mailbox ownership lookup failed — treating as owned by other: ${err.message}`);
+    logger.warn(`[bounce-recovery] gmail mailbox ownership lookup failed — treating as owned by other: ${err.code || 'db_error'}`);
     return true;
   }
   return false;
@@ -495,7 +499,7 @@ async function insertRecoveryMessage(bouncedMessage, correctedEmail, recoveryId)
  * LAST. Idempotent — a row already sent (e.g. a partial-retry) is not re-sent.
  */
 async function dispatchRecoveryMessage({ message, categories, bouncedMessage, correctedEmail, ownCustomerId = null }) {
-  if (message.status === 'sent' && message.provider_message_id) {
+  if (message.provider_message_id) {
     return { ok: true, messageRowId: message.id, reused: true };
   }
   try {
@@ -506,7 +510,8 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
     // BOTH the visit-summary and ordinary branches, since dispatchToProvider
     // is the SAME function either way.
     let annualWithheld = false;
-    const dispatchToProvider = async () => {
+    let authorityRefusal = null;
+    const dispatchToProvider = async (database, providerBoundaryCheck) => {
       // Bounce recovery re-sends the SAME stored html/text to a CORRECTED
       // address, straight through sendgrid.sendOne — its own content
       // derivation over that html/text covers this without composing the
@@ -523,7 +528,10 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
       // send a garbage value into the estimates query and loop as transient.
       const sourceEstimateId = guardEstimateIdFromTriggerEvent(bouncedMessage.trigger_event_id);
       try {
-        result = await sendgrid.sendOne({
+        result = Object.assign({
+          html: bouncedMessage.html_snapshot,
+          text: bouncedMessage.text_snapshot,
+        }, await sendgrid.sendOne({
           to: correctedEmail,
           fromEmail: message.from_email_snapshot,
           fromName: message.from_name_snapshot,
@@ -545,28 +553,36 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
           // refused permanently just because this recovery path has no
           // explicit opinion of its own.
           templateKey: bouncedMessage.template_key,
-        });
+          suppressErrorLog: true,
+          database,
+          providerBoundaryCheck,
+        }));
       } catch (err) {
         if (err && err.annualOfferWithheld) {
           annualWithheld = true;
           return;
         }
+        // SendGrid's response body can echo a recipient. Keep only its status
+        // before the recovery result reaches persistence or the failure log.
+        if (Number.isInteger(err?.status)) throw new Error(`SendGrid bounce recovery failed (${err.status})`);
         throw err;
       }
     };
-    if (bouncedMessage.template_key === 'service.visit_summary') {
+    const visitSummary = bouncedMessage.template_key === 'service.visit_summary';
+    let fence;
+    if (visitSummary) {
       // Domain correction changes the destination, not the customer's consent
       // or the authority of the original visit link. The original recipient
       // is re-authorized on held rows and the request runs while they are
       // held; a recheck that cannot be read fails closed through the catch.
-      let fence;
       try {
         fence = await require('./visit-completion-summary').retrySummaryThroughHandoff(bouncedMessage, async (trx) => {
           // The corrected destination is revalidated immediately before the
           // request, on the held connection: a party that claimed that
           // address after the earlier ownership check must not receive the
           // bearer link.
-          if (await correctedAddressOwnedByOther(correctedEmail, ownCustomerId, trx || db)) return { ok: false, reason: 'corrected_owned_by_other' };
+          await require('../utils/customer-comms-lock').lockEmailOwnershipForSend(trx, correctedEmail);
+          if (await correctedAddressOwnedByOther(correctedEmail, ownCustomerId, trx)) return { ok: false, reason: 'corrected_owned_by_other' };
           await dispatchToProvider();
           return { ok: true };
         }, { destination: correctedEmail });
@@ -574,22 +590,50 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
         if (!result) throw err;
         logger.warn(`[bounce-recovery] visit summary handoff guard failed after acceptance for ${message.id}: ${err.message}`);
       }
-      if (!result) {
-        const reason = annualWithheld ? 'annual_offer_withheld' : (fence?.reason || 'visit_summary_unavailable');
-        await db('email_messages').where({ id: message.id, status: 'queued' })
-          .update({ status: 'blocked', error_message: reason, updated_at: new Date() }).catch(() => {});
+      authorityRefusal = fence?.reason || 'visit_summary_unavailable';
+    } else if (billingReplay.isBillingEmailTemplateRetry(bouncedMessage)) {
+      const handoff = await billingReplay.runBillingEmailProviderReplayHandoff(
+        bouncedMessage,
+        dispatchToProvider,
+        {
+          recipientEmail: correctedEmail,
+          authorityRecipientEmail: bouncedMessage.recipient_email_snapshot,
+          providerBoundaryCheck: async ({ database }) => {
+            try {
+              await require('../utils/customer-comms-lock').lockEmailOwnershipForSend(database, correctedEmail);
+            } catch (err) {
+              const busy = err?.code === 'EMAIL_OWNERSHIP_CHECK_BUSY';
+              return { ok: false, retryable: true,
+                code: busy ? 'EMAIL_OWNERSHIP_CHECK_BUSY' : 'EMAIL_OWNERSHIP_CHECK_UNAVAILABLE',
+                reason: busy ? 'Email ownership assignment in progress' : 'Email ownership check temporarily unavailable' };
+            }
+            return await correctedAddressOwnedByOther(correctedEmail, ownCustomerId, database) ? {
+              ok: false,
+              code: 'CORRECTED_EMAIL_OWNED_BY_OTHER',
+              reason: 'corrected_owned_by_other',
+            } : { ok: true };
+          },
+        },
+      );
+      // Bounce recovery is one-shot and excluded from provider retries. An
+      // unavailable authority must reach its existing manual-failure alert.
+      if (handoff.retryable) throw new Error(handoff.reason);
+      // The replay contract always supplies a reason for a refusal. An allowed
+      // handoff has already populated result, so an absent reason is ignored.
+      authorityRefusal = handoff.reason;
+    } else {
+      await dispatchToProvider();
+    }
+    if (!result) {
+      const reason = annualWithheld ? 'annual_offer_withheld' : (authorityRefusal || 'provider_dispatch_unavailable');
+      await db('email_messages').where({ id: message.id, status: 'queued' })
+        .update({ status: 'blocked', error_message: reason, updated_at: new Date() }).catch(() => {});
+      if (visitSummary) {
         // No provider request follows: settle the summary aggregate from the ledger.
         await require('./visit-completion-summary').reconcileSummaryEmailRecovery({ ...message, status: 'blocked' })
           .catch((err) => logger.warn(`[bounce-recovery] visit summary suppression not reconciled for ${message.id}: ${err.message}`));
-        return { ok: false, suppressed: true, reason };
       }
-    } else {
-      await dispatchToProvider();
-      if (annualWithheld) {
-        await db('email_messages').where({ id: message.id, status: 'queued' })
-          .update({ status: 'blocked', error_message: 'annual_offer_withheld', updated_at: new Date() }).catch(() => {});
-        return { ok: false, suppressed: true, reason: 'annual_offer_withheld' };
-      }
+      return { ok: false, suppressed: true, reason };
     }
     // Always record the provider id + send time. These are safe regardless of
     // any concurrent webhook.
@@ -602,9 +646,8 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
       // rewritten bytes onto the recovery row so it reflects what the
       // corrected address actually received, same as a fresh sendTemplate
       // send does (email-template-library.js).
-      ...(result.withheldLinksRewritten?.length
-        ? { html_snapshot: result.html, text_snapshot: result.text }
-        : {}),
+      html_snapshot: result.html,
+      text_snapshot: result.text,
     });
     // Advance to 'sent' ONLY if still 'queued' — a fast delivery/bounce webhook
     // (resolvable via custom_args.email_message_id before this commit) may have
@@ -619,8 +662,8 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
     // (via custom_args.email_message_id) already resolved the row before this
     // catch ran (lost-response case). If so, don't regress it or report failure.
     const current = await db('email_messages').where({ id: message.id }).first().catch(() => null);
-    const status = String(current?.status || '').toLowerCase();
-    if (current && status !== 'queued' && status !== 'failed') {
+    const status = String(current?.status || 'queued').toLowerCase();
+    if (!['queued', 'failed'].includes(status)) {
       return { ok: true, messageRowId: message.id, reused: true };
     }
     await db('email_messages')
@@ -698,7 +741,10 @@ async function attemptRecovery(bouncedMessage, ev = {}) {
     // pre-flag rows and any direct inserter that didn't stamp has_attachments).
     const hasAttachments = !!bouncedMessage.has_attachments
       || ATTACHMENT_TEMPLATE_KEYS.has(String(bouncedMessage.template_key || ''));
-    const decision = decideRecoveryAction({ candidate, suppressed, ownedByOther, hasAttachments, addressOnFile, min: minConfidence() });
+    const decision = decideRecoveryAction({
+      candidate, suppressed, ownedByOther, hasAttachments, addressOnFile,
+      min: minConfidence(),
+    });
 
     const baseUpdate = {
       corrected_email: candidate?.corrected || null,
@@ -714,7 +760,8 @@ async function attemptRecovery(bouncedMessage, ev = {}) {
       // Every skip means a service/transactional email did NOT reach the
       // customer — nudge a human to fix the address (and show the suggestion
       // when we have one, e.g. a medium-confidence typo below the auto-send bar).
-      if (['no_candidate', 'corrected_suppressed', 'skipped_low_confidence', 'corrected_owned_by_other', 'has_attachments', 'address_no_longer_on_file'].includes(decision.status)) {
+      if (['no_candidate', 'corrected_suppressed', 'skipped_low_confidence', 'corrected_owned_by_other',
+        'has_attachments', 'address_no_longer_on_file', 'billing_replay_reauthorization_required'].includes(decision.status)) {
         await alertUnrecoverableBounce({ bouncedMessage, bouncedEmail, customerId: match?.customerId, status: decision.status, candidate });
         // Audio re-verification lane (gated, best-effort): the domain
         // corrector can't touch LOCAL-PART errors ("apitz" vs the spelled
@@ -775,6 +822,11 @@ async function attemptRecovery(bouncedMessage, ev = {}) {
         updated_at: new Date(),
         metadata: jsonbMerge({ suppression_reason: sendResult.reason }),
       });
+      if (billingReplay.isBillingEmailTemplateRetry(bouncedMessage)) {
+        await alertUnrecoverableBounce({ bouncedMessage, bouncedEmail, customerId: match?.customerId,
+          status: sendResult.reason === 'corrected_owned_by_other'
+            ? 'corrected_owned_by_other' : 'billing_replay_reauthorization_required', candidate });
+      }
       logger.info(`[bounce-recovery] resend to ${redactEmail(candidate.corrected)} suppressed: ${sendResult.reason}`);
       return { skipped: sendResult.reason };
     }
@@ -1052,6 +1104,7 @@ const UNRECOVERABLE_REASONS = {
   has_attachments: 'it includes an attachment (e.g. an invoice or report PDF) that cannot be auto-resent',
   address_no_longer_on_file: 'the bounced address is no longer on the record (it was already changed)',
   recovery_error: 'the automatic recovery hit an unexpected error',
+  billing_replay_reauthorization_required: 'the billing source must be reauthorized before it can be re-sent',
   send_failed: 're-sending to the corrected address failed',
   skipped_low_confidence: 'the likely correction was not confident enough to send automatically',
   no_candidate: 'no safe address correction was possible',
@@ -1266,6 +1319,7 @@ module.exports = {
   commitRecoveryOnDelivery,
   handleRecoveryBounce,
   // exported for tests
+  dispatchRecoveryMessage,
   resolveCustomerEmailField,
   correctedAddressSuppressed,
   correctedAddressOwnedByOther,
