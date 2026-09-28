@@ -429,6 +429,15 @@ describe('groundRescheduleAgreement', () => {
         quote('/scheduling/caller_accepted_slot', 'caller', "Okay, 9 o'clock tomorrow. I'll let them know."),
       ],
     }), "Caller: Can we make it earlier?\nAgent: Yep, we'll see them at 9.\nCaller: Okay, 9 o'clock tomorrow. I'll let them know.").ok).toBe(true);
+    // A relative day in the commitment is a day, and must be the recorded one.
+    expect(ground(v2({
+      scheduling: { confirmed_start_at: '2026-09-24T09:00:00-04:00', agreed_slot_words: nine },
+      evidence: [
+        quote('/scheduling/agent_committed_booking', 'agent', "We'll see them in two days at 9."),
+        quote('/scheduling/confirmed_start_at', 'caller', "Okay, 9 o'clock tomorrow"),
+        quote('/scheduling/caller_accepted_slot', 'caller', "Okay, 9 o'clock tomorrow"),
+      ],
+    }), "Caller: Okay, 9 o'clock tomorrow.\nAgent: We'll see them in two days at 9.")).toMatchObject({ ok: false });
     // A bound before "o'clock" is still a bound.
     for (const said of ["We will be there tomorrow before 9 o'clock.", "We will be there tomorrow by 9 o'clock."]) {
       expect([said, agreedAt('2026-09-24T09:00:00-04:00', said, { day: 'tomorrow', hour: '9', period: null }).ok]).toEqual([said, false]);

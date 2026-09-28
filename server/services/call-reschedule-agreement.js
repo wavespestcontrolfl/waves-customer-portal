@@ -523,8 +523,11 @@ const DAY_WORDS = new Set([
   'jan', 'feb', 'mar', 'apr', 'jun', 'jul', 'aug', 'sep', 'sept', 'oct', 'nov', 'dec',
   'today', 'tonight', 'tomorrow',
 ]);
+// Words that say a day relatively ("in two days", "the day after", "next
+// week"): a commitment using them names a day too.
+const RELATIVE_DAY_WORDS = new Set(['day', 'days', 'week', 'weeks', 'weekend', 'next', 'following', 'after', 'yesterday']);
 function namesAnyDay(quote) {
-  return normalize(quote).split(' ').some((t) => DAY_WORDS.has(t) || /^\d{1,2}(?:st|nd|rd|th)$/.test(t));
+  return normalize(quote).split(' ').some((t) => DAY_WORDS.has(t) || RELATIVE_DAY_WORDS.has(t) || /^\d{1,2}(?:st|nd|rd|th)$/.test(t));
 }
 
 // The halves of the day this quote's am/pm and part-of-day words state
