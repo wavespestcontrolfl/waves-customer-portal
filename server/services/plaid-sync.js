@@ -605,20 +605,20 @@ async function applyChanges(trx, accountsById, changes) {
   for (const txn of changes.upserts) {
     const existing = existingById.get(txn.transaction_id);
     const m = mapTransaction(txn, accountsById.get(txn.account_id), { correction: !!existing });
-    if (m.skip && existing) { skip(m.skip); withdrawnByCorrection.push(txn.transaction_id); continue; }
-    if (m.skip) { skip(m.skip); continue; }
+    if (m.skip) {
+      skip(m.skip);
+      if (existing) withdrawnByCorrection.push(txn.transaction_id);
+      continue;
+    }
     const r = m.row;
     if (!existing) { toInsert.push(r); continue; }
-    if (sameMoneyFields(existing, r)) {
-      // a re-send (cursor reset) or a correction the bank reverted: nothing
-      // to change — but a parked correction or withdrawal it undid is now
-      // obsolete
-      if (bankImport.hasUnresolvedBankChange(existing)) {
-        await trx('bank_transactions').where({ id: existing.id }).update({
-          suggestion: trx.raw("coalesce(suggestion, '{}'::jsonb) - 'plaidModified' - 'plaidRemoved'"),
-          updated_at: trx.fn.now(),
-        });
-      }
+    // Nothing to change when the bank's latest version is the row's own (a
+    // re-send after a cursor reset, or a correction the bank reverted) or
+    // the version the operator already dismissed (they kept the row's
+    // values) — and any correction or withdrawal parked since is obsolete.
+    const dismissed = existing.suggestion && existing.suggestion.plaidDismissed;
+    if (sameMoneyFields(existing, r) || (dismissed && sameMoneyFields(dismissed, r))) {
+      if (bankImport.hasUnresolvedBankChange(existing)) await clearParkedChange(trx, [existing.id]);
       continue;
     }
     if (existing.status === 'unmatched') {
@@ -627,11 +627,9 @@ async function applyChanges(trx, accountsById, changes) {
       // its money fields in place; see supersedeUnmatchedRow
       await supersedeUnmatchedRow(trx, existing.id, r);
       counts.updated++;
-    } else if (!(existing.suggestion && existing.suggestion.plaidDismissed && sameMoneyFields(existing.suggestion.plaidDismissed, r))) {
+    } else {
       // a reviewed row is never rewritten under the operator — the change
-      // parks on the row (replacing an older parked one) for them to judge.
-      // The exact version the operator already dismissed is not raised
-      // again (a cursor reset replays the bank's current version).
+      // parks on the row (replacing an older parked one) for them to judge
       await trx('bank_transactions').where({ id: existing.id }).update({
         // a valid version supersedes an earlier withdrawal (e.g. zeroed, then restored)
         suggestion: trx.raw("(coalesce(suggestion, '{}'::jsonb) - 'plaidRemoved') || ?::jsonb", [JSON.stringify({
@@ -662,9 +660,13 @@ async function applyChanges(trx, accountsById, changes) {
       .forUpdate()
       .select('id', 'status', 'suggestion');
     const unmatched = locked.filter(r => r.status === 'unmatched').map(r => r.id);
-    // a withdrawal the operator already dismissed is not raised again
-    const reviewed = locked.filter(r => r.status !== 'unmatched' && !(r.suggestion && r.suggestion.plaidDismissed && r.suggestion.plaidDismissed.removed)).map(r => r.id);
+    // a withdrawal the operator already dismissed is not raised again, and a
+    // correction parked since it is obsolete (the bank's latest = withdrawn)
+    const dismissedGone = (r) => !!(r.suggestion && r.suggestion.plaidDismissed && r.suggestion.plaidDismissed.removed);
+    const reviewed = locked.filter(r => r.status !== 'unmatched' && !dismissedGone(r)).map(r => r.id);
+    const obsolete = locked.filter(r => r.status !== 'unmatched' && dismissedGone(r) && bankImport.hasUnresolvedBankChange(r)).map(r => r.id);
     if (unmatched.length) counts.deleted += await trx('bank_transactions').whereIn('id', unmatched).del();
+    if (obsolete.length) await clearParkedChange(trx, obsolete);
     if (reviewed.length) {
       counts.flagged += await trx('bank_transactions').whereIn('id', reviewed).update({
         suggestion: trx.raw("coalesce(suggestion, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ plaidRemoved: true })]),
@@ -673,6 +675,13 @@ async function applyChanges(trx, accountsById, changes) {
     }
   }
   return counts;
+}
+
+function clearParkedChange(trx, ids) {
+  return trx('bank_transactions').whereIn('id', ids).update({
+    suggestion: trx.raw("coalesce(suggestion, '{}'::jsonb) - 'plaidModified' - 'plaidRemoved'"),
+    updated_at: trx.fn.now(),
+  });
 }
 
 // Staged rows' money fields (date / amount / direction / description) are

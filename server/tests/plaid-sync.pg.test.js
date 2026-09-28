@@ -547,6 +547,19 @@ async function activate(itemId, overrides = {}) {
     expect(await plaidSync.syncItem(itemId)).toMatchObject({ flagged: 1 });
     const row = await mockPg('bank_transactions').where({ plaid_transaction_id: 't-a' }).first();
     expect(row.suggestion.plaidModified).toMatchObject({ amount: 12 });
+    // …and the bank returning to the dismissed version makes that $12 obsolete
+    plaid.transactionsSync.mockResolvedValueOnce(page([], [txn('t-a', 'acc-card', 11, '2026-09-06')], [], 'cursor-4'));
+    expect(await plaidSync.syncItem(itemId)).toMatchObject({ flagged: 0 });
+    const back = await mockPg('bank_transactions').where({ plaid_transaction_id: 't-a' }).first();
+    expect(back.suggestion.plaidModified).toBeUndefined();
+    expect(Number(back.amount)).toBe(10);
+    // same for a dismissed withdrawal: re-added (flagged), then withdrawn again
+    plaid.transactionsSync.mockResolvedValueOnce(page([], [txn('t-b', 'acc-card', 25, '2026-09-05')], [], 'cursor-5'));
+    expect(await plaidSync.syncItem(itemId)).toMatchObject({ flagged: 1 });
+    plaid.transactionsSync.mockResolvedValueOnce(page([], [], [{ transaction_id: 't-b' }], 'cursor-6'));
+    expect(await plaidSync.syncItem(itemId)).toMatchObject({ flagged: 0 });
+    const gone = await mockPg('bank_transactions').where({ plaid_transaction_id: 't-b' }).first();
+    expect(gone.suggestion).toEqual({ plaidDismissed: { removed: true } });
   });
 
   test('the hourly run keeps matching while work remains, even when nothing new synced', async () => {
