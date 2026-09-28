@@ -80,9 +80,13 @@ function useAutoGrowTextarea(ref, value, getMaxHeight, enabled = true) {
     const maxHeight =
       typeof getMaxHeight === "function" ? getMaxHeight() : getMaxHeight;
     el.style.height = "auto";
-    const next = maxHeight ? Math.min(el.scrollHeight, maxHeight) : el.scrollHeight;
+    // scrollHeight excludes the border; a border-box height must add it
+    // back or the box ends up shorter than its content.
+    const borders = el.offsetHeight - el.clientHeight;
+    const full = el.scrollHeight + borders;
+    const next = maxHeight ? Math.min(full, maxHeight) : full;
     el.style.height = `${next}px`;
-    el.style.overflowY = maxHeight && el.scrollHeight > maxHeight ? "auto" : "hidden";
+    el.style.overflowY = maxHeight && full > maxHeight ? "auto" : "hidden";
   }, [ref, value, getMaxHeight, enabled]);
 }
 
