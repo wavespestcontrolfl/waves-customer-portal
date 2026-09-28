@@ -21,11 +21,12 @@ function makeDbMock() {
         onConflict: jest.fn(() => ({ ignore: jest.fn(() => ({ returning: jest.fn().mockResolvedValue([{ id: 'run_1' }]) })) })),
       })),
       where: jest.fn(function where(...args) { chain._wheres.push(args); return chain; }),
+      whereRaw: jest.fn(function whereRaw(...args) { chain._wheres.push(['raw', ...args]); return chain; }),
       update: jest.fn((patch) => { updates.push({ table, wheres: chain._wheres, patch }); return Promise.resolve(1); }),
     };
     return chain;
   });
-  dbMock.raw = jest.fn((sql) => ({ __raw: sql }));
+  dbMock.raw = jest.fn((sql, bindings = []) => ({ __raw: sql, bindings }));
   dbMock._updates = updates;
   return dbMock;
 }
@@ -185,7 +186,9 @@ describe('hard-gate failure: one feedback redraft, then silent skip', () => {
     expect(queue.skip).not.toHaveBeenCalled();
     const retryWrite = dbMock._updates.find((u) => u.table === 'opportunity_queue');
     expect(retryWrite).toBeTruthy();
-    expect(String(retryWrite.patch.signal_metadata)).toContain('HARDCODED_PRICE');
+    expect(retryWrite.patch.signal_metadata.bindings[0]).toBe('gate_retry');
+    expect(JSON.parse(retryWrite.patch.signal_metadata.bindings[1]).findings)
+      .toEqual(expect.arrayContaining([expect.objectContaining({ code: 'HARDCODED_PRICE' })]));
   });
 
   test('aggregate quality-gate MISS (no infra error) also gets the redraft-then-skip disposition', async () => {
@@ -212,7 +215,60 @@ describe('hard-gate failure: one feedback redraft, then silent skip', () => {
     expect(queue.defer).toHaveBeenCalledWith('opp_agg', expect.any(Date), { claimToken: claimedAt });
     expect(queue.pendingReview).not.toHaveBeenCalled();
     const retryWrite = dbMock._updates.find((u) => u.table === 'opportunity_queue');
-    expect(String(retryWrite.patch.signal_metadata)).toContain('QUALITY_GATE');
+    expect(retryWrite.patch.signal_metadata.bindings[0]).toBe('gate_retry');
+    expect(JSON.parse(retryWrite.patch.signal_metadata.bindings[1]).findings)
+      .toEqual(expect.arrayContaining([expect.objectContaining({ code: 'QUALITY_GATE' })]));
+  });
+
+  test('an unattended blog delays one infrastructure retry, then skips without a writer directive', async () => {
+    process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG = 'false';
+    process.env.AUTONOMOUS_CONTENT_BLOG_UNIQUENESS = 'false';
+    const qualityGate = { evaluate: jest.fn().mockReturnValue({ ok: false, error: 'scanner unavailable' }) };
+    const firstQueue = makeQueue({
+      id: 'opp_infra_first', action_type: 'new_supporting_blog', claimed_at: claimedAt, signal_metadata: {},
+    });
+    const first = loadRunner({
+      queue: firstQueue, briefBuilder: makeBriefBuilder(), dispatcher: makeDispatcher(),
+      uniquenessGate: { evaluateBlog: jest.fn().mockReturnValue({ ok: true }), evaluate: jest.fn().mockReturnValue({ ok: true }) },
+      qualityGate,
+    });
+    const before = Date.now();
+
+    await expect(first.runner.runNext()).resolves.toMatchObject({
+      outcome: 'deferred_infrastructure_retry', skip_reason: 'gate_infrastructure_error',
+    });
+
+    const retryAt = firstQueue.defer.mock.calls[0][1];
+    expect(retryAt).toBeInstanceOf(Date);
+    expect(retryAt.getTime()).toBeGreaterThanOrEqual(before + 60 * 60 * 1000);
+    expect(firstQueue.defer).toHaveBeenCalledWith('opp_infra_first', retryAt, { claimToken: claimedAt });
+    const retryWrite = first.dbMock._updates.find((u) => u.table === 'opportunity_queue');
+    expect(retryWrite.wheres).toEqual(expect.arrayContaining([
+      ['raw', expect.stringContaining('page_edit_superseded')],
+      ['raw', expect.stringContaining('jsonb_exists'), ['infrastructure_retry']],
+    ]));
+    expect(retryWrite.patch.signal_metadata.__raw).toContain('ARRAY[?]::text[]');
+    expect(retryWrite.patch.signal_metadata.bindings[0]).toBe('infrastructure_retry');
+    expect(JSON.parse(retryWrite.patch.signal_metadata.bindings[1])).toMatchObject({
+      retry_after: retryAt.toISOString(), skip_reason: 'gate_infrastructure_error',
+    });
+
+    const secondQueue = makeQueue({
+      id: 'opp_infra_second', action_type: 'new_supporting_blog', claimed_at: claimedAt,
+      signal_metadata: { infrastructure_retry: { skip_reason: 'gate_infrastructure_error' } },
+    });
+    const second = loadRunner({
+      queue: secondQueue, briefBuilder: makeBriefBuilder(), dispatcher: makeDispatcher(),
+      uniquenessGate: { evaluateBlog: jest.fn().mockReturnValue({ ok: true }), evaluate: jest.fn().mockReturnValue({ ok: true }) },
+      qualityGate,
+    });
+
+    await expect(second.runner.runNext()).resolves.toMatchObject({
+      outcome: 'skipped_gate_fail', skip_reason: 'gate_infrastructure_error',
+    });
+    expect(secondQueue.skip).toHaveBeenCalledWith('opp_infra_second', 'gate_infrastructure_error', { claimToken: claimedAt });
+    expect(secondQueue.defer).not.toHaveBeenCalled();
+    expect(secondQueue.pendingReview).not.toHaveBeenCalled();
   });
 
   test('second failure (gate_retry already recorded) skips silently — never pending_review', async () => {
