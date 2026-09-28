@@ -2912,7 +2912,7 @@ function initScheduledJobs() {
         const { retryPestInsiderProof } = require('./pest-insider-autopilot');
         const result = await retryPestInsiderProof();
         if (!result.skipped) {
-          logger.info(`[pest-insider-proof-retry] proof ${result.proofSent ? 'sent' : 'failed again'} for send ${result.sendId}`);
+          logger.info(`[pest-insider-proof-retry] proof ${result.proofSent ? 'sent' : `not sent (${result.reason})`} for send ${result.sendId}`);
         }
       });
     } catch (err) {

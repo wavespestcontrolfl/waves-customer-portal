@@ -47,16 +47,23 @@ function proofGateOn() {
 }
 
 // sendNewsletterProof is itself gated behind GATE_NEWSLETTER_PROOF_APPROVAL
-// and idempotent on proof_sent_at. A failure is logged and reported, never
-// thrown: the draft is already saved and the catch-up will try again.
+// and idempotent on proof_sent_at. It reports most failures as a RESULT
+// ({ skipped: true, reason }: a SendGrid failure is 'proof_send_failed', a
+// blocked draft 'validation_failed', the shared gate off 'gate_off'), not
+// by throwing — so "no exception" is not "proof sent". Only { sent: true }
+// counts. Nothing here throws: the draft is already saved and the catch-up
+// tries again.
 async function sendProofFor(sendId) {
   try {
     const { sendNewsletterProof } = require('./newsletter-proof');
-    await sendNewsletterProof(sendId);
-    return true;
+    const result = await sendNewsletterProof(sendId);
+    if (result?.sent === true) return { sent: true, reason: null };
+    const reason = result?.reason || 'unknown';
+    logger.warn(`[pest-insider-autopilot] proof not sent for ${sendId}: ${reason}`);
+    return { sent: false, reason };
   } catch (e) {
     logger.warn(`[pest-insider-autopilot] proof send failed: ${e.message}`);
-    return false;
+    return { sent: false, reason: 'threw' };
   }
 }
 
@@ -151,8 +158,8 @@ async function retryPestInsiderProof({ now = new Date() } = {}) {
     .first('id');
   if (!draft) return { skipped: true, reason: 'no unproofed draft this month' };
 
-  const proofSent = await sendProofFor(draft.id);
-  return { skipped: false, sendId: draft.id, proofSent };
+  const proof = await sendProofFor(draft.id);
+  return { skipped: false, sendId: draft.id, proofSent: proof.sent, reason: proof.reason };
 }
 
 module.exports = {

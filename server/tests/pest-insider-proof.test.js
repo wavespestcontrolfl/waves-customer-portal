@@ -94,7 +94,7 @@ describe('pest-insider proof catch-up', () => {
 
     const result = await retryPestInsiderProof({ now: DAY_AFTER });
 
-    expect(result).toEqual({ skipped: false, sendId: 'send-pi-1', proofSent: true });
+    expect(result).toEqual({ skipped: false, sendId: 'send-pi-1', proofSent: true, reason: null });
     expect(mockSendProof).toHaveBeenCalledWith('send-pi-1');
     // Only an unproofed DRAFT of this type qualifies.
     expect(q.where).toHaveBeenCalledWith('newsletter_type', 'pest-insider-monthly');
@@ -109,7 +109,21 @@ describe('pest-insider proof catch-up', () => {
 
     const result = await retryPestInsiderProof({ now: DAY_AFTER });
 
-    expect(result).toEqual({ skipped: false, sendId: 'send-pi-1', proofSent: false });
+    expect(result).toEqual({ skipped: false, sendId: 'send-pi-1', proofSent: false, reason: 'threw' });
+  });
+
+  test.each([
+    ['a SendGrid failure', 'proof_send_failed'],
+    ['a draft the validator blocked', 'validation_failed'],
+    ['the shared proof gate being off', 'gate_off'],
+  ])('%s is a RESULT, not an exception, and is never reported as sent', async (_label, reason) => {
+    process.env.GATE_PEST_INSIDER_PROOF = 'true';
+    db.mockImplementation(() => chain({ first: { id: 'send-pi-1' } }));
+    mockSendProof.mockImplementationOnce(async () => ({ skipped: true, reason }));
+
+    const result = await retryPestInsiderProof({ now: DAY_AFTER });
+
+    expect(result).toEqual({ skipped: false, sendId: 'send-pi-1', proofSent: false, reason });
   });
 
   test('nothing to do when the proof is on record, the issue was sent or deleted, or no draft exists', async () => {
