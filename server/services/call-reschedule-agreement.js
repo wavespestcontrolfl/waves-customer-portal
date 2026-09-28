@@ -181,6 +181,9 @@ function statedHour(hourWords, periodWords) {
   if (twelveNamed(n, periodToks)) return periodToks[0] === 'noon' ? 12 : 0;
   const phrase = periodToks.join(' ');
   if (!Object.hasOwn(PERIOD_PHRASES, phrase)) return null;
+  // Twelve with a part of the day ("12 tonight", "12 in the morning") says
+  // noon or midnight only loosely: it states an hour only with am/pm.
+  if (n === 12 && phrase !== 'am' && phrase !== 'pm') return null;
   return (n % 12) + (PERIOD_PHRASES[phrase] === 'pm' ? 12 : 0);
 }
 

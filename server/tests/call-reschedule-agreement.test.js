@@ -173,6 +173,10 @@ describe('groundRescheduleAgreement', () => {
       .toMatchObject({ ok: false, reason: 'agreed_slot_words_mismatch' });
     expect(agreedAt(THURSDAY_2PM, 'We will see you Thursday afternoon at two.', { day: 'Thursday', hour: 'two', period: 'afternoon' }).ok).toBe(true);
     expect(agreedAt(THURSDAY_2PM, 'We will see you Thursday at 2:00 PM.', { day: 'Thursday', hour: '2', period: 'PM' }).ok).toBe(true);
+    // Codex #5092 r13: twelve with a part of the day states no hour; with am/pm it does.
+    expect(agreedAt('2026-09-23T12:00:00-04:00', 'We will see you at 12 tonight.', { day: 'tonight', hour: '12', period: 'tonight' }))
+      .toMatchObject({ ok: false, reason: 'agreed_slot_words_mismatch' });
+    expect(agreedAt('2026-09-24T12:00:00-04:00', 'We will see you tomorrow at 12 pm.', { day: 'tomorrow', hour: '12', period: 'pm' }).ok).toBe(true);
     // Codex #5092 r12: clock-formatted twelve.
     expect(agreedAt('2026-09-24T12:00:00-04:00', 'We will see you tomorrow at 12:00 noon.', { day: 'tomorrow', hour: '12', period: 'noon' }).ok).toBe(true);
     // Codex #5092 r9: twelve beside a window's named end is not "12 midnight".
