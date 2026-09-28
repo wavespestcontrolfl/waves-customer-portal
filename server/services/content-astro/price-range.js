@@ -171,10 +171,18 @@ function mappedKeys(frontmatter) {
   return keysForText(frontmatter.primary_keyword) || keysForText(frontmatter.title) || [];
 }
 
-// The feed's current keys, or null when the feed cannot be computed.
+// The feed's current keys, or null when the feed cannot be computed or is
+// INCOMPLETE — a row whose sweep errored is missing from `services` though
+// it still exists, and pruning a kept list against that gap would delete a
+// valid owner key.
 function publishedPriceKeys() {
   try {
-    return new Set((computePublicPricingRanges().services || []).map((row) => row.key));
+    const feed = computePublicPricingRanges();
+    if ((feed.errors || []).length) {
+      logger.warn(`[price-range] public pricing feed incomplete (${feed.errors.map((e) => e.key).join(', ')}) — treated as unavailable`);
+      return null;
+    }
+    return new Set((feed.services || []).map((row) => row.key));
   } catch (err) {
     logger.warn(`[price-range] public pricing feed unavailable: ${err.message}`);
     return null;
@@ -198,7 +206,7 @@ function costGuidePriceRange(frontmatter = {}, { knownKeys } = {}) {
   const keys = mappedKeys(frontmatter);
   if (!keys.length) return null;
   const known = knownKeys || publishedPriceKeys();
-  if (!known) return null; // feed down → no card
+  if (!known) return null; // feed down or incomplete → no card
   const valid = usableKeys(keys, known);
   return valid.length ? valid : null;
 }

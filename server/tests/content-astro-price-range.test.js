@@ -201,6 +201,24 @@ describe('costGuidePriceRange', () => {
     });
   });
 
+  test('an incomplete feed (a row whose sweep errored) is treated as unavailable, never as "key removed"', () => {
+    jest.isolateModules(() => {
+      jest.doMock('../services/pricing-engine/public-ranges', () => ({
+        // termite_trenching errored this sweep: it is missing from services
+        // but still a real row.
+        computePublicPricingRanges: () => ({
+          services: [{ key: 'termite_bait_install' }, { key: 'termite_bait_monitoring' }],
+          errors: [{ key: 'termite_trenching', message: 'engine signature changed' }],
+        }),
+        PURCHASE_GATED_ROWS: jest.requireActual('../services/pricing-engine/public-ranges').PURCHASE_GATED_ROWS,
+      }));
+      const isolated = require('../services/content-astro/price-range');
+      expect(() => isolated.applyCostGuidePriceRange(cost(), { price_range: ['termite_trenching'] }))
+        .toThrow(expect.objectContaining({ code: 'BLOG_PRICE_FEED_UNAVAILABLE' }));
+      expect(isolated.costGuidePriceRange(cost({ primary_keyword: 'termite treatment cost' }))).toBeNull();
+    });
+  });
+
   test('fails closed when the pricing feed cannot be computed', () => {
     jest.isolateModules(() => {
       jest.doMock('../services/pricing-engine/public-ranges', () => ({
