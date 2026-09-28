@@ -149,9 +149,11 @@ const CATEGORY_KEYWORDS = [
   ['mosquito', /mosquito|waveguard mosquito/],
   ['termite', /termite/],
   ['rodent', /rodent|\brat\b|rats\b|\bmice\b|\bmouse\b/],
-  // The catalog files Fire Ant, Flea & Tick and Bee / Wasp as specialty
-  // (migration 20260401000105) — before the generic ant/pest catch.
-  ['specialty', /fire[\s-]*ants?\b|\bflea|\bticks?\b|\bbees?\b|\bwasps?\b/],
+  // The catalog files Fire Ant, Flea & Tick, Bee / Wasp, Mud Dauber, Wildlife
+  // Trapping, Bed Bug, WaveGuard Initial Setup and the general appointment
+  // as specialty (migrations 20260401000105, 20260408000001, 20260414000027,
+  // 20260611000006) — before the generic ant/pest catch.
+  ['specialty', /fire[\s-]*ants?\b|\bflea|\bticks?\b|\bbees?\b|\bwasps?\b|mud[\s-]*dauber|wildlife|bed[\s-]*bugs?\b|initial[\s-]*setup|\bappointment\b/],
   // "Palmetto" is a roach, not a palm (mirrors SchedulePage's classifier).
   ['pest_control', /\bpalmetto\b/],
   ['tree_shrub', /tree|shrub|palm/],
