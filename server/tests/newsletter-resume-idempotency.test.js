@@ -665,10 +665,30 @@ describe('resumeCampaign — preconditions', () => {
       otherTableTouched = table;
       return chain({});
     });
-    await expect(prepareResumeCampaign('s')).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
+    await expect(prepareResumeCampaign('s')).rejects.toMatchObject({ code: 'VALIDATION_FAILED', message: expect.stringMatching(/correct the copy and resume again/) });
     expect(otherTableTouched).toBeNull();
-    // …and the campaign is back in an editable state with its approval cleared.
-    expect(sendUpdate).toMatchObject({ status: 'draft', proof_approved_at: null, proof_token: null, scheduled_for: null });
+    // …and the campaign KEEPS its delivered, publicly readable state — it is
+    // corrected in place through PATCH, never demoted to draft (codex round 12 P2).
+    expect(sendUpdate).toBeNull();
+  });
+
+  test('a promoted legacy flagship (newsletter_type NULL, calendar-linked) is validated as the flagship type on resume (codex round 12 P1)', async () => {
+    let sendUpdate = null;
+    db.mockImplementation((table) => {
+      if (table === 'newsletter_sends') {
+        return chain({
+          first: {
+            id: 's', status: 'failed', newsletter_type: null, subject: 'Weekend events',
+            html_body: '<p>Tickets are $20 at the door.</p>', text_body: 'Tickets are $20 at the door.', event_ids: [],
+          },
+          onUpdate: (payload) => { sendUpdate = payload; },
+        });
+      }
+      if (table === 'newsletter_calendar') return chain({ first: { id: 'cal-1' } });
+      throw new Error(`unexpected ${table}`);
+    });
+    await expect(prepareResumeCampaign('s')).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
+    expect(sendUpdate).toBeNull();
   });
 
   test('an actively sending Pest Insider campaign that fails the claim scan is refused as STILL_SENDING and never reset to draft (pre-push audit P1)', async () => {
@@ -689,7 +709,7 @@ describe('resumeCampaign — preconditions', () => {
     expect(sendUpdate).toBeNull();
   });
 
-  test('a stale sending Pest Insider campaign that fails the claim scan is reset only if still stale, and its claim token is revoked', async () => {
+  test('a stale sending Pest Insider campaign that fails the claim scan is released to failed only if still stale, and its claim token is revoked', async () => {
     let sendUpdate = null;
     const wheres = [];
     db.mockImplementation((table) => {
@@ -710,7 +730,9 @@ describe('resumeCampaign — preconditions', () => {
       throw new Error(`unexpected ${table}`);
     });
     await expect(prepareResumeCampaign('s')).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
-    expect(sendUpdate).toMatchObject({ status: 'draft', sending_claim_token: null, proof_approved_at: null });
+    // released to 'failed' — publicly readable and correctable — never to draft (codex round 12 P2)
+    expect(sendUpdate).toMatchObject({ status: 'failed', sending_claim_token: null });
+    expect(sendUpdate.proof_approved_at).toBeUndefined();
     expect(wheres).toContainEqual([{ id: 's', status: 'sending' }]);
     expect(wheres.some(([col, op]) => col === 'updated_at' && op === '<=')).toBe(true);
   });

@@ -395,6 +395,11 @@ describe('findUnverifiedClaims', () => {
       'Termites can have a second (and bigger) swarm after storms.',
       'Termite swarms after storms are common here.',
       'Hurricane season brings termite swarmers out again.',
+      // a fall or late-year flight assigned to a non-drywood termite is the same false claim with no "second" in it (codex round 12 P1)
+      'Native subterranean termites swarm in fall.',
+      'Subterranean termites take flight in October.',
+      'Termites swarm in September after the rains.',
+      'Formosan termites also fly in November.',
     ])('flags: %s', (sentence) => {
       expect(rule(sentence, 'termite_second_swarm')).toBe(true);
     });
@@ -405,6 +410,10 @@ describe('findUnverifiedClaims', () => {
       'Termite swarmers appear on warm afternoons after rain in spring.',
       'After a storm, check the house for termite damage.',
       'Swarm season, January through May, is unrelated to hurricane season.',
+      'Native subterranean termites swarm in spring. By October the swarmers are gone.',
+      'Termite swarm season is over by June.',
+      'Subterranean termites do not fly in the fall.',
+      'Termite swarmers in October are almost always drywood termites.',
     ])('does NOT flag the verified swarm-season facts: %s', (sentence) => {
       expect(rule(sentence, 'termite_second_swarm')).toBe(false);
     });
@@ -660,6 +669,10 @@ describe('findUnverifiedClaims', () => {
       'Hold off on vacuuming for two weeks after your flea treatment.',
       'For fleas, vacuum daily for 14 days. For fleas, keep vacuuming for a few weeks.',
       'For fleas, keep vacuuming for a few weeks. Vacuum daily for 14 days after your ant treatment.',
+      // every unit counts, months included (codex round 12 P1)
+      'Vacuum daily for a month after your flea treatment.',
+      'For fleas, vacuum for one month.',
+      'Keep vacuuming for two months after your ant treatment.',
     ])('flags a fixed or negated vacuuming instruction the source does not support: %s', (sentence) => {
       expect(rule(sentence, 'non_flea_vacuum_advice')).toBe(true);
     });

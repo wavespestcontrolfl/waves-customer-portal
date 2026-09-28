@@ -31,7 +31,7 @@ const { grassTypeLabel, normalizeGrassType } = require('./lawn-grass-context');
 const { hasQuizToken, buildQuizSubstitutions } = require('./newsletter-quiz');
 const { hasFeedbackToken, ensureFeedbackToken, buildFeedbackSubstitutions } = require('./newsletter-feedback');
 const { isFlagshipDeliveryWindow, isCurrentFlagshipTarget } = require('./event-freshness');
-const { validateFlagshipEventSelection, parseLockedEventIds } = require('./newsletter-event-selection');
+const { validateFlagshipEventSelection, parseLockedEventIds, isFlagshipSend } = require('./newsletter-event-selection');
 const { reverifyEvents, reverifyEnabled } = require('./event-reverify');
 const { pestInsiderProofLive } = require('../config/feature-gates');
 const NewsletterSubscribers = require('./newsletter-subscribers');
@@ -1140,34 +1140,41 @@ async function prepareResumeCampaign(sendId) {
   // persisted before a stricter claim scan shipped, or one edited after its
   // first attempt failed, must pass the same validation the manual and
   // scheduled paths run — before anything is claimed (codex round 8 P1).
-  const { requiresClaimValidation } = require('../config/newsletter-types');
-  if (requiresClaimValidation(send.newsletter_type)) {
+  const { requiresClaimValidation, FLAGSHIP_TYPE_KEY } = require('../config/newsletter-types');
+  // A promoted legacy flagship has newsletter_type NULL; the manual and
+  // scheduled paths classify it by its calendar link and validate it as the
+  // flagship type — so does the resume path (codex round 12 P1): its
+  // outstanding recipients must never receive stored copy the current scan
+  // rejects.
+  const typedSend = requiresClaimValidation(send.newsletter_type)
+    ? send
+    : ((send.newsletter_type === null && await isFlagshipSend(send)) ? { ...send, newsletter_type: FLAGSHIP_TYPE_KEY } : null);
+  if (typedSend) {
     const { validateNewsletterDraft, lockedPricesForSend } = require('../services/newsletter-validator');
-    const lockedPrices = await lockedPricesForSend(send, db);
-    const { errors } = validateNewsletterDraft(send, { recipientCount: 1, lockedPrices });
+    const lockedPrices = await lockedPricesForSend(typedSend, db);
+    const { errors } = validateNewsletterDraft(typedSend, { recipientCount: 1, lockedPrices });
     if (errors.length > 0) {
-      // Nothing is claimed. Return the campaign to an editable draft (PATCH
-      // accepts draft/scheduled only) with its approval cleared; the
-      // per-recipient delivery ledger is untouched, and sendCampaign never
-      // re-seeds a campaign that has a ledger (its ledger guard, codex round
-      // 11), so a later send of the corrected copy reaches only the
-      // recipients still outstanding (codex round 9). A live 'sending' owner was refused above; the reset
-      // is a compare-and-set on the state inspected here — the same guard
-      // the claim below uses — so it never lands on a row another worker
-      // claimed since, and clearing the claim token tells a stuck original
-      // worker (via its heartbeat ownership check) it no longer owns the
-      // campaign (pre-push audit P1).
-      const resetQuery = db('newsletter_sends').where({ id: send.id, status: send.status });
+      // Nothing is claimed, and the campaign KEEPS its delivered state: a
+      // 'failed' or 'sent' row stays publicly readable (newsletter-feed.js
+      // serves sending/sent/failed — the web version the first batch
+      // received stays up) and is corrected in place through PATCH's
+      // correct-and-resume path; the next Resume re-validates the corrected
+      // copy and, through sendCampaign's ledger guard (codex round 11),
+      // reaches only the recipients still outstanding (codex round 12 P2 —
+      // a return to 'draft' made that link a 404). A live 'sending' owner
+      // was refused above; a STALE one moves to 'failed' with its claim
+      // token revoked — readable and editable, and a stuck original worker
+      // learns through its heartbeat ownership check that it no longer owns
+      // the campaign — as a compare-and-set on the inspected state and lease
+      // (pre-push audit P1).
+      let released = false;
       if (reclaimingStaleSend) {
-        resetQuery.where('updated_at', '<=', new Date(Date.now() - sendingLeaseMinutes() * 60 * 1000));
+        released = (await db('newsletter_sends')
+          .where({ id: send.id, status: 'sending' })
+          .where('updated_at', '<=', new Date(Date.now() - sendingLeaseMinutes() * 60 * 1000))
+          .update({ status: 'failed', sending_claim_token: null, updated_at: new Date() })) > 0;
       }
-      const reset = await resetQuery.update({
-        status: 'draft', scheduled_for: null, proof_token: null, proof_sent_at: null, proof_approved_at: null,
-        sending_claim_token: null, updated_at: new Date(),
-      });
-      const err = new Error(reset
-        ? `campaign no longer passes validation and was returned to draft for editing: ${errors.join('; ')}`
-        : `campaign no longer passes validation (it changed state meanwhile and was left as is): ${errors.join('; ')}`);
+      const err = new Error(`campaign no longer passes validation${released ? ' (its stale send claim was released)' : ''}; correct the copy and resume again: ${errors.join('; ')}`);
       err.code = 'VALIDATION_FAILED';
       err.errors = errors;
       throw err;

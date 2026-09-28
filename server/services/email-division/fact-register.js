@@ -593,6 +593,16 @@ const CONTRAST_LEAD_IN = /^(?:unlike|like|compared\s+(?:to|with)|rather\s+than|i
 const OTHER_PEST_SUBJECT = /\b(?:fire\s+ants?|ants?|mosquito(?:es|s)?|(?:cock)?roach(?:es)?|palmetto\s+bugs?|spiders?|fleas?|ticks?|rodents?|rats?|mice|wasps?|bees?|hornets?|yellow\s*jackets?|lovebugs?|love\s+bugs?|chinch\s+bugs?|webworms?|no-see-ums?|midges?|gnats?|flies|bed\s*bugs?|silverfish|earwigs?|millipedes?|centipedes?|scorpions?|beetles?|moths?|aphids?|whiteflies|mealybugs?|scale\s+insects?)\b/i;
 const SWARM_WORD = /\b(?:swarm\w*|fl(?:y|ies|ew|ying|own)|flights?|take\s+flight|took\s+flight|taking\s+flight|alates?|winged|emerg\w+|come\s+out|coming\s+out|came\s+out)\b/i;
 const REPEAT_TRIGGER = /\b(?:second|another|again|repeat\w*|twice|once\s+more|all\s+over\s+again|late[-\s]?summer|summer(?:s|time)?|storms?|hurricanes?|post[-\s]?storms?|tropical|rainy\s+season)\b/i;
+// The register gives every native and subterranean species ONE flight
+// window inside January–May (R. flavipes January–April, R. virginicus
+// February–May, Asian subterranean from March, Formosan from late April)
+// plus the December–February R. hageni; only drywood termites fly in the
+// fall. A non-drywood termite subject flying in any other month or season —
+// "swarm in fall", "take flight in October" — is the same false claim with
+// no "second" or "again" in it (codex round 12 P1). A clause saying the
+// swarmers are GONE or the season is OVER by then states the fact.
+const OUT_OF_SEASON = /\b(?:june|july|august|september|october|november|fall|autumn|late[-\s]?summer|summer(?:s|time)?|hurricane\s+season|rainy\s+season)\b/i;
+const SWARM_RECEDES = /\b(?:gone|over|done|ends?|ended|finished|past|behind\s+us|wrap(?:s|ped)?\s+up|wind(?:s|ing)?\s+down|taper(?:s|ed|ing)?(?:\s+off)?|stop(?:s|ped)?|no\s+longer|quiet|dormant)\b/i;
 
 // The kind of termite the last mention in `text` names: 'drywood',
 // 'other', or null when no termite is mentioned.
@@ -623,7 +633,10 @@ function termiteClaimInSentence(sentence, previousSentence) {
     else if (OTHER_PEST_SUBJECT.test(clause)) subject = 'other-pest';
     if (subject === null && PRONOUN_SUBJECT.test(clause)) subject = lastTermiteKind(previousSentence);
     if (subject !== 'other') continue;
-    if (!SWARM_WORD.test(clause) || !REPEAT_TRIGGER.test(clause)) continue;
+    if (!SWARM_WORD.test(clause)) continue;
+    const repeat = REPEAT_TRIGGER.test(clause);
+    const outOfSeason = !repeat && OUT_OF_SEASON.test(clause) && !SWARM_RECEDES.test(clause);
+    if (!repeat && !outOfSeason) continue;
     if (clauseDenies(clause) || previousClauseIsMythLabel(clauses, i)) continue;
     return clause;
   }
@@ -776,9 +789,11 @@ function patchClaimInSentence(sentence, previousSentence = '') {
 // affirmative (never "avoid", "hold off", "wait N days before vacuuming" —
 // not for fleas, not for anything) and every duration in it is one the
 // source states (a few weeks; 1 to 4 weeks; up to 4 weeks). "Vacuum daily
-// for 14 days" is a made-up number even in a flea sentence.
+// for 14 days" is a made-up number even in a flea sentence, and so is "for
+// a month" — every unit counts, months and years included, and the sourced
+// exemption stays limited to its documented week ranges (codex round 12 P1).
 const VACUUM = /\bvacuum\w*\b/i;
-const DURATION = /\b(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|twelve|fourteen|a\s+few|several|a\s+couple\s+of)\s*(?:(?:to|-|–)\s*(?:\d+|one|two|three|four)\s*)?(?:days?|weeks?)\b/gi;
+const DURATION = /\b(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|twelve|fourteen|a\s+few|several|a\s+couple\s+of|an?)\s*(?:(?:to|-|–)\s*(?:\d+|one|two|three|four)\s*)?(?:days?|weeks?|months?|years?)\b/gi;
 const SOURCED_FLEA_DURATION = /\b(?:a\s+few|several)\s+weeks\b|\b(?:1|one)\s*(?:to|-|–)\s*(?:4|four)\s+weeks\b|\b(?:up\s+to\s+)?(?:4|four)\s+weeks\b/gi;
 const VACUUM_NEGATION = /\b(?:avoid|hold\s+off|wait|skip|delay|postpone|refrain|stop|before\s+vacuum\w*)\b/i;
 const FLEA = /\bfleas?\b/i;
@@ -862,7 +877,7 @@ const AUDIENCE_AFTER_PRODUCT = new RegExp(`\\b(?:for|around|near|with)\\s+${AUDI
 // its message) and whether that phrase is a time figure — a duration is the
 // fixed_reentry_time rule's to report, a safety word this rule's, so one
 // problem is reported once, under the right heading (codex round 8 P2).
-const DURATION_WORD = /\b(?:minutes?|mins?|hours?|hrs?|seconds?|secs?|days?|weeks?)\b/i;
+const DURATION_WORD = /\b(?:minutes?|mins?|hours?|hrs?|seconds?|secs?|days?|weeks?|months?|years?)\b/i;
 function canonicalFinding(sentence) {
   const finding = reentrySafetyClaimFinding(sentence);
   if (!finding) return null;

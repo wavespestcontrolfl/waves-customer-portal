@@ -623,9 +623,23 @@ router.patch('/sends/:id', async (req, res, next) => {
   try {
     const send = await db('newsletter_sends').where({ id: req.params.id }).first();
     if (!send) return res.status(404).json({ error: 'not found' });
-    if (!['draft', 'scheduled'].includes(send.status)) return res.status(400).json({ error: 'can only edit drafts or scheduled' });
+    // Correct-and-resume (codex round 12 on #5187): a partially delivered
+    // campaign ('failed' / 'sent' with a delivery ledger) whose stored copy
+    // the resume re-validation now rejects is corrected HERE, in place — it
+    // keeps its publicly readable state (the web version the first batch
+    // received stays up) and the next Resume reaches only the ledger's
+    // outstanding rows (sendCampaign's ledger guard). Copy fields only: the
+    // audience is the ledger and the type is locked by the guards below.
+    const correctingDelivered = ['failed', 'sent'].includes(send.status)
+      && Boolean(await db('newsletter_send_deliveries').where({ send_id: send.id }).first('id'));
+    if (!['draft', 'scheduled'].includes(send.status) && !correctingDelivered) {
+      return res.status(400).json({ error: 'can only edit drafts or scheduled sends, or correct the copy of a partially delivered campaign' });
+    }
 
     const { subject, subjectB, htmlBody, textBody, previewText, fromName, fromEmail, replyTo, segmentFilter, aiPrompt, newsletterType, autoShareSocial, eventIds } = req.body;
+    if (correctingDelivered && [segmentFilter, newsletterType, eventIds].some((value) => value !== undefined)) {
+      return res.status(400).json({ error: 'a partially delivered campaign can only have its copy corrected — its audience is the delivery ledger and its type is fixed' });
+    }
 
     // Factual-lock integrity: a flagship ("local-weekly-fresh-events") draft was
     // generated through the fact-locked, hallucination-gated pipeline. Both the
@@ -721,7 +735,7 @@ router.patch('/sends/:id', async (req, res, next) => {
 
     const updatedCount = await db('newsletter_sends')
       .where({ id: req.params.id })
-      .whereIn('status', ['draft', 'scheduled'])
+      .whereIn('status', correctingDelivered ? [send.status] : ['draft', 'scheduled'])
       .update({
       subject: subject ?? send.subject,
       subject_b: subjectB !== undefined ? subjectB : send.subject_b,

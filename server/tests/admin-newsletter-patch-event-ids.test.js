@@ -178,3 +178,58 @@ describe('PATCH /sends/:id refuses retyping a Pest Insider draft', () => {
     expect(update).toHaveBeenCalledTimes(1);
   });
 });
+
+
+// Codex round 12 on #5187: a partially delivered campaign whose stored copy the
+// resume re-validation now rejects is corrected IN PLACE — it keeps its
+// publicly readable 'failed'/'sent' state (the web version the first batch
+// received stays up) and the next Resume reaches only the ledger's
+// outstanding rows. Copy fields only.
+describe('PATCH /sends/:id correct-and-resume for a partially delivered campaign', () => {
+  beforeEach(() => { jest.clearAllMocks(); });
+
+  function mockTables({ send, deliveryRow }) {
+    const update = jest.fn(async () => 1);
+    const whereIns = [];
+    db.mockImplementation((table) => {
+      const q = {};
+      ['where', 'orderBy', 'limit', 'offset', 'select'].forEach((method) => { q[method] = jest.fn(() => q); });
+      q.whereIn = jest.fn((...args) => { whereIns.push(args); return q; });
+      if (table === 'newsletter_sends') { q.first = jest.fn(async () => send); q.update = update; return q; }
+      if (table === 'newsletter_send_deliveries') { q.first = jest.fn(async () => deliveryRow); return q; }
+      throw new Error(`Unexpected table ${table}`);
+    });
+    return { update, whereIns };
+  }
+  const failedInsider = { ...draftRow([]), status: 'failed', newsletter_type: 'pest-insider-monthly' };
+
+  test('a failed campaign WITH a delivery ledger accepts a copy correction, scoped to its own status and without touching its state', async () => {
+    const { update, whereIns } = mockTables({ send: failedInsider, deliveryRow: { id: 'd-1' } });
+    await withServer(async (baseUrl) => {
+      const res = await patchSend(baseUrl, { htmlBody: '<p>Corrected</p>', textBody: 'Corrected' });
+      expect(res.status).toBe(200);
+    });
+    expect(update).toHaveBeenCalledTimes(1);
+    expect(whereIns).toContainEqual(['status', ['failed']]);
+    expect(update.mock.calls[0][0]).toMatchObject({ html_body: '<p>Corrected</p>', text_body: 'Corrected' });
+    expect(update.mock.calls[0][0].status).toBeUndefined();
+  });
+
+  test('a failed campaign with NO delivery ledger is still not editable', async () => {
+    const { update } = mockTables({ send: failedInsider, deliveryRow: undefined });
+    await withServer(async (baseUrl) => {
+      const res = await patchSend(baseUrl, { htmlBody: '<p>Corrected</p>' });
+      expect(res.status).toBe(400);
+    });
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  test('a partially delivered campaign cannot change its audience or type — the ledger is the audience', async () => {
+    const { update } = mockTables({ send: failedInsider, deliveryRow: { id: 'd-1' } });
+    await withServer(async (baseUrl) => {
+      const res = await patchSend(baseUrl, { segmentFilter: { tags: ['everyone'] } });
+      expect(res.status).toBe(400);
+    });
+    expect(update).not.toHaveBeenCalled();
+  });
+});
