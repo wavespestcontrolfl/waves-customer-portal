@@ -139,11 +139,17 @@ function deriveSyncGuardrailOptions(opp = {}, brief = {}) {
     forbidAllPrices: briefForbidsCompetitorPrices(opp?.signal_metadata?.intercept_brief, operatorBrief),
     allowedInternalLinks,
     // The network kill switch is evaluated again at publication time. If it
-    // changes a frozen spoke brief into a hub publish (or vice versa), remove
-    // the optional path allowance so a relative candidate fails closed as an
-    // unknown route until the brief is recomposed for the effective host.
-    relatedPostLinks: relatedTargetMatches ? relatedPostPaths : [],
-    relatedPostHosts: effectiveRelatedHosts,
+    // changes a frozen spoke brief into a hub publish (or vice versa), the
+    // frozen paths stay bound to their FROZEN host set (never the drifted
+    // effective one) and relatedPostLinksLive tells internalRouteFinding to
+    // quarantine every reference to them — relative or absolute — as denied,
+    // rather than dropping their identity: emptying relatedPostLinks let a
+    // wrong-host link past the host check entirely if check_existing_content
+    // separately re-admitted the same path into the generic allowlist
+    // (Codex #4984 r6+ P1).
+    relatedPostLinks: relatedPostPaths,
+    relatedPostHosts: frozenRelatedHosts,
+    relatedPostLinksLive: relatedTargetMatches,
     isRefresh,
   };
 }

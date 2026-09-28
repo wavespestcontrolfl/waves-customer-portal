@@ -2459,10 +2459,42 @@ describe('internal-route allowlist (UNKNOWN_INTERNAL_ROUTE)', () => {
         },
       };
       const options = deriveSyncGuardrailOptions({}, brief);
-      expect(options.relatedPostHosts).toEqual(['wavespestcontrol.com']);
-      expect(options.relatedPostLinks).toEqual([]);
+      // The path keeps its identity as a related post bound to its FROZEN
+      // (spoke) host — never the drifted hub host — and relatedPostLinksLive
+      // is false, so internalRouteFinding quarantines every reference to it
+      // rather than dropping it into the untracked-route bucket (Codex
+      // #4984 r6+ P1: emptying relatedPostLinks let a wrong-host or even a
+      // relative link past the host check entirely if check_existing_content
+      // separately re-admitted the same path into the generic allowlist).
+      expect(options.relatedPostHosts).toEqual(['sarasotaflpestcontrol.com']);
+      expect(options.relatedPostLinks).toEqual(['/termite/spoke-only/']);
+      expect(options.relatedPostLinksLive).toBe(false);
       const result = guardrails.evaluate({ body: '[Spoke only](/termite/spoke-only/)' }, options);
       expect(result.findings.some((finding) => finding.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
+      // The escape hatch this finding closed: check_existing_content had
+      // separately re-admitted this SAME path into the generic allowlist
+      // (draft.checked_existing_routes) — under the old "drop the path"
+      // behavior that would have silently satisfied the generic,
+      // host-blind allowedInternalLinks check once relatedPaths no longer
+      // recognized it. It must still P0 today.
+      const draft = { body: '[Spoke only](/termite/spoke-only/)', checked_existing_routes: ['/termite/spoke-only/'] };
+      const stillDenied = guardrails.evaluate(draft, options);
+      expect(stillDenied.findings.some((finding) => finding.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
+      // An absolute link on the CURRENT (drifted) hub host must also P0 —
+      // the path was only ever verified live on the frozen spoke.
+      const hubAbsolute = guardrails.evaluate(
+        { body: '[Spoke only](https://www.wavespestcontrol.com/termite/spoke-only/)' },
+        options
+      );
+      expect(hubAbsolute.findings.some((finding) => finding.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
+      // And even an absolute link on its OWN frozen spoke host must still
+      // P0 — a full mismatch quarantines the path everywhere, not just off
+      // the new host, since the brief itself no longer targets that spoke.
+      const frozenHostAbsolute = guardrails.evaluate(
+        { body: '[Spoke only](https://www.sarasotaflpestcontrol.com/termite/spoke-only/)' },
+        options
+      );
+      expect(frozenHostAbsolute.findings.some((finding) => finding.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
     } finally {
       if (previous === undefined) delete process.env.SPOKE_BLOG_NETWORK_ENABLED;
       else process.env.SPOKE_BLOG_NETWORK_ENABLED = previous;
