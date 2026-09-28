@@ -575,6 +575,94 @@ suite('first-application-sibling-split — periodic sweep', () => {
     expect(results).toEqual([]);
   }));
 
+  // Codex on head 3681fe5c5e: a THREE-program group (A anchor + B + C). B
+  // and C both diverge; staff then price and separately invoice B ONLY (a
+  // partial split), leaving C still unpriced and un-invoiced. B's own new
+  // invoice must never itself register as a second, competing candidate
+  // for this estimate — the real alert (naming C, still uncovered by A's
+  // combined invoice) must stay open, never silently wiped by a bogus
+  // 'clear' verdict evaluated from B's own invoice's point of view.
+  test('a partially completed THREE-program split (B priced + invoiced, C still uncovered) keeps the real alert open', () => rollbackTest(async (trx) => {
+    const customerId = randomUUID();
+    const estimateId = randomUUID();
+    const anchorId = randomUUID();
+    const bId = randomUUID();
+    const cId = randomUUID();
+    await trx('customers').insert({
+      id: customerId, first_name: 'Synthetic three-program partial-split fixture', phone: `qa-${customerId.slice(0, 8)}`, active: true,
+    });
+    await trx('estimates').insert({ id: estimateId, customer_id: customerId, status: 'accepted' });
+    await trx('scheduled_services').insert([
+      {
+        id: anchorId, customer_id: customerId, source_estimate_id: estimateId, scheduled_date: SAME_DATE,
+        service_type: 'Quarterly Pest Control', status: 'confirmed', is_recurring: true, estimated_price: 200,
+      },
+      {
+        id: bId, customer_id: customerId, source_estimate_id: estimateId, scheduled_date: SAME_DATE,
+        service_type: 'Lawn Care', status: 'confirmed', is_recurring: true, estimated_price: null,
+      },
+      {
+        id: cId, customer_id: customerId, source_estimate_id: estimateId, scheduled_date: SAME_DATE,
+        service_type: 'Tree & Shrub', status: 'confirmed', is_recurring: true, estimated_price: null,
+      },
+    ]);
+    // Explicit, distinct created_at values (real acceptance vs a later
+    // hand-split are always separate requests/transactions in production,
+    // so their created_at values are naturally ordered — this test sets
+    // them explicitly rather than relying on the fixture's single shared
+    // transaction, whose default now() would otherwise tie them).
+    const anchorInvoiceId = randomUUID();
+    await trx('invoices').insert({
+      id: anchorInvoiceId, customer_id: customerId, scheduled_service_id: anchorId,
+      token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
+      status: 'draft', title: 'First Service Application',
+      notes: `Auto-generated from accepted estimate #${estimateId}. Customer selected pay per application — first application only.`,
+      line_items: JSON.stringify([{ description: 'First service application', quantity: 1, unit_price: 200, amount: 200 }]),
+      subtotal: 200, total: 200, created_at: new Date('2026-09-01T00:00:00Z'),
+    });
+
+    // B and C both diverge from the anchor.
+    await trx('scheduled_services').where({ id: bId }).update({ scheduled_date: '2026-10-02' });
+    await trx('scheduled_services').where({ id: cId }).update({ scheduled_date: '2026-10-03' });
+    const [firstResult] = await sweepOnce(trx, estimateId);
+    expect(firstResult.action).toBe('alerted');
+    expect(firstResult.divergingSiblingIds).toEqual([bId, cId].map(String).sort());
+    const dedupeKey = DEDUPE_KEY(estimateId, [bId, cId]);
+    expect((await readBell(trx, dedupeKey)).read_at).toBeNull();
+
+    // Office splits B only: prices it and mints its own live invoice —
+    // well AFTER the anchor's own invoice, exactly like a real hand-split
+    // done days later.
+    await trx('scheduled_services').where({ id: bId }).update({ estimated_price: 60 });
+    await trx('invoices').insert({
+      id: randomUUID(), customer_id: customerId, scheduled_service_id: bId,
+      token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
+      status: 'draft', title: 'Lawn Care', notes: 'Hand-split from the combined first-application invoice.',
+      line_items: JSON.stringify([{ description: 'Lawn Care', quantity: 1, unit_price: 60, amount: 60 }]),
+      subtotal: 60, total: 60, created_at: new Date('2026-09-05T00:00:00Z'),
+    });
+
+    // loadCandidates must find exactly ONE candidate for this estimate —
+    // the true anchor's invoice — never B's own new invoice too.
+    const candidates = await loadCandidates(trx);
+    const mine = candidates.filter((c) => c.source_estimate_id === estimateId);
+    expect(mine).toHaveLength(1);
+    expect(mine[0].invoice_id).toBe(anchorInvoiceId);
+
+    const [result] = await sweepOnce(trx, estimateId);
+    expect(result.action).toBe('alerted');
+    expect(result.divergingSiblingIds).toEqual([cId]);
+
+    // The alert for the now-narrower diverging set (just C, since B
+    // resolved) is open and unread — never wiped by a bogus clear from B's
+    // own invoice's point of view, which would have marked THIS row read
+    // too (clearStandingAlerts with no exceptKey clears every dedupeKey
+    // under the estimate's prefix).
+    const newDedupeKey = DEDUPE_KEY(estimateId, [cId]);
+    const stillOpen = await readBell(trx, newDedupeKey);
+    expect(stillOpen.read_at).toBeNull();
+  }));
+
   test('a priced (but still diverging) sibling still alerts (Codex P1 fix)', () => rollbackTest(async (trx) => {
     const ids = await fixture(trx);
     await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02', estimated_price: 42 });

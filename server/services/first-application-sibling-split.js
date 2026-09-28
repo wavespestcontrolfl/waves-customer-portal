@@ -349,11 +349,27 @@ async function loadStaleAlertInvoiceIds(conn) {
 // multi-program estimate where every program was independently priced AND
 // invoiced from day one (neither OR branch matches for such a sibling).
 // Invoice title/notes text is never consulted — a copy edit on the invoice
-// can no longer drop a candidate out of every future scan. The second-half
-// "stale" re-fetch below intentionally skips this structural re-check:
-// those invoice ids are already known relevant from a standing alert's own
-// metadata, and re-deriving structural eligibility on every tick would
-// risk dropping one the moment every sibling finally gets its own invoice.
+// can no longer drop a candidate out of every future scan. PLUS: only the
+// group's EARLIEST live invoice may register as a candidate (Codex on head
+// 3681fe5c5e) — once a sibling is priced AND separately invoiced (a
+// partial split in a 3+ program group), that sibling's OWN new invoice can
+// ALSO satisfy the "still covered sibling" check above on account of some
+// OTHER, still-unresolved sibling, becoming a second, illegitimate
+// candidate for the same estimate whose own bogus 'clear' verdict would
+// silently wipe the real, still-open alert (evaluateCandidate's 'clear'
+// branch calls clearStandingAlerts with no exceptKey — every alert under
+// the estimate's prefix, not just this row's own dedupeKey). The true
+// combined invoice is always the group's oldest live one — minted once at
+// acceptance; every later invoice for a sibling is by construction a
+// hand-split RESOLUTION, never a second combined one — so this keeps
+// exactly one candidate row per estimate at the SQL level, which is what
+// representativeCandidatesByEstimate's one-row-per-estimate consolidation
+// (and clearStandingAlerts' own no-exceptKey blast radius) both assume.
+// The second-half "stale" re-fetch below intentionally skips ALL of this
+// structural re-checking: those invoice ids are already known relevant
+// from a standing alert's own metadata, and re-deriving structural
+// eligibility on every tick would risk dropping one the moment every
+// sibling finally gets its own invoice.
 //
 // Deliberately UNBOUNDED by row count (Codex P1): the set this query
 // selects is already bounded by "currently non-settled" — operationally
@@ -386,6 +402,44 @@ async function loadCandidates(conn, { limit = SWEEP_LIMIT } = {}) {
                 .from('invoices as sib_invoice')
                 .whereRaw('sib_invoice.scheduled_service_id = sib.id')
                 .whereNotIn('sib_invoice.status', InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES);
+            });
+        });
+    })
+    // Only the EARLIEST live invoice anywhere in this estimate's top-level
+    // visit group may register as a candidate (Codex on head 3681fe5c5e):
+    // once a sibling gets priced AND its own live invoice minted (a
+    // partial split — the exact scenario the OR clause above exists to
+    // keep discovering), that sibling's OWN new invoice can ALSO satisfy
+    // the "still covered sibling exists" check above on account of some
+    // OTHER, still-unresolved sibling in a 3+ program group — becoming a
+    // SECOND, illegitimate candidate row for the SAME estimate. Both rows
+    // then reach evaluateCandidate independently; each 'clear' verdict
+    // calls clearStandingAlerts with no exceptKey, unconditionally wiping
+    // every standing alert under the estimate's prefix — so the split
+    // sibling's own bogus "clear" (it sees only the true anchor as its one
+    // diverging "sibling", which already has ITS OWN live invoice — the
+    // shared one — and reads that as resolved) silently wipes out the
+    // REAL, still-open alert the true anchor's row would have kept firing
+    // for the group's genuinely unresolved sibling. The true combined
+    // invoice is ALWAYS the group's oldest live invoice — it is minted
+    // once, at acceptance, and every later invoice for a sibling is by
+    // construction a hand-split RESOLUTION, never a second combined one —
+    // so excluding any row with an earlier live competitor in the same
+    // group keeps representativeCandidatesByEstimate's one-row-per-estimate
+    // invariant intact at the SQL level, before it ever reaches JS.
+    .whereNotExists(function earlierLiveGroupInvoiceExists() {
+      this.select(1)
+        .from('invoices as earlier_inv')
+        .join('scheduled_services as earlier_anchor', 'earlier_anchor.id', 'earlier_inv.scheduled_service_id')
+        .whereRaw('earlier_anchor.customer_id = anchor.customer_id')
+        .whereRaw('earlier_anchor.source_estimate_id = anchor.source_estimate_id')
+        .whereNull('earlier_anchor.recurring_parent_id')
+        .whereNotIn('earlier_inv.status', SETTLED_INVOICE_STATUSES)
+        .where((earlier) => {
+          earlier.whereRaw('earlier_inv.created_at < i.created_at')
+            .orWhere((tie) => {
+              tie.whereRaw('earlier_inv.created_at = i.created_at')
+                .whereRaw('earlier_inv.id < i.id');
             });
         });
     })
