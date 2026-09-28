@@ -67,4 +67,67 @@ function followupPromiseIsStale({ inputSnapshot, promptVersion = null, body, now
   return draftPromisedFollowup(inputSnapshot, promptVersion) && slaPhraseStatus(body, now) === 'stale';
 }
 
-module.exports = { SLA_PHRASES, FOLLOWUP_PROMISED_NOTE, realAnswersGateOn, replyPromisesFollowup, slaPhraseStatus, draftPromisedFollowup, followupPromiseIsStale };
+// Follow-up #1 (Codex r6): an operator can keep the promise while editing
+// its timing into wording the phrase list does not know ("within 60
+// minutes"), which would otherwise read as "no promise" and send at any
+// hour. On a draft that recorded a promised follow-up, an edit that removes
+// every recognized timing phrase the drafted reply had is unsendable.
+function followupPromiseEdited({ inputSnapshot, promptVersion = null, originalBody, body }) {
+  if (!draftPromisedFollowup(inputSnapshot, promptVersion)) return false;
+  if (originalBody == null) return false;
+  return slaPhraseStatus(originalBody, new Date()) !== 'none' && slaPhraseStatus(body, new Date()) === 'none';
+}
+
+// Follow-up #7 (Codex r9): the window comparison alone repeats — "by 9 AM
+// tomorrow morning" drafted Monday night reads as current Tuesday night,
+// after the promised Tuesday-morning deadline passed. The phrase plus the
+// decision's draft time pin the actual deadline: within the hour → drafted
+// + 60 min; by 9 AM this morning / tomorrow morning → that 9 AM ET.
+function followupDeadline(phrase, draftedAt) {
+  const at = draftedAt instanceof Date ? draftedAt : new Date(draftedAt);
+  if (!Number.isFinite(at.getTime())) return null;
+  const { parseETDateTime, etDateString, addETDays } = require('../utils/datetime-et');
+  const p = String(phrase || '').toLowerCase();
+  if (p === 'within the hour') return new Date(at.getTime() + 60 * 60 * 1000);
+  if (p === 'by 9 am this morning') return parseETDateTime(`${etDateString(at)}T09:00:00`);
+  if (p === 'by 9 am tomorrow morning') {
+    // The phrase is only ever generated after 8 PM ET. A decision row
+    // inserted after midnight (draft started before it) still means the
+    // 9 AM of ITS OWN date, not a day later (Codex #5194 r2).
+    const { etParts } = require('../utils/datetime-et');
+    const generatedBeforeMidnight = etParts(at).hour < 8;
+    return parseETDateTime(`${etDateString(generatedBeforeMidnight ? at : addETDays(at, 1))}T09:00:00`);
+  }
+  return null;
+}
+// The deadline is the ORIGINAL promise's (Codex #5194 r4): an operator who
+// updates "by 9 AM tomorrow morning" to the now-current "by 9 AM this
+// morning" on Tuesday at 8 AM has not moved the deadline, so it is derived
+// from the drafted reply's phrase and draft time; the outgoing body's
+// phrase is used only when the drafted reply carried none.
+function followupDeadlinePassed({ body, originalBody = null, draftedAt, now = new Date() }) {
+  if (draftedAt == null) return false;
+  const source = [originalBody, body].find((t) => t != null && slaPhraseStatus(t, now) !== 'none');
+  if (source == null) return false;
+  const text = String(source).toLowerCase();
+  return SLA_PHRASES.some((p) => {
+    if (!text.includes(p.toLowerCase())) return false;
+    const deadline = followupDeadline(p, draftedAt);
+    return Boolean(deadline) && now.getTime() > deadline.getTime();
+  });
+}
+
+// Both send seams ask one question: may this escalated draft's follow-up
+// promise go out as written? null when yes, else the reason.
+function followupPromiseBlockReason({ inputSnapshot, promptVersion = null, originalBody = null, body, draftedAt = null, now = new Date() }) {
+  if (draftPromisedFollowup(inputSnapshot, promptVersion) && followupDeadlinePassed({ body, originalBody, draftedAt, now })) return 'sla_deadline_passed';
+  if (followupPromiseIsStale({ inputSnapshot, promptVersion, body, now })) return 'sla_phrase_stale';
+  if (followupPromiseEdited({ inputSnapshot, promptVersion, originalBody, body })) return 'sla_phrase_edited';
+  return null;
+}
+
+module.exports = {
+  SLA_PHRASES, FOLLOWUP_PROMISED_NOTE, realAnswersGateOn, replyPromisesFollowup, slaPhraseStatus,
+  draftPromisedFollowup, followupPromiseIsStale, followupPromiseEdited, followupPromiseBlockReason,
+  followupDeadline, followupDeadlinePassed,
+};
