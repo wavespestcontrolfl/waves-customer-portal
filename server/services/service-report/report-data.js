@@ -5096,15 +5096,32 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         city: service.city,
         zip: service.zip,
       }) || null;
-      // Address fallback order when the report carries a property_id but no
-      // stamp text (property_id and the stamp are normally written
-      // together — an edge case): the linked property's OWN address, never
-      // the customer mirror, or a report for a secondary property would
-      // key against the primary and match nothing (or worse, match the
-      // primary's OTHER visits).
+      // Resolve THIS report's own property address when it's linked but
+      // unstamped (property_id and the stamp are normally written
+      // together — an edge case). PRIVACY (P1 2026-09-28): a linked
+      // property that cannot be resolved (e.g. deleted) fails CLOSED —
+      // never falls back to the customer mirror, which names a DIFFERENT
+      // property for a multi-property account. Only a report with NO
+      // property link at all may use the mirror fallback (the ordinary
+      // single-property case).
       let reportPropertyOwnAddressKey = null;
+      if (reportPropertyId && !reportStampAddressKey) {
+        const ownPropertyRow = await knex('customer_properties')
+          .where({ id: reportPropertyId })
+          .first('address_line1', 'address_line2', 'city', 'zip')
+          .catch(() => null);
+        reportPropertyOwnAddressKey = ownPropertyRow ? (addressKey(ownPropertyRow) || null) : null;
+      }
+      const reportAddressKey = reportPropertyId
+        // Linked: the visit's own stamp, else the linked property's own
+        // resolved address — NEVER the mirror. Null (fail closed) when
+        // neither resolves, so the block below never runs.
+        ? (reportStampAddressKey || reportPropertyOwnAddressKey || null)
+        // Unlinked/legacy: the mirror is the only candidate (the property
+        // this report belongs to IS the customer's primary in that case).
+        : (reportStampAddressKey || mirrorAddressKey);
 
-      if (reportPropertyId || reportStampAddressKey || mirrorAddressKey) {
+      if (reportAddressKey) {
         const todayIso = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
         const cutoffIso = new Date(Date.now() + 90 * 24 * 3600 * 1000)
           .toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
@@ -5129,14 +5146,13 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           .catch(() => null);
 
         if (Array.isArray(candidates) && candidates.length) {
-          // Resolve every property_id in play (the report's own, plus every
-          // candidate's) in one batched read, and each candidate's OWN
-          // premises — preferring its own stamp, then its property_id
-          // link, then — unstamped legacy rows — the same customer-mirror
+          // Resolve every CANDIDATE property_id in one batched read (the
+          // report's own property, if linked, was already resolved above
+          // — fail-closed, never re-attempted here). Each candidate's OWN
+          // premises prefers its own stamp, then its property_id link,
+          // then — unstamped legacy rows — the same customer-mirror
           // fallback every reader COALESCEs to.
-          const propertyIds = [...new Set(
-            [reportPropertyId, ...candidates.map((row) => row.property_id)].filter(Boolean),
-          )];
+          const propertyIds = [...new Set(candidates.map((row) => row.property_id).filter(Boolean))];
           let propertyKeyById = new Map();
           if (propertyIds.length) {
             const propertyRows = await knex('customer_properties')
@@ -5147,8 +5163,6 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
               (Array.isArray(propertyRows) ? propertyRows : []).map((row) => [row.id, addressKey(row) || null]),
             );
           }
-          if (reportPropertyId) reportPropertyOwnAddressKey = propertyKeyById.get(reportPropertyId) || null;
-          const reportAddressKey = reportStampAddressKey || reportPropertyOwnAddressKey || mirrorAddressKey;
 
           let mirrorKey = null;
           if (candidates.some((row) => !row.service_address_line1 && !row.property_id)) {

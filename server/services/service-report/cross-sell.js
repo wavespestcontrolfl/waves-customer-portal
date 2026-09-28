@@ -533,61 +533,43 @@ async function cacheOnlyPropertyLookup(address) {
 // prioritize without it).
 // ============================================================
 
-const ROACH_TERM = "(?:roach(?:es)?|cockroach(?:es)?)";
-const RODENT_TERM = '(?:rodents?|rats?|mouse|mice)';
-const TERMITE_TERM = "(?:termites?|swarmers?|swarming|mud\\s*tubes?|wood\\s*damage)";
-const V2_ROACH_RE = new RegExp(`\\b${ROACH_TERM}\\b`, 'i');
-const V2_RODENT_RE = new RegExp(`\\b${RODENT_TERM}\\b`, 'i');
-const V2_TERMITE_RE = new RegExp(`\\b${TERMITE_TERM}\\b`, 'i');
-// Mosquito has NO findings-based signal (removed 2026-09-28, third round of
-// the same "inferred from free text" finding — a mention count could never
-// be tied reliably to genuine severity from short structured text). Mosquito
-// is offered only by SEASON (May-Oct, below) or the unchanged ladder.
+// Findings priority reads ONLY structured, fixed-vocabulary fields from
+// THIS visit's typed snapshots (server/services/project-types.js is the one
+// source of truth for these keys/options) — never free text. Four rounds of
+// "claim inferred from free text" findings (2026-09-27/28: service_findings
+// regex matches, then an "inside" location inference, then a mosquito
+// mention count, then recommendation/category text read as an observed
+// finding) removed that whole approach structurally rather than refining it
+// further: service_findings rows carry recommendation and category-label
+// text that is NOT an observed finding, and no regex can reliably tell them
+// apart. An UNTYPED (general pest) visit carries no typed snapshot at all —
+// no findings signal, season/ladder decides. Mosquito has NO findings
+// branch at all (removed 2026-09-28) — season (May-Oct) or the ladder only.
+//
+// Field/option choices (verified against project-types.js):
+//   cockroach (COMPANION ONLY — a PRIMARY cockroach report means the
+//     customer is already mid-program today; never "start" what they
+//     already have): activity_level, any value other than 'None observed'
+//     (shared across the cockroach / german_roach_knockdown /
+//     palmetto_roach_knockdown forms, which all normalize to typed
+//     snapshot type 'cockroach').
+//   rodent_trapping: captures (count) > 0.
+//   rodent_bait_station: bait_consumption, any value other than 'None'.
+//   rodent_inspection: activity_found === 'Yes'.
+//   termite_bait_station: termite_activity === 'Active termites present'
+//     or 'Previous feeding noted' (both mean termites were physically
+//     present; 'None observed' is the baseline).
+//   termite_inspection: activity_status === 'Active infestation'
+//     ('No activity' and 'Old / inactive damage' are not current activity).
+// Primary OR companion counts for rodent/termite (no primary-exclusion rule
+// there): owning that family already excludes the offer via the ladder's
+// own property-scoped ownership evidence, which already counts THIS
+// report's own typed identity as owned — no duplicate guard needed here.
 
-// A finding only asserts what it POSITIVELY reports, never what a negation
-// or an explicit absence value rules out — "no roaches observed", "no
-// signs of rodents", and the structured label:value shape technicians
-// actually write ("Termite: none", "Roaches - not observed") must never
-// read as the activity they name. Same negation-window technique
-// call-booking-catalog.js's hasAffirmativeRoachMention /
-// hasAffirmativeRodentMention use for spoken call transcripts (negation
-// word + up to 4 plain-word fillers — punctuation breaks the run so
-// negation never crosses a clause boundary; adversative conjunctions
-// excepted so "no ants but roaches everywhere" keeps its affirmative
-// mention) — not reused directly: those also strip HISTORICAL mentions,
-// tuned for conversational recaps of a past visit, which service_findings
-// rows (short, dated, staff/AI-written facts about THIS visit) have no
-// analogue for and would be untested complexity here. Both negation
-// SHAPES are stripped before the affirmative regex runs; when in doubt,
-// no signal — the caller falls through to season/ladder rather than claim
-// a finding it can't back.
-const NEGATION_BEFORE = "(?:no|not|none|isn['’]?t|aren['’]?t|wasn['’]?t|weren['’]?t|don['’]?t|doesn['’]?t|didn['’]?t|haven['’]?t|hasn['’]?t|never|without)";
-const ABSENCE_AFTER = "(?:none(?:\\s+(?:observed|seen|found|noted|present))?|not\\s+(?:observed|seen|found|noted|present)|no\\s+(?:activity|evidence|signs?|damage)|n\\/a|negative)";
-
-function stripNegatedMentions(text, termCore) {
-  // The negation also consumes a COORDINATED second term ("no mice or
-  // rats", "not rats and mice") — without this trailing group, "didn't
-  // find any mice or rats" strips only "didn't find any mice" and the
-  // surviving "rats" would read as an affirmative mention on its own.
-  const before = new RegExp(
-    `\\b${NEGATION_BEFORE}\\s+(?:(?!(?:but|however|though|except)\\b)[\\w'’]+\\s+){0,4}?${termCore}`
-    + `(?:(?:\\s*,\\s*(?:or|and|nor)\\s+|\\s*,\\s*|\\s+(?:or|and|nor)\\s+)${termCore})*`,
-    'gi',
-  );
-  // One optional descriptor noun between the term and its absence value —
-  // the structured shorthand technicians actually write is as often
-  // "Rodent activity: none" / "Cockroach activity: none" as the bare
-  // "Termite: none".
-  const after = new RegExp(
-    `\\b${termCore}\\b\\s*(?:activity|evidence|signs?|damage)?\\s*[:\\-]?\\s*${ABSENCE_AFTER}\\b`,
-    'gi',
-  );
-  return String(text || '').replace(before, ' ').replace(after, ' ');
-}
-
-function hasAffirmativeMention(text, termCore, anchoredRe) {
-  return anchoredRe.test(stripNegatedMentions(text, termCore));
-}
+const COCKROACH_ACTIVITY_BASELINE = 'None observed';
+const RODENT_BAIT_BASELINE = 'None';
+const TERMITE_STATION_POSITIVE = new Set(['Active termites present', 'Previous feeding noted']);
+const TERMITE_INSPECTION_POSITIVE = 'Active infestation';
 
 // The one catalog service this module prices OUTSIDE buildCustomerPricingResponse:
 // a fixed one-time $350 two-treatment package (20260602000002_cockroach_control_service),
@@ -596,12 +578,6 @@ function hasAffirmativeMention(text, termCore, anchoredRe) {
 // per-application figure this module did not compute.
 const COCKROACH_SERVICE_KEY = 'cockroach_control';
 
-// Structured, staff/AI-reviewed evidence ONLY — service_findings (title/
-// detail/recommendation, the same rows the report's Findings section
-// renders) and the visit's typed companion identity. Deliberately never
-// reads technician_notes: raw tech-note text must not egress on a customer
-// surface (AGENTS.md; codex P1 r3 + inline on #3516), and a cross-sell
-// reason is exactly that — customer-facing copy.
 function parseJsonColumnLocal(value) {
   if (!value) return {};
   if (typeof value === 'object' && !Array.isArray(value)) return value;
@@ -614,42 +590,49 @@ function parseJsonColumnLocal(value) {
   }
 }
 
-async function detectReportFindingsSignal(service, database) {
+// This visit's typed snapshots — the primary and every companion, each
+// `{ type, values }` (values keyed by the project-types.js findingsFields
+// `key`s for that type). Pure and synchronous: no DB read, unlike the
+// removed free-text version.
+function typedSnapshotsFor(service) {
   const serviceData = parseJsonColumnLocal(service.service_data);
-  const primaryType = serviceData.typedReportSnapshot && typeof serviceData.typedReportSnapshot === 'object'
-    ? serviceData.typedReportSnapshot.type
+  const primary = serviceData.typedReportSnapshot && typeof serviceData.typedReportSnapshot === 'object'
+    ? serviceData.typedReportSnapshot
     : null;
-  const companionTypes = Array.isArray(serviceData.companionReportSnapshots)
-    ? serviceData.companionReportSnapshots
-      .filter((snap) => snap && typeof snap === 'object')
-      .map((snap) => snap.type)
+  const companions = Array.isArray(serviceData.companionReportSnapshots)
+    ? serviceData.companionReportSnapshots.filter((snap) => snap && typeof snap === 'object')
     : [];
-  // A cockroach-PRIMARY report means the customer is already mid-program
-  // today (the same visit this report documents) — never "start" what they
-  // already have. Only a companion typed cockroach snapshot (roach activity
-  // flagged alongside a DIFFERENT primary service) counts as new evidence
-  // toward the offer; the primary case falls through to the text signal,
-  // which the "already scheduled" check in buildCockroachFindingsOffer
-  // below also guards.
-  const roachCompanionTyped = primaryType !== 'cockroach' && companionTypes.includes('cockroach');
+  return { primary, companions, all: [primary, ...companions].filter(Boolean) };
+}
 
-  let findings = [];
-  try {
-    findings = await database('service_findings')
-      .where({ service_record_id: service.id })
-      .select('category', 'severity', 'title', 'detail', 'recommendation');
-  } catch { /* best-effort: an unreadable findings table reads as no signal */ }
-  const text = (Array.isArray(findings) ? findings : [])
-    .flatMap((f) => [f.category, f.severity, f.title, f.detail, f.recommendation])
-    .filter(Boolean)
-    .join(' ')
-    .toLowerCase();
+function detectReportFindingsSignal(service) {
+  const { primary, companions, all } = typedSnapshotsFor(service);
 
-  return {
-    roachesIndoors: roachCompanionTyped || hasAffirmativeMention(text, ROACH_TERM, V2_ROACH_RE),
-    rodentEvidence: hasAffirmativeMention(text, RODENT_TERM, V2_RODENT_RE),
-    termiteActivity: hasAffirmativeMention(text, TERMITE_TERM, V2_TERMITE_RE),
-  };
+  const roachesIndoors = companions.some((snap) => {
+    if (snap.type !== 'cockroach' || primary?.type === 'cockroach') return false;
+    const level = String(snap.values?.activity_level || '');
+    return !!level && level !== COCKROACH_ACTIVITY_BASELINE;
+  });
+
+  const rodentEvidence = all.some((snap) => {
+    const v = snap.values || {};
+    if (snap.type === 'rodent_trapping') return Number(v.captures) > 0;
+    if (snap.type === 'rodent_bait_station') {
+      const level = String(v.bait_consumption || '');
+      return !!level && level !== RODENT_BAIT_BASELINE;
+    }
+    if (snap.type === 'rodent_inspection') return String(v.activity_found || '') === 'Yes';
+    return false;
+  });
+
+  const termiteActivity = all.some((snap) => {
+    const v = snap.values || {};
+    if (snap.type === 'termite_bait_station') return TERMITE_STATION_POSITIVE.has(String(v.termite_activity || ''));
+    if (snap.type === 'termite_inspection') return String(v.activity_status || '') === TERMITE_INSPECTION_POSITIVE;
+    return false;
+  });
+
+  return { roachesIndoors, rodentEvidence, termiteActivity };
 }
 
 // buildCockroachFindingsOffer(service, database) → fingerprinted payload | null.
@@ -724,7 +707,8 @@ async function resolveReportCrossSellV2({ service, database, ladderEvidence, pla
   const billed = offerVocabulary(planRateFamilies);
   const notOwned = (key) => !owned.has(key) && !billed.has(key);
 
-  const signal = await detectReportFindingsSignal(service, database).catch(() => null);
+  let signal = null;
+  try { signal = detectReportFindingsSignal(service); } catch { /* best-effort: unreadable service_data reads as no signal */ }
   if (signal) {
     if (signal.roachesIndoors) {
       const cockroachOffer = await buildCockroachFindingsOffer(service, database);

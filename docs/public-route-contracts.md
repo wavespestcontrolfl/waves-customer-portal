@@ -498,62 +498,92 @@ disclosable-status allow-list as `nextAppointment`: pending/confirmed/
 en_route/on_site). Scoped to THIS report's property only: the linked
 visit's own `scheduled_services.property_id` or stamped `service_address_*`
 is authoritative; an unlinked/legacy report falls back to the
-already-COALESCEd customer-mirror address. Each candidate row is resolved
-the same way (its own stamp, else its `property_id`'s resolved
+already-COALESCEd customer-mirror address. Every address key folds in
+`address_line2` (the unit — a normalized "Apt 4"/"#4"/"Unit 4" all key
+identically), so a condo/apartment building's units never compare equal
+(a unit on one side and none on the other is a NON-match, not a fallback
+match). PRIVACY (P1 2026-09-28): a report whose visit IS property-linked
+but whose `property_id` cannot be RESOLVED (row deleted, bad link) fails
+CLOSED — the card is omitted entirely, never falling back to the customer
+mirror (which would name a DIFFERENT property on a multi-property
+account). Only a report with NO property link at all may use the mirror
+fallback (the ordinary single-property case). Each candidate row is
+resolved the same way (its own stamp, else its `property_id`'s resolved
 `customer_properties` address, else the customer mirror) before being
 compared to the report's property, so a multi-property account's report can
 never list another property's visits. Gate off (default): the field is
 absent and the payload is byte-identical to today.
 
 Findings- and season-aware cross-sell priority (owner-approved 2026-09-27,
-narrowed 2026-09-28 after three rounds of "claim inferred from free text"
-findings — see below): `GATE_REPORT_CROSS_SELL_V2` (dark, off unless
-exactly `true`, read at call time; inert unless `GATE_REPORT_CROSS_SELL`
-is also on — there is no card to prioritize without it) layers a priority
-on top of the existing `crossSell` offer ladder
-(`services/service-report/cross-sell.js`'s `buildReportCrossSell`). On,
-the payload's existing `crossSell` object may additionally carry `reason`
-— one short, honest, reason-tied sentence rendered above the CTA button,
-tied ONLY to the fact a matching affirmative finding exists, never to a
-location or a severity the finding doesn't itself state (roach: "We noted
-roach activity today — our cockroach control program is a focused
-two-treatment cleanout."; rodent: "We noted signs of rodent activity
-today — …"; termite: "We noted possible termite activity today — …";
-season-mosquito: "Mosquito season is here in SW Florida — …"; season-
-termite: "It's termite swarm season in SW Florida — …") — and `serviceKey`
-may resolve to two targets the ladder itself never picks: `rodent_bait`
-and `mosquito`, priced through the SAME `buildCustomerPricingResponse`
-estimator path and per-application-only serialization rule as the
-existing ladder targets. Their prompts/labels live in cross-sell.js's own
-`V2_TARGET_PROMPTS`/`V2_TARGET_LABELS` maps, deliberately NOT added to the
-shared `OFFER_PROMPTS`/`OFFER_LABELS` vocabulary the portal offer card and
-the photo-triage lane (`buildPortalOffer`, `buildOfferForFamily`) also
-read by `requestedTargetKey` — those two surfaces are unaffected by this
-gate and still refuse `rodent_bait`/`mosquito` as an unknown family.
-`serviceKey` may also resolve to `cockroach_control` — the one target
-priced OUTSIDE the estimator (a fixed one-time catalog price; `mode` is
-always `quote_cta`, `option` is always `null`) — gated on the live
-`services` catalog row (`is_active`, `!is_archived`, `customer_visible`,
+rewritten structurally 2026-09-28 after FOUR rounds of "claim inferred
+from free text" findings — see below): `GATE_REPORT_CROSS_SELL_V2` (dark,
+off unless exactly `true`, read at call time; inert unless
+`GATE_REPORT_CROSS_SELL` is also on — there is no card to prioritize
+without it) layers a priority on top of the existing `crossSell` offer
+ladder (`services/service-report/cross-sell.js`'s `buildReportCrossSell`).
+On, the payload's existing `crossSell` object may additionally carry
+`reason` — one short, honest, reason-tied FIXED sentence rendered above
+the CTA button, one per branch below, never composed from or naming a
+location or severity the structured field itself doesn't state (roach:
+"We noted roach activity today — our cockroach control program is a
+focused two-treatment cleanout."; rodent: "We noted signs of rodent
+activity today — …"; termite: "We noted possible termite activity
+today — …"; season-mosquito: "Mosquito season is here in SW Florida — …";
+season-termite: "It's termite swarm season in SW Florida — …") — and
+`serviceKey` may resolve to two targets the ladder itself never picks:
+`rodent_bait` and `mosquito`, priced through the SAME
+`buildCustomerPricingResponse` estimator path and per-application-only
+serialization rule as the existing ladder targets. Their prompts/labels
+live in cross-sell.js's own `V2_TARGET_PROMPTS`/`V2_TARGET_LABELS` maps,
+deliberately NOT added to the shared `OFFER_PROMPTS`/`OFFER_LABELS`
+vocabulary the portal offer card and the photo-triage lane
+(`buildPortalOffer`, `buildOfferForFamily`) also read by
+`requestedTargetKey` — those two surfaces are unaffected by this gate and
+still refuse `rodent_bait`/`mosquito` as an unknown family. `serviceKey`
+may also resolve to `cockroach_control` — the one target priced OUTSIDE
+the estimator (a fixed one-time catalog price; `mode` is always
+`quote_cta`, `option` is always `null`) — gated on the live `services`
+catalog row (`is_active`, `!is_archived`, `customer_visible`,
 `booking_enabled`) and on the customer having no already-open
-(pending/confirmed/en_route/on_site) visit linked to it. Findings priority
-reads ONLY the visit's own `service_findings` rows (title/detail/category/
-severity/recommendation — the same structured rows the report's Findings
-section renders) plus its typed companion-report identity, NEVER
-`technician_notes` (raw notes must never egress on a customer surface),
-and only an AFFIRMATIVE mention counts — a negation or an explicit
-absence value ("no roaches observed", "no signs of rodents", "termite:
-none") never asserts the finding it names. Mosquito has NO findings-based
-branch (removed 2026-09-28: a mention count in short structured text
-could not be tied reliably to genuine severity) — it is offered ONLY by
-season (America/New_York May–Oct) or the unchanged ladder. Roach findings
-likewise carry NO location claim (removed 2026-09-28: a location word
-anywhere in the findings text did not prove the roach mention itself was
-indoors) — the reason states only that activity was found. Season
-(May–Oct mosquito, Feb–May termite swarm season) runs only when no
-findings branch fired; May favors mosquito when neither is already owned.
-Never offers a family the customer already owns — reuses the ladder's own
-property-scoped ownership + plan-rate evidence, including the
-`termite_bait` → `termite` ownership mapping. Gate off (default):
+(pending/confirmed/en_route/on_site) visit linked to it.
+
+Findings priority reads ONLY structured, fixed-vocabulary fields from THIS
+visit's typed report snapshots (`service_records.service_data`'s
+`typedReportSnapshot` / `companionReportSnapshots`, primary or companion —
+`server/services/project-types.js` is the one source of truth for these
+keys/options) — free-text parsing of `service_findings`
+(category/title/detail/recommendation) and any negation handling over it
+was REMOVED ENTIRELY 2026-09-28 rather than refined a fourth time: those
+rows carry a technician's RECOMMENDATION and CATEGORY LABEL alongside the
+observation, text no regex could reliably separate from an actual finding.
+`technician_notes` was never read (raw notes must never egress on a
+customer surface) and still isn't. An UNTYPED (general pest) visit carries
+no typed snapshot at all — no findings signal, season/ladder decides. The
+surviving structured checks, each "unknown/empty value → no signal": roach
+— a COMPANION (never the primary — a primary cockroach report means the
+customer is already mid-program today) typed `cockroach` snapshot's
+`activity_level` is anything other than `'None observed'`; rodent — a
+`rodent_trapping` snapshot's `captures` count is > 0, OR a
+`rodent_bait_station` snapshot's `bait_consumption` is anything other than
+`'None'`, OR a `rodent_inspection` snapshot's `activity_found` is
+`'Yes'` (primary or companion, no exclusion); termite — a
+`termite_bait_station` snapshot's `termite_activity` is `'Active termites
+present'` or `'Previous feeding noted'`, OR a `termite_inspection`
+snapshot's `activity_status` is `'Active infestation'` (primary or
+companion, no exclusion; a merely historical `'Old / inactive damage'`
+value is NOT current activity and is not a signal). Mosquito has NO
+findings branch at all (removed 2026-09-28, a prior round: a mention count
+in short structured text could not be tied reliably to genuine severity)
+— it is offered ONLY by season (America/New_York May–Oct) or the
+unchanged ladder. Season (May–Oct mosquito, Feb–May termite swarm season)
+runs only when no findings branch fired; May favors mosquito when neither
+is already owned. Never offers a family the customer already owns —
+reuses the ladder's own property-scoped ownership + plan-rate evidence,
+including the `termite_bait` → `termite` ownership mapping (this also
+covers a typed rodent/termite report's OWN identity — a `rodent_trapping`
+visit's own family is already counted owned by the ladder's existing
+report-identity corroboration, so no separate primary-exclusion rule is
+needed for rodent/termite the way roach's is). Gate off (default):
 `crossSell` is byte-identical to today's unchanged ladder pick and carries
 no `reason` field.
 

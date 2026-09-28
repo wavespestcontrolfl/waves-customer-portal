@@ -252,6 +252,59 @@ describe('multi-property scoping', () => {
     expect(data.upcomingVisitsCard.visits.map((v) => v.serviceType)).toEqual(['Pest Control at rental follow-up']);
   });
 
+  // P1 privacy fix (2026-09-28): a linked report whose property_id cannot
+  // be RESOLVED (the customer_properties row is gone — deleted, or a bad
+  // link) must fail closed and show NOTHING — never fall back to the
+  // customer mirror, which names a different property for a multi-property
+  // account. Only a report with NO property link at all (the ordinary
+  // single-property case, covered by the next test) may use the mirror.
+  test('linked report whose property_id does not resolve (unstamped, deleted property row) → no card at all, even with an otherwise-matching mirror candidate', async () => {
+    process.env.GATE_REPORT_UPCOMING_VISITS = 'true';
+    const knex = makeKnex({
+      ...BASE_FIXTURES,
+      // 'prop-gone' deliberately absent from customer_properties — the
+      // report's OWN link is unresolvable.
+      customer_properties: [],
+      scheduled_services: [
+        { id: 'scheduled-current', customer_id: 'customer-1', scheduled_date: '2026-05-16', status: 'completed', service_type: 'Pest Control', property_id: 'prop-gone' },
+        // Unstamped, unlinked — would COALESCE to the customer mirror
+        // everywhere else, and the mirror fixture address matches
+        // BASE_SERVICE's. Must still be excluded: the report's own
+        // property is unresolvable, so nothing may be shown.
+        { id: 'scheduled-mirror-match', customer_id: 'customer-1', scheduled_date: todayPlus(5), status: 'confirmed', service_type: 'Should never appear (unresolvable linked property)', window_start: '09:00:00' },
+      ],
+    });
+    const data = await buildReportV1Data(
+      { ...BASE_SERVICE, service_date: '2026-05-16' },
+      'token-unresolvable',
+      knex,
+      LIVE,
+    );
+    expect(data.upcomingVisitsCard).toBeNull();
+  });
+
+  test('unlinked report (no scheduled_service_id link at all): the mirror fallback still works — the ordinary single-property case', async () => {
+    process.env.GATE_REPORT_UPCOMING_VISITS = 'true';
+    const knex = makeKnex({
+      ...BASE_FIXTURES,
+      customer_properties: [],
+      scheduled_services: [
+        // unstamped, unlinked candidate — COALESCEs to the customer
+        // mirror, which matches BASE_SERVICE's own (already-COALESCEd)
+        // address — included.
+        { id: 'scheduled-mirror', customer_id: 'customer-1', scheduled_date: todayPlus(5), status: 'confirmed', service_type: 'Lawn Care Treatment', window_start: '09:00:00' },
+      ],
+    });
+    const data = await buildReportV1Data(
+      // No scheduled_service_id at all — a genuinely unlinked/legacy report.
+      { ...BASE_SERVICE, scheduled_service_id: null, service_date: '2026-05-16' },
+      'token-unlinked-mirror',
+      knex,
+      LIVE,
+    );
+    expect(data.upcomingVisitsCard.visits.map((v) => v.serviceType)).toEqual(['Lawn Care Treatment']);
+  });
+
   // P1 privacy fix (2026-09-28): every address-key comparison in the
   // upcoming-visits scoping must include the normalized unit (address_line2,
   // or a unit token embedded in line1) — dropping it let a condo/apartment
