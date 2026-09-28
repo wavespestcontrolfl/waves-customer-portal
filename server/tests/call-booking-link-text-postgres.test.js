@@ -1210,6 +1210,56 @@ postgres('call-booking-link-text against PostgreSQL', () => {
     expect(result).toEqual({ sent: false, skipped: 'estimate_linked' });
   });
 
+  // codex #5018 P2: the handoff now joins public-quote.js's OWN estimate-
+  // automation duplicate lock (acquireAutomatedEstimateLocks, the SAME
+  // helper/key withAutomatedEstimatePhoneLock uses) before its own mirror
+  // recheck — a real Postgres proof no mocked knex can give: a concurrent
+  // quote-wizard insert holding that lock genuinely blocks the handoff
+  // until it commits, so the handoff's own recheck cannot race past it and
+  // always sees the estimate it left behind.
+  test('a quote-wizard draft insert holding the estimate-automation lock blocks the final check, then the handoff sees the estimate and does not send', async () => {
+    const WIZARD_PHONE = '+15555550779';
+    const leadId = await insertLead(mockPg, { phone: WIZARD_PHONE });
+    const send_at = new Date(NOW.getTime() - 60 * 60 * 1000).toISOString();
+    const callId = await insertCall(mockPg, {
+      from_phone: WIZARD_PHONE,
+      metadata: { lead_id: leadId, call_booking_link_text: { status: 'claimed', lead_id: leadId, send_at, original_send_at: send_at } },
+    });
+    buildLeadConsultationSmsLine.mockResolvedValue({ url: 'https://portal.example.com/inspection/tok-lock', line: 'Pick a time.\n\n', phone: WIZARD_PHONE });
+    sendCustomerMessage.mockImplementation(async ({ withSmsHandoff, providerPreSendCheck }) => {
+      const verdict = await withSmsHandoff((trx) => providerPreSendCheck({ dbi: trx }));
+      return verdict.ok ? { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SMtest0000000000000000000000lk' } : { sent: false, ...verdict };
+    });
+
+    const { acquireAutomatedEstimateLocks } = require('../services/estimate-automation-duplicates');
+    let releaseWizardWriter;
+    const wizardWriterHeld = new Promise((resolve) => { releaseWizardWriter = resolve; });
+    const wizardWriterTx = mockPg.transaction(async (trx) => {
+      // public-quote.js's own real order inside withAutomatedEstimatePhoneLock:
+      // the lock first, then the estimates insert, while still holding it.
+      await acquireAutomatedEstimateLocks(trx, WIZARD_PHONE);
+      await trx('estimates').insert({ id: randomUUID(), status: 'draft', estimate_data: { lead_id: leadId }, created_at: NOW });
+      await wizardWriterHeld; // held open until this test explicitly releases it
+    });
+
+    // Give the wizard-writer transaction a moment to actually acquire the
+    // lock (and commit its own INSERT within it) before the handoff starts.
+    await new Promise((r) => setTimeout(r, 100));
+
+    const call = await mockPg('call_log').where({ id: callId }).first();
+    const handoffPromise = callBookingLinkText.dispatchClaimedCall(mockPg, call, NOW);
+
+    // The handoff's own final check is now genuinely blocked on the SAME
+    // advisory key the wizard writer holds (pg_advisory_xact_lock waits, it
+    // does not error) — this is the real proof a mocked knex cannot give.
+    await new Promise((r) => setTimeout(r, 200));
+    releaseWizardWriter();
+    await wizardWriterTx;
+
+    const result = await handoffPromise;
+    expect(result).toEqual({ sent: false, skipped: 'estimate_linked' });
+  }, 10000);
+
   // codex #5018 P2: linkSentRecently used to match ONLY a short /l/<code>
   // bearer via short_codes — a manual composer send or a forwarded resolved
   // page URL can carry the long-form /inspection/<token> instead, which

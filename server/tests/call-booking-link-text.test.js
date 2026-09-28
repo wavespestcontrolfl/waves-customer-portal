@@ -437,6 +437,18 @@ describe('stagingIneligibleReason', () => {
     expect(stagingIneligibleReason(baseCall, extraction, leadId)).toBeNull();
   });
 
+  // OWNER RULING 2026-09-28: this transactional follow-up may go to a
+  // caller who never explicitly opted in to SMS, as long as it rides the
+  // consented destination (consentedDestination's ANI/dialed-number path) —
+  // no_sms_consent_captured removed from EXCLUDED_TRIAGE_FLAGS. Every OTHER
+  // block still holds: do_not_contact_requested (test below) and an
+  // EXPLICIT sms_consent_given: false ('explicit SMS consent refusal',
+  // covered in the table above) are unaffected by this removal.
+  test('no_sms_consent_captured alone no longer blocks (owner ruling 2026-09-28)', () => {
+    const extraction = { ...baseExtraction(), triage_flags: ['no_sms_consent_captured'] };
+    expect(stagingIneligibleReason(baseCall, extraction, leadId)).toBeNull();
+  });
+
   // codex #5018 r11 P1: the model's own raw out_of_service_area triage flag
   // still blocks via the canonical-merge safety net — moved out of the
   // shared test.each above because baseCall's AV (validated_accept,
@@ -1705,6 +1717,29 @@ describe('dispatchClaimedCall', () => {
       entryPoint: 'call_booking_link_text', leadId: OPEN_LEAD.id,
       consentBasis: { status: 'transactional_allowed', source: 'call_booking_link_text' },
     }));
+  });
+
+  // OWNER RULING 2026-09-28: no_sms_consent_captured alone no longer blocks
+  // this transactional follow-up, sent only to the consented ANI
+  // destination — CALL.from_phone === OPEN_LEAD.phone here, the ANI path
+  // consentedDestination grants on implied consent alone.
+  test('no_sms_consent_captured whose destination is the ANI is staged and sent (owner ruling 2026-09-28)', async () => {
+    const withFlag = { ...CALL, ai_extraction_enriched: { ...CALL.ai_extraction_enriched, triage_flags: ['no_sms_consent_captured'] } };
+    const conn = makeDb({ freshCall: withFlag });
+    const result = await dispatchClaimedCall(conn, withFlag, NOW);
+    expect(result.sent).toBe(true);
+    expect(sendCustomerMessage).toHaveBeenCalled();
+  });
+
+  // Contrast: an explicit do_not_contact_requested triage flag still blocks
+  // — every OTHER block in EXCLUDED_TRIAGE_FLAGS is unaffected by the
+  // removal above.
+  test('the same caller with do_not_contact_requested is not sent', async () => {
+    const withFlag = { ...CALL, ai_extraction_enriched: { ...CALL.ai_extraction_enriched, triage_flags: ['do_not_contact_requested'] } };
+    const conn = makeDb({ freshCall: withFlag });
+    const result = await dispatchClaimedCall(conn, withFlag, NOW);
+    expect(result.skipped).toBe('triage_flag_do_not_contact_requested');
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
   test('a lead linkage rewritten since staging (attribution correction/merge) blocks the send', async () => {

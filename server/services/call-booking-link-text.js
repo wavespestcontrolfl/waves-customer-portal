@@ -233,9 +233,14 @@ const WANTS_ONSITE_INTENTS = new Set([
 // more specific angle (e.g. cancellation_request is also an existing-
 // customer/complaint shape) only where a second exclusion would be inert;
 // every flag here is its own reason not to text.
+// no_sms_consent_captured deliberately excluded: OWNER RULING 2026-09-28 —
+// this transactional follow-up may go to a caller who never explicitly
+// opted in, as long as it rides the consented destination (consentedDestination's
+// ANI/dialed-number path, implied consent); explicit refusals (do_not_contact,
+// sms_consent_given === false) and destination_not_consented still block it.
 const EXCLUDED_TRIAGE_FLAGS = new Set([
   'out_of_service_area', 'hoa_common_area_requires_approval', 'commercial_requires_quote',
-  'caller_not_authorized', 'no_sms_consent_captured', 'do_not_contact_requested',
+  'caller_not_authorized', 'do_not_contact_requested',
   'address_unverifiable', 'competing_quotes_active', 'spam_or_wrong_number',
   'cancellation_request', 'manual_review_requested', 'quote_promised',
   'callback_number_needed',
@@ -1532,6 +1537,35 @@ async function dispatchClaimedCall(conn, call, now) {
       // instead of committing a booking in the gap between
       // bookedSinceCall's SELECT and the actual provider request.
       //
+      // codex #5018 P2: the estimate-automation duplicate lock (services/
+      // estimate-automation-duplicates.js), keyed on this SAME destination
+      // phone — public-quote.js's own quote-wizard estimate insert
+      // (withAutomatedEstimatePhoneLock, contactPhone) takes it around
+      // exactly the write leadHasOpenEstimateMirror's own recheck below
+      // reads, so acquiring it here first makes that recheck wait for an
+      // in-flight wizard insert to finish rather than racing it — the same
+      // "resolve → lock → re-resolve" idiom this file already documents.
+      //
+      // LOCK ORDER: acquired FIRST, before lockCustomerComms/lockSmsPhone
+      // below — not after. This is a THIRD advisory-lock family (its own
+      // hashtext namespaces, 'estimate_automation_duplicate'/'_customer',
+      // never colliding with lockSmsPhone's 'twilio_21610' two-key lock or
+      // lockCustomerComms's single-key one), so ordering it relative to
+      // those two is a free choice UNLESS some other caller combines it
+      // with either — and one already does: lead-response-tools.js's
+      // flag_for_estimate tool wraps withAutomatedEstimatePhoneLock
+      // AROUND resolveLeadSubject(..., lock: true), whose own body takes
+      // lockCustomerComms (then the customers/leads row locks) INSIDE that
+      // callback — i.e., automated-estimate-lock, THEN comms. Taking comms
+      // first here, as this handoff already does for its own phone lock
+      // below, would invert that: this handoff holds comms(customer) and
+      // wants the estimate lock, while flag_for_estimate holds the
+      // estimate lock and wants comms(that same customer) — the identical
+      // two-resource cycle shape the phone-vs-comms comment right below
+      // this one already explains. Matching flag_for_estimate's established
+      // order (estimate lock before comms) instead closes it.
+      const { acquireAutomatedEstimateLocks } = require('./estimate-automation-duplicates');
+      await acquireAutomatedEstimateLocks(trx, destinationPhone);
       // Both candidate sources are closure-stable — no speculative read
       // needed: leadLinkedToExistingCustomer (inside neverSendRecheck)
       // refuses whenever lead.customer_id is truthy and differs from
