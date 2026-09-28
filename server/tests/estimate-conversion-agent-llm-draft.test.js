@@ -42,6 +42,8 @@ jest.mock('../services/context-aggregator', () => ({
 jest.mock('../services/sms-suggest-mode', () => ({
   hasRedactionPlaceholder: jest.fn((text) => /\[(?:name|phone|address|date|time|email)\]/i.test(String(text || ''))),
   hasPriceQuote: jest.fn((text) => /\$\s*\d|\b\d[\d,]*(?:\.\d+)?\s*dollars?\b/i.test(String(text || ''))),
+  // real sanitizer: the persisted shape is the contract /agent-draft reads
+  sanitizeIntendedActions: jest.requireActual('../services/sms-suggest-mode').sanitizeIntendedActions,
 }));
 
 jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({})));
@@ -517,5 +519,41 @@ describe('processInboundSms — GATE_SMS_REAL_ANSWERS grounded-amount guard (Cod
     const payload = lastDecisionInsert();
     expect(payload.model).toBe('deterministic_rules');
     expect(payload.suggested_message || '').not.toContain('$120.50');
+  });
+});
+
+
+// Pre-push audit P1 (PR #5119 round 3): the estimate-review lane discarded
+// parsed.intended_actions, so a v12 draft promising a payment link, a
+// booking, or an owned follow-up reached the reviewer with no visible action.
+describe('processInboundSms — intended actions persist on the estimate-review card', () => {
+  test('an LLM draft\'s actions are sanitized into input_snapshot.intended_actions', async () => {
+    process.env.GATE_SMS_REAL_ANSWERS = 'true';
+    seedActiveSchedulingThread();
+    ContextAggregator.getContextForCustomer.mockResolvedValue({ summary: 'ctx', flags: [], billing: { outstandingBalance: 120.5 } });
+    generateGroundedDraft.mockResolvedValue({
+      parsed: {
+        reply: 'Your current balance is $120.50 — I will text your pay link now.',
+        intended_actions: [{ type: 'send_payment_link' }, { type: 'escalate', note: 'followup_promised' }, { type: 42 }, { type: 'x', note: 'n'.repeat(300) }],
+        auto_send_safe: false, missing_info: null,
+      },
+      passes: 1, converged: true, model: MODELS.OPENAI_SMS_DRAFT, promptVersion: 'house_voice_v12_real_answers',
+    });
+    await processInboundSms({ customer: CUSTOMER, from: '+19415551234', to: '+19415550000', body: 'How much do I owe', smsLogId: 'sms-in-actions-1' });
+    const snapshot = JSON.parse(lastDecisionInsert().input_snapshot);
+    expect(snapshot.intended_actions).toEqual([
+      { type: 'send_payment_link' },
+      { type: 'escalate', note: 'followup_promised' },
+      { type: 'x', note: 'n'.repeat(200) },
+    ]);
+  });
+
+  test('a template (non-LLM) draft carries no intended_actions key', async () => {
+    process.env.GATE_SMS_REAL_ANSWERS = 'true';
+    seedActiveSchedulingThread();
+    generateGroundedDraft.mockResolvedValue(null);
+    await processInboundSms({ customer: CUSTOMER, from: '+19415551234', to: '+19415550000', body: 'Can we do Tuesday', smsLogId: 'sms-in-actions-2' });
+    const snapshot = JSON.parse(lastDecisionInsert().input_snapshot);
+    expect(snapshot).not.toHaveProperty('intended_actions');
   });
 });

@@ -676,7 +676,13 @@ async function generateLlmReviewDraft({ customer, body, decision, estimate }) {
     // forever once GATE_SMS_REAL_ANSWERS goes live). Persisted onto
     // agent_decisions.prompt_version below (processInboundSms), so this
     // must record what generated THIS row, not a label that never moves.
-    return { reply: parsed.reply, model, promptVersion, passes, openTimesSnapshot: openTimesSnapshot ?? null };
+    // Pre-push audit P1: the actions this draft promises (payment link,
+    // booking, escalate for a follow-up) ride to the review card the same
+    // way the suggestion lane's do, so /agent-draft can show them.
+    return {
+      reply: parsed.reply, model, promptVersion, passes, openTimesSnapshot: openTimesSnapshot ?? null,
+      intendedActions: Array.isArray(parsed.intended_actions) ? parsed.intended_actions : [],
+    };
   } catch (err) {
     logger.warn(`[estimate-conversion-agent] LLM review draft failed (${err.message}); using template`);
     return null;
@@ -773,6 +779,11 @@ async function processInboundSms({ customer, from, to, body, smsLogId, sourceMes
         // at /sms and /schedule-sms time. Absent for template drafts and for
         // any llm draft whose reply never quoted an open-times window.
         ...(llmDraft?.openTimesSnapshot ? { open_times_snapshot: llmDraft.openTimesSnapshot } : {}),
+        // Same sanitized shape publishSuggestion persists, read back by
+        // GET /agent-draft (pre-push audit P1). Template drafts carry none.
+        ...(llmDraft && Array.isArray(llmDraft.intendedActions)
+          ? { intended_actions: require('./sms-suggest-mode').sanitizeIntendedActions(llmDraft.intendedActions) || [] }
+          : {}),
       }),
       recommended_actions: JSON.stringify(decision.recommendedActions),
       auto_actions_allowed: JSON.stringify(decision.autoActionsAllowed),
