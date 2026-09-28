@@ -2815,6 +2815,15 @@ const gates = {
   // flip needs no redeploy. Kill switch: unset GATE_PEST_TRACE_OR_NOTHING.
   pestTraceOrNothing: gateEnvValue('GATE_PEST_TRACE_OR_NOTHING'),
 
+  // Pest Report V2 "expectations" blocks (owner-approved 2026-09-27): rain +
+  // treatment, spiders (#1 callback), and a short "what to expect" list keyed
+  // to product class. OFF everywhere until Adam flips it (exact 'true' —
+  // read directly, not through gateEnvValue's looser '1'/'on' parse, by
+  // pestReportExpectationsGateOn() in pest-report-expectations.js). Kill
+  // switch: unset GATE_PEST_REPORT_EXPECTATIONS. This entry is the
+  // status/log listing only.
+  pestReportExpectations: process.env.GATE_PEST_REPORT_EXPECTATIONS === 'true',
+
   // Re-service (callback) report copy (2026-08-30): the customer report for
   // a callback visit keys off `service_records.is_callback` instead of the
   // editable display name, drops below the honest V2 status branches, splits
