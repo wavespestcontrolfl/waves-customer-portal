@@ -1624,6 +1624,26 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // Promises kept by a booking for their promised slot whose proof lapsed
+  // (visit cancelled/skipped/moved, call relinked) go back to Owed within
+  // fifteen minutes on the commitments gate alone — the watchdog's own
+  // cadence depends on other gates (slot-proof-reconciler.js).
+  cron.schedule('0 */15 * * * *', async () => {
+    try {
+      const result = await require('./slot-proof-reconciler').runSlotProofReconciler();
+      if (result?.skipped === true && result.reason !== 'gated_off' && result.reason !== 'lease_held') {
+        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+        const t0 = Date.now();
+        await recordJobStart('slot-proof-reconciler').catch(() => {});
+        await recordJobEnd('slot-proof-reconciler', t0, new Error(`tick skipped: ${result.reason || 'no_connection'}`)).catch(() => {});
+        throw new Error(`Slot proof reconciler tick skipped: ${result.reason || 'no_connection'}`);
+      }
+      if (result?.reopened > 0) logger.info(`[slot-proof-reconciler] reopened=${result.reopened} of ${result.checked} call(s)`);
+    } catch (err) {
+      logger.error(`[slot-proof-reconciler] tick failed (${err.code || err.name || 'error'})`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // The same watchdog and persisted identities own reminders before and
   // after rollback. Cards add a five-minute cadence to the daily sweep.
   cron.schedule('0 */5 * * * *', async () => {

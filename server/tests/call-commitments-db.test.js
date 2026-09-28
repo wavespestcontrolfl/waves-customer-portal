@@ -435,6 +435,10 @@ maybeDescribe('call_commitments (live Postgres)', () => {
     await lapses(visitTo({ status: 'cancelled' }), visitTo({ status: 'pending' }));
     await lapses(visitTo({ status: 'rescheduled' }), visitTo({ status: 'pending' }));
     await lapses(visitTo({ status: 'skipped' }), visitTo({ status: 'pending' }));
+    // The call's duration posted after the proof: the booking was made while
+    // the call was still going (codex #5081 r8 P2).
+    const callTo = (patch) => () => db('call_log').where({ id: call.id }).update(patch);
+    await lapses(callTo({ duration_seconds: 20 * 60 }), callTo({ duration_seconds: null }));
     await lapses(visitTo({ window_start: '16:30' }), visitTo({ window_start: '15:00' }));
     // Entered once the slot had come: a record of it, not the booking (codex #5081 r6 P2).
     await lapses(visitTo({ created_at: new Date(Date.parse(threePm) + 60 * 60 * 1000) }), visitTo({ created_at: new Date(Date.now() - 60 * 1000) }));
