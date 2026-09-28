@@ -16,8 +16,8 @@ import {
   completionTimeOnSiteBody,
   completionWillReview,
   restoredBackfillChoices,
-  shouldResetCompletionIdempotencyKey,
 } from "./SchedulePage.jsx";
+import { shouldResetCompletionIdempotencyKey } from "../../lib/completion-idempotency";
 
 // Pre-submit report reconciliation (GATE_REPORT_RECONCILE_PROMPT): the
 // server 409s with code 'report_reconcile' and the contradictions packed

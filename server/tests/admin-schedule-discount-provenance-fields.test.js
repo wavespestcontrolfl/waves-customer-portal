@@ -35,6 +35,17 @@ jest.mock('../services/weather-forecast', () => ({
   getDailyRainOutlookBounded: jest.fn(async () => null),
 }));
 
+// The day route also fetches current weather directly. Keep these database
+// contracts independent of the network as well as the mocked rain forecast.
+let weatherFetch;
+beforeEach(() => {
+  weatherFetch = jest.spyOn(global, 'fetch').mockResolvedValue({
+    ok: true,
+    json: async () => ({ current: { temperature_2m: 75, wind_speed_10m: 5, precipitation_probability: 0 } }),
+  });
+});
+afterEach(() => { weatherFetch?.mockRestore(); });
+
 const SKIP = !process.env.DATABASE_URL;
 const postgres = SKIP ? describe.skip : describe;
 const { randomUUID } = require('node:crypto');

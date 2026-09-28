@@ -145,3 +145,18 @@ test('a customer with a phone keeps the single Text reminder and the customer-wi
     original_message_type: 'autopay_pre_charge', billing_mode_at_send: 'monthly_membership',
   });
 });
+
+// A guarded current bell remains delivered after native push fails.
+test.each([
+  [{ sent: false, deliveryOutcome: 'not_sent', bellPersisted: true }, 1, 0],
+])('settles the current App bell cooldown: %j', async (outcome, sent, skipped) => {
+  mockPrefs = { billing_channels: ['push'] };
+  sendCustomerMessage.mockResolvedValueOnce(outcome);
+  expect(await sendPreChargeReminders()).toMatchObject({ sent, skipped });
+  expect(logAutopay).toHaveBeenCalledWith('cust-1', 'pre_charge_reminder_sent',
+    expect.objectContaining({ details: expect.objectContaining({ channel: 'push' }) }));
+  if (outcome.eventVisibleAt) expect(logAutopay.mock.calls[0][2]).toMatchObject({ createdAt: outcome.eventVisibleAt });
+  mockCooldown.mockResolvedValue(true);
+  await sendPreChargeReminders();
+  expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+});

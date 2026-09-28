@@ -21,6 +21,18 @@ jest.mock('../utils/cron-lock', () => ({
 jest.mock('../services/lead-consultation-email-block', () => ({
   buildConsultationEmailBlock: jest.fn(),
 }));
+// A customer's payment-failed step rides the shared billing email authority
+// (owner ruling 2026-09-27). Its own locks, rechecks and suppression reads are
+// pinned in billing-channel-email-authority.test.js and the Postgres suite;
+// here it authorizes the enrollment's billing recipient, and a test overrides
+// it to refuse at the first read or at the provider handoff.
+jest.mock('../services/billing-channel-email-authority', () => ({
+  loadBillingEmailContext: jest.fn(),
+  dispatchUnderBillingEmailAuthority: jest.fn(),
+  blocked: (code, reason, { retryable = false } = {}) => ({
+    sent: false, blocked: true, code, reason, deliveryOutcome: 'not_sent', ...(retryable ? { retryable: true } : {}),
+  }),
+}));
 
 const {
   renderAutomationStepContent,
@@ -33,6 +45,7 @@ const {
 const db = require('../models/db');
 const sendgrid = require('../services/sendgrid-mail');
 const { buildConsultationEmailBlock } = require('../services/lead-consultation-email-block');
+const BillingEmailAuthority = require('../services/billing-channel-email-authority');
 
 function chain({ result = [], first, returning, updateResult = 1 } = {}) {
   const q = {};
@@ -258,18 +271,11 @@ describe('automation runner suppression guardrails', () => {
     }));
   });
 
-  test.each([
-    { payment_issue_channels: ['sms', 'push'] },
-    { payment_issue_channels: ['email', 'sms'], email_enabled: false },
-    { payment_issue_channels: ['email'], email_enabled: false },
-  ])('a queued payment-failed step honors the current Email choice and opt-out: %j', async (prefs) => {
+  function paymentFailedQueues({ enrollmentUpdate = chain(), sendUpdate = chain(), suppressions = [] } = {}) {
     const enrollment = {
       id: 'enrollment-1', template_key: 'payment_failed', customer_id: 'cust-1', status: 'active',
       current_step: 0, email: 'customer@example.com', first_name: 'Sam', last_name: 'Customer',
     };
-    const prefsRead = chain({ first: prefs });
-    const sendUpdate = chain();
-    const enrollmentUpdate = chain();
     setDbQueues({
       automation_enrollments: [chain({ first: enrollment }), chain({ first: enrollment }), enrollmentUpdate],
       automation_templates: [chain({ first: { key: 'payment_failed', name: 'Payment Failed', asm_group: 'service' } })],
@@ -277,42 +283,164 @@ describe('automation runner suppression guardrails', () => {
         html_body: '<p>Please update payment.</p>', text_body: 'Please update payment.',
         from_email: 'automations@wavespestcontrol.com', enabled: true }] })],
       automation_step_sends: [chain({ returning: [{ id: 'send-1' }] }), sendUpdate],
-      email_suppressions: [chain({ result: [] })],
-      notification_prefs: [prefsRead],
+      email_suppressions: [chain({ result: suppressions })],
     });
+    return { enrollmentUpdate, sendUpdate };
+  }
 
-    await expect(sendStep('enrollment-1')).resolves.toEqual({
-      sent: false, blocked: true, reason: 'Billing delivery preference excludes Email',
+  function authorizeBillingRecipient(email = 'customer@example.com', name = 'Sam Customer') {
+    BillingEmailAuthority.loadBillingEmailContext.mockReset().mockResolvedValue({
+      category: 'payment_issue', recipient: { email, name }, recipientEmail: email,
     });
-    expect(prefsRead.first).toHaveBeenCalledWith();
-    expect(sendgrid.sendOne).not.toHaveBeenCalled();
-    expect(sendUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
-      status: 'blocked', failure_reason: 'Billing delivery preference excludes Email',
+    BillingEmailAuthority.dispatchUnderBillingEmailAuthority.mockReset()
+      .mockImplementation(async ({ dispatch, state }) => {
+        await dispatch('authority-trx', providerBoundaryCheck);
+        state.providerAccepted = true;
+        return { ok: true };
+      });
+  }
+  const providerBoundaryCheck = jest.fn(async () => ({ ok: true }));
+
+  test('a customer\'s payment-failed step goes to the billing recipient through the shared billing email authority', async () => {
+    paymentFailedQueues();
+    authorizeBillingRecipient();
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-billing' });
+
+    await expect(sendStep('enrollment-1')).resolves.toMatchObject({ sent: true, done: true });
+
+    const input = { customerId: 'cust-1', channel: 'email', metadata: { billingDeliveryCategory: 'payment_issue' } };
+    expect(BillingEmailAuthority.loadBillingEmailContext).toHaveBeenCalledWith(input);
+    expect(BillingEmailAuthority.dispatchUnderBillingEmailAuthority).toHaveBeenCalledWith(expect.objectContaining({
+      input, recipientEmail: 'customer@example.com', emailSuppression: expect.any(Function),
     }));
-    expect(enrollmentUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
-      status: 'cancelled', next_send_at: null,
+    // The authority's final check rides into sendOne, which runs it right
+    // before the provider request (#5041).
+    expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({
+      to: 'customer@example.com', providerBoundaryCheck,
     }));
   });
 
-  test('a legacy NULL payment-issue choice still sends', async () => {
-    const enrollment = {
-      id: 'enrollment-1', template_key: 'payment_failed', customer_id: 'cust-1', status: 'active',
-      current_step: 0, email: 'customer@example.com', first_name: 'Sam', last_name: 'Customer',
-    };
-    setDbQueues({
-      automation_enrollments: [chain({ first: enrollment }), chain({ first: enrollment }), chain()],
-      automation_templates: [chain({ first: { key: 'payment_failed', name: 'Payment Failed', asm_group: 'service' } })],
-      automation_steps: [chain({ result: [{ id: 'step-1', step_order: 0, subject: 'Payment issue',
-        html_body: '<p>Please update payment.</p>', text_body: 'Please update payment.',
-        from_email: 'automations@wavespestcontrol.com', enabled: true }] })],
-      automation_step_sends: [chain({ returning: [{ id: 'send-1' }] }), chain()],
-      email_suppressions: [chain({ result: [] })],
-      notification_prefs: [chain({ first: { payment_issue_channels: null } })],
-    });
-    sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-legacy' });
+  test('the locked suppression recheck is this automation\'s own group, read on the authority\'s transaction', async () => {
+    paymentFailedQueues();
+    authorizeBillingRecipient();
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-billing' });
+    await sendStep('enrollment-1');
+    const { emailSuppression } = BillingEmailAuthority.dispatchUnderBillingEmailAuthority.mock.calls[0][0];
 
-    await expect(sendStep('enrollment-1')).resolves.toMatchObject({ sent: true, done: true });
-    expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+    const groupUnsubscribe = { suppression_type: 'unsubscribe', group_key: 'service_operational', status: 'active' };
+    const trx = jest.fn(() => chain({ result: [groupUnsubscribe] }));
+    await expect(emailSuppression(trx, 'customer@example.com')).resolves.toMatchObject({
+      code: 'EMAIL_SUPPRESSED', reason: 'Suppressed: unsubscribe (service_operational)',
+    });
+    expect(trx).toHaveBeenCalledWith('email_suppressions');
+
+    const newsletterOnly = jest.fn(() => chain({ result: [{ suppression_type: 'unsubscribe', group_key: 'marketing_newsletter' }] }));
+    await expect(emailSuppression(newsletterOnly, 'customer@example.com')).resolves.toBeNull();
+  });
+
+  test.each([
+    ['an explicit payment-issue choice without Email', {
+      code: 'BILLING_PREFERENCES_CHANGED', reason: 'Email is not selected for this billing category', retryable: true, deferred: true,
+    }, 'billing_email_deselected'],
+    ['the portal-wide email switch', { code: 'BILLING_EMAIL_DISABLED', reason: 'Email notifications are disabled for this customer' },
+      'billing_email_disabled'],
+    ['no billing email on file', { code: 'NO_EMAIL_RECIPIENT', reason: 'No billing email recipient is available' },
+      'no_email_recipient'],
+    ['a deleted customer', { code: 'CUSTOMER_NOT_FOUND', reason: 'Customer is unavailable' }, 'customer_not_found'],
+  ])('%s at the first read cancels the enrollment, as before', async (_label, block, cancelReason) => {
+    const { enrollmentUpdate, sendUpdate } = paymentFailedQueues();
+    authorizeBillingRecipient();
+    BillingEmailAuthority.loadBillingEmailContext.mockResolvedValueOnce({ error: { blocked: true, ...block } });
+
+    await expect(sendStep('enrollment-1')).resolves.toEqual({ sent: false, blocked: true, reason: block.reason });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(sendUpdate.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'blocked', failure_reason: block.reason }));
+    expect(enrollmentUpdate.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'cancelled', next_send_at: null }));
+    expect(db.raw.mock.calls.at(-1)[1]).toEqual([JSON.stringify(cancelReason)]);
+  });
+
+  test('an unreadable billing context leaves the step due instead of failing or cancelling the enrollment', async () => {
+    const { enrollmentUpdate, sendUpdate } = paymentFailedQueues();
+    authorizeBillingRecipient();
+    BillingEmailAuthority.loadBillingEmailContext.mockRejectedValueOnce(new Error('connection reset'));
+
+    await expect(sendStep('enrollment-1')).resolves.toEqual({
+      sent: false, deferred: true, reason: 'Billing email authority could not be verified',
+    });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(sendUpdate.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'failed' }));
+    expect(enrollmentUpdate.update).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['a suppression found under the recipient lock cancels', {
+      code: 'EMAIL_SUPPRESSED', reason: 'Suppressed: bounce',
+    }, 'cancelled'],
+    ['a staff do-not-contact cancels', { code: 'SUPPRESSED_MANUAL_DNC', reason: 'manual_dnc' }, 'cancelled'],
+    ['a recipient that moved mid-send stays due', {
+      code: 'EMAIL_RECIPIENT_CHANGED', reason: 'Billing email recipient changed before delivery', retryable: true,
+    }, 'due'],
+  ])('at the provider handoff, %s', async (_label, block, outcome) => {
+    const { enrollmentUpdate } = paymentFailedQueues();
+    authorizeBillingRecipient();
+    BillingEmailAuthority.dispatchUnderBillingEmailAuthority.mockImplementationOnce(async ({ state }) => {
+      state.boundaryBlock = { blocked: true, ...block };
+      return { ok: false };
+    });
+
+    const result = await sendStep('enrollment-1');
+
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    if (outcome === 'cancelled') {
+      expect(result).toEqual({ sent: false, blocked: true, reason: block.reason });
+      expect(enrollmentUpdate.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'cancelled' }));
+    } else {
+      expect(result).toEqual({ sent: false, deferred: true, reason: block.reason });
+      expect(enrollmentUpdate.update).not.toHaveBeenCalled();
+    }
+  });
+
+  test('a suppression on the address snapshotted at enrollment does not cancel a step whose billing recipient moved', async () => {
+    // The old address bounced; billing now goes to the bookkeeper.
+    const { enrollmentUpdate } = paymentFailedQueues({
+      suppressions: [{ suppression_type: 'bounce', group_key: null, status: 'active' }],
+    });
+    authorizeBillingRecipient('bookkeeper@example.com', 'Jordan Lee');
+
+    await expect(sendStep('enrollment-1')).resolves.toEqual({
+      sent: false, deferred: true, reason: 'billing_recipient_changed',
+    });
+    expect(enrollmentUpdate.update).toHaveBeenCalledWith(expect.objectContaining({ email: 'bookkeeper@example.com' }));
+    expect(enrollmentUpdate.update).not.toHaveBeenCalledWith(expect.objectContaining({ status: 'cancelled' }));
+  });
+
+  test('an operator test send goes straight to the test address, outside the billing authority', async () => {
+    paymentFailedQueues();
+    authorizeBillingRecipient();
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-test' });
+
+    await expect(sendStep('enrollment-1', { testRecipient: 'owner@example.com' }))
+      .resolves.toMatchObject({ sent: true, test: true });
+    expect(BillingEmailAuthority.loadBillingEmailContext).not.toHaveBeenCalled();
+    expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({ to: 'owner@example.com' }));
+  });
+
+  test('a billing recipient changed since enrollment re-points the enrollment and sends next tick, re-rendered', async () => {
+    const { enrollmentUpdate, sendUpdate } = paymentFailedQueues();
+    authorizeBillingRecipient('bookkeeper@example.com', 'Jordan Lee');
+
+    await expect(sendStep('enrollment-1')).resolves.toEqual({
+      sent: false, deferred: true, reason: 'billing_recipient_changed',
+    });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(BillingEmailAuthority.dispatchUnderBillingEmailAuthority).not.toHaveBeenCalled();
+    expect(sendUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'blocked', failure_reason: 'Billing recipient changed since enrollment',
+    }));
+    expect(enrollmentUpdate.where).toHaveBeenCalledWith({ id: 'enrollment-1', current_step: 0 });
+    expect(enrollmentUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
+      email: 'bookkeeper@example.com', first_name: 'Jordan', last_name: 'Lee',
+    }));
   });
 
   // service_renewal is termite-bond renewal copy: an enrollment queued before

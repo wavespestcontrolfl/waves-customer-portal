@@ -65,11 +65,18 @@
  */
 const db = require('../../models/db');
 const logger = require('../logger');
-const { matchTitleToProduct } = require('./product-matcher');
+const { gateEnvValue } = require('../../config/feature-gates');
+const { matchTitleToProduct, matchTitleInCatalog } = require('./product-matcher');
 const { parsePackSize } = require('../product-costing');
 const { convertInventoryQuantity } = require('../inventory-units');
 const { LIVE_RESTOCK_STATUSES } = require('../procurement/live-restock-request');
 const { adjustStock } = require('../inventory-operations');
+
+// GATE_INVENTORY_AGENT (inventory-agent.js): read at call time here too, so
+// a flip needs no redeploy. Off, these three statuses are held for a
+// person exactly as before this lane existed.
+const AGENT_GATE = 'GATE_INVENTORY_AGENT';
+const AGENT_HANDOFF_STATUSES = ['unmatched', 'needs_size', 'size_mismatch'];
 
 // Vendor -> the product_inventory_movements.metadata.source its restocks carry.
 const SOURCES = { amazon: 'amazon_delivery', siteone: 'siteone_invoice' };
@@ -196,8 +203,11 @@ function amountPerItem(title, container, aliasMatch) {
 }
 
 // Pure classification (match + sizing, no writes). Exported for unit tests.
-async function classifyItem(item, conn = db) {
-  const match = await matchTitleToProduct(item.title, conn);
+// `catalog` (optional, a loadMatchCatalog snapshot): match against it
+// instead of reading the database — the read-only replay passes the catalog
+// plus the changes it has proposed so far.
+async function classifyItem(item, conn = db, catalog = null) {
+  const match = catalog ? matchTitleInCatalog(item.title, catalog) : await matchTitleToProduct(item.title, conn);
   if (!match.matched) return { status: 'unmatched', productId: null };
   const { product } = match;
   const container = parsePackSize(product.container_size);
@@ -221,6 +231,23 @@ function lockShipment(trx, vendor, shipmentKey) {
   return trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`purchase-receipt-shipment:${vendor}:${shipmentKey}`]);
 }
 
+// Has this shipment been handed to a person (see the header)? Call it under
+// lockShipment. A placeholder hand-off stops every line of the shipment;
+// the others stop only lines that came from a different email.
+async function shipmentHandedOff(trx, vendor, shipmentKey, emailId) {
+  const handOffs = await trx('purchase_receipt_lines').where({ vendor, shipment_key: shipmentKey })
+    .whereIn('status', HANDED_OFF_STATUSES).select('status', 'email_id');
+  return handedOffBy(handOffs, emailId);
+}
+
+// The rule itself, over a shipment's recorded { status, email_id } rows —
+// shared with the read-only replay, which applies it to the lines it has
+// recorded so far rather than to today's table.
+function handedOffBy(rows, emailId) {
+  return rows.some((row) => HANDED_OFF_STATUSES.includes(row.status)
+    && (PLACEHOLDER_HAND_OFFS.includes(row.status) || row.email_id !== emailId));
+}
+
 // Classify, and for a line that would move stock, lock its product row and
 // classify again under the lock: a container_size edit or a deactivation
 // that committed after the first read is what counts.
@@ -234,6 +261,33 @@ async function classifyUnderLock(item, trx) {
     throw new Error(`matched product changed while processing "${item.title}"; retrying next sweep`);
   }
   return locked;
+}
+
+// What a recorded line becomes, given its classification — the one
+// decision processReceiptLine makes, pulled out so the read-only replay tool
+// (ops/agents/inventory-agent-replay.js) hands the agent exactly the lines
+// this lane would:
+//   - a person-facing hold (holdAs: a return, an unverified invoice, …)
+//     applies once a product matched; an unmatched held line keeps its own
+//     classification;
+//   - otherwise, with the agent on, one of the three statuses it resolves
+//     is handed off instead of held for a person: no bell (agent_pending
+//     isn't in sweep.js's HELD_REASONS), no movement, product_id kept when
+//     the matcher already found one (needs_size/size_mismatch). A holdAs or
+//     forcedStatus line never is, even when its classification landed on
+//     one of those three — those callers asked for a specific person-facing
+//     hold, and the agent never overrides that. handoffFrom (the status the
+//     line would have held under) rides along in agent_decision so a later
+//     gate-off never strands it: inventory-agent.js's drainAgentQueue reads
+//     it back, or restores 'unmatched' when it's missing (a defensive
+//     default; every hand-off sets it);
+//   - otherwise the classification itself.
+function lineDisposition(found, { forcedStatus, holdAs } = {}, { agentOn = false } = {}) {
+  if (holdAs && found.productId) return { status: holdAs, productId: found.productId, product: found.product };
+  if (!forcedStatus && !holdAs && AGENT_HANDOFF_STATUSES.includes(found.status) && agentOn) {
+    return { status: 'agent_pending', productId: found.productId, product: found.product, handoffFrom: found.status };
+  }
+  return found;
 }
 
 /**
@@ -264,16 +318,13 @@ async function processReceiptLine({ vendor, email, orderNumber, shipmentKey, ite
 
   return conn.transaction(async (trx) => {
     await lockShipment(trx, vendor, shipmentKey);
-    const handOffs = await trx('purchase_receipt_lines').where({ vendor, shipment_key: shipmentKey })
-      .whereIn('status', HANDED_OFF_STATUSES).select('status', 'email_id');
-    if (handOffs.some((row) => PLACEHOLDER_HAND_OFFS.includes(row.status) || row.email_id !== email.id)) return { ...HANDED_TO_PERSON };
-    let classified = forcedStatus ? { status: forcedStatus, productId: null, product: null } : await classifyUnderLock(item, trx);
-    if (holdAs && classified.productId) {
-      classified = { status: holdAs, productId: classified.productId, product: classified.product };
-    }
+    if (await shipmentHandedOff(trx, vendor, shipmentKey, email.id)) return { ...HANDED_TO_PERSON };
+    const found = forcedStatus ? { status: forcedStatus, productId: null, product: null } : await classifyUnderLock(item, trx);
+    const classified = lineDisposition(found, { forcedStatus, holdAs }, { agentOn: gateEnvValue(AGENT_GATE) });
     const claim = await claimLine(trx, {
       ...key, email_id: email.id, raw_title: item.title, quantity: item.quantity, product_id: classified.productId,
       received_qty: classified.receivedQty ?? null, received_unit: classified.receivedUnit ?? null, status: classified.status,
+      ...(classified.handoffFrom ? { agent_decision: { handoffFrom: classified.handoffFrom } } : {}),
     });
     if (!claim) return { ...ALREADY_PROCESSED };
     const outcome = classified.status === 'logged'
@@ -329,4 +380,33 @@ async function performLoggedMovement(trx, { vendor, claim, classified, orderNumb
   return { status: 'logged', product, receivedQty, receivedUnit, movement: result.movement, hasOpenRestockRequest: Boolean(liveRequest) };
 }
 
-module.exports = { classifyItem, processReceiptLine, lockShipment, SOURCES, UNKNOWN_ORDER };
+// A queued agent_pending line (inventory-agent.js) that THIS lane's own
+// classifier now resolves — staff filled its container size, or an earlier
+// line created the product or alias it names — posts through this lane's
+// own path, never through the model: classify again under the product lock,
+// stamp the line with the classifier's product and quantity, then
+// performLoggedMovement (the duplicate check and adjustStock). The caller
+// holds the line and shipment locks. Returns performLoggedMovement's outcome
+// (logged or possible_duplicate), or null when the locked classification
+// no longer logs (nothing written).
+async function logQueuedLine(trx, { line, email }) {
+  const item = { title: line.raw_title, quantity: Number(line.quantity) };
+  const classified = await classifyUnderLock(item, trx);
+  if (classified.status !== 'logged') return null;
+  await trx('purchase_receipt_lines').where({ id: line.id }).update({
+    status: 'logged', product_id: classified.productId, received_qty: classified.receivedQty, received_unit: classified.receivedUnit,
+  });
+  const orderNumber = line.order_number === UNKNOWN_ORDER ? null : line.order_number;
+  return performLoggedMovement(trx, { vendor: line.vendor, claim: line, classified, orderNumber, email, item });
+}
+
+module.exports = {
+  classifyItem, processReceiptLine, lineDisposition, logQueuedLine, lockShipment, shipmentHandedOff, handedOffBy, SOURCES, UNKNOWN_ORDER,
+  findPossibleDuplicateMovement,
+  // Title-size-claim and pack-marker parsing primitives, reused (not
+  // duplicated) by inventory-agent.js's deterministic reading validation —
+  // see this module's header for what each one does.
+  TITLE_SIZE_RE, SIZE_UNITS, sizeUnit, parseSizeNumber, sizesAgree, round4,
+  MULTIPACK_PATTERNS, parseMultipack, PACK_CLAIM_RE, PLURAL_CONTAINER_RE,
+  AGENT_HANDOFF_STATUSES,
+};

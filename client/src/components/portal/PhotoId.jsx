@@ -258,8 +258,12 @@ export function PhotoIdFab({ onOpen, hasBottomNav }) {
       data-glass-accent=""
       style={{
         position: 'fixed',
-        right: 14,
-        bottom: hasBottomNav ? 82 : 20,
+        right: 'calc(14px + env(safe-area-inset-right, 0px))',
+        // The mobile nav includes the home-indicator inset in its height.
+        // Keep the whole button above that bar, including its bottom gap.
+        bottom: hasBottomNav
+          ? 'calc(90px + env(safe-area-inset-bottom, 0px))'
+          : 'calc(20px + env(safe-area-inset-bottom, 0px))',
         zIndex: 97,
         minHeight: 48,
         padding: '0 18px 0 14px',
@@ -634,11 +638,12 @@ export function PhotoIdSheet({ open, onClose, items = [], onRefreshHistory, onOp
           background: SHELL.page,
           borderRadius: '8px 8px 0 0',
           position: 'relative',
-          padding: '12px 16px max(18px, env(safe-area-inset-bottom))',
+          padding: '12px calc(16px + env(safe-area-inset-right, 0px)) calc(18px + env(safe-area-inset-bottom, 0px)) calc(16px + env(safe-area-inset-left, 0px))',
           boxShadow: '0 -8px 40px rgba(15,23,42,0.18)',
           animation: 'photoIdSheetUp 0.25s ease',
           borderTop: `1px solid ${SHELL.border}`,
-          maxHeight: 'calc(100dvh - 16px)',
+          maxHeight: 'calc(100dvh - 16px - env(safe-area-inset-top, 0px))',
+          boxSizing: 'border-box',
           overflowY: 'auto',
           WebkitOverflowScrolling: 'touch',
           overscrollBehavior: 'contain',
@@ -1252,6 +1257,9 @@ function V2Result({ v2, photos, unavailablePhotoIds, onPhotoUnavailable, onRetak
           <div style={{ fontSize: 14, fontWeight: 700, color: SHELL.muted, textTransform: 'uppercase', letterSpacing: '0.04em' }}>{tierLabel}</div>
         )}
         <ResultPhotos photos={photos} unavailablePhotoIds={unavailablePhotoIds} onPhotoUnavailable={onPhotoUnavailable} />
+        {!entry && v2.generic_safety_line && (
+          <div style={{ fontSize: 16, color: B.red, fontWeight: 700, lineHeight: 1.45 }}>{v2.generic_safety_line}</div>
+        )}
         {entry && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             {entry.verdict_label && (

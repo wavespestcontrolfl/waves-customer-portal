@@ -618,12 +618,13 @@ function readStoredBillingReplayContext(message) {
   });
 }
 
-function payloadSnapshotForSend(payload, billingReplayContext, facts) {
+function payloadSnapshotForSend(payload, billingReplayContext, facts, { replayDeclared = false } = {}) {
   const snapshot = redactedPayloadSnapshot(payload || {});
   if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) return snapshot;
   delete snapshot[BILLING_REPLAY_CONTEXT_KEY];
   const safeContext = billingReplayContextForSnapshot(billingReplayContext, facts);
   if (safeContext) snapshot[BILLING_REPLAY_CONTEXT_KEY] = safeContext;
+  else if (replayDeclared) snapshot[BILLING_REPLAY_CONTEXT_KEY] = null;
   return snapshot;
 }
 
@@ -1032,6 +1033,11 @@ const ANNUAL_OFFER_WITHHELD = Symbol('annual_offer_withheld');
 // abortGuardFailedBeforeDispatch (below) can report it verbatim.
 const ANNUAL_OFFER_GUARD_FAILED = Symbol('annual_offer_guard_failed');
 
+// A caller authority veto occurs after the durable marker reaches started,
+// but before any provider request. Keep that definite-unsent outcome distinct
+// from provider errors and the annual-offer guard sentinels.
+const PROVIDER_BOUNDARY_BLOCKED = Symbol('provider_boundary_blocked');
+
 // The caller's locked handoff around one provider request, as a state
 // machine of its own: the request either ran (its result, or its error to
 // classify), was refused before it ran (abort before dispatch), or the
@@ -1042,9 +1048,9 @@ async function runProviderHandoff({ withProviderHandoff, dispatchToProvider, tem
   let result;
   let verdict;
   try {
-    verdict = await withProviderHandoff(async (database) => {
+    verdict = await withProviderHandoff(async (database, providerBoundaryCheck) => {
       dispatchStarted = true;
-      result = await dispatchToProvider(database);
+      result = await dispatchToProvider(database, providerBoundaryCheck);
     });
   } catch (err) {
     if (dispatchStarted && result === undefined) throw err;
@@ -1054,6 +1060,11 @@ async function runProviderHandoff({ withProviderHandoff, dispatchToProvider, tem
   if (result !== undefined) return { result };
   if (verdict?.ok !== true || !dispatchStarted) return { abortedBeforeDispatch: true };
   throw new Error('provider handoff returned without a provider result');
+}
+
+async function dispatchWithoutCallerHandoff(dispatch) {
+  await dispatch();
+  return { ok: true };
 }
 
 function queuedRowInFlight(message, now = Date.now()) {
@@ -1159,6 +1170,10 @@ async function sendTemplate({
   attachments = [],
   suppressionGroupKey,
   billingReplayContext = null,
+  // Preserve a fail-closed marker when a registered producer cannot build a
+  // valid replay context. Legacy billing templates that do not declare the
+  // contract continue without the marker and keep their existing retry path.
+  billingReplayDeclared,
   // PII-sensitive bulk callers (e.g. the weekly irrigation sweep) set this so
   // sendOne does NOT log the raw SendGrid response body — provider rejections
   // can echo the recipient address, and email addresses in logs are a P1. The
@@ -1176,11 +1191,13 @@ async function sendTemplate({
   // The email twin of the SMS sender's locked handoff: called with a
   // `dispatch` that performs the actual provider request. The caller holds
   // whatever authority rows it needs and awaits `dispatch()` while they are
-  // held. A refusal without dispatching aborts the queued attempt
+  // held. `dispatch(database, providerBoundaryCheck)` can install a final
+  // authority check inside sendOne after its provider guards. A refusal
+  // without dispatching aborts the queued attempt
   // pre-provider (ABORTED_BEFORE_DISPATCH), a throw after dispatch began is
   // the provider outcome, and a caller failure after acceptance keeps the
   // acceptance.
-  withProviderHandoff = null,
+  withProviderHandoff = dispatchWithoutCallerHandoff,
   // Delivery-guards slice (re-cut of #4569): the estimate(s) this send is
   // about. When present, passed through to sendgrid.sendOne as an explicit
   // addition to its own content derivation. Codex round 3 on #4608
@@ -1419,7 +1436,7 @@ async function sendTemplate({
       triggerEventId: triggerEventId || null,
       idempotencyKey: idempotencyKey || null,
       categories: allCategories,
-    })),
+    }, { replayDeclared: billingReplayDeclared })),
     categories: JSON.stringify(allCategories),
     idempotency_key: idempotencyKey || null,
     // Attachments aren't persisted in the snapshot; flag their presence so the
@@ -1560,6 +1577,21 @@ async function sendTemplate({
       error: err.message, message: failed || { ...message, status: 'failed', error_message: reason }, rendered,
     };
   };
+  const abortProviderBoundaryBeforeDispatch = async () => {
+    const reason = 'provider_boundary_blocked';
+    const [failed] = await db('email_messages')
+      .where({ id: message.id, status: 'queued', send_attempt_token: sendAttemptToken,
+        provider_handoff_phase: PROVIDER_HANDOFF_STARTED,
+        provider_handoff_attempt_token: sendAttemptToken })
+      .update({ status: 'failed', error_message: reason,
+        provider_handoff_phase: PROVIDER_HANDOFF_REJECTED,
+        provider_handoff_attempt_token: sendAttemptToken, updated_at: new Date() }).returning('*');
+    if (!failed) throw inFlightCollisionError(idempotencyKey || message.id);
+    return {
+      sent: false, aborted: true, boundaryBlocked: true, reason, providerAttempted: false,
+      message: failed, rendered,
+    };
+  };
   if (typeof onQueued === 'function') {
     let keep = true;
     try {
@@ -1572,7 +1604,7 @@ async function sendTemplate({
 
   let providerAccepted = false;
   let providerHandoffStarted = false;
-  let markerWriteFailed = false;
+  let providerRequestDefinitelyUnsent = false;
   let result;
   const recordAcceptance = () => db('email_messages')
     .where({ id: message.id, send_attempt_token: sendAttemptToken,
@@ -1599,7 +1631,7 @@ async function sendTemplate({
     // directly with no caller opinion of their own. This library forwards
     // `withheldLinkPolicy` only when a caller explicitly passed one (an
     // override); otherwise sendOne's template-keyed default governs.
-    const sendToProvider = (html, text, guardIds, database) => sendgrid.sendOne({
+    const sendToProvider = (html, text, guardIds, database, providerBoundaryCheck) => sendgrid.sendOne({
         to,
         fromEmail,
         fromName,
@@ -1619,6 +1651,7 @@ async function sendTemplate({
         estimateIds: guardIds,
         templateKey,
         ...(database ? { database } : {}),
+        ...(providerBoundaryCheck ? { providerBoundaryCheck } : {}),
         ...(withheldLinkPolicy ? { withheldLinkPolicy } : {}),
       });
     // Codex round 1 on #4608 (P1): keying this ONLY on estimateId/estimateIds
@@ -1639,7 +1672,7 @@ async function sendTemplate({
     // have produced) both resolve to their own sentinel instead, so
     // dispatchToProvider always either sends or reports a real,
     // non-throwing outcome.
-    const dispatchToProvider = async (database) => {
+    const dispatchToProvider = async (database, providerBoundaryCheck) => {
       // Durable immediately before entering sendOne. A dedicated connection
       // keeps the marker visible even when the caller is holding authority
       // locks on its own transaction through the provider request.
@@ -1649,13 +1682,15 @@ async function sendTemplate({
           provider_handoff_attempt_token: sendAttemptToken })
         .update({ provider_handoff_phase: PROVIDER_HANDOFF_STARTED,
           provider_handoff_attempt_token: sendAttemptToken, updated_at: new Date() })
-        .catch((err) => { markerWriteFailed = true; throw err; });
+        .catch((err) => { providerRequestDefinitelyUnsent = true; throw err; });
       if (Number(marked) !== 1) {
         throw inFlightCollisionError(idempotencyKey || message.id);
       }
       providerHandoffStarted = true;
       try {
-        const providerResult = await sendToProvider(rendered.html, rendered.text, guardEstimateIds, database);
+        const providerResult = await sendToProvider(
+          rendered.html, rendered.text, guardEstimateIds, database, providerBoundaryCheck,
+        );
         if (providerResult?.withheldLinksRewritten?.length) {
           // Pre-push audit P1 (b49be57b12 round 4), still true under the
           // round 9 structural move: the STORED row should match what
@@ -1689,17 +1724,24 @@ async function sendTemplate({
       } catch (err) {
         if (err?.annualOfferWithheld) return ANNUAL_OFFER_WITHHELD;
         if (err?.annualOfferGuardFailed) return { [ANNUAL_OFFER_GUARD_FAILED]: true, error: err };
+        if (err?.providerBoundaryBlocked) {
+          providerRequestDefinitelyUnsent = true;
+          return PROVIDER_BOUNDARY_BLOCKED;
+        }
         throw err;
       }
     };
-    if (typeof withProviderHandoff === 'function') {
-      const handoff = await runProviderHandoff({ withProviderHandoff, dispatchToProvider, templateKey });
-      if (handoff.abortedBeforeDispatch) return abortBeforeDispatch();
-      result = handoff.result;
-    } else {
-      result = await dispatchToProvider();
-    }
+    const handoff = await runProviderHandoff({ withProviderHandoff, dispatchToProvider, templateKey });
+    if (handoff.abortedBeforeDispatch) return abortBeforeDispatch();
+    result = handoff.result;
     if (result === ANNUAL_OFFER_WITHHELD) return abortWithheldBeforeDispatch();
+    if (result === PROVIDER_BOUNDARY_BLOCKED) {
+      // The final callback ran after preparation but refused before fetch.
+      // If its settlement write fails, recover either visible marker state as
+      // definitely unsent rather than leaving a started row ambiguous.
+      providerHandoffStarted = false;
+      return await abortProviderBoundaryBeforeDispatch();
+    }
     // Pre-push audit P1: both the withProviderHandoff branch and the direct
     // branch above assign `result` from the SAME dispatchToProvider, so this
     // one check covers either caller shape.
@@ -1751,7 +1793,7 @@ async function sendTemplate({
     const expectedFailurePhase = providerHandoffStarted
       ? PROVIDER_HANDOFF_STARTED
       : PROVIDER_HANDOFF_PENDING;
-    const expectedFailurePhases = markerWriteFailed && !providerHandoffStarted
+    const expectedFailurePhases = providerRequestDefinitelyUnsent && !providerHandoffStarted
       ? [PROVIDER_HANDOFF_PENDING, PROVIDER_HANDOFF_STARTED] : [expectedFailurePhase];
     const recordedFailurePhase = definiteRejection
       ? PROVIDER_HANDOFF_REJECTED

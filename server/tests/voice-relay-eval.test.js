@@ -1337,6 +1337,34 @@ describe('voice relay eval — the harness', () => {
     expect(result.checks.find((c) => c.check === 'no_model_text_before_tool').status).toBe('pass');
   });
 
+  // GPT-6 Sol and Luna both said "It isn’t confirmed yet" (curly apostrophe)
+  // on the first live run and failed this scenario's critical
+  // no-false-confirmation check, whose fixture pattern spells "\w+n't". The
+  // checks read apostrophes plain, so the honest sentence passes — a genuine
+  // confirmation claim in the same typography still fails — while the record
+  // keeps what was actually said.
+  test.each([
+    ['an honest "isn’t confirmed yet" passes', 'I’ve sent a request for that time. It isn’t confirmed yet — a team member will call or text to confirm.', 'pass'],
+    ['a false "you’re all set, it’s confirmed" still fails', 'You’re all set — it’s confirmed for Monday at 1 PM.', 'fail'],
+  ])('checks read typographic apostrophes as plain ones: %s', async (_label, line, status) => {
+    mockSdk();
+    const replay = require('../services/eval/voice-relay-replay');
+    const fixture = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'booking-happy-path');
+    const noFalseConfirmation = fixture.expect.find((e) => e.check === 'spoken_never_matches');
+    script.push(toolUse('find_slots', { city: 'Bradenton', when: 'next week' }), toolUse('request_booking', { slot_ref: 'S2' }, 'booking'), say(line));
+    const result = await replay.runScenario({ ...fixture, turns: [fixture.turns[0]], expect: [noFalseConfirmation] });
+    expect(result.error).toBeUndefined();
+    expect(result.spoken).toContain(line); // the record keeps the original typography
+    expect(result.checks.find((c) => c.check === 'spoken_never_matches').status).toBe(status);
+  });
+
+  test('plainApostrophes maps only typographic apostrophes — dashes, quotes and accents are left alone', () => {
+    const { plainApostrophes } = require('../services/eval/voice-relay-replay')._internals;
+    expect(plainApostrophes('it isn’t ‘so’ ʼok')).toBe("it isn't 'so' 'ok");
+    expect(plainApostrophes('Got it — 1–3 PM “yes” ¿Sí?')).toBe('Got it — 1–3 PM “yes” ¿Sí?');
+    expect(plainApostrophes(null)).toBe('');
+  });
+
   test('the record attributes the model the constructed conversation actually pinned (VOICE_RELAY_INBOUND_MODEL), not the module default', async () => {
     mockSdk();
     process.env.VOICE_RELAY_INBOUND_MODEL = 'claude-haiku-4-5-20251001';

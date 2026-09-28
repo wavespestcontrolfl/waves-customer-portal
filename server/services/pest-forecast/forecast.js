@@ -7,7 +7,8 @@
  *
  * computeForecast() is pure (location + signals + date in, payload out) so the
  * model is unit-testable without the network. getForecast() wraps it with the
- * live weather lookup and a 3-hour per-location response cache.
+ * live weather lookup and a per-location response cache that lasts exactly
+ * as long as the weather signals it was computed from (their freshUntil).
  */
 
 const { scorePests } = require('./pests');
@@ -22,8 +23,7 @@ const DISCLAIMER = 'An informational forecast based on Florida pest seasonality 
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June',
   'July', 'August', 'September', 'October', 'November', 'December'];
 
-const CACHE_TTL = 3 * 60 * 60 * 1000; // 3 hours
-const _cache = new Map(); // slug -> { at, value }
+const _cache = new Map(); // slug -> { forecast, freshUntil }
 
 // Portal runs on Eastern Time end-to-end; derive the calendar month/day there
 // so the seasonal curve and the "as of" label don't shift around UTC midnight.
@@ -119,20 +119,28 @@ function computeForecast(location, signals, date) {
 }
 
 /**
- * Live forecast: resolve location, fetch weather, compute, cache per slug.
- * Never throws — weather failures degrade to the seasonal baseline.
+ * Live forecast plus the epoch ms it stays fresh until — the weather signals'
+ * freshUntil (3 hours; 15 minutes while a SWFL city's rain reading is
+ * missing; never past ET midnight). Cached per slug for exactly that long;
+ * the public route derives its HTTP cache lifetimes from it. Never throws —
+ * weather failures degrade to the seasonal baseline.
  */
-async function getForecast({ location, zip } = {}, { now } = {}) {
+async function getForecastWithFreshness({ location, zip } = {}, { now } = {}) {
   const loc = resolveLocation({ location, zip });
   const cached = _cache.get(loc.slug);
-  if (cached && Date.now() - cached.at < CACHE_TTL) return cached.value;
+  if (cached && Date.now() < cached.freshUntil) return cached;
 
   const signals = await getWeatherSignals({ lat: loc.lat, lng: loc.lng, region: loc.region });
-  const value = computeForecast(loc, signals, now || new Date());
-  _cache.set(loc.slug, { at: Date.now(), value });
-  return value;
+  const entry = { forecast: computeForecast(loc, signals, now || new Date()), freshUntil: signals.freshUntil };
+  _cache.set(loc.slug, entry);
+  return entry;
+}
+
+/** The live forecast payload alone (see getForecastWithFreshness). */
+async function getForecast(request, options) {
+  return (await getForecastWithFreshness(request, options)).forecast;
 }
 
 function _clearCache() { _cache.clear(); } // test hook
 
-module.exports = { getForecast, computeForecast, _clearCache, LANDING, BRAND };
+module.exports = { getForecast, getForecastWithFreshness, computeForecast, _clearCache, LANDING, BRAND };

@@ -58,19 +58,22 @@ async function recordContact({
   if (!idempotencyKey) throw new Error('collections ledger insert returned no id');
   const existing = await db('collections_contact_ledger')
     .where({ idempotency_key: idempotencyKey })
-    .first('id', 'metadata');
+    .first('id', 'metadata', 'occurred_at');
   if (!existing) throw new Error('collections ledger reservation neither inserted nor found');
-  // A reused reservation is being re-attempted NOW (codex r5): refresh
-  // occurred_at so the 24h frequency window starts at the actual delivery
-  // attempt, not the first failed one. Later timestamp = longer window —
-  // the safe direction; a refresh failure propagates (caller holds).
-  await db('collections_contact_ledger')
-    .where({ id: existing.id })
-    .update({ occurred_at: occurredAt });
   const existingMeta = typeof existing.metadata === 'string'
-    ? JSON.parse(existing.metadata)
-    : (existing.metadata || {});
-  return { id: existing.id, metadata: existingMeta, reused: true };
+    ? JSON.parse(existing.metadata) : (existing.metadata || {});
+  // Preserve settled event windows, including a concurrent stamp. Unsettled
+  // reservations still refresh for legacy deferred callers before dispatch.
+  let contactAt = existing.occurred_at;
+  if (![existingMeta.delivered, existingMeta.resolved].includes(true)) {
+    const changed = await db('collections_contact_ledger').where({ id: existing.id })
+      .whereRaw("NOT (COALESCE(metadata, '{}'::jsonb) @> ?::jsonb) AND NOT (COALESCE(metadata, '{}'::jsonb) @> ?::jsonb)", [
+        JSON.stringify({ delivered: true }), JSON.stringify({ resolved: true }),
+      ]).update({ occurred_at: occurredAt });
+    if (Number(changed) === 1) contactAt = occurredAt;
+  }
+  return { id: existing.id, metadata: existingMeta, reused: true,
+    ...(contactAt ? { occurred_at: contactAt } : {}) };
 }
 
 /**
@@ -117,11 +120,21 @@ async function markDelivered(target, { database = db, match = {} } = {}) {
   }
 }
 
+// Outcome flags belong to the ledger's own stamps, never a caller's snapshot.
+function reservationSnapshot(metadata) {
+  const snapshot = { ...(metadata || {}) };
+  for (const key of ['delivered', 'resolved', 'resolution', 'send_failed']) delete snapshot[key];
+  return snapshot;
+}
+
 // A keyed reservation permits one provider attempt. Only a confirmed failed
 // attempt may be retried; an unstamped reused reservation is ambiguous. Clear
 // the old failure before retrying so a later acceptance-stamp failure cannot
 // make that accepted attempt look safe to send again.
-async function claimAttempt(entry) {
+// A retry can quote different debt than the failed attempt that created the
+// reservation. `refresh` ({ invoiceIds, metadata }: what this attempt sends)
+// is written in the same claim, so the row records what the retry quoted.
+async function claimAttempt(entry, refresh = null) {
   if (!entry?.id) return { allowed: false, held: true };
   if (entry.metadata?.delivered === true) return { allowed: false, delivered: true };
   if (entry.metadata?.resolved === true) return { allowed: false, resolved: true };
@@ -131,9 +144,12 @@ async function claimAttempt(entry) {
     .whereRaw("metadata @> ?::jsonb AND NOT (metadata @> ?::jsonb) AND NOT (metadata @> ?::jsonb)", [
       JSON.stringify({ send_failed: true }), JSON.stringify({ delivered: true }), JSON.stringify({ resolved: true }),
     ])
-    .update({ metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [
-      JSON.stringify({ send_failed: false }),
-    ]) });
+    .update({
+      metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [
+        JSON.stringify({ ...reservationSnapshot(refresh?.metadata), send_failed: false }),
+      ]),
+      ...(Array.isArray(refresh?.invoiceIds) ? { invoice_ids: JSON.stringify(refresh.invoiceIds) } : {}),
+    });
   return changed === 1 ? { allowed: true } : { allowed: false, held: true };
 }
 

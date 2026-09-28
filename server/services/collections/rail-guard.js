@@ -9,8 +9,8 @@
  *     do_not_text blocks only sms, do_not_email only email);
  *   - when the rail has a TARGET invoice, that invoice must be in the
  *     verdict's eligible set — an allowed verdict about a sibling invoice is
- *     not permission (pass invoiceId: null only for aggregate-balance rails
- *     with no single target, e.g. the previsit dues reminder).
+ *     not permission. A frozen aggregate passes invoiceIds so every quoted
+ *     invoice must remain eligible; dues-only aggregates pass an empty set.
  *
  * evaluate() fails closed internally (an error is a denial), so a policy
  * blip skips the send rather than bypassing the policy.
@@ -53,18 +53,32 @@ async function collectionsChannelVerdict({
     });
   } catch (err) {
     logger.warn(`[${logTag}] collections policy consult failed for customer ${customerId}: ${err.message} — denying`);
-    return { permitted: false, eligibleInvoiceIds: [] };
+    return {
+      permitted: false,
+      eligibleInvoiceIds: [],
+      balanceIncomplete: 'policy evaluation failed',
+    };
   }
+  const incomplete = verdict.balanceIncomplete
+    ? { balanceIncomplete: verdict.balanceIncomplete }
+    : {};
   if (!verdict.allowed) {
     logger.info(`[${logTag}] collections policy denied ${channel} for customer ${customerId}: ${verdict.denialReasons.join(', ')}`);
-    return { permitted: false, eligibleInvoiceIds: verdict.eligibleInvoiceIds || [] };
+    return { permitted: false, eligibleInvoiceIds: verdict.eligibleInvoiceIds || [], ...incomplete };
   }
-  return { permitted: true, eligibleInvoiceIds: verdict.eligibleInvoiceIds || [] };
+  return { permitted: true, eligibleInvoiceIds: verdict.eligibleInvoiceIds || [], ...incomplete };
+}
+
+function includesQuotedInvoices(eligibleInvoiceIds, invoiceId, invoiceIds) {
+  const targets = invoiceIds ?? (invoiceId == null ? [] : [invoiceId]);
+  const eligible = new Set((eligibleInvoiceIds || []).map(String));
+  return Array.isArray(targets) && targets.every((id) => eligible.has(String(id)));
 }
 
 async function collectionsChannelPermitted({
   customerId,
   invoiceId = null,
+  invoiceIds = null,
   channel,
   purpose,
   now = new Date(),
@@ -75,7 +89,9 @@ async function collectionsChannelPermitted({
   detail = false,
   database,
 }) {
-  const answer = (allowed, durable = false) => (detail ? { allowed, durable } : allowed);
+  const answer = (allowed, durable = false, balanceIncomplete = false) => (detail
+    ? { allowed, durable, ...(balanceIncomplete ? { balanceIncomplete } : {}) }
+    : allowed);
   if (process.env.GATE_COLLECTIONS_POLICY !== 'true') return answer(true);
   let verdict;
   try {
@@ -90,15 +106,14 @@ async function collectionsChannelPermitted({
     logger.warn(`[${logTag}] collections policy consult failed for customer ${customerId}: ${err.message} — denying`);
     return answer(false);
   }
-  const member = invoiceId == null
-    ? true
-    : (verdict.eligibleInvoiceIds || []).map(String).includes(String(invoiceId));
+  const member = includesQuotedInvoices(verdict.eligibleInvoiceIds, invoiceId, invoiceIds);
   if (!verdict.allowed || !member) {
     const why = !verdict.allowed ? verdict.denialReasons.join(', ') : 'invoice_not_eligible';
     logger.info(`[${logTag}] collections policy denied ${channel} for customer ${customerId}${invoiceId ? ` invoice ${invoiceId}` : ''}: ${why}`);
-    return answer(false, !verdict.allowed && verdict.denialReasons.some(isDurableDenial));
+    return answer(false, !verdict.allowed && verdict.denialReasons.some(isDurableDenial),
+      verdict.balanceIncomplete);
   }
-  return answer(true);
+  return answer(true, false, verdict.balanceIncomplete);
 }
 
 // A denial that will not lift on its own schedule: an operator flag, a

@@ -769,6 +769,32 @@ describe('v2 result card (GATE_PHOTO_ID_V2, server-side)', () => {
     expect(screen.getByText('Smaller, rounder head.')).toBeInTheDocument();
   });
 
+  it('renders source-backed generic medical guidance when an unapproved species cannot be named', async () => {
+    api.getPhotoIds.mockResolvedValue({ items: [] });
+    render(<Harness />);
+    fireEvent.click(await screen.findByRole('button', { name: /Photo ID/i }));
+    fireEvent.click(screen.getByText('Bug or pest'));
+    fireEvent.change(document.querySelector('input[type="file"]'), { target: { files: [photoFile()] } });
+    await screen.findByRole('img');
+
+    const safety = 'Widow bites can be medically significant. See a doctor for a suspected bite, and call 911 if someone has trouble breathing.';
+    api.createPhotoId.mockResolvedValueOnce({
+      id: 'v2medical', type: 'pest', created_at: '2026-09-26T00:00:00Z', result: {},
+      v2: {
+        version: 2, catalog_version: '2026-09-26.1', tier: 'needs_more_evidence',
+        answer: { level: 'subgroup', node_id: 'widow-spiders', wording: 'group_only', headline: 'Looks like a widow spider', subhead: 'Latrodectus' },
+        group: { id: 'spiders', label: 'Spiders', generic: 'a spider' }, entry: null,
+        generic_safety_line: safety, evidence: {}, candidates: [], next_photo: null, referral: null,
+      },
+      next_step: { kind: 'unclear', title: 'Not sure yet', body: 'A clearer photo would help.' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Identify' }));
+
+    expect(await screen.findByText('Looks like a widow spider')).toBeInTheDocument();
+    expect(screen.getByText(safety)).toBeVisible();
+    expect(screen.queryByRole('button', { name: /^About /i })).not.toBeInTheDocument();
+  });
+
   it('an unresolved group answer with next_photo shows the retake card; tapping it returns to photos with the ask banner and keeps the existing photo', async () => {
     api.getPhotoIds.mockResolvedValue({ items: [] });
     render(<Harness />);

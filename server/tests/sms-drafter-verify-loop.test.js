@@ -36,6 +36,10 @@ describe('generateGroundedDraft — convergence loop', () => {
     expect(r.converged).toBe(true);
     expect(r.parsed.reply).toMatch(/confirm your exact time/);
     expect(client.calls).toHaveLength(2); // draft + 1 verify
+    // sms_verifier requests effort:'medium' (2026-09-26): a supported/not
+    // yes-no check needs no deep reasoning, and MODELS.DEEP (Opus 4.8 by
+    // default) is effort-capable, so the request carries it through.
+    expect(client.calls[1].output_config).toEqual({ effort: 'medium' });
   });
 
   test('violation → revise → clean → 2 passes, converged on the revised draft', async () => {

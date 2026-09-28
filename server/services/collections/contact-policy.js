@@ -56,7 +56,9 @@ const FLAG_BLOCKED_CHANNELS = {
   collection_hold: ALL_CHANNELS,
   attorney_represented: ALL_CHANNELS,
   bankruptcy: ALL_CHANNELS,
-  wrong_number: ALL_CHANNELS,
+  // A wrong number is a fact about the phone: it never stops a payment email
+  // (owner ruling 2026-09-27, the suppression list's rule for the same fact).
+  wrong_number: ALL_CHANNELS.filter((channel) => channel !== 'email'),
   do_not_call: ['voice', 'manual_call'],
   do_not_text: ['sms'],
   do_not_email: ['email'],
@@ -246,6 +248,7 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
     eligibleInvoiceIds: [],
     eligibleBalanceCents: 0,
     eligibleInvoiceCents: {}, // per-invoice remainder, keyed by id
+    balanceIncomplete: null,
     eligibleAccountTier: null, // dunning tier of the OLDEST-due eligible invoice (the register)
     eligibleAnchorDueDate: null, // its ET due day
     nextEligibleAt: null,
@@ -255,6 +258,9 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
   };
   const deny = (reason) => {
     if (!result.denialReasons.includes(reason)) result.denialReasons.push(reason);
+  };
+  const markBalanceIncomplete = (reason) => {
+    if (!result.balanceIncomplete) result.balanceIncomplete = reason;
   };
   const proposeNextEligible = (at) => {
     if (!at) return;
@@ -299,10 +305,9 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
     // 'processing', which the loader above already excludes (it admits only
     // sent/viewed/overdue), same as paid/void/draft; credit-covered rows
     // fall to its cents test.
-    let balanceIncomplete = null;
     const eligible = await loadEligibleInvoices(customerId, {
       database,
-      onIncomplete: (reason) => { balanceIncomplete = reason; },
+      onIncomplete: markBalanceIncomplete,
     });
     // (loader: open-balance + legacy 'unpaid' + stopped-sequence filter —
     // extracted so dial-time disclosure shares the SAME authority, codex
@@ -357,10 +362,12 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
     // its own doc declares suppression HARD across channels. The new
     // collections_flags table does not replace it — a customer with a
     // canonical DNC and no duplicate flag must still be denied. Phone-keyed
-    // (one row per E.164). Mapping: manual_dnc and unknown reasons deny
-    // every channel; opt-outs and wrong_number deny the phone-based
-    // channels; non_mobile is an SMS-deliverability fact only (voice
-    // line-type has its own pilot check). A read failure propagates into
+    // (one row per E.164). Mapping: non_mobile is an SMS-deliverability
+    // fact only (voice line-type has its own pilot check); every other
+    // reason denies every channel, except that Email here is a payment
+    // email, which only a staff do-not-contact or an unknown reason stops
+    // (owner ruling 2026-09-27, the suppression module's
+    // suppressionBlocksPaymentEmail). A read failure propagates into
     // evaluate's fail-closed catch.
     if (customer.phone) {
       const { toE164 } = require('../../utils/phone');
@@ -369,13 +376,15 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
         .where({ phone: e164, active: true })
         .first('reason');
       if (sup) {
-        // The canonical semantics are HARD across every channel (the
-        // suppression module's own doc; codex r3 — do not reinterpret
-        // them here). The single carve-out is non_mobile: a carrier
-        // deliverability fact about SMS, not a consent withdrawal.
+        // The canonical semantics are the suppression module's own (codex
+        // r3 — do not reinterpret them here): HARD across every channel,
+        // except non_mobile (a carrier deliverability fact about SMS, not a
+        // consent withdrawal) and the payment-email rule it owns.
         const reason = sup.reason || 'unknown';
         const deniedChannels = reason === 'non_mobile' ? ['sms'] : ALL_CHANNELS;
-        if (deniedChannels.includes(channel)) deny(`suppression_${reason}`);
+        const paymentEmailAllowed = channel === 'email'
+          && !require('../messaging/validators/suppression').suppressionBlocksPaymentEmail(reason);
+        if (deniedChannels.includes(channel) && !paymentEmailAllowed) deny(`suppression_${reason}`);
       }
     }
 
@@ -506,7 +515,7 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
         // An account read that dropped an unprovable row or hit the bound is
         // not "the total" — the call would disclose a partial balance as the
         // whole. Fail closed (gh r1).
-        if (balanceIncomplete) deny('balance_read_incomplete');
+        if (result.balanceIncomplete) deny('balance_read_incomplete');
         // ACCOUNT-LEVEL (owner ruling 2026-08-28): every open self-pay invoice
         // is collected as ONE balance; the clock is the OLDEST unpaid
         // invoice's due date. (The single-invoice pilot rule is gone.)
@@ -588,6 +597,7 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
   } catch (err) {
     logger.error(`[contact-policy] evaluation failed for customer ${customerId}: ${err.message}`);
     // FAIL CLOSED — an error is never "allowed".
+    markBalanceIncomplete('policy evaluation failed');
     result.allowed = false;
     deny('policy_evaluation_error');
     return result;
