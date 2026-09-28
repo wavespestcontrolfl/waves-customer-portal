@@ -1,8 +1,10 @@
 const {
   applyHtmlMetadata,
+  loadServiceReportCardContent,
   loadServiceReportPageMetadata,
   metadataForServiceReport,
   redactReportPath,
+  reportOgImage,
   reportTokenFromPath,
 } = require('../services/report-page-metadata');
 
@@ -145,5 +147,120 @@ describe('report page metadata', () => {
 
     const metadata = await loadServiceReportPageMetadata('/report/0123456789abcdef0123456789abcdef', knex);
     expect(metadata.title).toBe('Service report · June 11, 2026 · Pest Inspection');
+  });
+
+  test('auto_send report metadata carries an absolute, escaped og:image (link-preview-cards)', async () => {
+    const first = jest.fn().mockResolvedValue({
+      service_type: 'Pest Inspection',
+      service_date: '2026-06-11',
+      structured_notes: JSON.stringify({ typedReportDelivery: 'auto_send' }),
+    });
+    const where = jest.fn().mockReturnValue({ first });
+    const knex = jest.fn().mockReturnValue({ where });
+
+    const metadata = await loadServiceReportPageMetadata('/report/0123456789abcdef0123456789abcdef', knex);
+    expect(metadata.image.url).toMatch(/^https?:\/\/.+\/og\/report\/0123456789abcdef0123456789abcdef\.jpg$/);
+    expect(metadata.image.width).toBe(1200);
+    expect(metadata.image.height).toBe(630);
+    expect(metadata.image.alt).toBe('Waves Pest Control service report — Pest Inspection');
+  });
+
+  test('reportOgImage builds an absolute /og/report/:token.jpg URL', () => {
+    const image = reportOgImage('0123456789abcdef0123456789abcdef', { service_type: 'Rodent Trapping' });
+    expect(image.url).toMatch(/\/og\/report\/0123456789abcdef0123456789abcdef\.jpg$/);
+    expect(image.alt).toBe('Waves Pest Control service report — Rodent Trapping');
+  });
+
+  describe('loadServiceReportCardContent (the /og/report/:token.jpg card)', () => {
+    test('resolves eyebrow/headline/subline for an auto_send report', async () => {
+      const first = jest.fn().mockResolvedValue({
+        service_type: 'Quarterly Pest Control Service',
+        service_date: '2026-05-16',
+        structured_notes: null,
+      });
+      const where = jest.fn().mockReturnValue({ first });
+      const knex = jest.fn().mockReturnValue({ where });
+
+      const content = await loadServiceReportCardContent('0123456789abcdef0123456789abcdef', knex);
+      expect(content).toEqual({
+        eyebrow: 'SERVICE REPORT',
+        headline: 'Quarterly Pest Control Service',
+        subline: 'May 16, 2026',
+      });
+    });
+
+    test('a suppressed (internal_only) report yields no card content — no existence leak', async () => {
+      const first = jest.fn().mockResolvedValue({
+        service_type: 'Rodent Trapping',
+        service_date: '2026-06-11',
+        structured_notes: JSON.stringify({ typedReportDelivery: 'internal_only' }),
+      });
+      const where = jest.fn().mockReturnValue({ first });
+      const knex = jest.fn().mockReturnValue({ where });
+
+      expect(await loadServiceReportCardContent('0123456789abcdef0123456789abcdef', knex)).toBeNull();
+    });
+
+    test('a malformed token never reaches the database', async () => {
+      const knex = jest.fn(() => { throw new Error('must not query for a malformed token'); });
+      expect(await loadServiceReportCardContent('not-a-hex-token', knex)).toBeNull();
+    });
+  });
+
+  describe('applyHtmlMetadata image support (link-preview-cards)', () => {
+    const baseHtml = [
+      '<html><head>',
+      '<meta property="og:title" content="Old title" />',
+      '<meta name="twitter:card" content="summary" />',
+      '<title>Old title</title>',
+      '</head><body></body></html>',
+    ].join('');
+
+    test('sets og:image + dimensions/alt + twitter:image and upgrades twitter:card to summary_large_image', () => {
+      const updated = applyHtmlMetadata(baseHtml, {
+        title: 'A report',
+        image: {
+          url: 'https://portal.wavespestcontrol.com/og/report/abc.jpg',
+          width: 1200,
+          height: 630,
+          alt: 'Waves Pest Control service report — Pest Control',
+        },
+      });
+      expect(updated).toContain('<meta property="og:image" content="https://portal.wavespestcontrol.com/og/report/abc.jpg" />');
+      expect(updated).toContain('<meta property="og:image:width" content="1200" />');
+      expect(updated).toContain('<meta property="og:image:height" content="630" />');
+      expect(updated).toContain('<meta property="og:image:alt" content="Waves Pest Control service report — Pest Control" />');
+      expect(updated).toContain('<meta name="twitter:image" content="https://portal.wavespestcontrol.com/og/report/abc.jpg" />');
+      expect(updated).toContain('<meta name="twitter:card" content="summary_large_image" />');
+    });
+
+    test('escapes an untrusted alt string (defense in depth — alt only ever carries our own eyebrow/service text)', () => {
+      const updated = applyHtmlMetadata(baseHtml, {
+        image: { url: 'https://example.com/x.jpg', alt: '"><script>alert(1)</script>' },
+      });
+      expect(updated).not.toContain('<script>');
+      expect(updated).toContain('&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;');
+    });
+
+    test('omitting image leaves any previously-set image tags untouched (idempotent no-op)', () => {
+      const withImage = applyHtmlMetadata(baseHtml, {
+        image: { url: 'https://portal.wavespestcontrol.com/og/default.jpg', width: 1200, height: 630 },
+      });
+      const again = applyHtmlMetadata(withImage, { title: 'Just a title change' });
+      expect(again).toContain('<meta property="og:image" content="https://portal.wavespestcontrol.com/og/default.jpg" />');
+      expect(again).toContain('<title>Just a title change</title>');
+    });
+
+    test('previewTitle sets only the link-preview title; the page <title> keeps the full title', () => {
+      const updated = applyHtmlMetadata(baseHtml, { title: 'Your invoice · Waves Pest Control', previewTitle: 'Waves' });
+      expect(updated).toContain('<meta property="og:title" content="Waves" />');
+      expect(updated).toContain('<meta name="twitter:title" content="Waves" />');
+      expect(updated).toContain('<title>Your invoice · Waves Pest Control</title>');
+    });
+
+    test('no image field never touches twitter:card (stays whatever the page already had)', () => {
+      const updated = applyHtmlMetadata(baseHtml, { title: 'No image here' });
+      expect(updated).toContain('<meta name="twitter:card" content="summary" />');
+    });
   });
 });

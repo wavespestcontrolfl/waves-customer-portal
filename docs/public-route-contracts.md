@@ -474,7 +474,21 @@ transaction, and the customer did ask to save the card. A
 withdrawn invoice is also absent from the authenticated portal's balance and
 Pay Now list, and carries no `manualPayOptions`. Nothing else in the payload
 changes; an invoice that returns to self-pay is released by the Bill-To
-reconciliation and collects normally again),
+reconciliation and collects normally again). TERMITE RENEWAL ELIGIBILITY
+(2026-09-28, dark behind GATE_TERMITE_ANNUAL_PLAN — only an invoice that is a
+termite annual-plan RENEWAL successor's prepay invoice, found through its own
+`annual_prepay_term_id` link, is ever judged; every other invoice is
+byte-identical and costs no extra query): a renewal pay link the customer
+already holds stops collecting once the prior year's plan no longer backs the
+renewal — the prior plan was cancelled, refunded, or had its dates moved, the
+account was deleted, the renewal payment is under dispute, or the renewal's
+payment grace has closed. `/setup`, `/quote`, `/finalize` and `/update-amount`
+then answer `409 { error, renewalNotPayable: true }` with a customer-safe
+message (no plan, parent or reason detail rides the payload), and `/finalize`
+additionally runs its charge UNDER the renewal gate with the same check
+repeated inside it, so a prior-plan change either waits for the charge or is
+seen by it. `/confirm`, receipts and `invoice.pdf` are unchanged — recording a
+payment Stripe already collected always remains available),
 `/api/pay/statement/:token` (+ `/setup`, `/quote`, `/finalize`) — payer NET
 statement self-serve pay, **gated behind GATE_PAYER_STATEMENTS** (404 when off),
 64-hex `payer_statements.token` format gate + public-route rate limit; resolves
@@ -2183,6 +2197,41 @@ target / 410 on expired / generic 404 with no enumeration leak; `noindex`;
 mounts OUTSIDE the global `/api/` limiter so it carries its own 120/min
 per-key limiter; new codes are 10 chars ≈ 49.5 bits since 2026-08-07,
 legacy 5-char codes still resolve).
+`/og/report/:token.jpg`, `/og/<kind>.jpg`, `/og/default.jpg`
+(`server/routes/og-preview.js`, link-preview images, owner 2026-09-27: the
+picture iMessage/SMS/email crawlers show under a texted or emailed customer
+link; `server/index.js` renderHTML writes the matching `og:image` into each
+customer page's `<head>`, and `og:title`/`twitter:title` read just "Waves").
+Mounted OUTSIDE the `/api/` limiter with its own 120/min per-key limiter
+(the `/l` budget), and BEFORE the global body parsers (it reads no body).
+Fixed cards change only the preview tags, never the page's own `<title>`.
+**Only the service report card looks its token up**
+(owner 2026-09-28): `/og/report/:token.jpg` (and the `/report/` and
+`/recap/` pages' head tags, both already behind the report limiter) resolve
+through report-page-metadata's lookup with its `typedReportDelivery`
+suppression — 32-hex format gate before any DB read, read-only, never
+URL-decoded, a failure logs only the error code (knex messages embed the
+token). Its privacy headers precede the limiter. **Deliberate exception to
+"generic 404":** an unknown, malformed or suppressed link returns the
+default card, 200, byte-identical to `/og/default.jpg` with the same
+headers — still no existence oracle, and the crawler shows a branded card.
+**Every other kind is a fixed card** (`/og/<kind>.jpg`, `FIXED_CARDS`:
+project report, appointment, reschedule, prep, invoice, receipt, statement,
+estimate, tracking, assessment, …): it reads nothing from the database,
+carries no token, and is served `public, max-age=3600` without privacy
+headers. A fixed card whose surface is dark (`GATE_APPOINTMENT_PAGE`,
+`payerStatements`, re-service self-serve, `leadInspectionLinkLive`,
+`recruitingComms`) resolves to the default card, matching that surface's
+uniform 404; an unregistered or inherited name gets the default too.
+Payload is a 1200x630 JPEG of an eyebrow, headline and subline: never a
+price, amount, name, address, phone, email, tech name or note, and
+estimates stay generic (no services or prices). Routes match the raw path
+(regex captures that can't hold `%`), so no parameter is URL-decoded and a
+malformed encoding can't reach the JSON error handler; any other `/og` path
+(another kind with a token, a bad token, no `.jpg`) is the default card.
+The file segment two levels under `/og` is always redacted from request
+logs (`redact-request-url.js`). No query parameters are read. The render cache is keyed by card content, never by
+token.
 `/r/:code` (referral click-track + redirect to the marketing site; also
 OUTSIDE the `/api/` limiter — carries its own 30/min limiter and a
 url-safe 4-32 code format gate before any DB read; every hit below the
@@ -3161,7 +3210,19 @@ generic 404 — their pages never mount the ask bar. Only write: an
 content. Optional body field `intent` — one of `findings` / `treatment` /
 `recommendations` / `next_visit`, sent by the shipped prompt chips — selects
 that answer directly; any other value is ignored and the question is
-keyword-routed as before, so older clients are unaffected. This route and the
+keyword-routed as before, so older clients are unaffected. The service-report
+`/api/reports/:token/ask` (deterministic `report-assistant.js` answers, no
+LLM) writes one `service_report_events` row, `report_question_asked`, with
+metadata `{ question_length, topic }` — never the question text or the answer
+(owner ruling 2026-09-28: topic only). `topic` is the answer family the
+question was routed to, one of `REPORT_QUESTION_TOPICS` (`reentry`, `watering`,
+`findings`, `next_steps`, `next_visit`, `applied`, `results`, `summary`,
+`unrouted`); the response body is unchanged. Only this route writes that
+event: the public `POST /api/reports/:token/events` refuses
+`report_question_asked` with the same 400 as an unknown event, so a token
+holder cannot add question rows the engagement tools would count. A staff
+reader's question (the report page sends the portal JWT, verified exactly like
+the `/data` staff read) is answered the same way but writes no row. This route and the
 service-report `/api/reports/:token/ask` both answer with
 `Cache-Control: no-store` and `X-Robots-Tag: noindex, nofollow` on every
 response, including CORS preflights, the global `/api` limiter's 429 and

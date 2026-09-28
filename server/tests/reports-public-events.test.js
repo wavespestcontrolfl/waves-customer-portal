@@ -116,6 +116,37 @@ describe('POST /reports/:token/events', () => {
     });
   });
 
+  test('refuses report_question_asked: only the /ask route records questions (codex P2 on #5167)', async () => {
+    const serviceRead = chain({
+      first: jest.fn().mockResolvedValue({
+        id: 'service-1',
+        customer_id: 'customer-1',
+        report_template_version: 'service_report_v1',
+      }),
+    });
+    const eventInsert = chain();
+    db.mockImplementation((table) => {
+      if (table === 'service_records') return serviceRead;
+      if (table === 'service_report_events') return eventInsert;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/reports/${VALID_TOKEN}/events`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          eventName: 'report_question_asked',
+          metadata: { question_length: 24, topic: 'watering' },
+        }),
+      });
+
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: 'Unknown report event' });
+      expect(eventInsert.insert).not.toHaveBeenCalled();
+    });
+  });
+
   test('a whitespace-padded cross_sell_requested still hits the low action limiter (PR r11 P1)', async () => {
     // The handler TRIMS the event name before matching, so the limiter's
     // skip() must trim identically — comparing the raw body value let
@@ -629,6 +660,23 @@ describe('nearYou opt-in (lawn "Near you" line, GATE_REPORT_NEAR_YOU)', () => {
     const optIns = src.match(/nearYou: true/g) || [];
     expect(optIns).toHaveLength(1);
     expect(src).toMatch(/composeOffers: true, planSummary: true, upcomingVisitsCard: true, nearYou: true,/);
+  });
+});
+
+describe('report ask event metadata (topic only, owner ruling 2026-09-28)', () => {
+  // The service-report /:token/ask handler records what the answer covered,
+  // never what the customer typed.
+  const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/reports-public.js'), 'utf8');
+
+  test('records exactly question_length and topic — never the question text or the answer', () => {
+    const m = src.match(/recordServiceReportEvent\(service, 'report_question_asked', 'public_report', req, \{([\s\S]*?)\}\);/);
+    expect(m).toBeTruthy();
+    const keys = m[1].replace(/\/\/.*$/gm, '').split(',').map((k) => k.trim().split(':')[0].trim()).filter(Boolean);
+    expect(keys.sort()).toEqual(['question_length', 'topic']);
+  });
+
+  test('the topic comes from the same routing that produced the answer', () => {
+    expect(src).toMatch(/const \{ answer, topic \} = routeServiceReportQuestion\(\{/);
   });
 });
 

@@ -2951,10 +2951,18 @@ function FloatingAskWaves({ mode, token, serviceLine, data }) {
     if (!q || asking) return;
     setAsking(true);
     setAnswer('');
+    // Staff browsers send their portal JWT, as on the /data read, so the
+    // server can leave a staff QA question out of customer engagement.
+    // Guarded like that read: sandboxed webviews can throw on localStorage.
+    let staffToken = null;
+    try { staffToken = localStorage.getItem('waves_admin_token'); } catch { /* storage blocked */ }
     try {
       const response = await fetch(`${API_BASE}/reports/${token}/ask`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(staffToken ? { Authorization: `Bearer ${staffToken}` } : {}),
+        },
         body: JSON.stringify({ question: q }),
       });
       const payload = await response.json();

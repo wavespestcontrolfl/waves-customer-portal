@@ -19,7 +19,9 @@ jest.mock('../services/logger', () => ({
   error: jest.fn(),
 }));
 jest.mock('../services/fawn-weather', () => ({ getCurrent: jest.fn() }));
-jest.mock('../config/models', () => ({ DEEP: 'test-model', FLAGSHIP: 'test-model' }));
+// anthropicAcceptsEffort lets the wire request carry a caller's effort, as it
+// would on a real Opus 5.5 DEEP model.
+jest.mock('../config/models', () => ({ DEEP: 'test-model', FLAGSHIP: 'test-model', anthropicAcceptsEffort: () => true }));
 jest.mock('../services/lawn-grass-context', () => ({
   loadCustomerGrassContext: jest.fn(async () => ({
     trackKey: 'st_augustine',
@@ -219,6 +221,8 @@ describe('generatePage', () => {
     );
 
     expect(global.__anthropicCreate.mock.calls[0][0].max_tokens).toBe(16000);
+    // High effort ran pages into the cap even at 16000 (2026-09-28).
+    expect(global.__anthropicCreate.mock.calls[0][0].output_config).toEqual({ effort: 'medium' });
     expect(result.writeState).toBe('failed');
     expect(result.entry.content).toBe(existing.content);
     const contentPatch = (state.updates.knowledge_entries || []).find((u) => 'content' in u);
