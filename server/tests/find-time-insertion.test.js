@@ -1,23 +1,31 @@
 /**
- * Owner 2026-09-28: findCapacitySlots' allowInsertion boolean used to be
- * true only for opts.capacityPlacement (the estimate picker). On a day
- * whose stored route_order is complete and not stale, arrival-route.js's
- * buildCandidateOrders sequences the day through currentOrder alone, which
- * sorts a no-route_order prospective candidate LAST — after the final real
- * stop — so every hour before that stop failed arrival_window. /book
- * (buildBookingAvailability, booking-availability-insertion.test.js) never
- * passed capacityPlacement, so it never tried inserting a new stop BETWEEN
- * a day's existing stops.
+ * findCapacitySlots' pre-existing allowInsertion boolean
+ * (`opts.capacityPlacement === true`): on a day whose stored route_order is
+ * complete and not stale, arrival-route.js's buildCandidateOrders sequences
+ * the day through currentOrder alone, which sorts a no-route_order
+ * prospective candidate LAST — after the final real stop — so every hour
+ * before that stop fails arrival_window UNLESS allowInsertion is set.
+ * Codex round 1 on PR #5231 (owner 2026-09-28): a broader `insertProspective`
+ * opt was rejected — insertion offers must only reach callers whose commit
+ * persists the certified route order (createSelfBooking, while
+ * GATE_BOOK_CAPACITY_COMMIT is live), which is exactly what capacityPlacement
+ * already gates. This file pins find-time.js's OWN capacityPlacement ->
+ * allowInsertion wiring, and its conservative_travel skip, at the unit level
+ * (mocked arrival-route, no DB) — the estimate picker (estimate-slot-
+ * availability.js) already relies on both; booking-availability-insertion
+ * .test.js pins booking.js's own callers passing capacityPlacement through.
  *
  * This mocks arrival-route.js's evaluation (like find-time-customer-grid
  * .test.js) rather than exercising its real route-simulation math (already
  * covered by scheduling-capacity.test.js's "finds an insertion without
- * changing the existing relative stop order" / allowInsertion:false pair):
- * the mock models exactly that bug — a candidate before the day's last real
- * stop is feasible only with allowInsertion, one after it is feasible
- * either way — so these tests are purely about find-time.js's OWN
- * opts.insertProspective / opts.capacityPlacement -> allowInsertion wiring
- * and the conservative_travel keying, not arrival-route's insertion math.
+ * changing the existing relative stop order" / allowInsertion:false pair,
+ * and by arrival-window-placement-db.test.js's real-DB capacityPlacement
+ * commit-persistence proof): the mock models exactly the append-only bug — a
+ * candidate before the day's last real stop is feasible only with
+ * allowInsertion, one after it is feasible either way — so these tests are
+ * purely about find-time.js's own opts.capacityPlacement -> allowInsertion
+ * wiring and the conservative_travel keying, not arrival-route's insertion
+ * math or the DB-backed commit.
  */
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -92,7 +100,7 @@ const BASE = {
   dateFrom: FUTURE_DATE, dateTo: FUTURE_DATE, topN: 50, serviceType: 'pest_control',
 };
 
-describe('findCapacitySlots — insertProspective (owner 2026-09-28)', () => {
+describe('findCapacitySlots — capacityPlacement insertion on a complete-route-order day', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     process.env.GATE_SCHEDULING_CAPACITY = 'true';
@@ -113,43 +121,34 @@ describe('findCapacitySlots — insertProspective (owner 2026-09-28)', () => {
   });
   afterEach(() => { delete process.env.GATE_SCHEDULING_CAPACITY; });
 
-  test('insertProspective: true — a 10:00/11:00 candidate between existing stops is offered', async () => {
-    const { slots } = await findAvailableSlots({ ...BASE, insertProspective: true });
+  // evaluateArrivalPlacement is also called 3x per candidate up front, for
+  // the pairwise travel-preload passes (collectLegs set) — filtered out
+  // below so these tests count only the REAL feasibility checks (the main
+  // fit check, and — only when !capacityPlacement — the conservative_travel
+  // no-traffic fallback probe).
+  const realCalls = () => evaluateArrivalPlacement.mock.calls.filter((c) => !('collectLegs' in c[1]));
+
+  test('capacityPlacement: true — a 10:00/11:00 candidate between existing stops is offered, and the conservative_travel fallback probe is skipped', async () => {
+    const { slots } = await findAvailableSlots({ ...BASE, capacityPlacement: true });
     const startTimes = slots.map((s) => s.start_time);
     expect(startTimes).toContain('10:00');
     expect(startTimes).toContain('11:00');
+    // One real evaluateArrivalPlacement call per admitted 10:00 candidate,
+    // not two — capacityPlacement skips the conservative_travel probe
+    // (find-time.js: `if (!opts.capacityPlacement && ...)`).
+    expect(realCalls().filter((c) => c[1].windowStart === '10:00')).toHaveLength(1);
   });
 
-  test('insertProspective omitted (gate-less baseline) — the same candidate is rejected with arrival_window', async () => {
+  test('capacityPlacement omitted — the same candidate is rejected with arrival_window, and the conservative_travel probe runs', async () => {
     const { slots, rejections } = await findAvailableSlots({ ...BASE });
     const startTimes = slots.map((s) => s.start_time);
     expect(startTimes).not.toContain('10:00');
     expect(startTimes).not.toContain('11:00');
     expect(rejections.arrival_window).toBeGreaterThan(0);
-  });
-
-  // evaluateArrivalPlacement is also called 3x per candidate up front, for
-  // the pairwise travel-preload passes (collectLegs set) — filtered out
-  // below so these two tests count only the REAL feasibility checks (the
-  // main fit check, and — only when !capacityPlacement — the
-  // conservative_travel no-traffic fallback probe).
-  const realCalls = () => evaluateArrivalPlacement.mock.calls.filter((c) => !('collectLegs' in c[1]));
-
-  test('capacityPlacement: true also inserts, and skips the conservative_travel fallback probe (one real evaluateArrivalPlacement call per admitted 10:00 candidate, not two)', async () => {
-    const { slots } = await findAvailableSlots({ ...BASE, capacityPlacement: true });
-    expect(slots.map((s) => s.start_time)).toContain('10:00');
-    const tenAmCalls = realCalls().filter((c) => c[1].windowStart === '10:00');
-    expect(tenAmCalls).toHaveLength(1);
-  });
-
-  test('insertProspective: true (without capacityPlacement) still requires the conservative_travel no-traffic fallback to fit — two real evaluateArrivalPlacement calls for an inserted 10:00 candidate', async () => {
-    const { slots } = await findAvailableSlots({ ...BASE, insertProspective: true });
-    expect(slots.map((s) => s.start_time)).toContain('10:00');
-    // insertProspective alone does not skip the conservative_travel probe —
-    // only capacityPlacement does (find-time.js: `if (!opts.capacityPlacement
-    // && ...)`) — so an admitted, inserted 10:00 candidate costs TWO real
-    // calls: the main check plus the { travel: null } fallback probe.
-    const tenAmCalls = realCalls().filter((c) => c[1].windowStart === '10:00');
-    expect(tenAmCalls).toHaveLength(2);
+    // The main check alone rejects 10:00 (arrival_window) before the
+    // conservative_travel probe would even run for it — confirms the
+    // rejection comes from allowInsertion being unset, not from a
+    // travel-only failure.
+    expect(realCalls().filter((c) => c[1].windowStart === '10:00')).toHaveLength(1);
   });
 });

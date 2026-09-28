@@ -1,12 +1,17 @@
 /**
- * Owner 2026-09-28: buildBookingAvailability (the /book availability
- * builder behind /api/booking/availability, /find-slots, public reschedule,
- * public re-service, inspection-public, and the voice agent) now passes
- * find-time's insertProspective option, so a customer-facing offer can be
- * inserted BETWEEN a day's existing stops, not only appended after the
- * stored route order. Mirrors booking-availability-gap-fanout.test.js's
- * mocking style (find-time itself mocked; this file is purely about the
- * opts buildBookingAvailability hands findAvailableSlots).
+ * Codex round 1 on PR #5231 (owner 2026-09-28): buildBookingAvailability
+ * (the shared /book availability builder) now takes a `capacityPlacement`
+ * param and passes it straight through to findAvailableSlots, replacing the
+ * earlier unconditional `insertProspective: true` — insertion offers must
+ * only reach callers whose own commit persists the certified route order,
+ * so buildBookingAvailability itself takes no default and leaves the
+ * decision to each caller. Per-caller wiring (which callers pass
+ * capacityPlacement: bookCapacityCommitLive() vs omit it) is covered in each
+ * route's own test file (booking-find-slots*, reservice-public*,
+ * inspection-public*, reschedule-public*, voice-relay-booking/tools). This
+ * file mirrors booking-availability-gap-fanout.test.js's mocking style
+ * (find-time itself mocked) and is purely about buildBookingAvailability's
+ * own pass-through.
  */
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -56,7 +61,7 @@ async function build(serviceKey = '', extra = {}) {
   });
 }
 
-describe('buildBookingAvailability — insertProspective wiring (owner 2026-09-28)', () => {
+describe('buildBookingAvailability — capacityPlacement pass-through', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     wireDayCapCounts([]);
@@ -64,22 +69,21 @@ describe('buildBookingAvailability — insertProspective wiring (owner 2026-09-2
     findAvailableSlots.mockResolvedValue({ slots: [], total_feasible: 0 });
   });
 
-  test('passes insertProspective: true to findAvailableSlots, alongside packEnds: true, for every /book availability call', async () => {
-    await build();
-    expect(findAvailableSlots).toHaveBeenCalledWith(expect.objectContaining({ insertProspective: true, packEnds: true }));
+  test('capacityPlacement: true is passed straight through to findAvailableSlots, alongside packEnds: true', async () => {
+    await build('', { capacityPlacement: true });
+    expect(findAvailableSlots).toHaveBeenCalledWith(expect.objectContaining({ capacityPlacement: true, packEnds: true }));
   });
 
-  test('the self-serve caller (selfServeNotice: true) and the voice-agent caller (unset) both get insertProspective: true — the customerFacing split does not gate this', async () => {
-    await build('', { selfServeNotice: true });
-    expect(findAvailableSlots).toHaveBeenLastCalledWith(expect.objectContaining({ insertProspective: true, customerFacing: true }));
-    await build('');
-    expect(findAvailableSlots).toHaveBeenLastCalledWith(expect.objectContaining({ insertProspective: true, customerFacing: false }));
-  });
-
-  test('never passes capacityPlacement — /book keeps the conservative_travel no-traffic fallback requirement find-time.js keys on it', async () => {
+  test('capacityPlacement omitted by the caller reaches findAvailableSlots as undefined, never true — the append-only default', async () => {
     await build();
     const opts = findAvailableSlots.mock.calls[0][0];
     expect(opts.capacityPlacement).toBeUndefined();
-    expect(opts.insertProspective).toBe(true);
+    expect(opts.capacityPlacement).not.toBe(true);
+  });
+
+  test('capacityPlacement: false is passed through as false, not coerced to undefined or true', async () => {
+    await build('', { capacityPlacement: false });
+    const opts = findAvailableSlots.mock.calls[0][0];
+    expect(opts.capacityPlacement).toBe(false);
   });
 });

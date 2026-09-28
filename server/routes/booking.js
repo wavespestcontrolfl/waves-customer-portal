@@ -1415,7 +1415,7 @@ function idleMinutesAgainst(dayOccupied, startMin, endMin, candidate = {}) {
 // lookup), so this function itself carries none of that branching. It only
 // ever reorders `slots`/`days`' is_best_fit; the offered slot SET
 // (days[].slots) is never filtered.
-async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], excludeSelfBookingId = null, serviceKey = '', serviceIdentity = null, selfServeNotice = false, rankProfile }) {
+async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], excludeSelfBookingId = null, serviceKey = '', serviceIdentity = null, selfServeNotice = false, rankProfile, capacityPlacement }) {
   config = applySchedulingPolicy(config);
   // addCandidate's customerWindowAdmits() call defaults dayEndMinutes to
   // currentDayEndMinutes() / lunchGateOn to lunchBlockEnabled() — both read
@@ -1455,14 +1455,24 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     // packed inside find-time (no `insertion` to key off here), and
     // unassigned committed visits anchor the route (push-audit P1).
     packEnds: true,
-    // Owner 2026-09-28: offers were append-only after a complete stored
-    // route order — every commit path this builder feeds (createSelfBooking,
-    // the rebooker's customer probes, phone booking, and /book's own
-    // capacity commit check) already accepts an inserted placement, so
-    // offers here were stricter than every commit they lead to. Staff save
-    // probes (checkArrivalPlacement) stay append-only; this does not touch
-    // them.
-    insertProspective: true,
+    // capacityPlacement is the estimate picker's existing flag
+    // (estimate-slot-availability.js): it both allows inserting the new
+    // visit BETWEEN a day's existing stops (not only appended after the
+    // stored route order) and skips find-time's conservative_travel
+    // no-traffic fallback probe, because the estimate accept commit
+    // re-verifies with live traffic and persists the certified order.
+    // Owner 2026-09-28: only a caller here whose OWN commit is
+    // createSelfBooking, and only while GATE_BOOK_CAPACITY_COMMIT is live,
+    // may pass it too — that commit re-verifies with traffic
+    // (verifyArrivalCapacity) and persists the certified route order
+    // (persistBookCapacityOrder), so an inserted offer it confirms is
+    // exactly what gets saved. A caller whose commit does NOT persist a
+    // route order (public reschedule — rebooker.js clears route_order on a
+    // move; the voice agent — relay-booking.js inserts with no route_order)
+    // must never pass this — an inserted offer there would commit as an
+    // unnumbered stop sorted after the route, not at the position it was
+    // offered at — so it stays append-only and omits capacityPlacement.
+    capacityPlacement,
     dateFrom: rangeFrom,
     dateTo: rangeTo,
     // Travel gap (GATE_SLOT_TRAVEL_GAP): customer-facing turnaround buffer
@@ -1952,6 +1962,11 @@ router.get('/availability', async (req, res, next) => {
       serviceKey,
       // Self-serve surface — enforce the notice window (owner ruling 2026-09-23).
       selfServeNotice: true,
+      // /confirm's own commit for this funnel is createSelfBooking, which
+      // (while GATE_BOOK_CAPACITY_COMMIT is live) re-verifies with traffic
+      // and persists the certified route order — see the comment on
+      // capacityPlacement inside buildBookingAvailability.
+      capacityPlacement: bookCapacityCommitLive(),
     });
 
     // Coords the caller didn't already hold (estimate_id → customer record,
@@ -2058,6 +2073,9 @@ router.post('/find-slots', findSlotsLimiter, findSlotsHourlyLimiter, async (req,
       serviceKey,
       // Self-serve surface — enforce the notice window (owner ruling 2026-09-23).
       selfServeNotice: true,
+      // Same /confirm commit (createSelfBooking) as /availability — see the
+      // comment there and on capacityPlacement inside buildBookingAvailability.
+      capacityPlacement: bookCapacityCommitLive(),
     });
 
     const slotCount = (availability.days || []).reduce((n, d) => n + (Array.isArray(d.slots) ? d.slots.length : 0), 0);
@@ -6354,6 +6372,11 @@ router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter,
         // Self-serve surface — a slot the notice window would now refuse
         // must not be treated as still offered (offer/commit parity).
         selfServeNotice: true,
+        // This re-checks a slot /availability or /find-slots already
+        // offered, so it must use the SAME capacityPlacement value those
+        // used, or a genuinely still-offered inserted slot would revalidate
+        // as unavailable (offer/commit parity).
+        capacityPlacement: bookCapacityCommitLive(),
       });
       const day = (avail.days || []).find((d) => String(d.date).slice(0, 10) === row.slot_date);
       const offered = !!day && Array.isArray(day.slots)

@@ -25,6 +25,12 @@ jest.mock('../services/logger', () => ({
 const gateState = { live: true };
 jest.mock('../config/feature-gates', () => ({
   leadInspectionLinkLive: jest.fn(() => gateState.live),
+  // GATE_BOOK_CAPACITY_COMMIT (owner 2026-09-28, PR #5231 round 1):
+  // buildAvailabilityForLead reads this to decide whether an offer may be
+  // inserted between existing stops. Off by default here — this file is not
+  // about that gate, and false matches this route's pre-existing (append-
+  // only) behavior for every test that doesn't override it.
+  bookCapacityCommitLive: jest.fn(() => false),
 }));
 
 const mockGeocode = jest.fn(async () => ({ location: { lat: 27.4, lng: -82.5 } }));

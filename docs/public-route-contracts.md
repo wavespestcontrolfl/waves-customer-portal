@@ -530,12 +530,22 @@ HTTP requests and fall back to the conservative model when exhausted; response
 data remains request-local. Existing stops are planned at the owner planning
 minutes (`scheduling/planning-minutes.js`, owner 2026-09-25) rather than their
 window span; the visit being offered keeps its own resolved allowance.
-Customer-facing capacity offers (the `/book` availability builder and every
-caller it serves — public reschedule, public re-service, inspection-public,
-the voice agent — and the estimate slot routes) evaluate the new visit at
-every position in the technician's route, including BETWEEN two existing
-stops, not only appended after the stored order (owner 2026-09-28); the staff
-save probe (`checkArrivalPlacement`) stays append-only. Detour
+`/book`'s self-booking offers (`/api/booking/availability`, `/find-slots`,
+the `/capture-intent` revalidation, public re-service, and inspection
+booking) evaluate the new visit at every position in the technician's route,
+including BETWEEN two existing stops, not only appended after the stored
+order, only while `GATE_BOOK_CAPACITY_COMMIT` is live — the same condition
+the estimate routes' own insertion already required (owner 2026-09-28). That
+commit (`createSelfBooking`) re-verifies with live traffic and saves the
+certified route order, so an inserted offer it confirms is exactly what gets
+persisted. Public reschedule and the voice agent keep append-only offers
+because their own commits do not save a route order: public reschedule
+(`SmartRebooker.reschedule`/`rescheduleSeries`) clears `route_order` on any
+day or technician move, and the voice agent inserts the new row with no
+`route_order` at all — either way an inserted offer would commit as an
+unnumbered stop sorted after the route, not at the position it was offered
+at. The staff save probe (`checkArrivalPlacement`) stays append-only too.
+Detour
 cap (owner 2026-09-25): self-serve callers that pass `customerFacing` (the
 /book availability engine behind /api/booking/availability and the public
 reschedule/re-service pickers, and the estimate slot routes) omit a feasible slot whose added round-trip drive exceeds

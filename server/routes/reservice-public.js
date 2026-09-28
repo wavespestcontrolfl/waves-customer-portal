@@ -265,6 +265,12 @@ async function buildAvailabilityForCustomer(customer, { rangeFrom, rangeTo, conf
     // filters the offered slot set, so the commit-time re-validation below
     // still accepts exactly what days[].slots offers.
     rankProfile: 'reservice',
+    // This route's commit (line ~533 below) is createSelfBooking — while
+    // GATE_BOOK_CAPACITY_COMMIT is live it re-verifies with traffic and
+    // persists the certified route order, so an inserted offer here is safe
+    // to commit at the position it was offered (see the capacityPlacement
+    // comment inside buildBookingAvailability, booking.js).
+    capacityPlacement: require('../config/feature-gates').bookCapacityCommitLive(),
     ...(timeOfDay ? { timeOfDay } : {}),
   });
 }

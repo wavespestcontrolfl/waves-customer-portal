@@ -752,6 +752,12 @@ async function buildAvailabilityForLead(coords, { rangeFrom, rangeTo, config, du
     config,
     today: new Date(),
     selfServeNotice: true,
+    // This route's commit (phase 2, createSelfBooking below) re-verifies
+    // with traffic and persists the certified route order while
+    // GATE_BOOK_CAPACITY_COMMIT is live, so an inserted offer here is safe
+    // to commit at the position it was offered (see the capacityPlacement
+    // comment inside buildBookingAvailability, booking.js).
+    capacityPlacement: require('../config/feature-gates').bookCapacityCommitLive(),
     ...(timeOfDay ? { timeOfDay } : {}),
   });
 }
