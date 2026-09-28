@@ -116,7 +116,12 @@ function composeYellowDigest(queue) {
   // Item identity (admin-alerts-ring-v2 follow-up): the pages already in
   // scope — a count-only digest can't otherwise tell "same queue" from "a
   // different set of pages" at a flat total.
-  const itemKeys = [...pending, ...yellow].map((page) => page.id).filter(Boolean).map(String);
+  // Queue-state prefixed: a page moving from optional review (yellow) to
+  // blocked (pending) is new news even though its id did not change.
+  const itemKeys = [
+    ...pending.filter((page) => page.id).map((page) => `pending:${page.id}`),
+    ...yellow.filter((page) => page.id).map((page) => `yellow:${page.id}`),
+  ];
   return { subject, html, text, yellowCount: yellow.length, pendingCount: pending.length, headline, summary, itemKeys };
 }
 

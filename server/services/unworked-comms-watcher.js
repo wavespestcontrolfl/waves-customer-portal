@@ -23,7 +23,7 @@
 
 const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
-const { deliverOpsDigest } = require('./ops-digest');
+const { deliverOpsDigest, fullSetItemKeys } = require('./ops-digest');
 const { retireIfClean } = require('./ops-digest-fall-off');
 const db = require('../models/db');
 const { loadPendingSmsConversations } = require('./sms-pending-conversations');
@@ -130,7 +130,7 @@ async function loadCallbackCalls(cutoff = new Date(), { includeExpired = false }
       // The same judged deadline as the queue and the watchdog: staffed,
       // else the legacy implicit one for an undated card, snooze-aware.
       .whereRaw(`${require('./call-commitments').effectiveDueSql('cc', 'cl')} <= NOW()`)
-      .select('cc.id', db.raw('COUNT(*) OVER () AS total_count')).limit(1);
+      .select('cc.id', db.raw('COUNT(*) OVER () AS total_count'), db.raw('ARRAY_AGG(cc.id::text) OVER () AS all_ids')).limit(1);
   }
   const { rows } = await db.raw(
     `
@@ -138,7 +138,8 @@ async function loadCallbackCalls(cutoff = new Date(), { includeExpired = false }
            CASE WHEN c.direction = 'outbound' THEN c.to_phone ELSE c.from_phone END AS from_phone,
            NULLIF(TRIM(COALESCE(cu.first_name, '') || ' ' || COALESCE(cu.last_name, '')), '') AS customer_name,
            LEFT(COALESCE(c.call_summary, c.lead_synopsis, ''), 160) AS summary,
-           COUNT(*) OVER () AS total_count
+           COUNT(*) OVER () AS total_count,
+           ARRAY_AGG(c.id::text) OVER () AS all_ids
     FROM call_log c
     LEFT JOIN customers cu ON cu.id = c.customer_id
     -- Rolling 7-day live worklist (codex r14): callbacks are stateful —
@@ -258,7 +259,8 @@ async function loadDroppedFollowUps(cutoff = new Date(), { includeExpired = fals
     SELECT t.id, t.task_type, t.deadline, t.status, t.recommended_action,
            NULLIF(TRIM(COALESCE(cu.first_name, '') || ' ' || COALESCE(cu.last_name, '')), '') AS customer_name,
            LEFT(COALESCE(cs.call_summary, ''), 120) AS call_context,
-           COUNT(*) OVER () AS total_count
+           COUNT(*) OVER () AS total_count,
+           ARRAY_AGG(t.id::text) OVER () AS all_ids
     FROM ai_follow_up_tasks t
     LEFT JOIN customers cu ON cu.id = t.customer_id
     LEFT JOIN csr_call_scores cs ON cs.id = t.call_score_id
@@ -500,7 +502,8 @@ async function loadOpenServiceRequests(cutoff = new Date()) {
     SELECT sr.id, sr.category, sr.subject, sr.urgency, sr.status, sr.created_at,
            sr.customer_id,
            NULLIF(TRIM(COALESCE(cu.first_name, '') || ' ' || COALESCE(cu.last_name, '')), '') AS customer_name,
-           COUNT(*) OVER () AS total_count
+           COUNT(*) OVER () AS total_count,
+           ARRAY_AGG(sr.id::text) OVER () AS all_ids
     FROM service_requests sr
     LEFT JOIN customers cu ON cu.id = sr.customer_id
     WHERE sr.status NOT IN ('resolved', 'closed', 'cancelled')
@@ -617,14 +620,18 @@ function composeUnworkedCommsDigest({ callbacks = [], followUps = [], unanswered
   // Item identity (admin-alerts-ring-v2 follow-up): the shown page's own
   // record ids across every lane — a count-only digest can't otherwise
   // tell "same backlog" from "the whole list turned over" at a flat total.
-  // Only when every lane's page is its whole backlog: past a lane's row
-  // cap, an older item moving onto the page would read as a new one.
-  const shownAll = callbackCards.length + a.length + b.length + c.length + d.length === total;
-  // Lane-prefixed: the lanes read different tables whose ids can collide.
-  const laneKeys = (lane, rows) => rows.filter((r) => r.id != null).map((r) => `${lane}:${r.id}`);
-  const itemKeys = shownAll
-    ? [...laneKeys('card', callbackCards), ...laneKeys('call', a), ...laneKeys('task', b), ...laneKeys('text', c), ...laneKeys('request', d)]
-    : null;
+  // Full-set identity per lane, lane-prefixed (the lanes read different
+  // tables whose ids can collide). A lane with no full-set proof (the shared
+  // SMS loader carries no all_ids and has overflowed) makes the whole list
+  // unknown — a partial list would read that lane's items as gone or new.
+  const laneKeys = [
+    fullSetItemKeys(callbackCards, { prefix: 'card:' }),
+    fullSetItemKeys(a, { prefix: 'call:' }),
+    fullSetItemKeys(b, { prefix: 'task:' }),
+    fullSetItemKeys(c, { prefix: 'text:', idOf: (row) => row.peer }),
+    fullSetItemKeys(d, { prefix: 'request:' }),
+  ];
+  const itemKeys = laneKeys.every(Array.isArray) ? laneKeys.flat() : null;
 
   return {
     subject,

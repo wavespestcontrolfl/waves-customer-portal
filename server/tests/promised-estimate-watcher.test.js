@@ -85,6 +85,8 @@ describe('composePromisedEstimateDigest', () => {
     const overflow = composePromisedEstimateDigest([row(6, { total_count: 30 }), row(2, { total_count: 30 })]);
     expect(overflow.count).toBe(30);
     expect(overflow.itemKeys).toBeNull(); // clears a stored list (ops-digest.js)
+    const full = composePromisedEstimateDigest([row(6, { total_count: 30, all_ids: ['call-6', 'call-2', 'call-99'] })]);
+    expect(full.itemKeys).toEqual(['call-6', 'call-2', 'call-99']); // past the cap, all_ids still tracks every promise
   });
 
   test('no rows composes nothing (quiet day)', () => {

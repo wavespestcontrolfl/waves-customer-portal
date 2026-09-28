@@ -170,6 +170,22 @@ describe('findPriorRungRow — query shape', () => {
   });
 });
 
+describe('fullSetItemKeys', () => {
+  const { fullSetItemKeys } = require('../services/ops-digest');
+  test('uses all_ids (computed before LIMIT) when the query carries it', () => {
+    expect(fullSetItemKeys([{ id: 'a', total_count: 3, all_ids: ['a', 'b', 'c'] }], { prefix: 'call:' }))
+      .toEqual(['call:a', 'call:b', 'call:c']);
+  });
+  test('without all_ids: the page when it is the whole backlog, else null', () => {
+    expect(fullSetItemKeys([{ id: 1, total_count: 2 }, { id: 2, total_count: 2 }])).toEqual(['1', '2']);
+    expect(fullSetItemKeys([{ id: 1, total_count: 9 }])).toBeNull();
+    expect(fullSetItemKeys([])).toEqual([]);
+  });
+  test('idOf picks a non-id identity (texts lane keys by peer)', () => {
+    expect(fullSetItemKeys([{ peer: '9415550000' }], { prefix: 'text:', idOf: (r) => r.peer })).toEqual(['text:9415550000']);
+  });
+});
+
 describe('decideRingForNewRow', () => {
   test('no prior row at all -> rings', async () => {
     const conn = makeConn(null);

@@ -182,6 +182,18 @@ function normalizeItemKeys(raw) {
   const cleaned = [...new Set(raw.map((k) => String(k ?? '').trim()).filter(Boolean))].sort();
   return cleaned.length ? cleaned.slice(0, MAX_ITEM_KEYS) : null;
 }
+// A capped query's FULL-set identity: `all_ids` (ARRAY_AGG(id) OVER (),
+// computed before LIMIT like total_count) when the query carries it; else
+// the page itself only when it IS the whole backlog; else null (a partial
+// page would read an older item moving onto it as new).
+function fullSetItemKeys(rows, { prefix = '', idOf = (row) => row.id } = {}) {
+  const list = (rows || []).filter(Boolean);
+  const all = list[0]?.all_ids;
+  if (Array.isArray(all)) return all.filter((id) => id != null).map((id) => `${prefix}${id}`);
+  const total = Number(list[0]?.total_count) > 0 ? Number(list[0].total_count) : list.length;
+  if (total > list.length) return null;
+  return list.map(idOf).filter((id) => id != null).map((id) => `${prefix}${id}`);
+}
 // True only when BOTH sides carry an itemKeys array and the current one
 // names an item the prior list never did. Either side missing (a sender
 // that doesn't report itemKeys, or a prior row from before this existed)
@@ -657,5 +669,5 @@ module.exports = {
   deliverOpsDigest, resolveOpsDigest, readCleanWatermark, cleanWatermarkKey, inAppEnabled, htmlToText, CATEGORY,
   deriveKind, defaultAudienceFor, fallbackHeadline, truncateAtWord, digestRowFields,
   alertClassFor, ringDecision, findPriorRungRow, decideRingForNewRow, ringOnRefreshFrom, setKeyFor,
-  normalizeItemKeys, hasNewItemKeys,
+  normalizeItemKeys, hasNewItemKeys, fullSetItemKeys,
 };

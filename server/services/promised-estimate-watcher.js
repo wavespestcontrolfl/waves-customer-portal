@@ -24,7 +24,7 @@
 
 const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
-const { deliverOpsDigest } = require('./ops-digest');
+const { deliverOpsDigest, fullSetItemKeys } = require('./ops-digest');
 const { retireIfClean } = require('./ops-digest-fall-off');
 const db = require('../models/db');
 const { isInternalEmailRecipient } = require('../utils/internal-email-recipients');
@@ -82,6 +82,7 @@ async function loadUnkeptPromises() {
     `
     SELECT COUNT(*) OVER () AS total_count,
            MIN(c.created_at) OVER () AS oldest_created_at,
+           ARRAY_AGG(c.id::text) OVER () AS all_ids,
            c.id, c.created_at, c.customer_id, c.disposition,
            CASE WHEN c.direction = 'outbound' THEN c.to_phone ELSE c.from_phone END AS from_phone,
            c.duration_seconds,
@@ -237,9 +238,9 @@ function composePromisedEstimateDigest(rows) {
   // Item identity (admin-alerts-ring-v2 follow-up): the shown page's own
   // call ids — a count-only digest can't otherwise tell "same 25" from "25
   // different calls" when the backlog churns at a flat size.
-  // Only when the page IS the whole backlog: past the row cap, an older
-  // promise moving onto the page would read as a new one.
-  const itemKeys = total <= lines.length ? lines.map((l) => String(l.callId)).filter(Boolean) : null;
+  // Full-set identity (all_ids rides every row, computed before LIMIT), so
+  // a promise past the page cap is still tracked.
+  const itemKeys = fullSetItemKeys(promises);
   return { subject, text, html, count: total, oldestDays: oldest, headline, summary, itemKeys };
 }
 

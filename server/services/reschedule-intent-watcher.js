@@ -16,7 +16,7 @@
 
 const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
-const { deliverOpsDigest } = require('./ops-digest');
+const { deliverOpsDigest, fullSetItemKeys } = require('./ops-digest');
 const { retireIfClean } = require('./ops-digest-fall-off');
 const db = require('../models/db');
 const { isInternalEmailRecipient } = require('../utils/internal-email-recipients');
@@ -279,6 +279,7 @@ async function loadUnactionedFlags({ includeExpired = false } = {}) {
     .limit(MAX_ROWS)
     .select(
       db.raw('COUNT(*) OVER () AS total_count'),
+      db.raw('ARRAY_AGG(ad.id::text) OVER () AS all_ids'),
       'ad.id', 'ad.created_at', 'ad.input_snapshot', 'ad.customer_id',
       'cu.first_name', 'cu.last_name',
       'ss.scheduled_date', 'ss.window_start', 'ss.service_type', 'ss.status as visit_status',
@@ -347,9 +348,8 @@ function composeRescheduleIntentDigest(rows) {
   // Item identity (admin-alerts-ring-v2 follow-up): the shown page's own
   // agent_decisions ids — a count-only digest can't otherwise tell "same
   // requests" from "different ones" at a flat total.
-  // Only when the page IS the whole backlog: past MAX_ROWS, an older flag
-  // moving onto the page would read as a new one.
-  const itemKeys = total <= flags.length ? flags.map((row) => String(row.id)).filter(Boolean) : null;
+  // Full-set identity (all_ids, computed before LIMIT).
+  const itemKeys = fullSetItemKeys(flags);
   return { subject, text, html, count: total, headline, summary, itemKeys };
 }
 
