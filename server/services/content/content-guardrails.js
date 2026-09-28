@@ -4960,10 +4960,12 @@ const PAGE_CITY_SLUGS = new Set([
   'north-port', 'palmetto', 'parrish', 'port-charlotte',
 ]);
 
-function normalizeInternalPath(dest) {
-  let p = String(dest || '').trim().toLowerCase().split('#')[0].split('?')[0];
+function normalizeInternalPath(dest, { keepCase = false } = {}) {
+  let p = String(dest || '').trim();
+  if (!keepCase) p = p.toLowerCase();
+  p = p.split('#')[0].split('?')[0];
   if (!p.startsWith('/')) return null;
-  if (p !== '/' && !p.endsWith('/') && !/\.[a-z0-9]{2,5}$/.test(p)) p += '/';
+  if (p !== '/' && !p.endsWith('/') && !/\.[a-z0-9]{2,5}$/i.test(p)) p += '/';
   return p;
 }
 
@@ -5077,7 +5079,7 @@ function collectInternalDestinations(text) {
     // Anchor-only and in-repo image references are not routes.
     if (resolved.startsWith('/images/')) continue;
     const norm = normalizeInternalPath(resolved);
-    if (norm) normalized.push({ dest, norm, host, safeOrigin });
+    if (norm) normalized.push({ dest, norm, exact: normalizeInternalPath(resolved, { keepCase: true }), host, safeOrigin });
   }
   return normalized;
 }
@@ -5114,7 +5116,7 @@ function isKnownGoodInternalRoute(dest) {
 // that preserves one legacy /old/ link must not thereby earn a free pass to
 // ADD more links to that dead route; only up to the prior body's count of
 // each route is preserved-legacy (see uncatalogedComponentFinding).
-function internalRouteFinding(body, allowedInternalLinks = [], exemptRouteCounts = null, relatedPostLinks = [], relatedPostHosts = [], relatedPostLinksLive = true) {
+function internalRouteFinding(body, allowedInternalLinks = [], exemptRouteCounts = null, relatedPostLinks = [], relatedPostHosts = [], relatedPostLinksLive = true, staleRelatedPostLinks = []) {
   // Non-rendered content carries no live links: a fenced or commented
   // example (<InlineCTA ctaHref="/example-only/">, a code-block href) must
   // not flag UNKNOWN_INTERNAL_ROUTE — the same masking the component
@@ -5144,9 +5146,16 @@ function internalRouteFinding(body, allowedInternalLinks = [], exemptRouteCounts
     if (allowanceCity && !PAGE_CITY_SLUGS.has(allowanceCity)) continue;
     allowed.add(norm);
   }
-  const relatedPaths = new Set((Array.isArray(relatedPostLinks) ? relatedPostLinks : [])
-    .map((link) => normalizeInternalPath(link))
-    .filter(Boolean));
+  // Related-post paths match with their canonical case: blog slugs are
+  // lowercase and static routes need not resolve another casing, so
+  // "/Termite/Swarmers/" must not ride the allowance for "/termite/swarmers/".
+  const relatedList = Array.isArray(relatedPostLinks) ? relatedPostLinks : [];
+  const relatedPaths = new Set(relatedList.map((link) => normalizeInternalPath(link, { keepCase: true })).filter(Boolean));
+  const relatedLower = new Set(relatedList.map((link) => normalizeInternalPath(link)).filter(Boolean));
+  // Frozen related paths that failed the publish-time liveness recheck
+  // (unpublished, noindexed or moved since compose): always denied.
+  const staleRelated = new Set((Array.isArray(staleRelatedPostLinks) ? staleRelatedPostLinks : [])
+    .map((link) => normalizeInternalPath(link)).filter(Boolean));
   const allowedRelatedHosts = new Set();
   for (const value of Array.isArray(relatedPostHosts) ? relatedPostHosts : []) {
     let host = String(value || '').trim().toLowerCase();
@@ -5157,8 +5166,14 @@ function internalRouteFinding(body, allowedInternalLinks = [], exemptRouteCounts
     allowedRelatedHosts.add(`www.${bare}`);
   }
   const seenCounts = new Map();
-  for (const { dest, norm, host, safeOrigin } of collectInternalDestinations(text)) {
-    if (relatedPaths.has(norm)) {
+  for (const { dest, norm, exact, host, safeOrigin } of collectInternalDestinations(text)) {
+    if (staleRelated.has(norm)) {
+      return finding('P0', 'UNKNOWN_INTERNAL_ROUTE', `Draft links related-post path "${dest}", which is no longer live (unpublished, noindexed or moved since this brief was composed).`);
+    }
+    if (relatedLower.has(norm) && !relatedPaths.has(exact)) {
+      return finding('P0', 'UNKNOWN_INTERNAL_ROUTE', `Draft links related-post path "${dest}" with different capitalization than the verified route; use the exact path from the brief.`);
+    }
+    if (relatedPaths.has(exact)) {
       // A relative candidate renders on the current publish host. An absolute
       // candidate must name that same frozen host; a path match alone must not
       // turn a hub allowance into permission for a spoke URL (or vice versa).
@@ -6478,7 +6493,7 @@ function literalPhoneInTitleFinding(frontmatter) {
  *   citation-residue and off-footprint checks still apply in full (those are
  *   never legitimate, new or old).
  */
-function evaluate(draft, { service = null, primaryKeyword = null, domains = null, operatorFaqException = false, requiredSourceUrls = [], operatorCitations = false, competitorPriceCitations = false, forbidAllPrices = false, allowedInternalLinks = [], relatedPostLinks = [], relatedPostHosts = [], relatedPostLinksLive = true, isRefresh = false, priorBody = null, liveMetaTitle = null, liveMetaDescription = null, targetIsBlog = false, allowedAffiliateProducts = null } = {}) {
+function evaluate(draft, { service = null, primaryKeyword = null, domains = null, operatorFaqException = false, requiredSourceUrls = [], operatorCitations = false, competitorPriceCitations = false, forbidAllPrices = false, allowedInternalLinks = [], relatedPostLinks = [], relatedPostHosts = [], relatedPostLinksLive = true, staleRelatedPostLinks = [], isRefresh = false, priorBody = null, liveMetaTitle = null, liveMetaDescription = null, targetIsBlog = false, allowedAffiliateProducts = null } = {}) {
   const body = draft?.body || draft?.content || '';
   const frontmatter = draft?.frontmatter || {};
   const kw = primaryKeyword || frontmatter.primary_keyword || frontmatter.primaryKeyword || null;
@@ -6617,7 +6632,7 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
     (isRefresh && !refreshPriorBody) ? null : internalRouteFinding(body, [
       ...(Array.isArray(allowedInternalLinks) ? allowedInternalLinks : []),
       ...(Array.isArray(draft?.checked_existing_routes) ? draft.checked_existing_routes : []),
-    ], refreshExemptRoutes, relatedPostLinks, relatedPostHosts, relatedPostLinksLive),
+    ], refreshExemptRoutes, relatedPostLinks, relatedPostHosts, relatedPostLinksLive, staleRelatedPostLinks),
     // Owner hard rule (2026-07-16): service/location metaTitles — the
     // intentional long near-me titles — are NEVER edited by automation. A
     // refresh draft that proposes a DIFFERENT metaTitle than the live page is

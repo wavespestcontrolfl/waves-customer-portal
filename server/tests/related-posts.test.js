@@ -10,6 +10,7 @@ jest.mock('../models/db', () => jest.fn());
 const {
   rankRelatedPosts,
   getRelatedPostsForBrief,
+  getLiveRelatedPaths,
   candidateFromRow,
   candidateFromAutonomousRun,
   candidateFromRegistryRow,
@@ -537,6 +538,25 @@ describe('getRelatedPostsForBrief — DB wrapper', () => {
     ]);
     expect(out.some((r) => r.path.includes('termite-legacy-slug'))).toBe(false);
     expect(out.some((r) => r.path.includes('failed-build'))).toBe(false);
+  });
+
+  test('getLiveRelatedPaths keeps only frozen paths that are still verified live', async () => {
+    const registryRows = [{
+      id: 'registry-1',
+      canonical_url_normalized: '/termite/direct-astro-post/',
+      content_type: 'blog',
+      reconciliation_status: 'astro_only',
+      workflow_status: 'published',
+      astro_status: 'present',
+      live_status: 'live',
+      noindex_detected: false,
+      title: 'Direct Astro Termite Post',
+      metadata: { frontmatter: {} },
+    }];
+    const database = fakeDb({ registryRows });
+    const live = await getLiveRelatedPaths(['/termite/direct-astro-post/', '/termite/unpublished-since/'], { database });
+    expect([...live]).toEqual(['/termite/direct-astro-post/']);
+    expect([...(await getLiveRelatedPaths([], { database }))]).toEqual([]);
   });
 
   test('matches current registry health to an absolute spoke URL by domain and path', async () => {

@@ -383,7 +383,10 @@ function candidateFromRegistryRow(row) {
  * rankRelatedPosts' first argument. `opts.database` overrides the knex
  * connection (tests inject a mock); `opts.limit` overrides the cap.
  */
-async function getRelatedPostsForBrief(target = {}, { database = db, limit = RELATED_POSTS_DEFAULT_LIMIT } = {}) {
+// Every related-post candidate that is verified live right now (blog_posts,
+// autonomous runs and the content registry, cross-checked). Shared by brief
+// composition (ranked) and the publish-time recheck (paths only).
+async function loadVerifiedCandidates(database) {
   const rows = await database('blog_posts')
     .select('id', 'title', 'keyword', 'tag', 'category', 'slug', 'city', 'target_sites', 'status', 'astro_status', 'astro_live_url');
   // The audit table is append-only and draft_payload carries the full
@@ -494,7 +497,21 @@ async function getRelatedPostsForBrief(target = {}, { database = db, limit = REL
   for (const candidate of registryCandidatesByPath.values()) {
     if (!autonomousPaths.has(candidate.path)) candidates.push(candidate);
   }
-  return rankRelatedPosts(target, candidates, { limit });
+  return candidates;
+}
+
+async function getRelatedPostsForBrief(target = {}, { database = db, limit = RELATED_POSTS_DEFAULT_LIMIT } = {}) {
+  return rankRelatedPosts(target, await loadVerifiedCandidates(database), { limit });
+}
+
+// Publish-time recheck: of the frozen related paths, the ones still verified
+// live now. A post can be unpublished, noindexed or moved while a draft that
+// links it waits for review.
+async function getLiveRelatedPaths(paths = [], { database = db } = {}) {
+  const wanted = new Set((Array.isArray(paths) ? paths : []).map(normalizePathForCompare).filter(Boolean));
+  if (!wanted.size) return new Set();
+  const live = new Set((await loadVerifiedCandidates(database)).map((c) => normalizePathForCompare(c.path)));
+  return new Set([...wanted].filter((p) => live.has(p)));
 }
 
 module.exports = {
@@ -507,5 +524,6 @@ module.exports = {
   registryRowLivePath,
   registryRowLiveKeys,
   getRelatedPostsForBrief,
+  getLiveRelatedPaths,
   _internals: { extractTokens, entityCandidates, candidateRendersOnDomains, normalizePathForCompare, GENERIC_TOPIC_TOKENS },
 };
