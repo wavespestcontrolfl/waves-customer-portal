@@ -44,6 +44,14 @@ const geocodeReview = require('./customer-geocode-review');
 async function withReviewWriteFence({ propertyId, customerId, visitIds }, write) {
   if (!geocodeReview.reviewEnabled()) return write(db);
   return db.transaction(async (trx) => {
+    // Property-preferences advisory lock FIRST (the global order: prefs
+    // advisory → row locks). A staff geocode decision holds it while it
+    // locks the customer and THEN the visits (customer-geocode-review-
+    // actions.js); without it this fence (visit, then customer) and a
+    // concurrent decision on the same customer form an ABBA cycle and
+    // Postgres aborts one side with 40P01.
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+      ['property-preferences', String(customerId)]);
     // Visit-then-customer, matching the annual-prepay switch's lock order
     // (admin-schedule.js: scheduled_services then customers) — a caller
     // writing to scheduled_services under this fence must lock those rows

@@ -133,6 +133,51 @@ postgres('geocode enrichment visit-then-customer lock order', () => {
     expect(Number(visit.lng)).toBeCloseTo(-82.4);
   });
 
+  test('a staff geocode decision (prefs lock, customer, then visits) never deadlocks against this fence', async () => {
+    let customerLocked;
+    let releaseHolder;
+    const locked = new Promise(resolve => { customerLocked = resolve; });
+    const release = new Promise(resolve => { releaseHolder = resolve; });
+    // Mimics resolveCustomerGeocodeReview: the property-preferences advisory
+    // lock, then the customer row (lockedContext), and only THEN the visits
+    // (lockVisitContext) -- the reverse of this fence's visit-then-customer.
+    const holder = mockConnection.transaction(async (trx) => {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        ['property-preferences', String(customerId)]);
+      await trx('customers').where({ id: customerId }).forUpdate().first('id');
+      customerLocked();
+      await release;
+      await trx('scheduled_services').where({ id: visitId }).forUpdate().first('id');
+    });
+    await locked;
+
+    let fenceSettled = false;
+    const fence = withReviewWriteFence({ propertyId, customerId, visitIds: [visitId] }, async (conn) => (
+      conn('scheduled_services').where({ id: visitId }).update({ lat: 27.6, lng: -82.4 })
+    )).finally(() => { fenceSettled = true; });
+
+    const deadline = Date.now() + 5000;
+    let blocked = false;
+    while (!blocked && Date.now() < deadline) {
+      const waiting = await admin('pg_stat_activity')
+        .where({ application_name: 'geocode-lock-order' })
+        .where({ state: 'active', wait_event_type: 'Lock' })
+        .count('* as count').first();
+      blocked = Number(waiting?.count || 0) > 0;
+      if (!blocked) await new Promise(resolve => setImmediate(resolve));
+    }
+    try {
+      // The fence must wait on the shared advisory lock BEFORE taking the
+      // visit row, so the decision can still lock that visit.
+      expect(blocked).toBe(true);
+      expect(fenceSettled).toBe(false);
+    } finally {
+      releaseHolder();
+    }
+    await expect(holder).resolves.toBeUndefined();
+    await expect(fence).resolves.toBe(1);
+  });
+
   test('a multi-visit lock is acquired in ascending id order regardless of the caller\'s array order', async () => {
     // Fixed ids so the sort order is known independent of insertion order.
     // Inserted HIGH-then-LOW (reversed from id order): an unindexed/unordered
