@@ -700,6 +700,10 @@ describe('CustomersPageV2 workflow state', () => {
 
   // Overlay mode mounts the directory queue and a profile together; closing
   // the profile's draft must not drop the guard for the queue's open draft.
+  // The profile opens BEFORE the queue draft here (rather than after, as a
+  // real admin opening the queue first would trigger the guarded directory
+  // open below) so this test's own setup exercises the profile-draft-close
+  // behavior it names without also going through that separate guard.
   it('keeps guarding an open queue draft after an overlay profile draft closes', async () => {
     vi.stubGlobal('fetch', vi.fn((url) => String(url).includes('/admin/customers?') ? response(list) : response({})));
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
@@ -709,14 +713,86 @@ describe('CustomersPageV2 workflow state', () => {
       <a href="/admin/dashboard" onClick={(e) => { e.preventDefault(); linkClicks(); }}>Leave to Dashboard</a>
       <CustomersPageV2 />
     </MemoryRouter>);
-    fireEvent.click(await screen.findByRole('button', { name: 'Open queue draft' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Open Avery Customer customer profile' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Open Avery Customer customer profile' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Open address draft' }));
     fireEvent.click(screen.getByRole('button', { name: 'Close address draft' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Open queue draft' }));
     expect(screen.getByTestId('queue-draft-open')).toHaveTextContent('true');
 
     fireEvent.click(screen.getByRole('link', { name: 'Leave to Dashboard' }));
     expect(confirmSpy).toHaveBeenCalledOnce();
     expect(linkClicks).not.toHaveBeenCalled();
+  });
+
+  // The directory table's own customer-name click (and the mobile/legacy
+  // list, and the "Open profile" menu item) is a plain programmatic
+  // ?customerId= write — no popstate, no <a> click — so neither
+  // guardHistory nor guardLink ever sees it. It needs its own guard.
+  it('prompts before opening a directory profile while a queue draft is open, and opens it once confirmed', async () => {
+    vi.stubGlobal('fetch', vi.fn((url) => String(url).includes('/admin/customers?') ? response(list) : response({})));
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+
+    render(<MemoryRouter initialEntries={['/admin/customers']}><CustomersPageV2 /></MemoryRouter>);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open queue draft' }));
+    expect(screen.getByTestId('queue-draft-open')).toHaveTextContent('true');
+
+    // Declined: the profile never opens, and the queue draft survives.
+    fireEvent.click(screen.getByRole('button', { name: 'Open Avery Customer customer profile' }));
+    expect(confirmSpy).toHaveBeenCalledOnce();
+    expect(screen.queryByTestId('customer-profile')).not.toBeInTheDocument();
+    expect(screen.getByTestId('queue-draft-open')).toHaveTextContent('true');
+
+    // Confirmed: the same click now opens it.
+    confirmSpy.mockReturnValue(true);
+    fireEvent.click(screen.getByRole('button', { name: 'Open Avery Customer customer profile' }));
+    expect(await screen.findByTestId('customer-profile')).toHaveTextContent('customer-a');
+  });
+
+  // Switching away from Directory unmounts the queue panel below (it only
+  // renders under view === "directory") with no popstate and no <a> click
+  // of its own — same unguarded gap as opening a profile from the table.
+  it('prompts before switching the Customers view while a queue draft is open, and switches once confirmed', async () => {
+    vi.stubGlobal('fetch', vi.fn((url) => String(url).includes('/admin/customers?') ? response(list) : response({})));
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+
+    render(<MemoryRouter initialEntries={['/admin/customers']}><CustomersPageV2 /></MemoryRouter>);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open queue draft' }));
+    expect(screen.getByTestId('queue-draft-open')).toHaveTextContent('true');
+
+    // Declined: stays on Directory with the queue draft intact.
+    fireEvent.click(screen.getByRole('button', { name: 'Map' }));
+    expect(confirmSpy).toHaveBeenCalledOnce();
+    expect(screen.getByRole('button', { name: 'Directory' })).toHaveAttribute('aria-current', 'page');
+    expect(screen.getByTestId('queue-draft-open')).toHaveTextContent('true');
+
+    // Confirmed: the view actually switches, unmounting the queue panel.
+    confirmSpy.mockReturnValue(true);
+    fireEvent.click(screen.getByRole('button', { name: 'Map' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Map' })).toHaveAttribute('aria-current', 'page'));
+    expect(screen.queryByTestId('queue-draft-open')).not.toBeInTheDocument();
+  });
+
+  // shiftKey/altKey open a new window or trigger a download, same as
+  // _blank/meta/ctrl (already covered above) — none of those unmount this
+  // page, so none should prompt.
+  it('does not prompt a shift-click or alt-click on a same-tab link while a queue draft is open', async () => {
+    vi.stubGlobal('fetch', vi.fn((url) => String(url).includes('/admin/customers?') ? response(list) : response({})));
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    const linkClicks = vi.fn();
+
+    render(<MemoryRouter initialEntries={['/admin/customers']}>
+      <a href="/admin/dashboard" onClick={(e) => { e.preventDefault(); linkClicks(); }}>Leave to Dashboard</a>
+      <CustomersPageV2 />
+    </MemoryRouter>);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open queue draft' }));
+    expect(screen.getByTestId('queue-draft-open')).toHaveTextContent('true');
+
+    fireEvent.click(screen.getByRole('link', { name: 'Leave to Dashboard' }), { shiftKey: true });
+    expect(confirmSpy).not.toHaveBeenCalled();
+    expect(linkClicks).toHaveBeenCalledOnce();
+
+    fireEvent.click(screen.getByRole('link', { name: 'Leave to Dashboard' }), { altKey: true });
+    expect(confirmSpy).not.toHaveBeenCalled();
+    expect(linkClicks).toHaveBeenCalledTimes(2);
   });
 });

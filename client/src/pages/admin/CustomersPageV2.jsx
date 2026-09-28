@@ -1036,6 +1036,7 @@ function CustomerDirectoryView({
   loadCustomers,
   filteredSorted,
   openCustomerProfile,
+  onOpenCustomerProfile,
   startEdit,
   handleDeleteCustomer,
   geocodeReviewRefreshToken,
@@ -1051,6 +1052,10 @@ function CustomerDirectoryView({
     view === "directory" && (
       <>
         {isAdmin && (
+          // The queue's own customer-name links already guard themselves
+          // against THIS row's draft (ReviewSummary's draftActive check) —
+          // raw openCustomerProfile, not the directory-level guarded one, so
+          // a confirmed discard here is never re-prompted by that guard.
           <CustomerGeocodeReviewPanel
             onSelectCustomer={openCustomerProfile}
             refreshToken={geocodeReviewRefreshToken}
@@ -1122,7 +1127,7 @@ function CustomerDirectoryView({
               ...customer,
               address: formatCustomerAddress(customer.address),
             }))}
-            onOpen={openCustomerProfile}
+            onOpen={onOpenCustomerProfile}
             onEdit={startEdit}
             onDelete={handleDeleteCustomer}
             onCall={callCustomer}
@@ -1152,7 +1157,7 @@ function CustomerDirectoryView({
                           {" "}
                           <button data-ui-text-action
                             type="button"
-                            onClick={() => openCustomerProfile(c.id)}
+                            onClick={() => onOpenCustomerProfile(c.id)}
                             aria-label={`Open ${c.firstName || ""} ${c.lastName || ""} customer profile`.trim()}
                             className="text-14 font-medium text-zinc-900 hover:underline truncate text-left bg-transparent border-0 p-0 cursor-pointer u-focus-ring rounded-xs"
                           >
@@ -1203,12 +1208,12 @@ function CustomerDirectoryView({
                   })()
                 ) : (
                   <div
-                    onClick={() => openCustomerProfile(c.id)}
+                    onClick={() => onOpenCustomerProfile(c.id)}
                     onKeyDown={(event) => {
                       if (event.target !== event.currentTarget) return;
                       if (event.key === "Enter" || event.key === " ") {
                         event.preventDefault();
-                        openCustomerProfile(c.id);
+                        onOpenCustomerProfile(c.id);
                       }
                     }}
                     role="button"
@@ -1806,6 +1811,10 @@ export default function CustomersPageV2() {
   };
 
   const changeView = (nextView) => {
+    // Switching away from "directory" unmounts the queue panel below
+    // (CustomerDirectoryView only renders it there) exactly like a route
+    // change would — same guardNavigateAway choke point.
+    if (!guardNavigateAway()) return;
     setSearchParams((current) => {
       const next = new URLSearchParams(current);
       if (nextView === "directory") next.delete("view");
@@ -1856,12 +1865,17 @@ export default function CustomersPageV2() {
     }
     if (customer?.id) {
       createdCustomerIdRef.current = String(customer.id);
-      // Deep-link into the newly created profile.
-      openCustomerProfile(customer.id);
+      // Deep-link into the newly created profile. The queue panel underneath
+      // the (now-closing) Add Customer modal can still hold an open draft —
+      // route through the same guard as any other directory-level open.
+      guardedOpenCustomerProfile(customer.id);
     }
   };
 
   const closeAddCustomer = () => {
+    // Only the /new route actually changes the page's pathname below —
+    // an ordinary modal dismiss touches no route param and needs no guard.
+    if (isNewCustomerRoute && !guardNavigateAway()) return;
     const createdId = createdCustomerIdRef.current;
     createdCustomerIdRef.current = null;
     setShowAddModal(false);
@@ -1907,6 +1921,26 @@ export default function CustomersPageV2() {
   const hasOpenDraft = () => draftActiveRef.current.profile || draftActiveRef.current.queue;
   const handleProfileDraftActiveChange = (active) => { draftActiveRef.current.profile = active; };
   const handleQueueDraftActiveChange = (active) => { draftActiveRef.current.queue = active; };
+  // Single choke point for every OTHER control on this page that can
+  // programmatically change pathname/customerId/view and unmount a
+  // draft-bearing panel with no popstate and no <a> click of its own to
+  // catch (guardHistory/guardLink below cover those) — changeView,
+  // closeAddCustomer's /new → /customers navigate, and opening a profile
+  // straight from the directory (table row, "Open profile" menu item, the
+  // mobile/legacy list, a fresh quick-add). Same shape as this page's own
+  // popstate/link guards and Customer360ProfileV2's guardNavigateAway.
+  // NOT used for openCustomerProfile/selectCustomer generally — the calls
+  // that reach it through an already-guarded control (the queue's own
+  // row links, the profile's account-properties customer-switch links,
+  // Customer360Workspace's "All customers") have already resolved their
+  // own confirm before calling it, and this ref only clears once the
+  // panel that owned the draft actually unmounts, not the instant the
+  // confirm dialog closes — checking hasOpenDraft() again here would
+  // double-prompt on the same navigation.
+  const guardNavigateAway = () => !hasOpenDraft() || confirmDiscardDraft();
+  const guardedOpenCustomerProfile = (customerId) => {
+    if (guardNavigateAway()) openCustomerProfile(customerId);
+  };
   // BrowserRouter stamps an index on each history entry. Kept in sync on
   // every settled render so a declined Back/Forward can step back to the
   // draft's own entry instead of overwriting the one it popped to.
@@ -1937,7 +1971,11 @@ export default function CustomersPageV2() {
     const guardLink = (event) => {
       if (!hasOpenDraft()) return;
       const link = event.target.closest?.("a[href]");
-      if (!link || link.target === "_blank" || event.metaKey || event.ctrlKey || link.hash) return;
+      // shiftKey/altKey open a new window or trigger a download, same as
+      // _blank/meta/ctrl — none of those unmount this page, so none discard
+      // the draft (no shared modifier-click helper exists in the repo;
+      // AdminLayoutV2/AdminWorkspaceNavigation each inline this same check).
+      if (!link || link.target === "_blank" || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || link.hash) return;
       if (link.origin === window.location.origin
         && `${link.pathname}${link.search}` === `${window.location.pathname}${window.location.search}`) return;
       if (!confirmDiscardDraft()) {
@@ -2148,6 +2186,13 @@ export default function CustomersPageV2() {
   return (
     <PagePresentation
       selectedId={selected360Id}
+      // Raw, not guardedOpenCustomerProfile: Customer360ProfileV2's own
+      // guardedSelectCustomer already confirms its local draft before this
+      // ever fires (account-properties/address-neighbor customer switches),
+      // and neither presentation unmounts the queue on a customerId change
+      // in flight from there — workspace mode already dropped it opening
+      // the FIRST profile, overlay mode never unmounts it on customerId at
+      // all. A second check here would double-prompt that same click.
       onSelect={openCustomerProfile}
       onClose={closeCustomerProfile}
       onCustomerMutation={refreshCustomersAndGeocodeReview}
@@ -2298,6 +2343,7 @@ export default function CustomersPageV2() {
         loadCustomers={loadCustomers}
         filteredSorted={filteredSorted}
         openCustomerProfile={openCustomerProfile}
+        onOpenCustomerProfile={guardedOpenCustomerProfile}
         startEdit={startEdit}
         handleDeleteCustomer={handleDeleteCustomer}
         geocodeReviewRefreshToken={geocodeReviewRefreshToken}
@@ -2316,7 +2362,7 @@ export default function CustomersPageV2() {
         error={error}
         loadCustomers={loadCustomers}
         customers={customers}
-        openCustomerProfile={openCustomerProfile}
+        openCustomerProfile={guardedOpenCustomerProfile}
       />
 
       {/* ======================= PIPELINE (V2 monochrome) ======================= */}
