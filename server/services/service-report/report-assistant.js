@@ -50,6 +50,9 @@ const WATERING_ADVICE_QUESTION_RE = new RegExp(
   String.raw`\b(?:(?:how(?:\s+(?:much|long|often))?|when)\s+(?:${WATERING_ASK_SRC})?|${WATERING_ASK_SRC})${WATERING_TERM_SRC}`
   + String.raw`|\bwhat\s+is\s+(?:my|the)\s+(?:watering|irrigation)\s+plan\b`,
 );
+// Watering-schedule topics asked without a verb ("What's my watering
+// schedule?", "Any irrigation changes this week?", "What run time?").
+const WATERING_TOPIC_RE = /\b(?:watering|irrigation|sprinklers?)\s+(?:plan|schedule|advice|instructions?|directions?|restrictions?|changes?|guidance|settings?|days?)\b|\brun\s?times?\b/;
 // A request for the customer's own next move ("What do I need to do about
 // the mushrooms I observed?", "Anything we should do…", "Any action needed…",
 // "How do I handle…"). Observation words inside it qualify the request; they
@@ -722,7 +725,11 @@ function answerServiceReportQuestion({
   // must fall through to the appointment router (codex gh-r46).
   const zoneRuntimeIntent = !/\btime\s*zones?\b/.test(q)
     && /\bzones?\b/.test(q) && /\b(run|runs|running|minutes?|duration|how long)\b/.test(q);
-  const wateringIntent = /\b(water(?:s|ed|ing)?|irrigat\w*|sprinklers?|run ?time)\b/.test(q) || zoneRuntimeIntent;
+  // A watering REQUEST, never an incidental noun ("Is this water damage?",
+  // "Is the irrigation meter broken?"): every watering branch below — the
+  // unresolved-aftercare task, the credited watering-in, the weekly plan —
+  // reads this one intent.
+  const wateringIntent = WATERING_ADVICE_QUESTION_RE.test(q) || WATERING_TOPIC_RE.test(q) || zoneRuntimeIntent;
 
   const rules = questionRoutingRules({
     data, nextAppointment, weekPlan, aftercare, wateringIntent,

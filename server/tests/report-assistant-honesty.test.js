@@ -147,6 +147,10 @@ describe('reconciled todaysResult leads with the visit summary', () => {
   });
 });
 
+// PR #5033 P2 (thread PRRT_kwDOR3YQi86mlJsv): water/irrigation/sprinkler as
+// a noun never reaches a watering branch.
+const INCIDENTAL_WATER_NOUNS = ['Is this water damage?', 'What caused the water stains?', 'Is the irrigation meter broken?'];
+
 describe('watering questions answer with the weekly plan when the report carries one (codex #3565 gh-r29)', () => {
   const plan = { title: 'This week: check the rain before you water', detail: 'Leave the turf irrigation off for now; run one cycle only if less than ½" has fallen.' };
   test('plan present → the plan, before re-entry / trend routing', () => {
@@ -176,6 +180,12 @@ describe('watering questions answer with the weekly plan when the report carries
     // gh-r38: controller phrasing without the word "water" is a watering question too.
     for (const q of ['How long should I run each zone?', 'How many minutes per zone?']) {
       expect(answerServiceReportQuestion({ question: q, data })).toBe(`${plan.title} ${plan.detail}`);
+    }
+    // PR #5033 P2: a verbless watering-schedule topic is still a watering request.
+    expect(answerServiceReportQuestion({ question: 'What’s my watering schedule this week?', data })).toBe(`${plan.title} ${plan.detail}`);
+    // PR #5033 P2: an incidental watering noun is not a watering request.
+    for (const q of INCIDENTAL_WATER_NOUNS) {
+      expect(answerServiceReportQuestion({ question: q, data })).not.toBe(`${plan.title} ${plan.detail}`);
     }
     // gh-r46: "time zone" is not watering intent — the appointment router answers it.
     expect(answerServiceReportQuestion({ question: 'What time zone is my next appointment?', data })).not.toBe(`${plan.title} ${plan.detail}`);
@@ -278,6 +288,13 @@ describe('watering questions answer with the weekly plan when the report carries
       const findingsAnswer = answerServiceReportQuestion({ question, data });
       expect(findingsAnswer).toMatch(/Sprinkler area checked/);
       expect(findingsAnswer).not.toMatch(expected);
+    }
+    // Unresolved aftercare answers watering requests only — an incidental
+    // watering noun keeps its findings / trend routing.
+    for (const question of INCIDENTAL_WATER_NOUNS) {
+      const answer = answerServiceReportQuestion({ question, data });
+      expect(answer).not.toMatch(expected);
+      expect(answer).not.toMatch(/Confirm the product watering directions|Follow the product-specific watering restriction/);
     }
   });
 
