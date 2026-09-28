@@ -11,7 +11,7 @@
     "legacy_slugs": [],
     "review": {
       "status": "draft",
-      "notes": ""
+      "notes": "Range fact-check closed 2026-09-28: iNaturalist has 9 Florida observations ever (5 research-grade: Tampa, Orlando, Miami, Navarre; none in Manatee/Sarasota/Charlotte/Lee) vs 1,151 in Virginia and 1,778 in Pennsylvania; GBIF likewise 5 Florida records. Clemson HGIC confirms it as the Southeast indoor species. Range set to rare (was common, which would have told customers it is common here now). Awaiting owner approval of this wording."
     },
     "slug": "house-centipede",
     "common_name": "House Centipede",
@@ -61,7 +61,7 @@
       "regulated": false,
       "irritant": false
     },
-    "range": "common",
+    "range": "rare",
     "active_months": [
       1,
       2,
@@ -92,7 +92,9 @@
     },
     "tech_notes": "Beneficial predator; indicates other insect prey present. No treatment needed unless customer wants it excluded; check bathroom/garage moisture entry points.",
     "sources": [
-      "https://ask.ifas.ufl.edu/publication/IG093"
+      "https://ask.ifas.ufl.edu/publication/IG093",
+      "https://hgic.clemson.edu/factsheet/centipedes/",
+      "https://www.inaturalist.org/observations?place_id=21&taxon_name=Scutigera%20coleoptrata"
     ],
     "links": {
       "site_page": "/pest-identifier/house-centipede/",
@@ -102,12 +104,7 @@
     "risk": "defensive",
     "action": "leave_alone",
     "season_basis": "year_round",
-    "verification": [
-      {
-        "claim": "Range in Southwest Florida specifically (vs. common statewide/nationally)",
-        "note": "Still open as of 2026-09-26. Re-fetched ask.ifas.ufl.edu/publication/IG093 (UF/IFAS \"Centipedes\" fact sheet, already in sources): it covers centipedes generically (10-100 legs, active predators of insects/spiders, venom not lethal to humans) and does not name Scutigera coleoptrata or break down Florida sub-regions. Searched for a dedicated UF/IFAS Featured Creatures page for the house centipede specifically; none found (only general pest-control blogs turned up, which aren't authoritative sources per the sourcing rules). Extension literature on this species is written at the statewide/national level, not broken out by Florida region, so a Southwest-Florida-specific density figure may not exist to be sourced. Leaving range: \"common\" as a statewide/nationwide characterization rather than asserting SW-FL-specific density."
-      }
-    ]
+    "verification": []
   },
   {
     "kind": "organism",
