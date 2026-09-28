@@ -98,7 +98,9 @@ function pinnedBodyDigest(query, expectedBodyDigest) {
 // (scheduler.js provider_retry_at/_code, twilio-webhook.js provider_retry).
 // Matched by key NAME so a producer's variant spelling is still caught.
 const PRIOR_ATTEMPT_KEY_RE = /^(provider_retry|scheduled_sms_(claimed|recovered)_at$)/;
-const PRIOR_ATTEMPT_KEY_SQL = '^(provider_retry|scheduled_sms_(claimed|recovered)_at$)';
+// One source of truth: the SQL `~` match uses the SAME pattern text (the
+// syntax is valid in both JS and Postgres POSIX regex).
+const PRIOR_ATTEMPT_KEY_SQL = PRIOR_ATTEMPT_KEY_RE.source;
 
 function simpleOnlyWhere(query, simpleOnly) {
   if (!simpleOnly) return query;
