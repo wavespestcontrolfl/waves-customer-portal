@@ -344,6 +344,10 @@ async function callClaude(systemPrompt, userPrompt) {
     const response = await createDeepMessage(client, {
       laneId: 'wiki_compiler',
       model: MODEL,
+      // effort 'medium' (2026-09-28): at high, Opus 5.5's thinking still ran
+      // a September page into the 16000 cap. A page summarizes logged
+      // outcomes; it needs room to write, not deep reasoning.
+      effort: 'medium',
       // DEEP: thinking spends from max_tokens ahead of the visible answer.
       // 16000 (was 8192, 2026-09-26): 5 of 6 prod calls were hitting 8192
       // exactly (avg output 7515) with thinking eating the whole cap —
