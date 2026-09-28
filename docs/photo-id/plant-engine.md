@@ -43,13 +43,96 @@ be merged into `v2`.
   "evidence": { "photos": 3, "chips": {...}, "account": {...} },
   "settle_it": { "kind": "photo|field_test|technician|retake", ... },
   "next_step_hint": { "kind": "specialist|inspection|fix_conditions|none|unclear", "text": "..." },
-  "referral": null, "quality": { "usable": true, "issue": "none" }
+  "referral": null, "quality": { "usable": true, "issue": "none", "shows": "plant|damage|both|nothing|conflicting|null" }
 }
 ```
 
 `mode: "identify"` returns the pest identity-card shape instead (`{ version,
-kind: "identity", answer, entry, candidates, next_photo, quality }`) for
-Layer A only (turf, one weed, or a host plant).
+kind: "identity", answer, entry, evidence: { matches, still_need },
+candidates, next_photo, quality }`) for Layer A only, so the existing
+`V2Result` card renders its "What matches" / "What we still need to see"
+sections. The one identity lane is the host for `tree_shrub`/`palm`; for a
+lawn it is whichever of turf and weeds the photos populated, and when both
+are populated the one whose top candidate has the higher verified
+confidence (turf on a tie) — a photo of a weed returns the weed, not an
+empty turf answer. `internal.identity.lane` records the choice.
+
+## Photo reads that gate naming
+
+- **Quality.** Any leg (candidates, conditions, escalation, a host re-run)
+  reading `usable: false` makes the photos unusable.
+- **`shows`.** Call A and the escalation each report whether the photos show
+  the `plant`, `damage`, `both`, or `nothing`; the combined read rides along
+  as `quality.shows`. `nothing` from any leg makes the photos unusable
+  (`usable: false`, issue `subject_unclear` when no other issue was
+  reported). Two different specific reads (`plant` vs `damage`) are
+  `conflicting`: nothing is named, though the workup keeps its symptom
+  headline, possibilities and next step. `both` is compatible with either
+  read.
+- **Unusable** → workup: fixed unusable headline, no named identity or
+  condition, `next_step_hint: unclear`, tier `needs_more_evidence`;
+  identify: the `unknown` answer, no candidates or evidence, a retake
+  prompt, tier `needs_more_evidence` (the same gate in both modes).
+
+## Identity verification and escalation provenance
+
+- Cue citations are cleaned before anything reads them: out-of-range
+  numbers and a cue cited as both visible and not visible are dropped; a
+  candidate is `verified` (required for `pretty_sure`) only with at least
+  one clean visible cue.
+- The verify leg counts as a miss (→ escalation) unless it returns a record
+  for EVERY catalog candidate it was asked about. A candidate an answered
+  verify leg left out is `uncovered` and is never named unless a checked
+  escalation score replaces it (a whole-leg miss keeps the older rule: the
+  escalation trigger fires and an unanswered one caps wording at `likely`).
+- When both providers agree on a slot's top, the combined candidate carries
+  ONE provider's score together with its own provenance: a score whose cue
+  check passed beats one whose did not, the higher of two passed checks
+  wins, and otherwise Gemini's stands — never the `Math.max` of a checked
+  and an unchecked number. OpenAI's cue numbers count as a check only for
+  slugs it was given a numbered cue list for.
+- Self-contradiction (raw vs verified top) is checked per slot — turf,
+  weeds and host separately — so a flipped turf answer escalates even under
+  a higher-confidence weed, and a turf/weed confidence swap does not.
+- Each provider's selected conditions are ranked by confidence before the
+  agreement check reads either provider's top.
+- **Off-catalog groups.** Call A and the escalation return a nullable
+  `group_id` for an off-catalog answer; the engine keeps it only when it is
+  a real plant-section group of that slot's own index. Two providers
+  agreeing on an off-catalog plant in the same group therefore agree (same
+  candidate key) and `mode: "identify"` climbs to the group generic
+  ("Looks like a palm"). The workup still has no group-level identity slot,
+  so there it stays unnamed.
+- **Next photo.** `next_photo` follows the chosen answer: on a disagreement,
+  the look-alike between the two providers' own tops; at `likely`, the named
+  entry's first approved look-alike; for a group-level answer, a look-alike
+  pair among the candidates that support that group; otherwise the retake
+  prompt.
+
+## Condition index for trees, shrubs and palms
+
+The tree/shrub/palm condition index (Call C and the escalation prompt) is
+the union of `conditionIndexFor` over every catalog host candidate still
+reading ≥ 0.20 after verification plus the customer's `plant_slug` chip (no
+viable host → the class index). An OpenAI host correction inside that union
+was therefore already covered. When the escalation's top host is OUTSIDE the
+union, the engine runs Call C ONCE more against union + corrected host,
+within what is left of the total time budget, and recombines it with
+OpenAI's own condition picks. With no budget left, or if that call misses,
+the possibilities fall back to the class index (host-specific conditions
+for a host neither provider settled on are dropped). `internal.conditions`
+records `host_union` and `corrected_host`; `internal.models.condition_rerun`
+the extra leg.
+
+## Admin-only `internal`
+
+`internal.disagreed` / `internal.openai_answered` fold in the condition
+combiner as well as every identity slot, so a symptom fallback caused by a
+condition disagreement is explained. `internal.identity` (per slot
+`{ disagreed, openai_answered }`, `trigger_reasons`, `lane`) and
+`internal.conditions` (`disagreed`, `openai_answered`, `trigger_reasons`,
+`host_union`, `corrected_host`) break the same flags out per scope;
+`escalation_reasons` is the union.
 
 ## The naming gate (§6.3)
 
@@ -111,7 +194,9 @@ identity verify response was never Ajv-validated, escalation
 disagreement/non-answer never reached either builder, an unusable-photo read
 from the conditions leg alone didn't gate naming, and identity resolution
 accepted any catalog slug rather than restricting to its own slot — all six
-now have regression tests in `plant-engine-v2.test.js`.
+now have regression tests in `plant-engine-v2.test.js`. Codex round 1 on
+#5186 (9 P1, 5 P2) is covered by the sections above; its regression tests
+are grouped under "Codex #5186 round 1 regressions" in the same file.
 
 ## What L4 must do
 

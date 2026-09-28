@@ -152,7 +152,9 @@ const FIXTURE = buildFixtureCatalog({
       slug: 'fixture-citrus', common_name: 'Fixture Citrus', scientific_name: 'Citrus fixturicus', kind: 'host_plant',
       group: 'shrubs-trees', subgroup: null, verdict: 'harmless', role: 'landscape_plant', risk: 'low', action: 'monitor',
       safety_line: null, safety: COMMON_SAFETY, range: 'common', active_months: ALL_MONTHS, peak_months: [],
-      traits: ['Glossy leaves'], look_alikes: [], copy: { what_it_means: 'A fixture citrus.', fact: 'Fixture citrus fact.' }, links: {},
+      traits: ['Glossy leaves'],
+      look_alikes: [{ slug: 'fixture-sago-palm', difference: 'Citrus has simple glossy leaves; sago has stiff feather leaflets.', next_photo: 'A close-up of one whole leaf.', photo_can_confirm: true }],
+      copy: { what_it_means: 'A fixture citrus.', fact: 'Fixture citrus fact.' }, links: {},
       service: { line: 'tree_shrub', key: null, label: 'Tree & Shrub Care', inspection_first: false, referral: null }, urgency: 'low',
       plant: { type: 'tree', id_cues: ['Glossy aromatic leaves'], common_problems: ['fixture-citrus-greening'] },
     }),
@@ -163,6 +165,45 @@ const FIXTURE = buildFixtureCatalog({
       traits: ['Stiff feather leaflets'], look_alikes: [], copy: { what_it_means: 'A fixture sago.', fact: 'Fixture sago fact.' }, links: {},
       service: { line: 'tree_shrub', key: null, label: 'Tree & Shrub Care', inspection_first: false, referral: null }, urgency: 'low',
       plant: { type: 'cycad', id_cues: ['Stiff glossy feather-like leaflets'], common_problems: ['fixture-manganese-deficiency-palm'] },
+    }),
+    // Second turfgrass so a single lawn slot can flip between two catalog
+    // candidates (per-slot self-contradiction, Codex #5186 r1 finding 14).
+    ownerApproved({
+      slug: 'fixture-bahia', common_name: 'Fixture Bahia', scientific_name: 'Paspalum fixturicus', kind: 'turfgrass',
+      group: 'turfgrasses', subgroup: null, verdict: 'harmless', role: 'lawn_grass', risk: 'low', action: 'monitor',
+      safety_line: null, safety: COMMON_SAFETY, range: 'common', active_months: ALL_MONTHS, peak_months: [5, 6],
+      traits: ['V-shaped seed head'], look_alikes: [], copy: { what_it_means: 'A fixture bahia.', fact: 'Fixture bahia fact.' }, links: {},
+      service: { line: 'lawn', key: null, label: 'Lawn Care', inspection_first: false, referral: null }, urgency: 'low',
+      plant: { type: 'turf', id_cues: ['V-shaped seed head', 'Coarse open canopy'], common_problems: [] },
+    }),
+    // Two palms (group `palms`) that look alike each other; the queen's FIRST
+    // look-alike is the sago (another group), so a next-photo pick that reads
+    // the global top's first look-alike asks the wrong question (Codex #5186
+    // r1 finding 7).
+    ownerApproved({
+      slug: 'fixture-queen-palm', common_name: 'Fixture Queen Palm', scientific_name: 'Syagrus fixturicus', kind: 'host_plant',
+      group: 'palms', subgroup: null, verdict: 'harmless', role: 'landscape_plant', risk: 'low', action: 'monitor',
+      safety_line: null, safety: COMMON_SAFETY, range: 'common', active_months: ALL_MONTHS, peak_months: [],
+      traits: ['Drooping plumose fronds'],
+      look_alikes: [
+        { slug: 'fixture-sago-palm', difference: 'Sago is a low cycad; queen palm has a tall single trunk.', next_photo: 'A photo of the whole plant with its trunk.', photo_can_confirm: true },
+        { slug: 'fixture-royal-palm', difference: 'Royal palm has a smooth gray trunk and a green crownshaft; queen palm has neither.', next_photo: 'A photo of the trunk just below the fronds.', photo_can_confirm: true },
+      ],
+      copy: { what_it_means: 'A fixture queen palm.', fact: 'Fixture queen fact.' }, links: {},
+      service: { line: 'tree_shrub', key: null, label: 'Tree & Shrub Care', inspection_first: false, referral: null }, urgency: 'low',
+      plant: { type: 'palm', id_cues: ['Plumose drooping leaflets'], common_problems: [] },
+    }),
+    ownerApproved({
+      slug: 'fixture-royal-palm', common_name: 'Fixture Royal Palm', scientific_name: 'Roystonea fixturica', kind: 'host_plant',
+      group: 'palms', subgroup: null, verdict: 'harmless', role: 'landscape_plant', risk: 'low', action: 'monitor',
+      safety_line: null, safety: COMMON_SAFETY, range: 'common', active_months: ALL_MONTHS, peak_months: [],
+      traits: ['Smooth gray trunk'],
+      look_alikes: [
+        { slug: 'fixture-queen-palm', difference: 'Royal palm has a smooth gray trunk and a green crownshaft; queen palm has neither.', next_photo: 'A photo of the trunk just below the fronds.', photo_can_confirm: true },
+      ],
+      copy: { what_it_means: 'A fixture royal palm.', fact: 'Fixture royal fact.' }, links: {},
+      service: { line: 'tree_shrub', key: null, label: 'Tree & Shrub Care', inspection_first: false, referral: null }, urgency: 'low',
+      plant: { type: 'palm', id_cues: ['Green crownshaft'], common_problems: [] },
     }),
     // ── conditions ──
     // Fully photo-confirmable, one required element, differentials to the

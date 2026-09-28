@@ -20,8 +20,9 @@
  *
  * Every schema closes `additionalProperties` and requires every key (same
  * strict-mode convention `pest-engine-prompts.js` and `lawn-visit-input.js`
- * use); "off-catalog" is `slug: ''` rather than `slug: null`. Nothing in
- * this file is customer-facing text: it is model input only.
+ * use); "off-catalog" is `slug: ''` rather than `slug: null`, and the one
+ * nullable field, an identity item's `group_id`, is still required. Nothing
+ * in this file is customer-facing text: it is model input only.
  */
 
 'use strict';
@@ -29,6 +30,8 @@
 const STR = { type: 'string' };
 const NUM01 = { type: 'number', minimum: 0, maximum: 1 };
 const INT_LIST = { type: 'array', items: { type: 'integer' } };
+// Required-but-nullable (strict mode still lists it in `required`).
+const NULLABLE_STR = { type: ['string', 'null'] };
 const obj = (properties) => ({ type: 'object', additionalProperties: false, required: Object.keys(properties), properties });
 const enumOf = (values) => ({ type: 'string', enum: values });
 
@@ -45,7 +48,14 @@ const QUALITY_SCHEMA = obj({ usable: { type: 'boolean' }, issue: enumOf(QUALITY_
 
 // ── A. Identity candidates ──────────────────────────────────────────────
 
-const IDENTITY_ITEM_SCHEMA = obj({ slug: STR, off_catalog_name: STR, confidence: NUM01 });
+// `group_id`: an off-catalog answer's best-fit group from the index's group
+// column (null when none fits, or for a catalog slug). The engine keeps it
+// only when it is a real plant-section group of that slot's own index, so two
+// providers agreeing on an off-catalog plant can still climb to the group
+// generic ("Looks like a palm").
+const IDENTITY_ITEM_SCHEMA = obj({
+  slug: STR, off_catalog_name: STR, group_id: NULLABLE_STR, confidence: NUM01,
+});
 const IDENTITY_ARRAY = { type: 'array', maxItems: 3, items: IDENTITY_ITEM_SCHEMA };
 
 const CANDIDATES_A_SCHEMA = obj({
@@ -77,7 +87,9 @@ ${asks}
 
 When nothing in the catalog fits but you can still say what it likely is,
 return an off-catalog answer instead (empty slug, off_catalog_name filled
-in). Never guess a specific catalog slug you are not visually confident in.
+in, and group_id set to the best-fit group from the group column above, or
+null when no listed group fits). For a catalog slug, group_id is null.
+Never guess a specific catalog slug you are not visually confident in.
 
 Also report photo quality (usable / issue) and whether the photos show the
 plant itself, damage/a problem, both, or nothing relevant.
@@ -168,7 +180,7 @@ ONLY from: ${OBSERVED_TERMS.join(', ')}. Also report photo quality.`;
 // ── D. Escalation (OpenAI, combined) ─────────────────────────────────────
 
 const ESCALATION_IDENTITY_ITEM_SCHEMA = obj({
-  slug: STR, off_catalog_name: STR, confidence: NUM01, cues_visible: INT_LIST, cues_not_visible: INT_LIST,
+  slug: STR, off_catalog_name: STR, group_id: NULLABLE_STR, confidence: NUM01, cues_visible: INT_LIST, cues_not_visible: INT_LIST,
 });
 const ESCALATION_IDENTITY_ARRAY = { type: 'array', maxItems: 3, items: ESCALATION_IDENTITY_ITEM_SCHEMA };
 const ESCALATION_CONDITION_ITEM_SCHEMA = obj({
@@ -213,8 +225,9 @@ Account/context: ${JSON.stringify(context || {})}
 Current month (ET): ${etMonth}
 
 # TASK
-Return your own identity candidates (turf/weeds/host, same rules as before)
-AND your own selected conditions, in one response. For any candidate with a
+Return your own identity candidates (turf/weeds/host; an off-catalog answer
+has an empty slug, off_catalog_name, and group_id from the group column or
+null) AND your own selected conditions, in one response. For any candidate with a
 catalog slug, report numbered cues/elements visible vs not visible — use the
 numbered lists below when your answer matches one already raised; otherwise
 report empty lists (you don't have a numbered list for something no one has
