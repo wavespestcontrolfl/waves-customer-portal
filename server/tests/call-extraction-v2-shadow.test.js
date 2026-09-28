@@ -102,8 +102,15 @@ describe('v2 extraction prompt', () => {
   });
 
   test('prompt version and hash are stable', () => {
-    expect(PROMPT_VERSION).toBe('v15');
-    expect(PROMPT_HASH).toMatch(/^v15-[a-f0-9]{12}$/);
+    expect(PROMPT_VERSION).toBe('v16');
+    expect(PROMPT_HASH).toMatch(/^v16-[a-f0-9]{12}$/);
+  });
+
+  test('includes the family_member relationship instructions (schema 1.18.0)', () => {
+    const prompt = buildExtractionPrompt(transcript, callerPhone, callDateET);
+    expect(prompt).toContain('"family_member"');
+    expect(prompt).toContain('my grandfather\'s house');
+    expect(prompt).toContain('spouse/partner arranging service at the SAME household');
   });
 
   test('includes the reschedule agreement and moved-appointment rules (schema 1.16.0)', () => {
@@ -285,7 +292,7 @@ describe('v2 extraction function (extractCallDataV2)', () => {
 
 describe('schema version alignment', () => {
   test('schema version matches between validator and prompt', () => {
-    expect(SCHEMA_VERSION).toBe('1.17.0');
+    expect(SCHEMA_VERSION).toBe('1.18.0');
   });
 
   test('persisted schema_version enum accepts the current SCHEMA_VERSION (P1: a missing enum entry fail-closes every extraction)', () => {

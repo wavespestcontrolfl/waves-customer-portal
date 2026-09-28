@@ -137,8 +137,8 @@ function validPersisted() {
 // ═══════════════════════════════════════════════════
 
 describe('schema validation', () => {
-  test('schema version is 1.17.0', () => {
-    expect(SCHEMA_VERSION).toBe('1.17.0');
+  test('schema version is 1.18.0', () => {
+    expect(SCHEMA_VERSION).toBe('1.18.0');
   });
 
   describe('model-output schema', () => {
@@ -203,6 +203,27 @@ describe('schema validation', () => {
       persisted.meta.schema_version = '1.15.0';
       persisted.caller.relationship_to_property = 'home_buyer';
       expect(validatePersisted(persisted).valid).toBe(true);
+    });
+
+    test('1.18.0: a family_member caller validates in both schemas', () => {
+      const out = validModelOutput();
+      out.caller.relationship_to_property = 'family_member';
+      expect(validateModelOutput(out).valid).toBe(true);
+      const persisted = validPersisted();
+      persisted.meta.schema_version = SCHEMA_VERSION;
+      persisted.caller.relationship_to_property = 'family_member';
+      expect(validatePersisted(persisted).valid).toBe(true);
+    });
+
+    test('1.18.0: family_member survives normalization unchanged (normalizeCaller spreads caller fields — no relationship_to_property allowlist to silently coerce it to "other"/"unknown")', () => {
+      const data = validPersisted();
+      data.meta.schema_version = SCHEMA_VERSION;
+      data.caller.relationship_to_property = 'family_member';
+      data.caller.on_site_authorization = false;
+      expect(validatePersisted(data).valid).toBe(true);
+      const normalized = normalizeExtractionV2(data);
+      expect(normalized.caller.relationship_to_property).toBe('family_member');
+      expect(normalized.caller.on_site_authorization).toBe(false);
     });
 
     test('1.16.0: a reschedule agreement and the appointment it moves survive validation, normalization and flattening', () => {
