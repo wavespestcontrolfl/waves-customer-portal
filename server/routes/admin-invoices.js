@@ -2222,6 +2222,19 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
     let term;
     try {
       term = await db.transaction(async (trx) => {
+        // Codex #4971 round-20 P1 (charge.js:925): this route can edit an
+        // EXISTING term's term_start/term_end/prepay_amount (the "existing"
+        // branch of createTermForAnnualPrepay below), which is exactly the
+        // parent-decision-sensitive write the renewal charge's own
+        // withParentDecisionLock gate exists for — a term-window move (or an
+        // amount change) between chargeRefusalUnderGate's validation and the
+        // Stripe submission. Take the gate FIRST, before the overlap lock
+        // (gate → customer → invoice → term, the ordering every other
+        // termite writer follows): termite-only (acquireTermiteGateAtEntry
+        // no-ops when this invoice names no termite term) and keyed on the
+        // invoice, so it finds the term this edit is actually about even
+        // though the term id itself isn't known yet at this point.
+        await AnnualPrepayRenewals.acquireTermiteGateAtEntry(trx, { invoiceIds: [invoice.id] });
         await trx.raw(
           'SELECT pg_advisory_xact_lock(?, hashtext(?))',
           [ANNUAL_PREPAY_LOCK_NS, String(invoice.customer_id)],
@@ -2420,6 +2433,10 @@ router.delete('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
     // inside a transaction, so it runs after commit (below).
     let coveredInvoiceIds = [];
     const txResult = await db.transaction(async (trx) => {
+      // Chokepoint B (pre-push lock order): the parent-decision gate for the
+      // termite term this flag removal cancels is the FIRST lock — gate →
+      // customer → invoice → term, the charge path's own order.
+      await AnnualPrepayRenewals.acquireTermiteGateAtEntry(trx, { invoiceIds: [invoice.id] });
       // Customer before invoice — the order reverse-prepaid and apply-credit
       // take, and the cancel below locks the customer too — then re-read the
       // invoice under its own lock: a payment landing on it waits for us.
@@ -3084,6 +3101,14 @@ router.post('/:id/reverse-prepaid', requireAdmin, async (req, res, next) => {
         }
       }
       outcome = await db.transaction(async (trx) => {
+        // Chokepoint B (Codex #4971 pre-push P1, lock order): un-paying a
+        // termite annual term moves it out of renewal-charge-eligible state,
+        // so the parent-decision gate is this transaction's FIRST lock —
+        // before the customer / invoice / term row locks below. The renewal
+        // charge holds the gate and then asks for the customer row; taking
+        // the rows first made the two wait on each other until the 5s
+        // lock_timeout aborted the reversal. No-op without a termite term.
+        await AnnualPrepayRenewals.acquireTermiteGateAtEntry(trx, { invoiceIds: [id] });
         if (preCustomer) await trx('customers').where({ id: preCustomer.customer_id }).forUpdate().first('id');
         const locked = await trx('invoices').where({ id }).forUpdate().first();
         if (!locked) {

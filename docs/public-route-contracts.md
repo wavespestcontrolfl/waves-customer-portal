@@ -450,7 +450,21 @@ transaction, and the customer did ask to save the card. A
 withdrawn invoice is also absent from the authenticated portal's balance and
 Pay Now list, and carries no `manualPayOptions`. Nothing else in the payload
 changes; an invoice that returns to self-pay is released by the Bill-To
-reconciliation and collects normally again),
+reconciliation and collects normally again). TERMITE RENEWAL ELIGIBILITY
+(2026-09-28, dark behind GATE_TERMITE_ANNUAL_PLAN — only an invoice that is a
+termite annual-plan RENEWAL successor's prepay invoice, found through its own
+`annual_prepay_term_id` link, is ever judged; every other invoice is
+byte-identical and costs no extra query): a renewal pay link the customer
+already holds stops collecting once the prior year's plan no longer backs the
+renewal — the prior plan was cancelled, refunded, or had its dates moved, the
+account was deleted, the renewal payment is under dispute, or the renewal's
+payment grace has closed. `/setup`, `/quote`, `/finalize` and `/update-amount`
+then answer `409 { error, renewalNotPayable: true }` with a customer-safe
+message (no plan, parent or reason detail rides the payload), and `/finalize`
+additionally runs its charge UNDER the renewal gate with the same check
+repeated inside it, so a prior-plan change either waits for the charge or is
+seen by it. `/confirm`, receipts and `invoice.pdf` are unchanged — recording a
+payment Stripe already collected always remains available),
 `/api/pay/statement/:token` (+ `/setup`, `/quote`, `/finalize`) — payer NET
 statement self-serve pay, **gated behind GATE_PAYER_STATEMENTS** (404 when off),
 64-hex `payer_statements.token` format gate + public-route rate limit; resolves

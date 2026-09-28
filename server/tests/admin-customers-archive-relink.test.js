@@ -15,6 +15,16 @@ jest.mock('../middleware/admin-auth', () => ({
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn(async () => {}) }));
+// withCustomerDeletionGate (termite-annual-renewal-charge.js, Codex #4971
+// r21) takes the customer's termite keys as transaction-level advisory locks
+// through acquireTermiteGateAtEntry on the archive's own transaction; the
+// query-builder stub below cannot answer termiteGateKeys' whereRaw scan, so
+// the lock step is a spy here (its real behavior is proven on Postgres in
+// annual-prepay-invoice-routes-postgres.test.js).
+jest.mock('../services/annual-prepay-renewals', () => ({
+  ...jest.requireActual('../services/annual-prepay-renewals'),
+  acquireTermiteGateAtEntry: jest.fn(async () => []),
+}));
 jest.mock('../services/newsletter-subscribers', () => ({
   relinkSubscribersForEmail: jest.fn(async () => ({ winnerId: 'winner-1', relinked: 1 })),
   relinkSubscribersFromArchivedCustomer: jest.fn(async () => ({ relinked: 2 })),
@@ -34,6 +44,7 @@ jest.mock('../models/db', () => {
     // table read must keep resolving null/no-row through these no-op chains.
     q.whereNot = () => q;
     q.whereNotIn = () => q;
+    q.whereIn = () => q;
     q.whereRaw = () => q;
     q.leftJoin = () => q;
     // findPendingPrepayInvoice (admin-cancellation.js, reused by
