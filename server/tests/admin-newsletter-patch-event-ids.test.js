@@ -54,6 +54,13 @@ function draftRow(eventIds) {
 function mockSendsTable(row) {
   const update = jest.fn(async () => 1);
   db.mockImplementation((table) => {
+    if (table === 'events_raw') {
+      // Occurrence snapshot read (snapshotEventOccurrences) on eventIds saves.
+      const e = {};
+      e.whereIn = jest.fn(() => e);
+      e.select = jest.fn(async () => [{ id: EVENT_UUID, start_at: new Date('2026-10-10T22:00:00Z') }]);
+      return e;
+    }
     if (table !== 'newsletter_sends') throw new Error(`Unexpected table ${table}`);
     const q = {};
     ['where', 'whereIn', 'orderBy', 'limit', 'offset', 'select'].forEach((method) => {
@@ -150,6 +157,8 @@ describe('PATCH /sends/:id event_ids preservation', () => {
     });
     const payload = update.mock.calls[0][0];
     expect(payload.event_ids).toBe(JSON.stringify([EVENT_UUID]));
+    // The occurrence snapshot is saved with the event list.
+    expect(JSON.parse(payload.event_occurrences)).toEqual({ [EVENT_UUID]: '2026-10-10T22:00:00.000Z' });
   });
 });
 

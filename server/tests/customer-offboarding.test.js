@@ -31,6 +31,10 @@ const mockVoidOpenInvoices = jest.fn(async () => {});
 jest.mock('../services/invoice', () => ({
   voidInvoice: (...args) => mockVoidInvoice(...args),
   voidOpenInvoicesForCancelledService: (...args) => mockVoidOpenInvoices(...args),
+  // The shared post-void scope, issued against this suite's sequential db
+  // mock exactly as the old inline query was (the SQL itself is tested in
+  // invoice-cancel-void-amounts.test.js).
+  unresolvedInvoicesForCancelledService: (conn, id) => conn('invoices').where({ scheduled_service_id: id }),
 }));
 
 const mockTransition = jest.fn(async ({ jobId }) => { callOrder.push(`cancel:${jobId}`); });

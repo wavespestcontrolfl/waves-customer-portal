@@ -183,6 +183,14 @@ postgres('durable customer geocode review in PostgreSQL', () => {
     await saveReview(mockConnection, await customer(), { status: 'outside_area', reason: 'staff_confirmed_outside_area', reviewed_by: ACTOR });
     expect((await listReviewQueue({}, mockConnection)).total).toBe(0);
   });
+  test('blank and null units remain the same quarantined address for direct retries', async () => {
+    await saveReview(mockConnection, { ...await customer(), address_line2: null }, {
+      status: 'outside_area', reason: 'staff_confirmed_outside_area', reviewed_by: ACTOR,
+    });
+    await mockConnection('customers').where({ id: CUSTOMER }).update({ address_line2: '' });
+    expect(await attemptReviewedGeocode(CUSTOMER, mockConnection)).toBeNull();
+    expect(geocodeAddressWithStatus).not.toHaveBeenCalled();
+  });
   test('a failed coordinate transaction rolls back mirrors and never schedules a refresh', async () => {
     const onCoordinatesCommitted = jest.fn();
     await mockConnection.raw("ALTER TABLE customer_geocode_reviews ADD CONSTRAINT reject_test CHECK (status <> 'geocoded')");

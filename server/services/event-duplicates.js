@@ -34,8 +34,12 @@ function etDayKey(startAt) {
   return `${p.year}-${String(p.month).padStart(2, '0')}-${String(p.day).padStart(2, '0')}`;
 }
 
+// Tolerant of formatting drift between feeds — one source stores a URL-style
+// slug ("lakewood-ranch"), another stores a proper name ("Lakewood Ranch");
+// both must normalize the same way or a real cross-source duplicate never
+// clusters at all. Same idea as normalizeEventTitle's punctuation strip.
 function normalizeCity(city) {
-  return String(city || '').trim().toLowerCase();
+  return String(city || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 }
 
 /**
