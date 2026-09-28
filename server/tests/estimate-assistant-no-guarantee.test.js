@@ -820,6 +820,29 @@ describe('estimate assistant no-guarantee context', () => {
     }]);
   });
 
+  test('a saved row whose removal lives only in its detail text governs a stale snapshot detail (pre-push P1)', () => {
+    const recurring = { service: 'pest_control', name: 'Pest Control', mo: 55 };
+    const base = { service: 'pre_slab_termiticide', label: 'Pre-Slab Termiticide Treatment', amount: 950 };
+    const saved = { ...base, detail: 'Termite soil treatment before the slab pour | No extended warranty selected' };
+    const snapshot = { ...base, detail: 'Termite soil treatment before the slab pour | Extended 5-year warranty' };
+    const context = buildEstimateAssistantContext({
+      estimate: { monthly_total: 55, onetime_total: 950, show_one_time_option: true },
+      serviceMode: 'recurring', noGuaranteeClaims: true,
+      estData: { result: { recurring: { services: [recurring] }, oneTime: { items: [saved] } } },
+      pricingBundle: { source: 'engine_invocation', snapshotHit: true, anchorOneTimePrice: 950,
+        oneTimeBreakdown: { total: 950, items: [snapshot] } },
+    });
+    const row = context.oneTime.items[0];
+    expect(row.warrantyExtendedSelected).toBe(false);
+    expect(row.warrantyTerms.join(' ')).toContain('No extended warranty selected.');
+    expect(row.detail).not.toMatch(/extended 5-year warranty/i);
+    expect(context.guarantees.serviceTerms).toEqual([{
+      service: 'Pre-Slab Termiticide Treatment',
+      terms: ['Warranty terms depend on the selected warranty option. No extended warranty selected.'],
+    }]);
+    expect(answerEstimateQuestionFallback('What is included?', context)).not.toMatch(/extended 5-year warranty/i);
+  });
+
   test('a hand-built context lists each row under its own name', () => {
     const bond = 'Purchased termite bond: 5-year term with re-treatment coverage.';
     const rows = [

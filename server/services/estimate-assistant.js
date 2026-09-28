@@ -14,6 +14,7 @@ const {
   isPreSlabTreatmentItem,
   preSlabExtendedWarrantySelected,
   preSlabSelectedWarrantyPart,
+  preSlabWarrantyDecision,
   rawOneTimeWarrantyEvidenceItems,
   reconcilePricedPreSlabWarrantyEvidence,
   reconcileTrenchingWarrantyEvidence,
@@ -515,9 +516,15 @@ function mergeOneTimeServiceRows(primaryRows = [], fallbackRows = []) {
 function preSlabProjectionFields(item = {}, evidence = item) {
   if (!isPreSlabTreatmentItem(item)) return {};
   const decided = evidence && typeof evidence === 'object' ? evidence : item;
+  // The resolved decision is stamped as the boolean whenever the evidence
+  // row decided it, even when that row says so only in its detail text:
+  // the projected row keeps the priced row's own detail, which may still
+  // name a removed extended warranty, and preSlabSelectedWarrantyPart must
+  // read the decision, not that text (pre-push audit P1 on ca460e0f0c).
+  const decision = preSlabWarrantyDecision(decided);
   return {
     warrantyTerms: preSlabWarrantyTerms(decided),
-    ...(typeof decided.warrantyExtendedSelected === 'boolean' ? { warrantyExtendedSelected: decided.warrantyExtendedSelected } : {}),
+    ...(decision !== 'unset' ? { warrantyExtendedSelected: decision === 'extended' } : {}),
     ...(cleanText(decided.warrantyStatus) ? { warrantyStatus: cleanText(decided.warrantyStatus) } : {}),
   };
 }
