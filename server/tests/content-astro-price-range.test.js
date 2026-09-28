@@ -28,6 +28,10 @@ describe('costGuidePriceRange', () => {
     ['mosquito control cost', 'mosquito', ['mosquito_program', 'one_time_mosquito']],
     ['lawn care cost', 'lawn-care', ['lawn_care_program', 'one_time_lawn']],
     ['pest control cost', 'pest-control', ['general_pest_quarterly', 'one_time_pest']],
+    // An inspection guide prices the inspection, not the treatment.
+    ['wdo inspection cost', 'termite', ['wdo_inspection']],
+    ['termite inspection cost', 'termite', ['wdo_inspection']],
+    ['rodent inspection cost', 'pest-control', ['rodent_inspection']],
   ])('a cost guide for "%s" gets its service keys from the live feed', (primary_keyword, category, expected) => {
     expect(costGuidePriceRange(cost({ primary_keyword, category }))).toEqual(expected);
   });

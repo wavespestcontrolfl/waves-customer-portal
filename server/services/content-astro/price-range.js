@@ -31,9 +31,12 @@ const GENERAL_PEST = ['general_pest_quarterly', 'one_time_pest'];
 
 // Ordered most-specific first: a "termite" or "rodent" cost guide is filed
 // under pest-control, so the post's own keyword/title decides before the
-// category does. Only the primary keyword and title are read.
+// category does, and an inspection guide matches its inspection row before
+// the treatment rows. Only the primary keyword and title are read.
 const SERVICE_PRICE_KEYS = [
-  { pattern: /\b(?:termites?|wdo)\b/, keys: TERMITE },
+  { pattern: /\b(?:wdo|wood[- ]destroying|termite inspections?)\b/, keys: ['wdo_inspection'] },
+  { pattern: /\b(?:rodents?|rats?|mice|mouse) inspections?\b/, keys: ['rodent_inspection'] },
+  { pattern: /\btermites?\b/, keys: TERMITE },
   { pattern: /\bbed ?bugs?\b/, keys: ['bed_bug_treatment'] },
   { pattern: /\bfleas?\b/, keys: ['flea_elimination'] },
   { pattern: /\b(?:wasps?|hornets?|yellow ?jackets?)\b/, keys: ['wasp_hornet_removal'] },
