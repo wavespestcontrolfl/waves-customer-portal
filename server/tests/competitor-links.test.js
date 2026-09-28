@@ -121,6 +121,20 @@ describe('competitorLinkUrls: every form a browser follows', () => {
     expect(found('<a href="https://orkin.com@wavespestcontrol.com/">x</a>')).toBe(false);
   });
 
+  test('Markdown escapes, quotes in userinfo, U+FEFF and a start glued to a link do not hide it (Codex r8 on #5191)', () => {
+    for (const t of [
+      '[Orkin](https\\://orkin.com/plans)',
+      '[x](https\\:\\/\\/orkin.com)',
+      '[x](//user\\@orkin.com/a)',
+      'See https://ork\uFEFFin.com/x',
+      '<a href=\'//us"er@orkin.com/x\'>x</a>',
+      '<a href="//us\'er@orkin.com/x">x</a>',
+      '[a](https://www.wavespestcontrol.com/x)(https://orkin.com)',
+    ]) expect([t, found(t)]).toEqual([t, true]);
+    // One URL per link, however many readings found it.
+    expect(competitorLinkUrls('Per [Orkin](https://orkin\\.com/plans).')).toHaveLength(1);
+  });
+
   test('a tab or newline inside a URL does not hide it: browsers remove them (Codex r6 on #5191)', () => {
     expect(competitorLinkUrls('[plans](https://or\tkin.com/plans)')).toEqual(['https://orkin.com/plans']);
     expect(competitorLinkUrls('<a href="https://www.ork\nin.com/x">Orkin</a>')).toEqual(['https://www.orkin.com/x']);

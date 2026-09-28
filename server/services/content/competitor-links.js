@@ -114,50 +114,71 @@ function isCompetitorUrl(url, hosts) {
 // decides the host a candidate reaches, userinfo included — "//user@orkin.com"
 // reaches orkin.com (Codex r7 on #5191).
 const URL_START_RE = /\bhttps?:|(?<![:\w/\\])[\\/]{2}|\bwww\./gi;
-// A candidate ends where its surrounding syntax ends it: whitespace, quotes,
-// angle brackets, a backtick. A bracket may belong to the URL
-// ("//us(er@orkin.com/x") or close the Markdown around it
-// ("[x](https://orkin.com)" — "orkin.com)" is a different host to a
-// browser), so every candidate is read both ways.
-const WIDE_END_RE = /[\s<>"'`]/;
-const NARROW_END_RE = /[\s<>()[\]"'`]/;
 const TRAILING_PUNCT_RE = /[.,;:!?]+$/;
-// A browser removes every ASCII tab and newline from a URL before parsing it
-// (WHATWG URL), so "https://or\tkin.com" — or an href split across lines —
-// still reaches orkin.com (Codex r6 on #5191).
-const URL_IGNORED_RE = /[\t\n\r]/g;
+// Characters dropped before a host is looked up: a browser removes every ASCII
+// tab and newline from a URL (WHATWG URL), so "https://or\tkin.com" or an
+// href split across lines still reaches orkin.com (Codex r6 on #5191), and
+// the host step (UTS #46) drops U+FEFF, which JS counts as whitespace.
+const URL_IGNORED_RE = /[\t\n\r\uFEFF]/g;
+// Characters surrounding syntax uses to end a URL — quotes, angle brackets,
+// a backtick, brackets — can also sit inside one: in userinfo
+// ('//us"er@orkin.com') or a path ("…/report_(2026)"). A candidate runs to
+// the next whitespace and is read cut at each of those characters inside its
+// authority, and whole; a reading that reaches a competitor host counts
+// ("[x](https://orkin.com)" read whole is the host "orkin.com)", cut at the
+// bracket it is orkin.com).
+const SYNTAX_CHAR_RE = /["'`<>()[\]]/g;
+const AUTHORITY_LEAD_RE = /^(?:https?:[\\/]*|[\\/]{2})?/i;
+const AUTHORITY_END_RE = /[/?#\\]/;
 
-// Each URL candidate in `text` as its [narrow, wide] readings. A start
-// inside the previous candidate is part of it (an archived copy's embedded
-// URL goes to archive.org).
+// Past the authority a cut cannot change the host, so the whole reading
+// stops at the first syntax character there (the URL a message quotes).
+function readingsOf(token) {
+  const lead = token.match(AUTHORITY_LEAD_RE)[0].length;
+  const end = token.slice(lead).search(AUTHORITY_END_RE);
+  const authorityEnd = end === -1 ? token.length : lead + end;
+  const cuts = [...token.slice(0, authorityEnd).matchAll(SYNTAX_CHAR_RE)].map((c) => token.slice(0, c.index));
+  const pathSyntax = token.slice(authorityEnd).search(SYNTAX_CHAR_RE);
+  const whole = pathSyntax === -1 ? token : token.slice(0, authorityEnd + pathSyntax);
+  return [...cuts, whole].map((r) => r.replace(TRAILING_PUNCT_RE, ''));
+}
+
+// Each URL candidate in `text` as its readings. A start before the first
+// syntax character of the previous candidate is part of it (an archived
+// copy's embedded URL goes to archive.org); one after it is its own
+// ("[a](https://waves.com/x)(https://orkin.com)").
 function* urlCandidates(text) {
   let covered = 0;
   for (const m of text.matchAll(URL_START_RE)) {
     if (m.index < covered) continue;
     const rest = text.slice(m.index);
-    const upTo = (re) => {
-      const i = rest.search(re);
-      return (i === -1 ? rest : rest.slice(0, i)).replace(TRAILING_PUNCT_RE, '');
-    };
-    const narrow = upTo(NARROW_END_RE);
-    covered = m.index + narrow.length;
-    yield [narrow, upTo(WIDE_END_RE)];
+    const ws = rest.search(/\s/);
+    const token = ws === -1 ? rest : rest.slice(0, ws);
+    const firstSyntax = token.search(SYNTAX_CHAR_RE);
+    covered = m.index + (firstSyntax === -1 ? token.length : firstSyntax);
+    yield readingsOf(token);
   }
 }
 
 // Every competitor URL in `text`, in any context — Markdown, HTML, JSX
-// props, code, prose — read as a browser would: HTML entities decoded, and
-// scanned both as written and with tabs/newlines removed. One URL per link.
+// props, code, prose — read every way a renderer and a browser might: HTML
+// entities decoded; as written (raw HTML) and with Markdown backslash-escapes
+// removed ("[x](https\://orkin.com)" renders https://orkin.com — Codex r8
+// on #5191); each with the characters a browser drops removed. One URL per
+// link.
 function competitorLinkUrls(text, hosts = competitorHosts()) {
   const decoded = decodeHTML(String(text ?? ''));
-  const out = new Set();
-  for (const variant of [decoded, decoded.replace(URL_IGNORED_RE, '')]) {
-    for (const readings of urlCandidates(variant)) {
-      const hit = readings.find((u) => isCompetitorUrl(u, hosts));
-      if (hit) out.add(hit);
+  const out = new Map(); // the URL as a browser reads it → first spelling found
+  for (const rendered of [decoded, unescapeMarkdown(decoded)]) {
+    for (const variant of [rendered, rendered.replace(URL_IGNORED_RE, '')]) {
+      for (const readings of urlCandidates(variant)) {
+        const hit = readings.find((u) => isCompetitorUrl(u, hosts));
+        const key = hit && readableUrl(hit).replace(URL_IGNORED_RE, '');
+        if (hit && !out.has(key)) out.set(key, hit);
+      }
     }
   }
-  return [...out];
+  return [...out.values()];
 }
 
 // A document's competitor URLs: the body plus every frontmatter string, at
@@ -177,6 +198,7 @@ function competitorLinkUrlsIn(frontmatter, body, hosts = competitorHosts()) {
 
 module.exports = {
   readableUrl,
+  unescapeMarkdown,
   URL_START_RE,
   competitorHosts,
   isCompetitorHost,

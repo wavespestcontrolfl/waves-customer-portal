@@ -189,9 +189,10 @@ async function refreshReviewFrontmatter(draft, brief) {
 // gets the same clean list.
 function evidenceUrlsFor(draft) {
   const notes = typeof draft?.notes_for_reviewer === 'string' ? draft.notes_for_reviewer : '';
-  const { URL_START_RE, isCompetitorHost } = require('./competitor-links');
+  const { URL_START_RE, isCompetitorHost, readableUrl } = require('./competitor-links');
   const urlRe = new RegExp(`(?:${URL_START_RE.source})[^\\s<>"'\`\\]}]+`, 'gi');
-  const urls = (notes.match(urlRe) || [])
+  // Read as the detector reads it: entities decoded, Markdown escapes removed.
+  const urls = (readableUrl(notes).match(urlRe) || [])
     .map((raw) => evidenceUrl(trimTrailingUrlNoise(raw)))
     .filter((url) => url && isCompetitorHost(new URL(url).hostname));
   return [...new Set(urls)];

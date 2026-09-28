@@ -1548,13 +1548,18 @@ describe('outbound-link gate: encoded mailto separators, IP/localhost hosts, sem
       // Userinfo before the host: the browser still goes to the host (Codex r7 on #5191).
       'See [x](//user@spam-example.com/x) now.',
       '<a href="//a@b@spam-example.com">x</a>',
+      // Markdown escapes are removed before a link is built (Codex r8 on #5191).
+      'See [x](\\/\\/spam-example.com/x) now.',
+      'See [x](https\\://spam-example.com/x) now.',
     ]) {
       const r = guardrails.evaluate({ body }, {});
       expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' && f.severity === 'P0')).toBe(true);
     }
-    // prose slashes still don't trip
-    const prose = guardrails.evaluate({ body: 'Rates vary and//or depend on size.' }, {});
-    expect(prose.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(false);
+    // prose slashes and ordinary escapes still don't trip
+    for (const body of ['Rates vary and//or depend on size.', 'Plain \\*stars\\* and [UF](https://edis.ifas.ufl.edu/x).']) {
+      const prose = guardrails.evaluate({ body }, {});
+      expect(prose.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(false);
+    }
   });
   test('semicolonless numeric entities decode like a browser (greedy digit consumption included)', () => {
     // decimal: 'a' is not a decimal digit, so &#58alert(1) is a live javascript: link

@@ -6507,7 +6507,13 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
     priceFinding(publishableText, { thirdPartyCitations: competitorPriceCitations, forbidAllPrices }),
     // Outbound links are scanned across body AND meta too — an injected spam
     // URL hiding in a meta description ships exactly like one in the body.
-    externalLinkFinding(publishableText, { operatorCitations, requiredSourceUrls }),
+    externalLinkFinding(publishableText, { operatorCitations, requiredSourceUrls })
+      // A renderer removes Markdown backslash-escapes before it builds a link
+      // ("[x](https\://host)" links host), so the escaped text is read
+      // unescaped too (Codex r8 on #5191).
+      || (publishableText.includes('\\')
+        ? externalLinkFinding(require('./competitor-links').unescapeMarkdown(publishableText), { operatorCitations, requiredSourceUrls })
+        : null),
     // Owner rulings 2026-09-28: never a link to a competitor's own site, and
     // refuse, don't rewrite. Body, meta and every frontmatter string: the
     // writer's self-lint sends such a draft back for a redraft, and the
