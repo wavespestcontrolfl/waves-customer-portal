@@ -149,6 +149,11 @@ const CATEGORY_KEYWORDS = [
   ['mosquito', /mosquito|waveguard mosquito/],
   ['termite', /termite/],
   ['rodent', /rodent|\brat\b|rats\b|\bmice\b|\bmouse\b/],
+  // The catalog files Fire Ant, Flea & Tick and Bee / Wasp as specialty
+  // (migration 20260401000105) — before the generic ant/pest catch.
+  ['specialty', /fire[\s-]*ants?\b|\bflea|\bticks?\b|\bbees?\b|\bwasps?\b/],
+  // "Palmetto" is a roach, not a palm (mirrors SchedulePage's classifier).
+  ['pest_control', /\bpalmetto\b/],
   ['tree_shrub', /tree|shrub|palm/],
   ['lawn_care', /lawn|turf|fertiliz|dethatch|topdress|plugging|weed/],
   // Generic pest-control catch: "Quarterly Pest Control", "Pest & Rodent

@@ -70,6 +70,11 @@ describe('field-report category resolution', () => {
     ['Rodent Inspection Service', 'inspection'],
     ['Plant Health Program', 'other'], // "ant" only as a whole word
     ['Ant Treatment', 'pest_control'],
+    ['Fire Ant Treatment', 'specialty'],
+    ['Flea & Tick Yard Treatment', 'specialty'],
+    ['Bee / Wasp Nest Removal', 'specialty'],
+    ['Palmetto Roach Knockdown', 'pest_control'],
+    ['Palm Tree Nutrition', 'tree_shrub'],
     ['Annual Home Inspection', 'inspection'],
     ['Quarterly Pest Control', 'pest_control'],
     ['General Pest Treatment', 'pest_control'],
