@@ -264,6 +264,30 @@ it('keeps the existing reminder options when app preferences are unavailable', a
   expect(api.getCustomerPushStatus).not.toHaveBeenCalled();
 });
 
+it('reveals help for every service notification without changing preferences', async () => {
+  render(<ScheduleTab customer={customer} onRequestVisit={() => {}} />);
+  await screen.findByRole('combobox', { name: 'Delivery method for request updates' });
+  const explanations = [
+    ['Appointment updates', 'Bookings, changes and cancellations'],
+    ['3-day reminder', 'A reminder three days before your visit'],
+    ['Day-before reminder', 'A reminder the day before your visit'],
+    ['On the way', 'Live technician tracking'],
+    ['Technician arrival', 'An alert when your technician reaches the property'],
+    ['Service reports', 'Your report and treatment details after a completed visit'],
+    ['Weather & property alerts', 'Rain and lawn advisories in the app'],
+    ['Request updates', 'Updates when your service request is received or changes'],
+  ];
+  for (const [label, description] of explanations) {
+    const summary = screen.getByText(label, { selector: 'summary span' }).closest('summary');
+    const details = summary.closest('details');
+    expect(details).not.toHaveAttribute('open');
+    fireEvent.click(summary);
+    expect(details).toHaveAttribute('open');
+    expect(screen.getByText(description)).toBeVisible();
+  }
+  expect(api.updateNotificationPrefs).not.toHaveBeenCalled();
+});
+
 
 it('saves Request updates to App and restores Email after a failed save', async () => {
   prefs.requestChannel = 'email';
