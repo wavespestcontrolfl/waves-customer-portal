@@ -42,6 +42,19 @@ describe("buildReschedulePrefill", () => {
     );
   });
 
+  it("says Waves once when the service name already starts with the brand", () => {
+    expect(
+      buildReschedulePrefill({
+        firstName: "PersonA",
+        day: "Mon, Aug 10",
+        serviceType: "Waves Assessment",
+        url: URL,
+      }),
+    ).toBe(
+      `Hi PersonA, it's Waves. Reschedule your Mon, Aug 10 Assessment visit here: ${URL}`,
+    );
+  });
+
   it("returns null without a first name or url — the caller falls back to the clause", () => {
     expect(
       buildReschedulePrefill({ firstName: "", day: "Mon, Aug 10", url: URL }),
@@ -147,6 +160,12 @@ describe("buildCustomerLinkPrefill", () => {
     expect(
       buildCustomerLinkPrefill({ firstName: "PersonA", clause: `You can view your estimate here: ${URL}` }),
     ).toBe(`Hi PersonA, it's Waves. You can view your estimate here: ${URL}`);
+  });
+
+  it("skips the brand intro when the clause already names Waves (referral link)", () => {
+    expect(
+      buildCustomerLinkPrefill({ firstName: "PersonA", clause: `Know someone who needs pest control? Share Waves here: ${URL}` }),
+    ).toBe(`Hi PersonA! Know someone who needs pest control? Share Waves here: ${URL}`);
   });
 
   it("returns null without a first name or clause — caller falls back to the bare clause", () => {
