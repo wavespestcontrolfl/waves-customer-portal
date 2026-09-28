@@ -13,7 +13,7 @@ function makeFakeDb({ activeCount = 0, candidates = [] } = {}) {
   const inserts = [];
   const dbi = (table) => {
     const tableKey = typeof table === 'object' ? Object.values(table)[0] : table;
-    const builder = { _table: tableKey, _isCount: false, _insertRows: null };
+    const builder = { _table: tableKey, _isCount: false, _insertRows: null, _update: false };
     const record = (name) => (...args) => {
       if ((name === 'where' || name === 'whereNull') && typeof args[0] === 'function') {
         args[0].call(builder);
@@ -21,6 +21,7 @@ function makeFakeDb({ activeCount = 0, candidates = [] } = {}) {
         calls.push([name, args, tableKey]);
       }
       if (name === 'count') builder._isCount = true;
+      if (name === 'update') builder._update = true;
       if (name === 'insert') {
         builder._insertRows = args[0];
         inserts.push(args[0]);
@@ -28,12 +29,13 @@ function makeFakeDb({ activeCount = 0, candidates = [] } = {}) {
       return builder;
     };
     for (const m of ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereRaw',
-      'join', 'leftJoin', 'select', 'count', 'groupBy', 'orderBy', 'limit', 'insert', 'onConflict', 'ignore', 'first']) {
+      'join', 'leftJoin', 'select', 'count', 'groupBy', 'orderBy', 'limit', 'insert', 'onConflict', 'ignore', 'first', 'update']) {
       builder[m] = record(m);
     }
     builder.then = (resolve, reject) => {
       let rows;
-      if (builder._insertRows) rows = [];
+      if (builder._update) rows = 0; // nothing retired to restore, nothing to retire
+      else if (builder._insertRows) rows = [];
       else if (builder._isCount) rows = [{ count: String(activeCount) }];
       else rows = candidates;
       return Promise.resolve(rows).then(resolve, reject);
@@ -137,7 +139,7 @@ describe('sealEvalItems — selection contract', () => {
 // prompt, a pool already full of pre-v12 items must still replenish — the
 // target counts only compatible items, only compatible drafts are sealed,
 // and the oldest displaced pre-v12 items are retired (active=false), never
-// deleted. v11 runs take none of these branches.
+// deleted. v11 has a contract too since #5194 r7 (rollbacks).
 describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
   const MARKER = 'FOLLOW-UP SLA RIGHT NOW:';
   const drafter = require('../services/sms-shadow-drafter');
@@ -157,7 +159,7 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
         calls.push([name, args, tableKey]);
         if (name === 'count') b._isCount = true;
         // the compatibility predicate (count + candidates) starts with the LIKE clause; retirement wraps it in NOT (...)
-        if (name === 'whereRaw' && /^(?:md\.facts_block|COALESCE\(facts_block, ''\)) LIKE \?/.test(String(args[0])) && String(args[1]?.[0] || '').includes(MARKER)) b._compat = true;
+        if (name === 'whereRaw' && /^(?:md\.facts_block|COALESCE\(facts_block, ''\)) (?:NOT )?LIKE \?/.test(String(args[0])) && String(args[1]?.[0] || '').includes(MARKER)) b._compat = true;
         if (name === 'whereRaw') b._raws.push([args[0], args[1]]);
         if (name === 'modify') args[0](b);
         if (name === 'insert') { b._insertRows = args[0]; inserts.push(args[0]); }
@@ -238,15 +240,22 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
     expect(likeRaws.some(([, args]) => /^NOT \(/.test(String(args[0])))).toBe(true);
   });
 
-  test('v11: no compatibility count, no candidate restriction, no retirement (unchanged)', async () => {
+  // Codex #5194 r7 P1: v11 has a contract too — a rollback must not keep
+  // grading items frozen with the v12 lines.
+  test('v11 (a rollback): the count, the candidate filter and the retirement all EXCLUDE the v12 SLA and category lines', async () => {
     versionSpy = jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue('house_voice_v11');
-    const dbi = makeV12FakeDb({ activeCount: 98, compatibleCount: 0, candidates: [cand('a', 'GENERAL', '2026-08-01'), cand('b', 'GENERAL', '2026-08-02'), cand('c', 'GENERAL', '2026-08-03')] });
+    const dbi = makeV12FakeDb({ activeCount: 100, compatibleCount: 98, candidates: [cand('a', 'GENERAL', '2026-08-01'), cand('b', 'GENERAL', '2026-08-02'), cand('c', 'GENERAL', '2026-08-03')] });
     const out = await sealEvalItems({ target: 100, dbi });
-    expect(out.sealed).toBe(2);
-    expect(out.retired).toBe(0);
-    expect(dbi.calls.filter(([name]) => name === 'count')).toHaveLength(1);
-    expect(dbi.calls.some(([name, args]) => name === 'whereRaw' && /md\.facts_block LIKE/.test(String(args[0])))).toBe(false);
-    expect(dbi.updates).toHaveLength(0);
+    expect(out.sealed).toBe(2); // the shortfall is 100 - 98 compatible, not 100 - 100 active
+    const contract = dbi.calls.filter(([name, args]) => name === 'whereRaw' && /NOT LIKE \?/.test(String(args[0])) && !/^NOT \(/.test(String(args[0])));
+    expect(contract.length).toBeGreaterThanOrEqual(2); // the count + the candidate filter
+    for (const [, args] of contract) {
+      expect(String(args[0])).not.toMatch(/(?<!NOT )LIKE \?/); // nothing required, both lines forbidden
+      expect(args[1]).toEqual(['%FOLLOW-UP SLA RIGHT NOW:%', '%FREE RE-SERVICE:%']);
+    }
+    expect(dbi.calls.some(([name, args]) => name === 'whereRaw' && /^md\.facts_block NOT LIKE/.test(String(args[0])))).toBe(true);
+    // the v12 items beyond the target are retired (the fake reports 3)
+    expect(dbi.updates.filter((u) => u.patch.active === false)).toHaveLength(1);
   });
 
   // Codex #5194 r5: after a category-gate rollback the retired items the
@@ -302,12 +311,18 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
       expect(dbi.inserts[0]).toHaveLength(20);
     });
 
-    test('v11 runs no restore query, even with a short pool', async () => {
+    test('a v11 rollback restores the pre-v12 items the v12 pool displaced', async () => {
       versionSpy = jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue('house_voice_v11');
-      const dbi = makeV12FakeDb({ activeCount: 50, compatibleCount: 0, candidates: [cand('a', 'GENERAL', '2026-08-01')] });
+      const dbi = makeV12FakeDb({ activeCount: 100, compatibleCount: 0, candidates: [], restorable: 100 });
       const out = await sealEvalItems({ target: 100, dbi });
-      expect(out.reactivated).toBe(0);
-      expect(dbi.updates.filter((u) => u.patch.active === true)).toHaveLength(0);
+      expect(out.reactivated).toBe(100);
+      expect(dbi.inserts).toHaveLength(0);
+      expect(dbi.updates.filter((u) => u.patch.active === true)).toHaveLength(1);
+      // the restore selects RETIRED rows under the v11 contract: both v12 lines forbidden
+      expect(dbi.calls.some(([name, args]) => name === 'where' && args[0] === 'active' && args[1] === false)).toBe(true);
+      expect(dbi.calls.some(([name, args]) => name === 'whereRaw' && /^COALESCE\(facts_block, ''\) NOT LIKE \?/.test(String(args[0]))
+        && JSON.stringify(args[1]) === JSON.stringify(['%FOLLOW-UP SLA RIGHT NOW:%', '%FREE RE-SERVICE:%']))).toBe(true);
+      expect(dbi.updates.filter((u) => u.patch.active === false)).toHaveLength(1); // the v12 items are retired
     });
   });
 });
