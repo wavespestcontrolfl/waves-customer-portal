@@ -176,7 +176,16 @@ async function fetchPestRainForecastHeavySafe(service) {
 // rain-derived reaches the cached bytes, so there is nothing stale to carry
 // forward once the window closes.
 function settledWeekWeatherForRender(weekWeather, mode) {
-  if (mode === 'live') return weekWeather;
+  // codex P2 2026-09-28 round 5: the LIVE page no longer shows an open
+  // window either. fetchServiceWeekWeather serves an open window from the
+  // FORECAST endpoint, whose current-day value includes hours that have not
+  // happened yet, so "It's rained about X" (and the ants-after-heavy-rain
+  // line it can trigger) would describe predicted rain as observed. Every
+  // render — live, PDF, static — shows the rain block only once the window
+  // has closed and the reading is a measurement; `mode` is kept for the
+  // call sites' readability and for a future live-only source of measured
+  // so-far precipitation.
+  void mode;
   return weekWeather?.windowClosed === true ? weekWeather : null;
 }
 
@@ -2307,7 +2316,7 @@ router.get('/:token', async (req, res, next) => {
           // must never be baked into the stable '-pex1' PDF key, or later
           // downloads keep serving the "no rain block" bytes forever even
           // after the window settles.
-          logger.warn(`[reports-public] pest week weather unsettled for ${service.id} — not caching this render`);
+          logger.warn(`[reports-public] pest week weather not cacheable for ${service.id} (${renderedData.pestWeekWeatherPendingReason || 'open_window'}) — not caching this render`);
         } else if (laAfter !== laRenderSignature) {
           logger.warn(`[reports-public] lawn assessment changed during PDF render for ${service.id} — not caching this render`);
         } else if (await reserviceTrendsPdfSignature(service, db) !== reserviceTrendsSignature) {

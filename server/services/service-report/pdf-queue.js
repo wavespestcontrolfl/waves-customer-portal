@@ -51,6 +51,11 @@ function isMissingQueueError(err) {
 // gives the hourly geocode backstop ample room, while bounding the records it
 // can never repair.
 const PENDING_DEFER_GRACE_MS = 3 * 24 * 60 * 60 * 1000;
+// Uncached reasons that are TRANSIENT (a retry can succeed any minute) and so
+// take the normal failure retry ladder rather than a wait for ET midnight:
+// the lawn freeze's 'unfrozen' and the pest week's provider/freeze failures
+// (codex P2 2026-09-28 round 5). Every other reason is time-dependent.
+const TRANSIENT_UNCACHED_REASONS = new Set(['unfrozen', 'pest_week_weather_unavailable']);
 
 function nextPdfRenderAttemptAt(now = new Date(), attempts = 0) {
   const index = Math.min(Math.max(Number(attempts || 0), 0), RETRY_DELAYS_MINUTES.length - 1);
@@ -371,10 +376,19 @@ async function renderAndStoreServiceReportPdf(recordId, {
     // would include it. Wait for the window to close; no amount of retrying
     // resolves it any sooner.
     if (renderedData?.pestWeekWeatherUncacheable) {
-      logger.warn(`[service-report-pdf] pest week weather unsettled for ${recordId} — serving without storing`);
+      // The reason decides the retry shape (codex P2 2026-09-28 round 5):
+      // an OPEN window or missing coordinates are time-dependent (wait for
+      // ET midnight, like the lawn pending reasons); a provider outage or a
+      // failed freeze is transient and takes the normal failure retry
+      // ladder instead of deferring for up to three days.
+      const pending = renderedData.pestWeekWeatherPendingReason || 'open_window';
+      const uncachedReason = pending === 'open_window' ? 'pest_week_weather_unsettled'
+        : pending === 'no_coordinates' ? 'pest_week_weather_no_coordinates'
+          : 'pest_week_weather_unavailable';
+      logger.warn(`[service-report-pdf] pest week weather not cacheable for ${recordId} (${pending}) — serving without storing`);
       return {
         key: null, pdf, rendered: true, token: reportToken, uncached: true,
-        uncachedReason: 'pest_week_weather_unsettled',
+        uncachedReason,
       };
     }
     const laAfter = await lawnAssessmentPdfSignature(service, knex, { propertyHistoryEnabled });
@@ -852,7 +866,7 @@ async function processPdfRenderJob(job, knex = db) {
       // nightly and never surfacing. After the grace window it takes the normal
       // failure path, so it retires loudly with the reason in last_error.
       const queuedSinceMs = job.created_at ? Date.now() - new Date(job.created_at).getTime() : 0;
-      if (result.uncachedReason && result.uncachedReason !== 'unfrozen' && queuedSinceMs < PENDING_DEFER_GRACE_MS) {
+      if (result.uncachedReason && !TRANSIENT_UNCACHED_REASONS.has(result.uncachedReason) && queuedSinceMs < PENDING_DEFER_GRACE_MS) {
         const until = nextEtMidnight();
         await deferPdfRenderJob(job, until, `weather not freezable yet (${result.uncachedReason}) — deferred`, knex);
         return { status: 'deferred', nextAttemptAt: until.toISOString() };

@@ -690,13 +690,39 @@ describe('buildSpiderExpectation', () => {
     expect(out.whatWeDid).not.toMatch(/Swept eaves, window frames, door frames, and lanai/);
   });
 
-  it('a differently-worded eave/web action still renders the SAME fixed de-web sentence, not its own text', () => {
+  it('a differently-worded web action (no eave named) renders the fixed LOCATION-NEUTRAL de-web sentence, never its own text', () => {
     const out = buildSpiderExpectation({
       actionLabels: ['Internal SKU-4471 cobweb removal — do not quote to customer'],
       applications: [],
     });
-    expect(out.whatWeDid).toBe('We knocked down webs around the eaves and entry points.');
+    expect(out.whatWeDid).toBe('We knocked down the webs we could reach on the exterior.');
     expect(out.whatWeDid).not.toMatch(/SKU-4471/);
+    expect(out.whatWeDid).not.toMatch(/eaves/);
+  });
+
+  // codex P2 2026-09-28 round 5: the canonical exterior action opens the
+  // section (it is a web action) but places the work nowhere in particular,
+  // so the eaves are never named.
+  it('the canonical "Removed accessible webs from the recorded exterior areas." action: section renders, wording is location-neutral', () => {
+    const out = buildSpiderExpectation({
+      actionLabels: ['Removed accessible webs from the recorded exterior areas.'],
+      actionEntries: [{ label: 'Removed accessible webs from the recorded exterior areas.', treatmentApplied: false }],
+      applications: [],
+    });
+    expect(out).not.toBeNull();
+    expect(out.whatWeDid).toBe('We knocked down the webs we could reach on the exterior.');
+    expect(out.whatWeDid).not.toMatch(/eaves|entry points/);
+    expect(out.expectation).toMatch(/New webs can appear within days/);
+  });
+
+  it('a generic web action plus a TREATED generic web entry (no eave named anywhere) never earns the eave residual wording', () => {
+    const out = buildSpiderExpectation({
+      actionLabels: ['Removed accessible webs from the recorded exterior areas.'],
+      actionEntries: [{ label: 'Treated webs on exterior surfaces', treatmentApplied: true }],
+      applications: [{ product: { name: 'Demand CS' }, targets: ['spiders'] }],
+    });
+    expect(out.whatWeDid).toBe('We knocked down the webs we could reach on the exterior.');
+    expect(out.expectation).not.toMatch(/residual we applied/);
   });
 
   // P1-C fix (owner ruling 2026-09-28, P1 audit round 2): a spider-targeted

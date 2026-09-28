@@ -255,6 +255,12 @@ function buildRainExpectation({
 // must not count as a treatment. applications: the same array pest-report-v2
 // builds ({ product: {...}, targets: [...], applicationArea, ... }).
 const SPIDER_ACTION_RE = /\b(eave|eaves|web|webs|webbing|soffit|cobweb)\b/i;
+// The LOCATION claim ("around the eaves and entry points") needs an action
+// that actually names the eaves/soffit — codex P2 2026-09-28 round 5: the
+// canonical exterior action "Removed accessible webs from the recorded
+// exterior areas." is a web action (opens the section) but says nothing
+// about where, so it gets location-neutral wording.
+const EAVE_ACTION_RE = /\b(eave|eaves|soffit|soffits)\b/i;
 const SPIDER_TARGET_RE = /spider/i;
 // Ant-specific wording (colony, "ants may show up more", the treated-band
 // trail claim) needs an application the tech actually TAGGED for ants —
@@ -284,6 +290,9 @@ function hasAntTargetEvidence(product) {
 //      -> combined wording — the eaves claim still rests on the recorded
 //         action, never on the product target alone
 const WEB_ONLY_TEXT = 'We knocked down webs around the eaves and entry points.';
+// Same de-web fact, location-neutral — no recorded action placed the work
+// at the eaves (codex P2 round 5).
+const WEB_ONLY_GENERIC_TEXT = 'We knocked down the webs we could reach on the exterior.';
 const WEB_AND_RESIDUAL_TEXT = 'We knocked down webs and treated the eaves and entry points where spiders build.';
 
 // De-web-only expectation (combo 1): no "the residual we applied" claim —
@@ -312,8 +321,12 @@ function buildSpiderExpectation({ actionLabels = [], actionEntries = [], applica
   // application evidence the eaves were treated; see the module note above
   // and the P1-C fix this closes). Visit-wide, not tied to one product.
   const eaveActionTreated = (actionEntries || []).some(
-    (entry) => entry?.treatmentApplied === true && SPIDER_ACTION_RE.test(cleanText(entry?.label)),
+    (entry) => entry?.treatmentApplied === true && EAVE_ACTION_RE.test(cleanText(entry?.label)),
   );
+  // Did any recorded action place the work AT the eaves/soffit? Without one
+  // the de-web sentence stays location-neutral (codex P2 round 5).
+  const eaveNamed = (actionLabels || []).some((label) => EAVE_ACTION_RE.test(cleanText(label)))
+    || (actionEntries || []).some((entry) => EAVE_ACTION_RE.test(cleanText(entry?.label)));
 
   // A spider-labeled residual actually applied: tech-tagged for spiders,
   // classified pyrethroid by the explicit product-name map (never a target
@@ -330,7 +343,7 @@ function buildSpiderExpectation({ actionLabels = [], actionEntries = [], applica
     return areaEvidence || eaveActionTreated;
   });
 
-  const whatWeDid = residualApplied ? WEB_AND_RESIDUAL_TEXT : WEB_ONLY_TEXT;
+  const whatWeDid = residualApplied ? WEB_AND_RESIDUAL_TEXT : (eaveNamed ? WEB_ONLY_TEXT : WEB_ONLY_GENERIC_TEXT);
   const expectation = residualApplied ? RESIDUAL_EXPECTATION : WEB_ONLY_EXPECTATION;
   const nextStep = residualApplied ? RESIDUAL_NEXT_STEP : WEB_ONLY_NEXT_STEP;
 

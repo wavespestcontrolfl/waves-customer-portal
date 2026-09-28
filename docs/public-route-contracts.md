@@ -132,7 +132,7 @@ each result with `windowClosed`; `reports-public.js`
 `settledWeekWeatherForRender` drops an open, still-accumulating week from
 every non-live render so no mid-window rain total is ever baked into a
 cached document — the rain block is simply absent until the window closes,
-while the live page may show the current reading); a second line may add an ants-after-rain expectation, but
+and — codex P2 2026-09-28 round 5 — the LIVE page withholds it too: an open window is served from the forecast endpoint, whose current-day value includes hours that have not happened yet, so no render describes predicted rain as observed); a second line may add an ants-after-rain expectation, but
 ONLY when an actual rain signal clears a threshold (>= 0.5" during SWFL
 rainy season Jun–Oct, >= 1" otherwise; a low-confidence reading always uses
 the higher 1" bar) or the same live-only forecast signal fires — never on
@@ -163,7 +163,12 @@ line, additionally require an application the technician TAGGED for ants
 P1 2026-09-28 round 4): a non-repellent applied for roaches only, or the
 auto-seeded pest mix on a visit with no ant target, gets pest-neutral
 transfer wording instead. Ant bait keeps its ant wording (the product is
-an ant bait by definition). The same
+an ant bait by definition). The spider
+card's LOCATION wording ("around the eaves and entry points") requires a
+recorded action that names the eaves/soffit; a generic web action such as
+"Removed accessible webs from the recorded exterior areas." opens the card
+but gets location-neutral wording ("the webs we could reach on the
+exterior") — codex P2 2026-09-28 round 5. The same
 predicate feeds the `EXPECTATIONS` grounding section below; that path is
 structurally incapable of proving perimeter evidence (its product list is
 deduped by catalog product, not by application) and so always gets the
@@ -176,7 +181,20 @@ for the identical reason): `report-data.js`'s `resolvePestWeekWeather` /
 itself, is the ONE canonical resolution every caller shares — the direct
 PDF route's pre-render pass, `pdf-queue.js`'s pre-render pass, AND the
 browser's own independent live `/data` fetch all call `buildReportV1Data`.
-The lookup is OPT-IN (codex P2 2026-09-28 round 4, `pestWeekWeather: true`
+`pestWeekWeatherPendingReason` (public, top-level, sibling of the boolean)
+says WHY: `open_window` (time-dependent — `pdf-queue.js` defers the job to
+the next ET midnight, reason `pest_week_weather_unsettled`),
+`no_coordinates` (a legacy record the geocoder backstop may still fill —
+also deferred, `pest_week_weather_no_coordinates`), or `unavailable` /
+`unfrozen` (a provider outage, a fetch timeout or a failed freeze — TRANSIENT,
+reason `pest_week_weather_unavailable`, which takes the queue's normal
+5/30/240-minute failure retry ladder instead of waiting for midnight; codex
+P2 2026-09-28 round 5). A record whose completion-time identity snapshot has
+FROZEN `mapCenter` (even as null) can never regain coordinates, so its
+missing coordinates are PERMANENT and cacheable, not pending. Reports the
+Pest V2 composer excludes — cockroach-family typed reports, or
+`PEST_REPORT_V2` off — never resolve weather at all (no fetch, no pin, never
+uncacheable over weather). The lookup is OPT-IN (codex P2 2026-09-28 round 4, `pestWeekWeather: true`
 in `buildReportV1Data`'s options): only the `/data` response builder
 (which also serves the direct PDF route) and `pdf-queue.js` pass it; every
 other caller — e.g. the public `/:token/map.svg` handler, which renders no

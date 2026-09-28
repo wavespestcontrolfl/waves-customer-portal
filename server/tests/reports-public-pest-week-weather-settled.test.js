@@ -52,9 +52,9 @@ const SETTLED = { rainInches: 0.6, rainConfidence: 'high', et0Inches: null, dail
 const UNSETTLED = { ...SETTLED, rainInches: 0.2, windowClosed: false };
 
 describe('settledWeekWeatherForRender', () => {
-  test('live view keeps the week weather whether or not the window has closed', () => {
+  test('live view keeps a settled week but drops an open one (codex P2 round 5: an open window is a forecast, not a measurement)', () => {
     expect(settledWeekWeatherForRender(SETTLED, 'live')).toBe(SETTLED);
-    expect(settledWeekWeatherForRender(UNSETTLED, 'live')).toBe(UNSETTLED);
+    expect(settledWeekWeatherForRender(UNSETTLED, 'live')).toBeNull();
   });
 
   test('a PDF/static render keeps a settled week', () => {
@@ -71,7 +71,7 @@ describe('settledWeekWeatherForRender', () => {
     const { windowClosed, ...unstamped } = SETTLED;
     expect(settledWeekWeatherForRender(unstamped, 'pdf')).toBeNull();
     expect(settledWeekWeatherForRender(null, 'pdf')).toBeNull();
-    expect(settledWeekWeatherForRender(undefined, 'live')).toBeUndefined();
+    expect(settledWeekWeatherForRender(undefined, 'live')).toBeNull();
   });
 
   test('the v1 response builder routes the resolved week through the settle check before buildPestReportV2', () => {
@@ -157,7 +157,7 @@ describe('resolvePestWeekWeather / resolvePestWeekWeatherForBuild — the pin (r
     mockWeekWeather(fetchServiceWeekWeather);
     const { resolvePestWeekWeather } = require('../services/service-report/report-data');
     const { knex, state } = makePestKnex();
-    await expect(resolvePestWeekWeather(GEOCODED, 'pest', knex)).resolves.toEqual({ weekWeather: null, uncacheable: false });
+    await expect(resolvePestWeekWeather(GEOCODED, 'pest', knex)).resolves.toEqual({ weekWeather: null, uncacheable: false, reason: null });
     expect(fetchServiceWeekWeather).not.toHaveBeenCalled();
     expect(state.patches).toHaveLength(0);
   });
@@ -167,7 +167,7 @@ describe('resolvePestWeekWeather / resolvePestWeekWeatherForBuild — the pin (r
     mockWeekWeather(fetchServiceWeekWeather);
     const { resolvePestWeekWeather } = require('../services/service-report/report-data');
     const { knex } = makePestKnex();
-    await expect(resolvePestWeekWeather(GEOCODED, 'lawn', knex)).resolves.toEqual({ weekWeather: null, uncacheable: false });
+    await expect(resolvePestWeekWeather(GEOCODED, 'lawn', knex)).resolves.toEqual({ weekWeather: null, uncacheable: false, reason: null });
     expect(fetchServiceWeekWeather).not.toHaveBeenCalled();
   });
 
@@ -177,8 +177,22 @@ describe('resolvePestWeekWeather / resolvePestWeekWeatherForBuild — the pin (r
     const { resolvePestWeekWeather } = require('../services/service-report/report-data');
     const { knex } = makePestKnex();
     const noCoords = { ...GEOCODED, customer_latitude: null, customer_longitude: null };
-    await expect(resolvePestWeekWeather(noCoords, 'pest', knex)).resolves.toEqual({ weekWeather: null, uncacheable: true });
+    await expect(resolvePestWeekWeather(noCoords, 'pest', knex)).resolves.toEqual({ weekWeather: null, uncacheable: true, reason: 'no_coordinates' });
     expect(fetchServiceWeekWeather).not.toHaveBeenCalled();
+  });
+
+  test('no coordinates but the completion-time identity snapshot FROZE mapCenter: permanent, cacheable (codex P2 round 5 — the geocoder never repairs a completed report)', async () => {
+    const fetchServiceWeekWeather = jest.fn();
+    mockWeekWeather(fetchServiceWeekWeather);
+    const { resolvePestWeekWeather } = require('../services/service-report/report-data');
+    const { knex } = makePestKnex();
+    const frozen = { ...GEOCODED, customer_latitude: null, customer_longitude: null, report_identity_snapshot: { mapCenter: null, customer: { name: 'Fixture Customer' } } };
+    await expect(resolvePestWeekWeather(frozen, 'pest', knex)).resolves.toEqual({ weekWeather: null, uncacheable: false, reason: null });
+    expect(fetchServiceWeekWeather).not.toHaveBeenCalled();
+    // A snapshot that omitted mapCenter entirely (customer row missing at
+    // completion) is NOT frozen coordinates — still pending.
+    const unfrozen = { ...frozen, report_identity_snapshot: { customer: null } };
+    await expect(resolvePestWeekWeather(unfrozen, 'pest', knex)).resolves.toMatchObject({ uncacheable: true, reason: 'no_coordinates' });
   });
 
   test('already frozen (pinned): reads back the stored value, never fetches again — same rain line, cacheable', async () => {
@@ -188,7 +202,7 @@ describe('resolvePestWeekWeather / resolvePestWeekWeatherForBuild — the pin (r
     const { resolvePestWeekWeather } = require('../services/service-report/report-data');
     const pinned = { ...GEOCODED, structured_notes: { pestWeekWeather: STORED } };
     const { knex } = makePestKnex();
-    await expect(resolvePestWeekWeather(pinned, 'pest', knex)).resolves.toEqual({ weekWeather: STORED, uncacheable: false });
+    await expect(resolvePestWeekWeather(pinned, 'pest', knex)).resolves.toEqual({ weekWeather: STORED, uncacheable: false, reason: null });
     expect(fetchServiceWeekWeather).not.toHaveBeenCalled();
   });
 
@@ -196,7 +210,7 @@ describe('resolvePestWeekWeather / resolvePestWeekWeatherForBuild — the pin (r
     mockWeekWeather(jest.fn().mockRejectedValue(new Error('provider unavailable')));
     const { resolvePestWeekWeather } = require('../services/service-report/report-data');
     const { knex, state } = makePestKnex();
-    await expect(resolvePestWeekWeather(GEOCODED, 'pest', knex)).resolves.toEqual({ weekWeather: null, uncacheable: true });
+    await expect(resolvePestWeekWeather(GEOCODED, 'pest', knex)).resolves.toEqual({ weekWeather: null, uncacheable: true, reason: 'unavailable' });
     expect(state.patches).toHaveLength(0);
   });
 
@@ -206,20 +220,21 @@ describe('resolvePestWeekWeather / resolvePestWeekWeatherForBuild — the pin (r
     const { knex, state } = makePestKnex();
     const result = await resolvePestWeekWeather(GEOCODED, 'pest', knex);
     expect(result.uncacheable).toBe(true);
+    // transient (codex P2 round 5): the queue's failure ladder, not a midnight wait
+    expect(result.reason).toBe('unavailable');
     expect(state.patches).toHaveLength(0);
   });
 
-  test('open window (still accumulating): NOT frozen, uncacheable — the fetched reading is still returned so a LIVE render may show it', async () => {
+  test('open window (still accumulating): NOT frozen, uncacheable with reason open_window (time-dependent — the queue waits for midnight)', async () => {
     const FETCHED = { rainInches: 0.2, windowClosed: false, rainConfidence: null };
     mockWeekWeather(jest.fn().mockResolvedValue(FETCHED));
     const { resolvePestWeekWeather } = require('../services/service-report/report-data');
     const { knex, state } = makePestKnex();
-    await expect(resolvePestWeekWeather(GEOCODED, 'pest', knex)).resolves.toEqual({ weekWeather: FETCHED, uncacheable: true });
+    await expect(resolvePestWeekWeather(GEOCODED, 'pest', knex)).resolves.toEqual({ weekWeather: FETCHED, uncacheable: true, reason: 'open_window' });
     expect(state.patches).toHaveLength(0);
-    // settledWeekWeatherForRender (tested above) is what keeps this open
-    // reading OFF a non-live render while still allowing a live one to
-    // show it — this resolver itself is mode-agnostic, matching the lawn
-    // freeze's own mode-independence.
+    // settledWeekWeatherForRender (tested above) keeps this open reading
+    // off EVERY render (codex P2 round 5) — this resolver itself is
+    // mode-agnostic, matching the lawn freeze's own mode-independence.
   });
 
   test('settled + freeze succeeds: cacheable, via a first-writer-wins UPDATE guarded on the key\'s absence', async () => {
@@ -242,6 +257,7 @@ describe('resolvePestWeekWeather / resolvePestWeekWeatherForBuild — the pin (r
     const { knex } = makePestKnex({ matched: 0, stored: null });
     const result = await resolvePestWeekWeather(GEOCODED, 'pest', knex);
     expect(result.uncacheable).toBe(true);
+    expect(result.reason).toBe('unfrozen'); // transient
     expect(result.weekWeather).toEqual(FETCHED);
   });
 
@@ -350,6 +366,7 @@ describe('resolvePestWeekWeatherForBuild — bounded to ~1200ms on the LIVE requ
     await expect(promise).resolves.toEqual({
       weekWeather: { rainInches: null, windowClosed: false, unavailable: true },
       uncacheable: true,
+      reason: 'unavailable',
     });
     // The timed-out caller itself never wrote a freeze — a timed-out
     // request must not persist anything (the still-running background
@@ -395,7 +412,7 @@ describe('BOTH PDF cache-decision sites read the pin, with no separate preflight
     expect(reportData).toMatch(/await resolvePestWeekWeatherForBuild\(service, serviceLine, knex, opts\.mode\)/);
     // Public marker only — no raw provider numbers land on the object this
     // function returns; those stay server-internal via expectationFactsOut.
-    expect(reportData).toMatch(/pestWeekWeatherUncacheable,\s*\n\s*mowingHeight,/);
+    expect(reportData).toMatch(/pestWeekWeatherUncacheable,[\s\S]{0,700}?pestWeekWeatherPendingReason: pestWeekWeatherPendingReason \|\| null,\s*\n\s*mowingHeight,/);
   });
 
   test('pdf-queue.js never composes pestReportV2 and no longer calls any separate pest-weather preflight', () => {
@@ -420,7 +437,7 @@ describe('BOTH PDF cache-decision sites read the pin, with no separate preflight
     // lawn guard immediately above it.
     expect(reportsPublic).toMatch(/renderedData\?\.pestWeekWeatherUncacheable\)[\s\S]{0,600}\} else if/);
     // pdf-queue.js returns the bytes with no key rather than storing.
-    expect(pdfQueue).toMatch(/renderedData\?\.pestWeekWeatherUncacheable\)[\s\S]{0,300}uncached: true/);
+    expect(pdfQueue).toMatch(/renderedData\?\.pestWeekWeatherUncacheable\)[\s\S]{0,1400}uncached: true/);
   });
 });
 
@@ -542,7 +559,7 @@ describe('pest week-weather lookup is opt-in per caller (source wiring)', () => 
 
   test('buildReportV1Data resolves the week only when opts.pestWeekWeather === true', () => {
     const src = read('services/service-report/report-data.js');
-    expect(src).toMatch(/opts\.pestWeekWeather === true\n\s*\? await resolvePestWeekWeatherForBuild\(service, serviceLine, knex, opts\.mode\)\n\s*: \{ weekWeather: null, uncacheable: false \}/);
+    expect(src).toMatch(/const pestWeekWeatherEligible = opts\.pestWeekWeather === true[\s\S]{0,300}?pestWeekWeatherEligible\n\s*\? await resolvePestWeekWeatherForBuild\(service, serviceLine, knex, opts\.mode\)\n\s*: \{ weekWeather: null, uncacheable: false, reason: null \}/);
   });
 
   test('the /data response builder (which also serves the direct PDF route) opts in', () => {
@@ -558,5 +575,28 @@ describe('pest week-weather lookup is opt-in per caller (source wiring)', () => 
   test('the public map.svg handler passes no options and so never resolves weather', () => {
     const src = read('routes/reports-public.js');
     expect(src).toMatch(/const data = await buildReportV1Data\(service, req\.params\.token\);/);
+  });
+});
+
+describe('pending reasons drive the queue retry shape and the render eligibility (source wiring, codex P2 round 5)', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const read = (rel) => fs.readFileSync(path.join(__dirname, '..', rel), 'utf8');
+
+  test('buildReportV1Data exposes pestWeekWeatherPendingReason beside the boolean', () => {
+    const src = read('services/service-report/report-data.js');
+    expect(src).toMatch(/pestWeekWeatherUncacheable,\n[\s\S]{0,600}?pestWeekWeatherPendingReason: pestWeekWeatherPendingReason \|\| null,/);
+  });
+
+  test('weather resolution is skipped for cockroach-family typed reports and when PEST_REPORT_V2 is off', () => {
+    const src = read('services/service-report/report-data.js');
+    expect(src).toMatch(/const pestWeekWeatherEligible = opts\.pestWeekWeather === true\n\s*&& process\.env\.PEST_REPORT_V2 === 'true'\n\s*&& !require\('\.\/pest-report-v2'\)\.isCockroachTypedReportType\(typedSnapshot\?\.type\);/);
+  });
+
+  test('pdf-queue maps open_window → unsettled (defer), no_coordinates → its own pending reason, everything else → unavailable (transient)', () => {
+    const src = read('services/service-report/pdf-queue.js');
+    expect(src).toMatch(/pending === 'open_window' \? 'pest_week_weather_unsettled'\n\s*: pending === 'no_coordinates' \? 'pest_week_weather_no_coordinates'\n\s*: 'pest_week_weather_unavailable'/);
+    expect(src).toMatch(/const TRANSIENT_UNCACHED_REASONS = new Set\(\['unfrozen', 'pest_week_weather_unavailable'\]\);/);
+    expect(src).toMatch(/!TRANSIENT_UNCACHED_REASONS\.has\(result\.uncachedReason\) && queuedSinceMs < PENDING_DEFER_GRACE_MS/);
   });
 });
