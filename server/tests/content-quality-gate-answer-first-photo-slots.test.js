@@ -735,3 +735,55 @@ describe('Codex r9: four-letter nouns survive beside a long qualifier', () => {
   });
 });
 
+// ── Codex r8 on #5216 (follow-up PR) ─────────────────────────────────
+describe('Codex r8: the run ledger marks a customer-question page on refresh', () => {
+  const refresh = brief({ action_type: 'refresh_existing_page', page_type: 'refresh' });
+  const live = '<BottomLineBox verdict="Yes, you should." recommendation="Compare both." />\n\nIntro.';
+  const moved = { frontmatter: {}, body: 'New intro.\n\n<BottomLineBox verdict="Yes, you should." recommendation="Compare both." />' };
+  const ctx = (extra) => ({ liveFrontmatter: { post_type: 'decision' }, previousVersion: { body: live }, ...extra });
+  test('a decision-shaped customer question keeps its box first', () => {
+    expect(checkVerdictBoxFirst(moved, refresh, ctx({ liveIsCustomerQuestion: true }))).toEqual({ ok: false, reason: 'verdict_box_not_first_block' });
+  });
+  test('a decision post the ledger does not mark may move its box', () => {
+    expect(checkVerdictBoxFirst(moved, refresh, ctx({ liveIsCustomerQuestion: false }))).toEqual({ ok: true, reason: 'not_identification_or_question' });
+  });
+  test('an unreadable ledger holds a page that opens on the box (fail closed)', () => {
+    expect(checkVerdictBoxFirst(moved, refresh, ctx({ liveQuestionLedgerUnavailable: true })).ok).toBe(false);
+  });
+  test('a ledger-marked page is held even when its live body no longer opens on the box', () => {
+    const c = { liveFrontmatter: { post_type: 'location' }, previousVersion: { body: 'Intro.' }, liveIsCustomerQuestion: true };
+    expect(checkVerdictBoxFirst(moved, refresh, c).ok).toBe(false);
+  });
+});
+
+describe('Codex r8: no sales pitch inside the verdict box', () => {
+  const run = (props) => checkCtaAfterVerdictBox({ frontmatter: { post_type: 'diagnostic' }, body: `<BottomLineBox ${props} />\n\nMore.` }, brief());
+  test.each([
+    ['verdict="Cockroaches can fly. Get a free estimate now." recommendation="Seal gaps."'],
+    ['verdict="Yes, they sting." recommendation="Call today."'],
+    ['verdict="Yes, they sting." recommendation="Call (941) 297-5749 for help."'],
+    ['verdict="Yes, they sting." recommendation="Call {{cityPhone}}."'],
+  ])('%s is a pitch', (props) => {
+    expect(run(props)).toEqual({ ok: false, reason: 'sales_pitch_inside_verdict_box' });
+  });
+  test('advice to call a licensed pro is not a pitch', () => {
+    expect(run('verdict="Yes, fire ants sting and it hurts." recommendation="Keep kids off the mound; call a licensed pro if the mound is near the house."')).toEqual({ ok: true });
+  });
+});
+
+describe('Codex r8: each photo credit sits directly below its image', () => {
+  const credited = `![${PHOTO.alt}](${PHOTO_URL})\n\n${ATTR}`;
+  test('a credit directly below passes', () => {
+    expect(checkPhotoSlotsLicensedOnly(diag(`Intro.\n\n${credited}\n\nMore.`), slotsBrief())).toEqual({ ok: true });
+  });
+  test('a credit in a distant footer does not count', () => {
+    const body = `Intro.\n\n![${PHOTO.alt}](${PHOTO_URL})\n\nA paragraph between.\n\n${ATTR}`;
+    expect(checkPhotoSlotsLicensedOnly(diag(body), slotsBrief())).toEqual({ ok: false, reason: `identification_photo_attribution_missing:${PHOTO_URL}` });
+  });
+  test('two copies of the photo need two credits', () => {
+    const body = `Intro.\n\n${credited}\n\nMore.\n\n![${PHOTO.alt}](${PHOTO_URL})\n\nEnd.`;
+    expect(checkPhotoSlotsLicensedOnly(diag(body), slotsBrief())).toEqual({ ok: false, reason: `identification_photo_attribution_missing:${PHOTO_URL}` });
+    expect(checkPhotoSlotsLicensedOnly(diag(`Intro.\n\n${credited}\n\nMore.\n\n${credited}\n\nEnd.`), slotsBrief())).toEqual({ ok: true });
+  });
+});
+

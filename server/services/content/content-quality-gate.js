@@ -1253,12 +1253,21 @@ function isIdentificationDraft(draft, brief, context) {
 // `^<BottomLineBox` check checkVerdictBoxFirst runs on the DRAFT.
 function isIdentificationOrQuestionDraft(draft, brief, context) {
   if (isIdentificationDraft(draft, brief, context) || brief?.page_type === 'customer-question') return true;
-  // A "decision" post carries a BottomLineBox by its own post-type contract
-  // (and answer-first does not apply to it), so its leading box proves
-  // nothing about the page being a question page (Codex r7).
+  if (brief?.action_type !== 'refresh_existing_page') return false;
+  // The durable marker is the run ledger: the runner reports whether this
+  // target was first published by a customer-question run
+  // (context.liveIsCustomerQuestion, from autonomous_runs) — any post_type,
+  // "decision" included (Codex r8 on #5216).
+  if (context?.liveIsCustomerQuestion === true) return true;
+  // Pages the ledger does not know (published by hand, or before the
+  // ledger), or a failed ledger read: a live body that opens on the box was
+  // published answer-first — except a "decision" post, whose own contract
+  // carries a box (Codex r7). A failed read holds even a decision post (fail
+  // closed).
+  if (!leadingVerdictBox(context?.previousVersion?.body)) return false;
+  if (context?.liveQuestionLedgerUnavailable) return true;
   const livePostType = String(context?.liveFrontmatter?.post_type || '').trim().toLowerCase();
-  if (brief?.action_type === 'refresh_existing_page' && livePostType !== 'decision' && leadingVerdictBox(context?.previousVersion?.body)) return true;
-  return false;
+  return livePostType !== 'decision';
 }
 
 // C2: the verdict box (BottomLineBox) must be the LITERAL first block of
@@ -1312,6 +1321,7 @@ const DANGER_TERMS_RE = /\b(dangerous|danger|harmless|safe|unsafe|venom\w*|sting
 // this is the fail-closed backstop for whatever reaches this check
 // without that having held.
 const ANY_MD_LINK_RE = /\[[^\]]*\]\([^)]+\)/g;
+const BOX_PHONE_RE = /\(?\b\d{3}\)?[\s.-]?\d{3}[\s.-]\d{4}\b/;
 const BOTTOM_LINE_BOX_TAG_RE = /<BottomLineBox\b(?:[^>"']|"[^"]*"|'[^']*')*\/?>/;
 function checkCtaAfterVerdictBox(draft, brief, context) {
   if (!isIdentificationOrQuestionDraft(draft, brief, context)) return { ok: true, reason: 'not_identification_or_question' };
@@ -1324,6 +1334,15 @@ function checkCtaAfterVerdictBox(draft, brief, context) {
   const boxStart = boxMatch.index;
   ANY_MD_LINK_RE.lastIndex = 0;
   if (ANY_MD_LINK_RE.test(boxMatch[0])) return { ok: false, reason: 'link_inside_verdict_box' };
+  // The box's props render as the reader's first answer — a sales pitch in
+  // plain text ("Get a free estimate now", "Call today", a phone number)
+  // is a pitch before the answer just like a link (Codex r8 on #5216).
+  // Same sales-copy detectors the blog meta gate uses; "call a licensed
+  // pro" style advice is not sales copy.
+  const boxText = `${attrValue(boxMatch[0], 'verdict') || ''} ${attrValue(boxMatch[0], 'recommendation') || ''}`;
+  if (SALESY_META_RE.test(boxText) || metaHasSalesCopy(boxText) || PHONE_TOKEN_RE.test(boxText) || CITY_PHONE_TOKEN_RE.test(boxText) || BOX_PHONE_RE.test(boxText)) {
+    return { ok: false, reason: 'sales_pitch_inside_verdict_box' };
+  }
   ANY_MD_LINK_RE.lastIndex = 0;
   let m;
   while ((m = ANY_MD_LINK_RE.exec(body))) {
@@ -1344,11 +1363,24 @@ function checkCtaAfterVerdictBox(draft, brief, context) {
 // guardrails' blankNonRenderedMarkdown):
 //   Photo: [credit](source_page) ([license](license_url))
 const PHOTO_CATALOG_FIELDS = ['credit', 'license', 'license_url', 'source_page'];
-function validateLibraryPhoto(photo, alt, url, renderedBody) {
+// Codex r8 on #5216: the credit sits DIRECTLY below its own image — the
+// next non-blank rendered line after the image's line is the exact
+// attribution line (a credit in a distant footer, or one credit shared by
+// two copies of the photo, does not count).
+function validateLibraryPhoto(photo, alt, url, renderedBody, line) {
   if (!photo) return { ok: false, reason: `unlicensed_or_unknown_identification_photo:${url}` };
   if (alt !== photo.alt) return { ok: false, reason: `identification_photo_alt_mismatch:${url}` };
   if (PHOTO_CATALOG_FIELDS.some((field) => !photo[field])) return { ok: false, reason: `identification_photo_catalog_entry_incomplete:${url}` };
-  if (!renderedBody.includes(photoAttributionLine(photo))) return { ok: false, reason: `identification_photo_attribution_missing:${url}` };
+  // A raw <img>/srcset has no line here; it fails as an unsupported form
+  // right after this, so only its presence is judged.
+  if (!Number.isInteger(line)) {
+    if (!renderedBody.includes(photoAttributionLine(photo))) return { ok: false, reason: `identification_photo_attribution_missing:${url}` };
+    return null;
+  }
+  const lines = renderedBody.split('\n');
+  let next = line + 1;
+  while (next < lines.length && !lines[next].trim()) next += 1;
+  if (next >= lines.length || lines[next].trim() !== photoAttributionLine(photo)) return { ok: false, reason: `identification_photo_attribution_missing:${url}` };
   return null;
 }
 // Every rendered image FORM is collected — Codex r5 on #5216 (3rd round on
@@ -1376,7 +1408,7 @@ function collectBodyImageOccurrences(body, { mdx = true } = {}) {
   // require — never top-level, or the two modules deadlock on load).
   const { bodyImageRefs } = require('../content-astro/astro-publisher')._internals;
   for (const ref of bodyImageRefs(body, { mdx })) {
-    out.push({ alt: String(ref.alt || '').trim(), url: String(ref.src || '').trim(), form: 'markdown' });
+    out.push({ alt: String(ref.alt || '').trim(), url: String(ref.src || '').trim(), form: 'markdown', line: ref.line });
   }
 
   let m;
@@ -1438,8 +1470,8 @@ function checkPhotoSlotsLicensedOnly(draft, brief, context) {
   // .md refresh renders Markdown inside raw HTML as literal text) — Codex r7.
   const mdx = !markdownOnlyTarget(brief);
   const occurrences = collectBodyImageOccurrences(body, { mdx });
-  for (const { alt, url, form } of occurrences) {
-    const failure = validateLibraryPhoto(libraryPhotoBySrc(url), alt, url, renderedBody);
+  for (const { alt, url, form, line } of occurrences) {
+    const failure = validateLibraryPhoto(libraryPhotoBySrc(url), alt, url, renderedBody, line);
     if (failure) return failure;
     // Raw <img> (src or srcset) is outside the publisher's Markdown subset —
     // validateBodyImageRefs parks it at publish — so a library photo shipped

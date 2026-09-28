@@ -4601,6 +4601,32 @@ describe('refresh quality gate receives the live frontmatter', () => {
     expect(ctx.liveFrontmatter).toMatchObject({ post_type: 'diagnostic', _read: 'gate_3c' });
     expect(ctx.liveFrontmatterUnavailable).toBeUndefined();
   });
+
+  // Codex r8 on #5216: the run ledger is the durable customer-question
+  // marker — the page carries no page type of its own.
+  describe('customer-question ledger lookup', () => {
+    const withRuns = (rows, { fail = false } = {}) => {
+      const chain = { where: jest.fn(() => chain), whereNotNull: jest.fn(() => chain), select: jest.fn(() => (fail ? Promise.reject(new Error('db down')) : Promise.resolve(rows))) };
+      db.mockImplementation((table) => (table === 'autonomous_runs' ? chain : undefined));
+      return chain;
+    };
+    afterEach(() => { db.mockReset(); });
+
+    test('true when a customer-question run published this path (absolute URL vs path)', async () => {
+      const chain = withRuns([{ published_url: 'https://www.wavespestcontrol.com/pest-control/can-cockroaches-fly/' }]);
+      const r = await _internals.publishedAsCustomerQuestion('/pest-control/can-cockroaches-fly');
+      expect(r).toBe(true);
+      expect(chain.where).toHaveBeenCalledWith('page_type', 'customer-question');
+    });
+    test('false for a path no customer-question run published', async () => {
+      withRuns([{ published_url: 'https://www.wavespestcontrol.com/pest-control/other/' }]);
+      expect(await _internals.publishedAsCustomerQuestion('/pest-control/can-cockroaches-fly/')).toBe(false);
+    });
+    test('null when the ledger cannot be read', async () => {
+      withRuns([], { fail: true });
+      expect(await _internals.publishedAsCustomerQuestion('/pest-control/can-cockroaches-fly/')).toBeNull();
+    });
+  });
 });
 
 // Refreshes had no in-loop self-lint (their guard options need the live

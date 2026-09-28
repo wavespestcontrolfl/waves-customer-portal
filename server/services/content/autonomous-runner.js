@@ -1034,6 +1034,13 @@ class AutonomousRunner {
         // (holds the refresh to the identification checks).
         if (refreshLiveFrontmatter && typeof refreshLiveFrontmatter === 'object') ctx.liveFrontmatter = refreshLiveFrontmatter;
         else ctx.liveFrontmatterUnavailable = true;
+        // The durable customer-question marker: the page itself carries no
+        // page type (not in the blog schema), but the run ledger records
+        // which run first published it (Codex r8 on #5216). A failed read
+        // makes the gate fail closed on a page that opens on the box.
+        const questionLedger = await publishedAsCustomerQuestion(brief.target_url || brief.page_url || draft.url);
+        if (questionLedger === null) ctx.liveQuestionLedgerUnavailable = true;
+        else ctx.liveIsCustomerQuestion = questionLedger;
         // Same resolved-target derivation as the metadata lane: page_type
         // 'refresh' says nothing about the target, and a refresh that
         // rewrites a blog post's meta_description must keep the full blog
@@ -5042,9 +5049,31 @@ function firstReturnedId(rows) {
   return null;
 }
 
+/**
+ * Was this target first published by a customer-question run? true / false
+ * from autonomous_runs (page_type + published_url, path-compared), null when
+ * the ledger cannot be read.
+ */
+async function publishedAsCustomerQuestion(targetUrl) {
+  const { _internals: { normalizePathForCompare } } = require('./related-posts');
+  const key = normalizePathForCompare(targetUrl);
+  if (!key || key === '/') return false;
+  try {
+    const rows = await db('autonomous_runs')
+      .where('page_type', 'customer-question')
+      .whereNotNull('published_url')
+      .select('published_url');
+    return rows.some((row) => normalizePathForCompare(row.published_url) === key);
+  } catch (err) {
+    logger.warn(`[autonomous-runner] customer-question ledger read failed: ${err.message}`);
+    return null;
+  }
+}
+
 module.exports = new AutonomousRunner();
 module.exports.AutonomousRunner = AutonomousRunner;
 module.exports._internals = {
+  publishedAsCustomerQuestion,
   isShadow,
   autoPublishEnabled,
   OPERATOR_INTERCEPT_BUCKET,
