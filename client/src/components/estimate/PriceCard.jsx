@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 import { flushSync } from 'react-dom';
 import { quoteRequiredReasonText } from '../../lib/quoteDisplay';
-import { applyCommercialExteriorScope, copyHasPlanTermsClaim, glassCopyActive, glassRowInclusions, glassServiceSlug, glassTierDisplay, treeShrubPalmBulletText, withTreeShrubPalmBullet } from '../../lib/estimate-glass-copy';
+import { applyCommercialExteriorScope, glassCopyActive, glassRowInclusions, glassServiceSlug, glassTierDisplay, treeShrubPalmBulletText, withTreeShrubPalmBullet } from '../../lib/estimate-glass-copy';
+import { copyAllowedInScope } from '@estimate-copy-claims';
 import { CUSTOMER_SURFACE } from '../../theme-customer';
 import { fmtMoney, fmtMoneySigned } from '../../lib/money';
 import { W, PRICE_FONT, waveGuardChipStyle } from './tokens';
@@ -227,7 +228,9 @@ export function perApplicationNetForFrequency(frequency) {
 // "$X/mo" it showed instead was a plan total the estimate surface must not
 // carry. With the flag the headline names the billing unit and the itemized
 // rows below carry the actual per-application prices.
-export default function PriceCard({ frequency, waveGuardTier, waveGuardDiscountPct = null, memberPerApplicationSavings = null, wording = DEFAULT_WORDING, showSavings = true, glassSetupBullet = false, preferPerApplicationPrice = false, perApplicationNoun = 'application', showTierBadge = true, suppressCombinedTotal = false, measuredBasis = null, onMeasurementChallenge = null, commercialInteriorSelected = null, noGuarantee = false }) {
+export default function PriceCard({ frequency, waveGuardTier, waveGuardDiscountPct = null, memberPerApplicationSavings = null, wording = DEFAULT_WORDING, showSavings = true, glassSetupBullet = false, preferPerApplicationPrice = false, perApplicationNoun = 'application', showTierBadge = true, suppressCombinedTotal = false, measuredBasis = null, onMeasurementChallenge = null, commercialInteriorSelected = null, noGuarantee = false, guaranteeScope: guaranteeScopeProp = null }) {
+  // The estimate's guarantee scope; older callers pass the noGuarantee boolean.
+  const inclusionScope = guaranteeScopeProp || (noGuarantee ? 'none' : 'all');
   if (!frequency) return null;
 
   // Glass copy pack (PR B): tier display + pest inclusion swaps
@@ -767,9 +770,7 @@ export default function PriceCard({ frequency, waveGuardTier, waveGuardDiscountP
                   // under glass, serviceKey(row) for the baseline list.
                   const isTreeShrubRow = glass ? glassSlug === 'tree_shrub' : serviceKey(row) === 'tree_shrub';
                   const withPalmCare = isTreeShrubRow ? withTreeShrubPalmBullet(base, row.palmCount) : base;
-                  return noGuarantee
-                    ? withPalmCare.filter((line) => !copyHasPlanTermsClaim(line))
-                    : withPalmCare;
+                  return withPalmCare.filter((line) => copyAllowedInScope(line, inclusionScope));
                 })()}
                 collapsible={glass}
               />

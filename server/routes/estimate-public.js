@@ -40,7 +40,7 @@ function acceptBookingGateToken(estimate) {
 }
 const { isInvoiceCollectibleStatus } = require('../services/invoice-helpers');
 const { resolveOneTimeServiceCopy, resolveOneTimeRowCopies, oneTimeOnlyIntelligenceCopy } = require('../services/estimate-one-time-copy');
-const { PLAN_TERMS_COPY, withoutPlanTermsClaims } = require('../../shared/estimate-copy-claims.cjs');
+const { copyAllowedInScope, guaranteeScope, withoutClaimsOutsideScope } = require('../../shared/estimate-copy-claims.cjs');
 const {
   collapseMirroredRows,
   hasPurchasedTrenchingWarranty,
@@ -4766,7 +4766,10 @@ function renderMembershipBlockHtml(membership) {
 
 function renderPage(token, estimate, estData, membership, opts = {}) {
   const est = estimate;
-  const noGuaranteeClaims = estimate?.noGuaranteeClaims === true;
+  // The claims this page may make (shared/estimate-copy-claims.cjs
+  // guaranteeScope): 'none' with termite or unclassifiable work,
+  // 'satisfaction' with a rodent or commercial service, else 'all'.
+  const pageGuaranteeScope = guaranteeScope(estimate || {});
   // "Show your work" payload — built (gate-checked) by the caller; null
   // keeps every byte of the rendered page identical to the pre-gate HTML.
   const showYourWork = opts.showYourWork || null;
@@ -4815,7 +4818,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // renderers agree on when a quote is mixed (codex #3823 r8 P0).
   const oneTimeIntelligenceRows = [...oneTimeItems, ...boraCareOneTimeRows];
   const oneTimeHeroCopy = !hasRegulatedCertificateServiceMix(recurring, oneTimeItems) && oneTimeOnlyIntelligenceCopy(oneTimeIntelligenceRows)
-    ? oneTimeItems.map(item => resolveOneTimeServiceCopy(item, { noGuaranteeClaims })).find(Boolean) || null
+    ? oneTimeItems.map(item => resolveOneTimeServiceCopy(item, { guaranteeScope: pageGuaranteeScope })).find(Boolean) || null
     : null;
   const recurringMonthlyParts = resolveRecurringMonthlyParts(est, estData);
   const storedBaseMonthly = Number(recurringMonthlyParts.baseMonthly || est.monthlyTotal || 0);
@@ -5016,7 +5019,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
               cardConfirmTitle: 'Confirm invoice',
               cardConfirmSub: 'next step creates your invoice and makes secure payment available.',
               perksHeading: 'What WaveGuard members get',
-              perksBody: noGuaranteeClaims
+              perksBody: pageGuaranteeScope !== 'all'
                 ? 'Your WaveGuard membership includes priority service, locked-in pricing, and access to your service team.'
                 : 'Your WaveGuard membership goes beyond routine visits - priority service, locked-in pricing, and protection between treatments.',
               finalHeading: 'Go Waves! Wave Goodbye to Pests!',
@@ -5602,7 +5605,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // guarantee) covers the whole plan, so it needs every service to carry the
   // plan terms: termite, unknown, rodent or commercial work anywhere leaves
   // only the factual refund details (AGENTS.md estimate truth scope).
-  const planTermsNeutral = noGuaranteeClaims || estimate?.noEstimateWideGuarantee === true;
+  const planTermsNeutral = pageGuaranteeScope !== 'all';
   const planTermsCardHtml = showBillingCard ? `
   <section class="card plan-terms-card"${billingModeAttr}>
     <h2>${planTermsNeutral ? 'Cancel &amp; refunds' : 'Cancel, refunds &amp; our guarantee'}</h2>
@@ -5810,16 +5813,16 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   const oneTimeRowCopyAllowed = !hasRegulatedCertificateServiceMix(recurring, oneTimeItems);
   // One copy per logical job, included (service-credit) rows skipped — the
   // same helper the React contract uses (codex #3823 r3 P2s).
-  const oneTimeRowCopies = oneTimeRowCopyAllowed ? resolveOneTimeRowCopies(billableOneTimeItems, { noGuaranteeClaims }) : [];
+  const oneTimeRowCopies = oneTimeRowCopyAllowed ? resolveOneTimeRowCopies(billableOneTimeItems, { guaranteeScope: pageGuaranteeScope }) : [];
   const realOneTimeRows = billableOneTimeItems.map((it, rowIndex) => {
     const price = oneTimeItemAmount(it);
     const includedByServiceCredit = it.serviceSpecificDiscountApplied === true;
     const rawDetail = isTermiteInstallItem(it) ? formatTermiteBaitDetail(R.tmBait, it.detail) : it.detail;
     // Plan-terms parts go and the scope stays; a pre-slab job keeps its
     // selected extended warranty (owner ruling 2026-09-27).
-    const detail = noGuaranteeClaims && PLAN_TERMS_COPY.test(rawDetail || '')
-      ? withoutPlanTermsClaims(rawDetail, preSlabSelectedWarrantyPart(it))
-      : rawDetail;
+    const detail = copyAllowedInScope(rawDetail, pageGuaranteeScope)
+      ? rawDetail
+      : withoutClaimsOutsideScope(rawDetail, pageGuaranteeScope, preSlabSelectedWarrantyPart(it));
     const priceCell = includedByServiceCredit ? 'Included' : fmtMoney(price);
     // What the visit involves — same outcome + bullet + terms shape the
     // React OneTimeBreakdownCard renders from item.copy (one pack, both paths).
@@ -5850,7 +5853,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     : (hasOnlyMosquitoServices
       ? MOSQUITO_PERKS
       : (hasOnlyTermiteBaitServices ? TERMITE_BAIT_PERKS : PERKS)))
-    .filter((perk) => !noGuaranteeClaims || !PLAN_TERMS_COPY.test(perk))
+    .filter((perk) => copyAllowedInScope(perk, pageGuaranteeScope))
     .map((p) => `<li>${escapeHtml(p)}</li>`)
     .join('');
   // All four GBP profiles (owner directive 2026-07-10 — was the first three).
@@ -6056,10 +6059,10 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
       <ul>
         <li>Recurring exterior treatment &mdash; foundation, entry points, and grounds on your scheduled cadence</li>
         <li>Interior treatment available on every visit &mdash; priced from your building, no surprise fees</li>
-        ${noGuaranteeClaims ? '' : '<li>Tenant-reported pests handled between visits &mdash; re-service requests are included in the plan</li>'}
+        ${planTermsNeutral ? '' : '<li>Tenant-reported pests handled between visits &mdash; re-service requests are included in the plan</li>'}
         <li>Tenants can be added to the Waves app for arrival alerts and service reports</li>
         <li>Every visit documented &mdash; time on site, areas treated, and products applied</li>
-        ${noGuaranteeClaims ? '' : '<li>No long-term contract &mdash; stay because it works, not because you&rsquo;re locked in</li>'}
+        ${planTermsNeutral ? '' : '<li>No long-term contract &mdash; stay because it works, not because you&rsquo;re locked in</li>'}
       </ul>
     </div>` : ''}
   </section>`;
@@ -6075,7 +6078,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // a boolean, never per row.
   // One-time-only service copy pack chips lead (roach, flea, wasp, bed
   // bug, …) — same source the React contract's askChips reads.
-  const oneTimeOnlyAskCopy = isOneTimeOnly && !isRegulatedCertificateSurface ? oneTimeOnlyIntelligenceCopy(oneTimeIntelligenceRows, { noGuaranteeClaims }) : null;
+  const oneTimeOnlyAskCopy = isOneTimeOnly && !isRegulatedCertificateSurface ? oneTimeOnlyIntelligenceCopy(oneTimeIntelligenceRows, { guaranteeScope: pageGuaranteeScope }) : null;
   const askPrompts = oneTimeOnlyAskCopy?.askChips?.length
     ? oneTimeOnlyAskCopy.askChips.slice(0, 6)
     : buildEstimateAskPrompts(
@@ -23753,6 +23756,11 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
     ? { ...payload, frequencies: payload.frequencies.map(normalizePricingFrequencyTotals) }
     : payload;
   const noGuaranteeClaims = estimate?.noGuaranteeClaims === true || estimateMakesNoGuaranteeClaim(estData, basePayload);
+  // The same scope /data states (noGuaranteeClaims, noEstimateWideGuarantee).
+  const contractGuaranteeScope = guaranteeScope({
+    noGuaranteeClaims,
+    noEstimateWideGuarantee: !estimateCarriesPlanTerms(estData, basePayload),
+  });
   // Normalize breakdown labels BEFORE sections are built: the per-service
   // oneTimeContribution rows and the top-level breakdown must be the SAME
   // row objects, or the client's exclusion identity (service|label|amount)
@@ -23783,16 +23791,16 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
         ...basePayload.oneTimeBreakdown,
         items: (() => {
           const labeled = basePayload.oneTimeBreakdown.items.map(normalizeBreakdownItemLabel)
-            .map((row) => (noGuaranteeClaims && PLAN_TERMS_COPY.test(row.detail || '')
-              ? { ...row, detail: withoutPlanTermsClaims(row.detail, preSlabSelectedWarrantyPart(row)) }
-              : row));
+            .map((row) => (copyAllowedInScope(row.detail, contractGuaranteeScope)
+              ? row
+              : { ...row, detail: withoutClaimsOutsideScope(row.detail, contractGuaranteeScope, preSlabSelectedWarrantyPart(row)) }));
           if (!rowCopyAllowed) return labeled;
           const copyInputs = labeled.map((row) => {
             const raw = rawContractRowFor(row, rawContractRowGroups, labeled);
             const input = raw ? { ...raw, ...row } : row;
             return withReconciledContractWarranty(input, rawContractRowGroups, row, payload, labeled);
           });
-          const copies = resolveOneTimeRowCopies(copyInputs, { noGuaranteeClaims });
+          const copies = resolveOneTimeRowCopies(copyInputs, { guaranteeScope: contractGuaranteeScope });
           return labeled.map((row, i) => {
             if (!copies[i]) return row;
             const returned = { ...row, copy: copies[i] };
@@ -23894,7 +23902,7 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
   // row's hero/AI/chips (codex pre-push P0).
   const oneTimeServiceCopy = !regulatedSurface
     && (contractPayload.defaultServiceMode === 'one_time' || isStructuralOneTimeOnlyEstimate(estData, estimate))
-    ? oneTimeOnlyIntelligenceCopy([...oneTimeBreakdownItems, ...rawOneTimeRows], { noGuaranteeClaims })
+    ? oneTimeOnlyIntelligenceCopy([...oneTimeBreakdownItems, ...rawOneTimeRows], { guaranteeScope: contractGuaranteeScope })
     : null;
   const askChips = regulatedSurface
     ? []

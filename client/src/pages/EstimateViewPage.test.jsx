@@ -804,6 +804,64 @@ describe('mixed-estimate approval microcopy', () => {
     expect(screen.getByText(/Gel bait placed where German roaches actually live/i)).toBeInTheDocument();
     expect(screen.queryByText(/100% guaranteed|Waves Guarantee/i)).not.toBeInTheDocument();
   });
+
+  it('a commercial one-time job states its scope but no guarantee or no-contract term (Codex #4982)', async () => {
+    // Commercial service carries only its satisfaction clause: the server
+    // marks the estimate noEstimateWideGuarantee while noGuaranteeClaims
+    // stays false, and the itemized row follows that scope.
+    const rawRow = {
+      service: 'bed_bug', label: 'Bed Bug Heat Treatment', amount: 650, kind: 'charge', warrantyEligible: true,
+    };
+    const rawCopy = resolveOneTimeServiceCopy(rawRow);
+    expect(rawCopy.assurance).toMatch(/30-day guarantee/i);
+
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        glassDefault: false,
+        estimate: {
+          customerFirstName: 'Casey',
+          address: '1 Commercial Plaza, Sarasota, FL 34236',
+          serviceCategory: 'bed_bug',
+          acceptance: { mode: 'standard_slot_pick' },
+          defaultServiceMode: 'one_time',
+          isOneTimeOnly: true,
+          showOneTimeOption: false,
+          billByInvoice: false,
+          membership: null,
+          intelligence: null,
+          noGuaranteeClaims: false,
+          noEstimateWideGuarantee: true,
+        },
+        pricing: {
+          services: [],
+          frequencies: [],
+          askChips: [],
+          oneTimeBreakdown: {
+            total: 650,
+            items: [{ ...rawRow, copy: rawCopy }],
+          },
+          defaultServiceMode: 'one_time',
+          renderFlags: {},
+        },
+        cta: {
+          canAccept: true,
+          terminalState: null,
+          quoteRequired: false,
+          reviewBeforeBooking: false,
+        },
+      }),
+    })));
+
+    render(<EstimateViewPage />);
+
+    expect(await screen.findByText('Bed Bug Heat Treatment')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /See everything included/i }));
+    expect(screen.getByText('Interceptor traps under bed legs for post-treatment monitoring')).toBeInTheDocument();
+    expect(screen.getByText('Pay on service day.')).toBeInTheDocument();
+    expect(screen.queryByText(/30-day guarantee|No contract/i)).not.toBeInTheDocument();
+  });
 });
 
 describe('OneTimeBreakdownCard', () => {
@@ -827,6 +885,18 @@ describe('OneTimeBreakdownCard', () => {
     expect(screen.getByText('If they come back, so do we — 100% guaranteed with the Waves Guarantee')).toBeInTheDocument();
     expect(screen.getByText('Pay on service day. No recurring schedule, no contract.')).toBeInTheDocument();
     expect(screen.getByText('$350.00')).toBeInTheDocument();
+  });
+
+  it('the satisfaction scope drops a row guarantee and no-contract term but keeps the sold scope', () => {
+    const row = { service: 'bed_bug', label: 'Bed Bug Heat Treatment', amount: 650, warrantyEligible: true };
+    render(<OneTimeBreakdownCard guaranteeScope="satisfaction" breakdown={{ total: 650, items: [{
+      ...row,
+      copy: resolveOneTimeServiceCopy(row),
+    }] }} />);
+    fireEvent.click(screen.getByRole('button', { name: /See everything included/i }));
+    expect(screen.getByText('Interceptor traps under bed legs for post-treatment monitoring')).toBeInTheDocument();
+    expect(screen.getByText('Pay on service day.')).toBeInTheDocument();
+    expect(screen.queryByText(/30-day guarantee|No contract/i)).not.toBeInTheDocument();
   });
 
   it('keeps a canonically purchased trenching warranty while filtering generic promises', () => {

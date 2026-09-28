@@ -4626,6 +4626,21 @@ describe('public estimate one-time breakdown', () => {
     else expect(html).not.toContain('Basic 1-yr warranty');
   });
 
+  test('a commercial one-time job on the legacy page states its scope but no guarantee (Codex #4982)', () => {
+    const html = renderPage('commercial-one-time-token', {
+      status: 'sent', customerName: 'Pat Customer', address: '123 Main St',
+      monthlyTotal: 0, annualTotal: 0, onetimeTotal: 650, noEstimateWideGuarantee: true,
+    }, {
+      result: {
+        recurring: { services: [] },
+        oneTime: { items: [{ service: 'bed_bug', name: 'Bed Bug Heat Treatment', price: 650, warrantyEligible: true, isCommercial: true }], specItems: [] },
+        specItems: [],
+      },
+    });
+    expect(html).toContain('Interceptor traps under bed legs');
+    expect(html).not.toContain('Written 30-day guarantee');
+  });
+
   test('a rodent plan keeps its cancel/refund terms but no estimate-wide guarantee item', () => {
     const html = renderPage('terms-rodent-token', {
       status: 'sent', customerName: 'Pat Customer', address: '123 Main St',

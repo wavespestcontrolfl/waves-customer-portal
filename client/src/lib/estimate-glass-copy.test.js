@@ -172,6 +172,13 @@ describe('termite work never carries a guarantee (owner ruling; server estimateM
     expect(glassCtaMicroForKeys(['pest_control', 'rodent_bait'])).toMatch(/Satisfaction guaranteed/);
   });
 
+  it('the satisfaction scope keeps a satisfaction-only micro and neutralizes plan terms', () => {
+    expect(glassCtaMicroForKeys(['rodent'], { scope: 'satisfaction' })).toMatch(/Satisfaction guaranteed/);
+    expect(glassCtaMicroForKeys(['pest_control'], { scope: 'satisfaction' })).not.toMatch(/callbacks|money-back|contract/i);
+    expect(glassCtaMicroForKeys(['pest_control'], { scope: 'satisfaction' })).toMatch(/Satisfaction guaranteed/);
+    expect(glassCtaMicroForKeys(['pest_control'], { scope: 'none' })).not.toMatch(/guarantee/i);
+  });
+
   it('the server noGuaranteeClaims decision overrides otherwise guaranteed recurring keys', () => {
     expect(glassCtaMicroForKeys(['pest_control'], { noGuarantee: true })).not.toMatch(/guarantee|callbacks/i);
     expect(glassCtaMicroForKeys(['pest_control'], { noGuarantee: true })).toMatch(/Licensed & insured/);

@@ -12,7 +12,7 @@
  */
 import { useSyncExternalStore } from 'react';
 import { etDateString } from './timezone';
-import { PLAN_TERMS_COPY } from '@estimate-copy-claims';
+import { PLAN_TERMS_COPY, copyAllowedInScope } from '@estimate-copy-claims';
 
 // Estimate glass COPY release — category-scoped server-side. NOTE: only the
 // marketing COPY still rides this flag; the glass THEME is now unconditional
@@ -446,22 +446,23 @@ export function copyHasPlanTermsClaim(text) {
   return PLAN_TERMS_COPY.test(String(text || ''));
 }
 
-export function glassPackWithoutGuarantee(pack) {
-  if (!pack) return pack;
+export function glassPackWithoutGuarantee(pack, scope = 'none') {
+  if (!pack || scope === 'all') return pack;
   // Every field the page renders from a pack, not only the hero subline: a
-  // claim-bearing string (heroSub, eyebrow, the Waves AI card's aiTitle and
-  // aiBody) falls back to the bundle pack's own field, and a claim-bearing
-  // ask chip is dropped. ctaMicro has its own path (glassCtaMicroForKeys).
+  // string the scope does not allow (heroSub, eyebrow, the Waves AI card's
+  // aiTitle and aiBody) falls back to the bundle pack's own field, and such
+  // an ask chip is dropped. 'satisfaction' keeps "satisfaction guaranteed".
+  // ctaMicro has its own path (glassCtaMicroForKeys).
   const neutral = GLASS_PACKS.bundle;
   let changed = false;
   const out = { ...pack };
   for (const [key, value] of Object.entries(pack)) {
     if (key === 'ctaMicro') continue;
-    if (typeof value === 'string' && copyHasPlanTermsClaim(value)) {
-      out[key] = copyHasPlanTermsClaim(neutral[key]) ? null : (neutral[key] ?? null);
+    if (typeof value === 'string' && !copyAllowedInScope(value, scope)) {
+      out[key] = copyAllowedInScope(neutral[key], scope) ? (neutral[key] ?? null) : null;
       changed = true;
-    } else if (Array.isArray(value) && value.some((item) => copyHasPlanTermsClaim(item))) {
-      out[key] = value.filter((item) => !copyHasPlanTermsClaim(item));
+    } else if (Array.isArray(value) && value.some((item) => !copyAllowedInScope(item, scope))) {
+      out[key] = value.filter((item) => copyAllowedInScope(item, scope));
       changed = true;
     }
   }
@@ -525,8 +526,17 @@ export function glassCtaMicroFor(serviceCategory) {
 // A CTA that covers termite work, or a service the page can't classify (it
 // might be termite), never carries a guarantee: the same rule as the
 // server's estimateMakesNoGuaranteeClaim.
-export function glassCtaMicroForKeys(keys, { noGuarantee = false } = {}) {
-  if (noGuarantee) return NO_GUARANTEE_CTA_MICRO;
+export function glassCtaMicroForKeys(keys, { noGuarantee = false, scope = null } = {}) {
+  const resolved = scope || (noGuarantee ? 'none' : 'all');
+  if (resolved === 'none') return NO_GUARANTEE_CTA_MICRO;
+  const micro = ctaMicroForKeyList(keys);
+  if (resolved === 'all' || copyAllowedInScope(micro, resolved)) return micro;
+  // A rodent or commercial service on the estimate: the approve line keeps
+  // only "satisfaction guaranteed", never recurring plan terms.
+  return NEUTRAL_CTA_MICRO;
+}
+
+function ctaMicroForKeyList(keys) {
   const list = (Array.isArray(keys) ? keys : [keys]).filter(Boolean);
   if (!list.length) return NO_GUARANTEE_CTA_MICRO;
   const slugs = list.map((key) => glassServiceSlug(String(key)));

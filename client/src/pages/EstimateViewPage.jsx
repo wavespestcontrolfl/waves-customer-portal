@@ -73,11 +73,10 @@ import { estimateCard, estimateInnerBox } from '../components/estimate/cardStyle
 import TerminalStateCard from '../components/estimate/TerminalStateCard';
 import ProposalDetailCard from '../components/estimate/ProposalDetailCard';
 import EstimateProposalDocument, { proposalMakesNoGuaranteeClaim } from './EstimateProposalDocument';
-import { withoutPlanTermsClaims } from '@estimate-copy-claims';
+import { copyAllowedInScope, guaranteeScope, withoutClaimsOutsideScope } from '@estimate-copy-claims';
 import { estimateCopyFor } from '../lib/estimate-copy';
 import {
   commercialGlassActive,
-  copyHasPlanTermsClaim,
   glassCopyActive,
   glassCtaMicroForKeys,
   glassDayLinesFor,
@@ -1977,7 +1976,7 @@ export function OneTimePriceCard({ oneTimePrice, breakdown, noGuarantee = false 
 // shape the recurring PriceCard rows carry, so a one-time service reads
 // like a plan card (owner 2026-09-03). Shared by the standalone
 // OneTimeBreakdownCard and the rows embedded in a service section.
-function oneTimeOutcomeWithoutGuarantee(text) {
+function oneTimeOutcomeWithoutGuarantee(text, scope = 'none') {
   if (!text) return null;
   // The shipped German-roach outcome appends its guarantee to otherwise
   // useful visit/scope copy in the same sentence. Remove that suffix first,
@@ -1988,30 +1987,41 @@ function oneTimeOutcomeWithoutGuarantee(text) {
   const sentences = withoutSuffix.match(/[^.!?]+[.!?]?/g) || [];
   return sentences
     .map((sentence) => sentence.trim())
-    .filter((sentence) => sentence && !copyHasPlanTermsClaim(sentence))
+    .filter((sentence) => sentence && copyAllowedInScope(sentence, scope))
     .join(' ')
     .trim() || null;
 }
 
-function oneTimeCopyWithoutGuarantee(copy, item = {}) {
+// A row copy under the estimate's guarantee scope ('none' or 'satisfaction';
+// shared/estimate-copy-claims.cjs): the claims the scope does not allow are
+// removed, the sold scope stays, and a purchased trenching warranty bullet
+// is kept.
+function oneTimeCopyWithoutGuarantee(copy, item = {}, scope = 'none') {
   if (!copy) return null;
   const retainPurchasedWarranty = hasPurchasedTrenchingWarranty(item);
   return {
     ...copy,
-    outcome: oneTimeOutcomeWithoutGuarantee(copy.outcome),
+    outcome: copyAllowedInScope(copy.outcome, scope) ? copy.outcome : oneTimeOutcomeWithoutGuarantee(copy.outcome, scope),
     includes: Array.isArray(copy.includes)
       ? copy.includes.filter((line) => (
         retainPurchasedWarranty && line === PURCHASED_TRENCHING_WARRANTY_BULLET
-      ) || !copyHasPlanTermsClaim(line))
+      ) || copyAllowedInScope(line, scope))
       : [],
-    assurance: null,
-    terms: withoutPlanTermsClaims(copy.terms),
+    assurance: scope !== 'none' && copyAllowedInScope(copy.assurance, scope) ? copy.assurance : null,
+    terms: copyAllowedInScope(copy.terms, scope) ? copy.terms : withoutClaimsOutsideScope(copy.terms, scope),
   };
 }
 
-function OneTimeRowCopy({ copy, item, noGuarantee = false }) {
+// The scope a component uses: its guaranteeScope prop, else the older
+// noGuarantee boolean (true means 'none').
+function resolvedGuaranteeScope(scope, noGuarantee) {
+  return scope || (noGuarantee ? 'none' : 'all');
+}
+
+function OneTimeRowCopy({ copy, item, noGuarantee = false, guaranteeScope: scopeProp = null }) {
   if (!copy) return null;
-  const visibleCopy = noGuarantee ? oneTimeCopyWithoutGuarantee(copy, item) : copy;
+  const scope = resolvedGuaranteeScope(scopeProp, noGuarantee);
+  const visibleCopy = scope === 'all' ? copy : oneTimeCopyWithoutGuarantee(copy, item, scope);
   return (
     <>
       {visibleCopy.outcome ? (
@@ -2047,7 +2057,8 @@ export function oneTimeRowIdentityKey(item = {}) {
   return `row:${item?.service || ''}|${label}|${Number.isFinite(amount) ? amount : ''}|${quoteState}`;
 }
 
-export function OneTimeBreakdownCard({ breakdown, excludeServices = [], prepayWaivedServices = [], headlineTotal = null, noGuarantee = false }) {
+export function OneTimeBreakdownCard({ breakdown, excludeServices = [], prepayWaivedServices = [], headlineTotal = null, noGuarantee = false, guaranteeScope: scopeProp = null }) {
+  const scope = resolvedGuaranteeScope(scopeProp, noGuarantee);
   // excludeServices accepts plain service keys (setup-fee callers) and
   // oneTimeRowIdentityKey values (embedded-row callers) — check both.
   const excluded = new Set(excludeServices.filter(Boolean));
@@ -2094,9 +2105,9 @@ export function OneTimeBreakdownCard({ breakdown, excludeServices = [], prepayWa
           const isIncluded = !isQuoteRequired && item.kind === 'included';
           const showPrepayWaiverNote = !isQuoteRequired && !isDiscount && !isIncluded && isPrepayWaivedRow(item);
           const quoteNote = isQuoteRequired ? quoteRequiredReasonNote(item, item.detail || '') : '';
-          const visibleDetail = noGuarantee && copyHasPlanTermsClaim(item.detail)
-            ? withoutPlanTermsClaims(item.detail, preSlabSelectedWarrantyPart(item))
-            : item.detail;
+          const visibleDetail = copyAllowedInScope(item.detail, scope)
+            ? item.detail
+            : withoutClaimsOutsideScope(item.detail, scope, preSlabSelectedWarrantyPart(item));
           return (
             <div key={`${item.service || item.label || 'item'}-${i}`} style={{
               display: 'grid', gridTemplateColumns: '1fr auto', gap: 12,
@@ -2112,7 +2123,7 @@ export function OneTimeBreakdownCard({ breakdown, excludeServices = [], prepayWa
                     {visibleDetail}
                   </div>
                 ) : null}
-                <OneTimeRowCopy copy={item.copy} item={item} noGuarantee={noGuarantee} />
+                <OneTimeRowCopy copy={item.copy} item={item} guaranteeScope={scope} />
                 {quoteNote ? (
                   <div style={{ fontSize: 14, color: '#92400E', marginTop: 4, lineHeight: 1.35, fontWeight: 700 }}>
                     {quoteNote}
@@ -4620,7 +4631,8 @@ function customerOneTimeLabel(item = {}) {
   return label || 'One-time service';
 }
 
-function SectionOneTimeBlock({ contribution, variant = 'trailing', noGuarantee = false }) {
+function SectionOneTimeBlock({ contribution, variant = 'trailing', noGuarantee = false, guaranteeScope: scopeProp = null }) {
+  const scope = resolvedGuaranteeScope(scopeProp, noGuarantee);
   const items = Array.isArray(contribution?.items)
     ? contribution.items.filter((item) => item && item.quoteRequired !== true && item.kind !== 'quote_required')
     : [];
@@ -4640,9 +4652,9 @@ function SectionOneTimeBlock({ contribution, variant = 'trailing', noGuarantee =
       <div style={{ display: 'grid', gap: 10 }}>
         {items.map((item, i) => {
           const amount = fmtMoney(Math.abs(Number(item.amount) || 0));
-          const visibleDetail = noGuarantee && copyHasPlanTermsClaim(item.detail)
-            ? withoutPlanTermsClaims(item.detail, preSlabSelectedWarrantyPart(item))
-            : item.detail;
+          const visibleDetail = copyAllowedInScope(item.detail, scope)
+            ? item.detail
+            : withoutClaimsOutsideScope(item.detail, scope, preSlabSelectedWarrantyPart(item));
           if (lead && isTermiteInstall(item)) {
             return (
               <div key={`${item.service || item.label || 'item'}-${i}`}>
@@ -4653,7 +4665,7 @@ function SectionOneTimeBlock({ contribution, variant = 'trailing', noGuarantee =
                 <div style={{ fontSize: 16, fontWeight: 700, color: COLORS.navy, marginTop: 4, fontVariantNumeric: 'tabular-nums' }}>
                   {amount} gets every station in the ground.
                 </div>
-                <OneTimeRowCopy copy={item.copy} item={item} noGuarantee={noGuarantee} />
+                <OneTimeRowCopy copy={item.copy} item={item} guaranteeScope={scope} />
               </div>
             );
           }
@@ -4664,7 +4676,7 @@ function SectionOneTimeBlock({ contribution, variant = 'trailing', noGuarantee =
                 {visibleDetail ? (
                   <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 2, lineHeight: 1.35 }}>{visibleDetail}</div>
                 ) : null}
-                <OneTimeRowCopy copy={item.copy} item={item} noGuarantee={noGuarantee} />
+                <OneTimeRowCopy copy={item.copy} item={item} guaranteeScope={scope} />
               </div>
               <div style={{ fontSize: 14, fontWeight: 700, color: COLORS.navy, whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
                 {amount}
@@ -4914,6 +4926,9 @@ export function ServiceSection({
   afterPrice = null,
   showGetServiceCta = false,
   noGuarantee = false,
+  // The estimate's guarantee scope ('all' | 'satisfaction' | 'none'); older
+  // callers pass the noGuarantee boolean instead.
+  guaranteeScope: guaranteeScopeProp = null,
   showAddOns: showAddOnsProp = true,
   glassSetupBulletEligible = false,
   ctaSlotMeta = null,
@@ -4936,6 +4951,7 @@ export function ServiceSection({
   // gate on) when the plan is recurring, else null.
   lawnCalendar = null,
 }) {
+  const sectionGuaranteeScope = resolvedGuaranteeScope(guaranteeScopeProp, noGuarantee);
   // On phones the corner-pinned WaveGuard badge's 170px heading clearance
   // eats most of the card width and crunches the headline — stack the badge
   // in flow instead. Hook must precede the early return (rules of hooks).
@@ -5041,7 +5057,7 @@ export function ServiceSection({
             the monitoring price so the two figures read as ONE plan. */}
         {sectionSlug === 'termite_bait' && oneTimeEmbed ? (
           <>
-            <SectionOneTimeBlock contribution={oneTimeEmbed} variant="lead" noGuarantee={noGuarantee} />
+            <SectionOneTimeBlock contribution={oneTimeEmbed} variant="lead" guaranteeScope={sectionGuaranteeScope} />
             <div style={{ fontSize: 16, fontWeight: 700, color: '#04395E', margin: '14px 0 0' }}>
               Monitoring is what keeps them working:
             </div>
@@ -5121,7 +5137,7 @@ export function ServiceSection({
             // (anchor−cadence delta misattributed to the tier; owner
             // directive to remove).
             showSavings={servicesLength === 1 || section?.waveGuardTierEligible !== false}
-            noGuarantee={noGuarantee}
+            guaranteeScope={sectionGuaranteeScope}
             // Guarantee line off under glass (owner 2026-07-23) — the approve
             // CTA's glass micro line states the same money-back guarantee
             // immediately below, so the in-card line read twice. Non-glass
@@ -5243,7 +5259,7 @@ export function ServiceSection({
             box — multi-service plans no longer detach it into a separate card
             (owner 2026-07-10). Termite renders its install ABOVE the price
             (lead variant above); everything else trails the price block. */}
-        {sectionSlug === 'termite_bait' ? null : <SectionOneTimeBlock contribution={oneTimeEmbed} noGuarantee={noGuarantee} />}
+        {sectionSlug === 'termite_bait' ? null : <SectionOneTimeBlock contribution={oneTimeEmbed} guaranteeScope={sectionGuaranteeScope} />}
 
         {serviceDetailsRequest ? (
           <ServiceDetailsRequestRow
@@ -5379,7 +5395,7 @@ export function ServiceSection({
               Array.isArray(section.memberKeys) && section.memberKeys.length
                 ? section.memberKeys
                 : [section.key || section.label],
-              { noGuarantee },
+              { scope: sectionGuaranteeScope },
             )}
           />
         ) : null}
@@ -7923,16 +7939,18 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     'termite_trenching', 'pre_slab_termiticide', 'bora_care',
     'wdo_inspection', 'termite_foam', 'trap_only',
   ]).has(serviceCategory);
-  // noGuaranteeClaims: the server's guarantee decision (termite work, or a
-  // service it can't classify, anywhere on the estimate). The one-time hero
-  // drops "satisfaction guaranteed", and any other hero drops a guarantee
-  // promise, recurring plans included.
-  const noGuaranteeClaims = estimate?.noGuaranteeClaims === true;
+  // The claims this page may make, from the server's two decisions:
+  // 'none' (noGuaranteeClaims — termite work, or a service it can't
+  // classify, anywhere on the estimate), 'satisfaction'
+  // (noEstimateWideGuarantee — a rodent or commercial service) or 'all'.
+  // Every copy surface reads it; under 'none' the one-time hero drops
+  // "satisfaction guaranteed" too.
+  const pageGuaranteeScope = guaranteeScope(estimate || {});
   const categoryGlassPack = estimate.isOneTimeOnly === true
     ? glassOneTimeHeroOverlay(glassEstimateCopyFor(serviceCategory), {
       reviewBeforeBooking,
       preserveServiceHero: serviceSpecificOneTimeHero,
-      noGuarantee: noGuaranteeClaims,
+      noGuarantee: pageGuaranteeScope === 'none',
     })
     : glassEstimateCopyFor(serviceCategory);
   // One-time-only service copy (server contract pricing.oneTimeServiceCopy —
@@ -7949,7 +7967,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // Apply the estimate-wide rule last: an authored proposal can add termite
   // work while stale engine pricing still supplies a guaranteed one-time
   // service hero, and that overlay must not restore the removed claim.
-  const glassPack = noGuaranteeClaims ? glassPackWithoutGuarantee(heroGlassPack) : heroGlassPack;
+  const glassPack = glassPackWithoutGuarantee(heroGlassPack, pageGuaranteeScope);
   // Personalization tokens (owner 2026-07-06): {city} from the service
   // address, {date} from the first open slot (SlotPicker reports it up via
   // onFirstSlotDate; 'tomorrow' until it loads). {first} stays Header's job.
@@ -8168,7 +8186,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 {!estimate.showOneTimeOption ? (
                   <OneTimeBreakdownCard
                     breakdown={pricing.oneTimeBreakdown}
-                    noGuarantee={noGuaranteeClaims}
+                    guaranteeScope={pageGuaranteeScope}
                     // Only exclude fees that actually render their own
                     // SetupFeeCard — a glass-suppressed card must stay in
                     // this list or the one-time total understates itself
@@ -8249,7 +8267,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                   : null}
                 afterPrice={afterPrice}
                 showGetServiceCta={!readOnly && canShowSlotPicker && services.length === 1}
-                noGuarantee={noGuaranteeClaims}
+                guaranteeScope={pageGuaranteeScope}
                 // Glass removes the customize section everywhere — including
                 // this accepted read-only recap (owner directive; the booked
                 // add-ons still price into the totals shown).
@@ -8424,7 +8442,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
               code in prod (glass active for all categories) and contradicted
               the standing dedupe ruling. */}
 
-          {!readOnly && canShowSlotPicker && services.length > 1 ? <GetServiceTodayCta showGuaranteeMicro slotMeta={glassContent ? selectedSlotMeta : null} microText={glassCtaMicroForKeys(services.map((s) => s?.key || s?.label), { noGuarantee: noGuaranteeClaims })} /> : null}
+          {!readOnly && canShowSlotPicker && services.length > 1 ? <GetServiceTodayCta showGuaranteeMicro slotMeta={glassContent ? selectedSlotMeta : null} microText={glassCtaMicroForKeys(services.map((s) => s?.key || s?.label), { scope: pageGuaranteeScope })} /> : null}
 
           {services.length > 1 && renderFlags.showWaveGuardSetupFee ? (
             // Tier-aware fee state on the plan-level card too (codex r24 P2):
@@ -8450,7 +8468,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           {services.length > 1 && !estimate.showOneTimeOption ? (
             <OneTimeBreakdownCard
               breakdown={pricing.oneTimeBreakdown}
-              noGuarantee={noGuaranteeClaims}
+              guaranteeScope={pageGuaranteeScope}
               // Mirror of the single-service path: keep glass-suppressed
               // setup fees in the breakdown so the total stays honest.
               // Items embedded inside their own service box
@@ -8493,7 +8511,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     return (
       <>
         {hasOneTimeRows
-          ? <OneTimeBreakdownCard breakdown={pricing.oneTimeBreakdown} noGuarantee={noGuaranteeClaims} />
+          ? <OneTimeBreakdownCard breakdown={pricing.oneTimeBreakdown} guaranteeScope={pageGuaranteeScope} />
           : (
             <OneTimePriceCard
               oneTimePrice={pricing.anchorOneTimePrice || pricing.oneTimeBreakdown?.total || 0}
@@ -8501,7 +8519,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
               // Its copy (the 30-day callback) covers every one-time row, so it
               // follows the page-wide decision: rodent or commercial work
               // carries no callback term.
-              noGuarantee={noGuaranteeClaims || estimate?.noEstimateWideGuarantee === true}
+              noGuarantee={pageGuaranteeScope !== 'all'}
             />
           )}
         {!readOnly && canShowSlotPicker ? <GetServiceTodayCta slotMeta={glassContent ? selectedSlotMeta : null} /> : null}

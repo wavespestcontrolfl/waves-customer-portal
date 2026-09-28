@@ -97,6 +97,16 @@ describe('EstimateProposalDocument', () => {
     expect(container.textContent).not.toMatch(/re-service requests are included|no long.term contract|guarantee/i);
   });
 
+  it('an authored commercial proposal the server marks terms-neutral keeps only its satisfaction clause (Codex #4982)', () => {
+    const { container } = render(<EstimateProposalDocument data={{
+      ...BASE_DATA, proposal: { ...BASE_DATA.proposal, noEstimateWideGuarantee: true },
+    }} token="tok-123" />);
+    const text = container.textContent;
+    expect(text).toContain('Recurring service plan');
+    expect(text).toContain('Licensed & insured · Satisfaction guaranteed');
+    expect(text).not.toMatch(/re-service requests are included|no long.term contract|money[- ]back|callbacks?/i);
+  });
+
   it('renders a residential estimate with the recurring terms and approve-online next step', () => {
     const residential = {
       ...BASE_DATA,
