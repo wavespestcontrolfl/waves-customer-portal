@@ -50,7 +50,12 @@ const COMPETITORS = [
   {
     id: 'terminix',
     name: 'Terminix',
-    aliases: ['terminix pest control'],
+    // "Terminix Global Holdings" is the parent company's real legal name
+    // (curated alias, not suffix-stripped — #5146 r9: stripping generic
+    // words like "Global"/"Holdings" off an unrecognized name can misread an
+    // unrelated company as an approved one, so only true legal-entity
+    // suffixes are stripped; a genuine variant belongs here instead).
+    aliases: ['terminix pest control', 'terminix global holdings'],
     attributes: {
       // NOTE: not re-fetched 2026-06-22 (site returned 403); values are
       // well-established public knowledge — re-verify before relying on them.
@@ -362,9 +367,16 @@ const URL_PEST_CONTEXT_RE = /\b(?:pests?|termites?|exterminat\w*|bugs?|lawns?|mo
 
 // Trailing legal / corporate suffixes stripped (repeatedly) when an exact
 // name/alias lookup misses: "Orkin, LLC", "Massey Services, Inc.",
-// "Terminix Global Holdings", "HomeTeam Pest Defense, Inc." resolve to their
-// curated record instead of reading as a distinct company (#5146 r7).
-const LEGAL_SUFFIX_TOKENS = new Set(['llc', 'l l c', 'inc', 'incorporated', 'corp', 'corporation', 'co', 'company', 'ltd', 'limited', 'holdings', 'holding', 'global', 'group', 'services', 'service', 'the']);
+// "HomeTeam Pest Defense, Inc." resolve to their curated record instead of
+// reading as a distinct company (#5146 r7). ONLY true legal-entity suffixes
+// belong here — a DESCRIPTIVE word (Services, Global, Group, Holdings, "the")
+// must never be stripped: an off-list company that happens to share an
+// approved short prefix ("Turner Services LLC" is not Turner Pest Control;
+// "HomeTeam Services LLC" is not HomeTeam Pest Defense) would otherwise read
+// as approved and bypass the owner-list restriction (#5146 r9). A genuine
+// legal-name variant that needs a descriptive word (e.g. "Terminix Global
+// Holdings") is a curated alias on its record instead — see COMPETITORS.
+const LEGAL_SUFFIX_TOKENS = new Set(['llc', 'l l c', 'inc', 'incorporated', 'corp', 'corporation', 'co', 'company', 'ltd', 'lp', 'llp', 'pllc']);
 
 /** findCompetitor(name) → allowlist record | null (matches name or alias, legal suffixes ignored). */
 function findCompetitor(name) {

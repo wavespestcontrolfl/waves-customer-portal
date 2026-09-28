@@ -30,6 +30,12 @@ describe('extractCompanyNames', () => {
     const [policy, payload] = dispatchWithFallback.mock.calls[0];
     expect(policy).toBe(MODELS.TEXT_POLICIES.fastStructured);
     expect(payload).toMatchObject({ laneId: 'business_name_confirm', jsonMode: true });
+    // #5146 r9: reserve budget for the fallback rather than handing the
+    // primary the whole explicit CALL_TIMEOUT_MS (see
+    // business-name-confirmer-fallback-budget.test.js for the real-dispatch
+    // proof that a stalled primary still leaves the fallback its share).
+    const options = dispatchWithFallback.mock.calls[0][2];
+    expect(options).toMatchObject({ reserveFallbackBudget: true });
     for (const part of ['Comparing Termite Plans', '/pest-control/hulett-alternatives/', 'How to compare plans.', 'https://example.com/providers/terms', 'Compare plans before you switch.']) {
       expect(payload.text).toContain(part);
     }
@@ -195,13 +201,39 @@ describe('assertOwnerListForCommit', () => {
     expect(draft.competitors_approved_by_list).toEqual(['Aptive Environmental', 'Orkin', 'Terminix']);
   });
 
-  test('a failed check refuses the commit; a human-approved publish skips the check', async () => {
+  test('a failed check refuses the commit; a human-approved publish skips only the owner-list extraction/enforcement', async () => {
     dispatchWithFallback.mockResolvedValue({ ok: false, reason: 'no_key' });
     await expect(assertOwnerListForCommit({ draft: {}, brief: BLOG_BRIEF, frontmatter: finalFm, body: 'Plain body.' }))
       .rejects.toMatchObject({ code: 'BLOG_OWNER_LIST_UNVERIFIED', retryable: true });
     dispatchWithFallback.mockClear();
     expect(await assertOwnerListForCommit({ draft: {}, brief: BLOG_BRIEF, frontmatter: finalFm, body: 'Bug Out competes.', humanApproved: true }))
       .toEqual({ extraction: null, requiresHumanMerge: false });
+    // No model call — company extraction is the part humanApproved skips.
+    expect(dispatchWithFallback).not.toHaveBeenCalled();
+  });
+
+  // #5146 r9: a human approves the DRAFT the operator reviewed, not text the
+  // publisher adds afterward (a generated/reused hero or body-image alt).
+  // The final comparison gate must still run — and can still block — a
+  // human-approved publish; only the owner-list company-extraction +
+  // enforcement is what humanApproved skips.
+  test('humanApproved still runs the final comparison gate on publisher-added text (#5146 r9)', async () => {
+    // Disparagement planted ONLY in the hero alt (publisher-added, never
+    // seen by the human at approval time) still blocks, even humanApproved.
+    await expect(assertOwnerListForCommit({
+      draft: {}, brief: BLOG_BRIEF, humanApproved: true, body: 'Orkin offers recurring residential plans.',
+      frontmatter: { ...finalFm, hero_image: { src: '/images/blog/x/hero.webp', alt: 'Orkin scams customers with hidden fees' } },
+    })).rejects.toMatchObject({ code: 'BLOG_OWNER_LIST_BLOCKED', reason: 'comparison_table_failed' });
+    // No model call happens either way — the gate is deterministic.
+    expect(dispatchWithFallback).not.toHaveBeenCalled();
+  });
+
+  test('humanApproved with clean publisher-added text still skips extraction and passes', async () => {
+    const result = await assertOwnerListForCommit({
+      draft: {}, brief: BLOG_BRIEF, humanApproved: true, body: 'Orkin offers recurring residential plans.',
+      frontmatter: { ...finalFm, hero_image: { src: '/images/blog/x/hero.webp', alt: 'A technician inspects a Sarasota lanai' } },
+    });
+    expect(result).toEqual({ extraction: null, requiresHumanMerge: false });
     expect(dispatchWithFallback).not.toHaveBeenCalled();
   });
 });

@@ -188,7 +188,16 @@ async function extractCompanyNames(draft, { prior = null, brief = null, final = 
         system: SYSTEM_PROMPT,
         text,
       },
-      { validate: (r) => (Array.isArray(r?.json?.companies) && r.json.companies.every((c) => typeof c === 'string') ? null : 'missing_companies') },
+      {
+        // Split the explicit CALL_TIMEOUT_MS across both legs (mirrors the
+        // other bounded fallback callers, e.g. ask-waves-intake.js /
+        // property-lookup-v2.js) — without this, a stalled primary can
+        // consume the whole budget and leave the fallback
+        // timeout_budget_exhausted for the exact outage it exists to survive
+        // (#5146 r9).
+        reserveFallbackBudget: true,
+        validate: (r) => (Array.isArray(r?.json?.companies) && r.json.companies.every((c) => typeof c === 'string') ? null : 'missing_companies'),
+      },
     );
     const companies = result?.json?.companies;
     if (!result?.ok || !Array.isArray(companies) || !companies.every((c) => typeof c === 'string')) {
@@ -231,14 +240,19 @@ function ownerListError(code, message, fields) {
  *   BLOG_OWNER_LIST_UNVERIFIED { retryable } — extraction failed / too long
  *   BLOG_OWNER_LIST_BLOCKED    { reason, offList } — off-list name, or
  *     competitor content outside the unattended lane
- * humanApproved (the operator approval / admin publish) skips the check.
+ * humanApproved (the operator approval / admin publish) skips ONLY the
+ * owner-list company-extraction + enforcement below — a human approves the
+ * DRAFT text, not text the publisher adds afterward (hero/body-image alt and
+ * similar), so the final comparison-gate scan two paragraphs down (which
+ * covers that publisher-added text) still runs and can still block a
+ * human-approved publish (#5146 r9). A name the human saw in the approved
+ * draft stays approved either way.
  * humanMergeFallback (the scheduler's publishAstro): competitor content
  * naming only the six returns { requiresHumanMerge: true } for the PR's
  * human-merge stamp instead of throwing. Returns { extraction,
  * requiresHumanMerge }.
  */
 async function assertOwnerListForCommit({ draft, brief = {}, frontmatter = {}, body = '', humanApproved = false, humanMergeFallback = false } = {}) {
-  if (humanApproved) return { extraction: null, requiresHumanMerge: false };
   const gate = require('./comparison-table-gate');
   const finalDraft = {
     frontmatter, body, title: frontmatter.title, meta_description: frontmatter.meta_description,
@@ -250,6 +264,7 @@ async function assertOwnerListForCommit({ draft, brief = {}, frontmatter = {}, b
   // authorization (the brief's own bucket) — so pre-existing authorized
   // prose still passes. The scheduler lane (humanMergeFallback) keeps
   // publishAstro's advisory treatment of COMPARISON_UNCLASSIFIED_OPTION.
+  // Runs even when humanApproved — see the doc comment above (#5146 r9).
   let namedCompetitorEnabled = false;
   try { namedCompetitorEnabled = require('../../config/feature-gates').isEnabled('namedCompetitorComparison') === true; } catch (_) { namedCompetitorEnabled = false; }
   const { operatorBriefTextForComparisonGate } = require('./guardrail-options');
@@ -276,6 +291,10 @@ async function assertOwnerListForCommit({ draft, brief = {}, frontmatter = {}, b
       `final text fails the comparison gate: ${blocking.map((f) => `${f.severity} ${f.code}`).join('; ')}`,
       { reason: 'comparison_table_failed', offList: [], findings: blocking });
   }
+  // humanApproved skips ONLY the owner-list company-extraction + enforcement
+  // below — the human approved the draft's own names; the gate above already
+  // covered publisher-added text on their behalf.
+  if (humanApproved) return { extraction: null, requiresHumanMerge: false };
   // Through module.exports so a suite exercising the publisher can stub the
   // model call alone and keep this chokepoint's real decision logic.
   const extraction = await module.exports.extractCompanyNames(finalDraft, {

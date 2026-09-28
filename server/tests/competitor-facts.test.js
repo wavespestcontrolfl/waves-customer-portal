@@ -59,6 +59,43 @@ describe('competitor-facts', () => {
     expect(cf.findCompetitor('Hulett')).toBeNull();
   });
 
+  test('legal-suffix normalization strips ONLY true legal-entity suffixes, never a descriptive word (#5146 r9)', () => {
+    // Direction 1: a true legal suffix still resolves to the curated record.
+    for (const [name, id] of [
+      ['Orkin, LLC', 'orkin'],
+      ['Massey Services, Inc.', 'massey-services'],
+      ['Massey Services Incorporated', 'massey-services'],
+      ['HomeTeam Pest Defense, Inc.', 'hometeam-pest-defense'],
+      ['Turner Pest Control Corp', 'turner-pest'],
+      ['Turner Pest Control Corporation', 'turner-pest'],
+      ['Turner Pest Control Co', 'turner-pest'],
+      ['Turner Pest Control Company', 'turner-pest'],
+      ['Turner Pest Control Ltd', 'turner-pest'],
+      ['Turner Pest Control LP', 'turner-pest'],
+      ['Turner Pest Control LLP', 'turner-pest'],
+      ['Turner Pest Control PLLC', 'turner-pest'],
+    ]) {
+      expect(cf.findCompetitor(name)?.id).toBe(id);
+    }
+    // Direction 2: a descriptive word must NOT be stripped — an unrelated
+    // off-list company sharing an approved short prefix reads as unknown,
+    // never as the approved record ("Turner Services LLC" is not Turner
+    // Pest Control; "HomeTeam Services LLC" is not HomeTeam Pest Defense).
+    for (const name of [
+      'Turner Services LLC', 'Turner Services', 'Turner Global', 'Turner Group',
+      'Turner Holdings', 'Turner Holdings LLC', 'The Turner Company',
+      'HomeTeam Services LLC', 'HomeTeam Services', 'HomeTeam Group',
+    ]) {
+      expect(cf.findCompetitor(name)).toBeNull();
+      expect(cf.isKnownCompetitor(name)).toBe(false);
+    }
+  });
+
+  test('a real legal-name variant needing a descriptive word is a curated alias, not suffix-stripped (#5146 r9)', () => {
+    expect(cf.findCompetitor('Terminix Global Holdings')?.id).toBe('terminix');
+    expect(cf.isOwnerApprovedForAutopublish('Terminix Global Holdings')).toBe(true);
+  });
+
   test('findBusinessMentions flags allowlist vs unlisted businesses', () => {
     const text = 'We compared Orkin and Hulett for SWFL homes.';
     const mentions = cf.findBusinessMentions(text);
