@@ -87,7 +87,7 @@ const OPERATOR_PINNED_BUCKETS = new Set(['operator_intercept']);
 // benchmark question + target page, so a profiler reroute of its refresh
 // (to a new blog or a city-service page) would complete — and freeze — the
 // key without the target ever answering the question.
-const PAGE_ANCHORED_BUCKETS = new Set(['answer_gap', 'listicle_family', 'local_gap', 'aeo_question_gap']);
+const PAGE_ANCHORED_BUCKETS = new Set(['answer_gap', 'listicle_family', 'local_gap', 'aeo_question_gap', 'citability_backfill']);
 
 function isOperatorPinned(opportunity = {}) {
   if (OPERATOR_PINNED_BUCKETS.has(opportunity.bucket)) return true;

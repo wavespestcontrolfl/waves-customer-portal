@@ -74,6 +74,30 @@ jest.mock('../services/appointment-reminders', () => ({
   ...jest.requireActual('../services/appointment-reminders'),
   buildServiceLabel: (...args) => mockBuildServiceLabel(...args),
 }));
+// PR 3b — office feed item. NotificationService itself is left REAL (backed
+// by the same fake `db` below) so its own admin path genuinely runs; what's
+// mocked here are the three channels an admin notification must NEVER
+// reach: native push to admin devices, the customer SMS/email dispatcher,
+// and the outbound SMS sender. If notifyAdmin's admin path ever grew a call
+// into any of these, one of the assertions below would catch it.
+const mockSendToAdmins = jest.fn().mockResolvedValue({ sent: 0 });
+const mockSendToAdminUsers = jest.fn().mockResolvedValue({ sent: 0 });
+const mockSendToAdminUser = jest.fn().mockResolvedValue({ sent: 0 });
+const mockSendToCustomer = jest.fn().mockResolvedValue({ sent: 0 });
+jest.mock('../services/push-notifications', () => ({
+  sendToAdmins: (...args) => mockSendToAdmins(...args),
+  sendToAdminUsers: (...args) => mockSendToAdminUsers(...args),
+  sendToAdminUser: (...args) => mockSendToAdminUser(...args),
+  sendToCustomer: (...args) => mockSendToCustomer(...args),
+}));
+const mockDispatcherNotify = jest.fn().mockResolvedValue({ sent: false });
+jest.mock('../services/notification-dispatcher', () => ({
+  notify: (...args) => mockDispatcherNotify(...args),
+}));
+const mockSendCustomerMessage = jest.fn().mockResolvedValue({ sent: false });
+jest.mock('../services/messaging/send-customer-message', () => ({
+  sendCustomerMessage: (...args) => mockSendCustomerMessage(...args),
+}));
 
 let dbState;
 
@@ -110,6 +134,10 @@ function chain(table) {
     }
     // The locked recheck's FOR SHARE on the customer row (Codex r3 P1).
     if (lockRead && table === 'customers') { dbState.lockOrder.push('customers'); return dbState.customerLockRow; }
+    // The office feed item's own unlocked name lookup (PR 3b,
+    // notifyOfficeVisitPrepSubmission) — a plain read, never under the
+    // stop/customer lock, and never on the write's own transaction.
+    if (!lockRead && table === 'customers') return dbState.customerNameRow;
     if (countMode === 'photos') return { count: dbState.photoCount + dbState.inserted.photos.length };
     if (countMode === 'submissions') return { count: dbState.submissionCount + dbState.inserted.submissions.length };
     if (table.startsWith('scheduled_services')) {
@@ -138,6 +166,16 @@ function chain(table) {
     if (table === 'visit_prep_photos') {
       dbState.inserted.photos.push(...arr);
       return Promise.resolve();
+    }
+    // The office feed item (PR 3b) — NotificationService.create()'s own
+    // insert, `.returning('*')` chained on the result.
+    if (table === 'notifications') {
+      if (dbState.notificationsInsertThrows) throw new Error('notifications insert failed');
+      if (dbState.notificationsInsertHangs) return { returning: () => new Promise(() => {}) };
+      const id = `notif-${dbState.inserted.notifications.length + 1}`;
+      const row = { id, ...arr[0] };
+      dbState.inserted.notifications.push(row);
+      return { returning: async () => [row] };
     }
     return Promise.resolve();
   };
@@ -188,8 +226,13 @@ function resetDbState(overrides = {}) {
     lockReads: 0,
     lockOrder: [],
     customerLockRow: { id: 'cust-1' },
+    // Office feed item's own name lookup (PR 3b) — synthetic, never a real
+    // customer name (no customer names in the repo).
+    customerNameRow: { first_name: 'Jordan', last_name: 'Reyes' },
     groupedMembersForPreCheck: null,
-    inserted: { submissions: [], photos: [] },
+    inserted: { submissions: [], photos: [], notifications: [] },
+    notificationsInsertThrows: false,
+    notificationsInsertHangs: false,
     ...overrides,
   };
 }
@@ -356,7 +399,7 @@ describe('POST /api/public/appointment/:token/photos', () => {
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.ok).toBe(true);
-      expect(body.prepPhotos).toMatchObject({ photoCount: 6, photosRemaining: 0 });
+      expect(body.prepPhotos).toMatchObject({ photoCount: 6, photosRemaining: 0, photosAdded: 0 });
       expect(dbState.inserted.submissions).toHaveLength(0);
       expect(mockDeletePhoto).toHaveBeenCalledTimes(1);
     });
@@ -425,7 +468,7 @@ describe('POST /api/public/appointment/:token/photos', () => {
     await withServer(async (baseUrl) => {
       const res = await postPhotos(baseUrl, { files: [{ bytes: JPEG_BYTES, mimetype: 'image/jpeg' }] });
       expect(res.status).toBe(200);
-      expect(await res.json()).toEqual({ ok: true, prepPhotos: { eligible: true, photoCount: 0, photosRemaining: 6 } });
+      expect(await res.json()).toEqual({ ok: true, prepPhotos: { eligible: true, photoCount: 0, photosRemaining: 6, photosAdded: 0 } });
       expect(mockUploadFunnelPhotoToS3).toHaveBeenCalledTimes(1);
       expect(mockDeletePhoto).toHaveBeenCalledTimes(1);
       expect(dbState.inserted.submissions).toHaveLength(0);
@@ -572,7 +615,7 @@ describe('POST /api/public/appointment/:token/photos', () => {
       // Customer row before the visit rows (Codex r3 P1).
       expect(dbState.lockOrder.slice(0, 2)).toEqual(['customers', 'scheduled_services']);
       const body = await res.json();
-      expect(body).toEqual({ ok: true, prepPhotos: { eligible: true, photoCount: 1, photosRemaining: 5 } });
+      expect(body).toEqual({ ok: true, prepPhotos: { eligible: true, photoCount: 1, photosRemaining: 5, photosAdded: 1 } });
       expect(JSON.stringify(body)).not.toMatch(/1234|friendly|s3_key|visitprep/i);
       expect(dbState.inserted.submissions).toHaveLength(1);
       expect(dbState.inserted.submissions[0]).toMatchObject({
@@ -581,6 +624,145 @@ describe('POST /api/public/appointment/:token/photos', () => {
       });
       expect(dbState.inserted.photos).toHaveLength(1);
     });
+  });
+});
+
+describe('POST /api/public/appointment/:token/photos — office feed item (PR 3b)', () => {
+  const prevAppt = process.env.GATE_APPOINTMENT_PAGE;
+  const prevPrep = process.env.GATE_VISIT_PREP_PHOTOS;
+
+  beforeEach(() => {
+    jest.resetModules();
+    jest.clearAllMocks();
+    process.env.GATE_APPOINTMENT_PAGE = 'true';
+    process.env.GATE_VISIT_PREP_PHOTOS = 'true';
+    mockUploadFunnelPhotoToS3.mockImplementation(async ({ index }) => `visitprep/svc-1/photo_${index}.jpg`);
+    mockConvertHeicToJpeg.mockResolvedValue(CONVERTED_HEIC_JPEG);
+    mockLockStopForRow.mockImplementation(async (trx, id) => id);
+    resetDbState();
+    router = require('../routes/appointment-public');
+  });
+  afterAll(() => {
+    if (prevAppt === undefined) delete process.env.GATE_APPOINTMENT_PAGE; else process.env.GATE_APPOINTMENT_PAGE = prevAppt;
+    if (prevPrep === undefined) delete process.env.GATE_VISIT_PREP_PHOTOS; else process.env.GATE_VISIT_PREP_PHOTOS = prevPrep;
+  });
+
+  // The office item runs detached from the response (Codex #5242 r2 P2):
+  // let its promise chain settle before asserting on it either way.
+  const settleDetached = async () => {
+    for (let i = 0; i < 25; i += 1) await new Promise((r) => setImmediate(r));
+  };
+
+  test('a NEW submission writes exactly one quiet admin notification: in-app only, no push, no SMS, no email', async () => {
+    await withServer(async (baseUrl) => {
+      const res = await postPhotos(baseUrl, {
+        files: [{ bytes: JPEG_BYTES, mimetype: 'image/jpeg' }],
+        topic: 'lawn',
+      });
+      expect(res.status).toBe(201);
+      await settleDetached();
+      expect(dbState.inserted.notifications).toHaveLength(1);
+      const notif = dbState.inserted.notifications[0];
+      expect(notif.recipient_type).toBe('admin');
+      expect(notif.category).toBe('visit_prep_photos');
+      expect(notif.title).toBe('Customer sent photos for a visit');
+      expect(notif.body).toMatch(/Jordan Reyes sent photos about lawn ahead of/);
+      expect(notif.link).toBe('/admin/customers?customerId=cust-1');
+      expect(JSON.parse(notif.metadata)).toMatchObject({ customerId: 'cust-1', scheduledServiceId: 'svc-1' });
+      // The one guarantee this PR must not regress: an admin-recipient
+      // notifyAdmin call never reaches a push/SMS/email channel.
+      expect(mockSendToAdmins).not.toHaveBeenCalled();
+      expect(mockSendToAdminUsers).not.toHaveBeenCalled();
+      expect(mockSendToAdminUser).not.toHaveBeenCalled();
+      expect(mockSendToCustomer).not.toHaveBeenCalled();
+      expect(mockDispatcherNotify).not.toHaveBeenCalled();
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    });
+  });
+
+  test('the notification is built from the RECHECKED row, not the stale pre-lock read (Codex r1 P2)', async () => {
+    // The visit moves to a NEW date between the pre-lock read (svcRow) and
+    // the locked recheck (svcRowAfterRecheck) — e.g. a reschedule landing
+    // mid-submission. The office item must name the NEW date.
+    resetDbState({ svcRowAfterRecheck: { ...dbStateSvc(), scheduled_date: '2099-06-15' } });
+    await withServer(async (baseUrl) => {
+      const res = await postPhotos(baseUrl, { files: [{ bytes: JPEG_BYTES, mimetype: 'image/jpeg' }] });
+      expect(res.status).toBe(201);
+      await settleDetached();
+      const notif = dbState.inserted.notifications[0];
+      expect(notif.body).toMatch(/June 15/);
+      expect(notif.body).not.toMatch(/January 1/);
+    });
+  });
+
+  test('an all-duplicate resubmit (result.created is false) writes NO office notification', async () => {
+    const sha256 = crypto.createHash('sha256').update(JPEG_BYTES).digest('hex');
+    resetDbState({ existingHashes: [sha256] });
+    await withServer(async (baseUrl) => {
+      const res = await postPhotos(baseUrl, { files: [{ bytes: JPEG_BYTES, mimetype: 'image/jpeg' }] });
+      expect(res.status).toBe(200);
+      expect(dbState.inserted.submissions).toHaveLength(0);
+      await settleDetached();
+      expect(dbState.inserted.notifications).toHaveLength(0);
+    });
+  });
+
+  test('a failed submission (storage failure, 503) writes NO office notification', async () => {
+    mockUploadFunnelPhotoToS3.mockResolvedValue(null);
+    await withServer(async (baseUrl) => {
+      const res = await postPhotos(baseUrl, { files: [{ bytes: JPEG_BYTES, mimetype: 'image/jpeg' }] });
+      expect(res.status).toBe(503);
+      await settleDetached();
+      expect(dbState.inserted.notifications).toHaveLength(0);
+    });
+  });
+
+  test('an ineligible-at-the-lock submission (generic 404) writes NO office notification', async () => {
+    resetDbState({ svcRowAfterRecheck: { ...dbStateSvc(), status: 'cancelled' } });
+    await withServer(async (baseUrl) => {
+      const res = await postPhotos(baseUrl, { files: [{ bytes: JPEG_BYTES, mimetype: 'image/jpeg' }] });
+      expect(res.status).toBe(404);
+      await settleDetached();
+      expect(dbState.inserted.notifications).toHaveLength(0);
+    });
+  });
+
+  test('a notification insert failure is caught and logged — the submission still answers 201', async () => {
+    resetDbState({ notificationsInsertThrows: true });
+    await withServer(async (baseUrl) => {
+      const res = await postPhotos(baseUrl, { files: [{ bytes: JPEG_BYTES, mimetype: 'image/jpeg' }] });
+      expect(res.status).toBe(201);
+      expect((await res.json()).ok).toBe(true);
+      expect(dbState.inserted.submissions).toHaveLength(1);
+      await settleDetached();
+      expect(dbState.inserted.notifications).toHaveLength(0);
+    });
+  });
+
+  test('a stalled notification insert never holds the customer response open (Codex #5242 r2 P2)', async () => {
+    resetDbState({ notificationsInsertHangs: true });
+    await withServer(async (baseUrl) => {
+      const res = await postPhotos(baseUrl, { files: [{ bytes: JPEG_BYTES, mimetype: 'image/jpeg' }] });
+      expect(res.status).toBe(201);
+      expect((await res.json()).ok).toBe(true);
+      expect(dbState.inserted.submissions).toHaveLength(1);
+    });
+  });
+
+  test('GATE_ADMIN_BELL_POLICY on: the category is admitted by DEFAULT_ON_CATEGORIES, not silenced', async () => {
+    const prevPolicy = process.env.GATE_ADMIN_BELL_POLICY;
+    process.env.GATE_ADMIN_BELL_POLICY = 'true';
+    try {
+      await withServer(async (baseUrl) => {
+        const res = await postPhotos(baseUrl, { files: [{ bytes: JPEG_BYTES, mimetype: 'image/jpeg' }] });
+        expect(res.status).toBe(201);
+        await settleDetached();
+        expect(dbState.inserted.notifications).toHaveLength(1);
+        expect(dbState.inserted.notifications[0].category).toBe('visit_prep_photos');
+      });
+    } finally {
+      if (prevPolicy === undefined) delete process.env.GATE_ADMIN_BELL_POLICY; else process.env.GATE_ADMIN_BELL_POLICY = prevPolicy;
+    }
   });
 });
 

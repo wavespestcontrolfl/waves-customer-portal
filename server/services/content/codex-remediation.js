@@ -681,6 +681,9 @@ async function validateFixedBlogFile(markdown, opts = {}, deps = {}) {
       body,
       frontmatter: data,
       checked_existing_routes: Array.isArray(runContext.checkedExistingRoutes) ? runContext.checkedExistingRoutes : undefined,
+      // The run's reviewer notes: a competitor price is exempt only when
+      // they list its source (Codex r9 on #5191).
+      notes_for_reviewer: typeof runContext.notesForReviewer === 'string' ? runContext.notesForReviewer : null,
     },
     {
       domains,
@@ -1677,7 +1680,7 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   const gh = deps.gh || ghDefault;
   const {
     prNumber, branch, slug = null, service = null, factContext = null,
-    operatorFaqException = false, guardContext = null, editorialBrief = null,
+    operatorFaqException = false, guardContext = null, editorialBrief = null, editorialEvidenceUrls = [],
     // Owner directive 2026-08-26: TRUE only when the caller verified
     // operator-intercept provenance AND both named-competitor gates
     // (namedCompetitorAutopublish + namedCompetitorComparison) — lets a fix
@@ -2036,6 +2039,9 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
       document: fixed,
       path: targetPath,
       brief: editorialBrief || {},
+      // Competitor pages the run's draft listed in its reviewer notes:
+      // evidence, never published.
+      evidenceUrls: editorialEvidenceUrls,
     });
     if (!Array.isArray(editorialFiles)) throw new Error('editorial evidence generator returned no file list');
   } catch (e) {
@@ -2639,6 +2645,7 @@ async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
   // Only the persisted, reviewed brief loaded through the autonomous runner
   // may inform editorial source/facts context for the repaired bytes.
   let trustedEditorialBrief = null;
+  let trustedEditorialEvidenceUrls = [];
   try {
     const fullRun = run && run.id ? await db('autonomous_runs').where({ id: run.id }).first() : null;
     const opp = (fullRun && fullRun.action_type === 'new_supporting_blog' && fullRun.opportunity_id)
@@ -2653,9 +2660,11 @@ async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
         operatorFaqException = !!guardOptions && guardOptions.operatorFaqException === true;
         let dp = fullRun.draft_payload;
         if (typeof dp === 'string') { try { dp = JSON.parse(dp); } catch (_) { dp = null; } }
+        trustedEditorialEvidenceUrls = require('./editorial-evidence').evidenceUrlsFor(dp);
         guardContext = {
           ...guardOptions,
           checkedExistingRoutes: Array.isArray(dp?.checked_existing_routes) ? dp.checked_existing_routes : [],
+          notesForReviewer: typeof dp?.notes_for_reviewer === 'string' ? dp.notes_for_reviewer : null,
           // Operator competitor authorization for the preflight comparison
           // gate — same derivation the run-context revalidation uses.
           operatorBriefText: (runner._internals && typeof runner._internals.operatorBriefTextForComparisonGate === 'function')
@@ -2683,6 +2692,7 @@ async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
     expectedParentSha,
     guardContext,
     editorialBrief: trustedEditorialBrief,
+    editorialEvidenceUrls: trustedEditorialEvidenceUrls,
     prNumber: pr && pr.number,
     branch: pr && pr.head && pr.head.ref,
     // path comes from the findings themselves (the autonomous run has no slug
@@ -2848,6 +2858,7 @@ async function reconcileAutonomousPr(options, deps = {}) {
   const guardContext = {
     ...await runner._deriveGuardrailOptions(opp, brief),
     checkedExistingRoutes: draft.checked_existing_routes,
+    notesForReviewer: typeof draft.notes_for_reviewer === 'string' ? draft.notes_for_reviewer : null,
     operatorBriefText: runner._internals.operatorBriefTextForComparisonGate(opp, brief),
   };
   const preflight = await (deps.validateFixedBlogFile || validateFixedBlogFile)(candidate.content, {

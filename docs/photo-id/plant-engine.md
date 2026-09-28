@@ -163,12 +163,10 @@ A **hard cap** (the tech-side lawn engine's own rule) caps wording at
 `likely`, never `pretty_sure`, for the `turf-diseases` group, every
 `disorder`, `drought-irrigation-stress`, and every pest possibility
 (`isHardCapped`). Unapproved (`review.status !== "owner_approved"`, via
-`isApproved`) entries never enter the condition index or an answer at all —
-today's real catalog is **100% draft** for `plant`/`condition` content, so a
-real-catalog workup is symptom-only with zero named possibilities; the
-catalog's `pest` section is 100% owner-approved, so lawn/tree_shrub pest
-possibilities (chinch bug, white grub, …) already show up and can be named
-at `likely`.
+`isApproved`) entries never enter the condition index or an answer at all.
+Every entry in the real catalog is owner-approved (pest 2026-09-27/28, plant
+and condition 2026-09-28), so all of it can be named under the rules above;
+an entry edited later drops out until it is approved again.
 
 Every customer-visible string is a catalog field or one of the template
 constants this module exports (`RETAKE_TEXT`, `TECHNICIAN_CONFIRM_TEXT`,
@@ -335,6 +333,26 @@ are grouped under "Codex #5186 round 1 regressions" in the same file.
   the draft, so it stays hidden), never a retake prompt, and the tier stays
   `needs_more_evidence`.
 
+## Photo-eval follow-ups (2026-09-28)
+
+A 27-photo labeled eval (openly licensed photos, production models) named
+18 of 27 exactly and listed 3 more correctly; the weak spot was lawn grass.
+A textbook bahiagrass photo (Y-shaped seed heads) read "Likely:
+Bermudagrass" with bahia as the runner-up, and no second opinion ran
+because Gemini was confident. With the second opinion forced on, it read
+bahiagrass.
+
+- **Close calls escalate** (`close_call`): when the turf or host slot's top
+  two catalog candidates share a group (two grasses, two palms) and the
+  runner-up reads >= 0.20, the slot gets the OpenAI second opinion even at
+  high confidence. An agreement keeps the name; a disagreement names neither
+  — identify mode answers with the shared group ("Looks like a lawn grass"),
+  and a workup leaves `subject.plant` unnamed — rather than a confident wrong
+  name. The weeds slot is excluded: a lawn can hold several weeds at once,
+  so two weeds are not rival answers.
+- **Output budget 4096**: Gemini's reasoning shares the output budget with
+  the JSON answer, and at 2048 one lawn read came back cut off (a miss).
+
 ## What L4 must do
 
 - Wire `identifyPlantV2` into `POST /api/photo-id/lawn` / `/tree_shrub`
@@ -347,6 +365,6 @@ are grouped under "Codex #5186 round 1 regressions" in the same file.
 - Client card for the workup shape (separate from the existing pest/identity
   `V2Result` card) — possibilities list, `settle_it` card, next-step block.
 - Chips UI (§3 of the contract) and admin rendering of `internal`.
-- As soon as any `plant`/`condition` catalog entries clear owner review, the
-  workup stops being symptom-only automatically — no code change needed
-  here, since `isApproved` is read live.
+- The plant/condition content is owner-approved (2026-09-28), so workups
+  name possibilities as soon as L4 calls the engine — `isApproved` is read
+  live, no code change needed.

@@ -1584,6 +1584,7 @@ class CollectionsConversation {
       // The ACTIVE call's own ledger row must not veto this in-call write
       // (gh prb-r2: the any-channel 24h window always found it).
       excludeCollectionCaseId: this._ctx.caseId,
+      source: 'collections_voice_paylink',
       logTag: 'collections-voice-paylink',
     });
     if (!permitted) return 'A text cannot be sent to this customer. Offer the office number for payment instead.';

@@ -55,9 +55,9 @@ const FEED = {
   ],
 };
 
-function renderTab() {
+function renderTab(initialEntries = ["/"]) {
   return render(
-    <MemoryRouter>
+    <MemoryRouter initialEntries={initialEntries}>
       <AgentActivityTab />
     </MemoryRouter>,
   );
@@ -170,5 +170,56 @@ describe("AgentActivityTab", () => {
     expect(screen.getByText("impact verdict digest")).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText(/Window/), { target: { value: "168" } });
     await waitFor(() => expect(adminFetch).toHaveBeenLastCalledWith("/admin/agents/activity?hours=168"));
+  });
+
+  // The bell's deep link (client/src/components/NotificationBell.jsx)
+  // appends &focus=<notification id> when an ops_digest row's own link is
+  // this shared feed. digestItem's id is `digest:<that same id>`.
+  it("?focus=<notification id> expands and scrolls to that digest item on load", async () => {
+    const scrollIntoView = vi.fn();
+    Element.prototype.scrollIntoView = scrollIntoView;
+    adminFetch.mockResolvedValue({
+      ...FEED,
+      items: [
+        {
+          id: "digest:n9", kind: "digest", agent: "Waves Ops", notificationId: "n9",
+          title: "3 promised quotes not sent", subtitle: "promised estimate · needs you",
+          status: "awaiting_review", startedAt: "2026-09-02T10:00:00Z", finishedAt: null, durationMs: null,
+          steps: [], stepsDone: 0, stepsTotal: 1, link: "/admin/pipeline", detail: "the whole report for n9",
+        },
+        {
+          id: "digest:n8", kind: "digest", agent: "Waves Ops", notificationId: "n8",
+          title: "Sends — duplicate detection failing", subtitle: "d17 duplicate sends · needs a fix",
+          status: "failed", startedAt: "2026-09-02T09:00:00Z", finishedAt: null, durationMs: null,
+          steps: [], stepsDone: 0, stepsTotal: 1, link: null, detail: "the whole report for n8",
+        },
+      ],
+    });
+    renderTab(["/?focus=n9"]);
+    // The focused item (n9) is already expanded — its detail shows with no click.
+    expect(await screen.findByText("the whole report for n9")).toBeInTheDocument();
+    // The other item (n8) stays collapsed.
+    expect(screen.queryByText("the whole report for n8")).not.toBeInTheDocument();
+    expect(scrollIntoView).toHaveBeenCalled();
+    // The fetch itself carries ?focus= through, so the server can load that
+    // ONE row even when it's read and older than the window.
+    expect(adminFetch).toHaveBeenCalledWith("/admin/agents/activity?hours=24&focus=n9");
+  });
+
+  it("no focus param: nothing is pre-expanded", async () => {
+    adminFetch.mockResolvedValue({
+      ...FEED,
+      items: [{
+        id: "digest:n9", kind: "digest", agent: "Waves Ops", notificationId: "n9",
+        title: "3 promised quotes not sent", subtitle: "promised estimate · needs you",
+        status: "awaiting_review", startedAt: "2026-09-02T10:00:00Z", finishedAt: null, durationMs: null,
+        steps: [], stepsDone: 0, stepsTotal: 1, link: "/admin/pipeline", detail: "the whole report for n9",
+      }],
+    });
+    renderTab();
+    await screen.findByText("3 promised quotes not sent");
+    expect(screen.queryByText("the whole report for n9")).not.toBeInTheDocument();
+    // No &focus= on the fetch when the route carries none.
+    expect(adminFetch).toHaveBeenCalledWith("/admin/agents/activity?hours=24");
   });
 });

@@ -43,6 +43,9 @@ postgres('aeo_question_gap claim fence on PostgreSQL', () => {
     await mockPg.schema.createTable('autonomous_runs', (t) => {
       t.uuid('id').primary(); t.uuid('opportunity_id'); t.text('action_type');
       t.text('astro_pr_url'); t.text('published_url'); t.timestamp('claimed_at', { useTz: true });
+      // Real columns (phase_11 runs migration) that stale-claim recovery's
+      // current-claim PR probe reads; Postgres resolves them even on 0 rows.
+      t.text('outcome'); t.text('skip_reason'); t.timestamp('created_at', { useTz: true }).defaultTo(mockPg.fn.now());
     });
     // migration.up adds autonomous_runs.astro_pr_retired_at (and claim_id).
     await mockPg.schema.createTable('content_briefs', (t) => {

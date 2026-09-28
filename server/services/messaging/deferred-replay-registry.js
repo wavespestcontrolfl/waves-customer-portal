@@ -121,6 +121,12 @@ async function checkRecruitingApplicationEligibility(meta, conn, lock) {
   return { app };
 }
 
+// A deferred invoice-followup SMS that was a bank-verification re-nudge
+// (invoice-followups mdPending), not an overdue reminder.
+function followupReplayIsVerification(meta) {
+  return meta?.original_message_type === 'bank_verification_incomplete' || meta?.billingDeliveryCategory === 'payment_issue';
+}
+
 // Stage supersession: for the interview stages only, the application must
 // still be at 'interview', and this queued attempt must not have been
 // superseded by a newer attempt of the same stage in the ledger (Codex r7
@@ -348,6 +354,15 @@ const REGISTRY = {
             invoiceId: meta.invoice_id,
             channel: 'sms',
             purpose: 'late_payment',
+            // Shadow spacing only: a deferred bank-verification re-nudge is
+            // not an overdue reminder (Codex #5189 r6), so it names no rail;
+            // an overdue replay excludes its own standing reservation and
+            // the rest of its touch (the delivered email sibling).
+            ...(followupReplayIsVerification(meta) ? {} : {
+              source: 'invoice_followup_replay',
+              ...(meta.ledger_reservation_key ? { spacingExcludeKey: `followup-replay:${meta.ledger_reservation_key}` } : {}),
+              ...(meta.notificationEventKey ? { spacingExcludeEventKey: meta.notificationEventKey } : {}),
+            }),
             logTag: 'invoice-followup-replay',
           });
           if (!permitted) return { eligible: false, reason: 'collections-policy-denied' };
@@ -375,6 +390,11 @@ const REGISTRY = {
               followup_sequence_id: meta.followup_sequence_id || null,
               original_block_code: meta.original_block_code || null,
               replay: true,
+              // The touch this leg belongs to, so spacing groups it with its
+              // delivered email sibling (Codex #5189 r6).
+              ...(meta.notificationEventKey ? { notificationEventKey: meta.notificationEventKey } : {}),
+              // Spacing evidence skips a verification re-nudge (Codex #5189 r7).
+              ...(followupReplayIsVerification(meta) ? { verification_renudge: true } : {}),
             },
           });
         }
@@ -409,6 +429,8 @@ const REGISTRY = {
           followup_sequence_id: meta.followup_sequence_id || null,
           original_block_code: meta.original_block_code || null,
           replay: true,
+          ...(meta.notificationEventKey ? { notificationEventKey: meta.notificationEventKey } : {}),
+          ...(followupReplayIsVerification(meta) ? { verification_renudge: true } : {}),
         },
       });
     },

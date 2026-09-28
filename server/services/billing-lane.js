@@ -981,11 +981,28 @@ async function sameTripFirstApplicationBreakdown({ svc, invoiceTotal, invoiceLin
 // — never a second, independent re-read of svc's columns that could drift
 // from them. `sourceEstimateId` missing (a pure unit-test fixture with no
 // svc at all) reads as ineligible, never as a false positive.
-function isSiblingCoverageEligibleVisit({ sourceEstimateId, hasOwnPrice, isCallback, serviceType }) {
+// `isPricedCoveredMember` (Codex r21 P1 on PR #5021, deferred to this
+// follow-up): a NON-ANCHOR row whose first_application_invoice_id is
+// stamped to an invoice whose OWN scheduled_service_id (its anchor) is a
+// DIFFERENT row is coverage-eligible even though it carries its own price —
+// staff pricing a covered sibling after its trip's combined invoice already
+// existed must never make Charge Now/completion blind to that invoice.
+// Computed ASYNC, DB-backed (estimate-first-application-invoice.js's
+// isPricedCoveredMemberVisit — the anchor identity lives on the INVOICE row,
+// not svc) by the few callers that have a dbConn; every other caller omits
+// it (default false), which keeps this predicate's OWN `!hasOwnPrice` gate
+// byte-identical for them — including the anchor's own priced mint, which
+// must never reach the sibling-coverage checks this gate exists to keep it
+// out of (an anchor's own refunded/voided invoice is its OWN terminal-invoice
+// case, not a sibling "needs review").
+function isSiblingCoverageEligibleVisit({
+  sourceEstimateId, hasOwnPrice, isCallback, serviceType, isPricedCoveredMember = false,
+}) {
   if (!sourceEstimateId) return false;
   if (isCallback) return false;
   if (isAlwaysFreeServiceType(serviceType)) return false;
-  return !hasOwnPrice;
+  if (hasOwnPrice) return !!isPricedCoveredMember;
+  return true;
 }
 
 // Owner ruling — REFUSE AFTER A VOID (replaces the round-9/round-10 guards
@@ -1098,8 +1115,20 @@ async function perApplicationCompletionVoidHold({
 }) {
   const hasOwnPrice = (svc?.estimated_price != null && Number(svc.estimated_price) > 0)
     || hasAuthoritativeZeroPrice(svc?.estimated_price, svc?.primary_line_price);
+  // Cheap shape check FIRST, price-blind (every other exclusion — no
+  // estimate link, callback, always-free type — needs no DB at all): only
+  // when the visit already looks eligible apart from price do we spend the
+  // one extra DB round trip deciding isPricedCoveredMember (see
+  // isSiblingCoverageEligibleVisit's own header) — never for a visit this
+  // predicate would refuse anyway.
   if (!isSiblingCoverageEligibleVisit({
-    sourceEstimateId: svc?.source_estimate_id, hasOwnPrice, isCallback: !!isCallback, serviceType,
+    sourceEstimateId: svc?.source_estimate_id, hasOwnPrice: false, isCallback: !!isCallback, serviceType,
+  })) return null;
+  const isPricedCoveredMember = hasOwnPrice
+    ? await require('./estimate-first-application-invoice').isPricedCoveredMemberVisit(svc, dbConn)
+    : false;
+  if (!isSiblingCoverageEligibleVisit({
+    sourceEstimateId: svc?.source_estimate_id, hasOwnPrice, isCallback: !!isCallback, serviceType, isPricedCoveredMember,
   })) return null;
   try {
     return await combinedInvoiceVoidedWithoutLiveReplacement(svc, dbConn);
@@ -1329,12 +1358,37 @@ async function enrichCoveredSiblingPrediction(prediction, svc, inv, dbConn) {
 // credits it) feeds the SAME isSiblingCoverageEligibleVisit shape predicate
 // every other sibling-coverage caller gates on, plus the DB/estimate/date
 // fields this lookup itself needs in order to run at all.
-function scheduleSiblingCoverageEligible(svc, dbConn) {
+async function scheduleSiblingCoverageEligible(svc, dbConn) {
+  const hasBaseFields = !!(svc?.source_estimate_id && svc?.customer_id && svc?.scheduled_date && dbConn);
+  if (!hasBaseFields) return { eligible: false, isPricedCoveredMember: false };
   const hasOwnPrice = (svc?.estimated_price != null && Number(svc.estimated_price) > 0)
     || hasAuthoritativeZeroPrice(svc?.estimated_price, svc?.primary_line_price ?? null);
-  const baseShape = { sourceEstimateId: svc?.source_estimate_id, hasOwnPrice, isCallback: !!svc?.is_callback, serviceType: svc?.service_type };
-  const hasBaseFields = !!(svc?.source_estimate_id && svc?.customer_id && svc?.scheduled_date && dbConn);
-  return hasBaseFields && isSiblingCoverageEligibleVisit(baseShape);
+  // Priced-covered-member widening (see isSiblingCoverageEligibleVisit's own
+  // header) — the same shape the Charge Now resolver and completion's void
+  // guard ask, so this sheet prediction can never disagree with either.
+  // Feed cost (Codex r4 P2 on #5237): the day/week feeds call this per visit,
+  // so the DB-backed member check runs only for a priced visit whose SHAPE
+  // could be covered and whose feed row carries a stamp. A NULL on the
+  // feed's own fresh row is trusted here: this is a read-only prediction,
+  // so a stamp landing mid-render changes only what the sheet shows until
+  // the next refresh; every charge path re-reads under its own lock
+  // (refuseCoveredMemberMintInTrx, siblingCoverageRecheckInTrx).
+  const couldBeMember = hasOwnPrice
+    && svc?.first_application_invoice_id !== null
+    && isSiblingCoverageEligibleVisit({
+      sourceEstimateId: svc?.source_estimate_id, hasOwnPrice: false, isCallback: !!svc?.is_callback, serviceType: svc?.service_type,
+    });
+  const isPricedCoveredMember = couldBeMember
+    ? await require('./estimate-first-application-invoice').isPricedCoveredMemberVisit(svc, dbConn)
+    : false;
+  const eligible = isSiblingCoverageEligibleVisit({
+    sourceEstimateId: svc?.source_estimate_id, hasOwnPrice, isCallback: !!svc?.is_callback, serviceType: svc?.service_type, isPricedCoveredMember,
+  });
+  // isPricedCoveredMember rides back to the caller (#5237 review r2 P2):
+  // only when it's true does the caller need to ALSO ask
+  // pricedCoveredMemberOwnRefundHold before trusting a 'covered' verdict —
+  // recomputing it there would be a second, redundant DB round trip.
+  return { eligible, isPricedCoveredMember };
 }
 
 /**
@@ -1360,12 +1414,20 @@ function scheduleSiblingCoverageEligible(svc, dbConn) {
  * except where a caller opts in, same as monthlyDuesCollected above.
  */
 async function siblingCoverageForSchedule({ svc, dbConn } = {}) {
-  if (!scheduleSiblingCoverageEligible(svc, dbConn)) {
+  const { eligible, isPricedCoveredMember } = await scheduleSiblingCoverageEligible(svc, dbConn);
+  if (!eligible) {
     return { coverage: NO_SIBLING_COVERAGE, prediction: null };
   }
   let verdict;
   try {
-    verdict = await siblingInvoiceCoverageVerdict(svc, dbConn);
+    // Own-row refund precedence (#5237 review r2 P2) — see
+    // resolveScheduledServiceCharge's own header (admin-schedule.js) for
+    // why: reuses the SAME pricedCoveredMemberOwnRefundHold so the sheet
+    // can never disagree with Charge Now or completion for this input.
+    const ownRefund = isPricedCoveredMember
+      ? await require('./estimate-first-application-invoice').pricedCoveredMemberOwnRefundHold(svc, dbConn)
+      : null;
+    verdict = ownRefund ? { status: 'needs_review', invoice: ownRefund } : await siblingInvoiceCoverageVerdict(svc, dbConn);
   } catch {
     verdict = { status: 'error' };
   }
@@ -1474,6 +1536,7 @@ module.exports = {
   predictCompletionBilling,
   monthlyDuesCollected,
   siblingCoverageForSchedule,
+  collectionStateForCoveredInvoice,
   siblingInvoiceCoverageVerdict,
   combinedInvoiceVoidedWithoutLiveReplacement,
   perApplicationCompletionVoidHold,
