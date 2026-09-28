@@ -5,7 +5,7 @@
 // the glass scene. Every other project type keeps glass.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, render, waitFor, within } from '@testing-library/react';
+import { cleanup, render, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import ProjectReportViewPage from './ProjectReportViewPage';
@@ -134,12 +134,12 @@ describe('ProjectReportViewPage Poison Control (owner 2026-09-26)', () => {
     expect(container.querySelector('[data-testid="project-applicator-id"]')).toBeNull();
   });
 
-  // Owner ask 2026-09-27: every customer service report links to the public
-  // Products & Safety page alongside its label-derived facts.
-  it('links to the public Products & Safety page beside the Poison Control line', async () => {
-    const { findByTestId } = renderProjectReport(payload('flea', { poisonControl: true }));
-    const card = await findByTestId('project-poison-control');
-    const link = within(card).getByRole('link', { name: /see every product we use and our safety protocol/i });
+  // Owner ask 2026-09-28: every report links to the public Products & Safety
+  // page from its closing strip, treatment evidence or not.
+  it.each([true, false])('links to the public Products & Safety page (poisonControl %s)', async (poisonControl) => {
+    const { findByRole } = renderProjectReport(payload('flea', { poisonControl }));
+    const link = await findByRole('link', { name: /see every product we use and our safety protocol/i });
+    expect(link.closest('footer')).not.toBeNull();
     expect(link).toHaveAttribute('href', 'https://www.wavespestcontrol.com/products-and-safety/#safety-protocol');
     expect(link).toHaveAttribute('target', '_blank');
     expect(link).toHaveAttribute('rel', 'noopener noreferrer');

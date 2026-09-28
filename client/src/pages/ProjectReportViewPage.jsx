@@ -807,19 +807,6 @@ export default function ProjectReportViewPage() {
                 {applicatorLine}
               </div>
             )}
-            {/* Owner ask 2026-09-27: every report links out to the public
-                Products & Safety page alongside the label-derived facts
-                above. Shared constant only. */}
-            <div style={{ fontSize: 14, lineHeight: 1.5, marginTop: 8 }}>
-              <a
-                href={`${WAVES_PRODUCTS_SAFETY_URL}#safety-protocol`}
-                target="_blank"
-                rel="noopener noreferrer"
-                style={{ color: ESTIMATE_TEXT, fontWeight: 700 }}
-              >
-                See every product we use and our safety protocol
-              </a>
-            </div>
           </div>
         )}
 
@@ -827,6 +814,12 @@ export default function ProjectReportViewPage() {
             service report's footer line, not the Text Us / Call Us CTA. */}
         <footer style={{ marginTop: 20, padding: '16px 0', fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.6, textAlign: 'center' }}>
           Questions about today&apos;s service? Ask Waves in your portal or call {WAVES_PHONE_DISPLAY}.
+          {/* Owner ask 2026-09-28: every report links to the public Products &
+              Safety page; the closing strip renders on every project report. */}
+          {' '}
+          <a href={`${WAVES_PRODUCTS_SAFETY_URL}#safety-protocol`} target="_blank" rel="noopener noreferrer" style={{ color: ESTIMATE_TEXT, fontWeight: 700 }}>
+            See every product we use and our safety protocol
+          </a>.
           {' '}This report is provided for your records.
         </footer>
 

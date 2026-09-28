@@ -1277,15 +1277,6 @@ export default function ServiceReportDocument({ data, token }) {
                 product prints Poison Control. The tel: link stays tappable
                 in the PDF. */}
             <DocPoisonControl data={data} listsProducts showApplicator />
-            {/* Owner ask 2026-09-27: every record of service links out to the
-                public Products & Safety page alongside the label facts
-                above. Shared constant only — a real <a> for the PDF link
-                annotation, same as the interactive-report URL below. */}
-            <p style={{ fontSize: 10.5, color: MUTED, lineHeight: 1.5, marginTop: 6 }}>
-              <a href={`${WAVES_PRODUCTS_SAFETY_URL}#safety-protocol`} target="_blank" rel="noopener noreferrer" style={{ color: NAVY, textDecoration: 'underline' }}>
-                See every product we use and our safety protocol
-              </a>
-            </p>
           </div>
         )}
 
@@ -1640,6 +1631,13 @@ export default function ServiceReportDocument({ data, token }) {
                 autodetection is optional, and this is the only route to the
                 analysis this record intentionally omits */}
             <a href={reportUrl} style={{ color: NAVY, textDecoration: 'underline' }}>{reportUrl}</a>
+            <br />
+            {/* Owner ask 2026-09-28: every record of service links to the
+                public Products & Safety page. The footer prints on every
+                record, product rows or not; the URL shows in full so a
+                printed copy carries it. */}
+            Every product we use and our safety protocol:{' '}
+            <a href={`${WAVES_PRODUCTS_SAFETY_URL}#safety-protocol`} target="_blank" rel="noopener noreferrer" style={{ color: NAVY, textDecoration: 'underline' }}>{WAVES_PRODUCTS_SAFETY_URL}</a>
             <br />
             This report is provided for your records. This is not an invoice.
             {/* Claim tamper-evidence only when photos are actually displayed

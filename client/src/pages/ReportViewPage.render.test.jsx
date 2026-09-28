@@ -755,15 +755,19 @@ describe('ReportViewPage — legacy lawn fallback (historical tokens, reportV2 n
     }
   });
 
-  // Owner ask 2026-09-27: every customer service report links to the portal
-  // login and the public Products & Safety page.
-  it('links to the portal login and the public Products & Safety page', async () => {
-    const { container } = renderReport(legacyLawnReport);
+  // Owner ask 2026-09-28: every report links to the portal login and the
+  // public Products & Safety page. The safety link sits in the footer, so a
+  // visit that applied nothing carries it too.
+  it.each([
+    ['with products applied', legacyLawnReport],
+    ['with nothing applied', { ...legacyLawnReport, applications: [], applicationMade: false }],
+  ])('links to the portal login and the Products & Safety page (%s)', async (_label, report) => {
+    const { container } = renderReport(report);
     await screen.findByText('Visit Summary');
 
     expect(screen.getByRole('link', { name: /portal login/i })).toHaveAttribute('href', '/login');
-    const products = container.querySelector('#products-applied');
-    const safetyLink = within(products).getByRole('link', { name: /see every product we use and our safety protocol/i });
+    const footer = container.querySelector('footer.sr-footer');
+    const safetyLink = within(footer).getByRole('link', { name: /see every product we use and our safety protocol/i });
     expect(safetyLink).toHaveAttribute('href', 'https://www.wavespestcontrol.com/products-and-safety/#safety-protocol');
     expect(safetyLink).toHaveAttribute('target', '_blank');
     expect(safetyLink).toHaveAttribute('rel', 'noopener noreferrer');
