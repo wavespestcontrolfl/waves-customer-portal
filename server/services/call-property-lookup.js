@@ -421,15 +421,23 @@ async function enrichPropertyById(propertyId) {
           mirror.property_type = db.raw("COALESCE(NULLIF(TRIM(property_type), ''), ?)", [afterType]);
         }
         if (Object.keys(mirror).length) {
-          mirror.updated_at = db.fn.now();
+          // Same split as reconcileCustomerMirrors: a blocking staff review
+          // quarantines only the COORDINATES — a residential type fill is not
+          // location evidence and still mirrors while the review is open.
           await withReviewWriteFence({ propertyId, customerId: liveRole.customer_id }, async (conn) => {
-            let customerUpdate = conn('customers')
+            const customerUpdate = () => conn('customers')
               .where({ id: liveRole.customer_id })
               .whereRaw("COALESCE(address_line1, '') = ? AND COALESCE(address_line2, '') = ? AND COALESCE(city, '') = ? AND COALESCE(zip, '') = ?", [
                 customer.address_line1 || '', customer.address_line2 || '', customer.city || '', customer.zip || '',
               ]);
-            if (mirror.latitude) customerUpdate = geocodeReview.excludePrimaryPropertyReviewForId(customerUpdate, propertyId);
-            return customerUpdate.update(mirror);
+            if (mirror.property_type) {
+              await customerUpdate().update({ property_type: mirror.property_type, updated_at: db.fn.now() });
+            }
+            if (mirror.latitude) {
+              await geocodeReview.excludePrimaryPropertyReviewForId(customerUpdate(), propertyId).update({
+                latitude: mirror.latitude, longitude: mirror.longitude, updated_at: db.fn.now(),
+              });
+            }
           });
         }
       }
