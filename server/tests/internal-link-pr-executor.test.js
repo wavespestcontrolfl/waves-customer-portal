@@ -1795,3 +1795,15 @@ describe('internal-link transient dry-run failures from planners', () => {
     db.mockImplementation(() => undefined);
   });
 });
+
+describe('internal-link verification vs a concurrent publication', () => {
+  test('a closed-unmerged settle that finds the row already published backs off for the next pass', async () => {
+    const instance = new InternalLinkPrExecutor();
+    instance._failAbandonedPrTask = jest.fn(async () => 0); // conditional update matched nothing
+    GitHubClient.getPr.mockResolvedValue({ number: 77, merged: false, state: 'closed', head: { ref: 'b' } });
+    GitHubClient.retireBranch = jest.fn(async () => true);
+    const result = await instance.verifyMergedTask({ id: 't1', status: 'pr_open', astro_pr_url: 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/77' });
+    expect(result).toMatchObject({ transient: true, skipped: 'publication_state_changed' });
+    expect(instance._failAbandonedPrTask).toHaveBeenCalledWith('t1', 'internal_link_pr_closed_unmerged', { onlyIf: expect.any(Function) });
+  });
+});

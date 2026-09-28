@@ -960,15 +960,23 @@ class InternalLinkPrExecutor {
         }
         if (!retired) return { task_id: task.id, status: task.status, transient: true, skipped: 'branch_retire_pending', pr_number: resolvedPrNumber };
         const reason = 'internal_link_pr_closed_unmerged';
+        // Both terminal updates are conditioned on the CURRENT row: the
+        // auto-merge tick (separately locked) may have recorded a publication
+        // or a merge in flight after this task was loaded. Nothing updated →
+        // leave it for the next pass.
+        const unpublished = (q) => q.whereNull('merged_at')
+          .where((inner) => inner.whereNull('failure_reason').orWhereNot('failure_reason', MERGE_IN_FLIGHT));
         if (task.skip_reason === RECYCLE_PENDING) {
           // Closed for a retry (moved main / canceled preview): back to the pool.
-          await db(TABLE).where({ id: task.id }).whereIn('status', ['pr_open', 'pr_reserved'])
+          const moved = await db(TABLE).where({ id: task.id }).whereIn('status', ['pr_open', 'pr_reserved']).where(unpublished)
             .update({ status: 'patch_candidate', skip_reason: null, astro_pr_url: null, pr_branch: null, pr_commit_sha: null, updated_at: new Date() });
+          if (!Number(moved)) return { task_id: task.id, status: task.status, transient: true, skipped: 'publication_state_changed', pr_number: resolvedPrNumber };
           return { task_id: task.id, status: 'patch_candidate', pr_number: resolvedPrNumber };
         }
         // _failAbandonedPrTask keeps skip_reason, so a recorded reviewer
         // rejection (codex_findings) stays terminal through this path.
-        await this._failAbandonedPrTask(task.id, reason);
+        const failed = await this._failAbandonedPrTask(task.id, reason, { onlyIf: unpublished });
+        if (!Number(failed)) return { task_id: task.id, status: task.status, transient: true, skipped: 'publication_state_changed', pr_number: resolvedPrNumber };
         return { task_id: task.id, status: 'failed', failure_reason: reason, pr_number: resolvedPrNumber };
       }
       return { task_id: task.id, status: task.status, skipped: 'pr_not_merged', pr_number: resolvedPrNumber };
@@ -1334,10 +1342,12 @@ class InternalLinkPrExecutor {
   // (astro_pr_number is not a column — the PR number is parsed from
   // astro_pr_url — so only astro_pr_url/pr_branch/pr_commit_sha are cleared.)
   // The closed PR URL stays in reviewer_notes (from the pr_open note) for audit.
-  async _failAbandonedPrTask(taskId, reason) {
-    await db(TABLE)
+  async _failAbandonedPrTask(taskId, reason, { onlyIf = null } = {}) {
+    let q = db(TABLE)
       .where({ id: taskId })
-      .whereIn('status', ['pr_open', 'pr_reserved', 'merged', 'deployed'])
+      .whereIn('status', ['pr_open', 'pr_reserved', 'merged', 'deployed']);
+    if (onlyIf) q = q.where(onlyIf);
+    return q
       .update({
         status: 'failed',
         failure_reason: reason,

@@ -2545,6 +2545,11 @@ class AutonomousRunner {
     // poller merges it (InternalLinkPrExecutor) — so a run never waits on a
     // PR and nothing has to tie a run to the PR that ships its links.
     if (!run.shadow_mode) {
+      // Mixed results: tasks that failed only on a transient load error go
+      // back to the pool before the claim completes (the sweep revalidates).
+      if (candidates > 0 && executor?.requeueTransientDryRunFailures) {
+        await executor.requeueTransientDryRunFailures(dryRunResult?.results);
+      }
       if (candidates > 0) {
         return {
           claim: 'complete',

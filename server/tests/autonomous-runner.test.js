@@ -2480,11 +2480,14 @@ describe('runNext internal-link shadow behavior', () => {
           count: 1,
           pr_url: 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/88',
         }),
+        requeueTransientDryRunFailures: jest.fn(async () => 0),
       };
       const runner = loadRunnerWith({ queue, briefBuilder, linkPlanner, internalLinkExecutor });
 
       const result = await runner.runNext();
 
+      // Mixed results: transient failures are requeued before completing.
+      expect(internalLinkExecutor.requeueTransientDryRunFailures).toHaveBeenCalledWith([{ task_id: 'run_1', status: 'patch_candidate' }]);
       // Shipping is the candidate sweep's job alone (one PR path).
       expect(result.outcome).toBe('completed_planned');
       expect(result.astro_pr_url).toBeUndefined();
