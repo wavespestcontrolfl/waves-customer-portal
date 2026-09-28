@@ -101,10 +101,22 @@ const RELATIVE_APPOINTMENT_DATE_RE = new RegExp(
 // as agreeing because the trailing weekday token alone matches). Timing
 // anchored on the visit itself ("mow the day before your next visit") is
 // preparation advice, not another date for the visit.
+// A quantified/plural count leading the relational phrase ("two days after
+// Labor Day", "three weeks after the treatment", "a couple of days after
+// the visit") — run on word-number-normalized text, so word counts are
+// digits by the time this matches. The target is captured (group 1) so the
+// visit-anchor exemption below can be scoped to non-promise sentences only.
+const RELATIONAL_DATE_COUNT = String.raw`(?:the|a|\d+|a\s+couple\s+of|a\s+few|several)\s+`;
 const RELATIONAL_DATE_RE = new RegExp(
-  `\\b(?:(?:the|a)\\s+)?(?:${WEEKDAY_NAMES}|day|week|month)\\s+(?:after|before)\\s+(?!(?:your|the|our|this|each|every)\\s+(?:next\\s+)?(?:visit|appointment|service|treatment|application)\\b)(?:next\\b|${WEEKDAY_NAMES}\\b|[a-z]+(?:\\s+[a-z]+){0,2})`,
+  `\\b(?:${RELATIONAL_DATE_COUNT})?(?:${WEEKDAY_NAMES}|days?|weeks?|months?)\\s+(?:after|before)\\s+(next\\b|${WEEKDAY_NAMES}\\b|\\d{1,2}\\/\\d{1,2}(?:\\/\\d{2,4})?|[a-z]+(?:\\s+[a-z]+){0,2}(?:\\s+\\d{1,2}(?:st|nd|rd|th)?)?)`,
   'gi',
 );
+// Timing anchored on the visit itself ("mow the day before your next
+// visit") is preparation advice, not another date for the visit — UNLESS
+// the sentence is itself a provider visit promise ("We will return the day
+// before your next visit" still states timing for our return and must be
+// judged like any other relational date).
+const RELATIONAL_DATE_ANCHOR_RE = /^(?:your|the|our|this|each|every)\s+(?:next\s+)?(?:visit|appointment|service|treatment|application)\b/i;
 // Every other relative date, judged inside a visit claim: "today" (not the
 // possessive "today's visit", which names the completed visit), "this
 // afternoon", "next weekend", "the following week".
@@ -161,17 +173,75 @@ const PROVIDER_SUBJECT = String.raw`(?:i|we|waves|someone|somebody|(?:(?:the|you
 // checking back, following up, being back/there/out, re-treating, seeing you.
 const VISIT_VERB = String.raw`(?:return\w*|com(?:e|es|ing)|came|arriv\w*|visit\w*|back|(?:stop|swing|drop)\w*\s+by|check\w*\s+(?:back|in|on)|follow\w*[-\s]+up|head\w*\s+(?:out|over|back)|re-?treat\w*|re-?inspect\w*|re-?servic\w*|see\s+you|be\s+(?:there|out|over))`;
 // A clause coordinated onto a provider-subject clause with "and"/"but"/
-// "then" carries that subject forward when it names no subject of its own
-// ("we checked all traps and will return tomorrow", "...but will come back
-// next week"): the provider never stopped being the subject, only the
-// clause changed. Only auxiliaries and adverbs may sit between the
-// coordinator and the visit verb, so a clause with its own subject ("...but
-// activity may come back", "You can mow and water tomorrow") never claims a
-// visit through an earlier "we", and a bare "back" needs an auxiliary ("and
-// will be back") so "the front and back yard" is never a visit.
+// "then"/";" carries that subject forward when it names no subject of its
+// own ("we checked all traps and will return tomorrow", "...but will come
+// back next week"): the provider never stopped being the subject, only the
+// clause changed. A clause that opens with its own subject — the provider
+// again, someone else ("you", "they"), or any other noun immediately
+// followed by a verb of its own ("activity subsided", "it will come back")
+// — resets what later clauses inherit; a coordinator that merely joins two
+// words inside the CURRENT clause's own object ("interior and exterior
+// bait stations", "the front and back yard") is not a clause boundary at
+// all (codex P1 on #5262: an unbounded provider clause, a mid-sentence
+// subject change, and a noun-phrase "and" all broke the old fixed-distance
+// lookbehind this replaces). A bare "back" needs an auxiliary ("and will be
+// back") so "the front and back yard" is never a visit.
 const OTHER_CLAUSE_SUBJECT_RE = String.raw`\b(?:you|your|they|them|customers?|homeowners?|tenants?)\b`;
-const CLAUSE_COORDINATOR_RE = String.raw`(?:,\s*)?\b(?:and|but|then)\b\s*`;
+const CLAUSE_COORDINATOR_RE = String.raw`(?:,\s*)?\b(?:and|but|then)\b\s*|;\s*`;
 const CLAUSE_AUX = String.raw`(?:will|would|shall|should|can|could|may|might|must|also|then|soon|likely|definitely|be|is|are|am|plans?\s+to|planning\s+to|going\s+to|gonna|expect\s+to|intend\s+to)`;
+// A leading adverb, or a short introductory phrase ending in a comma, that
+// may sit before a coordinated clause's real subject or verb ("and then
+// Waves will return", "and, once the eggs hatch, we will return").
+const CLAUSE_LEAD_RE = String.raw`(?:(?:then|also|soon|likely|definitely)\s+)?(?:[a-z][a-z ,'-]{0,30},\s*)?`;
+const CLAUSE_INHERIT_VERB_RE = new RegExp(
+  `^${CLAUSE_LEAD_RE}(?:(?:${CLAUSE_AUX})\\s+){1,3}${VISIT_VERB}\\b|^${CLAUSE_LEAD_RE}(?!back\\b)${VISIT_VERB}\\b`,
+  'i',
+);
+const CLAUSE_LEAD_ONLY_RE = new RegExp(`^${CLAUSE_LEAD_RE}`, 'i');
+const CLAUSE_OWN_PROVIDER_RE = new RegExp(`^${CLAUSE_LEAD_RE}${PROVIDER_SUBJECT}\\b`, 'i');
+const CLAUSE_OWN_OTHER_RE = new RegExp(`^${CLAUSE_LEAD_RE}${OTHER_CLAUSE_SUBJECT_RE}`, 'i');
+// A clause start that names no recognized subject but still reads as a
+// genuine new clause (a noun immediately followed by a verb of its own) —
+// distinguished from a noun-phrase continuation of the PREVIOUS clause's
+// object ("exterior bait stations", which has no verb after "exterior").
+const CLAUSE_OWN_VERB_SUBJECT_RE = new RegExp(
+  `^${CLAUSE_LEAD_RE}[a-z][a-z'-]*\\s+(?:(?:has|have|had|is|are|was|were|will|would|shall|should|can|could|may|might|must)\\b|[a-z]{2,}(?:ed|s)\\b)`,
+  'i',
+);
+
+// The visit-verb claim carried by a coordinated clause with no subject of
+// its own — walks every coordinator in the sentence, tracking which
+// subject is "in scope" clause by clause, rather than a fixed character
+// window back to the last provider mention.
+function coordinatedClauseClaims(text) {
+  const claims = [];
+  let subject = CLAUSE_OWN_PROVIDER_RE.test(text) ? 'provider' : (CLAUSE_OWN_OTHER_RE.test(text) ? 'other' : null);
+  const re = new RegExp(CLAUSE_COORDINATOR_RE, 'gi');
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    const boundaryEnd = m.index + m[0].length;
+    const rest = text.slice(boundaryEnd);
+    if (CLAUSE_OWN_PROVIDER_RE.test(rest)) { subject = 'provider'; continue; }
+    if (CLAUSE_OWN_OTHER_RE.test(rest)) { subject = 'other'; continue; }
+    if (CLAUSE_INHERIT_VERB_RE.test(rest)) {
+      if (subject === 'provider') {
+        const verbMatch = CLAUSE_INHERIT_VERB_RE.exec(rest);
+        const lead = CLAUSE_LEAD_ONLY_RE.exec(rest)[0];
+        claims.push({
+          kind: 'verb',
+          match: { 0: verbMatch[0].slice(lead.length), index: boundaryEnd + lead.length },
+          before: text.slice(0, boundaryEnd),
+        });
+      }
+      continue;
+    }
+    if (CLAUSE_OWN_VERB_SUBJECT_RE.test(rest)) { subject = 'other'; continue; }
+    // A phrase-level "and"/"but" inside the current clause's own object —
+    // not a clause boundary; keep scanning with the same subject in scope.
+  }
+  return claims;
+}
+
 // [pattern, kind]: a "verb" claim is past when its own verb is; a "noun"
 // claim is past when a past word anchors it ("today's visit", "since our
 // visit"); "future" claims (openers, scheduling, "see you") never are.
@@ -180,9 +250,6 @@ const VISIT_CLAIMS = [
   // back", "we are returning", "the technician returns", "our team is
   // scheduled to come out", "the tech's return".
   [String.raw`\b${PROVIDER_SUBJECT}(?:[’'](?:ll|re|s|m|d|ve))?(?:\s+[a-z’']+){0,3}?\s+${VISIT_VERB}\b`, 'verb'],
-  // A coordinated clause with no subject of its own, carrying a provider
-  // subject named earlier in the same sentence (codex P1 on #5055 followups).
-  [String.raw`(?<=\b${PROVIDER_SUBJECT}\b(?:(?!${OTHER_CLAUSE_SUBJECT_RE}|[.!?])[\s\S]){0,60}?${CLAUSE_COORDINATOR_RE})(?:(?:${CLAUSE_AUX}\s+){1,3}${VISIT_VERB}|(?!back\b)${VISIT_VERB})\b`, 'verb'],
   // Subjectless openers: "Back Tuesday to check traps", "Returning tomorrow".
   [String.raw`^\s*(?:back|returning|coming\s+back|arriving|checking\s+back|following\s+up)\b`, 'future'],
   // The visit named as a thing: any visit, appointment, arrival, follow-up,
@@ -199,8 +266,19 @@ const CUSTOMER_BOOKING_RE = /\b(?:to|and)\s+(?:book|schedule|request|arrange|set
 
 function visitClaimMatches(sentence) {
   const text = String(sentence || '').replace(CUSTOMER_BOOKING_RE, ' ');
-  return VISIT_CLAIMS.flatMap(({ re, kind }) => [...text.matchAll(new RegExp(re.source, 'gi'))]
+  const staticMatches = VISIT_CLAIMS.flatMap(({ re, kind }) => [...text.matchAll(new RegExp(re.source, 'gi'))]
     .map((match) => ({ kind, match, before: text.slice(0, match.index) })));
+  return [...staticMatches, ...coordinatedClauseClaims(text)];
+}
+
+// A genuine provider PROMISE — a verb or an unmistakably future claim — as
+// opposed to a sentence that is only classified as a "claim" because it
+// names the visit as a bare noun ("the day before your next visit" inside
+// customer prep advice). Used only to scope the relational-date anchor
+// exemption below: a customer instruction that merely mentions the next
+// visit is not itself a promise about when we return.
+function isProviderVisitPromise(sentence) {
+  return visitClaimMatches(sentence).some(({ kind }) => kind !== 'noun');
 }
 
 function isVisitClaim(sentence) {
@@ -317,8 +395,15 @@ function dayPeriod(text) {
   return meridiem ? `${meridiem[1].toUpperCase()}M` : null;
 }
 
-function durationSpans(text) {
-  return [...String(text).matchAll(new RegExp(RELATIVE_DURATION_RE.source, 'gi'))].map((match) => durationSpan(match[0]));
+// A duration governed by a visit word just before it: "visit in 10–14
+// days", "return within 2 weeks", "follow-up in 30 days".
+const VISIT_DURATION_RE = new RegExp(
+  String.raw`\b(?:${VISIT_VERB}|visits?|appointments?|follow[-\s]?ups?|rechecks?|re-?treatments?)\b(?:\s+[a-z’']+){0,2}?\s+(${RELATIVE_DURATION_RE.source})`,
+  'gi',
+);
+
+function visitDurationSpans(text) {
+  return [...String(text).matchAll(VISIT_DURATION_RE)].map((match) => durationSpan(match[1]));
 }
 
 function durationSpan(text) {
@@ -427,8 +512,31 @@ const regexTokens = (re, text) => [...text.matchAll(new RegExp(re.source, re.fla
 
 const TOKEN_RULES = [
   {
+    // A relational date ("the day after Monday", "two days after August 3")
+    // is never the visit's own date, even when the weekday or date it names
+    // agrees. First, so the date inside it is consumed with it rather than
+    // judged alone. Timing anchored on the visit itself is preparation
+    // advice unless the sentence promises our return ("Mow the day before
+    // your next visit" stays; "We will return the day before your next
+    // visit" does not).
     claimOnly: true,
-    find: (text) => regexTokens(RELATIVE_DURATION_RE, text),
+    find: (text) => regexTokens(RELATIONAL_DATE_RE, text)
+      .filter(({ match }) => !(RELATIONAL_DATE_ANCHOR_RE.test(match[1]) && !isProviderVisitPromise(text))),
+    problem: ({ raw }) => `ungrounded_relative_date:${lower(raw)}`,
+  },
+  {
+    // A span of time is visit timing only when it times the visit: always in
+    // a promise of our return, and in a sentence that merely mentions a visit
+    // only when attached to it ("your follow-up visit in 10–14 days"), never
+    // outcome timing beside it ("Results should appear within 2 weeks after
+    // your visit").
+    claimOnly: true,
+    find: (text) => {
+      const tokens = regexTokens(RELATIVE_DURATION_RE, text);
+      if (isProviderVisitPromise(text)) return tokens;
+      const attached = [...text.matchAll(VISIT_DURATION_RE)].map((m) => m.index + m[0].length - m[1].length);
+      return tokens.filter(({ index }) => attached.includes(index));
+    },
     problem: ({ raw }, expected) => {
       const span = durationSpan(raw);
       return ratifiedSpan(span, expected.ratifiedSpans) ? null : `ungrounded_relative_date:${span.raw}`;
@@ -477,14 +585,6 @@ const TOKEN_RULES = [
   {
     // A relative date is never the authoritative visit, which is dated.
     find: (text) => regexTokens(RELATIVE_APPOINTMENT_DATE_RE, text),
-    problem: ({ raw }) => `ungrounded_relative_date:${lower(raw)}`,
-  },
-  {
-    // A relational date ("the day after Monday") is never the authoritative
-    // visit either, even when the weekday it names agrees — masked here so
-    // the plain-weekday rule below never separately re-checks that token.
-    claimOnly: true,
-    find: (text) => regexTokens(RELATIONAL_DATE_RE, text),
     problem: ({ raw }) => `ungrounded_relative_date:${lower(raw)}`,
   },
   {
@@ -553,22 +653,22 @@ function expectedAppointment(facts, groundedCare) {
     day: date ? Number(date[3]) : null,
     window,
     periods: windowPeriods(window),
-    // Only a duration from a sentence that is itself an appointment/visit
-    // claim can ground a relative-duration visit promise ("A follow-up
-    // visit in 10–14 days is recommended" grounds "in 14 days"). Outcome
-    // timing makes no visit claim ("Results should appear within 2 weeks")
-    // and must never ground one (codex P1 on #5055 followups): "We will be
-    // back within 2 weeks" would otherwise pass as if the technician had
-    // said so.
-    ratifiedSpans: groundedCare
-      .filter((sentence) => isVisitClaim(sentence))
-      .flatMap((sentence) => durationSpans(normalizeTemporalText(sentence))),
+    // Only a duration attached to the visit itself ("a follow-up visit in
+    // 10–14 days", "we will return in 2 weeks") can ground a
+    // relative-duration visit promise. Outcome timing never does, even in a
+    // sentence that mentions a visit ("Results should appear within 2 weeks
+    // after your visit") — codex P1 on #5055 follow-ups.
+    ratifiedSpans: groundedCare.flatMap((sentence) => visitDurationSpans(normalizeTemporalText(sentence))),
   };
 }
 
-// Every temporal token in a future visit claim, and every appointment-shaped
-// token elsewhere, must agree with the typed report's authoritative
-// appointment facts.
+// With a visit on the schedule, the narrative never says when we return
+// (owner ruling 2026-09-28): every temporal token in a future visit claim is
+// a problem even when it agrees — the report's upcoming-visits section is
+// the one place the date appears. With none scheduled, every temporal token
+// in a future visit claim is ungrounded except a duration the ratified copy
+// attached to the visit. Appointment-shaped tokens outside a claim are
+// judged against the schedule either way.
 function nextVisitProblems(text, facts, options = {}) {
   const groundedCare = options.groundedCareExemptions || [];
   // One exemption boundary before every scan: ratified care copied verbatim
@@ -578,33 +678,38 @@ function nextVisitProblems(text, facts, options = {}) {
     return care && !isFutureVisitClaim(care) ? copy.replaceAll(care, ' ') : copy;
   }, String(text));
   const expected = expectedAppointment(facts, groundedCare);
+  const scheduled = Boolean(facts?.nextVisit);
   const problems = [];
   for (const sentence of splitSentences(exemptText)) {
     if (describesCompletedVisit(sentence)) continue;
-    for (const token of temporalTokens(normalizeTemporalText(sentence), isVisitClaim(sentence))) {
+    const claim = isVisitClaim(sentence);
+    for (const token of temporalTokens(normalizeTemporalText(sentence), claim)) {
+      if (scheduled && claim) {
+        problems.push(`visit_timing_stated:${lower(token.raw)}`);
+        continue;
+      }
       problems.push(...[token.rule.problem(token, expected)].flat().filter(Boolean));
     }
   }
   return problems;
 }
 
-// Ratified copy (Today's Result, next step, recap) that promises a visit at
-// a time the authoritative next visit contradicts is stale. It is removed
-// sentence by sentence before the copy reaches any consumer (the prompt, the
-// deterministic fallback, the mandatory-care append, the care exemptions), so
-// no path can publish it beside the dated visit. Only future visit claims
-// are judged: a sentence about the completed visit ("At today's September 28
-// visit, we inspected the traps") is kept. A sentence grounds its own
-// recommended span, as it would in the model's copy. With no authoritative
-// visit there is nothing to contradict and the copy is kept as written.
-function withoutStaleVisitClaims(block, nextVisit) {
+// With a visit on the schedule, ratified copy (Today's Result, next step,
+// recap) loses every future visit claim that says when (owner ruling
+// 2026-09-28), agreeing or not, before the copy reaches any consumer (the
+// prompt, the deterministic fallback, the mandatory-care append, the care
+// exemptions). A visit claim with no timing ("We will check the traps at
+// your next visit") and a sentence about the completed visit ("At today's
+// September 28 visit, we inspected the traps") are kept. With nothing
+// scheduled the copy is kept as written.
+function withoutTimedVisitClaims(block, nextVisit) {
   if (!nextVisit) return block;
   return splitSentences(block)
     .filter((sentence) => !isFutureVisitClaim(sentence)
-      || !nextVisitProblems(sentence, { nextVisit }, { groundedCareExemptions: [sentence] }).length)
+      || !temporalTokens(normalizeTemporalText(sentence), true).length)
     .join(' ');
 }
 
 module.exports = {
-  nextVisitProblems, isVisitClaim, splitSentences, withoutStaleVisitClaims,
+  nextVisitProblems, isVisitClaim, splitSentences, withoutTimedVisitClaims,
 };
