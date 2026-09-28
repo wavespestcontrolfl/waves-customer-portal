@@ -6,8 +6,10 @@
  * where they are stored, who writes them and which report section reads them.
  * This suite fails when that map drifts from the code: a renamed storage key,
  * a moved reader, a gap that silently closed (or opened) without the doc
- * saying so. Plain file reads and string searches — no DB, no module loading
- * beyond the registry itself.
+ * saying so. Plain file reads and string searches — no DB. Besides the
+ * registry it loads only the DB-free modules the typed facts are generated
+ * from (project-types.js, activity-indicators.js), to re-derive them
+ * independently.
  */
 const fs = require('fs');
 const path = require('path');
@@ -15,7 +17,12 @@ const {
   VISIT_FACTS_CONTRACT,
   EXCLUDED_SERVICE_LINES,
   RETIRED_CATALOG_KEYS,
+  TYPED_REPORT_BUILDERS,
+  REPORT_DATA_TYPED_AREA_FIELD_KEYS,
 } = require('../config/visit-facts-contract');
+const { PROJECT_TYPES } = require('../services/project-types');
+const { REQUIRED_FINDINGS_FIELDS } = require('../services/service-report/activity-indicators');
+const { renderTypedFactsBlock, BLOCK_START, BLOCK_END } = require('../scripts/generate-visit-facts-doc');
 
 const REPO_ROOT = path.join(__dirname, '..', '..');
 const DOC_PATH = path.join(REPO_ROOT, 'docs', 'design', 'visit-facts-contract.md');
@@ -46,6 +53,16 @@ const allFacts = Object.entries(VISIT_FACTS_CONTRACT).flatMap(([line, def]) => (
 ));
 const label = ({ line, fact }) => `${line}.${fact.key}`;
 
+function readDoc() {
+  return fs.readFileSync(DOC_PATH, 'utf8');
+}
+
+/** The body of the doc's `## Known gaps` section. */
+function knownGapsSection(doc) {
+  const match = doc.match(/^## Known gaps\s*$([\s\S]*?)(?=^## |(?![\s\S]))/m);
+  return match ? match[1] : null;
+}
+
 describe('visit facts contract registry', () => {
   test('lines and facts have a valid shape, keys unique per line', () => {
     const problems = [];
@@ -69,6 +86,9 @@ describe('visit facts contract registry', () => {
         if (fact.status !== undefined && fact.status !== 'gap') problems.push(`${id}: status`);
         if (fact.storage === null) {
           if (fact.status !== 'gap') problems.push(`${id}: null storage without status gap`);
+          // Nothing can write a fact that has no storage; a writer here would
+          // be an unchecked (and false) edge.
+          if ((fact.writers || []).length) problems.push(`${id}: null storage but writers declared`);
         } else if (typeof fact.storage !== 'string' || !/^[a-z_]+(\.[A-Za-z0-9_]+(\[\])?)+$/.test(fact.storage)) {
           problems.push(`${id}: storage must be one dotted path`);
         }
@@ -84,6 +104,32 @@ describe('visit facts contract registry', () => {
             problems.push(`${id}: reader shape`);
           }
         }
+        if (fact.qualifiedBy !== undefined && !def.facts.some((f) => f.key === fact.qualifiedBy)) {
+          problems.push(`${id}: qualifiedBy ${fact.qualifiedBy} is not a fact on this line`);
+        }
+        if (fact.typedForm !== undefined && fact.typedForm !== def.typedForm) {
+          problems.push(`${id}: typed fact from form ${fact.typedForm} on a line whose typedForm is ${def.typedForm}`);
+        }
+      }
+    }
+    expect(problems).toEqual([]);
+  });
+
+  // A measurement without its unit is not interpretable: every
+  // service_products measurement column is registered with its unit column.
+  test('every product measurement is registered with its unit fact', () => {
+    const MEASUREMENT_UNITS = {
+      'service_products.area_value': 'service_products.area_unit',
+      'service_products.total_amount': 'service_products.amount_unit',
+      'service_products.application_rate': 'service_products.rate_unit',
+    };
+    const problems = [];
+    for (const [line, def] of Object.entries(VISIT_FACTS_CONTRACT)) {
+      for (const fact of def.facts) {
+        const unitStorage = MEASUREMENT_UNITS[fact.storage];
+        if (!unitStorage) continue;
+        const unit = def.facts.find((f) => f.key === fact.qualifiedBy);
+        if (!unit || unit.storage !== unitStorage) problems.push(`${line}.${fact.key}: not qualifiedBy a ${unitStorage} fact`);
       }
     }
     expect(problems).toEqual([]);
@@ -133,18 +179,34 @@ describe('visit facts contract registry', () => {
     expect(unread).toEqual([]);
   });
 
-  test('gap facts have no readers and are listed in the doc Known gaps section', () => {
-    const doc = fs.readFileSync(DOC_PATH, 'utf8');
-    const match = doc.match(/^## Known gaps\s*$([\s\S]*?)(?=^## |(?![\s\S]))/m);
-    expect(match).not.toBeNull();
-    const knownGaps = match[1];
+  // Known gaps lists each gap as a bullet naming `<line>.<fact key>`. Both
+  // directions are checked: every registry gap is listed, and every listed
+  // gap is still a `status: 'gap'` fact on that line (a gap deleted from the
+  // registry while the doc still promises it fails here).
+  test('gap facts have no readers and match the doc Known gaps list both ways', () => {
+    const knownGaps = knownGapsSection(readDoc());
+    expect(knownGaps).not.toBeNull();
+    const bullets = knownGaps.split('\n').filter((l) => /^- /.test(l));
     const problems = [];
+    const documented = new Set();
+    for (const bullet of bullets) {
+      const m = bullet.match(/^- `([a-z_]+)\.([a-z0-9_]+)`:/);
+      if (!m) {
+        problems.push(`Known gaps bullet does not start with \`<line>.<fact>\`: ${bullet.slice(0, 60)}`);
+        continue;
+      }
+      const [, line, key] = m;
+      documented.add(`${line}.${key}`);
+      const fact = (VISIT_FACTS_CONTRACT[line]?.facts || []).find((f) => f.key === key);
+      if (!fact) problems.push(`${line}.${key}: in Known gaps but not a registry fact`);
+      else if (fact.status !== 'gap') problems.push(`${line}.${key}: in Known gaps but not status gap`);
+    }
     for (const entry of allFacts) {
       if (entry.fact.status !== 'gap') continue;
       if (entry.fact.readers.length) problems.push(`${label(entry)}: gap fact has readers`);
-      if (!knownGaps.includes(`\`${entry.fact.key}\``)) problems.push(`${label(entry)}: missing from Known gaps`);
+      if (!documented.has(label(entry))) problems.push(`${label(entry)}: missing from Known gaps`);
     }
-    // And the reverse: a fact with no reader must be declared a gap.
+    // A fact with no reader must be declared a gap.
     for (const entry of allFacts) {
       if (!entry.fact.readers.length && entry.fact.status !== 'gap') {
         problems.push(`${label(entry)}: no readers but not status gap`);
@@ -180,5 +242,94 @@ describe('visit facts contract registry', () => {
       }
     }
     expect(problems).toEqual([]);
+  });
+
+  // ---------------------------------------------------------------------
+  // Typed lines are generated from project-types.js; these re-derive the
+  // expectation independently so the generator cannot be bypassed.
+  // ---------------------------------------------------------------------
+
+  const typedLines = Object.entries(VISIT_FACTS_CONTRACT).filter(([, def]) => def.typedForm);
+
+  test('each typed line carries exactly its form\'s fields, requiredness from REQUIRED_FINDINGS_FIELDS', () => {
+    expect(typedLines.length).toBeGreaterThan(0);
+    const problems = [];
+    for (const [line, def] of typedLines) {
+      const cfg = PROJECT_TYPES[def.typedForm];
+      if (!cfg) {
+        problems.push(`${line}: typedForm ${def.typedForm} is not a PROJECT_TYPES key`);
+        continue;
+      }
+      const required = new Set(REQUIRED_FINDINGS_FIELDS[def.typedForm] || []);
+      const fields = new Map(cfg.findingsFields.map((f) => [f.key, f]));
+      for (const key of required) {
+        if (!fields.has(key)) problems.push(`${line}: REQUIRED_FINDINGS_FIELDS.${def.typedForm} names ${key}, not a field of the form`);
+      }
+      const expected = cfg.findingsFields
+        .filter((f) => !f.internal || required.has(f.key))
+        .map((f) => f.key)
+        .sort();
+      const typed = def.facts.filter((f) => f.typedForm === def.typedForm);
+      expect({ line, keys: typed.map((f) => f.key).sort() }).toEqual({ line, keys: expected });
+      for (const fact of def.facts) {
+        if (fact.typedForm === undefined && fact.storage && fact.storage.startsWith('service_data.typedReportSnapshot.')) {
+          problems.push(`${line}.${fact.key}: hand-written typed fact (generate it from ${def.typedForm})`);
+        }
+      }
+      for (const fact of typed) {
+        const shouldRequire = required.has(fact.key);
+        if ((fact.whenMissing === 'required') !== shouldRequire) {
+          problems.push(`${line}.${fact.key}: whenMissing ${fact.whenMissing}, REQUIRED_FINDINGS_FIELDS says ${shouldRequire ? 'required' : 'optional'}`);
+        }
+        const field = fields.get(fact.key);
+        if (fact.label !== field.label || fact.fieldType !== field.type) problems.push(`${line}.${fact.key}: label/type differ from project-types.js`);
+      }
+    }
+    expect(problems).toEqual([]);
+  });
+
+  test('typed builders read exactly the keys registered for them, all defined by the form', () => {
+    const problems = [];
+    for (const [name, builder] of Object.entries(TYPED_REPORT_BUILDERS)) {
+      const src = readRepoFile(builder.file) || '';
+      const reads = [...new Set([...src.matchAll(/\bvalues\??\.([a-z][a-z0-9_]*)\b/g)].map((m) => m[1]))].sort();
+      expect({ builder: name, reads }).toEqual({ builder: name, reads: [...builder.keys].sort() });
+      const fieldKeys = new Set((PROJECT_TYPES[builder.typedForm]?.findingsFields || []).map((f) => f.key));
+      for (const key of reads) {
+        if (!fieldKeys.has(key)) problems.push(`${builder.file} reads values.${key}, which ${builder.typedForm} does not define`);
+      }
+      for (const key of Object.keys(builder.sections)) {
+        if (!builder.keys.includes(key)) problems.push(`${name}: section label for ${key}, which the builder does not read`);
+      }
+      const lines = typedLines.filter(([, def]) => def.typedForm === builder.typedForm);
+      if (!lines.length) problems.push(`${name}: no line completes through ${builder.typedForm}`);
+      for (const [line, def] of lines) {
+        for (const key of builder.keys) {
+          const fact = def.facts.find((f) => f.key === key && f.typedForm === builder.typedForm);
+          if (!fact || !fact.readers.some((r) => r.file === builder.file)) {
+            problems.push(`${line}.${key}: read by ${builder.file} but has no reader edge to it`);
+          }
+        }
+      }
+    }
+    expect(problems).toEqual([]);
+  });
+
+  test('the typed areas key list matches report-data.js TYPED_AREA_FIELD_KEYS', () => {
+    const src = readRepoFile('server/services/service-report/report-data.js') || '';
+    const m = src.match(/const TYPED_AREA_FIELD_KEYS = \[([^\]]*)\]/);
+    expect(m).not.toBeNull();
+    const keys = [...m[1].matchAll(/'([a-z_]+)'/g)].map((x) => x[1]);
+    expect(keys).toEqual([...REPORT_DATA_TYPED_AREA_FIELD_KEYS]);
+  });
+
+  test('the doc\'s generated typed facts block matches the registry', () => {
+    const doc = readDoc();
+    const start = doc.indexOf(BLOCK_START);
+    const end = doc.indexOf(BLOCK_END);
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    // Regenerate with: node server/scripts/generate-visit-facts-doc.js
+    expect(doc.slice(start, end + BLOCK_END.length)).toEqual(renderTypedFactsBlock());
   });
 });

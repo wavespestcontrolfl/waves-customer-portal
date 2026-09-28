@@ -2629,6 +2629,8 @@ where it is stored, which files write it, which report section reads it, and
 what the report shows when the fact is missing.
 `server/tests/visit-facts-contract.test.js` checks the registry against the
 code, and `docs/design/visit-facts-contract.md` explains it and lists the
-known gaps. A report section may only make a claim that a registered fact
+known gaps. Typed form facts are generated from `project-types.js`
+(`findingsFields`, with requiredness from `REQUIRED_FINDINGS_FIELDS`), not
+hand-listed. A report section may only make a claim that a registered fact
 supports. The typed forms' field rules stay in
 `specialty-service-completion-contract.md`. No runtime behavior changed.

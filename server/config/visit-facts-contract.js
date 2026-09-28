@@ -21,10 +21,13 @@
  * a fact's storage key string (or the declared writerSymbol / readerSymbol)
  * actually appears in EVERY declared writer and reader file, for every
  * storage family (so a rename, a removal or a stale writer entry fails CI
- * instead of silently going stale), that every `status: 'gap'` fact is
- * listed in the doc's Known gaps section, that no line lists a retired
- * catalog key, and that no voice-fill line carries an undeclared tap-only
- * fact.
+ * instead of silently going stale), that registry gaps and the doc's Known
+ * gaps list match in both directions, that every product measurement has its
+ * unit fact, that each typed line carries exactly its form's fields with
+ * REQUIRED_FINDINGS_FIELDS requiredness, that each TYPED_REPORT_BUILDERS
+ * file reads exactly its registered keys, that the doc's generated typed
+ * tables are current, that no line lists a retired catalog key, and that no
+ * voice-fill line carries an undeclared tap-only fact.
  *
  * Sibling pattern: server/config/completion-lane-registry.js (routing
  * decisions — which catalog key completes through which form) +
@@ -38,16 +41,24 @@
  * compliance Projects flow (FDACS-13645 / FBC certificate machinery), never
  * a customer Service Report. See EXCLUDED_SERVICE_LINES below.
  *
- * Existing, narrower contract this file does NOT duplicate:
- * docs/design/specialty-service-completion-contract.md owns the typed
- * PROJECT_TYPES forms' tiers, required fields, zero options and copy
- * templates. The typed lines below list only the fields a report section
- * reads by name; every other non-internal typed field still renders through
- * the generic typed findings list (activity-indicators.js
- * buildTypedReportSnapshot), per that doc.
+ * Typed lines are GENERATED, not hand-listed (typedFormFacts below): each
+ * typed line's facts are its PROJECT_TYPES form's findingsFields
+ * (project-types.js — key, label, field type), `whenMissing: 'required'`
+ * exactly for the keys REQUIRED_FINDINGS_FIELDS (activity-indicators.js)
+ * lists, and named report readers taken from the builders' own key lists
+ * (cockroach-report-v2.js COCKROACH_V2_DASHBOARD_FIELD_KEYS, report-data.js
+ * TYPED_AREA_FIELD_KEYS, the termite-report-v2.js `values.<key>` reads).
+ * Hand-written entries remain only for untyped facts (basic form, products,
+ * photos, assessments) and per-key section labels / notes. The field
+ * options, tiers and copy templates stay owned by
+ * docs/design/specialty-service-completion-contract.md.
  */
 
 'use strict';
+
+const { PROJECT_TYPES } = require('../services/project-types');
+const { REQUIRED_FINDINGS_FIELDS } = require('../services/service-report/activity-indicators');
+const { COCKROACH_V2_DASHBOARD_FIELD_KEYS } = require('../services/service-report/cockroach-report-v2');
 
 /**
  * @typedef {'tap'|'voice'|'prefill'|'derived'|'photo'} FactCapture
@@ -105,6 +116,13 @@
  *   reads this fact yet (must pair with `status: 'gap'`).
  * @property {WhenMissing} whenMissing
  * @property {string} [notes]
+ * @property {string} [qualifiedBy] - on a measurement fact, the key of the
+ *   fact on the same line that holds its unit (a value without its unit is
+ *   not interpretable).
+ * @property {string} [typedForm] - generated typed facts only: the
+ *   PROJECT_TYPES key the field comes from.
+ * @property {string} [fieldType] - generated typed facts only: the
+ *   findingsFields `type` (select / chips / count / …).
  * @property {'gap'} [status] - the fact is needed but no report section
  *   reads it (or nothing records it); MUST have `readers: []` and MUST be
  *   named in docs/design/visit-facts-contract.md's "Known gaps" section.
@@ -121,6 +139,8 @@
  *   RETIRED_CATALOG_KEYS.
  * @property {boolean} voiceFill - voice fill applies to this line (owner
  *   ruling 2026-09-27: every in-scope line).
+ * @property {string} [typedForm] - the PROJECT_TYPES form this line completes
+ *   through; its typed facts are generated from that form (typedFormFacts).
  * @property {VisitFact[]} facts
  */
 
@@ -136,7 +156,7 @@ const SERVICE_PHOTOS = 'server/services/service-photos.js';
 const TURF_HEIGHT_SERVICE = 'server/services/turf-height-service.js';
 const LAWN_ASSESSMENT_ROUTE = 'server/routes/admin-lawn-assessment.js';
 const TREE_SHRUB_ASSESSMENT = 'server/services/tree-shrub-assessment.js';
-const PROJECT_TYPES = 'server/services/project-types.js';
+const PROJECT_TYPES_FILE = 'server/services/project-types.js';
 const TIP_LIBRARY = 'server/services/service-report/tip-library.js';
 const SERVICE_COMPLETION_CHOICES = 'client/src/lib/service-completion-choices.js';
 const ADMIN_SCHEDULE_ROUTE = 'server/routes/admin-schedule.js'; // generate-report (the AI report writer)
@@ -222,23 +242,71 @@ function productFacts() {
     },
     {
       key: 'product_area_value',
-      label: 'Product measured area (value; unit in service_products.area_unit)',
+      label: 'Product measured area (value)',
       capture: ['voice', 'tap'],
       storage: 'service_products.area_value',
+      qualifiedBy: 'product_area_unit',
       writers: [COMPLETE_SERVICE, via(SCHEDULE_PAGE, 'areaValue'), via(FAST_COMPLETE_SHEET, 'areaValue')],
-      readers: [{ file: REPORT_DATA, section: 'What we did / products applied' }],
+      readers: [
+        { file: REPORT_DATA, section: 'What we did / products applied' },
+        { file: LAWN_REPORT_V2, section: 'Treatment card area line (value + unit)' },
+      ],
       whenMissing: 'hidden',
-      notes: 'Required (blocks submit) for perimeter_spray (linear ft) and for methods whose report application needs square feet — see the linear_ft / sqft checks in complete-scheduled-service.js.',
+      notes: 'Required (blocks submit) for perimeter_spray (linear ft) and for methods whose report application needs square feet — see the linear_ft / sqft checks in complete-scheduled-service.js. Fast Complete sends it only for perimeter_spray.',
+    },
+    {
+      key: 'product_area_unit',
+      label: 'Product measured area unit (sq ft / linear ft …)',
+      capture: ['prefill', 'voice', 'tap'],
+      storage: 'service_products.area_unit',
+      writers: [COMPLETE_SERVICE, via(SCHEDULE_PAGE, 'areaUnit'), via(FAST_COMPLETE_SHEET, 'areaUnit')],
+      readers: [
+        { file: REPORT_DATA, section: 'What we did / products applied' },
+        { file: LAWN_REPORT_V2, section: 'Treatment card area line (value + unit)' },
+      ],
+      whenMissing: 'hidden',
+      notes: 'Validated with area_value on completion; lawn-report-v2.js shows an area only when both are present. Fast Complete sends \'linear_ft\' with its perimeter_spray area.',
     },
     {
       key: 'product_total_amount',
-      label: 'Product total amount applied (unit in service_products.amount_unit)',
+      label: 'Product total amount applied',
       capture: ['prefill', 'voice', 'tap'],
       storage: 'service_products.total_amount',
+      qualifiedBy: 'product_amount_unit',
       writers: [COMPLETE_SERVICE, via(SCHEDULE_PAGE, 'totalAmount'), via(FAST_COMPLETE_SHEET, 'totalAmount')],
       readers: [{ file: REPORT_DATA, section: 'What we did / products applied' }],
       whenMissing: 'hidden',
       notes: 'Per-product standard amounts are deferred ("protocols later", owner 2026-09-28); voice fill must never guess an amount.',
+    },
+    {
+      key: 'product_amount_unit',
+      label: 'Product total amount unit (oz / fl oz / lb …)',
+      capture: ['prefill', 'voice', 'tap'],
+      storage: 'service_products.amount_unit',
+      writers: [COMPLETE_SERVICE, via(SCHEDULE_PAGE, 'amountUnit'), via(FAST_COMPLETE_SHEET, 'amountUnit')],
+      readers: [{ file: REPORT_DATA, section: 'What we did / products applied' }],
+      whenMissing: 'hidden',
+      notes: 'The full form prefills it with the rate through resolveRatePrefill (client/src/lib/product-rate-prefill.js); the tech can change it.',
+    },
+    {
+      key: 'product_application_rate',
+      label: 'Product application rate',
+      capture: ['prefill', 'voice', 'tap'],
+      storage: 'service_products.application_rate',
+      qualifiedBy: 'product_rate_unit',
+      writers: [COMPLETE_SERVICE, via(SCHEDULE_PAGE, 'rate:'), via(FAST_COMPLETE_SHEET, 'rate:')],
+      readers: [{ file: REPORT_DATA, section: 'What we did / products applied (rate)' }],
+      whenMissing: 'hidden',
+      notes: 'The client submits it as `rate`; complete-scheduled-service.js stores it as application_rate. Fast Complete sends it only with a rate unit.',
+    },
+    {
+      key: 'product_rate_unit',
+      label: 'Product application rate unit',
+      capture: ['prefill', 'voice', 'tap'],
+      storage: 'service_products.rate_unit',
+      writers: [COMPLETE_SERVICE, via(SCHEDULE_PAGE, 'rateUnit'), via(FAST_COMPLETE_SHEET, 'rateUnit')],
+      readers: [{ file: REPORT_DATA, section: 'What we did / products applied (rate)' }],
+      whenMissing: 'hidden',
     },
   ];
 }
@@ -463,33 +531,158 @@ function photoFacts(opts = {}) {
   ];
 }
 
+// ---------------------------------------------------------------------------
+// Typed facts — GENERATED from the code that defines the typed forms.
+// ---------------------------------------------------------------------------
+
 /**
- * A typed PROJECT_TYPES findings field on the line's PRIMARY typed form,
- * frozen into service_data.typedReportSnapshot (complete-scheduled-service.js).
- * Every active typed catalog key completes through its own primary form
- * since the two-program combos retired (20260831000070); residual
- * pre-retirement combined visits still carry the same keys under
- * service_data.companionReportSnapshots[], which report-data.js and
- * termite-report-v2.js keep reading for those frozen reports. Every typed fact
- * also renders through TYPED_FINDINGS_LIST.
- *
- * Writers: project-types.js declares the field by its key (a rename there
- * fails the test); the form and the server submit/freeze every findings
- * field generically, so they are pinned by their generic symbols.
- * @param {{ key: string, label: string, readers?: VisitFactReader[], whenMissing?: WhenMissing, notes?: string }} def
- * @returns {VisitFact}
+ * report-data.js TYPED_AREA_FIELD_KEYS (not importable here: report-data.js
+ * loads the DB). The contract test parses that literal and fails when this
+ * copy differs.
  */
-function typedFindingFact(def) {
-  return {
-    key: def.key,
-    label: def.label,
-    capture: ['voice', 'tap'],
-    storage: `service_data.typedReportSnapshot.values.${def.key}`,
-    writers: [PROJECT_TYPES, via(COMPLETE_SERVICE, 'typedReportSnapshot'), via(SCHEDULE_PAGE, 'typedFindings')],
-    readers: [TYPED_FINDINGS_LIST, ...(def.readers || [])],
-    whenMissing: def.whenMissing || 'hidden',
-    ...(def.notes ? { notes: def.notes } : {}),
-  };
+const REPORT_DATA_TYPED_AREA_FIELD_KEYS = Object.freeze(['areas_treated', 'spot_treatment_areas', 'treatment_zones']);
+
+/**
+ * Type-specific report builders that read typed values by key
+ * (`values.<key>`). The contract test scans each file's `values.<key>` reads
+ * and requires them to equal `keys` exactly, and every key to be a field of
+ * `typedForm` — so a builder that starts reading a new field (or stops
+ * reading one) fails CI until this table and the generated facts follow.
+ * `sections` labels the report section per key; a key without a label falls
+ * back to `defaultSection`.
+ */
+const TYPED_REPORT_BUILDERS = Object.freeze({
+  cockroach: Object.freeze({
+    typedForm: 'cockroach',
+    file: COCKROACH_REPORT_V2,
+    // The builder's own exported list (the typed tiles skip these keys).
+    keys: Object.freeze([...COCKROACH_V2_DASHBOARD_FIELD_KEYS]),
+    defaultSection: 'Cockroach report dashboard',
+    sections: Object.freeze({
+      species: 'Status + status summary; species label; How you can help',
+      activity_level: '"Activity today" metric + status',
+      activity_locations: '"Areas with activity" metric + status summary',
+      evidence_observed: 'Status reconciliation (resolveCockroachStatus) + status summary + evidence list',
+      conducive_conditions: 'Conducive conditions list (dashboard conditions)',
+      work_completed: '"What we did" (buildWork)',
+      customer_prep: 'How you can help (buildHelp)',
+    }),
+  }),
+  termite_bait_station: Object.freeze({
+    typedForm: 'termite_bait_station',
+    file: TERMITE_REPORT_V2,
+    // termite-report-v2.js has no exported key list; `keys` is exactly its
+    // `values.<key>` reads, which the contract test re-derives from source.
+    keys: Object.freeze([
+      'stations_checked', 'total_stations', 'stations_inaccessible', 'stations_with_activity',
+      'termite_activity', 'activity_signs', 'bait_consumption', 'active_station_location',
+      'bait_actions', 'station_actions', 'conducive_conditions', 'customer_recommendations',
+    ]),
+    defaultSection: 'Termite bait report',
+    sections: Object.freeze({
+      stations_checked: 'Station summary + counts (reconciledSummary)',
+      total_stations: 'Station summary + counts (reconciledSummary)',
+      stations_inaccessible: 'Station summary + counts (reconciledSummary)',
+      stations_with_activity: 'Activity summary + status resolution',
+      termite_activity: 'Status resolution',
+      activity_signs: 'Status resolution',
+      bait_consumption: 'Status resolution + "bait engaged" activity detail',
+      active_station_location: 'Status resolution (active location)',
+      bait_actions: '"Serviced today" claim',
+      station_actions: '"Serviced today" claim',
+      conducive_conditions: 'Primary move (why)',
+      customer_recommendations: 'Primary move',
+    }),
+  }),
+});
+
+/**
+ * The completion validator's own required list for a typed form
+ * (activity-indicators.js REQUIRED_FINDINGS_FIELDS).
+ * @param {string} typedForm
+ * @returns {Set<string>}
+ */
+function requiredTypedKeys(typedForm) {
+  return new Set(REQUIRED_FINDINGS_FIELDS[typedForm] || []);
+}
+
+/**
+ * The findingsFields of a typed form that are visit facts: every
+ * non-internal field (the report shows it), plus an internal field the
+ * completion validator requires (voice fill must still write it). Internal,
+ * optional fields are office-only data, not report facts.
+ * @param {string} typedForm
+ * @returns {Array<Object>} PROJECT_TYPES findingsFields entries
+ */
+function typedFactFields(typedForm) {
+  const cfg = PROJECT_TYPES[typedForm];
+  if (!cfg || !Array.isArray(cfg.findingsFields)) {
+    throw new Error(`visit-facts-contract: unknown typed form ${typedForm}`);
+  }
+  const required = requiredTypedKeys(typedForm);
+  return cfg.findingsFields.filter((field) => !field.internal || required.has(field.key));
+}
+
+/**
+ * Every typed fact of one form, generated from project-types.js. One fact per
+ * typedFactFields entry: its key, label and field type come from the field;
+ * `whenMissing` is 'required' exactly when REQUIRED_FINDINGS_FIELDS lists it;
+ * readers are the generic typed findings list (non-internal fields), the
+ * report-data.js areas reader for TYPED_AREA_FIELD_KEYS, the form's
+ * TYPED_REPORT_BUILDERS entry, and any per-key `readers` override.
+ *
+ * Each value is frozen into service_data.typedReportSnapshot
+ * (complete-scheduled-service.js). Residual pre-retirement combined visits
+ * (20260831000070) carry the same keys under
+ * service_data.companionReportSnapshots[], which report-data.js and
+ * termite-report-v2.js keep reading for those frozen reports.
+ *
+ * Writers: project-types.js declares the key; the form and the server
+ * submit/freeze every findings field generically, so they are pinned by
+ * their generic symbols.
+ * @param {string} typedForm - a PROJECT_TYPES key
+ * @param {{ readers?: Record<string, VisitFactReader[]>, notes?: Record<string, string> }} [overrides]
+ * @returns {VisitFact[]}
+ */
+function typedFormFacts(typedForm, overrides = {}) {
+  const required = requiredTypedKeys(typedForm);
+  const extraReaders = overrides.readers || {};
+  const extraNotes = overrides.notes || {};
+  const builder = Object.values(TYPED_REPORT_BUILDERS).find((b) => b.typedForm === typedForm) || null;
+  for (const key of [...Object.keys(extraReaders), ...Object.keys(extraNotes)]) {
+    if (!PROJECT_TYPES[typedForm].findingsFields.some((f) => f.key === key)) {
+      throw new Error(`visit-facts-contract: override for ${typedForm}.${key}, which project-types.js does not define`);
+    }
+  }
+  return typedFactFields(typedForm).map((field) => {
+    const readers = [];
+    if (!field.internal) readers.push(TYPED_FINDINGS_LIST);
+    if (REPORT_DATA_TYPED_AREA_FIELD_KEYS.includes(field.key)) {
+      readers.push({ file: REPORT_DATA, section: 'Areas treated (TYPED_AREA_FIELD_KEYS)' });
+    }
+    if (builder && builder.keys.includes(field.key)) {
+      readers.push({ file: builder.file, section: builder.sections[field.key] || builder.defaultSection });
+    }
+    readers.push(...(extraReaders[field.key] || []));
+    const notes = [];
+    if (field.internal) notes.push('Internal field (never shown on the report); registered because REQUIRED_FINDINGS_FIELDS requires it.');
+    if (field.requiredUnless) {
+      notes.push(`Required unless ${field.requiredUnless.field} = '${field.requiredUnless.value}' (project-types.js requiredUnless); not in REQUIRED_FINDINGS_FIELDS.`);
+    }
+    if (extraNotes[field.key]) notes.push(extraNotes[field.key]);
+    return {
+      key: field.key,
+      label: field.label,
+      typedForm,
+      fieldType: field.type,
+      capture: ['voice', 'tap'],
+      storage: `service_data.typedReportSnapshot.values.${field.key}`,
+      writers: [PROJECT_TYPES_FILE, via(COMPLETE_SERVICE, 'typedReportSnapshot'), via(SCHEDULE_PAGE, 'typedFindings')],
+      readers,
+      whenMissing: required.has(field.key) ? 'required' : 'hidden',
+      ...(notes.length ? { notes: notes.join(' ') } : {}),
+    };
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -507,7 +700,7 @@ const EXCLUDED_SERVICE_LINES = Object.freeze({
 // Mapped to the migration that retired each; the test verifies the file
 // names the key and that no line lists it in catalogKeys. Their residual
 // frozen reports still render through the SAME facts as the active keys
-// that replaced them (see typedFindingFact).
+// that replaced them (see typedFormFacts).
 // ---------------------------------------------------------------------------
 
 const RETIRED_CATALOG_KEYS = Object.freeze({
@@ -576,7 +769,7 @@ const VISIT_FACTS_CONTRACT = {
         label: 'Customer recap text from Fast Complete',
         capture: ['voice', 'tap'],
         storage: null,
-        writers: [FAST_COMPLETE_SHEET],
+        writers: [],
         readers: [],
         whenMissing: 'hidden',
         status: 'gap',
@@ -631,19 +824,24 @@ const VISIT_FACTS_CONTRACT = {
     ],
   },
 
+  // -------------------------------------------------------------------------
+  // Typed lines — one per PROJECT_TYPES form. Their typed facts are
+  // GENERATED (typedFormFacts); only per-key extra readers / notes and the
+  // untyped facts (assessments, products, photos, gaps) are written here.
+  // -------------------------------------------------------------------------
+
   tree_shrub: {
     label: 'Tree & shrub (typed tree_shrub form)',
+    typedForm: 'tree_shrub',
     catalogKeys: ['tree_shrub_program', 'tree_shrub_6week', 'tree_shrub_quarterly'],
     voiceFill: true,
     facts: [
-      typedFindingFact({
-        key: 'areas_treated',
-        label: 'Areas treated',
-        readers: [{ file: REPORT_DATA, section: 'Areas treated (TYPED_AREA_FIELD_KEYS)' }],
+      ...typedFormFacts('tree_shrub', {
+        readers: {
+          landscape_condition: [{ file: ACTIVITY_INDICATORS, section: 'Today\'s Result tree & shrub story (buildTodaysResult)' }],
+          plant_groups: [{ file: ACTIVITY_INDICATORS, section: 'Today\'s Result tree & shrub story (buildTodaysResult)' }],
+        },
       }),
-      typedFindingFact({ key: 'observed_conditions', label: 'Observed plant conditions' }),
-      typedFindingFact({ key: 'treatments_completed', label: 'Treatments completed' }),
-      typedFindingFact({ key: 'customer_recommendations', label: 'Customer recommendations' }),
       {
         key: 'tree_shrub_assessment_observations',
         label: 'Tree & shrub assessment observations (photo scoring narrative)',
@@ -664,54 +862,16 @@ const VISIT_FACTS_CONTRACT = {
 
   cockroach: {
     label: 'Cockroach (typed cockroach form: control + German roach packages)',
+    typedForm: 'cockroach',
     catalogKeys: ['cockroach_control', 'german_roach', 'german_roach_initial'],
     voiceFill: true,
     facts: [
-      typedFindingFact({
-        key: 'species',
-        label: 'Cockroach species',
-        readers: [{ file: COCKROACH_REPORT_V2, section: 'Status + status summary; species label; How you can help' }],
-        whenMissing: 'required',
-        notes: 'Required on the cockroach form (activity-indicators.js REQUIRED_FINDINGS_FIELDS).',
-      }),
-      typedFindingFact({
-        key: 'activity_level',
-        label: 'Cockroach activity level',
-        readers: [{ file: COCKROACH_REPORT_V2, section: '"Activity today" metric + status' }],
-        whenMissing: 'required',
-        notes: 'Required on the cockroach form. cross-sell.js reads activity_level only from a COMPANION cockroach snapshot under a non-cockroach primary, so it is not a reader for this primary-form line.',
-      }),
-      typedFindingFact({
-        key: 'activity_locations',
-        label: 'Where activity was noted',
-        readers: [{ file: COCKROACH_REPORT_V2, section: '"Areas with activity" metric + status summary' }],
-      }),
-      typedFindingFact({
-        key: 'evidence_observed',
-        label: 'Evidence observed',
-        readers: [{ file: COCKROACH_REPORT_V2, section: 'Status reconciliation (resolveCockroachStatus) + status summary + evidence list' }],
-        notes: 'Evidence can reconcile the status away from the activity select ("Signs found").',
-      }),
-      typedFindingFact({
-        key: 'conducive_conditions',
-        label: 'Conducive conditions',
-        readers: [{ file: COCKROACH_REPORT_V2, section: 'Conducive conditions list (dashboard conditions)' }],
-      }),
-      typedFindingFact({
-        key: 'areas_treated',
-        label: 'Areas treated',
-        readers: [{ file: REPORT_DATA, section: 'Areas treated (TYPED_AREA_FIELD_KEYS)' }],
-      }),
-      typedFindingFact({
-        key: 'work_completed',
-        label: 'Work completed today (treatment chips)',
-        readers: [{ file: COCKROACH_REPORT_V2, section: '"What we did" (buildWork)' }],
-        notes: 'buildWork reads ONLY these chips — see gap cockroach_work_from_products.',
-      }),
-      typedFindingFact({
-        key: 'customer_prep',
-        label: 'Customer prep / aftercare',
-        readers: [{ file: COCKROACH_REPORT_V2, section: 'How you can help (buildHelp)' }],
+      ...typedFormFacts('cockroach', {
+        notes: {
+          activity_level: 'cross-sell.js reads activity_level only from a COMPANION cockroach snapshot under a non-cockroach primary, so it is not a reader for this primary-form line.',
+          evidence_observed: 'Evidence can reconcile the status away from the activity select ("Signs found").',
+          work_completed: 'buildWork reads ONLY these chips — see gap cockroach_work_from_products.',
+        },
       }),
       ...productFacts(),
       ...photoFacts(),
@@ -731,148 +891,110 @@ const VISIT_FACTS_CONTRACT = {
 
   termite_bait: {
     label: 'Termite bait stations (typed termite_bait_station form)',
+    typedForm: 'termite_bait_station',
     catalogKeys: ['termite_bait', 'termite_active_annual', 'termite_active_bait_quarterly', 'termite_monitoring', 'termite_cartridge_replacement', 'termite_installation_setup'],
     voiceFill: true,
     facts: [
-      typedFindingFact({
-        key: 'stations_checked', label: 'Stations checked (count)',
-        readers: [{ file: TERMITE_REPORT_V2, section: 'Station summary + counts (reconciledSummary)' }],
-      }),
-      typedFindingFact({
-        key: 'total_stations', label: 'Total stations on property (count)',
-        readers: [{ file: TERMITE_REPORT_V2, section: 'Station summary + counts (reconciledSummary)' }],
-      }),
-      typedFindingFact({
-        key: 'stations_inaccessible', label: 'Stations inaccessible (count)',
-        readers: [{ file: TERMITE_REPORT_V2, section: 'Station summary + counts (reconciledSummary)' }],
-      }),
-      typedFindingFact({
-        key: 'stations_with_activity', label: 'Stations with termite activity (count)',
-        readers: [{ file: TERMITE_REPORT_V2, section: 'Activity summary + status resolution' }],
-      }),
-      typedFindingFact({
-        key: 'termite_activity', label: 'Termite activity (none / active / previous feeding)',
-        readers: [
-          { file: TERMITE_REPORT_V2, section: 'Status resolution' },
-          { file: CROSS_SELL, section: 'Cross-sell V2 findings signal (termite)' },
-        ],
-      }),
-      typedFindingFact({
-        key: 'activity_signs', label: 'Activity signs',
-        readers: [{ file: TERMITE_REPORT_V2, section: 'Status resolution' }],
-      }),
-      typedFindingFact({
-        key: 'bait_consumption', label: 'Bait consumption level',
-        readers: [{ file: TERMITE_REPORT_V2, section: 'Status resolution + "bait engaged" activity detail' }],
-        notes: 'cross-sell.js reads bait_consumption only for rodent_bait_station snapshots; the termite signal is termite_activity alone.',
-      }),
-      typedFindingFact({
-        key: 'active_station_location', label: 'Active station number / location',
-        readers: [{ file: TERMITE_REPORT_V2, section: 'Status resolution (active location)' }],
-      }),
-      typedFindingFact({
-        key: 'bait_actions', label: 'Bait actions',
-        readers: [{ file: TERMITE_REPORT_V2, section: '"Serviced today" claim' }],
-      }),
-      typedFindingFact({
-        key: 'station_actions', label: 'Station actions',
-        readers: [{ file: TERMITE_REPORT_V2, section: '"Serviced today" claim' }],
-      }),
-      typedFindingFact({
-        key: 'conducive_conditions', label: 'Conducive conditions',
-        readers: [{ file: TERMITE_REPORT_V2, section: 'Primary move (why)' }],
-      }),
-      typedFindingFact({
-        key: 'customer_recommendations', label: 'Customer recommendations (bait program)',
-        readers: [{ file: TERMITE_REPORT_V2, section: 'Primary move' }],
+      ...typedFormFacts('termite_bait_station', {
+        readers: {
+          termite_activity: [{ file: CROSS_SELL, section: 'Cross-sell V2 findings signal (termite)' }],
+        },
+        notes: {
+          bait_consumption: 'cross-sell.js reads bait_consumption only for rodent_bait_station snapshots; the termite signal is termite_activity alone.',
+        },
       }),
       ...productFacts(),
       ...photoFacts(),
     ],
   },
 
-  rodent: {
-    label: 'Rodent trapping + exclusion (typed)',
+  rodent_trapping: {
+    label: 'Rodent trapping (typed rodent_trapping form, incl. exclusion / sanitation combos)',
+    typedForm: 'rodent_trapping',
     catalogKeys: [
-      // typed rodent_trapping form
       'rodent_trapping', 'rodent_trapping_exclusion', 'rodent_trapping_sanitation', 'rodent_trapping_exclusion_sanitation',
       'rodent_trapping_followup', 'rodent_trap_check_additional',
       'trap_only_retainer_monthly', 'trap_only_retainer_standard', 'trap_only_retainer_plus',
-      // typed rodent_exclusion form
-      'rodent_exclusion', 'rodent_exclusion_only', 'rodent_bird_box', 'rodent_wire_mesh',
     ],
     voiceFill: true,
     facts: [
-      typedFindingFact({
-        key: 'species',
-        label: 'Rodent species',
-        readers: [{ file: RODENT_REPORT_NARRATIVE, section: 'Species grounding for the narrative' }],
-        whenMissing: 'required',
-        notes: 'Required on the rodent_trapping form (REQUIRED_FINDINGS_FIELDS); the rodent_exclusion form has no species field.',
+      ...typedFormFacts('rodent_trapping', {
+        readers: {
+          species: [{ file: RODENT_REPORT_NARRATIVE, section: 'Species grounding for the narrative' }],
+          trap_visit_type: [
+            { file: ACTIVITY_INDICATORS, section: 'Today\'s Result trap-setup wording (isInitialRodentTrapSetup)' },
+            { file: RODENT_REPORT_NARRATIVE, section: 'Narrative visitStage "initial_trap_setup"', readerSymbol: 'isInitialRodentTrapSetup' },
+          ],
+          traps_checked: [{ file: REPORT_DATA, section: 'Trap counts (station summary)' }],
+          captures: [
+            { file: RODENT_REPORT_NARRATIVE, section: 'Grounded capture sentence' },
+            { file: CROSS_SELL, section: 'Cross-sell V2 findings signal (rodent trapping)' },
+          ],
+        },
       }),
-      typedFindingFact({
-        key: 'traps_checked',
-        label: 'Traps checked / set (count)',
-        readers: [{ file: REPORT_DATA, section: 'Trap counts (station summary)' }],
+      ...productFacts(),
+      ...photoFacts(),
+    ],
+  },
+
+  rodent_exclusion: {
+    label: 'Rodent exclusion (typed rodent_exclusion form)',
+    typedForm: 'rodent_exclusion',
+    catalogKeys: ['rodent_exclusion', 'rodent_exclusion_only', 'rodent_bird_box', 'rodent_wire_mesh'],
+    voiceFill: true,
+    facts: [
+      ...typedFormFacts('rodent_exclusion', {
+        readers: {
+          exclusion_work_completed: [{ file: ACTIVITY_INDICATORS, section: 'Today\'s Result rodent exclusion story (buildTodaysResult)' }],
+          remaining_concerns: [{ file: ACTIVITY_INDICATORS, section: 'Today\'s Result rodent exclusion story (buildTodaysResult)' }],
+        },
       }),
-      typedFindingFact({
-        key: 'captures',
-        label: 'Captures (count)',
-        readers: [
-          { file: RODENT_REPORT_NARRATIVE, section: 'Grounded capture sentence' },
-          { file: CROSS_SELL, section: 'Cross-sell V2 findings signal (rodent trapping)' },
-        ],
+      ...productFacts(),
+      ...photoFacts(),
+    ],
+  },
+
+  rodent_bait_station: {
+    label: 'Rodent bait stations (typed rodent_bait_station form)',
+    typedForm: 'rodent_bait_station',
+    catalogKeys: ['rodent_bait_quarterly', 'rodent_bait_setup'],
+    voiceFill: true,
+    facts: [
+      ...typedFormFacts('rodent_bait_station', {
+        readers: {
+          bait_consumption: [{ file: CROSS_SELL, section: 'Cross-sell V2 findings signal (rodent bait stations)' }],
+        },
       }),
-      typedFindingFact({ key: 'entry_points_addressed', label: 'Entry points addressed (exclusion)' }),
-      typedFindingFact({ key: 'exclusion_work_completed', label: 'Exclusion work completed' }),
-      typedFindingFact({ key: 'sanitation_recommendations', label: 'Sanitation recommendations' }),
       ...productFacts(),
       ...photoFacts(),
     ],
   },
 
   wildlife: {
-    label: 'Wildlife trapping (typed)',
+    label: 'Wildlife trapping (typed wildlife_trapping form)',
+    typedForm: 'wildlife_trapping',
     catalogKeys: ['wildlife_trapping'],
     voiceFill: true,
     facts: [
-      typedFindingFact({ key: 'target_animal', label: 'Suspected wildlife species' }),
-      typedFindingFact({ key: 'evidence_observed', label: 'Wildlife evidence observed' }),
-      typedFindingFact({ key: 'entry_points', label: 'Entry / access points' }),
-      typedFindingFact({ key: 'traps_checked', label: 'Traps checked (count)' }),
-      typedFindingFact({ key: 'customer_recommendations', label: 'Customer recommendations' }),
+      ...typedFormFacts('wildlife_trapping'),
       ...photoFacts(),
     ],
   },
 
   flea: {
     label: 'Flea & tick (typed flea form)',
+    typedForm: 'flea',
     catalogKeys: ['flea_tick'],
     voiceFill: true,
     facts: [
-      typedFindingFact({
-        key: 'evidence_level',
-        label: 'Evidence / activity level',
-        readers: [{ file: ACTIVITY_INDICATORS, section: 'Flea activity gauge (score derived from evidence_level)' }],
-        whenMissing: 'required',
-        notes: 'Required on the flea form (activity-indicators.js REQUIRED_FINDINGS_FIELDS).',
-      }),
-      typedFindingFact({
-        key: 'activity_areas',
-        label: 'Activity areas',
-        whenMissing: 'required',
-        notes: 'requiredUnless evidence_level = \'None observed\' (project-types.js).',
-      }),
-      typedFindingFact({
-        key: 'areas_treated',
-        label: 'Areas treated',
-        readers: [{ file: REPORT_DATA, section: 'Areas treated (TYPED_AREA_FIELD_KEYS)' }],
-      }),
-      typedFindingFact({
-        key: 'customer_prep',
-        label: 'Customer prep / aftercare',
-        whenMissing: 'required',
-        notes: 'Required on the flea form (owner spec: cooperation must be unmistakable).',
+      ...typedFormFacts('flea', {
+        readers: {
+          evidence_level: [{ file: ACTIVITY_INDICATORS, section: 'Flea activity gauge + Today\'s Result flea story (buildTodaysResult)' }],
+          activity_areas: [{ file: ACTIVITY_INDICATORS, section: 'Today\'s Result flea story (buildTodaysResult)' }],
+        },
+        notes: {
+          customer_prep: 'Owner spec: cooperation must be unmistakable.',
+        },
       }),
       ...productFacts(),
       ...photoFacts(),
@@ -881,23 +1003,11 @@ const VISIT_FACTS_CONTRACT = {
 
   palm: {
     label: 'Palm injection (typed palm_injection form)',
+    typedForm: 'palm_injection',
     catalogKeys: ['palm_injection', 'palm_injection_semiannual'],
     voiceFill: true,
     facts: [
-      typedFindingFact({
-        key: 'palm_condition',
-        label: 'Overall palm condition',
-        whenMissing: 'required',
-        notes: 'Required on the palm_injection form (activity-indicators.js REQUIRED_FINDINGS_FIELDS).',
-      }),
-      typedFindingFact({ key: 'palms_serviced', label: 'Palms serviced' }),
-      typedFindingFact({
-        key: 'areas_treated',
-        label: 'Areas treated',
-        readers: [{ file: REPORT_DATA, section: 'Areas treated (TYPED_AREA_FIELD_KEYS)' }],
-      }),
-      typedFindingFact({ key: 'work_completed', label: 'Work completed' }),
-      typedFindingFact({ key: 'customer_recommendations', label: 'Customer recommendations' }),
+      ...typedFormFacts('palm_injection'),
       ...productFacts(),
       ...photoFacts(),
     ],
@@ -925,4 +1035,7 @@ module.exports = {
   VISIT_FACTS_CONTRACT,
   EXCLUDED_SERVICE_LINES,
   RETIRED_CATALOG_KEYS,
+  TYPED_REPORT_BUILDERS,
+  REPORT_DATA_TYPED_AREA_FIELD_KEYS,
+  typedFactFields,
 };
