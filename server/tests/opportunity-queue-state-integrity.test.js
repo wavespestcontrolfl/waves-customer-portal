@@ -394,6 +394,52 @@ describe('listicle_family lane fence (kill-switch contract)', () => {
   });
 });
 
+describe('aeo_question_gap lane fence (kill-switch contract)', () => {
+  // GATE_AEO_QUESTION_GAP_MINING is the no-redeploy kill switch: gate off
+  // must make already-queued question rows unclaimable too (they stay
+  // pending, so re-enabling resumes them). Real env gate, read at call time.
+  const OLD = process.env.GATE_AEO_QUESTION_GAP_MINING;
+  afterEach(() => {
+    if (OLD === undefined) delete process.env.GATE_AEO_QUESTION_GAP_MINING; else process.env.GATE_AEO_QUESTION_GAP_MINING = OLD;
+  });
+  const peekChain = () => {
+    const q = {
+      _filters: [],
+      where: jest.fn(function (...args) { q._filters.push(args); return q; }),
+      whereNot: jest.fn(function (...args) { q._filters.push(['not', ...args]); return q; }),
+      whereRaw: jest.fn(function (...args) { q._filters.push(['raw', ...args]); return q; }),
+      orderBy: jest.fn(() => q),
+      limit: jest.fn(() => q),
+      select: jest.fn(() => Promise.resolve([])),
+    };
+    return q;
+  };
+
+  test('gate off: a pending question row is neither claimed nor peeked', async () => {
+    delete process.env.GATE_AEO_QUESTION_GAP_MINING;
+    db.mockImplementation(() => chain());
+    db.raw.mockResolvedValue({ rows: [] });
+    await queue.claimNext({});
+    expect(db.raw.mock.calls[0][0]).toContain(`AND bucket <> 'aeo_question_gap'`);
+    const q = peekChain();
+    db.mockImplementation(() => q);
+    await queue.peek({});
+    expect(q._filters).toEqual(expect.arrayContaining([['not', 'bucket', 'aeo_question_gap']]));
+  });
+
+  test('gate on: question rows are claimable and peekable', async () => {
+    process.env.GATE_AEO_QUESTION_GAP_MINING = 'true';
+    db.mockImplementation(() => chain());
+    db.raw.mockResolvedValue({ rows: [] });
+    await queue.claimNext({});
+    expect(db.raw.mock.calls[0][0]).not.toContain(`bucket <> 'aeo_question_gap'`);
+    const q = peekChain();
+    db.mockImplementation(() => q);
+    await queue.peek({});
+    expect(q._filters).not.toEqual(expect.arrayContaining([['not', 'bucket', 'aeo_question_gap']]));
+  });
+});
+
 describe('defer() — cap/gate-retry deferral back to pending (exceptions-only review queue)', () => {
   test('claim-guarded update: pending, future available_at, cleared skip_reason, extended expires_at', async () => {
     const q = chain({ updateResult: 1 });

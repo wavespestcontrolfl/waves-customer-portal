@@ -58,6 +58,19 @@ function listicleFamilyLaneOpen() {
   }
 }
 
+// Same kill-switch contract for the aeo_question_gap lane: its gate is the
+// no-redeploy kill switch, so gate-off must stop queued rows from being
+// claimed too, not only new mining. Rows stay pending (re-enabling resumes
+// them; expireStale ages them out). Read at call time; fail CLOSED.
+function aeoQuestionLaneOpen() {
+  try {
+    const { isEnabled } = require('../../config/feature-gates');
+    return isEnabled('aeoQuestionGapMining') === true;
+  } catch {
+    return false;
+  }
+}
+
 // Lifetime claim budget per opportunity. A row that keeps failing returns
 // to pending (release / stale-claim recovery) and, as the top-scored row,
 // gets re-claimed by the daily batch forever — one wasted LLM dispatch per
@@ -120,6 +133,7 @@ class OpportunityQueue {
       // Same lane fence as claimNext (peek is consumed as "what the runner
       // can claim" — see listicleFamilyLaneOpen).
       if (!listicleFamilyLaneOpen()) q = q.whereNot('bucket', 'listicle_family');
+      if (!aeoQuestionLaneOpen()) q = q.whereNot('bucket', 'aeo_question_gap');
       if (minScore != null) {
         // Same action-aware floor as claimNext (including the
         // listicle_family blog-floor ride), so previews show exactly what
@@ -167,6 +181,8 @@ class OpportunityQueue {
     const whereExclude = exclude.length ? `AND NOT (id = ANY(?))` : '';
     // See listicleFamilyLaneOpen — gate-off family rows are unclaimable.
     const whereFamilyGate = listicleFamilyLaneOpen() ? '' : `AND bucket <> 'listicle_family'`;
+    // See aeoQuestionLaneOpen — gate-off question rows are unclaimable.
+    const whereAeoQuestionGate = aeoQuestionLaneOpen() ? '' : `AND bucket <> 'aeo_question_gap'`;
 
     const result = await db.raw(
       `UPDATE opportunity_queue
@@ -206,6 +222,7 @@ class OpportunityQueue {
            ${whereActionType}
            ${whereExclude}
            ${whereFamilyGate}
+           ${whereAeoQuestionGate}
          ORDER BY score DESC, mined_at ASC
          FOR UPDATE SKIP LOCKED
          LIMIT 1

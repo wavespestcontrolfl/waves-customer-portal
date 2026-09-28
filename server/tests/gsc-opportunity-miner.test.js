@@ -3194,6 +3194,13 @@ describe('aeo_question_gap bucket', () => {
     expect(await yields([mine, decay])).toBe(true);
     expect(await yields([mine, weak])).toBe(false); // below its floor → lands nothing
     expect(await yields([mine])).toBe(false);
+    // Sitemap omission: the live sitemap missed the page, so the question
+    // became a pinned ARTICLE for the same route another bucket edits —
+    // it yields by route too.
+    const article = buildAeoQuestionGapOpp(gapFor('Q26'), { liveUrl: null });
+    expect(article.page_url).toBeNull();
+    expect(GscOpportunityMiner.aeoQuestionOppYields(article, await miner._arbitratedRefreshPages([article, decay]))).toBe(true);
+    expect(GscOpportunityMiner.aeoQuestionOppYields(article, await miner._arbitratedRefreshPages([article]))).toBe(false);
     db.mockReset();
   });
 
@@ -3230,7 +3237,11 @@ describe('aeo_question_gap bucket', () => {
       q.update = async (patch) => { updates.push({ ids: q.filters.id, patch }); for (const r of queue) if (q.filters.id.includes(r.id)) Object.assign(r, patch); return q.filters.id.length; };
       return q;
     };
-    trx.raw = async (_sql, bindings) => { upserts.push(bindings[12]); return { rowCount: 1 }; };
+    trx.raw = (sql, bindings) => {
+      if (!bindings) return sql; // select-list fragment
+      upserts.push(bindings[12]);
+      return Promise.resolve({ rowCount: 1 });
+    };
     const decay = { bucket: 'decay_refresh', action_type: 'refresh_existing_page', query: null, page_url: page, service: 'termite', city: null, score: 90, score_breakdown: {}, signal_metadata: {}, dedupe_key: 'decay_refresh::termite::_::bond' };
     try {
       const miner = new GscOpportunityMiner();
@@ -3238,6 +3249,13 @@ describe('aeo_question_gap bucket', () => {
       expect(await miner.persistAll([decay], trx)).toBe(1);
       expect(queue[0]).toMatchObject({ status: 'expired', skip_reason: 'aeo_question_yielded_page_edit' });
       expect(upserts).toEqual([decay.dedupe_key]);
+      // A pending pinned ARTICLE for the same route (no page_url yet) is
+      // retired the same way.
+      queue.push({ id: 2, bucket: 'aeo_question_gap', page_url: null, target_path: '/termite/termite-bond/', status: 'pending' });
+      upserts.length = 0;
+      expect(await miner.persistAll([decay], trx)).toBe(1);
+      expect(queue[1]).toMatchObject({ status: 'expired', skip_reason: 'aeo_question_yielded_page_edit' });
+      queue.pop();
       // A CLAIMED question write instead makes the incoming edit wait —
       // with the mining gate OFF too: the gate stops new questions, not the
       // protection of rows already queued.
@@ -3383,7 +3401,7 @@ describe('aeo_question_gap bucket', () => {
     const fs = require('fs');
     const src = fs.readFileSync(require.resolve('../services/seo/gsc-opportunity-miner'), 'utf8');
     expect(src).toMatch(/if \(!errors\.aeo_question_gap && aeoQuestionQualifying\.opps\)/);
-    expect(src).toMatch(/qualifying\.opps = opps;\n[\s\S]*selectAeoQuestionGaps\(opps, \{ cap: Infinity/);
+    expect(src).toMatch(/selectAeoQuestionGaps\(opps, \{ cap: Infinity[\s\S]*qualifying\.opps = opps\.filter\(/);
   });
 
   test('a batch carrying only pinned question articles still takes the page-edit advisory lock', async () => {
@@ -3406,7 +3424,7 @@ describe('aeo_question_gap bucket', () => {
       jest.spyOn(miner, '_hubPageImpressionsByRoute').mockResolvedValue(new Map());
       jest.spyOn(miner, '_loadOccupiedKeys').mockResolvedValue(new Set());
       jest.spyOn(miner, '_aeoQuestionPageFence').mockResolvedValue(new Map());
-      jest.spyOn(miner, '_aeoRefreshTargetEditable').mockResolvedValue(true);
+      jest.spyOn(miner, '_aeoRefreshTargetEditable').mockResolvedValue('editable');
       return miner;
     };
 
@@ -3442,9 +3460,32 @@ describe('aeo_question_gap bucket', () => {
       process.env.GATE_AEO_QUESTION_GAP_MINING = 'true';
       const questions = [q('Q31'), q('Q36'), q('Q26')]; // calculator, termite cost, termite bond
       const miner = stubbed(synthetic(questions), questions.map((x) => `${HUB}${x.target_path}`));
-      miner._aeoRefreshTargetEditable.mockImplementation(async (url) => !/pest-control-calculator/.test(url));
+      miner._aeoRefreshTargetEditable.mockImplementation(async (url) => (/pest-control-calculator/.test(url) ? 'not_editable' : 'editable'));
       const out = await miner.mineAeoQuestionGaps('2026-08-30');
       expect(out.map((o) => o.signal_metadata.benchmark_id).sort()).toEqual(['Q26', 'Q36']);
+    });
+
+    test('recovery live set: confirmed non-editable targets drop out; cap- and fence-skipped candidates stay', async () => {
+      process.env.GATE_AEO_QUESTION_GAP_MINING = 'true';
+      process.env.AEO_QUESTION_GAP_MAX_PER_RUN = '1';
+      const questions = [q('Q31'), q('Q36'), q('Q26'), q('Q21')]; // calculator, termite cost, termite bond, one-time plan
+      const miner = stubbed(synthetic(questions), questions.map((x) => `${HUB}${x.target_path}`));
+      const calc = routeIdentity(`${HUB}${q('Q31').target_path}`);
+      // Confirmed non-editable by an earlier probe (cached verdict) — even
+      // though this run's cap stops before probing it again.
+      GscOpportunityMiner._nonEditablePages.set(calc, Date.now() + 60_000);
+      miner._aeoRefreshTargetEditable.mockImplementation(async (url) => (routeIdentity(url) === calc ? 'not_editable' : 'editable'));
+      // Q21's page is fenced by another bucket's in-flight edit (temporary).
+      miner._aeoQuestionPageFence.mockResolvedValue(new Map([[routeIdentity(`${HUB}${q('Q21').target_path}`), new Set(['decay_refresh::x'])]]));
+      const qualifying = { opps: null };
+      try {
+        const out = await miner.mineAeoQuestionGaps('2026-08-30', { qualifying });
+        expect(out).toHaveLength(1); // cap
+        const live = qualifying.opps.map((o) => o.signal_metadata.benchmark_id).sort();
+        expect(live).toEqual(['Q21', 'Q26', 'Q36']); // Q31 confirmed non-editable → retires
+      } finally {
+        GscOpportunityMiner._nonEditablePages.delete(calc);
+      }
     });
 
     test('the editability probe is bounded and remembers confirmed non-editable pages', async () => {
@@ -3454,12 +3495,15 @@ describe('aeo_question_gap bucket', () => {
       const url = `${HUB}/pest-control-calculator/`;
       GscOpportunityMiner._nonEditablePages.delete(routeIdentity(url));
       const probe = { remaining: 1 };
-      expect(await miner._aeoRefreshTargetEditable(url, probe)).toBe(false);
-      expect(await miner._aeoRefreshTargetEditable(url, probe)).toBe(false); // cached, no second load
+      expect(await miner._aeoRefreshTargetEditable(url, probe)).toBe('not_editable');
+      expect(await miner._aeoRefreshTargetEditable(url, probe)).toBe('not_editable'); // cached, no second load
       expect(load).toHaveBeenCalledTimes(1);
       load.mockResolvedValue({ body: 'x' });
-      expect(await miner._aeoRefreshTargetEditable(`${HUB}/termite/termite-bond/`, { remaining: 0 })).toBe(false); // budget spent
-      expect(await miner._aeoRefreshTargetEditable(`${HUB}/termite/termite-bond/`, { remaining: 1 })).toBe(true);
+      expect(await miner._aeoRefreshTargetEditable(`${HUB}/termite/termite-bond/`, { remaining: 0 })).toBe('unknown'); // budget spent
+      expect(await miner._aeoRefreshTargetEditable(`${HUB}/termite/termite-bond/`, { remaining: 1 })).toBe('editable');
+      load.mockRejectedValue(new Error('github 502'));
+      expect(await miner._aeoRefreshTargetEditable(`${HUB}/termite/other/`, { remaining: 1 })).toBe('unknown'); // transient: not cached
+      expect(GscOpportunityMiner._nonEditablePages.has(routeIdentity(`${HUB}/termite/other/`))).toBe(false);
       GscOpportunityMiner._nonEditablePages.delete(routeIdentity(url));
     });
 

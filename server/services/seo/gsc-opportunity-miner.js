@@ -3461,7 +3461,6 @@ class GscOpportunityMiner {
       const id = routeIdentity(hubTargetUrl(gap.question.target_path));
       return buildAeoQuestionGapOpp(gap, { liveUrl: live.get(id) || null, impressions: impressions.get(id) || 0 });
     });
-    qualifying.opps = opps;
     // Rank + fence without the cap, then fill the cap. A live target the
     // refresh lane cannot edit (a tool page rather than an Astro content
     // file) would park its run for review, so each refresh pick is probed
@@ -3473,30 +3472,37 @@ class GscOpportunityMiner {
     const probe = { remaining: cap * 3 };
     for (const o of ranked) {
       if (out.length >= cap) break;
-      if (o.page_url && !(await this._aeoRefreshTargetEditable(o.page_url, probe))) continue;
+      if (o.page_url && (await this._aeoRefreshTargetEditable(o.page_url, probe)) !== 'editable') continue;
       out.push(o);
     }
+    // The recovery sweep's live set: every qualifying candidate, including
+    // ones held back only by the cap or a temporary fence — but NOT a live
+    // target confirmed non-editable (cached verdict, this run's probes
+    // included). Its pending row can never be refreshed, so it retires.
+    const nonEditable = GscOpportunityMiner._nonEditablePages;
+    qualifying.opps = opps.filter((o) => !(o.page_url && nonEditable.get(routeIdentity(o.page_url)) > Date.now()));
     logger.info(`[gsc-opp-miner] aeo_question_gap: ${gaps.length} qualifying question(s), ${out.length} emitted (${out.map((o) => o.signal_metadata.benchmark_id).join(', ') || 'none'})`);
     return out;
   }
 
+  // 'editable' | 'not_editable' (confirmed, cached) | 'unknown' (probe
+  // budget spent or a transient failure — retried next mine).
   async _aeoRefreshTargetEditable(pageUrl, probe) {
     const cache = GscOpportunityMiner._nonEditablePages;
     const id = routeIdentity(pageUrl);
-    const exp = cache.get(id);
-    if (exp && exp > Date.now()) return false;
-    if (probe.remaining <= 0) return false;
+    if (cache.get(id) > Date.now()) return 'not_editable';
+    if (probe.remaining <= 0) return 'unknown';
     probe.remaining -= 1;
     try {
       const astroPublisher = require('../content-astro/astro-publisher');
       const loaded = await astroPublisher.loadExistingPageBody(pageUrl, { strictRegistryErrors: true });
-      if (loaded && loaded.body) return true;
+      if (loaded && loaded.body) return 'editable';
       cache.set(id, Date.now() + GscOpportunityMiner.NON_EDITABLE_TTL_MS);
+      return 'not_editable';
     } catch (err) {
-      // Transient (GitHub / registry) — not cached; the question retries next mine.
       logger.warn(`[gsc-opp-miner] aeo_question_gap: editability probe failed: ${err.message}`);
+      return 'unknown';
     }
-    return false;
   }
 
   // Attributable observations for ACTIVE managed benchmark questions — the
@@ -4257,12 +4263,13 @@ class GscOpportunityMiner {
     if (!otherPageEdits) return result;
     let rows;
     try {
+      // Refreshes AND pinned articles — an article's route is its
+      // target_path (aeoQuestionGapRoute).
       rows = await runner('opportunity_queue')
         .where({ bucket: AEO_QUESTION_GAP_BUCKET })
         .whereIn('status', ['pending', 'claimed', 'pending_review'])
-        .whereNotNull('page_url')
         .forUpdate()
-        .select('id', 'page_url', 'status');
+        .select('id', 'page_url', 'status', runner.raw("signal_metadata->>'target_path' as target_path"));
     } catch (err) {
       // Same posture as _arbitratedRefreshPages. Inside the persist
       // transaction a failed read aborts it, so nothing persists unguarded;
@@ -4273,7 +4280,8 @@ class GscOpportunityMiner {
     const busy = result.busyPages;
     const losers = [];
     for (const r of rows) {
-      const id = routeIdentity(r.page_url);
+      const id = aeoQuestionGapRoute({ page_url: r.page_url, signal_metadata: { target_path: r.target_path } });
+      if (!id) continue;
       if (r.status !== 'pending') busy.add(id);
       else if (arbitrated.nonAeoQuestionPages?.has(id)) losers.push(r.id);
     }
@@ -4282,17 +4290,19 @@ class GscOpportunityMiner {
         .whereIn('id', losers)
         .where('status', 'pending')
         .update({ status: 'expired', skip_reason: 'aeo_question_yielded_page_edit', updated_at: new Date() });
-      logger.info(`[gsc-opp-miner] aeo_question_gap: ${losers.length} pending refresh(es) expired — another bucket edits the page`);
+      logger.info(`[gsc-opp-miner] aeo_question_gap: ${losers.length} pending row(s) expired — another bucket edits the route`);
     }
     return result;
   }
 
-  // An aeo_question_gap refresh yields to a floor-clearing, non-frozen edit
-  // of the same page from another bucket in this batch (it retries next
-  // mine; the page fence then sees that edit in flight).
+  // An aeo_question_gap row yields to a floor-clearing, non-frozen edit of
+  // the same ROUTE from another bucket in this batch (it retries next mine;
+  // the page fence then sees that edit in flight). Pinned articles included:
+  // the sitemap can omit a page GSC still reports, so a "missing-target"
+  // article may point at a route another bucket is editing.
   static aeoQuestionOppYields(o, arbitrated) {
-    return o.bucket === AEO_QUESTION_GAP_BUCKET && !!o.page_url
-      && !!arbitrated.nonAeoQuestionPages?.has(routeIdentity(o.page_url));
+    return o.bucket === AEO_QUESTION_GAP_BUCKET
+      && !!arbitrated.nonAeoQuestionPages?.has(aeoQuestionGapRoute(o));
   }
 
   // Does this family opp lose page/query arbitration to another bucket?
