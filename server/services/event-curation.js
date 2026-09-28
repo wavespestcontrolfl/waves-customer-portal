@@ -264,6 +264,7 @@ async function fetchCurationCandidates(limit = CURATION_RUN_LIMIT) {
     .filter((row) => !historicallyNewIds.has(String(row.id)))
     .map((row) => ({
       id: String(row.id),
+      updated_at: row.updated_at,
       note: !nonRepeatedIds.has(String(row.id))
         ? 'Excluded by policy: repeated-date identity (routine series occurrence)'
         : 'Excluded by policy: identity already featured in a prior issue',
@@ -524,9 +525,13 @@ async function runAutoCuration({ limit = CURATION_RUN_LIMIT, deadlineMs = curati
   // even when the model batches below fail. Same guarded write as the
   // missing-assessment fallback: examined, pending, assessment cleared.
   for (const drop of policyDrops) {
+    // Pinned to the fetched version like the model-decision writes: a row a
+    // feed moved to another day mid-run (re-opened by ingestion) keeps
+    // curated_at NULL and is judged fresh next run.
     await db('events_raw')
       .where({ id: drop.id })
       .whereNull('curated_at')
+      .whereRaw("date_trunc('milliseconds', updated_at) = ?", [drop.updated_at])
       .update({
         editorial_score: null,
         score_breakdown: null,

@@ -250,6 +250,8 @@ describeOrSkip('buildCurationCandidateQuery admits a genuine first-of-year stale
     const id = await insertEvent(annual);
     const { policyDrops } = await fetchCurationCandidates(500);
     expect(policyDrops.map((d) => d.id)).toContain(String(id));
+    // Each drop carries the fetched version, so its stamp can be pinned.
+    expect(policyDrops.find((d) => d.id === String(id)).updated_at).toBeTruthy();
   });
 
   test('an operator-reset row is never a curation candidate, even after its curated_at is re-opened', async () => {
