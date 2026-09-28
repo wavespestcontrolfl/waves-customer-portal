@@ -1729,6 +1729,22 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
       expect(JSON.stringify(built)).not.toContain('Draft-only');
     });
   });
+
+  describe('catalog approvals (#5250) regressions', () => {
+    const cand = (slug, confidence) => ({
+      slug, entry: catalog.getEntry(slug), confidence, verified: true, checked: true, uncovered: false, cuesVisible: [1], cuesNotVisible: [], offCatalogName: null, groupId: catalog.getEntry(slug).group,
+    });
+
+    test('r7: the next-photo comparison carries the compared look-alike\'s warning, even when that plant is not a candidate', () => {
+      // Citrus (likely) is compared against sago palm, which is not among the candidates.
+      const citrus = engine.buildIdentityResult([cand('fixture-citrus', 0.7)], { subject: 'tree_shrub', currentMonth: 6 });
+      expect(citrus.candidates.map((c) => c.slug)).toEqual(['fixture-citrus']);
+      expect(citrus.next_photo).toMatchObject({ photo_can_confirm: true, safety_line: 'Toxic to pets.' });
+      // A look-alike with no warning adds none.
+      const paspalum = engine.buildIdentityResult([cand('fixture-seashore-paspalum', 0.95)], { subject: 'lawn', currentMonth: 6 });
+      expect(paspalum.next_photo).not.toHaveProperty('safety_line');
+    });
+  });
 });
 
 describe('plant-engine — schema-invalid answers flip their ledger row (Codex #5186 round 2, finding 7)', () => {

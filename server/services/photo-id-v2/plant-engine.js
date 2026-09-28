@@ -898,7 +898,17 @@ function plantNextPhotoFor(answer, candidates, subject, disagreementPair = null)
   const la = decisiveLookAlike({
     level: answer.level, nodeId: answer.node_id, candidates, disagreementPair,
   });
-  if (la) return { ask: la.next_photo || null, why: la.difference || null, photo_can_confirm: la.photo_can_confirm !== false };
+  if (la) {
+    // The comparison names its look-alike, which need not be among the
+    // candidates, so that plant's catalog warning rides along (Codex #5250 r7
+    // P2: ligustrum named beside sweet viburnum without its pet warning). A
+    // hidden draft look-alike (HIDDEN_VETO_PAIR) names nothing and adds none.
+    const target = la.slug ? catalog.getEntry(la.slug) : null;
+    const safetyLine = target && isApproved(target) ? (target.safety_line || null) : null;
+    return {
+      ask: la.next_photo || null, why: la.difference || null, photo_can_confirm: la.photo_can_confirm !== false, ...(safetyLine ? { safety_line: safetyLine } : {}),
+    };
+  }
   return { ask: RETAKE_TEXT[subject], why: 'A clearer photo helps us narrow it down.', photo_can_confirm: true };
 }
 

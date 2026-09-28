@@ -821,7 +821,9 @@ describe('v2 result card (GATE_PHOTO_ID_V2, server-side)', () => {
       entry: null,
       evidence: {},
       candidates: [],
-      next_photo: { ask: 'A close-up showing the waist from the side would settle it.', why: 'That view separates the two most likely ants.' },
+      next_photo: {
+        ask: 'A close-up showing the waist from the side would settle it.', why: 'That view separates the two most likely ants.', safety_line: 'The compared look-alike can sting.',
+      },
       referral: null,
     };
     api.createPhotoId.mockResolvedValueOnce({
@@ -838,6 +840,8 @@ describe('v2 result card (GATE_PHOTO_ID_V2, server-side)', () => {
     expect(screen.getByText('A photo that would help confirm it')).toBeInTheDocument();
     expect(screen.getByText('A close-up showing the waist from the side would settle it.')).toBeInTheDocument();
     expect(screen.getByText('That view separates the two most likely ants.')).toBeInTheDocument();
+    // The compared look-alike's own warning shows with the comparison (Codex #5250 r7).
+    expect(screen.getByText('The compared look-alike can sting.')).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'Take this photo' }));
     // Back on the photos step, with the retake ask shown as a banner...
