@@ -1294,6 +1294,21 @@ export default function ServiceReportDocument({ data, token }) {
                             {(product.precaution_summary || product.reentry_summary) && (
                               <div><strong style={{ color: INK, fontWeight: 600 }}>Label safety:</strong> {[product.precaution_summary, product.reentry_summary].map(sanitizeReentryCopy).filter(Boolean).filter((part, i, all) => all.indexOf(part) === i).join(' ')}</div>
                             )}
+                            {/* Owner-approved product wording
+                                (GATE_REPORT_PRODUCT_COPY, 2026-09-28) — the
+                                server omits `report_copy` entirely when the
+                                gate is off or the product has no approved
+                                wording. "Also labeled for" describes the
+                                LABEL, never this visit's treatment. */}
+                            {product.report_copy && (
+                              <>
+                                <div><strong style={{ color: INK, fontWeight: 600 }}>How it works:</strong> {product.report_copy.how_it_works}</div>
+                                {product.report_copy.also_labeled_for && (
+                                  <div><strong style={{ color: INK, fontWeight: 600 }}>Also labeled for:</strong> {product.report_copy.also_labeled_for}</div>
+                                )}
+                                <div><strong style={{ color: INK, fontWeight: 600 }}>Pets &amp; kids:</strong> {product.report_copy.pets_kids}</div>
+                              </>
+                            )}
                             {/* Legacy lawn reports (no reportV2) carry approved
                                 watering-in guidance ONLY here — dropping it
                                 loses a required instruction. */}

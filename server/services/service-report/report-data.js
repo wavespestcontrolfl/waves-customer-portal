@@ -27,6 +27,7 @@ const { resolveZoneRowsImageDrift } = require('./zone-drift');
 const { buildStationMapReportContext } = require('../termite-stations');
 const { fetchServiceWeekWeather, toCoordinate } = require('./application-conditions');
 const { pestReportExpectationsGateOn } = require('./pest-report-expectations');
+const { reportProductCopyGateOn, reportProductCopyForApplicationProduct } = require('./report-product-copy');
 const { validatePhotoChainRows } = require('./photo-chain');
 const { buildSatelliteTreatmentMapContext } = require('./satellite-treatment-map');
 const { computeLinearFt, computeOnSiteMin } = require('./metrics-band');
@@ -4069,6 +4070,19 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         // part of the public /api/reports/:token/data payload (gate on or
         // off, every service line). See expectationFactsOut below — the
         // ONLY channel that carries them to the render path.
+        //
+        // report_copy (GATE_REPORT_PRODUCT_COPY, owner-approved 2026-09-28):
+        // the three short customer-facing lines for THIS product, matched
+        // against the static reviewed config — never fuzzy, never guessed.
+        // KEY OMITTED (not null) when the gate is off or the product has no
+        // approved wording — same "omit, never serialize null" contract the
+        // top-level planSummary/nearYou keys follow.
+        ...(reportProductCopyGateOn()
+          ? (() => {
+            const copy = reportProductCopyForApplicationProduct(product);
+            return copy ? { report_copy: copy } : {};
+          })()
+          : {}),
       },
       method,
       // Explicit vs inferred decides whether pesticide identity may override

@@ -409,6 +409,42 @@ count, customer name, or address in it. `stripLiveOnlyScheduleFields` also
 deletes it from every non-live render (PDF, static, sms_preview). No new route
 and no write; auth, headers and rate limits are unchanged.
 
+Report product wording (owner-approved 2026-09-28, verbatim from the reviewed
+wording page): `GATE_REPORT_PRODUCT_COPY` (off unless exactly `true`, read at
+CALL time via `reportProductCopyGateOn()` in
+`server/services/service-report/report-product-copy.js` — the
+`reportProductCopy` feature-gates map entry is for `logGateStatus` only).
+Unlike `planSummary`/`nearYou` above, this is NOT live-view-only: it is an
+attribute of the applied-products list itself
+(`/api/reports/:token/data`'s `applications[].product`), which already
+renders identically on the live report, the PDF, and static/sms_preview
+renders, so `stripLiveOnlyScheduleFields` does not touch it. On, an applied
+product that matches the static reviewed config
+(`server/config/report-product-copy.js`) — by EPA registration number
+primarily (`product.epa_reg_number`, resolved off the catalog join the same
+way the existing product-safety fields are), or by an explicit
+normalized-name alias list otherwise (a hand-entered row with no catalog
+`product_id` still carries its snapshotted `product_name`) — gets
+`applications[N].product.report_copy: { how_it_works, also_labeled_for,
+pets_kids }`. `also_labeled_for` is OMITTED (never a null/empty string) for
+the one approved product with no such line (the LESCO 90/10 Nonionic
+Surfactant — it is an adjuvant, not a pesticide). Matching is exact only —
+never a substring/fuzzy match, same posture as
+`pest-report-expectations.js`'s `PRODUCT_EXPECTATION_CLASS` — so a product
+absent from the config (every catalog product not on the owner-approved
+page) gets NO `report_copy` key at all, fail closed. Every line clears the
+shared banned-copy screen (`premium-experience.js`'s `validateCustomerCopy`)
+before it can render. Customer-display only: this copy is never read by the
+AI report writer's grounding (`report-copy-context.js` builds its own
+product-evidence list independently of `buildReportV1Data`'s `applications`,
+so it never sees `report_copy`). The PDF's content-insensitive storage key
+carries a `-rpc1` suffix while the gate is on
+(`reportProductCopyPdfSignature()`, same append-not-switch convention as
+`photo-marks.js`'s `photoMarksPdfSignature`), so a gate flip re-renders every
+cached PDF exactly once in either direction rather than serving a stale
+document. No new route and no write; auth, headers and rate limits are
+unchanged.
+
 Invoice line-item ownership metadata: `/api/pay/:token` and
 `/api/receipt/:token` return the invoice's persisted `line_items` as `lineItems`.
 On itemized accepted-plan invoices, each base-application row intentionally may
