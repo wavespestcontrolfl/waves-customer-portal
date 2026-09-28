@@ -25733,3 +25733,14 @@ module.exports.cancelSpawnedReminderIfVisitTerminal = cancelSpawnedReminderIfVis
 module.exports.typedFindingsPromptSections = typedFindingsPromptSections;
 // Parity-test surface (series-move incident): see tests/recurring-date-parity.test.js.
 module.exports.nextRecurringDate = nextRecurringDate;
+// Read-only reuse for the pest-rides-the-lawn-rhythm READ-ONLY PREVIEW
+// (services/rider-series-preview.js — the write engine itself is #5268,
+// paused): the SAME series-eligibility table the nightly top-up already
+// applies (annual prepay / family plan hold / duplicate active series),
+// consumed with NO lock taken — the preview never writes, so it skips the
+// per-customer annual-prepay advisory try-lock this file's own cancel-reseed
+// path takes (above, inline) before calling this same function on that
+// path; a lock is meaningless (and misleading — it would silently no-op)
+// for a read that commits nothing. Lazy require only, same avoid-a-route-
+// load-cycle reason as every other export in this block.
+module.exports.topupSeriesSkipReason = topupSeriesSkipReason;
