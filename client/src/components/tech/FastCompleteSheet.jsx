@@ -290,19 +290,16 @@ function useFastCompleteContext({ base, request, serviceType, routedCustomerId, 
   const [ctx, setCtx] = useState({
     loading: true, loadError: '', blockedReason: '', rows: [], visitIdentity: null, visit: null,
     rating: { allowed: false, scaleLabels: null },
-    tips: null,
   });
   useEffect(() => {
     let active = true;
     (async () => {
       try {
-        const [data, ratingContract, tipLibrary] = await Promise.all([
+        const [data, ratingContract] = await Promise.all([
           request(`${base}/pest-recap/context`),
           // A failed read keeps the rating off: never send a rating the
           // server may drop, or show a scale it may not use.
           request(`${base}/tech-rating-allowed`).catch(() => null),
-          // A failed read, or the tips gate off, hides the picker.
-          request(`${base}/tech-tips`).catch(() => null),
         ]);
         if (!active) return;
         const visit = data?.service || {};
@@ -315,7 +312,6 @@ function useFastCompleteContext({ base, request, serviceType, routedCustomerId, 
           rows: pestDefaultMixSelections(products).map(({ product, totalAmount }) => productRow(product, serviceType, totalAmount)),
           visitIdentity: recapVisitIdentity(visit),
           rating: { allowed: ratingContract?.allowed === true, scaleLabels: ratingContract?.scaleLabels || null },
-          tips: tipLibrary?.available === true ? tipLibrary : null,
         });
       } catch (err) {
         if (active) setCtx((prev) => ({ ...prev, loading: false, loadError: err?.message || 'Failed to load products' }));
@@ -324,6 +320,21 @@ function useFastCompleteContext({ base, request, serviceType, routedCustomerId, 
     return () => { active = false; };
   }, [base, request, serviceType, routedCustomerId, routedScheduledDate, routedPropertyId, routedAddress]);
   return ctx;
+}
+
+// The tip library, read on its own: the picker is optional, so a slow or
+// failed read never holds the sheet. null until it arrives, and when the
+// read fails or the tips gate is off.
+function useTipLibrary({ base, request }) {
+  const [library, setLibrary] = useState(null);
+  useEffect(() => {
+    let active = true;
+    request(`${base}/tech-tips`)
+      .then((data) => { if (active) setLibrary(data?.available === true ? data : null); })
+      .catch(() => { if (active) setLibrary(null); });
+    return () => { active = false; };
+  }, [base, request]);
+  return library;
 }
 
 // One completion attempt at a time, settled into the four outcomes above.
@@ -399,6 +410,16 @@ function ChoiceSection({ title, action, columns = 2, children }) {
   );
 }
 
+// The photo manager opens over the sheet. While it is up the sheet is inert
+// and hidden from assistive tech, the way the photo manager treats its own
+// marks dialog; `version` moves on each close so the count is read again.
+function usePhotoManager() {
+  const [state, setState] = useState({ isOpen: false, version: 0 });
+  const open = useCallback(() => setState((prev) => ({ ...prev, isOpen: true })), []);
+  const close = useCallback(() => setState((prev) => ({ isOpen: false, version: prev.version + 1 })), []);
+  return { ...state, open, close, hiddenProps: state.isOpen ? { 'aria-hidden': true, inert: '' } : {} };
+}
+
 export default function FastCompleteSheet({ service, request, onClose, onCompleted, onFullForm }) {
   const isMobile = useIsMobile();
   const closeRef = useRef(null);
@@ -417,6 +438,7 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
   });
   const submission = useFastCompleteSubmit({ base, request });
   const { submitting, done } = submission;
+  const photoManager = usePhotoManager();
 
   // Dismissing a saved sheet refreshes the schedule like "Next stop" does,
   // so a missed socket update can't leave the visit showing as open.
@@ -436,6 +458,7 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
   const locked = submitting || submission.failure !== null;
 
   return createPortal(
+    <>
     <UiSurface
       density="touch"
       className={cn('tech-visit-surface tech-visit-overlay', isMobile && 'tech-visit-overlay--fullscreen')}
@@ -447,30 +470,46 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
         aria-modal="true"
         aria-labelledby={titleId}
         className={cn('tech-visit-dialog', isMobile && 'tech-visit-dialog--fullscreen')}
+        {...photoManager.hiddenProps}
       >
-        <header className="tech-visit-header">
-          <div>
-            <h2 id={titleId} className="tech-visit-title">{done ? 'Re-service complete' : 'Complete re-service'}</h2>
-            {/* The LIVE visit once loaded, so the tech sees whose property
-                this completion records against. */}
-            <p className="tech-visit-muted">
-              {ctx.visit?.customerName || service?.customerName || 'Customer'}{service?.serviceType ? ` · ${service.serviceType}` : ''}
-            </p>
-            {liveAddressLine(ctx.visit?.address) && <p className="tech-visit-muted">{liveAddressLine(ctx.visit.address)}</p>}
-          </div>
-          {!done && (
-            <Button variant="ghost" className="tech-visit-action" onClick={onFullForm} disabled={locked}>Full form</Button>
-          )}
-          <Button variant="ghost" className="tech-visit-action tech-visit-close" onClick={close} disabled={submitting} aria-label="Close">×</Button>
-        </header>
-        <SheetBody service={service} request={request} ctx={ctx} submission={submission} locked={locked} onCompleted={onCompleted} onFullForm={onFullForm} />
+        <SheetHeader titleId={titleId} service={service} visit={ctx.visit} done={!!done} locked={locked} submitting={submitting} onFullForm={onFullForm} onClose={close} />
+        <SheetBody service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photoManager} onCompleted={onCompleted} onFullForm={onFullForm} />
       </section>
-    </UiSurface>,
+    </UiSurface>
+    {photoManager.isOpen && (
+      <TechServicePhotosModal serviceId={service?.id} customerName={customerNameOf(ctx.visit, service)} onClose={photoManager.close} />
+    )}
+    </>,
     document.body,
   );
 }
 
-function SheetBody({ service, request, ctx, submission, locked, onCompleted, onFullForm }) {
+// The LIVE visit once loaded, so the tech sees whose property this
+// completion records against.
+function customerNameOf(visit, service) {
+  return visit?.customerName || service?.customerName || '';
+}
+
+function SheetHeader({ titleId, service, visit, done, locked, submitting, onFullForm, onClose }) {
+  const address = liveAddressLine(visit?.address);
+  return (
+    <header className="tech-visit-header">
+      <div>
+        <h2 id={titleId} className="tech-visit-title">{done ? 'Re-service complete' : 'Complete re-service'}</h2>
+        <p className="tech-visit-muted">
+          {customerNameOf(visit, service) || 'Customer'}{service?.serviceType ? ` · ${service.serviceType}` : ''}
+        </p>
+        {address && <p className="tech-visit-muted">{address}</p>}
+      </div>
+      {!done && (
+        <Button variant="ghost" className="tech-visit-action" onClick={onFullForm} disabled={locked}>Full form</Button>
+      )}
+      <Button variant="ghost" className="tech-visit-action tech-visit-close" onClick={onClose} disabled={submitting} aria-label="Close">×</Button>
+    </header>
+  );
+}
+
+function SheetBody({ service, request, ctx, submission, locked, photos, onCompleted, onFullForm }) {
   if (submission.done) {
     return (
       <div className="tech-visit-body">
@@ -487,10 +526,10 @@ function SheetBody({ service, request, ctx, submission, locked, onCompleted, onF
   if (ctx.loading) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Loading…</ActionFeedback>;
   const stop = ctx.loadError || ctx.blockedReason;
   if (stop) return <ActionFeedback error={!!ctx.loadError} className="tech-visit-feedback tech-visit-loading">{stop}</ActionFeedback>;
-  return <FastCompleteForm service={service} request={request} ctx={ctx} submission={submission} locked={locked} onFullForm={onFullForm} />;
+  return <FastCompleteForm service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photos} onFullForm={onFullForm} />;
 }
 
-function FastCompleteForm({ service, request, ctx, submission, locked, onFullForm }) {
+function FastCompleteForm({ service, request, ctx, submission, locked, photos, onFullForm }) {
   const [rows, setRows] = useState(ctx.rows);
   const [editAmounts, setEditAmounts] = useState(false);
   const [form, setForm] = useState(() => ({
@@ -502,7 +541,8 @@ function FastCompleteForm({ service, request, ctx, submission, locked, onFullFor
   const appendNote = useCallback((text) => {
     setForm((prev) => ({ ...prev, note: prev.note.trim() ? `${prev.note.trimEnd()} ${text}` : text }));
   }, []);
-  const tipsAvailable = !!ctx.tips;
+  const tips = useTipLibrary({ base: `/admin/dispatch/${service?.id}`, request });
+  const tipsAvailable = !!tips;
   const [dictationPending, setDictationPending] = useState(false);
 
   const updateRow = useCallback((productId, patch) => {
@@ -529,7 +569,7 @@ function FastCompleteForm({ service, request, ctx, submission, locked, onFullFor
       <div className="tech-visit-body">
         <fieldset className="tech-visit-form" disabled={locked}>
           <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={setDictationPending} serviceId={service?.id} locked={locked} />
-          <PhotosSection serviceId={service?.id} customerName={ctx.visit?.customerName || service?.customerName} request={request} locked={locked} />
+          <PhotosSection serviceId={service?.id} request={request} photos={photos} locked={locked} />
           <ProductsSection
             rows={rows}
             method={form.method}
@@ -556,7 +596,7 @@ function FastCompleteForm({ service, request, ctx, submission, locked, onFullFor
           )}
           {tipsAvailable && (
             <TipSection
-              library={ctx.tips}
+              library={tips}
               tipId={form.tipId}
               customTip={form.customTip}
               locked={locked}
@@ -683,37 +723,33 @@ function VisitNote({ note, onChange, onDictated, onDictationPending, serviceId, 
   );
 }
 
-// Photos are staged against the visit by the existing photo manager and
-// promoted into the service record at completion. Optional here.
-function PhotosSection({ serviceId, customerName, request, locked }) {
-  const [open, setOpen] = useState(false);
+// Photos are staged against the visit by the existing photo manager (opened
+// over the sheet by the parent) and promoted into the service record at
+// completion. Optional here.
+function PhotosSection({ serviceId, request, photos, locked }) {
   const [count, setCount] = useState(null);
-  const loadCount = useCallback(async () => {
-    try {
-      const data = await request(`/tech/services/${serviceId}/photos`);
-      setCount(Array.isArray(data?.photos) ? data.photos.length : null);
-    } catch {
+  // Only the latest read may set the count: a first read still in flight
+  // when the manager closes must not land after the refreshed one.
+  const readSequence = useRef(0);
+  useEffect(() => {
+    const sequence = ++readSequence.current;
+    request(`/tech/services/${serviceId}/photos`)
+      .then((data) => {
+        if (sequence === readSequence.current) setCount(Array.isArray(data?.photos) ? data.photos.length : null);
+      })
       // The count is a convenience; the photo manager reports its own errors.
-      setCount(null);
-    }
-  }, [request, serviceId]);
-  useEffect(() => { void loadCount(); }, [loadCount]);
+      .catch(() => { if (sequence === readSequence.current) setCount(null); });
+    return () => { readSequence.current += 1; };
+  }, [request, serviceId, photos.version]);
   return (
     <section className="tech-visit-choice-section">
       <div className="tech-visit-section-head">
         <h3 className="tech-visit-section-title">Photos</h3>
         <span className="tech-visit-muted">{count ? `${count} added` : 'Optional'}</span>
       </div>
-      <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" onClick={() => setOpen(true)} disabled={locked}>
+      <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" onClick={photos.open} disabled={locked}>
         {count ? 'Add or view photos' : 'Add photos'}
       </Button>
-      {open && (
-        <TechServicePhotosModal
-          serviceId={serviceId}
-          customerName={customerName}
-          onClose={() => { setOpen(false); void loadCount(); }}
-        />
-      )}
     </section>
   );
 }

@@ -151,6 +151,49 @@ describe('FastCompleteSheet photos', () => {
     expect(screen.getByRole('button', { name: 'Add or view photos' })).toBeTruthy();
   });
 
+  test('the sheet is inert and hidden from assistive tech while the photo manager is open', async () => {
+    const request = makeRequest();
+    await openSheet(request);
+    const sheet = screen.getByRole('dialog', { name: 'Complete re-service' });
+    expect(sheet.hasAttribute('inert')).toBe(false);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add photos' }));
+    expect(sheet.getAttribute('aria-hidden')).toBe('true');
+    expect(sheet.hasAttribute('inert')).toBe(true);
+    // The photo manager sits outside the hidden sheet.
+    expect(sheet.contains(screen.getByText('photos for svc-1'))).toBe(false);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Done with photos' }));
+    expect(sheet.hasAttribute('aria-hidden')).toBe(false);
+    expect(sheet.hasAttribute('inert')).toBe(false);
+  });
+
+  test('a first count still in flight never overwrites the count read after the manager closes', async () => {
+    const request = makeRequest();
+    const base = request.getMockImplementation();
+    let releaseFirst;
+    let photoReads = 0;
+    request.mockImplementation(async (path, options) => {
+      if (path.endsWith('/photos')) {
+        photoReads += 1;
+        if (photoReads === 1) {
+          await new Promise((resolve) => { releaseFirst = resolve; });
+          return { photos: [] };
+        }
+        return { photos: [{ id: 'p1' }] };
+      }
+      return base(path, options);
+    });
+    await openSheet(request);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add photos' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Done with photos' }));
+    expect(await screen.findByText('1 added')).toBeTruthy();
+
+    await React.act(async () => { releaseFirst(); });
+    expect(screen.getByText('1 added')).toBeTruthy();
+  });
+
   test('a photo count that cannot be read never blocks the sheet', async () => {
     const request = makeRequest();
     const base = request.getMockImplementation();
@@ -182,9 +225,27 @@ describe('FastCompleteSheet tip for the customer', () => {
     expect(body.techTips).toBeNull();
   });
 
+  test('a tips read that has not answered never holds the sheet; the picker appears when it does', async () => {
+    const request = makeRequest();
+    const base = request.getMockImplementation();
+    let answerTips;
+    request.mockImplementation(async (path, options) => {
+      if (path.endsWith('/tech-tips')) return new Promise((resolve) => { answerTips = resolve; });
+      return base(path, options);
+    });
+    await openSheet(request);
+    // The form is usable with the tips read still open.
+    expect(screen.getByLabelText('Tell me about the visit')).toBeTruthy();
+    expect(screen.queryByText('Tip for the customer')).toBeNull();
+
+    await React.act(async () => { answerTips(TIP_LIBRARY); });
+    expect(await screen.findByText('Tip for the customer')).toBeTruthy();
+  });
+
   test('offers several options and keeps only the last one picked', async () => {
     const request = makeRequest({ tips: TIP_LIBRARY });
     await openSheet(request);
+    await screen.findByText('Tip for the customer');
 
     expect(screen.getByText('Pick 1 (optional)')).toBeTruthy();
     // The short list first; the rest sits behind Show all.
@@ -207,6 +268,7 @@ describe('FastCompleteSheet tip for the customer', () => {
   test('tapping the picked tip again clears it', async () => {
     const request = makeRequest({ tips: TIP_LIBRARY });
     await openSheet(request);
+    await screen.findByText('Tip for the customer');
     const option = screen.getByRole('button', { name: /Fix drips at hose bibs/ });
     fireEvent.click(option);
     fireEvent.click(option);
@@ -218,6 +280,7 @@ describe('FastCompleteSheet tip for the customer', () => {
   test('Show all and search reach the whole list, and the pick stays in view', async () => {
     const request = makeRequest({ tips: TIP_LIBRARY });
     await openSheet(request);
+    await screen.findByText('Tip for the customer');
 
     fireEvent.click(screen.getByRole('button', { name: 'Show all' }));
     fireEvent.click(screen.getByRole('button', { name: /Aim landscape lights away/ }));
@@ -236,6 +299,7 @@ describe('FastCompleteSheet tip for the customer', () => {
   test('a tip the tech writes replaces a library pick, and the other way round', async () => {
     const request = makeRequest({ tips: TIP_LIBRARY });
     await openSheet(request);
+    await screen.findByText('Tip for the customer');
 
     fireEvent.click(screen.getByRole('button', { name: /Fix drips at hose bibs/ }));
     fireEvent.click(screen.getByRole('button', { name: 'Write your own' }));
