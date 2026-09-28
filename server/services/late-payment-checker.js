@@ -491,6 +491,13 @@ async function collectionsChannelPermitted(customerId, invoiceId, channel, now, 
 }
 
 const LatePaymentService = {
+  // Exposed so invoice-followups.js's orphan-adoption sweep can check for a
+  // pending (delivered-SMS, failed-email) legacy retry episode before
+  // arming a fresh sequence over it (Codex pre-push P0 B) — the SAME
+  // durable record and resolution rule this file's own retry logic reads,
+  // never a second implementation. Lazy-required there (this file already
+  // lazy-requires invoice-followups.js above to break the same cycle).
+  recoverPendingEmailEpisode,
   async checkAndNotify(daysOverdue = 7) {
     // GATE_LATE_PAYMENT_CHECKER_OFF, read at call time (strict 'true'):
     // dunning unification PR 3 — once every overdue invoice carries a

@@ -41,8 +41,9 @@ const { adoptOrphanInvoices } = require(path.join(__dirname, '..', 'services', '
 const execute = process.argv.includes('--execute');
 
 (async () => {
-  const { candidates } = await adoptOrphanInvoices({ dryRun: true });
-  console.log(`[dunning-adopt-orphans] ${execute ? 'EXECUTE' : 'DRY RUN'} — ${candidates.length} orphan invoice(s) with no follow-up sequence row`);
+  const { candidates, skipped = [] } = await adoptOrphanInvoices({ dryRun: true });
+  console.log(`[dunning-adopt-orphans] ${execute ? 'EXECUTE' : 'DRY RUN'} — ${candidates.length} orphan invoice(s) with no follow-up sequence row, ${skipped.length} skipped`);
+  for (const s of skipped) console.log(`  skipped invoice ${s.invoice_id}  reason ${s.reason}`);
   for (const c of candidates) {
     console.log(`  invoice ${c.invoice_id}  customer ${c.customer_id}  sent ${new Date(c.sent_at).toISOString().slice(0, 10)}  $${c.amount_due.toFixed(2)} due  ${c.days_since_sent}d since sent`);
   }
@@ -51,7 +52,7 @@ const execute = process.argv.includes('--execute');
     return;
   }
   const result = await adoptOrphanInvoices({ dryRun: false });
-  console.log(`[dunning-adopt-orphans] adopted ${result.adopted} invoice(s)${result.invoiceIds.length ? `: ${result.invoiceIds.join(', ')}` : ''}`);
+  console.log(`[dunning-adopt-orphans] adopted ${result.adopted} invoice(s)${result.invoiceIds.length ? `: ${result.invoiceIds.join(', ')}` : ''}; skipped ${(result.skipped || []).length}`);
 })()
   .catch((e) => { console.error('[dunning-adopt-orphans] failed:', e.message); process.exitCode = 1; })
   .finally(() => db.destroy());
