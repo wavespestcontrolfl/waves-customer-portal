@@ -103,9 +103,14 @@ function isSchedulableInvoice(invoice) {
 // byte-identical, per-channel verdicts, invoice-membership required.
 const { collectionsChannelPermitted: railGuardPermitted } = require('./collections/rail-guard');
 
-async function collectionsChannelPermitted(customerId, invoiceId, channel, excludeLedgerIds = [], detail = false) {
+// A bank-verification re-nudge (mdPending) is written as purpose
+// payment_verification, not an overdue reminder, so it names no source and
+// the spacing shadow never observes it (Codex #5189 r5); its policy verdict
+// is unchanged.
+async function collectionsChannelPermitted(customerId, invoiceId, channel, excludeLedgerIds = [], detail = false, verification = false) {
   return railGuardPermitted({
-    customerId, invoiceId, channel, purpose: 'late_payment', excludeLedgerIds, source: 'invoice_followups', logTag: 'invoice-followups', detail,
+    customerId, invoiceId, channel, purpose: 'late_payment', excludeLedgerIds,
+    ...(verification ? {} : { source: 'invoice_followups' }), logTag: 'invoice-followups', detail,
   });
 }
 
@@ -1442,7 +1447,7 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
     }
   }
   const policyResults = await Promise.all(policyChannels.map((channel) =>
-    collectionsChannelPermitted(row.customer_id, row.invoice_id, channel, ownLedgerIds, true)));
+    collectionsChannelPermitted(row.customer_id, row.invoice_id, channel, ownLedgerIds, true, mdPending)));
   const channelPolicy = Object.fromEntries(policyChannels.map((channel, index) => [channel, verdictAllows(policyResults[index])]));
   const emailDurablyDenied = verdictDurablyDenied(policyResults[policyChannels.indexOf('email')]);
   const smsPermitted = channelPolicy.sms === true;
