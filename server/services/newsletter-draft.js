@@ -1744,7 +1744,12 @@ async function createNewsletterDraft({
         .whereIn('e.id', safeIds)
         .whereIn('e.admin_status', ['approved', 'featured'])
         .whereNull('e.merged_into')
-        .whereNotIn('e.freshness_status', ['expired', 'stale_recurring'])
+        // 'stale_recurring' is deliberately NOT excluded here (Codex P1,
+        // 2026-09-27, second pass) — see newsletter-autopilot.js's
+        // buildDigestPlan for why: it used to be, which unconditionally
+        // defeated excludeRoutineRecurringFromQuery's own first-of-year
+        // admission for every routine row before that shared gate even ran.
+        .whereNotIn('e.freshness_status', ['expired'])
         .orderByRaw('e.freshness_score DESC NULLS LAST');
 
       const approvedRows = await excludeRoutineRecurringFromQuery(approvedQuery);

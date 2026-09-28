@@ -96,12 +96,28 @@ function curationEnabled() {
   return process.env.EVENT_AUTO_CURATION !== 'false';
 }
 
-// Freshness statuses that hard-reject a row regardless of when it was first
-// examined — shared by fresh curation AND the rescore pass (Codex P1: the
-// rescore path used to skip this gate entirely, so an operator flip to
-// needs_review/expired after the original assessment never blocked a stale
-// stored score from later auto-approving).
-const CURATION_FRESHNESS_EXCLUSIONS = Object.freeze(['expired', 'stale_recurring', 'needs_review']);
+// Freshness statuses that hard-reject a row UNCONDITIONALLY, regardless of
+// when it was first examined or what the routine/first-of-year gate below
+// would otherwise say — shared by fresh curation AND the rescore pass (Codex
+// P1: the rescore path used to skip this gate entirely, so an operator flip
+// to needs_review/expired after the original assessment never blocked a
+// stale stored score from later auto-approving).
+//
+// 'stale_recurring' is deliberately NOT in this list (Codex P1, 2026-09-27,
+// second pass) — it used to be, and that was itself a bug: this constant is
+// ANDed at the top level of the query, OUTSIDE excludeRoutineRecurringFromQuery's
+// own OR-group. Excluding 'stale_recurring' here unconditionally meant EVERY
+// stale_recurring row was removed before it ever reached that OR-group's
+// third branch (the NOT EXISTS "no earlier-this-ET-year sibling" admission)
+// — so a continuity-proven first-of-year weekly/monthly row, which normally
+// KEEPS the normalizer's 'stale_recurring' classification (classifyFreshness
+// has no pool access and can't know about continuity), could never be
+// admitted at all, silently defeating that whole admission mechanism. A
+// stale_recurring row's fate is decided ENTIRELY by
+// excludeRoutineRecurringFromQuery now: routine metadata + no earlier sibling
+// this year ⇒ admitted (to be re-verified by the JS gate below); routine
+// metadata + an earlier sibling exists ⇒ excluded, same as before.
+const CURATION_FRESHNESS_EXCLUSIONS = Object.freeze(['expired', 'needs_review']);
 
 /**
  * Hard gates shared by fresh curation's candidate query AND the deterministic
@@ -140,7 +156,11 @@ const CANDIDATE_COLUMNS = [
  * Hard gates in SQL: only events the digest could actually use reach
  * the model. Never-examined (curated_at NULL) pending rows, classified
  * by the normalizer, future-dated within the digest horizon, with a
- * link, not merged, not stale/expired/needs_review.
+ * link, not merged, not expired/needs_review, and not routine-recurring
+ * unless it could be this ET calendar year's first occurrence (a
+ * 'stale_recurring' row is admitted or rejected entirely by
+ * excludeRoutineRecurringFromQuery, never by a blanket freshness_status
+ * exclusion — see CURATION_FRESHNESS_EXCLUSIONS).
  */
 function buildCurationCandidateQuery(limit = CURATION_RUN_LIMIT) {
   const etMidnight = parseETDateTime(`${etDateString()}T00:00:00`);
@@ -562,6 +582,30 @@ function rescoreCuratedEvent(row) {
  * above and this write. updated_at is deliberately never written here (unlike
  * applyDecision) — hasContentChangedSinceCuration's drift check depends on it
  * staying put across repeated rescore passes.
+ *
+ * Codex P1, 2026-09-27 (second pass): hasContentChangedSinceCuration in the
+ * caller only inspects the batch's OWN fetch-time snapshot — it catches drift
+ * that happened before this rescore run started, not a write that lands
+ * DURING it (a long batch processes many rows; a concurrent ingestion
+ * re-pull or admin edit can land on THIS row between the initial SELECT and
+ * this UPDATE). The approval UPDATE is therefore made optimistic: its WHERE
+ * also pins `updated_at` and `curated_at` to the exact values this decision
+ * was computed from (`row`, the SELECT snapshot), so ANY concurrent write to
+ * either column — not just one that happens to touch a gate column this
+ * function already checks — makes it match 0 rows instead of approving from
+ * math that may no longer describe the row.
+ *
+ * The comparison is via date_trunc('milliseconds', …), NOT plain `=` —
+ * verified against real Postgres: pg's timestamptz has microsecond
+ * precision, but node-postgres reads it back into a JS Date, which is
+ * MILLISECOND precision. A plain `.where('updated_at', row.updated_at)`
+ * therefore compares a millisecond-truncated value against the column's own
+ * full microsecond value and NEVER matches — not even the unchanged row it
+ * was just read from — which would silently zero out every rescore approval
+ * forever. Truncating the column to the same millisecond precision before
+ * comparing is what makes "unchanged" actually match while a genuine
+ * concurrent write (which moves the value by more than a truncation
+ * rounding) still does not.
  */
 async function applyRescore(row, decision, { canApprove = decision.approve } = {}) {
   const note = (decision.editorialReason
@@ -581,6 +625,8 @@ async function applyRescore(row, decision, { canApprove = decision.approve } = {
       .whereNotNull('event_url')
       .whereNot('event_type', 'unknown')
       .whereNotIn('freshness_status', CURATION_FRESHNESS_EXCLUSIONS)
+      .whereRaw("date_trunc('milliseconds', updated_at) = ?", [row.updated_at])
+      .whereRaw("date_trunc('milliseconds', curated_at) = ?", [row.curated_at])
       .update({ ...assessmentFields, admin_status: 'approved', approved_via: 'auto_curation' });
     if (updated) return 'approved';
   }

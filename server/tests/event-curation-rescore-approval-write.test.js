@@ -7,6 +7,15 @@
  * no live Postgres in this environment) to prove the `canApprove` gate
  * (computed by runScoreRescore from the SAME eligibility pipeline fresh
  * curation uses) is what the write obeys, not decision.approve alone.
+ *
+ * Codex P1 (2026-09-27, second pass), event-curation.js:578 "Guard rescore
+ * approval against concurrent content changes": hasContentChangedSinceCuration
+ * only catches drift present in the batch's OWN fetch-time snapshot, not a
+ * write that lands DURING the batch (between the initial SELECT and this
+ * row's own approval UPDATE). The tests below prove the approval UPDATE's
+ * WHERE is now optimistic — pinned to the exact `updated_at`/`curated_at`
+ * the decision was computed from — so a concurrent write that changes either
+ * makes it match 0 rows instead of approving from stale math.
  */
 
 jest.mock('../models/db', () => jest.fn());
@@ -15,18 +24,25 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const db = require('../models/db');
 const { applyRescore, hasContentChangedSinceCuration, revalidateStaleRescoreCandidate } = require('../services/event-curation');
 
-function wireDb() {
+function wireDb({ approveRows = 1 } = {}) {
   const calls = [];
+  const whereRawCalls = [];
   db.fn = { now: jest.fn(() => 'NOW()') };
-  db.mockImplementation(() => ({
-    where: jest.fn().mockReturnThis(),
-    whereNull: jest.fn().mockReturnThis(),
-    whereNotNull: jest.fn().mockReturnThis(),
-    whereNot: jest.fn().mockReturnThis(),
-    whereNotIn: jest.fn().mockReturnThis(),
-    update: jest.fn((patch) => { calls.push(patch); return Promise.resolve(1); }),
-  }));
-  return calls;
+  const chain = {
+    where: jest.fn(() => chain),
+    whereNull: jest.fn(() => chain),
+    whereNotNull: jest.fn(() => chain),
+    whereNot: jest.fn(() => chain),
+    whereNotIn: jest.fn(() => chain),
+    whereRaw: jest.fn((sql, bindings) => { whereRawCalls.push({ sql, bindings }); return chain; }),
+    update: jest.fn((patch) => {
+      calls.push(patch);
+      const isApprovalWrite = patch.admin_status === 'approved';
+      return Promise.resolve(isApprovalWrite ? approveRows : 1);
+    }),
+  };
+  db.mockImplementation(() => chain);
+  return { calls, whereRawCalls };
 }
 
 beforeEach(() => jest.clearAllMocks());
@@ -39,10 +55,14 @@ describe('applyRescore write path obeys canApprove, not decision.approve alone',
     rejectionCodes: [],
     editorialReason: 'Great event',
   };
-  const row = { id: 'row-1' };
+  const row = {
+    id: 'row-1',
+    updated_at: new Date('2026-09-27T09:00:00.000Z'),
+    curated_at: new Date('2026-09-27T06:15:00.000Z'),
+  };
 
   test('canApprove: false (current-eligibility check failed) never writes admin_status=approved, even though decision.approve is true', async () => {
-    const calls = wireDb();
+    const { calls } = wireDb();
     const outcome = await applyRescore(row, APPROVING_DECISION, { canApprove: false });
     expect(outcome).toBe('rescored');
     expect(calls).toHaveLength(1);
@@ -54,7 +74,7 @@ describe('applyRescore write path obeys canApprove, not decision.approve alone',
   });
 
   test('canApprove: true (default from decision.approve when the caller passes nothing) writes admin_status=approved', async () => {
-    const calls = wireDb();
+    const { calls } = wireDb();
     const outcome = await applyRescore(row, APPROVING_DECISION);
     expect(outcome).toBe('approved');
     expect(calls).toHaveLength(1);
@@ -63,24 +83,55 @@ describe('applyRescore write path obeys canApprove, not decision.approve alone',
   });
 
   test('neither write path touches updated_at — hasContentChangedSinceCuration must stay valid across repeated rescore passes', async () => {
-    const calls = wireDb();
+    const { calls } = wireDb();
     await applyRescore(row, APPROVING_DECISION, { canApprove: true });
     await applyRescore(row, APPROVING_DECISION, { canApprove: false });
     for (const patch of calls) expect(patch.updated_at).toBeUndefined();
   });
 
   test('a rejected-policy decision (approve: false) never approves regardless of canApprove', async () => {
-    const calls = wireDb();
+    const { calls } = wireDb();
     const rejected = { ...APPROVING_DECISION, approve: false, rejectionCodes: ['retail_promotion'] };
     const outcome = await applyRescore(row, rejected, { canApprove: false });
     expect(outcome).toBe('rescored');
     expect(calls[0].admin_status).toBeUndefined();
   });
+
+  test('the approval UPDATE pins its WHERE to the row\'s own updated_at and curated_at via a millisecond-truncated comparison', async () => {
+    const { whereRawCalls } = wireDb();
+    await applyRescore(row, APPROVING_DECISION, { canApprove: true });
+    expect(whereRawCalls).toHaveLength(2);
+    const updatedAtClause = whereRawCalls.find((c) => c.bindings[0] === row.updated_at);
+    const curatedAtClause = whereRawCalls.find((c) => c.bindings[0] === row.curated_at);
+    expect(updatedAtClause).toBeTruthy();
+    expect(curatedAtClause).toBeTruthy();
+    // Not a plain `=` — node-postgres reads timestamptz back as a
+    // millisecond-precision JS Date while the column itself is microsecond
+    // precision, so a bare equality would never match even the SAME row.
+    expect(updatedAtClause.sql).toMatch(/date_trunc\('milliseconds',\s*updated_at\)\s*=\s*\?/);
+    expect(curatedAtClause.sql).toMatch(/date_trunc\('milliseconds',\s*curated_at\)\s*=\s*\?/);
+  });
+
+  test('a concurrent write between fetch and this UPDATE (WHERE matches 0 rows) never approves — the row is left "raced", not approved', async () => {
+    const { calls } = wireDb({ approveRows: 0 });
+    const outcome = await applyRescore(row, APPROVING_DECISION, { canApprove: true });
+    // The version-pinned approval UPDATE is attempted (its SQL is sent) but
+    // — simulating a concurrent write that moved updated_at/curated_at off
+    // this row's snapshot — matches 0 rows, so applyRescore falls through to
+    // the plain (non-approving) rescore write instead of ever claiming
+    // 'approved'. runScoreRescore's own approved-count only increments on
+    // outcome === 'approved', so this concurrent-write case is never
+    // reported as a newly-approved row.
+    expect(outcome).toBe('raced');
+    expect(calls).toHaveLength(2);
+    expect(calls[0].admin_status).toBe('approved'); // the attempted, but unmatched, approval write
+    expect(calls[1].admin_status).toBeUndefined(); // the fallback write never sets admin_status
+  });
 });
 
 describe('revalidateStaleRescoreCandidate clears the assessment and curated_at (Codex P1 content-drift path)', () => {
   test('writes curated_at: null and clears the stored score so the row re-enters fresh curation', async () => {
-    const calls = wireDb();
+    const { calls } = wireDb();
     await revalidateStaleRescoreCandidate({ id: 'row-2' }, 'content changed');
     expect(calls).toHaveLength(1);
     expect(calls[0].curated_at).toBeNull();

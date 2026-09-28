@@ -333,14 +333,31 @@ describe('event-curation rescore approval must re-check current eligibility, not
     expect(decision.score).toBe(86);
   });
 
-  test('needs_review/expired/stale_recurring never reach the rescore pipeline at all — buildRescoreCandidateQuery excludes them at the SQL layer', () => {
+  test('needs_review/expired never reach the rescore pipeline at all — buildRescoreCandidateQuery excludes them unconditionally at the SQL layer', () => {
     // The SAME freshness_status exclusion list fresh curation's own query
     // uses (asserted directly against buildRescoreCandidateQuery above) means
     // an operator's needs_review/expired flip removes the row from `rows`
     // before runScoreRescore ever computes a decision for it — the strongest
     // form of the fix, since a row that was never fetched can never be
     // rescored from its stale assessment.
-    expect(CURATION_FRESHNESS_EXCLUSIONS).toEqual(['expired', 'stale_recurring', 'needs_review']);
+    //
+    // 'stale_recurring' is DELIBERATELY absent from this unconditional list
+    // (Codex P1, 2026-09-27, second pass) — it used to be included, which was
+    // itself a bug: ANDed at the top level of the query, outside
+    // excludeRoutineRecurringFromQuery's own OR-group, it unconditionally
+    // removed EVERY routine row before that shared gate's first-of-year
+    // admission (the NOT EXISTS "no earlier-this-ET-year sibling" branch)
+    // ever got a chance to run — so a continuity-proven first-of-year weekly/
+    // monthly row (which keeps the normalizer's 'stale_recurring'
+    // classification; classifyFreshness has no pool access to know about
+    // continuity) could NEVER reach the rescore pipeline at all, silently
+    // defeating the owner's 2026-09-27 ruling for every rescore-path
+    // consumer. A stale_recurring row's fate is now decided entirely by
+    // excludeRoutineRecurringFromQuery — see
+    // event-freshness-routine-first-of-year-sql-admission.test.js for the
+    // real-Postgres proof that a first-of-year stale_recurring row IS
+    // admitted while a non-first-of-year one is still rejected.
+    expect(CURATION_FRESHNESS_EXCLUSIONS).toEqual(['expired', 'needs_review']);
   });
 
   test('a row whose recurrence metadata was edited to routine (no debut evidence, no proven first-of-year) fails isEligibleForFreshDigest even though its stored score clears the floor', () => {

@@ -334,6 +334,30 @@ function mayNeedYearPool(events) {
 }
 
 /**
+ * The ONE predicate that exempts a recurring identity from the same-issue
+ * repeated-title rejection, shared verbatim by the planning filter
+ * (filterRepeatedDateIdentities, below — reaching this branch never even
+ * consults repeatedTitles) and the final proof/send gate
+ * (assessFlagshipEventSelection). A recurring identity that has proven it is
+ * first-of-year is, by construction, going to have OTHER dated siblings of
+ * the same normalized title somewhere in the pool (that's what "recurring"
+ * means) — repeatedDateTitleKeys has no way to tell those apart from a
+ * mislabeled one-off repeated by ingestion error, so recurring identities
+ * are exempted from it entirely and rely on isFirstOccurrenceOfYear /
+ * isPreviouslyFeaturedIdentity instead.
+ *
+ * Codex P1, 2026-09-27: assessFlagshipEventSelection used to apply the
+ * repeated-title rejection unconditionally (except for a star or a debut),
+ * so a continuity-proven (non-debut) weekly/monthly first-of-year
+ * occurrence — admitted by planning — failed final validation the moment
+ * any later sibling of the same series existed anywhere in the reloaded
+ * ±90-day pool, which for an actual weekly series is always.
+ */
+function isRecurringFirstOfYearExempt(isRecurringIdentity, firstOfYear) {
+  return Boolean(isRecurringIdentity && firstOfYear);
+}
+
+/**
  * DB-backed routine-identity gate shared by planning and final validation.
  * The bounded ±90-day horizon catches next week's sibling and a prior-only
  * sibling (including a rejected row, which is still recurrence evidence)
@@ -366,8 +390,14 @@ async function filterRepeatedDateIdentities(
     // never covered — is eligible only for its first occurrence of the ET
     // calendar year.
     const occurrenceCount = identityOccurrenceCount(event, calendarYearPool);
-    if (isRecurringIdentityEvent(event, { occurrenceCount })) {
-      if (!isFirstOccurrenceOfYear(event, calendarYearPool, reference)) return null;
+    const isRecurringIdentity = isRecurringIdentityEvent(event, { occurrenceCount });
+    if (isRecurringIdentity) {
+      const firstOfYear = isFirstOccurrenceOfYear(event, calendarYearPool, reference);
+      // Reaching here already proves isRecurringFirstOfYearExempt(true, firstOfYear)
+      // decides this branch's fate — spelled out via the shared predicate so
+      // this stays provably the same rule assessFlagshipEventSelection uses,
+      // not a parallel re-implementation.
+      if (!isRecurringFirstOfYearExempt(isRecurringIdentity, firstOfYear)) return null;
       const debutProof = event?.freshness_status === 'fresh_series_launch' && isSeriesDebutEvent(event);
       // Debut evidence alone already proves recurring-ness (isRoutineRecurring
       // Event's own metadata check) — no occurrenceCount needed, and object
@@ -462,8 +492,16 @@ function assessFlagshipEventSelection(
       __recurrenceOccurrenceCount: occurrenceCount,
     };
 
+    // Codex P1, 2026-09-27: a verified recurring first-of-year occurrence is
+    // exempt from the repeated-title rejection here exactly as it is in
+    // filterRepeatedDateIdentities (isRecurringFirstOfYearExempt) — without
+    // this, a continuity-proven weekly/monthly row that planning already
+    // admitted fails final validation the instant a later sibling of the
+    // same series exists anywhere in the reloaded pool, which for a real
+    // recurring series is always.
     if (!approved || !inIssueWindow
-        || (!starred && !debut && repeatedTitles.has(normalizeDigestTitle(event.title)))
+        || (!starred && !debut && !isRecurringFirstOfYearExempt(isRecurringIdentity, firstOfYear)
+          && repeatedTitles.has(normalizeDigestTitle(event.title)))
         || (!starred && isRecurringIdentity && !firstOfYear)
         || !isEligibleForFreshDigest(eligibilityCheckEvent, reference)
         || (!starred && isPreviouslyFeaturedIdentity(event, featuredHistory, reference, { occurrenceCount }))) {
@@ -530,6 +568,7 @@ module.exports = {
   parseLockedEventIds,
   isFirstOccurrenceInPool,
   isMergedAwaySibling,
+  isRecurringFirstOfYearExempt,
   identityOccurrenceCount,
   isFirstOccurrenceOfYear,
   loadYearIdentityPool,

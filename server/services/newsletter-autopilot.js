@@ -191,7 +191,17 @@ async function buildDigestPlan({ reference = new Date() } = {}) {
     .where('e.start_at', '>=', startDate)
     .where('e.start_at', '<=', endDate)
     .whereNotNull('e.event_url')
-    .whereNotIn('e.freshness_status', ['expired', 'stale_recurring'])
+    // 'stale_recurring' is deliberately NOT excluded here (Codex P1,
+    // 2026-09-27, second pass) — it used to be, ANDed at this top level,
+    // which unconditionally removed EVERY routine row before
+    // excludeRoutineRecurringFromQuery's own OR-group ever got a chance to
+    // admit a genuine first-of-year occurrence (a continuity-proven weekly/
+    // monthly row keeps the normalizer's 'stale_recurring' classification —
+    // classifyFreshness has no pool access to know about continuity). A
+    // stale_recurring row's fate is decided entirely by
+    // excludeRoutineRecurringFromQuery below, never by a blanket exclusion
+    // outside it.
+    .whereNotIn('e.freshness_status', ['expired'])
     .orderByRaw('e.freshness_score DESC NULLS LAST');
 
   const rows = await excludeRoutineRecurringFromQuery(query);

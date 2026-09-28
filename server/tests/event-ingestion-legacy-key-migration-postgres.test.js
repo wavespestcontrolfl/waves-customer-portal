@@ -23,6 +23,23 @@ const { randomUUID } = require('crypto');
 const SKIP = !process.env.DATABASE_URL;
 const describeOrSkip = SKIP ? describe.skip : describe;
 
+// Near-today date literals bit-rot (AGENTS.md: "compute relative dates for
+// anything a freshness check validates") — upsertExtractedEvents drops
+// anything more than FORWARD_WINDOW_DAYS (90) out or more than 24h in the
+// past (server/services/event-ingestion.js), against the REAL clock, with no
+// injectable reference. A fixed November 2026 literal reads as safely future
+// today but silently starts failing (dropped instead of upserted) the moment
+// the real calendar passes it. Anchored to Date.now() + N days instead, well
+// inside that window, with an explicit UTC offset so the instant is
+// unambiguous regardless of which side of a DST transition "N days from now"
+// falls on.
+function daysFromNowIso(days, hourUtc = 18) {
+  const d = new Date();
+  d.setUTCDate(d.getUTCDate() + days);
+  d.setUTCHours(hourUtc, 0, 0, 0);
+  return d.toISOString();
+}
+
 describeOrSkip('upsertExtractedEvents — legacy dedup-key migration on real PostgreSQL', () => {
   jest.setTimeout(30000);
 
@@ -56,7 +73,8 @@ describeOrSkip('upsertExtractedEvents — legacy dedup-key migration on real Pos
     const source = { id: sourceId, coverage_geo: [] };
     const title = 'TEST Legacy Key Migration Event';
     const url = 'https://test.invalid/legacy-migration-event/';
-    const start = parseExtractedStartAt('2026-11-05T18:00:00-05:00'); // EST
+    const startIso = daysFromNowIso(30);
+    const start = parseExtractedStartAt(startIso);
     const { externalId: newKey, legacyExternalId: legacyKey } = extractedEventDedupKeys(title, start, url);
     expect(newKey).not.toBe(legacyKey); // the two shapes really do differ
 
@@ -76,7 +94,7 @@ describeOrSkip('upsertExtractedEvents — legacy dedup-key migration on real Pos
     // this is what a source cron does after the fix ships, with Claude
     // extracting the identical event.
     const { upserted, dropped } = await upsertExtractedEvents(source, [
-      { title, startAt: '2026-11-05T18:00:00-05:00', eventUrl: url, description: 'updated on re-pull' },
+      { title, startAt: startIso, eventUrl: url, description: 'updated on re-pull' },
     ]);
     expect(upserted).toBe(1);
     expect(dropped).toBe(0);
@@ -92,14 +110,15 @@ describeOrSkip('upsertExtractedEvents — legacy dedup-key migration on real Pos
     const source = { id: sourceId, coverage_geo: [] };
     const title = 'TEST Fresh Pull Event';
     const url = 'https://test.invalid/fresh-pull-event/';
+    const startAt = daysFromNowIso(31, 13);
 
     const first = await upsertExtractedEvents(source, [
-      { title, startAt: '2026-11-06T09:00:00-05:00', eventUrl: url },
+      { title, startAt, eventUrl: url },
     ]);
     expect(first.upserted).toBe(1);
 
     const second = await upsertExtractedEvents(source, [
-      { title, startAt: '2026-11-06T09:00:00-05:00', eventUrl: url },
+      { title, startAt, eventUrl: url },
     ]);
     expect(second.upserted).toBe(1);
 

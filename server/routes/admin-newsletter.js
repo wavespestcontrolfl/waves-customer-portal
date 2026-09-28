@@ -1909,7 +1909,12 @@ router.get('/events/approved-ids', async (req, res, next) => {
       .where('e.start_at', '>=', todayET)
       .where('e.start_at', '<=', cutoffET)
       .whereNotNull('e.event_url')
-      .whereNotIn('e.freshness_status', ['expired', 'stale_recurring'])
+      // 'stale_recurring' is deliberately NOT excluded here (Codex P1,
+      // 2026-09-27, second pass) — see newsletter-autopilot.js's
+      // buildDigestPlan for why: it used to be, which unconditionally
+      // defeated excludeRoutineRecurringFromQuery's own first-of-year
+      // admission for every routine row before that shared gate even ran.
+      .whereNotIn('e.freshness_status', ['expired'])
       .orderByRaw('CASE WHEN e.admin_status = \'featured\' THEN 0 ELSE 1 END')
       .orderByRaw('e.freshness_score DESC NULLS LAST')
       .limit(20);
@@ -1951,7 +1956,12 @@ router.post('/events/digest-plan', async (req, res, next) => {
       .where('e.start_at', '>=', startDate)
       .where('e.start_at', '<=', endDate)
       .whereNotNull('e.event_url')
-      .whereNotIn('e.freshness_status', ['expired', 'stale_recurring'])
+      // 'stale_recurring' is deliberately NOT excluded here (Codex P1,
+      // 2026-09-27, second pass) — see newsletter-autopilot.js's
+      // buildDigestPlan for why: it used to be, which unconditionally
+      // defeated excludeRoutineRecurringFromQuery's own first-of-year
+      // admission for every routine row before that shared gate even ran.
+      .whereNotIn('e.freshness_status', ['expired'])
       .orderByRaw('e.freshness_score DESC NULLS LAST');
 
     const rows = await excludeRoutineRecurringFromQuery(query);
