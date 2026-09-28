@@ -320,13 +320,18 @@ function isoOrNull(value) {
 // or none keeps the written clock; any other offset is converted. due_at
 // keeps the instant; this keeps what was said (persisted as due_local).
 function spokenWallClock(value) {
-  // Only a time the Eastern parser accepts (never '2026-13-45T…'): the
-  // lapse sweep casts due_local to a timestamp.
-  if (!(parseDueAt(value) instanceof Date)) return null;
+  if (value == null || value === '') return null;
   const wall = require('./call-booking-miss-watchdog').confirmedWallClockET(value);
-  if (!wall || !/^\d{4}-\d{2}-\d{2}$/.test(wall.dateET) || !Number.isFinite(wall.minutes)) return null;
+  if (!wall) return null;
   const pad = (n) => String(n).padStart(2, '0');
-  return `${wall.dateET}T${pad(Math.floor(wall.minutes / 60))}:${pad(wall.minutes % 60)}`;
+  const local = `${wall.dateET}T${pad(Math.floor(wall.minutes / 60))}:${pad(wall.minutes % 60)}`;
+  // Only a real ET wall clock: it must read back as itself, so a rolled-over
+  // calendar date ('2026-02-30', '2026-13-45') or an hour past 23 is never
+  // persisted — the lapse sweep casts due_local to a timestamp.
+  const at = parseETDateTime(local);
+  if (!(at instanceof Date) || Number.isNaN(at.getTime())) return null;
+  const back = etParts(at);
+  return `${etDateString(at)}T${pad(back.hour)}:${pad(back.minute)}` === local ? local : null;
 }
 
 // The persisted V2 schema types scheduling.callback_window_start as a TIME

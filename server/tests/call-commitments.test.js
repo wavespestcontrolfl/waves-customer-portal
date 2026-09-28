@@ -302,6 +302,9 @@ describe('groundModelCommitments', () => {
     expect(say('tomorrow-ish')).toMatchObject({ due_at: null, due_local: null });
     // Shaped like a time but not one: never persisted (the sweep casts it).
     expect(say('2026-13-45T15:00:00-04:00')).toMatchObject({ due_at: null, due_local: null });
+    // A calendar rollover the parser would accept as another day never is.
+    expect(say('2026-02-30T15:00:00-05:00').due_local).toBeNull();
+    expect(say('2026-07-10T25:00:00-04:00').due_local).toBeNull();
   });
 
   test('a nonempty due_at the parser rejects is not a stated deadline: kept, counted, and its wording rides in due_text (codex gh-r12 P2)', () => {
