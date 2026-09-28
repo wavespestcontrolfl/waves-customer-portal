@@ -26,11 +26,10 @@ const fromEmail = () => process.env.SENDGRID_FROM_EMAIL || 'contact@wavespestcon
 const FROM_NAME = process.env.SENDGRID_FROM_NAME || 'Waves Pest Control';
 
 const WINDOW_DAYS = 7;
-// A gap the owner has already triaged as intentional or rejected does not
-// need a recurring weekly nag; `fixed` still shows up if it recurs (the
-// recorder reopens it to `new` on that recurrence) and `building`/`new` gaps
-// are the ones worth a reminder.
-const QUIET_STATUSES = ['by_design', 'dismissed'];
+// Gaps the owner already settled stay out of the reminder. A `fixed` gap
+// that happens again is reopened to `new` by the recorder, so a regression
+// still shows up; `new` and `building` are the ones worth a reminder.
+const QUIET_STATUSES = ['fixed', 'by_design', 'dismissed'];
 // Fixed, short instruction — never the list itself (bell-body length rule).
 const BELL_BODY = 'Ask the bar "show gap reports" for the list. Tell any session "build gap #N" to start a PR.';
 
@@ -161,5 +160,5 @@ async function runAgentGapDigest(opts = {}) {
 
 module.exports = {
   runAgentGapDigest,
-  _private: { composeAgentGapDigest, dedupeKeyFor, BELL_BODY },
+  _private: { composeAgentGapDigest, dedupeKeyFor, loadRecentGaps, BELL_BODY },
 };

@@ -70,11 +70,9 @@ describe('agent-gap-reports', () => {
       expect(a.closest_tool).toBe('get_refunds');
     });
 
-    test('a tool failure is identified by its tool', () => {
+    test('only missing capabilities are recorded; tool failures live in tool_health_events', () => {
       const { _private: { prepareGapRow } } = load();
-      const a = prepareGapRow({ source: 'intelligence-bar', kind: 'tool_failure', summary: 'kept failing in one request', closestTool: 'send_sms' });
-      const b = prepareGapRow({ source: 'intelligence-bar', kind: 'tool_failure', summary: 'kept failing in one request', closestTool: 'adjust_stock' });
-      expect(a.fingerprint).not.toBe(b.fingerprint);
+      expect(prepareGapRow({ source: 'intelligence-bar', kind: 'tool_failure', summary: 'send_sms kept failing' })).toBeNull();
     });
 
     test('redacts contact details, UUIDs, record numbers and the request customer names', () => {
@@ -92,6 +90,13 @@ describe('agent-gap-reports', () => {
       expect(row.summary).toContain('[number]');
       expect(row.summary).toContain('[id]');
       expect(row.attempted).not.toContain('Synthwell');
+    });
+
+    test('redacts a request customer name that ends in an accented letter', () => {
+      const { _private: { prepareGapRow } } = load();
+      const row = prepareGapRow({ source: 'intelligence-bar', kind: 'missing_capability', summary: 'add a rental for José Núñez and Chloé' },
+        ['José Núñez', 'José', 'Núñez', 'Chloé']);
+      expect(row.summary).toBe('add a rental for [name] and [name]');
     });
 
     test('an empty summary after cleaning records nothing', () => {
@@ -164,7 +169,7 @@ describe('agent-gap-reports', () => {
       expect(dbMock).not.toHaveBeenCalled();
     });
 
-    test('an unresolved search is recorded with the search as its summary', async () => {
+    test('a search that found nothing is recorded with the search as its summary', async () => {
       const { createGapCollector } = load();
       const collector = createGapCollector({ source: 'intelligence-bar' });
       collector.discovery({ query: 'add a second service address', domain: 'customers' }, MISS);
@@ -178,29 +183,29 @@ describe('agent-gap-reports', () => {
       const collector = createGapCollector({ source: 'intelligence-bar' });
       collector.discovery({ query: 'refund a card payment' }, found('get_refunds', 'list_payouts'));
       await collector.flush({ reply: DECLINE });
-      expect(insertedRows[0]).toMatchObject({ closest_tool: 'get_refunds', domain: 'customers' });
-      expect(insertedRows[0].attempted).toMatch(/2 related tool\(s\) found, none completed the request/);
+      expect(insertedRows[0]).toMatchObject({ closest_tool: 'get_refunds', domain: 'customers', attempted: 'Searched the bar; 2 related tool(s) found, none used successfully' });
     });
 
-    test('a later success of a surfaced tool resolves the search', async () => {
+    test('a related tool succeeding does not hide a declined request; the note says it ran', async () => {
       const { createGapCollector } = load();
       const collector = createGapCollector({ source: 'intelligence-bar' });
-      collector.discovery({ query: 'update customer fields' }, found('update_customer'));
-      collector.toolResult('update_customer', { status: 'proposed' }, false);
-      await collector.flush({ reply: "I can't change the billing address, but the other fields are ready to confirm." });
-      expect(insertedRows).toHaveLength(0);
+      collector.discovery({ query: 'refund a card payment' }, found('list_refunds'));
+      collector.toolResult('list_refunds', { refunds: [] }, false);
+      await collector.flush({ reply: "I can list refunds, but I can't issue one from the bar." });
+      expect(insertedRows).toHaveLength(1);
+      expect(insertedRows[0]).toMatchObject({ summary: 'refund a card payment', attempted: 'Searched the bar; a related tool ran, but the reply still declined part of the request' });
     });
 
-    test('a success before the search does not resolve it', async () => {
+    test('a success before the search is not credited to it', async () => {
       const { createGapCollector } = load();
       const collector = createGapCollector({ source: 'intelligence-bar' });
       collector.toolResult('query_customers', { customers: [] }, false);
       collector.discovery({ query: 'merge two customer records' }, found('query_customers'));
       await collector.flush({ reply: DECLINE });
-      expect(insertedRows).toHaveLength(1);
+      expect(insertedRows[0].attempted).toBe('Searched the bar; 1 related tool(s) found, none used successfully');
     });
 
-    test('distinct unresolved searches are each recorded; a repeated search counts once for the request', async () => {
+    test('distinct searches are each recorded; a repeated search counts once for the request', async () => {
       const { createGapCollector } = load();
       const collector = createGapCollector({ source: 'intelligence-bar' });
       collector.discovery({ query: 'add a second service address' }, MISS);
@@ -210,32 +215,13 @@ describe('agent-gap-reports', () => {
       expect(insertedRows.map((row) => row.summary)).toEqual(['add a second service address', 'refund a card payment']);
     });
 
-    test('control-flow outcomes never count as tool failures', async () => {
+    test('tool failures are never recorded here, coded or not', async () => {
       const { createGapCollector } = load();
       const collector = createGapCollector({ source: 'intelligence-bar' });
-      for (const code of ['target_clarification_required', 'permission_denied', 'invalid_input', 'dependency_unresolved', 'capability_not_loaded']) {
-        collector.toolResult('adjust_stock', { error: 'x', code }, true);
-        collector.toolResult('adjust_stock', { error: 'x', code }, true);
+      for (let i = 0; i < 3; i += 1) {
+        collector.toolResult('adjust_stock', { error: 'x', code: 'target_clarification_required' }, true);
+        collector.toolResult('send_sms', { error: 'IB writes are turned off' }, true);
       }
-      await collector.flush({ reply: DECLINE });
-      expect(insertedRows).toHaveLength(0);
-    });
-
-    test('a tool that genuinely fails twice records one tool_failure without the raw error text or the count', async () => {
-      const { createGapCollector } = load();
-      const collector = createGapCollector({ source: 'intelligence-bar' });
-      collector.toolResult('send_sms', { error: 'customer dana@example.com not found' }, true);
-      collector.toolResult('send_sms', { error: 'customer dana@example.com not found', code: 'execution_interrupted' }, true);
-      collector.toolResult('send_sms', { error: 'customer dana@example.com not found' }, true);
-      await collector.flush({ reply: DECLINE });
-      expect(insertedRows).toHaveLength(1);
-      expect(insertedRows[0]).toMatchObject({ kind: 'tool_failure', closest_tool: 'send_sms', summary: 'send_sms kept failing in one request (execution_interrupted)' });
-    });
-
-    test('a single genuine failure stays under the threshold', async () => {
-      const { createGapCollector } = load();
-      const collector = createGapCollector({ source: 'intelligence-bar' });
-      collector.toolResult('send_sms', { error: 'boom' }, true);
       await collector.flush({ reply: DECLINE });
       expect(insertedRows).toHaveLength(0);
     });

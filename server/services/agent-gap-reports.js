@@ -11,8 +11,8 @@
  * The model is given NO tool that writes here (the #1568 trust boundary:
  * a model-facing write goes through the confirmation card). Instead the
  * route feeds the collector what the server itself observed in the tool
- * loop — its own capability-search results, a tool name that does not
- * exist, a tool that genuinely broke — and at the end of the request the
+ * loop — its own capability-search results and a tool name that does not
+ * exist — and at the end of the request the
  * collector records those signals only when the reply told the operator
  * the bar could not do something. `writeGapRows()` is the only write path
  * (server/models/migrations/20260928160000_agent_gap_reports.js) and never
@@ -24,9 +24,10 @@ const logger = require('./logger');
 const { redactText } = require('./agent-decision-training');
 const policy = require('./intelligence-bar/action-policy.json');
 
-// The table also allows 'blocked' (migration CHECK) for a later
-// refusal signal; nothing produces it yet.
-const KINDS = new Set(['missing_capability', 'tool_failure']);
+// The table's CHECK also allows 'tool_failure' and 'blocked'; nothing
+// produces them. Broken tools are already tracked per call in
+// tool_health_events (the Tool Health dashboard).
+const KINDS = new Set(['missing_capability']);
 const MAX_TEXT = 300;
 const TOOL_NAME_RE = /^[a-z0-9_]{1,64}$/;
 const UUID_RE = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi;
@@ -47,13 +48,6 @@ const STOPWORDS = new Set(('a an the i me my we our you your it this that these 
 // recorded without it: an exploratory search or a retried tool that ended
 // in a real answer is not a gap.
 const DECLINE_RE = /\b(?:can(?:not|'t|’t)|could(?: not|n't|n’t)|unable to|not able to|no tool|don(?:'t|’t) have (?:a|any) (?:tool|way))\b|\b(?:isn(?:'t|’t)|not) (?:available|supported|possible)\b/i;
-
-// Tool results carrying a code are the loop's structured outcomes —
-// target clarification, permission, invalid input, a pending dependency,
-// a stale target. Only an uncoded error (an unexpected failure) or one of
-// these execution failures counts toward a tool_failure gap.
-const GENUINE_FAILURE_CODES = new Set(['execution_interrupted', 'verify_failed']);
-const TOOL_FAILURE_THRESHOLD = 2;
 
 // Kill switch (CLAUDE.md rule 14): AGENT_GAP_REPORTS=off stops the prompt
 // line, the collector's writes and the Monday digest. Read at call time, so
@@ -102,11 +96,11 @@ function wordKeyOf(summary) {
   return words.length ? words.join(' ') : String(summary || '').toLowerCase();
 }
 
-// The tool is part of a tool_failure's identity. For a missing capability it
-// is only the search's best guess, which varies between requests for the
-// same ask, so it stays out of the key (and is enriched on merge instead).
-function fingerprintFor({ source, kind, tool, summary }) {
-  const key = `${source}|${kind}|${kind === 'tool_failure' ? tool || '' : ''}|${wordKeyOf(summary)}`;
+// The closest tool is only the search's best guess, which varies between
+// requests for the same ask, so it stays out of the key (and is enriched on
+// merge instead).
+function fingerprintFor({ source, kind, summary }) {
+  const key = `${source}|${kind}|${wordKeyOf(summary)}`;
   return crypto.createHash('sha256').update(key).digest('hex');
 }
 
@@ -125,7 +119,7 @@ function prepareGapRow({ source, kind, summary, attempted, closestTool, domain }
     summary: cleanSummary,
     attempted: cleanText(attempted, names),
     closest_tool: tool,
-    fingerprint: fingerprintFor({ source: src, kind, tool, summary: cleanSummary }),
+    fingerprint: fingerprintFor({ source: src, kind, summary: cleanSummary }),
   };
 }
 
@@ -191,24 +185,25 @@ function namesFromTaskContext(taskContext) {
   return [...names];
 }
 
-function isGenuineFailure(result) {
-  return !result?.code || GENUINE_FAILURE_CODES.has(result.code);
-}
-
 function searchAttempt(search) {
-  return search.surfaced.size
-    ? `Searched the bar; ${search.surfaced.size} related tool(s) found, none completed the request`
-    : 'Searched the bar; no matching tool';
+  if (!search.surfaced.size) return 'Searched the bar; no matching tool';
+  return search.relatedToolRan
+    ? 'Searched the bar; a related tool ran, but the reply still declined part of the request'
+    : `Searched the bar; ${search.surfaced.size} related tool(s) found, none used successfully`;
 }
 
 /**
  * Per-request collector. The route reports what the server observed; flush()
  * decides, once the reply is known, what to record.
+ *
+ * The server cannot tell which part of a partly declined request failed —
+ * a related tool succeeding (listing refunds) does not prove the searched
+ * capability (issuing one) exists — so a declined request records every
+ * search it made, each noting whether a related tool ran.
  */
 function createGapCollector({ source }) {
-  const searches = []; // { query, domain, closestTool, surfaced:Set, resolved }
+  const searches = []; // { query, domain, closestTool, surfaced:Set, relatedToolRan }
   const unknownTools = new Set();
-  const failures = new Map(); // toolName -> { count, code }
 
   function discovery(input, result) {
     const status = result?.status;
@@ -219,42 +214,26 @@ function createGapCollector({ source }) {
       domain: input?.domain || capabilities[0]?.domain,
       closestTool: capabilities[0]?.id || null,
       surfaced: new Set(capabilities.map((capability) => capability.id)),
-      resolved: false,
+      relatedToolRan: false,
     });
   }
 
   function toolResult(name, result, failed) {
     if (name === DISCOVERY_TOOL_NAME) return;
     if (!failed) {
-      // A tool an earlier search surfaced did its job: that search found
-      // the capability, whatever the model says afterwards.
-      for (const search of searches) if (search.surfaced.has(name)) search.resolved = true;
-      return;
-    }
-    if (result?.code === 'capability_unimplemented') {
+      for (const search of searches) if (search.surfaced.has(name)) search.relatedToolRan = true;
+    } else if (result?.code === 'capability_unimplemented') {
       unknownTools.add(name);
-      return;
     }
-    if (!isGenuineFailure(result)) return;
-    const entry = failures.get(name) || { count: 0, code: null };
-    entry.count += 1;
-    if (result?.code) entry.code = result.code;
-    failures.set(name, entry);
   }
 
   function pendingSignals() {
-    const signals = searches.filter((search) => !search.resolved).map((search) => ({
+    const signals = searches.map((search) => ({
       source, kind: 'missing_capability', summary: search.query, domain: search.domain,
       closestTool: search.closestTool, attempted: searchAttempt(search),
     }));
     for (const name of unknownTools) {
       signals.push({ source, kind: 'missing_capability', summary: `Asked for a tool that does not exist: ${name}`, closestTool: name });
-    }
-    for (const [name, entry] of failures) {
-      if (entry.count < TOOL_FAILURE_THRESHOLD) continue;
-      // No count in the text: "failed 2 times" and "failed 3 times" must
-      // fingerprint as the same gap; occurrences counts the requests.
-      signals.push({ source, kind: 'tool_failure', summary: `${name} kept failing in one request${entry.code ? ` (${entry.code})` : ''}`, closestTool: name });
     }
     return signals;
   }

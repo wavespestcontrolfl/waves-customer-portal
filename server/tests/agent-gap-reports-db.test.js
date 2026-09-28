@@ -43,6 +43,25 @@ postgres('agent-gap-reports against PostgreSQL', () => {
     return result;
   }
 
+  test('the Monday digest leaves out gaps already marked fixed, by_design or dismissed', async () => {
+    const { _private: { loadRecentGaps } } = require('../services/agent-gap-digest');
+    const open = await record({ summary: 'Synthetic digest gap still open' });
+    const fixed = await record({ summary: 'Synthetic digest gap fixed after its last sighting' });
+    await db('agent_gap_reports').where('id', fixed.id).update({ status: 'fixed' });
+    const ids = (await loadRecentGaps()).map((row) => Number(row.id));
+    expect(ids).toContain(open.id);
+    expect(ids).not.toContain(fixed.id);
+  });
+
+  test('list_gap_reports reports the real matching total and has_more when it caps the rows', async () => {
+    for (let i = 0; i < 51; i += 1) await record({ summary: `Synthetic capped gap ${source} ${String.fromCharCode(97 + (i % 26))}${String.fromCharCode(97 + Math.floor(i / 26))} alpha` });
+    const result = await listGapReports({ days: 1 });
+    expect(result.returned).toBe(50);
+    expect(result.total_matching).toBeGreaterThanOrEqual(51);
+    expect(result.has_more).toBe(true);
+    expect(result.note).toMatch(/most-hit of/);
+  });
+
   test('a recurrence fills in the domain and tool the first sighting lacked and keeps the latest attempt', async () => {
     const first = await record({ summary: 'Synthetic enrichment gap', attempted: 'first try' });
     const second = await record({ summary: 'Synthetic enrichment gap', domain: 'customers', closestTool: 'update_customer', attempted: 'second try' });
@@ -101,7 +120,7 @@ postgres('agent-gap-reports against PostgreSQL', () => {
     const closed = await record({ summary: 'A closed gap that should be excluded by default', domain: 'ops' });
     await db('agent_gap_reports').where('id', closed.id).update({ status: 'dismissed' });
 
-    const result = await listGapReports({ days: 1 });
+    const result = await listGapReports({ days: 1, include_closed: false });
     expect(result.window_days).toBe(1);
     const opsGroup = result.groups.find((g) => g.domain === 'ops');
     const otherGroup = result.groups.find((g) => g.domain === 'other');

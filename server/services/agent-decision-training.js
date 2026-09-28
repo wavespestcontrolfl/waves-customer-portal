@@ -49,7 +49,10 @@ function redactText(value, context = {}) {
   ].map((item) => String(item || '').trim()).filter((item) => item.length >= 3);
 
   for (const name of names) {
-    text = text.replace(new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'gi'), '[name]');
+    // Unicode-aware edges: `\b` is ASCII-only, so a name ending in a letter
+    // like "é" (José, Chloé) had no boundary after it and never matched.
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    text = text.replace(new RegExp(`(?<![\\p{L}\\p{N}_])${escaped}(?![\\p{L}\\p{N}_])`, 'giu'), '[name]');
   }
 
   return text

@@ -40,28 +40,30 @@ confirmation card (#1568), so collection is server-owned. The route feeds
 `createGapCollector()` (`server/services/agent-gap-reports.js`) what the
 server itself observed in the tool loop:
 
-- its own `discover_capabilities` results, where a search counts as resolved
-  once any tool it surfaced later succeeds;
-- a tool name that does not exist (`capability_unimplemented`);
-- the same tool failing twice with a genuine execution failure. Coded
-  control-flow outcomes (target clarification, permission, invalid input,
-  pending dependency) do not count.
+- its own `discover_capabilities` results, noting whether a tool a search
+  surfaced later ran successfully;
+- a tool name that does not exist (`capability_unimplemented`).
 
-At the end of the request, `flush()` records the unresolved signals only when
-the reply told the operator the bar could not do something. The platform
+At the end of the request, `flush()` records those signals only when the reply
+told the operator the bar could not do something. The server cannot tell
+which part of a partly declined request failed (listing refunds is not
+issuing one), so a declined request records every search it made, each
+noting whether a related tool ran. Broken tools are not gap reports: every
+tool call's outcome is already in `tool_health_events` (Tool Health). The platform
 prompt asks the model to search with a short, general description before
 declining, so that search becomes the gap's summary. Text is cleaned with the
 shared `redactText` plus the request's resolved customer names and
 addresses; UUIDs and record numbers are stripped. Rows dedupe by a
-fingerprint of source, kind, tool (tool failures only) and the summary's
-word set: a recurrence bumps `occurrences`, reopens a `fixed` gap as `new`,
-and fills in a domain or tool the first sighting lacked.
+fingerprint of source, kind and the summary's word set: a recurrence bumps
+`occurrences`, reopens a `fixed` gap as `new`, and fills in a domain or tool
+the first sighting lacked.
 
 `list_gap_reports` (`gap-report-tools.js`) is the read side, grouped by domain
 and most-hit first, for "show gap reports" and "what should we build next".
+It returns up to 50 rows with the real `total_matching` and `has_more`.
 `server/services/agent-gap-digest.js` sends a short weekly reminder (Monday
-8:15am ET, `scheduler.js`) when the last 7 days recorded anything open; a quiet
-week sends nothing. The bell carries a fixed two-line instruction, and the
+8:15am ET, `scheduler.js`) when the last 7 days recorded anything still open
+(not fixed, by_design or dismissed); a quiet week sends nothing. The bell carries a fixed two-line instruction, and the
 full list is in the bar and in the email fallback (`AGENT_GAP_DIGEST_EMAIL`,
 internal recipients only, default contact@). Kill switch:
 `AGENT_GAP_REPORTS=off`, read at call time. It drops the prompt line, stops

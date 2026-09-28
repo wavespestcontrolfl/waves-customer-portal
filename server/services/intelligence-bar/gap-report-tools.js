@@ -77,18 +77,25 @@ async function listGapReports(input = {}) {
     const days = normalizedDays(input.days);
     const includeClosed = input.include_closed === true;
     const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
-    const query = db('agent_gap_reports')
-      .where('last_seen_at', '>=', cutoff)
-      .orderBy('occurrences', 'desc')
-      .orderBy('last_seen_at', 'desc')
-      .limit(ROW_CAP);
-    if (!includeClosed) query.whereNotIn('status', CLOSED_STATUSES);
-    const rows = await query;
+    const matching = () => {
+      const query = db('agent_gap_reports').where('last_seen_at', '>=', cutoff);
+      if (!includeClosed) query.whereNotIn('status', CLOSED_STATUSES);
+      return query;
+    };
+    const [rows, [{ n }]] = await Promise.all([
+      matching().orderBy('occurrences', 'desc').orderBy('last_seen_at', 'desc').limit(ROW_CAP),
+      matching().count('* as n'),
+    ]);
+    const totalMatching = Number(n);
     return {
       window_days: days,
-      total: rows.length,
+      total_matching: totalMatching,
+      returned: rows.length,
+      has_more: totalMatching > rows.length,
       groups: groupByDomain(rows),
-      note: 'Refer to gaps by number, e.g. gap #12.',
+      note: totalMatching > rows.length
+        ? `Showing the ${rows.length} most-hit of ${totalMatching} gaps; narrow the window to see the rest. Refer to gaps by number, e.g. gap #12.`
+        : 'Refer to gaps by number, e.g. gap #12.',
     };
   } catch (err) {
     logger.error('[intelligence-bar:gap-report] list_gap_reports failed:', err);

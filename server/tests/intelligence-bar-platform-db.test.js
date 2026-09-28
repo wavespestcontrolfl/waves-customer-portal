@@ -1271,7 +1271,7 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
       expect(await db('agent_gap_reports').where({ summary: query }).first()).toBeUndefined();
     }, 30000);
 
-    test('a search whose surfaced tool then succeeds is not a gap, even when the reply declines part of the ask', async () => {
+    test('a partly declined request records each of its searches, noting which ones ran a related tool', async () => {
       const query = missQuery();
       mockModel.mockResolvedValueOnce(tools('discover_capabilities', { query }, 'discover-miss'))
         .mockResolvedValueOnce(tools('discover_capabilities', { query: 'update customer fields' }, 'discover-hit'))
@@ -1279,12 +1279,11 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
         .mockResolvedValueOnce(answer("I can't do the first part, but the note update is awaiting confirmation."));
       const result = await api('/query', request('First try something odd, then update this customer'));
       expect(result.status).toBe(200);
-      // The miss stays unresolved (nothing it surfaced was used) and is recorded;
-      // the second search surfaced update_customer, which then proposed, so it is not.
       const miss = await db('agent_gap_reports').where({ summary: query }).first();
-      expect(miss).toBeTruthy();
-      expect(await db('agent_gap_reports').where({ source: 'intelligence-bar', summary: 'update customer fields' }).first()).toBeUndefined();
-      await db('agent_gap_reports').where('id', miss.id).del();
+      expect(miss.attempted).toBe('Searched the bar; no matching tool');
+      const related = await db('agent_gap_reports').where({ source: 'intelligence-bar', summary: 'update customer fields' }).first();
+      expect(related.attempted).toBe('Searched the bar; a related tool ran, but the reply still declined part of the request');
+      await db('agent_gap_reports').whereIn('id', [miss.id, related.id]).del();
     }, 30000);
   });
 });
