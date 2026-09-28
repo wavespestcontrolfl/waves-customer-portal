@@ -12,6 +12,7 @@ const {
   evaluateGroupDivergence,
   divergingSiblings,
   divergenceStateFingerprint,
+  resolveGoverningInvoice,
   groupCandidatesByInvoice,
   isInvoiceSettled,
   dateOnly,
@@ -305,6 +306,68 @@ describe('divergenceStateFingerprint', () => {
       const bActive = member('b', { scheduled_date: '2026-10-05', status });
       expect(divergenceStateFingerprint({ anchor: a, diverging: [bActive], invoiceId: 'inv-1', invoiceTotal: 100 })).toBe(fp1);
     }
+  });
+});
+
+// resolveGoverningInvoice: which invoice actually governs a group's
+// settlement/alerting right now, given the STAMPED invoice and every OTHER
+// live invoice already found on the anchor's own scheduled_service_id
+// (newest-first — see evaluateEstimateCandidates). Owner ruling 2026-09-27
+// / Codex round 7 P1: the stamp is never rewritten, so once the stamped
+// invoice goes terminal a live, RECOGNIZED replacement must take over
+// governance instead of letting the dead stamped row keep clearing the
+// alert.
+describe('resolveGoverningInvoice', () => {
+  const recognized = (over = {}) => ({
+    id: 'replacement-1',
+    status: 'sent',
+    title: 'First Service Application',
+    notes: 'Auto-generated from accepted estimate #est-1. Customer selected pay per application — first application only.',
+    ...over,
+  });
+  const unrecognized = (over = {}) => ({
+    id: 'hand-invoice-1', status: 'sent', title: 'Repair charge', notes: 'A one-off hand invoice for a broken sprinkler head.', ...over,
+  });
+
+  test('an OPEN stamped invoice always governs itself — never looks at replacements', () => {
+    const stamped = { id: 'stamped-1', status: 'sent' };
+    expect(resolveGoverningInvoice(stamped, [recognized()])).toBe(stamped);
+  });
+
+  test('a terminal (void) stamped invoice with a recognized live replacement → the replacement governs', () => {
+    const stamped = { id: 'stamped-1', status: 'void' };
+    const replacement = recognized();
+    expect(resolveGoverningInvoice(stamped, [replacement])).toBe(replacement);
+  });
+
+  test.each(['void', 'refunded', 'canceled', 'cancelled'])('every terminal status (%s) looks for a replacement', (status) => {
+    const stamped = { id: 'stamped-1', status };
+    const replacement = recognized();
+    expect(resolveGoverningInvoice(stamped, [replacement])).toBe(replacement);
+  });
+
+  test('a terminal stamped invoice with NO live replacement → governs itself (today\'s behavior)', () => {
+    const stamped = { id: 'stamped-1', status: 'void' };
+    expect(resolveGoverningInvoice(stamped, [])).toBe(stamped);
+    expect(resolveGoverningInvoice(stamped, null)).toBe(stamped);
+  });
+
+  test('a live anchor invoice that is NOT recognized as first-application never governs — could be an unrelated hand invoice', () => {
+    const stamped = { id: 'stamped-1', status: 'void' };
+    expect(resolveGoverningInvoice(stamped, [unrecognized()])).toBe(stamped);
+  });
+
+  test('an unrecognized live invoice beside a recognized one — the recognized one still governs', () => {
+    const stamped = { id: 'stamped-1', status: 'void' };
+    const replacement = recognized();
+    expect(resolveGoverningInvoice(stamped, [unrecognized(), replacement])).toBe(replacement);
+  });
+
+  test('newest-first ordering — the FIRST recognized entry wins when more than one live replacement exists', () => {
+    const stamped = { id: 'stamped-1', status: 'void' };
+    const newer = recognized({ id: 'replacement-newer' });
+    const older = recognized({ id: 'replacement-older' });
+    expect(resolveGoverningInvoice(stamped, [newer, older])).toBe(newer);
   });
 });
 

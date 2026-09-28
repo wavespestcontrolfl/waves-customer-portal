@@ -535,6 +535,174 @@ suite('first-application-sibling-split — periodic sweep', () => {
   }));
 
   // ---------------------------------------------------------------------
+  // Voided stamped invoice + a LIVE REPLACEMENT on the SAME anchor visit
+  // (Charge Now / completion re-minting the combined amount on
+  // invoices.scheduled_service_id) — Codex round 7 P1 on the prior
+  // structural-guessing design: the stamp is never rewritten (owner ruling:
+  // accept-time-only), so once the stamped invoice goes terminal,
+  // evaluateEstimateCandidates must resolve the current LIVE, RECOGNIZED
+  // replacement as the GOVERNING invoice instead of letting the dead
+  // stamped row keep clearing (or hiding) the alert while the replacement
+  // still charges both programs.
+  // ---------------------------------------------------------------------
+  describe('voided stamped invoice with a live replacement on the anchor', () => {
+    // Mints a live invoice recognized as a first-application invoice,
+    // linked to the SAME anchor scheduled_service_id as the (about to be
+    // voided) stamped invoice — models Charge Now / completion re-minting
+    // the combined amount on the reserved row after the original is voided.
+    async function mintRecognizedReplacement(trx, { anchorId, customerId, total = 153.60, status = 'sent' }) {
+      const id = randomUUID();
+      await trx('invoices').insert({
+        id, customer_id: customerId, scheduled_service_id: anchorId,
+        token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
+        status,
+        title: 'First Service Application',
+        notes: 'Auto-generated from accepted estimate. Customer selected pay per application — first application only.',
+        line_items: JSON.stringify([{ description: 'First service application', quantity: 1, unit_price: total, amount: total }]),
+        subtotal: total, total,
+      });
+      return id;
+    }
+
+    test('void + recognized live replacement while DIVERGED → alert stays, naming the replacement invoice', () => rollbackTest(async (trx) => {
+      const ids = await fixture(trx);
+      await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+      await sweepOnce(trx, ids.estimateId);
+      const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
+      expect((await readBell(trx, dedupeKey)).read_at).toBeNull();
+
+      // The original combined invoice is voided and a live replacement is
+      // minted on the SAME anchor (pest) visit.
+      await trx('invoices').where({ id: ids.invoiceId }).update({ status: 'void' });
+      const replacementId = await mintRecognizedReplacement(trx, { anchorId: ids.pestId, customerId: ids.customerId });
+
+      const [result] = await sweepOnce(trx, ids.estimateId);
+      expect(result.action).toBe('alerted');
+      expect(result.divergingSiblingIds).toEqual([ids.lawnId]);
+
+      const bell = await readBell(trx, dedupeKey);
+      expect(bell.read_at).toBeNull();
+      expect(bell.link).toBe(`/admin/invoices?invoice=${replacementId}`);
+      const metadata = typeof bell.metadata === 'string' ? JSON.parse(bell.metadata) : bell.metadata;
+      // The alert's invoice reference is the GOVERNING (replacement)
+      // invoice, never the dead voided stamped row — this is what
+      // loadCandidates' own alert-recovery EXISTS reads back too.
+      expect(metadata.invoiceId).toBe(replacementId);
+    }));
+
+    test('void + replacement while ALIGNED → no alert; group re-enters discovery with no standing alert once it later diverges', () => rollbackTest(async (trx) => {
+      const ids = await fixture(trx);
+      // Never diverged — both visits stay on SAME_DATE throughout.
+      await trx('invoices').where({ id: ids.invoiceId }).update({ status: 'void' });
+      await mintRecognizedReplacement(trx, { anchorId: ids.pestId, customerId: ids.customerId });
+
+      const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
+      const [alignedResult] = await sweepOnce(trx, ids.estimateId);
+      expect(alignedResult.action).toBe('cleared');
+      expect(await readBell(trx, dedupeKey)).toBeUndefined();
+
+      // Now it diverges — the group must be freshly discoverable (via the
+      // live-replacement clause, with NO standing alert to recover) and
+      // alert off the replacement.
+      await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+      const candidates = await loadCandidates(trx);
+      expect(candidates.some((c) => String(c.source_estimate_id) === String(ids.estimateId))).toBe(true);
+      const [divergedResult] = await sweepOnce(trx, ids.estimateId);
+      expect(divergedResult.action).toBe('alerted');
+      expect(divergedResult.divergingSiblingIds).toEqual([ids.lawnId]);
+      expect((await readBell(trx, dedupeKey)).read_at).toBeNull();
+    }));
+
+    test('void + NO live replacement → clears exactly like today', () => rollbackTest(async (trx) => {
+      const ids = await fixture(trx);
+      await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+      await sweepOnce(trx, ids.estimateId);
+      const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
+      expect((await readBell(trx, dedupeKey)).read_at).toBeNull();
+
+      await trx('invoices').where({ id: ids.invoiceId }).update({ status: 'void' });
+      const [result] = await sweepOnce(trx, ids.estimateId);
+      expect(result.action).toBe('cleared');
+      expect(result.reason).toBe('invoice_settled');
+      const cleared = await readBell(trx, dedupeKey);
+      expect(cleared.read_at).not.toBeNull();
+    }));
+
+    test('void + an UNRECOGNIZED live anchor invoice (an unrelated hand invoice) → never governs, clears exactly like no replacement', () => rollbackTest(async (trx) => {
+      const ids = await fixture(trx);
+      await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+      await sweepOnce(trx, ids.estimateId);
+      const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
+      expect((await readBell(trx, dedupeKey)).read_at).toBeNull();
+
+      await trx('invoices').where({ id: ids.invoiceId }).update({ status: 'void' });
+      // A live invoice sharing the anchor's scheduled_service_id, but with
+      // no first-application recognition at all — a repair or one-off
+      // charge that happens to reuse the same row. Must never govern.
+      await trx('invoices').insert({
+        id: randomUUID(), customer_id: ids.customerId, scheduled_service_id: ids.pestId,
+        token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
+        status: 'sent', title: 'Sprinkler head repair', notes: 'One-off hand invoice, unrelated to the estimate.',
+        line_items: JSON.stringify([{ description: 'Repair', quantity: 1, unit_price: 45, amount: 45 }]),
+        subtotal: 45, total: 45,
+      });
+
+      const [result] = await sweepOnce(trx, ids.estimateId);
+      expect(result.action).toBe('cleared');
+      expect(result.reason).toBe('invoice_settled');
+      const cleared = await readBell(trx, dedupeKey);
+      expect(cleared.read_at).not.toBeNull();
+    }));
+
+    test('a dismissed alert reopens once the split invoice is voided and a recognized replacement is reissued', () => rollbackTest(async (trx) => {
+      const ids = await fixture(trx);
+      await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+      await sweepOnce(trx, ids.estimateId);
+      const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
+      const firstBell = await readBell(trx, dedupeKey);
+      expect(firstBell.read_at).toBeNull();
+
+      // Staff dismiss it by hand while still genuinely diverging.
+      await trx('notifications').where({ id: firstBell.id }).update({ read_at: new Date() });
+
+      // The combined invoice is voided and reissued live on the same
+      // anchor — the SAME divergence, but now governed by a DIFFERENT
+      // invoice id, which must be enough to reopen the dismissed bell on
+      // its own (the fingerprint's invoiceId changed).
+      await trx('invoices').where({ id: ids.invoiceId }).update({ status: 'void' });
+      const replacementId = await mintRecognizedReplacement(trx, { anchorId: ids.pestId, customerId: ids.customerId });
+
+      const [result] = await sweepOnce(trx, ids.estimateId);
+      expect(result.action).toBe('alerted');
+
+      const reopened = await readBell(trx, dedupeKey);
+      expect(reopened.id).toBe(firstBell.id);
+      expect(reopened.read_at).toBeNull();
+      const metadata = typeof reopened.metadata === 'string' ? JSON.parse(reopened.metadata) : reopened.metadata;
+      expect(metadata.invoiceId).toBe(replacementId);
+      expect(metadata.autoCleared).toBe(false);
+    }));
+
+    test('the replacement invoice itself later settles (paid) → clears, even though the visits still diverge', () => rollbackTest(async (trx) => {
+      const ids = await fixture(trx);
+      await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+      await sweepOnce(trx, ids.estimateId);
+      const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
+
+      await trx('invoices').where({ id: ids.invoiceId }).update({ status: 'void' });
+      const replacementId = await mintRecognizedReplacement(trx, { anchorId: ids.pestId, customerId: ids.customerId });
+      const [alerted] = await sweepOnce(trx, ids.estimateId);
+      expect(alerted.action).toBe('alerted');
+
+      await trx('invoices').where({ id: replacementId }).update({ status: 'paid' });
+      const [result] = await sweepOnce(trx, ids.estimateId);
+      expect(result.action).toBe('cleared');
+      expect(result.reason).toBe('invoice_settled');
+      expect((await readBell(trx, dedupeKey)).read_at).not.toBeNull();
+    }));
+  });
+
+  // ---------------------------------------------------------------------
   // Candidacy semantics (owner ruling 2026-09-27): the stamp is the ONLY
   // membership signal now. No text match, no structural guess (an unpriced
   // sibling, no live invoice of its own, ...) ever makes a pair a
