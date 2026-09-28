@@ -888,6 +888,115 @@ describe('estimate assistant no-guarantee context', () => {
     ]);
   });
 
+  test('a legacy-mapped undefined flag is no decision: the saved selection still governs (Codex #5195 r1)', () => {
+    const recurring = { service: 'pest_control', name: 'Pest Control', mo: 55 };
+    const base = { service: 'pre_slab_termiticide', label: 'Pre-Slab Termiticide Treatment', amount: 950 };
+    const priced = { ...base, warrantyExtendedSelected: undefined };
+    expect(Object.prototype.hasOwnProperty.call(priced, 'warrantyExtendedSelected')).toBe(true);
+    const saved = { ...base, warrantyExtendedSelected: true, warrantyStatus: 'Extended 5-year warranty selected' };
+    const context = buildEstimateAssistantContext({
+      estimate: { monthly_total: 55, onetime_total: 950, show_one_time_option: true },
+      serviceMode: 'recurring', noGuaranteeClaims: true,
+      estData: { result: { recurring: { services: [recurring] }, oneTime: { items: [saved] } } },
+      pricingBundle: { source: 'engine_invocation', snapshotHit: false, anchorOneTimePrice: 950,
+        oneTimeBreakdown: { total: 950, items: [priced] } },
+    });
+    expect(context.guarantees.serviceTerms).toEqual([{
+      service: 'Pre-Slab Termiticide Treatment',
+      terms: ['Extended 5-year warranty selected. Warranty terms depend on the selected warranty option.'],
+    }]);
+  });
+
+  test('a pre-slab row only an older engineResult retains is not exposed for its warranty terms (Codex #5195 r1)', () => {
+    const recurring = { service: 'pest_control', name: 'Pest Control', mo: 55, visitsPerYear: 4 };
+    const removed = { service: 'pre_slab_termiticide', label: 'Pre-Slab Termiticide Treatment', amount: 950,
+      warrantyExtendedSelected: true, warrantyStatus: 'Extended 5-year warranty selected' };
+    const context = buildEstimateAssistantContext({
+      estimate: { monthly_total: 55, show_one_time_option: false },
+      serviceMode: 'recurring', noGuaranteeClaims: true,
+      estData: {
+        result: { recurring: { services: [recurring] }, oneTime: { items: [] } },
+        engineResult: { recurring: { services: [recurring] }, oneTime: { items: [removed] } },
+      },
+      pricingBundle: { source: 'engine_invocation', snapshotHit: false,
+        frequencies: [{ key: 'quarterly', monthly: 55, included: [{ service: 'pest_control', label: 'Pest Control' }] }] },
+    });
+    expect(context.serviceMode).toBe('recurring');
+    expect(context.oneTime?.items ?? null).toBeNull();
+    expect(JSON.stringify(context.guarantees.serviceTerms)).not.toMatch(/Pre-Slab/);
+    expect(answerEstimateQuestionFallback('What is included?', context)).not.toMatch(/pre-slab|extended 5-year/i);
+  });
+
+  test('an undecided priced pre-slab row never inherits a saved sibling\'s selection through the merge (tree-reviewer)', () => {
+    const recurring = { service: 'pest_control', name: 'Pest Control', mo: 55 };
+    const base = { service: 'pre_slab_termiticide', label: 'Pre-Slab Termiticide Treatment' };
+    const priced = { ...base, amount: 2200, detail: 'Termite soil treatment before the slab pour' };
+    const savedBasic = { ...base, amount: 1000, warrantyExtendedSelected: false, warrantyStatus: 'No extended warranty selected' };
+    const savedExtended = { ...base, amount: 1200, warrantyExtendedSelected: true, warrantyStatus: 'Extended 5-year warranty' };
+    const context = buildEstimateAssistantContext({
+      estimate: { monthly_total: 55, onetime_total: 2200, show_one_time_option: true },
+      serviceMode: 'recurring', noGuaranteeClaims: true,
+      estData: { result: { recurring: { services: [recurring] }, oneTime: { items: [savedBasic, savedExtended] } } },
+      pricingBundle: { source: 'engine_invocation', snapshotHit: true, anchorOneTimePrice: 2200,
+        oneTimeBreakdown: { total: 2200, items: [priced] } },
+    });
+    const row = context.oneTime.items.find((item) => item.amount === 2200);
+    expect(row.warrantyExtendedSelected).not.toBe(true);
+    expect(row.warrantyStatus ?? '').not.toMatch(/extended/i);
+    expect(row.warrantyTerms.join(' ')).toContain('No extended warranty selected.');
+    expect(JSON.stringify(context)).not.toMatch(/Extended 5-year warranty selected/);
+  });
+
+  test('an ambiguous current group stops the search: no historical row is borrowed (tree-reviewer)', () => {
+    const recurring = { service: 'pest_control', name: 'Pest Control', mo: 55 };
+    const priced = { service: 'pre_slab_termiticide', label: 'Pre-Slab Termiticide Treatment', amount: 950, detail: 'Termite soil treatment' };
+    const house = { service: 'pre_slab_termiticide', label: 'Pre-Slab Termiticide – House', amount: 950, warrantyExtendedSelected: false };
+    const annex = { service: 'pre_slab_termiticide', label: 'Pre-Slab Termiticide – Annex', amount: 950, warrantyExtendedSelected: false };
+    const historical = { ...priced, warrantyExtendedSelected: true, warrantyStatus: 'Extended 5-year warranty' };
+    const context = buildEstimateAssistantContext({
+      estimate: { monthly_total: 55, onetime_total: 950, show_one_time_option: true },
+      serviceMode: 'recurring', noGuaranteeClaims: true,
+      estData: {
+        result: { recurring: { services: [recurring] }, oneTime: { items: [house, annex] } },
+        engineResult: { recurring: { services: [recurring] }, oneTime: { items: [historical] } },
+      },
+      pricingBundle: { source: 'engine_invocation', snapshotHit: true, anchorOneTimePrice: 950,
+        oneTimeBreakdown: { total: 950, items: [priced] } },
+    });
+    expect(JSON.stringify(context)).not.toMatch(/Extended 5-year warranty selected/);
+  });
+
+  test('terms, flag and status all follow one decision (tree-reviewer)', () => {
+    const base = { service: 'pre_slab_termiticide', label: 'Pre-Slab Termiticide Treatment', amount: 950 };
+    for (const [row, extended] of [
+      [{ ...base, warrantyExtendedSelected: null, warrantyStatus: 'Extended 5-year warranty' }, true],
+      [{ ...base, warrantyStatus: 'Basic warranty; 5-year option declined' }, false],
+      [{ ...base, warrantyExtendedSelected: false, warrantyStatus: 'Extended 5-year warranty' }, false],
+    ]) {
+      const context = buildEstimateAssistantContext({
+        estimate: { onetime_total: 950 }, serviceMode: 'one_time', noGuaranteeClaims: true,
+        pricingBundle: { source: 'engine_invocation', snapshotHit: false, anchorOneTimePrice: 950,
+          oneTimeBreakdown: { total: 950, items: [row] } },
+      });
+      const item = context.oneTime.items[0];
+      expect(item.warrantyExtendedSelected).toBe(extended);
+      expect(item.warrantyTerms[0].startsWith('Extended 5-year warranty selected')).toBe(extended);
+    }
+  });
+
+  test('without pricing, an undecided current row borrows one matching older decision, consistently (tree-reviewer)', () => {
+    const base = { service: 'pre_slab_termiticide', label: 'Pre-Slab Termiticide Treatment', amount: 950 };
+    const current = { ...base, detail: 'Termite soil treatment' };
+    const historical = { ...base, warrantyExtendedSelected: true, warrantyStatus: 'Extended 5-year warranty' };
+    const context = buildEstimateAssistantContext({
+      estimate: { onetime_total: 950 }, serviceMode: 'one_time', noGuaranteeClaims: true,
+      estData: { result: { oneTime: { items: [current] } }, engineResult: { oneTime: { items: [historical] } } },
+    });
+    const item = context.oneTime.items[0];
+    expect(item.warrantyExtendedSelected).toBe(true);
+    expect(item.warrantyTerms[0]).toMatch(/^Extended 5-year warranty selected/);
+  });
+
   test('a hand-built context lists each row under its own name', () => {
     const bond = 'Purchased termite bond: 5-year term with re-treatment coverage.';
     const rows = [

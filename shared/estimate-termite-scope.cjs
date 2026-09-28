@@ -17,15 +17,24 @@ function classifyTermiteScope(value) {
   if (/\bwdo\b|wood\s+destroying/.test(text)) return TERMITE_SCOPE.WDO;
   if (/\bpre\s*slab\b|\bslab\s+pre\s*treat/.test(text)) return TERMITE_SCOPE.PRE_SLAB;
 
-  const explicitTermite = /\btermites?\b|\btermiticide\b|\btermidor\b|\bbora\s*care\b|\bboracare\b|\bborates?\b|\btrelona\b/.test(text);
-  if (explicitTermite && /\bfoam\b/.test(text)) return TERMITE_SCOPE.FOAM;
+  // "termidor" and "foam" tolerate a missing separator ("TermidorFoam"), the
+  // legacy engine label forms the replaced regexes accepted (Codex #5195 r1).
+  const explicitTermite = /\btermites?\b|\btermiticide\b|\btermidor|\bbora\s*care\b|\bboracare\b|\bborates?\b|\btrelona\b/.test(text);
+  // Termite foam is the ADJACENT form the schedule keeps verbatim ("Termite
+  // Foam Treatment", "Termidor Foam", "TermidorFoam", "Termite Foaming"):
+  // the same adjacency the replaced foam-label regex required, so "Termite
+  // Treatment (Foam)" still normalizes like any termite treatment.
+  if (/\b(?:termites?|termidor)\s*foam(?:ing)?/.test(text)) return TERMITE_SCOPE.FOAM;
   if (explicitTermite) return TERMITE_SCOPE.TERMITE;
 
-  // Historical drill/recurring foam product names omit "termite." Keep this
-  // narrow so rodent exclusion foam and sealant never become termite work.
-  const rodentSealant = /\brodents?\b|\brats?\b|\bmice\b|\bmouse\b|\bseal(?:ant|ing)?\b/.test(text);
-  if (rodentSealant) return null;
-  if (/\bfoam\s+drill\b|\bdrill\s+(?:and\s+)?foam\b|\brecurring\s+foam\b|\bfoam(?:\s+treatment)?\s+recurring\b/.test(text)) {
+  // Historical drill/recurring foam product names omit "termite." A rodent
+  // word rules them out (foam sealant is rodent-exclusion material); the
+  // forms themselves are specific enough that "sealing" alone is not
+  // excluded ("Drill & Foam Treatment – Seal Holes" stays termite work).
+  // Separators are optional: "FoamRecurring", "RecurringFoam", "FoamDrill"
+  // and "DrillAndFoam" are legacy engine-backed labels (Codex #5195 r1).
+  if (/\brodents?\b|\brats?\b|\bmice\b|\bmouse\b/.test(text)) return null;
+  if (/\bfoam(?:ing)?\s*drill\b|\bdrill\s*(?:and\s*)?foam(?:ing)?\b|\brecurring\s*foam(?:ing)?\b|\bfoam(?:ing)?(?:\s+treatment)?\s*recurring\b/.test(text)) {
     return TERMITE_SCOPE.RECURRING_FOAM;
   }
   return null;

@@ -236,10 +236,14 @@ function preSlabSelectedWarrantyPart(item = {}) {
   return (part) => /\bextended\b/i.test(part) && /\bwarrant/i.test(part);
 }
 
+// Only a boolean flag is a decision: the legacy mapper copies
+// warrantyExtendedSelected through as an own property even when the row has
+// none (undefined), and that must stay 'unset' so reconciliation can still
+// read the saved row's decision (Codex #5195 r1).
 function preSlabWarrantyDecision(item = {}) {
   if (!isPreSlabTreatmentItem(item)) return 'unset';
-  if (Object.prototype.hasOwnProperty.call(item, 'warrantyExtendedSelected')) {
-    return item.warrantyExtendedSelected === true ? 'extended' : 'basic';
+  if (typeof item.warrantyExtendedSelected === 'boolean') {
+    return item.warrantyExtendedSelected ? 'extended' : 'basic';
   }
   const raw = [item.warrantyStatus, item.detail, item.det]
     .filter(Boolean)
@@ -250,19 +254,26 @@ function preSlabWarrantyDecision(item = {}) {
   return 'unset';
 }
 
+// The pre-slab counterpart of matchingTrenchingWarrantyRow, with the same
+// result shape: a unique exact-label row, then a unique amount match with
+// exact-label rows and their peers reserved first, then a lone legacy row
+// for a lone job. Two candidates that cannot be told apart are `ambiguous`,
+// and the reconciler stops there rather than borrowing older evidence.
 function matchingPreSlabWarrantyRow(target, rows = [], targets = [target]) {
-  if (!isPreSlabTreatmentItem(target)) return null;
+  if (!isPreSlabTreatmentItem(target)) return { row: null, ambiguous: false };
   const candidates = rows.filter(isPreSlabTreatmentItem);
-  if (candidates.includes(target)) return target;
+  if (!candidates.length) return { row: null, ambiguous: false };
+  if (candidates.includes(target)) return { row: target, ambiguous: false };
   const peers = targets.filter(isPreSlabTreatmentItem);
   const labelFor = (row) => String(row?.label || row?.displayName || row?.name || '').trim().toLowerCase();
   const label = labelFor(target);
   const sameLabel = candidates.filter((row) => labelFor(row) === label);
   if (label && sameLabel.length === 1 && peers.filter((row) => labelFor(row) === label).length === 1) {
-    return sameLabel[0];
+    return { row: sameLabel[0], ambiguous: false };
   }
   const amountFor = (row) => row?.amount ?? row?.price ?? row?.total;
-  const amount = Number(amountFor(target));
+  const targetAmount = amountFor(target);
+  const amount = Number(targetAmount);
   const hasAmount = (row) => amountFor(row) !== '' && amountFor(row) != null && Number(amountFor(row)) === amount;
   const labelCount = (list, value) => (value ? list.filter((row) => labelFor(row) === value).length : 0);
   // A unique exact-label row is reserved for the peer that carries that label
@@ -281,16 +292,22 @@ function matchingPreSlabWarrantyRow(target, rows = [], targets = [target]) {
     if (row !== target && reservedByLabel(row, peers, candidates)) return false;
     return hasAmount(row);
   }).length;
-  if (Number.isFinite(amount) && sameAmount.length === 1 && peerAmountCount === 1) return sameAmount[0];
-  if (candidates.length === 1 && peers.length === 1) return candidates[0];
-  return null;
+  if (targetAmount !== '' && targetAmount != null && Number.isFinite(amount)
+    && sameAmount.length === 1 && peerAmountCount === 1) {
+    return { row: sameAmount[0], ambiguous: false };
+  }
+  if (candidates.length === 1 && peers.length === 1) return { row: candidates[0], ambiguous: false };
+  if (candidates.length === 1) return { row: null, ambiguous: false };
+  return { row: null, ambiguous: true };
 }
 
 // The same order as reconcilePricedTrenchingWarrantyEvidence: a live engine
 // row or an explicit priced removal decides first; otherwise the current
 // saved rows, then the priced row, then historical fallback rows (an older
 // engineResult). Historical evidence never outranks a priced snapshot's own
-// removal (pre-push audit P1 on 41b0b242a9).
+// removal (pre-push audit P1 on 41b0b242a9), and an ambiguous group ends the
+// search with whatever is decided so far, as the trenching reconciler does:
+// two current jobs that cannot be told apart never borrow an older row.
 function reconcilePricedPreSlabWarrantyEvidence(target, evidenceGroups = [], pricing = {}, targets = [target]) {
   const [current = [], ...fallback] = evidenceGroups;
   const liveEnginePricing = pricing.source === 'engine_invocation' && pricing.snapshotHit !== true;
@@ -300,7 +317,8 @@ function reconcilePricedPreSlabWarrantyEvidence(target, evidenceGroups = [], pri
     : [current, [target], ...fallback];
   let fallbackRow = target;
   for (const rows of ordered) {
-    const match = matchingPreSlabWarrantyRow(target, rows, targets);
+    const { row: match, ambiguous } = matchingPreSlabWarrantyRow(target, rows, targets);
+    if (ambiguous) return fallbackRow;
     if (!match) continue;
     fallbackRow = match;
     if (preSlabWarrantyDecision(match) !== 'unset') return match;

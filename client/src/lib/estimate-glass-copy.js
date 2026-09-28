@@ -579,7 +579,11 @@ export function glassServiceSlug(keyOrLabel) {
   const earlyTermiteSlug = EARLY_TERMITE_SLUG_BY_SCOPE[termiteScope];
   if (earlyTermiteSlug) return earlyTermiteSlug;
   if (raw.includes('trap_only') || raw.includes('trap-only')) return 'trap_only';
-  if (termiteScope === TERMITE_SCOPE.FOAM && raw.includes('termite')) return 'termite_foam';
+  // A label that itself says termite and foam takes the termite-foam slug
+  // here, its pre-existing non-adjacent rule ("Termite Treatment (Foam)").
+  // Termidor-only foam names still respect the primary ordering below and
+  // reach 'termite_foam' through TERMITE_SLUG_BY_SCOPE.
+  if (raw.includes('termite') && raw.includes('foam')) return 'termite_foam';
   // Commercial PEST rows (commercial_pest keys / "Commercial Pest Control"
   // labels) get their own stack — but ONLY once the server has released
   // commercial glass (cta.commercialGlass → setCommercialGlass). Scoped to

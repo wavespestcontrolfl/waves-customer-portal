@@ -268,6 +268,8 @@ describe('foam slug: termite foam only (rodent foam sealing stays rodent)', () =
     expect(glassServiceSlug('Recurring Foam Treatment (Quarterly)')).toBe('foam_recurring');
     expect(glassServiceSlug('Termite Foam Treatment')).toBe('termite_foam');
     expect(glassServiceSlug('Termidor Foam Treatment')).toBe('termite_foam');
+    expect(glassServiceSlug('Termite Treatment (Foam)')).toBe('termite_foam');
+    expect(glassServiceSlug('Termite Foaming Treatment')).toBe('termite_foam');
   });
 
   it.each([
