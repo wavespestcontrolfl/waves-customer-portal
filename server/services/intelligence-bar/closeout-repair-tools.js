@@ -583,6 +583,7 @@ const STEP_RUNNERS = {
       actorId: step.actor_id || null,
       expectedPrice: step.amount,
       expectedTotal: step.total,
+      expectedBreakdown: { subtotal: step.subtotal, discount: step.discount, tax: step.tax },
       refuseDepositCredit: true,
       serviceRecordId: step.service_record_id || null,
       requireCompletedVisit: true,
@@ -722,7 +723,7 @@ async function executeCloseoutRepair(steps, { knex = db } = {}) {
 function stepsKey(steps) {
   return JSON.stringify((steps || []).map((s) => [
     s.step, s.service_record_id || null, s.scheduled_service_id || null, s.invoice_id || null, s.depends_on || null, s.recipients_key || null,
-    s.amount ?? null, s.total ?? null, s.due_date || null,
+    s.amount ?? null, s.total ?? null, s.subtotal ?? null, s.discount ?? null, s.tax ?? null, s.due_date || null,
     s.date || null, s.window_start || null, s.window_end || null, s.technician_id || null, s.customer_id || null, s.overlap === true,
   ]));
 }

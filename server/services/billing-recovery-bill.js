@@ -250,11 +250,12 @@ async function pendingDepositForVisit(scheduledServiceId, database = db) {
 // requireCompletedVisit / refuseLiveCardHold: the IB repair's approval
 // covers neither a contradicted visit nor an open card hold — both are
 // re-checked under the lock.
-// expectedTotal: the exact invoice total an approval showed (from
-// previewBillVisit) — the minted invoice must carry the same total or the
-// whole mint rolls back.
+// expectedTotal / expectedBreakdown: the exact invoice total and its
+// subtotal / discount / tax split an approval showed (from previewBillVisit)
+// — the minted invoice must carry the same figures or the whole mint rolls
+// back.
 async function billVisit(scheduledServiceId, {
-  actorId = null, expectedPrice = null, expectedTotal = null, refuseDepositCredit = false, serviceRecordId = null,
+  actorId = null, expectedPrice = null, expectedTotal = null, expectedBreakdown = null, refuseDepositCredit = false, serviceRecordId = null,
   requireCompletedVisit = false, refuseLiveCardHold = false, database = db,
 } = {}) {
   try {
@@ -276,6 +277,13 @@ async function billVisit(scheduledServiceId, {
         throw e;
       }
       const { visit, price, rowPrice } = assessed;
+      // The lock must be on the visit's CURRENT owner: a merge that committed
+      // between the owner read and the lock leaves us holding the old row.
+      if (owner?.customer_id && String(owner.customer_id) !== String(visit.customer_id)) {
+        const e = new Error('The visit changed customers while billing — try again.');
+        e.status = 409;
+        throw e;
+      }
       if (refuseLiveCardHold && await liveCardHoldForVisit(scheduledServiceId, trx)) {
         const e = new Error('A card hold is still open on this visit — completion captures or releases it; bill it from Billing Recovery after resolving the hold.');
         e.status = 409;
@@ -348,6 +356,13 @@ async function billVisit(scheduledServiceId, {
       }
       if (created.payer_id) {
         const e = new Error('The visit became third-party billed while billing — handle it via the payer AP flow.');
+        e.status = 409;
+        throw e;
+      }
+      if (expectedBreakdown && (cents(created.subtotal) !== cents(expectedBreakdown.subtotal)
+        || cents(created.discount_amount || 0) !== cents(expectedBreakdown.discount || 0)
+        || cents(created.tax_amount || 0) !== cents(expectedBreakdown.tax || 0))) {
+        const e = new Error('The invoice line items, discounts or tax changed since they were approved.');
         e.status = 409;
         throw e;
       }

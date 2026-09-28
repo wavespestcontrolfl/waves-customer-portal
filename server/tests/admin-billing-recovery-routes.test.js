@@ -726,3 +726,39 @@ describe('billVisit — customer pinned through the mint; Auto Pay serialized (G
     expect(order.indexOf('customer_lock')).toBeLessThan(order.indexOf('autopay_check'));
   });
 });
+
+describe('billVisit — owner re-checked after the lock; breakdown pinned (GH Codex r5)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.schema = { hasColumn: jest.fn().mockResolvedValue(true), hasTable: jest.fn().mockResolvedValue(false) };
+    customerOnAutopay.mockResolvedValue(false);
+  });
+
+  test('a merge between the owner read and the lock refuses (the locked row is not the current owner)', async () => {
+    const { billVisit } = require('../services/billing-recovery-bill');
+    db.mockImplementation((arg) => (typeof arg === 'object' && arg.ss ? makeQB({ first: BILLABLE_VISIT }) : makeQB({ first: null })));
+    installTransaction((arg) => {
+      if (arg === 'scheduled_services') return makeQB({ first: { customer_id: 'cust-OLD' } });
+      if (arg === 'customers') return makeQB({ first: { id: 'cust-OLD' } });
+      throw new Error('fall through');
+    });
+    const result = await billVisit('ss-1', { expectedPrice: 129 });
+    expect(result).toEqual(expect.objectContaining({ ok: false, status: 409, error: expect.stringMatching(/changed customers/) }));
+    expect(InvoiceService.createFromService).not.toHaveBeenCalled();
+  });
+
+  test('a different subtotal/discount/tax split at the same total refuses and records no disposition', async () => {
+    const { billVisit } = require('../services/billing-recovery-bill');
+    db.mockImplementation((arg) => (typeof arg === 'object' && arg.ss ? makeQB({ first: BILLABLE_VISIT }) : makeQB({ first: null })));
+    const dispositionQB = makeQB({ first: null });
+    installTransaction((arg) => {
+      if (arg === 'invoices') return makeQB({ first: null });
+      if (arg === 'visit_billing_dispositions') return dispositionQB;
+      throw new Error('fall through');
+    });
+    InvoiceService.createFromService.mockResolvedValue({ id: 'inv-b', customer_id: 'cust-1', total: '138.03', subtotal: '140.00', discount_amount: '11.00', tax_amount: '9.03' });
+    const result = await billVisit('ss-1', { expectedPrice: 129, expectedTotal: 138.03, expectedBreakdown: { subtotal: 129, discount: 0, tax: 9.03 } });
+    expect(result).toEqual(expect.objectContaining({ ok: false, status: 409, error: expect.stringMatching(/line items, discounts or tax changed/) }));
+    expect(dispositionQB.insert).not.toHaveBeenCalled();
+  });
+});
