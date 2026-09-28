@@ -221,8 +221,8 @@ describe('generatePage', () => {
     );
 
     expect(global.__anthropicCreate.mock.calls[0][0].max_tokens).toBe(16000);
-    // High effort ran pages into the cap even at 16000 (2026-09-28).
-    expect(global.__anthropicCreate.mock.calls[0][0].output_config).toEqual({ effort: 'medium' });
+    // High and medium effort both ran pages into the cap at 16000 (2026-09-28).
+    expect(global.__anthropicCreate.mock.calls[0][0].output_config).toEqual({ effort: 'low' });
     expect(result.writeState).toBe('failed');
     expect(result.entry.content).toBe(existing.content);
     const contentPatch = (state.updates.knowledge_entries || []).find((u) => 'content' in u);

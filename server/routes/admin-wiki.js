@@ -147,7 +147,10 @@ router.post('/update/:slug(*)', requireAdmin, async (req, res, next) => {
       const productName = page.title.replace(/^Product:\s*/i, '');
       updated = await wiki.updateProductPage(productName);
     } else if (page.category === 'track') {
-      const trackId = page.slug.replace('track/', '');
+      // The title carries the stored grass_track id ("Track st_augustine
+      // Performance"); the slug is slugified ("track/st-augustine") and
+      // matches no outcome rows.
+      const trackId = page.title.replace(/^Track\s+/i, '').replace(/\s+Performance$/i, '');
       updated = await wiki.updateTrackPage(trackId);
     } else if (page.category === 'condition') {
       const conditionName = page.title.replace(/^Condition:\s*/i, '');
