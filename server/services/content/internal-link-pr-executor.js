@@ -157,6 +157,24 @@ async function judgeStage(ctx) {
 const CANDIDATE_STAGES = [loadPagesStage, sourceProtectionStage, validateStage, renderedSourceStage, patchStage, judgeStage];
 
 // ── Auto-merge gates (see runAutoMerge / _applyGateOutcome) ───────────
+// Links already published (an advanced-head merge recorded merged_at while
+// the PR was left open): finish fencing — close the PR, retire the branch —
+// then let the tasks leave pr_open. A GitHub failure throws and the next
+// tick retries; nothing below may treat this PR as unmerged.
+async function publishedCleanupGate(ctx) {
+  if (!ctx.prTasks.length || !ctx.prTasks.every((t) => t.merged_at)) return null;
+  if (String(ctx.pr?.state || '').toLowerCase() === 'open') await GitHubClient.closePr(ctx.prNumber);
+  try {
+    await GitHubClient.retireBranch(ctx.pr?.head?.ref);
+  } catch (err) {
+    logger.warn(`[internal-link-pr-executor] branch retirement after advanced head failed for PR #${ctx.prNumber}: ${err.message}`);
+  }
+  for (const task of ctx.prTasks) {
+    await this._markTaskMerged(task.id, { mergedAt: new Date(task.merged_at), commitSha: task.pr_commit_sha || null });
+  }
+  return { result: { status: 'merged', reason: 'advanced_head_closed' } };
+}
+
 function prStateGate(ctx) {
   const state = String(ctx.pr?.state || '').toLowerCase();
   if (ctx.pr && !ctx.pr.merged && state === 'closed') {
@@ -338,7 +356,7 @@ function mergeCapGate(ctx) {
   return ctx.allowMerge ? null : { hold: 'merge_cap_reached' };
 }
 
-const MERGE_GATES = [prStateGate, provenanceGate, productionBaseGate, codexFindingsGate, linkOnlyDiffGate, previewBuildGate, codexGraceGate, targetStillValidGate, sourceProtectionMergeGate, publishCapGate, mergeCapGate];
+const MERGE_GATES = [publishedCleanupGate, prStateGate, provenanceGate, productionBaseGate, codexFindingsGate, linkOnlyDiffGate, previewBuildGate, codexGraceGate, targetStillValidGate, sourceProtectionMergeGate, publishCapGate, mergeCapGate];
 
 class InternalLinkPrExecutor {
   async runDryRun({ limit = DEFAULT_LIMIT, taskIds = null } = {}) {
@@ -600,15 +618,18 @@ class InternalLinkPrExecutor {
     // but it leaves the PR open with unreviewed content. Close it before the
     // tasks leave pr_open: if the close fails, the throw keeps them pr_open,
     // where provenanceGate holds the foreign head for a human.
-    if (merged?.headAdvanced) {
-      await GitHubClient.closePr(prNumber);
-      try {
-        await GitHubClient.retireBranch(pr.head?.ref);
-      } catch (err) {
-        logger.warn(`[internal-link-pr-executor] branch retirement after advanced head failed for PR #${prNumber}: ${err.message}`);
-      }
-    }
     const mergedAt = new Date();
+    if (merged?.headAdvanced) {
+      // Publication is recorded FIRST (merged_at, tasks still pr_open so the
+      // one-open-PR guard stays up); publishedCleanupGate then closes the PR
+      // and retires the branch — now, or on a later tick if GitHub fails.
+      await db(TABLE).whereIn('id', prTasks.map((t) => t.id)).where('status', 'pr_open')
+        .update({ merged_at: mergedAt, updated_at: new Date() });
+      return this._applyGateOutcome(ctx, await publishedCleanupGate.call(this, {
+        ...ctx,
+        prTasks: prTasks.map((t) => ({ ...t, merged_at: mergedAt })),
+      }));
+    }
     for (const task of prTasks) {
       await this._markTaskMerged(task.id, { mergedAt, commitSha: merged?.sha || null });
     }

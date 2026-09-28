@@ -1344,17 +1344,29 @@ describe('internal-link PR auto-merge', () => {
     expect(GitHubClient.mergePr).not.toHaveBeenCalled();
   });
 
-  test('an advanced head during the merge closes the PR before the tasks leave pr_open', async () => {
-    GitHubClient.mergePr.mockResolvedValueOnce({ sha: 'b'.repeat(40), merged: true, headAdvanced: 'c'.repeat(40) });
-    expect(await instance.runAutoMerge()).toMatchObject({ status: 'merged' });
-    expect(GitHubClient.closePr).toHaveBeenCalledWith(77);
-    expect(GitHubClient.closePr.mock.invocationCallOrder[0]).toBeLessThan(instance._markTaskMerged.mock.invocationCallOrder[0]);
-
+  test('an advanced head records publication first, then closes the PR; a failed close is retried next tick', async () => {
+    const updates = [];
+    const base = db.getMockImplementation();
+    db.mockImplementation((table) => {
+      const q = base(table);
+      q.whereIn = jest.fn(() => q);
+      q.update = jest.fn(async (patch) => { updates.push(patch); return 1; });
+      return q;
+    });
     GitHubClient.mergePr.mockResolvedValueOnce({ sha: 'b'.repeat(40), merged: true, headAdvanced: 'c'.repeat(40) });
     GitHubClient.closePr.mockRejectedValueOnce(new Error('github down'));
-    instance._markTaskMerged.mockClear();
     await expect(instance.runAutoMerge()).rejects.toThrow('github down');
+    // Publication evidence is on the rows before cleanup was attempted.
+    expect(updates).toEqual([expect.objectContaining({ merged_at: expect.any(Date) })]);
     expect(instance._markTaskMerged).not.toHaveBeenCalled();
+
+    // Next tick: the rows carry merged_at, so cleanup finishes (never "unmerged").
+    openTasks([{ id: 't1', status: 'pr_open', astro_pr_url: prUrl, pr_commit_sha: HEAD, merged_at: new Date().toISOString(), executor_version: 'internal-link-pr-executor-v2', source_file: 'src/content/blog/a.md', source_url: '/a/', target_url: '/termite-inspection/' }]);
+    GitHubClient.getPr.mockResolvedValue({ number: 77, state: 'open', head: { sha: 'c'.repeat(40), ref: 'content/internal-link-x' }, base: { ref: 'main' } });
+    expect(await instance.runAutoMerge()).toMatchObject({ status: 'merged', reason: 'advanced_head_closed' });
+    expect(GitHubClient.closePr).toHaveBeenLastCalledWith(77);
+    expect(instance._markTaskMerged).toHaveBeenCalledWith('t1', expect.any(Object));
+    expect(GitHubClient.mergePr).toHaveBeenCalledTimes(1);
   });
 
   test('holds inside the grace window while Codex has not answered', async () => {
