@@ -209,6 +209,7 @@ async function verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomer
           city: openTimesSnapshot.lookup?.city || null,
           customerId: openTimesSnapshot.lookup?.customerId || null,
           estimateId: openTimesSnapshot.lookup?.estimateId || null,
+          ...(openTimesSnapshot.lookup?.serviceType ? { serviceType: openTimesSnapshot.lookup.serviceType } : {}),
           quotedWindows: plan.quotedWindows,
         });
         if (!recheck.ok) {
@@ -217,6 +218,22 @@ async function verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomer
           return null;
         }
       }
+    }
+
+    // Follow-up SLA phrase recheck (Codex r3 P2): a draft's relative SLA
+    // wording ("within the hour" / "by 9 AM this morning"/"tomorrow
+    // morning") is frozen at generation, but an Agent Review card can sit
+    // up to 48h before this immediate-send verification runs — the same
+    // choke point as the open-times recheck above, covering both /sms
+    // (immediate send) and /schedule-sms (queue-time verification). Refuse
+    // rather than rewrite: the reviewer approved specific wording, and a
+    // phrase that no longer matches the current 8am/8pm ET window needs a
+    // fresh look, not a silent substitution.
+    const { slaPhraseStatus } = require('../services/sms-followup-sla');
+    if (slaPhraseStatus(outgoingBody) === 'stale') {
+      logger.info(`[agent-review] decision ${decision.id} SLA phrase stale for the current window — refusing send`);
+      await require('../services/sms-suggest-mode').supersedeStaleDecision({ decisionId: decision.id });
+      return null;
     }
     return decision;
   } catch (verifyErr) {
@@ -2125,6 +2142,11 @@ router.get('/agent-draft', async (req, res, next) => {
         // card must show WHY a draft was flagged (it may have been demoted
         // from auto-send), never present it as clean.
         lintFailures: Array.isArray(input?.comms_lint) ? input.comms_lint : [],
+        // Codex r3 P1: the actions this draft promises (payment link,
+        // booking, escalation…) — persisted on the snapshot by
+        // publishSuggestion — so the reviewer sees them before sending,
+        // never only the prose that promises them.
+        intendedActions: Array.isArray(input?.intended_actions) ? input.intended_actions : [],
         createdAt: row.created_at,
       },
     });

@@ -4014,6 +4014,7 @@ function initScheduledJobs() {
                       city: openTimesSnapshot.lookup?.city || null,
                       customerId: openTimesSnapshot.lookup?.customerId || null,
                       estimateId: openTimesSnapshot.lookup?.estimateId || null,
+                      ...(openTimesSnapshot.lookup?.serviceType ? { serviceType: openTimesSnapshot.lookup.serviceType } : {}),
                       quotedWindows: plan.quotedWindows,
                     });
                     if (!recheck.ok) {
@@ -4028,12 +4029,31 @@ function initScheduledJobs() {
                 openTimesReason = 'open_times_recheck_failed';
               }
             }
-            if (anchorStale || amountsStale || openTimesStale) {
+            // Follow-up SLA phrase revalidation (Codex r3 P2): the relative
+            // wording ("within the hour" / "by 9 AM this morning"/"tomorrow
+            // morning") is frozen at draft time, but this scheduled reply can
+            // fire hours later, past the 8am/8pm ET boundary the phrase was
+            // computed against — the exact "quoted a window that's gone"
+            // staleness the open-times check above covers, for the SLA
+            // phrase. Same fail-closed block+retire path, no new mechanism.
+            let slaStale = false;
+            if (!anchorStale && !amountsStale && !openTimesStale) {
+              try {
+                const { slaPhraseStatus } = require('./sms-followup-sla');
+                if (slaPhraseStatus(msg.message_body) === 'stale') slaStale = true;
+              } catch (err) {
+                logger.warn(`[scheduler] SLA phrase revalidation failed for scheduled sms ${msg.id}: ${err.message}; blocking send`);
+                slaStale = true;
+              }
+            }
+            if (anchorStale || amountsStale || openTimesStale || slaStale) {
               const blockedReason = anchorStale
                 ? 'stale_agent_decision'
                 : amountsStale
                   ? 'stale_amount_agent_decision'
-                  : 'stale_open_times_agent_decision';
+                  : openTimesStale
+                    ? 'stale_open_times_agent_decision'
+                    : 'stale_sla_agent_decision';
               const threadKey = String(msg.to_phone || '').replace(/\D/g, '').slice(-10) || msg.customer_id || msg.id;
               // Everything under the lock, metadata read THROUGH the trx
               // AFTER acquiring it — the cancel route can transfer parked
@@ -4061,7 +4081,9 @@ function initScheduledJobs() {
                     ? 'A newer customer message arrived before this scheduled reply fired — review the thread.'
                     : amountsStale
                       ? 'This scheduled reply quoted a price — house rule: no prices in SMS. Review the thread.'
-                      : `This scheduled reply quoted an appointment time that is no longer open (${openTimesReason}) — review the thread.`,
+                      : openTimesStale
+                        ? `This scheduled reply quoted an appointment time that is no longer open (${openTimesReason}) — review the thread.`
+                        : 'This scheduled reply’s follow-up timing no longer matches the current window — review the thread.',
                   dbi: trx,
                   strict: true,
                 });

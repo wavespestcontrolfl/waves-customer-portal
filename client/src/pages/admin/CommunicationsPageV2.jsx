@@ -272,6 +272,23 @@ const TABS = [
 ];
 const SMS_LOG_PAGE_SIZE = 500;
 
+// Short reviewer-facing labels for an Agent Review draft's intended_actions
+// (Codex r3 P1) — the promise a reviewer must see BEFORE sending copy that
+// commits to it. "none" carries no promise and is never shown; an unknown
+// type (a future action the drafter added) falls back to its raw string
+// rather than disappearing silently.
+const INTENDED_ACTION_LABELS = {
+  escalate: "escalate to staff",
+  book_appointment: "book appointment",
+  send_payment_link: "send payment link",
+  send_portal_link: "send portal link",
+  send_estimate_link: "send estimate link",
+};
+function intendedActionLabel(action) {
+  const type = typeof action === "string" ? action : action?.type;
+  return INTENDED_ACTION_LABELS[type] || type;
+}
+
 // ── V2 helpers ────────────────────────────────────────────────
 
 function smsThreadKey(phone) {
@@ -3251,6 +3268,17 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
                     {f.reason}
                   </div>
                 ))}
+              </div>
+            )}
+            {agentDraft?.intendedActions?.filter((a) => a?.type && a.type !== "none").length > 0 && (
+              <div className="mt-2 pt-2 border-t border-hairline border-zinc-200 text-ui-label md:text-ui-caption">
+                <span className="font-medium text-zinc-900">Actions: </span>
+                <span className="text-ink-secondary">
+                  {agentDraft.intendedActions
+                    .filter((a) => a?.type && a.type !== "none")
+                    .map(intendedActionLabel)
+                    .join(", ")}
+                </span>
               </div>
             )}
             {agentDraft?.inboundMessage && (

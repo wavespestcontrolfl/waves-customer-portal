@@ -224,7 +224,7 @@ function makeFirstQueryBuilder(row = null) {
 function makeUniversalBuilder() {
   const b = {};
   const chain = () => b;
-  for (const m of ['where', 'whereNull', 'whereNot', 'whereIn', 'whereRaw', 'leftJoin', 'join', 'joinRaw', 'select', 'orderBy', 'groupBy', 'distinct', 'limit', 'offset', 'insert', 'update', 'onConflict', 'ignore', 'merge', 'count']) {
+  for (const m of ['where', 'andWhere', 'whereNull', 'whereNotNull', 'whereNot', 'whereIn', 'whereRaw', 'leftJoin', 'join', 'joinRaw', 'select', 'orderBy', 'groupBy', 'distinct', 'limit', 'offset', 'insert', 'update', 'onConflict', 'ignore', 'merge', 'count']) {
     b[m] = jest.fn(chain);
   }
   b.returning = jest.fn(() => Promise.resolve([{ id: '44444444-4444-4444-8444-444444444444' }]));
@@ -3344,6 +3344,217 @@ describe('/sms — OPEN TIMES send-time recheck on a claimed agent decision (Cod
     });
     expect(getAvailableSlots).not.toHaveBeenCalled();
     expect(sendCustomerMessage).toHaveBeenCalled();
+  });
+
+  // Codex r3 (serviceType forwarding): the OPEN TIMES recheck now passes the
+  // snapshot's own serviceType through to the engine, when the draft that
+  // quoted the windows knew one — the recheck must ask about the SAME
+  // service the draft offered times for, not a generic slot lookup.
+  test('a snapshot lookup carrying serviceType forwards it to the recheck call', async () => {
+    const shadowDrafter = require('../services/sms-shadow-drafter');
+    const spy = jest.spyOn(shadowDrafter, 'openTimesStillOffered').mockResolvedValue({ ok: true });
+    const claimUpdates = [];
+    try {
+      mockDb({
+        decision: decisionRow({
+          input_snapshot: JSON.stringify({
+            open_times_snapshot: {
+              lookup: { city: 'Venice', customerId: 'cust-A', estimateId: null, serviceType: 'termite' },
+              quotedWindows: OPEN_TIMES_SNAPSHOT.quotedWindows,
+            },
+          }),
+        }),
+        claimUpdates,
+      });
+      await withServer(async (baseUrl) => {
+        const res = await send(baseUrl, { body: 'How about 9:00 AM - 11:00 AM?' });
+        expect(res.status).toBe(200);
+      });
+      expect(spy).toHaveBeenCalledWith(expect.objectContaining({ serviceType: 'termite' }));
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  // A snapshot lookup with no serviceType (the common case — older drafts,
+  // or a lookup that never knew one) must not invent one.
+  test('a snapshot lookup with no serviceType omits it from the recheck call', async () => {
+    const shadowDrafter = require('../services/sms-shadow-drafter');
+    const spy = jest.spyOn(shadowDrafter, 'openTimesStillOffered').mockResolvedValue({ ok: true });
+    const claimUpdates = [];
+    try {
+      mockDb({ decision: decisionRow(), claimUpdates });
+      await withServer(async (baseUrl) => {
+        const res = await send(baseUrl, { body: 'How about 9:00 AM - 11:00 AM?' });
+        expect(res.status).toBe(200);
+      });
+      expect(spy).toHaveBeenCalledWith(expect.not.objectContaining({ serviceType: expect.anything() }));
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
+// Codex r3 P2: a draft's relative SLA phrase ("within the hour" / "by 9 AM
+// this morning"/"tomorrow morning") is frozen when the drafter writes it,
+// but an Agent Review card can sit in review up to 48h — the same
+// "can't see it from an inbound-anchored check" gap the OPEN TIMES recheck
+// above covers, for the SLA wording instead of the calendar. Real timers
+// throughout except the faked system clock (doNotFake keeps the actual HTTP
+// round trip — withServer/fetch — from deadlocking, same convention as the
+// ET-boundary tests elsewhere in this file).
+describe('/sms — follow-up SLA phrase send-time recheck (Codex r3 P2)', () => {
+  const FAKE_TIMERS_OPTS = {
+    doNotFake: ['nextTick', 'setImmediate', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'queueMicrotask', 'hrtime', 'performance'],
+  };
+  const send = (baseUrl, extra) => fetch(`${baseUrl}/admin/communications/sms`, {
+    method: 'POST',
+    headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      to: '+15551234567', agentDecisionId: 'dec-1',
+      agentDraft: 'Sorry about that — someone will follow up within the hour.',
+      body: 'Sorry about that — someone will follow up within the hour.',
+      ...extra,
+    }),
+  });
+  function decisionRow(overrides = {}) {
+    return {
+      id: 'dec-1', customer_id: 'cust-A', sms_log_id: null,
+      suggested_message: 'Sorry about that — someone will follow up within the hour.',
+      input_snapshot: JSON.stringify({}),
+      inbound_created_at: null, sms_from_phone: '+15551234567', sms_to_phone: null, customer_phone: null,
+      ...overrides,
+    };
+  }
+  function mockDb({ decision, claimUpdates }) {
+    db.mockImplementation((table) => {
+      if (table === 'agent_decisions as ad') {
+        const b = makeUniversalBuilder();
+        b.first = jest.fn(async () => decision);
+        return b;
+      }
+      if (table === 'agent_decisions') {
+        const b = makeUniversalBuilder();
+        b.update = jest.fn(async (patch) => { claimUpdates.push(patch); return 1; });
+        return b;
+      }
+      return makeUniversalBuilder();
+    });
+  }
+
+  beforeEach(() => {
+    sendCustomerMessage.mockClear();
+    sendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM-sla' });
+    require('../services/sms-suggest-mode').supersedeStaleDecision.mockClear();
+  });
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  test('a phrase that no longer matches the current ET window refuses the send and supersedes the decision', async () => {
+    jest.useFakeTimers(FAKE_TIMERS_OPTS);
+    // 2026-09-28T01:30:00Z = 21:30 ET the evening before — outside 8am-8pm,
+    // so the CURRENT phrase is "by 9 AM tomorrow morning", not "within the
+    // hour" (frozen on this draft from when it was drafted inside the window).
+    jest.setSystemTime(new Date('2026-09-28T01:30:00.000Z'));
+    const claimUpdates = [];
+    mockDb({ decision: decisionRow(), claimUpdates });
+    await withServer(async (baseUrl) => {
+      const res = await send(baseUrl, {});
+      expect(res.status).toBe(409);
+    });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(claimUpdates.some((u) => u.status === 'scheduled')).toBe(false); // refused before the claim
+    expect(require('../services/sms-suggest-mode').supersedeStaleDecision).toHaveBeenCalledWith({ decisionId: 'dec-1' });
+  });
+
+  test('the same phrase sent while still inside its window sends normally', async () => {
+    jest.useFakeTimers(FAKE_TIMERS_OPTS);
+    // 2026-09-28T14:00:00Z = 10:00 ET — inside 8am-8pm, current phrase is
+    // still "within the hour", matching the draft's frozen wording.
+    jest.setSystemTime(new Date('2026-09-28T14:00:00.000Z'));
+    const claimUpdates = [];
+    mockDb({ decision: decisionRow(), claimUpdates });
+    await withServer(async (baseUrl) => {
+      const res = await send(baseUrl, {});
+      expect(res.status).toBe(200);
+    });
+    expect(sendCustomerMessage).toHaveBeenCalled();
+    expect(claimUpdates.some((u) => u.status === 'accepted')).toBe(true);
+    expect(require('../services/sms-suggest-mode').supersedeStaleDecision).not.toHaveBeenCalled();
+  });
+
+  test('a body with no SLA phrase is unaffected regardless of the time', async () => {
+    jest.useFakeTimers(FAKE_TIMERS_OPTS);
+    jest.setSystemTime(new Date('2026-09-28T01:30:00.000Z')); // same stale hour as above
+    const claimUpdates = [];
+    mockDb({ decision: decisionRow({ suggested_message: 'Thanks for reaching out! We appreciate you.' }), claimUpdates });
+    await withServer(async (baseUrl) => {
+      const res = await send(baseUrl, {
+        agentDraft: 'Thanks for reaching out! We appreciate you.',
+        body: 'Thanks for reaching out! We appreciate you.',
+      });
+      expect(res.status).toBe(200);
+    });
+    expect(sendCustomerMessage).toHaveBeenCalled();
+  });
+});
+
+// Codex r3 P1: an action-bearing draft that cannot auto-send (payment link,
+// booking, escalation…) reaches publishSuggestion, which persists the
+// validated actions on agent_decisions.input_snapshot. The composer's
+// /agent-draft read must surface them — otherwise a reviewer can send copy
+// promising an action they never saw or executed.
+describe('GET /agent-draft — surfaces intended_actions from the published snapshot (Codex r3 P1)', () => {
+  function agentDraftRow(overrides = {}) {
+    return {
+      id: 'dec-1',
+      workflow: 'sms_house_voice_suggest',
+      detected_intent: 'BILLING',
+      confidence: 0.9,
+      confidence_label: 'high',
+      suggested_message: 'We can text you a payment link — want me to send it?',
+      reasoning_summary: null,
+      input_snapshot: JSON.stringify({
+        sms: { body: 'Can I pay my balance now?' },
+        intended_actions: [{ type: 'send_payment_link', note: 'customer asked to pay now' }],
+      }),
+      created_at: new Date('2026-09-27T12:00:00Z'),
+      ...overrides,
+    };
+  }
+  function mockAgentDraft(row) {
+    db.mockImplementation((table) => {
+      if (table === 'agent_decisions as ad') {
+        const b = makeUniversalBuilder();
+        b.first = jest.fn(async () => row);
+        return b;
+      }
+      return makeUniversalBuilder();
+    });
+  }
+  const get = (baseUrl) => fetch(`${baseUrl}/admin/communications/agent-draft?customerId=cust-A`, {
+    headers: { Authorization: 'Bearer admin' },
+  });
+
+  test('a card whose snapshot carries intended_actions returns them, sanitized shape intact', async () => {
+    mockAgentDraft(agentDraftRow());
+    await withServer(async (baseUrl) => {
+      const res = await get(baseUrl);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.draft.intendedActions).toEqual([{ type: 'send_payment_link', note: 'customer asked to pay now' }]);
+    });
+  });
+
+  test('a card with no intended_actions on its snapshot returns an empty array — never undefined or omitted', async () => {
+    mockAgentDraft(agentDraftRow({ input_snapshot: JSON.stringify({ sms: { body: 'Thanks so much!' } }) }));
+    await withServer(async (baseUrl) => {
+      const res = await get(baseUrl);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.draft.intendedActions).toEqual([]);
+    });
   });
 });
 
