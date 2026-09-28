@@ -917,14 +917,24 @@ router.post('/sends/:id/send', async (req, res) => {
     }
 
     // Fire-and-forget. Don't await — the response should land before the
-    // first recipient is queued.
-    NewsletterSender.sendCampaign(req.params.id, { force }).catch(async (err) => {
+    // first recipient is queued. The claim is bound to the exact row version
+    // this handler just validated (status, updated_at, approval): an edit
+    // landing between here and the claim leaves the claim empty instead of
+    // broadcasting content nobody validated.
+    NewsletterSender.sendCampaign(req.params.id, {
+      force,
+      expect: { status: send.status, updatedAt: send.updated_at, proofApprovedAt: send.proof_approved_at },
+    }).catch(async (err) => {
       // ALREADY_CLAIMED = another worker (scheduler tick, or a second
       // manual click that beat us to the atomic claim) is actively
       // sending this row. Do NOT flip to 'failed' or we'd overwrite an
       // in-flight campaign — let the winner finish and stamp 'sent'.
       if (err.code === 'ALREADY_CLAIMED') {
         logger.info(`[newsletter] background send ${req.params.id} already claimed by another worker — no-op`);
+        return;
+      }
+      if (err.code === 'VERSION_CHANGED') {
+        logger.info(`[newsletter] background send ${req.params.id} changed after validation — not dispatching that version`);
         return;
       }
       if (err.code === 'EVENT_REVERIFY_FAILED' || err.code === 'EVENT_SELECTION_INVALID') {

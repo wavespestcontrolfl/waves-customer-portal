@@ -301,10 +301,10 @@ describe('planStraySync (pure) — a register row whose slug left the register',
     expect(planStraySync(rowFor(fact, { active: false, status: 'archived' }))).toEqual({ action: 'unchanged' });
   });
 
-  test('retires an untouched or legacy row, holds an edited one', () => {
+  test('archives an untouched, legacy OR edited row — the wording is never touched, withdrawn guidance leaves the shared search', () => {
     expect(planStraySync(rowFor(fact))).toEqual({ action: 'retire', reason: 'withdrawn_from_register', keepDeactivation: false });
     expect(planStraySync(withMeta(fact, { register_hash: undefined }))).toEqual({ action: 'retire', reason: 'withdrawn_from_register', keepDeactivation: false });
-    expect(planStraySync(rowFor(fact, { content: 'edited by a person' }))).toMatchObject({ action: 'hold', reason: 'edited_by_person' });
+    expect(planStraySync(rowFor(fact, { content: 'edited by a person' }))).toEqual({ action: 'retire', reason: 'withdrawn_from_register', keepDeactivation: false });
   });
 
   test('a withdrawn fact a person had deactivated still archives (shared search reads status), keeping the deactivation', () => {
@@ -475,6 +475,14 @@ describe('findUnverifiedClaims', () => {
     });
 
     test.each([
+      'Termites fly in spring, and fire ants swarm again after storms.',
+      'Native termites fly in spring; mosquitoes come out again after every storm.',
+      'Subterranean termites swarm in spring, but lovebugs fly again in September.',
+    ])('a clause naming ANOTHER pest never inherits the termite subject: %s', (sentence) => {
+      expect(rule(sentence, 'termite_second_swarm')).toBe(false);
+    });
+
+    test.each([
       'Fire ants make six to eight mating flights a year. They fly again after rain.',
       'Mosquitoes breed in containers. They swarm again after every rain.',
       'Love bugs are back. They swarm again in September.',
@@ -594,6 +602,11 @@ describe('findUnverifiedClaims', () => {
       'Your technician will confirm the product is safe for your family.',
       'The lawn is safe to walk on after 30 minutes; ask your technician.',
       'The treatment is safe and works after it dries; your technician confirms timing.',
+      'A safer option for homes with pets.',
+      'The safest lawn treatment in Sarasota.',
+      'It can be used safely around pets and children.',
+      'Our formula is safer than the old one for your family.',
+      'A pet-safer alternative.',
       'The treatment is safe, your technician confirms timing, once it dries.',
       // The repo-wide compliance predicate flags these too; its verdict is authoritative here.
       'Keep your family safe from mosquitoes this summer.',

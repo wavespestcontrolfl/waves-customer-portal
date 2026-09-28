@@ -161,19 +161,18 @@ function planFactSync(fact, row, { today, priorSeed = false } = {}) {
 }
 
 /**
- * Pure: a register row whose slug is no longer in the register. Retired when
- * untouched (or legacy), held when a person edited it, ignored when it is
- * not the register's row at all.
+ * Pure: a register row whose slug is no longer in the register. Archived
+ * (wording untouched, deactivation remembered), ignored when it is not the
+ * register's row at all.
  */
 function planStraySync(row) {
   if (!row || row.source !== SOURCE) return { action: 'ignore' };
   if (row.status === 'archived') return { action: 'unchanged' };
   const meta = parseJson(row.metadata, {}) || {};
-  if (meta.register_hash && rowFingerprint(row) !== meta.register_hash) {
-    return { action: 'hold', reason: 'edited_by_person', rowHash: rowFingerprint(row), shippedHash: meta.register_hash };
-  }
-  // A withdrawn fact archives even when a person had already set
-  // active=false (shared search reads status); that deactivation is kept.
+  // A withdrawn fact archives whatever its state: a person's edit is kept
+  // word for word (retirement never touches the wording) but withdrawn
+  // guidance leaves the shared search like expired guidance does (codex
+  // round 7 P2); a person's active=false is remembered too.
   return { action: 'retire', reason: 'withdrawn_from_register', keepDeactivation: !row.active && !meta.retired_reason };
 }
 
@@ -571,6 +570,10 @@ function previousClauseIsMythLabel(clauses, index) {
 // "drywood" earlier in the text does not shield the subterranean claim.
 const TERMITE_MENTION = /\b((?:[\w'-]+\s+){0,3}?)termites?\b/gi;
 const PRONOUN_SUBJECT = /\b(?:they|them|these\s+(?:insects|pests|bugs|termites)|the\s+colony|colonies|the\s+swarmers?|swarmers|alates)\b/i;
+// A clause that names another pest as its own subject ("..., and fire ants
+// swarm again after storms") is about that pest, not the termites named
+// earlier (codex round 7 P2).
+const OTHER_PEST_SUBJECT = /\b(?:fire\s+ants?|ants?|mosquito(?:es|s)?|(?:cock)?roach(?:es)?|palmetto\s+bugs?|spiders?|fleas?|ticks?|rodents?|rats?|mice|wasps?|bees?|hornets?|yellow\s*jackets?|lovebugs?|love\s+bugs?|chinch\s+bugs?|webworms?|no-see-ums?|midges?|gnats?|flies|bed\s*bugs?|silverfish|earwigs?|millipedes?|centipedes?|scorpions?|beetles?|moths?|aphids?|whiteflies|mealybugs?|scale\s+insects?)\b/i;
 const SWARM_WORD = /\b(?:swarm\w*|fl(?:y|ies|ew|ying|own)|flights?|take\s+flight|took\s+flight|taking\s+flight|alates?|winged|emerg\w+|come\s+out|coming\s+out|came\s+out)\b/i;
 const REPEAT_TRIGGER = /\b(?:second|another|again|repeat\w*|twice|once\s+more|all\s+over\s+again|late[-\s]?summer|summer(?:s|time)?|storms?|hurricanes?|post[-\s]?storms?|tropical|rainy\s+season)\b/i;
 
@@ -596,6 +599,7 @@ function termiteClaimInSentence(sentence, previousSentence) {
     const clause = clauses[i];
     const own = lastTermiteKind(clause);
     if (own) subject = own;
+    else if (OTHER_PEST_SUBJECT.test(clause)) subject = 'other-pest';
     else if (subject === null && PRONOUN_SUBJECT.test(clause)) subject = lastTermiteKind(previousSentence);
     if (subject !== 'other') continue;
     if (!SWARM_WORD.test(clause) || !REPEAT_TRIGGER.test(clause)) continue;
@@ -673,22 +677,27 @@ function vacuumClaimInSentence(sentence) {
 // until the spray has dried") is not a safety claim; "safe to say", "a safe
 // distance" and "a safe trip" are not product-safety claims either.
 // Hyphenated only: "keep your family safe from mosquitoes" is not a claim.
-const SAFE_COMPOUND = /\b(?:bee|pet|family|kid|child|children|baby|dog|cat|people|human|eco|environment(?:ally)?|earth|planet)-safe\b/i;
+const SAFE_COMPOUND = /\b(?:bee|pet|family|kid|child|children|baby|dog|cat|people|human|eco|environment(?:ally)?|earth|planet)-safe(?:r|st)?\b/i;
 // Copula forms ("is safe"), prepositional forms ("safe for / around / once
 // dry"), and the bare adjective on a product or service ("our safe lawn
 // treatment", "a safe, effective spray", "the safe choice"). Not: "safe
 // from" (protection), "safe to say", "a safe distance / place / bet".
 const SAFE_PRODUCT_NOUN = '(?:lawn|pest|termite|mosquito|rodent|ant|flea|indoor|outdoor|home|yard|residential|commercial)?\\s*(?:treatments?|products?|sprays?|formulas?|formulations?|applications?|options?|choices?|ways?|solutions?|pesticides?|insecticides?|herbicides?|chemicals?|services?|barriers?|alternatives?|approach(?:es)?|methods?|programs?|plans?|ingredients?|materials?)';
 const SAFE_IDIOM_NOUN = '(?:from|to\\s+say|bet|distance|place|space|side|harbou?r|haven|spot|room|hands|travels?|trip|journey|holiday|weekend|season|drive|passage)';
+// "safe", "safer" and "safest" are the same claim; so is "used safely
+// around pets" (codex round 7 P1).
+const SAFE_WORD = 'safe(?:r|st)?';
 const SAFE_CLAIM = new RegExp(
-  `\\b(?:is|are|it's|its|be|being|remains?|becomes?|considered|deemed|completely|totally|perfectly|entirely|100%)\\s+(?:\\w+\\s+)?safe\\b(?!\\s+${SAFE_IDIOM_NOUN}\\b)`
-  + '|\\bsafe\\s+(?:for|around|near|with|once|when|after|as\\s+soon\\s+as)\\b'
-  + '|\\bsafe\\s+to\\s+(?!say\\b)\\w+',
+  `\\b(?:is|are|it's|its|be|being|remains?|becomes?|considered|deemed|completely|totally|perfectly|entirely|100%|much|far|even|the)\\s+(?:\\w+\\s+)?${SAFE_WORD}\\b(?!\\s+${SAFE_IDIOM_NOUN}\\b)`
+  + `|\\b${SAFE_WORD}\\s+(?:for|around|near|with|once|when|after|as\\s+soon\\s+as|than)\\b`
+  + `|\\b${SAFE_WORD}\\s+to\\s+(?!say\\b)\\w+`
+  + '|\\bsafely\\s+(?:around|near|with|on|in|indoors|outdoors|inside|outside)\\b'
+  + '|\\b(?:used?|appl(?:y|ied)|sprayed|treated?)\\s+safely\\b',
   'i',
 );
 // The bare adjective on a product noun, tested on the whole sentence: "a
 // safe, effective spray" spans the comma a clause split would cut at.
-const SAFE_ADJECTIVE_PRODUCT = new RegExp(`\\bsafe(?:,?\\s+(?:and\\s+)?\\w+)?\\s+${SAFE_PRODUCT_NOUN}\\b`, 'i');
+const SAFE_ADJECTIVE_PRODUCT = new RegExp(`\\b${SAFE_WORD}(?:,?\\s+(?:and\\s+)?\\w+)?\\s+${SAFE_PRODUCT_NOUN}\\b`, 'i');
 const TECHNICIAN_CONFIRMS = /\btechnicians?\b[^.]{0,80}\b(?:confirm|tell|let\s+you\s+know|advise|say|give)|\b(?:confirm|tell|advise|check)\w*[^.]{0,40}\btechnicians?\b/i;
 // The technician idiom exempts ONLY dry-state re-entry guidance: "safe once
 // dry / when it has dried, and your technician confirms the timing". It

@@ -403,8 +403,11 @@ async function countRecipients(send) {
 async function notifyProof(type, payload) {
   try {
     const { triggerNotification } = require('./notification-triggers');
-    await triggerNotification(type, payload);
-    return true;
+    const result = await triggerNotification(type, payload);
+    // triggerNotification resolves with the delivery outcome rather than
+    // throwing — { bellWritten: false, push: null, prefsUnavailable: true }
+    // is a failure. Delivered = a bell row was written or a push went out.
+    return !!(result && (result.bellWritten === true || Number(result.push?.sent) > 0));
   } catch (e) {
     logger.warn(`[newsletter-proof] ${type} notification failed: ${e.message}`);
     return false;

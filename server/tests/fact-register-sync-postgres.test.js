@@ -327,6 +327,15 @@ postgres('email-division fact register sync against migrated PostgreSQL', () => 
     expect(row).toMatchObject({ active: false, status: 'archived', content: 'A person corrected this.' });
   });
 
+  test('a withdrawn fact a person had EDITED is archived with the edit intact', async () => {
+    const facts = [fact(1), fact(2)];
+    await sync(facts);
+    await trx('knowledge_base').where({ slug: facts[0].slug }).update({ content: 'A person corrected this.' });
+    const r = await sync([fact(2)], { retireStrays: true });
+    expect(r.retired).toContain(facts[0].slug);
+    expect(await rowOf(facts[0].slug)).toMatchObject({ active: false, status: 'archived', content: 'A person corrected this.' });
+  });
+
   test('a legacy register row (no register_hash, from the pre-fingerprint seeds) is brought under management', async () => {
     const f = fact(1);
     const [legacy] = await trx('knowledge_base').insert({
