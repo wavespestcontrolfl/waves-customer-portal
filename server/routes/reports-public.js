@@ -313,6 +313,11 @@ const ALLOWED_REPORT_EVENTS = new Set([
   'referral_cta_clicked',
 ]);
 const ALLOWED_REPORT_EVENT_CHANNELS = new Set(['public_report', 'portal', 'email', 'sms', 'wallet']);
+// Events only the server writes. The /ask route records report_question_asked
+// with the topic its own routing produced, and get_report_engagement counts
+// those rows as real questions, so the public events POST must not mint them
+// (codex P2 on #5167). recordServiceReportEvent still accepts them.
+const SERVER_ONLY_REPORT_EVENTS = new Set(['report_question_asked']);
 
 async function trackServiceReportView(service) {
   if (!service?.id || service.report_viewed_at) return;
@@ -1139,7 +1144,7 @@ router.post('/:token/events', reportEventLimiter, crossSellActionLimiter, async 
 
     const eventName = normalizedEventName(req);
     const channel = String(req.body?.channel || 'public_report').trim();
-    if (!ALLOWED_REPORT_EVENTS.has(eventName)) {
+    if (!ALLOWED_REPORT_EVENTS.has(eventName) || SERVER_ONLY_REPORT_EVENTS.has(eventName)) {
       return res.status(400).json({ error: 'Unknown report event' });
     }
     // Cross-sell events exist only while the feature does (codex #3367 r4:

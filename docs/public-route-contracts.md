@@ -2859,7 +2859,10 @@ metadata `{ question_length, topic }` — never the question text or the answer
 (owner ruling 2026-09-28: topic only). `topic` is the answer family the
 question was routed to, one of `REPORT_QUESTION_TOPICS` (`reentry`, `watering`,
 `findings`, `next_steps`, `next_visit`, `applied`, `results`, `summary`,
-`unrouted`); the response body is unchanged. This route and the
+`unrouted`); the response body is unchanged. Only this route writes that
+event: the public `POST /api/reports/:token/events` refuses
+`report_question_asked` with the same 400 as an unknown event, so a token
+holder cannot add question rows the engagement tools would count. This route and the
 service-report `/api/reports/:token/ask` both answer with
 `Cache-Control: no-store` and `X-Robots-Tag: noindex, nofollow` on every
 response, including CORS preflights, the global `/api` limiter's 429 and

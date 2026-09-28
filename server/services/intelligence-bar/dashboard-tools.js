@@ -1071,9 +1071,11 @@ async function getReserviceWithin14Days(from, to, cutoff) {
 // never stores the question text, only its length and this key (owner
 // ruling 2026-09-28). Keyed by service line, independent of report sends;
 // questions asked before topics were recorded carry none and are left out.
-// Only the fixed topic list is counted: event metadata can also arrive
-// through the report page's public events endpoint, so an arbitrary string
-// must never reach the Intelligence Bar's model as a "topic".
+// Only the ask route writes these rows: the report page's public events
+// endpoint refuses this event (reports-public.js SERVER_ONLY_REPORT_EVENTS).
+// Older rows could carry any metadata, so only the fixed topic list is
+// counted and an arbitrary string never reaches the Intelligence Bar's model
+// as a "topic".
 async function getReportQuestionTopics(fromTs, toTs) {
   const { rows } = await db.raw(`
     SELECT COALESCE(NULLIF(srec.service_line, ''), 'unknown') AS service_line,
