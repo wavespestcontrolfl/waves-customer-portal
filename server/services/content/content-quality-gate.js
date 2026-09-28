@@ -146,6 +146,12 @@ const PAGE_TYPE_CHECKS = {
     // soft, a refresh that guts >20% of prior content or has no prior
     // version to compare would still pass on common points alone.
     { name: 'improvement_over_prior', weight: 10, isHard: true, evaluate: checkImprovementOverPrior },
+    // Blog refreshes use this bundle too. These remain weight-zero signals;
+    // nonBlogTarget() makes them no-ops for ordinary service/city pages.
+    { name: 'citability_named_sources', weight: 0, evaluate: checkCitabilityNamedSources },
+    { name: 'citability_concrete_specifics', weight: 0, evaluate: checkCitabilityConcreteSpecifics },
+    { name: 'citability_comparison', weight: 0, evaluate: checkCitabilityComparison },
+    { name: 'citability_how_to_choose', weight: 0, evaluate: checkCitabilityHowToChoose },
   ],
   'supporting-blog': [
     // Hard: hub links are the point of a supporting blog (hub-and-spoke
@@ -163,6 +169,18 @@ const PAGE_TYPE_CHECKS = {
     { name: 'blog_meta_contract', weight: 0, isHard: true, evaluate: checkBlogMetaContract },
     { name: 'blog_meta_soft_cta', weight: 0, evaluate: checkBlogMetaSoftCta },
     { name: 'meta_rendered_length_in_bounds', weight: 0, isHard: true, evaluate: checkAuthoredMetaLength },
+    // Citability nudges (2026-09-25): the traits AI answer engines cite —
+    // a named source behind the claims, supported facts stated as numbers
+    // with units, a ComparisonTable wherever the reader faces a choice, and a
+    // "How to choose" section beside it. Weight 0 like blog_meta_soft_cta:
+    // signal-only BY DESIGN — the writer prompt forbids a stat quota and
+    // invented products/sources, so a weighted check would pressure the
+    // writer toward fabrication. They ride the redraft feedback and the
+    // review queue (soft_failures) without moving the pass threshold.
+    { name: 'citability_named_sources', weight: 0, evaluate: checkCitabilityNamedSources },
+    { name: 'citability_concrete_specifics', weight: 0, evaluate: checkCitabilityConcreteSpecifics },
+    { name: 'citability_comparison', weight: 0, evaluate: checkCitabilityComparison },
+    { name: 'citability_how_to_choose', weight: 0, evaluate: checkCitabilityHowToChoose },
   ],
   metadata: [
     { name: 'title_length_in_bounds', weight: 6, isHard: true, evaluate: checkTitleLengthBounds },
@@ -1087,6 +1105,409 @@ function checkVoiceMatch(draft) {
   return { ok: true };
 }
 
+// ── citability nudges (supporting-blog, weight 0) ────────────────────
+//
+// Mirrors the writer prompt's CITABILITY section (same bracket codes). All
+// four are heuristics over the raw body: they detect the SHAPE of a citable
+// post, never the truth of a claim — truth stays with the guardrails and the
+// evidence rules. Failing any of them only adds a nudge.
+
+// Post types whose contract is a choice (packages/blog-schema
+// postTypeRequirements: decision + comparison + cost all require a
+// ComparisonTable). Read from the writer's frontmatter; unset or unknown
+// post types are treated as non-choice (the astro publisher's own
+// normalization decides the final type — this gate only nudges).
+const CHOICE_POST_TYPES = new Set(['decision', 'comparison', 'cost']);
+
+// A refresh ships the LIVE page's non-meta frontmatter (publishRefresh
+// freezes it), so the prior version's post_type is what actually publishes
+// (Codex r6 P2); a new post uses the writer's own frontmatter.
+function draftPostType(draft, context) {
+  const frozen = context?.previousVersion?.frontmatter?.post_type;
+  const type = frozen != null && String(frozen).trim() ? frozen : (draft?.frontmatter?.post_type ?? draft?.post_type ?? '');
+  return String(type).trim().toLowerCase();
+}
+
+// Named authorities the evidence rules already point the writer at (UF/IFAS,
+// FDACS, EPA, CDC, county mosquito programs, product labels). Deliberately a
+// SOURCE-attribution list, not a brand list: PRO_PRODUCT_TERMS stay banned in
+// recommendation context and competitor names live only inside the
+// ComparisonTable, so neither may count toward this nudge.
+// The county prefix is REQUIRED: a bare "Mosquito Control" is our own
+// service name and must not count as an external authority (fallback P2).
+const NAMED_AUTHORITY = String.raw`(?:UF\s*\/\s*IFAS|IFAS|University of Florida|USDA|NOAA|National Weather Service|Cooperative Extension|FDACS|Florida Department of Agriculture|Florida Department of Health|(?:U\.?S\.? )?EPA\b|Environmental Protection Agency|CDC\b|Centers for Disease Control|National Pesticide Information Center|NPIC|NPMA|FPMA|National Pest Management Association|Florida Pest Management Association|National Hurricane Center|USGS|U\.S\. Geological Survey|Florida Statutes?|[A-Z][a-z]+ County Mosquito (?:Control|Management)|Mosquito Control District)`;
+// Bare mentions are NOT attribution (Codex P2, 2026-09-26): "an
+// EPA-registered product" names EPA without citing it for any claim. A named
+// authority counts only in a citation frame — led by an attribution phrase,
+// or followed by a reporting verb / source noun.
+const NAMED_SOURCE_RE = new RegExp(
+  String.raw`\b(?:[Aa]ccording to|[Pp]er|[Ff]rom|[Bb]y|[Cc]it(?:es?|ing)|[Uu]nder|[Ss]ee)\s+(?:the\s+)?(?:[\w.&'’-]+\s+){0,2}${NAMED_AUTHORITY}\b`
+  + String.raw`|\b${NAMED_AUTHORITY}(?:'s|’s)?\s+(?:[\w-]+\s+){0,2}?(?:recommends?|says|notes?|reports?|advises?|found|finds|warns?|tracks?|lists?|states?|requires?|publish(?:es)?|estimates?|confirms?|defines?|guidance|data|research|fact sheets?|publications?|stud(?:y|ies)|surveys?|rules?|records?|recommendations?|label(?:ing)?)\b`
+  + String.raw`|\b(?:[Pp]er|[Oo]n|[Uu]nder|[Aa]ccording to|[Rr]ead|[Ff]ollow) the (?:product )?label\b`,
+);
+
+// Refresh lane: the runner stamps target_page_type 'page' for non-blog
+// targets (service/city pages), where the blog citability contract does not
+// apply. Supporting-blog briefs carry no target_page_type → checks apply.
+function nonBlogTarget(brief) {
+  return brief?.target_page_type === 'page';
+}
+
+// Unquoted HTML attribute values (<aside aria-label=Recheck-in-14-days>)
+// are configuration, like quoted ones — blank them in place so the
+// equivalent attribute syntax cannot change a signal (Codex r6 P2).
+function maskUnquotedAttrValues(src) {
+  return String(src || '').replace(/<[A-Za-z][\w.:-]*(?:\s[^<>]*)?>/g, (tag) => tag.replace(
+    /(\s[A-Za-z_:][\w:.-]*\s*=\s*)([^\s"'`{}<>=]+)/g,
+    (_m, lead, value) => lead + ' '.repeat(value.length),
+  ));
+}
+
+// Rendered lines only: fenced code, HTML/MDX comments and other non-rendered
+// Markdown must not satisfy (or trip) a citability check (Codex r8 P2).
+// The shared guardrails blanker preserves line structure but flattens list
+// indentation, so restore only leading whitespace onto the masked text —
+// never restore inline comments or code beside otherwise visible prose.
+function renderedCitabilityBody(body) {
+  const raw = String(body || '');
+  const {
+    blankNonRenderedMarkdown, blankDefinitelyHiddenContent, blankExpressions, maskJsxAttrQuotes, projectMdxDisplayText,
+  } = require('./content-guardrails');
+  // First remove comments/code, then containers a browser definitely hides;
+  // finally mask JSX/HTML attribute values, which are configuration rather
+  // than reader-visible copy. Keep tag names so visible ComparisonTable
+  // components remain detectable.
+  const visible = maskUnquotedAttrValues(blankDefinitelyHiddenContent(blankNonRenderedMarkdown(raw)));
+  const blanked = maskJsxAttrQuotes(blankExpressions(visible));
+  const orig = raw.split(/\r?\n/);
+  const mask = blanked.split(/\r?\n/);
+  if (orig.length !== mask.length) return blanked;
+  const prose = orig.map((line, i) => (
+    mask[i].trim() ? line.match(/^[\t ]*/)[0] + mask[i].trimStart() : ''
+  )).join('\n');
+  const componentText = projectMdxDisplayText(visible);
+  return componentText ? `${prose}\n${componentText}` : prose;
+}
+
+// Attribution to ANY proper-noun source ("according to the Florida Forest
+// Service", "data from NOAA", "per Mote Marine Laboratory"): the writer
+// contract asks for the SPECIFIC authority the evidence came from, so the
+// hardcoded list above cannot be exhaustive (Codex P2, 2026-09-26). The
+// source must start with a capital; our own company never counts as the
+// authority behind a claim.
+const ATTRIBUTED_SOURCE_RE = /\b(?:[Aa]ccording to|[Pp]er|[Rr]eported by|[Pp]ublished by|[Dd]ata from|[Gg]uidance from|[Rr]esearch (?:from|by))\s+(?:the\s+)?([A-Z][\w&.'’-]*(?:\s+(?:of|for|and|&)?\s*[A-Z][\w&.'’-]*){0,6})/g;
+// Natural subject-first attribution for named institutions outside the
+// finite authority list ("Florida Forest Service reports ..."). Require an
+// institutional head noun so a sentence-leading generic group such as
+// "Homeowners report" does not become a named source merely by casing.
+const DIRECT_INSTITUTION_SOURCE_RE = /\b((?:The\s+)?(?:[A-Z][\w&.'’-]*\s+){1,7}(?:Service|Laboratory|Department|Agency|Institute|University|Extension|District|Center|Centre|Commission|Council|Office|Association|Society|Foundation|Administration|Bureau|Authority|Program|Survey|Clinic|Hospital|Organization|Organisation|Institution|Station|Museum|Garden|Gardens))(?:'s|’s)?\s+(?:recommends?|says|notes?|reports?|advises?|found|finds|warns?|tracks?|lists?|states?|requires?|publishes?|estimates?|confirms?|defines?)\b/g;
+const OWN_COMPANY_RE = /^(?:the\s+)?Waves\b/i;
+// Capitalization is not evidence that a source is specific. These generic
+// source head nouns are common LLM attribution filler and must not satisfy
+// the named-source contract even when arbitrary title-cased modifiers make
+// the whole phrase look proper ("Leading Experts", "Trusted Research").
+const GENERIC_SOURCE_HEAD_RE = /\b(?:authorities|authority|experts?|officials?|professionals?|research|researchers?|scientists?|specialists?|studies|study)\s*$/i;
+const SPECIFIC_SOURCE_ORG_RE = /\b(?:Service|Laboratory|Department|Agency|Institute|University|Extension|District|Center|Centre|Commission|Council|Office|Association|Society|Foundation|Administration|Bureau|Authority|Program|Survey|Clinic|Hospital|Organization|Organisation|Institution|Station|Museum|Garden|Gardens)\b/i;
+const GENERIC_ORG_NAME_TOKEN_RE = /^(?:local|county|state|federal|national|regional|city|municipal|government|public|health|pest|control|industry|professional|professionals|management|community|trusted|leading|independent|official|recognized|respected|expert|research|science|scientific)$/i;
+const CREDENTIALED_PERSON_RE = /^(?:Dr|Prof|Professor)\.?\s+[A-Z][\w.'’-]+(?:\s+[A-Z][\w.'’-]+)+$/;
+const NAMED_PUBLICATION_RE = /^(?:Nature|Science|Consumer Reports|Scientific American|Journal of(?:\s+[A-Z][\w&.'’-]*){1,6}|(?:[A-Z][\w&.'’-]*\s+){0,5}(?:Journal|Review|Times|Tribune|Post|Herald|Magazine))$/;
+
+function genericAttributedSource(source) {
+  return GENERIC_SOURCE_HEAD_RE.test(String(source || '').trim());
+}
+
+function hasSpecificOrganizationName(source) {
+  const words = String(source || '').trim().replace(/^the\s+/i, '').split(/\s+/)
+    .map((word) => word.replace(/^[^\w&]+|[^\w&]+$/g, ''))
+    .filter(Boolean);
+  const head = words.findIndex((word) => SPECIFIC_SOURCE_ORG_RE.test(word));
+  if (head < 0) return false;
+  const identifying = words.filter((word, index) => index !== head
+    && !SPECIFIC_SOURCE_ORG_RE.test(word)
+    && !/^(?:of|for|and|&)$/i.test(word)
+    && !GENERIC_ORG_NAME_TOKEN_RE.test(word));
+  // Universities, extension offices, services, and laboratories commonly
+  // have one distinctive name token (Cornell University, University of
+  // Miami, Florida Forest Service), and so do centers, surveys, and clinics
+  // (National Hurricane Center, U.S. Geological Survey, Mayo Clinic) and
+  // named organizations or stations (World Health Organization, Smithsonian
+  // Institution, Everglades Research and Education Station) once the generic
+  // tokens are gone (Codex r4/r5 P2). Looser heads such as Program
+  // and Association need two, so locality-shaped filler like "Sarasota
+  // County Program" does not become evidence merely through capitalization.
+  const distinctiveHead = /^(?:University|Extension|Service|Laboratory|Center|Centre|Survey|Clinic|Hospital|Organization|Organisation|Institution|Station|Museum|Garden|Gardens)$/i.test(words[head]);
+  return identifying.length >= (distinctiveHead ? 1 : 2);
+}
+
+function hasAttributedSource(body) {
+  for (const m of String(body || '').matchAll(ATTRIBUTED_SOURCE_RE)) {
+    const source = m[1].trim();
+    const withoutArticle = source.replace(/^the\s+/i, '');
+    if (!OWN_COMPANY_RE.test(source)
+      && !genericAttributedSource(source)
+      && (hasSpecificOrganizationName(source) || CREDENTIALED_PERSON_RE.test(source)
+        || NAMED_PUBLICATION_RE.test(withoutArticle))) return true;
+  }
+  for (const m of String(body || '').matchAll(DIRECT_INSTITUTION_SOURCE_RE)) {
+    const source = m[1].trim();
+    if (!OWN_COMPANY_RE.test(source) && !genericAttributedSource(source)
+      && hasSpecificOrganizationName(source)) return true;
+  }
+  return false;
+}
+
+// Reduce inline Markdown/HTML to its visible text so a LINKED or emphasized
+// source ("According to [UF/IFAS](…)", "**CDC** recommends") reads the same
+// as plain text to the attribution matchers (Codex P2, 2026-09-26).
+function visibleInlineText(body) {
+  return String(body || '')
+    .replace(/^[ \t]{0,3}\[[^\]\n]+\]:[^\n]*(?:\n|$)/gm, ' ')
+    .replace(/!\[[^\]\n]*\](?:\([^)\n]*\)|\[[^\]\n]*\])/g, ' ')
+    .replace(/\[([^\]\n]+)\](?:\([^)\n]*\)|\[[^\]\n]*\])/g, '$1')
+    .replace(/<a\b[^>]*>([\s\S]*?)<\/a>/gi, '$1')
+    .replace(/(\*\*|__|\*|_)(?=\S)([^*_\n]+?)\1/g, '$2');
+}
+
+function checkCitabilityNamedSources(draft, brief) {
+  if (nonBlogTarget(brief)) return { ok: true, reason: 'non_blog_target' };
+  const body = visibleInlineText(renderedCitabilityBody(draft.body));
+  if (NAMED_SOURCE_RE.test(body) || hasAttributedSource(body)) return { ok: true };
+  return { ok: false, reason: 'no_named_source_attribution' };
+}
+
+// A "concrete specific" is a number bound to a unit of measure, time, or
+// rate. Dollar amounts are excluded on purpose (HARDCODED_PRICE bans them),
+// as are bare years and bare counts ("3 ways", "2024") — those are not the
+// extractable measurements the nudge is after. Ranges ("3.5–4 inches",
+// "10-14 days") count once.
+const CONCRETE_SPECIFIC_RE = /(?<![$\d.,\/])(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+|\/\d+| \d+\/\d+)?(?:\s?(?:-|–|to)\s?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+|\/\d+| \d+\/\d+)?)?(?:\s*[-–—]\s*|\s*)(?:%|(?:percent|inch(?:es)?|feet|foot|ft\b|yards?|sq\.? ?ft|square feet|millimeters?|mm\b|centimeters?|cm\b|meters?|°\s?F|degrees|days?|weeks?|months?|hours?|minutes?|seconds?|mph|gallons?|ounces?|oz\b|pounds?|lbs?|acres?|applications?|treatments?|visits?|mowings?|times? (?:a|per) (?:year|month|week|day)|per (?:year|month|week|day|acre|1,?000 sq))\b)(?:\s+(?:per|a|an|each|every)\s+(?:year|month|week|day|application|treatment|visit)\b)?/gi;
+const CALENDAR_WINDOW_RE = /\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?\s+\d{1,2}(?:st|nd|rd|th)?\s*(?:-|–|—|to|through)\s*(?:(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?\s+)?\d{1,2}(?:st|nd|rd|th)?\b/gi;
+
+// Vague stand-ins for a measurement — the prompt's own examples ("tall",
+// "a couple of weeks", "deeply"). Softening is what the nudge targets.
+const VAGUE_QUALIFIER_RE = /\b(?:a (?:couple|few) (?:of )?(?:days|weeks|months|hours|inches|feet)|several (?:days|weeks|months|hours|inches)|(?:water|soak)(?:ing)? deeply|mow(?:ing)? (?:it )?(?:tall|high|short|low)|a while|(?:in|during|this|next|last|early|late|each|every|throughout|by|before|after) (?:the )?(?:spring|summer|fall|autumn|winter)|(?:spring|summer|fall|autumn|winter) (?:season|months?|weather|rains?|rainfall|temperatures?|conditions?|timing|window|applications?|treatments?|service|pressure|activity)|(?:rainy|dry) season)\b/i;
+
+const UNIT_KEYS = [
+  [/^(?:%|percent)$/, '%'],
+  [/^inch(?:es)?$/, 'inch'],
+  [/^(?:feet|foot|ft)$/, 'foot'],
+  [/^(?:sq\.? ?ft|square feet)$/, 'sq ft'],
+  [/^(?:°\s?f|degrees)$/, 'degree'],
+  [/^(?:lbs?|pounds?)$/, 'pound'],
+  [/^(?:oz|ounces?)$/, 'ounce'],
+  [/^(?:mm|millimeters?)$/, 'mm'],
+  [/^(?:cm|centimeters?)$/, 'cm'],
+];
+
+// One comparable key per measurement: the number (range dashes unified) and
+// its unit in a single spelling, so "14 days", "14-day", and "14 day"
+// compare equal while "4 inches" never stands in for "10–14 days".
+function measurementKey(match) {
+  const m = match.toLowerCase().replace(/\s+/g, ' ').trim();
+  // Whole formatted numbers: "1,000" and "3 1/2" never shrink to a
+  // trailing "000" / "1/2" (Codex r6 P2).
+  const num = m.match(/^((?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+|\/\d+| \d+\/\d+)?)(?:\s?(?:-|–|to)\s?((?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+|\/\d+| \d+\/\d+)?))?/);
+  let unit = m.slice(num[0].length).replace(/^[\s\-–—]+/, '').trim();
+  unit = unit.replace(/^times? (?:a|per) /, 'times per ');
+  // Keep the trailing cadence ("1 inch per week" vs "1 inch per month",
+  // Codex r7 P2) in one spelling: "a/each/every week" reads as "per week".
+  let rate = '';
+  const cadence = unit.match(/\s+(?:per|a|an|each|every)\s+(year|month|week|day|application|treatment|visit)$/);
+  if (cadence && !/^(?:times per|per)\b/.test(unit)) {
+    rate = ` per ${cadence[1]}`;
+    unit = unit.slice(0, cadence.index);
+  }
+  const alias = UNIT_KEYS.find(([re]) => re.test(unit));
+  if (alias) unit = alias[1];
+  else unit = unit.split(' ').map((w) => w.replace(/s$/, '')).join(' ');
+  const clean = (v) => v.replace(/,/g, '');
+  return `${clean(num[1])}${num[2] ? `-${clean(num[2])}` : ''} ${unit}${rate}`;
+}
+
+function calendarKey(match) {
+  const t = match.toLowerCase()
+    .replace(/(\d)(?:st|nd|rd|th)\b/g, '$1')
+    .replace(/\s*(?:–|—|-|\bto\b|\bthrough\b)\s*/g, '-')
+    .replace(/\b([a-z]{3})[a-z]*\.?/g, '$1')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return `cal:${t}`;
+}
+
+function concreteSpecificKeys(body) {
+  // Remove complete dollar literals before scanning. Otherwise a
+  // comma-formatted price such as "$1,200 per year" can be entered midway
+  // at "200 per year" and masquerade as a non-price measurement.
+  const text = visibleInlineText(body).replace(/\$\s*\d[\d,]*(?:\.\d+)?(?:\s*(?:-|–|—|to)\s*\$?\s*\d[\d,]*(?:\.\d+)?)?/g, ' ');
+  return [
+    ...(text.match(CONCRETE_SPECIFIC_RE) || []).map(measurementKey),
+    ...(text.match(CALENDAR_WINDOW_RE) || []).map(calendarKey),
+  ];
+}
+
+function countConcreteSpecifics(body) {
+  return concreteSpecificKeys(body).length;
+}
+
+// How many of the prior page's measurements the refresh still states, each
+// counted at most as often as the draft repeats it — an unrelated new
+// number or a repeated retained one cannot stand in for a dropped value
+// (Codex r4 P2).
+function retainedMeasurements(beforeKeys, afterKeys) {
+  const available = new Map();
+  for (const key of afterKeys) available.set(key, (available.get(key) || 0) + 1);
+  let retained = 0;
+  for (const key of beforeKeys) {
+    const left = available.get(key) || 0;
+    if (left > 0) {
+      retained += 1;
+      available.set(key, left - 1);
+    }
+  }
+  return retained;
+}
+
+// NOT a count quota (Codex P2, 2026-09-26): a fixed minimum fired on every
+// brief whose evidence held fewer measurements, pressuring a redraft toward
+// invented numbers. The gate cannot see the writer's tool evidence, so it
+// flags only what is visible as softening: a refresh that states fewer
+// measurements than the page it replaces, or a draft with no measurement at
+// all that leans on a vague stand-in instead.
+function checkCitabilityConcreteSpecifics(draft, brief, context) {
+  if (nonBlogTarget(brief)) return { ok: true, reason: 'non_blog_target' };
+  const keys = concreteSpecificKeys(renderedCitabilityBody(draft.body));
+  const n = keys.length;
+  const prev = context?.previousVersion?.body;
+  if (prev != null) {
+    const beforeKeys = concreteSpecificKeys(renderedCitabilityBody(prev));
+    const retained = retainedMeasurements(beforeKeys, keys);
+    if (retained < beforeKeys.length) {
+      return { ok: false, reason: `refresh_dropped_measurements_${beforeKeys.length}_to_${retained}` };
+    }
+  }
+  if (n === 0) {
+    const vague = renderedCitabilityBody(draft.body).match(VAGUE_QUALIFIER_RE);
+    if (vague) return { ok: false, reason: `vague_qualifier_without_measurement:${vague[0].toLowerCase()}` };
+  }
+  return { ok: true };
+}
+
+const COMPARISON_TABLE_RE = /<ComparisonTable\b/;
+// A choice the post itself frames: the title or a heading pits options
+// against each other, or the post type's contract is a choice. Body prose
+// is NOT scanned ("DIY" appears in most posts) — the nudge must not push a
+// generic DIY-vs-pro table onto every post (the no-filler visual rule).
+// Deliberately narrow: "X vs Y", "X or Y?" as a whole heading/title, and
+// "which option/approach…". A bare "Should you…?" or a yes/no question is
+// NOT a two-path comparison (it fired on 73% of the live corpus in the
+// 2026-09-25 calibration run — most were single-answer questions).
+const CHOICE_FRAMING_RE = /\bvs\.?\b|\bversus\b|^ {0,3}#*\s*[\w'’-]+(?: [\w'’-]+){0,3} or [\w'’-]+(?: [\w'’-]+){0,3}(?:\s*[:—-]\s*[^?\n]{1,80})?\??\s*$|\bwhich (?:[\w'’-]+ ){0,2}?(?:one|option|approach|method|plan|product|treatment|service)s? (?:is|are|fits|works|makes|do|does|should)\b|\bwhich (?:one |option )?(?:is|works|fits) (?:better|best)\b/i;
+
+function headingLines(body) {
+  return String(body || '').split(/\r?\n/).filter((l) => /^ {0,3}#{1,3}\s+\S/.test(l));
+}
+
+function postFramesAChoice(draft, context) {
+  if (CHOICE_POST_TYPES.has(draftPostType(draft, context))) return true;
+  const title = String(draft.title || draft.frontmatter?.title || '');
+  if (CHOICE_FRAMING_RE.test(visibleInlineText(title))) return true;
+  // Rendered heading text only: a link destination such as
+  // "(/bait-vs-spray/)" is invisible to the reader (Codex r4 P2).
+  return headingLines(renderedCitabilityBody(draft.body))
+    .some((h) => CHOICE_FRAMING_RE.test(visibleInlineText(h)));
+}
+
+// Legacy .md posts cannot carry MDX components: publishRefresh keeps the
+// extension and 422s a refreshed .md body containing <ComparisonTable>, so
+// asking for one there could never publish (Codex r7 P2; same rule as the
+// #4845 backfill scan). The markdown-only signals still apply.
+function markdownOnlyTarget(brief) {
+  return /\.md$/i.test(String(brief?.target_file_path || ''));
+}
+
+function checkCitabilityComparison(draft, brief, context) {
+  if (nonBlogTarget(brief)) return { ok: true, reason: 'non_blog_target' };
+  if (markdownOnlyTarget(brief)) return { ok: true, reason: 'markdown_only_post_cannot_carry_ComparisonTable' };
+  const hasTable = COMPARISON_TABLE_RE.test(renderedCitabilityBody(draft.body));
+  if (hasTable) return { ok: true };
+  if (!postFramesAChoice(draft, context)) return { ok: true, reason: 'no_choice_framed' };
+  return { ok: false, reason: 'choice_framed_without_ComparisonTable' };
+}
+
+const HOW_TO_CHOOSE_HEADING_RE = /\b(?:how to (?:choose|pick|decide)|choosing (?:between|the right|a|your)|which (?:one|option|approach|method|plan|treatment|service)[^\n]{0,40}\b(?:right|fits?|for you|for your)|what to (?:weigh|look for|consider)|decision (?:guide|checklist)|fits your situation)\b/i;
+
+const HOW_TO_CHOOSE_MIN_CRITERIA = 3;
+const HOW_TO_CHOOSE_MAX_CRITERIA = 5;
+
+// The contract is an H2 carrying 3–5 bulleted criteria (Codex P2s,
+// 2026-09-26 — both bounds): an H3, or an H2 over plain prose, is not the extractable
+// structure the nudge measures. Criteria = list items before the next H1/H2.
+function howToChooseSectionCriteria(body) {
+  const lines = String(body || '').split(/\r?\n/);
+  let best = -1;
+  for (let i = 0; i < lines.length; i += 1) {
+    if (!/^ {0,3}##\s+\S/.test(lines[i]) || !HOW_TO_CHOOSE_HEADING_RE.test(visibleInlineText(lines[i]))) continue;
+    // Top-level criteria only; nested explanation bullets never count.
+    let items = 0;
+    let topContentColumn = null;
+    for (let j = i + 1; j < lines.length && !/^ {0,3}#{1,2}\s/.test(lines[j]); j += 1) {
+      const m = lines[j].match(/^(\s*)[-*+]([ \t]+)(\S.*)$/);
+      if (!m) continue;
+      const indent = m[1].replace(/\t/g, '    ').length;
+      // CommonMark decides nesting against the preceding peer item's
+      // content column, not one global minimum marker indent. Thus 0/1/2
+      // and 1/2/3 marker columns are peers, while 0/1/3 nests the third
+      // marker beneath the second (whose content begins at column 3).
+      const topLevel = topContentColumn === null || indent < topContentColumn;
+      if (topLevel) topContentColumn = indent + 1 + m[2].replace(/\t/g, '    ').length;
+      const criterion = visibleInlineText(m[3]).trim();
+      // An observable condition: a conditional lead word, or any noun-phrase
+      // check ahead of an arrow ("Active mud tubes → choose liquid", Codex r6 P2).
+      const hasCondition = /^(?:if|when|for|where|with|without|after|before|once)\b/i.test(criterion)
+        || /^[^→]*\w[^→]*\s*(?:→|->)\s*\S/.test(criterion);
+      const namesOption = /(?:→|->|\b(?:choose|pick|use|prefer|select|go with|call|hire|apply|install|schedule|start with|switch to)\b)/i.test(criterion);
+      if (topLevel && hasCondition && namesOption) items += 1;
+    }
+    best = Math.max(best, items);
+  }
+  return best; // -1 = no H2 found
+}
+
+function checkCitabilityHowToChoose(draft, brief, context) {
+  if (nonBlogTarget(brief)) return { ok: true, reason: 'non_blog_target' };
+  const body = renderedCitabilityBody(draft.body);
+  const applies = COMPARISON_TABLE_RE.test(body) || postFramesAChoice(draft, context);
+  if (!applies) return { ok: true, reason: 'no_comparison_to_choose_from' };
+  const criteria = howToChooseSectionCriteria(body);
+  if (criteria < 0) return { ok: false, reason: 'no_how_to_choose_section' };
+  if (criteria < HOW_TO_CHOOSE_MIN_CRITERIA) return { ok: false, reason: `how_to_choose_has_${criteria}_criteria_need_${HOW_TO_CHOOSE_MIN_CRITERIA}+` };
+  if (criteria > HOW_TO_CHOOSE_MAX_CRITERIA) return { ok: false, reason: `how_to_choose_has_${criteria}_criteria_max_${HOW_TO_CHOOSE_MAX_CRITERIA}` };
+  return { ok: true };
+}
+
+// The four optional signals as retry advisories ({ code, message }), for
+// the writer's in-session emit_draft redraft, which runs before any
+// run-level evaluate() (5013 Codex r2 P2). Same checks, same codes as the
+// run-level soft_failures path.
+const CITABILITY_CHECKS = [
+  ['citability_named_sources', checkCitabilityNamedSources],
+  ['citability_concrete_specifics', checkCitabilityConcreteSpecifics],
+  ['citability_comparison', checkCitabilityComparison],
+  ['citability_how_to_choose', checkCitabilityHowToChoose],
+];
+
+function citabilityAdvisories(draft, brief, context) {
+  const out = [];
+  for (const [name, check] of CITABILITY_CHECKS) {
+    let result;
+    try { result = check(draft, brief, context); } catch { continue; }
+    if (result && result.ok === false) {
+      out.push({ code: name.toUpperCase(), message: String(result.reason || 'optional citability signal').slice(0, 300) });
+    }
+  }
+  return out;
+}
+
 // ── metadata checks ─────────────────────────────────────────────────
 
 function checkTitleLengthBounds(draft, brief, context) {
@@ -1246,7 +1667,7 @@ function checkNoDuplicateTitle(draft, _brief, context) {
 // DANGLING_META_ENDINGS is exported as the single source of truth for
 // "words a meta may not end on" — astro-publisher's clamp fallback strips
 // against the SAME set so a clamped meta can never fail this gate.
-module.exports = { evaluate, MIN_TOTAL_SCORES, minTotalScoreFor, DANGLING_META_ENDINGS };
+module.exports = { evaluate, MIN_TOTAL_SCORES, minTotalScoreFor, DANGLING_META_ENDINGS, citabilityAdvisories };
 module.exports._internals = {
   HARD_CHECKS,
   PAGE_TYPE_CHECKS,
@@ -1261,6 +1682,8 @@ module.exports._internals = {
   checkAnswerInFirstParagraph, checkSourceInternalLink, checkRedactionPassed,
   checkImprovementOverPrior,
   checkHubLinkPresent, checkTwoPlusCityMentions, checkFaqSectionPresent, checkVoiceMatch,
+  checkCitabilityNamedSources, checkCitabilityConcreteSpecifics, checkCitabilityComparison, checkCitabilityHowToChoose,
+  countConcreteSpecifics, CHOICE_POST_TYPES,
   checkTitleLengthBounds, checkMetaLengthBounds,
   checkPrimaryKeywordInTitle, checkNoDuplicateTitle,
   checkMetaPhoneTokenPresent, checkCityServiceMetaPhone, checkBlogMetaContract,

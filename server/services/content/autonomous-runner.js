@@ -1003,13 +1003,17 @@ class AutonomousRunner {
         // meta-completeness contract. Resolution failure fails CLOSED to
         // the stricter blog contract — such a target cannot publish anyway.
         let targetPageType = 'supporting-blog';
+        let targetFilePath = null;
         try {
           const resolved = publisher?.resolveExistingAstroFileForTarget
             ? await publisher.resolveExistingAstroFileForTarget(brief.target_url || brief.page_url || draft.url)
             : null;
           if (resolved?.path && !String(resolved.path).startsWith('src/content/blog/')) targetPageType = 'page';
+          if (resolved?.path) targetFilePath = String(resolved.path);
         } catch (_) { /* keep the stricter blog contract */ }
-        gateBrief = { ...brief, target_page_type: targetPageType };
+        // target_file_path lets the citability comparison signal skip legacy
+        // .md targets, which publishRefresh cannot give an MDX component.
+        gateBrief = { ...brief, target_page_type: targetPageType, target_file_path: targetFilePath };
       }
       try {
         qualityResult = qualityGate.evaluate(draft, gateBrief, ctx);
@@ -1257,6 +1261,7 @@ class AutonomousRunner {
           skipReason: autoPublish ? 'auto_publish_gate_fail' : 'gate_fail',
           notes,
           blocking: [...aggregateGateFindings({ uniquenessResult, qualityResult, seoCompletionResult, prePublishVisibilityResult, summary }), ...guardAdvisory],
+          advisoryMessages: citabilityAdvisoryMessages(qualityResult),
         });
       }
       // Remaining combinations are genuine human decisions (gate infra
@@ -1962,7 +1967,9 @@ class AutonomousRunner {
    * Second failure: skip silently. The gates themselves never loosen —
    * a repeat offender is discarded, not published and not parked.
    */
-  async _gateFailRetryOrSkip(queue, opp, run, t0, finalize, { claimToken, skipReason, notes, blocking }) {
+  async _gateFailRetryOrSkip(queue, opp, run, t0, finalize, {
+    claimToken, skipReason, notes, blocking, advisoryMessages = [],
+  }) {
     const findings = (blocking || []).map((finding) => ({
       severity: finding.severity,
       code: finding.code,
@@ -1974,7 +1981,9 @@ class AutonomousRunner {
       notes,
       marker: 'gate_retry',
       retryAt: new Date(),
-      retryData: { findings },
+      // Optional quality signals must reach the redraft without becoming
+      // hard retry directives. The brief renderer labels these separately.
+      retryData: { findings, advisory_messages: advisoryMessages },
       deferredOutcome: 'deferred_gate_retry',
       deferredNote: 'deferred for one autonomous redraft with these findings fed back to the writer.',
       exhaustedNote: 'redraft with gate feedback failed the gate again; skipped (exceptions-only review queue).',
@@ -4465,6 +4474,15 @@ function aggregateGateFindings({ uniquenessResult, qualityResult, seoCompletionR
   return blocking;
 }
 
+function citabilityAdvisoryMessages(qualityResult) {
+  return (qualityResult?.soft_failures || [])
+    .filter((failure) => String(failure?.name || '').startsWith('citability_'))
+    .map((failure) => ({
+      code: String(failure.name).toUpperCase(),
+      message: String(failure.reason || 'optional citability signal').slice(0, 300),
+    }));
+}
+
 function protectedPagePatch(prot = {}) {
   return {
     outcome: 'skipped_gate_fail',
@@ -4666,4 +4684,5 @@ module.exports._internals = {
   nextEtWeekStart,
   gbpLocationIdForCity,
   operatorBriefTextForComparisonGate,
+  citabilityAdvisoryMessages,
 };
