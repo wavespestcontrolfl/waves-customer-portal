@@ -1200,6 +1200,15 @@ function aeoQuestionGapDedupeKey(question) {
   return [AEO_QUESTION_GAP_BUCKET, question.id, routeIdentity(hubTargetUrl(question.target_path)) || '_'].join('::');
 }
 
+// The city a target page names: a city-service route or -city-fl slug
+// (inferCityFromUrl), else a city named in the page's slug leaf
+// ("get-rid-of-ghost-ants-in-sarasota"). Used for the refresh's locality AND
+// the question/target conflict check, so the two never disagree.
+function aeoTargetCity(url) {
+  const leaf = String(url || '').split(/[?#]/)[0].split('/').filter(Boolean).pop() || '';
+  return inferCityFromUrl(url) || inferCityFromQuery(leaf.replace(/-/g, ' '));
+}
+
 function urlHost(url) {
   try { return new URL(url).hostname.toLowerCase().replace(/^www\./, ''); } catch { return null; }
 }
@@ -1267,16 +1276,21 @@ function evaluateAeoQuestionGaps(rows = [], questions = [], { minDays = 3, minEn
 // thin to clear its action's floor is pinned AT that floor (the lowest
 // admissible rank) — admitted, but never above a GSC opportunity that
 // earned its place. score_floor_pinned also keeps the facts boost off it.
-// A missing target (liveUrl null) routes to do_not_publish — an unmet gap,
-// never queued.
+// Unmet gaps route to do_not_publish and are never queued: a missing target
+// (liveUrl null), or a question whose explicit city conflicts with the city
+// its target names (the refresh would answer a Bradenton question on a
+// Sarasota page — a benchmark or target fix, not a refresh).
 function buildAeoQuestionGapOpp(gap, { liveUrl = null, impressions = 0 } = {}) {
   const q = gap.question;
   const page_url = liveUrl || null;
-  // City/service come from the TARGET URL (answer_gap's rule: a
+  // City/service come from the TARGET (answer_gap's rule: a
   // question-derived city on a non-city page would attach wrong-city facts
   // to the edit); the benchmark label only fills a missing service.
   const service = (page_url && inferServiceFromUrl(page_url)) || aeoServiceFor(q.service, q.query);
-  const city = page_url ? inferCityFromUrl(page_url) : null;
+  const city = page_url ? aeoTargetCity(page_url) : null;
+  const questionCity = normalizeCity(q.city) || inferCityFromQuery(q.query);
+  const targetCity = aeoTargetCity(hubTargetUrl(q.target_path));
+  const cityConflict = !!(questionCity && targetCity && questionCity !== targetCity);
   const signal = {
     impressions,
     benchmark_id: q.id,
@@ -1304,9 +1318,10 @@ function buildAeoQuestionGapOpp(gap, { liveUrl = null, impressions = 0 } = {}) {
     benchmark_id: q.id,
     engines_missing: gap.engines_missing.map((e) => e.platform),
   }];
+  if (cityConflict) signal.city_conflict = { question_city: questionCity, target_city: targetCity };
   const opp = { bucket: AEO_QUESTION_GAP_BUCKET, query: q.query, page_url, service, city, signal_metadata: signal };
   const { total, breakdown } = scoreOpportunity(opp, { position: 20, impressions, gapStrength: gap.gap_strength });
-  opp.action_type = actionForOpportunity(opp);
+  opp.action_type = cityConflict ? 'do_not_publish' : actionForOpportunity(opp);
   let score = total;
   if (opp.action_type !== 'do_not_publish') {
     const floor = persistFloorFor(opp);
@@ -3476,10 +3491,12 @@ class GscOpportunityMiner {
     const nonEditable = GscOpportunityMiner._nonEditablePages;
     qualifying.opps = opps.filter((o) => aeoQuestionGapRoutable(o)
       && !(nonEditable.get(routeIdentity(o.page_url)) > Date.now()));
-    // Missing targets are unmet gaps this lane does not write — reported so
-    // the seed lanes can pick them up.
-    const unmet = opps.filter((o) => !o.page_url).map((o) => o.signal_metadata.benchmark_id);
-    logger.info(`[gsc-opp-miner] aeo_question_gap: ${gaps.length} qualifying question(s), ${out.length} emitted (${out.map((o) => o.signal_metadata.benchmark_id).join(', ') || 'none'}); unmet gaps, target missing: ${unmet.join(', ') || 'none'}`);
+    // Unmet gaps this lane does not write — reported so the benchmark,
+    // target or seed lanes can pick them up.
+    const ids = (list) => list.map((o) => o.signal_metadata.benchmark_id).join(', ') || 'none';
+    const missing = opps.filter((o) => !o.page_url);
+    const conflicts = opps.filter((o) => o.page_url && o.signal_metadata.city_conflict);
+    logger.info(`[gsc-opp-miner] aeo_question_gap: ${gaps.length} qualifying question(s), ${out.length} emitted (${ids(out)}); unmet gaps, target missing: ${ids(missing)}; unmet gaps, question/target city conflict: ${ids(conflicts)}`);
     return out;
   }
 
@@ -5312,4 +5329,5 @@ module.exports._internals = {
   evaluateAeoQuestionGaps,
   buildAeoQuestionGapOpp,
   selectAeoQuestionGaps,
+  aeoTargetCity,
 };

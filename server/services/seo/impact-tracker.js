@@ -719,6 +719,22 @@ async function pausedBuckets({ db: database = db, strict = false } = {}) {
   }
 }
 
+// The engines (llm_platform values) an aeo_question_gap run set out to win:
+// the qualifying cohort persisted on its opportunity row. Empty when the
+// cohort is unavailable, which leaves the verdict insufficient_data (the
+// recheck retries such rows); a lookup failure throws and the row retries.
+async function questionGapMissingPlatforms(database, runId) {
+  if (!runId) return [];
+  const row = await database('autonomous_runs as r')
+    .join('opportunity_queue as q', 'r.opportunity_id', 'q.id')
+    .where('r.id', runId)
+    .first('q.signal_metadata as signal_metadata');
+  let meta = row?.signal_metadata;
+  if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
+  const engines = Array.isArray(meta?.engines_missing) ? meta.engines_missing : [];
+  return [...new Set(engines.map((e) => e?.platform).filter(Boolean))];
+}
+
 /**
  * AEO visibility feedback loop. For AEO rows (AEO_BUCKETS) that deployed ≥ AEO_REPROBE_DAYS
  * ago and haven't been checked, look at the answer-engine observations the daily
@@ -734,7 +750,7 @@ async function checkAeoVisibility({ db: database = db, now = new Date() } = {}) 
       .whereIn('bucket', AEO_BUCKETS)
       .where(b => b.whereNull('aeo_measurement_version').orWhere('aeo_verdict', 'insufficient_data'))
       .where('deployed_at', '<=', addETDays(now, -AEO_REPROBE_DAYS))
-      .select('id', 'page_url', 'aeo_query_ids', 'deployed_at');
+      .select('id', 'bucket', 'run_id', 'page_url', 'aeo_query_ids', 'deployed_at');
   } catch (err) {
     logger.warn(`[impact-tracker] checkAeoVisibility query failed: ${err.message}`);
     return { checked: 0 };
@@ -745,12 +761,22 @@ async function checkAeoVisibility({ db: database = db, now = new Date() } = {}) 
       let ids = [];
       try { ids = Array.isArray(row.aeo_query_ids) ? row.aeo_query_ids : JSON.parse(row.aeo_query_ids || '[]'); } catch { ids = []; }
 
+      // aeo_question_gap measures ONLY the engines that were missing the
+      // target when the question qualified (its frozen queue row's
+      // signal_metadata.engines_missing): an engine that already cited the
+      // target proves nothing about the treatment. aeo_gap is unchanged.
+      const platforms = row.bucket === 'aeo_question_gap'
+        ? await questionGapMissingPlatforms(database, row.run_id)
+        : null;
+
       let observedDays = 0;
       let wavesHitDays = 0;
-      if (ids.length) {
-        const obs = await database('seo_llm_mentions')
+      if (ids.length && (!platforms || platforms.length)) {
+        let obsQ = database('seo_llm_mentions')
           .whereIn('query_id', ids)
-          .where('check_date', '>=', etDateString(row.deployed_at))
+          .where('check_date', '>=', etDateString(row.deployed_at));
+        if (platforms) obsQ = obsQ.whereIn('llm_platform', platforms);
+        const obs = await obsQ
           .select('check_date', 'measurement_version', 'answer_available', 'citations_complete', 'waves_cited_urls');
         const days = new Map(); // date → any waves hit that day
         for (const o of obs.filter(isMeasuredAnswer)) {
@@ -787,7 +813,7 @@ module.exports = {
   selectControlPages,
   launchVerdict,
   isEmptyBaseline,
-  _internals: { median, clicksPct, positionDelta, confidenceScore, etDayAnchor, parseAstroPrNumber, resolveRunPageUrl, aeoVerdict, normalizeQueryCohort, queryLift, domainFromUrl, aeoQueryIdsForRun },
+  _internals: { median, clicksPct, positionDelta, confidenceScore, etDayAnchor, parseAstroPrNumber, resolveRunPageUrl, aeoVerdict, normalizeQueryCohort, queryLift, domainFromUrl, aeoQueryIdsForRun, questionGapMissingPlatforms },
   THRESHOLDS: {
     BASELINE_DAYS, DEPLOY_LAG_DAYS, MIN_IMPRESSIONS, MIN_CONFIDENCE,
     LIFT_POSITION_IMPROVED, LIFT_CLICKS_IMPROVED_PCT,

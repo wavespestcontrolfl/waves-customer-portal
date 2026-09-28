@@ -3189,6 +3189,28 @@ describe('aeo_question_gap bucket', () => {
     db.mockReset();
   });
 
+  test('a question whose city conflicts with its target page\'s city is never queued (Q13, Q17, Q23 today)', () => {
+    const { aeoTargetCity } = require('../services/seo/gsc-opportunity-miner')._internals;
+    const built = aeoQuestionGapQuestions(benchmark.questions)
+      .map((x) => buildAeoQuestionGapOpp(gapFor(x.id), { liveUrl: `${HUB}${x.target_path}` }));
+    const rejected = built.filter((o) => o.signal_metadata.city_conflict);
+    expect(Object.fromEntries(rejected.map((o) => [o.signal_metadata.benchmark_id, o.signal_metadata.city_conflict]))).toEqual({
+      Q13: { question_city: 'Bradenton', target_city: 'Sarasota' },
+      Q17: { question_city: 'Sarasota', target_city: 'Bradenton' },
+      Q23: { question_city: 'Lakewood Ranch', target_city: 'Sarasota' },
+    });
+    expect(rejected.every((o) => o.action_type === 'do_not_publish')).toBe(true);
+    expect(selectAeoQuestionGaps(rejected, { cap: 10 })).toEqual([]);
+    // Same city, or no city on either side, is fine — and the refresh takes
+    // its locality from the same target parser.
+    const byId = Object.fromEntries(built.map((o) => [o.signal_metadata.benchmark_id, o]));
+    expect(byId.Q12).toMatchObject({ action_type: 'refresh_existing_page', city: 'Sarasota' });
+    expect(byId.Q18).toMatchObject({ action_type: 'refresh_existing_page', city: 'Bradenton' });
+    expect(byId.Q6).toMatchObject({ action_type: 'refresh_existing_page', city: null });
+    expect(byId.Q21.action_type).toBe('refresh_existing_page'); // Bradenton question, city-less target
+    expect(aeoTargetCity(`${HUB}/pest-control/get-rid-of-ghost-ants-in-sarasota/`)).toBe('Sarasota');
+  });
+
   test('dedupe key is per question and target', () => {
     expect(aeoQuestionGapDedupeKey(q('Q26'))).not.toBe(aeoQuestionGapDedupeKey(q('Q27')));
     expect(aeoQuestionGapDedupeKey({ ...q('Q26'), target_path: '/termite/termite-bond' })).toBe(aeoQuestionGapDedupeKey(q('Q26')));
@@ -3385,6 +3407,19 @@ describe('aeo_question_gap bucket', () => {
       // question keeps its row.
       expect(qualifying.opps.map((o) => o.signal_metadata.benchmark_id).sort()).toEqual(['Q21', 'Q36']);
       expect(logger.info.mock.calls.map((c) => c[0]).join('\n')).toMatch(/unmet gaps, target missing: Q11, Q26|unmet gaps, target missing: Q26, Q11/);
+    });
+
+    test('a city-conflicted question is skipped, logged as an unmet gap, and drops out of the live set', async () => {
+      process.env.GATE_AEO_QUESTION_GAP_MINING = 'true';
+      const questions = [q('Q12'), q('Q13')]; // same Sarasota ghost-ant page; Q13 asks about Bradenton
+      const miner = stubbed(synthetic(questions), [`${HUB}${q('Q12').target_path}`]);
+      const logger = require('../services/logger');
+      logger.info.mockClear();
+      const qualifying = { opps: null };
+      const out = await miner.mineAeoQuestionGaps('2026-08-30', { qualifying });
+      expect(out.map((o) => o.signal_metadata.benchmark_id)).toEqual(['Q12']);
+      expect(qualifying.opps.map((o) => o.signal_metadata.benchmark_id)).toEqual(['Q12']);
+      expect(logger.info.mock.calls.map((c) => c[0]).join('\n')).toMatch(/question\/target city conflict: Q13/);
     });
 
     test('the editability probe is bounded and remembers confirmed non-editable pages', async () => {
