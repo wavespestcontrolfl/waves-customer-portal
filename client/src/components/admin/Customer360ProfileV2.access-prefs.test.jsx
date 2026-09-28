@@ -293,6 +293,22 @@ describe('Customer 360 → Property → Access & Preferences', () => {
     expect(screen.getByRole('button', { name: 'Save' })).toBeInTheDocument();
   });
 
+  it('shows a saved pet count of zero as 0, not Not set', async () => {
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const path = String(url);
+      if (path.endsWith('/admin/payers')) return response({ payers: [] });
+      if (path.split('?')[0].endsWith('/timeline')) return response({ timeline: [] });
+      if (path.endsWith('/admin/customers/customer-a')) return response(customerDetail({ pet_count: 0 }));
+      return response({});
+    }));
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+    await screen.findAllByText('Avery Customer');
+    await openPropertyTab();
+    const row = (await screen.findByText('Pet Count')).parentElement;
+    expect(row).toHaveTextContent('0');
+    expect(row).not.toHaveTextContent('Not set');
+  });
+
   it('masks access codes and access notes for a technician', async () => {
     localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'technician' }));
     vi.stubGlobal('fetch', vi.fn((url) => {

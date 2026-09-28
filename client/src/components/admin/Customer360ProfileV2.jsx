@@ -6983,7 +6983,7 @@ function AccessPrefsReadView({ p, isAdmin, onEdit }) {
       ))}
 
       <AccessPrefsSubheading>Pets</AccessPrefsSubheading>
-      <AccessPrefRow label="Pet Count" value={p.pet_count || null} />
+      <AccessPrefRow label="Pet Count" value={p.pet_count ?? null} />
       <AccessPrefRow label="Pet Details" value={p.pet_details} />
       <AccessPrefRow label="Pets Secured Plan" value={p.pets_secured_plan} />
       {accessPrefsFormatPetsStructured(p.pets_structured).map((line, i) => (
