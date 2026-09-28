@@ -292,3 +292,17 @@ describe('htmlToText', () => {
     expect(htmlToText('<h1>A &amp; B</h1><ul><li>one</li><li>two</li></ul><br>done')).toBe('A & B\none\ntwo\n\ndone');
   });
 });
+
+describe('digestRowFields — caller headline obeys the 60-char bell title budget', () => {
+  const { digestRowFields: rowFields } = require('../services/ops-digest');
+  test('a caller headline over 60 chars is cut at a word boundary like the fallback', () => {
+    const long = 'Schedule — ' + 'overlapping visit pairs need a look '.repeat(3);
+    const { title } = rowFields({ subject: '[Waves] x', text: 'x', headline: long });
+    expect(title.length).toBeLessThanOrEqual(60);
+    expect(long.startsWith(title.replace(/…$/, ''))).toBe(true);
+  });
+  test('a short caller headline is kept as written', () => {
+    expect(rowFields({ subject: '[Waves] x', text: 'x', headline: 'Email — bounce needs a fix' }).title)
+      .toBe('Email — bounce needs a fix');
+  });
+});

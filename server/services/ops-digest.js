@@ -38,7 +38,6 @@ function notificationService() {
 }
 
 const CATEGORY = 'ops_digest';
-const MAX_TITLE_CHARS = 200; // notifications.title is varchar(200); body is text (uncapped)
 
 // Admin-alerts-brevity scope (owner ruling 2026-09-28): the bell shows a
 // short headline + one-sentence summary; the WHOLE finding moves to
@@ -95,7 +94,7 @@ function digestRowFields({ subject, text = null, html = null, headline = null, s
   const kind = deriveKind(subject);
   const resolvedAudience = audience || defaultAudienceFor(kind);
   return {
-    title: String(headline || fallbackHeadline(subject)).slice(0, MAX_TITLE_CHARS),
+    title: headline ? truncateAtWord(String(headline), MAX_HEADLINE_CHARS) : fallbackHeadline(subject),
     body: summary ? String(summary) : null,
     detail: String(text || htmlToText(html) || ''),
     kind,
