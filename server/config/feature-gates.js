@@ -513,10 +513,10 @@ const gates = {
   // Product-copy lines on the service report (owner-approved 2026-09-28) —
   // "How it works" / "Also labeled for" / "Pets & kids" per applied product,
   // matched against the static reviewed config in
-  // server/config/report-product-copy.js. Renders on BOTH the live report
-  // and the PDF (unlike planSummary/nearYou above, which are live-only —
-  // this is an attribute of the applied-products list itself, shown on both
-  // surfaces already). This map entry is for logGateStatus only — the
+  // server/config/report-product-copy.js. Live view only, like
+  // planSummary/nearYou above — PDF/static/sms_preview never carry it at any
+  // setting (stripLiveOnlyReportProductCopy), and termite-line reports never
+  // get it. This map entry is for logGateStatus only — the
   // canonical CALL-TIME reader is reportProductCopyGateOn() in
   // server/services/service-report/report-product-copy.js, same posture as
   // pestReportExpectationsGateOn().
