@@ -5,7 +5,7 @@
  * FREE re-service conversion, which voids its own invoices as part of the
  * same save. See server/routes/admin-schedule.js (priceChangeNeedsGuard,
  * the mint-lock acquisition right above it, and findBillingCoveredVisits'
- * `openBalance` option).
+ * `liveInvoice` option).
  *
  * Reuses the mock-knex harness pattern from
  * update-details-discount-preserved-no-addons-mock.test.js: `db` is a
@@ -272,23 +272,34 @@ test('changed price is allowed when there is no covered invoice — mint lock is
   expect(Number(write.payload.estimated_price)).toBeCloseTo(150, 2);
 });
 
-test('the free re-service conversion is exempt from the repricing guard by construction', () => {
-  // reServiceConversionZeroPrice zeros the visit (and voids its own open
-  // invoices in the same save — see the trx block right after this guard),
-  // so it must never itself be blocked by the guard it would otherwise
-  // trip. Driving resolveReServiceConversion's full eligibility chain
-  // (membership lookup, re-service catalog resolution, prior-price
-  // comparison) end-to-end through this mock harness would exercise a
-  // large, separately-tested surface just to re-prove a one-line gate —
-  // asserted directly against the route source instead, the same technique
-  // this file's neighbor (edit-appt-price-service-scope.test.js) uses for
-  // an equally deep conditional.
+test('the free re-service conversion runs the base money check (not liveInvoice), and service edits take the mint lock', () => {
+  // A conversion voids this visit's unpaid invoices itself, so only money it
+  // cannot undo refuses it (Codex r1 P1 on #5253). Driving
+  // resolveReServiceConversion's full eligibility chain through this mock
+  // harness would exercise a large, separately tested surface to re-prove a
+  // one-line argument — asserted against the route source instead, the same
+  // technique edit-appt-price-service-scope.test.js uses.
   const fs = require('fs');
   const src = fs.readFileSync(require.resolve('../routes/admin-schedule.js'), 'utf8');
-  expect(src).toMatch(/const priceEditPosted = !reServiceConversionZeroPrice && postedPriceKeys\.length > 0;/);
-  // The conversion still takes the mint lock (it voids invoices under it),
-  // it just never runs the coverage refusal.
-  expect(src).toMatch(/if \(reServiceConversionZeroPrice \|\| priceEditPosted\) \{/);
+  expect(src).toMatch(/const priceEditPosted = postedPriceKeys\.length > 0;/);
+  expect(src).toMatch(/findBillingCoveredVisits\(trx, \[priceGuardRow \|\| \{ id: req\.params\.id \}\], \{ liveInvoice: !reServiceConversionZeroPrice \}\)/);
+  expect(src).toMatch(/if \(reServiceConversionZeroPrice \|\| priceEditPosted \|\| serviceEditPosted\) \{/);
+  // The check reads the row under its own FOR UPDATE, before the first
+  // route-owned write (applyAppointmentAddress).
+  const guardAt = src.indexOf("const priceGuardRow = await trx('scheduled_services').where({ id: req.params.id }).forUpdate().first(...priceGuardSelect);");
+  const firstWriteAt = src.indexOf('if (addressPlan) addressUpdatedIds = await applyAppointmentAddress(trx, addressPlan, req.technicianId);');
+  expect(guardAt).toBeGreaterThan(-1);
+  expect(guardAt).toBeLessThan(firstWriteAt);
+});
+
+test('changed price is refused (409) with a live $0 invoice (completion would reuse it at the old price)', async () => {
+  invoiceFixture = [{ scheduled_service_id: 'svc-1', status: 'draft', credit_applied: 0, line_items: '[]', stripe_payment_intent_id: null, total: 0 }];
+  const { status, body } = await put({ estimatedPrice: 150, notes: 'price change over a $0 draft' });
+  expect(status).toBe(409);
+  expect(body.code).toBe('REPRICE_BLOCKED_COMMITTED_MONEY');
+  // Decided under the visit's row lock.
+  expect(forUpdateSpy).toHaveBeenCalled();
+  expect(captured.find((c) => c.table === 'scheduled_services')).toBeUndefined();
 });
 
 test('the refusal happens BEFORE the Bill-To session release (the first Stripe cancel this route can reach)', async () => {

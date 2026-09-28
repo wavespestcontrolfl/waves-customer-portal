@@ -188,7 +188,7 @@ describe('source contracts', () => {
     const occupancyAt = schedule.indexOf('await acquireOccupancyLock(trx, occupancyDateKey);', detailsTrxAt);
     // The re-price block (owner 2026-09-28) takes the same lock at the same
     // point for a price edit, so the condition now names both.
-    const mintAt = schedule.indexOf('if (reServiceConversionZeroPrice || priceEditPosted) {\n        const { acquireScheduledInvoiceMintLock } = require(\'../services/scheduled-invoice-mint\');\n        await acquireScheduledInvoiceMintLock(trx, req.params.id);', detailsTrxAt);
+    const mintAt = schedule.indexOf('if (reServiceConversionZeroPrice || priceEditPosted || serviceEditPosted) {\n        const { acquireScheduledInvoiceMintLock } = require(\'../services/scheduled-invoice-mint\');\n        await acquireScheduledInvoiceMintLock(trx, req.params.id);', detailsTrxAt);
     const firstRowLockAt = schedule.indexOf('.forUpdate()', detailsTrxAt);
     const conversionVoidAt = schedule.indexOf('await voidConversionInvoicesRestoringCredits({ trx, ids: nonAccruedIds, voidUpdate });', detailsTrxAt);
     expect(detailsTrxAt).toBeGreaterThan(-1);

@@ -1,7 +1,7 @@
 /**
  * propagatePriceServiceToFollowingSiblings (server/routes/admin-schedule.js)
  * — the sibling side of the re-price block (owner ruling 2026-09-28, B.3/C):
- *   - B.3: its findBillingCoveredVisits call now passes `{ openBalance: true }`,
+ *   - B.3: its findBillingCoveredVisits call now passes `{ liveInvoice: true }`,
  *     so a sibling sitting on an unpaid draft/sent invoice refuses the
  *     'following' propagation, not just one already holding taken money.
  *   - C: a sibling whose price this loop is about to rewrite takes that
@@ -109,7 +109,7 @@ beforeEach(() => {
   tryAcquireScheduledInvoiceMintLock.mockClear();
 });
 
-test('a sibling with an OPEN (draft) invoice linked only via its service record refuses the propagation (B.3 — openBalance)', async () => {
+test('a sibling with an OPEN (draft) invoice linked only via its service record refuses the propagation (B.3 — liveInvoice)', async () => {
   const conn = makeConn({
     candidateIds: ['sib-1'],
     targets: [{ id: 'sib-1', scheduled_date: '2099-02-01', pre_service_brief_type: null }],

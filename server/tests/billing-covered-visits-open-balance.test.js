@@ -1,11 +1,11 @@
 /**
- * findBillingCoveredVisits' `openBalance` option (owner ruling 2026-09-28,
+ * findBillingCoveredVisits' `liveInvoice` option (owner ruling 2026-09-28,
  * "the re-price block" — server/routes/admin-schedule.js). Default false
  * keeps the 3 pre-existing callers (the plan-length trim, the dispatch
  * series-cancel fee rails, and the price/service sibling propagation before
  * this option was threaded onto it) byte-identical: a draft/sent invoice
  * with nobody having taken any money yet was never "money already taken"
- * for THOSE questions. `openBalance: true` (the repricing guard) answers a
+ * for THOSE questions. `liveInvoice: true` (the repricing guard) answers a
  * different question — "would changing the price leave a stale bill in
  * front of the customer or the office" — so it also counts:
  *   - a draft/sent/scheduled/viewed/overdue invoice that still has a
@@ -71,7 +71,7 @@ const ALL_TABLES_PRESENT = {
   visit_completion_packet_items: true,
 };
 
-test('openBalance default false: a draft invoice with a balance is NOT covered (existing callers unchanged)', async () => {
+test('liveInvoice default false: a draft invoice with a balance is NOT covered (existing callers unchanged)', async () => {
   const conn = makeConn({
     hasTables: ALL_TABLES_PRESENT,
     byTable: {
@@ -84,7 +84,7 @@ test('openBalance default false: a draft invoice with a balance is NOT covered (
   expect(covered.size).toBe(0);
 });
 
-test('openBalance true: the SAME draft invoice with a balance IS covered', async () => {
+test('liveInvoice true: the SAME draft invoice with a balance IS covered', async () => {
   const conn = makeConn({
     hasTables: ALL_TABLES_PRESENT,
     byTable: {
@@ -95,11 +95,11 @@ test('openBalance true: the SAME draft invoice with a balance IS covered', async
       'visit_completion_packet_items as p': [],
     },
   });
-  const covered = await findBillingCoveredVisits(conn, [{ id: 'v1' }], { openBalance: true });
-  expect(covered.get('v1')).toMatch(/open invoice/);
+  const covered = await findBillingCoveredVisits(conn, [{ id: 'v1' }], { liveInvoice: true });
+  expect(covered.get('v1')).toMatch(/still open at the old price/);
 });
 
-test('openBalance true: a SENT invoice with a balance is covered too', async () => {
+test('liveInvoice true: a SENT invoice with a balance is covered too', async () => {
   const conn = makeConn({
     hasTables: ALL_TABLES_PRESENT,
     byTable: {
@@ -110,12 +110,12 @@ test('openBalance true: a SENT invoice with a balance is covered too', async () 
       'visit_completion_packet_items as p': [],
     },
   });
-  const covered = await findBillingCoveredVisits(conn, [{ id: 'v1' }], { openBalance: true });
+  const covered = await findBillingCoveredVisits(conn, [{ id: 'v1' }], { liveInvoice: true });
   expect(covered.size).toBe(1);
-  expect(covered.get('v1')).toMatch(/balance/);
+  expect(covered.get('v1')).toMatch(/still open at the old price/);
 });
 
-test('a $0 invoice (no balance due) is never covered, openBalance true or false', async () => {
+test('a live $0 invoice is covered with liveInvoice (completion would reuse it at the old price), never without', async () => {
   const conn = makeConn({
     hasTables: ALL_TABLES_PRESENT,
     byTable: {
@@ -126,10 +126,12 @@ test('a $0 invoice (no balance due) is never covered, openBalance true or false'
       'visit_completion_packet_items as p': [],
     },
   });
-  expect((await findBillingCoveredVisits(conn, [{ id: 'v1' }], { openBalance: true })).size).toBe(0);
+  expect((await findBillingCoveredVisits(conn, [{ id: 'v1' }])).size).toBe(0);
+  const covered = await findBillingCoveredVisits(conn, [{ id: 'v1' }], { liveInvoice: true });
+  expect(covered.get('v1')).toMatch(/still open at the old price/);
 });
 
-test('an invoice fully paid by account credit (status prepaid, credit_applied) blocks REGARDLESS of openBalance — already existing behavior', async () => {
+test('an invoice fully paid by account credit (status prepaid, credit_applied) blocks REGARDLESS of liveInvoice — already existing behavior', async () => {
   const conn = makeConn({
     hasTables: ALL_TABLES_PRESENT,
     byTable: {
@@ -142,11 +144,11 @@ test('an invoice fully paid by account credit (status prepaid, credit_applied) b
   });
   const withoutOption = await findBillingCoveredVisits(conn, [{ id: 'v1' }]);
   expect(withoutOption.get('v1')).toMatch(/money on it/);
-  const withOption = await findBillingCoveredVisits(conn, [{ id: 'v1' }], { openBalance: true });
+  const withOption = await findBillingCoveredVisits(conn, [{ id: 'v1' }], { liveInvoice: true });
   expect(withOption.get('v1')).toMatch(/money on it/);
 });
 
-test('a PARTIALLY credit-applied sent invoice (credit_applied > 0, still owes the rest) blocks regardless of openBalance', async () => {
+test('a PARTIALLY credit-applied sent invoice (credit_applied > 0, still owes the rest) blocks regardless of liveInvoice', async () => {
   const conn = makeConn({
     hasTables: ALL_TABLES_PRESENT,
     byTable: {
@@ -159,7 +161,7 @@ test('a PARTIALLY credit-applied sent invoice (credit_applied > 0, still owes th
   expect(covered.get('v1')).toMatch(/credit already applied/);
 });
 
-test('openBalance true: an invoice linked ONLY by service_record_id (no invoices.scheduled_service_id) is covered', async () => {
+test('liveInvoice true: an invoice linked ONLY by service_record_id (no invoices.scheduled_service_id) is covered', async () => {
   const conn = makeConn({
     hasTables: ALL_TABLES_PRESENT,
     byTable: {
@@ -170,13 +172,13 @@ test('openBalance true: an invoice linked ONLY by service_record_id (no invoices
       'visit_completion_packet_items as p': [],
     },
   });
-  const withOption = await findBillingCoveredVisits(conn, [{ id: 'v1' }], { openBalance: true });
-  expect(withOption.get('v1')).toMatch(/balance/);
+  const withOption = await findBillingCoveredVisits(conn, [{ id: 'v1' }], { liveInvoice: true });
+  expect(withOption.get('v1')).toMatch(/still open at the old price/);
   const withoutOption = await findBillingCoveredVisits(conn, [{ id: 'v1' }]);
   expect(withoutOption.size).toBe(0);
 });
 
-test('openBalance true: a combined-visit packet invoice (visit_completion_packet_items.invoice_id) covers its member visit', async () => {
+test('liveInvoice true: a combined-visit packet invoice (visit_completion_packet_items.invoice_id) covers its member visit', async () => {
   const conn = makeConn({
     hasTables: ALL_TABLES_PRESENT,
     byTable: {
@@ -187,13 +189,13 @@ test('openBalance true: a combined-visit packet invoice (visit_completion_packet
       'visit_completion_packet_items as p': [{ scheduled_service_id: 'v2', status: 'sent', credit_applied: 0, line_items: '[]', stripe_payment_intent_id: null, total: 300 }],
     },
   });
-  const withOption = await findBillingCoveredVisits(conn, [{ id: 'v2' }], { openBalance: true });
-  expect(withOption.get('v2')).toMatch(/balance/);
+  const withOption = await findBillingCoveredVisits(conn, [{ id: 'v2' }], { liveInvoice: true });
+  expect(withOption.get('v2')).toMatch(/still open at the old price/);
   const withoutOption = await findBillingCoveredVisits(conn, [{ id: 'v2' }]);
   expect(withoutOption.size).toBe(0);
 });
 
-test('a live card hold blocks regardless of openBalance (feeRails unaffected)', async () => {
+test('a live card hold blocks regardless of liveInvoice (feeRails unaffected)', async () => {
   const conn = makeConn({
     hasTables: ALL_TABLES_PRESENT,
     byTable: {
@@ -202,11 +204,11 @@ test('a live card hold blocks regardless of openBalance (feeRails unaffected)', 
       invoices: [],
     },
   });
-  const covered = await findBillingCoveredVisits(conn, [{ id: 'v1' }], { openBalance: true });
+  const covered = await findBillingCoveredVisits(conn, [{ id: 'v1' }], { liveInvoice: true });
   expect(covered.get('v1')).toMatch(/card for a late-cancel fee/);
 });
 
-test('void/refunded/cancelled invoices never cover, even with openBalance true', async () => {
+test('void/refunded/cancelled invoices never cover, even with liveInvoice true', async () => {
   const conn = makeConn({
     hasTables: ALL_TABLES_PRESENT,
     byTable: {
@@ -219,12 +221,12 @@ test('void/refunded/cancelled invoices never cover, even with openBalance true',
       'visit_completion_packet_items as p': [],
     },
   });
-  const covered = await findBillingCoveredVisits(conn, [{ id: 'v1' }], { openBalance: true });
+  const covered = await findBillingCoveredVisits(conn, [{ id: 'v1' }], { liveInvoice: true });
   expect(covered.size).toBe(0);
 });
 
 test('no invoices/holds at all: never covered', async () => {
   const conn = makeConn({ hasTables: ALL_TABLES_PRESENT, byTable: {} });
-  const covered = await findBillingCoveredVisits(conn, [{ id: 'v1' }], { openBalance: true });
+  const covered = await findBillingCoveredVisits(conn, [{ id: 'v1' }], { liveInvoice: true });
   expect(covered.size).toBe(0);
 });

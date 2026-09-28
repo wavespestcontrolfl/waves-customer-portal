@@ -4739,12 +4739,12 @@ async function propagatePriceServiceToFollowingSiblings(conn, {
     // Same refusal contract as the plan trim (findBillingCoveredVisits
     // rationale): a partially applied reprice would leave the office
     // believing a series was repriced while paid visits kept old numbers.
-    // openBalance: this writes siblingUpdates.estimated_price below, so it
-    // is a repricing path too, not just the invoice-presence probe the loop
-    // runs next — a sibling sitting on an unpaid draft/sent invoice at the
-    // old price must refuse here for the same reason the single-visit
-    // repricing guard does.
-    const covered = await findBillingCoveredVisits(conn, guardRows, { openBalance: true });
+    // liveInvoice: this writes siblingUpdates.estimated_price below, so it
+    // is a repricing path too, not just the direct invoice-presence probe
+    // the loop runs next — a sibling whose live invoice is linked only
+    // through its service record or a combined-visit packet must refuse
+    // here for the same reason the single-visit repricing guard does.
+    const covered = await findBillingCoveredVisits(conn, guardRows, { liveInvoice: true });
     if (covered.size > 0) {
       const [firstId, reason] = [...covered.entries()][0];
       const when = guardRows.find((visit) => visit.id === firstId);
@@ -12925,7 +12925,11 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     // under a stamped $0, dropping primary_line_price alone changes what the
     // visit bills (hasAuthoritativeZeroPrice), so it is a re-price too.
     const postedPriceKeys = [...ANCHORED_PRICE_AUTHORITY_KEYS].filter((key) => updates[key] !== undefined);
-    const priceEditPosted = !reServiceConversionZeroPrice && postedPriceKeys.length > 0;
+    const priceEditPosted = postedPriceKeys.length > 0;
+    // A service change re-describes the visit's invoice lines, so it takes
+    // the mint lock too (Codex r1 P1 on #5253): a concurrent mint then waits
+    // and builds from the new service. The refusal itself stays price-only.
+    const serviceEditPosted = updates.service_id !== undefined || updates.service_type !== undefined;
     // Same retired-for-sale gate as POST / (codex r13 on #4786), on the
     // catalog ids this save ADDS — the resolved primary service and any
     // add-on line not already on the visit. A grandfathered visit that keeps
@@ -13171,40 +13175,9 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       // (transaction-scoped advisory lock — released on commit/rollback).
       // Gated on `priceEditPosted` (the request shape), never on a
       // pre-transaction DB comparison — see its own comment above.
-      if (reServiceConversionZeroPrice || priceEditPosted) {
+      if (reServiceConversionZeroPrice || priceEditPosted || serviceEditPosted) {
         const { acquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
         await acquireScheduledInvoiceMintLock(trx, req.params.id);
-      }
-      // The repricing refusal itself — decided here, mint-lock held, BEFORE
-      // any FOR UPDATE on this visit's row and BEFORE the Bill-To session
-      // release further down (the first Stripe cancel this route can reach;
-      // see the "EVERY refusal is decided BEFORE the first Stripe cancel"
-      // comment there). The row's CURRENT price is read here, under the
-      // mint lock, not before the transaction (pre-push audit P1): a
-      // pre-transaction read can go stale the instant a concurrent save
-      // commits a price change ahead of us, and comparing against that
-      // stale value would run — or skip — the coverage check against the
-      // wrong "before" price. Nothing else can mint an invoice or change
-      // this row's price out from under this read while we hold the mint
-      // lock (every price-changing update-details save takes it too), so a
-      // plain (unlocked) read is sufficient once the lock is held.
-      if (priceEditPosted) {
-        const priceGuardCols = await trx('scheduled_services').columnInfo();
-        const priceGuardSelect = ['id', ...postedPriceKeys.filter((key) => priceGuardCols[key])];
-        if (priceGuardCols.annual_prepay_term_id) priceGuardSelect.push('annual_prepay_term_id');
-        if (priceGuardCols.prepaid_amount) priceGuardSelect.push('prepaid_amount');
-        const priceGuardRow = await trx('scheduled_services').where({ id: req.params.id }).first(...priceGuardSelect);
-        const priceActuallyChanging = postedPriceKeys.some((key) => moneyValuesDiffer(priceGuardRow?.[key], updates[key]));
-        if (priceActuallyChanging) {
-          const covered = await findBillingCoveredVisits(trx, [priceGuardRow || { id: req.params.id }], { openBalance: true });
-          if (covered.size > 0) {
-            const [, reason] = [...covered.entries()][0];
-            throw Object.assign(
-              httpError(409, `Can't change this visit's price: it's ${reason}. Void or release that first, then set the new price.`),
-              { code: 'REPRICE_BLOCKED_COMMITTED_MONEY', isOperational: true },
-            );
-          }
-        }
       }
       // Regrouping can adopt a destination partner's technician. Include all
       // destination rows (eligibility may change during this save), then
@@ -13453,6 +13426,42 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           throw Object.assign(new Error('This appointment changed while saving — reload and save again.'), {
             statusCode: 409, isOperational: true, code: 'VISIT_CHANGED_RETRY', reason: 'ROW_VERSION_DRIFT',
           });
+        }
+      }
+
+      // The repricing refusal (owner ruling 2026-09-28): decided HERE, under
+      // this visit's row lock — taken now if nothing above took it
+      // (re-entrant otherwise), after the customer row lock (ordering
+      // contract) — and BEFORE the first route-owned write and the Bill-To
+      // session release further down (the first Stripe cancel this route can
+      // reach; see "EVERY refusal is decided BEFORE the first Stripe
+      // cancel"). The mint lock taken above keeps every invoice minter out;
+      // the row lock serializes the writers that commit money without it — a
+      // hand prepayment, an annual-prepay term stamp, a card hold or a
+      // card-fee capture all write this row (Codex r1 P1 + parallel review on
+      // #5253). The row's CURRENT price is read under these locks, never
+      // before the transaction.
+      // A free re-service conversion voids this visit's unpaid invoices
+      // itself, so only money it cannot undo blocks it (a paid or prepaid
+      // invoice, credit or a deposit on one, a card charge that can still
+      // settle, a prepayment, a term, a hold): the base check, without
+      // liveInvoice (Codex r1 P1).
+      if (priceEditPosted) {
+        const priceGuardCols = await trx('scheduled_services').columnInfo();
+        const priceGuardSelect = ['id', ...postedPriceKeys.filter((key) => priceGuardCols[key])];
+        if (priceGuardCols.annual_prepay_term_id) priceGuardSelect.push('annual_prepay_term_id');
+        if (priceGuardCols.prepaid_amount) priceGuardSelect.push('prepaid_amount');
+        const priceGuardRow = await trx('scheduled_services').where({ id: req.params.id }).forUpdate().first(...priceGuardSelect);
+        const priceActuallyChanging = postedPriceKeys.some((key) => moneyValuesDiffer(priceGuardRow?.[key], updates[key]));
+        if (priceActuallyChanging) {
+          const covered = await findBillingCoveredVisits(trx, [priceGuardRow || { id: req.params.id }], { liveInvoice: !reServiceConversionZeroPrice });
+          if (covered.size > 0) {
+            const [, reason] = [...covered.entries()][0];
+            throw Object.assign(
+              httpError(409, `Can't change this visit's price: it's ${reason}. Void or release that first, then set the new price.`),
+              { code: 'REPRICE_BLOCKED_COMMITTED_MONEY', isOperational: true },
+            );
+          }
         }
       }
 
@@ -17278,15 +17287,15 @@ async function liveUpcomingSeriesVisits(conn, parentId) {
 // with a fee preview and waiver control — the dispatch series cancel — where
 // a live hold is handled, not a reason to refuse. Money already TAKEN (prepay
 // term, prepaid_amount, an invoice holding money) is checked either way.
-// `openBalance` (repricing guard, PUT /:id/update-details): also count an
-// invoice that hasn't taken any money yet but still bills the OLD price —
-// a draft never sent, or a sent/viewed/overdue invoice sitting unpaid.
-// Neither stamps prepaid_amount/a term/a hold, and none of the three
+// `liveInvoice` (repricing guard, PUT /:id/update-details): also count ANY
+// live attached invoice that hasn't taken money yet — a draft never sent, a
+// sent/viewed/overdue invoice sitting unpaid, or a $0 one — because
+// completion and Charge Now reuse it at the OLD price. None of the three
 // existing callers (the plan trim, the series-cancel fee rails, the price/
 // service sibling propagation before this option was threaded onto it) ever
 // needed to know about an invoice nobody has paid — so this stays opt-in,
 // default false, keeping every pre-existing call byte-identical.
-async function findBillingCoveredVisits(conn, visits, { feeRails = true, openBalance = false } = {}) {
+async function findBillingCoveredVisits(conn, visits, { feeRails = true, liveInvoice = false } = {}) {
   const covered = new Map();
   const mark = (id, reason) => { if (!covered.has(id)) covered.set(id, reason); };
   // The term LINK outlives the coverage: a voided/refunded prepay flips the
@@ -17380,7 +17389,7 @@ async function findBillingCoveredVisits(conn, visits, { feeRails = true, openBal
       .whereIn('scheduled_service_id', ids)
       .whereNotIn('status', [...NO_MONEY_HELD])
       .select('scheduled_service_id', 'status', 'credit_applied', 'line_items', 'stripe_payment_intent_id', 'total');
-    // openBalance also reaches an invoice this visit carries WITHOUT its own
+    // liveInvoice also reaches an invoice this visit carries WITHOUT its own
     // invoices.scheduled_service_id — the two indirect links the repricing
     // guard has to check because the direct query above misses them:
     //   • service-record-linked — most post-completion invoices carry ONLY
@@ -17395,7 +17404,7 @@ async function findBillingCoveredVisits(conn, visits, { feeRails = true, openBal
     // asked "does this visit carry an unpaid invoice at all," only "has
     // money already moved," so widening the match set here would change
     // their answer for a case they were never built to consider.
-    if (openBalance) {
+    if (liveInvoice) {
       if (await conn.schema.hasTable('service_records')) {
         const srLinked = await conn('invoices as inv')
           .join('service_records as sr', 'sr.id', 'inv.service_record_id')
@@ -17442,14 +17451,14 @@ async function findBillingCoveredVisits(conn, visits, { feeRails = true, openBal
         // conservative: no Stripe round-trip in a refusal path, and an
         // already-dead PI just means the operator voids the invoice first.
         mark(inv.scheduled_service_id, 'attached to an invoice with a card payment that can still settle');
-      } else if (openBalance && invoiceAmountDue(inv) > 0) {
-        // Nothing above fired — no settled status, no credit, no deposit
-        // line, no live PI — yet the invoice still has a balance: a plain
-        // draft never sent, or a sent/viewed/overdue invoice sitting
-        // unpaid. The repricing guard treats that the same as money taken:
-        // the customer (or their own copy of the invoice) already has the
-        // OLD price in front of them.
-        mark(inv.scheduled_service_id, 'attached to an open invoice that still has a balance due');
+      } else if (liveInvoice) {
+        // Nothing above fired, yet a live invoice is attached: a draft never
+        // sent, a sent/viewed/overdue invoice sitting unpaid, or a $0 one.
+        // Completion and Charge Now reuse any live attached invoice, so it
+        // would keep billing the OLD price (Codex r1 P1: a $0 draft too) —
+        // the same "any live invoice" rule the sibling propagation already
+        // applies (Codex #3505 r7, owner decision).
+        mark(inv.scheduled_service_id, 'attached to an invoice that is still open at the old price');
       }
     }
   }
