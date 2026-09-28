@@ -97,6 +97,16 @@ describe('groundRescheduleAgreement', () => {
     // Codex #5092 r8: a question is not a commitment or an acceptance.
     expect(said('Will we see you Thursday at two in the afternoon?', OK_CALLER)).toMatchObject({ ok: false, reason: 'agent_commitment_ungrounded' });
     expect(said('We will see you Thursday at two in the afternoon.', 'Thursday at two works for me?')).toMatchObject({ ok: false, reason: 'caller_acceptance_ungrounded' });
+    // Codex #5092 r12: "p.m." ending a sentence keeps the boundary.
+    const PM_LINE = 'We will see you Thursday at two p.m. Do not forget to unlock the gate.';
+    expect(ground(v2({
+      scheduling: { agreed_slot_words: { day: 'Thursday', hour: 'two', period: 'p.m.' } },
+      evidence: [
+        quote('/scheduling/agent_committed_booking', 'agent', 'We will see you Thursday at two p.m.'),
+        quote('/scheduling/confirmed_start_at', 'agent', 'We will see you Thursday at two p.m.'),
+        quote('/scheduling/caller_accepted_slot', 'caller', OK_CALLER),
+      ],
+    }), `Caller: Can we move my visit?\nAgent: ${PM_LINE}\nCaller: ${OK_CALLER}`).ok).toBe(true);
     // Another sentence of the turn is not screened: "No worries." does not void it.
     expect(said('No worries. We will see you Thursday at two in the afternoon.', `Great. ${OK_CALLER}`).ok).toBe(true);
   });
@@ -163,6 +173,8 @@ describe('groundRescheduleAgreement', () => {
       .toMatchObject({ ok: false, reason: 'agreed_slot_words_mismatch' });
     expect(agreedAt(THURSDAY_2PM, 'We will see you Thursday afternoon at two.', { day: 'Thursday', hour: 'two', period: 'afternoon' }).ok).toBe(true);
     expect(agreedAt(THURSDAY_2PM, 'We will see you Thursday at 2:00 PM.', { day: 'Thursday', hour: '2', period: 'PM' }).ok).toBe(true);
+    // Codex #5092 r12: clock-formatted twelve.
+    expect(agreedAt('2026-09-24T12:00:00-04:00', 'We will see you tomorrow at 12:00 noon.', { day: 'tomorrow', hour: '12', period: 'noon' }).ok).toBe(true);
     // Codex #5092 r9: twelve beside a window's named end is not "12 midnight".
     expect(agreedAt('2026-09-24T00:00:00-04:00', 'We will be there between 12 and midnight tomorrow.', { day: 'tomorrow', hour: '12', period: 'midnight' }))
       .toMatchObject({ ok: false, reason: 'agreed_slot_ungrounded' });

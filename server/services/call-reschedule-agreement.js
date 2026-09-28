@@ -71,8 +71,18 @@ function padded(s) { return ` ${s} `; }
 // Lowercase words, punctuation dropped, with "a.m." / "p.m." kept as one
 // word ("am") so a quote matches its turn however either was punctuated
 // and the period words read the same whichever way they were written.
+// The dot after "p.m." also ends the sentence when a new sentence follows
+// ("two p.m. Do not forget the gate code."): it is kept then, unless the
+// next word is a weekday or month that the time runs into ("10 a.m.
+// Thursday").
+const RUNS_INTO = /^(?:mon|tue|wed|thu|fri|sat|sun|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)/i;
 function joinMeridiem(s) {
-  return String(s || '').replace(/\b([ap])\.\s?m\b\.?/gi, '$1m').replace(/(\d)([ap]m)\b/gi, '$1 $2');
+  return String(s || '')
+    .replace(/\b([ap])\.\s?m\b(\.?)(?=(\s+)(\S+)|)/gi, (_m, ap, dot, _gap, next) => {
+      const endsSentence = dot && /^[A-Z]/.test(next || '') && !RUNS_INTO.test(next);
+      return `${ap}m${endsSentence ? '.' : ''}`;
+    })
+    .replace(/(\d)([ap]m)\b/gi, '$1 $2');
 }
 function normalize(s) {
   return joinMeridiem(s).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
@@ -283,12 +293,15 @@ function periodIsTheHours(quote, words) {
   }));
 }
 
-// The recorded words the slot quote must hold. "12 noon" must be said as
-// such, not read off "between 12 and noon".
+// The recorded words the slot quote must hold.
 function slotPhrases(words) {
-  const said = [words.day, words.hour, words.period].filter((w) => typeof w === 'string');
-  if (twelveNamed(hourNumber(words.hour), normalize(words.period).split(' '))) said.push(`${words.hour} ${words.period}`);
-  return said;
+  return [words.day, words.hour, words.period].filter((w) => typeof w === 'string');
+}
+
+// "12 noon" / "12:00 midnight" must be said together (see twelveNamed).
+function twelveSaidTogether(quote, words) {
+  if (!twelveNamed(hourNumber(words.hour), normalize(words.period).split(' '))) return true;
+  return holds(quote, `${words.hour} ${words.period}`) || holds(quote, `${words.hour} 00 ${words.period}`);
 }
 
 /**
@@ -324,7 +337,7 @@ function groundRescheduleAgreement({ v2, transcript, callStartedAt } = {}) {
   if (typeof words?.hour !== 'string') return fail('agreed_slot_words_missing');
   if (!wordsStateSlot(words, slot, started, movedDate)) return fail('agreed_slot_words_mismatch');
   const said = slotPhrases(words);
-  if (!grounded('/scheduling/confirmed_start_at').some((q) => said.every((w) => holds(q, w)) && periodIsTheHours(q, words))) {
+  if (!grounded('/scheduling/confirmed_start_at').some((q) => said.every((w) => holds(q, w)) && periodIsTheHours(q, words) && twelveSaidTogether(q, words))) {
     return fail('agreed_slot_ungrounded');
   }
   return { ok: true, reason: 'agreement_grounded', movedDate };
