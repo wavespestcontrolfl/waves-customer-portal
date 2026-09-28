@@ -577,8 +577,15 @@ async function createExamRun({ providerLeg, baselineRunId, triggeredBy = 'manual
   // pushing a LIKE clause down — same cost, one shared check with examOneItem.
   if (isV12PromptVersion(currentVersion)) {
     const activeItems = await dbi('sms_sealed_eval_items').where('active', true).select('facts_block');
-    if (!activeItems.some((i) => hasFollowupSlaFact(i.facts_block))) {
-      throw new Error(`no v12-compatible sealed items — every active item predates GATE_SMS_REAL_ANSWERS (facts_block lacks "${V12_FACTS_MARKER}"); seal fresh items under ${currentVersion} before running this exam`);
+    // Same bar the exam gate applies to a finished run (evaluateExamGate:
+    // at least half the pool graded). Starting below it would complete a
+    // run that can never pass, and the nightly sweep would then report the
+    // version already examined while the pool is still replenishing
+    // (pre-push audit P1) — so refuse until the freezer has caught up.
+    const compatible = activeItems.filter((i) => hasFollowupSlaFact(i.facts_block)).length;
+    const needed = Math.max(1, Math.ceil(activeItems.length / 2));
+    if (compatible < needed) {
+      throw new Error(`no v12-compatible sealed coverage — only ${compatible} of ${activeItems.length} active items carry "${V12_FACTS_MARKER}" (need ${needed}); the rest predate GATE_SMS_REAL_ANSWERS. Seal fresh items under ${currentVersion} before running this exam`);
     }
   }
 

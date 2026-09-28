@@ -472,29 +472,48 @@ function replyBindsDeclaredDays(reply, offeredTimes) {
     const label = String(date || '');
     return [label.split(',')[0].trim(), label.split(',').slice(1).join(',').trim()].filter(Boolean).map((a) => a.toLowerCase());
   };
+  // Every day mention (weekday or "Month N") of every declared entry.
   const anchors = [];
   for (const e of list) {
     let named = false;
     for (const a of anchorsOf(e.date)) {
       let i = lower.indexOf(a);
-      while (i !== -1) { named = true; anchors.push({ pos: i, len: a.length, date: e.date }); i = lower.indexOf(a, i + 1); }
+      while (i !== -1) { named = true; anchors.push({ pos: i, end: i + a.length, date: e.date }); i = lower.indexOf(a, i + 1); }
     }
     if (!named) return false;
   }
+  // Every occurrence of every declared window text.
+  const occurrences = [];
   for (const w of new Set(list.map((e) => e.window))) {
-    const datesFor = new Set(list.filter((e) => e.window === w).map((e) => e.date));
     let i = text.indexOf(w);
-    while (i !== -1) {
-      let best = null;
-      for (const a of anchors) {
-        const d = a.pos < i ? i - (a.pos + a.len) : a.pos - (i + w.length);
-        if (best === null || d < best.d) best = { d, date: a.date };
-      }
-      if (!best || !datesFor.has(best.date)) return false;
-      i = text.indexOf(w, i + 1);
-    }
+    while (i !== -1) { occurrences.push({ pos: i, end: i + w.length, window: w }); i = text.indexOf(w, i + 1); }
   }
-  return true;
+  // A day mention belongs to a time's OPTION when no other offered time sits
+  // between them ("Tuesday from 9-11 or Wednesday from 2-4": Wednesday is
+  // adjacent to both times, Tuesday only to the first). Each time must then
+  // be matched to a DISTINCT adjacent day mention whose date is declared for
+  // that window — nearest-distance alone misreads "day from time" phrasing.
+  const declared = new Set(list.map((e) => `${e.date}|${e.window}`));
+  const between = (a, b) => occurrences.some((o) => o.pos >= Math.min(a, b) && o.end <= Math.max(a, b));
+  const candidates = occurrences.map((o) => anchors
+    .map((a, idx) => ({ a, idx }))
+    .filter(({ a }) => (a.end <= o.pos ? !between(a.end, o.pos) : !between(o.end, a.pos)))
+    .filter(({ a }) => declared.has(`${a.date}|${o.window}`))
+    .map(({ idx }) => idx));
+  const used = new Set();
+  const assign = (k) => {
+    if (k === candidates.length) return true;
+    for (const idx of candidates[k]) {
+      // the weekday and the calendar date of one label are the same mention
+      const key = `${anchors[idx].date}@${idx}`;
+      if (used.has(key)) continue;
+      used.add(key);
+      if (assign(k + 1)) return true;
+      used.delete(key);
+    }
+    return false;
+  };
+  return assign(0);
 }
 
 // The deterministic inverse of buildFactsBlock's OPEN TIMES section, for a

@@ -216,10 +216,22 @@ describe('createExamRun — guards and stamps', () => {
     drafter.currentPromptVersion.mockReturnValueOnce('house_voice_v12_real_answers');
     const dbi = makeRunnerDb({ runs: [], items: [item('i1')] });
     await expect(sealedEval.createExamRun({ providerLeg: 'anthropic', dbi }))
-      .rejects.toThrow(/no v12-compatible sealed items/);
+      .rejects.toThrow(/no v12-compatible sealed coverage — only 0 of 1/);
   });
 
-  test('a v12 run with at least one v12-compatible item is created normally', async () => {
+  // Pre-push audit P1 (r4): the bar is the exam gate's own coverage rule —
+  // at least half the active pool — so a run that could never pass is not
+  // started (and the nightly sweep cannot call the version examined while
+  // the freezer is still replenishing).
+  test('refuses a v12 run while fewer than half the active items are v12-compatible', async () => {
+    drafter.currentPromptVersion.mockReturnValueOnce('house_voice_v12_real_answers');
+    const V12 = 'FROZEN FACTS\nFOLLOW-UP SLA RIGHT NOW: within the hour';
+    const dbi = makeRunnerDb({ runs: [], items: [item('i1'), item('i2'), item('i3'), item('i4', { facts_block: V12 })] });
+    await expect(sealedEval.createExamRun({ providerLeg: 'anthropic', dbi }))
+      .rejects.toThrow(/only 1 of 4 active items .* \(need 2\)/);
+  });
+
+  test('a v12 run with at least half the pool v12-compatible is created normally', async () => {
     drafter.currentPromptVersion.mockReturnValueOnce('house_voice_v12_real_answers');
     const dbi = makeRunnerDb({
       runs: [],

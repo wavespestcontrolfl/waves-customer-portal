@@ -1553,6 +1553,12 @@ describe('replyBindsDeclaredDays — single-pass day binding (Codex r4)', () => 
     expect(replyBindsDeclaredDays('How about Tuesday 9:00 AM - 11:00 AM or Wednesday 2:00 PM - 4:00 PM?', [TUE, WED2])).toBe(true);
     expect(replyBindsDeclaredDays('September 29 from 9:00 AM - 11:00 AM works.', [TUE])).toBe(true); // calendar-date anchor
   });
+  test('"day FROM time" phrasing, two options (the following day sits closer to the first time than its own day does) → bound', () => {
+    expect(replyBindsDeclaredDays('Tuesday from 9:00 AM - 11:00 AM or Wednesday from 2:00 PM - 4:00 PM', [TUE, WED2])).toBe(true);
+    expect(replyBindsDeclaredDays('9:00 AM - 11:00 AM on Tuesday or 2:00 PM - 4:00 PM on Wednesday', [TUE, WED2])).toBe(true);
+    expect(replyBindsDeclaredDays('Tuesday, September 29 from 9:00 AM - 11:00 AM works.', [TUE])).toBe(true);
+  });
+
   test('swapped days, or a declared day the reply never names → not bound', () => {
     expect(replyBindsDeclaredDays('How about Tuesday 2:00 PM - 4:00 PM or Wednesday 9:00 AM - 11:00 AM?', [TUE, WED2])).toBe(false);
     expect(replyBindsDeclaredDays('How about 9:00 AM - 11:00 AM?', [TUE])).toBe(false);
