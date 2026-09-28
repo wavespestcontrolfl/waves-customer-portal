@@ -303,6 +303,20 @@ describe('sendNewsletterProof', () => {
     }));
   });
 
+  test('a non-flagship (Pest Insider) proof discloses immediate delivery, never the Tuesday target', async () => {
+    const pestInsiderDraft = {
+      ...FLAGSHIP_DRAFT,
+      newsletter_type: 'pest-insider-monthly',
+      proof_token: null,
+    };
+    wireDb({ sends: { first: pestInsiderDraft } });
+    const r = await sendNewsletterProof('send-1');
+    expect(r.sent).toBe(true);
+    const args = mockSendOne.mock.calls[0][0];
+    expect(args.html).toContain('immediately');
+    expect(args.html).not.toContain('Tuesday at 6:00 AM ET');
+  });
+
   test('future-issue proof validates its lineup against the linked issue Tuesday', async () => {
     const futureTarget = new Date('2026-07-28T10:00:00Z');
     wireDb({

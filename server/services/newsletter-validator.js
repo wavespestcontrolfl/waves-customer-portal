@@ -5,6 +5,7 @@
 const { getNewsletterType, isFlagshipType, requiresClaimValidation } = require('../config/newsletter-types');
 const { validateVoice } = require('../config/voice-profiles');
 const { containsAffiliateMaterial } = require('./content/content-guardrails');
+const { findUnverifiedClaims } = require('./email-division/fact-register');
 
 // Phrases the flagship draft is NOT allowed to make up. The events_raw
 // table doesn't store admission, and the newsletter is an events guide
@@ -131,6 +132,29 @@ function findHallucinatedClaims(body, lockedPrices = [], mode = 'text') {
 }
 
 /**
+ * Email-division fact register: hard-block a small set of known-false or
+ * overreaching claim shapes (e.g. a storm-triggered "second" termite swarm
+ * — the September 2026 Pest Insider draft's actual error) that no UF/IFAS
+ * source in the register supports. Scans the same segments as the
+ * hallucinated-claim check, deduped by rule so one draft never reports the
+ * same claim twice.
+ */
+function scanUnverifiedClaims(send) {
+  const errors = [];
+  const seen = new Set();
+  for (const body of [send.subject, send.preview_text, send.html_body, send.text_body]) {
+    if (!body) continue;
+    const bodyText = body.replace(/<[^>]+>/g, ' ');
+    for (const { rule, excerpt } of findUnverifiedClaims(bodyText)) {
+      if (seen.has(rule)) continue;
+      seen.add(rule);
+      errors.push(`Unverified claim (${rule}): "${excerpt}" — not supported by the email-division fact register (server/services/email-division/fact-register.js)`);
+    }
+  }
+  return errors;
+}
+
+/**
  * Fetch the DB-locked price strings for a send's own lineup — the only
  * strings the claim scan may excise. Callers pass the result as
  * opts.lockedPrices; fail-open to [] (scan stays maximally strict).
@@ -211,6 +235,8 @@ function validateNewsletterDraft(send, opts = {}) {
     scanSegment([send.subject, send.preview_text].filter(Boolean).join('\n'), [], 'none');
     scanSegment(send.html_body, opts.lockedPrices || [], 'html');
     scanSegment(send.text_body, opts.lockedPrices || [], 'text');
+
+    errors.push(...scanUnverifiedClaims(send));
   }
 
   // Affiliate links are WEB-ONLY (owner monetization pilot 2026-08-31: the
