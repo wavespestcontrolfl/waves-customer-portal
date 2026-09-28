@@ -367,10 +367,17 @@ async function loadCandidates(conn, { limit = SWEEP_LIMIT } = {}) {
 
 // Groups candidate MEMBER rows by the invoice they are stamped with — the
 // whole group IS the invoice's covered members, never an inferred or
-// unioned set. A group of fewer than 2 (a stray single stamp — should
-// never happen given stampCombinedFirstApplicationInvoiceCoverage's own
-// 2+-only guarantee, but defensive against a manual edit or a bug) is
-// dropped: the sweep only ever evaluates a genuine pair or larger.
+// unioned set. A group of exactly ONE (a stray single stamp — should never
+// happen given stampCombinedFirstApplicationInvoiceCoverage's own 2+-only
+// guarantee at stamp time, but reachable afterward if an operator NULLs
+// one member's stamp by hand) is KEPT, not dropped (Codex round-11 P2 on
+// PR #5021: a group that already collapsed to one stamped member before
+// loadCandidates even ran used to be filtered out here, so
+// evaluateEstimateCandidates' own fresh-re-read "< 2 members -> clear"
+// branch never got a turn to run and a standing alert for that estimate
+// could never auto-clear). Every group loadCandidates returns is handed to
+// evaluateEstimateCandidates, which re-reads the CURRENT member count fresh
+// inside its own transaction and decides from there.
 function groupCandidatesByInvoice(candidates) {
   const byInvoice = new Map();
   for (const candidate of candidates) {
@@ -378,7 +385,7 @@ function groupCandidatesByInvoice(candidates) {
     if (!byInvoice.has(key)) byInvoice.set(key, []);
     byInvoice.get(key).push(candidate);
   }
-  return [...byInvoice.values()].filter((group) => group.length >= 2);
+  return [...byInvoice.values()];
 }
 
 // Marks read (with an autoCleared stamp) every standing alert for this
@@ -537,11 +544,20 @@ function resolveGoverningInvoice(stampedInvoice, liveAnchorInvoices) {
 
 // Re-derives one invoice group's state fresh and acts on it — the whole
 // unit a single transaction covers. membersForInvoice is EXACTLY the
-// invoice's stamped covered members (2+, guaranteed by
-// groupCandidatesByInvoice); the anchor is simply whichever member the
-// invoice's own scheduled_service_id points at.
+// invoice's stamped covered members AS OF loadCandidates' snapshot — 1 or
+// more (groupCandidatesByInvoice no longer drops a singleton, Codex
+// round-11 P2); the anchor is simply whichever member the invoice's own
+// scheduled_service_id points at. This function re-reads the CURRENT
+// member count fresh below and that fresh count, never this snapshot's,
+// decides whether the group is still a genuine pair.
 async function evaluateEstimateCandidates(conn, membersForInvoice) {
-  if (!Array.isArray(membersForInvoice) || membersForInvoice.length < 2) {
+  // Only the empty/non-array shape is skipped without evaluation — there is
+  // no invoice id to re-read. A genuine singleton group (length 1) is NOT
+  // skipped here any more (Codex round-11 P2): it is evaluated exactly like
+  // any other group, and the freshMembers.length < 2 branch below — reading
+  // CURRENT membership inside this transaction, not this possibly-stale
+  // snapshot — is what decides whether it clears a standing alert.
+  if (!Array.isArray(membersForInvoice) || membersForInvoice.length === 0) {
     return { estimateId: membersForInvoice?.[0]?.source_estimate_id ?? null, action: 'skipped', reason: 'not_a_pair' };
   }
   const { source_estimate_id: estimateId, customer_id: customerId, invoice_id: invoiceId } = membersForInvoice[0];
@@ -586,13 +602,15 @@ async function evaluateEstimateCandidates(conn, membersForInvoice) {
       'm.first_application_invoice_id as invoice_id',
     );
   if (freshMembers.length < 2) {
-    // The stamp is never rewritten by any real write path today (owner
-    // ruling: accept-time-only) — so dropping below 2 members here, when
-    // groupCandidatesByInvoice handed this evaluation 2+ only moments ago,
-    // can only be a manual NULL edit on one member since loadCandidates
-    // last scanned. The group has genuinely dissolved: clear any standing
-    // alert for this estimate rather than leave it open with no group left
-    // to ever re-evaluate it.
+    // Fewer than 2 CURRENT members — either this group was already a
+    // singleton when groupCandidatesByInvoice handed it over (an operator
+    // NULLed a partner's stamp before this sweep ever ran), or the stamp
+    // dissolved between loadCandidates' snapshot and this transaction's own
+    // fresh read (the stamp is never rewritten by any real write path today
+    // — owner ruling: accept-time-only — so that's necessarily a manual
+    // NULL edit, not a normal writer). Either way the group is no longer a
+    // genuine pair: clear any standing alert for this estimate rather than
+    // leave it open with no group left to ever re-evaluate it.
     const cleared = await clearStandingAlerts(conn, prefix);
     return {
       estimateId, action: 'cleared', reason: 'not_a_pair', cleared,
@@ -691,9 +709,18 @@ async function loadSweepCursor(conn) {
   return row ? row.last_estimate_id : null;
 }
 
+// Upsert, not a plain UPDATE (Codex round-11 P2): loadSweepCursor already
+// treats a missing singleton row as recoverable ("start from the
+// beginning"), but a plain UPDATE of id=1 is a silent no-op once that row
+// is gone — every tick would then restart from a null cursor and, past
+// SWEEP_BATCH_LIMIT groups, later groups would starve behind an
+// always-same head of the list forever. Upserting keeps the singleton
+// self-healing exactly the way loadCandidates' own read already assumes.
 async function saveSweepCursor(conn, lastInvoiceId) {
-  await conn(SWEEP_CURSOR_TABLE).where({ id: 1 })
-    .update({ last_estimate_id: lastInvoiceId, updated_at: conn.fn.now() });
+  await conn(SWEEP_CURSOR_TABLE)
+    .insert({ id: 1, last_estimate_id: lastInvoiceId, updated_at: conn.fn.now() })
+    .onConflict('id')
+    .merge({ last_estimate_id: lastInvoiceId, updated_at: conn.fn.now() });
 }
 
 // Bound the candidate groups to a fair, per-tick batch so one tick can

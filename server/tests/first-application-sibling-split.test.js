@@ -385,16 +385,21 @@ describe('resolveGoverningInvoice', () => {
 // stamp makes membership durable and unambiguous, replacing the old
 // groupCandidatesByEstimate's estimate-keyed grouping (which existed only
 // because the old design could find MORE THAN ONE structurally-eligible
-// invoice row for the same estimate). A group under 2 members — a stray
+// invoice row for the same estimate). A group of exactly one — a stray
 // single stamp, should never happen given the converter's own 2+-only
-// stamping guarantee — is dropped: the sweep never evaluates a lone stamp.
+// stamping guarantee at stamp time, but reachable afterward if an operator
+// NULLs a partner's stamp by hand — is KEPT, not dropped (Codex round-11
+// P2 on PR #5021): dropping it here meant evaluateEstimateCandidates'
+// fresh-re-read "< 2 members -> clear" branch never got a turn to run, so
+// a standing alert for that estimate could never auto-clear.
 describe('groupCandidatesByInvoice', () => {
   const row = (over = {}) => ({
     invoice_id: 'inv-1', source_estimate_id: 'est-1', status: 'confirmed', ...over,
   });
 
-  test('a single stamped row with no partner is dropped (never a group of one)', () => {
-    expect(groupCandidatesByInvoice([row({ id: 'solo' })])).toEqual([]);
+  test('a single stamped row with no partner is kept as a group of one, not dropped', () => {
+    const solo = row({ id: 'solo' });
+    expect(groupCandidatesByInvoice([solo])).toEqual([[solo]]);
   });
 
   test('two rows stamped with the same invoice stay grouped together, in order', () => {

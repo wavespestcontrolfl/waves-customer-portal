@@ -863,11 +863,14 @@ suite('first-application-sibling-split — periodic sweep', () => {
     expect(results).toEqual([]);
   }));
 
-  // New: a stamped group whose partner has since lost its stamp (the FK's
-  // ON DELETE SET NULL firing, or a manual correction) collapses to a
-  // group of one — groupCandidatesByInvoice drops it, so it is never
-  // evaluated at all, alerted or cleared.
-  test('a stamped group whose partner is unstamped (group of one) is never evaluated', () => rollbackTest(async (trx) => {
+  // Codex round-11 P2 on PR #5021: a stamped group whose partner has since
+  // lost its stamp (the FK's ON DELETE SET NULL firing, or a manual
+  // correction) collapses to a group of one. groupCandidatesByInvoice no
+  // longer drops it — it IS evaluated, every tick, exactly like any other
+  // group — but a lone stamped member can never diverge from itself, so it
+  // never alerts; it only ever clears (see the fresh-re-read
+  // "freshMembers.length < 2" branch in evaluateEstimateCandidates).
+  test('a stamped group whose partner is unstamped (group of one) is evaluated and never alerts', () => rollbackTest(async (trx) => {
     const ids = await fixture(trx);
     await trx('scheduled_services').where({ id: ids.lawnId }).update({ first_application_invoice_id: null, scheduled_date: '2026-10-02' });
 
@@ -877,9 +880,39 @@ suite('first-application-sibling-split — periodic sweep', () => {
     const mine = candidates.filter((c) => String(c.source_estimate_id) === String(ids.estimateId));
     expect(mine.map((c) => c.id)).toEqual([ids.pestId]);
 
-    // ...but grouping drops the now-solo stamp, so nothing is evaluated.
-    const results = await sweepOnce(trx, ids.estimateId);
-    expect(results).toEqual([]);
+    // ...and grouping keeps the now-solo stamp as a group of one, which IS
+    // evaluated — never alerted, cleared instead since fewer than 2 current
+    // members can never be a diverging pair.
+    const [result] = await sweepOnce(trx, ids.estimateId);
+    expect(result.action).toBe('cleared');
+    expect(result.reason).toBe('not_a_pair');
+  }));
+
+  // Codex round-11 P2 on PR #5021: before this fix, a group that collapsed
+  // to one stamped member was dropped entirely by groupCandidatesByInvoice,
+  // so a standing alert for that estimate could never auto-clear once its
+  // partner's stamp was manually nulled — it stood forever. Now the
+  // singleton IS evaluated and the fresh-re-read clear path fires.
+  test('an alerted pair whose partner stamp is later nulled has its standing alert autoCleared on the next sweep', () => rollbackTest(async (trx) => {
+    const ids = await fixture(trx);
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+    const [alerted] = await sweepOnce(trx, ids.estimateId);
+    expect(alerted.action).toBe('alerted');
+    const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
+    const before = await readBell(trx, dedupeKey);
+    expect(before).toBeTruthy();
+    expect(before.read_at).toBeNull();
+
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ first_application_invoice_id: null });
+    const [cleared] = await sweepOnce(trx, ids.estimateId);
+    expect(cleared.action).toBe('cleared');
+    expect(cleared.reason).toBe('not_a_pair');
+
+    const after = await readBell(trx, dedupeKey);
+    expect(after.read_at).not.toBeNull();
+    let meta = after.metadata;
+    if (typeof meta === 'string') meta = JSON.parse(meta);
+    expect(meta.autoCleared).toBe(true);
   }));
 
   test('no first-application invoice at all — never a sweep candidate, no alert', () => rollbackTest(async (trx) => {
@@ -1401,6 +1434,26 @@ suite('first-application-sibling-split — periodic sweep', () => {
     expect(await loadSweepCursor(db)).toBe(before);
   }));
 
+  // Codex round-11 P2 on PR #5021: saveSweepCursor used to be a plain
+  // UPDATE of the id=1 singleton row. loadSweepCursor already treats a
+  // missing row as recoverable ("start from the beginning"), but a plain
+  // UPDATE silently no-ops once that row is gone — every tick would then
+  // restart from a null cursor forever. saveSweepCursor must upsert the
+  // singleton back into existence.
+  test('saveSweepCursor recreates the singleton row when it has been deleted', () => rollbackTest(async (trx) => {
+    await trx('first_application_sibling_split_sweep_cursor').where({ id: 1 }).del();
+    expect(await trx('first_application_sibling_split_sweep_cursor').where({ id: 1 }).first()).toBeUndefined();
+
+    const sentinel = randomUUID();
+    await saveSweepCursor(trx, sentinel);
+
+    const row = await trx('first_application_sibling_split_sweep_cursor').where({ id: 1 }).first();
+    expect(row).toBeTruthy();
+    expect(row.id).toBe(1);
+    expect(row.last_estimate_id).toBe(sentinel);
+    expect(await loadSweepCursor(trx)).toBe(sentinel);
+  }));
+
   // ---------------------------------------------------------------------
   // stampCombinedFirstApplicationInvoiceCoverage (estimate-converter.js) —
   // the writer that records the stamp at accept time, inside the SAME
@@ -1678,15 +1731,27 @@ suite('first-application-sibling-split — periodic sweep', () => {
     }));
 
     // -----------------------------------------------------------------
-    // Codex round-9 P1: the original rule above required the sibling's
-    // CURRENT scheduled_date to still match the anchor's — so a pair that
-    // had ALREADY diverged before this migration ever ran (the exact state
-    // this feature exists to surface) was never stamped. Widened to accept
-    // ACCEPTANCE-TIME evidence instead: a shared created_at instant (both
-    // rows inserted by the same converter run), or reschedule_log proof
-    // the sibling once sat on the anchor's date.
+    // Codex round-9 P1 (superseded by round-11 P2 below): the original
+    // rule required the sibling's CURRENT scheduled_date to still match
+    // the anchor's — so a pair that had ALREADY diverged before this
+    // migration ever ran (the exact state this feature exists to surface)
+    // was never stamped. Widened to accept ACCEPTANCE-TIME evidence
+    // instead: a sibling created within 120 seconds of the INVOICE's own
+    // created_at — the same-transaction birth instant a genuine promoted
+    // sibling always shares with the invoice, regardless of where either
+    // row's scheduled_date has since moved to.
+    //
+    // Codex round-11 P2: a later same-CURRENT-date match (the original (a)
+    // branch, and every reschedule_log branch that only ever proved a
+    // sibling or anchor once shared a date) is REMOVED — it stamped any
+    // unpriced top-level recurring row that merely happened to share the
+    // anchor's date today, including a wholly separate program staff added
+    // later under the same estimate. The created_at window above is the
+    // ONLY same-trip evidence now: a row created at accept qualifies
+    // regardless of where it has moved since, and a row created later
+    // never qualifies no matter what date it currently shows.
     // -----------------------------------------------------------------
-    describe('widened acceptance-time eligibility', () => {
+    describe('accept-time created_at window eligibility', () => {
       async function seedAcceptanceEvidencePair(trx, {
         anchorCreatedAt = new Date('2026-08-01T10:00:00Z'),
         siblingCreatedAt = new Date('2026-08-01T10:00:00Z'),
@@ -1703,7 +1768,6 @@ suite('first-application-sibling-split — periodic sweep', () => {
         siblingScheduledDate = '2026-09-15',
         siblingEstimatedPrice = null,
         siblingOwnLiveInvoice = false,
-        rescheduleLogOriginalDate = null,
       } = {}) {
         const customerId = randomUUID();
         const estimateId = randomUUID();
@@ -1745,13 +1809,6 @@ suite('first-application-sibling-split — periodic sweep', () => {
             subtotal: 60, total: 60,
           });
         }
-        if (rescheduleLogOriginalDate) {
-          await trx('reschedule_log').insert({
-            id: randomUUID(), scheduled_service_id: siblingId, customer_id: customerId,
-            original_date: rescheduleLogOriginalDate, new_date: siblingScheduledDate,
-            reason_code: 'customer_request', initiated_by: 'admin',
-          });
-        }
         return {
           customerId, estimateId, anchorId, siblingId, invoiceId,
         };
@@ -1774,24 +1831,29 @@ suite('first-application-sibling-split — periodic sweep', () => {
         expect(sibling.first_application_invoice_id).toBe(ids.invoiceId);
       }));
 
-      test('a sibling whose reschedule_log history shows it once sat on the anchor\'s date IS stamped, even with no shared created_at instant', () => rollbackTest(async (trx) => {
+      // Codex round-11 P2 — the exact bug: a separate program staff added
+      // LATER under the same estimate, that simply happens to share the
+      // anchor's date TODAY, must never be swept up as though it shared the
+      // accept trip. Same current date, but created well outside the
+      // window ⇒ not stamped.
+      test('a same-day sibling added later (created 2 hours after the invoice) is NOT stamped — the P2 case', () => rollbackTest(async (trx) => {
+        const invoiceCreatedAt = new Date('2026-08-01T10:00:00Z');
         const ids = await seedAcceptanceEvidencePair(trx, {
-          anchorCreatedAt: new Date('2026-08-01T10:00:00Z'),
-          siblingCreatedAt: new Date('2026-08-01T10:45:00Z'), // 45 minutes later — not within the 120s window
-          siblingScheduledDate: '2026-11-20',
-          rescheduleLogOriginalDate: SAME_DATE, // once sat on the anchor's own date
+          anchorCreatedAt: invoiceCreatedAt,
+          invoiceCreatedAt,
+          siblingCreatedAt: new Date('2026-08-01T12:00:00Z'), // 2 hours later — outside the 120s window
+          siblingScheduledDate: SAME_DATE, // still shares the anchor's CURRENT date today
         });
-        const result = await backfillFirstApplicationInvoiceStamps(trx);
-        expect(result.stamped).toBeGreaterThanOrEqual(2);
+        await backfillFirstApplicationInvoiceStamps(trx);
         const [anchor, sibling] = await Promise.all([
           trx('scheduled_services').where({ id: ids.anchorId }).first('first_application_invoice_id'),
           trx('scheduled_services').where({ id: ids.siblingId }).first('first_application_invoice_id'),
         ]);
-        expect(anchor.first_application_invoice_id).toBe(ids.invoiceId);
-        expect(sibling.first_application_invoice_id).toBe(ids.invoiceId);
+        expect(anchor.first_application_invoice_id).toBeNull();
+        expect(sibling.first_application_invoice_id).toBeNull();
       }));
 
-      test('a same-estimate program from a genuinely SEPARATE, later accept (different day, no shared instant, no reschedule history) is NOT stamped', () => rollbackTest(async (trx) => {
+      test('a same-estimate program from a genuinely SEPARATE, later accept (different day, no shared created_at instant) is NOT stamped', () => rollbackTest(async (trx) => {
         const ids = await seedAcceptanceEvidencePair(trx, {
           anchorCreatedAt: new Date('2026-08-01T10:00:00Z'),
           siblingCreatedAt: new Date('2026-09-10T14:00:00Z'), // a much later, independent accept
@@ -1861,29 +1923,26 @@ suite('first-application-sibling-split — periodic sweep', () => {
     });
 
     // -----------------------------------------------------------------
-    // Pre-push P1 (Codex auditor on f7d5c6ea75): a RESERVED anchor row is
-    // minted when the slot is reserved, often DAYS before acceptance, while
-    // the converter inserts the invoice AND the promoted sibling together,
-    // AT acceptance. Comparing the sibling's created_at against the
-    // ANCHOR's own created_at (the old (b) evidence) therefore fails for
-    // exactly this shape — and if the anchor ALSO later moved off the
-    // shared date while the sibling stayed put (or both moved to different
-    // days), the plain current-date check (a) and the sibling-side-only
-    // reschedule_log check (c) fail too, leaving a real pair unstamped
-    // forever. Fixed: (b) now compares against the INVOICE's own
-    // created_at, and two new reschedule_log clauses — anchor-side-only
-    // (d) and both-sides-shared-original-date (e) — cover the anchor
-    // having moved.
+    // Pre-push P1 (Codex auditor on f7d5c6ea75), still true under round-11
+    // P2: a RESERVED anchor row is minted when the slot is reserved, often
+    // DAYS before acceptance, while the converter inserts the invoice AND
+    // the promoted sibling together, AT acceptance. Comparing the
+    // sibling's created_at against the ANCHOR's own created_at would fail
+    // for exactly this shape, which is why the window compares against the
+    // INVOICE's own created_at instead — the sibling and the invoice are
+    // always born in the same accept transaction even when the anchor
+    // predates both by days, and it makes no difference where the anchor
+    // (or the sibling) has since moved to: the window is the only
+    // evidence, so a row's CURRENT scheduled_date never enters the
+    // decision either way.
     // -----------------------------------------------------------------
-    describe('reserved-anchor evidence: invoice created_at + anchor/sibling reschedule_log', () => {
+    describe('reserved-anchor evidence: invoice created_at window', () => {
       async function seedReservedAnchorPair(trx, {
         invoiceCreatedAt,
         anchorCreatedAt,
         siblingCreatedAt,
         anchorScheduledDate = SAME_DATE,
         siblingScheduledDate = '2026-11-20',
-        anchorRescheduleLog = null, // { originalDate }
-        siblingRescheduleLog = null, // { originalDate }
       }) {
         const customerId = randomUUID();
         const estimateId = randomUUID();
@@ -1915,35 +1974,24 @@ suite('first-application-sibling-split — periodic sweep', () => {
           subtotal: 200, total: 200,
           created_at: invoiceCreatedAt,
         });
-        if (anchorRescheduleLog) {
-          await trx('reschedule_log').insert({
-            id: randomUUID(), scheduled_service_id: anchorId, customer_id: customerId,
-            original_date: anchorRescheduleLog.originalDate, new_date: anchorScheduledDate,
-            reason_code: 'customer_request', initiated_by: 'admin',
-          });
-        }
-        if (siblingRescheduleLog) {
-          await trx('reschedule_log').insert({
-            id: randomUUID(), scheduled_service_id: siblingId, customer_id: customerId,
-            original_date: siblingRescheduleLog.originalDate, new_date: siblingScheduledDate,
-            reason_code: 'customer_request', initiated_by: 'admin',
-          });
-        }
         return {
           customerId, estimateId, anchorId, siblingId, invoiceId,
         };
       }
 
-      test('(a) reserved anchor created days before the invoice, sibling created at invoice time, anchor later moved off the shared date — stamped', () => rollbackTest(async (trx) => {
+      // (b) from the assignment: the reserved-anchor-moved shape still
+      // stamps purely on the created_at window, with no reschedule_log
+      // evidence needed at all — the anchor having moved off the shared
+      // date days after accept makes no difference, since the window only
+      // ever compares the sibling's created_at against the invoice's.
+      test('reserved anchor created days before the invoice, sibling created at invoice time, anchor later moved off the shared date — stamped purely on the window', () => rollbackTest(async (trx) => {
         const invoiceCreatedAt = new Date('2026-08-04T09:00:00Z');
-        const originalSharedDate = '2026-09-15';
         const ids = await seedReservedAnchorPair(trx, {
           invoiceCreatedAt,
           anchorCreatedAt: new Date('2026-08-01T09:00:00Z'), // reserved 3 days before accept
           siblingCreatedAt: invoiceCreatedAt, // promoted sibling inserted in the SAME accept transaction as the invoice
           anchorScheduledDate: '2026-09-20', // the anchor later moved off the shared date
-          siblingScheduledDate: originalSharedDate, // the sibling stayed put
-          anchorRescheduleLog: { originalDate: originalSharedDate },
+          siblingScheduledDate: '2026-09-15', // the sibling stayed on the original shared date
         });
         const result = await backfillFirstApplicationInvoiceStamps(trx);
         expect(result.stamped).toBeGreaterThanOrEqual(2);
@@ -1955,36 +2003,19 @@ suite('first-application-sibling-split — periodic sweep', () => {
         expect(sibling.first_application_invoice_id).toBe(ids.invoiceId);
       }));
 
-      test('(b) both anchor and sibling moved to different days from a shared original date — stamped via both-moved reschedule_log evidence', () => rollbackTest(async (trx) => {
-        const invoiceCreatedAt = new Date('2026-08-04T09:00:00Z');
-        const sharedOriginalDate = '2026-09-15';
-        const ids = await seedReservedAnchorPair(trx, {
-          invoiceCreatedAt,
-          anchorCreatedAt: new Date('2026-08-01T09:00:00Z'),
-          siblingCreatedAt: new Date('2026-08-10T09:00:00Z'), // days after the invoice — well outside the 120s window
-          anchorScheduledDate: '2026-09-20', // anchor moved here
-          siblingScheduledDate: '2026-11-20', // sibling moved here — a DIFFERENT day than the anchor's current date
-          anchorRescheduleLog: { originalDate: sharedOriginalDate },
-          siblingRescheduleLog: { originalDate: sharedOriginalDate },
-        });
-        const result = await backfillFirstApplicationInvoiceStamps(trx);
-        expect(result.stamped).toBeGreaterThanOrEqual(2);
-        const [anchor, sibling] = await Promise.all([
-          trx('scheduled_services').where({ id: ids.anchorId }).first('first_application_invoice_id'),
-          trx('scheduled_services').where({ id: ids.siblingId }).first('first_application_invoice_id'),
-        ]);
-        expect(anchor.first_application_invoice_id).toBe(ids.invoiceId);
-        expect(sibling.first_application_invoice_id).toBe(ids.invoiceId);
-      }));
-
-      test('(c) same reserved-anchor shape, but the sibling was created 2 hours after the invoice with no reschedule evidence and a different date — NOT stamped (a genuinely separate later booking)', () => rollbackTest(async (trx) => {
+      // (a) from the assignment (the P2 case, reserved-anchor shape): a
+      // sibling created 2 hours after the invoice — well outside the 120s
+      // window — is NOT stamped, even though the anchor was genuinely
+      // reserved days ahead of accept. No reschedule_log evidence exists
+      // to fall back on any more.
+      test('same reserved-anchor shape, but the sibling was created 2 hours after the invoice — NOT stamped (a genuinely separate later booking)', () => rollbackTest(async (trx) => {
         const invoiceCreatedAt = new Date('2026-08-04T09:00:00Z');
         const ids = await seedReservedAnchorPair(trx, {
           invoiceCreatedAt,
           anchorCreatedAt: new Date('2026-08-01T09:00:00Z'),
           siblingCreatedAt: new Date('2026-08-04T11:00:00Z'), // 2 hours after the invoice — outside the 120s window
           anchorScheduledDate: SAME_DATE,
-          siblingScheduledDate: '2026-11-20', // a different date, no reschedule evidence tying it to the anchor at all
+          siblingScheduledDate: '2026-11-20',
         });
         await backfillFirstApplicationInvoiceStamps(trx);
         const [anchor, sibling] = await Promise.all([
@@ -1995,16 +2026,16 @@ suite('first-application-sibling-split — periodic sweep', () => {
         expect(sibling.first_application_invoice_id).toBeNull();
       }));
 
-      test('(d) rerun is idempotent for the reserved-anchor invoice-created_at + reschedule_log evidence shape', () => rollbackTest(async (trx) => {
+      // (c) from the assignment: idempotent rerun for the reserved-anchor
+      // shape.
+      test('rerun is idempotent for the reserved-anchor invoice-created_at window shape', () => rollbackTest(async (trx) => {
         const invoiceCreatedAt = new Date('2026-08-04T09:00:00Z');
-        const originalSharedDate = '2026-09-15';
         const ids = await seedReservedAnchorPair(trx, {
           invoiceCreatedAt,
           anchorCreatedAt: new Date('2026-08-01T09:00:00Z'),
           siblingCreatedAt: invoiceCreatedAt,
           anchorScheduledDate: '2026-09-20',
-          siblingScheduledDate: originalSharedDate,
-          anchorRescheduleLog: { originalDate: originalSharedDate },
+          siblingScheduledDate: '2026-09-15',
         });
         const first = await backfillFirstApplicationInvoiceStamps(trx);
         const second = await backfillFirstApplicationInvoiceStamps(trx);
