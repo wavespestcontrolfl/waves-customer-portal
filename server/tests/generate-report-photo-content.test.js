@@ -247,3 +247,34 @@ test('gate off: the same assessment-only-plus-captions request still 503s lawn_a
   expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ code: 'lawn_assessment_grounding_unavailable' }));
   expect(mockProvider).not.toHaveBeenCalled();
 });
+
+// Pre-push P2 (Codex #5145 r3): the client's generation-invalidation
+// watcher needs the server's own verdict on whether THIS generation
+// actually included photo grounding — with the gate off (the default) the
+// key must be OMITTED entirely (not `photoGroundingUsed: false`) so the
+// gate-off response stays byte-identical to before this fix.
+test('gate off: the response omits photoGroundingUsed entirely', async () => {
+  const res = mkRes();
+  await handler(mkReq({ observations: ['Ants along the exterior baseboard.'] }), res);
+  expect(res.statusCode).toBe(200);
+  const body = res.json.mock.calls[0][0];
+  expect(body).not.toHaveProperty('photoGroundingUsed');
+});
+
+test('gate on, no captions (summary-only, cannot open generation on its own): irrelevant here, but a caption-free gate-on generation still omits the flag', async () => {
+  process.env.GATE_REPORT_PHOTO_CONTENT = 'true';
+  const res = mkRes();
+  await handler(mkReq({ observations: ['Ants along the exterior baseboard.'] }), res);
+  expect(res.statusCode).toBe(200);
+  const body = res.json.mock.calls[0][0];
+  expect(body).not.toHaveProperty('photoGroundingUsed');
+});
+
+test('gate on + at least one caption: the response carries photoGroundingUsed: true', async () => {
+  process.env.GATE_REPORT_PHOTO_CONTENT = 'true';
+  const res = mkRes();
+  await handler(mkReq({ photoCaptions: ['Ants at the kitchen baseboard.'] }), res);
+  expect(res.statusCode).toBe(200);
+  const body = res.json.mock.calls[0][0];
+  expect(body.photoGroundingUsed).toBe(true);
+});

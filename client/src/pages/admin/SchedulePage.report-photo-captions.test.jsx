@@ -148,7 +148,7 @@ it('reviewed captions alone (no other substantive input) never open Generate —
 // left the stale AI copy installed as if nothing had changed.
 const GENERATED_REPORT = 'WHAT WE DID\n\nTreated the perimeter.\n\nWHAT WE FOUND\n\nNo activity noted.';
 
-it('editing the photo summary after a report was generated invalidates it', async () => {
+it('editing the photo summary after a GROUNDED report was generated invalidates it', async () => {
   await seedAndRestore({
     // notes === generatedReportText: the tech hasn't touched the installed
     // AI text yet — this is what makes invalidation VISIBLE (the "draft was
@@ -158,6 +158,10 @@ it('editing the photo summary after a report was generated invalidates it', asyn
     // not what this test is proving.
     notes: GENERATED_REPORT,
     generatedReportText: GENERATED_REPORT,
+    // The server's photoGroundingUsed flag, restored (pre-push P2, Codex
+    // #5145 r3) — without it, editing captions/summary below must NOT
+    // invalidate (see the gate-off test further down).
+    generationPhotoGroundingUsed: true,
     aiReportUsed: true,
     preGenerationNotes: 'Treated the exterior perimeter (pre-generation).',
   });
@@ -169,10 +173,11 @@ it('editing the photo summary after a report was generated invalidates it', asyn
     .toBe('Treated the exterior perimeter (pre-generation).');
 });
 
-it('re-analyzing photos (fresh AI captions) after a report was generated invalidates it', async () => {
+it('re-analyzing photos (fresh AI captions) after a GROUNDED report was generated invalidates it', async () => {
   await seedAndRestore({
     notes: GENERATED_REPORT,
     generatedReportText: GENERATED_REPORT,
+    generationPhotoGroundingUsed: true,
     aiReportUsed: true,
     preGenerationNotes: 'Treated the exterior perimeter (pre-generation).',
   });
@@ -181,14 +186,68 @@ it('re-analyzing photos (fresh AI captions) after a report was generated invalid
   await screen.findByText(/the draft\s+was cleared/);
 });
 
-it('editing the photo summary WHILE Generate is in flight still invalidates once the request settles', async () => {
+// Pre-push P2 (Codex #5145 r3): GATE_REPORT_PHOTO_CONTENT off (the default)
+// means the server drops captions/summary before building the prompt — a
+// generated draft in this state is UNGROUNDED, and editing either
+// afterward must not clear it even though the watcher still runs. The
+// shared beforeEach's mocked generate-report response carries no
+// photoGroundingUsed flag, which is exactly the gate-off shape.
+it('gate-off response (no photoGroundingUsed flag): editing the summary after Generate does NOT clear the draft', async () => {
+  await seedAndRestore({ notes: 'Treated the exterior perimeter.' });
+  await act(async () => fireEvent.click(screen.getAllByRole('button', { name: /generate ai/i })[0]));
+  await waitFor(() => expect(generateReportCalls.length).toBe(1));
+  expect(screen.queryByText(/the draft\s+was cleared/)).toBeNull();
+  const summaryBox = screen.getByDisplayValue('Photos document ant and rodent activity.');
+  fireEvent.change(summaryBox, { target: { value: 'Edited after an ungrounded generation.' } });
+  // No banner, ever — give any stray effect a tick to (not) fire.
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(screen.queryByText(/the draft\s+was cleared/)).toBeNull();
+});
+
+it('gate-off response (no photoGroundingUsed flag): re-analyzing photos after Generate does NOT clear the draft', async () => {
+  await seedAndRestore({ notes: 'Treated the exterior perimeter.' });
+  await act(async () => fireEvent.click(screen.getAllByRole('button', { name: /generate ai/i })[0]));
+  await waitFor(() => expect(generateReportCalls.length).toBe(1));
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: /analyze photos with ai/i })));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(screen.queryByText(/the draft\s+was cleared/)).toBeNull();
+});
+
+// The baseline-rebuild fix itself (pre-push P2, Codex #5145 r3): a FRESH
+// grounded generation must not invalidate the draft it JUST installed the
+// instant photoGroundingUsed flips from its false default — the watcher's
+// own baseline has to be rebuilt under the NEW flag at install time, or
+// this self-triggers exactly the same "the draft was cleared" banner on a
+// draft the tech never touched.
+it('installing a GROUNDED draft does not immediately invalidate itself', async () => {
+  const originalFetch = globalThis.fetch;
+  vi.stubGlobal('fetch', vi.fn(async (url, options = {}) => {
+    if (url.includes('generate-report')) {
+      const res = await originalFetch(url, options);
+      const data = await res.json();
+      return { ok: res.ok, json: async () => ({ ...data, photoGroundingUsed: true }) };
+    }
+    return originalFetch(url, options);
+  }));
+  await seedAndRestore({ notes: 'Treated the exterior perimeter.' });
+  await act(async () => fireEvent.click(screen.getAllByRole('button', { name: /generate ai/i })[0]));
+  await waitFor(() => expect(generateReportCalls.length).toBe(1));
+  // Give the watcher's effect a chance to run before asserting it did NOT
+  // invalidate — a real bug here would show the banner right about now.
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(screen.queryByText(/the draft\s+was cleared/)).toBeNull();
+});
+
+it('editing the photo summary WHILE a GROUNDED Generate is in flight still invalidates once the request settles', async () => {
   let resolveGenerate;
   const pending = new Promise((resolve) => { resolveGenerate = resolve; });
   const originalFetch = globalThis.fetch;
   vi.stubGlobal('fetch', vi.fn(async (url, options = {}) => {
     if (url.includes('generate-report')) {
       await pending;
-      return originalFetch(url, options);
+      const res = await originalFetch(url, options);
+      const data = await res.json();
+      return { ok: res.ok, json: async () => ({ ...data, photoGroundingUsed: true }) };
     }
     return originalFetch(url, options);
   }));

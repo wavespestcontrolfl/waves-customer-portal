@@ -13040,6 +13040,17 @@ export function CompletionPanel({
   // no longer matches, so the stale opt-in silently stops applying instead
   // of grounding text the tech never actually reviewed-and-accepted.
   const optedInPhotoSummaryRef = useRef(null);
+  // Whether the CURRENTLY INSTALLED draft was actually generated with photo
+  // grounding — the server's own photoGroundingUsed flag on its response
+  // (pre-push P2, Codex #5145 r3), never guessed client-side. With the gate
+  // off (the default) the server drops captions/summary before building the
+  // prompt, so this stays false and the watcher below must not track them —
+  // editing either afterward would otherwise clear an untouched, ungrounded
+  // draft. Read by buildGenerationInputsSnapshot; set by
+  // applyGeneratedReport, which also rebuilds generationInputsRef right
+  // below under the NEW value so the flag flipping never itself reads as a
+  // mismatch.
+  const installedPhotoGroundingUsedRef = useRef(false);
   // Baseline for the generation-inputs watcher below — null means "not yet
   // initialized" (fresh mount or just-restored draft), so the first run
   // records without invalidating.
@@ -14962,6 +14973,13 @@ export function CompletionPanel({
         // The installed-report identity restores too, so an UNTOUCHED
         // restored draft stays invalidatable on later typed edits (codex r24).
         generatedReportText: generatedReportTextRef.current,
+        // Whether that installed report was actually generated WITH photo
+        // grounding (pre-push P2, Codex #5145 r3) — restores alongside it so
+        // a reload/billing-detour doesn't forget a grounded draft is
+        // grounded (which would silently stop tracking caption/summary
+        // edits against it) or an ungrounded one isn't (which would start
+        // invalidating on edits the server never even received).
+        generationPhotoGroundingUsed: installedPhotoGroundingUsedRef.current,
         // Metadata retains the count so a failed photo write invalidates
         // prose grounded in photos that could not be restored.
         generationPhotoCount: servicePhotos.length,
@@ -15354,6 +15372,10 @@ export function CompletionPanel({
     generatedReportTextRef.current = typeof savedDraft.generatedReportText === "string" && savedDraft.generatedReportText
       ? savedDraft.generatedReportText
       : null;
+    // Restores with it (pre-push P2, Codex #5145 r3) — older drafts lack the
+    // field, which defaults to false (byte-identical to this fix not
+    // existing yet: nothing tracked, nothing invalidates).
+    installedPhotoGroundingUsedRef.current = savedDraft.generationPhotoGroundingUsed === true;
     preGenerationNotesRef.current = typeof savedDraft.preGenerationNotes === "string"
       ? savedDraft.preGenerationNotes
       : null;
@@ -15521,6 +15543,9 @@ export function CompletionPanel({
     if (restorePruned && generatedReportTextRef.current) {
       const installed = generatedReportTextRef.current;
       generatedReportTextRef.current = null;
+      // No draft installed any more (pre-push P2, Codex #5145 r3) — the
+      // NEXT generation's own flag decides again.
+      installedPhotoGroundingUsedRef.current = false;
       setAiReportUsed(false);
       if (String(savedDraft.notes || "").trim() === installed.trim()) {
         // The parked fields own the free-typed [Found]/[Next] lines once a
@@ -15770,7 +15795,7 @@ export function CompletionPanel({
   // record (and interior-treatment safety scopes) survive drafting, and the
   // pills UI takes over as the deselect handle. (notes still holds the
   // pre-draft text here; setNotes(report) hasn't applied yet.)
-  function applyGeneratedReport(reportText, { deterministic = false } = {}) {
+  function applyGeneratedReport(reportText, { deterministic = false, photoGroundingUsed = false } = {}) {
     // Telemetry (specialty completion contract): an installed AI report is
     // an AI-assisted completion — persisted as ai_draft_used (codex r14).
     // A double-provider miss returns deterministic template copy, which is
@@ -15778,6 +15803,10 @@ export function CompletionPanel({
     // deterministic REGENERATION replaces a previously installed AI report,
     // so the flag follows each installed result exactly (codex r29).
     setAiReportUsed(!deterministic);
+    // The server's own verdict on THIS generation (pre-push P2, Codex #5145
+    // r3) — never guessed client-side. Read by buildGenerationInputsSnapshot
+    // below via the ref.
+    installedPhotoGroundingUsedRef.current = photoGroundingUsed;
     // Capture the tech's own notes the FIRST time a draft replaces them —
     // an untouched installed draft is never the grounding for regeneration.
     // An EDITED older draft still carries the two-section report shape and
@@ -15816,6 +15845,13 @@ export function CompletionPanel({
     const nextParkedNext = parkTaggedNoteLines({ notes, tag: "next", labels: selectedRecommendationLabels, current: parkedNext });
     if (nextParkedNext !== null) setParkedNext(nextParkedNext);
     setNotes(String(reportText || "").trim());
+    // Rebuild the watcher's baseline NOW, under the FRESH grounding flag
+    // just above (pre-push P2, Codex #5145 r3) — the effect re-runs once
+    // `generating` flips false right after this call returns, and without
+    // rebuilding here it would compare against a baseline recorded under
+    // the OLD flag/shape, self-invalidating a draft the tech never touched
+    // the instant the flag changes.
+    generationInputsRef.current = buildGenerationInputsSnapshot();
   }
   // Deselect handle after an AI draft: remove a structured selection from its
   // label array (and its recorded re-entry/treatment scope, for protocol
@@ -18146,8 +18182,16 @@ export function CompletionPanel({
   // stale copy beside the final record (codex r36). A value-diff watcher
   // covers the many inline setters without wrapping each; the baseline
   // resets on draft restore so restoring never invalidates.
-  useEffect(() => {
-    const snapshot = JSON.stringify([
+  //
+  // Shared with applyGeneratedReport (pre-push P2, Codex #5145 r3), which
+  // must rebuild generationInputsRef under the FRESH
+  // installedPhotoGroundingUsedRef value at install time — otherwise the
+  // instant that ref flips (a first grounded generation lands, or a
+  // regeneration drops grounding) the snapshot's own SHAPE changes and the
+  // stale pre-install baseline reads as a mismatch, self-invalidating a
+  // draft the tech never touched.
+  function buildGenerationInputsSnapshot() {
+    return JSON.stringify([
       areasServiced, observationsText, recommendationsText,
       customerInteraction, customerConcern, clientPestRating,
       // Trace/default fetches can update product evidence while Generate is
@@ -18162,15 +18206,20 @@ export function CompletionPanel({
       // the payload sends photoCount — the set's size is a generation
       // input like any other (codex r44)
       servicePhotos.length,
-      // GATE_REPORT_PHOTO_CONTENT (pre-push P2, Codex #5145 r1): reviewed
+      // GATE_REPORT_PHOTO_CONTENT (pre-push P2, Codex #5145 r1, r3): reviewed
       // captions and the photo summary are generation inputs too (see
       // buildAiReportPayload's photoCaptions/photoSummary) — the set's SIZE
       // above doesn't catch an edited caption on an unchanged photo count,
       // and typedPhotoSummary wasn't tracked at all, so the AI copy could
       // stay installed beside captions/a summary the report was never
-      // actually generated from.
-      servicePhotos.map((p) => String(p?.caption || "").trim()),
-      typedPhotoSummary,
+      // actually generated from. BUT only when the INSTALLED draft was
+      // actually generated WITH grounding (installedPhotoGroundingUsedRef,
+      // set from the server's photoGroundingUsed response flag) — with the
+      // gate off (the default) neither value ever reached the model, so
+      // editing them must not clear an otherwise-untouched draft (r3).
+      ...(installedPhotoGroundingUsedRef.current
+        ? [servicePhotos.map((p) => String(p?.caption || "").trim()), typedPhotoSummary]
+        : []),
       // a retaken/reconfirmed lawn assessment changes what completion and
       // the final report describe — the draft must invalidate with it
       // (codex r58)
@@ -18183,6 +18232,9 @@ export function CompletionPanel({
       // input
       aiReportIncludeComms,
     ]);
+  }
+  useEffect(() => {
+    const snapshot = buildGenerationInputsSnapshot();
     if (generationInputsRef.current === null) {
       generationInputsRef.current = snapshot;
       return;
@@ -18208,6 +18260,9 @@ export function CompletionPanel({
     const installed = generatedReportTextRef.current;
     if (!installed) return chipLinesDetached;
     generatedReportTextRef.current = null;
+    // No draft installed any more (pre-push P2, Codex #5145 r3) — the NEXT
+    // generation's own flag decides again.
+    installedPhotoGroundingUsedRef.current = false;
     if (String(notes || "").trim() === installed) {
       // The tech's handwritten pre-generation notes come BACK when the
       // draft clears — clearing to empty would drop them from a
@@ -19492,7 +19547,7 @@ export function CompletionPanel({
                   setGenerating(true);
                   try {
                     const r = await generateAiReport(payload);
-                    if (r.report) applyGeneratedReport(r.report, { deterministic: r.deterministic === true });
+                    if (r.report) applyGeneratedReport(r.report, { deterministic: r.deterministic === true, photoGroundingUsed: r.photoGroundingUsed === true });
                   } catch (e) {
                     alert("AI report failed: " + e.message);
                   }
@@ -21941,7 +21996,7 @@ export function CompletionPanel({
                 setGenerating(true);
                 try {
                   const r = await generateAiReport(payload);
-                  if (r.report) applyGeneratedReport(r.report, { deterministic: r.deterministic === true });
+                  if (r.report) applyGeneratedReport(r.report, { deterministic: r.deterministic === true, photoGroundingUsed: r.photoGroundingUsed === true });
                 } catch (e) {
                   alert("AI report failed: " + e.message);
                 }

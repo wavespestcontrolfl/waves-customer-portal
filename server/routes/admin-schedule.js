@@ -23002,6 +23002,15 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         + (photoSummaryText ? `Summary: ${photoSummaryText}\n` : '')
         + cappedPhotoCaptions.map((c, i) => `Photo ${i + 1}: ${c}`).join('\n')
       : '';
+    // Pre-push P2 (Codex #5145 r3): the client's generated-draft-invalidation
+    // watcher needs to know whether THIS generation actually included the
+    // photo block — with the gate off (the default), cappedPhotoCaptions is
+    // always [] and no caption/summary ever reaches the model, so editing
+    // either afterward must not clear an otherwise-untouched draft. Exactly
+    // mirrors when photoObservationsBlock is non-empty; reused across every
+    // response branch below (a cache hit reuses a prior generation built
+    // from this SAME identity, so it carries the same grounding truth).
+    const photoGroundingUsed = cappedPhotoCaptions.length > 0;
 
     // Assemble real, customer-specific grounding (prior visits, pressure trend,
     // weather, product label data, season, household notes). Fail-soft: if it
@@ -23405,7 +23414,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
       .update(`v9|openai:${primaryModel}|anthropic:${backupModel}|${effectiveSystemPrompt}|${fullUserMessage}`)
       .digest('hex');
     const cached = reportCopyCacheGet(cacheKey);
-    if (cached) return res.json({ report: cached, cached: true });
+    if (cached) return res.json({ report: cached, cached: true, ...(photoGroundingUsed ? { photoGroundingUsed: true } : {}) });
 
     // Output guard for trade names from THIS visit's own product records —
     // selected products, the free-text productsApplied names, and any typed
@@ -23485,7 +23494,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
       logger.warn('[generate-report] both AI providers missed; returned deterministic report copy', {
         failures: generated.failures,
       });
-      return res.json({ report: fallbackReport, fallback: true, deterministic: true });
+      return res.json({ report: fallbackReport, fallback: true, deterministic: true, ...(photoGroundingUsed ? { photoGroundingUsed: true } : {}) });
     }
 
     const { report } = generated;
@@ -23497,7 +23506,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
       hasGrounding: !!groundingCustomerId,
       ...contextSignals,
     });
-    res.json({ report });
+    res.json({ report, ...(photoGroundingUsed ? { photoGroundingUsed: true } : {}) });
   } catch (err) {
     logger.error('[generate-report] AI failed', {
       message: err.message,
