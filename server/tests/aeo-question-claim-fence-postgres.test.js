@@ -44,6 +44,7 @@ postgres('aeo_question_gap claim fence on PostgreSQL', () => {
       t.uuid('id').primary(); t.uuid('opportunity_id'); t.text('action_type');
       t.text('astro_pr_url'); t.text('published_url'); t.timestamp('claimed_at', { useTz: true });
     });
+    // migration.up adds autonomous_runs.astro_pr_retired_at (and claim_id).
     await mockPg.schema.createTable('content_briefs', (t) => {
       t.uuid('id').primary(); t.uuid('opportunity_id'); t.text('action_type'); t.timestamp('composed_at', { useTz: true });
     });
@@ -54,6 +55,7 @@ postgres('aeo_question_gap claim fence on PostgreSQL', () => {
     if (admin) { await admin.schema.dropSchemaIfExists(schema, true); await admin.destroy(); }
   });
   beforeEach(async () => {
+    await mockPg('autonomous_runs').del();
     await mockPg('opportunity_queue').del();
   });
 
@@ -128,6 +130,35 @@ postgres('aeo_question_gap claim fence on PostgreSQL', () => {
     await mockPg('opportunity_queue').del();
     await mockPg('opportunity_queue').insert([questionArticle({ status: 'done', updated_at: new Date() }), categorySeed()]);
     expect(await queue.claimNext({ minScore: 0 })).not.toBeNull();
+  });
+
+  test('an open PR holds its route after stale-claim recovery left the row pending (either kind)', async () => {
+    const run = (opportunityId, patch = {}) => ({
+      id: randomUUID(), opportunity_id: opportunityId, action_type: 'new_supporting_blog', claimed_at: new Date(),
+      astro_pr_url: 'https://github.com/example/content/pull/9', ...patch,
+    });
+    for (const [crashed, other] of [[questionArticle(), categorySeed()], [categorySeed(), questionArticle()]]) {
+      await mockPg('autonomous_runs').del();
+      await mockPg('opportunity_queue').del();
+      // The worker opened the PR, then crashed; recovery set the row back to
+      // pending. Its own row stays fenced by claimableStatusSql; the route
+      // fence must also hold the OTHER producer's row.
+      await mockPg('opportunity_queue').insert([crashed, other]);
+      await mockPg('autonomous_runs').insert(run(crashed.id));
+      expect(await queue.claimNext({ minScore: 0 })).toBeNull();
+      // Retired (closed, branch removed) → the route frees: one write at a
+      // time again (whichever claims first holds the other).
+      await mockPg('autonomous_runs').update({ astro_pr_retired_at: new Date() });
+      expect(await claimAll()).toHaveLength(1);
+    }
+    // A PUBLISHED run no longer holds the route through this clause.
+    await mockPg('autonomous_runs').del();
+    await mockPg('opportunity_queue').del();
+    const seed = categorySeed({ status: 'expired' });
+    const question = questionArticle();
+    await mockPg('opportunity_queue').insert([seed, question]);
+    await mockPg('autonomous_runs').insert(run(seed.id, { published_url: `${HUB}${SLUG}` }));
+    expect((await queue.claimNext({ minScore: 0 }))?.id).toBe(question.id);
   });
 
   test('unrelated routes and rows without a question are unaffected', async () => {

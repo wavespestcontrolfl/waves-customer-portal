@@ -48,6 +48,9 @@ const { writeRouteSql } = require('./opportunity-route-sql');
 // buckets' claims are unchanged when none is involved:
 //   - no row is claimable while a question row for the same route is claimed
 //     or in review, and no question row while ANY other row for its route is;
+//   - an unpublished, unretired Astro PR holds its route whatever the queue
+//     status says: a worker that recorded the PR and crashed leaves the row
+//     pending after stale-claim recovery, and the PR is still an open write;
 //   - a question row also waits while another row wrote its route within the
 //     cooldown (AEO_QUESTION_GAP_COOLDOWN_DAYS, the miner's refresh cooldown):
 //     a question ARTICLE left pending after a seed published the same slug
@@ -63,6 +66,12 @@ function aeoRouteFenceSql() {
             WHERE route_fence.id <> opportunity_queue.id
               AND (route_fence.bucket = 'aeo_question_gap' OR opportunity_queue.bucket = 'aeo_question_gap')
               AND (route_fence.status IN ('claimed', 'pending_review')
+                OR EXISTS (
+                  SELECT 1 FROM autonomous_runs route_run
+                   WHERE route_run.opportunity_id = route_fence.id
+                     AND route_run.astro_pr_url IS NOT NULL
+                     AND route_run.astro_pr_retired_at IS NULL
+                     AND route_run.published_url IS NULL)
                 OR (opportunity_queue.bucket = 'aeo_question_gap' AND route_fence.status = 'done'
                   AND route_fence.updated_at >= now() - make_interval(days => ${days})))
               AND ${writeRouteSql('route_fence')} = ${writeRouteSql('opportunity_queue')}
