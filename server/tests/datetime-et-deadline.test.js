@@ -84,6 +84,17 @@ describe('quoted Eastern days with no clock (SMS staff-promise plan, owner rulin
     expect(parseQuotedETDay('next week', sunday)).toBe('2040-03-16');
   });
 
+  test('Codex #5248 r4: "before" a span is the day before the span starts', () => {
+    const thursday = new Date('2040-03-08T15:00:00Z');
+    expect(parseQuotedETDay('before this weekend', thursday)).toBe('2040-03-09');
+    expect(parseQuotedETDay('before the weekend', thursday)).toBe('2040-03-09');
+    expect(parseQuotedETDay('before next week', thursday)).toBe('2040-03-11');
+    expect(parseQuotedETDay('before next week', saturday)).toBe('2040-03-11');
+    // Once the weekend has begun, the day before it has passed.
+    expect(parseQuotedETDay('before the weekend', saturday)).toBeNull();
+    expect(parseQuotedETDay('before this weekend', sunday)).toBeNull();
+  });
+
   test.each(['next Wednesday', 'in two weeks', 'tomorrow at 3pm', 'soon', 'this week', '3/9/2040', 'February 30', 'Marchish 24', 'before today', '', null])(
     'cannot place %p on one day', (text) => {
       expect(parseQuotedETDay(text, saturday)).toBeNull();

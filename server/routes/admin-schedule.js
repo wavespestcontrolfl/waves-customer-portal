@@ -44,7 +44,7 @@ const {
 } = require('../utils/datetime-et');
 const { calculateBoundedTrackingEta } = require('../services/customer-tracking-eta');
 const { customerOnAutopay, isBankMethodType, isExpiredCardMethod } = require('../services/autopay-eligibility');
-const { resolveBillingLane, predictCompletionBilling, completionInvoiceAmount, hasAuthoritativeZeroPrice, monthlyDuesCollected, attachedInvoiceAutoChargeLikely, unbilledCompletionGap, UNBILLED_MONEY_GAP_REASONS, siblingCoverageForSchedule, siblingInvoiceCoverageVerdict, isSiblingCoverageEligibleVisit, sameTripFirstApplicationBreakdown } = require('../services/billing-lane');
+const { resolveBillingLane, predictCompletionBilling, completionInvoiceAmount, hasAuthoritativeZeroPrice, monthlyDuesCollected, attachedInvoiceAutoChargeLikely, unbilledCompletionGap, UNBILLED_MONEY_GAP_REASONS, siblingCoverageForSchedule, siblingInvoiceCoverageVerdict, isSiblingCoverageEligibleVisit, sameTripFirstApplicationBreakdown, collectionStateForCoveredInvoice } = require('../services/billing-lane');
 const { isAlwaysFreeServiceType } = require('../services/no-cost-visit-types');
 const DiscountEngine = require('../services/discount-engine');
 const { serviceExcludedFromPercentDiscount } = require('../services/pricing-engine/discount-engine');
@@ -16004,13 +16004,47 @@ router.put('/:id/assign', requireAdmin, async (req, res, next) => {
 // lookup failure all refuse the same way, since a MINT decision must fail
 // CLOSED. Returns the structured refusal, or null for a definitive 'none'
 // (nothing to refuse — the ordinary precedence below runs).
-function siblingCoverageRefusal(verdict) {
+// hasOwnPrice (#5237 review P2): a priced visit reaches this only as a
+// stamped covered member, where setting a price is not an escape hatch — the
+// copy must not send staff round the same 409.
+// The 'covered' copy follows the combined invoice's collection state (Codex
+// r5 P2 on #5237) — the schedule sheet's own classifier
+// (collectionStateForCoveredInvoice), never a second one. "Collect on that
+// invoice" only when it is actually collectible from this customer.
+function coveredRefusalMessage(invoice, { hasOwnPrice = false } = {}) {
+  const tail = hasOwnPrice ? ' Completing the visit will not create a new charge.' : '';
+  const state = invoice
+    ? collectionStateForCoveredInvoice(invoice, invoiceAmountDue(invoice))
+    : { state: 'collect_on_combined_invoice', reason: null };
+  if (state.state === 'settled') {
+    if (state.reason === 'invoice_processing') {
+      return `This visit is billed on the combined trip invoice, whose payment is still processing — do not collect again; verify it settles.${tail}`;
+    }
+    if (state.reason === 'payer_billed' || state.reason === 'withdrawn_from_customer') {
+      return `This visit is billed on the combined trip invoice, which is billed to a third-party payer — do not collect from the customer.${tail}`;
+    }
+    return `This visit is billed on the combined trip invoice, which is already paid — do not collect again.${tail}`;
+  }
+  return hasOwnPrice
+    ? 'This visit is billed on the combined trip invoice — collect on that invoice. Completing the visit will not create a new charge; to bill it separately, ask the office to adjust the combined invoice.'
+    : 'This visit is billed on the combined trip invoice — collect on that invoice, or set a price on this visit first.';
+}
+
+function siblingCoverageRefusal(verdict, { hasOwnPrice = false } = {}) {
   if (verdict.status === 'none') return null;
   if (verdict.status === 'covered') {
     return {
       refused: true,
       reason: 'sibling_invoice_covered',
-      message: 'This visit is billed on the combined trip invoice — collect on that invoice, or set a price on this visit first.',
+      // #5237 review P2: the Invoices page's manual-create endpoint
+      // (admin-invoices.js POST /) only links via serviceRecordId — a
+      // pre-completion visit has none yet, so a "split it off from the
+      // Invoices page" instruction was a dead end that would just 409 on
+      // the next Charge Now. No staff-facing action un-stamps a covered
+      // member today; the honest instructions are collect on the combined
+      // invoice (completing the visit reuses it too — never a second
+      // charge) or have the office adjust the combined invoice by hand.
+      message: coveredRefusalMessage(verdict.invoice, { hasOwnPrice }),
     };
   }
   if (verdict.status === 'needs_review') {
@@ -16055,21 +16089,48 @@ async function resolveScheduledServiceCharge({
   // unconditionally, so all three can never disagree about whether a
   // sibling COULD be covering this trip. `svc` absent (pure/unit-test
   // callers) reads as ineligible — byte-identical to before for them.
+  // Priced-covered-member widening (Codex r21 P1 on PR #5021, deferred to
+  // this follow-up — see isSiblingCoverageEligibleVisit's own header,
+  // billing-lane.js): a NON-ANCHOR row staff priced AFTER its trip's
+  // combined invoice already existed must still be asked — only this one
+  // extra DB round trip (itself a no-op DB call for the common unstamped
+  // row — see isPricedCoveredMemberVisit's own fast path), and an anchor's
+  // own priced mint never reaches it (the same predicate keeps anchors out
+  // on their own scheduled_service_id match).
+  const isPricedCoveredMember = hasOwnPrice && svc && dbConn
+    ? await require('../services/estimate-first-application-invoice').isPricedCoveredMemberVisit(svc, dbConn)
+    : false;
   const eligibleForCoverageLookup = isSiblingCoverageEligibleVisit({
-    sourceEstimateId: svc?.source_estimate_id, hasOwnPrice, isCallback, serviceType,
+    sourceEstimateId: svc?.source_estimate_id, hasOwnPrice, isCallback, serviceType, isPricedCoveredMember,
   });
   if (eligibleForCoverageLookup && svc && dbConn) {
     let verdict;
     try {
-      verdict = await siblingInvoiceCoverageVerdict(svc, dbConn);
+      // Own-row refund precedence (#5237 review r2 P2): completion checks
+      // THIS VISIT's own refunded invoice BEFORE ever consulting the
+      // sibling group — a priced covered member split off by hand and
+      // refunded still carries the combined-invoice stamp, so the ordinary
+      // sibling verdict below would otherwise report 'covered' on the
+      // (still live) combined invoice while completion parks it for manual
+      // review. Scoped to the priced-covered-member widening only
+      // (isPricedCoveredMember true) — every unpriced-sibling caller is
+      // unaffected. Reuses completion's own classifier
+      // (pricedCoveredMemberOwnRefundHold → completionTerminalInvoiceLookup)
+      // so the two can never disagree.
+      const ownRefund = isPricedCoveredMember
+        ? await require('../services/estimate-first-application-invoice').pricedCoveredMemberOwnRefundHold(svc, dbConn)
+        : null;
+      verdict = ownRefund ? { status: 'needs_review', invoice: ownRefund } : await siblingInvoiceCoverageVerdict(svc, dbConn);
     } catch {
       verdict = { status: 'error' };
     }
-    const refusal = siblingCoverageRefusal(verdict);
+    const refusal = siblingCoverageRefusal(verdict, { hasOwnPrice });
     if (refusal) return refusal;
   }
-  // Owner ruling — REFUSE AFTER A VOID: the priced row is never refused
-  // here. The unpriced-sibling verdict above (siblingInvoiceCoverageVerdict)
+  // Owner ruling — REFUSE AFTER A VOID: an ordinary priced row (not a
+  // confirmed priced covered member, which the gate above already sent
+  // through the sibling verdict — #5237) is never refused here. The
+  // unpriced-sibling verdict above (siblingInvoiceCoverageVerdict)
   // already covers "the combined invoice died" — a priced visit's own mint
   // always proceeds to completionInvoiceAmount below, exactly as before the
   // round-10 priced-branch detour (removed; replaced by the single rule).
@@ -16148,10 +16209,36 @@ function siblingCoverageRecheckInTrx(svc) {
   const primaryLinePrice = svc?.primary_line_price ?? null;
   const hasOwnPrice = (svc?.estimated_price != null && Number(svc.estimated_price) > 0)
     || hasAuthoritativeZeroPrice(svc?.estimated_price, primaryLinePrice);
+  // Shape-only eligibility, PRICE-BLIND (Codex r2 P1 on 2ac5813cf0): the
+  // route's own pre-lock read of svc can be stale by the time this mint
+  // transaction's row lock (acquireScheduledMintLockChain, ahead of this
+  // recheck) actually commits — reconcileRecentUnstampedAccepts /
+  // stampGroupRevalidated can stamp a priced sibling in exactly that
+  // window. Deciding "maybe a covered member" from svc's OWN captured
+  // first_application_invoice_id column (as this used to) missed that
+  // race outright: a not-yet-stamped snapshot returned null here and the
+  // mint proceeded with NO in-lock recheck at all. So this outer gate no
+  // longer looks at price or the stamp at all — every visit whose SHAPE
+  // (estimate-linked, not a callback, not an always-free type) could ever
+  // carry a stamp gets the closure below; the closure alone decides,
+  // re-reading the stamp FRESH under the lock every time.
   if (!isSiblingCoverageEligibleVisit({
-    sourceEstimateId: svc?.source_estimate_id, hasOwnPrice, isCallback: !!svc?.is_callback, serviceType: svc?.service_type,
+    sourceEstimateId: svc?.source_estimate_id, hasOwnPrice: false, isCallback: !!svc?.is_callback, serviceType: svc?.service_type,
   })) return null;
   return async (trx) => {
+    if (hasOwnPrice) {
+      const { isPricedCoveredMemberVisit } = require('../services/estimate-first-application-invoice');
+      // A NARROW shape ({id} only — no first_application_invoice_id key)
+      // forces readFirstApplicationStamp's own by-id fallback read instead
+      // of its fast path off svc's stale pre-lock object (that fast path
+      // is exactly what let the race above through): the row this trx
+      // already holds FOR UPDATE makes this read authoritative.
+      const isPricedCoveredMember = await isPricedCoveredMemberVisit({ id: svc?.id }, trx);
+      if (!isSiblingCoverageEligibleVisit({
+        sourceEstimateId: svc?.source_estimate_id, hasOwnPrice, isCallback: !!svc?.is_callback, serviceType: svc?.service_type,
+        isPricedCoveredMember,
+      })) return;
+    }
     let recheck;
     try {
       // noWait (codex round-6 P1): this recheck runs AFTER
@@ -20627,6 +20714,24 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
         // just the facts: a served brief's cached access codes must not
         // reach the former technician once the recheck has the signal.
         if (!stillOwned) return { brief: null };
+        // "Seen" stamp for the customer-flagged photos (PR 3a): same
+        // fire-and-forget, whereNull-guarded, first-time-only pattern as
+        // pest_identifications.report_first_viewed_at
+        // (public-pest-identifier.js) — never adds latency or failure to
+        // the brief read, and the guard makes concurrent reads idempotent.
+        // ASSIGNED-TECHNICIAN reads only (isTechnicianRequest): an
+        // admin/dispatcher previewing the same stop must not mark a
+        // customer's photos "seen" before the technician has actually
+        // opened them. Runs only after the reassignment recheck above
+        // confirms this request still owns the stop.
+        if (isTechnicianRequest(req) && facts.customerFlagged?.length) {
+          const submissionIds = facts.customerFlagged.map((c) => c.id);
+          void db('visit_prep_submissions')
+            .whereIn('id', submissionIds)
+            .whereNull('tech_seen_at')
+            .update({ tech_seen_at: db.fn.now() })
+            .catch((err) => logger.warn(`[admin-schedule] visit-prep tech_seen_at stamp failed for ${svc.id}: ${err.message}`));
+        }
         return { ...payload, facts };
       } catch (err) {
         logger.warn(`[admin-schedule] visit-brief facts failed for ${svc.id}: ${err.message}`);
@@ -20662,6 +20767,38 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
     // a gate code changed since generation must reach the tech from the
     // live facts, not the cached copy.
     res.json(await withFacts(served));
+  } catch (err) { next(err); }
+});
+
+// GET /:id/visit-prep-photos
+// Short-lived signed VIEW urls for the stop's customer-sent visit-prep
+// photos (PR 3a — the tech Visit Brief panel's "Customer flagged"
+// thumbnails). Gate off (GATE_VISIT_PREP_PHOTOS) = 404, same generic shape
+// every other gated route in this lane answers with. Authorization is
+// EXACTLY GET /:id/visit-brief's own model: one ownership-scoped fetch
+// (technicianCurrentVisitFilter — a technician request is scoped to their
+// OWN current assignment; an admin/office request is unscoped) plus a
+// reassignment recheck AFTER the (S3-signing) work, since dispatch can
+// reassign the stop while those signed urls are being minted — a former
+// technician must never receive a batch of live links into a customer's
+// home.
+router.get('/:id/visit-prep-photos', async (req, res, next) => {
+  try {
+    const { visitPrepPhotosLive } = require('../config/feature-gates');
+    if (!visitPrepPhotosLive()) return res.status(404).json({ error: 'Not found' });
+    const svc = await db('scheduled_services')
+      .where({ 'scheduled_services.id': req.params.id })
+      .modify((q) => technicianCurrentVisitFilter(req, q))
+      .first('scheduled_services.*');
+    if (!svc) return res.status(404).json({ error: 'Not found' });
+    const VisitPrep = require('../services/visit-prep');
+    const photos = await VisitPrep.stopPhotoViewUrls(svc);
+    const stillOwned = await db('scheduled_services')
+      .where({ 'scheduled_services.id': svc.id })
+      .modify((q) => technicianCurrentVisitFilter(req, q))
+      .first('scheduled_services.id');
+    if (!stillOwned) return res.status(404).json({ error: 'Not found' });
+    res.json({ photos });
   } catch (err) { next(err); }
 });
 
@@ -25367,6 +25504,7 @@ function blackoutDateString(value) {
 }
 
 router._test = {
+  siblingCoverageRefusal,
   copyActivityScore,
   // Post-cancel counted-plan reseed (owner ruling 2026-09-24) — the split
   // writer's helpers, so the behavioural suite can drive each one against a

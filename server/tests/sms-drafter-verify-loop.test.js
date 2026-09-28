@@ -288,6 +288,10 @@ describe('generateGroundedDraft — frozen replay (presetFactsBlock) validates o
     expect(getAvailableSlots).not.toHaveBeenCalled();
     expect(r.factsBlock).toBe(FROZEN);
     expect(r.openTimesSnapshot).toBeNull();
+    // Codex #5194 P2: a frozen replay never calls buildFactsBlock (its facts
+    // came from whenever the ORIGINAL draft was built, not now) — it has no
+    // "generated now" instant of its own to persist.
+    expect(r.factsGeneratedAt).toBeNull();
   });
 
   test('an offer from TODAY\'s calendar (not in the frozen OPEN TIMES) is rejected deterministically', async () => {
@@ -603,5 +607,61 @@ describe('generateGroundedDraft — banned compliance copy never converges', () 
     const r = await drafter.generateGroundedDraft(args(client));
     expect(r.converged).toBe(false);
     expect(client.calls).toHaveLength(3);
+  });
+});
+
+// Codex #5194 P2 ("Timestamp the SLA when its facts are generated"): a live
+// draft's factsGeneratedAt must be the SAME instant buildFactsBlock rendered
+// "FOLLOW-UP SLA RIGHT NOW" from — the caller (draftShadowReply →
+// publishSuggestion / claimAutoSend) persists it so the send-time deadline
+// checks (sms-followup-sla.js's slaDraftedAt) can anchor on it instead of
+// the row's later created_at.
+describe('generateGroundedDraft — factsGeneratedAt is the exact instant the SLA phrase was rendered from', () => {
+  const prior = process.env.GATE_SMS_REAL_ANSWERS;
+  beforeEach(() => { process.env.GATE_SMS_REAL_ANSWERS = 'true'; jest.resetModules(); });
+  afterEach(() => {
+    if (prior === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = prior;
+    jest.useRealTimers();
+    jest.resetModules();
+  });
+
+  const args = (client) => ({
+    client, context: CTX, inboundMessage: 'Can someone call me back about my account?',
+    intent: { intent: 'general_customer_sms_needs_review' }, schedulingIntent: false,
+  });
+
+  test('a draft built right at the 8 PM ET boundary returns the exact instant its own phrase was computed from', async () => {
+    // Mon 2026-09-28 19:59:00 ET — one minute before the "within the hour"
+    // window closes; a fixed clock stands in for the real instant
+    // generateGroundedDraft would otherwise capture with `new Date()`.
+    jest.useFakeTimers({ toFake: ['Date'], now: new Date('2026-09-28T23:59:00.000Z') });
+    const drafter = require('../services/sms-shadow-drafter');
+    const client = makeClient([
+      { reply: 'So sorry about that — a manager will reach out within the hour.', intended_actions: [{ type: 'escalate', note: 'followup_promised' }], missing_info: null },
+      { supported: true, violations: [] },
+    ]);
+    const r = await drafter.generateGroundedDraft(args(client));
+    expect(r.converged).toBe(true);
+    expect(r.factsBlock).toContain('FOLLOW-UP SLA RIGHT NOW: within the hour');
+    expect(r.factsGeneratedAt).toBeInstanceOf(Date);
+    expect(r.factsGeneratedAt.toISOString()).toBe('2026-09-28T23:59:00.000Z');
+    // The phrase this SAME instant would render is exactly the phrase that
+    // landed in factsBlock — the drafter never renders off one instant and
+    // returns another.
+    const { followupSlaPhrase } = require('../services/sms-shadow-drafter');
+    expect(followupSlaPhrase(r.factsGeneratedAt)).toBe('within the hour');
+  });
+
+  test('drafted one minute later, past the boundary, returns the later instant and the "tomorrow morning" phrase', async () => {
+    jest.useFakeTimers({ toFake: ['Date'], now: new Date('2026-09-29T00:01:00.000Z') }); // Mon 20:01 ET
+    const drafter = require('../services/sms-shadow-drafter');
+    const client = makeClient([
+      { reply: 'So sorry about that — a manager will reach out by 9 AM tomorrow morning.', intended_actions: [{ type: 'escalate', note: 'followup_promised' }], missing_info: null },
+      { supported: true, violations: [] },
+    ]);
+    const r = await drafter.generateGroundedDraft(args(client));
+    expect(r.converged).toBe(true);
+    expect(r.factsBlock).toContain('FOLLOW-UP SLA RIGHT NOW: by 9 AM tomorrow morning');
+    expect(r.factsGeneratedAt.toISOString()).toBe('2026-09-29T00:01:00.000Z');
   });
 });

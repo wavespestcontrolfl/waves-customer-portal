@@ -210,12 +210,20 @@ describe('content-brief-builder operator-intercept injection', () => {
     }
   });
 
-  test('every intercept brief carries the price-guard framing rule for sourced competitor dollar figures', async () => {
+  // Owner rulings 2026-09-28: never link a competitor's website; competitor
+  // facts and prices are stated plainly (no link, no verified/as-of label).
+  // The old framing rule ("quote"/"pricing varies" + dated source) is
+  // retired — a deliberate owner-ruled change.
+  test('every intercept brief carries the plain-attribution price rule and the no-competitor-link ruling', async () => {
     queue.getById.mockResolvedValue(opportunityFor('B3')); // brief whose outline mandates dollar figures
     const brief = await briefBuilder.compose('opp-B3', { persist: false, skipSerp: true });
     const joined = brief.voice_constraints.operator_brief.binding_instructions.join('\n');
-    expect(joined).toMatch(/COMPETITOR PRICING FRAMING/);
-    expect(joined).toMatch(/"quote", "range", "pricing varies", "depends", or "estimate"/);
+    expect(joined).toMatch(/COMPETITOR PRICING \(mandatory/);
+    expect(joined).toMatch(/COMPETITOR FACTS \(owner ruling 2026-09-28/);
+    expect(joined).toMatch(/NEVER link a competitor's own website/);
+    expect(joined).not.toMatch(/COMPARISON DISCLAIMER|dated source attribution|verify current terms directly/);
+    // The owner-ruling line comes AFTER the manifest's older global rules.
+    expect(joined.indexOf('COMPETITOR FACTS')).toBeGreaterThan(joined.indexOf('GLOBAL RULES'));
   });
 
   test('non-intercept opportunities are completely untouched by the overlay', async () => {

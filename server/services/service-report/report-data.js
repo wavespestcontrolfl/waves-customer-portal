@@ -2924,15 +2924,45 @@ async function resolvePestWeekWeatherForBuild(service, serviceLine, knex, mode) 
   return result;
 }
 
-async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { pinnedAssessmentId = null, pinnedWeekPlanAvailableAt, propertyHistoryEnabled = featureGates.gateEnvValue('GATE_LAWN_PROPERTY_HISTORY'), lawnHistory } = {}) {
-  if (serviceLine !== 'lawn') return null;
+// The identity both the scorecard render and the PDF cache signature must
+// agree on: which assessment is CURRENTLY linked, and — when history goes
+// back far enough to pair a before/after — which earlier assessment anchors
+// the baseline. One resolver, so a caller resolving photo identity for the
+// cache key (photo-set-signature.js, through report-photo-set.js's
+// resolveLawnPhotoAssessmentIds) can never drift from what the render itself
+// can show (pre-push P1, second round, 2026-09-28: the render's before/after
+// slider shows a customer-visible lawn_assessment_photos row from the
+// BASELINE assessment too, not only the currently linked one, and the
+// signature ignored that entirely).
+//
+// `failClosed` is threaded into loadLinkedLawnAssessment and, for the
+// gate-off history query below, changes catch-and-degrade into rethrow.
+// buildLawnAssessmentReportData calls this with failClosed left false — its
+// long-standing fail-soft posture, an unreadable assessment or history
+// degrades to "no lawn section" rather than 500ing a customer's report — a
+// signature caller opts in so the same failure reaches its own unique-token
+// fence instead of resolving a false empty identity.
+//
+// loadLinkedLawnAssessment already branches on `failClosed` on its own (see
+// its doc a few lines above, issue #3135: `const swallow = (err) => {
+// if (failClosed) throw err; return null; }` on every lookup inside it) —
+// that behavior predates this function and is unchanged here; this resolver
+// only forwards the flag. The photo-set-signature.js failClosed tests
+// (server/tests/report-photo-set-signature.test.js, "the linked-assessment
+// lookup throwing") exercise this exact path end-to-end.
+async function resolveLawnAssessmentAndHistory(service, knex = db, {
+  pinnedAssessmentId = null,
+  propertyHistoryEnabled = featureGates.gateEnvValue('GATE_LAWN_PROPERTY_HISTORY'),
+  lawnHistory,
+  failClosed = false,
+} = {}) {
   // Pinned-empty is unconditional: the attachment provably carries no lawn
   // section, which is exactly what the fence sealed.
-  if (pinnedAssessmentId === PIN_NO_ASSESSMENT) return null;
+  if (pinnedAssessmentId === PIN_NO_ASSESSMENT) return { assessment: null, historyRows: [] };
   let assessment = pinnedAssessmentId
     ? await loadPinnedLawnAssessment(service, pinnedAssessmentId, knex)
-    : await loadLinkedLawnAssessment(service, knex, { propertyHistoryEnabled });
-  if (!assessment) return null;
+    : await loadLinkedLawnAssessment(service, knex, { failClosed, propertyHistoryEnabled });
+  if (!assessment) return { assessment: null, historyRows: [] };
 
   let historyRows;
   if (propertyHistoryEnabled) {
@@ -2943,14 +2973,37 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     assessment = { ...resolved.current, is_baseline: resolved.isBaseline };
     historyRows = resolved.rows.map((row) => ({ ...row, service_date: row.visit_date }));
   } else {
-    const allAssessments = await knex('lawn_assessments')
+    const historyQuery = knex('lawn_assessments')
       .where({ customer_id: service.customer_id, confirmed_by_tech: true })
       .orderBy('service_date', 'asc')
-      .orderBy('created_at', 'asc')
-      .catch(() => []);
+      .orderBy('created_at', 'asc');
+    const allAssessments = failClosed ? await historyQuery : await historyQuery.catch(() => []);
     const assessmentIndex = allAssessments.findIndex((row) => String(row.id) === String(assessment.id));
     historyRows = assessmentIndex >= 0 ? allAssessments.slice(0, assessmentIndex + 1) : allAssessments;
   }
+  return { assessment, historyRows };
+}
+
+// The subset of resolveLawnAssessmentAndHistory's identity that actually
+// carries customer-visible PHOTOS: the current assessment, plus — only when
+// it differs — the earliest (baseline) assessment in its history. Consumed
+// by the PDF cache signature through report-photo-set.js's
+// resolveLawnPhotoAssessmentIds, which requires this module lazily (this
+// file requires report-photo-set.js back, for the render's own turf-gallery
+// lookup below) to avoid a load-time require cycle.
+async function resolveLawnPhotoAssessmentIds(service, knex = db, options = {}) {
+  const { assessment, historyRows } = await resolveLawnAssessmentAndHistory(service, knex, options);
+  if (!assessment?.id) return [];
+  const ids = [assessment.id];
+  const baselineId = historyRows?.[0]?.id;
+  if (baselineId != null && String(baselineId) !== String(assessment.id)) ids.push(baselineId);
+  return ids;
+}
+
+async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { pinnedAssessmentId = null, pinnedWeekPlanAvailableAt, propertyHistoryEnabled = featureGates.gateEnvValue('GATE_LAWN_PROPERTY_HISTORY'), lawnHistory } = {}) {
+  if (serviceLine !== 'lawn') return null;
+  const { assessment, historyRows } = await resolveLawnAssessmentAndHistory(service, knex, { pinnedAssessmentId, propertyHistoryEnabled, lawnHistory });
+  if (!assessment) return null;
   const initialRow = historyRows[0] || assessment;
   const currentScore = formatLawnAssessmentScore(assessment);
   const initialScore = formatLawnAssessmentScore(initialRow);
@@ -4593,12 +4646,11 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     if (linkedAssessment?.id) {
       // customer_visible: true == passed the quality gate. Failed-quality
       // photos are stored only for audit (customer_visible: false) and must
-      // never reach the customer's permanent report token.
-      const turfPhotos = await knex('lawn_assessment_photos')
-        .where({ assessment_id: linkedAssessment.id, customer_visible: true })
-        .orderBy('photo_order', 'asc')
-        .orderBy('taken_at', 'asc')
-        .catch(() => []);
+      // never reach the customer's permanent report token. Shared with the
+      // cache-signature side (photo-set-signature.js) through
+      // resolveLawnReportPhotos — see report-photo-set.js — so the two never
+      // drift on which rows a report can show (pre-push P1).
+      const turfPhotos = await require('./report-photo-set').resolveLawnReportPhotos(linkedAssessment.id, knex);
       const turfGalleryItems = (await Promise.all(turfPhotos.map(async (photo) => {
         const url = await lawnPhotoUrl(photo);
         // Dropped-but-expected turf photo — same silent-omission class.
@@ -6562,6 +6614,8 @@ module.exports = {
   serviceDisplayName,
   treatmentScope,
   buildLawnAssessmentReportData,
+  resolveLawnAssessmentAndHistory,
+  resolveLawnPhotoAssessmentIds,
   loadLinkedLawnAssessment,
   PinnedAssessmentUnavailable,
   loadPinnedLawnAssessment,

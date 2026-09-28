@@ -321,6 +321,7 @@ describe('runRemediationForPr', () => {
       document: reviewedDocument,
       path: 'src/content/blog/pest-control/roaches.md',
       brief: editorialBrief,
+      evidenceUrls: [],
     });
     expect(gh._calls.putFile).toHaveLength(0);
     expect(gh._calls.commitFiles).toEqual([{
@@ -1449,6 +1450,13 @@ describe('operator-FAQ exception (intercept posts on FAQ-blocked services)', () 
       if (prior === undefined) delete process.env.GATE_EDITORIAL_EVIDENCE;
       else process.env.GATE_EDITORIAL_EVIDENCE = prior;
     }
+  });
+
+  test('a remediation fix that leaves a competitor link is refused before any commit (owner ruling 2026-09-28)', async () => {
+    const withLink = `---\n${JSON.stringify(TERMITE_FM, null, 2)}\n---\nBait stations target the colony itself. Compare [this plan](https://www.orkin.com/plans) before you sign.`;
+    const r = await rem.validateFixedBlogFile(withLink, { operatorFaqException: true }, gateDeps);
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/COMPETITOR_LINK/);
   });
 
   test('validateFixedBlogFile: termite post with a pre-existing FAQ blocks without the flag, passes with it', async () => {

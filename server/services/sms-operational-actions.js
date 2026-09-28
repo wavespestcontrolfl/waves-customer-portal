@@ -878,21 +878,32 @@ async function lockLiveCommitment(trx, row, message) {
 const OVERDUE_BELL_BODY = {
   uncertain: (when) => `The ${when} ET SMS needs a completion check. Some follow-up evidence is unavailable or ambiguous; the agent cannot determine whether the work was completed. Open the customer profile to verify.`,
   open: (when) => `Requested or promised in the ${when} ET conversation. The available follow-up records do not establish completion. Open the customer profile to take the next step.`,
+  late: (when) => `Promised in the ${when} ET conversation. The records show it done only after the promised deadline. Open the customer profile to follow up.`,
 };
+
+// Owner ruling 2026-09-28: a staff promise kept late rings the bell, then
+// clears. The deadline tick normally rings before the late record lands; when
+// verification runs only after both (Codex #5248 r3), the late record rings
+// the bell first and closes the row on a later tick.
+function keptLate(row, verdict) {
+  return verdict.verdict === 'fulfilled' && row.sms_context?.basis === 'promise' && row.due_at != null
+    && new Date(verdict.matched_at) > new Date(row.due_at);
+}
 
 // The deadline passed and the records do not establish completion.
 async function ringOverdueBell(trx, { row, message, verdict, dedupeKey }) {
   const when = new Date(message.created_at).toLocaleString('en-US', {
     timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
   });
-  const body = (OVERDUE_BELL_BODY[verdict.verdict] || OVERDUE_BELL_BODY.open)(when);
+  const body = (OVERDUE_BELL_BODY[verdict.late ? 'late' : verdict.verdict] || OVERDUE_BELL_BODY.open)(when);
   const title = row.sms_context?.basis === 'promise' ? PROMISE_LABEL : (KIND_LABELS[row.kind] || KIND_LABELS.other);
   const notification = await NotificationService.notifyAdmin('alert', title, body,
     { trx, bell: true, dedupeKey, dedupeWindowMs: 24 * 60 * 60 * 1000, refreshOnDedupe: true,
       link: `/admin/customers?customerId=${encodeURIComponent(message.customer_id)}&tab=comms`,
       metadata: { triggerKey: 'sms_operational_followup', customerId: message.customer_id,
-        sms_log_id: message.id, commitment_id: row.id, kind: row.kind, verification: verdict.verdict } });
+        sms_log_id: message.id, commitment_id: row.id, kind: row.kind, verification: verdict.late ? 'kept_late' : verdict.verdict } });
   if (!notification?.id && !notification?.suppressed) throw new Error('sms_operations_bell_not_persisted');
+  return notification;
 }
 
 // One open row: skip, verify, and close or bell. Returns what happened so
@@ -958,6 +969,12 @@ async function refreshSmsCommitment(conn, row, now, verify) {
       sms_context: { ...current.sms_context, fulfillment_check: verdict },
     });
     persisted = true;
+    if (keptLate(live, verdict) && !await trx('notifications').where({ recipient_type: 'admin' })
+      .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]).first('id')) {
+      // A suppressed bell leaves no row to find next tick: close now instead.
+      const bell = await ringOverdueBell(trx, { row, message, verdict: { ...verdict, late: true }, dedupeKey });
+      if (!bell.suppressed) return;
+    }
     if (verdict.verdict === 'fulfilled') {
       await trx('call_commitments').where({ id: row.id }).update({
         status: 'fulfilled', fulfillment: verdict, fulfilled_at: now, updated_at: now,

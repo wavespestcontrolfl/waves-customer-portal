@@ -921,7 +921,7 @@ export default function RainOutSheet({ service, onClose, onDone }) {
                   rows={isCustomReason ? 3 : 2}
                   aria-label={isCustomReason ? 'Your message (optional)' : 'Add a note to the text (optional)'}
                   placeholder={isCustomReason
-                    ? 'Your message (optional) — it opens the text; left blank, a standard update line is used'
+                    ? 'Your message (optional) — the text already says hi, so skip the greeting; left blank, a standard update line is used'
                     : 'Add a note to the text (optional) — added to the end of the message'}
                   style={{
                     width: '100%', boxSizing: 'border-box', padding: '10px 12px', borderRadius: 10,
@@ -936,7 +936,7 @@ export default function RainOutSheet({ service, onClose, onDone }) {
                       : overBudget
                         ? <span style={{ color: '#B91C1C' }}>{ERROR_COPY.note_too_many_segments}</span>
                         : isCustomReason
-                          ? 'Sent as: your message, then the new time + reschedule link.'
+                          ? 'Sent as: "Hi {name} - " + your message, then the new time + reschedule link. No need to greet them.'
                           : (scope === 'route' && routeCount > 0 && note.trim()
                             ? "Note goes to this stop's customer only — the rest of the route gets the standard text."
                             : '')}
