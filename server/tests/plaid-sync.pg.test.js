@@ -498,6 +498,42 @@ async function activate(itemId, overrides = {}) {
     expect((await mockPg('plaid_items').where({ id: itemId }).first()).sync_cursor).toBeNull();
   });
 
+  test('an add and a later correction in ONE pagination run stage the final version; an unchanged re-send is a no-op', async () => {
+    const itemId = await connect();
+    await activate(itemId);
+    plaid.transactionsSync
+      .mockResolvedValueOnce({ added: [txn('t-1', 'acc-card', 10, '2026-09-05'), txn('t-gone', 'acc-card', 3, '2026-09-05')], modified: [], removed: [], next_cursor: 'p1', has_more: true })
+      .mockResolvedValueOnce({ added: [], modified: [txn('t-1', 'acc-card', 15, '2026-09-06', { name: 'FINAL' })], removed: [{ transaction_id: 't-gone' }], next_cursor: 'p2', has_more: false });
+    expect(await plaidSync.syncItem(itemId)).toMatchObject({ inserted: 1, updated: 0, flagged: 0 });
+    const rows = await mockPg('bank_transactions');
+    expect(rows.map(r => [r.plaid_transaction_id, Number(r.amount), r.description])).toEqual([['t-1', 15, 'FINAL']]);
+
+    const [exp] = await mockPg('expenses').insert({}).returning(['id']);
+    await mockPg('bank_transactions').where({ plaid_transaction_id: 't-1' }).update({ status: 'matched_expense', matched_expense_id: exp.id });
+    plaid.transactionsSync.mockResolvedValueOnce(page([txn('t-1', 'acc-card', 15, '2026-09-06', { name: 'FINAL' })], [], [], 'p3'));
+    expect(await plaidSync.syncItem(itemId)).toMatchObject({ inserted: 0, updated: 0, flagged: 0 });
+    expect((await mockPg('bank_transactions').first()).suggestion).toBeNull();
+  });
+
+  test('disconnect keeps an unreadable token unless removal at Plaid is confirmed', async () => {
+    const itemId = await connect();
+    await activate(itemId);
+    const saved = process.env.PLAID_TOKEN_KEY;
+    process.env.PLAID_TOKEN_KEY = 'a-different-key';
+    try {
+      expect((await plaidSync.getStatus()).items[0].tokenReadable).toBe(false);
+      await expect(plaidSync.disconnectItem(itemId)).rejects.toMatchObject({ status: 409 });
+      const kept = await mockPg('plaid_items').where({ id: itemId }).first();
+      expect(kept.status).not.toBe('removed');
+      expect(kept.access_token_enc).toMatch(/BEGIN PGP MESSAGE/);
+      expect(plaid.removeItem).not.toHaveBeenCalled();
+      await plaidSync.disconnectItem(itemId, { confirmedRemovedAtPlaid: true });
+      expect((await mockPg('plaid_items').where({ id: itemId }).first()).status).toBe('removed');
+    } finally {
+      process.env.PLAID_TOKEN_KEY = saved;
+    }
+  });
+
   test('enabling an account or moving its start date earlier restarts the feed from scratch', async () => {
     const itemId = await connect();
     await activate(itemId);

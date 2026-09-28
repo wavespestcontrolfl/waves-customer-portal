@@ -216,12 +216,15 @@ async function getStatus() {
   const accounts = items.length
     ? await db('plaid_accounts').whereIn('plaid_item_id', items.map(i => i.id)).orderBy('name', 'asc')
     : [];
+  const readable = new Map();
+  for (const i of items) readable.set(i.id, !!(await decryptToken(db, i.access_token_enc)));
   return {
     configured: plaid.isConfigured(),
     tokenKey: hasTokenKey(),
     env: plaid.plaidEnv(),
     items: items.map(i => ({
       id: i.id,
+      tokenReadable: readable.get(i.id),
       institutionName: i.institution_name,
       status: i.status,
       lastSyncedAt: i.last_synced_at,
@@ -399,7 +402,11 @@ async function markReconnected(itemId) {
   return n > 0;
 }
 
-async function disconnectItem(itemId) {
+// `confirmedRemovedAtPlaid`: the stored token can't be read (key missing or
+// rotated), so this app cannot revoke the connection itself. Without the
+// operator's explicit confirmation that it was removed on Plaid's side, the
+// ciphertext is kept — restoring the key makes a normal disconnect work.
+async function disconnectItem(itemId, { confirmedRemovedAtPlaid = false } = {}) {
   const item = await db('plaid_items').where({ id: itemId }).first();
   if (!item || item.status === 'removed') { const e = new Error('connection not found'); e.status = 404; throw e; }
   const accessToken = await decryptToken(db, item.access_token_enc);
@@ -411,6 +418,10 @@ async function disconnectItem(itemId) {
       // connection stays so the operator can retry
       if (err.errorCode !== 'ITEM_NOT_FOUND') throw err;
     }
+  } else if (item.access_token_enc && !confirmedRemovedAtPlaid) {
+    const e = new Error('the stored bank token cannot be read (check PLAID_TOKEN_KEY), so the connection cannot be revoked from here — restore the key, or remove it in Plaid first and confirm');
+    e.status = 409;
+    throw e;
   }
   await db.transaction(async (trx) => {
     await trx('plaid_items').where({ id: itemId }).update({
@@ -422,11 +433,13 @@ async function disconnectItem(itemId) {
 
 // ── sync ────────────────────────────────────────────────────────────────────
 
+// One complete pagination run, consolidated to each transaction's LATEST
+// state: a transaction added on page 1 and corrected (or withdrawn) on page
+// 3 is applied once, as its final version — never as two staged versions
+// where the insert-conflict rule would keep the stale one.
 async function fetchAllChanges(accessToken, startCursor) {
   for (let attempt = 0; attempt <= MAX_PAGINATION_RESTARTS; attempt++) {
-    const added = [];
-    const modified = [];
-    const removed = [];
+    const latest = new Map(); // transaction_id → { txn } | { removed: true }
     let cursor = startCursor;
     let hasMore = true;
     let pages = 0;
@@ -436,13 +449,21 @@ async function fetchAllChanges(accessToken, startCursor) {
         // not a valid restart point — only a complete run may be committed
         if (++pages > MAX_SYNC_PAGES) throw new Error(`more than ${MAX_SYNC_PAGES * 500} changed transactions in one sync — nothing applied`);
         const page = await plaid.transactionsSync(accessToken, cursor);
-        added.push(...(page.added || []));
-        modified.push(...(page.modified || []));
-        removed.push(...(page.removed || []));
+        for (const t of [...(page.added || []), ...(page.modified || [])]) {
+          if (t && t.transaction_id) latest.set(t.transaction_id, { txn: t });
+        }
+        for (const r of page.removed || []) {
+          if (r && r.transaction_id) latest.set(r.transaction_id, { removed: true });
+        }
         cursor = page.next_cursor || cursor;
         hasMore = !!page.has_more;
       }
-      return { added, modified, removed, nextCursor: cursor };
+      const upserts = [];
+      const removedIds = [];
+      for (const [id, v] of latest) {
+        if (v.removed) removedIds.push(id); else upserts.push(v.txn);
+      }
+      return { upserts, removedIds, nextCursor: cursor };
     } catch (err) {
       // Plaid's documented recovery: restart the whole pagination loop from
       // the cursor the loop STARTED with
@@ -451,6 +472,11 @@ async function fetchAllChanges(accessToken, startCursor) {
     }
   }
   throw new Error('transactions sync kept changing during pagination');
+}
+
+function sameMoneyFields(row, r) {
+  return toDateOnly(row.txn_date) === r.txn_date && Number(row.amount) === r.amount
+    && row.direction === r.direction && row.description === r.description;
 }
 
 async function applyChanges(trx, accountsById, changes) {
@@ -473,23 +499,37 @@ async function applyChanges(trx, accountsById, changes) {
     }
   }
 
-  const toInsert = [];
-  for (const txn of changes.added) {
-    const m = mapTransaction(txn, accountsById.get(txn.account_id));
-    if (m.skip) { skip(m.skip); continue; }
-    toInsert.push(m.row);
+  // Row-locked up front: the matcher or an operator claiming a row between
+  // our read and our write would otherwise make a status-conditional write
+  // miss, and the change would be lost as the cursor moves past it.
+  const existingById = new Map();
+  const ids = changes.upserts.map(t => t.transaction_id);
+  for (let i = 0; i < ids.length; i += 500) {
+    const rows = await trx('bank_transactions')
+      .whereIn('plaid_transaction_id', ids.slice(i, i + 500))
+      .forUpdate()
+      .select('id', 'status', 'plaid_transaction_id', 'txn_date', 'amount', 'direction', 'description', 'suggestion');
+    for (const row of rows) existingById.set(row.plaid_transaction_id, row);
   }
 
-  for (const txn of changes.modified) {
-    if (!txn || !txn.transaction_id) { skip('no_id'); continue; }
-    // Row-locked: the matcher or an operator claiming this row between the
-    // read and the write would otherwise make a status-conditional update
-    // miss, and the correction would be lost as the cursor moves past it.
-    const existing = await trx('bank_transactions').where({ plaid_transaction_id: txn.transaction_id }).forUpdate().first('id', 'status');
+  const toInsert = [];
+  for (const txn of changes.upserts) {
+    const existing = existingById.get(txn.transaction_id);
     const m = mapTransaction(txn, accountsById.get(txn.account_id), { correction: !!existing });
     if (m.skip) { skip(m.skip); continue; }
     const r = m.row;
     if (!existing) { toInsert.push(r); continue; }
+    if (sameMoneyFields(existing, r)) {
+      // a re-send (cursor reset) or a correction the bank reverted: nothing
+      // to change — but a parked correction it undid is now obsolete
+      if (existing.suggestion && existing.suggestion.plaidModified) {
+        await trx('bank_transactions').where({ id: existing.id }).update({
+          suggestion: trx.raw("coalesce(suggestion, '{}'::jsonb) - 'plaidModified'"),
+          updated_at: trx.fn.now(),
+        });
+      }
+      continue;
+    }
     if (existing.status === 'unmatched') {
       // the bank's newest values win (superseding any correction parked
       // while the row was reviewed) — by REPLACING the row, never editing
@@ -518,7 +558,7 @@ async function applyChanges(trx, accountsById, changes) {
     counts.inserted += batch.length;
   }
 
-  const removedIds = changes.removed.map(r => r && r.transaction_id).filter(Boolean);
+  const { removedIds } = changes;
   for (let i = 0; i < removedIds.length; i += 500) {
     // lock first, THEN decide per row: deciding by two status-filtered
     // statements let a row unlinked between them escape both (neither

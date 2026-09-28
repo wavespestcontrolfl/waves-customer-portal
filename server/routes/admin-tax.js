@@ -2021,7 +2021,7 @@ router.post('/bank-import/plaid/rows/:plaidRowId/bank-change', async (req, res, 
 // linked to expenses); the feed just stops.
 router.post('/bank-import/plaid/items/:plaidItemId/disconnect', async (req, res, next) => {
   try {
-    await plaidSync.disconnectItem(req.params.plaidItemId);
+    await plaidSync.disconnectItem(req.params.plaidItemId, { confirmedRemovedAtPlaid: (req.body || {}).confirmedRemovedAtPlaid === true });
     res.json({ success: true });
   } catch (err) { plaidRouteError(res, next, err); }
 });

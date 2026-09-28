@@ -5190,14 +5190,22 @@ function PlaidFeedsPanel({ onSynced }) {
                 variant="secondary"
                 disabled={!!busy}
                 onClick={() => {
+                  // unreadable token: this app can't revoke it at Plaid, so
+                  // the operator must confirm they removed it there
+                  const blind = item.tokenReadable === false;
                   if (
                     !window.confirm(
-                      `Disconnect ${item.institutionName || "this bank"}? Transactions already imported stay; new ones stop.`,
+                      blind
+                        ? `The stored token for ${item.institutionName || "this bank"} can't be read, so it can't be revoked from here. Only continue if you have already removed this connection in Plaid. Disconnect anyway?`
+                        : `Disconnect ${item.institutionName || "this bank"}? Transactions already imported stay; new ones stop.`,
                     )
                   )
                     return;
                   run(`disconnect-${item.id}`, () =>
-                    post(`/admin/tax/bank-import/plaid/items/${item.id}/disconnect`),
+                    post(
+                      `/admin/tax/bank-import/plaid/items/${item.id}/disconnect`,
+                      blind ? { confirmedRemovedAtPlaid: true } : {},
+                    ),
                   );
                 }}
               >
@@ -5205,6 +5213,12 @@ function PlaidFeedsPanel({ onSynced }) {
               </Button>
             </span>
           </div>
+          {item.tokenReadable === false && (
+            <div className="mt-1 text-14 text-ink-primary">
+              The stored bank token can't be read — check PLAID_TOKEN_KEY on
+              the server. Syncing and revoking are unavailable until it is.
+            </div>
+          )}
           {item.lastError && item.status !== "active" && (
             <div className="mt-1 text-14 text-ink-secondary">
               {item.lastError}
