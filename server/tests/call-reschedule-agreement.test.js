@@ -482,6 +482,50 @@ describe('groundRescheduleAgreement', () => {
     expect(moved('Do not move my visit tomorrow.', 'Do not move my visit tomorrow')).toMatchObject({ ok: false, reason: 'moved_appointment_ungrounded' });
   });
 
+  // Codex #5207 r1: each loosening kept to its own case.
+  test('follow-ups r1: loosenings do not reach past their case', () => {
+    const thu = { day: 'Thursday', hour: 'two', period: null };
+    // A leading "No," only before "we'll"/"I'll".
+    expect(agreedAt(THURSDAY_2PM, 'No, Thursday at two PM.', { day: 'Thursday', hour: 'two', period: 'PM' }).ok).toBe(false);
+    // "9 o'clock" without a lead only at a clause start or after a plain yes.
+    expect(agreedAt('2026-09-24T09:00:00-04:00', "Avoid 9 o'clock Thursday.", { day: 'Thursday', hour: '9', period: null }).ok).toBe(false);
+    expect(agreedAt('2026-09-24T09:00:00-04:00', "Okay, 9 o'clock Thursday.", { day: 'Thursday', hour: '9', period: null }).ok).toBe(true);
+    // The agent's "let me know" / "I will let you know" is not a booking.
+    expect(agreedAt(THURSDAY_2PM, 'Thursday at two, let me know.', thu).ok).toBe(false);
+    // A same-day commitment may end "have a nice day".
+    const SAME = 'We will see you at two PM, have a nice day.';
+    expect(ground(v2({
+      scheduling: { moved_appointment_date: '2026-09-24', moved_appointment_words: 'September 24th', agreed_slot_words: { day: null, hour: 'two', period: 'PM' } },
+      evidence: [
+        quote('/scheduling/agent_committed_booking', 'agent', SAME),
+        quote('/scheduling/confirmed_start_at', 'agent', SAME),
+        quote('/scheduling/caller_accepted_slot', 'caller', ACCEPT),
+        quote('/scheduling/moved_appointment_date', 'caller', 'my September 24th visit'),
+      ],
+    }), `Caller: Can you move my September 24th visit?\nAgent: ${SAME}\nCaller: ${ACCEPT}`).ok).toBe(true);
+    // "now" is not a plain commitment word.
+    expect(ground(v2({
+      scheduling: { confirmed_start_at: '2026-09-24T09:00:00-04:00', agreed_slot_words: { day: 'tomorrow', hour: '9', period: null } },
+      evidence: [
+        quote('/scheduling/agent_committed_booking', 'agent', "We'll see you now at 9."),
+        quote('/scheduling/confirmed_start_at', 'caller', "Okay, 9 o'clock tomorrow"),
+        quote('/scheduling/caller_accepted_slot', 'caller', "Okay, 9 o'clock tomorrow"),
+      ],
+    }), "Caller: Okay, 9 o'clock tomorrow.\nAgent: We'll see you now at 9.")).toMatchObject({ ok: false });
+    // An availability phrase must govern the moved visit, with no "but".
+    const movedFri = (callerLine, movedQuote) => ground(v2({
+      scheduling: { moved_appointment_date: '2026-09-25', moved_appointment_words: 'Friday', agreed_slot_words: thu },
+      evidence: [
+        quote('/scheduling/agent_committed_booking', 'agent', 'We will see you Thursday at two'),
+        quote('/scheduling/confirmed_start_at', 'agent', 'We will see you Thursday at two'),
+        quote('/scheduling/caller_accepted_slot', 'caller', ACCEPT),
+        quote('/scheduling/moved_appointment_date', 'caller', movedQuote),
+      ],
+    }), `Caller: ${callerLine}\nAgent: We will see you Thursday at two.\nCaller: ${ACCEPT}`);
+    expect(movedFri("I'm not going to be home tomorrow, but my appointment is Friday.", 'my appointment is Friday')).toMatchObject({ ok: false, reason: 'moved_appointment_ungrounded' });
+    expect(movedFri("I'm not going to be home Friday.", "I'm not going to be home Friday").ok).toBe(true);
+  });
+
   // The fixtures above inject the fields; this pins them to the stored V2
   // contract (schema 1.17.0), where a rename on either side would silently
   // skip every automatic move.
