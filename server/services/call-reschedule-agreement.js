@@ -354,11 +354,21 @@ function periodIsTheHours(quote, words) {
 
 // Does this slot quote hold every recorded word, with the period its hour's
 // and the hour on the hour?
-function statesSlotWords(quote, words) {
+function statesSlotWords(quote, words, turns) {
   return slotPhrases(words).every((w) => holds(quote, w)) && periodIsTheHours(quote, words) && twelveSaidTogether(quote, words)
-    // An hour read as business hours: the quote must state no half of the
-    // day, and name no noon/midnight bound ("between 11 and midnight").
-    && (typeof words.period === 'string' || /^(?:noon|midnight)$/.test(normalize(words.hour)) || !statesAnyPeriod(quote));
+    // An hour read as business hours: the sentences the quote sits in must
+    // state no half of the day and name no noon/midnight bound — "Thursday
+    // at two" cut from "Thursday at two in the morning" never falls back.
+    && (typeof words.period === 'string' || /^(?:noon|midnight)$/.test(normalize(words.hour))
+      || !statesAnyPeriod(sentencesHolding(turns, quote)));
+}
+
+// The sentences, in every turn that holds this quote, that the quote
+// touches, as one normalized text.
+function sentencesHolding(turns, quote) {
+  const nq = padded(normalize(quote));
+  return turns.filter((t) => padded(t.ns).includes(nq))
+    .flatMap((t) => sentencesAround(t, quote)).map((x) => x.ns).join(' ') || normalize(quote);
 }
 
 function statesAnyPeriod(quote) {
@@ -369,11 +379,12 @@ function statesAnyPeriod(quote) {
 // the recorded hour, on the hour (periodIsTheHours's minute check), any day
 // words the slot records (none at all for a same-day change), and no am/pm
 // or part of the day but the slot's.
-function commitsToSlot(quote, words, hour24) {
+function commitsToSlot(quote, words, hour24, turns) {
   const withoutPeriod = { ...words, period: null };
   return holds(quote, words.hour) && periodIsTheHours(quote, withoutPeriod)
     && (typeof words.day === 'string' ? holds(quote, words.day) : !namesAnyDay(quote))
-    && halvesSaid(quote).every((half) => half === (hour24 >= 12 ? 'pm' : 'am'));
+    // Read in the sentences it sits in: "at two" cut from "at two AM".
+    && halvesSaid(sentencesHolding(turns, quote)).every((half) => half === (hour24 >= 12 ? 'pm' : 'am'));
 }
 
 // Does this quote name a day at all (a weekday, a month, today/tomorrow/
@@ -441,10 +452,10 @@ function groundRescheduleAgreement({ v2, transcript, callStartedAt } = {}) {
   const words = scheduling.agreed_slot_words;
   if (typeof words?.hour !== 'string') return fail('agreed_slot_words_missing');
   if (!wordsStateSlot(words, slot, started, movedDate)) return fail('agreed_slot_words_mismatch');
-  if (!grounded('/scheduling/confirmed_start_at').some((q) => statesSlotWords(q, words))) return fail('agreed_slot_ungrounded');
+  if (!grounded('/scheduling/confirmed_start_at').some((q) => statesSlotWords(q, words, turns))) return fail('agreed_slot_ungrounded');
   // The agent committed to THIS slot: the commitment quote says its hour,
   // on the hour, and no day but the slot's.
-  if (!commitments.some((q) => commitsToSlot(q, words, slot.hour24))) return fail('agent_commitment_not_the_slot');
+  if (!commitments.some((q) => commitsToSlot(q, words, slot.hour24, turns))) return fail('agent_commitment_not_the_slot');
   return { ok: true, reason: 'agreement_grounded', movedDate };
 }
 

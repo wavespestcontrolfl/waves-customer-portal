@@ -122,6 +122,12 @@ describe('groundRescheduleAgreement', () => {
     expect(committed('We will see you Friday at three')).toMatchObject({ ok: false, reason: 'agent_commitment_not_the_slot' });
     expect(committed('Okay we will see you then')).toMatchObject({ ok: false, reason: 'agent_commitment_not_the_slot' });
     expect(committed('We will see you Thursday at two AM')).toMatchObject({ ok: false, reason: 'agent_commitment_not_the_slot' });
+    expect(ground(v2({ evidence: [
+      quote('/scheduling/agent_committed_booking', 'agent', 'We will see you Thursday at two'),
+      quote('/scheduling/confirmed_start_at', 'caller', 'Thursday at two in the afternoon works for me'),
+      quote('/scheduling/caller_accepted_slot', 'caller', 'Thursday at two in the afternoon works for me'),
+    ] }), 'Caller: Thursday at two in the afternoon works for me.\nAgent: We will see you Thursday at two AM.'))
+      .toMatchObject({ ok: false, reason: 'agent_commitment_not_the_slot' });
     expect(committed('Great, we will see you Thursday at two').ok).toBe(true);
     expect(committed('Great, we will see you Thursday at two PM').ok).toBe(true);
     // Codex #5092 r16: "minutes before" is a minute count too.
@@ -269,6 +275,16 @@ describe('groundRescheduleAgreement', () => {
     expect(plain('2026-09-24T20:00:00-04:00', 'We will see you Thursday at eight.', 'eight')).toMatchObject({ ok: false, reason: 'agreed_slot_words_mismatch' });
     expect(plain('2026-09-24T08:00:00-04:00', 'We will see you Thursday at eight.', 'eight').ok).toBe(true);
     expect(plain('2026-09-24T11:00:00-04:00', 'We will be there Thursday between 11 and midnight.', '11')).toMatchObject({ ok: false, reason: 'agreed_slot_ungrounded' });
+    // Nor one said just past the end of the quote, in the same sentence.
+    expect(ground(v2({
+      scheduling: { agreed_slot_words: { day: 'Thursday', hour: 'two', period: null } },
+      evidence: [
+        quote('/scheduling/agent_committed_booking', 'agent', 'We will see you Thursday at two'),
+        quote('/scheduling/confirmed_start_at', 'agent', 'We will see you Thursday at two'),
+        quote('/scheduling/caller_accepted_slot', 'caller', ACCEPT),
+      ],
+    }), `Caller: Can we move my visit?\nAgent: We will see you Thursday at two in the morning.\nCaller: ${ACCEPT}`))
+      .toMatchObject({ ok: false, reason: 'agreed_slot_ungrounded' });
     // A period said in the quote but not recorded never falls back.
     expect(plain(THURSDAY_2PM, 'We will see you Thursday at two in the morning.', 'two')).toMatchObject({ ok: false, reason: 'agreed_slot_ungrounded' });
   });
