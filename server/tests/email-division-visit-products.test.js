@@ -1,7 +1,7 @@
 // Email division per-visit product reader — pure-function tests only (no
 // DB). DB-backed reads are covered in email-division-postgres.test.js.
 const {
-  PRODUCT_FAMILIES, PEST_KEYWORDS, classifyProduct, rankVisibleProducts, parsePestsNamed, pestsTargeted, nutrientsListed,
+  PRODUCT_FAMILIES, PRODUCT_LABELS, PEST_KEYWORDS, classifyProduct, rankVisibleProducts, parsePestsNamed, pestsTargeted, nutrientsListed,
   allCustomerFacingStrings, readVisitProducts,
 } = require('../services/email-division/visit-products');
 
@@ -16,7 +16,7 @@ async function readOne(row) {
 }
 
 describe('readVisitProducts source scope: a recorded active ingredient wins over the product name', () => {
-  test('"ZOECON 10578 Gentrol Complete EC3" (pyriproxyfen + permethrin + tetramethrin) never gets the hydroprene 120-day note or fact-gentrol-igr', async () => {
+  test('"ZOECON 10578 Gentrol Complete EC3" (pyriproxyfen + permethrin + tetramethrin) never gets the Gentrol IGR label note or fact-gentrol-igr-hydroprene', async () => {
     const { products } = await readVisitProducts('sr-1', { conn: stubConn([
       { product_name: 'ZOECON 10578 Gentrol Complete EC3 Insecticide and Growth Regulator', active_ingredient: 'Nylar (pyriproxyfen) + Permethrin + Tetramethrin' },
     ]) });
@@ -55,8 +55,10 @@ describe('readVisitProducts wording comes from the product\'s own data, never a 
     ['Delta Dust', 'deltamethrin', 'an insecticide'],
     // Distance IGR is a Tree & Shrub whitefly/scale product — never "immature roaches".
     ['Distance IGR', 'Pyriproxyfen', 'an insect growth regulator'],
-    ['Taurus SC', 'fipronil', 'a non-repellent that ants cannot detect, so they walk through it and carry it back to the colony'],
-    ['Gentrol IGR', '(S)-Hydroprene 9.0%', 'a growth regulator: immature roaches exposed to it become adults that cannot reproduce'],
+    // Talak's label states no mode of action and no residual -> neutral phrase.
+    ['Talstar P', 'bifenthrin', 'an insecticide'],
+    ['Taurus SC', 'fipronil', 'a non-repellent insecticide that target pests cannot detect, so they touch it, ingest it and spread it through the colony'],
+    ['Gentrol IGR', '(S)-Hydroprene 9.0%', 'an insect growth regulator: cockroaches exposed to it become adults that cannot reproduce'],
   ])('%s (%s) -> %j', async (productName, activeIngredient, phrase) => {
     expect((await readOne({ product_name: productName, active_ingredient: activeIngredient })).phrase).toBe(phrase);
   });
@@ -186,18 +188,50 @@ describe('PRODUCT_FAMILIES customer-facing text carries no fabricated timeline',
   // adjuvant have no verified source yet) must say nothing time-specific.
   const ALLOWED_TIMELINE_STRINGS = [
     'The label asks for application when rain is not predicted for the next 24 hours; people and pets stay off treated surfaces until the spray has dried.',
-    'The Gentrol IGR (hydroprene) label states 120 days of control.',
+    'The Gentrol IGR label states continuous protection for 4 months.',
   ];
 
   test('no stray digit+day/week/hour claim outside the two allowed strings, which are both present', () => {
     const strings = allCustomerFacingStrings();
-    const timelinePattern = /\d+\s*(day|week|hour)/i;
+    const timelinePattern = /\d+\s*(day|week|hour|month)/i;
     for (const str of strings) {
       if (ALLOWED_TIMELINE_STRINGS.includes(str)) continue;
       expect(str).not.toMatch(timelinePattern);
     }
     for (const allowed of ALLOWED_TIMELINE_STRINGS) expect(strings).toContain(allowed);
     expect(PRODUCT_FAMILIES.adjuvant.customerVisible).toBe(false);
+  });
+
+  test('the ONLY fact slugs visit-products can emit are these three fact-register slugs', () => {
+    // Each must exist in server/services/email-division/fact-register-data.js
+    // (PR #5187). A slug that is not a real register fact must never be
+    // emitted — families carry no slugs at all; a label carries its fact's.
+    const emittable = new Set(Object.values(PRODUCT_LABELS).flatMap((label) => label.factSlugs));
+    for (const def of Object.values(PRODUCT_FAMILIES)) expect(def.factSlugs).toBeUndefined();
+    expect([...emittable].sort()).toEqual(['fact-bifenthrin-talak-label', 'fact-gentrol-igr-hydroprene', 'fact-taurus-sc-non-repellent']);
+  });
+
+  test('no label text claims a residual, and every label cites its source', () => {
+    for (const label of Object.values(PRODUCT_LABELS)) {
+      expect(label.source).toBeTruthy();
+      for (const text of [label.phrase, label.dryRule?.text, ...label.notes.map((n) => n.text)].filter(Boolean)) {
+        expect(text).not.toMatch(/residual|lasts?\b|long-lasting/i);
+      }
+    }
+  });
+
+  test.each([
+    ['Talak 7.9 F', 'bifenthrin', 'fact-bifenthrin-talak-label', 'Talak 7.9 F label (EPA 91234-145)', true],
+    ['Bifen IT', 'Bifenthrin 7.9%', 'fact-bifenthrin-talak-label', 'Talak 7.9 F label (EPA 91234-145)', true],
+    ['Gentrol IGR', 'hydroprene', 'fact-gentrol-igr-hydroprene', 'Gentrol IGR Concentrate label', false],
+    ['Taurus SC', 'fipronil', 'fact-taurus-sc-non-repellent', 'Control Solutions, Taurus SC product page', true],
+    ['Bifen XTS', 'bifenthrin + zeta-cypermethrin', null, null, true], // different registration
+    ['Artavia 2 SC', 'azoxystrobin', null, null, true],
+  ])('%s -> slug %s, source %s, noTimeline %s', async (productName, activeIngredient, slug, source, noTimeline) => {
+    const product = await readOne({ product_name: productName, active_ingredient: activeIngredient });
+    expect(product.factSlugs).toEqual(slug ? [slug] : []);
+    expect(product.source).toBe(source);
+    expect(product.noTimeline).toBe(noTimeline);
   });
 
   test('every family phrase is target-neutral: no pest name, and no pest word outside a sourced label phrase', () => {

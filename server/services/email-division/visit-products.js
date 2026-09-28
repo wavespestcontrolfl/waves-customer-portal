@@ -14,7 +14,7 @@
 //    name that product, and a recorded active ingredient must agree with
 //    the label's. Sharing an active ingredient is never enough — Topchoice
 //    (granular fipronil) is not Taurus SC, Distance IGR (pyriproxyfen) is not
-//    Gentrol IGR, LESCO Crosscheck Plus is not Talstar P.
+//    Gentrol IGR, LESCO Crosscheck Plus is not Talak 7.9 F.
 // 3. Nutrition wording names only nutrients the recorded active ingredient
 //    itself lists (see nutrientsListed) — never a family default.
 // Recorded `targets` (the technician's picks at completion) ride along as
@@ -26,49 +26,66 @@ const { dateOnlyString } = require('../../utils/date-only');
 const { applyCustomerVisibleServiceRecordFilter } = require('../pest-pressure/history-filter');
 const { NON_PERFORMED_VISIT_OUTCOMES } = require('../pest-pressure/first-visit');
 
+// Every label entry cites a fact in the email-division fact register
+// (server/services/email-division/fact-register-data.js, PR #5187) and says
+// only what that fact's quote says — no more. `factSlugs` must name real
+// register facts; the email-division unit test pins the complete set.
 const LABELS = {
   taurus_sc: {
+    // Manufacturer: "a non-repellent insecticide that is undetectable to
+    // target pests, allowing them to touch, ingest and spread the
+    // insecticide throughout the entire colony". No time to control and no
+    // statement about how long pests stay visible, so no note.
     name: ['taurus sc'], ai: ['fipronil'], source: 'Control Solutions, Taurus SC product page',
-    phrase: 'a non-repellent that ants cannot detect, so they walk through it and carry it back to the colony',
-    dryRule: null,
-    notes: [{ text: 'It works through the colony rather than killing on contact, so you may still see ants for a while after the visit.', source: 'Control Solutions, Taurus SC product page' }],
+    phrase: 'a non-repellent insecticide that target pests cannot detect, so they touch it, ingest it and spread it through the colony',
+    dryRule: null, notes: [], statesTimeline: false,
     factSlugs: ['fact-taurus-sc-non-repellent'],
   },
-  talstar_p: {
-    // The catalog's 7.9% bifenthrin liquids (Talak is what the office calls
-    // Talstar P; Bifen I/T is the same concentrate). Never LESCO Crosscheck
-    // Plus or any other bifenthrin product by chemistry alone.
-    name: ['talstar p', 'bifen i/t', 'talak'], ai: ['bifenthrin'], source: 'Talstar P label',
-    phrase: 'a contact product that works on the surfaces it is sprayed on',
-    dryRule: { hours: 24, text: 'The label asks for application when rain is not predicted for the next 24 hours; people and pets stay off treated surfaces until the spray has dried.', source: 'Talstar P label' },
-    notes: [], factSlugs: ['fact-bifenthrin-residual', 'fact-talstar-p-label'],
+  talak: {
+    // Owner ruling 2026-09-11: Talak, Talstar P and Bifen I/T in the job
+    // logs are the same bottle, Atticus Talak 7.9 F (product_aliases resolve
+    // them to Talak). LESCO Crosscheck Plus and Bifen XTS are different
+    // registrations and never match. The label states NO residual duration
+    // and no mode-of-action description, so the family's neutral phrase is
+    // used; only the rain / dry-surface instruction is quoted.
+    name: ['talak', 'talstar p', 'bifen i/t', 'bifen it'], ai: ['bifenthrin'], source: 'Talak 7.9 F label (EPA 91234-145)',
+    phrase: null,
+    dryRule: { hours: 24, text: 'The label asks for application when rain is not predicted for the next 24 hours; people and pets stay off treated surfaces until the spray has dried.', source: 'Talak 7.9 F label (EPA 91234-145)' },
+    notes: [], statesTimeline: false,
+    factSlugs: ['fact-bifenthrin-talak-label'],
   },
   gentrol_igr: {
     // "Gentrol IGR" exactly — Gentrol Complete EC3 (pyriproxyfen +
     // permethrin + tetramethrin) and Gentrol Point Source are other labels.
-    name: ['gentrol igr'], ai: ['hydroprene'], source: 'Gentrol IGR label',
-    phrase: 'a growth regulator: immature roaches exposed to it become adults that cannot reproduce',
+    // Label: "Cockroaches and bedbugs exposed to the GENTROL IGR will become
+    // adults incapable of reproducing"; front panel "CONTINUOUS PROTECTION
+    // FOR 4 MONTHS". Never a claim that it sterilises adults.
+    name: ['gentrol igr'], ai: ['hydroprene'], source: 'Gentrol IGR Concentrate label',
+    phrase: 'an insect growth regulator: cockroaches exposed to it become adults that cannot reproduce',
     dryRule: null,
-    notes: [{ text: 'The Gentrol IGR (hydroprene) label states 120 days of control.', source: 'Gentrol IGR label' }],
-    factSlugs: ['fact-gentrol-igr'],
+    notes: [{ text: 'The Gentrol IGR label states continuous protection for 4 months.', source: 'Gentrol IGR Concentrate label' }],
+    statesTimeline: true,
+    factSlugs: ['fact-gentrol-igr-hydroprene'],
   },
 };
 
-// `factSlugs` on a family are guardrail markers for the writer (e.g. "no
-// verified timeline"), not claims; a labeled product carries its label's.
+// A family is a neutral class name only. It carries no fact slug (a slug
+// must point at a real register fact, and only a label has one); a product
+// with no label reports `noTimeline: true` — copy must state no timeline
+// for it.
 const FAMILIES = {
-  non_repellent: { ai: ['fipronil', 'dinotefuran'], name: ['taurus sc', 'alpine wsg'], phrase: 'an insecticide', factSlugs: [], customerVisible: true, labels: ['taurus_sc'] },
-  contact_residual: { ai: ['bifenthrin', 'lambda-cyhalothrin', 'lambda cyhalothrin', 'deltamethrin', 'cyfluthrin'], name: ['talstar p', 'bifen i/t', 'talak', 'demand cs', 'delta dust'], phrase: 'an insecticide', factSlugs: [], customerVisible: true, labels: ['talstar_p'] },
-  igr: { ai: ['hydroprene', 'pyriproxyfen', 'methoprene'], name: ['gentrol'], phrase: 'an insect growth regulator', factSlugs: [], customerVisible: true, labels: ['gentrol_igr'] },
-  fungicide: { ai: ['azoxystrobin', 'thiophanate-methyl', 'thiophanate methyl', 'propiconazole'], name: ['artavia', 't-storm', 't storm'], phrase: 'a fungicide', factSlugs: ['fact-fungicide-unverified-timeline'], customerVisible: true, labels: [] },
-  herbicide: { ai: ['thiencarbazone', 'iodosulfuron', 'dicamba', 'halosulfuron', 'sulfentrazone'], name: ['celsius', 'sedgehammer'], phrase: 'a weed control', factSlugs: ['fact-herbicide-unverified-timeline'], customerVisible: true, labels: [] },
+  non_repellent: { ai: ['fipronil', 'dinotefuran'], name: ['taurus sc', 'alpine wsg'], phrase: 'an insecticide', customerVisible: true, labels: ['taurus_sc'] },
+  contact_residual: { ai: ['bifenthrin', 'lambda-cyhalothrin', 'lambda cyhalothrin', 'deltamethrin', 'cyfluthrin'], name: ['talstar p', 'bifen i/t', 'bifen it', 'talak', 'demand cs', 'delta dust'], phrase: 'an insecticide', customerVisible: true, labels: ['talak'] },
+  igr: { ai: ['hydroprene', 'pyriproxyfen', 'methoprene'], name: ['gentrol'], phrase: 'an insect growth regulator', customerVisible: true, labels: ['gentrol_igr'] },
+  fungicide: { ai: ['azoxystrobin', 'thiophanate-methyl', 'thiophanate methyl', 'propiconazole'], name: ['artavia', 't-storm', 't storm'], phrase: 'a fungicide', customerVisible: true, labels: [] },
+  herbicide: { ai: ['thiencarbazone', 'iodosulfuron', 'dicamba', 'halosulfuron', 'sulfentrazone'], name: ['celsius', 'sedgehammer'], phrase: 'a weed control', customerVisible: true, labels: [] },
   // `phrase` is the fallback when the recorded AI lists no recognisable
   // nutrient; otherwise nutritionPhrase() names exactly what it lists.
-  nutrition: { ai: ['potassium', 'iron', 'manganese', 'micronutrient', '0-0-'], name: ['k-flow', 'chelated'], phrase: 'a nutrition product', factSlugs: ['fact-nutrition-unverified-timeline'], customerVisible: true, labels: [] },
+  nutrition: { ai: ['potassium', 'iron', 'manganese', 'micronutrient', '0-0-'], name: ['k-flow', 'chelated'], phrase: 'a nutrition product', customerVisible: true, labels: [] },
   // Non-pesticide additives (surfactants, wetting agents, spreaders,
   // markers/dyes) — internal only, never ranked, never described.
-  adjuvant: { ai: ['surfactant', 'nonionic', 'non-ionic', 'wetting agent', 'humectant', 'spreader', 'sticker', 'defoam', 'drift control', 'spray pattern indicator', 'marker dye'], name: ['90/10', 'nonionic', 'non-ionic', 'surfactant', 'wetting agent', 'spreader', 'sticker', 'defoam', 'marker', 'pattern indicator', 'blue dye'], phrase: null, factSlugs: ['fact-adjuvant-internal-only'], customerVisible: false, labels: [] },
-  other: { ai: [], name: [], phrase: null, factSlugs: [], customerVisible: true, labels: [] },
+  adjuvant: { ai: ['surfactant', 'nonionic', 'non-ionic', 'wetting agent', 'humectant', 'spreader', 'sticker', 'defoam', 'drift control', 'spray pattern indicator', 'marker dye'], name: ['90/10', 'nonionic', 'non-ionic', 'surfactant', 'wetting agent', 'spreader', 'sticker', 'defoam', 'marker', 'pattern indicator', 'blue dye'], phrase: null, customerVisible: false, labels: [] },
+  other: { ai: [], name: [], phrase: null, customerVisible: true, labels: [] },
 };
 const FAMILY_ORDER = Object.keys(FAMILIES).filter((f) => f !== 'other');
 // Customer-primacy ranking (adjuvant is never customer-visible, so never eligible).
@@ -118,7 +135,7 @@ function allCustomerFacingStrings() {
   const out = [];
   for (const def of Object.values(FAMILIES)) if (def.phrase && def.customerVisible) out.push(def.phrase);
   for (const label of Object.values(LABELS)) {
-    out.push(label.phrase);
+    if (label.phrase) out.push(label.phrase);
     if (label.dryRule?.text) out.push(label.dryRule.text);
     for (const note of label.notes) out.push(note.text);
   }
@@ -170,8 +187,8 @@ async function readVisitProducts(serviceRecordId, { conn = db } = {}) {
     return {
       productName: row.product_name, activeIngredient: row.active_ingredient || null, family,
       phrase: def.customerVisible ? phrase : null, dryRule: label?.dryRule || null, notes: label?.notes || [],
-      factSlugs: label ? label.factSlugs : def.factSlugs, customerVisible: def.customerVisible,
-      verified: Boolean(label), source: label?.source || null,
+      factSlugs: label ? label.factSlugs : [], customerVisible: def.customerVisible,
+      verified: Boolean(label), source: label?.source || null, noTimeline: !label?.statesTimeline,
       targets: asArray(row.targets).map((t) => String(t || '').trim()).filter(Boolean),
       applicationMethod: row.application_method || null, applicationArea: row.application_area || null,
       appliedAt: row.applied_at || row.created_at || null,
@@ -371,7 +388,7 @@ async function getActivityRatingAverages({ conn = db } = {}) {
 }
 
 module.exports = {
-  PRODUCT_FAMILIES: FAMILIES, FAMILY_ORDER, PRIMARY_FAMILY_RANK, PEST_KEYWORDS,
+  PRODUCT_FAMILIES: FAMILIES, PRODUCT_LABELS: LABELS, FAMILY_ORDER, PRIMARY_FAMILY_RANK, PEST_KEYWORDS,
   classifyProduct, rankVisibleProducts, parsePestsNamed, pestsTargeted, nutrientsListed, expandElidedSpeciesLists, allCustomerFacingStrings,
   readVisitProducts, readVisitSummary, getActivityRatingAverages,
 };

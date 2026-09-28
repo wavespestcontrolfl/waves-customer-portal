@@ -106,7 +106,7 @@ suite('email division against real Postgres', () => {
     expect(pyriproxyfen).toMatchObject({ family: 'igr', verified: false, notes: [] });
   });
 
-  test('readVisitProducts: scopes bifenthrin/Talstar-P label facts to bifenthrin products only, never Delta Dust or Demand CS', async () => {
+  test('readVisitProducts: scopes the Talak 7.9 F label facts to the Talak bottle only, never Delta Dust or Demand CS', async () => {
     const customerId = await makeCustomer();
     const visitId = await makeVisit(customerId);
     await trx('service_products').insert([
@@ -116,13 +116,16 @@ suite('email division against real Postgres', () => {
     ]);
     const { products } = await readVisitProducts(visitId, { conn: trx });
     const talstar = products.find((p) => p.productName === 'Talstar P');
-    expect(talstar).toMatchObject({ family: 'contact_residual', verified: true, source: 'Talstar P label', phrase: 'a contact product that works on the surfaces it is sprayed on' });
+    // Owner ruling 2026-09-11: "Talstar P" in the job logs is the Talak 7.9 F bottle.
+    expect(talstar).toMatchObject({
+      family: 'contact_residual', verified: true, source: 'Talak 7.9 F label (EPA 91234-145)',
+      phrase: 'an insecticide', factSlugs: ['fact-bifenthrin-talak-label'],
+    });
     expect(talstar.dryRule?.hours).toBe(24);
-    expect(talstar.factSlugs.length).toBeGreaterThan(0);
     for (const name of ['Delta Dust', 'Demand CS']) {
       const p = products.find((prod) => prod.productName === name);
       // Same family (still shown, still ranked as contact_residual) but the
-      // Talstar-P-specific "spray has dried" rain instruction, its fact
+      // Talak-label "spray has dried" rain instruction, its fact
       // slugs, AND the "sprayed on" phrase (inaccurate for a dust) never
       // ride along on a dust or a different active ingredient — the
       // neutral class name is used instead.
@@ -145,7 +148,7 @@ suite('email division against real Postgres', () => {
     const { products } = await readVisitProducts(visitId, { conn: trx });
     const taurus = products.find((p) => p.productName === 'Taurus SC');
     expect(taurus).toMatchObject({ family: 'non_repellent', verified: true });
-    expect(taurus.notes.length).toBeGreaterThan(0);
+    expect(taurus.notes).toEqual([]); // the manufacturer states nothing about how long ants stay visible
     expect(taurus.factSlugs).toContain('fact-taurus-sc-non-repellent');
     // Same family, still shown — but the Taurus-SC-sourced phrase, note and
     // fact slug never ride along on a different product, even one sharing
@@ -191,10 +194,10 @@ suite('email division against real Postgres', () => {
     const complete = products.find((p) => p.productName.startsWith('ZOECON 10578'));
     expect(complete).toMatchObject({ family: 'igr', verified: false, notes: [], factSlugs: [] });
     const hydroprene = products.find((p) => p.productName === 'Gentrol IGR');
-    expect(hydroprene).toMatchObject({ family: 'igr', verified: true, factSlugs: ['fact-gentrol-igr'] });
-    expect(hydroprene.notes.map((n) => n.text)).toEqual(['The Gentrol IGR (hydroprene) label states 120 days of control.']);
+    expect(hydroprene).toMatchObject({ family: 'igr', verified: true, factSlugs: ['fact-gentrol-igr-hydroprene'] });
+    expect(hydroprene.notes.map((n) => n.text)).toEqual(['The Gentrol IGR label states continuous protection for 4 months.']);
     const nameOnly = products.find((p) => p.productName === 'Gentrol IGR Concentrate');
-    expect(nameOnly).toMatchObject({ family: 'igr', verified: true, factSlugs: ['fact-gentrol-igr'] });
+    expect(nameOnly).toMatchObject({ family: 'igr', verified: true, factSlugs: ['fact-gentrol-igr-hydroprene'] });
     const pointSource = products.find((p) => p.productName === 'Gentrol Point Source');
     expect(pointSource).toMatchObject({ family: 'igr', verified: false, notes: [], factSlugs: [], phrase: 'an insect growth regulator' });
   });
