@@ -157,26 +157,28 @@ async function judgeStage(ctx) {
 const CANDIDATE_STAGES = [loadPagesStage, sourceProtectionStage, validateStage, renderedSourceStage, patchStage, judgeStage];
 
 // ── Auto-merge gates (see runAutoMerge / _applyGateOutcome) ───────────
-// Links already published (an advanced-head merge recorded merged_at while
-// the PR was left open): finish fencing — close the PR, retire the branch —
-// then let the tasks leave pr_open. A GitHub failure throws and the next
-// tick retries; nothing below may treat this PR as unmerged.
+// Links already published (runAutoMerge records merged_at before settling):
+// finish fencing — close the PR if a late commit left it open, confirm the
+// branch is retired — then let the tasks leave pr_open. A GitHub failure
+// throws or holds and the next tick retries; nothing below may treat this
+// PR as unmerged.
 async function publishedCleanupGate(ctx) {
   if (!ctx.prTasks.length || !ctx.prTasks.every((t) => t.merged_at)) return null;
   if (String(ctx.pr?.state || '').toLowerCase() === 'open') await GitHubClient.closePr(ctx.prNumber);
-  // The branch holds unreviewed advanced-head commits: the rows stay pr_open
-  // (guard up, retried every tick) until its retirement is CONFIRMED.
+  // A surviving branch could carry unreviewed late commits and be reopened:
+  // the rows stay pr_open (guard up, retried every tick) until its
+  // retirement is CONFIRMED.
   let retired = false;
   try {
     retired = await GitHubClient.retireBranch(ctx.pr?.head?.ref);
   } catch (err) {
-    logger.warn(`[internal-link-pr-executor] branch retirement after advanced head failed for PR #${ctx.prNumber}: ${err.message}`);
+    logger.warn(`[internal-link-pr-executor] branch retirement after publish failed for PR #${ctx.prNumber}: ${err.message}`);
   }
-  if (!retired) return { hold: 'advanced_head_branch_retire_pending' };
+  if (!retired) return { hold: 'published_branch_retire_pending' };
   for (const task of ctx.prTasks) {
     await this._markTaskMerged(task.id, { mergedAt: new Date(task.merged_at), commitSha: task.pr_commit_sha || null });
   }
-  return { result: { status: 'merged', reason: 'advanced_head_closed' } };
+  return { result: { status: 'merged', reason: 'published_settled' } };
 }
 
 function prStateGate(ctx) {
@@ -622,21 +624,22 @@ class InternalLinkPrExecutor {
     // but it leaves the PR open with unreviewed content. Close it before the
     // tasks leave pr_open: if the close fails, the throw keeps them pr_open,
     // where provenanceGate holds the foreign head for a human.
+    // EVERY merge settles the same way, without trusting mergePr's
+    // headAdvanced report (its post-merge read can fail silently):
+    // publication is recorded FIRST (merged_at + the published SHA, tasks
+    // still pr_open so the one-open-PR guard stays up), then
+    // publishedCleanupGate re-reads the PR, closes it if a late commit left
+    // it open, and releases the rows only once the branch is confirmed gone
+    // — now, or on a later tick if GitHub fails.
     const mergedAt = new Date();
-    if (merged?.headAdvanced) {
-      // Publication is recorded FIRST (merged_at, tasks still pr_open so the
-      // one-open-PR guard stays up); publishedCleanupGate then closes the PR
-      // and retires the branch — now, or on a later tick if GitHub fails.
-      await db(TABLE).whereIn('id', prTasks.map((t) => t.id)).where('status', 'pr_open')
-        .update({ merged_at: mergedAt, updated_at: new Date() });
-      return this._applyGateOutcome(ctx, await publishedCleanupGate.call(this, {
-        ...ctx,
-        prTasks: prTasks.map((t) => ({ ...t, merged_at: mergedAt })),
-      }));
-    }
-    for (const task of prTasks) {
-      await this._markTaskMerged(task.id, { mergedAt, commitSha: merged?.sha || null });
-    }
+    await db(TABLE).whereIn('id', prTasks.map((t) => t.id)).where('status', 'pr_open')
+      .update({ merged_at: mergedAt, pr_commit_sha: merged?.sha || null, updated_at: new Date() });
+    const settled = await publishedCleanupGate.call(this, {
+      ...ctx,
+      pr: await GitHubClient.getPr(prNumber).catch(() => ctx.pr),
+      prTasks: prTasks.map((t) => ({ ...t, merged_at: mergedAt, pr_commit_sha: merged?.sha || null })),
+    });
+    if (settled?.hold) return { status: 'hold', reason: settled.hold, pr_number: prNumber, published: true };
     logger.info(`[internal-link-pr-executor] auto-merged link PR #${prNumber} (${prTasks.length} link(s), codex ${codex.clean ? 'clean' : 'silent'})`);
     return { status: 'merged', pr_number: prNumber, count: prTasks.length, codex: codex.clean ? 'clean' : 'silent' };
   }
@@ -902,7 +905,10 @@ class InternalLinkPrExecutor {
       return { task_id: task.id, status: task.status, skipped: 'pr_not_merged', pr_number: resolvedPrNumber };
     }
 
-    const mergedAt = prInfo.merged_at ? new Date(prInfo.merged_at) : new Date();
+    // Publication time: GitHub's, else the one runAutoMerge recorded (an
+    // advanced-head PR closes without GitHub's merged_at) — never "now",
+    // which would move an old publish into today's publish cap.
+    const mergedAt = prInfo.merged_at ? new Date(prInfo.merged_at) : (task.merged_at ? new Date(task.merged_at) : new Date());
     await this._markTaskMerged(task.id, {
       mergedAt,
       commitSha: prInfo.merge_commit_sha || task.pr_commit_sha || null,

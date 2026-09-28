@@ -1280,6 +1280,8 @@ describe('internal-link PR auto-merge', () => {
       select: jest.fn(async () => rows),
       countDistinct: jest.fn(() => q),
       first: jest.fn(async () => ({ count: String(mergedToday) })),
+      whereIn: jest.fn(() => q),
+      update: jest.fn(async () => 1),
     };
     db.mockImplementation(() => q);
   }
@@ -1364,16 +1366,25 @@ describe('internal-link PR auto-merge', () => {
     openTasks([{ id: 't1', status: 'pr_open', astro_pr_url: prUrl, pr_commit_sha: HEAD, merged_at: new Date().toISOString(), executor_version: 'internal-link-pr-executor-v2', source_file: 'src/content/blog/a.md', source_url: '/a/', target_url: '/termite-inspection/' }]);
     GitHubClient.getPr.mockResolvedValue({ number: 77, state: 'closed', head: { sha: 'c'.repeat(40), ref: 'content/internal-link-x' }, base: { ref: 'main' } });
     GitHubClient.retireBranch.mockResolvedValueOnce(false);
-    expect(await instance.runAutoMerge()).toMatchObject({ status: 'hold', reason: 'advanced_head_branch_retire_pending' });
+    expect(await instance.runAutoMerge()).toMatchObject({ status: 'hold', reason: 'published_branch_retire_pending' });
     expect(instance._markTaskMerged).not.toHaveBeenCalled();
 
     // Next tick: the rows carry merged_at, so cleanup finishes (never "unmerged").
     openTasks([{ id: 't1', status: 'pr_open', astro_pr_url: prUrl, pr_commit_sha: HEAD, merged_at: new Date().toISOString(), executor_version: 'internal-link-pr-executor-v2', source_file: 'src/content/blog/a.md', source_url: '/a/', target_url: '/termite-inspection/' }]);
     GitHubClient.getPr.mockResolvedValue({ number: 77, state: 'open', head: { sha: 'c'.repeat(40), ref: 'content/internal-link-x' }, base: { ref: 'main' } });
-    expect(await instance.runAutoMerge()).toMatchObject({ status: 'merged', reason: 'advanced_head_closed' });
+    expect(await instance.runAutoMerge()).toMatchObject({ status: 'merged', reason: 'published_settled' });
     expect(GitHubClient.closePr).toHaveBeenLastCalledWith(77);
     expect(instance._markTaskMerged).toHaveBeenCalledWith('t1', expect.any(Object));
     expect(GitHubClient.mergePr).toHaveBeenCalledTimes(1);
+  });
+
+  test('a PR still open after the merge is closed even when mergePr reported no advanced head', async () => {
+    GitHubClient.mergePr.mockResolvedValueOnce({ sha: 'b'.repeat(40), merged: true });
+    // getPr: gates read it open; the post-merge re-read still shows it open.
+    expect(await instance.runAutoMerge()).toMatchObject({ status: 'merged' });
+    expect(GitHubClient.closePr).toHaveBeenCalledWith(77);
+    expect(GitHubClient.retireBranch).toHaveBeenCalledWith('content/internal-link-x');
+    expect(instance._markTaskMerged).toHaveBeenCalledWith('t1', expect.objectContaining({ commitSha: 'b'.repeat(40) }));
   });
 
   test('holds inside the grace window while Codex has not answered', async () => {
