@@ -120,16 +120,22 @@ const SPECIES_ALIASES = (() => {
  * which one the identification slots are about) — the caller then treats
  * every slot as unmatched rather than risk the wrong species' photo.
  */
-// Codex P1: the "more than one CATALOG species matched" guard alone missed
-// a comparison topic naming ONE catalog species plus an uncatalogued one
-// ("brown recluse vs huntsman spider" — only "huntsman spider" is in the
-// catalog, so it matched exactly one and would have filled the pest slot
-// with the huntsman photo even when the post is actually about the brown
-// recluse). Safety content can't risk presenting a licensed-but-wrong
-// species as THE pest, so ANY comparison-shaped topic fails closed —
-// intentionally broad (over-flagging for a human beats a confident wrong
-// photo); a false trigger just means one more slot goes to a human.
-const COMPARISON_RE = /\b(vs\.?|versus|or|from|not)\b/i;
+// Codex P1 (2 rounds): the "more than one CATALOG species matched" guard
+// alone missed a comparison topic naming ONE catalog species plus an
+// UNCATALOGUED one ("brown recluse vs huntsman spider" — only "huntsman
+// spider" is in the catalog, so it matched exactly one and would have
+// filled the pest slot with the huntsman photo even when the post is
+// actually about the brown recluse). Safety content can't risk presenting
+// a licensed-but-wrong species as THE pest, so ANY comparison-shaped topic
+// fails closed — deliberately broad (a wide connector list plus every
+// specific phrasing raised in review: and/between/compared to/than/
+// instead of/mistaken for/confused with/like/look-alike/difference).
+// Over-flagging for a human beats a confident wrong photo; a false
+// trigger just means one more slot goes to a human. This is a denylist,
+// not a parser — expand it on the same evidence standard as the rest of
+// this file's guardrails (a real example that slipped through), not
+// preemptively for every imaginable phrasing.
+const COMPARISON_RE = /\b(vs\.?|versus|or|from|not|and|between|compared\s+to|than|instead\s+of|mistaken\s+for|confused\s+with|like|look-?alikes?|difference|differences)\b/i;
 
 function matchSpecies(topic) {
   const norm = normalizeTopic(topic);

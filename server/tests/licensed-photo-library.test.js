@@ -109,6 +109,22 @@ describe('matchSpecies — ambiguity guard (Codex P1)', () => {
     expect(matchSpecies('carpenter ant vs fire ant identification')).toBeNull();
   });
 
+  test('returns null for every comparison phrasing named in review round 2 (Codex P1 follow-up)', () => {
+    expect(matchSpecies('brown recluse and huntsman spider')).toBeNull();
+    expect(matchSpecies('difference between a brown recluse and a huntsman spider')).toBeNull();
+    expect(matchSpecies('huntsman spider compared to brown recluse')).toBeNull();
+    expect(matchSpecies('is it a huntsman spider or a brown recluse')).toBeNull();
+    expect(matchSpecies('huntsman spider mistaken for a brown recluse')).toBeNull();
+    expect(matchSpecies('huntsman spider confused with a brown recluse')).toBeNull();
+    expect(matchSpecies('a brown recluse look-alike: the huntsman spider')).toBeNull();
+    expect(matchSpecies('huntsman spider instead of a brown recluse')).toBeNull();
+  });
+
+  test('an ordinary single-species identification topic with no connector still matches (no over-triggering)', () => {
+    expect(matchSpecies('florida huntsman spider identification guide')).toBe('huntsman spider');
+    expect(matchSpecies('how to get rid of fire ants in your yard')).toBe('fire ant');
+  });
+
   test('a multi-species-ambiguous topic flags every photo slot rather than guessing', () => {
     const slots = buildPhotoSlots('fire ant vs huntsman spider: which is more dangerous');
     for (const s of slots) {
