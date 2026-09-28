@@ -37,6 +37,10 @@ series it points at is its **host**. Both parent and child rows are looked
 up by `id = parent OR recurring_parent_id = parent`, same as every other
 series-maintenance query in this codebase.
 
+The link is one level deep. Sync refuses a series that rides itself
+(`self_link`) and a host that itself rides another series
+(`host_is_rider`), so links never chain or cycle.
+
 ## The date rule
 
 `server/services/rider-series.js#planRiderDates` — pure, no DB:
@@ -67,6 +71,11 @@ own 84-day cadence rather than lapsing.
    `tryLockCustomerComms`; a miss on any of them skips with `host_locked` /
    `rider_locked` / `customer_locked`, writing nothing) — see "Locking"
    below.
+   After the comms lock it reads the customer `FOR SHARE NOWAIT` and
+   applies the same eligibility table as the visit-count top-up
+   (`services/series-customer-eligibility.js`): a deleted, genuinely
+   held, inactive or churned customer skips with that reason, and a
+   locked customer row skips with `customer_row_locked`.
 3. Host dates = the host's live future rows (parent + children,
    `JOIN_INELIGIBLE_STATUSES` excluded, `>= today`).
 4. `lastRiderDate` (the anchor) = the rider's latest row that is
