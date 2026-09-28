@@ -31,9 +31,9 @@ describe('every booking path stamps or deliberately skips', () => {
     expect((src.match(/maybeGroupRow\(\w+\.id,/g) || []).length).toBe(8);
   });
 
-  test('estimate-converter stamps BOTH paths (standalone + recurring unit)', () => {
+  test('estimate-converter stamps all three paths (standalone unit + recurring unit + reserved start after catalog relink)', () => {
     const src = read('services/estimate-converter.js');
-    expect((src.match(/VisitGroups\.maybeGroupRow\(/g) || []).length).toBe(2);
+    expect((src.match(/VisitGroups\.maybeGroupRow\(/g) || []).length).toBe(3);
   });
 
   test('annual-prepay timed seeds carry the sole-property anchor (GH codex r8 P2)', () => {

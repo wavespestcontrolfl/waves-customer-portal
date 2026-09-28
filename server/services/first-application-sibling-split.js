@@ -280,19 +280,29 @@ function divergingSiblings(anchor, members) {
 // already collected money; only what happens next (alert copy, whether a
 // plain date divergence alone also qualifies) differs between the two.
 //
-// includeAnchor (Codex round 14 P1, paid/processing review only): the
-// combined invoice bills the ANCHOR's own share too, so a paid combined
-// invoice whose anchor was cancelled/skipped/no-show holds money for work that
-// will not happen exactly like a never-ran sibling does. For the anchor no
-// invoice is treated as "split off": the combined invoice IS the anchor's own
-// invoice (invoices.scheduled_service_id), so a live invoice on the anchor is
-// never evidence the combined charge moved — even a genuinely separate one
-// (a repair, a later visit charge) leaves the combined payment in place. The
-// only resolutions are the governing invoice going refunded/void, the anchor
-// being reactivated, or a human dismissal (which the deterministic
-// fingerprint keeps dismissed while nothing changes). Off by default: the
-// OPEN-invoice review keeps excluding the anchor (cancelling the anchor voids
-// the open combined invoice through voidOpenInvoicesForCancelledService).
+// includeAnchor (Codex round 14 P1, paid/processing review; also the
+// still-OPEN review below, Codex round 19 P2): the combined invoice bills
+// the ANCHOR's own share too, so an invoice whose anchor was cancelled/
+// skipped/no-show holds (or, while still open, still charges) money for
+// work that will not happen exactly like a never-ran sibling does. For the
+// anchor no invoice is treated as "split off": the combined invoice IS the
+// anchor's own invoice (invoices.scheduled_service_id), so a live invoice on
+// the anchor is never evidence the combined charge moved — even a genuinely
+// separate one (a repair, a later visit charge) leaves the combined payment
+// in place. The only resolutions are the governing invoice going refunded/
+// void, the anchor being reactivated, or a human dismissal (which the
+// deterministic fingerprint keeps dismissed while nothing changes).
+//
+// The open-invoice review used to exclude the anchor on the theory that
+// cancelling the anchor voids the open combined invoice through
+// voidOpenInvoicesForCancelledService — but that void is fired-and-forget
+// (job-status.js) and can fail silently. When it does, an anchor that will
+// never run stays covered by a combined invoice nobody has flagged, and
+// excluding it here let evaluateGroupDivergence read the group as realigned
+// and clear a standing alert (or never raise one) for a still-open invoice
+// that still charges for work that will not happen. Both never-ran-covered-
+// members verdicts (paid/processing above, and the still-open one below)
+// now include the anchor the same way.
 function neverRanCoveredMembers(anchor, members, { includeAnchor = false } = {}) {
   return members.filter((m) => {
     if (!neverRan(m.status)) return false;
@@ -364,15 +374,28 @@ function evaluateGroupDivergence({ anchor, members, invoiceStatus }) {
   const unresolvedDiverging = diverging.filter((m) => !m.has_own_live_invoice && !neverRan(m.status));
 
   // Same membership question as the paid-invoice branch above (shared via
-  // neverRanCoveredMembers), for the still-open invoice.
-  const neverRanNeedingReview = neverRanCoveredMembers(anchor, members);
+  // neverRanCoveredMembers), for the still-open invoice — anchor included
+  // (Codex round 19 P2): voidOpenInvoicesForCancelledService is fired and
+  // forgotten (job-status.js) when the anchor itself is cancelled/skipped/
+  // no-shown, so its failure must never be the ONLY thing standing between
+  // a never-ran anchor and a silently-cleared alert on an invoice that
+  // still charges for it.
+  const neverRanNeedingReview = neverRanCoveredMembers(anchor, members, { includeAnchor: true });
 
   const unresolved = [...unresolvedDiverging, ...neverRanNeedingReview];
   if (!unresolved.length) {
     // 'split_completed' whenever there was ever something here needing
     // hand resolution (a diverging or never-ran-and-covered sibling) that
     // has since been resolved — 'realigned' only when the group never had
-    // anything beyond a plain date mismatch to begin with.
+    // anything beyond a plain date mismatch to begin with. Still excludes
+    // the anchor: reaching this branch at all means neverRanNeedingReview
+    // came back empty, and with includeAnchor:true (Codex round 19 P2) that
+    // already guarantees the anchor is not CURRENTLY never-ran — a
+    // never-ran anchor always keeps this verdict in the alert branch above,
+    // never here — so checking the anchor's status here could never change
+    // the answer; the exclusion is kept only because it made that
+    // impossibility explicit at the one call site that could otherwise look
+    // like an oversight.
     const everNeededResolution = diverging.length > 0
       || members.some((m) => String(m.id) !== String(anchor.id) && neverRan(m.status));
     return { action: 'clear', reason: everNeededResolution ? 'split_completed' : 'realigned' };
@@ -645,9 +668,25 @@ const ALERT_TITLES = Object.freeze({
 
 // Raises (or refreshes) the durable admin alert for this exact diverging
 // set. Takes the SAME advisory lock notifyAdmin's own dedupe path takes,
-// and holds it through notifyAdmin's own write, so a concurrent dismissal
-// can never land between the decision and the write. Never touches the
-// invoice or any visit row.
+// and holds it through notifyAdmin's own write, so two concurrent sweep
+// ticks racing the SAME dedupeKey can never land between each other's
+// decision and write. That advisory lock is purely cooperative, though —
+// it only excludes another caller that takes the SAME lock, and
+// markReadAdmin (a human dismissal) never does — so it does nothing on its
+// own to keep a dismissal from landing between this read and notifyAdmin's
+// refresh write below (Codex round 21 P2). The `.forUpdate()` on the read
+// is what actually closes that window: it takes a real row lock that
+// notification-service.js's markReadAdmin, an ordinary UPDATE, always
+// queues behind (Postgres locks every row an UPDATE touches, with or
+// without an explicit FOR UPDATE on the writer's own side) — so a
+// dismissal either commits and is visible in this very read (existing
+// already reflects it), or is still queued when we get here and only
+// proceeds once this whole transaction commits, at which point its own
+// unconditional `read_at: new Date()` write lands on top of whatever this
+// refresh wrote. Either way the LAST of the two to actually commit is what
+// the row ends up holding — never a torn state where a dismissal that
+// really did happen gets silently overwritten back to unread. Never
+// touches the invoice or any visit row.
 async function raiseDivergenceAlert(conn, {
   estimateId, anchor, diverging, invoice, customerId, dedupeKey, stampedInvoiceId = null, alertKind = 'diverged',
 }) {
@@ -663,7 +702,7 @@ async function raiseDivergenceAlert(conn, {
   // human dismissal (read_at set, never autoCleared) keeps the
   // deterministic-fingerprint dedupe: unchanged state stays dismissed.
   const existing = await conn('notifications').where({ recipient_type: 'admin' })
-    .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]).first('read_at', 'metadata');
+    .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]).forUpdate().first('read_at', 'metadata');
   let existingMeta = existing?.metadata;
   if (typeof existingMeta === 'string') { try { existingMeta = JSON.parse(existingMeta); } catch { existingMeta = null; } }
   const wasAutoCleared = Boolean(existing?.read_at) && existingMeta?.autoCleared === true;
