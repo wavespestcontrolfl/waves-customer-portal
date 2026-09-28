@@ -485,13 +485,13 @@ test('cancel_appointment: a restored deposit credit is stated with its amount an
   expect(contractHash(make(75))).not.toBe(contractHash(make(60)));
 });
 
-test('cancel_appointment: a hold outcome the preview cannot pin is left for office review, never promised as released', () => {
-  const c = buildContract({
+test('cancel_appointment: the simple-visit refusals are part of the pinned structure (a refused card can never hash like an eligible one)', () => {
+  const make = (refusals) => buildContract({
     toolName: 'cancel_appointment', params: {}, displayParams: {},
-    preview: { cancellation: { ...synthCancellationBase(), fee: { applies: false, amount: 49, unresolved: false, rail: 'card_hold', hold_disposition: 'review' } } },
+    preview: { cancellation: { ...synthCancellationBase(), card_cancel_refusals: refusals } },
   });
-  expect(c.effects).toContainEqual({ kind: 'billing', label: 'No late-cancel fee is charged and the card hold is left as it is — its outcome cannot be pinned on this card, so the office is alerted to review it' });
-  expect(c.effects.some((e) => /RELEASED|PARKED/.test(e.label))).toBe(false);
+  expect(make(['card_fee_agreement']).pinned_cancellation.card_cancel_refusals).toEqual(['card_fee_agreement']);
+  expect(contractHash(make([]))).not.toBe(contractHash(make(['card_fee_agreement'])));
 });
 
 test('cancel_appointment: no invoices means no void disclosure at all', () => {

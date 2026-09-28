@@ -3639,6 +3639,8 @@ async function rescheduleAppointment(input, actionContext = {}) {
 }
 
 
+const CARD_CANCEL_REFUSED_MESSAGE = 'This visit has a saved-card fee agreement, a card payment on its invoice, an estimate deposit, or a plan make-up visit, so it can only be cancelled from the Dispatch screen. Nothing was changed.';
+
 // The follow-through's per-target pin for a cancel confirmed against a frozen
 // impact (see cancelAppointment); null when nothing was pinned.
 function pinnedCancelEffects(appointmentId, frozen) {
@@ -3724,10 +3726,14 @@ async function cancelAppointment(input, actionContext = {}) {
     }
     // Counted-plan reseed on the replay too (Codex #4814 r7 P1): a first
     // reseed that failed without its stamp gets its retry here, like the
-    // other post-commit obligations this branch replays. Idempotent.
-    await require('../recurring-series-cancel-reseed').runPostCancelSeriesReseed({
-      db, serviceId: appointment_id, source: 'intelligence-bar-cancel-replay',
-    });
+    // other post-commit obligations this branch replays. Idempotent. A
+    // card-confirmed cancel never reseeds: the card only confirms visits
+    // that cannot add a make-up visit (cancelMayReseedPlan).
+    if (!input._frozen_cancellation_impact) {
+      await require('../recurring-series-cancel-reseed').runPostCancelSeriesReseed({
+        db, serviceId: appointment_id, source: 'intelligence-bar-cancel-replay',
+      });
+    }
     return {
       success: true,
       appointment_id,
@@ -3765,6 +3771,10 @@ async function cancelAppointment(input, actionContext = {}) {
     }
     if (!cancelImpactsMatch(freshImpact, input._frozen_cancellation_impact)) {
       return { error: 'The cancellation effects (late-cancel fee, invoices, or inspection credit) changed since this was proposed — nothing was changed. Ask again for a fresh preview.' };
+    }
+    // Owner ruling 2026-09-28: the bar cancels simple visits only.
+    if ((freshImpact?.card_cancel_refusals || []).length) {
+      return { error: CARD_CANCEL_REFUSED_MESSAGE };
     }
   }
   const pinnedEffects = pinnedCancelEffects(appointment_id, input._frozen_cancellation_impact);
@@ -3850,9 +3860,12 @@ async function cancelAppointment(input, actionContext = {}) {
   // Counted-plan reseed (owner ruling 2026-09-24): a single-visit cancel
   // inside a 9-application plan adds one back at the end of the series.
   // Gated, failure-isolated, post-commit.
-  await require('../recurring-series-cancel-reseed').runPostCancelSeriesReseed({
-    db, serviceId: appointment_id, source: 'intelligence-bar-cancel',
-  });
+  // A card-confirmed cancel never reseeds (see the replay branch above).
+  if (!pinnedEffects) {
+    await require('../recurring-series-cancel-reseed').runPostCancelSeriesReseed({
+      db, serviceId: appointment_id, source: 'intelligence-bar-cancel',
+    });
+  }
 
   const customer = await db('customers').where('id', appt.customer_id).first();
 

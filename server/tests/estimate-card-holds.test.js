@@ -105,7 +105,6 @@ const {
   isWithinCancelWindow,
   handleCardHoldCancellation,
   cardHoldCancelPreview,
-  cardHoldCancelDisposition,
   cardHoldReminderLine,
   cardHoldReminderNote,
   recordCardHoldHeld,
@@ -1932,65 +1931,6 @@ describe('reschedule-orphan DETECTION at completion (GATE_CARD_HOLD_RESCHEDULE_A
     const r = await chargeCardHoldOnCompletion({ scheduledServiceId: 'svc-new', invoiceId: 'inv-1' });
     expect(r).toEqual({ charged: false, reason: 'no_hold' });
     expect(mockNotifyAdmin).not.toHaveBeenCalled();
-  });
-});
-
-describe('cardHoldCancelDisposition — what the cancel handler does to a hold when no fee applies', () => {
-  const setPark = (on) => {
-    if (on) {
-      process.env.GATE_CARD_HOLD_PARK_ON_CANCEL = 'true';
-      process.env.GATE_CARD_HOLD_RESCHEDULE_ADOPT = 'true';
-    } else {
-      delete process.env.GATE_CARD_HOLD_PARK_ON_CANCEL;
-      delete process.env.GATE_CARD_HOLD_RESCHEDULE_ADOPT;
-    }
-  };
-  afterEach(() => setPark(false));
-
-  it('an already-parked hold stays parked', () => {
-    expect(cardHoldCancelDisposition({ held: true, feeApplies: false, parked: true, rule: { code: 'hold_parked' } })).toBe('parked');
-  });
-  it.each(['outside_window', 'past_start', 'booking_age'])('a free %s cancel parks with park-on-cancel on, releases with it off', (code) => {
-    setPark(true);
-    expect(cardHoldCancelDisposition({ held: true, feeApplies: false, rule: { code } })).toBe('parked');
-    setPark(false);
-    expect(cardHoldCancelDisposition({ held: true, feeApplies: false, rule: { code } })).toBe('released');
-  });
-  it.each(['card_removed', 'no_time'])('%s always releases', (code) => {
-    setPark(true);
-    expect(cardHoldCancelDisposition({ held: true, feeApplies: false, rule: { code } })).toBe('released');
-  });
-  // Parity with the REAL handler (the rule is a mirror of its free-cancel
-  // branches): same hold, same start, same clock — the preview's disposition
-  // must be what handleCardHoldCancellation actually does to the hold.
-  describe('parity with handleCardHoldCancellation', () => {
-    const HOLD = { id: 'h1', customer_id: 'cust1', stripe_payment_method_id: 'pm_s', no_show_fee_amount: 49, cancel_window_hours: 24, held_at: new Date('2026-06-01T12:00:00Z') };
-    const now = new Date('2026-06-25T12:00:00Z');
-    const cases = [
-      ['outside the window', new Date('2026-06-28T14:00:00Z'), {}],
-      ['past start', new Date('2026-06-20T10:00:00Z'), {}],
-      ['an already-parked hold', new Date('2026-06-28T14:00:00Z'), { parked_at: new Date('2026-06-22T10:00:00Z') }],
-    ];
-    for (const park of [false, true]) {
-      it.each(cases)(`%s (park-on-cancel ${park ? 'on' : 'off'})`, async (_label, start, extra) => {
-        setPark(park);
-        stubDb({ ...HOLD, ...extra });
-        mockApptTime.mockResolvedValue(start);
-        const preview = await cardHoldCancelPreview('svc1', now);
-        expect(preview.feeApplies).toBe(false);
-        const predicted = cardHoldCancelDisposition(preview);
-
-        stubDb([{ ...HOLD, ...extra }]);
-        mockApptTime.mockResolvedValue(start);
-        const r = await handleCardHoldCancellation({ scheduledServiceId: 'svc1', now });
-        const actual = r.parked ? 'parked' : (r.released ? 'released' : `other:${r.reason}`);
-        expect(actual).toBe(predicted);
-      });
-    }
-  });
-
-  it.each(['rail_off', 'fee_settled', 'something_new', undefined])('%s is not determined by the preview → review', (code) => {
-    expect(cardHoldCancelDisposition({ held: true, feeApplies: false, rule: code ? { code } : undefined })).toBe('review');
   });
 });
 

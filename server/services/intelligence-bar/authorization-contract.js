@@ -568,15 +568,9 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
         : `Late-cancel fee of ${amt} will be charged to the card on file (a failed charge goes to office review, never silently dropped)`);
     } else if (c.fee?.rail === 'card_hold') {
       // Frozen disposition (pinned in the fingerprint), not a disjunction.
-      // 'review' = the hold's outcome is not determined by the preview (rail
-      // off, fee settled elsewhere): a pinned cancel runs no rail on it.
-      if (c.fee.hold_disposition === 'review') {
-        push('billing', 'No late-cancel fee is charged and the card hold is left as it is — its outcome cannot be pinned on this card, so the office is alerted to review it');
-      } else {
-        push('billing', c.fee.hold_disposition === 'parked'
-          ? 'No late-cancel fee (outside the fee window) — the card hold is PARKED for the rebooked visit'
-          : 'No late-cancel fee (outside the fee window) — the card hold is RELEASED');
-      }
+      push('billing', c.fee.hold_disposition === 'parked'
+        ? 'No late-cancel fee (outside the fee window) — the card hold is PARKED for the rebooked visit'
+        : 'No late-cancel fee (outside the fee window) — the card hold is RELEASED');
     } else if (c.fee?.rail && c.fee.rail !== 'none') {
       push('billing', 'No late-cancel fee (outside the fee window) — the appointment-card agreement is released');
     }

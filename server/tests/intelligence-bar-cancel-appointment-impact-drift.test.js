@@ -44,7 +44,8 @@ const mockFollowThrough = jest.fn(async () => ({ settled: 1 }));
 jest.mock('../services/visit-cancellation-followthrough', () => ({
   runVisitCancellationFollowThrough: (...a) => mockFollowThrough(...a),
 }));
-jest.mock('../services/recurring-series-cancel-reseed', () => ({ runPostCancelSeriesReseed: jest.fn(async () => {}) }));
+const mockReseed = jest.fn(async () => {});
+jest.mock('../services/recurring-series-cancel-reseed', () => ({ runPostCancelSeriesReseed: (...a) => mockReseed(...a) }));
 jest.mock('../services/typed-followup-obligation', () => ({ handleFollowupChildCancellation: jest.fn(async () => {}) }));
 
 const mockTransitionJobStatus = jest.fn();
@@ -60,6 +61,7 @@ const FROZEN = {
   fee: { applies: true, amount: 49, unresolved: false, rail: 'card_hold', hold_disposition: null },
   invoices: [{ id: 'inv-1', invoice_number: 'WPC-2026-9001', status: 'sent', total: 89, credit_applied: 0 }],
   inspection_credit_reversal: null,
+  card_cancel_refusals: [],
 };
 
 beforeEach(() => {
@@ -185,4 +187,31 @@ test('no frozen pin: the follow-through runs unpinned, as before', async () => {
   mockTransitionJobStatus.mockResolvedValue(undefined);
   await executeTool('cancel_appointment', { appointment_id: 'svc-synthetic-1' }, {});
   expect(mockFollowThrough).toHaveBeenCalledWith(expect.objectContaining({ pinnedEffects: null }));
+});
+
+test('a visit the bar may not cancel (owner ruling: simple visits only) is REFUSED even when nothing drifted', async () => {
+  const refused = { ...FROZEN, card_cancel_refusals: ['card_fee_agreement'] };
+  mockComputeImpact.mockResolvedValue(refused);
+  const result = await executeTool('cancel_appointment', {
+    appointment_id: 'svc-synthetic-1',
+    _frozen_cancellation_impact: refused,
+  }, {});
+
+  expect(result.error).toMatch(/can only be cancelled from the Dispatch screen/);
+  expect(mockTransitionJobStatus).not.toHaveBeenCalled();
+  expect(mockFollowThrough).not.toHaveBeenCalled();
+});
+
+test('a pinned cancel never runs the plan reseed (commit and replay); an unpinned one still does', async () => {
+  mockComputeImpact.mockResolvedValue(FROZEN);
+  mockTransitionJobStatus.mockResolvedValue(undefined);
+  await executeTool('cancel_appointment', { appointment_id: 'svc-synthetic-1', _frozen_cancellation_impact: FROZEN }, {});
+  expect(mockReseed).not.toHaveBeenCalled();
+
+  mockApptRow = { ...mockApptRow, status: 'cancelled' };
+  await executeTool('cancel_appointment', { appointment_id: 'svc-synthetic-1', _frozen_cancellation_impact: FROZEN }, {});
+  expect(mockReseed).not.toHaveBeenCalled();
+
+  await executeTool('cancel_appointment', { appointment_id: 'svc-synthetic-1' }, {});
+  expect(mockReseed).toHaveBeenCalledTimes(1);
 });

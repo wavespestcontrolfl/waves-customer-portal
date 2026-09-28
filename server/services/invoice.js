@@ -11002,9 +11002,12 @@ const InvoiceService = {
       const StripeService = require("./stripe");
       for (const candidate of candidates) {
         try {
-          if (pinnedMismatch(candidate)) {
+          // A card-confirmed cancel never pins an invoice carrying a
+          // PaymentIntent (the card refuses that shape), so one attached
+          // since the card is left alone: no Stripe cancel, no void.
+          if (pinnedById && (pinnedMismatch(candidate) || candidate.stripe_payment_intent_id)) {
             logger.warn(
-              `[invoice] NOT auto-voiding ${candidate.invoice_number} for cancelled service ${scheduledServiceId} — amounts changed since the confirmed card; needs office review`,
+              `[invoice] NOT auto-voiding ${candidate.invoice_number} for cancelled service ${scheduledServiceId} — changed since the confirmed card; needs office review`,
             );
             continue;
           }
@@ -11290,6 +11293,9 @@ const InvoiceService = {
         id: candidate.id,
         invoice_number: candidate.invoice_number,
         status: candidate.status,
+        // The void would CANCEL this PaymentIntent (and unbind it from
+        // combined siblings) — a card-confirmed cancel refuses that shape.
+        payment_intent: Boolean(candidate.stripe_payment_intent_id),
         ...cancelVoidInvoiceAmounts(candidate),
       });
     }

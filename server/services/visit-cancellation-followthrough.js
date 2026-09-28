@@ -53,10 +53,9 @@ const {
  *   card showed, keyed by target id: `{ invoices, fee,
  *   creditReversalOfferIds }` (from appointment-cancel-impact.js). A pinned
  *   target voids ONLY the listed invoices at the listed amounts, reverses
- *   inspection credit only for the listed offers, and runs its fee step
- *   only if the fee verdict re-derived at the cancellation instant still
- *   equals `fee`; otherwise no card rail runs and the office gets the
- *   unresolved-fee alert. Unpinned targets are unchanged.
+ *   inspection credit only for the listed offers, and runs NO card rail
+ *   (the card only confirms visits without one); a rail that appeared since
+ *   goes to office review. Unpinned targets are unchanged.
  */
 async function runVisitCancellationFollowThrough({
   targetIds = [],
@@ -118,36 +117,27 @@ async function runVisitCancellationFollowThrough({
         waiveFee: waiveFee || Date.now() - feeTime.getTime() > CardHolds.NO_SHOW_FEE_MAX_AGE_MS,
         now: feeTime,
       };
-      // A pinned card promised one fee verdict. Re-derive it with the rails'
-      // own previews at the cancellation instant the rails will judge, and
-      // run no rail when it moved, when the card promised the fee step would
-      // not run (blocked by an invoice, or a hold outcome it could not pin),
-      // or when the cancellation clock is missing or stale (the waive legs
-      // would release or park a card the approval never covered) — never
-      // charge, release or park a card differently from what was approved.
+      // A pinned (card-confirmed) cancel is only ever a visit with NO card
+      // fee rail (the card refuses any other). It runs no card rail at all,
+      // so nothing can charge, release or park a hold the card never showed;
+      // re-read the rails at the cancellation instant and send anything that
+      // appeared since to office review.
       if (pinned) {
-        const pinnedFee = pinned.fee || {};
-        if (pinnedFee.blocked_by_invoice) {
-          throw new Error('Pinned card showed the fee step blocked by an invoice; fee requires review');
+        const { previewCancelFee } = require('./appointment-cancel-impact');
+        if ((await previewCancelFee(id, feeTime)).rail !== 'none') {
+          throw new Error('A card fee agreement appeared since the confirmed card; fee requires review');
         }
-        if (pinnedFee.hold_disposition === 'review') {
-          throw new Error('Pinned card left the card hold for office review; fee requires review');
-        }
-        if (feeOptions.waiveFee && pinnedFee.rail !== 'none') {
-          throw new Error('Cancellation clock missing or stale for a pinned fee; fee requires review');
-        }
-        const { previewCancelFee, cancelFeesMatch } = require('./appointment-cancel-impact');
-        if (!cancelFeesMatch(await previewCancelFee(id, feeTime), pinnedFee)) {
-          throw new Error('Late-cancel fee no longer matches the confirmed card; fee requires review');
-        }
+        feeOutcome = { released: true, reason: 'pinned_no_card_rail' };
       }
-      const { reason: holdReason, charged, released, parked } = await CardHolds.handleCardHoldCancellation(feeOptions);
-      feeOutcome = holdReason === 'no_hold'
-        ? await ApptCardRequests.handleAppointmentCardCancellation(feeOptions)
-        : {
-          released: [charged, released, parked, holdReason === 'park_gate_off'].includes(true),
-          reason: holdReason || 'hold_unresolved',
-        };
+      if (!pinned) {
+        const { reason: holdReason, charged, released, parked } = await CardHolds.handleCardHoldCancellation(feeOptions);
+        feeOutcome = holdReason === 'no_hold'
+          ? await ApptCardRequests.handleAppointmentCardCancellation(feeOptions)
+          : {
+            released: [charged, released, parked, holdReason === 'park_gate_off'].includes(true),
+            reason: holdReason || 'hold_unresolved',
+          };
+      }
     } catch (e) {
       logger.error(`[${source}] cancellation money handling failed (target ${id}): ${e.message}`);
       feeOutcome = { released: false, reason: 'fee_step_error' };

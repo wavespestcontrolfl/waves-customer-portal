@@ -1689,25 +1689,6 @@ function isParkOnCancelEnabled() {
   }
 }
 
-// What handleCardHoldCancellation does to the HOLD when cancelPreview (a
-// cardHoldCancelPreview result) says no fee applies: 'parked', 'released',
-// or 'review' when the preview's rule does not determine it (rail off, fee
-// settled elsewhere, anything unrecognized). Kept beside the handler so the
-// park rule has one home: an already-parked hold stays parked; a removed
-// card, or no appointment time, releases; a free cancel with a known start
-// (outside the window, past start, booking-age grace) parks when
-// park-on-cancel is on and releases otherwise. The Intelligence Bar cancel
-// card pins this value, and a pinned cancel runs no rail on 'review'.
-function cardHoldCancelDisposition(cancelPreview) {
-  if (cancelPreview?.parked === true) return 'parked';
-  const code = cancelPreview?.rule?.code;
-  if (code === 'card_removed' || code === 'no_time') return 'released';
-  if (['outside_window', 'past_start', 'booking_age'].includes(code)) {
-    return isParkOnCancelEnabled() ? 'parked' : 'released';
-  }
-  return 'review';
-}
-
 // Durable park (pre-push r2 P0): the decision is STAMPED (parked_at +
 // park_reason) so a replayed cancellation returns the park verbatim
 // instead of re-evaluating the fee window against a later `now` — without
@@ -2477,7 +2458,6 @@ async function sendNoShowFeeReceipt({ invoice, customerId, amount, feeLabel, rea
 
 module.exports = {
   isCardHoldEnabled,
-  cardHoldCancelDisposition,
   cardHoldNoShowFee,
   cardHoldCancelWindowHours,
   resolveCardHoldPolicy,

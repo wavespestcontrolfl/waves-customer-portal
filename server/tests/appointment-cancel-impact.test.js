@@ -3,7 +3,7 @@
  * computation for cancel_appointment (PR A of the cancel-pinned-effects
  * lane). Every rail (fee merge, invoice-void preview, inspection-credit
  * reversal preview) is mocked wholesale here — this suite proves the
- * ORCHESTRATION (fee-rail mapping to the {applies, rail, hold_disposition}
+ * ORCHESTRATION (fee-rail mapping to the {applies, amount, unresolved, rail}
  * shape authorization-contract.js reads, and the drift-comparison engine),
  * not the internals of those rail modules (covered by invoice.js /
  * inspection-credit.js's own callers and by the authorization-contract
@@ -28,12 +28,12 @@ jest.mock('../models/db', () => {
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const mockCardHoldPreview = jest.fn();
-// The disposition rule itself is tested beside the handler it mirrors
-// (estimate-card-holds.test.js); here it only has to be the one consulted.
-const mockDisposition = jest.fn((p) => (p?.parked === true ? 'parked' : 'released'));
 jest.mock('../services/estimate-card-holds', () => ({
   cardHoldCancelPreview: (...a) => mockCardHoldPreview(...a),
-  cardHoldCancelDisposition: (...a) => mockDisposition(...a),
+}));
+const mockMayReseed = jest.fn(() => false);
+jest.mock('../services/recurring-series-cancel-reseed', () => ({
+  cancelMayReseedPlan: (...a) => mockMayReseed(...a),
 }));
 const mockApptCardPreview = jest.fn();
 jest.mock('../services/appointment-card-request', () => ({
@@ -57,7 +57,6 @@ jest.mock('../services/inspection-credit', () => ({
 const {
   computeCancelAppointmentImpact,
   cancelImpactsMatch,
-  cancelFeesMatch,
 } = require('../services/appointment-cancel-impact');
 
 beforeEach(() => {
@@ -91,25 +90,25 @@ test('fee applies: an in-window held card hold wins outright', async () => {
     id: 'svc-synthetic-1', status: 'confirmed', scheduled_date: '2026-10-02',
     service_type: 'pest_control', customer_name: 'Synthia Tester',
   });
-  expect(impact.fee).toEqual({ applies: true, amount: 49, unresolved: false, rail: 'card_hold', hold_disposition: null, blocked_by_invoice: false });
+  expect(impact.fee).toEqual({ applies: true, amount: 49, unresolved: false, rail: 'card_hold', blocked_by_invoice: false });
   // The appointment rail was never even asked — the hold answered outright.
   expect(mockApptCardPreview).not.toHaveBeenCalled();
 });
 
-test('fee does not apply: outside-window card hold is released', async () => {
+test('fee does not apply: an outside-window card hold is still a card rail', async () => {
   mockCardHoldPreview.mockResolvedValue({ held: true, feeApplies: false, feeAmount: 49, rule: { code: 'outside_window' } });
 
   const impact = await computeCancelAppointmentImpact('svc-synthetic-1');
 
-  expect(impact.fee).toEqual({ applies: false, amount: 49, unresolved: false, rail: 'card_hold', hold_disposition: 'released', blocked_by_invoice: false });
+  expect(impact.fee).toEqual({ applies: false, amount: 49, unresolved: false, rail: 'card_hold', blocked_by_invoice: false });
 });
 
-test('fee does not apply: a PARKED card hold is disclosed as parked, not released', async () => {
+test('fee does not apply: a PARKED card hold is still a card rail', async () => {
   mockCardHoldPreview.mockResolvedValue({ held: true, feeApplies: false, feeAmount: 49, parked: true, rule: { code: 'hold_parked' } });
 
   const impact = await computeCancelAppointmentImpact('svc-synthetic-1');
 
-  expect(impact.fee).toEqual({ applies: false, amount: 49, unresolved: false, rail: 'card_hold', hold_disposition: 'parked', blocked_by_invoice: false });
+  expect(impact.fee).toEqual({ applies: false, amount: 49, unresolved: false, rail: 'card_hold', blocked_by_invoice: false });
 });
 
 test('fee rail is the appointment card when no hold exists and the card is secured', async () => {
@@ -118,7 +117,7 @@ test('fee rail is the appointment card when no hold exists and the card is secur
 
   const impact = await computeCancelAppointmentImpact('svc-synthetic-1');
 
-  expect(impact.fee).toEqual({ applies: true, amount: 49, unresolved: false, rail: 'appointment_card', hold_disposition: null, blocked_by_invoice: false });
+  expect(impact.fee).toEqual({ applies: true, amount: 49, unresolved: false, rail: 'appointment_card', blocked_by_invoice: false });
 });
 
 test('no card at all: fee rail is none and nothing is flagged', async () => {
@@ -127,7 +126,7 @@ test('no card at all: fee rail is none and nothing is flagged', async () => {
 
   const impact = await computeCancelAppointmentImpact('svc-synthetic-1');
 
-  expect(impact.fee).toEqual({ applies: false, amount: null, unresolved: false, rail: 'none', hold_disposition: null, blocked_by_invoice: false });
+  expect(impact.fee).toEqual({ applies: false, amount: null, unresolved: false, rail: 'none', blocked_by_invoice: false });
 });
 
 test('an unresolved hold lookup is reported, never silently treated as no fee', async () => {
@@ -147,13 +146,13 @@ test('invoice void: the exact set is passed through with amounts and ids', async
   mockCardHoldPreview.mockResolvedValue({ held: false, feeApplies: false, rule: { code: 'no_card' } });
   mockApptCardPreview.mockResolvedValue({ secured: false, feeApplies: false, rule: { code: 'no_card' } });
   mockInvoicePreview.mockResolvedValue([
-    { id: 'inv-1', invoice_number: 'WPC-2026-9001', status: 'sent', total: 89, credit_applied: 0, deposit_credit: 0 },
+    { id: 'inv-1', invoice_number: 'WPC-2026-9001', status: 'sent', total: 89, credit_applied: 0, deposit_credit: 0, payment_intent: false },
   ]);
 
   const impact = await computeCancelAppointmentImpact('svc-synthetic-1');
 
   expect(impact.invoices).toEqual([
-    { id: 'inv-1', invoice_number: 'WPC-2026-9001', status: 'sent', total: 89, credit_applied: 0, deposit_credit: 0 },
+    { id: 'inv-1', invoice_number: 'WPC-2026-9001', status: 'sent', total: 89, credit_applied: 0, deposit_credit: 0, payment_intent: false },
   ]);
 });
 
@@ -201,7 +200,7 @@ test('an invoice still holding money after the void blocks the fee step (rail ve
 
   const impact = await computeCancelAppointmentImpact('svc-synthetic-1');
 
-  expect(impact.fee).toEqual({ applies: true, amount: 49, unresolved: false, rail: 'card_hold', hold_disposition: null, blocked_by_invoice: true });
+  expect(impact.fee).toEqual({ applies: true, amount: 49, unresolved: false, rail: 'card_hold', blocked_by_invoice: true });
 });
 
 test.each([
@@ -216,16 +215,6 @@ test.each([
   await expect(computeCancelAppointmentImpact('svc-synthetic-1')).rejects.toThrow();
 });
 
-test('a card-hold outcome comes from the card-hold module rule (e.g. review when the rail is off)', async () => {
-  mockCardHoldPreview.mockResolvedValue({ held: true, feeApplies: false, feeAmount: 49, rule: { code: 'rail_off' } });
-  mockDisposition.mockReturnValueOnce('review');
-
-  const impact = await computeCancelAppointmentImpact('svc-synthetic-1');
-
-  expect(mockDisposition).toHaveBeenCalledWith(expect.objectContaining({ rule: { code: 'rail_off' } }));
-  expect(impact.fee.hold_disposition).toBe('review');
-});
-
 test('invoices carry the deposit credit the void would restore', async () => {
   mockCardHoldPreview.mockResolvedValue({ held: false, feeApplies: false, rule: { code: 'no_card' } });
   mockApptCardPreview.mockResolvedValue({ secured: false, feeApplies: false, rule: { code: 'no_card' } });
@@ -238,24 +227,42 @@ test('invoices carry the deposit credit the void would restore', async () => {
   expect(impact.invoices[0].deposit_credit).toBe(75);
 });
 
-describe('cancelFeesMatch (the follow-through re-check before any card rail)', () => {
-  const fee = { applies: true, amount: 49, unresolved: false, rail: 'card_hold', hold_disposition: null };
-  test('same verdict matches; blocked_by_invoice is not part of the rail verdict', () => {
-    expect(cancelFeesMatch({ ...fee }, { ...fee, blocked_by_invoice: false })).toBe(true);
+describe('card_cancel_refusals (owner ruling 2026-09-28: the bar cancels simple visits only)', () => {
+  const noCard = () => {
+    mockCardHoldPreview.mockResolvedValue({ held: false, feeApplies: false, rule: { code: 'no_card' } });
+    mockApptCardPreview.mockResolvedValue({ secured: false, feeApplies: false, rule: { code: 'no_card' } });
+  };
+
+  test('a plain visit (no card rail, plain invoice, no plan make-up) has no refusals', async () => {
+    noCard();
+    mockInvoicePreview.mockResolvedValue([{ id: 'inv-1', invoice_number: 'WPC-2026-9001', status: 'draft', total: 89, credit_applied: 0, deposit_credit: 0, payment_intent: false }]);
+    const impact = await computeCancelAppointmentImpact('svc-synthetic-1');
+    expect(impact.card_cancel_refusals).toEqual([]);
   });
-  test.each(['applies', 'amount', 'unresolved', 'rail', 'hold_disposition'])('a changed %s does not match', (k) => {
-    const moved = { ...fee, [k]: k === 'amount' ? 99 : (k === 'rail' ? 'appointment_card' : (k === 'hold_disposition' ? 'released' : !fee[k])) };
-    expect(cancelFeesMatch(moved, fee)).toBe(false);
+
+  test('any card fee rail is refused, fee or no fee', async () => {
+    mockCardHoldPreview.mockResolvedValue({ held: true, feeApplies: false, feeAmount: 49, rule: { code: 'outside_window' } });
+    const impact = await computeCancelAppointmentImpact('svc-synthetic-1');
+    expect(impact.card_cancel_refusals).toEqual(['card_fee_agreement']);
   });
-  test('a missing side never matches', () => {
-    expect(cancelFeesMatch(null, fee)).toBe(false);
+
+  test('an invoice carrying a card PaymentIntent, a legacy deposit, or a possible plan make-up visit is refused', async () => {
+    noCard();
+    mockInvoicePreview.mockResolvedValue([
+      { id: 'inv-1', status: 'sent', total: 50, credit_applied: 0, deposit_credit: 75, payment_intent: false },
+      { id: 'inv-2', status: 'sent', total: 20, credit_applied: 0, deposit_credit: 0, payment_intent: true },
+    ]);
+    mockMayReseed.mockReturnValueOnce(true);
+    const impact = await computeCancelAppointmentImpact('svc-synthetic-1');
+    expect(impact.card_cancel_refusals).toEqual(['card_payment_on_invoice', 'estimate_deposit', 'plan_makeup_visit']);
+    expect(mockMayReseed).toHaveBeenCalledWith(expect.objectContaining({ id: 'svc-synthetic-1', status: 'confirmed' }));
   });
 });
 
 describe('cancelImpactsMatch (the commit-time drift check)', () => {
   const base = () => ({
     appointment: { id: 'svc-1', status: 'confirmed', scheduled_date: '2026-10-02', service_type: 'pest_control', customer_name: 'Synthia Tester' },
-    fee: { applies: true, amount: 49, unresolved: false, rail: 'card_hold', hold_disposition: null },
+    fee: { applies: true, amount: 49, unresolved: false, rail: 'card_hold' },
     invoices: [{ id: 'inv-1', invoice_number: 'WPC-2026-9001', status: 'sent', total: 89, credit_applied: 0 }],
     inspection_credit_reversal: null,
   });

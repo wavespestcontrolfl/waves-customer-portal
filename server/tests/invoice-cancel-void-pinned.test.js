@@ -78,8 +78,8 @@ beforeEach(() => {
 test('the preview pins each invoice with total, account credit and deposit credit — and an unpinned sweep voids that same set', async () => {
   const preview = await InvoiceService.previewInvoiceVoidForCancelledService('svc-1');
   expect(preview).toEqual([
-    { id: 'inv-a', invoice_number: 'WPC-TEST-1', status: 'sent', total: 50, credit_applied: 0, deposit_credit: 75 },
-    { id: 'inv-b', invoice_number: 'WPC-TEST-2', status: 'draft', total: 20, credit_applied: 5, deposit_credit: 0 },
+    { id: 'inv-a', invoice_number: 'WPC-TEST-1', status: 'sent', payment_intent: false, total: 50, credit_applied: 0, deposit_credit: 75 },
+    { id: 'inv-b', invoice_number: 'WPC-TEST-2', status: 'draft', payment_intent: false, total: 20, credit_applied: 5, deposit_credit: 0 },
   ]);
   const voided = await InvoiceService.voidOpenInvoicesForCancelledService('svc-1');
   expect([...voided]).toEqual(preview.map((p) => p.id));
@@ -115,4 +115,15 @@ test('an empty pin voids nothing but still runs the (pinned) credit reversal', a
   const voided = await InvoiceService.voidOpenInvoicesForCancelledService('svc-1', { pinnedInvoices: [], pinnedCreditReversalOfferIds: [] });
   expect([...voided]).toEqual([]);
   expect(mockReverse).toHaveBeenCalledWith(expect.objectContaining({ pinnedReversalOfferIds: [] }));
+});
+
+test('a pinned invoice that gained a card PaymentIntent since the card is left alone — no Stripe call, no void', async () => {
+  const pinned = await InvoiceService.previewInvoiceVoidForCancelledService('svc-1');
+  mockInvoiceRows = [INV_A, { ...INV_B, stripe_payment_intent_id: 'pi_test' }];
+  const stripe = require('../services/stripe');
+  stripe.retrievePaymentIntent.mockResolvedValue({ status: 'requires_payment_method' });
+  const voided = await InvoiceService.voidOpenInvoicesForCancelledService('svc-1', { pinnedInvoices: pinned });
+  expect([...voided]).toEqual(['inv-a']);
+  expect(stripe.retrievePaymentIntent).not.toHaveBeenCalled();
+  expect(stripe.cancelPaymentIntent).not.toHaveBeenCalled();
 });
