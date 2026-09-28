@@ -196,7 +196,7 @@ function statedHour(hourWords, periodWords) {
   // No period said (owner decision 2026-09-28, reschedules): business
   // hours — 7-11 the morning, 12 and 1-6 the afternoon; other hours state
   // nothing. The slot quote must then say no period at all (statesSlotWords).
-  if (typeof periodWords !== 'string') return businessHour(n);
+  if (typeof periodWords !== 'string') return /^0/.test(tok) ? null : businessHour(n); // "02" is a 24-hour clock
   const periodToks = normalize(periodWords).split(' ');
   // "12 noon" / "12 midnight" name the hour itself; for any other hour noon
   // or midnight is a window's end (see PERIOD_PHRASES). Twelve beside a
@@ -356,8 +356,30 @@ function periodIsTheHours(quote, words) {
 
 // Does this slot quote hold every recorded word, with the period its hour's
 // and the hour on the hour?
+// The only shapes an hour with no period may be said in for the
+// business-hours reading: led by "at"/"to"/"for"/"between" or a day
+// ("Tuesday, 2 to 4"), and followed by nothing, "o'clock", a range end, or
+// a day. "Around two", "by two", "two or four", "two-ish" never qualify.
+const EXACT_LEADS = new Set(['at', 'to', 'for', 'between']);
+const EXACT_TAILS = new Set(['o', 'oclock', 'on', 'then', 'this', 'next', 'please', 'sharp']);
+function saidExactly(quote, words) {
+  // Tokens keeping clause punctuation, so "at two, a tech will call" ends
+  // the hour at the comma.
+  const toks = joinMeridiem(quote).toLowerCase().replace(/[,.;!?]/g, ' , ').replace(/[^a-z0-9,]+/g, ' ').trim().split(/\s+/);
+  return spans(toks, words.hour).some(([ha, hb]) => {
+    const prev = toks[ha - 1];
+    const next = toks[hb];
+    const lead = EXACT_LEADS.has(prev) || DAY_WORDS.has(prev) || (prev === ',' && DAY_WORDS.has(toks[ha - 2]));
+    const rangeEnd = (next === 'to' || next === 'through' || (next === 'and' && prev === 'between'))
+      && (hourNumber(toks[hb + 1]) != null || /^(?:noon|midnight)$/.test(toks[hb + 1] || ''));
+    const tail = next === undefined || next === ',' || EXACT_TAILS.has(next) || DAY_WORDS.has(next) || rangeEnd;
+    return lead && tail && (prev !== 'between' || rangeEnd);
+  });
+}
+
 function statesSlotWords(quote, words, turns, agreementQuotes = []) {
   return slotPhrases(words).every((w) => holds(quote, w)) && periodIsTheHours(quote, words) && twelveSaidTogether(quote, words)
+    && (typeof words.period === 'string' || /^(?:noon|midnight)$/.test(normalize(words.hour)) || saidExactly(quote, words))
     // An hour read as business hours: the sentences the quote sits in must
     // state no half of the day and name no noon/midnight bound — "Thursday
     // at two" cut from "Thursday at two in the morning" never falls back.

@@ -301,6 +301,11 @@ describe('groundRescheduleAgreement', () => {
     for (const said of ['We will move it to Thursday at two, I mean a.m.', 'We will move it to Thursday at two, I said AM.', 'I prefer AM, we will move it to Thursday at two.']) {
       expect([said, plain(THURSDAY_2PM, said, 'two').reason]).toEqual([said, 'agreed_slot_ungrounded']);
     }
+    // Codex #5163 r4: only an exact hour takes the business-hours reading.
+    for (const said of ['We will move it to Thursday around two.', 'We will move it to Thursday by two.', 'We will move it to Thursday at two or four.', 'We will move it to Thursday at 02:00.']) {
+      expect([said, plain(THURSDAY_2PM, said, said.includes('02') ? '02' : 'two').ok]).toEqual([said, false]);
+    }
+    expect(plain(THURSDAY_2PM, 'We will move it to Thursday between two and four.', 'two').ok).toBe(true);
     // "Am" the verb is not a period.
     expect(plain(THURSDAY_2PM, 'I am moving you to Thursday at two.', 'two').ok).toBe(true);
     // Nor one said just past the end of the quote, in the same sentence.
