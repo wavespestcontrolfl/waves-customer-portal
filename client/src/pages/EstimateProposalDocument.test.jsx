@@ -107,6 +107,49 @@ describe('EstimateProposalDocument', () => {
     expect(text).not.toMatch(/re-service requests are included|no long.term contract|money[- ]back|callbacks?/i);
   });
 
+  // Owner ruling 2026-09-27: each service carries its own terms; the terms
+  // line covers the whole document, so it needs every service.
+  const pestRodentDocument = (proposalOverrides = {}, estimateOverrides = {}) => ({
+    ...BASE_DATA,
+    estimate: { ...BASE_DATA.estimate, category: 'RESIDENTIAL', ...estimateOverrides },
+    proposal: {
+      ...BASE_DATA.proposal,
+      enabled: false,
+      synthesized: true,
+      title: 'Service Proposal',
+      buildings: [{
+        name: '123 Palm Way',
+        note: null,
+        lineItems: [
+          { description: 'Quarterly Pest Control', quantity: 1, unitPrice: 150, amount: 150, frequency: 'quarterly', frequencyLabel: 'Quarterly', taxable: false, termsScope: 'all' },
+          { description: 'Rodent Bait Stations', quantity: 1, unitPrice: 40, amount: 40, frequency: 'monthly', frequencyLabel: 'Monthly', taxable: false, termsScope: 'satisfaction' },
+        ],
+      }],
+      totals: { annualRecurring: 1080, monthlyEquivalent: 90, oneTime: 0, totalTax: 0, firstYearTotal: 1080, hasTax: false, isMultiBuilding: false },
+      ...proposalOverrides,
+    },
+    cta: { commercialProposal: false, commercialAutoPriced: false },
+  });
+
+  it('a pest service keeps its own terms beside a rodent service, while the terms line stays neutral', () => {
+    const { container } = render(<EstimateProposalDocument data={pestRodentDocument({ noEstimateWideGuarantee: true })} token="tok-123" />);
+    const text = container.textContent;
+    expect(text).toMatch(/Money-back guarantee — if we can’t solve/);
+    expect(text).toContain('Licensed & insured · Satisfaction guaranteed');
+    expect(text).not.toContain(GLASS_COPY.ctaMicro);
+  });
+
+  it('the page-level decision also neutralizes the terms line (engine commercial marks the document rows drop)', () => {
+    const pestOnly = pestRodentDocument({
+      buildings: [{ name: '123 Palm Way', note: null, lineItems: [
+        { description: 'Quarterly Pest Control', quantity: 1, unitPrice: 150, amount: 150, frequency: 'quarterly', frequencyLabel: 'Quarterly', taxable: false, termsScope: 'all' },
+      ] }],
+    }, { noEstimateWideGuarantee: true });
+    const { container } = render(<EstimateProposalDocument data={pestOnly} token="tok-123" />);
+    expect(container.textContent).toContain('Licensed & insured · Satisfaction guaranteed');
+    expect(container.textContent).not.toContain(GLASS_COPY.ctaMicro);
+  });
+
   it('renders a residential estimate with the recurring terms and approve-online next step', () => {
     const residential = {
       ...BASE_DATA,

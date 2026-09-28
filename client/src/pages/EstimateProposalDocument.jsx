@@ -1,7 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import { WAVES_ACCOUNT_MANAGER_FIRST_NAME, WAVES_FL_LICENSE_LINE, WAVES_SUPPORT_PHONE_DISPLAY } from '../constants/business';
 import { fmtMoney } from '../lib/money';
-import { copyAllowedInScope, guaranteeScope } from '@estimate-copy-claims';
+import { copyAllowedInScope, guaranteeScope, serviceGuaranteeScope } from '@estimate-copy-claims';
 import {
   glassCtaMicroForKeys,
   glassRowInclusions,
@@ -133,6 +133,12 @@ function Bullet({ children }) {
   );
 }
 
+const SCOPE_BREADTH = { none: 0, satisfaction: 1, all: 2 };
+function narrowerScope(a, b) {
+  if (!a) return b;
+  return SCOPE_BREADTH[b] < SCOPE_BREADTH[a] ? b : a;
+}
+
 function proposalInclusions(items, scope = 'all') {
   if (!Array.isArray(items)) return null;
   const visible = items.filter((line) => copyAllowedInScope(line, scope));
@@ -145,16 +151,17 @@ export function proposalMakesNoGuaranteeClaim(data = {}) {
     : data?.estimate?.noGuaranteeClaims === true;
 }
 
-// The document's guarantee scope ('all' | 'satisfaction' | 'none') from the
-// server's decisions about the rows it prints: an authored (commercial),
-// rodent or mixed-neutral proposal keeps only "satisfaction guaranteed".
+// The document's guarantee scope ('all' | 'satisfaction' | 'none') for the
+// lines that cover the whole document, from the server's decisions about the
+// rows it prints: an authored (commercial), rodent or mixed-neutral proposal
+// keeps only "satisfaction guaranteed". The page's own decision also counts:
+// it sees engine commercial marks that the printed rows drop.
 export function proposalGuaranteeScope(data = {}) {
   const proposal = data?.proposal;
   return guaranteeScope({
     noGuaranteeClaims: proposalMakesNoGuaranteeClaim(data),
-    noEstimateWideGuarantee: proposal && typeof proposal === 'object'
-      ? proposal.noEstimateWideGuarantee === true
-      : data?.estimate?.noEstimateWideGuarantee === true,
+    noEstimateWideGuarantee: (proposal && typeof proposal === 'object' && proposal.noEstimateWideGuarantee === true)
+      || data?.estimate?.noEstimateWideGuarantee === true,
   });
 }
 
@@ -221,23 +228,32 @@ export default function EstimateProposalDocument({ data, token }) {
   const scope = proposalGuaranteeScope(data);
   const inclusionStacks = useMemo(() => {
     if (authoredTermsPresent || programList.length) return [];
+    // Each stack states its own service's terms: commercial work carries
+    // only its satisfaction clause, and a residential line the server's
+    // termsScope (an unstamped line follows the document).
     if (isCommercial) {
       const stack = pestRecurringOnly ? glassRowInclusions('commercial_pest') : null;
-      const items = proposalInclusions(stack, scope);
+      const items = proposalInclusions(stack, serviceGuaranteeScope(scope, 'satisfaction'));
       return items ? [{ key: 'commercial_pest', title: 'What your commercial pest service includes', items }] : [];
     }
+    const recurringLines = buildings
+      .flatMap((building) => (building.lineItems || []))
+      .filter((item) => item.frequency !== 'one_time')
+      .map((item) => ({ item, slug: glassServiceSlug(String(item.description || '')) }))
+      .filter(({ slug }) => slug);
+    // A stack speaks for every line it covers: the narrowest of their scopes.
+    const slugScopes = new Map();
+    for (const { item, slug } of recurringLines) {
+      slugScopes.set(slug, narrowerScope(slugScopes.get(slug), serviceGuaranteeScope(scope, item.termsScope)));
+    }
     const seen = new Map();
-    for (const building of buildings) {
-      for (const item of (building.lineItems || [])) {
-        if (item.frequency === 'one_time') continue;
-        const slug = glassServiceSlug(String(item.description || ''));
-        if (!slug || seen.has(slug)) continue;
-        const visits = item.frequency === 'per_application'
-          ? (Number(item.visitsPerYear) || null)
-          : (FREQUENCY_VISITS[item.frequency] || null);
-        const items = proposalInclusions(glassRowInclusions(slug, visits, false), scope);
-        if (items) seen.set(slug, { key: slug, title: 'What this service includes', items });
-      }
+    for (const { item, slug } of recurringLines) {
+      if (seen.has(slug)) continue;
+      const visits = item.frequency === 'per_application'
+        ? (Number(item.visitsPerYear) || null)
+        : (FREQUENCY_VISITS[item.frequency] || null);
+      const items = proposalInclusions(glassRowInclusions(slug, visits, false), slugScopes.get(slug));
+      if (items) seen.set(slug, { key: slug, title: 'What this service includes', items });
     }
     return [...seen.values()];
   }, [isCommercial, pestRecurringOnly, authoredTermsPresent, buildings, programList, scope]);

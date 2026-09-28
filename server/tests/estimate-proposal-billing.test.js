@@ -35,6 +35,7 @@ const {
   proposalCallbackTermsEligible,
   proposalCarriesPlanTerms,
   proposalMakesNoGuaranteeClaim,
+  proposalRowTermsScope,
   resolveProposalBillingContext,
   _resetPerApplicationColumnsProbeForTests,
 } = require('../services/estimate-proposal-billing');
@@ -166,6 +167,25 @@ describe('proposalCallbackTermsEligible', () => {
   it('never allows it where the proposal makes no guarantee claim', () => {
     mockEstimateMakesNoGuaranteeClaim.mockReturnValueOnce(true);
     expect(proposalCallbackTermsEligible({ enabled: false, buildings: [building('Quarterly Pest Control')] }, 'e1')).toBe(false);
+  });
+});
+
+// Owner ruling 2026-09-27: each service carries its own terms, so each
+// printed line states its own service's terms.
+describe('proposalRowTermsScope', () => {
+  const residential = { enabled: false };
+  it('a residential pest or lawn line carries the plan terms; a rodent line only satisfaction', () => {
+    expect(proposalRowTermsScope(residential, { description: 'Quarterly Pest Control' })).toBe('all');
+    expect(proposalRowTermsScope(residential, { description: 'Lawn Care' })).toBe('all');
+    expect(proposalRowTermsScope(residential, { description: 'Rodent Bait Stations' })).toBe('satisfaction');
+  });
+
+  it('every line of an authored (commercial) proposal carries only satisfaction', () => {
+    expect(proposalRowTermsScope({ enabled: true }, { description: 'Quarterly Pest Control' })).toBe('satisfaction');
+  });
+
+  it('no line of a no-guarantee document carries terms', () => {
+    expect(proposalRowTermsScope(residential, { description: 'Quarterly Pest Control' }, true)).toBe('none');
   });
 });
 

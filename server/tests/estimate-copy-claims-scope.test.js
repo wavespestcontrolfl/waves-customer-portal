@@ -7,7 +7,9 @@ const {
   guaranteeScope,
   withoutClaimsOutsideScope,
 } = require('../../shared/estimate-copy-claims.cjs');
+const { serviceGuaranteeScope } = require('../../shared/estimate-copy-claims.cjs');
 const { resolveOneTimeServiceCopy } = require('../services/estimate-one-time-copy');
+const { serviceRowTermsScope } = require('../routes/estimate-public');
 
 describe('estimate guarantee scope', () => {
   test('the scope follows the two server decisions', () => {
@@ -43,5 +45,42 @@ describe('estimate guarantee scope', () => {
     expect(neutral.includes.join(' ')).not.toMatch(/guarantee/i);
     expect(neutral.terms).not.toMatch(/contract/i);
     expect(neutral.includes).toContain('Interceptor traps under bed legs for post-treatment monitoring');
+  });
+
+  // Owner ruling 2026-09-27: each service carries its own terms; a line
+  // covering the whole estimate needs every service to carry it.
+  test('a service states its own terms within the estimate scope', () => {
+    expect(serviceGuaranteeScope('satisfaction', 'all')).toBe('all');
+    expect(serviceGuaranteeScope('all', 'satisfaction')).toBe('satisfaction');
+    expect(serviceGuaranteeScope('none', 'all')).toBe('none');
+    expect(serviceGuaranteeScope('satisfaction', undefined)).toBe('satisfaction');
+    expect(serviceGuaranteeScope('all', 'interior_only')).toBe('all');
+  });
+
+  test.each([
+    ['a pest section beside a rodent one', { key: 'pest_control', memberKeys: ['pest_control'] }, 'all'],
+    ['a rodent section', { key: 'rodent_bait', memberKeys: ['rodent_bait'] }, 'satisfaction'],
+    ['a commercial pest section', { key: 'commercial_pest', memberKeys: ['commercial_pest'] }, 'satisfaction'],
+    ['a pest + lawn bundle section', { key: 'bundle', memberKeys: ['pest_control', 'lawn_care'] }, 'all'],
+    ['a pest + rodent bundle section', { key: 'bundle', memberKeys: ['pest_control', 'rodent_bait'] }, 'satisfaction'],
+    ['a palm section', { key: 'palm_injection', memberKeys: ['palm_injection'] }, 'all'],
+  ])('%s carries its own terms on a satisfaction-scope estimate', (_label, section, expected) => {
+    expect(serviceRowTermsScope('satisfaction', section, { recurring: true })).toBe(expected);
+  });
+
+  test.each([
+    ['a residential bed bug job', { service: 'bed_bug', label: 'Bed Bug Heat Treatment', amount: 650 }, 'all'],
+    ['a rodent exclusion job', { service: 'rodent_exclusion', label: 'Full Rodent Exclusion', amount: 900 }, 'satisfaction'],
+    ['an engine-marked commercial job', { service: 'bed_bug', label: 'Bed Bug Heat Treatment', amount: 650, isCommercial: true }, 'satisfaction'],
+  ])('%s carries its own terms', (_label, row, expected) => {
+    expect(serviceRowTermsScope('satisfaction', row)).toBe(expected);
+  });
+
+  test('commercial scope, termite work and non-service rows', () => {
+    const pest = { key: 'pest_control', memberKeys: ['pest_control'] };
+    expect(serviceRowTermsScope('satisfaction', pest, { recurring: true, commercial: true })).toBe('satisfaction');
+    expect(serviceRowTermsScope('none', pest, { recurring: true })).toBe('none');
+    expect(serviceRowTermsScope('all', { service: 'waveguard_setup', label: 'WaveGuard Setup', amount: 99 })).toBeNull();
+    expect(serviceRowTermsScope('satisfaction', { key: 'bundle', memberKeys: [] }, { recurring: true })).toBeNull();
   });
 });

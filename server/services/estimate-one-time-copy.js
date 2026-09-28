@@ -26,7 +26,7 @@
 
 const PACK = require('./estimate-one-time-copy.json');
 const { hasPurchasedTrenchingWarranty, PURCHASED_TRENCHING_WARRANTY_BULLET } = require('../../shared/estimate-purchased-warranty.cjs');
-const { GUARANTEE_COPY, copyAllowedInScope, withoutClaimsOutsideScope } = require('../../shared/estimate-copy-claims.cjs');
+const { GUARANTEE_COPY, copyAllowedInScope, serviceGuaranteeScope, withoutClaimsOutsideScope } = require('../../shared/estimate-copy-claims.cjs');
 
 // The copy scope an option set asks for: an explicit guaranteeScope, else the
 // older noGuaranteeClaims boolean (true means 'none').
@@ -458,13 +458,14 @@ const COMPONENT_EXPANSION_KEYS = new Set(['rodent_exclusion']);
 
 // Row copies for a breakdown, aligned by index; included (service-credit)
 // rows never carry copy. Both render paths use this so they cannot diverge
-// (codex #3823 r3 P2s).
+// (codex #3823 r3 P2s). Each row states its own terms: the row's termsScope
+// stamp within the estimate's scope (serviceGuaranteeScope).
 function resolveOneTimeRowCopies(rows = [], options = {}) {
   const seen = new Set();
   const scope = copyScope(options);
   return (Array.isArray(rows) ? rows : []).map((row) => {
     if (!row || row.serviceSpecificDiscountApplied === true || row.kind === 'included') return null;
-    const copy = resolveOneTimeServiceCopy(row, { guaranteeScope: scope });
+    const copy = resolveOneTimeServiceCopy(row, { guaranteeScope: serviceGuaranteeScope(scope, row.termsScope) });
     if (!copy) return null;
     if (COMPONENT_EXPANSION_KEYS.has(copy.key)) {
       if (seen.has(copy.key)) return null;

@@ -98,6 +98,34 @@ describe('ServiceSection', () => {
     expect(screen.getByText(/licensed & insured · no pressure/i)).toBeInTheDocument();
   });
 
+  it('a section states its own terms: a pest section keeps its plan terms on a satisfaction estimate', () => {
+    const section = {
+      key: 'pest_control',
+      label: 'Pest Control',
+      isRecurring: true,
+      isPest: true,
+      frequencies: [baseFrequency],
+      copy: { priceWording: {} },
+    };
+    const props = {
+      selectedFrequencyKey: 'standard',
+      selectedAddOns: new Set(),
+      onFrequencyChange: vi.fn(),
+      onAddOnToggle: vi.fn(),
+      renderFlags: { showPestRecurringAddOns: false, showWaveGuardTierUi: false },
+      showGetServiceCta: true,
+      guaranteeScope: 'satisfaction',
+    };
+    const { rerender } = render(<ServiceSection {...props} section={{ ...section, termsScope: 'all' }} />);
+    expect(screen.getByText(/money-back guarantee/i)).toBeInTheDocument();
+
+    rerender(<ServiceSection {...props} section={section} />);
+    expect(screen.queryByText(/money-back guarantee/i)).not.toBeInTheDocument();
+
+    rerender(<ServiceSection {...props} guaranteeScope="none" section={{ ...section, termsScope: 'all' }} />);
+    expect(screen.queryByText(/money-back guarantee/i)).not.toBeInTheDocument();
+  });
+
   it('hides the frequency slider when a section has one frequency', () => {
     render(
       <ServiceSection
@@ -897,6 +925,19 @@ describe('OneTimeBreakdownCard', () => {
     expect(screen.getByText('Interceptor traps under bed legs for post-treatment monitoring')).toBeInTheDocument();
     expect(screen.getByText('Pay on service day.')).toBeInTheDocument();
     expect(screen.queryByText(/30-day guarantee|No contract/i)).not.toBeInTheDocument();
+  });
+
+  it('each one-time row states its own service terms (server termsScope)', () => {
+    const bedBug = { service: 'bed_bug', label: 'Bed Bug Heat Treatment', amount: 650, warrantyEligible: true };
+    const commercialBedBug = { ...bedBug, label: 'Bed Bug Heat Treatment — Suite 200' };
+    render(<OneTimeBreakdownCard guaranteeScope="satisfaction" breakdown={{ total: 1300, items: [
+      { ...bedBug, termsScope: 'all', copy: resolveOneTimeServiceCopy(bedBug) },
+      { ...commercialBedBug, termsScope: 'satisfaction', copy: resolveOneTimeServiceCopy(commercialBedBug) },
+    ] }} />);
+    for (const button of screen.getAllByRole('button', { name: /See everything included/i })) fireEvent.click(button);
+    expect(screen.getAllByText('Written 30-day guarantee on the treated areas')).toHaveLength(1);
+    expect(screen.getByText('Pay on service day. No contract.')).toBeInTheDocument();
+    expect(screen.getByText('Pay on service day.')).toBeInTheDocument();
   });
 
   it('keeps a canonically purchased trenching warranty while filtering generic promises', () => {

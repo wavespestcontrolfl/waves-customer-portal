@@ -312,6 +312,43 @@ describe('resolveOneTimeServiceCopy', () => {
     expect(rear.copy.includes).not.toContain(ONE_TIME_SERVICE_COPY.wasp.removalBullet);
   });
 
+  // Owner ruling 2026-09-27: each service carries its own terms. The page
+  // data stamps every row with termsScope, and its copy follows it.
+  test('a residential bed bug job keeps its own guarantee beside a rodent job', () => {
+    const contract = attachPublicPricingContract(
+      { frequencies: [], oneTimeBreakdown: { total: 1550, items: [
+        { service: 'bed_bug', label: 'Bed Bug Heat Treatment', amount: 650, warrantyEligible: true },
+        { service: 'rodent_exclusion', label: 'Full Rodent Exclusion', amount: 900 },
+      ] } },
+      {},
+      { result: { oneTime: { items: [
+        { service: 'bed_bug', name: 'Bed Bug Heat Treatment', price: 650, warrantyEligible: true },
+        { service: 'rodent_exclusion', name: 'Full Rodent Exclusion', price: 900 },
+      ] } } },
+    );
+    const [bedBug, rodent] = contract.oneTimeBreakdown.items;
+    expect(bedBug.termsScope).toBe('all');
+    expect(bedBug.copy.assurance).toBe('Written 30-day guarantee on the treated areas');
+    expect(rodent.termsScope).toBe('satisfaction');
+    expect(rodent.copy.terms).toBe('Pay on service day.');
+  });
+
+  test('every one-time row of an estimate with commercial work keeps only its satisfaction clause', () => {
+    const contract = attachPublicPricingContract(
+      { frequencies: [], oneTimeBreakdown: { total: 650, items: [
+        { service: 'bed_bug', label: 'Bed Bug Heat Treatment', amount: 650, warrantyEligible: true },
+      ] } },
+      {},
+      { result: { oneTime: { items: [
+        { service: 'bed_bug', name: 'Bed Bug Heat Treatment', price: 650, warrantyEligible: true, isCommercial: true },
+      ] } } },
+    );
+    const [bedBug] = contract.oneTimeBreakdown.items;
+    expect(bedBug.termsScope).toBe('satisfaction');
+    expect(bedBug.copy.assurance).toBeNull();
+    expect(`${bedBug.copy.includes.join(' ')} ${bedBug.copy.terms}`).not.toMatch(/guarantee|contract/i);
+  });
+
   test('one-time lawn copy is neutral across turf basis and treatment type (fertilization is not described as a corrective treatment)', () => {
     const lawn = ONE_TIME_SERVICE_COPY.one_time_lawn;
     expect(`${lawn.outcome} ${lawn.includes.join(' ')}`).not.toMatch(/chinch|weed|fungus/i);

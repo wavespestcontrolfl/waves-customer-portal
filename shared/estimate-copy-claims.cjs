@@ -19,6 +19,19 @@ function guaranteeScope({ noGuaranteeClaims = false, noEstimateWideGuarantee = f
   return 'all';
 }
 
+// One service's scope (owner ruling 2026-09-27: each service carries its own
+// terms; a line covering the whole estimate needs every service to carry
+// it). The estimate's 'none' governs every service. Otherwise a row the
+// server stamped with its own termsScope ('all' for residential pest, lawn,
+// mosquito, tree & shrub or palm work; 'satisfaction' for rodent or
+// commercial work) states those terms, and an unstamped row follows the
+// estimate.
+function serviceGuaranteeScope(estimateScope, termsScope) {
+  if (estimateScope === 'none' || termsScope === 'none') return 'none';
+  if (termsScope === 'all' || termsScope === 'satisfaction') return termsScope;
+  return estimateScope;
+}
+
 const SATISFACTION_CLAIM = /\bsatisfaction guaranteed\b/i;
 const SATISFACTION_CLAIMS = /\bsatisfaction guaranteed\b/gi;
 
@@ -64,6 +77,7 @@ module.exports = {
   PLAN_TERMS_COPY,
   copyAllowedInScope,
   guaranteeScope,
+  serviceGuaranteeScope,
   withoutClaimParts,
   withoutClaimsOutsideScope,
   withoutPlanTermsClaims,

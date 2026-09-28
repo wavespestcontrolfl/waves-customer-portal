@@ -40,7 +40,7 @@ function acceptBookingGateToken(estimate) {
 }
 const { isInvoiceCollectibleStatus } = require('../services/invoice-helpers');
 const { resolveOneTimeServiceCopy, resolveOneTimeRowCopies, oneTimeOnlyIntelligenceCopy } = require('../services/estimate-one-time-copy');
-const { copyAllowedInScope, guaranteeScope, withoutClaimsOutsideScope } = require('../../shared/estimate-copy-claims.cjs');
+const { copyAllowedInScope, guaranteeScope, serviceGuaranteeScope, withoutClaimsOutsideScope } = require('../../shared/estimate-copy-claims.cjs');
 const {
   collapseMirroredRows,
   hasPurchasedTrenchingWarranty,
@@ -5813,16 +5813,29 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   const oneTimeRowCopyAllowed = !hasRegulatedCertificateServiceMix(recurring, oneTimeItems);
   // One copy per logical job, included (service-credit) rows skipped — the
   // same helper the React contract uses (codex #3823 r3 P2s).
-  const oneTimeRowCopies = oneTimeRowCopyAllowed ? resolveOneTimeRowCopies(billableOneTimeItems, { guaranteeScope: pageGuaranteeScope }) : [];
+  // Each row states its own service's terms (serviceRowTermsScope), as the
+  // page data stamps them for the React page.
+  const pageCommercialScope = estimateHasCommercialScope(estData);
+  const oneTimeRowScopes = billableOneTimeItems.map((it) => serviceGuaranteeScope(
+    pageGuaranteeScope,
+    serviceRowTermsScope(pageGuaranteeScope, it, { commercial: pageCommercialScope }),
+  ));
+  const oneTimeRowCopies = oneTimeRowCopyAllowed
+    ? resolveOneTimeRowCopies(
+      billableOneTimeItems.map((it, rowIndex) => ({ ...it, termsScope: oneTimeRowScopes[rowIndex] })),
+      { guaranteeScope: pageGuaranteeScope },
+    )
+    : [];
   const realOneTimeRows = billableOneTimeItems.map((it, rowIndex) => {
     const price = oneTimeItemAmount(it);
     const includedByServiceCredit = it.serviceSpecificDiscountApplied === true;
     const rawDetail = isTermiteInstallItem(it) ? formatTermiteBaitDetail(R.tmBait, it.detail) : it.detail;
     // Plan-terms parts go and the scope stays; a pre-slab job keeps its
     // selected extended warranty (owner ruling 2026-09-27).
-    const detail = copyAllowedInScope(rawDetail, pageGuaranteeScope)
+    const rowScope = oneTimeRowScopes[rowIndex];
+    const detail = copyAllowedInScope(rawDetail, rowScope)
       ? rawDetail
-      : withoutClaimsOutsideScope(rawDetail, pageGuaranteeScope, preSlabSelectedWarrantyPart(it));
+      : withoutClaimsOutsideScope(rawDetail, rowScope, preSlabSelectedWarrantyPart(it));
     const priceCell = includedByServiceCredit ? 'Included' : fmtMoney(price);
     // What the visit involves — same outcome + bullet + terms shape the
     // React OneTimeBreakdownCard renders from item.copy (one pack, both paths).
@@ -20123,10 +20136,39 @@ function estimateHasCommercialRow(estData = {}) {
   ]).some((row) => row.isCommercial === true));
 }
 
+// An authored proposal is commercial work, as is any engine-marked row.
+function estimateHasCommercialScope(estData = {}) {
+  return estData?.proposal?.enabled === true || estimateHasCommercialRow(estData);
+}
+
 function estimateCarriesPlanTerms(estData = {}, pricingBundle = {}) {
-  if (estData?.proposal?.enabled === true || estimateHasCommercialRow(estData)) return false;
+  if (estimateHasCommercialScope(estData)) return false;
   const rows = guaranteeServiceRows(estData, pricingBundle);
   return rows ? serviceMixCarriesPlanTerms(rows.recurring, rows.oneTime) : false;
+}
+
+// The terms one service states on its own row (owner ruling 2026-09-27:
+// each service carries its own terms), the per-row half of
+// serviceMixCarriesPlanTerms: 'all' for residential pest, lawn, mosquito or
+// tree & shrub work, 'satisfaction' for rodent, commercial or other work
+// (every row, on an estimate with commercial scope), within the estimate's
+// scope, so termite or unclassifiable work anywhere still means 'none'. A
+// recurring section classifies by its key, or by every member key of a
+// synthetic bundle section. Null for a setup, discount or credit row, or a
+// bundle section without member keys: those follow the estimate.
+function serviceRowTermsScope(estimateScope, row, { recurring = false, commercial = false } = {}) {
+  if (!row || typeof row !== 'object') return null;
+  let carries;
+  if (recurring) {
+    const keys = Array.isArray(row.memberKeys) && row.memberKeys.length ? row.memberKeys : [row.key];
+    if (keys.some((key) => !key || key === 'bundle')) return null;
+    carries = keys.every((key) => !String(key).startsWith('commercial_')
+      && PLAN_TERMS_CATEGORIES.has(categoryForRecurringServiceKey(key)));
+  } else {
+    if (isNonServiceOneTimeItem(row)) return null;
+    carries = PLAN_TERMS_CATEGORIES.has(serviceCategoryForOneTimeItem(row));
+  }
+  return serviceGuaranteeScope(estimateScope, !commercial && row.isCommercial !== true && carries ? 'all' : 'satisfaction');
 }
 
 // Optional service-category scope for the glass release: CSV env, e.g.
@@ -23761,6 +23803,16 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
     noGuaranteeClaims,
     noEstimateWideGuarantee: !estimateCarriesPlanTerms(estData, basePayload),
   });
+  // Each service states its own terms (serviceRowTermsScope): every section
+  // and one-time row carries termsScope, and its row copy follows it.
+  const contractCommercialScope = estimateHasCommercialScope(estData);
+  const withTermsScope = (row, options = {}) => {
+    const termsScope = serviceRowTermsScope(contractGuaranteeScope, row, { ...options, commercial: contractCommercialScope });
+    if (termsScope) return { ...row, termsScope };
+    if (!row || typeof row !== 'object' || !('termsScope' in row)) return row;
+    const { termsScope: _stale, ...rest } = row;
+    return rest;
+  };
   // Normalize breakdown labels BEFORE sections are built: the per-service
   // oneTimeContribution rows and the top-level breakdown must be the SAME
   // row objects, or the client's exclusion identity (service|label|amount)
@@ -23791,9 +23843,13 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
         ...basePayload.oneTimeBreakdown,
         items: (() => {
           const labeled = basePayload.oneTimeBreakdown.items.map(normalizeBreakdownItemLabel)
-            .map((row) => (copyAllowedInScope(row.detail, contractGuaranteeScope)
-              ? row
-              : { ...row, detail: withoutClaimsOutsideScope(row.detail, contractGuaranteeScope, preSlabSelectedWarrantyPart(row)) }));
+            .map((row) => withTermsScope(row))
+            .map((row) => {
+              const rowScope = serviceGuaranteeScope(contractGuaranteeScope, row?.termsScope);
+              return copyAllowedInScope(row?.detail, rowScope)
+                ? row
+                : { ...row, detail: withoutClaimsOutsideScope(row.detail, rowScope, preSlabSelectedWarrantyPart(row)) };
+            });
           if (!rowCopyAllowed) return labeled;
           const copyInputs = labeled.map((row) => {
             const raw = rawContractRowFor(row, rawContractRowGroups, labeled);
@@ -23832,6 +23888,22 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
     buildPricingServices(contractPayload, estimate, estData),
     lowConfidenceLines,
   );
+  // A section, and each service row inside its price card (an unsplit
+  // bundle lists several), states its own service's terms.
+  const stampRecurringTermsScope = (target, row) => {
+    const termsScope = serviceRowTermsScope(contractGuaranteeScope, row, { recurring: true, commercial: contractCommercialScope });
+    if (termsScope) target.termsScope = termsScope;
+    else delete target.termsScope;
+  };
+  for (const section of services) {
+    if (!section || typeof section !== 'object') continue;
+    stampRecurringTermsScope(section, section);
+    for (const frequency of (Array.isArray(section.frequencies) ? section.frequencies : [])) {
+      for (const row of (Array.isArray(frequency?.perServiceTreatments) ? frequency.perServiceTreatments : [])) {
+        if (row && typeof row === 'object') stampRecurringTermsScope(row, { key: row.service || row.key });
+      }
+    }
+  }
   attachTermiteBondSelector(services, estData);
   attachTermiteStationRental(services, estData);
   attachCommercialInteriorSelector(services, estData);
@@ -26865,16 +26937,19 @@ async function composeEstimateDataPayload(estimate, {
       || (commercialGlassEnabled && estimateDataForIntelligence?.proposal?.enabled === true)) {
       try {
         const { normalizeProposal, computeProposalTotals } = require('../services/estimate-proposal');
-        const { proposalCarriesPlanTerms, proposalMakesNoGuaranteeClaim, resolveProposalBillingContext } = require('../services/estimate-proposal-billing');
+        const {
+          proposalCarriesPlanTerms, proposalMakesNoGuaranteeClaim, proposalRowTermsScope, resolveProposalBillingContext,
+        } = require('../services/estimate-proposal-billing');
         const proposalBilling = await resolveProposalBillingContext(estimate);
         const proposalForView = normalizeProposal(estimate, {
           recurringMode: proposalBilling?.billsPerApplication === true ? 'per_application' : 'legacy',
           livePricing: proposalBilling?.livePricing || null,
         });
+        const proposalNoGuaranteeClaims = proposalMakesNoGuaranteeClaim(proposalForView, estimate.id);
         proposalPublicView = {
           enabled: proposalForView.enabled === true,
           synthesized: proposalForView.synthesized === true,
-          noGuaranteeClaims: proposalMakesNoGuaranteeClaim(proposalForView, estimate.id),
+          noGuaranteeClaims: proposalNoGuaranteeClaims,
           ...(proposalCarriesPlanTerms(proposalForView, estimate.id) ? {} : { noEstimateWideGuarantee: true }),
           // Drives the commercial inclusions/terms stacks client-side — see
           // proposalPestRecurringOnly's truth-scope classification.
@@ -26899,6 +26974,8 @@ async function composeEstimateDataPayload(estimate, {
               frequencyLabel: item.frequencyLabel,
               ...(item.visitsPerYear > 0 ? { visitsPerYear: item.visitsPerYear } : {}),
               taxable: item.taxable === true,
+              // The terms this line's service states in its own inclusions.
+              termsScope: proposalRowTermsScope(proposalForView, item, proposalNoGuaranteeClaims),
             })),
           })),
           totals: computeProposalTotals(proposalForView),
@@ -27827,6 +27904,7 @@ module.exports.serviceMixMakesNoGuaranteeClaim = serviceMixMakesNoGuaranteeClaim
 module.exports.estimateMakesNoGuaranteeClaim = estimateMakesNoGuaranteeClaim;
 module.exports.estimateCarriesPlanTerms = estimateCarriesPlanTerms;
 module.exports.serviceMixCarriesPlanTerms = serviceMixCarriesPlanTerms;
+module.exports.serviceRowTermsScope = serviceRowTermsScope;
 module.exports.guaranteeRecurringRows = guaranteeRecurringRows;
 module.exports.guaranteeProposalRows = guaranteeProposalRows;
 module.exports.oneTimeInvoiceLabelForCategory = oneTimeInvoiceLabelForCategory;

@@ -73,7 +73,7 @@ import { estimateCard, estimateInnerBox } from '../components/estimate/cardStyle
 import TerminalStateCard from '../components/estimate/TerminalStateCard';
 import ProposalDetailCard from '../components/estimate/ProposalDetailCard';
 import EstimateProposalDocument, { proposalMakesNoGuaranteeClaim } from './EstimateProposalDocument';
-import { copyAllowedInScope, guaranteeScope, withoutClaimsOutsideScope } from '@estimate-copy-claims';
+import { copyAllowedInScope, guaranteeScope, serviceGuaranteeScope, withoutClaimsOutsideScope } from '@estimate-copy-claims';
 import { estimateCopyFor } from '../lib/estimate-copy';
 import {
   commercialGlassActive,
@@ -2105,9 +2105,11 @@ export function OneTimeBreakdownCard({ breakdown, excludeServices = [], prepayWa
           const isIncluded = !isQuoteRequired && item.kind === 'included';
           const showPrepayWaiverNote = !isQuoteRequired && !isDiscount && !isIncluded && isPrepayWaivedRow(item);
           const quoteNote = isQuoteRequired ? quoteRequiredReasonNote(item, item.detail || '') : '';
-          const visibleDetail = copyAllowedInScope(item.detail, scope)
+          // Each row states its own service's terms (server termsScope).
+          const rowScope = serviceGuaranteeScope(scope, item.termsScope);
+          const visibleDetail = copyAllowedInScope(item.detail, rowScope)
             ? item.detail
-            : withoutClaimsOutsideScope(item.detail, scope, preSlabSelectedWarrantyPart(item));
+            : withoutClaimsOutsideScope(item.detail, rowScope, preSlabSelectedWarrantyPart(item));
           return (
             <div key={`${item.service || item.label || 'item'}-${i}`} style={{
               display: 'grid', gridTemplateColumns: '1fr auto', gap: 12,
@@ -2123,7 +2125,7 @@ export function OneTimeBreakdownCard({ breakdown, excludeServices = [], prepayWa
                     {visibleDetail}
                   </div>
                 ) : null}
-                <OneTimeRowCopy copy={item.copy} item={item} guaranteeScope={scope} />
+                <OneTimeRowCopy copy={item.copy} item={item} guaranteeScope={rowScope} />
                 {quoteNote ? (
                   <div style={{ fontSize: 14, color: '#92400E', marginTop: 4, lineHeight: 1.35, fontWeight: 700 }}>
                     {quoteNote}
@@ -4652,9 +4654,11 @@ function SectionOneTimeBlock({ contribution, variant = 'trailing', noGuarantee =
       <div style={{ display: 'grid', gap: 10 }}>
         {items.map((item, i) => {
           const amount = fmtMoney(Math.abs(Number(item.amount) || 0));
-          const visibleDetail = copyAllowedInScope(item.detail, scope)
+          // Each row states its own service's terms (server termsScope).
+          const rowScope = serviceGuaranteeScope(scope, item.termsScope);
+          const visibleDetail = copyAllowedInScope(item.detail, rowScope)
             ? item.detail
-            : withoutClaimsOutsideScope(item.detail, scope, preSlabSelectedWarrantyPart(item));
+            : withoutClaimsOutsideScope(item.detail, rowScope, preSlabSelectedWarrantyPart(item));
           if (lead && isTermiteInstall(item)) {
             return (
               <div key={`${item.service || item.label || 'item'}-${i}`}>
@@ -4665,7 +4669,7 @@ function SectionOneTimeBlock({ contribution, variant = 'trailing', noGuarantee =
                 <div style={{ fontSize: 16, fontWeight: 700, color: COLORS.navy, marginTop: 4, fontVariantNumeric: 'tabular-nums' }}>
                   {amount} gets every station in the ground.
                 </div>
-                <OneTimeRowCopy copy={item.copy} item={item} guaranteeScope={scope} />
+                <OneTimeRowCopy copy={item.copy} item={item} guaranteeScope={rowScope} />
               </div>
             );
           }
@@ -4676,7 +4680,7 @@ function SectionOneTimeBlock({ contribution, variant = 'trailing', noGuarantee =
                 {visibleDetail ? (
                   <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 2, lineHeight: 1.35 }}>{visibleDetail}</div>
                 ) : null}
-                <OneTimeRowCopy copy={item.copy} item={item} guaranteeScope={scope} />
+                <OneTimeRowCopy copy={item.copy} item={item} guaranteeScope={rowScope} />
               </div>
               <div style={{ fontSize: 14, fontWeight: 700, color: COLORS.navy, whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
                 {amount}
@@ -4951,7 +4955,12 @@ export function ServiceSection({
   // gate on) when the plan is recurring, else null.
   lawnCalendar = null,
 }) {
-  const sectionGuaranteeScope = resolvedGuaranteeScope(guaranteeScopeProp, noGuarantee);
+  // The section's own terms (server termsScope) within the estimate's scope:
+  // a pest section beside a rodent one keeps its plan terms.
+  const sectionGuaranteeScope = serviceGuaranteeScope(
+    resolvedGuaranteeScope(guaranteeScopeProp, noGuarantee),
+    section?.termsScope,
+  );
   // On phones the corner-pinned WaveGuard badge's 170px heading clearance
   // eats most of the card width and crunches the headline — stack the badge
   // in flow instead. Hook must precede the early return (rules of hooks).

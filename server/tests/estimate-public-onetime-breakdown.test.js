@@ -4641,6 +4641,25 @@ describe('public estimate one-time breakdown', () => {
     expect(html).not.toContain('Written 30-day guarantee');
   });
 
+  test('on the legacy page a residential bed bug job keeps its own guarantee beside a rodent job', () => {
+    const html = renderPage('bed-bug-rodent-token', {
+      status: 'sent', customerName: 'Pat Customer', address: '123 Main St',
+      monthlyTotal: 0, annualTotal: 0, onetimeTotal: 1550, noEstimateWideGuarantee: true,
+    }, {
+      result: {
+        recurring: { services: [] },
+        oneTime: { items: [
+          { service: 'bed_bug', name: 'Bed Bug Heat Treatment', price: 650, warrantyEligible: true },
+          { service: 'rodent_exclusion', name: 'Full Rodent Exclusion', price: 900 },
+        ], specItems: [] },
+        specItems: [],
+      },
+    });
+    expect(html).toContain('Written 30-day guarantee on the treated areas');
+    expect(html).toContain('Pay on service day. No contract.');
+    expect(html).toContain('<div class="onetime-terms">Pay on service day.</div>');
+  });
+
   test('a rodent plan keeps its cancel/refund terms but no estimate-wide guarantee item', () => {
     const html = renderPage('terms-rodent-token', {
       status: 'sent', customerName: 'Pat Customer', address: '123 Main St',

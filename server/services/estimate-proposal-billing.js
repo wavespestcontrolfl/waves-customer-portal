@@ -91,6 +91,20 @@ function proposalCarriesPlanTerms(proposal, estimateId = null) {
   });
 }
 
+// The terms one printed row states on its own (owner ruling 2026-09-27: each
+// service carries its own terms): 'all' for a row in one recurring
+// residential lane (pest, lawn, mosquito, tree & shrub, palm) on a
+// residential proposal, 'satisfaction' for any other row and every row of an
+// authored (commercial) proposal, 'none' on a document that makes no
+// guarantee claim (the caller's proposalMakesNoGuaranteeClaim result).
+function proposalRowTermsScope(proposal, row, noGuaranteeClaims = false) {
+  if (noGuaranteeClaims === true) return 'none';
+  if (proposal?.enabled === true) return 'satisfaction';
+  const { RECURRING_TERMS_LANES } = require('./estimate-followup-copy');
+  const lanes = proposalRowLanes(row);
+  return lanes.length === 1 && RECURRING_TERMS_LANES.includes(lanes[0]) ? 'all' : 'satisfaction';
+}
+
 // Whether the PDF may print its canned IPM/callback sentence, a recurring
 // residential PEST term: the proposal carries the plan terms, every row is
 // pest work, and at least one line is a scheduled recurring visit.
@@ -301,6 +315,7 @@ module.exports = {
   proposalCallbackTermsEligible,
   proposalCarriesPlanTerms,
   proposalMakesNoGuaranteeClaim,
+  proposalRowTermsScope,
   resolveLivePricing,
   resolveProposalBillingContext,
 };

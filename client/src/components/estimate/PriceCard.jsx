@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { flushSync } from 'react-dom';
 import { quoteRequiredReasonText } from '../../lib/quoteDisplay';
 import { applyCommercialExteriorScope, glassCopyActive, glassRowInclusions, glassServiceSlug, glassTierDisplay, treeShrubPalmBulletText, withTreeShrubPalmBullet } from '../../lib/estimate-glass-copy';
-import { copyAllowedInScope } from '@estimate-copy-claims';
+import { copyAllowedInScope, serviceGuaranteeScope } from '@estimate-copy-claims';
 import { CUSTOMER_SURFACE } from '../../theme-customer';
 import { fmtMoney, fmtMoneySigned } from '../../lib/money';
 import { W, PRICE_FONT, waveGuardChipStyle } from './tokens';
@@ -770,7 +770,9 @@ export default function PriceCard({ frequency, waveGuardTier, waveGuardDiscountP
                   // under glass, serviceKey(row) for the baseline list.
                   const isTreeShrubRow = glass ? glassSlug === 'tree_shrub' : serviceKey(row) === 'tree_shrub';
                   const withPalmCare = isTreeShrubRow ? withTreeShrubPalmBullet(base, row.palmCount) : base;
-                  return withPalmCare.filter((line) => copyAllowedInScope(line, inclusionScope));
+                  // Each service row states its own terms (server termsScope).
+                  const rowScope = serviceGuaranteeScope(inclusionScope, row.termsScope);
+                  return withPalmCare.filter((line) => copyAllowedInScope(line, rowScope));
                 })()}
                 collapsible={glass}
               />

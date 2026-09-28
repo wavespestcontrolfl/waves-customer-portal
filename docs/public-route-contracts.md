@@ -1596,10 +1596,23 @@ field on a document `proposal`) is set when not every service carries the
 recurring residential terms: a rodent, commercial, termite or unclassifiable
 service anywhere, or an authored (commercial) proposal
 (`estimateCarriesPlanTerms` / `proposalCarriesPlanTerms`). Absent otherwise.
-Guarantee lines that cover the whole estimate follow it: the shell footer's
-"Backed by the Waves Guarantee" and the legacy plan-terms card's guarantee
-heading and item. It is a superset of `noGuaranteeClaims` below, which still
-governs row-level copy.
+Lines that cover the whole estimate follow it through the shared
+`guaranteeScope` ('none' under `noGuaranteeClaims` below, 'satisfaction'
+here, else 'all'): the shell footer's "Backed by the Waves Guarantee", the
+legacy plan-terms card, perks and one-time callback note, the hero, the plan
+CTA line, the one-time price card and the document's terms line. Row-level
+copy states each service's own terms instead: `/data` stamps `termsScope`
+('all' | 'satisfaction' | 'none') on every `pricing.services[]` section,
+`pricing.oneTimeBreakdown.items[]` row and document
+`proposal.buildings[].lineItems[]` line (`serviceRowTermsScope` /
+`proposalRowTermsScope`). It is 'all' for residential pest, lawn, mosquito,
+tree & shrub or palm work, 'satisfaction' for rodent or commercial work
+(every row of an estimate with a commercial row or an authored proposal),
+and 'none' under `noGuaranteeClaims`. A row's inclusions, one-time copy and
+detail follow it (`serviceGuaranteeScope`); a row without the field follows
+the estimate, and the legacy page applies the same per-row rule. So a pest
+section beside a rodent one keeps its own plan terms while the footer stays
+neutral.
 `/data`'s optional `estimate.noGuaranteeClaims: true` (copy-audit follow-up
 to #4874, 2026-09-26; termite gets no generic estimate-wide guarantee)
 is the page's guarantee decision, `serviceMixMakesNoGuaranteeClaim` in this
