@@ -70,7 +70,12 @@ beforeEach(() => {
   delete process.env.GATE_COLLECTIONS_POLICY;
   collectionsChannelPermitted.mockResolvedValue({ allowed: true, durable: false });
   ContactLedger.recordContact.mockImplementation(async ({ idempotencyKey }) => ({ id: `ledger-${idempotencyKey}` }));
-  buildPayBalanceLink.mockResolvedValue({ url: 'https://portal.wavespestcontrol.com/pay/combined' });
+  // Covers every invoice id used anywhere in this file by default — the one
+  // "coverage falls short" scenario below overrides this narrower.
+  buildPayBalanceLink.mockResolvedValue({
+    url: 'https://portal.wavespestcontrol.com/pay/combined',
+    coveredInvoiceIds: ['inv-1', 'inv-A', 'inv-B'],
+  });
   smsTemplatesRouter.getTemplate.mockResolvedValue('rendered sms body');
   sendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted' });
   billingEmailRecipient.mockResolvedValue({ recipient: { name: 'Taylor', email: 'taylor@example.com' }, to: 'taylor@example.com' });
@@ -300,6 +305,50 @@ describe('gate on: a customer with 2 due rows gets ONE combined message', () => 
     expect(seqTable.rows.get('seq-B').next_touch_at).toBeNull();
     expect(seqTable.rows.get('seq-A').step_index).toBe(1);
     void invA; void invB;
+  });
+
+  test('the email template idempotency key is scoped to the included invoice set, not just customer+step', async () => {
+    twoInvoiceSetup();
+    await runPending();
+    const call = EmailTemplateLibrary.sendTemplate.mock.calls[0][0];
+    expect(call.idempotencyKey).toBe('invoice_followup_combined_email:cust-1:d3_friendly:inv-A,inv-B');
+    expect(call.triggerEventId).toBe('invoice_followup_combined:cust-1:d3_friendly:inv-A,inv-B');
+  });
+
+  test('the combined pay-balance link is used only when it covers every included invoice; otherwise the anchor\'s own link is used', async () => {
+    const { seqTable } = twoInvoiceSetup();
+    // The balance link only covers inv-A (e.g. GATE_PAY_INCLUDE_BALANCE off,
+    // or inv-B excluded from the combined charge for its own reason) — the
+    // message must not promise a link that can't settle inv-B too.
+    buildPayBalanceLink.mockResolvedValue({ url: 'https://portal.wavespestcontrol.com/pay/combined', coveredInvoiceIds: ['inv-A'] });
+    await runPending();
+    const smsVars = smsTemplatesRouter.getTemplate.mock.calls[0][1];
+    expect(smsVars.pay_url).toBe('https://portal.wavespestcontrol.com/pay/tok-1'); // anchor's own token, shortenOrPassthrough passthrough
+    expect(seqTable.rows.get('seq-A').step_index).toBe(1); // still sends and advances — just not via the combined link
+  });
+
+  test('one leg delivers but the other is only transiently policy-denied: the whole touch holds, neither sequence advances', async () => {
+    const { seqTable } = twoInvoiceSetup();
+    // email permitted+delivers; sms transiently denied (not durable) this run.
+    collectionsChannelPermitted.mockImplementation(async ({ channel }) => (
+      channel === 'sms' ? { allowed: false, durable: false } : { allowed: true, durable: false }
+    ));
+    const result = await runPending();
+    expect(result).toEqual({ sent: 1, skipped: 0 });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledTimes(1); // email still attempted and delivered
+    expect(seqTable.rows.get('seq-A').step_index).toBe(0); // held — not advanced
+    expect(seqTable.rows.get('seq-B').step_index).toBe(0);
+  });
+
+  test('an uncertain SMS outcome holds and does NOT mark the ledger reservation send_failed (no duplicate-text risk on retry)', async () => {
+    const { seqTable } = twoInvoiceSetup();
+    sendCustomerMessage.mockResolvedValue({ deliveryOutcome: 'uncertain' });
+    const result = await runPending();
+    expect(result).toEqual({ sent: 1, skipped: 0 });
+    expect(ContactLedger.markSendFailed).not.toHaveBeenCalled();
+    expect(seqTable.rows.get('seq-A').step_index).toBe(0);
+    expect(seqTable.rows.get('seq-B').step_index).toBe(0);
   });
 
   test('a send failure (both legs fail) advances neither sequence', async () => {

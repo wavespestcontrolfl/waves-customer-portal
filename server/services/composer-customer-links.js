@@ -150,12 +150,18 @@ async function buildPayBalanceLink(customerIds) {
   // PaymentIntent ownership. It never throws; null degrades the figure to
   // the anchor invoice alone, which is what the page will show and charge.
   let balance = null;
+  // Which invoice ids the linked page will actually settle — additive to
+  // `balance` (invoice-followups.js's combined touch checks this before
+  // trusting the link to cover every invoice its own message quotes;
+  // existing callers that only read url/line/balance are unaffected).
+  let coveredInvoiceIds = null;
   if (!anchorIncomplete) {
     const { combinedEligibleSiblings, amountDueCents } = require('./pay-combined');
     const siblings = (await combinedEligibleSiblings(invoice)) || [];
     const totalCents = amountDueCents(invoice)
       + siblings.reduce((sum, sib) => sum + amountDueCents(sib), 0);
     balance = { total: totalCents / 100, count: 1 + siblings.length };
+    coveredInvoiceIds = [invoice.id, ...siblings.map((sib) => sib.id)];
   }
   const url = await shortenOrPassthrough(`${publicPortalUrl()}/pay/${invoice.token}`, {
     kind: 'invoice',
@@ -173,6 +179,7 @@ async function buildPayBalanceLink(customerIds) {
     // the total — say nothing about the amount rather than assert a wrong
     // figure (the open-balance SMS-line rule). balance stays null then.
     balance,
+    coveredInvoiceIds,
   };
 }
 

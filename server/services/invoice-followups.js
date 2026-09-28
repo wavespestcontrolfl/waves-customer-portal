@@ -1279,7 +1279,15 @@ async function fireCombinedTouchClaimed(rows) {
   let payUrl = null;
   try {
     const balanceLink = await buildPayBalanceLink([customer.id]);
-    payUrl = balanceLink?.url || null;
+    // The combined message says "pay them all" through ONE link — only
+    // trust it when the linked page will actually settle EVERY included
+    // invoice (GATE_PAY_INCLUDE_BALANCE on, no payer/incomplete-read
+    // degradation, no sibling excluded for its own reason). Anything short
+    // of full coverage falls back to the anchor's own single-invoice link
+    // below, which never overclaims what it can charge (Codex pre-push).
+    const coveredIds = new Set((balanceLink?.coveredInvoiceIds || []).map(String));
+    const coversEveryIncludedInvoice = includedIds.every((id) => coveredIds.has(String(id)));
+    payUrl = coversEveryIncludedInvoice ? (balanceLink?.url || null) : null;
   } catch (err) {
     logger.warn(`[invoice-followups] combined pay-balance link failed for customer ${customerId}: ${err.message}`);
   }
@@ -1293,6 +1301,21 @@ async function fireCombinedTouchClaimed(rows) {
   const etDay = etDateString(new Date());
   const combinedLedgerKey = (channel) => `invoice_followups:combined:${customerId}:${step.id}:${etDay}:${channel}`;
   const ContactLedger = require('./collections/contact-ledger');
+  // A stable identity for THIS combined touch's included set — the same
+  // step id recurs for a customer as new invoices reach it later, so the
+  // email template's own provider-level idempotency key must be scoped to
+  // which invoices it is quoting THIS time, or a later different pair
+  // reaching the same step dedupes against a stale prior send (pre-push
+  // audit P1).
+  const includedIdsKey = includedIds.map(String).sort().join(',');
+
+  // Durable vs transient policy denials, per selected channel — a
+  // transient denial (spacing window, a releasable hold) must HOLD the
+  // whole touch until it clears, same as fireTouch; a durable one (a flag,
+  // no consent) is waived and never blocks the other leg.
+  const durablyDenied = Object.fromEntries(
+    policyChannels.map((channel, index) => [channel, verdictDurablyDenied(policyResults[index])]),
+  );
 
   // ONE text leg, on the best available channel the customer selected
   // (sms preferred; push only when sms is unavailable/unselected) — "one
@@ -1300,6 +1323,10 @@ async function fireCombinedTouchClaimed(rows) {
   let smsChannel = null;
   if (nonEmailChannels.includes('sms') && channelPolicy.sms === true && customer.phone) smsChannel = 'sms';
   else if (nonEmailChannels.includes('push') && channelPolicy.push === true) smsChannel = 'push';
+  // A selected text channel this run couldn't pick because its ONLY
+  // transient (not durable) — hold rather than silently drop it; matches
+  // fireTouch's holdStep on a policy denial (pre-push audit P1).
+  let smsHold = !smsChannel && nonEmailChannels.some((ch) => channelPolicy[ch] !== true && !durablyDenied[ch]);
 
   let smsOk = false;
   if (smsChannel && smsTemplateKey) {
@@ -1322,11 +1349,13 @@ async function fireCombinedTouchClaimed(rows) {
         });
       } catch (err) {
         logger.warn(`[invoice-followups] combined ${smsChannel} ledger unavailable for customer ${customerId}: ${err.message}`);
+        smsHold = true; // retryable — don't drop the leg over a ledger blip
       }
       if (ledger) {
         const claim = typeof ContactLedger.claimAttempt === 'function' ? await ContactLedger.claimAttempt(ledger) : { allowed: true };
         if (claim.delivered) smsOk = true;
-        else if (claim.allowed) {
+        else if (!claim.allowed) smsHold = true; // a prior attempt's outcome is still unconfirmed
+        else {
           let result;
           try {
             result = await sendCustomerMessage({
@@ -1353,8 +1382,17 @@ async function fireCombinedTouchClaimed(rows) {
             if (typeof ContactLedger.markDelivered === 'function') {
               await ContactLedger.markDelivered(ledger, ...(occurredAt ? [{ occurredAt }] : []));
             }
-          } else {
+          } else if (result?.deliveryOutcome === 'not_sent' || (result?.deliveryOutcome == null && result?.blocked === true)) {
+            // A DEFINITE provider rejection — settled as failed, never
+            // retried against this reservation.
             await ContactLedger.markSendFailed(ledger, { code: result?.code || 'not_sent' });
+          } else {
+            // Uncertain / retryable (a thrown send, a deferred window): the
+            // provider may still have accepted it — do NOT stamp
+            // send_failed (that would let claimAttempt reopen the
+            // reservation and risk a duplicate text). Hold instead, same as
+            // fireTouch's holdStep (pre-push audit P1).
+            smsHold = true;
           }
         }
       }
@@ -1362,6 +1400,9 @@ async function fireCombinedTouchClaimed(rows) {
   }
 
   let emailOk = false;
+  // Selected but not (yet) permitted, and not a durable denial — hold, same
+  // as fireTouch's own emailHold seed (pre-push audit P1).
+  let emailHold = emailSelected && channelPolicy.email !== true && !durablyDenied.email;
   if (emailSelected && channelPolicy.email === true && emailTemplateKey) {
     let emailLedger = null;
     try {
@@ -1379,7 +1420,7 @@ async function fireCombinedTouchClaimed(rows) {
       if (claim.delivered) emailOk = true;
       else if (claim.allowed) {
         const emailResult = await sendCombinedFollowupEmail({
-          customer, step, anchorInvoiceId: anchorRow.invoice_id,
+          customer, step, anchorInvoiceId: anchorRow.invoice_id, includedIdsKey,
           payload: {
             invoice_count: String(included.length),
             total_due: `$${totalDue}`,
@@ -1395,10 +1436,25 @@ async function fireCombinedTouchClaimed(rows) {
         // settleFollowupEmailLedger stamps the ledger row (delivered /
         // send_failed) and returns whether the step should stay HELD —
         // delivery itself is emailResult.ok.
-        await settleFollowupEmailLedger(ContactLedger, emailLedger, emailResult, true, []);
+        const held = await settleFollowupEmailLedger(ContactLedger, emailLedger, emailResult, true, []);
         emailOk = emailResult.ok === true;
+        emailHold = emailHold || held;
+      } else {
+        emailHold = true; // a prior attempt's outcome is still unconfirmed
       }
+    } else {
+      emailHold = true; // ledger unavailable — retry, don't drop the leg
     }
+  }
+
+  // A selected leg still pending (transient policy denial, an uncertain
+  // send, an unresolved prior attempt) holds the WHOLE combined touch —
+  // every included sequence stays on its current step, exactly like
+  // fireTouch holds its one invoice's touch, rather than silently dropping
+  // the pending leg the moment a sibling leg succeeds (pre-push audit P1).
+  if (smsHold || emailHold) {
+    logger.info(`[invoice-followups] combined touch for customer ${customerId} step ${step.id} held — a selected leg is still pending (sms ${smsHold ? 'held' : 'settled'}, email ${emailHold ? 'held' : 'settled'}); ${included.length} sequence(s) left at their current step`);
+    return;
   }
 
   if (!smsOk && !emailOk) {
@@ -1442,7 +1498,9 @@ async function fireCombinedTouchClaimed(rows) {
  * fireCombinedTouchClaimed (invoice_count/total_due/pay_url/invoices) plus
  * the resolved recipient's first name.
  */
-async function sendCombinedFollowupEmail({ customer, step, anchorInvoiceId, payload }) {
+async function sendCombinedFollowupEmail({
+  customer, step, anchorInvoiceId, includedIdsKey, payload,
+}) {
   const templateKey = COMBINED_EMAIL_TEMPLATE_BY_STEP_ID[step.id];
   if (!templateKey) return { ok: false, skipped: true, reason: 'no_email_template_mapping' };
   const authorityInput = {
@@ -1466,8 +1524,12 @@ async function sendCombinedFollowupEmail({ customer, step, anchorInvoiceId, payl
       payload: finalPayload,
       recipientType: 'customer',
       recipientId: customer.id,
-      triggerEventId: `invoice_followup_combined:${customer.id}:${step.id}`,
-      idempotencyKey: `invoice_followup_combined_email:${customer.id}:${step.id}`,
+      // Scoped to the INCLUDED invoice set, not just customer+step: the same
+      // step id recurs for a customer as later invoices reach it, and an
+      // unscoped key would dedupe a new pair's send against a stale prior
+      // one at the same step (pre-push audit P1).
+      triggerEventId: `invoice_followup_combined:${customer.id}:${step.id}:${includedIdsKey}`,
+      idempotencyKey: `invoice_followup_combined_email:${customer.id}:${step.id}:${includedIdsKey}`,
       categories: ['invoice_followup', 'combined', step.id],
       suppressionGroupKey: 'transactional_required',
       withProviderHandoff: (dispatch) => dispatchUnderBillingEmailAuthority({
