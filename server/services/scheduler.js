@@ -7165,6 +7165,30 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 7PM — Tech open-visit nudge (owner ask 2026-09-28: "just do an
+  // afternoon nudge, at 7 pm"). Arrival/on_site is set automatically by the
+  // geofence and en_route is the tech's only tap — nothing today reminds
+  // them to tap Complete, so ~1/3 of visits a week were left open past their
+  // day. ONE text to each technician who still has open visits from today;
+  // no morning repeat. Gated GATE_TECH_OPEN_VISIT_NUDGE. runExclusive: a
+  // deploy overlap must not double-text a tech (the service also claims a
+  // durable per-tech/per-day tech_notifications row before sending, so a
+  // re-run the same ET day is idempotent even without the lock).
+  // =========================================================================
+  cron.schedule('0 19 * * *', async () => {
+    logger.info('Running: tech open-visit nudge');
+    try {
+      await runExclusive('tech-open-visit-nudge', async () => {
+        const { runTechOpenVisitNudge } = require('./tech-open-visit-nudge');
+        const result = await runTechOpenVisitNudge();
+        logger.info(`Tech open-visit nudge done: ${JSON.stringify(result)}`);
+      });
+    } catch (err) {
+      logger.error(`Tech open-visit nudge failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 4:23AM — IB retention. Threads use IB_THREAD_RETENTION_DAYS
   // (default 365); tasks use their stored 30-day expiry. The sweep runs with
   // either write gate off so pre-existing conversation data still ages out.
