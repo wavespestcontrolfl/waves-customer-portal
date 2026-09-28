@@ -120,9 +120,21 @@ const SPECIES_ALIASES = (() => {
  * which one the identification slots are about) — the caller then treats
  * every slot as unmatched rather than risk the wrong species' photo.
  */
+// Codex P1: the "more than one CATALOG species matched" guard alone missed
+// a comparison topic naming ONE catalog species plus an uncatalogued one
+// ("brown recluse vs huntsman spider" — only "huntsman spider" is in the
+// catalog, so it matched exactly one and would have filled the pest slot
+// with the huntsman photo even when the post is actually about the brown
+// recluse). Safety content can't risk presenting a licensed-but-wrong
+// species as THE pest, so ANY comparison-shaped topic fails closed —
+// intentionally broad (over-flagging for a human beats a confident wrong
+// photo); a false trigger just means one more slot goes to a human.
+const COMPARISON_RE = /\b(vs\.?|versus|or|from|not)\b/i;
+
 function matchSpecies(topic) {
   const norm = normalizeTopic(topic);
   if (!norm) return null;
+  if (COMPARISON_RE.test(norm)) return null;
   const matched = new Set();
   for (const [species, aliases] of SPECIES_ALIASES) {
     // Trailing e?s? tolerates the ordinary plural of the alias's last word

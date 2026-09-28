@@ -99,6 +99,16 @@ describe('matchSpecies — ambiguity guard (Codex P1)', () => {
     expect(matchSpecies('fire ant vs huntsman spider: which is more dangerous')).toBeNull();
   });
 
+  test('returns null when the topic compares a catalog species against an UNCATALOGUED one (Codex P1)', () => {
+    // Only "huntsman spider" is in the catalog — "brown recluse" is not —
+    // so the two-DISTINCT-catalog-species guard alone would miss this and
+    // confidently hand back the huntsman photo for a post that might
+    // actually be about the brown recluse.
+    expect(matchSpecies('brown recluse vs huntsman spider: how to tell them apart')).toBeNull();
+    expect(matchSpecies('wolf spider or huntsman spider in your garage')).toBeNull();
+    expect(matchSpecies('carpenter ant vs fire ant identification')).toBeNull();
+  });
+
   test('a multi-species-ambiguous topic flags every photo slot rather than guessing', () => {
     const slots = buildPhotoSlots('fire ant vs huntsman spider: which is more dangerous');
     for (const s of slots) {
