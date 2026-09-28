@@ -376,7 +376,7 @@ const URL_PEST_CONTEXT_RE = /\b(?:pests?|termites?|exterminat\w*|bugs?|lawns?|mo
 // as approved and bypass the owner-list restriction (#5146 r9). A genuine
 // legal-name variant that needs a descriptive word (e.g. "Terminix Global
 // Holdings") is a curated alias on its record instead — see COMPETITORS.
-const LEGAL_SUFFIX_TOKENS = new Set(['llc', 'l l c', 'inc', 'incorporated', 'corp', 'corporation', 'co', 'company', 'ltd', 'lp', 'llp', 'pllc']);
+const LEGAL_SUFFIX_TOKENS = new Set(['llc', 'inc', 'incorporated', 'corp', 'corporation', 'co', 'company', 'ltd', 'lp', 'llp', 'pllc']);
 
 /** findCompetitor(name) → allowlist record | null (matches name or alias, legal suffixes ignored). */
 function findCompetitor(name) {
@@ -384,6 +384,17 @@ function findCompetitor(name) {
   const exact = ALLOWLIST_INDEX.get(key);
   if (exact) return exact;
   const words = key.split(' ').filter(Boolean);
+  // A dotted suffix ("L.L.C.", "P.L.L.C.") normalizes to one-letter words;
+  // rejoin the longest trailing run of them that spells a legal suffix.
+  let run = words.length;
+  while (run > 0 && words[run - 1].length === 1) run -= 1;
+  for (let i = run; i < words.length - 1; i += 1) {
+    const joined = words.slice(i).join('');
+    if (LEGAL_SUFFIX_TOKENS.has(joined)) {
+      words.splice(i, words.length - i, joined);
+      break;
+    }
+  }
   while (words.length > 1 && LEGAL_SUFFIX_TOKENS.has(words[words.length - 1])) {
     words.pop();
     const hit = ALLOWLIST_INDEX.get(words.join(' '));

@@ -74,9 +74,16 @@ describe('competitor-facts', () => {
       ['Turner Pest Control LP', 'turner-pest'],
       ['Turner Pest Control LLP', 'turner-pest'],
       ['Turner Pest Control PLLC', 'turner-pest'],
+      // Dotted forms normalize to one-letter words and must rejoin.
+      ['Orkin, L.L.C.', 'orkin'],
+      ['Turner Pest Control, P.L.L.C.', 'turner-pest'],
+      ['Turner Pest Control L.P.', 'turner-pest'],
+      ['Massey Services Co. L.L.C.', 'massey-services'],
     ]) {
       expect(cf.findCompetitor(name)?.id).toBe(id);
     }
+    // A one-letter run that spells no legal suffix is left alone.
+    expect(cf.findCompetitor('Orkin S.W.F.L.')).toBeNull();
     // Direction 2: a descriptive word must NOT be stripped — an unrelated
     // off-list company sharing an approved short prefix reads as unknown,
     // never as the approved record ("Turner Services LLC" is not Turner
