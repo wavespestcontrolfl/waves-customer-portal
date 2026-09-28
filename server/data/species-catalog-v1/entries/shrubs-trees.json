@@ -2622,13 +2622,13 @@
       "venomous": false,
       "disease_vector": false,
       "structural": false,
-      "allergen": false,
+      "allergen": true,
       "protected": false,
       "toxic_to_pets": false,
       "regulated": false,
-      "irritant": false
+      "irritant": true
     },
-    "safety_line": null,
+    "safety_line": "Mango is a poison-ivy relative, and contact can cause an allergic skin reaction in sensitive people; wear gloves when pruning or handling the plant.",
     "range": "common",
     "active_months": [
       1,
@@ -2663,21 +2663,22 @@
       "fact": "A mango tree can reach 30 to 60 feet tall and wide, so UF/IFAS recommends planting it well away from the house, other trees and power lines.",
       "blurb": "A large, fast-growing backyard fruit tree; anthracnose is the main disease concern, while scale drives sticky leaves and sooty mold."
     },
-    "tech_notes": "Anthracnose is a serious mango disease affecting leaves, flowers and fruit, worse in wet weather. Scale insects and their sooty mold are the other main issue named. Some people develop skin contact reactions to mango sap or peel, which is worth keeping in mind when pruning or handling fruit, though this affects people rather than pets.",
+    "tech_notes": "Anthracnose is a serious mango disease affecting leaves, flowers and fruit, worse in wet weather. Scale insects and their sooty mold are the other main issue named. UF/IFAS identifies mango as a poison-ivy relative that may cause allergic reactions, so minimize bare-skin contact when pruning or handling the plant.",
     "links": {
       "site_page": null,
       "guides": []
     },
     "legacy_slugs": [],
     "sources": [
-      "https://ask.ifas.ufl.edu/publication/ST404"
+      "https://ask.ifas.ufl.edu/publication/ST404",
+      "https://ask.ifas.ufl.edu/publication/EP220"
     ],
     "review": {
       "status": "draft",
-      "notes": "Mango sap and peel can cause contact dermatitis in sensitive people (Anacardiaceae family) per general botanical knowledge, but this is not confirmed against the fetched UF/IFAS ST404 fact sheet, so it is not stated as settled fact in customer copy."
+      "notes": "UF/IFAS EP220 confirms that mango is a poison-ivy relative that may cause allergic reactions. Set safety.allergen and safety.irritant true, changed risk to irritant, and added a contact precaution; the source does not specifically attribute the reaction to sap or peel, so those unsupported details were removed."
     },
     "role": "landscape_plant",
-    "risk": "low",
+    "risk": "irritant",
     "action": "monitor",
     "season_basis": "observed",
     "verification": [],
