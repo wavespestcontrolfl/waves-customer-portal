@@ -3,13 +3,16 @@ const d = SKIP ? describe.skip : describe;
 
 // Every fixture and the migration run inside a transaction that is always
 // rolled back, so a populated database never loses its real catalog rows.
-d('20260928040000 catalog pack-size recalc', () => {
+d('20260928050000 catalog pack-size repair (full 020000-050000 sequence)', () => {
   let db;
   const first = require('../models/migrations/20260928020000_catalog_package_size_corrections');
   const second = require('../models/migrations/20260928030000_catalog_package_size_vendor_rows');
-  const migration = require('../models/migrations/20260928040000_catalog_pack_size_recalc');
+  const third = require('../models/migrations/20260928040000_catalog_pack_size_recalc');
+  const migration = require('../models/migrations/20260928050000_catalog_pack_size_repair');
   // Every environment runs the whole frozen sequence in order.
-  const runAll = async (trx) => { await first.up(trx); await second.up(trx); await migration.up(trx); };
+  const runAll = async (trx) => {
+    await first.up(trx); await second.up(trx); await third.up(trx); await migration.up(trx);
+  };
   const DOMINION = 'Dominion 2L 1 gal';
   const SEDGE = 'Sedgehammer Halosulfuron-methyl 75% Post Emergent Soluble Herbicide';
   const ROLLBACK = new Error('rollback');
