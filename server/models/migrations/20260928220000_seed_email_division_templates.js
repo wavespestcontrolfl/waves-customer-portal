@@ -41,6 +41,13 @@
  *    the same address after the first's follow-up would dedupe away.
  *  - P2: the three lc.* templates' `purpose` is 'pest' (was 'lawn_care') —
  *    they are structural pest-control lifecycle emails, not lawn care.
+ *  - P1 (local pre-push audit, Codex out of quota / claude fallback):
+ *    up() re-running (e.g. a manually cleared knex_migrations row) must
+ *    never overwrite a template/version/automation row an operator has
+ *    since drafted or published — upsertTemplate/upsertAutomation now
+ *    read-modify-write, skipping the overwrite whenever created_by /
+ *    last_published_by / published_by is non-null (only an authenticated
+ *    admin action ever sets those; this migration's own inserts never do).
  *  - P2: nurture.expired_1's content_sensitivity is 'normal' (was 'lead',
  *    not in the admin API's enum: normal | financial | account |
  *    health_safety | property_sensitive).
@@ -352,17 +359,34 @@ function automationRow(a) {
   };
 }
 
+// `created_by` / `last_published_by` (templates) and `created_by` /
+// `published_by` (versions) are only ever set by an authenticated admin
+// action (admin-email-templates.js, behind adminAuthenticate) — this
+// migration's own inserts never set them. A non-null value is therefore
+// conclusive proof a person has touched the row since it was seeded (drafted
+// a revision via createDraftVersion, or published one), and re-running up()
+// must never overwrite that — the local pre-push audit's own P1 finding on
+// this file (the seed's up() unconditionally overwrote rows on every
+// re-run, which would silently revert an operator's published edit if the
+// migration were ever re-applied, e.g. a manually cleared knex_migrations
+// row). Read-modify-write, not overwrite, same principle as down() below.
+function touchedByHuman(row) {
+  return !!(row && (row.created_by || row.last_published_by || row.published_by));
+}
+
 async function upsertTemplate(knex, t) {
   const existing = await knex('email_templates').where({ template_key: t.key }).first();
   let template = existing;
   const row = templateRow(t);
 
-  if (template) {
+  if (!template) {
+    [template] = await knex('email_templates').insert({ ...row, created_at: new Date() }).returning('*');
+  } else if (!touchedByHuman(template)) {
     await knex('email_templates').where({ id: template.id }).update(row);
     template = await knex('email_templates').where({ id: template.id }).first();
-  } else {
-    [template] = await knex('email_templates').insert({ ...row, created_at: new Date() }).returning('*');
   }
+  // else: an operator has already touched this template row — leave it
+  // exactly as they left it.
 
   // A brand-new, never-published template has no active_version_id (that
   // field is set only by publishVersion, on an explicit staff publish) — so
@@ -383,9 +407,7 @@ async function upsertTemplate(knex, t) {
     text_body: null,
     updated_at: new Date(),
   };
-  if (version) {
-    await knex('email_template_versions').where({ id: version.id }).update(versionFields);
-  } else {
+  if (!version) {
     const latest = await knex('email_template_versions')
       .where({ template_id: template.id })
       .max('version_number as max')
@@ -397,7 +419,12 @@ async function upsertTemplate(knex, t) {
       created_at: new Date(),
       ...versionFields,
     }).returning('*');
+  } else if (!touchedByHuman(version)) {
+    await knex('email_template_versions').where({ id: version.id }).update(versionFields);
   }
+  // else: the latest version is an operator's own draft or published
+  // revision (created_by/published_by set via createDraftVersion /
+  // publishVersion) — leave its content alone.
 
   if (await knex.schema.hasTable('email_template_fixtures')) {
     for (const [name, payload] of Object.entries(t.fixtures || {})) {
@@ -418,11 +445,12 @@ async function upsertTemplate(knex, t) {
 async function upsertAutomation(knex, a) {
   const existing = await knex('email_template_automations').where({ automation_key: a.key }).first();
   const row = automationRow(a);
-  if (existing) {
-    await knex('email_template_automations').where({ id: existing.id }).update(row);
-  } else {
+  if (!existing) {
     await knex('email_template_automations').insert({ ...row, created_at: new Date() });
+  } else if (!touchedByHuman(existing)) {
+    await knex('email_template_automations').where({ id: existing.id }).update(row);
   }
+  // else: an operator has already touched this automation row.
 }
 
 exports.up = async function up(knex) {

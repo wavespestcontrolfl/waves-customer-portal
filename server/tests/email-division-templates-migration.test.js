@@ -282,6 +282,38 @@ describe('seed migration 20260928220000 (re-cut of #5160)', () => {
     expect(knex.__store.email_templates[0].name).toBe('An operator renamed this by hand');
   });
 
+  test('up() re-running never overwrites a template, version, or automation an operator has touched (local pre-push audit P1)', async () => {
+    const knex = fakeKnex(TABLES);
+    await migration.up(knex);
+
+    const pestTemplate = knex.__store.email_templates.find((t) => t.template_key === 'lc.first_visit_pest');
+    pestTemplate.created_by = 'tech-123'; // only ever set by an authenticated admin action
+    pestTemplate.name = 'Operator-edited name';
+
+    const pestVersion = knex.__store.email_template_versions.find((v) => v.template_id === pestTemplate.id);
+    pestVersion.published_by = 'tech-123';
+    pestVersion.subject = 'Operator-edited subject';
+    pestVersion.blocks = JSON.stringify([{ type: 'paragraph', content: 'Operator-written copy.' }]);
+
+    const pestAutomation = knex.__store.email_template_automations.find((a) => a.automation_key === 'lc.first_visit_pest');
+    pestAutomation.last_published_by = 'tech-123';
+    pestAutomation.delay_minutes = 9999;
+
+    await migration.up(knex); // re-run
+
+    expect(knex.__store.email_templates.find((t) => t.id === pestTemplate.id).name).toBe('Operator-edited name');
+    expect(knex.__store.email_template_versions.find((v) => v.id === pestVersion.id).subject).toBe('Operator-edited subject');
+    expect(JSON.parse(knex.__store.email_template_versions.find((v) => v.id === pestVersion.id).blocks)).toEqual([
+      { type: 'paragraph', content: 'Operator-written copy.' },
+    ]);
+    expect(knex.__store.email_template_automations.find((a) => a.id === pestAutomation.id).delay_minutes).toBe(9999);
+
+    // An UNTOUCHED template (no created_by/last_published_by/published_by)
+    // still gets re-seeded normally — the guard is per-row, not global.
+    const untouched = knex.__store.email_templates.find((t) => t.template_key === 'lc.why_91_days');
+    expect(untouched.name).toBe('Lawn Care · Why 91 Days');
+  });
+
   test("sendTemplate refuses each seeded template in its seeded ('draft') status, undisguised", async () => {
     mockDb = await seededKnex();
     for (const t of migration.TEMPLATES) {
