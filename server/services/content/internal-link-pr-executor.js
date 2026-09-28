@@ -611,14 +611,19 @@ class InternalLinkPrExecutor {
     if (!runs.length) return 0;
     const { resolveTargetForRun } = require('./autonomous-pr-poller')._internals;
     const publisher = require('../content-astro/astro-publisher');
+    // Same kill switch finalizeMerged honors; runs stay NULL while it is on.
+    if (publisher.internalLinkPlanningDisabled?.()) return 0;
     let replanned = 0;
     for (const run of runs) {
       try {
         const target = await resolveTargetForRun(run);
         const url = target?.url || run.published_url;
         const result = target?.planLinks === false ? { queued: 0 } : await publisher.planInternalLinksForTarget({ ...target, url });
+        // null = planning could not run (no corpus): stays NULL for the next
+        // sweep, same result guard as finalizeMerged.
+        if (!result) continue;
         await db('autonomous_runs').where({ id: run.id }).whereNull('link_tasks_queued')
-          .update({ link_tasks_queued: result?.queued || 0, updated_at: new Date() });
+          .update({ link_tasks_queued: result.queued || 0, updated_at: new Date() });
         replanned += 1;
       } catch (err) {
         // Still NULL → retried on the next daily sweep (bounded by `days`).

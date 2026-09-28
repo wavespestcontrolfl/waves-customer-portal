@@ -1839,13 +1839,26 @@ describe('internal-link replan of publishes whose post-merge planning failed', (
       return db;
     });
     jest.doMock('../services/content/autonomous-pr-poller', () => ({ _internals: { resolveTargetForRun: jest.fn(async () => ({ url: 'https://www.wavespestcontrol.com/new-post/', planLinks: true })) } }));
-    const planInternalLinksForTarget = jest.fn(async () => ({ queued: 4 }));
-    jest.doMock('../services/content-astro/astro-publisher', () => ({ planInternalLinksForTarget }));
+    const planInternalLinksForTarget = jest.fn()
+      .mockResolvedValueOnce(null) // no corpus: planning could not run
+      .mockResolvedValueOnce({ queued: 4 });
+    const internalLinkPlanningDisabled = jest.fn(() => false);
+    jest.doMock('../services/content-astro/astro-publisher', () => ({ planInternalLinksForTarget, internalLinkPlanningDisabled }));
     const fresh = require('../services/content/internal-link-pr-executor');
-    const replanned = await new fresh.InternalLinkPrExecutor()._replanUnplannedPublishes();
+    const instance = new fresh.InternalLinkPrExecutor();
+    // A null result stays NULL (retryable)…
+    expect(await instance._replanUnplannedPublishes()).toBe(0);
+    expect(updates).toEqual([]);
+    // …the next sweep plans it and stamps the result.
+    const replanned = await instance._replanUnplannedPublishes();
     expect(replanned).toBe(1);
     expect(planInternalLinksForTarget).toHaveBeenCalledWith(expect.objectContaining({ url: 'https://www.wavespestcontrol.com/new-post/' }));
     expect(updates).toEqual([{ table: 'autonomous_runs', patch: expect.objectContaining({ link_tasks_queued: 4 }) }]);
+    // The post-merge planning kill switch stops the replan too.
+    internalLinkPlanningDisabled.mockReturnValueOnce(true);
+    planInternalLinksForTarget.mockClear();
+    expect(await instance._replanUnplannedPublishes()).toBe(0);
+    expect(planInternalLinksForTarget).not.toHaveBeenCalled();
     jest.dontMock('../models/db');
     jest.dontMock('../services/content/autonomous-pr-poller');
     jest.dontMock('../services/content-astro/astro-publisher');
