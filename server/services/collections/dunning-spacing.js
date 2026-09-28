@@ -205,7 +205,7 @@ function isWithin7d(row, now) {
  * convention as contact-policy.js's other frequency windows.
  */
 async function lastOverdueReminderWithin7d(customerId, {
-  now = new Date(), excludeLedgerIds = [], excludeIdempotencyKey = null, database,
+  now = new Date(), excludeLedgerIds = [], excludeIdempotencyKey = null, excludeEventKey = null, database,
 } = {}) {
   if (!customerId || !database) return null;
   const windowStart = new Date(now.getTime() - SPACING_MS);
@@ -223,6 +223,8 @@ async function lastOverdueReminderWithin7d(customerId, {
   return (rows || []).find((row) => {
     if (excluded.has(String(row.id))) return false;
     if (excludeIdempotencyKey && row.idempotency_key === excludeIdempotencyKey) return false;
+    // The rest of the caller's own touch (e.g. a replay's delivered email leg).
+    if (excludeEventKey && metadataOf(row).notificationEventKey === excludeEventKey) return false;
     // Belt & suspenders vs. the query's own source/purpose filter — a test
     // double or a future query change must not silently widen this.
     if (!isOverdueReminderRow(row)) return false;

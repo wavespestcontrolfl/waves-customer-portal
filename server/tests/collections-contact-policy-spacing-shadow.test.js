@@ -246,9 +246,11 @@ describe('a caller that names its rail (Codex #5189 r3/r4)', () => {
   test('the follow-up replay is observed, with its own reservation key excluded', async () => {
     process.env.GATE_DUNNING_SPACING_SHADOW = 'true';
     armAllowedBaseline();
-    await evalSms('late_payment', { source: 'invoice_followup_replay', spacingExcludeKey: 'followup-replay:abc' });
+    await evalSms('late_payment', {
+      source: 'invoice_followup_replay', spacingExcludeKey: 'followup-replay:abc', spacingExcludeEventKey: 'invoice-followup:seq-1:d3',
+    });
     expect(DunningSpacing.lastOverdueReminderWithin7d).toHaveBeenCalledWith('cust-1', expect.objectContaining({
-      excludeIdempotencyKey: 'followup-replay:abc',
+      excludeIdempotencyKey: 'followup-replay:abc', excludeEventKey: 'invoice-followup:seq-1:d3',
     }));
   });
 });

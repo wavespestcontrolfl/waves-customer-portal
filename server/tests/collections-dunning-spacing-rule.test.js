@@ -294,6 +294,14 @@ describe('lastOverdueReminderWithin7d', () => {
     expect(result).toEqual(other);
   });
 
+  test('excludeEventKey drops the rest of the caller\'s own touch, e.g. a replay\'s delivered email leg (Codex r6)', async () => {
+    const sibling = row({ id: 'email-leg', metadata: { notificationEventKey: 'invoice-followup:seq-1:d3' }, occurred_at: new Date(NOW.getTime() - HOUR_MS).toISOString() });
+    const earlier = row({ id: 'earlier', metadata: { notificationEventKey: 'invoice-followup:seq-9:d3' }, occurred_at: new Date(NOW.getTime() - 3 * HOUR_MS).toISOString() });
+    const database = fakeDatabase([sibling, earlier]);
+    const result = await lastOverdueReminderWithin7d('cust-1', { now: NOW, database, excludeEventKey: 'invoice-followup:seq-1:d3' });
+    expect(result).toEqual(earlier);
+  });
+
   test('no rows at all returns null', async () => {
     const database = fakeDatabase([]);
     const result = await lastOverdueReminderWithin7d('cust-1', { now: NOW, database });
