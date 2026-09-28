@@ -154,12 +154,9 @@ postgres('cancel_queued_message / list_queued_messages (real PostgreSQL, SMS-onl
     expect((await trx('sms_log').where({ id: recruitingId }).first()).status).toBe('scheduled');
   });
 
-  test.each([
-    ['finalize_only', { finalize_only: true }],
-    ['review_delivery_uncertain_exhausted', { review_delivery_uncertain_exhausted: true }],
-  ])('a %s sms_log row is excluded from the list and refused as already-delivered', async (_label, metaFlag) => {
+  test('a finalize_only sms_log row is excluded from the list and refused as already-delivered', async () => {
     const custId = await customer();
-    const alreadyDeliveredId = await scheduledSms(custId, { metadata: metaFlag });
+    const alreadyDeliveredId = await scheduledSms(custId, { metadata: { finalize_only: true } });
 
     const listed = await executeCommsTool('list_queued_messages', { customer_id: custId, channel: 'sms' });
     expect(listed.messages).toEqual([]);
@@ -167,6 +164,35 @@ postgres('cancel_queued_message / list_queued_messages (real PostgreSQL, SMS-onl
     const out = await executeCommsTool('cancel_queued_message', { message_id: alreadyDeliveredId, customer_id: custId, channel: 'sms' });
     expect(out.error).toMatch(/already reached the provider/i);
     expect((await trx('sms_log').where({ id: alreadyDeliveredId }).first()).status).toBe('scheduled'); // untouched
+  });
+
+  // Codex round 3 on #5224, P1: dispatch() (scheduled-sms-delivery.js)
+  // stamps review_ask_reservation BEFORE every review-ask provider call and
+  // does NOT clear it when an ambiguous attempt is held back to 'scheduled'
+  // for its next retry (holdUncertainReservation) — only when delivery is
+  // later proven accepted or definitely not sent. review_delivery_uncertain_
+  // exhausted is stamped only on the FINAL such attempt, so a row can carry
+  // review_ask_reservation alone, well before exhaustion, while Twilio may
+  // already have accepted an earlier attempt. Both states must refuse.
+  test.each([
+    ['review_ask_reservation alone (an earlier ambiguous attempt, held for retry)', { review_ask_reservation: true, scheduled_sms_attempts: 1 }],
+    ['review_ask_reservation + review_delivery_uncertain_exhausted (the final ambiguous attempt)', { review_ask_reservation: true, review_delivery_uncertain_exhausted: true, scheduled_sms_attempts: 3 }],
+  ])('a %s sms_log row is excluded from the list and refused as possibly-already-sent, completely untouched', async (_label, metaFlag) => {
+    const custId = await customer();
+    const targetId = await scheduledSms(custId, { message_type: 'review_request', metadata: metaFlag });
+
+    const listed = await executeCommsTool('list_queued_messages', { customer_id: custId, channel: 'sms' });
+    expect(listed.messages).toEqual([]);
+
+    const out = await executeCommsTool('cancel_queued_message', { message_id: targetId, customer_id: custId, channel: 'sms' });
+    expect(out.error).toMatch(/may already have reached the provider/i);
+
+    // Never reaches the shared cancel workflow — status AND metadata (the
+    // 72h ask-spacing evidence) are completely untouched, not merely
+    // "cancelled but marker preserved."
+    const row = await trx('sms_log').where({ id: targetId }).first();
+    expect(row.status).toBe('scheduled');
+    expect(row.metadata).toMatchObject(metaFlag);
   });
 
   // Codex round 2 on #5224, P2: a bounded body preview rides both the list
@@ -217,31 +243,56 @@ postgres('cancel_queued_message / list_queued_messages (real PostgreSQL, SMS-onl
     expect((await trx('sms_log').where({ id: siblingId }).first()).status).toBe('scheduled');
   });
 
-  // Owner ruling / Codex round 1 on #5224: the IB cancel must run the SAME
-  // shared workflow the admin SMS inbox uses — proven here by the exact
-  // review-ask-reservation-in-place special case that workflow exists for.
-  // A bare status flip (this tool's pre-fix behavior) would have deleted
-  // this row, erasing the 72h ask-spacing evidence review-ask-history's
-  // lastManualAskAt reads regardless of status.
-  test('cancels a review-ask-reservation-marked scheduled text IN PLACE, preserving the reservation as spacing evidence', async () => {
+  // scheduled-sms-cancel.js's review-ask-reservation-in-place special case
+  // (cancel without erasing the marker, preserving 72h ask-spacing evidence)
+  // still exists and is still exercised — but only via the admin SMS inbox
+  // route directly now (admin-communications-scheduled-cancel.test.js),
+  // never via this IB tool: Codex round 3 on #5224, P1, closed the gap
+  // where the tool's OWN preview let a review_ask_reservation row through
+  // to that in-place cancel at all, since Twilio may already have accepted
+  // an earlier attempt on this exact row. See the test.each above.
+  test('a review-ask-reservation-marked scheduled text is refused outright by the IB tool, completely untouched (not cancelled in place)', async () => {
     const custId = await customer();
     const targetId = await scheduledSms(custId, {
+      message_type: 'review_request',
       metadata: { review_ask_reservation: true, scheduled_sms_attempts: 3 },
     });
 
+    const out = await executeCommsTool('cancel_queued_message', { message_id: targetId, customer_id: custId, channel: 'sms' });
+    expect(out.proposal).not.toBe(true);
+    expect(out.error).toMatch(/may already have reached the provider/i);
+
+    const row = await trx('sms_log').where({ id: targetId }).first();
+    expect(row.status).toBe('scheduled'); // never flipped to 'canceled' — the row is untouched, not cancelled in place
+    expect(row.metadata).toMatchObject({ review_ask_reservation: true, scheduled_sms_attempts: 3 });
+  });
+
+  // Codex round 3 on #5224, P2: customer-contact-fanout.js can rewrite a
+  // still-'scheduled' row's to_phone (a customer phone edit) without
+  // touching status or scheduled_for. The tool pins to_phone into _version
+  // alongside scheduled_for, so a recipient change between the card and
+  // Confirm refuses instead of cancelling a text now addressed to someone
+  // else's old number.
+  test('refuses when the recipient phone was rewritten after the preview — the pinned to_phone no longer matches', async () => {
+    const custId = await customer();
+    const targetId = await scheduledSms(custId);
     const preview = await executeCommsTool('cancel_queued_message', { message_id: targetId, customer_id: custId, channel: 'sms' });
-    expect(preview.proposal).toBe(true);
+    expect(preview._version.to_phone).toBe('+19415550100');
+
+    // customer-contact-fanout.js rewrites to_phone on a phone edit, leaving
+    // status and scheduled_for untouched.
+    await trx('sms_log').where({ id: targetId }).update({ to_phone: '+19415550199' });
 
     const confirmed = await executeCommsTool('cancel_queued_message', {
       message_id: targetId, customer_id: custId, channel: 'sms', confirmed: true,
       _verified_message_version: preview._version,
     });
-    expect(confirmed).toMatchObject({ success: true, cancelled: true, channel: 'sms', message_id: targetId });
+    expect(confirmed.preview_changed).toBe(true);
+    expect(confirmed.success).not.toBe(true);
 
     const row = await trx('sms_log').where({ id: targetId }).first();
-    expect(row).toBeDefined();
-    expect(row.status).toBe('canceled'); // single L — scheduled-sms-cancel.js's in-place marker, not a delete
-    expect(row.metadata).toMatchObject({ review_ask_reservation: true, scheduled_sms_attempts: 3 });
+    expect(row.status).toBe('scheduled'); // untouched
+    expect(row.to_phone).toBe('+19415550199'); // the rewrite itself is never reverted
   });
 
   test('refuses an sms already sent — it can never be recalled', async () => {

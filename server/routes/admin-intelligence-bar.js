@@ -2077,7 +2077,11 @@ function executeToolByName(toolName, input, techContext, actionContext = {}) {
     return executeReviewTool(toolName, input, actionContext);
   }
   if (COMMS_TOOL_NAMES.has(toolName)) {
-    return executeCommsTool(toolName, input);
+    // actionContext.technicianId is the confirming admin — cancel_queued_
+    // message threads it into cancelScheduledSmsRow so a reopened parked
+    // decision records the real admin, not a hardcoded null (Codex round 3
+    // on #5224, P2). Every other comms tool ignores the extra parameter.
+    return executeCommsTool(toolName, input, actionContext);
   }
   if (TAX_TOOL_NAMES.has(toolName)) {
     return executeTaxTool(toolName, input);

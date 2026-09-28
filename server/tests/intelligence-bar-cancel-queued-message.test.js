@@ -116,12 +116,23 @@ test('list_queued_messages refuses "customer not found" instead of an empty list
 
 // A db mock covering the two tables these tools ever touch: `customers`
 // (resolveCustomer/customerDisplayName) answers via `.first()`; `sms_log`
-// answers `.select()` (list) or `.first()` (preview) with `matchRows`.
+// answers `.select()` (list — honors .limit()/.offset() against matchRows,
+// so the pagination cap is genuinely exercised) or `.first()` (preview)
+// with `matchRows`.
 function makeSmsDbMock(matchRows) {
   const customersQ = { where: () => customersQ, first: () => Promise.resolve(CUSTOMER_ROW) };
+  let limitN = null;
+  let offsetN = 0;
   const smsQ = {
     where: () => smsQ, orderBy: () => smsQ,
-    select: () => Promise.resolve(matchRows), first: () => Promise.resolve(matchRows[0]),
+    limit: (n) => { limitN = n; return smsQ; },
+    offset: (n) => { offsetN = n; return smsQ; },
+    select: () => {
+      let out = matchRows.slice(offsetN);
+      if (limitN != null) out = out.slice(0, limitN);
+      return Promise.resolve(out);
+    },
+    first: () => Promise.resolve(matchRows[0]),
   };
   return (table) => (table === 'customers' ? customersQ : smsQ);
 }
@@ -191,18 +202,40 @@ test('a recruiting-typed row (job_* message_type, no entry_point) is excluded fr
   expect(cancelScheduledSmsRow).not.toHaveBeenCalled();
 });
 
-// scheduler.js/scheduled-sms-delivery.js: finalize_only and
-// review_delivery_uncertain_exhausted both mean the text already reached
-// the provider — the row only exists for post-delivery bookkeeping or a
-// terminal-hook safety hold, never "still queued." This message is
-// unchanged (never mentioned the inbox).
-test.each([
-  ['finalize_only', { finalize_only: true }],
-  ['review_delivery_uncertain_exhausted', { review_delivery_uncertain_exhausted: true }],
-])('a %s sms_log row is excluded from the list and refused as already-delivered', async (_label, metaFlag) => {
+// scheduler.js: finalize_only means the text itself already delivered — the
+// row only exists for post-delivery bookkeeping, never "still queued."
+test('a finalize_only sms_log row is excluded from the list and refused as already-delivered', async () => {
   const row = {
     id: MESSAGE_ID, customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled',
     to_phone: '+19415550100', message_type: 'reminder', message_body: 'Synthetic body',
+    scheduled_for: new Date('2099-01-01T12:00:00Z'),
+    metadata: { finalize_only: true },
+  };
+  db.mockImplementation(makeSmsDbMock([row]));
+  const listed = await executeCommsTool('list_queued_messages', { customer_id: CUSTOMER_ID, channel: 'sms' });
+  expect(listed.messages).toEqual([]);
+
+  const out = await executeCommsTool('cancel_queued_message', { message_id: MESSAGE_ID, customer_id: CUSTOMER_ID, channel: 'sms' });
+  expect(out.error).toMatch(/already reached the provider/i);
+  expect(cancelScheduledSmsRow).not.toHaveBeenCalled();
+});
+
+// Codex round 3 on #5224, P1: scheduled-sms-delivery.js's dispatch() stamps
+// review_ask_reservation BEFORE every review-ask provider call, and does
+// NOT clear it when an ambiguous attempt is held back to 'scheduled' for
+// its next ask-spacing retry (holdUncertainReservation) — only when
+// delivery is later proven accepted or definitely not sent. So a
+// 'scheduled' row can carry this marker with review_delivery_uncertain_
+// exhausted STILL FALSE (that flag only appears on the FINAL such
+// attempt) — Twilio may already have accepted an EARLIER attempt. Both
+// states must refuse, not only the exhausted one.
+test.each([
+  ['review_ask_reservation alone (not yet exhausted — an earlier ambiguous attempt, held for retry)', { review_ask_reservation: true }],
+  ['review_ask_reservation + review_delivery_uncertain_exhausted (the final ambiguous attempt)', { review_ask_reservation: true, review_delivery_uncertain_exhausted: true }],
+])('a %s sms_log row is excluded from the list and refused as possibly-already-sent', async (_label, metaFlag) => {
+  const row = {
+    id: MESSAGE_ID, customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled',
+    to_phone: '+19415550100', message_type: 'review_request', message_body: 'Synthetic review ask',
     scheduled_for: new Date('2099-01-01T12:00:00Z'),
     metadata: metaFlag,
   };
@@ -211,7 +244,7 @@ test.each([
   expect(listed.messages).toEqual([]);
 
   const out = await executeCommsTool('cancel_queued_message', { message_id: MESSAGE_ID, customer_id: CUSTOMER_ID, channel: 'sms' });
-  expect(out.error).toMatch(/already reached the provider/i);
+  expect(out.error).toMatch(/may already have reached the provider/i);
   expect(cancelScheduledSmsRow).not.toHaveBeenCalled();
 });
 
@@ -291,7 +324,7 @@ test('the SMS commit calls the shared cancel workflow with the pinned scheduled_
   });
   expect(cancelScheduledSmsRow).toHaveBeenCalledWith({
     id: MESSAGE_ID, techRole: 'admin', technicianId: null,
-    expectedScheduledFor: scheduledFor.toISOString(),
+    expectedScheduledFor: scheduledFor.toISOString(), expectedToPhone: '+19415550100',
   });
   expect(refused.success).not.toBe(true);
   expect(refused.preview_changed).toBe(true);
@@ -308,6 +341,91 @@ test('the SMS commit calls the shared cancel workflow with the pinned scheduled_
     success: true, cancelled: true, channel: 'sms', message_id: MESSAGE_ID,
     masked_recipient: '…0100', kind: 'manual', messages_sent: false,
   });
+});
+
+// Codex round 3 on #5224, P2: customer-contact-fanout.js can rewrite a
+// still-'scheduled' row's to_phone (a phone edit) without touching status
+// or scheduled_for — the scheduled_for pin alone would not catch it.
+test('the recipient (to_phone) is pinned into _version and threaded to the shared workflow as expectedToPhone', async () => {
+  const row = {
+    id: MESSAGE_ID, customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled',
+    to_phone: '+19415550100', message_type: 'manual', message_body: 'Synthetic body',
+    scheduled_for: new Date('2099-01-01T12:00:00Z'), metadata: {},
+  };
+  db.mockImplementation(makeSmsDbMock([row]));
+  const preview = await executeCommsTool('cancel_queued_message', { message_id: MESSAGE_ID, customer_id: CUSTOMER_ID, channel: 'sms' });
+  expect(preview._version.to_phone).toBe('+19415550100');
+
+  cancelScheduledSmsRow.mockResolvedValue({ outcome: 'ok', cancelled: true, row: { id: MESSAGE_ID } });
+  await executeCommsTool('cancel_queued_message', {
+    message_id: MESSAGE_ID, customer_id: CUSTOMER_ID, channel: 'sms', confirmed: true,
+    _verified_message_version: preview._version,
+  });
+  expect(cancelScheduledSmsRow).toHaveBeenCalledWith(expect.objectContaining({ expectedToPhone: '+19415550100' }));
+});
+
+test('a recipient change between the preview and confirm refuses — the pinned to_phone no longer matches', async () => {
+  const row = {
+    id: MESSAGE_ID, customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled',
+    to_phone: '+19415550100', message_type: 'manual', message_body: 'Synthetic body',
+    scheduled_for: new Date('2099-01-01T12:00:00Z'), metadata: {},
+  };
+  db.mockImplementation(makeSmsDbMock([row]));
+  const preview = await executeCommsTool('cancel_queued_message', { message_id: MESSAGE_ID, customer_id: CUSTOMER_ID, channel: 'sms' });
+  expect(preview.masked_recipient).toBe('…0100');
+
+  // customer-contact-fanout.js retargets the row to a corrected number —
+  // status and scheduled_for are untouched.
+  row.to_phone = '+19415559999';
+  const confirmed = await executeCommsTool('cancel_queued_message', {
+    message_id: MESSAGE_ID, customer_id: CUSTOMER_ID, channel: 'sms', confirmed: true,
+    _verified_message_version: preview._version,
+  });
+  expect(confirmed.success).not.toBe(true);
+  expect(confirmed.preview_changed).toBe(true);
+  expect(cancelScheduledSmsRow).not.toHaveBeenCalled();
+});
+
+// Codex round 3 on #5224, P2: actionContext.technicianId (the confirming
+// admin, threaded by the route into executeCommsTool) must reach
+// cancelScheduledSmsRow instead of a hardcoded null, so agent_decisions.
+// reviewed_by records the real admin if a parked decision reopens.
+test('the confirming admin (actionContext.technicianId) is threaded into the shared cancel workflow', async () => {
+  const row = {
+    id: MESSAGE_ID, customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled',
+    to_phone: '+19415550100', message_type: 'manual', message_body: 'Synthetic body',
+    scheduled_for: new Date('2099-01-01T12:00:00Z'), metadata: {},
+  };
+  db.mockImplementation(makeSmsDbMock([row]));
+  const preview = await executeCommsTool('cancel_queued_message', { message_id: MESSAGE_ID, customer_id: CUSTOMER_ID, channel: 'sms' });
+
+  cancelScheduledSmsRow.mockResolvedValue({ outcome: 'ok', cancelled: true, row: { id: MESSAGE_ID } });
+  await executeCommsTool('cancel_queued_message', {
+    message_id: MESSAGE_ID, customer_id: CUSTOMER_ID, channel: 'sms', confirmed: true,
+    _verified_message_version: preview._version,
+  }, { technicianId: 'admin-synthetic-99' });
+  expect(cancelScheduledSmsRow).toHaveBeenCalledWith(expect.objectContaining({ technicianId: 'admin-synthetic-99' }));
+});
+
+// Codex round 3 on #5224, P2: list_queued_messages is bounded like every
+// other paged IB reader (query_customers, getScheduleView).
+test('list_queued_messages caps at the default limit (25) and reports has_more/next_offset', async () => {
+  const rows = Array.from({ length: 30 }, (_, i) => ({
+    id: `msg-${i}`, customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled',
+    to_phone: '+19415550100', message_type: 'reminder', message_body: `Synthetic body ${i}`,
+    scheduled_for: new Date(Date.now() + (i + 1) * 60000), metadata: {},
+  }));
+  db.mockImplementation(makeSmsDbMock(rows));
+
+  const page1 = await executeCommsTool('list_queued_messages', { customer_id: CUSTOMER_ID, channel: 'sms' });
+  expect(page1.messages).toHaveLength(25);
+  expect(page1.has_more).toBe(true);
+  expect(page1.next_offset).toBe(25);
+
+  const page2 = await executeCommsTool('list_queued_messages', { customer_id: CUSTOMER_ID, channel: 'sms', offset: 25 });
+  expect(page2.messages).toHaveLength(5);
+  expect(page2.has_more).toBe(false);
+  expect(page2.next_offset).toBeNull();
 });
 
 test('cancel_queued_message never sends anything and is not classified as customer contact', () => {

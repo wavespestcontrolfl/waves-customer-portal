@@ -217,13 +217,15 @@ Use for: "what happened today?", "today's comms summary", "morning inbox briefin
   },
   {
     name: 'list_queued_messages',
-    description: `List a customer's outbound TEXTS that are still SCHEDULED — not yet sent (a text held past 8PM-8AM quiet hours, an uncertain-delivery retry, etc.). Use before cancel_queued_message to resolve the exact message_id; a cancel preview always names one message from this list. SCHEDULED EMAILS DO NOT EXIST: an email is rendered and handed to the delivery provider within seconds of being queued, so by the time anyone could ask about it, it has already sent — there is nothing to list or cancel.
+    description: `List a customer's outbound TEXTS that are still SCHEDULED — not yet sent (a text held past 8PM-8AM quiet hours, an uncertain-delivery retry, etc.). Use before cancel_queued_message to resolve the exact message_id; a cancel preview always names one message from this list. Soonest first, capped at 25 — follow next_offset for more. SCHEDULED EMAILS DO NOT EXIST: an email is rendered and handed to the delivery provider within seconds of being queued, so by the time anyone could ask about it, it has already sent — there is nothing to list or cancel.
 Use for: "what's queued to send Henderson?", "is there a text scheduled for this customer?"`,
     input_schema: {
       type: 'object',
       properties: {
         customer_id: { type: 'string', format: 'uuid', description: 'The customer to check' },
         channel: { type: 'string', enum: ['sms'], description: 'Scheduled texts only — there is no scheduled-email store to check.' },
+        offset: { type: 'integer', minimum: 0, description: 'Continue from next_offset in the previous result' },
+        limit: { type: 'number', description: 'Max results (default 25, max 100)' },
       },
       required: ['customer_id'],
     },
@@ -264,7 +266,7 @@ const COMMS_READ_TOOLS = COMMS_TOOLS.filter(t => COMMS_READ_TOOL_NAMES.has(t.nam
 
 // ─── EXECUTION ──────────────────────────────────────────────────
 
-async function executeCommsTool(toolName, input) {
+async function executeCommsTool(toolName, input, actionContext = {}) {
   try {
     switch (toolName) {
       case 'get_unanswered_threads': return await getUnansweredThreads(input);
@@ -280,7 +282,7 @@ async function executeCommsTool(toolName, input) {
       case 'get_csr_overview': return await getCsrOverview(input.days || 30);
       case 'get_todays_activity': return await getTodaysActivity();
       case 'list_queued_messages': return await listQueuedMessages(input);
-      case 'cancel_queued_message': return await cancelQueuedMessage(input);
+      case 'cancel_queued_message': return await cancelQueuedMessage(input, actionContext);
       default: return { error: `Unknown comms tool: ${toolName}` };
     }
   } catch (err) {
@@ -438,13 +440,24 @@ function bodyPreview(text) {
 function smsIneligibilityReason(row) {
   const meta = parseSmsMetadata(row.metadata);
   // Already reached the provider: finalize_only means the text itself
-  // delivered and this row only re-runs post-delivery finalization;
-  // review_delivery_uncertain_exhausted means delivery could not be
-  // confirmed either way and the row is held only for its terminal-hook
-  // safety window. Neither is "still queued" (scheduler.js, scheduled-sms-
-  // delivery.js — see the deliverable's field-level comments there).
-  if (meta.finalize_only === true || meta.review_delivery_uncertain_exhausted === true) {
+  // delivered and this row only re-runs post-delivery finalization — not
+  // "still queued" (scheduler.js).
+  if (meta.finalize_only === true) {
     return 'This text has already reached the provider — it cannot be cancelled.';
+  }
+  // Provider-attempt / uncertain (Codex round 3 on #5224, P1):
+  // review_ask_reservation is stamped by scheduled-sms-delivery.js's
+  // dispatch() immediately BEFORE every review-ask provider call, and is
+  // NOT cleared when an ambiguous attempt is held back to 'scheduled' for
+  // its next ask-spacing retry (holdUncertainReservation) — only when
+  // delivery is later proven accepted or definitely not sent. So a
+  // 'scheduled' row can carry this marker with review_delivery_uncertain_
+  // exhausted still false/absent (that flag is stamped only on the FINAL
+  // such attempt): Twilio may already have accepted an EARLIER attempt and
+  // the row was simply requeued for its next retry. Refuse both states —
+  // never only the exhausted one.
+  if (meta.review_ask_reservation === true || meta.review_delivery_uncertain_exhausted === true) {
+    return "This text may already have reached the provider and can't be cancelled here.";
   }
   // Recruiting threads are answered from Recruiting only — message_type is
   // the general, always-present signal (a recruiting send may carry no
@@ -487,8 +500,12 @@ const SMS_STORE = {
   // commit refuses a message that started sending or was rescheduled.
   // body_preview rides in the pin too (Codex round 2 P2) — a reviewer
   // editing the queued body between the card and Confirm must also refuse,
-  // not silently cancel the wrong-worded message.
-  version: (row, scheduledIso, previewText) => ({ scheduled_for: scheduledIso, body_preview: previewText }),
+  // not silently cancel the wrong-worded message. to_phone rides in the pin
+  // too (Codex round 3 P2) — customer-contact-fanout.js can retarget a
+  // still-'scheduled' row's to_phone on a phone edit without touching
+  // status or scheduled_for, so the scheduled_for pin alone would not
+  // catch a card shown for one number committing against a different one.
+  version: (row, scheduledIso, previewText) => ({ scheduled_for: scheduledIso, body_preview: previewText, to_phone: row.to_phone || null }),
   ineligibilityReason: smsIneligibilityReason,
 };
 
@@ -528,16 +545,30 @@ async function queuedMessagePreview(conn, messageId, channel) {
   };
 }
 
+const LIST_QUEUED_MESSAGES_DEFAULT_LIMIT = 25;
+const LIST_QUEUED_MESSAGES_MAX_LIMIT = 100;
+
+// Bounded like every other paged IB reader (query_customers, getScheduleView
+// in tools.js): fetch one row past the page to learn has_more without a
+// second COUNT query, soonest-first (Codex round 3 on #5224, P2 — an
+// unbounded scan is an unnecessary footgun even though a real customer's
+// scheduled queue is normally tiny).
 async function listQueuedMessages(input) {
   const customer = await resolveCustomer(input);
   if (!customer) return { error: 'Customer not found.' };
   if (customer.error) return customer;
+  const limit = Math.max(1, Math.min(Math.trunc(input.limit) || LIST_QUEUED_MESSAGES_DEFAULT_LIMIT, LIST_QUEUED_MESSAGES_MAX_LIMIT));
+  const offset = Math.max(0, Math.trunc(input.offset) || 0);
   const rows = await db('sms_log')
     .where({ customer_id: customer.id, direction: 'outbound', status: 'scheduled' })
     .orderBy('scheduled_for', 'asc')
+    .limit(limit + 1)
+    .offset(offset)
     .select('id', 'to_phone', 'message_type', 'scheduled_for', 'metadata', 'message_body');
+  const hasMore = rows.length > limit;
+  const page = hasMore ? rows.slice(0, limit) : rows;
   const messages = [];
-  for (const row of rows) {
+  for (const row of page) {
     if (smsIneligibilityReason(row)) continue; // workflow-owned or already delivered — not the bar's to list
     messages.push({
       message_id: row.id, channel: 'sms', masked_recipient: maskPhoneLast4(row.to_phone),
@@ -550,6 +581,8 @@ async function listQueuedMessages(input) {
     customer_id: customer.id,
     customer_name: `${customer.first_name || ''} ${customer.last_name || ''}`.trim() || null,
     messages, total: messages.length,
+    has_more: hasMore,
+    next_offset: hasMore ? offset + limit : null,
   };
 }
 
@@ -559,11 +592,11 @@ function sameVersion(a, b) {
   return JSON.stringify(a || null) === JSON.stringify(b || null);
 }
 
-async function commitCancelSms(input, preview) {
+async function commitCancelSms(input, preview, technicianId) {
   // Re-derive eligibility + the current pin fresh (cheap, no lock here —
   // the actual atomicity guarantee is cancelScheduledSmsRow's own CAS
   // inside its own transaction/thread lock, scoped to the pinned
-  // scheduled_for below).
+  // scheduled_for/to_phone below).
   let fresh;
   try {
     fresh = await queuedMessagePreview(db, input.message_id, 'sms');
@@ -579,8 +612,9 @@ async function commitCancelSms(input, preview) {
   const result = await cancelScheduledSmsRow({
     id: input.message_id,
     techRole: 'admin', // every IB comms tool is admin-only (action-policy.json)
-    technicianId: null,
+    technicianId: technicianId || null, // the confirming admin — recorded on agent_decisions.reviewed_by if a parked decision reopens
     expectedScheduledFor: fresh._version.scheduled_for,
+    expectedToPhone: fresh._version.to_phone,
   });
   if (result.outcome !== 'ok' || !result.cancelled) {
     // 'forbidden' cannot happen (techRole is always 'admin' here); 'not_found'
@@ -604,7 +638,7 @@ async function commitCancelSms(input, preview) {
 // commit is a single status column write on a row some OTHER sender
 // already queued. SMS only — see the SMS-ONLY note above the tool
 // definitions for why an email_messages row can never be safely cancelled.
-async function cancelQueuedMessage(input) {
+async function cancelQueuedMessage(input, actionContext = {}) {
   const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   if (!uuid.test(String(input.message_id || '')) || !uuid.test(String(input.customer_id || ''))) {
     return { error: 'Resolve the message and customer IDs first — call list_queued_messages.' };
@@ -628,7 +662,7 @@ async function cancelQueuedMessage(input) {
   if (!input._verified_message_version) {
     return { error: 'Use the confirmation card to approve this change.' };
   }
-  return commitCancelSms(input, preview);
+  return commitCancelSms(input, preview, actionContext?.technicianId);
 }
 
 async function getUnansweredThreads(input) {

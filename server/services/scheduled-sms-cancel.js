@@ -11,12 +11,15 @@
  * Every one of those obligations is threaded through here so a second
  * writer can never reintroduce the bug this extraction fixes.
  *
- * `expectedScheduledFor` is an optional CAS pin: when provided, both the
- * DELETE and the fallback UPDATE additionally require the row's CURRENT
- * scheduled_for to equal this value, so a caller whose preview pinned one
- * scheduled time refuses instead of cancelling a row that was reclaimed or
- * rescheduled since. Omitted (undefined), the admin-inbox route's original
- * unconditional-on-status behavior is preserved exactly.
+ * `expectedScheduledFor` and `expectedToPhone` are optional CAS pins: when
+ * provided, both the DELETE and the fallback UPDATE additionally require
+ * the row's CURRENT scheduled_for / to_phone to equal the pinned value, so
+ * a caller whose preview pinned one scheduled time or recipient refuses
+ * instead of cancelling a row that was reclaimed, rescheduled, or
+ * retargeted since (customer-contact-fanout.js rewrites a still-'scheduled'
+ * row's to_phone on a phone edit without touching status or scheduled_for
+ * — Codex round 3 on #5224, P2). Omitted (undefined), the admin-inbox
+ * route's original unconditional-on-status behavior is preserved exactly.
  */
 const db = require('../models/db');
 const { isRecruitingMessageType } = require('../utils/recruiting-thread-scope');
@@ -67,6 +70,17 @@ function pinnedScheduledFor(query, expectedScheduledFor) {
     : query.where({ scheduled_for: expectedScheduledFor });
 }
 
+function pinnedToPhone(query, expectedToPhone) {
+  if (expectedToPhone === undefined) return query;
+  return expectedToPhone === null
+    ? query.whereNull('to_phone')
+    : query.where({ to_phone: expectedToPhone });
+}
+
+function pinned(query, expectedScheduledFor, expectedToPhone) {
+  return pinnedToPhone(pinnedScheduledFor(query, expectedScheduledFor), expectedToPhone);
+}
+
 /**
  * @returns {Promise<{outcome: 'not_found'|'forbidden'|'ok', cancelled: boolean, row: object|null}>}
  *   `outcome` mirrors the admin-inbox route's three response branches
@@ -76,7 +90,7 @@ function pinnedScheduledFor(query, expectedScheduledFor) {
  *   only when THIS call actually neutralized the row (deleted it, or
  *   flipped it to 'canceled' in place).
  */
-async function cancelScheduledSmsRow({ id, techRole, technicianId, expectedScheduledFor } = {}) {
+async function cancelScheduledSmsRow({ id, techRole, technicianId, expectedScheduledFor, expectedToPhone } = {}) {
   const peek = await db('sms_log').where({ id, status: 'scheduled' }).first('id', 'to_phone');
   if (!peek) return { outcome: 'not_found', cancelled: false, row: null };
   if (techRole !== 'admin') {
@@ -116,24 +130,24 @@ async function cancelScheduledSmsRow({ id, techRole, technicianId, expectedSched
     // excluded (still status = 'scheduled', so the marker must be why) —
     // no instant where either statement acts on a snapshot the other could
     // have invalidated.
-    let row = (await pinnedScheduledFor(
+    let row = (await pinned(
       trx('sms_log').where({ id, status: 'scheduled' }),
-      expectedScheduledFor,
+      expectedScheduledFor, expectedToPhone,
     )
       .whereRaw("COALESCE(metadata->>'review_ask_reservation', '') <> 'true'")
       .del(['id', 'metadata', 'created_at']))?.[0];
     if (!row) {
       // Either no matching row at all (claimed by the cron, already
-      // resolved by another request, or rescheduled past the pinned CAS),
-      // or one that matched status = 'scheduled' (and the CAS pin, if any)
-      // but carries the marker right now — the DELETE's own WHERE excluded
-      // it for that reason. Cancel it in place instead of deleting: a
-      // canceled row with the marker is still an unresolved reservation to
-      // review-ask-history's lastManualAskAt, so the 72-hour spacing hold
-      // survives.
-      row = (await pinnedScheduledFor(
+      // resolved by another request, or rescheduled/retargeted past the
+      // pinned CAS), or one that matched status = 'scheduled' (and the CAS
+      // pins, if any) but carries the marker right now — the DELETE's own
+      // WHERE excluded it for that reason. Cancel it in place instead of
+      // deleting: a canceled row with the marker is still an unresolved
+      // reservation to review-ask-history's lastManualAskAt, so the
+      // 72-hour spacing hold survives.
+      row = (await pinned(
         trx('sms_log').where({ id, status: 'scheduled' }),
-        expectedScheduledFor,
+        expectedScheduledFor, expectedToPhone,
       )
         .update({ status: 'canceled', updated_at: new Date() }, ['id', 'metadata', 'created_at']))?.[0];
     }
