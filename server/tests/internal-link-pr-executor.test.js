@@ -1042,6 +1042,7 @@ describe('internal-link dry-run executor helpers', () => {
     db.mockImplementation(() => builder);
 
     GitHubClient.retireBranch = jest.fn(async () => true);
+    GitHubClient.findOpenPrByHead.mockResolvedValueOnce(null);
     await new InternalLinkPrExecutor()._releaseReservedTasks(
       [{ task: { id: 'task-open-failed' } }],
       { branch: 'content/internal-link-x', err: new Error('createPr 502') }
@@ -1682,5 +1683,32 @@ describe('internal-link recycle intent survives a failed branch retirement', () 
     expect(instance._failAbandonedPrTask).not.toHaveBeenCalled();
     expect(updates).toEqual([expect.objectContaining({ status: 'patch_candidate', skip_reason: null })]);
     db.mockImplementation(() => undefined);
+  });
+});
+
+describe('internal-link ambiguous PR-open failure', () => {
+  function capture() {
+    const updates = [];
+    const q = { whereIn: jest.fn(() => q), where: jest.fn(() => q), update: jest.fn(async (patch) => { updates.push(patch); return 1; }) };
+    db.mockImplementation(() => q);
+    return updates;
+  }
+  afterEach(() => db.mockImplementation(() => undefined));
+
+  test('a PR that opened despite the error is tracked (held for a human), never duplicated', async () => {
+    const updates = capture();
+    GitHubClient.findOpenPrByHead.mockResolvedValueOnce({ html_url: 'https://github.com/x/y/pull/90', head: { sha: 'e'.repeat(40) } });
+    GitHubClient.retireBranch = jest.fn();
+    await new InternalLinkPrExecutor()._releaseReservedTasks([{ task: { id: 't1' } }], { branch: 'b', err: new Error('createPr timeout') });
+    expect(updates).toEqual([expect.objectContaining({ status: 'pr_open', astro_pr_url: 'https://github.com/x/y/pull/90', executor_version: 'internal-link-pr-executor-recovered' })]);
+    expect(GitHubClient.retireBranch).not.toHaveBeenCalled();
+  });
+
+  test('an unconfirmed branch retirement keeps the reservation', async () => {
+    const updates = capture();
+    GitHubClient.findOpenPrByHead.mockResolvedValueOnce(null);
+    GitHubClient.retireBranch = jest.fn(async () => false);
+    await new InternalLinkPrExecutor()._releaseReservedTasks([{ task: { id: 't1' } }], { branch: 'b', err: new Error('x') });
+    expect(updates).toEqual([]);
   });
 });

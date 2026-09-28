@@ -1123,14 +1123,35 @@ class InternalLinkPrExecutor {
   // patch_candidate so the next daily sweep retries them. Marking them
   // failed stranded one-off post-publish candidates for good (the sweep
   // selects only patch_candidate). The error is kept for diagnosis.
+  //
+  // The failure can be ambiguous (createPr succeeded remotely but the
+  // response was lost), so first look the PR up by branch: if it exists,
+  // restore its lifecycle (stamped recovered → held for a human, never
+  // auto-merged). Otherwise keep the reservation until the branch is
+  // CONFIRMED retired (the stale-reservation sweep retries later).
   async _releaseReservedTasks(selected, { branch, err }) {
     const ids = selected.map((item) => item.task.id).filter(Boolean);
     if (!ids.length) return;
+    let livePr = null;
+    let retired = !branch;
     try {
-      if (branch) await GitHubClient.retireBranch(branch);
+      livePr = branch ? await GitHubClient.findOpenPrByHead(branch) : null;
+      if (!livePr && branch) retired = await GitHubClient.retireBranch(branch);
     } catch (cleanupErr) {
-      logger.warn(`[internal-link-pr-executor] branch cleanup after failed PR open failed for ${branch}: ${cleanupErr.message}`);
+      logger.warn(`[internal-link-pr-executor] cleanup after failed PR open failed for ${branch}: ${cleanupErr.message}`);
+      return; // reservation kept; the stale-reservation sweep settles it
     }
+    if (livePr?.html_url) {
+      await db(TABLE).whereIn('id', ids).where('status', 'pr_reserved').update({
+        status: 'pr_open',
+        astro_pr_url: livePr.html_url,
+        pr_commit_sha: livePr.head?.sha || null,
+        executor_version: RECOVERED_PR_EXECUTOR_VERSION,
+        updated_at: new Date(),
+      });
+      return;
+    }
+    if (!retired) return; // reservation kept until the branch is gone
     await db(TABLE)
       .whereIn('id', ids)
       .where('status', 'pr_reserved')
