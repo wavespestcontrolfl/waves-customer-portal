@@ -11,18 +11,21 @@ const FOCUSABLE_SELECTOR = [
   'input:not([disabled]):not([type="hidden"])',
   'select:not([disabled])',
   'textarea:not([disabled])',
+  'summary',
   'iframe',
   '[tabindex]:not([tabindex="-1"])',
 ].join(', ');
 
 function isAvailable(element) {
   // :disabled includes controls disabled by their fieldset while saving.
-  if (element.matches(':disabled')) return false;
-  if (element.closest('[hidden], [aria-hidden="true"]')) return false;
+  if (element.matches(':disabled') || element.tabIndex < 0) return false;
+  if (element.closest('[hidden], [aria-hidden="true"], [inert]')) return false;
   let current = element;
   while (current instanceof HTMLElement) {
     const style = window.getComputedStyle(current);
     if (style.display === 'none' || style.visibility === 'hidden') return false;
+    if (current.tagName === 'DETAILS' && !current.open
+      && !current.querySelector(':scope > summary')?.contains(element)) return false;
     current = current.parentElement;
   }
   return true;
@@ -87,18 +90,14 @@ export default function useModalFocus(active = true, onEscape = null) {
         dialog.focus({ preventScroll: true });
         return;
       }
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      const current = document.activeElement;
-      if (event.shiftKey) {
-        if (current === first || current === dialog || !dialog.contains(current)) {
-          event.preventDefault();
-          last.focus({ preventScroll: true });
-        }
-      } else if (current === last || !dialog.contains(current)) {
-        event.preventDefault();
-        first.focus({ preventScroll: true });
-      }
+      // Own each step: Safari's default Tab policy can skip buttons and
+      // leave the dialog before it ever reaches our last focusable item.
+      const currentIndex = focusable.indexOf(document.activeElement);
+      const nextIndex = event.shiftKey
+        ? (currentIndex <= 0 ? focusable.length - 1 : currentIndex - 1)
+        : (currentIndex + 1) % focusable.length;
+      event.preventDefault();
+      focusable[nextIndex].focus({ preventScroll: true });
     };
 
     document.addEventListener('keydown', onKeyDown, true);
