@@ -73,7 +73,7 @@ const SPANISH_PRESENT_COMMITMENT_VERB = '(?:env[ií](?:o|as|a|amos|áis|an)|(?:m
 const SPANISH_COMMITMENT_SUBJECT = '(?:(?:yo|nosotros|nosotras|ellos|ellas|usted|ustedes)|(?:el|la|un|una)\\s+(?:(?:miembro|integrante)\\s+del\\s+)?(?:equipo|oficina)|(?:el|la|su)\\s+(?:presupuesto|cotizaci[oó]n|estimado))';
 const SPANISH_FIRST_PERSON_COMMITMENT = '(?:env[ií]o|enviamos|(?:mand|lleg|entreg|prepar|confirm|contact|comunic|llam)(?:o|amos)|(?:recib|escrib)(?:o|imos)|ofrezco|ofrecemos|devuelvo|devolvemos|hago|hacemos|pongo|ponemos|doy|damos)';
 const SPANISH_PRESENT_COMMITMENT_RE = new RegExp(`(?<![a-záéíóúñü])(?:(?:le|les|nos|se|lo|la|los|las)\\s+${SPANISH_PRESENT_COMMITMENT_VERB}|${SPANISH_COMMITMENT_SUBJECT}\\s+(?:(?:le|les|nos|se|lo|la|los|las)\\s+)?${SPANISH_PRESENT_COMMITMENT_VERB}|^\\s*${SPANISH_FIRST_PERSON_COMMITMENT})(?![a-záéíóúñü])`, 'i');
-const SPANISH_GROUNDED_CONTINUATION_RE = /\b((?:el|su)\s+t[eé]cnico)\b[^;]*;\s*((?:llega|viene|estar[aá])\s+hoy\b[^.!?]*)/i;
+const SPANISH_GROUNDED_CONTINUATION_RE = /\b((?:el|su)\s+t[eé]cnico\b[^;]*)\s*;\s*((?:llega|viene|estar[aá])\s+hoy\b[^.!?]*)/i;
 const SPANISH_WITHOUT_PREDICATE_RE = /\bsin\s+(?:llegar\s+a\s+)?(?:enviar|mandar|recibir|entregar|ofrecer|tener|haber)\b/i;
 const SPANISH_REASSURANCE_RE = /^\s*(?:no\s+(?:se\s+)?preocupe|no\s+hay\s+problema|sin\s+problema)\b[\s,:—–]*/i;
 const SPANISH_CERTAINTY_RE = /\b(?:sin\s+duda|no\s+s[oó]lo)\b/gi;
@@ -155,8 +155,10 @@ const SPANISH_ESTIMATE_ARRIVAL = 'lleg[a-záéíóúñü]*';
 const SPANISH_DELIVERY_PREDICATE_RE = new RegExp(`(?:${SPANISH_SEND_ACTION}|${SPANISH_RECEIVE_RE.source}|${SPANISH_ESTIMATE_ARRIVAL})`, 'gi');
 const SPANISH_ROLE_BOUNDARY_RE = /[.!?;]|\b(?:y|pero|aunque|sino)\b/gi;
 const SPANISH_CLOCK_RANGE_RE = /\b(?:de|entre|desde)\s+(?:la\s+)?(?:una|1)(?::00)?\b[^.!?;,]{0,45}\b(?:tres|3)(?::00)?\b/i;
-const SPANISH_VISIT_RANGE_CONTEXT_RE = /\b(?:ventana\s+(?:(?:de|para)\s+(?:hoy|llegada|la\s+visita|su\s+cita)\s+)?(?:es|ser[aá]|est[aá]|queda|va)|llegada|(?:visita|cita)\b[^.!?;,]{0,35}\b(?:es|ser[aá]|ocurre|tiene\s+lugar|est[aá]\s+programada)|t[eé]cnico\b[^.!?;,]{0,35}\b(?:llega|viene|estar[aá])|(?:llega|viene|estar[aá])(?![a-záéíóúñü])[^.!?;,]{0,35}\bt[eé]cnico)(?![a-záéíóúñü])/i;
-const SPANISH_EXPLICIT_VISIT_OWNER_RE = /\b(?:ventana\s+de\s+(?:llegada|la\s+visita)|visita|cita|llegada|ventana(?!\s+de\s+(?:llegada|la\s+visita)\b)|t[eé]cnico)\s+(?:(?:de|del|para)|asignad[oa]\s+a)\s+([^.!?;,]+?)\s+(?:es|ser[aá]|ocurre|tiene\s+lugar|est[aá](?:\s+programad[oa])?|queda|va|llega|viene|estar[aá])(?![a-záéíóúñü])/i;
+const SPANISH_VISIT_EVENT_COORDINATION_RE = /\by\s+(?=(?:(?:el|la|su)\s+)?(?:t[eé]cnic[oa]|visita|cita|ventana|llegada)\b)/i;
+const SPANISH_VISIT_RANGE_CONTEXT_RE = /\b(?:ventana\s+(?:(?:de|para)\s+(?:hoy|llegada|la\s+visita|su\s+cita)\s+)?(?:es|ser[aá]|est[aá]|queda|va)|llegada|(?:visita|cita)\b[^.!?;,]{0,35}\b(?:es|ser[aá]|ocurre|tiene\s+lugar|est[aá]\s+programada)|t[eé]cnico\b[^.!?;,]{0,35}(?:,\s*)?\b(?:llega|viene|estar[aá])|(?:llega|viene|estar[aá])(?![a-záéíóúñü])[^.!?;,]{0,35}\bt[eé]cnico)(?![a-záéíóúñü])/i;
+const SPANISH_EXPLICIT_VISIT_OWNER_RE = /\b(?:ventana\s+de\s+(?:llegada|la\s+visita)|visita|cita|llegada|ventana(?!\s+de\s+(?:llegada|la\s+visita)\b)|t[eé]cnico)\s+(?:(?:de|del|para)|asignad[oa]\s+a)\s+([^.!?;,]+?)(?:\s*,\s*|\s+)(?:es|ser[aá]|ocurre|tiene\s+lugar|est[aá](?:\s+programad[oa])?|queda|va|llega|viene|estar[aá])(?![a-záéíóúñü])/i;
+const SPANISH_TERMINAL_VISIT_OWNER_RE = /\b(?:(?:ventana\s+de\s+llegada|ventana(?!\s+de\s+llegada)|visita|cita|llegada)\s+(?:(?:de|del|para)|asignad[oa]\s+a)|t[eé]cnico\s+(?:(?:de(?!\s+(?:la\s+)?(?:una|1)\b)|del|para)|asignad[oa]\s+a))\s+([^.!?;,]+?)\s*$/i;
 const SPANISH_REVERSE_TECHNICIAN_OWNER_RE = /\b(?:llega|viene|estar[aá])\s+(?:(?:el|la|su)\s+)?t[eé]cnic[oa]\s+(?:(?:de|del|para)|asignad[oa]\s+a)\s+([^.!?;,]+?)(?=\s+(?:de|entre|desde)\s+(?:la\s+)?(?:una|1)\b)/i;
 const SPANISH_TEMPORAL_VISIT_OWNER_RE = /^(?:hoy|mañana|pasado\s+mañana|(?:el\s+)?(?:lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado|domingo)|(?:el\s+)?\d{1,2}\s+de\s+[a-záéíóúñü]+)$/i;
 const SPANISH_COORDINATED_NAMED_SUBJECT_RE = /^\s*(.+?)\s+(?=(?:(?:le|les|lo|la|los|las|te|nos|se)\s+)?[a-záéíóúñü]+(?:ar|er|ir)[aá](?![a-záéíóúñü]))/i;
@@ -297,12 +299,25 @@ function spanishPersonDestinationTargetsCaller(roleEvidence, callerNames = []) {
 
 function spanishVisitRangeTargetsCaller(claim, callerNames = []) {
   const owner = SPANISH_EXPLICIT_VISIT_OWNER_RE.exec(claim)?.[1]
-    || SPANISH_REVERSE_TECHNICIAN_OWNER_RE.exec(claim)?.[1];
+    || SPANISH_REVERSE_TECHNICIAN_OWNER_RE.exec(claim)?.[1]
+    || SPANISH_TERMINAL_VISIT_OWNER_RE.exec(claim)?.[1];
   if (!owner) return true;
   if (/^(?:usted(?:es)?|(?:(?:el|la)\s+)?cliente)$/i.test(owner.trim())) return true;
   if (SPANISH_TEMPORAL_VISIT_OWNER_RE.test(owner.trim())) return true;
   if (/^(?:Waves|(?:(?:su|la)\s+)?(?:visita|cita))$/i.test(owner.trim())) return true;
-  return spanishCallerNameMatches(owner, callerNames);
+  if (spanishCallerNameMatches(owner, callerNames)) return true;
+  return callerNames.some((name) => {
+    const prefix = String(name).trim();
+    if (!owner.toLocaleLowerCase('es').startsWith(`${prefix.toLocaleLowerCase('es')} `)) return false;
+    return SPANISH_COORDINATED_STAFF_PREDICATE_RE.test(owner.slice(prefix.length).trim());
+  });
+}
+
+function spanishVisitEventAt(claim, at) {
+  const boundaries = [...claim.matchAll(new RegExp(SPANISH_VISIT_EVENT_COORDINATION_RE.source, 'gi'))];
+  const left = boundaries.filter((boundary) => boundary.index < at).at(-1);
+  const right = boundaries.find((boundary) => boundary.index > at);
+  return claim.slice(left ? left.index + left[0].length : 0, right?.index ?? claim.length);
 }
 
 function spanishCallbackHasWavesActor(claim, match, callerNames) {
@@ -411,8 +426,16 @@ function spanishMatchHasValidRoles(claim, match, prospective, callerNames) {
     const delivery = spanishDeliveryRoleEvidence(claim, match);
     if (!delivery.found || !spanishEstimateTargetsCaller(delivery.roleEvidence, delivery.targetText, delivery.sharedSubject, callerNames)) return false;
   }
-  return !SPANISH_CLOCK_RANGE_RE.test(matchText)
-    || (SPANISH_VISIT_RANGE_CONTEXT_RE.test(claim) && spanishVisitRangeTargetsCaller(claim, callerNames));
+  const visitContext = SPANISH_VISIT_RANGE_CONTEXT_RE.test(claim);
+  if (SPANISH_CLOCK_RANGE_RE.test(matchText)) {
+    return visitContext && spanishVisitRangeTargetsCaller(claim, callerNames);
+  }
+  if (!/\bhoy\b/i.test(matchText)) return true;
+  const todayAt = match.index + matchText.toLocaleLowerCase('es').lastIndexOf('hoy');
+  const todayClaim = spanishVisitEventAt(claim, todayAt);
+  const todayContext = SPANISH_VISIT_RANGE_CONTEXT_RE.test(todayClaim);
+  const explicitTerminalOwner = SPANISH_TERMINAL_VISIT_OWNER_RE.test(todayClaim);
+  return (!todayContext && !explicitTerminalOwner) || spanishVisitRangeTargetsCaller(todayClaim, callerNames);
 }
 
 function spanishClaimIsUncertain(claim) {
@@ -468,7 +491,12 @@ function assertedSpokenMatch(text, re, { prospective = false, callerNames } = {}
     const next = segments[index + 1];
     const grounded = segment.asserted && segment.separator.includes(';') && next?.asserted
       ? `${segment.text};${next.text}`.match(SPANISH_GROUNDED_CONTINUATION_RE) : null;
-    return grounded ? [`${grounded[1]} ${grounded[2]}`] : [];
+    if (!grounded) return [];
+    const ownerEvidence = grounded[1].replace(/\s+(?:(?:todav[ií]a|a[uú]n)\s+)?no\b[\s\S]*$/i, '');
+    const baseSubject = grounded[1].match(/\b(?:el|su)\s+t[eé]cnico\b/i)[0];
+    const owner = SPANISH_EXPLICIT_VISIT_OWNER_RE.exec(`${ownerEvidence} llega`)?.[1];
+    const subject = owner ? `${baseSubject} de ${owner}` : baseSubject;
+    return [`${subject} ${grounded[2]}`];
   });
   candidates.push(...groundedContinuations);
   const claims = candidates.flatMap((candidate) => {
@@ -1146,7 +1174,9 @@ const RELATIVE_DATE_ALLOWANCES = Object.freeze([
   {
     name: 'attested existing visit today',
     allows: (c) => BARE_TODAY_RE.test(c.relative) && c.grounded && c.afterTool === 'get_today_eta'
-      && SCHEDULE_PREDICATES.visit.test(c.clause) && !NEW_OR_CHANGED_VISIT_RE.test(c.clause)
+      && (SCHEDULE_PREDICATES.visit.test(c.clause) || SPANISH_VISIT_RANGE_CONTEXT_RE.test(c.visitEvent))
+      && (!c.callerNames?.length || spanishVisitRangeTargetsCaller(c.visitEvent, c.callerNames))
+      && !NEW_OR_CHANGED_VISIT_RE.test(c.clause)
       && !clauseIsNegated(c.clause),
   },
   {
@@ -1225,6 +1255,8 @@ function no_visit_time(value, record, { utterances }) {
           relative: relative[0], clause: relativeClause, grounded, returnedMode,
           afterTool: opts.afterTool, allowedSameDayPhrases, sentenceHasGrounding,
           clauseHasGrounding: relativeClause.includes(GROUNDED_TIME_MARKER), subject, sentence,
+          callerNames: opts.callerNames,
+          visitEvent: spanishVisitEventAt(sentence, relative.index),
         };
         if (RELATIVE_DATE_ALLOWANCES.some((rule) => rule.allows(relativeContext))) continue;
         if (UNGROUNDED_DATE_CONTEXTS.some((rule) => rule.applies(relativeContext))) return ['fail', `"${relative[0]}" spoken for a ${visitKind}: "${clip(raw, 160)}"`];
@@ -3575,6 +3607,9 @@ const SPOKEN_CHECK_VALUE_RULES = Object.freeze({
     && (Array.isArray(v.amount) ? (v.amount.length > 0 && v.amount.every((n) => Number.isFinite(Number(n)))) : Number.isFinite(Number(v.amount)))
     && typeof v.unit === 'string' && /^[a-záéíóúñ]+$/i.test(v.unit) && Object.keys(v).length === 2
     ? null : 'value must be { amount: <number|number[]>, unit: "<word>" }'),
+  // `callerNames` lets an attested same-day window apply the same exact
+  // owner binding as its required spoken fact; it is fixture data, not a
+  // general allowance for third-party visit times.
   // Codex round-5 P1: `afterTool` (allowWindow only) makes the allowed
   // window depend on an EARLIER successful call to that tool — a window
   // spoken before it ever ran is invented (no tool has grounded it yet)
@@ -3585,10 +3620,12 @@ const SPOKEN_CHECK_VALUE_RULES = Object.freeze({
     const keys = Object.keys(v);
     if (v.allow === 'returned' && keys.length === 1) return null;
     if (v.allowWindow !== undefined) {
-      const extra = keys.find((k) => !['allowWindow', 'afterTool'].includes(k));
-      if (extra) return `unknown key "${extra}" (allowWindow, afterTool)`;
+      const extra = keys.find((k) => !['allowWindow', 'afterTool', 'callerNames'].includes(k));
+      if (extra) return `unknown key "${extra}" (allowWindow, afterTool, callerNames)`;
       if (!(Array.isArray(v.allowWindow) && v.allowWindow.length === 2 && v.allowWindow.every((h) => Number.isInteger(h) && h >= 0 && h <= 23))) return 'allowWindow must be two hours 0–23 (24-hour clock: 13 is 1 PM)';
-      if (v.afterTool !== undefined && (typeof v.afterTool !== 'string' || !v.afterTool || !knownTools.has(v.afterTool))) return 'afterTool must be a known tool name';
+      if (v.afterTool !== undefined && !knownTools.has(v.afterTool)) return 'afterTool must be a known tool name';
+      if (v.callerNames !== undefined && (!Array.isArray(v.callerNames) || !v.callerNames.length
+        || !v.callerNames.every((name) => typeof name === 'string' && name.trim()))) return 'callerNames must be a non-empty array of nonblank strings';
       return null;
     }
     if (v.about !== undefined && keys.length === 1) return v.about in SCHEDULE_PREDICATES ? null : `about must be one of ${Object.keys(SCHEDULE_PREDICATES).join(', ')}`;
