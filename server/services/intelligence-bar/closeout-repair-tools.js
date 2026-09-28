@@ -273,7 +273,8 @@ async function planInvoiceStep(status, knex) {
     due_date: preview.dueDate || assessed.dueDate || null,
   };
   const send = await planInvoiceSend(status, knex);
-  return send.step ? { steps: [bill, send.step] } : { steps: [bill], skip: send.skip };
+  // The send carries the approved total so its boundary can refuse an edited draft.
+  return send.step ? { steps: [bill, { ...send.step, total: bill.total }] } : { steps: [bill], skip: send.skip };
 }
 
 // Account credit the Send action would consume: sendViaSMSAndEmail runs
@@ -490,7 +491,7 @@ const STEP_RUNNERS = {
     if (!disposition?.invoice_id) return { status: 'failed', detail: 'the created invoice could not be found' };
     // Re-checked right before the send: credit that appeared since the card
     // was shown would be consumed by the send — refuse instead.
-    const invoiceRow = await knex('invoices').where({ id: disposition.invoice_id }).first('customer_id');
+    const invoiceRow = await knex('invoices').where({ id: disposition.invoice_id }).first('customer_id', 'total', 'status');
     const blocked = await sendBoundaryRefusal(step, invoiceRow, knex);
     if (blocked) return { status: 'failed', detail: blocked, invoice_id: disposition.invoice_id };
     try {
@@ -511,6 +512,11 @@ const STEP_RUNNERS = {
 // (recipients_key), and no account credit may have appeared.
 async function sendBoundaryRefusal(step, invoiceRow, knex) {
   if (!invoiceRow) return 'the created invoice could not be read';
+  // The approved total must still be the invoice's total — a draft edited
+  // between creation and this send is not the invoice that was approved.
+  if (step.total !== undefined && Math.round(Number(invoiceRow.total) * 100) !== Math.round(Number(step.total) * 100)) {
+    return `the invoice total changed to $${Number(invoiceRow.total).toFixed(2)} since approval — review it and send it from the Invoices page`;
+  }
   const { customer, prefs } = await loadContact(invoiceRow.customer_id, knex);
   if (!customer || prefs === PREFS_UNAVAILABLE) return "the customer's contact settings could not be read — send it from the Invoices page";
   const { email, phone } = invoiceContacts(customer, prefs);

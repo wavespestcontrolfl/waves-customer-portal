@@ -423,7 +423,7 @@ describe('bill_visit — the Billing Recovery "Bill" action as a repair step', (
 
   test('confirmed: bills at the approved total, then sends that invoice as a first delivery; a total change refuses', async () => {
     getCloseoutStatus.mockResolvedValue({ ...status({ facts: UNBILLED }), serviceId: SVC });
-    db.mockImplementation(fakeDb({ service_records: [RECORD], invoices: [{ id: 'inv-9', customer_id: 'cust-1' }], visit_billing_dispositions: [{ invoice_id: 'inv-9' }] }));
+    db.mockImplementation(fakeDb({ service_records: [RECORD], invoices: [{ id: 'inv-9', customer_id: 'cust-1', total: '138.03', status: 'draft' }], visit_billing_dispositions: [{ invoice_id: 'inv-9' }] }));
     BillingRecoveryBill.assessVisitBillable.mockResolvedValue({ ok: true, price: 129, rowPrice: 129, visit: {} });
     const { steps: approved } = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
     BillingRecoveryBill.billVisit.mockResolvedValue({ ok: true, price: 129, invoice: { id: 'inv-9', invoice_number: 'WPC-2026-0042', total: '138.03', status: 'draft' } });
@@ -463,7 +463,7 @@ describe('bill_visit — the Billing Recovery "Bill" action as a repair step', (
 
   test('send: a recipient changed after approval refuses the send at the boundary (the invoice stays created)', async () => {
     getCloseoutStatus.mockResolvedValue({ ...status({ facts: UNBILLED }), serviceId: SVC });
-    db.mockImplementation(fakeDb({ service_records: [RECORD], invoices: [{ id: 'inv-9', customer_id: 'cust-1' }], visit_billing_dispositions: [{ invoice_id: 'inv-9' }] }));
+    db.mockImplementation(fakeDb({ service_records: [RECORD], invoices: [{ id: 'inv-9', customer_id: 'cust-1', total: '138.03', status: 'draft' }], visit_billing_dispositions: [{ invoice_id: 'inv-9' }] }));
     BillingRecoveryBill.assessVisitBillable.mockResolvedValue({ ok: true, price: 129, rowPrice: 129, visit: {} });
     const { steps: approved } = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
     BillingRecoveryBill.billVisit.mockResolvedValue({ ok: true, price: 129, invoice: { id: 'inv-9', total: '138.03' } });
@@ -478,9 +478,22 @@ describe('bill_visit — the Billing Recovery "Bill" action as a repair step', (
     expect(InvoiceService.sendViaSMSAndEmail).not.toHaveBeenCalled();
   });
 
+  test('send: a draft edited to a different total after creation refuses the send (the approved total is re-checked)', async () => {
+    getCloseoutStatus.mockResolvedValue({ ...status({ facts: UNBILLED }), serviceId: SVC });
+    db.mockImplementation(fakeDb({ service_records: [RECORD], invoices: [{ id: 'inv-9', customer_id: 'cust-1', total: '150.00', status: 'draft' }], visit_billing_dispositions: [{ invoice_id: 'inv-9' }] }));
+    BillingRecoveryBill.assessVisitBillable.mockResolvedValue({ ok: true, price: 129, rowPrice: 129, visit: {} });
+    const { steps: approved } = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
+    expect(approved[1]).toEqual(expect.objectContaining({ step: 'send_invoice', total: 138.03 }));
+    BillingRecoveryBill.billVisit.mockResolvedValue({ ok: true, price: 129, invoice: { id: 'inv-9', total: '138.03' } });
+    InvoiceService.sendViaSMSAndEmail.mockClear();
+    const run = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC }, { confirmed: true, executionPins: { _verified_repair_steps: approved } });
+    expect(run.receipt[1]).toEqual(expect.objectContaining({ step: 'send_invoice', status: 'failed', detail: expect.stringMatching(/total changed to \$150\.00/) }));
+    expect(InvoiceService.sendViaSMSAndEmail).not.toHaveBeenCalled();
+  });
+
   test('send: a terminal-visit void is the Send route\'s completed no-op, read through the shared classifier', async () => {
     getCloseoutStatus.mockResolvedValue({ ...status({ facts: UNBILLED }), serviceId: SVC });
-    db.mockImplementation(fakeDb({ service_records: [RECORD], invoices: [{ id: 'inv-9', customer_id: 'cust-1' }], visit_billing_dispositions: [{ invoice_id: 'inv-9' }] }));
+    db.mockImplementation(fakeDb({ service_records: [RECORD], invoices: [{ id: 'inv-9', customer_id: 'cust-1', total: '138.03', status: 'draft' }], visit_billing_dispositions: [{ invoice_id: 'inv-9' }] }));
     BillingRecoveryBill.assessVisitBillable.mockResolvedValue({ ok: true, price: 129, rowPrice: 129, visit: {} });
     const { steps: approved } = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
     BillingRecoveryBill.billVisit.mockResolvedValue({ ok: true, price: 129, invoice: { id: 'inv-9', total: '138.03' } });
@@ -495,7 +508,7 @@ describe('bill_visit — the Billing Recovery "Bill" action as a repair step', (
 
   test('send: an invoice already delivered by another path is a completed no-op; a refused send is a failed step (partial run)', async () => {
     getCloseoutStatus.mockResolvedValue({ ...status({ facts: UNBILLED }), serviceId: SVC });
-    db.mockImplementation(fakeDb({ service_records: [RECORD], invoices: [{ id: 'inv-9', customer_id: 'cust-1' }], visit_billing_dispositions: [{ invoice_id: 'inv-9' }] }));
+    db.mockImplementation(fakeDb({ service_records: [RECORD], invoices: [{ id: 'inv-9', customer_id: 'cust-1', total: '138.03', status: 'draft' }], visit_billing_dispositions: [{ invoice_id: 'inv-9' }] }));
     BillingRecoveryBill.assessVisitBillable.mockResolvedValue({ ok: true, price: 129, rowPrice: 129, visit: {} });
     const { steps: approved } = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
     BillingRecoveryBill.billVisit.mockResolvedValue({ ok: true, price: 129, invoice: { id: 'inv-9', total: '138.03' } });
@@ -516,7 +529,7 @@ test('send_invoice: account credit the send would apply keeps the send manual (p
   gates.autoApplyAccountCredit = true;
   try {
     getCloseoutStatus.mockResolvedValue({ ...status({ facts: { invoice: { state: 'pending', reason: 'expected_invoice_not_minted' } } }), serviceId: SVC });
-    db.mockImplementation(fakeDb({ service_records: [RECORD], invoices: [{ id: 'inv-9', customer_id: 'cust-1' }], visit_billing_dispositions: [{ invoice_id: 'inv-9' }] }));
+    db.mockImplementation(fakeDb({ service_records: [RECORD], invoices: [{ id: 'inv-9', customer_id: 'cust-1', total: '138.03', status: 'draft' }], visit_billing_dispositions: [{ invoice_id: 'inv-9' }] }));
     BillingRecoveryBill.assessVisitBillable.mockResolvedValue({ ok: true, price: 129, rowPrice: 129, visit: {} });
     const preview = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
     expect(preview.steps.map((st) => st.step)).toEqual(['bill_visit']);

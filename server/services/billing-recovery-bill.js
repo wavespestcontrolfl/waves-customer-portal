@@ -262,6 +262,13 @@ async function billVisit(scheduledServiceId, {
     // then create the invoice + disposition. Prevents duplicate draft invoices.
     const { invoice, price, dueDate } = await database.transaction(async (trx) => {
       await acquireScheduledInvoiceMintLock(trx, scheduledServiceId);
+      // Customer row lock BEFORE the coverage assessment: Auto Pay enrollment
+      // (autopay-enrollment enrollConsentedMethod) locks this row first, so
+      // an enrollment can't land between the assessment reading the customer
+      // as uncovered and the mint. Same order the mint itself uses (mint
+      // advisory → customer → visit), so no new lock cycle.
+      const owner = await trx('scheduled_services').where({ id: scheduledServiceId }).first('customer_id');
+      if (owner?.customer_id) await trx('customers').where({ id: owner.customer_id }).forUpdate().first('id');
       const assessed = await assessVisitBillable(scheduledServiceId, { serviceRecordId, requireCompletedVisit, database: trx });
       if (!assessed.ok) {
         const e = new Error(assessed.error);
@@ -331,6 +338,14 @@ async function billVisit(scheduledServiceId, {
       // Self-pay is pinned through the mint: createFromService re-resolves
       // Bill-To, so a payer assigned after the assessment would mint a
       // payer-owned invoice — refuse and roll back instead.
+      // …and the customer: createFromService mints for the completion
+      // record's CURRENT owner, so a merge/repoint after the assessment
+      // must refuse rather than bill another account.
+      if (String(created.customer_id || '') !== String(visit.customer_id || '')) {
+        const e = new Error('The visit changed customers while billing — reload it and bill it from Billing Recovery.');
+        e.status = 409;
+        throw e;
+      }
       if (created.payer_id) {
         const e = new Error('The visit became third-party billed while billing — handle it via the payer AP flow.');
         e.status = 409;

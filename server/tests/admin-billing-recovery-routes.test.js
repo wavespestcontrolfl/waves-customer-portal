@@ -51,7 +51,7 @@ const router = require('../routes/admin-billing-recovery');
 // to `rows` (the `.orderBy(...)` terminal in GET /leaks).
 function makeQB({ rows = [], first = null, insert = undefined } = {}) {
   const qb = {};
-  ['join', 'leftJoin', 'where', 'whereIn', 'whereRaw', 'whereNull', 'whereNot', 'whereNotIn', 'orWhere', 'select', 'orderBy']
+  ['join', 'leftJoin', 'where', 'whereIn', 'whereRaw', 'whereNull', 'whereNot', 'whereNotIn', 'orWhere', 'select', 'orderBy', 'forUpdate']
     .forEach((m) => { qb[m] = jest.fn(() => qb); });
   qb.first = jest.fn(() => Promise.resolve(first));
   qb.insert = jest.fn(() => Promise.resolve(insert));
@@ -65,7 +65,12 @@ function makeQB({ rows = [], first = null, insert = undefined } = {}) {
 function installTransaction(routeTable = () => { throw new Error('no trx tables'); }) {
   db.transaction = jest.fn(async (cb) => {
     const trx = (arg) => {
-      try { return routeTable(arg); } catch { return db(arg); }
+      try { return routeTable(arg); } catch { /* fall through to the db mock */ }
+      try { return db(arg); } catch { /* strict db mocks: serve the lock reads below */ }
+      // billVisit's owner lookup + customer row lock (taken before the assessment).
+      if (arg === 'scheduled_services') return makeQB({ first: { customer_id: 'cust-1' } });
+      if (arg === 'customers') return makeQB({ first: { id: 'cust-1' } });
+      throw new Error(`unexpected trx table ${JSON.stringify(arg)}`);
     };
     trx.raw = jest.fn((sql) => (typeof sql === 'string' ? sql : Promise.resolve()));
     trx.schema = db.schema;
@@ -615,7 +620,7 @@ describe('previewBillVisit / expectedTotal (exact total on the IB card)', () => 
     db.mockImplementation((arg) => (typeof arg === 'object' && arg.ss ? makeQB({ first: { ...BILLABLE_VISIT, ss_status: 'completed' } }) : makeQB({ first: null })));
     const dispositionQB = makeQB({ first: null });
     installNested(dispositionQB);
-    InvoiceService.createFromService.mockResolvedValue({ id: 'inv-p', total: '138.03', subtotal: '129.00', discount_amount: '0', tax_amount: '9.03' });
+    InvoiceService.createFromService.mockResolvedValue({ customer_id: 'cust-1', id: 'inv-p', total: '138.03', subtotal: '129.00', discount_amount: '0', tax_amount: '9.03' });
     let rolledBack = false;
     const outer = db.transaction;
     db.transaction = jest.fn(async (cb) => {
@@ -636,7 +641,7 @@ describe('previewBillVisit / expectedTotal (exact total on the IB card)', () => 
       if (arg === 'visit_billing_dispositions') return dispositionQB;
       throw new Error('fall through');
     });
-    InvoiceService.createFromService.mockResolvedValue({ id: 'inv-x', total: '140.00' });
+    InvoiceService.createFromService.mockResolvedValue({ customer_id: 'cust-1', id: 'inv-x', total: '140.00' });
     const result = await billVisit('ss-1', { expectedPrice: 129, expectedTotal: 138.03 });
     expect(result).toEqual(expect.objectContaining({ ok: false, status: 409, error: expect.stringMatching(/\$138\.03 → \$140\.00/) }));
     expect(dispositionQB.insert).not.toHaveBeenCalled();
@@ -659,7 +664,7 @@ describe('billVisit pins self-pay through the mint (GH Codex r3)', () => {
       if (arg === 'visit_billing_dispositions') return dispositionQB;
       throw new Error('fall through');
     });
-    InvoiceService.createFromService.mockResolvedValue({ id: 'inv-p', total: '129.00', payer_id: 'payer-1' });
+    InvoiceService.createFromService.mockResolvedValue({ customer_id: 'cust-1', id: 'inv-p', total: '129.00', payer_id: 'payer-1' });
     const result = await billVisit('ss-1', { expectedPrice: 129 });
     expect(result).toEqual(expect.objectContaining({ ok: false, status: 409, error: expect.stringMatching(/third-party billed/) }));
     expect(dispositionQB.insert).not.toHaveBeenCalled();
@@ -676,5 +681,48 @@ describe('billVisit pins self-pay through the mint (GH Codex r3)', () => {
     joinFn.call({ on });
     expect(on).toHaveBeenCalledWith('sr.scheduled_service_id', '=', 'ss.id');
     expect(andOnSpy).toHaveBeenCalledWith('sr.customer_id', '=', 'ss.customer_id');
+  });
+});
+
+describe('billVisit — customer pinned through the mint; Auto Pay serialized (GH Codex r4)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.schema = { hasColumn: jest.fn().mockResolvedValue(true), hasTable: jest.fn().mockResolvedValue(false) };
+    customerOnAutopay.mockResolvedValue(false);
+  });
+
+  test('an invoice minted for a different customer (merge mid-mint) refuses and records no disposition', async () => {
+    const { billVisit } = require('../services/billing-recovery-bill');
+    db.mockImplementation((arg) => (typeof arg === 'object' && arg.ss ? makeQB({ first: BILLABLE_VISIT }) : makeQB({ first: null })));
+    const dispositionQB = makeQB({ first: null });
+    installTransaction((arg) => {
+      if (arg === 'invoices') return makeQB({ first: null });
+      if (arg === 'visit_billing_dispositions') return dispositionQB;
+      throw new Error('fall through');
+    });
+    InvoiceService.createFromService.mockResolvedValue({ id: 'inv-m', total: '129.00', customer_id: 'cust-OTHER' });
+    const result = await billVisit('ss-1', { expectedPrice: 129 });
+    expect(result).toEqual(expect.objectContaining({ ok: false, status: 409, error: expect.stringMatching(/changed customers/) }));
+    expect(dispositionQB.insert).not.toHaveBeenCalled();
+  });
+
+  test('the customer row is locked (FOR UPDATE) after the mint lock and before the coverage assessment', async () => {
+    const { billVisit } = require('../services/billing-recovery-bill');
+    const order = [];
+    const customerLockQB = makeQB({ first: { id: 'cust-1' } });
+    customerLockQB.forUpdate = jest.fn(() => { order.push('customer_lock'); return customerLockQB; });
+    db.mockImplementation((arg) => (typeof arg === 'object' && arg.ss ? makeQB({ first: BILLABLE_VISIT }) : makeQB({ first: null })));
+    customerOnAutopay.mockImplementation(async () => { order.push('autopay_check'); return false; });
+    installTransaction((arg) => {
+      if (arg === 'scheduled_services') return makeQB({ first: { customer_id: 'cust-1' } });
+      if (arg === 'customers') return customerLockQB;
+      if (arg === 'invoices') return makeQB({ first: null });
+      if (arg === 'visit_billing_dispositions') return makeQB({ first: null });
+      throw new Error('fall through');
+    });
+    InvoiceService.createFromService.mockResolvedValue({ id: 'inv-1', total: '129.00', customer_id: 'cust-1' });
+    await billVisit('ss-1', { expectedPrice: 129 });
+    expect(order.indexOf('customer_lock')).toBeGreaterThanOrEqual(0);
+    expect(order.indexOf('customer_lock')).toBeLessThan(order.indexOf('autopay_check'));
   });
 });
