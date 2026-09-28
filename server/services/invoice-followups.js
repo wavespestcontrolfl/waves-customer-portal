@@ -629,8 +629,8 @@ async function latestLegacyCheckerDelivery(invoiceId) {
     }
     return { tierDays, lastDeliveredAt };
   } catch (err) {
-    logger.warn(`[invoice-followups] adoption legacy-tier lookup failed for invoice ${invoiceId} — arming at step 0: ${err.message}`);
-    return { tierDays: null, lastDeliveredAt: null };
+    logger.warn(`[invoice-followups] adoption legacy-tier lookup failed for invoice ${invoiceId} — skipping this sweep: ${err.message}`);
+    return { tierDays: null, lastDeliveredAt: null, unavailable: true };
   }
 }
 
@@ -660,15 +660,16 @@ function stepIndexPastTier(tierDays) {
  * (initializeAdoptedAutopayHold below, or the webhook threshold release)
  * computes its next touch from the correct, already-mapped step.
  */
-async function advanceAdoptedRowPastLegacyTier(row, anchorAt) {
+async function advanceAdoptedRowPastLegacyTier(row, anchorAt, legacy) {
   // Only a row still in the state scheduleForInvoice left it in is mapped: a
   // pause or stop that raced the adoption (admin action, STOP reply) wins,
   // and the guarded update below no-ops if the state moved meanwhile.
   if (!['active', 'autopay_hold'].includes(row.status)) return row;
-  const { tierDays, lastDeliveredAt } = await latestLegacyCheckerDelivery(row.invoice_id);
+  const { tierDays, lastDeliveredAt } = legacy;
   if (tierDays === null && lastDeliveredAt === null) return row;
   row = { ...row, legacy_last_delivered_at: lastDeliveredAt };
   const held = row.status === 'autopay_hold';
+  const steps = followupSteps();
   const targetIndex = tierDays === null ? row.step_index : Math.max(row.step_index, stepIndexPastTier(tierDays));
   let nextAt = targetIndex === row.step_index
     ? (row.next_touch_at ? new Date(row.next_touch_at) : null)
@@ -676,10 +677,18 @@ async function advanceAdoptedRowPastLegacyTier(row, anchorAt) {
   // A legacy delivery inside the owner's 7-day spacing window DELAYS the
   // landing step to a week after that delivery (10:00 NY); it never skips a
   // further step, so no reminder is lost to the handoff.
+  // The delay moves the ANCHOR, not just this touch: every later step is
+  // computed from anchor_at, so shifting it by the same amount keeps the
+  // ladder's own spacing between the delayed touch and the steps after it.
   let delayed = false;
+  let shiftedAnchor = null;
   if (!held && nextAt && lastDeliveredAt !== null) {
     const floor = anchorTo10amNY(new Date(lastDeliveredAt), 7, config.sendWindow.hour);
-    if (nextAt.getTime() < floor.getTime()) { nextAt = floor; delayed = true; }
+    if (nextAt.getTime() < floor.getTime()) {
+      nextAt = floor;
+      delayed = true;
+      shiftedAnchor = anchorTo10amNY(floor, -steps[targetIndex].daysAfterSend, config.sendWindow.hour);
+    }
   }
   if (targetIndex === row.step_index && !delayed) return row;
   const patch = {
@@ -687,6 +696,7 @@ async function advanceAdoptedRowPastLegacyTier(row, anchorAt) {
     step_index: targetIndex,
     status: held ? 'autopay_hold' : (nextAt ? 'active' : 'completed'),
     next_touch_at: held ? null : nextAt,
+    ...(shiftedAnchor ? { anchor_at: shiftedAnchor } : {}),
   };
   const updated = await db('invoice_followup_sequences')
     .where({ id: row.id, step_index: row.step_index, status: row.status })
@@ -694,7 +704,7 @@ async function advanceAdoptedRowPastLegacyTier(row, anchorAt) {
   if (!updated) return row;
   logger.info(`[invoice-followups] adopted invoice ${row.invoice_id} `
     + (targetIndex !== row.step_index ? `mapped past legacy tier ${tierDays}d to step ${targetIndex}` : `kept at step ${targetIndex}`)
-    + (delayed ? `, first touch delayed to ${nextAt.toISOString()} (7 days after the legacy delivery)` : ''));
+    + (delayed ? `, first touch delayed to ${nextAt.toISOString()} (7 days after the legacy delivery; anchor shifted to ${shiftedAnchor.toISOString()})` : ''));
   return { ...row, ...patch };
 }
 
@@ -876,6 +886,14 @@ async function adoptOrphanInvoices({ dryRun = false } = {}) {
   const adoptedIds = [];
   for (const candidate of candidates) {
     try {
+      // Read the legacy history BEFORE creating anything: an unreadable
+      // history is not an empty one, and a row armed at step 0 on unknown
+      // history could repeat a reminder the checker already delivered.
+      const legacy = await latestLegacyCheckerDelivery(candidate.invoice_id);
+      if (legacy.unavailable) {
+        skipped.push({ invoice_id: candidate.invoice_id, reason: 'legacy_history_unreadable' });
+        continue;
+      }
       let armed = await scheduleForInvoice(candidate.invoice_id);
       if (!armed) continue;
       if (candidate.pending_legacy_email?.emailLedgerId) await supersedePendingLegacyEmail(candidate);
@@ -884,7 +902,7 @@ async function adoptOrphanInvoices({ dryRun = false } = {}) {
       // (the next sweep re-selects nothing — the row exists — so the run
       // after this one takes it from wherever it landed).
       adoptedIds.push(candidate.invoice_id);
-      armed = await advanceAdoptedRowPastLegacyTier(armed, candidate.sent_at);
+      armed = await advanceAdoptedRowPastLegacyTier(armed, candidate.sent_at, legacy);
       armed = await initializeAdoptedAutopayHold(armed, candidate.customer_id);
     } catch (err) {
       // One candidate's failure must never abort the whole sweep — the

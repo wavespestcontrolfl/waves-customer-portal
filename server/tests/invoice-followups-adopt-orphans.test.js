@@ -125,7 +125,7 @@ function orphanCandidateQuery(rows) {
 function setupFullDb({
   orphanRows = [], previewInvoice = null, customer = null, activePlan = null,
   insertedRow = null, batchReads = [], seqUpdateResult = 1,
-  legacyLedgerRows = [], achFailureCount = 0,
+  legacyLedgerRows = [], legacyLedgerError = null, achFailureCount = 0,
 } = {}) {
   const orphanQuery = orphanCandidateQuery(orphanRows);
   const batchQueue = [...batchReads];
@@ -184,7 +184,7 @@ function setupFullDb({
       const qq = { wheres: [], whereRaw: jest.fn(() => qq) };
       qq.where = jest.fn((cond) => { qq.wheres.push(cond); return qq; });
       qq.update = jest.fn(async (patch) => { ledgerUpdates.push({ wheres: qq.wheres, patch }); return 1; });
-      qq.then = (resolve, reject) => Promise.resolve(legacyLedgerRows).then(resolve, reject);
+      qq.then = (resolve, reject) => (legacyLedgerError ? Promise.reject(legacyLedgerError) : Promise.resolve(legacyLedgerRows)).then(resolve, reject);
       return qq;
     }
     if (table === 'ach_failure_log') {
@@ -375,7 +375,28 @@ describe('adoptOrphanInvoices maps past the legacy checker\'s delivered tier', (
     // legacy delivery 2h ago (2026-08-05), so the landing step is floored to
     // 2026-08-12 10:00 NY instead of being skipped to Day 90.
     expect(mapUpdate.patch.next_touch_at).toEqual(tenAmET('2026-08-12'));
+    // The anchor moves with it (floor minus the Day 60 offset), so Day 90
+    // follows 30 days after the delayed touch instead of crowding it.
+    expect(mapUpdate.patch.anchor_at).toEqual(tenAmET('2026-06-13'));
     expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('first touch delayed to'));
+  });
+
+  test('an unreadable legacy history fails closed — nothing is armed this sweep', async () => {
+    process.env.GATE_DUNNING_ADOPT_ORPHANS = 'true';
+    process.env.GATE_LATE_PAYMENT_CHECKER_OFF = 'true';
+    const oldSent = tenAmET('2026-06-21');
+    setupFullDb({
+      orphanRows: [{
+        invoice_id: 'inv-1', customer_id: 'cust-1', total: '150.00', credit_applied: '0', sent_at: oldSent, sms_sent_at: null, created_at: oldSent,
+      }],
+      legacyLedgerError: new Error('ledger unavailable'),
+    });
+
+    const result = await adoptOrphanInvoices({ dryRun: false });
+
+    expect(result.adopted).toBe(0);
+    expect(result.skipped).toEqual([{ invoice_id: 'inv-1', reason: 'legacy_history_unreadable' }]);
+    expect(db.transaction).not.toHaveBeenCalled();
   });
 
   test('a non-delivered (send_failed) ledger row is ignored — no mapping', async () => {
