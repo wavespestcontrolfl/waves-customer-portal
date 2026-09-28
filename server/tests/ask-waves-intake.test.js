@@ -2373,6 +2373,188 @@ describe('public-quote resolveEntryChannel allowlist', () => {
 // territory. One-time regex/JIT setup is exercised before measurement below.
 // Inputs are sized to the real caps (12 history turns × 600 chars, a
 // 2000-char message, a 600-char reply) with repetitive adversarial shapes.
+describe('topic routing (GATE_ASK_WAVES_TOPIC_ROUTING)', () => {
+  // What the visitor asked decides: a medical-emergency, product-safety or
+  // re-entry question gets reviewed copy, never the model's own words. The
+  // model's `topic` is the only routing signal — no regex floor on the
+  // visitor's words (#4899: the regex emergency detector fires on business
+  // questions) — and a `none` answer still goes through the claim chokepoint.
+  const neutral = 'Great question! Our technicians handle that on every visit.';
+  const withTopic = (topic, extra = {}) => ({ reply: neutral, intent: 'question', service_keys: [], ready_for_quote: false, topic, ...extra });
+  const LABEL_COPY = /label directions/;
+  const VET = /veterinarian or an emergency animal hospital/;
+  beforeEach(() => { process.env.GATE_ASK_WAVES_TOPIC_ROUTING = 'true'; });
+  afterEach(() => { delete process.env.GATE_ASK_WAVES_TOPIC_ROUTING; });
+
+  test('the model gets the topic rules and field only while the gate is on', async () => {
+    dispatchWithFallback.mockResolvedValue(chainOk(withTopic('none'), 'openai'));
+    await processIntakeMessage({ message: 'Do you treat for roaches?' });
+    const [, on] = dispatchWithFallback.mock.calls[0];
+    expect(on.jsonSchema.required).toContain('topic');
+    expect(on.jsonSchema.required).toContain('language');
+    expect(on.system).toContain('LANGUAGE (the language field)');
+    expect(on.system).toContain('TOPIC (the topic field)');
+
+    delete process.env.GATE_ASK_WAVES_TOPIC_ROUTING;
+    dispatchWithFallback.mockClear();
+    dispatchWithFallback.mockResolvedValue(chainOk(withTopic('none'), 'openai'));
+    await processIntakeMessage({ message: 'Do you treat for roaches?' });
+    const [, off] = dispatchWithFallback.mock.calls[0];
+    expect(off.jsonSchema).toBe(_internals.INTAKE_SCHEMA);
+    expect(off.system).not.toContain('TOPIC (the topic field)');
+  });
+
+  test('with the gate off, the model topic is ignored', () => {
+    delete process.env.GATE_ASK_WAVES_TOPIC_ROUTING;
+    expect(normalizeIntakeResult(withTopic('product_safety'), 'openai', 'Is it ok for my kids?').reply).toBe(neutral);
+    expect(normalizeIntakeResult(withTopic('medical_emergency'), 'openai', 'My dog is acting strange').reply).toBe(neutral);
+  });
+
+  test.each([
+    ['product_safety', 'Is it ok for my kids?'],
+    ['reentry_timing', 'When is it fine to use the pool?'],
+  ])('a %s question gets the reviewed copy whatever the model wrote', (topic, message) => {
+    const out = normalizeIntakeResult(withTopic(topic), 'openai', message);
+    expect(out.reply).toMatch(LABEL_COPY);
+  });
+
+  test('a Spanish safety question gets the Spanish reviewed copy', () => {
+    expect(normalizeIntakeResult(withTopic('product_safety'), 'openai', '¿Es seguro para mi perro?').reply).toMatch(/instrucciones de la etiqueta/);
+  });
+
+  test.each([
+    ['reentry_timing', 'Cuanto esperar?', 'Debe esperar.'],
+    ['product_safety', 'Y para mi hija?', 'No hay problema.'],
+  ])('the reviewed copy follows the model\'s reply language, not the Spanish-word detector: %s %s', (topic, message, reply) => {
+    expect(normalizeIntakeResult(withTopic(topic, { reply, language: 'es' }), 'openai', message).reply).toMatch(/instrucciones de la etiqueta/);
+    expect(normalizeIntakeResult(withTopic(topic, { reply, language: 'en' }), 'openai', message).reply).toMatch(LABEL_COPY);
+  });
+
+  test('a none-topic claim gets the reviewed copy in the model\'s reply language', () => {
+    const out = normalizeIntakeResult(withTopic('none', { reply: 'Es totalmente seguro.', language: 'es' }), 'openai', 'Y el gato?');
+    expect(out.reply).toMatch(/instrucciones de la etiqueta/);
+  });
+
+  test('a safety answer keeps the model\'s quote offer', () => {
+    const out = normalizeIntakeResult(withTopic('product_safety', { intent: 'quote', ready_for_quote: true, service_keys: ['rodentBait'] }), 'openai', 'Is your rodent bait safe for my kids?');
+    expect(out.reply).toMatch(LABEL_COPY);
+    expect(out.ready_for_quote).toBe(true);
+    expect(out.service_keys).toEqual(['rodentBait']);
+  });
+
+  test('a model-classified emergency gets the emergency script, with Poison Control for an ingestion', () => {
+    const out = normalizeIntakeResult(withTopic('medical_emergency', { intent: 'quote', ready_for_quote: true }), 'openai', 'My son swallowed some bait');
+    expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
+    expect(out.reply).toContain('1-800-222-1222');
+    expect(out.intent).toBe('emergency');
+    expect(out.ready_for_quote).toBe(false);
+  });
+
+  test.each([
+    'My dog is acting strange after you were here',
+    'Mi perro se comporta raro después de que estuvieron aquí',
+    'A dog here is acting strange after the treatment',
+    'Un perro aquí se comporta raro después del tratamiento',
+  ])('a model-classified emergency about a pet adds the veterinary line even when the regex sees nothing: %s', (message) => {
+    const out = normalizeIntakeResult(withTopic('medical_emergency'), 'openai', message);
+    expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
+    expect(out.reply).toMatch(VET);
+  });
+
+  test('a question about a vet adds the veterinary line to a model-classified emergency', () => {
+    const out = normalizeIntakeResult(withTopic('medical_emergency'), 'openai', 'Should I call a vet?');
+    expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
+    expect(out.reply).toMatch(VET);
+  });
+
+  test('a none answer to a safety question still goes through the claim chokepoint', () => {
+    const out = normalizeIntakeResult(withTopic('none', { reply: 'Yes, it is completely safe for cats.' }), 'openai', 'Is the spray safe for my cat?');
+    expect(out.reply).toMatch(LABEL_COPY);
+  });
+
+  test.each([
+    'I passed out flyers for my business',
+    'We live at 911 Palm Ave',
+  ])('a known false positive earlier in the chat never turns a safety answer into the emergency script: %s', (earlier) => {
+    const out = normalizeIntakeResult(withTopic('product_safety'), 'openai', `${earlier}\nIs your spray safe for kids?`, 'Is your spray safe for kids?');
+    expect(out.reply).toMatch(LABEL_COPY);
+  });
+
+  test('trouble breathing earlier in the chat turns a re-entry answer into the emergency script', () => {
+    const out = normalizeIntakeResult(withTopic('reentry_timing'), 'openai', 'My son cannot breathe after the spray\nWhen can we go back in?', 'When can we go back in?');
+    expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
+  });
+
+  test('a safety question the model labeled "emergency" gets its quote offer back', () => {
+    const out = normalizeIntakeResult(withTopic('product_safety', { intent: 'emergency', ready_for_quote: true, service_keys: ['rodentBait'] }), 'openai', 'Is your rodent bait safe for my kids?');
+    expect(out.reply).toMatch(LABEL_COPY);
+    expect(out.intent).toBe('question');
+    expect(out.ready_for_quote).toBe(true);
+    expect(out.service_keys).toEqual(['rodentBait']);
+  });
+
+
+  test.each([
+    'We live at 911 Palm Ave, do you service Parrish?',
+    'I passed out flyers for my business, do you do commercial?',
+    'Last year my son got stung and swelled up, do you treat wasps?',
+    'Are fire ants dangerous for my dog?',
+    'Do ants come inside when it rains?',
+    'How much is quarterly pest control?',
+    'Do you treat dangerous spiders?',
+    'Are spiders dangerous for my dog?',
+    'Can I use your lawn care service for weeds?',
+    'Can I use your lawn service today?',
+    'Do you treat dry rot?',
+    'Can you let me out of my contract?',
+    'Is the spray safe for my cat?',
+    'When can the kids go back outside?',
+    'When can we walk on the lawn?',
+  ])('with topic none the model answer stands (no regex floor, no regex emergency override): %s', (message) => {
+    expect(normalizeIntakeResult(withTopic('none'), 'openai', message).reply).toBe(neutral);
+  });
+
+  test.each([
+    ['I passed out flyers for my business. Is that okay?', 'That should be fine.'],
+    ['We live at 911 Palm Ave. Can you come Tuesday?', 'That should be fine.'],
+  ])('with topic none a broad-detector phrase never turns a reassurance into the emergency script: %s', (message, reply) => {
+    expect(normalizeIntakeResult(withTopic('none', { reply }), 'openai', message).reply).toBe(reply);
+  });
+
+  test('with topic none a broad-detector phrase never turns price talk into the emergency script', () => {
+    const out = normalizeIntakeResult(withTopic('none', { reply: 'Quarterly service starts at $49 per visit.' }), 'openai', 'I passed out flyers for my business, how much is quarterly service?');
+    expect(out.reply).not.toContain(EMERGENCY_FALLBACK_RESULT.reply);
+    expect(out.reply).not.toMatch(/\$49/);
+  });
+
+  test('with topic none qualified evidence still turns a reassurance into the emergency script', () => {
+    const out = normalizeIntakeResult(withTopic('none', { reply: 'He should be fine.' }), 'openai', 'My son swallowed some bait');
+    expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
+    expect(out.reply).toContain('1-800-222-1222');
+  });
+
+  test('with topic none a claim whose reply directs to 911 keeps the emergency script', () => {
+    const out = normalizeIntakeResult(withTopic('none', { reply: 'It is completely safe, but call 911 if anyone feels sick.' }), 'openai', 'Is the spray safe?');
+    expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
+  });
+
+  test('an unknown or missing topic is treated as none', () => {
+    expect(normalizeIntakeResult(withTopic('banana'), 'openai', 'Do you treat for roaches?').reply).toBe(neutral);
+    expect(normalizeIntakeResult(withTopic(undefined), 'openai', 'Do you treat for roaches?').reply).toBe(neutral);
+  });
+
+  test('emergency evidence in the conversation upgrades a safety answer to the emergency script', () => {
+    const out = normalizeIntakeResult(withTopic('product_safety'), 'openai', 'My child swallowed pesticide\nIs it toxic?', 'Is it toxic?');
+    expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
+    expect(out.reply).toContain('1-800-222-1222');
+  });
+
+  test('with both providers down, routing changes nothing (there is no model topic)', async () => {
+    dispatchWithFallback.mockResolvedValue(chainMiss());
+    expect((await processIntakeMessage({ message: 'Is the spray safe for my cat?' })).reply).toBe(FALLBACK_RESULT.reply);
+  });
+});
+
 describe('intake chokepoint worst-case latency (#4905)', () => {
   const { execFileSync } = require('child_process');
   const path = require('path');
@@ -2384,8 +2566,9 @@ describe('intake chokepoint worst-case latency (#4905)', () => {
   // background-compile work for every earlier test file — CI measured 54–62 ms,
   // best of three, on shapes that take ~1 ms in isolation on Node 20 and 26.
   // A super-linear regex still blows the budget there on every run.
-  const timeInFreshProcess = (inputs) => {
+  const timeInFreshProcess = (inputs, env = process.env) => {
     const out = execFileSync(process.execPath, [path.join(__dirname, 'fixtures', 'ask-waves-latency-probe.js')], {
+      env,
       // A super-linear regex fails fast instead of hanging CI (the child is
       // synchronous, so jest's own test timeout cannot interrupt it).
       input: JSON.stringify(inputs), encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, timeout: 30000,
@@ -2403,6 +2586,16 @@ describe('intake chokepoint worst-case latency (#4905)', () => {
 
   test.each(shapes.map((unit, index) => [unit, index]))('stays well under budget for repeated %j', (unit, index) => {
     expect(shapeMs[index]).toBeLessThan(50);
+  });
+
+  test('topic routing (gate on) stays well under budget for every topic', () => {
+    const inputs = [];
+    for (const unit of shapes.concat(['is it safe for my ', 'when can the kids go back '])) {
+      const msg = fill(unit, 2000);
+      const ctx = [...Array(12).fill(fill(unit, 600)), msg].join('\n');
+      for (const topic of ['none', 'product_safety', 'reentry_timing', 'medical_emergency']) inputs.push({ reply: fill(unit, 600), ctx, msg, topic });
+    }
+    expect(Math.max(...timeInFreshProcess(inputs, { ...process.env, GATE_ASK_WAVES_TOPIC_ROUTING: 'true' }))).toBeLessThan(50);
   });
 
   test('stays under budget for seeded random mixes of the matchers\' own vocabulary', () => {
@@ -2432,3 +2625,144 @@ describe('intake chokepoint flags every wording the shared rule set flags', () =
   });
 });
 
+
+describe('emergency second opinion (GATE_ASK_WAVES_EMERGENCY_CHECK, #4899)', () => {
+  // A fast classifier asks only "is anyone in medical danger?" alongside
+  // every turn; a yes turns a non-emergency answer into the emergency script
+  // (no quote CTA). It never removes an emergency script, and a failed check
+  // leaves the answer as it was.
+  const quoteAnswer = { reply: 'We can treat that! Want a quick quote?', intent: 'quote', service_keys: ['generalPest'], ready_for_quote: true };
+  const route = (answer, verdict) => (policy, req) => Promise.resolve(req.laneId === 'ask_waves_emergency_check'
+    ? (verdict === 'miss' ? chainMiss() : chainOk({ in_danger: verdict }, 'openai'))
+    : (answer ? chainOk(answer, 'openai') : chainMiss()));
+  const checkCalls = () => dispatchWithFallback.mock.calls.filter(([, req]) => req.laneId === 'ask_waves_emergency_check');
+  beforeEach(() => {
+    dispatchWithFallback.mockReset();
+    process.env.GATE_ASK_WAVES_EMERGENCY_CHECK = 'true';
+  });
+  afterEach(() => { delete process.env.GATE_ASK_WAVES_EMERGENCY_CHECK; });
+
+  test('gate off: no check call and the answer stands', async () => {
+    delete process.env.GATE_ASK_WAVES_EMERGENCY_CHECK;
+    dispatchWithFallback.mockImplementation(route(quoteAnswer, true));
+    const out = await processIntakeMessage({ message: "No, he can't breathe" });
+    expect(checkCalls()).toHaveLength(0);
+    expect(out.ready_for_quote).toBe(true);
+  });
+
+  test.each([
+    "I don't know if this matters, but my child cannot breathe",
+    "No, he can't breathe",
+    'No sé si importa, pero mi hijo no puede respirar',
+  ])('a yes turns a quote answer into the emergency script with no quote CTA: %s', async (message) => {
+    dispatchWithFallback.mockImplementation(route(quoteAnswer, true));
+    const out = await processIntakeMessage({ message });
+    expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
+    expect(out.intent).toBe('emergency');
+    expect(out.ready_for_quote).toBe(false);
+    expect(out.service_keys).toEqual([]);
+  });
+
+  test.each([
+    'We live at 911 Palm Ave, do you service Parrish?',
+    'I passed out flyers for my business, do you do commercial?',
+    'There is rat poison in the attic from the last company',
+    'He is breathing normally, do you treat wasps?',
+  ])('a no leaves the answer as it was: %s', async (message) => {
+    dispatchWithFallback.mockImplementation(route(quoteAnswer, false));
+    const out = await processIntakeMessage({ message });
+    expect(out.reply).toBe(quoteAnswer.reply);
+    expect(out.ready_for_quote).toBe(true);
+  });
+
+  test('a failed check leaves the answer as it was', async () => {
+    dispatchWithFallback.mockImplementation(route(quoteAnswer, 'miss'));
+    expect((await processIntakeMessage({ message: 'My son swallowed bait' })).reply).toBe(quoteAnswer.reply);
+  });
+
+  test('a check that throws leaves the answer as it was', async () => {
+    dispatchWithFallback.mockImplementation((policy, req) => (req.laneId === 'ask_waves_emergency_check'
+      ? Promise.reject(new Error('boom')) : Promise.resolve(chainOk(quoteAnswer, 'openai'))));
+    expect((await processIntakeMessage({ message: 'My son swallowed bait' })).reply).toBe(quoteAnswer.reply);
+  });
+
+  test('a pet in the conversation adds the veterinary line; an ingestion adds Poison Control', async () => {
+    dispatchWithFallback.mockImplementation(route(quoteAnswer, true));
+    const dog = await processIntakeMessage({ message: 'Our dog is shaking and drooling', history: [{ role: 'user', content: 'You sprayed the yard this morning' }] });
+    expect(dog.reply).toMatch(/veterinarian or an emergency animal hospital/);
+    const bait = await processIntakeMessage({ message: 'My son swallowed some of the bait' });
+    expect(bait.reply).toContain('1-800-222-1222');
+  });
+
+  test('an answer that is already the emergency script is left alone', async () => {
+    const emergencyAnswer = { reply: 'Please call 911 right away.', intent: 'emergency', service_keys: [], ready_for_quote: false };
+    dispatchWithFallback.mockImplementation(route(emergencyAnswer, false));
+    expect((await processIntakeMessage({ message: 'My son swallowed bait' })).intent).toBe('emergency');
+  });
+
+  test('with both answer providers down, a yes still gets the emergency script', async () => {
+    dispatchWithFallback.mockImplementation(route(null, true));
+    const out = await processIntakeMessage({ message: "No, he can't breathe" });
+    expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
+  });
+
+  test('a check still pending 1.5 s after the answer is ready does not hold the answer', async () => {
+    jest.useFakeTimers();
+    try {
+      dispatchWithFallback.mockImplementation((policy, req) => (req.laneId === 'ask_waves_emergency_check'
+        ? new Promise(() => {}) : Promise.resolve(chainOk(quoteAnswer))));
+      let done = null;
+      const pending = processIntakeMessage({ message: 'My son swallowed bait' }).then((r) => { done = r; });
+      await jest.advanceTimersByTimeAsync(1400);
+      expect(done).toBeNull();
+      await jest.advanceTimersByTimeAsync(200);
+      await pending;
+      expect(done.reply).toBe(quoteAnswer.reply);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('a check that answers yes within the grace window still overrides', async () => {
+    jest.useFakeTimers();
+    try {
+      dispatchWithFallback.mockImplementation((policy, req) => (req.laneId === 'ask_waves_emergency_check'
+        ? new Promise((r) => { setTimeout(() => r(chainOk({ in_danger: true })), 1000); }) : Promise.resolve(chainOk(quoteAnswer))));
+      const pending = processIntakeMessage({ message: "No, he can't breathe" });
+      await jest.advanceTimersByTimeAsync(1100);
+      expect((await pending).reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('an answer that is already the emergency script never waits for the check', async () => {
+    const emergencyAnswer = { reply: 'Please call 911 right away.', intent: 'emergency', service_keys: [], ready_for_quote: false };
+    dispatchWithFallback.mockImplementation((policy, req) => (req.laneId === 'ask_waves_emergency_check'
+      ? new Promise(() => {}) : Promise.resolve(chainOk(emergencyAnswer))));
+    expect((await processIntakeMessage({ message: 'My son swallowed bait' })).intent).toBe('emergency');
+  });
+
+  test('both calls start before either is awaited, and the check gets the whole visitor side', async () => {
+    let started = 0;
+    let release;
+    const gate = new Promise((r) => { release = r; });
+    dispatchWithFallback.mockImplementation((policy, req) => {
+      started += 1;
+      return gate.then(() => (req.laneId === 'ask_waves_emergency_check' ? chainOk({ in_danger: false }) : chainOk(quoteAnswer)));
+    });
+    const pending = processIntakeMessage({ message: 'Now he is wheezing', history: [{ role: 'user', content: 'My son touched the bait' }] });
+    await Promise.resolve();
+    expect(started).toBe(2);
+    release();
+    await pending;
+    const [[policy, req, opts]] = checkCalls();
+    expect(policy.name).toBe('fastStructured');
+    expect(req.text).toContain('My son touched the bait');
+    expect(req.text).toContain('Now he is wheezing');
+    expect(req.jsonSchema.required).toEqual(['in_danger']);
+    expect(opts.hardDeadline).toBe(true);
+    expect(opts.validate({ json: { in_danger: 'yes' } })).toBe('no_verdict');
+    expect(opts.validate({ json: { in_danger: false } })).toBeNull();
+  });
+});

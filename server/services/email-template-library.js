@@ -618,12 +618,13 @@ function readStoredBillingReplayContext(message) {
   });
 }
 
-function payloadSnapshotForSend(payload, billingReplayContext, facts) {
+function payloadSnapshotForSend(payload, billingReplayContext, facts, { replayDeclared = false } = {}) {
   const snapshot = redactedPayloadSnapshot(payload || {});
   if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) return snapshot;
   delete snapshot[BILLING_REPLAY_CONTEXT_KEY];
   const safeContext = billingReplayContextForSnapshot(billingReplayContext, facts);
   if (safeContext) snapshot[BILLING_REPLAY_CONTEXT_KEY] = safeContext;
+  else if (replayDeclared) snapshot[BILLING_REPLAY_CONTEXT_KEY] = null;
   return snapshot;
 }
 
@@ -1169,6 +1170,10 @@ async function sendTemplate({
   attachments = [],
   suppressionGroupKey,
   billingReplayContext = null,
+  // Preserve a fail-closed marker when a registered producer cannot build a
+  // valid replay context. Legacy billing templates that do not declare the
+  // contract continue without the marker and keep their existing retry path.
+  billingReplayDeclared,
   // PII-sensitive bulk callers (e.g. the weekly irrigation sweep) set this so
   // sendOne does NOT log the raw SendGrid response body — provider rejections
   // can echo the recipient address, and email addresses in logs are a P1. The
@@ -1431,7 +1436,7 @@ async function sendTemplate({
       triggerEventId: triggerEventId || null,
       idempotencyKey: idempotencyKey || null,
       categories: allCategories,
-    })),
+    }, { replayDeclared: billingReplayDeclared })),
     categories: JSON.stringify(allCategories),
     idempotency_key: idempotencyKey || null,
     // Attachments aren't persisted in the snapshot; flag their presence so the

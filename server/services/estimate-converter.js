@@ -8546,6 +8546,7 @@ module.exports.annualPrepayRecurringUnitCount = function annualPrepayRecurringUn
   return recurring.length + standalone.filter((unit) => unit.fromSupplement).length;
 };
 module.exports.recurringServicesFromEstimateData = recurringServicesFromEstimateData;
+module.exports.normalizeBondTermService = normalizeBondTermService;
 module.exports.combineRecurringServicesForScheduling = combineRecurringServicesForScheduling;
 module.exports.reservedRowComboRewrites = reservedRowComboRewrites;
 module.exports.combinedRewriteUpdate = combinedRewriteUpdate;

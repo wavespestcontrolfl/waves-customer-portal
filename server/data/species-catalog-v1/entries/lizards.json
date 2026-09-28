@@ -11,7 +11,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "",
+      "approval_hash": "8a14921d026b8d29b20385fe9067f6ce241f76325bd5ddbaa78d5c6bf84d3e97"
     },
     "slug": "brown-anole",
     "common_name": "Brown Anole",
@@ -121,7 +122,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": "Resolved 2026-09-26: the old source (ask.ifas.ufl.edu/publication/UW486) was misidentified -- that publication is actually about the brown anole (Anolis sagrei), not Hemidactylus house geckos, so it was removed. No dedicated UF/IFAS Featured Creatures page for Hemidactylus exists. Confirmed traits instead against two directly-loaded sources: Powell 2004, \"Asian House Gecko (Hemidactylus frenatus),\" IGUANA 11(1):20 (nocturnal, gathers at lights to feed on insects, forages on walls/ceilings), and Hoskin 2020, \"Calling behaviour in the invasive Asian house gecko (Hemidactylus frenatus)...,\" Wildlife Research, BioOne/CSIRO (multiple-chirp \"chik, chik, chik\" call, territorial/sexual function, peaks at dusk and pre-dawn). Toe-pad wall-climbing is a defining, undisputed Gekkonidae trait and wasn't separately sourced."
+      "notes": "Resolved 2026-09-26: the old source (ask.ifas.ufl.edu/publication/UW486) was misidentified -- that publication is actually about the brown anole (Anolis sagrei), not Hemidactylus house geckos, so it was removed. No dedicated UF/IFAS Featured Creatures page for Hemidactylus exists. Confirmed traits instead against two directly-loaded sources: Powell 2004, \"Asian House Gecko (Hemidactylus frenatus),\" IGUANA 11(1):20 (nocturnal, gathers at lights to feed on insects, forages on walls/ceilings), and Hoskin 2020, \"Calling behaviour in the invasive Asian house gecko (Hemidactylus frenatus)...,\" Wildlife Research, BioOne/CSIRO (multiple-chirp \"chik, chik, chik\" call, territorial/sexual function, peaks at dusk and pre-dawn). Toe-pad wall-climbing is a defining, undisputed Gekkonidae trait and wasn't separately sourced.",
+      "approval_hash": "1596c87b9d0aadd7fa0617d5cc9bc1141dca75c90272f07417bc333b1f6c218e"
     },
     "slug": "gecko",
     "common_name": "House Gecko",
@@ -212,6 +214,573 @@
     "risk": "low",
     "action": "leave_alone",
     "season_basis": "year_round",
+    "verification": []
+  },
+  {
+    "slug": "green-anole",
+    "kind": "organism",
+    "common_name": "Green Anole",
+    "aka": [
+      "American Anole",
+      "Carolina Anole"
+    ],
+    "aliases": [
+      "green anole",
+      "american anole",
+      "carolina anole",
+      "anolis carolinensis"
+    ],
+    "scientific_name": "Anolis carolinensis",
+    "rank": "species",
+    "group": "lizards",
+    "subgroup": "anoles",
+    "site_category": "Wildlife neighbors",
+    "stages": [
+      "juvenile",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Slender lizard, 5 to 8 inches long including tail, usually bright green but can shift to brown with mood, temperature or stress",
+      "Males flare a pink throat fan (dewlap) during display or territorial disputes",
+      "Slim toes with small pads, not the sticky round toe-pads of a house gecko",
+      "Florida's only native anole, most often seen up in shrubs, trees, and on screens"
+    ],
+    "look_alikes": [
+      {
+        "slug": "brown-anole",
+        "difference": "Green anole can turn bright green and stays higher in shrubs/trees; brown anole is brown/gray with diamond blotches, stays lower on fences/ground",
+        "next_photo": "A close-up of the color (can it turn green?) and where it was seen, up in a shrub versus low on the ground or a fence",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "lawn-garden",
+      "trees-shrubs",
+      "lanai-patio"
+    ],
+    "looks": [
+      "lizard-frog"
+    ],
+    "verdict": "ally",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      3,
+      4,
+      5,
+      9,
+      10
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "Florida's only native anole and a genuine garden ally, eating insects around the yard. It's harmless to have around and worth leaving alone, especially since it's been squeezed out of a lot of ground-level habitat by the invasive brown anole.",
+      "fact": "It can change color between green and brown, but unlike a chameleon this is driven mainly by mood, temperature and stress rather than matching its background."
+    },
+    "tech_notes": "No treatment indicated; if a customer asks about lizard control broadly, distinguish this native species from the invasive brown anole before any recommendation.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Green_anole"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "70a532b4a79a28643f20ac9100c1c8cc7011f3bde4dd84c38c6ab92e150a8def"
+    },
+    "role": "beneficial",
+    "risk": "low",
+    "action": "leave_alone",
+    "season_basis": "year_round",
+    "verification": []
+  },
+  {
+    "slug": "green-iguana",
+    "kind": "organism",
+    "common_name": "Green Iguana",
+    "aka": [],
+    "aliases": [
+      "green iguana",
+      "green iguanas",
+      "iguana iguana"
+    ],
+    "scientific_name": "Iguana iguana",
+    "rank": "species",
+    "group": "lizards",
+    "subgroup": "large-lizards",
+    "site_category": "Wildlife neighbors",
+    "stages": [
+      "juvenile",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Large lizard, often 3 to 5+ feet long including tail, usually green but can turn olive, gray, or orange-ish, especially breeding males",
+      "A row of tall spines runs down the back and tail, with a large round scale under the chin",
+      "Basks in the open on seawalls, docks, rooftops and tree limbs near water, often in small groups",
+      "Burrows under seawalls, sidewalks and foundations, sometimes undermining them"
+    ],
+    "look_alikes": [
+      {
+        "slug": "spiny-tailed-iguana",
+        "difference": "Green iguana has a large round chin scale and a smoother tail; spiny-tailed iguana has rings of large spiky tail scales and no big chin scale",
+        "next_photo": "From a safe distance, zoom in on the chin (a large round scale) and the tail (spiky rings vs. smooth bands).",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "large",
+    "where": [
+      "lawn-garden",
+      "trees-shrubs",
+      "pool-water"
+    ],
+    "looks": [
+      "lizard-frog"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": false,
+      "disease_vector": true,
+      "structural": true,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "It can bite or scratch if cornered, and like most reptiles can carry Salmonella; wash your hands after any contact and keep kids and pets away from its droppings.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "Wildlife Referral",
+      "inspection_first": false,
+      "referral": "wildlife_trapper"
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "An invasive species that is now common along canals and seawalls in Florida, where its burrowing can undermine pavement, docks and foundations over time. It isn't a protected animal, so a wildlife professional can remove nuisance individuals.",
+      "fact": "On unusually cold nights, iguanas can lose their grip on branches and drop out of trees, a real phenomenon sometimes called 'iguana rain.'"
+    },
+    "tech_notes": "Not a protected species in Florida; refer for removal as a standard invasive-nuisance wildlife job. Check for burrow-related damage near seawalls/foundations when assessing structural concerns.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Common_green_iguana"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "42f3c4b48f0e0e151ee32cad4bfee8a3ddb1f3ba880533d3482bdaddd8f89674"
+    },
+    "role": "wildlife",
+    "risk": "medical",
+    "action": "specialist",
+    "season_basis": "year_round",
+    "verification": []
+  },
+  {
+    "slug": "spiny-tailed-iguana",
+    "kind": "organism",
+    "common_name": "Spiny-tailed Iguana",
+    "aka": [
+      "Black Spiny-tailed Iguana"
+    ],
+    "aliases": [
+      "spiny-tailed iguana",
+      "spinytail iguana",
+      "black spiny-tailed iguana",
+      "ctenosaura similis"
+    ],
+    "scientific_name": "Ctenosaura similis",
+    "rank": "species",
+    "group": "lizards",
+    "subgroup": "reportable-large-lizards",
+    "site_category": "Wildlife neighbors",
+    "stages": [
+      "juvenile",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Large lizard, often 3 to 4+ feet long including tail, gray to tan-brown with faint dark banding, not typically green",
+      "Tail ringed with rows of large, sharp, spiky scales, much spinier than a green iguana's",
+      "Fast-moving and alert, quick to bolt for a burrow or crevice compared to a green iguana",
+      "Digs burrows in sandy soil, under seawalls or pavement, often in loose colonies"
+    ],
+    "look_alikes": [
+      {
+        "slug": "green-iguana",
+        "difference": "Spiny-tailed iguana has rings of large spiky scales around its tail and no big round chin scale; green iguana has a large round chin scale and a smoother tail",
+        "next_photo": "From a safe distance, zoom in on the chin (a large round scale) and the tail (spiky rings vs. smooth bands).",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "large",
+    "where": [
+      "lawn-garden",
+      "lanai-patio"
+    ],
+    "looks": [
+      "lizard-frog"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": false,
+      "disease_vector": true,
+      "structural": true,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "It can bite or scratch if cornered, and like most reptiles can carry Salmonella; wash your hands after any contact.",
+    "range": "occasional",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "Report to FWC",
+      "inspection_first": false,
+      "referral": "report_fwc"
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "This invasive lizard has a well-known established colony on Gasparilla Island and nearby areas, and sightings elsewhere in the region are worth reporting to track how far it's spreading, alongside removal by a wildlife professional.",
+      "fact": "It's one of the fastest lizards in the world for short sprints, which is exactly why it's so quick to vanish down a burrow when approached."
+    },
+    "tech_notes": "Not a protected species in Florida; refer for removal, and note the sighting for state tracking given its more localized SWFL population versus the widespread green iguana.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Ctenosaura_similis",
+      "https://pubmed.ncbi.nlm.nih.gov/24382291/"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Confirmed and refined this session with a peer-reviewed source: Avery & Tillman 2014 (Integrative Zoology, PubMed 24382291), \"Invasive black spiny-tailed iguanas (Ctenosaura similis) on Gasparilla Island, Florida, USA,\" documents the population growing from 3 founders in 1979 to \"numbers in the thousands\" on Gasparilla Island specifically, with a 2008-2011 USDA Wildlife Services removal program that trapped 9,467 animals (declining from 32/day to 1.9/day, suggesting the removal effort meaningfully reduced but didn't eliminate the localized population). Separately, a 2004 FWC/Florida Museum peer-reviewed paper on Nile monitors (Southeastern Naturalist, cited on this entry's look-alike page) independently corroborates that this species co-occurs with Nile monitors on Gasparilla Island. Both sources confirm a very large, well-documented, but still geographically localized (Gasparilla Island/Lee-Charlotte County) population; neither source documents broader spread across SWFL, so range 'occasional' (common only within that specific localized area) is confirmed rather than contradicted. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "3cdee6a79fb1eaaea411c6590c208356cb63a3bcdfe4726e47970035b797a6cb"
+    },
+    "role": "wildlife",
+    "risk": "medical",
+    "action": "report",
+    "season_basis": "year_round",
+    "verification": []
+  },
+  {
+    "slug": "nile-monitor",
+    "kind": "organism",
+    "common_name": "Nile Monitor",
+    "aka": [],
+    "aliases": [
+      "nile monitor",
+      "nile monitors",
+      "nile monitor lizard",
+      "varanus niloticus"
+    ],
+    "scientific_name": "Varanus niloticus",
+    "rank": "species",
+    "group": "lizards",
+    "subgroup": "reportable-large-lizards",
+    "site_category": "Wildlife neighbors",
+    "stages": [
+      "juvenile",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Very large lizard, often 4 to 6+ feet long, grayish-brown with rows of pale yellow-green spots across the back and bands on the tail",
+      "Long neck and a noticeably forked tongue like a snake's",
+      "Powerful swimmer, often seen near canals, ponds or seawalls, and can also climb trees",
+      "Sharp, curved claws built for digging and climbing"
+    ],
+    "look_alikes": [
+      {
+        "slug": "argentine-tegu",
+        "difference": "Nile monitor has a long neck and a deeply forked, snake-like tongue; tegu has a shorter neck, a stockier body, and a tail banded in yellow and black",
+        "next_photo": "From a safe distance, zoom in on the neck length, tongue and tail banding; keep people and pets well back.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "large",
+    "where": [
+      "lawn-garden",
+      "pool-water",
+      "trees-shrubs"
+    ],
+    "looks": [
+      "lizard-frog"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": false,
+      "disease_vector": true,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "This lizard can deliver a serious bite and deep claw wounds, and it can catch small pets near water; keep people and pets well back and don't try to corner or handle it.",
+    "range": "occasional",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "Report to FWC",
+      "inspection_first": false,
+      "referral": "report_fwc"
+    },
+    "urgency": "high",
+    "copy": {
+      "what_it_means": "This is one of the more concerning invasive lizards here, with an established breeding population around Cape Coral and nearby Lee/Charlotte County waterways. It can seriously hurt a person or small pet and preys on native wildlife eggs, so report it and get a wildlife professional's help.",
+      "fact": "A cornered Nile monitor has been described by wildlife experts as more dangerous to handle than a similarly-sized alligator, due to its willingness to bite, claw and tail-whip."
+    },
+    "tech_notes": "Established breeding population concentrated in Lee/Charlotte County (Cape Coral area) per range data; treat sightings there as expected rather than novel, but still report for state tracking and refer for professional removal given bite/claw risk.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Nile_monitor",
+      "https://myfwc.com/wildlifehabitats/profiles/reptiles/lizards/nile-monitor/",
+      "https://www.jstor.org/stable/3878019"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Confirmed and refined this session with a peer-reviewed, FWC-affiliated source: Enge, Krysko, Hankins, Campbell & King 2004, \"Status of the Nile Monitor (Varanus niloticus) in Southwestern Florida\" (Southeastern Naturalist 3(4):571-582; lead author is an FWC biologist). It documents the population first observed ca. 1990 in Cape Coral (Lee County), 146 reports of 159 animals compiled 2001-2003 (mostly confined to Cape Coral but expanding to Pine Island and reported at Sanibel), and separate, less-established observations from Charlotte County (Gasparilla Island, alongside black spiny-tailed iguanas), Collier County (Naples/Haldeman Creek), De Soto County (Peace River) and Miami-Dade/Broward. This directly confirms the entry's 'concentrated in Cape Coral/Lee-Charlotte' framing and that density drops off outside that core area, matching 'occasional' region-wide / effectively common within Cape Coral specifically. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "400eea7294a4834a3f961359bdde06c4b6a3b90fe78086f5a2a29389cfd402b9"
+    },
+    "role": "wildlife",
+    "risk": "medical",
+    "action": "report",
+    "season_basis": "year_round",
+    "verification": []
+  },
+  {
+    "slug": "argentine-tegu",
+    "kind": "organism",
+    "common_name": "Argentine Black and White Tegu",
+    "aka": [
+      "Tegu"
+    ],
+    "aliases": [
+      "argentine tegu",
+      "argentine black and white tegu",
+      "tegu",
+      "salvator merianae"
+    ],
+    "scientific_name": "Salvator merianae",
+    "rank": "species",
+    "group": "lizards",
+    "subgroup": "reportable-large-lizards",
+    "site_category": "Wildlife neighbors",
+    "stages": [
+      "juvenile",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Large, stocky lizard, often 3 to 4+ feet long, black with white or yellow speckled banding, growing more black overall with age",
+      "Thick tail banded in yellow and black when young, more mottled and darker with age",
+      "Males develop noticeably large jowls at the back of the head",
+      "Digs burrows in sandy or loose soil; a bold, active forager, most visible in warmer months"
+    ],
+    "look_alikes": [
+      {
+        "slug": "nile-monitor",
+        "difference": "Tegu has a shorter neck, a stockier body, and a tail banded in yellow and black; Nile monitor has a long neck and a deeply forked, snake-like tongue",
+        "next_photo": "From a safe distance, zoom in on the neck length, tongue and tail banding; keep people and pets well back.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "large",
+    "where": [
+      "lawn-garden",
+      "lanai-patio"
+    ],
+    "looks": [
+      "lizard-frog"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": false,
+      "disease_vector": true,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "It has a powerful bite; keep people and pets away and don't try to catch or corner it yourself.",
+    "range": "occasional",
+    "active_months": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "peak_months": [
+      4,
+      5,
+      6,
+      9,
+      10
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "Report to FWC",
+      "inspection_first": false,
+      "referral": "report_fwc"
+    },
+    "urgency": "high",
+    "copy": {
+      "what_it_means": "A high-priority invasive species for Florida wildlife officials: it hunts the eggs of ground-nesting birds and other native wildlife, and has a confirmed breeding population in Charlotte County within our service area. Any sighting is worth reporting, along with a wildlife professional's help.",
+      "fact": "It goes dormant and dens up during Florida's cooler months, then re-emerges active and hungry as temperatures warm in spring."
+    },
+    "tech_notes": "FWC confirms established reproducing populations in Hillsborough, Miami-Dade, and Charlotte Counties (Punta Gorda-area sightings on/near Bronco Road since 2018) — Charlotte County is inside our SWFL service area, so this is a known local population, not just range-expansion risk. Becomes inactive in cooler months (roughly Nov–Feb), which affects detection likelihood.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Argentine_black_and_white_tegu",
+      "https://myfwc.com/wildlifehabitats/profiles/reptiles/lizards/argentine-black-and-white-tegu/"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Per audit item 31: tech_notes previously omitted the FWC-confirmed Charlotte County (Punta Gorda area) population, which is inside our five-county SWFL service area. myfwc.com's tegu profile (loaded this session) states plainly: \"Reproducing populations of Argentine black and white tegus are established in Hillsborough and Miami-Dade and Charlotte Counties.\" Range kept 'occasional' rather than 'common' since the confirmed population is localized to Charlotte County (Punta Gorda area) rather than spread across all five counties. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "11d85ed4115deca99f6f31254b03fef627c620975a3b998c5c5c20885682320e"
+    },
+    "role": "wildlife",
+    "risk": "medical",
+    "action": "report",
+    "season_basis": "observed",
     "verification": []
   }
 ]

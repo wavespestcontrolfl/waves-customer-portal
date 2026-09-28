@@ -88,6 +88,68 @@ describe('EstimateProposalDocument', () => {
     expect(window.__WAVES_PDF_IMAGE_FAILURES).toBe(0);
   });
 
+  it('keeps a neutral commercial document free of included re-service and no-contract promises', () => {
+    const { container } = render(<EstimateProposalDocument data={{
+      ...BASE_DATA, proposal: { ...BASE_DATA.proposal, noGuaranteeClaims: true },
+    }} token="tok-123" />);
+    expect(container.textContent).toContain('Recurring exterior treatment');
+    expect(container.textContent).toContain('$513.60');
+    expect(container.textContent).not.toMatch(/re-service requests are included|no long.term contract|guarantee/i);
+  });
+
+  it('an authored commercial proposal the server marks terms-neutral keeps only its satisfaction clause (Codex #4982)', () => {
+    const { container } = render(<EstimateProposalDocument data={{
+      ...BASE_DATA, proposal: { ...BASE_DATA.proposal, noEstimateWideGuarantee: true },
+    }} token="tok-123" />);
+    const text = container.textContent;
+    expect(text).toContain('Recurring service plan');
+    expect(text).toContain('Licensed & insured · Satisfaction guaranteed');
+    expect(text).not.toMatch(/re-service requests are included|no long.term contract|money[- ]back|callbacks?/i);
+  });
+
+  // Owner ruling 2026-09-27: each service carries its own terms; the terms
+  // line covers the whole document, so it needs every service.
+  const pestRodentDocument = (proposalOverrides = {}, estimateOverrides = {}) => ({
+    ...BASE_DATA,
+    estimate: { ...BASE_DATA.estimate, category: 'RESIDENTIAL', ...estimateOverrides },
+    proposal: {
+      ...BASE_DATA.proposal,
+      enabled: false,
+      synthesized: true,
+      title: 'Service Proposal',
+      buildings: [{
+        name: '123 Palm Way',
+        note: null,
+        lineItems: [
+          { description: 'Quarterly Pest Control', quantity: 1, unitPrice: 150, amount: 150, frequency: 'quarterly', frequencyLabel: 'Quarterly', taxable: false, termsScope: 'all' },
+          { description: 'Rodent Bait Stations', quantity: 1, unitPrice: 40, amount: 40, frequency: 'monthly', frequencyLabel: 'Monthly', taxable: false, termsScope: 'satisfaction' },
+        ],
+      }],
+      totals: { annualRecurring: 1080, monthlyEquivalent: 90, oneTime: 0, totalTax: 0, firstYearTotal: 1080, hasTax: false, isMultiBuilding: false },
+      ...proposalOverrides,
+    },
+    cta: { commercialProposal: false, commercialAutoPriced: false },
+  });
+
+  it('a pest service keeps its own terms beside a rodent service, while the terms line stays neutral', () => {
+    const { container } = render(<EstimateProposalDocument data={pestRodentDocument({ noEstimateWideGuarantee: true })} token="tok-123" />);
+    const text = container.textContent;
+    expect(text).toMatch(/Money-back guarantee — if we can’t solve/);
+    expect(text).toContain('Licensed & insured · Satisfaction guaranteed');
+    expect(text).not.toContain(GLASS_COPY.ctaMicro);
+  });
+
+  it('the page-level decision also neutralizes the terms line (engine commercial marks the document rows drop)', () => {
+    const pestOnly = pestRodentDocument({
+      buildings: [{ name: '123 Palm Way', note: null, lineItems: [
+        { description: 'Quarterly Pest Control', quantity: 1, unitPrice: 150, amount: 150, frequency: 'quarterly', frequencyLabel: 'Quarterly', taxable: false, termsScope: 'all' },
+      ] }],
+    }, { noEstimateWideGuarantee: true });
+    const { container } = render(<EstimateProposalDocument data={pestOnly} token="tok-123" />);
+    expect(container.textContent).toContain('Licensed & insured · Satisfaction guaranteed');
+    expect(container.textContent).not.toContain(GLASS_COPY.ctaMicro);
+  });
+
   it('renders a residential estimate with the recurring terms and approve-online next step', () => {
     const residential = {
       ...BASE_DATA,
@@ -207,6 +269,148 @@ describe('EstimateProposalDocument', () => {
     const text = container.textContent;
     expect(text).not.toContain('Unlimited free callbacks');
     expect(text).toContain('Free between-visit service calls');
+  });
+
+  it.each(['Termite Trenching', 'WDO Inspection', 'Unclassified Specialty Work'])('a neutral estimate with %s filters recurring terms while retaining scope and prices', (oneTimeLabel) => {
+    const lines = [
+      { description: 'Pest Control', quantity: 1, unitPrice: 55, amount: 55, frequency: 'monthly', frequencyLabel: 'Monthly', taxable: false },
+      { description: oneTimeLabel, quantity: 1, unitPrice: 1200, amount: 1200, frequency: 'one_time', frequencyLabel: 'One-time', taxable: false },
+    ];
+    const termite = {
+      ...BASE_DATA,
+      estimate: { ...BASE_DATA.estimate, category: 'RESIDENTIAL', noGuaranteeClaims: true },
+      proposal: {
+        ...BASE_DATA.proposal,
+        enabled: false,
+        synthesized: true,
+        pestRecurringOnly: false,
+        title: 'Service Proposal',
+        buildings: [{ name: '123 Palm Way', note: null, lineItems: lines }],
+        totals: { annualRecurring: 660, monthlyEquivalent: 55, oneTime: 1200, totalTax: 0, firstYearTotal: 1860, hasTax: false, isMultiBuilding: false },
+      },
+      cta: { commercialProposal: false, commercialAutoPriced: false },
+    };
+    const PEST_TERMS = 'No long-term contract · Unlimited free callbacks · Money-back guarantee';
+    const { container } = render(<EstimateProposalDocument data={termite} token="tok-123" />);
+    // The document-wide terms line drops to the neutral line: no guarantee.
+    expect(container.textContent).not.toContain(PEST_TERMS);
+    expect(container.textContent).not.toMatch(/Satisfaction guaranteed/);
+    expect(container.textContent).toContain('Licensed & insured');
+    expect(container.textContent).not.toMatch(/callbacks?|guarantee|warrant|money[- ]back|re[- ]?treat|no long.term contract|cancel anytime/i);
+    expect(container.textContent).toContain('Premium non-repellent + repellent solutions');
+    expect(container.textContent).toContain('Pest Control');
+    expect(container.textContent).toContain('$55.00');
+    expect(container.textContent).toContain(oneTimeLabel);
+    expect(container.textContent).toContain('$1,200.00');
+
+    // Without the flag the same recurring plan keeps its normal terms and
+    // inclusion guarantees.
+    const { container: flagless } = render(<EstimateProposalDocument data={{ ...termite, estimate: { ...termite.estimate, noGuaranteeClaims: undefined } }} token="tok-123" />);
+    expect(flagless.textContent).toContain(PEST_TERMS);
+    expect(flagless.textContent).toMatch(/Money-back guarantee — if we can’t solve/);
+  });
+
+  it('uses the rendered-row policy for retained disabled termite itemization beside current pest pricing', () => {
+    const retainedTermite = {
+      ...BASE_DATA,
+      estimate: {
+        ...BASE_DATA.estimate,
+        category: 'RESIDENTIAL',
+        // The ordinary page classifies its current pest rows and keeps its
+        // guarantee; document mode must use the different rows below.
+        noGuaranteeClaims: false,
+      },
+      proposal: {
+        ...BASE_DATA.proposal,
+        enabled: false,
+        synthesized: false,
+        noGuaranteeClaims: true,
+        pestRecurringOnly: false,
+        title: 'Service Proposal',
+        buildings: [{
+          name: '123 Palm Way',
+          note: 'Retained inspection scope',
+          lineItems: [
+            { description: 'Termite trenching', quantity: 1, unitPrice: 1200, amount: 1200, frequency: 'one_time', frequencyLabel: 'One-time', taxable: false },
+          ],
+        }],
+        totals: { annualRecurring: 0, monthlyEquivalent: 0, oneTime: 1200, totalTax: 0, firstYearTotal: 1200, hasTax: false, isMultiBuilding: false },
+      },
+      cta: { commercialProposal: false, commercialAutoPriced: false },
+    };
+
+    const { container } = render(<EstimateProposalDocument data={retainedTermite} token="tok-123" />);
+    const text = container.textContent;
+    expect(text).toContain('Termite trenching');
+    expect(text).toContain('$1,200.00');
+    expect(text).toContain('Retained inspection scope');
+    expect(text).toContain('Licensed & insured');
+    expect(text).not.toMatch(/callbacks?|guarantee|warrant|money[- ]back|re[- ]?treat|no long.term contract|cancel anytime/i);
+  });
+
+  it('keeps ordinary pest-document guarantees when its rendered rows classify as pest', () => {
+    const pest = {
+      ...BASE_DATA,
+      estimate: { ...BASE_DATA.estimate, category: 'RESIDENTIAL', noGuaranteeClaims: false },
+      proposal: {
+        ...BASE_DATA.proposal,
+        enabled: false,
+        synthesized: true,
+        noGuaranteeClaims: false,
+        pestRecurringOnly: true,
+        title: 'Service Proposal',
+        buildings: [{
+          name: '123 Palm Way',
+          note: null,
+          lineItems: [
+            { description: 'Pest Control', quantity: 1, unitPrice: 55, amount: 55, frequency: 'monthly', frequencyLabel: 'Monthly', taxable: false },
+          ],
+        }],
+        totals: { annualRecurring: 660, monthlyEquivalent: 55, oneTime: 0, totalTax: 0, firstYearTotal: 660, hasTax: false, isMultiBuilding: false },
+      },
+      cta: { commercialProposal: false, commercialAutoPriced: false },
+    };
+
+    const { container } = render(<EstimateProposalDocument data={pest} token="tok-123" />);
+    expect(container.textContent).toContain('Pest Control');
+    expect(container.textContent).toContain('$55.00');
+    expect(container.textContent).toMatch(/Money-back guarantee — if we can’t solve/);
+    expect(container.textContent).toContain('No long-term contract');
+  });
+
+  it('applies the same inclusion filter to a mosquito stack and preserves its neutral treatment scope', () => {
+    const mosquito = {
+      ...BASE_DATA,
+      estimate: { ...BASE_DATA.estimate, category: 'RESIDENTIAL', noGuaranteeClaims: true },
+      proposal: {
+        ...BASE_DATA.proposal,
+        enabled: false,
+        synthesized: true,
+        pestRecurringOnly: false,
+        buildings: [{
+          name: '123 Palm Way',
+          note: null,
+          lineItems: [
+            { description: 'Mosquito Control', quantity: 1, unitPrice: 65, amount: 65, frequency: 'monthly', frequencyLabel: 'Monthly', taxable: false },
+            { description: 'WDO Inspection', quantity: 1, unitPrice: 175, amount: 175, frequency: 'one_time', frequencyLabel: 'One-time', taxable: false },
+          ],
+        }],
+        totals: { annualRecurring: 780, monthlyEquivalent: 65, oneTime: 175, totalTax: 0, firstYearTotal: 955, hasTax: false, isMultiBuilding: false },
+      },
+      cta: { commercialProposal: false, commercialAutoPriced: false },
+    };
+    const { container } = render(<EstimateProposalDocument data={mosquito} token="tok-123" />);
+    expect(container.textContent).not.toMatch(/callbacks?|guarantee|warrant|money[- ]back|re[- ]?treat|no long.term contract|cancel anytime/i);
+    expect(container.textContent).toContain('Barrier treatment where mosquitoes actually rest');
+    expect(container.textContent).toContain('Weather-aware timing');
+    expect(container.textContent).toContain('Mosquito Control');
+    expect(container.textContent).toContain('$65.00');
+
+    const { container: control } = render(<EstimateProposalDocument data={{
+      ...mosquito,
+      estimate: { ...mosquito.estimate, noGuaranteeClaims: undefined },
+    }} token="tok-123" />);
+    expect(control.textContent).toMatch(/Money-back guarantee — if we can’t solve/);
   });
 
   it('authored terms govern — inclusions and plan-terms claims stay out beside them', () => {

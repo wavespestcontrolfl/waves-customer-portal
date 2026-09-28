@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { WAVES_FL_LICENSE_LINE, WAVES_SUPPORT_PHONE_DISPLAY } from '../constants/business';
+import { WAVES_FL_LICENSE_LINE, WAVES_PRODUCTS_SAFETY_URL, WAVES_SUPPORT_PHONE_DISPLAY } from '../constants/business';
 import { cleanVisitSummary } from './ReportViewPage';
 import { epaReg, isProductApplication, reportHasRodenticide } from '../lib/product-application';
 import { TERMITE_V2_DASHBOARD_FIELD_KEYS } from '../components/report/termiteV2/TermiteReportV2';
@@ -1631,6 +1631,13 @@ export default function ServiceReportDocument({ data, token }) {
                 autodetection is optional, and this is the only route to the
                 analysis this record intentionally omits */}
             <a href={reportUrl} style={{ color: NAVY, textDecoration: 'underline' }}>{reportUrl}</a>
+            <br />
+            {/* Owner ask 2026-09-28: every record of service links to the
+                public Products & Safety page. The footer prints on every
+                record, product rows or not; the URL shows in full so a
+                printed copy carries it. */}
+            Every product we use and our safety protocol:{' '}
+            <a href={`${WAVES_PRODUCTS_SAFETY_URL}#safety-protocol`} target="_blank" rel="noopener noreferrer" style={{ color: NAVY, textDecoration: 'underline' }}>{WAVES_PRODUCTS_SAFETY_URL}</a>
             <br />
             This report is provided for your records. This is not an invoice.
             {/* Claim tamper-evidence only when photos are actually displayed

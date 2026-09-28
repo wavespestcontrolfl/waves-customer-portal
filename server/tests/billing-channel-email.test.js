@@ -100,6 +100,20 @@ describe('billing channel email adapter', () => {
     }));
   });
 
+  test.each([
+    ['sent_at', { sent_at: new Date('2026-05-20T14:00:00Z'), created_at: new Date('2026-05-19T14:00:00Z') }, new Date('2026-05-20T14:00:00Z')],
+    ['created_at fallback', { sent_at: null, created_at: new Date('2026-05-19T14:00:00Z') }, new Date('2026-05-19T14:00:00Z')],
+    ['valid created_at after invalid sent_at', { sent_at: 'invalid', created_at: new Date('2026-05-19T14:00:00Z') }, new Date('2026-05-19T14:00:00Z')],
+    ['no usable timestamp', { sent_at: 'invalid', created_at: null }, null],
+    ['missing message', null, null],
+  ])('deduped accepted Email carries stored %s for stamp repair', async (_label, message, sentAt) => {
+    mockSendTemplate.mockResolvedValueOnce({ sent: true, deduped: true, message });
+
+    await expect(sendBillingChannelEmail(input())).resolves.toMatchObject({
+      sent: true, deliveryOutcome: 'accepted', deduped: true, sentAt,
+    });
+  });
+
   test('passes only complete allowlisted producer context to the template snapshot', async () => {
     mockLoadBillingEmailContext.mockResolvedValue(baseContext({ invoice: { id: 'inv-1', customer_id: 'cust-1' } }));
     await sendBillingChannelEmail(input({
@@ -170,6 +184,29 @@ describe('billing channel email adapter', () => {
     await sendBillingChannelEmail(input(overrides));
     expect(mockSendTemplate.mock.calls[0][0]).not.toHaveProperty('billingReplayContext');
   });
+
+  test.each([
+    ['a registered source whose context is incomplete', 'invoice_followup_sequence', true],
+    ['a registered source with normalized surrounding space', ' invoice_followup_sequence ', true],
+    ['an unregistered receipt source', 'monthly_billing_success', false],
+  ])('declares the replay contract only for %s', async (_label, entryPoint, declared) => {
+    mockLoadBillingEmailContext.mockResolvedValue(baseContext({ invoice: { id: 'inv-1', customer_id: 'cust-1' } }));
+    await sendBillingChannelEmail(input({ entryPoint, invoiceId: 'inv-1' }));
+    expect(mockSendTemplate.mock.calls[0][0]).toMatchObject({ billingReplayDeclared: declared });
+  });
+
+  test.each([['invoice_send_deferred', true], ['invoice_receipt_sms', false]])(
+    'invalid scheduled context preserves the normalized declaration for %s', async (originalEntryPoint, declared) => {
+      mockLoadBillingEmailContext.mockResolvedValue(baseContext({
+        category: 'invoice', invoice: { id: 'inv-1', customer_id: 'cust-1' },
+      }));
+      await sendBillingChannelEmail(input({ entryPoint: 'scheduled_sms_cron', invoiceId: 'inv-1',
+        metadata: { ...input().metadata, billingDeliveryCategory: 'invoice',
+          original_entry_point: originalEntryPoint, rendered_amount: 'invalid' } }));
+      expect(mockSendTemplate.mock.calls[0][0]).not.toHaveProperty('billingReplayContext');
+      expect(mockSendTemplate.mock.calls[0][0]).toMatchObject({ billingReplayDeclared: declared });
+    },
+  );
 
   test('routes a payment_receipt-category send through billing.receipt_notice', async () => {
     mockLoadBillingEmailContext.mockResolvedValue(baseContext({
@@ -463,4 +500,25 @@ describe('billing channel email adapter', () => {
       sent: false, deliveryOutcome: 'uncertain', retryable: false,
     });
   });
+});
+
+const previsitReplayContext = {
+  schema_version: 1, customer_id: 'cust-1', category: 'billing', source_entry_point: 'previsit_balance_reminder',
+  notificationEventKey: 'previsit-balance:visit-1', appointment_id: 'visit-1', appointment_date: '2026-09-29',
+  appointment_service_type: 'Pest Control', appointment_rendered_on: '2026-09-27', collections_ledger_id: 'ledger-email-1',
+  rendered_amount: '96.60', invoice_ids: ['inv-1'], invoice_quotes: [{ id: 'inv-1', dueCents: 9660 }],
+  dues_cents: 0, selected_channels: ['email'],
+};
+
+test('complete previsit replay context preserves the exact per-invoice quote and obligation pins', () => {
+  expect(sanitizeBillingReplayContext(previsitReplayContext)).toEqual(previsitReplayContext);
+});
+
+test.each([
+  { invoice_ids: undefined }, { invoice_ids: ['inv-1', 'inv-1'] }, { invoice_quotes: undefined },
+  { invoice_quotes: [{ id: 'different', dueCents: 9660 }] }, { invoice_quotes: [{ id: 'inv-1', dueCents: 9600 }] },
+  { dues_cents: 10 }, { dues_cents: -1 }, { selected_channels: [] }, { selected_channels: ['email', 'email'] },
+  { collections_ledger_id: undefined }, { notificationEventKey: 'previsit-balance:other' },
+])('incomplete or mismatched previsit replay context cannot be stored: %j', (change) => {
+  expect(sanitizeBillingReplayContext({ ...previsitReplayContext, ...change })).toBeNull();
 });

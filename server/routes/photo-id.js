@@ -411,10 +411,8 @@ function pestReserviceLane(contract) {
 // static catalog.
 const INSPECTION_FIRST_NODES = (() => {
   const flagsByNode = new Map();
-  for (const entry of speciesCatalog.listEntries()) {
-    const category = speciesCatalog.getGroup(entry.group)?.category;
-    for (const id of [entry.slug, entry.subgroup, entry.group, category]) {
-      if (!id) continue;
+  for (const entry of speciesCatalog.listEntries({ section: 'pest' })) {
+    for (const { id } of speciesCatalog.lineage(entry.slug)) {
       if (!flagsByNode.has(id)) flagsByNode.set(id, []);
       flagsByNode.get(id).push(!!entry.service?.inspection_first);
     }
@@ -427,9 +425,9 @@ const INSPECTION_FIRST_NODES = (() => {
 // pestNextStepKind whenever a v2 object is present (POST and every later
 // GET reconstruction). `contract` is the v1-mapped report_contract
 // (mapToV1's output), read here only for the re-service lane. Order matters:
-// - a referral wins first. The engine attaches one only to a named entry,
-//   the card always shows its text (V2Result), and it says who handles this
-//   instead of us (bee relocation, bat exclusion, a wildlife trapper, an
+// - a referral wins first. The engine attaches one only to a named, approved
+//   entry; the card always shows its text (V2Result), and it says who handles
+//   this instead of us (bee relocation, bat exclusion, a wildlife trapper, an
 //   FWC/FDACS report). Honey bee swarms/wall colonies and bats are ALSO
 //   inspection-first, and an in-person-inspection offer under "we refer you
 //   to a licensed specialist" would contradict the card.

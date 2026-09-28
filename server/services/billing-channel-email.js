@@ -6,7 +6,8 @@ const {
   billingEmailTemplateKey,
   blocked,
 } = require('./billing-channel-email-authority');
-const { buildBillingReplayContext } = require('./billing-email-replay-context');
+const { buildBillingReplayContext, isBillingReplaySource } = require('./billing-email-replay-context');
+const { storedEmailAcceptedAt } = require('./messaging/billing-channel-routing');
 
 function clean(value) {
   return String(value || '').trim();
@@ -17,13 +18,19 @@ function emailNotificationBody(value) {
 }
 
 function acceptedResult(result) {
+  const storedTime = storedEmailAcceptedAt(result.message);
   return {
     sent: true,
     provider: 'email',
     providerMessageId: result.message?.provider_message_id || null,
     deliveryOutcome: 'accepted',
     blocked: false,
-    ...(result.deduped ? { deduped: true } : {}),
+    ...(result.deduped ? {
+      deduped: true,
+      // The invoice finalizer may be repairing a lost acknowledgement. Keep
+      // its stamp tied to the stored Email, never to this retry's clock.
+      sentAt: storedTime,
+    } : {}),
   };
 }
 
@@ -184,6 +191,7 @@ async function sendBillingChannelEmailOnce(input, { preSendCheck } = {}) {
       suppressionGroupKey: 'transactional_required',
       suppressProviderErrorLog: true,
       ...(replayContext ? { billingReplayContext: replayContext } : {}),
+      billingReplayDeclared: Boolean(replayContext) || isBillingReplaySource(input),
       withProviderHandoff: (dispatch) => dispatchUnderBillingEmailAuthority({
         input, recipientEmail, preSendCheck, dispatch, state,
       }),

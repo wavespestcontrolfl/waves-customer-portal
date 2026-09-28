@@ -62,6 +62,7 @@ import PestPressureCard from '../components/PestPressureCard';
 import { etDateString } from '../lib/timezone';
 import ReferralShareCard from '../components/referral/ReferralShareCard';
 import ActivityCard from '../components/ActivityCard';
+import { WAVES_PRODUCTS_SAFETY_URL } from '../constants/business';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const WAVES_PHONE_DISPLAY = '(941) 297-5749';
@@ -2639,6 +2640,32 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
   );
 }
 
+// "Your plan" section (owner ask 2026-09-28): an active plan member's visit +
+// re-service COUNTS for this year — never a price, owner rule that prices
+// only ever appear on estimate pages. The server sends it for members only.
+// Live view only; the payload field itself is stripped from
+// pdf/static/sms_preview renders server-side (stripLiveOnlyScheduleFields),
+// so `mode` is a belt-and-braces check here, same as the other live-only
+// cards on this page.
+function PlanSummaryCard({ data, mode }) {
+  const plan = data.planSummary;
+  if (mode !== 'live' || !plan) return null;
+  const visits = Number(plan.visitsThisYear) || 0;
+  if (visits <= 0) return null;
+  const reservices = Number(plan.reservicesThisYear) || 0;
+  const visitWord = visits === 1 ? 'visit' : 'visits';
+  const reserviceWord = reservices === 1 ? 're-service' : 're-services';
+  const yearLine = reservices > 0
+    ? `This year: ${visits} ${visitWord}, including ${reservices} ${reserviceWord}`
+    : `This year: ${visits} ${visitWord}`;
+  return (
+    <section data-glass="card" className="sr-section plan-summary-section" id="your-plan">
+      <div className="section-eyebrow">Your plan</div>
+      <p className="map-context-copy">{yearLine}</p>
+    </section>
+  );
+}
+
 // Shown to staff viewing an internal-only (shadow) report in place of the
 // download/share bar: no PDF is rendered for these records and the public
 // link 404s for customers, so every control there would dead-end. Customers
@@ -3321,6 +3348,40 @@ function ReviewRequestCard({ data, token, mode, placement = 'top' }) {
   );
 }
 
+// "Your upcoming visits" card (owner-approved 2026-09-27,
+// GATE_REPORT_UPCOMING_VISITS). Server-driven: renders only when the LIVE
+// payload carries upcomingVisitsCard.visits — property scoping (this
+// report's property only), the 90-day window, the excluded statuses, and
+// the ~6 cap all live server-side (report-data.js); the client renders
+// exactly what it is given. Distinct from the hero's "Next service" cell
+// above, which stays scoped to this report's own service line only.
+function UpcomingVisitsCard({ data, mode }) {
+  const visits = data?.upcomingVisitsCard?.visits;
+  if (mode !== 'live' || !Array.isArray(visits) || !visits.length) return null;
+  return (
+    <section data-glass="card" className="report-card upcoming-visits-card" data-section="upcoming-visits">
+      {/* h2, not .section-eyebrow (codex round-2 P2): the glass theme hides
+          EVERY .section-eyebrow outside the hero kicker
+          (html[data-glass-theme] .service-report-v1 .section-eyebrow), so
+          the title was invisible under glass. .report-card h2 already
+          carries real, deliberate styling (same pattern the companion
+          section heading and the generic .report-card/.sr-section rule
+          use) and the glass rule never targets headings. */}
+      <h2>Your upcoming visits</h2>
+      <div className="service-status-grid">
+        {visits.map((visit, index) => (
+          <div className="sr-cell" key={`${index}-${visit.scheduledDate || ''}-${visit.serviceType || ''}`}>
+            <div className="sr-cell-value">
+              {formatNextAppointmentLabel(visit) || nextServiceName(visit.serviceType) || 'Scheduled visit'}
+            </div>
+          </div>
+        ))}
+      </div>
+      <div className="sr-cell-note">Dates and windows are subject to change</div>
+    </section>
+  );
+}
+
 // Cross-sell offer card (owner-approved 2026-08-11, GATE_REPORT_CROSS_SELL).
 // Server-driven: renders only when the LIVE payload carries `crossSell` — the
 // server computes the offer fail-closed (ownership, commercial, secondary-
@@ -3374,6 +3435,14 @@ function CrossSellCard({ data, token, mode }) {
   };
   return (
     <section data-glass="card" className="report-card cross-sell-card" data-section="cross-sell">
+      {/* GATE_REPORT_CROSS_SELL_V2 only: short, honest, reason-tied copy for
+          a findings/season-picked offer ("We noted roach activity today...").
+          Absent for the unchanged ladder pick. */}
+      {offer.reason && (
+        <p style={{ margin: '0 0 12px', color: 'var(--muted)', fontSize: 14, lineHeight: 1.5, textAlign: 'center' }}>
+          {offer.reason}
+        </p>
+      )}
       <div className="cross-sell-cta-row">
         {requestState === 'sent' ? (
           <p className="cross-sell-confirm">
@@ -5643,6 +5712,13 @@ function LegacyReport({ data, token, glass = false }) {
             }}
             style={{ ...actionButtonStyle('primary'), marginTop: 16 }}
           ><Download size={16} /> Download PDF</a>
+          {/* Owner ask 2026-09-28: legacy (pre-v1) reports carry the Products
+              & Safety link too; they never mount the v1 footer. */}
+          <p style={{ fontSize: 14, lineHeight: 1.5, marginTop: 12 }}>
+            <a href={`${WAVES_PRODUCTS_SAFETY_URL}#safety-protocol`} target="_blank" rel="noopener noreferrer" style={{ color: '#04395E', fontWeight: 600 }}>
+              See every product we use and our safety protocol
+            </a>
+          </p>
         </section>
         <div data-glass={glass ? 'card' : undefined} style={{ marginTop: 16, borderRadius: 16, overflow: 'hidden', border: glass ? undefined : `1px solid ${ESTIMATE_BORDER}`, background: glass ? undefined : '#fff' }}>
           <iframe src={pdfUrl} style={{ width: '100%', height: 620, border: 'none', background: '#fff' }} title="Service report PDF" />
@@ -7315,6 +7391,14 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         .sr-cell-label { font-size: 14px; color: var(--soft); }
         .sr-cell-value { margin-top: 8px; font-size: 15px; color: var(--text); }
+        /* Customer-facing body copy floor is 16px; 14px stays reserved for
+           labels (codex round-2 P2). Scoped to the upcoming-visits card only
+           — .sr-cell-value/.sr-cell-note are shared with other cards whose
+           existing 15px/14px sizing is unchanged here. */
+        .upcoming-visits-card .sr-cell-value,
+        .upcoming-visits-card .sr-cell-note {
+          font-size: 16px;
+        }
         .sr-list { display: grid; gap: 12px; }
         .sr-row {
           border: 1px solid var(--line);
@@ -8887,6 +8971,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
 
         <ServiceStatusCard data={data} mode={mode} resultOverride={data.reportV2?.todaysResult || null} />
 
+        <PlanSummaryCard data={data} mode={mode} />
+
         {/* V2 + pest: a review ask up top, location-synced to the closest GBP
             (ReviewRequestCard picks the office review URL). Self-gates on
             eligibility / already-reviewed. Pest gets the top placement like
@@ -8938,6 +9024,12 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             lawn timeline below; the two are exclusive on isV2LeadLayout so
             #tech-note never duplicates. Live only. */}
         {!isV2LeadLayout && <TechNoteCard data={data} mode={mode} />}
+
+        {/* Your upcoming visits (owner-approved 2026-09-27,
+            GATE_REPORT_UPCOMING_VISITS) — right beside the cross-sell offer,
+            same interwoven placement. Live-only; renders nothing unless the
+            payload carries upcomingVisitsCard. */}
+        <UpcomingVisitsCard data={data} mode={mode} />
 
         {/* Cross-sell offer — INTERWOVEN placement (owner 2026-08-11: spaced
             through the report, not stacked at the bottom): after the visit
@@ -9476,6 +9568,13 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
 
         <footer className="sr-footer">
           Questions about today&apos;s service? Ask Waves in your portal or call (941) 297-5749.
+          {/* Owner ask 2026-09-28: every report links to the public Products &
+              Safety page. The footer renders on every report, so assessment-
+              and inspection-only visits get it too. */}
+          {' '}
+          <a href={`${WAVES_PRODUCTS_SAFETY_URL}#safety-protocol`} target="_blank" rel="noopener noreferrer" style={{ color: '#04395E', fontWeight: 600 }}>
+            See every product we use and our safety protocol
+          </a>.
           {data.waveGuardTier || data.waveguardTier || data.plan?.isWaveGuard ? ' WaveGuard members receive free re-service when covered activity continues after the treatment window.' : ''}
           {/* Pair the sentence with a "book it" path. Server-gated boolean
               only (reserviceEligible) — the standing reservice_token must

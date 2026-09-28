@@ -10,7 +10,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": "Resolved 2026-09-26: ENY-224 \"Rat and Mouse Control\" (Koehler & Kern, UF/IFAS) is back up at the FLVC/EDIS journal host (the ask.ifas.ufl.edu short URL still 404s, but the article record loads directly). It confirms: roof rats nest in attics/roof spaces/palm trees/shrubbery, are climbers, gnaw citrus fruit and are destructive to citrus groves, gnaw electrical wires/rafters in attics, and have a tail longer than the combined head and body, and that rats travel wires, pipes and rough walls using their sense of balance. Source URL added; ENY-224 re-verification note is resolved."
+      "notes": "Resolved 2026-09-26: ENY-224 \"Rat and Mouse Control\" (Koehler & Kern, UF/IFAS) is back up at the FLVC/EDIS journal host (the ask.ifas.ufl.edu short URL still 404s, but the article record loads directly). It confirms: roof rats nest in attics/roof spaces/palm trees/shrubbery, are climbers, gnaw citrus fruit and are destructive to citrus groves, gnaw electrical wires/rafters in attics, and have a tail longer than the combined head and body, and that rats travel wires, pipes and rough walls using their sense of balance. Source URL added; ENY-224 re-verification note is resolved. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "da90159091b9906231f9756c7fbf6a90d92538917b81b70dc2e6004a9ec2e9e9"
     },
     "slug": "roof-rat",
     "common_name": "Roof Rat",
@@ -35,7 +36,7 @@
       {
         "slug": "norway-rat",
         "difference": "Roof rats are found up high (attic, roofline, trees) with a tail longer than the body; Norway rats burrow at ground level and have a shorter, thicker tail.",
-        "next_photo": "A close-up of the droppings next to a coin, plus a wide shot of where the activity is (attic vs. ground).",
+        "next_photo": "From a safe distance, zoom in on the droppings' size and shape, plus a wide shot of where the activity is (attic vs. ground).",
         "photo_can_confirm": true
       }
     ],
@@ -116,7 +117,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": "Resolved 2026-09-26: ENY-224 (UF/IFAS, link above) confirms Norway rats are burrowers that dig under buildings/concrete slabs and along walls/rubbish (foundation-level activity). Its tail-length phrasing for Norway rats (\"about as long as the combined head and body\") is ambiguous next to the entry's \"tail shorter than the body,\" so also checked icwdm.org (Internet Center for Wildlife Damage Management, University of Nebraska-Lincoln Extension), which states the Norway rat's tail \"does not reach the tip of the nose\" -- i.e., shorter than head+body -- and confirms ground-level burrowing near walls/buildings. Entry traits left as written; both URLs added to sources."
+      "notes": "Resolved 2026-09-26: ENY-224 (UF/IFAS, link above) confirms Norway rats are burrowers that dig under buildings/concrete slabs and along walls/rubbish (foundation-level activity). Its tail-length phrasing for Norway rats (\"about as long as the combined head and body\") is ambiguous next to the entry's \"tail shorter than the body,\" so also checked icwdm.org (Internet Center for Wildlife Damage Management, University of Nebraska-Lincoln Extension), which states the Norway rat's tail \"does not reach the tip of the nose\" -- i.e., shorter than head+body -- and confirms ground-level burrowing near walls/buildings. Entry traits left as written; both URLs added to sources. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "6c4254a1e61c6ef9e17a39e7b0a37c82535e932db4445f74687167800b7067bc"
     },
     "slug": "norway-rat",
     "common_name": "Norway Rat",
@@ -141,7 +143,7 @@
       {
         "slug": "roof-rat",
         "difference": "Norway rats burrow at ground level with a tail shorter than the body; roof rats are found up high with a tail longer than the body.",
-        "next_photo": "A close-up of the droppings next to a coin, plus a wide shot of where the activity is (ground vs. attic).",
+        "next_photo": "From a safe distance, zoom in on the droppings' size and shape, plus a wide shot of where the activity is (ground vs. attic).",
         "photo_can_confirm": true
       }
     ],
@@ -222,7 +224,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": "Resolved 2026-09-26: ENY-224 (UF/IFAS, link above) confirms house mice nibble at a wide variety of food sources (consistent with the \"20-30 food sites a night\" copy) and states mice can squeeze through a 1/4-inch crack (\"any place a pencil can be poked, a mouse can go\"), and gives dropping length as 1/8 inch (rice-grain sized, matching the entry). A 1/4-inch gap is narrower than a dime's diameter (~0.7 in), so the entry's \"gap the width of a dime\" is a true but more conservative comparison than the source's precise figure; left as written since it is not contradicted. Source URL added."
+      "notes": "Resolved 2026-09-26: ENY-224 (UF/IFAS, link above) confirms house mice nibble at a wide variety of food sources (consistent with the \"20-30 food sites a night\" copy) and states mice can squeeze through a 1/4-inch crack (\"any place a pencil can be poked, a mouse can go\"), and gives dropping length as 1/8 inch (rice-grain sized, matching the entry). A 1/4-inch gap is narrower than a dime's diameter (~0.7 in), so the entry's \"gap the width of a dime\" is a true but more conservative comparison than the source's precise figure; left as written since it is not contradicted. Source URL added. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "34f9dc7d33c397cc5bd7a15802be7d7fdf2d9895a7993ff1a46078de8c6d7916"
     },
     "slug": "house-mouse",
     "common_name": "House Mouse",
@@ -247,7 +250,7 @@
       {
         "slug": "norway-rat",
         "difference": "House mice are much smaller with rice-grain droppings; Norway rats are large with thick, capsule-shaped droppings and a burrow at ground level.",
-        "next_photo": "A close-up of the droppings next to a coin for size.",
+        "next_photo": "From a safe distance, zoom in on the droppings' size and shape.",
         "photo_can_confirm": true
       }
     ],
@@ -313,6 +316,466 @@
     },
     "role": "structural_pest",
     "risk": "medical",
+    "action": "inspection",
+    "season_basis": "year_round",
+    "verification": []
+  },
+  {
+    "slug": "hispid-cotton-rat",
+    "kind": "organism",
+    "common_name": "Hispid Cotton Rat",
+    "aka": [
+      "Cotton Rat"
+    ],
+    "aliases": [
+      "hispid cotton rat",
+      "cotton rat",
+      "sigmodon hispidus"
+    ],
+    "scientific_name": "Sigmodon hispidus",
+    "rank": "species",
+    "group": "rodents",
+    "subgroup": null,
+    "site_category": "Rodents",
+    "stages": [
+      "juvenile",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Medium-large rat, 8 to 13 inches long including tail, with coarse, bristly grayish-brown fur",
+      "Short tail, often shorter than the body, sparsely haired and frequently looking stubbed or broken",
+      "Found in overgrown grassy lots, ditches, canal banks and weedy fields, not usually inside a tightly sealed home",
+      "Builds shallow surface runways through matted grass rather than the deep burrows or wall-void nests of house rodents"
+    ],
+    "look_alikes": [
+      {
+        "slug": "roof-rat",
+        "difference": "Cotton rat has coarse fur and a short stubby tail, lives outdoors in grassy lots; roof rat has smooth fur, a tail longer than its body, prefers structures",
+        "next_photo": "From a safe distance, zoom in on the tail length compared to the body and the fur texture.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "medium",
+    "where": [
+      "lawn-garden",
+      "garage-storage"
+    ],
+    "looks": [
+      "mammal"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": false,
+      "disease_vector": true,
+      "structural": false,
+      "allergen": true,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "A Florida-specific hantavirus strain has been linked to this species; avoid stirring up dust from droppings or nests, and see a doctor if flu-like symptoms follow an exposure or cleanup.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      4,
+      5,
+      6,
+      9,
+      10
+    ],
+    "service": {
+      "line": "rodent",
+      "key": null,
+      "label": "Rodent Inspection & Exclusion",
+      "inspection_first": true,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "This is a native rat of overgrown, grassy areas rather than a typical house rodent, but it can move into sheds, garages or dense yard vegetation right next to a home. An inspection helps confirm what's actually present and where it's getting in or nesting before any exclusion work.",
+      "fact": "A hantavirus strain first identified near Miami in the 1990s was traced specifically to this species, a reminder that rodent droppings and nests are always worth handling carefully."
+    },
+    "tech_notes": "Confirm coarse pelage and short stubbed tail vs Rattus/Mus; habitat is typically overgrown grass/weeds near structures rather than wall voids. Note regional Black Creek Canal hantavirus association when advising on dropping/nest cleanup precautions (wet down before removal, gloves, ventilation).",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Hispid_cotton_rat",
+      "https://www.floridahealth.gov/diseases-and-conditions/disease/hantavirus-pulmonary-syndrome/",
+      "https://www.fs.usda.gov/database/feis/animals/mammal/sihi/all.html"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Both items resolved this session. Hantavirus risk: the Florida Department of Health's own hantavirus page confirms the virus \"has been identified in cotton rats in Florida\" and that most US cases are western, with only occasional eastern cases; multiple news reports citing CDC/FDOH figures put confirmed human hantavirus cases in Florida at about three total between 1993 and 2023 (including the original 1993 Dade County case that led to Black Creek Canal virus's discovery, PubMed 7623004) -- confirming this entry's 'rare' framing and calibrated (not overstated) safety_line/urgency. Peak months: the USDA Forest Service Fire Effects Information System (FEIS) species report states hispid cotton rat populations \"usually exhibit a bimodal breeding season, with peak litter production occurring in late spring and in late summer-early fall,\" which matches this entry's peak_months (Apr-Jun and Sep-Oct) closely; it's a general/federal rather than Florida-specific source, but settles the qualitative bimodal-peak claim. Per audit item 38: safety.structural changed from true to false since this entry makes no structural-damage claim anywhere -- it lives in grassy runways outdoors, not wall voids or wood. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "e40c9f852b8c079c6ba9d355f50b875a7a6819865514ac2ca37ad59105a0fc2c"
+    },
+    "role": "health_pest",
+    "risk": "medical",
+    "action": "inspection",
+    "season_basis": "observed",
+    "verification": []
+  },
+  {
+    "slug": "rodent-droppings",
+    "kind": "sign",
+    "common_name": "Rodent Droppings",
+    "aka": [],
+    "aliases": [
+      "rodent droppings",
+      "rat droppings",
+      "mouse droppings",
+      "rat feces",
+      "mouse feces"
+    ],
+    "scientific_name": "Rattus / Mus (sign)",
+    "rank": "group",
+    "group": "rodents",
+    "subgroup": null,
+    "site_category": "Rodents",
+    "stages": [],
+    "sign_of": [
+      "roof-rat",
+      "norway-rat",
+      "house-mouse",
+      "hispid-cotton-rat"
+    ],
+    "traits": [
+      "Small, dark brown to black pellets, shaped like grains of rice (mice) or large grains of dark rice or olive pits (rats)",
+      "Found clustered along walls, in corners, cabinets, pantries, or attic insulation, often along a repeated travel path",
+      "Fresh droppings look moist, dark and shiny; old droppings turn dry, gray, and crumble easily",
+      "Often paired with a stale, musky odor in an enclosed space like a cabinet or attic"
+    ],
+    "look_alikes": [
+      {
+        "slug": "roach-droppings-egg-cases",
+        "difference": "Rodent droppings are solid, rice/olive-pit pellets in a scatter; roach droppings look like tiny pepper grains, often in a tighter pile",
+        "next_photo": "From a safe distance, zoom in on the size and shape of the individual pieces.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "tiny",
+    "where": [
+      "kitchen",
+      "attic-walls",
+      "garage-storage",
+      "living-areas"
+    ],
+    "looks": [
+      "sign"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": true,
+      "structural": false,
+      "allergen": true,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "Droppings can carry germs and, rarely, viruses; avoid sweeping or vacuuming them dry, and see a doctor if flu-like symptoms follow a cleanup or heavy exposure.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      10,
+      11,
+      12,
+      1,
+      2
+    ],
+    "service": {
+      "line": "rodent",
+      "key": null,
+      "label": "Rodent Inspection & Exclusion",
+      "inspection_first": true,
+      "referral": null
+    },
+    "urgency": "high",
+    "copy": {
+      "what_it_means": "Fresh-looking droppings are evidence of recent rodent activity, but a photo cannot show whether that activity is ongoing. An inspection helps pin down which rodent left them and how it may be getting in before any cleanup or exclusion.",
+      "fact": "The age of a dropping is a real clue: fresh ones stay soft and dark for only a few days before drying out and turning gray."
+    },
+    "tech_notes": "Wet droppings with disinfectant before cleanup rather than dry sweeping/vacuuming to limit dust; identify species from pellet size/shape and location pattern to guide exclusion and trap placement.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://www.cdc.gov/hantavirus/about/index.html"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "736394223e4dabf85484fa04aaf302007ad7afdfe68a1a5afa7f5eff301b1306"
+    },
+    "role": "health_pest",
+    "risk": "medical",
+    "action": "inspection",
+    "season_basis": "year_round",
+    "verification": []
+  },
+  {
+    "slug": "rodent-gnaw-marks",
+    "kind": "sign",
+    "common_name": "Rodent Gnaw Marks",
+    "aka": [],
+    "aliases": [
+      "rodent gnaw marks",
+      "rat gnaw marks",
+      "mouse gnaw marks",
+      "gnaw marks"
+    ],
+    "scientific_name": "Rodentia (sign)",
+    "rank": "group",
+    "group": "rodents",
+    "subgroup": null,
+    "site_category": "Rodents",
+    "stages": [],
+    "sign_of": [
+      "roof-rat",
+      "norway-rat",
+      "house-mouse",
+      "hispid-cotton-rat"
+    ],
+    "traits": [
+      "Fresh, light-colored gouges in wood or plastic with parallel groove marks from front teeth, often at corners or edges",
+      "Found on baseboards, door corners, wire insulation, stored boxes, or plastic pipe",
+      "Gnawed holes into a structure are usually rough-edged and about the size of a quarter or larger",
+      "Chewed spots darken and look greasy over time from repeated rubbing by the animal's fur"
+    ],
+    "look_alikes": [
+      {
+        "slug": "powderpost-beetle",
+        "difference": "Rodent gnaw marks are wide, rough gouges with visible parallel tooth grooves; powderpost beetle damage is tiny round pinholes with fine powder and no gouging",
+        "next_photo": "From a safe distance, zoom in on the damaged area, checking for a wide gouge with grooves versus tiny round pinholes.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "attic-walls",
+      "garage-storage",
+      "kitchen"
+    ],
+    "looks": [
+      "sign"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": true,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "Chewed electrical wiring is a fire risk; treat any chewed wire as worth an electrician's look alongside pest exclusion.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      10,
+      11,
+      12,
+      1,
+      2
+    ],
+    "service": {
+      "line": "rodent",
+      "key": null,
+      "label": "Rodent Inspection & Exclusion",
+      "inspection_first": true,
+      "referral": null
+    },
+    "urgency": "high",
+    "copy": {
+      "what_it_means": "Rodents gnaw constantly to keep their front teeth worn down, and they'll go through wood, plastic, and even wiring to do it. Fresh gouges anywhere in the home, especially near wiring, are worth an inspection before the damage or fire risk grows.",
+      "fact": "A rodent's front teeth never stop growing, which is exactly why it has to keep gnawing on something hard its whole life."
+    },
+    "tech_notes": "Distinguish fresh (light, clean-edged) from old (dark, worn) gnawing to gauge current activity; flag any chewed wiring for electrical follow-up separate from exclusion work.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IG093",
+      "https://edis.ifas.ufl.edu/dh044"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Found and confirmed a dedicated, rodent-specific UF/IFAS EDIS page this session: ENY-224/DH044, \"Rat and Mouse Control\" (Koehler & Kern). Its 'Recognizing Rat and Mouse Signs' section directly confirms gnaw marks as a documented sign: \"Teeth marks on food, building materials, wire, and edges of beams are indications of gnawing... Fresh gnawing in wood is usually light-colored with sharp, splintery edges. Old gnawing is smooth and darker\" — matching this entry's traits almost verbatim (light/fresh vs. darker/older gouges, wire and structural gnawing, fire-risk framing). Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "5a4190a0e07700ec4103e0d8ecbad64c5d4e423d9cf644eb272e590dbd1d32f8"
+    },
+    "role": "structural_pest",
+    "risk": "low",
+    "action": "inspection",
+    "season_basis": "year_round",
+    "verification": []
+  },
+  {
+    "slug": "rodent-rub-marks",
+    "kind": "sign",
+    "common_name": "Rodent Rub Marks",
+    "aka": [],
+    "aliases": [
+      "rodent rub marks",
+      "rat rub marks",
+      "grease marks",
+      "rub marks"
+    ],
+    "scientific_name": "Rattus spp. (sign)",
+    "rank": "group",
+    "group": "rodents",
+    "subgroup": null,
+    "site_category": "Rodents",
+    "stages": [],
+    "sign_of": [
+      "roof-rat",
+      "norway-rat",
+      "house-mouse",
+      "hispid-cotton-rat"
+    ],
+    "traits": [
+      "Dark, greasy smudges along the same spot on a wall, baseboard, beam, or pipe where an animal squeezes through repeatedly",
+      "Found low along walls, at wall-floor junctions, or around consistent gaps like pipe penetrations",
+      "Marks build up gradually and darken with repeated contact over days to weeks",
+      "Often found alongside droppings or a worn, smoothed-down travel path in dust or insulation"
+    ],
+    "look_alikes": [
+      {
+        "slug": "rodent-gnaw-marks",
+        "difference": "Rub marks are just a dark smudge with no material removed; gnaw marks show actual chewed-away wood, plastic or wire with tooth grooves",
+        "next_photo": "From a safe distance, zoom in on the spot to see if material is missing (gnawing) or it's just a stain (rub mark).",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "attic-walls",
+      "garage-storage",
+      "kitchen"
+    ],
+    "looks": [
+      "sign"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      10,
+      11,
+      12,
+      1,
+      2
+    ],
+    "service": {
+      "line": "rodent",
+      "key": null,
+      "label": "Rodent Inspection & Exclusion",
+      "inspection_first": true,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "This greasy smudge marks a spot a rodent uses again and again to get from one place to another, which makes it one of the best clues for finding the actual entry point. It's worth pointing out during an inspection rather than just wiping away.",
+      "fact": "The mark comes from natural oils in the animal's fur, built up bit by bit from squeezing through the exact same gap night after night."
+    },
+    "tech_notes": "Use rub mark location to help pinpoint the active entry gap for exclusion; combine with droppings/gnaw evidence to confirm current activity level.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IG093",
+      "https://edis.ifas.ufl.edu/dh044"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Found and confirmed a dedicated, rodent-specific UF/IFAS EDIS page this session: ENY-224/DH044, \"Rat and Mouse Control\" (Koehler & Kern). Its 'Recognizing Rat and Mouse Signs' section directly confirms rub marks: \"Along runways, dark greasy rubmarks appear from contact with the rodent's body. Rubmarks on walls appear as black smudges left by the rodent. New rubmarks are soft and will smudge. Old rubmarks are brittle and will flake when scratched. Rafters may show swing marks of roof rats\" — matching this entry's traits closely (dark greasy smudge, builds up over repeated contact, along the same travel spot). Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "057f5ef2d8ade16558e2ba5a0407d0512f03b44c3bd1f5e9093e88b4fd990d03"
+    },
+    "role": "structural_pest",
+    "risk": "low",
     "action": "inspection",
     "season_basis": "year_round",
     "verification": []

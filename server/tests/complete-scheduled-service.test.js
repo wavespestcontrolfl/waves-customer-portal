@@ -961,6 +961,14 @@ describe('payment-failed decline notice claim acquisition (#4131 slice 5, deferr
     );
   });
 
+  test('a replayed decline bell finalizes with its original time and no fresh invoice activity', () => {
+    expect(noticeBlock).toMatch(/noticeLegs = \(failResult\.channelResults \|\| failResult\.deduped === true\)\s*&& require\('\.\/messaging\/billing-prior-delivery'\)\.settledLegTimes\(failResult\)/);
+    expect(noticeBlock).toMatch(/noticeSentAt = failResult\.deduped \? noticeLegs\?\.eventAt : new Date\(\)/);
+    expect(noticeBlock).toMatch(/paymentFailedNoticeSentAt =\s*noticeSentAt\?\.toISOString\(\) \|\| recordStructuredNotes\.paymentFailedNoticeSentAt/);
+    expect(noticeBlock).toMatch(/sms: noticeLegs \? noticeLegs\.smsAccepted : true,\s*email: noticeLegs\?\.emailAccepted \|\| false/);
+    expect(noticeBlock).toMatch(/claimToken: declineSendClaim\.invoice\.send_claim_token,\s*deduped: failResult\.deduped === true,\s*eventVisibleAt: noticeSentAt,\s*smsEventVisibleAt: noticeLegs\?\.smsAccepted && !noticeLegs\.freshSms \? noticeLegs\.smsAt : undefined,\s*emailEventVisibleAt: noticeLegs\?\.emailAccepted && !noticeLegs\.freshEmail \? noticeLegs\.emailAt : undefined/);
+  });
+
   test('markDeliverySent itself requires and releases a passed claimToken atomically, in ONE merged decision, and never finalizes a row it does not own', () => {
     const invoiceSource = fs.readFileSync(path.join(__dirname, '../services/invoice.js'), 'utf8');
     const fnAt = invoiceSource.indexOf('async markDeliverySent(');

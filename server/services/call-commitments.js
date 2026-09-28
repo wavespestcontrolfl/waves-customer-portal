@@ -39,7 +39,7 @@ const crypto = require('crypto');
 const logger = require('./logger');
 const MODELS = require('../config/models');
 const { anthropicMaxTokens, anthropicEffortConfig } = require('./llm/anthropic-wire');
-const { parseETDateTime, etDateString, addETDays } = require('../utils/datetime-et');
+const { parseETDateTime, etDateString, etParts, addETDays } = require('../utils/datetime-et');
 const { ledgerCall, ledgerCallRejected } = require('./llm-dispatch-metrics');
 
 // A due time typed by the office arrives either as an ISO instant (the
@@ -310,8 +310,31 @@ function evidenceFor(v2, paths) {
 // Every timestamp that reaches a commitment — a V2 scheduling field or a
 // model-written due_at — goes through the Eastern parser: a naive
 // "2026-09-02T09:00:00" is an ET wall clock, never Railway's UTC.
+//
+// An AI-written time with an Eastern offset of EITHER season is the wall
+// clock it spells: the model is told to write the ET offset, and when it
+// slips the season ("15:00-05:00" in July) the spoken number is still right
+// — the booking path's rule (v2IsoToEtWallClock, confirmedWallClockET).
+// Read as an instant it would land an hour off: a 3 PM callback due at
+// 4 PM, a "3 PM" appointment promise never matching the 3 PM booking
+// (#5081 follow-up). Any other offset is a real instant. Office-typed
+// times go through parseDueAt directly and are not affected.
+// Fractional seconds are dropped: the ET parser reads only naive
+// 'YYYY-MM-DDTHH:MM[:SS]' (anything else would fall through to UTC).
+const ET_OFFSET_TIME_RE = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?)(?:\.\d+)?(?:-04:?00|-05:?00)$/;
+// The written instant stands whenever its offset is valid for that ET wall
+// clock — it reads back as the same clock, e.g. either occurrence of 1:30
+// on the fall-back night — and the wall clock is used only when the offset
+// is from the wrong season (codex #5139 r2 P1).
 function isoOrNull(value) {
-  const d = parseDueAt(value);
+  const et = ET_OFFSET_TIME_RE.exec(String(value ?? '').trim());
+  if (et) {
+    const written = new Date(String(value).trim());
+    const p = !Number.isNaN(written.getTime()) ? etParts(written) : null;
+    const pad = (n) => String(n).padStart(2, '0');
+    if (p && `${p.year}-${pad(p.month)}-${pad(p.day)}T${pad(p.hour)}:${pad(p.minute)}` === et[1].slice(0, 16)) return written.toISOString();
+  }
+  const d = parseDueAt(et ? et[1] : value);
   return d instanceof Date ? d.toISOString() : null;
 }
 
@@ -1441,6 +1464,64 @@ function whereEstimateCustomerOwnership(query, customerId) {
         ))`, [customerId, customerId, customerId, customerId, customerId]);
 }
 
+// The basis of a scheduling promise kept by a booking for its promised slot
+// (resolveFulfillment). The visit is found through the call's CUSTOMER and
+// the slot through inputs a reprocess rewrites, so every refresh judges it
+// again (refreshFulfillment; listSlotKeptCallIds feeds the sweep).
+const SLOT_BOOKING_BASIS = "visit_booked_at_the_promised_time";
+// A visit in one of these is off the books and proves no slot: cancelled,
+// the legacy reschedule's original row, or skipped by the office
+// (scheduled-service-statuses.js; codex #5081 r3 P1, r7 P2).
+const SLOT_OFF_BOOKS_STATUSES = ["cancelled", "canceled", "rescheduled", "skipped"];
+
+// A promise's stated time as a bookable slot — its ET day and minute of the
+// day — or null: no stated time, one labeled a deadline (the latest moment
+// for the action, not an appointment), or one no later than the evidence
+// boundary (nothing left to book).
+function statedSlot(commitment, after) {
+  const at = commitment?.due_at && commitment.due_type !== "deadline" ? new Date(commitment.due_at) : null;
+  if (!at || Number.isNaN(at.getTime()) || at.getTime() <= after.getTime()) return null;
+  const { hour, minute } = etParts(at);
+  return { at, day: etDateString(at), minutes: hour * 60 + minute, time: `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}` };
+}
+
+// A scheduling promise's stated time is usually the appointment itself
+// ("I'll put you on the schedule for around 3"): a visit booked for this
+// customer after the call, and before that time came, FOR exactly that slot
+// — the stated ET day, its arrival window starting at the stated minute — is
+// the promise kept, not a same-customer hint (owner ruling 2026-09-27). The
+// stated time alone is the promised ACTION's timing ("schedule the
+// follow-up after the 3 PM inspection" is a 3 PM floor), so the slot counts
+// only when the call's own V2 extraction CONFIRMED an appointment at that
+// same ET wall clock — extractConfirmedSlot, the booking-miss watchdog's
+// reader: scheduling.status 'confirmed' (a reschedule's proposed time is not
+// one), confirmed_start_at by the booking path's wall-clock rule. A promise
+// whose own time disagrees stays a hint. schedule_visit only; the follow-up
+// pager applies the same slot test to its own evidence (appointmentSlot).
+async function slotBookingProof(conn, commitment, call, customerId, after) {
+  const slot = commitment.kind === "schedule_visit" ? statedSlot(commitment, after) : null;
+  if (!slot) return null;
+  const v2 = await conn("call_log").where({ id: call.id, v2_extraction_status: "valid" }).first("ai_extraction_enriched");
+  const confirmed = v2 && require("./call-booking-miss-watchdog").extractConfirmedSlot(v2.ai_extraction_enriched);
+  if (!confirmed || confirmed.dateET !== slot.day || confirmed.minutes !== slot.minutes) return null;
+  const booked = await conn("scheduled_services")
+    .where("customer_id", customerId)
+    .where("created_at", ">", after)
+    // A row entered once the slot had come is a record of it, not the
+    // booking that kept the promise (codex #5081 r6 P2).
+    .where("created_at", "<", slot.at)
+    .where("scheduled_date", slot.day)
+    .whereRaw("to_char(window_start, 'HH24:MI') = ?", [slot.time])
+    .whereNotIn("status", SLOT_OFF_BOOKS_STATUSES)
+    .whereNull("recurring_parent_id")
+    .whereNull("parent_service_id")
+    .orderBy("created_at", "asc")
+    .first("id", "created_at");
+  return booked
+    ? { kind: "appointment_booked", record_type: "scheduled_service", record_id: booked.id, matched_at: booked.created_at, strength: "direct", basis: SLOT_BOOKING_BASIS }
+    : null;
+}
+
 async function resolveFulfillment(conn, commitment, call) {
   const started = call?.created_at ? new Date(call.created_at) : null;
   // Evidence counts from the end of the call — or, for a callback card whose
@@ -1668,6 +1749,8 @@ async function resolveFulfillment(conn, commitment, call) {
         return { kind: "appointment_rescheduled", record_type: "scheduled_service", record_id: movedMeta.scheduled_service_id, matched_at: movedRow.created_at, strength: "direct", basis: "visit_rescheduled_from_this_call" };
       }
       if (!customerId) return null;
+      const slotProof = await slotBookingProof(conn, commitment, call, customerId, after);
+      if (slotProof) return slotProof;
       const visit = await conn("scheduled_services")
         .where("customer_id", customerId)
         .where("created_at", ">", after)
@@ -1748,14 +1831,70 @@ async function resolveFulfillment(conn, commitment, call) {
 // Direct proof marks an open AI row fulfilled. Association proof is stored
 // as a hint (status stays open, nothing is invented). Human-touched rows are
 // left to the human either way.
-// When a callback card's obligation was last (re)stated: a human-recorded
-// promise exists from the moment it was typed, and the card's audited
-// callback_edit / callback_reopen events restate it (the row's reviewed_at
-// is overwritten by every later action, so it cannot carry that history).
-// Null for anything that is not a reviewed callback card.
+// When a WAVES obligation was last (re)stated: a human-recorded promise
+// exists from the moment it was typed, and — for every alertable SLA kind
+// (callback via callback_edit/callback_reopen, every other one via
+// commitment_edit/commitment_reopen, Codex #5019 r17 structural fix) — its
+// OWN audited renewal events restate it (the row's human_state/reviewed_at
+// are overwritten by every later action, including an ordinary confirm, so
+// neither can carry that history on its own — see applyHumanUpdate's
+// writers for both event families). Null for anything that is not a
+// reviewed, party:'waves' SLA commitment.
+// True when a non-callback SLA promise's renewal boundary cannot be known:
+// a row from before renewal_trail existed, now 'confirmed', with no
+// commitment_edit / commitment_reopen event. The old path left a reopen, and
+// an edit followed by a confirm, looking exactly like a bare confirm, and no
+// record tells them apart (Codex #5019 r19 P0) — a caller that would act on
+// the boundary declines instead of guessing.
+async function renewalBoundaryUnknown(conn, commitment) {
+  if (!commitment || commitment.party !== 'waves' || commitment.kind === 'callback') return false;
+  if (commitment.renewal_trail === true || commitment.human_state !== 'confirmed') return false;
+  if (!require('./followup-sla-watcher').SLA_KINDS.includes(commitment.kind)) return false;
+  const event = await conn('audit_log').where({ resource_type: 'call_commitment', resource_id: commitment.id })
+    .whereIn('action', ['commitment_edit', 'commitment_reopen']).first('id');
+  return !event;
+}
+
 async function obligationRenewedAt(conn, commitment) {
-  if (!commitment || commitment.kind !== 'callback' || commitment.party !== 'waves') return null;
+  if (!commitment || commitment.party !== 'waves') return null;
   if (!['confirmed', 'edited'].includes(commitment.human_state)) return null;
+  // Every OTHER alertable SLA kind (send_estimate, schedule_visit — Codex
+  // #5019 r11 P2), additive: callers outside this lane are unaffected,
+  // since none of them ever pass a non-callback row through this far
+  // (followup-sla-watcher's own renewedFloors keeps its pre-existing
+  // `kind !== 'callback'` guard before it ever calls this). A lazy require
+  // — not a top-level one — since followup-sla-watcher.js already requires
+  // this file; the module is fully initialized by the time this runs.
+  if (commitment.kind !== 'callback') {
+    if (!require('./followup-sla-watcher').SLA_KINDS.includes(commitment.kind)) return null;
+    // The durable commitment_edit/commitment_reopen event is the ONLY
+    // renewal boundary for these kinds (Codex #5019 r17, superseding r16's
+    // human_state === 'edited' rule — CLAUDE.md rule 19; the r16 code is
+    // removed, not kept alongside this). r16 read the boundary off
+    // human_state, but applyHumanUpdate's 'confirm' CASE only ever
+    // preserves 'edited' for kind === 'callback' — for these kinds a later
+    // ORDINARY confirm always resets human_state to 'confirmed' regardless
+    // of a genuine prior edit, which silently erased a human_state-based
+    // boundary the moment anyone confirmed the row afterward. A durable
+    // audit_log event, once written, is unaffected by anything a later
+    // confirm does to the row — exactly the same shape callback already
+    // uses below, just under its own action names so nothing reading the
+    // callback events changes.
+    const events = await conn('audit_log').where({ resource_type: 'call_commitment', resource_id: commitment.id })
+      .whereIn('action', ['commitment_edit', 'commitment_reopen']).select('created_at', 'metadata');
+    const meta = (e) => { try { return typeof e.metadata === 'string' ? JSON.parse(e.metadata) : (e.metadata || {}); } catch { return {}; } };
+    const times = [commitment.source === 'human' ? commitment.created_at : null, ...events.map((e) => meta(e).renewed_at || e.created_at)];
+    // A row edited before these events existed (renewal_trail NULL) has
+    // none: while none exists at all, a legacy 'edited' row's reviewed_at is
+    // the only boundary on record (at worst later than the edit, never
+    // earlier) — the same legacy rule the callback branch below applies to
+    // a pre-card edit (Codex #5019 r18 P0). A newer row's edit that wrote no
+    // event restated nothing, so it is no boundary; once any event exists,
+    // reviewed_at may have been advanced by an ordinary confirm.
+    if (commitment.renewal_trail !== true && commitment.human_state === 'edited' && !events.length) times.push(commitment.reviewed_at);
+    const ms = times.filter(Boolean).map((t) => new Date(t).getTime()).filter(Number.isFinite);
+    return ms.length ? new Date(Math.max(...ms)) : null;
+  }
   const events = await conn('audit_log').where({ resource_type: 'call_commitment', resource_id: commitment.id })
     .whereIn('action', ['callback_edit', 'callback_reopen']).select('action', 'created_at', 'metadata');
   const meta = (e) => { try { return typeof e.metadata === 'string' ? JSON.parse(e.metadata) : (e.metadata || {}); } catch { return {}; } };
@@ -1806,6 +1945,16 @@ async function refreshFulfillment(conn, callLogId, call = null) {
   // confirm protects the promise from a later extraction withdrawing it,
   // and the card's own conversation evidence must still close it.
   const open = await conn("call_commitments").where({ call_log_id: callLogId, status: "open" }).whereRaw(...refreshableVerdictSql());
+  // A promise kept by a booking for its promised slot rests on facts that
+  // move after it is kept — the call's customer (a relink), the stated or
+  // confirmed slot (a reprocess), the visit itself (cancelled, moved,
+  // rescheduled) — so it is never final: every refresh judges it again,
+  // read before the open rows are settled below. Untouched AI rows only;
+  // a human verdict stands.
+  const kept = await conn("call_commitments")
+    .where({ call_log_id: callLogId, status: "fulfilled" })
+    .whereNull("human_state")
+    .whereRaw("fulfillment ->> 'basis' = ?", [SLOT_BOOKING_BASIS]);
   let fulfilled = 0;
   let hinted = 0;
   let cleared = 0;
@@ -1845,6 +1994,17 @@ async function refreshFulfillment(conn, callLogId, call = null) {
         // landed meanwhile moved the evidence boundary, so the write is
         // skipped and the next refresh judges the new version.
         .whereRaw("date_trunc('milliseconds', updated_at) = ?", [c.updated_at])
+        // A slot proof was found through the call's CUSTOMER: it is written
+        // only while the call still has that customer, read under a share
+        // lock in this same statement — a relink either waits for this write
+        // (and the refresh after it re-judges the row) or has already moved
+        // the call (and nothing is written).
+        .modify((q) => {
+          if (proof.basis !== SLOT_BOOKING_BASIS) return;
+          q.whereExists(function callStillHasThatCustomer() {
+            this.select(conn.raw("1")).from("call_log").where({ id: callLogId, customer_id: row.customer_id }).forShare();
+          });
+        })
         .update({ status: "fulfilled", fulfillment: JSON.stringify(proof), fulfilled_at: proof.matched_at || new Date(), updated_at: new Date() });
     } else {
       // A hint is written once and refreshed only while it is still a hint.
@@ -1860,8 +2020,101 @@ async function refreshFulfillment(conn, callLogId, call = null) {
         .update({ fulfillment: JSON.stringify(proof), updated_at: new Date() });
     }
   }
-  return { checked: open.length, fulfilled, hinted, cleared, failed };
+  const rejudged = await rejudgeSlotKept(conn, kept, row, callLogId);
+  failed += rejudged.failed;
+  return { checked: open.length + kept.length, fulfilled, hinted, cleared, failed, reopened: rejudged.reopened };
 }
+
+// Judges refreshFulfillment's slot-kept rows again: still kept by the same
+// record (untouched), kept by another (re-pointed, same customer guard as
+// the open-row write), or reopened carrying whatever hint the facts support.
+async function rejudgeSlotKept(conn, kept, row, callLogId) {
+  const LOOKUP_FAILED = Symbol("lookup_failed");
+  let failed = 0;
+  let reopened = 0;
+  for (const c of kept) {
+    const proof = await resolveFulfillment(conn, c, row).catch((err) => {
+      logger.warn(`[call-commitments] fulfillment lookup failed for ${c.id}: ${err.message}`);
+      return LOOKUP_FAILED;
+    });
+    if (proof === LOOKUP_FAILED) { failed += 1; continue; }
+    const prior = typeof c.fulfillment === "string" ? JSON.parse(c.fulfillment) : c.fulfillment;
+    const stillKept = proof?.strength === "direct";
+    if (stillKept && proof.basis === prior?.basis && proof.record_id === prior?.record_id) continue;
+    const unchanged = (q) => q
+      .where({ id: c.id, status: "fulfilled" })
+      .whereNull("human_state")
+      .whereRaw("fulfillment ->> 'basis' = ?", [SLOT_BOOKING_BASIS])
+      .whereRaw("date_trunc('milliseconds', updated_at) = ?", [c.updated_at]);
+    if (stillKept) {
+      // Kept by another record now (another visit at the slot, or a
+      // canonical proof): same customer guard as the open-row write above.
+      await unchanged(conn("call_commitments"))
+        .modify((q) => {
+          if (proof.basis !== SLOT_BOOKING_BASIS) return;
+          q.whereExists(function callStillHasThatCustomer() {
+            this.select(conn.raw("1")).from("call_log").where({ id: callLogId, customer_id: row.customer_id }).forShare();
+          });
+        })
+        .update({ fulfillment: JSON.stringify(proof), fulfilled_at: proof.matched_at || new Date(), updated_at: new Date() });
+      continue;
+    }
+    // No longer kept: owed again, carrying whatever hint the facts support.
+    reopened += await unchanged(conn("call_commitments"))
+      .update({ status: "open", fulfillment: proof ? JSON.stringify(proof) : null, fulfilled_at: null, updated_at: new Date() });
+  }
+  return { reopened, failed };
+}
+
+// Calls holding a promise kept by a booking for its promised slot whose
+// proof no longer holds in the records themselves: the visit is gone, off
+// the books, moved off the stated slot, entered once the slot had come, or
+// no longer the call's customer's. The periodic sweep refreshes them beside
+// the calls with open promises, so a lapse is caught whenever it happened —
+// long after the slot, or while the commitments gate was off (codex #5081
+// r5/r6 P1) — while the sweep's work follows the lapses, not every promise
+// this rule ever kept (r7 P2). A reprocess only rewrites rows, so the
+// grounding is checked here too: the promise turned into a deadline, or the
+// call's V2 extraction no longer confirms that wall clock (an ET-offset or
+// naive confirmed_start_at compared as written — the booking path's rule;
+// any other encoding is simply re-judged).
+async function listSlotKeptCallIds(conn) {
+  // The basis is inlined (a constant) so the planner can match the partial
+  // index call_commitments_slot_kept_idx.
+  const rows = await conn.raw(
+    `SELECT DISTINCT cc.call_log_id
+       FROM call_commitments cc
+       JOIN call_log cl ON cl.id = cc.call_log_id
+       LEFT JOIN scheduled_services ss ON ss.id::text = cc.fulfillment ->> 'record_id'
+      WHERE cc.status = 'fulfilled' AND cc.human_state IS NULL
+        AND (cc.fulfillment ->> 'basis') = '${SLOT_BOOKING_BASIS}'
+        AND (ss.id IS NULL
+          OR ss.status = ANY(?)
+          OR ss.customer_id IS DISTINCT FROM cl.customer_id
+          OR cc.due_at IS NULL
+          OR ss.created_at >= cc.due_at
+          -- The call's end as callEndedAt reads it now: a booking made while
+          -- the call was still going (its duration posted after the proof)
+          -- is not evidence of the promise (codex #5081 r8 P2).
+          OR ss.created_at <= CASE
+               WHEN cl.bridged_at IS NOT NULL THEN cl.bridged_at + make_interval(secs => GREATEST(COALESCE(cl.duration_seconds, 0), 0))
+               WHEN cl.direction = 'inbound' THEN cl.created_at + make_interval(secs => GREATEST(COALESCE(cl.duration_seconds, 0), 0))
+               ELSE cl.created_at END
+          OR to_char(ss.scheduled_date, 'YYYY-MM-DD') IS DISTINCT FROM to_char(cc.due_at AT TIME ZONE 'America/New_York', 'YYYY-MM-DD')
+          OR to_char(ss.window_start, 'HH24:MI') IS DISTINCT FROM to_char(cc.due_at AT TIME ZONE 'America/New_York', 'HH24:MI')
+          OR cc.kind IS DISTINCT FROM 'schedule_visit'
+          OR cc.due_type IS NOT DISTINCT FROM 'deadline'
+          OR cl.v2_extraction_status IS DISTINCT FROM 'valid'
+          OR cl.ai_extraction_enriched #>> '{scheduling,status}' IS DISTINCT FROM 'confirmed'
+          OR NOT COALESCE(
+            cl.ai_extraction_enriched #>> '{scheduling,confirmed_start_at}' ~ '^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}(:\\d{2}(\\.\\d+){0,1}){0,1}(-0[45]:{0,1}00){0,1}$'
+            AND left(cl.ai_extraction_enriched #>> '{scheduling,confirmed_start_at}', 16)
+              = to_char(cc.due_at AT TIME ZONE 'America/New_York', 'YYYY-MM-DD"T"HH24:MI'), false))`,
+    [SLOT_OFF_BOOKS_STATUSES],
+  );
+  return (rows?.rows || []).map((r) => r.call_log_id);
+}
+
 
 
 // ── Queue reads (the Owed tab, Customer 360, the lead card, the bell) ─────
@@ -1962,10 +2215,15 @@ function selectOverdue(rows, { now = new Date() } = {}) {
   return (rows || []).filter((r) => isOverdue(r, now));
 }
 
-// The customer / lead scope of a commitments read, over the `cl` call_log
-// alias. Shared by the queue query and callback preparation so a filtered
-// read prepares exactly the rows it returns.
-function scopeCommitmentRows(builder, { customerId = null, leadId = null, leadSid = null } = {}) {
+// The customer / lead / phone scope of a commitments read, over the `cl`
+// call_log alias. Shared by the queue query and callback preparation so a
+// filtered read prepares exactly the rows it returns.
+// `phone`: matches the CONTACT number of the promise's own call — the
+// dialed number on an outbound call, the caller ID on an inbound one (the
+// same rule contactPhoneOf applies) — for a caller with no customerId/leadId
+// yet (the promise-chaser bell's own case: a lead calling back before any
+// link exists).
+function scopeCommitmentRows(builder, { customerId = null, leadId = null, leadSid = null, phone = null } = {}) {
   if (customerId) builder.where('cl.customer_id', customerId);
   if (leadId) {
     builder.where(function leadScope() {
@@ -1976,6 +2234,9 @@ function scopeCommitmentRows(builder, { customerId = null, leadId = null, leadSi
       if (leadSid) this.orWhere('cl.twilio_call_sid', leadSid);
     });
   }
+  // The contact number of the promise's own call (dialed number outbound,
+  // caller ID inbound), matched by this file's own phoneWhere digits rule.
+  if (phone) phoneWhere(builder, "CASE WHEN cl.direction LIKE 'outbound%' THEN cl.to_phone ELSE cl.from_phone END", phone);
   return builder;
 }
 
@@ -1983,7 +2244,7 @@ function scopeCommitmentRows(builder, { customerId = null, leadId = null, leadSi
 // callback cards (deadline, default owner, audit row) as they read; every
 // other caller — the Intelligence Bar's read-only tool, the integrations
 // worker — gets a pure read and sees whatever those paths persisted.
-async function listOpenCommitments(conn, { party = null, kind = null, customerId = null, leadId = null, limit = 100, offset = 0, includeHints = true, prepare = false, now = new Date(), activeSince = null } = {}) {
+async function listOpenCommitments(conn, { party = null, kind = null, kinds = null, customerId = null, leadId = null, phone = null, limit = 100, offset = 0, includeHints = true, prepare = false, now = new Date(), activeSince = null } = {}) {
   let leadSid = null;
   if (leadId) {
     // No local catch: a failed lookup must reach the route's error handler
@@ -2005,8 +2266,15 @@ async function listOpenCommitments(conn, { party = null, kind = null, customerId
     .whereRaw(`NOT ${staleAiRowSql('cc')}`)
     .modify((b) => {
       if (party === 'waves' || party === 'customer') b.where('cc.party', party);
-      if (kind) b.where('cc.kind', kind);
-      scopeCommitmentRows(b, { customerId, leadId, leadSid });
+      // Additive: kinds (a list) pushes a multi-kind filter into the QUERY
+      // itself, page and limit both — a caller scanning for one of several
+      // kinds on a shared/long-lived number must not have those rows
+      // crowded out of every LIMIT-bounded page by unrelated kinds it will
+      // only discard client-side anyway (Codex #5019 r10 P2). kind (single)
+      // is unchanged for every existing caller.
+      const kindFilter = kinds && kinds.length ? kinds : (kind ? [kind] : null);
+      if (kindFilter) b.whereIn('cc.kind', kindFilter);
+      scopeCommitmentRows(b, { customerId, leadId, leadSid, phone });
       if (!includeHints) b.whereNull('cc.fulfillment');
       // activeSince (the follow-up pager): only promises made, dated or
       // snoozed since then — a large historical backlog must not page
@@ -2409,6 +2677,29 @@ async function applyHumanUpdate(conn, id, { action, description, due_at, note, r
     await require('./audit-log').recordAuditEvent({ actor_type: reviewedBy ? 'technician' : 'system', actor_id: reviewedBy || null,
       action: `callback_${action}`, resource_type: 'call_commitment', resource_id: id,
       metadata: { via: 'ledger', renewed_at: new Date().toISOString(), ...renewal }, critical: true, trx: conn });
+  } else if (before && before.party === 'waves' && before.kind !== 'callback'
+    && require('./followup-sla-watcher').SLA_KINDS.includes(before.kind)
+    && (action === 'reopen' || (action === 'edit' && editRestatesRow(before, { description, due_at })))) {
+    // The durable renewal event for every OTHER alertable SLA kind
+    // (send_estimate, schedule_visit), mirroring callback's own
+    // callback_edit/callback_reopen trail above — structural fix for Codex
+    // #5019 r17, superseding r16's human_state-based rule (CLAUDE.md rule
+    // 19: the r16 guard in obligationRenewedAt is removed, not kept
+    // alongside this). r16 read the boundary off human_state === 'edited',
+    // but applyHumanUpdate's own 'confirm' CASE above only ever preserves
+    // 'edited' for kind === 'callback' — for these kinds a later ORDINARY
+    // confirm always resets human_state to 'confirmed' regardless of a
+    // genuine prior edit, silently erasing a human_state-based boundary.
+    // A durable audit_log event, once written, is unaffected by anything a
+    // later confirm does to the row — a distinct action name
+    // (commitment_edit / commitment_reopen, never callback_*) so nothing
+    // reading the callback events changes. A bare confirm never reaches
+    // this branch at all (`before` is populated only for reopen/edit,
+    // above), and a non-substantive edit (wording/due_at unchanged) writes
+    // nothing, since nothing about the obligation was actually restated.
+    await require('./audit-log').recordAuditEvent({ actor_type: reviewedBy ? 'technician' : 'system', actor_id: reviewedBy || null,
+      action: `commitment_${action}`, resource_type: 'call_commitment', resource_id: id,
+      metadata: { via: 'ledger', renewed_at: new Date().toISOString() }, critical: true, trx: conn });
   } else if (before && before.kind === 'send_reschedule_link' && before.party === 'waves' && action === 'reopen') {
     // The inverse of a dismiss is not a no-op for this kind: an explicit
     // office verdict is one of only two things allowed to move the
@@ -2649,10 +2940,13 @@ module.exports = {
   normalizeRow,
   resolveFulfillment,
   refreshFulfillment,
+  listSlotKeptCallIds,
   applyHumanUpdate,
   editRestatesRow,
   callbackEditEventMetadata,
   addHumanCommitment,
+  obligationRenewedAt,
+  renewalBoundaryUnknown,
   buildCallOutcomes,
   OVERDUE_IMPLICIT_DAYS,
   PROMPT_KINDS,

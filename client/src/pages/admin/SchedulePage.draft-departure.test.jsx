@@ -241,4 +241,112 @@ describe('completion review preview availability', () => {
     expect(screen.queryByText(/as soon as the send window allows|then goes out at the next/)).toBeNull();
     if (unpaid) expect(screen.getByText(/New review enrollment waits for invoice payment and visit eligibility/)).toBeTruthy();
   });
+
+  // Codex round-9 P2: a covering sibling invoice that is only 'processing'
+  // (billing-lane.js siblingCoverageForSchedule's 'invoice_processing'
+  // reason, kept distinct from a genuinely paid/prepaid 'invoice_settled')
+  // must hold the review ask exactly like an unpaid invoice does —
+  // complete-scheduled-service.js's invoiceBlocksReview holds it for every
+  // status except literal 'paid'/'prepaid', and the reused invoice
+  // completion actually checks is the SIBLING's, not this row's own. Before
+  // the fix this row's own `willInvoice`/`completionInvoiceAlreadySent`
+  // were both false for a sibling-covered visit, so the panel promised an
+  // immediate send.
+  it('holds the review ask for a sibling invoice that is still processing (not yet paid)', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url) => ({
+      ok: true,
+      json: async () => String(url).includes('/send-time-preview')
+        ? { schedulerEnabled: true, reviewSequencesEnabled: true, smsSendWindowEnabled: true }
+        : { customer: {}, actions: [], available: false },
+    })));
+    await mount({
+      service: {
+        ...service,
+        estimatedPrice: null,
+        billingLane: {
+          mode: 'per_application',
+          source: 'explicit',
+          monthlyRate: null,
+          prediction: {
+            kind: 'covered_sibling_invoice', amount: null, conflictStampedPrice: false,
+            invoiceId: 'inv-1', invoiceNumber: 'WPC-TEST-0001',
+          },
+          siblingCoverage: {
+            state: 'settled', invoiceId: 'inv-1', invoiceNumber: 'WPC-TEST-0001', amountDue: 0, reason: 'invoice_processing',
+          },
+        },
+      },
+    });
+    expect(screen.getByText(/waits for the invoice to be paid/)).toBeTruthy();
+  });
+
+  // Codex pre-push P2: the SAME hold must apply to the other three reasons
+  // `state: 'settled'` can carry besides 'invoice_processing' —
+  // 'withdrawn_from_customer', 'payer_billed', and 'credit_applied' are all
+  // draft/sent invoices never marked literally paid/prepaid either, so
+  // complete-scheduled-service.js's invoiceBlocksReview holds the ask for
+  // them exactly the same way. This panel used to recognize
+  // 'invoice_processing' alone and let these three preview an immediate
+  // send the server still withheld pending manual reconciliation.
+  it.each(['withdrawn_from_customer', 'payer_billed', 'credit_applied'])(
+    'holds the review ask for a sibling invoice settled by reason "%s" (not yet literally paid)',
+    async (reason) => {
+      vi.stubGlobal('fetch', vi.fn(async (url) => ({
+        ok: true,
+        json: async () => String(url).includes('/send-time-preview')
+          ? { schedulerEnabled: true, reviewSequencesEnabled: true, smsSendWindowEnabled: true }
+          : { customer: {}, actions: [], available: false },
+      })));
+      await mount({
+        service: {
+          ...service,
+          estimatedPrice: null,
+          billingLane: {
+            mode: 'per_application',
+            source: 'explicit',
+            monthlyRate: null,
+            prediction: {
+              kind: 'covered_sibling_invoice', amount: null, conflictStampedPrice: false,
+              invoiceId: 'inv-1', invoiceNumber: 'WPC-TEST-0001',
+            },
+            siblingCoverage: {
+              state: 'settled', invoiceId: 'inv-1', invoiceNumber: 'WPC-TEST-0001', amountDue: 0, reason,
+            },
+          },
+        },
+      });
+      expect(screen.getByText(/waits for the invoice to be paid/)).toBeTruthy();
+    },
+  );
+
+  // The counterpart: a sibling invoice that IS genuinely settled
+  // ('invoice_settled' — paid/prepaid) must NOT hold the ask — the
+  // pre-existing behavior for a truly paid sibling stays unchanged.
+  it('does not hold the review ask for a sibling invoice that is genuinely settled (paid/prepaid)', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url) => ({
+      ok: true,
+      json: async () => String(url).includes('/send-time-preview')
+        ? { schedulerEnabled: true, reviewSequencesEnabled: true, smsSendWindowEnabled: true }
+        : { customer: {}, actions: [], available: false },
+    })));
+    await mount({
+      service: {
+        ...service,
+        estimatedPrice: null,
+        billingLane: {
+          mode: 'per_application',
+          source: 'explicit',
+          monthlyRate: null,
+          prediction: {
+            kind: 'covered_sibling_invoice', amount: null, conflictStampedPrice: false,
+            invoiceId: 'inv-1', invoiceNumber: 'WPC-TEST-0001',
+          },
+          siblingCoverage: {
+            state: 'settled', invoiceId: 'inv-1', invoiceNumber: 'WPC-TEST-0001', amountDue: 0, reason: 'invoice_settled',
+          },
+        },
+      },
+    });
+    expect(screen.queryByText(/waits for the invoice to be paid/)).toBeNull();
+  });
 });

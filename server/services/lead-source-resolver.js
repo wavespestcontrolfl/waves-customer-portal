@@ -1,5 +1,6 @@
 const db = require('../models/db');
 const { findGbpLocationByUtmContent, isGbpUtmCampaign } = require('../config/locations');
+const { findAiAssistant, AI_ASSISTANT_SOURCE_TYPE, AI_ASSISTANT_LEAD_SOURCE_NAME } = require('./ai-referral-sources');
 
 const MAIN_SITE_NAME = 'Main Site (wavespestcontrol.com)';
 // Seeded by migration 20260827000001. Web-form paid-Google leads go here so
@@ -61,6 +62,7 @@ async function resolveLeadSource(attribution) {
   let detail = null;
   let metaPaid = false;
   let googlePaid = false;
+  let aiReferral = false;
 
   const utmSrc = String(utm.source || '').toLowerCase();
   const utmMed = String(utm.medium || '').toLowerCase();
@@ -73,6 +75,13 @@ async function resolveLeadSource(attribution) {
   // determineLeadSource. (Explicit utm_source=google&cpc also qualifies.)
   const isGoogleAdsClick = (utmSrc === 'google' && utmMed === 'cpc')
     || !!attribution?.gclid || !!attribution?.wbraid || !!attribution?.gbraid;
+  // AI-assistant referral (owner-approved 2026-09-27) — SHARED detection
+  // table with lead-source-classify.js (see ./ai-referral-sources.js) so the
+  // quote-wizard (property-lookup / quote-calculate) judges the same ChatGPT/
+  // Perplexity/Gemini/Copilot/Claude visit the same way the /api/leads
+  // webhook does. Checked by BOTH utm_source and the referrer host, same as
+  // the webhook path.
+  const aiAssistant = findAiAssistant(utmSrc, referrerHost);
 
   if (isGbpUtmCampaign({ source: utm.source, medium: utm.medium, campaign: utm.campaign })) {
     const loc = findGbpLocationByUtmContent(utm.content);
@@ -103,6 +112,14 @@ async function resolveLeadSource(attribution) {
     detail = attribution?.fbclid ? 'Meta click (fbclid)'
       : attribution?.fbc ? 'Meta click (_fbc)'
         : `facebook ${utm.medium || ''} ${utm.campaign || ''}`.trim();
+  } else if (aiAssistant) {
+    // Organic, not paid — checked before the spoke/Main-Site fallback so an
+    // AI-referred visit isn't silently folded into a spoke or "Main Site"
+    // row. Resolved by source_type below (stable even if the office renames
+    // the seeded row), mirroring the google/meta paid lookups above.
+    aiReferral = true;
+    targetName = AI_ASSISTANT_LEAD_SOURCE_NAME;
+    detail = `AI assistant referral (${aiAssistant.detail})${referrer ? `: ${referrer}` : ''}`;
   } else if (referrerHost && SPOKE_DOMAIN_TO_SOURCE_NAME[referrerHost]) {
     targetName = SPOKE_DOMAIN_TO_SOURCE_NAME[referrerHost];
     detail = `Spoke referrer: ${referrer}`;
@@ -128,6 +145,12 @@ async function resolveLeadSource(attribution) {
       // 'google_ads' with leadSourceId null, and the dashboard's
       // leads_unattributed_7d alert surfaces the missing row.
       row = await db('lead_sources').where({ name: GOOGLE_ADS_WEB_FORM_NAME }).first();
+    } else if (aiReferral) {
+      // Matched by source_type (seed: migration
+      // 20260928030000_ai_assistant_lead_source.js) rather than name — stable
+      // even if the office renames the row, mirroring the google/meta paid
+      // lookups above.
+      row = await db('lead_sources').where({ source_type: AI_ASSISTANT_SOURCE_TYPE }).first();
     } else {
       row = await db('lead_sources').where({ name: targetName }).first();
     }
@@ -150,7 +173,9 @@ async function resolveLeadSource(attribution) {
     // (ads/call-attribution attributionForSourceType) is keyed on. Paid
     // classifications keep their type even when the FK row is missing;
     // anything else without a row stays null (no funnel row, fail-closed).
-    sourceType: row?.source_type || (googlePaid ? 'google_ads' : metaPaid ? 'facebook' : null),
+    // AI referrals mirror that same "keep the type even if the row lookup
+    // ever misses" shape, though the seed migration means it normally won't.
+    sourceType: row?.source_type || (googlePaid ? 'google_ads' : metaPaid ? 'facebook' : aiReferral ? AI_ASSISTANT_SOURCE_TYPE : null),
     isPaidClick,
   };
 }
