@@ -1522,7 +1522,7 @@ router.post('/batch/send-receipts', requireAdmin, async (req, res, next) => {
       // the closeout so a queued receipt cannot deliver during it.
       let claim;
       try {
-        claim = await claimReceiptJobForOperatorSend(invoiceId);
+        claim = await claimReceiptJobForOperatorSend(invoiceId, { sawUnsent: !invoice.receipt_sent_at });
       } catch (err) {
         failed.push({ invoiceId, error: `receipt claim failed: ${err.message}` });
         continue;
@@ -2517,7 +2517,7 @@ router.post('/:id/send-receipt', requireAdmin, async (req, res, next) => {
 
     // The invoice's queued receipt job (if any) is claimed before anything
     // else runs, so it cannot deliver a second receipt around this send.
-    const claim = await claimReceiptJobForOperatorSend(id);
+    const claim = await claimReceiptJobForOperatorSend(id, { sawUnsent: !invoice.receipt_sent_at });
     if (claim.inFlight) {
       return res.status(409).json({
         error: 'The automatic receipt for this invoice is being delivered right now — refresh in a minute before resending.',

@@ -80,7 +80,8 @@ describe('POST /:id/send-receipt', () => {
     const r = await withServer((base) => post(base, `/${INVOICE_ID}/send-receipt`, { via: 'both' }));
     expect(r.status).toBe(200);
     expect(r.body).toMatchObject({ ok: true, email: { ok: true }, sms: { ok: true } });
-    expect(claimReceiptJobForOperatorSend).toHaveBeenCalledWith(INVOICE_ID);
+    // The route read an unstamped invoice: the claim refuses if another path stamps it first.
+    expect(claimReceiptJobForOperatorSend).toHaveBeenCalledWith(INVOICE_ID, { sawUnsent: true });
     const claimAt = claimReceiptJobForOperatorSend.mock.invocationCallOrder[0];
     // Claimed before the closeout too: a queued receipt cannot deliver during it.
     expect(claimAt).toBeLessThan(closeOutVisitForIssuedInvoice.mock.invocationCallOrder[0]);

@@ -471,7 +471,7 @@ describe('recordManualPayment — settlement', () => {
   test('the inline receipt holds the invoice\'s receipt-job claim around both legs and hands it back with the email outcome', async () => {
     settle(openInvoice());
     await recordManualPayment('inv-1', { method: 'cash' });
-    expect(ReceiptDeliveryQueue.claimReceiptJobForOperatorSend).toHaveBeenCalledWith('inv-1');
+    expect(ReceiptDeliveryQueue.claimReceiptJobForOperatorSend).toHaveBeenCalledWith('inv-1', { sawUnsent: true });
     expect(ReceiptDeliveryQueue.claimReceiptJobForOperatorSend.mock.invocationCallOrder[0]).toBeLessThan(sendReceiptEmail.mock.invocationCallOrder[0]);
     expect(ReceiptDeliveryQueue.releaseOperatorReceiptClaim).toHaveBeenCalledWith(
       { id: 'job-1', token: 'claim-1', prior: null },

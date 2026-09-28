@@ -493,7 +493,7 @@ async function recordManualPayment(id, {
     const { claimReceiptJobForOperatorSend, recordOperatorReceiptEmail, releaseOperatorReceiptClaim } = require('./receipt-delivery-queue');
     // The payment is already recorded: a claim failure only skips the
     // receipt (reported back), never fails the payment.
-    const claim = await claimReceiptJobForOperatorSend(id)
+    const claim = await claimReceiptJobForOperatorSend(id, { sawUnsent: !updatedInvoice.receipt_sent_at })
       .catch((err) => ({ error: err.message }));
     if (claim.inFlight) {
       // A queued job for this invoice is delivering the receipt right now.

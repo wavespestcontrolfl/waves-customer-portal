@@ -400,7 +400,12 @@ async function processDueReceiptDeliveryJobs({ limit = 10, id = workerId() } = {
 // STALE_LOCK_MINUTES: closed when its own email was recorded as sent
 // (recordOperatorReceiptEmail), removed when the claim created the row, and
 // otherwise handed back to the drain.
-async function claimReceiptJobForOperatorSend(invoiceId) {
+// sawUnsent: the caller read the invoice with receipt_sent_at still null.
+// If it is stamped by the time the claim runs, another path (the drain, or
+// the drain's recovery of a crashed operator send) delivered the receipt in
+// between, and this send is refused ({ alreadySent: true }). A caller that
+// saw it already stamped is a deliberate resend and is never refused here.
+async function claimReceiptJobForOperatorSend(invoiceId, { sawUnsent = false } = {}) {
   // A stale row is settled first by the same rules as the drain's recovery
   // (closed on its own recorded email, removed when a claim created it,
   // otherwise requeued), so what is left running is genuinely in flight. A
@@ -410,6 +415,10 @@ async function claimReceiptJobForOperatorSend(invoiceId) {
   if (settled.closedDelivered > 0) return { alreadySent: true };
   const token = `operator:${workerId()}:${randomUUID()}`;
   return db.transaction(async (trx) => {
+    if (sawUnsent) {
+      const invoice = await trx('invoices').where({ id: invoiceId }).first('receipt_sent_at');
+      if (invoice?.receipt_sent_at) return { alreadySent: true };
+    }
     const inserted = await trx('receipt_delivery_jobs')
       .insert({
         invoice_id: invoiceId,

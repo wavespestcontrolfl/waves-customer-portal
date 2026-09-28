@@ -239,4 +239,19 @@ postgres('operator receipt claim on PostgreSQL', () => {
     expect((await mockPg('invoices').where({ id: invoiceId }).first()).receipt_sent_at).toBeInstanceOf(Date);
     expect(await job(invoiceId)).toMatchObject({ status: 'completed' });
   });
+
+  test('the drain recovered a delivered claim between the caller\'s read and this claim: refused when the caller saw it unsent, allowed as a deliberate resend otherwise', async () => {
+    const stale = new Date(Date.now() - 60 * 60 * 1000);
+    const invoiceId = await seedJob();
+    await mockPg('invoices').insert({ id: invoiceId, receipt_sent_at: null });
+    const crashed = await claimReceiptJobForOperatorSend(invoiceId);
+    await recordOperatorReceiptEmail(crashed);
+    await mockPg('receipt_delivery_jobs').where({ id: crashed.id }).update({ locked_at: stale });
+    // The route reads the invoice (unstamped)… then the drain's own recovery runs first.
+    await recoverStaleLocks();
+    expect(await job(invoiceId)).toMatchObject({ status: 'completed' });
+    expect(await claimReceiptJobForOperatorSend(invoiceId, { sawUnsent: true })).toEqual({ alreadySent: true });
+    // An operator who saw it already receipted is resending on purpose.
+    expect(await claimReceiptJobForOperatorSend(invoiceId, { sawUnsent: false })).toEqual({ id: null });
+  });
 });
