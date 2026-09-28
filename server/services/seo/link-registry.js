@@ -22,10 +22,16 @@ const { CLAIMABLE_LINK_TYPES } = require('./prospect-scorer');
 const { SPOKE_SITE_KEYS } = require('../content-astro/spoke-sites');
 
 // §3.5 — first-touch provenance. `legacy_unknown` = backfill fallback only.
+// `ai_citation` (the AEO link-source-of-answers feeder, `ai-citation-feeder.js`)
+// is DISCOVERY ONLY — a domain whose first touch is `ai_citation` never earns
+// AUTO authority (link-authority-policy.js decideAuthority downgrades every
+// AUTO_* level to its OWNER_ equivalent for such a domain, and the signup
+// runner's execution authorize() refuses to claim one even if it somehow read
+// AUTO_FREE): owner ruling — discovery never grants authority.
 const LINK_SOURCES = Object.freeze([
   'owner_seed', 'list_import', 'competitor_gap', 'competitor_clone', 'recursive',
   'x', 'google_search', 'dataforseo', 'strategy_agent', 'existing_backlink',
-  'lost_recovery', 'local_opportunity', 'legacy_unknown',
+  'lost_recovery', 'local_opportunity', 'legacy_unknown', 'ai_citation',
 ]);
 
 // §3.4d — intake items (step 2): raw references parked before resolution.

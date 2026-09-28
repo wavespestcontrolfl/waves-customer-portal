@@ -2059,13 +2059,16 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // WEEKLY SUNDAY 4:10AM — Registry feeders, after the 3:30 backlink scan (§4):
-  // existing-profile baseline (idempotent) → competitor-gap ingestion → enrich
-  // (DataForSEO, gated by GATE_SEO_INTELLIGENCE inside the service). Services
-  // are called directly — never the admin HTTP route. The feeders consume
-  // seo_backlinks, so they run INSIDE the scan's own lock ('backlink-scan'):
-  // a scan still paging at 4:10 keeps the lease and the feeders wait (10-min
-  // retries, up to an hour) rather than reading rows the scan is still
-  // transitioning; while they run, no scan can start.
+  // existing-profile baseline (idempotent) → competitor-gap ingestion →
+  // ai_citation discovery (AEO answer-engine citations, gated by
+  // GATE_SEO_INTELLIGENCE inside the service — DISCOVERY NEVER GRANTS
+  // AUTHORITY: see link-authority-policy.js) → enrich (DataForSEO, gated by
+  // GATE_SEO_INTELLIGENCE inside the service). Services are called directly —
+  // never the admin HTTP route. The feeders consume seo_backlinks, so they
+  // run INSIDE the scan's own lock ('backlink-scan'): a scan still paging at
+  // 4:10 keeps the lease and the feeders wait (10-min retries, up to an hour)
+  // rather than reading rows the scan is still transitioning; while they run,
+  // no scan can start.
   cron.schedule('10 4 * * 0', async () => {
     try {
       await runExclusive('link-registry-sunday-feeders', async () => {
@@ -2074,6 +2077,8 @@ function initScheduledJobs() {
           logger.info(`[link-intake] baseline: scanned ${b.scanned} domains +${b.domainsCreated} placements +${b.placementsCreated} reconciled ${b.placementsReconciled} mappings +${b.mappingsCreated} paths +${b.pathsCreated} skipped ${b.skipped.length}`);
           const g = await require('./seo/link-registry-gap-ingest').ingestCompetitorGap(db);
           logger.info(`[link-intake] competitor gap: scanned ${g.scanned} candidates ${g.candidates} inserted ${g.inserted} touched ${g.touched} existing ${g.existing}`);
+          const ai = await require('./seo/link-registry-ai-citation-ingest').runAiCitationFeeder(db);
+          logger.info(`[link-intake] ai_citation: ${ai.gated ? 'GATED (GATE_SEO_INTELLIGENCE off)' : ''}scanned ${ai.scanned} domains ${ai.domains} byCategory ${JSON.stringify(ai.byCategory)} enqueued ${ai.enqueued} inserted ${ai.inserted} touched ${ai.touched} existing ${ai.existing}`);
           const e = await require('./seo/link-registry-enrich').enrichDomains(db, { limit: 1000 });
           logger.info(`[link-intake] enrich: ${e.gated ? 'GATED (GATE_SEO_INTELLIGENCE off)' : ''}${e.skipped ? `SKIPPED (${e.skipped}) ` : ''} selected ${e.selected} enriched ${e.enriched} failed ${e.failed.length} calls ${e.calls}`);
           return { ran: true };

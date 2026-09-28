@@ -456,3 +456,77 @@ describe('the follow-up instance (§6.4)', () => {
     expect(P.decisionInputsHash('communication', { ...ctx, instanceKey: 'followup:1' })).not.toBe(P.decisionInputsHash('communication', { ...ctx, instanceKey: '-:1' }));
   });
 });
+
+// ---------------------------------------------------------------------------
+// Owner-queue safety guard (AEO ai_citation feeder, owner ruling 2026-09-27):
+// DISCOVERY NEVER GRANTS AUTHORITY. A domain whose first-touch provenance is
+// `ai_citation` never reads an AUTO_* level from decideAuthority, whatever
+// the policy allows every other domain — it always reads the OWNER_
+// equivalent instead, so the placement parks awaiting_owner exactly like a
+// policy that had auto_* off would produce for any other domain.
+// ---------------------------------------------------------------------------
+describe('owner-queue safety guard: ai_citation-discovered domains never read AUTO_*', () => {
+  const autoAllowsEverything = () => ({
+    ...defaults(), auto_free_acquisition: true, auto_account_creation: true,
+    auto_outreach_min_score: 0, auto_outreach_daily_cap: 10,
+    monthly_paid_budget_cents: 50000, max_auto_purchase_cents: 5000, auto_paid_min_score: 0, auto_paid_min_d30_confidence: 0,
+  });
+  const aiCitationDomain = (over = {}) => domain({ source: 'ai_citation', ...over });
+
+  test('AUTO_FREE downgrades to OWNER_FREE for a self_service_free path', () => {
+    const ordinary = P.decideAuthority({ path: path(), domain: domain(), policy: autoAllowsEverything() });
+    expect(level(ordinary, 'execution')).toBe('AUTO_FREE');
+    const r = P.decideAuthority({ path: path(), domain: aiCitationDomain(), policy: autoAllowsEverything() });
+    expect(level(r, 'execution')).toBe('OWNER_FREE');
+    expect(r.instances[0].reason).toMatch(/discovery-only \(ai_citation\): owner decision required/);
+  });
+
+  test('AUTO_ACCOUNT downgrades to OWNER_ACCOUNT for an account-required path', () => {
+    const p = path({ account_required: true });
+    expect(level(P.decideAuthority({ path: p, domain: domain(), policy: autoAllowsEverything() }), 'execution')).toBe('AUTO_ACCOUNT');
+    expect(level(P.decideAuthority({ path: p, domain: aiCitationDomain(), policy: autoAllowsEverything() }), 'execution')).toBe('OWNER_ACCOUNT');
+  });
+
+  test('AUTO_ACCOUNT (terms instance) downgrades to OWNER_ACCOUNT', () => {
+    const p = path({ legal_attestation: true, legal_terms_hash: HASH });
+    const auto = { ...autoAllowsEverything(), legal_attestation_requires_owner: false };
+    expect(level(P.decideAuthority({ path: p, domain: domain(), policy: auto }), 'execution', 'terms')).toBe('AUTO_ACCOUNT');
+    expect(level(P.decideAuthority({ path: p, domain: aiCitationDomain(), policy: auto }), 'execution', 'terms')).toBe('OWNER_ACCOUNT');
+  });
+
+  test('AUTO_PAID_WITHIN_POLICY downgrades to OWNER_PAYMENT', () => {
+    const ordinary = P.decideAuthority({ path: paid(), domain: domain(), policy: autoAllowsEverything(), d30Confidence: 0.9 });
+    expect(level(ordinary, 'payment')).toBe('AUTO_PAID_WITHIN_POLICY');
+    const r = P.decideAuthority({ path: paid(), domain: aiCitationDomain(), policy: autoAllowsEverything(), d30Confidence: 0.9 });
+    expect(level(r, 'payment')).toBe('OWNER_PAYMENT');
+  });
+
+  test('AUTO_OUTREACH downgrades to OWNER_OUTREACH', () => {
+    const ordinary = P.decideAuthority({ path: outreach(), domain: domain({ score: 90 }), policy: autoAllowsEverything(), draftClean: true });
+    expect(level(ordinary, 'communication')).toBe('AUTO_OUTREACH');
+    const r = P.decideAuthority({ path: outreach(), domain: aiCitationDomain({ score: 90 }), policy: autoAllowsEverything(), draftClean: true });
+    expect(level(r, 'communication')).toBe('OWNER_OUTREACH');
+  });
+
+  test('OWNER_* levels the policy would produce anyway are unaffected (no double-downgrade, no OWNER_HUMAN_STEP rewrite)', () => {
+    const r = P.decideAuthority({ path: path({ agent_completable: false }), domain: aiCitationDomain(), policy: autoAllowsEverything() });
+    expect(level(r, 'execution')).toBe('OWNER_HUMAN_STEP');
+  });
+
+  test('a domain touched by ai_citation but first discovered by a real feeder is unaffected (first-touch source rules)', () => {
+    const r = P.decideAuthority({ path: path(), domain: domain({ source: 'competitor_gap' }), policy: autoAllowsEverything() });
+    expect(level(r, 'execution')).toBe('AUTO_FREE');
+  });
+
+  test('isDiscoveryOnlyDomain', () => {
+    expect(P.isDiscoveryOnlyDomain(aiCitationDomain())).toBe(true);
+    expect(P.isDiscoveryOnlyDomain(domain({ source: 'competitor_gap' }))).toBe(false);
+    expect(P.isDiscoveryOnlyDomain(null)).toBe(false);
+    expect(P.isDiscoveryOnlyDomain(undefined)).toBe(false);
+  });
+
+  test('AI_CITATION_SOURCE is the registry enum value', () => {
+    expect(R.LINK_SOURCES).toContain(P.AI_CITATION_SOURCE);
+    expect(P.AI_CITATION_SOURCE).toBe('ai_citation');
+  });
+});

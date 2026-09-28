@@ -10,7 +10,7 @@ const { SPOKE_SITE_KEYS } = require('../services/content-astro/spoke-sites');
 
 describe('enums (plan §3)', () => {
   test('§3.5 provenance is the plan list, legacy_unknown included, no duplicates', () => {
-    expect(R.LINK_SOURCES).toEqual(['owner_seed', 'list_import', 'competitor_gap', 'competitor_clone', 'recursive', 'x', 'google_search', 'dataforseo', 'strategy_agent', 'existing_backlink', 'lost_recovery', 'local_opportunity', 'legacy_unknown']);
+    expect(R.LINK_SOURCES).toEqual(['owner_seed', 'list_import', 'competitor_gap', 'competitor_clone', 'recursive', 'x', 'google_search', 'dataforseo', 'strategy_agent', 'existing_backlink', 'lost_recovery', 'local_opportunity', 'legacy_unknown', 'ai_citation']);
     for (const arr of [R.LINK_SOURCES, R.AGENT_STATES, R.ACQUISITION_TYPES, R.ATTEMPT_OUTCOMES, R.AUTHORITY_LEVELS, R.ATTEMPT_PROVIDERS, R.ATTEMPT_ACTIONS]) {
       expect(new Set(arr).size).toBe(arr.length);
       expect(Object.isFrozen(arr)).toBe(true);

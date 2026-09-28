@@ -204,6 +204,24 @@ const LEVELS = Object.freeze({
   OWNER_HUMAN_STEP: 'OWNER_HUMAN_STEP', OWNER_INPUT_REQUIRED: 'OWNER_INPUT_REQUIRED', DENY: 'DENY', INVALID: 'INVALID',
 });
 
+// §6.3 owner ruling (2026-09-27): DISCOVERY NEVER GRANTS AUTHORITY. A domain
+// whose first-touch provenance (link-registry.js ensureDomain never rewrites
+// it) is `ai_citation` — it was found because an AI answer engine cited it,
+// nothing more — can never be decided AUTO_FREE / AUTO_ACCOUNT / AUTO_OUTREACH
+// / AUTO_PAID_WITHIN_POLICY. Every AUTO_* level downgrades to its OWNER_
+// equivalent below (2a/2b/2c all funnel through the shared `push` — this is
+// the ONE place that rule is enforced for the decision; link-execution-
+// authority.js's authorize() carries the same check as a second, independent
+// gate at the actual claim). A domain later ALSO touched by a real feeder
+// keeps its unrelated first-touch source (ensureDomain's contract) and is
+// unaffected — this only ever fires for a domain `ai_citation` itself
+// discovered.
+const AI_CITATION_SOURCE = 'ai_citation';
+const AUTO_TO_OWNER_ON_DISCOVERY = Object.freeze({
+  AUTO_FREE: 'OWNER_FREE', AUTO_ACCOUNT: 'OWNER_ACCOUNT', AUTO_OUTREACH: 'OWNER_OUTREACH', AUTO_PAID_WITHIN_POLICY: 'OWNER_PAYMENT',
+});
+const isDiscoveryOnlyDomain = (domain) => Boolean(domain) && domain.source === AI_CITATION_SOURCE;
+
 const isLiteralBoolean = (v) => v === true || v === false;
 const validLegalTermsHash = (h) => typeof h === 'string' && /^[0-9a-f]{64}$/.test(h);
 // §3.2 / §6.3: a resolvable recipient identity is a checkout origin, a
@@ -361,7 +379,17 @@ function decideAuthority({ path, domain, policy, score, d30Confidence = null, mo
   const waived = floors.length ? `floors waived (${waiver.id}): ${floors.join('; ')}` : null;
 
   const instances = [];
-  const push = (dimension, instance_kind, level, reason) => instances.push({ dimension, instance_kind, level, reason: waived ? `${reason} · ${waived}` : reason });
+  const discoveryOnly = isDiscoveryOnlyDomain(domain);
+  const push = (dimension, instance_kind, level, reason) => {
+    let lvl = level;
+    let rsn = reason;
+    // discovery-only downgrade — see AUTO_TO_OWNER_ON_DISCOVERY above
+    if (discoveryOnly && AUTO_TO_OWNER_ON_DISCOVERY[lvl]) {
+      lvl = AUTO_TO_OWNER_ON_DISCOVERY[lvl];
+      rsn = `${reason} · discovery-only (ai_citation): owner decision required`;
+    }
+    instances.push({ dimension, instance_kind, level: lvl, reason: waived ? `${rsn} · ${waived}` : rsn });
+  };
   const type = path.acquisition_type;
   const outreach = OUTREACH_ACQUISITION_TYPES.includes(type);
 
@@ -425,4 +453,5 @@ module.exports = {
   normalizePolicyRow, applyEnvTightening, loadPolicy, updatePolicy, parseField,
   requiredInstances, submitFirst, validityFailure, isValidMerchantBinding, validLegalTermsHash, decideAuthority,
   DIMENSION_INPUT_FIELDS, floorInputs, floorInputsHash, decisionInputs, decisionInputsHash,
+  AI_CITATION_SOURCE, AUTO_TO_OWNER_ON_DISCOVERY, isDiscoveryOnlyDomain,
 };
