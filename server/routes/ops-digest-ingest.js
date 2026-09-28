@@ -282,6 +282,11 @@ router.post('/', darkUnlessConfigured, ingestAuth, async (req, res) => {
       // on the row any more (admin-alerts-brevity scope, owner 2026-09-28).
       const row = await NotificationService.notifyAdmin(CATEGORY, title, bellBody, {
         link: resolvedLink,
+        // bell: true is the GATE_ADMIN_BELL_POLICY persist tag, not a ring: with
+        // the policy on, `false` would suppress the ROW (no Activity entry, and
+        // the email fallback fires). Bell visibility is `metadata.feed` below —
+        // an Activity-only row never reaches the bell list/count, and admin
+        // notifyAdmin rows never push.
         bell: true,
         detail: text,
         dedupeKey,
