@@ -211,6 +211,19 @@ function publicAccount(a) {
   };
 }
 
+// First day a live feed covers for this label (null = no live feed). The
+// CSV upload calls this under its per-label lock and skips rows on/after it.
+async function feedCutoffForLabel(conn, label) {
+  const row = await conn('plaid_accounts as pa')
+    .join('plaid_items as pi', 'pi.id', 'pa.plaid_item_id')
+    .whereNot('pi.status', 'removed')
+    .where('pa.enabled', true)
+    .whereRaw('upper(trim(pa.account_label)) = upper(?)', [String(label).trim()])
+    .min('pa.sync_from as cutoff')
+    .first();
+  return toDateOnly(row && row.cutoff);
+}
+
 async function getStatus() {
   const items = await db('plaid_items').whereNot({ status: 'removed' }).orderBy('created_at', 'asc');
   const accounts = items.length
@@ -389,6 +402,18 @@ async function setupItem(itemId, input) {
         if (existing && existing.account_type !== a.accountType) {
           const asWhat = existing.account_type === 'bank' ? 'a bank account' : 'a credit card';
           throw badRequest(`"${a.label}" is already imported as ${asWhat} — keep that type, or use a different label`);
+        }
+        // CSV and feed rows hash differently and can't be deduped against
+        // each other, so the feed must start AFTER the statement series'
+        // last day (checked under the label lock the CSV upload also takes)
+        const csv = await trx('bank_transactions')
+          .whereRaw('upper(trim(account_label)) = upper(?)', [a.label])
+          .where({ source: 'csv' })
+          .max('txn_date as last_date')
+          .first();
+        const lastCsv = toDateOnly(csv && csv.last_date);
+        if (lastCsv && a.syncFrom <= lastCsv) {
+          throw badRequest(`"${a.label}" already has statement rows through ${lastCsv} — start the feed on ${addDaysStr(lastCsv, 1)} or later`);
         }
       }
       const prev = byId.get(a.id);
@@ -728,5 +753,6 @@ module.exports = {
   isLoginRequired,
   toDateOnly,
   supersedeUnmatchedRow,
+  feedCutoffForLabel,
   _private: { applyChanges, fetchAllChanges, decryptToken, defaultSyncFrom, existingLabels },
 };

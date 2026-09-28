@@ -5492,6 +5492,9 @@ function BankImportTab() {
         setNotice({
           text:
             `Imported ${r.imported} of ${r.parsed} rows (${r.duplicates} already imported, ${r.skippedTotal ?? r.skipped.length} skipped)` +
+            (r.feedCovered
+              ? ` — ${r.feedCovered} row${r.feedCovered === 1 ? "" : "s"} dated ${r.feedCutoff} or later not imported: the live bank feed already covers those days`
+              : "") +
             // skipped rows never reach staging or coverage — name each line
             // and reason so the operator can fix the statement and re-import
             // (the server returns a bounded sample plus the honest total)

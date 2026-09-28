@@ -477,6 +477,43 @@ async function activate(itemId, overrides = {}) {
     }
   });
 
+  test('CSV and feed never cover the same days for one label', async () => {
+    await mockPg('bank_transactions').insert({
+      account_label: 'capone-card', account_type: 'card', txn_date: '2026-09-10', source: 'csv',
+      description: 'CSV row', amount: 5, direction: 'debit', row_hash: 'c'.repeat(64),
+    });
+    const itemId = await connect();
+    // setup: the feed must start after the statement series' last day
+    await expect(activate(itemId, { 'acc-card': { accountLabel: 'capone-card', syncFrom: '2026-09-10' } }))
+      .rejects.toThrow(/statement rows through 2026-09-10 — start the feed on 2026-09-11/);
+    await activate(itemId, { 'acc-card': { accountLabel: 'capone-card', syncFrom: '2026-09-11' } });
+
+    // upload: statement rows on/after the feed's start are skipped + reported
+    process.env.GATE_BANK_IMPORT = 'true';
+    const express = require('express');
+    const app = express();
+    app.use(express.json({ limit: '5mb' }));
+    app.use('/admin/tax', require('../routes/admin-tax'));
+    app.use((err, _req, res, _next) => res.status(500).json({ error: err.message }));
+    const server = await new Promise(r => { const sv = app.listen(0, () => r(sv)); });
+    try {
+      const res = await fetch(`http://127.0.0.1:${server.address().port}/admin/tax/bank-import/upload`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          accountLabel: 'capone-card', accountType: 'card', filename: 'sept.csv',
+          csv: 'Date,Description,Amount\n2026-09-09,EARLY,-4.00\n2026-09-11,COVERED,-6.00\n2026-09-12,COVERED TOO,-7.00',
+        }),
+      });
+      const out = await res.json();
+      expect(out).toMatchObject({ imported: 1, feedCovered: 2, feedCutoff: '2026-09-11', duplicates: 0 });
+      const csvRows = await mockPg('bank_transactions').where({ source: 'csv' }).orderBy('txn_date');
+      expect(csvRows.map(r => r.description)).toEqual(['EARLY', 'CSV row']);
+    } finally {
+      server.close();
+      delete process.env.GATE_BANK_IMPORT;
+    }
+  });
+
   test('bank login errors park the item; the hourly run skips it until re-login', async () => {
     const itemId = await connect();
     await activate(itemId);
