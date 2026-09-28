@@ -5853,28 +5853,17 @@ describe('reentrySafetyClaimFinding — shared claim corpus', () => {
 
 // #4905 guard: reentrySafetyClaimFinding runs synchronously on every live
 // voice-call turn (relay-visit.js / relay-context.js / relay-booking.js) and
-// email draft (email-reply-claims-verifier.js), plus comms-lint.js. It used
-// to build a fresh `new RegExp(src, 'gi')` for each of the ~50 sources in
-// REENTRY_SAFETY_SRCS on EVERY call — real parsing + allocation work,
-// repeated forever, on top of whatever the match itself costs — instead of
-// compiling them once. V8 also runs any regex it hasn't executed yet in a
-// slow bytecode interpreter before tiering up to fast compiled code, so a
-// battery of ~50 patterns scanning a string while still cold is where the
-// worst reported latencies (tens of ms up to multiple seconds,
-// content-dependent) came from; a one-time warm-up call at server start
-// didn't reliably prevent it. The two tests below guard the actual code
-// shape from two angles:
-//   1. a DETERMINISTIC check that a call constructs zero `RegExp` objects
-//      (the ~50 patterns are compiled once, at module load, into
-//      REENTRY_SAFETY_PATTERNS, and reused with `lastIndex` reset per call)
-//      — this can't be flaky, since it doesn't depend on V8's tiering state;
-//   2. a latency budget timed in a FRESH Node process
-//      (fixtures/reentry-claim-latency-probe.js), with unrelated dynamic
-//      regexes interleaved between calls standing in for the app's own real
-//      per-request regex traffic. In-worker timing is flaky on CI
-//      (GC/background-compile from every earlier test file skews it — see
-//      ask-waves-latency-probe.js, the sibling probe for the same issue),
-//      so this also runs standalone.
+// email draft (email-reply-claims-verifier.js), plus comms-lint.js. Its
+// multi-second stalls were V8 compiling the ~50 large patterns to native code
+// on their first runs in a process — once for one-byte text and again for
+// two-byte text (an em dash, é) — landing on the first live call to reach
+// each path. A single warm-up call never fixed it: the function returns at
+// its first claim, and a one-byte call never compiles the two-byte code. The
+// server now runs warmReentrySafetyPatterns() once at boot, before it
+// listens. The tests below guard the patterns being compiled once, the boot
+// warm-up being wired before listen, and first-sight latency after that
+// warm-up, timed in a FRESH process (in-worker timing is flaky on CI; see
+// ask-waves-latency-probe.js).
 describe('reentrySafetyClaimFinding avoids rebuilding RegExp objects per call (#4905)', () => {
   const { reentrySafetyClaimFinding, _internals } = require('../services/content/content-guardrails');
   const { REENTRY_SAFETY_PATTERNS } = _internals;
@@ -5920,8 +5909,20 @@ describe('reentrySafetyClaimFinding worst-case latency (#4905)', () => {
     return JSON.parse(out.split('\n').find((line) => line.startsWith('LATENCY ')).slice('LATENCY '.length));
   };
 
+  // Best of three fresh processes per input: one sample can catch a CI
+  // scheduling spike; a real regression fails all three.
   let ms = [];
-  beforeAll(() => { ms = timeInFreshProcess(); });
+  beforeAll(() => {
+    const runs = [timeInFreshProcess(), timeInFreshProcess(), timeInFreshProcess()];
+    ms = corpus.map((_, i) => Math.min(...runs.map((run) => run[i])));
+  });
+
+  test('the server compiles the patterns at boot, before it listens', () => {
+    const src = require('fs').readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
+    const warm = src.indexOf('warmReentrySafetyPatterns()');
+    expect(warm).toBeGreaterThan(-1);
+    expect(src.indexOf('primeGuardrails.then(() => httpServer.listen(')).toBeGreaterThan(warm);
+  });
 
   test.each(corpus.map((text, index) => [text, index]))('stays well under budget for %j', (text, index) => {
     expect(ms[index]).toBeLessThan(50);

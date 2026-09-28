@@ -6042,6 +6042,29 @@ function normalizeHardCopyText(text) {
     .replace(/(\*\*|__|~~|[*_`])/g, '');
 }
 
+// #4905: V8 compiles each pattern above to native code on its first runs in
+// a process — once for one-byte text and again for two-byte text (an em
+// dash, é, ñ). Across this battery that is about a second (seconds on a busy
+// host), and it used to land on the first live voice turn or email draft to
+// reach each path. The server runs this once at boot, before it listens. It
+// runs every pattern directly: reentrySafetyClaimFinding returns at its first
+// claim, so calling it cannot reach the rest. Returns the time spent (ms).
+const REENTRY_WARM_TEXTS = ['Warm up line, nothing to see here.', 'Warm up \u2014 nothing to see here, se\u00f1or.'];
+function warmReentrySafetyPatterns() {
+  const started = Date.now();
+  for (let pass = 0; pass < 3; pass += 1) {
+    for (const text of REENTRY_WARM_TEXTS) {
+      for (const { re } of REENTRY_SAFETY_PATTERNS) {
+        re.lastIndex = 0;
+        re.test(text);
+        re.lastIndex = 0;
+      }
+      reentrySafetyClaimFinding(text);
+    }
+  }
+  return Date.now() - started;
+}
+
 function reentrySafetyClaimFinding(text) {
   const s = normalizeHardCopyText(text);
   for (const entry of REENTRY_SAFETY_PATTERNS) {
@@ -6616,6 +6639,7 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
 }
 
 module.exports = {
+  warmReentrySafetyPatterns,
   evaluate,
   // affiliate-material detector for reuse channels (newsletter validator,
   // social share lanes) — affiliate links are web-only; runs regardless of
