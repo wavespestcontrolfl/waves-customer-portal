@@ -2556,6 +2556,48 @@ describe('dispatchClaimedCall', () => {
       expect(outcome.ambiguous).toBe(false);
     });
 
+    // codex #5196 pre-push P1 (Claude fallback audit, round 2): an outright
+    // non-retryable block (e.g. Twilio's own terminal 21211/21610/21614
+    // rejection — classifyProviderFailure's retryable:false, never merely
+    // a pre-dispatch policy refusal) can ALSO arrive AFTER onDispatchStart
+    // already wrote both marker tables — this reaches recordSendOutcome's
+    // generic `skip()` branch, not recordRetryableDecision, and previously
+    // left both markers stale: a manual resend would 409 for
+    // MANUAL_SEND_RACE_GUARD_WINDOW_MS and this lane's own next call to
+    // the same lead would refuse link_sent_recently for the full 14-day
+    // window, even though nothing was ever delivered.
+    test('a definite NON-retryable block AFTER onDispatchStart also clears the stale marker', async () => {
+      const markerDel = jest.fn(async () => 1);
+      const conn = makeDb({ markerDel });
+      sendCustomerMessage.mockImplementation(async (opts) => {
+        const verdict = await opts.providerPreSendCheck({ dbi: conn });
+        expect(verdict).toEqual({ ok: true });
+        await opts.onDispatchStart(); // the marker is written here
+        // Twilio's own terminal rejection (e.g. 21211 invalid To number) —
+        // retryable: false, never ambiguous, never merely a pre-dispatch
+        // policy block.
+        return { sent: false, blocked: true, code: 'TWILIO_INVALID_NUMBER', reason: 'invalid To number' };
+      });
+      const result = await dispatchClaimedCall(conn, CALL, NOW);
+      expect(result).toEqual({ sent: false, skipped: 'TWILIO_INVALID_NUMBER' });
+      expect(markerDel).toHaveBeenCalledTimes(1);
+
+      // recoverAbandonedClaim reads the marker table fresh — with the
+      // stale row cleared it correctly finds none, matching the retryable
+      // case's own proof above.
+      conn.mockImplementation((table) => {
+        const chain = {};
+        ['whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'whereRaw', 'orderBy', 'limit', 'modify', 'forUpdate', 'where', 'join']
+          .forEach((m) => { chain[m] = jest.fn(() => chain); });
+        chain.first = jest.fn(async () => undefined);
+        chain.update = jest.fn(async () => 1);
+        chain.insert = jest.fn(async () => {});
+        return chain;
+      });
+      const outcome = await recoverAbandonedClaim(conn, CALL, NOW);
+      expect(outcome.ambiguous).toBe(false);
+    });
+
     // The actual r8 P2 fix: a failure in sendCustomerMessage's OWN
     // pre-provider work — before it ever reaches providerPreSendCheck —
     // must leave NO handoff_started_at at all, unlike the old behavior

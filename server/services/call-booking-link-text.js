@@ -1887,6 +1887,39 @@ function recordAmbiguousDecision(call) {
   return { sent: false, skipped: 'ambiguous_provider_outcome', ambiguous: true };
 }
 
+// codex #5018 pre-push P1 (round 3) / codex #5196 pre-push P1 (Claude
+// fallback audit, round 2): a definite, non-ambiguous outcome — retryable
+// (e.g. Twilio's own 429/20429 rate limit) OR an outright non-retryable
+// block (e.g. Twilio's own terminal 21211/21610/21614 rejection,
+// classifyProviderFailure's retryable:false) — can both arrive AFTER
+// onDispatchStart already wrote both marker tables. Reaching either
+// caller (never the ambiguous kind, handled above both) means send-
+// customer-message.js/twilio.js have ALREADY determined this exact
+// attempt did NOT reach an ambiguous state, so a marker from it is safe —
+// and necessary — to clear. Left in place: a LATER retry that crashes or
+// throws before ever reaching Twilio again would find the stale handoff
+// marker and recoverAbandonedClaim would misclassify it 'ambiguous, never
+// resend' for a follow-up that in fact never sent at all; and the stale
+// consultation_link_send_attempts row would wrongly 409 a manual resend
+// for MANUAL_SEND_RACE_GUARD_WINDOW_MS and wrongly block this lane's own
+// next attempt for LINK_SENT_RECENTLY_DEFAULT_WINDOW_MS — neither
+// reflecting a link that was ever delivered. A DELETE for a call_log_id
+// that was never written (onDispatchStart never ran) is a harmless no-op,
+// so this runs unconditionally rather than tracking whether dispatch
+// actually started. Best-effort: a cleanup failure just leaves the stale
+// markers for that same (already-handled) misclassification, never a
+// duplicate send.
+async function clearDispatchMarkers(call) {
+  try {
+    await markerDb().transaction(async (mtrx) => {
+      await mtrx(HANDOFF_MARKER_TABLE).where({ call_log_id: call.id }).del();
+      await mtrx(CONSULTATION_ATTEMPT_TABLE).where({ call_log_id: call.id }).del();
+    });
+  } catch (markerErr) {
+    logger.warn(`[call-booking-link-text] stale handoff marker cleanup failed for call ${call.id} (${markerErr.code || markerErr.name || 'error'})`);
+  }
+}
+
 // A retryable/deferred outcome (send-customer-message.js's own
 // { retryable, deferred, nextAllowedAt } — a quiet-hours hold crossed by
 // this sweep, CONSENT_LOOKUP_FAILED, or a transient provider failure) is
@@ -1898,31 +1931,7 @@ function recordAmbiguousDecision(call) {
 // record a reason.
 async function recordRetryableDecision(conn, call, entry, leadId, now, result, skip) {
   if (pastRetryDeadline(entry, now)) return skip(result.code || result.reason || 'send_retry_timeout');
-  // codex #5018 pre-push P1 (round 3): a DEFINITELY retryable outcome
-  // (e.g. Twilio's own 429/20429 rate-limit rejection — twilio-sms.js's
-  // own retryableTwilioCodes classification) can still arrive AFTER
-  // onDispatchStart already wrote the durable handoff marker: the marker
-  // only proves "messages.create() may have run," and reaching this
-  // branch (never the ambiguous kind above) means send-customer-
-  // message.js/twilio.js have ALREADY determined this exact attempt did
-  // NOT reach an ambiguous state — so a marker from it is safe to clear.
-  // Left in place, a LATER retry that crashes or throws before ever
-  // reaching Twilio again would find this stale marker and
-  // recoverAbandonedClaim would misclassify it 'ambiguous, never resend'
-  // for a follow-up that in fact never sent at all. Best-effort: a
-  // cleanup failure just leaves the stale marker for that same
-  // (already-handled) misclassification, never a duplicate send.
-  try {
-    // codex #5196: clears the shared consultation_link_send_attempts row
-    // alongside the handoff marker, same transaction — see
-    // insertConsultationLinkAttempt's own doc comment.
-    await markerDb().transaction(async (mtrx) => {
-      await mtrx(HANDOFF_MARKER_TABLE).where({ call_log_id: call.id }).del();
-      await mtrx(CONSULTATION_ATTEMPT_TABLE).where({ call_log_id: call.id }).del();
-    });
-  } catch (markerErr) {
-    logger.warn(`[call-booking-link-text] stale handoff marker cleanup failed for call ${call.id} (${markerErr.code || markerErr.name || 'error'})`);
-  }
+  await clearDispatchMarkers(call);
   const rawNextAllowedAt = result.nextAllowedAt ? new Date(result.nextAllowedAt) : null;
   const nextAllowedAtValid = rawNextAllowedAt && !Number.isNaN(rawNextAllowedAt.getTime());
   const send_at = (nextAllowedAtValid ? rawNextAllowedAt : new Date(now.getTime() + RETRY_BACKOFF_MS)).toISOString();
@@ -1947,6 +1956,12 @@ async function recordSendOutcome(conn, call, entry, leadId, now, result) {
   if (kind === 'sent') return recordSentDecision(conn, call, entry, leadId, now, result);
   if (kind === 'ambiguous') return recordAmbiguousDecision(call);
   if (kind === 'retryable') return recordRetryableDecision(conn, call, entry, leadId, now, result, skip);
+  // codex #5196 pre-push P1 (Claude fallback audit, round 2): an outright
+  // non-retryable block reaches this branch too, and can arrive just as
+  // easily AFTER onDispatchStart already wrote both marker tables (a
+  // Twilio terminal rejection, not merely a pre-dispatch policy refusal) —
+  // see clearDispatchMarkers' own doc comment for why this is unconditional.
+  await clearDispatchMarkers(call);
   return skip(blockedOutcomeReason(result));
 }
 
