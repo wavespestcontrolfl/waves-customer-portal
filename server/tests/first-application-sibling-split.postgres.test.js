@@ -476,17 +476,102 @@ suite('first-application-sibling-split — periodic sweep', () => {
     expect(reopened.read_at).toBeNull();
   }));
 
-  test('invoice text unrecognizable — never a sweep candidate, no alert', () => rollbackTest(async (trx) => {
+  // PR #5021 Codex r6 (head 2168cb0877): candidacy is structural now, not
+  // text-matched — InvoiceService.update lets staff freely edit an unpaid
+  // invoice's title/notes, and a copy edit made before the FIRST sweep ever
+  // ran used to drop the invoice out of every future candidate scan
+  // forever (no standing alert yet existed to carry it through the
+  // stale-invoice fallback). A hand-edited title/notes must not matter.
+  test('invoice text unrecognizable — still a candidate (candidacy is structural, not text-matched)', () => rollbackTest(async (trx) => {
     const ids = await fixture(trx, { matchInvoiceText: false });
     await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
-    const results = await sweepOnce(trx, ids.estimateId);
-    expect(results).toEqual([]);
+    const [result] = await sweepOnce(trx, ids.estimateId);
+    expect(result.action).toBe('alerted');
+    expect(result.divergingSiblingIds).toEqual([ids.lawnId]);
   }));
 
   test('no first-application invoice at all — never a sweep candidate, no alert', () => rollbackTest(async (trx) => {
     const ids = await fixture(trx, { noInvoice: true });
     await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
     const results = await sweepOnce(trx, ids.estimateId);
+    expect(results).toEqual([]);
+  }));
+
+  // False-positive coverage for the structural candidacy signal (PR #5021
+  // Codex r6, head 2168cb0877): a normal single-program estimate has no
+  // sibling top-level visit at all, so it must never become a candidate —
+  // even when its invoice's own title/notes WOULD have matched the old
+  // text pattern.
+  test('a normal single-program estimate is never a candidate, even with first-application-shaped invoice text', () => rollbackTest(async (trx) => {
+    const customerId = randomUUID();
+    const estimateId = randomUUID();
+    const soloId = randomUUID();
+    await trx('customers').insert({
+      id: customerId, first_name: 'Synthetic single-program fixture', phone: `qa-${customerId.slice(0, 8)}`, active: true,
+    });
+    await trx('estimates').insert({ id: estimateId, customer_id: customerId, status: 'accepted' });
+    await trx('scheduled_services').insert({
+      id: soloId, customer_id: customerId, source_estimate_id: estimateId, scheduled_date: SAME_DATE,
+      service_type: 'Quarterly Pest Control', status: 'confirmed', is_recurring: true, estimated_price: 99,
+    });
+    await trx('invoices').insert({
+      id: randomUUID(), customer_id: customerId, scheduled_service_id: soloId,
+      token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
+      status: 'draft', title: 'First Service Application',
+      notes: `Auto-generated from accepted estimate #${estimateId}. Customer selected pay per application — first application only.`,
+      line_items: JSON.stringify([{ description: 'First service application', quantity: 1, unit_price: 99, amount: 99 }]),
+      subtotal: 99, total: 99,
+    });
+    // Move the visit's own date around — a single-program estimate has no
+    // sibling to diverge from in the first place.
+    await trx('scheduled_services').where({ id: soloId }).update({ scheduled_date: '2026-10-09' });
+    const results = await sweepOnce(trx, estimateId);
+    expect(results).toEqual([]);
+  }));
+
+  // False-positive coverage: two SEPARATE recurring programs off one
+  // estimate, each independently priced AND independently invoiced from
+  // day one (never sharing one combined invoice), must never be read as a
+  // reserved-accept split just because they share an estimate.
+  test('two independently priced-and-invoiced programs from one estimate are never a candidate', () => rollbackTest(async (trx) => {
+    const customerId = randomUUID();
+    const estimateId = randomUUID();
+    const pestId = randomUUID();
+    const lawnId = randomUUID();
+    await trx('customers').insert({
+      id: customerId, first_name: 'Synthetic two-separate-programs fixture', phone: `qa-${customerId.slice(0, 8)}`, active: true,
+    });
+    await trx('estimates').insert({ id: estimateId, customer_id: customerId, status: 'accepted' });
+    await trx('scheduled_services').insert([
+      {
+        id: pestId, customer_id: customerId, source_estimate_id: estimateId, scheduled_date: SAME_DATE,
+        service_type: 'Quarterly Pest Control', status: 'confirmed', is_recurring: true, estimated_price: 100,
+      },
+      {
+        id: lawnId, customer_id: customerId, source_estimate_id: estimateId, scheduled_date: SAME_DATE,
+        service_type: 'Lawn Care', status: 'confirmed', is_recurring: true, estimated_price: 80,
+      },
+    ]);
+    await trx('invoices').insert([
+      {
+        id: randomUUID(), customer_id: customerId, scheduled_service_id: pestId,
+        token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
+        status: 'draft', title: 'Quarterly Pest Control', notes: 'Standard invoice.',
+        line_items: JSON.stringify([{ description: 'Quarterly Pest Control', quantity: 1, unit_price: 100, amount: 100 }]),
+        subtotal: 100, total: 100,
+      },
+      {
+        id: randomUUID(), customer_id: customerId, scheduled_service_id: lawnId,
+        token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
+        status: 'draft', title: 'Lawn Care', notes: 'Standard invoice.',
+        line_items: JSON.stringify([{ description: 'Lawn Care', quantity: 1, unit_price: 80, amount: 80 }]),
+        subtotal: 80, total: 80,
+      },
+    ]);
+    // One of the two visits moves — a real divergence between two
+    // independently billed programs, not a shared-invoice conflict.
+    await trx('scheduled_services').where({ id: lawnId }).update({ scheduled_date: '2026-10-02' });
+    const results = await sweepOnce(trx, estimateId);
     expect(results).toEqual([]);
   }));
 
@@ -505,11 +590,32 @@ suite('first-application-sibling-split — periodic sweep', () => {
     expect(results.every((r) => r.action !== 'alerted')).toBe(true);
   }));
 
-  test('an already-completed sibling is a settled fact, not a diverging candidate', () => rollbackTest(async (trx) => {
+  // PR #5021 Codex r6 (head 2168cb0877): a completed sibling used to be
+  // excluded from divergence on the theory that completion is a "settled
+  // fact" — but completing a visit never settles or rewrites the
+  // still-open COMBINED invoice, so the office lost the alert the moment
+  // the moved sibling finished. A completed sibling now still alerts.
+  test('a completed sibling still alerts — completion never settles the still-open combined invoice', () => rollbackTest(async (trx) => {
     const ids = await fixture(trx);
     await trx('scheduled_services').where({ id: ids.lawnId })
       .update({ scheduled_date: '2026-10-02', completed_at: new Date() });
+    const [result] = await sweepOnce(trx, ids.estimateId);
+    expect(result.action).toBe('alerted');
+    expect(result.divergingSiblingIds).toEqual([ids.lawnId]);
+  }));
+
+  // The ONLY exclusion divergingSiblings still relies on (Codex round-6 P1
+  // at head 2168cb0877): a CANCELLED sibling was never going to be
+  // serviced, so it drops out of the group entirely at loadGroupMembers's
+  // own query level — never treated as diverging, never alerted on.
+  test('a cancelled sibling is excluded from the group entirely — no alert even though its date diverges', () => rollbackTest(async (trx) => {
+    const ids = await fixture(trx);
+    await trx('scheduled_services').where({ id: ids.lawnId })
+      .update({ scheduled_date: '2026-10-02', status: 'cancelled' });
     const results = await sweepOnce(trx, ids.estimateId);
+    // The cancelled sibling drops out at loadGroupMembers, leaving only the
+    // anchor — fewer than two members, so the group itself dissolves
+    // ('no_group'), never an 'alerted' verdict.
     expect(results.every((r) => r.action !== 'alerted')).toBe(true);
   }));
 

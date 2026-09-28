@@ -42,10 +42,16 @@ describe('divergingSiblings', () => {
     expect(divergingSiblings(a, [a, same, diverged]).map((m) => m.id)).toEqual(['diverged']);
   });
 
-  test('excludes a completed sibling — a settled fact a plain date move cannot change', () => {
+  // PR #5021 Codex r6 (head 2168cb0877): a completed sibling used to be
+  // excluded here on the theory that completion is a "settled fact" — but
+  // completing a visit never settles or rewrites the still-open COMBINED
+  // invoice, so excluding it let the group silently read as "realigned"
+  // (empty diverging set) the moment the moved sibling finished, and the
+  // office lost the alert. A completed sibling now still counts.
+  test('a completed sibling still counts — completion never settles the still-open combined invoice', () => {
     const a = anchor();
     const diverged = member('diverged', { scheduled_date: '2026-10-05', completed_at: new Date('2026-10-01') });
-    expect(divergingSiblings(a, [a, diverged])).toEqual([]);
+    expect(divergingSiblings(a, [a, diverged]).map((m) => m.id)).toEqual(['diverged']);
   });
 
   test('a diverging sibling with its OWN estimated_price still counts (Codex P1 fix)', () => {
