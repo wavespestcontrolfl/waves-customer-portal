@@ -75,11 +75,18 @@ function competitorFreeMarkdown(frontmatter, body, { validate = null } = {}) {
 }
 
 // The generated PR's own description lists what was unlinked.
-// Links the writer's capture step already turned into plain text (emit_draft /
-// emit_metadata_only stamp them on the draft), so a lane's PR notes list
-// every removal, not only the ones its own commit-time pass found.
-function capturedUnlinks(draft) {
-  return Array.isArray(draft?.competitor_links_unlinked) ? draft.competitor_links_unlinked : [];
+// One list of removed competitor links per draft: the capture step's
+// (emit_draft / emit_metadata_only stamp them) plus this commit's. It is
+// stamped back on the draft, which the runner persists (draft_payload), so
+// the PR notes, the final editorial review and a later Codex remediation
+// all read the same list (Codex r3).
+function recordUnlinks(draft, unlinked = []) {
+  const captured = Array.isArray(draft?.competitor_links_unlinked) ? draft.competitor_links_unlinked : [];
+  if (!unlinked.length || !draft || typeof draft !== 'object') return captured;
+  const seen = new Set(captured.map((u) => `${u?.url}\u0000${u?.text}`));
+  const all = [...captured, ...unlinked.filter((u) => !seen.has(`${u?.url}\u0000${u?.text}`))];
+  draft.competitor_links_unlinked = all;
+  return all;
 }
 
 function withCompetitorUnlinkNote(prBody, unlinked = []) {
@@ -3442,9 +3449,9 @@ async function publishOrUpdatePage(draft, brief = {}) {
   // nothing left, so competitorUnlinked alone would under-report what
   // actually changed. Merge in the capture-time removals so the PR notes
   // show the whole story.
-  const capturedCompetitorUnlinked = capturedUnlinks(draft);
+  const allUnlinked = recordUnlinks(draft, competitorUnlinked);
   const editorialFiles = await editorialEvidence.filesForDocument({ document: markdown, path: filePath, brief,
-    evidenceUrls: editorialEvidence.unlinkedCompetitorUrls(draft, competitorUnlinked) });
+    evidenceUrls: editorialEvidence.unlinkedCompetitorUrls(draft) });
 
   await gh.createBranch(branch);
   // Reused body pictures are pinned to the blob they were judged on; a
@@ -3491,7 +3498,7 @@ async function publishOrUpdatePage(draft, brief = {}) {
   const pr = await gh.createPr({
     head: branch,
     title: `Blog: ${frontmatter.title}`.slice(0, 72),
-    body: withCompetitorUnlinkNote(buildDraftPrBody({ frontmatter, slug, branch, content: finalBody, brief, images: { hero, body: bodyImages.images } }), [...capturedCompetitorUnlinked, ...competitorUnlinked]),
+    body: withCompetitorUnlinkNote(buildDraftPrBody({ frontmatter, slug, branch, content: finalBody, brief, images: { hero, body: bodyImages.images } }), allUnlinked),
   });
   await requestCodexReview({
     pr,
@@ -3625,6 +3632,7 @@ async function publishMetadataRewrite(draft, brief = {}) {
   }
 
   const { markdown, unlinked: competitorUnlinked } = competitorFreeMarkdown(nextFrontmatter, parsed.content || '', { validate: isBlogTarget(filePath) ? assertValidBlogFrontmatter : null });
+  recordUnlinks(draft, competitorUnlinked);
   if (markdown === existing.content) {
     return {
       url: canonicalForExistingPage(targetUrl, currentFrontmatter, filePath),
@@ -3657,7 +3665,7 @@ async function publishMetadataRewrite(draft, brief = {}) {
   const branchSlug = slugify(filePath.replace(/^src\/content\//, '').replace(/\.mdx?$/, '').replace(/\//g, ' '));
   const branch = `content/meta-${branchSlug}-${shortId()}`;
   const editorialFiles = await editorialEvidence.filesForDocument({ document: markdown, path: filePath, brief,
-    evidenceUrls: editorialEvidence.unlinkedCompetitorUrls(draft, competitorUnlinked) });
+    evidenceUrls: editorialEvidence.unlinkedCompetitorUrls(draft) });
   await gh.createBranch(branch);
   if (editorialFiles.length) {
     const current = await gh.getFile(filePath, branch);
@@ -3690,7 +3698,7 @@ async function publishMetadataRewrite(draft, brief = {}) {
       metaField,
       brief,
       backfilledFields,
-    }), [...capturedUnlinks(draft), ...competitorUnlinked]),
+    }), recordUnlinks(draft)),
   });
   await requestCodexReview({
     pr,
@@ -3925,8 +3933,9 @@ async function publishRefresh(draft, brief = {}) {
   }
   const finalBody = refreshImages.body;
   const { markdown, unlinked: competitorUnlinked } = competitorFreeMarkdown(nextFrontmatter, `${finalBody}\n`, { validate: isBlogTarget(filePath) ? assertValidBlogFrontmatter : null });
+  recordUnlinks(draft, competitorUnlinked);
   const editorialFiles = await editorialEvidence.filesForDocument({ document: markdown, path: filePath, brief,
-    evidenceUrls: editorialEvidence.unlinkedCompetitorUrls(draft, competitorUnlinked) });
+    evidenceUrls: editorialEvidence.unlinkedCompetitorUrls(draft) });
 
   const branchSlug = slugify(filePath.replace(/^src\/content\//, '').replace(/\.mdx?$/, '').replace(/\//g, ' '));
   const branch = `content/refresh-${branchSlug}-${shortId()}`;
@@ -3974,7 +3983,7 @@ async function publishRefresh(draft, brief = {}) {
   const pr = await gh.createPr({
     head: branch,
     title: `Refresh: ${nextFrontmatter.title || nextFrontmatter.metaTitle || publicPathFromAstroFile(filePath)}`.slice(0, 72),
-    body: withCompetitorUnlinkNote(buildRefreshPrBody({ filePath, targetUrl, branch, before: currentFrontmatter, after: nextFrontmatter, oldBody, newBody: finalBody, brief, backfilledFields, images: { hero: null, body: refreshImages.images || [] } }), [...capturedUnlinks(draft), ...competitorUnlinked]),
+    body: withCompetitorUnlinkNote(buildRefreshPrBody({ filePath, targetUrl, branch, before: currentFrontmatter, after: nextFrontmatter, oldBody, newBody: finalBody, brief, backfilledFields, images: { hero: null, body: refreshImages.images || [] } }), recordUnlinks(draft)),
   });
   await requestCodexReview({
     pr,

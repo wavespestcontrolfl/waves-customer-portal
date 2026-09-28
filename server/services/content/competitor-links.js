@@ -40,11 +40,17 @@ function unescapeMarkdown(s) {
   return String(s || '').replace(MD_BACKSLASH_ESCAPE_RE, '$1');
 }
 
+// A destination as a browser reads it: HTML entities and Markdown
+// backslash-escapes decoded ("orkin&#46;com", "orkin\\.com").
+function readableUrl(url) {
+  return unescapeMarkdown(decodeHTML(String(url || ''))).trim();
+}
+
 // Destinations are compared as a browser reads them: HTML entities decoded
 // ("orkin&#46;com"), Markdown backslash-escapes decoded ("orkin\.com"),
 // protocol-relative ("//orkin.com/x") resolved to https.
 function hostOf(url) {
-  const raw = unescapeMarkdown(decodeHTML(String(url || ''))).trim();
+  const raw = readableUrl(url);
   if (!raw) return null;
   const absolute = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `https://${raw.replace(/^\/\//, '')}`;
   try {
@@ -278,6 +284,7 @@ function unlinkCompetitorLinksDeep(value, hosts = competitorHosts()) {
 }
 
 module.exports = {
+  readableUrl,
   competitorHosts,
   isCompetitorHost,
   competitorLinkUrls,

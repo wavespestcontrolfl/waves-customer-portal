@@ -67,11 +67,27 @@ function trimTrailingUrlNoise(url) {
 // 2026-09-28). The review still reads them, so a claim sourced from a
 // competitor's own page keeps its evidence without the post linking it
 // (Codex r2 on #5191).
+// An unlinked destination in any form the unlinker recognizes (http://,
+// protocol-relative, www., entity- or backslash-escaped) as the https URL
+// the review's filter below accepts (Codex r3 on #5191); null when it isn't
+// a web URL at all.
+function evidenceUrl(raw) {
+  const url = require('./competitor-links').readableUrl(raw);
+  const absolute = /^https?:\/\//i.test(url) ? url : url.startsWith('//') ? `https:${url}` : /^www\./i.test(url) ? `https://${url}` : null;
+  if (!absolute) return null;
+  try {
+    const parsed = new URL(absolute);
+    parsed.protocol = 'https:';
+    return parsed.href;
+  } catch { return null; }
+}
+
 function sourceUrls(document, brief = {}, evidenceUrls = []) {
   // Public citation URLs only; the transport independently checks DNS/IP/redirects.
   // Parentheses are allowed inside the match (URLs can legitimately contain
   // them); trimTrailingUrlNoise strips only what's unmatched.
-  const text = `${fm.parse(document).content}\n${JSON.stringify(brief.required_sources || [])}\n${JSON.stringify(brief.facts_pack || [])}\n${(Array.isArray(evidenceUrls) ? evidenceUrls : []).join('\n')}`;
+  const evidence = (Array.isArray(evidenceUrls) ? evidenceUrls : []).map(evidenceUrl).filter(Boolean);
+  const text = `${fm.parse(document).content}\n${JSON.stringify(brief.required_sources || [])}\n${JSON.stringify(brief.facts_pack || [])}\n${evidence.join('\n')}`;
   return [...new Set((text.match(/https:\/\/[^\s<>"'\]}]+/g) || [])
     .map(trimTrailingUrlNoise)
     .filter((url) => {

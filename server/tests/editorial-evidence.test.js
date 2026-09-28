@@ -433,6 +433,9 @@ test('competitor pages the no-link rule removed are still review evidence, never
   expect(evidence.unlinkedCompetitorUrls(null)).toEqual([]);
   expect(evidence.sourceUrls("Per Orkin's terms, plans renew yearly.", {}, ['https://www.orkin.com/terms']))
     .toEqual(['https://www.orkin.com/terms']);
+  // Every destination form the unlinker removes reaches the review as https (Codex r3).
+  expect(evidence.sourceUrls('Body.', {}, ['//orkin.com/terms', 'http://www.orkin.com/a', 'www.terminix.com/x', 'https://orkin&#46;com/b', 'https://orkin\\.com/c', 'mailto:x@y.com']))
+    .toEqual(['https://orkin.com/terms', 'https://www.orkin.com/a', 'https://www.terminix.com/x', 'https://orkin.com/b', 'https://orkin.com/c']);
 });
 test('source extraction preserves a balanced parenthesis inside a URL and trims only an unmatched wrapping one', () => {
   expect(evidence.sourceUrls('Per the report at https://example.org/report_(2026) prevalence rose.'))

@@ -145,6 +145,13 @@ describe('publishRefresh frontmatter freeze', () => {
     expect(gh.createPr.mock.calls[0][0].body).toMatch(/Competitor links removed[\s\S]*https:\/\/www\.orkin\.com\/terms/);
   });
 
+  test('commit-time removals are stamped on the draft the runner persists, next to capture-time ones (Codex r3)', async () => {
+    const draft = { ...refreshDraft({ body: 'Fresh Sarasota guidance. Per [Orkin\'s terms](https://www.orkin.com/terms) plans renew yearly.' }),
+      competitor_links_unlinked: [{ url: 'https://www.terminix.com/fees', text: 'fees' }] };
+    expect((await pub.publishRefresh(draft, BRIEF)).status).toBe('pr_open');
+    expect(draft.competitor_links_unlinked.map((u) => u.url)).toEqual(['https://www.terminix.com/fees', 'https://www.orkin.com/terms']);
+  });
+
   test('the PR notes also list links the capture step already removed (refresh + metadata lanes)', async () => {
     const captured = [{ url: 'https://www.orkin.com/terms', text: "Orkin's terms" }];
     const res = await pub.publishRefresh({ ...refreshDraft({ body: "Fresh Sarasota guidance. Per Orkin's terms, plans renew yearly." }), competitor_links_unlinked: captured }, BRIEF);
