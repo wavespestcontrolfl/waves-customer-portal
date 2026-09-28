@@ -282,9 +282,11 @@ const REPORT_PAST_ACCESS_NUMBER_RE = /\b\d{3,8}\b(?!\.\d)/g;
 const REPORT_STRUCTURED_DATE_TEXT = String.raw`(?:\d{4}\s*[/-]\s*\d{1,2}\s*[/-]\s*\d{1,2}|\d{1,2}\s*[/-]\s*\d{1,2}\s*[/-]\s*(?:\d{2}|\d{4}))`;
 const REPORT_STRUCTURED_DATE_RE = new RegExp(String.raw`\b${REPORT_STRUCTURED_DATE_TEXT}\b`, 'g');
 const REPORT_AFFIXED_OR_GROUPED_NUMBER_RE = /(?:\b[A-Za-z#*]+\d[A-Za-z0-9#*]*\b|\b\d[A-Za-z0-9#*]*[A-Za-z#*]\b|\b\d{1,2}(?:[\s–—-]+\d{1,2}){1,7}\b)/;
-// A work verb plus a pest noun establishes a count, including bounded species
-// and state modifiers. Explicit access relationships are screened first.
-const REPORT_PEST_COUNT_RE = /\b(?:found|saw|observ(?:e|es|ed|ing)|count(?:s|ed|ing)?|not(?:e|es|ed|ing)|record(?:s|ed|ing)?)\s+\d{1,8}\s+(?:[a-z][a-z’'-]{0,23}\s+){0,3}(?:ants?|termites?|roaches?|cockroaches?|mosquitoes?|fleas?|ticks?|spiders?|rodents?|mice|rats?|wasps?|bees?|flies|beetles?|silverfish|earwigs?)\b/gi;
+// A work verb plus a domain noun establishes only its adjacent count, including
+// bounded species/state modifiers. A later credential remains available to the
+// relationship scanners instead of inheriting this work-detail exemption.
+const REPORT_PEST_COUNT_RE = /\b(?:found|saw|observ(?:e|es|ed|ing)|count(?:s|ed|ing)?|not(?:e|es|ed|ing)|record(?:s|ed|ing)?|remov(?:e|es|ed|ing))\s+\d{1,8}\s+(?:[a-z][a-z’'-]{0,23}\s+){0,3}(?:ants?|termites?|roaches?|cockroaches?|mosquitoes?|fleas?|ticks?|spiders?|rodents?|mice|rats?|wasps?|bees?|flies|beetles?|silverfish|earwigs?)\b/gi;
+const REPORT_SERVICE_COUNT_RE = /\binstall(?:s|ed|ing)?\s+\d{1,8}\s+(?:[a-z][a-z’'-]{0,23}\s+){0,3}(?:traps?|stations?|devices?|units?)\b/gi;
 const REPORT_SERVICE_IDENTIFIER_RE = /\b(?:treat(?:s|ed|ing)?|servic(?:e|es|ed|ing)|inspect(?:s|ed|ing)?|check(?:s|ed|ing)?)\s+(?:bait\s+)?(?:station|trap|device|unit)\s*#?\s*\d{3,8}\b/gi;
 
 function isValidStructuredDate(value) {
@@ -323,14 +325,17 @@ function maskStructuredDates(value) {
 function maskPastAccessWorkDetails(value) {
   return value
     .replace(REPORT_PEST_COUNT_RE, (detail) => detail.replace(/\d{1,8}/, '[work-detail]'))
+    .replace(REPORT_SERVICE_COUNT_RE, (detail) => detail.replace(/\d{1,8}/, '[work-detail]'))
     .replace(REPORT_SERVICE_IDENTIFIER_RE, (detail) => detail.replace(/\d{3,8}/, '[work-detail]'));
 }
 
-function isObservedPestCountNumber(value, index, length) {
-  for (const match of value.matchAll(REPORT_PEST_COUNT_RE)) {
-    const numberOffset = match[0].search(/\d/);
-    if (match.index + numberOffset === index
-      && match[0].slice(numberOffset).match(/^\d{1,8}/)?.[0].length === length) return true;
+function isPastAccessWorkCountNumber(value, index, length) {
+  for (const pattern of [REPORT_PEST_COUNT_RE, REPORT_SERVICE_COUNT_RE]) {
+    for (const match of value.matchAll(pattern)) {
+      const numberOffset = match[0].search(/\d/);
+      if (match.index + numberOffset === index
+        && match[0].slice(numberOffset).match(/^\d{1,8}/)?.[0].length === length) return true;
+    }
   }
   return false;
 }
@@ -350,7 +355,7 @@ function containsPastAccessCredential(text) {
       if (/\bunit\s*$/i.test(before)) continue;
       if (isStructuredDateNumber(value, index, numeric[0].length)) continue;
       if (REPORT_MEASUREMENT_AFTER_NUMBER_RE.test(after)) continue;
-      if (isObservedPestCountNumber(value, index, numeric[0].length)) continue;
+      if (isPastAccessWorkCountNumber(value, index, numeric[0].length)) continue;
       return true;
     }
   }
