@@ -24,6 +24,8 @@ let capturedNotesUpdate = null;
 // service_address_line1 AND a customer_id — the default DEFAULT_APPT_ROW
 // below has neither, so most tests never touch this).
 let mockCustomerRow = { first_name: 'Synthia', last_name: 'Tester' };
+// The visit's card-fee rail rows (Codex round 7 P1), read under the lock.
+let mockCardRailRows = { estimate_card_holds: [], appointment_card_requests: [] };
 jest.mock('../models/db', () => {
   const db = jest.fn((table) => {
     if (table === 'scheduled_services') {
@@ -48,6 +50,9 @@ jest.mock('../models/db', () => {
       // here, same shape as scheduled_services' .forUpdate() above.
       const reader = { first: async () => mockCustomerRow };
       return { where: () => ({ ...reader, forShare: () => reader }) };
+    }
+    if (table in mockCardRailRows) {
+      return { where: () => ({ select: async () => mockCardRailRows[table] }) };
     }
     throw new Error(`unexpected table in this suite: ${table}`);
   });
@@ -85,6 +90,7 @@ jest.mock('../services/appointment-cancel-impact', () => {
     cancelImpactsMatch: actual.cancelImpactsMatch,
     computeRowFingerprint: actual.computeRowFingerprint,
     legacyAddressFingerprint: actual.legacyAddressFingerprint,
+    cardRailFingerprint: actual.cardRailFingerprint,
   };
 });
 
@@ -147,6 +153,8 @@ const FROZEN = {
   // fingerprint for DEFAULT_APPT_ROW, so it matches what the round-3/4 P1a
   // lock recheck (tools.js) actually computes when mockApptRow is unchanged.
   identity_fingerprint: computeRowFingerprint(DEFAULT_APPT_ROW),
+  // sha256 of the empty rail list — no hold, no card request (bare visit).
+  card_rail_fingerprint: require('crypto').createHash('sha256').update(JSON.stringify([])).digest('hex'),
 };
 
 beforeEach(() => {
@@ -154,6 +162,7 @@ beforeEach(() => {
   capturedNotesUpdate = null;
   mockApptRow = { ...DEFAULT_APPT_ROW };
   mockCustomerRow = { first_name: 'Synthia', last_name: 'Tester' };
+  mockCardRailRows = { estimate_card_holds: [], appointment_card_requests: [] };
   mockCancelMayReseedPlan.mockReturnValue(false);
   // Bare by default (owner ruling 2026-09-28) — clearAllMocks() only clears
   // call history, not a factory-provided implementation, but reset
@@ -642,4 +651,19 @@ test('a pinned cancel never runs the plan reseed (commit and replay); an unpinne
 
   await executeTool('cancel_appointment', { appointment_id: 'svc-synthetic-1' }, {});
   expect(mockReseed).toHaveBeenCalledTimes(1);
+});
+
+// Codex round 7 on #5244, P1: a card-fee agreement committed after the
+// proposal (a /secure capture, an accepted estimate card hold) lives outside
+// scheduled_services — the under-lock rail recheck refuses it.
+test('a card request secured between the card and Confirm refuses as drift — nothing transitions', async () => {
+  mockComputeImpact.mockResolvedValue(FROZEN);
+  mockCardRailRows = { estimate_card_holds: [], appointment_card_requests: [{ id: 'req-1', status: 'secured' }] };
+  const result = await executeTool('cancel_appointment', {
+    appointment_id: 'svc-synthetic-1',
+    _frozen_cancellation_impact: FROZEN,
+  }, {});
+  expect(result.success).not.toBe(true);
+  expect(mockTransitionJobStatus).not.toHaveBeenCalled();
+  expect(mockFollowThrough).not.toHaveBeenCalled();
 });

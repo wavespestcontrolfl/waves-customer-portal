@@ -13,9 +13,11 @@
 
 let mockAppointmentRow = null;
 let mockCustomerRow = null;
+let mockCardRailRows = { estimate_card_holds: [], appointment_card_requests: [] };
 jest.mock('../models/db', () => {
   const customersQb = { where: () => customersQb, first: async () => mockCustomerRow };
-  const db = jest.fn((table) => (table === 'customers' ? customersQb : {
+  const railQb = (table) => ({ where: () => ({ select: async () => mockCardRailRows[table] }) });
+  const db = jest.fn((table) => (table === 'customers' ? customersQb : (table in mockCardRailRows) ? railQb(table) : {
     leftJoin: () => db.__qb,
     where: () => db.__qb,
     first: async () => mockAppointmentRow,
@@ -103,6 +105,21 @@ test('identity fingerprint covers only the scheduled_services row, not the custo
   const impact = await computeCancelAppointmentImpact('svc-synthetic-1');
   expect(impact.appointment.customer_name).toBe('Synthia Tester');
   expect(impact.identity_fingerprint).toBe(computeRowFingerprint({ ...mockAppointmentRow }));
+});
+
+// Codex round 7 on #5244, P1: the card-fee rails live outside
+// scheduled_services, so they get their own pinned fingerprint.
+test('card_rail_fingerprint changes when a hold or card request appears or changes status', async () => {
+  mockCardHoldPreview.mockResolvedValue({ held: false, feeApplies: false, rule: { code: 'no_card' } });
+  mockApptCardPreview.mockResolvedValue({ secured: false, feeApplies: false, rule: { code: 'no_card' } });
+  mockCardRailRows = { estimate_card_holds: [], appointment_card_requests: [] };
+  const none = (await computeCancelAppointmentImpact('svc-synthetic-1')).card_rail_fingerprint;
+  mockCardRailRows = { estimate_card_holds: [], appointment_card_requests: [{ id: 'req-1', status: 'pending' }] };
+  const pending = (await computeCancelAppointmentImpact('svc-synthetic-1')).card_rail_fingerprint;
+  mockCardRailRows = { estimate_card_holds: [], appointment_card_requests: [{ id: 'req-1', status: 'secured' }] };
+  const secured = (await computeCancelAppointmentImpact('svc-synthetic-1')).card_rail_fingerprint;
+  expect(new Set([none, pending, secured]).size).toBe(3);
+  mockCardRailRows = { estimate_card_holds: [], appointment_card_requests: [] };
 });
 
 test('returns null for an appointment that no longer exists', async () => {

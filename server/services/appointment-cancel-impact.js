@@ -128,6 +128,24 @@ function legacyAddressFingerprint({ line1, line2, city, state, zip } = {}) {
   })).digest('hex');
 }
 
+// The visit's card-fee rails (estimate_card_holds, appointment_card_requests)
+// live outside scheduled_services, so the whole-row fingerprint cannot see a
+// hold accepted or a /secure capture committed after the proposal (Codex
+// round 7 on #5244, P1). Hash every rail row's (table, id, status) —
+// recomputed under the visit lock at commit (tools.js); both rails' writers
+// lock the same visit row FOR UPDATE, so that read serializes with them.
+async function cardRailFingerprint(conn, scheduledServiceId) {
+  const [holds, requests] = await Promise.all([
+    conn('estimate_card_holds').where({ scheduled_service_id: scheduledServiceId }).select('id', 'status'),
+    conn('appointment_card_requests').where({ scheduled_service_id: scheduledServiceId }).select('id', 'status'),
+  ]);
+  const rows = [
+    ...holds.map((r) => `hold:${r.id}:${r.status}`),
+    ...requests.map((r) => `request:${r.id}:${r.status}`),
+  ].sort();
+  return crypto.createHash('sha256').update(JSON.stringify(rows)).digest('hex');
+}
+
 // Columns that legitimately change on scheduled_services without changing
 // what cancelling THIS row would do — pure operational churn, never a
 // signal that the visit's identity, money effects, eligibility, window, or
@@ -462,6 +480,8 @@ async function computeCancelAppointmentImpact(scheduledServiceId, { now = new Da
     // null for a stamped row (its address is already fully covered by
     // identity_fingerprint below).
     legacy_address_fingerprint: addressFingerprint,
+    // Codex round-7 P1 — see cardRailFingerprint's own header.
+    card_rail_fingerprint: await cardRailFingerprint(db, scheduledServiceId),
     // Full appointment identity, hashed (Codex round-2 P1) — see
     // loadAppointmentFacts above. Part of the impact object, so the
     // existing cancelImpactsMatch drift check covers it automatically: a
@@ -504,5 +524,6 @@ module.exports = {
   // customer row, under the same lock as the identity recheck, for a row
   // with no stamped service_address_*.
   legacyAddressFingerprint,
+  cardRailFingerprint,
   _stableStringify: stableStringify,
 };

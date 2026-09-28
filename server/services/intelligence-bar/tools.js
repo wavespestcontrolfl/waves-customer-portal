@@ -3918,6 +3918,15 @@ async function cancelAppointment(input, actionContext = {}) {
             throw new Error('__cancel_identity_drift__');
           }
         }
+        // Card-fee rails (Codex round 7 P1): a hold accepted or a /secure
+        // capture committed since the proposal lives outside the row
+        // fingerprint. Re-read under this lock (their writers lock the same
+        // visit row) and refuse on any change — the unpinned follow-through
+        // must never charge a fee the card said did not exist.
+        const { cardRailFingerprint } = require('../appointment-cancel-impact');
+        if (await cardRailFingerprint(trx, appointment_id) !== input._frozen_cancellation_impact.card_rail_fingerprint) {
+          throw new Error('__cancel_identity_drift__');
+        }
       }
       await transitionJobStatus({
         jobId: appointment_id,
