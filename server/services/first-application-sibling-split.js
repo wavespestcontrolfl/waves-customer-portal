@@ -678,7 +678,9 @@ async function raiseDivergenceAlert(conn, {
     ALERT_TITLES[alertKind] || ALERT_TITLES.diverged,
     `${leadSentence}: ${detail}. ${actionSentence} ${invoiceRef}`,
     {
-      link: invoice ? `/admin/invoices?invoice=${invoice.invoice_id}` : `/admin/estimates/${estimateId}`,
+      // Query form only — the admin app has no /admin/estimates/:id page
+      // (tests/admin-notification-link-shapes.test.js).
+      link: invoice ? `/admin/invoices?invoice=${invoice.invoice_id}` : `/admin/estimates?estimateId=${estimateId}`,
       bell: true,
       metadata: {
         estimateId: String(estimateId),
