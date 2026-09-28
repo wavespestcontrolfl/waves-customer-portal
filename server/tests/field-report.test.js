@@ -75,6 +75,7 @@ describe('field-report category resolution', () => {
     ['Bee / Wasp Nest Removal', 'specialty'],
     ['Palmetto Roach Knockdown', 'pest_control'],
     ['Palm Tree Nutrition', 'tree_shrub'],
+    ['Core Aeration Service', 'lawn_care'],
     ['Annual Home Inspection', 'inspection'],
     ['Quarterly Pest Control', 'pest_control'],
     ['General Pest Treatment', 'pest_control'],
@@ -141,9 +142,14 @@ describe('field-report SQL — service-address-first geography (no live DB in th
     expect(FIELD_REPORT_QUERY).not.toMatch(/COALESCE\(ss\.service_address_/i);
   });
 
-  test('an incomplete closeout counts only once a completed record exists', () => {
-    expect(FIELD_REPORT_QUERY).toMatch(/NOT EXISTS \(SELECT 1 FROM service_records sr\s+WHERE sr\.scheduled_service_id = ss\.id AND sr\.status = 'incomplete'\)/i);
-    expect(FIELD_REPORT_QUERY).toMatch(/OR EXISTS \(SELECT 1 FROM service_records sr\s+WHERE sr\.scheduled_service_id = ss\.id AND sr\.status = 'completed'\)/i);
+  test('a customer-declined closeout is treated like an incomplete one', () => {
+    expect(FIELD_REPORT_QUERY).toMatch(/sr\.structured_notes->>'visitOutcome' = 'customer_declined'/);
+    expect(FIELD_REPORT_QUERY).toMatch(/COALESCE\(sr\.structured_notes->>'visitOutcome', ''\) <> 'customer_declined'/);
+  });
+
+  test('an incomplete closeout counts only once a genuinely performed record exists', () => {
+    expect(FIELD_REPORT_QUERY).toMatch(/NOT EXISTS \(SELECT 1 FROM service_records sr[\s\S]*?sr\.status = 'incomplete'/i);
+    expect(FIELD_REPORT_QUERY).toMatch(/OR EXISTS \(SELECT 1 FROM service_records sr[\s\S]*?sr\.status = 'completed'/i);
   });
 });
 

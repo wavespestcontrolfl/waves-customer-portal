@@ -155,7 +155,7 @@ const CATEGORY_KEYWORDS = [
   // "Palmetto" is a roach, not a palm (mirrors SchedulePage's classifier).
   ['pest_control', /\bpalmetto\b/],
   ['tree_shrub', /tree|shrub|palm/],
-  ['lawn_care', /lawn|turf|fertiliz|dethatch|topdress|plugging|weed/],
+  ['lawn_care', /lawn|turf|fertiliz|dethatch|topdress|plugging|weed|aerat/],
   // Generic pest-control catch: "Quarterly Pest Control", "Pest & Rodent
   // Control" (rodent already matched above), roach/ant/spider one-offs.
   // Ants as a whole word, so "Plant Health" never counts as pest control.
@@ -346,14 +346,20 @@ const FIELD_REPORT_QUERY = `SELECT to_char(ss.scheduled_date, 'YYYY-MM') AS serv
         WHERE ss.status = 'completed'
           AND ss.scheduled_date >= $1::date
           AND ss.scheduled_date < $2::date
-          -- An incomplete closeout keeps scheduled_services.status='completed'
-          -- but records service_records.status='incomplete'; it counts only
-          -- once a completed record exists for the visit.
+          -- Non-performed closeouts keep scheduled_services.status='completed':
+          -- an incomplete visit records service_records.status='incomplete',
+          -- a customer-declined one a 'completed' record whose frozen
+          -- structured_notes.visitOutcome is 'customer_declined'. Such a visit
+          -- counts only once a genuinely performed record exists.
           AND (
             NOT EXISTS (SELECT 1 FROM service_records sr
-                         WHERE sr.scheduled_service_id = ss.id AND sr.status = 'incomplete')
+                         WHERE sr.scheduled_service_id = ss.id
+                           AND (sr.status = 'incomplete'
+                                OR sr.structured_notes->>'visitOutcome' = 'customer_declined'))
             OR EXISTS (SELECT 1 FROM service_records sr
-                        WHERE sr.scheduled_service_id = ss.id AND sr.status = 'completed')
+                        WHERE sr.scheduled_service_id = ss.id
+                          AND sr.status = 'completed'
+                          AND COALESCE(sr.structured_notes->>'visitOutcome', '') <> 'customer_declined')
           )`;
 
 async function fetchRows({ fromStr, toStr }) {
