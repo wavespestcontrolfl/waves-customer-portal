@@ -2625,3 +2625,144 @@ describe('intake chokepoint flags every wording the shared rule set flags', () =
   });
 });
 
+
+describe('emergency second opinion (GATE_ASK_WAVES_EMERGENCY_CHECK, #4899)', () => {
+  // A fast classifier asks only "is anyone in medical danger?" alongside
+  // every turn; a yes turns a non-emergency answer into the emergency script
+  // (no quote CTA). It never removes an emergency script, and a failed check
+  // leaves the answer as it was.
+  const quoteAnswer = { reply: 'We can treat that! Want a quick quote?', intent: 'quote', service_keys: ['generalPest'], ready_for_quote: true };
+  const route = (answer, verdict) => (policy, req) => Promise.resolve(req.laneId === 'ask_waves_emergency_check'
+    ? (verdict === 'miss' ? chainMiss() : chainOk({ in_danger: verdict }, 'openai'))
+    : (answer ? chainOk(answer, 'openai') : chainMiss()));
+  const checkCalls = () => dispatchWithFallback.mock.calls.filter(([, req]) => req.laneId === 'ask_waves_emergency_check');
+  beforeEach(() => {
+    dispatchWithFallback.mockReset();
+    process.env.GATE_ASK_WAVES_EMERGENCY_CHECK = 'true';
+  });
+  afterEach(() => { delete process.env.GATE_ASK_WAVES_EMERGENCY_CHECK; });
+
+  test('gate off: no check call and the answer stands', async () => {
+    delete process.env.GATE_ASK_WAVES_EMERGENCY_CHECK;
+    dispatchWithFallback.mockImplementation(route(quoteAnswer, true));
+    const out = await processIntakeMessage({ message: "No, he can't breathe" });
+    expect(checkCalls()).toHaveLength(0);
+    expect(out.ready_for_quote).toBe(true);
+  });
+
+  test.each([
+    "I don't know if this matters, but my child cannot breathe",
+    "No, he can't breathe",
+    'No sé si importa, pero mi hijo no puede respirar',
+  ])('a yes turns a quote answer into the emergency script with no quote CTA: %s', async (message) => {
+    dispatchWithFallback.mockImplementation(route(quoteAnswer, true));
+    const out = await processIntakeMessage({ message });
+    expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
+    expect(out.intent).toBe('emergency');
+    expect(out.ready_for_quote).toBe(false);
+    expect(out.service_keys).toEqual([]);
+  });
+
+  test.each([
+    'We live at 911 Palm Ave, do you service Parrish?',
+    'I passed out flyers for my business, do you do commercial?',
+    'There is rat poison in the attic from the last company',
+    'He is breathing normally, do you treat wasps?',
+  ])('a no leaves the answer as it was: %s', async (message) => {
+    dispatchWithFallback.mockImplementation(route(quoteAnswer, false));
+    const out = await processIntakeMessage({ message });
+    expect(out.reply).toBe(quoteAnswer.reply);
+    expect(out.ready_for_quote).toBe(true);
+  });
+
+  test('a failed check leaves the answer as it was', async () => {
+    dispatchWithFallback.mockImplementation(route(quoteAnswer, 'miss'));
+    expect((await processIntakeMessage({ message: 'My son swallowed bait' })).reply).toBe(quoteAnswer.reply);
+  });
+
+  test('a check that throws leaves the answer as it was', async () => {
+    dispatchWithFallback.mockImplementation((policy, req) => (req.laneId === 'ask_waves_emergency_check'
+      ? Promise.reject(new Error('boom')) : Promise.resolve(chainOk(quoteAnswer, 'openai'))));
+    expect((await processIntakeMessage({ message: 'My son swallowed bait' })).reply).toBe(quoteAnswer.reply);
+  });
+
+  test('a pet in the conversation adds the veterinary line; an ingestion adds Poison Control', async () => {
+    dispatchWithFallback.mockImplementation(route(quoteAnswer, true));
+    const dog = await processIntakeMessage({ message: 'Our dog is shaking and drooling', history: [{ role: 'user', content: 'You sprayed the yard this morning' }] });
+    expect(dog.reply).toMatch(/veterinarian or an emergency animal hospital/);
+    const bait = await processIntakeMessage({ message: 'My son swallowed some of the bait' });
+    expect(bait.reply).toContain('1-800-222-1222');
+  });
+
+  test('an answer that is already the emergency script is left alone', async () => {
+    const emergencyAnswer = { reply: 'Please call 911 right away.', intent: 'emergency', service_keys: [], ready_for_quote: false };
+    dispatchWithFallback.mockImplementation(route(emergencyAnswer, false));
+    expect((await processIntakeMessage({ message: 'My son swallowed bait' })).intent).toBe('emergency');
+  });
+
+  test('with both answer providers down, a yes still gets the emergency script', async () => {
+    dispatchWithFallback.mockImplementation(route(null, true));
+    const out = await processIntakeMessage({ message: "No, he can't breathe" });
+    expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
+  });
+
+  test('a check still pending 1.5 s after the answer is ready does not hold the answer', async () => {
+    jest.useFakeTimers();
+    try {
+      dispatchWithFallback.mockImplementation((policy, req) => (req.laneId === 'ask_waves_emergency_check'
+        ? new Promise(() => {}) : Promise.resolve(chainOk(quoteAnswer))));
+      let done = null;
+      const pending = processIntakeMessage({ message: 'My son swallowed bait' }).then((r) => { done = r; });
+      await jest.advanceTimersByTimeAsync(1400);
+      expect(done).toBeNull();
+      await jest.advanceTimersByTimeAsync(200);
+      await pending;
+      expect(done.reply).toBe(quoteAnswer.reply);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('a check that answers yes within the grace window still overrides', async () => {
+    jest.useFakeTimers();
+    try {
+      dispatchWithFallback.mockImplementation((policy, req) => (req.laneId === 'ask_waves_emergency_check'
+        ? new Promise((r) => { setTimeout(() => r(chainOk({ in_danger: true })), 1000); }) : Promise.resolve(chainOk(quoteAnswer))));
+      const pending = processIntakeMessage({ message: "No, he can't breathe" });
+      await jest.advanceTimersByTimeAsync(1100);
+      expect((await pending).reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('an answer that is already the emergency script never waits for the check', async () => {
+    const emergencyAnswer = { reply: 'Please call 911 right away.', intent: 'emergency', service_keys: [], ready_for_quote: false };
+    dispatchWithFallback.mockImplementation((policy, req) => (req.laneId === 'ask_waves_emergency_check'
+      ? new Promise(() => {}) : Promise.resolve(chainOk(emergencyAnswer))));
+    expect((await processIntakeMessage({ message: 'My son swallowed bait' })).intent).toBe('emergency');
+  });
+
+  test('both calls start before either is awaited, and the check gets the whole visitor side', async () => {
+    let started = 0;
+    let release;
+    const gate = new Promise((r) => { release = r; });
+    dispatchWithFallback.mockImplementation((policy, req) => {
+      started += 1;
+      return gate.then(() => (req.laneId === 'ask_waves_emergency_check' ? chainOk({ in_danger: false }) : chainOk(quoteAnswer)));
+    });
+    const pending = processIntakeMessage({ message: 'Now he is wheezing', history: [{ role: 'user', content: 'My son touched the bait' }] });
+    await Promise.resolve();
+    expect(started).toBe(2);
+    release();
+    await pending;
+    const [[policy, req, opts]] = checkCalls();
+    expect(policy.name).toBe('fastStructured');
+    expect(req.text).toContain('My son touched the bait');
+    expect(req.text).toContain('Now he is wheezing');
+    expect(req.jsonSchema.required).toEqual(['in_danger']);
+    expect(opts.hardDeadline).toBe(true);
+    expect(opts.validate({ json: { in_danger: 'yes' } })).toBe('no_verdict');
+    expect(opts.validate({ json: { in_danger: false } })).toBeNull();
+  });
+});

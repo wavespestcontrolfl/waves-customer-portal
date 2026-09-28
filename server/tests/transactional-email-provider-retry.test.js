@@ -63,6 +63,49 @@ describe('transactional email provider retry classification', () => {
     expect(retry.isTransactionalRetryEligible(message({ subject_snapshot: null }))).toBe(false);
   });
 
+  // Owner ruling 2026-09-27: a late-payment or invoice follow-up email the
+  // provider blocks is never re-sent from its stored copy; the sender's next
+  // stage renders fresh.
+  const senderRendered = [
+    'billing_late_payment_7_day', 'billing_late_payment_14_day', 'billing_late_payment_30_day',
+    'billing_late_payment_60_day', 'billing_late_payment_90_day',
+    'invoice.followup_3_day', 'invoice.followup_7_day', 'invoice.followup_14_day', 'invoice.followup_30_day',
+  ];
+
+  test.each(senderRendered)('a blocked %s email records the rejection but schedules no retry', (templateKey) => {
+    const blocked = message({ template_key: templateKey, suppression_group_key_snapshot: 'transactional_required',
+      send_attempt_token: 'attempt-1', provider_handoff_phase: 'started' });
+    expect(retry.isSenderRenderedEmail(blocked)).toBe(true);
+    expect(retry.isTransactionalRetryEligible(blocked)).toBe(false);
+    expect(retry.retryStateForProviderBlock(blocked, new Date('2026-09-27T12:00:00Z'))).toEqual({
+      provider_handoff_phase: 'rejected', provider_handoff_attempt_token: 'attempt-1',
+    });
+  });
+
+  test('other billing emails keep the retry rail', () => {
+    expect(retry.isSenderRenderedEmail(message({ template_key: 'billing.notice' }))).toBe(false);
+    expect(retry.isTransactionalRetryEligible(message({ template_key: 'billing.notice' }))).toBe(true);
+  });
+
+  test('a sender-rendered row already scheduled settles as not sent without reaching the provider', async () => {
+    const chain = {};
+    chain.where = jest.fn(() => chain);
+    chain.update = jest.fn(() => chain);
+    chain.returning = jest.fn(async () => [{ id: 'message-1', status: 'failed' }]);
+    db.mockReturnValue(chain);
+
+    const result = await retry.retryOne(message({ template_key: 'billing_late_payment_30_day',
+      suppression_group_key_snapshot: 'transactional_required', send_attempt_token: 'attempt-2' }));
+
+    expect(result).toMatchObject({ sent: false, stopped: true });
+    expect(chain.update).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'failed', provider_retry_next_at: null, provider_handoff_phase: 'pending',
+    }));
+    expect(emailTemplates.activeSuppressionFor).not.toHaveBeenCalled();
+    expect(sendgrid.clearBlockedAddress).not.toHaveBeenCalled();
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  });
+
   test('schedules 10 minute, 1 hour, and 6 hour backoff slots', () => {
     const now = new Date('2026-07-16T12:00:00Z');
     for (const [count, delay] of retry.RETRY_DELAYS_MS.entries()) {
@@ -320,7 +363,10 @@ describe('transactional email provider retry classification', () => {
     expect(chain.update.mock.invocationCallOrder[marker]).toBeLessThan(sendgrid.sendOne.mock.invocationCallOrder[0]);
     // Recovery: a started handoff settles as uncertain; other stale claims requeue.
     chain.update.mockClear();
-    chain.select = jest.fn(async () => [{ id: 'message-1', send_attempt_token: 'attempt-8' }]);
+    chain.whereIn = chain.orderBy = chain.limit = jest.fn(() => chain);
+    chain.select = jest.fn().mockResolvedValue([])
+      .mockResolvedValueOnce([{ id: 'message-1', send_attempt_token: 'attempt-8' }])
+      .mockResolvedValueOnce([{ id: 'message-1', send_attempt_token: 'attempt-8' }]);
     await retry.recoverStaleClaims();
     expect(chain.update).toHaveBeenCalledWith(expect.objectContaining({ provider_retry_next_at: null, provider_retry_exhausted_at: expect.any(Date),
       error_message: expect.stringMatching(/^Provider outcome unknown/) }));
@@ -367,7 +413,10 @@ describe('transactional email provider retry classification', () => {
     chain.update = jest.fn(() => chain);
     chain.then = (res, rej) => Promise.resolve(1).then(res, rej);
     // The uncertain settlement selects its claims and settles each in its own transaction.
-    chain.select = jest.fn(async () => [{ id: 'stale-summary', send_attempt_token: 'attempt-9' }]);
+    chain.whereIn = chain.orderBy = chain.limit = jest.fn(() => chain);
+    chain.select = jest.fn().mockResolvedValue([])
+      .mockResolvedValueOnce([{ id: 'stale-summary', send_attempt_token: 'attempt-9' }])
+      .mockResolvedValueOnce([{ id: 'stale-summary', send_attempt_token: 'attempt-9' }]);
     chain.returning = jest.fn(async () => [{ id: 'stale-summary', status: 'failed', template_key: 'service.visit_summary' }]);
     db.mockReturnValue(chain);
     const now = new Date('2026-07-16T12:30:00Z');
@@ -399,7 +448,8 @@ describe('transactional email provider retry classification', () => {
     chain.whereNotNull = jest.fn(() => chain);
     chain.update = jest.fn(() => chain);
     chain.returning = jest.fn(async () => []);
-    chain.select = jest.fn()
+    chain.whereIn = chain.orderBy = chain.limit = jest.fn(() => chain);
+    chain.select = jest.fn().mockResolvedValue([])
       .mockResolvedValueOnce([{ id: 'lost-claim', send_attempt_token: 'old-token' }])
       .mockResolvedValueOnce([]);
     chain.then = (resolve, reject) => Promise.resolve(0).then(resolve, reject);

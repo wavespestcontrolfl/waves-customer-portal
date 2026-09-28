@@ -110,8 +110,9 @@
       "https://en.wikipedia.org/wiki/Centruroides_gracilis"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "f114c7b9493826162e14396a69db3f6bdf724733a843ed5ba06c7082554818e4"
     }
   },
   {
@@ -220,8 +221,9 @@
       "https://en.wikipedia.org/wiki/Centruroides_hentzi"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "11c3a074582f5bf6d7a7dbdc15e9d330f63519ec75bce373fbea0ef7c17a4535"
     }
   },
   {
@@ -335,8 +337,9 @@
       "https://en.wikipedia.org/wiki/Opiliones"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "94e3bee2679b34fb53c7febf8576212221283d7a92de1802425a6959b6a7f764"
     }
   },
   {
