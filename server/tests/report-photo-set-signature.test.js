@@ -104,6 +104,16 @@ describe('reportPhotoSetPdfSignature', () => {
     expect(a).toMatch(/^-phu-/);
     expect(a).not.toBe(b);
   });
+
+  test('options.serviceData without lawnFields and a vanished service_records row → failure token, never a non-lawn key', async () => {
+    const vanished = (table) => {
+      const chain = knexWith([{ id: 'p1' }])(table);
+      chain.first = async () => undefined;
+      return chain;
+    };
+    const a = await reportPhotoSetPdfSignature('rec-1', vanished, { serviceData: null });
+    expect(a).toMatch(/^-phu-/);
+  });
 });
 
 describe('reportPhotoSetPdfSignature — lawn turf photo identity (pre-push P1s, 2026-09-28)', () => {
