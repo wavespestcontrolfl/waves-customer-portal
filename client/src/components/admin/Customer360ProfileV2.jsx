@@ -6906,6 +6906,12 @@ function accessPrefsDirtyKeys(initial, current) {
     if (!keys.includes("blackoutStart")) keys.push("blackoutStart");
     if (!keys.includes("blackoutEnd")) keys.push("blackoutEnd");
   }
+  // The server infers the sensitivity flag from details sent without it,
+  // so details always carry the switch as shown — a flag turned back off
+  // must not be re-enabled by that inference.
+  if (keys.includes("chemicalSensitivityDetails") && !keys.includes("chemicalSensitivities")) {
+    keys.push("chemicalSensitivities");
+  }
   return keys;
 }
 

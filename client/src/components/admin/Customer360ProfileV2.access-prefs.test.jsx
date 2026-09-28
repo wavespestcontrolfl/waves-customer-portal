@@ -286,6 +286,35 @@ describe('Customer 360 → Property → Access & Preferences', () => {
     expect(bodies[0]).toMatchObject({ chemicalSensitivities: true, chemicalSensitivityDetails: 'Asthma in the household' });
   });
 
+  it('details typed then the switch turned back off saves the flag OFF', async () => {
+    const bodies = [];
+    vi.stubGlobal('fetch', vi.fn((url, options) => {
+      const path = String(url);
+      if (path.endsWith('/admin/payers')) return response({ payers: [] });
+      if (path.split('?')[0].endsWith('/timeline')) return response({ timeline: [] });
+      if (path.endsWith('/admin/customers/customer-a/property-preferences')) {
+        bodies.push(JSON.parse(options.body));
+        return response({ success: true, saved: true, preferences: BASE_PREFS });
+      }
+      if (path.endsWith('/admin/customers/customer-a')) return response(customerDetail());
+      return response({});
+    }));
+
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+    await screen.findAllByText('Avery Customer');
+    await openPropertyTab();
+    await screen.findByText('Access & Preferences');
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Access & Preferences' }));
+    const flag = await screen.findByRole('switch', { name: 'Chemical Sensitivities' });
+    const details = screen.getByText('Sensitivity Details').closest('label').querySelector('textarea');
+    fireEvent.change(details, { target: { value: 'Old note, no longer applies' } });
+    fireEvent.click(flag);
+    expect(flag).toHaveAttribute('aria-checked', 'false');
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(bodies).toHaveLength(1));
+    expect(bodies[0]).toMatchObject({ chemicalSensitivities: false, chemicalSensitivityDetails: 'Old note, no longer applies' });
+  });
+
   it('after a partial save, reverting a SAVED field still sends it on retry', async () => {
     const bodies = [];
     vi.stubGlobal('fetch', vi.fn((url, options) => {
