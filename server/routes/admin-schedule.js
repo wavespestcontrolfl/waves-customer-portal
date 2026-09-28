@@ -44,7 +44,7 @@ const {
 } = require('../utils/datetime-et');
 const { calculateBoundedTrackingEta } = require('../services/customer-tracking-eta');
 const { customerOnAutopay, isBankMethodType, isExpiredCardMethod } = require('../services/autopay-eligibility');
-const { resolveBillingLane, predictCompletionBilling, completionInvoiceAmount, hasAuthoritativeZeroPrice, isStampedZeroEstimate, monthlyDuesCollected, attachedInvoiceAutoChargeLikely, unbilledCompletionGap, UNBILLED_MONEY_GAP_REASONS, siblingCoverageForSchedule, siblingInvoiceCoverageVerdict, isSiblingCoverageEligibleVisit, sameTripFirstApplicationBreakdown } = require('../services/billing-lane');
+const { resolveBillingLane, predictCompletionBilling, completionInvoiceAmount, isStampedZeroEstimate, monthlyDuesCollected, attachedInvoiceAutoChargeLikely, unbilledCompletionGap, UNBILLED_MONEY_GAP_REASONS, siblingCoverageForSchedule, siblingInvoiceCoverageVerdict, isSiblingCoverageEligibleVisit, sameTripFirstApplicationBreakdown } = require('../services/billing-lane');
 const { isAlwaysFreeServiceType } = require('../services/no-cost-visit-types');
 const DiscountEngine = require('../services/discount-engine');
 const { serviceExcludedFromPercentDiscount } = require('../services/pricing-engine/discount-engine');
@@ -5220,7 +5220,7 @@ async function enrichBillingLaneWithWalletGap({ billingLane, svc, alerts, comple
   // client/src/lib/siblingInvoiceCoverage.js is pure copy formatting of it,
   // never its own classifier.
   const { coverage: siblingCoverage, prediction: siblingPrediction } = svc?.source_estimate_id
-    ? await siblingCoverageForSchedule({ svc, dbConn: db, perApplicationBilling: svc?.billing_mode === 'per_application' }).catch(() => ({ coverage: null, prediction: null }))
+    ? await siblingCoverageForSchedule({ svc, dbConn: db }).catch(() => ({ coverage: null, prediction: null }))
     : { coverage: null, prediction: null };
   billingLane.siblingCoverage = siblingCoverage || {
     state: 'none', invoiceId: null, invoiceNumber: null, amountDue: null, reason: null,
@@ -5867,7 +5867,6 @@ router.get('/', async (req, res, next) => {
           billingMode: s.billing_mode || null,
           autopayActive,
           estimatedPrice: s.estimated_price != null ? Number(s.estimated_price) : null,
-          primaryLinePrice: s.primary_line_price,
           serviceKey: s.service_key_snapshot || null,
           serviceCategorySnapshot: s.service_category_snapshot || null,
           excludedFromPercentDiscount: lineExcludedFromPercentDiscount(s.service_key_snapshot),
@@ -6458,7 +6457,6 @@ router.get('/week', async (req, res, next) => {
             billingMode: s.billing_mode || null,
             autopayActive,
             estimatedPrice: s.estimated_price != null ? Number(s.estimated_price) : null,
-            primaryLinePrice: s.primary_line_price,
             serviceKey: s.service_key_snapshot || null,
             serviceCategorySnapshot: s.service_category_snapshot || null,
             excludedFromPercentDiscount: lineExcludedFromPercentDiscount(s.service_key_snapshot),
@@ -15785,27 +15783,21 @@ function siblingCoverageRefusal(verdict) {
 async function resolveScheduledServiceCharge({
   estimatedPrice, isCallback, monthlyRate, billingMode, serviceType, svc = null, dbConn = null,
 }) {
-  // codex pre-push P1 (round 3): a provenance-backed $0 (completion-pricing's
-  // discount engine froze a fully-discounted application at a genuine $0
-  // net, stamping a positive primary_line_price alongside it — see
-  // hasAuthoritativeZeroPrice, billing-lane.js) is this visit's OWN price,
-  // never "unpriced" — it must never fall into the sibling-coverage lookup
-  // below (unrelated to that provenance).
-  // `svc?.primary_line_price` is undefined/absent for every existing
-  // pure/unit-test caller, so this is a no-op for them.
-  const primaryLinePrice = svc?.primary_line_price ?? null;
+  // Owner ruling 2026-09-28: a stamped $0 is this visit's OWN price in
+  // EVERY lane (completionInvoiceAmount, billing-lane.js, returns 0 for it
+  // unconditionally now) — never "unpriced" — so it must never fall into
+  // the sibling-coverage lookup below. This USED to be gated to
+  // `billingMode === 'per_application'` only (a prior P0 fix: crediting a
+  // bare stamped $0 for every lane let a monthly_membership/legacy-null
+  // customer's estimate-linked $0 visit, still covered by a sibling's
+  // combined invoice, read as ineligible for the sibling lookup and skip
+  // straight to completionInvoiceAmount's OLD monthly_rate fallback —
+  // repro: monthlyRate 74.7, estimated_price 0 → returned 74.7). That
+  // fallback no longer exists for a stamped 0 in any lane, so skipping the
+  // lookup here can no longer surface a positive amount — the lane gate is
+  // gone.
   const hasOwnPrice = (estimatedPrice != null && Number(estimatedPrice) > 0)
-    || hasAuthoritativeZeroPrice(estimatedPrice, primaryLinePrice)
-    // Codex pre-push P0: only for a CURRENTLY per-application customer — see
-    // completionInvoiceAmount's own per-application branch. Crediting a bare
-    // stamped $0 for EVERY lane let a monthly_membership/legacy-null
-    // customer's estimate-linked $0 visit, still covered by a sibling's
-    // combined invoice, read as ineligible for the sibling lookup below —
-    // this resolver then skipped straight to completionInvoiceAmount's
-    // monthly_rate fallback and minted a SECOND charge beside the sibling's
-    // live invoice (repro: monthlyRate 74.7, estimated_price null → refused
-    // by the sibling guard; estimated_price 0 → returned 74.7).
-    || (billingMode === 'per_application' && isStampedZeroEstimate(estimatedPrice));
+    || isStampedZeroEstimate(estimatedPrice);
   // Codex P1 (round 6): this used to gate on the CUSTOMER'S CURRENT billing
   // mode — so a combined pay-per-application trip that already has its
   // first-application invoice on a sibling, whose customer later moves to a
@@ -15889,7 +15881,6 @@ async function resolveScheduledServiceCharge({
     isCallback,
     monthlyRate,
     billingMode,
-    primaryLinePrice,
   });
 }
 
@@ -15910,13 +15901,10 @@ async function resolveScheduledServiceCharge({
 // `svc` missing the shape (pure/unit-test callers) returns null — no
 // recheck, byte-identical to before.
 function siblingCoverageRecheckInTrx(svc) {
-  const primaryLinePrice = svc?.primary_line_price ?? null;
-  // Codex pre-push P0: gated to per-application only — see
-  // resolveScheduledServiceCharge's own hasOwnPrice above for the exact
-  // double-charge repro this must avoid for monthly/legacy-null customers.
+  // Owner ruling 2026-09-28 — see resolveScheduledServiceCharge's own
+  // hasOwnPrice above for why this is lane-independent again.
   const hasOwnPrice = (svc?.estimated_price != null && Number(svc.estimated_price) > 0)
-    || hasAuthoritativeZeroPrice(svc?.estimated_price, primaryLinePrice)
-    || (svc?.cust_billing_mode === 'per_application' && isStampedZeroEstimate(svc?.estimated_price));
+    || isStampedZeroEstimate(svc?.estimated_price);
   if (!isSiblingCoverageEligibleVisit({
     sourceEstimateId: svc?.source_estimate_id, hasOwnPrice, isCallback: !!svc?.is_callback, serviceType: svc?.service_type,
   })) return null;
@@ -16792,8 +16780,7 @@ router.post('/:id/invoice', async (req, res, next) => {
       // original generic copy — "bill it at completion" would be untrue for
       // those, since none of them ever bill anything at completion either.
       const hasOwnPrice = (svc.estimated_price != null && Number(svc.estimated_price) > 0)
-        || hasAuthoritativeZeroPrice(svc.estimated_price, svc.primary_line_price)
-        || (svc.cust_billing_mode === 'per_application' && isStampedZeroEstimate(svc.estimated_price));
+        || isStampedZeroEstimate(svc.estimated_price);
       const clearerCopy = isSiblingCoverageEligibleVisit({
         sourceEstimateId: svc.source_estimate_id, hasOwnPrice, isCallback: svc.is_callback, serviceType: svc.service_type,
       });

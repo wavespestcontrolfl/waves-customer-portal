@@ -197,7 +197,6 @@ describe('shouldAutoInvoiceCompletion — per-application billing', () => {
       perApplicationFee: 127,
       monthlyRate: null,
       billingMode: 'per_application',
-      primaryLinePrice: 0,
     });
     expect(invoiceAmount).toBe(0);
     expect(shouldAutoInvoiceCompletion({ ...perApp, invoiceAmount })).toBe(false);
@@ -210,10 +209,137 @@ describe('shouldAutoInvoiceCompletion — per-application billing', () => {
       perApplicationFee: 127,
       monthlyRate: null,
       billingMode: 'per_application',
-      primaryLinePrice: null,
     });
     expect(nullPriceAmount).toBe(127);
     expect(shouldAutoInvoiceCompletion({ ...perApp, invoiceAmount: nullPriceAmount })).toBe(true);
+  });
+});
+
+// Owner ruling 2026-09-28 (waves-billing invariant #8 — "$0 means charge
+// nothing"): a stamped estimated_price of exactly 0 is authoritative in EVERY
+// billing lane, not just per-application. Prod shape this closes: a
+// monthly_membership (or legacy-null member with a tier) whose autopay has
+// lapsed and whose dues have not posted gets a $0 one-off (the $0 Termite
+// Inspection Service perk) — completion used to read 0 as "unpriced", fall to
+// the monthly_rate, find no dues coverage, and mint a full monthly_rate
+// invoice because create_invoice_on_complete is true. End-to-end through the
+// SAME chain complete-scheduled-service.js runs: hasVisitPrice (a stamped 0
+// counts — see the source guard below) → completionInvoiceAmount →
+// membershipDuesCoverVisit → shouldAutoInvoiceCompletion.
+describe('stamped $0 is authoritative in every lane — completion end-to-end (owner ruling 2026-09-28)', () => {
+  const { completionInvoiceAmount, isStampedZeroEstimate } = require('../services/billing-lane');
+  // Mirrors complete-scheduled-service.js's own hasVisitPrice derivation
+  // (pinned against the source below so the two cannot drift).
+  const completionHasVisitPrice = (estimatedPrice, isCallback) => (estimatedPrice != null && Number(estimatedPrice) > 0)
+    || (isStampedZeroEstimate(estimatedPrice) && !isCallback);
+  function completionMints({
+    estimatedPrice, billingMode, waveguardTier = null, monthlyRate = 74.7, isRecurring = false,
+    isCallback = false, customerAutopayActive = false, duesCollectedThisMonth = false,
+    createInvoiceOnComplete = true, perApplicationFee = null,
+  }) {
+    const perApplicationBilling = billingMode === 'per_application';
+    const hasVisitPrice = completionHasVisitPrice(estimatedPrice, isCallback);
+    const invoiceAmount = completionInvoiceAmount({
+      estimatedPrice, isCallback, perApplicationBilling, perApplicationFee, monthlyRate, billingMode,
+    });
+    const autopayCoversVisit = membershipDuesCoverVisit({
+      visitIsPayerBilled: false,
+      perApplicationBilling,
+      annualPrepayBilling: billingMode === 'annual_prepay',
+      customerAutopayActive,
+      duesCollectedThisMonth,
+      hasVisitPrice,
+      isRecurring,
+      waveguardTier,
+      monthlyRate,
+      billingMode,
+    });
+    const mints = shouldAutoInvoiceCompletion({
+      ...base,
+      autopayCoversVisit,
+      createInvoiceOnComplete,
+      waveguardTier,
+      explicitMembership: billingMode === 'monthly_membership',
+      explicitPerVisitLane: ['per_visit', 'one_time'].includes(billingMode),
+      perApplicationBilling,
+      annualPrepayBilling: billingMode === 'annual_prepay',
+      hasVisitPrice,
+      invoiceAmount,
+      isCallback,
+    });
+    return { invoiceAmount, autopayCoversVisit, mints };
+  }
+
+  test('monthly member, autopay lapsed + dues not collected, stamped-$0 one-off → NO invoice (never the monthly rate)', () => {
+    expect(completionMints({ estimatedPrice: 0, billingMode: 'monthly_membership', waveguardTier: 'Gold' }))
+      .toEqual({ invoiceAmount: 0, autopayCoversVisit: false, mints: false });
+    // pg numeric arrives as a string
+    expect(completionMints({ estimatedPrice: '0.00', billingMode: 'monthly_membership' }))
+      .toEqual({ invoiceAmount: 0, autopayCoversVisit: false, mints: false });
+  });
+
+  test('legacy-null-mode member with a tier, autopay lapsed + dues not collected, stamped-$0 one-off → NO invoice', () => {
+    expect(completionMints({ estimatedPrice: 0, billingMode: null, waveguardTier: 'Silver' }))
+      .toEqual({ invoiceAmount: 0, autopayCoversVisit: false, mints: false });
+  });
+
+  test('control: the NULL-priced monthly one-off with lapsed autopay still bills monthly_rate exactly as before', () => {
+    expect(completionMints({ estimatedPrice: null, billingMode: 'monthly_membership', waveguardTier: 'Gold' }))
+      .toEqual({ invoiceAmount: 74.7, autopayCoversVisit: false, mints: true });
+    expect(completionMints({ estimatedPrice: '', billingMode: null, waveguardTier: 'Silver' }))
+      .toEqual({ invoiceAmount: 74.7, autopayCoversVisit: false, mints: true });
+  });
+
+  test('a stamped-$0 one-off is free by its own price, never "covered by dues" — autopay/dues state no longer matters', () => {
+    for (const cover of [{ customerAutopayActive: true }, { duesCollectedThisMonth: true }]) {
+      expect(completionMints({ estimatedPrice: 0, billingMode: 'monthly_membership', waveguardTier: 'Gold', ...cover }))
+        .toEqual({ invoiceAmount: 0, autopayCoversVisit: false, mints: false });
+    }
+    // A RECURRING plan visit stamped 0 is still dues-covered exactly as
+    // before (isRecurring keeps the coverage leg) — and bills nothing.
+    expect(completionMints({
+      estimatedPrice: 0, billingMode: 'monthly_membership', waveguardTier: 'Gold', isRecurring: true, customerAutopayActive: true,
+    })).toEqual({ invoiceAmount: 0, autopayCoversVisit: true, mints: false });
+  });
+
+  test('per-application: stamped $0 → nothing; NULL → the acceptance fee (unchanged)', () => {
+    expect(completionMints({ estimatedPrice: 0, billingMode: 'per_application', perApplicationFee: 127, monthlyRate: null }))
+      .toMatchObject({ invoiceAmount: 0, mints: false });
+    expect(completionMints({ estimatedPrice: null, billingMode: 'per_application', perApplicationFee: 127, monthlyRate: null }))
+      .toMatchObject({ invoiceAmount: 127, mints: true });
+  });
+
+  test('callbacks unchanged: a stamped-$0 or NULL callback bills nothing (and keeps its dues coverage), a priced callback bills its price', () => {
+    for (const estimatedPrice of [0, null]) {
+      expect(completionMints({ estimatedPrice, billingMode: 'monthly_membership', isCallback: true }))
+        .toMatchObject({ invoiceAmount: 0, mints: false });
+      // Active autopay: the $0 re-service is still classified dues-covered,
+      // exactly as before the ruling (drives the same completion text).
+      expect(completionMints({
+        estimatedPrice, billingMode: 'monthly_membership', waveguardTier: 'Gold', isCallback: true, customerAutopayActive: true,
+      })).toEqual({ invoiceAmount: 0, autopayCoversVisit: true, mints: false });
+    }
+    expect(completionInvoiceAmount({ estimatedPrice: 75, isCallback: true, monthlyRate: 74.7, billingMode: null })).toBe(75);
+  });
+
+  test('the discount-to-$0 shape (estimated 0 beside a positive gross base) stays $0 in every lane — unchanged', () => {
+    for (const billingMode of ['monthly_membership', null, 'per_visit', 'per_application']) {
+      expect(completionInvoiceAmount({
+        estimatedPrice: 0, isCallback: false, perApplicationBilling: billingMode === 'per_application',
+        perApplicationFee: 97.2, monthlyRate: 74.7, billingMode,
+        // The retired provenance input — ignored now, but it is what made
+        // this shape $0 before the ruling, so the control stays honest.
+        primaryLinePrice: 100,
+      })).toBe(0);
+    }
+  });
+
+  test('source guard: completion counts a stamped $0 as hasVisitPrice, and its dues-covered alert only fires for a POSITIVE stamped price', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
+    expect(source).toMatch(/const hasVisitPrice = reviewedVisitPrice\s*\n\s*\|\| \(svc\.estimated_price != null && Number\(svc\.estimated_price\) > 0\)\s*\n\s*\|\| \(isStampedZeroEstimate\(svc\.estimated_price\) && !svc\.is_callback\);/);
+    expect(source).toContain('!shouldInvoice && autopayCoversVisit && hasVisitPrice && Number(svc.estimated_price) > 0');
   });
 });
 

@@ -543,7 +543,6 @@ async function loadCloseoutInputs(serviceId, { knex = db, now = new Date(), _res
     serviceType: visit.service_type,
     svc: visit,
     dbConn: knex,
-    perApplicationBilling: lane?.mode === 'per_application' || inputs.customer?.billing_mode === 'per_application',
   }));
   // Read-only projection (like the annual-coverage lookup just above): a
   // lookup failure here fails toward null — the ordinary prediction stands
@@ -604,7 +603,6 @@ function deriveBillingExpectation(inputs) {
     billingMode: customer.billing_mode || null,
     autopayActive: inputs.autopayActive === true,
     estimatedPrice: visit.estimated_price != null ? Number(visit.estimated_price) : null,
-    primaryLinePrice: visit.primary_line_price,
     monthlyRate: customer.monthly_rate,
     perApplicationFee: customer.per_application_fee,
     isRecurring: visit.is_recurring === true,

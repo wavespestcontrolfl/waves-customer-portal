@@ -12,7 +12,7 @@
  *
  * Fixed by scoping "primaryBaseKnown" (and so the reconciliation's stored
  * net) to an ACTUAL authoritative price on the row (a real positive
- * estimated_price, or the provenance-backed genuine $0 — hasAuthoritativeZeroPrice)
+ * estimated_price, or a stamped genuine $0 — isStampedZeroEstimate)
  * rather than the bare presence of primary_line_price, and reconciling the
  * replay in BOTH directions against fallbackAmount when no authoritative net
  * exists.
@@ -115,7 +115,7 @@ describe('buildScheduledServiceInvoiceLines — stale primary_line_price beside 
     expect(netTotal(lineItems)).toBe(138);
   });
 
-  test('a provenance-backed genuine $0 (hasAuthoritativeZeroPrice) still stays $0 — never reconciled UP toward an unrelated fallback', async () => {
+  test('a provenance-backed genuine $0 (isStampedZeroEstimate) still stays $0 — never reconciled UP toward an unrelated fallback', async () => {
     const scheduled = {
       id: 'sched-1',
       service_type: 'Quarterly Pest Control',

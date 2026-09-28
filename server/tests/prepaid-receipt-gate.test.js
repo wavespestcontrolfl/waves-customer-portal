@@ -81,9 +81,16 @@ describe('resolveScheduledServiceCharge', () => {
       .toBe(0);
   });
 
-  test('a zero/negative estimate price falls through to the monthly rate', async () => {
+  // Owner ruling 2026-09-28 (waves-billing invariant #8 — "$0 means charge
+  // nothing", EVERY lane): a stamped $0 used to fall through to the monthly
+  // rate here like a blank price; it is now the visit's own price and bills
+  // nothing. A negative (never a valid stamp — writers refuse it) is not a
+  // stamped zero and keeps the unchanged fallback.
+  test('a stamped $0 bills nothing (never the monthly rate); a negative price still falls through to the monthly rate', async () => {
     expect(await resolveScheduledServiceCharge({ estimatedPrice: 0, isCallback: false, monthlyRate: 49 }))
-      .toBe(49);
+      .toBe(0);
+    expect(await resolveScheduledServiceCharge({ estimatedPrice: '0.00', isCallback: false, monthlyRate: 49, billingMode: 'monthly_membership' }))
+      .toBe(0);
     expect(await resolveScheduledServiceCharge({ estimatedPrice: -10, isCallback: false, monthlyRate: 49 }))
       .toBe(49);
   });

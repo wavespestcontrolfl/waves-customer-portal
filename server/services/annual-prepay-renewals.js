@@ -5038,7 +5038,6 @@ async function computeCardExpiryExemptions(horizon = etDateString(), conn = db) 
         billingMode: v.billing_mode || null,
         autopayActive,
         estimatedPrice: v.estimated_price != null ? Number(v.estimated_price) : null,
-        primaryLinePrice: v.primary_line_price,
         monthlyRate: v.monthly_rate,
         perApplicationFee: v.per_application_fee,
         isRecurring: !!v.is_recurring,
@@ -5152,7 +5151,6 @@ async function computeCardExpiryExemptions(horizon = etDateString(), conn = db) 
         if (!split.existing) {
           const voidHold = await perApplicationCompletionVoidHold({
             isCallback: !!v.is_callback, serviceType: v.service_type, svc: v, dbConn: conn,
-            perApplicationBilling: v.billing_mode === 'per_application',
           });
           if (voidHold) continue;
         }

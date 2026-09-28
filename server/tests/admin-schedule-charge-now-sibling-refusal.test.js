@@ -357,48 +357,74 @@ describe('POST /:id/invoice — sibling-lookup refusal (codex round-2 P1)', () =
     expect(mockMint).not.toHaveBeenCalled();
   });
 
-  // Codex pre-push P0 (real regression this exact test proves is fixed): a
-  // BARE STAMPED 0 (not null) on an estimate-linked monthly_membership visit
-  // still covered by a sibling's combined invoice. The per-application-only
-  // isStampedZeroEstimate widening (added for the 2026-09-28 per_application
-  // $0 fee-fallback bug) must NOT credit "has own price" for this lane — if
-  // it did, hasOwnPrice would read true, isSiblingCoverageEligibleVisit
-  // would read this visit as ineligible for the lookup, the sibling
-  // coverage check above would never run, and resolveScheduledServiceCharge
-  // would fall straight through to completionInvoiceAmount's monthlyRate
-  // fallback (74.7) — minting a SECOND charge beside the sibling's live
-  // invoice. Repro pinned exactly as Codex reported it: monthlyRate 74.7,
-  // estimated_price null → refuses (proven above); estimated_price 0 must
-  // refuse identically, never return 74.7.
-  test('a monthly-lane visit with a BARE STAMPED 0 (not null) still runs the sibling lookup and refuses — never falls through to the monthly rate', async () => {
-    mockDb.__svcRow = {
+  // Owner ruling 2026-09-28 (waves-billing invariant #8 — "$0 means charge
+  // nothing", EVERY lane) supersedes the earlier Codex pre-push P0 pin here.
+  // That P0 was a real double charge: a monthly_membership visit, still
+  // covered by a sibling's combined invoice, with estimated_price stamped 0
+  // (monthlyRate 74.7) — once a lane-independent hasOwnPrice skipped the
+  // sibling lookup, completionInvoiceAmount's OLD monthly_rate fallback
+  // returned 74.7 and the route minted a SECOND charge. The fix then was to
+  // keep the stamped 0 "unpriced" for this lane (lookup + 409). Now the
+  // amount itself is 0 for a stamped 0 in every lane, so the widened
+  // hasOwnPrice is safe: the lookup is skipped (a stamped 0 is not the
+  // NULL-priced promoted-row shape a sibling covers), the resolver returns
+  // $0 — never 74.7 — and with nothing to charge the route mints NOTHING
+  // (400 "no chargeable amount"). Either way: no second charge.
+  test('double-charge repro: a monthly-lane, sibling-covered visit with a BARE STAMPED 0 resolves $0 and mints nothing — never the $74.70 monthly rate', async () => {
+    const row = {
       ...SVC_ROW, cust_billing_mode: 'monthly_membership', cust_monthly_rate: 74.7,
       estimated_price: 0, primary_line_price: null,
     };
+    mockDb.__svcRow = row;
     findFirstApplicationInvoiceForEstimateService.mockResolvedValue({
       invoice: { id: 'inv-1', scheduled_service_id: 'svc-pest', status: 'sent', total: 153.6 },
       liveBeside: null,
     });
+    const { resolveScheduledServiceCharge } = adminScheduleRouter._test;
+    expect(await resolveScheduledServiceCharge({
+      estimatedPrice: row.estimated_price, isCallback: false, monthlyRate: 74.7,
+      billingMode: 'monthly_membership', serviceType: row.service_type, svc: row, dbConn: mockDb,
+    })).toBe(0);
+
     const { req, res, next } = makeReqRes({});
     await handler(req, res, next);
 
-    // The lookup ran — a stamped 0 must not be read as "has its own price"
-    // for a monthly-lane visit, so it stays sibling-coverage-eligible.
-    expect(findFirstApplicationInvoiceForEstimateService).toHaveBeenCalled();
-    expect(res.status).toHaveBeenCalledWith(409);
-    expect(res.body.error).toMatch(/combined trip invoice/i);
+    expect(findFirstApplicationInvoiceForEstimateService).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(res.body.error).toMatch(/no chargeable amount/i);
     expect(mockMint).not.toHaveBeenCalled();
+    expect(mockBuildLineItems).not.toHaveBeenCalled();
   });
 
-  // Same shape but with a $0 primary_line_price on file too (the exact prod
-  // row shape: estimated_price 0.00, primary_line_price 0.00) — still not
-  // "has own price" for a non-per-application lane (hasAuthoritativeZeroPrice
-  // requires primary_line_price > 0, and the per-application widening never
-  // applies here either).
-  test('a monthly-lane visit with estimated_price 0 AND primary_line_price 0 still refuses via the sibling guard', async () => {
+  // Same shape with a $0 primary_line_price too (the exact prod row shape:
+  // estimated_price 0.00, primary_line_price 0.00), legacy-null lane as
+  // well — same $0, same nothing-minted outcome.
+  test('a monthly or legacy-null visit with estimated_price 0 AND primary_line_price 0 resolves $0 and mints nothing', async () => {
+    for (const lane of ['monthly_membership', null]) {
+      jest.clearAllMocks();
+      mockDb.__svcRow = {
+        ...SVC_ROW, cust_billing_mode: lane, cust_monthly_rate: 74.7,
+        estimated_price: '0.00', primary_line_price: '0.00',
+      };
+      findFirstApplicationInvoiceForEstimateService.mockResolvedValue({
+        invoice: { id: 'inv-1', scheduled_service_id: 'svc-pest', status: 'sent', total: 153.6 },
+        liveBeside: null,
+      });
+      const { req, res, next } = makeReqRes({});
+      await handler(req, res, next);
+
+      expect(res.status).toHaveBeenCalledWith(400);
+      expect(mockMint).not.toHaveBeenCalled();
+    }
+  });
+
+  // Control: the NULL-priced version of the SAME sibling-covered monthly
+  // visit is unchanged — it still runs the lookup and refuses (409), never
+  // falling through to the monthly rate.
+  test('control: the same monthly-lane sibling-covered visit with a NULL price still runs the lookup and refuses', async () => {
     mockDb.__svcRow = {
       ...SVC_ROW, cust_billing_mode: 'monthly_membership', cust_monthly_rate: 74.7,
-      estimated_price: 0, primary_line_price: 0,
+      estimated_price: null, primary_line_price: null,
     };
     findFirstApplicationInvoiceForEstimateService.mockResolvedValue({
       invoice: { id: 'inv-1', scheduled_service_id: 'svc-pest', status: 'sent', total: 153.6 },

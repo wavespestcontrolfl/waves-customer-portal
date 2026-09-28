@@ -448,7 +448,7 @@ describe('MobileCheckoutSheet unpriced-visit billingLane.prediction fallback', (
   });
 
   // Codex round 4 P1: a CONFIRMED no-charge prediction ('no_charge' with
-  // reason 'fully_discounted' — hasAuthoritativeZeroPrice's genuine $0 net)
+  // reason 'fully_discounted' — a stamped $0, isStampedZeroEstimate)
   // never carries grossAmount by design (it is 0 either way), and the
   // missing-grossAmount refresh guard above must not fire for it just
   // because a leftover prepaidAmount happens to be on the row — that
@@ -551,7 +551,7 @@ describe('MobileCheckoutSheet unpriced-visit billingLane.prediction fallback', (
 
   // codex pre-push P1 (round 14, Codex r11 finding): a fully-discounted
   // application (estimatedPrice stamped 0 alongside a positive
-  // primaryLinePrice — hasAuthoritativeZeroPrice, billing-lane.js) IS an
+  // primaryLinePrice — isStampedZeroEstimate, billing-lane.js) IS an
   // authoritative price server-side — resolveScheduledServiceCharge's own
   // hasOwnPrice includes this exemption, so its per_application_fee_at_completion
   // refusal does NOT apply, and an attached invoice on this exact shape
@@ -582,6 +582,36 @@ describe('MobileCheckoutSheet unpriced-visit billingLane.prediction fallback', (
     );
     expect(screen.queryByRole('button', { name: 'Bills at completion — see the invoice or set a price' })).not.toBeInTheDocument();
     // $214 invoice total, $60 prepaid credited once.
+    expect(screen.getByRole('button', { name: 'Charge $154.00' })).toBeInTheDocument();
+  });
+
+  // Owner ruling 2026-09-28: a BARE stamped $0 (no primaryLinePrice base)
+  // is just as authoritative server-side (resolveScheduledServiceCharge's
+  // hasOwnPrice is isStampedZeroEstimate alone, every lane), so the same
+  // attached invoice stays collectible — the old client mirror still
+  // demanded a positive primaryLinePrice and refused this shape.
+  it('does not refuse checkout for a per_application visit with a BARE stamped $0 (no base) and an attached invoice', () => {
+    render(
+      <MobileCheckoutSheet
+        service={{
+          ...BASE_SERVICE,
+          ...ATTACHED_INVOICE_FIELDS,
+          waveguardTier: null,
+          estimatedPrice: 0,
+          primaryLinePrice: null,
+          prepaidAmount: 60,
+          prepaidMethod: 'cash',
+          billingLane: {
+            mode: 'per_application',
+            source: 'explicit',
+            monthlyRate: null,
+            prediction: { kind: 'invoice', amount: 40, conflictStampedPrice: false },
+          },
+        }}
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.queryByRole('button', { name: 'Bills at completion — see the invoice or set a price' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Charge $154.00' })).toBeInTheDocument();
   });
 

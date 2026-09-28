@@ -20,6 +20,7 @@ const { createAlertOnce } = require('./dispatch-alerts');
 const { resolveWdoInspectionFee, wdoFeeIsExplicitZero } = require('./wdo-inspection-fee');
 const { settleOwedCompletionSupplies, completionSuppliesOwed, completionSuppliesOwedMarker } = require('./supplies-consumption');
 const { INVOICE_DELIVERED_STATUSES } = require('./closeout-status');
+const { isStampedZeroEstimate } = require('./billing-lane');
 
 const NON_MEMBERSHIP_TIER_KEYS = new Set(['none', 'onetime', 'na', 'no', 'notset', 'commercial']);
 const TERMINAL_NON_COMPLETABLE_STATUSES = new Set(['cancelled', 'skipped', 'no_show']);
@@ -162,6 +163,20 @@ function projectCompletionInvoiceAmount({ scheduledService = {}, customer = {}, 
   }
   const estimated = positiveMoney(scheduledService.estimated_price);
   if (estimated > 0) return estimated;
+  // Owner ruling 2026-09-28 (waves-billing skill invariant #8 — "$0 means
+  // charge nothing" — supersedes an earlier narrower per-application-only
+  // scoping here, which itself superseded the original unconditional
+  // monthly_rate fallback): a stamped estimated_price of exactly 0 (not
+  // null/blank) is authoritative in EVERY lane, mirroring
+  // billing-lane.js's completionInvoiceAmount — never falls through to
+  // monthly_rate below, regardless of customer.billing_mode. NULL/blank is
+  // unaffected and still falls through exactly as before. (Note: as of this
+  // commit the Termite Inspection Service itself completes through the
+  // typed service_report flow, not this project-closeout path — this stays
+  // consistent for any other project-backed service that ships at $0.)
+  if (isStampedZeroEstimate(scheduledService.estimated_price)) {
+    return 0;
+  }
   // Callbacks (re-services, e.g. pest_re_service / lawn_re_service) are free
   // for recurring/WaveGuard customers — they must never fall back to the
   // monthly rate, or the completion billing guard would either bill a month's

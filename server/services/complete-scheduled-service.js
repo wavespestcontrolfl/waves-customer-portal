@@ -61,7 +61,7 @@ const { lawnCompletionDefaultsEnabled, lawnPlanProgramApplies, lawnPlanAttribute
 const { evaluateWaveGuardManagerApprovals, managerApprovalSummary } = require('../services/waveguard-approval-engine');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { customerOnAutopay } = require('../services/autopay-eligibility');
-const { membershipDuesCoverVisit, completionInvoiceAmount, isMembershipTier, monthlyDuesCollected, resolveBillingLane, combinedInvoiceVoidedWithoutLiveReplacement, isSiblingCoverageEligibleVisit, hasAuthoritativeZeroPrice, isStampedZeroEstimate } = require('../services/billing-lane');
+const { membershipDuesCoverVisit, completionInvoiceAmount, isMembershipTier, monthlyDuesCollected, resolveBillingLane, combinedInvoiceVoidedWithoutLiveReplacement, isSiblingCoverageEligibleVisit, isStampedZeroEstimate } = require('../services/billing-lane');
 const { resolveAppointmentCardLane, resolveExtendedLane, resolveCompletionChargeCap } = require('../services/completion-charge-verdict');
 const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isSprayApplicationMethod, isNonBaitPesticideProduct, isTermiteNoReentryServiceType } = require('../services/service-report/service-line-configs');
 const { runAndSwallowErrors: runPestPressureForServiceRecord } = require('../services/pest-pressure/orchestrate');
@@ -4169,7 +4169,24 @@ async function completeScheduledService(completionInput, packetContext = null) {
       svc.estimated_price = reviewedPriceAmount;
     }
     const reviewedVisitPrice = reviewedPriceAmount !== null;
-    const hasVisitPrice = reviewedVisitPrice || (svc.estimated_price != null && Number(svc.estimated_price) > 0);
+    // Owner ruling 2026-09-28 (waves-billing invariant #8 — "$0 means charge
+    // nothing"): a stamped estimated_price of exactly 0 IS this visit's own
+    // price, exactly like a reviewed $0 above already is — never "unpriced".
+    // Counting it here keeps every gate that reads hasVisitPrice in step with
+    // completionInvoiceAmount (which returns 0 for it in every lane) and with
+    // predictCompletionBilling's own hasVisitPrice (billing-lane.js): a
+    // stamped-$0 ONE-OFF is free by its own price, never "covered by dues"
+    // (membershipDuesCoverVisit's `!hasVisitPrice || isRecurring` leg), so it
+    // no longer rides the paid-template "Thanks for your payment" SMS family
+    // that autopayCoversVisit selects, and autopay/dues state stops mattering
+    // for it at all. Recurring plan visits are unaffected (isRecurring still
+    // covers them). NULL/blank stays unpriced. Callbacks are excluded: a
+    // re-service is routinely stamped 0 by convention and already bills
+    // nothing, so its dues-coverage classification stays exactly as before
+    // (same rule as predictCompletionBilling's hasVisitPrice).
+    const hasVisitPrice = reviewedVisitPrice
+      || (svc.estimated_price != null && Number(svc.estimated_price) > 0)
+      || (isStampedZeroEstimate(svc.estimated_price) && !svc.is_callback);
     // inspection_only / customer_declined = no application performed —
     // nothing bills for the visit (mirrors referralVisitPerformed;
     // 'incomplete' returns early below). Shared by the auto-invoice gate AND
@@ -4197,12 +4214,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
       perApplicationFee: svc.cust_per_application_fee,
       monthlyRate: svc.cust_monthly_rate,
       billingMode: svc.cust_billing_mode,
-      // Codex round 4 P1: without this, a fully-discounted $0 per-application
-      // visit (estimated_price 0, positive primary_line_price) fell back to
-      // per_application_fee here and billed the acceptance fee on completion
-      // — contradicting the schedule prediction and Charge Now, which both
-      // already pass primaryLinePrice.
-      primaryLinePrice: svc.primary_line_price,
+      // A stamped $0 (fully-discounted or deliberately free) returns 0 here
+      // in every lane — owner ruling 2026-09-28; no provenance input needed.
     });
     // The inspection-credit amount is resolved from the LOCKED row inside
     // the completion transaction (below), never from this pre-lock read: a
@@ -8492,8 +8505,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // A billable per-application visit with no amount on file (multi-service
     // accept: fee + row prices intentionally NULL) completes UNINVOICED — flag
     // it loudly so the visit gets billed manually instead of leaking.
-    // A stamped $0 is a deliberately free visit (owner 2026-09-28), not a
-    // missing price — never flagged for manual invoicing.
+    // A stamped $0 is a deliberate price, not "no amount on file" (owner
+    // ruling 2026-09-28) — never flag it for manual invoicing.
     if (!packetEffects && (perApplicationBilling && !reviewedVisitPrice && !(invoiceAmount > 0)
       && !isStampedZeroEstimate(svc.estimated_price)
       && !svc.is_callback && !isAlwaysFreeServiceType(svc.service_type))) {
@@ -8504,7 +8517,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // per-visit price — Codex r4), so an unpriced billable visit completes
     // uninvoiced and must be billed manually.
     if (!packetEffects && (['per_visit', 'one_time'].includes(svc.cust_billing_mode || '') && !perApplicationBilling && !reviewedVisitPrice
-      && !(invoiceAmount > 0) && !svc.is_callback && !isAlwaysFreeServiceType(svc.service_type))) {
+      && !(invoiceAmount > 0) && !isStampedZeroEstimate(svc.estimated_price)
+      && !svc.is_callback && !isAlwaysFreeServiceType(svc.service_type))) {
       logger.warn(`[dispatch] ${svc.cust_billing_mode} visit ${svc.id} (customer ${svc.customer_id}) completed with no billable amount on file (monthly-rate fallback suppressed for explicit non-monthly lanes) — invoice manually`);
     }
     // (visitIsPayerBilled + customerAutopayActive + autopayCoversVisit are
@@ -8682,8 +8696,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               // died. Reuses the EXISTING terminal-invoice park/alert
               // machinery above — no new completion-side mint/split logic.
               const hasOwnPrice = (svc.estimated_price != null && Number(svc.estimated_price) > 0)
-                || hasAuthoritativeZeroPrice(svc.estimated_price, svc.primary_line_price)
-                || (svc.cust_billing_mode === 'per_application' && isStampedZeroEstimate(svc.estimated_price));
+                || isStampedZeroEstimate(svc.estimated_price);
               if (isSiblingCoverageEligibleVisit({
                 sourceEstimateId: svc.source_estimate_id, hasOwnPrice, isCallback: svc.is_callback, serviceType: svc.service_type,
               })) {
@@ -9665,7 +9678,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // billable recurring add-on must not vanish silently; the alert copy
     // tells the office to KEEP the series' price (clearing it would make
     // future occurrences complete silently with no alert — Codex r2).
-    if (!packetEffects && (!shouldInvoice && autopayCoversVisit && hasVisitPrice && !recapReviewOnly
+    // A stamped (or reviewed) $0 counts as hasVisitPrice (owner ruling
+    // 2026-09-28) but is not a "separately billable add-on" price — nothing
+    // was left unbilled, so it must not park a "$0.00 NOT invoiced" alert.
+    if (!packetEffects && (!shouldInvoice && autopayCoversVisit && hasVisitPrice && Number(svc.estimated_price) > 0
+      && !recapReviewOnly
       && !alreadyPaid && !prepaidCovered && !preMintedInvoice && !existingCompletionInvoice)) {
       logger.info(`[dispatch] visit ${svc.id}: monthly membership dues cover this recurring visit — stamped estimated_price $${Number(svc.estimated_price).toFixed(2)} NOT invoiced`);
       try {

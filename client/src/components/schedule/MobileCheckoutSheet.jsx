@@ -162,7 +162,8 @@ export default function MobileCheckoutSheet({
   // stale/unsafe. A CONFIRMED no-charge kind ('no_charge', 'covered_*',
   // 'payer') legitimately has no grossAmount — it is null/0 either way —
   // so a leftover positive prepaidAmount on a fully-discounted $0 visit
-  // (hasAuthoritativeZeroPrice's 'no_charge'/'fully_discounted' kind never
+  // (a stamped $0's 'no_charge'/'fully_discounted' kind — isStampedZeroEstimate,
+  // billing-lane.js — never
   // carries grossAmount by design) must not permanently disable Charge for
   // it, including for a chargeable extra stacked on top.
   const priceNeedsRefresh = usingUnpricedPrediction
@@ -193,7 +194,7 @@ export default function MobileCheckoutSheet({
   // both), the ENTIRE amount for 'invoice' / 'auto_charge' / 'prepaid'
   // kinds under this lane comes from that fee — `estimatedPrice` alone
   // would have taken the `hasOwnPrice` branch above, and
-  // hasAuthoritativeZeroPrice / callback / always-free-type all predict
+  // a stamped $0 (isStampedZeroEstimate) / callback / always-free-type all predict
   // 'no_charge' instead, never reaching these kinds at all.
   //
   // Codex pre-push P1 (round 13): this same shape is ALSO used further below
@@ -375,20 +376,20 @@ export default function MobileCheckoutSheet({
   const siblingCollectible = !!siblingCoverage?.collectible;
   const siblingBlocksCharge = !!siblingCoverageVerdict && siblingCoverageVerdict.state !== 'none';
   const openVisitInvoice = !payerBilled && inv && inv.open && inv.total > 0 ? inv : null;
-  // codex pre-push P1 (round 14, Codex r11 finding): a fully-discounted
-  // application — estimatedPrice stamped 0 alongside a positive
-  // primaryLinePrice (hasAuthoritativeZeroPrice, billing-lane.js) — IS an
-  // authoritative price server-side: resolveScheduledServiceCharge's own
-  // hasOwnPrice includes this exemption, so its per_application_fee_at_completion
-  // refusal does NOT apply to it, and an attached invoice on this exact
-  // shape (e.g. a genuine extras-only invoice on a $0-net application)
-  // stays normally collectible. Checked locally here, matching the SAME
-  // server predicate, rather than widening this file's own `hasOwnPrice`
-  // above, which deliberately stays narrower (positive price only) for the
+  // codex pre-push P1 (round 14, Codex r11 finding), widened by the owner
+  // ruling 2026-09-28 ("$0 means charge nothing", every lane): a stamped
+  // estimatedPrice of exactly 0 — with or without a primaryLinePrice base —
+  // IS an authoritative price server-side: resolveScheduledServiceCharge's
+  // own hasOwnPrice credits it (isStampedZeroEstimate, billing-lane.js), so
+  // its per_application_fee_at_completion refusal does NOT apply to it, and
+  // an attached invoice on this exact shape (e.g. a genuine extras-only
+  // invoice on a $0 visit) stays normally collectible. Checked locally here,
+  // mirroring the SAME server predicate (null/'' are never a stamped zero),
+  // rather than widening this file's own `hasOwnPrice` above, which
+  // deliberately stays narrower (positive price only) for the
   // unpriced-prediction `price` ternary it feeds.
   const attachedInvoiceHasAuthoritativeZeroPrice = service.estimatedPrice != null && service.estimatedPrice !== ''
-    && Number(service.estimatedPrice) === 0
-    && service.primaryLinePrice != null && Number(service.primaryLinePrice) > 0;
+    && Number(service.estimatedPrice) === 0;
   // Codex pre-push P1 (round 13, Codex r11 finding): resolveScheduledServiceCharge
   // refuses the per_application_fee_at_completion shape UNCONDITIONALLY —
   // even when this visit already has an open, otherwise-collectible

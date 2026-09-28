@@ -391,21 +391,15 @@ describe('invoice tier discounts', () => {
     expect(invoice.total).toBe(0);
   });
 
-  // Codex pre-push P1: a stamped estimated_price of 0 on an UNPRICED
-  // per-application visit (no stale primary_line_price to reconcile —
-  // unlike the callback test above, this row was never gross-priced at
-  // all) is not the same shape as the callback reconciliation. storedNetAmount
-  // used to prefer `scheduled.estimated_price` whenever it was numeric at
-  // all (hasNumericValue(0) is true), so it read the stamped 0 as the
-  // AUTHORITATIVE frozen net and reconciled the fee-fallback primary line
-  // straight back down to $0 via a "Scheduled price adjustment" — even
-  // though the caller's own fallbackAmount (97.20, resolveScheduledServiceCharge's
-  // per-application-fee fallback — the SAME positive-price precedence
-  // completionInvoiceAmount uses) is what should anchor the reconciliation
-  // when the row itself carries no positive price. Preview
-  // (MobileCheckoutSheet) and mint must land on the SAME $137.20 (fee +
-  // a $40 checkout extra) — this pins the mint side.
-  test('a zero-priced per-application visit with no stale gross column bills the fee fallback, not a reconciled $0', async () => {
+  // Owner ruling 2026-09-28 (waves-billing invariant #8 — "$0 means charge
+  // nothing", EVERY lane) supersedes the Codex pre-push P1 this test used to
+  // pin ("a stamped 0 with no stale gross column bills the fee fallback" —
+  // $97.20 fee + $40 extra = $137.20). A stamped estimated_price of exactly
+  // 0 is now the visit's own authoritative net even against a positive
+  // caller fallback (no production caller passes one any more —
+  // completionInvoiceAmount / resolveScheduledServiceCharge both resolve 0
+  // for it), so only the operator's checkout extra bills.
+  test('a stamped-$0 visit with no stale gross column reconciles its base to $0 even against a positive fallback — only the checkout extra bills', async () => {
     setupDb({
       customer: { id: 'customer-1', waveguard_tier: null, property_type: 'residential' },
       scheduledServices: [{
@@ -424,8 +418,7 @@ describe('invoice tier discounts', () => {
       }],
     });
 
-    expect(scheduledInvoice.lineItems.some((item) => item.description === 'Scheduled price adjustment')).toBe(false);
-    expect(scheduledInvoice.lineItems.reduce((sum, item) => sum + Number(item.amount), 0)).toBe(137.2);
+    expect(scheduledInvoice.lineItems.reduce((sum, item) => sum + Number(item.amount), 0)).toBe(40);
 
     const invoice = await InvoiceService.create({
       customerId: 'customer-1',
@@ -433,7 +426,32 @@ describe('invoice tier discounts', () => {
       lineItems: scheduledInvoice.lineItems,
       trustedStoredDiscountSources: ['scheduled_service'],
     });
-    expect(invoice.total).toBe(137.2);
+    expect(invoice.total).toBe(40);
+  });
+
+  // NULL (never priced) is UNCHANGED: the caller's fallback still anchors
+  // the base and the extra stacks on top.
+  test('control: a NULL-priced visit still bills the caller fallback plus the checkout extra', async () => {
+    setupDb({
+      customer: { id: 'customer-1', waveguard_tier: null, property_type: 'residential' },
+      scheduledServices: [{
+        id: 'scheduled-1',
+        service_type: 'Quarterly Pest Control',
+        estimated_price: null,
+        primary_line_price: null,
+      }],
+    });
+
+    const scheduledInvoice = await InvoiceService.buildLineItemsForScheduledService('scheduled-1', {
+      fallbackAmount: 97.2,
+      fallbackDescription: 'Quarterly Pest Control',
+      extraLineItems: [{
+        description: 'Checkout Extra', quantity: 1, unit_price: 40, amount: 40,
+      }],
+    });
+
+    expect(scheduledInvoice.lineItems.some((item) => item.description === 'Scheduled price adjustment')).toBe(false);
+    expect(scheduledInvoice.lineItems.reduce((sum, item) => sum + Number(item.amount), 0)).toBe(137.2);
   });
 
   // Codex pre-push P1 (round 3): the OPPOSITE, supported shape from the test

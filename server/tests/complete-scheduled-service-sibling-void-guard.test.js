@@ -27,12 +27,16 @@ const path = require('path');
 describe('complete-scheduled-service.js — REFUSE AFTER A VOID completion-side guard', () => {
   const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
 
-  test('imports combinedInvoiceVoidedWithoutLiveReplacement + isSiblingCoverageEligibleVisit + hasAuthoritativeZeroPrice from billing-lane.js', () => {
+  // Owner ruling 2026-09-28: hasAuthoritativeZeroPrice is retired —
+  // isStampedZeroEstimate is the ONE "stamped $0 is this visit's own price"
+  // fact in every lane.
+  test('imports combinedInvoiceVoidedWithoutLiveReplacement + isSiblingCoverageEligibleVisit + isStampedZeroEstimate from billing-lane.js', () => {
     const importLine = source.match(/const \{[^}]*\} = require\('\.\.\/services\/billing-lane'\);/)?.[0];
     expect(importLine).toBeTruthy();
     expect(importLine).toContain('combinedInvoiceVoidedWithoutLiveReplacement');
     expect(importLine).toContain('isSiblingCoverageEligibleVisit');
-    expect(importLine).toContain('hasAuthoritativeZeroPrice');
+    expect(importLine).toContain('isStampedZeroEstimate');
+    expect(source).not.toContain('hasAuthoritativeZeroPrice');
   });
 
   test('the sibling-first-application block asks the void guard only after existingCompletionInvoice, the terminal split, and canceledSetupFee all come back empty', () => {

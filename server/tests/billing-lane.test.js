@@ -4,7 +4,7 @@ const {
   impliedMonthlyStampForWrite,
   membershipDuesCoverVisit,
   predictCompletionBilling,
-  hasAuthoritativeZeroPrice,
+  isStampedZeroEstimate,
   completionInvoiceAmount,
 } = require('../services/billing-lane');
 
@@ -301,34 +301,74 @@ describe('predictCompletionBilling', () => {
       .toEqual({ kind: 'covered_membership', amount: null, grossAmount: 100, conflictStampedPrice: true });
   });
 
-  // Codex pre-push P1 (round 3): completion-pricing's discount engine
-  // freezes a fully-discounted application at a genuine $0 net by stamping
-  // BOTH primary_line_price (the pre-discount gross base) and
-  // estimated_price (the post-discount net) together — pinned for real by
-  // completion-pricing.postgres.test.js's "fully discounted application
-  // stays zero" case. A bare estimatedPrice: 0 with NO primaryLinePrice is
-  // the DIFFERENT, indistinguishable-from-null shape (the sibling-covered
-  // same-trip PROMOTED row leaves both columns null) and must keep
-  // deferring to the fee fallback exactly as before — this predicate is
-  // the ONE thing that tells the two apart.
-  describe('a provenance-backed $0 (primaryLinePrice on the row) stays free — never the fee/rate fallback', () => {
-    test('per_application: a fully-discounted application predicts no charge, never the acceptance fee', () => {
+  // Owner ruling 2026-09-28 (waves-billing skill invariant #8 — "$0 means
+  // charge nothing"): a stamped estimated_price of exactly 0 is now
+  // authoritative in EVERY lane, full stop — not just per-application, and
+  // not gated on a primary_line_price base (completion-pricing's discount-
+  // engine "provenance" shape). This SUPERSEDES the prior narrower
+  // `hasAuthoritativeZeroPrice` predicate (retired — see git history / the
+  // PR #5161 → P0-fix → this-commit sequence for why) which required a
+  // positive primary_line_price alongside the stamped zero, and fell
+  // through to monthly_rate/the acceptance fee for a bare $0 with no base.
+  // NULL/blank is UNCHANGED — every lane's existing fallback still applies.
+  describe('a stamped $0 stays free in EVERY lane — never the fee/rate fallback (owner ruling 2026-09-28)', () => {
+    test('per_application: a fully-discounted application predicts no charge, never the acceptance fee, with or without a primaryLinePrice base', () => {
       const perApp = {
         ...memberBase, lane: 'per_application', billingMode: 'per_application',
         estimatedPrice: 0, primaryLinePrice: 100, perApplicationFee: 97.2, monthlyRate: null,
       };
       expect(predictCompletionBilling(perApp))
         .toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason: 'fully_discounted' });
-      // Owner ruling 2026-09-28: WITHOUT primaryLinePrice too (a bare
-      // stamped 0, no discount-engine provenance) the per-application lane
-      // now ALSO predicts no charge — a bare $0 is equally the row's own
-      // deliberate price for this lane, and never falls back to the
-      // acceptance fee (superseded the old "still defers to the fee" rule).
       expect(predictCompletionBilling({ ...perApp, primaryLinePrice: null }))
+        .toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason: 'fully_discounted' });
+      expect(predictCompletionBilling({ ...perApp, primaryLinePrice: 0 }))
         .toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason: 'fully_discounted' });
     });
 
-    test('self-pay/membership lane: a fully-discounted visit predicts no charge, never the monthly rate', () => {
+    // The exact shape the $0 Termite Inspection Service perk needs: a
+    // recurring-plan member's ONE-OFF stamped-$0 visit must read free
+    // because the visit itself is $0 — never because dues happened to
+    // cover it (autopay lapsed/dues-not-collected must not matter anymore).
+    test('monthly_membership: a stamped $0 one-off predicts no charge regardless of autopay/dues state — never the monthly rate', () => {
+      const monthlyOneOff = {
+        ...memberBase, isRecurring: false, estimatedPrice: 0, monthlyRate: 74.7,
+      };
+      expect(predictCompletionBilling(monthlyOneOff))
+        .toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason: 'fully_discounted' });
+      // Autopay lapsed AND dues not collected this month — the owner's exact
+      // reported scenario. Still free, not a monthly_rate invoice.
+      expect(predictCompletionBilling({ ...monthlyOneOff, autopayActive: false, duesCollectedThisMonth: false }))
+        .toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason: 'fully_discounted' });
+    });
+
+    // Legacy-null-mode member (no explicit billing_mode, inferred from a
+    // real tier + positive rate) — the exact same fallback line
+    // (completionInvoiceAmount) as explicit monthly_membership, so it must
+    // resolve identically.
+    test('legacy-null-mode member (inferred monthly, tier on file): a stamped $0 one-off predicts no charge too', () => {
+      const legacyNullOneOff = {
+        ...memberBase, billingMode: null, isRecurring: false, estimatedPrice: 0, monthlyRate: 74.7,
+        autopayActive: false, duesCollectedThisMonth: false,
+      };
+      expect(predictCompletionBilling(legacyNullOneOff))
+        .toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason: 'fully_discounted' });
+    });
+
+    // Control: a genuinely NULL (blank) price on the SAME monthly-lane
+    // one-off shape is UNCHANGED — it still falls through to monthly_rate
+    // when dues don't cover it. This is what tells "$0 means free" apart
+    // from "unpriced defaults to the dues rate" — the two must never
+    // collapse into each other.
+    test('control: a NULL (blank) price on the same monthly one-off shape still bills the monthly rate when uncovered', () => {
+      const monthlyOneOffNull = {
+        ...memberBase, isRecurring: false, estimatedPrice: null, monthlyRate: 74.7,
+        autopayActive: false, duesCollectedThisMonth: false,
+      };
+      expect(predictCompletionBilling(monthlyOneOffNull))
+        .toEqual({ kind: 'invoice', amount: 74.7, grossAmount: 74.7, conflictStampedPrice: false });
+    });
+
+    test('self-pay/per_visit lane: a stamped $0 visit predicts no charge, never the monthly rate', () => {
       const selfPay = {
         ...memberBase, lane: null, billingMode: 'per_visit', autopayActive: false,
         estimatedPrice: 0, primaryLinePrice: 62.5, monthlyRate: 74.7, isRecurring: false,
@@ -337,18 +377,62 @@ describe('predictCompletionBilling', () => {
         .toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason: 'fully_discounted' });
     });
 
-    test('a primaryLinePrice of 0 (or missing) is NOT discount-engine provenance, but per-application still bills nothing on a bare stamped 0 (owner ruling 2026-09-28)', () => {
-      const perApp = {
-        ...memberBase, lane: 'per_application', billingMode: 'per_application',
-        estimatedPrice: 0, perApplicationFee: 97.2, monthlyRate: null,
+    // Callback pricing is UNCHANGED by any of this: completionInvoiceAmount
+    // checks isCallback strictly AFTER the stamped-zero short-circuit, but
+    // both return 0 either way, and the per-visit/one_time lane's own
+    // unconditional callback exclusion (predictCompletionBilling) still
+    // reports 'callback', never 'fully_discounted', for a priced OR
+    // stamped-0 callback.
+    test('callbacks are unaffected — still report "callback", never "fully_discounted"', () => {
+      const perVisitCallback = {
+        ...memberBase, lane: 'per_visit', billingMode: 'per_visit', monthlyRate: 74.7,
+        estimatedPrice: 0, isCallback: true,
       };
-      expect(predictCompletionBilling({ ...perApp, primaryLinePrice: 0 }))
-        .toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason: 'fully_discounted' });
-      expect(predictCompletionBilling(perApp))
-        .toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason: 'fully_discounted' });
+      expect(predictCompletionBilling(perVisitCallback))
+        .toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason: 'callback' });
+      const monthlyCallback = {
+        ...memberBase, isRecurring: false, estimatedPrice: 0, monthlyRate: 74.7, isCallback: true,
+        autopayActive: false,
+      };
+      expect(predictCompletionBilling(monthlyCallback))
+        .toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason: 'callback' });
+      // With autopay active a stamped-$0 re-service is still dues-covered,
+      // exactly as before the ruling — hasVisitPrice never credits a
+      // callback's conventional $0 stamp.
+      expect(predictCompletionBilling({ ...monthlyCallback, autopayActive: true }))
+        .toEqual({ kind: 'covered_membership', amount: null, grossAmount: 0, conflictStampedPrice: false });
     });
 
-    test('a POSITIVE estimatedPrice always wins, provenance or not', () => {
+    // The payer lane reads the same rule: a stamped $0 with a payer on the
+    // account is a deliberately free visit, never a 'payer' prediction for a
+    // monthly_rate completion never mints (and never a $0 'payer' money gap).
+    test('payer-billed: a stamped $0 predicts no charge, never the monthly rate billed to the payer', () => {
+      expect(predictCompletionBilling({ ...memberBase, isRecurring: false, estimatedPrice: 0, monthlyRate: 74.7, payerBilled: true }))
+        .toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason: 'fully_discounted' });
+      // NULL with a payer is unchanged — the payer is invoiced the rate.
+      expect(predictCompletionBilling({ ...memberBase, isRecurring: false, estimatedPrice: null, monthlyRate: 74.7, payerBilled: true }))
+        .toMatchObject({ kind: 'payer', amount: 74.7 });
+    });
+
+    // annual_prepay never had a fallback to protect: an uncovered stamped $0
+    // was already a no-charge ('annual_renewal_owned', since a bare 0 read
+    // as unpriced) and still is — it only reports its real reason now.
+    test('annual_prepay: an uncovered stamped $0 is still a no-charge (inert), reported as fully_discounted', () => {
+      const annual = { ...memberBase, lane: 'annual_prepay', billingMode: 'annual_prepay', isRecurring: false, estimatedPrice: 0 };
+      expect(predictCompletionBilling(annual))
+        .toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason: 'fully_discounted' });
+      expect(predictCompletionBilling({ ...annual, prepaidMethod: 'annual_prepay_invoice' }).kind).toBe('covered_annual');
+    });
+
+    // A RECURRING stamped-$0 plan visit is still dues-covered, and a $0 stamp
+    // is no "per-visit price the dues override" — no conflict note.
+    test('monthly_membership: a recurring stamped-$0 visit stays covered, with no stamped-price conflict', () => {
+      expect(predictCompletionBilling({ ...memberBase, isRecurring: true, estimatedPrice: 0 }))
+        .toEqual({ kind: 'covered_membership', amount: null, grossAmount: 0, conflictStampedPrice: false });
+      expect(predictCompletionBilling({ ...memberBase, isRecurring: true, estimatedPrice: 50 }).conflictStampedPrice).toBe(true);
+    });
+
+    test('a POSITIVE estimatedPrice always wins, whatever the base', () => {
       const perApp = {
         ...memberBase, lane: 'per_application', billingMode: 'per_application',
         estimatedPrice: 40, primaryLinePrice: 100, perApplicationFee: 97.2, monthlyRate: null,
@@ -357,19 +441,18 @@ describe('predictCompletionBilling', () => {
         .toEqual({ kind: 'auto_charge', amount: 40, grossAmount: 40, conflictStampedPrice: false });
     });
 
-    // Codex round 4 P1: Number(null) === 0 and Number('') === 0 — a row that
-    // was simply NEVER PRICED (estimatedPrice null/'') must not be read as a
-    // deliberately-frozen $0 just because a positive primary_line_price
-    // happens to be on file. hasAuthoritativeZeroPrice requires an ACTUAL
-    // stamped zero; without this the acceptance-fee fallback silently
-    // vanished for every unpriced per-application row that also carries a
-    // base price (pre-fix this test asserted 'no_charge'/'fully_discounted').
-    test('null/empty estimatedPrice with a positive primaryLinePrice is NOT an authoritative zero — the fee fallback still applies', () => {
-      expect(hasAuthoritativeZeroPrice(null, 100)).toBe(false);
-      expect(hasAuthoritativeZeroPrice('', 100)).toBe(false);
-      expect(hasAuthoritativeZeroPrice(undefined, 100)).toBe(false);
+    // Codex round 4 P1 (still true — this rule is UNCHANGED by the 2026-09-28
+    // ruling): Number(null) === 0 and Number('') === 0 — a row that was
+    // simply NEVER PRICED (estimatedPrice null/'') must not be read as a
+    // deliberately-frozen $0. isStampedZeroEstimate requires an ACTUAL
+    // stamped zero; without this the acceptance-fee/monthly-rate fallback
+    // would silently vanish for every unpriced row.
+    test('null/empty estimatedPrice is NOT a stamped zero — every lane\'s fallback still applies', () => {
+      expect(isStampedZeroEstimate(null)).toBe(false);
+      expect(isStampedZeroEstimate('')).toBe(false);
+      expect(isStampedZeroEstimate(undefined)).toBe(false);
       // A genuine stamped 0 is unaffected by this guard.
-      expect(hasAuthoritativeZeroPrice(0, 100)).toBe(true);
+      expect(isStampedZeroEstimate(0)).toBe(true);
 
       const perApp = {
         ...memberBase, lane: 'per_application', billingMode: 'per_application',
@@ -379,7 +462,7 @@ describe('predictCompletionBilling', () => {
         .toEqual({ kind: 'auto_charge', amount: 97.2, grossAmount: 97.2, conflictStampedPrice: false });
       expect(completionInvoiceAmount({
         estimatedPrice: null, isCallback: false, perApplicationBilling: true,
-        perApplicationFee: 97.2, monthlyRate: null, billingMode: 'per_application', primaryLinePrice: 100,
+        perApplicationFee: 97.2, monthlyRate: null, billingMode: 'per_application',
       })).toBe(97.2);
     });
   });

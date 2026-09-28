@@ -270,12 +270,14 @@ describe('enrichBillingLaneWithWalletGap wiring (source guards)', () => {
   // skipped.
   test('resolves the ONE canonical sibling-coverage verdict unconditionally for every eligible visit, attaches it to billingLane.siblingCoverage, and overrides the prediction only when it is non-\'none\'', () => {
     expect(fn).toContain('const { coverage: siblingCoverage, prediction: siblingPrediction } = svc?.source_estimate_id');
-    // Codex pre-push P0 fix (2026-09-28): perApplicationBilling threads
-    // through so a bare stamped $0 only counts as "has own price" for a
-    // currently per-application visit — see billing-lane.js's
-    // scheduleSiblingCoverageEligible for the double-charge repro this
-    // scoping avoids on monthly/legacy-null customers.
-    expect(fn).toContain("await siblingCoverageForSchedule({ svc, dbConn: db, perApplicationBilling: svc?.billing_mode === 'per_application' })");
+    // Owner ruling 2026-09-28 ("$0 means charge nothing", every lane): a
+    // stamped $0 counts as "has own price" lane-independently now, so the
+    // per-application-only `perApplicationBilling` flag this call used to
+    // thread (the earlier P0 double-charge scoping) is gone — the stamped-0
+    // amount is 0 in every lane, so skipping the lookup cannot surface a
+    // monthly_rate fallback any more.
+    expect(fn).toContain('await siblingCoverageForSchedule({ svc, dbConn: db })');
+    expect(fn).not.toContain('siblingCoverageForSchedule({ svc, dbConn: db, perApplicationBilling');
     expect(fn).toContain('billingLane.siblingCoverage = siblingCoverage ||');
     expect(fn).toContain('if (siblingPrediction) {');
     expect(fn).not.toContain('billingLane?.prediction?.source !== ');

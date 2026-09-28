@@ -164,6 +164,50 @@ describe('project completion helpers', () => {
       scheduledService: { is_callback: true, estimated_price: '75.00' },
       customer: { monthly_rate: '99.00' },
     })).toBe(75);
+    // Owner ruling 2026-09-28 (waves-billing invariant #8 — "$0 means charge
+    // nothing", EVERY lane): a stamped estimated_price of exactly 0 (not
+    // null/blank) is that visit's OWN deliberate price and never falls back
+    // to monthly_rate, even with create_invoice_on_complete true — mirrors
+    // billing-lane.js's completionInvoiceAmount (isStampedZeroEstimate).
+    expect(projectCompletionInvoiceAmount({
+      scheduledService: { estimated_price: 0, create_invoice_on_complete: true, is_callback: false },
+      customer: { billing_mode: 'per_application', monthly_rate: '99.00' },
+    })).toBe(0);
+    expect(projectCompletionInvoiceAmount({
+      scheduledService: { estimated_price: '0', create_invoice_on_complete: true, is_callback: false },
+      customer: { billing_mode: 'per_application', monthly_rate: '99.00' },
+    })).toBe(0);
+    // This used to pin 99 (an earlier Codex P1 kept the monthly/legacy-null
+    // monthly_rate fallback for a stamped 0); the 2026-09-28 ruling
+    // reverses that — a monthly or legacy-null member's $0 visit is free.
+    expect(projectCompletionInvoiceAmount({
+      scheduledService: { estimated_price: 0, create_invoice_on_complete: true, is_callback: false },
+      customer: { billing_mode: 'monthly_membership', monthly_rate: '99.00' },
+    })).toBe(0);
+    expect(projectCompletionInvoiceAmount({
+      scheduledService: { estimated_price: '0.00', create_invoice_on_complete: true, is_callback: false },
+      customer: { monthly_rate: '99.00' }, // legacy-null billing_mode
+    })).toBe(0);
+    // A genuinely blank (null/undefined/'') price is UNCHANGED for any lane
+    // — it still falls through to monthly_rate exactly as before.
+    expect(projectCompletionInvoiceAmount({
+      scheduledService: { estimated_price: null, create_invoice_on_complete: true, is_callback: false },
+      customer: { billing_mode: 'per_application', monthly_rate: '99.00' },
+    })).toBe(99);
+    expect(projectCompletionInvoiceAmount({
+      scheduledService: { estimated_price: '', create_invoice_on_complete: true, is_callback: false },
+      customer: { monthly_rate: '99.00' },
+    })).toBe(99);
+    // A stamped 0 on a callback is unaffected either way — callbacks already
+    // bill nothing, for every lane.
+    expect(projectCompletionInvoiceAmount({
+      scheduledService: { estimated_price: 0, is_callback: true, create_invoice_on_complete: true },
+      customer: { billing_mode: 'per_application', monthly_rate: '99.00' },
+    })).toBe(0);
+    expect(projectCompletionInvoiceAmount({
+      scheduledService: { estimated_price: 0, is_callback: true, create_invoice_on_complete: true },
+      customer: { monthly_rate: '99.00' },
+    })).toBe(0);
     // WDO pricing comes from the filing, not a legacy appointment row. Blank
     // uses the mandatory flat default; a tech-entered override wins.
     expect(projectCompletionInvoiceAmount({

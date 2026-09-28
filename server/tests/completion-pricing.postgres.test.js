@@ -221,7 +221,7 @@ suite('completion pricing PostgreSQL and invoice replay', () => {
     // Mirrors the discount engine's own frozen shape (discountedVisit) WITHOUT
     // running a review: a fully-discounted application's estimated_price is 0
     // net while primary_line_price keeps the positive pre-discount base — the
-    // provenance signal hasAuthoritativeZeroPrice looks for.
+    // shape (a stamped $0 is authoritative in every lane — isStampedZeroEstimate).
     await trx('scheduled_services').where({ id: jobId }).update({ estimated_price: 0, primary_line_price: 100 });
     const view = (await pricing.loadCompletionPricing(jobId, { database: trx, role: 'admin' })).view;
     expect(view.currentAmount).toBe(0);

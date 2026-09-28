@@ -21,7 +21,7 @@ const { explicitBillingChannels } = require("./billing-delivery-channels");
 const PhotoService = require("./photos");
 const config = require("../config");
 const { customerSafeServiceNotes } = require("./project-types");
-const { hasAuthoritativeZeroPrice } = require("./billing-lane");
+const { isStampedZeroEstimate } = require("./billing-lane");
 const {
   SEND_CLAIMABLE_STATUSES,
   SEND_FINALIZABLE_STATUSES,
@@ -1761,45 +1761,22 @@ async function buildScheduledServiceInvoiceLines(
     : null;
   if (appointmentDiscount) lineItems.push(appointmentDiscount);
 
-  // Codex pre-push P1: a stamped estimated_price of 0 is not the visit's
-  // authoritative frozen net the way a stamped POSITIVE price is — it's
-  // the same "no price on this row" shape as null, and completionInvoiceAmount
-  // / predictCompletionBilling / resolveScheduledServiceCharge (billing-lane.js,
-  // admin-schedule.js) all defer to their fee/rate fallback for exactly that
-  // shape. Anchoring the reconciliation on a bare hasNumericValue(0) === true
-  // read 0 as the real net and wiped the freshly-computed fee-fallback
-  // primaryBase (above, via firstPositiveNumber — which already treats 0 the
-  // same as absent) straight back down to $0 through a "Scheduled price
-  // adjustment" line, so a $97.20 fee visit with a $40 checkout extra minted
-  // $40, not the $137.20 the checkout preview showed. `scheduledAmount`
-  // above uses the same positive-price precedence for primaryBase; mirror it
-  // here so the two never disagree on what "no price" means. The legacy
-  // callback-reconciliation shape this guards (a stale gross primary_line_price
-  // beside a genuinely-zero estimated_price AND a genuinely-zero fallbackAmount)
-  // is unaffected — both sides still resolve to 0 there.
-  //
-  // Codex pre-push P1 (round 3): that same bare-0 check ALSO caught the
-  // opposite, supported shape — completion-pricing's discount engine froze
-  // a fully-discounted application at a genuine $0 net (a positive
-  // primary_line_price gross base stamped alongside it — see
-  // hasAuthoritativeZeroPrice, billing-lane.js), which is exactly
-  // `primaryBaseKnown` above. Treating it as "no price, use the fallback"
-  // let a positive fallbackAmount (e.g. the per-application fee another
-  // caller resolved for a DIFFERENT reason) reconcile a real $0 invoice
-  // back up to that fee. completion-pricing.postgres.test.js's "fully
-  // discounted application stays zero" pins this with fallbackAmount
-  // matching (0) — this guard is for a caller whose fallback does NOT.
-  // Codex round 4 P0: this used to re-derive the check inline as
-  // `Number(scheduled.estimated_price) === 0`, and Number(null) === 0 —
-  // so a NEVER-PRICED row (estimated_price null, no reconciliation
-  // authority at all) with a positive primary_line_price misread as an
-  // authoritative zero, reconciling a genuinely-owed fee (e.g. the
-  // fallbackAmount another caller correctly resolved) back down to $0.
-  // Delegate to the shared predicate so this can never drift from
-  // completionInvoiceAmount / predictCompletionBilling's own reading of
-  // the same provenance signal.
-  const authoritativeZero = primaryBaseKnown
-    && hasAuthoritativeZeroPrice(scheduled.estimated_price, scheduled.primary_line_price);
+  // Owner ruling 2026-09-28 (waves-billing invariant #8 — "$0 means charge
+  // nothing", every lane): a stamped estimated_price of exactly 0 is the
+  // visit's own authoritative net — with or without a primary_line_price
+  // base — so the replay reconciles DOWN to $0 and never toward a caller's
+  // fee/rate fallbackAmount. Same predicate as completionInvoiceAmount /
+  // predictCompletionBilling / resolveScheduledServiceCharge, which all
+  // resolve 0 for this row now, so no production caller passes a positive
+  // fallback for it any more; this keeps the line builder agreeing even if
+  // one did. (Supersedes the earlier Codex pre-push P1 that read a bare 0 as
+  // "no price" so a $97.20 fee fallback plus a $40 extra minted $137.20, and
+  // the provenance-only hasAuthoritativeZeroPrice guard.) A NEVER-PRICED row
+  // (estimated_price null/'') is unaffected — isStampedZeroEstimate excludes
+  // it explicitly (Number(null) === 0; Codex round 4 P0's fix stays intact),
+  // so its fallbackAmount still anchors the reconciliation in both
+  // directions.
+  const authoritativeZero = isStampedZeroEstimate(scheduled.estimated_price);
   // Whether storedNetAmount below actually came from a stamped price on this
   // row (a real positive estimated_price, or the provenance-backed genuine
   // $0) versus the fee/rate fallback another caller resolved because this
