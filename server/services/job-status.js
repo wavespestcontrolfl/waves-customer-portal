@@ -1129,35 +1129,23 @@ const STATUS_ROUTE_ALLOWED_TARGETS = new Set([
 // (the 2026-08-05 fix, GATE_CANCEL_NOTICE_HOOK, exists precisely so a
 // cancellation surface can't go silent on the customer).
 //
-// Mirrors only the conditions that are UNCONDITIONAL, evidence-independent,
-// AND cannot change between this preview and the moment the cancel actually
-// commits (Codex round-2 P1: a "merged-slot survivor" is neither — another
-// admin can cancel that sibling visit between the card's proposal-time
-// preview, or even between /confirm-action's fresh drift recheck and this
-// visit's own transition transaction, and the real hook would then text.
-// A pin that could go stale inside that window must never resolve to
-// 'none'). Returning 'none' is reserved for the two cases that are true at
-// this instant and CANNOT become false before commit:
-//   - the gate is off (no claim is ever minted), or
-//   - no `appointment_reminders` row exists for this visit at all (the
-//     in-trx claim's UPDATE matches zero rows, so processCancelNoticeClaim's
-//     own guard — no claim, no late-claim, no caller-claim — returns
-//     immediately and no worker ever runs; nothing can make a row appear).
-// Every other case — including a live merged-slot survivor existing RIGHT
-// NOW — is 'may_send': a 'pending' claim is minted, and the hook sends as
-// soon as delivery evidence exists (now, or up to 72 hours later), unless a
-// survivor is still live at COMMIT time (its own separate, real-time check).
-// This function never claims to know WHEN a text goes out, or whether a
-// currently-live survivor will still be live at commit — so a card showing
-// 'may_send' can never under-disclose a real send.
+// Mirrors only the ONE condition that is a process-level value and
+// therefore CANNOT change between this preview and the moment the cancel
+// actually commits: whether the gate is on at all. Every DB-backed
+// condition is mutable within that window and must never ground a 'none'
+// (Codex round-2 P1: a "merged-slot survivor" can appear/disappear before
+// commit; Codex round-3 P1: so can the `appointment_reminders` row itself —
+// the reminder self-healer (server/services/appointment-reminders.js) can
+// insert a missing row for this visit between ANY read here and the hook's
+// own in-transaction claim, so "no row right now" is not evidence the hook
+// has nothing to claim at commit time either). 'none' only when the gate
+// is off (no claim is ever minted, in any transaction, ever); 'may_send'
+// otherwise — this function never claims to know WHEN a text goes out, or
+// whether any DB-backed condition will still read the same at commit, so a
+// card showing 'may_send' can never under-disclose a real send.
 async function previewCancellationNoticeVerdict(scheduledServiceId) {
   const { isEnabled } = require('../config/feature-gates');
-  if (!isEnabled('cancelNoticeHook')) return 'none';
-  const own = await db('appointment_reminders')
-    .where({ scheduled_service_id: scheduledServiceId })
-    .first('id');
-  if (!own) return 'none';
-  return 'may_send';
+  return isEnabled('cancelNoticeHook') ? 'may_send' : 'none';
 }
 
 module.exports = {

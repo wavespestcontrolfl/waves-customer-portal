@@ -553,7 +553,11 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     // The follow-through's money effects, from the rails' own previews.
     const c = preview.cancellation;
     const a = c.appointment || {};
-    push('operational', `Cancel ${a.service_type || 'visit'} on ${a.scheduled_date || '?'}${a.customer_name ? ` for ${a.customer_name}` : ''}`, {
+    // The window is shown so two same-day visits for the same customer are
+    // distinguishable on the card (Codex round-3 P1) — pinned automatically,
+    // since it rides on preview.cancellation.appointment (the impact object
+    // cancelImpactsMatch already compares whole).
+    push('operational', `Cancel ${a.service_type || 'visit'} on ${a.scheduled_date || '?'}${a.window ? `, ${a.window}` : ''}${a.customer_name ? ` for ${a.customer_name}` : ''}`, {
       before: a.status || null, after: 'cancelled',
     });
     // Wording states what the rails GUARANTEE, not the best case: a charge

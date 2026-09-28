@@ -93,7 +93,7 @@ test('fee applies: an in-window held card hold wins outright', async () => {
 
   expect(impact.appointment).toEqual({
     id: 'svc-synthetic-1', status: 'confirmed', scheduled_date: '2026-10-02',
-    service_type: 'pest_control', customer_name: 'Synthia Tester',
+    service_type: 'pest_control', customer_name: 'Synthia Tester', window: null,
   });
   expect(impact.fee).toEqual({ applies: true, amount: 49, unresolved: false, rail: 'card_hold', blocked_by_invoice: false });
   // The appointment rail was never even asked — the hold answered outright.
@@ -232,6 +232,41 @@ test('invoices carry the deposit credit the void would restore', async () => {
   expect(impact.invoices[0].deposit_credit).toBe(75);
 });
 
+describe('appointment.window (Codex round-3 P1: show the visit\'s time so same-day visits are distinguishable)', () => {
+  const noCard = () => {
+    mockCardHoldPreview.mockResolvedValue({ held: false, feeApplies: false, rule: { code: 'no_card' } });
+    mockApptCardPreview.mockResolvedValue({ secured: false, feeApplies: false, rule: { code: 'no_card' } });
+  };
+
+  test('prefers the stored time_window label verbatim — the SAME field reschedule_appointment already renders', async () => {
+    noCard();
+    mockAppointmentRow = { ...mockAppointmentRow, time_window: 'Morning', window_start: '13:00:00', window_end: '15:00:00' };
+    const impact = await computeCancelAppointmentImpact('svc-synthetic-1');
+    expect(impact.appointment.window).toBe('Morning');
+  });
+
+  test('falls back to formatting window_start–window_end (bare TIME columns) when time_window is absent', async () => {
+    noCard();
+    mockAppointmentRow = { ...mockAppointmentRow, time_window: null, window_start: '08:00:00', window_end: '11:30:00' };
+    const impact = await computeCancelAppointmentImpact('svc-synthetic-1');
+    expect(impact.appointment.window).toBe('8:00 AM–11:30 AM');
+  });
+
+  test('window_start only (no window_end): a single formatted time', async () => {
+    noCard();
+    mockAppointmentRow = { ...mockAppointmentRow, time_window: null, window_start: '09:00:00', window_end: null };
+    const impact = await computeCancelAppointmentImpact('svc-synthetic-1');
+    expect(impact.appointment.window).toBe('9:00 AM');
+  });
+
+  test('neither time_window nor window_start: null, not a broken string', async () => {
+    noCard();
+    mockAppointmentRow = { ...mockAppointmentRow, time_window: null, window_start: null, window_end: null };
+    const impact = await computeCancelAppointmentImpact('svc-synthetic-1');
+    expect(impact.appointment.window).toBeNull();
+  });
+});
+
 describe('identity_fingerprint (Codex round-2 P1: pin the COMPLETE appointment identity, not just the display facts)', () => {
   const noCard = () => {
     mockCardHoldPreview.mockResolvedValue({ held: false, feeApplies: false, rule: { code: 'no_card' } });
@@ -247,20 +282,22 @@ describe('identity_fingerprint (Codex round-2 P1: pin the COMPLETE appointment i
     expect(a.identity_fingerprint).toBe(b.identity_fingerprint);
   });
 
-  // Codex round-2 P1: the display facts alone (status/scheduled_date/
-  // service_type/customer_name) can read IDENTICAL for a same-day window
-  // move or a repoint to a same-named customer — this fingerprint is what
-  // actually changes, so cancelImpactsMatch (which compares the whole
-  // impact object) catches it.
-  test('changes when the window moves (same date, same status)', async () => {
+  // Codex round-2 P1: a same-day window move or a repoint to a same-named
+  // customer must still drift the fingerprint even where it's plausible
+  // the OTHER display facts (status/scheduled_date/service_type/
+  // customer_name) read identical. window_start/window_end are bare
+  // Postgres TIME columns (e.g. '13:00:00'), never a timestamp.
+  test('changes when the window moves (same date, same status) — Codex round-3 P1 also surfaces it on the card via `window`', async () => {
     noCard();
     const before = await computeCancelAppointmentImpact('svc-synthetic-1');
-    mockAppointmentRow = { ...mockAppointmentRow, window_start: '2026-10-02T13:00:00.000Z', window_end: '2026-10-02T15:00:00.000Z' };
+    mockAppointmentRow = { ...mockAppointmentRow, window_start: '13:00:00', window_end: '15:00:00' };
     const after = await computeCancelAppointmentImpact('svc-synthetic-1');
     expect(after.identity_fingerprint).not.toBe(before.identity_fingerprint);
-    // The display facts (what the card actually PRINTS) are unaffected —
-    // this is exactly the case a text-only pin would miss.
-    expect(after.appointment).toEqual(before.appointment);
+    // The window now ALSO shows up in the display facts themselves — the
+    // operator sees the new window on a fresh card, and the fingerprint
+    // independently drift-refuses a stale one that was never re-shown.
+    expect(after.appointment.window).not.toBe(before.appointment.window);
+    expect(after.appointment.window).toBe('1:00 PM–3:00 PM');
   });
 
   test('changes when the visit is repointed to a different customer_id (identically named account)', async () => {
@@ -275,13 +312,18 @@ describe('identity_fingerprint (Codex round-2 P1: pin the COMPLETE appointment i
     expect(after.appointment.customer_name).toBe(before.appointment.customer_name);
   });
 
-  test('changes when the technician changes', async () => {
+  // The technician is NOT part of the display facts at all (id/status/
+  // scheduled_date/service_type/customer_name/window) — this is the clean
+  // case proving the fingerprint catches identity drift the card's own
+  // rendered text can never show.
+  test('changes when the technician changes (never shown on the card at all)', async () => {
     noCard();
     mockAppointmentRow = { ...mockAppointmentRow, technician_id: 'tech-1' };
     const before = await computeCancelAppointmentImpact('svc-synthetic-1');
     mockAppointmentRow = { ...mockAppointmentRow, technician_id: 'tech-2' };
     const after = await computeCancelAppointmentImpact('svc-synthetic-1');
     expect(after.identity_fingerprint).not.toBe(before.identity_fingerprint);
+    expect(after.appointment).toEqual(before.appointment);
   });
 
   test('does NOT change on a volatile/display-only re-read with nothing actually different', async () => {

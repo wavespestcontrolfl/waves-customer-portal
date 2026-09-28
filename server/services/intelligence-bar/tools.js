@@ -3798,6 +3798,30 @@ async function cancelAppointment(input, actionContext = {}) {
   try {
     const { transitionJobStatus } = require('../job-status');
     await db.transaction(async (trx) => {
+      // Exact-effect confirm, INSIDE the mutation transaction (Codex round-3
+      // P1a): the pre-check above (input._frozen_cancellation_impact
+      // block) reads OUTSIDE any lock — a same-day reschedule (window or
+      // customer change, status unchanged) that commits in the gap between
+      // that read and this transaction's own lock would slip through
+      // undetected, since transitionJobStatus's own atomic guard only
+      // checks fromStatus, never the full identity. Lock the row FIRST —
+      // a reschedule racing to commit AFTER this point blocks on the lock
+      // until this transaction resolves, and one that already committed
+      // BEFORE it is caught by the fingerprint recompute below — then
+      // refuse before transitioning anything if the SAME identity
+      // fingerprint (proposal-pins.js normalizeAppointmentPin +
+      // appointmentPinFingerprint — the identical pin
+      // appointment-cancel-impact.js computed at proposal time) no longer
+      // matches what the operator approved.
+      if (input._frozen_cancellation_impact) {
+        const lockedRow = await trx('scheduled_services').where('id', appointment_id).forUpdate().first();
+        if (!lockedRow) throw new Error('__cancel_target_missing__');
+        const { normalizeAppointmentPin, appointmentPinFingerprint } = require('./proposal-pins');
+        const lockedFingerprint = appointmentPinFingerprint(normalizeAppointmentPin(lockedRow));
+        if (lockedFingerprint !== input._frozen_cancellation_impact.identity_fingerprint) {
+          throw new Error('__cancel_identity_drift__');
+        }
+      }
       await transitionJobStatus({
         jobId: appointment_id,
         fromStatus: appt.status,
@@ -3833,6 +3857,12 @@ async function cancelAppointment(input, actionContext = {}) {
       }
     });
   } catch (err) {
+    if (err && err.message === '__cancel_identity_drift__') {
+      return { error: 'The cancellation effects (late-cancel fee, invoices, or inspection credit) changed since this was proposed — nothing was changed. Ask again for a fresh preview.' };
+    }
+    if (err && err.message === '__cancel_target_missing__') {
+      return { error: 'Appointment not found — nothing was changed.' };
+    }
     if (err && err.message && err.message.includes('not in state')) {
       return { error: 'Appointment status changed while cancelling (concurrent update) — refresh and try again.' };
     }

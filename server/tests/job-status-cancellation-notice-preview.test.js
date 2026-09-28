@@ -1,40 +1,34 @@
 /**
  * job-status.js#previewCancellationNoticeVerdict — the read-only mirror of
- * processCancelNoticeClaim's UNCONDITIONAL, evidence-independent suppression
- * conditions. appointment-cancel-impact.js uses this to disclose (never
- * silently suppress) the Intelligence Bar cancel_appointment card's
- * customer-notice outcome (Codex round-1 P1 on the ib-cancel-appointment-live
- * lane: the card must never claim "no customer message is sent" when the
- * existing GATE_CANCEL_NOTICE_HOOK fix can still text one — that hook exists
- * on purpose, 2026-08-05, and this lane must not silently reverse it).
+ * processCancelNoticeClaim's UNCONDITIONAL suppression conditions.
+ * appointment-cancel-impact.js uses this to disclose (never silently
+ * suppress) the Intelligence Bar cancel_appointment card's customer-notice
+ * outcome (Codex round-1 P1 on the ib-cancel-appointment-live lane: the
+ * card must never claim "no customer message is sent" when the existing
+ * GATE_CANCEL_NOTICE_HOOK fix can still text one — that hook exists on
+ * purpose, 2026-08-05, and this lane must not silently reverse it).
  *
- * Round-2 P1: a "merged-slot survivor" (a live sibling visit for the same
- * customer/time) is a MUTABLE condition — another admin can cancel that
- * sibling between this preview and the moment THIS visit's own transition
- * commits, and the real hook would then text. The function must never
- * resolve to 'none' on a condition that can flip before commit, so it no
- * longer even queries for a survivor. Synthetic ids throughout — no real
+ * Round-2 P1: a "merged-slot survivor" is MUTABLE — it can appear or
+ * disappear before commit, so it was removed as a 'none' condition.
+ * Round-3 P1: the `appointment_reminders`-row check is ALSO mutable — the
+ * reminder self-healer can insert a missing row for this visit between any
+ * read here and the hook's own in-transaction claim, so "no row right now"
+ * is not proof the hook has nothing to claim at commit time. The ONLY
+ * remaining condition is the gate itself (a process-level value that
+ * cannot change mid-transaction): 'none' only when it's off, 'may_send'
+ * otherwise — no DB read at all. Synthetic ids throughout — no real
  * customer data.
  */
 
 const mockIsEnabled = jest.fn();
 jest.mock('../config/feature-gates', () => ({ isEnabled: (...a) => mockIsEnabled(...a) }));
 
-let mockReminderRow = null;
+// No DB mock needed — the function reads nothing but the gate. A stray
+// db() call would throw here (no mock registered for '../models/db'),
+// which is itself proof the function stays DB-free.
 jest.mock('../models/db', () => {
-  const db = jest.fn((table) => {
-    if (table !== 'appointment_reminders') throw new Error(`unexpected table in this suite: ${table}`);
-    return {
-      where: () => ({
-        first: async () => mockReminderRow,
-        // A re-introduced survivor query (Codex round-2 P1: that condition
-        // is mutable and must never resolve to 'none') would throw here.
-        whereNot: () => {
-          throw new Error('previewCancellationNoticeVerdict must never query a merged-slot survivor — that condition can change before commit');
-        },
-      }),
-    };
-  });
+  const err = () => { throw new Error('previewCancellationNoticeVerdict must never query the database — every DB-backed condition is mutable before commit'); };
+  const db = jest.fn(err);
   return db;
 });
 
@@ -43,45 +37,27 @@ const { previewCancellationNoticeVerdict } = require('../services/job-status');
 describe('previewCancellationNoticeVerdict', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    mockReminderRow = { id: 'reminder-1' };
   });
 
-  test('gate off: none, without reading anything else', async () => {
+  test('gate off: none', async () => {
     mockIsEnabled.mockReturnValue(false);
     const verdict = await previewCancellationNoticeVerdict('svc-1');
     expect(verdict).toBe('none');
     expect(mockIsEnabled).toHaveBeenCalledWith('cancelNoticeHook');
   });
 
-  test('gate on, no appointment_reminders row for this visit: none (the real hook has nothing to claim, and this cannot change before commit)', async () => {
-    mockIsEnabled.mockReturnValue(true);
-    mockReminderRow = null;
-    const verdict = await previewCancellationNoticeVerdict('svc-1');
-    expect(verdict).toBe('none');
-  });
-
-  test('gate on, row exists: may_send — never claims to know WHEN, and never queries a survivor', async () => {
+  test('gate on: may_send — never claims to know WHEN, and reads nothing else', async () => {
     mockIsEnabled.mockReturnValue(true);
     await expect(previewCancellationNoticeVerdict('svc-1')).resolves.toBe('may_send');
   });
 
-  test('never returns none from delivery evidence alone — the function does not even look at it', async () => {
-    // The real hook's evidence check (messaging_audit_log / customer_interactions
-    // / legacy sms_log correlation) only decides WHEN a 'may_send' claim
-    // actually sends — never whether the claim exists in the first place.
-    // This suite's db mock never stubs those tables at all; if the function
-    // tried to read them it would throw "unexpected table in this suite".
+  // Codex round-3 P1: even with NO appointment_reminders row for this
+  // visit right now, the self-healer can insert one before commit — the
+  // verdict must still be may_send with the gate on. Proven by never
+  // reading the DB at all (the mock throws on any db() call).
+  test('gate on resolves to may_send with no DB read at all — a row appearing later cannot be missed', async () => {
     mockIsEnabled.mockReturnValue(true);
-    await expect(previewCancellationNoticeVerdict('svc-1')).resolves.toBe('may_send');
-  });
-
-  // Codex round-2 P1: a merged-slot survivor is MUTABLE — it can appear or
-  // disappear between this preview and the real transition's commit, so a
-  // currently-live survivor must NOT resolve to 'none'. Proven by the mock
-  // above throwing if the function ever re-queries one.
-  test('a live merged-slot survivor existing right now still resolves to may_send (the condition can change before commit)', async () => {
-    mockIsEnabled.mockReturnValue(true);
-    mockReminderRow = { id: 'reminder-1' };
-    await expect(previewCancellationNoticeVerdict('svc-1')).resolves.toBe('may_send');
+    const verdict = await previewCancellationNoticeVerdict('svc-with-no-reminders-row-yet');
+    expect(verdict).toBe('may_send');
   });
 });

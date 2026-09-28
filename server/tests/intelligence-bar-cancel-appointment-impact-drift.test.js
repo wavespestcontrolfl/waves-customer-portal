@@ -22,12 +22,16 @@ let capturedNotesUpdate = null;
 jest.mock('../models/db', () => {
   const db = jest.fn((table) => {
     if (table === 'scheduled_services') {
-      return {
-        where: () => ({
-          first: async () => mockApptRow,
-          update: async (fields) => { capturedNotesUpdate = fields; return 1; },
-        }),
+      // .forUpdate() is the round-3 P1a row lock (tools.js cancelAppointment,
+      // inside the mutation trx) — chainable no-op here (this mock has no
+      // real concurrency to enforce), returning the SAME reader so the
+      // locked read sees whatever mockApptRow currently is, exactly like a
+      // real SELECT ... FOR UPDATE would see the live row.
+      const reader = {
+        first: async () => mockApptRow,
+        update: async (fields) => { capturedNotesUpdate = fields; return 1; },
       };
+      return { where: () => ({ ...reader, forUpdate: () => reader }) };
     }
     if (table === 'job_status_history') {
       const chain = { where: () => chain, whereNot: () => chain, orderBy: () => chain, first: async () => ({ transitioned_at: new Date(Date.now() - 60 * 1000) }) };
@@ -68,9 +72,27 @@ jest.mock('../services/job-status', () => ({
 }));
 
 const { executeTool } = require('../services/intelligence-bar/tools');
+// REAL implementation (not mocked) — the commit path's round-3 P1a lock
+// recheck (tools.js cancelAppointment) computes this same fingerprint over
+// whatever row its FOR UPDATE lock reads, so FROZEN's own fingerprint below
+// must be the ACTUAL value for the default mockApptRow shape, or every
+// "matches" test would spuriously drift-refuse against a fake string.
+const { normalizeAppointmentPin, appointmentPinFingerprint } = require('../services/intelligence-bar/proposal-pins');
+
+// The exact shape beforeEach assigns to mockApptRow — kept as its own
+// constant (not read from the mutable `mockApptRow` let) so FROZEN's
+// fingerprint is fixed and tests that mutate mockApptRow mid-test don't
+// retroactively change what "matches" means.
+const DEFAULT_APPT_ROW = {
+  id: 'svc-synthetic-1',
+  status: 'confirmed',
+  scheduled_date: '2026-10-02',
+  service_type: 'pest_control',
+  notes: null,
+};
 
 const FROZEN = {
-  appointment: { id: 'svc-synthetic-1', status: 'confirmed', scheduled_date: '2026-10-02', service_type: 'pest_control', customer_name: 'Synthia Tester' },
+  appointment: { id: 'svc-synthetic-1', status: 'confirmed', scheduled_date: '2026-10-02', service_type: 'pest_control', customer_name: 'Synthia Tester', window: null },
   fee: { applies: true, amount: 49, unresolved: false, rail: 'card_hold', hold_disposition: null },
   invoices: [{ id: 'inv-1', invoice_number: 'WPC-2026-9001', status: 'sent', total: 89, credit_applied: 0 }],
   inspection_credit_reversal: null,
@@ -79,20 +101,16 @@ const FROZEN = {
   // see appointment-cancel-impact.js's loadAppointmentFacts), hashed. The
   // display facts above (status/scheduled_date/service_type/customer_name)
   // can read identical for a same-day window move or a same-named repoint —
-  // this is what actually catches it.
-  identity_fingerprint: 'fp-original',
+  // this is what actually catches it. The REAL fingerprint for
+  // DEFAULT_APPT_ROW, so it matches what the round-3 P1a lock recheck
+  // (tools.js) actually computes when mockApptRow is unchanged.
+  identity_fingerprint: appointmentPinFingerprint(normalizeAppointmentPin(DEFAULT_APPT_ROW)),
 };
 
 beforeEach(() => {
   jest.clearAllMocks();
   capturedNotesUpdate = null;
-  mockApptRow = {
-    id: 'svc-synthetic-1',
-    status: 'confirmed',
-    scheduled_date: '2026-10-02',
-    service_type: 'pest_control',
-    notes: null,
-  };
+  mockApptRow = { ...DEFAULT_APPT_ROW };
   // transitionJobStatus is only reached once the drift check clears — throw
   // a distinctive sentinel so a passing-through test can assert we GOT
   // there without modeling the rest of the (pre-existing, unrelated) commit
@@ -165,6 +183,70 @@ test('a window change or customer repoint between card and confirm is drift: REF
 
   expect(result.error).toMatch(/changed since this was proposed/);
   expect(mockTransitionJobStatus).not.toHaveBeenCalled();
+});
+
+// Codex round-3 P1a: the pre-check above (computeCancelAppointmentImpact,
+// mocked as mockComputeImpact) runs OUTSIDE any lock — this proves the
+// SEPARATE, INSIDE-the-transaction lock+recheck catches a reschedule that
+// commits in the gap between that pre-check and this transaction's own
+// row lock, even when the pre-check itself was fooled (mocked here to
+// report no drift, simulating a race the pre-check's own fresh read simply
+// won BEFORE the concurrent reschedule landed).
+describe('round-3 P1a: the FINAL identity recheck runs INSIDE the mutation transaction, under a row lock', () => {
+  test('a reschedule that commits in the gap between the pre-check and the row lock is still caught', async () => {
+    mockComputeImpact.mockResolvedValue(FROZEN); // pre-check sees no drift
+    // Simulate the race: by the time this transaction's FOR UPDATE lock
+    // reads the row, a DIFFERENT admin's reschedule already committed —
+    // same status/date, so the pre-check's own impact fields still matched,
+    // but the row's actual identity (window) has moved.
+    mockApptRow = { ...mockApptRow, window_start: '13:00:00' };
+    const result = await executeTool('cancel_appointment', {
+      appointment_id: 'svc-synthetic-1',
+      _frozen_cancellation_impact: FROZEN,
+    }, {});
+
+    expect(result.error).toMatch(/changed since this was proposed/);
+    expect(mockTransitionJobStatus).not.toHaveBeenCalled();
+  });
+
+  test('an unchanged row (no race) passes the lock recheck and reaches the transition', async () => {
+    mockComputeImpact.mockResolvedValue(FROZEN);
+    mockTransitionJobStatus.mockResolvedValue(undefined);
+    const result = await executeTool('cancel_appointment', {
+      appointment_id: 'svc-synthetic-1',
+      _frozen_cancellation_impact: FROZEN,
+    }, {});
+    expect(result.success).toBe(true);
+    expect(mockTransitionJobStatus).toHaveBeenCalledTimes(1);
+  });
+
+  test('the appointment vanishing under the lock (deleted between proposal and commit) refuses cleanly, never throws raw', async () => {
+    mockComputeImpact.mockResolvedValue(FROZEN);
+    mockApptRow = null; // the locked read finds nothing
+    const result = await executeTool('cancel_appointment', {
+      appointment_id: 'svc-synthetic-1',
+      _frozen_cancellation_impact: FROZEN,
+    }, {});
+    expect(result.error).toMatch(/not found/i);
+    expect(mockTransitionJobStatus).not.toHaveBeenCalled();
+  });
+
+  // The mock can't simulate genuine lock BLOCKING (a second, concurrently-
+  // starting reschedule waiting on this transaction's row lock until it
+  // resolves) — that guarantee comes from .forUpdate() being a REAL
+  // Postgres row lock, proven here at the source level rather than
+  // re-implemented as a fake concurrency harness.
+  test('the recheck actually takes a row lock (source contract — real blocking is a Postgres guarantee, not mockable)', () => {
+    const source = require('fs').readFileSync(require.resolve('../services/intelligence-bar/tools.js'), 'utf8');
+    const cancelFn = source.slice(source.indexOf('async function cancelAppointment('));
+    expect(cancelFn).toContain(".where('id', appointment_id).forUpdate().first()");
+    // The lock read happens BEFORE transitionJobStatus is called, both
+    // inside the same db.transaction callback.
+    const lockIdx = cancelFn.indexOf('.forUpdate().first()');
+    const transitionIdx = cancelFn.indexOf('await transitionJobStatus({');
+    expect(lockIdx).toBeGreaterThan(-1);
+    expect(transitionIdx).toBeGreaterThan(lockIdx);
+  });
 });
 
 test('an inspection-credit reversal appearing where the frozen preview had none is drift: REFUSED', async () => {

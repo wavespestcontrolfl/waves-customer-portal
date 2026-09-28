@@ -45,7 +45,30 @@
  */
 
 const db = require('../models/db');
-const { dateOnlyString } = require('../utils/datetime-et');
+const { dateOnlyString, parseETDateTime, formatETTime } = require('../utils/datetime-et');
+
+// Human-readable arrival window for the card (Codex round-3 P1: two
+// same-day visits for the same customer are otherwise indistinguishable on
+// the cancel card). Prefers the stored display label `time_window` — the
+// SAME field reschedule_appointment's own card already renders verbatim
+// (authorization-contract.js, confirmationDisplayParams) — and only falls
+// back to formatting the window_start/window_end TIME columns when that
+// label is absent, using the SAME date+TIME-column composition
+// appointment-reminders.js#composeScheduledApptTime establishes for these
+// exact columns (scheduled_date is a DATE, window_start/window_end are
+// bare TIME columns — never a timezone-bearing timestamp, so this is a
+// straight ET wall-clock read, not a conversion).
+function formatAppointmentWindow(row) {
+  if (row.time_window) return String(row.time_window);
+  if (!row.scheduled_date || !row.window_start) return null;
+  const datePart = row.scheduled_date instanceof Date
+    ? row.scheduled_date.toISOString().slice(0, 10)
+    : String(row.scheduled_date).slice(0, 10);
+  const start = parseETDateTime(`${datePart}T${String(row.window_start).slice(0, 8)}`);
+  if (!row.window_end) return formatETTime(start);
+  const end = parseETDateTime(`${datePart}T${String(row.window_end).slice(0, 8)}`);
+  return `${formatETTime(start)}–${formatETTime(end)}`;
+}
 
 async function loadAppointmentFacts(scheduledServiceId) {
   const row = await db('scheduled_services as s')
@@ -77,6 +100,10 @@ async function loadAppointmentFacts(scheduledServiceId) {
       scheduled_date: row.scheduled_date ? dateOnlyString(row.scheduled_date) : null,
       service_type: row.service_type || null,
       customer_name: customerName,
+      // Human-readable arrival window (Codex round-3 P1) — see
+      // formatAppointmentWindow above. Pinned automatically: part of the
+      // impact object cancelImpactsMatch already compares.
+      window: formatAppointmentWindow(row),
     },
     // A hash, not the raw pin object: matches every other pin in this
     // codebase (reschedule/price-approval/email), and keeps this shape

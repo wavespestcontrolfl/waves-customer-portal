@@ -464,18 +464,31 @@ function withCacheBreakpoint(messages) {
 // text hook may still text the customer; this card DISCLOSES that, via
 // job-status.js's read-only previewCancellationNoticeVerdict, rather than
 // the earlier draft of this lane silently claiming cancellations never
-// contact anyone — 'none' only for conditions that CANNOT change before
-// commit; a live merged-slot survivor is mutable, so it is never grounds
-// for 'none', Codex round-2 P1), plus identity_fingerprint (the visit's
-// FULL identity — window/customer/technician/visit-group, reusing
-// proposal-pins.js's normalizeAppointmentPin/appointmentPinFingerprint,
-// the same pin reschedule_appointment trusts — so a same-day window move
-// or a repoint to a differently-owned but identically-named customer is
-// drift too, even though the display facts alone would read identical,
-// Codex round-2 P1). Gate off (default) is byte-identical to before this
-// lane: every cancel_appointment proposal and confirm refuses with
-// CANCEL_NOT_CARD_CONFIRMABLE_MESSAGE, and cancels happen from the
-// Dispatch screen, which owns the waiver and review controls.
+// contact anyone — 'none' ONLY when the gate is off (a process-level value
+// that cannot change mid-transaction); every DB-backed condition, a live
+// merged-slot survivor (Codex round-2 P1) AND whether an appointment_
+// reminders row currently exists (Codex round-3 P1b — the reminder self-
+// healer can insert one before commit), is mutable and never grounds
+// 'none'), plus a human-readable appointment window (Codex round-3 P1 —
+// so two same-day visits for the same customer are distinguishable on the
+// card; prefers the stored time_window label, falls back to formatting
+// window_start/window_end), plus identity_fingerprint (the visit's FULL
+// identity — window/customer/technician/visit-group, reusing proposal-
+// pins.js's normalizeAppointmentPin/appointmentPinFingerprint, the same
+// pin reschedule_appointment trusts — so a same-day window move or a
+// repoint to a differently-owned but identically-named customer is drift
+// too, even though the display facts alone would read identical, Codex
+// round-2 P1). That fingerprint is re-verified TWICE at confirm: once by
+// the pre-check below (computeCancelAppointmentImpact, outside any lock)
+// and once more by tools.js cancelAppointment itself, which locks the
+// scheduled_services row FOR UPDATE inside its own mutation transaction
+// and recomputes the fingerprint from what THAT lock sees before
+// transitioning anything (Codex round-3 P1a — closes the race in the gap
+// between the pre-check's read and the transaction's own commit). Gate off
+// (default) is byte-identical to before this lane: every cancel_appointment
+// proposal and confirm refuses with CANCEL_NOT_CARD_CONFIRMABLE_MESSAGE,
+// and cancels happen from the Dispatch screen, which owns the waiver and
+// review controls.
 const CANCEL_NOT_CARD_CONFIRMABLE_MESSAGE = 'Cancelling a visit can charge a late-cancel fee, void invoices, and reverse credits, which the confirmation card cannot pin exactly. Cancel it from the Dispatch screen (fee waiver and invoice review live there). Nothing was changed.';
 
 function ibWritesDisabled() {

@@ -474,6 +474,50 @@ const synthCancellationBase = () => ({
   inspection_credit_reversal: null,
 });
 
+// Codex round-3 P1: two same-day visits for the same customer are
+// otherwise indistinguishable on the card — the window (pinned
+// automatically as part of preview.cancellation.appointment) makes the
+// "Cancel <service> on <date>, <window> for <customer>" line unambiguous.
+test('cancel_appointment: the appointment window is rendered in the cancel line when present', () => {
+  const c = buildContract({
+    toolName: 'cancel_appointment', params: {}, displayParams: {},
+    preview: { cancellation: { ...synthCancellationBase(), appointment: { ...synthCancellationBase().appointment, window: '1:00 PM–3:00 PM' } } },
+  });
+  expect(c.effects).toContainEqual(expect.objectContaining({
+    kind: 'operational',
+    label: 'Cancel pest_control on 2026-10-02, 1:00 PM–3:00 PM for Synthia Tester',
+  }));
+});
+
+test('cancel_appointment: no window on the row omits the clause — byte-identical to before this lane', () => {
+  const c = buildContract({
+    toolName: 'cancel_appointment', params: {}, displayParams: {},
+    preview: { cancellation: synthCancellationBase() },
+  });
+  expect(c.effects).toContainEqual(expect.objectContaining({
+    kind: 'operational',
+    label: 'Cancel pest_control on 2026-10-02 for Synthia Tester',
+  }));
+});
+
+// Two visits, same date, same customer, different window: the hash must
+// never collide (mirrors the identity_fingerprint drift guarantee — the
+// CARD itself must show operators the difference, not just refuse silently
+// later).
+test('cancel_appointment: two same-day visits with different windows render different lines and hash differently', () => {
+  const morning = buildContract({
+    toolName: 'cancel_appointment', params: {}, displayParams: {},
+    preview: { cancellation: { ...synthCancellationBase(), appointment: { ...synthCancellationBase().appointment, window: '8:00 AM–11:00 AM' } } },
+  });
+  const afternoon = buildContract({
+    toolName: 'cancel_appointment', params: {}, displayParams: {},
+    preview: { cancellation: { ...synthCancellationBase(), appointment: { ...synthCancellationBase().appointment, window: '1:00 PM–3:00 PM' } } },
+  });
+  expect(morning.effects.some((e) => e.label.includes('8:00 AM'))).toBe(true);
+  expect(afternoon.effects.some((e) => e.label.includes('1:00 PM'))).toBe(true);
+  expect(contractHash(morning)).not.toBe(contractHash(afternoon));
+});
+
 test('cancel_appointment: a late-cancel fee that applies is disclosed with its exact amount', () => {
   const c = buildContract({
     toolName: 'cancel_appointment',
