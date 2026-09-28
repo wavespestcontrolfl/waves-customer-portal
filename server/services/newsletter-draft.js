@@ -1998,19 +1998,37 @@ ${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
 }
 
 /**
- * Occurrence snapshot for a send's event list: { [eventId]: start_at ISO },
- * read when the list is saved. Written together with event_ids by every
- * Compose save (POST / PATCH /sends), because the Compose client renders the
- * email from the events' current dates and saves minutes later; the sender
- * stamps last_featured_occurrence_at from it.
+ * { [eventId]: start_at ISO } for drafted events, from their fact-locked
+ * startAt (lockEventFactsFromDb): the dates the rendered email shows.
  */
-async function snapshotEventOccurrences(knex, eventIds) {
+function lockedEventOccurrences(events) {
+  return Object.fromEntries((Array.isArray(events) ? events : [])
+    .filter((e) => e && e.eventId && e.startAt && !Number.isNaN(new Date(e.startAt).getTime()))
+    .map((e) => [String(e.eventId), new Date(e.startAt).toISOString()]));
+}
+
+/**
+ * The occurrence map saved with a send's event list. The Compose client
+ * carries the map the draft generator returned (`provided`, the dates the
+ * email was rendered with); only entries for listed ids with a valid date
+ * are kept. An id without one (a hand-picked list, an old client) falls back
+ * to the row's start_at at save time. The sender stamps
+ * last_featured_occurrence_at from this map.
+ */
+async function resolveEventOccurrences(knex, eventIds, provided) {
   const ids = (Array.isArray(eventIds) ? eventIds : []).map(String).filter(Boolean);
-  if (!ids.length) return JSON.stringify({});
-  const rows = await knex('events_raw').whereIn('id', ids).select('id', 'start_at');
-  return JSON.stringify(Object.fromEntries(rows
-    .filter((r) => r.start_at)
-    .map((r) => [String(r.id), new Date(r.start_at).toISOString()])));
+  const given = provided && typeof provided === 'object' && !Array.isArray(provided) ? provided : {};
+  const out = {};
+  for (const id of ids) {
+    const value = given[id];
+    if (typeof value === 'string' && !Number.isNaN(new Date(value).getTime())) out[id] = new Date(value).toISOString();
+  }
+  const missing = ids.filter((id) => !out[id]);
+  if (missing.length) {
+    const rows = await knex('events_raw').whereIn('id', missing).select('id', 'start_at');
+    for (const r of rows) if (r.start_at) out[String(r.id)] = new Date(r.start_at).toISOString();
+  }
+  return JSON.stringify(out);
 }
 
 async function persistNewsletterDraft({ draft, prompt, newsletterType, knex = db }) {
@@ -2041,16 +2059,15 @@ async function persistNewsletterDraft({ draft, prompt, newsletterType, knex = db
     event_ids: JSON.stringify((draft.events || []).map((e) => e.eventId).filter(Boolean)),
     // Locked occurrence per event, stamped as last_featured_occurrence_at at
     // send (the row itself may be advanced in place before delivery).
-    event_occurrences: JSON.stringify(Object.fromEntries((draft.events || [])
-      .filter((e) => e.eventId && e.startAt)
-      .map((e) => [String(e.eventId), new Date(e.startAt).toISOString()]))),
+    event_occurrences: JSON.stringify(lockedEventOccurrences(draft.events)),
   }).returning('*');
   return send;
 }
 
 module.exports = {
   INTERACTIVE_DRAFT_TIMEOUT_MS,
-  snapshotEventOccurrences,
+  lockedEventOccurrences,
+  resolveEventOccurrences,
   resolveIssueReference,
   createNewsletterDraft,
   persistNewsletterDraft,

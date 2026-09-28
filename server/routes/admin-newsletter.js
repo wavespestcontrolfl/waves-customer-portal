@@ -39,7 +39,8 @@ const {
 const { parseETDateTime, addETDays, etDateString, etParts } = require('../utils/datetime-et');
 const { validateNewsletterDraft, lockedPricesForSend } = require('../services/newsletter-validator');
 const {
-  createNewsletterDraft, persistNewsletterDraft, INTERACTIVE_DRAFT_TIMEOUT_MS, snapshotEventOccurrences,
+  createNewsletterDraft, persistNewsletterDraft, INTERACTIVE_DRAFT_TIMEOUT_MS,
+  lockedEventOccurrences, resolveEventOccurrences,
 } = require('../services/newsletter-draft');
 const {
   validateFlagshipEventSelection,
@@ -615,7 +616,7 @@ router.post('/sends', async (req, res, next) => {
       created_by: req.technicianId || null,
       auto_share_social: autoShareSocial !== false,
       event_ids: JSON.stringify(safeEventIds),
-      event_occurrences: await snapshotEventOccurrences(db, safeEventIds),
+      event_occurrences: await resolveEventOccurrences(db, safeEventIds, req.body?.eventOccurrences),
     }).returning('*');
 
     res.json({ success: true, send: row });
@@ -727,7 +728,9 @@ router.patch('/sends/:id', async (req, res, next) => {
       auto_share_social: autoShareSocial !== undefined ? autoShareSocial : send.auto_share_social,
       event_ids: nextEventIds,
       // The occurrence snapshot moves with the event list.
-      ...(eventIds !== undefined ? { event_occurrences: await snapshotEventOccurrences(db, JSON.parse(nextEventIds)) } : {}),
+      ...(eventIds !== undefined
+        ? { event_occurrences: await resolveEventOccurrences(db, JSON.parse(nextEventIds), req.body?.eventOccurrences) }
+        : {}),
       updated_at: new Date(),
       ...(invalidatesProof ? {
         status: 'draft',
@@ -1283,7 +1286,11 @@ router.post('/draft-ai', aiDraftLimiter, async (req, res) => {
       // Return the locked event ids so the Compose flow can carry them into
       // the /sends save (the saved row needs them for times_featured tracking).
       const lockedEventIds = (draft.events || []).map((e) => e.eventId).filter(Boolean);
-      return res.json({ success: true, draft, eventIds: lockedEventIds });
+      // And the dates the rendered email shows, saved with the ids so the
+      // sender records the occurrence that actually went out.
+      return res.json({
+        success: true, draft, eventIds: lockedEventIds, eventOccurrences: lockedEventOccurrences(draft.events),
+      });
     }
 
     // ── Pest Insider flow: structured humor-sandwich draft ────────────

@@ -54,3 +54,30 @@ describe('markEventsFeatured occurrence stamp', () => {
     expect(updates[0].last_featured_occurrence_at).toEqual(ROW.start_at);
   });
 });
+
+describe('occurrence map saved with a send', () => {
+  const { lockedEventOccurrences, resolveEventOccurrences } = jest.requireActual('../services/newsletter-draft');
+
+  test('lockedEventOccurrences maps drafted events to their locked start', () => {
+    expect(lockedEventOccurrences([
+      { eventId: 'a', startAt: new Date('2026-12-31T23:00:00Z') },
+      { eventId: 'b', startAt: null },
+      { eventId: null, startAt: '2026-12-31T23:00:00Z' },
+    ])).toEqual({ a: '2026-12-31T23:00:00.000Z' });
+  });
+
+  test('resolveEventOccurrences keeps the drafted dates, drops unlisted or invalid ones, and fills the rest from rows', async () => {
+    const knex = jest.fn(() => {
+      const q = {};
+      q.whereIn = jest.fn(() => q);
+      q.select = jest.fn(async () => [{ id: 'c', start_at: new Date('2027-01-05T15:00:00Z') }]);
+      return q;
+    });
+    const json = await resolveEventOccurrences(knex, ['a', 'c'], {
+      a: '2026-12-31T23:00:00.000Z', // drafted date wins over the live row
+      c: 'not-a-date',
+      z: '2026-12-31T23:00:00.000Z', // not in the saved list
+    });
+    expect(JSON.parse(json)).toEqual({ a: '2026-12-31T23:00:00.000Z', c: '2027-01-05T15:00:00.000Z' });
+  });
+});
