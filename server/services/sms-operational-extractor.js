@@ -9,7 +9,7 @@ const { parseQuotedETDeadline } = require('../utils/datetime-et');
 const { scrubPans, scrubSegments } = require('../utils/pan-scrub');
 
 // The shared proposal rule_version column is varchar(16).
-const VERSION = 'sms-ops-v19';
+const VERSION = 'sms-ops-v20';
 const FACT_FIELDS = Object.freeze([
   'contact_preference', 'irrigation_controller_location', 'irrigation_schedule_notes',
   'irrigation_issues', 'parking_notes', 'pet_details', 'access_notes', 'special_instructions',
@@ -35,7 +35,7 @@ const SCHEMA = {
       type: 'array', maxItems: 12,
       items: {
         type: 'object', additionalProperties: false,
-        required: ['party', 'kind', 'description', 'quote', 'basis', 'property_id', 'due_text', 'due_at', 'answered_by_payment'],
+        required: ['party', 'kind', 'description', 'quote', 'basis', 'property_id', 'due_text', 'due_at', 'answered_by_payment', 'answered_by_reply'],
         properties: {
           party: { enum: ['waves', 'customer'] }, kind: { enum: COMMITMENT_KINDS },
           description: { type: 'string', minLength: 3, maxLength: 240 },
@@ -45,6 +45,7 @@ const SCHEMA = {
           due_text: { type: ['string', 'null'], maxLength: 100 },
           due_at: { type: ['string', 'null'] },
           answered_by_payment: { type: 'boolean' },
+          answered_by_reply: { type: 'boolean' },
         },
       },
     },
@@ -169,6 +170,7 @@ Obligations (capture enabled: ${captureCommitments}; when false return obligatio
 - Preserve exclusions, partial approvals, dependencies, reported product failures and whether the customer only wants advice. A bare thanks, reaction, spam, or acknowledgment creates no new work.
 - Do not call a reply fulfillment. "I'll send the estimate" still means an estimate is owed.
 - answered_by_payment is true only when the customer's own payment arriving (going through, being received, posting, clearing, being charged) would answer the obligation: "did my payment go through?", "did you get my check?". It is false for money going back to the customer however it is worded (a refund, reversal, void, reimbursement, chargeback, "my money back"), a disputed or wrong charge, a change of how the customer pays (a new card, autopay, splitting charges), a billing explanation, a receipt or other document, and every obligation that is not about a payment arriving. Judge the obligation itself: a refund the customer only mentions or declines beside a payment question does not make that question false.
+- answered_by_reply is true only when the obligation is a plain question asking Waves for information that a staff reply itself would fully answer: a number, an amount, a price explanation, a yes/no fact, or a schedule fact already decided ("what's the Zelle number?", "I thought it was $125/quarter", "are you open Saturdays?"). It is false for every request that Waves DO something — change, cancel, book, come out, fix, send a document (an estimate, report, receipt, paperwork), refund — for a complaint ("still seeing ants"), and for a customer-owned promise. A reply-answerable question stays false the moment it is mixed with an action ask in the same obligation.
 - due_text must quote the timing actually stated in the current message. due_at is an ISO timestamp ONLY for an explicitly stated date AND clock time, resolved from that message's timestamp in America/New_York. For tomorrow/afternoon/end of day without a clock time, keep due_at=null. Never invent a default deadline.
 
 Additional properties (capture enabled: ${captureAdditionalProperties}; when false return additional_properties=[]):
