@@ -6689,7 +6689,13 @@ async function createTermForAnnualPrepay({
     // termite parent is a durable parent_term_moved refusal for its unpaid
     // renewal — withdraw it right after this edit commits.
     if (windowMoved && existing.annual_plan_version) {
-      await require('./termite-annual-renewal-charge').afterParentChange(conn, existing.id, 'the prior term dates were changed');
+      // Codex #5197 r1 P1: the edited term may be the unpaid SUCCESSOR
+      // itself (edited through its own prepay invoice) — then it is the
+      // one that no longer abuts its parent, and it is withdrawn directly.
+      const successorItself = Boolean(existing.renewed_from_term_id);
+      await require('./termite-annual-renewal-charge').afterParentChange(
+        conn, existing.id, successorItself ? 'the renewal dates were changed' : 'the prior term dates were changed', { successorItself },
+      );
     }
     // When the coverage window is edited (start/end actually supplied), detach
     // any visits attachScheduledServices() stamped under the old window that now
@@ -8695,6 +8701,11 @@ const heldParentDecisionLockStore = new AsyncLocalStorage();
 // session's locks, nested writers must take their own transaction locks
 // again instead of trusting the stale marker.
 const heldDecisionSessions = () => heldParentDecisionLockStore.getStore()?.sessions || [];
+// Run fn OUTSIDE every held-lock context this async tree captured (review of
+// #5197): an after-commit hook attached inside withParentDecisionLock would
+// otherwise inherit the store and read the session's keys as still held
+// after that session released them cleanly — and then skip its own gate.
+const runOutsideParentDecisionLocks = (fn) => heldParentDecisionLockStore.exit(fn);
 const heldDecisionKeys = () => {
   const live = new Set();
   for (const session of heldDecisionSessions()) {
@@ -10113,6 +10124,7 @@ module.exports = {
   // takes — exported so termite-annual-renewal-charge.js's charge path
   // can hold the SAME lock across its own Stripe submission.
   withParentDecisionLock,
+  runOutsideParentDecisionLocks,
   assertParentDecisionLockAlive,
   // Chokepoint B (Codex #4971 round-3 P1 / pre-push lock order): the FIRST
   // lock of a writer's own transaction, keyed on the termite terms tied to

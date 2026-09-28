@@ -431,6 +431,16 @@ postgres('termite renewal invoices — the Bill-To fence through pay-link handof
     expect(await successorStatus(successor.id)).toBe('cancelled');
   });
 
+  test('editing the unpaid renewal\'s OWN dates (through its prepay invoice) withdraws it at once', async () => {
+    const Renewals = require('../services/annual-prepay-renewals');
+    const { customerId, invoiceId, successor } = await queuedRenewal();
+    // The renewal starts the day after its parent ends (2026-09-27); moving
+    // it by a day means it no longer abuts the parent.
+    await Renewals.createTermForAnnualPrepay({ customerId, prepayInvoiceId: invoiceId, termStart: '2026-09-28', termEnd: '2027-09-27' });
+    expect(await readInvoice(invoiceId)).toMatchObject({ status: 'void' });
+    expect(await successorStatus(successor.id)).toBe('cancelled');
+  });
+
   test('a renew decision on the parent leaves the renewal collectible', async () => {
     const Renewals = require('../services/annual-prepay-renewals');
     const { invoiceId, successor } = await queuedRenewal();

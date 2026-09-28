@@ -249,10 +249,15 @@ describe('termite annual renewal charge', () => {
   describe('afterParentChange (synchronous withdrawal dispatch)', () => {
     function withdrawalDb() {
       const successorLookup = jest.fn(async () => null);
-      const db = Object.assign(jest.fn(() => ({
-        where: jest.fn(() => ({ whereNotNull: jest.fn(() => ({ first: successorLookup })) })),
-      })), { transaction: jest.fn() });
-      return { db, successorLookup };
+      const whereCalls = [];
+      const chain = {};
+      for (const m of ['where', 'whereIn', 'whereNotNull', 'whereNull', 'whereRaw']) {
+        chain[m] = jest.fn((...args) => { if (m === 'where') whereCalls.push(args[0]); return chain; });
+      }
+      chain.first = successorLookup;
+      chain.select = jest.fn(async () => []);
+      const db = Object.assign(jest.fn(() => chain), { transaction: jest.fn() });
+      return { db, successorLookup, whereCalls };
     }
     const flush = async () => { await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); };
 
@@ -270,6 +275,25 @@ describe('termite annual renewal charge', () => {
       expect(successorLookup).not.toHaveBeenCalled();
       commit();
       await flush();
+      expect(successorLookup).toHaveBeenCalledTimes(1);
+    });
+
+    // Review of #5197: the deferred run must not inherit the writer's held-lock
+    // context — it runs through runOutsideParentDecisionLocks.
+    test('a deferred run executes outside the captured lock context', async () => {
+      mockCommon();
+      process.env.GATE_TERMITE_ANNUAL_PLAN = 'true';
+      const { db, successorLookup } = withdrawalDb();
+      jest.doMock('../models/db', () => db);
+      const runOutsideParentDecisionLocks = jest.fn((fn) => fn());
+      jest.doMock('../services/annual-prepay-renewals', () => ({
+        ...jest.requireActual('../services/annual-prepay-renewals'),
+        runOutsideParentDecisionLocks,
+      }));
+      const { afterParentChange } = require('../services/termite-annual-renewal-charge');
+      await afterParentChange({ executionPromise: Promise.resolve() }, 'parent-1', 'test');
+      await flush();
+      expect(runOutsideParentDecisionLocks).toHaveBeenCalledTimes(1);
       expect(successorLookup).toHaveBeenCalledTimes(1);
     });
 
@@ -294,6 +318,27 @@ describe('termite annual renewal charge', () => {
       const { afterParentChange } = require('../services/termite-annual-renewal-charge');
       await afterParentChange(db, 'parent-1', 'test');
       expect(successorLookup).toHaveBeenCalledTimes(1);
+    });
+
+    test('successorItself: the edited term is the unpaid renewal — it is looked up by its own id', async () => {
+      mockCommon();
+      process.env.GATE_TERMITE_ANNUAL_PLAN = 'true';
+      const { db, successorLookup, whereCalls } = withdrawalDb();
+      jest.doMock('../models/db', () => db);
+      const { afterParentChange } = require('../services/termite-annual-renewal-charge');
+      await afterParentChange(db, 'succ-1', 'test', { successorItself: true });
+      expect(whereCalls).toContainEqual({ id: 'succ-1', status: 'payment_pending' });
+      expect(successorLookup).toHaveBeenCalledTimes(1);
+    });
+
+    test('a lookup that throws is contained — the caller (already committed) never sees it', async () => {
+      mockCommon();
+      process.env.GATE_TERMITE_ANNUAL_PLAN = 'true';
+      const db = Object.assign(jest.fn(() => { throw new Error('connection reset'); }), { transaction: jest.fn() });
+      jest.doMock('../models/db', () => db);
+      const { afterParentChange, withdrawUnpaidSuccessorsOfCustomers } = require('../services/termite-annual-renewal-charge');
+      await expect(afterParentChange(db, 'parent-1', 'test')).resolves.toBeNull();
+      await expect(withdrawUnpaidSuccessorsOfCustomers(['cust-1'], 'test')).resolves.toEqual([]);
     });
 
     test('gate off: nothing is looked up (the feature is dark)', async () => {

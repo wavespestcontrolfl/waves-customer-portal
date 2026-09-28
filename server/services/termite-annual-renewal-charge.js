@@ -1442,7 +1442,12 @@ async function withCustomerDeletionGate(customerIds, fn) {
   // unpaid renewal pay links die now, not at the next sweep — after the
   // deletion committed and its transaction-level gate released, on the
   // renewal gate the withdrawal itself takes.
-  if (ids.length) await withdrawUnpaidSuccessorsOfCustomers(ids, 'the customer deleted their account');
+  // Never lets a withdrawal problem change the committed deletion's outcome.
+  if (ids.length) {
+    await withdrawUnpaidSuccessorsOfCustomers(ids, 'the customer deleted their account').catch((err) => {
+      logger.error(`[termite-annual-renewal] synchronous withdrawal after account deletion failed: ${err.message}`);
+    });
+  }
   return result;
 }
 
@@ -1466,24 +1471,45 @@ async function withCustomerDeletionGate(customerIds, fn) {
 // anything this path could not finish. Gated like the sweep.
 async function withdrawUnpaidSuccessorOfParent(parentTermId, reason, conn = db) {
   if (!parentTermId || !termiteAnnualRenewalChargeLive()) return null;
-  const successor = await conn('annual_prepay_terms')
-    .where({ renewed_from_term_id: parentTermId, status: PAYMENT_PENDING_STATUS })
-    .whereNotNull('annual_plan_version')
-    .first();
+  const successor = await whereWithdrawableByHook(
+    conn('annual_prepay_terms').where({ renewed_from_term_id: parentTermId, status: PAYMENT_PENDING_STATUS }),
+  ).first();
   if (!successor) return null;
   logger.info(`[termite-annual-renewal] withdrawing successor ${successor.id} now — ${reason}`);
   return withdrawIfParentDurablyIneligible(successor, conn);
 }
 
+// The rows the synchronous hooks may touch — the SAME ownership rules the
+// sweep's own scan applies (withdrawSuccessorsOfIneligibleParents): a
+// dispute-suspended successor belongs to its dispute, a started lapse to
+// the lapse state machine, a manual_review row to staff.
+function whereWithdrawableByHook(query) {
+  return query
+    .whereNotNull('annual_plan_version')
+    .whereNull('dispute_suspended_at')
+    .whereNull('renewal_lapse_started_at')
+    .whereRaw("coalesce(renewal_lapse_outcome, '') <> 'manual_review'");
+}
+
 async function withdrawUnpaidSuccessorsOfCustomers(customerIds, reason, conn = db) {
   const ids = (customerIds || []).filter(Boolean).map(String);
   if (!ids.length || !termiteAnnualRenewalChargeLive()) return [];
-  const successors = await conn('annual_prepay_terms')
-    .whereIn('customer_id', ids)
-    .where({ status: PAYMENT_PENDING_STATUS })
-    .whereNotNull('renewed_from_term_id')
-    .whereNotNull('annual_plan_version')
-    .select('*');
+  // Codex #5197 r1 P2: the writer that calls this has ALREADY committed
+  // (the deletion / archive) — nothing here may change its outcome, so the
+  // lookup is as best-effort as the per-successor work below; the sweep is
+  // the backstop.
+  let successors;
+  try {
+    successors = await whereWithdrawableByHook(
+      conn('annual_prepay_terms')
+        .whereIn('customer_id', ids)
+        .where({ status: PAYMENT_PENDING_STATUS })
+        .whereNotNull('renewed_from_term_id'),
+    ).select('*');
+  } catch (err) {
+    logger.error(`[termite-annual-renewal] synchronous withdrawal lookup failed for customers ${ids.join(', ')}: ${err.message}`);
+    return [];
+  }
   const outcomes = [];
   for (const successor of successors) {
     try {
@@ -1497,20 +1523,48 @@ async function withdrawUnpaidSuccessorsOfCustomers(customerIds, reason, conn = d
   return outcomes;
 }
 
+// Codex #5197 r1 P1: the edited term may itself be the SUCCESSOR (the
+// admin invoice flow edits an existing unpaid renewal's dates through its
+// prepay invoice) — a moved successor no longer abuts its own parent, which
+// is the same durable parent_term_moved refusal read from the other side.
+// Withdraw the successor itself; nothing to look up.
+async function withdrawSuccessorIfNoLongerBacked(successorId, reason, conn = db) {
+  if (!successorId || !termiteAnnualRenewalChargeLive()) return null;
+  const successor = await whereWithdrawableByHook(
+    conn('annual_prepay_terms')
+      .where({ id: successorId, status: PAYMENT_PENDING_STATUS })
+      .whereNotNull('renewed_from_term_id'),
+  ).first();
+  if (!successor) return null;
+  logger.info(`[termite-annual-renewal] withdrawing successor ${successor.id} now — ${reason}`);
+  return withdrawIfParentDurablyIneligible(successor, conn);
+}
+
 // The one entry every parent-change writer calls. `conn` is the writer's
 // own handle: a transaction (or a savepoint inside one) defers the
 // withdrawal to the OUTERMOST commit (commitPromiseOf — a rollback runs
 // nothing); the root handle means the write already committed, so the
 // withdrawal runs now and the caller awaits it. Never throws: the sweep is
 // the backstop, and a writer's own success must not depend on this.
-function afterParentChange(conn, parentTermId, reason) {
-  const run = () => withdrawUnpaidSuccessorOfParent(parentTermId, reason).catch((err) => {
-    logger.error(`[termite-annual-renewal] synchronous withdrawal after parent change failed for term ${parentTermId}: ${err.message}`);
+function afterParentChange(conn, parentTermId, reason, { successorItself = false } = {}) {
+  const withdraw = successorItself ? withdrawSuccessorIfNoLongerBacked : withdrawUnpaidSuccessorOfParent;
+  const run = () => withdraw(parentTermId, reason).catch((err) => {
+    logger.error(`[termite-annual-renewal] synchronous withdrawal after term change failed for term ${parentTermId}: ${err.message}`);
     return null;
   });
   const commit = commitPromiseOf(conn);
   if (commit) {
-    commit.then(run, () => null);
+    // The deferred run executes OUTSIDE the writer's captured lock context
+    // (review of #5197): a writer that itself ran under
+    // withParentDecisionLock would otherwise hand this hook a store that
+    // still lists its keys as held after the session released them, and
+    // withRenewalGate would skip the very gate this must take fresh.
+    // (knex resolves executionPromise on an explicit no-argument
+    // trx.rollback() too; the under-gate re-judge then finds the parent
+    // still authorizing and withdraws nothing.)
+    const { runOutsideParentDecisionLocks } = require('./annual-prepay-renewals');
+    const outside = typeof runOutsideParentDecisionLocks === 'function' ? () => runOutsideParentDecisionLocks(run) : run;
+    commit.then(outside, () => null);
     return Promise.resolve(null);
   }
   return run();
@@ -4338,6 +4392,8 @@ module.exports = {
   withCustomerDeletionGate,
   afterParentChange,
   withdrawUnpaidSuccessorOfParent,
+  withdrawSuccessorIfNoLongerBacked,
+  withdrawUnpaidSuccessorsOfCustomers,
   renewalPaymentRefusal,
   withRenewalPaymentClearance,
   termiteAnnualRenewalChargeLive,
