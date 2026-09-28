@@ -72,7 +72,8 @@ empty turf answer. `internal.identity.lane` records the choice.
   headline, possibilities and next step. `both` is compatible with either
   read.
 - **Unusable** → workup: fixed unusable headline, no named identity or
-  condition, `next_step_hint: unclear`, tier `needs_more_evidence`;
+  condition, no possibilities or observations, the retake prompt as
+  `settle_it`, `next_step_hint: unclear`, tier `needs_more_evidence`;
   identify: the `unknown` answer, no candidates or evidence, a retake
   prompt, tier `needs_more_evidence` (the same gate in both modes).
 

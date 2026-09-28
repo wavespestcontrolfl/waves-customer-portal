@@ -1050,6 +1050,27 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
         expect(result.v2.next_step_hint.kind).toBe('specialist');
       });
 
+      test('an unusable photo shows no possibilities, observations or condition-specific settle_it (retake instead)', () => {
+        const built = engine.buildWorkup({
+          subject: 'lawn',
+          possibilities: [possibility('fixture-drought', 0.9, [1])],
+          turfCandidates: [],
+          weedCandidates: [],
+          hostCandidates: [],
+          observedTerms: ['browning'],
+          currentMonth: 6,
+          chips: {},
+          context: {},
+          photosCount: 1,
+          quality: { usable: false, issue: 'blurry' },
+        });
+        expect(built.possibilities).toEqual([]);
+        expect(built.observed).toEqual([]);
+        expect(built.settle_it).toEqual({ kind: 'retake', text: engine.RETAKE_TEXT.lawn });
+        expect(built.next_step_hint.kind).toBe('unclear');
+        expect(built.referral).toBeNull();
+      });
+
       test('an off-catalog top below the threshold escalates too', async () => {
         queue(
           candidatesLeg({ host: [idItem('', 0.5, { off_catalog_name: 'Foxtail palm', group_id: 'palms' })] }),

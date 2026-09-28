@@ -913,23 +913,23 @@ function buildWorkup(ctx) {
   // block naming a manageable top possibility. Only the DISPLAY list
   // (possibilities block, observed, settle_it, next_step_hint — all of
   // which the contract itself scopes to "the top 3"/"the top 2") is capped.
-  const allApprovedPossibilities = possibilities.filter((p) => isApproved(p.entry))
+  // An unusable photo (a leg said `usable:false` or `shows: nothing`) shows
+  // nothing read off it: no named answer, no possibilities, observations or
+  // condition-specific `settle_it` (the retake prompt instead — pre-push
+  // audit on #5186 r1), an `unclear` next step, the fixed headline, and a
+  // needs_more_evidence tier. A subject-conflicted one (providers split
+  // `plant` vs `damage`) names nothing but keeps its symptom workup.
+  const gate = namingGateFor(quality);
+  const allApprovedPossibilities = gate.unusable ? [] : possibilities.filter((p) => isApproved(p.entry))
     .sort((a, b) => b.confidence - a.confidence);
   const approvedPossibilities = allApprovedPossibilities
     .slice(0, 3)
     .map((p) => ({ ...p, localCtx: { currentMonth, chips, context: ctx.context || {} } }));
 
-  // An unusable photo (a leg said `usable:false` or `shows: nothing`) never
-  // carries a named answer, a treatment-shaped next step, a term-based
-  // headline or a confident tier; a subject-conflicted one (providers split
-  // `plant` vs `damage`) names nothing but keeps its symptom workup.
-  const gate = namingGateFor(quality);
   const { plant, weeds, accountTurf } = workupSubjectFor(ctx, gate.blocked);
   const namedAnswer = gate.blocked ? null : namedAnswerFor(allApprovedPossibilities, allApprovedPossibilities[0] || null, conditionFlags);
   const answer = workupAnswerFor(namedAnswer, gate.unusable ? [] : (ctx.observedTerms || []), subject);
-  const { hint: nextStepHint, referral } = gate.unusable
-    ? { hint: { kind: 'unclear', text: NEXT_STEP_TEMPLATES.unclear }, referral: null }
-    : nextStepHintFor(approvedPossibilities);
+  const { hint: nextStepHint, referral } = nextStepHintFor(approvedPossibilities);
 
   return {
     version: 2,
