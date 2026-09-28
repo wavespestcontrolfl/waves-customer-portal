@@ -69,10 +69,22 @@ const STOPWORDS = new Set(('a an the i me my we our you your it this that these 
   + 'will would should please like want need to for from of on in with is are be have has and or what how '
   + 'get find show search list').split(' '));
 
-// The reply told the operator the bar could not do something. Nothing is
-// recorded without it: an exploratory search or a retried tool that ended
-// in a real answer is not a gap.
-const DECLINE_RE = /\b(?:can(?:not|'t|’t)|could(?: not|n't|n’t)|unable to|not able to|no tool|don(?:'t|’t) have (?:a|any) (?:tool|way))\b|\b(?:isn(?:'t|’t)|not) (?:available|supported|possible)\b/i;
+// The reply told the operator THE BAR cannot do something — a refusal tied to
+// its tools or to what it supports, not "I couldn't find any matching
+// invoices" or "that time is not available" (a read that worked). Nothing
+// is recorded without it: an exploratory search or a retried tool that
+// ended in a real answer is not a gap.
+const DECLINE_RE = new RegExp([
+  String.raw`\bno tools?\b`,
+  String.raw`\bdon['’]t have (?:a|an|any)\b[^.!?\n]{0,40}?\b(?:tools?|way|capability)\b`,
+  String.raw`\b(?:isn['’]t|not|aren['’]t) (?:currently )?supported\b`,
+  String.raw`\bno way to\b`,
+  String.raw`\b(?:not|isn['’]t) something i can\b`,
+  String.raw`\boutside (?:of )?what i can\b`,
+  // "can't / couldn't / unable to …" only when the sentence ties it to the bar
+  String.raw`\b(?:can(?:not|['’]t)|could(?: not|n['’]t)|unable to|not able to)\b[^.!?\n]{0,80}?\b(?:from here|(?:from|in|through|with) (?:the|this) bar|directly)\b`,
+  String.raw`\b(?:isn['’]t|not) (?:available|possible) (?:from here|(?:from|in|through) (?:the|this) bar)\b`,
+].join('|'), 'i');
 
 // Kill switch (CLAUDE.md rule 14): AGENT_GAP_REPORTS=off stops the prompt
 // line, the collector's writes and the Monday digest. Read at call time, so

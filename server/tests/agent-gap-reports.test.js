@@ -326,13 +326,22 @@ describe('agent-gap-reports', () => {
       await expect(collector.flush({ reply: DECLINE })).resolves.toBeUndefined();
     });
 
-    test('the decline check recognizes the phrasings the bar uses', () => {
+    test('the decline check recognizes refusals the bar has actually given', () => {
       const { _private: { DECLINE_RE } } = load();
-      for (const reply of ["I can't merge records directly", 'I cannot deactivate it from the bar', 'I could not find a way to do that.',
-        "There's no tool in this bar that adds a property", "I don't have a tool for refunds", 'That isn’t available from here']) {
+      for (const reply of ["I can't merge records directly", 'I cannot deactivate, edit, or delete it from the bar',
+        'I could not find a way to do that from the bar.', "There's no tool in this bar that adds a property",
+        "I don't have an inventory tool in this bar", 'That isn’t available from here', 'Recurring series edits are not supported yet',
+        'This is a system issue I can’t work around from here', 'There is no way to issue a refund']) {
         expect(DECLINE_RE.test(reply)).toBe(true);
       }
-      expect(DECLINE_RE.test('Done — the visit moved to Thursday at 9 AM.')).toBe(false);
+    });
+
+    test('a read that worked but found nothing, or a request missing information, is not a decline', () => {
+      const { _private: { DECLINE_RE } } = load();
+      for (const reply of ["I couldn't find any matching invoices", 'that time is not available', "I can't confirm the price without the invoice",
+        "I can't switch it without the rental's street address", 'Done — the visit moved to Thursday at 9 AM.']) {
+        expect(DECLINE_RE.test(reply)).toBe(false);
+      }
     });
   });
 });

@@ -1276,7 +1276,7 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
       mockModel.mockResolvedValueOnce(tools('discover_capabilities', { query }, 'discover-miss'))
         .mockResolvedValueOnce(tools('discover_capabilities', { query: 'update customer fields' }, 'discover-hit'))
         .mockResolvedValueOnce(tools('update_customer', { customer_id: customerB, updates: { notes: 'Synthetic recovered note' } }, 'update'))
-        .mockResolvedValueOnce(answer("I can't do the first part, but the note update is awaiting confirmation."));
+        .mockResolvedValueOnce(answer("I can't do the first part from the bar, but the note update is awaiting confirmation."));
       const result = await api('/query', request('First try something odd, then update this customer'));
       expect(result.status).toBe(200);
       const miss = await db('agent_gap_reports').where({ summary: query }).first();
