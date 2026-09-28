@@ -1185,14 +1185,14 @@ const ATTRIBUTED_SOURCE_RE = /\b(?:[Aa]ccording to|[Pp]er|[Rr]eported by|[Pp]ubl
 // finite authority list ("Florida Forest Service reports ..."). Require an
 // institutional head noun so a sentence-leading generic group such as
 // "Homeowners report" does not become a named source merely by casing.
-const DIRECT_INSTITUTION_SOURCE_RE = /\b((?:The\s+)?(?:[A-Z][\w&.'’-]*\s+){1,7}(?:Service|Laboratory|Department|Agency|Institute|University|Extension|District|Center|Centre|Commission|Council|Office|Association|Society|Foundation|Administration|Bureau|Authority|Program|Survey|Clinic|Hospital))(?:'s|’s)?\s+(?:recommends?|says|notes?|reports?|advises?|found|finds|warns?|tracks?|lists?|states?|requires?|publishes?|estimates?|confirms?|defines?)\b/g;
+const DIRECT_INSTITUTION_SOURCE_RE = /\b((?:The\s+)?(?:[A-Z][\w&.'’-]*\s+){1,7}(?:Service|Laboratory|Department|Agency|Institute|University|Extension|District|Center|Centre|Commission|Council|Office|Association|Society|Foundation|Administration|Bureau|Authority|Program|Survey|Clinic|Hospital|Organization|Organisation|Institution|Station|Museum|Garden|Gardens))(?:'s|’s)?\s+(?:recommends?|says|notes?|reports?|advises?|found|finds|warns?|tracks?|lists?|states?|requires?|publishes?|estimates?|confirms?|defines?)\b/g;
 const OWN_COMPANY_RE = /^(?:the\s+)?Waves\b/i;
 // Capitalization is not evidence that a source is specific. These generic
 // source head nouns are common LLM attribution filler and must not satisfy
 // the named-source contract even when arbitrary title-cased modifiers make
 // the whole phrase look proper ("Leading Experts", "Trusted Research").
 const GENERIC_SOURCE_HEAD_RE = /\b(?:authorities|authority|experts?|officials?|professionals?|research|researchers?|scientists?|specialists?|studies|study)\s*$/i;
-const SPECIFIC_SOURCE_ORG_RE = /\b(?:Service|Laboratory|Department|Agency|Institute|University|Extension|District|Center|Centre|Commission|Council|Office|Association|Society|Foundation|Administration|Bureau|Authority|Program|Survey|Clinic|Hospital)\b/i;
+const SPECIFIC_SOURCE_ORG_RE = /\b(?:Service|Laboratory|Department|Agency|Institute|University|Extension|District|Center|Centre|Commission|Council|Office|Association|Society|Foundation|Administration|Bureau|Authority|Program|Survey|Clinic|Hospital|Organization|Organisation|Institution|Station|Museum|Garden|Gardens)\b/i;
 const GENERIC_ORG_NAME_TOKEN_RE = /^(?:local|county|state|federal|national|regional|city|municipal|government|public|health|pest|control|industry|professional|professionals|management|community|trusted|leading|independent|official|recognized|respected|expert|research|science|scientific)$/i;
 const CREDENTIALED_PERSON_RE = /^(?:Dr|Prof|Professor)\.?\s+[A-Z][\w.'’-]+(?:\s+[A-Z][\w.'’-]+)+$/;
 const NAMED_PUBLICATION_RE = /^(?:Nature|Science|Consumer Reports|Scientific American|Journal of(?:\s+[A-Z][\w&.'’-]*){1,6}|(?:[A-Z][\w&.'’-]*\s+){0,5}(?:Journal|Review|Times|Tribune|Post|Herald|Magazine))$/;
@@ -1214,11 +1214,13 @@ function hasSpecificOrganizationName(source) {
   // Universities, extension offices, services, and laboratories commonly
   // have one distinctive name token (Cornell University, University of
   // Miami, Florida Forest Service), and so do centers, surveys, and clinics
-  // (National Hurricane Center, U.S. Geological Survey, Mayo Clinic) once
-  // the generic tokens are gone (Codex r4 P2). Looser heads such as Program
+  // (National Hurricane Center, U.S. Geological Survey, Mayo Clinic) and
+  // named organizations or stations (World Health Organization, Smithsonian
+  // Institution, Everglades Research and Education Station) once the generic
+  // tokens are gone (Codex r4/r5 P2). Looser heads such as Program
   // and Association need two, so locality-shaped filler like "Sarasota
   // County Program" does not become evidence merely through capitalization.
-  const distinctiveHead = /^(?:University|Extension|Service|Laboratory|Center|Centre|Survey|Clinic|Hospital)$/i.test(words[head]);
+  const distinctiveHead = /^(?:University|Extension|Service|Laboratory|Center|Centre|Survey|Clinic|Hospital|Organization|Organisation|Institution|Station|Museum|Garden|Gardens)$/i.test(words[head]);
   return identifying.length >= (distinctiveHead ? 1 : 2);
 }
 
@@ -1263,7 +1265,7 @@ function checkCitabilityNamedSources(draft, brief) {
 // as are bare years and bare counts ("3 ways", "2024") — those are not the
 // extractable measurements the nudge is after. Ranges ("3.5–4 inches",
 // "10-14 days") count once.
-const CONCRETE_SPECIFIC_RE = /(?<![$\d.])\d+(?:\.\d+)?(?:\s?(?:-|–|to)\s?\d+(?:\.\d+)?)?(?:\s*[-–—]\s*|\s*)(?:%|(?:percent|inch(?:es)?|feet|foot|ft\b|yards?|sq\.? ?ft|square feet|millimeters?|mm\b|centimeters?|cm\b|meters?|°\s?F|degrees|days?|weeks?|months?|hours?|minutes?|seconds?|mph|gallons?|ounces?|oz\b|pounds?|lbs?|acres?|applications?|treatments?|visits?|mowings?|times? (?:a|per) (?:year|month|week|day)|per (?:year|month|week|day|acre|1,?000 sq))\b)/gi;
+const CONCRETE_SPECIFIC_RE = /(?<![$\d.\/])\d+(?:\.\d+|\/\d+)?(?:\s?(?:-|–|to)\s?\d+(?:\.\d+|\/\d+)?)?(?:\s*[-–—]\s*|\s*)(?:%|(?:percent|inch(?:es)?|feet|foot|ft\b|yards?|sq\.? ?ft|square feet|millimeters?|mm\b|centimeters?|cm\b|meters?|°\s?F|degrees|days?|weeks?|months?|hours?|minutes?|seconds?|mph|gallons?|ounces?|oz\b|pounds?|lbs?|acres?|applications?|treatments?|visits?|mowings?|times? (?:a|per) (?:year|month|week|day)|per (?:year|month|week|day|acre|1,?000 sq))\b)/gi;
 const CALENDAR_WINDOW_RE = /\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?\s+\d{1,2}(?:st|nd|rd|th)?\s*(?:-|–|—|to|through)\s*(?:(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?\s+)?\d{1,2}(?:st|nd|rd|th)?\b/gi;
 
 // Vague stand-ins for a measurement — the prompt's own examples ("tall",
@@ -1287,7 +1289,7 @@ const UNIT_KEYS = [
 // compare equal while "4 inches" never stands in for "10–14 days".
 function measurementKey(match) {
   const m = match.toLowerCase().replace(/\s+/g, ' ').trim();
-  const num = m.match(/^(\d+(?:\.\d+)?)(?:\s?(?:-|–|to)\s?(\d+(?:\.\d+)?))?/);
+  const num = m.match(/^(\d+(?:\.\d+|\/\d+)?)(?:\s?(?:-|–|to)\s?(\d+(?:\.\d+|\/\d+)?))?/);
   let unit = m.slice(num[0].length).replace(/^[\s\-–—]+/, '').trim();
   unit = unit.replace(/^times? (?:a|per) /, 'times per ');
   const alias = UNIT_KEYS.find(([re]) => re.test(unit));

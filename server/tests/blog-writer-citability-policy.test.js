@@ -28,6 +28,13 @@ describe('writer-agent-config CITABILITY section', () => {
     for (const code of codes) expect(REFRESH_AGENT_CONFIG.system).toContain(code);
   });
 
+  test('scopes the structural citability guidance to blog targets in both agents (Codex r5 P2)', () => {
+    for (const prompt of [system, REFRESH_AGENT_CONFIG.system]) {
+      expect(prompt).toMatch(/CITABILITY \(blog posts only: a new supporting-blog brief, or a refresh\s+whose target is a blog post/);
+      expect(prompt).toMatch(/For city-service pages, customer-question pages, and any other refresh\s+target, skip this whole section/);
+    }
+  });
+
   test('keeps the no-quota and no-invented-source guardrails explicit', () => {
     expect(system).toMatch(/This is not a quota/);
     expect(system).toMatch(/There is NO quota for statistics/);

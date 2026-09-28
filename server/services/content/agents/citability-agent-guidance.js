@@ -3,8 +3,12 @@
 // Shared by new-post and refresh agents because both quality bundles emit
 // the same optional citability signals. A single prompt contract keeps a
 // retry code from meaning something different in the two lanes.
-const CITABILITY_AGENT_GUIDANCE = `CITABILITY — write so a search engine or AI answer engine can lift the
-answer cleanly (nudge codes in [brackets] are weight-0 quality-gate signals:
+const CITABILITY_AGENT_GUIDANCE = `CITABILITY (blog posts only: a new supporting-blog brief, or a refresh
+whose target is a blog post, i.e. its source lives under src/content/blog/.
+For city-service pages, customer-question pages, and any other refresh
+target, skip this whole section and keep that page's own structure; never
+add a <ComparisonTable> or a How-to-choose H2 there on its account) — write
+so a search engine or AI answer engine can lift the answer cleanly (nudge codes in [brackets] are weight-0 quality-gate signals:
 they never block or authorize unsupported claims). Every rule below sits
 INSIDE the evidence, product, price, and comparison rules — none licenses an
 invented number, product, competitor, or source:

@@ -1539,6 +1539,17 @@ describe('citability nudges (weight-0, signal-only)', () => {
     expect(checkCitabilityNamedSources({ body: 'According to Local Government Agency, ants are common.' }).ok).toBe(false);
   });
 
+  test('fractional measurements compare as whole values; organizations and institutions count as named (Codex r5 P2)', () => {
+    expect(checkCitabilityConcreteSpecifics({ body: 'Water 3/2 inch per week.' }, {}, { previousVersion: { body: 'Water 1/2 inch per week.' } }))
+      .toEqual({ ok: false, reason: 'refresh_dropped_measurements_1_to_0' });
+    expect(checkCitabilityConcreteSpecifics({ body: 'Water 1/2 inch each week.' }, {}, { previousVersion: { body: 'Water 1/2 inch per week.' } }))
+      .toEqual({ ok: true });
+    expect(checkCitabilityNamedSources({ body: 'According to the World Health Organization, dengue cases rose.' }).ok).toBe(true);
+    expect(checkCitabilityNamedSources({ body: 'According to the Smithsonian Institution, termites swarm in spring.' }).ok).toBe(true);
+    expect(checkCitabilityNamedSources({ body: 'According to the Local Health Organization, ants are common.' }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: 'According to Trusted Industry Organization, ants are common.' }).ok).toBe(false);
+  });
+
   test('choice framing reads rendered heading text only (Codex r4 P2)', () => {
     expect(checkCitabilityComparison({ title: 'Ghost Ants in Venice', body: '## [Related guide](/bait-vs-spray/)\nText.' }))
       .toEqual({ ok: true, reason: 'no_choice_framed' });
