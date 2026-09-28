@@ -3298,6 +3298,88 @@ suite('first-application-sibling-split — periodic sweep', () => {
       expect((await row(trx, bystanderId)).first_application_invoice_id).toBe(ids.invoiceId);
     }));
 
+    // Codex r17: the base-application identity is the ONLY split/ownership
+    // evidence everywhere — discovery, backfill and the lookup agree.
+    const addOnInvoice = (trx, ids, visitId, over = {}) => trx('invoices').insert({
+      id: randomUUID(), customer_id: ids.customerId, scheduled_service_id: visitId,
+      token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`, status: 'sent',
+      title: 'Mosquito add-on', notes: 'One-off add-on billed separately.',
+      line_items: JSON.stringify([{ description: 'Mosquito add-on treatment', quantity: 1, unit_price: 35, amount: 35 }]),
+      subtotal: 35, total: 35, ...over,
+    });
+
+    test('paid-group discovery: a PAID combined invoice + cancelled sibling that also has an unrelated add-on invoice still gets the refund alert', () => rollbackTest(async (trx) => {
+      const ids = await fixture(trx, { invoiceStatus: 'paid' });
+      await trx('scheduled_services').where({ id: ids.lawnId }).update({ status: 'cancelled' });
+      await addOnInvoice(trx, ids, ids.lawnId);
+      const [result] = await sweepOnce(trx, ids.estimateId);
+      expect(result.action).toBe('alerted');
+      expect(await readBell(trx, REFUND_DEDUPE_KEY(ids.estimateId, ids.invoiceId, [ids.lawnId]))).toBeTruthy();
+    }));
+
+    test('paid-group discovery: the same shape with a genuine base-application split invoice on the cancelled sibling → no refund alert', () => rollbackTest(async (trx) => {
+      const ids = await fixture(trx, { invoiceStatus: 'paid' });
+      await trx('scheduled_services').where({ id: ids.lawnId }).update({ status: 'cancelled' });
+      await addOnInvoice(trx, ids, ids.lawnId, {
+        title: 'Lawn Care',
+        line_items: JSON.stringify([{ client_id: `scheduled_${ids.lawnId}_primary`, description: 'Lawn Care', quantity: 1, unit_price: 42, amount: 42 }]),
+      });
+      const results = await sweepOnce(trx, ids.estimateId);
+      expect(results.some((r) => r.action === 'alerted')).toBe(false);
+      expect(await readBell(trx, REFUND_DEDUPE_KEY(ids.estimateId, ids.invoiceId, [ids.lawnId]))).toBeFalsy();
+    }));
+
+    test('backfill ownership: an unrelated live add-on invoice on the anchor or the sibling is not an ownership claim — the pair is still stamped', () => rollbackTest(async (trx) => {
+      const ids = await fixture(trx, { stamp: false });
+      await addOnInvoice(trx, ids, ids.pestId);
+      await addOnInvoice(trx, ids, ids.lawnId);
+      await backfillFirstApplicationInvoiceStamps(trx);
+      expect((await row(trx, ids.pestId)).first_application_invoice_id).toBe(ids.invoiceId);
+      expect((await row(trx, ids.lawnId)).first_application_invoice_id).toBe(ids.invoiceId);
+    }));
+
+    test('backfill ownership: a sibling whose application a live base-application invoice already bills was split off — not stamped', () => rollbackTest(async (trx) => {
+      const ids = await fixture(trx, { stamp: false });
+      await addOnInvoice(trx, ids, ids.lawnId, {
+        title: 'Lawn Care',
+        line_items: JSON.stringify([{ client_id: `scheduled_${ids.lawnId}_primary`, description: 'Lawn Care', quantity: 1, unit_price: 42, amount: 42 }]),
+      });
+      await backfillFirstApplicationInvoiceStamps(trx);
+      expect((await row(trx, ids.lawnId)).first_application_invoice_id).toBeNull();
+      // single-program result: the anchor alone is never stamped as a pair
+      expect((await row(trx, ids.pestId)).first_application_invoice_id).toBeNull();
+    }));
+
+    test('lookup: a stamped sibling rescheduled onto ANOTHER group\'s day (same customer + estimate) finds its OWN stamped invoice, never the other group\'s', () => rollbackTest(async (trx) => {
+      const ids = await fixture(trx);
+      // A second combined-invoice group under the same customer + estimate on
+      // a different day (a later acceptance), also stamped.
+      const otherDate = '2026-10-15';
+      const otherAnchor = randomUUID();
+      const otherSibling = randomUUID();
+      await trx('scheduled_services').insert([
+        { id: otherAnchor, customer_id: ids.customerId, source_estimate_id: ids.estimateId, scheduled_date: otherDate, service_type: 'Quarterly Pest Control', status: 'confirmed', is_recurring: true, estimated_price: 120 },
+        { id: otherSibling, customer_id: ids.customerId, source_estimate_id: ids.estimateId, scheduled_date: otherDate, service_type: 'Tree & Shrub', status: 'confirmed', is_recurring: true, estimated_price: null },
+      ]);
+      const otherInvoiceId = randomUUID();
+      await trx('invoices').insert({
+        id: otherInvoiceId, customer_id: ids.customerId, scheduled_service_id: otherAnchor,
+        token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`, status: 'sent',
+        title: 'First Service Application',
+        notes: `Auto-generated from accepted estimate #${ids.estimateId}. Customer selected pay per application — first application only.`,
+        line_items: JSON.stringify([{ description: 'First service application', quantity: 1, unit_price: 120, amount: 120 }]),
+        subtotal: 120, total: 120,
+      });
+      await trx('scheduled_services').whereIn('id', [otherAnchor, otherSibling]).update({ first_application_invoice_id: otherInvoiceId });
+      // Our lawn sibling moves onto the other group's day.
+      await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: otherDate });
+      const found = await findFirstApplicationInvoiceForEstimateService(await row(trx, ids.lawnId), trx);
+      expect(found.invoice?.id).toBe(ids.invoiceId);
+      // and the other group's own sibling still finds ITS invoice
+      const otherFound = await findFirstApplicationInvoiceForEstimateService(await row(trx, otherSibling), trx);
+      expect(otherFound.invoice?.id).toBe(otherInvoiceId);
+    }));
+
     test('backfill ownership: an old REFUNDED invoice attached to the anchor is dead, not a live claim — the pair is still stamped', () => rollbackTest(async (trx) => {
       const ids = await fixture(trx, { stamp: false });
       await anchorInvoice(trx, ids, { status: 'refunded', title: 'Old refunded visit invoice', notes: 'refunded' });

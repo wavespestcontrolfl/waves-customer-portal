@@ -493,18 +493,18 @@ async function loadCandidates(conn, { limit = SWEEP_LIMIT } = {}) {
         .orWhere((paidWithNeverRanMember) => {
           paidWithNeverRanMember
             .whereIn('i.status', MONEY_REVIEW_INVOICE_STATUSES)
+            // Discovery admits EVERY paid/processing group with a never-ran
+            // stamped member; whether that member was already split off is
+            // decided in evaluation by flagOwnLiveInvoices' base-application
+            // check (invoiceBillsBaseApplication), never by "any live invoice
+            // on the row" in SQL — an unrelated add-on or repair invoice used
+            // to hide the whole group here before evaluation could run
+            // (Codex r17 P1, PR #5021). A genuinely split member evaluates to
+            // no alert, at the cost of one cheap evaluation.
             .whereExists(function neverRanMemberOnInvoiceExists() {
               this.select(1).from('scheduled_services as nr')
                 .whereRaw('nr.first_application_invoice_id = i.id')
-                .whereIn('nr.status', VISIT_NEVER_RAN_STATUSES)
-                .where(function anchorOrUnsplitSibling() {
-                  this.whereRaw('nr.id = i.scheduled_service_id')
-                    .orWhereNotExists(function ownLiveInvoiceExists() {
-                      this.select(1).from('invoices as own')
-                        .whereRaw('own.scheduled_service_id = nr.id')
-                        .whereNotIn('own.status', InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES);
-                    });
-                });
+                .whereIn('nr.status', VISIT_NEVER_RAN_STATUSES);
             });
         });
     })

@@ -438,10 +438,12 @@ describe('findFirstApplicationInvoiceForEstimateService — honours the stamp (C
     expect(found).toEqual({ invoice: combined, liveBeside: null });
     // The svc carried the column — no fallback read.
     expect(knex.calls.some((c) => c[0] === 'stamp')).toBe(false);
-    // The widened query: date branch OR the stamped row OR any invoice on the stamped anchor.
-    expect(knex.calls).toContainEqual(['q>where>where', 'where', 'first_visit.source_estimate_id', 'est-1']);
-    expect(knex.calls).toContainEqual(['q>where>where', 'where', 'first_visit.scheduled_date', '2026-10-20']);
-    expect(knex.calls).toContainEqual(['q>where', 'orWhere', 'i.id', 'combined-inv']);
+    // The stamped query: ONLY the stamped row OR any invoice on the stamped
+    // anchor — never the date branch (Codex r17 P1: another group's same-day
+    // invoice must never compete with the stamp).
+    expect(knex.calls.some((c) => c[2] === 'first_visit.scheduled_date')).toBe(false);
+    expect(knex.calls.some((c) => c[2] === 'first_visit.source_estimate_id')).toBe(false);
+    expect(knex.calls).toContainEqual(['q>where', 'where', 'i.id', 'combined-inv']);
     expect(knex.calls).toContainEqual(['q>where', 'orWhereIn', 'i.scheduled_service_id', '[fn]']);
     expect(knex.calls).toContainEqual(['q>where>orWhereIn', 'select', 'scheduled_service_id']);
     expect(knex.calls).toContainEqual(['q>where>orWhereIn', 'from', 'invoices']);
@@ -516,7 +518,7 @@ describe('findFirstApplicationInvoiceForEstimateService — honours the stamp (C
       ['stamp', 'where', { id: 'sibling-visit' }],
       ['stamp', 'first', 'first_application_invoice_id'],
     ]);
-    expect(knex.calls).toContainEqual(['q>where', 'orWhere', 'i.id', 'combined-inv']);
+    expect(knex.calls).toContainEqual(['q>where', 'where', 'i.id', 'combined-inv']);
   });
 
   test('a svc WITHOUT the column whose row is unstamped → the fallback read happens, then the plain date query', async () => {
