@@ -78,9 +78,35 @@ function followupPromiseEdited({ inputSnapshot, promptVersion = null, originalBo
   return slaPhraseStatus(originalBody, new Date()) !== 'none' && slaPhraseStatus(body, new Date()) === 'none';
 }
 
+// Follow-up #7 (Codex r9): the window comparison alone repeats — "by 9 AM
+// tomorrow morning" drafted Monday night reads as current Tuesday night,
+// after the promised Tuesday-morning deadline passed. The phrase plus the
+// decision's draft time pin the actual deadline: within the hour → drafted
+// + 60 min; by 9 AM this morning / tomorrow morning → that 9 AM ET.
+function followupDeadline(phrase, draftedAt) {
+  const at = draftedAt instanceof Date ? draftedAt : new Date(draftedAt);
+  if (!Number.isFinite(at.getTime())) return null;
+  const { parseETDateTime, etDateString, addETDays } = require('../utils/datetime-et');
+  const p = String(phrase || '').toLowerCase();
+  if (p === 'within the hour') return new Date(at.getTime() + 60 * 60 * 1000);
+  if (p === 'by 9 am this morning') return parseETDateTime(`${etDateString(at)}T09:00:00`);
+  if (p === 'by 9 am tomorrow morning') return parseETDateTime(`${etDateString(addETDays(at, 1))}T09:00:00`);
+  return null;
+}
+function followupDeadlinePassed({ body, draftedAt, now = new Date() }) {
+  if (draftedAt == null) return false;
+  const text = String(body || '').toLowerCase();
+  return SLA_PHRASES.some((p) => {
+    if (!text.includes(p.toLowerCase())) return false;
+    const deadline = followupDeadline(p, draftedAt);
+    return Boolean(deadline) && now.getTime() > deadline.getTime();
+  });
+}
+
 // Both send seams ask one question: may this escalated draft's follow-up
 // promise go out as written? null when yes, else the reason.
-function followupPromiseBlockReason({ inputSnapshot, promptVersion = null, originalBody = null, body, now = new Date() }) {
+function followupPromiseBlockReason({ inputSnapshot, promptVersion = null, originalBody = null, body, draftedAt = null, now = new Date() }) {
+  if (draftPromisedFollowup(inputSnapshot, promptVersion) && followupDeadlinePassed({ body, draftedAt, now })) return 'sla_deadline_passed';
   if (followupPromiseIsStale({ inputSnapshot, promptVersion, body, now })) return 'sla_phrase_stale';
   if (followupPromiseEdited({ inputSnapshot, promptVersion, originalBody, body })) return 'sla_phrase_edited';
   return null;
@@ -89,4 +115,5 @@ function followupPromiseBlockReason({ inputSnapshot, promptVersion = null, origi
 module.exports = {
   SLA_PHRASES, FOLLOWUP_PROMISED_NOTE, realAnswersGateOn, replyPromisesFollowup, slaPhraseStatus,
   draftPromisedFollowup, followupPromiseIsStale, followupPromiseEdited, followupPromiseBlockReason,
+  followupDeadline, followupDeadlinePassed,
 };

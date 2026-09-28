@@ -125,6 +125,7 @@ async function verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomer
         'ad.suggested_message',
         'ad.input_snapshot',
         'ad.prompt_version',
+        'ad.created_at',
         's.created_at as inbound_created_at',
         's.from_phone as sms_from_phone',
         's.to_phone as sms_to_phone',

@@ -721,7 +721,11 @@ async function processInboundSms({ customer, from, to, body, smsLogId, sourceMes
       if (existing) return null; // same semantics as the ignored insert: nothing new
     }
 
-    const llmDraft = await generateLlmReviewDraft({ customer, body, decision, estimate });
+    // Follow-up #8 (Codex r9): the resolved estimate reaches the drafter's
+    // availability lookup only when the inbound is routed as an ESTIMATE
+    // interaction — a reschedule of an existing visit is priced with that
+    // visit's service, not an unrelated open estimate's service_interest.
+    const llmDraft = await generateLlmReviewDraft({ customer, body, decision, estimate: workflow === WORKFLOW ? estimate : null });
     // The house no-price rule applies to WHATEVER text lands in the composer
     // card — the deterministic scheduling templates echo raw inbound text, so
     // a customer's own "Tuesday for $50 works" would flow into the draft

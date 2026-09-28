@@ -49,6 +49,7 @@ function followupBlock({ decision, outgoingBody }) {
     promptVersion: decision.prompt_version,
     originalBody: decision.suggested_message,
     body: outgoingBody,
+    draftedAt: decision.created_at ?? null,
   });
   return reason ? `follow-up promise unsendable (${reason})` : null;
 }

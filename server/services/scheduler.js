@@ -4134,10 +4134,11 @@ function initScheduledJobs() {
                 const { followupPromiseBlockReason } = require('./sms-followup-sla');
                 const slaDecision = await db('agent_decisions')
                   .where({ id: claimMeta.agent_decision_id })
-                  .first('input_snapshot', 'prompt_version', 'suggested_message');
+                  .first('input_snapshot', 'prompt_version', 'suggested_message', 'created_at');
                 if (followupPromiseBlockReason({
                   inputSnapshot: slaDecision?.input_snapshot, promptVersion: slaDecision?.prompt_version,
                   originalBody: slaDecision?.suggested_message ?? null, body: msg.message_body,
+                  draftedAt: slaDecision?.created_at ?? null,
                 })) slaStale = true;
               } catch (err) {
                 logger.warn(`[scheduler] SLA phrase revalidation failed for scheduled sms ${msg.id}: ${err.message}; blocking send`);

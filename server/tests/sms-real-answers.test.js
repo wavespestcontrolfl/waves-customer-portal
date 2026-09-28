@@ -1842,3 +1842,38 @@ describe('follow-up #5: a NEW booking is priced with the requested service, not 
     expect(getAvailableSlots).toHaveBeenLastCalledWith('Venice', null, expect.objectContaining({ serviceType: 'Quarterly Pest' }));
   });
 });
+
+describe('follow-up #7: the promised deadline is pinned by phrase + draft time, not just the window', () => {
+  const { followupDeadline, followupDeadlinePassed, followupPromiseBlockReason } = require('../services/sms-followup-sla');
+  const promised = { intended_actions: [{ type: 'escalate', note: 'followup_promised' }] };
+  const MON_NIGHT = new Date('2026-09-29T01:30:00Z'); // Mon Sep 28 21:30 ET
+  const TUE_NIGHT = new Date('2026-09-30T01:30:00Z'); // Tue Sep 29 21:30 ET
+  const TUE_8AM = new Date('2026-09-29T12:00:00Z');  // Tue 08:00 ET
+  const MON_10AM = new Date('2026-09-28T14:00:00Z'); // Mon 10:00 ET
+
+  test('deadlines: within the hour → +60 min; by 9 AM tomorrow → next ET 9:00; by 9 AM this morning → same ET 9:00', () => {
+    expect(followupDeadline('within the hour', MON_10AM).toISOString()).toBe('2026-09-28T15:00:00.000Z');
+    expect(followupDeadline('by 9 AM tomorrow morning', MON_NIGHT).toISOString()).toBe('2026-09-29T13:00:00.000Z'); // Tue 09:00 EDT
+    expect(followupDeadline('by 9 AM this morning', new Date('2026-09-29T10:00:00Z')).toISOString()).toBe('2026-09-29T13:00:00.000Z');
+    expect(followupDeadline('anything else', MON_10AM)).toBeNull();
+    expect(followupDeadline('within the hour', 'not a date')).toBeNull();
+  });
+
+  test('"by 9 AM tomorrow morning" drafted Monday night, sent Tuesday night → deadline passed (the window alone would call it current)', () => {
+    const body = 'A manager will reach out by 9 AM tomorrow morning.';
+    expect(followupDeadlinePassed({ body, draftedAt: MON_NIGHT, now: TUE_NIGHT })).toBe(true);
+    expect(followupDeadlinePassed({ body, draftedAt: MON_NIGHT, now: TUE_8AM })).toBe(false);
+    expect(followupPromiseBlockReason({ inputSnapshot: promised, body, draftedAt: MON_NIGHT, now: TUE_NIGHT })).toBe('sla_deadline_passed');
+    // before the deadline the window rule still speaks: at 8 AM "tomorrow morning" is no longer the current phrase
+    expect(followupPromiseBlockReason({ inputSnapshot: promised, body, draftedAt: MON_NIGHT, now: TUE_8AM })).toBe('sla_phrase_stale');
+    // same night it was drafted, inside its window → sendable
+    expect(followupPromiseBlockReason({ inputSnapshot: promised, body, draftedAt: MON_NIGHT, now: new Date('2026-09-29T02:00:00Z') })).toBeNull();
+  });
+
+  test('"within the hour" drafted at 10 AM and sent two hours later → passed; no draft time known → the window rule alone applies', () => {
+    const body = 'Someone will follow up within the hour.';
+    expect(followupPromiseBlockReason({ inputSnapshot: promised, body, draftedAt: MON_10AM, now: new Date('2026-09-28T16:30:00Z') })).toBe('sla_deadline_passed');
+    expect(followupPromiseBlockReason({ inputSnapshot: promised, body, draftedAt: MON_10AM, now: new Date('2026-09-28T14:30:00Z') })).toBeNull();
+    expect(followupPromiseBlockReason({ inputSnapshot: promised, body, draftedAt: null, now: new Date('2026-09-28T16:30:00Z') })).toBeNull();
+  });
+});

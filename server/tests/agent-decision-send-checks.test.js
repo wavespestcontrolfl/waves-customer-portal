@@ -44,6 +44,11 @@ test('an unverifiable edit refuses before any availability call', async () => {
   expect(drafter.openTimesStillOffered).not.toHaveBeenCalled();
 });
 
+test('the follow-up check receives the decision\'s draft time so a passed deadline can refuse', async () => {
+  await agentDecisionSendBlockReason({ decision: decision({ created_at: '2026-09-28T14:00:00Z' }), outgoingBody: 'x' });
+  expect(followupPromiseBlockReason).toHaveBeenCalledWith(expect.objectContaining({ draftedAt: '2026-09-28T14:00:00Z' }));
+});
+
 test('a gone slot, a stale/edited follow-up promise, or a stale amount each refuse with its reason', async () => {
   drafter.openTimesStillOffered.mockResolvedValue({ ok: false, reason: 'open_times_no_longer_offered' });
   await expect(agentDecisionSendBlockReason({ decision: decision(), outgoingBody: 'x' })).resolves.toBe('open-times stale (open_times_no_longer_offered)');
