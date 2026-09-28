@@ -74,8 +74,11 @@ export default function DictationButton({
   // (Live speech recognition stops itself when another button is pressed,
   // so it never holds a save.)
   const pending = mode === "upload" && (starting || listening || uploading);
+  // Unmounting abandons a clip still in flight (the hook stops the recorder
+  // and drops a late transcript), so nothing is pending once the mic is gone.
   useEffect(() => {
     onPendingChange?.(pending);
+    return () => onPendingChange?.(false);
   }, [pending, onPendingChange]);
 
   // A consumer disables the mic while it is busy (e.g. an AI rewrite of the

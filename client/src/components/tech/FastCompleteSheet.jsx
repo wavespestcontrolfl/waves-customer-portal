@@ -439,6 +439,11 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
   const submission = useFastCompleteSubmit({ base, request });
   const { submitting, done } = submission;
   const photoManager = usePhotoManager();
+  // A recorded dictation clip is still being taken or transcribed (the
+  // upload path). The full form is another page and carries nothing over,
+  // so Full form and "+ Other product" wait for the clip, like Complete and
+  // photos. Close still works: it discards the sheet, typed note included.
+  const [dictationPending, setDictationPending] = useState(false);
 
   // Dismissing a saved sheet refreshes the schedule like "Next stop" does,
   // so a missed socket update can't leave the visit showing as open.
@@ -472,8 +477,8 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
         className={cn('tech-visit-dialog', isMobile && 'tech-visit-dialog--fullscreen')}
         {...photoManager.hiddenProps}
       >
-        <SheetHeader titleId={titleId} service={service} visit={ctx.visit} done={!!done} locked={locked} submitting={submitting} onFullForm={onFullForm} onClose={close} />
-        <SheetBody service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photoManager} onCompleted={onCompleted} onFullForm={onFullForm} />
+        <SheetHeader titleId={titleId} service={service} visit={ctx.visit} done={!!done} locked={locked} dictationPending={dictationPending} submitting={submitting} onFullForm={onFullForm} onClose={close} />
+        <SheetBody service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photoManager} dictationPending={dictationPending} onDictationPending={setDictationPending} onCompleted={onCompleted} onFullForm={onFullForm} />
       </section>
     </UiSurface>
     {photoManager.isOpen && (
@@ -490,7 +495,7 @@ function customerNameOf(visit, service) {
   return visit?.customerName || service?.customerName || '';
 }
 
-function SheetHeader({ titleId, service, visit, done, locked, submitting, onFullForm, onClose }) {
+function SheetHeader({ titleId, service, visit, done, locked, dictationPending, submitting, onFullForm, onClose }) {
   const address = liveAddressLine(visit?.address);
   return (
     <header className="tech-visit-header">
@@ -502,14 +507,14 @@ function SheetHeader({ titleId, service, visit, done, locked, submitting, onFull
         {address && <p className="tech-visit-muted">{address}</p>}
       </div>
       {!done && (
-        <Button variant="ghost" className="tech-visit-action" onClick={onFullForm} disabled={locked}>Full form</Button>
+        <Button variant="ghost" className="tech-visit-action" onClick={onFullForm} disabled={locked || dictationPending}>Full form</Button>
       )}
       <Button variant="ghost" className="tech-visit-action tech-visit-close" onClick={onClose} disabled={submitting} aria-label="Close">×</Button>
     </header>
   );
 }
 
-function SheetBody({ service, request, ctx, submission, locked, photos, onCompleted, onFullForm }) {
+function SheetBody({ service, request, ctx, submission, locked, photos, dictationPending, onDictationPending, onCompleted, onFullForm }) {
   if (submission.done) {
     return (
       <div className="tech-visit-body">
@@ -526,10 +531,10 @@ function SheetBody({ service, request, ctx, submission, locked, photos, onComple
   if (ctx.loading) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Loading…</ActionFeedback>;
   const stop = ctx.loadError || ctx.blockedReason;
   if (stop) return <ActionFeedback error={!!ctx.loadError} className="tech-visit-feedback tech-visit-loading">{stop}</ActionFeedback>;
-  return <FastCompleteForm service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photos} onFullForm={onFullForm} />;
+  return <FastCompleteForm service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photos} dictationPending={dictationPending} onDictationPending={onDictationPending} onFullForm={onFullForm} />;
 }
 
-function FastCompleteForm({ service, request, ctx, submission, locked, photos, onFullForm }) {
+function FastCompleteForm({ service, request, ctx, submission, locked, photos, dictationPending, onDictationPending, onFullForm }) {
   const [rows, setRows] = useState(ctx.rows);
   const [editAmounts, setEditAmounts] = useState(false);
   const [form, setForm] = useState(() => ({
@@ -543,7 +548,6 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, o
   }, []);
   const tips = useTipLibrary({ base: `/admin/dispatch/${service?.id}`, request });
   const tipsAvailable = !!tips;
-  const [dictationPending, setDictationPending] = useState(false);
 
   const updateRow = useCallback((productId, patch) => {
     setRows((prev) => prev.map((row) => (row.productId === productId ? { ...row, ...patch } : row)));
@@ -568,7 +572,7 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, o
     <>
       <div className="tech-visit-body">
         <fieldset className="tech-visit-form" disabled={locked}>
-          <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={setDictationPending} serviceId={service?.id} locked={locked} />
+          <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={onDictationPending} serviceId={service?.id} locked={locked} />
           {/* A clip being recorded keeps recording behind the photo manager, so
               photos wait until the dictation is finished. */}
           <PhotosSection serviceId={service?.id} request={request} photos={photos} locked={locked || dictationPending} />
@@ -581,6 +585,7 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, o
             onToggleRow={(row) => updateRow(row.productId, { active: !row.active })}
             onUpdateRow={updateRow}
             onOtherProduct={onFullForm}
+            otherProductLocked={locked || dictationPending}
           />
           <PestsSection form={form} setField={setField} locked={locked} />
           <ChoiceSection title="Where" columns={3}>
@@ -627,7 +632,7 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, o
   );
 }
 
-function ProductsSection({ rows, method, editAmounts, locked, onToggleEdit, onToggleRow, onUpdateRow, onOtherProduct }) {
+function ProductsSection({ rows, method, editAmounts, locked, onToggleEdit, onToggleRow, onUpdateRow, onOtherProduct, otherProductLocked }) {
   return (
     <>
     <ChoiceSection
@@ -650,7 +655,7 @@ function ProductsSection({ rows, method, editAmounts, locked, onToggleEdit, onTo
       ))}
       {/* Any product beyond the house mix completes through the full
           completion screen, which records its method, amount and area. */}
-      <Chip disabled={locked} label="+ Other product" onClick={onOtherProduct} />
+      <Chip disabled={otherProductLocked} label="+ Other product" onClick={onOtherProduct} />
     </ChoiceSection>
     {editAmounts && rows.filter((row) => row.active).map((row) => (
       <AmountRow key={row.productId} row={row} rate={rowRate(row, method)} onChange={(patch) => onUpdateRow(row.productId, patch)} />

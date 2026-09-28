@@ -148,11 +148,33 @@ describe('FastCompleteSheet recorded dictation', () => {
     expect(screen.queryByRole('dialog', { name: 'Photo manager' })).toBeNull();
   });
 
+  // The full form is another page and carries nothing over from the sheet,
+  // so leaving for it mid-clip would drop the dictation.
+  test.each([
+    ['still starting', { starting: true }],
+    ['recording', { listening: true }],
+    ['being transcribed', { uploading: true }],
+  ])('Full form and + Other product wait while a clip is %s', async (_, clipState) => {
+    dictation.state = { listening: false, mode: 'upload', starting: false, uploading: false, ...clipState };
+    const onFullForm = vi.fn();
+    render(<FastCompleteSheet service={SERVICE} request={makeRequest()} onClose={() => {}} onFullForm={onFullForm} />);
+    await screen.findByRole('button', { name: /Taurus SC/ });
+    const fullForm = screen.getByRole('button', { name: 'Full form' });
+    const otherProduct = screen.getByRole('button', { name: '+ Other product' });
+    expect(fullForm.disabled).toBe(true);
+    expect(otherProduct.disabled).toBe(true);
+    fireEvent.click(fullForm);
+    fireEvent.click(otherProduct);
+    expect(onFullForm).not.toHaveBeenCalled();
+  });
+
   test('live speech recognition never holds the completion', async () => {
     dictation.state = { listening: true, mode: 'speech', uploading: false };
     const submit = await fillRequired(makeRequest());
     expect(submit.disabled).toBe(false);
     expect(screen.getByRole('button', { name: 'Add photos' }).disabled).toBe(false);
+    expect(screen.getByRole('button', { name: 'Full form' }).disabled).toBe(false);
+    expect(screen.getByRole('button', { name: '+ Other product' }).disabled).toBe(false);
   });
 });
 
