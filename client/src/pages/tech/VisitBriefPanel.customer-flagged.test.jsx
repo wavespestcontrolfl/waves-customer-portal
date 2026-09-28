@@ -85,6 +85,33 @@ describe('VisitBriefPanel — Customer flagged section', () => {
     expect(openSpy).toHaveBeenCalledWith('https://s3.example/a.jpg', '_blank', 'noopener,noreferrer');
   });
 
+  it('refetches thumbnails when a brief refresh brings new photo ids (no reopen needed)', async () => {
+    const request = vi.fn(async () => ({ photos: [] }));
+    const panelFor = (customerFlagged) => (
+      <VisitBriefPanel
+        stop={stopOf(BASE_SERVICE)}
+        detail={detailFor({
+          'svc-1': { estimate: null, brief: { brief: null, facts: { access: null, last_visit: null, customerFlagged } } },
+        })}
+        request={request}
+        onRetry={vi.fn()} onPhotos={vi.fn()} onProject={vi.fn()} onZone={vi.fn()} onLead={vi.fn()}
+      />
+    );
+    const { rerender } = render(panelFor(CUSTOMER_FLAGGED));
+    await act(async () => { await Promise.resolve(); });
+    expect(request).toHaveBeenCalledTimes(1);
+    // Same ids again: no extra fetch.
+    rerender(panelFor(CUSTOMER_FLAGGED.map((e) => ({ ...e }))));
+    await act(async () => { await Promise.resolve(); });
+    expect(request).toHaveBeenCalledTimes(1);
+    // The customer sent another submission while the panel was open.
+    rerender(panelFor([...CUSTOMER_FLAGGED, {
+      id: 'sub-2', sentAt: '2026-10-01T12:00:00.000Z', topic: 'pest', locationOnProperty: null, note: null, photoIds: ['photo-c'],
+    }]));
+    await act(async () => { await Promise.resolve(); });
+    expect(request).toHaveBeenCalledTimes(2);
+  });
+
   it('renders nothing when facts carry no customerFlagged entries (gate off, or nothing sent)', () => {
     renderPanel({ customerFlagged: null });
     expect(screen.queryByText('Customer flagged')).not.toBeInTheDocument();

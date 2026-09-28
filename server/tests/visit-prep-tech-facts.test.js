@@ -137,6 +137,47 @@ describe('customerFlaggedFacts', () => {
   });
 });
 
+describe('techStopMemberIds (Codex #5239 r1 P1)', () => {
+  const { techStopMemberIds } = visitPrep;
+  // A frozen visit keeps visit_id on a member dispatch reassigned or moved;
+  // that member is someone else's stop now and must not ride svc-A's access.
+  const members = [
+    { id: 'svc-A', visit_id: 'visit-9', technician_id: 'tech-1', scheduled_date: new Date('2026-10-02T00:00:00Z'), status: 'confirmed' },
+    { id: 'svc-B', visit_id: 'visit-9', technician_id: 'tech-1', scheduled_date: '2026-10-02', status: 'confirmed' },
+    { id: 'svc-other-tech', visit_id: 'visit-9', technician_id: 'tech-2', scheduled_date: '2026-10-02', status: 'confirmed' },
+    { id: 'svc-other-day', visit_id: 'visit-9', technician_id: 'tech-1', scheduled_date: '2026-10-05', status: 'confirmed' },
+    { id: 'svc-cancelled', visit_id: 'visit-9', technician_id: 'tech-1', scheduled_date: '2026-10-02', status: 'cancelled' },
+  ];
+
+  test('keeps only members still on svc\'s current technician and date, not dead; svc itself always first', async () => {
+    const conn = fakeConn({ scheduled_services: members });
+    expect(await techStopMemberIds({ id: 'svc-A', visit_id: 'visit-9' }, conn)).toEqual(['svc-A', 'svc-B']);
+  });
+
+  test('reads svc\'s technician and date from the database, not the caller\'s copy', async () => {
+    const conn = fakeConn({ scheduled_services: members });
+    const stale = { id: 'svc-A', visit_id: 'visit-9', technician_id: 'tech-2', scheduled_date: '2026-10-05' };
+    expect(await techStopMemberIds(stale, conn)).toEqual(['svc-A', 'svc-B']);
+  });
+
+  test('facts and signed photos exclude a reassigned member\'s submission and photos', async () => {
+    const conn = fakeConn({
+      scheduled_services: members,
+      visit_prep_submissions: [
+        { id: 'sub-A', scheduled_service_id: 'svc-A', created_at: new Date('2026-09-30T10:00:00Z'), topic: 'pest', location_on_property: null, note: 'mine' },
+        { id: 'sub-X', scheduled_service_id: 'svc-other-tech', created_at: new Date('2026-09-30T11:00:00Z'), topic: 'lawn', location_on_property: null, note: 'not mine' },
+      ],
+      visit_prep_photos: [
+        { id: 'photo-A', submission_id: 'sub-A', scheduled_service_id: 'svc-A', photo_index: 0, s3_key: 'visitprep/A.jpg' },
+        { id: 'photo-X', submission_id: 'sub-X', scheduled_service_id: 'svc-other-tech', photo_index: 0, s3_key: 'visitprep/X.jpg' },
+      ],
+    });
+    const svc = { id: 'svc-A', visit_id: 'visit-9' };
+    expect((await customerFlaggedFacts(svc, conn)).map((f) => f.id)).toEqual(['sub-A']);
+    expect((await stopPhotoViewUrls(svc, conn)).map((p) => p.id)).toEqual(['photo-A']);
+  });
+});
+
 describe('stopPhotoViewUrls', () => {
   beforeEach(() => jest.clearAllMocks());
 

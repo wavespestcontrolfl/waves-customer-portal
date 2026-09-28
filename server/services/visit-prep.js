@@ -30,6 +30,8 @@ const { convertHeicToJpeg } = require('./heic-to-jpeg');
 const { hashBuffer } = require('./service-report/photo-chain');
 const { uploadFunnelPhotoToS3 } = require('../utils/funnel-photos');
 const { isRecurringLineageVisit } = require('../utils/recurring-lineage');
+const { dateOnlyString } = require('../utils/datetime-et');
+const { TECH_DEAD_ASSIGNMENT_STATUSES } = require('./technician-visit-scope');
 // The same location-chip set the customer portal's service-request form
 // uses (server/routes/requests.js) — reused rather than redefined, the same
 // route-module-from-a-service pattern already used by several services
@@ -467,9 +469,34 @@ async function createVisitPrepSubmission({
 // Two new, self-contained reads consumed by previsit-brief.js's
 // deterministicVisitFacts (facts.customerFlagged) and by
 // admin-schedule.js's GET /:id/visit-prep-photos. Neither touches any of
-// the write path above; both reuse stopMemberIds (unchanged) for the same
-// CURRENT-membership resolution every other read/count in this file uses —
-// NEVER a submission's own snapshotted visit_id (see the file header).
+// the write path above; both resolve the stop from CURRENT scheduled_services
+// rows through techStopMemberIds (below) — NEVER a submission's own
+// snapshotted visit_id (see the file header).
+
+// The stop AS IT STANDS for whoever holds `svc` — the member set for the
+// two tech-facing reads below (Codex #5239 r1 P1). A frozen visit keeps a
+// member's visit_id when dispatch reassigns or moves that one row
+// (handleChildStopChanged), so `stopMemberIds` can include rows now on
+// another technician or day. The caller authorized `svc` only; a member
+// counts here only while it is still on svc's CURRENT technician and date
+// (read from the database, not the caller's copy) and not in a dead status
+// (technician-visit-scope.js's list). `stopMemberIds` keeps its wider set
+// for the customer-side cap counts, which are about the visit, not access.
+async function techStopMemberIds(svc, conn) {
+  if (!svc?.id) return [];
+  if (!svc.visit_id) return [svc.id];
+  const rows = await conn('scheduled_services')
+    .where({ visit_id: svc.visit_id })
+    .select('id', 'technician_id', 'scheduled_date', 'status');
+  const self = rows.find((r) => String(r.id) === String(svc.id)) || svc;
+  const techKey = self.technician_id == null ? null : String(self.technician_id);
+  const dateKey = dateOnlyString(self.scheduled_date);
+  const others = rows.filter((r) => String(r.id) !== String(svc.id)
+    && (r.technician_id == null ? null : String(r.technician_id)) === techKey
+    && dateOnlyString(r.scheduled_date) === dateKey
+    && !TECH_DEAD_ASSIGNMENT_STATUSES.includes(r.status));
+  return [svc.id, ...others.map((r) => r.id)];
+}
 
 // Short-lived signed VIEW urls for every photo on the stop's CURRENT
 // membership — same TTL as the technician's own service photos
@@ -484,7 +511,7 @@ async function createVisitPrepSubmission({
 const TECH_PHOTO_VIEW_TTL_SECONDS = 3600;
 
 async function stopPhotoViewUrls(svc, conn = db) {
-  const ids = await stopMemberIds(svc, conn);
+  const ids = await techStopMemberIds(svc, conn);
   if (ids.length === 0) return [];
   const photos = await conn('visit_prep_photos')
     .whereIn('scheduled_service_id', ids)
@@ -508,7 +535,7 @@ async function stopPhotoViewUrls(svc, conn = db) {
 // Never returns S3 keys or URLs — photoIds only; the thumbnails endpoint
 // above signs those on its own authorized read.
 async function customerFlaggedFacts(svc, conn = db) {
-  const ids = await stopMemberIds(svc, conn);
+  const ids = await techStopMemberIds(svc, conn);
   if (ids.length === 0) return null;
   const submissions = await conn('visit_prep_submissions')
     .whereIn('scheduled_service_id', ids)
@@ -546,6 +573,7 @@ module.exports = {
   TECH_PHOTO_VIEW_TTL_SECONDS,
   stopPhotoViewUrls,
   customerFlaggedFacts,
+  techStopMemberIds,
   _internal: {
     detectedImageMime, mimeFamily, stripHtml, prepareUploadFile, prepareFiles, normalizeSubmissionFields, deleteUploadedObject, stopMemberIds, normalizeToJpeg,
   },

@@ -211,7 +211,10 @@ function formatFlaggedSentAt(iso) {
 // the facts key itself would have been withheld. A fetch failure just
 // leaves the placeholder boxes — never an error banner over a section
 // that is otherwise informative (the note/topic/location still render).
-function useVisitPrepPhotoUrls(serviceId, active, request) {
+// `photoSignature` (the current photo ids, joined) re-runs the fetch when a
+// brief refresh brings a new submission, so its thumbnails load without
+// reopening the panel (Codex #5239 r1 P2).
+function useVisitPrepPhotoUrls(serviceId, active, request, photoSignature) {
   const [byId, setById] = useState({});
   useEffect(() => {
     if (!active || !serviceId || typeof request !== 'function') return;
@@ -225,12 +228,13 @@ function useVisitPrepPhotoUrls(serviceId, active, request) {
       })
       .catch(() => {});
     return () => { cancelled = true; };
-  }, [serviceId, active, request]);
+  }, [serviceId, active, request, photoSignature]);
   return byId;
 }
 
 function CustomerFlaggedSection({ serviceId, customerFlagged, request }) {
-  const photoUrls = useVisitPrepPhotoUrls(serviceId, !!customerFlagged?.length, request);
+  const photoSignature = (customerFlagged || []).flatMap((entry) => entry.photoIds || []).join(',');
+  const photoUrls = useVisitPrepPhotoUrls(serviceId, !!customerFlagged?.length, request, photoSignature);
   if (!customerFlagged?.length) return null;
   return (
     <>
