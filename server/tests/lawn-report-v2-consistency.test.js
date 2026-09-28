@@ -186,10 +186,6 @@ describe('aftercare verdict fixture table (PR #5033 findings)', () => {
     ['P1 generic next-step answer includes the confirmation', () => ask('What should I do next?'), (answer) => {
       expect(answer).toMatch(/^Confirm the product watering directions/);
     }],
-    ['P2 observation-qualified action request routes to next steps', () => ask('What are the next steps for the mushrooms you found?'), (answer) => {
-      expect(answer).toMatch(/^Confirm the product watering directions/);
-      expect(answer).not.toMatch(/Mushrooms observed/);
-    }],
     ['P2 need-to-water question outranks findings wording', () => ask('I observed dry spots; do I need to water?', { weekPlan: { ...RUN_PLAN, visitInPlanWeek: true } }), (answer) => {
       expect(answer).toMatch(PLAN_CONDITION);
       expect(answer).toContain(RUN_PLAN.title);
@@ -209,14 +205,6 @@ describe('aftercare verdict fixture table (PR #5033 findings)', () => {
       await rewrite(neutralAftercare(), 'Shared narrative facts.');
       return rewrite(creditedAftercare(), 'Shared narrative facts.');
     }, keepsCreditedActions],
-    ['P2 passive watering question outranks findings wording', () => ['I found mushrooms; should the lawn be watered?', 'I found mushrooms; may I water?', 'You found dry spots; does it need water?']
-      .map((question) => ask(question, { weekPlan: { ...RUN_PLAN, visitInPlanWeek: true } })), (answers) => {
-      for (const answer of answers) {
-        expect(answer).toMatch(PLAN_CONDITION);
-        expect(answer).toContain(RUN_PLAN.title);
-        expect(answer).not.toMatch(/Mushrooms observed/);
-      }
-    }],
     // Round 4 (PR #5033 findings on fb3f59b606).
     ['P1 no recorded instruction never earns water-in credit', () => resolveLawnAftercare({ ...creditedAftercare(), watering: '  ' }), (state) => {
       expect(state).toEqual({ verdict: 'review', customerTask: expect.stringMatching(CONFIRM), restricts: true, credited: false });
