@@ -3386,6 +3386,51 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY 15 MIN — Same-trip first-application billing-alert sweep. A
+  // reserved-accept slot that sells 2+ recurring programs mints ONE
+  // combined first-application invoice, linked to the reserved (priced)
+  // visit; the same-trip sibling is left unpriced on purpose (covered by
+  // that invoice while both share a date). If a later reschedule pulls the
+  // sibling onto a different day, the invoice still charges for both. This
+  // sweep re-derives every OPEN (non-settled) first-application invoice's
+  // estimate group fresh and opens/refreshes or clears ONE durable admin
+  // billing alert per estimate, telling the office to split it by hand —
+  // it never touches the invoice or any visit row, and never holds
+  // collection (owner ruling, 2026-09-27 redesign of #5021 — see
+  // first-application-sibling-split.js; supersedes the per-writer
+  // in-transaction alert that design used through round 9). No dedicated
+  // gate: same always-on shape as tech-late-detector/unassigned-overdue-
+  // detector above (an internal, idempotent, dedupe-keyed alert, no
+  // customer-facing side effect). runExclusive lives INSIDE
+  // runFirstApplicationSiblingSplitSweep itself, and this tick runs as a
+  // SCHEDULED tick (registered through utils/scheduled-cron, not node-cron
+  // directly), so runExclusive always takes runScheduled's waitForSlot
+  // path here — never the fire-and-forget request path. On a genuine
+  // 'no_connection' skip, runScheduled's own "no lock slot within
+  // SLOT_WAIT_MAX_MS" branch has ALREADY called recordMissedTick before
+  // returning (cron-lock.js) — a second recordJobStart/recordJobEnd pair
+  // here recorded the SAME missed tick twice (Codex P2: the adjacent
+  // followup-sla-watcher.js and call-commitments-watchdog.js cron entries
+  // carry this identical extra write and are not a correct model to copy;
+  // left as-is here since fixing shared cron-lock plumbing or those other
+  // jobs' entries is outside this module). This tick only throws, so the
+  // skip is still logged and the tick still counts as failed to whatever
+  // is watching this promise — job_health itself is left to the
+  // cron-lock wrapper alone.
+  // =========================================================================
+  cron.schedule('*/15 * * * *', async () => {
+    try {
+      const { runFirstApplicationSiblingSplitSweep } = require('./first-application-sibling-split');
+      const result = await runFirstApplicationSiblingSplitSweep();
+      if (result?.skipped && result.reason !== 'lease_held') {
+        throw new Error(`First-application sibling-split sweep tick skipped: ${result.reason || 'no_connection'}`);
+      }
+    } catch (err) {
+      logger.error(`[first-application-sibling-split] sweep tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY 2 MIN — Cloudflare Pages build status for open blog-publish PRs.
   // Updates astro_preview_url once the preview deploy succeeds, or flips
   // the post to build_failed if it blows up. runExclusive: this tick

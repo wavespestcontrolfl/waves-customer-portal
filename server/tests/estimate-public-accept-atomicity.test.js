@@ -191,9 +191,21 @@ jest.mock('../models/db', () => {
 // Module mocks: everything with real side effects (comms, Stripe-adjacent,
 // notifications) is stubbed; converter HELPERS stay real (the in-txn invoice
 // mint derives its gates from them) with only convertEstimate replaced.
+// stampCombinedFirstApplicationInvoiceCoverage is a bare spy (never the real
+// impl — it needs a real DB, and this suite's knex is a fake) so tests can
+// assert it was invoked (or not) with the right args, same style as
+// convertEstimate above. shouldAttachScheduledServiceToStandardDraftInvoice
+// wraps the REAL implementation by default (existing tests all exercise its
+// real gate) but can be overridden per-test to force the attach path without
+// reconstructing the full pricing pipeline in this fake-knex harness.
 jest.mock('../services/estimate-converter', () => {
   const actual = jest.requireActual('../services/estimate-converter');
-  return { ...actual, convertEstimate: jest.fn() };
+  return {
+    ...actual,
+    convertEstimate: jest.fn(),
+    stampCombinedFirstApplicationInvoiceCoverage: jest.fn().mockResolvedValue(),
+    shouldAttachScheduledServiceToStandardDraftInvoice: jest.fn(actual.shouldAttachScheduledServiceToStandardDraftInvoice),
+  };
 });
 jest.mock('../services/invoice', () => ({
   create: jest.fn(),
@@ -574,6 +586,97 @@ describe('FIX 1 — standard recurring conversion is atomic with acceptance', ()
     expect(storedEstimate().status).toBe('sent');
     expect(storedEstimate().price_locked_at == null).toBe(true);
     expect(InvoiceService.sendViaSMSAndEmail).not.toHaveBeenCalled();
+  });
+
+  // Codex round-9 P1 (#5021): this public accept path mints the standard
+  // setup/first-application invoice itself (skipSetupInvoice above) and,
+  // unlike estimate-converter.js's own standard branch, never called
+  // stampCombinedFirstApplicationInvoiceCoverage — so a multi-program public
+  // acceptance was invisible to first-application-sibling-split.js's sweep.
+  // shouldAttachScheduledServiceToStandardDraftInvoice is force-returned true
+  // for this one test (a jest spy on the real implementation everywhere
+  // else) rather than reconstructing the full multi-service pricing ladder
+  // in this fake-knex harness — the real gate itself is unit-tested directly
+  // in estimate-converter's own suite; this test's job is only to prove the
+  // ROUTE calls the stamper with the right ids once that gate says yes.
+  test('Codex round-9 P1: a reserved-anchor accept stamps the standard invoice with the anchor row', async () => {
+    resetStore(recurringPestEstimate({ id: 'est-multi-1', token: 'tok-multi-1-x0123456789' }));
+    EstimateConverter.shouldAttachScheduledServiceToStandardDraftInvoice.mockReturnValueOnce(true);
+    EstimateConverter.convertEstimate.mockResolvedValueOnce({
+      customerId: 'cust-1',
+      tier: 'Bronze',
+      monthlyRate: 60,
+      firstScheduledServiceId: 'ss-multi-1',
+      // Codex round-12 P2: convertEstimate's own additive field — the
+      // promoted same-trip sibling ids it actually inserted for this
+      // accept, threaded straight through to the stamper's memberIds
+      // rather than reconstructed here or by the stamper itself.
+      combinedInvoiceMemberIds: ['ss-multi-2'],
+      recurringConversionSkipped: false,
+      welcomeSms: null,
+      membershipEmail: null,
+      deferredFollowUpReminderRows: [],
+    });
+
+    const response = await putAccept('tok-multi-1-x0123456789');
+
+    expect(response.status).toBe(200);
+    expect(EstimateConverter.stampCombinedFirstApplicationInvoiceCoverage).toHaveBeenCalledTimes(1);
+    expect(EstimateConverter.stampCombinedFirstApplicationInvoiceCoverage).toHaveBeenCalledWith(
+      expect.anything(), // the accept's own trx — same transaction the invoice itself commits in
+      { invoiceId: 'inv-1', anchorId: 'ss-multi-1', memberIds: ['ss-multi-2'] },
+    );
+  });
+
+  // Codex round-15 P1: an INVOICE-MODE accept with no pre-existing visit
+  // (acceptLinkedSsId null) mints its combined invoice BEFORE convertEstimate
+  // creates the anchor, so it was neither attached to that anchor nor
+  // stamped. After conversion the route must attach the invoice to the
+  // converter's firstScheduledServiceId and stamp the converter's members.
+  test('Codex round-15 P1: an invoice-mode, no-slot, multi-program accept attaches the invoice to the converter anchor and stamps', async () => {
+    resetStore(recurringPestEstimate({ id: 'est-im-1', token: 'tok-im-1-x0123456789', bill_by_invoice: true }));
+    EstimateConverter.convertEstimate.mockResolvedValueOnce({
+      customerId: 'cust-1',
+      tier: 'Bronze',
+      monthlyRate: 60,
+      firstScheduledServiceId: 'ss-im-1',
+      combinedInvoiceMemberIds: ['ss-im-2'],
+      recurringConversionSkipped: false,
+      welcomeSms: null,
+      membershipEmail: null,
+      deferredFollowUpReminderRows: [],
+    });
+
+    const response = await putAccept('tok-im-1-x0123456789');
+
+    expect(response.status).toBe(200);
+    expect(response.data.invoiceMode).toBe(true);
+    expect(InvoiceService.create).toHaveBeenCalledTimes(1);
+    const attach = db.__state.ops.find((op) => op.type === 'update' && op.table === 'invoices'
+      && op.data && op.data.scheduled_service_id === 'ss-im-1');
+    expect(attach).toBeTruthy();
+    expect(EstimateConverter.stampCombinedFirstApplicationInvoiceCoverage).toHaveBeenCalledTimes(1);
+    expect(EstimateConverter.stampCombinedFirstApplicationInvoiceCoverage).toHaveBeenCalledWith(
+      expect.anything(),
+      { invoiceId: 'inv-1', anchorId: 'ss-im-1', memberIds: ['ss-im-2'] },
+    );
+  });
+
+  test('control: a single-program accept (no reserved multi-program anchor) never calls the stamper', async () => {
+    resetStore(recurringPestEstimate({ id: 'est-single-1', token: 'tok-single-1-x0123456789' }));
+    EstimateConverter.convertEstimate.mockResolvedValueOnce({
+      customerId: 'cust-1',
+      firstScheduledServiceId: null,
+      recurringConversionSkipped: false,
+      welcomeSms: null,
+      membershipEmail: null,
+      deferredFollowUpReminderRows: [],
+    });
+
+    const response = await putAccept('tok-single-1-x0123456789');
+
+    expect(response.status).toBe(200);
+    expect(EstimateConverter.stampCombinedFirstApplicationInvoiceCoverage).not.toHaveBeenCalled();
   });
 });
 
