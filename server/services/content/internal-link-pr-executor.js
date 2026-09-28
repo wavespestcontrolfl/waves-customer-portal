@@ -576,7 +576,7 @@ class InternalLinkPrExecutor {
     if (!envBool('AUTONOMOUS_INTERNAL_LINK_CANDIDATE_SWEEP', true)) return { status: 'disabled' };
     if (!shadowOff()) return { status: 'shadow' };
     // Post-merge link planning that failed (a protected-registry or corpus
-    // outage) left the publishing run's link_tasks_queued NULL and has no
+    // outage) stamped the publishing run's link_planning_failed_at and has no
     // other retry route — replan those recent publishes first.
     try {
       await this._replanUnplannedPublishes();
@@ -594,15 +594,14 @@ class InternalLinkPrExecutor {
     return this.runPrBatch({ limit, scanLimit: envInt('AUTONOMOUS_INTERNAL_LINK_SWEEP_SCAN_LIMIT', 15) });
   }
 
-  // Recent autonomous blog publishes whose post-merge link planning never
-  // succeeded (link_tasks_queued still NULL — finalizeMerged stamps it only
-  // on a successful plan). One transient outage must not leave a new post
-  // without inbound links for good.
+  // Recent autonomous blog publishes whose post-merge link planning failed or
+  // could not run (the poller stamps link_planning_failed_at). One transient
+  // outage must not leave a new post without inbound links for good.
   async _replanUnplannedPublishes({ days = envInt('AUTONOMOUS_INTERNAL_LINK_REPLAN_DAYS', 7), limit = 5 } = {}) {
     const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
     const runs = await db('autonomous_runs')
       .where({ action_type: 'new_supporting_blog', outcome: 'completed_published', shadow_mode: false })
-      .whereNull('link_tasks_queued')
+      .whereNotNull('link_planning_failed_at')
       .whereNotNull('published_url')
       .where('completed_at', '>=', since)
       .orderBy('completed_at', 'desc')
@@ -611,7 +610,7 @@ class InternalLinkPrExecutor {
     if (!runs.length) return 0;
     const { resolveTargetForRun } = require('./autonomous-pr-poller')._internals;
     const publisher = require('../content-astro/astro-publisher');
-    // Same kill switch finalizeMerged honors; runs stay NULL while it is on.
+    // Same kill switch finalizeMerged honors; markers wait while it is on.
     if (publisher.internalLinkPlanningDisabled?.()) return 0;
     let replanned = 0;
     for (const run of runs) {
@@ -619,14 +618,14 @@ class InternalLinkPrExecutor {
         const target = await resolveTargetForRun(run);
         const url = target?.url || run.published_url;
         const result = target?.planLinks === false ? { queued: 0 } : await publisher.planInternalLinksForTarget({ ...target, url });
-        // null = planning could not run (no corpus): stays NULL for the next
-        // sweep, same result guard as finalizeMerged.
+        // null = planning could not run (no corpus): the marker stays for
+        // the next sweep, same result guard as finalizeMerged.
         if (!result) continue;
-        await db('autonomous_runs').where({ id: run.id }).whereNull('link_tasks_queued')
-          .update({ link_tasks_queued: result.queued || 0, updated_at: new Date() });
+        await db('autonomous_runs').where({ id: run.id }).whereNotNull('link_planning_failed_at')
+          .update({ link_tasks_queued: result.queued || 0, link_planning_failed_at: null, updated_at: new Date() });
         replanned += 1;
       } catch (err) {
-        // Still NULL → retried on the next daily sweep (bounded by `days`).
+        // Marker kept → retried on the next daily sweep (bounded by `days`).
         logger.warn(`[internal-link-pr-executor] replan failed for run ${run.id}: ${err.message}`);
       }
     }

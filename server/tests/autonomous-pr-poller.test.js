@@ -471,6 +471,22 @@ describe('merged-by-human reconciliation', () => {
     expect(queueUpdate.updates).toMatchObject({ status: 'done' });
   });
 
+  test.each([
+    ['throws (registry/corpus outage)', () => publisher.planInternalLinksForTarget.mockRejectedValue(new Error('protected_registry_unavailable'))],
+    ['could not run (no corpus)', () => publisher.planInternalLinksForTarget.mockResolvedValue(null)],
+  ])('a post-merge plan that %s stamps link_planning_failed_at for the daily retry', async (_label, arrange) => {
+    const updates = setupDb({ pending: [makeRun()] });
+    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true, merged_at: '2026-06-11T05:00:00Z' });
+    indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
+    arrange();
+
+    await poller.pollPending();
+
+    const patch = runUpdates(updates)[1];
+    expect(patch.updates).toMatchObject({ link_planning_failed_at: expect.any(Date) });
+    expect(patch.updates.link_tasks_queued).toBeUndefined();
+  });
+
   test('honors the INTERNAL_LINK_PLAN_ON_BLOG_MERGE kill switch', async () => {
     setupDb({ pending: [makeRun()] });
     gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true, merged_at: '2026-06-11T05:00:00Z' });

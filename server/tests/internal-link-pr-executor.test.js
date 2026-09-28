@@ -1825,13 +1825,13 @@ describe('internal-link verification vs a concurrent publication', () => {
 });
 
 describe('internal-link replan of publishes whose post-merge planning failed', () => {
-  test('replans recent publishes with link_tasks_queued NULL and stamps the result', async () => {
+  test('replans recent publishes stamped link_planning_failed_at and clears the marker', async () => {
     jest.resetModules();
     const updates = [];
     jest.doMock('../models/db', () => {
       const db = jest.fn((table) => {
         const q = {};
-        for (const m of ['where', 'whereNull', 'whereNotNull', 'orderBy', 'limit']) q[m] = jest.fn(() => q);
+        for (const m of ['where', 'whereNull', 'whereNotNull', 'orderBy', 'limit']) q[m] = jest.fn((col) => { if (col === 'link_planning_failed_at') q.usedMarker = true; return q; });
         q.select = jest.fn(async () => (table === 'autonomous_runs' ? [{ id: 'run1', published_url: 'https://www.wavespestcontrol.com/new-post/', action_type: 'new_supporting_blog' }] : []));
         q.update = jest.fn(async (patch) => { updates.push({ table, patch }); return 1; });
         return q;
@@ -1853,7 +1853,7 @@ describe('internal-link replan of publishes whose post-merge planning failed', (
     const replanned = await instance._replanUnplannedPublishes();
     expect(replanned).toBe(1);
     expect(planInternalLinksForTarget).toHaveBeenCalledWith(expect.objectContaining({ url: 'https://www.wavespestcontrol.com/new-post/' }));
-    expect(updates).toEqual([{ table: 'autonomous_runs', patch: expect.objectContaining({ link_tasks_queued: 4 }) }]);
+    expect(updates).toEqual([{ table: 'autonomous_runs', patch: expect.objectContaining({ link_tasks_queued: 4, link_planning_failed_at: null }) }]);
     // The post-merge planning kill switch stops the replan too.
     internalLinkPlanningDisabled.mockReturnValueOnce(true);
     planInternalLinksForTarget.mockClear();
