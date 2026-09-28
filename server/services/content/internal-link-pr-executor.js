@@ -688,7 +688,9 @@ class InternalLinkPrExecutor {
 
   async _sourceProtection(source, task) {
     const url = policy.normalizeInternalUrl(source.url || task.source_url || source.canonical_url);
-    if (!url) return { protected: false };
+    // An unresolvable source URL can't be proven unprotected: fail closed
+    // (retry next sweep), same as the merge-time gate.
+    if (!url) return { error: true };
     try {
       const prot = await protectedPages.isProtected(url, { db });
       if (prot?.reason === 'protected_check_error' || prot?.source === 'error') return { error: true };
