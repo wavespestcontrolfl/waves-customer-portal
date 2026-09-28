@@ -948,14 +948,13 @@ function buildEstimateAssistantContext({
   // Expose separately-billed add-ons with their own Ask Waves chip or proven
   // purchased terms even when this recurring estimate offers no one-time plan.
   // The plan selector must not hide the purchased scope of a billed add-on.
-  const hasAssistantVisibleOneTimeAddOn = oneTimeServices.some(
-    (row) => isGermanRoachCleanoutContextRow(row) || isBoraCareContextRow(row)
-      || row.purchasedTerms?.length > 0
-      // A pre-slab add-on's warranty terms expose it only while it is still
-      // in the current scope (Codex #5195 r1: a fallback-only row from an
-      // older engineResult is a removed treatment).
-      || (row.warrantyTerms?.length > 0 && currentOneTimeKeys.has(oneTimeRowScopeKey(row))),
-  );
+  const isAssistantVisibleOneTimeAddOn = (row) => isGermanRoachCleanoutContextRow(row) || isBoraCareContextRow(row)
+    || row.purchasedTerms?.length > 0
+    // A pre-slab add-on's warranty terms expose it only while it is still
+    // in the current scope (Codex #5195 r1: a fallback-only row from an
+    // older engineResult is a removed treatment).
+    || (row.warrantyTerms?.length > 0 && currentOneTimeKeys.has(oneTimeRowScopeKey(row)));
+  const hasAssistantVisibleOneTimeAddOn = oneTimeServices.some(isAssistantVisibleOneTimeAddOn);
   const exposeOneTimeContext = !quoteRequired
     && (oneTimeAvailable || hasAssistantVisibleOneTimeAddOn)
     && (hasOneTimeValue || oneTimeServices.length > 0);
@@ -1007,7 +1006,15 @@ function buildEstimateAssistantContext({
   };
   const servicesContext = services.map(rowWithSummary);
   const recurringServicesContext = recurringServices.map(rowWithSummary);
-  const oneTimeItemsContext = exposeOneTimeContext ? oneTimeServices.map(rowWithSummary) : null;
+  // When one-time work is not offered and an add-on alone exposes this
+  // context, only the add-ons are exposed: the merged list also retains
+  // rows only an older engineResult still carries (a removed termite-foam
+  // treatment), and those must not ride along (pre-push audit P1 on
+  // 5e030feff6).
+  const exposedOneTimeServices = oneTimeAvailable
+    ? oneTimeServices
+    : oneTimeServices.filter(isAssistantVisibleOneTimeAddOn);
+  const oneTimeItemsContext = exposeOneTimeContext ? exposedOneTimeServices.map(rowWithSummary) : null;
 
   return {
     company: COMPANY,

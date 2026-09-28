@@ -997,6 +997,26 @@ describe('estimate assistant no-guarantee context', () => {
     expect(item.warrantyTerms[0]).toMatch(/^Extended 5-year warranty selected/);
   });
 
+  test('a current pre-slab add-on does not drag a removed historical service into the context (pre-push P1)', () => {
+    const recurring = { service: 'pest_control', name: 'Pest Control', mo: 55, visitsPerYear: 4 };
+    const preSlab = { service: 'pre_slab_termiticide', label: 'Pre-Slab Termiticide Treatment', amount: 950,
+      warrantyExtendedSelected: true, warrantyStatus: 'Extended 5-year warranty selected' };
+    const removedFoam = { service: 'termite_foam', label: 'Termite Foam Treatment', amount: 400 };
+    const context = buildEstimateAssistantContext({
+      estimate: { monthly_total: 55, onetime_total: 950, show_one_time_option: false },
+      serviceMode: 'recurring', noGuaranteeClaims: true,
+      estData: {
+        result: { recurring: { services: [recurring] }, oneTime: { items: [preSlab] } },
+        engineResult: { recurring: { services: [recurring] }, oneTime: { items: [preSlab, removedFoam] } },
+      },
+      pricingBundle: { source: 'engine_invocation', snapshotHit: false, anchorOneTimePrice: 950,
+        oneTimeBreakdown: { total: 950, items: [preSlab] } },
+    });
+    expect(context.oneTime.items.map((row) => row.label)).toEqual(['Pre-Slab Termiticide Treatment']);
+    expect(JSON.stringify(context)).not.toMatch(/Termite Foam Treatment/);
+    expect(answerEstimateQuestionFallback('What is included?', context)).not.toMatch(/foam/i);
+  });
+
   test('a hand-built context lists each row under its own name', () => {
     const bond = 'Purchased termite bond: 5-year term with re-treatment coverage.';
     const rows = [
