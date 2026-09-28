@@ -3385,7 +3385,7 @@ class RelayConversation {
         this._switchToClaudeFallback(timedOut ? 'stream_timeout' : 'provider_error', stat);
         const retryable = !streamState || !(streamState.entry || streamState.failed);
         if (retryable && await this._sessionSuperseded().catch(() => false)) {
-          logger.warn(`[voice-relay] provider-failure retry skipped — session superseded callSid=${this.callSid}`);
+          logger.warn(`[voice-relay] provider-failure retry skipped — session superseded callSid=${maskSid(this.callSid)}`);
           await this._closeStreamedRoundOnCatch(streamState, 'interrupted');
           this._ending = true;
           try { this._endSession?.({ reason: 'superseded', captured: this.leadCaptured }); } catch { /* closing */ }
