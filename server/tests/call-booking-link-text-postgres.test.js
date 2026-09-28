@@ -24,6 +24,13 @@
  * clones the already-migrated public tables into it, and drops the whole
  * schema in afterAll.
  */
+// codex #5018 P2: the long-form /inspection/<token> section below is the
+// one exception to "free of consultation-token signing setup" above — a
+// long-form match genuinely requires composer-customer-links.js's real
+// signature verification (never hand-rolled), so a JWT_SECRET fallback is
+// unavoidable there. Harmless for every other test in this file, which
+// never touches token minting/verification.
+process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error: jest.fn() }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
 // hasPriorContact reads the db singleton, so it's stubbed here. The staging
@@ -60,7 +67,7 @@ const schema = `call_booking_link_${randomUUID().replaceAll('-', '')}`;
 // this file runs against must be FULLY migrated (never the possibly-stale
 // waves_test template alone) for it to exist in `public` before the clone
 // below runs.
-const TABLES = ['customers', 'leads', 'call_log', 'system_settings', 'scheduled_services', 'short_codes', 'sms_log', 'activity_log', 'call_booking_link_text_handoffs'];
+const TABLES = ['customers', 'leads', 'call_log', 'system_settings', 'scheduled_services', 'short_codes', 'sms_log', 'activity_log', 'call_booking_link_text_handoffs', 'estimates'];
 let admin;
 let mockPg;
 jest.setTimeout(30000);
@@ -1150,5 +1157,214 @@ postgres('call-booking-link-text against PostgreSQL', () => {
     expect(oldMarker).toBeUndefined(); // pruned
     const recentMarker = await mockPg(callBookingLinkText.HANDOFF_MARKER_TABLE).where({ call_log_id: recentCallId }).first();
     expect(recentMarker).toBeTruthy(); // kept — still meaningful to recoverAbandonedClaim
+  });
+
+  // codex #5018 P2: leads.estimate_id is only the FK RESCUED at send/view
+  // (admin-estimates.js's own "Prefer the FK... fall back to the public-
+  // quote mirror" comment) — a quote-wizard draft the lead never opened
+  // stores the link ONLY in estimates.estimate_data.lead_id (public-
+  // quote.js's findPriorOpenWizardLeadId: "A wizard draft is mirrored
+  // through estimate_data.lead_id, not the FK"). dispatchIneligibleReason's
+  // own estimate_linked check (DISPATCH_CHECKS, run before the handoff even
+  // opens) must catch this too — a mocked knex cannot compile the real
+  // jsonb ->> lookup leadHasOpenEstimateMirror needs.
+  test('dispatchClaimedCall skips estimate_linked for a quote-wizard draft that only mirrors this lead through estimate_data.lead_id (never the FK)', async () => {
+    const leadId = await insertLead(mockPg, { phone: '+15555550777' });
+    await mockPg('estimates').insert({ id: randomUUID(), status: 'draft', estimate_data: { lead_id: leadId }, created_at: NOW });
+    const send_at = new Date(NOW.getTime() - 60 * 60 * 1000).toISOString();
+    const callId = await insertCall(mockPg, {
+      from_phone: '+15555550777',
+      metadata: { lead_id: leadId, call_booking_link_text: { status: 'claimed', lead_id: leadId, send_at, original_send_at: send_at } },
+    });
+
+    const call = await mockPg('call_log').where({ id: callId }).first();
+    const result = await callBookingLinkText.dispatchClaimedCall(mockPg, call, NOW);
+
+    expect(result).toEqual({ sent: false, skipped: 'estimate_linked' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  // The same mirror, but landing in the gap AFTER dispatchIneligibleReason's
+  // own (already-cleared) check and BEFORE neverSendRecheck's — the final
+  // provider-boundary recheck must catch it too, on the freshest possible
+  // read (dbi), the same discipline every other mutable fact on this hook
+  // already follows.
+  test('neverSendRecheck skips estimate_linked for a quote-wizard mirror created between dispatch and the handoff', async () => {
+    const leadId = await insertLead(mockPg, { phone: '+15555550778' });
+    const send_at = new Date(NOW.getTime() - 60 * 60 * 1000).toISOString();
+    const callId = await insertCall(mockPg, {
+      from_phone: '+15555550778',
+      metadata: { lead_id: leadId, call_booking_link_text: { status: 'claimed', lead_id: leadId, send_at, original_send_at: send_at } },
+    });
+    buildLeadConsultationSmsLine.mockResolvedValue({ url: 'https://portal.example.com/inspection/tok-est', line: 'Pick a time.\n\n', phone: '+15555550778' });
+    sendCustomerMessage.mockImplementation(async ({ withSmsHandoff, providerPreSendCheck }) => {
+      // Simulates a quote-wizard submission landing in this exact gap.
+      await mockPg('estimates').insert({ id: randomUUID(), status: 'sent', estimate_data: { lead_id: leadId }, created_at: NOW });
+      const verdict = await withSmsHandoff((trx) => providerPreSendCheck({ dbi: trx }));
+      return verdict.ok ? { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SMtest0000000000000000000000009' } : { sent: false, ...verdict };
+    });
+
+    const call = await mockPg('call_log').where({ id: callId }).first();
+    const result = await callBookingLinkText.dispatchClaimedCall(mockPg, call, NOW);
+
+    expect(result).toEqual({ sent: false, skipped: 'estimate_linked' });
+  });
+
+  // codex #5018 P2: linkSentRecently used to match ONLY a short /l/<code>
+  // bearer via short_codes — a manual composer send or a forwarded resolved
+  // page URL can carry the long-form /inspection/<token> instead, which
+  // never appears in short_codes at all. Reuses composer-customer-links.js's
+  // own consultationLinkRows (real signature verification) — never
+  // hand-rolled token parsing.
+  test('linkSentRecently matches a long-form /inspection/<token> sms_log body with no short_codes row at all', async () => {
+    const { mintLeadConsultationToken } = require('../utils/lead-consultation-token');
+    const leadId = await insertLead(mockPg, { phone: '+15555550444' });
+    const sentAt = new Date(NOW.getTime() - 3 * 24 * 60 * 60 * 1000);
+    await mockPg('sms_log').insert({
+      id: randomUUID(), direction: 'outbound', from_phone: '+15555550100', to_phone: '+15555550444', status: 'delivered',
+      message_body: `Pick a time: https://portal.wavespestcontrol.com/inspection/${mintLeadConsultationToken(leadId)}`,
+      created_at: sentAt,
+    });
+    const send_at = new Date(NOW.getTime() - 60 * 60 * 1000).toISOString();
+    const callId = await insertCall(mockPg, {
+      from_phone: '+15555550444',
+      metadata: { lead_id: leadId, call_booking_link_text: { status: 'claimed', lead_id: leadId, send_at, original_send_at: send_at } },
+    });
+
+    const call = await mockPg('call_log').where({ id: callId }).first();
+    const result = await callBookingLinkText.dispatchClaimedCall(mockPg, call, NOW);
+
+    expect(result).toEqual({ sent: false, skipped: 'link_sent_recently' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  // Negative control: a long-form link decoding to a DIFFERENT lead must
+  // never block this one — proves the fix matches by resolved lead_id, not
+  // merely by the presence of an /inspection/ substring.
+  test('linkSentRecently ignores a long-form link that decodes to a DIFFERENT lead', async () => {
+    const { mintLeadConsultationToken } = require('../utils/lead-consultation-token');
+    const otherLeadId = await insertLead(mockPg, { phone: '+15555550445' });
+    const leadId = await insertLead(mockPg, { phone: '+15555550446' });
+    const sentAt = new Date(NOW.getTime() - 3 * 24 * 60 * 60 * 1000);
+    await mockPg('sms_log').insert({
+      id: randomUUID(), direction: 'outbound', from_phone: '+15555550100', to_phone: '+15555550445', status: 'delivered',
+      message_body: `Pick a time: https://portal.wavespestcontrol.com/inspection/${mintLeadConsultationToken(otherLeadId)}`,
+      created_at: sentAt,
+    });
+    buildLeadConsultationSmsLine.mockResolvedValue({ url: 'https://portal.wavespestcontrol.com/inspection/tok-new2', line: 'Pick a time.\n\n', phone: '+15555550446' });
+    sendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SMtest0000000000000000000000010' });
+    const send_at = new Date(NOW.getTime() - 60 * 60 * 1000).toISOString();
+    const callId = await insertCall(mockPg, {
+      from_phone: '+15555550446',
+      metadata: { lead_id: leadId, call_booking_link_text: { status: 'claimed', lead_id: leadId, send_at, original_send_at: send_at } },
+    });
+
+    const call = await mockPg('call_log').where({ id: callId }).first();
+    const result = await callBookingLinkText.dispatchClaimedCall(mockPg, call, NOW);
+
+    expect(result).toEqual({ sent: true, providerMessageId: 'SMtest0000000000000000000000010' });
+  });
+
+  // codex #5018 P2: stage()'s own SELECT requires processing_token IS NULL,
+  // v2_extraction_status = 'valid', and updated_at past the grace window —
+  // but stageOne makes further real DB awaits (resolveLeadLinkage,
+  // outboundStagingReason) before ever reaching claimMetadata's UPDATE. A
+  // forced reprocess claiming the row in that gap must not have its own
+  // claim silently overwritten by a decision stamped against the STALE row
+  // stage()'s SELECT observed. `staleCall` below is exactly what that
+  // SELECT would have read — handed to stageOne directly (it never re-reads
+  // the row itself) while the REAL row underneath has already moved on.
+  test('stageOne\'s claimMetadata UPDATE is a no-op — never a stamped decision — when a reprocess claims the row after the SELECT that fed it', async () => {
+    const leadId = await insertLead(mockPg, { phone: '+15555550999' });
+    const callId = await insertCall(mockPg, { metadata: { lead_id: leadId } });
+    const staleCall = await mockPg('call_log').where({ id: callId }).first();
+    // The reprocess lands AFTER stage()'s own SELECT already ran.
+    await mockPg('call_log').where({ id: callId }).update({
+      processing_token: 'reprocess-claim', v2_extraction_status: null, updated_at: new Date(),
+    });
+
+    const decided = await callBookingLinkText.stageOne(mockPg, staleCall, NOW, null);
+    expect(decided).toBe('pending'); // stageOne's own in-memory logic never re-reads the row
+
+    const row = await mockPg('call_log').where({ id: callId }).first('metadata', 'processing_token', 'v2_extraction_status');
+    expect(row.metadata?.call_booking_link_text).toBeUndefined(); // never stamped over the claimed row
+    expect(row.processing_token).toBe('reprocess-claim'); // the reprocess's own claim survives untouched
+    expect(row.v2_extraction_status).toBeNull();
+  });
+
+  // codex #5018 P2: twilio.js's accepted-send sms_log recovery insert
+  // (services/twilio.js, the "Authority guard failed after provider
+  // acceptance" branch) now serializes its own check-then-insert with a
+  // transaction-scoped advisory lock keyed on the twilio_sid, because
+  // twilio_sid carries no UNIQUE constraint. This pair proves the SQL
+  // primitive itself — hand-replicated here exactly as twilio.js derives
+  // it (never re-exported for tests) — the same mechanism/fix methodology
+  // this file's own lock-ordering tests above already use, since a mocked
+  // knex cannot prove a real Postgres lock is genuinely held.
+  describe('twilio.js sms_log recovery: an advisory lock serializes concurrent check-then-insert for the SAME twilio_sid (codex #5018 P2)', () => {
+    async function acquireRecoveryLock(trx, sid) {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`sms_log_sid:${sid}`]);
+    }
+    function smsLogRow(sid) {
+      return {
+        id: randomUUID(), direction: 'outbound', from_phone: '+19410000000', to_phone: '+19415550100',
+        message_body: 'recovery race', twilio_sid: sid, status: 'sent', created_at: NOW, message_type: 'manual',
+      };
+    }
+
+    test('mechanism: an unlocked SELECT-then-INSERT for the SAME sid across two sequenced transactions duplicates the row — the exact pre-fix hazard', async () => {
+      const sid = `SM${randomUUID().replaceAll('-', '').slice(0, 32)}`;
+      const tx1 = await mockPg.transaction();
+      const tx2 = await mockPg.transaction();
+      try {
+        // Sequenced, not raced (this file's own established mechanism-test
+        // pattern) — deterministic without relying on real network timing:
+        // both see "not logged" before either commits its own insert.
+        expect(await tx1('sms_log').where({ twilio_sid: sid }).first('id')).toBeUndefined();
+        expect(await tx2('sms_log').where({ twilio_sid: sid }).first('id')).toBeUndefined();
+        await tx1('sms_log').insert(smsLogRow(sid));
+        await tx1.commit();
+        await tx2('sms_log').insert(smsLogRow(sid)); // tx2 never re-checked — it already "knew" the row didn't exist
+        await tx2.commit();
+
+        const rows = await mockPg('sms_log').where({ twilio_sid: sid });
+        expect(rows).toHaveLength(2); // the duplicate this fix prevents
+      } finally {
+        await tx1.rollback().catch(() => {});
+        await tx2.rollback().catch(() => {});
+      }
+    });
+
+    test('fix: the SAME sequencing, with the advisory lock twilio.js now takes, never duplicates the row', async () => {
+      const sid = `SM${randomUUID().replaceAll('-', '').slice(0, 32)}`;
+      const tx1 = await mockPg.transaction();
+      const tx2 = await mockPg.transaction();
+      try {
+        await acquireRecoveryLock(tx1, sid);
+        let tx2Done = false;
+        const tx2Work = (async () => {
+          // tx2's own lock request blocks until tx1 COMMITS (releasing it)
+          // — it cannot even reach its own SELECT before then.
+          await acquireRecoveryLock(tx2, sid);
+          const already = await tx2('sms_log').where({ twilio_sid: sid }).first('id');
+          if (!already) await tx2('sms_log').insert(smsLogRow(sid));
+          await tx2.commit();
+          tx2Done = true;
+        })();
+        expect(await tx1('sms_log').where({ twilio_sid: sid }).first('id')).toBeUndefined();
+        await tx1('sms_log').insert(smsLogRow(sid));
+        await new Promise((resolve) => setTimeout(resolve, 75));
+        expect(tx2Done).toBe(false); // still waiting on tx1's lock
+        await tx1.commit();
+        await tx2Work;
+        expect(tx2Done).toBe(true);
+
+        const rows = await mockPg('sms_log').where({ twilio_sid: sid });
+        expect(rows).toHaveLength(1); // tx2's own check now sees tx1's committed row and skips
+      } finally {
+        await tx1.rollback().catch(() => {});
+        await tx2.rollback().catch(() => {});
+      }
+    });
   });
 });

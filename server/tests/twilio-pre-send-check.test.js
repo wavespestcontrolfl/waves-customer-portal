@@ -73,6 +73,16 @@ describe('TwilioService.sendSMS preSendCheck (provider-handoff gate)', () => {
     mockValidateOutbound.mockReturnValue({ ok: true });
     mockTwilioCreate.mockResolvedValue({ sid: 'SM_ok' });
     delete process.env.OWNER_SMS_DISABLED;
+    // codex #5018 P2: the accepted-send recovery insert now opens its own
+    // short transaction on the base connection (holding a transaction-
+    // scoped advisory lock around the check-then-insert). Every test below
+    // that reaches it needs `db.transaction` to exist and run its callback
+    // against the SAME base-connection mock the test configures via
+    // `db.mockImplementation` — that mock IS what a fresh base-connection
+    // transaction resolves to here, never the caller's own dead trx.
+    // `db.raw` backs the advisory-lock SELECT itself.
+    require('../models/db').transaction = jest.fn(async (cb) => cb(require('../models/db')));
+    require('../models/db').raw = jest.fn(async () => ({}));
   });
 
   test('a passing check sends normally', async () => {

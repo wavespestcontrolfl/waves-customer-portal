@@ -1450,8 +1450,41 @@ const TwilioService = {
             // a duplicate row for the one send that already landed.
             if (options.logInHandoff) {
               try {
-                const alreadyLogged = await db('sms_log').where({ twilio_sid: message.sid }).first('id');
-                if (!alreadyLogged) await db('sms_log').insert(buildSmsLogRow());
+                // codex #5018 P2: twilio_sid carries no UNIQUE constraint
+                // (never added here — a migration on this hot table, which
+                // may already hold duplicates, is out of scope) — so a bare
+                // SELECT-then-INSERT can still race ITSELF: two recovery
+                // attempts for the SAME sid (e.g. this same catch running
+                // twice for one send, or two processes each recovering
+                // after a lost commit acknowledgement) could both see
+                // `alreadyLogged` as false and both insert. Serialize the
+                // check-then-insert with a transaction-scoped advisory
+                // lock keyed on the sid, in a FRESH transaction on the
+                // base connection — never `trx`, the caller's own
+                // transaction is already dead by the time this catch
+                // runs. Same single-key hashtextextended(key, 0)
+                // derivation utils/customer-comms-lock.js's
+                // lockCustomerComms uses, in its own namespace so it can
+                // never collide with that lock or with lockSmsPhone's
+                // separate two-key family.
+                //
+                // What this does NOT close: the ORIGINAL commit itself
+                // becoming visible to a reader on a different connection
+                // AFTER this lock releases. This lock only serializes
+                // recovery attempts against EACH OTHER — if the caller's
+                // own transaction actually committed (the "lost ack" case
+                // this recovery exists for) but that commit's row is not
+                // yet visible to a read here (a snapshot taken before the
+                // commit finished landing), the SELECT below can still see
+                // nothing and this insert can still land as a genuine
+                // duplicate. Stated plainly: nothing short of a real
+                // UNIQUE constraint on twilio_sid closes that specific
+                // window, and this lock does not claim to.
+                await db.transaction(async (trx) => {
+                  await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`sms_log_sid:${message.sid}`]);
+                  const alreadyLogged = await trx('sms_log').where({ twilio_sid: message.sid }).first('id');
+                  if (!alreadyLogged) await trx('sms_log').insert(buildSmsLogRow());
+                });
               } catch (recoveryErr) {
                 logger.error(`SMS log recovery insert failed after handoff rollback: ${recoveryErr.message}`);
               }

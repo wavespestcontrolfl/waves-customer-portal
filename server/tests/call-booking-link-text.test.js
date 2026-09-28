@@ -10,6 +10,9 @@
  */
 
 jest.mock('../models/db', () => jest.fn());
+// Real registry (never mocked in this file — see managedLineForCall's own
+// tests below, which already assert against real registered numbers).
+const TWILIO_NUMBERS = require('../config/twilio-numbers');
 jest.mock('../models/marker-db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), gateEnvValue: jest.fn(() => false) }));
@@ -265,6 +268,39 @@ describe('managedLineForCall', () => {
 
   test('no candidate at all resolves to null', () => {
     expect(managedLineForCall({ direction: 'inbound' })).toBeNull();
+  });
+
+  // codex #5018 P2: config/twilio-numbers.js's own findByNumber treats an
+  // env-configured internalAlertCallerId() as a REGISTERED line (its last
+  // branch: "office semantics, like unassigned") — without this exclusion,
+  // a call whose from_phone/to_phone happened to be the internal alert
+  // leg would pass findByNumber, isTechLine, isStaffForwardNumber and the
+  // toll-free check, and get returned as a valid customer-facing reply
+  // line, when it is never customer-facing at all (the new-lead ring to
+  // Adam's cell).
+  test('the env-configured internal alert line is never used — falls back to a customer-facing line', () => {
+    const ALERT_LINE = '+19415557777'; // distinct from every other fixture number above
+    process.env.INTERNAL_ALERT_CALLER_ID = ALERT_LINE;
+    try {
+      // Confirms findByNumber really does resolve it (the exact registered-
+      // line trap this exclusion exists for), so a null result below is
+      // this fix, never an unrelated "not registered at all" no-op.
+      expect(TWILIO_NUMBERS.findByNumber(ALERT_LINE)).toBeTruthy();
+      expect(managedLineForCall({ direction: 'inbound', to_phone: ALERT_LINE })).toBeNull();
+    } finally {
+      delete process.env.INTERNAL_ALERT_CALLER_ID;
+    }
+  });
+
+  // Negative control: internalAlertCallerId() ITSELF falls back to the
+  // ordinary main line when the env var is unset — this exclusion must
+  // never reject that fallback value (main line traffic is genuinely
+  // customer-facing) or a naive comparison would silently change today's
+  // ordinary, unconfigured behavior for every other registered line.
+  test('with INTERNAL_ALERT_CALLER_ID unset, an ordinary registered line is unaffected', () => {
+    delete process.env.INTERNAL_ALERT_CALLER_ID;
+    expect(TWILIO_NUMBERS.internalAlertLine()).toBeNull(); // falls back to main line — no distinct alert line to exclude
+    expect(managedLineForCall({ direction: 'inbound', to_phone: PARRISH })).toBe(PARRISH);
   });
 });
 
@@ -638,7 +674,7 @@ describe('stage', () => {
     const rawBindings = [];
     const conn = jest.fn(() => {
       const chain = {};
-      ['where', 'whereRaw'].forEach((m) => { chain[m] = jest.fn(() => chain); });
+      ['where', 'whereRaw', 'whereNull'].forEach((m) => { chain[m] = jest.fn(() => chain); });
       chain.update = jest.fn(async () => 1);
       return chain;
     });
@@ -674,7 +710,7 @@ describe('stage', () => {
     const rawBindings = [];
     const conn = jest.fn(() => {
       const chain = {};
-      ['where', 'whereRaw'].forEach((m) => { chain[m] = jest.fn(() => chain); });
+      ['where', 'whereRaw', 'whereNull'].forEach((m) => { chain[m] = jest.fn(() => chain); });
       chain.update = jest.fn(async () => 1);
       return chain;
     });
@@ -710,7 +746,7 @@ describe('stage', () => {
     const conn = jest.fn((table) => {
       if (table === 'leads') return leadsSidChain([{ id: 'lead-fresh' }]);
       const chain = {};
-      ['where', 'whereRaw'].forEach((m) => { chain[m] = jest.fn(() => chain); });
+      ['where', 'whereRaw', 'whereNull'].forEach((m) => { chain[m] = jest.fn(() => chain); });
       chain.update = jest.fn(async () => 1);
       return chain;
     });
@@ -743,7 +779,7 @@ describe('stage', () => {
     const rawBindings = [];
     const conn = jest.fn(() => {
       const chain = {};
-      ['where', 'whereRaw'].forEach((m) => { chain[m] = jest.fn(() => chain); });
+      ['where', 'whereRaw', 'whereNull'].forEach((m) => { chain[m] = jest.fn(() => chain); });
       chain.update = jest.fn(async () => 1);
       return chain;
     });
@@ -763,7 +799,7 @@ describe('stage', () => {
     const conn = jest.fn((table) => {
       if (table === 'leads') return leadsSidChain([{ id: 'lead-fresh' }]);
       const chain = {};
-      ['where', 'whereRaw'].forEach((m) => { chain[m] = jest.fn(() => chain); });
+      ['where', 'whereRaw', 'whereNull'].forEach((m) => { chain[m] = jest.fn(() => chain); });
       chain.update = jest.fn(async () => 1);
       return chain;
     });
@@ -802,7 +838,7 @@ describe('stage', () => {
         return chain;
       }
       const chain = {};
-      ['where', 'whereRaw'].forEach((m) => { chain[m] = jest.fn(() => chain); });
+      ['where', 'whereRaw', 'whereNull'].forEach((m) => { chain[m] = jest.fn(() => chain); });
       chain.update = jest.fn(async () => 1);
       return chain;
     });
@@ -839,7 +875,7 @@ describe('stage', () => {
   // hours-stale texts.
   test('a call whose computed send_at is already hours in the past at staging is skipped stale_at_staging, never queued', async () => {
     const now = new Date('2026-09-26T18:00:00Z'); // 2:00 PM ET
-    const conn = jest.fn(() => { const chain = {}; ['where', 'whereRaw'].forEach((m) => { chain[m] = jest.fn(() => chain); }); chain.update = jest.fn(async () => 1); return chain; });
+    const conn = jest.fn(() => { const chain = {}; ['where', 'whereRaw', 'whereNull'].forEach((m) => { chain[m] = jest.fn(() => chain); }); chain.update = jest.fn(async () => 1); return chain; });
     const rawBindings = [];
     conn.raw = jest.fn((sql, bindings) => { rawBindings.push(bindings); return 'RAW'; });
     const call = {
@@ -864,7 +900,7 @@ describe('stage', () => {
 
   test('a call from a short (~20 min) gap, whose send_at is still within the hour, stages normally', async () => {
     const now = new Date('2026-09-26T18:00:00Z'); // 2:00 PM ET
-    const conn = jest.fn(() => { const chain = {}; ['where', 'whereRaw'].forEach((m) => { chain[m] = jest.fn(() => chain); }); chain.update = jest.fn(async () => 1); return chain; });
+    const conn = jest.fn(() => { const chain = {}; ['where', 'whereRaw', 'whereNull'].forEach((m) => { chain[m] = jest.fn(() => chain); }); chain.update = jest.fn(async () => 1); return chain; });
     conn.raw = jest.fn(() => 'RAW');
     const call = {
       id: 'call-short-gap', direction: 'inbound', from_phone: STAGE_FROM_PHONE, created_at: new Date('2026-09-26T15:50:00Z'), duration_seconds: 90, // 2h delay elapsed only ~8.5 min ago
@@ -893,7 +929,7 @@ describe('stage', () => {
   // more than three hours BEFORE its actual first legal send.
   test('a 1 AM ET call staged at 4:30 AM ET is not stale — its nominal offset is before the window even opens', async () => {
     const now = new Date('2026-09-26T08:30:00Z'); // 4:30 AM ET
-    const conn = jest.fn(() => { const chain = {}; ['where', 'whereRaw'].forEach((m) => { chain[m] = jest.fn(() => chain); }); chain.update = jest.fn(async () => 1); return chain; });
+    const conn = jest.fn(() => { const chain = {}; ['where', 'whereRaw', 'whereNull'].forEach((m) => { chain[m] = jest.fn(() => chain); }); chain.update = jest.fn(async () => 1); return chain; });
     conn.raw = jest.fn(() => 'RAW');
     const call = {
       id: 'call-1am', direction: 'inbound', from_phone: STAGE_FROM_PHONE, created_at: new Date('2026-09-26T05:00:00Z'), duration_seconds: 90, // 1:00 AM ET, ends ~1:01:30 AM ET
@@ -919,7 +955,7 @@ describe('stage', () => {
   // does not disable the cap for early-morning calls.
   test('a 1 AM ET call staged more than an hour past its window-adjusted (8 AM ET) send time is still stale_at_staging', async () => {
     const now = new Date('2026-09-26T13:05:00Z'); // 9:05 AM ET — 65 minutes past the 8 AM ET window open
-    const conn = jest.fn(() => { const chain = {}; ['where', 'whereRaw'].forEach((m) => { chain[m] = jest.fn(() => chain); }); chain.update = jest.fn(async () => 1); return chain; });
+    const conn = jest.fn(() => { const chain = {}; ['where', 'whereRaw', 'whereNull'].forEach((m) => { chain[m] = jest.fn(() => chain); }); chain.update = jest.fn(async () => 1); return chain; });
     const rawBindings = [];
     conn.raw = jest.fn((sql, bindings) => { rawBindings.push(bindings); return 'RAW'; });
     const call = {
@@ -1223,7 +1259,13 @@ describe('neverSendRecheck', () => {
   function dbi({ lead = OPEN, bookedSince = null, smsWithLink = null, freshCall = FRESH_CALL_LOG } = {}) {
     const conn = jest.fn((table) => {
       const chain = {};
-      ['where', 'whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'whereRaw', 'whereExists', 'orderBy', 'limit', 'modify', 'forUpdate', 'join']
+      // codex #5018 P2: 'select' chains here like every other builder call —
+      // linkSentRecently's own long-form fallback (`.select('sms_log.message_body')`)
+      // then awaits the plain chain object itself; its `.length` is
+      // undefined, so `!longFormCandidates.length` is true and it returns
+      // `false` (no long-form candidates) without ever needing an array —
+      // the SAME safe default every no-match path here already assumes.
+      ['where', 'whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'whereRaw', 'whereExists', 'orderBy', 'limit', 'modify', 'forUpdate', 'join', 'select']
         .forEach((m) => { chain[m] = jest.fn(() => chain); });
       chain.first = jest.fn(async () => {
         if (table === 'leads') return lead;
@@ -1455,7 +1497,7 @@ describe('neverSendRecheck', () => {
     const conn = dbi();
     conn.mockImplementation((table) => {
       const chain = {};
-      ['where', 'whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'whereRaw', 'whereExists', 'orderBy', 'limit', 'modify', 'forUpdate', 'join']
+      ['where', 'whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'whereRaw', 'whereExists', 'orderBy', 'limit', 'modify', 'forUpdate', 'join', 'select']
         .forEach((m) => { chain[m] = jest.fn(() => chain); });
       chain.first = jest.fn(async () => {
         if (table === 'leads') return OPEN;
@@ -1604,7 +1646,7 @@ describe('dispatchClaimedCall', () => {
     markerDel = jest.fn(async () => 1) } = {}) {
     const conn = jest.fn((table) => {
       const chain = {};
-      ['whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'whereRaw', 'whereExists', 'orderBy', 'limit', 'modify', 'forUpdate', 'join']
+      ['whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'whereRaw', 'whereExists', 'orderBy', 'limit', 'modify', 'forUpdate', 'join', 'select']
         .forEach((m) => { chain[m] = jest.fn(() => chain); });
       chain.where = jest.fn((...args) => {
         if (table === 'scheduled_services' && args[0] === 'created_at') capture.bookedSinceBound = args[2];

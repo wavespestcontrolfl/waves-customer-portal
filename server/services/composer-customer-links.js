@@ -1445,6 +1445,15 @@ async function checkContractLinks(ctx, contracts) {
 // the short link in a browser) is verified directly. Each entry is
 // { lead_id, expired, invalid }: a long-form token on our host that fails
 // its signature is `invalid`, never ignored.
+//
+// Also reused (codex #5018 P2) by call-booking-link-text.js's own
+// linkSentRecently, which scans PAST sms_log bodies for a long-form
+// /inspection/<token> the short_codes-only EXISTS check can't see (a code
+// minted through buildLeadConsultationLink is always short-wrapped before
+// send, but staff can paste the long-form bearer directly). `expired` is
+// deliberately not disqualifying there — history asks "was this lead's
+// link already sent," not "is it still valid right now" — only `invalid`
+// (the signature itself never matched) means the row proves nothing.
 async function consultationLinkRows(body) {
   const runs = decodedRuns(body);
   const hosts = ownedPortalHosts();
@@ -2654,6 +2663,7 @@ module.exports = {
   bearerLinkSendCheck,
   checkConsultationLinkSend,
   bodyCarriesConsultationLink,
+  consultationLinkRows,
   markStatementsSent,
   markPrepGuidesSent,
   recheckPrepLinks,

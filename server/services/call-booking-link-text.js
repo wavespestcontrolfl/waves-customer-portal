@@ -85,6 +85,7 @@ const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-re
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { phoneIdentityKey } = require('../utils/phone');
 const { lockSmsPhone, lockCustomerComms } = require('../utils/customer-comms-lock');
+const { OPEN_ESTIMATE_STATUSES } = require('./estimate-automation-duplicates');
 const {
   computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV,
   suppressUnsupportedModelFlags, BLOCKING_TRIAGE_FLAGS,
@@ -536,6 +537,21 @@ function managedLineForCall(call) {
   if (TWILIO_NUMBERS.isTechLine(candidate)) return null;
   if (TWILIO_NUMBERS.isStaffForwardNumber(candidate)) return null;
   if (candidate === TWILIO_NUMBERS.tollFree.number) return null;
+  // codex #5018 P2: internalAlertCallerId() is the new-lead ring TO Adam's
+  // cell (never customer-facing) — a bridged call's own from_phone/to_phone
+  // is checked here as a fallback only when metadata.bridgeCallerId is
+  // absent (see this function's own doc comment above), so a call that
+  // reaches this point through THAT fallback could still resolve to the
+  // internal alert leg rather than the line that actually rang the lead.
+  // Excluded via internalAlertLine() specifically, never a raw
+  // internalAlertCallerId() comparison: that method itself FALLS BACK to
+  // the ordinary main line when INTERNAL_ALERT_CALLER_ID is unset, and the
+  // main line is a genuine customer-facing fallback, not an internal leg —
+  // internalAlertLine() already returns null in exactly that case (and
+  // when the configured number is already a registered fleet line), so
+  // this only excludes a REAL, distinct, env-configured alert number.
+  const alertLine = TWILIO_NUMBERS.internalAlertLine();
+  if (alertLine && candidate === alertLine.number) return null;
   return candidate;
 }
 
@@ -740,7 +756,12 @@ async function stage(conn = db, { now = new Date() } = {}) {
     // from_phone / to_phone / source: resolveCallContactPhone needs them to
     // find an outbound call's dialed number for the prior-contact check
     // (pre-push P1). Without them every outbound call read as cold.
-    .select('id', 'customer_id', 'direction', 'source', 'from_phone', 'to_phone', 'bridged_at', 'duration_seconds', 'recording_duration_seconds', 'created_at', 'metadata', 'twilio_call_sid', 'ai_extraction_enriched', 'ai_address_validation', 'transcription');
+    // processing_token / updated_at / v2_extraction_status (codex #5018 P2):
+    // exactly the three columns this query's own WHERE just filtered on —
+    // carried through so claimMetadata can re-check them at UPDATE time
+    // (see its own doc comment) instead of trusting they still hold after
+    // every async await stageOne makes in between.
+    .select('id', 'customer_id', 'direction', 'source', 'from_phone', 'to_phone', 'bridged_at', 'duration_seconds', 'recording_duration_seconds', 'created_at', 'metadata', 'twilio_call_sid', 'ai_extraction_enriched', 'ai_address_validation', 'transcription', 'processing_token', 'updated_at', 'v2_extraction_status');
   let staged = 0;
   let ineligible = 0;
   for (const call of calls) {
@@ -767,25 +788,25 @@ async function stageOne(conn, call, now, boundary = null) {
   if (boundary) {
     const callAt = callStartedAt(call) || new Date(call.created_at);
     if (callAt.getTime() < boundary.getTime()) {
-      await claimMetadata(conn, call.id, { status: 'skipped', reason: 'pre_activation', staged_at });
+      await claimMetadata(conn, call, { status: 'skipped', reason: 'pre_activation', staged_at });
       return 'skipped';
     }
   }
   const linkage = await resolveLeadLinkage(conn, call);
   if (linkage.ambiguous) {
-    await claimMetadata(conn, call.id, { status: 'skipped', reason: 'ambiguous_lead_linkage', staged_at });
+    await claimMetadata(conn, call, { status: 'skipped', reason: 'ambiguous_lead_linkage', staged_at });
     return 'skipped';
   }
   const leadId = linkage.leadId;
   const extraction = extractionOf(call);
   const reason = stagingIneligibleReason(call, extraction, leadId) || (await outboundStagingReason(conn, call));
   if (reason) {
-    await claimMetadata(conn, call.id, { status: 'skipped', reason, staged_at });
+    await claimMetadata(conn, call, { status: 'skipped', reason, staged_at });
     return 'skipped';
   }
   const callEnd = callEndFor(call);
   if (!callEnd) {
-    await claimMetadata(conn, call.id, { status: 'skipped', reason: 'no_call_end_time', staged_at });
+    await claimMetadata(conn, call, { status: 'skipped', reason: 'no_call_end_time', staged_at });
     return 'skipped';
   }
   // Clamp to `now` (codex pre-push P1): a skewed duration_seconds could
@@ -819,7 +840,7 @@ async function stageOne(conn, call, now, boundary = null) {
   const nominalSendAt = new Date(send_at);
   const legalSendAt = isWithinSendWindowET(nominalSendAt) ? nominalSendAt : nextSendWindowOpenET(nominalSendAt);
   if (now.getTime() - legalSendAt.getTime() > STAGING_STALE_MS) {
-    await claimMetadata(conn, call.id, { status: 'skipped', reason: 'stale_at_staging', staged_at });
+    await claimMetadata(conn, call, { status: 'skipped', reason: 'stale_at_staging', staged_at });
     return 'skipped';
   }
   // original_send_at is set ONCE here and never overwritten by a later
@@ -828,15 +849,34 @@ async function stageOne(conn, call, now, boundary = null) {
   // same, repeatedly-advancing field would let consecutive transient
   // failures push the deadline out indefinitely. This field is the one
   // fixed anchor every retry's own give-up check reads instead.
-  await claimMetadata(conn, call.id, { status: 'pending', lead_id: leadId, send_at, original_send_at: send_at, staged_at });
+  await claimMetadata(conn, call, { status: 'pending', lead_id: leadId, send_at, original_send_at: send_at, staged_at });
   return 'pending';
 }
 
 // Only the FIRST writer for a given call may set this key — a concurrent
 // stage tick (unlikely under the cron's single-instance lock, but cheap to
 // guard) loses instead of overwriting a decision another tick already made.
-async function claimMetadata(conn, callId, value) {
-  await conn('call_log').where({ id: callId }).whereRaw("metadata->:key IS NULL", { key: METADATA_KEY })
+//
+// codex #5018 P2: `stage()`'s own SELECT already required processing_token
+// IS NULL, v2_extraction_status = 'valid' and updated_at past the grace
+// window — but stageOne makes several further awaits (resolveLeadLinkage,
+// outboundStagingReason, more) before landing on any of the calls to this
+// function, and a forced reprocess can claim processing_token (resetting
+// v2_extraction_status and bumping updated_at) in that gap. Stamping a
+// decision here after that lands would judge — and permanently record —
+// half-rewritten extraction/lead-linkage state. Re-checking the SAME three
+// facts the SELECT observed, exactly as read (`call.processing_token`,
+// `call.v2_extraction_status`, `call.updated_at`), makes the UPDATE a
+// no-op instead: `metadata->key` stays NULL, so this row is simply picked
+// up again — quiet, on its own updated_at — by a later tick, the same as
+// any other row a reprocess is still touching. Never a completed decision
+// recorded against stale ownership.
+async function claimMetadata(conn, call, value) {
+  await conn('call_log').where({ id: call.id })
+    .whereNull('processing_token')
+    .where('v2_extraction_status', 'valid')
+    .where('updated_at', call.updated_at)
+    .whereRaw("metadata->:key IS NULL", { key: METADATA_KEY })
     .update({ metadata: metadataPatch(conn, value), updated_at: new Date() });
 }
 
@@ -955,10 +995,11 @@ async function linkSentRecently(conn, leadId, now) {
   // a pre-provider reply/review-ask RESERVATION row — a placeholder that
   // never reached Twilio, not delivery evidence. Every other caller of
   // this helper applies it before its own further .where()s.
-  const row = await excludeUnresolvedSendReservations(conn('sms_log'))
+  const recentOutbound = () => excludeUnresolvedSendReservations(conn('sms_log'))
     .where('sms_log.direction', 'outbound')
     .where('sms_log.created_at', '>=', since)
-    .whereIn('sms_log.status', ['queued', 'accepted', 'sending', 'sent', 'delivered', 'read'])
+    .whereIn('sms_log.status', ['queued', 'accepted', 'sending', 'sent', 'delivered', 'read']);
+  const shortRow = await recentOutbound()
     .whereExists(
       conn('short_codes')
         .where('short_codes.kind', 'consultation')
@@ -967,7 +1008,50 @@ async function linkSentRecently(conn, leadId, now) {
         .whereRaw("sms_log.message_body LIKE '%/l/' || short_codes.code || '%'"),
     )
     .first('sms_log.id');
-  return !!row;
+  if (shortRow) return true;
+  // codex #5018 P2: the check above only sees a SHORT /l/<code> bearer — a
+  // manual composer send or a customer forwarding the resolved page URL can
+  // carry the long-form /inspection/<token> instead, which never appears in
+  // short_codes at all. Never hand-roll that token's signature parsing here
+  // — composer-customer-links.js's own consultationLinkRows already
+  // resolves both forms (short AND long) the SAME way its send-time
+  // refusal check does; reused verbatim (CLAUDE.md rule 15). Only a
+  // narrow, indexable LIKE '%/inspection/%' pre-filter reaches this slower
+  // per-row decode, so an ordinary lead with no long-form send in its
+  // window costs nothing beyond that filtered SELECT.
+  const longFormCandidates = await recentOutbound()
+    .where('sms_log.message_body', 'like', '%/inspection/%')
+    .select('sms_log.message_body');
+  if (!longFormCandidates.length) return false;
+  const { consultationLinkRows } = require('./composer-customer-links');
+  for (const { message_body } of longFormCandidates) {
+    const rows = await consultationLinkRows(message_body);
+    if (rows.some((row) => !row.invalid && String(row.lead_id) === String(leadId))) return true;
+  }
+  return false;
+}
+
+// codex #5018 P2: `leads.estimate_id` is only the FK RESCUED at send/view
+// (see admin-estimates.js's own "Prefer the FK... fall back to the
+// public-quote mirror" comment) — a quote-wizard draft the lead hasn't
+// opened yet stores the link ONLY in estimates.estimate_data.lead_id
+// (public-quote.js's own findPriorOpenWizardLeadId comment: "A wizard
+// draft is mirrored through estimate_data.lead_id, not the FK"). Reusing
+// admin-estimates.js's exact fallback shape, in the other direction (lead
+// -> its estimate, not estimate -> its lead): the LATEST mirror row for
+// this lead, judged open by the SAME OPEN_ESTIMATE_STATUSES + archived_at
+// check public-quote.js's own live-courtship query applies. A priced
+// draft the lead never opened still owns this lead's next step just as
+// much as a sent one — this lane's free-consultation text is not it.
+async function leadHasOpenEstimateMirror(conn, leadId) {
+  if (!leadId) return false;
+  const mirror = await conn('estimates')
+    .whereRaw("estimate_data->>'lead_id' = ?", [String(leadId)])
+    .orderBy('created_at', 'desc')
+    .orderBy('id', 'desc')
+    .first('archived_at', 'status');
+  if (!mirror) return false;
+  return mirror.archived_at == null && OPEN_ESTIMATE_STATUSES.includes(mirror.status);
 }
 
 // Table-driven send-time re-check (mirrors STAGING_CHECKS above — CLAUDE.md
@@ -979,7 +1063,10 @@ async function linkSentRecently(conn, leadId, now) {
 const DISPATCH_CHECKS = [
   ({ lead }) => (!lead ? 'lead_not_found' : null),
   ({ lead }) => (!isOpenLeadRow(lead) ? 'lead_no_longer_open' : null),
-  ({ lead }) => (lead.estimate_id ? 'estimate_linked' : null),
+  async ({ conn, lead, leadId }) => {
+    if (lead.estimate_id) return 'estimate_linked';
+    return (await leadHasOpenEstimateMirror(conn, leadId)) ? 'estimate_linked' : null;
+  },
   ({ call, lead }) => (leadLinkedToExistingCustomer(call, lead) ? 'existing_customer' : null),
   ({ lead }) => (lead.is_commercial === true ? 'commercial_lead' : null),
   ({ lead }) => (!lead.phone || !isUsPhone(lead.phone) ? 'lead_phone_unusable' : null),
@@ -1090,6 +1177,11 @@ function neverSendRecheck(call, leadId, destinationPhone) {
       const lead = await dbi('leads').where({ id: leadId }).whereNull('deleted_at').forUpdate().first();
       if (!lead || !isOpenLeadRow(lead)) return { ok: false, code: 'lead_no_longer_open' };
       if (lead.estimate_id) return { ok: false, code: 'estimate_linked' };
+      // codex #5018 P2: the FK alone misses a quote-wizard draft the lead
+      // never opened (see leadHasOpenEstimateMirror's own doc comment) —
+      // re-checked here too, on `dbi`, the freshest possible read, for the
+      // same reason every other check on this hook repeats.
+      if (await leadHasOpenEstimateMirror(dbi, leadId)) return { ok: false, code: 'estimate_linked' };
       // Re-verified on the freshest possible read, same reason as every
       // other check on this hook (codex #5018 r10 P2): dispatchIneligibleReason's
       // own check ran moments earlier, and either fact can change in the
