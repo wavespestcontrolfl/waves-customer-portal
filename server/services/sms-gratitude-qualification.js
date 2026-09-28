@@ -129,7 +129,14 @@ async function readCurrent({ dbi, sourceDigest }) {
   const pins = {
     policyVersion: GRATITUDE_POLICY_VERSION,
     fixtureSha256,
-    promptVersion: drafter.PROMPT_VERSION,
+    // currentPromptVersion(), not the static PROMPT_VERSION (pre-push audit
+    // P1): this is "which prompt is being examined right now", the exact
+    // question systemPromptSha256 below answers by hash — the label must
+    // agree with it, or a v11-labeled pin sitting next to a v12-rendered
+    // hash would be internally inconsistent. same()'s pins-drift check
+    // (evaluateGratitudeQualification) already catches a stale run via the
+    // hash alone; this keeps the human-readable label honest too.
+    promptVersion: drafter.currentPromptVersion(),
     routes,
     verifier: {
       enabled: drafter.VERIFY_ENABLED === true,

@@ -96,7 +96,7 @@ function applyReservationMatch(query, match = {}) {
   return query;
 }
 
-async function markDelivered(target, { database = db, match = {} } = {}) {
+async function markDelivered(target, { database = db, match = {}, occurredAt } = {}) {
   if (!target) return false;
   try {
     const stamp = async (conn) => {
@@ -107,6 +107,8 @@ async function markDelivered(target, { database = db, match = {} } = {}) {
       applyReservationMatch(query, match);
       const changed = await query.update({
         metadata: conn.raw(`COALESCE(metadata, '{}'::jsonb) || '{"delivered": true}'::jsonb`),
+        // A repaired App event restores its original contact window.
+        ...(occurredAt ? { occurred_at: occurredAt } : {}),
       });
       return Number(changed) === 1;
     };

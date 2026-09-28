@@ -1,4 +1,4 @@
-const { billingLegDeliveryState } = require('./messaging/billing-channel-routing');
+const { billingLegDeliveryState, billingLegContactTime, originalBillingContactArgs } = require('./messaging/billing-channel-routing');
 /**
  * Per-Invoice Follow-up Sequence Engine
  *
@@ -134,10 +134,12 @@ function followupEmailOutcomeUncertain(result, explicit) {
     || (result?.deduped && !result?.blocked));
 }
 
-async function settleFollowupEmailLedger(ContactLedger, ledger, result, explicit) {
+async function settleFollowupEmailLedger(ContactLedger, ledger, result, explicit, originalDeliveryTimes) {
   if (result?.ok === true) {
-    return explicit && typeof ContactLedger.markDelivered === 'function'
-      && !await ContactLedger.markDelivered(ledger);
+    const originalContact = originalBillingContactArgs(result);
+    originalDeliveryTimes.push(...originalContact.map((stamp) => stamp.occurredAt));
+    return (explicit || originalContact.length > 0) && typeof ContactLedger.markDelivered === 'function'
+      && !await ContactLedger.markDelivered(ledger, ...originalContact);
   }
   if (followupEmailOutcomeUncertain(result, explicit)) return true;
   // A retryable refusal before the provider never reached the customer. An
@@ -1174,6 +1176,7 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
   // a definite failed delivery stamps send_failed, while an unknown outcome
   // keeps the claim held until delivery evidence can settle it.
   const ContactLedger = require('./collections/contact-ledger');
+  const originalDeliveryTimes = [];
   let emailResult = { ok: false, skipped: true, reason: 'collections_policy_denied' };
   // A spacing-window denial keeps the selected Email owed on this step; a
   // durable one (flag, suppression) waives it so the step cannot be pinned
@@ -1198,8 +1201,10 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
     if (emailLedger) {
       const claim = selectedChannels !== null && typeof ContactLedger.claimAttempt === 'function'
         ? await ContactLedger.claimAttempt(emailLedger) : { allowed: true };
-      if (claim.delivered) emailResult = { ok: true, deduped: true };
-      else if (claim.resolved) {
+      if (claim.delivered) {
+        emailResult = { ok: true, deduped: true };
+        if (emailLedger.occurred_at) originalDeliveryTimes.push(emailLedger.occurred_at);
+      } else if (claim.resolved) {
         emailResult = {
           ok: false,
           delivered: false,
@@ -1219,7 +1224,7 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
             })
           : await sendFollowupEmail({ row, customer, step, ctx, enforceBillingPreference: !operatorInitiated });
         const attemptHeld = await settleFollowupEmailLedger(
-          ContactLedger, emailLedger, emailResult, selectedChannels !== null,
+          ContactLedger, emailLedger, emailResult, selectedChannels !== null, originalDeliveryTimes,
         );
         emailHold = emailHold || attemptHeld;
       }
@@ -1233,6 +1238,8 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
   let appSent = false;
   let smsSkipReason = null;
   let smsDeferUntil = null;
+  let smsDeferredOwned = false;
+  let smsOutcomeMayHaveDelivered = false;
   // The held SMS leg failed to reach the scheduled rail: nothing durable
   // owns it, so this touch must stay retryable (codex r21).
   let smsHoldUnowned = false;
@@ -1277,7 +1284,7 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
         ? await ContactLedger.claimAttempt(ledger) : { allowed: true };
       if (claim.delivered) {
         smsSent = true;
-        if (channel === 'push') appSent = true; else actualSmsSent = true;
+        if (ledger.occurred_at) originalDeliveryTimes.push(ledger.occurred_at);
         continue;
       }
       if (!claim.allowed) { holdStep(); continue; }
@@ -1301,11 +1308,14 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
       } catch (err) {
         result = err.providerOutcome || { deliveryOutcome: 'uncertain', deferred: true };
       }
-      if (billingLegDeliveryState(channel, result || {})) {
+      const delivery = billingLegDeliveryState(channel, result || {});
+      if (delivery) {
+        const occurredAt = billingLegContactTime(result);
         smsSent = true;
-        if (channel === 'push') appSent = true; else actualSmsSent = true;
+        if (delivery === 'deduped' && occurredAt) originalDeliveryTimes.push(occurredAt);
+        if (channel === 'push') appSent ||= delivery === 'delivered'; else actualSmsSent ||= delivery === 'delivered';
         if (typeof ContactLedger.markDelivered === 'function'
-          && !await ContactLedger.markDelivered(ledger)) holdStep();
+          && !await ContactLedger.markDelivered(ledger, ...(occurredAt ? [{ occurredAt }] : []))) holdStep();
       } else if (result?.deliveryOutcome === 'not_sent'
         || (result?.deliveryOutcome == null && result?.blocked === true)) {
         if (!await ContactLedger.markSendFailed(ledger, { code: result.code || 'not_sent' })) holdStep();
@@ -1379,6 +1389,7 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
         preDispatchCheck: invoiceHelpers.selfPayAtDispatch(row.invoice_id, db),
       }) : null;
       if (sendResult && (sendResult.blocked || sendResult.sent === false)) {
+        smsOutcomeMayHaveDelivered = ['accepted', 'uncertain'].includes(sendResult.deliveryOutcome);
         await ContactLedger.markSendFailed(smsLedger, { code: sendResult.code || 'sms_blocked' });
         smsSkipReason = sendResult.code || 'sms_blocked';
         // Send-window block (this cron runs hourly, incl. nights): not a
@@ -1431,6 +1442,7 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
                   resolve_from_by_customer: true,
                 }),
               });
+              smsDeferredOwned = true;
               logger.info(`[invoice-followups] SMS leg of sequence ${row.id} held outside the 8AM-8PM ET send window — queued for ${smsDeferUntil.toISOString()} (email leg delivered)`);
             } catch (queueErr) {
               smsHoldUnowned = true;
@@ -1517,6 +1529,19 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
     return;
   }
 
+  const freshDelivery = actualSmsSent || appSent || (emailResult.ok && !emailResult.deduped);
+  const originalAt = originalDeliveryTimes.length
+    ? new Date(Math.max(...originalDeliveryTimes.map((time) => new Date(time).getTime()))) : row.last_touch_at;
+  // Only an earlier accepted leg reached the customer on this path. Return
+  // this run's credit draw; the previous attempt's applied credit stays put.
+  if (!freshDelivery && !smsDeferredOwned && !smsOutcomeMayHaveDelivered && dunAppliedCredit > 0) {
+    try {
+      const { reverseAppliedCredit } = require('./customer-credit');
+      await reverseAppliedCredit({ invoiceId: row.invoice_id, amount: dunAppliedCredit, createdBy: 'system:dun_undelivered' });
+    } catch (e) {
+      logger.warn(`[invoice-followups] credit reversal after prior-delivery replay skipped for ${row.invoice_id}: ${e.message}`);
+    }
+  }
   const nextIndex = row.step_index + 1;
   // anchor_at (set when an admin edit shifted the due date) overrides the
   // send-time anchor so the whole remaining cadence stays on one timeline.
@@ -1527,13 +1552,16 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
     updated_at: db.fn.now(),
     touches_sent: row.touches_sent + 1,
     step_index: nextIndex,
-    last_touch_at: new Date(),
+    last_touch_at: freshDelivery ? new Date() : originalAt,
     next_touch_at: nextAt,
     status: nextAt ? 'active' : 'completed',
   });
 
   // (Contact-ledger rows were written BEFORE each leg's delivery attempt —
   // record-then-send, codex 2026-08-14 — so there is nothing to record here.)
+
+  // An already delivered leg advances its step without a new outbound touch.
+  if (!freshDelivery) return;
 
   // Log to customer_interactions for the 360 view
   try {

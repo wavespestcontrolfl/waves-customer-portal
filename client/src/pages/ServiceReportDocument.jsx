@@ -1025,6 +1025,40 @@ export default function ServiceReportDocument({ data, token }) {
           </div>
         )}
 
+        {/* Rain / spiders / what-to-expect (GATE_PEST_REPORT_EXPECTATIONS, dark).
+            pestV2.expectations is built server-side (pest-report-v2.js) with
+            forecastHeavyRain always false for this render (mode !== 'live'
+            in reports-public.js) — the NWS forecast piece never reaches a
+            permanent PDF; everything here is already PDF-safe as delivered. */}
+        {pestV2?.expectations?.rain?.lines?.length > 0 && (
+          <div className="doc-keep">
+            <SectionHeader>Rain and your treatment</SectionHeader>
+            {pestV2.expectations.rain.lines.map((line) => (
+              <p key={line} style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{line}</p>
+            ))}
+          </div>
+        )}
+        {pestV2?.expectations?.spiders?.expectation && (
+          <div className="doc-keep">
+            <SectionHeader>{pestV2.expectations.spiders.headline || 'Spiders'}</SectionHeader>
+            {pestV2.expectations.spiders.whatWeDid && (
+              <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{pestV2.expectations.spiders.whatWeDid}</p>
+            )}
+            <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{pestV2.expectations.spiders.expectation}</p>
+            {pestV2.expectations.spiders.nextStep && (
+              <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{pestV2.expectations.spiders.nextStep}</p>
+            )}
+          </div>
+        )}
+        {pestV2?.expectations?.whatToExpect?.lines?.length > 0 && (
+          <div className="doc-keep">
+            <SectionHeader>What to expect</SectionHeader>
+            {pestV2.expectations.whatToExpect.lines.map((line) => (
+              <Bullet key={line}>{line}</Bullet>
+            ))}
+          </div>
+        )}
+
         {/* A promised revisit is a commitment — dropping it from the permanent
             artifact leaves the customer with no record of it. */}
         {v2?.followUp && (v2.followUp.headline || v2.followUp.reason) && (

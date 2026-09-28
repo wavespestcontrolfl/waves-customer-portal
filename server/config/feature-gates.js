@@ -82,6 +82,7 @@
  *   GATE_RESERVICE_REPORT_COPY=true (re-service/callback customer reports key off service_records.is_callback: lawn-vs-pest hero copy below the honest V2 status branches, "$0 — included with WaveGuard" line on web + PDF for member tiers; unset = legacy name-regex headline)
  *   GATE_SOUTH_ZONE_DAY_FUNNEL=true (estimate picker funnels far-south zones onto days with an existing zone stop, seeding one day when none exists)
  *   GATE_JOB_CARD=true (Service Protocol drawer "Job card" tab: customer paragraph (FAST-tier rewrite of portal fields, template fallback, cached on scheduled_services.job_card), per-product spray check from NWS hourly at the property, tank mix search; read at call time; unset = tab hidden, endpoint answers {enabled:false})
+ *   GATE_REPORT_PHOTO_CONTENT=true (tech-reviewed completion-photo captions/summary ground the AI report writer; read at call time via reportPhotoContentLive(), off unless exactly 'true')
  *   GATE_VAN_SCENE=true (the "look for this van" scene under the appointment header card and on the booking confirmation step; dev-open (every non-production NODE_ENV renders it regardless), prod dark; prod kill = unset)
  *   GATE_SLOT_TRAVEL_GAP=true (every customer-facing picker + commit gate requires modeled drive time + SLOT_TRAVEL_BUFFER_MINUTES (default 15) between consecutive stops; read at call time; unset = pure-overlap legacy)
  *   GATE_BOOKING_LUNCH_BLOCK=true (restores the 12:00-13:00 lunch block on every customer-facing offer + commit surface (/book, public reschedule, public re-service, the legacy zone availability engine); read at call time via scheduling/customer-windows.js lunchBlockEnabled(); unset = noon is a normal offerable/reservable hour, owner ruling 2026-09-23)
@@ -623,6 +624,13 @@ const gates = {
   // load value, so a flip needs no redeploy.
   discountStacking: process.env.GATE_DISCOUNT_STACKING === 'true',
 
+  // Tech-reviewed completion-photo captions/summary grounding the AI report
+  // writer (owner spec 2026-09-27). This map entry is for logGateStatus
+  // only (pre-push P3, Codex #5145 r2) — the canonical CALL-TIME reader is
+  // reportPhotoContentLive() below (strict 'true'), which admin-schedule.js's
+  // POST /generate-report actually uses, so a flip needs no redeploy.
+  reportPhotoContent: process.env.GATE_REPORT_PHOTO_CONTENT === 'true',
+
   // Voice relay (Sandy) on an OpenAI model — benchmark/sandbox only. This map
   // entry is for logGateStatus only; the canonical CALL-TIME reader is
   // voiceRelayOpenaiLive() below (strict 'true', same convention as
@@ -911,6 +919,28 @@ const gates = {
   smsOperationalActions: gateEnvValue('GATE_SMS_OPERATIONAL_ACTIONS'),
   // Separate activation for commitment capture, follow-up bells and staff closure.
   smsCommitmentFollowup: gateEnvValue('GATE_SMS_COMMITMENT_FOLLOWUP'),
+
+  // SMS real answers (owner ruling 2026-09-27) — the shadow drafter answers
+  // from the facts (real OPEN TIMES from AvailabilityEngine for booking/
+  // rescheduling, exact amounts + send_payment_link, portal/estimate links)
+  // instead of defaulting to "we'll confirm and follow up", and answers
+  // CANCELLATIONS (skip/reschedule from OPEN TIMES only, never an invented
+  // discount/credit/refund) instead of escalating them. Dark in every
+  // environment: gate off keeps the drafter's prompts, facts block and
+  // behavior byte-identical (draft rows keep stamping prompt_version
+  // house_voice_v11). The one canonical reader is server/services/
+  // sms-shadow-drafter.js, which re-reads gateEnvValue('GATE_SMS_REAL_ANSWERS')
+  // at draft time — this entry is for logGateStatus only.
+  smsRealAnswers: gateEnvValue('GATE_SMS_REAL_ANSWERS'),
+  // Per-category hand-off gates (owner ruling 2026-09-27): each one, ON,
+  // removes exactly that category from the HELD-FOR-A-PERSON list in the
+  // real-answers prompt (smsRealAnswers must ALSO be on, or there is no
+  // real-answers prompt to remove it from). All default off, dark in every
+  // environment, read at call time by the same drafter module.
+  smsAgentComplaints: gateEnvValue('GATE_SMS_AGENT_COMPLAINTS'),
+  smsAgentBillingDisputes: gateEnvValue('GATE_SMS_AGENT_BILLING_DISPUTES'),
+  smsAgentChemicalMedical: gateEnvValue('GATE_SMS_AGENT_CHEMICAL_MEDICAL'),
+  smsAgentLegal: gateEnvValue('GATE_SMS_AGENT_LEGAL'),
 
   // Voice-Corpus Miner (brand-voice loop, Phase A) — nightly mining of
   // human-authored SMS replies + consent-gated call transcripts into
@@ -1684,11 +1714,14 @@ const gates = {
 
   // Voicemail lead text-back — when a NEW prospect's voicemail produces a
   // workable lead, text them a prefilled quote-wizard link ("got your message
-  // about X — get your quote: …"). A customer-facing auto-send, so it FAILS
-  // CLOSED (explicit opt-in in EVERY environment) per the house rule — a
-  // preview/dev env with real Twilio creds must NOT auto-text prospects.
-  // Owner sets GATE_VOICEMAIL_LEAD_SMS=true on prod to go live. Off → the
-  // voicemail still becomes a Needs-Review lead; only the SMS is skipped.
+  // about X — get your quote: … Someone from the Waves team will follow up
+  // as soon as possible."), at any hour (owner ruling 2026-09-28: no 8 AM
+  // defer — 'voicemail_lead_sms' is a CUSTOMER_ACTION_ENTRY_POINTS entry). A
+  // customer-facing auto-send, so it FAILS CLOSED (explicit opt-in in EVERY
+  // environment) per the house rule — a preview/dev env with real Twilio
+  // creds must NOT auto-text prospects. Owner sets
+  // GATE_VOICEMAIL_LEAD_SMS=true on prod to go live. Off → the voicemail
+  // still becomes a Needs-Review lead; only the SMS is skipped.
   voicemailLeadSms: process.env.GATE_VOICEMAIL_LEAD_SMS === 'true',
 
   // Dropped-call address-request text (services/dropped-call-sms.js): a NEW
@@ -1726,13 +1759,15 @@ const gates = {
   // caller (no customer record on file) calls a Waves line,
   // nobody answers, they wait >= 25s (missed-call-bell's own floor) and
   // hang up with no voicemail — one text goes from the exact line they
-  // called ("it's Waves... text us here... or call back anytime"). Same
-  // fail-CLOSED rule as the other text-back lanes: customer-facing
-  // auto-send, explicit opt-in in every environment. Owner sets
-  // GATE_MISSED_CALL_TEXT_BACK=true to go live. Off → the post-call hook
-  // and the durable sweep send nothing (gate read first, before any call
-  // query) — no text, no call_log write, no claim taken. The sweep still
-  // reconciles claims this lane left orphaned while it was on.
+  // called ("it's Waves... someone will follow up... text us here... or
+  // call back anytime"), at any hour (owner ruling 2026-09-28: no 8 AM
+  // defer — it is a CUSTOMER_ACTION_ENTRY_POINTS entry). Same fail-CLOSED
+  // rule as the other text-back lanes: customer-facing auto-send, explicit
+  // opt-in in every environment. Owner sets GATE_MISSED_CALL_TEXT_BACK=true
+  // to go live. Off → the post-call hook and the durable sweep send nothing
+  // (gate read first, before any call query) — no text, no call_log write,
+  // no claim taken. The sweep still reconciles claims this lane left
+  // orphaned while it was on.
   missedCallTextBack: process.env.GATE_MISSED_CALL_TEXT_BACK === 'true',
 
   // GrowthBook experimentation — master gate for A/B experiment assignment on
@@ -1903,6 +1938,13 @@ const gates = {
   // seo_llm_mentions tracker has several days of data and the opportunities
   // have been eyeballed. When off, the aeo_gap bucket miner returns [].
   aeoGapMining: isProd ? process.env.GATE_AEO_GAP_MINING === 'true' : true,
+
+  // aeo_question_gap opportunity mining — identify/decision/cost AEO
+  // benchmark questions whose target page answer engines don't cite become
+  // a refresh of that page (or one new article when it doesn't exist).
+  // DARK in every environment unless exactly 'true'; read at call time so
+  // unsetting it stops the bucket without a redeploy (off ⇒ []).
+  get aeoQuestionGapMining() { return process.env.GATE_AEO_QUESTION_GAP_MINING === 'true'; },
 
   // answer_gap opportunity mining — queries a page already ranks 9–30 for
   // (per gsc_query_page_map) whose body never directly answers them; emits
@@ -2785,6 +2827,15 @@ const gates = {
   // flip needs no redeploy. Kill switch: unset GATE_PEST_TRACE_OR_NOTHING.
   pestTraceOrNothing: gateEnvValue('GATE_PEST_TRACE_OR_NOTHING'),
 
+  // Pest Report V2 "expectations" blocks (owner-approved 2026-09-27): rain +
+  // treatment, spiders (#1 callback), and a short "what to expect" list keyed
+  // to product class. OFF everywhere until Adam flips it (exact 'true' —
+  // read directly, not through gateEnvValue's looser '1'/'on' parse, by
+  // pestReportExpectationsGateOn() in pest-report-expectations.js). Kill
+  // switch: unset GATE_PEST_REPORT_EXPECTATIONS. This entry is the
+  // status/log listing only.
+  pestReportExpectations: process.env.GATE_PEST_REPORT_EXPECTATIONS === 'true',
+
   // Re-service (callback) report copy (2026-08-30): the customer report for
   // a callback visit keys off `service_records.is_callback` instead of the
   // editable display name, drops below the honest V2 status branches, splits
@@ -3033,6 +3084,12 @@ const gates = {
   // exactly `true`**; canonical CALL-TIME reader commercialSuiteSizingLive().
   // Off = byte-identical to before (the building size flows through).
   commercialSuiteSizing: process.env.GATE_COMMERCIAL_SUITE_SIZING === 'true',
+  // Condo unit folio (unit-scope ruling #8): a typed Apt/Unit in a stacked
+  // condo building resolves the unit's OWN county roll row instead of
+  // dropping to the address search. **Ships DARK: off unless exactly
+  // `true`**; canonical CALL-TIME reader condoUnitFolioLive(). Off =
+  // byte-identical to before.
+  condoUnitFolio: process.env.GATE_CONDO_UNIT_FOLIO === 'true',
   // Post-cancel recurring-series reseed (owner ruling 2026-09-24): a
   // single-visit cancel inside a counted plan adds one visit back at the
   // END of the series (services/recurring-series-cancel-reseed.js →
@@ -3187,6 +3244,17 @@ function discountStackingLive() {
   return process.env.GATE_DISCOUNT_STACKING === 'true';
 }
 
+// GATE_REPORT_PHOTO_CONTENT read at CALL time — off unless exactly 'true'
+// (repo gate convention, matching discountStackingLive above). On, the AI
+// report writer's grounding (POST /generate-report, admin-schedule.js) may
+// include the technician's own tech-reviewed photo captions / photo summary,
+// labeled as a TECHNICIAN PHOTO OBSERVATIONS block. Off, byte-identical to
+// before this lane: no captions or summary reach the model. The
+// `reportPhotoContent` gates-map entry above is for logGateStatus only.
+function reportPhotoContentLive() {
+  return process.env.GATE_REPORT_PHOTO_CONTENT === 'true';
+}
+
 // GATE_VOICE_RELAY_OPENAI read at CALL time — the one reader every entry
 // point into a non-Anthropic voice-relay session model must use: the session
 // allowlist (relay-conversation.js's resolveSessionModel/isAllowedOverride
@@ -3240,6 +3308,12 @@ function cancelReseedsRecurringLive() {
 // estimator engine's own resolve), so a flip is a live kill/enable.
 function commercialSuiteSizingLive() {
   return process.env.GATE_COMMERCIAL_SUITE_SIZING === 'true';
+}
+
+// GATE_CONDO_UNIT_FOLIO read at CALL time — strict `=== 'true'`, same
+// convention as commercialSuiteSizingLive().
+function condoUnitFolioLive() {
+  return process.env.GATE_CONDO_UNIT_FOLIO === 'true';
 }
 
 function leadInspectionLinkLive() {
@@ -3371,5 +3445,5 @@ function logGateStatus() {
   }
 }
 
-module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, autoDispatchSharedModelLive, bookCapacityCommitLive };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, reportPhotoContentLive };
 // gates 1775330914

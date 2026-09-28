@@ -291,12 +291,22 @@ async function proposePatches({ dbi = db, anthropicClient, minEvidence = PROPOSA
   // call runs: classified before created_at, yet absent from this proposal —
   // no future window would ever pick them up (audit P1).
   const evidenceCutoff = new Date();
+  // Codex r4 (PR #5119): a gate flip changes the live prompt version, and a
+  // proposal is a fix FOR that version — so the threshold count, the
+  // evidence and the per-cell watermark are all scoped to it. v11 failures
+  // never become a "v12 fix", and a v11 proposal's timestamp never hides
+  // v12 evidence (pre-versioned proposal rows carry NULL and match neither).
+  // currentPromptVersion(), not the static PROMPT_VERSION (pre-push audit
+  // P1): "what's live now" — PROMPT_VERSION never moves once
+  // GATE_SMS_REAL_ANSWERS goes live. Also labels the proposer's own prompt.
+  const currentVersion = require('./sms-shadow-drafter').currentPromptVersion();
   // New-evidence counts per cell since that cell's last proposal of ANY
   // status — dismissed/accepted proposals reset the counter on purpose
   // (re-proposing the same cell needs NEW evidence, not the old pile).
   const cells = await dbi({ pe: 'sms_pathology_entries' })
     .leftJoin(
       dbi('sms_patch_proposals')
+        .where('prompt_version', '=', currentVersion)
         .select('surface', 'failure_mode')
         .select(dbi.raw('MAX(COALESCE(evidence_cutoff_at, created_at)) as last_proposed_at'))
         .groupBy('surface', 'failure_mode')
@@ -308,6 +318,7 @@ async function proposePatches({ dbi = db, anthropicClient, minEvidence = PROPOSA
     // Parens are load-bearing: without them AND binds tighter than OR and the
     // evidence cutoff below is skipped for cells with no prior proposal.
     .whereRaw('(pp.last_proposed_at IS NULL OR pe.classified_at > pp.last_proposed_at)')
+    .where('pe.prompt_version', '=', currentVersion)
     .where('pe.classified_at', '<=', evidenceCutoff)
     .groupBy('pe.surface', 'pe.failure_mode')
     .select('pe.surface', 'pe.failure_mode')
@@ -329,7 +340,6 @@ async function proposePatches({ dbi = db, anthropicClient, minEvidence = PROPOSA
     client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
   }
   const { createDeepMessage } = require('./llm/deep');
-  const currentVersion = require('./sms-shadow-drafter').PROMPT_VERSION;
 
   let proposed = 0;
   for (const cell of eligible) {
@@ -347,6 +357,7 @@ async function proposePatches({ dbi = db, anthropicClient, minEvidence = PROPOSA
         // Upper bound = the run's evidence cutoff: entries the classifier
         // lands mid-run belong to the NEXT window, matching the persisted
         // watermark exactly — nothing is double-counted or skipped.
+        .where('prompt_version', '=', currentVersion)
         .where('classified_at', '<=', evidenceCutoff)
         .orderBy('classified_at', 'desc')
         .limit(25)
@@ -385,6 +396,7 @@ async function proposePatches({ dbi = db, anthropicClient, minEvidence = PROPOSA
             evidence_ids: JSON.stringify(entries.map((e) => e.id)),
             evidence_cutoff_at: evidenceCutoff,
             proposal,
+            prompt_version: currentVersion,
             status: 'pending',
             model: resp?.model || null,
             schema_version: SCHEMA_VERSION,
@@ -425,7 +437,11 @@ async function proposePatches({ dbi = db, anthropicClient, minEvidence = PROPOSA
  * version), recent entry summaries, pending proposals.
  */
 async function getPathologySummary({ dbi = db } = {}) {
-  const currentVersion = require('./sms-shadow-drafter').PROMPT_VERSION;
+  // currentPromptVersion(), not the static PROMPT_VERSION (pre-push audit
+  // P1): "current drafter version" per the docstring above means whichever
+  // prompt is ACTUALLY live, so this dashboard readout tracks a real-
+  // answers gate flip instead of reporting v11 forever.
+  const currentVersion = require('./sms-shadow-drafter').currentPromptVersion();
   const [cells, recent, pendingProposals, acceptedProposals] = await Promise.all([
     dbi('sms_pathology_entries')
       .groupBy('surface', 'failure_mode')
