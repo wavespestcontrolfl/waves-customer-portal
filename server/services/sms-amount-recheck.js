@@ -51,7 +51,9 @@ async function outgoingAmountsStale({ customerId, body, dbh = db } = {}) {
     const ContextAggregator = require('./context-aggregator');
     const customerRow = await dbh('customers').where({ id: customerId }).first();
     const ctx = customerRow ? await ContextAggregator.getContextForCustomer(customerRow) : null;
-    const ackBody = PAYMENT_ACK_RE.test(String(body || ''));
+    // Masked before matching (audit P1): the ack grammar stops at a period,
+    // and "$95.50" must not end the clause.
+    const ackBody = PAYMENT_ACK_RE.test(String(body || '').replace(AMOUNT_FORMS_RE, ' AMT '));
     const authorized = new Set([
       ctx?.billing?.outstandingBalance > 0 ? cents(ctx.billing.outstandingBalance) : null,
       ctx?.billing?.openInvoice?.amountDue != null ? cents(ctx.billing.openInvoice.amountDue) : null,
