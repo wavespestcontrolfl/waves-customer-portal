@@ -80,6 +80,7 @@ const {
   linkSentRecently,
   _private,
 } = require('../services/call-booking-link-text');
+const { normalizeExtractionV2 } = require('../utils/normalize-extraction-v2');
 
 // ── computeSendAt — 2h delay, 6pm ET cutoff → 8am ET next morning ─────────
 describe('computeSendAt', () => {
@@ -346,6 +347,22 @@ describe('stagingIneligibleReason', () => {
 
   test('eligible call returns null', () => {
     expect(stagingIneligibleReason(baseCall, baseExtraction(), leadId)).toBeNull();
+  });
+
+  // consent.sms_declined (schema 1.18.0, codex P1 on #5292) survives the
+  // REAL normalizeExtractionV2 (not just a hand-built fixture) before the
+  // staging check reads it — pre-push review's exact concern: if the
+  // model-output-to-persisted normalizer ever started copying consent
+  // fields by name instead of passing the object through, sms_declined
+  // would silently stop reaching this check.
+  test('sms_declined survives real normalizeExtractionV2 before the staging check reads it', () => {
+    const declined = normalizeExtractionV2({ ...baseExtraction(), consent: { ...baseExtraction().consent, sms_declined: true } });
+    expect(declined.consent.sms_declined).toBe(true);
+    expect(stagingIneligibleReason(baseCall, declined, leadId)).toBe('sms_declined');
+
+    const notDeclined = normalizeExtractionV2(baseExtraction());
+    expect(notDeclined.consent.sms_declined).toBe(false);
+    expect(stagingIneligibleReason(baseCall, notDeclined, leadId)).toBeNull();
   });
 
   test('no lead linkage', () => {

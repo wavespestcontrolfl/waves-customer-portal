@@ -99,6 +99,12 @@ const FIELD_GROUPS = {
     // hallucinating one) must show up here, not just in a triage-flag count.
     'caller_id_disclaimed',
     'phone_note',
+    // sms_declined (schema 1.18.0, codex P1 on #5292) — the dedicated
+    // explicit-SMS-refusal field the booking-link staging check reads
+    // (call-booking-link-text.js). A model that stops catching (or starts
+    // hallucinating) a refusal must show up here, not just as a silent
+    // change in who gets texted.
+    'sms_declined',
   ],
   low: [
     'lead_quality',
@@ -441,6 +447,11 @@ function normalizeField(field, value) {
   // schema never sets it false (see call-extraction.model-output.schema.json),
   // so null (not addressed) must stay distinct from a hypothetical false.
   if (field === 'caller_id_disclaimed') return normalizeBool(value);
+  // sms_declined (schema 1.18.0) is the same tri-state shape — null (never
+  // judged, including every pre-1.18 row) must stay distinct from an
+  // explicit false, which the booking-link staging check treats very
+  // differently (null fails closed; false does not block).
+  if (field === 'sms_declined') return normalizeBool(value);
   // agent_committed_booking postdates every legacy extraction: absent/null
   // means "not committed", identical to false — collapse them so replays
   // don't report a spurious high-severity delta on every pre-1.8.0 row
