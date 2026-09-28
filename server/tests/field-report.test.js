@@ -7,6 +7,13 @@ const {
   resolveWindow,
   REPORT_COUNTIES,
 } = require('../../ops/agents/field-report');
+const { INTERNAL_TEST_CUSTOMERS, INTERNAL_TEST_CUSTOMER_IDS } = require('../../server/services/internal-test-customers');
+
+// Exercise the real exclusion list's own entries rather than hardcoding a
+// literal name/id copy in this file (no customer/account identifiers as
+// fixture text — see AGENTS.md).
+const [SOME_INTERNAL_TEST_NAME] = INTERNAL_TEST_CUSTOMERS;
+const [SOME_INTERNAL_TEST_ID] = INTERNAL_TEST_CUSTOMER_IDS;
 
 describe('field-report county resolution', () => {
   test.each([
@@ -131,6 +138,16 @@ describe('field-report aggregate — small-cell suppression', () => {
     expect(july.categories.pest_control.count).toBe(10);
   });
 
+  test('the top-level totalCompleted and excludedInternal rollups are suppressed too, not just per-cell counts', () => {
+    // A one-visit window must never print an exact "1" just because it's a
+    // top-level rollup that bypassed cell() (codex pre-push r1, #D5).
+    const rows = [row({ month: '2026-07', zip: '34292', categorySnapshot: 'pest_control' })];
+    const summary = aggregate(rows, { minCell: 10 });
+    expect(summary.totalCompleted.suppressed).toBe(true);
+    expect(summary.totalCompleted.display).toBe('<10');
+    expect(summary.excludedInternal.display).toBe('0'); // a true zero is never suppressed
+  });
+
   test('a custom --min-cell threshold is honored', () => {
     const rows = [row({ month: '2026-07', zip: '34292', categorySnapshot: 'termite' }), row({ month: '2026-07', zip: '34292', categorySnapshot: 'termite' })];
     const summary = aggregate(rows, { minCell: 2 });
@@ -155,11 +172,11 @@ describe('field-report aggregate — small-cell suppression', () => {
 describe('field-report aggregate — exclusions', () => {
   test('internal/test customer name is excluded from aggregation and counted separately', () => {
     const rows = [
-      row({ month: '2026-07', zip: '34292', categorySnapshot: 'pest_control', customerName: 'Adam Martinez' }),
+      row({ month: '2026-07', zip: '34292', categorySnapshot: 'pest_control', customerName: SOME_INTERNAL_TEST_NAME }),
       row({ month: '2026-07', zip: '34292', categorySnapshot: 'pest_control', customerName: 'Jamie Rivera' }),
     ];
     const summary = aggregate(rows, { minCell: 1 });
-    expect(summary.excludedInternal).toBe(1);
+    expect(summary.excludedInternal.count).toBe(1);
     const july = summary.byCounty.Sarasota.months.find((m) => m.month === '2026-07');
     expect(july.categories.pest_control.display).toBe('1');
   });
@@ -168,12 +185,12 @@ describe('field-report aggregate — exclusions', () => {
     const rows = [
       row({
         month: '2026-07', zip: '34292', categorySnapshot: 'pest_control', customerName: 'Someone Else',
-        customerId: '3274944a-f509-413c-9dee-a8b0cdb16493',
+        customerId: SOME_INTERNAL_TEST_ID,
       }),
     ];
     const summary = aggregate(rows, { minCell: 1 });
-    expect(summary.excludedInternal).toBe(1);
-    expect(summary.totalCompleted).toBe(1);
+    expect(summary.excludedInternal.count).toBe(1);
+    expect(summary.totalCompleted.count).toBe(1);
   });
 
   test('a customer outside the three counties never appears in any county table', () => {
@@ -211,7 +228,7 @@ describe('field-report aggregate — ET month boundaries', () => {
   test('an empty row set produces an empty, well-formed summary', () => {
     const summary = aggregate([], { minCell: 10 });
     expect(summary.months).toEqual([]);
-    expect(summary.totalCompleted).toBe(0);
+    expect(summary.totalCompleted.display).toBe('0');
     for (const county of REPORT_COUNTIES) {
       expect(summary.byCounty[county].months).toEqual([]);
       expect(summary.byCounty[county].total.display).toBe('0');

@@ -279,14 +279,17 @@ function aggregate(rows, { minCell = DEFAULT_MIN_CELL } = {}) {
     byCounty[county] = { months: monthRows, total: cell(countyRawTotal, minCell) };
   }
 
+  // Every reported number gets the same primary-suppression treatment,
+  // including these top-level rollups — a one-visit window must never print
+  // totalCompleted: 1 just because it bypassed cell() (codex pre-push r1).
   return {
     byCounty,
     months: sortedMonths,
     categories: sortedCategories,
     counties: REPORT_COUNTIES,
     unresolvedGeography: cell(unresolvedGeography, minCell),
-    excludedInternal,
-    totalCompleted: rows ? rows.length : 0,
+    excludedInternal: cell(excludedInternal, minCell),
+    totalCompleted: cell(rows ? rows.length : 0, minCell),
     minCell,
   };
 }
@@ -297,7 +300,7 @@ function formatMarkdown(summary, { from, to } = {}) {
   lines.push('');
   lines.push('**This is an internal draft. Nothing here is published or shared until the owner approves the numbers.**');
   lines.push('');
-  lines.push(`Completed visits in window: ${summary.totalCompleted} (internal/test accounts excluded: ${summary.excludedInternal}; outside Sarasota/Manatee/Charlotte or unresolved geography: ${summary.unresolvedGeography.display})`);
+  lines.push(`Completed visits in window: ${summary.totalCompleted.display} (internal/test accounts excluded: ${summary.excludedInternal.display}; outside Sarasota/Manatee/Charlotte or unresolved geography: ${summary.unresolvedGeography.display})`);
   lines.push(`Small-cell suppression: any count under ${summary.minCell} prints as "<${summary.minCell}".`);
   lines.push('');
   for (const county of summary.counties) {
