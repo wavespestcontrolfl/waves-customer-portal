@@ -1560,7 +1560,7 @@
       {
         "slug": "spotted-spurge",
         "difference": "Artilleryweed has tiny fern-like leaves on soft stems, growing in shaded mulch beds and cracks; spotted spurge has a maroon leaf spot, milky sap, sunnier spots.",
-        "next_photo": "A close-up of the stem (soft and translucent vs. oozing milky sap when broken; wear gloves if you break one) and the growing location (shaded bed vs. sunny thin turf).",
+        "next_photo": "Wearing gloves, a close-up of the stem (soft and translucent vs. milky sap when broken) and where it grows (shaded bed vs. sunny thin turf); keep any sap away from your eyes.",
         "photo_can_confirm": true
       }
     ],
@@ -1632,7 +1632,7 @@
     "review": {
       "status": "owner_approved",
       "notes": "",
-      "approval_hash": "9b73422717094acfe166bbce6c434c467af501a20f4381e2b02092aac44241af"
+      "approval_hash": "35212f903bb3e81a1b7c803cb05e6b27289a9bfae3542d60527609f1014a89ce"
     },
     "role": "weed",
     "risk": "low",
