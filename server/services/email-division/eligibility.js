@@ -101,7 +101,14 @@ function streamChannelBlocksEmail(stream, emailKey, prefs) {
 // Whether the customer's standing relationship qualifies this stream.
 async function relationshipEligible(stream, emailKey, customer, database) {
   if (stream === 'lifecycle') {
-    if (isWinbackKey(emailKey)) return customer.churned_at != null;
+    // Win-back reads CURRENT pipeline stage, not the historical churned_at
+    // timestamp (codex push-audit P1): churned_at can persist on a customer
+    // who later re-activated (customer-stages.js keeps it as a fallback
+    // signal, never the sole one), and a legacy churned row can lack it
+    // entirely. pipeline_stage === 'churned' is the live-state check every
+    // other reader (admin-cancellation.js, revenue-forecast.js,
+    // cancellation-processor.js) treats as authoritative on its own.
+    if (isWinbackKey(emailKey)) return customer.pipeline_stage === 'churned';
     return customer.active === true && customer.churned_at == null;
   }
   if (stream === 'nurture') {

@@ -151,6 +151,26 @@ describe('email-division eligibility', () => {
     expect(r.reason).toBe(REASONS.RELATIONSHIP_NOT_ELIGIBLE);
   });
 
+  test('win-back is eligible on pipeline_stage churned even with no churned_at timestamp (codex push-audit P1)', async () => {
+    // A legacy churned row can lack the historical churned_at column
+    // entirely — the live pipeline_stage is what must decide this.
+    const r = await evalWith(
+      { customer: customerRow({ pipeline_stage: 'churned', churned_at: null }) },
+      { emailKey: 'lc.winback.60d' },
+    );
+    expect(r.ok).toBe(true);
+  });
+
+  test('win-back is RELATIONSHIP_NOT_ELIGIBLE once re-activated, even with a stale churned_at still on file', async () => {
+    // churned_at can persist after a customer re-subscribes — only the
+    // current pipeline_stage may say "still churned".
+    const r = await evalWith(
+      { customer: customerRow({ pipeline_stage: 'active_customer', churned_at: new Date('2026-01-01') }) },
+      { emailKey: 'lc.winback.60d' },
+    );
+    expect(r.reason).toBe(REASONS.RELATIONSHIP_NOT_ELIGIBLE);
+  });
+
   test('CAP_WEEKLY_BROADCAST when a broadcast already sent in the last 7 days', async () => {
     const r = await evalWith({ ledger: [chain({ first: { id: 'led-1' } })] },
       { stream: 'broadcast', marketingClass: 'marketing', emailKey: 'mkt.broadcast.fall' });
