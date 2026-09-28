@@ -46,7 +46,7 @@ const logger = require('./logger');
 const TwilioService = require('./twilio');
 const { isAssignable } = require('./technician-eligibility');
 const { usableCell } = require('./tech-line');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, etParts } = require('../utils/datetime-et');
 const { publicPortalUrl } = require('../utils/portal-url');
 
 const GATE = 'GATE_TECH_OPEN_VISIT_NUDGE';
@@ -55,6 +55,9 @@ const GATE = 'GATE_TECH_OPEN_VISIT_NUDGE';
 // no_show are excluded on purpose; a visit that ended has nothing left to
 // nudge.
 const OPEN_STATUSES = ['pending', 'confirmed', 'en_route', 'on_site'];
+// Never tapped En Route — listed too (a third of the 2026-09-28 backlog was
+// never started), but marked so the tech knows it needs closing, not finishing.
+const NOT_STARTED = new Set(['pending', 'confirmed']);
 const NOTIFICATION_TYPE = 'tech_open_visit_nudge';
 const MAX_LISTED = 5;
 
@@ -67,18 +70,24 @@ function enabled() {
 
 // Today's open visits with a technician assigned, joined to the technician
 // and customer rows the message needs. Ordered by window so a tech's list
-// reads chronologically and the "+N more" tail drops the latest stops.
+// reads chronologically and the "+N more" tail drops the latest stops. A
+// visit whose window starts after the send time (an evening stop) hasn't
+// happened yet, so it is left out; a visit with no window is kept.
 async function findOpenVisitsToday(now) {
   const today = etDateString(now);
+  const { hour, minute } = etParts(now);
+  const nowHHMM = `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
   return db('scheduled_services as s')
     .join('technicians as t', 's.technician_id', 't.id')
     .leftJoin('customers as c', 's.customer_id', 'c.id')
     .where('s.scheduled_date', today)
     .whereIn('s.status', OPEN_STATUSES)
     .whereNotNull('s.technician_id')
+    .where((q) => q.whereNull('s.window_start').orWhere('s.window_start', '<=', nowHHMM))
     .orderBy('s.window_start', 'asc')
     .select(
       's.id as visit_id',
+      's.status',
       's.window_start',
       's.service_type',
       's.technician_id',
@@ -113,6 +122,7 @@ function groupByTechnician(rows) {
     }
     byId.get(id).visits.push({
       id: row.visit_id,
+      status: row.status,
       windowStart: row.window_start,
       serviceType: row.service_type,
       customerFirst: row.cust_first_name,
@@ -147,16 +157,17 @@ function clock12(value) {
 
 function visitLine(visit) {
   const time = clock12(visit.windowStart) || '—';
-  return `${time} · ${customerLabel(visit)} · ${visit.serviceType || 'Service'}`;
+  const line = `${time} · ${customerLabel(visit)} · ${visit.serviceType || 'Service'}`;
+  return NOT_STARTED.has(visit.status) ? `${line} (not started)` : line;
 }
 
-// "Waves: 3 visits from today are still open. Tap to finish: <link>" then
+// "Waves: 3 visits from today are still open. Tap to close out: <link>" then
 // up to MAX_LISTED lines, then "+N more". One plain-text message, no
 // signature (owner ruling: brand is just "Waves").
 function buildMessage(visits) {
   const count = visits.length;
   const link = `${publicPortalUrl()}/tech`;
-  const header = `Waves: ${count} visit${count === 1 ? '' : 's'} from today are still open. Tap to finish: ${link}`;
+  const header = `Waves: ${count} visit${count === 1 ? '' : 's'} from today are still open. Tap to close out: ${link}`;
   const shown = visits.slice(0, MAX_LISTED);
   const lines = shown.map(visitLine);
   const overflow = count - shown.length;

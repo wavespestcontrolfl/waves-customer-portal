@@ -35,10 +35,11 @@ function chain(overrides = {}) {
 function visitRow({
   id, techId, techName = 'Tech', employmentStatus = 'active', fieldDispatchable = true,
   techPhone = '941-555-0101', windowStart = '09:00:00', serviceType = 'Pest Control',
-  custFirst = 'Ana', custLast = 'Ruiz',
+  custFirst = 'Ana', custLast = 'Ruiz', status = 'on_site',
 }) {
   return {
     visit_id: id,
+    status,
     window_start: windowStart,
     service_type: serviceType,
     technician_id: techId,
@@ -192,6 +193,37 @@ describe('runTechOpenVisitNudge — grouping, eligibility, sends', () => {
     expect(lines).toHaveLength(7);
     expect(lines[lines.length - 1]).toBe('+2 more');
     expect(body).toContain('Waves: 7 visits from today are still open');
+  });
+
+  test('a never-started visit is listed but marked "(not started)"; a started one is not', async () => {
+    const rows = [
+      visitRow({ id: 'v1', techId: 'tech-a', custFirst: 'Ana', custLast: 'Ruiz', status: 'on_site', windowStart: '09:00:00' }),
+      visitRow({ id: 'v2', techId: 'tech-a', custFirst: 'Bo', custLast: 'Lee', status: 'confirmed', windowStart: '11:00:00' }),
+    ];
+    db.mockImplementation((table) => {
+      if (table === 'scheduled_services as s') return chain({ select: jest.fn().mockResolvedValue(rows) });
+      return chain();
+    });
+    await runTechOpenVisitNudge({ now: new Date('2026-09-28T23:00:00Z') });
+    const lines = TwilioService.sendSMS.mock.calls[0][1].split('\n');
+    expect(lines[0]).toContain('Tap to close out:');
+    expect(lines[1]).toBe('9:00 AM · Ana R. · Pest Control');
+    expect(lines[2]).toBe('11:00 AM · Bo L. · Pest Control (not started)');
+  });
+
+  test('a visit whose window starts after the send time (an evening stop) is left out; no window is kept', async () => {
+    let visitsChain;
+    db.mockImplementation((table) => {
+      if (table === 'scheduled_services as s') { visitsChain = chain(); return visitsChain; }
+      return chain();
+    });
+    await runTechOpenVisitNudge({ now: new Date('2026-09-28T23:00:00Z') }); // 7:00 PM EDT
+    const windowFilter = visitsChain.where.mock.calls.map((c) => c[0]).find((a) => typeof a === 'function');
+    expect(windowFilter).toBeDefined();
+    const q = { whereNull: jest.fn(() => q), orWhere: jest.fn(() => q) };
+    windowFilter(q);
+    expect(q.whereNull).toHaveBeenCalledWith('s.window_start');
+    expect(q.orWhere).toHaveBeenCalledWith('s.window_start', '<=', '19:00');
   });
 
   test('message never contains a full last name — first name + last initial only', async () => {
