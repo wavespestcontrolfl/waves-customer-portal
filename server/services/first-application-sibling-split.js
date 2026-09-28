@@ -769,7 +769,19 @@ function newestFirst(rows) {
 }
 function resolveGoverningInvoice(stampedInvoice, liveAnchorInvoices) {
   if (!InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES.includes(stampedInvoice.status)) return stampedInvoice;
-  const ordered = newestFirst(liveAnchorInvoices || []);
+  // Codex r18 P1 (PR #5021): a live invoice on the anchor row governs — and
+  // can drive refund / pending-payment instructions — only when it carries
+  // DURABLE evidence that it bills the base application
+  // (invoiceBillsBaseApplication: a positive line tagged client_id
+  // `scheduled_<id>_primary`, which every service mint writes, or described
+  // "First service application"). client_id is not among the fields
+  // InvoiceService.update lets staff edit, so this is not the editable
+  // title/notes text the round-9 ruling rejected. An unrelated paid repair or
+  // add-on invoice on the anchor never becomes "the combined invoice" and
+  // never earns a refund instruction; with no qualifying replacement the
+  // terminal stamped invoice stays governing (void/refunded → clear).
+  const { invoiceBillsBaseApplication } = require('./estimate-first-application-invoice');
+  const ordered = newestFirst((liveAnchorInvoices || []).filter((inv) => invoiceBillsBaseApplication(inv)));
   const collectible = ordered.filter((inv) => !isInvoiceSettled(inv.status));
   if (collectible.length) return collectible[collectible.length - 1];
   return ordered[0] || stampedInvoice;
@@ -777,9 +789,10 @@ function resolveGoverningInvoice(stampedInvoice, liveAnchorInvoices) {
 
 // Resolve the GOVERNING invoice before deciding anything: normally the
 // stamped invoice itself. Only when the stamped invoice has gone terminal do
-// we look for ANY live invoice on the anchor's OWN scheduled_service_id — no
-// title/notes recognition (Codex round-9 P1) — locked FOR UPDATE right
-// alongside it. resolveGoverningInvoice picks among them (oldest collectible,
+// we look for live invoices on the anchor's OWN scheduled_service_id — no
+// title/notes recognition (Codex round-9 P1), but base-application line
+// evidence is required (Codex r18 P1, see resolveGoverningInvoice) — locked
+// FOR UPDATE right alongside it. resolveGoverningInvoice picks among them (oldest collectible,
 // else newest settled — Codex round 14 P1), so created_at is selected too.
 async function loadGoverningInvoice(conn, freshInvoice) {
   if (!InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES.includes(freshInvoice.status)) return freshInvoice;
@@ -789,7 +802,7 @@ async function loadGoverningInvoice(conn, freshInvoice) {
     .whereNotIn('status', InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES)
     .orderBy('created_at', 'desc')
     .forUpdate()
-    .select('id', 'status', 'invoice_number', 'total', 'scheduled_service_id', 'created_at');
+    .select('id', 'status', 'invoice_number', 'total', 'scheduled_service_id', 'created_at', 'line_items');
   return resolveGoverningInvoice(freshInvoice, liveAnchorInvoices);
 }
 

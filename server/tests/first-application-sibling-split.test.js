@@ -656,15 +656,22 @@ describe('divergenceStateFingerprint', () => {
 // anchor's live invoice turns out to be, so ANY live invoice on the anchor
 // governs — even one that looks completely unrelated.
 describe('resolveGoverningInvoice', () => {
+  // A replacement carries DURABLE base-application evidence: a positive line
+  // tagged client_id `scheduled_<id>_primary` (what every service mint writes)
+  // — not editable title/notes text (Codex r18 P1).
   const liveInvoice = (over = {}) => ({
     id: 'replacement-1',
     status: 'sent',
     title: 'First Service Application',
     notes: 'Auto-generated from accepted estimate #est-1. Customer selected pay per application — first application only.',
+    line_items: [{ client_id: 'scheduled_anchor-1_primary', description: 'First service application', quantity: 1, unit_price: 153.6, amount: 153.6 }],
     ...over,
   });
+  // An unrelated hand invoice on the same visit: no base-application line.
   const handInvoice = (over = {}) => ({
-    id: 'hand-invoice-1', status: 'sent', title: 'Repair charge', notes: 'A one-off hand invoice for a broken sprinkler head.', ...over,
+    id: 'hand-invoice-1', status: 'sent', title: 'Repair charge', notes: 'A one-off hand invoice for a broken sprinkler head.',
+    line_items: [{ description: 'Sprinkler head repair', quantity: 1, unit_price: 45, amount: 45 }],
+    ...over,
   });
 
   test('an OPEN stamped invoice always governs itself — never looks at any live invoice on the anchor', () => {
@@ -690,17 +697,28 @@ describe('resolveGoverningInvoice', () => {
     expect(resolveGoverningInvoice(stamped, null)).toBe(stamped);
   });
 
-  // Flipped by Codex round-9 P1: a live anchor invoice that would NOT have
-  // been recognized as a first-application invoice by title/notes text
-  // (an unrelated hand invoice — a repair, a one-off charge) now STILL
-  // governs — no text recognition at all any more. Failing toward
-  // alerting (the office looks at an invoice that turns out unrelated)
-  // beats failing toward silence (a renamed or truly unrelated live
-  // invoice letting a genuinely diverged, still-charging pair go quiet).
-  test('an unrecognized-looking live invoice on the anchor (e.g. an unrelated hand invoice) still governs — durable evidence only', () => {
+  // Codex round-9 P1 removed TEXT recognition here; Codex r18 P1 requires
+  // DURABLE evidence instead: a live anchor invoice governs (and can drive a
+  // refund instruction) only when a positive line bills the base
+  // application (client_id `scheduled_<id>_primary` / "First service
+  // application"). An unrelated hand invoice — a repair, a one-off charge —
+  // never becomes "the combined invoice"; with no qualifying replacement the
+  // terminal stamped invoice governs itself.
+  test('an unrelated hand invoice on the anchor (no base-application line) never governs — the terminal stamped invoice does', () => {
     const stamped = { id: 'stamped-1', status: 'void' };
-    const hand = handInvoice();
-    expect(resolveGoverningInvoice(stamped, [hand])).toBe(hand);
+    expect(resolveGoverningInvoice(stamped, [handInvoice()])).toBe(stamped);
+  });
+
+  test('a RENAMED replacement (hand-looking title/notes) that carries a base-application line still governs — evidence is the line, not the text', () => {
+    const stamped = { id: 'stamped-1', status: 'void' };
+    const renamed = liveInvoice({ id: 'renamed-1', title: 'Custom title', notes: 'Edited by the office.' });
+    expect(resolveGoverningInvoice(stamped, [renamed])).toBe(renamed);
+  });
+
+  test('base-application evidence works from a JSON-string line_items column too', () => {
+    const stamped = { id: 'stamped-1', status: 'void' };
+    const asString = liveInvoice({ line_items: JSON.stringify(liveInvoice().line_items) });
+    expect(resolveGoverningInvoice(stamped, [asString])).toBe(asString);
   });
 
   // Codex round 14 P1: the NEWEST live invoice is not necessarily the one
@@ -709,8 +727,8 @@ describe('resolveGoverningInvoice', () => {
   describe('several live invoices on the anchor (Codex round 14 P1)', () => {
     const stamped = { id: 'stamped-1', status: 'void' };
     const olderSent = liveInvoice({ id: 'older-sent', status: 'sent', created_at: '2026-10-02T10:00:00Z' });
-    const newerPaid = handInvoice({ id: 'newer-paid', status: 'paid', created_at: '2026-10-05T10:00:00Z' });
-    const olderPaid = handInvoice({ id: 'older-paid', status: 'paid', created_at: '2026-10-02T10:00:00Z' });
+    const newerPaid = liveInvoice({ id: 'newer-paid', status: 'paid', created_at: '2026-10-05T10:00:00Z' });
+    const olderPaid = liveInvoice({ id: 'older-paid', status: 'paid', created_at: '2026-10-02T10:00:00Z' });
     const newerSent = liveInvoice({ id: 'newer-sent', status: 'sent', created_at: '2026-10-05T10:00:00Z' });
 
     test('older collectible + newer paid → the older collectible governs, whatever the array order', () => {
@@ -728,8 +746,8 @@ describe('resolveGoverningInvoice', () => {
     });
 
     test.each(['paid', 'prepaid', 'processing'])('every live invoice settled (%s) → the NEWEST settled governs', (status) => {
-      const older = handInvoice({ id: 'older', status, created_at: '2026-10-02T10:00:00Z' });
-      const newer = handInvoice({ id: 'newer', status, created_at: '2026-10-05T10:00:00Z' });
+      const older = liveInvoice({ id: 'older', status, created_at: '2026-10-02T10:00:00Z' });
+      const newer = liveInvoice({ id: 'newer', status, created_at: '2026-10-05T10:00:00Z' });
       expect(resolveGoverningInvoice(stamped, [older, newer])).toBe(newer);
     });
 

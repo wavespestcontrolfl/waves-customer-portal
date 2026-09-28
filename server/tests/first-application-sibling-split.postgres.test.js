@@ -707,7 +707,13 @@ suite('first-application-sibling-split — periodic sweep', () => {
       expect(cleared.read_at).not.toBeNull();
     }));
 
-    test('void + an unrecognized-looking live anchor invoice (an unrelated hand invoice) → STILL governs and alerts (Codex round-9 P1: no text recognition)', () => rollbackTest(async (trx) => {
+    // Codex round-9 P1 removed TEXT recognition from the governing choice;
+    // Codex r18 P1 requires DURABLE evidence instead: a live anchor invoice
+    // governs (and can carry refund instructions) only when a positive line
+    // bills the base application (client_id `scheduled_<id>_primary`, which
+    // every service mint writes). An unrelated hand invoice — a repair — that
+    // merely shares the anchor's row never becomes "the combined invoice".
+    test('void + an unrelated hand invoice on the anchor (no base-application line) → the voided stamped invoice still governs → cleared as settled', () => rollbackTest(async (trx) => {
       const ids = await fixture(trx);
       await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
       await sweepOnce(trx, ids.estimateId);
@@ -715,31 +721,42 @@ suite('first-application-sibling-split — periodic sweep', () => {
       expect((await readBell(trx, dedupeKey)).read_at).toBeNull();
 
       await trx('invoices').where({ id: ids.invoiceId }).update({ status: 'void' });
-      // A live invoice sharing the anchor's scheduled_service_id, with no
-      // first-application recognition at all — a repair or one-off charge
-      // that happens to reuse the same row. This now governs anyway: the
-      // pair is still genuinely diverged, and this advisory alert must
-      // point staff at whatever invoice actually sits on the anchor rather
-      // than clear silently.
-      const handInvoiceId = randomUUID();
       await trx('invoices').insert({
-        id: handInvoiceId, customer_id: ids.customerId, scheduled_service_id: ids.pestId,
+        id: randomUUID(), customer_id: ids.customerId, scheduled_service_id: ids.pestId,
         token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
         status: 'sent', title: 'Sprinkler head repair', notes: 'One-off hand invoice, unrelated to the estimate.',
         line_items: JSON.stringify([{ description: 'Repair', quantity: 1, unit_price: 45, amount: 45 }]),
         subtotal: 45, total: 45,
       });
+      const [result] = await sweepOnce(trx, ids.estimateId);
+      expect(result.action).toBe('cleared');
+      expect(result.reason).toBe('invoice_settled');
+      expect((await readBell(trx, dedupeKey)).read_at).not.toBeNull();
+    }));
 
+    test('void + a RENAMED replacement on the anchor that carries a base-application line → governs and alerts, naming that invoice', () => rollbackTest(async (trx) => {
+      const ids = await fixture(trx);
+      await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+      await sweepOnce(trx, ids.estimateId);
+      const dedupeKey = DEDUPE_KEY(ids.estimateId, ids.invoiceId, [ids.lawnId]);
+
+      await trx('invoices').where({ id: ids.invoiceId }).update({ status: 'void' });
+      const replacementId = randomUUID();
+      await trx('invoices').insert({
+        id: replacementId, customer_id: ids.customerId, scheduled_service_id: ids.pestId,
+        token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
+        status: 'sent', title: 'Custom title', notes: 'Edited by the office.',
+        line_items: JSON.stringify([{ client_id: `scheduled_${ids.pestId}_primary`, description: 'Quarterly Pest Control', quantity: 1, unit_price: 153.6, amount: 153.6 }]),
+        subtotal: 153.6, total: 153.6,
+      });
       const [result] = await sweepOnce(trx, ids.estimateId);
       expect(result.action).toBe('alerted');
       expect(result.divergingSiblingIds).toEqual([ids.lawnId]);
       const bell = await readBell(trx, dedupeKey);
       expect(bell.read_at).toBeNull();
-      expect(bell.link).toBe(`/admin/invoices?invoice=${handInvoiceId}`);
+      expect(bell.link).toBe(`/admin/invoices?invoice=${replacementId}`);
       const metadata = typeof bell.metadata === 'string' ? JSON.parse(bell.metadata) : bell.metadata;
-      expect(metadata.invoiceId).toBe(handInvoiceId);
-      // The stamped (voided) invoice's own id is preserved separately so a
-      // LATER governing-invoice change can still recover this alert (P2).
+      expect(metadata.invoiceId).toBe(replacementId);
       expect(metadata.stampedInvoiceId).toBe(ids.invoiceId);
       expect(bell.body).toMatch(/charge now sits on invoice/i);
     }));
@@ -3378,6 +3395,57 @@ suite('first-application-sibling-split — periodic sweep', () => {
       // and the other group's own sibling still finds ITS invoice
       const otherFound = await findFirstApplicationInvoiceForEstimateService(await row(trx, otherSibling), trx);
       expect(otherFound.invoice?.id).toBe(otherInvoiceId);
+    }));
+
+    // Codex r18 P1: a settled invoice on the anchor drives refund instructions
+    // only with base-application evidence.
+    test('refund instructions: stamped invoice REFUNDED + unrelated PAID add-on on the anchor + cancelled sibling → no refund alert (cleared as refunded)', () => rollbackTest(async (trx) => {
+      const ids = await fixture(trx);
+      await trx('invoices').where({ id: ids.invoiceId }).update({ status: 'refunded' });
+      await addOnInvoice(trx, ids, ids.pestId, { status: 'paid' });
+      await trx('scheduled_services').where({ id: ids.lawnId }).update({ status: 'cancelled' });
+      const results = await sweepOnce(trx, ids.estimateId);
+      expect(results.some((r) => r.action === 'alerted')).toBe(false);
+      expect(await readBell(trx, REFUND_DEDUPE_KEY(ids.estimateId, ids.invoiceId, [ids.lawnId]))).toBeFalsy();
+    }));
+
+    test('refund instructions: stamped invoice VOID + a PAID base-application replacement on the anchor + cancelled sibling → refund alert naming the replacement', () => rollbackTest(async (trx) => {
+      const ids = await fixture(trx);
+      await trx('invoices').where({ id: ids.invoiceId }).update({ status: 'void' });
+      const replacementNumber = `WPC-TEST-${randomUUID().slice(0, 8)}`;
+      await addOnInvoice(trx, ids, ids.pestId, {
+        status: 'paid', invoice_number: replacementNumber, title: 'Quarterly Pest Control',
+        line_items: JSON.stringify([{ client_id: `scheduled_${ids.pestId}_primary`, description: 'Quarterly Pest Control', quantity: 1, unit_price: 153.6, amount: 153.6 }]),
+        subtotal: 153.6, total: 153.6,
+      });
+      await trx('scheduled_services').where({ id: ids.lawnId }).update({ status: 'cancelled' });
+      const [result] = await sweepOnce(trx, ids.estimateId);
+      expect(result.action).toBe('alerted');
+      const bell = await readBell(trx, REFUND_DEDUPE_KEY(ids.estimateId, ids.invoiceId, [ids.lawnId]));
+      expect(bell).toBeTruthy();
+      expect(`${bell.title} ${bell.body || bell.message || ''}`).toContain(replacementNumber);
+    }));
+
+    // Codex pre-push P1 on a0a05a61e6: invoice-mode recurring accepts write
+    // different notes; the backfill must recognize them too.
+    test('backfill recognizer: an INVOICE-MODE recurring accept invoice ("(invoice-mode recurring)" notes) is stamped by the migration run and by the runtime reconciliation', () => rollbackTest(async (trx) => {
+      const ids = await fixture(trx, { stamp: false });
+      await trx('invoices').where({ id: ids.invoiceId }).update({
+        title: 'Quarterly Pest Control + Lawn Care',
+        notes: `Auto-generated from accepted estimate #${ids.estimateId} (invoice-mode recurring). Monthly equivalent: $61.20/mo.`,
+      });
+      await reconcileRecentUnstampedAccepts(trx);
+      expect((await row(trx, ids.pestId)).first_application_invoice_id).toBe(ids.invoiceId);
+      expect((await row(trx, ids.lawnId)).first_application_invoice_id).toBe(ids.invoiceId);
+      // idempotent on the unbounded (migration) run too
+      const again = await backfillFirstApplicationInvoiceStamps(trx);
+      expect(again.stamped).toBe(0);
+    }));
+
+    test('backfill recognizer: an unrecognizable hand invoice on the anchor is still never a candidate', () => rollbackTest(async (trx) => {
+      const ids = await fixture(trx, { stamp: false, matchInvoiceText: false });
+      await backfillFirstApplicationInvoiceStamps(trx);
+      expect((await row(trx, ids.lawnId)).first_application_invoice_id).toBeNull();
     }));
 
     test('backfill ownership: an old REFUNDED invoice attached to the anchor is dead, not a live claim — the pair is still stamped', () => rollbackTest(async (trx) => {
