@@ -773,7 +773,7 @@ function ConversationViewV2({
 export function buildReschedulePrefill({ firstName, day, serviceType, url }) {
   const first = String(firstName || "").trim();
   if (!first || !url) return null;
-  return `Hi ${first}, it's Waves Pest Control. Reschedule your ${day}${
+  return `Hi ${first}, it's Waves. Reschedule your ${day}${
     serviceType ? ` ${serviceType}` : ""
   } visit here: ${url}`;
 }
@@ -781,7 +781,7 @@ export function buildReschedulePrefill({ firstName, day, serviceType, url }) {
 export function buildReservicePrefill({ firstName, laneLabel, url }) {
   const first = String(firstName || "").trim();
   if (!first || !url) return null;
-  return `Hi ${first}, it's Waves Pest Control. Book your free${
+  return `Hi ${first}, it's Waves. Book your free${
     laneLabel ? ` ${laneLabel}` : ""
   } re-service here: ${url}`;
 }
@@ -839,7 +839,7 @@ export function buildCustomerLinkPrefill({ firstName, clause }) {
   const first = String(firstName || "").trim();
   const line = String(clause || "").trim();
   if (!first || !line) return null;
-  return `Hi ${first}, it's Waves Pest Control. ${line}`;
+  return `Hi ${first}, it's Waves. ${line}`;
 }
 
 const ANALYZE_PHOTOS_MAX = 5;

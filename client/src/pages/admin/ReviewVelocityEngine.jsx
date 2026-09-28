@@ -199,7 +199,7 @@ const TEMPLATES = [
     id: "friendly_ask",
     name: "Friendly Ask",
     sentiment: "happy",
-    body: "Hey {first}! Adam with Waves here. If we earned it, a quick Google review would mean the world:\n\n{review_url}",
+    body: "Hey {first}, it's Waves. If we earned it, a quick Google review would mean the world:\n\n{review_url}",
   },
   {
     id: "soft_reminder",
@@ -235,7 +235,7 @@ const TEMPLATES = [
     id: "resolution_check",
     name: "Issue Resolution Check",
     sentiment: "issue",
-    body: "Hi {first}, Adam with Waves. Just making sure everything has been taken care of - if there is anything else we can do, reply here anytime.",
+    body: "Hi {first}, it's Waves. Just making sure everything has been taken care of - if there is anything else we can do, reply here anytime.",
   },
   {
     id: "satisfaction_confirm",
@@ -434,12 +434,13 @@ function hydrate(body, c) {
       .replace(/\{name\}/g, c.name)
       // Tech FIRST name only — the hydrated body submits as custom copy, so the
       // server's own first-name substitution never runs on it, and a full name
-      // would tip the one-segment ask templates into a second segment.
+      // would tip the one-segment ask templates into a second segment. No
+      // tech on file → the server's own "Your tech", never a person's name.
       .replace(
         /\{tech\}/g,
-        String(c.lastTech || "Adam")
+        String(c.lastTech || "")
           .trim()
-          .split(/\s+/)[0] || "Adam",
+          .split(/\s+/)[0] || "Your tech",
       )
       // {sender} is deliberately NOT hydrated here (codex #4139 r1): the
       // candidates feed carries no technician, so the server renders it from

@@ -22,13 +22,18 @@
  *   - appointment_recurring_placement_confirmed's "stay as they are until
  *     we go over them with you" was read back by the owner as unclear;
  *     reworded to "won't change unless we talk with you first."
- *   - service_cancellation_scoped_confirmation and
- *     plan_hold_resume_reminder were missing the word "service" after the
- *     {service}/{service} variable, reading like "your Waves Lawn Care is
+ *   - service_cancellation_scoped_confirmation was missing the word
+ *     "service" after {service}, reading "your Waves Lawn Care is
  *     cancelled" instead of "your Waves Lawn Care service is cancelled".
+ *     (plan_hold_resume_reminder reads the same way but is left alone: it
+ *     already says "Waves", and the extra word pushes common name + date
+ *     combinations past the 160-character single segment.)
  *
- * Every body stays GSM-7 (straight apostrophes only) and no rewrite adds a
- * segment at typical lengths. Exact-body CAS, same contract as
+ * Every body stays GSM-7 (straight apostrophes only). The two completion
+ * texts (service_report_v1_with_invoice / service_complete_with_invoice)
+ * gain 6 characters for "Waves ", which tips a long first name + long
+ * service name into a second segment; accepted, since every text naming
+ * Waves is the point. Exact-body CAS, same contract as
  * 20260926120000 / 20260928050000: a template an administrator has since
  * edited is left alone, and down() only restores a body this migration
  * itself set (never overwrites a later admin edit).
@@ -163,11 +168,6 @@ const SWAPS = [
     "service_cancellation_scoped_confirmation",
     "Hello {first_name}, your Waves {service} is cancelled as of {effective_date}. {remaining} continue as before, and completed visits stay payable. Changed your mind or have a question? Reply here.",
     "Hello {first_name}, your Waves {service} service is cancelled as of {effective_date}. {remaining} continue as before, and completed visits stay payable. Changed your mind or have a question? Reply here."
-  ],
-  [
-    "plan_hold_resume_reminder",
-    "Hello {first_name}! Your Waves {service} hold ends {resume_date}, and your visits start again then. Want a different date, or to cancel instead? Reply here.",
-    "Hello {first_name}! Your Waves {service} service hold ends {resume_date}, and your visits start again then. Want a different date, or to cancel instead? Reply here."
   ],
 ];
 
