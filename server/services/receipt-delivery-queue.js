@@ -72,11 +72,14 @@ async function enqueueReceiptDelivery({
   return { enqueued: false, deduped: true };
 }
 
-async function recoverStaleLocks() {
+async function recoverStaleLocks({ invoiceId = null } = {}) {
+  // invoiceId scopes every statement to one invoice's job (the operator
+  // claim settles a stale row this way before claiming it).
+  const scoped = (q) => (invoiceId ? q.where('receipt_delivery_jobs.invoice_id', invoiceId) : q);
   // Stale operator claims (claimReceiptJobForOperatorSend) were never handed
   // back — a failed release, or a process that died mid-send — and are
   // settled before the generic requeue below:
-  const staleOperatorClaims = () => db('receipt_delivery_jobs')
+  const staleOperatorClaims = () => scoped(db('receipt_delivery_jobs'))
     .where({ status: 'running' })
     .where('locked_at', '<', db.raw(`now() - interval '${STALE_LOCK_MINUTES} minutes'`))
     .where('locked_by', 'like', 'operator:%');
@@ -104,7 +107,7 @@ async function recoverStaleLocks() {
   await staleOperatorClaims().where({ source: 'operator_send' }).del();
   // Everything else stale — a drain worker's job, or a queued job an
   // operator held — may still owe its email and is requeued.
-  return db('receipt_delivery_jobs')
+  return scoped(db('receipt_delivery_jobs'))
     .where({ status: 'running' })
     .where('locked_at', '<', db.raw(`now() - interval '${STALE_LOCK_MINUTES} minutes'`))
     .update({
@@ -395,6 +398,10 @@ async function processDueReceiptDeliveryJobs({ limit = 10, id = workerId() } = {
 // (recordOperatorReceiptEmail), removed when the claim created the row, and
 // otherwise handed back to the drain.
 async function claimReceiptJobForOperatorSend(invoiceId) {
+  // A stale row is settled first by the same rules as the drain's recovery
+  // (closed on its own recorded email, removed when a claim created it,
+  // otherwise requeued), so what is left running is genuinely in flight.
+  await recoverStaleLocks({ invoiceId });
   const token = `operator:${workerId()}:${randomUUID()}`;
   return db.transaction(async (trx) => {
     const inserted = await trx('receipt_delivery_jobs')
@@ -417,24 +424,16 @@ async function claimReceiptJobForOperatorSend(invoiceId) {
     const job = await trx('receipt_delivery_jobs')
       .where({ invoice_id: invoiceId })
       .forUpdate()
-      .first('id', 'status', 'next_attempt_at', trx.raw(`(locked_at < now() - interval '${STALE_LOCK_MINUTES} minutes') AS lock_stale`));
+      .first('id', 'status', 'next_attempt_at');
     if (!job) throw new Error(`receipt job for invoice ${invoiceId} vanished during the operator claim`);
-    const staleRunning = job.status === 'running' && job.lock_stale === true;
-    if (job.status === 'running' && !staleRunning) return { inFlight: true };
+    if (job.status === 'running') return { inFlight: true };
     // A completed or failed job sends nothing more: no claim to hold.
-    if (!QUEUED_STATUSES.includes(job.status) && !staleRunning) return { id: null };
+    if (!QUEUED_STATUSES.includes(job.status)) return { id: null };
 
     await trx('receipt_delivery_jobs')
       .where({ id: job.id })
       .update({ status: 'running', locked_at: trx.fn.now(), locked_by: token, updated_at: trx.fn.now() });
-    return {
-      id: job.id,
-      token,
-      // A stale running job goes back as due now, as recoverStaleLocks would.
-      prior: staleRunning
-        ? { status: 'retry_scheduled', next_attempt_at: new Date() }
-        : { status: job.status, next_attempt_at: job.next_attempt_at },
-    };
+    return { id: job.id, token, prior: { status: job.status, next_attempt_at: job.next_attempt_at } };
   });
 }
 

@@ -205,4 +205,28 @@ postgres('operator receipt claim on PostgreSQL', () => {
     expect(await job(takenId)).toMatchObject({ status: 'retry_scheduled', source: 'stripe_webhook' });
     expect(await job(workerId)).toMatchObject({ status: 'retry_scheduled' });
   });
+
+  test('a new operator send on a stale claim settles it by the recovery rules first — never inherits it', async () => {
+    const stale = new Date(Date.now() - 60 * 60 * 1000);
+    // A stale claim-created row, nothing sent: removed, so a text-only
+    // resend then leaves no automatic email behind.
+    const syntheticId = randomUUID();
+    const first = await claimReceiptJobForOperatorSend(syntheticId);
+    await mockPg('receipt_delivery_jobs').where({ id: first.id }).update({ locked_at: stale });
+    const second = await claimReceiptJobForOperatorSend(syntheticId);
+    expect(second).toMatchObject({ id: expect.any(String), prior: null });
+    expect(second.id).not.toBe(first.id);
+    await releaseOperatorReceiptClaim(second, { emailDelivered: false });
+    expect(await job(syntheticId)).toBeUndefined();
+
+    // A stale claim whose own email was recorded: closed (and the invoice
+    // stamped), so the new send holds nothing that could re-send it.
+    const sentId = await seedJob();
+    await mockPg('invoices').insert({ id: sentId, receipt_sent_at: null });
+    const sentClaim = await claimReceiptJobForOperatorSend(sentId);
+    await recordOperatorReceiptEmail(sentClaim);
+    await mockPg('receipt_delivery_jobs').where({ id: sentClaim.id }).update({ locked_at: stale });
+    expect(await claimReceiptJobForOperatorSend(sentId)).toEqual({ id: null });
+    expect(await job(sentId)).toMatchObject({ status: 'completed', email_result: { operator_claim: sentClaim.token } });
+  });
 });
