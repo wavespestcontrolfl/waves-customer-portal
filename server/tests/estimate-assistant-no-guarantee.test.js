@@ -569,6 +569,27 @@ describe('estimate assistant no-guarantee context', () => {
     }
   });
 
+  test('identical current jobs with the same decision are both listed (Codex #4982)', () => {
+    const rows = [
+      { service: 'trenching', label: 'Termite Trenching', amount: 900, warrantyTier: 'one_year_retreat', warrantyAdder: 0 },
+      { service: 'trenching', label: 'Termite Trenching', amount: 900, warrantyTier: 'one_year_retreat', warrantyAdder: 0 },
+    ];
+    const context = buildEstimateAssistantContext({
+      estimate: { onetime_total: 1800 }, serviceMode: 'one_time', noGuaranteeClaims: true,
+      estData: {},
+      pricingBundle: { source: 'engine_invocation', snapshotHit: false,
+        anchorOneTimePrice: 1800, oneTimeBreakdown: { total: 1800, items: rows } },
+    });
+    expect(context.oneTime.items).toHaveLength(2);
+    expect(context.guarantees.serviceTerms).toEqual([
+      { service: 'Termite Trenching job 1 of 2 at $900', terms: ['Annual inspection during the warranty period'] },
+      { service: 'Termite Trenching job 2 of 2 at $900', terms: ['Annual inspection during the warranty period'] },
+    ]);
+    const answer = answerEstimateQuestionFallback('Is the trenching guaranteed?', context);
+    expect(answer).toContain('Termite Trenching job 1 of 2 at $900: Annual inspection');
+    expect(answer).toContain('Termite Trenching job 2 of 2 at $900: Annual inspection');
+  });
+
   test.each([
     ['paid-first', false],
     ['removed-first', true],
@@ -1151,6 +1172,8 @@ describe('estimate assistant no-guarantee context', () => {
     ['Does the cost of trenching include a warranty?', true],
     ['How much does the 5-year termite bond cost?', false],
     ['How much is the bond?', false],
+    ['How much for the 5-year bond?', false],
+    ['How much for coverage?', true],
     ['What’s the price of the warranty?', false],
     ['How often do you retreat the lawn?', false],
     ['Are you licensed and bonded?', false],

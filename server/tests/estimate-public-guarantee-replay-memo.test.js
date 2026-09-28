@@ -42,6 +42,17 @@ describe('inputs-only guarantee classification replays the engine once per estim
     expect(generateEstimate).toHaveBeenCalledTimes(2);
   });
 
+  test('an empty persisted result is a placeholder: the inputs replay once (Codex on 6880c57a95)', () => {
+    const estData = { ...inputsOnly({ pest: { frequency: 'quarterly' } }), result: {} };
+    expect(estimateMakesNoGuaranteeClaim(estData)).toBe(false);
+    expect(estimateCarriesPlanTerms(estData)).toBe(true);
+    expect(generateEstimate).toHaveBeenCalledTimes(1);
+    const lawn = { ...inputsOnly({ lawn: { frequency: 'premium' } }), result: {}, engineResult: { recurring: { services: [] } } };
+    expect(estimateMakesNoGuaranteeClaim(lawn)).toBe(false);
+    expect(estimateCarriesPlanTerms(lawn)).toBe(true);
+    expect(generateEstimate).toHaveBeenCalledTimes(2);
+  });
+
   test('a persisted result never replays', () => {
     const estData = {
       ...inputsOnly({ pest: { frequency: 'quarterly' } }),
@@ -88,5 +99,9 @@ describe('an inputs-only commercial quote decides like its saved engine result',
     expect(estimateCarriesPlanTerms(inputsOnlyQuote)).toBe(false);
     expect(estimateMakesNoGuaranteeClaim(inputsOnlyQuote)).toBe(estimateMakesNoGuaranteeClaim(saved));
     expect(generateEstimate).toHaveBeenCalledTimes(1);
+    const placeholder = { ...commercialBedBug(), result: {} };
+    expect(estimateHasCommercialScope(placeholder)).toBe(true);
+    expect(estimateCarriesPlanTerms(placeholder)).toBe(false);
+    expect(generateEstimate).toHaveBeenCalledTimes(2);
   });
 });

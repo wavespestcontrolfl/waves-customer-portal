@@ -1644,45 +1644,56 @@ function writtenSatisfactionClause(detail) {
 function serviceTermsFromRows(rowGroups = [], oneTimeRows = [], { ownTerms = () => [] } = {}) {
   const oneTimeIdentities = new Set(oneTimeRows.map(trenchingServiceIdentity));
   const seen = new Set();
-  const entries = rowGroups.flat().flatMap((row) => {
-    if (!row || typeof row !== 'object') return [];
-    // Engine frequency inclusions can carry a bare service-key placeholder
-    // for a separately priced add-on. It is not a distinct job.
-    const unpricedPlaceholder = !row.oneTime && !oneTimeRows.includes(row)
-      && oneTimeIdentities.has(trenchingServiceIdentity(row))
-      && cleanText(row.label).toLowerCase() === cleanText(row.service).toLowerCase()
-      && !row.purchasedTerms?.length
-      && ![row.amount, row.monthly, row.perApplication].some(Number.isFinite);
-    if (unpricedPlaceholder) return [];
-    const lanes = rowGuaranteeLanes(row);
-    const purchased = Array.isArray(row.purchasedTerms) ? row.purchasedTerms : [];
-    let terms;
-    if (lanes.some((lane) => TERMITE_LANES.has(lane))) {
-      // A bond is itself the purchase: a bond row with no purchase says nothing.
-      // Neither does an unpriced row labeled with its bare service key (the
-      // engine's inclusion placeholder for a separately priced add-on).
-      const bareKeyPlaceholder = cleanText(row.label).toLowerCase() === cleanText(row.service).toLowerCase()
-        && ![row.amount, row.monthly, row.perApplication].some((value) => Number.isFinite(value) && value > 0);
-      if (!purchased.length && (bareKeyPlaceholder || cleanText(row.service).toLowerCase().startsWith('termite_bond'))) {
-        return [];
+  // The same job is projected into several groups (services, recurring,
+  // one-time rows), so a repeated projection collapses across groups. Two
+  // identical current jobs inside one group (two $900 trenching jobs that
+  // both purchased the warranty) are distinct jobs: each occurrence keeps its
+  // place, so the positional naming below lists both (Codex #4982).
+  const groups = rowGroups.every(Array.isArray) ? rowGroups : [rowGroups];
+  const entries = groups.flatMap((group) => {
+    const occurrences = new Map();
+    return group.flatMap((row) => {
+      if (!row || typeof row !== 'object') return [];
+      // Engine frequency inclusions can carry a bare service-key placeholder
+      // for a separately priced add-on. It is not a distinct job.
+      const unpricedPlaceholder = !row.oneTime && !oneTimeRows.includes(row)
+        && oneTimeIdentities.has(trenchingServiceIdentity(row))
+        && cleanText(row.label).toLowerCase() === cleanText(row.service).toLowerCase()
+        && !row.purchasedTerms?.length
+        && ![row.amount, row.monthly, row.perApplication].some(Number.isFinite);
+      if (unpricedPlaceholder) return [];
+      const lanes = rowGuaranteeLanes(row);
+      const purchased = Array.isArray(row.purchasedTerms) ? row.purchasedTerms : [];
+      let terms;
+      if (lanes.some((lane) => TERMITE_LANES.has(lane))) {
+        // A bond is itself the purchase: a bond row with no purchase says nothing.
+        // Neither does an unpriced row labeled with its bare service key (the
+        // engine's inclusion placeholder for a separately priced add-on).
+        const bareKeyPlaceholder = cleanText(row.label).toLowerCase() === cleanText(row.service).toLowerCase()
+          && ![row.amount, row.monthly, row.perApplication].some((value) => Number.isFinite(value) && value > 0);
+        if (!purchased.length && (bareKeyPlaceholder || cleanText(row.service).toLowerCase().startsWith('termite_bond'))) {
+          return [];
+        }
+        const warranty = Array.isArray(row.warrantyTerms) ? row.warrantyTerms : [];
+        terms = purchased.length ? purchased : (warranty.length ? warranty : ['No guarantee.']);
+      } else {
+        const clause = writtenSatisfactionClause(row.detail);
+        terms = [...purchased, ...ownTerms(row), ...(clause ? [`The written detail says “${clause}”`] : [])];
+        if (!terms.length) return [];
       }
-      const warranty = Array.isArray(row.warrantyTerms) ? row.warrantyTerms : [];
-      terms = purchased.length ? purchased : (warranty.length ? warranty : ['No guarantee.']);
-    } else {
-      const clause = writtenSatisfactionClause(row.detail);
-      terms = [...purchased, ...ownTerms(row), ...(clause ? [`The written detail says “${clause}”`] : [])];
-      if (!terms.length) return [];
-    }
-    const amount = Number(row.amount);
-    const entry = {
-      service: cleanText(row.label) || 'Service',
-      amount: Number.isFinite(amount) && amount > 0 ? amount : null,
-      terms,
-    };
-    const key = [row.service, entry.service, entry.amount, ...terms].map(cleanText).join('|').toLowerCase();
-    if (seen.has(key)) return [];
-    seen.add(key);
-    return [entry];
+      const amount = Number(row.amount);
+      const entry = {
+        service: cleanText(row.label) || 'Service',
+        amount: Number.isFinite(amount) && amount > 0 ? amount : null,
+        terms,
+      };
+      const key = [row.service, entry.service, entry.amount, ...terms].map(cleanText).join('|').toLowerCase();
+      const occurrence = occurrences.get(key) || 0;
+      occurrences.set(key, occurrence + 1);
+      if (seen.has(`${key}#${occurrence}`)) return [];
+      seen.add(`${key}#${occurrence}`);
+      return [entry];
+    });
   });
   // Same-label jobs are named by price, and by position when the price repeats.
   return entries.map((entry) => {
@@ -1734,14 +1745,15 @@ const RECURRENCE_QUESTION_PATTERN = new RegExp(
   'i',
 );
 // A price question asks for an amount of money: "How much does the 5-year
-// bond cost?", "What's the price of the warranty?", "How much is the bond?".
-// "How much" alone is not one ("How much warranty coverage do I get?", "How
-// much is covered?"), and a dollar figure or cost that names a job ("Does
-// the cost of trenching include a warranty?") is still a guarantee question.
+// bond cost?", "What's the price of the warranty?", "How much is the bond?",
+// "How much for the 5-year bond?" (Codex #4982). "How much" alone is not one
+// ("How much warranty coverage do I get?", "How much is covered?", "How much
+// for coverage?"), and a dollar figure or cost that names a job ("Does the
+// cost of trenching include a warranty?") is still a guarantee question.
 const PRICE_QUESTION_PATTERN = new RegExp([
   '\\bhow much\\b[^?.!]*\\b(?:costs?|prices?|charges?|fees?|run)\\b',
   "\\bwhat(?:\\s+(?:does|do|is|would|will)|['’]s)\\b[^?.!]*\\b(?:costs?|prices?)\\b",
-  '\\bhow much (?:is|are|would|will)\\b(?![^?.!]*\\b(?:cover\\w*|guarant\\w*|warrant\\w*)\\b)',
+  '\\bhow much (?:is|are|would|will|for)\\b(?![^?.!]*\\b(?:cover\\w*|guarant\\w*|warrant\\w*)\\b)',
 ].join('|'), 'i');
 // Scheduling wording is a scheduling question: "How often do you retreat the
 // lawn?", "When will you treat the yard again?".

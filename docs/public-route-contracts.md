@@ -1762,9 +1762,9 @@ all raw rows for warranty evidence. Distinct current jobs remain distinct.
 The server, browser, and Ask Waves use the shared purchased-warranty evidence
 rule and the existing authored copy pack. Ask Waves normalizes legacy termite
 bond aliases, names, and `bondYears` through the acceptance converter's
-canonical identity rule; on mixed estimates, named warranty questions return
-only that service's purchased term, while generic questions label each term's
-service scope. A current top-level bond selector governs historical snapshots.
+canonical identity rule; every guarantee question, named or generic, returns
+the one per-service list described above, and the question's wording never
+narrows it to a single service. A current top-level bond selector governs historical snapshots.
 Without that selector, the unversioned saved rows and frozen pricing must
 agree on the purchased bond term; explicit removal, contradictory terms, or
 zero-price decisions suppress coverage regardless of snapshot order. A raw

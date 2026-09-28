@@ -20330,23 +20330,44 @@ function guaranteeReplayForInputsOnly(estData) {
   return replay;
 }
 
+// The rows one root (a persisted result, the raw save or a replay)
+// contributes to the guarantee decisions.
+function guaranteeRowsOfRoot(estData, root) {
+  return {
+    recurring: guaranteeRecurringRows(root),
+    oneTime: normalizeOneTimeBreakdown({ ...estData, result: root }).items,
+  };
+}
+
+// The persisted engine roots that carry service rows, with those rows. A
+// placeholder root ({ engineInputs, result: {} }) is absent: the page prices
+// that save from its inputs (readV1Shape yields nothing, so the bundle
+// replays extractEngineInputs), and the guarantee decisions classify the
+// same replay rather than an empty result that would strip a residential
+// plan's terms (Codex on #4982, 6880c57a95).
+function persistedGuaranteeRoots(estData = {}) {
+  return [estData?.result, estData?.engineResult]
+    .filter((root) => root && typeof root === 'object')
+    .map((root) => ({ root, rows: guaranteeRowsOfRoot(estData, root) }))
+    .filter(({ rows }) => rows.recurring.length > 0 || rows.oneTime.length > 0);
+}
+
 // Every service row the estimate's guarantee decisions read. Mapped pricing
 // can omit a raw one-time line, so both persisted roots are classified, just
 // as recurring rows are, without changing displayed totals. Null when an
 // inputs-only replay fails: callers fail closed.
 function guaranteeServiceRows(estData = {}, pricingBundle = {}) {
-  const roots = [estData?.result, estData?.engineResult]
-    .filter((root) => root && typeof root === 'object');
-  if (!roots.length) {
-    roots.push(estData);
+  let rowSets = persistedGuaranteeRoots(estData).map(({ rows }) => rows);
+  if (!rowSets.length) {
+    rowSets = [guaranteeRowsOfRoot(estData, estData)];
     const replay = guaranteeReplayForInputsOnly(estData);
     if (replay.failed) return null;
-    if (replay.result) roots.push(replay.result);
+    if (replay.result) rowSets.push(guaranteeRowsOfRoot(estData, replay.result));
   }
   return {
-    recurring: roots.flatMap(guaranteeRecurringRows),
+    recurring: rowSets.flatMap((rows) => rows.recurring),
     oneTime: [
-      ...roots.flatMap((result) => normalizeOneTimeBreakdown({ ...estData, result }).items),
+      ...rowSets.flatMap((rows) => rows.oneTime),
       ...(pricingBundle?.oneTimeBreakdown?.items || []),
       ...guaranteeProposalRows(estData),
     ],
@@ -20390,13 +20411,13 @@ function serviceMixCarriesPlanTerms(recurringServices = [], oneTimeItems = []) {
 // work, and the raw marker on any other saved row.
 function estimateHasCommercialRow(estData = {}) {
   if (require('../services/estimate-converter').estimateHasCommercialOneTime(estData || {})) return true;
-  const persisted = [estData?.result, estData?.engineResult].filter((root) => root && typeof root === 'object');
-  const roots = [...persisted, estData].filter((root) => root && typeof root === 'object');
-  // An inputs-only save carries its commercial marks only on the replayed
-  // engine rows (Codex on #4982, 236d3956d6): read the same memoized replay
-  // the guarantee rows classify, so a commercial bed-bug quote saved as
-  // inputs decides like the identical saved engine result.
-  if (!persisted.length) {
+  const roots = [estData?.result, estData?.engineResult, estData].filter((root) => root && typeof root === 'object');
+  // An inputs-only save (no persisted root with rows, persistedGuaranteeRoots)
+  // carries its commercial marks only on the replayed engine rows (Codex on
+  // #4982, 236d3956d6): read the same memoized replay the guarantee rows
+  // classify, so a commercial bed-bug quote saved as inputs decides like the
+  // identical saved engine result.
+  if (!persistedGuaranteeRoots(estData).length) {
     const replay = guaranteeReplayForInputsOnly(estData);
     if (replay.result) roots.push(replay.result);
   }
