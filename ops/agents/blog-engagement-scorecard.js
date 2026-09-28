@@ -33,14 +33,13 @@
 // both organic search and other Google properties count; a lookalike like
 // notgoogle.com does not), Facebook (facebook.com, www.facebook.com,
 // m.facebook.com, l.facebook.com, lm.facebook.com, fb.me), Other (any other
-// external host), or Direct/none (no referrer at all) — with its own
-// page-load count and an onward-click rate, so Google-only engagement is
-// visible next to the all-sources figure. Cloudflare RUM carries no visitor
-// id, so a specific onward click can't be traced back to the referrer that
-// first landed that reader on the post: a source's rate is the onward rate
-// of the posts it actually lands readers on (the SAME per-post rate as the
-// table below), weighted by how much of each post's landing volume came
-// from that source. Investigated and not used: the Facebook in-app browser
+// external host), or Direct/none (no referrer at all) — with its page-load
+// count and share of all blog landings. Cloudflare RUM carries no visitor
+// id, so an onward click can't be traced back to the referrer that landed
+// that reader: the breakdown reports volume only, never a per-source
+// engagement rate (an estimate from per-post rates would present post mix
+// as source behavior).
+// Investigated and not used: the Facebook in-app browser
 // is not its own `userAgentBrowser` value in this account's RUM data — it
 // reports the underlying rendering engine (MobileSafari, ChromeMobileWebview,
 // …), same as any other embedded browser — so it is classified by referrer
@@ -305,24 +304,13 @@ function summarize(groups) {
     .map((p) => ({ ...p, rate: p.views > 0 ? p.onward / p.views : null }))
     .sort((a, b) => b.views - a.views || b.onward - a.onward || a.path.localeCompare(b.path));
 
-  // Per-source onward rate: no visitor id ties a specific onward click back
-  // to the referrer that landed that reader, so a source's rate is the
-  // onward rate of the posts it lands readers on (rateByPath, the same
-  // per-post rate as `rows`), weighted by its share of each post's landing
-  // volume — mathematically the onward clicks each source's landings would
-  // produce if they clicked onward at that post's overall rate.
-  const rateByPath = new Map(rows.map((p) => [p.path, p.rate]));
+  // Volume by source only: no visitor id ties an onward click back to the
+  // referrer that landed that reader, so there is no per-source rate.
+  const landingTotal = Object.values(sourceViews).reduce((n, v) => n + v, 0);
   const sources = Object.keys(sourceViews).map((key) => {
     const views = sourceViews[key];
-    let onwardEstimate = 0;
-    for (const [path, bySource] of postSourceViews) {
-      const n = bySource[key];
-      const rate = rateByPath.get(path);
-      if (n && rate != null) onwardEstimate += n * rate;
-    }
-    return { source: key, label: TRAFFIC_SOURCE_LABELS[key], views, rate: views > 0 ? onwardEstimate / views : null };
+    return { source: key, label: TRAFFIC_SOURCE_LABELS[key], views, share: landingTotal > 0 ? views / landingTotal : null };
   });
-  const googleSource = sources.find((s) => s.source === 'google');
 
   return {
     totals: {
@@ -330,7 +318,6 @@ function summarize(groups) {
       blogViews,
       onwardClicks,
       onwardRate: blogViews > 0 ? onwardClicks / blogViews : null,
-      googleOnwardRate: googleSource ? googleSource.rate : null,
     },
     destinations: [...destinations.entries()]
       .map(([cls, views]) => ({ cls, label: CLASS_LABELS[cls] || cls, views }))
@@ -438,7 +425,7 @@ function formatReadDepth(lines, readDepth, top) {
 
 function formatMarkdown(summary, { start, end, top = 20, readDepth } = {}) {
   const { totals, destinations, posts, sources } = summary;
-  const googleSource = (sources || []).find((s) => s.source === 'google') || { views: 0 };
+  const googleSource = (sources || []).find((s) => s.source === 'google') || { views: 0, share: null };
   const lines = [];
   lines.push(`## Blog engagement scorecard, ${start} to ${end}`);
   lines.push('');
@@ -446,7 +433,7 @@ function formatMarkdown(summary, { start, end, top = 20, readDepth } = {}) {
   lines.push('');
   lines.push(`- Blog post views (fresh navigations): ${totals.blogViews}, of which ${totals.blogEntries} began a visit`);
   lines.push(`- Onward page views referred by a post: ${totals.onwardClicks} (${pct(totals.onwardRate)} per post view)`);
-  lines.push(`- Onward rate, Google referrers only: ${pct(totals.googleOnwardRate)} per post view (${googleSource.views} page loads)`);
+  lines.push(`- Blog landings from Google: ${googleSource.views} (${pct(googleSource.share)} of blog landings)`);
   lines.push('- Baseline 2026-07-17 to 2026-09-23: 1.2% (about 100 onward views per 8,220 post views)');
   lines.push('');
   lines.push('| Where onward clicks went | Views |');
@@ -456,11 +443,11 @@ function formatMarkdown(summary, { start, end, top = 20, readDepth } = {}) {
   lines.push('');
   lines.push('### Traffic source (blog-post landings)');
   lines.push('');
-  lines.push('| Source | Page loads | Onward rate |');
+  lines.push('| Source | Page loads | Share |');
   lines.push('|---|---:|---:|');
-  for (const s of sources || []) lines.push(`| ${s.label} | ${s.views} | ${pct(s.rate)} |`);
+  for (const s of sources || []) lines.push(`| ${s.label} | ${s.views} | ${pct(s.share)} |`);
   lines.push('');
-  lines.push("Onward rate per source is the onward rate of the posts that source lands readers on, weighted by its landing volume on each post — Cloudflare RUM carries no visitor id, so a specific onward click can't be traced back to which referrer first landed that reader.");
+  lines.push("Volume only: Cloudflare RUM carries no visitor id, so onward clicks can't be attributed to the source that landed the reader.");
   lines.push('');
   lines.push(`| Post (top ${top} by views) | Views | Entries | Onward | Rate | To estimate/service |`);
   lines.push('|---|---:|---:|---:|---:|---:|');

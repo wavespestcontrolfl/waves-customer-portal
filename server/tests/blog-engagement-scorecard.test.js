@@ -107,46 +107,31 @@ describe('summarize', () => {
 
   test('counts post views, entries and onward clicks per view, ignoring reloads', () => {
     const s = summarize(groups);
-    expect(s.totals).toEqual({
-      blogEntries: 190, blogViews: 196, onwardClicks: 9, onwardRate: 9 / 196, googleOnwardRate: 8 / 150,
-    });
+    expect(s.totals).toEqual({ blogEntries: 190, blogViews: 196, onwardClicks: 9, onwardRate: 9 / 196 });
   });
 
-  test('breaks landings down by traffic source, with an apportioned onward rate per source', () => {
+  test('breaks landings down by traffic source, volume and share only', () => {
     const s = summarize(groups);
     // huntsman got 100 views from google and 50 with no referrer (direct);
-    // bagworm got 40 from bing (other); wolf-spider had no external landing.
-    // huntsman's own rate is 8/150 and bagworm's is 1/40 (see the per-post
-    // test above) — google and direct only ever land on huntsman, so their
-    // rate equals huntsman's; other only ever lands on bagworm, so its rate
-    // equals bagworm's; facebook never appears, so it has no rate at all.
+    // bagworm got 40 from bing (other); 190 external landings in all.
     expect(s.sources).toEqual([
-      { source: 'google', label: 'Google', views: 100, rate: 8 / 150 },
-      { source: 'facebook', label: 'Facebook', views: 0, rate: null },
-      { source: 'other', label: 'Other', views: 40, rate: 1 / 40 },
-      { source: 'direct', label: 'Direct/none', views: 50, rate: 8 / 150 },
+      { source: 'google', label: 'Google', views: 100, share: 100 / 190 },
+      { source: 'facebook', label: 'Facebook', views: 0, share: 0 },
+      { source: 'other', label: 'Other', views: 40, share: 40 / 190 },
+      { source: 'direct', label: 'Direct/none', views: 50, share: 50 / 190 },
     ]);
   });
 
-  test('a source landing on two posts gets its onward clicks apportioned across both, and a source with views but no onward reads 0, never null', () => {
+  test('never reports a per-source engagement rate', () => {
     const s = summarize([
-      // post a: 10 views from google, 10 with no referrer (direct); 4 onward
-      // clicks from a, so a's own rate is 4/20 = 20%.
       { path: '/pest-control/a/', refererHost: 'www.google.com', refererPath: '/', views: 10 },
-      { path: '/pest-control/a/', refererHost: '', refererPath: '', views: 10 },
       { path: '/contact/', refererHost: 'www.wavespestcontrol.com', refererPath: '/pest-control/a/', views: 4 },
-      // post b: 5 views from google, 5 from facebook; no onward clicks at all.
-      { path: '/pest-control/b/', refererHost: 'news.google.com', refererPath: '/', views: 5 },
       { path: '/pest-control/b/', refererHost: 'm.facebook.com', refererPath: '/', views: 5 },
     ]);
-    // google landed 10 on a (rate 20%) and 5 on b (rate 0%): (10*0.2 + 5*0) / 15
-    expect(s.sources).toContainEqual({ source: 'google', label: 'Google', views: 15, rate: (10 * 0.2 + 5 * 0) / 15 });
-    // direct only ever landed on a, so it inherits a's rate exactly
-    expect(s.sources).toContainEqual({ source: 'direct', label: 'Direct/none', views: 10, rate: 0.2 });
-    // facebook only ever landed on b, whose onward rate is 0 -- a real
-    // measured 0%, not the "no data" null a source with zero views gets
-    expect(s.sources).toContainEqual({ source: 'facebook', label: 'Facebook', views: 5, rate: 0 });
-    expect(s.sources).toContainEqual({ source: 'other', label: 'Other', views: 0, rate: null });
+    for (const src of s.sources) expect(src).not.toHaveProperty('rate');
+    expect(s.totals).not.toHaveProperty('googleOnwardRate');
+    expect(s.sources).toContainEqual({ source: 'google', label: 'Google', views: 10, share: 10 / 15 });
+    expect(s.sources).toContainEqual({ source: 'facebook', label: 'Facebook', views: 5, share: 5 / 15 });
   });
 
   test('breaks down destinations by class', () => {
@@ -174,9 +159,7 @@ describe('summarize', () => {
       { path: '/pest-control/b/', refererHost: 'www.wavespestcontrol.com', refererPath: '/pest-control/a/', views: 1 },
       { path: '/contact/', refererHost: 'www.wavespestcontrol.com', refererPath: '/pest-control/b/', views: 1 },
     ]);
-    expect(s.totals).toEqual({
-      blogEntries: 1, blogViews: 2, onwardClicks: 2, onwardRate: 1, googleOnwardRate: 1,
-    });
+    expect(s.totals).toEqual({ blogEntries: 1, blogViews: 2, onwardClicks: 2, onwardRate: 1 });
     expect(s.posts.map((p) => [p.path, p.views, p.onward, p.rate])).toEqual([
       ['/pest-control/a/', 1, 1, 1],
       ['/pest-control/b/', 1, 1, 1],
@@ -202,9 +185,7 @@ describe('summarize', () => {
       { path: '/pest-control/b/', ...base, navigationType: 'soft-navigation', views: 7 },
       { path: '/pest-control/b/', ...base, navigationType: 'unknown', views: 1 },
     ]);
-    expect(s.totals).toEqual({
-      blogEntries: 10, blogViews: 11, onwardClicks: 3, onwardRate: 3 / 11, googleOnwardRate: 0.3,
-    });
+    expect(s.totals).toEqual({ blogEntries: 10, blogViews: 11, onwardClicks: 3, onwardRate: 3 / 11 });
   });
 
   test('cached, prefetched and prerendered link clicks count as fresh navigations', () => {
@@ -216,9 +197,7 @@ describe('summarize', () => {
       { path: '/pest-control-quote/', ...base, navigationType: 'navigate_prefetch', views: 1 },
       { path: '/contact/', ...base, navigationType: 'Navigate Cache', views: 1 },
     ]);
-    expect(s.totals).toEqual({
-      blogEntries: 5, blogViews: 6, onwardClicks: 3, onwardRate: 3 / 6, googleOnwardRate: 0.6,
-    });
+    expect(s.totals).toEqual({ blogEntries: 5, blogViews: 6, onwardClicks: 3, onwardRate: 3 / 6 });
     expect(countsAsPageView('navigate')).toBe(true);
     expect(countsAsPageView('Navigate Prefetch Cache')).toBe(true);
     expect(countsAsPageView('navigate_cache')).toBe(true);
@@ -231,16 +210,14 @@ describe('summarize', () => {
 
   test('handles empty input', () => {
     expect(summarize([])).toEqual({
-      totals: {
-        blogEntries: 0, blogViews: 0, onwardClicks: 0, onwardRate: null, googleOnwardRate: null,
-      },
+      totals: { blogEntries: 0, blogViews: 0, onwardClicks: 0, onwardRate: null },
       destinations: [],
       posts: [],
       sources: [
-        { source: 'google', label: 'Google', views: 0, rate: null },
-        { source: 'facebook', label: 'Facebook', views: 0, rate: null },
-        { source: 'other', label: 'Other', views: 0, rate: null },
-        { source: 'direct', label: 'Direct/none', views: 0, rate: null },
+        { source: 'google', label: 'Google', views: 0, share: null },
+        { source: 'facebook', label: 'Facebook', views: 0, share: null },
+        { source: 'other', label: 'Other', views: 0, share: null },
+        { source: 'direct', label: 'Direct/none', views: 0, share: null },
       ],
     });
   });
@@ -250,13 +227,15 @@ describe('summarize', () => {
     expect(md).toContain('## Blog engagement scorecard, 2026-09-19 to 2026-09-25');
     expect(md).toContain('Blog post views (fresh navigations): 196, of which 190 began a visit');
     expect(md).toContain('Onward page views referred by a post: 9 (4.6% per post view)');
-    expect(md).toContain('Onward rate, Google referrers only: 5.3% per post view (100 page loads)');
+    expect(md).toContain('Blog landings from Google: 100 (52.6% of blog landings)');
+    expect(md).not.toContain('Onward rate, Google');
     expect(md).toContain('| Another blog post | 6 |');
     expect(md).toContain('### Traffic source (blog-post landings)');
-    expect(md).toContain('| Google | 100 | 5.3% |');
-    expect(md).toContain('| Facebook | 0 | — |');
-    expect(md).toContain('| Other | 40 | 2.5% |');
-    expect(md).toContain('| Direct/none | 50 | 5.3% |');
+    expect(md).toContain('| Source | Page loads | Share |');
+    expect(md).toContain('| Google | 100 | 52.6% |');
+    expect(md).toContain('| Facebook | 0 | 0.0% |');
+    expect(md).toContain('| Other | 40 | 21.1% |');
+    expect(md).toContain('| Direct/none | 50 | 26.3% |');
     expect(md).toContain('| /pest-control/huntsman/ | 150 | 150 | 8 | 5.3% | 2 |');
     expect(md).not.toContain('/pest-control/bagworm/ |');
   });
