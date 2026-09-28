@@ -50,7 +50,7 @@ const {
   isGenericTechnicianLabel,
   initialsForCustomerTechnicianName,
 } = require('../../utils/technician-name');
-const { etCalendarDayOf, etDateString, parseETDateTime } = require('../../utils/datetime-et');
+const { etCalendarDayOf, etDateString, parseETDateTime, addETDays } = require('../../utils/datetime-et');
 const featureGates = require('../../config/feature-gates');
 const { buildReserviceReport, reserviceReportCopyGateOn } = require('./reservice-report');
 const { renderWeekPlanReport, renderWeekPlanAfterTreatment, loadCurrentWeekPlan, planBindsToService, visitInPlanWeek, PinnedWeekPlanUnavailable } = require('../irrigation-week-plan');
@@ -5122,89 +5122,126 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         : (reportStampAddressKey || mirrorAddressKey);
 
       if (reportAddressKey) {
-        const todayIso = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-        const cutoffIso = new Date(Date.now() + 90 * 24 * 3600 * 1000)
-          .toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+        // ET CALENDAR days, not elapsed 24h periods (codex round-1 P1): a
+        // fixed 90 * 24h window built off Date.now() crosses a DST change
+        // at a different wall-clock instant than the ET calendar does, so
+        // it can admit day 91 or drop day 90 depending which side of
+        // midnight ET the run lands on. addETDays/etDateString are the
+        // shared ET-calendar helpers (datetime-et.js) — no ad hoc math.
+        const todayIso = etDateString();
+        const cutoffIso = etDateString(addETDays(new Date(), 90));
         // Disclosable statuses only (same allow-list as nextAppointment
         // above): pending/confirmed/en_route/on_site excludes
-        // cancelled/completed/rescheduled by construction. A 60-row buffer
-        // (same pattern as the 200-row nextAppointment window) covers
-        // property filtering before the ~6 cap below.
-        const candidates = await knex('scheduled_services')
-          .where('customer_id', service.customer_id)
-          .andWhere('scheduled_date', '>=', todayIso)
-          .andWhere('scheduled_date', '<=', cutoffIso)
-          .whereIn('status', ['pending', 'confirmed', 'en_route', 'on_site'])
-          .modify((qb) => {
-            if (service.scheduled_service_id) qb.whereNot('id', service.scheduled_service_id);
-          })
-          .orderBy('scheduled_date', 'asc')
-          .orderBy('window_start', 'asc')
-          .limit(60)
-          .select('id', 'service_type', 'scheduled_date', 'window_start', 'property_id',
-            'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip')
-          .catch(() => null);
+        // cancelled/completed/rescheduled by construction.
+        //
+        // Property scoping runs in JS (address-key comparison, not a SQL
+        // predicate), so the visit cap can only apply AFTER it — a flat
+        // LIMIT 60 ahead of that filter truncates candidates before
+        // scoping ever runs, and a multi-property customer with >60
+        // visits elsewhere can lose this property's own visits entirely
+        // (codex round-1 P2). Paged instead: PAGE_SIZE rows at a time,
+        // oldest-first (matching the eventual 6-visit ordering), until 6
+        // property-scoped matches are found, the rows run out, or the
+        // hard MAX_PAGES bound is hit — bounded so a customer with an
+        // enormous schedule can never turn this into an unbounded scan.
+        const PAGE_SIZE = 60;
+        const MAX_PAGES = 5;
+        const matched = [];
+        const propertyKeyById = new Map();
+        let mirrorKey = null;
+        let mirrorKeyResolved = false;
 
-        if (Array.isArray(candidates) && candidates.length) {
-          // Resolve every CANDIDATE property_id in one batched read (the
-          // report's own property, if linked, was already resolved above
-          // — fail-closed, never re-attempted here). Each candidate's OWN
-          // premises prefers its own stamp, then its property_id link,
-          // then — unstamped legacy rows — the same customer-mirror
-          // fallback every reader COALESCEs to.
-          const propertyIds = [...new Set(candidates.map((row) => row.property_id).filter(Boolean))];
-          let propertyKeyById = new Map();
-          if (propertyIds.length) {
+        for (let page = 0; page < MAX_PAGES && matched.length < 6; page += 1) {
+          const candidates = await knex('scheduled_services')
+            .where('customer_id', service.customer_id)
+            .andWhere('scheduled_date', '>=', todayIso)
+            .andWhere('scheduled_date', '<=', cutoffIso)
+            .whereIn('status', ['pending', 'confirmed', 'en_route', 'on_site'])
+            .modify((qb) => {
+              if (service.scheduled_service_id) qb.whereNot('id', service.scheduled_service_id);
+            })
+            .orderBy('scheduled_date', 'asc')
+            .orderBy('window_start', 'asc')
+            .limit(PAGE_SIZE)
+            .offset(page * PAGE_SIZE)
+            .select('id', 'service_type', 'scheduled_date', 'window_start', 'property_id',
+              'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip')
+            .catch(() => null);
+
+          if (!Array.isArray(candidates) || !candidates.length) break;
+
+          // Resolve every CANDIDATE property_id in one batched read per
+          // page (the report's own property, if linked, was already
+          // resolved above — fail-closed, never re-attempted here); ids
+          // already resolved by an earlier page are skipped. Each
+          // candidate's OWN premises prefers its own stamp, then its
+          // property_id link, then — unstamped legacy rows — the same
+          // customer-mirror fallback every reader COALESCEs to.
+          const newPropertyIds = [...new Set(candidates.map((row) => row.property_id).filter(Boolean))]
+            .filter((id) => !propertyKeyById.has(id));
+          if (newPropertyIds.length) {
             const propertyRows = await knex('customer_properties')
-              .whereIn('id', propertyIds)
+              .whereIn('id', newPropertyIds)
               .select('id', 'address_line1', 'address_line2', 'city', 'zip')
               .catch(() => []);
-            propertyKeyById = new Map(
-              (Array.isArray(propertyRows) ? propertyRows : []).map((row) => [row.id, addressKey(row) || null]),
-            );
+            for (const row of (Array.isArray(propertyRows) ? propertyRows : [])) {
+              propertyKeyById.set(row.id, addressKey(row) || null);
+            }
           }
 
-          let mirrorKey = null;
-          if (candidates.some((row) => !row.service_address_line1 && !row.property_id)) {
+          if (!mirrorKeyResolved && candidates.some((row) => !row.service_address_line1 && !row.property_id)) {
             const customerRow = await knex('customers')
               .where({ id: service.customer_id })
               .first('address_line1', 'address_line2', 'city', 'zip')
               .catch(() => null);
             mirrorKey = customerRow ? (addressKey(customerRow) || null) : null;
+            mirrorKeyResolved = true;
           }
+
           const matchesReportProperty = (row) => {
-            if (reportPropertyId && row.property_id) return row.property_id === reportPropertyId;
-            let rowKey = null;
+            // Stamp FIRST, even when property_id also matches the report
+            // (codex round-1 P1): the stamp is immutable and intentionally
+            // survives a later property edit or merge, while property_id
+            // does not — a candidate whose property_id equals the
+            // report's but whose stamp names a different premises was
+            // dispatched to that other premises, and must be excluded, not
+            // waved through on the id alone. property_id is trusted as
+            // identity ONLY on a row with no stamp at all.
             if (row.service_address_line1) {
               // address_line2 rides this key too — same unit-privacy rule
               // as reportStampAddressKey/mirrorAddressKey above: a keyless
               // unit comparison would let one condo unit's report see
               // another unit's visits.
-              rowKey = addressKey({
+              const rowKey = addressKey({
                 address_line1: row.service_address_line1,
                 address_line2: row.service_address_line2,
                 city: row.service_address_city,
                 zip: row.service_address_zip,
               }) || null;
-            } else if (row.property_id) {
-              rowKey = propertyKeyById.get(row.property_id) || null;
-            } else {
-              rowKey = mirrorKey;
+              return !!rowKey && !!reportAddressKey && rowKey === reportAddressKey;
             }
+            if (reportPropertyId && row.property_id) return row.property_id === reportPropertyId;
+            const rowKey = row.property_id ? (propertyKeyById.get(row.property_id) || null) : mirrorKey;
             return !!rowKey && !!reportAddressKey && rowKey === reportAddressKey;
           };
 
-          const visits = candidates
-            .filter(matchesReportProperty)
-            .slice(0, 6)
-            .map((row) => ({
-              serviceType: row.service_type || null,
-              scheduledDate: row.scheduled_date instanceof Date
-                ? row.scheduled_date.toISOString().slice(0, 10)
-                : String(row.scheduled_date).slice(0, 10),
-              windowStart: row.window_start || null,
-            }));
-          if (visits.length) upcomingVisitsCard = { visits };
+          for (const row of candidates) {
+            if (matched.length >= 6) break;
+            if (matchesReportProperty(row)) matched.push(row);
+          }
+
+          if (candidates.length < PAGE_SIZE) break;
+        }
+
+        if (matched.length) {
+          const visits = matched.map((row) => ({
+            serviceType: row.service_type || null,
+            scheduledDate: row.scheduled_date instanceof Date
+              ? row.scheduled_date.toISOString().slice(0, 10)
+              : String(row.scheduled_date).slice(0, 10),
+            windowStart: row.window_start || null,
+          }));
+          upcomingVisitsCard = { visits };
         }
       }
     } catch { /* best-effort */ }

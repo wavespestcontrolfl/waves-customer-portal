@@ -1123,6 +1123,24 @@ describe('buildReportCrossSell', () => {
     expect(optionIsPriceable({ perVisit: 42, oneTime: 150 })).toBe(false);
   });
 
+  test('rodent bait setup fee (codex round-1 P1): unwaived — and priceability must demote — only when the customer has no OTHER WaveGuard-qualifying recurring service', () => {
+    // The estimator's rodent_bait_setup line is separate from the priced
+    // rodent_bait option (findLineItem only matches the target service's
+    // own line), so optionIsPriceable's oneTime/dueAtStart check never sees
+    // it — this is the independent check that must catch it instead.
+    const { rodentSetupFeeUnwaived } = _private;
+    // No other qualifying family modeled at all → fee applies (unwaived).
+    expect(rodentSetupFeeUnwaived('rodent_bait', [])).toBe(true);
+    // rodent_bait never waives its own setup fee.
+    expect(rodentSetupFeeUnwaived('rodent_bait', ['rodent_bait'])).toBe(true);
+    // ANY other qualifying recurring family (on the modeled baseline)
+    // waives it.
+    expect(rodentSetupFeeUnwaived('rodent_bait', ['pest_control'])).toBe(false);
+    expect(rodentSetupFeeUnwaived('rodent_bait', ['rodent_bait', 'pest_control'])).toBe(false);
+    // Never demotes a non-rodent target — this check is rodent_bait-only.
+    expect(rodentSetupFeeUnwaived('pest_control', [])).toBe(false);
+  });
+
   test('a HISTORICAL report identity does not advance the ladder without billing corroboration', async () => {
     // Former pest customer, plan cancelled: no upcoming rows, no ledger
     // row, and the permanent-token report is months old — pest must be

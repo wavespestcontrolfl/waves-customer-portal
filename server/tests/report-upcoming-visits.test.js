@@ -26,6 +26,21 @@ function makeKnex(fixtures) {
   const knex = (table) => {
     let rows = [...(fixtures[table] || [])];
     const sortKeys = [];
+    // limit/offset are applied lazily at materialization (real SQL/knex
+    // semantics — LIMIT/OFFSET apply together regardless which is called
+    // first in the chain), not as an immediate `rows` mutation like the
+    // filters above: the upcoming-visits pagination fix calls
+    // .limit(PAGE_SIZE).offset(page * PAGE_SIZE), and slicing `rows`
+    // eagerly in call order would apply the offset WITHIN an
+    // already-limited slice instead of against the full sorted set.
+    let limitN = null;
+    let offsetN = 0;
+    const materialize = () => {
+      let out = rows;
+      if (offsetN) out = out.slice(offsetN);
+      if (limitN != null) out = out.slice(0, limitN);
+      return out;
+    };
     const query = {
       where(criteria, value) {
         if (criteria && typeof criteria === 'object') {
@@ -60,7 +75,8 @@ function makeKnex(fixtures) {
         return query;
       },
       modify(fn) { fn(query); return query; },
-      limit: () => query,
+      limit(n) { limitN = n; return query; },
+      offset(n) { offsetN = n; return query; },
       orderBy(column) {
         sortKeys.push(column);
         rows = [...rows].sort((a, b) => {
@@ -73,10 +89,10 @@ function makeKnex(fixtures) {
         return query;
       },
       leftJoin: () => query,
-      select: () => Promise.resolve(rows),
-      first: () => Promise.resolve(rows[0] || null),
-      catch: () => Promise.resolve(rows),
-      then: (resolve) => Promise.resolve(rows).then(resolve),
+      select: () => Promise.resolve(materialize()),
+      first: () => Promise.resolve(materialize()[0] || null),
+      catch: () => Promise.resolve(materialize()),
+      then: (resolve) => Promise.resolve(materialize()).then(resolve),
     };
     return query;
   };
@@ -227,6 +243,105 @@ describe('multi-property scoping', () => {
       LIVE,
     );
     expect(data.upcomingVisitsCard.visits.map((v) => v.serviceType)).toEqual(['Lawn Care Treatment']);
+  });
+
+  // P1 fix (codex round-1): a candidate's immutable service_address_*
+  // stamp must win over a matching property_id — stamps intentionally
+  // survive a later property edit/merge, so a row whose property_id now
+  // points at the report's property but whose stamp names a DIFFERENT
+  // premises (the one actually serviced) must be excluded, not waved
+  // through on the id alone.
+  test('candidate shares the report\'s property_id but its stamp names a different premises → excluded (stamp wins over property_id)', async () => {
+    process.env.GATE_REPORT_UPCOMING_VISITS = 'true';
+    const knex = makeKnex({
+      ...BASE_FIXTURES,
+      customer_properties: [PROP_A, PROP_B],
+      scheduled_services: [
+        { id: 'scheduled-current', customer_id: 'customer-1', scheduled_date: '2026-05-16', status: 'completed', service_type: 'Quarterly Pest Control Service', property_id: 'prop-a' },
+        // SAME property_id as the report (prop-a), but its own immutable
+        // stamp names prop-b's address — the premises actually serviced
+        // does not match the report's, so this must be excluded even
+        // though property_id equality alone would say "match".
+        {
+          id: 'scheduled-stamp-mismatch',
+          customer_id: 'customer-1',
+          scheduled_date: todayPlus(5),
+          status: 'confirmed',
+          service_type: 'Should never appear (stamp names a different premises)',
+          window_start: '09:00:00',
+          property_id: 'prop-a',
+          service_address_line1: PROP_B.address_line1,
+          service_address_city: PROP_B.city,
+          service_address_zip: PROP_B.zip,
+        },
+        // SAME property_id AND a stamp that matches the report's own
+        // resolved address — included.
+        {
+          id: 'scheduled-stamp-match',
+          customer_id: 'customer-1',
+          scheduled_date: todayPlus(6),
+          status: 'confirmed',
+          service_type: 'Lawn Care Treatment',
+          window_start: '08:00:00',
+          property_id: 'prop-a',
+          service_address_line1: PROP_A.address_line1,
+          service_address_city: PROP_A.city,
+          service_address_zip: PROP_A.zip,
+        },
+      ],
+    });
+    const data = await buildReportV1Data(
+      { ...BASE_SERVICE, service_date: '2026-05-16' },
+      'token-stamp-wins',
+      knex,
+      LIVE,
+    );
+    expect(data.upcomingVisitsCard.visits.map((v) => v.serviceType)).toEqual(['Lawn Care Treatment']);
+  });
+
+  // P2 fix (codex round-1): the visit cap must apply AFTER property
+  // scoping, not before it. Property scoping runs in JS, so a flat
+  // LIMIT ahead of it can truncate the candidate set before this
+  // property's own visits are ever reached. Built with >PAGE_SIZE (60)
+  // other-property rows dated earlier, forcing this property's matches
+  // into a later page — a bug that applies the cap before scoping finds
+  // zero visits here; the fix's pagination still finds them.
+  test('a multi-property customer with >60 OTHER-property visits still surfaces this property\'s own visits (cap applies after scoping, not before)', async () => {
+    process.env.GATE_REPORT_UPCOMING_VISITS = 'true';
+    const otherPropertyRows = Array.from({ length: 65 }, (_, i) => ({
+      id: `scheduled-other-${i}`,
+      customer_id: 'customer-1',
+      scheduled_date: todayPlus(2 + i),
+      status: 'confirmed',
+      service_type: `Other property visit ${i}`,
+      window_start: '09:00:00',
+      property_id: 'prop-b',
+    }));
+    const thisPropertyRows = [
+      { id: 'scheduled-this-1', customer_id: 'customer-1', scheduled_date: todayPlus(70), status: 'confirmed', service_type: 'Lawn Care Treatment', window_start: '08:00:00', property_id: 'prop-a' },
+      { id: 'scheduled-this-2', customer_id: 'customer-1', scheduled_date: todayPlus(71), status: 'confirmed', service_type: 'Termite Bait Station Service', window_start: '08:00:00', property_id: 'prop-a' },
+      { id: 'scheduled-this-3', customer_id: 'customer-1', scheduled_date: todayPlus(72), status: 'confirmed', service_type: 'Quarterly Pest Control Service', window_start: '08:00:00', property_id: 'prop-a' },
+    ];
+    const knex = makeKnex({
+      ...BASE_FIXTURES,
+      customer_properties: [PROP_A, PROP_B],
+      scheduled_services: [
+        { id: 'scheduled-current', customer_id: 'customer-1', scheduled_date: '2026-05-16', status: 'completed', service_type: 'Quarterly Pest Control Service', property_id: 'prop-a' },
+        ...otherPropertyRows,
+        ...thisPropertyRows,
+      ],
+    });
+    const data = await buildReportV1Data(
+      { ...BASE_SERVICE, service_date: '2026-05-16' },
+      'token-page-cap',
+      knex,
+      LIVE,
+    );
+    expect(data.upcomingVisitsCard.visits.map((v) => v.serviceType)).toEqual([
+      'Lawn Care Treatment',
+      'Termite Bait Station Service',
+      'Quarterly Pest Control Service',
+    ]);
   });
 
   test('linked report for a SECONDARY property (no stamp on the report row): an unstamped candidate falls back to the primary mirror, not the secondary property, and is excluded', async () => {

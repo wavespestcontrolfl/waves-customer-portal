@@ -277,6 +277,32 @@ describe('buildCockroachFindingsOffer', () => {
     const offer = await buildCockroachFindingsOffer({ id: 'sr-1', customer_id: 'cust-1' }, db);
     expect(offer).not.toBeNull();
   });
+
+  // P1 fix (codex round-1): scheduled_services.service_id is nullable — a
+  // row identified only by its durable service_key_snapshot (dispatch
+  // stamps this even when service_id never got backfilled) must still
+  // suppress the re-pitch. The old check compared service_id === catalogRow.id
+  // only, so this exact row slipped through and Cockroach Control got
+  // re-offered to a customer already awaiting the included follow-up.
+  test('already scheduled row identified only by its service_key_snapshot (service_id null) still suppresses the offer', async () => {
+    const db = fakeDb({
+      services: [ACTIVE_COCKROACH_ROW],
+      scheduled_services: [{ id: 'sched-2', customer_id: 'cust-1', service_id: null, service_key_snapshot: 'cockroach_control', status: 'pending' }],
+    });
+    const offer = await buildCockroachFindingsOffer({ id: 'sr-1', customer_id: 'cust-1' }, db);
+    expect(offer).toBeNull();
+  });
+
+  // Guards the fix against over-suppression: an open row identified via
+  // snapshot as a DIFFERENT service must not block the cockroach offer.
+  test('an open row identified via service_key_snapshot for a DIFFERENT service does not suppress the offer', async () => {
+    const db = fakeDb({
+      services: [ACTIVE_COCKROACH_ROW, { id: 'svc-other', service_key: 'pest_control', is_active: true }],
+      scheduled_services: [{ id: 'sched-3', customer_id: 'cust-1', service_id: null, service_key_snapshot: 'pest_control', status: 'confirmed' }],
+    });
+    const offer = await buildCockroachFindingsOffer({ id: 'sr-1', customer_id: 'cust-1' }, db);
+    expect(offer).not.toBeNull();
+  });
 });
 
 // ============================================================

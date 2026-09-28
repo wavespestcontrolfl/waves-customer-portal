@@ -339,6 +339,31 @@ function optionIsPriceable(option) {
   return Number(option.perVisit) > 0;
 }
 
+// Bait-station setup fee (service-pricing.js priceBaitSetup, owner ruling
+// 2026-08-29): $99 one-time, unwaived unless the customer already has
+// ANOTHER WaveGuard-qualifying recurring service (on the estimate or
+// already active). The estimator prices it as an INTRINSIC, SEPARATE
+// oneTimeItems line keyed rodent_bait_setup — not folded into the
+// rodent_bait line's own price — so quoteAmountFromLine/findLineItem (which
+// match only the target service's own line) never surface it on `option`,
+// and optionIsPriceable's dueAtStart/oneTime check above never sees it
+// either. A card this module marks 'priced' for a not-yet-a-WaveGuard-
+// member customer then carries an undisclosed one-time charge the click
+// mint's belt check (GitHub #3391) rejects with a 409 (codex round-1 P1).
+// Mirrors the estimator's OWN otherQualifiers/isWaveGuardMember predicate
+// (estimate-engine.js) via the SAME determineWaveGuardTier the estimator
+// calls — no parallel qualifying-count logic — over `currentServiceKeys`,
+// the identical modeled baseline qualifyingBaselineMismatch already reads,
+// so this can never disagree with the ownership frame the rest of the card
+// prices against.
+function rodentSetupFeeUnwaived(targetKey, currentServiceKeys) {
+  if (targetKey !== 'rodent_bait') return false;
+  const { determineWaveGuardTier } = require('../pricing-engine/discount-engine');
+  const otherQualifiers = (Array.isArray(currentServiceKeys) ? currentServiceKeys : [])
+    .filter((key) => key !== 'rodent_bait');
+  return determineWaveGuardTier(otherQualifiers).qualifyingCount === 0;
+}
+
 function parseJsonColumn(value) {
   if (!value) return null;
   if (typeof value === 'object') return value;
@@ -663,18 +688,34 @@ async function buildCockroachFindingsOffer(service, database) {
       || catalogRow.booking_enabled !== true) {
       return null;
     }
-    // Already has it: an open (not yet completed/cancelled) visit linked to
-    // this catalog row — a mid-program customer (initial treatment already
-    // done, follow-up scheduled ~14 days out per the catalog description)
-    // must never be re-pitched the program they are already in. Filtered
-    // client-side (status membership, not a bare .whereIn) so this reads
-    // like every other best-effort DB read in this module.
-    const linkedRows = await database('scheduled_services')
-      .where({ customer_id: service.customer_id, service_id: catalogRow.id })
-      .select('id', 'status');
+    // Already has it: an open (not yet completed/cancelled) visit identified
+    // as this catalog row — a mid-program customer (initial treatment
+    // already done, follow-up scheduled ~14 days out per the catalog
+    // description) must never be re-pitched the program they are already
+    // in. `scheduled_services.service_id` is nullable, so a row identified
+    // only by its `service_key_snapshot` or a legacy service_type label
+    // would slip an equality-on-service_id filter entirely (codex round-1
+    // P1) — every open row on the account is resolved through the SAME
+    // strict identity resolver service-completion-profiles.js uses for
+    // completion (service_id, else the durable snapshot, else legacy-label
+    // matching), rather than a parallel exact-ID check. Filtered client-side
+    // (status membership, not a bare .whereIn) so this reads like every
+    // other best-effort DB read in this module.
+    const { resolveCompletionProfileForScheduledService } = require('../service-completion-profiles');
     const openStatuses = new Set(['pending', 'confirmed', 'en_route', 'on_site']);
-    const alreadyScheduled = (Array.isArray(linkedRows) ? linkedRows : [])
-      .some((row) => openStatuses.has(row.status));
+    const candidateRows = await database('scheduled_services')
+      .where({ customer_id: service.customer_id })
+      .select('id', 'status', 'service_id', 'service_type', 'service_key_snapshot', 'is_recurring');
+    const openRows = (Array.isArray(candidateRows) ? candidateRows : [])
+      .filter((row) => openStatuses.has(row.status));
+    let alreadyScheduled = false;
+    for (const row of openRows) {
+      const identity = await resolveCompletionProfileForScheduledService(row, database);
+      if (identity?.serviceKey === COCKROACH_SERVICE_KEY) {
+        alreadyScheduled = true;
+        break;
+      }
+    }
     if (alreadyScheduled) return null;
 
     const payload = {
@@ -1202,7 +1243,8 @@ async function buildReportCrossSell(service, database, {
     // would need provenance the stored blob does not carry.
     const seedRequiresVerification = !!propertySeed?.requiresFieldVerification;
     const priced = optionIsPriceable(option) && !baselineIncomplete && !baselineUnexpected
-      && !ambiguousTreeEvidence && !correctionsUnapplied && !seedRequiresVerification;
+      && !ambiguousTreeEvidence && !correctionsUnapplied && !seedRequiresVerification
+      && !rodentSetupFeeUnwaived(targetKey, result.currentServiceKeys);
 
     const payload = {
       serviceKey: targetKey,
@@ -1537,7 +1579,8 @@ function composePricedOfferBasis({ result, propertySeed, correctionsUnapplied, t
   const ambiguousTreeEvidence = targetKey === 'tree_shrub' && !!propertySeed?.zeroTreeCountAmbiguous;
   const seedRequiresVerification = !!propertySeed?.requiresFieldVerification;
   const priced = optionIsPriceable(option) && !baselineIncomplete && !baselineUnexpected
-    && !ambiguousTreeEvidence && !correctionsUnapplied && !seedRequiresVerification;
+    && !ambiguousTreeEvidence && !correctionsUnapplied && !seedRequiresVerification
+    && !rodentSetupFeeUnwaived(targetKey, result.currentServiceKeys);
 
   const payload = {
     serviceKey: targetKey,
@@ -1667,6 +1710,7 @@ module.exports = {
   // Test hooks: target matrix + priceability are the card's two decisions.
   _private: {
     pickOfferTarget, startFamilyForIdentity, pickOption, optionIsPriceable, offerFingerprint, OFFER_LADDER,
+    rodentSetupFeeUnwaived,
     // Test hook: what the seed actually carries out of an accepted estimate
     // is the money-bearing contract here — every modifier it drops prices
     // as if the property did not have it.
