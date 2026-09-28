@@ -4197,6 +4197,38 @@ class GscOpportunityMiner {
     };
   }
 
+  // Cross-run half of the aeo_question_gap page arbitration, inside the
+  // persist transaction (same doctrine as the family sweep):
+  //   - a PENDING question refresh whose page another bucket wins this
+  //     batch is expired — otherwise it stays claimable beside the new
+  //     edit (it re-mines once that edit is done and the cooldown passes);
+  //   - pages with a question write CLAIMED or in review are returned, and
+  //     other buckets' edits of those pages wait a mine.
+  // Runs only while the bucket's gate is on.
+  async _reconcileAeoQuestionPages(runner, arbitrated) {
+    if (!isEnabled('aeoQuestionGapMining')) return new Set();
+    const rows = await runner('opportunity_queue')
+      .where({ bucket: AEO_QUESTION_GAP_BUCKET })
+      .whereIn('status', ['pending', 'claimed', 'pending_review'])
+      .whereNotNull('page_url')
+      .select('id', 'page_url', 'status');
+    const busy = new Set();
+    const losers = [];
+    for (const r of rows) {
+      const id = routeIdentity(r.page_url);
+      if (r.status !== 'pending') busy.add(id);
+      else if (arbitrated.nonAeoQuestionPages?.has(id)) losers.push(r.id);
+    }
+    if (losers.length) {
+      await runner('opportunity_queue')
+        .whereIn('id', losers)
+        .where('status', 'pending')
+        .update({ status: 'expired', skip_reason: 'aeo_question_yielded_page_edit', updated_at: new Date() });
+      logger.info(`[gsc-opp-miner] aeo_question_gap: ${losers.length} pending refresh(es) expired — another bucket edits the page`);
+    }
+    return busy;
+  }
+
   // An aeo_question_gap refresh yields to a floor-clearing, non-frozen edit
   // of the same page from another bucket in this batch (it retries next
   // mine; the page fence then sees that edit in flight).
@@ -4793,8 +4825,12 @@ class GscOpportunityMiner {
     // and familyOppYields (family refreshes yield by PAGE, family blogs
     // by QUERY intent).
     const arbitrated = await this._arbitratedRefreshPages(opportunities);
+    const aeoBusyPages = await this._reconcileAeoQuestionPages(runner, arbitrated);
     const admitted = opportunities.filter((o) => !GscOpportunityMiner.familyOppYields(o, arbitrated)
-      && !GscOpportunityMiner.aeoQuestionOppYields(o, arbitrated));
+      && !GscOpportunityMiner.aeoQuestionOppYields(o, arbitrated)
+      && !(o.bucket !== AEO_QUESTION_GAP_BUCKET && o.page_url
+        && GscOpportunityMiner.PAGE_EDITING_ACTIONS.includes(o.action_type)
+        && aeoBusyPages.has(routeIdentity(o.page_url))));
 
     // Group by dedupe_key, keep highest-score entry per key.
     const winners = new Map();

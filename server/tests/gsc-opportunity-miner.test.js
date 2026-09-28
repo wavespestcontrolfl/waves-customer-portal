@@ -3201,6 +3201,46 @@ describe('aeo_question_gap bucket', () => {
     expect(aeoQuestionGapDedupeKey({ ...q('Q26'), target_path: '/termite/other/' })).not.toBe(aeoQuestionGapDedupeKey(q('Q26')));
   });
 
+  test('two mines: a later edit from another bucket retires the pending question refresh, and waits for a claimed one', async () => {
+    const OLD_GATE = process.env.GATE_AEO_QUESTION_GAP_MINING;
+    process.env.GATE_AEO_QUESTION_GAP_MINING = 'true';
+    const db = require('../models/db');
+    db.mockImplementation(() => ({ whereIn() { return this; }, select: async () => [] }));
+    const page = `${HUB}/termite/termite-bond/`;
+    // Queue state after mine 1: the question refresh for this page.
+    const queue = [{ id: 1, bucket: 'aeo_question_gap', page_url: page, status: 'pending' }];
+    const updates = [];
+    const upserts = [];
+    const trx = (table) => {
+      expect(table).toBe('opportunity_queue');
+      const q = { filters: {} };
+      q.where = (arg) => { if (typeof arg === 'object') Object.assign(q.filters, arg); else q.filters.status = 'pending'; return q; };
+      q.whereIn = (col, vals) => { q.filters[col] = vals; return q; };
+      q.whereNotNull = () => q;
+      q.select = async () => queue.filter((r) => r.bucket === q.filters.bucket && q.filters.status.includes(r.status));
+      q.update = async (patch) => { updates.push({ ids: q.filters.id, patch }); for (const r of queue) if (q.filters.id.includes(r.id)) Object.assign(r, patch); return q.filters.id.length; };
+      return q;
+    };
+    trx.raw = async (_sql, bindings) => { upserts.push(bindings[12]); return { rowCount: 1 }; };
+    const decay = { bucket: 'decay_refresh', action_type: 'refresh_existing_page', query: null, page_url: page, service: 'termite', city: null, score: 90, score_breakdown: {}, signal_metadata: {}, dedupe_key: 'decay_refresh::termite::_::bond' };
+    try {
+      const miner = new GscOpportunityMiner();
+      // Mine 2: decay_refresh wins the page → the pending question row expires.
+      expect(await miner.persistAll([decay], trx)).toBe(1);
+      expect(queue[0]).toMatchObject({ status: 'expired', skip_reason: 'aeo_question_yielded_page_edit' });
+      expect(upserts).toEqual([decay.dedupe_key]);
+      // A CLAIMED question write instead makes the incoming edit wait.
+      queue[0].status = 'claimed';
+      upserts.length = 0;
+      expect(await miner.persistAll([decay], trx)).toBe(0);
+      expect(upserts).toEqual([]);
+      expect(queue[0].status).toBe('claimed');
+    } finally {
+      if (OLD_GATE === undefined) delete process.env.GATE_AEO_QUESTION_GAP_MINING; else process.env.GATE_AEO_QUESTION_GAP_MINING = OLD_GATE;
+      db.mockReset();
+    }
+  });
+
   describe('mineAeoQuestionGaps', () => {
     const OLD = { ...process.env };
     afterEach(() => { process.env = { ...OLD }; jest.restoreAllMocks(); });
