@@ -4955,12 +4955,12 @@ export function ServiceSection({
   // gate on) when the plan is recurring, else null.
   lawnCalendar = null,
 }) {
-  // The section's own terms (server termsScope) within the estimate's scope:
-  // a pest section beside a rodent one keeps its plan terms.
-  const sectionGuaranteeScope = serviceGuaranteeScope(
-    resolvedGuaranteeScope(guaranteeScopeProp, noGuarantee),
-    section?.termsScope,
-  );
+  // The estimate's scope governs lines that cover the whole estimate, such
+  // as the approve CTA below (its approval covers every service, one-time
+  // work included). The section's own rows state its own terms (server
+  // termsScope) within it: a pest section beside rodent work keeps them.
+  const estimateGuaranteeScope = resolvedGuaranteeScope(guaranteeScopeProp, noGuarantee);
+  const sectionGuaranteeScope = serviceGuaranteeScope(estimateGuaranteeScope, section?.termsScope);
   // On phones the corner-pinned WaveGuard badge's 170px heading clearance
   // eats most of the card width and crunches the headline — stack the badge
   // in flow instead. Hook must precede the early return (rules of hooks).
@@ -5404,7 +5404,7 @@ export function ServiceSection({
               Array.isArray(section.memberKeys) && section.memberKeys.length
                 ? section.memberKeys
                 : [section.key || section.label],
-              { scope: sectionGuaranteeScope },
+              { scope: estimateGuaranteeScope },
             )}
           />
         ) : null}

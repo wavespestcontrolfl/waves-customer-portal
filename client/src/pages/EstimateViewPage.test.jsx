@@ -98,32 +98,42 @@ describe('ServiceSection', () => {
     expect(screen.getByText(/licensed & insured · no pressure/i)).toBeInTheDocument();
   });
 
-  it('a section states its own terms: a pest section keeps its plan terms on a satisfaction estimate', () => {
-    const section = {
-      key: 'pest_control',
-      label: 'Pest Control',
-      isRecurring: true,
-      isPest: true,
-      frequencies: [baseFrequency],
-      copy: { priceWording: {} },
-    };
-    const props = {
-      selectedFrequencyKey: 'standard',
-      selectedAddOns: new Set(),
-      onFrequencyChange: vi.fn(),
-      onAddOnToggle: vi.fn(),
-      renderFlags: { showPestRecurringAddOns: false, showWaveGuardTierUi: false },
-      showGetServiceCta: true,
-      guaranteeScope: 'satisfaction',
-    };
-    const { rerender } = render(<ServiceSection {...props} section={{ ...section, termsScope: 'all' }} />);
-    expect(screen.getByText(/money-back guarantee/i)).toBeInTheDocument();
+  it('a section states its own terms, while its approve line covers the whole estimate', () => {
+    // Owner ruling 2026-09-27: the pest service keeps its own plan terms
+    // beside rodent work; the approve line covers every service, so it
+    // follows the estimate's scope.
+    setGlassDefault(true);
+    try {
+      const section = {
+        key: 'pest_control',
+        label: 'Pest Control',
+        isRecurring: true,
+        isPest: true,
+        termsScope: 'all',
+        frequencies: [{
+          ...baseFrequency,
+          perServiceTreatments: [{ service: 'pest_control', label: 'Pest Control', displayPrice: 100, visitsPerYear: 4, termsScope: 'all' }],
+        }],
+        copy: { priceWording: {} },
+      };
+      const props = {
+        selectedFrequencyKey: 'standard',
+        selectedAddOns: new Set(),
+        onFrequencyChange: vi.fn(),
+        onAddOnToggle: vi.fn(),
+        renderFlags: { showPestRecurringAddOns: false, showWaveGuardTierUi: false },
+        showGetServiceCta: true,
+      };
+      const { rerender } = render(<ServiceSection {...props} section={section} guaranteeScope="satisfaction" />);
+      fireEvent(window, new Event('beforeprint'));
+      expect(screen.getByText(/unlimited free callbacks/i)).toBeInTheDocument();
+      expect(screen.getByText(/^Licensed & insured · Satisfaction guaranteed · No pressure/)).toBeInTheDocument();
 
-    rerender(<ServiceSection {...props} section={section} />);
-    expect(screen.queryByText(/money-back guarantee/i)).not.toBeInTheDocument();
-
-    rerender(<ServiceSection {...props} guaranteeScope="none" section={{ ...section, termsScope: 'all' }} />);
-    expect(screen.queryByText(/money-back guarantee/i)).not.toBeInTheDocument();
+      rerender(<ServiceSection {...props} section={section} guaranteeScope="none" />);
+      expect(screen.queryByText(/callbacks|money-back|satisfaction guaranteed/i)).not.toBeInTheDocument();
+    } finally {
+      setGlassDefault(false);
+    }
   });
 
   it('hides the frequency slider when a section has one frequency', () => {
