@@ -1025,7 +1025,14 @@ async function linkSentRecently(conn, leadId, now) {
   if (!longFormCandidates.length) return false;
   const { consultationLinkRows } = require('./composer-customer-links');
   for (const { message_body } of longFormCandidates) {
-    const rows = await consultationLinkRows(message_body);
+    // codex #5018 pre-push P1 (this round): pass THIS caller's own `conn`
+    // through, never letting consultationLinkRows fall back to a second
+    // implicit pool checkout — neverSendRecheck can call this whole
+    // function while its own phone-locked handoff already occupies one of
+    // a constrained pool's connections, and a second checkout here could
+    // time out under that constraint instead of landing on the connection
+    // already held.
+    const rows = await consultationLinkRows(message_body, conn);
     if (rows.some((row) => !row.invalid && String(row.lead_id) === String(leadId))) return true;
   }
   return false;
