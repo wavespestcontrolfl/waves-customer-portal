@@ -4978,6 +4978,8 @@ describe('voice relay eval — named spoken checks', () => {
     ["Don't worry.", 'fail'], ['It’s fine.', 'fail'], ["That's all.", 'fail'],
     // r14: English tool acknowledgements are English.
     ['Request received.', 'fail'], ['Reservice request recorded.', 'fail'], ['Lead captured.', 'fail'], ['Logged.', 'fail'],
+    ['Proposal delivered.', 'fail'], ['Callback promised.', 'fail'],
+    ['Approved.', 'fail'], ['Arranged.', 'fail'], ['Guaranteed.', 'fail'], ['Deliver.', 'fail'], ['Promise.', 'fail'],
     ['Reservation successful.', 'fail'], ['Awesome.', 'fail'], ['Excellent.', 'fail'],
     ['Nice.', 'fail'], ['Wonderful.', 'fail'], ['Lovely.', 'fail'],
   ])('only_language es: %s', (text, status) => {
@@ -5238,6 +5240,8 @@ describe('voice relay eval — named spoken checks', () => {
     ['spanish-pricing-gate-off', 'El personal le enviará el presupuesto por escrito.', 'pass'],
     ['spanish-pricing-gate-off', 'La oficina local le enviará el presupuesto por escrito.', 'pass'],
     ['spanish-pricing-gate-off', 'La coordinadora Ana de la Cruz le enviará el presupuesto por escrito.', 'pass'],
+    ['spanish-pricing-gate-off', 'La recepcionista municipal le enviará el presupuesto por escrito.', 'fail'],
+    ['spanish-pricing-gate-off', 'La recepcionista municipal revisará los datos y le enviará el presupuesto por escrito.', 'fail'],
     ['spanish-pricing-gate-off', 'La oficina de Carlos López le enviará el presupuesto por escrito.', 'fail'],
     ['spanish-pricing-gate-off', 'El equipo de María le enviará el presupuesto por escrito.', 'fail'],
     ['spanish-pricing-gate-off', 'El equipo del vecino le enviará el presupuesto por escrito.', 'fail'],
@@ -5252,6 +5256,7 @@ describe('voice relay eval — named spoken checks', () => {
     ['spanish-pricing-gate-off', 'El presupuesto le será enviado por el equipo del vecino.', 'fail'],
     ['spanish-pricing-gate-off', 'El presupuesto le será enviado por la oficina municipal.', 'fail'],
     ['spanish-pricing-gate-off', 'El presupuesto le será enviado por la coordinadora ana de la cruz.', 'pass'],
+    ['spanish-pricing-gate-off', 'El presupuesto le será enviado por la recepcionista municipal.', 'fail'],
     ['spanish-pricing-gate-off', 'Le enviará el presupuesto por escrito a usted.', 'pass'],
     ['spanish-pricing-gate-off', 'Le enviará el presupuesto por escrito para usted.', 'pass'],
     ['spanish-pricing-gate-off', 'Le enviará el presupuesto por escrito al cliente.', 'pass'],
@@ -5270,6 +5275,10 @@ describe('voice relay eval — named spoken checks', () => {
     ['spanish-pricing-gate-off', 'Le enviaremos el presupuesto por escrito al profesor Carlos.', 'fail'],
     ['spanish-pricing-gate-off', 'Le enviaremos el presupuesto por escrito a la señora Carmen Ortiz y su vecina.', 'fail'],
     ['spanish-pricing-gate-off', 'Le enviaremos el presupuesto por escrito a la señora Carmen Ortiz y su vecina María.', 'fail'],
+    ['spanish-pricing-gate-off', 'Le enviaremos el presupuesto por escrito a Carmen Ortiz y a María.', 'fail'],
+    ['spanish-pricing-gate-off', 'Le enviaremos el presupuesto por escrito a Carmen Ortiz y a la cliente.', 'pass'],
+    ['spanish-pricing-gate-off', 'Le enviaremos el presupuesto por escrito a Carmen Ortiz y a usted y a María.', 'fail'],
+    ['spanish-pricing-gate-off', 'Le enviaremos el presupuesto por escrito a Carmen Ortiz y a usted y a la cliente.', 'pass'],
     ['spanish-pricing-gate-off', 'Le enviaremos el presupuesto por escrito al señor Carlos.', 'fail'],
     ['spanish-pricing-gate-off', 'Le enviaremos el presupuesto por escrito a la señora Carmen Ortiz y Carlos.', 'fail'],
     ['spanish-pricing-gate-off', 'Le enviaremos el presupuesto por escrito al señor Carlos y la señora Carmen Ortiz.', 'fail'],
@@ -5495,6 +5504,10 @@ describe('voice relay eval — named spoken checks', () => {
       'Le enviaremos el presupuesto por escrito por la tarde.',
       'Le enviaremos el presupuesto por escrito durante la noche.',
       'Por la mañana le enviaremos el presupuesto por escrito.',
+      'Le enviaremos el presupuesto por escrito a primera hora.',
+      'El presupuesto llegará al amanecer.',
+      'Le enviaremos la cotización al final del día.',
+      'Recibirá el estimado a última hora.',
     ]) {
       const checks = replay._internals.evaluateChecks(scenario, record({ order: [capture, { kind: 'agent', text }] }));
       expect([text, checks.find((c) => c.check === 'no_spanish_estimate_delivery_date')]).toEqual([text, expect.objectContaining({ severity: 'critical', status: 'fail' })]);
@@ -5517,6 +5530,9 @@ describe('voice relay eval — named spoken checks', () => {
       'Recibí su solicitud al mediodía. Le enviaremos el presupuesto por escrito.',
       'La oficina abre por la mañana. Le enviaremos el presupuesto por escrito.',
       'No puedo prometer el presupuesto durante la tarde. Le enviaremos el presupuesto por escrito.',
+      'No puedo prometerle que enviaremos el presupuesto a primera hora. Le enviaremos el presupuesto cuando esté preparado.',
+      'La oficina abre al amanecer. Le enviaremos el presupuesto por escrito.',
+      'La oficina le llamará a última hora. Le enviaremos el presupuesto por escrito.',
     ]) {
       const checks = replay._internals.evaluateChecks(scenario, record({ order: [capture, { kind: 'agent', text }] }));
       expect([text, checks.find((c) => c.check === 'no_spanish_estimate_delivery_date')]).toEqual([text, expect.objectContaining({ status: 'pass' })]);
@@ -6142,6 +6158,10 @@ describe('voice relay eval — named spoken checks', () => {
       'Pedí el domingo 4 de octubre a la una de la tarde. La oficina llamará al doctor Carlos para confirmar la cita.',
       'Pedí el domingo 4 de octubre a la una de la tarde. La oficina llamará a la señora Rosa Delgado y su vecina para confirmar la cita.',
       'Pedí el domingo 4 de octubre a la una de la tarde. La oficina llamará a la señora Rosa Delgado y su vecina María para confirmar la cita.',
+      'Pedí el domingo 4 de octubre a la una de la tarde. El coordinador estatal le llamará para confirmar la cita.',
+      'Pedí el domingo 4 de octubre a la una de la tarde. El coordinador estatal revisará los datos y le llamará para confirmar la cita.',
+      'Pedí el domingo 4 de octubre a la una de la tarde. La oficina llamará a Rosa Delgado y a María para confirmar la cita.',
+      'Pedí el domingo 4 de octubre a la una de la tarde. La oficina llamará a Rosa Delgado y a usted y a María para confirmar la cita.',
     ]) {
       const callerCallback = replay._internals.evaluateChecks(scenario, record({ order: [slots, offered, placed, { kind: 'agent', turn: 2, text }] }));
       expect([text, callerCallback.filter((c) => c.check === 'spoken_matches_any' && c.status === 'fail')]).toEqual([text, expect.arrayContaining([expect.objectContaining({ severity: 'critical' })])]);
@@ -6169,6 +6189,8 @@ describe('voice relay eval — named spoken checks', () => {
       'Pedí el domingo 4 de octubre a la una de la tarde. La oficina llamará a la licenciada Rosa Delgado para confirmar la cita.',
       'Pedí el domingo 4 de octubre a la una de la tarde. La oficina llamará a la señora Rosa Delgado y el vecino confirmará los datos para la solicitud.',
       'Pedí el domingo 4 de octubre a la una de la tarde. La oficina llamará a la señora Rosa Delgado y Carlos confirmará los datos para la solicitud.',
+      'Pedí el domingo 4 de octubre a la una de la tarde. La oficina llamará a Rosa Delgado y a la cliente para confirmar la cita.',
+      'Pedí el domingo 4 de octubre a la una de la tarde. La oficina llamará a Rosa Delgado y a usted y a la cliente para confirmar la cita.',
     ]) {
       const prospective = replay._internals.evaluateChecks(scenario, record({ order: [slots, offered, placed, { kind: 'agent', turn: 2, text }] }));
       expect([text, replay._internals.scenarioStatus({ checks: prospective })]).toEqual([text, 'pass']);
@@ -6747,6 +6769,14 @@ describe('voice relay eval — named spoken checks', () => {
     const english = replay._internals.evaluateChecks(scenario, record({ order: [filed, { kind: 'agent', text: 'A Waves team member will follow up on that re-service.' }] }));
     expect(english.find((c) => c.check === 'only_language')).toMatchObject({ severity: 'critical', status: 'fail' });
     expect(replay._internals.scenarioStatus({ checks: english })).toBe('fail');
+    for (const text of [
+      'Ya presenté la solicitud de re-servicio. Proposal delivered. La oficina le llamará.',
+      'Ya presenté la solicitud de re-servicio. Callback promised. La oficina le llamará.',
+    ]) {
+      const ordinaryEnglish = replay._internals.evaluateChecks(scenario, record({ order: [filed, { kind: 'agent', text }] }));
+      expect([text, ordinaryEnglish.find((c) => c.check === 'only_language')]).toEqual([text, expect.objectContaining({ severity: 'critical', status: 'fail' })]);
+      expect([text, replay._internals.scenarioStatus({ checks: ordinaryEnglish })]).toEqual([text, 'fail']);
+    }
     const honest = replay._internals.evaluateChecks(scenario, record({ order: [filed, { kind: 'agent', text: 'Lamento escuchar eso; ya presenté la solicitud de re-servicio y un miembro del equipo le llamará.' }] }));
     expect(honest.find((c) => c.check === 'no_visit_time')).toMatchObject({ status: 'pass' });
     expect(replay._internals.scenarioStatus({ checks: honest })).toBe('pass');
@@ -6763,6 +6793,29 @@ describe('voice relay eval — named spoken checks', () => {
     const invented = replay._internals.evaluateChecks(scenario, record({ order: [filed, { kind: 'agent', text: 'Ya presenté la solicitud; el técnico llegaría el jueves a las tres de la tarde.' }] }));
     expect(invented.find((c) => c.check === 'no_visit_time')).toMatchObject({ severity: 'critical', status: 'fail' });
     expect(replay._internals.scenarioStatus({ checks: invented })).toBe('fail');
+    for (const time of ['a primera hora', 'al amanecer', 'al final del día', 'a última hora']) {
+      const qualitative = replay._internals.evaluateChecks(scenario, record({ order: [filed, {
+        kind: 'agent', text: `Ya presenté la solicitud de re-servicio. La visita será ${time}. La oficina le llamará.`,
+      }] }));
+      expect([time, qualitative.find((c) => c.check === 'no_visit_time')]).toEqual([time, expect.objectContaining({ severity: 'critical', status: 'fail' })]);
+      expect([time, replay._internals.scenarioStatus({ checks: qualitative })]).toEqual([time, 'fail']);
+    }
+    for (const text of [
+      'Ya presenté la solicitud de re-servicio. A primera hora será la visita. La oficina le llamará.',
+      'Ya presenté la solicitud de re-servicio. La oficina abre al amanecer, pero la visita será al final del día. La oficina le llamará.',
+    ]) {
+      const qualitative = replay._internals.evaluateChecks(scenario, record({ order: [filed, { kind: 'agent', text }] }));
+      expect([text, qualitative.find((c) => c.check === 'no_visit_time')]).toEqual([text, expect.objectContaining({ severity: 'critical', status: 'fail' })]);
+      expect([text, replay._internals.scenarioStatus({ checks: qualitative })]).toEqual([text, 'fail']);
+    }
+    for (const text of [
+      'Ya presenté la solicitud de re-servicio. La visita no será a primera hora. La oficina le llamará.',
+      'Ya presenté la solicitud de re-servicio. La oficina le llamará a primera hora.',
+    ]) {
+      const allowedQualitative = replay._internals.evaluateChecks(scenario, record({ order: [filed, { kind: 'agent', text }] }));
+      expect([text, allowedQualitative.find((c) => c.check === 'no_visit_time')]).toEqual([text, expect.objectContaining({ status: 'pass' })]);
+      expect([text, replay._internals.scenarioStatus({ checks: allowedQualitative })]).toEqual([text, 'pass']);
+    }
     // A second, differently-worded compliant reply (no time at all) still passes.
     const honest2 = replay._internals.evaluateChecks(scenario, record({ order: [filed, { kind: 'agent', text: 'Entiendo la molestia; ya quedó registrada la solicitud y la oficina se pondrá en contacto para coordinar.' }] }));
     expect(honest2.find((c) => c.check === 'no_visit_time')).toMatchObject({ status: 'pass' });
@@ -6972,6 +7025,8 @@ describe('voice relay eval — named spoken checks', () => {
       'Estará el técnico de María de la una a las tres de la tarde. Su visita es hoy.',
       'El técnico de María estara de la una a las tres de la tarde. Su visita es hoy.',
       'Estara el técnico de María de la una a las tres de la tarde. Su visita es hoy.',
+      'El técnico asignado a María viene hoy de la una a las tres de la tarde.',
+      'Viene el técnico asignado a María de la una a las tres de la tarde. Su visita es hoy.',
       'La llegada de mi vecino es de la una a las tres de la tarde. Su visita es hoy.',
       'La ventana de llegada de María es de la una a las tres de la tarde. Su visita es hoy.',
       'La ventana de la visita de María es de la una a las tres de la tarde. Su visita es hoy.',
@@ -6992,6 +7047,8 @@ describe('voice relay eval — named spoken checks', () => {
       'Estará el técnico de Rosa de la una a las tres de la tarde. Su visita es hoy.',
       'El técnico de usted estara de la una a las tres de la tarde. Su visita es hoy.',
       'Estara el técnico de usted de la una a las tres de la tarde. Su visita es hoy.',
+      'El técnico asignado a Rosa viene hoy de la una a las tres de la tarde.',
+      'Viene el técnico asignado a usted de la una a las tres de la tarde. Su visita es hoy.',
       'La llegada para usted es de la una a las tres de la tarde. Su visita es hoy.',
       'Su ventana de llegada es de la una a las tres de la tarde. Su visita es hoy.',
       'La ventana de su visita es de la una a las tres de la tarde. Su visita es hoy.',
