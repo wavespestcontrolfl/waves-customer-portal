@@ -16,8 +16,9 @@
     "safety_line": "Bites itch and burn but are not known to spread disease locally. See a doctor if a bite site becomes increasingly red, swollen, or painful days later.",
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "3eddf77b8a5afce81129d21d93b9599a5ab3e00b4a77ccf2b910a9b1046da68f"
     },
     "slug": "no-see-um",
     "common_name": "No-See-Um",
@@ -214,8 +215,9 @@
       "https://ask.ifas.ufl.edu/publication/IN155"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Active/peak months corrected against UF/IFAS EDIS IN595 (Featured Creatures: Yellow Fly, Diachlorus ferrugatus): 'occur in Florida from March to November, although the peak season is April through June' -- matches active/peak months exactly. IN595 states plainly that regional biting-pressure comparisons within Florida have not been studied, so no Gulf/Panhandle-vs-SWFL pressure comparison is claimed anywhere in this entry; copy and range rely only on the confirmed statewide season and IN595's 'especially common near large bodies of water' note."
+      "status": "owner_approved",
+      "notes": "Active/peak months corrected against UF/IFAS EDIS IN595 (Featured Creatures: Yellow Fly, Diachlorus ferrugatus): 'occur in Florida from March to November, although the peak season is April through June' -- matches active/peak months exactly. IN595 states plainly that regional biting-pressure comparisons within Florida have not been studied, so no Gulf/Panhandle-vs-SWFL pressure comparison is claimed anywhere in this entry; copy and range rely only on the confirmed statewide season and IN595's 'especially common near large bodies of water' note. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "5cdc837f44f1c991790aefa1d84bca7e4b57113ef635467f9b6d236ac2713185"
     }
   },
   {
@@ -316,8 +318,9 @@
       "https://ask.ifas.ufl.edu/publication/IN155"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "c125f2f7e9b52b11d5efb7a69709d4f3f1bb23d8109c02115ceb0bcbcb940b8a"
     }
   },
   {
@@ -420,8 +423,9 @@
       "https://ask.ifas.ufl.edu/publication/IN155"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "4f2b3f883bfd158c03a106c5ea18973ff603f8575efe3192834ada9e6c1954d5"
     }
   },
   {
@@ -533,8 +537,9 @@
       "https://edis.ifas.ufl.edu/publication/in1114"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "252c40e7612e25ac249ae54040c5ccadd92912eeb406bf82e393a37cab2b5ba5"
     }
   }
 ]
