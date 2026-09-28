@@ -11,6 +11,8 @@
 const db = require('../../models/db');
 const { etMonthStart, etMonthEnd } = require('../../utils/datetime-et');
 const { parsePestsNamed } = require('./visit-products');
+const { applyCustomerVisibleServiceRecordFilter } = require('../pest-pressure/history-filter');
+const { NON_PERFORMED_VISIT_OUTCOMES } = require('../pest-pressure/first-visit');
 
 const MIN_CITY_CUSTOMERS = 5;
 
@@ -26,21 +28,31 @@ async function computeAreaIntel({ month = new Date(), conn = db } = {}) {
   // city on an unstamped/unlinked row — the same COALESCE legacy fallback
   // every other reader of this stamp uses. Never the account's CURRENT city:
   // a rental or second property must not have its visits credited to the
-  // customer's primary address. Only performed visits count (status =
-  // 'completed'; 'incomplete' is an office-handoff closeout for a visit
-  // that did NOT happen). Every completed visit counts toward the
-  // denominator whether or not it has technician_notes — a completed visit
-  // with blank notes still happened and must not silently shrink `visits`
-  // (and so understate the true visit volume behind the percentage in
-  // getAreaIntelSentence); parsePestsNamed itself returns
-  // [] for blank notes, so no separate notes filter is needed for the
+  // customer's primary address. Only PERFORMED, customer-visible visits
+  // count — status = 'completed' is not enough on its own (a completed row
+  // can still carry structured_notes.visitOutcome 'customer_declined' or
+  // 'inspection_only'); this reuses the exact predicate
+  // getActivityRatingAverages below does, straight from Pest Pressure's own
+  // first-visit history (server/services/pest-pressure/first-visit.js +
+  // history-filter.js), never re-derived. Every performed, visible visit
+  // counts toward the denominator whether or not it has technician_notes —
+  // a visit with blank notes still happened and must not silently shrink
+  // `visits` (and so understate the true visit volume behind the
+  // percentage in getAreaIntelSentence); parsePestsNamed itself returns []
+  // for blank notes, so no separate notes filter is needed for the
   // pest-mention numerator either.
-  const rows = await conn('service_records as sr')
+  const query = conn('service_records as sr')
     .join('customers as c', 'c.id', 'sr.customer_id')
     .leftJoin('scheduled_services as ss', 'ss.id', 'sr.scheduled_service_id')
     .where('sr.status', 'completed')
     .where('sr.service_date', '>=', monthStart)
-    .where('sr.service_date', '<=', monthEnd)
+    .where('sr.service_date', '<=', monthEnd);
+  applyCustomerVisibleServiceRecordFilter(query, { alias: 'sr' });
+  query.whereRaw(
+    `COALESCE(sr.structured_notes->>'visitOutcome', '') NOT IN (${NON_PERFORMED_VISIT_OUTCOMES.map(() => '?').join(', ')})`,
+    NON_PERFORMED_VISIT_OUTCOMES,
+  );
+  const rows = await query
     .select('sr.customer_id', 'sr.technician_notes', conn.raw('COALESCE(ss.service_address_city, c.city) as city'));
 
   const byCity = new Map();

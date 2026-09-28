@@ -247,17 +247,31 @@ suite('email division against real Postgres', () => {
     await expect(getAreaIntelSentence({ city: 'Bradenton', month: sentenceMonth, conn: trx })).resolves.toBeNull();
   });
 
-  test('computeAreaIntel: excludes non-performed (incomplete) service records from both counts', async () => {
+  test('computeAreaIntel: excludes non-performed and report-suppressed service records from both counts', async () => {
     const month = new Date('2026-09-15T12:00:00Z');
     await makeCityVisits('Oneco', 5, { service_date: '2026-09-05', technician_notes: 'WHAT WE DID: treated for fleas.', status: 'completed' });
     // An office-handoff closeout for a visit that did NOT happen — must not
     // inflate the denominator or seed a pest count of its own.
     await makeCityVisits('Oneco', 3, { service_date: '2026-09-06', technician_notes: 'WHAT WE DID: treated for ticks.', status: 'incomplete' });
+    // status='completed' alone is not enough — a completed row can still
+    // carry a non-performed visitOutcome (tech showed up, nothing treated).
+    await makeCityVisits('Oneco', 3, {
+      service_date: '2026-09-07', technician_notes: 'WHAT WE DID: treated for wasps.',
+      structured_notes: { visitOutcome: 'customer_declined' },
+    });
+    // Report-suppressed (not shown to the customer) — excluded the same way
+    // Pest Pressure's own first-visit history excludes it.
+    await makeCityVisits('Oneco', 3, {
+      service_date: '2026-09-08', technician_notes: 'WHAT WE DID: treated for spiders.',
+      structured_notes: { typedReportDelivery: 'manual_review' },
+    });
     await computeAreaIntel({ month, conn: trx });
     const rows = await trx('email_area_intel_monthly').where({ city: 'oneco' });
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ visits: 5, pest_key: 'fleas', visits_with_pest: 5 });
     expect(rows.find((r) => r.pest_key === 'ticks')).toBeUndefined();
+    expect(rows.find((r) => r.pest_key === 'wasps')).toBeUndefined();
+    expect(rows.find((r) => r.pest_key === 'spiders')).toBeUndefined();
   });
 
   test('computeAreaIntel: one customer with 5+ completed visits never alone clears the privacy floor', async () => {
