@@ -169,3 +169,58 @@ test('wrapper invoice completion forwards the original App witness on finalize-o
     sms: true, deduped: true, eventVisibleAt: meta.app_event_already_visible_at,
   }));
 });
+
+test('finalize-only replay forwards durable Email and Text originals without inventing a new delivery', async () => {
+  const Invoice = require('../services/invoice');
+  const meta = { invoice_id: 'inv-1', mark_invoice_delivery: true,
+    invoice_delivery_legs_recorded: true, invoice_prior_delivery_deduped: true,
+    invoice_prior_delivery_at: '2026-09-08T16:00:00Z',
+    invoice_delivery_email: true, invoice_prior_email: true, invoice_prior_email_at: '2026-09-08T14:00:00Z',
+    invoice_delivery_sms: true, invoice_prior_sms: true, invoice_prior_sms_at: '2026-09-08T16:00:00Z' };
+  expect(await finalizeDeferredCompletionSend(meta, { retry: true })).toEqual({ ok: true });
+  expect(Invoice.markDeliverySent).toHaveBeenCalledWith('inv-1', expect.objectContaining({
+    email: true, sms: true, deduped: true,
+    eventVisibleAt: meta.invoice_prior_delivery_at,
+    emailEventVisibleAt: meta.invoice_prior_email_at,
+    smsEventVisibleAt: meta.invoice_prior_sms_at,
+  }));
+});
+
+test('Email-only old replay does not claim a Text send or substitute a retry timestamp', async () => {
+  const Invoice = require('../services/invoice');
+  await finalizeDeferredCompletionSend({ invoice_id: 'inv-1', mark_invoice_delivery: true,
+    invoice_delivery_legs_recorded: true, invoice_prior_delivery_deduped: true,
+    invoice_prior_delivery_at: null, invoice_delivery_email: true, invoice_prior_email: true,
+    invoice_prior_email_at: null, invoice_delivery_sms: false, invoice_prior_sms: false }, { retry: true });
+  expect(Invoice.markDeliverySent).toHaveBeenCalledWith('inv-1', expect.objectContaining({
+    email: true, sms: false, deduped: true, eventVisibleAt: null,
+  }));
+});
+
+test('legacy mixed replay keeps old App time but treats its new Email sibling as fresh', async () => {
+  const Invoice = require('../services/invoice');
+  await finalizeDeferredCompletionSend({ invoice_id: 'inv-1', mark_invoice_delivery: true,
+    invoice_delivery_legs_recorded: true, invoice_prior_delivery_deduped: false,
+    invoice_prior_delivery_at: null, invoice_delivery_email: true, invoice_prior_email: false,
+    invoice_prior_email_at: null, invoice_delivery_sms: true, invoice_prior_sms: true,
+    invoice_prior_sms_at: '2026-09-08T14:00:00Z' }, { retry: true });
+  expect(Invoice.markDeliverySent).toHaveBeenCalledWith('inv-1', expect.objectContaining({
+    email: true, sms: true, deduped: false, eventVisibleAt: null,
+    smsEventVisibleAt: '2026-09-08T14:00:00Z',
+  }));
+  expect(Invoice.markDeliverySent.mock.calls[0][1]).not.toHaveProperty('emailEventVisibleAt');
+});
+
+test('legacy mixed replay keeps old Email time but treats its new Text sibling as fresh', async () => {
+  const Invoice = require('../services/invoice');
+  await finalizeDeferredCompletionSend({ invoice_id: 'inv-1', mark_invoice_delivery: true,
+    invoice_delivery_legs_recorded: true, invoice_prior_delivery_deduped: false,
+    invoice_prior_delivery_at: null, invoice_delivery_email: true, invoice_prior_email: true,
+    invoice_prior_email_at: '2026-09-08T14:00:00Z', invoice_delivery_sms: true, invoice_prior_sms: false,
+    invoice_prior_sms_at: null }, { retry: true });
+  expect(Invoice.markDeliverySent).toHaveBeenCalledWith('inv-1', expect.objectContaining({
+    email: true, sms: true, deduped: false, eventVisibleAt: null,
+    emailEventVisibleAt: '2026-09-08T14:00:00Z',
+  }));
+  expect(Invoice.markDeliverySent.mock.calls[0][1]).not.toHaveProperty('smsEventVisibleAt');
+});

@@ -195,6 +195,66 @@ test('a wrapper invoice replay persists the old App event time with its durable 
   expect(updates[0].patch.metadata.bindings).toContain(visibleAt);
 });
 
+test('wrapper invoice replay saves original Email and Text times for restart and finalize-only recovery', async () => {
+  const emailAt = new Date('2026-09-08T14:00:00Z');
+  const textAt = new Date('2026-09-08T16:00:00Z');
+  row.message_body = 'Invoice: https://portal.test/pay';
+  row.metadata = { entry_point: 'invoice_send_deferred', invoice_id: 'inv-1', mark_invoice_delivery: true };
+  const result = { sent: true, deduped: true, deliveryOutcome: 'accepted',
+    channelResults: {
+      email: { sent: true, deduped: true, deliveryOutcome: 'accepted', sentAt: emailAt },
+      sms: { sent: true, deduped: true, deliveryOutcome: 'accepted', sentAt: textAt },
+    } };
+  await dispatchScheduledSms(row, row.metadata, async () => result);
+  expect(row.created_at).toEqual(textAt);
+  const stamp = updates[0].patch.metadata;
+  expect(stamp.sql).toContain("'invoice_delivery_legs_recorded', true");
+  expect(stamp.bindings).toEqual([null, true, textAt, true, true, emailAt, true, true, textAt]);
+});
+
+test('fresh Email beside an old Text does not persist an all-old invoice witness', async () => {
+  row.message_body = 'Invoice: https://portal.test/pay';
+  row.metadata = { entry_point: 'invoice_send_deferred', invoice_id: 'inv-1', mark_invoice_delivery: true };
+  await dispatchScheduledSms(row, row.metadata, async () => ({ sent: true, deliveryOutcome: 'accepted',
+    channelResults: {
+      email: { sent: true, deliveryOutcome: 'accepted' },
+      sms: { sent: true, deduped: true, deliveryOutcome: 'accepted', sentAt: new Date('2026-09-08T14:00:00Z') },
+    } }));
+  expect(updates[0].patch.metadata.sql).toContain("'invoice_prior_delivery_deduped', ?::boolean");
+  expect(updates[0].patch.metadata.bindings[1]).toBe(false);
+  expect(row.created_at).toEqual(new Date());
+});
+
+test('legacy wrapper saves old App rail time beside a fresh Email without marking the aggregate old', async () => {
+  const appAt = new Date('2026-09-08T14:00:00Z');
+  row.message_body = 'Invoice: https://portal.test/pay';
+  // Historical wrapper rows have no hasEmailLeg flag, so Email can be a
+  // newly delivered sibling of an App bell that was already visible.
+  row.metadata = { entry_point: 'invoice_send_deferred', invoice_id: 'inv-1', mark_invoice_delivery: true };
+  await dispatchScheduledSms(row, row.metadata, async () => ({ sent: true, deliveryOutcome: 'accepted',
+    channelResults: {
+      email: { sent: true, deliveryOutcome: 'accepted' },
+      push: { sent: false, deliveryOutcome: 'not_sent', reason: 'app_event_already_visible', eventVisibleAt: appAt },
+    } }));
+  const stamp = updates[0].patch.metadata;
+  expect(row.created_at).toEqual(new Date());
+  expect(stamp.sql).toContain("'invoice_delivery_legs_recorded', true");
+  expect(stamp.bindings).toEqual([null, false, null, true, false, null, true, true, appAt]);
+});
+
+test('legacy wrapper also saves old Email time beside a fresh Text leg', async () => {
+  const emailAt = new Date('2026-09-08T14:00:00Z');
+  row.message_body = 'Invoice: https://portal.test/pay';
+  row.metadata = { entry_point: 'invoice_send_deferred', invoice_id: 'inv-1', mark_invoice_delivery: true };
+  await dispatchScheduledSms(row, row.metadata, async () => ({ sent: true, deliveryOutcome: 'accepted',
+    channelResults: {
+      email: { sent: true, deduped: true, deliveryOutcome: 'accepted', sentAt: emailAt },
+      sms: { sent: true, deliveryOutcome: 'accepted' },
+    } }));
+  expect(row.created_at).toEqual(new Date());
+  expect(updates[0].patch.metadata.bindings).toEqual([null, false, null, true, true, emailAt, true, false, null]);
+});
+
 test.each(['recent', 'history', 'busy'])('completion durably arms its stripped review fallback through finalization: %s', async kind => {
   const completion = 'Your service is complete: https://portal.test/report/abc\nReceipt: https://portal.test/receipt/xyz';
   row.message_body = completion + '\n\nEnjoyed the service? A quick review means the world: https://portal.test/rate/review1';
@@ -460,7 +520,7 @@ test('retiring an earlier billing event keeps the original queue time and mints 
   expect(result.deduped).toBe(true);
   const final = updates.find(({ patch }) => patch.status === 'sent').patch;
   expect(new Date(final.created_at)).toEqual(visibleAt);
-  expect(final.metadata.bindings).toEqual([null, visibleAt]);
+  expect(final.metadata.bindings).toEqual([null, visibleAt, true, visibleAt, false, false, null, true, true, visibleAt]);
   expect(final.metadata.sql).toContain("'app_event_already_visible_at', ?::timestamptz");
   expect(row.status).toBe('sent');
 });

@@ -6191,14 +6191,8 @@ const InvoiceService = {
     // at schedule time — the success path below clears
     // scheduled_request_review unconditionally, so without this fallback an
     // early manual send silently drops it. An explicit true/false still wins.
-    let effectiveRequestReview = requestReview;
-    let effectiveReviewDelayMinutes = reviewDelayMinutes;
-    if (effectiveRequestReview == null) {
-      effectiveRequestReview = Boolean(claim.invoice.scheduled_request_review);
-      if (effectiveRequestReview && effectiveReviewDelayMinutes == null) {
-        effectiveReviewDelayMinutes = claim.invoice.scheduled_review_delay_minutes;
-      }
-    }
+    const { requestReview: effectiveRequestReview, reviewDelayMinutes: effectiveReviewDelayMinutes } =
+      require('./invoice-delivery-review').reviewDecisionForInvoice(claim.invoice, requestReview, reviewDelayMinutes);
 
     // Third-party Bill-To: a payer-billed invoice must NOT text the homeowner
     // a pay link — AR and the pay link route to the payer (email) instead.
@@ -6710,8 +6704,6 @@ const InvoiceService = {
       const { closeOutVisitForIssuedInvoice } = require("./invoice-issued-closeout");
       issuedCloseout = await closeOutVisitForIssuedInvoice({ invoiceId, trigger: "sent", actorTechnicianId });
     }
-    const { issuedCloseoutOwnsRecord } = require("./invoice-issued-closeout");
-
     // The review decision waits for the closeout (GitHub r4 P1 #4127): a
     // linked pre-completion invoice has no service_record_id until the
     // closeout writes it, so deciding first would classify it standalone
@@ -6721,48 +6713,9 @@ const InvoiceService = {
     // the paid webhook enrolls nothing later either); otherwise the fresh
     // read below sees whatever linkage now stands.
     if (effectiveRequestReview && ownedDeliveryFinalized) {
-      try {
-        const ReviewService = require("./review-request");
-        if (issuedCloseout?.closed) {
-          logger.info(`[invoice] Review ask suppressed for invoice ${invoiceId}: the invoice-issued closeout completed visit ${issuedCloseout.visitId} quietly`);
-        } else {
-          const inv = await db("invoices")
-            .where({ id: invoiceId })
-            .select("customer_id", "service_record_id", "status")
-            .first();
-          // Unpaid COMPLETION invoices defer the review ask to payment — the
-          // Stripe paid-invoice webhook enrolls then, reading the completion's
-          // requestReview intent from the service record. Enrolling here would
-          // text a review ask alongside an open pay link (Codex P1, PR #3104
-          // r1). Standalone invoices (no service_record_id) keep the legacy
-          // at-delivery ask: their operator opt-in has no other trigger (a
-          // cash/manual payment never reaches the webhook).
-          const deferToPayment = inv
-            && inv.service_record_id
-            && !["paid", "prepaid"].includes(String(inv.status || ""));
-          if (deferToPayment) {
-            logger.info(`[invoice] Review ask deferred to payment for invoice ${invoiceId} (unpaid completion invoice)`);
-          } else if (inv && await issuedCloseoutOwnsRecord(inv.service_record_id)) {
-            // A closeout that committed its record (frozen requestReview:
-            // false) but reported closed: false — post-commit failure, or a
-            // later send on an already-closed visit — still owns the ask
-            // (pre-push P1 r7): the durable provenance decides, not this
-            // invocation's return value.
-            logger.info(`[invoice] Review ask suppressed for invoice ${invoiceId}: record ${inv.service_record_id} was committed by the invoice-issued closeout`);
-          } else if (inv) {
-            await ReviewService.enrollPostService({
-              customerId: inv.customer_id,
-              serviceRecordId: inv.service_record_id || null,
-              triggeredBy: "auto",
-              delayMinutes: effectiveReviewDelayMinutes,
-            });
-          }
-        }
-      } catch (err) {
-        logger.error(
-          `[invoice] Review request schedule failed: ${err.message}`,
-        );
-      }
+      await require('./invoice-delivery-review').enrollReviewAfterInvoiceDelivery({
+        invoiceId, issuedCloseout, delayMinutes: effectiveReviewDelayMinutes,
+      });
     }
     return { ok, sms, email, payUrl, creditApplied: sms.ok ? 0 : (sendCreditResult?.applied || 0),
       ...queueOutcome,
@@ -6808,6 +6761,8 @@ const InvoiceService = {
       // deferred-queue rails, project reports) omit it — unchanged.
       claimToken = null,
       eventVisibleAt = null,
+      smsEventVisibleAt = undefined,
+      emailEventVisibleAt = undefined,
       deduped = false,
     } = {},
   ) {
@@ -6827,30 +6782,25 @@ const InvoiceService = {
     // so a delivery finalized through this path (combined project send,
     // completion SMS with invoice) must not silently drop it. An explicit
     // true/false from the caller still wins.
-    let effectiveRequestReview = requestReview;
-    let effectiveReviewDelayMinutes = reviewDelayMinutes;
-    if (effectiveRequestReview == null) {
-      effectiveRequestReview = Boolean(invoice.scheduled_request_review);
-      if (effectiveRequestReview && effectiveReviewDelayMinutes == null) {
-        effectiveReviewDelayMinutes = invoice.scheduled_review_delay_minutes;
-      }
-    }
+    const { requestReview: effectiveRequestReview, reviewDelayMinutes: effectiveReviewDelayMinutes } =
+      require('./invoice-delivery-review').reviewDecisionForInvoice(invoice, requestReview, reviewDelayMinutes);
 
     const now = new Date();
-    const deliveryAt = eventVisibleAt ? new Date(eventVisibleAt) : now;
+    // A known prior acceptance without a valid original timestamp cannot
+    // acquire this retry's clock time as its first delivery stamp.
     const updates = {
       status: db.raw(
         "CASE WHEN status IN ('draft', 'scheduled', 'sending') THEN 'sent' ELSE status END",
       ),
-      sent_at: db.raw("COALESCE(sent_at, ?)", [deliveryAt]),
+      ...require('./messaging/billing-prior-delivery').invoiceDeliveryStampUpdates(db, {
+        deduped, eventVisibleAt, smsEventVisibleAt, emailEventVisibleAt, sms, email, now,
+      }),
       scheduled_send_at: null,
       scheduled_send_error: require("./invoice-helpers").preserveWithdrawalStamp(db),
       scheduled_request_review: false,
       scheduled_review_delay_minutes: null,
       updated_at: now,
     };
-    if (sms) updates.sms_sent_at = db.raw("COALESCE(sms_sent_at, ?)", [deliveryAt]);
-
     const finalizeQuery = db("invoices")
       .where({ id: invoiceId })
       .whereIn("status", SEND_FINALIZABLE_STATUSES);
@@ -6918,51 +6868,10 @@ const InvoiceService = {
     // closeout that completed the visit quietly suppresses the ask outright
     // — its record froze requestReview: false, so nothing enrolls later.
     if (updated && effectiveRequestReview) {
-      try {
-        if (issuedCloseout?.closed) {
-          logger.info(`[invoice] Review ask suppressed for invoice ${invoiceId}: the invoice-issued closeout completed visit ${issuedCloseout.visitId} quietly (source=${source})`);
-        } else {
-          // The DURABLE linkage, re-read after the closeout (GitHub r5 P1
-          // #4127) — never the pre-closeout row: a closeout that committed
-          // the record and this invoice's back-link but failed in its
-          // post-commit work reports closed: false (the attempt stays
-          // resumable), and the stale read would still say "standalone".
-          const linked = await db("invoices")
-            .where({ id: invoiceId })
-            .select("service_record_id", "status")
-            .first();
-          const linkage = linked ? { ...finalInvoice, ...linked } : finalInvoice;
-          // Same unpaid-completion-invoice hold as sendViaSMSAndEmail (Codex
-          // P1, PR #3104 r1): delivery of an unpaid completion invoice must
-          // not start review outreach — the paid webhook enrolls on payment
-          // from the service record's requestReview intent. Standalone
-          // invoices (no service_record_id) keep the legacy at-delivery ask.
-          const deferToPayment = linkage.service_record_id
-            && !["paid", "prepaid"].includes(String(linkage.status || ""));
-          const { issuedCloseoutOwnsRecord } = require("./invoice-issued-closeout");
-          if (deferToPayment) {
-            logger.info(`[invoice] Review ask deferred to payment for invoice ${invoiceId} (unpaid completion invoice, source=${source})`);
-          } else if (await issuedCloseoutOwnsRecord(linkage.service_record_id)) {
-            // Durable provenance over this invocation's verdict (pre-push
-            // P1 r7): a closeout that committed the record but failed after
-            // — or a resend on a visit it already closed — reports closed:
-            // false, yet the record froze requestReview: false.
-            logger.info(`[invoice] Review ask suppressed for invoice ${invoiceId}: record ${linkage.service_record_id} was committed by the invoice-issued closeout (source=${source})`);
-          } else {
-            const ReviewService = require("./review-request");
-            await ReviewService.enrollPostService({
-              customerId: invoice.customer_id,
-              serviceRecordId: linkage.service_record_id || null,
-              triggeredBy: "auto",
-              delayMinutes: effectiveReviewDelayMinutes,
-            });
-          }
-        }
-      } catch (err) {
-        logger.error(
-          `[invoice] Review request schedule failed after ${source}: ${err.message}`,
-        );
-      }
+      await require('./invoice-delivery-review').enrollReviewAfterInvoiceDelivery({
+        invoiceId, issuedCloseout, delayMinutes: effectiveReviewDelayMinutes,
+        source, fallbackInvoice: finalInvoice,
+      });
     }
 
     return finalInvoice;

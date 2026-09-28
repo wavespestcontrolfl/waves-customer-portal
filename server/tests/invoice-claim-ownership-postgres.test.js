@@ -218,6 +218,58 @@ postgres('invoice send episode ownership', () => {
     expect((await read()).sms_sent_at).toBeTruthy();
   });
 
+  test('prior Email and Text settlement uses each original rail time without a new invoice activity', async () => {
+    const emailAt = new Date('2026-09-08T14:00:00Z');
+    const textAt = new Date('2026-09-08T16:00:00Z');
+    await Invoice.markDeliverySent(invoiceId, { email: true, sms: true, deduped: true,
+      eventVisibleAt: textAt, emailEventVisibleAt: emailAt, smsEventVisibleAt: textAt });
+    const invoice = await read();
+    expect(invoice.status).toBe('sent');
+    expect(invoice.sent_at).toEqual(textAt);
+    expect(invoice.email_sent_at).toEqual(emailAt);
+    expect(invoice.sms_sent_at).toEqual(textAt);
+    expect(await trx('activity_log').where({ action: 'invoice_sent' }).count('* as count').first()).toMatchObject({ count: '0' });
+  });
+
+  test('missing or invalid original dedupe time never mints a retry-clock invoice stamp', async () => {
+    await Invoice.markDeliverySent(invoiceId, { email: true, sms: false, deduped: true,
+      eventVisibleAt: 'invalid-original-time', emailEventVisibleAt: null });
+    expect(await read()).toMatchObject({ status: 'sent', sent_at: null, email_sent_at: null, sms_sent_at: null });
+    expect(await trx('activity_log').where({ action: 'invoice_sent' }).count('* as count').first()).toMatchObject({ count: '0' });
+  });
+
+  test('an old Email time never substitutes for a missing App or Text rail time', async () => {
+    const emailAt = new Date('2026-09-08T14:00:00Z');
+    await Invoice.markDeliverySent(invoiceId, { email: true, sms: true, deduped: true,
+      eventVisibleAt: emailAt, emailEventVisibleAt: emailAt, smsEventVisibleAt: null });
+    expect(await read()).toMatchObject({ status: 'sent', sent_at: emailAt,
+      email_sent_at: emailAt, sms_sent_at: null });
+  });
+
+  test('legacy wrapper mixed fresh Email and old App stamps only the App rail at its original time', async () => {
+    const appAt = new Date('2026-09-08T14:00:00Z');
+    await Invoice.markDeliverySent(invoiceId, { email: true, sms: true, deduped: false,
+      smsEventVisibleAt: appAt });
+    const invoice = await read();
+    expect(invoice.status).toBe('sent');
+    expect(invoice.sms_sent_at).toEqual(appAt);
+    expect(invoice.sent_at.getTime()).toBeGreaterThan(appAt.getTime());
+    expect(invoice.email_sent_at.getTime()).toBeGreaterThan(appAt.getTime());
+    expect(await trx('activity_log').where({ action: 'invoice_sent' }).count('* as count').first()).toMatchObject({ count: '1' });
+  });
+
+  test('legacy wrapper mixed fresh Text and old Email stamps only the Email rail at its original time', async () => {
+    const emailAt = new Date('2026-09-08T14:00:00Z');
+    await Invoice.markDeliverySent(invoiceId, { email: true, sms: true, deduped: false,
+      emailEventVisibleAt: emailAt });
+    const invoice = await read();
+    expect(invoice.status).toBe('sent');
+    expect(invoice.email_sent_at).toEqual(emailAt);
+    expect(invoice.sent_at.getTime()).toBeGreaterThan(emailAt.getTime());
+    expect(invoice.sms_sent_at.getTime()).toBeGreaterThan(emailAt.getTime());
+    expect(await trx('activity_log').where({ action: 'invoice_sent' }).count('* as count').first()).toMatchObject({ count: '1' });
+  });
+
   test('markDeliverySent with a passed claimToken finalizes and releases that exact claim atomically, in the SAME update (#4131 slice 5, Codex pre-push P1)', async () => {
     const token = randomUUID();
     await trx('invoices').where({ id: invoiceId }).update({ status: 'sending', send_claim_token: token });
