@@ -225,9 +225,12 @@ const RESUME_SCHEMA = Joi.object({
   // itself reads receipts from.
   priorReceipts: Joi.array().min(1).items(Joi.string().valid(...WRITE_TOOLS)),
 }).allow(null);
-const MATCHER_SCALAR = Joi.alternatives().try(Joi.string().pattern(/\S/), Joi.number(), Joi.boolean());
+const REGEX_MATCHER_SCHEMA = Joi.object({
+  regex: Joi.string().pattern(/\S/).custom((source, helpers) => (compileRegex(source) ? source : helpers.error('any.invalid'))).required(),
+});
+const MATCHER_VALUE = Joi.alternatives().try(Joi.string().pattern(/\S/), Joi.number(), Joi.boolean(), REGEX_MATCHER_SCHEMA);
 const INPUT_MATCHER_SCHEMA = Joi.object().min(1).pattern(/\S/, Joi.alternatives().try(
-  MATCHER_SCALAR, Joi.array().min(1).items(MATCHER_SCALAR.required()),
+  MATCHER_VALUE, Joi.array().min(1).items(MATCHER_VALUE.required()),
 ));
 const TOOL_RESPONSES_SCHEMA = Joi.array().min(1).items(Joi.alternatives().try(
   Joi.string().pattern(/\S/),
@@ -893,13 +896,11 @@ function noCallbackNumber(name, input, scenario) {
   return isLikelyE164(toE164(input.callback_phone || scenario.caller?.from || '')) ? null : NO_CALLBACK_NUMBER_TEXT;
 }
 
-/** Does `input` satisfy a `when` matcher? Strings match case-insensitively as substrings, arrays as any-of, everything else strictly. */
+/** Fixture `when` uses the same string/regex/any-of value matchers as input expectations. */
 function inputMatches(input = {}, when = {}) {
   return Object.entries(when).every(([field, want]) => {
     const have = input[field];
-    if (Array.isArray(want)) return want.some((w) => (typeof w === 'string' ? String(have ?? '').toLowerCase().includes(w.toLowerCase()) : have === w));
-    if (typeof want === 'string') return String(have ?? '').toLowerCase().includes(want.toLowerCase());
-    return have === want;
+    return Array.isArray(want) ? want.some((w) => wantMatches(have, w)) : wantMatches(have, want);
   });
 }
 
@@ -1136,11 +1137,13 @@ function patchStreamProto(getProto, state, label) {
             // round for the cache-hit rate. Both supported providers expose
             // Anthropic-shaped final usage on this common client surface.
             if (record.usage && msg && msg.usage && typeof msg.usage === 'object') {
-              const usage = extractUsage('anthropic', msg);
-              // An unexpected/renamed usage shape is incomplete telemetry,
-              // never a zero-token round that makes a candidate look free.
-              if (Number.isFinite(usage.input_tokens) && Number.isFinite(usage.output_tokens)
-                && Number.isFinite(usage.cached_input_tokens) && Number.isFinite(usage.cache_write_tokens)) {
+              // Validate raw counters before the shared ledger extractor
+              // coerces/truncates them. Malformed data must not reduce spend
+              // or invent a measured cache round; explicit zeroes are valid.
+              const counts = [msg.usage.input_tokens, msg.usage.output_tokens,
+                msg.usage.cache_read_input_tokens, msg.usage.cache_creation_input_tokens];
+              if (counts.every((count) => Number.isSafeInteger(count) && count >= 0)) {
+                const usage = extractUsage('anthropic', msg);
                 record.usage.input_tokens += usage.input_tokens;
                 record.usage.output_tokens += usage.output_tokens;
                 record.usage.cached_input_tokens += usage.cached_input_tokens;

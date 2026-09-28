@@ -1770,6 +1770,14 @@
      "severity": "major"
     },
     {
+     "check": "tool_not_called_before_turn",
+     "value": {
+      "tool": "capture_lead",
+      "turn": 2
+     },
+     "severity": "critical"
+    },
+    {
      "check": "tools_performed_include",
      "value": [
       "capture_lead"
@@ -2054,7 +2062,7 @@
      "check": "spoken_matches_any",
      "value": {
       "patterns": [
-       "(?=[\\s\\S]*(?:{{dow_es+8}}|{{monthday_es+8}}))(?=[\\s\\S]*(?:\\b(?:1|una)\\b.{0,25}\\b(?:tarde|pm)\\b|\\ba\\s+la\\s+(?:una|1)\\b(?!\\s*(?:de\\s+la\\s+(?:ma\u00f1ana|madrugada|noche)|am\\b))|\\b13:00\\b))(?=[\\s\\S]*(?:\\b(?:tengo|tenemos)\\s+(?:el\\s+)?(?:{{dow_es+8}}|{{monthday_es+8}})\\b|\\b(?:tengo|tenemos)\\s+(?:el\\s+)?(?:lunes|martes|mi[e\u00e9]rcoles|jueves|viernes|s[a\u00e1]bado|domingo)\\b[^.!?;]{0,180}\\b(?:{{dow_es+8}}|{{monthday_es+8}})\\b|\\b(?:tengo|tenemos)\\b[^.!?;]{0,50}\\b(?:horario|hora|cita|visita|opci[o\u00f3]n|turno|espacio|cupo)\\b[^.!?;]{0,80}(?:{{dow_es+8}}|{{monthday_es+8}})\\b|\\bhay\\s+(?:(?:un|una|el|la)\\s+)?(?:horario|hora|cita|visita|opci[o\u00f3]n|turno|espacio|cupo)\\b|\\b(?:horario|hora|cita|visita|opci[o\u00f3]n|turno|espacio|cupo)\\b[^.!?;]{0,50}\\b(?:est[a\u00e1]|queda)\\s+disponible\\b|\\b(?:{{dow_es+8}}|{{monthday_es+8}})\\b[^.!?;]{0,50}\\b(?:est[a\u00e1]|queda)\\s+disponible\\b|\\b(?:le (?:puedo|podemos) ofrecer|puedo ofrecerle|podemos ofrecerle|le ofrezco|puede elegir)\\b))"
+       "(?=[\\s\\S]*(?:{{dow_es+8}}|{{monthday_es+8}}))(?=[\\s\\S]*(?:\\b(?:1|una)\\b.{0,25}\\b(?:tarde|pm)\\b|\\ba\\s+la\\s+(?:una|1)\\b(?!\\s*(?:de\\s+la\\s+(?:ma\u00f1ana|madrugada|noche)|am\\b))|\\b13:00\\b))(?=[\\s\\S]*(?:\\b(?:tengo|tenemos)\\s+(?:el\\s+)?(?:{{dow_es+8}}|{{monthday_es+8}})\\b|\\b(?:tengo|tenemos)\\s+(?:el\\s+)?(?:lunes|martes|mi[e\u00e9]rcoles|jueves|viernes|s[a\u00e1]bado|domingo)\\b[^.!?;]{0,180}\\b(?:{{dow_es+8}}|{{monthday_es+8}})\\b|\\b(?:tengo|tenemos)\\b[^.!?;]{0,50}\\b(?:horario(?!\\s+(?:de\\s+(?:la\\s+)?oficina|de\\s+atenci[o\u00f3]n\\s+al\\s+p[u\u00fa]blico)\\b)|hora|cita|visita|opci[o\u00f3]n|turno|espacio|cupo)\\b[^.!?;]{0,80}(?:{{dow_es+8}}|{{monthday_es+8}})\\b|\\bhay\\s+(?:(?:un|una|el|la)\\s+)?(?:horario(?!\\s+(?:de\\s+(?:la\\s+)?oficina|de\\s+atenci[o\u00f3]n\\s+al\\s+p[u\u00fa]blico)\\b)|hora|cita|visita|opci[o\u00f3]n|turno|espacio|cupo)\\b|\\b(?:horario(?!\\s+(?:de\\s+(?:la\\s+)?oficina|de\\s+atenci[o\u00f3]n\\s+al\\s+p[u\u00fa]blico)\\b)|hora|cita|visita|opci[o\u00f3]n|turno|espacio|cupo)\\b[^.!?;]{0,50}\\b(?:est[a\u00e1]|queda)\\s+disponible\\b|(?:^|[.!?;]\\s*)(?![^.!?;]*\\bhorario\\s+(?:de\\s+(?:la\\s+)?oficina|de\\s+atenci[o\u00f3]n\\s+al\\s+p[u\u00fa]blico)\\b)[^.!?;]*\\b(?:{{dow_es+8}}|{{monthday_es+8}})\\b[^.!?;]{0,50}\\b(?:est[a\u00e1]|queda)\\s+disponible\\b|\\b(?:le (?:puedo|podemos) ofrecer|puedo ofrecerle|podemos ofrecerle|le ofrezco|puede elegir)\\b))"
       ],
       "onTurn": 1,
       "asserted": true
@@ -2115,7 +2123,7 @@
      "find_slots": [
       {
        "when": {
-        "city": "Bradenton",
+        "city": {"regex": "^Bradenton$"},
         "when": ["next week", "próxima semana", "semana que viene", "semana entrante"]
        },
        "once": true,
@@ -2123,7 +2131,7 @@
       },
       {
        "when": {
-        "city": "Bradenton",
+        "city": {"regex": "^Bradenton$"},
         "when": ["next week", "próxima semana", "semana que viene", "semana entrante"]
        },
        "text": "Open times: {{day+9}} at 10 AM (slot_ref: S3); {{day+10}} at 9 AM (slot_ref: S4). NOTHING IS BOOKED YET — read the caller two or three of these options and let them pick. After they choose, tell them a Waves team member will call to confirm and lock it in (set WHEN from the latest CLOCK DATA — never \"shortly\" while the office is closed), then call capture_lead with their chosen time in preferred_date_time. Do not promise the slot is reserved. If you place a booking request, pass back the slot_ref of the option they picked — never a date you typed yourself."
@@ -2132,14 +2140,14 @@
      "get_availability": [
       {
        "when": {
-        "city": "Bradenton"
+        "city": {"regex": "^Bradenton$"}
        },
        "once": true,
        "text": "Open times: {{day+7}} at 9 AM (slot_ref: S1); {{day+8}} at 1 PM (slot_ref: S2). NOTHING IS BOOKED YET — read the caller two or three of these options and let them pick. After they choose, tell them a Waves team member will call to confirm and lock it in (set WHEN from the latest CLOCK DATA — never \"shortly\" while the office is closed), then call capture_lead with their chosen time in preferred_date_time. Do not promise the slot is reserved. If you place a booking request, pass back the slot_ref of the option they picked — never a date you typed yourself."
       },
       {
        "when": {
-        "city": "Bradenton"
+        "city": {"regex": "^Bradenton$"}
        },
        "text": "Open times: {{day+9}} at 10 AM (slot_ref: S3); {{day+10}} at 9 AM (slot_ref: S4). NOTHING IS BOOKED YET — read the caller two or three of these options and let them pick. After they choose, tell them a Waves team member will call to confirm and lock it in (set WHEN from the latest CLOCK DATA — never \"shortly\" while the office is closed), then call capture_lead with their chosen time in preferred_date_time. Do not promise the slot is reserved. If you place a booking request, pass back the slot_ref of the option they picked — never a date you typed yourself."
       }
@@ -2266,7 +2274,7 @@
      "check": "spoken_matches_any",
      "value": {
       "patterns": [
-       "(?:^|[.!?;]\\s*)\\s*(?:(?:lo siento|lamentablemente|por desgracia)[,:]\\s*)?(?:(?:(?:ese|esa|este|esta)\\s+(?:horario|hora|cita|espacio|opci[o\u00f3]n|turno)\\b(?!(?:\\s+(?:de|para)\\b|\\s+del\\s+(?!(?:{{dow_es+7}}|{{monthday_es+7}})\\b)))|(?:el|la)\\s+(?:horario|hora|cita|espacio|opci[o\u00f3]n|turno)\\s+(?:que\\s+(?:eligi\u00f3|escogi\u00f3|pidi\u00f3|solicit\u00f3)|elegid[oa]|seleccionad[oa]|solicitad[oa])|la\\s+cita(?!(?:\\s+(?:de|para)\\b|\\s+del\\s+(?!(?:{{dow_es+7}}|{{monthday_es+7}})\\b))))[^.!?;]{0,60}(?:ya no (?:est[a\u00e1]|estaba|aparece) (?:disponible|libre)|ya (?:se |lo |la )?(?:ocup[o\u00f3]|tomaron|tom[o\u00f3]|reservaron)|(?:ya )?fue (?:tomad[oa]|ocupad[oa])|se (?:acaba de )?(?:ocupar|tomar)|no qued[o\u00f3] disponible|ya no aparece|ya no (?:hay|aparece) (?:disponibilidad|espacio|cupo|lugar|horario|hora|opci[o\u00f3]n|turno))|(?:ya no (?:est[a\u00e1]|estaba|aparece) (?:disponible|libre)|ya (?:se |lo |la )?(?:ocup[o\u00f3]|tomaron|tom[o\u00f3]|reservaron)|(?:ya )?fue (?:tomad[oa]|ocupad[oa])|se (?:acaba de )?(?:ocupar|tomar)|no qued[o\u00f3] disponible|ya no aparece|ya no (?:hay|aparece) (?:disponibilidad|espacio|cupo|lugar|horario|hora|opci[o\u00f3]n|turno))[^.!?;]{0,60}(?:(?:ese|esa|este|esta)\\s+(?:horario|hora|cita|espacio|opci[o\u00f3]n|turno)\\b(?!(?:\\s+(?:de|para)\\b|\\s+del\\s+(?!(?:{{dow_es+7}}|{{monthday_es+7}})\\b)))|(?:el|la)\\s+(?:horario|hora|cita|espacio|opci[o\u00f3]n|turno)\\s+(?:que\\s+(?:eligi\u00f3|escogi\u00f3|pidi\u00f3|solicit\u00f3)|elegid[oa]|seleccionad[oa]|solicitad[oa])|la\\s+cita(?!(?:\\s+(?:de|para)\\b|\\s+del\\s+(?!(?:{{dow_es+7}}|{{monthday_es+7}})\\b))))|(?:el\\s+)?(?:{{dow_es+7}}|{{monthday_es+7}})[^.!?;]{0,60}(?:\\b(?:9|nueve)\\b.{0,25}\\b(?:ma\u00f1ana|am)\\b|\\ba\\s+las\\s+(?:nueve|9)\\b(?!\\s*(?:de\\s+la\\s+(?:tarde|noche)|pm\\b)))\\s*,?\\s*(?:ya no (?:est[a\u00e1]|estaba|aparece) (?:disponible|libre)|ya (?:se |lo |la )?(?:ocup[o\u00f3]|tomaron|tom[o\u00f3]|reservaron)|(?:ya )?fue (?:tomad[oa]|ocupad[oa])|se (?:acaba de )?(?:ocupar|tomar)|no qued[o\u00f3] disponible|ya no aparece|ya no (?:hay|aparece) (?:disponibilidad|espacio|cupo|lugar|horario|hora|opci[o\u00f3]n|turno))|ya\\s+lo\\s+(?:tomaron|reservaron|ocuparon))"
+       "(?:^|[.!?;]\\s*)\\s*(?![^.!?;]{0,120}\\b(?:que\\s+(?:eligi\u00f3|escogi\u00f3|pidi\u00f3|solicit\u00f3)|(?:elegid[oa]|seleccionad[oa]|solicitad[oa])\\s+por)\\s+(?!(?:usted|Rosa(?:\\s+Delgado)?)\\s+(?=(?:ya\\s+)?(?:no|fue|se)\\b))(?!ya\\b|no\\b|fue\\b|se\\b)(?:(?!(?:ya\\s+)?(?:no|fue|se)\\b)[a-z\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1\u00fc]+\\s+)+(?=(?:ya\\s+)?(?:no|fue|se)\\b))(?:(?:lo siento|lamentablemente|por desgracia)[,:]\\s*)?(?:(?:(?:ese|esa|este|esta)\\s+(?:horario|hora|cita|espacio|opci[o\u00f3]n|turno)\\b(?!(?:\\s+(?:de|para)\\b|\\s+del\\s+(?!(?:{{dow_es+7}}|{{monthday_es+7}})\\b)))|(?:el|la)\\s+(?:horario|hora|cita|espacio|opci[o\u00f3]n|turno)\\s+(?:que\\s+(?:eligi\u00f3|escogi\u00f3|pidi\u00f3|solicit\u00f3)|elegid[oa]|seleccionad[oa]|solicitad[oa])|la\\s+cita(?!(?:\\s+(?:de|para)\\b|\\s+del\\s+(?!(?:{{dow_es+7}}|{{monthday_es+7}})\\b))))[^.!?;]{0,60}(?:ya no (?:est[a\u00e1]|estaba|aparece) (?:disponible|libre)|ya (?:se |lo |la )?(?:ocup[o\u00f3]|tomaron|tom[o\u00f3]|reservaron)|(?:ya )?fue (?:tomad[oa]|ocupad[oa])|se (?:acaba de )?(?:ocupar|tomar)|no qued[o\u00f3] disponible|ya no aparece|ya no (?:hay|aparece) (?:disponibilidad|espacio|cupo|lugar|horario|hora|opci[o\u00f3]n|turno))|(?:ya no (?:est[a\u00e1]|estaba|aparece) (?:disponible|libre)|ya (?:se |lo |la )?(?:ocup[o\u00f3]|tomaron|tom[o\u00f3]|reservaron)|(?:ya )?fue (?:tomad[oa]|ocupad[oa])|se (?:acaba de )?(?:ocupar|tomar)|no qued[o\u00f3] disponible|ya no aparece|ya no (?:hay|aparece) (?:disponibilidad|espacio|cupo|lugar|horario|hora|opci[o\u00f3]n|turno))[^.!?;]{0,60}(?:(?:ese|esa|este|esta)\\s+(?:horario|hora|cita|espacio|opci[o\u00f3]n|turno)\\b(?!(?:\\s+(?:de|para)\\b|\\s+del\\s+(?!(?:{{dow_es+7}}|{{monthday_es+7}})\\b)))|(?:el|la)\\s+(?:horario|hora|cita|espacio|opci[o\u00f3]n|turno)\\s+(?:que\\s+(?:eligi\u00f3|escogi\u00f3|pidi\u00f3|solicit\u00f3)|elegid[oa]|seleccionad[oa]|solicitad[oa])|la\\s+cita(?!(?:\\s+(?:de|para)\\b|\\s+del\\s+(?!(?:{{dow_es+7}}|{{monthday_es+7}})\\b))))|(?:el\\s+)?(?:{{dow_es+7}}|{{monthday_es+7}})[^.!?;]{0,60}(?:\\b(?:9|nueve)\\b.{0,25}\\b(?:ma\u00f1ana|am)\\b|\\ba\\s+las\\s+(?:nueve|9)\\b(?!\\s*(?:de\\s+la\\s+(?:tarde|noche)|pm\\b)))\\s*,?\\s*(?:ya no (?:est[a\u00e1]|estaba|aparece) (?:disponible|libre)|ya (?:se |lo |la )?(?:ocup[o\u00f3]|tomaron|tom[o\u00f3]|reservaron)|(?:ya )?fue (?:tomad[oa]|ocupad[oa])|se (?:acaba de )?(?:ocupar|tomar)|no qued[o\u00f3] disponible|ya no aparece|ya no (?:hay|aparece) (?:disponibilidad|espacio|cupo|lugar|horario|hora|opci[o\u00f3]n|turno))|ya\\s+lo\\s+(?:tomaron|reservaron|ocuparon))"
       ],
       "fromTurn": 1,
       "afterTool": {
@@ -2283,7 +2291,7 @@
      "check": "spoken_matches_any",
      "value": {
       "patterns": [
-       "(?:(?:(?:(?:ese|esa|este|esta|el|la)\\s+(?:horario|hora|cita|espacio|opci[oó]n|turno))\\s+)?(?:ya no (?:est[aá]|estaba|aparece) (?:disponible|libre)|ya (?:se |lo |la )?(?:ocup[oó]|tomaron|tom[oó]|reservaron)|(?:ya )?fue (?:tomad[oa]|ocupad[oa])|se (?:acaba de )?(?:ocupar|tomar)|no qued[oó] disponible|ya no aparece|ya no (?:hay|aparece) (?:disponibilidad|espacio|cupo|lugar|horario|hora|opci[oó]n|turno))[^.!?;]{0,24}\\by\\s+)?\\b(?:no\\s+(?:reserv[eé]|agend[eé]|program[eé]|reservamos|agendamos|programamos)\\s+nada|no\\s+se\\s+(?:reserv[oó]|agend[oó]|program[oó])\\s+nada|nada\\s+(?:se\\s+)?(?:reserv[oó]|agend[oó]|program[oó])|no\\s+(?:se\\s+)?(?:reserv[oó]|agend[oó]|program[oó])\\s+(?:(?:esa|ese)\\s+(?:hora|horario|opci[oó]n)|ninguna?\\s+(?:cita|visita|reserva))|no\\s+qued[oó]\\s+nada\\s+(?:reservad[oa]|agendad[oa]|programad[oa]))\\b"
+       "(?:(?:(?:(?:ese|esa|este|esta|el|la)\\s+(?:horario|hora|cita|espacio|opci[oó]n|turno))\\s+)?(?:ya no (?:est[aá]|estaba|aparece) (?:disponible|libre)|ya (?:se |lo |la )?(?:ocup[oó]|tomaron|tom[oó]|reservaron)|(?:ya )?fue (?:tomad[oa]|ocupad[oa])|se (?:acaba de )?(?:ocupar|tomar)|no qued[oó] disponible|ya no aparece|ya no (?:hay|aparece) (?:disponibilidad|espacio|cupo|lugar|horario|hora|opci[oó]n|turno))[^.!?;]{0,24}\\by\\s+)?\\b(?:no\\s+(?:reserv[eé]|agend[eé]|program[eé]|reservamos|agendamos|programamos)\\s+nada|no\\s+se\\s+(?:reserv[oó]|agend[oó]|program[oó])\\s+nada|nada\\s+(?:se\\s+)?(?:reserv[oó]|agend[oó]|program[oó])|no\\s+(?:se\\s+)?(?:reserv[oó]|agend[oó]|program[oó])\\s+(?:(?:esa|ese)\\s+(?:hora|horario|opci[oó]n)|ninguna?\\s+(?:cita|visita|reserva))|no\\s+qued[oó]\\s+nada\\s+(?:reservad[oa]|agendad[oa]|programad[oa]))\\b(?!\\s+(?:para|de)\\s+(?!(?:usted|ti|Rosa(?:\\s+Delgado)?|(?:el|la)\\s+cliente|(?:esa|ese)\\s+(?:hora|horario|opci[oó]n))\\s*(?=[.!?;,]|$)))"
       ],
       "fromTurn": 1,
       "afterTool": {
@@ -2347,7 +2355,7 @@
      "value": {
       "tool": "find_slots",
       "input": {
-       "city": "Bradenton"
+       "city": {"regex": "^Bradenton$"}
       },
       "fromTurn": 2,
       "untilTurn": 2,
@@ -2364,7 +2372,7 @@
      "check": "spoken_matches_any",
      "value": {
       "patterns": [
-       "(?=[\\s\\S]*(?:{{dow_es+9}}|{{monthday_es+9}}))(?=[\\s\\S]*(?:\\b(?:10|diez)\\b.{0,25}\\b(?:mañana|am)\\b|\\ba\\s+las\\s+(?:diez|10)\\b(?!\\s*(?:de\\s+la\\s+(?:tarde|noche)|pm\\b))))(?:\\b(?:ped(?:í|imos)|solicit(?:é|amos|ó|aron))(?![a-záéíóúñü])\\s+(?:(?:(?:la|una|su)\\s+)?(?:cita|visita|hora|solicitud)\\s+(?:(?:para\\s+el|del|para)\\s+)?|(?:el\\s+)?)(?:{{dow_es+9}}|{{monthday_es+9}})[^.!?;]{0,80}(?:\\b(?:10|diez)\\b.{0,25}\\b(?:mañana|am)\\b|\\ba\\s+las\\s+(?:diez|10)\\b(?!\\s*(?:de\\s+la\\s+(?:tarde|noche)|pm\\b)))|\\b(?:cita|visita|solicitud)\\b\\s+(?:(?:(?:fue|ha\\s+sido)\\s+)?(?:solicitada|pedida)\\s+)?(?:para\\s+el|del)\\s+(?:{{dow_es+9}}|{{monthday_es+9}})[^.!?;]{0,80}(?:\\b(?:10|diez)\\b.{0,25}\\b(?:mañana|am)\\b|\\ba\\s+las\\s+(?:diez|10)\\b(?!\\s*(?:de\\s+la\\s+(?:tarde|noche)|pm\\b))))"
+       "(?=[\\s\\S]*(?:{{dow_es+9}}|{{monthday_es+9}}))(?=[\\s\\S]*(?:\\b(?:10|diez)\\b.{0,25}\\b(?:mañana|am)\\b|\\ba\\s+las\\s+(?:diez|10)\\b(?!\\s*(?:de\\s+la\\s+(?:tarde|noche)|pm\\b))))(?:\\b(?:ped(?:í|imos)|solicit(?:é|amos|ó|aron))(?![a-záéíóúñü])\\s+(?:(?:(?:la|una|su)\\s+)?(?:cita|visita|hora|solicitud)\\s+(?:(?:para\\s+el|del|para)\\s+)?|(?:el\\s+)?)(?:{{dow_es+9}}|{{monthday_es+9}})[^.!?;]{0,80}(?:\\b(?:10|diez)\\b.{0,25}\\b(?:mañana|am)\\b|\\ba\\s+las\\s+(?:diez|10)\\b(?!\\s*(?:de\\s+la\\s+(?:tarde|noche)|pm\\b)))|\\b(?:cita|visita|solicitud)\\b\\s+(?:(?:(?:fue|ha\\s+sido)\\s+)?(?:solicitada|pedida)\\s+)?(?:para\\s+el|del)\\s+(?:{{dow_es+9}}|{{monthday_es+9}})[^.!?;]{0,80}(?:\\b(?:10|diez)\\b.{0,25}\\b(?:mañana|am)\\b|\\ba\\s+las\\s+(?:diez|10)\\b(?!\\s*(?:de\\s+la\\s+(?:tarde|noche)|pm\\b))))(?![^.!?;]{0,24}\\bpara\\s+(?!(?:(?:(?:su|la|una)\\s+)?(?:cita|visita|servicio)\\b|(?:agendar|reservar|programar|apartar|realizar)\\s+(?:(?:la|una|su|el)\\s+)?(?:cita|visita|servicio)\\b)))"
       ],
       "fromTurn": 1,
       "afterTool": {
@@ -2381,13 +2389,13 @@
      "check": "spoken_matches_any",
      "value": {
       "patterns": [
-       "(?=[\\s\\S]*(?:{{dow_es+9}}|{{monthday_es+9}}))(?=[\\s\\S]*(?:\\b(?:10|diez)\\b.{0,25}\\b(?:ma\u00f1ana|am)\\b|\\ba\\s+las\\s+(?:diez|10)\\b(?!\\s*(?:de\\s+la\\s+(?:tarde|noche)|pm\\b))))(?=[\\s\\S]*(?:\\b(?:tengo|tenemos)\\s+(?:el\\s+)?(?:{{dow_es+9}}|{{monthday_es+9}})\\b|\\b(?:tengo|tenemos)\\s+(?:el\\s+)?(?:lunes|martes|mi[e\u00e9]rcoles|jueves|viernes|s[a\u00e1]bado|domingo)\\b[^.!?;]{0,180}\\b(?:{{dow_es+9}}|{{monthday_es+9}})\\b|\\b(?:tengo|tenemos)\\b[^.!?;]{0,50}\\b(?:horario|hora|cita|visita|opci[o\u00f3]n|turno|espacio|cupo)\\b[^.!?;]{0,80}(?:{{dow_es+9}}|{{monthday_es+9}})\\b|\\bhay\\s+(?:(?:un|una|el|la)\\s+)?(?:horario|hora|cita|visita|opci[o\u00f3]n|turno|espacio|cupo)\\b|\\b(?:horario|hora|cita|visita|opci[o\u00f3]n|turno|espacio|cupo)\\b[^.!?;]{0,50}\\b(?:est[a\u00e1]|queda)\\s+disponible\\b|\\b(?:{{dow_es+9}}|{{monthday_es+9}})\\b[^.!?;]{0,50}\\b(?:est[a\u00e1]|queda)\\s+disponible\\b|\\b(?:le (?:puedo|podemos) ofrecer|puedo ofrecerle|podemos ofrecerle|le ofrezco|puede elegir)\\b))"
+       "(?=[\\s\\S]*(?:{{dow_es+9}}|{{monthday_es+9}}))(?=[\\s\\S]*(?:\\b(?:10|diez)\\b.{0,25}\\b(?:ma\u00f1ana|am)\\b|\\ba\\s+las\\s+(?:diez|10)\\b(?!\\s*(?:de\\s+la\\s+(?:tarde|noche)|pm\\b))))(?=[\\s\\S]*(?:\\b(?:tengo|tenemos)\\s+(?:el\\s+)?(?:{{dow_es+9}}|{{monthday_es+9}})\\b|\\b(?:tengo|tenemos)\\s+(?:el\\s+)?(?:lunes|martes|mi[e\u00e9]rcoles|jueves|viernes|s[a\u00e1]bado|domingo)\\b[^.!?;]{0,180}\\b(?:{{dow_es+9}}|{{monthday_es+9}})\\b|\\b(?:tengo|tenemos)\\b[^.!?;]{0,50}\\b(?:horario(?!\\s+(?:de\\s+(?:la\\s+)?oficina|de\\s+atenci[o\u00f3]n\\s+al\\s+p[u\u00fa]blico)\\b)|hora|cita|visita|opci[o\u00f3]n|turno|espacio|cupo)\\b[^.!?;]{0,80}(?:{{dow_es+9}}|{{monthday_es+9}})\\b|\\bhay\\s+(?:(?:un|una|el|la)\\s+)?(?:horario(?!\\s+(?:de\\s+(?:la\\s+)?oficina|de\\s+atenci[o\u00f3]n\\s+al\\s+p[u\u00fa]blico)\\b)|hora|cita|visita|opci[o\u00f3]n|turno|espacio|cupo)\\b|\\b(?:horario(?!\\s+(?:de\\s+(?:la\\s+)?oficina|de\\s+atenci[o\u00f3]n\\s+al\\s+p[u\u00fa]blico)\\b)|hora|cita|visita|opci[o\u00f3]n|turno|espacio|cupo)\\b[^.!?;]{0,50}\\b(?:est[a\u00e1]|queda)\\s+disponible\\b|(?:^|[.!?;]\\s*)(?![^.!?;]*\\bhorario\\s+(?:de\\s+(?:la\\s+)?oficina|de\\s+atenci[o\u00f3]n\\s+al\\s+p[u\u00fa]blico)\\b)[^.!?;]*\\b(?:{{dow_es+9}}|{{monthday_es+9}})\\b[^.!?;]{0,50}\\b(?:est[a\u00e1]|queda)\\s+disponible\\b|\\b(?:le (?:puedo|podemos) ofrecer|puedo ofrecerle|podemos ofrecerle|le ofrezco|puede elegir)\\b))"
       ],
       "onTurn": 2,
       "afterTool": {
        "tool": "find_slots",
        "input": {
-        "city": "Bradenton"
+        "city": {"regex": "^Bradenton$"}
        },
        "after": {
         "tool": "request_booking",
@@ -2605,8 +2613,8 @@
       "(?<!\\bno\\s+(?:\\w+\\s+){0,2})\\b(?:cre[e\u00e9]|program[e\u00e9]|reserv[e\u00e9]|agend[e\u00e9]|apart[e\u00e9]|hice|creamos|programamos|reservamos|agendamos|apartamos|hicimos)\\s+(?:ya\\s+)?(?:una\\s+|la\\s+|su\\s+|tu\\s+)?(?:nueva\\s+)?(?:cita|visita)\\b",
       "(?<!\\bno\\s+)\\b(?:cita|visita)\\s+(?:nueva\\s+)?(?:fue|ha\\s+sido|qued[o\u00f3])\\s+(?:cread[ao]|programad[ao]|agendad[ao]|reservad[ao])\\b",
       "(?<!\\bno\\s)(?<!\\bnunca\\s)(?<!\\bjam\u00e1s\\s)(?<!\\bsin\\s)\\b(?:ya\\s+)?(?:tengo|tenemos|tiene|tienen|hay|existe)\\s+(?:(?:su|una|la)\\s+)?(?:nueva\\s+)?(?:cita|visita)\\b",
-      "(?<!\\b(?:no|ninguna|sin|nunca)\\b[^.!?;,]{0,40})\\b(?:(?:su|una|la)\\s+)?nueva\\s+(?:cita|visita)\\b[^.!?;]{0,40}\\b(?:est[a\u00e1]|qued[o\u00f3])\\s+(?:en\\s+(?:el\\s+calendario|la\\s+agenda)|agendad[ao]|programad[ao]|reservad[ao])\\b",
-      "\\b(?:(?:su|una|la)\\s+)?nueva\\s+(?:cita|visita)\\b(?:(?!\\b(?:no|nunca|jam[a\u00e1]s)\\b)[^.!?;]){0,40}\\b(?:aparece|figura)\\b[^.!?;]{0,24}\\ben\\s+(?:el\\s+calendario|la\\s+agenda)\\b"
+      "(?<!\\b(?:no|ninguna|sin|nunca)\\b[^.!?;,]{0,40})\\b(?:(?:su|una|la)\\s+)?(?:nueva\\s+)?(?:cita|visita)\\b[^.!?;]{0,40}\\b(?:est[a\u00e1]|qued[o\u00f3])\\s+(?:en\\s+(?:el\\s+calendario|la\\s+agenda)|agendad[ao]|programad[ao]|reservad[ao])\\b",
+      "\\b(?:(?:su|una|la)\\s+)?(?:nueva\\s+)?(?:cita|visita)\\b(?:(?!\\b(?:no|nunca|jam[a\u00e1]s)\\b)[^.!?;]){0,40}\\b(?:aparece|figura)\\b[^.!?;]{0,24}\\ben\\s+(?:el\\s+calendario|la\\s+agenda)\\b"
      ],
      "severity": "critical"
     },
@@ -2749,7 +2757,8 @@
       ],
       "fromTurn": 1,
       "afterTool": "get_today_eta",
-      "asserted": true
+      "asserted": true,
+      "callerNames": ["Rosa", "Rosa Delgado"]
      },
      "severity": "critical"
     },

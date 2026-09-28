@@ -172,6 +172,50 @@ describe('voice relay eval — per-round Anthropic usage threading (cache-hit lo
     expect(replay.summarize([result]).usage).toMatchObject({ complete: true, cacheHitRate: 0 });
   });
 
+  test.each(['input_tokens', 'output_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens']
+    .flatMap((field) => [
+      ['negative', -1], ['negative fraction', -0.5], ['fraction', 1.5],
+      ['numeric string', '2'], ['boolean', true], ['array', [2]],
+      ['unsafe integer', Number.MAX_SAFE_INTEGER + 1],
+    ].map(([label, value]) => [field, label, value])))('%s with a %s raw count stays incomplete through benchmark aggregation', async (field, _label, value) => {
+    mockSdk();
+    const { replay, scenario } = loadScenario('robocall');
+    const usage = { input_tokens: 100, output_tokens: 10, cache_creation_input_tokens: 20, cache_read_input_tokens: 30, [field]: value };
+    script.push(say('This looks like a recording.', usage), say('Take care.', usage));
+    const result = await replay.runScenario(scenario);
+    expect(result.modelRounds).toBe(2);
+    expect(result.usage).toMatchObject({
+      rounds: 0, incompleteRounds: 2, cacheReadRounds: 0,
+      input_tokens: 0, output_tokens: 0, cached_input_tokens: 0, cache_write_tokens: 0,
+    });
+    const summary = replay.summarize([result]);
+    expect(summary.usage).toMatchObject({ complete: false, cacheHitRate: null });
+    const { summarizeCondition } = require('../scripts/run-voice-relay-benchmark');
+    const benchmark = summarizeCondition('invalid-count', [{
+      condition: 'invalid-count', ranOk: true, inconclusive: false,
+      result: { summary, attempts: [{ status: 'pass', summary }] },
+    }]);
+    expect(benchmark.usage).toMatchObject({
+      complete: false, rounds: 0, incompleteRounds: 2, cacheReadRounds: 0, cacheHitRate: null,
+      inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, cacheWriteTokens: 0,
+    });
+  });
+
+  test('a malformed round cannot reduce valid measured usage or inflate its cache-hit rate', async () => {
+    mockSdk();
+    const { replay, scenario } = loadScenario('robocall');
+    script.push(
+      say('This looks like a recording.', { input_tokens: 120, output_tokens: 18, cache_creation_input_tokens: 4200, cache_read_input_tokens: 0 }),
+      say('Take care.', { input_tokens: -40, output_tokens: 6, cache_creation_input_tokens: 0, cache_read_input_tokens: -4200 }),
+    );
+    const result = await replay.runScenario(scenario);
+    expect(result.usage).toMatchObject({
+      rounds: 1, incompleteRounds: 1, cacheReadRounds: 0,
+      input_tokens: 120, output_tokens: 18, cached_input_tokens: 0, cache_write_tokens: 4200,
+    });
+    expect(replay.summarize([result]).usage).toMatchObject({ complete: false, cacheHitRate: 0 });
+  });
+
   // Codex pre-push on #4946: successful rounds with no usage block at all make
   // the standalone eval summary incomplete too (same rule as the runner).
   test('successful rounds without a usage block mark the eval summary incomplete', async () => {
