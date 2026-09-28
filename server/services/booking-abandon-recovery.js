@@ -247,7 +247,12 @@ function serviceLabelOf(intent) {
 // single segment. The email keeps the canonical name.
 const SMS_SERVICE_LABELS = { bora_care: 'Bora-Care' };
 function smsServiceLabelOf(intent) {
-  return SMS_SERVICE_LABELS[String(intent.service_id || '').trim()] || serviceLabelOf(intent);
+  const key = String(intent.service_id || '').trim();
+  // Owner report 2026-09-28: an unknown/bundle service id fell back to the
+  // email path's 'your service', rendering "Your your service spot…" — the
+  // template already says "Your". The SMS path's own fallback is just
+  // 'service'; the email path's serviceLabelOf/'your service' is untouched.
+  return SMS_SERVICE_LABELS[key] || SERVICE_LABELS[key] || 'service';
 }
 
 async function bookingUrlFor(intent) {
