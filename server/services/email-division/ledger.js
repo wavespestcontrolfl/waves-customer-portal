@@ -79,10 +79,12 @@ async function markFailed(id, reason, { conn } = {}) {
  *     a marketing-class attempt also denies on any OTHER still-`reserved`
  *     (not yet sent/skipped/failed) row for this customer, reusing the
  *     stream-appropriate cap reason.
- *   - the recipient actually stored is always the customer's OWN checked
- *     email (never a caller-supplied `recipientEmail`), so the address a
- *     future sender delivers to can never diverge from the address
- *     eligibility just cleared against suppression.
+ *   - the recipient actually stored is always the SAME email address
+ *     eligibleForEmail just read and cleared against suppression (carried
+ *     through in its `checks.customerEmail`, never a caller-supplied
+ *     `recipientEmail` and never a second `customers` read of our own —
+ *     a second read could observe a concurrent email change under READ
+ *     COMMITTED and store an address that was never actually checked).
  */
 async function reserveWithCap({
   customerId, stream, marketingClass, emailKey, idempotencyKey, pestKey = null, now = new Date(),
@@ -107,9 +109,9 @@ async function reserveWithCap({
       }
     }
 
-    const customer = await trx('customers').where({ id: customerId }).first('email');
     const { row, duplicate } = await reserve({
-      customerId, stream, marketingClass, emailKey, idempotencyKey, recipientEmail: customer.email, pestKey, conn: trx,
+      customerId, stream, marketingClass, emailKey, idempotencyKey,
+      recipientEmail: verdict.checks.customerEmail, pestKey, conn: trx,
     });
     return { ok: true, reason: null, row, duplicate };
   });

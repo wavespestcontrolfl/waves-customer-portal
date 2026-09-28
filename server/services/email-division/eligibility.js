@@ -18,6 +18,7 @@
 const db = require('../../models/db');
 const { etDateString } = require('../../utils/datetime-et');
 const { toE164 } = require('../../utils/phone');
+const { activeSuppressionsFor, GLOBAL_SUPPRESSION_TYPES } = require('../email-template-library');
 
 const REASONS = {
   CUSTOMER_MISSING: 'CUSTOMER_MISSING',
@@ -99,6 +100,11 @@ async function eligibleForEmail({
     if (!customer) return { ok: false, reason: REASONS.CUSTOMER_MISSING, checks };
     if (customer.deleted_at) return { ok: false, reason: REASONS.CUSTOMER_DELETED, checks };
     if (!customer.email) return { ok: false, reason: REASONS.NO_EMAIL, checks };
+    // Read once, here, and carried through: reserveWithCap stores exactly
+    // this address rather than re-reading customers.email in a later
+    // statement, which under READ COMMITTED could observe a value this
+    // suppression check never saw (codex pre-push r2 P1).
+    checks.customerEmail = customer.email;
 
     if (customer.phone) {
       const e164 = toE164(customer.phone) || customer.phone;
@@ -108,16 +114,19 @@ async function eligibleForEmail({
       if (dnc) return { ok: false, reason: REASONS.STAFF_DNC, checks };
     }
 
+    // Reuse the canonical classifier (email-template-library.js) rather than
+    // re-derive it: a bounce/spam_complaint/do_not_email row blocks every
+    // stream even when it carries an unrelated group_key, not just a
+    // null-group row (codex pre-push r2 P1). `template: null` is safe here —
+    // the classifier's template-only branches (transactional-bypass) never
+    // trigger for a real send_stream group key like ours.
     const groupKey = groupKeyFor(stream, emailKey);
-    const suppressions = await database('email_suppressions')
-      .whereRaw('lower(email) = lower(?)', [customer.email])
-      .where({ status: 'active' })
-      .select('group_key');
-    if (suppressions.some((row) => row.group_key == null)) {
-      return { ok: false, reason: REASONS.EMAIL_SUPPRESSED_GLOBAL, checks };
-    }
-    if (suppressions.some((row) => row.group_key === groupKey)) {
-      return { ok: false, reason: REASONS.EMAIL_SUPPRESSED_GROUP, checks };
+    const suppressions = await activeSuppressionsFor(null, customer.email, groupKey, database);
+    if (suppressions.length) {
+      const isGlobal = suppressions.some((row) => (
+        !row.group_key || GLOBAL_SUPPRESSION_TYPES.has(String(row.suppression_type || '').toLowerCase())
+      ));
+      return { ok: false, reason: isGlobal ? REASONS.EMAIL_SUPPRESSED_GLOBAL : REASONS.EMAIL_SUPPRESSED_GROUP, checks };
     }
 
     const prefs = await database('notification_prefs').where({ customer_id: customerId }).first();

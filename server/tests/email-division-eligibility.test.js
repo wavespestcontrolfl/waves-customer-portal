@@ -98,6 +98,11 @@ describe('email-division eligibility', () => {
     expect(r.reason).toBe(REASONS.EMAIL_SUPPRESSED_GROUP);
   });
 
+  test('EMAIL_SUPPRESSED_GLOBAL on a bounce even when it carries an unrelated group_key (codex pre-push r2 P1)', async () => {
+    const r = await evalWith({ suppressions: [{ group_key: 'marketing_newsletter', suppression_type: 'bounce' }] });
+    expect(r.reason).toBe(REASONS.EMAIL_SUPPRESSED_GLOBAL);
+  });
+
   test('EMAIL_SWITCH_OFF when notification_prefs.email_enabled is false', async () => {
     expect((await evalWith({ prefs: { email_enabled: false } })).reason).toBe(REASONS.EMAIL_SWITCH_OFF);
   });
