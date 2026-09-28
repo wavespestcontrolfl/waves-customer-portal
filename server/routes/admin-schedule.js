@@ -22766,6 +22766,19 @@ router.post('/generate-report', async (req, res) => {
       return res.status(500).json({ error: 'AI model not configured' });
     }
 
+    // Pre-push P1 (Codex #5145 r1): the prompt text itself must be the kill
+    // switch, not just the caption block below it — with the gate off the
+    // route was still handing the model the REWRITTEN provenance clause and
+    // photo-count instruction on EVERY generation, byte-different from the
+    // pre-gate prompt even though no caption ever reaches it. Both clauses
+    // below restore the EXACT prior wording when the gate is off; only the
+    // gate-on branch mentions TECHNICIAN PHOTO OBSERVATIONS.
+    const invalidObservationsProvenanceClause = photoContentLive
+      ? 'Three narrowly scoped sources may also be used, each with its own limited provenance: tech-confirmed LAWN ASSESSMENT scores (from GROUNDING CONTEXT) are verified findings for this visit and may support their supplied deltas; TREE & SHRUB REVIEWED PHOTO SIGNALS (from GROUNDING CONTEXT) may describe reviewed visual appearances only; TECHNICIAN PHOTO OBSERVATIONS below may reference what a specific photo shows ("the photo under the kitchen sink shows droppings") but never upgrades that observation into a confirmed finding, diagnosis, or completed work beyond what the photo visibly shows. None of these three establish a diagnosis, confirmed cause, observed pest species, or completed work.'
+      : 'Two narrowly scoped sources may also be used from GROUNDING CONTEXT: tech-confirmed LAWN ASSESSMENT scores are verified findings for this visit and may support their supplied deltas; TREE & SHRUB REVIEWED PHOTO SIGNALS may describe reviewed visual appearances only, with their photo-signal provenance. Tree photo signals never establish a diagnosis, confirmed cause, observed pest species, or completed work.';
+    const photoCountProvenanceNote = photoContentLive
+      ? 'use only separately supplied TREE & SHRUB REVIEWED PHOTO SIGNALS or a TECHNICIAN PHOTO OBSERVATIONS block below, each with its own limited provenance — never infer unseen photo contents'
+      : 'use only separately supplied TREE & SHRUB REVIEWED PHOTO SIGNALS with their limited provenance, never infer unseen photo contents';
     const systemPrompt = `# SERVICE REPORT COPY — SYSTEM PROMPT v4
 
 ## CONTEXT
@@ -22789,7 +22802,7 @@ A generic report is a failed report. Build both sections around the concrete det
 
 2. **No overpromising.** Never claim: elimination, eradication, impenetrable, guaranteed, 100%, total protection, pest-free, foolproof. Use language like: reduce activity, manage pressure, support long-term control, limit conducive conditions.
 
-3. **No invented observations.** Only present conditions, pest types, or findings as observed on THIS visit when they appear in the service notes or in a STRUCTURED SERVICE FINDINGS block below (both are technician-recorded for THIS visit) — and a block line's own group decides HOW it may be used per constraint #7: only its "Findings observed" lines are observations. If the inputs say "general pest control" with no specifics, do not fabricate sightings. A PRODUCT LABELED COVERAGE block may support a separate product-capability statement under the grounding rules below, but those label examples are never observations, visit targets, or proof that every listed species was treated. Three narrowly scoped sources may also be used, each with its own limited provenance: tech-confirmed LAWN ASSESSMENT scores (from GROUNDING CONTEXT) are verified findings for this visit and may support their supplied deltas; TREE & SHRUB REVIEWED PHOTO SIGNALS (from GROUNDING CONTEXT) may describe reviewed visual appearances only; TECHNICIAN PHOTO OBSERVATIONS below may reference what a specific photo shows ("the photo under the kitchen sink shows droppings") but never upgrades that observation into a confirmed finding, diagnosis, or completed work beyond what the photo visibly shows. None of these three establish a diagnosis, confirmed cause, observed pest species, or completed work. Omitted/hidden signals are unavailable, not healthy or absent.
+3. **No invented observations.** Only present conditions, pest types, or findings as observed on THIS visit when they appear in the service notes or in a STRUCTURED SERVICE FINDINGS block below (both are technician-recorded for THIS visit) — and a block line's own group decides HOW it may be used per constraint #7: only its "Findings observed" lines are observations. If the inputs say "general pest control" with no specifics, do not fabricate sightings. A PRODUCT LABELED COVERAGE block may support a separate product-capability statement under the grounding rules below, but those label examples are never observations, visit targets, or proof that every listed species was treated. ${invalidObservationsProvenanceClause} Omitted/hidden signals are unavailable, not healthy or absent.
 
 4. **No brand names for products.** Use active ingredient names (fipronil, bifenthrin, imidacloprid, prodiamine, etc.) or functional descriptions (non-repellent residual, insect growth regulator, pre-emergent herbicide, systemic drench). If the active ingredient is not provided in the inputs, use the functional description only. When the copy tells the homeowner to DO something with a product, lead with the plain-language role, not a bare chemical name — "water in today's grub treatment", never "water in the clothianidin".
 
@@ -22976,7 +22989,7 @@ Customer concern (as reported, not a verified finding): ${promptConcern || 'None
 [FUTURE ADVICE — not completed work]
 Recommendations: ${promptRecs.length ? promptRecs.join('; ') : 'None'}
 
-Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a count alone supplies no visual facts; use only separately supplied TREE & SHRUB REVIEWED PHOTO SIGNALS or a TECHNICIAN PHOTO OBSERVATIONS block below, each with its own limited provenance — never infer unseen photo contents)`;
+Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a count alone supplies no visual facts; ${photoCountProvenanceNote})`;
 
     // TECHNICIAN PHOTO OBSERVATIONS (GATE_REPORT_PHOTO_CONTENT, owner spec
     // 2026-09-27): the tech's own reviewed/edited captions for this visit's

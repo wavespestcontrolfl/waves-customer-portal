@@ -129,3 +129,68 @@ test('gate on: an access code in a caption or the summary is redacted before it 
   expect(text).not.toContain('4821');
   expect(text).not.toContain('1234');
 });
+
+// Pre-push P1 (Codex #5145 r1): the gate must be a kill switch for the
+// PROMPT TEXT ITSELF, not just for whether the caption block is appended —
+// a generation with the gate off must send the byte-identical pre-branch
+// system prompt and photo-count note on EVERY request, never the rewritten
+// provenance wording, even though no caption ever reaches it either way.
+const crypto = require('crypto');
+const sha256 = (s) => crypto.createHash('sha256').update(s).digest('hex');
+// Original (pre-branch) wording, reproduced verbatim from the diff this P1
+// closed — this is what a gate-off request must still send.
+const PRE_BRANCH_INVALID_OBSERVATIONS_CLAUSE = 'Two narrowly scoped sources may also be used from GROUNDING CONTEXT: tech-confirmed LAWN ASSESSMENT scores are verified findings for this visit and may support their supplied deltas; TREE & SHRUB REVIEWED PHOTO SIGNALS may describe reviewed visual appearances only, with their photo-signal provenance. Tree photo signals never establish a diagnosis, confirmed cause, observed pest species, or completed work.';
+const PRE_BRANCH_PHOTO_COUNT_NOTE = 'use only separately supplied TREE & SHRUB REVIEWED PHOTO SIGNALS with their limited provenance, never infer unseen photo contents';
+// Gate-ON wording (this branch's own additions) — used only to normalize
+// both sides to the SAME placeholder below, proving the rest of the prompt
+// is untouched by the gate.
+const GATE_ON_INVALID_OBSERVATIONS_CLAUSE = 'Three narrowly scoped sources may also be used, each with its own limited provenance: tech-confirmed LAWN ASSESSMENT scores (from GROUNDING CONTEXT) are verified findings for this visit and may support their supplied deltas; TREE & SHRUB REVIEWED PHOTO SIGNALS (from GROUNDING CONTEXT) may describe reviewed visual appearances only; TECHNICIAN PHOTO OBSERVATIONS below may reference what a specific photo shows ("the photo under the kitchen sink shows droppings") but never upgrades that observation into a confirmed finding, diagnosis, or completed work beyond what the photo visibly shows. None of these three establish a diagnosis, confirmed cause, observed pest species, or completed work.';
+const GATE_ON_PHOTO_COUNT_NOTE = 'use only separately supplied TREE & SHRUB REVIEWED PHOTO SIGNALS or a TECHNICIAN PHOTO OBSERVATIONS block below, each with its own limited provenance — never infer unseen photo contents';
+
+test('gate off: the system prompt and photo-count note are byte-identical to the pre-branch wording, even with substantive non-photo input', async () => {
+  const res = mkRes();
+  await handler(mkReq({ observations: ['Ants along the exterior baseboard.'] }), res);
+  expect(res.statusCode).toBe(200);
+  const { system, text } = mockProvider.mock.calls[0][0];
+  expect(system).toContain(PRE_BRANCH_INVALID_OBSERVATIONS_CLAUSE);
+  expect(system).not.toContain('Three narrowly scoped sources');
+  expect(system).not.toContain('TECHNICIAN PHOTO OBSERVATIONS');
+  expect(text).toContain(`(a count alone supplies no visual facts; ${PRE_BRANCH_PHOTO_COUNT_NOTE})`);
+  expect(text).not.toContain('TECHNICIAN PHOTO OBSERVATIONS');
+  // Regression pin: any future change to the gate-off system prompt for
+  // this service line changes this hash — a deliberate change updates the
+  // hash in the same commit; an accidental one (like the bug this closes)
+  // is caught here instead of six pre-push rounds later.
+  expect(sha256(system)).toBe('f9cfa2fed54fb7ebb51c90c9bacd31bdf6cbdb63711e9f1e65fa49aa358f7f87');
+});
+
+test('gate on: the same request differs from the gate-off prompt ONLY by the gated additions', async () => {
+  const offRes = mkRes();
+  await handler(mkReq({ observations: ['Ants along the exterior baseboard, second visit.'] }), offRes);
+  const offSystem = mockProvider.mock.calls[0][0].system;
+  const offText = mockProvider.mock.calls[0][0].text;
+  mockProvider.mockClear();
+
+  process.env.GATE_REPORT_PHOTO_CONTENT = 'true';
+  const onRes = mkRes();
+  await handler(mkReq({ observations: ['Ants along the exterior baseboard, second visit.'] }), onRes);
+  const onSystem = mockProvider.mock.calls[0][0].system;
+  const onText = mockProvider.mock.calls[0][0].text;
+
+  expect(onRes.statusCode).toBe(200);
+  expect(offRes.statusCode).toBe(200);
+  expect(onSystem).not.toBe(offSystem);
+  // The ONLY difference in the system prompt is the provenance clause
+  // swapping from the "Two"/old wording to the "Three"/new wording — every
+  // other character is identical.
+  expect(onSystem.replace(GATE_ON_INVALID_OBSERVATIONS_CLAUSE, 'X')).toBe(
+    offSystem.replace(PRE_BRANCH_INVALID_OBSERVATIONS_CLAUSE, 'X'),
+  );
+  expect(onSystem).toContain('Three narrowly scoped sources');
+  expect(onSystem).toContain('TECHNICIAN PHOTO OBSERVATIONS below may reference');
+  // The user-message photo-count note is the only other gated difference —
+  // no photoObservationsBlock is appended either way since no captions were
+  // sent, so `text` differs ONLY by that one parenthetical note.
+  expect(onText).not.toBe(offText);
+  expect(onText.replace(GATE_ON_PHOTO_COUNT_NOTE, 'X')).toBe(offText.replace(PRE_BRANCH_PHOTO_COUNT_NOTE, 'X'));
+});

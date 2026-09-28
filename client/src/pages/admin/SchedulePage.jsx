@@ -16136,11 +16136,17 @@ export function CompletionPanel({
       // A confirmed photo-scored assessment is substantive visit detail on
       // its own — a scores-only lawn visit can still generate.
       Boolean(payload.lawnAssessmentId) ||
-      // Reviewed photo captions are real, tech-vetted text describing what a
-      // photo shows — substantive on their own, same as the assessment rule
-      // above (mirrors the server's cappedPhotoCaptions gate; the summary
-      // alone never opens this).
-      reportPhotoCaptions.length > 0 ||
+      // Reviewed photo captions do NOT open Generate on their own here
+      // (pre-push P2, Codex #5145 r1) — GATE_REPORT_PHOTO_CONTENT is a
+      // deploy-wide GATE_* flag, not a per-user flag `useFeatureFlag` can
+      // read, and no dedicated readout endpoint exists for it the way
+      // GATE_JOB_CARD or GATE_DISCOUNT_STACKING each have their own. With
+      // the gate off the server always 400s a captions-only request, so
+      // letting captions alone flip this client-side would just hand the
+      // tech a false "Generate" affordance that fails on click. Captions
+      // still RIDE ALONG in the payload above whenever some other input
+      // already opens Generate — this only removes them as an independent
+      // opener; the server stays the sole authority on whether they count.
       // The omitted-field fallback state must REACH the server — after a
       // failed lookup the client can't know whether a visit-linked confirmed
       // row exists; the server's validated gate decides.
@@ -18138,6 +18144,15 @@ export function CompletionPanel({
       // the payload sends photoCount — the set's size is a generation
       // input like any other (codex r44)
       servicePhotos.length,
+      // GATE_REPORT_PHOTO_CONTENT (pre-push P2, Codex #5145 r1): reviewed
+      // captions and the photo summary are generation inputs too (see
+      // buildAiReportPayload's photoCaptions/photoSummary) — the set's SIZE
+      // above doesn't catch an edited caption on an unchanged photo count,
+      // and typedPhotoSummary wasn't tracked at all, so the AI copy could
+      // stay installed beside captions/a summary the report was never
+      // actually generated from.
+      servicePhotos.map((p) => String(p?.caption || "").trim()),
+      typedPhotoSummary,
       // a retaken/reconfirmed lawn assessment changes what completion and
       // the final report describe — the draft must invalidate with it
       // (codex r58)
@@ -18165,7 +18180,7 @@ export function CompletionPanel({
     }
   }, [areasServiced, observationsText, recommendationsText,
     customerInteraction, customerConcern, clientPestRating,
-    servicePhotos, generating, lawnAssessmentId, lawnAssessmentRevision,
+    servicePhotos, typedPhotoSummary, generating, lawnAssessmentId, lawnAssessmentRevision,
     aiReportIncludeComms, selectedProducts, serviceTypeForArea]);
   // A typed edit AFTER generation settles invalidates an UNTOUCHED draft —
   // the installed prose described the old facts, and completion would
