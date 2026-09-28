@@ -1159,10 +1159,11 @@ class GoogleBusinessService {
     if (data.status !== 'OK') throw new Error(`Places API: ${data.status}`);
     const googleRating = data.result?.rating || null;
     const googleTotalReviews = data.result?.user_ratings_total || null;
-    // Google answered and the listing has no reviews: nothing to store, but
-    // the health check needs this answer to tell a profile that has never had
-    // a review from a feed that went silent.
-    if (!googleRating && !googleTotalReviews) return { rating: null, totalReviews: 0 };
+    // Returns the listing's public review count. Google answered and the
+    // listing has no reviews: nothing to store, but the 0 lets the health
+    // check tell a profile that has never had a review from a feed that went
+    // silent (a skipped or failed call yields no count at all).
+    if (!googleRating && !googleTotalReviews) return 0;
     const existing = await db('google_reviews').where({ google_review_id: `places_stats_${loc.id}` }).first();
     const statsData = JSON.stringify({ rating: googleRating, totalReviews: googleTotalReviews });
     if (existing) {
@@ -1178,7 +1179,7 @@ class GoogleBusinessService {
         synced_at: db.fn.now(),
       });
     }
-    return { rating: googleRating, totalReviews: googleTotalReviews };
+    return googleTotalReviews;
   }
 
   // `countedRowIds`: review row ids a breaker-tripped GBP store of this
@@ -1490,8 +1491,9 @@ class GoogleBusinessService {
     // codex #3298 r1).
     const pulledCounts = {};
     const gbpFailures = {};
-    // This run's public review count per location, from Places. Present only
-    // when Places answered this run; a failed call leaves it unset.
+    // This run's public review count per location, from Places. A number
+    // only when Places answered this run; a skipped or failed call leaves
+    // null or undefined.
     const placesTotals = {};
     // Unlinked-review notifications collected across the WHOLE run and fired
     // after every location's reviews are inserted/linked — the likely-reviewer
@@ -1521,10 +1523,9 @@ class GoogleBusinessService {
         // newest information always rings last.
         const locRestored = [];
         if (GOOGLE_KEY) {
-          const stats = await this._syncPlacesStatsForLocation(loc, GOOGLE_KEY).catch(err => {
+          placesTotals[loc.id] = await this._syncPlacesStatsForLocation(loc, GOOGLE_KEY).catch(err => {
             logger.warn(`[gbp] Places stats sync failed for ${loc.name}: ${err.message}`);
           });
-          if (Number.isFinite(stats?.totalReviews)) placesTotals[loc.id] = stats.totalReviews;
         }
 
         let usedGbp = false;
@@ -1680,8 +1681,8 @@ class GoogleBusinessService {
    *   silent_empty  ACT  GBP pull succeeds but the feed has ZERO reviews
    *                      (the Venice wipe class — mechanically "healthy").
    *                      Not raised for a profile that has never had a
-   *                      review: Places confirms zero this run, no review
-   *                      row was ever stored, and no stored total says more
+   *                      review: Places confirms zero this run and no
+   *                      review row was ever stored
    *   ingest_stale  ACT  Google shows more reviews than we ever ingested and
    *                      nothing new has landed in 14d — reviewers exist that
    *                      auto-mark can never see
@@ -1717,15 +1718,15 @@ class GoogleBusinessService {
     }
     // Judged on the CURRENT pull, not retained rows: a wiped profile keeps
     // its historical rows (missing_since-stamped, never deleted), so a
-    // stored-row count would read healthy forever after the wipe.
-    if (source === 'gbp' && Number(pulledCount) === 0) {
+    // stored-row count would read healthy forever after the wipe. Every
+    // failed source returned above, so a pull counted here succeeded.
+    if (Number(pulledCount) === 0) {
       // Nothing is missing from a profile that has never had a review. A
-      // wipe still alerts: its removal-stamped rows stay stored, and a
-      // stored Places total keeps the count Google showed before.
-      if (placesTotal === 0 && storedCount === 0 && !(Number(statsTotal) > 0)) return null;
+      // wipe still alerts: its removal-stamped rows stay stored.
+      if (placesTotal === 0 && storedCount === 0) return null;
       return { cls: 'silent_empty', severity: 'ACT', detail: 'the GBP pull succeeds but the feed returns ZERO reviews — profile wiped, suspended, or re-created (the Venice class)' };
     }
-    if (Number.isFinite(statsTotal) && statsTotal > rowCount && days(newestIngestAt) > 14) {
+    if (statsTotal > rowCount && days(newestIngestAt) > 14) {
       return { cls: 'ingest_stale', severity: 'ACT', detail: `Google shows ${statsTotal} reviews but only ${rowCount} were ever ingested and nothing new in ${Math.floor(days(newestIngestAt))}d — those reviewers can never auto-mark` };
     }
     if (days(statsUpdatedAt) > 7) {

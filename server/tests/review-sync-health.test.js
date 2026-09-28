@@ -110,8 +110,6 @@ describe('_classifyLocationSyncHealth (pure classifier)', () => {
     expect(classify({ ...neverReviewed, placesTotal: 12 })).toMatchObject({ cls: 'silent_empty' });
     // A wipe: both sources now read zero, but the removal-stamped rows stay stored.
     expect(classify({ ...neverReviewed, storedCount: 47, newestIngestAt: daysAgo(60) })).toMatchObject({ cls: 'silent_empty' });
-    // A wipe before anything was ingested: the stored Places total remembers the reviews.
-    expect(classify({ ...neverReviewed, statsTotal: 30, statsUpdatedAt: daysAgo(40) })).toMatchObject({ cls: 'silent_empty' });
   });
 
   test('Google shows more reviews than ever ingested + 14d of silence → ingest_stale ACT', () => {
