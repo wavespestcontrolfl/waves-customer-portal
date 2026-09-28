@@ -642,14 +642,15 @@ suite('first-application-sibling-split — periodic sweep', () => {
       subtotal: 60, total: 60, created_at: new Date('2026-09-05T00:00:00Z'),
     });
 
-    // loadCandidates deliberately returns BOTH rows for this estimate now
-    // — the true anchor's invoice AND B's own new invoice (each
-    // structurally qualifies; see the module header for why picking "the"
-    // one by any heuristic is unsafe). evaluateEstimateCandidates is what
-    // must get this right by evaluating them together.
+    // loadCandidates now returns ONLY the true anchor's own invoice for
+    // this estimate — never B's own new invoice too — because the first
+    // sweep already ESTABLISHED anchorId=A in the standing alert's own
+    // metadata, and every later tick re-derives that SAME known anchor
+    // directly instead of re-running the (ambiguous, once a split exists)
+    // structural scan. B's own invoice is not even discovered here.
     const candidates = await loadCandidates(trx);
     const mine = candidates.filter((c) => c.source_estimate_id === estimateId);
-    expect(mine.map((c) => c.invoice_id).sort()).toEqual([anchorInvoiceId, bInvoiceId].sort());
+    expect(mine.map((c) => c.invoice_id)).toEqual([anchorInvoiceId]);
 
     const [result] = await sweepOnce(trx, estimateId);
     expect(result.action).toBe('alerted');
@@ -688,6 +689,80 @@ suite('first-application-sibling-split — periodic sweep', () => {
     expect(stillOpenAfterReissue.read_at).toBeNull();
     const meta = typeof stillOpenAfterReissue.metadata === 'string' ? JSON.parse(stillOpenAfterReissue.metadata) : stillOpenAfterReissue.metadata;
     expect(meta.invoiceId).toBe(anchorReplacementId);
+  }));
+
+  // Codex on head 5531a784ac: the opposite failure mode from the tests
+  // above. A THREE-program group where C stays ALIGNED with the true
+  // anchor A the whole time — only B moves and gets split off. Evaluating
+  // B AS an anchor (the union-of-all-candidates fix) computes divergence
+  // BACKWARDS from B's own (moved) date: it reads C, which never moved at
+  // all, as "diverging FROM B" and manufactures a false alert about a
+  // sibling that needs no action whatsoever. The established-anchor
+  // mechanism must never let B become a reference frame in the first
+  // place once A is already established.
+  test('C stays aligned with A after B splits off — never a false alert about C', () => rollbackTest(async (trx) => {
+    const customerId = randomUUID();
+    const estimateId = randomUUID();
+    const anchorId = randomUUID();
+    const bId = randomUUID();
+    const cId = randomUUID();
+    await trx('customers').insert({
+      id: customerId, first_name: 'Synthetic aligned-sibling fixture', phone: `qa-${customerId.slice(0, 8)}`, active: true,
+    });
+    await trx('estimates').insert({ id: estimateId, customer_id: customerId, status: 'accepted' });
+    await trx('scheduled_services').insert([
+      {
+        id: anchorId, customer_id: customerId, source_estimate_id: estimateId, scheduled_date: SAME_DATE,
+        service_type: 'Quarterly Pest Control', status: 'confirmed', is_recurring: true, estimated_price: 200,
+      },
+      {
+        id: bId, customer_id: customerId, source_estimate_id: estimateId, scheduled_date: SAME_DATE,
+        service_type: 'Lawn Care', status: 'confirmed', is_recurring: true, estimated_price: null,
+      },
+      {
+        id: cId, customer_id: customerId, source_estimate_id: estimateId, scheduled_date: SAME_DATE,
+        service_type: 'Tree & Shrub', status: 'confirmed', is_recurring: true, estimated_price: null,
+      },
+    ]);
+    const anchorInvoiceId = randomUUID();
+    await trx('invoices').insert({
+      id: anchorInvoiceId, customer_id: customerId, scheduled_service_id: anchorId,
+      token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
+      status: 'draft', title: 'First Service Application',
+      notes: `Auto-generated from accepted estimate #${estimateId}. Customer selected pay per application — first application only.`,
+      line_items: JSON.stringify([{ description: 'First service application', quantity: 1, unit_price: 200, amount: 200 }]),
+      subtotal: 200, total: 200,
+    });
+
+    // Only B moves. C stays put, aligned with A, the whole time.
+    await trx('scheduled_services').where({ id: bId }).update({ scheduled_date: '2026-10-02' });
+    const [firstResult] = await sweepOnce(trx, estimateId);
+    expect(firstResult.action).toBe('alerted');
+    expect(firstResult.divergingSiblingIds).toEqual([bId]);
+    const dedupeKey = DEDUPE_KEY(estimateId, [bId]);
+    expect((await readBell(trx, dedupeKey)).read_at).toBeNull();
+
+    // Office splits B: prices it and mints its own live invoice. C never
+    // moved, so the group is now genuinely, fully resolved.
+    await trx('scheduled_services').where({ id: bId }).update({ estimated_price: 60 });
+    await trx('invoices').insert({
+      id: randomUUID(), customer_id: customerId, scheduled_service_id: bId,
+      token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
+      status: 'draft', title: 'Lawn Care', notes: 'Hand-split from the combined first-application invoice.',
+      line_items: JSON.stringify([{ description: 'Lawn Care', quantity: 1, unit_price: 60, amount: 60 }]),
+      subtotal: 60, total: 60,
+    });
+
+    const [result] = await sweepOnce(trx, estimateId);
+    expect(result.action).toBe('cleared');
+    expect(result.reason).toBe('split_completed');
+
+    const cleared = await readBell(trx, dedupeKey);
+    expect(cleared.read_at).not.toBeNull();
+
+    // No NEW alert about C was ever raised.
+    const bogusCAlert = await readBell(trx, DEDUPE_KEY(estimateId, [cId]));
+    expect(bogusCAlert).toBeUndefined();
   }));
 
   test('a priced (but still diverging) sibling still alerts (Codex P1 fix)', () => rollbackTest(async (trx) => {
