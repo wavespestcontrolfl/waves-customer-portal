@@ -4505,15 +4505,6 @@ const ADMIN_PREFS_ALLOWED_FIELDS = [...PREFS_ALLOWED_FIELDS, ...ADMIN_ONLY_PREFS
 
 router.put('/:id/property-preferences', requireAdmin, async (req, res, next) => {
   try {
-    // A missing or archived customer is a 404, not a foreign-key 500 on the
-    // insert — and a stale Customer 360 tab must not keep editing a
-    // soft-deleted customer's preferences (codex r2).
-    const liveCustomer = await db('customers')
-      .where({ id: req.params.id })
-      .whereNull('deleted_at')
-      .first('id');
-    if (!liveCustomer) return res.status(404).json({ error: 'Customer not found' });
-
     const { value, rejected, presentCount } = validatePrefsBodyWithSchemas(ADMIN_PREFS_FIELD_SCHEMAS, req.body);
     if (presentCount > 0 && rejected.length === presentCount) {
       // Every field in the request failed validation — nothing to save.
@@ -4593,10 +4584,6 @@ router.put('/:id/property-preferences', requireAdmin, async (req, res, next) => 
       });
     }
 
-    // Same advisory-lock key/order the portal PUT and the customer-edit
-    // route's address sync already take on this customer — one shared lock
-    // order across every property_preferences writer avoids an AB-BA
-    // deadlock between them (codex #3565 gh-r38/r39).
     // Details on file mean a sensitivity exists: every tech-facing consumer
     // (nextstop-alerts, job-card, dispatch) gates the warning on the
     // boolean, so details saved without the flag would never reach the
@@ -4609,11 +4596,29 @@ router.put('/:id/property-preferences', requireAdmin, async (req, res, next) => 
       updates.chemical_sensitivities = true;
     }
 
+    let customerMissing = false;
+    // Same advisory-lock key/order the portal PUT and the customer-edit
+    // route's address sync already take on this customer — one shared lock
+    // order across every property_preferences writer avoids an AB-BA
+    // deadlock between them (codex #3565 gh-r38/r39).
     await db.transaction(async (trx) => {
       await trx.raw(
         'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
         ['property-preferences', String(req.params.id)],
       );
+      // A missing or archived customer is a 404, not a foreign-key 500 on
+      // the insert, and a stale tab must not edit a soft-deleted customer.
+      // Checked under a row lock inside the write so an archive committing
+      // mid-request can't slip between the check and the upsert (codex r2/r4).
+      const liveCustomer = await trx('customers')
+        .where({ id: req.params.id })
+        .whereNull('deleted_at')
+        .forShare()
+        .first('id');
+      if (!liveCustomer) {
+        customerMissing = true;
+        return;
+      }
       const current = await trx('property_preferences')
         .where({ customer_id: req.params.id })
         .first();
@@ -4645,6 +4650,8 @@ router.put('/:id/property-preferences', requireAdmin, async (req, res, next) => 
         await trx('property_preferences').insert({ customer_id: req.params.id, ...updates, ...stampIrrigationOn });
       }
     });
+
+    if (customerMissing) return res.status(404).json({ error: 'Customer not found' });
 
     const preferences = await db('property_preferences')
       .where({ customer_id: req.params.id })

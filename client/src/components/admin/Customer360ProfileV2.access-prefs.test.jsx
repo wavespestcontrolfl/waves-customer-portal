@@ -247,6 +247,52 @@ describe('Customer 360 → Property → Access & Preferences', () => {
     expect(await screen.findByText('Rex — Dog — Boxer · Outdoor, Aggressive')).toBeInTheDocument();
   });
 
+  it('locks pet count and details while a structured pet list exists', async () => {
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const path = String(url);
+      if (path.endsWith('/admin/payers')) return response({ payers: [] });
+      if (path.split('?')[0].endsWith('/timeline')) return response({ timeline: [] });
+      if (path.endsWith('/admin/customers/customer-a')) {
+        return response(customerDetail({ pets_structured: [{ name: 'Rex', type: 'Dog' }] }));
+      }
+      return response({});
+    }));
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+    await screen.findAllByText('Avery Customer');
+    await openPropertyTab();
+    await screen.findByText('Access & Preferences');
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Access & Preferences' }));
+    expect((await screen.findByText('Pet Count')).closest('label').querySelector('input')).toBeDisabled();
+    expect(screen.getByText('Pet Details').closest('label').querySelector('textarea')).toBeDisabled();
+  });
+
+  it('keeps the editor open with an error when the save lands but the profile reload fails', async () => {
+    let profileLoads = 0;
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const path = String(url);
+      if (path.endsWith('/admin/payers')) return response({ payers: [] });
+      if (path.split('?')[0].endsWith('/timeline')) return response({ timeline: [] });
+      if (path.endsWith('/admin/customers/customer-a/property-preferences')) {
+        return response({ success: true, saved: true, preferences: BASE_PREFS });
+      }
+      if (path.endsWith('/admin/customers/customer-a')) {
+        profileLoads += 1;
+        return profileLoads === 1 ? response(customerDetail()) : response({ error: 'boom' }, 500);
+      }
+      return response({});
+    }));
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+    await screen.findAllByText('Avery Customer');
+    await openPropertyTab();
+    await screen.findByText('Access & Preferences');
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Access & Preferences' }));
+    const notes = (await screen.findByText('Access Notes')).closest('label').querySelector('textarea');
+    fireEvent.change(notes, { target: { value: 'Ring twice' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    expect(await screen.findByText(/Saved, but the profile couldn't refresh/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Save' })).toBeInTheDocument();
+  });
+
   it('an unset contact preference shows Not set, and choosing Text actually saves it', async () => {
     const bodies = [];
     vi.stubGlobal('fetch', vi.fn((url, options) => {

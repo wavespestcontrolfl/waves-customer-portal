@@ -6946,6 +6946,8 @@ function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved }) {
   // full-snapshot resubmit could clobber a newer customer portal autosave
   // on a field nobody touched here).
   const initialDraftRef = useRef(null);
+  const hasStructuredPets =
+    Array.isArray(prefs?.pets_structured) && prefs.pets_structured.length > 0;
 
   const set = (key) => (value) =>
     setDraft((prev) => ({ ...(prev || {}), [key]: value }));
@@ -7021,12 +7023,22 @@ function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved }) {
         setErr(
           `${response.rejected.length} field${response.rejected.length > 1 ? "s" : ""} could not be saved — fix and try again. Everything else was saved.`,
         );
+        await onSaved?.();
       } else {
+        // Refresh first, then close: if the reload fails the editor stays
+        // open with the error rather than dropping staff back onto a stale
+        // read view. The save itself landed, so the baseline moves to it.
+        initialDraftRef.current = { ...draft };
+        try {
+          await onSaved?.();
+        } catch (reloadErr) {
+          setErr(`Saved, but the profile couldn't refresh — reload the page to see it. (${reloadErr?.message || "refresh failed"})`);
+          return;
+        }
         setEditing(false);
         setDraft(null);
         initialDraftRef.current = null;
       }
-      await onSaved?.();
     } catch (e) {
       const rejected = e?.body?.rejected;
       if (Array.isArray(rejected) && rejected.length) {
@@ -7226,11 +7238,19 @@ function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved }) {
         </AccessPrefsField>
 
         <AccessPrefsSubheading>Pets</AccessPrefsSubheading>
+        {/* The tech job card prefers the structured pet list over count and
+            details, so while one exists those two stay read-only here —
+            an edit would never reach the technician. */}
+        {hasStructuredPets && (
+          <div className="text-ui-caption text-ink-secondary">
+            This customer's pet list comes from their portal and is what the technician sees; pet count and details are locked while it exists.
+          </div>
+        )}
         <AccessPrefsField label="Pet Count" error={fieldErrors.petCount}>
-          <Input type="number" min="0" max="20" className={ACCESS_PREFS_INPUT_CLASS} value={d.petCount} onChange={(e) => set("petCount")(e.target.value)} />
+          <Input type="number" min="0" max="20" disabled={hasStructuredPets} className={ACCESS_PREFS_INPUT_CLASS} value={d.petCount} onChange={(e) => set("petCount")(e.target.value)} />
         </AccessPrefsField>
         <AccessPrefsField label="Pet Details" error={fieldErrors.petDetails}>
-          <Textarea rows={2} className={ACCESS_PREFS_TEXTAREA_CLASS} value={d.petDetails} onChange={(e) => set("petDetails")(e.target.value)} />
+          <Textarea rows={2} disabled={hasStructuredPets} className={ACCESS_PREFS_TEXTAREA_CLASS} value={d.petDetails} onChange={(e) => set("petDetails")(e.target.value)} />
         </AccessPrefsField>
         <AccessPrefsField label="Pets Secured Plan" error={fieldErrors.petsSecuredPlan}>
           <Textarea rows={2} className={ACCESS_PREFS_TEXTAREA_CLASS} value={d.petsSecuredPlan} onChange={(e) => set("petsSecuredPlan")(e.target.value)} />

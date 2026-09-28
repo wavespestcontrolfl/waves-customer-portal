@@ -44,6 +44,7 @@ jest.mock('../models/db', () => {
     const q = {};
     q.where = jest.fn(() => q);
     q.whereNull = jest.fn(() => q);
+    q.forShare = jest.fn(() => q);
     q.first = jest.fn(async () => mockState.customerRow);
     return q;
   };
