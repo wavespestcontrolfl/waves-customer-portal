@@ -84,4 +84,34 @@ describe('useModalFocus', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Close outer' }));
     await waitFor(() => expect(originalOpener).toHaveFocus());
   });
+
+  it('matches native Tab stops for named radio groups and their form owners', async () => {
+    function RadioDialog() {
+      const ref = useModalFocus(true);
+      return (
+        <div ref={ref} role="dialog" aria-label="Radio dialog">
+          <button>Before radios</button>
+          <form>
+            <input type="radio" name="plan" aria-label="Main unchecked" />
+            <input type="radio" name="plan" aria-label="Main checked" defaultChecked />
+            <input type="radio" name="fallback" aria-label="Fallback first" />
+            <input type="radio" name="fallback" aria-label="Fallback second" />
+          </form>
+          <form>
+            <input type="radio" name="plan" aria-label="Other unchecked" />
+            <input type="radio" name="plan" aria-label="Other checked" defaultChecked />
+          </form>
+          <button>After radios</button>
+        </div>
+      );
+    }
+
+    render(<RadioDialog />);
+    await waitFor(() => expect(screen.getByRole('dialog', { name: 'Radio dialog' })).toHaveFocus());
+    const stops = [['button', 'Before radios'], ['radio', 'Main checked'], ['radio', 'Fallback first'], ['radio', 'Other checked'], ['button', 'After radios'], ['button', 'Before radios']];
+    for (const [role, name] of stops) {
+      fireEvent.keyDown(document, { key: 'Tab' });
+      expect(screen.getByRole(role, { name })).toHaveFocus();
+    }
+  });
 });

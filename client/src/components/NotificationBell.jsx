@@ -481,7 +481,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
             top: isDark ? 'calc(52px + env(safe-area-inset-top, 0px))' : 'calc(env(safe-area-inset-top, 0px) + 8px)',
             left: isDark ? 0 : 'calc(10px + env(safe-area-inset-left, 0px))',
             right: isDark ? 0 : 'calc(10px + env(safe-area-inset-right, 0px))',
-            bottom: isDark ? 'calc(56px + env(safe-area-inset-bottom, 0px))' : 'calc(env(safe-area-inset-bottom, 0px) + 78px)',
+            bottom: isDark ? 'calc(56px + env(safe-area-inset-bottom, 0px))' : 'calc(var(--portal-bottom-nav-height, calc(70px + env(safe-area-inset-bottom, 0px))) + 8px)',
             background: '#FFFFFF', zIndex: 9999,
             borderRadius: isDark ? 0 : 24,
             border: isDark ? 'none' : '1px solid #E7E2D7',

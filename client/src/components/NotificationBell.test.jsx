@@ -529,7 +529,7 @@ describe('NotificationBell customer safe-area offsets', () => {
       fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
       const panel = await screen.findByRole('dialog', { name: 'Notifications' });
       expect(panel.style.bottom).toContain('safe-area-inset-bottom');
-      expect(panel.style.bottom).toContain('78px');
+      expect(panel.style.bottom).toContain('--portal-bottom-nav-height');
       expect(panel.style.left).toContain('safe-area-inset-left');
       expect(panel.style.right).toContain('safe-area-inset-right');
     } finally {

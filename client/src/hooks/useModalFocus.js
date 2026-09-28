@@ -62,8 +62,15 @@ export default function useModalFocus(active = true, onEscape = null) {
     const modalEntry = modalEntryRef.current;
     modalStack.push(modalEntry);
 
-    const getFocusable = () =>
-      Array.from(dialog.querySelectorAll(FOCUSABLE_SELECTOR)).filter(isAvailable);
+    const getFocusable = () => {
+      const controls = Array.from(dialog.querySelectorAll(FOCUSABLE_SELECTOR)).filter(isAvailable);
+      return controls.filter((element) => {
+        if (element.type !== 'radio' || !element.name) return true;
+        const group = controls.filter((other) => other.type === 'radio'
+          && other.name === element.name && other.form === element.form);
+        return element === (group.find((radio) => radio.checked) || group[0]);
+      });
+    };
 
     if (!dialog.hasAttribute('tabindex')) dialog.setAttribute('tabindex', '-1');
     if (!dialog.contains(document.activeElement)) {
