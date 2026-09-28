@@ -344,4 +344,24 @@ describe('agent-gap-reports', () => {
       }
     });
   });
+
+  describe('gapWindowCutoff', () => {
+    test('reaches the prior Monday 08:15 ET across the fall DST change (169 hours)', () => {
+      const { _private: { gapWindowCutoff } } = load();
+      const run = new Date('2026-11-02T13:15:00Z'); // Mon 08:15 EST
+      expect(gapWindowCutoff(7, run).toISOString()).toBe('2026-10-26T12:15:00.000Z'); // Mon 08:15 EDT
+    });
+
+    test('reaches the prior Monday 08:15 ET across the spring DST change (167 hours)', () => {
+      const { _private: { gapWindowCutoff } } = load();
+      const run = new Date('2027-03-15T12:15:00Z'); // Mon 08:15 EDT
+      expect(gapWindowCutoff(7, run).toISOString()).toBe('2027-03-08T13:15:00.000Z'); // Mon 08:15 EST
+    });
+
+    test('an ordinary week is exactly seven days back', () => {
+      const { _private: { gapWindowCutoff } } = load();
+      const run = new Date('2026-10-05T12:15:00Z');
+      expect(gapWindowCutoff(7, run).toISOString()).toBe('2026-09-28T12:15:00.000Z');
+    });
+  });
 });

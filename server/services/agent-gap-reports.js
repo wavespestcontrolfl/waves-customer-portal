@@ -22,6 +22,7 @@ const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
 const { redactText } = require('./agent-decision-training');
+const { addETDaysAtWallClock } = require('../utils/datetime-et');
 const policy = require('./intelligence-bar/action-policy.json');
 
 // The table's CHECK also allows 'tool_failure' and 'blocked'; nothing
@@ -227,6 +228,13 @@ async function writeGapRows(signals, { names = [] } = {}) {
   return saved;
 }
 
+// Same Eastern wall-clock time `days` calendar days back, so the Monday
+// digest's week spans Monday 08:15 ET to Monday 08:15 ET across a DST seam
+// (167 or 169 elapsed hours, never a fixed 168).
+function gapWindowCutoff(days, now = new Date()) {
+  return addETDaysAtWallClock(now, -days);
+}
+
 /**
  * Gaps hit in the last `days` days, each with `seen_in_window` (sightings in
  * the window) beside its lifetime `occurrences`; most-seen-in-window first,
@@ -234,7 +242,7 @@ async function writeGapRows(signals, { names = [] } = {}) {
  * The one reader behind list_gap_reports and the Monday digest.
  */
 async function listRecentGaps({ days, includeClosed = false } = {}) {
-  const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+  const cutoff = gapWindowCutoff(days);
   const counts = await db('agent_gap_report_sightings')
     .where('seen_at', '>=', cutoff)
     .groupBy('gap_id')
@@ -386,5 +394,5 @@ module.exports = {
   listRecentGaps,
   setGapStatus,
   createGapCollector,
-  _private: { prepareGapRow, scrubProperNouns, knownNamesIn, DECLINE_RE },
+  _private: { prepareGapRow, scrubProperNouns, knownNamesIn, gapWindowCutoff, DECLINE_RE },
 };
