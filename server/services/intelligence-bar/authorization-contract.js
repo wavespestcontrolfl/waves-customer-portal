@@ -767,7 +767,7 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       // and defers only the text). The old wording said the WHOLE
       // confirmation waited until 8 AM, which is false for an email-only or
       // email+text customer.
-      contactLabel = 'Customer is sent a booking confirmation unless their appointment-confirmation setting is off, as on the Schedule screen: by text, email or both per their notice settings (email is the fallback when a text cannot go out), to their appointment contacts as they stand when it sends; a text after 8 PM waits until 8 AM, but an email goes right away';
+      contactLabel = 'Customer is sent a booking confirmation unless their appointment-confirmation setting is off or they were already confirmed for another visit at the same time, as on the Schedule screen: by text, email or both per their notice settings (email is the fallback when a text cannot go out), to their appointment contacts as they stand when it sends; a text after 8 PM waits until 8 AM, but an email goes right away';
     }
     // Derived from the PINNED recipient set for batch moves (GH r21 P2):
     // a stop pinned with no SMS recipient cannot be texted — the card

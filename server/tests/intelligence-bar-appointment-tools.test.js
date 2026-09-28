@@ -97,6 +97,7 @@ function chain(overrides = {}) {
     whereNotIn: jest.fn().mockReturnThis(),
     whereNull: jest.fn().mockReturnThis(),
     forUpdate: jest.fn().mockReturnThis(),
+    forShare: jest.fn().mockReturnThis(),
     whereRaw: jest.fn().mockReturnThis(),
     orWhereRaw: jest.fn().mockReturnThis(),
     whereILike: jest.fn().mockReturnThis(),
@@ -1008,12 +1009,14 @@ describe('create_appointment — the visit carries a price like a Schedule-scree
       // in intelligence-bar-recurring-coverage-canonical.test.js; this test
       // only proves the IB wiring reaches it and honors a non-empty result.
       loadLiveRecurringObligationRows.mockResolvedValue([{ id: 'rec-visit' }]);
+      const evidenceLock = chain({ select: jest.fn().mockResolvedValue([{ id: 'rec-visit' }]) });
       wireDb({
         customers: [chain({ first: jest.fn().mockResolvedValue(recurringOnly) }), chain({ first: jest.fn().mockResolvedValue(recurringOnly) })],
         services: [catalog([ONE_TIME_PEST]), catalog([ONE_TIME_PEST])],
         discounts: discountsQueue([GENERIC], GENERIC),
-        // probe, the stamp helper's column read, then the insert
-        scheduled_services: [chain(), chain({ columnInfo: jest.fn().mockResolvedValue(LINE_DISCOUNT_COLS) }), insertChain],
+        // the occupancy probe, the locked pass's share-lock re-read of the
+        // evidence rows, the stamp helper's column read, then the insert
+        scheduled_services: [chain(), evidenceLock, chain({ columnInfo: jest.fn().mockResolvedValue(LINE_DISCOUNT_COLS) }), insertChain],
       });
       const result = await book({
         _booking_price: 212.5, _booking_service_id: 'svc-otp',
@@ -1024,6 +1027,27 @@ describe('create_appointment — the visit carries a price like a Schedule-scree
       expect(insertChain.insert.mock.calls[0][0]).toMatchObject({ estimated_price: 212.5, line_discount_id: 'disc-member' });
       // Reached the canonical loader for this exact customer.
       expect(loadLiveRecurringObligationRows).toHaveBeenCalledWith(expect.anything(), 'cust-1');
+      expect(evidenceLock.forShare).toHaveBeenCalled();
+    });
+
+    test('a series cancel that ends the only qualifying row before commit refuses the discounted booking (Codex r10)', async () => {
+      const recurringOnly = {
+        ...PER_VISIT, billing_mode: 'per_application', per_application_fee: 95, waveguard_tier: null, monthly_rate: 0, active: true,
+      };
+      loadLiveRecurringObligationRows.mockResolvedValue([{ id: 'rec-visit' }]);
+      wireDb({
+        customers: [chain({ first: jest.fn().mockResolvedValue(recurringOnly) }), chain({ first: jest.fn().mockResolvedValue(recurringOnly) })],
+        services: [catalog([ONE_TIME_PEST]), catalog([ONE_TIME_PEST])],
+        discounts: discountsQueue([GENERIC], GENERIC),
+        // The share-locked re-read finds the row already cancelled.
+        scheduled_services: [chain(), chain({ select: jest.fn().mockResolvedValue([]) }), chain()],
+      });
+      const result = await book({
+        _booking_price: 212.5, _booking_service_id: 'svc-otp',
+        _booking_list_price: 250, _booking_discount_id: 'disc-member', _booking_discount_name: 'WaveGuard Member Discount',
+        _booking_discount_type: 'percentage', _booking_discount_amount: 15,
+      });
+      expect(result).toMatchObject({ preview_changed: true });
     });
 
     test('the locked recheck never refreshes the exclusion catalog on the global pool — it holds a transaction connection already', async () => {

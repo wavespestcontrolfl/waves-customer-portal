@@ -2450,11 +2450,22 @@ const MEMBER_DISCOUNT_KEYS = ['waveguard_member'];
 // owned-keys set: a palm-injection or termite-bond plan is a live recurring
 // plan that maps to no ownership family (Codex r5, r7). A catalog-join
 // failure fails CLOSED (no automatic discount).
+// On the locked recheck (conn is the booking transaction) the evidence rows
+// are share-locked and re-read (Codex r10): a series cancel that locks and
+// ends them concurrently either finishes first — and the re-read sees it —
+// or waits for this booking to commit.
 async function hasLiveRecurringCoverage(customerId, conn = db) {
-  const { loadLiveRecurringObligationRows } = require('../waveguard-existing-services');
+  const { loadLiveRecurringObligationRows, TERMINAL_STATUSES } = require('../waveguard-existing-services');
   try {
     const rows = await loadLiveRecurringObligationRows(conn, customerId);
-    return Array.isArray(rows) && rows.length > 0;
+    if (!Array.isArray(rows) || rows.length === 0) return false;
+    if (conn === db) return true;
+    const locked = await conn('scheduled_services')
+      .whereIn('id', rows.map((r) => r.id))
+      .whereNotIn('status', TERMINAL_STATUSES)
+      .forShare()
+      .select('id');
+    return Array.isArray(locked) && locked.length > 0;
   } catch (err) {
     logger.warn(`[intelligence-bar] loadLiveRecurringObligationRows failed for customer ${customerId}; treating as no live recurring coverage: ${err.message}`);
     return false;

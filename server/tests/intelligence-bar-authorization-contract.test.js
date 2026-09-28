@@ -214,7 +214,7 @@ test('create_appointment: card bookings are credit-free by construction; a windo
 test('create_appointment with a time texts the booking confirmation, as on the Schedule screen (owner 2026-09-27)', () => {
   const c = buildContract({ toolName: 'create_appointment', params: { customer_id: 'c1', time_window: '9:00 AM' }, displayParams: { customer_id: 'c1', date: '2026-09-02' }, preview: { proposal: true, inspection_credit: { amount: 0 } } });
   const labels = c.effects.map((e) => e.label);
-  expect(labels).toContainEqual(expect.stringMatching(/^Customer is sent a booking confirmation unless their appointment-confirmation setting is off, as on the Schedule screen: by text, email or both/));
+  expect(labels).toContainEqual(expect.stringMatching(/^Customer is sent a booking confirmation unless their appointment-confirmation setting is off or they were already confirmed for another visit at the same time, as on the Schedule screen: by text, email or both/));
   expect(labels).toContainEqual(expect.stringMatching(/^Registers the 72h\/24h reminder rows/));
   expect(c.notifies_customer).toBe(true);
 });
