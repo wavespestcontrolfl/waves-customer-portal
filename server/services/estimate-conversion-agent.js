@@ -1,6 +1,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
+const { gateEnvValue } = require('../config/feature-gates');
 
 const WORKFLOW = 'estimate_conversion_sms';
 const SERVICE_SCHEDULING_WORKFLOW = 'service_scheduling_sms';
@@ -648,12 +649,26 @@ async function generateLlmReviewDraft({ customer, body, decision, estimate }) {
       logger.warn(`[estimate-conversion-agent] LLM review draft leaked a redaction placeholder (customer=${customer.id}); using template`);
       return null;
     }
-    // House rule: no prices in customer SMS. This lane's draft lands in the
-    // composer's Use Draft button — same delivery boundary as suggest-mode,
-    // same deterministic guard (a priced draft falls back to the template).
-    if (parsed.reply && require('./sms-suggest-mode').hasPriceQuote(parsed.reply)) {
-      logger.warn(`[estimate-conversion-agent] LLM review draft quoted a price (customer=${customer.id}); using template`);
-      return null;
+    // House rule: no UNGROUNDED prices in customer SMS. This lane's draft
+    // lands in the composer's Use Draft button — same delivery boundary as
+    // suggest-mode. With GATE_SMS_REAL_ANSWERS off, this stays the old
+    // blanket hasPriceQuote reject (byte-identical). With the gate on, the
+    // house-voice prompt is instructed to answer billing questions with
+    // exact grounded amounts (Codex r3: rejecting every hasPriceQuote match
+    // here discarded every verified v12 answer in favor of the template) —
+    // reuse the shared authoritative-amount guard so only a FABRICATED or
+    // unverifiable amount falls back; a real balance/invoice/dues figure
+    // passes.
+    if (parsed.reply) {
+      if (gateEnvValue('GATE_SMS_REAL_ANSWERS')) {
+        if (drafter.replyQuotesUngroundedAmount(parsed.reply, context)) {
+          logger.warn(`[estimate-conversion-agent] LLM review draft quoted an ungrounded amount (customer=${customer.id}); using template`);
+          return null;
+        }
+      } else if (require('./sms-suggest-mode').hasPriceQuote(parsed.reply)) {
+        logger.warn(`[estimate-conversion-agent] LLM review draft quoted a price (customer=${customer.id}); using template`);
+        return null;
+      }
     }
     // The version THIS draft actually used (pre-push audit P1) — resolved
     // per call inside generateGroundedDraft off the ACTUAL gate state, not
@@ -707,9 +722,18 @@ async function processInboundSms({ customer, from, to, body, smsLogId, sourceMes
     // whenever the LLM path is rejected or unavailable. NULL = the agent
     // offers no draft; the human writes the reply.
     const reviewDraftText = llmDraft ? (llmDraft.reply || null) : decision.suggestedMessage;
-    const reviewSuggestedMessage = reviewDraftText && require('./sms-suggest-mode').hasPriceQuote(reviewDraftText)
-      ? null
-      : reviewDraftText;
+    // llmDraft is only ever returned once its own reply already cleared the
+    // gate-aware amount guard above (grounded amount allowed on, blanket
+    // hasPriceQuote reject off) — re-running hasPriceQuote here would throw
+    // away that verified v12 answer (Codex r3). The deterministic template
+    // (decision.suggestedMessage) echoes raw inbound text and never passed
+    // any guard, so it keeps the unconditional hasPriceQuote reject
+    // regardless of gate state.
+    const reviewSuggestedMessage = llmDraft
+      ? reviewDraftText
+      : (reviewDraftText && require('./sms-suggest-mode').hasPriceQuote(reviewDraftText)
+        ? null
+        : reviewDraftText);
 
     const entityType = estimate ? 'estimate' : lead ? 'lead' : customer ? 'customer' : 'sms';
     const entityId = estimate?.id || lead?.id || customer?.id || null;

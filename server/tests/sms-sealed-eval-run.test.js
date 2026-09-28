@@ -207,6 +207,31 @@ describe('createExamRun — guards and stamps', () => {
       .rejects.toThrow(/unknown sealed-eval provider leg/);
   });
 
+  test('refuses a v12 run when every active item predates GATE_SMS_REAL_ANSWERS (Codex r3 fail-fast)', async () => {
+    // currentPromptVersion() resolves a v12 real-answers version, but the
+    // only active item's frozen facts_block carries no FOLLOW-UP SLA RIGHT
+    // NOW line — every gate-on facts block stamps that line unconditionally,
+    // so its absence means the item was frozen before the gate existed.
+    // Starting the run would grade nothing; refuse instead of running dark.
+    drafter.currentPromptVersion.mockReturnValueOnce('house_voice_v12_real_answers');
+    const dbi = makeRunnerDb({ runs: [], items: [item('i1')] });
+    await expect(sealedEval.createExamRun({ providerLeg: 'anthropic', dbi }))
+      .rejects.toThrow(/no v12-compatible sealed items/);
+  });
+
+  test('a v12 run with at least one v12-compatible item is created normally', async () => {
+    drafter.currentPromptVersion.mockReturnValueOnce('house_voice_v12_real_answers');
+    const dbi = makeRunnerDb({
+      runs: [],
+      items: [
+        item('i1'), // pre-v12 — excluded later, but doesn't block creation
+        item('i2', { facts_block: 'FROZEN FACTS for i2\nFOLLOW-UP SLA RIGHT NOW: reply within 1 business hour, 8am-8pm ET.' }),
+      ],
+    });
+    const run = await sealedEval.createExamRun({ providerLeg: 'anthropic', dbi });
+    expect(run.prompt_version).toBe('house_voice_v12_real_answers');
+  });
+
   test('measurement legs (gemini/sol/opus/fable) are valid, but autonomy rides only on the live legs', async () => {
     // the exam accepts every candidate…
     for (const leg of ['gemini', 'luna', 'opus', 'fable']) expect(sealedEval.EXAM_LEGS).toContain(leg);
@@ -250,7 +275,10 @@ describe('createExamRun — guards and stamps', () => {
     drafter.currentPromptVersion.mockReturnValueOnce('house_voice_v12_real_answers');
     const dbi = makeRunnerDb({
       runs: [{ id: 'r-v11', status: 'complete', provider_leg: 'anthropic', prompt_version: 'house_voice_v9_test', model: 'claude-sonnet-5' }],
-      items: [item('i1')],
+      // v12-compatible facts_block (Codex r3 fail-fast guard): unrelated to
+      // what this test proves, but createExamRun now refuses to start a v12
+      // run with zero v12-compatible active items.
+      items: [item('i1', { facts_block: 'FROZEN FACTS for i1\nFOLLOW-UP SLA RIGHT NOW: reply within 1 business hour, 8am-8pm ET.' })],
     });
     const run = await sealedEval.createExamRun({ providerLeg: 'anthropic', dbi });
     expect(run.prompt_version).toBe('house_voice_v12_real_answers');
@@ -535,6 +563,76 @@ describe('runSealedExam — replay loop', () => {
     const dbi = makeRunnerDb({ runs, items: [item('i1')] });
     const run = await sealedEval.createExamRun({ providerLeg: 'anthropic', baselineRunId: 'r-good', dbi });
     expect(run.baseline_run_id).toBe('r-good');
+  });
+});
+
+// Codex r3 (PR #5119): a v12 real-answers run replaying items frozen BEFORE
+// GATE_SMS_REAL_ANSWERS existed would grade scheduling/cancellation/handoff
+// replies against instructions (OPEN TIMES, the FOLLOW-UP SLA RIGHT NOW
+// handoff wording) whose facts the frozen snapshot never carries. These lock
+// the exclusion: a v12 run skips an incompatible item without calling the
+// drafter or judge, records it as an 'ungradable' sentinel (same shape as
+// the terminal no-progress rule), and the run still completes; a compatible
+// item, and any v11 run regardless of the item's facts, are unaffected.
+describe('examOneItem — v12 facts-compatibility exclusion (Codex r3)', () => {
+  test('v12 run + pre-v12 item (facts_block lacks FOLLOW-UP SLA RIGHT NOW): excluded, drafter/judge never called, run still completes', async () => {
+    drafter.currentPromptVersion.mockReturnValueOnce('house_voice_v12_real_answers');
+    const dbi = makeRunnerDb({
+      runs: [{ id: 'r1', status: 'running', provider_leg: 'anthropic', prompt_version: 'house_voice_v12_real_answers', baseline_run_id: null }],
+      items: [item('i1')], // default fixture facts_block has no SLA line
+    });
+
+    const out = await sealedEval.runSealedExam({ runId: 'r1', dbi });
+
+    expect(out.status).toBe('complete');
+    expect(drafter.generateGroundedDraft).not.toHaveBeenCalled();
+    expect(judge.judgeOne).not.toHaveBeenCalled();
+    const result = dbi.state.results.find((r) => r.run_id === 'r1' && r.item_id === 'i1');
+    expect(result).toMatchObject({ verdict: 'ungradable' });
+    expect(result.notes).toMatch(/predates GATE_SMS_REAL_ANSWERS/);
+    const finalPatch = dbi.state.runPatches.find((p) => p.id === 'r1' && p.patch.status === 'complete');
+    expect(finalPatch).toBeTruthy();
+    // Excluded — never counted as graded (same rule the terminal no-progress
+    // sentinel already relies on in finalizeRun).
+    expect(finalPatch.patch.items_judged).toBe(0);
+  });
+
+  test('v12 run + v12-compatible item (facts_block carries FOLLOW-UP SLA RIGHT NOW): examined as today', async () => {
+    drafter.currentPromptVersion.mockReturnValueOnce('house_voice_v12_real_answers');
+    const dbi = makeRunnerDb({
+      runs: [{ id: 'r1', status: 'running', provider_leg: 'anthropic', prompt_version: 'house_voice_v12_real_answers', baseline_run_id: null }],
+      items: [item('i1', { facts_block: 'FROZEN FACTS for i1\nFOLLOW-UP SLA RIGHT NOW: reply within 1 business hour, 8am-8pm ET.' })],
+    });
+    drafter.generateGroundedDraft.mockResolvedValue({ ...goodDraft(), promptVersion: 'house_voice_v12_real_answers' });
+    judge.judgeOne.mockResolvedValue(judgment('equivalent', { safety: 9, voice: 7, actions: 8, overall: 8 }));
+
+    const out = await sealedEval.runSealedExam({ runId: 'r1', dbi });
+
+    expect(out.status).toBe('complete');
+    expect(drafter.generateGroundedDraft).toHaveBeenCalledTimes(1);
+    expect(judge.judgeOne).toHaveBeenCalledTimes(1);
+    const result = dbi.state.results.find((r) => r.run_id === 'r1' && r.item_id === 'i1');
+    expect(result.verdict).toBe('equivalent');
+    const finalPatch = dbi.state.runPatches.find((p) => p.id === 'r1' && p.patch.status === 'complete');
+    expect(finalPatch.patch.items_judged).toBe(1);
+  });
+
+  test('v11 run + pre-v12 item (facts_block lacks FOLLOW-UP SLA RIGHT NOW): examined as today, unchanged', async () => {
+    drafter.currentPromptVersion.mockReturnValueOnce('house_voice_v9_test');
+    const dbi = makeRunnerDb({
+      runs: [{ id: 'r1', status: 'running', provider_leg: 'anthropic', prompt_version: 'house_voice_v9_test', baseline_run_id: null }],
+      items: [item('i1')], // default fixture facts_block has no SLA line either — irrelevant for a v11 run
+    });
+    drafter.generateGroundedDraft.mockResolvedValue(goodDraft());
+    judge.judgeOne.mockResolvedValue(judgment('equivalent', { safety: 9, voice: 7, actions: 8, overall: 8 }));
+
+    const out = await sealedEval.runSealedExam({ runId: 'r1', dbi });
+
+    expect(out.status).toBe('complete');
+    expect(drafter.generateGroundedDraft).toHaveBeenCalledTimes(1);
+    expect(judge.judgeOne).toHaveBeenCalledTimes(1);
+    const result = dbi.state.results.find((r) => r.run_id === 'r1' && r.item_id === 'i1');
+    expect(result.verdict).toBe('equivalent');
   });
 });
 

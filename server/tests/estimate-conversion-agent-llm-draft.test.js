@@ -18,6 +18,20 @@ jest.mock('../services/logger', () => ({
 jest.mock('../services/sms-shadow-drafter', () => ({
   generateGroundedDraft: jest.fn(),
   PROMPT_VERSION: 'house_voice_v8',
+  // Real behavior mirrored for the gate-on tests below (Codex r3): true
+  // when the reply carries an amount not present in context.billing's
+  // authorized figures. Kept intentionally simple — the drafter's own unit
+  // tests cover the full extraction/authorization grammar; this test file
+  // only needs grounded-vs-ungrounded discrimination.
+  replyQuotesUngroundedAmount: jest.fn((reply, context) => {
+    const amounts = (String(reply || '').match(/\$\s?\d[\d,]*(?:\.\d{1,2})?/g) || [])
+      .map((a) => Math.round(Number(a.replace(/[^\d.]/g, '')) * 100));
+    if (!amounts.length) return false;
+    const authorized = new Set(
+      [context?.billing?.outstandingBalance].filter((v) => v != null).map((v) => Math.round(v * 100))
+    );
+    return amounts.some((a) => !authorized.has(a));
+  }),
 }));
 
 jest.mock('../services/context-aggregator', () => ({
@@ -72,7 +86,8 @@ jest.mock('../models/db', () => {
 });
 
 const db = require('../models/db');
-const { generateGroundedDraft } = require('../services/sms-shadow-drafter');
+const { generateGroundedDraft, replyQuotesUngroundedAmount } = require('../services/sms-shadow-drafter');
+const ContextAggregator = require('../services/context-aggregator');
 const MODELS = require('../config/models');
 const { processInboundSms, _test } = require('../services/estimate-conversion-agent');
 
@@ -104,7 +119,11 @@ beforeEach(() => {
   db.__state.smsLogRows = [];
   db.__state.existingDecision = null;
   generateGroundedDraft.mockReset();
+  replyQuotesUngroundedAmount.mockClear();
+  ContextAggregator.getContextForCustomer.mockReset();
+  ContextAggregator.getContextForCustomer.mockResolvedValue({ summary: 'ctx', flags: [] });
   delete process.env.AGENT_REVIEW_LLM_DRAFTS;
+  delete process.env.GATE_SMS_REAL_ANSWERS;
 });
 
 describe('processInboundSms — grounded LLM review draft', () => {
@@ -398,5 +417,105 @@ describe('processInboundSms — grounded LLM review draft', () => {
     expect(generateGroundedDraft).not.toHaveBeenCalled();
     const payload = lastDecisionInsert();
     expect(payload.model).toBe('deterministic_rules');
+  });
+});
+
+// Codex r3 (PR #5119): with GATE_SMS_REAL_ANSWERS on, the shared drafter is
+// instructed to answer billing questions with exact grounded amounts, but
+// this lane rejected every hasPriceQuote match regardless — discarding a
+// verified v12 answer in favor of the template. These lock the gate-aware
+// fix: gate off stays byte-identical; gate on rejects only an amount the
+// shared guard (replyQuotesUngroundedAmount) says is unauthorized.
+describe('processInboundSms — GATE_SMS_REAL_ANSWERS grounded-amount guard (Codex r3)', () => {
+  test('gate ON + a grounded amount (matches context.billing.outstandingBalance): LLM draft kept and persisted', async () => {
+    process.env.GATE_SMS_REAL_ANSWERS = 'true';
+    seedActiveSchedulingThread();
+    ContextAggregator.getContextForCustomer.mockResolvedValue({
+      summary: 'ctx',
+      flags: [],
+      billing: { outstandingBalance: 120.5 },
+    });
+    generateGroundedDraft.mockResolvedValue({
+      parsed: { reply: 'Your current balance is $120.50 — want me to send a payment link?', intended_actions: [], auto_send_safe: false, missing_info: null },
+      passes: 1,
+      converged: true,
+      model: MODELS.OPENAI_SMS_DRAFT,
+      promptVersion: 'house_voice_v12_real_answers',
+    });
+
+    await processInboundSms({
+      customer: CUSTOMER,
+      from: '+19415551234',
+      to: '+19415550000',
+      body: 'How much do I owe',
+      smsLogId: 'sms-in-grounded-1',
+    });
+
+    expect(replyQuotesUngroundedAmount).toHaveBeenCalled();
+    const payload = lastDecisionInsert();
+    expect(payload.model).toBe(MODELS.OPENAI_SMS_DRAFT);
+    expect(payload.suggested_message).toContain('$120.50');
+    expect(JSON.parse(payload.input_snapshot).review_draft).toEqual({ source: 'llm', passes: 1, no_reply: false });
+  });
+
+  test('gate ON + an ungrounded amount (no matching billing fact): falls back to the template', async () => {
+    process.env.GATE_SMS_REAL_ANSWERS = 'true';
+    seedActiveSchedulingThread();
+    ContextAggregator.getContextForCustomer.mockResolvedValue({
+      summary: 'ctx',
+      flags: [],
+      billing: { outstandingBalance: 120.5 },
+    });
+    generateGroundedDraft.mockResolvedValue({
+      parsed: { reply: 'Your balance is $9999.00 — want me to send a payment link?', intended_actions: [], auto_send_safe: false, missing_info: null },
+      passes: 1,
+      converged: true,
+      model: MODELS.OPENAI_SMS_DRAFT,
+      promptVersion: 'house_voice_v12_real_answers',
+    });
+
+    await processInboundSms({
+      customer: CUSTOMER,
+      from: '+19415551234',
+      to: '+19415550000',
+      body: 'How much do I owe',
+      smsLogId: 'sms-in-ungrounded-1',
+    });
+
+    expect(replyQuotesUngroundedAmount).toHaveBeenCalled();
+    const payload = lastDecisionInsert();
+    expect(payload.model).toBe('deterministic_rules');
+    expect(payload.suggested_message || '').not.toContain('$9999.00');
+  });
+
+  test('gate OFF + any amount (even one that matches a billing fact): still falls back to the template (unchanged)', async () => {
+    seedActiveSchedulingThread();
+    ContextAggregator.getContextForCustomer.mockResolvedValue({
+      summary: 'ctx',
+      flags: [],
+      billing: { outstandingBalance: 120.5 },
+    });
+    generateGroundedDraft.mockResolvedValue({
+      parsed: { reply: 'Your balance is $120.50 — want me to send a payment link?', intended_actions: [], auto_send_safe: false, missing_info: null },
+      passes: 1,
+      converged: true,
+      model: MODELS.OPENAI_SMS_DRAFT,
+      promptVersion: 'house_voice_v8',
+    });
+
+    await processInboundSms({
+      customer: CUSTOMER,
+      from: '+19415551234',
+      to: '+19415550000',
+      body: 'How much do I owe',
+      smsLogId: 'sms-in-gate-off-1',
+    });
+
+    // Gate off never reaches the shared guard — same blanket hasPriceQuote
+    // reject as before this fix.
+    expect(replyQuotesUngroundedAmount).not.toHaveBeenCalled();
+    const payload = lastDecisionInsert();
+    expect(payload.model).toBe('deterministic_rules');
+    expect(payload.suggested_message || '').not.toContain('$120.50');
   });
 });

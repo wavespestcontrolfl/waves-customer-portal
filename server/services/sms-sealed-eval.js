@@ -108,6 +108,27 @@ const EXAM_LEGS = Object.freeze(Object.keys(EXAM_LEG_ROUTES));
 // auto-baselines these (and only these). The gemini leg runs manually.
 const LIVE_EXAM_LEGS = Object.freeze(['anthropic', 'openai']);
 
+// Codex r3: existing active sealed items were frozen before GATE_SMS_REAL_
+// ANSWERS existed and therefore lack the v12-only OPEN TIMES / FOLLOW-UP SLA
+// RIGHT NOW facts — replaying those frozen (inbound, facts_block) pairs
+// through the CURRENT v12 prompt and grading the result as v12 evidence
+// scores scheduling/cancellation/handoff items under instructions whose
+// required inputs are simply absent. FOLLOW-UP SLA RIGHT NOW is the marker:
+// buildFactsBlock (sms-shadow-drafter.js) stamps that line into EVERY gate-on
+// facts block unconditionally, so its absence means the item predates the
+// gate. v11 runs never carry this line either (the gate was off when they
+// drafted) and are unaffected — this only excludes items being graded AS v12
+// evidence that were never given v12 facts.
+const V12_FACTS_MARKER = 'FOLLOW-UP SLA RIGHT NOW:';
+
+function isV12PromptVersion(promptVersion) {
+  return typeof promptVersion === 'string' && promptVersion.startsWith('house_voice_v12');
+}
+
+function hasFollowupSlaFact(factsBlock) {
+  return String(factsBlock || '').includes(V12_FACTS_MARKER);
+}
+
 /* ── Freezer ──────────────────────────────────────────────────────────── */
 
 /**
@@ -300,6 +321,28 @@ async function examOneItem({ run, item, route, client, dbi = db, voiceProfile = 
   const drafter = require('./sms-shadow-drafter');
   const judge = require('./sms-shadow-judge');
 
+  // Codex r3: a run pinned to a v12 real-answers prompt version replaying an
+  // item frozen BEFORE that prompt existed would grade it against
+  // instructions (OPEN TIMES, the FOLLOW-UP SLA RIGHT NOW handoff wording)
+  // whose facts the frozen snapshot never carries — never call the drafter
+  // or judge for it; record it as excluded (an 'ungradable' sentinel, same
+  // shape as the terminal no-progress rule above) so it holds the item's
+  // completion slot without counting as a pass, a fail, or staying pending
+  // forever. v11 runs (isV12PromptVersion false) never take this branch.
+  if (isV12PromptVersion(run.prompt_version) && !hasFollowupSlaFact(item.facts_block)) {
+    await dbi('sms_sealed_eval_results')
+      .insert({
+        run_id: run.id,
+        item_id: item.id,
+        verdict: 'ungradable',
+        notes: `excluded: frozen facts_block predates GATE_SMS_REAL_ANSWERS (no ${V12_FACTS_MARKER} line) — not representative of ${run.prompt_version} (Codex r3)`,
+      })
+      .onConflict(['run_id', 'item_id'])
+      .ignore();
+    logger.warn(`[sealed-eval] item ${String(item.id).slice(0, 8)} excluded from run ${String(run.id).slice(0, 8)}: frozen pre-v12 facts_block replayed under ${run.prompt_version}`);
+    return true;
+  }
+
   const intent = { intent: item.intent || 'GENERAL' };
   const { parsed, passes, converged, model, voiceProfileVersion, promptVersion } = await drafter.generateGroundedDraft({
     client,
@@ -481,6 +524,19 @@ async function createExamRun({ providerLeg, baselineRunId, triggeredBy = 'manual
   }
   const [{ count: activeCount }] = await dbi('sms_sealed_eval_items').where('active', true).count('* as count');
   if (!Number(activeCount)) throw new Error('no active sealed items — seal the eval set first');
+  // Codex r3: fail fast rather than start a run that will grade nothing —
+  // every active item pre-dating GATE_SMS_REAL_ANSWERS gets excluded item by
+  // item in examOneItem, so a v12 run with zero v12-compatible items would
+  // otherwise sit at 'running' with every item landing as an 'ungradable'
+  // sentinel and finish with no evidence at all. The pool is small (sealed
+  // to SEALED_EVAL_TARGET, ~100) so this reads facts_block in JS rather than
+  // pushing a LIKE clause down — same cost, one shared check with examOneItem.
+  if (isV12PromptVersion(currentVersion)) {
+    const activeItems = await dbi('sms_sealed_eval_items').where('active', true).select('facts_block');
+    if (!activeItems.some((i) => hasFollowupSlaFact(i.facts_block))) {
+      throw new Error(`no v12-compatible sealed items — every active item predates GATE_SMS_REAL_ANSWERS (facts_block lacks "${V12_FACTS_MARKER}"); seal fresh items under ${currentVersion} before running this exam`);
+    }
+  }
 
   // Baseline: an explicit baselineRunId must identify a COMPLETE run on the
   // SAME leg — a failed/partial baseline would compare against a fragment,
