@@ -3974,6 +3974,14 @@ async function recordParentRenewedIfEligible({ successorId, parentTermId }, conn
     const Charge = require('./termite-annual-renewal-charge')._private;
     const successor = await t('annual_prepay_terms').where({ id: successorId }).first();
     if (!(await Charge.successorPaymentBacksRenewal(t, successor))) return null;
+    // Codex #4971 r17 P2 (finding 5): once the deleted-account conflict
+    // below has actually told staff, never re-run that check (or re-ring
+    // its bell) for this successor again — see the marker's own doc on the
+    // column write just below for why this exists at all.
+    if (Object.prototype.hasOwnProperty.call(successor, 'renewal_parent_deleted_conflict_belled_at')
+      && successor.renewal_parent_deleted_conflict_belled_at) {
+      return null;
+    }
     // Codex #4971 r16 P1 (finding 5, DELETION (b)): a deleted account is a
     // late-payment CONFLICT, never a silent renewal — the SAME refund-or-
     // honor staff alert a parent that changed any other way gets
@@ -3989,11 +3997,26 @@ async function recordParentRenewedIfEligible({ successorId, parentTermId }, conn
     // behind an in-flight deletion or is seen by it once it commits.
     const deleted = await Charge.customerDeletedRefusal(t, successor);
     if (deleted) {
-      await Charge.ringRenewalBell(
+      const bell = await Charge.ringRenewalBell(
         successor,
         'paid_after_parent_ended',
         "the customer's account was deleted before the renewal payment settled",
       );
+      // Codex #4971 r17 P2 (finding 5): a bell that actually persisted
+      // (fresh or deduped — either way staff has been told) is the trigger
+      // to exclude this row from reconcileParentRenewedStamps' bounded scan
+      // for good — otherwise the parent stays ACTIVE_STATUSES with
+      // renewal_decision still null forever, and that scan's own LIMIT page
+      // re-selects this SAME row on every tick, starving any newer
+      // conflict behind it from ever being reached. The column is written
+      // only where the row shows it exists (this migration ships in the
+      // same PR) — a missing column must never fail this activation, same
+      // convention as renewal_late_paid_belled_at.
+      if (bell && Object.prototype.hasOwnProperty.call(successor, 'renewal_parent_deleted_conflict_belled_at')) {
+        await t('annual_prepay_terms').where({ id: successor.id })
+          .whereNull('renewal_parent_deleted_conflict_belled_at')
+          .update({ renewal_parent_deleted_conflict_belled_at: new Date() });
+      }
       return null;
     }
     const parent = await t('annual_prepay_terms').where({ id: parentTermId }).first();
@@ -4044,6 +4067,15 @@ async function reconcileParentRenewedStamps({ conn = db, limit = 200 } = {}) {
         .whereNotNull('s.renewed_from_term_id')
         .whereIn('p.status', ACTIVE_STATUSES)
         .whereNull('p.renewal_decision')
+        // Codex #4971 r17 P2 (finding 5): a successor whose deleted-account
+        // conflict already told staff (renewal_parent_deleted_conflict_
+        // belled_at) is excluded here directly — its parent never leaves
+        // ACTIVE_STATUSES/renewal_decision-null on its own, so without this
+        // the SAME row pinned this bounded page forever, starving any newer
+        // conflict behind it. A human's own later decision on the parent
+        // still moves it out of ACTIVE_STATUSES/renewal_decision-null
+        // regardless of this stamp.
+        .whereNull('s.renewal_parent_deleted_conflict_belled_at')
         .where(function parentInvoiceSettled() {
           this.whereNull('p.prepay_invoice_id').orWhere(function settled() { whereInvoiceSettledNotRevoked(this, 'pi'); });
         }),
@@ -9185,12 +9217,16 @@ async function withParentDecisionLock(termId, fn, { timeoutMs = PARENT_DECISION_
     if (!lockConn) {
       throw new Error(`could not acquire the parent-decision lock for term ${keys[0]} — no lock session is available right now (the session cap is full or the database did not answer in time); retry shortly`);
     }
-    await takeSessionDecisionLocks(lockConn, keys, locked, boundedTimeoutMs);
-    // Codex #4971 r15 P1: the session's own error/end/close is the one
-    // authority for "is this lock still held" — the same mechanism
-    // reschedule-link-promises.js's send interlock uses (raw-connection-
-    // slots.js's trackConnectionLoss), so both session-lock users share one
-    // implementation.
+    // Codex #4971 r17 P1: attach the connection-loss tracker BEFORE any lock
+    // query — the same mechanism reschedule-link-promises.js's send
+    // interlock uses (raw-connection-slots.js's trackConnectionLoss), so
+    // both session-lock users share one implementation. Attaching it only
+    // after takeSessionDecisionLocks() returned missed a close/end that
+    // landed between the connection's own acquisition and the listener's
+    // registration — that loss was silently forgotten and the caller went
+    // on believing the lock still held. Attaching it here means the window
+    // between acquire() returning and this line is the only gap left, and
+    // is checked explicitly below rather than left to chance.
     const lockHeld = { lost: false };
     require('./raw-connection-slots').trackConnectionLoss(lockConn, lockHeld);
     const assertAlive = () => {
@@ -9201,6 +9237,8 @@ async function withParentDecisionLock(termId, fn, { timeoutMs = PARENT_DECISION_
         );
       }
     };
+    assertAlive();
+    await takeSessionDecisionLocks(lockConn, keys, locked, boundedTimeoutMs);
     // Mark these terms as session-lock-held for the lifetime of fn()'s own
     // async tree — see heldParentDecisionLockStore's doc above.
     return await heldParentDecisionLockStore.run({ keys: new Set([...held, ...keys]), assertAlive }, () => fn());

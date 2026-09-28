@@ -1357,12 +1357,18 @@ async function withCustomerDeletionGate(customerId, fn) {
   // for a handful of rows, and it keeps this callable against a query
   // builder stub that supports where/whereNotNull/whereIn/select but not
   // orderBy).
-  const sorted = [...parents].sort((a, b) => String(a.id).localeCompare(String(b.id)));
-  const chain = sorted.reduceRight(
-    (inner, parent) => () => require('./annual-prepay-renewals').withParentDecisionLock(parent.id, inner),
-    fn,
-  );
-  return chain();
+  //
+  // Codex #4971 r17 P2: every parent key is taken on ONE session via
+  // withParentDecisionLock's own alsoTermIds — never one nested
+  // withParentDecisionLock call per parent. Nesting them (the old
+  // `reduceRight` chain) opened one raw lock session (PARENT_DECISION_LOCK_
+  // SESSIONS, capped at 8) PER PARENT, all held open at once by the outer
+  // calls waiting on their inner ones — a customer with 9 renewable parent
+  // terms deterministically exhausted the cap and failed the 9th. Passing
+  // every id through alsoTermIds takes them all, sorted, on the single
+  // session withParentDecisionLock already opens for that call.
+  const sorted = [...new Set(parents.map((parent) => String(parent.id)))].sort();
+  return require('./annual-prepay-renewals').withParentDecisionLock(sorted[0], fn, { alsoTermIds: sorted.slice(1) });
 }
 
 async function withdrawSuccessorUnderGate(original, label, conn) {
@@ -2257,9 +2263,14 @@ const RENEWAL_BELL_COPY = {
     title: 'Termite annual renewal — card on file not charged (surcharge)',
     body: `The payment method on file for customer ${successor.customer_id}'s termite annual renewal (invoice for $${Number(successor.prepay_amount).toFixed(2)}) is a credit card whose surcharge would exceed the flat renewal fee the v3 agreement quoted, so it was not charged. ${reason}`,
   }),
-  declined: (successor, reason) => ({
+  // Codex #4971 r17 P2: `amount` is the ACTUAL attempted amount (the same
+  // attemptedChargeAmount() the customer's own decline SMS uses, read from
+  // the durable stripe_invoice_charge_attempts row) — never the full
+  // prepay_amount, which overstates what Stripe was asked for whenever
+  // account credit reduced the cash amount actually tried.
+  declined: (successor, reason, amount) => ({
     title: 'Termite annual renewal — card on file declined',
-    body: `The renewal charge of $${Number(successor.prepay_amount).toFixed(2)} for customer ${successor.customer_id}'s termite annual renewal was declined by the card on file: ${reason}. The renewal invoice was sent with its pay link instead. The card will NOT be retried automatically.`,
+    body: `The renewal charge of $${Number(amount).toFixed(2)} for customer ${successor.customer_id}'s termite annual renewal was declined by the card on file: ${reason}. The renewal invoice was sent with its pay link instead. The card will NOT be retried automatically.`,
   }),
   refused: (successor, reason) => ({
     title: 'Termite annual renewal — card on file not charged',
@@ -2366,7 +2377,11 @@ const RENEWAL_BELL_COPY = {
 async function ringRenewalBell(successor, kind, reason) {
   try {
     const NotificationService = require('./notification-service');
-    const copy = (RENEWAL_BELL_COPY[kind] || RENEWAL_BELL_COPY.declined)(successor, reason);
+    // Codex #4971 r17 P2: the 'declined' copy needs the ACTUAL attempted
+    // amount, not the full prepay_amount — computed only for that kind (the
+    // other copy functions ignore the extra argument).
+    const amount = kind === 'declined' ? await attemptedChargeAmount(successor) : Number(successor.prepay_amount);
+    const copy = (RENEWAL_BELL_COPY[kind] || RENEWAL_BELL_COPY.declined)(successor, reason, amount);
     return await NotificationService.notifyAdmin('billing', copy.title, copy.body, {
       icon: '⚠️',
       bell: true,

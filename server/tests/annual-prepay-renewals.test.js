@@ -6768,6 +6768,53 @@ describe('stampParentRenewedForSuccessor (move 16) — the parent-renewed hook',
     expect(recordDecisionQ.update).not.toHaveBeenCalled();
   });
 
+  // Codex #4971 r17 P2 — finding 5: with no persisted exclusion, the
+  // deleted-account conflict bell above rings again on every tick, but the
+  // parent NEVER leaves ACTIVE_STATUSES/renewal_decision-null on its own —
+  // so reconcileParentRenewedStamps' own bounded LIMIT 200 scan would
+  // re-select this SAME row forever, starving any newer conflict behind it.
+  // A successful bell (fresh or deduped — either way staff has been told)
+  // now persists renewal_parent_deleted_conflict_belled_at; see the SQL
+  // exclusion itself in the reconcileParentRenewedStamps describe below.
+  test('a successful deleted-account bell persists the exclusion marker (finding 5)', async () => {
+    const { notifyAdmin } = require('../services/notification-service');
+    notifyAdmin.mockClear();
+    const markedSuccessor = { ...PAID_SUCCESSOR, renewal_parent_deleted_conflict_belled_at: null };
+    const gateQ = query({ rows: [] });
+    const successorQ = query({ first: markedSuccessor });
+    const updateMarkerQ = query({ updateCount: 1 });
+    setDbQueues({
+      annual_prepay_terms: [gateQ, successorQ, updateMarkerQ],
+      ...paidEvidence(undefined, undefined, { deleted_at: new Date('2026-09-20T00:00:00Z') }),
+    });
+
+    await _private.stampParentRenewedForSuccessor({ id: 'succ-term', renewed_from_term_id: 'parent-term' }, 'test');
+
+    expect(notifyAdmin).toHaveBeenCalledWith('billing', expect.any(String), expect.stringMatching(/account was deleted/i), expect.objectContaining({
+      dedupeKey: 'termite-renewal-charge:succ-term:paid_after_parent_ended',
+    }));
+    expect(updateMarkerQ.where).toHaveBeenCalledWith({ id: markedSuccessor.id });
+    expect(updateMarkerQ.whereNull).toHaveBeenCalledWith('renewal_parent_deleted_conflict_belled_at');
+    expect(updateMarkerQ.update).toHaveBeenCalledWith({ renewal_parent_deleted_conflict_belled_at: expect.any(Date) });
+  });
+
+  // Codex #4971 r17 P2 — finding 5 regression: once the marker is already
+  // set, the deletion check (and its bell) never runs again for this
+  // successor — never a repeat notification, never a repeat customers read.
+  test('an already-marked successor skips the deletion check entirely — no re-bell, no re-read', async () => {
+    const { notifyAdmin } = require('../services/notification-service');
+    notifyAdmin.mockClear();
+    const alreadyMarked = { ...PAID_SUCCESSOR, renewal_parent_deleted_conflict_belled_at: new Date('2026-09-21T00:00:00Z') };
+    setDbQueues({
+      annual_prepay_terms: [query({ rows: [] }), query({ first: alreadyMarked })],
+      ...paidEvidence(),
+    });
+
+    await expect(_private.stampParentRenewedForSuccessor({ id: 'succ-term', renewed_from_term_id: 'parent-term' }, 'test')).resolves.toBeUndefined();
+
+    expect(notifyAdmin).not.toHaveBeenCalled();
+  });
+
   const TERMS = 'annual_prepay_terms';
   test.each([
     ['refunded in full on the payments ledger', PAID_SUCCESSOR, paidEvidence(undefined, { id: 'pay-refunded' }), [TERMS, TERMS, 'invoices', 'payments']],
@@ -6947,6 +6994,81 @@ describe('reconcileParentRenewedStamps (Codex round-2 P1 backstop)', () => {
 
     expect(summary.scanned).toBe(2);
     expect(summary.stamped).toBe(1);
+  });
+
+  // Codex #4971 r17 P2 — finding 5: the scan itself excludes a successor
+  // whose deleted-account conflict already told staff — directly in SQL,
+  // never just as an in-JS re-check after the row is already inside this
+  // bounded LIMIT page. Without this, that SAME row (its parent never
+  // leaves ACTIVE_STATUSES/renewal_decision-null on its own) would keep
+  // being reselected on every tick, starving any newer conflict behind it.
+  test('the scan query excludes rows whose deleted-account conflict already belled', async () => {
+    const scanQ = query({ rows: [] });
+    setDbQueues({ 'annual_prepay_terms as s': [scanQ] });
+
+    await AnnualPrepayRenewals.reconcileParentRenewedStamps({});
+
+    expect(scanQ.whereNull).toHaveBeenCalledWith('s.renewal_parent_deleted_conflict_belled_at');
+  });
+});
+
+// Codex #4971 r17 P1 — finding 1: withParentDecisionLock's connection-loss
+// tracker (trackConnectionLoss) must be attached BEFORE any lock query, not
+// after takeSessionDecisionLocks() returns — otherwise a close/end landing
+// while a lock query is still outstanding is silently missed forever (the
+// listener that would have caught it isn't registered yet). Proved here by
+// making the mocked session connection's own query implementation fire its
+// 'close' handlers WHILE the advisory-lock query is in flight: with the
+// tracker attached early, fn() sees the loss; the pre-fix ordering (attach
+// only after every lock query settles) would have missed this exact event
+// and let fn() run believing the lock still held. The real end-to-end wiring
+// against an actually-killed Postgres backend is proved separately in
+// annual-prepay-parent-decision-lock-postgres.test.js.
+describe('withParentDecisionLock — connection-loss tracking (finding 1)', () => {
+  afterEach(() => {
+    delete db.client.lockConn.on;
+    db.client.lockConn.query = jest.fn(async (sql) => {
+      if (/pg_advisory_lock/.test(String(sql)) && !/pg_advisory_unlock/.test(String(sql))) {
+        if (!db.client.locked) {
+          const err = new Error('canceling statement due to lock timeout');
+          err.code = '55P03';
+          throw err;
+        }
+      }
+      return { rows: [] };
+    });
+  });
+
+  test('a close event firing while a lock query is still in flight is caught — never missed by attaching the tracker too late', async () => {
+    const handlers = {};
+    db.client.lockConn.on = jest.fn((event, cb) => { handlers[event] = cb; });
+    const baseQuery = db.client.lockConn.query;
+    db.client.lockConn.query = jest.fn(async (sql, params) => {
+      const result = await baseQuery(sql, params);
+      // The underlying socket closing WHILE this exact advisory-lock query
+      // was outstanding — the scenario the old attach-after-the-fact
+      // ordering missed.
+      if (/pg_advisory_lock/.test(String(sql)) && !/pg_advisory_unlock/.test(String(sql))) {
+        handlers.close?.();
+      }
+      return result;
+    });
+
+    let sawAliveInsideFn = false;
+    let thrownInsideFn = null;
+    await AnnualPrepayRenewals.withParentDecisionLock('term-loss-1', async () => {
+      try {
+        AnnualPrepayRenewals.assertParentDecisionLockAlive();
+        sawAliveInsideFn = true;
+      } catch (err) {
+        thrownInsideFn = err;
+      }
+    });
+
+    expect(sawAliveInsideFn).toBe(false);
+    expect(thrownInsideFn).toBeTruthy();
+    expect(thrownInsideFn.code).toBe('PARENT_DECISION_LOCK_LOST');
+    expect(thrownInsideFn.deliveryNeverAttempted).toBe(true);
   });
 });
 

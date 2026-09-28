@@ -108,6 +108,10 @@ async function createScratchDb() {
     -- Codex #4971 r15 P2: the charge-failed customer notice's own durable
     -- delivery stamp.
     renewal_charge_failed_notice_sent_at timestamptz,
+    -- Codex #4971 r17 P2 (finding 5): the deleted-account conflict's own
+    -- exclusion marker — reconcileParentRenewedStamps' scan excludes on it
+    -- directly in SQL (20260928000100).
+    renewal_parent_deleted_conflict_belled_at timestamptz,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now()
   )`);

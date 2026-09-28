@@ -191,17 +191,17 @@ describe('termite annual renewal charge', () => {
       expect(order).toEqual(['gate-acquired', 'deletion-commits', 'gate-released']);
     });
 
-    // Codex #4971 r16 P1 — finding 4 regression: a customer with more than
-    // one in-flight renewable parent term takes every one of their gates,
-    // in id order, nested (never in parallel) — the SAME defensive
-    // cross-deadlock ordering the old successor-keyed version already had.
-    test('more than one renewable parent term takes every gate, in sorted id order', async () => {
+    // Codex #4971 r17 P2 — finding 2: every renewable parent term is taken
+    // on ONE withParentDecisionLock call (its own alsoTermIds), sorted —
+    // never one nested withParentDecisionLock call per parent. The old
+    // `reduceRight` chain opened one raw lock session (capped at 8) PER
+    // PARENT, all held open at once by the outer calls waiting on their
+    // inner ones, so a customer with more renewable parents than the cap
+    // deterministically exhausted it; a single call with alsoTermIds takes
+    // them all on the ONE session withParentDecisionLock already opens.
+    test('more than one renewable parent term takes all of them on a SINGLE withParentDecisionLock call, sorted', async () => {
       mockCommon();
-      const acquireOrder = [];
-      const withParentDecisionLock = jest.fn(async (termId, innerFn) => {
-        acquireOrder.push(termId);
-        return innerFn();
-      });
+      const withParentDecisionLock = jest.fn(async (termId, innerFn) => innerFn());
       jest.doMock('../services/annual-prepay-renewals', () => ({
         ...jest.requireActual('../services/annual-prepay-renewals'),
         withParentDecisionLock,
@@ -220,8 +220,87 @@ describe('termite annual renewal charge', () => {
       }));
       const { withCustomerDeletionGate } = require('../services/termite-annual-renewal-charge');
       await expect(withCustomerDeletionGate('cust-1', async () => 'deleted')).resolves.toBe('deleted');
-      expect(withParentDecisionLock).toHaveBeenCalledTimes(2);
-      expect(acquireOrder).toEqual(['parent-a', 'parent-b']);
+      expect(withParentDecisionLock).toHaveBeenCalledTimes(1);
+      expect(withParentDecisionLock).toHaveBeenCalledWith('parent-a', expect.any(Function), { alsoTermIds: ['parent-b'] });
+    });
+
+    // Codex #4971 r17 P2 — finding 2 regression: the scenario that
+    // deterministically failed before this fix — more renewable parents
+    // than PARENT_DECISION_LOCK_SESSIONS' own 8-session cap. Still exactly
+    // ONE withParentDecisionLock call (one raw session), never nine.
+    test('nine renewable parent terms (past the 8-session raw-connection cap) still take a SINGLE withParentDecisionLock call', async () => {
+      mockCommon();
+      const withParentDecisionLock = jest.fn(async (termId, innerFn) => innerFn());
+      jest.doMock('../services/annual-prepay-renewals', () => ({
+        ...jest.requireActual('../services/annual-prepay-renewals'),
+        withParentDecisionLock,
+      }));
+      const nineParents = Array.from({ length: 9 }, (_, i) => ({ id: `parent-${i}` }));
+      jest.doMock('../models/db', () => jest.fn((table) => {
+        if (table === 'annual_prepay_terms') {
+          return {
+            where: jest.fn(() => ({
+              whereNotNull: jest.fn(() => ({
+                whereIn: jest.fn(() => ({ select: jest.fn(async () => nineParents) })),
+              })),
+            })),
+          };
+        }
+        throw new Error(`unexpected table ${table}`);
+      }));
+      const { withCustomerDeletionGate } = require('../services/termite-annual-renewal-charge');
+      await expect(withCustomerDeletionGate('cust-1', async () => 'deleted')).resolves.toBe('deleted');
+      expect(withParentDecisionLock).toHaveBeenCalledTimes(1);
+      const [, , options] = withParentDecisionLock.mock.calls[0];
+      expect(options.alsoTermIds).toHaveLength(8);
+    });
+  });
+
+  // Codex #4971 r17 P2 — finding 3: the staff decline bell must report the
+  // ACTUAL amount Stripe was asked for (attemptedChargeAmount, the SAME
+  // source the customer's own decline SMS uses — the durable
+  // stripe_invoice_charge_attempts row), never the full prepay_amount,
+  // which overstates it whenever account credit reduced the cash amount
+  // actually tried (a $249 renewal with $100 credit tries $149).
+  describe('ringRenewalBell — declined amount', () => {
+    function attemptQuery(amount) {
+      const q = {};
+      ['where', 'whereNotNull', 'orWhereNotNull', 'orderBy'].forEach((m) => {
+        q[m] = jest.fn((arg) => {
+          if (typeof arg === 'function') arg.call(q, q);
+          return q;
+        });
+      });
+      q.first = jest.fn(async () => (amount == null ? undefined : { amount }));
+      return q;
+    }
+
+    test('a declined charge bell reports the attempted amount, not the full prepay_amount', async () => {
+      mockCommon();
+      const notifyAdmin = jest.fn(async () => ({ id: 'n1' }));
+      jest.doMock('../services/notification-service', () => ({ notifyAdmin }));
+      jest.doMock('../models/db', () => jest.fn((table) => {
+        if (table === 'stripe_invoice_charge_attempts as a') return attemptQuery(149);
+        throw new Error(`unexpected table ${table}`);
+      }));
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      const successor = { id: 'succ-1', customer_id: 'cust-1', prepay_amount: 249, prepay_invoice_id: 'inv-1' };
+      await _private.ringRenewalBell(successor, 'declined', 'card_declined');
+      expect(notifyAdmin).toHaveBeenCalledWith('billing', expect.any(String), expect.stringContaining('$149.00'), expect.any(Object));
+      expect(notifyAdmin).toHaveBeenCalledWith('billing', expect.any(String), expect.not.stringContaining('$249.00'), expect.any(Object));
+    });
+
+    test('every other bell kind is unaffected — still reports the full prepay_amount', async () => {
+      mockCommon();
+      const notifyAdmin = jest.fn(async () => ({ id: 'n1' }));
+      jest.doMock('../services/notification-service', () => ({ notifyAdmin }));
+      jest.doMock('../models/db', () => jest.fn((table) => {
+        throw new Error(`unexpected table ${table} — a non-declined bell must never read stripe_invoice_charge_attempts`);
+      }));
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      const successor = { id: 'succ-1', customer_id: 'cust-1', prepay_amount: 249, prepay_invoice_id: 'inv-1' };
+      await _private.ringRenewalBell(successor, 'refused', 'Auto Pay inactive');
+      expect(notifyAdmin).toHaveBeenCalledWith('billing', expect.any(String), expect.stringContaining('$249.00'), expect.any(Object));
     });
   });
 
