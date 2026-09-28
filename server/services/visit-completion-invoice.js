@@ -326,6 +326,34 @@ async function linkPacketInvoice({ packet, invoice, members, customer, trx, acce
   });
 }
 
+// An acceptance invoice minted before per-member itemization carries one
+// "First service application" line with no member identity. It is adopted
+// only when that line provably is the reserved row's stop price: the packet
+// performs exactly the estimate's same-day first-visit set, the invoice's own
+// visit is the one priced member, every other member is deliberately unpriced
+// (NULL, never an explicit zero) and the net line equals that price. The line
+// is then stamped with the priced member's identity so every later check
+// reads the shape an itemized acceptance would have written. Anything else
+// returns null and stays with the office.
+async function stampAggregateApplicationLine({ lines, primary, members, invoice, sourceId, trx }) {
+  if (primary.length !== 1) return null;
+  const [line] = primary;
+  if ([line.client_id, line.accepted_service_type, line.accepted_service_id].some(Boolean)) return null;
+  const owner = members.find((member) => member.id === invoice.scheduled_service_id);
+  if (!owner) return null;
+  const priced = members.filter((member) => member.estimated_price !== null);
+  const price = Number.parseFloat(owner.estimated_price);
+  if (priced.length !== 1 || priced[0] !== owner || !Number.isFinite(price) || !(price > 0)) return null;
+  const lineNet = Math.round((Number(line.amount) - Number(invoice.discount_amount || 0)) * 100);
+  if (!(Number(line.amount) > 0) || !Number.isSafeInteger(lineNet) || lineNet !== Math.round(price * 100)) return null;
+  const estimateSet = await trx('scheduled_services').where({ customer_id: invoice.customer_id,
+    source_estimate_id: sourceId, scheduled_date: owner.scheduled_date }).whereNull('recurring_parent_id').pluck('id');
+  const memberIds = members.map((member) => String(member.id)).sort();
+  if (JSON.stringify(estimateSet.map(String).sort()) !== JSON.stringify(memberIds)) return null;
+  return lines.map((entry) => (entry === line ? { ...line, client_id: `scheduled_${owner.id}_primary`,
+    accepted_service_type: owner.service_type, accepted_service_id: owner.service_id } : entry));
+}
+
 async function adoptAcceptanceInvoice({ packet, members, customer, trx, invoices }) {
   const rejected = office('existing_member_invoice');
   if (invoices.length !== 1 || !members.length) return rejected;
@@ -358,8 +386,12 @@ async function adoptAcceptanceInvoice({ packet, members, customer, trx, invoices
   const frozenIdentities = primary.map((line) => [
     line.client_id, line.accepted_service_type, line.accepted_service_id,
   ]).sort();
-  if (JSON.stringify(frozenIdentities) !== JSON.stringify(identities)
-      || primary.some((line) => !(Number(line.amount) > 0))) return rejected;
+  let adoptedLines = lines;
+  if (JSON.stringify(frozenIdentities) !== JSON.stringify(identities)) {
+    adoptedLines = await stampAggregateApplicationLine({ lines, primary, members, invoice, sourceId, trx });
+    if (!adoptedLines) return rejected;
+  }
+  if (primary.some((line) => !(Number(line.amount) > 0))) return rejected;
   const applicationNet = Math.round((primary.reduce((sum, line) => sum + Number(line.amount), 0)
     - Number(invoice.discount_amount || 0)) * 100);
   const scheduledCeiling = members.reduce((sum, member) => sum + Math.round(Number(member.estimated_price) * 100), 0);
@@ -423,8 +455,9 @@ async function adoptAcceptanceInvoice({ packet, members, customer, trx, invoices
     if (!await require('./estimate-deposits').invoiceDepositCreditIsBacked(invoice, trx)) return rejected;
   } catch (error) { visitBusy(error); }
   await trx('invoices').where({ id: invoice.id }).update({ visit_completion_packet_id: packet.id,
-    service_record_id: owner.record_id, updated_at: trx.fn.now() });
-  await linkPacketInvoice({ packet, invoice, members, customer, trx, acceptedLineItems: lines });
+    service_record_id: owner.record_id, updated_at: trx.fn.now(),
+    ...(adoptedLines === lines ? {} : { line_items: JSON.stringify(adoptedLines) }) });
+  await linkPacketInvoice({ packet, invoice, members, customer, trx, acceptedLineItems: adoptedLines });
   return { state: 'invoice_ready', invoiceId: invoice.id, total: Number(invoice.total) };
 }
 

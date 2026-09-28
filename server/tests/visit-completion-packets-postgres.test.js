@@ -2907,6 +2907,66 @@ postgres('visit completion packet records on PostgreSQL', () => {
     await expect(assertPacketCharge(saved)).rejects.toMatchObject({ reason: 'member_price_changed' });
   });
 
+  // Acceptance drafts minted before per-member itemization carry one
+  // aggregate "First service application" line with no member identity.
+  async function preparePregateAcceptanceDraft({ prices = [178.2, null], lineAmount = 178.2 } = {}) {
+    await mockPg('customers').where({ id: fixture.customerId }).update({ waveguard_tier: 'Silver' });
+    const prepared = await prepareAcceptanceInvoice({ scheduledPrices: prices });
+    const { estimateId, invoice, pestId, lawnId } = prepared;
+    await mockPg('estimates').where({ id: estimateId }).update({ estimate_data: {} });
+    await mockPg('scheduled_services').where({ id: pestId }).update({
+      service_type: 'Quarterly Pest Control Service', is_recurring: true });
+    await mockPg('scheduled_services').where({ id: lawnId }).update({
+      service_type: 'Quarterly Rodent Bait Station Service', is_recurring: true });
+    await InvoiceService.update(invoice.id, { line_items: [
+      { description: 'First service application', quantity: 1, unit_price: lineAmount, amount: lineAmount },
+    ] });
+    await mockPg('invoices').where({ id: invoice.id }).update({ title: 'First Service Application',
+      notes: acceptanceInvoiceNotes(estimateId, 'first application only') });
+    return { ...prepared, rodentId: lawnId, before: await mockPg('invoices').where({ id: invoice.id }).first() };
+  }
+
+  test('adopts a pre-gate aggregate acceptance draft and stamps the priced member identity', async () => {
+    const { invoice, pestId, rodentId, before } = await preparePregateAcceptanceDraft();
+    expect(before).toMatchObject({ subtotal: '178.20', total: '178.20', status: 'draft' });
+    const saved = await saveVisitCompletionPacket(submission());
+    expect(saved.body.billing).toMatchObject({ state: 'invoice_ready', invoiceId: invoice.id, total: 178.2 });
+    const after = await mockPg('invoices').where({ id: invoice.id }).first();
+    expect(after).toMatchObject({ subtotal: before.subtotal, total: before.total, tax_amount: before.tax_amount,
+      visit_completion_packet_id: saved.body.packetId, status: 'draft' });
+    expect(after.line_items).toEqual([{ ...before.line_items[0], client_id: `scheduled_${pestId}_primary`,
+      accepted_service_type: 'Quarterly Pest Control Service', accepted_service_id: fixture.catalogId }]);
+    const snapshot = (await mockPg('visit_completion_packets').where({ id: saved.body.packetId }).first())
+      .payload.billingSnapshot;
+    expect(snapshot.acceptedLineItems).toEqual(after.line_items);
+    expect(snapshot.memberPricing.find((member) => member.id === rodentId).price).toBeNull();
+    await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }).update({ status: 'done' });
+    await expect(assertPacketCharge(saved)).resolves.toBeUndefined();
+    await mockPg('scheduled_services').where({ id: rodentId }).update({ estimated_price: 0 });
+    await expect(assertPacketCharge(saved)).rejects.toMatchObject({ reason: 'member_price_changed' });
+  });
+
+  test.each([
+    ['a same-day estimate member missing from the billed packet', {}, 'declined'],
+    ['a packet member that is not on the estimate', {}, 'foreign'],
+    ['a line below the priced member', { lineAmount: 150 }, null],
+    ['two priced members behind one aggregate line', { prices: [120, 58.2] }, null],
+    ['an explicit zero instead of an unpriced member', { prices: [178.2, 0] }, null],
+  ])('keeps a pre-gate aggregate acceptance draft with %s for the office', async (_label, shape, change) => {
+    const { invoice, rodentId, before } = await preparePregateAcceptanceDraft(shape);
+    const input = submission();
+    if (change === 'declined') input.items[1].body.visitOutcome = 'customer_declined';
+    if (change === 'foreign') {
+      const otherEstimateId = randomUUID();
+      fixture.estimateIds.push(otherEstimateId);
+      await mockPg('estimates').insert({ id: otherEstimateId, customer_id: fixture.customerId, status: 'accepted' });
+      await mockPg('scheduled_services').where({ id: rodentId }).update({ source_estimate_id: otherEstimateId });
+    }
+    const saved = await saveVisitCompletionPacket(input);
+    expect(saved.body.billing).toMatchObject({ state: 'office_required', reason: 'existing_member_invoice' });
+    expect(await mockPg('invoices').where({ id: invoice.id }).first()).toEqual(before);
+  });
+
   test('mixed commercial tax treatment cannot inherit an acceptance invoice owner rate', async () => {
     await mockPg('customers').where({ id: fixture.customerId }).update({
       property_type: 'commercial', zip: '34209',

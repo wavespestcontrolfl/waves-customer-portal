@@ -133,6 +133,21 @@ Paths above are relative to `server/`.
 - Preserve all deployed native app and public token contracts. Specialty
   compliance documents remain available even when the summary groups services.
 
+## Adopting the acceptance invoice
+
+When the packet's performed first-visit members already have the draft
+pay-per-application invoice the accept route minted, the closeout adopts that
+draft instead of minting a second invoice. An itemized draft is adopted when
+its per-member lines name exactly the performed members. A draft minted before
+per-member itemization carries one "First service application" line with no
+member identity; it is adopted only when the performed members are exactly the
+estimate's same-day first-visit set, the invoice's own visit is the one priced
+member, every other member is deliberately unpriced (a NULL price, never an
+explicit zero) and the line, net of the invoice discount, equals that price.
+Adoption then stamps the priced member's identity on the line in the same
+transaction, so later charge checks read the same shape an itemized accept
+writes. Every other shape stays with the office.
+
 ## Verification and rollout
 
 Use synthetic records in a dedicated Railway dev/preview database. Prove

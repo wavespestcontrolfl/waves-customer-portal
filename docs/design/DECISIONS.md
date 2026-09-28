@@ -2608,3 +2608,13 @@ the upload unresolved: no species is named and the report is a generic,
 inspection-first consultation. It supersedes the 2026-09-24 "Claude only when Gemini
 returns nothing" rule for this lane only; lawn and tree & shrub scoring keep
 it until they move to the photo ID v2 engine.
+
+## 2026-09-28 — Grouped closeout adopts pre-gate acceptance drafts
+
+**Decision:** A pay-per-application acceptance draft minted before per-member itemization (one aggregate "First service application" line with no member identity) is adopted by the grouped visit closeout when the performed members are exactly the estimate's same-day first-visit set and the line, net of the invoice discount, equals the reserved member's price. The reserved member's identity is stamped on the line at adoption. Anything else stays office review.
+
+**Context:** Two drafts minted before the gate closed as office review (`existing_member_invoice`) because their single line named no member, although the reserved row carried the whole stop price and its same-trip row was deliberately unpriced.
+
+**Reasoning:** The reserved row already carries the whole stop price, so attributing the line to it needs no new split. Requiring the exact estimate set, a single priced member that owns the invoice, NULL (not zero) prices on the others and an exact amount leaves no case where the stamp guesses. Stamping inside the adoption transaction means the charge fence and price-change checks compare against the stamped line, never an unstamped one. All the existing adoption checks (draft status, setup-fee authority, tax, eligibility, retention, deposits) still apply first.
+
+**Revisit if:** Any path starts minting aggregate lines for mixes where more than one member is priced, or the reserved-row pricing convention changes.
