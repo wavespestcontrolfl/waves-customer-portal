@@ -1548,7 +1548,7 @@ jest.setTimeout(30000);
     const dispatch = jest.fn(async () => ({ ok: true, json: { kind: 'not_stock', reason: 'unused' } }));
     const result = await decideForTitle(mockConn, dispatch, {
       rawTitle: 'Control Solutions Taurus SC Termiticide 78 oz', quantity: 2, vendor: 'amazon', siteOneFields: null,
-    }, { allowedCategories: new Set(['insecticide']), activeProducts: [], activeProductAliases: {} });
+    }, { activeProducts: [], activeProductAliases: {} });
     expect(dispatch).not.toHaveBeenCalled();
     expect(result).toMatchObject({ rulesResolve: true });
   });
