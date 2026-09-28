@@ -1069,9 +1069,11 @@ describe('fulfillment proof', () => {
     expect(admissibleWitness({ ...staffCall, customer_leg_status: 'completed', customer_leg_seconds: '75' }, other)).toBe(true);
     // An ask naming an address still takes a person's reply (Codex #5169 r1
     // P2); an email delivery is still no `other` witness.
-    const emailOther = { kind: 'other', evidence: [{ quote: 'Email the answer to synthetic@example.invalid' }] };
+    const emailOther = { kind: 'other', evidence: [{ quote: 'Email the answer to synthetic@example.invalid' }], sms_context: { basis: 'request' } };
     expect(admissibleWitness(personSms, emailOther)).toBe(true);
     expect(admissibleWitness(staffCall, emailOther)).toBe(true);
+    // A promise staff made to email an address is proved by that delivery, never a text or call.
+    expect(admissibleWitness(personSms, { ...emailOther, sms_context: { basis: 'promise' } })).toBe(false);
     expect(admissibleWitness({ type: 'email_delivery', status: 'delivered', sent_at: '2040-03-11T15:00:00Z',
       recipient_email_snapshot: 'synthetic@example.invalid' }, emailOther)).toBe(false);
     // `callback` keeps its existing call/visit mix, whoever placed the call.
@@ -1462,7 +1464,7 @@ describe('R2 payment evidence (owner ruling 2026-09-25): money landing (a paid i
 
   test('owner ruling 2026-09-28: a person\'s reply or call back closes a general ask without the model, whatever it says', async () => {
     dispatchWithFallback.mockReset().mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
-    const ask = { kind: 'other', description: 'I thought it was 125 a quarter', sms_context: { ...ctx, money_answerable: false } };
+    const ask = { kind: 'other', description: 'I thought it was 125 a quarter', sms_context: { ...ctx, basis: 'request', money_answerable: false } };
     const reply = (id, created_at, text, extra = {}) => ({ id, ref: `sms:${id}`, type: 'sms', status: 'delivered',
       message_type: 'manual', operator_sent: true, created_at, text, ...extra });
     const first = reply('first', '2040-03-11T15:00:00Z', 'You got it');
@@ -1487,7 +1489,10 @@ describe('R2 payment evidence (owner ruling 2026-09-25): money landing (a paid i
     await verifySmsFulfillment(ask, { records: [reply('bare', '2040-03-11T15:00:00Z', 'You got it', { operator_sent: false })], failures: [] });
     // Only a general ask takes the shortcut: a callback's call stays the model's to judge.
     await verifySmsFulfillment({ ...ask, kind: 'callback' }, { records: [call], failures: [] });
-    expect(dispatchWithFallback).toHaveBeenCalledTimes(3);
+    // A promise Waves made is kept by doing it, never by a later reply: the model judges it.
+    expect(await verifySmsFulfillment({ ...ask, description: "we'll get the prep guide today", sms_context: { ...ask.sms_context, basis: 'promise' } },
+      { records: [reply('thanks', '2040-03-11T15:00:00Z', 'Thanks!')], failures: [] })).toMatchObject({ verdict: 'open' });
+    expect(dispatchWithFallback).toHaveBeenCalledTimes(4);
   });
 
   test('rule 6: a property-scoped ask refuses only a payment tied to another property; an unscoped ask admits any of the customer\'s own payments', () => {
