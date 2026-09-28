@@ -233,23 +233,39 @@ function isFirstOccurrenceInPool(event, pool) {
   });
 }
 
+// id -> row per pool array, so the survivor lookup below stays O(1).
+const poolIdIndex = new WeakMap();
+function poolRowById(pool, id) {
+  if (!Array.isArray(pool)) return null;
+  let index = poolIdIndex.get(pool);
+  if (!index) {
+    index = new Map(pool.filter(Boolean).map((row) => [String(row.id), row]));
+    poolIdIndex.set(pool, index);
+  }
+  return index.get(String(id)) || null;
+}
+
 /**
- * True when `sibling` is a cross-source duplicate that was merged away
- * (merged_into set) — never independent evidence of a DISTINCT occurrence,
- * regardless of what its own start_at says. event-dedup.js's pickSurvivor
- * can keep either row of a same-day, ≤30-minute-drift cross-source pair
- * (event-duplicates.js's tolerant matching), so a merged loser's start_at
- * can land a few minutes EARLIER than its own survivor's — without this
- * check, that loser would count as a separate "earlier this year"
- * occurrence and disqualify the survivor from being first-of-year, even
- * though they're the same real happening (Codex P2, 2026-09-27). A merged
- * sibling already matched isSameSeriesSibling against `event`, so its merge
- * target is — by construction of the merge system — the same identity;
- * excluding it here loses no real evidence, since the (unmerged) survivor
- * it points to is itself in `pool` and independently counts.
+ * True when `sibling` is a cross-source duplicate merged into a survivor
+ * on the SAME ET day: the same happening, never independent evidence of a
+ * distinct occurrence. event-dedup.js's pickSurvivor can keep either row of
+ * a same-day, ≤30-minute-drift cross-source pair (event-duplicates.js's
+ * tolerant matching), so a merged loser's start_at can land a few minutes
+ * EARLIER than its own survivor's — counting it would disqualify the
+ * survivor from being first-of-year (Codex P2, 2026-09-27).
+ *
+ * A merged row whose survivor now sits on a DIFFERENT day still counts
+ * (Codex P2, round 20): a stable-ID feed can advance the survivor in place
+ * to a later occurrence, leaving the merged loser as the only record of the
+ * earlier one. `pool` must hold the survivor for the same-day comparison;
+ * a survivor on the same day is in the same year, so any year pool that
+ * holds the sibling holds it too, and a survivor absent from `pool` is on
+ * another day. Mirrored in SQL by buildRoutineFirstOfYearAdmission.
  */
-function isMergedAwaySibling(sibling) {
-  return Boolean(sibling?.merged_into);
+function isMergedAwaySibling(sibling, pool) {
+  if (!sibling?.merged_into) return false;
+  const survivor = poolRowById(pool, sibling.merged_into);
+  return Boolean(survivor) && occurrenceDayKey(survivor) === occurrenceDayKey(sibling);
 }
 
 /**
@@ -282,8 +298,9 @@ function identityOccurrenceCount(event, pool) {
   const occurrences = new Set([occurrenceDayKey(event)]);
   for (const sibling of (Array.isArray(pool) ? pool : [])) {
     if (!sibling || String(sibling.id) === String(event?.id)) continue;
-    if (isMergedAwaySibling(sibling)) continue;
-    if (isSameSeriesSibling(event, sibling)) occurrences.add(occurrenceDayKey(sibling));
+    if (isSameSeriesSibling(event, sibling) && !isMergedAwaySibling(sibling, pool)) {
+      occurrences.add(occurrenceDayKey(sibling));
+    }
   }
   return occurrences.size;
 }
@@ -320,7 +337,7 @@ function hasEarlierOccurrenceThisYear(event, pool, reference = new Date()) {
   const eventDayKey = occurrenceDayKey(event);
   return (Array.isArray(pool) ? pool : []).some((sibling) => {
     if (!sibling || String(sibling.id) === String(event?.id)) return false;
-    if (isMergedAwaySibling(sibling) || !isSameSeriesSibling(event, sibling)) return false;
+    if (!isSameSeriesSibling(event, sibling) || isMergedAwaySibling(sibling, pool)) return false;
     if (!sibling.start_at || etYearOf(sibling.start_at, reference) !== eventYear) return false;
     const siblingDayKey = occurrenceDayKey(sibling);
     return siblingDayKey !== eventDayKey && siblingDayKey < eventDayKey;
@@ -444,8 +461,8 @@ function identityIsRecurring(event, pool, occurrenceCount) {
   return (Array.isArray(pool) ? pool : []).some((sibling) => (
     sibling
     && String(sibling.id) !== String(event?.id)
-    && !isMergedAwaySibling(sibling)
     && isSameSeriesSibling(event, sibling)
+    && !isMergedAwaySibling(sibling, pool)
     && isRecurringIdentityEvent(sibling, { occurrenceCount })
   ));
 }

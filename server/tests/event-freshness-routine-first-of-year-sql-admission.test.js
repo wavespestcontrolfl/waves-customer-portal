@@ -170,6 +170,17 @@ describeOrSkip('buildCurationCandidateQuery admits a genuine first-of-year stale
     expect(rows.map((r) => r.id)).toContain(survivorId);
   });
 
+  test('a merged duplicate still counts once its survivor was advanced in place to a later day', async () => {
+    const title = 'TEST Weekly Trivia Survivor Advanced';
+    const { laterDay, earlierDay } = sameYearDays();
+    // Merged on earlierDay; the stable-ID survivor's feed then moved it to laterDay.
+    const survivorId = await insertEvent({ title, start_at: etAt(laterDay, '12:00:00') });
+    const loserId = await insertEvent({ title, start_at: etAt(earlierDay, '12:00:00') });
+    await db('events_raw').where({ id: loserId }).update({ merged_into: survivorId });
+    const rows = await buildCurationCandidateQuery(500);
+    expect(rows.map((r) => r.id)).not.toContain(survivorId);
+  });
+
   test('a stale NON-routine row (limited run between its weeks) is kept out of the capped query', async () => {
     const id = await insertEvent({
       title: 'TEST Limited Run Between Weeks',

@@ -961,7 +961,9 @@ const TZ_SHIFT_QUARANTINE = 'tz_shift_quarantine';
 
 function shiftedLegacyKey(title, start, urlKey) {
   if (!start) return null;
-  const shiftedIso = `${etDateString(start)}T${etWallClockHHMM(start)}:00.000Z`;
+  // Seconds carry over: the old parser kept "19:30:45" as 19:30:45Z.
+  const seconds = String(etParts(start).second).padStart(2, '0');
+  const shiftedIso = `${etDateString(start)}T${etWallClockHHMM(start)}:${seconds}.000Z`;
   if (shiftedIso === start.toISOString()) return null;
   return `${title.toLowerCase().slice(0, 80)}|${shiftedIso}|${urlKey}`.slice(0, 256);
 }

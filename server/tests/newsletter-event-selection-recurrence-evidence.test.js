@@ -28,6 +28,7 @@ const {
   identityOccurrenceCount,
   isFirstOccurrenceOfYear,
   isMergedAwaySibling,
+  hasEarlierOccurrenceThisYear,
   occurrenceDayKey,
 } = require('../services/newsletter-event-selection');
 const { isRecurringIdentityEvent, isEligibleForFreshDigest } = require('../services/event-freshness');
@@ -182,9 +183,18 @@ describe('P2 #242: a merged-away duplicate must not count as a separate occurren
     id: 'a', title: 'Riverside Trivia', start_at: '2026-04-04T20:00:00Z', merged_into: 'b',
   };
 
-  test('isMergedAwaySibling identifies a merged loser', () => {
-    expect(isMergedAwaySibling(mergedLoser)).toBe(true);
-    expect(isMergedAwaySibling(survivor)).toBe(false);
+  test('isMergedAwaySibling identifies a merged loser on its survivor\'s day', () => {
+    expect(isMergedAwaySibling(mergedLoser, [survivor, mergedLoser])).toBe(true);
+    expect(isMergedAwaySibling(survivor, [survivor, mergedLoser])).toBe(false);
+  });
+
+  test('a merged loser still counts once its survivor was advanced in place to another day', () => {
+    const advanced = { ...survivor, start_at: '2026-04-11T20:15:00Z' };
+    expect(isMergedAwaySibling(mergedLoser, [advanced, mergedLoser])).toBe(false);
+    // Without the survivor in the pool, it is on another day by construction.
+    expect(isMergedAwaySibling(mergedLoser, [mergedLoser])).toBe(false);
+    expect(identityOccurrenceCount(advanced, [advanced, mergedLoser])).toBe(2);
+    expect(hasEarlierOccurrenceThisYear(advanced, [advanced, mergedLoser], REFERENCE)).toBe(true);
   });
 
   test('identityOccurrenceCount excludes the merged loser from the count', () => {

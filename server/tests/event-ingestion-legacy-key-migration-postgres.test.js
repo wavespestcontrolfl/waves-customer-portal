@@ -397,6 +397,29 @@ describeOrSkip('upsertExtractedEvents — legacy dedup-key migration on real Pos
     expect(new Date(fresh[0].start_at).toISOString()).toBe(start.toISOString());
   });
 
+  test('a pre-fix row whose time carried seconds is quarantined too', async () => {
+    const source = { id: sourceId, coverage_geo: [] };
+    const title = 'TEST Shifted Pre Fix Row With Seconds';
+    const url = 'https://test.invalid/shifted-pre-fix-row-seconds/';
+    const startIso = daysFromNowIso(42, 23).replace(':00:00.000Z', ':00:45.000Z');
+    const start = parseExtractedStartAt(startIso);
+    const shifted = start.toLocaleString('sv-SE', { timeZone: 'America/New_York' }).replace(' ', 'T');
+    const shiftedIso = `${shifted}.000Z`; // the old parser kept the seconds
+    expect(shiftedIso).toMatch(/:45\.000Z$/);
+    const [stale] = await db('events_raw').insert({
+      source_id: sourceId, external_id: `${title.toLowerCase()}|${shiftedIso}|${url}`, title,
+      start_at: new Date(shiftedIso), event_url: url, admin_status: 'pending',
+      pulled_at: new Date(Date.now() - 2 * 24 * 3600 * 1000),
+    }).returning(['id']);
+    const staleId = stale.id || stale;
+
+    await upsertExtractedEvents(source, [{ title, startAt: startIso, eventUrl: url }]);
+
+    const old = await db('events_raw').where({ id: staleId }).first();
+    expect(old.admin_status).toBe('rejected');
+    expect(old.approved_via).toBe('tz_shift_quarantine');
+  });
+
   test('with no legacy row present, a fresh pull inserts once under the new key', async () => {
     const source = { id: sourceId, coverage_geo: [] };
     const title = 'TEST Fresh Pull Event';

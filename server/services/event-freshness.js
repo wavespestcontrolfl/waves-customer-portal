@@ -361,9 +361,10 @@ const sqlEtDay = (colRef) => `(${colRef} AT TIME ZONE 'America/New_York')::date`
  * blank on either side — mirrors newsletter-event-selection.js's
  * isSameSeriesSibling) with a start_at falling on a strictly EARLIER ET
  * CALENDAR DAY in the SAME ET calendar year (see sqlEtDay above — not an
- * earlier exact timestamp). Merged-away rows never count (isFirstOccurrenceOfYear
- * ignores them too: a merged duplicate a few minutes earlier than its survivor is the
- * same happening, not an earlier occurrence). Correlated against `alias` (the caller's own query alias),
+ * earlier exact timestamp). A row merged into a survivor on its own ET day
+ * never counts (a merged duplicate a few minutes earlier than its survivor is
+ * the same happening); one whose survivor was since advanced to another day
+ * does, exactly as newsletter-event-selection.js's isMergedAwaySibling. Correlated against `alias` (the caller's own query alias),
  * so it can only be used once that alias is actually in scope.
  */
 function buildRoutineFirstOfYearAdmission(alias) {
@@ -372,7 +373,11 @@ function buildRoutineFirstOfYearAdmission(alias) {
   return `NOT EXISTS (
     SELECT 1 FROM events_raw AS routine_sibling
     WHERE ${sib('id')} != ${outer('id')}
-      AND ${sib('merged_into')} IS NULL
+      AND (${sib('merged_into')} IS NULL OR NOT EXISTS (
+        SELECT 1 FROM events_raw AS routine_survivor
+        WHERE routine_survivor.id = ${sib('merged_into')}
+          AND ${sqlEtDay('routine_survivor.start_at')} = ${sqlEtDay(sib('start_at'))}
+      ))
       AND ${sqlEtDay(sib('start_at'))} < ${sqlEtDay(outer('start_at'))}
       AND ${sqlEtYear(sib('start_at'))} = ${sqlEtYear(outer('start_at'))}
       AND ${sqlNormalizedTitle(sib('title'))} = ${sqlNormalizedTitle(outer('title'))}
