@@ -111,8 +111,8 @@ brief; the jest suite enforces them)
 | `links.site_page`, `links.guides` | `site_page` only for the 60 entries with a live website page |
 | `legacy_slugs`, `sources`, `review` | `owner_approved` reviews carry a SHA-256 `approval_hash`; see below |
 
-The catalog currently has 238 owner-approved entries and 1 draft
-(`house-centipede`, which has an open fact-check). Runtime
+All 239 catalog entries are owner-approved (`house-centipede` was the last,
+on 2026-09-28 after its range fact-check closed). Runtime
 naming requires all three conditions: `review.status` is `owner_approved`, the
 `verification` list is empty, and `review.approval_hash` matches the stable
 hash of every authored entry field. `review` metadata and the loader-injected

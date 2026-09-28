@@ -59,6 +59,14 @@ const { applyReportIdentitySnapshot, canonicalProductId } = require('./report-id
 const { scheduleUnconfirmedAfterMove } = require('../irrigation-schedule-confirmation');
 const { configuredPublicPortalOrigin } = require('../../utils/portal-url');
 const { STRUCTURED_OBSERVATION_FINDING_DETAIL } = require('../../../shared/service-completion-observations');
+// The plan's callbacks, as a customer knows them ("re-service"). Not
+// re-service.js's RE_SERVICE_SERVICE_KEYS: that billing set also holds
+// rodent_trapping_followup, an included trapping-program visit that no
+// customer would call a re-service.
+const PLAN_CALLBACK_RESERVICE_KEYS = new Set(['pest_re_service', 'lawn_re_service']);
+const { isActivePlanCustomer } = require('../waveguard-existing-services');
+const { isPerformedVisitOutcome } = require('../pest-pressure/first-visit');
+const { serviceRecordSuppressesCustomerArtifacts } = require('../pest-pressure/history-filter');
 
 let PhotoService = null;
 try {
@@ -1870,6 +1878,7 @@ function stripLiveOnlyScheduleFields(data) {
   delete data.upcomingVisitsCard;
   delete data.termiteNextMonitoringVisit;
   delete data.cockroachNextTreatmentVisit;
+  delete data.planSummary;
   if (data.reportV2?.snapshot?.nextVisit) delete data.reportV2.snapshot.nextVisit;
   return data;
 }
@@ -4781,6 +4790,12 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   let cockroachUpcomingRoachVisits;
   let cockroachProgramPosition;
   let cockroachRenderedSignature;
+  // "Your plan" section (owner ask 2026-09-28, GATE_REPORT_PLAN_SUMMARY):
+  // this year's performed-visit + re-service COUNTS — never a price, owner
+  // rule that prices live on estimate pages only. It lists no upcoming
+  // visits. Live-view only (stripLiveOnlyScheduleFields), like
+  // nextAppointment.
+  let planSummary = null;
   try {
     const reportTodayIso = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
     // Same disclosable statuses as findReportFollowupAppointment: pending /
@@ -4979,6 +4994,88 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       // store key reads it from the render, never from a second lookup.
       cockroachRenderedSignature = cockroachProgramSignature(program);
     }
+
+    // Placed last in this try so a failure here can never disturb the
+    // next-appointment picks already resolved above — this whole block is
+    // best-effort under the shared outer catch.
+    // OPT-IN, live builds only: the /data render path is the one caller that
+    // shows the card (opts.planSummary, set by reports-public.js). The Q&A
+    // endpoint's live build and the PDF, email, recap and map builders would
+    // never read the field, so they skip these reads entirely.
+    if (opts.mode === 'live' && opts.planSummary === true
+      && featureGates.isEnabled('reportPlanSummary') && service.customer_id) {
+      const yearEt = Number(reportTodayIso.slice(0, 4));
+      // Active plan members only, by the canonical membership read, which
+      // fails closed to non-member: "Your plan" describes a plan a one-time
+      // customer does not have. The plan is account-level (the customers
+      // row), so the counts cover the account's visits, not one property's.
+      // Counts only, never "at no charge": a member's callback can still be
+      // billed, and that money claim needs per-visit proof (reservice-report.js).
+      const member = await isActivePlanCustomer(knex, service.customer_id);
+      // A visit counts only when it was PERFORMED — the same rule Pest
+      // Pressure uses for prior visits (pest-pressure/first-visit.js): a
+      // completed, customer-visible service record whose outcome is not
+      // inspection-only, customer-declined or incomplete. The schedule row's
+      // status alone is not proof: an incomplete or declined closeout still
+      // leaves it 'completed'. The booking joins in only for its visit_id
+      // (grouped stops); it never decides "re-service" — an admin can repoint
+      // or rename it after closeout.
+      const recordRows = member
+        ? await knex('service_records')
+          .leftJoin('scheduled_services', 'scheduled_services.id', 'service_records.scheduled_service_id')
+          .where('service_records.customer_id', service.customer_id)
+          .where('service_records.status', 'completed')
+          .andWhere('service_records.service_date', '>=', `${yearEt}-01-01`)
+          .andWhere('service_records.service_date', '<', `${yearEt + 1}-01-01`)
+          .select(
+            'service_records.id',
+            'service_records.scheduled_service_id',
+            'service_records.service_line',
+            'service_records.service_type',
+            'service_records.structured_notes',
+            'service_records.service_data',
+            { record_is_callback: 'service_records.is_callback' },
+            'scheduled_services.visit_id',
+          )
+          .catch(() => null)
+        : null;
+      const performedRows = Array.isArray(recordRows)
+        ? recordRows.filter((row) => !serviceRecordSuppressesCustomerArtifacts(row)
+          && isPerformedVisitOutcome(parseJsonObject(row.structured_notes).visitOutcome))
+        : [];
+      if (performedRows.length) {
+        // One physical stop is one visit: grouped services completed at one
+        // stop share the booking's visit_id (the service_visits parent), and
+        // one booking can own several completion records (the detailed form,
+        // the pest-recap rail, a project close — completion-record-invariants
+        // documents the sibling model), so the booking id comes next. Only a
+        // legacy record with no booking link is its own visit.
+        const visitIdentity = (row) => {
+          if (row.visit_id) return `visit:${row.visit_id}`;
+          if (row.scheduled_service_id) return `booking:${row.scheduled_service_id}`;
+          return `record:${row.id}`;
+        };
+        const visitsThisYear = new Set(performedRows.map(visitIdentity)).size;
+        const reservicesThisYear = new Set(performedRows
+          // Decided by the record's FROZEN completion-time evidence only, the
+          // rule reservice-report.js and 20260830000051_repair_recap_callback_
+          // flags.js set: its is_callback, or its service_data.
+          // completedServiceKey of pest_re_service / lawn_re_service. Never
+          // the booking row (repointable after closeout) or a "Re-Service"
+          // display name (a name can belong to a non-callback). A rodent-
+          // program visit (the included trapping follow-up, a trap check) is
+          // a program step, never a re-service, whatever its flags say. A
+          // stop counts once however many of its services were re-services.
+          .filter((row) => {
+            const frozenKey = parseJsonObject(row.service_data).completedServiceKey || null;
+            if (frozenKey === 'rodent_trapping_followup'
+              || (row.service_line || detectServiceLine(row.service_type)) === 'rodent') return false;
+            return row.record_is_callback === true || PLAN_CALLBACK_RESERVICE_KEYS.has(frozenKey);
+          })
+          .map(visitIdentity)).size;
+        planSummary = { year: yearEt, visitsThisYear, reservicesThisYear };
+      }
+    }
   } catch { /* best-effort */ }
 
   // Termite warranty line (owner ask 2026-08-27): a termite-line report
@@ -5056,8 +5153,17 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   // directly at call time (same same-file convention as
   // GATE_RODENT_REPORT_REFRESH / COCKROACH_REPORT_V2 above). Best-effort:
   // never blocks the report.
+  // OPT-IN on the same terms as composeOffers/planSummary (codex round-5
+  // P2): only the /data render path shows the card, so only it pays for
+  // the scheduled_services scan (paged, up to MAX_PAGES * PAGE_SIZE rows,
+  // plus the property/estimate/single-premises reads it can trigger). The
+  // Q&A endpoint (/api/reports/:token/ask) calls this builder purely for
+  // report CONTEXT and reads report-assistant.js never touches the field —
+  // every customer question was paying for this scan nobody reads, under
+  // the general report limiter, repeatedly.
   let upcomingVisitsCard = null;
-  if (opts.mode === 'live' && process.env.GATE_REPORT_UPCOMING_VISITS === 'true') {
+  if (opts.mode === 'live' && opts.upcomingVisitsCard === true
+    && process.env.GATE_REPORT_UPCOMING_VISITS === 'true') {
     try {
       // Shared stamp → property_id → source_estimate_id resolver (codex
       // round-4 P1 — a FOURTH consecutive parallel reimplementation of
@@ -5074,7 +5180,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       // an estimate's free-text address and carries the locality-lacks /
       // locality-shares proofs a real property-equality compare needs.
       const linkage = require('../estimate-property-linkage');
-      const { resolveVisitPropertyScope, sameResolvedProperty } = require('./visit-property-scope');
+      const { resolveVisitPropertyScope, sameResolvedProperty, customerHasOnlyPrimaryPremises } = require('./visit-property-scope');
 
       // THIS report's property identity. A linked visit's own stamp /
       // property_id / source_estimate_id is the truth (a phone-booked
@@ -5109,17 +5215,47 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       const mirrorKey = linkage.normalizedStampedStreet(
         service.address_line1, service.address_line2, service.city, service.zip
       ) || null;
-      // PRIVACY (P1 2026-09-28): a linked row whose stamp/property_id/
-      // source_estimate_id was present but UNRESOLVABLE (e.g. a deleted
-      // property row) fails CLOSED — never falls back to the customer
-      // mirror, which names a DIFFERENT property for a multi-property
-      // account. Only a report with NO identity evidence at all — linked
-      // or not — may use the mirror fallback (the ordinary single-property
-      // case, and the pre-existing "linked but predates these columns"
-      // case).
+
+      // The mirror fallback (used below, and again per candidate) is only
+      // safe when this account can be PROVEN to have a single premises, the
+      // primary one (codex round-5 P1): a multi-property account's legacy
+      // no-evidence row — no stamp, no property_id, no source_estimate_id —
+      // could easily be the OTHER property, and without this proof it would
+      // pass sameResolvedProperty against a primary-property report on the
+      // mirror address alone. Reuses cross-sell.js's own single-premises
+      // proof (moved to visit-property-scope.js so both callers share it)
+      // anchored to the SAME mirrorKey the fallback itself uses — one
+      // customer read, and the proof can never disagree with the value it
+      // is guarding. Memoized: computed at most once per report, only the
+      // first time a no-evidence row actually needs the mirror. Fails
+      // CLOSED on any read failure (the proof throws on an unreadable
+      // witness by design) — a failed proof is "not proven single-premises",
+      // never "assume yes".
+      let singlePremisesProof = null;
+      const ensureSinglePremisesProven = async () => {
+        if (singlePremisesProof !== null) return singlePremisesProof;
+        if (!mirrorKey) { singlePremisesProof = false; return singlePremisesProof; }
+        try {
+          const customerRow = await knex('customers')
+            .where({ id: service.customer_id })
+            .first('has_multi_home');
+          singlePremisesProof = await customerHasOnlyPrimaryPremises(knex, service.customer_id, customerRow, mirrorKey);
+        } catch {
+          singlePremisesProof = false;
+        }
+        return singlePremisesProof;
+      };
+
+      // PRIVACY (P1 2026-09-28, extended round-5): a linked row whose
+      // stamp/property_id/source_estimate_id was present but UNRESOLVABLE
+      // (e.g. a deleted property row) fails CLOSED — never falls back to
+      // the customer mirror, which names a DIFFERENT property for a
+      // multi-property account. Only a report with NO identity evidence at
+      // all — linked or not — may use the mirror fallback, and even then
+      // only once the single-premises proof above clears it.
       const reportPropertyKey = reportLinkUnresolved
         ? null
-        : (reportScope && reportScope.hasEvidence ? reportScope.key : mirrorKey);
+        : (reportScope && reportScope.hasEvidence ? reportScope.key : ((await ensureSinglePremisesProven()) ? mirrorKey : null));
 
       if (reportPropertyKey) {
         // ET CALENDAR days, not elapsed 24h periods (codex round-1 P1): a
@@ -5154,8 +5290,6 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         // now covering the estimate leg too).
         const propertyById = new Map();
         const estimateById = new Map();
-        let candidateMirrorKey = null;
-        let candidateMirrorKeyResolved = false;
 
         for (let page = 0; page < MAX_PAGES && matched.length < 6; page += 1) {
           const candidates = await knex('scheduled_services')
@@ -5219,30 +5353,19 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
             for (const id of newEstimateIds) if (!foundIds.has(id)) estimateById.set(id, null);
           }
 
-          // The customer mirror is the ONLY fallback for a candidate with
-          // NO stamp, property_id, or source_estimate_id at all (an
-          // unstamped legacy row) — resolveVisitPropertyScope's hasEvidence
-          // flag says so per row; this is resolved once per report, lazily,
-          // the first page that actually needs it.
-          if (!candidateMirrorKeyResolved
-            && candidates.some((row) => !row.service_address_line1 && !row.property_id && !row.source_estimate_id)) {
-            const customerRow = await knex('customers')
-              .where({ id: service.customer_id })
-              .first('address_line1', 'address_line2', 'city', 'zip')
-              .catch(() => null);
-            candidateMirrorKey = customerRow
-              ? (linkage.normalizedStampedStreet(customerRow.address_line1, customerRow.address_line2, customerRow.city, customerRow.zip) || null)
-              : null;
-            candidateMirrorKeyResolved = true;
-          }
-
           for (const row of candidates) {
             if (matched.length >= 6) break;
             // Bounded (PAGE_SIZE rows/page, MAX_PAGES pages), and the
             // property_id/source_estimate_id lookups below are cache hits
             // after the batched reads above.
             const scope = await resolveVisitPropertyScope(row, knex, { propertyById, estimateById });
-            const rowKey = scope.hasEvidence ? scope.key : candidateMirrorKey;
+            // The customer mirror is the ONLY fallback for a candidate with
+            // NO stamp, property_id, or source_estimate_id at all (an
+            // unstamped legacy row) — and, same as the report's own
+            // resolution, only once the single-premises proof clears it
+            // (codex round-5 P1): an unscoped row on a MULTI-property
+            // account is excluded, never waved through on the mirror alone.
+            const rowKey = scope.hasEvidence ? scope.key : ((await ensureSinglePremisesProven()) ? mirrorKey : null);
             if (sameResolvedProperty(rowKey, reportPropertyKey)) matched.push(row);
           }
 
@@ -5825,8 +5948,15 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     // null-valued key still changes the shape of every live payload while
     // the gate is unset, contradicting the documented "gate off: the field
     // is absent" contract. Read directly at call time, same convention as
-    // the flag's own gating above.
-    ...(process.env.GATE_REPORT_UPCOMING_VISITS === 'true' ? { upcomingVisitsCard } : {}),
+    // the flag's own gating above. Also omitted for a caller that never
+    // opted in (codex round-5 P2, e.g. the Q&A endpoint) — same
+    // opts.upcomingVisitsCard check the work above already gated on.
+    ...(process.env.GATE_REPORT_UPCOMING_VISITS === 'true' && opts.upcomingVisitsCard === true ? { upcomingVisitsCard } : {}),
+    // "Your plan" section data (owner ask 2026-09-28): omitted entirely when
+    // the gate is off, there's no customer, or there's nothing to show —
+    // stripLiveOnlyScheduleFields deletes it for every non-live render, same
+    // staleness rule as nextAppointment.
+    ...(planSummary ? { planSummary } : {}),
     termiteNextMonitoringVisit,
     // Present (possibly null) ONLY when the live cockroach pick ran — the
     // attach composer reads presence as "schedule resolved" (pdf/static

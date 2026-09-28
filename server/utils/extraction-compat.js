@@ -126,6 +126,10 @@ function flatView(extraction) {
     agent_committed_booking: sched.agent_committed_booking === true,
     caller_accepted_slot: sched.caller_accepted_slot === true,
     moved_appointment_date: sched.moved_appointment_date || null,
+    // Verbatim-words fields (schema 1.17.0) that the reschedule applier
+    // checks against their evidence quotes instead of parsing speech.
+    agreed_slot_words: sched.agreed_slot_words || null,
+    moved_appointment_words: sched.moved_appointment_words || null,
     follow_up_visit_mentioned: sched.follow_up_mentioned === true,
     follow_up_date_time: sched.follow_up_start_at || null,
 

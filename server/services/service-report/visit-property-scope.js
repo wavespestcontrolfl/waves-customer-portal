@@ -128,4 +128,108 @@ function sameResolvedProperty(a, b) {
   return linkage.sameScopeKey(a, b) && linkage.scopeKeysShareLocality(a, b);
 }
 
-module.exports = { resolveVisitPropertyScope, sameResolvedProperty };
+// True only when NOTHING on file contradicts "this customer has a single
+// premises, the primary one" (codex #3367 PR r11 P1; moved here codex
+// round-5 P1 so the upcoming-visits card can share it — a legacy
+// no-evidence row on a multi-property account must not pass
+// sameResolvedProperty against a primary-property report just because
+// the customer mirror happens to be all either side has). Deliberately a
+// PROOF of single-premises, not a search for a second one: an unreadable
+// witness throws and the caller decides the fail-closed consequence (the
+// whole card suppresses in cross-sell.js's unlinked-report branch; the
+// one unscoped row excludes in the upcoming-visits card).
+async function customerHasOnlyPrimaryPremises(database, customerId, customer, primaryStreet) {
+  // The eligibility flag the discount engine already trusts for multi-home
+  // status — admins hand-set it for customers whose second property never
+  // made it into customer_properties.
+  if (customer?.has_multi_home === true) return false;
+  const provablyPrimary = (key) => {
+    if (!key) return false;
+    if (!linkage.sameScopeKey(key, primaryStreet)) return false;
+    // Same street, but disjoint locality evidence (city-only vs zip-only)
+    // matches across cities under sameScopeKey's per-field wildcard — the
+    // r6/r7 rule. A key with NO locality at all is the legacy partial stamp,
+    // and it is UNPROVEN, not benign (codex #3367 PR r12): a secondary
+    // property with the same street and unit in another city produces
+    // exactly that key, so accepting it would declare the wrong premises
+    // primary and publish an exact price from the wrong profile — the hole
+    // the linked-report and estimate-seed guards already close by rejecting
+    // scopeKeyLacksLocality outright. Same rejection here.
+    if (linkage.scopeKeyLacksLocality(key)) return false;
+    return linkage.scopeKeysShareLocality(key, primaryStreet);
+  };
+  // EVERY property row, active or not (pre-push P0): report tokens are
+  // permanent, so the report being priced is frequently older than the
+  // account's current shape. A secondary property that has since been
+  // deactivated is exactly the premises a legacy unlinked record is likely
+  // to belong to, and filtering it out makes the COALESCEd primary address
+  // look proven. This proof asks "has this account EVER had a second
+  // premises", not "does it have one today" — the live-count question that
+  // refreshHasMultiHome answers is a different one.
+  const properties = await database('customer_properties')
+    .where({ customer_id: customerId })
+    .select('address_line1', 'address_line2', 'city', 'zip');
+  if (properties.length >= 2) return false;
+  for (const row of properties) {
+    if (!provablyPrimary(linkage.normalizedStampedStreet(row.address_line1, row.address_line2, row.city, row.zip))) {
+      return false;
+    }
+  }
+  // customer_properties is gated (GATE_CUSTOMER_PROPERTIES) and empty for
+  // accounts that predate it, so the STAMPED visit addresses are the second
+  // witness: dispatch stamps the premises it routed to, and a stamp that
+  // cannot be proven to be the primary is a second premises on this account.
+  const cols = await database('scheduled_services').columnInfo();
+  if (!cols.service_address_line1) return true;
+  const stampCols = ['service_address_line1'];
+  for (const col of ['service_address_line2', 'service_address_city', 'service_address_zip']) {
+    if (cols[col]) stampCols.push(col);
+  }
+  // property_id / source_estimate_id ride along so an UNSTAMPED row can be
+  // resolved rather than waved through (codex #3367 PR r13): dispatch's own
+  // order is stamp → property row → creating estimate → primary, and only
+  // the property_id leg is covered by the customer_properties witness above.
+  // A row that links to a secondary address through its creating ESTIMATE
+  // would otherwise certify a multi-property account as single-premises.
+  if (cols.property_id) stampCols.push('property_id');
+  if (cols.source_estimate_id) stampCols.push('source_estimate_id');
+  const rows = await database('scheduled_services')
+    .where({ customer_id: customerId })
+    .distinct(stampCols);
+  for (const row of rows) {
+    if (String(row.service_address_line1 || '').trim()) {
+      if (!provablyPrimary(linkage.normalizedStampedStreet(
+        row.service_address_line1, row.service_address_line2, row.service_address_city, row.service_address_zip
+      ))) return false;
+      continue;
+    }
+    // Unstamped: resolve the same way the linked-report branch does.
+    if (row.property_id) {
+      const prop = await database('customer_properties')
+        .where({ id: row.property_id })
+        .first('address_line1', 'address_line2', 'city', 'zip');
+      // An unresolvable property link names no premises — the row is not
+      // evidence of a second one (the linked-report branch suppresses on
+      // it because THAT report is the one being priced; here the row is
+      // just another visit on the account).
+      if (!prop) continue;
+      if (!provablyPrimary(linkage.normalizedStampedStreet(
+        prop.address_line1, prop.address_line2, prop.city, prop.zip
+      ))) return false;
+      continue;
+    }
+    if (row.source_estimate_id) {
+      const src = await database('estimates')
+        .where({ id: row.source_estimate_id })
+        .first('address');
+      if (!src?.address) continue;
+      if (!provablyPrimary(linkage.normalizedEstimateStreet(src.address))) return false;
+      continue;
+    }
+    // Neither stamped nor linked → the absence of evidence, not evidence of
+    // a second premises.
+  }
+  return true;
+}
+
+module.exports = { resolveVisitPropertyScope, sameResolvedProperty, customerHasOnlyPrimaryPremises };

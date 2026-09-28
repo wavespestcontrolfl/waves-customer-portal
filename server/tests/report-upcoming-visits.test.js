@@ -22,8 +22,13 @@ function todayPlus(days) {
 // Fake knex supporting the chain the upcoming-visits lookup uses, extending
 // report-next-appointment.test.js's pattern with '<=' (the 90-day cutoff)
 // and object-criteria where() on customer_properties / customers.
-function makeKnex(fixtures) {
+// `callLog`, when passed, records every table name queried (in call order)
+// — used to prove the opt-in gate (codex round-5 P2) actually SKIPS the
+// scheduled_services scan for a caller that never opts in, not merely that
+// the output key is absent.
+function makeKnex(fixtures, { callLog } = {}) {
   const knex = (table) => {
+    if (callLog) callLog.push(table);
     let rows = [...(fixtures[table] || [])];
     const sortKeys = [];
     // limit/offset are applied lazily at materialization (real SQL/knex
@@ -89,6 +94,19 @@ function makeKnex(fixtures) {
         return query;
       },
       leftJoin: () => query,
+      // The single-premises proof (customerHasOnlyPrimaryPremises, shared
+      // via visit-property-scope.js) reads columnInfo() to decide which
+      // stamp/link columns to distinct-scan, then distinct()s the account's
+      // scheduled_services rows as its second witness. Mirrors the live
+      // schema so that read isn't silently skipped in tests.
+      distinct: () => Promise.resolve(materialize()),
+      columnInfo: () => Promise.resolve(table === 'scheduled_services'
+        ? {
+          service_address_line1: {}, service_address_line2: {},
+          service_address_city: {}, service_address_zip: {},
+          property_id: {}, source_estimate_id: {},
+        }
+        : {}),
       select: () => Promise.resolve(materialize()),
       first: () => Promise.resolve(materialize()[0] || null),
       catch: () => Promise.resolve(materialize()),
@@ -131,6 +149,37 @@ function makeKnexWithFailingReportLookup(fixtures, failingId) {
   };
 }
 
+// Wraps makeKnex so EVERY read against one named table rejects — used to
+// prove the single-premises proof (customerHasOnlyPrimaryPremises, shared
+// via visit-property-scope.js) fails CLOSED on an unreadable witness rather
+// than assuming single-premises. Every other table passes through unchanged.
+function makeKnexWithFailingTable(fixtures, tableName) {
+  const base = makeKnex(fixtures);
+  return (table) => {
+    if (table !== tableName) return base(table);
+    const boom = () => Promise.reject(new Error(`simulated read failure (${tableName})`));
+    const failing = {
+      where: () => failing,
+      andWhere: () => failing,
+      whereIn: () => failing,
+      whereNot: () => failing,
+      whereRaw: () => failing,
+      modify: () => failing,
+      limit: () => failing,
+      offset: () => failing,
+      orderBy: () => failing,
+      leftJoin: () => failing,
+      distinct: boom,
+      columnInfo: boom,
+      select: boom,
+      first: boom,
+      catch: boom,
+      then: (resolve, reject) => boom().then(resolve, reject),
+    };
+    return failing;
+  };
+}
+
 const BASE_SERVICE = {
   id: 'service-upcoming',
   scheduled_service_id: 'scheduled-current',
@@ -162,7 +211,13 @@ const BASE_FIXTURES = {
   customer_properties: [],
 };
 
-const LIVE = { mode: 'live' };
+// upcomingVisitsCard: true (codex round-5 P2) — the explicit opt-in only
+// the /data render path passes (reports-public.js); every test in this
+// file is exercising THAT path (the card's own behavior) unless it says
+// otherwise, so LIVE opts in by default. The dedicated 'opt-in gating'
+// tests below build their own options object to prove the ask-route shape
+// (mode: 'live' with NO opt-in) skips the scan entirely.
+const LIVE = { mode: 'live', upcomingVisitsCard: true };
 
 afterEach(() => { delete process.env.GATE_REPORT_UPCOMING_VISITS; });
 
@@ -182,7 +237,7 @@ test('gate off: upcomingVisitsCard KEY is absent from the payload entirely, even
   expect(data).not.toHaveProperty('upcomingVisitsCard');
 });
 
-test('gate on but not live mode: upcomingVisitsCard stays null (pdf/static builds)', async () => {
+test('gate on but not live mode: upcomingVisitsCard KEY is absent (pdf/static builds)', async () => {
   process.env.GATE_REPORT_UPCOMING_VISITS = 'true';
   const knex = makeKnex({
     ...BASE_FIXTURES,
@@ -191,8 +246,10 @@ test('gate on but not live mode: upcomingVisitsCard stays null (pdf/static build
       { id: 'scheduled-lawn', customer_id: 'customer-1', scheduled_date: todayPlus(5), status: 'confirmed', service_type: 'Lawn Care Treatment', window_start: '09:00:00' },
     ],
   });
+  // Same non-live-mode shape the queued PDF renderer actually calls with —
+  // no upcomingVisitsCard opt-in either, matching reports-public.js.
   const data = await buildReportV1Data(BASE_SERVICE, 'token-static', knex, { mode: 'static' });
-  expect(data.upcomingVisitsCard).toBeNull();
+  expect(data).not.toHaveProperty('upcomingVisitsCard');
 });
 
 test('gated + live: lists multi-program upcoming visits (pest, lawn, termite) for the unlinked report\'s mirror property, sorted, excluding cancelled/completed/rescheduled', async () => {
@@ -280,9 +337,61 @@ test('rows tied on scheduled_date + window_start still order deterministically, 
   expect(data.upcomingVisitsCard.visits.map((v) => v.serviceType)).toEqual(['Visit A', 'Visit B']);
 });
 
+// P2 fix (codex round-5): /api/reports/:token/ask calls buildServiceReportV1
+// ResponseData with mode 'live' (so nextAppointment etc. still resolve for
+// Q&A context) but report-assistant.js never reads upcomingVisitsCard —
+// every customer question was paying for the full paged scan anyway. The
+// card's work (and the scheduled_services scan it runs) is now gated on an
+// explicit opt-in option, upcomingVisitsCard, the SAME shape composeOffers/
+// planSummary already use — only reports-public.js's /data render path
+// passes it; the /ask route's call ({ mode: 'live' } alone) does not.
+describe('opt-in gating (only the /data render path pays for the scan)', () => {
+  const SCHEDULED_SERVICES_FIXTURE = [
+    { id: 'scheduled-current', customer_id: 'customer-1', scheduled_date: '2026-05-16', status: 'completed', service_type: 'Quarterly Pest Control Service' },
+    { id: 'scheduled-lawn', customer_id: 'customer-1', scheduled_date: todayPlus(5), status: 'confirmed', service_type: 'Lawn Care Treatment', window_start: '09:00:00' },
+  ];
+
+  test('ask path shape ({ mode: \'live\' }, no opt-in): no scheduled_services scan for the card, and the key is absent', async () => {
+    process.env.GATE_REPORT_UPCOMING_VISITS = 'true';
+    const callLog = [];
+    const knex = makeKnex({ ...BASE_FIXTURES, scheduled_services: SCHEDULED_SERVICES_FIXTURE }, { callLog });
+    // Exactly the /ask route's own call shape (reports-public.js line
+    // ~1800) — mode 'live', nothing else.
+    const data = await buildReportV1Data(BASE_SERVICE, 'token-ask', knex, { mode: 'live' });
+    expect(data).not.toHaveProperty('upcomingVisitsCard');
+    // The report's OWN nextAppointment resolution (unrelated, always-on)
+    // still queries scheduled_services — the card's OWN paged candidate
+    // scan is what must be absent. That scan orders by `id` as its final
+    // tie-breaker (unique to this card, per the earlier round-2 fix); no
+    // logged call reaches that far.
+    const scheduledServicesCalls = callLog.filter((t) => t === 'scheduled_services').length;
+    expect(scheduledServicesCalls).toBeGreaterThan(0); // nextAppointment etc. still ran
+    // Re-run the SAME fixture WITH the opt-in and compare: the card's scan
+    // must add AT LEAST one more scheduled_services read (its own paged
+    // candidate query) beyond whatever the ask path already needed.
+    const callLogWithOptIn = [];
+    const knexWithOptIn = makeKnex({ ...BASE_FIXTURES, scheduled_services: SCHEDULED_SERVICES_FIXTURE }, { callLog: callLogWithOptIn });
+    await buildReportV1Data(BASE_SERVICE, 'token-data-compare', knexWithOptIn, { mode: 'live', upcomingVisitsCard: true });
+    const scheduledServicesCallsWithOptIn = callLogWithOptIn.filter((t) => t === 'scheduled_services').length;
+    expect(scheduledServicesCallsWithOptIn).toBeGreaterThan(scheduledServicesCalls);
+  });
+
+  test('data path shape ({ mode: \'live\', upcomingVisitsCard: true }): the card is built', async () => {
+    process.env.GATE_REPORT_UPCOMING_VISITS = 'true';
+    const knex = makeKnex({ ...BASE_FIXTURES, scheduled_services: SCHEDULED_SERVICES_FIXTURE });
+    // Exactly reports-public.js's /data render call shape.
+    const data = await buildReportV1Data(BASE_SERVICE, 'token-data', knex, { mode: 'live', upcomingVisitsCard: true });
+    expect(data.upcomingVisitsCard.visits.map((v) => v.serviceType)).toEqual(['Lawn Care Treatment']);
+  });
+});
+
 describe('multi-property scoping', () => {
-  const PROP_A = { id: 'prop-a', address_line1: '100 Sample Trail', address_line2: null, city: 'Bradenton', zip: '34211' };
-  const PROP_B = { id: 'prop-b', address_line1: '20 Duplicate Way', address_line2: null, city: 'Nokomis', zip: '34275' };
+  // customer_id rides both rows (codex round-5): the single-premises proof
+  // (customerHasOnlyPrimaryPremises) queries customer_properties scoped by
+  // customer_id — earlier tests never needed it (they resolve a property
+  // by its own id), but the proof does.
+  const PROP_A = { id: 'prop-a', customer_id: 'customer-1', address_line1: '100 Sample Trail', address_line2: null, city: 'Bradenton', zip: '34211' };
+  const PROP_B = { id: 'prop-b', customer_id: 'customer-1', address_line1: '20 Duplicate Way', address_line2: null, city: 'Nokomis', zip: '34275' };
 
   test('linked report: property_id match includes a same-property visit and excludes a different property\'s and a different customer\'s', async () => {
     process.env.GATE_REPORT_UPCOMING_VISITS = 'true';
@@ -575,6 +684,79 @@ describe('multi-property scoping', () => {
       LIVE,
     );
     expect(data.upcomingVisitsCard.visits.map((v) => v.serviceType)).toEqual(['Lawn Care Treatment']);
+  });
+
+  // P1 fix (codex round-5): the mirror fallback is only safe for an
+  // unscoped (no stamp/property_id/source_estimate_id) row when this
+  // account can be PROVEN to have a single premises — reusing cross-sell.js's
+  // own single-premises proof (customerHasOnlyPrimaryPremises, moved to
+  // visit-property-scope.js so this card and cross-sell.js share it).
+  describe('single-premises proof gates the mirror fallback', () => {
+    test('MULTI-property account: an unscoped legacy candidate is EXCLUDED, never waved through on the mirror alone', async () => {
+      process.env.GATE_REPORT_UPCOMING_VISITS = 'true';
+      const knex = makeKnex({
+        ...BASE_FIXTURES,
+        // TWO property rows on file — customerHasOnlyPrimaryPremises fails
+        // the proof outright (properties.length >= 2).
+        customer_properties: [PROP_A, PROP_B],
+        scheduled_services: [
+          { id: 'scheduled-current', customer_id: 'customer-1', scheduled_date: '2026-05-16', status: 'completed', service_type: 'Quarterly Pest Control Service', property_id: 'prop-a' },
+          // No stamp, no property_id, no source_estimate_id — the ONLY
+          // candidate for the mirror fallback, and this account cannot
+          // be proven single-premises.
+          { id: 'scheduled-unscoped', customer_id: 'customer-1', scheduled_date: todayPlus(5), status: 'confirmed', service_type: 'Should never appear (multi-property account, unscoped row)', window_start: '09:00:00' },
+        ],
+      });
+      const data = await buildReportV1Data(
+        { ...BASE_SERVICE, service_date: '2026-05-16' },
+        'token-multi-property-unscoped',
+        knex,
+        LIVE,
+      );
+      expect(data.upcomingVisitsCard).toBeNull();
+    });
+
+    test('SINGLE-premises account (linked report): an unscoped legacy candidate is included via the mirror', async () => {
+      process.env.GATE_REPORT_UPCOMING_VISITS = 'true';
+      const knex = makeKnex({
+        ...BASE_FIXTURES,
+        // Only the primary property on file, and it IS the mirror address
+        // (BASE_FIXTURES.customers) — the proof clears.
+        customer_properties: [PROP_A],
+        scheduled_services: [
+          { id: 'scheduled-current', customer_id: 'customer-1', scheduled_date: '2026-05-16', status: 'completed', service_type: 'Quarterly Pest Control Service', property_id: 'prop-a' },
+          { id: 'scheduled-unscoped', customer_id: 'customer-1', scheduled_date: todayPlus(5), status: 'confirmed', service_type: 'Lawn Care Treatment', window_start: '09:00:00' },
+        ],
+      });
+      const data = await buildReportV1Data(
+        { ...BASE_SERVICE, service_date: '2026-05-16' },
+        'token-single-property-unscoped',
+        knex,
+        LIVE,
+      );
+      expect(data.upcomingVisitsCard.visits.map((v) => v.serviceType)).toEqual(['Lawn Care Treatment']);
+    });
+
+    test('the proof query itself fails → excluded (fail closed, never "assume single-premises")', async () => {
+      process.env.GATE_REPORT_UPCOMING_VISITS = 'true';
+      // 'customers' is the table ensureSinglePremisesProven reads for
+      // has_multi_home — making it fail simulates an unreadable witness.
+      const knex = makeKnexWithFailingTable({
+        ...BASE_FIXTURES,
+        customer_properties: [],
+        scheduled_services: [
+          { id: 'scheduled-current', customer_id: 'customer-1', scheduled_date: '2026-05-16', status: 'completed', service_type: 'Quarterly Pest Control Service' },
+          { id: 'scheduled-unscoped', customer_id: 'customer-1', scheduled_date: todayPlus(5), status: 'confirmed', service_type: 'Should never appear (proof query failed)', window_start: '09:00:00' },
+        ],
+      }, 'customers');
+      const data = await buildReportV1Data(
+        { ...BASE_SERVICE, scheduled_service_id: null, service_date: '2026-05-16' },
+        'token-proof-fails',
+        knex,
+        LIVE,
+      );
+      expect(data.upcomingVisitsCard).toBeNull();
+    });
   });
 
   // P1 fix (codex round-4, fourth consecutive property-scoping finding on

@@ -62,6 +62,7 @@ import PestPressureCard from '../components/PestPressureCard';
 import { etDateString } from '../lib/timezone';
 import ReferralShareCard from '../components/referral/ReferralShareCard';
 import ActivityCard from '../components/ActivityCard';
+import { WAVES_PRODUCTS_SAFETY_URL } from '../constants/business';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const WAVES_PHONE_DISPLAY = '(941) 297-5749';
@@ -2635,6 +2636,32 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
             : null}
         />
       </div>
+    </section>
+  );
+}
+
+// "Your plan" section (owner ask 2026-09-28): an active plan member's visit +
+// re-service COUNTS for this year — never a price, owner rule that prices
+// only ever appear on estimate pages. The server sends it for members only.
+// Live view only; the payload field itself is stripped from
+// pdf/static/sms_preview renders server-side (stripLiveOnlyScheduleFields),
+// so `mode` is a belt-and-braces check here, same as the other live-only
+// cards on this page.
+function PlanSummaryCard({ data, mode }) {
+  const plan = data.planSummary;
+  if (mode !== 'live' || !plan) return null;
+  const visits = Number(plan.visitsThisYear) || 0;
+  if (visits <= 0) return null;
+  const reservices = Number(plan.reservicesThisYear) || 0;
+  const visitWord = visits === 1 ? 'visit' : 'visits';
+  const reserviceWord = reservices === 1 ? 're-service' : 're-services';
+  const yearLine = reservices > 0
+    ? `This year: ${visits} ${visitWord}, including ${reservices} ${reserviceWord}`
+    : `This year: ${visits} ${visitWord}`;
+  return (
+    <section data-glass="card" className="sr-section plan-summary-section" id="your-plan">
+      <div className="section-eyebrow">Your plan</div>
+      <p className="map-context-copy">{yearLine}</p>
     </section>
   );
 }
@@ -5685,6 +5712,13 @@ function LegacyReport({ data, token, glass = false }) {
             }}
             style={{ ...actionButtonStyle('primary'), marginTop: 16 }}
           ><Download size={16} /> Download PDF</a>
+          {/* Owner ask 2026-09-28: legacy (pre-v1) reports carry the Products
+              & Safety link too; they never mount the v1 footer. */}
+          <p style={{ fontSize: 14, lineHeight: 1.5, marginTop: 12 }}>
+            <a href={`${WAVES_PRODUCTS_SAFETY_URL}#safety-protocol`} target="_blank" rel="noopener noreferrer" style={{ color: '#04395E', fontWeight: 600 }}>
+              See every product we use and our safety protocol
+            </a>
+          </p>
         </section>
         <div data-glass={glass ? 'card' : undefined} style={{ marginTop: 16, borderRadius: 16, overflow: 'hidden', border: glass ? undefined : `1px solid ${ESTIMATE_BORDER}`, background: glass ? undefined : '#fff' }}>
           <iframe src={pdfUrl} style={{ width: '100%', height: 620, border: 'none', background: '#fff' }} title="Service report PDF" />
@@ -8937,6 +8971,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
 
         <ServiceStatusCard data={data} mode={mode} resultOverride={data.reportV2?.todaysResult || null} />
 
+        <PlanSummaryCard data={data} mode={mode} />
+
         {/* V2 + pest: a review ask up top, location-synced to the closest GBP
             (ReviewRequestCard picks the office review URL). Self-gates on
             eligibility / already-reviewed. Pest gets the top placement like
@@ -9532,6 +9568,13 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
 
         <footer className="sr-footer">
           Questions about today&apos;s service? Ask Waves in your portal or call (941) 297-5749.
+          {/* Owner ask 2026-09-28: every report links to the public Products &
+              Safety page. The footer renders on every report, so assessment-
+              and inspection-only visits get it too. */}
+          {' '}
+          <a href={`${WAVES_PRODUCTS_SAFETY_URL}#safety-protocol`} target="_blank" rel="noopener noreferrer" style={{ color: '#04395E', fontWeight: 600 }}>
+            See every product we use and our safety protocol
+          </a>.
           {data.waveGuardTier || data.waveguardTier || data.plan?.isWaveGuard ? ' WaveGuard members receive free re-service when covered activity continues after the treatment window.' : ''}
           {/* Pair the sentence with a "book it" path. Server-gated boolean
               only (reserviceEligible) — the standing reservice_token must
