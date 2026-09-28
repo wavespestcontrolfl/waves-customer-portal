@@ -3197,22 +3197,10 @@ async function assertRepriceAllowed(conn, scheduledServiceId, nextPrice) {
       { code: 'REPRICE_BLOCKED_CARD_HOLD' },
     );
   }
-  // Every live approval at the old price: pending (link sent, amount
-  // disclosed), completing (capture in flight), completed, satisfied. Locked
-  // FOR SHARE so an in-flight capture can't promote a request past this check
-  // while the re-price commits.
-  const cardLane = await conn('appointment_card_requests')
-    .where({ scheduled_service_id: scheduledServiceId })
-    .whereIn('status', ['pending', 'completing', 'completed', 'satisfied'])
-    .where('accepted_amount', '>', 0)
-    .forShare()
-    .first('id');
-  if (cardLane) {
-    throw Object.assign(
-      httpError(409, 'The customer approved a card charge at this visit\'s current price. Cancel that approval before changing the visit price.'),
-      { code: 'REPRICE_BLOCKED_CARD_APPROVAL' },
-    );
-  }
+  // Card approvals are not blocked here: there is no staff path to retire
+  // one, and the card lane re-checks the live price at charge time — a visit
+  // re-priced to $0 authorizes no charge (completion-charge-verdict,
+  // appointment-card-request recap rail).
 }
 
 function calculateVisitFinancialsForAddons(pricing, addonLines) {

@@ -46,3 +46,29 @@ describe('per-application stamped $0 charge cap', () => {
     expect(attachedInvoiceAutoChargeLikely({ ...base, estimatedPrice: null })).toBe(true);
   });
 });
+
+test('the completion card lane gives a visit re-priced to $0 a $0 cap (over cap -> office review)', async () => {
+  const gates = require('../config/feature-gates');
+  const spy = jest.spyOn(gates, 'isEnabled').mockImplementation((k) => k === 'apptCardCompletionCharge');
+  try {
+    const { resolveAppointmentCardLane } = require('../services/completion-charge-verdict');
+    const laneConn = (table) => {
+      const chain = {
+        where() { return chain; }, whereIn() { return chain; },
+        first: async () => (table === 'appointment_card_requests' ? { id: 'r1', customer_id: 'c1', accepted_amount: '250.00' } : null),
+      };
+      return chain;
+    };
+    const lane = await resolveAppointmentCardLane({
+      svc: { id: 's1', customer_id: 'c1', estimated_price: 0, is_callback: false, is_recurring: false },
+      invoice: { id: 'i1', subtotal: 40, total: 40, discount_amount: 0, payer_id: null },
+      alreadyPaid: false, visitPerformed: true, perApplicationBilling: false, annualPrepayBilling: false,
+      explicitMembershipLane: false, conn: laneConn,
+    });
+    expect(lane.apptCardOneTimeCharge).toBe(true);
+    expect(lane.apptCardAcceptedAmount).toBe(0);
+    expect(lane.apptCardOverCap).toBe(true);
+  } finally {
+    spy.mockRestore();
+  }
+});

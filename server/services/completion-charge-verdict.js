@@ -69,6 +69,10 @@ async function resolveAppointmentCardLane({
         if (apptCardOneTimeCharge) {
           apptCardAcceptedAmount = laneRow.accepted_amount != null && Number(laneRow.accepted_amount) > 0
             ? Number(laneRow.accepted_amount) : null;
+          // A visit re-priced to $0 after consent is free now (owner
+          // 2026-09-28): the approval at the old price authorizes nothing,
+          // so any invoice is over cap and goes to office review.
+          if (!svc.is_callback && isStampedZeroEstimate(svc.estimated_price)) apptCardAcceptedAmount = 0;
           const preCreditSubtotal = invoice.subtotal != null ? Number(invoice.subtotal) : Number(invoice.total || 0);
           const preCreditNet = Math.round((preCreditSubtotal - Math.max(0, Number(invoice.discount_amount) || 0)) * 100) / 100;
           apptCardOverCap = apptCardAcceptedAmount == null || preCreditNet > apptCardAcceptedAmount + 0.005;

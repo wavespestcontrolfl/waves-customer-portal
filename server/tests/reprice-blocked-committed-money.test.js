@@ -45,9 +45,8 @@ describe('assertRepriceAllowed', () => {
       .rejects.toMatchObject({ statusCode: 409, code: 'REPRICE_BLOCKED_CARD_HOLD' });
   });
 
-  test('an approved appointment-card charge blocks a re-price', async () => {
-    await expect(assertRepriceAllowed(conn({ cardLane: { id: 'a1' } }), 's1', 80))
-      .rejects.toMatchObject({ statusCode: 409, code: 'REPRICE_BLOCKED_CARD_APPROVAL' });
+  test('a card approval does not block a re-price (the card lane re-checks the live price at charge time)', async () => {
+    await expect(assertRepriceAllowed(conn({ cardLane: { id: 'a1' } }), 's1', 80)).resolves.toBeUndefined();
   });
 
   test('nothing committed: a re-price (including to $0) passes', async () => {
@@ -89,20 +88,4 @@ test('an invoice linked only through the visit\'s service record is part of the 
   wrapped.schema = c.schema;
   await expect(assertRepriceAllowed(wrapped, 's1', 0)).rejects.toMatchObject({ code: 'REPRICE_BLOCKED_OPEN_INVOICE' });
   expect(calls).toContain('service_record_id');
-});
-
-test('an in-flight or pending card approval (not only completed) blocks a re-price', async () => {
-  const seen = [];
-  const c = conn({ cardLane: { id: 'a1' } });
-  const wrapped = (table) => {
-    const ch = c(table);
-    if (table === 'appointment_card_requests') {
-      const orig = ch.whereIn;
-      ch.whereIn = (col, vals) => { seen.push(vals); return orig.call(ch, col, vals); };
-    }
-    return ch;
-  };
-  wrapped.schema = c.schema;
-  await expect(assertRepriceAllowed(wrapped, 's1', 0)).rejects.toMatchObject({ code: 'REPRICE_BLOCKED_CARD_APPROVAL' });
-  expect(seen[0]).toEqual(expect.arrayContaining(['pending', 'completing', 'completed', 'satisfied']));
 });

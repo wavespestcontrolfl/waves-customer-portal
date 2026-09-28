@@ -585,6 +585,16 @@ describe('chargeAppointmentCardForRecapCompletion — recap closeout lane (Codex
     expect(mockChargeSavedCard).not.toHaveBeenCalled();
   });
 
+  // Owner ruling 2026-09-28: a visit re-priced to exactly $0 after the
+  // customer approved the card charge is free — the old approval authorizes
+  // nothing, so the office reviews instead of an automatic charge.
+  test('a visit re-priced to $0 after consent is never auto-charged — office review', async () => {
+    recapHandlers({ scheduled_services: { first: () => ({ ...RECAP_SVC(), estimated_price: '0.00', is_callback: false }) } });
+    const res = await chargeAppointmentCardForRecapCompletion({ scheduledServiceId: 'svc-1', serviceRecordId: 'sr-1' });
+    expect(res).toEqual({ charged: false, reason: 'visit_repriced_to_zero' });
+    expect(mockChargeSavedCard).not.toHaveBeenCalled();
+  });
+
   test('happy path: invoice minted through the SHARED lock helper, charged with the saved autopay method, autopay-logged', async () => {
     recapHandlers();
     const res = await chargeAppointmentCardForRecapCompletion({ scheduledServiceId: 'svc-1', serviceRecordId: 'sr-1' });
