@@ -16,6 +16,13 @@
  * Idempotent per ET month: skips when a pest-insider-monthly send
  * already exists for the current month (any status — a deleted draft
  * does NOT resurrect, matching the weekly's deleted-draft rule).
+ *
+ * Proof-approval (GATE_PEST_INSIDER_PROOF, dark by default): once the
+ * draft is created, sendNewsletterProof runs exactly as it does for the
+ * weekly flagship — same GATE_NEWSLETTER_PROOF_APPROVAL gate underneath,
+ * same idempotency on proof_sent_at, same fail-open error handling. Kill
+ * switch: unset GATE_PEST_INSIDER_PROOF — draft + notification only,
+ * today's behavior.
  */
 
 const db = require('../models/db');
@@ -83,6 +90,21 @@ async function runPestInsiderAutopilot({ now = new Date() } = {}) {
     });
   } catch (e) {
     logger.warn(`[pest-insider-autopilot] draft notification failed: ${e.message}`);
+  }
+
+  // Proof-approval flow (GATE_PEST_INSIDER_PROOF, dark by default — kill =
+  // unset, today's behavior: draft + notification only). Read at call time,
+  // same as its neighbour gates. sendNewsletterProof is itself gated behind
+  // GATE_NEWSLETTER_PROOF_APPROVAL and is idempotent on proof_sent_at, so
+  // this mirrors the flagship autopilot's call exactly — same error
+  // handling, same retry semantics.
+  if (process.env.GATE_PEST_INSIDER_PROOF === 'true') {
+    try {
+      const { sendNewsletterProof } = require('./newsletter-proof');
+      await sendNewsletterProof(send.id);
+    } catch (e) {
+      logger.warn(`[pest-insider-autopilot] proof send failed: ${e.message}`);
+    }
   }
 
   return { skipped: false, sendId: send.id, subject: send.subject, voiceWarnings: draft.voiceWarnings };

@@ -215,6 +215,15 @@ describe('pest-insider claim validation at the send gates', () => {
     const { errors } = validateNewsletterDraft(baseSend, { recipientCount: 100 });
     expect(errors).toEqual([]);
   });
+
+  test('a storm-triggered "second swarm" termite claim hard-blocks the send (email-division fact register)', () => {
+    const draft = {
+      ...baseSend,
+      html_body: baseSend.html_body + '<p>Termites will throw a second swarm event after significant rain and storm activity.</p>',
+    };
+    const { errors } = validateNewsletterDraft(draft, { recipientCount: 100 });
+    expect(errors.some((e) => e.includes('Unverified claim (termite_second_swarm)'))).toBe(true);
+  });
 });
 
 describe('pest-insider cron guards', () => {
