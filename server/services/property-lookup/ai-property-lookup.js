@@ -2263,6 +2263,10 @@ async function lookupPropertyFromAITrio(address, geoContext = null, diag = null,
       county: geoContext.county,
       timeoutMs: gisTimeoutMs,
     }).catch(() => null));
+    // The county roll answered for this point (condo unit folio: only then is
+    // "no stacked building here" a definitive, cacheable outcome — a failed or
+    // timed-out leg also reads null and must stay retryable).
+    if (diag && parcel) diag.countyGisAnswered = true;
     if (!parcel) {
       const fdorTimeoutMs = Math.min(parcelGisTimeoutMs(), remainingCountyMs());
       if (fdorTimeoutMs >= COUNTY_LOOKUP_MIN_REMAINING_MS) {
@@ -2906,7 +2910,7 @@ const COUNTY_STREET_SUFFIXES = 'AVE|BLVD|BND|CIR|CT|CV|DR|GLN|HWY|LN|LOOP|PASS|P
 const PRE_DIRECTION_STREET_SUFFIX_RE = new RegExp(
   `\\b(?:${COUNTY_STREET_SUFFIXES}|AVENUE|BEND|BOULEVARD|CIRCLE|COURT|COVE|CROSSING|DRIVE|GLEN|HIGHWAY|LANE|PARKWAY|PLACE|PLAZA|POINT|POINTE|ROAD|SQUARE|STREET|TERRACE|TRACE|TRAIL)$`,
 );
-const BARE_TRAILING_UNIT_RE = new RegExp(`\\b(?:${COUNTY_STREET_SUFFIXES})(?:\\s+[NSEW])?\\s+\\d[A-Z0-9-]*$`);
+const BARE_TRAILING_UNIT_RE = new RegExp(`\\b(?:${COUNTY_STREET_SUFFIXES})(?:\\s+(?:[NS][EW]|[NSEW]))?\\s+\\d[A-Z0-9-]*$`);
 const REMOVE_SUFFIX_RE = new RegExp(`\\s+(${COUNTY_STREET_SUFFIXES})(?:\\s+[NSEW])?$`, 'i');
 const EXTRACT_SUFFIX_RE = new RegExp(`\\b(${COUNTY_STREET_SUFFIXES})(?:\\s+[NSEW])?$`, 'i');
 const POST_SUFFIX_DIRECTION_RE = new RegExp(`\\b(?:${COUNTY_STREET_SUFFIXES})\\s+([NSEW])\\b`, 'i');

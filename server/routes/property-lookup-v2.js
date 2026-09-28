@@ -295,17 +295,26 @@ function cachedAggregateResolvesToOwnUnit(record, address) {
   return Number.isFinite(units) && units > 1 && buildings === units;
 }
 
-// A typed Apt/Unit address whose cached row predates the condo unit folio
-// (GATE_CONDO_UNIT_FOLIO): the live path now resolves the unit's own county
-// row out of a stacked building, where the cached row came from the address
-// search the old drop fell back to — possibly the building's figures. Every
-// live run with the gate on stamps `_unitFolio` (even 'no_stacked_building'),
-// so each unit address re-runs once and is never re-invalidated. Gate off =
-// no-op. Pure; cache rows are inputs, never mutated.
-function cachedUnitAddressPredatesUnitFolio(record, address) {
-  if (typeof condoUnitFolioEnabled !== 'function' || !condoUnitFolioEnabled()) return false;
-  if (!record || record._unitFolio) return false;
-  return addressMayNameUnit(address);
+// Condo unit folio (GATE_CONDO_UNIT_FOLIO) cache freshness. Gate ON: a
+// unit address whose cached row predates the folio (no `_unitFolio` — it came
+// from the address search the old drop fell back to, possibly the building's
+// figures) misses once; so does a 'county_unavailable' stamp older than a day
+// (the county leg failed or found nothing, so the check never ran — retry,
+// but not on every lookup). Gate OFF: a row the folio touched misses, so the
+// kill switch rolls every cached unit back to the pre-feature lookup instead
+// of serving unit facts until the 180-day TTL. Pure; cache rows are inputs,
+// never mutated.
+const UNIT_FOLIO_UNAVAILABLE_RETRY_MS = 24 * 60 * 60 * 1000;
+function cachedUnitFolioStale(record, address, now = Date.now()) {
+  if (!record) return false;
+  const live = typeof condoUnitFolioEnabled === 'function' && condoUnitFolioEnabled();
+  if (!live) return Boolean(record._unitFolio);
+  if (!addressMayNameUnit(address)) return false;
+  const stamp = record._unitFolio;
+  if (!stamp) return true;
+  if (stamp.status !== 'county_unavailable') return false;
+  const checkedAt = Date.parse(stamp.checkedAt);
+  return !Number.isFinite(checkedAt) || now - checkedAt >= UNIT_FOLIO_UNAVAILABLE_RETRY_MS;
 }
 
 async function performPropertyLookupCore(address, options = {}) {
@@ -341,10 +350,10 @@ async function performPropertyLookupCore(address, options = {}) {
       logger.info('[property-lookup] cached association aggregate superseded by own-unit resolution — treating as a miss');
       cached = null;
     }
-    if (cached && cachedUnitAddressPredatesUnitFolio(cached.property_record, address)) {
-      // Same once-only miss for a unit address cached before the unit folio
-      // existed (cacheOnly callers take the ordinary miss, as above).
-      logger.info('[property-lookup] cached unit address predates condo unit folio — treating as a miss');
+    if (cached && cachedUnitFolioStale(cached.property_record, address)) {
+      // Condo unit folio stamp out of step with the gate (cacheOnly callers
+      // take the ordinary miss, as above).
+      logger.info('[property-lookup] cached unit address out of step with condo unit folio gate — treating as a miss');
       cached = null;
     }
     if (cached) {
@@ -559,12 +568,19 @@ async function performPropertyLookupCore(address, options = {}) {
 
     // Condo unit folio outcome (GATE_CONDO_UNIT_FOLIO) rides the cached
     // record like _floodZone: the profile flags an ambiguous unit match, and
-    // its presence marks the row as checked (cachedUnitAddressPredatesUnitFolio).
+    // its status tells cachedUnitFolioStale whether the check ran. With no
+    // match, "no stacked building" is definitive only when the county roll
+    // answered for the point; a failed / empty leg stamps 'county_unavailable'
+    // so a transient outage never pins the fallback for the cache lifetime.
     if (typeof condoUnitFolioEnabled === 'function' && condoUnitFolioEnabled()
       && (lookupDiag.unitFolio || addressMayNameUnit(address))) {
-      result.propertyRecord._unitFolio = lookupDiag.unitFolio
-        ? { status: lookupDiag.unitFolio.status, candidates: lookupDiag.unitFolio.candidates ?? null }
-        : { status: 'no_stacked_building', candidates: null };
+      if (lookupDiag.unitFolio) {
+        result.propertyRecord._unitFolio = { status: lookupDiag.unitFolio.status, candidates: lookupDiag.unitFolio.candidates ?? null };
+      } else if (lookupDiag.countyGisAnswered) {
+        result.propertyRecord._unitFolio = { status: 'no_stacked_building', candidates: null };
+      } else {
+        result.propertyRecord._unitFolio = { status: 'county_unavailable', candidates: null, checkedAt: new Date().toISOString() };
+      }
     }
 
     // FEMA NFHL flood-zone evidence (point query, fail-open, evidence-only).
@@ -2238,7 +2254,7 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
       priority: 'HIGH',
     });
   }
-  if (rc?._unitFolio?.status === 'multiple_unit_matches') {
+  if (rc?._unitFolio?.status === 'multiple_unit_matches' && condoUnitFolioEnabled()) {
     fieldVerifyFlags.push({
       field: 'squareFootage',
       reason: `The unit number matches ${Number(rc._unitFolio.candidates) > 1 ? `${rc._unitFolio.candidates} ` : 'several '}county unit records at this address (the same unit number in more than one building), so the unit's own county record could not be picked. Confirm the building and the unit's sq ft with the customer.`,
@@ -5806,7 +5822,7 @@ module.exports._private = {
   resolveCommercialSuiteScope,
   buildResultFromCachedLookup,
   cachedAggregateResolvesToOwnUnit,
-  cachedUnitAddressPredatesUnitFolio,
+  cachedUnitFolioStale,
   subdivisionMedianEstimate,
   inFlightLookups,
   lookupCoalesceKey,

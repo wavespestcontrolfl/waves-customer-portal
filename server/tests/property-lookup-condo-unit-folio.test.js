@@ -30,7 +30,7 @@ const { buildEnrichedProfile, _private: routePrivate } = require('../routes/prop
 const {
   buildCadastralRecord, attachParcelMeta, aggregateUnitDesignatorMatch, typedDwellingUnit,
 } = aiPrivate;
-const { cachedUnitAddressPredatesUnitFolio } = routePrivate;
+const { cachedUnitFolioStale } = routePrivate;
 
 const PT = { lat: 27.07, lng: -82.45 };
 const RING = [[
@@ -266,7 +266,8 @@ describe('resolved unit → record → profile', () => {
     expect(profile.lotSqFt).toBe(0);
   });
 
-  test('an ambiguous unit match raises a HIGH sq ft flag', () => {
+  test('an ambiguous unit match raises a HIGH sq ft flag (gate on only)', () => {
+    process.env.GATE_CONDO_UNIT_FOLIO = 'true';
     const record = {
       formattedAddress: '8100 Sample Harbor Way Unit 301, Bradenton, FL 34202',
       propertyType: 'Condo',
@@ -275,6 +276,10 @@ describe('resolved unit → record → profile', () => {
     const profile = buildEnrichedProfile(record, null, PT.lat, PT.lng);
     const flag = profile.fieldVerifyFlags.find((f) => f.field === 'squareFootage' && /2 county unit records/.test(f.reason));
     expect(flag).toMatchObject({ priority: 'HIGH' });
+
+    delete process.env.GATE_CONDO_UNIT_FOLIO;
+    const off = buildEnrichedProfile(record, null, PT.lat, PT.lng);
+    expect(off.fieldVerifyFlags.some((f) => /county unit records/.test(f.reason))).toBe(false);
   });
 });
 
@@ -319,9 +324,20 @@ describe('the trio, end to end', () => {
     const merged = await lookupPropertyFromAITrio(TARPON('Apt 201'), geo, diag);
 
     expect(diag.unitFolio).toMatchObject({ status: 'resolved' });
+    expect(diag.countyGisAnswered).toBe(true);
     expect(merged).toMatchObject({ squareFootage: 910 });
     expect(merged._parcel).toMatchObject({ parcelId: '01731220201', association: { residentialUnits: 6 } });
     expect(merged.lotSize || 0).toBe(0);
+  });
+
+  test('gate ON: a failed county leg never reads as a definitive answer', async () => {
+    process.env.GATE_CONDO_UNIT_FOLIO = 'true';
+    global.fetch = jest.fn(async () => { throw new Error('county GIS down'); });
+    const diag = {};
+    await lookupPropertyFromAITrio(TARPON('Apt 201'), geo, diag);
+
+    expect(diag.unitFolio).toBeUndefined();
+    expect(diag.countyGisAnswered).toBeUndefined();
   });
 
   test('gate OFF: the aggregate drops to the address search as before', async () => {
@@ -340,28 +356,44 @@ describe('cached unit addresses vs the unit folio', () => {
 
   test('gate ON: a unit-address row without the checked marker misses once', () => {
     process.env.GATE_CONDO_UNIT_FOLIO = 'true';
-    expect(cachedUnitAddressPredatesUnitFolio({ squareFootage: 122696 }, ADDR)).toBe(true);
-    expect(cachedUnitAddressPredatesUnitFolio({ _unitFolio: { status: 'no_stacked_building' } }, ADDR)).toBe(false);
-    expect(cachedUnitAddressPredatesUnitFolio({ squareFootage: 1800 }, '1555 Tarpon Center Dr, Venice, FL 34285')).toBe(false);
-    expect(cachedUnitAddressPredatesUnitFolio(null, ADDR)).toBe(false);
+    expect(cachedUnitFolioStale({ squareFootage: 122696 }, ADDR)).toBe(true);
+    expect(cachedUnitFolioStale({ _unitFolio: { status: 'no_stacked_building' } }, ADDR)).toBe(false);
+    expect(cachedUnitFolioStale({ squareFootage: 1800 }, '1555 Tarpon Center Dr, Venice, FL 34285')).toBe(false);
+    expect(cachedUnitFolioStale(null, ADDR)).toBe(false);
   });
 
   test('gate ON: a bare trailing unit number misses once too; a numbered route does not', () => {
     process.env.GATE_CONDO_UNIT_FOLIO = 'true';
-    expect(cachedUnitAddressPredatesUnitFolio({ squareFootage: 122696 }, TARPON('201'))).toBe(true);
-    expect(cachedUnitAddressPredatesUnitFolio({ _unitFolio: { status: 'no_stacked_building' } }, TARPON('201'))).toBe(false);
-    expect(cachedUnitAddressPredatesUnitFolio({ squareFootage: 1800 }, '123 US 41, Venice, FL 34285')).toBe(false);
+    expect(cachedUnitFolioStale({ squareFootage: 122696 }, TARPON('201'))).toBe(true);
+    expect(cachedUnitFolioStale({ _unitFolio: { status: 'no_stacked_building' } }, TARPON('201'))).toBe(false);
+    expect(cachedUnitFolioStale({ squareFootage: 1800 }, '123 US 41, Venice, FL 34285')).toBe(false);
   });
 
-  test('gate OFF: never', () => {
+  test('gate ON: a county_unavailable stamp retries after a day, not on every lookup', () => {
+    process.env.GATE_CONDO_UNIT_FOLIO = 'true';
+    const now = Date.parse('2026-09-28T12:00:00Z');
+    const stamp = (checkedAt) => ({ _unitFolio: { status: 'county_unavailable', checkedAt } });
+    expect(cachedUnitFolioStale(stamp('2026-09-28T01:00:00Z'), ADDR, now)).toBe(false);
+    expect(cachedUnitFolioStale(stamp('2026-09-27T11:00:00Z'), ADDR, now)).toBe(true);
+    expect(cachedUnitFolioStale(stamp(undefined), ADDR, now)).toBe(true);
+  });
+
+  test('gate ON: a two-letter post-direction bare unit ("Main St NW 201") misses once', () => {
+    process.env.GATE_CONDO_UNIT_FOLIO = 'true';
+    expect(cachedUnitFolioStale({ squareFootage: 122696 }, '1555 Main St NW 201, Venice, FL 34285')).toBe(true);
+  });
+
+  test('gate OFF (kill switch): a row the folio touched misses; untouched rows stay hits', () => {
     delete process.env.GATE_CONDO_UNIT_FOLIO;
-    expect(cachedUnitAddressPredatesUnitFolio({ squareFootage: 122696 }, ADDR)).toBe(false);
+    expect(cachedUnitFolioStale({ squareFootage: 910, _unitFolio: { status: 'resolved' } }, ADDR)).toBe(true);
+    expect(cachedUnitFolioStale({ _unitFolio: { status: 'no_stacked_building' } }, ADDR)).toBe(true);
+    expect(cachedUnitFolioStale({ squareFootage: 122696 }, ADDR)).toBe(false);
   });
 
   test('gate reads strictly: only exactly "true" is on', () => {
     for (const value of ['1', 'on', 'TRUE', 'yes', '']) {
       process.env.GATE_CONDO_UNIT_FOLIO = value;
-      expect(cachedUnitAddressPredatesUnitFolio({ squareFootage: 122696 }, ADDR)).toBe(false);
+      expect(cachedUnitFolioStale({ squareFootage: 122696 }, ADDR)).toBe(false);
     }
   });
 });
