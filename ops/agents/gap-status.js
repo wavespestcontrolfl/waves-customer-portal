@@ -21,6 +21,10 @@ if (!process.env.DATABASE_PUBLIC_URL) {
 // The app's knex reads DATABASE_URL; railway run injects the internal host,
 // which is unreachable from a laptop — point it at the public URL.
 process.env.DATABASE_URL = process.env.DATABASE_PUBLIC_URL;
+// The public proxy needs TLS, and knex only turns ssl on when
+// NODE_ENV=production — enable it unless the URL or PGSSLMODE already sets a
+// mode (same as inventory-agent-undo.js).
+if (!/sslmode=/.test(process.env.DATABASE_URL) && !process.env.PGSSLMODE) process.env.PGSSLMODE = 'no-verify';
 const path = require('path');
 const db = require(path.join(__dirname, '..', '..', 'server', 'models', 'db'));
 const { GAP_STATUSES, setGapStatus } = require(path.join(__dirname, '..', '..', 'server', 'services', 'agent-gap-reports'));
