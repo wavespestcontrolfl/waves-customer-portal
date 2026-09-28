@@ -26,6 +26,15 @@ const { publicPortalUrl } = require('../utils/portal-url');
 const { smtpFallbackAllowed } = require('./email-fallback-gate');
 const { isEnabled } = require('../config/feature-gates');
 const { billingChannelAllowed } = require('./billing-delivery-channels');
+const {
+  loadBillingEmailContext, dispatchUnderBillingEmailAuthority,
+} = require('./billing-channel-email-authority');
+const { billingEmailRefusal } = require('./billing-email-sender');
+const { storedEmailAcceptedAt } = require('./messaging/billing-channel-routing');
+
+function acceptedInvoiceEmailEvidence(result) {
+  return result.deduped ? { deduped: true, sentAt: storedEmailAcceptedAt(result.message) } : {};
+}
 
 let cachedTransporter = null;
 function getTransporter() {
@@ -210,11 +219,16 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
   // never flip a delivered email into a reported send failure (the caller
   // restores the claim to draft on failure, and a later automatic resend
   // would duplicate the delivered email).
-  const markEmailDelivered = async () => {
+  const markEmailDelivered = async ({ deduped = false, sentAt = null } = {}) => {
     try {
       const updated = await db('invoices')
         .where({ id: invoice.id, send_claim_token: claimToken })
-        .update({ email_sent_at: new Date(), updated_at: new Date() });
+        .update({
+          email_sent_at: deduped
+            ? db.raw('COALESCE(email_sent_at, ?::timestamptz)', [sentAt])
+            : new Date(),
+          updated_at: new Date(),
+        });
       if (updated === 0) return;
     } catch (err) {
       logger.warn(`[invoice-email] email_sent_at stamp failed for ${invoice.invoice_number}: ${err.message}`);
@@ -486,9 +500,11 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
           ...(refusal.retryable ? { retryable: true } : {}),
           recipient: recipientPayload };
       }
-      await markEmailDelivered();
+      const evidence = acceptedInvoiceEmailEvidence(result);
+      await markEmailDelivered(evidence);
       logger.info(`[invoice-email] Template invoice email sent for ${invoice.invoice_number} to ${recipient.role || 'recipient'} ${invoice.customer_id || 'unknown'}`);
-      return { ok: true, messageId: result.message?.provider_message_id || null, recipient: recipientPayload, payUrl };
+      return { ok: true, messageId: result.message?.provider_message_id || null, recipient: recipientPayload, payUrl,
+        ...evidence };
     } catch (err) {
       if (!canFallbackFromTemplateEmailError(err)) {
         logger.error(`[invoice-email] Template send failed for ${invoice.invoice_number}: ${err.message}`);
@@ -590,6 +606,76 @@ async function inspectionCreditMemoForInvoice(invoice) {
   }
 }
 
+// A routed receipt's refusal, classified like every other billing sender's
+// (billing-email-sender.js) and reported in the vocabulary its callers (the
+// receipt delivery queue, the no-show fee receipt) already settle on: no
+// address and an unselected Email at the first read are their expected
+// skips, a suppression is a blocked send, and anything else (a
+// choice or recipient that moved at the handoff, an invoice no longer this
+// customer's to be paid for, a recheck that could not run) is an aborted
+// handoff the durable owner retries.
+function routedReceiptRefusal(block, { atHandoff = false } = {}) {
+  const refusal = billingEmailRefusal(block);
+  if (refusal.blocked) return { ok: false, error: refusal.reason, blocked: true };
+  if (refusal.reason === 'missing_email') return { ok: false, error: 'No receipt recipient email' };
+  if (block.code === 'BILLING_PREFERENCES_CHANGED' && !atHandoff) {
+    return { ok: false, skipped: true, error: 'billing_email_not_selected', code: 'billing_email_not_selected' };
+  }
+  return { ok: false, error: String(block.reason || block.code || 'Receipt email refused'), code: 'receipt_handoff_aborted' };
+}
+
+// The one answer to "who gets this paid receipt by email" — shared by
+// sendReceiptEmail (the receipt worker and the operator resends) and the
+// Intelligence Bar closeout repair's confirmation card, so the card can never
+// name a different inbox than the send reaches. Attaches the payer to
+// `invoice` (callers read invoice.payer afterwards). Returns
+// { ok: true, recipient, customer, authorityInput } or the same refusal sendReceiptEmail
+// answers with ({ ok: false, error, code? }).
+async function resolveReceiptEmailRecipient(invoice, { billingDeliveryCategory = null } = {}) {
+  const customer = await db('customers').where({ id: invoice.customer_id })
+    .select('id', 'first_name', 'last_name', 'email', 'phone', 'address_line1', 'city', 'state', 'zip', 'property_type', 'company_name')
+    .first();
+  // A routed receipt (the receipt delivery queue, the no-show fee) is billing
+  // mail: its recipient, the customer's receipt channel choice and the
+  // portal-wide switch come from the shared billing email authority (owner
+  // ruling 2026-09-27), read here and again under its locks at the provider
+  // handoff. A payer-billed receipt goes to the payer's AP inbox instead.
+  const authorityInput = billingDeliveryCategory && !invoice.payer_id ? {
+    customerId: invoice.customer_id, invoiceId: invoice.id, channel: 'email',
+    metadata: { billingDeliveryCategory: billingDeliveryCategory },
+  } : null;
+  let routedRecipient = null;
+  if (authorityInput) {
+    let context;
+    try {
+      context = await loadBillingEmailContext(authorityInput);
+    } catch (err) {
+      logger.warn(`[invoice-email] receipt billing email context unavailable for ${invoice.invoice_number}: ${err.message}`);
+      return { ok: false, error: 'Receipt delivery preferences unavailable', code: 'billing_prefs_unavailable' };
+    }
+    if (context.error) return routedReceiptRefusal(context.error);
+    routedRecipient = { ...context.recipient, email: context.recipientEmail };
+  }
+  const prefs = routedRecipient ? null
+    : await db('notification_prefs').where({ customer_id: invoice.customer_id }).first().catch(() => null);
+  // Third-party Bill-To: a payer-billed receipt may go ONLY to the payer's AP
+  // inbox — the receipt PDF/page exposes the payer's payment-method last4, so we
+  // never fall back to the homeowner. No usable AP email => no recipient
+  // (returned as the standard "No receipt recipient email" skip, which the
+  // receipt delivery queue treats as an expected non-actionable skip rather than
+  // retrying forever); the operator fixes the AP email.
+  await PayerService.attachToInvoice(invoice);
+  // Keyed on payer_id (the column), not the attached object: a payer-billed
+  // invoice whose payer can't be attached (inactive/missing live payer, no
+  // snapshot) must still NEVER fall back to the homeowner (would leak the
+  // payer's card last4). No payer recipient → standard no-recipient skip.
+  const recipient = invoice.payer_id
+    ? (invoice.payer ? PayerService.payerRecipient(invoice.payer) : null)
+    : routedRecipient || getReceiptEmailRecipients(customer, prefs || {})[0];
+  if (!recipient?.email) return { ok: false, error: 'No receipt recipient email' };
+  return { ok: true, recipient, customer, authorityInput };
+}
+
 async function sendReceiptEmail(invoiceId, options = {}) {
   let memo = typeof options.memo === 'string' ? options.memo.trim().slice(0, 400) : '';
   // Optional dedupe key. Auto-send paths (Stripe webhook) pass one so a
@@ -607,35 +693,9 @@ async function sendReceiptEmail(invoiceId, options = {}) {
   // gate). An explicit caller memo always wins — never silently replaced.
   if (!memo) memo = await inspectionCreditMemoForInvoice(invoice);
 
-  const customer = await db('customers').where({ id: invoice.customer_id })
-    .select('id', 'first_name', 'last_name', 'email', 'phone', 'address_line1', 'city', 'state', 'zip', 'property_type', 'company_name')
-    .first();
-  let prefsLookupFailed = false;
-  const prefs = await db('notification_prefs').where({ customer_id: invoice.customer_id }).first().catch(() => {
-    prefsLookupFailed = true;
-    return null;
-  });
-  if (options.billingDeliveryCategory && !invoice.payer_id) {
-    if (prefsLookupFailed) return { ok: false, error: 'Receipt delivery preferences unavailable', code: 'billing_prefs_unavailable' };
-    if (billingChannelAllowed(prefs || {}, options.billingDeliveryCategory, 'email') === false) {
-      return { ok: false, skipped: true, error: 'billing_email_not_selected', code: 'billing_email_not_selected' };
-    }
-  }
-  // Third-party Bill-To: a payer-billed receipt may go ONLY to the payer's AP
-  // inbox — the receipt PDF/page exposes the payer's payment-method last4, so we
-  // never fall back to the homeowner. No usable AP email => no recipient
-  // (returned as the standard "No receipt recipient email" skip, which the
-  // receipt delivery queue treats as an expected non-actionable skip rather than
-  // retrying forever); the operator fixes the AP email.
-  await PayerService.attachToInvoice(invoice);
-  // Keyed on payer_id (the column), not the attached object: a payer-billed
-  // invoice whose payer can't be attached (inactive/missing live payer, no
-  // snapshot) must still NEVER fall back to the homeowner (would leak the
-  // payer's card last4). No payer recipient → standard no-recipient skip.
-  const recipient = invoice.payer_id
-    ? (invoice.payer ? PayerService.payerRecipient(invoice.payer) : null)
-    : getReceiptEmailRecipients(customer, prefs || {})[0];
-  if (!recipient?.email) return { ok: false, error: 'No receipt recipient email' };
+  const resolved = await resolveReceiptEmailRecipient(invoice, { billingDeliveryCategory: options.billingDeliveryCategory || null });
+  if (!resolved.ok) return resolved;
+  const { recipient, customer, authorityInput } = resolved;
 
   const payment = await db('payments')
     .where({ customer_id: invoice.customer_id })
@@ -723,6 +783,7 @@ async function sendReceiptEmail(invoiceId, options = {}) {
   ]);
 
   if (sendgrid.isConfigured()) {
+    const receiptHandoff = { boundaryBlock: null, handoffStarted: false, providerAccepted: false };
     try {
       const result = await EmailTemplateLibrary.sendTemplate({
         templateKey: 'invoice.receipt',
@@ -743,22 +804,24 @@ async function sendReceiptEmail(invoiceId, options = {}) {
         idempotencyKey,
         categories: ['invoice_receipt'],
         attachments: [pdfAttachment(`receipt-${invoice.invoice_number}.pdf`, pdfBuffer)],
-        ...(options.billingDeliveryCategory && !invoice.payer_id ? {
-          withProviderHandoff: async (dispatch) => {
-            const current = await db('invoices').where({ id: invoice.id }).first();
-            if (!current || current.status !== 'paid' || current.payer_id) return { ok: false };
-            const freshPrefs = await db('notification_prefs').where({ customer_id: current.customer_id }).first();
-            if (billingChannelAllowed(freshPrefs || {}, options.billingDeliveryCategory, 'email') === false) {
-              return { ok: false };
-            }
-            const freshCustomer = await db('customers').where({ id: current.customer_id }).first();
-            const [freshRecipient] = getReceiptEmailRecipients(freshCustomer, freshPrefs || {});
-            if (cleanEmail(freshRecipient?.email) !== cleanEmail(recipient.email)) return { ok: false };
-            await dispatch();
-            return { ok: true };
-          },
+        ...(authorityInput ? {
+          withProviderHandoff: (dispatch) => dispatchUnderBillingEmailAuthority({
+            input: authorityInput,
+            recipientEmail: recipient.email,
+            templateKey: 'invoice.receipt',
+            // A receipt is only true of a paid invoice; the authority rechecks
+            // the invoice's ownership itself.
+            preSendCheck: async ({ database }) => {
+              const current = await database('invoices').where({ id: invoice.id }).first('status');
+              return current?.status === 'paid'
+                ? { ok: true } : { ok: false, code: 'INVOICE_NOT_PAID', reason: 'Invoice is no longer paid' };
+            },
+            dispatch,
+            state: receiptHandoff,
+          }),
         } : {}),
       });
+      if (receiptHandoff.boundaryBlock) return routedReceiptRefusal(receiptHandoff.boundaryBlock, { atHandoff: true });
       if (result?.blocked) {
         return { ok: false, error: result.reason || 'Email suppressed', blocked: true };
       }
@@ -812,6 +875,7 @@ async function sendReceiptEmail(invoiceId, options = {}) {
 module.exports = {
   sendInvoiceEmail,
   sendReceiptEmail,
+  resolveReceiptEmailRecipient,
   inspectionCreditMemoForInvoice,
   _private: {
     invoiceRecipientFor,

@@ -10,8 +10,9 @@
     "safety_line": "Can pinch if handled, but venom is too weak to bother most people. See a doctor for an unusual reaction.",
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-28 after the range fact-check closed (rare in Florida; see #5114).",
+      "approval_hash": "556e6575b557722e142c15b51be0914b21d597b49eed9ea51331837eaf8fea57"
     },
     "slug": "house-centipede",
     "common_name": "House Centipede",
@@ -24,7 +25,7 @@
     "scientific_name": "Scutigera coleoptrata",
     "rank": "species",
     "group": "many-legged",
-    "subgroup": null,
+    "subgroup": "bite-risk-centipedes",
     "site_category": "Occasional invaders",
     "traits": [
       "Fifteen pairs of very long legs — moves in a fast, ghostly blur",
@@ -36,7 +37,7 @@
       {
         "slug": "florida-blue-centipede",
         "difference": "House centipedes have extremely long, thread-like legs and blur when moving; Florida blue centipedes have short legs and move deliberately.",
-        "next_photo": "A close-up from the side showing leg length relative to body width.",
+        "next_photo": "From a safe distance, zoom in from the side showing leg length relative to body width.",
         "photo_can_confirm": true
       }
     ],
@@ -61,7 +62,7 @@
       "regulated": false,
       "irritant": false
     },
-    "range": "common",
+    "range": "rare",
     "active_months": [
       1,
       2,
@@ -92,7 +93,9 @@
     },
     "tech_notes": "Beneficial predator; indicates other insect prey present. No treatment needed unless customer wants it excluded; check bathroom/garage moisture entry points.",
     "sources": [
-      "https://ask.ifas.ufl.edu/publication/IG093"
+      "https://ask.ifas.ufl.edu/publication/IG093",
+      "https://hgic.clemson.edu/factsheet/centipedes/",
+      "https://www.inaturalist.org/observations?place_id=21&taxon_name=Scutigera%20coleoptrata"
     ],
     "links": {
       "site_page": "/pest-identifier/house-centipede/",
@@ -102,12 +105,7 @@
     "risk": "defensive",
     "action": "leave_alone",
     "season_basis": "year_round",
-    "verification": [
-      {
-        "claim": "Range in Southwest Florida specifically (vs. common statewide/nationally)",
-        "note": "Still open as of 2026-09-26. Re-fetched ask.ifas.ufl.edu/publication/IG093 (UF/IFAS \"Centipedes\" fact sheet, already in sources): it covers centipedes generically (10-100 legs, active predators of insects/spiders, venom not lethal to humans) and does not name Scutigera coleoptrata or break down Florida sub-regions. Searched for a dedicated UF/IFAS Featured Creatures page for the house centipede specifically; none found (only general pest-control blogs turned up, which aren't authoritative sources per the sourcing rules). Extension literature on this species is written at the statewide/national level, not broken out by Florida region, so a Southwest-Florida-specific density figure may not exist to be sourced. Leaving range: \"common\" as a statewide/nationwide characterization rather than asserting SW-FL-specific density."
-      }
-    ]
+    "verification": []
   },
   {
     "kind": "organism",
@@ -120,19 +118,20 @@
     "safety_line": "Its defensive secretion can mildly irritate skin or eyes if handled roughly; sweep it up rather than picking it up bare-handed.",
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "537651578c7962ea17eed8928d50bbcf691350834e5c7fab28a822ff2a45b752"
     },
     "slug": "millipede",
     "common_name": "Florida Ivory Millipede",
     "aliases": [
-      "millipede",
-      "millipedes"
+      "florida ivory millipede",
+      "florida ivory millipedes"
     ],
     "scientific_name": "Chicobolus spinigerus",
     "rank": "species",
     "group": "many-legged",
-    "subgroup": null,
+    "subgroup": "millipedes",
     "site_category": "Occasional invaders",
     "traits": [
       "Coils into a tight spiral when touched",
@@ -144,7 +143,7 @@
       {
         "slug": "house-centipede",
         "difference": "Millipedes have two short leg pairs per segment and coil when touched; house centipedes have one very long leg pair per segment and move fast.",
-        "next_photo": "A close-up from the side counting legs per body segment, next to a coin.",
+        "next_photo": "From a safe distance, zoom in from the side, counting legs per body segment.",
         "photo_can_confirm": true
       }
     ],
@@ -231,7 +230,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "",
+      "approval_hash": "cf2e5b0309b13835e7b4101ec88c86ac1f843214cfac13cc41815b6dcd995da8"
     },
     "slug": "pillbug",
     "common_name": "Pillbug",
@@ -317,6 +317,344 @@
     "links": {
       "site_page": "/pest-identifier/pillbug/",
       "guides": []
+    },
+    "role": "harmless_visitor",
+    "risk": "low",
+    "action": "fix_conditions",
+    "season_basis": "year_round",
+    "verification": []
+  },
+  {
+    "slug": "florida-blue-centipede",
+    "kind": "organism",
+    "common_name": "Florida Blue Centipede",
+    "aka": [
+      "Eastern Bark Centipede"
+    ],
+    "aliases": [
+      "florida blue centipede",
+      "eastern bark centipede",
+      "hemiscolopendra marginata"
+    ],
+    "scientific_name": "Hemiscolopendra marginata",
+    "rank": "species",
+    "group": "many-legged",
+    "subgroup": "bite-risk-centipedes",
+    "site_category": "Occasional invaders",
+    "stages": [
+      "juvenile",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Elongated, flattened body about 1.5 to 2 inches long, often described with a bluish-black sheen and orange-yellow head and legs",
+      "One pair of legs per body segment, with the last pair noticeably longer and trailing behind",
+      "Moves in fast, darting bursts rather than a steady crawl",
+      "Found under bark, logs, mulch or stones by day, hunting insects and spiders at night"
+    ],
+    "look_alikes": [
+      {
+        "slug": "greenhouse-millipede",
+        "difference": "Centipede has one pair of legs per segment, moves fast, and can bite; millipede has two pairs per segment, moves slowly, and doesn't bite",
+        "next_photo": "From a safe distance, zoom in on the underside or side profile counting leg pairs per segment.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "medium",
+    "where": [
+      "lawn-garden",
+      "garage-storage",
+      "lanai-patio"
+    ],
+    "looks": [
+      "crawler"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": true,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "Its bite can hurt like a bee sting for a short while but isn't dangerous to a healthy adult; see a doctor if you have a bigger reaction or are prone to allergies.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A predator that actually helps by eating other insects and spiders around the yard. It only bites if picked up or cornered, so the main reason to treat is simply not wanting to run into one barehanded near the house.",
+      "fact": "Despite the bite, it's doing pest control of its own outdoors, hunting roaches, crickets and other small insects at night."
+    },
+    "tech_notes": "Confirm leg-pair-per-segment count and coloring to distinguish from millipedes; reducing harborage (leaf litter, log piles, dense mulch against the foundation) reduces indoor encounters more than a pesticide alone.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Hemiscolopendra_marginata",
+      "https://ask.ifas.ufl.edu/publication/IG093"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "UF/IFAS EDIS IG093 (Household/occasional invaders) was checked directly and covers centipedes only as a group (\"usually brownish, flattened animals\"), with no mention of this species or blue coloring; UF/IFAS's Featured Creatures collection (771 titles checked) has no dedicated page for Hemiscolopendra marginata. \"Florida Blue Centipede\" is the fixed common name from the project's master slug list, not this worker's choice; the bluish-black coloring itself is from general reference material, not a UF/IFAS/FWC/FDACS source. Re-checked this session: a peer-reviewed taxonomic revision exists (Shelley, in Hoffman & Shelley 1996 / a later genus revision redescribing H. marginata), and a USFWS species page exists for this species, but neither was accessible with a color description in the sources checked; USFWS's page gives only taxonomic/organizational data with no physical description at all. Resolution: the bluish-black coloring is hedged with 'often described' in traits rather than stated as a settled fact, since it is consistently reported across independent photographic references (Wikipedia, and the species' own common/site name) but not confirmed by a UF/IFAS/FWC/FDACS source; this is a purely descriptive, non-safety morphological detail. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "d6bc28e0ce3a56878cbd0a39f79e8f39456b32b35d5676771f4cd462f8c450b7"
+    },
+    "role": "nuisance",
+    "risk": "defensive",
+    "action": "leave_alone",
+    "season_basis": "year_round",
+    "verification": []
+  },
+  {
+    "slug": "greenhouse-millipede",
+    "kind": "organism",
+    "common_name": "Greenhouse Millipede",
+    "aka": [],
+    "aliases": [
+      "greenhouse millipede",
+      "greenhouse millipedes",
+      "oxidus gracilis"
+    ],
+    "scientific_name": "Oxidus gracilis",
+    "rank": "species",
+    "group": "many-legged",
+    "subgroup": "millipedes",
+    "site_category": "Occasional invaders",
+    "stages": [
+      "juvenile",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Small (under 1 inch), flattened, dark brown body with pale cream-colored legs",
+      "Two pairs of legs per body segment, giving it a much denser leg fringe than a centipede",
+      "Curls into a tight coil rather than running or biting when disturbed",
+      "Found under mulch, stones, rotting logs or leaf litter, sometimes wandering into garages in numbers after rain"
+    ],
+    "look_alikes": [
+      {
+        "slug": "florida-blue-centipede",
+        "difference": "Millipede has two pairs of legs per segment, moves slowly, and doesn't bite; centipede has one pair per segment, moves fast, and can bite",
+        "next_photo": "From a safe distance, zoom in on the underside or side profile counting leg pairs per segment.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "garage-storage",
+      "lawn-garden",
+      "lanai-patio"
+    ],
+    "looks": [
+      "crawler"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": true
+    },
+    "safety_line": "Its defensive secretion can mildly irritate skin or eyes if handled roughly; sweep it up rather than picking it up bare-handed.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A harmless decomposer that feeds on decaying leaves and mulch, not living plants. Large numbers after rain, sometimes migrating into garages, mean a moisture/mulch situation, not a pest to worry about. Sweep them up rather than handling them, since the secretion can mildly irritate skin.",
+      "fact": "When threatened, it curls into a tight coil and releases a defensive secretion that may mildly irritate skin — its only defense, since it has no bite or sting."
+    },
+    "tech_notes": "Reduce moisture and thin mulch/leaf litter against the foundation as the primary fix; large migrations are usually seasonal and self-limiting.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Oxidus_gracilis",
+      "https://ask.ifas.ufl.edu/publication/IG093"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "3607a3bd67b579f9423311f21e60845f43de4ebc2aacf3d5c2acb5c7089d04e1"
+    },
+    "role": "harmless_visitor",
+    "risk": "irritant",
+    "action": "fix_conditions",
+    "season_basis": "year_round",
+    "verification": []
+  },
+  {
+    "slug": "sowbug",
+    "kind": "organism",
+    "common_name": "Sowbug",
+    "aka": [],
+    "aliases": [
+      "sowbug",
+      "sowbugs",
+      "porcellio"
+    ],
+    "scientific_name": "Porcellio spp.",
+    "rank": "genus",
+    "group": "many-legged",
+    "subgroup": null,
+    "site_category": "Occasional invaders",
+    "stages": [
+      "juvenile",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Oval, flattened, gray body with overlapping armor-like plates, like a tiny land-dwelling isopod",
+      "Two short tail-like appendages (uropods) visible at the rear end",
+      "Cannot roll into a ball; just scurries away when disturbed",
+      "Found in damp mulch, under pots, logs or stones, feeding on decaying plant matter"
+    ],
+    "look_alikes": [
+      {
+        "slug": "pillbug",
+        "difference": "Sowbug has two tail-like appendages at the rear and cannot roll up; pillbug has no visible tail appendages and rolls into a tight ball when disturbed",
+        "next_photo": "A close-up of the rear end for tail appendages, plus gently touch it to see if it rolls into a ball",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "lawn-garden",
+      "lanai-patio",
+      "garage-storage"
+    ],
+    "looks": [
+      "crawler"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A harmless decomposer that feeds on decaying mulch and plant matter, not living plants or the house itself. Numbers near the foundation usually mean mulch is piled too deep or too damp, and thinning it out is the real fix.",
+      "fact": "It breathes through gill-like structures and needs damp surroundings to survive, which is why it's almost never found somewhere dry."
+    },
+    "tech_notes": "No treatment usually needed; recommend keeping mulch 2 to 4 inches deep and away from direct foundation contact to dry out harborage.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IG093"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "9abe3bd39aebeb1c7df44ed49b40d59c007083c160f73c216999770f9dbd256e"
     },
     "role": "harmless_visitor",
     "risk": "low",

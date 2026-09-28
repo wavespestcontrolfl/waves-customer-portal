@@ -203,22 +203,23 @@ describe('processScheduledSends send-window handling', () => {
     expect(result).toEqual({ sent: 1, failed: 0, deferred: 0 });
   });
 
-  test('outside the window: a marked Email retry does not defer its already delivered Text leg', async () => {
-    isWithinSendWindowET.mockReturnValue(false);
-    const retry = {
-      ...dueRow,
-      sms_sent_at: new Date('2026-09-25T02:45:00.000Z'),
-      scheduled_send_error: BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED,
-    };
-    db.mockReturnValueOnce(chain())
-      .mockReturnValueOnce(chain({ rows: [retry] }))
-      .mockReturnValueOnce(chain({ returning: [claimedRow(retry)] }));
-    sendSpy.mockResolvedValue({ ok: true, sms: { ok: true, deduped: true }, email: { ok: true }, creditApplied: 0 });
+  test.each([new Date('2026-09-25T02:45:00.000Z'), null])(
+    'outside the window: a marked Email retry with original time %s does not defer its accepted Text leg', async (smsSentAt) => {
+      isWithinSendWindowET.mockReturnValue(false);
+      const retry = {
+        ...dueRow,
+        sms_sent_at: smsSentAt,
+        scheduled_send_error: BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED,
+      };
+      db.mockReturnValueOnce(chain())
+        .mockReturnValueOnce(chain({ rows: [retry] }))
+        .mockReturnValueOnce(chain({ returning: [claimedRow(retry)] }));
+      sendSpy.mockResolvedValue({ ok: true, sms: { ok: true, deduped: true }, email: { ok: true }, creditApplied: 0 });
 
-    expect(await InvoiceService.processScheduledSends()).toEqual({ sent: 1, failed: 0, deferred: 0 });
-    expect(sendSpy).toHaveBeenCalledWith('inv-1', expect.objectContaining({ allowClaimed: true }));
-    expect(db).toHaveBeenCalledTimes(3);
-  });
+      expect(await InvoiceService.processScheduledSends()).toEqual({ sent: 1, failed: 0, deferred: 0 });
+      expect(sendSpy).toHaveBeenCalledWith('inv-1', expect.objectContaining({ allowClaimed: true }));
+      expect(db).toHaveBeenCalledTimes(3);
+    });
 
   test('outside the window: an email-only invoice (third-party payer) sends at its requested time', async () => {
     isWithinSendWindowET.mockReturnValue(false);

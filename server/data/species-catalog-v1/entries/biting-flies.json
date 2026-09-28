@@ -17,7 +17,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "3eddf77b8a5afce81129d21d93b9599a5ab3e00b4a77ccf2b910a9b1046da68f"
     },
     "slug": "no-see-um",
     "common_name": "No-See-Um",
@@ -44,8 +45,9 @@
       {
         "slug": "chiggers",
         "difference": "Both leave itchy welts. No-see-ums bite near water at dawn/dusk; chiggers come from vegetation and bite at sock lines and skin folds.",
-        "next_photo": "A technician judges from the site, timing, and any insect actually caught — a photo of the bite pattern alone can't confirm which one bit.",
-        "photo_can_confirm": false
+        "next_photo": "A photo of the bites alone can't tell these apart. From a safe distance, note where and when you were bitten; a technician judges from the site and timing.",
+        "photo_can_confirm": false,
+        "photo_veto_applies_to": "sign"
       }
     ],
     "size": "tiny",
@@ -110,6 +112,434 @@
     "links": {
       "site_page": "/pest-identifier/no-see-um/",
       "guides": []
+    }
+  },
+  {
+    "slug": "yellow-fly",
+    "kind": "organism",
+    "common_name": "Yellow Fly",
+    "role": "nuisance",
+    "risk": "defensive",
+    "action": "fix_conditions",
+    "season_basis": "observed",
+    "verification": [],
+    "aka": [],
+    "aliases": [
+      "yellow fly",
+      "yellow flies",
+      "diachlorus ferrugatus"
+    ],
+    "scientific_name": "Diachlorus ferrugatus",
+    "rank": "species",
+    "group": "biting-flies",
+    "subgroup": null,
+    "site_category": "Mosquitoes & biters",
+    "stages": [
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Bright yellow-orange body, noticeably lighter than a horse fly or deer fly",
+      "Large, colorful eyes and clear wings with a small dark spot",
+      "Lands quietly and bites before you feel it land, unlike a buzzing mosquito",
+      "Active only in daylight, especially on still, hot, humid afternoons"
+    ],
+    "look_alikes": [
+      {
+        "slug": "deer-fly",
+        "difference": "Yellow fly has a solid yellow-orange body; deer fly is smaller with dark patterned wings and a mottled brown-and-yellow body",
+        "next_photo": "From a safe distance, zoom in under good light showing the overall body color and wing pattern.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "medium",
+    "where": [
+      "lawn-garden",
+      "lanai-patio",
+      "trees-shrubs"
+    ],
+    "looks": [
+      "flying-biter"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": true,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "Bites are sharp and sudden and can leave a welt; see a doctor if a bite becomes very swollen, hot or spreads.",
+    "range": "occasional",
+    "active_months": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+    ],
+    "peak_months": [
+      4,
+      5,
+      6
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "A fierce daytime biter, most active on still, hot afternoons in warmer months. Spraying adult yellow, deer and horse flies gives little control per extension research, so the realistic options are timing outdoor time away from peak hours, light clothing, and a trap away from where people gather.",
+      "fact": "Only the females bite; males feed on flower nectar and pollen and leave people alone."
+    },
+    "tech_notes": "Breeds off-property in wet wooded/marsh habitat. UF/IFAS notes spraying adult tabanids has limited effect — set expectations accordingly and point toward timing, personal protection, and dark-target trap placement away from gathering areas rather than a barrier-spray promise. No significant human disease vector concern in Florida.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN595",
+      "https://ask.ifas.ufl.edu/publication/IN155"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Active/peak months corrected against UF/IFAS EDIS IN595 (Featured Creatures: Yellow Fly, Diachlorus ferrugatus): 'occur in Florida from March to November, although the peak season is April through June' -- matches active/peak months exactly. IN595 states plainly that regional biting-pressure comparisons within Florida have not been studied, so no Gulf/Panhandle-vs-SWFL pressure comparison is claimed anywhere in this entry; copy and range rely only on the confirmed statewide season and IN595's 'especially common near large bodies of water' note. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "5cdc837f44f1c991790aefa1d84bca7e4b57113ef635467f9b6d236ac2713185"
+    }
+  },
+  {
+    "slug": "deer-fly",
+    "kind": "organism",
+    "common_name": "Deer Fly",
+    "role": "nuisance",
+    "risk": "defensive",
+    "action": "fix_conditions",
+    "season_basis": "observed",
+    "verification": [],
+    "aka": [],
+    "aliases": [
+      "deer fly",
+      "deer flies",
+      "chrysops"
+    ],
+    "scientific_name": "Chrysops spp.",
+    "rank": "genus",
+    "group": "biting-flies",
+    "subgroup": null,
+    "site_category": "Mosquitoes & biters",
+    "stages": [
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Smaller and slimmer than a horse fly, with dark patterned bands across the wings",
+      "Brightly colored, often green or gold, iridescent eyes",
+      "Mottled brown-and-yellow body",
+      "Circles a person's head persistently before landing to bite, active only in daylight"
+    ],
+    "look_alikes": [
+      {
+        "slug": "horse-fly",
+        "difference": "Deer fly is smaller with patterned, banded wings; horse fly is larger and stockier with clear or evenly smoky wings and no wing pattern",
+        "next_photo": "From a safe distance, zoom in on the wings showing whether they have a dark banded pattern or are clear/uniformly smoky.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "lawn-garden",
+      "trees-shrubs"
+    ],
+    "looks": [
+      "flying-biter"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": true,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "Bites are sharp and can leave a welt or bruise; see a doctor if a bite site becomes very swollen or does not improve.",
+    "range": "common",
+    "active_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "peak_months": [
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "A persistent daytime biter that breeds in wooded, wet areas and often shows up while working or relaxing near trees and brush. Spraying adult deer flies gives little control per extension guidance, so timing outdoor time away from peak activity, light-colored clothing, and traps are the more realistic options.",
+      "fact": "It gets its name from a habit of pestering deer and other large animals, and it will just as readily circle a person's head looking for a place to land."
+    },
+    "tech_notes": "Breeds in wet, wooded habitat off-property. UF/IFAS notes adult tabanid spraying has limited effect; advise timing, personal protection, and trap placement near resting vegetation rather than a barrier-spray promise. No significant human disease vector concern in Florida.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN155"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "c125f2f7e9b52b11d5efb7a69709d4f3f1bb23d8109c02115ceb0bcbcb940b8a"
+    }
+  },
+  {
+    "slug": "horse-fly",
+    "kind": "organism",
+    "common_name": "Horse Fly",
+    "role": "nuisance",
+    "risk": "defensive",
+    "action": "fix_conditions",
+    "season_basis": "observed",
+    "verification": [],
+    "aka": [],
+    "aliases": [
+      "horse fly",
+      "horse flies",
+      "tabanus"
+    ],
+    "scientific_name": "Tabanus spp.",
+    "rank": "genus",
+    "group": "biting-flies",
+    "subgroup": null,
+    "site_category": "Mosquitoes & biters",
+    "stages": [
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Large, robust, dark brown to black fly, often an inch or more long",
+      "Big, often iridescent compound eyes that take up most of the head",
+      "Clear or uniformly smoky wings with no bold pattern",
+      "Loud, low buzz in flight and a fast, painful bite, active in daylight"
+    ],
+    "look_alikes": [
+      {
+        "slug": "deer-fly",
+        "difference": "Horse fly is larger and stockier with plain clear or smoky wings; deer fly is smaller with dark banded patterns on the wings",
+        "next_photo": "From a safe distance, zoom in on the wings showing whether they have a dark banded pattern or are clear/uniformly smoky.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "large",
+    "where": [
+      "lawn-garden",
+      "trees-shrubs",
+      "lanai-patio"
+    ],
+    "looks": [
+      "flying-biter"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": true,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "The bite uses small scissor-like mouthparts and is immediately painful; see a doctor if a bite becomes very swollen or does not improve.",
+    "range": "common",
+    "active_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "One of Florida's largest and most painful biting flies, common near marshes, woods and wherever livestock or wildlife gather. Spraying adult horse flies gives little control per extension guidance, so timing outdoor time away from peak hours, light-colored clothing, and traps are the more realistic options.",
+      "fact": "Females need a blood meal to lay eggs, but males only ever feed on nectar and pollen and never bite."
+    },
+    "tech_notes": "Breeds in wet/marsh habitat off-property. UF/IFAS notes adult tabanid spraying has limited effect; advise timing, personal protection, and trap placement rather than a barrier-spray promise. No significant human disease vector concern in Florida (can mechanically transmit some livestock pathogens).",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN155"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "4f2b3f883bfd158c03a106c5ea18973ff603f8575efe3192834ada9e6c1954d5"
+    }
+  },
+  {
+    "slug": "stable-fly",
+    "kind": "organism",
+    "common_name": "Stable Fly (dog fly)",
+    "role": "nuisance",
+    "risk": "defensive",
+    "action": "fix_conditions",
+    "season_basis": "year_round",
+    "verification": [],
+    "aka": [
+      "dog fly",
+      "biting house fly"
+    ],
+    "aliases": [
+      "stable fly",
+      "stable flies",
+      "dog fly",
+      "biting house fly"
+    ],
+    "scientific_name": "Stomoxys calcitrans",
+    "rank": "species",
+    "group": "biting-flies",
+    "subgroup": null,
+    "site_category": "Mosquitoes & biters",
+    "stages": [
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Looks almost identical to a house fly, gray with dark stripes on the thorax",
+      "Bites hard around the ankles and lower legs instead of just landing to feed on skin oils",
+      "Holds its bayonet-like mouthpart pointed forward, visible even when at rest",
+      "Common where seaweed washes up on beaches or where grass clippings and moist plant debris pile up"
+    ],
+    "look_alikes": [
+      {
+        "slug": "house-fly",
+        "difference": "Stable fly holds a forward-pointing, needle-like mouthpart and bites ankles; house fly has a soft sponging mouthpart built only for sipping",
+        "next_photo": "From a safe distance, zoom in straight on at the front of the head showing the shape of the mouthpart.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "lanai-patio",
+      "lawn-garden"
+    ],
+    "looks": [
+      "flying-biter",
+      "small-fly"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": true,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "Bites around the ankles are sharp and sudden; see a doctor if a bite becomes very swollen or does not improve.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "A fly that looks like a common house fly but bites hard around the ankles, breeding in grass clippings, seaweed wrack and other rotting plant matter. Clearing grass clippings and moist plant debris from the yard is the biggest thing that helps; a technician can advise further if the source is off your property.",
+      "fact": "It is nicknamed the dog fly because on some Gulf beaches, north winds carry swarms of them onto the sand where they go after any warm-blooded target, dogs included."
+    },
+    "tech_notes": "Breeding sites are decaying organic matter (grass clippings, seaweed, mulch piles) on or near the property, so sanitation/source reduction is the key recommendation alongside any adulticide treatment per label. Off-property sources (neighboring pasture, beach wrack) limit what treatment here can fix.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://edis.ifas.ufl.edu/publication/in1114"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "252c40e7612e25ac249ae54040c5ccadd92912eeb406bf82e393a37cab2b5ba5"
     }
   }
 ]

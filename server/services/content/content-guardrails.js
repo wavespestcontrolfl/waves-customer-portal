@@ -5052,10 +5052,12 @@ const PAGE_CITY_SLUGS = new Set([
   'north-port', 'palmetto', 'parrish', 'port-charlotte',
 ]);
 
-function normalizeInternalPath(dest) {
-  let p = String(dest || '').trim().toLowerCase().split('#')[0].split('?')[0];
+function normalizeInternalPath(dest, { keepCase = false } = {}) {
+  let p = String(dest || '').trim();
+  if (!keepCase) p = p.toLowerCase();
+  p = p.split('#')[0].split('?')[0];
   if (!p.startsWith('/')) return null;
-  if (p !== '/' && !p.endsWith('/') && !/\.[a-z0-9]{2,5}$/.test(p)) p += '/';
+  if (p !== '/' && !p.endsWith('/') && !/\.[a-z0-9]{2,5}$/i.test(p)) p += '/';
   return p;
 }
 
@@ -5097,6 +5099,26 @@ function hubHostSet() {
   return hosts;
 }
 
+// Absolute fleet URLs share one origin contract: HTTP(S), a standard port,
+// no embedded credentials, and an explicitly allowed fleet host. Callers may
+// then compare the returned pathname without erasing unsafe origin details.
+function safeFleetUrlPath(value, allowedHosts = hubHostSet()) {
+  try {
+    const parsed = new URL(String(value || '').trim());
+    const standardPort = !parsed.port
+      || (parsed.protocol === 'https:' && parsed.port === '443')
+      || (parsed.protocol === 'http:' && parsed.port === '80');
+    if (!/^https?:$/.test(parsed.protocol)
+      || !standardPort
+      || parsed.username
+      || parsed.password
+      || !allowedHosts.has(parsed.hostname.toLowerCase())) return null;
+    return parsed.pathname || '/';
+  } catch {
+    return null;
+  }
+}
+
 // Every internal-route candidate in the text, normalized. Shared by the
 // gate and by the refresh grandfathering pass over the prior live body.
 function collectInternalDestinations(text) {
@@ -5111,7 +5133,7 @@ function collectInternalDestinations(text) {
   const rel = new RegExp(RELATIVE_DEST_RE.source, RELATIVE_DEST_RE.flags);
   while ((m = rel.exec(s)) !== null) {
     if (attrMasked[m.index] !== s[m.index]) continue;
-    dests.push(m[1] || m[2] || m[3] || m[4]);
+    dests.push({ dest: m[1] || m[2] || m[3] || m[4], host: null, safeOrigin: true });
   }
   const abs = new RegExp(HUB_URL_CANDIDATE_RE.source, HUB_URL_CANDIDATE_RE.flags);
   const hubHosts = hubHostSet();
@@ -5129,11 +5151,18 @@ function collectInternalDestinations(text) {
     const raw = m[0].replace(/[),.;:!?'"\]]+$/, '');
     try {
       const u = new URL(raw);
-      if (hubHosts.has(u.hostname.toLowerCase())) dests.push(u.pathname || '/');
+      if (hubHosts.has(u.hostname.toLowerCase())) {
+        dests.push({
+          dest: u.pathname || '/',
+          host: u.hostname.toLowerCase(),
+          safeOrigin: safeFleetUrlPath(raw, hubHosts) != null,
+        });
+      }
     } catch { /* malformed URL — the external gate owns it */ }
   }
   const normalized = [];
-  for (const dest of dests) {
+  for (const item of dests) {
+    const { dest, host, safeOrigin } = item;
     // Resolve dot segments FIRST — browsers resolve "/images/../x/" to
     // "/x/", so the /images/ exemption must see the resolved path or a
     // dot-segment link reopens the dead-route class.
@@ -5142,7 +5171,7 @@ function collectInternalDestinations(text) {
     // Anchor-only and in-repo image references are not routes.
     if (resolved.startsWith('/images/')) continue;
     const norm = normalizeInternalPath(resolved);
-    if (norm) normalized.push({ dest, norm });
+    if (norm) normalized.push({ dest, norm, exact: normalizeInternalPath(resolved, { keepCase: true }), host, safeOrigin });
   }
   return normalized;
 }
@@ -5179,7 +5208,7 @@ function isKnownGoodInternalRoute(dest) {
 // that preserves one legacy /old/ link must not thereby earn a free pass to
 // ADD more links to that dead route; only up to the prior body's count of
 // each route is preserved-legacy (see uncatalogedComponentFinding).
-function internalRouteFinding(body, allowedInternalLinks = [], exemptRouteCounts = null) {
+function internalRouteFinding(body, allowedInternalLinks = [], exemptRouteCounts = null, relatedPostLinks = [], relatedPostHosts = [], relatedPostLinksLive = true, staleRelatedPostLinks = []) {
   // Non-rendered content carries no live links: a fenced or commented
   // example (<InlineCTA ctaHref="/example-only/">, a code-block href) must
   // not flag UNKNOWN_INTERNAL_ROUTE — the same masking the component
@@ -5209,8 +5238,50 @@ function internalRouteFinding(body, allowedInternalLinks = [], exemptRouteCounts
     if (allowanceCity && !PAGE_CITY_SLUGS.has(allowanceCity)) continue;
     allowed.add(norm);
   }
+  // Related-post paths match with their canonical case: blog slugs are
+  // lowercase and static routes need not resolve another casing, so
+  // "/Termite/Swarmers/" must not ride the allowance for "/termite/swarmers/".
+  const relatedList = Array.isArray(relatedPostLinks) ? relatedPostLinks : [];
+  const relatedPaths = new Set(relatedList.map((link) => normalizeInternalPath(link, { keepCase: true })).filter(Boolean));
+  const relatedLower = new Set(relatedList.map((link) => normalizeInternalPath(link)).filter(Boolean));
+  // Frozen related paths that failed the publish-time liveness recheck
+  // (unpublished, noindexed or moved since compose): always denied.
+  const staleRelated = new Set((Array.isArray(staleRelatedPostLinks) ? staleRelatedPostLinks : [])
+    .map((link) => normalizeInternalPath(link)).filter(Boolean));
+  const allowedRelatedHosts = new Set();
+  for (const value of Array.isArray(relatedPostHosts) ? relatedPostHosts : []) {
+    let host = String(value || '').trim().toLowerCase();
+    try { host = new URL(host.includes('://') ? host : `https://${host}`).hostname.toLowerCase(); } catch { continue; }
+    const bare = host.replace(/^www\./, '');
+    if (!SPOKE_SITE_KEYS.includes(bare)) continue;
+    allowedRelatedHosts.add(bare);
+    allowedRelatedHosts.add(`www.${bare}`);
+  }
   const seenCounts = new Map();
-  for (const { dest, norm } of collectInternalDestinations(text)) {
+  for (const { dest, norm, exact, host, safeOrigin } of collectInternalDestinations(text)) {
+    if (staleRelated.has(norm)) {
+      return finding('P0', 'UNKNOWN_INTERNAL_ROUTE', `Draft links related-post path "${dest}", which is no longer live (unpublished, noindexed or moved since this brief was composed).`);
+    }
+    if (relatedLower.has(norm) && !relatedPaths.has(exact)) {
+      return finding('P0', 'UNKNOWN_INTERNAL_ROUTE', `Draft links related-post path "${dest}" with different capitalization than the verified route; use the exact path from the brief.`);
+    }
+    if (relatedPaths.has(exact)) {
+      // A relative candidate renders on the current publish host. An absolute
+      // candidate must name that same frozen host; a path match alone must not
+      // turn a hub allowance into permission for a spoke URL (or vice versa).
+      // relatedPostLinksLive=false means the publish target drifted after
+      // this list was frozen (e.g. SPOKE_BLOG_NETWORK_ENABLED flipped after
+      // compose) — the path was verified live on the FROZEN host only, so
+      // every reference to it, relative or absolute, is quarantined as
+      // denied here rather than falling through to the generic
+      // allowedInternalLinks check below, which does no host verification
+      // at all and could otherwise admit it via draft.checked_existing_routes
+      // as a dead hub link (Codex #4984 r6+ P1).
+      if (relatedPostLinksLive && (!host || (safeOrigin && allowedRelatedHosts.has(host)))) continue;
+      return finding('P0', 'UNKNOWN_INTERNAL_ROUTE', host
+        ? `Draft links related-post path "${dest}" on host "${host}", which is not the brief's frozen publish host.`
+        : `Draft links related-post path "${dest}", which is no longer a live target after the publish routing changed since this brief was composed.`);
+    }
     if (allowed.has(norm)) continue;
     const seen = (seenCounts.get(norm) || 0) + 1;
     seenCounts.set(norm, seen);
@@ -5246,6 +5317,14 @@ const BLOCKED_SERVICE_ALIASES = new Map([
   ['palmetto-bug', 'cockroach'],
   ['stinging-insects', 'wasp'], // canonical blog tag "Stinging Insects"
   ['stinging-insect', 'wasp'],
+  // Lawn pests by name → the blocked lawn-pest id. A chinch-bug topic is a
+  // lawn-pest topic; without these a "chinch bugs" question or tag carries
+  // only the broad service 'lawn' and keeps its FAQ.
+  ['chinch-bug', 'lawn-pest'],
+  ['sod-webworm', 'lawn-pest'],
+  ['mole-cricket', 'lawn-pest'],
+  ['grub', 'lawn-pest'],
+  ['armyworm', 'lawn-pest'],
 ]);
 
 function blockedServiceCandidates(service) {
@@ -5869,6 +5948,38 @@ const REENTRY_SAFETY_SRCS = [
   `\\b(?:\\d+|${REENTRY_SPELLED_NUM_SRC})[-‑\\s]\\s?(?:minute|min|hour|hr|second|sec|day|week)\\s+(?:re-?entry|wait(?:ing)?)\\b`,
   { src: `\\b(?:\\d+|${REENTRY_SPELLED_NUM_SRC})[-‑\\s]\\s?(?:minute|min|hour|hr|second|sec|day|week)\\s+dry(?:ing)?\\b`, needsTreatmentContext: true },
 ];
+// PERFORMANCE (#4905): reentrySafetyClaimFinding runs synchronously on every
+// live voice-call turn and email draft. It used to build a fresh `new
+// RegExp(src, 'gi')` — parsing the source string and allocating a new object
+// — for each of the ~50 sources above on EVERY call, discarding all ~50
+// objects immediately after. That per-call construction is real,
+// unavoidable work on top of whatever the match itself costs, repeated on
+// every single invocation forever. V8 also runs any regex it hasn't
+// executed (yet) in a slow bytecode interpreter before tiering up to fast
+// compiled code, and a short battery of ~50 moderately complex patterns
+// scanning a string while still in that slow tier is where the worst
+// documented latencies (tens of ms up to multiple seconds, content-
+// dependent) came from; a one-time warm-up call at server start didn't
+// reliably prevent it, since real traffic's constant unrelated regex
+// compilation (this file alone builds many other DYNAMIC, content-keyed
+// patterns per request) can still leave these specific ~50 patterns cold
+// when a live call reaches them. Compiling every pattern ONCE here, at
+// module load, and reusing the SAME RegExp objects on every call (resetting
+// `lastIndex` per use, exactly like the old per-call `new RegExp` did
+// implicitly) removes the repeated construction cost entirely — measured
+// at a many-fold lower steady-state per-call cost with no other behavior
+// change (same sources, same 'gi' flags, same per-call lastIndex-from-0
+// scan). It does not, on its own, guarantee every call is instant — the
+// first handful of executions after a process starts (or certain V8-
+// internal resets) still pay some interpreter-tier cost either way, which
+// is inherent to a plain-JS regex approach and shared by any
+// implementation — but it ends the PER-CALL, FOREVER-RECURRING cost this
+// function used to pay on every single turn.
+const REENTRY_SAFETY_PATTERNS = REENTRY_SAFETY_SRCS.map((entry) => (
+  typeof entry === 'string'
+    ? { re: new RegExp(entry, 'gi') }
+    : { re: new RegExp(entry.src, 'gi'), needsTreatmentContext: entry.needsTreatmentContext, needsTreatmentAntecedent: entry.needsTreatmentAntecedent }
+));
 
 // The APPROVED conditional idiom has TWO required parts (AGENTS.md): the
 // dry condition ("safe once dry" — condition before or after the claim,
@@ -6102,11 +6213,34 @@ function normalizeHardCopyText(text) {
     .replace(/(\*\*|__|~~|[*_`])/g, '');
 }
 
+// #4905: V8 compiles each pattern above to native code on its first runs in
+// a process — once for one-byte text and again for two-byte text (an em
+// dash, é, ñ). Across this battery that is about a second (seconds on a busy
+// host), and it used to land on the first live voice turn or email draft to
+// reach each path. The server runs this once at boot, before it listens. It
+// runs every pattern directly: reentrySafetyClaimFinding returns at its first
+// claim, so calling it cannot reach the rest. Returns the time spent (ms).
+const REENTRY_WARM_TEXTS = ['Warm up line, nothing to see here.', 'Warm up \u2014 nothing to see here, se\u00f1or.'];
+function warmReentrySafetyPatterns() {
+  const started = Date.now();
+  for (let pass = 0; pass < 3; pass += 1) {
+    for (const text of REENTRY_WARM_TEXTS) {
+      for (const { re } of REENTRY_SAFETY_PATTERNS) {
+        re.lastIndex = 0;
+        re.test(text);
+        re.lastIndex = 0;
+      }
+      reentrySafetyClaimFinding(text);
+    }
+  }
+  return Date.now() - started;
+}
+
 function reentrySafetyClaimFinding(text) {
   const s = normalizeHardCopyText(text);
-  for (const entry of REENTRY_SAFETY_SRCS) {
-    const src = typeof entry === 'string' ? entry : entry.src;
-    const re = new RegExp(src, 'gi');
+  for (const entry of REENTRY_SAFETY_PATTERNS) {
+    const { re } = entry;
+    re.lastIndex = 0;
     let m;
     while ((m = re.exec(s)) !== null) {
       const before = s.slice(Math.max(0, m.index - 80), m.index);
@@ -6121,7 +6255,7 @@ function reentrySafetyClaimFinding(text) {
       // Drying forms with no intrinsic re-entry word only count as the
       // banned figure in pesticide context (Codex PR r5) — "Paint drying
       // takes 30 minutes" stays legal maintenance advice.
-      if (typeof entry === 'object' && entry.needsTreatmentContext && !REENTRY_TREATMENT_CONTEXT_RE.test(fullSentence)) {
+      if (entry.needsTreatmentContext && !REENTRY_TREATMENT_CONTEXT_RE.test(fullSentence)) {
         if (m.index === re.lastIndex) re.lastIndex += 1;
         continue;
       }
@@ -6131,7 +6265,7 @@ function reentrySafetyClaimFinding(text) {
       // r5, scoped PR r6): "The pesticide is applied outdoors. The
       // repaired screen prevents entry. It is safe for pets." keeps the
       // screen as the antecedent and stays legal.
-      if (typeof entry === 'object' && entry.needsTreatmentAntecedent) {
+      if (entry.needsTreatmentAntecedent) {
         const before220 = s.slice(Math.max(0, m.index - 220), m.index);
         const governing = before220.split(/[.!?\n]/).slice(-2).join(' ');
         if (!REENTRY_TREATMENT_CONTEXT_RE.test(governing)) {
@@ -6514,7 +6648,7 @@ function literalPhoneInTitleFinding(frontmatter) {
  *   citation-residue and off-footprint checks still apply in full (those are
  *   never legitimate, new or old).
  */
-function evaluate(draft, { service = null, primaryKeyword = null, domains = null, operatorFaqException = false, requiredSourceUrls = [], operatorCitations = false, competitorPriceCitations = false, forbidAllPrices = false, allowedInternalLinks = [], isRefresh = false, priorBody = null, liveMetaTitle = null, liveMetaDescription = null, targetIsBlog = false, allowedAffiliateProducts = null } = {}) {
+function evaluate(draft, { service = null, primaryKeyword = null, domains = null, operatorFaqException = false, requiredSourceUrls = [], operatorCitations = false, competitorPriceCitations = false, forbidAllPrices = false, allowedInternalLinks = [], relatedPostLinks = [], relatedPostHosts = [], relatedPostLinksLive = true, staleRelatedPostLinks = [], isRefresh = false, priorBody = null, liveMetaTitle = null, liveMetaDescription = null, targetIsBlog = false, allowedAffiliateProducts = null } = {}) {
   const body = draft?.body || draft?.content || '';
   const frontmatter = draft?.frontmatter || {};
   const kw = primaryKeyword || frontmatter.primary_keyword || frontmatter.primaryKeyword || null;
@@ -6653,7 +6787,7 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
     (isRefresh && !refreshPriorBody) ? null : internalRouteFinding(body, [
       ...(Array.isArray(allowedInternalLinks) ? allowedInternalLinks : []),
       ...(Array.isArray(draft?.checked_existing_routes) ? draft.checked_existing_routes : []),
-    ], refreshExemptRoutes),
+    ], refreshExemptRoutes, relatedPostLinks, relatedPostHosts, relatedPostLinksLive, staleRelatedPostLinks),
     // Owner hard rule (2026-07-16): service/location metaTitles — the
     // intentional long near-me titles — are NEVER edited by automation. A
     // refresh draft that proposes a DIFFERENT metaTitle than the live page is
@@ -6676,6 +6810,7 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
 }
 
 module.exports = {
+  warmReentrySafetyPatterns,
   evaluate,
   // affiliate-material detector for reuse channels (newsletter validator,
   // social share lanes) — affiliate links are web-only; runs regardless of
@@ -6689,6 +6824,10 @@ module.exports = {
   // generators/gates can never contradict the publish-time guard.
   isFaqBlockedService,
   FAQ_BLOCKED_SERVICES,
+  // Topic-name aliases onto blocked ids — the miner's specialty-topic
+  // derivation matches these names too, so it can never miss a topic the
+  // publish-time guard blocks.
+  BLOCKED_SERVICE_ALIASES,
   KEYWORD_DENSITY_MAX,
   // single source of truth for the raw-markdown-table policy — consumed by
   // content-quality-gate's no_raw_markdown_tables hard check so the two
@@ -6727,6 +6866,7 @@ module.exports = {
   // first-party host set (hub + spoke fleet) — consumed by seo-completion-gate
   // to read absolute Waves URLs as the site-relative paths they are.
   hubHostSet,
+  safeFleetUrlPath,
   // single source of truth for the hardcoded-price policy — consumed by
   // seo-completion-gate so the two price P0s can never drift again.
   findHardcodedPrice,
@@ -6758,5 +6898,10 @@ module.exports = {
   SANCTIONED_META_TOKEN_RE,
   outOfAreaCities,
   GEO_COMPOUND_EXEMPT_RE,
-  _internals: { priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding, blockedServiceCandidates, BLOCKED_SERVICE_ALIASES, externalLinkFinding, allowedLinkHosts, hostAllowed, curatedCompetitorSourceHosts, TRUSTED_CITATION_HOSTS, productClaimFinding, preventionPromiseFinding, uncatalogedComponentFinding, citationResidueFinding, tenureClaimFinding, offFootprintCityFinding, internalRouteFinding, normalizeInternalPath, CITY_SERVICE_LINK_RE, affiliateComponentFindings, collectAffiliateLinkTags, hasServiceCtaLink, inlineCtaContractFinding },
+  _internals: { priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding, blockedServiceCandidates, BLOCKED_SERVICE_ALIASES, externalLinkFinding, allowedLinkHosts, hostAllowed, curatedCompetitorSourceHosts, TRUSTED_CITATION_HOSTS, productClaimFinding, preventionPromiseFinding, uncatalogedComponentFinding, citationResidueFinding, tenureClaimFinding, offFootprintCityFinding, internalRouteFinding, normalizeInternalPath, CITY_SERVICE_LINK_RE, affiliateComponentFindings, collectAffiliateLinkTags, hasServiceCtaLink, inlineCtaContractFinding,
+    // #4905 perf regression guard (content-guardrails.test.js): exposes the
+    // precompiled reentry-safety RegExp objects so a test can confirm
+    // reentrySafetyClaimFinding reuses the SAME objects call over call
+    // instead of rebuilding them.
+    REENTRY_SAFETY_PATTERNS },
 };

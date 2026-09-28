@@ -11,8 +11,8 @@
  * payload — a submitted type outside profile.companions is a 409, and a
  * declared type missing from the submission is a 422 on a completed visit.
  * All per-type validation calls into the existing typed machinery
- * (validateTypedFindings / validateNextStepChips / derive-then-pin /
- * validateActivityScoreConsistency); nothing is reimplemented here.
+ * (validateTypedFindings / derive-then-pin / validateActivityScoreConsistency);
+ * nothing is reimplemented here.
  */
 const ActivityIndicators = require('./activity-indicators');
 
@@ -23,13 +23,13 @@ function reject(status, body) {
 /**
  * Validate a companionFindings submission against the profile's declared
  * companions. Returns { ok: true, companions } with one normalized entry per
- * declared companion, in DECLARED order ({ type, values, chips,
+ * declared companion, in DECLARED order ({ type, values,
  * activityScore, activityScoreSource }), or { ok: false, status, body }
  * shaped like the /complete route's other validation failures.
  *
  * @param {object} opts.profile              resolved completion profile
  * @param {Array}  opts.companionFindings    request payload entries
- *                 [{ type, values, nextStepChips, activityScore, activityScoreSource }]
+ *                 [{ type, values, activityScore, activityScoreSource }]
  * @param {string} opts.primaryFindingsType  profile.findingsType (null for
  *                 recurring primaries) — used for indicator-collision checks
  */
@@ -141,23 +141,10 @@ function validateCompanionSubmission({ profile, companionFindings, primaryFindin
       );
     }
 
-    const chipsValidation = ActivityIndicators.validateNextStepChips(
-      entry.nextStepChips, type, values || {},
-    );
-    if (!chipsValidation.ok) {
-      return reject(400, {
-        error: chipsValidation.error,
-        code: 'companion_next_step_chips_invalid',
-        companionType: type,
-      });
-    }
-    if (ActivityIndicators.nextStepRequiredForType(type) && !chipsValidation.chips.length) {
-      return reject(422, {
-        error: `Select at least one next step for the ${type} companion section.`,
-        code: 'companion_next_step_required',
-        companionType: type,
-      });
-    }
+    // The "Next steps" chip picker/requirement was retired (owner ruling
+    // 2026-09-27) — Recommendations is the single tech-advice field now. A
+    // pre-deploy tab that still submits entry.nextStepChips has it accepted
+    // and ignored (never read here).
 
     // Companion findings values render verbatim on the customer report via
     // the snapshot — same banned-copy policy as the primary's free-text
@@ -177,8 +164,10 @@ function validateCompanionSubmission({ profile, companionFindings, primaryFindin
     }
 
     // Activity score: strict integer 0-5 or null, same contract as the
-    // primary. Trend types require a score on a completed visit — derived
-    // prefill fills it when the tech didn't touch the picker.
+    // primary. Tech-set-only trend types (no derive mapping) require a
+    // score on a completed visit; a derive-mapped type has no separate
+    // gauge any more (owner ruling 2026-09-26) and is scored from the
+    // findings field alone, absent when that field is empty.
     const activityScore = entry.activityScore == null ? null : entry.activityScore;
     if (activityScore != null
       && (!Number.isInteger(activityScore) || activityScore < 0 || activityScore > 5)) {
@@ -193,7 +182,12 @@ function validateCompanionSubmission({ profile, companionFindings, primaryFindin
     let finalScoreSource = null;
     if (indicator) {
       const derived = ActivityIndicators.deriveActivityScore(type, values || {});
-      if (activityScore != null) {
+      if (indicator.derive) {
+        // Same rule as the primary: a derive-mapped companion ignores any
+        // obsolete submitted score and follows its findings field.
+        finalScore = derived ? derived.score : null;
+        finalScoreSource = derived ? 'derived' : null;
+      } else if (activityScore != null) {
         finalScore = activityScore;
         finalScoreSource = entry.activityScoreSource === 'derived' && derived?.score === activityScore
           ? 'derived'
@@ -202,17 +196,25 @@ function validateCompanionSubmission({ profile, companionFindings, primaryFindin
         finalScore = derived.score;
         finalScoreSource = 'derived';
       } else {
+        // Tech-set-only gauge (no findings field to derive from — the
+        // derive-mapped case is handled above) — still required on a
+        // completed visit.
         return reject(422, {
           error: `${indicator.label} requires an activity score (0-5) on a completed visit (${type} companion section)`,
           code: 'companion_activity_score_required',
           companionType: type,
         });
       }
-      // The FINAL score (pinned or derived) must agree with the findings at
-      // the cleared boundary — same rule as the primary typed path.
-      const scoreConsistency = ActivityIndicators.validateActivityScoreConsistency(
-        type, values || {}, finalScore,
-      );
+      // Owner ruling 2026-09-26: a derive-mapped type has no separate gauge
+      // on the companion panel any more — the score always comes from the
+      // findings field. An empty findings value means no indicator this
+      // visit (finalScore stays null), never a validation failure. The
+      // FINAL score (pinned or derived) must agree with the findings at the
+      // cleared boundary — same rule as the primary typed path — but only
+      // once a score actually exists.
+      const scoreConsistency = finalScore == null
+        ? { ok: true }
+        : ActivityIndicators.validateActivityScoreConsistency(type, values || {}, finalScore);
       if (!scoreConsistency.ok) {
         return reject(422, {
           error: scoreConsistency.error,
@@ -225,7 +227,6 @@ function validateCompanionSubmission({ profile, companionFindings, primaryFindin
     normalized.push({
       type,
       values: values || {},
-      chips: chipsValidation.chips,
       activityScore: finalScore,
       activityScoreSource: finalScoreSource,
     });

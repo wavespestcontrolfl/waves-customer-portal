@@ -28,17 +28,56 @@ const effectiveActionSql = require('./opportunity-action-sql');
 // A failed status write may leave a published run's row pending. Fence every
 // blog claim, not just legacy approval holds. Only a verified closed PR with
 // its branch removed can cease blocking; published URLs never do.
+// aeo_question_gap refresh rows get the same own-run fence: a worker that
+// opened the refresh PR and crashed leaves the row pending after stale-claim
+// recovery, and re-claiming it would open a second PR for the same page.
 const claimableStatusSql = `((status = 'pending' OR (
            ${effectiveActionSql} = 'new_supporting_blog' AND status = 'pending_review'
            AND (skip_reason IN ('named_competitor_review', 'affiliate_review')
              OR skip_reason ~ '^trust_build_[0-9]+_of_[0-9]+$')
-         )) AND (${effectiveActionSql} <> 'new_supporting_blog' OR NOT EXISTS (
+         )) AND ((${effectiveActionSql} <> 'new_supporting_blog' AND opportunity_queue.bucket <> 'aeo_question_gap') OR NOT EXISTS (
            SELECT 1 FROM autonomous_runs r WHERE r.opportunity_id = opportunity_queue.id
              AND (r.published_url IS NOT NULL
                OR (r.astro_pr_url IS NOT NULL AND r.astro_pr_retired_at IS NULL))
          )))`;
 
 const { THRESHOLDS, minScoreToActFor } = require('./scoring-config');
+const { writeRouteSql } = require('./opportunity-route-sql');
+
+// Route fence for aeo_question_gap, at the ONE chokepoint every producer's
+// rows pass through (claim). Producers insert independently (miner buckets,
+// intercept / category seeders), so insertion-order arbitration always has a
+// gap; claiming does not. Scoped to pairs involving a question row — other
+// buckets' claims are unchanged when none is involved:
+//   - no row is claimable while a question row for the same route is claimed
+//     or in review, and no question row while ANY other row for its route is;
+//   - an unpublished, unretired Astro PR holds its route whatever the queue
+//     status says: a worker that recorded the PR and crashed leaves the row
+//     pending after stale-claim recovery, and the PR is still an open write;
+//   - a question refresh also waits while another row wrote its page within
+//     the cooldown (AEO_QUESTION_GAP_COOLDOWN_DAYS, the miner's refresh
+//     cooldown), so a page a seed or another refresh just rewrote is not
+//     edited again straight away.
+// The day count is a parsed integer, never user text.
+function aeoRouteFenceSql() {
+  const raw = Number.parseInt(process.env.AEO_QUESTION_GAP_COOLDOWN_DAYS, 10);
+  const days = Number.isFinite(raw) && raw >= 0 ? raw : 28;
+  return `NOT EXISTS (
+           SELECT 1 FROM opportunity_queue route_fence
+            WHERE route_fence.id <> opportunity_queue.id
+              AND (route_fence.bucket = 'aeo_question_gap' OR opportunity_queue.bucket = 'aeo_question_gap')
+              AND (route_fence.status IN ('claimed', 'pending_review')
+                OR EXISTS (
+                  SELECT 1 FROM autonomous_runs route_run
+                   WHERE route_run.opportunity_id = route_fence.id
+                     AND route_run.astro_pr_url IS NOT NULL
+                     AND route_run.astro_pr_retired_at IS NULL
+                     AND route_run.published_url IS NULL)
+                OR (opportunity_queue.bucket = 'aeo_question_gap' AND route_fence.status = 'done'
+                  AND route_fence.updated_at >= now() - make_interval(days => ${days})))
+              AND ${writeRouteSql('route_fence')} = ${writeRouteSql('opportunity_queue')}
+         )`;
+}
 
 const STALE_CLAIM_MS = 30 * 60 * 1000; // 30 minutes
 const DEFAULT_FETCH_LIMIT = 20;
@@ -54,6 +93,19 @@ function listicleFamilyLaneOpen() {
     const { isEnabled } = require('../../config/feature-gates');
     return isEnabled('listicleFamilyMining') === true && isEnabled('listicleBriefs') === true;
   } catch (_) {
+    return false;
+  }
+}
+
+// Same kill-switch contract for the aeo_question_gap lane: its gate is the
+// no-redeploy kill switch, so gate-off must stop queued rows from being
+// claimed too, not only new mining. Rows stay pending (re-enabling resumes
+// them; expireStale ages them out). Read at call time; fail CLOSED.
+function aeoQuestionLaneOpen() {
+  try {
+    const { isEnabled } = require('../../config/feature-gates');
+    return isEnabled('aeoQuestionGapMining') === true;
+  } catch {
     return false;
   }
 }
@@ -120,6 +172,8 @@ class OpportunityQueue {
       // Same lane fence as claimNext (peek is consumed as "what the runner
       // can claim" — see listicleFamilyLaneOpen).
       if (!listicleFamilyLaneOpen()) q = q.whereNot('bucket', 'listicle_family');
+      if (!aeoQuestionLaneOpen()) q = q.whereNot('bucket', 'aeo_question_gap');
+      q = q.whereRaw(aeoRouteFenceSql());
       if (minScore != null) {
         // Same action-aware floor as claimNext (including the
         // listicle_family blog-floor ride), so previews show exactly what
@@ -167,8 +221,18 @@ class OpportunityQueue {
     const whereExclude = exclude.length ? `AND NOT (id = ANY(?))` : '';
     // See listicleFamilyLaneOpen — gate-off family rows are unclaimable.
     const whereFamilyGate = listicleFamilyLaneOpen() ? '' : `AND bucket <> 'listicle_family'`;
+    // See aeoQuestionLaneOpen — gate-off question rows are unclaimable.
+    const whereAeoQuestionGate = aeoQuestionLaneOpen() ? '' : `AND bucket <> 'aeo_question_gap'`;
 
-    const result = await db.raw(
+    // Claims are serialized: the route fence below is a NOT EXISTS over OTHER
+    // rows, and FOR UPDATE SKIP LOCKED locks only the chosen row — two
+    // overlapping claims could each miss the other's uncommitted claim of a
+    // same-route row. The transaction-scoped advisory lock is taken in its
+    // own statement first, so the claim statement's snapshot is read after
+    // any earlier claim committed. Held only for this one UPDATE.
+    const result = await db.transaction(async (trx) => {
+      await trx.raw("SELECT pg_advisory_xact_lock(hashtext('opportunity_queue_claim'))");
+      return trx.raw(
       `UPDATE opportunity_queue
          SET status = 'claimed',
              claimed_at = ?,
@@ -206,6 +270,8 @@ class OpportunityQueue {
            ${whereActionType}
            ${whereExclude}
            ${whereFamilyGate}
+           ${whereAeoQuestionGate}
+           AND ${aeoRouteFenceSql()}
          ORDER BY score DESC, mined_at ASC
          FOR UPDATE SKIP LOCKED
          LIMIT 1
@@ -214,7 +280,8 @@ class OpportunityQueue {
       [new Date(), maxClaimAttempts(), blogMinScoreFor(minScore), rewriteMinScoreFor(minScore), minScore]
         .concat(actionType ? [actionType] : [])
         .concat(exclude.length ? [exclude] : [])
-    );
+      );
+    });
     const row = result.rows?.[0];
     if (row) logger.info(`[opportunity-queue] claimed ${row.id} (${row.bucket}/${row.action_type}, score ${row.score}) by ${claimedBy}`);
     return row ? parseRow(row) : null;

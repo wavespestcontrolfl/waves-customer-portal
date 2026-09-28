@@ -14,10 +14,12 @@ const mockMatchByPhone = jest.fn();
 // page reconciles a lapsed membership before building it (#3120 r4/r6/r7).
 const mockBuildPricingBundle = jest.fn();
 const mockReconcileMembership = jest.fn();
+const mockEstimateMakesNoGuaranteeClaim = jest.fn(() => false);
 jest.mock('../routes/estimate-public', () => ({
   matchAcceptCustomerByPhone: mockMatchByPhone,
   buildPricingBundle: mockBuildPricingBundle,
   reconcileFrozenMembershipSnapshot: mockReconcileMembership,
+  estimateMakesNoGuaranteeClaim: mockEstimateMakesNoGuaranteeClaim,
   // Real implementation — selected → recommended → first.
   defaultFrequencyFromList: (list = []) => list.find((f) => f?.selected || f?.isSelected)
     || list.find((f) => f?.recommended || f?.isRecommended)
@@ -30,6 +32,10 @@ const LIVE_BUNDLE = { source: 'live_rebuild', frequencies: [REBUILT] };
 const {
   estimateBillsPerApplication,
   estimateSoldAsAnnualPrepay,
+  proposalCallbackTermsEligible,
+  proposalCarriesPlanTerms,
+  proposalMakesNoGuaranteeClaim,
+  proposalRowTermsScope,
   resolveProposalBillingContext,
   _resetPerApplicationColumnsProbeForTests,
 } = require('../services/estimate-proposal-billing');
@@ -93,6 +99,93 @@ describe('estimateBillsPerApplication', () => {
   it('keeps the monthly description when the lane lookup fails', async () => {
     stubTables({ customersThrow: true });
     expect(await estimateBillsPerApplication({ id: 'e1', customer_id: 'c1' })).toBe(false);
+  });
+});
+
+describe('proposalMakesNoGuaranteeClaim', () => {
+  it('passes only the normalized rows the proposal document renders to the canonical route policy', () => {
+    mockEstimateMakesNoGuaranteeClaim.mockReturnValueOnce(true);
+    const proposal = {
+      enabled: false,
+      buildings: [{ name: 'Home', lineItems: [{ description: 'Termite trenching', amount: 1200 }] }],
+      programs: [{ service: 'pest', label: 'Pest control' }],
+      correctiveWork: [{ label: 'WDO inspection', amount: 175 }],
+      terms: 'Authored terms stay outside service classification.',
+    };
+    expect(proposalMakesNoGuaranteeClaim(proposal, 'e1')).toBe(true);
+    expect(mockEstimateMakesNoGuaranteeClaim).toHaveBeenCalledWith(
+      {
+        proposal: {
+          enabled: true,
+          buildings: proposal.buildings,
+          programs: proposal.programs,
+          correctiveWork: proposal.correctiveWork,
+        },
+      },
+    );
+  });
+
+  it('fails closed when the canonical policy cannot classify the estimate', () => {
+    mockEstimateMakesNoGuaranteeClaim.mockImplementationOnce(() => { throw new Error('classification unavailable'); });
+    expect(proposalMakesNoGuaranteeClaim({ buildings: [] }, 'e1')).toBe(true);
+  });
+});
+
+describe('proposalCallbackTermsEligible', () => {
+  const building = (...descriptions) => ({ name: 'Home', lineItems: descriptions.map((description) => ({ description, amount: 55, frequency: 'quarterly' })) });
+
+  it('allows the canned callback sentence only on an all-pest residential proposal', () => {
+    mockEstimateMakesNoGuaranteeClaim.mockReturnValue(false);
+    expect(proposalCallbackTermsEligible({ enabled: false, buildings: [building('Quarterly Pest Control')] }, 'e1')).toBe(true);
+    expect(proposalCallbackTermsEligible({ enabled: false, buildings: [building('Rodent Bait Stations')] }, 'e1')).toBe(false);
+    expect(proposalCallbackTermsEligible({ enabled: false, buildings: [building('Quarterly Pest Control', 'Rodent Bait Stations')] }, 'e1')).toBe(false);
+    expect(proposalCallbackTermsEligible({ enabled: false, buildings: [] }, 'e1')).toBe(false);
+    // An authored (enabled) proposal is commercial: terms-neutral.
+    expect(proposalCallbackTermsEligible({ enabled: true, buildings: [building('Quarterly Pest Control')] }, 'e1')).toBe(false);
+    mockEstimateMakesNoGuaranteeClaim.mockReset();
+  });
+
+  it('needs a scheduled recurring pest line: a one-time pest job has no visits to call back between', () => {
+    mockEstimateMakesNoGuaranteeClaim.mockReturnValue(false);
+    const oneTime = { enabled: false, buildings: [{ name: 'Home', lineItems: [{ description: 'Pest Control', frequency: 'one_time', amount: 150 }] }] };
+    const recurring = { enabled: false, buildings: [{ name: 'Home', lineItems: [{ description: 'Pest Control', frequency: 'quarterly', amount: 120 }] }] };
+    const pestLawn = { enabled: false, buildings: [{ name: 'Home', lineItems: [
+      { description: 'Pest Control', frequency: 'quarterly', amount: 120 },
+      { description: 'Lawn Care', frequency: 'monthly', amount: 60 },
+    ] }] };
+    expect(proposalCallbackTermsEligible(oneTime, 'e1')).toBe(false);
+    expect(proposalCallbackTermsEligible(recurring, 'e1')).toBe(true);
+    // Pest + lawn carries the plan terms, but the canned sentence is pest's.
+    expect(proposalCarriesPlanTerms(pestLawn, 'e1')).toBe(true);
+    expect(proposalCallbackTermsEligible(pestLawn, 'e1')).toBe(false);
+    expect(proposalCarriesPlanTerms({ enabled: false, buildings: [{ name: 'Home', lineItems: [
+      { description: 'Rodent Bait Stations', frequency: 'monthly', amount: 40 },
+    ] }] }, 'e1')).toBe(false);
+    mockEstimateMakesNoGuaranteeClaim.mockReset();
+  });
+
+  it('never allows it where the proposal makes no guarantee claim', () => {
+    mockEstimateMakesNoGuaranteeClaim.mockReturnValueOnce(true);
+    expect(proposalCallbackTermsEligible({ enabled: false, buildings: [building('Quarterly Pest Control')] }, 'e1')).toBe(false);
+  });
+});
+
+// Owner ruling 2026-09-27: each service carries its own terms, so each
+// printed line states its own service's terms.
+describe('proposalRowTermsScope', () => {
+  const residential = { enabled: false };
+  it('a residential pest or lawn line carries the plan terms; a rodent line only satisfaction', () => {
+    expect(proposalRowTermsScope(residential, { description: 'Quarterly Pest Control' })).toBe('all');
+    expect(proposalRowTermsScope(residential, { description: 'Lawn Care' })).toBe('all');
+    expect(proposalRowTermsScope(residential, { description: 'Rodent Bait Stations' })).toBe('satisfaction');
+  });
+
+  it('every line of an authored (commercial) proposal carries only satisfaction', () => {
+    expect(proposalRowTermsScope({ enabled: true }, { description: 'Quarterly Pest Control' })).toBe('satisfaction');
+  });
+
+  it('no line of a no-guarantee document carries terms', () => {
+    expect(proposalRowTermsScope(residential, { description: 'Quarterly Pest Control' }, true)).toBe('none');
   });
 });
 

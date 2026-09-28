@@ -507,13 +507,13 @@ describe('booking route wiring (source contracts)', () => {
     // Travel gap (GATE_SLOT_TRAVEL_GAP, pre-push P1): the seeded sweep is a
     // commit surface too — it must carry the follow-up's pin like the
     // parent commit does, or a follow-up lands inside a neighbour's drive.
-    expect(booking).toMatch(/excludeServiceIds: sweepExcludeIds,[\s\S]{0,600}travel: seededRowPin\(row, offerLat, offerLng\)/);
+    expect(booking).toMatch(/excludeServiceIds: sweepExcludeIds,[\s\S]{0,600}travel: seededRowPin\(row, bookingLat, bookingLng\)/);
     // The pin helper must let a SQL NULL fall through to the booking pin —
     // Number(null) is 0 (GH codex #3803 r2 P1).
     expect(booking).toMatch(/function seededRowPin\([\s\S]{0,400}v != null && Number\.isFinite\(Number\(v\)\)/);
     // The parent-extension guard is a commit surface too: the extended
     // window must clear the travel gap with the same booking pin (r3 P1).
-    expect(booking).toMatch(/parentExtensionGuard\(\{[\s\S]{0,700}travel: \{\s*\n\s*lat: Number\.isFinite\(offerLat\)/);
+    expect(booking).toMatch(/parentExtensionGuard\(\{[\s\S]{0,700}travel: \{\s*\n\s*lat: bookingLat,\s*\n\s*lng: bookingLng,/);
   });
 
   test('activation takes rung-1 occupancy locks BEFORE the comms/row locks, from the pre-computed plan', () => {
@@ -668,7 +668,7 @@ describe('booking route wiring (source contracts)', () => {
     expect(findBody).toMatch(/where\('e\.source', 'quote_wizard'\)/);
     expect(findBody).not.toMatch(/where\('e\.status', 'draft'\)/);
     expect(findBody).not.toMatch(/whereNull\('e\.archived_at'\)/);
-    expect(recovery).toMatch(/lockCustomerComms\(trx, parent\.customer_id\)/);
+    expect(recovery).toMatch(/for \(const id of ownershipCustomerIds\) await lockCustomerComms\(trx, id\);/);
     // The FULL stranded predicate re-validates under the lock (codex
     // #3504 r6 hook): status, activation, children, and the live draft.
     expect(recovery).toMatch(/\.forUpdate\(\)/);
@@ -845,14 +845,22 @@ describe('booking route wiring (source contracts)', () => {
     expect(recoverySrc).toMatch(/hasColumn\('scheduled_services', 'source_estimate_generation'\)/);
     // ownership never infers from content — the price match lives only in
     // mintedPriceConfirmed (r25), which is gated on the generation proof.
-    expect(recoverySrc).toMatch(/const draftRepresentsParent = draftLive\s*\n\s*&& String\(freshDraft\.customer_id \|\| ''\) === String\(fresh\.customer_id \|\| ''\)\s*\n\s*&& !!fresh\.source_estimate_generation/);
+    expect(recoverySrc).toMatch(/const draftRepresentsParent = draftLive\s*\n\s*&& estimateOwnershipMatchesLockedRows\([\s\S]{0,240}draftOwnershipSnapshot,[\s\S]{0,160}lockedOwnershipCustomers,[\s\S]{0,80}\)\s*\n\s*&& !!fresh\.source_estimate_generation/);
+    const ownerFencesAt = recoverySrc.indexOf('for (const id of ownershipCustomerIds) await lockCustomerComms(trx, id);');
+    const accountRowsAt = recoverySrc.indexOf('const lockedOwnershipCustomers = await lockCustomerAccountRows(', ownerFencesAt);
+    const parentRowAt = recoverySrc.indexOf("const fresh = await trx('scheduled_services')", accountRowsAt);
+    const draftRowAt = recoverySrc.indexOf("const freshDraft = await trx('estimates')", parentRowAt);
+    expect(ownerFencesAt).toBeGreaterThan(-1);
+    expect(accountRowsAt).toBeGreaterThan(ownerFencesAt);
+    expect(parentRowAt).toBeGreaterThan(accountRowsAt);
+    expect(draftRowAt).toBeGreaterThan(parentRowAt);
     // The booking stamps the generation on the parent at INSERT, only for
     // trusted wizard pricing, column-guarded.
     expect(booking).toMatch(/sourceEstimateGeneration = pricingTrusted && pricingEstimate\?\.updated_at \? pricingEstimate\.updated_at : null;/);
     // (Pest lane: the reconciled-column read + in-transaction kept guard now
     // sit between the generation-column read and the INSERT.)
     expect(booking).toMatch(/const hasGenerationColumn = await trx\.schema\.hasColumn\('scheduled_services', 'source_estimate_generation'\);\s*\n\s*const hasReconciledColumn = await trx\.schema\.hasColumn\('scheduled_services', 'wizard_recovery_reconciled_at'\);/);
-    expect(booking).toMatch(/const \[scheduledRow\] = await trx\('scheduled_services'\)\.insert\(\{\s*\n\s*\.\.\.\(pestDuplicateKeptAtBooking \? \{ wizard_recovery_reconciled_at: trx\.fn\.now\(\) \} : \{\}\),\s*\n\s*\.\.\.\(hasGenerationColumn && paymentPref === 'pay_at_visit' && sourceEstimateGeneration/);
+    expect(booking).toMatch(/const \[scheduledRow\] = await trx\('scheduled_services'\)\.insert\(\{[\s\S]{0,220}\.\.\.\(bookingLocationStamp \|\| \{\}\),\s*\n\s*\.\.\.\(pestDuplicateKeptAtBooking \? \{ wizard_recovery_reconciled_at: trx\.fn\.now\(\) \} : \{\}\),\s*\n\s*\.\.\.\(hasGenerationColumn && paymentPref === 'pay_at_visit' && sourceEstimateGeneration/);
     const migration = require('../models/migrations/20260827000001_source_estimate_generation');
     expect(typeof migration.up).toBe('function');
     expect(typeof migration.down).toBe('function');

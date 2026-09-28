@@ -454,6 +454,217 @@ describe('_composeBrief customer signal context', () => {
   });
 });
 
+// Owner audit 2026-09-26: 115/278 blog posts link to no other post because
+// the writer's closed internal-link set never included any blog post.
+// related-posts.js computes the allowance; content-brief-builder carries it
+// on the brief (voice_constraints.related_posts — no content_briefs column
+// exists for it, so it rides the same jsonb field operator_brief already
+// uses) for supporting-blog briefs only.
+describe('_composeBrief related_posts (owner audit 2026-09-26)', () => {
+  const baseArgs = (over = {}) => ({
+    opportunity: { id: 'opp-1', page_url: null, query: 'termite swarmers', city: 'Bradenton', service: 'termite', bucket: 'customer_need', signal_metadata: {} },
+    signals: { customer_signal: null, serp_profile: null, conversion_feedback: null },
+    decision: {
+      page_type: 'supporting-blog',
+      action_type: 'new_supporting_blog',
+      final_score: 80,
+      score_breakdown: {},
+      human_review_required: false,
+      human_review_reason: null,
+      router_notes: null,
+    },
+    existingBriefVersions: 0,
+    ...over,
+  });
+
+  test('a supporting-blog brief carries the related_posts list under voice_constraints', () => {
+    const relatedPosts = [
+      { title: 'Termite Bait Stations Explained', path: '/termite/bait-stations/', keyword: 'termite bait stations' },
+      { title: 'Subterranean vs Drywood Termites', path: '/termite/subterranean-vs-drywood/', keyword: 'subterranean vs drywood termites' },
+    ];
+    const brief = new ContentBriefBuilder()._composeBrief(baseArgs({ relatedPosts }));
+    expect(brief.voice_constraints.related_posts).toEqual(relatedPosts);
+    expect(brief.voice_constraints.related_posts_target_sites).toEqual(['wavespestcontrol.com']);
+  });
+
+  test('an empty related_posts list adds no candidates but preserves the frozen publish domain', () => {
+    const brief = new ContentBriefBuilder()._composeBrief(baseArgs({ relatedPosts: [] }));
+    expect(brief.voice_constraints.related_posts).toBeUndefined();
+    expect(brief.voice_constraints.related_posts_status).toBeUndefined();
+    expect(brief.voice_constraints.related_posts_target_sites).toEqual(['wavespestcontrol.com']);
+  });
+
+  test('non-supporting-blog page types never carry related_posts even if passed', () => {
+    const relatedPosts = [{ title: 'X', path: '/x/', keyword: 'x' }];
+    const brief = new ContentBriefBuilder()._composeBrief(baseArgs({
+      decision: { page_type: 'city-service', action_type: 'create_or_refresh_city_service_page', final_score: 80, score_breakdown: {}, human_review_required: false, human_review_reason: null, router_notes: null },
+      relatedPosts,
+    }));
+    expect(brief.voice_constraints.related_posts).toBeUndefined();
+  });
+
+  test('a refresh routed to supporting-blog never carries related_posts', () => {
+    const relatedPosts = [{ title: 'X', path: '/x/', keyword: 'x' }];
+    const brief = new ContentBriefBuilder()._composeBrief(baseArgs({
+      decision: { page_type: 'supporting-blog', action_type: 'refresh_existing_page', final_score: 80, score_breakdown: {}, human_review_required: false, human_review_reason: null, router_notes: null },
+      relatedPosts,
+    }));
+    expect(brief.voice_constraints.related_posts).toBeUndefined();
+    expect(brief.voice_constraints.related_posts_status).toBeUndefined();
+  });
+
+  test('related_posts coexists with an operator_brief / retry_directives already on voice_constraints', () => {
+    const relatedPosts = [{ title: 'X', path: '/x/', keyword: 'x' }];
+    const brief = new ContentBriefBuilder()._composeBrief(baseArgs({
+      opportunity: { id: 'opp-1', page_url: null, query: 'termite swarmers', city: 'Bradenton', service: 'termite', bucket: 'customer_need', signal_metadata: { gate_retry: { code: 'UNKNOWN_INTERNAL_ROUTE', attempt: 1 } } },
+      relatedPosts,
+    }));
+    expect(brief.voice_constraints.related_posts).toEqual(relatedPosts);
+    expect(brief.voice_constraints.retry_directives).toBeDefined();
+  });
+});
+
+describe('_loadRelatedPosts gating', () => {
+  test('compose propagates a related-post lookup failure before persistence or writer dispatch', async () => {
+    const queue = require('../services/content/opportunity-queue');
+    const router = require('../services/content/decision-router');
+    const opportunity = {
+      id: 'opp-lookup-failure',
+      page_url: null,
+      query: 'termite swarmers',
+      service: 'termite',
+      city: 'Bradenton',
+      bucket: 'customer_need',
+      signal_metadata: {},
+    };
+    const decision = {
+      page_type: 'supporting-blog',
+      action_type: 'new_supporting_blog',
+      final_score: 80,
+      score_breakdown: {},
+      human_review_required: false,
+      human_review_reason: null,
+      router_notes: null,
+    };
+    const getById = jest.spyOn(queue, 'getById').mockResolvedValue(opportunity);
+    const route = jest.spyOn(router, 'route').mockReturnValue(decision);
+    try {
+      const builder = new ContentBriefBuilder();
+      builder._gatherSignals = jest.fn().mockResolvedValue({ customer_signal: null, serp_profile: null, conversion_feedback: null });
+      builder._countExistingBriefs = jest.fn().mockResolvedValue(0);
+      builder._loadFactsPack = jest.fn().mockResolvedValue(null);
+      builder._loadRelatedPosts = jest.fn().mockRejectedValue(new Error('candidate query unavailable'));
+      await expect(builder.compose(opportunity.id, { persist: false }))
+        .rejects.toThrow('candidate query unavailable');
+    } finally {
+      getById.mockRestore();
+      route.mockRestore();
+    }
+  });
+
+  test('skips the DB lookup entirely for a non-supporting-blog decision', async () => {
+    const builder = new ContentBriefBuilder();
+    const out = await builder._loadRelatedPosts({ id: 'opp-1' }, { page_type: 'city-service', action_type: 'create_or_refresh_city_service_page' });
+    expect(out).toEqual([]);
+  });
+
+  test('skips a refresh even when the router derives supporting-blog as its page type', async () => {
+    const selector = require('../services/content/related-posts');
+    const spy = jest.spyOn(selector, 'getRelatedPostsForBrief');
+    const out = await new ContentBriefBuilder()._loadRelatedPosts(
+      { id: 'opp-1' },
+      { page_type: 'supporting-blog', action_type: 'refresh_existing_page' }
+    );
+    expect(out).toEqual([]);
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  test('calls the selector with the opportunity signal for a supporting-blog decision', async () => {
+    const selector = require('../services/content/related-posts');
+    const spy = jest.spyOn(selector, 'getRelatedPostsForBrief').mockResolvedValue([{ title: 'X', path: '/x/', keyword: 'x' }]);
+    const builder = new ContentBriefBuilder();
+    const opportunity = { id: 'opp-1', query: 'termite swarmers', service: 'termite', city: 'Bradenton', page_url: '/existing/', signal_metadata: {} };
+    const out = await builder._loadRelatedPosts(opportunity, { page_type: 'supporting-blog', action_type: 'new_supporting_blog' });
+    expect(out).toEqual([{ title: 'X', path: '/x/', keyword: 'x' }]);
+    expect(spy).toHaveBeenCalledWith(expect.objectContaining({
+      keyword: 'termite swarmers',
+      service: 'termite',
+      city: 'Bradenton',
+      excludePath: '/existing/',
+    }));
+    spy.mockRestore();
+  });
+
+  test('a queued spoke job selects hub posts when the publish kill switch turns off before composition', async () => {
+    const previous = process.env.SPOKE_BLOG_NETWORK_ENABLED;
+    const selector = require('../services/content/related-posts');
+    const spy = jest.spyOn(selector, 'getRelatedPostsForBrief').mockResolvedValue([]);
+    try {
+      // The job was queued while spoke publishing was enabled and retains
+      // that target in its durable signal metadata.
+      process.env.SPOKE_BLOG_NETWORK_ENABLED = 'true';
+      const opportunity = {
+        id: 'queued-spoke-1',
+        query: 'termite swarmers',
+        service: 'termite',
+        signal_metadata: {
+          spoke_seed: true,
+          target_sites: ['sarasotaflpestcontrol.com'],
+        },
+      };
+
+      // The canonical publisher decision now falls back to the hub. Related
+      // candidates must use that same effective destination.
+      process.env.SPOKE_BLOG_NETWORK_ENABLED = 'false';
+      await new ContentBriefBuilder()._loadRelatedPosts(
+        opportunity,
+        { page_type: 'supporting-blog', action_type: 'new_supporting_blog' }
+      );
+      expect(spy).toHaveBeenCalledWith(expect.objectContaining({
+        domains: ['wavespestcontrol.com'],
+      }));
+
+      const relatedPosts = [{ title: 'Hub guide', path: '/termite/a/', keyword: 'termite guide' }];
+      const composeArgs = {
+        opportunity,
+        signals: { customer_signal: null, serp_profile: null, conversion_feedback: null },
+        decision: {
+          page_type: 'supporting-blog',
+          action_type: 'new_supporting_blog',
+          final_score: 80,
+          score_breakdown: {},
+          human_review_required: false,
+          human_review_reason: null,
+          router_notes: null,
+        },
+        existingBriefVersions: 0,
+        publishTargetSites: ['wavespestcontrol.com'],
+      };
+      const frozen = new ContentBriefBuilder()._composeBrief({ ...composeArgs, relatedPosts });
+      expect(frozen.target_sites).toEqual(['wavespestcontrol.com']);
+      expect(frozen.voice_constraints.related_posts_target_sites).toEqual(['wavespestcontrol.com']);
+
+      // Simulate the content_briefs JSONB round trip. target_sites has no
+      // column, so only voice_constraints survives a reload; re-enabling after
+      // composition still cannot resurrect the stale queued spoke. The marker
+      // must survive candidate success and a confirmed empty corpus alike.
+      const frozenEmpty = new ContentBriefBuilder()._composeBrief({ ...composeArgs, relatedPosts: [] });
+      process.env.SPOKE_BLOG_NETWORK_ENABLED = 'true';
+      const { resolveSpokeTarget: resolveFinalTarget } = require('../services/content-astro/spoke-routing');
+      for (const persisted of [frozen, frozenEmpty]) {
+        const reloaded = { voice_constraints: JSON.parse(JSON.stringify(persisted.voice_constraints)) };
+        expect(reloaded.voice_constraints.related_posts_target_sites).toEqual(['wavespestcontrol.com']);
+        expect(resolveFinalTarget(reloaded)).toBeNull();
+      }
+    } finally {
+      spy.mockRestore();
+      if (previous === undefined) delete process.env.SPOKE_BLOG_NETWORK_ENABLED;
+      else process.env.SPOKE_BLOG_NETWORK_ENABLED = previous;
+    }
+  });
+});
+
 describe('nextWeekday9amET', () => {
   test('returns a Date in the future', () => {
     const next = nextWeekday9amET();
@@ -918,6 +1129,56 @@ describe('_composeBrief family-refresh coverage section (Codex r21 on #3255)', (
     // r34: with no facts pack there is NO methodology note at all — any
     // mandate would force an invented first-party claim.
     expect(brief.required_sections.some((sec) => /how we put this list together/i.test(sec))).toBe(false);
+  });
+});
+
+describe('_composeBrief aeo_question_gap rows (AI-search question gaps)', () => {
+  const compose = (opportunity, decision) => new ContentBriefBuilder()._composeBrief({
+    opportunity: { id: 'opp-aeo-q', city: null, service: 'pest', bucket: 'aeo_question_gap', ...opportunity },
+    signals: { customer_signal: null, serp_profile: null, conversion_feedback: null },
+    decision,
+  });
+  const engines_missing = [{ platform: 'chatgpt' }, { platform: 'claude' }, { platform: 'gemini' }];
+  const question = 'How do I get rid of German cockroaches in my Florida home — should I hire a professional?';
+
+  test('a live-target refresh carries the question as unanswered_queries, the AEO overlay, and its evidence', () => {
+    const unanswered = [{ query: question, impressions: 0, source: 'aeo_question_gap', benchmark_id: 'Q6' }];
+    const brief = compose(
+      { page_url: 'https://www.wavespestcontrol.com/pest-control/get-rid-of-german-cockroaches/', query: question,
+        signal_metadata: { impressions: 0, benchmark_id: 'Q6', engines_missing, unanswered_queries: unanswered,
+          competitors_mentioned: ['Example Pest Co'], specialty_topic: 'cockroach' } },
+      { page_type: 'refresh', action_type: 'refresh_existing_page' }
+    );
+    expect(brief.gsc_signal.unanswered_queries).toEqual(unanswered);
+    expect(brief.required_sections.some((sec) => /direct-answer/i.test(sec))).toBe(true);
+    // Refresh publishing freezes the live page's schema, so FAQPage is not
+    // claimed as a requirement here.
+    expect(brief.schema_types).not.toContain('FAQPage');
+    // A German-cockroach question is FAQ-blocked: the miner's specialty
+    // topic reaches the brief's FAQ policy, so no FAQ section is required.
+    expect(brief.required_sections.some((sec) => /\bFAQ\b/i.test(sec))).toBe(false);
+    expect(brief.gsc_signal.specialty_topic).toBe('cockroach');
+    expect(brief.gsc_signal.aeo_benchmark_id).toBe('Q6');
+    expect(brief.gsc_signal.aeo_engines_missing).toEqual(['chatgpt', 'claude', 'gemini']);
+    // Competitor names are queue evidence only — they never reach the brief.
+    expect(JSON.stringify(brief)).not.toMatch(/Example Pest Co/);
+  });
+
+  test('a non-blocked question refresh keeps the visible FAQ section but claims no FAQPage schema', () => {
+    const brief = compose(
+      { page_url: 'https://www.wavespestcontrol.com/pest-control/one-time-pest-control-vs-ongoing-plan/', query: 'Do I need one-time or recurring pest control in Bradenton?',
+        signal_metadata: { impressions: 0, benchmark_id: 'Q21', engines_missing, specialty_topic: null } },
+      { page_type: 'refresh', action_type: 'refresh_existing_page' }
+    );
+    expect(brief.required_sections.some((sec) => /\bFAQ\b/i.test(sec))).toBe(true);
+    expect(brief.schema_types).not.toContain('FAQPage');
+  });
+
+  test('other buckets carry no AEO evidence fields', () => {
+    const brief = compose({ bucket: 'aeo_gap', page_url: null, query: 'q', signal_metadata: { impressions: 80 } },
+      { page_type: 'supporting-blog', action_type: 'new_supporting_blog' });
+    expect(brief.gsc_signal.aeo_benchmark_id).toBeNull();
+    expect(brief.gsc_signal.aeo_engines_missing).toBeNull();
   });
 });
 

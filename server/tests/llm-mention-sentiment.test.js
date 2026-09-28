@@ -57,10 +57,21 @@ describe('classifySentiment ledger row', () => {
     else process.env.ANTHROPIC_API_KEY = prevKey;
   });
 
-  test('an ambiguous reply is neutral and fails the row', async () => {
+  // Codex r4 on #5123: no label is unclassified (null), not 'neutral' — the
+  // recommended rate reads this label. The r13 contract is unchanged: an
+  // ambiguous reply is never taken as a label and still fails the row.
+  test('an ambiguous reply is unclassified (null) and fails the row', async () => {
     mockCreate.mockResolvedValue({ content: [{ type: 'text', text: 'not negative; neutral' }] });
-    expect(await prober.classifySentiment('Waves Pest Control was mentioned')).toBe('neutral');
+    expect(await prober.classifySentiment('Waves Pest Control was mentioned')).toBeNull();
     expect(ledgerCallRejected).toHaveBeenCalledWith(expect.anything(), 'invalid_output');
+  });
+
+  test('a provider error or a missing key is unclassified (null), never a fallback neutral', async () => {
+    mockCreate.mockRejectedValue(new Error('overloaded'));
+    expect(await prober.classifySentiment('Waves Pest Control was mentioned')).toBeNull();
+    delete process.env.ANTHROPIC_API_KEY;
+    expect(await prober.classifySentiment('Waves Pest Control was mentioned')).toBeNull();
+    expect(mockCreate).toHaveBeenCalledTimes(1);
   });
 
   test('a clean one-word reply is used and not flagged', async () => {

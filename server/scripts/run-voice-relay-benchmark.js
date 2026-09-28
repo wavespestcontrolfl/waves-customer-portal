@@ -28,6 +28,15 @@
  *   node server/scripts/run-voice-relay-benchmark.js --candidate-model=claude-haiku-4-5-20251001 --judge
  *   node server/scripts/run-voice-relay-benchmark.js --candidate-model=claude-haiku-4-5-20251001 --out=/tmp/sandy-benchmark.json
  *
+ * A voice-eligible OpenAI candidate (MODEL_CATALOG provider 'openai', e.g.
+ * gpt-6-sol) is also allowed — this runner sets GATE_VOICE_RELAY_OPENAI=true
+ * in ONLY the two candidate-* conditions' child env (never its own; see
+ * relay-openai-client.js and relay-conversation.js's own file header for what
+ * that gate does), and requires OPENAI_API_KEY in this process's OWN
+ * environment up front (a usage error, exit 2, before any child runs) —
+ * without it every OpenAI-candidate condition would fail its first call:
+ *   OPENAI_API_KEY=sk-… node server/scripts/run-voice-relay-benchmark.js --candidate-model=gpt-6-sol --trials=5
+ *
  * Exit code is non-zero if any condition's run itself failed to complete
  * (crashed OR inconclusive) — a scenario-level pass/fail miss inside a
  * completed run does NOT fail this script; the report below is what carries
@@ -83,12 +92,23 @@ function parseArgs(argv) {
 // sandbox PHONE CALL is the only path that reads VOICE_RELAY_SANDBOX_MODEL /
 // VOICE_RELAY_SANDBOX_RENDERER (server/services/voice-agent/relay-server.js
 // passes `sandbox: authenticatedSandboxCall`) — see docs/sandy-benchmark.md.
-function buildConditions(candidateModel) {
+// `candidateProvider` is the catalog provider for `candidateModel`
+// ('anthropic' | 'openai' | undefined for an unrecognized id, though
+// runBenchmark's own allowlist check below already refused that case). Only
+// an OpenAI candidate needs GATE_VOICE_RELAY_OPENAI on its two conditions'
+// child env — relay-conversation.js's session allowlist otherwise rejects
+// the override and silently falls back to the CURRENT model, which would
+// make "candidate-*" secretly duplicate "current-*" (the existing
+// model-mismatch check catches that, but the gate avoids wasting the run).
+function buildConditions(candidateModel, candidateProvider) {
+  const candidateEnv = candidateProvider === 'openai'
+    ? { VOICE_RELAY_INBOUND_MODEL: candidateModel, GATE_VOICE_RELAY_OPENAI: 'true' }
+    : { VOICE_RELAY_INBOUND_MODEL: candidateModel };
   return [
     { id: 'current-block', env: {} },
     { id: 'current-stream', env: { VOICE_RELAY_RENDERER: 'stream' } },
-    { id: 'candidate-block', env: { VOICE_RELAY_INBOUND_MODEL: candidateModel } },
-    { id: 'candidate-stream', env: { VOICE_RELAY_INBOUND_MODEL: candidateModel, VOICE_RELAY_RENDERER: 'stream' } },
+    { id: 'candidate-block', env: { ...candidateEnv } },
+    { id: 'candidate-stream', env: { ...candidateEnv, VOICE_RELAY_RENDERER: 'stream' } },
   ];
 }
 
@@ -249,6 +269,10 @@ function runOnce(condition, trial, { cliArgs = {}, scriptPath = SCRIPT_PATH, exe
       // "current" condition and silently turn it into a second candidate run.
       ...(condition.env.VOICE_RELAY_INBOUND_MODEL ? {} : { VOICE_RELAY_INBOUND_MODEL: '' }),
       ...(condition.env.VOICE_RELAY_RENDERER ? {} : { VOICE_RELAY_RENDERER: '' }),
+      // Same leak guard as the two overrides above: a "current" condition
+      // (or a non-OpenAI candidate) must never inherit a stray
+      // GATE_VOICE_RELAY_OPENAI=true left in the invoking shell.
+      ...(condition.env.GATE_VOICE_RELAY_OPENAI ? {} : { GATE_VOICE_RELAY_OPENAI: '' }),
     };
     // The one model this condition actually requested via the override env
     // (unset for the two "current" conditions) — used below to catch the
@@ -500,25 +524,71 @@ async function runBenchmark({ argv = process.argv.slice(2), execFileImpl = execF
     );
   }
   const candidateModel = ARGS['candidate-model'];
-  // Reuse the relay's OWN allowlist (config/models.js MODEL_CATALOG, derived
-  // — never a locally hand-typed list) BEFORE any child runs: an id this
-  // repo does not recognize would otherwise run four full conditions only to
-  // have the relay silently reject the override on every "candidate" call and
-  // fall back to the current model, making two of the four conditions secretly
-  // duplicate the other two. See relay-conversation.js's own file header for
-  // why the allowlist is Anthropic text models excluding `requires: 'deep'`.
-  // Required here, not at module top-level, so runOnce/summarizeCondition's
-  // own unit tests never need this heavier module graph loaded.
-  const { isAllowedOverrideModel, ALLOWED_OVERRIDE_MODEL_IDS } = require('../services/voice-agent/relay-conversation');
-  if (!isAllowedOverrideModel(candidateModel)) {
+  // Every run needs ANTHROPIC_API_KEY in THIS process's environment (each
+  // child inherits `...process.env` — see runOnce): the two current-*
+  // conditions always run the current Anthropic model, an Anthropic
+  // candidate needs it too, and --judge grades through an Anthropic primary.
+  // Without it the baselines fail every call, and an OpenAI candidate's paid
+  // calls would buy a comparison with nothing to compare against — so the
+  // run is refused before any child starts, same as the OpenAI key below.
+  if (!process.env.ANTHROPIC_API_KEY) {
+    throw new Error(
+      "ANTHROPIC_API_KEY is not set in this process's environment — the two current-* conditions "
+      + '(and any Anthropic candidate) would fail every call, leaving no baseline to compare against.',
+    );
+  }
+  // Checked BEFORE any child runs: an id this repo does not recognize (or an
+  // OpenAI candidate with no key) would otherwise run four full conditions
+  // only to have the relay silently reject the override on every "candidate"
+  // call and fall back to the current model, making two of the four
+  // conditions secretly duplicate the other two. Required here, not at
+  // module top-level, so runOnce/summarizeCondition's own unit tests never
+  // need this heavier module graph loaded.
+  const { MODEL_CATALOG } = require('../config/models');
+  const candidateProvider = (MODEL_CATALOG[candidateModel] || {}).provider || null;
+  // An OpenAI candidate needs OPENAI_API_KEY in THIS process's own
+  // environment — every condition's child inherits `...process.env` (see
+  // runOnce), so a missing key here fails all four conditions alike. Checked
+  // here, before any child runs, same as the allowlist check right below —
+  // this file's own header rule is "never mutate this process's own env",
+  // so the actual GATE_VOICE_RELAY_OPENAI enablement happens ONLY in the two
+  // candidate conditions' env (buildConditions above), never here.
+  if (candidateProvider === 'openai' && !process.env.OPENAI_API_KEY) {
+    throw new Error(
+      `--candidate-model="${candidateModel}" is an OpenAI model but OPENAI_API_KEY is not set in this `
+      + "process's environment — every condition would fail to call it.",
+    );
+  }
+  // Reuse the relay's OWN catalog-eligible id sets (config/models.js
+  // MODEL_CATALOG, derived — never a locally hand-typed list). This check is
+  // deliberately UNGATED (not relay-conversation.js's own live-gate-aware
+  // isAllowedOverrideModel): this process never sets
+  // GATE_VOICE_RELAY_OPENAI on itself (see above), so a gate-aware check
+  // here would always reject a perfectly good OpenAI candidate whose actual
+  // gate only turns on in the child conditions. ANTHROPIC_SANDBOX_OVERRIDE_
+  // MODEL_IDS (Opus 5.5+ — thinking always on, never on the production
+  // ALLOWED_OVERRIDE_MODEL_IDS) needs no gate, unlike the OpenAI ids: every
+  // condition here runs through the eval harness (`evalHarness: true` —
+  // voice-relay-replay.js), the same `openaiContext` the relay's own
+  // resolveSessionModel admits it under, so a candidate from this Set is
+  // never silently rejected and duplicated onto the current-* baseline.
+  const {
+    ALLOWED_OVERRIDE_MODEL_IDS, OPENAI_VOICE_OVERRIDE_MODEL_IDS, ANTHROPIC_SANDBOX_OVERRIDE_MODEL_IDS,
+  } = require('../services/voice-agent/relay-conversation');
+  const candidateAllowlisted = ALLOWED_OVERRIDE_MODEL_IDS.has(candidateModel)
+    || ANTHROPIC_SANDBOX_OVERRIDE_MODEL_IDS.has(candidateModel)
+    || OPENAI_VOICE_OVERRIDE_MODEL_IDS.has(candidateModel);
+  if (!candidateAllowlisted) {
     throw new Error(
       `--candidate-model="${candidateModel}" is not an allowlisted model id. `
-      + 'Allowed (server/config/models.js MODEL_CATALOG, Anthropic text models, '
-      + `excluding requires:"deep" ids): ${[...ALLOWED_OVERRIDE_MODEL_IDS].join(', ')}`,
+      + 'Allowed (server/config/models.js MODEL_CATALOG): Anthropic text models excluding requires:"deep" ids '
+      + `(${[...ALLOWED_OVERRIDE_MODEL_IDS].join(', ')}), a thinking-always-on Anthropic id `
+      + `(${[...ANTHROPIC_SANDBOX_OVERRIDE_MODEL_IDS].join(', ') || 'none in the catalog today'}), `
+      + `or a voice-eligible OpenAI id (${[...OPENAI_VOICE_OVERRIDE_MODEL_IDS].join(', ')})`,
     );
   }
   const trials = resolveTrials(ARGS);
-  const CONDITIONS = buildConditions(candidateModel);
+  const CONDITIONS = buildConditions(candidateModel, candidateProvider);
 
   const runs = [];
   // Interleaved order: one trial of every condition before the next trial of

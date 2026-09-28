@@ -2689,9 +2689,15 @@ export default function CreateProjectModal({
                     style={{ ...inputStyle, resize: 'vertical', minHeight: 132, paddingRight: 44 }}
                   />
                   <div style={{ position: 'absolute', right: 8, bottom: 8 }}>
+                    {/* AI draft replaces this field with its response, so the
+                        mic stops while a draft or save is in flight and a late
+                        chunk is dropped rather than appended and then
+                        overwritten (same rule as the Schedule report draft). */}
                     <DictationButton
                       palette={P}
+                      disabled={aiWriting || saving}
                       onAppend={(text) => {
+                        if (aiWriting) return;
                         userDirtyRef.current = true;
                         setRecommendations(prev => prev.trim() ? `${prev.replace(/\s+$/, '')} ${text}` : text);
                       }}

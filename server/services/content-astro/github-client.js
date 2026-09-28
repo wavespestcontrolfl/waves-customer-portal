@@ -233,6 +233,12 @@ async function createIssueComment(number, body) {
   });
 }
 
+// Files changed by a PR (filename/status/additions/deletions/patch).
+async function listPrFiles(number) {
+  const { owner, repo } = env();
+  return ghFetchPaginated(`/repos/${owner}/${repo}/pulls/${number}/files`);
+}
+
 async function ghFetchPaginated(path, { perPage = 100, maxPages = 20 } = {}) {
   const rows = [];
   for (let page = 1; page <= maxPages; page++) {
@@ -523,6 +529,7 @@ async function verifyAccess() {
 }
 
 module.exports = {
+  listPrFiles,
   env,
   listDir,
   getFile,
