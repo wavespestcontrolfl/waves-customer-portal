@@ -1140,6 +1140,27 @@ function checkCtaAfterVerdictBox(draft, brief) {
 // its catalog entry's URL AND alt text exactly, and the body must carry
 // that entry's credit and license string somewhere (the instructed
 // attribution line), not merely the bare image markdown.
+// One embedded image's attribution, checked against its catalog entry.
+// `checks` pairs each required-substring field with the reason code it
+// reports missing — walked as data instead of a repeated if-chain so
+// checkPhotoSlotsLicensedOnly's own complexity stays low.
+const PHOTO_ATTRIBUTION_FIELDS = [
+  ['credit', 'identification_photo_credit_missing'],
+  ['license', 'identification_photo_license_missing'],
+  // Codex P1: a bare credit/license STRING with no link is not CC-BY/BY-SA
+  // compliant — the license (and, where the catalog has it, the source
+  // page) must be an actual link, not just text the human eye can read.
+  ['license_url', 'identification_photo_license_link_missing'],
+  ['source_page', 'identification_photo_source_link_missing'],
+];
+function validateSlotPhotoAttribution(photo, alt, url, body) {
+  if (!photo) return { ok: false, reason: `unlicensed_or_unknown_identification_photo:${url}` };
+  if (alt !== photo.alt) return { ok: false, reason: `identification_photo_alt_mismatch:${url}` };
+  for (const [field, reasonCode] of PHOTO_ATTRIBUTION_FIELDS) {
+    if (photo[field] && !body.includes(photo[field])) return { ok: false, reason: `${reasonCode}:${url}` };
+  }
+  return null;
+}
 function checkPhotoSlotsLicensedOnly(draft, brief) {
   if (draft?.frontmatter?.post_type !== 'diagnostic') return { ok: true, reason: 'not_identification_post' };
   const slots = Array.isArray(brief?.voice_constraints?.photo_slots) ? brief.voice_constraints.photo_slots : [];
@@ -1151,11 +1172,8 @@ function checkPhotoSlotsLicensedOnly(draft, brief) {
   while ((m = imgRe.exec(body))) {
     const alt = String(m[1] || '');
     const url = String(m[2] || '').trim();
-    const photo = byUrl.get(url);
-    if (!photo) return { ok: false, reason: `unlicensed_or_unknown_identification_photo:${url}` };
-    if (alt !== photo.alt) return { ok: false, reason: `identification_photo_alt_mismatch:${url}` };
-    if (photo.credit && !body.includes(photo.credit)) return { ok: false, reason: `identification_photo_credit_missing:${url}` };
-    if (photo.license && !body.includes(photo.license)) return { ok: false, reason: `identification_photo_license_missing:${url}` };
+    const failure = validateSlotPhotoAttribution(byUrl.get(url), alt, url, body);
+    if (failure) return failure;
   }
   return { ok: true };
 }

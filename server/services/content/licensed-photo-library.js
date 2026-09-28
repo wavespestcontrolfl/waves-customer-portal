@@ -20,13 +20,17 @@
  * generation time from a search or a generative model.
  */
 
-// Each entry: species aliases (lowercase, matched as whole words/phrases
-// against the brief's topic string), the slot it fills, and the exact
-// attribution the writer must reproduce verbatim (never paraphrased —
-// license compliance depends on the credit + license string matching what
-// the source page states).
+// Each entry: `species` is the canonical display name (shared across every
+// slot entry for that species); `aliases` are the phrases matched — as
+// WHOLE WORDS/PHRASES via a word-boundary regex, never a bare substring —
+// against the brief's topic string. `url`/`alt`/`credit`/`license`/
+// `license_url`/`source_page` are the exact attribution the writer must
+// reproduce verbatim (CC BY / BY-SA requires linking the license and,
+// where practicable, the source — never a bare credit/license STRING with
+// no link).
 const PHOTO_LIBRARY = Object.freeze([
   {
+    species: 'American cockroach',
     aliases: ['american cockroach', 'palmetto bug'],
     slot: 'pest',
     url: 'https://upload.wikimedia.org/wikipedia/commons/b/bd/American_cockroach.jpg',
@@ -37,6 +41,7 @@ const PHOTO_LIBRARY = Object.freeze([
     credit: 'Muhammad Mahdi Karim',
   },
   {
+    species: 'huntsman spider',
     aliases: ['huntsman spider', 'florida huntsman'],
     slot: 'pest',
     url: 'https://upload.wikimedia.org/wikipedia/commons/8/84/Heteropoda_venatoria-Kadavoor-2017-05-22-001_%28cropped%29.jpg',
@@ -47,6 +52,7 @@ const PHOTO_LIBRARY = Object.freeze([
     credit: 'Jeevan Jose, Kerala, India',
   },
   {
+    species: 'huntsman spider',
     aliases: ['huntsman spider', 'florida huntsman'],
     slot: 'look_alike',
     url: 'https://upload.wikimedia.org/wikipedia/commons/c/c8/Hogna_carolinensis_female_dorsal.jpeg',
@@ -57,6 +63,7 @@ const PHOTO_LIBRARY = Object.freeze([
     credit: 'codystricker',
   },
   {
+    species: 'fire ant',
     aliases: ['fire ant', 'red imported fire ant'],
     slot: 'pest',
     url: 'https://upload.wikimedia.org/wikipedia/commons/c/ce/Red_Imported_Fire_Ant_-_Solenopsis_invicta%2C_Okaloacoochee_Slough_State_Forest%2C_Felda%2C_Florida%2C_February_6%2C_2022_%2851872217415%29.jpg',
@@ -67,6 +74,7 @@ const PHOTO_LIBRARY = Object.freeze([
     credit: 'Judy Gallagher',
   },
   {
+    species: 'fire ant',
     aliases: ['fire ant', 'red imported fire ant'],
     slot: 'sign',
     url: 'https://upload.wikimedia.org/wikipedia/commons/5/5b/Red_Imported_Fire_Ant_nest_-_Solenopsis_invicta%2C_Arthur_Marshall_Loxahatchee_National_Wildlife_Refuge%2C_Boynton_Beach%2C_Florida%2C_December_12%2C_2023_%2853578144030%29.jpg',
@@ -79,56 +87,101 @@ const PHOTO_LIBRARY = Object.freeze([
 ]);
 
 const SLOTS = Object.freeze([
-  { slot: 'pest', captionTemplate: (topic) => `A clear, correctly identified photo of ${topic ? `the ${topic}` : 'the pest'} itself.` },
-  { slot: 'sign', captionTemplate: (topic) => `A photo of a telltale sign or piece of evidence ${topic ? `the ${topic}` : 'this pest'} leaves behind — not the pest itself.` },
-  { slot: 'look_alike', captionTemplate: (topic) => `A commonly confused look-alike ${topic ? `for the ${topic}` : 'species'}, shown for contrast — never presented as the real thing.` },
+  { slot: 'pest', captionTemplate: (species) => `A clear, correctly identified photo of ${species ? `the ${species}` : 'the pest'} itself.` },
+  { slot: 'sign', captionTemplate: (species) => `A photo of a telltale sign or piece of evidence ${species ? `the ${species}` : 'this pest'} leaves behind — not the pest itself.` },
+  { slot: 'look_alike', captionTemplate: (species) => `A commonly confused look-alike ${species ? `for the ${species}` : 'species'}, shown for contrast — never presented as the real thing.` },
 ]);
 
 function normalizeTopic(topic) {
   return String(topic || '').trim().toLowerCase();
 }
 
+function escapeRegExp(value) {
+  return value.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&');
+}
+
+// Every distinct species the catalog carries (aliases across its slot
+// entries are identical per species, so the first entry's list suffices).
+const SPECIES_ALIASES = (() => {
+  const bySpecies = new Map();
+  for (const entry of PHOTO_LIBRARY) {
+    if (!bySpecies.has(entry.species)) bySpecies.set(entry.species, entry.aliases);
+  }
+  return bySpecies;
+})();
+
+/**
+ * matchSpecies(topic) → the ONE canonical species name whose alias matches
+ * `topic` as a whole word/phrase (word-boundary regex, never a bare
+ * substring — "ant" in "carpenter ant" must never match the "fire ant"
+ * alias). Returns null when NO species matches, or when MORE THAN ONE
+ * distinct species matches (an ambiguous multi-species topic, e.g. "wolf
+ * spider vs huntsman spider" naming two catalog species, must never guess
+ * which one the identification slots are about) — the caller then treats
+ * every slot as unmatched rather than risk the wrong species' photo.
+ */
+function matchSpecies(topic) {
+  const norm = normalizeTopic(topic);
+  if (!norm) return null;
+  const matched = new Set();
+  for (const [species, aliases] of SPECIES_ALIASES) {
+    // Trailing e?s? tolerates the ordinary plural of the alias's last word
+    // ("fire ants", "cockroaches") without opening the door to an unrelated
+    // longer word ("fire antique" still fails the boundary check).
+    const hit = aliases.some((alias) => new RegExp(`\\b${escapeRegExp(alias)}e?s?\\b`, 'i').test(norm));
+    if (hit) matched.add(species);
+  }
+  return matched.size === 1 ? [...matched][0] : null;
+}
+
 /**
  * findPhotoForSlot(topic, slot) → the catalog entry (plain object, safe to
  * spread into a brief) matching `topic` for `slot`, or null when the
- * catalog has no verified photo for that pairing. Matches on a whole-word/
- * phrase alias contained in the normalized topic string — never a fuzzy or
- * partial-token match, so "ant" in "dangerous ants in florida" does not
- * accidentally match "fire ant" and hand back the wrong species' photo.
+ * catalog has no verified photo for that pairing, the topic names no
+ * catalog species, or it names more than one (ambiguous — see
+ * matchSpecies).
  */
 function findPhotoForSlot(topic, slot) {
-  const norm = normalizeTopic(topic);
-  if (!norm || !slot) return null;
-  for (const entry of PHOTO_LIBRARY) {
-    if (entry.slot !== slot) continue;
-    if (entry.aliases.some((alias) => norm.includes(alias))) {
-      const photo = { ...entry };
-      delete photo.aliases;
-      delete photo.slot;
-      return photo;
-    }
-  }
-  return null;
+  if (!slot) return null;
+  const species = matchSpecies(topic);
+  if (!species) return null;
+  const entry = PHOTO_LIBRARY.find((e) => e.species === species && e.slot === slot);
+  if (!entry) return null;
+  const photo = { ...entry };
+  delete photo.aliases;
+  delete photo.slot;
+  delete photo.species;
+  return photo;
 }
 
 /**
  * buildPhotoSlots(topic) → the 3 required identification photo slots
  * (pest / sign / look-alike) with a caption and, when the licensed library
- * has a verified match, the photo asset. A slot with no match carries
- * `photo: null` and `flagged_for_human: true` — the writer omits that
- * slot's image entirely rather than substituting AI art (owner rule, C3).
+ * has a verified, UNAMBIGUOUS match, the photo asset. A slot with no match
+ * carries `photo: null` and `flagged_for_human: true` — the writer omits
+ * that slot's image entirely rather than substituting AI art (owner rule,
+ * C3). The caption names the matched CANONICAL species (never the raw,
+ * possibly question-shaped topic string, which reads ungrammatically —
+ * e.g. "is a huntsman spider dangerous" is never interpolated verbatim).
  */
 function buildPhotoSlots(topic) {
-  const norm = normalizeTopic(topic);
+  const species = matchSpecies(topic);
   return SLOTS.map(({ slot, captionTemplate }) => {
-    const photo = norm ? findPhotoForSlot(norm, slot) : null;
+    const entry = species ? PHOTO_LIBRARY.find((e) => e.species === species && e.slot === slot) : null;
+    let photo = null;
+    if (entry) {
+      photo = { ...entry };
+      delete photo.aliases;
+      delete photo.slot;
+      delete photo.species;
+    }
     return {
       slot,
-      caption: captionTemplate(norm),
+      caption: captionTemplate(species),
       photo,
       flagged_for_human: !photo,
     };
   });
 }
 
-module.exports = { PHOTO_LIBRARY, findPhotoForSlot, buildPhotoSlots };
+module.exports = { PHOTO_LIBRARY, matchSpecies, findPhotoForSlot, buildPhotoSlots };

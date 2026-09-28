@@ -240,6 +240,65 @@ describe('checkPhotoSlotsLicensedOnly', () => {
     expect(r.ok).toBe(true);
   });
 
+  test('fails when the catalog entry has a license_url/source_page but the body carries only bare text (Codex P1: CC requires a link)', () => {
+    const b = brief({
+      voice_constraints: {
+        photo_slots: [
+          {
+            slot: 'pest',
+            photo: {
+              url: 'https://upload.wikimedia.org/real-fire-ant.jpg',
+              alt: 'fire ant',
+              credit: 'Judy Gallagher',
+              license: 'CC BY 2.0',
+              license_url: 'https://creativecommons.org/licenses/by/2.0',
+              source_page: 'https://commons.wikimedia.org/wiki/File:Real_Fire_Ant.jpg',
+            },
+            flagged_for_human: false,
+          },
+        ],
+      },
+    });
+    const r = checkPhotoSlotsLicensedOnly(
+      // Credit + license text present, but neither is an actual link.
+      { frontmatter: { post_type: 'diagnostic' }, body: '![fire ant](https://upload.wikimedia.org/real-fire-ant.jpg)\n\nPhoto: Judy Gallagher (CC BY 2.0)' },
+      b,
+    );
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/^identification_photo_(license_link|source_link)_missing:/);
+  });
+
+  test('passes when the license and source page are linked as the writer instruction requires', () => {
+    const b = brief({
+      voice_constraints: {
+        photo_slots: [
+          {
+            slot: 'pest',
+            photo: {
+              url: 'https://upload.wikimedia.org/real-fire-ant.jpg',
+              alt: 'fire ant',
+              credit: 'Judy Gallagher',
+              license: 'CC BY 2.0',
+              license_url: 'https://creativecommons.org/licenses/by/2.0',
+              source_page: 'https://commons.wikimedia.org/wiki/File:Real_Fire_Ant.jpg',
+            },
+            flagged_for_human: false,
+          },
+        ],
+      },
+    });
+    const r = checkPhotoSlotsLicensedOnly(
+      {
+        frontmatter: { post_type: 'diagnostic' },
+        body: '![fire ant](https://upload.wikimedia.org/real-fire-ant.jpg)\n\n'
+          + 'Photo: [Judy Gallagher](https://commons.wikimedia.org/wiki/File:Real_Fire_Ant.jpg) '
+          + '([CC BY 2.0](https://creativecommons.org/licenses/by/2.0))',
+      },
+      b,
+    );
+    expect(r.ok).toBe(true);
+  });
+
   test('passes when a flagged slot is correctly omitted (no image for it at all)', () => {
     const b = brief({
       voice_constraints: {

@@ -473,10 +473,16 @@ look_alike — see licensed-photo-library.js).
   ('![alt](url)') using that slot's 'photo.url' and 'photo.alt' EXACTLY as
   given, placed where the slot's 'caption' puts it in the prose (near the
   passage identifying the pest / its sign / the look-alike). Directly below
-  the image, credit the source verbatim from the slot: "Photo: {credit}
-  ({license})" — never paraphrase the license or credit string, never drop
-  it. Do not caption a licensed photo as anything other than what its 'alt'
-  says it is.
+  the image, credit the source with the license AND both links the CC
+  license requires — never a bare credit/license STRING with no link:
+  "Photo: [{credit}]({photo.source_page}) ([{license}]({photo.license_url}))"
+  — e.g. "Photo: [Judy Gallagher](https://commons.wikimedia.org/wiki/File:…)
+  ([CC BY 2.0](https://creativecommons.org/licenses/by/2.0))". Every one of
+  these — photo.url, photo.source_page, photo.license_url — is an EXACT URL
+  the brief pre-clears for this draft only (the external-link gate accepts
+  exactly these, nothing else off-domain); never paraphrase the credit or
+  license text, never drop either link. Do not caption a licensed photo as
+  anything other than what its 'alt' says it is.
 - This section governs ONLY the pest/sign/look-alike identification roles.
   It does not change the general in-body-image rule below (an unrelated
   in-body image on a non-identification post, or a hero image, is unaffected).

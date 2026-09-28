@@ -91,6 +91,17 @@ function deriveSyncGuardrailOptions(opp = {}, brief = {}) {
   const relatedTargetMatches = selectedRelatedHosts != null
     && frozenRelatedHosts.length === effectiveRelatedHosts.length
     && frozenRelatedHosts.every((host, index) => host === effectiveRelatedHosts[index]);
+  // Photo-slot licensed URLs (C3, 2026-09-28) ride the same exact-URL
+  // allowance requiredSourceUrls already grants operator citations —
+  // without it every licensed Commons photo/attribution the PHOTO SLOTS
+  // writer instruction requires would hard-fail DISALLOWED_EXTERNAL_LINK
+  // (upload.wikimedia.org / commons.wikimedia.org / creativecommons.org
+  // are not on the trusted-host allowlist). Exact URLs only, never the
+  // whole host — the same posture requiredSourceUrls already applies.
+  const photoSlots = Array.isArray(brief?.voice_constraints?.photo_slots) ? brief.voice_constraints.photo_slots : [];
+  const photoSlotSourceUrls = photoSlots
+    .flatMap((s) => [s?.photo?.url, s?.photo?.source_page, s?.photo?.license_url])
+    .filter(Boolean);
   const isRefresh = brief.action_type === 'refresh_existing_page';
   // A supporting-blog run IS a blog target: the affiliate gate builds its
   // product index only for blog targets, so without this every valid
@@ -121,6 +132,7 @@ function deriveSyncGuardrailOptions(opp = {}, brief = {}) {
       ...(Array.isArray(operatorBrief?.required_sources) ? operatorBrief.required_sources : []),
       ...(Array.isArray(operatorBrief?.sources) ? operatorBrief.sources : []),
       ...(Array.isArray(opp?.signal_metadata?.intercept_brief?.sources) ? opp.signal_metadata.intercept_brief.sources : []),
+      ...photoSlotSourceUrls,
     ],
     operatorCitations: Boolean(operatorBrief),
     // Competitor-price citations are STRICTER: category/spoke seeds share

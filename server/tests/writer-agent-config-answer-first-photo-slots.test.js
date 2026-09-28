@@ -67,8 +67,9 @@ describe('C3: licensed photo slots only', () => {
     expect(PROMPT).toContain('no placeholder');
   });
 
-  test('license/credit must be reproduced verbatim', () => {
+  test('license/credit must be linked, not just printed as text (Codex P1: CC BY/BY-SA requires a license link)', () => {
     expect(PROMPT).toContain('EXACTLY as');
-    expect(PROMPT).toMatch(/Photo: \{credit\}/);
+    expect(PROMPT).toMatch(/Photo: \[\{credit\}\]\(\{photo.source_page\}\)/);
+    expect(PROMPT).toContain('never a bare credit/license STRING with no link');
   });
 });

@@ -6,6 +6,7 @@
 
 const {
   PHOTO_LIBRARY,
+  matchSpecies,
   findPhotoForSlot,
   buildPhotoSlots,
 } = require('../services/content/licensed-photo-library');
@@ -69,6 +70,42 @@ describe('findPhotoForSlot', () => {
     expect(findPhotoForSlot(null, 'pest')).toBeNull();
     expect(findPhotoForSlot('fire ant', null)).toBeNull();
   });
+
+  test('matches the ordinary plural of the alias (Codex P1 follow-up: word-boundary must not break "fire ants")', () => {
+    const photo = findPhotoForSlot('how to get rid of fire ants in your yard', 'pest');
+    expect(photo).not.toBeNull();
+    expect(photo.alt).toMatch(/fire ant/i);
+  });
+
+  test('matches the irregular -es plural ("cockroaches")', () => {
+    const photo = findPhotoForSlot('why do american cockroaches play dead', 'pest');
+    expect(photo).not.toBeNull();
+    expect(photo.alt).toMatch(/american cockroach/i);
+  });
+
+  test('a longer unrelated word sharing the alias prefix never matches ("fire antique" must not match "fire ant")', () => {
+    expect(findPhotoForSlot('fire antique cabinet identification', 'pest')).toBeNull();
+  });
+});
+
+describe('matchSpecies — ambiguity guard (Codex P1)', () => {
+  test('returns the single species a topic clearly names', () => {
+    expect(matchSpecies('florida huntsman spider identification')).toBe('huntsman spider');
+  });
+
+  test('returns null (never guesses) when the topic names two distinct catalog species', () => {
+    // Both "fire ant" and "huntsman spider" are real catalog species — a
+    // topic naming both must never silently pick one for the pest slot.
+    expect(matchSpecies('fire ant vs huntsman spider: which is more dangerous')).toBeNull();
+  });
+
+  test('a multi-species-ambiguous topic flags every photo slot rather than guessing', () => {
+    const slots = buildPhotoSlots('fire ant vs huntsman spider: which is more dangerous');
+    for (const s of slots) {
+      expect(s.photo).toBeNull();
+      expect(s.flagged_for_human).toBe(true);
+    }
+  });
 });
 
 describe('buildPhotoSlots', () => {
@@ -95,6 +132,13 @@ describe('buildPhotoSlots', () => {
       expect(s.flagged_for_human).toBe(true);
       expect(s.caption).toEqual(expect.any(String));
     }
+  });
+
+  test('caption names the canonical species, never the raw question-shaped query (Codex P1)', () => {
+    const slots = buildPhotoSlots('is a huntsman spider dangerous');
+    const pestSlot = slots.find((s) => s.slot === 'pest');
+    expect(pestSlot.caption).toContain('the huntsman spider');
+    expect(pestSlot.caption).not.toMatch(/is a huntsman spider dangerous/);
   });
 
   test('every slot carries a caption even with no topic', () => {
