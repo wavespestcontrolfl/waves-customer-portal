@@ -8498,7 +8498,10 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
             <OneTimePriceCard
               oneTimePrice={pricing.anchorOneTimePrice || pricing.oneTimeBreakdown?.total || 0}
               breakdown={pricing.oneTimeBreakdown}
-              noGuarantee={noGuaranteeClaims}
+              // Its copy (the 30-day callback) covers every one-time row, so it
+              // follows the page-wide decision: rodent or commercial work
+              // carries no callback term.
+              noGuarantee={noGuaranteeClaims || estimate?.noEstimateWideGuarantee === true}
             />
           )}
         {!readOnly && canShowSlotPicker ? <GetServiceTodayCta slotMeta={glassContent ? selectedSlotMeta : null} /> : null}

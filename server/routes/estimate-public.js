@@ -42,6 +42,7 @@ const { isInvoiceCollectibleStatus } = require('../services/invoice-helpers');
 const { resolveOneTimeServiceCopy, resolveOneTimeRowCopies, oneTimeOnlyIntelligenceCopy } = require('../services/estimate-one-time-copy');
 const { PLAN_TERMS_COPY, withoutPlanTermsClaims } = require('../../shared/estimate-copy-claims.cjs');
 const {
+  collapseMirroredRows,
   hasPurchasedTrenchingWarranty,
   isPreSlabTreatmentItem,
   matchingTrenchingWarrantyRow,
@@ -6637,7 +6638,7 @@ ${shellTopBar()}
     </div>
     ` : ''}
     ${quoteRequired || isOneTimeOnly ? '' : `<div class="mini-guarantee" data-mode-only="recurring">${escapeHtml(pageCopy.recurringAssurance)}</div>`}
-    ${!noGuaranteeClaims && canChooseOneTime && (!oneTimeToggleCopy || oneTimeToggleCopy.callbackNote) ? `<div class="mini-guarantee" data-mode-only="one_time" hidden>${escapeHtml(oneTimeToggleCopy?.callbackNote || 'Includes a 30-day callback period if pests return after this visit.')}</div>` : ''}
+    ${!planTermsNeutral && canChooseOneTime && (!oneTimeToggleCopy || oneTimeToggleCopy.callbackNote) ? `<div class="mini-guarantee" data-mode-only="one_time" hidden>${escapeHtml(oneTimeToggleCopy?.callbackNote || 'Includes a 30-day callback period if pests return after this visit.')}</div>` : ''}
     ${oneTimeItemsCardHtml}
   </div>
 
@@ -20106,8 +20107,21 @@ function serviceMixCarriesPlanTerms(recurringServices = [], oneTimeItems = []) {
   return services > 0;
 }
 
+// A commercial row anywhere (the engine marks them isCommercial, a mark the
+// normalized one-time rows drop) makes the estimate terms-neutral:
+// estimate-converter's estimateHasCommercialOneTime for priced one-time
+// work, and the raw marker on any other saved row.
+function estimateHasCommercialRow(estData = {}) {
+  if (require('../services/estimate-converter').estimateHasCommercialOneTime(estData || {})) return true;
+  const roots = [estData?.result, estData?.engineResult, estData].filter((root) => root && typeof root === 'object');
+  return roots.some((root) => collapseMirroredRows([
+    root.oneTime?.items, root.oneTime?.specItems, root.results?.oneTime?.items, root.results?.oneTime?.specItems,
+    root.specItems, root.lineItems, root.recurring?.services, root.results?.recurring?.services,
+  ]).some((row) => row.isCommercial === true));
+}
+
 function estimateCarriesPlanTerms(estData = {}, pricingBundle = {}) {
-  if (estData?.proposal?.enabled === true) return false;
+  if (estData?.proposal?.enabled === true || estimateHasCommercialRow(estData)) return false;
   const rows = guaranteeServiceRows(estData, pricingBundle);
   return rows ? serviceMixCarriesPlanTerms(rows.recurring, rows.oneTime) : false;
 }

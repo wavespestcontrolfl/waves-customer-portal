@@ -232,6 +232,21 @@ describe('GET /:token/data — noGuaranteeClaims', () => {
     else expect(body.estimate).not.toHaveProperty('noEstimateWideGuarantee');
   });
 
+  test('commercial one-time work makes the estimate terms-neutral even where the breakdown drops the marker', async () => {
+    const base = estimateRow();
+    const body = await dataFor(estimateRow({
+      id: 'est-commercial-one-time', token: 'commercialonetimeplantoken', monthly_total: 0, onetime_total: 650,
+      estimate_data: {
+        ...base.estimate_data,
+        sendSnapshot: { pricingBundle: { ...base.estimate_data.sendSnapshot.pricingBundle, anchorOneTimePrice: 650 } },
+        result: { recurring: { discount: 0, services: [] }, oneTime: { items: [
+          { service: 'bed_bug', name: 'Bed Bug Treatment', price: 650, isCommercial: true, commercialPricingMode: 'auto_estimate' },
+        ], membershipFee: 0 } },
+      },
+    }));
+    expect(body.estimate.noEstimateWideGuarantee).toBe(true);
+  });
+
   test('termite bait monitoring is flagged', async () => {
     const base = estimateRow();
     const body = await dataFor(estimateRow({

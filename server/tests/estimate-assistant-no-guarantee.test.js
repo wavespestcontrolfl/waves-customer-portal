@@ -62,7 +62,6 @@ describe('estimate assistant no-guarantee context', () => {
   test.each([
     ['rodent', ['rodent_bait']],
     ['commercial', ['commercial_pest']],
-    ['bundle', ['pest_control', 'lawn_care']],
     ['mixed rodent', ['pest_control', 'rodent_bait']],
     ['unknown', ['unclassified_service']],
   ])('%s retains neutral service context without inheriting recurring terms', (_lane, services) => {
@@ -80,6 +79,53 @@ describe('estimate assistant no-guarantee context', () => {
       expect(answer).toMatch(/written service scope and terms/i);
       expect(answer).not.toMatch(/includes the money-back guarantee|30-day callback/i);
     }
+  });
+
+  test('a pest + lawn bundle carries the plan terms, as the page states them (every service carries them)', () => {
+    const context = buildEstimateAssistantContext({
+      estimate: { waveguard_tier: 'Silver', monthly_total: 110 },
+      pricingBundle: { waveGuardTier: 'Silver', frequencies: [{ key: 'quarterly', label: 'Quarterly', monthly: 110, annual: 1320,
+        included: [{ service: 'pest_control', label: 'Pest Control' }, { service: 'lawn_care', label: 'Lawn Care' }],
+      }] },
+    });
+    expect(context.guarantees.recurringTermsEligible).toBe(true);
+    expect(answerEstimateQuestionFallback('What is the guarantee?', context))
+      .toMatch(/includes the money-back guarantee/i);
+  });
+
+  test.each([
+    ['mosquito', { service: 'mosquito', label: 'One-Time Mosquito Treatment', amount: 125 }, true],
+    ['tree & shrub', { service: 'tree_shrub', label: 'One-Time Tree & Shrub Treatment', amount: 140 }, true],
+    ['lawn', { service: 'one_time_lawn', label: 'One-Time Lawn Treatment', amount: 120 }, false],
+    ['rodent', { service: 'rodent_trapping', label: 'Rodent Trapping', amount: 200 }, false],
+    ['commercial bed bug', { service: 'bed_bug', label: 'Bed Bug Treatment', amount: 650, isCommercial: true }, false],
+  ])('a one-time %s job carries the page\'s 30-day callback only where the page states it', (_name, item, callback) => {
+    const context = buildEstimateAssistantContext({
+      estimate: { onetime_total: item.amount }, serviceMode: 'one_time', estData: {},
+      pricingBundle: { anchorOneTimePrice: item.amount, oneTimeBreakdown: { total: item.amount, items: [item] } },
+    });
+    const answer = answerEstimateQuestionFallback('Is there a callback if the problem comes back?', context);
+    if (callback) {
+      expect(context.guarantees.oneTime).toMatch(/30-day callback/);
+      expect(answer).toMatch(/30-day callback/);
+    } else {
+      expect(context.guarantees.oneTime).toBeNull();
+      expect(answer).not.toMatch(/30-day callback/);
+    }
+  });
+
+  test.each([
+    'When will you treat the lawn again?',
+    'How often do you retreat the lawn?',
+  ])('a scheduling question is not a guarantee question: %s', (question) => {
+    const context = buildEstimateAssistantContext({
+      estimate: { monthly_total: 45 },
+      pricingBundle: { frequencies: [{ key: 'quarterly', monthly: 45, included: [
+        { service: 'termite_bait', label: 'Termite Bait Monitoring' },
+      ] }] },
+      noGuaranteeClaims: true,
+    });
+    expect(answerEstimateQuestionFallback(question, context)).not.toMatch(/No guarantee\./);
   });
 
   test.each([true, false])('neutral policy %s governs no-contract prose in the actual assistant context', (noGuaranteeClaims) => {

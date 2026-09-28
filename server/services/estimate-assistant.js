@@ -520,6 +520,7 @@ function oneTimeRowsFromPricing(pricingBundle = {}, evidenceGroups = []) {
           ? { purchasedTerms: purchasedTermsForRow(evidence) }
           : {}),
         ...(isPreSlabTreatmentItem(item) ? { warrantyTerms: preSlabWarrantyTerms(item) } : {}),
+        ...(item.isCommercial === true ? { isCommercial: true } : {}),
         oneTime: true,
       };
     });
@@ -563,6 +564,7 @@ function oneTimeRowsFromResult(result = {}) {
         detail: detailParts.join(' - '),
         amount: Number.isFinite(amount) && amount > 0 ? amount : null,
         ...(isPreSlabTreatmentItem(item) ? { warrantyTerms: preSlabWarrantyTerms(item) } : {}),
+        ...(item.isCommercial === true ? { isCommercial: true } : {}),
         oneTime: true,
       };
     });
@@ -758,23 +760,36 @@ function quoteRequiredFromContext(estimate = {}, pricingBundle = {}) {
     || cleanText(estimate.status) === 'quote_required';
 }
 
+// A row's service lanes; a commercial row (isCommercial) reads as its
+// commercial lane even where only the saved row carried that marker.
+function rowGuaranteeLanes(row = {}) {
+  return row.guaranteeLanes
+    || (row.isCommercial === true ? guaranteeLanesForRow(row) : serviceKeysFromText(row.service, row.label));
+}
+
 function assistantGuaranteeContext(noGuaranteeClaims, serviceMode, recurringRows, oneTimeRows) {
   const rowLanes = [...recurringRows, ...oneTimeRows].map((row) => {
-    const keys = row.guaranteeLanes || serviceKeysFromText(row.service, row.label);
+    const keys = rowGuaranteeLanes(row);
     return keys.length ? keys : ['unknown'];
   });
   const lanes = [...new Set(rowLanes.flat())];
+  // The page's own rule (routes/estimate-public.js estimateCarriesPlanTerms):
+  // plan terms cover the estimate when EVERY service carries them, so a pest
+  // + lawn bundle carries them, and a rodent, commercial or unknown lane does
+  // not. The one-time 30-day callback follows the same scope, except a
+  // lawn-only job (the page's oneTimePriceCopy lawn branch).
+  const everyLaneCarriesTerms = lanes.length > 0 && lanes.every((lane) => RECURRING_TERMS_LANES.includes(lane));
   const recurringTermsEligible = !noGuaranteeClaims && serviceMode === 'recurring'
-    && recurringRows.length > 0 && lanes.length === 1 && RECURRING_TERMS_LANES.includes(lanes[0]);
+    && recurringRows.length > 0 && everyLaneCarriesTerms;
   const oneTimePestTerms = !noGuaranteeClaims && serviceMode === 'one_time'
-    && lanes.length === 1 && lanes[0] === 'pest';
+    && everyLaneCarriesTerms && !lanes.every((lane) => lane === 'lawn');
   return {
     noGuaranteeClaims: noGuaranteeClaims === true,
     recurringTermsEligible,
     recurring: recurringTermsEligible
       ? 'Money-back guarantee on recurring WaveGuard service: free re-treats between visits, and a refund of the most recent service payment if a covered problem can’t be solved.'
       : null,
-    oneTime: oneTimePestTerms ? 'One-time pest service may include a 30-day callback period when shown on the estimate.' : null,
+    oneTime: oneTimePestTerms ? 'This one-time service may include a 30-day callback period when shown on the estimate.' : null,
     guidance: noGuaranteeClaims
       ? 'Use this estimate’s written service scope and terms. Do not infer an estimate-wide callback, satisfaction, re-treatment, or money-back guarantee. State each service’s terms exactly as guarantees.serviceTerms lists them.'
       : (recurringTermsEligible ? null : 'Use the service-specific written terms. Do not infer recurring callbacks, money-back, or no-contract terms from membership or category-specific satisfaction wording. State each service’s terms exactly as guarantees.serviceTerms lists them.'),
@@ -1606,7 +1621,7 @@ function serviceTermsFromRows(rowGroups = [], oneTimeRows = []) {
       && !row.purchasedTerms?.length
       && ![row.amount, row.monthly, row.perApplication].some(Number.isFinite);
     if (unpricedPlaceholder) return [];
-    const lanes = row.guaranteeLanes || serviceKeysFromText(row.service, row.label);
+    const lanes = rowGuaranteeLanes(row);
     const purchased = Array.isArray(row.purchasedTerms) ? row.purchasedTerms : [];
     let terms;
     if (lanes.some((lane) => TERMITE_LANES.has(lane))) {
@@ -1672,7 +1687,7 @@ const GUARANTEE_QUESTION_PATTERN = new RegExp(
   '\\b(?:guarantees?|callbacks?|re-?treat\\w*|money[- ]?back|satisfaction|risk[- ]?free|bond|warrant\\w*|annual inspection|coverage'
   + `|${RECURRING_PEST}(?:\\s+(?:ever|still|just|then))?\\s+(?:come|comes|coming|came)\\s+back`
   + `|${RECURRING_PEST}(?:\\s+(?:ever|still|just|then))?\\s+return(?:s|ed|ing)?`
-  + '|treat(?:ed|ing)?\\s+(?:it|them|the\\s+\\w+)\\s+again)\\b',
+  + `|treat(?:ed|ing)?\\s+(?:them|the\\s+${RECURRING_PEST})\\s+again)\\b`,
   'i',
 );
 // A price question gets the price: "How much does the 5-year bond cost?"
@@ -1680,9 +1695,13 @@ const GUARANTEE_QUESTION_PATTERN = new RegExp(
 // price intent counts; a dollar figure that names a job ("Does the $700
 // trenching include a guarantee?") is still a guarantee question.
 const PRICE_QUESTION_PATTERN = /\bhow much\b|\bwhat (?:does|do|is|would|will|'s)\b[^?.!]*\b(?:cost|price)s?\b/i;
+// Scheduling wording is a scheduling question: "How often do you retreat the
+// lawn?", "When will you treat the yard again?".
+const SCHEDULING_QUESTION_PATTERN = /\bhow often\b|\bwhat (?:day|time)\b|\bschedul\w*|\bappointment\b|\bnext (?:visit|treatment|service|application)\b|\bwhen (?:will|do|can|should|is|are) (?:you|the tech|your tech|someone|a tech)\b/i;
 function answersWithServiceTerms(question, context = {}) {
   const q = cleanText(question);
-  return withoutEstimateWideTerms(context) && GUARANTEE_QUESTION_PATTERN.test(q) && !PRICE_QUESTION_PATTERN.test(q);
+  return withoutEstimateWideTerms(context) && GUARANTEE_QUESTION_PATTERN.test(q)
+    && !PRICE_QUESTION_PATTERN.test(q) && !SCHEDULING_QUESTION_PATTERN.test(q);
 }
 
 // On an estimate without estimate-wide terms, a model answer that makes a

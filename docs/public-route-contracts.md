@@ -1579,7 +1579,11 @@ preferences ride estimateToggleLimiter, data rides dataLimiter, pdf rides
 its own estimatePdfLimiter (10 per 5 min)).
 Guarantee rule for the estimate page, its proposal document and Ask Waves
 (owner 2026-09-26/27): a guarantee line that covers the whole estimate
-appears only when every service carries it. An estimate with termite work
+appears only when every service carries it. The recurring plan terms
+(callbacks, money-back, no contract) are carried by residential pest, lawn,
+mosquito, tree & shrub and palm; "satisfaction guaranteed" is also the
+rodent and commercial lanes' own term, so it may cover any estimate without
+termite or unclassifiable work. An estimate with termite work
 states no callback, money-back, satisfaction or no-contract terms for any
 service; its termite work states "no guarantee" except the terms of a
 termite bond, trenching warranty or pre-slab warranty option the customer
