@@ -1612,7 +1612,9 @@ picture iMessage/SMS/email crawlers show under a texted or emailed customer
 link; `server/index.js` renderHTML writes the matching `og:image` into each
 customer page's `<head>`, and `og:title`/`twitter:title` read just "Waves").
 Mounted OUTSIDE the `/api/` limiter with its own 120/min per-key limiter
-(the `/l` budget). **Only the service report card looks its token up**
+(the `/l` budget), and BEFORE the global body parsers (it reads no body).
+Fixed cards change only the preview tags, never the page's own `<title>`.
+**Only the service report card looks its token up**
 (owner 2026-09-28): `/og/report/:token.jpg` (and the `/report/` and
 `/recap/` pages' head tags, both already behind the report limiter) resolve
 through report-page-metadata's lookup with its `typedReportDelivery`

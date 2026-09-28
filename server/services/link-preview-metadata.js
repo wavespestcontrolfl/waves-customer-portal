@@ -167,11 +167,12 @@ function ogImageUrl(kind, token) {
 }
 
 function metadataFromCardContent(kind, token, content) {
-  const headline = cleanText(content.headline, 140) || 'Waves Pest Control';
   const subline = cleanText(content.subline, 200);
   const eyebrow = cleanText(content.eyebrow, 60) || 'Waves Pest Control';
+  // No `title`: applyHtmlMetadata would write it into the page's own
+  // <title>, and only the link-preview title changes (the browser tab keeps
+  // the page's existing title). The headline lives in the card image.
   return {
-    title: `${headline} · Waves Pest Control`,
     previewTitle: PREVIEW_TITLE,
     description: subline || 'View your Waves service details online.',
     image: {

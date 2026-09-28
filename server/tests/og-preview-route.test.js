@@ -108,3 +108,13 @@ test('a failed render is not cached and the next request tries again', async () 
   expect(second.body).toContain('Your invoice');
   expect(router._internals.inFlight.size).toBe(0);
 }));
+
+test('/og is mounted before the global body parsers, so a junk body never reaches a parser first', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'index.js'), 'utf8');
+  const og = src.indexOf("app.use('/og', require('./routes/og-preview'));");
+  const json = src.indexOf("app.use(express.json({ limit: '1mb'");
+  const urlencoded = src.indexOf("app.use(express.urlencoded(");
+  expect(og).toBeGreaterThan(-1);
+  expect(og).toBeLessThan(json);
+  expect(og).toBeLessThan(urlencoded);
+});

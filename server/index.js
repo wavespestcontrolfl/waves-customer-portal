@@ -612,6 +612,13 @@ function requireCustomerPhotoIdGateOpen(req, res, next) {
 app.use('/api/photo-id', requireCustomerPhotoIdGateOpen);
 app.use('/api/photo-id', require('./middleware/large-body-auth').requireCustomerTokenForLargeBody);
 app.use('/api/photo-id', express.json({ limit: '30mb' }));
+// Per-link Open Graph preview images (/og/report/:token.jpg, /og/<kind>.jpg)
+// — the endpoint iMessage/SMS/email link-preview crawlers fetch, outside any
+// auth. Mounted BEFORE the global body parsers below: it reads no body, and
+// a junk body must never be parsed (or rejected) ahead of its privacy
+// headers and limiter. See server/routes/og-preview.js.
+app.use('/og', require('./routes/og-preview'));
+
 // Worker-route HMAC signing (link-worker-auth) hashes the RAW request bytes;
 // the verify hook stores them for /api/integrations/*-worker paths only.
 app.use(express.json({ limit: '1mb', verify: require('./middleware/link-worker-auth').rawBodyVerify }));
@@ -972,12 +979,6 @@ app.get('/api/health', async (req, res) => {
     staffMaintenance: { enabled: isStaffMaintenanceEnabled() },
   });
 });
-
-// Per-link Open Graph preview images (/og/:kind/:token.jpg, /og/default.jpg)
-// — mounted before the SPA catch-all below and outside any auth; it's the
-// endpoint iMessage/SMS/email link-preview crawlers actually fetch. See
-// server/routes/og-preview.js.
-app.use('/og', require('./routes/og-preview'));
 
 // =========================================================================
 // SERVE FRONTEND (Production)

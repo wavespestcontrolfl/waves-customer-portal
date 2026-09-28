@@ -182,7 +182,7 @@ describe('loadLinkPreviewMetadata (the full HTML <head> path)', () => {
     mockTables({ service_records: chainable({ first: { service_type: 'Lawn Care', service_date: '2026-05-16', structured_notes: null } }) });
     const metadata = await loadLinkPreviewMetadata('/recap/' + '2'.repeat(32));
     expect(metadata.image.url).toContain(`/og/report/${'2'.repeat(32)}.jpg`);
-    expect(metadata.title).toBe('Lawn Care · Waves Pest Control');
+    expect(metadata.title).toBeUndefined(); // the page keeps its own <title>
     mockTables({ service_records: chainable({ first: null }) });
     expect(await loadLinkPreviewMetadata('/recap/' + '3'.repeat(32))).toBeNull();
   });
@@ -209,7 +209,7 @@ describe('loadLinkPreviewMetadata (the full HTML <head> path)', () => {
     expect(metadata.image.url).toMatch(/^https?:\/\/.+\/og\/appointment\.jpg$/);
     expect(metadata.image.url).not.toContain('f'.repeat(64));
     expect(metadata.previewTitle).toBe('Waves');
-    expect(metadata.title).toBe('Your appointment · Waves Pest Control');
+    expect(metadata.title).toBeUndefined(); // the page keeps its own <title>
   });
 });
 
