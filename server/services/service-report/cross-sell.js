@@ -2,11 +2,15 @@
 // cross-sell.js — the live service report's "add your next service" offer.
 //
 // Owner-approved 2026-08-11: a completed-visit report may offer the ONE next
-// service family the customer doesn't have (pest ↔ lawn, then tree & shrub,
-// then termite bait), priced by the estimator engine when the property data
-// supports a real number, or as an unpriced "request a quote" CTA when it
-// doesn't. LIVE web views only — the PDF is a permanent service record and
-// carries no pricing by documented rule (ServiceReportDocument header).
+// service family the customer doesn't have (pest ↔ lawn, then tree & shrub),
+// priced by the estimator engine when the property data supports a real
+// number, or as an unpriced "request a quote" CTA when it doesn't. LIVE web
+// views only — the PDF is a permanent service record and carries no pricing
+// by documented rule (ServiceReportDocument header). Owner ruling 2026-09-28
+// ("three pillars is fine for now, yes applies there too"): the ladder push
+// stops at the three pillars everywhere — termite is no longer offered as
+// the fourth rung on the report card, the portal offer card, or the
+// photo-triage lane's ladder pick (see OFFER_LADDER below).
 //
 // This module COMPOSES the two existing authorities instead of re-deciding
 // anything itself:
@@ -27,12 +31,32 @@ const logger = require('../logger');
 // ladder): one offer per report, never stacked. Mosquito is deliberately
 // absent — it affects the price tier but never the target — and palm is
 // assessment-first by catalog design (booking_enabled false), never offered.
-// The full 16-row ownership matrix + identity-start rules live in
+// The full ownership matrix + identity-start rules live in
 // pickOfferTarget/startFamilyForIdentity below; the test file pins every row.
-// Owner ruling 2026-09-28: report offers push the three pillars only — pest,
-// lawn, tree & shrub. Termite left the ladder (it was the fourth rung, offered
-// once a customer owned all three).
+// Owner ruling 2026-09-28 (applies to EVERY offer surface — the report card,
+// the portal offer card, and the photo-triage lane alike, confirmed
+// explicitly: "three pillars is fine for now, yes applies there too"):
+// offers push the three pillars only — pest, lawn, tree & shrub. Termite
+// left the ladder everywhere (it was the fourth rung, offered once a
+// customer owned all three); `termite`/`termite_bait` ownership still counts
+// as "has a plan, not the anchor" via offerVocabulary below, it is simply
+// never the OFFER on any surface. One shared picker, ladder, and ownership
+// matrix for buildReportCrossSell, buildPortalOffer / buildPortalPurchaseBasis
+// / resolvePortalOfferTarget, and buildOfferForFamily (photo-triage) — they
+// can never disagree about what a customer may be offered.
 const OFFER_LADDER = ['pest_control', 'lawn_care', 'tree_shrub'];
+
+// Guarded-ownership families for the report's recent-report ambiguity guard
+// ONLY (see guardedFamilies below) — separate from OFFER_LADDER because
+// termite is no longer an offer rung on ANY surface but a recent,
+// uncorroborated termite report identity is exactly as ambiguous as a
+// recent pest/lawn/tree one (P0, pre-push finding on this change): the
+// unseeded-next-visit gap and a just-cancelled termite plan are
+// indistinguishable, so a recent uncorroborated termite report must still
+// fail the whole report card closed rather than fall through to
+// startFamilyForIdentity and pitch a 'start pest' card to a customer who
+// may still own a termite plan.
+const GUARDED_OWNERSHIP_FAMILIES = [...OFFER_LADDER, 'termite'];
 
 // Prompts routed through customer-pricing-ai's own SERVICE_MATCHERS so the
 // offer prices exactly what the portal pricing panel would price for the same
@@ -90,23 +114,28 @@ function offerVocabulary(ownedKeys = []) {
   return new Set(ownedKeys.map((key) => OWNED_KEY_TO_OFFER_KEY[key] || key));
 }
 
-// Ownership matrix (owner ruling 2026-08-13, every cell approved):
-//   all three pillars (pest+lawn+T&S)      → NO card (owner 2026-09-28: termite
-//                                            left the ladder; referral fills it)
+// Ownership matrix (owner ruling 2026-08-13, every cell approved; termite
+// rung removed 2026-09-28 on every surface — see OFFER_LADDER above) — the
+// ONE picker shared by buildReportCrossSell, buildPortalOffer /
+// buildPortalPurchaseBasis / resolvePortalOfferTarget, and buildOfferForFamily
+// (photo-triage): they can never disagree about what a customer may be
+// offered.
+//   all three pillars (pest+lawn+T&S)      → NO card (referral fills the slot)
 //   T&S without lawn (incl. T&S+termite)   → lawn
 //   pest+lawn                              → tree & shrub
 //   has pest                               → lawn
 //   has lawn                               → pest
 //   termite-only / rodent- / mosquito-only → pest
 // Rule order IS the precedence: the T&S-without-lawn row deliberately beats
-// both the pest→lawn and termite→pest rows (T&S+termite → lawn, not pest).
+// the pest→lawn row (T&S+termite → lawn, not pest).
 function pickOfferTarget(ownedKeys) {
   const owned = offerVocabulary(ownedKeys);
   const pest = owned.has('pest_control');
   const lawn = owned.has('lawn_care');
   const tree = owned.has('tree_shrub');
   // Owns all three pillars → nothing to offer (owner 2026-09-28: termite is
-  // no longer a rung; `termite` ownership still counts as "has a plan" below).
+  // no longer a rung on any surface; `termite` ownership still counts as
+  // "has a plan" via the final pest_control default below).
   if (pest && lawn && tree) return null;
   if (tree && !lawn) return 'lawn_care';
   if (pest && lawn) return 'tree_shrub';
@@ -495,20 +524,19 @@ async function cacheOnlyPropertyLookup(address) {
 //   rodent_trapping: captures (count) > 0.
 //   rodent_bait_station: bait_consumption, any value other than 'None'.
 //   rodent_inspection: activity_found === 'Yes'.
-//   termite_bait_station: termite_activity === 'Active termites present'
-//     or 'Previous feeding noted' (both mean termites were physically
-//     present; 'None observed' is the baseline).
-//   termite_inspection: activity_status === 'Active infestation'
-//     ('No activity' and 'Old / inactive damage' are not current activity).
-// Primary OR companion counts for rodent/termite (no primary-exclusion rule
-// there): owning that family already excludes the offer via the ladder's
-// own property-scoped ownership evidence, which already counts THIS
-// report's own typed identity as owned — no duplicate guard needed here.
+// Primary OR companion counts for rodent (no primary-exclusion rule there):
+// owning that family already excludes the offer via the ladder's own
+// property-scoped ownership evidence, which already counts THIS report's
+// own typed identity as owned — no duplicate guard needed here.
+// No termite signal (removed 2026-09-28, owner ruling: report offers push
+// the three pillars only — termite is never pitched from a report, so a
+// termite_bait_station/termite_inspection reading has no production
+// consumer left; termite-report-v2.js's OWN termiteActivity is an unrelated
+// module — the customer-facing termite service report page, not this offer
+// signal).
 
 const COCKROACH_ACTIVITY_BASELINE = 'None observed';
 const RODENT_BAIT_BASELINE = 'None';
-const TERMITE_STATION_POSITIVE = new Set(['Active termites present', 'Previous feeding noted']);
-const TERMITE_INSPECTION_POSITIVE = 'Active infestation';
 
 // The one catalog service this module prices OUTSIDE buildCustomerPricingResponse:
 // a fixed one-time $350 two-treatment package (20260602000002_cockroach_control_service),
@@ -570,14 +598,7 @@ function detectReportFindingsSignal(service) {
     return false;
   });
 
-  const termiteActivity = all.some((snap) => {
-    const v = snap.values || {};
-    if (snap.type === 'termite_bait_station') return TERMITE_STATION_POSITIVE.has(String(v.termite_activity || ''));
-    if (snap.type === 'termite_inspection') return String(v.activity_status || '') === TERMITE_INSPECTION_POSITIVE;
-    return false;
-  });
-
-  return { roachActivity, rodentEvidence, termiteActivity };
+  return { roachActivity, rodentEvidence };
 }
 
 // buildCockroachFindingsOffer(service, database) → fingerprinted payload | null.
@@ -952,13 +973,17 @@ async function buildReportCrossSell(service, database, {
       // today. Only widen the guard when V2 is actually live. Derived
       // from the V2 offer table (V2_TARGET_PROMPTS) + COCKROACH_SERVICE_KEY,
       // not a hand list, so a future V2 family is covered automatically
-      // without a second finding.
+      // without a second finding. GUARDED_OWNERSHIP_FAMILIES (not
+      // OFFER_LADDER — P0, pre-push finding on this change): termite is no
+      // longer an offer rung, but a recent uncorroborated termite report
+      // identity carries the exact same both-answers-wrong ambiguity as a
+      // recent pest/lawn/tree one and must still fail the card closed.
       const guardedFamilies = process.env.GATE_REPORT_CROSS_SELL_V2 === 'true'
-        ? new Set([...OFFER_LADDER, ...Object.keys(V2_TARGET_PROMPTS), COCKROACH_SERVICE_KEY])
-        : new Set(OFFER_LADDER);
+        ? new Set([...GUARDED_OWNERSHIP_FAMILIES, ...Object.keys(V2_TARGET_PROMPTS), COCKROACH_SERVICE_KEY])
+        : new Set(GUARDED_OWNERSHIP_FAMILIES);
       const guardedKeysFor = (fam) => [...offerVocabulary([fam])].filter((key) => guardedFamilies.has(key));
-      // Only a GUARDED family (every OFFER_LADDER rung, plus every family
-      // GATE_REPORT_CROSS_SELL_V2 can also offer) carries the
+      // Only a GUARDED family (every GUARDED_OWNERSHIP_FAMILIES member, plus
+      // every family GATE_REPORT_CROSS_SELL_V2 can also offer) carries the
       // both-answers-wrong ambiguity that suppresses the whole card on a
       // recent report: it would either be offered to someone who owns it
       // or advanced past for someone who doesn't. A family outside that
@@ -1670,6 +1695,7 @@ module.exports = {
   // Test hooks: target matrix + priceability are the card's two decisions.
   _private: {
     pickOfferTarget, startFamilyForIdentity, pickOption, optionIsPriceable, offerFingerprint, OFFER_LADDER,
+    GUARDED_OWNERSHIP_FAMILIES,
     rodentSetupFeeUnwaived,
     // Test hook: what the seed actually carries out of an accepted estimate
     // is the money-bearing contract here — every modifier it drops prices

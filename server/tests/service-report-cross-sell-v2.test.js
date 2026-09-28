@@ -13,9 +13,10 @@
 //   rodent_trapping: captures (count) > 0.
 //   rodent_bait_station: bait_consumption != 'None'.
 //   rodent_inspection: activity_found === 'Yes'.
-//   termite_bait_station: termite_activity in {'Active termites present',
-//     'Previous feeding noted'}.
-//   termite_inspection: activity_status === 'Active infestation'.
+// No termite signal (removed 2026-09-28, owner ruling: report offers push
+// the three pillars only — termite is never pitched from a report, so a
+// termite_bait_station/termite_inspection reading has no production
+// consumer left).
 // Mosquito has NO findings branch at all — season (May-Oct) or the ladder
 // only. An untyped (general pest) visit carries no typed snapshot → no
 // findings signal → season/ladder decides.
@@ -60,7 +61,7 @@ function withTypedSnapshot({ primary = null, companions = [] } = {}) {
 describe('detectReportFindingsSignal', () => {
   test('an untyped (general pest) visit with no typed snapshot at all → no signal on any pest', () => {
     const signal = detectReportFindingsSignal({ id: 'sr-1', service_data: '{}' });
-    expect(signal).toEqual({ roachActivity: false, rodentEvidence: false, termiteActivity: false });
+    expect(signal).toEqual({ roachActivity: false, rodentEvidence: false });
   });
 
   describe('cockroach (companion only)', () => {
@@ -108,10 +109,9 @@ describe('detectReportFindingsSignal', () => {
         companions: [
           { type: 'cockroach', delivery, values: { activity_level: 'Heavy' } },
           { type: 'rodent_trapping', delivery, values: { captures: 3 } },
-          { type: 'termite_bait_station', delivery, values: { termite_activity: 'Active termites present' } },
         ],
       });
-      expect(detectReportFindingsSignal(service)).toEqual({ roachActivity: false, rodentEvidence: false, termiteActivity: false });
+      expect(detectReportFindingsSignal(service)).toEqual({ roachActivity: false, rodentEvidence: false });
     }
   });
 
@@ -160,32 +160,11 @@ describe('detectReportFindingsSignal', () => {
     });
   });
 
-  describe('termite', () => {
-    test.each(['Active termites present', 'Previous feeding noted'])(
-      'termite_bait_station: termite_activity "%s" is the signal',
-      (value) => {
-        const service = withTypedSnapshot({ primary: { type: 'termite_bait_station', values: { termite_activity: value } } });
-        expect(detectReportFindingsSignal(service).termiteActivity).toBe(true);
-      },
-    );
-
-    test('termite_bait_station: termite_activity "None observed" is NOT a signal', () => {
-      const service = withTypedSnapshot({ primary: { type: 'termite_bait_station', values: { termite_activity: 'None observed' } } });
-      expect(detectReportFindingsSignal(service).termiteActivity).toBe(false);
-    });
-
-    test('termite_inspection: activity_status "Active infestation" is the signal', () => {
-      const service = withTypedSnapshot({ primary: { type: 'termite_inspection', values: { activity_status: 'Active infestation' } } });
-      expect(detectReportFindingsSignal(service).termiteActivity).toBe(true);
-    });
-
-    test.each(['No activity', 'Old / inactive damage'])(
-      'termite_inspection: activity_status "%s" is NOT a signal (not CURRENT activity)',
-      (value) => {
-        const service = withTypedSnapshot({ primary: { type: 'termite_inspection', values: { activity_status: value } } });
-        expect(detectReportFindingsSignal(service).termiteActivity).toBe(false);
-      },
-    );
+  test('a termite snapshot produces no signal at all (removed 2026-09-28: termite is never pitched from a report)', () => {
+    const active = withTypedSnapshot({ primary: { type: 'termite_bait_station', values: { termite_activity: 'Active termites present' } } });
+    expect(detectReportFindingsSignal(active)).toEqual({ roachActivity: false, rodentEvidence: false });
+    const infested = withTypedSnapshot({ primary: { type: 'termite_inspection', values: { activity_status: 'Active infestation' } } });
+    expect(detectReportFindingsSignal(infested)).toEqual({ roachActivity: false, rodentEvidence: false });
   });
 
   test('a recommendation/category-label string stashed under values is never read as a positive signal — only the exact typed key/option matters', () => {
@@ -202,7 +181,7 @@ describe('detectReportFindingsSignal', () => {
 
   test('an unrelated typed snapshot (e.g. tree_shrub) contributes no signal on any pest', () => {
     const service = withTypedSnapshot({ primary: { type: 'tree_shrub', values: { activity_level: 'Heavy' } } });
-    expect(detectReportFindingsSignal(service)).toEqual({ roachActivity: false, rodentEvidence: false, termiteActivity: false });
+    expect(detectReportFindingsSignal(service)).toEqual({ roachActivity: false, rodentEvidence: false });
   });
 });
 

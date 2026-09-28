@@ -1260,6 +1260,24 @@ describe('buildReportCrossSell', () => {
     expect(result).toBeNull();
   });
 
+  test('report-family guard: a RECENT uncorroborated TERMITE report identity still suppresses the card (P0, pre-push finding on the three-pillars change)', async () => {
+    // Termite left the offer ladder (owner 2026-09-28), but a recent,
+    // uncorroborated termite report identity carries the exact same
+    // both-answers-wrong ambiguity as a recent pest/lawn/tree one: the
+    // unseeded-next-visit gap and a just-cancelled termite plan are
+    // indistinguishable. Without the guard this fell through to
+    // startFamilyForIdentity and pitched a "start pest" card to a customer
+    // who may still own a termite plan — exactly the regression this test
+    // pins closed.
+    const db = dbFor({
+      serviceTypes: [],
+      turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
+    });
+    const service = SERVICE({ service_type: 'Termite Bait Station Service' });
+    const result = await buildReportCrossSell(service, db, { propertyLookup: missLookup });
+    expect(result).toBeNull();
+  });
+
   test('plan-rate ledger evidence on the target rung suppresses the card — it never advances the ladder', async () => {
     // Pest via upcoming rows; lawn ONLY via a plan-rate row (next lawn visit
     // not seeded). Ledger rows are advisory-capable and never
