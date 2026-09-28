@@ -1300,12 +1300,14 @@ export default function ServiceReportDocument({ data, token }) {
                                 gate is off or the product has no approved
                                 wording. "Also labeled for" describes the
                                 LABEL, never this visit's treatment.
-                                pets_kids runs through the SAME
+                                pets_kids also runs through the SAME
                                 sanitizeReentryCopy backstop as the "Label
                                 safety" line above — belt-and-suspenders on
-                                top of the server-side payload-boundary sweep
-                                (reports-public.js), same re-entry-adjacent
-                                claim, same compliance pass. */}
+                                top of the SOURCE-level screen every mode
+                                already gets (reportProductCopyForApplication
+                                Product in report-product-copy.js), same
+                                re-entry-adjacent claim, same compliance
+                                pass. */}
                             {product.report_copy && (
                               <>
                                 <div><strong style={{ color: INK, fontWeight: 600 }}>How it works:</strong> {product.report_copy.how_it_works}</div>

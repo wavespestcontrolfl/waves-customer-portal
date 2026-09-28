@@ -6,6 +6,12 @@
  */
 const { reportProductCopyFor } = require('../../config/report-product-copy');
 const { validateCustomerCopy } = require('./premium-experience');
+const { stripFixedReentryTiming } = require('../social-media');
+
+// Same replacement text reports-public.js and ServiceReportDocument.jsx
+// each define locally for the identical purpose (not a shared export in
+// this codebase — matched here rather than introducing one).
+const REENTRY_SAFE_COPY = 'Ready once dry — your technician confirms timing.';
 
 // Strict `=== 'true'` — repo gate convention (matches reportPhotoContentLive
 // / discountStackingLive in feature-gates.js). The `reportProductCopy`
@@ -34,7 +40,17 @@ function reportProductCopyForApplicationProduct(product = {}) {
   if (!validateCustomerCopy(copy.how_it_works)) return null;
   if (copy.also_labeled_for && !validateCustomerCopy(copy.also_labeled_for)) return null;
   if (!validateCustomerCopy(copy.pets_kids)) return null;
-  return copy;
+  // pets_kids is a re-entry-adjacent claim, screened at the SOURCE — every
+  // mode (live, PDF, static, sms_preview) reads applications through this
+  // one function, so stripping here (rather than only in reports-public.js's
+  // existing `mode !== 'live'` compliance sweep for precaution_summary /
+  // reentry_summary) closes the live-report gap those pre-existing catalog
+  // fields still have. AGENTS.md bans a fixed re-entry/drying MINUTE figure
+  // on any customer surface; none of the 12 owner-approved lines carry one
+  // today (pinned by report-product-copy-reentry-compliance.test.js), so
+  // this is a no-op now and a guard against a future config edit.
+  const pets = stripFixedReentryTiming(copy.pets_kids, REENTRY_SAFE_COPY);
+  return pets.changed ? { ...copy, pets_kids: pets.text } : copy;
 }
 
 // PDF cache-key component — same append-not-switch pattern as

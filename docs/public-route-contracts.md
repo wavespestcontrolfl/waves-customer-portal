@@ -434,7 +434,13 @@ never a substring/fuzzy match, same posture as
 absent from the config (every catalog product not on the owner-approved
 page) gets NO `report_copy` key at all, fail closed. Every line clears the
 shared banned-copy screen (`premium-experience.js`'s `validateCustomerCopy`)
-before it can render. Customer-display only: this copy is never read by the
+before it can render, and `pets_kids` additionally runs through
+`stripFixedReentryTiming` (the same AGENTS.md fixed-minute-reentry-figure
+guard `precaution_summary`/`reentry_summary` are swept with, reused from
+`social-media.js`) at the SOURCE inside
+`reportProductCopyForApplicationProduct` — mode-independent, unlike the
+non-live-only sweep those two pre-existing catalog fields still carry — so
+the live report gets the same guard the PDF does. Customer-display only: this copy is never read by the
 AI report writer's grounding (`report-copy-context.js` builds its own
 product-evidence list independently of `buildReportV1Data`'s `applications`,
 so it never sees `report_copy`). The PDF's content-insensitive storage key

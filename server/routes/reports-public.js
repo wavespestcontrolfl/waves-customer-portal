@@ -566,14 +566,12 @@ async function buildServiceReportV1ResponseData(service, token, {
       if (!app?.product) return;
       if (app.product.precaution_summary) app.product.precaution_summary = strip(app.product.precaution_summary);
       if (app.product.reentry_summary) app.product.reentry_summary = strip(app.product.reentry_summary);
-      // report_copy.pets_kids (GATE_REPORT_PRODUCT_COPY) is the SAME kind of
-      // re-entry-adjacent claim as the two lines above, even though its
-      // source is the reviewed static config rather than free-text catalog
-      // fields — same compliance pass, same reasoning: never trust a
-      // fixed-minute figure to survive a future edit unswept.
-      if (app.product.report_copy?.pets_kids) {
-        app.product.report_copy = { ...app.product.report_copy, pets_kids: strip(app.product.report_copy.pets_kids) };
-      }
+      // report_copy.pets_kids (GATE_REPORT_PRODUCT_COPY) is NOT swept here:
+      // unlike the two free-text catalog fields above, it is screened at its
+      // SOURCE for every mode, live included (reportProductCopyForApplication
+      // Product in report-product-copy.js) — see that module for why a new
+      // field can take the stricter, mode-independent posture the two
+      // already-shipped fields above deliberately do not.
     });
     if (data.reportV2?.aftercare?.reentry) {
       data.reportV2.aftercare.reentry = strip(data.reportV2.aftercare.reentry);
