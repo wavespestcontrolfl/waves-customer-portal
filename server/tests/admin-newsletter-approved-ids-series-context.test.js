@@ -129,6 +129,21 @@ describe('GET /events/approved-ids', () => {
     expect(selectedColumns).toEqual(expect.arrayContaining(['e.venue_name', 'e.city']));
   });
 
+  test('over-fetches the week before filtering, so dropped recurring repeats cannot crowd out valid events', async () => {
+    const { q } = buildEventsQuery([APPROVED_EVENT]);
+    db.mockImplementation((table) => {
+      if (table === 'events_raw as e') return q;
+      throw new Error(`Unexpected table ${table}`);
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/newsletter/events/approved-ids`);
+      expect(res.status).toBe(200);
+    });
+
+    expect(q.limit).toHaveBeenCalledWith(500);
+  });
+
   test('loads ONE shared calendar-year pool and threads it into both identity/history filters', async () => {
     const { q } = buildEventsQuery([APPROVED_EVENT]);
     db.mockImplementation((table) => {

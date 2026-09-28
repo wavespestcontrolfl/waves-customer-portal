@@ -227,22 +227,20 @@ async function fetchCurationCandidates(limit = CURATION_RUN_LIMIT) {
   //
   // Eligibility drops are deliberately NOT stamped: isEligibleForFreshDigest
   // is time-dependent — a limited_run is only admissible in its opening or
-  // closing week, an annual can clear its 300-day cooldown — so a row
-  // dropped today can be genuinely scoreable next week. Those rows stay
+  // closing week — so a row dropped today can be genuinely scoreable next
+  // week. Those rows stay
   // curated_at NULL and retry as the reference advances; they are bounded
   // (real limited-run/annual listings, not fan-out spam, which the identity
   // filters above catch and stamp).
   const nonRepeatedIds = new Set(nonRepeatedRows.map((row) => String(row.id)));
   const historicallyNewIds = new Set(historicallyNewRows.map((row) => String(row.id)));
-  const isAnnual = (row) => row.event_type === 'annual' || row.recurrence_type === 'annual';
+  // Featured-history drops are permanent for this occurrence, annual rows
+  // included: under the calendar-year rule (owner ruling 2026-09-27) newness
+  // depends on the occurrence's ET year versus the year it was featured, not
+  // on the reference date, so advancing time never re-admits it. Leaving them
+  // unstamped would let them refill the start-ordered curation window daily.
   const policyDrops = rows
     .filter((row) => !historicallyNewIds.has(String(row.id)))
-    // An ANNUAL row dropped by the previously-featured filter is a
-    // time-dependent decision — isEditoriallyNewEvent re-admits it after
-    // the 300-day cooldown — so it stays unstamped and retries, like the
-    // eligibility drops below. Non-annual featured-history drops and all
-    // repeated-identity drops are permanent and stamp.
-    .filter((row) => !(nonRepeatedIds.has(String(row.id)) && isAnnual(row)))
     .map((row) => ({
       id: String(row.id),
       note: !nonRepeatedIds.has(String(row.id))
@@ -881,6 +879,7 @@ module.exports = {
   runCurationEligibilityPipeline,
   hasContentChangedSinceCuration,
   contentFingerprint,
+  fetchCurationCandidates,
   manualHoldScoreBreakdown,
   revalidateStaleRescoreCandidate,
   rescoreCuratedEvent,

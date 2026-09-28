@@ -55,7 +55,9 @@ describeOrSkip('buildCurationCandidateQuery admits a genuine first-of-year stale
   jest.setTimeout(30000);
 
   const db = require('../models/db');
-  const { buildCurationCandidateQuery, runScoreRescore, contentFingerprint } = require('../services/event-curation');
+  const {
+    buildCurationCandidateQuery, runScoreRescore, contentFingerprint, fetchCurationCandidates,
+  } = require('../services/event-curation');
   const { filterRepeatedDateIdentities } = require('../services/newsletter-event-selection');
 
   const feedUrl = `https://test.invalid/curation-first-of-year-sql/${randomUUID()}`;
@@ -272,6 +274,23 @@ describeOrSkip('buildCurationCandidateQuery admits a genuine first-of-year stale
     expect(heldChanged.admin_status).toBe('pending');
     expect(heldChanged.curated_at).not.toBeNull();
     expect(heldChanged.score_breakdown.manual_hold).toBe(true);
+  });
+
+  test('an annual row already featured this ET year is stamped as a permanent policy drop', async () => {
+    const { laterDay, earlierDay } = sameYearDays();
+    const annual = {
+      title: 'TEST Annual Harbor Lights Festival',
+      event_type: 'annual', recurrence_type: 'annual', freshness_status: 'fresh_annual',
+      start_at: etAt(laterDay),
+    };
+    // Another listing of the same occurrence already shipped in an issue.
+    await insertEvent({
+      ...annual, admin_status: 'approved', curated_at: db.fn.now(),
+      times_featured: 1, last_featured_at: etAt(earlierDay, '06:00:00'),
+    });
+    const id = await insertEvent(annual);
+    const { policyDrops } = await fetchCurationCandidates(500);
+    expect(policyDrops.map((d) => d.id)).toContain(String(id));
   });
 
   test('expired and needs_review rows remain excluded unconditionally, even with no earlier sibling at all', async () => {

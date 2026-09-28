@@ -1935,7 +1935,9 @@ router.get('/events/approved-ids', async (req, res, next) => {
       .whereNotIn('e.freshness_status', ['expired'])
       .orderByRaw('CASE WHEN e.admin_status = \'featured\' THEN 0 ELSE 1 END')
       .orderByRaw('e.freshness_score DESC NULLS LAST')
-      .limit(20);
+      // Over-fetch the week's approved rows: the recurring/identity filters
+      // below can drop many, so the final cap applies after them (slice).
+      .limit(500);
 
     const rows = await excludeRoutineRecurringFromQuery(query);
     // One calendar-year identity pool for this batch, shared by both filters
