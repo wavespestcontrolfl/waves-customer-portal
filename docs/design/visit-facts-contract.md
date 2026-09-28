@@ -108,7 +108,7 @@ stay internal, without a decision either way.
 | `protocol_actions_completed` | prefill, tap | `structured_notes.protocolActionsCompleted` | What we did (protocol actions) | hidden |
 | `technician_notes` (internal) | voice, tap, derived | `service_records.technician_notes` | AI report writer prompt ("Service Notes", `redactAccessCodes`); Visit summary / Today's Result body **only** through `technicianReportCustomerCopy`'s screened parse | fallback to the deterministic summary |
 | `customer_concern_text` | tap only | `structured_notes.customerConcernText` | Customer concern grounding | hidden |
-| `customer_recap` | derived, voice, tap | `structured_notes.customerRecap` | Visit summary paragraph | fallback to the generated summary |
+| `customer_recap` | derived (server-generated; the full form deliberately does not post it) | `structured_notes.customerRecap` | Visit summary paragraph | fallback to the generated summary |
 | `customer_interaction` | voice, tap | `structured_notes.customerInteraction` | Customer interaction line | hidden |
 | `visit_outcome` | prefill, tap | `structured_notes.visitOutcome` | No-application copy branch | fallback `completed` |
 | `reentry_exterior_minutes` | prefill, tap | `service_records.advisory.exterior_reentry_min` | Re-entry ready-time summary (`reentry.js`) | fallback to the computed default |

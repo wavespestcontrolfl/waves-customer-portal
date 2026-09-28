@@ -517,13 +517,17 @@ function genericCompletionFacts(opts = {}) {
     },
     {
       key: 'customer_recap',
-      label: 'Customer recap (AI-drafted from the facts, tech-editable)',
-      capture: ['derived', 'voice', 'tap'],
+      label: 'Customer recap (server-generated from the facts)',
+      capture: ['derived'],
       storage: 'structured_notes.customerRecap',
-      writers: [COMPLETE_SERVICE, SCHEDULE_PAGE],
+      // The full form deliberately does NOT post customerRecap (SchedulePage.jsx
+      // "customerRecap is intentionally NOT sent"); its client state is
+      // draft/preview only, so the server is the sole writer until a client
+      // posts a tech-edited recap again (Codex #5190 r6).
+      writers: [COMPLETE_SERVICE],
       readers: withExtra('customer_recap', [{ file: REPORT_DATA, section: 'Visit summary paragraph' }]),
       whenMissing: 'fallback',
-      notes: 'report-data.js falls back to a generated visitSummary when customerRecap is empty.',
+      notes: 'Server-generated at completion; no client posts it today. report-data.js falls back to a generated visitSummary when customerRecap is empty.',
     },
     {
       key: 'customer_interaction',
