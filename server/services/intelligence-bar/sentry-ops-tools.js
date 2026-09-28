@@ -285,7 +285,13 @@ async function writeSentryIssue(toolName, input) {
       // The pinned canonical identity (internal id + the exact short id) —
       // never a re-resolve of the operator's raw string — is what a future
       // commit path must act on.
-      issue: { ...mapIssue(issue), id: issue.id },
+      // Stable identity only. /confirm-action re-runs this preview and
+      // compares its fingerprint, so live counters (events, users, last
+      // seen) on an active issue would refuse every confirm as drifted.
+      issue: {
+        id: issue.id, short_id: issue.shortId, title: truncate(issue.title),
+        culprit: truncate(issue.culprit), level: issue.level, link: issue.permalink,
+      },
       note: `${action.verb} "${issue.title}" (${issue.shortId}) in Sentry.`,
     };
     if (toolName === 'assign_sentry_issue') {

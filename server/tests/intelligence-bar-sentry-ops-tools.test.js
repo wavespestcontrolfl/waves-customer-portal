@@ -168,6 +168,18 @@ describe('intelligence bar Sentry write tools (preview only)', () => {
     expect(result.note).toContain(issueFixture.title);
   });
 
+  test('the write preview fingerprint ignores live issue counters, so an active issue can still be confirmed', async () => {
+    const { previewFingerprint } = require('../services/intelligence-bar/authorization-contract');
+    process.env.SENTRY_API_TOKEN = 'sentry-token';
+    global.fetch.mockResolvedValueOnce(jsonResponse([issueFixture]));
+    const before = await executeSentryOpsTool('resolve_sentry_issue', { issue_short_id: 'WAVES-PORTAL-1A' });
+    global.fetch.mockResolvedValueOnce(jsonResponse([{ ...issueFixture, count: '999', userCount: 77, lastSeen: '2099-01-01T00:00:00Z' }]));
+    const after = await executeSentryOpsTool('resolve_sentry_issue', { issue_short_id: 'WAVES-PORTAL-1A' });
+    expect(after.issue).not.toHaveProperty('events');
+    expect(after.issue).not.toHaveProperty('users_affected');
+    expect(previewFingerprint(after)).toBe(previewFingerprint(before));
+  });
+
   test('resolve_sentry_issue: a mixed-case / whitespace short id still resolves the exact issue', async () => {
     process.env.SENTRY_API_TOKEN = 'sentry-token';
     global.fetch.mockResolvedValueOnce(jsonResponse([issueFixture]));
