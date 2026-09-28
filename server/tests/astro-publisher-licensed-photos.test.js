@@ -26,7 +26,11 @@ jest.mock('../services/content-astro/github-client', () => ({
 
 const gh = require('../services/content-astro/github-client');
 const pub = require('../services/content-astro/astro-publisher');
-const { rehostLicensedIdentificationPhotos, resolveBodyImages } = pub._internals;
+const {
+  rehostLicensedIdentificationPhotos, resolveBodyImages,
+  fetchAndVerifyLicensedPhoto, assertLicensedPhotoUrlAllowed, readCappedResponseBody,
+  LICENSED_PHOTO_MAX_BYTES,
+} = pub._internals;
 
 const LICENSED_URL = 'https://upload.wikimedia.org/wikipedia/commons/c/ce/Red_Imported_Fire_Ant.jpg';
 const LICENSED_ALT = 'Red imported fire ant workers swarming over sandy soil in Florida';
@@ -62,6 +66,22 @@ async function tinyPngBuffer() {
   return sharp({ create: { width: 4, height: 4, channels: 3, background: { r: 200, g: 40, b: 40 } } }).png().toBuffer();
 }
 
+// A minimal WHATWG ReadableStream-shaped body — fetchAndVerifyLicensedPhoto
+// reads via body.getReader() (a manual byte-cap stream read), never
+// res.arrayBuffer(), so the mock must support that exact shape.
+function streamingBody(buf) {
+  let sent = false;
+  return {
+    getReader: () => ({
+      read: async () => {
+        if (sent || !buf || !buf.length) { sent = true; return { done: true, value: undefined }; }
+        sent = true;
+        return { done: false, value: buf };
+      },
+      cancel: async () => {},
+    }),
+  };
+}
 function mockFetchOnce({ ok = true, status = 200, contentType = 'image/jpeg', body, contentLength } = {}) {
   global.fetch = jest.fn().mockResolvedValue({
     ok,
@@ -73,7 +93,7 @@ function mockFetchOnce({ ok = true, status = 200, contentType = 'image/jpeg', bo
         return null;
       },
     },
-    arrayBuffer: async () => (body ? body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength) : new ArrayBuffer(0)),
+    body: streamingBody(body),
   });
 }
 
@@ -227,5 +247,76 @@ describe('resolveBodyImages — diagnostic drafts never get AI-generated art', (
       siblings: [],
       mdx: true,
     })).rejects.toMatchObject({ code: 'BLOG_BODY_IMAGES_FAILED' });
+  });
+});
+
+// Codex P1 (3rd round, defense-in-depth): photo.url reaches the fetch call
+// from a persisted JSONB field — today always the hardcoded catalog, but
+// nothing at the point of the network call previously enforced that.
+describe('assertLicensedPhotoUrlAllowed / fetchAndVerifyLicensedPhoto — host allowlist + streaming cap', () => {
+  afterEach(() => { delete global.fetch; jest.clearAllMocks(); });
+
+  test('accepts a real upload.wikimedia.org URL', () => {
+    expect(() => assertLicensedPhotoUrlAllowed(LICENSED_URL, 'fire-ant-id')).not.toThrow();
+  });
+
+  test('rejects a URL on a host outside the allowlist (SSRF guard)', () => {
+    expect(() => assertLicensedPhotoUrlAllowed('https://attacker.example.com/x.jpg', 'fire-ant-id'))
+      .toThrow(/not on the licensed-photo host allowlist/);
+  });
+
+  test('rejects an internal/private-network host even if it were somehow reached', () => {
+    expect(() => assertLicensedPhotoUrlAllowed('https://169.254.169.254/latest/meta-data/', 'fire-ant-id'))
+      .toThrow(/not on the licensed-photo host allowlist/);
+  });
+
+  test('rejects a non-https scheme (file://, http://, etc.) even on an otherwise-trusted-looking host', () => {
+    expect(() => assertLicensedPhotoUrlAllowed('file:///etc/passwd', 'fire-ant-id')).toThrow(/disallowed scheme/);
+    expect(() => assertLicensedPhotoUrlAllowed('http://upload.wikimedia.org/x.jpg', 'fire-ant-id')).toThrow(/disallowed scheme/);
+  });
+
+  test('rejects an unparseable URL', () => {
+    expect(() => assertLicensedPhotoUrlAllowed('not a url at all', 'fire-ant-id')).toThrow(/not a valid URL/);
+  });
+
+  test('fetchAndVerifyLicensedPhoto never calls fetch() at all for an off-allowlist URL (the check runs BEFORE the network call)', async () => {
+    global.fetch = jest.fn();
+    await expect(fetchAndVerifyLicensedPhoto('https://attacker.example.com/x.jpg', 'fire-ant-id')).rejects.toMatchObject({ code: 'BLOG_BODY_IMAGES_FAILED' });
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  test('readCappedResponseBody aborts (cancels the stream) once the byte cap is crossed, even with NO/absent content-length', async () => {
+    // Two chunks that together exceed a tiny cap, streamed with no
+    // content-length header at all — the pre-fetch declared-length check
+    // cannot catch this; only the streaming read can.
+    const chunkA = Buffer.alloc(5, 1);
+    const chunkB = Buffer.alloc(5, 2);
+    let chunkIndex = 0;
+    const cancel = jest.fn(async () => {});
+    const res = {
+      body: {
+        getReader: () => ({
+          read: async () => {
+            const chunks = [chunkA, chunkB];
+            if (chunkIndex >= chunks.length) return { done: true, value: undefined };
+            const value = chunks[chunkIndex];
+            chunkIndex += 1;
+            return { done: false, value };
+          },
+          cancel,
+        }),
+      },
+    };
+    await expect(readCappedResponseBody(res, 6, 'fire-ant-id', 'https://upload.wikimedia.org/x.jpg'))
+      .rejects.toMatchObject({ code: 'BLOG_BODY_IMAGES_FAILED' });
+    expect(cancel).toHaveBeenCalled();
+  });
+
+  test('readCappedResponseBody returns the full buffer when under the cap', async () => {
+    const chunk = Buffer.from('hello');
+    let sent = false;
+    const res = { body: { getReader: () => ({ read: async () => { if (sent) return { done: true, value: undefined }; sent = true; return { done: false, value: chunk }; }, cancel: async () => {} }) } };
+    const out = await readCappedResponseBody(res, LICENSED_PHOTO_MAX_BYTES, 'fire-ant-id', 'https://upload.wikimedia.org/x.jpg');
+    expect(out.toString()).toBe('hello');
   });
 });

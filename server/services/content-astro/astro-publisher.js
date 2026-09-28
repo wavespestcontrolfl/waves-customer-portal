@@ -2925,7 +2925,56 @@ function licensedPhotoError(slug, url, detail) {
 // actually verify content-type — this is the real verification a
 // licensed-catalog fetch needs (same exact URL as the brief's own catalog
 // entry, a real image response, a byte cap).
+// Codex P1 (3rd round, defense-in-depth): photo.url reaches this function
+// from the persisted content_briefs JSONB (voice_constraints.photo_slots)
+// — today ALWAYS a hardcoded PHOTO_LIBRARY entry (licensed-photo-
+// library.js), never writer- or user-controlled, but nothing at the
+// point of the actual network call enforced that invariant. A host
+// allowlist here means a future editable-brief path, a review-tooling
+// bug, or a redirect target can never turn this fetch into an SSRF
+// primitive (an internal address, file://, or an unexpected host), even
+// if the upstream catalog guarantee is ever weakened.
+const LICENSED_PHOTO_ALLOWED_HOSTS = new Set(['upload.wikimedia.org']);
+function assertLicensedPhotoUrlAllowed(url, slug) {
+  let parsed;
+  try { parsed = new URL(url); } catch { throw licensedPhotoError(slug, url, 'is not a valid URL'); }
+  if (parsed.protocol !== 'https:') throw licensedPhotoError(slug, url, `uses a disallowed scheme (${parsed.protocol})`);
+  if (!LICENSED_PHOTO_ALLOWED_HOSTS.has(parsed.hostname.toLowerCase())) {
+    throw licensedPhotoError(slug, url, `is not on the licensed-photo host allowlist (${parsed.hostname})`);
+  }
+}
+
+// Codex P1 (3rd round): res.arrayBuffer() fully buffers the response
+// before the post-fetch length check runs — a chunked/no-content-length
+// response (or one lying about content-length) is buffered in full
+// regardless of actual size. Reads the stream manually and aborts the
+// instant the cap is crossed, so a compromised or spoofed endpoint can
+// never force an unbounded in-memory buffer.
+async function readCappedResponseBody(res, cap, slug, url) {
+  const reader = typeof res.body?.getReader === 'function' ? res.body.getReader() : null;
+  if (!reader) {
+    // No streaming body available (should not happen with the global
+    // fetch's Response) — fail closed rather than trust an unbounded read.
+    throw licensedPhotoError(slug, url, 'response body is not readable as a stream');
+  }
+  const chunks = [];
+  let total = 0;
+  for (;;) {
+     
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.length;
+    if (total > cap) {
+      await reader.cancel().catch(() => {});
+      throw licensedPhotoError(slug, url, `exceeds the ${cap}-byte cap while streaming (aborted at ${total} bytes)`);
+    }
+    chunks.push(Buffer.from(value));
+  }
+  return Buffer.concat(chunks);
+}
+
 async function fetchAndVerifyLicensedPhoto(url, slug) {
+  assertLicensedPhotoUrlAllowed(url, slug);
   let res;
   try {
     res = await fetch(url, { redirect: 'follow' });
@@ -2937,9 +2986,8 @@ async function fetchAndVerifyLicensedPhoto(url, slug) {
   if (!/^image\//.test(contentType)) throw licensedPhotoError(slug, url, `is not an image (content-type: ${contentType || 'none'})`);
   const declaredLength = Number(res.headers.get('content-length') || 0);
   if (declaredLength > LICENSED_PHOTO_MAX_BYTES) throw licensedPhotoError(slug, url, `exceeds the ${LICENSED_PHOTO_MAX_BYTES}-byte cap (${declaredLength} declared bytes)`);
-  const rawBuffer = Buffer.from(await res.arrayBuffer());
+  const rawBuffer = await readCappedResponseBody(res, LICENSED_PHOTO_MAX_BYTES, slug, url);
   if (!rawBuffer.length) throw licensedPhotoError(slug, url, 'fetched 0 bytes');
-  if (rawBuffer.length > LICENSED_PHOTO_MAX_BYTES) throw licensedPhotoError(slug, url, `exceeds the ${LICENSED_PHOTO_MAX_BYTES}-byte cap (${rawBuffer.length} bytes)`);
   return compressToWebp(rawBuffer, { width: BODY_IMAGE_WIDTH });
 }
 
@@ -5413,6 +5461,11 @@ module.exports = {
     resolveAutonomousHero,
     resolveBodyImages,
     rehostLicensedIdentificationPhotos,
+    fetchAndVerifyLicensedPhoto,
+    assertLicensedPhotoUrlAllowed,
+    readCappedResponseBody,
+    LICENSED_PHOTO_ALLOWED_HOSTS,
+    LICENSED_PHOTO_MAX_BYTES,
     bodyImageSlots,
     insertBodyImages,
     countBodyImages,
