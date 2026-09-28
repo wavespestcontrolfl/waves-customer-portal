@@ -313,7 +313,9 @@ function offerFingerprint(payload = {}) {
     // GATE_REPORT_CROSS_SELL_V2's reason-tied copy is customer-visible, so
     // it rides the fingerprint like every other rendered field — a reason
     // change under a stable serviceKey/option must still 409 a stale tap.
-    payload.reason || '',
+    // Appended ONLY when present, so every offer without a reason (all of
+    // them with the gate off) keeps its pre-V2 fingerprint byte-for-byte.
+    ...(payload.reason ? [payload.reason] : []),
   ].join('|');
   return require('crypto').createHash('sha256').update(canonical).digest('hex').slice(0, 32);
 }
