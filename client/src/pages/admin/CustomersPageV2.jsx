@@ -49,7 +49,7 @@ import {
 import Customer360Profile from "../../components/admin/Customer360ProfileV2";
 import Customer360Workspace from "../../components/admin/Customer360Workspace";
 import CustomerDirectoryTable from "../../components/admin/CustomerDirectoryTable";
-import CustomerGeocodeReviewPanel from "../../components/admin/CustomerGeocodeReviewPanel";
+import CustomerGeocodeReviewPanel, { confirmDiscardDraft } from "../../components/admin/CustomerGeocodeReviewPanel";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import MobileNewCustomerSheet from "../../components/admin/MobileNewCustomerSheet";
 import AddressAutocomplete from "../../components/AddressAutocomplete";
@@ -1645,6 +1645,7 @@ function CustomersWorkspacePage({
   onSelect,
   onClose,
   onCustomerMutation,
+  onDraftActiveChange,
   initialTab,
   tabKey,
   children,
@@ -1660,6 +1661,7 @@ function CustomersWorkspacePage({
           onSelect={onSelect}
           onClose={onClose}
           onCustomerMutation={onCustomerMutation}
+          onDraftActiveChange={onDraftActiveChange}
         />
       ) : (
         children
@@ -1674,6 +1676,7 @@ function CustomersOverlayPage({
   onSelect,
   onClose,
   onCustomerMutation,
+  onDraftActiveChange,
   initialTab,
   tabKey,
   children,
@@ -1691,6 +1694,7 @@ function CustomersOverlayPage({
           onSelectCustomer={onSelect}
           onClose={onClose}
           onCustomerMutation={onCustomerMutation}
+          onDraftActiveChange={onDraftActiveChange}
         />
       )}
     </UiSurface>
@@ -1881,6 +1885,35 @@ export default function CustomersPageV2() {
   const closeCustomerProfile = () => {
     selectCustomer(null, { replace: true });
   };
+
+  // "draft active" reported up from the embedded profile's own choke point
+  // (Customer360ProfileV2's useCustomerProfileNavigation / Customer360Workspace)
+  // — a ref, not state, so the popstate guard below reads it synchronously
+  // with no re-render dependency, same reasoning as that hook's own
+  // draftActiveRef. Browser Back/Forward changes ?customerId= without ever
+  // firing beforeunload (same-document navigation), silently unmounting the
+  // workspace and losing an open address-review draft — this is the one
+  // other place (besides that hook's tab/close/switch guards) that can
+  // discard it.
+  const draftActiveRef = useRef(false);
+  const handleDraftActiveChange = (active) => { draftActiveRef.current = active; };
+  // Kept in sync on every settled render so a later popstate can restore
+  // exactly the URL the draft was open on.
+  const currentUrlRef = useRef(`${location.pathname}${location.search}`);
+  useEffect(() => {
+    currentUrlRef.current = `${location.pathname}${location.search}`;
+  }, [location.pathname, location.search]);
+  useEffect(() => {
+    const guardHistory = () => {
+      if (!draftActiveRef.current || confirmDiscardDraft()) return;
+      // Declined: the browser already popped to the new entry before this
+      // event fired — put the draft's own URL back on top rather than a new
+      // history-manipulation mechanism (minimal, scoped to a live draft).
+      navigate(currentUrlRef.current, { replace: true });
+    };
+    window.addEventListener("popstate", guardHistory);
+    return () => window.removeEventListener("popstate", guardHistory);
+  }, [navigate]);
 
   function loadCustomers(p) {
     const pg = p || page;
@@ -2080,6 +2113,7 @@ export default function CustomersPageV2() {
       onSelect={openCustomerProfile}
       onClose={closeCustomerProfile}
       onCustomerMutation={refreshCustomersAndGeocodeReview}
+      onDraftActiveChange={handleDraftActiveChange}
       initialTab={searchParams.get("tab") === "comms" ? "comms" : "overview"}
       tabKey={searchParams.get("tab") === "comms" ? location.key : "overview"}
       overlays={

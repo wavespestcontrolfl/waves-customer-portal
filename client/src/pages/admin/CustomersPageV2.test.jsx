@@ -1,18 +1,24 @@
 // @vitest-environment jsdom
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { MemoryRouter, useNavigate, useLocation } from 'react-router-dom';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { BrowserRouter, MemoryRouter, useNavigate, useLocation } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import CustomersPageV2 from './CustomersPageV2';
 
 vi.mock('../../components/admin/Customer360ProfileV2', () => ({
-  default: function Profile({ customerId, initialTab, onCustomerMutation }) {
+  default: function Profile({ customerId, initialTab, onCustomerMutation, onDraftActiveChange }) {
     const [tab, setTab] = React.useState(initialTab);
+    // Stands in for the embedded address-review panel's own draft-active
+    // signal (CustomerGeocodeReviewPanel -> useCustomerProfileNavigation),
+    // which is what a real open draft reports through this same prop.
+    const [draftOpen, setDraftOpen] = React.useState(false);
     return <div data-testid="customer-profile">Profile {customerId}
       <span data-testid="profile-active-tab">{tab}</span>
+      <span data-testid="draft-open">{String(draftOpen)}</span>
       <button onClick={() => setTab('overview')}>Profile overview</button>
       <button onClick={() => onCustomerMutation?.({ customerId, action: 'update' })}>Save profile address</button>
+      <button onClick={() => { setDraftOpen(true); onDraftActiveChange?.(true); }}>Open address draft</button>
     </div>;
   },
 }));
@@ -22,6 +28,7 @@ vi.mock('../../components/admin/CustomerGeocodeReviewPanel', () => ({
     <output data-testid="geocode-review-refresh">{refreshToken}</output>
     <button type="button" onClick={onResolved}>Resolve address review</button>
   </>,
+  confirmDiscardDraft: () => window.confirm('This will discard the unsaved address review draft. Continue?'),
 }));
 vi.mock('../../components/AddressAutocomplete', () => ({
   default: ({ id, value, onChange, onSelect }) => (
@@ -342,6 +349,7 @@ describe('CustomersPageV2 workflow state', () => {
   afterEach(() => {
     cleanup();
     vi.unstubAllGlobals();
+    window.history.replaceState({}, '', '/');
   });
 
   beforeEach(() => {
@@ -529,5 +537,54 @@ describe('CustomersPageV2 workflow state', () => {
     expect(postBodies[1].confirmMatchedAccountId).toBe('acct-a');
     // Attach success surfaces the account the profile landed on.
     expect(await screen.findByText(/additional property on Avery Customer's account/)).toBeInTheDocument();
+  });
+
+  // Browser Back/Forward is same-document navigation for this page's own
+  // ?customerId= — it never fires beforeunload, so it needs its own guard
+  // (CustomersPageV2's popstate listener) fed by the same draft-active
+  // signal the embedded profile already reports for its tab/close guards.
+  // A real BrowserRouter is required here (unlike the MemoryRouter used
+  // elsewhere in this file) because MemoryRouter never touches window.history
+  // or dispatches a 'popstate' event — see TechFieldShell.test.jsx for the
+  // same precedent on TechNavigationLock's own history guard.
+  it('keeps a draft-open profile mounted and the draft intact when browser Back is declined', async () => {
+    vi.stubGlobal('fetch', vi.fn((url) => String(url).includes('/admin/customers?') ? response(list) : response({})));
+    window.history.replaceState({ idx: 0 }, '', '/admin/customers');
+    window.history.pushState({ idx: 1 }, '', '/admin/customers?customerId=customer-a');
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+
+    render(<BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><CustomersPageV2 /></BrowserRouter>);
+    expect(await screen.findByTestId('customer-profile')).toHaveTextContent('customer-a');
+    fireEvent.click(screen.getByRole('button', { name: 'Open address draft' }));
+    expect(screen.getByTestId('draft-open')).toHaveTextContent('true');
+
+    // jsdom (like a real browser) dispatches 'popstate' asynchronously after
+    // history.back() — waitFor gives that task a chance to run, same as
+    // TechFieldShell.test.jsx's own history-guard assertions.
+    act(() => { window.history.back(); });
+    await waitFor(() => expect(confirmSpy).toHaveBeenCalledOnce());
+
+    // The profile, its draft, and the URL all stay exactly as they were —
+    // no unmount/remount round trip through a blank customerId.
+    expect(window.location.search).toBe('?customerId=customer-a');
+    expect(screen.getByTestId('customer-profile')).toHaveTextContent('customer-a');
+    expect(screen.getByTestId('draft-open')).toHaveTextContent('true');
+  });
+
+  it('lets browser Back through once the draft discard is confirmed', async () => {
+    vi.stubGlobal('fetch', vi.fn((url) => String(url).includes('/admin/customers?') ? response(list) : response({})));
+    window.history.replaceState({ idx: 0 }, '', '/admin/customers');
+    window.history.pushState({ idx: 1 }, '', '/admin/customers?customerId=customer-a');
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+
+    render(<BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><CustomersPageV2 /></BrowserRouter>);
+    expect(await screen.findByTestId('customer-profile')).toHaveTextContent('customer-a');
+    fireEvent.click(screen.getByRole('button', { name: 'Open address draft' }));
+    expect(screen.getByTestId('draft-open')).toHaveTextContent('true');
+
+    act(() => { window.history.back(); });
+    await waitFor(() => expect(confirmSpy).toHaveBeenCalledOnce());
+    await waitFor(() => expect(window.location.search).toBe(''));
+    await waitFor(() => expect(screen.queryByTestId('customer-profile')).not.toBeInTheDocument());
   });
 });
