@@ -1681,8 +1681,8 @@ class GoogleBusinessService {
    *   silent_empty  ACT  GBP pull succeeds but the feed has ZERO reviews
    *                      (the Venice wipe class — mechanically "healthy").
    *                      Not raised for a profile that has never had a
-   *                      review: Places confirms zero this run and no
-   *                      review row was ever stored
+   *                      review: Places confirms zero this run and nothing
+   *                      was ever stored for it (no review row, no stats row)
    *   ingest_stale  ACT  Google shows more reviews than we ever ingested and
    *                      nothing new has landed in 14d — reviewers exist that
    *                      auto-mark can never see
@@ -1723,7 +1723,8 @@ class GoogleBusinessService {
     // stored-row count would read healthy forever after the wipe.
     if (Number(pulledCount) === 0) {
       // Nothing is missing from a profile that has never had a review. A
-      // wipe still alerts: its removal-stamped rows stay stored.
+      // wipe still alerts: its removal-stamped rows and its Places stats
+      // row stay stored.
       if (placesTotal === 0 && storedCount === 0) return null;
       return { cls: 'silent_empty', severity: 'ACT', detail: 'the GBP pull succeeds but the feed returns ZERO reviews — profile wiped, suspended, or re-created (the Venice class)' };
     }
@@ -1760,9 +1761,12 @@ class GoogleBusinessService {
       // (codex #3298 r2). newest_ingest_at stays all-rows: ingestion recency
       // is about the pipeline moving, not the row's later removal.
       .select(db.raw(`COUNT(*) FILTER (WHERE reviewer_name != '_stats' AND missing_since IS NULL) AS row_count`))
-      // Every review row ever stored, removal-stamped ones included: a wiped
-      // profile keeps them, a profile that never had a review has none.
-      .select(db.raw(`COUNT(*) FILTER (WHERE reviewer_name IS DISTINCT FROM '_stats') AS stored_count`))
+      // Every row ever stored for the location: review rows, removal-stamped
+      // ones included, plus the Places _stats row, which is written only
+      // once Google has shown a rating or review count and never cleared by
+      // a later zero. A wiped profile keeps them; a profile that never had
+      // a review has none.
+      .select(db.raw('COUNT(*) AS stored_count'))
       .select(db.raw(`MAX(created_at) FILTER (WHERE reviewer_name != '_stats') AS newest_ingest_at`))
       // _syncPlacesStatsForLocation stamps synced_at (updated_at has no
       // auto-touch trigger) — reading updated_at would mark every

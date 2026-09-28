@@ -110,6 +110,9 @@ describe('_classifyLocationSyncHealth (pure classifier)', () => {
     expect(classify({ ...neverReviewed, placesTotal: 12 })).toMatchObject({ cls: 'silent_empty' });
     // A wipe: both sources now read zero, but the removal-stamped rows stay stored.
     expect(classify({ ...neverReviewed, storedCount: 47, newestIngestAt: daysAgo(60) })).toMatchObject({ cls: 'silent_empty' });
+    // Google once showed reviews that were never ingested: the stats row
+    // alone is stored, and a later zero never clears it.
+    expect(classify({ ...neverReviewed, storedCount: 1, statsTotal: 3, statsUpdatedAt: daysAgo(40) })).toMatchObject({ cls: 'silent_empty' });
   });
 
   test('Google shows more reviews than ever ingested + 14d of silence → ingest_stale ACT', () => {
@@ -230,11 +233,12 @@ describe('_assessReviewSyncHealth (escalation)', () => {
 
   test('a never-reviewed profile Google confirms empty leaves the fleet healthy; the same empty feed after a wipe still escalates', async () => {
     // Production 2026-09-28: Venice has no stored row at all, so the
-    // aggregate query returns no row for it.
+    // aggregate query returns no row for it. stored_count includes each
+    // location's _stats row.
     const fleet = [
-      { location_id: 'bradenton', row_count: '117', stored_count: '119', newest_ingest_at: daysAgo(1), stats_updated_at: daysAgo(1) },
-      { location_id: 'parrish', row_count: '39', stored_count: '39', newest_ingest_at: daysAgo(1), stats_updated_at: daysAgo(1) },
-      { location_id: 'sarasota', row_count: '48', stored_count: '48', newest_ingest_at: daysAgo(1), stats_updated_at: daysAgo(1) },
+      { location_id: 'bradenton', row_count: '117', stored_count: '120', newest_ingest_at: daysAgo(1), stats_updated_at: daysAgo(1) },
+      { location_id: 'parrish', row_count: '39', stored_count: '40', newest_ingest_at: daysAgo(1), stats_updated_at: daysAgo(1) },
+      { location_id: 'sarasota', row_count: '48', stored_count: '49', newest_ingest_at: daysAgo(1), stats_updated_at: daysAgo(1) },
     ];
     const sources = { bradenton: 'gbp', parrish: 'gbp', sarasota: 'gbp', venice: 'gbp' };
     const pulled = { bradenton: 117, parrish: 39, sarasota: 48, venice: 0 };
@@ -248,6 +252,17 @@ describe('_assessReviewSyncHealth (escalation)', () => {
     installDb({ aggregates: [...fleet, { location_id: 'venice', row_count: '0', stored_count: '12', newest_ingest_at: daysAgo(30), stats_updated_at: null }], stats: [] });
     const out = await gbp._assessReviewSyncHealth(sources, pulled, {}, observedAt, { venice: 0 });
     expect(out.emailed).toBe(true);
+    expect(mockNotifyAdmin.mock.calls[0][1]).toBe('Review sync health escalation [venice:silent_empty]');
+
+    // Google once showed reviews that never ingested: only the stats row is
+    // stored (no review rows), and today's zero leaves it in place.
+    mockEmailSend.mockClear();
+    mockNotifyAdmin.mockClear();
+    installDb({
+      aggregates: [...fleet, { location_id: 'venice', row_count: '0', stored_count: '1', newest_ingest_at: null, stats_updated_at: daysAgo(40) }],
+      stats: [{ location_id: 'venice', review_text: '{"rating":5,"totalReviews":3}' }],
+    });
+    expect((await gbp._assessReviewSyncHealth(sources, pulled, {}, observedAt, { venice: 0 })).emailed).toBe(true);
     expect(mockNotifyAdmin.mock.calls[0][1]).toBe('Review sync health escalation [venice:silent_empty]');
   });
 
