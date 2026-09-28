@@ -36,7 +36,16 @@ function bodyAmountCents(body) {
  */
 async function outgoingAmountsStale({ customerId, body, dbh = db } = {}) {
   const bodyAmounts = bodyAmountCents(body);
-  if (!bodyAmounts.length) return { stale: false };
+  if (!bodyAmounts.length) {
+    // Price grammar the numeric extractor cannot verify ("fifty dollars",
+    // "45/mo") is unverifiable, not amount-free (audit P1): with real
+    // answers on it fails closed, mirroring the drafter's draft-time rule.
+    const { hasPriceQuote } = require('./sms-suggest-mode');
+    if (require('./sms-followup-sla').realAnswersGateOn() && hasPriceQuote(String(body || ''))) {
+      return { stale: true, reason: 'amount_unverifiable' };
+    }
+    return { stale: false };
+  }
   if (!customerId) return { stale: true, reason: 'amount_recheck_no_customer' };
   try {
     const ContextAggregator = require('./context-aggregator');

@@ -11,6 +11,7 @@ jest.mock('../services/context-aggregator', () => ({
 }));
 jest.mock('../services/sms-shadow-drafter', () => ({ replyQuotesUngroundedAmount: jest.fn(() => false) }));
 jest.mock('../services/sms-followup-sla', () => ({ realAnswersGateOn: jest.fn(() => false) }));
+jest.mock('../services/sms-suggest-mode', () => ({ hasPriceQuote: jest.fn((t) => /\b(?:fifty|forty|twenty|hundred)\s+dollars\b|\d+\s?\/\s?mo\b|\$\s?\d/i.test(String(t || ''))) }));
 const { replyQuotesUngroundedAmount } = require('../services/sms-shadow-drafter');
 const { realAnswersGateOn } = require('../services/sms-followup-sla');
 const ContextAggregator = require('../services/context-aggregator');
@@ -73,4 +74,16 @@ test('fails closed: no customer id, a missing customer row, or a lookup error', 
   await expect(outgoingAmountsStale({ customerId: 'c1', body: 'You owe $5.', dbh: dbWithCustomer(null) })).resolves.toMatchObject({ stale: true });
   ContextAggregator.getContextForCustomer.mockRejectedValue(new Error('boom'));
   await expect(outgoingAmountsStale({ customerId: 'c1', body: 'You owe $5.', dbh: dbWithCustomer({ id: 'c1' }) })).resolves.toEqual({ stale: true, reason: 'amount_recheck_failed' });
+});
+
+
+test('gate ON: price grammar with no numeric amount ("fifty dollars", "45/mo") is unverifiable → stale, billing never read', async () => {
+  realAnswersGateOn.mockReturnValue(true);
+  await expect(outgoingAmountsStale({ customerId: 'c1', body: 'Your balance is fifty dollars.', dbh: dbWithCustomer({ id: 'c1' }) })).resolves.toEqual({ stale: true, reason: 'amount_unverifiable' });
+  await expect(outgoingAmountsStale({ customerId: 'c1', body: 'Your plan is 45/mo.', dbh: dbWithCustomer({ id: 'c1' }) })).resolves.toEqual({ stale: true, reason: 'amount_unverifiable' });
+  expect(ContextAggregator.getContextForCustomer).not.toHaveBeenCalled();
+});
+
+test('gate OFF: spelled amounts keep the original behavior (no amounts to check)', async () => {
+  await expect(outgoingAmountsStale({ customerId: 'c1', body: 'Your balance is fifty dollars.', dbh: dbWithCustomer({ id: 'c1' }) })).resolves.toEqual({ stale: false });
 });
