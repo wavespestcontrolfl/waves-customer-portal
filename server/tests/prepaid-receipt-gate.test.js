@@ -134,15 +134,14 @@ describe('resolveScheduledServiceCharge', () => {
     })).toBe(0);
   });
 
-  test('a zero estimatedPrice refuses the same way as null — never a bare 0, never the acceptance fee', async () => {
-    const result = await resolveScheduledServiceCharge({
+  // Owner ruling 2026-09-28 ("fix the bug for per application customers";
+  // billing invariant #8, "$0 means charge nothing"): a stamped $0 is the
+  // visit's own deliberate price, no longer the unpriced fee shape —
+  // completion bills nothing for it, so Charge Now has nothing to refuse.
+  test('a stamped $0 per_application visit bills nothing — not the fee, not a refusal', async () => {
+    expect(await resolveScheduledServiceCharge({
       estimatedPrice: 0, isCallback: false, monthlyRate: 74.7, billingMode: 'per_application',
-    });
-    expect(result).toEqual({
-      refused: true,
-      reason: 'per_application_fee_at_completion',
-      message: expect.stringMatching(/bills its application fee at completion/i),
-    });
+    })).toBe(0);
   });
 
   // Owner ruling: this used to be a parity test proving predictCompletionBilling
@@ -156,8 +155,10 @@ describe('resolveScheduledServiceCharge', () => {
   // own tests pin the client-side half of this (no preview of the fee, and
   // no Add Service/Item pickers offered for this shape either).
   test('completion still predicts the acceptance fee; Charge Now refuses the whole mint — the two deliberately diverge', async () => {
+    // Unpriced (NULL) is the fee shape; a stamped $0 is not (owner ruling
+    // 2026-09-28 — see the test above).
     const fixture = {
-      estimatedPrice: 0, isCallback: false, monthlyRate: null, billingMode: 'per_application',
+      estimatedPrice: null, isCallback: false, monthlyRate: null, billingMode: 'per_application',
       perApplicationFee: 97.2, serviceType: 'Quarterly Pest Control',
     };
 
@@ -453,16 +454,24 @@ describe('resolveScheduledServiceCharge', () => {
       expect(findFirstApplicationInvoiceForEstimateService).not.toHaveBeenCalled();
     });
 
-    // Without a positive primary_line_price on the row, a bare stamped 0 is
-    // the DIFFERENT, indistinguishable-from-null shape (the sibling-covered
-    // same-trip PROMOTED row leaves both columns null) and still defers to
-    // the sibling lookup exactly as before this change — once that lookup
-    // confirms 'none', it now refuses the whole mint outright (round 13)
-    // instead of resolving the (removed) fee.
-    test('a bare stamped $0 with no primary_line_price still defers to the sibling lookup, then refuses the whole mint', async () => {
+    // Owner ruling 2026-09-28: for a per_application customer a bare stamped
+    // $0 (no primary_line_price) is ALSO the visit's own deliberate price —
+    // no writer stores 0 for blank (promoted sibling rows leave both columns
+    // NULL), so it bills nothing, never the sibling lookup or the fee.
+    test('a bare stamped $0 with no primary_line_price bills nothing for a per_application customer — never the sibling lookup', async () => {
+      expect(await resolveScheduledServiceCharge({
+        estimatedPrice: 0, isCallback: false, monthlyRate: 74.7, billingMode: 'per_application',
+        serviceType: 'Every 6 Weeks Lawn Care', svc: SVC, dbConn: DB_CONN,
+      })).toBe(0);
+      expect(findFirstApplicationInvoiceForEstimateService).not.toHaveBeenCalled();
+    });
+
+    // A NULL-priced row keeps deferring to the sibling lookup and, with no
+    // sibling invoice, refuses the whole mint (round 13) exactly as before.
+    test('a NULL-priced per_application visit still defers to the sibling lookup, then refuses the whole mint', async () => {
       findFirstApplicationInvoiceForEstimateService.mockResolvedValue({ invoice: null, liveBeside: null });
       const result = await resolveScheduledServiceCharge({
-        estimatedPrice: 0, isCallback: false, monthlyRate: 74.7, billingMode: 'per_application',
+        estimatedPrice: null, isCallback: false, monthlyRate: 74.7, billingMode: 'per_application',
         serviceType: 'Every 6 Weeks Lawn Care', svc: SVC, dbConn: DB_CONN,
       });
       expect(result).toEqual({
