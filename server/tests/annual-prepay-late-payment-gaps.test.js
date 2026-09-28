@@ -1296,6 +1296,9 @@ describe('annual prepay late-payment gap fixes', () => {
         // postgres.test.js) would ever matter here.
         g.whereNotNull = (col) => g.comb('and', row[col] != null);
         g.whereRaw = () => g.comb('and', true);
+        // r28: the grace branch's parent-still-authorizes EXISTS — real SQL,
+        // exercised against Postgres in the grace-coverage suite.
+        g.whereExists = () => g.comb('and', true);
         return g;
       }
       const root = makeGroup();

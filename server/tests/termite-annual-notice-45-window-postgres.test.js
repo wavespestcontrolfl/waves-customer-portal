@@ -752,6 +752,15 @@ describeOrSkip('termite annual-plan notice obligations — against a schema buil
     await expect(_private.stampTermNoticeWitness(claimedPriced30, 30, new Date('2026-09-20T16:00:00Z'))).resolves.toBe('stamped');
     expect((await db('annual_prepay_terms').where({ id: priced30.id }).first('renewal_noticed_fee')).renewal_noticed_fee).toBeNull();
 
+    // Codex #4971 r28 P1: a witness RECOVERED from acceptance evidence
+    // freezes nothing — today's fee may not be the fee that message quoted.
+    const recovered = await insert({ prepay_amount: 275 });
+    const claimedRecovered = await _private.claimTermNotice(recovered, 45);
+    await expect(_private.stampTermNoticeWitness(claimedRecovered, 45, onTime, { freezeNoticedFee: false })).resolves.toBe('stamped');
+    const recoveredRow = await db('annual_prepay_terms').where({ id: recovered.id }).first('notice_45_sent_at', 'renewal_noticed_fee');
+    expect(recoveredRow.notice_45_sent_at).not.toBeNull();
+    expect(recoveredRow.renewal_noticed_fee).toBeNull();
+
     const a = await insert();
     const staleA = await _private.claimTermNotice(a, 45);
     await db('annual_prepay_terms').where({ id: a.id }).update({ notice_45_claimed_at: successorAt }); // reclaimed

@@ -70,7 +70,43 @@ function whereTermiteRenewalInGrace(builder, alias, onDate) {
     // column (pre-migration boots and the narrow scratch schemas many
     // suites build) — a missing column reads as "not suspended".
     .whereRaw(`(to_jsonb(${alias}) ->> 'dispute_suspended_at') IS NULL`)
-    .whereRaw(`${termiteRenewalGraceDeadlineSql(alias)} >= ?`, [onDate]);
+    .whereRaw(`${termiteRenewalGraceDeadlineSql(alias)} >= ?`, [onDate])
+    // Codex #4971 r28 P1: grace is the PARENT's promise carried forward —
+    // a successor whose parent was cancelled, refunded or had its window
+    // moved after the mint is covered by nothing, and must not keep
+    // suppressing completion or monthly billing until a withdrawal sweep
+    // (which does not even run while the gate is off) gets to it. The
+    // parent must still authorize the renewal: undecided and live, or
+    // renewed by a 'renew' decision; its own window still abutting the
+    // successor's; its prepay invoice (when it has one) collected and
+    // neither cancelled nor fully refunded. Only columns coveredTermsAsOf
+    // already reads on its own invoice join are referenced.
+    .whereExists(function parentStillAuthorizes() {
+      this.select(1)
+        .from('annual_prepay_terms as gp')
+        .leftJoin('invoices as gpi', 'gpi.id', 'gp.prepay_invoice_id')
+        .whereRaw(`gp.id = ${alias}.renewed_from_term_id`)
+        .whereRaw(`${alias}.term_start = gp.term_end + 1`)
+        .where(function authorizingShape() {
+          this.where(function undecidedLive() {
+            this.whereIn('gp.status', ACTIVE_STATUSES).whereNull('gp.renewal_decision');
+          }).orWhere(function renewedByRenew() {
+            this.where('gp.status', 'renewed').where('gp.renewal_decision', 'renew');
+          });
+        })
+        .where(function parentInvoiceCollected() {
+          this.whereNull('gp.prepay_invoice_id').orWhere(function collectedNotRevoked() {
+            this.where(function collected() { wherePrepayInvoiceCollected(this, 'gpi'); })
+              .whereRaw("lower(coalesce(gpi.status, '')) not in ('void', 'cancelled', 'canceled', 'refunded')")
+              .whereRaw(`not exists (
+                select 1 from payments gpp
+                where (gpp.status = 'refunded' or gpp.refund_status = 'full')
+                  and ((gpp.stripe_payment_intent_id is not null and gpp.stripe_payment_intent_id = gpi.stripe_payment_intent_id)
+                    or (gpp.stripe_charge_id is not null and gpp.stripe_charge_id = gpi.stripe_charge_id))
+              )`);
+          });
+        });
+    });
 }
 
 function termiteRenewalGraceDeadlineFor(term) {
@@ -7245,7 +7281,7 @@ async function releaseTermNoticeClaim(claimedTerm, daysOut, previousStatus) {
 // other rung's claim is cleared with its late record.
 // baseline (schema-not-ready fallback, exact-day send): the rung's own
 // column only — no late classification, no late predicate.
-async function stampTermNoticeWitness(claimedTerm, daysOut, sentAt, { alsoRecordMissedRung = null, missedRungAt = null, baseline = false } = {}) {
+async function stampTermNoticeWitness(claimedTerm, daysOut, sentAt, { alsoRecordMissedRung = null, missedRungAt = null, baseline = false, freezeNoticedFee = true } = {}) {
   const noticeCol = noticeColumnForDaysOut(daysOut);
   const claimCol = noticeClaimColumnForDaysOut(daysOut);
   const sentCol = baseline ? noticeCol : noticeWitnessColumn(daysOut, claimedTerm, etDateString(sentAt));
@@ -7262,7 +7298,13 @@ async function stampTermNoticeWitness(claimedTerm, daysOut, sentAt, { alsoRecord
     // by ROW SHAPE (the claimed row is the table's own `returning('*')`, so
     // it carries the key exactly when the schema has the column) — no extra
     // probe query on this transaction.
-    const freezeFee = daysOut === TERMITE_EXTRA_NOTICE_DAYS
+    // Codex #4971 r28 P1: ONLY the live send freezes the fee — it stamps
+    // right after rendering it. A witness RECOVERED later from provider
+    // acceptance evidence (recoverTermiteNoticeFromAcceptance) was rendered
+    // at some earlier moment; the term's fee today may not be the fee that
+    // message quoted, so recovery freezes nothing and the mint fails closed
+    // (notice_fee_unfrozen) until staff record the quoted fee.
+    const freezeFee = freezeNoticedFee && daysOut === TERMITE_EXTRA_NOTICE_DAYS
       && claimedTerm.prepay_amount != null && claimedTerm.prepay_amount !== ''
       && Object.prototype.hasOwnProperty.call(claimedTerm, 'renewal_noticed_fee');
     stamped = await trx('annual_prepay_terms')
@@ -7570,8 +7612,8 @@ async function stampPlannedRecovery(claimedTerm, n, prior, plan) {
     if (otherResult.sent) rungs.push(plan.other);
   }
   const witness = await stampTermNoticeWitness(claimedTerm, n, prior.at, plan.combined
-    ? { alsoRecordMissedRung: plan.other, missedRungAt: plan.coveredOtherAt }
-    : {});
+    ? { alsoRecordMissedRung: plan.other, missedRungAt: plan.coveredOtherAt, freezeNoticedFee: false }
+    : { freezeNoticedFee: false });
   if (plan.combined) rungs.push(plan.other);
   return { rungs, witness };
 }

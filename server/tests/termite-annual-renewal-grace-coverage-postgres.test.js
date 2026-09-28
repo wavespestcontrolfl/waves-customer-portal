@@ -103,14 +103,39 @@ describeOrSkip('coveredTermsAsOf — termite renewal grace coverage (P2-4), real
   });
   afterEach(async () => { if (fixture) await fixture.destroy(); });
 
-  async function insertSuccessor({ termStart, createdAt, termEnd = '2099-01-01', overrides = {} } = {}) {
+  // Codex #4971 r28 P1: grace needs a parent that still authorizes the
+  // renewal — a successor whose ancestry this helper generates gets one by
+  // default (live, undecided, its window ending the day before the
+  // successor starts); `parent` overrides its fields, `parent: null`
+  // inserts none. A caller passing its own renewed_from_term_id owns that
+  // ancestor entirely (the missing / foreign / cyclic cases below).
+  const dayBefore = (ymd) => {
+    const d = new Date(`${String(ymd).slice(0, 10)}T12:00:00Z`);
+    d.setUTCDate(d.getUTCDate() - 1);
+    return d.toISOString().slice(0, 10);
+  };
+  async function insertSuccessor({ termStart, createdAt, termEnd = '2099-01-01', overrides = {}, parent = {} } = {}) {
     const id = randomUUID();
+    const explicitAncestor = Object.prototype.hasOwnProperty.call(overrides, 'renewed_from_term_id');
+    const parentId = explicitAncestor ? overrides.renewed_from_term_id : randomUUID();
+    if (parent && !explicitAncestor) {
+      await db('annual_prepay_terms').insert({
+        id: parentId,
+        customer_id: customerId,
+        status: 'active',
+        annual_plan_version: 'v3',
+        term_start: '2000-01-01',
+        term_end: dayBefore(termStart),
+        created_at: '2000-01-01T12:00:00Z',
+        ...parent,
+      });
+    }
     await db('annual_prepay_terms').insert({
       id,
       customer_id: customerId,
       prepay_invoice_id: invoiceId,
       status: 'payment_pending',
-      renewed_from_term_id: randomUUID(),
+      renewed_from_term_id: parentId,
       annual_plan_version: 'v3',
       term_start: termStart,
       term_end: termEnd,
