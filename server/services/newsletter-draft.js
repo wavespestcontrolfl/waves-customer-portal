@@ -1742,7 +1742,7 @@ async function createNewsletterDraft({
           'e.venue_name', 'e.venue_address', 'e.city', 'e.event_url',
           'e.image_url', 'e.categories', 'e.is_free', 'e.admin_status',
           'e.event_type', 'e.recurrence_type', 'e.freshness_status',
-          'e.times_featured', 'e.last_featured_at', 'e.pulled_at',
+          'e.times_featured', 'e.last_featured_at', 'e.last_featured_occurrence_at', 'e.pulled_at',
           'e.price_text', 'e.family_friendly', 'e.audience_tags',
           'e.novelty_type', 'e.region_zone', 'e.score_breakdown',
           's.name as source_name',

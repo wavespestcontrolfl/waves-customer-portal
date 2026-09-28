@@ -166,7 +166,7 @@ function applyCurationHardGates(query, alias = 'e') {
 const CANDIDATE_COLUMNS = [
   'e.id', 'e.title', 'e.description', 'e.start_at', 'e.end_at',
   'e.venue_name', 'e.city', 'e.event_type', 'e.recurrence_type',
-  'e.freshness_status', 'e.times_featured', 'e.last_featured_at',
+  'e.freshness_status', 'e.times_featured', 'e.last_featured_at', 'e.last_featured_occurrence_at',
   'e.pulled_at', 'e.is_free', 'e.family_friendly', 'e.event_url',
   'e.price_text', 'e.region_zone',
   'e.admin_status', 'e.merged_into',

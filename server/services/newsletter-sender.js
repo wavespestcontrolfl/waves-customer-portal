@@ -1363,6 +1363,9 @@ async function markEventsFeatured(send) {
       await trx('events_raw').where({ id }).update({
         times_featured: nextFeatured,
         last_featured_at: new Date(),
+        // The occurrence that shipped, so the calendar-year rule compares its
+        // own year (the send time can fall in the prior December).
+        last_featured_occurrence_at: row.start_at || null,
         // The editorial star is consumed by shipping: drop featured back to
         // approved so the eligibility override can't re-admit the same
         // event in the next issue.

@@ -425,4 +425,33 @@ describe('operator star override still bypasses the calendar-year rule', () => {
     expect(planned[0].__recurringFirstOfYear).toBe(true);
     expect(isEligibleForFreshDigest(planned[0], REFERENCE)).toBe(false);
   });
+
+  test('a row advanced in place to a later January date is not new when its January occurrence already shipped', () => {
+    const advanced = {
+      id: 'jan-row',
+      title: 'New Year Polar Plunge',
+      event_type: 'one_time',
+      recurrence_type: 'annual',
+      start_at: '2027-01-20T15:00:00Z',
+      times_featured: 1,
+      last_featured_at: '2026-12-29T11:00:00Z',
+      last_featured_occurrence_at: '2027-01-02T15:00:00Z',
+    };
+    expect(isEditoriallyNewEvent(advanced, new Date('2027-01-10T12:00:00Z'))).toBe(false);
+    expect(isEditoriallyNewEvent({ ...advanced, start_at: '2028-01-08T15:00:00Z' }, new Date('2027-12-20T12:00:00Z'))).toBe(true);
+  });
+
+  test('history inherited from an old recurring row still requires this year\'s first occurrence', async () => {
+    const oneTime = { event_type: 'one_time', recurrence_type: 'none', freshness_status: 'fresh_one_time', title: 'Riverside Harvest Market', description: 'Produce and crafts.' };
+    const featured2024 = weeklyEvent('featured-2024', {
+      ...oneTime, recurrence_type: 'weekly', start_at: '2024-08-03T14:00:00Z', times_featured: 1, last_featured_at: '2024-07-30T10:00:00Z',
+    });
+    const march = weeklyEvent('march-2026', { ...oneTime, start_at: '2026-03-07T15:00:00Z' });
+    const june = weeklyEvent('june-2026', { ...oneTime, start_at: '2026-08-08T14:00:00Z' });
+
+    const history = { select: () => history, where: async () => [featured2024] };
+    const knex = () => history;
+    const rows = await filterPreviouslyFeaturedIdentities([june], { knex, reference: REFERENCE, yearPool: [march, june] });
+    expect(rows).toEqual([]);
+  });
 });

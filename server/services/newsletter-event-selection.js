@@ -49,7 +49,9 @@ function parseLockedEventIds(value) {
   return Array.isArray(parsed) ? parsed.map(String) : [];
 }
 
-function isPreviouslyFeaturedIdentity(event, featuredHistory, reference, { occurrenceCount = null, identityRecurring = false } = {}) {
+function isPreviouslyFeaturedIdentity(event, featuredHistory, reference, {
+  occurrenceCount = null, identityRecurring = false, firstOfYear = null,
+} = {}) {
   return (Array.isArray(featuredHistory) ? featuredHistory : []).some((prior) => {
     if (String(prior.id) === String(event.id)) return false;
     const hasHistory = Number(prior.times_featured) > 0 || Boolean(prior.last_featured_at);
@@ -90,10 +92,16 @@ function isPreviouslyFeaturedIdentity(event, featuredHistory, reference, { occur
       // would say "not recurring" and permanently block the identity instead
       // of granting the calendar-year refresh this branch just qualified it
       // for.
+      // The refresh is for this ET year's FIRST occurrence only, whichever
+      // side proved recurrence: callers pass whether an earlier same-year
+      // occurrence exists in the year pool (the featured prior row is the
+      // earlier-year evidence itself).
+      if (firstOfYear === false) return true;
       return !isEditoriallyNewEvent({
         ...event,
         times_featured: Math.max(1, Number(prior.times_featured) || 0),
         last_featured_at: prior.last_featured_at,
+        last_featured_occurrence_at: prior.last_featured_occurrence_at ?? null,
       }, reference, { occurrenceCount, recurring: true });
     }
     return true;
@@ -104,7 +112,7 @@ async function loadFeaturedIdentityHistory(knex = db) {
   return knex('events_raw')
     .select(
       'id', 'title', 'event_url', 'event_type', 'recurrence_type',
-      'times_featured', 'last_featured_at',
+      'times_featured', 'last_featured_at', 'last_featured_occurrence_at',
     )
     .where((query) => query.where('times_featured', '>', 0).orWhereNotNull('last_featured_at'));
 }
@@ -130,7 +138,8 @@ async function filterPreviouslyFeaturedIdentities(events, { knex = db, reference
     const occurrenceCount = identityOccurrenceCount(event, calendarYearPool);
     const identityRecurring = event.__identityRecurring === true
       || identityIsRecurring(event, calendarYearPool, occurrenceCount);
-    return !isPreviouslyFeaturedIdentity(event, history, reference, { occurrenceCount, identityRecurring });
+    const firstOfYear = !hasEarlierOccurrenceThisYear(event, calendarYearPool, reference);
+    return !isPreviouslyFeaturedIdentity(event, history, reference, { occurrenceCount, identityRecurring, firstOfYear });
   });
 }
 
@@ -298,12 +307,30 @@ function identityOccurrenceCount(event, pool) {
  * duplicate of whichever row survived the merge, not independent evidence of
  * a distinct occurrence date (Codex P2 — see isMergedAwaySibling).
  */
+/**
+ * Part (a) of the first-of-year rule on its own: a live same-identity sibling
+ * falls on an EARLIER ET calendar day of the same ET year. The featured-history
+ * gate uses it directly, because there the featured prior row is itself the
+ * earlier-year evidence (part b).
+ */
+function hasEarlierOccurrenceThisYear(event, pool, reference = new Date()) {
+  if (!event?.start_at) return false;
+  const eventYear = etYearOf(event.start_at, reference);
+  const eventDayKey = occurrenceDayKey(event);
+  return (Array.isArray(pool) ? pool : []).some((sibling) => {
+    if (!sibling || String(sibling.id) === String(event?.id)) return false;
+    if (isMergedAwaySibling(sibling) || !isSameSeriesSibling(event, sibling)) return false;
+    if (!sibling.start_at || etYearOf(sibling.start_at, reference) !== eventYear) return false;
+    const siblingDayKey = occurrenceDayKey(sibling);
+    return siblingDayKey !== eventDayKey && siblingDayKey < eventDayKey;
+  });
+}
+
 function isFirstOccurrenceOfYear(event, pool, reference = new Date()) {
   if (!event?.start_at) return false;
   const start = new Date(event.start_at).getTime();
   if (Number.isNaN(start)) return false;
   const eventYear = etYearOf(event.start_at, reference);
-  const eventDayKey = occurrenceDayKey(event);
 
   const siblings = (Array.isArray(pool) ? pool : []).filter((sibling) => (
     sibling && String(sibling.id) !== String(event?.id)
@@ -318,12 +345,7 @@ function isFirstOccurrenceOfYear(event, pool, reference = new Date()) {
   // neither is "earlier" than the other. A plain millisecond comparison
   // wrongly disqualified whichever of the pair happened to sort later, even
   // though it never actually lost to a genuinely distinct earlier occurrence.
-  const hasEarlierThisYear = siblings.some((sibling) => {
-    if (!sibling.start_at || etYearOf(sibling.start_at, reference) !== eventYear) return false;
-    const siblingDayKey = occurrenceDayKey(sibling);
-    return siblingDayKey !== eventDayKey && siblingDayKey < eventDayKey;
-  });
-  if (hasEarlierThisYear) return false; // (a)
+  if (hasEarlierOccurrenceThisYear(event, pool, reference)) return false; // (a)
 
   const hasPriorYearOccurrence = siblings.some((sibling) => (
     sibling.start_at && etYearOf(sibling.start_at, reference) === eventYear - 1
@@ -591,7 +613,9 @@ function assessFlagshipEventSelection(
         || (!starred && isRecurringIdentity && !firstOfYear)
         || !isEligibleForFreshDigest(eligibilityCheckEvent, reference)
         || (!starred && isPreviouslyFeaturedIdentity(event, featuredHistory, reference, {
-          occurrenceCount, identityRecurring: isRecurringIdentity,
+          occurrenceCount,
+          identityRecurring: isRecurringIdentity,
+          firstOfYear: !hasEarlierOccurrenceThisYear(event, yearIdentityPool, reference),
         }))) {
       errors.push(`Locked event is no longer eligible: ${event.title || event.id}.`);
       continue;
@@ -635,7 +659,7 @@ async function validateFlagshipEventSelection(send, { knex = db, reference = new
     .select(
       'id', 'title', 'description', 'admin_status', 'start_at', 'end_at',
       'event_url', 'event_type', 'recurrence_type', 'freshness_status',
-      'times_featured', 'last_featured_at', 'pulled_at', 'merged_into',
+      'times_featured', 'last_featured_at', 'last_featured_occurrence_at', 'pulled_at', 'merged_into',
       // Series context for isSameSeriesSibling — without these the final
       // gate compares a context-free locked row against the context-rich
       // pool and rejects a lineup planning accepted.

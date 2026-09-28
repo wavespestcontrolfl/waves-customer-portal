@@ -185,7 +185,7 @@ async function buildDigestPlan({ reference = new Date() } = {}) {
       'e.id', 'e.title', 'e.description', 'e.start_at', 'e.end_at',
       'e.venue_name', 'e.venue_address', 'e.city', 'e.event_url', 'e.image_url',
       'e.event_type', 'e.recurrence_type', 'e.freshness_status', 'e.freshness_score',
-      'e.admin_status', 'e.times_featured', 'e.last_featured_at', 'e.pulled_at', 'e.source_id',
+      'e.admin_status', 'e.times_featured', 'e.last_featured_at', 'e.last_featured_occurrence_at', 'e.pulled_at', 'e.source_id',
       'e.region_zone', 'e.family_friendly', 'e.is_free', 'e.price_text',
       'e.editorial_score', 'e.score_breakdown', 'e.novelty_type', 'e.audience_tags',
       's.name as source_name', 's.priority_tier as source_priority_tier',

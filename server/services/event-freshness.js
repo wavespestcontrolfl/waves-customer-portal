@@ -224,7 +224,14 @@ function isEditoriallyNewEvent(event = {}, reference = new Date(), { occurrenceC
   const parsedStart = event.start_at ? new Date(event.start_at) : null;
   const start = parsedStart && !Number.isNaN(parsedStart.getTime()) ? parsedStart : new Date(reference);
 
-  // last_featured_at is the SEND time, not the featured occurrence's date: an
+  // Preferred: the shipped occurrence's own date (last_featured_occurrence_at,
+  // stamped at send). New only in a later ET year than that occurrence.
+  const featuredOccurrence = event.last_featured_occurrence_at ? new Date(event.last_featured_occurrence_at) : null;
+  if (featuredOccurrence && !Number.isNaN(featuredOccurrence.getTime())) {
+    return etYearOf(featuredOccurrence, reference) < etYearOf(start, reference);
+  }
+
+  // Rows featured before that column existed: last_featured_at is the SEND time, not the featured occurrence's date: an
   // issue covers events up to FEATURED_ISSUE_LOOKAHEAD_MS after it ships. An
   // occurrence inside that window may be the very one that shipped (a
   // January 2 event featured December 29), so it never re-qualifies through

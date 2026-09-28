@@ -1919,7 +1919,7 @@ router.get('/events/approved-ids', async (req, res, next) => {
       .select(
         'e.id', 'e.title', 'e.description', 'e.admin_status', 'e.start_at', 'e.end_at',
         'e.event_url', 'e.event_type', 'e.recurrence_type', 'e.freshness_status',
-        'e.times_featured', 'e.last_featured_at', 'e.pulled_at',
+        'e.times_featured', 'e.last_featured_at', 'e.last_featured_occurrence_at', 'e.pulled_at',
         // Series context for isSameSeriesSibling (Codex P2, 2026-09-27):
         // without these every same-title row matches every other regardless
         // of venue/city, so a recurring identity's first-of-year admission
@@ -1980,7 +1980,7 @@ router.post('/events/digest-plan', async (req, res, next) => {
         'e.id', 'e.title', 'e.description', 'e.start_at', 'e.end_at',
         'e.venue_name', 'e.city', 'e.event_url',
         'e.event_type', 'e.recurrence_type', 'e.freshness_status', 'e.freshness_score',
-        'e.admin_status', 'e.times_featured', 'e.last_featured_at', 'e.pulled_at',
+        'e.admin_status', 'e.times_featured', 'e.last_featured_at', 'e.last_featured_occurrence_at', 'e.pulled_at',
         'e.region_zone', 'e.family_friendly', 'e.is_free',
         's.name as source_name', 's.priority_tier as source_priority_tier',
       )
