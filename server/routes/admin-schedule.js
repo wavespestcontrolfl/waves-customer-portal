@@ -15761,21 +15761,51 @@ async function resolveScheduledServiceCharge({
   // always proceeds to completionInvoiceAmount below, exactly as before the
   // round-10 priced-branch detour (removed; replaced by the single rule).
   //
-  // completionInvoiceAmount's own per_application fee branch is never
-  // exercised from here any more (owner ruling — REMOVE THE CHARGE NOW FEE
-  // FALLBACK): perApplicationBilling/perApplicationFee are simply not
-  // passed, so an unpriced per_application visit falls through to the
-  // `billingMode !== 'monthly_membership'` branch and resolves 0, same as
-  // every other explicit non-monthly lane. Returned as a plain number, NOT
-  // a structured refusal — a $0 amount here does not by itself mean
-  // "nothing to charge": both callers of this resolver still check for an
-  // existing invoice already on this visit's own row before giving up on
-  // it (mintOrReuseScheduledServiceInvoice / the Charge Now route's own
-  // reuse block), and a 0 that preempted that check here would block
-  // collecting on a perfectly good already-minted invoice. The Charge Now
-  // route's own "no chargeable amount" 400 (after that reuse check finds
-  // nothing) carries the clear copy for this ruling's actual "nothing else
-  // to charge" case.
+  // codex pre-push P1 (round 13): completionInvoiceAmount's own
+  // per_application fee branch is never exercised from here any more (owner
+  // ruling — REMOVE THE CHARGE NOW FEE FALLBACK): perApplicationBilling/
+  // perApplicationFee are simply not passed, so an unpriced per_application
+  // visit falls through to the `billingMode !== 'monthly_membership'`
+  // branch and resolves 0 — same as every other explicit non-monthly lane
+  // — UNLESS the shape below refuses first. A bare $0 here, left
+  // unrefused, let `extraLineItems` alone clear the Charge Now route's
+  // "amount > 0 OR extras > 0" mint gate and attach a real extras-only
+  // invoice to the visit's own scheduled_service_id — completion's
+  // existingCompletionInvoice lookup (complete-scheduled-service.js) then
+  // finds THAT invoice and reuses it as-is, never re-running the fee
+  // decision at all, so the acceptance fee is lost outright, not merely
+  // deferred (unlike the ordinary "no chargeable amount" 0 for every other
+  // ineligible shape below, which mints nothing for a caller to
+  // mis-attribute).
+  //
+  // Refuse the SAME way a covered sibling visit already does (round-8 P1):
+  // the WHOLE mint, base AND extras, base AND an already-existing invoice
+  // on the row — before extras (or the existing-invoice reuse block in
+  // either caller) are ever reached. Scoped to EXACTLY the shape completion
+  // bills the fee for (isCallback / isAlwaysFreeServiceType mirror every
+  // other per_application exclusion in this lane —
+  // isSiblingCoverageEligibleVisit, predictCompletionBilling — completion
+  // bills nothing for either of those, so there is nothing for an
+  // extras-only mint to suppress) — NOT the sibling-eligible shape
+  // (source_estimate_id is irrelevant here; this applies to ANY unpriced
+  // per_application customer visit, estimate-linked or not).
+  //
+  // monthly_membership checked and cleared (no equivalent gap): that
+  // lane's fallback is `monthlyRate`, read by THIS SAME resolver's
+  // completionInvoiceAmount call below with the exact inputs completion
+  // itself reads — if completion would bill the rate, `amount` below is
+  // ALREADY positive (no fee-removal divergence for that lane exists at
+  // all), so the ordinary "amount > 0" mint path already covers it. The
+  // explicit non-monthly per_visit/one_time lanes never fall back to
+  // anything besides an explicit price either (completionInvoiceAmount
+  // returns 0 for them regardless), so they have no fee to lose this way.
+  if (billingMode === 'per_application' && !isCallback && !isAlwaysFreeServiceType(serviceType) && !hasOwnPrice) {
+    return {
+      refused: true,
+      reason: 'per_application_fee_at_completion',
+      message: 'This visit bills its application fee at completion — add extras there, or set a price on this visit first.',
+    };
+  }
   return completionInvoiceAmount({
     estimatedPrice,
     isCallback,

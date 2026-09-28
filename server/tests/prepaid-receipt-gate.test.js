@@ -98,41 +98,64 @@ describe('resolveScheduledServiceCharge', () => {
   // Owner ruling — REMOVE THE CHARGE NOW FEE FALLBACK (2026-09-27): Charge
   // Now / prepaid-receipt minting must NEVER bill an unpriced visit from the
   // customer-level per_application_fee — that is main's original behavior,
-  // restored here (a prior round of this same lane had widened this
-  // resolver to bill it, matching completion's own fee fallback — see the
-  // divergence test below for why that widening is gone). An explicit
-  // non-monthly billingMode (including per_application) always resolves to
-  // 0 when there's no own price, exactly like every other explicit
-  // non-monthly lane always has on this resolver — passing perApplicationFee
-  // is simply a no-op now (the parameter no longer exists on this
-  // function).
-  test('an explicit per_application lane never bills the acceptance fee — that is completion\'s job now, not Charge Now\'s', async () => {
-    expect(await resolveScheduledServiceCharge({
+  // restored here.
+  //
+  // Owner ruling — REFUSE EXTRAS-ONLY MINTS FOR THE FEE SHAPE (round 13,
+  // codex pre-push P1): a bare 0 for an unpriced, non-callback,
+  // non-always-free per_application visit is not "nothing chargeable" — it
+  // is EXACTLY the shape completion bills the acceptance fee for
+  // (completionInvoiceAmount's own per_application branch, billing-lane.js).
+  // A caller with extraLineItems (or an existing invoice already on the
+  // row) could otherwise mint/reuse an extras-only invoice attached to the
+  // visit — complete-scheduled-service.js's existingCompletionInvoice
+  // lookup then finds it and never re-runs the fee decision, losing the
+  // fee outright rather than merely deferring it. This resolver now returns
+  // the SAME kind of structured refusal a covered sibling visit already
+  // does (round-8 P1) for this exact shape, unconditionally — every caller
+  // must check `.refused` before treating a 0 as "nothing to mint, but
+  // reuse/extras are fine."
+  test('an unpriced, non-callback, non-always-free per_application visit refuses the whole mint — completion bills the fee, not Charge Now', async () => {
+    const result = await resolveScheduledServiceCharge({
       estimatedPrice: null, isCallback: false, monthlyRate: 74.7, billingMode: 'per_application',
-    })).toBe(0);
-    // A callback is unaffected either way — still free.
+    });
+    expect(result).toEqual({
+      refused: true,
+      reason: 'per_application_fee_at_completion',
+      message: expect.stringMatching(/bills its application fee at completion/i),
+    });
+  });
+
+  // A callback is unaffected either way — still free, and never reaches the
+  // per_application refusal (isCallback excludes it, mirroring completion
+  // itself, which never bills a callback the fee).
+  test('a callback per_application visit is unaffected — free, never refused', async () => {
     expect(await resolveScheduledServiceCharge({
       estimatedPrice: null, isCallback: true, monthlyRate: 74.7, billingMode: 'per_application',
     })).toBe(0);
   });
 
-  test('a zero estimatedPrice falls through the same way as null — never the acceptance fee', async () => {
-    expect(await resolveScheduledServiceCharge({
+  test('a zero estimatedPrice refuses the same way as null — never a bare 0, never the acceptance fee', async () => {
+    const result = await resolveScheduledServiceCharge({
       estimatedPrice: 0, isCallback: false, monthlyRate: 74.7, billingMode: 'per_application',
-    })).toBe(0);
+    });
+    expect(result).toEqual({
+      refused: true,
+      reason: 'per_application_fee_at_completion',
+      message: expect.stringMatching(/bills its application fee at completion/i),
+    });
   });
 
-  // Owner ruling — REMOVE THE CHARGE NOW FEE FALLBACK: this used to be a
-  // parity test proving predictCompletionBilling (the schedule sheet's
-  // preview of what COMPLETION will bill) and resolveScheduledServiceCharge
-  // (what Charge Now actually mints) agreed on the same fixture. They now
-  // deliberately DIVERGE for an unpriced per_application visit — completion
-  // still bills the acceptance fee (predictCompletionBilling is completion's
-  // own prediction, untouched by this ruling), but Charge Now refuses:
-  // "set a price on the visit, or bill it at completion" is the whole
-  // point. MobileCheckoutSheet's own test pins the client-side half of this
-  // (it must not preview the fee amount for this shape either).
-  test('completion still predicts the acceptance fee; Charge Now no longer mints it — the two deliberately diverge', async () => {
+  // Owner ruling: this used to be a parity test proving predictCompletionBilling
+  // (the schedule sheet's preview of what COMPLETION will bill) and
+  // resolveScheduledServiceCharge (what Charge Now actually mints) agreed on
+  // the same fixture. They now deliberately DIVERGE for an unpriced
+  // per_application visit — completion still bills the acceptance fee
+  // (predictCompletionBilling is completion's own prediction, untouched by
+  // this ruling), but Charge Now refuses the WHOLE mint outright (round 13
+  // — not just a bare 0 a caller's extras could clear). MobileCheckoutSheet's
+  // own tests pin the client-side half of this (no preview of the fee, and
+  // no Add Service/Item pickers offered for this shape either).
+  test('completion still predicts the acceptance fee; Charge Now refuses the whole mint — the two deliberately diverge', async () => {
     const fixture = {
       estimatedPrice: 0, isCallback: false, monthlyRate: null, billingMode: 'per_application',
       perApplicationFee: 97.2, serviceType: 'Quarterly Pest Control',
@@ -153,9 +176,14 @@ describe('resolveScheduledServiceCharge', () => {
     expect(prediction.grossAmount).toBe(97.2);
 
     // "Mint" — resolveScheduledServiceCharge no longer takes perApplicationFee
-    // at all; passing it (as a stale caller might) is simply ignored.
-    const mintBase = await resolveScheduledServiceCharge(fixture);
-    expect(mintBase).toBe(0);
+    // at all (passing it, as a stale caller might, is simply ignored), and
+    // now refuses this shape outright rather than resolving 0.
+    const mintResult = await resolveScheduledServiceCharge(fixture);
+    expect(mintResult).toEqual({
+      refused: true,
+      reason: 'per_application_fee_at_completion',
+      message: expect.stringMatching(/bills its application fee at completion/i),
+    });
   });
 
   test('an explicit non-monthly, non-per_application lane still never falls back to the lingering monthly rate', async () => {
@@ -164,15 +192,32 @@ describe('resolveScheduledServiceCharge', () => {
     })).toBe(0);
   });
 
-  // Owner ruling — REMOVE THE CHARGE NOW FEE FALLBACK: serviceType used to
-  // matter here only because the acceptance-fee fallback existed at all —
-  // an always-free type (estimate/follow-up/re-service) had to be excluded
-  // from it explicitly, while a genuinely billable type still got the fee.
-  // With the fallback gone entirely, BOTH resolve to 0 now — serviceType no
-  // longer affects this resolver's AMOUNT at all (it still gates whether
-  // the sibling-coverage lookup runs at all, via isSiblingCoverageEligibleVisit
-  // — proven separately in the sibling-covered describe block below).
-  test('an unpriced visit under an explicit per_application lane never bills anything, always-free type or not', async () => {
+  // Owner ruling — REFUSE EXTRAS-ONLY MINTS: scoped to per_application ONLY
+  // — checked against monthly_membership, the other lane with an
+  // unpriced-visit fallback. That lane's fallback is `monthlyRate`, read by
+  // THIS SAME resolver's completionInvoiceAmount call with the exact inputs
+  // completion itself reads: if completion would bill the rate, `amount`
+  // is ALREADY positive here — no fee-removal divergence for that lane
+  // exists at all, so the ordinary "amount > 0" mint path (with extras
+  // stacked on top, same as always) already covers it. No refusal, no gap.
+  test('an unpriced monthly_membership visit has no equivalent gap — it mints the monthly rate normally, extras included', async () => {
+    expect(await resolveScheduledServiceCharge({
+      estimatedPrice: null, isCallback: false, monthlyRate: 74.7, billingMode: 'monthly_membership',
+    })).toBe(74.7);
+    // With no rate on file either, it resolves a plain 0 (not refused) —
+    // completion bills nothing for it either, so there's nothing for
+    // extras to suppress.
+    expect(await resolveScheduledServiceCharge({
+      estimatedPrice: null, isCallback: false, monthlyRate: 0, billingMode: 'monthly_membership',
+    })).toBe(0);
+  });
+
+  // An always-free type (estimate/follow-up/re-service) is unaffected by
+  // the round-13 refusal, exactly like it's unaffected by every other
+  // per_application exclusion in this lane (isSiblingCoverageEligibleVisit,
+  // predictCompletionBilling) — completion bills nothing for it either, so
+  // there's nothing for an extras-only mint to suppress.
+  test('an unpriced always-free-type visit under an explicit per_application lane is unaffected — bills nothing, never refused', async () => {
     expect(await resolveScheduledServiceCharge({
       estimatedPrice: null, isCallback: false, monthlyRate: 74.7, billingMode: 'per_application',
       serviceType: 'Pest Control Follow-Up',
@@ -183,13 +228,22 @@ describe('resolveScheduledServiceCharge', () => {
       estimatedPrice: 50, isCallback: false, monthlyRate: 74.7, billingMode: 'per_application',
       serviceType: 'Pest Control Follow-Up',
     })).toBe(50);
-    // A genuinely billable per_application type is ALSO 0 now — with no
-    // svc/dbConn passed (the pure, DB-free shape), the sibling-coverage
-    // guard below never even asks.
-    expect(await resolveScheduledServiceCharge({
+  });
+
+  // Owner ruling — REFUSE EXTRAS-ONLY MINTS: a genuinely billable
+  // per_application type (not always-free) refuses too, even with no
+  // svc/dbConn passed — this is a pure shape gate, not a DB lookup, so the
+  // sibling-coverage guard below never even asks.
+  test('a genuinely billable per_application type refuses too, even with no svc/dbConn passed', async () => {
+    const result = await resolveScheduledServiceCharge({
       estimatedPrice: null, isCallback: false, monthlyRate: 74.7, billingMode: 'per_application',
       serviceType: 'Quarterly Pest Control',
-    })).toBe(0);
+    });
+    expect(result).toEqual({
+      refused: true,
+      reason: 'per_application_fee_at_completion',
+      message: expect.stringMatching(/bills its application fee at completion/i),
+    });
     expect(findFirstApplicationInvoiceForEstimateService).not.toHaveBeenCalled();
   });
 
@@ -254,27 +308,40 @@ describe('resolveScheduledServiceCharge', () => {
       expect(findFirstApplicationInvoiceForEstimateService).not.toHaveBeenCalled();
     });
 
-    // Owner ruling — REMOVE THE CHARGE NOW FEE FALLBACK: this used to prove
-    // an own-row match falls through to bill the established fee. The fee
-    // fallback is gone — it now falls through to 0, same as any other
+    // Owner ruling — REFUSE EXTRAS-ONLY MINTS FOR THE FEE SHAPE (round 13):
+    // this used to prove an own-row match falls through to 0 (the removed
+    // fee fallback). A bare 0 for this shape is now itself refused
+    // outright — completion bills the acceptance fee for it, so any 0 that
+    // let a caller's extras (or an existing invoice reuse) slip past would
+    // silently drop that fee. Same structured refusal as any other
     // 'none'-verdict per_application visit with no own price.
-    test('a match naming this visit\'s OWN row (not a sibling) resolves to 0 — no fee fallback', async () => {
+    test('a match naming this visit\'s OWN row (not a sibling) still refuses the whole mint — no fee, no extras-only mint', async () => {
       findFirstApplicationInvoiceForEstimateService.mockResolvedValue({
         invoice: { id: 'inv-1', scheduled_service_id: SVC.id, status: 'sent', total: 97.2 },
         liveBeside: null,
       });
-      expect(await resolveScheduledServiceCharge({
+      const result = await resolveScheduledServiceCharge({
         estimatedPrice: null, isCallback: false, monthlyRate: 74.7, billingMode: 'per_application',
         serviceType: 'Every 6 Weeks Lawn Care', svc: SVC, dbConn: DB_CONN,
-      })).toBe(0);
+      });
+      expect(result).toEqual({
+        refused: true,
+        reason: 'per_application_fee_at_completion',
+        message: expect.stringMatching(/bills its application fee at completion/i),
+      });
     });
 
-    test('no sibling match resolves to 0 — no fee fallback', async () => {
+    test('no sibling match still refuses the whole mint — no fee, no extras-only mint', async () => {
       findFirstApplicationInvoiceForEstimateService.mockResolvedValue({ invoice: null, liveBeside: null });
-      expect(await resolveScheduledServiceCharge({
+      const result = await resolveScheduledServiceCharge({
         estimatedPrice: null, isCallback: false, monthlyRate: 74.7, billingMode: 'per_application',
         serviceType: 'Every 6 Weeks Lawn Care', svc: SVC, dbConn: DB_CONN,
-      })).toBe(0);
+      });
+      expect(result).toEqual({
+        refused: true,
+        reason: 'per_application_fee_at_completion',
+        message: expect.stringMatching(/bills its application fee at completion/i),
+      });
     });
 
     // Owner ruling — REFUSE AFTER A VOID: the estimate's recognized combined
@@ -353,11 +420,20 @@ describe('resolveScheduledServiceCharge', () => {
       expect(result).toEqual({ refused: true, reason: 'sibling_invoice_needs_review', message: expect.stringMatching(/manual review/i) });
     });
 
-    test('without svc/dbConn (a caller that has neither) skips the lookup and resolves to 0 — no fee fallback', async () => {
-      expect(await resolveScheduledServiceCharge({
+    // Owner ruling — REFUSE EXTRAS-ONLY MINTS: the per_application refusal
+    // is a pure shape gate (isCallback / isAlwaysFreeServiceType / hasOwnPrice
+    // only) — it fires even with no svc/dbConn passed, unlike the
+    // sibling-coverage lookup (which is skipped here, as before).
+    test('without svc/dbConn (a caller that has neither) skips the sibling lookup but still refuses the fee shape', async () => {
+      const result = await resolveScheduledServiceCharge({
         estimatedPrice: null, isCallback: false, monthlyRate: 74.7, billingMode: 'per_application',
         serviceType: 'Every 6 Weeks Lawn Care',
-      })).toBe(0);
+      });
+      expect(result).toEqual({
+        refused: true,
+        reason: 'per_application_fee_at_completion',
+        message: expect.stringMatching(/bills its application fee at completion/i),
+      });
       expect(findFirstApplicationInvoiceForEstimateService).not.toHaveBeenCalled();
     });
 
@@ -380,15 +456,20 @@ describe('resolveScheduledServiceCharge', () => {
     // Without a positive primary_line_price on the row, a bare stamped 0 is
     // the DIFFERENT, indistinguishable-from-null shape (the sibling-covered
     // same-trip PROMOTED row leaves both columns null) and still defers to
-    // the sibling lookup exactly as before this change — it just resolves
-    // to 0 now instead of the (removed) fee once that lookup confirms
-    // 'none'.
-    test('a bare stamped $0 with no primary_line_price still defers to the sibling lookup, resolving to 0 — no fee fallback', async () => {
+    // the sibling lookup exactly as before this change — once that lookup
+    // confirms 'none', it now refuses the whole mint outright (round 13)
+    // instead of resolving the (removed) fee.
+    test('a bare stamped $0 with no primary_line_price still defers to the sibling lookup, then refuses the whole mint', async () => {
       findFirstApplicationInvoiceForEstimateService.mockResolvedValue({ invoice: null, liveBeside: null });
-      expect(await resolveScheduledServiceCharge({
+      const result = await resolveScheduledServiceCharge({
         estimatedPrice: 0, isCallback: false, monthlyRate: 74.7, billingMode: 'per_application',
         serviceType: 'Every 6 Weeks Lawn Care', svc: SVC, dbConn: DB_CONN,
-      })).toBe(0);
+      });
+      expect(result).toEqual({
+        refused: true,
+        reason: 'per_application_fee_at_completion',
+        message: expect.stringMatching(/bills its application fee at completion/i),
+      });
       expect(findFirstApplicationInvoiceForEstimateService).toHaveBeenCalled();
     });
   });

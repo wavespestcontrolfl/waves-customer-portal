@@ -16,10 +16,18 @@
 // — this file's first describe block, which used to pin the fee winning
 // over a stamped $0 (parity with the OLD mint behavior), now pins the
 // OPPOSITE: no charge amount for the base, with the fee-based prediction
-// ignored entirely; a checkout extra is still fully chargeable on its own
-// (see server/tests/prepaid-receipt-gate.test.js's "completion still
-// predicts the acceptance fee; Charge Now no longer mints it" for the
-// server-side half of this same divergence).
+// ignored entirely (see server/tests/prepaid-receipt-gate.test.js's
+// "completion still predicts the acceptance fee; Charge Now no longer
+// mints it" for the server-side half of this same divergence).
+//
+// Codex pre-push P1 (round 13): a checkout extra is NOT chargeable on its
+// own for this shape either, unlike every other $0 visit — an extras-only
+// invoice would attach to the visit's own row, and completion's
+// existingCompletionInvoice lookup (complete-scheduled-service.js) would
+// then reuse it as-is and never re-run the fee decision, silently losing
+// the acceptance fee rather than merely deferring it. The server refuses
+// the WHOLE mint for this shape, extras included, and the sheet hides the
+// Add Service / Add Item pickers entirely to match.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
@@ -45,11 +53,6 @@ vi.mock('../../hooks/useDiscountStacking', () => ({
 }));
 
 afterEach(cleanup);
-
-function addCheckoutExtra() {
-  fireEvent.click(screen.getByRole('button', { name: 'Add Service' }));
-  fireEvent.click(screen.getByRole('button', { name: 'pick Checkout Extra' }));
-}
 
 const ZERO_PRICE_FEE_FALLBACK_SERVICE = {
   id: 'svc-1',
@@ -80,14 +83,15 @@ describe('MobileCheckoutSheet — estimatedPrice: 0 under the removed per_applic
     expect(screen.getByRole('button', { name: 'No charge — complete from job' })).toBeDisabled();
   });
 
-  // A checkout extra is still fully chargeable on its own — "nothing else
-  // to charge" only refused the base (the removed fee), never a genuine
-  // extra riding on top of it. $40 only, never $137.20 (fee + extra).
-  it('the checkout extra alone is chargeable — never stacked on the removed fee', () => {
+  // Codex pre-push P1 (round 13): a checkout extra is NOT chargeable on its
+  // own for this shape either — the server refuses the whole mint, extras
+  // included, so the pickers that would let a tech add one are hidden
+  // entirely, replaced with copy explaining why.
+  it('hides the Add Service / Add Item pickers — the whole mint is refused, extras included', () => {
     render(<MobileCheckoutSheet service={ZERO_PRICE_FEE_FALLBACK_SERVICE} onClose={() => {}} />);
-    addCheckoutExtra();
-    expect(screen.getByRole('button', { name: 'Charge $40.00' })).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Charge $137.20' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Add Service' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Add Item or Discount' })).not.toBeInTheDocument();
+    expect(screen.getByText('This visit bills its application fee at completion — add extras there, or set a price on this visit first.')).toBeInTheDocument();
   });
 });
 

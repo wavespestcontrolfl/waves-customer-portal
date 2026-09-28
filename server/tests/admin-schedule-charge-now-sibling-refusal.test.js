@@ -211,16 +211,23 @@ describe('POST /:id/invoice — sibling-lookup refusal (codex round-2 P1)', () =
   // to prove a definitive 'none' verdict falls through to mint the
   // customer's established cust_per_application_fee. That fallback is gone
   // — Charge Now must never bill an unpriced visit from the customer-level
-  // per_application_fee (main's original behavior, restored). A 'none'
-  // verdict with nothing else to charge now refuses with a plain 400 and
-  // clear copy, never a fee mint.
-  test('a definitive "none" verdict with an established fee on file still refuses — no fee mint', async () => {
+  // per_application_fee (main's original behavior, restored).
+  //
+  // Owner ruling — REFUSE EXTRAS-ONLY MINTS FOR THE FEE SHAPE (round 13,
+  // codex pre-push P1): a 'none' verdict for this shape (unpriced,
+  // non-callback, non-always-free, per_application) now refuses the WHOLE
+  // mint with a 409, the same way a covered sibling visit already does
+  // (round-8 P1) — not the plain 400 "nothing chargeable" every other $0
+  // reason still gets. Completion bills the acceptance fee for this exact
+  // shape; a bare 0 that let this route's own reuse/extras logic run past
+  // it could still attach an extras-only invoice that strands that fee.
+  test('a definitive "none" verdict with an established fee on file still refuses — the whole mint, a 409', async () => {
     findFirstApplicationInvoiceForEstimateService.mockResolvedValue({ invoice: null, liveBeside: null });
     const { req, res, next } = makeReqRes({});
     await handler(req, res, next);
 
-    expect(res.status).toHaveBeenCalledWith(400);
-    expect(res.body.error).toMatch(/set a price on the visit, or bill it at completion/i);
+    expect(res.status).toHaveBeenCalledWith(409);
+    expect(res.body.error).toMatch(/bills its application fee at completion/i);
     expect(mockMint).not.toHaveBeenCalled();
     expect(next).not.toHaveBeenCalled();
   });
@@ -250,27 +257,54 @@ describe('POST /:id/invoice — sibling-lookup refusal (codex round-2 P1)', () =
   // The normal, unaffected case: no voided combined invoice anywhere, and
   // the sibling group has genuinely nothing minted yet — the guard must
   // not invent a review state out of nothing. With the fee fallback gone,
-  // this unpriced visit still has nothing else to charge, so it refuses —
-  // a plain 400, never a 409 (nothing here is stale/retryable).
-  test('a normal "none" verdict with nothing on the estimate at all refuses — no fee mint, not a 409', async () => {
+  // this unpriced per_application visit refuses the WHOLE mint (round 13),
+  // a 409 — never the plain 400 "nothing chargeable" a lane with no fee at
+  // stake would get.
+  test('a normal "none" verdict with nothing on the estimate at all refuses the whole mint, a 409', async () => {
     findFirstApplicationInvoiceForEstimateService.mockResolvedValue({ invoice: null, liveBeside: null });
     mockDb.__invoiceRows = [];
     const { req, res, next } = makeReqRes({});
     await handler(req, res, next);
 
-    expect(res.status).toHaveBeenCalledWith(400);
-    expect(res.status).not.toHaveBeenCalledWith(409);
-    expect(res.body.error).toMatch(/set a price on the visit, or bill it at completion/i);
+    expect(res.status).toHaveBeenCalledWith(409);
+    expect(res.body.error).toMatch(/bills its application fee at completion/i);
     expect(mockMint).not.toHaveBeenCalled();
     expect(next).not.toHaveBeenCalled();
   });
 
-  // An unpriced visit with a real price on the checkout extra still charges
-  // that extra normally — "nothing else to charge" only refuses the base,
-  // never a checkout extra riding on top of it.
-  test('a normal "none" verdict WITH a checkout extra mints the extra normally, never the fee', async () => {
+  // Owner ruling — REFUSE EXTRAS-ONLY MINTS FOR THE FEE SHAPE (round 13,
+  // codex pre-push P1): the exact bug this ruling fixes. Before this fix, a
+  // $0 base plus a positive checkout extra cleared this route's own
+  // "amount > 0 OR extras > 0" mint gate and attached a real extras-only
+  // invoice to the visit's own scheduled_service_id — completion's
+  // existingCompletionInvoice lookup (complete-scheduled-service.js) would
+  // then find that invoice and reuse it as-is, never re-running the fee
+  // decision, silently losing the acceptance fee. The refusal must fire
+  // BEFORE extras are even parsed — same as a covered sibling visit
+  // (round-8 P1) — so no extra amount can ever slip past it.
+  test('a normal "none" verdict with a checkout extra STILL refuses the whole mint — no extras-only invoice', async () => {
     findFirstApplicationInvoiceForEstimateService.mockResolvedValue({ invoice: null, liveBeside: null });
     mockDb.__invoiceRows = [];
+    const { req, res, next } = makeReqRes({
+      extraLineItems: [{ description: 'Extra treatment', quantity: 1, unit_price: 40, amount: 40 }],
+    });
+    await handler(req, res, next);
+
+    expect(res.status).toHaveBeenCalledWith(409);
+    expect(res.body.error).toMatch(/bills its application fee at completion/i);
+    expect(mockMint).not.toHaveBeenCalled();
+    expect(mockBuildLineItems).not.toHaveBeenCalled();
+  });
+
+  // The lane this ruling does NOT touch (checked and cleared — see
+  // prepaid-receipt-gate.test.js's own "no equivalent gap" pure-resolver
+  // proof): a monthly_membership visit's fallback is `monthlyRate`, so an
+  // unpriced visit with a rate on file already resolves a positive amount
+  // through this SAME resolver — a checkout extra mints normally, stacked
+  // on top of the base, exactly as it always has.
+  test('an unpriced monthly_membership visit with a checkout extra mints normally — no equivalent gap for this lane', async () => {
+    mockDb.__svcRow = { ...SVC_ROW, cust_billing_mode: 'monthly_membership', cust_monthly_rate: 74.7 };
+    findFirstApplicationInvoiceForEstimateService.mockResolvedValue({ invoice: null, liveBeside: null });
     mockMint.mockImplementation(async ({ buildCreateParams }) => {
       buildCreateParams();
       throw new Error('stop-after-capture');
@@ -285,7 +319,7 @@ describe('POST /:id/invoice — sibling-lookup refusal (codex round-2 P1)', () =
     expect(mockMint).toHaveBeenCalledTimes(1);
     expect(next).toHaveBeenCalledTimes(1);
     expect(mockBuildLineItems).toHaveBeenCalledWith('svc-lawn', expect.objectContaining({
-      fallbackAmount: 0,
+      fallbackAmount: 74.7,
     }));
   });
 
@@ -347,17 +381,18 @@ describe('POST /:id/invoice — sibling-lookup refusal (codex round-2 P1)', () =
   // changed.
   describe('recheckInTrx — the sibling verdict is re-proven inside the mint lock', () => {
     test('passes a recheckInTrx for a "none" verdict, which re-runs the lookup WITH lockRows: true', async () => {
+      // Owner ruling — REFUSE EXTRAS-ONLY MINTS FOR THE FEE SHAPE (round 13):
+      // SVC_ROW's own per_application shape now refuses the WHOLE mint
+      // unconditionally (base or extras) — a monthly_membership lane with a
+      // rate on file is what makes the mint (and so recheckInTrx) reachable
+      // here; that lane has no equivalent gap (see prepaid-receipt-gate.test.js).
+      mockDb.__svcRow = { ...SVC_ROW, cust_billing_mode: 'monthly_membership', cust_monthly_rate: 74.7 };
       findFirstApplicationInvoiceForEstimateService.mockResolvedValue({ invoice: null, liveBeside: null });
       mockMint.mockImplementation(async ({ buildCreateParams }) => {
         buildCreateParams();
         throw new Error('stop-after-capture');
       });
-      // Owner ruling — REMOVE THE CHARGE NOW FEE FALLBACK: the base itself
-      // no longer mints for this unpriced visit — a checkout extra is what
-      // makes the mint (and so recheckInTrx) reachable at all now.
-      const { req, res, next } = makeReqRes({
-        extraLineItems: [{ description: 'Extra treatment', quantity: 1, unit_price: 40, amount: 40 }],
-      });
+      const { req, res, next } = makeReqRes({});
       await handler(req, res, next);
 
       const { recheckInTrx } = mockMint.mock.calls[0][0];
@@ -387,16 +422,16 @@ describe('POST /:id/invoice — sibling-lookup refusal (codex round-2 P1)', () =
     });
 
     test('refuses the mint when a concurrent refund flips "none" to a live sibling match ("covered") under the lock', async () => {
+      // Owner ruling — REFUSE EXTRAS-ONLY MINTS FOR THE FEE SHAPE (round 13):
+      // a monthly_membership lane with a rate is what makes the mint
+      // reachable now for this unpriced-visit shape.
+      mockDb.__svcRow = { ...SVC_ROW, cust_billing_mode: 'monthly_membership', cust_monthly_rate: 74.7 };
       findFirstApplicationInvoiceForEstimateService.mockResolvedValue({ invoice: null, liveBeside: null });
       mockMint.mockImplementation(async ({ buildCreateParams }) => {
         buildCreateParams();
         throw new Error('stop-after-capture');
       });
-      // Owner ruling — REMOVE THE CHARGE NOW FEE FALLBACK: a checkout extra
-      // is what makes the mint reachable now for this unpriced visit.
-      const { req, res, next } = makeReqRes({
-        extraLineItems: [{ description: 'Extra treatment', quantity: 1, unit_price: 40, amount: 40 }],
-      });
+      const { req, res, next } = makeReqRes({});
       await handler(req, res, next);
       const { recheckInTrx } = mockMint.mock.calls[0][0];
 
@@ -499,9 +534,38 @@ describe('POST /:id/invoice — sibling-lookup refusal (codex round-2 P1)', () =
       expect(mockMint).not.toHaveBeenCalled();
     });
 
-    test('a "none" verdict still reuses this visit\'s own existing invoice normally', async () => {
+    // Owner ruling — REFUSE EXTRAS-ONLY MINTS FOR THE FEE SHAPE (round 13,
+    // codex pre-push P1): this used to prove a 'none' verdict reuses a
+    // legacy own-invoice normally. For SVC_ROW's own per_application shape,
+    // the per_application_fee_at_completion refusal now fires unconditionally
+    // — BEFORE this route's existing-invoice reuse block is ever reached —
+    // the same "refuse the whole mint" posture round-8 P1 already applies
+    // to a covered sibling visit. An existing invoice on this exact shape's
+    // row is not trustworthy enough to hand back as-is either: it could be
+    // the same kind of stale extras-only invoice this whole ruling exists
+    // to stop creating.
+    test('a "none" verdict now refuses even with an existing invoice already on this visit\'s own row', async () => {
       mockDb.__existingInvoiceRow = {
         id: 'inv-legacy', status: 'sent', total: 97.2, token: 'tok-legacy',
+        scheduled_service_id: 'svc-lawn', payer_id: null,
+      };
+      findFirstApplicationInvoiceForEstimateService.mockResolvedValue({ invoice: null, liveBeside: null });
+      const { req, res, next } = makeReqRes({});
+      await handler(req, res, next);
+
+      expect(res.status).toHaveBeenCalledWith(409);
+      expect(res.body.error).toMatch(/bills its application fee at completion/i);
+      expect(res.body).not.toMatchObject({ reused: true, invoiceId: 'inv-legacy' });
+      expect(mockMint).not.toHaveBeenCalled();
+    });
+
+    // The lane this ruling does NOT touch: a monthly_membership visit's own
+    // existing invoice is still reused normally, exactly as round-9 P1
+    // always intended for a genuine 'none' verdict.
+    test('a "none" verdict still reuses an existing invoice normally for a monthly_membership visit', async () => {
+      mockDb.__svcRow = { ...SVC_ROW, cust_billing_mode: 'monthly_membership', cust_monthly_rate: 74.7 };
+      mockDb.__existingInvoiceRow = {
+        id: 'inv-legacy', status: 'sent', total: 74.7, token: 'tok-legacy',
         scheduled_service_id: 'svc-lawn', payer_id: null,
       };
       findFirstApplicationInvoiceForEstimateService.mockResolvedValue({ invoice: null, liveBeside: null });
@@ -655,16 +719,18 @@ describe('mintOrReuseScheduledServiceInvoice — sibling-lookup refusal', () => 
     expect(findFirstApplicationInvoiceForEstimateService).toHaveBeenCalledWith(svcMonthly, {}, { lockRows: true, noWait: true });
   });
 
-  // Owner ruling — REMOVE THE CHARGE NOW FEE FALLBACK: the exact regression
-  // this ruling fixes, through the mark-prepaid mint path — an unpriced,
-  // estimate-linked, per_application visit with a genuine 'none' sibling
-  // verdict (nothing covers it) used to mint the customer's established
-  // per_application_fee here. It must now report 'no_chargeable_amount'
-  // (mark-prepaid's existing, unchanged reason/copy) and never mint.
-  test('a "none" verdict on an unpriced per_application visit with no other price reports no_chargeable_amount, never mints the fee', async () => {
+  // Owner ruling — REMOVE THE CHARGE NOW FEE FALLBACK, then REFUSE
+  // EXTRAS-ONLY MINTS FOR THE FEE SHAPE (round 13, codex pre-push P1): the
+  // exact regression this ruling fixes, through the mark-prepaid mint path —
+  // an unpriced, estimate-linked, per_application visit with a genuine
+  // 'none' sibling verdict (nothing covers it) used to mint the customer's
+  // established per_application_fee here. It now reports the structured
+  // per_application_fee_at_completion refusal (mark-prepaid's own
+  // RECEIPT_REASON_TEXT has copy for it), never mints.
+  test('a "none" verdict on an unpriced per_application visit with no other price refuses — completion bills the fee, never mints', async () => {
     findFirstApplicationInvoiceForEstimateService.mockResolvedValue({ invoice: null, liveBeside: null });
     const result = await mintOrReuseScheduledServiceInvoice(SVC);
-    expect(result).toEqual({ invoice: null, reason: 'no_chargeable_amount' });
+    expect(result).toEqual({ invoice: null, reason: 'per_application_fee_at_completion' });
     expect(mockMint).not.toHaveBeenCalled();
   });
 
@@ -682,10 +748,27 @@ describe('mintOrReuseScheduledServiceInvoice — sibling-lookup refusal', () => 
     expect(mockMint).not.toHaveBeenCalled();
   });
 
-  test('a "none" verdict still reuses svc\'s own existing invoice normally', async () => {
+  // Owner ruling — REFUSE EXTRAS-ONLY MINTS FOR THE FEE SHAPE (round 13):
+  // SVC's own per_application shape now refuses even with an existing
+  // invoice already on the row (same "refuse the whole mint" posture as the
+  // Charge Now route's own equivalent test) — not trustworthy enough to
+  // hand back as-is, since it could be the stale kind of extras-only
+  // invoice this ruling exists to stop creating.
+  test('a "none" verdict now refuses even with an existing invoice already on svc\'s own row', async () => {
     mockDb.__existingInvoiceRow = { id: 'inv-legacy', status: 'sent', total: 97.2, scheduled_service_id: 'svc-lawn' };
     findFirstApplicationInvoiceForEstimateService.mockResolvedValue({ invoice: null, liveBeside: null });
     const result = await mintOrReuseScheduledServiceInvoice(SVC);
+    expect(result).toEqual({ invoice: null, reason: 'per_application_fee_at_completion' });
+    expect(mockMint).not.toHaveBeenCalled();
+  });
+
+  // The lane this ruling does NOT touch: a monthly_membership visit's
+  // existing invoice is still reused normally for a genuine 'none' verdict.
+  test('a "none" verdict still reuses an existing invoice normally for a monthly_membership visit', async () => {
+    const svcMonthly = { ...SVC, cust_billing_mode: 'monthly_membership' };
+    mockDb.__existingInvoiceRow = { id: 'inv-legacy', status: 'sent', total: 74.7, scheduled_service_id: 'svc-lawn' };
+    findFirstApplicationInvoiceForEstimateService.mockResolvedValue({ invoice: null, liveBeside: null });
+    const result = await mintOrReuseScheduledServiceInvoice(svcMonthly);
     expect(result).toEqual({ invoice: mockDb.__existingInvoiceRow, reused: true });
     expect(mockMint).not.toHaveBeenCalled();
   });

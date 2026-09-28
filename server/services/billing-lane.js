@@ -244,6 +244,248 @@ function completionInvoiceAmount({
  * balance, or dropped credit still owed once extras made the total larger
  * than what `amount` alone had already absorbed).
  */
+// codex pre-push P2 (round 13): predictCompletionBilling split below the
+// complexity-20 lint limit, per-lane, with identical behavior — every
+// existing predictCompletionBilling test still drives the SAME public
+// function and asserts the SAME results; these are its private pieces, not
+// a new contract. Split lines: payer, annual_prepay, per_application,
+// membership/self-pay, and the authoritative-zero/prepayment tail the last
+// two lanes share verbatim (see predictionFromResolvedAmount's own header
+// for why annual_prepay and payer do NOT share it — each has a genuinely
+// different shape, not just fewer lines).
+
+// The payer lane: a payer says WHO owes, not HOW MUCH — the amount still
+// comes from the canonical precedence, never from estimatedPrice alone.
+// Reading only the stamp made a payer visit that bills a monthly rate or an
+// acceptance fee look amountless (Codex P1, round 5).
+function predictCompletionBillingPayer({
+  lane, isCallback, serviceType, estimatedPrice, perApplicationFee, monthlyRate, billingMode,
+  primaryLinePrice, hasVisitPrice, noCharge,
+}) {
+  const payerFreeReason = isCallback
+    ? 'callback'
+    : (isAlwaysFreeServiceType(serviceType) ? 'always_free_service_type' : null);
+  const payerAmount = completionInvoiceAmount({
+    estimatedPrice,
+    isCallback,
+    perApplicationBilling: lane === 'per_application' || billingMode === 'per_application',
+    perApplicationFee,
+    monthlyRate,
+    billingMode,
+    primaryLinePrice,
+  });
+  const resolvedPayerAmount = payerAmount > 0
+    ? payerAmount
+    : (hasVisitPrice ? Number(estimatedPrice) : null);
+  // Free-by-design payer work with NO amount bills nobody, so it reads as
+  // the ordinary "nothing bills" line instead of promising an AP invoice
+  // (Codex P1, round 13). A PRICED one is different: completion's mint gate
+  // takes the create_invoice_on_complete stamp BEFORE its callback /
+  // always-free exclusions (admin-dispatch.js:16155-16157), so that visit
+  // really does invoice the payer. Calling it free was a regression this
+  // branch introduced (Codex P1, round 17) — origin/main predicted
+  // 'payer' with the amount here, and was right.
+  if (payerFreeReason && !(Number(resolvedPayerAmount) > 0)) return noCharge(payerFreeReason);
+  // codex round-7 P2: a provenance-backed $0 (hasAuthoritativeZeroPrice —
+  // estimatedPrice stamped 0 alongside a positive primaryLinePrice, e.g.
+  // a fully-discounted application) is a deliberately free visit even
+  // with a payer on the account — mirrors the per_application / self-pay
+  // lanes' own 'fully_discounted' exemption. Without this check,
+  // resolvedPayerAmount fell back to Number(estimatedPrice) (0) and this
+  // returned { kind: 'payer', amount: 0 }, which unbilledCompletionGap
+  // reads as a genuine 'no_amount_on_file' money-gap alert for a visit
+  // that was never supposed to bill anyone.
+  if (hasAuthoritativeZeroPrice(estimatedPrice, primaryLinePrice)) {
+    return { kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason: 'fully_discounted' };
+  }
+  return {
+    kind: 'payer',
+    amount: resolvedPayerAmount,
+    conflictStampedPrice: false,
+  };
+}
+
+// Shared tail for the per_application and membership/self-pay lanes ONLY —
+// annual_prepay and payer each have a genuinely different shape (annual_prepay
+// owns its own "no data" reason before `amount` is even computed and has no
+// authoritative-zero step at all; payer resolves its own amount precedence
+// entirely), not just fewer lines, so they are NOT routed through this.
+// Once a lane has resolved its base `amount` (completionInvoiceAmount) and
+// run its OWN callback/always-free exclusion (each lane's placement of that
+// check differs and must stay exactly where it was — see each caller),
+// authoritative-zero, out-of-band-prepayment coverage, and the
+// invoice/auto_charge choice are the SAME decision for both. `autoChargeEligible`
+// carries each lane's own exact auto-charge condition (they differ — per_application
+// is bare `autopayActive`; membership also gates on the completion-autopay-charge
+// gate, isCallback and always-free-type) so this helper never re-derives it
+// and risks the two diverging.
+function predictionFromResolvedAmount({
+  amount, estimatedPrice, primaryLinePrice, prepaid, autoChargeEligible, noCharge,
+}) {
+  if (!(amount > 0)) {
+    // A provenance-backed $0 (see hasAuthoritativeZeroPrice) is a
+    // deliberately free visit, never a money gap — 'fully_discounted' is
+    // NOT in UNBILLED_MONEY_GAP_REASONS, and 'no_charge' (never
+    // 'invoice'/'auto_charge') keeps unbilledCompletionGap's willMint===false
+    // path from reading it as a stalled mint either.
+    if (hasAuthoritativeZeroPrice(estimatedPrice, primaryLinePrice)) {
+      return { kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason: 'fully_discounted' };
+    }
+    // A POSITIVE out-of-band prepayment (cash/Zelle stamped through
+    // /:id/prepaid) on an unpriced visit is what completion calls covered
+    // — prepaid_amount > 0 AND >= the $0 amount — so it is paid, not a
+    // money gap.
+    if (prepaid > 0) return { kind: 'prepaid', amount: prepaid, grossAmount: amount, conflictStampedPrice: false };
+    return noCharge('no_amount_on_file');
+  }
+  // Completion only suppresses when the prepayment covers the WHOLE
+  // amount; a partial prepay is applied as credit and the remainder
+  // still collects.
+  if (prepaid >= amount) return { kind: 'prepaid', amount: prepaid, grossAmount: amount, conflictStampedPrice: false };
+  // grossAmount is the fee/rate BEFORE prepaid netting — a schedule-sheet
+  // consumer that lets the office stack extra line items on top of this
+  // visit (Charge Now checkout) must total those extras against the GROSS
+  // figure, then net the recorded prepayment ONCE against fee+extras
+  // combined, or crediting prepaidAmount separately against the
+  // ALREADY-NET `amount` here would apply the same prepayment twice.
+  // `amount` itself stays the final net figure for every consumer that
+  // doesn't stack anything on top (completion preview, detail sheet,
+  // sidebar).
+  return {
+    kind: autoChargeEligible ? 'auto_charge' : 'invoice',
+    amount: Math.max(0, amount - prepaid),
+    grossAmount: amount,
+    conflictStampedPrice: false,
+  };
+}
+
+// Coverage is the TERM-VALIDATED per-visit stamp (prepaid_method
+// 'annual_prepay_invoice'), never the amount — discounted plans stamp
+// visits below list. Without the stamp, completion mirrors: an explicitly
+// priced uncovered visit (separately scheduled add-on) bills normally; an
+// unpriced uncovered visit is owned by the renewal flow and bills nothing
+// here (Codex r1+r2).
+function predictCompletionBillingAnnualPrepay({
+  annualCoverageValidated, prepaidMethod, hasVisitPrice, estimatedPrice, prepaid,
+  autopayActive, completionAutopayChargeEnabled, isCallback, serviceType, noCharge,
+}) {
+  // When the caller validated the stamp against the live term (the same
+  // annualPrepayCoversVisit authority completion uses), that verdict wins —
+  // a stale stamp after a refund/void/expired term must not read as
+  // covered (Codex r3). Null = validation unavailable; fall back to the
+  // stamp.
+  const stampCovered = annualCoverageValidated != null
+    ? annualCoverageValidated === true
+    : prepaidMethod === ANNUAL_PREPAY_PREPAID_METHOD;
+  if (stampCovered) {
+    return { kind: 'covered_annual', amount: null, conflictStampedPrice: false };
+  }
+  // Owned by the renewal flow, not a data gap — bills nothing BY DESIGN.
+  if (!hasVisitPrice) return noCharge('annual_renewal_owned');
+  const amount = Number(estimatedPrice);
+  // grossAmount (codex round-9 P2): this lane can reach hasVisitPrice via
+  // hasAuthoritativeZeroPrice too (a stamped $0 with a positive
+  // primaryLinePrice), which the CLIENT reads as UNPRICED — the same gap
+  // the per_application/self-pay lanes close with their own
+  // `grossAmount: amount`. Without it here, MobileCheckoutSheet's
+  // missing-gross guard (priceNeedsRefresh) misread this prediction as a
+  // stale/legacy payload and permanently disabled Charge Now for it.
+  // Always ride it alongside `amount` — a consumer that doesn't stack
+  // extras on top (completion, the other three schedule surfaces) never
+  // reads it, exactly like the other two lanes.
+  if (prepaid >= amount) return { kind: 'prepaid', amount: prepaid, grossAmount: amount, conflictStampedPrice: false };
+  return {
+    // No-cost exclusions mirror the charge lane (manual-audit P1): a
+    // callback/always-free visit never auto-charges, so never promise it.
+    kind: (autopayActive && completionAutopayChargeEnabled
+      && !isCallback && !isAlwaysFreeServiceType(serviceType)) ? 'auto_charge' : 'invoice',
+    amount: Math.max(0, amount - prepaid),
+    grossAmount: amount,
+    conflictStampedPrice: false,
+  };
+}
+
+// Mirrors the completion gate: per-application bills performed applications
+// only — never a callback or an always-free type (estimate / re-service /
+// follow-up), even when a fee is on file (Codex r1). This exclusion runs
+// UNCONDITIONALLY, before `amount` is even computed — unlike the
+// membership/self-pay lane below, which only checks it once `amount` is
+// NOT positive (an explicit price still wins over isCallback there). Do
+// not "simplify" the two lanes onto the same placement; that would change
+// which one a priced callback bills.
+function predictCompletionBillingPerApplication({
+  isCallback, serviceType, estimatedPrice, perApplicationFee, monthlyRate, billingMode,
+  primaryLinePrice, prepaid, autopayActive, noCharge,
+}) {
+  if (isCallback || isAlwaysFreeServiceType(serviceType)) {
+    return noCharge(isCallback ? 'callback' : 'always_free_service_type');
+  }
+  const amount = completionInvoiceAmount({
+    estimatedPrice, isCallback, perApplicationBilling: true, perApplicationFee, monthlyRate, billingMode,
+    primaryLinePrice,
+  });
+  return predictionFromResolvedAmount({
+    amount, estimatedPrice, primaryLinePrice, prepaid, autoChargeEligible: autopayActive, noCharge,
+  });
+}
+
+// The membership/self-pay default lane (monthly_membership, per_visit,
+// one_time, or no lane at all). The 2026-08-31 shape this lane must catch:
+// self-pay, visit performed, and NO number anywhere — no stamped visit
+// price, no monthly rate. Nothing bills, and nothing about the visit says
+// it should be free, so (unlike per_application/annual_prepay) a genuine
+// gap here is a money-gap reason, not an exemption.
+function predictCompletionBillingMembership({
+  lane, isCallback, serviceType, estimatedPrice, perApplicationFee, monthlyRate, billingMode,
+  primaryLinePrice, hasVisitPrice, isRecurring, autopayActive, duesCollectedThisMonth,
+  prepaid, completionAutopayChargeEnabled, noCharge,
+}) {
+  const covered = membershipDuesCoverVisit({
+    visitIsPayerBilled: false,
+    perApplicationBilling: false,
+    annualPrepayBilling: false,
+    customerAutopayActive: autopayActive,
+    duesCollectedThisMonth,
+    hasVisitPrice,
+    isRecurring,
+    waveguardTier: lane === 'monthly_membership',
+    monthlyRate,
+    billingMode: billingMode || (lane === 'monthly_membership' ? 'monthly_membership' : null),
+  });
+  // Computed BEFORE the covered check (not just after it) so a covered
+  // visit's grossAmount is still the monthlyRate Charge Now's own resolver
+  // (resolveScheduledServiceCharge, admin-schedule.js) would use as ITS
+  // base — that resolver has no "dues cover it" concept at all, so a
+  // covered member who gets an ad hoc extra added at checkout still bills
+  // monthlyRate+extra on the mint, never just the extra alone (codex
+  // pre-push P1: previewing $0 base + extra understated what Charge Now
+  // actually mints for this customer).
+  const amount = completionInvoiceAmount({
+    estimatedPrice, isCallback, perApplicationBilling: false, perApplicationFee, monthlyRate, billingMode,
+    primaryLinePrice,
+  });
+  if (covered) {
+    return { kind: 'covered_membership', amount: null, grossAmount: amount, conflictStampedPrice: hasVisitPrice };
+  }
+  // Checked ONLY once `amount` is not positive — an explicit price still
+  // wins over isCallback here (completionInvoiceAmount's own precedence),
+  // unlike the per_application lane above, which excludes it unconditionally
+  // before `amount` is ever computed.
+  if (!(amount > 0) && (isCallback || isAlwaysFreeServiceType(serviceType))) {
+    return noCharge(isCallback ? 'callback' : 'always_free_service_type');
+  }
+  return predictionFromResolvedAmount({
+    amount,
+    estimatedPrice,
+    primaryLinePrice,
+    prepaid,
+    // Same no-cost exclusion as the annual branch (manual-audit P1).
+    autoChargeEligible: autopayActive && completionAutopayChargeEnabled
+      && !isCallback && !isAlwaysFreeServiceType(serviceType),
+    noCharge,
+  });
+}
+
 function predictCompletionBilling({
   lane,
   autopayActive,
@@ -281,51 +523,10 @@ function predictCompletionBilling({
   // amount, different `reason` — see UNBILLED_MONEY_GAP_REASONS.
   const noCharge = (reason) => ({ kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason });
   if (payerBilled) {
-    // A payer says WHO owes, not HOW MUCH — the amount still comes from the
-    // canonical precedence, never from estimatedPrice alone. Reading only the
-    // stamp made a payer visit that bills a monthly rate or an acceptance fee
-    // look amountless (Codex P1, round 5).
-    const payerFreeReason = isCallback
-      ? 'callback'
-      : (isAlwaysFreeServiceType(serviceType) ? 'always_free_service_type' : null);
-    const payerAmount = completionInvoiceAmount({
-      estimatedPrice,
-      isCallback,
-      perApplicationBilling: lane === 'per_application' || billingMode === 'per_application',
-      perApplicationFee,
-      monthlyRate,
-      billingMode,
-      primaryLinePrice,
+    return predictCompletionBillingPayer({
+      lane, isCallback, serviceType, estimatedPrice, perApplicationFee, monthlyRate, billingMode,
+      primaryLinePrice, hasVisitPrice, noCharge,
     });
-    const resolvedPayerAmount = payerAmount > 0
-      ? payerAmount
-      : (hasVisitPrice ? Number(estimatedPrice) : null);
-    // Free-by-design payer work with NO amount bills nobody, so it reads as
-    // the ordinary "nothing bills" line instead of promising an AP invoice
-    // (Codex P1, round 13). A PRICED one is different: completion's mint gate
-    // takes the create_invoice_on_complete stamp BEFORE its callback /
-    // always-free exclusions (admin-dispatch.js:16155-16157), so that visit
-    // really does invoice the payer. Calling it free was a regression this
-    // branch introduced (Codex P1, round 17) — origin/main predicted
-    // 'payer' with the amount here, and was right.
-    if (payerFreeReason && !(Number(resolvedPayerAmount) > 0)) return noCharge(payerFreeReason);
-    // codex round-7 P2: a provenance-backed $0 (hasAuthoritativeZeroPrice —
-    // estimatedPrice stamped 0 alongside a positive primaryLinePrice, e.g.
-    // a fully-discounted application) is a deliberately free visit even
-    // with a payer on the account — mirrors the per_application / self-pay
-    // lanes' own 'fully_discounted' exemption below. Without this check,
-    // resolvedPayerAmount fell back to Number(estimatedPrice) (0) and this
-    // returned { kind: 'payer', amount: 0 }, which unbilledCompletionGap
-    // reads as a genuine 'no_amount_on_file' money-gap alert for a visit
-    // that was never supposed to bill anyone.
-    if (hasAuthoritativeZeroPrice(estimatedPrice, primaryLinePrice)) {
-      return { kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason: 'fully_discounted' };
-    }
-    return {
-      kind: 'payer',
-      amount: resolvedPayerAmount,
-      conflictStampedPrice: false,
-    };
   }
   // Completion's numeric prepaid fallback covers ONLY out-of-band methods
   // (cash/Zelle) — an annual_prepay_invoice stamp is governed exclusively
@@ -345,153 +546,22 @@ function predictCompletionBilling({
     return noCharge(isCallback ? 'callback' : 'always_free_service_type');
   }
   if (lane === 'annual_prepay') {
-    // Coverage is the TERM-VALIDATED per-visit stamp (prepaid_method
-    // 'annual_prepay_invoice'), never the amount — discounted plans stamp
-    // visits below list. Without the stamp, completion mirrors: an
-    // explicitly priced uncovered visit (separately scheduled add-on)
-    // bills normally; an unpriced uncovered visit is owned by the renewal
-    // flow and bills nothing here (Codex r1+r2).
-    // When the caller validated the stamp against the live term (the same
-    // annualPrepayCoversVisit authority completion uses), that verdict wins
-    // — a stale stamp after a refund/void/expired term must not read as
-    // covered (Codex r3). Null = validation unavailable; fall back to the
-    // stamp.
-    const stampCovered = annualCoverageValidated != null
-      ? annualCoverageValidated === true
-      : prepaidMethod === ANNUAL_PREPAY_PREPAID_METHOD;
-    if (stampCovered) {
-      return { kind: 'covered_annual', amount: null, conflictStampedPrice: false };
-    }
-    // Owned by the renewal flow, not a data gap — bills nothing BY DESIGN.
-    if (!hasVisitPrice) return noCharge('annual_renewal_owned');
-    const amount = Number(estimatedPrice);
-    // grossAmount (codex round-9 P2): this lane can reach hasVisitPrice via
-    // hasAuthoritativeZeroPrice too (a stamped $0 with a positive
-    // primaryLinePrice), which the CLIENT reads as UNPRICED — the same gap
-    // the per_application/self-pay branches below already close with their
-    // own `grossAmount: amount`. Without it here, MobileCheckoutSheet's
-    // missing-gross guard (priceNeedsRefresh) misread this prediction as a
-    // stale/legacy payload and permanently disabled Charge Now for it.
-    // Always ride it alongside `amount` — a consumer that doesn't stack
-    // extras on top (completion, the other three schedule surfaces) never
-    // reads it, exactly like the other two lanes.
-    if (prepaid >= amount) return { kind: 'prepaid', amount: prepaid, grossAmount: amount, conflictStampedPrice: false };
-    return {
-      // No-cost exclusions mirror the charge lane (manual-audit P1): a
-      // callback/always-free visit never auto-charges, so never promise it.
-      kind: (autopayActive && completionAutopayChargeEnabled
-        && !isCallback && !isAlwaysFreeServiceType(serviceType)) ? 'auto_charge' : 'invoice',
-      amount: Math.max(0, amount - prepaid),
-      grossAmount: amount,
-      conflictStampedPrice: false,
-    };
+    return predictCompletionBillingAnnualPrepay({
+      annualCoverageValidated, prepaidMethod, hasVisitPrice, estimatedPrice, prepaid,
+      autopayActive, completionAutopayChargeEnabled, isCallback, serviceType, noCharge,
+    });
   }
   if (lane === 'per_application') {
-    // Mirrors the completion gate: per-application bills performed
-    // applications only — never a callback or an always-free type
-    // (estimate / re-service / follow-up), even when a fee is on file
-    // (Codex r1).
-    if (isCallback || isAlwaysFreeServiceType(serviceType)) {
-      return noCharge(isCallback ? 'callback' : 'always_free_service_type');
-    }
-    const amount = completionInvoiceAmount({
-      estimatedPrice, isCallback, perApplicationBilling: true, perApplicationFee, monthlyRate, billingMode,
-      primaryLinePrice,
+    return predictCompletionBillingPerApplication({
+      isCallback, serviceType, estimatedPrice, perApplicationFee, monthlyRate, billingMode,
+      primaryLinePrice, prepaid, autopayActive, noCharge,
     });
-    // Per-application lane with no fee on file — the acceptance fee never
-    // got stamped. A money gap, not a free visit.
-    if (!(amount > 0)) {
-      // A provenance-backed $0 (see hasAuthoritativeZeroPrice) is a
-      // deliberately free application, never a money gap — 'fully_discounted'
-      // is NOT in UNBILLED_MONEY_GAP_REASONS, and 'no_charge' (never
-      // 'invoice'/'auto_charge') keeps unbilledCompletionGap's willMint===false
-      // path from reading it as a stalled mint either.
-      if (hasAuthoritativeZeroPrice(estimatedPrice, primaryLinePrice)) {
-        return { kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason: 'fully_discounted' };
-      }
-      // A POSITIVE out-of-band prepayment (cash/Zelle stamped through
-      // /:id/prepaid) on an unpriced visit is what completion calls covered
-      // — prepaid_amount > 0 AND >= the $0 amount — so it is paid, not a
-      // money gap (Codex P2). Same ordering as the self-pay lane below.
-      if (prepaid > 0) return { kind: 'prepaid', amount: prepaid, grossAmount: amount, conflictStampedPrice: false };
-      return noCharge('no_amount_on_file');
-    }
-    // Completion only suppresses when the prepayment covers the WHOLE
-    // amount; a partial prepay is applied as credit and the remainder
-    // still collects (Codex r1).
-    if (prepaid >= amount) return { kind: 'prepaid', amount: prepaid, grossAmount: amount, conflictStampedPrice: false };
-    const due = Math.max(0, amount - prepaid);
-    // grossAmount is the fee BEFORE prepaid netting — a schedule-sheet
-    // consumer that lets the office stack extra line items on top of this
-    // visit (Charge Now checkout) must total those extras against the
-    // GROSS fee, then net the recorded prepayment ONCE against fee+extras
-    // combined, or crediting prepaidAmount separately against the
-    // ALREADY-NET `amount` here would apply the same prepayment twice
-    // (codex pre-push P1). `amount` itself stays the final net figure for
-    // every consumer that doesn't stack anything on top (completion
-    // preview, detail sheet, sidebar).
-    return { kind: autopayActive ? 'auto_charge' : 'invoice', amount: due, grossAmount: amount, conflictStampedPrice: false };
   }
-  const covered = membershipDuesCoverVisit({
-    visitIsPayerBilled: false,
-    perApplicationBilling: false,
-    annualPrepayBilling: false,
-    customerAutopayActive: autopayActive,
-    duesCollectedThisMonth,
-    hasVisitPrice,
-    isRecurring,
-    waveguardTier: lane === 'monthly_membership',
-    monthlyRate,
-    billingMode: billingMode || (lane === 'monthly_membership' ? 'monthly_membership' : null),
+  return predictCompletionBillingMembership({
+    lane, isCallback, serviceType, estimatedPrice, perApplicationFee, monthlyRate, billingMode,
+    primaryLinePrice, hasVisitPrice, isRecurring, autopayActive, duesCollectedThisMonth,
+    prepaid, completionAutopayChargeEnabled, noCharge,
   });
-  // Computed BEFORE the covered check (not just after it) so a covered
-  // visit's grossAmount is still the monthlyRate Charge Now's own resolver
-  // (resolveScheduledServiceCharge, admin-schedule.js) would use as ITS
-  // base — that resolver has no "dues cover it" concept at all, so a
-  // covered member who gets an ad hoc extra added at checkout still bills
-  // monthlyRate+extra on the mint, never just the extra alone (codex
-  // pre-push P1: previewing $0 base + extra understated what Charge Now
-  // actually mints for this customer).
-  const amount = completionInvoiceAmount({
-    estimatedPrice, isCallback, perApplicationBilling: false, perApplicationFee, monthlyRate, billingMode,
-    primaryLinePrice,
-  });
-  if (covered) {
-    return { kind: 'covered_membership', amount: null, grossAmount: amount, conflictStampedPrice: hasVisitPrice };
-  }
-  // The 2026-08-31 shape: self-pay lane, visit performed, and NO number
-  // anywhere — no stamped visit price, no monthly rate. Nothing bills, and
-  // nothing about the visit says it should be free.
-  if (!(amount > 0)) {
-    if (isCallback || isAlwaysFreeServiceType(serviceType)) {
-      return noCharge(isCallback ? 'callback' : 'always_free_service_type');
-    }
-    // Same provenance-backed-zero exemption as the per_application branch
-    // above — never a money gap.
-    if (hasAuthoritativeZeroPrice(estimatedPrice, primaryLinePrice)) {
-      return { kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason: 'fully_discounted' };
-    }
-    // Mirrors completion's prepaidCovered (prepaid_amount > 0 AND >= the
-    // amount): a positive cash/Zelle prepayment stamped on an unpriced visit
-    // covers its $0 amount, so completion mints nothing BECAUSE it is paid.
-    // Asked before the money-gap verdict, or the sheet warns — and offers a
-    // card link — on a visit the office already collected for (Codex P2).
-    if (prepaid > 0) return { kind: 'prepaid', amount: prepaid, grossAmount: amount, conflictStampedPrice: false };
-    return noCharge('no_amount_on_file');
-  }
-  if (prepaid >= amount) return { kind: 'prepaid', amount: prepaid, grossAmount: amount, conflictStampedPrice: false };
-  return {
-    // Same no-cost exclusion as the annual branch (manual-audit P1).
-    kind: (autopayActive && completionAutopayChargeEnabled
-      && !isCallback && !isAlwaysFreeServiceType(serviceType)) ? 'auto_charge' : 'invoice',
-    amount: Math.max(0, amount - prepaid),
-    // See the per_application branch above for why grossAmount rides
-    // alongside the net `amount` — a checkout that stacks extras on top of
-    // this visit must net the prepayment once against fee+extras, not
-    // again against the already-net figure.
-    grossAmount: amount,
-    conflictStampedPrice: false,
-  };
 }
 
 // Extended-completion cap-AUTHORITY revalidation
@@ -970,6 +1040,47 @@ async function combinedInvoiceVoidedWithoutLiveReplacement(svc, dbConn, { lockRo
   return terminal[0];
 }
 
+// Shared helper — owner ruling (round 13, codex pre-push P2): "propagate
+// the new void hold to billing projections". Completion's REFUSE AFTER A
+// VOID guard (combinedInvoiceVoidedWithoutLiveReplacement above) already
+// holds Charge Now for an unpriced, estimate-linked per_application visit
+// whose combined invoice died with no live replacement — but two OTHER
+// billing projections had no idea: closeout-status.js's deriveBillingExpectation
+// (predictCompletionBilling itself has no sibling-coverage awareness at
+// all — it only ever sees the visit's own fields) and
+// annual-prepay-renewals.js's card-expiry warning projection (its own
+// direct findFirstApplicationInvoiceForEstimateService call reports the
+// SAME invisible-void as an ordinary "nothing found — none", since that
+// lookup's own query excludes 'void' entirely). Both kept projecting a
+// positive invoice/auto_charge amount — the latter a live card-expiry
+// warning — for a charge completion actually holds for manual review. ONE
+// shared check here, called from both, so they can never drift from each
+// other or from the Charge Now guard's own verdict.
+//
+// Read-only/advisory, like coveringSiblingInvoice above (never a MINT
+// decision) — a lookup FAILURE fails toward null (the caller's ordinary
+// prediction stands), never toward inventing a hold; only a mint decision
+// fails closed the other way. Returns the voided invoice row when this
+// exact shape is held, null otherwise (every non-per_application lane,
+// every priced visit, a customer with no estimate link at all —
+// isSiblingCoverageEligibleVisit gates it the SAME way the Charge Now
+// resolver's own guard does).
+async function perApplicationCompletionVoidHold({
+  billingMode, isCallback, serviceType, svc, dbConn,
+}) {
+  if (billingMode !== 'per_application') return null;
+  const hasOwnPrice = (svc?.estimated_price != null && Number(svc.estimated_price) > 0)
+    || hasAuthoritativeZeroPrice(svc?.estimated_price, svc?.primary_line_price);
+  if (!isSiblingCoverageEligibleVisit({
+    sourceEstimateId: svc?.source_estimate_id, hasOwnPrice, isCallback: !!isCallback, serviceType,
+  })) return null;
+  try {
+    return await combinedInvoiceVoidedWithoutLiveReplacement(svc, dbConn);
+  } catch {
+    return null;
+  }
+}
+
 // `lockRows` (codex pre-push P1, round 3): a transactional MINT recheck
 // passes this so the underlying lookup's FOR UPDATE OF i (see
 // findFirstApplicationInvoiceForEstimateService) holds the matched invoice
@@ -1308,6 +1419,7 @@ module.exports = {
   coveringSiblingInvoice,
   siblingInvoiceCoverageVerdict,
   combinedInvoiceVoidedWithoutLiveReplacement,
+  perApplicationCompletionVoidHold,
   isSiblingCoverageEligibleVisit,
   sameTripFirstApplicationBreakdown,
   verifyExtendedCompletionAnchor,

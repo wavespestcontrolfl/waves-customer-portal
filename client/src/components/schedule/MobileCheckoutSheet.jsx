@@ -195,6 +195,14 @@ export default function MobileCheckoutSheet({
   // would have taken the `hasOwnPrice` branch above, and
   // hasAuthoritativeZeroPrice / callback / always-free-type all predict
   // 'no_charge' instead, never reaching these kinds at all.
+  //
+  // Codex pre-push P1 (round 13): this same shape is ALSO used further below
+  // to hide the Add Service / Add Item pickers entirely — the server now
+  // refuses the WHOLE mint for it, extras included (completion bills the
+  // fee, not Charge Now; an extras-only invoice attached here would strand
+  // that fee — see resolveScheduledServiceCharge's own header,
+  // admin-schedule.js), so offering the pickers would let the tech add an
+  // extra the server then 409s.
   const feeOnlyPerApplicationPreview = !attachedInvoicePrediction
     && service.billingLane?.mode === 'per_application'
     && ['invoice', 'auto_charge', 'prepaid'].includes(predictionKind);
@@ -858,7 +866,16 @@ export default function MobileCheckoutSheet({
         {/* Add Service / Add Item or Discount. Hidden when an invoice is
             already attached: the mint endpoint reuses that invoice as-is and
             ignores extraLineItems, so offering the pickers would silently
-            drop whatever the tech added. */}
+            drop whatever the tech added.
+            Codex pre-push P1 (round 13): ALSO hidden for the fee-at-completion
+            shape (feeOnlyPerApplicationPreview) — the server now refuses the
+            WHOLE mint, extras included, for an unpriced per_application
+            visit (completion bills the acceptance fee, not Charge Now; an
+            extras-only invoice here would attach to the visit and strand
+            that fee — complete-scheduled-service.js's existingCompletionInvoice
+            lookup would find it and never re-run the fee decision at all).
+            Offering the pickers here would let the tech add an extra the
+            server then 409s. */}
         {invoicePreview ? (
           <div className="mt-4 text-ink-secondary" style={{ fontSize: 13 }}>
             {processingVisitInvoice
@@ -866,6 +883,10 @@ export default function MobileCheckoutSheet({
               : <>Charging collects this invoice as-is. To change the amounts, edit{' '}
                 {invoicePreview.number ? `invoice ${invoicePreview.number}` : 'the invoice'} from
                 the Invoices page before charging.</>}
+          </div>
+        ) : feeOnlyPerApplicationPreview ? (
+          <div className="mt-4 text-ink-secondary" style={{ fontSize: 13 }}>
+            This visit bills its application fee at completion — add extras there, or set a price on this visit first.
           </div>
         ) : (
         <div className="mt-4 space-y-3">

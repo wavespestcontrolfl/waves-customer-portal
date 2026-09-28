@@ -92,6 +92,12 @@ const RECEIPT_REASON_TEXT = {
   // instead.
   sibling_invoice_covered:
     'The prepayment was recorded, but this visit is billed on the combined trip invoice — collect there, not here.',
+  // Codex pre-push P1 (round 13): an unpriced per_application visit bills
+  // its acceptance fee at completion, not here — resolveScheduledServiceCharge
+  // refuses this mint outright (never an extras-only invoice that would
+  // strand the fee) so no receipt/invoice exists for this visit yet.
+  per_application_fee_at_completion:
+    'The prepayment was recorded, but this visit bills its application fee at completion, so no receipt was sent yet — it will go out once the visit completes.',
   send_failed:
     'The prepayment was recorded, but the receipt couldn’t be sent just now. You can resend it from the invoice.',
   error: 'The prepayment was recorded, but the receipt couldn’t be sent just now.',
