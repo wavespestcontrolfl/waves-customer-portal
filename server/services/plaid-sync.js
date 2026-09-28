@@ -744,15 +744,26 @@ async function registerNewAccounts(item, accessToken, unknownIds) {
       enabled: false,
     });
   }
-  await db.transaction(async (trx) => {
+  // Conditioned on the item row as this sync observed it (row_version, as
+  // recordFailure): a run that registered these accounts — and an operator
+  // who confirmed them — while this one waited on Plaid is newer, so a stale
+  // discovery rolls back instead of pausing a confirmed feed. The next run
+  // re-checks against the current account list.
+  return db.transaction(async (trx) => {
+    const n = await trx('plaid_items')
+      .where({ id: item.id })
+      .whereRaw('updated_at::text = ?', [item.row_version])
+      .whereNot({ status: 'removed' })
+      .update({
+        status: 'setup',
+        last_error: rows.length
+          ? 'The bank reported a new or re-issued account — confirm the accounts below to resume syncing'
+          : `The bank sent transactions for an account it does not list (${unknownIds.join(', ').slice(0, 200)}) — reconnect this bank`,
+        updated_at: trx.fn.now(),
+      });
+    if (!n) return false;
     if (rows.length) await trx('plaid_accounts').insert(rows).onConflict('account_id').ignore();
-    await trx('plaid_items').where({ id: item.id }).whereNot({ status: 'removed' }).update({
-      status: 'setup',
-      last_error: rows.length
-        ? 'The bank reported a new or re-issued account — confirm the accounts below to resume syncing'
-        : `The bank sent transactions for an account it does not list (${unknownIds.join(', ').slice(0, 200)}) — reconnect this bank`,
-      updated_at: trx.fn.now(),
-    });
+    return true;
   });
 }
 
@@ -800,8 +811,8 @@ async function syncItem(itemId, { runMatching = true } = {}) {
     const known = new Set((await db('plaid_accounts').where({ plaid_item_id: itemId }).select('account_id')).map(r => r.account_id));
     const unknownIds = [...new Set(changes.upserts.map(t => t.account_id).filter(id => id && !known.has(id)))];
     if (unknownIds.length) {
-      await registerNewAccounts(item, accessToken, unknownIds);
-      return { itemId, skipped: 'new_accounts' };
+      const paused = await registerNewAccounts(item, accessToken, unknownIds);
+      return { itemId, skipped: paused ? 'new_accounts' : 'concurrent' };
     }
     result = await db.transaction(async (trx) => {
       await trx.raw('select pg_advisory_xact_lock(hashtext(?))', [`plaid-item:${itemId}`]);

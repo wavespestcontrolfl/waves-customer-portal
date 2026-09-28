@@ -670,6 +670,22 @@ async function activate(itemId, overrides = {}) {
     expect(await plaidSync.syncItem(itemId)).toMatchObject({ inserted: 2 });
   });
 
+  test('a stale new-account discovery cannot pause a connection updated while it waited on Plaid', async () => {
+    const itemId = await connect();
+    await activate(itemId);
+    plaid.transactionsSync.mockResolvedValueOnce(page([txn('t-new-acct', 'acc-card-v3', 9, '2026-09-05')], [], [], 'cursor-1'));
+    // while this run awaits /accounts/get, a faster run registered the
+    // account and the operator confirmed it (the item row moved on)
+    plaid.getAccounts.mockImplementationOnce(async () => {
+      await mockPg('plaid_items').where({ id: itemId }).update({ status: 'active', updated_at: mockPg.fn.now() });
+      return { accounts: [...ACCOUNTS, { account_id: 'acc-card-v3', name: 'Spark Card', mask: '1234', type: 'credit', subtype: 'credit card' }] };
+    });
+    expect(await plaidSync.syncItem(itemId)).toMatchObject({ skipped: 'concurrent' });
+    expect(await mockPg('plaid_items').where({ id: itemId }).first('status')).toEqual({ status: 'active' });
+    expect(await mockPg('plaid_accounts').where({ account_id: 'acc-card-v3' }).first()).toBeUndefined();
+    await plaidSync.disconnectItem(itemId);
+  });
+
   test('a sync that finishes after a concurrent run paused the connection for new accounts applies nothing', async () => {
     const itemId = await connect();
     await activate(itemId);
