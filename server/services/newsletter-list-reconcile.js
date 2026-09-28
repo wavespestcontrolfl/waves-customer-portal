@@ -77,13 +77,27 @@
  * instead of slipping between it and the insert. The orphan link likewise
  * uses ONE predicate (orphanTargetSql) for the projection and the UPDATE,
  * under the target customer's comms lock.
+ *
+ * NOTHING HERE RE-DERIVES A LINK OR AN IDENTITY. Which profile a subscriber
+ * row belongs to is decided by THE twin picker (liveTwinSubselect,
+ * newsletter-subscribers.js — is_primary_profile DESC NULLS LAST,
+ * created_at ASC, id ASC over every non-archived profile on the address,
+ * any stage), the same fragment linkToCustomer / linkManyToCustomers / the
+ * relink helpers use: the import links through linkToCustomer itself, takes
+ * the new row's name from that SAME canonical profile (the one the link
+ * lands on — never whichever sharing profile the candidate scan returned
+ * first), and the orphan link embeds liveTwinSubselect as its target. The
+ * zone fill (fillZoneForSubscriber) is one locked read-then-write shared by
+ * the fill sweep and the import: it re-reads the linked customer's live
+ * status and CURRENT city under that customer's comms lock and a row lock,
+ * so a city edit can never land between the read and the zone write.
  */
 
 const db = require('../models/db');
 const logger = require('./logger');
 const { cityToZone } = require('./event-freshness');
 const { activeSuppressionsFor } = require('./email-template-library');
-const { linkToCustomer } = require('./newsletter-subscribers');
+const { linkToCustomer, liveTwinSubselect } = require('./newsletter-subscribers');
 const { CUSTOMER_STAGES } = require('./customer-stages');
 const { lockCustomerComms, lockCustomerEmail } = require('../utils/customer-comms-lock');
 // The SAME channel-resolution rule the email-division sender pipeline
@@ -284,6 +298,12 @@ async function decideAddress(trx, customerId) {
   const fresh = await fetchLiveCandidate(trx, customerId, { forShare: true });
   if (!fresh) return { outcome: 'no_longer_live' };
   if (normalizeEmail(fresh.email) !== normalizeEmail(peek.email)) throw new AddressMovedError('address changed');
+  // Every OTHER sharing profile's customers row FOR SHARE too (still before
+  // the address key — rows before the key, like every writer here): the
+  // canonical twin picker below orders on these rows' is_primary_profile /
+  // created_at, so they must not move between the pick, the insert's name,
+  // and linkToCustomer's own pick inside this same transaction.
+  await trx.raw('SELECT id FROM customers WHERE id = ANY(?::uuid[]) ORDER BY id FOR SHARE', [lockedIds]);
   for (const id of lockedIds) await trx('notification_prefs').where({ customer_id: id }).forShare();
   await lockCustomerEmail(trx, fresh.email);
 
@@ -293,7 +313,23 @@ async function decideAddress(trx, customerId) {
   const reason = await classifyAddress(trx, { email: fresh.email, profileIds });
   if (reason === 'already_active') return { outcome: 'row_appeared' };
   if (reason) return { outcome: 'excluded', reason };
-  return { outcome: 'importable', fresh };
+  return { outcome: 'importable', fresh, canonical: await canonicalProfile(trx, fresh.email) };
+}
+
+// The profile THE twin picker (liveTwinSubselect — the fragment
+// linkToCustomer runs) links this address to, with the identity fields the
+// new subscriber row carries. Always one of profilesSharingAddress's set
+// (same population: non-archived, LOWER(TRIM(email)) match), all of which
+// the decision has comms-locked and row-locked.
+async function canonicalProfile(conn, email) {
+  const twin = liveTwinSubselect('?');
+  const result = await conn.raw(
+    `SELECT canon.id AS canonical_id, canon.first_name, canon.last_name, canon.city
+       FROM customers canon
+      WHERE canon.id = ${twin.sql}`,
+    [normalizeEmail(email), ...twin.bindings],
+  );
+  return result.rows?.[0] || null;
 }
 
 // Opens a transaction on `conn` (a savepoint when `conn` is already one),
@@ -312,25 +348,60 @@ async function withAddressDecision(conn, customerId, then) {
   }
 }
 
-// ACTIVE subscribers missing a region_zone, linked to a live customer
-// (canonical whereLiveCustomer stages) whose city maps to a zone. Filtered
-// to a mappable city here (SQL can't call cityToZone), so the count already
-// equals the rows that WOULD be filled.
-async function fetchZoneFillCandidates(conn) {
-  const result = await conn.raw(
-    `SELECT ns.id AS subscriber_id, c.city
-       FROM newsletter_subscribers ns
+// THE zone-fill predicate, one fragment for the projection and the locked
+// write: an ACTIVE subscriber missing a region_zone, linked to a live
+// customer (canonical whereLiveCustomer stages). The zone itself always
+// comes from cityToZone(c.city) of the row this predicate just read.
+const ZONE_FILL_FROM = `FROM newsletter_subscribers ns
        JOIN customers c ON c.id = ns.customer_id
       WHERE ns.status = 'active'
         AND (ns.region_zone IS NULL OR TRIM(ns.region_zone) = '')
         AND c.deleted_at IS NULL
         AND c.active = true
-        AND c.pipeline_stage = ANY(?)`,
+        AND c.pipeline_stage = ANY(?)`;
+
+// Projection: filtered to a mappable city here (SQL can't call cityToZone),
+// so the count already equals the rows that WOULD be filled.
+async function fetchZoneFillCandidates(conn) {
+  const result = await conn.raw(
+    `SELECT ns.id AS subscriber_id, c.city
+       ${ZONE_FILL_FROM}`,
     [CUSTOMER_STAGES],
   );
   return (result.rows || [])
     .map((r) => ({ subscriberId: r.subscriber_id, zone: cityToZone(r.city) }))
     .filter((r) => r.zone);
+}
+
+// Fills ONE subscriber's zone from its linked customer's CURRENT city —
+// never a city read earlier. Must run inside a transaction. Resolve → lock
+// → re-read: the linked customer's comms lock (taken before its customers
+// row, per customer-comms-lock.js's order contract), then the subscriber
+// row FOR UPDATE and the customer row FOR SHARE in the SAME statement that
+// re-checks the whole predicate (still active, still blank, still linked to
+// that customer, customer still live) and reads the city the zone is
+// computed from. A city edit (customer-email-write.js-style FOR UPDATE, or
+// any UPDATE of the row) therefore either commits before this read — and
+// the new city is used — or waits for this commit; it can never land
+// between the read and the write. Returns true only when a zone was written.
+async function fillZoneForSubscriber(trx, subscriberId) {
+  const link = await trx.raw('SELECT customer_id FROM newsletter_subscribers WHERE id = ?', [subscriberId]);
+  const customerId = link.rows?.[0]?.customer_id;
+  if (!customerId) return false;
+  await lockCustomerComms(trx, customerId);
+  const locked = await trx.raw(
+    `SELECT ns.id AS subscriber_id, c.city
+       ${ZONE_FILL_FROM}
+        AND ns.id = ?
+        AND ns.customer_id = ?
+      FOR UPDATE OF ns FOR SHARE OF c`,
+    [CUSTOMER_STAGES, subscriberId, customerId],
+  );
+  const row = locked.rows?.[0];
+  const zone = row ? cityToZone(row.city) : null;
+  if (!zone) return false;
+  await trx.raw('UPDATE newsletter_subscribers SET region_zone = ?, updated_at = NOW() WHERE id = ?', [zone, subscriberId]);
+  return true;
 }
 
 // ACTIVE subscribers with no linked customer yet.
@@ -342,29 +413,35 @@ async function fetchOrphanSubscriberRows(conn) {
 }
 
 // THE orphan-link predicate, as one SQL fragment the dry-run projection and
-// the write's UPDATE both embed verbatim: the orphan is still an active,
-// unlinked row; EXACTLY one live customer matches its address (an
-// ambiguous match is never guessed); and that customer does not already own
-// an active subscriber (the candidate query's one-active-subscription rule).
+// the write's UPDATE both embed verbatim. The TARGET is never chosen here:
+// it is THE canonical twin picker (liveTwinSubselect, newsletter-
+// subscribers.js — the same fragment linkToCustomer, linkManyToCustomers
+// and the relink helpers run, same deleted_at-only link scope, same
+// is_primary_profile / created_at / id order), applied to the orphan's
+// normalized email exactly as linkManyToCustomers applies it. So an orphan
+// linked here lands on the same profile any other linking path would pick.
+// On top of that pick the predicate can only REFUSE, never redirect: the
+// orphan must still be an active, unlinked row, and the picked profile must
+// not already own an active subscriber (one active subscription per
+// customer — the candidate query's rule) — a refused orphan simply stays
+// unlinked.
 function orphanTargetSql(subscriberId) {
+  const twin = liveTwinSubselect('LOWER(TRIM(orphan.email))');
   return {
-    sql: `SELECT twin.id
-            FROM newsletter_subscribers orphan
-            JOIN customers twin ON LOWER(TRIM(twin.email)) = LOWER(TRIM(orphan.email))
-           WHERE orphan.id = ?
-             AND orphan.status = 'active'
-             AND orphan.customer_id IS NULL
-             AND twin.deleted_at IS NULL AND twin.active = true AND twin.pipeline_stage = ANY(?)
-             AND (
-                   SELECT count(*) FROM customers c2
-                    WHERE LOWER(TRIM(c2.email)) = LOWER(TRIM(orphan.email))
-                      AND c2.deleted_at IS NULL AND c2.active = true AND c2.pipeline_stage = ANY(?)
-                 ) = 1
+    sql: `SELECT pick.twin_id AS id
+            FROM (
+                  SELECT ${twin.sql} AS twin_id
+                    FROM newsletter_subscribers orphan
+                   WHERE orphan.id = ?
+                     AND orphan.status = 'active'
+                     AND orphan.customer_id IS NULL
+                 ) pick
+           WHERE pick.twin_id IS NOT NULL
              AND NOT EXISTS (
                    SELECT 1 FROM newsletter_subscribers ns2
-                    WHERE ns2.customer_id = twin.id AND ns2.status = 'active'
+                    WHERE ns2.customer_id = pick.twin_id AND ns2.status = 'active'
                  )`,
-    bindings: [subscriberId, CUSTOMER_STAGES, CUSTOMER_STAGES],
+    bindings: [...twin.bindings, subscriberId],
   };
 }
 
@@ -409,7 +486,7 @@ async function applyOrphanLink(conn, subscriberId) {
 async function importOneCustomer(conn, customerId) {
   return withAddressDecision(conn, customerId, async (trx, decision) => {
     if (decision.outcome !== 'importable') return decision;
-    const { fresh } = decision;
+    const { fresh, canonical } = decision;
     const lc = normalizeEmail(fresh.email);
     // INSERT-only: no UPDATE branch exists for this statement to take, so
     // a row that appeared for this email in the instant between the
@@ -418,8 +495,10 @@ async function importOneCustomer(conn, customerId) {
     const inserted = await trx('newsletter_subscribers')
       .insert({
         email: lc,
-        first_name: fresh.first_name || null,
-        last_name: fresh.last_name || null,
+        // The CANONICAL profile's name — the profile linkToCustomer links
+        // this row to below — never the (unordered) candidate's.
+        first_name: canonical?.first_name || null,
+        last_name: canonical?.last_name || null,
         source: 'customer_import',
         status: 'active',
         confirmed_at: new Date(),
@@ -433,13 +512,19 @@ async function importOneCustomer(conn, customerId) {
     // profilesSharingAddress's set — every one of them was checked and is
     // comms-locked by the decision above.
     await linkToCustomer(lc, trx);
-    const zone = cityToZone(fresh.city);
-    if (zone) {
-      await trx('newsletter_subscribers')
-        .where({ id: inserted[0].id })
-        .whereNull('region_zone')
-        .update({ region_zone: zone });
-    }
+    // Identity follows the link that actually landed: re-read from the
+    // linked profile (a no-op when it is the canonical pick above, which
+    // the decision's locks make it on unchanged data).
+    await trx.raw(
+      `UPDATE newsletter_subscribers ns
+          SET first_name = linked.first_name, last_name = linked.last_name
+         FROM customers linked
+        WHERE ns.id = ? AND linked.id = ns.customer_id`,
+      [inserted[0].id],
+    );
+    // The SAME locked zone fill the sweep runs — the linked customer's
+    // current city and live status, never a snapshot.
+    await fillZoneForSubscriber(trx, inserted[0].id);
     return { outcome: 'imported' };
   });
 }
@@ -496,7 +581,9 @@ async function reconcileCustomers({ dryRun = true, conn = db } = {}) {
     if (projectedAddresses.has(address)) { excluded.duplicate_address += 1; continue; }
     projectedAddresses.add(address);
     importableRows.push(decision.fresh);
-    const city = (decision.fresh.city || '').trim() || 'Unknown';
+    // The canonical profile's city — the profile the row links to, whose
+    // city the write's zone fill reads.
+    const city = (decision.canonical?.city || '').trim() || 'Unknown';
     cityCounts.set(city, (cityCounts.get(city) || 0) + 1);
   }
 
@@ -545,11 +632,9 @@ async function reconcileCustomers({ dryRun = true, conn = db } = {}) {
     });
 
     await guardedEach(zoneFillCandidates, (fill) => ({ subscriberId: fill.subscriberId }), async (fill) => {
-      const updated = await conn('newsletter_subscribers')
-        .where({ id: fill.subscriberId, status: 'active' })
-        .where((qb) => qb.whereNull('region_zone').orWhereRaw("TRIM(region_zone) = ''"))
-        .update({ region_zone: fill.zone });
-      if (updated) zoneFillsApplied += 1;
+      // Re-reads the linked customer under lock — the projected zone is
+      // never trusted as the value to write.
+      if (await conn.transaction((trx) => fillZoneForSubscriber(trx, fill.subscriberId))) zoneFillsApplied += 1;
     });
 
     await guardedEach(orphanLinks, (link) => ({ subscriberId: link.subscriberId }), async (link) => {

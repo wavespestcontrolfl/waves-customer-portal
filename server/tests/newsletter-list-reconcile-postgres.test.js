@@ -441,4 +441,73 @@ postgres('newsletter-list-reconcile — real Postgres', () => {
       await cleanupCommitted([twin.id], [orphanEmail, competingEmail]);
     }
   });
+
+  // ── Canonical link / identity / zone (the SAME picker every linker runs) ──
+
+  async function canonicalTwinId(conn, email) {
+    const { liveTwinSubselect } = require('../services/newsletter-subscribers');
+    const twin = liveTwinSubselect('?');
+    const r = await conn.raw(`SELECT ${twin.sql} AS id`, [email.trim().toLowerCase(), ...twin.bindings]);
+    return r.rows[0].id;
+  }
+
+  test('an orphan links to THE canonical twin (liveTwinSubselect) — a primary lead-stage profile beats a live customer, exactly as linkToCustomer picks (real Postgres)', () => rollbackTest(async (trx) => {
+    const live = synthCustomer();
+    const lead = synthCustomer({ email: ` ${live.email.toUpperCase()}`, pipeline_stage: 'new_lead', is_primary_profile: true });
+    await trx('customers').insert([live, lead]);
+    const orphanEmail = live.email.toLowerCase();
+    await trx('newsletter_subscribers').insert({ email: orphanEmail, status: 'active', source: 'test_orphan' });
+    expect(await canonicalTwinId(trx, orphanEmail)).toBe(lead.id);
+
+    const dry = await reconcileCustomers({ conn: trx });
+    expect(dry.orphanLinks).toBeGreaterThanOrEqual(1);
+    expect((await trx('newsletter_subscribers').where({ email: orphanEmail }).first()).customer_id).toBeNull(); // dry run wrote nothing
+    await reconcileCustomers({ dryRun: false, conn: trx });
+    const row = await trx('newsletter_subscribers').where({ email: orphanEmail }).first();
+    expect(row.customer_id).toBe(lead.id);
+  }));
+
+  test('an imported row carries the CANONICAL profile\'s name and is linked to it — never a secondary sharer\'s (real Postgres)', () => rollbackTest(async (trx) => {
+    const secondary = synthCustomer({ first_name: 'Secondary', last_name: 'Sharer', city: 'Bradenton' });
+    const primary = synthCustomer({ email: secondary.email.toUpperCase(), first_name: 'Primary', last_name: 'Holder', city: 'Venice', is_primary_profile: true });
+    await trx('customers').insert([secondary, primary]);
+    const dry = await reconcileCustomers({ conn: trx });
+    expect(dry.byCity).toEqual(expect.arrayContaining([{ city: 'Venice', count: 1 }]));
+    const write = await reconcileCustomers({ dryRun: false, conn: trx });
+    expect(write.imported).toBeGreaterThanOrEqual(1);
+    const row = await trx('newsletter_subscribers').where({ email: secondary.email.toLowerCase() }).first();
+    expect(row).toMatchObject({ customer_id: primary.id, first_name: 'Primary', last_name: 'Holder', region_zone: 'south_sarasota' });
+  }));
+
+  test('zone fill writes from the customer\'s CURRENT city: an uncommitted city edit blocks the locked re-read, and the committed city is the one used (real Postgres)', async () => {
+    const cust = synthCustomer({ city: 'Venice' });
+    await seedCommitted([cust]);
+    const email = cust.email.toLowerCase();
+    await db('newsletter_subscribers').insert({ email, status: 'active', source: 'test_zone', customer_id: cust.id });
+    const editor = knexFactory({ client: 'pg', connection, pool: POOL });
+    const connA = knexFactory({ client: 'pg', connection, pool: POOL });
+    let editTrx;
+    try {
+      // The projection reads Venice (south_sarasota); an edit to Bradenton
+      // (manatee) is in flight on the customer row.
+      editTrx = await editor.transaction();
+      await editTrx('customers').where({ id: cust.id }).update({ city: 'Bradenton' });
+
+      let settled = false;
+      const resultPromise = reconcileCustomers({ dryRun: false, conn: connA }).then((r) => { settled = true; return r; });
+      await new Promise((resolve) => { setTimeout(resolve, 300); });
+      expect(settled).toBe(false); // the zone write's locked re-read waits on the edit
+
+      await editTrx.commit();
+      const result = await resultPromise;
+      expect(result.errors).toEqual([]);
+      const row = await db('newsletter_subscribers').where({ email }).first();
+      expect(row.region_zone).toBe('manatee'); // never the projected south_sarasota
+    } finally {
+      if (editTrx && !editTrx.isCompleted()) await editTrx.rollback();
+      await editor.destroy();
+      await connA.destroy();
+      await cleanupCommitted([cust.id], [email]);
+    }
+  });
 });

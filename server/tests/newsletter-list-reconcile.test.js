@@ -6,7 +6,12 @@
  * priority-order/filtering logic gets real behavioral coverage.
  */
 
-jest.mock('../services/newsletter-subscribers', () => ({ linkToCustomer: jest.fn(async () => {}) }));
+// linkToCustomer is faked against the fixture (makeConn); the twin picker's
+// SQL fragment (liveTwinSubselect) is the REAL one — the module embeds it.
+jest.mock('../services/newsletter-subscribers', () => ({
+  linkToCustomer: jest.fn(async () => {}),
+  liveTwinSubselect: jest.requireActual('../services/newsletter-subscribers').liveTwinSubselect,
+}));
 jest.mock('../services/email-template-library', () => ({ activeSuppressionsFor: jest.fn(async () => []) }));
 jest.mock('../services/logger', () => ({ error: jest.fn(), info: jest.fn(), warn: jest.fn() }));
 // The comms/email advisory locks are real Postgres behavior (proven against
@@ -23,10 +28,11 @@ const { CUSTOMER_STAGES } = require('../services/customer-stages');
 const { reconcileCustomers } = require('../services/newsletter-list-reconcile');
 
 const PRIORITY = { active: 0, unsubscribed: 1, pending: 2, inactive: 3, waitlist: 3 };
-// Canonical whereLiveCustomer/CUSTOMER_STAGES rule — the SAME "live
-// customer" check used everywhere in this file now (candidate scope, zone
-// fill, orphan link): active, not deleted, pipeline_stage IN CUSTOMER_STAGES.
-// A NULL pipeline_stage does NOT match (owner ruling 2026-09-28).
+// Canonical whereLiveCustomer/CUSTOMER_STAGES rule — the "live customer"
+// check for candidate scope and zone fill: active, not deleted,
+// pipeline_stage IN CUSTOMER_STAGES. A NULL pipeline_stage does NOT match
+// (owner ruling 2026-09-28). The orphan LINK is not lifecycle-scoped: it
+// uses the canonical twin picker (canonicalPick below), like every linker.
 const isLive = (c) => !c.deleted_at && c.active === true && CUSTOMER_STAGES.includes(c.pipeline_stage);
 // Matches subscribeOrResubscribe's own strict:false floor ("@" present) —
 // mirrors the production HAS_AT SQL filter added to every candidate query.
@@ -96,23 +102,43 @@ function makeConn(state) {
     && (s.customer_id === c.id || (s.email || '').trim().toLowerCase() === c.email.trim().toLowerCase()));
   const key = (v) => String(v).trim().toLowerCase();
 
-  // THE orphan-link predicate (orphanTargetSql): still an active unlinked
-  // orphan, exactly one live customer on its address, and that customer
-  // owns no active subscriber yet.
+  // THE canonical twin picker (liveTwinSubselect, newsletter-subscribers.js):
+  // every NON-ARCHIVED profile on the normalized address, any stage, ordered
+  // is_primary_profile DESC NULLS LAST, created_at ASC, id ASC.
+  const primaryRank = (v) => (v === true ? 0 : v === false ? 1 : 2);
+  const canonicalPick = (email) => state.customers
+    .filter((c) => !c.deleted_at && key(c.email || '') === key(email))
+    .sort((a, b) => primaryRank(a.is_primary_profile) - primaryRank(b.is_primary_profile)
+      || String(a.created_at || '').localeCompare(String(b.created_at || ''))
+      || String(a.id).localeCompare(String(b.id)))[0] || null;
+
+  // The real linkToCustomer's behavior against this fixture: rows whose
+  // email equals the lowercased input and are still unlinked get the
+  // canonical pick for the trimmed address.
+  linkToCustomer.mockImplementation(async (email) => {
+    const lc = String(email).toLowerCase();
+    const twin = canonicalPick(lc.trim());
+    if (!twin) return;
+    for (const s of state.subscribers) if (s.email === lc && s.customer_id == null) s.customer_id = twin.id;
+  });
+
+  // THE orphan-link predicate (orphanTargetSql): the canonical twin of a
+  // still-active unlinked orphan, refused (never redirected) when that twin
+  // already owns an active subscriber.
   const orphanTarget = (subscriberId) => {
     const orphan = state.subscribers.find((s) => s.id === subscriberId);
     if (!orphan || orphan.status !== 'active' || orphan.customer_id != null) return null;
-    const matches = state.customers.filter((c) => key(c.email || '') === key(orphan.email) && isLive(c));
-    if (matches.length !== 1) return null;
-    if (state.subscribers.some((s) => s.customer_id === matches[0].id && s.status === 'active')) return null;
-    return matches[0].id;
+    const twin = canonicalPick(orphan.email);
+    if (!twin) return null;
+    if (state.subscribers.some((s) => s.customer_id === twin.id && s.status === 'active')) return null;
+    return twin.id;
   };
 
   conn.raw = jest.fn(async (sql, bindings = []) => {
-    // Checked FIRST: the UPDATE embeds the orphan SELECT verbatim (and with
-    // it "NOT EXISTS" and "FROM customers c2"), so the more generic
-    // branches below would otherwise mis-route it.
-    if (sql.includes('UPDATE newsletter_subscribers ns')) {
+    // Checked FIRST: the orphan SQL embeds the twin picker (and with it
+    // "FROM customers c" and "NOT EXISTS"), so the more generic branches
+    // below would otherwise mis-route it.
+    if (sql.includes('SET customer_id = t.id')) {
       const subscriberId = bindings[0];
       const lockedTarget = bindings[bindings.length - 1];
       const target = orphanTarget(subscriberId);
@@ -122,9 +148,43 @@ function makeConn(state) {
       }
       return { rows: [] };
     }
-    if (sql.includes('SELECT twin.id')) {
-      const target = orphanTarget(bindings[0]);
+    if (sql.includes('SELECT pick.twin_id')) {
+      const target = orphanTarget(bindings[bindings.length - 1]);
       return { rows: target ? [{ id: target }] : [] };
+    }
+    // canonicalProfile — the decision's canonical identity pick.
+    if (sql.includes('AS canonical_id')) {
+      const c = canonicalPick(bindings[0]);
+      return { rows: c ? [{ canonical_id: c.id, first_name: c.first_name, last_name: c.last_name, city: c.city }] : [] };
+    }
+    // Identity refresh from the profile the link actually landed on.
+    if (sql.includes('SET first_name = linked.first_name')) {
+      const row = state.subscribers.find((s) => s.id === bindings[0]);
+      const linked = row && state.customers.find((c) => c.id === row.customer_id);
+      if (linked) Object.assign(row, { first_name: linked.first_name, last_name: linked.last_name });
+      return { rows: [] };
+    }
+    // decideAddress's FOR SHARE on every sharing profile's customers row —
+    // a real row lock (proved in the Postgres suite); a no-op here.
+    if (sql.includes('FROM customers WHERE id = ANY')) return { rows: [] };
+    // fillZoneForSubscriber: peek the link, then the locked re-read, then
+    // the write — checked BEFORE the generic zone-candidate branch below.
+    if (sql.includes('SELECT customer_id FROM newsletter_subscribers WHERE id = ?')) {
+      const row = state.subscribers.find((s) => s.id === bindings[0]);
+      return { rows: row ? [{ customer_id: row.customer_id ?? null }] : [] };
+    }
+    if (sql.includes('FOR UPDATE OF ns')) {
+      const [, subscriberId, customerId] = bindings;
+      const row = state.subscribers.find((s) => s.id === subscriberId);
+      const c = state.customers.find((x) => x.id === customerId);
+      const ok = row && row.status === 'active' && (!row.region_zone || !row.region_zone.trim())
+        && row.customer_id === customerId && c && isLive(c);
+      return { rows: ok ? [{ subscriber_id: row.id, city: c.city }] : [] };
+    }
+    if (sql.includes('UPDATE newsletter_subscribers SET region_zone')) {
+      const [zone, subscriberId] = bindings;
+      state.subscribers.find((s) => s.id === subscriberId).region_zone = zone;
+      return { rows: [] };
     }
     // countInvalidEmailCandidates — checked BEFORE the generic
     // "FROM customers c ... NOT EXISTS" branch below, since its SQL text
@@ -417,12 +477,17 @@ test('zone fill (write mode only): fills a null/blank region_zone from a live cu
   expect(state.subscribers[1].region_zone).toBe(''); // 'Nowhere' never maps — untouched
 });
 
-// Orphan link (write mode only) — exact-match only; the check and the write
-// are ONE atomic statement (applyOrphanLink), not a separate read + write.
+// Orphan link (write mode only) — the target is THE canonical twin picker's
+// (liveTwinSubselect: the profile linkToCustomer / linkManyToCustomers would
+// choose — any non-archived stage, is_primary_profile / created_at / id);
+// the check and the write are ONE atomic statement (applyOrphanLink).
 test.each([
   ['exactly one live customer -> linked', [cust({ id: 'c1', email: 'orphan@e.com' })], 'c1'],
-  ['two live customers sharing the email -> never guesses, stays unlinked', [cust({ id: 'c1', email: 'orphan@e.com' }), cust({ id: 'c2', email: 'orphan@e.com' })], null],
-  ['zero live customers -> stays unlinked', [], null],
+  ['two live customers sharing the email -> the canonical twin (is_primary_profile), never whichever matched', [cust({ id: 'c1', email: 'orphan@e.com' }), cust({ id: 'c2', email: 'orphan@e.com', is_primary_profile: true })], 'c2'],
+  ['a live customer and a primary LEAD profile -> the lead, exactly as linkToCustomer would link it (link scope, not lifecycle scope)', [cust({ id: 'c1', email: 'orphan@e.com' }), cust({ id: 'c2', email: 'Orphan@E.com ', pipeline_stage: 'new_lead', is_primary_profile: true })], 'c2'],
+  ['a live customer and an OLDER inactive profile -> the older one (created_at ASC)', [cust({ id: 'c1', email: 'orphan@e.com', created_at: '2026-02-01' }), cust({ id: 'c2', email: 'orphan@e.com', active: false, created_at: '2025-01-01' })], 'c2'],
+  ['only an archived profile -> stays unlinked', [cust({ id: 'c1', email: 'orphan@e.com', deleted_at: new Date() })], null],
+  ['zero customers -> stays unlinked', [], null],
 ])('%s', async (_label, customers, expected) => {
   const state = { customers, subscribers: [{ id: 's1', customer_id: null, email: 'orphan@e.com', status: 'active' }], prefs: [] };
   const dry = await reconcileCustomers({ conn: makeConn(state) });
@@ -432,20 +497,65 @@ test.each([
   expect(state.subscribers[0].customer_id).toBe(expected);
 });
 
-test('orphan link is atomic with the match check: a second live customer sharing the email appearing mid-batch drops the link (reported count reflects what was ACTUALLY applied, not the read-phase snapshot)', async () => {
+test('orphan link is atomic with the canonical pick: a new primary profile appearing mid-batch refuses the stale target (reported count reflects what was ACTUALLY applied, not the read-phase snapshot)', async () => {
   const state = { customers: [cust({ id: 'c1', email: 'orphan@e.com' })], subscribers: [{ id: 's1', customer_id: null, email: 'orphan@e.com', status: 'active' }], prefs: [] };
   const conn = makeConn(state);
   const rawImpl = conn.raw.getMockImplementation();
   conn.raw = jest.fn(async (sql, bindings) => {
-    // The projection and the write's resolve both saw exactly one match;
-    // a second live customer lands just before the UPDATE re-evaluates the
-    // same predicate in its own statement.
-    if (sql.includes('UPDATE newsletter_subscribers ns')) state.customers.push(cust({ id: 'c2', email: 'orphan@e.com' }));
+    // The projection and the write's resolve both picked c1; a new primary
+    // profile lands just before the UPDATE re-runs the picker in its own
+    // statement — the UPDATE never writes the target it resolved earlier.
+    if (sql.includes('SET customer_id = t.id')) state.customers.push(cust({ id: 'c2', email: 'orphan@e.com', is_primary_profile: true }));
     return rawImpl(sql, bindings);
   });
   const result = await reconcileCustomers({ dryRun: false, conn });
   expect(result.orphanLinks).toBe(0); // NOT the read-phase snapshot — what was actually applied
-  expect(state.subscribers[0].customer_id).toBeNull(); // the atomic write found it now ambiguous
+  expect(state.subscribers[0].customer_id).toBeNull(); // the atomic write saw the pick move
+});
+
+test('an imported row takes its name from the CANONICAL profile (the one it links to), never whichever sharing profile the candidate scan returned first', async () => {
+  const state = {
+    customers: [
+      // Listed first, so the (unordered) candidate scan returns it first.
+      cust({ id: 'c1', email: 'shared@example.com', first_name: 'Second', last_name: 'Profile', city: 'Nowhere' }),
+      cust({ id: 'c2', email: 'Shared@example.com', first_name: 'Primary', last_name: 'Holder', city: 'Venice', is_primary_profile: true }),
+    ],
+    subscribers: [],
+    prefs: [],
+  };
+  const dry = await reconcileCustomers({ conn: makeConn(state) });
+  expect(dry).toMatchObject({ importable: 1, byCity: [{ city: 'Venice', count: 1 }] });
+  const write = await reconcileCustomers({ dryRun: false, conn: makeConn(state) });
+  expect(write.imported).toBe(1);
+  expect(state.subscribers).toHaveLength(1);
+  expect(state.subscribers[0]).toMatchObject({ customer_id: 'c2', first_name: 'Primary', last_name: 'Holder', region_zone: 'south_sarasota' });
+});
+
+test('zone fill re-reads the linked customer at write time: a city changed after the projection is the one used, and a customer archived mid-batch gets no zone', async () => {
+  const state = {
+    customers: [cust({ id: 'c1', email: 'z1@e.com', city: 'Venice' }), cust({ id: 'c2', email: 'z2@e.com', city: 'Venice' })],
+    subscribers: [{ id: 's1', customer_id: 'c1', email: 'z1@e.com', status: 'active', region_zone: null },
+      { id: 's2', customer_id: 'c2', email: 'z2@e.com', status: 'active', region_zone: null }],
+    prefs: [],
+  };
+  const conn = makeConn(state);
+  const rawImpl = conn.raw.getMockImplementation();
+  let projected = false;
+  conn.raw = jest.fn(async (sql, bindings) => {
+    const out = await rawImpl(sql, bindings);
+    // Right after the projection read both as Venice (south_sarasota): c1
+    // moves to Bradenton (manatee), c2 is archived.
+    if (!projected && sql.includes('region_zone IS NULL') && !sql.includes('FOR UPDATE OF ns')) {
+      projected = true;
+      state.customers[0].city = 'Bradenton';
+      state.customers[1].deleted_at = new Date();
+    }
+    return out;
+  });
+  const write = await reconcileCustomers({ dryRun: false, conn });
+  expect(state.subscribers[0].region_zone).toBe('manatee'); // the CURRENT city, never the projected zone
+  expect(state.subscribers[1].region_zone).toBeNull(); // no longer linked to a live customer
+  expect(write.zoneFills).toBe(1);
 });
 
 test('orphan link NEVER attaches a second active subscriber to one customer — a customer already linked to an active subscriber stays unlinked from a second orphan sharing its email', async () => {
