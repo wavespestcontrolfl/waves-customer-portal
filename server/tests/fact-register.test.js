@@ -96,6 +96,11 @@ describe('findUnverifiedClaims', () => {
     expect(claims.some((c) => c.rule === 'non_flea_vacuum_advice')).toBe(false);
   });
 
+  test('a later non-exempt occurrence still blocks after an earlier exempt one', () => {
+    const claims = findUnverifiedClaims('For fleas, vacuum daily for 14 days. For fleas, avoid vacuuming for 14 days.');
+    expect(claims.some((c) => c.rule === 'non_flea_vacuum_advice')).toBe(true);
+  });
+
   test('flags absolute "bee-safe" / "pet-safe" claims', () => {
     expect(findUnverifiedClaims('Our spray is completely bee-safe.').some((c) => c.rule === 'absolute_safety_claim')).toBe(true);
     expect(findUnverifiedClaims('This treatment is pet-safe for the whole family.').some((c) => c.rule === 'absolute_safety_claim')).toBe(true);

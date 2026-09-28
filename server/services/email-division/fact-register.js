@@ -91,26 +91,46 @@ function nearbyWindow(body, match, radius) {
   return body.slice(start, end);
 }
 
+// A global clone of a rule's pattern — matchAll needs the 'g' flag, and a
+// single `body.match(pattern)` only ever checks the FIRST occurrence: a
+// draft repeating a rule's shape (one exempt mention, then a real one)
+// would have the exempt first match wrongly clear the whole rule.
+function globalPattern(pattern) {
+  return new RegExp(pattern.source, pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`);
+}
+
+// True when THIS occurrence is the rule's own correct fact stated
+// correctly (a negated denial, or — for the vacuum rule only — the
+// affirmative flea-context instruction), not the false claim.
+function isExemptOccurrence(body, match, rule, negatable) {
+  if (negatable && NEGATION_RE.test(match[0])) return true;
+  if (rule === 'non_flea_vacuum_advice') {
+    const negated = !!match[1];
+    // A negated instruction ("do not"/"avoid" vacuuming for N days) is
+    // never correct — flagged regardless of flea context.
+    if (!negated && /\bflea/i.test(nearbyWindow(body, match, 200))) return true;
+  }
+  return false;
+}
+
 /**
  * Scan customer-facing copy for the known-false/overreaching claim shapes
  * above. Returns one { rule, excerpt } per rule that matched (never more
  * than one per rule, mirroring findHallucinatedClaims' one-per-label shape).
+ * Every occurrence of a rule's pattern is checked — one exempt mention
+ * (a correct denial, or correct flea-context vacuuming advice) does not
+ * clear a LATER, non-exempt occurrence of the same shape.
  */
 function findUnverifiedClaims(text) {
   const body = String(text ?? '');
   if (!body) return [];
   const results = [];
   for (const { rule, pattern, negatable } of UNVERIFIED_CLAIM_RULES) {
-    const match = body.match(pattern);
-    if (!match) continue;
-    if (negatable && NEGATION_RE.test(match[0])) continue; // correctly denies the false claim
-    if (rule === 'non_flea_vacuum_advice') {
-      const negated = !!match[1];
-      if (!negated && /\bflea/i.test(nearbyWindow(body, match, 200))) continue; // correct flea guidance
-      // A negated instruction ("do not"/"avoid" vacuuming for N days) is
-      // never correct — flagged regardless of flea context.
+    for (const match of body.matchAll(globalPattern(pattern))) {
+      if (isExemptOccurrence(body, match, rule, negatable)) continue;
+      results.push({ rule, excerpt: match[0].trim().slice(0, 160) });
+      break; // one result per rule, mirroring findHallucinatedClaims
     }
-    results.push({ rule, excerpt: match[0].trim().slice(0, 160) });
   }
   return results;
 }
