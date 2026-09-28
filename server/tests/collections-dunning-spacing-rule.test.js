@@ -12,7 +12,8 @@
 
 const {
   SPACING_DAYS, OVERDUE_SOURCES, OVERDUE_PURPOSES, EXEMPT_SOURCES,
-  isOverdueReminderRow, countsAsSent, spacingHeldUntil, lastOverdueReminderWithin7d,
+  isOverdueReminderRow, countsAsSent, spacingHeldUntil, collapseDunningReminderEvents,
+  summarizeDunningSpacingReplay, lastOverdueReminderWithin7d,
 } = require('../services/collections/dunning-spacing');
 
 const NOW = new Date('2026-09-28T12:00:00.000Z');
@@ -21,6 +22,7 @@ const HOUR_MS = 60 * 60 * 1000;
 function row(overrides = {}) {
   return {
     id: 'ledger-1',
+    customer_id: 'cust-1',
     channel: 'sms',
     source: 'invoice_followups',
     purpose: 'invoice_followup',
@@ -109,6 +111,83 @@ describe('spacingHeldUntil', () => {
   test('is exactly 7×24h after occurred_at', () => {
     const occurredAt = '2026-09-01T00:00:00.000Z';
     expect(spacingHeldUntil(occurredAt).toISOString()).toBe('2026-09-08T00:00:00.000Z');
+  });
+});
+
+describe('dunning spacing replay event reduction', () => {
+  const windowStart = new Date('2026-09-20T12:00:00.000Z');
+  const at = (hoursAfterWindow) => new Date(windowStart.getTime() + hoursAfterWindow * HOUR_MS).toISOString();
+  const event = (id, hoursAfterWindow, overrides = {}) => row({
+    id,
+    occurred_at: at(hoursAfterWindow),
+    metadata: { notificationEventKey: `event-${id}` },
+    ...overrides,
+  });
+
+  test('SMS and email rows for one event collapse to one candidate with no self-spacing', () => {
+    const rows = [
+      event('sms', 1, { channel: 'sms', metadata: { notificationEventKey: 'event-one' } }),
+      event('email', 1 + 1 / 3600, { channel: 'email', metadata: { notificationEventKey: 'event-one' } }),
+    ];
+    const result = summarizeDunningSpacingReplay(rows, { windowStart });
+    expect(result.events).toEqual([expect.objectContaining({ id: 'email', channel: 'email' })]);
+    expect(result).toMatchObject({ candidatesInWindow: 1, spacedWithin7d: 0, customersAffected: 0 });
+  });
+
+  test('distinct event keys 6d23h apart remain separate and produce one spacing hit', () => {
+    const result = summarizeDunningSpacingReplay([
+      event('first', -1),
+      event('second', 6 * 24 + 22),
+    ], { windowStart });
+    expect(result).toMatchObject({ candidatesInWindow: 1, spacedWithin7d: 1, customersAffected: 1 });
+    expect(result.spacingHits[0]).toMatchObject({
+      previous: expect.objectContaining({ id: 'first' }),
+      current: expect.objectContaining({ id: 'second' }),
+      hoursApart: 6 * 24 + 23,
+    });
+  });
+
+  test('event keys are customer-scoped while keyless and blank-key rows stay independent', () => {
+    const collapsed = collapseDunningReminderEvents([
+      event('customer-a', 1, { customer_id: 'cust-a', metadata: { notificationEventKey: 'shared' } }),
+      event('customer-b', 1, { customer_id: 'cust-b', metadata: { notificationEventKey: 'shared' } }),
+      event('keyless-1', 2, { metadata: {} }),
+      event('keyless-2', 3, { metadata: { notificationEventKey: '   ' } }),
+    ]);
+    expect(collapsed.map(({ id }) => id)).toEqual(['keyless-1', 'keyless-2', 'customer-a', 'customer-b']);
+    const result = summarizeDunningSpacingReplay(collapsed, { windowStart });
+    expect(result).toMatchObject({ candidatesInWindow: 4, spacedWithin7d: 1, customersAffected: 1 });
+  });
+
+  test('JSON metadata dedupes and the latest sent retry wins with an id-stable timestamp tie', () => {
+    const events = collapseDunningReminderEvents([
+      event('first', 1, { source: 'invoice_followups', metadata: JSON.stringify({ notificationEventKey: 'retry' }) }),
+      event('latest-z', 2, { source: 'balance_reminder_workflow', metadata: { notificationEventKey: 'retry' } }),
+      event('latest-a', 2, { source: 'previsit_balance_reminder', metadata: { notificationEventKey: 'retry' } }),
+    ]);
+    expect(events).toEqual([expect.objectContaining({ id: 'latest-a', source: 'previsit_balance_reminder' })]);
+  });
+
+  test('a failed latest retry is removed before the delivered representative is picked', () => {
+    const events = collapseDunningReminderEvents([
+      event('delivered', 1, { metadata: { notificationEventKey: 'retry', delivered: true } }),
+      event('failed', 2, { metadata: { notificationEventKey: 'retry', send_failed: true } }),
+    ]);
+    expect(events).toEqual([expect.objectContaining({ id: 'delivered' })]);
+  });
+
+  test('the lookback event participates, while an exact 7×24h gap does not hit', () => {
+    const inside = summarizeDunningSpacingReplay([
+      event('lookback', -1),
+      event('inside', 6 * 24 + 22),
+    ], { windowStart });
+    expect(inside).toMatchObject({ candidatesInWindow: 1, spacedWithin7d: 1 });
+
+    const boundary = summarizeDunningSpacingReplay([
+      event('boundary-prev', -1),
+      event('boundary-current', 7 * 24 - 1),
+    ], { windowStart });
+    expect(boundary).toMatchObject({ candidatesInWindow: 1, spacedWithin7d: 0 });
   });
 });
 

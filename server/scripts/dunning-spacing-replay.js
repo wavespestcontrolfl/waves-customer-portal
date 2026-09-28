@@ -3,8 +3,8 @@
 // Historical replay for the seven-day overdue-reminder spacing rule
 // (server/services/collections/dunning-spacing.js, GATE_DUNNING_SPACING_SHADOW
 // PR 1 of the dunning-unification spacing work). Over the last N days
-// (default 30), lists overdue-reminder ledger rows that landed within 7 days
-// of a PREVIOUS overdue-reminder row for the same customer, from ANY of the
+// (default 30), lists overdue-reminder events that landed within 7 days
+// of a PREVIOUS overdue-reminder event for the same customer, from ANY of the
 // five dunning rails' sources — grouped by (previous source → this source),
 // counts only, plus an hours-apart distribution. This is the owner's
 // evidence for whether the enforcing PR is still needed after the ladder
@@ -38,7 +38,7 @@ if (process.env.DATABASE_PUBLIC_URL) {
 
 const db = require(path.join(__dirname, '..', 'models', 'db'));
 const {
-  OVERDUE_SOURCES, OVERDUE_PURPOSES, countsAsSent,
+  OVERDUE_SOURCES, OVERDUE_PURPOSES, summarizeDunningSpacingReplay,
 } = require(path.join(__dirname, '..', 'services', 'collections', 'dunning-spacing'));
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -81,50 +81,24 @@ function bucketLabel(hours) {
     .whereIn('source', [...OVERDUE_SOURCES])
     .whereIn('purpose', [...OVERDUE_PURPOSES])
     .where('occurred_at', '>', lookbackStart)
-    .orderBy(['customer_id', 'occurred_at'])
-    .select('customer_id', 'source', 'occurred_at', 'metadata');
+    .orderBy(['customer_id', 'occurred_at', 'id'])
+    .select('id', 'customer_id', 'source', 'occurred_at', 'metadata');
 
-  // Group by customer, in occurred_at order (the query already sorted this).
-  const byCustomer = new Map();
-  for (const row of rows) {
-    const list = byCustomer.get(row.customer_id) || [];
-    list.push(row);
-    byCustomer.set(row.customer_id, list);
-  }
+  const {
+    spacingHits, candidatesInWindow, spacedWithin7d, customersAffected,
+  } = summarizeDunningSpacingReplay(rows, { windowStart });
 
   const pairCounts = new Map(); // "prevSource→thisSource" -> count
   const hourBuckets = new Map(); // bucket label -> count
-  let candidatesInWindow = 0;
-  let spacedWithin7d = 0;
-  let customersAffected = 0;
-
-  for (const [, list] of byCustomer) {
-    // Only rows that actually reached the customer count as either a
-    // candidate or a previous send — same doctrine as the shadow rule.
-    const sent = list.filter(countsAsSent);
-    let thisCustomerAffected = false;
-    for (let i = 0; i < sent.length; i += 1) {
-      const current = sent[i];
-      const currentAt = new Date(current.occurred_at);
-      if (currentAt < windowStart) continue; // only report on rows inside the N-day window
-      candidatesInWindow += 1;
-      // Nearest previous send (any source), if within 7 days.
-      const prev = i > 0 ? sent[i - 1] : null;
-      if (!prev) continue;
-      const hoursApart = (currentAt.getTime() - new Date(prev.occurred_at).getTime()) / (60 * 60 * 1000);
-      if (hoursApart >= SPACING_MS / (60 * 60 * 1000)) continue;
-      spacedWithin7d += 1;
-      thisCustomerAffected = true;
-      const key = `${prev.source}→${current.source}`;
-      pairCounts.set(key, (pairCounts.get(key) || 0) + 1);
-      const label = bucketLabel(hoursApart);
-      hourBuckets.set(label, (hourBuckets.get(label) || 0) + 1);
-    }
-    if (thisCustomerAffected) customersAffected += 1;
+  for (const { previous, current, hoursApart } of spacingHits) {
+    const key = `${previous.source}→${current.source}`;
+    pairCounts.set(key, (pairCounts.get(key) || 0) + 1);
+    const label = bucketLabel(hoursApart);
+    hourBuckets.set(label, (hourBuckets.get(label) || 0) + 1);
   }
 
   console.log(`[dunning-spacing-replay] last ${days}d (window ${windowStart.toISOString()} .. ${now.toISOString()}), overdue-reminder rows read from ${lookbackStart.toISOString()}`);
-  console.log(`[dunning-spacing-replay] overdue-reminder rows in window: ${candidatesInWindow}, of those within 7d of a previous one (any source): ${spacedWithin7d}, distinct customers affected: ${customersAffected}`);
+  console.log(`[dunning-spacing-replay] overdue-reminder events in window: ${candidatesInWindow}, of those within 7d of a previous one (any source): ${spacedWithin7d}, distinct customers affected: ${customersAffected}`);
 
   console.log('[dunning-spacing-replay] by (previous source → this source):');
   const pairs = [...pairCounts.entries()].sort((a, b) => b[1] - a[1]);

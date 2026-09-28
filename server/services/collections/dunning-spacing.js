@@ -79,6 +79,84 @@ function countsAsSent(row) {
   return true;
 }
 
+function compareReplayRows(a, b) {
+  const customerOrder = String(a?.customer_id ?? '').localeCompare(String(b?.customer_id ?? ''));
+  if (customerOrder) return customerOrder;
+  const occurredOrder = new Date(a?.occurred_at).getTime() - new Date(b?.occurred_at).getTime();
+  if (occurredOrder) return occurredOrder;
+  return String(a?.id ?? '').localeCompare(String(b?.id ?? ''));
+}
+
+// One notification event may write a row per selected channel. For replay
+// evidence it is one customer contact: discard confirmed undelivered attempts
+// first, then use the latest sent row as the event's representative. Keyless
+// legacy rows remain independent contacts. Sorting here makes the reducer
+// deterministic even when it is exercised without the replay query.
+function collapseDunningReminderEvents(rows) {
+  const sent = [...(rows || [])].filter(countsAsSent).sort(compareReplayRows);
+  const events = [];
+  const keyedEventIndexes = new Map();
+  for (const row of sent) {
+    const rawEventKey = metadataOf(row).notificationEventKey;
+    const eventKey = typeof rawEventKey === 'string' && rawEventKey.trim() ? rawEventKey : null;
+    if (!eventKey) {
+      events.push(row);
+      continue;
+    }
+    const key = JSON.stringify([String(row.customer_id), eventKey]);
+    const existingIndex = keyedEventIndexes.get(key);
+    if (existingIndex == null) {
+      keyedEventIndexes.set(key, events.length);
+      events.push(row);
+      continue;
+    }
+    if (new Date(row.occurred_at).getTime() > new Date(events[existingIndex].occurred_at).getTime()) {
+      events[existingIndex] = row;
+    }
+  }
+  return events.sort(compareReplayRows);
+}
+
+// Pure replay reducer: includes pre-window events as possible predecessors,
+// counts only current events inside the reported window, and keeps the strict
+// (< 7×24h) boundary used by the live reader.
+function summarizeDunningSpacingReplay(rows, { windowStart }) {
+  const events = collapseDunningReminderEvents(rows);
+  const byCustomer = new Map();
+  for (const event of events) {
+    const list = byCustomer.get(event.customer_id) || [];
+    list.push(event);
+    byCustomer.set(event.customer_id, list);
+  }
+
+  const spacingHits = [];
+  let candidatesInWindow = 0;
+  let customersAffected = 0;
+  for (const list of byCustomer.values()) {
+    let thisCustomerAffected = false;
+    for (let i = 0; i < list.length; i += 1) {
+      const current = list[i];
+      const currentAt = new Date(current.occurred_at);
+      if (currentAt < windowStart) continue;
+      candidatesInWindow += 1;
+      const previous = i > 0 ? list[i - 1] : null;
+      if (!previous) continue;
+      const hoursApart = (currentAt.getTime() - new Date(previous.occurred_at).getTime()) / (60 * 60 * 1000);
+      if (hoursApart >= SPACING_MS / (60 * 60 * 1000)) continue;
+      spacingHits.push({ previous, current, hoursApart });
+      thisCustomerAffected = true;
+    }
+    if (thisCustomerAffected) customersAffected += 1;
+  }
+  return {
+    events,
+    spacingHits,
+    candidatesInWindow,
+    spacedWithin7d: spacingHits.length,
+    customersAffected,
+  };
+}
+
 // The instant a row sent at `occurredAt` stops holding the next one.
 function spacingHeldUntil(occurredAt) {
   return new Date(new Date(occurredAt).getTime() + SPACING_MS);
@@ -124,6 +202,8 @@ module.exports = {
   EXEMPT_SOURCES,
   isOverdueReminderRow,
   countsAsSent,
+  collapseDunningReminderEvents,
+  summarizeDunningSpacingReplay,
   spacingHeldUntil,
   lastOverdueReminderWithin7d,
 };
