@@ -799,4 +799,46 @@ describe('sms gratitude qualification', () => {
     await expect(qualification.evaluateGratitudeQualification({ dbi: store.dbi }))
       .resolves.toMatchObject({ qualified: false, reason: 'pins_changed' });
   });
+
+  // Pre-push audit P1: with GATE_SMS_REAL_ANSWERS on, the rewritten system
+  // prompt used to interpolate followupSlaPhrase() directly — a value that
+  // flips at the 8am/8pm ET boundary with no code or config change. Since
+  // this pins.systemPromptSha256 IS the rendered system prompt's hash, that
+  // would have made a qualified gratitude run go stale (pins_changed) the
+  // moment the clock crossed the boundary. The fix moved the live phrase
+  // into the per-draft facts block (never hashed here) and made the system
+  // prompt text itself reference the fact instead of a computed value —
+  // this proves the pin survives both sides of the boundary.
+  test('systemPromptSha256 is IDENTICAL across the 8am/8pm ET boundary with the real-answers gate on (pre-push audit P1)', async () => {
+    const priorGate = process.env.GATE_SMS_REAL_ANSWERS;
+    const realNow = Date.now;
+    try {
+      process.env.GATE_SMS_REAL_ANSWERS = 'true';
+
+      Date.now = () => new Date('2026-09-28T14:00:00Z').getTime(); // 10:00 AM ET
+      const inHoursStore = memoryDb();
+      const inHours = loadQualification({ dbi: inHoursStore });
+      const inHoursRun = await inHours.qualification.createGratitudeQualification({
+        dbi: inHoursStore.dbi, triggeredBy: 'test',
+      });
+
+      Date.now = () => new Date('2026-09-29T02:00:00Z').getTime(); // 10:00 PM ET
+      const afterHoursStore = memoryDb();
+      const afterHours = loadQualification({ dbi: afterHoursStore });
+      const afterHoursRun = await afterHours.qualification.createGratitudeQualification({
+        dbi: afterHoursStore.dbi, triggeredBy: 'test',
+      });
+
+      expect(inHoursRun.state).toBe('running');
+      expect(afterHoursRun.state).toBe('running');
+      const inHoursPins = snapshot(inHoursStore.rows[0]).pins;
+      const afterHoursPins = snapshot(afterHoursStore.rows[0]).pins;
+      expect(inHoursPins.systemPromptSha256).toMatch(/^[a-f0-9]{64}$/);
+      expect(inHoursPins.systemPromptSha256).toBe(afterHoursPins.systemPromptSha256);
+    } finally {
+      Date.now = realNow;
+      if (priorGate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS;
+      else process.env.GATE_SMS_REAL_ANSWERS = priorGate;
+    }
+  });
 });

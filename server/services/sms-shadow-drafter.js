@@ -155,6 +155,16 @@ const REAL_ANSWERS_HANDOFF_CATEGORIES = [
 // Computed off the ET wall clock so the model is TOLD the answer, never
 // asked to compute it itself. `now` is test-only (defaults to the real
 // clock); production callers never pass it.
+//
+// Pre-push audit P1: this value is TIME-VARYING (it flips at the 8am/8pm ET
+// boundaries) and must NEVER be interpolated into the SYSTEM prompt —
+// sms-gratitude-qualification.js hashes the full rendered system prompt and
+// pins it (systemPromptSha256); a boundary crossing would change that hash
+// with no code or config change, silently blocking a qualified gratitude
+// lane with pins_changed. It rides in the per-draft FACTS block instead
+// (buildFactsBlock's "FOLLOW-UP SLA RIGHT NOW" line, gate-on only), which is
+// NEVER pinned/hashed — the system prompt only ever describes the STABLE
+// RULE ("use the exact wording from the facts"), never the live value.
 function followupSlaPhrase(now = new Date()) {
   const { hour } = etParts(now);
   return hour >= 8 && hour < 20 ? 'within the hour' : 'by 9 AM tomorrow morning';
@@ -166,11 +176,16 @@ function followupSlaPhrase(now = new Date()) {
 // no-ops: "each category gate removes exactly its category" is the test
 // contract), and the CANCELLATIONS bullet, which is unconditional — owner
 // ruling: cancellations are never escalated as their own category anymore.
-function realAnswersHandoffBullets(now) {
+// Deliberately time-INVARIANT text (see followupSlaPhrase's comment above):
+// points at the facts' "FOLLOW-UP SLA RIGHT NOW" line rather than
+// interpolating the live value, so this string — and the system prompt hash
+// sms-gratitude-qualification.js pins — never changes at the 8am/8pm ET
+// boundary.
+function realAnswersHandoffBullets() {
   const held = REAL_ANSWERS_HANDOFF_CATEGORIES.filter((c) => !gateEnvValue(c.gate));
   const lines = [
     held.length
-      ? `- HELD FOR A PERSON: ${held.map((c) => c.label).join(', ')}. Acknowledge warmly, don't resolve it, add {"type":"escalate"} to intended_actions, and say CONCRETELY when they'll hear back — ${followupSlaPhrase(now)} (the 1-business-hour follow-up SLA, 8am–8pm ET).`
+      ? `- HELD FOR A PERSON: ${held.map((c) => c.label).join(', ')}. Acknowledge warmly, don't resolve it, add {"type":"escalate"} to intended_actions, and say CONCRETELY when they'll hear back — use the EXACT wording from FOLLOW-UP SLA RIGHT NOW in the facts below (never invent your own timing; that fact IS the 1-business-hour follow-up SLA, 8am–8pm ET).`
       : "- Every category that used to hold for a person now answers from the facts instead — see the category rules below.",
   ];
   if (gateEnvValue('GATE_SMS_AGENT_COMPLAINTS')) {
@@ -279,18 +294,23 @@ async function fetchVoiceProfileForDrafter({ dbi = db } = {}) {
   }
 }
 
-function buildSystemPromptWithProfile(voiceProfileText = '', { now } = {}) {
+function buildSystemPromptWithProfile(voiceProfileText = '') {
   // v12 REAL ANSWERS: every conditional below resolves to the exact v11
   // literal when the gate is off (see the constant-block comment above
-  // PROMPT_VERSION) — gate off is byte-identical.
+  // PROMPT_VERSION) — gate off is byte-identical. Every branch below is also
+  // TIME-INVARIANT (pre-push audit P1): the live follow-up SLA phrase is a
+  // per-draft FACT (buildFactsBlock's "FOLLOW-UP SLA RIGHT NOW" line), never
+  // interpolated here — this function's output must stay stable across the
+  // 8am/8pm ET boundary, since sms-gratitude-qualification.js hashes and
+  // pins the full rendered system prompt.
   const realAnswersOn = gateEnvValue('GATE_SMS_REAL_ANSWERS');
   const factSourceList = `SERVICE HISTORY, UPCOMING SERVICES${realAnswersOn ? ', OPEN TIMES' : ''}, BILLING, PENDING ESTIMATE, PROPERTY & PREFERENCES, LAWN HEALTH, ACCOUNT FLAGS, RECENT PHONE CALLS, LATEST CALL TRANSCRIPT, the thread`;
   const upcomingOrThread = realAnswersOn ? 'UPCOMING SERVICES, OPEN TIMES, or the thread' : 'UPCOMING SERVICES, or the thread';
   const deferRule = realAnswersOn
-    ? `Answer from the facts you have — that is the BEST reply, not a fallback. When the customer wants to book, reschedule, or change a visit, offer 2–3 SPECIFIC times straight from OPEN TIMES (verbatim — never invent one) and add {"type":"book_appointment"} to intended_actions once they confirm the one they want. When money is due, state the exact amount from BILLING or PENDING ESTIMATE and add {"type":"send_payment_link"}. Use {"type":"send_portal_link"} or {"type":"send_estimate_link"} wherever they fit what the customer is asking for. Only hand off to a person when the facts genuinely can't answer — and when you do, say CONCRETELY when they'll hear back: ${followupSlaPhrase(now)} (the 1-business-hour follow-up SLA, 8am–8pm ET). Record the gap in missing_info either way.`
+    ? `Answer from the facts you have — that is the BEST reply, not a fallback. When the customer wants to book, reschedule, or change a visit, offer 2–3 SPECIFIC times straight from OPEN TIMES (verbatim — never invent one) and add {"type":"book_appointment"} to intended_actions once they confirm the one they want. When money is due, state the exact amount from BILLING or PENDING ESTIMATE and add {"type":"send_payment_link"}. Use {"type":"send_portal_link"} or {"type":"send_estimate_link"} wherever they fit what the customer is asking for. Only hand off to a person when the facts genuinely can't answer — and when you do, say CONCRETELY when they'll hear back, using the EXACT wording from FOLLOW-UP SLA RIGHT NOW in the facts below (never invent your own timing; that fact IS the 1-business-hour follow-up SLA, 8am–8pm ET). Record the gap in missing_info either way.`
     : "When you lack a fact the customer needs, the BEST reply acknowledges warmly and says you'll confirm and follow up — that is correct and safe, not a failure, and often better than the answer a human gave. Record the gap in missing_info.";
   const handoffBullet = realAnswersOn
-    ? realAnswersHandoffBullets(now)
+    ? realAnswersHandoffBullets()
     : '- If the message warrants a human (cancellation, complaint, billing dispute, chemical/medical concern, legal threat), the reply should acknowledge warmly without resolving, and intended_actions must include {"type":"escalate"}.';
 
   const base = `You are the Waves Pest Control AI assistant drafting an SMS reply to a customer in Southwest Florida. This reply may be shown to a Waves team member to review and send, or — once an intent has earned it through review — sent to the customer automatically. Treat it as customer-facing: write exactly what should go to the customer, and make it safe and correct to send AS-IS with no human edit.
@@ -451,6 +471,17 @@ function buildFactsBlock(context, extras = {}) {
   // openTimesSection is '' and the returned block is byte-identical to v11.
   const openTimesSection = extras.openTimesBlock
     ? `OPEN TIMES (real, bookable slots, ET — offer ONLY from this list, never invent one):\n${extras.openTimesBlock}\n`
+    : '';
+  // Pre-push audit P1: the live follow-up SLA phrase ("within the hour" /
+  // "by 9 AM tomorrow morning") is TIME-VARYING — it flips at the 8am/8pm ET
+  // boundary — so it must never be baked into the (hashed/pinned) system
+  // prompt; see followupSlaPhrase's own comment. It rides here instead, as
+  // an ordinary per-draft FACT the model quotes verbatim, same as OPEN
+  // TIMES. Gate-on unconditional (not scheduling-intent-gated): ANY category
+  // — a hand-off, a cancellation, a held complaint — may need to state it.
+  // `extras.now` is test-only.
+  const slaSection = gateEnvValue('GATE_SMS_REAL_ANSWERS')
+    ? `FOLLOW-UP SLA RIGHT NOW: ${followupSlaPhrase(extras.now)}\n`
     : '';
   // Shared compliance guard (Codex r5): banned customer-copy claims
   // ("pet-safe", "EPA-approved", fixed re-entry/drying times) must not enter
@@ -707,7 +738,7 @@ SERVICE HISTORY (most recent first):
 ${historyBlock || `- ${lastService}`}
 UPCOMING SERVICES:
 ${upcomingBlock}
-${openTimesSection}BILLING:
+${openTimesSection}${slaSection}BILLING:
 ${billingLines.join('\n')}
 PENDING ESTIMATE: ${estimateLine}
 PROPERTY & PREFERENCES:

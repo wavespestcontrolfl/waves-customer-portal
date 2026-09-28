@@ -113,9 +113,34 @@ describe('GATE_SMS_REAL_ANSWERS on — the rewritten prompt', () => {
     expect(prompt).toContain('{"type":"send_payment_link"}');
     expect(prompt).toContain('{"type":"send_portal_link"}');
     expect(prompt).toContain('{"type":"send_estimate_link"}');
+    // the SLA points at the FACTS, never a live-computed value (see the
+    // time-invariance test below) — the rule text still names what that
+    // fact IS, for a human reading the prompt
+    expect(prompt).toContain('the EXACT wording from FOLLOW-UP SLA RIGHT NOW in the facts below');
     expect(prompt).toContain('the 1-business-hour follow-up SLA, 8am–8pm ET');
     // FACT DISCIPLINE still fully in force — never invent a time
     expect(prompt).toMatch(/never invent one/);
+  });
+
+  test('the system prompt is TIME-INVARIANT across the 8am/8pm ET boundary (pre-push audit P1)', () => {
+    // sms-gratitude-qualification.js hashes the full rendered system prompt
+    // and pins it (systemPromptSha256); a value that flips at a clock
+    // boundary with no code/config change would silently block a qualified
+    // gratitude lane with pins_changed the next time the clock crosses it.
+    // buildSystemPromptWithProfile takes no `now` — it must never differ no
+    // matter when it's called. Prove it holds at both real clock instants
+    // Date.now() can return, one on each side of the boundary.
+    const real = Date.now;
+    try {
+      Date.now = () => new Date('2026-09-28T14:00:00Z').getTime(); // 10:00 AM ET — "within the hour" territory
+      const inHours = buildSystemPrompt();
+      Date.now = () => new Date('2026-09-29T02:00:00Z').getTime(); // 10:00 PM ET — "by 9 AM tomorrow morning" territory
+      const afterHours = buildSystemPrompt();
+      expect(inHours).toBe(afterHours);
+      expect(inHours).not.toMatch(/within the hour|by 9 AM tomorrow morning/);
+    } finally {
+      Date.now = real;
+    }
   });
 
   test('OPEN TIMES joins the FACT DISCIPLINE grounding sources', () => {
@@ -224,6 +249,34 @@ describe('buildFactsBlock — OPEN TIMES section (extras.openTimesBlock)', () =>
     );
     expect(block.indexOf('UPCOMING SERVICES')).toBeLessThan(block.indexOf('OPEN TIMES ('));
     expect(block.indexOf('OPEN TIMES (')).toBeLessThan(block.indexOf('\nBILLING:'));
+  });
+});
+
+describe('buildFactsBlock — FOLLOW-UP SLA RIGHT NOW (pre-push audit P1: keeps the live value OUT of the system prompt)', () => {
+  test('gate off: no such line, ever', () => {
+    clearGates();
+    const context = { summary: 'Test customer', upcomingServices: [] };
+    expect(buildFactsBlock(context)).not.toContain('FOLLOW-UP SLA RIGHT NOW');
+  });
+
+  test('gate on: renders the live phrase as an ordinary per-draft fact, regardless of scheduling intent', () => {
+    process.env[GATE] = 'true';
+    const context = { summary: 'Test customer', upcomingServices: [] };
+    const inHours = buildFactsBlock(context, { now: new Date('2026-09-28T14:00:00Z') }); // 10:00 AM ET
+    expect(inHours).toContain('FOLLOW-UP SLA RIGHT NOW: within the hour');
+    const afterHours = buildFactsBlock(context, { now: new Date('2026-09-29T02:00:00Z') }); // 10:00 PM ET
+    expect(afterHours).toContain('FOLLOW-UP SLA RIGHT NOW: by 9 AM tomorrow morning');
+  });
+
+  test('sits after OPEN TIMES and before BILLING when both are present', () => {
+    process.env[GATE] = 'true';
+    const context = { summary: 'Test customer', upcomingServices: [] };
+    const block = buildFactsBlock(context, {
+      openTimesBlock: '- Tuesday, September 29: 9:00 AM - 11:00 AM',
+      now: new Date('2026-09-28T14:00:00Z'),
+    });
+    expect(block.indexOf('OPEN TIMES (')).toBeLessThan(block.indexOf('FOLLOW-UP SLA RIGHT NOW'));
+    expect(block.indexOf('FOLLOW-UP SLA RIGHT NOW')).toBeLessThan(block.indexOf('\nBILLING:'));
   });
 });
 
