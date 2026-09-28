@@ -170,9 +170,37 @@ export default function MobileCheckoutSheet({
     && predictionGrossAmount == null
     && predictionAmount != null
     && prepaidAmount > 0;
+  // codex round-2 P1 (moved up from further below so `price` can read it):
+  // an attached-invoice prediction (predictionFromAttachedInvoice,
+  // admin-schedule.js) legitimately never carries grossAmount, and its
+  // amount is the REAL invoice's total, never fee-derived — the
+  // feeOnlyPerApplicationPreview check right below must never fire for it.
+  const attachedInvoicePrediction = service.billingLane?.prediction?.source === 'attached_invoice';
+  // Owner ruling — REMOVE THE CHARGE NOW FEE FALLBACK (2026-09-27): Charge
+  // Now (this sheet) must never bill the customer-level per_application_fee
+  // for an unpriced visit — only completion still does (predictCompletionBilling
+  // is completion's own prediction and is unaffected by this ruling; it
+  // still returns the fee as grossAmount so completion's OWN preview
+  // elsewhere — CompletionPanel, the detail sheet — stays accurate). An
+  // unpriced, non-callback, per_application-lane visit with no attached
+  // invoice previews a fee-based grossAmount here that Charge Now's own
+  // mint endpoint (resolveScheduledServiceCharge, admin-schedule.js) no
+  // longer honors — reading it as `price` would show a "Charge $X" button
+  // the server then 400s (or, for a fully-prepaid 'prepaid' kind, a "Charge
+  // $0.00" settle-the-invoice button the server would ALSO 400, since there
+  // is no fee left to build that $0 invoice's line items from). With no own
+  // price and not callback (`price`'s ternary below already guarantees
+  // both), the ENTIRE amount for 'invoice' / 'auto_charge' / 'prepaid'
+  // kinds under this lane comes from that fee — `estimatedPrice` alone
+  // would have taken the `hasOwnPrice` branch above, and
+  // hasAuthoritativeZeroPrice / callback / always-free-type all predict
+  // 'no_charge' instead, never reaching these kinds at all.
+  const feeOnlyPerApplicationPreview = !attachedInvoicePrediction
+    && service.billingLane?.mode === 'per_application'
+    && ['invoice', 'auto_charge', 'prepaid'].includes(predictionKind);
   const price = hasOwnPrice
     ? rawPrice
-    : (service.isCallback
+    : (service.isCallback || feeOnlyPerApplicationPreview
       ? 0
       : Number(predictionGrossAmount ?? predictionAmount) || 0);
   const appointmentAddons = Array.isArray(service.serviceAddons) ? service.serviceAddons : [];
@@ -353,8 +381,8 @@ export default function MobileCheckoutSheet({
   // server's own `source` field instead of the invoicePreview subset — a
   // canceled/void attached invoice (source absent, predictCompletionBilling's
   // ordinary prediction applies instead) is UNCHANGED and still refused when
-  // stale.
-  const attachedInvoicePrediction = service.billingLane?.prediction?.source === 'attached_invoice';
+  // stale. (`attachedInvoicePrediction` itself is declared earlier, above
+  // `price`, so the fee-only-preview check can read it too.)
   const priceRefreshBlocksCharge = priceNeedsRefresh && !invoicePreview && !attachedInvoicePrediction;
   // amountDue (total − credit_applied), never the gross — the charge paths
   // collect the amount due. And when the recorded prepayment was already

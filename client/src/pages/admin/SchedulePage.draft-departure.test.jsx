@@ -280,6 +280,45 @@ describe('completion review preview availability', () => {
     expect(screen.getByText(/waits for the invoice to be paid/)).toBeTruthy();
   });
 
+  // Codex pre-push P2: the SAME hold must apply to the other three reasons
+  // `state: 'settled'` can carry besides 'invoice_processing' —
+  // 'withdrawn_from_customer', 'payer_billed', and 'credit_applied' are all
+  // draft/sent invoices never marked literally paid/prepaid either, so
+  // complete-scheduled-service.js's invoiceBlocksReview holds the ask for
+  // them exactly the same way. This panel used to recognize
+  // 'invoice_processing' alone and let these three preview an immediate
+  // send the server still withheld pending manual reconciliation.
+  it.each(['withdrawn_from_customer', 'payer_billed', 'credit_applied'])(
+    'holds the review ask for a sibling invoice settled by reason "%s" (not yet literally paid)',
+    async (reason) => {
+      vi.stubGlobal('fetch', vi.fn(async (url) => ({
+        ok: true,
+        json: async () => String(url).includes('/send-time-preview')
+          ? { schedulerEnabled: true, reviewSequencesEnabled: true, smsSendWindowEnabled: true }
+          : { customer: {}, actions: [], available: false },
+      })));
+      await mount({
+        service: {
+          ...service,
+          estimatedPrice: null,
+          billingLane: {
+            mode: 'per_application',
+            source: 'explicit',
+            monthlyRate: null,
+            prediction: {
+              kind: 'covered_sibling_invoice', amount: null, conflictStampedPrice: false,
+              invoiceId: 'inv-1', invoiceNumber: 'WPC-TEST-0001',
+            },
+            siblingCoverage: {
+              state: 'settled', invoiceId: 'inv-1', invoiceNumber: 'WPC-TEST-0001', amountDue: 0, reason,
+            },
+          },
+        },
+      });
+      expect(screen.getByText(/waits for the invoice to be paid/)).toBeTruthy();
+    },
+  );
+
   // The counterpart: a sibling invoice that IS genuinely settled
   // ('invoice_settled' — paid/prepaid) must NOT hold the ask — the
   // pre-existing behavior for a truly paid sibling stays unchanged.

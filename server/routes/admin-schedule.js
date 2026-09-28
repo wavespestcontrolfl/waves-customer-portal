@@ -15635,45 +15635,54 @@ router.put('/:id/assign', requireAdmin, async (req, res, next) => {
 // gate. The two pure decision helpers are exported on router._test.
 
 // Pure: the visit's chargeable price. Delegates to the SAME
-// completionInvoiceAmount (billing-lane.js) completion itself uses, so
-// Charge Now / prepaid-receipt minting can never diverge from what
-// completing the visit would bill — that used to be a second, narrower
-// re-implementation with no per_application branch at all, so an unpriced
-// explicit per_application visit with a real acceptance fee resolved $0
-// here (billingMode !== 'monthly_membership' short-circuited before ever
-// looking at the fee) while completion and the schedule sheet's own
-// prediction both billed the fee. The schedule sheet's Charge preview now
-// reads that same prediction (codex pre-push P1: previewing a positive
-// Charge amount this resolver would then reject as "no chargeable amount").
+// completionInvoiceAmount (billing-lane.js) completion itself uses for the
+// explicit-price / monthly-rate precedence, so those stay in lockstep with
+// what completing the visit would bill.
 //
-// completionInvoiceAmount itself has no serviceType/always-free concept —
-// only predictCompletionBilling's per_application branch adds that guard,
-// BEFORE ever computing an amount (codex pre-push P0): an unpriced
-// estimate/follow-up visit under an explicit per_application lane predicts
-// $0 there, so this resolver must refuse the SAME per-application-fee
-// fallback for it, or Charge Now / the prepaid receipt would mint the
-// acceptance fee for a visit completion never bills. Mirrors the guard,
-// not completionInvoiceAmount's own contract, so an explicit estimatedPrice
-// still wins on this resolver exactly as it always has (unchanged for
-// isCallback too — only the always-free-TYPE fallback is narrowed here).
+// Owner ruling — REMOVE THE CHARGE NOW FEE FALLBACK (2026-09-27): Charge Now
+// (this resolver) and the prepaid-receipt mint must NEVER bill an unpriced
+// visit from the customer-level per_application_fee — that is main's
+// original behavior, restored here. An earlier round of this lane had
+// widened this resolver to pass perApplicationBilling/perApplicationFee
+// into completionInvoiceAmount so an unpriced per_application visit with an
+// established acceptance fee would bill it here too, matching completion's
+// OWN fee fallback — but completion and Charge Now are different moments:
+// completion bills the fee for a performed application, while Charge Now
+// can fire before the visit even happens. That machinery (the
+// `perApplicationFee` parameter, the `customers.per_application_fee` reads
+// feeding it, and passing it into completionInvoiceAmount below) is
+// removed entirely. completionInvoiceAmount is still called for its OTHER,
+// unaffected precedence (an explicit positive estimatedPrice always wins;
+// an explicit non-monthly billingMode — including per_application — never
+// falls back to the lingering customer-level monthly_rate); with no fee
+// ever passed in, an unpriced per_application visit now falls through that
+// SAME `billingMode && billingMode !== 'monthly_membership'` branch to 0,
+// exactly like every other explicit non-monthly lane always has here — a
+// PLAIN NUMBER, never a structured refusal: a bare 0 does not by itself
+// mean "nothing to charge", since both callers of this resolver still check
+// for an existing invoice already on this visit's own row before giving up
+// (a structured refusal here would preempt that check and block collecting
+// on a perfectly good already-minted invoice). The Charge Now route's own
+// "no chargeable amount" 400 (reached only once that reuse check finds
+// nothing AND no checkout extra covers it) carries clearer copy — "set a
+// price on the visit, or bill it at completion" — for exactly this shape.
+// Completion (predictCompletionBilling / completionInvoiceAmount's
+// per_application branch, billing-lane.js) is UNCHANGED and still bills the
+// acceptance fee at completion — only Charge Now / the prepaid-receipt
+// mint narrow.
 //
 // Sibling-covered same-trip visit (owner decision — narrow + fail closed,
 // after 8 Codex rounds of partial-coverage machinery trying to let Charge
 // Now mint AROUND a covered visit — zero-base-plus-extras, an onVerdict
 // callback threaded into a locked recheck, …). A same-day combined
 // per-application accept invoices the RESERVED sibling row for the whole
-// trip and deliberately leaves THIS, the PROMOTED row, unpriced — but the
-// customer can still carry an established per_application_fee from an
-// earlier accept (estimate-converter.js reservedAcceptPerVisitSplit / "an
-// already-per_application customer accepting an ADD-ON keeps their
-// established fee"), so the ordinary fee fallback below would mint an
-// unrelated charge for a trip that is already billed on the sibling's
-// invoice. Ask siblingInvoiceCoverageVerdict (billing-lane.js) — the SAME
-// sibling-coverage determination the schedule sheet's own prediction reads
+// trip and deliberately leaves THIS, the PROMOTED row, unpriced. Ask
+// siblingInvoiceCoverageVerdict (billing-lane.js) — the SAME sibling-coverage
+// determination the schedule sheet's own prediction reads
 // (siblingCoverageForSchedule), so this resolver, the sheet, and completion
 // itself (which re-checks findFirstApplicationInvoiceForEstimateService
-// directly before minting) can never disagree — before ever falling back
-// to the fee. `svc`/`dbConn` are optional so a caller that hasn't been
+// directly before minting) can never disagree — before ever resolving
+// anything else. `svc`/`dbConn` are optional so a caller that hasn't been
 // updated (or a pure unit test) still gets the unchanged, DB-free
 // precedence.
 //
@@ -15693,39 +15702,39 @@ router.put('/:id/assign', requireAdmin, async (req, res, next) => {
 // structured refusal — every caller must check `.refused` and refuse to
 // mint ANYTHING (base or extras) — before extras are even parsed. Only a
 // definitive 'none' (genuinely no relevant sibling invoice at all) falls
-// through to the established fee.
+// through to the ordinary precedence below.
 async function resolveScheduledServiceCharge({
-  estimatedPrice, isCallback, monthlyRate, billingMode, perApplicationFee, serviceType, svc = null, dbConn = null,
+  estimatedPrice, isCallback, monthlyRate, billingMode, serviceType, svc = null, dbConn = null,
 }) {
-  const perApplicationBilling = billingMode === 'per_application' && !isAlwaysFreeServiceType(serviceType);
   // codex pre-push P1 (round 3): a provenance-backed $0 (completion-pricing's
   // discount engine froze a fully-discounted application at a genuine $0
   // net, stamping a positive primary_line_price alongside it — see
   // hasAuthoritativeZeroPrice, billing-lane.js) is this visit's OWN price,
   // never "unpriced" — it must never fall into the sibling-coverage lookup
-  // below (unrelated to that provenance) or the per-application fee
-  // fallback either. `svc?.primary_line_price` is undefined/absent for
-  // every existing pure/unit-test caller, so this is a no-op for them.
+  // below (unrelated to that provenance).
+  // `svc?.primary_line_price` is undefined/absent for every existing
+  // pure/unit-test caller, so this is a no-op for them.
   const primaryLinePrice = svc?.primary_line_price ?? null;
   const hasOwnPrice = (estimatedPrice != null && Number(estimatedPrice) > 0)
     || hasAuthoritativeZeroPrice(estimatedPrice, primaryLinePrice);
-  // Codex P1 (round 6): this used to gate on `perApplicationBilling` — the
-  // CUSTOMER'S CURRENT billing mode — so a combined pay-per-application
-  // trip that already has its first-application invoice on a sibling, whose
-  // customer later moves to a monthly or legacy-null lane, skipped this
-  // lookup entirely and fell through to `monthly_rate` below, minting a
-  // second collectible base charge beside the sibling's live invoice. Gate
-  // on the VISIT'S OWN SHAPE instead (isSiblingCoverageEligibleVisit,
-  // billing-lane.js — unpriced, estimate-linked, not a callback, not an
-  // always-free type) — the SAME shape schedule enrichment
-  // (siblingCoverageForSchedule's caller, enrichBillingLaneWithWalletGap)
-  // and completion (findFirstApplicationInvoiceForEstimateService) already
-  // ask unconditionally, so all three can never disagree about whether a
+  // Codex P1 (round 6): this used to gate on the CUSTOMER'S CURRENT billing
+  // mode — so a combined pay-per-application trip that already has its
+  // first-application invoice on a sibling, whose customer later moves to a
+  // monthly or legacy-null lane, skipped this lookup entirely and fell
+  // through to `monthly_rate` below, minting a second collectible base
+  // charge beside the sibling's live invoice. Gate on the VISIT'S OWN SHAPE
+  // instead (isSiblingCoverageEligibleVisit, billing-lane.js — unpriced,
+  // estimate-linked, not a callback, not an always-free type) — the SAME
+  // shape schedule enrichment (siblingCoverageForSchedule's caller,
+  // enrichBillingLaneWithWalletGap) and completion
+  // (findFirstApplicationInvoiceForEstimateService) already ask
+  // unconditionally, so all three can never disagree about whether a
   // sibling COULD be covering this trip. `svc` absent (pure/unit-test
   // callers) reads as ineligible — byte-identical to before for them.
-  if (isSiblingCoverageEligibleVisit({
+  const eligibleForCoverageLookup = isSiblingCoverageEligibleVisit({
     sourceEstimateId: svc?.source_estimate_id, hasOwnPrice, isCallback, serviceType,
-  }) && svc && dbConn) {
+  });
+  if (eligibleForCoverageLookup && svc && dbConn) {
     let verdict;
     try {
       verdict = await siblingInvoiceCoverageVerdict(svc, dbConn);
@@ -15751,11 +15760,25 @@ async function resolveScheduledServiceCharge({
   // already covers "the combined invoice died" — a priced visit's own mint
   // always proceeds to completionInvoiceAmount below, exactly as before the
   // round-10 priced-branch detour (removed; replaced by the single rule).
+  //
+  // completionInvoiceAmount's own per_application fee branch is never
+  // exercised from here any more (owner ruling — REMOVE THE CHARGE NOW FEE
+  // FALLBACK): perApplicationBilling/perApplicationFee are simply not
+  // passed, so an unpriced per_application visit falls through to the
+  // `billingMode !== 'monthly_membership'` branch and resolves 0, same as
+  // every other explicit non-monthly lane. Returned as a plain number, NOT
+  // a structured refusal — a $0 amount here does not by itself mean
+  // "nothing to charge": both callers of this resolver still check for an
+  // existing invoice already on this visit's own row before giving up on
+  // it (mintOrReuseScheduledServiceInvoice / the Charge Now route's own
+  // reuse block), and a 0 that preempted that check here would block
+  // collecting on a perfectly good already-minted invoice. The Charge Now
+  // route's own "no chargeable amount" 400 (after that reuse check finds
+  // nothing) carries the clear copy for this ruling's actual "nothing else
+  // to charge" case.
   return completionInvoiceAmount({
     estimatedPrice,
     isCallback,
-    perApplicationBilling,
-    perApplicationFee,
     monthlyRate,
     billingMode,
     primaryLinePrice,
@@ -15867,7 +15890,6 @@ async function mintOrReuseScheduledServiceInvoice(svc) {
     isCallback: svc.is_callback,
     monthlyRate: svc.cust_monthly_rate,
     billingMode: svc.cust_billing_mode || null,
-    perApplicationFee: svc.cust_per_application_fee,
     serviceType: svc.service_type,
     svc,
     dbConn: db,
@@ -15998,7 +16020,6 @@ async function generatePrepaidReceiptForService(serviceId, { operatorInitiated =
       'customers.property_type as cust_property_type',
       'customers.waveguard_tier as cust_waveguard_tier',
       'customers.billing_mode as cust_billing_mode',
-      'customers.per_application_fee as cust_per_application_fee',
     )
     .first();
   if (!svc) return { sent: false, reason: 'service_not_found' };
@@ -16351,8 +16372,7 @@ router.post('/:id/invoice', async (req, res, next) => {
         'customers.monthly_rate as cust_monthly_rate',
         'customers.property_type as cust_property_type',
         'customers.waveguard_tier as cust_waveguard_tier',
-        'customers.billing_mode as cust_billing_mode',
-        'customers.per_application_fee as cust_per_application_fee')
+        'customers.billing_mode as cust_billing_mode')
       .first();
     if (!svc) return res.status(404).json({ error: 'Scheduled service not found' });
 
@@ -16521,7 +16541,6 @@ router.post('/:id/invoice', async (req, res, next) => {
       isCallback: svc.is_callback,
       monthlyRate: svc.cust_monthly_rate,
       billingMode: svc.cust_billing_mode || null,
-      perApplicationFee: svc.cust_per_application_fee,
       serviceType: svc.service_type,
       svc,
       dbConn: db,
@@ -16649,7 +16668,27 @@ router.post('/:id/invoice', async (req, res, next) => {
 
     const extrasTotal = invoiceExtraLines.reduce((s, e) => s + e.amount, 0);
     if (!(amount > 0) && extrasTotal <= 0) {
-      return res.status(400).json({ error: 'No chargeable amount — estimated price is 0' });
+      // Owner ruling — REMOVE THE CHARGE NOW FEE FALLBACK (2026-09-27):
+      // clearer copy for the one shape that fallback used to widen —
+      // unpriced, estimate-linked, sibling-eligible (isSiblingCoverageEligibleVisit,
+      // billing-lane.js — the SAME shape the sibling lookup above gates on;
+      // recomputed here since resolveScheduledServiceCharge no longer
+      // returns a structured refusal for this case, only a plain 0, so an
+      // existing invoice on this row can still be reused above it). Every
+      // OTHER $0 reason reaching this line (a free callback, an always-free
+      // service type, an explicit non-monthly lane with no price) keeps the
+      // original generic copy — "bill it at completion" would be untrue for
+      // those, since none of them ever bill anything at completion either.
+      const hasOwnPrice = (svc.estimated_price != null && Number(svc.estimated_price) > 0)
+        || hasAuthoritativeZeroPrice(svc.estimated_price, svc.primary_line_price);
+      const clearerCopy = isSiblingCoverageEligibleVisit({
+        sourceEstimateId: svc.source_estimate_id, hasOwnPrice, isCallback: svc.is_callback, serviceType: svc.service_type,
+      });
+      return res.status(400).json({
+        error: clearerCopy
+          ? 'This visit has no price set — set a price on the visit, or bill it at completion.'
+          : 'No chargeable amount — estimated price is 0',
+      });
     }
 
     const InvoiceService = require('../services/invoice');

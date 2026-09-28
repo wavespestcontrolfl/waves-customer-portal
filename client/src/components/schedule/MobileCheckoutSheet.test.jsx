@@ -218,13 +218,18 @@ describe('MobileCheckoutSheet money lines', () => {
 
 describe('MobileCheckoutSheet unpriced-visit billingLane.prediction fallback', () => {
   // Codex pre-push P1: this sheet stacks extras on top of the base visit,
-  // so it reads `grossAmount` (the fee BEFORE the recorded prepayment was
-  // netted out) and applies its OWN prepaid-credit math against that gross
-  // figure exactly once — never the already-net `amount` the other three
-  // schedule surfaces use directly, which would net the same prepayment a
-  // second time ($100 fee, $60 prepaid predicts $40 net; crediting $60
-  // again against that $40 would zero the charge although $40 is owed).
-  it('charges the real remaining balance against the gross fee, crediting the prepayment once', () => {
+  // so it reads `grossAmount` (the fee/rate BEFORE the recorded prepayment
+  // was netted out) and applies its OWN prepaid-credit math against that
+  // gross figure exactly once — never the already-net `amount` the other
+  // three schedule surfaces use directly, which would net the same
+  // prepayment a second time ($100 base, $60 prepaid predicts $40 net;
+  // crediting $60 again against that $40 would zero the charge although $40
+  // is owed). Lane is monthly_membership (never per_application — see the
+  // REMOVE THE CHARGE NOW FEE FALLBACK block below for why that lane
+  // deliberately no longer previews a chargeable amount here at all) so
+  // this fixture's grossAmount traces to monthlyRate, a mint Charge Now
+  // still makes.
+  it('charges the real remaining balance against the gross base, crediting the prepayment once', () => {
     render(
       <MobileCheckoutSheet
         service={{
@@ -234,9 +239,9 @@ describe('MobileCheckoutSheet unpriced-visit billingLane.prediction fallback', (
           prepaidAmount: 60,
           prepaidMethod: 'cash',
           billingLane: {
-            mode: 'per_application',
+            mode: 'monthly_membership',
             source: 'explicit',
-            monthlyRate: null,
+            monthlyRate: 100,
             prediction: { kind: 'invoice', amount: 40, grossAmount: 100, conflictStampedPrice: false },
           },
         }}
@@ -249,12 +254,13 @@ describe('MobileCheckoutSheet unpriced-visit billingLane.prediction fallback', (
   });
 
   // A 'prepaid' kind means completion mints nothing new against the base
-  // visit — grossAmount ($80) is the fee, fully absorbed by the $100
+  // visit — grossAmount ($80) is the base, fully absorbed by the $100
   // prepaid, so the button still mints (a $0-due invoice the prepaid
   // credit settles), never disabled outright — the base is chargeable
   // pre-prepaid even though the net total is $0 (mirrors the existing
-  // attached-invoice "fully prepaid" behavior above).
-  it('nets a fully-covered "prepaid" prediction to $0 with no extras added, crediting the gross fee', () => {
+  // attached-invoice "fully prepaid" behavior above). Same monthly_membership
+  // lane choice as the test above, for the same reason.
+  it('nets a fully-covered "prepaid" prediction to $0 with no extras added, crediting the gross base', () => {
     render(
       <MobileCheckoutSheet
         service={{
@@ -264,9 +270,9 @@ describe('MobileCheckoutSheet unpriced-visit billingLane.prediction fallback', (
           prepaidAmount: 100,
           prepaidMethod: 'cash',
           billingLane: {
-            mode: 'per_application',
+            mode: 'monthly_membership',
             source: 'explicit',
-            monthlyRate: null,
+            monthlyRate: 80,
             prediction: { kind: 'prepaid', amount: 100, grossAmount: 80, conflictStampedPrice: false },
           },
         }}
@@ -276,6 +282,41 @@ describe('MobileCheckoutSheet unpriced-visit billingLane.prediction fallback', (
     expect(screen.getByRole('button', { name: 'Charge $0.00' })).toBeInTheDocument();
     expect(screen.getByText('Prepaid credit')).toBeInTheDocument();
     expect(screen.getByText('−$80.00')).toBeInTheDocument();
+  });
+
+  // Owner ruling — REMOVE THE CHARGE NOW FEE FALLBACK (2026-09-27): the SAME
+  // two fixtures as above, but under the per_application lane the ruling
+  // actually narrows — Charge Now must never preview (or mint) the
+  // customer-level per_application_fee for an unpriced visit, whether the
+  // prediction kind is 'invoice' (a balance still due) or 'prepaid' (fully
+  // covered — Charge Now would still need to mint a $0 invoice off the fee
+  // to settle it, and there is no fee left to build that invoice from
+  // either). Both now show the same generic "nothing to charge" state every
+  // other $0 visit shows.
+  it.each([
+    ['invoice', { kind: 'invoice', amount: 40, grossAmount: 100, conflictStampedPrice: false }, 60],
+    ['prepaid', { kind: 'prepaid', amount: 100, grossAmount: 80, conflictStampedPrice: false }, 100],
+  ])('never previews a per_application fee-based amount for prediction kind "%s"', (_kind, prediction, prepaidAmount) => {
+    render(
+      <MobileCheckoutSheet
+        service={{
+          ...BASE_SERVICE,
+          waveguardTier: null,
+          estimatedPrice: null,
+          prepaidAmount,
+          prepaidMethod: 'cash',
+          billingLane: {
+            mode: 'per_application',
+            source: 'explicit',
+            monthlyRate: null,
+            prediction,
+          },
+        }}
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.queryByRole('button', { name: /^Charge \$/ })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'No charge — complete from job' })).toBeDisabled();
   });
 
   // Older cached payload (or a kind that never nets against THIS customer's

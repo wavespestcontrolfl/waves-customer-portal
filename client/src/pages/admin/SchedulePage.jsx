@@ -13768,19 +13768,24 @@ export function CompletionPanel({
   // treat it as `usingUnpricedPrediction`'s ordinary $0/no-invoice path.
   const siblingCoverage = service.billingLane?.siblingCoverage || null;
   const collectOnSiblingInvoice = siblingCoverage?.state === 'collect_on_combined_invoice';
-  // codex round-9 P2: a covering sibling invoice that is only 'processing'
-  // (money in flight, e.g. a pending ACH debit — billing-lane.js
-  // siblingCoverageForSchedule's 'invoice_processing' reason, kept distinct
-  // from a genuinely paid/prepaid 'invoice_settled') reads as `state:
-  // 'settled'` like any other settled sibling — a technician still
-  // collects nothing at the door either way — but it must NOT read as
-  // "review clear to send" the way a truly paid/prepaid sibling does.
-  // complete-scheduled-service.js's own invoiceBlocksReview holds the
-  // review ask for every invoice status except literal 'paid'/'prepaid',
-  // so this panel's preview must hold it too, or it promises an immediate
-  // review request the server actually withholds until the payment settles.
-  const siblingInvoiceProcessing = siblingCoverage?.state === 'settled'
-    && siblingCoverage?.reason === 'invoice_processing';
+  // Codex pre-push P2: a covering sibling invoice reads `state: 'settled'`
+  // for FIVE distinct reasons (billing-lane.js siblingCoverageForSchedule) —
+  // 'invoice_settled' (literal paid/prepaid), 'invoice_processing' (money in
+  // flight, e.g. a pending ACH debit), 'withdrawn_from_customer' /
+  // 'payer_billed' (draft/sent, but not collectible from this homeowner at
+  // all), and 'credit_applied' (draft/sent, covered by account credit, never
+  // marked literally paid). A technician collects nothing at the door for
+  // any of the five — but complete-scheduled-service.js's own
+  // invoiceBlocksReview holds the review ask for every invoice status
+  // EXCEPT literal 'paid'/'prepaid', which only 'invoice_settled' actually
+  // is. This used to recognize 'invoice_processing' alone (codex round-9
+  // P2's own fix), which correctly held the ask for THAT one reason but
+  // missed the other three draft/sent-but-not-collectible reasons — the
+  // panel promised an immediate review request the server still withheld
+  // pending manual reconciliation. Every reason except the literal
+  // paid/prepaid one now holds the preview the same way.
+  const siblingInvoiceNotYetSettled = siblingCoverage?.state === 'settled'
+    && siblingCoverage?.reason !== 'invoice_settled';
   const invoiceAmount = hasVisitPrice
     ? Number(completionVisitPrice)
     : isCallback
@@ -13880,11 +13885,12 @@ export function CompletionPanel({
   // The server's invoiceBlocksReview: an UNPAID invoice after completion —
   // one minted now (willInvoice) or one already sent from dispatch and still
   // open (completionInvoiceAlreadySent, codex #4140 r12 P2). Prepaid and
-  // paid invoices never hold the ask. A covering sibling invoice that's
-  // still 'processing' holds it too (siblingInvoiceProcessing above) — the
-  // reused invoice completion actually checks is the SIBLING's, and its
-  // status is only 'paid'/'prepaid', not this row's own.
-  const reviewAwaitsPayment = willInvoice || siblingInvoiceProcessing
+  // paid invoices never hold the ask. A covering sibling invoice awaiting
+  // payment or reconciliation holds it too (siblingInvoiceNotYetSettled
+  // above) — the reused invoice completion actually checks is the
+  // SIBLING's, and invoiceBlocksReview clears only on its literal
+  // 'paid'/'prepaid' status, not this row's own.
+  const reviewAwaitsPayment = willInvoice || siblingInvoiceNotYetSettled
     || (!!service.completionInvoiceAlreadySent && !invoiceAlreadyPaid);
   // An unpaid invoice holds the customer-requested ask server-side
   // (invoiceBlocksReview gates effectiveRequestReview, so shouldBundleReview
