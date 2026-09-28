@@ -42,7 +42,7 @@ describe('cross-source dedup: the two-feed soccer case (prod 2026-09-27 shape)',
     id: 'b',
     source_id: 'source-sports-aggregator',
     title: 'Sarasota Paradise VS Greenville Triumph SC!',
-    start_at: '2026-09-19T23:41:00.000Z', // 11 min drift — different feed, same kickoff
+    start_at: '2026-09-19T23:34:00.000Z', // 4 min drift — different feed, same kickoff
     city: 'Lakewood Ranch',
     venue_name: 'Premier Sports Campus At Lakewood Ranch.',
     editorial_score: 65,
@@ -136,10 +136,20 @@ describe('cross-source dedup: conservative boundaries are preserved', () => {
 describe('cross-source dedup: full auto-merge decision keeps digest-required fields and curation', () => {
   test('backfill still carries event_url onto the survivor when the cluster auto-merges on tolerant matching', () => {
     const survivor = ev({ id: 'a', title: 'Sarasota Paradise vs. Greenville Triumph SC', start_at: '2026-09-19T23:30:00.000Z', city: 'lakewood-ranch', venue_name: 'Premier Sports Campus at Lakewood Ranch', source_id: 's1', event_url: null, admin_status: 'approved' });
-    const loser = ev({ id: 'b', title: 'Sarasota Paradise VS Greenville Triumph SC', start_at: '2026-09-19T23:41:00.000Z', city: 'Lakewood Ranch', venue_name: 'Premier Sports Campus At Lakewood Ranch.', source_id: 's2', event_url: 'https://example.com/e' });
+    const loser = ev({ id: 'b', title: 'Sarasota Paradise VS Greenville Triumph SC', start_at: '2026-09-19T23:34:00.000Z', city: 'Lakewood Ranch', venue_name: 'Premier Sports Campus At Lakewood Ranch.', source_id: 's2', event_url: 'https://example.com/e' });
     const cluster = [survivor, loser];
     expect(isAutoMergeableCluster(cluster)).toBe(true);
     expect(pickSurvivor(cluster).id).toBe('a'); // approved beats pending regardless of completeness
     expect(computeSurvivorBackfill(survivor, [loser])).toEqual({ event_url: 'https://example.com/e' });
+  });
+});
+
+describe('cross-source dedup: half-hour-apart sessions stay distinct', () => {
+  test('10:00 and 10:30 sessions of the same program at one venue are not auto-merged', () => {
+    const cluster = [
+      ev({ id: 'a', title: 'Toddler Tide Pool Tour', start_at: '2026-10-10T14:00:00.000Z', city: 'sarasota', venue_name: 'Bayfront Aquarium', source_id: 's1' }),
+      ev({ id: 'b', title: 'Toddler Tide Pool Tour', start_at: '2026-10-10T14:30:00.000Z', city: 'sarasota', venue_name: 'Bayfront Aquarium', source_id: 's2' }),
+    ];
+    expect(isAutoMergeableCluster(cluster)).toBe(false);
   });
 });

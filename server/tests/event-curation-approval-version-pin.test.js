@@ -126,4 +126,15 @@ describe('applyDecision pins its writes to the exact row version fetched for cla
     expect(calls[0].admin_status).toBeUndefined();
     expect(calls[0].editorial_score).toBe(90);
   });
+
+  test('a missing assessment only stamps the row when it is unchanged and still pending', async () => {
+    const { calls, whereRawCalls } = wireDb();
+    const outcome = await applyDecision(event, { id: 'evt-1', __missing: true });
+    expect(outcome).toBe('left_pending');
+    expect(calls).toHaveLength(1);
+    expect(calls[0].curation_note).toBe('No assessment returned by model');
+    expect(whereRawCalls).toHaveLength(1);
+    expect(whereRawCalls[0].bindings[0]).toBe(event.updated_at);
+    expect(db.mock.results.length).toBeGreaterThan(0);
+  });
 });

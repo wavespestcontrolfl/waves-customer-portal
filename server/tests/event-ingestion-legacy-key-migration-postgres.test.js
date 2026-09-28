@@ -201,6 +201,38 @@ describeOrSkip('upsertExtractedEvents — legacy dedup-key migration on real Pos
     expect(retired.external_id).toBe(`retired:${newKeyId}`);
   });
 
+  test('a live legacy row follows an already-merged new-key row to its survivor, and the pull continues', async () => {
+    const source = { id: sourceId, coverage_geo: [] };
+    const title = 'TEST Merged New Key Event';
+    const url = 'https://test.invalid/merged-new-key-event/';
+    const startIso = daysFromNowIso(34);
+    const start = parseExtractedStartAt(startIso);
+    const { externalId: newKey, legacyExternalId: legacyKey } = extractedEventDedupKeys(title, start, url);
+
+    const [survivorRow] = await db('events_raw').insert({
+      source_id: sourceId, external_id: `other-feed-${Date.now()}`, title, start_at: start, event_url: url,
+    }).returning(['id']);
+    const survivorId = survivorRow.id || survivorRow;
+    await db('events_raw').insert({
+      source_id: sourceId, external_id: newKey, title, start_at: start, event_url: url,
+      merged_into: survivorId, admin_status: 'rejected',
+    });
+    const [legacyRow] = await db('events_raw').insert({
+      source_id: sourceId, external_id: legacyKey, title, start_at: start, event_url: url,
+    }).returning(['id']);
+    const legacyId = legacyRow.id || legacyRow;
+
+    const otherTitle = 'TEST Second Event In Same Pull';
+    const { upserted } = await upsertExtractedEvents(source, [
+      { title, startAt: startIso, eventUrl: url },
+      { title: otherTitle, startAt: daysFromNowIso(35), eventUrl: 'https://test.invalid/second-event/' },
+    ]);
+    expect(upserted).toBe(2);
+    const legacy = await db('events_raw').where({ id: legacyId }).first();
+    expect(legacy.merged_into).toBe(survivorId);
+    expect(await db('events_raw').where({ source_id: sourceId, title: otherTitle })).toHaveLength(1);
+  });
+
   test('with no legacy row present, a fresh pull inserts once under the new key', async () => {
     const source = { id: sourceId, coverage_geo: [] };
     const title = 'TEST Fresh Pull Event';

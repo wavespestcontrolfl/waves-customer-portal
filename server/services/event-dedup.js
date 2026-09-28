@@ -158,7 +158,10 @@ const normalizeVenue = (v) => String(v || '').toLowerCase().replace(/[^a-z0-9]+/
 // happening. Deliberately small — this only absorbs seconds/minutes-level
 // drift (e.g. one feed truncates seconds, another rounds to the nearest 5
 // minutes), not hours.
-const MAX_START_DRIFT_MS = 30 * 60 * 1000; // 30 minutes
+// 5 minutes: absorbs one feed truncating seconds or rounding to the nearest
+// 5 minutes, while two real sessions offered half an hour apart (10:00 and
+// 10:30 tours) stay distinct.
+const MAX_START_DRIFT_MS = 5 * 60 * 1000;
 
 // Whether every row's start_at agrees closely enough to be the same
 // happening: the spread between the earliest and latest must be within

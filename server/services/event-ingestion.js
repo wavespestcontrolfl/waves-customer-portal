@@ -870,8 +870,12 @@ async function upsertExtractedEvents(source, claudeEvents, opts = {}) {
               // When that is the legacy row, it also takes over the new key
               // so later pulls keep updating the survivor; the merged loser
               // moves to a retired key to free it.
-              const survivor = pickSurvivor([newKeyRow, legacyRow]);
-              if (survivor.id === newKeyRow.id) {
+              if (newKeyRow.merged_into) {
+                // The new-key row was already merged away by dedup: this
+                // identity is a duplicate of that survivor, so the live
+                // legacy row follows it there too.
+                await mergeEvents(newKeyRow.merged_into, [legacyRow.id]);
+              } else if (pickSurvivor([newKeyRow, legacyRow]).id === newKeyRow.id) {
                 await mergeEvents(newKeyRow.id, [legacyRow.id]);
               } else {
                 // Key transfer commits atomically with the merge. The retired

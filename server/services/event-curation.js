@@ -437,9 +437,13 @@ async function applyDecision(event, rawAssessment, reference = new Date()) {
   // fresh examination (Codex P1/P2 on this PR).
   const malformedReason = rawAssessment.__missing ? null : malformedAssessmentReason(rawAssessment);
   if (rawAssessment.__missing || malformedReason) {
+    // Same fetched-version and pending guards as the scored writes below: a
+    // row changed or decided by an operator during the classify call is left
+    // un-examined for the next run instead of being stamped curated.
     await db('events_raw')
-      .where({ id: event.id })
+      .where({ id: event.id, admin_status: 'pending' })
       .whereNull('curated_at')
+      .whereRaw("date_trunc('milliseconds', updated_at) = ?", [event.updated_at])
       .update({
         editorial_score: null,
         score_breakdown: null,
