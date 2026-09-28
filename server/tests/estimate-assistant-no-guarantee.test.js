@@ -203,6 +203,35 @@ describe('estimate assistant no-guarantee context', () => {
     expect(answerEstimateQuestionFallback('What is the guarantee?', context)).not.toMatch(/30-day callback|includes the money-back guarantee/i);
   });
 
+  test.each(['rodent_bait', 'commercial_pest'])(
+    '%s raw detail drops a generic written guarantee as the page does (pre-push P1 on d1da03b391)', (service) => {
+      const context = buildEstimateAssistantContext({
+        estimate: { monthly_total: 55 },
+        pricingBundle: { frequencies: [{ key: 'monthly', monthly: 55, included: [{ service, label: service,
+          detail: 'Satisfaction guaranteed. Written 30-day guarantee on the treated areas. Warranty included with every visit. Licensed and insured.',
+        }] }] },
+        noGuaranteeClaims: false,
+      });
+      expect(context.services[0].detail).toBe('Satisfaction guaranteed. Licensed and insured.');
+      const answer = answerEstimateQuestionFallback('What is included?', context);
+      expect(answer).toContain('Satisfaction guaranteed.');
+      expect(answer).not.toMatch(/30-day guarantee|warranty included/i);
+    },
+  );
+
+  test('a pre-slab job keeps its selected extended warranty part on a no-guarantee estimate, as the page does', () => {
+    const context = buildEstimateAssistantContext({
+      estimate: { onetime_total: 1400 },
+      pricingBundle: { anchorOneTimePrice: 1400, oneTimeBreakdown: { items: [{
+        service: 'pre_slab_termiticide', label: 'Pre-Slab Termiticide Treatment', amount: 1400, warrantyExtendedSelected: true,
+        detail: 'Termite soil treatment before the slab pour | Extended 5-yr warranty | Money-back guarantee on every visit',
+      }] } },
+      serviceMode: 'one_time',
+      noGuaranteeClaims: true,
+    });
+    expect(context.oneTime.items[0].detail).toBe('Termite soil treatment before the slab pour | Extended 5-yr warranty');
+  });
+
   test.each(['rodent_bait', 'commercial_pest', 'unclassified_service'])(
     '%s raw detail cannot reintroduce residential recurring promises', (service) => {
       const context = buildEstimateAssistantContext({

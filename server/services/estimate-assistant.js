@@ -13,6 +13,7 @@ const {
   hasPurchasedTrenchingWarranty,
   isPreSlabTreatmentItem,
   preSlabExtendedWarrantySelected,
+  preSlabSelectedWarrantyPart,
   rawOneTimeWarrantyEvidenceItems,
   reconcileTrenchingWarrantyEvidence,
   reconcilePricedTrenchingWarrantyEvidence,
@@ -24,7 +25,7 @@ const { normalizeBondTermService } = require('./estimate-converter');
 
 // Neutral categories may retain their own satisfaction wording, but cannot
 // inherit residential membership promises from saved service prose.
-const { RECURRING_TERMS_COPY, PLAN_TERMS_COPY, withoutClaimParts } = require('../../shared/estimate-copy-claims.cjs');
+const { PLAN_TERMS_COPY, withoutClaimsOutsideScope } = require('../../shared/estimate-copy-claims.cjs');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -900,11 +901,18 @@ function buildEstimateAssistantContext({
     : normalBillingAmountText;
   // Each service keeps its own terms: a row that carries the plan terms
   // itself keeps them in its detail even where the estimate as a whole
-  // does not.
+  // does not. The detail is filtered by the page's shared scope rule
+  // (withoutClaimsOutsideScope): 'none' on a no-guarantee estimate, 'all'
+  // for a row that carries the plan terms, else 'satisfaction', where only
+  // "satisfaction guaranteed" survives and a generic written guarantee or
+  // warranty claim is dropped as the page drops it (pre-push audit P1 on
+  // d1da03b391). A pre-slab job's selected extended warranty is verified
+  // purchased coverage and is kept, as on the page.
   const rowWithSummary = (row) => {
-    const claimPattern = noGuaranteeClaims ? PLAN_TERMS_COPY
-      : (guarantees.recurringTermsEligible || rowCarriesOwnPlanTerms(row, { commercialScope }) ? null : RECURRING_TERMS_COPY);
-    const detail = claimPattern ? withoutClaimParts(cleanText(row.detail), claimPattern) : row.detail;
+    const rowScope = noGuaranteeClaims ? 'none'
+      : (guarantees.recurringTermsEligible || rowCarriesOwnPlanTerms(row, { commercialScope }) ? 'all' : 'satisfaction');
+    const detail = rowScope === 'all' ? row.detail
+      : withoutClaimsOutsideScope(cleanText(row.detail), rowScope, preSlabSelectedWarrantyPart(row));
     const safeRow = quoteRequired
       ? {
           ...row,
