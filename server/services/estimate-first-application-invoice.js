@@ -423,15 +423,17 @@ async function itemizeFirstApplication({ estimateId, customerId, scheduledServic
 // The visit's accept-time first-application stamp
 // (scheduled_services.first_application_invoice_id — written once, by
 // estimate-converter.js stampCombinedFirstApplicationInvoiceCoverage or the
-// history backfill below). A caller whose svc row carries the column (any
-// `scheduled_services.*` / `.first()` read) is trusted as-is, NULL included.
-// A caller with a NARROW select (the column is `undefined` on its object) gets
-// one extra read by id, so no call site can silently bypass the stamp just
-// because it listed columns by hand (Codex round 14 on PR #5021). No svc.id →
-// nothing to read; treated as unstamped (pure/unit-test callers).
+// history backfill below). The stamp is write-once and never cleared, so a
+// NON-NULL value on the caller's svc row cannot be stale and is trusted. A
+// NULL can be: the sweep's runtime reconciliation may stamp the row after the
+// caller read it (Codex r2/r3 P1 on #5237 — Charge Now, then completion), and
+// a narrow select leaves the column undefined (Codex round 14 on #5021).
+// Both re-read by id, so every consumer (the stamped lookup, the coverage
+// verdict, the priced-member gate) decides from the current stamp. No svc.id
+// → nothing to read; treated as unstamped (pure/unit-test callers).
 async function readFirstApplicationStamp(svc, conn) {
-  if (svc?.first_application_invoice_id !== undefined) return svc.first_application_invoice_id || null;
-  if (!svc?.id) return null;
+  if (svc?.first_application_invoice_id) return svc.first_application_invoice_id;
+  if (!svc?.id || !conn) return null;
   const row = await conn('scheduled_services').where({ id: svc.id }).first('first_application_invoice_id');
   return row?.first_application_invoice_id || null;
 }
@@ -459,6 +461,12 @@ async function isPricedCoveredMemberVisit(svc, conn) {
     const invoice = await conn('invoices').where({ id: stampedInvoiceId }).first('scheduled_service_id');
     if (!invoice?.scheduled_service_id) return false;
     if (String(invoice.scheduled_service_id) === String(svc.id)) return false;
+    // An own REFUNDED invoice keeps the member in review even beside a live
+    // replacement (Codex r3 P2 on #5237): completion parks whenever a
+    // refunded and a live invoice coexist, since the refund may still fail
+    // and restore the original payment. Staying a member routes Charge Now
+    // and the schedule sheet to pricedCoveredMemberOwnRefundHold → review.
+    if (await pricedCoveredMemberOwnRefundHold(svc, conn)) return true;
     // Split off by hand (#5237 review P2): a member whose base application a
     // live invoice of its OWN already bills is no longer covered — the same
     // split evidence the backfill and the sweep use

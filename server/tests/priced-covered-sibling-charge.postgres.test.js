@@ -286,6 +286,40 @@ suite('priced covered-member sibling — no double charge (Codex r21 P1, PR #502
   // (completionTerminalInvoiceLookup) reaches by checking this visit's own
   // refund FIRST — on all three surfaces, proven together against a real
   // DB so they can never drift apart.
+  // Codex r3 P2 on #5237: an own REFUNDED invoice beside a LIVE replacement
+  // is still review (completion parks on the coexistence — the refund may
+  // fail and restore the original payment), never "split off, collect".
+  test('own refunded invoice + a live replacement: Charge Now and the schedule sheet still hold for review', () => rollbackTest(async (trx) => {
+    const ids = await fixture(trx, { invoiceStatus: 'sent', siblingPrice: 65 });
+    const line = JSON.stringify([{ client_id: `scheduled_${ids.lawnId}_primary`, description: 'Lawn Care', quantity: 1, unit_price: 65, amount: 65 }]);
+    for (const status of ['refunded', 'sent']) {
+      await trx('invoices').insert({
+        id: randomUUID(), customer_id: ids.customerId, scheduled_service_id: ids.lawnId,
+        token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`, status, title: 'Lawn Care',
+        line_items: line, subtotal: 65, total: 65,
+      });
+    }
+    const lawn = await trx('scheduled_services').where({ id: ids.lawnId }).first();
+    expect(await isPricedCoveredMemberVisit(lawn, trx)).toBe(true);
+    expect(await chargeNow(lawn, trx)).toMatchObject({ refused: true, reason: 'sibling_invoice_needs_review' });
+    const { coverage } = await siblingCoverageForSchedule({ svc: lawn, dbConn: trx });
+    expect(coverage.state).toBe('review');
+  }));
+
+  // Codex r3 P1 on #5237: completion loaded the visit BEFORE the sweep
+  // stamped it and the sibling has since moved off the anchor's date. A
+  // stale NULL on svc is re-read by id, so the stamped lookup still finds the
+  // combined invoice instead of date-matching nothing and minting again.
+  test('a stale NULL stamp on a moved sibling is re-read: completion\'s lookup still finds the combined invoice', () => rollbackTest(async (trx) => {
+    const ids = await fixture(trx, { invoiceStatus: 'sent', siblingPrice: 65 });
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-09' });
+    const lawn = await trx('scheduled_services').where({ id: ids.lawnId }).first();
+    const staleSnapshot = { ...lawn, first_application_invoice_id: null };
+    const found = await findFirstApplicationInvoiceForEstimateService(staleSnapshot, trx);
+    expect(found.invoice?.id).toBe(ids.invoiceId);
+    expect(await isPricedCoveredMemberVisit(staleSnapshot, trx)).toBe(true);
+  }));
+
   test('a priced covered member with its OWN refunded base-application invoice agrees across Charge Now, schedule prediction, and completion\'s own classifier', () => rollbackTest(async (trx) => {
     const ids = await fixture(trx, { invoiceStatus: 'sent', siblingPrice: 65 });
     const ownRefundId = randomUUID();

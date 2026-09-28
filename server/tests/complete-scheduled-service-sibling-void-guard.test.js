@@ -38,7 +38,7 @@ describe('complete-scheduled-service.js — REFUSE AFTER A VOID completion-side 
   test('the sibling-first-application block asks the void guard only after existingCompletionInvoice, the terminal split, and canceledSetupFee all come back empty', () => {
     const anchor = source.indexOf("const siblingFirstApplication = await findFirstApplicationInvoiceForEstimateService(svc, db);");
     expect(anchor).toBeGreaterThan(-1);
-    const block = source.slice(anchor, anchor + 3500);
+    const block = source.slice(anchor, anchor + 6000);
     // Order: split.terminal (refunded/canceled-with-setup-fee) first, THEN
     // canceledSetupFee, THEN (only if still nothing) the new void guard —
     // never ahead of the existing checks.
