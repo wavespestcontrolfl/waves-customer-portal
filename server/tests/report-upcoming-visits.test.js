@@ -299,6 +299,74 @@ describe('multi-property scoping', () => {
     expect(data.upcomingVisitsCard.visits.map((v) => v.serviceType)).toEqual(['Lawn Care Treatment']);
   });
 
+  // P1 fix (codex round-1, second finding on the same function): a shared
+  // property_id must never stand in for an address match on its own — a
+  // property record's address can change (an edit, or a merge) AFTER an
+  // older report stamped its OLD address, so an unstamped candidate on
+  // that SAME property_id must resolve through the property's CURRENT
+  // address (propertyKeyById), not through id equality, which would wave
+  // it through even though the two premises no longer agree.
+  test('candidate shares the report\'s property_id, but that property\'s address has since changed — an unstamped candidate resolves through the CURRENT address and is excluded', async () => {
+    process.env.GATE_REPORT_UPCOMING_VISITS = 'true';
+    const knex = makeKnex({
+      ...BASE_FIXTURES,
+      // 'prop-a' has since been edited/merged onto a NEW address (prop-b's
+      // address, reused here only as a convenient "some other address").
+      // The report's own stamp still names the OLD address (A) — stamps
+      // are immutable — but the property ROW itself now resolves to B.
+      customer_properties: [{ id: 'prop-a', address_line1: PROP_B.address_line1, address_line2: null, city: PROP_B.city, zip: PROP_B.zip }],
+      scheduled_services: [
+        // report's own visit: stamped at the OLD address (A), linked to prop-a.
+        {
+          id: 'scheduled-current', customer_id: 'customer-1', scheduled_date: '2026-05-16', status: 'completed', service_type: 'Quarterly Pest Control Service',
+          property_id: 'prop-a', service_address_line1: PROP_A.address_line1, service_address_city: PROP_A.city, service_address_zip: PROP_A.zip,
+        },
+        // SAME property_id, but UNSTAMPED — must resolve through prop-a's
+        // CURRENT address (B), not through the id, and so must NOT match
+        // the report's stamped A.
+        {
+          id: 'scheduled-unstamped-after-change', customer_id: 'customer-1', scheduled_date: todayPlus(5), status: 'confirmed',
+          service_type: 'Should never appear (property now resolves to a different address)', window_start: '09:00:00', property_id: 'prop-a',
+        },
+      ],
+    });
+    const data = await buildReportV1Data(
+      { ...BASE_SERVICE, service_date: '2026-05-16' },
+      'token-property-address-changed',
+      knex,
+      LIVE,
+    );
+    expect(data.upcomingVisitsCard).toBeNull();
+  });
+
+  // Positive counterpart: same shared property_id, but the property's
+  // address is UNCHANGED — the unstamped candidate's resolved address still
+  // agrees with the report's, so it is included.
+  test('candidate shares the report\'s property_id and that property\'s address is UNCHANGED — an unstamped candidate is included', async () => {
+    process.env.GATE_REPORT_UPCOMING_VISITS = 'true';
+    const knex = makeKnex({
+      ...BASE_FIXTURES,
+      customer_properties: [PROP_A],
+      scheduled_services: [
+        {
+          id: 'scheduled-current', customer_id: 'customer-1', scheduled_date: '2026-05-16', status: 'completed', service_type: 'Quarterly Pest Control Service',
+          property_id: 'prop-a', service_address_line1: PROP_A.address_line1, service_address_city: PROP_A.city, service_address_zip: PROP_A.zip,
+        },
+        {
+          id: 'scheduled-unstamped-unchanged', customer_id: 'customer-1', scheduled_date: todayPlus(5), status: 'confirmed',
+          service_type: 'Lawn Care Treatment', window_start: '08:00:00', property_id: 'prop-a',
+        },
+      ],
+    });
+    const data = await buildReportV1Data(
+      { ...BASE_SERVICE, service_date: '2026-05-16' },
+      'token-property-address-unchanged',
+      knex,
+      LIVE,
+    );
+    expect(data.upcomingVisitsCard.visits.map((v) => v.serviceType)).toEqual(['Lawn Care Treatment']);
+  });
+
   // P2 fix (codex round-1): the visit cap must apply AFTER property
   // scoping, not before it. Property scoping runs in JS, so a flat
   // LIMIT ahead of it can truncate the candidate set before this

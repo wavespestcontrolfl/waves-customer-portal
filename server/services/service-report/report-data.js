@@ -5199,29 +5199,37 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           }
 
           const matchesReportProperty = (row) => {
-            // Stamp FIRST, even when property_id also matches the report
-            // (codex round-1 P1): the stamp is immutable and intentionally
-            // survives a later property edit or merge, while property_id
-            // does not — a candidate whose property_id equals the
-            // report's but whose stamp names a different premises was
-            // dispatched to that other premises, and must be excluded, not
-            // waved through on the id alone. property_id is trusted as
-            // identity ONLY on a row with no stamp at all.
+            // NO property_id shortcut at all (codex round-1 P1, second
+            // finding — the first fix still let two DIFFERENT property_ids
+            // that happened to equal each other stand in for an address
+            // match): a shared property_id does not prove the same
+            // premises TODAY, because a property record's own address can
+            // change (an edit, or a merge) after an older report stamped
+            // its OLD address. property_id only ever serves as the
+            // POINTER into propertyKeyById, which resolves that row's
+            // CURRENT address — every candidate always reduces to an
+            // address key (its own stamp, else its property's current
+            // address, else the customer mirror) and is included only
+            // when that key resolves and equals reportAddressKey (itself
+            // already resolved the same way, above). Fails closed when
+            // either key does not resolve.
+            let rowKey = null;
             if (row.service_address_line1) {
               // address_line2 rides this key too — same unit-privacy rule
               // as reportStampAddressKey/mirrorAddressKey above: a keyless
               // unit comparison would let one condo unit's report see
               // another unit's visits.
-              const rowKey = addressKey({
+              rowKey = addressKey({
                 address_line1: row.service_address_line1,
                 address_line2: row.service_address_line2,
                 city: row.service_address_city,
                 zip: row.service_address_zip,
               }) || null;
-              return !!rowKey && !!reportAddressKey && rowKey === reportAddressKey;
+            } else if (row.property_id) {
+              rowKey = propertyKeyById.get(row.property_id) || null;
+            } else {
+              rowKey = mirrorKey;
             }
-            if (reportPropertyId && row.property_id) return row.property_id === reportPropertyId;
-            const rowKey = row.property_id ? (propertyKeyById.get(row.property_id) || null) : mirrorKey;
             return !!rowKey && !!reportAddressKey && rowKey === reportAddressKey;
           };
 
