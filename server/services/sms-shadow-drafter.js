@@ -1336,7 +1336,10 @@ function buildFactsBlock(context, extras = {}) {
   // an ordinary per-draft FACT the model quotes verbatim, same as OPEN
   // TIMES. Gate-on unconditional (not scheduling-intent-gated): ANY category
   // — a hand-off, a cancellation, a held complaint — may need to state it.
-  // `extras.now` is test-only.
+  // `extras.now` was test-only through PR #5194; generateGroundedDraft now
+  // passes its own captured factsAt here for every live draft too (Codex
+  // #5194 P2 — see its comment), so the phrase rendered here and the
+  // instant returned as factsGeneratedAt are always the same moment.
   const slaSection = gateEnvValue('GATE_SMS_REAL_ANSWERS')
     ? `FOLLOW-UP SLA RIGHT NOW: ${followupSlaPhrase(extras.now)}\n`
     : '';
@@ -1802,10 +1805,16 @@ async function generateDraftOnce(client, system, userContent, route = MODELS.ROU
  * adversarial verifier; if the draft asserts facts the context doesn't
  * support, feeds the violations back for a rewrite toward deferral, up to
  * MAX_REVISIONS times. Returns the final draft + loop telemetry
- * { parsed, passes, converged, model, servedModel, verifierModels }. converged=true means the verifier
+ * { parsed, passes, converged, model, servedModel, verifierModels, factsBlock,
+ * factsGeneratedAt }. converged=true means the verifier
  * signed off (or the reply was empty — nothing to assert). model identifies
  * the winning requested route; servedModel identifies the provider-reported
- * model that produced the FINAL draft. Verify failures
+ * model that produced the FINAL draft. factsGeneratedAt is the instant
+ * factsBlock was rendered (Codex #5194 P2) — null on a frozen replay
+ * (presetFactsBlock), which has no such instant of its own; a live caller
+ * persists it so the SLA phrase it carries can be re-anchored at send time
+ * instead of to the row's later created_at (see sms-followup-sla.js's
+ * slaDraftedAt). Verify failures
  * degrade gracefully: keep the current draft, stop, converged=false — a
  * verification miss must never break drafting. Caller supplies the Anthropic
  * client so live + backfill share one implementation.
@@ -1892,7 +1901,19 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   // Frozen replays keep their own FREE RE-SERVICE line (or none); a live
   // draft resolves eligibility through the existing re-service mechanism.
   const reserviceLanes = presetFactsBlock ? null : await fetchReserviceLanes({ customerId: context?.customer?.id || null });
-  const factsBlock = presetFactsBlock || buildFactsBlock(context, { openTimesBlock, reserviceLanes });
+  // Codex #5194 P2 ("Timestamp the SLA when its facts are generated"): the
+  // FOLLOW-UP SLA RIGHT NOW line above is rendered off ONE captured instant,
+  // not off created_at — the row's created_at lands only after this whole
+  // draft→verify→revise loop finishes below, which can cross the 8am/8pm ET
+  // phrase boundary the send-time checks (sms-followup-sla.js) re-derive the
+  // deadline from. factsAt IS that instant; it rides straight into
+  // buildFactsBlock's `now` (so the rendered phrase and the timestamp this
+  // function returns are always the same moment) and out again as
+  // factsGeneratedAt on every return below, for the caller to persist. A
+  // frozen replay (presetFactsBlock) never calls buildFactsBlock and has no
+  // "generated now" instant of its own — it returns null.
+  const factsAt = presetFactsBlock ? null : new Date();
+  const factsBlock = presetFactsBlock || buildFactsBlock(context, { openTimesBlock, reserviceLanes, now: factsAt });
   // Few-shot voice grounding: intent-matched real human replies (redacted),
   // baked into the prompt once so they persist across the verify/revise loop.
   // Empty when the corpus has no rows for this intent → identical to v6.
@@ -1925,7 +1946,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   const first = await generateDraftOnce(client, system, userContent, route, { pinned, metricsLane, ...lane });
   if (!first) return {
     parsed: null, passes: 1, converged: false, model: null, servedModel: null,
-    voiceProfileVersion, verifierModels: [], factsBlock, promptVersion,
+    voiceProfileVersion, verifierModels: [], factsBlock, factsGeneratedAt: factsAt, promptVersion,
   };
   let { parsed, model, servedModel } = first;
   // Kill switch / single-pass mode: no LLM verification claim, behave as
@@ -1947,7 +1968,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     // also switches real answers off at the delivery boundary.
     logger.warn('[sms-shadow] real-answers draft generated with SHADOW_DRAFT_VERIFY=false — kept shadow (real answers require the verifier)');
     return {
-      parsed, passes: 1, converged: false, model, servedModel, voiceProfileVersion, verifierModels: [], factsBlock, promptVersion,
+      parsed, passes: 1, converged: false, model, servedModel, voiceProfileVersion, verifierModels: [], factsBlock, factsGeneratedAt: factsAt, promptVersion,
       openTimesSnapshot: null,
     };
   }
@@ -1969,12 +1990,12 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     if (!singlePassCheck.ok) {
       logger.warn(`[sms-shadow] single-pass draft failed the offered_times check (${singlePassCheck.violations.join('; ')}); not converged`);
       return {
-        parsed, passes: 1, converged: false, model, servedModel, voiceProfileVersion, verifierModels: [], factsBlock, promptVersion,
+        parsed, passes: 1, converged: false, model, servedModel, voiceProfileVersion, verifierModels: [], factsBlock, factsGeneratedAt: factsAt, promptVersion,
         openTimesSnapshot: null,
       };
     }
     return {
-      parsed, passes: 1, converged: true, model, servedModel, voiceProfileVersion, verifierModels: [], factsBlock, promptVersion,
+      parsed, passes: 1, converged: true, model, servedModel, voiceProfileVersion, verifierModels: [], factsBlock, factsGeneratedAt: factsAt, promptVersion,
       openTimesSnapshot: computeOpenTimesSnapshot({
         openTimesBlock, offeredTimes: parsed?.offered_times, city, customerId: context?.customer?.id || null, estimateId: pricingEstimateId, serviceType,
       }),
@@ -2061,7 +2082,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   }
 
   return {
-    parsed, passes, converged, model, servedModel, voiceProfileVersion, verifierModels, factsBlock, promptVersion,
+    parsed, passes, converged, model, servedModel, voiceProfileVersion, verifierModels, factsBlock, factsGeneratedAt: factsAt, promptVersion,
     // Computed off the FINAL parsed.reply (after every revision pass) — an
     // earlier draft may have quoted a window a REVISION dropped, or vice
     // versa; only what's actually about to be sent matters here.
@@ -2173,7 +2194,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // from the customer row the webhook already matched, never re-looked-up.
     const {
       parsed, passes, converged, model: draftModel, voiceProfileVersion, factsBlock: factsForDraft, promptVersion,
-      openTimesSnapshot,
+      openTimesSnapshot, factsGeneratedAt,
     } = await generateGroundedDraft({
       client, context, inboundMessage, intent, schedulingIntent, city: customer?.city || null,
     });
@@ -2346,6 +2367,11 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
           // TIMES at send time — dispatchClaimedSend re-fetches and refuses
           // to send if a quoted window is no longer offered.
           openTimesSnapshot,
+          // Codex #5194 P2: the instant the drafter rendered the SLA phrase
+          // into factsBlock — claimAutoSend persists it on the decision's
+          // input_snapshot so slaDraftedAt can anchor the deadline to it
+          // instead of the row's own (later) created_at.
+          factsGeneratedAt,
         });
         if (result?.sent) {
           deliveredAs = 'auto_sent';
@@ -2382,6 +2408,8 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
               lintFailures: lint.failures,
               openTimesSnapshot,
               intendedActions: parsed.intended_actions,
+              // Codex #5194 P2 — see the maybeAutoSend call's comment above.
+              factsGeneratedAt,
             });
             if (decisionId) deliveredAs = suggestMode.SUGGESTED_STATUS;
           }
@@ -2431,6 +2459,8 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
             lintFailures: lint.failures,
             openTimesSnapshot,
             intendedActions: parsed.intended_actions,
+            // Codex #5194 P2 — see the maybeAutoSend call's comment above.
+            factsGeneratedAt,
           });
           if (decisionId) deliveredAs = suggestMode.SUGGESTED_STATUS;
         }
