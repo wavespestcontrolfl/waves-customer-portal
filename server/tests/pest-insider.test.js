@@ -262,6 +262,14 @@ describe('pest-insider claim validation at the send gates', () => {
     expect(errors.some((e) => e.includes('Unverified claim'))).toBe(false);
   });
 
+  test('the A/B subject variant is scanned too — variant-B recipients see it', () => {
+    const draft = { ...baseSend, subject_b: 'Termites swarm again after storms' };
+    const { errors } = validateNewsletterDraft(draft, { recipientCount: 100 });
+    expect(errors.some((e) => e.includes('Unverified claim (termite_second_swarm)'))).toBe(true);
+    const priced = { ...baseSend, subject_b: 'Mosquito season special: $99' };
+    expect(validateNewsletterDraft(priced, { recipientCount: 100 }).errors.some((e) => e.includes('Hallucinated claim'))).toBe(true);
+  });
+
   test('an entity-encoded DENIAL is decoded before the scan and does not block', () => {
     const draft = { ...baseSend, html_body: `${baseSend.html_body}<p>Termites don&#39;t have a second swarm after storms.</p>` };
     const { errors } = validateNewsletterDraft(draft, { recipientCount: 100 });

@@ -142,7 +142,9 @@ function findHallucinatedClaims(body, lockedPrices = [], mode = 'text') {
 function scanUnverifiedClaims(send) {
   const errors = [];
   const seen = new Set();
-  for (const body of [send.subject, send.preview_text, send.html_body, send.text_body]) {
+  // subject_b is what variant-B recipients actually see, so it is scanned
+  // like the subject.
+  for (const body of [send.subject, send.subject_b, send.preview_text, send.html_body, send.text_body]) {
     if (!body) continue;
     // Block-level tags end a sentence (a heading glued to the paragraph
     // under it must not read as one sentence — the register's denial
@@ -243,7 +245,7 @@ function validateNewsletterDraft(send, opts = {}) {
         if (!claimSeen.has(err)) { claimSeen.add(err); errors.push(err); }
       }
     };
-    scanSegment([send.subject, send.preview_text].filter(Boolean).join('\n'), [], 'none');
+    scanSegment([send.subject, send.subject_b, send.preview_text].filter(Boolean).join('\n'), [], 'none');
     scanSegment(send.html_body, opts.lockedPrices || [], 'html');
     scanSegment(send.text_body, opts.lockedPrices || [], 'text');
 
@@ -263,7 +265,7 @@ function validateNewsletterDraft(send, opts = {}) {
   // Scanned on EVERY newsletter type, manual included — no legitimate send
   // carries an affiliate/tracking URL.
   for (const [segment, label] of [
-    [send.subject, 'subject'], [send.preview_text, 'preview text'],
+    [send.subject, 'subject'], [send.subject_b, 'subject B'], [send.preview_text, 'preview text'],
     [send.html_body, 'HTML body'], [send.text_body, 'plain-text body'],
   ]) {
     if (segment && containsAffiliateMaterial(segment)) {
