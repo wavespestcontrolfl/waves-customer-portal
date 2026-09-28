@@ -504,7 +504,14 @@ async function commitVoiceBooking({
       await assertAssignableTechnician(insertRow.technician_id || null, { conn: trx, date: dateStr });
       const [created] = await trx('scheduled_services').insert(insertRow).returning('*');
       // Apply the certified order only after the candidate has a stored id
-      // (createSelfBooking, routes/booking.js, does the same).
+      // (createSelfBooking, routes/booking.js, does the same). Persisting it
+      // while this row is still pending office review is deliberate: the
+      // pending row already occupies the tech's day (occupancy counts it),
+      // so leaving route_order unset would sort it after the last stop — the
+      // exact append-only defect this path fixes. The order was verified
+      // with every existing stop inside its own window, so if the office
+      // rejects the request the remaining stops keep a feasible sequence;
+      // no customer comms key off a route_order write.
       if (capacityCommitFit) {
         await require('../scheduling/arrival-route').persistArrivalOrder(trx, capacityCommitFit, created.id);
       }
