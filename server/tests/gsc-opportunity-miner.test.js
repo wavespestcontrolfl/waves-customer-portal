@@ -2860,7 +2860,10 @@ describe('local_gap representative query + label validation (Codex P1s on #3378)
   test('the brief builder falls back to representative_query for SERP + target_keyword', () => {
     const bb = fs.readFileSync(require.resolve('../services/content/content-brief-builder'), 'utf8');
     expect(bb).toMatch(/const serpKeyword = opportunity\.query \|\| opportunity\.signal_metadata\?\.representative_query \|\| null;/);
-    expect(bb).toMatch(/target_keyword: opportunity\.query \|\| opportunity\.signal_metadata\?\.representative_query \|\| null,/);
+    // The fallback is named once (#5216: the photo slots resolve the SAME
+    // topic string) and the brief's target_keyword is that value.
+    expect(bb).toMatch(/const targetKeyword = opportunity\.query \|\| opportunity\.signal_metadata\?\.representative_query \|\| null;/);
+    expect(bb).toMatch(/target_keyword: targetKeyword,/);
   });
 });
 
