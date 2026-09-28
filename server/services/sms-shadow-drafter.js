@@ -392,7 +392,12 @@ function reserviceFactLine(lanes) {
 // only when the SAME text also carries the technician-confirms-timing
 // clause — the complete prescribed answer. The sanctioned sentence is
 // stripped before screening so any OTHER claim in the text still drops it.
-const SANCTIONED_SAFE_RE = /\bsafe\s+(?:once|when|after)\s+(?:it(?:'s| is| has)?\s+)?dr(?:y|ied|ying)\b/i;
+// Only the EXACT standalone idiom is exempt (Codex r8 P1): "safe" must not
+// be a compound's tail ("pet-safe once dry") and the idiom must not carry a
+// timing modifier ("safe once dry in 30 minutes") — those stay in the text
+// for the screens below, and the exempt match is replaced by a neutral
+// token rather than removed so nothing around it is altered.
+const SANCTIONED_SAFE_RE = /(?<![\w-])safe\s+(?:once|when|after)\s+(?:it(?:'s| is| has)?\s+)?dr(?:y|ied|ying)\b(?!\s*[-–—,]?\s*(?:in|within|after|by|around|about|roughly|approximately|~)\s*(?:about\s+|around\s+)?\d)/i;
 const CONFIRM_TIMING_RE = /\b(?:tech(?:nician)?|office|we)\b[^.\n]{0,40}\bconfirm(?:s|ed|ing)?\b[^.\n]{0,25}\b(?:timing|time|when)\b/i;
 function hasBannedCustomerCopy(text) {
   let bannedCopyGuard = null;
@@ -402,7 +407,7 @@ function hasBannedCustomerCopy(text) {
   if (!bannedCopyGuard) return true;
   let t = String(text || '');
   if (SANCTIONED_SAFE_RE.test(t) && CONFIRM_TIMING_RE.test(t)) {
-    t = t.replace(SANCTIONED_SAFE_RE, '');
+    t = t.replace(SANCTIONED_SAFE_RE, ' SANCTIONED_IDIOM ');
   }
   return (bannedCopyGuard(t) || []).length > 0 || SMS_COMPLIANCE_CLAIM_RE.test(t);
 }

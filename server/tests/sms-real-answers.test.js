@@ -1753,6 +1753,11 @@ describe('round-7 deterministic guards (gate on)', () => {
       expect(drafter.validateComplianceCopy({ reply }).ok).toBe(false);
     }
     expect(drafter.validateComplianceCopy({ reply: 'It is safe once dry, and your technician will confirm the timing.' }).ok).toBe(true);
+    // Codex r8 P1: only the EXACT standalone idiom is exempt — a compound prefix or a timing modifier is still screened
+    expect(drafter.validateComplianceCopy({ reply: 'It is pet-safe once dry; our technician will confirm timing.' }).ok).toBe(false);
+    expect(drafter.validateComplianceCopy({ reply: 'It is safe once dry in 30 minutes; our technician will confirm the timing.' }).ok).toBe(false);
+    expect(drafter.validateComplianceCopy({ reply: 'Kids-safe once dry — we will confirm the timing.' }).ok).toBe(false);
+    expect(drafter.validateComplianceCopy({ reply: 'It is safe once dry — about 45 minutes — and we confirm the timing.' }).ok).toBe(false);
     expect(drafter.validateComplianceCopy({ reply: 'Thanks for reaching out — a manager will follow up within the hour.' }).ok).toBe(true);
     expect(drafter.validateComplianceCopy({ reply: '' }).ok).toBe(true);
     delete process.env.GATE_SMS_REAL_ANSWERS;
