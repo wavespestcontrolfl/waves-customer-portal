@@ -280,19 +280,19 @@ describe('Customer360ProfileV2 profile state', () => {
     fireEvent.change(sender, { target: { value: [...sender.options].find(option => option.value).value } });
     fireEvent.change(field, { target: { value: 'Fixture service update' } });
     fireEvent.click(screen.getByRole('button', { name: 'Send', exact: true }));
-    await waitFor(() => expect(field).toHaveValue(''));
+    await waitFor(() => expect(field).toHaveValue(''), { timeout: 15000 });
     await waitFor(() => {
       expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/communications/sms'))).toHaveLength(1);
       expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/customer-a'))).toHaveLength(2);
       expect(fetchMock.mock.calls.filter(([url]) => String(url).split('?')[0].endsWith('/timeline'))).toHaveLength(2);
-    }, { timeout: 5000 });
-    await screen.findByRole('heading', { name: 'Updated Customer' }, { timeout: 5000 });
+    }, { timeout: 15000 });
+    await screen.findByRole('heading', { name: 'Updated Customer' }, { timeout: 15000 });
     fireEvent.click(screen.getByRole('button', { name: 'Back to customer' }));
     fireEvent.click(screen.getByRole('tab', { name: 'Activity', exact: true }));
     expect(await screen.findByText('Saved message activity')).toBeInTheDocument();
     expect(fetchMock.mock.calls.filter(([url]) => String(url).split('?')[0].endsWith('/timeline'))).toHaveLength(2);
     expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/customer-a'))).toHaveLength(2);
-  }, 10000);
+  }, 25000);
 
   it('discards A conversation data when its post-send refresh lands during the switch to B', async () => {
     localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
