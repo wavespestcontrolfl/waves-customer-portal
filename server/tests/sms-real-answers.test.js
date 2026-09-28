@@ -1523,9 +1523,21 @@ describe('fetchOpenTimesData / openTimesStillOffered forward serviceType to the 
   });
 });
 
-describe('replyQuotesUngroundedAmount — payment-history amounts authorize only a payment acknowledgement (Codex r4)', () => {
+describe('replyQuotesUngroundedAmount — payment-history amounts authorize only a payment acknowledgement (Codex r4, gate on)', () => {
   const { replyQuotesUngroundedAmount } = require('../services/sms-shadow-drafter');
   const context = { billing: { outstandingBalance: 0, recentPayments: [{ amount: 95 }] } };
+  const priorGate = process.env.GATE_SMS_REAL_ANSWERS;
+  beforeEach(() => { process.env.GATE_SMS_REAL_ANSWERS = 'true'; });
+  afterEach(() => {
+    if (priorGate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS;
+    else process.env.GATE_SMS_REAL_ANSWERS = priorGate;
+  });
+  test('a FRACTIONAL amount inside the acknowledgement is still an acknowledgement ("$95.50 payment")', () => {
+    const ctx = { billing: { outstandingBalance: 0, recentPayments: [{ amount: 95.5 }] } };
+    expect(replyQuotesUngroundedAmount('We received your $95.50 payment — thank you!', ctx)).toBe(false);
+    expect(replyQuotesUngroundedAmount('Thank you for your payment of $95.50.', ctx)).toBe(false);
+    expect(replyQuotesUngroundedAmount('Your balance is $95.50.', ctx)).toBe(true);
+  });
   test('"your balance is $95" on a zero-balance account with a $95 payment → ungrounded', () => {
     expect(replyQuotesUngroundedAmount('Your balance is $95.', context)).toBe(true);
     expect(replyQuotesUngroundedAmount('Thanks for reaching out — your balance is $95.', context)).toBe(true);
@@ -1579,6 +1591,9 @@ describe('follow-up promise staleness is scoped to drafts that recorded an escal
     expect(draftPromisedFollowup(promised)).toBe(true);
     expect(draftPromisedFollowup(JSON.stringify(promised))).toBe(true);
     expect(draftPromisedFollowup({ intended_actions: [{ type: 'send_payment_link' }] })).toBe(false);
+    // an escalation WITHOUT the real-answers marker (an older-prompt draft) is never touched
+    expect(draftPromisedFollowup({ intended_actions: [{ type: 'escalate' }] })).toBe(false);
+    expect(draftPromisedFollowup({ intended_actions: [{ type: 'escalate', note: 'cancel_request' }] })).toBe(false);
     expect(draftPromisedFollowup({})).toBe(false);
     expect(draftPromisedFollowup(null)).toBe(false);
     expect(draftPromisedFollowup('not json')).toBe(false);
@@ -1592,8 +1607,26 @@ describe('follow-up promise staleness is scoped to drafts that recorded an escal
   });
 });
 
-describe('replyQuotesUngroundedAmount — amounts are authorized by MEANING (Codex r5)', () => {
+describe('replyQuotesUngroundedAmount — gate OFF keeps the original pooled allowlist (live behavior unchanged by PR #5119)', () => {
   const { replyQuotesUngroundedAmount } = require('../services/sms-shadow-drafter');
+  const priorGate = process.env.GATE_SMS_REAL_ANSWERS;
+  beforeEach(() => { delete process.env.GATE_SMS_REAL_ANSWERS; });
+  afterEach(() => { if (priorGate !== undefined) process.env.GATE_SMS_REAL_ANSWERS = priorGate; });
+  test('any authoritative figure passes regardless of the claim made about it, exactly as before', () => {
+    expect(replyQuotesUngroundedAmount('Your balance is $95.', { billing: { outstandingBalance: 0, recentPayments: [{ amount: 95 }] } })).toBe(false);
+    expect(replyQuotesUngroundedAmount('Your $95 payment went through.', { billing: { outstandingBalance: 95, recentPayments: [] } })).toBe(false);
+    expect(replyQuotesUngroundedAmount('It comes to $41.', { billing: { outstandingBalance: 95, recentPayments: [] } })).toBe(true); // not a fact at all
+  });
+});
+
+describe('replyQuotesUngroundedAmount — amounts are authorized by MEANING (Codex r5, gate on)', () => {
+  const { replyQuotesUngroundedAmount } = require('../services/sms-shadow-drafter');
+  const priorGate = process.env.GATE_SMS_REAL_ANSWERS;
+  beforeEach(() => { process.env.GATE_SMS_REAL_ANSWERS = 'true'; });
+  afterEach(() => {
+    if (priorGate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS;
+    else process.env.GATE_SMS_REAL_ANSWERS = priorGate;
+  });
   test('a $95 BALANCE does not back "your $95 payment went through" when no payment is on file', () => {
     const context = { billing: { outstandingBalance: 95, recentPayments: [] } };
     expect(replyQuotesUngroundedAmount('Your $95 payment went through — thank you!', context)).toBe(true);

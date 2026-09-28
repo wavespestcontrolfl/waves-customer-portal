@@ -145,6 +145,18 @@ test('a reply that dropped every quoted window (edited before send) skips the re
 // OWNED by an escalate action, or nobody works the promise. Deterministic at
 // the autonomy boundary, independent of the prompt and the LLM verifier.
 describe('auto-send refuses an unowned follow-up promise', () => {
+  const priorGate = process.env.GATE_SMS_REAL_ANSWERS;
+  beforeEach(() => { process.env.GATE_SMS_REAL_ANSWERS = 'true'; });
+  afterEach(() => {
+    if (priorGate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS;
+    else process.env.GATE_SMS_REAL_ANSWERS = priorGate;
+  });
+
+  test('gate OFF: the backstop does not run — auto-send is unchanged by this PR', async () => {
+    delete process.env.GATE_SMS_REAL_ANSWERS;
+    await expect(attempt({ reply: 'Your technician should arrive within the hour.', intendedActions: [] })).resolves.toMatchObject({ sent: true });
+  });
+
   test('an SLA phrase with no escalate action → refused (unowned_followup), provider never called', async () => {
     await expect(attempt({ reply: "I'll check with the office and get back to you within the hour.", intendedActions: [] })).resolves.toMatchObject({
       sent: false, reason: 'unowned_followup',

@@ -582,7 +582,10 @@ async function autoSendReadiness(params, gratitudeLane) {
   //       escalate action alongside it — but the prompt is not the boundary.
   //       Deterministic backstop: an SLA phrase in the reply with no
   //       escalate action means nobody owns the promise; never auto-send it.
-  if (require('./sms-followup-sla').replyPromisesFollowup(reply)
+  //       GATE_SMS_REAL_ANSWERS only: the SLA phrases exist only in that
+  //       prompt, and with the gate off auto-send is unchanged by this PR.
+  const followupSla = require('./sms-followup-sla');
+  if (followupSla.realAnswersGateOn() && followupSla.replyPromisesFollowup(reply)
       && !(Array.isArray(intendedActions) && intendedActions.some((a) => a && a.type === 'escalate'))) {
     logger.warn(`[sms-auto-send] reply promises a follow-up with no escalate action — refusing auto-send (intent=${intent})`);
     return { reason: 'unowned_followup' };

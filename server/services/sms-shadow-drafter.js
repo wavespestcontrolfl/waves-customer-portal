@@ -733,6 +733,7 @@ function offerSpanInText(text, day, window) {
 // block did not authorize, or price grammar the extractor cannot verify.
 // Language that states what is OWED or charged on an ongoing basis.
 const AMOUNT_OWED_RE = /\b(?:balance|owe[sd]?|due|outstanding|invoice[sd]?|bill(?:ed|ing)?|dues|membership|plan|monthly|per month|a month|each month|\/\s?mo(?:nth)?|fee|charge[sd]?|total|amount)\b|\/mo\b/i;
+const AMOUNT_MASK_RE = /(?:\$|\bUSD\s?)\s?\d[\d,]*(?:\.\d{1,2})?|\b\d[\d,]*(?:\.\d{1,2})?\s?(?:dollars|bucks|usd)\b/gi;
 const PAYMENT_ACK_RE = /\b(?:received|processed|went through)\b[^.\n]{0,30}\bpayment\b|\bpayment\b[^.\n]{0,30}\b(?:received|processed|went through)\b|\bthank(?:s| you)\b[^.\n]{0,25}\bpayment\b/i;
 function replyQuotesUngroundedAmount(reply, context) {
   const suggestMode = require('./sms-suggest-mode');
@@ -742,7 +743,15 @@ function replyQuotesUngroundedAmount(reply, context) {
   // and a payment-history figure backs a payment acknowledgement. Pooling
   // them let "your $95 payment went through" pass on a $95 balance with no
   // payment on file.
-  const owedLanguage = AMOUNT_OWED_RE.test(reply);
+  //
+  // GATE_SMS_REAL_ANSWERS only: with the gate off this guard keeps its
+  // original pooled allowlist, so live behavior is unchanged by this PR.
+  // The meaning tests run on the reply with its amounts masked — the ack
+  // grammar stops at a period, and "$95.50" must not end the clause.
+  const byMeaning = gateEnvValue('GATE_SMS_REAL_ANSWERS');
+  const masked = String(reply || '').replace(AMOUNT_MASK_RE, ' AMT ');
+  const owedLanguage = !byMeaning || AMOUNT_OWED_RE.test(masked);
+  const ackLanguage = !byMeaning || PAYMENT_ACK_RE.test(masked);
   const authorizedCents = new Set([
     ...(owedLanguage ? [
       context.billing?.outstandingBalance > 0 ? centsOf(context.billing.outstandingBalance) : null,
@@ -754,7 +763,7 @@ function replyQuotesUngroundedAmount(reply, context) {
     // let "your balance is $95" through). Same ack grammar as the
     // scheduler's fire-time recheck: "payment" near received/processed/
     // went through, or "thank you … payment".
-    ...(PAYMENT_ACK_RE.test(reply) ? (context.billing?.recentPayments || []).map((p) => (p?.amount != null ? centsOf(p.amount) : null)) : []),
+    ...(ackLanguage ? (context.billing?.recentPayments || []).map((p) => (p?.amount != null ? centsOf(p.amount) : null)) : []),
   ].filter((v) => Number.isFinite(v)));
   // Every amount syntax hasPriceQuote recognizes (Codex r7): $-prefixed,
   // USD-prefixed, and number-with-unit ("50 dollars"/"50 bucks"). Bare

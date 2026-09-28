@@ -9,6 +9,13 @@
 // is a deterministic "this draft promises a human follow-up" signal.
 const SLA_PHRASES = Object.freeze(['within the hour', 'by 9 AM this morning', 'by 9 AM tomorrow morning']);
 
+const FOLLOWUP_PROMISED_NOTE = 'followup_promised';
+// Same permissive spelling rule as config/feature-gates gateEnvValue, read
+// at call time; local so this module stays dependency-free.
+function realAnswersGateOn() {
+  return ['1', 'true', 'on'].includes(String(process.env.GATE_SMS_REAL_ANSWERS || '').toLowerCase());
+}
+
 function replyPromisesFollowup(reply) {
   const text = String(reply || '').toLowerCase();
   return SLA_PHRASES.some((p) => text.includes(p.toLowerCase()));
@@ -32,16 +39,18 @@ function slaPhraseStatus(body, now = new Date()) {
 // common English — a reviewed reply can truthfully say a technician arrives
 // "within the hour" — so the send seams never judge a body by wording
 // alone. A promised follow-up is one the draft recorded: the decision's
-// persisted intended_actions carry an escalate action (the real-answers
-// prompt adds {"type":"escalate","note":"followup_promised"} with the SLA
-// phrase). Accepts the input_snapshot as an object or its JSON string.
+// persisted intended_actions carry the real-answers prompt's own marker,
+// {"type":"escalate","note":"followup_promised"}, which it adds with the
+// SLA phrase. Only that exact marker counts, so a draft from the older
+// prompt that merely escalated is never touched (gate-off behavior is
+// unchanged by PR #5119). Accepts the snapshot as an object or JSON string.
 function draftPromisedFollowup(inputSnapshot) {
   let snap = inputSnapshot;
   if (typeof snap === 'string') {
     try { snap = JSON.parse(snap); } catch { return false; }
   }
   const actions = snap && Array.isArray(snap.intended_actions) ? snap.intended_actions : [];
-  return actions.some((a) => a && a.type === 'escalate');
+  return actions.some((a) => a && a.type === 'escalate' && a.note === FOLLOWUP_PROMISED_NOTE);
 }
 
 // The one question both send seams ask: is this an escalated draft whose
@@ -50,4 +59,4 @@ function followupPromiseIsStale({ inputSnapshot, body, now = new Date() }) {
   return draftPromisedFollowup(inputSnapshot) && slaPhraseStatus(body, now) === 'stale';
 }
 
-module.exports = { SLA_PHRASES, replyPromisesFollowup, slaPhraseStatus, draftPromisedFollowup, followupPromiseIsStale };
+module.exports = { SLA_PHRASES, FOLLOWUP_PROMISED_NOTE, realAnswersGateOn, replyPromisesFollowup, slaPhraseStatus, draftPromisedFollowup, followupPromiseIsStale };
