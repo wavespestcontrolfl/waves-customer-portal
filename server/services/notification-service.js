@@ -424,9 +424,10 @@ const NotificationService = {
     // it returns false, the metadata merge below also drops `feed`/`quiet`
     // from the caller's own metadata so an already-rung-or-quiet row keeps
     // its current bell visibility — only a ringing refresh may flip it.
-    // ringGate (optional, NO dedupeKey; admin-alerts-ring scope 2026-09-28):
-    // `(conn) => Promise<boolean>` — for a plain (non-deduped) admin row,
-    // decides whether THIS insert rings: false rewrites the caller's own
+    // ringGate (optional; admin-alerts-ring scope 2026-09-28):
+    // `(conn) => Promise<boolean>` — for a FRESH insert (a plain row, or a
+    // keyed row whose dedupeKey found no standing row), decides whether
+    // THIS insert rings: false rewrites the caller's own
     // `quiet`/`feed` to `true`/`'activity'` (only those two keys — every
     // other field the caller composed stands); true leaves the caller's
     // metadata untouched (its own default already assumes it rings). Runs
@@ -492,8 +493,9 @@ const NotificationService = {
           }
           return { notification: existing, deduped: true };
         }
-        const created = await this.create({
-          recipientType: 'admin', category, title, body, ...createOpts, metadata, connection: trx,
+        // A fresh keyed insert takes the same ring gate as a plain one.
+        const created = await createPlainAdmin(this, {
+          category, title, body, createOpts: { ...createOpts, metadata }, ringGate, callerTrx: trx,
         });
         // create() returns null on an insert failure (PR #3496 review P1):
         // spreading that null would report {deduped:false} as if a row

@@ -364,8 +364,15 @@ function ringOnRefreshFrom({ count, newCount, itemKeys, itemSetHash }) {
 // to keep deliverOpsDigest's own complexity down.
 function ringOptionsFor({ dedupeKey, dedupeWindowMs, refreshOnDedupe, resolvedAudience, alertClass, key, count, newCount, itemKeys, itemSetHash }) {
   const ownerAudience = resolvedAudience === 'owner';
+  // A FRESH insert — keyed or not — is compared with the prior ring of its
+  // class: a sender that rotates its dedupeKey (agent-gap-digest, by ET
+  // week) would otherwise ring every new key even with nothing added.
+  const ringGate = ownerAudience
+    ? { ringGate: (conn) => decideRingForNewRow(conn, { alertClass, source: null, key, count, newCount, itemKeys, itemSetHash }) }
+    : {};
   if (dedupeKey) {
     return {
+      ...ringGate,
       dedupeKey,
       ...(dedupeWindowMs ? { dedupeWindowMs } : {}),
       ...(refreshOnDedupe ? {
@@ -374,8 +381,7 @@ function ringOptionsFor({ dedupeKey, dedupeWindowMs, refreshOnDedupe, resolvedAu
       } : {}),
     };
   }
-  if (!ownerAudience) return {};
-  return { ringGate: (conn) => decideRingForNewRow(conn, { alertClass, source: null, key, count, newCount, itemKeys, itemSetHash }) };
+  return ringGate;
 }
 
 // system_settings.key is varchar(100); a full SHA-256 digest keeps even the

@@ -55,7 +55,7 @@ function composeAgentGapDigest(rows) {
     '',
     BELL_BODY,
   ].join('\n');
-  return { subject, text, count };
+  return { subject, text, count, itemKeys: rows.map((row) => row.id).filter((id) => id != null).map(String) };
 }
 
 // Durable weekly-send guard, same as turf-variance-digest (codex #3230 P1):
@@ -128,6 +128,8 @@ async function runAgentGapDigest(opts = {}) {
       subject: composed.subject,
       text: BELL_BODY,
       dedupeKey: dedupeKeyFor(opts.now),
+      count: composed.count,
+      itemKeys: composed.itemKeys,
       sendEmail: () => mailer.sendOne({
         to,
         fromEmail: fromEmail(),

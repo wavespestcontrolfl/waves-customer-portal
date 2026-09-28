@@ -252,6 +252,17 @@ test('an engineering emission refreshing an owner-quiet row drops the stale quie
 // decides whether THIS insert rings, inside the same transaction as the
 // insert itself.
 describe('ringGate (no dedupeKey)', () => {
+  test('a FRESH keyed insert (dedupeKey found no standing row) takes the ring gate too — a rotated key never rings on its own', async () => {
+    await NotificationService.notifyAdmin('ops_digest', 'Agent gaps', 'body', {
+      dedupeKey: 'agent-gap-digest:2026-W40', metadata: { count: 3, feed: null, quiet: false },
+      ringGate: async () => false,
+    });
+    const meta = JSON.parse(mockRows.notifications[0].metadata);
+    expect(meta.quiet).toBe(true);
+    expect(meta.feed).toBe('activity');
+    expect(meta.dedupeKey).toBe('agent-gap-digest:2026-W40');
+  });
+
   test('ringGate() -> true leaves the caller\'s own metadata untouched, plus a rungAt ring stamp', async () => {
     const row = await NotificationService.notifyAdmin('ops_digest', 'Backlog check', 'body', {
       metadata: { count: 5, feed: null, quiet: false },

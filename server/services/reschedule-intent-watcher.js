@@ -279,7 +279,7 @@ async function loadUnactionedFlags({ includeExpired = false } = {}) {
     .limit(MAX_ROWS)
     .select(
       db.raw('COUNT(*) OVER () AS total_count'),
-      db.raw('ARRAY_AGG(ad.id::text) OVER () AS all_ids'),
+      db.raw("ARRAY_AGG(ad.id::text || ':' || COALESCE(ss.status, '')) OVER () AS all_ids"),
       'ad.id', 'ad.created_at', 'ad.input_snapshot', 'ad.customer_id',
       'cu.first_name', 'cu.last_name',
       'ss.scheduled_date', 'ss.window_start', 'ss.service_type', 'ss.status as visit_status',
@@ -349,7 +349,9 @@ function composeRescheduleIntentDigest(rows) {
   // agent_decisions ids — a count-only digest can't otherwise tell "same
   // requests" from "different ones" at a flat total.
   // Full-set identity (all_ids, computed before LIMIT).
-  const itemKeys = fullSetItemKeys(flags);
+  // The visit outcome rides each key: a flag whose visit went from armed to
+  // COMPLETED/NO-SHOW despite the request is a new incident at the same id.
+  const itemKeys = fullSetItemKeys(flags, { idOf: (row) => (row.id == null ? null : `${row.id}:${row.visit_status || ''}`) });
   return { subject, text, html, count: total, headline, summary, itemKeys };
 }
 

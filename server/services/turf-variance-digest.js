@@ -168,7 +168,12 @@ function composeTurfVarianceDigest(rows, { thresholdPct = alertPct(), samplesFlo
   const summary = `Avg ${Math.abs(avgDeltaPct)}% off across ${samples.length} services.`;
   // Item identity: EVERY sample in the window (the email shows only the
   // top outliers, but the average moves with the whole set).
-  const itemKeys = samples.map((row) => row.service_record_id).filter((id) => id != null).map(String);
+  // Plus the drift direction: nightly rescans can flip the verdict (low <->
+  // high) on the same samples, which reverses the action — that must ring.
+  const itemKeys = [
+    `direction:${direction}`,
+    ...samples.map((row) => row.service_record_id).filter((id) => id != null).map(String),
+  ];
   return { subject, text, html, avgDeltaPct, samples: samples.length, direction, headline, summary, itemKeys };
 }
 
