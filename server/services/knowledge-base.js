@@ -165,6 +165,37 @@ async function flagIsFromAIAudit(entry, conn = db) {
 // ══════════════════════════════════════════════════════════════
 // CORE CRUD
 // ══════════════════════════════════════════════════════════════
+// One COGS line per usage row, mirroring product-costing's
+// usageAmountForArea: a row with usage_per_1000sf scales with the treated
+// area (plus or at least its flat amount when the notes say so), so the
+// write-up states the per-1,000 sq ft rate instead of the flat fallback.
+function cogsLineForUsage(p) {
+  const price = parseFloat(p.best_price || 0);
+  const base = parseFloat(p.usage_amount || 0) || 0;
+  const rate = parseFloat(p.usage_per_1000sf || 0) || 0;
+  const unit = p.usage_unit || '';
+  const head = `- ${p.product_name} (${p.active_ingredient || 'n/a'}):`;
+  const at = `@ $${price.toFixed(2)}`;
+  const n = (x) => Number(x.toFixed(4));
+  if (rate > 0) {
+    const notes = String(p.notes || '');
+    const areaCost = price * rate;
+    if (notes.includes('[usage:base_plus_per_1000]')) {
+      return { fixed: price * base, per1000: areaCost, line: `${head} ${n(base)} ${unit} + ${n(rate)} ${unit} per 1,000 sq ft ${at} = $${(price * base).toFixed(2)} + $${areaCost.toFixed(2)} per 1,000 sq ft` };
+    }
+    const floor = notes.includes('[usage:max_base_or_per_1000]') ? `, at least ${n(base)} ${unit} ($${(price * base).toFixed(2)})` : '';
+    return { fixed: 0, per1000: areaCost, line: `${head} ${n(rate)} ${unit} per 1,000 sq ft${floor} ${at} = $${areaCost.toFixed(2)} per 1,000 sq ft` };
+  }
+  const cost = price && base ? price * base : 0;
+  return { fixed: cost, per1000: 0, line: `${head} ${p.usage_amount || '?'} ${unit} ${at} = $${cost.toFixed(2)}` };
+}
+
+function cogsTotalLine(fixedTotal, per1000Total) {
+  if (per1000Total > 0 && fixedTotal > 0) return `Total COGS per application: $${fixedTotal.toFixed(2)} + $${per1000Total.toFixed(2)} per 1,000 sq ft`;
+  if (per1000Total > 0) return `Total COGS per application: $${per1000Total.toFixed(2)} per 1,000 sq ft`;
+  return `Total COGS per application: $${fixedTotal.toFixed(2)}`;
+}
+
 const KnowledgeBaseService = {
   async create({ title, content, category, tags, source, confidence, metadata, status }) {
     const safeTitle = cleanText(title) || 'Knowledge Base Entry';
@@ -835,13 +866,15 @@ const KnowledgeBaseService = {
 
       for (const [svcType, products] of Object.entries(grouped)) {
         const lines = [`**${svcType} — Cost of Goods**\n`];
-        let totalCost = 0;
+        let fixedTotal = 0;
+        let per1000Total = 0;
         for (const p of products) {
-          const cost = p.best_price && p.usage_amount ? parseFloat(p.best_price) * parseFloat(p.usage_amount) : 0;
-          totalCost += cost;
-          lines.push(`- ${p.product_name} (${p.active_ingredient || 'n/a'}): ${p.usage_amount || '?'} ${p.usage_unit || ''} @ $${parseFloat(p.best_price || 0).toFixed(2)} = $${cost.toFixed(2)}`);
+          const c = cogsLineForUsage(p);
+          fixedTotal += c.fixed;
+          per1000Total += c.per1000;
+          lines.push(c.line);
         }
-        lines.push(`\nTotal COGS per application: $${totalCost.toFixed(2)}`);
+        lines.push(`\n${cogsTotalLine(fixedTotal, per1000Total)}`);
         const slug = `cogs-${slugify(svcType)}`;
         await upsert(slug, `${svcType} — COGS Breakdown`, lines.join('\n'), 'pricing', ['cogs', svcType.toLowerCase()]);
       }
@@ -854,4 +887,4 @@ const KnowledgeBaseService = {
 };
 
 module.exports = KnowledgeBaseService;
-module.exports._internals = { auditSourceFor, buildAuditPrompt, planAuditOutcome, flagIsFromAIAudit };
+module.exports._internals = { auditSourceFor, buildAuditPrompt, planAuditOutcome, flagIsFromAIAudit, cogsLineForUsage, cogsTotalLine };
