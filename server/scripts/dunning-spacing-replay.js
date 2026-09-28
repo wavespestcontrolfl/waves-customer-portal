@@ -38,7 +38,7 @@ if (process.env.DATABASE_PUBLIC_URL) {
 
 const db = require(path.join(__dirname, '..', 'models', 'db'));
 const {
-  OVERDUE_SOURCES, OVERDUE_PURPOSES, summarizeDunningSpacingReplay,
+  OVERDUE_SOURCES, OVERDUE_PURPOSES, summarizeDunningSpacingReplay, isUnclassifiedLegacyReplay,
 } = require(path.join(__dirname, '..', 'services', 'collections', 'dunning-spacing'));
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -103,6 +103,10 @@ function bucketLabel(hours) {
 
   console.log(`[dunning-spacing-replay] last ${days}d (window ${windowStart.toISOString()} .. ${now.toISOString()}), overdue-reminder rows read from ${lookbackStart.toISOString()}`);
   console.log(`[dunning-spacing-replay] overdue-reminder events in window: ${candidatesInWindow}, of those within 7d of a previous one (any source): ${spacedWithin7d}, distinct customers affected: ${customersAffected}`);
+  const unclassified = rows.filter((row) => isUnclassifiedLegacyReplay(row) && new Date(row.occurred_at) >= windowStart).length;
+  if (unclassified) {
+    console.log(`[dunning-spacing-replay] ${unclassified} deferred follow-up text(s) from before replays carried their touch key are left out (unclassifiable: overdue vs bank-verification, and not groupable with their email)`);
+  }
 
   console.log('[dunning-spacing-replay] by (previous source → this source):');
   const pairs = [...pairCounts.entries()].sort((a, b) => b[1] - a[1]);

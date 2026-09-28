@@ -74,7 +74,20 @@ function metadataOf(row) {
 // r7); it is not an overdue reminder.
 function isOverdueReminderRow(row) {
   return !!row && !EXEMPT_SOURCES.has(row.source) && OVERDUE_SOURCES.has(row.source)
-    && OVERDUE_PURPOSES.has(row.purpose) && metadataOf(row).verification_renudge !== true;
+    && OVERDUE_PURPOSES.has(row.purpose) && metadataOf(row).verification_renudge !== true
+    && !isUnclassifiedLegacyReplay(row);
+}
+
+// A deferred follow-up SMS written before replays carried the touch's
+// notificationEventKey (Codex #5189 r8): it cannot be told apart from a
+// bank-verification re-nudge, nor grouped with its own email sibling, so
+// it is left out of spacing evidence and counted separately by the replay.
+// Every replay row written since carries the key, so these age out of the
+// 30-day window on their own.
+function isUnclassifiedLegacyReplay(row) {
+  if (row?.source !== 'invoice_followup_replay') return false;
+  const key = metadataOf(row).notificationEventKey;
+  return !(typeof key === 'string' && key.trim());
 }
 
 // Whether the row counts as having reached the customer — see module header.
@@ -118,7 +131,8 @@ function invoiceSetOf(row) {
 
 function collapseDunningReminderEvents(rows) {
   const sent = [...(rows || [])]
-    .filter((row) => countsAsSent(row) && metadataOf(row).verification_renudge !== true)
+    .filter((row) => countsAsSent(row) && metadataOf(row).verification_renudge !== true
+      && !isUnclassifiedLegacyReplay(row))
     .sort(compareReplayRows);
   const events = [];
   const keyedEventIndexes = new Map();
@@ -244,6 +258,7 @@ module.exports = {
   OVERDUE_PURPOSES,
   EXEMPT_SOURCES,
   isOverdueReminderRow,
+  isUnclassifiedLegacyReplay,
   countsAsSent,
   collapseDunningReminderEvents,
   summarizeDunningSpacingReplay,

@@ -287,8 +287,8 @@ describe('lastOverdueReminderWithin7d', () => {
   });
 
   test('excludeIdempotencyKey drops a retry\'s own standing reservation (Codex r3)', async () => {
-    const own = row({ id: 'ledger-own', source: 'invoice_followup_replay', idempotency_key: 'followup-replay:abc', occurred_at: new Date(NOW.getTime() - HOUR_MS).toISOString() });
-    const other = row({ id: 'ledger-other', source: 'invoice_followup_replay', idempotency_key: 'followup-replay:xyz', occurred_at: new Date(NOW.getTime() - 2 * HOUR_MS).toISOString() });
+    const own = row({ id: 'ledger-own', source: 'invoice_followup_replay', idempotency_key: 'followup-replay:abc', metadata: { notificationEventKey: 'invoice-followup:seq-1:d3' }, occurred_at: new Date(NOW.getTime() - HOUR_MS).toISOString() });
+    const other = row({ id: 'ledger-other', source: 'invoice_followup_replay', idempotency_key: 'followup-replay:xyz', metadata: { notificationEventKey: 'invoice-followup:seq-2:d3' }, occurred_at: new Date(NOW.getTime() - 2 * HOUR_MS).toISOString() });
     const database = fakeDatabase([own, other]);
     const result = await lastOverdueReminderWithin7d('cust-1', { now: NOW, database, excludeIdempotencyKey: 'followup-replay:abc' });
     expect(result).toEqual(other);
@@ -307,6 +307,14 @@ describe('lastOverdueReminderWithin7d', () => {
     const database = fakeDatabase([renudge]);
     expect(await lastOverdueReminderWithin7d('cust-1', { now: NOW, database })).toBeNull();
     expect(collapseDunningReminderEvents([renudge])).toEqual([]);
+  });
+
+  test('a replay row from before replays carried their touch key is left out of live and replay evidence (Codex r8)', async () => {
+    const legacy = row({ source: 'invoice_followup_replay', metadata: { replay: true }, occurred_at: new Date(NOW.getTime() - HOUR_MS).toISOString() });
+    const keyed = row({ id: 'keyed', source: 'invoice_followup_replay', metadata: { replay: true, notificationEventKey: 'invoice-followup:seq-1:d3' }, occurred_at: new Date(NOW.getTime() - 2 * HOUR_MS).toISOString() });
+    const database = fakeDatabase([legacy, keyed]);
+    expect(await lastOverdueReminderWithin7d('cust-1', { now: NOW, database })).toEqual(keyed);
+    expect(collapseDunningReminderEvents([legacy, keyed]).map(({ id }) => id)).toEqual(['keyed']);
   });
 
   test('no rows at all returns null', async () => {
