@@ -198,7 +198,7 @@ describeOrSkip('upsertExtractedEvents — legacy dedup-key migration on real Pos
     expect(survivor.external_id).toBe(newKey);
     expect(survivor.description).toBe('updated on re-pull');
     expect(retired.merged_into).toBe(legacyId);
-    expect(retired.external_id).not.toBe(newKey);
+    expect(retired.external_id).toBe(`retired:${newKeyId}`);
   });
 
   test('with no legacy row present, a fresh pull inserts once under the new key', async () => {

@@ -35,6 +35,9 @@ const EVENT_MERGE_LOCK_KEY = 778001;
  *   digest-required fields like event_url from a loser when the survivor lacks
  *   them, so a merge never makes an otherwise-eligible event disappear). The
  *   manual route passes nothing → behavior unchanged.
+ * opts.afterMerge — optional async (trx) => void run inside the same txn after
+ *   the losers are merged, so a caller's follow-up write (ingestion moving the
+ *   dedup key onto the survivor) commits or rolls back with the merge.
  *
  * @returns {Promise<{ merged:number, calendarsUpdated:number }>}
  */
@@ -94,6 +97,8 @@ async function mergeEvents(primaryId, toMerge, opts = {}) {
         calendarsUpdated += 1;
       }
     }
+
+    if (opts.afterMerge) await opts.afterMerge(trx);
   });
 
   return { merged, calendarsUpdated };

@@ -869,17 +869,20 @@ async function upsertExtractedEvents(source, claudeEvents, opts = {}) {
               // featured > approved > pending precedence, same as dedup).
               // When that is the legacy row, it also takes over the new key
               // so later pulls keep updating the survivor; the merged loser
-              // moves to a unique retired key first to free it.
+              // moves to a retired key to free it.
               const survivor = pickSurvivor([newKeyRow, legacyRow]);
               if (survivor.id === newKeyRow.id) {
                 await mergeEvents(newKeyRow.id, [legacyRow.id]);
               } else {
-                await mergeEvents(legacyRow.id, [newKeyRow.id]);
-                await db.transaction(async (trx) => {
-                  await trx('events_raw').where({ id: newKeyRow.id })
-                    .update({ external_id: `${row.external_id}#retired-${newKeyRow.id}`, updated_at: trx.fn.now() });
-                  await trx('events_raw').where({ id: legacyRow.id })
-                    .update({ external_id: row.external_id, updated_at: trx.fn.now() });
+                // Key transfer commits atomically with the merge. The retired
+                // key is bounded (external_id is varchar(256)) and unique.
+                await mergeEvents(legacyRow.id, [newKeyRow.id], {
+                  afterMerge: async (trx) => {
+                    await trx('events_raw').where({ id: newKeyRow.id })
+                      .update({ external_id: `retired:${newKeyRow.id}`, updated_at: trx.fn.now() });
+                    await trx('events_raw').where({ id: legacyRow.id })
+                      .update({ external_id: row.external_id, updated_at: trx.fn.now() });
+                  },
                 });
               }
             } catch (err) {
