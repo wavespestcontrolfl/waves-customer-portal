@@ -6,6 +6,7 @@
  * AI reply drafting, and CSR coaching. Virginia's daily driver.
  */
 
+const crypto = require('crypto');
 const db = require('../../models/db');
 const logger = require('../logger');
 const MODELS = require('../../config/models');
@@ -217,14 +218,14 @@ Use for: "what happened today?", "today's comms summary", "morning inbox briefin
   },
   {
     name: 'list_queued_messages',
-    description: `List a customer's outbound TEXTS that are still SCHEDULED — not yet sent (a text held past 8PM-8AM quiet hours, an uncertain-delivery retry, etc.). Use before cancel_queued_message to resolve the exact message_id; a cancel preview always names one message from this list. Soonest first, capped at 25 — follow next_offset for more. SCHEDULED EMAILS DO NOT EXIST: an email is rendered and handed to the delivery provider within seconds of being queued, so by the time anyone could ask about it, it has already sent — there is nothing to list or cancel.
+    description: `List a customer's outbound TEXTS that are still SCHEDULED — not yet sent (a text held past 8PM-8AM quiet hours, an uncertain-delivery retry, etc.). Use before cancel_queued_message to resolve the exact message_id; a cancel preview always names one message from this list. Soonest first, capped at 25 — pass next_cursor as cursor for more. SCHEDULED EMAILS DO NOT EXIST: an email is rendered and handed to the delivery provider within seconds of being queued, so by the time anyone could ask about it, it has already sent — there is nothing to list or cancel.
 Use for: "what's queued to send Henderson?", "is there a text scheduled for this customer?"`,
     input_schema: {
       type: 'object',
       properties: {
         customer_id: { type: 'string', format: 'uuid', description: 'The customer to check' },
         channel: { type: 'string', enum: ['sms'], description: 'Scheduled texts only — there is no scheduled-email store to check.' },
-        offset: { type: 'integer', minimum: 0, description: 'Continue from next_offset in the previous result' },
+        cursor: { type: 'string', description: 'Continue from next_cursor in the previous result' },
         limit: { type: 'number', description: 'Max results (default 25, max 100)' },
       },
       required: ['customer_id'],
@@ -423,6 +424,13 @@ function parseSmsMetadata(value) {
 // confirm this is the RIGHT message, never the full body. No PII beyond
 // what the body already carries; the recipient itself stays masked
 // everywhere this rides (Codex round 2 on #5224, P2).
+// Digest of the COMPLETE body (Codex round 5 on #5224, P2): the 160-char
+// preview alone misses an edit past the prefix. Same md5 the cancel writer's
+// CAS computes in SQL (scheduled-sms-cancel.js), so the two always agree.
+function bodyDigest(text) {
+  return text == null ? null : crypto.createHash('md5').update(String(text), 'utf8').digest('hex');
+}
+
 function bodyPreview(text) {
   if (!text) return null;
   const collapsed = String(text).replace(/\s+/g, ' ').trim();
@@ -458,6 +466,16 @@ function smsIneligibilityReason(row) {
   // never only the exhausted one.
   if (meta.review_ask_reservation === true || meta.review_delivery_uncertain_exhausted === true) {
     return "This text may already have reached the provider and can't be cancelled here.";
+  }
+  // Generic provider retry (Codex round 5 on #5224, P1): scheduler.js puts
+  // ANY retryable send failure back to 'scheduled' stamped with
+  // provider_retry_at — including a Twilio handoff whose outcome was
+  // 'uncertain', where the provider may already have accepted the text.
+  // Nothing persisted distinguishes that from a definite not-sent retry, so
+  // every requeued-after-attempt row is refused conservatively. (The retry
+  // also moves scheduled_for, which the commit's CAS pin refuses on.)
+  if (meta.provider_retry_at) {
+    return "This text already had a send attempt and may have reached the provider — it can't be cancelled here.";
   }
   // Recruiting threads are answered from Recruiting only — message_type is
   // the general, always-present signal (a recruiting send may carry no
@@ -505,7 +523,9 @@ const SMS_STORE = {
   // still-'scheduled' row's to_phone on a phone edit without touching
   // status or scheduled_for, so the scheduled_for pin alone would not
   // catch a card shown for one number committing against a different one.
-  version: (row, scheduledIso, previewText) => ({ scheduled_for: scheduledIso, body_preview: previewText, to_phone: row.to_phone || null }),
+  // body_digest (Codex round 5 P2) pins the complete body, not just the
+  // preview prefix, and is enforced in the writer's DELETE/UPDATE too.
+  version: (row, scheduledIso, previewText) => ({ scheduled_for: scheduledIso, body_preview: previewText, body_digest: bodyDigest(row.message_body), to_phone: row.to_phone || null }),
   ineligibilityReason: smsIneligibilityReason,
 };
 
@@ -553,17 +573,53 @@ const LIST_QUEUED_MESSAGES_MAX_LIMIT = 100;
 // second COUNT query, soonest-first (Codex round 3 on #5224, P2 — an
 // unbounded scan is an unnecessary footgun even though a real customer's
 // scheduled queue is normally tiny).
+//
+// Keyset cursor, not an offset (Codex round 5 on #5224, P2): this is a live
+// queue — the scheduler claims rows ('scheduled' → 'sending') between pages,
+// so an offset would skip rows. The cursor is the last row's
+// (scheduled_for truncated to ms, id); id breaks ties. Rows with no
+// scheduled_for sort last.
+const SF_MS = "date_trunc('milliseconds', scheduled_for)";
+
+function encodeQueueCursor(row) {
+  const sf = row.scheduled_for ? new Date(row.scheduled_for).toISOString() : '';
+  return Buffer.from(`${sf}|${row.id}`, 'utf8').toString('base64url');
+}
+
+function decodeQueueCursor(cursor) {
+  if (!cursor) return null;
+  const raw = Buffer.from(String(cursor), 'base64url').toString('utf8');
+  const bar = raw.lastIndexOf('|');
+  if (bar < 0) return undefined;
+  const sf = raw.slice(0, bar);
+  const id = raw.slice(bar + 1);
+  if (!id || (sf && Number.isNaN(Date.parse(sf)))) return undefined;
+  return { sf: sf || null, id };
+}
+
 async function listQueuedMessages(input) {
   const customer = await resolveCustomer(input);
   if (!customer) return { error: 'Customer not found.' };
   if (customer.error) return customer;
   const limit = Math.max(1, Math.min(Math.trunc(input.limit) || LIST_QUEUED_MESSAGES_DEFAULT_LIMIT, LIST_QUEUED_MESSAGES_MAX_LIMIT));
-  const offset = Math.max(0, Math.trunc(input.offset) || 0);
-  const rows = await db('sms_log')
-    .where({ customer_id: customer.id, direction: 'outbound', status: 'scheduled' })
-    .orderBy('scheduled_for', 'asc')
+  const after = decodeQueueCursor(input.cursor);
+  if (after === undefined) return { error: 'That cursor is not valid — call list_queued_messages again without one.' };
+  const query = db('sms_log')
+    .where({ customer_id: customer.id, direction: 'outbound', status: 'scheduled' });
+  if (after) {
+    query.where(function () {
+      if (after.sf) {
+        this.whereRaw(`${SF_MS} > ?::timestamptz`, [after.sf])
+          .orWhere(function () { this.whereRaw(`${SF_MS} = ?::timestamptz`, [after.sf]).andWhere('id', '>', after.id); })
+          .orWhereNull('scheduled_for');
+      } else {
+        this.whereNull('scheduled_for').andWhere('id', '>', after.id);
+      }
+    });
+  }
+  const rows = await query
+    .orderByRaw(`${SF_MS} ASC NULLS LAST, id ASC`)
     .limit(limit + 1)
-    .offset(offset)
     .select('id', 'to_phone', 'message_type', 'scheduled_for', 'metadata', 'message_body');
   const hasMore = rows.length > limit;
   const page = hasMore ? rows.slice(0, limit) : rows;
@@ -582,7 +638,7 @@ async function listQueuedMessages(input) {
     customer_name: `${customer.first_name || ''} ${customer.last_name || ''}`.trim() || null,
     messages, total: messages.length,
     has_more: hasMore,
-    next_offset: hasMore ? offset + limit : null,
+    next_cursor: hasMore ? encodeQueueCursor(page[page.length - 1]) : null,
   };
 }
 
@@ -615,6 +671,7 @@ async function commitCancelSms(input, preview, technicianId) {
     technicianId: technicianId || null, // the confirming admin — recorded on agent_decisions.reviewed_by if a parked decision reopens
     expectedScheduledFor: fresh._version.scheduled_for,
     expectedToPhone: fresh._version.to_phone,
+    expectedBodyDigest: fresh._version.body_digest,
   });
   if (result.outcome !== 'ok' || !result.cancelled) {
     // 'forbidden' cannot happen (techRole is always 'admin' here); 'not_found'

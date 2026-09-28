@@ -347,7 +347,7 @@ const ALLOWLIST = [
   },
   {
     file: 'services/intelligence-bar/comms-tools.js',
-    snippet: 'const rows = await db(\'sms_log\')',
+    snippet: 'const query = db(\'sms_log\')',
     reason: 'status filtered to \'scheduled\', which excludes \'sending\' — an unresolved reservation cannot match (list_queued_messages lists future sends only).',
   },
   {

@@ -11,7 +11,8 @@
  * Every one of those obligations is threaded through here so a second
  * writer can never reintroduce the bug this extraction fixes.
  *
- * `expectedScheduledFor` and `expectedToPhone` are optional CAS pins: when
+ * `expectedScheduledFor`, `expectedToPhone` and `expectedBodyDigest` (md5
+ * of the full message_body) are optional CAS pins: when
  * provided, both the DELETE and the fallback UPDATE additionally require
  * the row's CURRENT scheduled_for / to_phone to equal the pinned value, so
  * a caller whose preview pinned one scheduled time or recipient refuses
@@ -77,8 +78,18 @@ function pinnedToPhone(query, expectedToPhone) {
     : query.where({ to_phone: expectedToPhone });
 }
 
-function pinned(query, expectedScheduledFor, expectedToPhone) {
-  return pinnedToPhone(pinnedScheduledFor(query, expectedScheduledFor), expectedToPhone);
+// md5 of the COMPLETE body, matching comms-tools.js bodyDigest (Codex round 5
+// on #5224, P2) — an edit anywhere in the body, not just the previewed
+// prefix, refuses the cancel.
+function pinnedBodyDigest(query, expectedBodyDigest) {
+  if (expectedBodyDigest === undefined) return query;
+  return expectedBodyDigest === null
+    ? query.whereNull('message_body')
+    : query.whereRaw("md5(convert_to(message_body, 'UTF8')) = ?", [expectedBodyDigest]);
+}
+
+function pinned(query, expectedScheduledFor, expectedToPhone, expectedBodyDigest) {
+  return pinnedBodyDigest(pinnedToPhone(pinnedScheduledFor(query, expectedScheduledFor), expectedToPhone), expectedBodyDigest);
 }
 
 /**
@@ -90,7 +101,7 @@ function pinned(query, expectedScheduledFor, expectedToPhone) {
  *   only when THIS call actually neutralized the row (deleted it, or
  *   flipped it to 'canceled' in place).
  */
-async function cancelScheduledSmsRow({ id, techRole, technicianId, expectedScheduledFor, expectedToPhone } = {}) {
+async function cancelScheduledSmsRow({ id, techRole, technicianId, expectedScheduledFor, expectedToPhone, expectedBodyDigest } = {}) {
   const peek = await db('sms_log').where({ id, status: 'scheduled' }).first('id', 'to_phone');
   if (!peek) return { outcome: 'not_found', cancelled: false, row: null };
   if (techRole !== 'admin') {
@@ -132,7 +143,7 @@ async function cancelScheduledSmsRow({ id, techRole, technicianId, expectedSched
     // have invalidated.
     let row = (await pinned(
       trx('sms_log').where({ id, status: 'scheduled' }),
-      expectedScheduledFor, expectedToPhone,
+      expectedScheduledFor, expectedToPhone, expectedBodyDigest,
     )
       .whereRaw("COALESCE(metadata->>'review_ask_reservation', '') <> 'true'")
       .del(['id', 'metadata', 'created_at']))?.[0];
@@ -147,7 +158,7 @@ async function cancelScheduledSmsRow({ id, techRole, technicianId, expectedSched
       // 72-hour spacing hold survives.
       row = (await pinned(
         trx('sms_log').where({ id, status: 'scheduled' }),
-        expectedScheduledFor, expectedToPhone,
+        expectedScheduledFor, expectedToPhone, expectedBodyDigest,
       )
         .update({ status: 'canceled', updated_at: new Date() }, ['id', 'metadata', 'created_at']))?.[0];
     }

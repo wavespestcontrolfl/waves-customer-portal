@@ -116,19 +116,41 @@ test('list_queued_messages refuses "customer not found" instead of an empty list
 
 // A db mock covering the two tables these tools ever touch: `customers`
 // (resolveCustomer/customerDisplayName) answers via `.first()`; `sms_log`
-// answers `.select()` (list — honors .limit()/.offset() against matchRows,
-// so the pagination cap is genuinely exercised) or `.first()` (preview)
-// with `matchRows`.
+// answers `.select()` (list — honors .limit() and the keyset cursor
+// against matchRows, so the pagination cap is genuinely exercised) or
+// `.first()` (preview) with `matchRows`. matchRows must already be in
+// (scheduled_for, id) order, as the real ORDER BY returns them.
 function makeSmsDbMock(matchRows) {
   const customersQ = { where: () => customersQ, first: () => Promise.resolve(CUSTOMER_ROW) };
   let limitN = null;
-  let offsetN = 0;
+  let after = null;
   const smsQ = {
-    where: () => smsQ, orderBy: () => smsQ,
+    where: (arg) => {
+      if (typeof arg === 'function') {
+        // The cursor predicate: record its (scheduled_for, id) bindings.
+        after = {};
+        const rec = {
+          whereRaw: (_sql, b) => { if (after.sf === undefined) after.sf = b[0]; return rec; },
+          orWhere: (fn) => { fn.call(rec); return rec; },
+          andWhere: (_c, _op, v) => { after.id = v; return rec; },
+          orWhereNull: () => rec,
+          whereNull: () => rec,
+        };
+        arg.call(rec);
+      }
+      return smsQ;
+    },
+    orderBy: () => smsQ, orderByRaw: () => smsQ,
     limit: (n) => { limitN = n; return smsQ; },
-    offset: (n) => { offsetN = n; return smsQ; },
     select: () => {
-      let out = matchRows.slice(offsetN);
+      let out = matchRows;
+      if (after) {
+        const t = Date.parse(after.sf);
+        out = out.filter((r) => {
+          const rt = new Date(r.scheduled_for).getTime();
+          return rt > t || (rt === t && String(r.id) > String(after.id));
+        });
+      }
       if (limitN != null) out = out.slice(0, limitN);
       return Promise.resolve(out);
     },
@@ -325,6 +347,7 @@ test('the SMS commit calls the shared cancel workflow with the pinned scheduled_
   expect(cancelScheduledSmsRow).toHaveBeenCalledWith({
     id: MESSAGE_ID, techRole: 'admin', technicianId: null,
     expectedScheduledFor: scheduledFor.toISOString(), expectedToPhone: '+19415550100',
+    expectedBodyDigest: require('crypto').createHash('md5').update('Synthetic reminder body', 'utf8').digest('hex'),
   });
   expect(refused.success).not.toBe(true);
   expect(refused.preview_changed).toBe(true);
@@ -408,8 +431,9 @@ test('the confirming admin (actionContext.technicianId) is threaded into the sha
 });
 
 // Codex round 3 on #5224, P2: list_queued_messages is bounded like every
-// other paged IB reader (query_customers, getScheduleView).
-test('list_queued_messages caps at the default limit (25) and reports has_more/next_offset', async () => {
+// other paged IB reader (query_customers, getScheduleView). Codex round 5
+// P2: pages by a (scheduled_for, id) keyset cursor, not an offset.
+test('list_queued_messages caps at the default limit (25) and pages by next_cursor', async () => {
   const rows = Array.from({ length: 30 }, (_, i) => ({
     id: `msg-${i}`, customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled',
     to_phone: '+19415550100', message_type: 'reminder', message_body: `Synthetic body ${i}`,
@@ -420,12 +444,72 @@ test('list_queued_messages caps at the default limit (25) and reports has_more/n
   const page1 = await executeCommsTool('list_queued_messages', { customer_id: CUSTOMER_ID, channel: 'sms' });
   expect(page1.messages).toHaveLength(25);
   expect(page1.has_more).toBe(true);
-  expect(page1.next_offset).toBe(25);
+  expect(page1.next_cursor).toEqual(expect.any(String));
 
-  const page2 = await executeCommsTool('list_queued_messages', { customer_id: CUSTOMER_ID, channel: 'sms', offset: 25 });
-  expect(page2.messages).toHaveLength(5);
+  // The scheduler claims the first five rows between pages — an offset of
+  // 25 would now skip five unseen rows; the cursor still resumes exactly
+  // after the last row page one showed.
+  rows.splice(0, 5);
+  const page2 = await executeCommsTool('list_queued_messages', { customer_id: CUSTOMER_ID, channel: 'sms', cursor: page1.next_cursor });
+  expect(page2.messages.map((m) => m.message_id)).toEqual(['msg-25', 'msg-26', 'msg-27', 'msg-28', 'msg-29']);
   expect(page2.has_more).toBe(false);
-  expect(page2.next_offset).toBeNull();
+  expect(page2.next_cursor).toBeNull();
+});
+
+test('list_queued_messages refuses a malformed cursor instead of restarting from the top', async () => {
+  db.mockImplementation(makeSmsDbMock([]));
+  const out = await executeCommsTool('list_queued_messages', { customer_id: CUSTOMER_ID, channel: 'sms', cursor: 'bm90LWEtY3Vyc29y' });
+  expect(out.error).toMatch(/cursor is not valid/i);
+});
+
+// Codex round 5 on #5224, P1: scheduler.js requeues ANY retryable send
+// failure to 'scheduled' with provider_retry_at — including an 'uncertain'
+// Twilio handoff the provider may already have accepted.
+test('a provider-retry row (provider_retry_at set) is excluded from the list and refused', async () => {
+  const row = {
+    id: MESSAGE_ID, customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled',
+    to_phone: '+19415550100', message_type: 'manual', message_body: 'Synthetic body',
+    scheduled_for: new Date('2099-01-01T12:00:00Z'),
+    metadata: { provider_retry_at: '2099-01-01T11:45:00Z', provider_retry_code: 'TWILIO_UNCERTAIN' },
+  };
+  db.mockImplementation(makeSmsDbMock([row]));
+  const listed = await executeCommsTool('list_queued_messages', { customer_id: CUSTOMER_ID, channel: 'sms' });
+  expect(listed.messages).toEqual([]);
+  const out = await executeCommsTool('cancel_queued_message', { message_id: MESSAGE_ID, customer_id: CUSTOMER_ID, channel: 'sms' });
+  expect(out.error).toMatch(/may have reached the provider/i);
+  expect(out.proposal).not.toBe(true);
+  expect(cancelScheduledSmsRow).not.toHaveBeenCalled();
+});
+
+// Codex round 5 on #5224, P2: the 160-char preview alone misses an edit
+// past the prefix — the full-body digest is pinned and threaded to the writer.
+test('an edit past the 160-char preview refuses, and the full-body digest reaches the writer', async () => {
+  const longBody = `${'a'.repeat(200)} original ending`;
+  const row = {
+    id: MESSAGE_ID, customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled',
+    to_phone: '+19415550100', message_type: 'manual', message_body: longBody,
+    scheduled_for: new Date('2099-01-01T12:00:00Z'), metadata: {},
+  };
+  db.mockImplementation(makeSmsDbMock([row]));
+  const preview = await executeCommsTool('cancel_queued_message', { message_id: MESSAGE_ID, customer_id: CUSTOMER_ID, channel: 'sms' });
+  const expectedDigest = require('crypto').createHash('md5').update(longBody, 'utf8').digest('hex');
+  expect(preview._version.body_digest).toBe(expectedDigest);
+
+  row.message_body = `${'a'.repeat(200)} EDITED ending`;
+  const refused = await executeCommsTool('cancel_queued_message', {
+    message_id: MESSAGE_ID, customer_id: CUSTOMER_ID, channel: 'sms', confirmed: true,
+    _verified_message_version: preview._version,
+  });
+  expect(refused.preview_changed).toBe(true);
+  expect(cancelScheduledSmsRow).not.toHaveBeenCalled();
+
+  row.message_body = longBody;
+  cancelScheduledSmsRow.mockResolvedValue({ outcome: 'ok', cancelled: true, row: { id: MESSAGE_ID } });
+  await executeCommsTool('cancel_queued_message', {
+    message_id: MESSAGE_ID, customer_id: CUSTOMER_ID, channel: 'sms', confirmed: true,
+    _verified_message_version: preview._version,
+  });
+  expect(cancelScheduledSmsRow).toHaveBeenCalledWith(expect.objectContaining({ expectedBodyDigest: expectedDigest }));
 });
 
 test('cancel_queued_message never sends anything and is not classified as customer contact', () => {
