@@ -298,6 +298,7 @@ async function prepareVisitReminder(visit, { now, todayEt }) {
     customerId: visit.customer_id,
     purpose: 'balance_reminder',
     offLedgerBalanceCents: duesCents,
+    source: 'previsit_balance_reminder',
     logTag: 'previsit-balance',
   };
   const episode = channels ? (await reminderProgress(visit.customer_id, 'previsit_balance_reminder', channels))

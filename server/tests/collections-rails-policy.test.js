@@ -1085,7 +1085,7 @@ describe('invoice-followups rail', () => {
       purpose: 'invoice_followup',
       invoiceIds: ['inv-1'],
       source: 'invoice_followups',
-      metadata: { step_id: 'd3_friendly', notificationEventKey: 'invoice-followup:seq-1:d3_friendly:2026-05-26T13:00:00.000Z' },
+      metadata: { step_id: 'd3_friendly', notificationEventKey: 'invoice-followup:seq-1:d3_friendly' },
     });
     expect(ContactLedger.recordContact.mock.calls[1][0]).toEqual(expect.objectContaining({
       channel: 'sms', purpose: 'invoice_followup',
@@ -1110,7 +1110,7 @@ describe('invoice-followups rail', () => {
     expect(calls.map((c) => c.channel).sort()).toEqual(['email', 'push', 'sms']);
     const keys = calls.map((c) => c.metadata.notificationEventKey);
     expect(new Set(keys).size).toBe(1);
-    expect(keys[0]).toBe('invoice-followup:seq-1:d3_friendly:2026-05-26T13:00:00.000Z');
+    expect(keys[0]).toBe('invoice-followup:seq-1:d3_friendly');
     expect(sequenceUpdate.update).toHaveBeenCalledWith(expect.objectContaining({ step_index: 1 }));
   });
 

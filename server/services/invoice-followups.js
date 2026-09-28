@@ -105,7 +105,7 @@ const { collectionsChannelPermitted: railGuardPermitted } = require('./collectio
 
 async function collectionsChannelPermitted(customerId, invoiceId, channel, excludeLedgerIds = [], detail = false) {
   return railGuardPermitted({
-    customerId, invoiceId, channel, purpose: 'late_payment', excludeLedgerIds, logTag: 'invoice-followups', detail,
+    customerId, invoiceId, channel, purpose: 'late_payment', excludeLedgerIds, source: 'invoice_followups', logTag: 'invoice-followups', detail,
   });
 }
 
@@ -119,13 +119,12 @@ function followupLedgerKey(row, step, channel) {
 // channels writes ledger siblings collapseDunningReminderEvents (dunning
 // spacing shadow/replay) can group as one customer contact instead of
 // counting each channel's leg as an independent reminder (codex r2 P2).
-// The touch's due time is part of the LEDGER key (pre-push audit, #5189): a
-// revived or reopened sequence can fire the same step again weeks later,
-// and that is a second reminder, not a retry of the first. Only the
-// spacing reducer reads this key; the send's own key is unchanged.
+// One event per sequence + step, the same identity as the ledger's own
+// reservation key (followupLedgerKey minus the channel; Codex #5189 r4): a
+// step fires once per sequence — revival resumes at the step that had
+// not yet fired — so a repeat of the key is a retry of the same touch.
 function followupEventKey(row, step) {
-  const due = row.next_touch_at ? new Date(row.next_touch_at).toISOString() : 'unscheduled';
-  return `invoice-followup:${row.id}:${step.id}:${due}`;
+  return `invoice-followup:${row.id}:${step.id}`;
 }
 
 async function currentStepLedgerIds(row, step, channels) {

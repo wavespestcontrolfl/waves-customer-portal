@@ -101,7 +101,8 @@ function armAllowedBaseline({
 }
 
 async function evalSms(purpose = 'late_payment', extra = {}) {
-  return ContactPolicy.evaluate('cust-1', { channel: 'sms', purpose, now: NOW, ...extra });
+  // A designated reminder rail by default; the shadow observes nothing else.
+  return ContactPolicy.evaluate('cust-1', { channel: 'sms', purpose, now: NOW, source: 'invoice_followups', ...extra });
 }
 
 beforeEach(() => {
@@ -227,7 +228,14 @@ describe('non-overdue-reminder purposes never reach the shadow check', () => {
   });
 });
 
-describe('a caller that names its rail (Codex #5189 r3)', () => {
+describe('a caller that names its rail (Codex #5189 r3/r4)', () => {
+  test('a caller with no source (voice dial/answer checks, the shadow sweep) never reaches the shadow check', async () => {
+    process.env.GATE_DUNNING_SPACING_SHADOW = 'true';
+    armAllowedBaseline();
+    await evalSms('late_payment', { source: undefined });
+    expect(DunningSpacing.lastOverdueReminderWithin7d).not.toHaveBeenCalled();
+  });
+
   test('the exempt in-call pay link never reaches the shadow check', async () => {
     process.env.GATE_DUNNING_SPACING_SHADOW = 'true';
     armAllowedBaseline();

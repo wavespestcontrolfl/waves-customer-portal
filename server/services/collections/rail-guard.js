@@ -47,6 +47,8 @@ async function collectionsChannelVerdict({
   offLedgerBalanceCents = 0,
   excludeCollectionCaseId = null,
   excludeLedgerIds = [],
+  source = null,
+  spacingExcludeKey = null,
   logTag = 'collections',
   database,
 }) {
@@ -59,6 +61,7 @@ async function collectionsChannelVerdict({
     verdict = await ContactPolicy.evaluate(customerId, {
       channel, purpose, now, offLedgerBalanceCents, excludeCollectionCaseId, excludeLedgerIds,
       ...(database ? { database } : {}),
+      ...shadowSpacingArgs(source, spacingExcludeKey),
     });
   } catch (err) {
     logger.warn(`[${logTag}] collections policy consult failed for customer ${customerId}: ${err.message} — denying`);

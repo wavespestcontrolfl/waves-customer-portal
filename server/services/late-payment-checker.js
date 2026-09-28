@@ -486,7 +486,7 @@ const { collectionsChannelPermitted: railGuardPermitted } = require('./collectio
 
 async function collectionsChannelPermitted(customerId, invoiceId, channel, now, excludeLedgerIds = [], detail = false) {
   return railGuardPermitted({
-    customerId, invoiceId, channel, purpose: 'late_payment', now, excludeLedgerIds, logTag: 'late-payment', detail,
+    customerId, invoiceId, channel, purpose: 'late_payment', now, excludeLedgerIds, source: 'late_payment_checker', logTag: 'late-payment', detail,
   });
 }
 

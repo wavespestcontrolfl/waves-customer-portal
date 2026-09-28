@@ -152,10 +152,11 @@ async function dunningSpacingShadowLog(customerId, {
   channel, purpose, now, excludeLedgerIds, database, result, source = null, spacingExcludeKey = null,
 }) {
   if (!dunningSpacingShadowLive() || !DunningSpacing.OVERDUE_PURPOSES.has(purpose)) return;
-  // A caller that names its rail is observed only when that rail is one of
-  // the designated reminder rails (Codex #5189 r3: the in-call pay link
-  // evaluates with purpose late_payment but is exempt).
-  if (source && !DunningSpacing.OVERDUE_SOURCES.has(source)) return;
+  // Observed only for a caller that names one of the designated reminder
+  // rails (Codex #5189 r3/r4): the in-call pay link, the voice dial and
+  // answer checks and the shadow sweep evaluate with an overdue purpose
+  // but are not reminder attempts, and pass no source (or an exempt one).
+  if (!source || !DunningSpacing.OVERDUE_SOURCES.has(source)) return;
   try {
     const holding = await DunningSpacing.lastOverdueReminderWithin7d(customerId, {
       now, excludeLedgerIds, database, excludeIdempotencyKey: spacingExcludeKey,
