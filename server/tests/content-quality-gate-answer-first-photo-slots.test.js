@@ -34,6 +34,24 @@ function brief(overrides = {}) {
 // ── verdict_box_first ──────────────────────────────────────────────
 
 describe('checkVerdictBoxFirst', () => {
+  // Codex r6 on #5216 ("Validate diagnostic verdict content before
+  // publishing"): an identification post's box answers "Is it dangerous?"
+  // and "What to do now", not just sits first.
+  test('a diagnostic box must answer "Is it dangerous?" and give a next step', () => {
+    const run = (props) => checkVerdictBoxFirst({ frontmatter: { post_type: 'diagnostic' }, body: `<BottomLineBox ${props} />\n\nMore.` }, brief());
+    expect(run('verdict="Professional help is available." recommendation="Request an estimate."'))
+      .toEqual({ ok: false, reason: 'verdict_does_not_answer_is_it_dangerous' });
+    expect(run('verdict="Mostly harmless to people." recommendation="Leave it alone."')).toEqual({ ok: true });
+    expect(run('verdict="Their stings burn and can blister." recommendation="Keep kids off the mound."')).toEqual({ ok: true });
+    expect(run('verdict="No, it is not dangerous."')).toEqual({ ok: false, reason: 'verdict_box_has_no_recommendation' });
+    expect(run('recommendation="Leave it alone."')).toEqual({ ok: false, reason: 'verdict_box_has_no_verdict' });
+  });
+
+  test('a customer-question box is judged against its own question elsewhere, not "Is it dangerous?"', () => {
+    const r = checkVerdictBoxFirst({ frontmatter: {}, body: '<BottomLineBox verdict="About six weeks." recommendation="Seal the gaps." />\n\nMore.' }, brief({ page_type: 'customer-question' }));
+    expect(r).toEqual({ ok: true });
+  });
+
   test('defers on a non-identification, non-customer-question draft', () => {
     const r = checkVerdictBoxFirst({ frontmatter: {}, body: 'Ants are common in Florida.' }, brief({ page_type: 'city-service' }));
     expect(r.ok).toBe(true);
@@ -285,6 +303,19 @@ describe('checkPhotoSlotsLicensedOnly', () => {
     expect(checkPhotoSlotsLicensedOnly(diag(`Intro.\n\n${pest}\n\n${sign}`), withNull)).toEqual({ ok: true });
     // A photo that appears only inside a comment does not count as shown.
     expect(checkPhotoSlotsLicensedOnly(diag(`Intro.\n\n${pest}\n\n<!-- ${sign} -->`), both).ok).toBe(false);
+  });
+
+  // Codex r6 on #5216 ("Exclude hidden HTML from photo attribution checks").
+  test('an attribution inside a definitely-hidden container does not count', () => {
+    const body = `Intro.\n\n![${PHOTO.alt}](${PHOTO_URL})\n\n<div hidden>\n\n${ATTR}\n\n</div>`;
+    expect(checkPhotoSlotsLicensedOnly(diag(body), slotsBrief()))
+      .toEqual({ ok: false, reason: `identification_photo_attribution_missing:${PHOTO_URL}` });
+  });
+
+  test('a slot photo inside a hidden container is not shown', () => {
+    const body = `Intro.\n\n<div style="display:none">\n\n![${PHOTO.alt}](${PHOTO_URL})\n\n</div>\n\n${ATTR}`;
+    expect(checkPhotoSlotsLicensedOnly(diag(body), slotsBrief()))
+      .toEqual({ ok: false, reason: `identification_photo_slot_missing:pest:${PHOTO_URL}` });
   });
 
   test('a refresh is never required to add a slot photo', () => {
@@ -598,10 +629,20 @@ describe('answer_in_first_paragraph reads the leading verdict box', () => {
     expect(checkAnswerInFirstParagraph({ body: '<BottomLineBox recommendation="Seal gaps." />\n\nMore.' }, q))
       .toEqual({ ok: false, reason: 'verdict_box_has_no_verdict' });
   });
-  test('without a leading box the old first-paragraph noun check still applies', () => {
-    expect(checkAnswerInFirstParagraph({ body: 'Yes, some species can.\n\nMore.' }, q))
+  test('without a leading box the first paragraph is judged by the same answer rule', () => {
+    expect(checkAnswerInFirstParagraph({ body: 'Professional help is available.\n\nMore.' }, q))
       .toEqual({ ok: false, reason: 'first_paragraph_doesnt_address_question' });
+    expect(checkAnswerInFirstParagraph({ body: 'Yes, some species can.\n\nMore.' }, q)).toEqual({ ok: true });
     expect(checkAnswerInFirstParagraph({ body: 'Some cockroaches can fly short distances.\n\nMore.' }, q)).toEqual({ ok: true });
+  });
+
+  // Codex r6 on #5216 ("Normalize question tokens before matching verdicts").
+  test('a short WH question is judged on its own words, punctuation stripped', () => {
+    const wh = { target_keyword: 'What do fire ants look like?' };
+    const box = (v) => `<BottomLineBox verdict="${v}" recommendation="Keep kids and pets off the mound." />\n\nMore.`;
+    expect(checkAnswerInFirstParagraph({ body: box('Fire ants are small, reddish-brown and build dome mounds.') }, wh)).toEqual({ ok: true });
+    expect(checkAnswerInFirstParagraph({ body: box('Professional help is available.') }, wh))
+      .toEqual({ ok: false, reason: 'verdict_does_not_answer_question' });
   });
 
   // Codex r5 on #5216 ("Require the verdict to answer the customer

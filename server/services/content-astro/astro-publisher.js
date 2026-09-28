@@ -2900,7 +2900,28 @@ function legacyHeroRefs(body, heroSrc, { mdx = true } = {}) {
 // HTML blocks hide the Markdown inside them (renderedBodyView).
 async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief = {}, siblings = [], legacyHeroSrcs = [], mdx = true }) {
   const none = { body, files: [], images: [], newAlts: [], deletes: [], pinned: [] };
-  if (!bodyImagesEnabled()) return none;
+  if (!bodyImagesEnabled()) {
+    // Codex r6 on #5216: generation stays gated, but an identification
+    // post's licensed-library photos are still checked to be committed
+    // image files and pinned to the blobs judged here (re-checked on the
+    // fresh branch before the commit), so a catalog entry that lands before
+    // its asset, or an asset renamed since, parks instead of publishing a
+    // broken image.
+    if (!isIdentificationPost(frontmatter)) return none;
+    const checked = await validateBodyImageRefs({ body, heroSrc: frontmatter?.hero_image?.src, getFile: (path) => gh.getFile(path), legacyHeroSrcs, mdx, slug });
+    if (!checked.ok) {
+      const err = new Error(`autonomous blog body images: draft for ${slug} ${checked.reason}`);
+      err.code = 'BLOG_BODY_IMAGES_FAILED';
+      throw err;
+    }
+    const pinned = [];
+    for (const src of new Set(checked.refs.map((r) => r.src))) {
+      const repoPath = `public${src}`;
+      const file = await gh.getFile(repoPath);
+      pinned.push({ repoPath, sha: file?.sha || null });
+    }
+    return { ...none, pinned };
+  }
   // ONE predicate with the merge-time check and the quality gate. An
   // identification post's photos are licensed-library files already
   // committed in the Astro repo and embedded by local path (the quality gate

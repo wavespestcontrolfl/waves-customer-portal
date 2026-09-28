@@ -692,11 +692,22 @@ const DIRECT_ANSWER_WORD_RE = /^\s*(yes|no|usually|rarely|sometimes|often|genera
 // yes/no-shaped question, a verdict that leads with a direct answer word —
 // "Yes, some species can." answers "Can cockroaches fly?" without repeating
 // "cockroaches". Kept deliberately small: no growing phrase list beyond this.
+// Codex r6: question tokens are read with punctuation stripped ("like?"
+// never matched anything) and without question scaffolding; a short WH
+// question ("What do fire ants look like?") falls back to its 4-letter
+// words. A question with no judgeable word at all is not failed on wording.
+const QUESTION_SCAFFOLD_WORDS = new Set(['what', 'when', 'where', 'which', 'whose', 'does', 'look', 'looks', 'like', 'with', 'that', 'this', 'have', 'your', 'they', 'them', 'from', 'into', 'there', 'their', 'about', 'should', 'would', 'could']);
+function questionKeywords(question) {
+  const words = String(question || '').toLowerCase().replace(/[^a-z0-9\s-]/g, ' ').split(/[\s-]+/).filter((w) => w && !QUESTION_SCAFFOLD_WORDS.has(w));
+  const long = words.filter((w) => w.length > 4);
+  return long.length ? long : words.filter((w) => w.length === 4);
+}
 function verdictAnswersQuestion(question, verdictText) {
-  const qNouns = String(question || '').toLowerCase().split(/\s+/).filter((w) => w.length > 4);
+  const keys = questionKeywords(question);
   const v = String(verdictText || '').toLowerCase();
-  if (qNouns.some((n) => v.includes(n))) return true;
-  return YES_NO_QUESTION_RE.test(question) && DIRECT_ANSWER_WORD_RE.test(String(verdictText || '').trim());
+  if (keys.some((k) => v.includes(k))) return true;
+  if (YES_NO_QUESTION_RE.test(question)) return DIRECT_ANSWER_WORD_RE.test(String(verdictText || '').trim());
+  return keys.length === 0;
 }
 
 function checkAnswerInFirstParagraph(draft, brief) {
@@ -714,9 +725,7 @@ function checkAnswerInFirstParagraph(draft, brief) {
   // First paragraph should be a direct answer — short (< 400 chars)
   // and contain at least one key noun from the question.
   if (firstParagraph.length > 600) return { ok: false, reason: 'first_paragraph_too_long_for_quick_answer' };
-  const qNouns = q.toLowerCase().split(/\s+/).filter((w) => w.length > 4);
-  const matched = qNouns.some((n) => firstParagraph.toLowerCase().includes(n));
-  if (!matched) return { ok: false, reason: 'first_paragraph_doesnt_address_question' };
+  if (!verdictAnswersQuestion(q, firstParagraph)) return { ok: false, reason: 'first_paragraph_doesnt_address_question' };
   return { ok: true };
 }
 
@@ -1251,8 +1260,27 @@ function checkVerdictBoxFirst(draft, brief, context) {
   const body = String(draft.body || '').trim();
   if (!body) return { ok: false, reason: 'empty_body' };
   if (!/^<BottomLineBox\b/.test(body)) return { ok: false, reason: 'verdict_box_not_first_block' };
+  // Codex r6 on #5216: an identification post's box must also say
+  // something — the writer frames verdict as the answer to "Is it
+  // dangerous?" and recommendation as "What to do now". The verdict is
+  // judged by the same answer rule as a customer question (a direct answer
+  // word leads it), or names a risk in the catalog's own safety terms
+  // (stings, venom, toxic to pets, damage…). Customer-question pages judge
+  // theirs against the reader's own question (answer_in_first_paragraph).
+  if (isIdentificationDraft(draft, brief, context)) {
+    const box = leadingVerdictBox(body);
+    if (!box?.verdict) return { ok: false, reason: 'verdict_box_has_no_verdict' };
+    if (!box.recommendation) return { ok: false, reason: 'verdict_box_has_no_recommendation' };
+    if (!verdictAnswersQuestion('Is it dangerous?', box.verdict) && !DANGER_TERMS_RE.test(box.verdict)) {
+      return { ok: false, reason: 'verdict_does_not_answer_is_it_dangerous' };
+    }
+  }
   return { ok: true };
 }
+// The catalog's safety fields (stings, bites, venomous, disease_vector,
+// structural, allergen, toxic_to_pets, irritant) in plain words, plus the
+// verdict scale's own words.
+const DANGER_TERMS_RE = /\b(dangerous|danger|harmless|safe|unsafe|venom\w*|stings?|stinging|bites?|biting|toxic|poison\w*|irritat\w*|allerg\w*|disease\w*|damag\w*|risk\w*|threat\w*|medically|beneficial)\b/i;
 
 // C2: on the same drafts, the early estimate/quote CTA link must land
 // AFTER the verdict box closes, never before it. checkVerdictBoxFirst
@@ -1387,7 +1415,13 @@ function allowedIdentificationPhotoSrcs(brief, context) {
 function checkPhotoSlotsLicensedOnly(draft, brief, context) {
   if (!isIdentificationDraft(draft, brief, context)) return { ok: true, reason: 'not_identification_post' };
   const body = String(draft.body || '');
-  const renderedBody = require('./content-guardrails').blankNonRenderedMarkdown(body);
+  // Codex r6: the attribution must be READER-VISIBLE — comments and code
+  // blanked, then every definitely-hidden container (hidden, aria-hidden,
+  // display:none…) through the guardrails' own walker. Every image in the
+  // raw body is still judged (a hidden image still ships), but only a
+  // visible one counts as showing its slot.
+  const cg = require('./content-guardrails');
+  const renderedBody = cg.blankDefinitelyHiddenContent(cg.blankNonRenderedMarkdown(body));
   const allowed = allowedIdentificationPhotoSrcs(brief, context);
   const occurrences = collectBodyImageOccurrences(body);
   for (const { alt, url, form } of occurrences) {
@@ -1406,7 +1440,7 @@ function checkPhotoSlotsLicensedOnly(draft, brief, context) {
   // that are present, so a draft that omitted them all passed. A refresh
   // carries no slots and is never required to add a photo.
   if (brief?.action_type !== 'refresh_existing_page') {
-    const shown = new Set(occurrences.filter((o) => o.form === 'markdown').map((o) => o.url));
+    const shown = new Set(collectBodyImageOccurrences(cg.blankDefinitelyHiddenContent(body)).filter((o) => o.form === 'markdown').map((o) => o.url));
     const slots = Array.isArray(brief?.voice_constraints?.photo_slots) ? brief.voice_constraints.photo_slots : [];
     for (const slot of slots) {
       const src = slot?.photo?.src;
