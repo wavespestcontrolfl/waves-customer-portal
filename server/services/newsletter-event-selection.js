@@ -75,12 +75,23 @@ function isPreviouslyFeaturedIdentity(event, featuredHistory, reference, { occur
     // defaults an 'unknown' row to one-time, which would otherwise block a
     // genuinely recurring identity FOREVER after its first feature instead
     // of granting the calendar-year refresh (Codex P2, 2026-09-27).
-    if (isRecurringIdentityEvent(event, { occurrenceCount }) || isRecurringIdentityEvent(prior, { occurrenceCount })) {
+    const eventRecurring = isRecurringIdentityEvent(event, { occurrenceCount });
+    const priorRecurring = isRecurringIdentityEvent(prior, { occurrenceCount });
+    if (eventRecurring || priorRecurring) {
+      // Codex P2, 2026-09-27 (second pass): pass the ALREADY-ESTABLISHED
+      // recurring verdict through explicitly rather than letting
+      // isEditoriallyNewEvent re-derive it from `event`'s own metadata alone.
+      // When `prior` is the side that proved recurring (e.g. a re-scrape
+      // normalized the current row to recurrence_type='one_time' while the
+      // historical row is 'recurring_series'), re-deriving from `event` only
+      // would say "not recurring" and permanently block the identity instead
+      // of granting the calendar-year refresh this branch just qualified it
+      // for.
       return !isEditoriallyNewEvent({
         ...event,
         times_featured: Math.max(1, Number(prior.times_featured) || 0),
         last_featured_at: prior.last_featured_at,
-      }, reference, { occurrenceCount });
+      }, reference, { occurrenceCount, recurring: true });
     }
     return true;
   });
@@ -107,8 +118,7 @@ async function filterPreviouslyFeaturedIdentities(events, { knex = db, reference
   const rows = Array.isArray(events) ? events : [];
   if (!rows.length) return [];
   const history = await loadFeaturedIdentityHistory(knex);
-  const calendarYearPool = yearPool
-    || (mayNeedYearPool(rows) ? await loadYearIdentityPool(knex, rows, reference) : []);
+  const calendarYearPool = yearPool || await loadSharedYearPool(knex, rows, reference);
   // A starred row bypasses cross-row identity history — the operator is
   // deliberately re-featuring an identity that shipped before, and the star
   // is consumed on ship. (A DEBUT gets no such bypass here: prior shipped
@@ -241,17 +251,25 @@ function isMergedAwaySibling(sibling) {
 // unmerged feeds listing the same one-time event on the same day are ONE
 // occurrence; otherwise a recurrence_type='unknown' one-time event would read
 // as recurring and be dropped for lacking continuity before digest dedup runs.
-function occurrenceKey(row) {
+//
+// The SINGLE canonical definition of "which ET calendar day does this row's
+// occurrence fall on" — every JS consumer that needs to compare or count
+// occurrences (identityOccurrenceCount, isFirstOccurrenceOfYear's siblings
+// filter) goes through this, so "same day" can never drift between them.
+// The SQL mirror is buildRoutineFirstOfYearAdmission in event-freshness.js
+// (`(start_at AT TIME ZONE 'America/New_York')::date`), which cannot share
+// this JS function directly but implements the identical rule.
+function occurrenceDayKey(row) {
   const t = row?.start_at ? new Date(row.start_at) : null;
   return t && !Number.isNaN(t.getTime()) ? etDateString(t) : `id:${row?.id}`;
 }
 
 function identityOccurrenceCount(event, pool) {
-  const occurrences = new Set([occurrenceKey(event)]);
+  const occurrences = new Set([occurrenceDayKey(event)]);
   for (const sibling of (Array.isArray(pool) ? pool : [])) {
     if (!sibling || String(sibling.id) === String(event?.id)) continue;
     if (isMergedAwaySibling(sibling)) continue;
-    if (isSameSeriesSibling(event, sibling)) occurrences.add(occurrenceKey(sibling));
+    if (isSameSeriesSibling(event, sibling)) occurrences.add(occurrenceDayKey(sibling));
   }
   return occurrences.size;
 }
@@ -281,6 +299,7 @@ function isFirstOccurrenceOfYear(event, pool, reference = new Date()) {
   const start = new Date(event.start_at).getTime();
   if (Number.isNaN(start)) return false;
   const eventYear = etYearOf(event.start_at, reference);
+  const eventDayKey = occurrenceDayKey(event);
 
   const siblings = (Array.isArray(pool) ? pool : []).filter((sibling) => (
     sibling && String(sibling.id) !== String(event?.id)
@@ -288,10 +307,17 @@ function isFirstOccurrenceOfYear(event, pool, reference = new Date()) {
       && isSameSeriesSibling(event, sibling)
   ));
 
+  // Compare ET CALENDAR DAYS, not exact timestamps (Codex P2, 2026-09-27,
+  // re-raised): two same-identity rows on the SAME ET day but a few minutes
+  // apart (a showtime rounding difference, or two feeds reporting the same
+  // occurrence at slightly different clock times) are the SAME occurrence —
+  // neither is "earlier" than the other. A plain millisecond comparison
+  // wrongly disqualified whichever of the pair happened to sort later, even
+  // though it never actually lost to a genuinely distinct earlier occurrence.
   const hasEarlierThisYear = siblings.some((sibling) => {
     if (!sibling.start_at || etYearOf(sibling.start_at, reference) !== eventYear) return false;
-    const siblingStart = new Date(sibling.start_at).getTime();
-    return !Number.isNaN(siblingStart) && siblingStart < start;
+    const siblingDayKey = occurrenceDayKey(sibling);
+    return siblingDayKey !== eventDayKey && siblingDayKey < eventDayKey;
   });
   if (hasEarlierThisYear) return false; // (a)
 
@@ -343,6 +369,23 @@ function mayNeedYearPool(events) {
 }
 
 /**
+ * Load the calendar-year identity pool ONCE for a batch of candidate rows,
+ * for every eligibility filter in that batch's pipeline to share instead of
+ * each loading (and paying for) its own copy. Every batch-level caller —
+ * event-curation.js's runCurationEligibilityPipeline, newsletter-autopilot.js's
+ * buildDigestPlan, newsletter-draft.js's draft-loading query, and the admin
+ * planner/approved-ids routes — calls this once and threads the result into
+ * filterRepeatedDateIdentities / filterPreviouslyFeaturedIdentities /
+ * assessFlagshipEventSelection via their `yearPool` option (Codex P2,
+ * 2026-09-27: "Reuse the calendar-year pool across eligibility filters").
+ * Returns `[]` (no DB round trip) when nothing in `rows` could possibly need
+ * it — mayNeedYearPool's own cheap, over-inclusive check.
+ */
+async function loadSharedYearPool(knex, rows, reference = new Date()) {
+  return mayNeedYearPool(rows) ? loadYearIdentityPool(knex, rows, reference) : [];
+}
+
+/**
  * The ONE predicate that exempts a recurring identity from the same-issue
  * repeated-title rejection, shared verbatim by the planning filter
  * (filterRepeatedDateIdentities, below — reaching this branch never even
@@ -380,8 +423,7 @@ async function filterRepeatedDateIdentities(
   if (!rows.length) return [];
   const pool = identityPool || await loadRoutineIdentityPool(knex, reference);
   const repeatedTitles = repeatedDateTitleKeys(pool);
-  const calendarYearPool = yearPool
-    || (mayNeedYearPool(rows) ? await loadYearIdentityPool(knex, rows, reference) : []);
+  const calendarYearPool = yearPool || await loadSharedYearPool(knex, rows, reference);
 
   return rows.map((event) => {
     // Two carve-outs survive the repeated-title exclusion: an operator STAR
@@ -578,9 +620,7 @@ async function validateFlagshipEventSelection(send, { knex = db, reference = new
     .whereIn('id', [...new Set(ids)]);
   const featuredHistory = await loadFeaturedIdentityHistory(knex);
   const routineIdentityPool = await loadRoutineIdentityPool(knex, reference);
-  const yearIdentityPool = mayNeedYearPool(rows)
-    ? await loadYearIdentityPool(knex, rows, reference)
-    : [];
+  const yearIdentityPool = await loadSharedYearPool(knex, rows, reference);
   return assessFlagshipEventSelection(
     typedSend, rows, reference, featuredHistory, routineIdentityPool, yearIdentityPool,
   );
@@ -588,12 +628,16 @@ async function validateFlagshipEventSelection(send, { knex = db, reference = new
 
 module.exports = {
   parseLockedEventIds,
+  occurrenceDayKey,
+  isSameSeriesSibling,
   isFirstOccurrenceInPool,
   isMergedAwaySibling,
   isRecurringFirstOfYearExempt,
   identityOccurrenceCount,
   isFirstOccurrenceOfYear,
   loadYearIdentityPool,
+  mayNeedYearPool,
+  loadSharedYearPool,
   isPreviouslyFeaturedIdentity,
   loadFeaturedIdentityHistory,
   filterPreviouslyFeaturedIdentities,

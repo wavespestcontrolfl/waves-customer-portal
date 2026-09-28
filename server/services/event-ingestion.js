@@ -43,6 +43,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
 const { yieldTrackingUpdateFor, checkAndNotifySourceHealth } = require('./event-source-health');
+const { mergeEvents } = require('./event-dedup');
 
 // On a re-pull that moves an event's date from the PAST back into the FUTURE
 // (a feed correcting/rescheduling a previously-expired event), re-queue the row
@@ -825,16 +826,56 @@ async function upsertExtractedEvents(source, claudeEvents, opts = {}) {
     // the identical title+start+url. Only renames when a legacy row exists
     // AND no row already claims the new key for this source (that would
     // violate the (source_id, external_id) unique constraint) — in that
-    // rare case the legacy row is left as-is and the upsert below merges
-    // into the already-new-shaped row instead, so nothing is duplicated
-    // and nothing throws.
+    // rare case the rename below is skipped and the merge-away path just
+    // below handles it instead.
     if (legacyExternalId && legacyExternalId !== row.external_id) {
-      await db('events_raw')
+      const renamed = await db('events_raw')
         .where({ source_id: source.id, external_id: legacyExternalId })
         .whereNotExists(
           db('events_raw').select(1).where({ source_id: source.id, external_id: row.external_id }),
         )
         .update({ external_id: row.external_id });
+
+      // Codex P2, 2026-09-27: "Collapse legacy rows when the new dedup key
+      // already exists". A rolling deploy can leave BOTH shapes on disk for
+      // the same identity — a straggler instance still running pre-fix
+      // logic re-inserts a fresh legacy-shaped row after this migration
+      // already renamed the original onto the new key. The rename above
+      // can't apply then (the unique (source_id, external_id) constraint
+      // already claims the new key), so without this the legacy row would
+      // sit forever under a key nothing else ever looks up — invisible to
+      // every dedup/eligibility pass. Retire it into the new-key row
+      // through the SAME merge mechanism cross-source dedup uses
+      // (merged_into set, admin_status rejected, calendars rewritten —
+      // event-dedup.js's mergeEvents), so it disappears from the
+      // digest/pipeline exactly like any other merged duplicate while its
+      // own history (times_featured, last_featured_at, any admin
+      // decision) stays on the row rather than being deleted. Idempotent:
+      // a legacy row already merged_into something is excluded by the
+      // whereNull('merged_into') below, so a re-pull is a no-op here.
+      if (!renamed) {
+        const legacyRow = await db('events_raw')
+          .select('id')
+          .where({ source_id: source.id, external_id: legacyExternalId })
+          .whereNull('merged_into')
+          .first();
+        if (legacyRow) {
+          const newKeyRow = await db('events_raw')
+            .select('id')
+            .where({ source_id: source.id, external_id: row.external_id })
+            .first();
+          if (newKeyRow && newKeyRow.id !== legacyRow.id) {
+            try {
+              await mergeEvents(newKeyRow.id, [legacyRow.id]);
+            } catch (err) {
+              // A concurrent pull/merge already resolved this pair — non-fatal,
+              // same as autoMergeDuplicates' own per-cluster handling; the
+              // next pull retries if it's still unresolved.
+              logger.warn(`[event-ingestion] legacy-key merge skipped for source ${source.id}: ${err.message}`);
+            }
+          }
+        }
+      }
     }
 
     await db('events_raw')

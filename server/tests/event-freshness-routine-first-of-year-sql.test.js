@@ -49,10 +49,18 @@ describe('excludeRoutineRecurringFromQuery admits a genuine first-of-year routin
     expect(sql).toMatch(/routine_sibling\.city is not null/i);
   });
 
-  test('the admission clause excludes the row itself and requires a strictly earlier sibling start_at', () => {
+  test('the admission clause excludes the row itself and requires a strictly earlier sibling ET CALENDAR DAY (not just an earlier timestamp)', () => {
+    // Codex P2, 2026-09-27 (re-raised): comparing bare `start_at <` values
+    // would wrongly treat two same-identity rows on the SAME ET day, a few
+    // minutes apart, as "earlier" — the comparison is on the ET calendar day
+    // (mirrors newsletter-event-selection.js's occurrenceDayKey), so a
+    // same-day sibling never disqualifies the row.
     const clause = buildRoutineFirstOfYearAdmission('e');
     expect(clause).toMatch(/routine_sibling\.id != e\.id/);
-    expect(clause).toMatch(/routine_sibling\.start_at < e\.start_at/);
+    expect(clause).not.toMatch(/routine_sibling\.start_at < e\.start_at/);
+    expect(clause).toMatch(
+      /\(routine_sibling\.start_at AT TIME ZONE 'America\/New_York'\)::date\s*<\s*\(e\.start_at AT TIME ZONE 'America\/New_York'\)::date/,
+    );
   });
 
   test('an unaliased query (alias falsy) falls back to the original two-branch gate rather than guessing a correlation', () => {

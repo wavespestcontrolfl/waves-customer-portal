@@ -197,13 +197,23 @@ const FEATURED_ISSUE_LOOKAHEAD_MS = 8 * 24 * 60 * 60 * 1000;
  * once a NEW ET calendar year starts from its last feature — replacing the
  * old 300-day annual-only cooldown. A missing/unparseable last_featured_at
  * fails closed (blocked): we can't prove which year it ran.
+ *
+ * `recurring` (Codex P2, 2026-09-27): when a caller has already established
+ * that this identity recurs from evidence isRecurringIdentityEvent can't see
+ * on `event` alone — newsletter-event-selection.js's isPreviouslyFeaturedIdentity
+ * checks EITHER the current row's or the prior featured row's metadata, since
+ * a re-scrape can normalize the same identity's event_type/recurrence_type
+ * differently — pass that verdict through explicitly instead of letting this
+ * function re-derive it from `event` only, which would silently fall back to
+ * "one-time" and block the identity forever.
  */
-function isEditoriallyNewEvent(event = {}, reference = new Date(), { occurrenceCount = null } = {}) {
+function isEditoriallyNewEvent(event = {}, reference = new Date(), { occurrenceCount = null, recurring = null } = {}) {
   const timesFeatured = Math.max(0, Number(event.times_featured) || 0);
   const hasFeaturedAt = Boolean(event.last_featured_at);
   if (timesFeatured === 0 && !hasFeaturedAt) return true;
 
-  if (!isRecurringIdentityEvent(event, { occurrenceCount }) || !hasFeaturedAt) return false;
+  const isRecurring = recurring != null ? Boolean(recurring) : isRecurringIdentityEvent(event, { occurrenceCount });
+  if (!isRecurring || !hasFeaturedAt) return false;
 
   const lastFeatured = new Date(event.last_featured_at);
   if (Number.isNaN(lastFeatured.getTime())) return false;
@@ -310,14 +320,25 @@ function dedupeDigestEvents(events) {
 // full check (always safe), so this only needs to avoid over-matching.
 const sqlNormalizedTitle = (colRef) => `regexp_replace(lower(${colRef}), '[^a-z0-9]+', ' ', 'g')`;
 const sqlEtYear = (colRef) => `date_part('year', (${colRef} AT TIME ZONE 'America/New_York'))`;
+// ET calendar day (not timestamp) — the SQL mirror of
+// newsletter-event-selection.js's occurrenceDayKey, the single JS definition
+// of "which day does this occurrence fall on". Comparing DAYS rather than
+// exact instants (Codex P2, 2026-09-27, re-raised) matters because two
+// same-identity rows on the SAME ET day but a few minutes apart (a showtime
+// rounding difference, or two feeds reporting the same occurrence at
+// slightly different clock times) are the SAME occurrence, not one "earlier"
+// than the other — a plain `start_at <` comparison wrongly disqualified
+// whichever of the pair happened to sort later.
+const sqlEtDay = (colRef) => `(${colRef} AT TIME ZONE 'America/New_York')::date`;
 
 /**
  * Raw NOT EXISTS clause: true when no OTHER row in events_raw shares this
  * row's identity (normalized title + venue, or title + city when venue is
  * blank on either side — mirrors newsletter-event-selection.js's
- * isSameSeriesSibling) with a start_at strictly earlier in the SAME ET
- * calendar year. Merged-away rows never count (isFirstOccurrenceOfYear ignores
- * them too: a merged duplicate a few minutes earlier than its survivor is the
+ * isSameSeriesSibling) with a start_at falling on a strictly EARLIER ET
+ * CALENDAR DAY in the SAME ET calendar year (see sqlEtDay above — not an
+ * earlier exact timestamp). Merged-away rows never count (isFirstOccurrenceOfYear
+ * ignores them too: a merged duplicate a few minutes earlier than its survivor is the
  * same happening, not an earlier occurrence). Correlated against `alias` (the caller's own query alias),
  * so it can only be used once that alias is actually in scope.
  */
@@ -328,7 +349,7 @@ function buildRoutineFirstOfYearAdmission(alias) {
     SELECT 1 FROM events_raw AS routine_sibling
     WHERE ${sib('id')} != ${outer('id')}
       AND ${sib('merged_into')} IS NULL
-      AND ${sib('start_at')} < ${outer('start_at')}
+      AND ${sqlEtDay(sib('start_at'))} < ${sqlEtDay(outer('start_at'))}
       AND ${sqlEtYear(sib('start_at'))} = ${sqlEtYear(outer('start_at'))}
       AND ${sqlNormalizedTitle(sib('title'))} = ${sqlNormalizedTitle(outer('title'))}
       AND (

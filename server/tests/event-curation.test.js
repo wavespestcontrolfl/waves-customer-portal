@@ -473,6 +473,14 @@ describe('event-curation candidate query recurrence gate', () => {
     expect(sql).toContain('is_free');
     expect(sql).toContain('family_friendly');
   });
+
+  // Codex P1, 2026-09-27: "Revalidate content before initial auto-approval"
+  // — applyDecision pins its write to this exact updated_at, so the
+  // candidate fetch must select it.
+  test('selects updated_at for applyDecision\'s version-pinned approval/assessment write', () => {
+    const { sql } = buildCurationCandidateQuery(25).toSQL();
+    expect(sql).toMatch(/"e"\."updated_at"/);
+  });
 });
 
 describe('event-curation kill switch', () => {

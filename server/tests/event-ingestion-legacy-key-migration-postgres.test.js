@@ -106,6 +106,69 @@ describeOrSkip('upsertExtractedEvents — legacy dedup-key migration on real Pos
     expect(rows[0].description).toBe('updated on re-pull');
   });
 
+  test('Codex P2 (2026-09-27): when BOTH the legacy and new-key rows already exist (rolling deploy), the legacy row is merged into the new-key row instead of surviving forever', async () => {
+    const source = { id: sourceId, coverage_geo: [] };
+    const title = 'TEST Both Keys Present Event';
+    const url = 'https://test.invalid/both-keys-present-event/';
+    const startIso = daysFromNowIso(32);
+    const start = parseExtractedStartAt(startIso);
+    const { externalId: newKey, legacyExternalId: legacyKey } = extractedEventDedupKeys(title, start, url);
+
+    // Simulate the rolling-deploy race: a straggler pre-fix instance
+    // re-inserted a legacy-shaped row AFTER an earlier pull already renamed
+    // the original onto the new key shape — so both rows exist for the
+    // identical identity.
+    const [newKeyRow] = await db('events_raw').insert({
+      source_id: sourceId,
+      external_id: newKey,
+      title,
+      description: 'the current, new-key-shaped row',
+      start_at: start,
+      event_url: url,
+    }).returning(['id']);
+    const [legacyRow] = await db('events_raw').insert({
+      source_id: sourceId,
+      external_id: legacyKey,
+      title,
+      description: 'a straggler re-inserted under the legacy key shape',
+      start_at: start,
+      event_url: url,
+      times_featured: 1, // history that must survive the merge, not be deleted
+    }).returning(['id']);
+    const newKeyId = newKeyRow.id || newKeyRow;
+    const legacyId = legacyRow.id || legacyRow;
+
+    const { upserted, dropped } = await upsertExtractedEvents(source, [
+      { title, startAt: startIso, eventUrl: url, description: 'updated on re-pull' },
+    ]);
+    expect(upserted).toBe(1);
+    expect(dropped).toBe(0);
+
+    const rows = await db('events_raw').where({ source_id: sourceId, title });
+    expect(rows).toHaveLength(2); // BOTH rows preserved — nothing deleted
+    const survivor = rows.find((r) => r.id === newKeyId);
+    const retired = rows.find((r) => r.id === legacyId);
+    expect(survivor).toBeTruthy();
+    expect(retired).toBeTruthy();
+    // The new-key row got this pull's fresh content.
+    expect(survivor.description).toBe('updated on re-pull');
+    // The legacy row is retired into it — same mechanism cross-source dedup
+    // uses (event-dedup.js's mergeEvents): merged_into set, rejected, and
+    // its own history (times_featured) left on the row rather than deleted.
+    expect(retired.merged_into).toBe(newKeyId);
+    expect(retired.admin_status).toBe('rejected');
+    expect(retired.times_featured).toBe(1);
+
+    // Idempotent: a second pull is a no-op on the already-merged legacy row.
+    const second = await upsertExtractedEvents(source, [
+      { title, startAt: startIso, eventUrl: url, description: 'second re-pull' },
+    ]);
+    expect(second.upserted).toBe(1);
+    const rowsAfterSecond = await db('events_raw').where({ source_id: sourceId, title });
+    expect(rowsAfterSecond).toHaveLength(2);
+    expect(rowsAfterSecond.find((r) => r.id === legacyId).merged_into).toBe(newKeyId);
+  });
+
   test('with no legacy row present, a fresh pull inserts once under the new key', async () => {
     const source = { id: sourceId, coverage_geo: [] };
     const title = 'TEST Fresh Pull Event';

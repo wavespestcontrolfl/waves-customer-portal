@@ -43,6 +43,7 @@ const {
   validateFlagshipEventSelection,
   filterPreviouslyFeaturedIdentities,
   filterRepeatedDateIdentities,
+  loadSharedYearPool,
   isFlagshipSend,
 } = require('../services/newsletter-event-selection');
 const { buildDigestPlan } = require('../services/newsletter-autopilot');
@@ -1903,6 +1904,13 @@ router.get('/events/approved-ids', async (req, res, next) => {
         'e.id', 'e.title', 'e.description', 'e.admin_status', 'e.start_at', 'e.end_at',
         'e.event_url', 'e.event_type', 'e.recurrence_type', 'e.freshness_status',
         'e.times_featured', 'e.last_featured_at', 'e.pulled_at',
+        // Series context for isSameSeriesSibling (Codex P2, 2026-09-27):
+        // without these every same-title row matches every other regardless
+        // of venue/city, so a recurring identity's first-of-year admission
+        // can never tell two distinct same-named series apart. Match the
+        // columns the other planning paths (digest-plan below, autopilot's
+        // buildDigestPlan, draft loading) already select.
+        'e.venue_name', 'e.city',
       )
       .whereIn('e.admin_status', ['approved', 'featured'])
       .whereNull('e.merged_into')
@@ -1920,8 +1928,15 @@ router.get('/events/approved-ids', async (req, res, next) => {
       .limit(20);
 
     const rows = await excludeRoutineRecurringFromQuery(query);
-    const nonRepeatedRows = await filterRepeatedDateIdentities(rows);
-    const historicallyNewRows = await filterPreviouslyFeaturedIdentities(nonRepeatedRows);
+    // One calendar-year identity pool for this batch, shared by both filters
+    // below (Codex P2, 2026-09-27: "Reuse the calendar-year pool across
+    // eligibility filters") instead of each loading its own copy. Same
+    // reference (now) the filters themselves default to, so the pool's
+    // year range and the filters' own first-of-year/newness math agree.
+    const reference = new Date();
+    const yearPool = await loadSharedYearPool(db, rows, reference);
+    const nonRepeatedRows = await filterRepeatedDateIdentities(rows, { reference, yearPool });
+    const historicallyNewRows = await filterPreviouslyFeaturedIdentities(nonRepeatedRows, { reference, yearPool });
 
     const eligible = dedupeDigestEvents(historicallyNewRows.filter((r) => isEligibleForFreshDigest(r))).slice(0, 12);
     res.json({ ids: eligible.map((r) => r.id), count: eligible.length });
@@ -1965,15 +1980,29 @@ router.post('/events/digest-plan', async (req, res, next) => {
       .orderByRaw('e.freshness_score DESC NULLS LAST');
 
     const rows = await excludeRoutineRecurringFromQuery(query);
-    const nonRepeatedRows = await filterRepeatedDateIdentities(rows, { reference: startDate });
-    const historicallyNewRows = await filterPreviouslyFeaturedIdentities(nonRepeatedRows, { reference: startDate });
+    // One calendar-year identity pool for this batch, shared by both filters
+    // below (Codex P2, 2026-09-27: "Reuse the calendar-year pool across
+    // eligibility filters") instead of each loading its own copy.
+    const yearPool = await loadSharedYearPool(db, rows, startDate);
+    const nonRepeatedRows = await filterRepeatedDateIdentities(rows, { reference: startDate, yearPool });
+    const historicallyNewRows = await filterPreviouslyFeaturedIdentities(nonRepeatedRows, { reference: startDate, yearPool });
 
     const eligible = historicallyNewRows.filter((r) => isEligibleForFreshDigest(r, startDate));
     const scored = dedupeDigestEvents(
       eligible.map((r) => ({ ...r, compositeScore: scoreFreshEvent(r) }))
         .sort((a, b) => b.compositeScore - a.compositeScore),
     );
-    const suppressed = rows.filter((r) => !isEligibleForFreshDigest(r))
+    // Codex P2, 2026-09-27: "Derive planner suppression from the filtered
+    // candidates" — this used to re-run isEligibleForFreshDigest(r) on the
+    // RAW row (no reference, and none of the __recurringFirstOfYear /
+    // __recurrenceOccurrenceCount markers filterRepeatedDateIdentities just
+    // stamped), so a recurring identity the pipeline just ADMITTED into
+    // `eligible` still showed up in `suppressed` too — an admitted event
+    // rendered as suppressed. Suppression is now the plain set difference:
+    // whatever the identity/history/eligibility pipeline above removed from
+    // `rows` on the way to `eligible`.
+    const eligibleIds = new Set(eligible.map((r) => String(r.id)));
+    const suppressed = rows.filter((r) => !eligibleIds.has(String(r.id)))
       .map((r) => ({ id: r.id, title: r.title, reason: r.freshness_status }));
 
     const assigned = new Set();

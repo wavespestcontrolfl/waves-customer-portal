@@ -97,13 +97,21 @@ describeOrSkip('buildCurationCandidateQuery admits a genuine first-of-year stale
     // subquery — it need not itself be a curation candidate (a past-dated
     // row never is), and loadYearIdentityPool-style evidence includes
     // rows regardless of admin_status.
-    // Both occurrences sit a minute apart so they can never straddle an ET
-    // New Year boundary whatever day the suite runs.
+    //
+    // Codex P2, 2026-09-27 (re-raised): the admission now compares ET
+    // CALENDAR DAYS, not exact timestamps (buildRoutineFirstOfYearAdmission
+    // / occurrenceDayKey) — a sibling on the SAME day is the SAME
+    // occurrence, never "earlier" (see the same-day test below). So this
+    // fixture needs a sibling on a genuinely EARLIER ET calendar day, not
+    // merely an earlier timestamp on the same day. A few days apart keeps
+    // both comfortably inside the same ET year for any run more than a few
+    // days from the Dec 31/Jan 1 boundary.
     const laterStart = new Date(Date.now() + 10 * 24 * 3600 * 1000);
+    const earlierDayStart = new Date(Date.now() + 3 * 24 * 3600 * 1000);
     await insertEvent({
       title,
       admin_status: 'approved',
-      start_at: new Date(laterStart.getTime() - 60 * 1000),
+      start_at: earlierDayStart,
     });
     const laterId = await insertEvent({
       title,
@@ -111,6 +119,23 @@ describeOrSkip('buildCurationCandidateQuery admits a genuine first-of-year stale
     });
     const rows = await buildCurationCandidateQuery(500);
     expect(rows.map((r) => r.id)).not.toContain(laterId);
+  });
+
+  test('two same-day same-identity rows 20 minutes apart are the SAME occurrence — the later is still admitted (Codex P2, re-raised)', async () => {
+    const title = 'TEST Weekly Trivia Same Day Twenty Minutes Apart';
+    const laterStart = new Date(Date.now() + 10 * 24 * 3600 * 1000);
+    const earlierSameDay = new Date(laterStart.getTime() - 20 * 60 * 1000);
+    await insertEvent({
+      title,
+      admin_status: 'approved',
+      start_at: earlierSameDay,
+    });
+    const laterId = await insertEvent({
+      title,
+      start_at: laterStart,
+    });
+    const rows = await buildCurationCandidateQuery(500);
+    expect(rows.map((r) => r.id)).toContain(laterId);
   });
 
   test('a merged-away duplicate a few minutes earlier does not count as an earlier occurrence', async () => {

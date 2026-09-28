@@ -1,5 +1,5 @@
 /**
- * Two Codex P2 findings (2026-09-27) on newsletter-event-selection.js:
+ * Codex P2 findings (2026-09-27) on newsletter-event-selection.js:
  *
  * 1. (line 75) "Preserve repeat evidence through feature-history checks":
  *    for recurrence_type='unknown', isPreviouslyFeaturedIdentity and
@@ -13,14 +13,22 @@
  *    keeps the LATER of two same-day cross-source duplicates, the earlier
  *    merged loser was counted as a distinct "earlier this year" occurrence
  *    and wrongly excluded its own survivor from being first-of-year.
+ *
+ * 3. (re-raised, line 295) "Compare occurrence days instead of exact start
+ *    times": isFirstOccurrenceOfYear compared exact millisecond timestamps,
+ *    so two UNMERGED same-identity rows on the SAME ET calendar day, a few
+ *    minutes apart, wrongly counted as one being "earlier" than the other —
+ *    they're the SAME occurrence. Fixed via the canonical occurrenceDayKey.
  */
 
 const {
   isPreviouslyFeaturedIdentity,
   filterPreviouslyFeaturedIdentities,
+  filterRepeatedDateIdentities,
   identityOccurrenceCount,
   isFirstOccurrenceOfYear,
   isMergedAwaySibling,
+  occurrenceDayKey,
 } = require('../services/newsletter-event-selection');
 const { isRecurringIdentityEvent, isEligibleForFreshDigest } = require('../services/event-freshness');
 
@@ -76,6 +84,29 @@ describe('P2 #75: recurrence_type=unknown feature history needs pool-derived occ
       yearPool: [candidate, secondOccurrence2026, priorFeatured],
     });
     expect(rows).toEqual([candidate]);
+  });
+
+  test('P2 (2026-09-27, second pass) "Carry prior recurrence metadata into the newness check": PRIOR-side recurring metadata alone still grants the calendar-year refresh, even when the CURRENT row was re-scraped as one_time', () => {
+    // A re-scrape can normalize the same identity's event_type/recurrence_type
+    // differently than the historical featured row — here the CURRENT row
+    // reads recurrence_type='one_time' (not 'unknown', so occurrenceCount
+    // can't rescue it either), while `prior` still says recurring_series.
+    // isPreviouslyFeaturedIdentity's own gate already grants entry on EITHER
+    // side being recurring, but isEditoriallyNewEvent used to re-derive
+    // "is this recurring" from `event` alone — silently reading one_time and
+    // blocking the identity forever instead of granting the calendar-year
+    // refresh this branch just qualified it for.
+    const reScrapedAsOneTime = {
+      id: 'this-year', title: 'Community Trivia Night', recurrence_type: 'one_time', event_type: 'one_time', start_at: '2026-04-04T22:00:00Z',
+    };
+    const priorRecurring = {
+      id: 'prior', title: 'Community Trivia Night', event_type: 'recurring_series', recurrence_type: 'weekly', times_featured: 1, last_featured_at: '2025-04-05T22:00:00Z',
+    };
+    // The current row's OWN metadata says not-recurring — proves the fix
+    // isn't just occurrenceCount-driven.
+    expect(isRecurringIdentityEvent(reScrapedAsOneTime)).toBe(false);
+    expect(isRecurringIdentityEvent(priorRecurring)).toBe(true);
+    expect(isPreviouslyFeaturedIdentity(reScrapedAsOneTime, [priorRecurring], REFERENCE)).toBe(false);
   });
 
   test('filterPreviouslyFeaturedIdentities correctly keeps blocking a GENUINE one-time identity (no false positive from the fix)', async () => {
@@ -177,5 +208,81 @@ describe('P2 #242: a merged-away duplicate must not count as a separate occurren
     const genuineEarlier = { id: 'd', title: 'Riverside Trivia', start_at: '2026-01-10T20:15:00Z' };
     const pool = [genuineEarlier, survivor];
     expect(isFirstOccurrenceOfYear(survivor, pool, REFERENCE)).toBe(false);
+  });
+});
+
+describe('P2 (re-raised) #295: isFirstOccurrenceOfYear compares ET CALENDAR DAYS, not exact timestamps', () => {
+  const priorYear = { id: 'prior', title: 'Sunset Market', start_at: '2025-04-05T20:00:00Z' };
+  // Two UNMERGED rows on the SAME ET day, 20 minutes apart — e.g. two feeds
+  // reporting the identical occurrence with slightly different clock times.
+  // Neither is "merged away", so isMergedAwaySibling can't be what saves
+  // this case — it's the day-vs-timestamp comparison itself.
+  const earlierSameDay = { id: 'a', title: 'Sunset Market', start_at: '2026-04-04T20:00:00Z' };
+  const laterSameDay = { id: 'b', title: 'Sunset Market', start_at: '2026-04-04T20:20:00Z' };
+
+  test('occurrenceDayKey reads the same ET calendar day for both, despite the 20-minute gap', () => {
+    expect(occurrenceDayKey(earlierSameDay)).toBe(occurrenceDayKey(laterSameDay));
+  });
+
+  test('neither same-day row disqualifies the other from first-of-year — they are ONE occurrence', () => {
+    const pool = [priorYear, earlierSameDay, laterSameDay];
+    // Before this fix: a plain millisecond comparison would say
+    // earlierSameDay.start_at < laterSameDay.start_at, same ET year ->
+    // hasEarlierThisYear wrongly true for laterSameDay.
+    expect(isFirstOccurrenceOfYear(laterSameDay, pool, REFERENCE)).toBe(true);
+    expect(isFirstOccurrenceOfYear(earlierSameDay, pool, REFERENCE)).toBe(true);
+  });
+
+  test('a sibling on a genuinely EARLIER ET calendar day this year still correctly excludes first-of-year', () => {
+    const genuineEarlierDay = { id: 'c', title: 'Sunset Market', start_at: '2026-01-10T20:15:00Z' };
+    const pool = [genuineEarlierDay, laterSameDay];
+    expect(isFirstOccurrenceOfYear(laterSameDay, pool, REFERENCE)).toBe(false);
+  });
+});
+
+describe('P2 (re-raised) #242/#295: filterRepeatedDateIdentities end to end ignores a merged-away earlier occurrence', () => {
+  // Full pipeline (not just the lower-level isFirstOccurrenceOfYear /
+  // identityOccurrenceCount unit tests above): a weekly recurring identity
+  // with real prior-year continuity, plus a same-day cross-source duplicate
+  // that was merged away and reads a few minutes EARLIER than its own
+  // survivor — event-dedup.js's pickSurvivor can keep either side of such a
+  // pair. The merged loser must never disqualify its own survivor from
+  // being admitted as first-of-year through the actual entry point planning
+  // and curation call (filterRepeatedDateIdentities), not just the internal
+  // helpers.
+  const priorYear = {
+    id: 'prior-2025', title: 'Riverside Trivia', recurrence_type: 'weekly', event_type: 'recurring_series',
+    start_at: '2025-04-05T20:15:00Z', venue_name: 'Riverside Pub', city: 'sarasota', merged_into: null,
+  };
+  const mergedLoser = {
+    id: 'merged-loser', title: 'Riverside Trivia', recurrence_type: 'weekly', event_type: 'recurring_series',
+    start_at: '2026-04-04T20:00:00Z', venue_name: 'Riverside Pub', city: 'sarasota', merged_into: 'survivor',
+  };
+  const survivor = {
+    id: 'survivor',
+    title: 'Riverside Trivia',
+    description: 'Trivia every Tuesday night.',
+    admin_status: 'approved',
+    event_url: 'https://events.example/riverside-trivia',
+    event_type: 'recurring_series',
+    recurrence_type: 'weekly',
+    freshness_status: 'stale_recurring', // classifyFreshness's own label — no pool access, can't know continuity
+    times_featured: 0,
+    last_featured_at: null,
+    merged_into: null,
+    venue_name: 'Riverside Pub',
+    city: 'sarasota',
+    start_at: '2026-04-04T20:15:00Z',
+  };
+  const yearPool = [priorYear, mergedLoser, survivor];
+
+  test('the survivor is admitted with __recurringFirstOfYear despite the merged loser reading an "earlier" timestamp on the SAME day', async () => {
+    const planned = await filterRepeatedDateIdentities([survivor], {
+      reference: REFERENCE,
+      identityPool: [survivor], // ±90-day routine pool: just this row, no repeated-title collision
+      yearPool,
+    });
+    expect(planned.map((row) => row.id)).toEqual([survivor.id]);
+    expect(planned[0].__recurringFirstOfYear).toBe(true);
   });
 });

@@ -48,6 +48,7 @@ const {
 const {
   filterPreviouslyFeaturedIdentities,
   filterRepeatedDateIdentities,
+  loadSharedYearPool,
 } = require('./newsletter-event-selection');
 const {
   FACTOR_MAXES,
@@ -151,6 +152,12 @@ const CANDIDATE_COLUMNS = [
   'e.pulled_at', 'e.is_free', 'e.family_friendly', 'e.event_url',
   'e.price_text', 'e.region_zone',
   'e.admin_status', 'e.merged_into',
+  // Version pin for applyDecision's approval/assessment writes (Codex P1,
+  // 2026-09-27: "Revalidate content before initial auto-approval") — the
+  // classify call can take up to CLASSIFY_TIMEOUT_MS (10 min), during which
+  // ingestion or an admin edit can change this row's content underneath a
+  // candidate already fetched for classification.
+  'e.updated_at',
 ];
 
 /**
@@ -187,12 +194,16 @@ function buildCurationCandidateQuery(limit = CURATION_RUN_LIMIT) {
  * functions used to decide what the digest itself will accept, so neither
  * pass can approve a row the digest would reject.
  */
-async function runCurationEligibilityPipeline(rows, { reference = new Date() } = {}) {
+async function runCurationEligibilityPipeline(rows, { reference = new Date(), knex = db } = {}) {
+  // One calendar-year identity pool for this batch, shared by both filters
+  // below (Codex P2, 2026-09-27: "Reuse the calendar-year pool across
+  // eligibility filters") instead of each loading its own copy.
+  const yearPool = await loadSharedYearPool(knex, rows, reference);
   // The SQL gate handles normalized metadata. Keep the shared text backstop at
   // this earlier approval boundary too, so mislabeled weekly classes never get
   // auto-approved and later rely on the digest gate to save them.
-  const nonRepeatedRows = await filterRepeatedDateIdentities(rows, { reference });
-  const historicallyNewRows = await filterPreviouslyFeaturedIdentities(nonRepeatedRows, { reference });
+  const nonRepeatedRows = await filterRepeatedDateIdentities(rows, { knex, reference, yearPool });
+  const historicallyNewRows = await filterPreviouslyFeaturedIdentities(nonRepeatedRows, { knex, reference, yearPool });
   // ONE editorial gate for approval and delivery: isEligibleForFreshDigest is
   // the digest's own hard gate, so curation can never approve a row the
   // digest would reject — and, critically, never DROP a row the digest would
@@ -462,23 +473,43 @@ async function applyDecision(event, rawAssessment, reference = new Date()) {
     updated_at: db.fn.now(),
   };
 
+  // Codex P1, 2026-09-27: "Revalidate content before initial auto-approval".
+  // The classify call can take up to CLASSIFY_TIMEOUT_MS (10 minutes);
+  // ingestion (or an admin edit) can change this row's title/description/
+  // start_at/event_url/recurrence_type underneath a candidate already
+  // fetched for classification, and an approved row never re-enters rescore
+  // — so an approval (or even just stamping curated_at from this decision)
+  // must be pinned to the EXACT version this assessment was computed from.
+  // Same date_trunc('milliseconds', …) comparison applyRescore uses: pg's
+  // timestamptz is microsecond-precision, but node-pg reads it back as a
+  // millisecond-precision JS Date, so a plain `=` never matches even the
+  // unchanged row it was just read from.
+  const unchangedSinceFetch = (query) => query
+    .whereRaw("date_trunc('milliseconds', updated_at) = ?", [event.updated_at]);
+
   if (decision.approve) {
-    const updated = await db('events_raw')
-      .where({ id: event.id, admin_status: 'pending' })
-      .whereNull('merged_into')
-      .update({
-        ...assessmentFields,
-        admin_status: 'approved',
-        approved_via: 'auto_curation',
-        curated_at: db.fn.now(),
-      });
+    const updated = await unchangedSinceFetch(
+      db('events_raw')
+        .where({ id: event.id, admin_status: 'pending' })
+        .whereNull('merged_into'),
+    ).update({
+      ...assessmentFields,
+      admin_status: 'approved',
+      approved_via: 'auto_curation',
+      curated_at: db.fn.now(),
+    });
     if (updated) return 'approved';
   }
-  await db('events_raw')
-    .where({ id: event.id })
-    .whereNull('curated_at')
-    .update({ ...assessmentFields, curated_at: db.fn.now() });
-  return decision.approve ? 'raced' : 'left_pending';
+  const updated = await unchangedSinceFetch(
+    db('events_raw').where({ id: event.id }).whereNull('curated_at'),
+  ).update({ ...assessmentFields, curated_at: db.fn.now() });
+  if (updated) return decision.approve ? 'raced' : 'left_pending';
+  // Version mismatch: the row's content changed since it was fetched for
+  // classification (or it was already examined by a concurrent run). Leave
+  // it exactly as-is — curated_at is untouched — so the next run classifies
+  // the row's CURRENT content instead of stamping a decision computed from
+  // content that no longer matches.
+  return 'left_pending';
 }
 
 /**
@@ -499,7 +530,7 @@ async function applyDecision(event, rawAssessment, reference = new Date()) {
 function buildRescoreCandidateQuery(limit = RESCORE_RUN_LIMIT) {
   const query = db('events_raw as e')
     .select(...CANDIDATE_COLUMNS, 'e.score_breakdown', 'e.rejection_codes', 'e.audience_tags',
-      'e.novelty_type', 'e.editorial_evidence', 'e.curation_note', 'e.curated_at', 'e.updated_at')
+      'e.novelty_type', 'e.editorial_evidence', 'e.curation_note', 'e.curated_at')
     .where('e.admin_status', 'pending')
     .whereNotNull('e.curated_at')
     .whereNotNull('e.score_breakdown')

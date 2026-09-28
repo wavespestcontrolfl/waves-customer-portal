@@ -36,6 +36,7 @@ const { createNewsletterDraft, persistNewsletterDraft } = require('./newsletter-
 const {
   filterPreviouslyFeaturedIdentities,
   filterRepeatedDateIdentities,
+  loadSharedYearPool,
 } = require('./newsletter-event-selection');
 const {
   selectPortfolio, rankAlternates, effectiveScore, unmetConstraints,
@@ -206,8 +207,12 @@ async function buildDigestPlan({ reference = new Date() } = {}) {
 
   const rows = await excludeRoutineRecurringFromQuery(query);
 
-  const nonRepeatedRows = await filterRepeatedDateIdentities(rows, { reference: startDate });
-  const historicallyNewRows = await filterPreviouslyFeaturedIdentities(nonRepeatedRows, { reference: startDate });
+  // One calendar-year identity pool for this batch, shared by both filters
+  // below (Codex P2, 2026-09-27: "Reuse the calendar-year pool across
+  // eligibility filters") instead of each loading its own copy.
+  const yearPool = await loadSharedYearPool(db, rows, startDate);
+  const nonRepeatedRows = await filterRepeatedDateIdentities(rows, { reference: startDate, yearPool });
+  const historicallyNewRows = await filterPreviouslyFeaturedIdentities(nonRepeatedRows, { reference: startDate, yearPool });
   const eligible = historicallyNewRows.filter((r) => isEligibleForFreshDigest(r, startDate));
   const scored = dedupeDigestEvents(eligible
     .map((r) => ({ ...r, compositeScore: scoreFreshEvent(r) }))

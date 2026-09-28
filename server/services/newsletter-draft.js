@@ -28,6 +28,7 @@ const {
 const {
   filterPreviouslyFeaturedIdentities,
   filterRepeatedDateIdentities,
+  loadSharedYearPool,
 } = require('./newsletter-event-selection');
 const { dispatchWithFallback } = require('./llm/call');
 
@@ -1753,13 +1754,19 @@ async function createNewsletterDraft({
         .orderByRaw('e.freshness_score DESC NULLS LAST');
 
       const approvedRows = await excludeRoutineRecurringFromQuery(approvedQuery);
+      // One calendar-year identity pool for this batch, shared by both
+      // filters below (Codex P2, 2026-09-27: "Reuse the calendar-year pool
+      // across eligibility filters") instead of each loading its own copy.
+      const yearPool = await loadSharedYearPool(knex, approvedRows, editorialReference);
       const nonRepeatedRows = await filterRepeatedDateIdentities(approvedRows, {
         knex,
         reference: editorialReference,
+        yearPool,
       });
       const historicallyNewRows = await filterPreviouslyFeaturedIdentities(nonRepeatedRows, {
         knex,
         reference: editorialReference,
+        yearPool,
       });
       approvedEvents = dedupeDigestEvents(
         historicallyNewRows.filter((event) => isEligibleForFreshDigest(event, editorialReference)),
