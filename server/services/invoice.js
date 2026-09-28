@@ -6138,6 +6138,10 @@ const InvoiceService = {
       // The staff user behind an operator send (attribution for the
       // invoice-issued closeout's audit row); null for automated sends.
       actorTechnicianId = null,
+      // IB closeout repair: its approval never covered consuming account
+      // credit, so this send behaves exactly as with the autoApplyAccountCredit
+      // gate off — no credit is applied (the balance stays on the account).
+      skipAccountCreditAutoApply = false,
       // Internal-only: retries this same call once more after a
       // not_zero_due chokepoint outcome (Codex round-6 P2 #4131) — a real
       // caller never sets this, so a race can retry at most once.
@@ -6146,7 +6150,7 @@ const InvoiceService = {
   ) {
     const retryOnce = () => this.sendViaSMSAndEmail(invoiceId, {
       requestReview, reviewDelayMinutes, allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold,
-      emailRecipientOverride, payUrlParams, operatorInitiated, actorTechnicianId, _zeroDueRetried: true,
+      emailRecipientOverride, payUrlParams, operatorInitiated, actorTechnicianId, skipAccountCreditAutoApply, _zeroDueRetried: true,
     });
     // Phase 2: an accrued invoice (on a payer statement) is never delivered
     // individually. Refuse BEFORE claiming/applying credit so we don't flip its
@@ -6212,7 +6216,7 @@ const InvoiceService = {
     // covered; on a delivery failure the !ok path below restores the claim and
     // reverses this seam's applied credit.
     const { autoApplyAccountCreditIfEnabled } = require("./customer-credit");
-    const sendCreditResult = await autoApplyAccountCreditIfEnabled(invoiceId);
+    const sendCreditResult = skipAccountCreditAutoApply ? null : await autoApplyAccountCreditIfEnabled(invoiceId);
     if (sendCreditResult?.fullyCovered) {
       // Resolve the adopted rows while the token still owns the row — the
       // resolution is token-scoped and would be a silent no-op after the

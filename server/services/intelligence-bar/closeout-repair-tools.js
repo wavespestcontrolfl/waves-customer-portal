@@ -407,6 +407,9 @@ const STEP_RUNNERS = {
     try {
       const result = await require('../invoice').sendViaSMSAndEmail(disposition.invoice_id, {
         firstDeliveryOnly: true, operatorInitiated: true, actorTechnicianId: step.actor_id || null,
+        // Enforced inside the send itself: no account credit is consumed,
+        // even if some appeared after the pre-send check below.
+        skipAccountCreditAutoApply: true,
       });
       return { ...invoiceSendOutcome(result), invoice_id: disposition.invoice_id };
     } catch (err) {
