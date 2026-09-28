@@ -4,6 +4,19 @@
  * messages.create() returns the next queued response, so we can assert pass
  * counts and convergence for each path.
  */
+// The service identity lane (a model call) answers "no job named", so the
+// visit ladder picks the job: these suites test the OPEN TIMES plumbing, not
+// the pick (covered in sms-real-answers.test.js). Other dispatches stay real.
+jest.mock('../services/call-booking-catalog', () => ({ loadBookableCallServices: async () => [] }));
+jest.mock('../services/llm/call', () => {
+  const actual = jest.requireActual('../services/llm/call');
+  return {
+    ...actual,
+    dispatchWithFallback: (policy, payload, options) => (payload?.laneId === 'sms_service_identity'
+      ? Promise.resolve({ ok: true, json: { about: 'none', visit: null, service: null } })
+      : actual.dispatchWithFallback(policy, payload, options)),
+  };
+});
 const { generateGroundedDraft } = require('../services/sms-shadow-drafter');
 
 function makeClient(scripted) {
