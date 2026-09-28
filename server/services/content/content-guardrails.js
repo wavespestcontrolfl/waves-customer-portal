@@ -5209,15 +5209,53 @@ function internalRouteFinding(body, allowedInternalLinks = [], exemptRouteCounts
   return null;
 }
 
+// Every rendered Markdown image occurrence for libraryPhotoAttributionUrls
+// below — inline (`![alt](dest)`), full/collapsed reference
+// (`![alt][ref]`, `![alt][]`), and shortcut (bare `![alt]`, not followed by
+// `(` or `[`, resolved via a same-named reference definition). Fail-closed
+// direction only (see the P1 note below): a missed image form under-allows
+// its attribution links, it never over-allows an attacker URL.
+const BODY_IMAGE_INLINE_RE = /!\[[^\]]*\]\(([^)\s]+)[^)]*\)/g;
+const BODY_IMAGE_REFERENCE_RE = /!\[([^\]]*)\]\[([^\]]*)\]/g;
+const BODY_IMAGE_SHORTCUT_RE = /!\[([^\]]*)\](?!\(|\[)/g;
+
 // Source-page + license-deed URLs of every licensed-library photo the
-// rendered body embeds (licensed-photo-library.libraryPhotoBySrc).
-const BODY_IMAGE_SRC_RE = /!\[[^\]]*\]\(([^)\s]+)[^)]*\)/g;
+// rendered body embeds (licensed-photo-library.libraryPhotoBySrc). Codex r5
+// on #5216 (pre-push fallback review): the quality gate's own
+// checkPhotoSlotsLicensedOnly (collectBodyImageOccurrences) is the
+// authoritative "does the publisher accept this photo" answer, and it now
+// reuses the publisher's own bodyImageRefs — full/collapsed reference and
+// shortcut forms included, not just inline. This scan widens to match that
+// (on top of the original inline-only regex) so their attribution links are
+// allowed here too, instead of hard-failing a fully compliant draft as
+// DISALLOWED_EXTERNAL_LINK. It stays a LOCAL regex scan, not a require of
+// astro-publisher: this module is required by astro-publisher at load time
+// AND is exercised, unlike the quality gate's identification-only path, on
+// EVERY evaluate() call — a hard runtime dependency here would throw in
+// every caller that stubs astro-publisher as a partial mock (dozens of
+// autonomous-runner tests). Under-matching only narrows the allowlist (fail
+// closed, never leaks an attacker-controlled URL — the pushed URLs always
+// come from the fixed catalog, not the body).
 function libraryPhotoAttributionUrls(body) {
   const { libraryPhotoBySrc } = require('./licensed-photo-library');
   const urls = [];
   const rendered = blankNonRenderedMarkdown(String(body || ''));
-  for (const m of rendered.matchAll(BODY_IMAGE_SRC_RE)) {
+  for (const m of rendered.matchAll(BODY_IMAGE_INLINE_RE)) {
     const photo = libraryPhotoBySrc(m[1]);
+    if (photo) urls.push(photo.source_page, photo.license_url);
+  }
+  const refDefs = markdownReferenceDefinitions(rendered);
+  const resolveByLabel = (rawLabel) => {
+    const label = normalizeReferenceLabel(rawLabel || '');
+    const dest = label && refDefs.get(label);
+    return dest && libraryPhotoBySrc(dest);
+  };
+  for (const m of rendered.matchAll(BODY_IMAGE_REFERENCE_RE)) {
+    const photo = resolveByLabel(m[2] || m[1]); // collapsed `![alt][]` resolves via alt
+    if (photo) urls.push(photo.source_page, photo.license_url);
+  }
+  for (const m of rendered.matchAll(BODY_IMAGE_SHORTCUT_RE)) {
+    const photo = resolveByLabel(m[1]);
     if (photo) urls.push(photo.source_page, photo.license_url);
   }
   return urls;

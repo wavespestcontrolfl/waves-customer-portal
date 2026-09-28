@@ -30,6 +30,42 @@ describe('externalLinkFinding — photoAllowedUrls', () => {
   });
 });
 
+// Pre-push fallback review on #5216 (Codex over usage limit, Claude
+// Sonnet audit): libraryPhotoAttributionUrls used to be a second,
+// inline-only regex, out of step with the quality gate's own bodyImageRefs
+// -based parser — a licensed photo embedded via reference-style or
+// shortcut Markdown (which the gate approves) had its attribution links
+// missed here, so a fully compliant draft hard-failed at publish as
+// DISALLOWED_EXTERNAL_LINK. Now the SAME parser as the gate.
+describe('libraryPhotoAttributionUrls — same parser as the quality gate (reference/shortcut forms)', () => {
+  const { PHOTO_LIBRARY, photoAttributionLine } = require('../services/content/licensed-photo-library');
+  const photo = PHOTO_LIBRARY[0];
+
+  test('a licensed photo embedded as a full reference (`![alt][ref]`) is allowed, not DISALLOWED_EXTERNAL_LINK', () => {
+    const body = [
+      `![${photo.alt}][pic]`,
+      '',
+      photoAttributionLine(photo),
+      '',
+      `[pic]: ${photo.src}`,
+    ].join('\n');
+    const result = guardrails.evaluate({ body }, {});
+    expect(result.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(false);
+  });
+
+  test('a licensed photo embedded as a shortcut reference (`![alt]`) is allowed too', () => {
+    const body = [
+      `![${photo.alt}]`,
+      '',
+      photoAttributionLine(photo),
+      '',
+      `[${photo.alt}]: ${photo.src}`,
+    ].join('\n');
+    const result = guardrails.evaluate({ body }, {});
+    expect(result.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(false);
+  });
+});
+
 describe('priceParagraphIsSourced / findHardcodedPrice — photoAllowedUrls must NEVER satisfy sourcing', () => {
   test('a competitor price citing ONLY a library photo\'s source page still HARD-fails HARDCODED_PRICE', () => {
     // The body shows a library photo, so its source page IS allowed as an
