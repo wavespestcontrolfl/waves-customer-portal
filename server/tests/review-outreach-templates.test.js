@@ -121,6 +121,9 @@ describe('review outreach templates', () => {
     // The check reads finished words, never an unfilled placeholder.
     expect(renderOutreachBody('{date}. {sender}.', { date: '6/26' })).toBe("6/26. It's Waves.");
     expect(renderOutreachBody('Hi {first}\n{sender}.', { first: 'Sam' })).toBe("Hi Sam\nIt's Waves.");
+    // Spaces or tabs next to the boundary don't change it.
+    expect(renderOutreachBody('  {sender}. Thanks!', {})).toBe("  It's Waves. Thanks!");
+    expect(renderOutreachBody('Hi {first}!\t{sender} .', { first: 'Sam' })).toBe("Hi Sam!\tIt's Waves .");
     expect(renderOutreachBody('{sender}.', { sender: 'Sam with Waves', tech: 'Adam' })).toBe('Sam with Waves.');
   });
 

@@ -35,8 +35,10 @@
 // sentence ("this is {sender}.", "{sender} here.") gets the bare name.
 const SENDER_FALLBACK = "It's Waves";
 const SENDER_FALLBACK_IN_SENTENCE = 'Waves';
-const SENTENCE_START_RE = /(?:^|[.!?]\s+|\n[ \t]*)$/; // the start, after . ! ?, or a new line
-const SENTENCE_END_RE = /^(?:[.!?]|[ \t]*(?:\n|$))/; // punctuation, a line break, or the end
+// Stands alone = the start, . ! ? or a new line before it and . ! ?, a new
+// line or the end after it, with any spaces or tabs in between.
+const SENTENCE_START_RE = /(?:^|[.!?]|\n)[ \t]*$/;
+const SENTENCE_END_RE = /^[ \t]*(?:[.!?]|\n|$)/;
 
 const OUTREACH_TEMPLATES = [
   {
