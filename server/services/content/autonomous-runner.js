@@ -638,7 +638,9 @@ class AutonomousRunner {
     // remedy (single definition of slug drift — Codex r9); only a repair
     // that cannot be made safe (the pinned slug itself invalid) keeps the
     // old park remedy.
-    if (opp.bucket === OPERATOR_INTERCEPT_BUCKET) {
+    // aeo_question_gap articles carry the same pin (the benchmark target
+    // path) so the published URL is the page the question is measured on.
+    if (opp.bucket === OPERATOR_INTERCEPT_BUCKET || opp.bucket === 'aeo_question_gap') {
       const slugRepair = applyOperatorSlugRepair(brief, draft);
       if (slugRepair && !slugRepair.ok) {
         const finalized = await finalize(run, t0, {

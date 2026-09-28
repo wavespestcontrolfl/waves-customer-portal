@@ -932,6 +932,16 @@ describe('_composeBrief aeo_question_gap rows (AI-search question gaps)', () => 
     expect(JSON.stringify(brief)).not.toMatch(/Example Pest Co/);
   });
 
+  test('a missing-target article is pinned to the benchmark target path', () => {
+    const brief = compose(
+      { page_url: null, query: 'What is the difference between termite treatment and a termite bond in Sarasota?', city: 'Sarasota', service: 'termite',
+        signal_metadata: { impressions: 0, benchmark_id: 'Q26', engines_missing, target_path: '/termite/termite-bond/' } },
+      { page_type: 'supporting-blog', action_type: 'new_supporting_blog' }
+    );
+    expect(brief.voice_constraints.operator_brief).toEqual({ slug: '/termite/termite-bond/' });
+    expect(brief.gsc_signal.unanswered_queries).toBeNull();
+  });
+
   test('other buckets carry no AEO evidence fields', () => {
     const brief = compose({ bucket: 'aeo_gap', page_url: null, query: 'q', signal_metadata: { impressions: 80 } },
       { page_type: 'supporting-blog', action_type: 'new_supporting_blog' });

@@ -3167,6 +3167,11 @@ describe('aeo_question_gap bucket', () => {
     expect(selectAeoQuestionGaps([a, c], { cap: 2, fencedPages: new Map([[bondPage, new Set(['decay_refresh::x'])]]) }).map((o) => o.signal_metadata.benchmark_id)).toEqual(['Q36']);
     expect(selectAeoQuestionGaps([a, c], { cap: 2, fencedPages: new Map([[bondPage, new Set([a.dedupe_key])]]) })).toHaveLength(2);
     expect(selectAeoQuestionGaps([a, c], { cap: 2, batchRefreshPages: new Set([bondPage]) }).map((o) => o.signal_metadata.benchmark_id)).toEqual(['Q36']);
+    // A missing target that is not a /category/leaf/ blog route can't be
+    // published at its path → no article.
+    const calc = buildAeoQuestionGapOpp(gapFor('Q31'), { liveUrl: null });
+    expect(calc.action_type).toBe('new_supporting_blog');
+    expect(selectAeoQuestionGaps([calc, d], { cap: 2 }).map((o) => o.signal_metadata.benchmark_id)).toEqual(['Q6']);
     // Fence lookup failed → no refreshes, new articles still flow.
     expect(selectAeoQuestionGaps([a, c, d], { cap: 2, fencedPages: null }).map((o) => o.signal_metadata.benchmark_id)).toEqual(['Q6']);
   });

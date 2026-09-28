@@ -914,8 +914,18 @@ class ContentBriefBuilder {
       }),
       word_count_target: WORD_COUNT_TARGET[pageType] || 'intent-complete',
       voice_constraints: (() => {
-        const base = operatorOverlay
-          ? { ...layered.voiceConstraints, operator_brief: operatorOverlay.operator_brief }
+        // aeo_question_gap new articles publish AT the benchmark target
+        // path: the runner's operator slug pin (applyOperatorSlugRepair)
+        // enforces operator_brief.slug, so the question is measured against
+        // the page this lane actually created.
+        const aeoSlugPin = opportunity.bucket === 'aeo_question_gap'
+          && decision.action_type === 'new_supporting_blog'
+          && opportunity.signal_metadata?.target_path
+          ? { slug: opportunity.signal_metadata.target_path }
+          : null;
+        const pinnedBrief = operatorOverlay ? operatorOverlay.operator_brief : aeoSlugPin;
+        const base = pinnedBrief
+          ? { ...layered.voiceConstraints, operator_brief: pinnedBrief }
           : layered.voiceConstraints;
         const gateRetry = opportunity.signal_metadata?.gate_retry;
         return gateRetry ? { ...base, retry_directives: buildRetryDirectives(gateRetry) } : base;

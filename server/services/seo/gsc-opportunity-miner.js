@@ -80,6 +80,7 @@ const { etDateString, addETDays } = require('../../utils/datetime-et');
 const { isEnabled } = require('../../config/feature-gates');
 const { observationDate, asJsonArray, cleanUrls, isOwnedUrl, isMeasuredAnswer, ownedCitations, citationMatchesPage } = require('./aeo-measurement');
 const aeoBenchmark = require('../../data/aeo-benchmark-v1.json');
+const { POST_CATEGORIES: BLOG_POST_CATEGORIES } = require('../content-astro/blog-categories');
 const { isEntityQuestion } = require('./aeo-entity-facts');
 const { geoBlockReason } = require('../content/topic-targeting-gate');
 const { WEIGHTS, THRESHOLDS, REVENUE_PRIORITY, CITIES, minScoreToActFor, isTransactionalQuery } =
@@ -1193,6 +1194,17 @@ function aeoQuestionGapDedupeKey(question) {
   return [AEO_QUESTION_GAP_BUCKET, question.id, routeIdentity(hubTargetUrl(question.target_path)) || '_'].join('::');
 }
 
+// A missing target can only become an article when the article can be
+// published AT that path — otherwise it lands at a writer-chosen URL, the
+// question's key freezes on completion, and the benchmark target stays
+// missing. The runner's existing slug pin (applyOperatorSlugRepair) can
+// honor exactly one shape: /<canonical blog category>/<leaf>/.
+function aeoPinnableBlogPath(targetPath) {
+  const p = String(targetPath || '');
+  if (!/^\/[a-z0-9-]+\/[a-z0-9-]+\/$/.test(p)) return false;
+  return BLOG_POST_CATEGORIES.has(p.split('/')[1]);
+}
+
 function urlHost(url) {
   try { return new URL(url).hostname.toLowerCase().replace(/^www\./, ''); } catch { return null; }
 }
@@ -1332,6 +1344,9 @@ function selectAeoQuestionGaps(opps = [], { cap = 2, occupiedKeys = new Set(), f
   for (const o of ordered) {
     if (out.length >= cap) break;
     if (o.action_type === 'do_not_publish' || occupiedKeys.has(o.dedupe_key)) continue;
+    // Missing target the article cannot be pinned to (a tool, resource or
+    // city-service path) — nothing this lane publishes would close it.
+    if (!o.page_url && !aeoPinnableBlogPath(o.signal_metadata.target_path)) continue;
     if (o.page_url) {
       if (fencedPages === null) continue;
       const id = routeIdentity(o.page_url);
@@ -5231,4 +5246,5 @@ module.exports._internals = {
   evaluateAeoQuestionGaps,
   buildAeoQuestionGapOpp,
   selectAeoQuestionGaps,
+  aeoPinnableBlogPath,
 };
