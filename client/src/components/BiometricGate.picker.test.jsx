@@ -62,11 +62,31 @@ it('does not lock while the app\'s own camera picker covers the page', async () 
   fireEvent.click(screen.getByTestId('camera'));
 
   setVisibility('hidden');
-  appState(false);
-  appState(true);
+  setVisibility('visible');
 
   expect(lockShown()).not.toBeInTheDocument();
   expect(authenticateBiometric).toHaveBeenCalledTimes(1); // launch unlock only — no re-prompt
+});
+
+it('still locks on a real app switch while the camera is open', async () => {
+  await renderUnlocked();
+  fireEvent.click(screen.getByTestId('camera'));
+  setVisibility('hidden');
+
+  appState(false);
+
+  expect(lockShown()).toBeInTheDocument();
+});
+
+it('stops excusing a hidden page once the camera has returned', async () => {
+  await renderUnlocked();
+  fireEvent.click(screen.getByTestId('camera'));
+  setVisibility('hidden');
+  setVisibility('visible');
+
+  setVisibility('hidden');
+
+  expect(lockShown()).toBeInTheDocument();
 });
 
 it('still locks on a real background once the picker has reported back', async () => {

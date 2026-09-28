@@ -53,8 +53,8 @@ const LOCK_KEYFRAMES = `
 }
 `;
 
-// How long a camera / photo picker the app opened may keep the lock from firing
-// if it never reports a pick or cancel (older iOS has no `cancel` event).
+// How long a camera / photo picker the app opened may excuse a hidden document if
+// it never reports back (older iOS has no `cancel` event).
 const PICKER_GRACE_MS = 3 * 60 * 1000;
 
 /**
@@ -85,8 +85,9 @@ export default function BiometricGate({ children }) {
   // webview with a native sheet. That hides the document, which looked like a real
   // background: the app locked under the camera, and every Face ID success was then
   // discarded as "not foreground" (the camera still hid the page), so the prompt
-  // re-fired every few seconds. While a picker we opened is up, it is not leaving
-  // the app. Bounded so a picker that never reports back can't disable the lock.
+  // re-fired every few seconds. While a picker we opened is up, a hidden document is
+  // not leaving the app. A real app switch still resigns the app, and that always
+  // locks (appStateChange below) — the picker only excuses the hidden document.
   const pickerOpenUntilRef = useRef(0);
   const pickerOpen = () => Date.now() < pickerOpenUntilRef.current;
 
@@ -140,7 +141,11 @@ export default function BiometricGate({ children }) {
     // it the authoritative signal that a fresh unlock is required on return, and it
     // can't be confused with the Face ID prompt's own resign/activate churn.
     const onVisibility = () => {
-      if (pickerOpen()) return;
+      if (pickerOpen()) {
+        // The picker has closed once the page is visible again.
+        if (document.visibilityState === 'visible') pickerOpenUntilRef.current = 0;
+        return;
+      }
       if (document.visibilityState === 'hidden' && isNativeApp() && hasSessionToken()) {
         setLocked(true);
         lockedRef.current = true;
@@ -169,10 +174,10 @@ export default function BiometricGate({ children }) {
           // Only (re)prompt when actually locked — a stray foreground while already
           // unlocked must never kick off another Face ID prompt.
           if (lockedRef.current) attempt();
-        } else if (hasSessionToken() && !pickerOpen()) {
+        } else if (hasSessionToken()) {
           // ALWAYS lock on resign (willResignActive) — even during a prompt's
-          // suppression window — to cover the app-switcher snapshot. (Not while our
-          // own picker is up: the camera covers the content in that snapshot.)
+          // suppression window or while our own picker is up — to cover the
+          // app-switcher snapshot.
           setLocked(true);
           lockedRef.current = true;
         }
