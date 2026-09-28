@@ -167,7 +167,6 @@ async function backfillFirstApplicationInvoiceStamps(conn = db, { sinceDays = nu
   const hasColumn = await conn.schema.hasColumn('scheduled_services', 'first_application_invoice_id');
   if (!hasColumn) return { scanned: 0, stamped: 0, ambiguous: 0 };
   const logger = require('./logger');
-  const { CANCELLED_SERVICE_RESOLVED_STATUSES } = require('./invoice');
   const hasRescheduleLog = await conn.schema.hasTable('reschedule_log');
 
   // A row is never a candidate (anchor OR sibling) once it is already
@@ -207,15 +206,7 @@ async function backfillFirstApplicationInvoiceStamps(conn = db, { sinceDays = nu
   // the visit's application is invoiced elsewhere. Any other live invoice on
   // the row is irrelevant to membership. "Live" = the full resolved
   // vocabulary excluded (Codex r15 P2).
-  const liveBaseApplicationInvoiceVisitIds = async (visitIds, { excludeInvoiceId = null } = {}) => {
-    if (!visitIds.length) return new Set();
-    const rows = await conn('invoices')
-      .whereIn('scheduled_service_id', visitIds)
-      .whereNotIn('status', CANCELLED_SERVICE_RESOLVED_STATUSES)
-      .modify((q) => { if (excludeInvoiceId) q.whereNot('id', excludeInvoiceId); })
-      .select('id', 'scheduled_service_id', 'line_items');
-    return new Set(rows.filter((r) => invoiceBillsBaseApplication(r)).map((r) => String(r.scheduled_service_id)));
-  };
+  const liveBaseApplicationInvoiceVisitIds = (visitIds, opts = {}) => liveBaseApplicationInvoiceVisitIdsOn(conn, visitIds, opts);
 
   const candidates = await notAlreadyClaimed(
     conn('invoices as i')
@@ -343,14 +334,58 @@ async function backfillFirstApplicationInvoiceStamps(conn = db, { sinceDays = nu
     // A single-program invoice (no eligible, non-ambiguous sibling) is
     // never stamped as a pair.
     if (!eligibleSiblingIds.length) continue;
-    const memberIds = [row.anchor_id, ...eligibleSiblingIds];
-    // Never overwrite: an anchor (or anything) already stamped keeps its
-    // stamp, and only the rows actually written count as stamped.
-    stamped += await conn('scheduled_services').whereIn('id', memberIds)
-      .whereNull('first_application_invoice_id')
-      .update({ first_application_invoice_id: row.invoice_id });
+    stamped += await stampGroupRevalidated(conn, {
+      invoiceId: row.invoice_id, anchorId: row.anchor_id, siblingIds: eligibleSiblingIds, extendPartialGroups,
+    });
   }
   return { scanned, stamped, ambiguous };
+}
+
+// Pass 1 reads eligibility outside any transaction (the runtime
+// reconciliation runs on the global connection), so a price edit, a
+// standalone invoice mint or an accept-time stamp can land between the read
+// and the write (Codex pre-push P1 on 671efec4fe, PR #5021). Each group is
+// therefore re-checked and written in ONE transaction with the invoice and
+// member rows locked: the invoice still live, the anchor still unstamped
+// (or, on the unbounded run, stamped to this invoice) and still not billed by
+// another live base-application invoice — otherwise nothing in the group is
+// stamped, never siblings without their anchor. Each sibling must still be
+// unstamped, not split off, and unpriced unless the invoice itemizes it.
+// Never overwrites; returns the rows actually written.
+async function liveBaseApplicationInvoiceVisitIdsOn(q, visitIds, { excludeInvoiceId = null } = {}) {
+  if (!visitIds.length) return new Set();
+  const { CANCELLED_SERVICE_RESOLVED_STATUSES } = require('./invoice');
+  const rows = await q('invoices')
+    .whereIn('scheduled_service_id', visitIds)
+    .whereNotIn('status', CANCELLED_SERVICE_RESOLVED_STATUSES)
+    .modify((qb) => { if (excludeInvoiceId) qb.whereNot('id', excludeInvoiceId); })
+    .select('id', 'scheduled_service_id', 'line_items');
+  return new Set(rows.filter((r) => invoiceBillsBaseApplication(r)).map((r) => String(r.scheduled_service_id)));
+}
+
+async function stampGroupRevalidated(conn, { invoiceId, anchorId, siblingIds, extendPartialGroups = false }) {
+  return conn.transaction(async (trx) => {
+    const invoice = await trx('invoices').where({ id: invoiceId }).forUpdate().first('id', 'status', 'line_items', 'scheduled_service_id');
+    if (!invoice || invoice.status === 'void' || String(invoice.scheduled_service_id) !== String(anchorId)) return 0;
+    const locked = await trx('scheduled_services').whereIn('id', [anchorId, ...siblingIds]).orderBy('id').forUpdate()
+      .select('id', 'first_application_invoice_id', 'estimated_price');
+    const byId = new Map(locked.map((r) => [String(r.id), r]));
+    const anchor = byId.get(String(anchorId));
+    const anchorStamp = anchor && anchor.first_application_invoice_id;
+    if (!anchor || (anchorStamp != null && !(extendPartialGroups && String(anchorStamp) === String(invoiceId)))) return 0;
+    if ((await liveBaseApplicationInvoiceVisitIdsOn(trx, [anchorId], { excludeInvoiceId: invoiceId })).size) return 0;
+    const itemized = itemizedMemberIdsFromInvoiceLines(invoice.line_items);
+    const splitOff = await liveBaseApplicationInvoiceVisitIdsOn(trx, siblingIds);
+    const stillEligible = siblingIds.filter((id) => {
+      const sib = byId.get(String(id));
+      if (!sib || sib.first_application_invoice_id != null || splitOff.has(String(id))) return false;
+      return itemized.has(String(id)) || sib.estimated_price == null;
+    });
+    if (!stillEligible.length) return 0;
+    return trx('scheduled_services').whereIn('id', [anchorId, ...stillEligible])
+      .whereNull('first_application_invoice_id')
+      .update({ first_application_invoice_id: invoiceId });
+  });
 }
 
 // Freeze the accept route's per-service authority while it still exists.
@@ -722,6 +757,7 @@ module.exports = {
   isCombinedFirstApplicationInvoiceForBackfill,
   itemizedMemberIdsFromInvoiceLines,
   backfillFirstApplicationInvoiceStamps,
+  stampGroupRevalidated,
   invoiceContainsSetupFeeLine,
   invoiceHasPositiveSetupFeeLine,
   positiveSetupFeeLineAmount,

@@ -2306,6 +2306,71 @@ suite('first-application-sibling-split — periodic sweep', () => {
     // INFERRED into a group (a separately priced program bills itself, and a
     // false stamp would suppress its charge); a covered member priced later
     // by staff is stamped only when the invoice's own line items name it.
+    // Codex pre-push P1 on 671efec4fe: pass 1 reads eligibility outside any
+    // transaction, so the write re-checks each group under lock. These drive
+    // the revalidating stamper directly with state that changed after pass 1.
+    describe('stampGroupRevalidated — membership re-checked under lock before the write', () => {
+      const { stampGroupRevalidated } = require('../services/estimate-first-application-invoice');
+      const stampsOf = async (trx, ids) => Promise.all([ids.anchorId, ids.siblingId].map(
+        (id) => trx('scheduled_services').where({ id }).first('first_application_invoice_id').then((r) => r.first_application_invoice_id),
+      ));
+
+      test('baseline: an unchanged unpriced pair is stamped', () => rollbackTest(async (trx) => {
+        const ids = await seedHistoricalPair(trx);
+        expect(await stampGroupRevalidated(trx, { invoiceId: ids.invoiceId, anchorId: ids.anchorId, siblingIds: [ids.siblingId] })).toBe(2);
+        expect(await stampsOf(trx, ids)).toEqual([ids.invoiceId, ids.invoiceId]);
+      }));
+
+      test('a sibling priced after the eligibility read is dropped — nothing stamped', () => rollbackTest(async (trx) => {
+        const ids = await seedHistoricalPair(trx);
+        await trx('scheduled_services').where({ id: ids.siblingId }).update({ estimated_price: 60 });
+        expect(await stampGroupRevalidated(trx, { invoiceId: ids.invoiceId, anchorId: ids.anchorId, siblingIds: [ids.siblingId] })).toBe(0);
+        expect(await stampsOf(trx, ids)).toEqual([null, null]);
+      }));
+
+      test('a sibling that got its own live base-application invoice after the read is dropped', () => rollbackTest(async (trx) => {
+        const ids = await seedHistoricalPair(trx);
+        await trx('invoices').insert({
+          id: randomUUID(), customer_id: ids.customerId, scheduled_service_id: ids.siblingId,
+          token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`, status: 'sent', title: 'Lawn Care',
+          line_items: JSON.stringify([{ client_id: `scheduled_${ids.siblingId}_primary`, description: 'Lawn Care', quantity: 1, unit_price: 60, amount: 60 }]),
+          subtotal: 60, total: 60,
+        });
+        expect(await stampGroupRevalidated(trx, { invoiceId: ids.invoiceId, anchorId: ids.anchorId, siblingIds: [ids.siblingId] })).toBe(0);
+        expect(await stampsOf(trx, ids)).toEqual([null, null]);
+      }));
+
+      test('an anchor stamped to ANOTHER invoice after the read stops the whole group — the sibling is never stamped alone', () => rollbackTest(async (trx) => {
+        const ids = await seedHistoricalPair(trx);
+        const otherInvoiceId = randomUUID();
+        await trx('invoices').insert({
+          id: otherInvoiceId, customer_id: ids.customerId, scheduled_service_id: ids.anchorId,
+          token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`, status: 'void', title: 'Other',
+          line_items: JSON.stringify([]), subtotal: 0, total: 0,
+        });
+        await trx('scheduled_services').where({ id: ids.anchorId }).update({ first_application_invoice_id: otherInvoiceId });
+        expect(await stampGroupRevalidated(trx, { invoiceId: ids.invoiceId, anchorId: ids.anchorId, siblingIds: [ids.siblingId] })).toBe(0);
+        expect(await stampsOf(trx, ids)).toEqual([otherInvoiceId, null]);
+      }));
+
+      test('an invoice voided after the read stamps nothing', () => rollbackTest(async (trx) => {
+        const ids = await seedHistoricalPair(trx);
+        await trx('invoices').where({ id: ids.invoiceId }).update({ status: 'void' });
+        expect(await stampGroupRevalidated(trx, { invoiceId: ids.invoiceId, anchorId: ids.anchorId, siblingIds: [ids.siblingId] })).toBe(0);
+        expect(await stampsOf(trx, ids)).toEqual([null, null]);
+      }));
+
+      test('an anchor already stamped to THIS invoice extends only on the unbounded run', () => rollbackTest(async (trx) => {
+        const ids = await seedHistoricalPair(trx);
+        await trx('scheduled_services').where({ id: ids.anchorId }).update({ first_application_invoice_id: ids.invoiceId });
+        expect(await stampGroupRevalidated(trx, { invoiceId: ids.invoiceId, anchorId: ids.anchorId, siblingIds: [ids.siblingId] })).toBe(0);
+        expect(await stampGroupRevalidated(trx, {
+          invoiceId: ids.invoiceId, anchorId: ids.anchorId, siblingIds: [ids.siblingId], extendPartialGroups: true,
+        })).toBe(1);
+        expect(await stampsOf(trx, ids)).toEqual([ids.invoiceId, ids.invoiceId]);
+      }));
+    });
+
     test('a priced sibling with no itemized line and no own invoice is NOT inferred — left for hand review', () => rollbackTest(async (trx) => {
       const ids = await seedHistoricalPair(trx, { siblingPriced: true });
       await backfillFirstApplicationInvoiceStamps(trx);
