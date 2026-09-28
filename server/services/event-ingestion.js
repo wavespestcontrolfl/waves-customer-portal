@@ -898,8 +898,45 @@ async function reconcileLegacyKey(sourceId, currentKey, legacyKey) {
   }
 }
 
+// Pre-fix rows extracted from a naive time were stored with the ET wall
+// clock read as UTC (7:30 PM ET became 19:30Z), under a legacy key built from
+// that shifted instant. A shifted key can't be migrated automatically (in EDT
+// a 7 PM event's shifted key equals a real 3 PM showtime's correct key), so
+// after a pull such a row is QUARANTINED instead: marked needs_review, which
+// keeps it out of every newsletter until an operator looks. Only rows this
+// pull did not refresh are touched; nothing is deleted or re-timed.
+function shiftedLegacyKey(title, start, urlKey) {
+  if (!start) return null;
+  const shiftedIso = `${etDateString(start)}T${etWallClockHHMM(start)}:00.000Z`;
+  if (shiftedIso === start.toISOString()) return null;
+  return `${title.toLowerCase().slice(0, 80)}|${shiftedIso}|${urlKey}`.slice(0, 256);
+}
+
+async function quarantineShiftedLegacyRows(sourceId, pulledRows, batchStartedAt) {
+  let quarantined = 0;
+  for (const row of pulledRows) {
+    const key = shiftedLegacyKey(row.title, row.start_at, row.event_url || '');
+    if (!key) continue;
+    quarantined += await db('events_raw')
+      .where({ source_id: sourceId, external_id: key })
+      .whereNull('merged_into')
+      .where('pulled_at', '<', batchStartedAt)
+      .whereNot('freshness_status', 'needs_review')
+      .update({
+        freshness_status: 'needs_review',
+        curation_note: `Possible time-shifted duplicate (pre-2026-09-28 parsing bug) of the listing now at ${etWallClockHHMM(row.start_at)} ET. Review before featuring.`.slice(0, 200),
+        updated_at: db.fn.now(),
+      });
+  }
+  return quarantined;
+}
+
 async function upsertExtractedEvents(source, claudeEvents, opts = {}) {
   const nowMs = Date.now();
+  // Rows this batch refreshes get pulled_at >= this; a small margin absorbs
+  // app/DB clock skew.
+  const batchStartedAt = new Date(nowMs - 1000);
+  const pulledRows = [];
   let upserted = 0;
   let dropped = 0;
 
@@ -907,11 +944,8 @@ async function upsertExtractedEvents(source, claudeEvents, opts = {}) {
     const normalized = normalizeExtractedEvent(source, ev, nowMs, opts);
     if (!normalized) { dropped += 1; continue; }
     const { row, legacyExternalId } = normalized;
-    // Only the exact-instant legacy key is migrated automatically. Rows the
-    // pre-fix naive-time bug stored at a shifted instant are NOT matched: in
-    // EDT a 7 PM event's shifted key equals a real 3 PM showtime's correct
-    // key, so no single pull can prove which one a stored row is. Those rows
-    // are repaired once, by reviewed data cleanup.
+    // Only the exact-instant legacy key is migrated automatically; rows at a
+    // shifted instant are quarantined after the batch (see above).
     if (legacyExternalId && legacyExternalId !== row.external_id) {
       await reconcileLegacyKey(source.id, row.external_id, legacyExternalId);
     }
@@ -931,8 +965,12 @@ async function upsertExtractedEvents(source, claudeEvents, opts = {}) {
         ...revivalResetFields(),
       });
 
+    pulledRows.push(row);
     upserted += 1;
   }
+
+  const quarantined = await quarantineShiftedLegacyRows(source.id, pulledRows, batchStartedAt);
+  if (quarantined) logger.warn(`[event-ingestion] quarantined ${quarantined} possible time-shifted legacy row(s) for source ${source.id}`);
 
   return { upserted, dropped };
 }

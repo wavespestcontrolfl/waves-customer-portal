@@ -290,6 +290,16 @@ describeOrSkip('buildCurationCandidateQuery admits a genuine first-of-year stale
     expect(rows.map((r) => r.id)).not.toContain(laterId);
   });
 
+  test('a weekly row typed "unknown" still reaches the first-of-year check', async () => {
+    const id = await insertEvent({
+      title: 'TEST Unknown Type Weekly Market',
+      event_type: 'unknown', recurrence_type: 'weekly', freshness_status: 'stale_recurring',
+      start_at: etAt(sameYearDays().laterDay),
+    });
+    const rows = await buildCurationCandidateQuery(500);
+    expect(rows.map((r) => r.id)).toContain(id);
+  });
+
   test('expired and needs_review rows remain excluded unconditionally, even with no earlier sibling at all', async () => {
     const expiredId = await insertEvent({
       title: 'TEST Expired Row No Sibling',

@@ -933,6 +933,9 @@ function lockEventFactsFromDb(aiEvents, dbEvents) {
       // spreading — only the DB-locked eventUrl below may render as a link.
       ...sanitizeCommentaryFields(ev),
       eventId: row.id,
+      // The locked occurrence instant, persisted on the send
+      // (event_occurrences) so the sender stamps the date the email shows.
+      startAt: startAt ? startAt.toISOString() : null,
       date,
       dateStr,
       timeStr,
@@ -2020,6 +2023,11 @@ async function persistNewsletterDraft({ draft, prompt, newsletterType, knex = db
     // .times_featured (+ recompute freshness) for exactly the events that
     // actually shipped, on the first 'sent' transition.
     event_ids: JSON.stringify((draft.events || []).map((e) => e.eventId).filter(Boolean)),
+    // Locked occurrence per event, stamped as last_featured_occurrence_at at
+    // send (the row itself may be advanced in place before delivery).
+    event_occurrences: JSON.stringify(Object.fromEntries((draft.events || [])
+      .filter((e) => e.eventId && e.startAt)
+      .map((e) => [String(e.eventId), e.startAt]))),
   }).returning('*');
   return send;
 }

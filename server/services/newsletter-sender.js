@@ -1346,6 +1346,8 @@ async function markEventsFeatured(send) {
   if (!Array.isArray(ids) || ids.length === 0) return;
 
   const { classifyFreshness } = require('./event-freshness');
+  let occurrences = send.event_occurrences || {};
+  if (typeof occurrences === 'string') { try { occurrences = JSON.parse(occurrences); } catch { occurrences = {}; } }
 
   // Lock + read + write each event row inside a transaction (SELECT ... FOR
   // UPDATE) so two sends that ship the same event can't both read the same
@@ -1364,8 +1366,10 @@ async function markEventsFeatured(send) {
         times_featured: nextFeatured,
         last_featured_at: new Date(),
         // The occurrence that shipped, so the calendar-year rule compares its
-        // own year (the send time can fall in the prior December).
-        last_featured_occurrence_at: row.start_at || null,
+        // own year (the send time can fall in the prior December). Prefer the
+        // occurrence locked into the draft: a feed may have advanced this row
+        // in place since the email was rendered.
+        last_featured_occurrence_at: occurrences[String(id)] || row.start_at || null,
         // The editorial star is consumed by shipping: drop featured back to
         // approved so the eligibility override can't re-admit the same
         // event in the next issue.
