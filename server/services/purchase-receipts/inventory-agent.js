@@ -573,8 +573,11 @@ function existingGuess(candidate, ctx) {
   const titleWords = normalizeForMatch(ctx.rawTitle).split(' ').filter(Boolean);
   const aliases = ctx.aliasesByProduct || {};
   if (!productNamedByTitle(titleWords, candidate, aliases)) return null;
-  const others = [...(ctx.candidates || []), ...(ctx.allActiveProducts || [])].filter((p) => p.id !== candidate.id);
-  if (others.some((p) => productNamedByTitle(titleWords, p, aliases))) return null;
+  // The same test validateExistingCandidate's "names more than one product"
+  // rule runs: every active product against every active alias
+  // (activeProductAliases), plus the offered candidates' own aliases.
+  const namedElsewhere = (list, aliasMap) => (list || []).some((p) => p.id !== candidate.id && productNamedByTitle(titleWords, p, aliasMap || {}));
+  if (namedElsewhere(ctx.allActiveProducts, ctx.activeProductAliases) || namedElsewhere(ctx.candidates, aliases)) return null;
   return { type: 'existing', productId: candidate.id, productName: candidate.name };
 }
 

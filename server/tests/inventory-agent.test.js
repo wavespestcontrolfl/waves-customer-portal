@@ -895,6 +895,16 @@ describe('classifyDecision — equipment / not_stock / unsure routing', () => {
     expect(direct).not.toHaveProperty('suggestion');
   });
 
+  test('no guess when another active product is named through one of ITS active aliases', () => {
+    const taurus = { id: 'p-taurus', name: 'Taurus SC' };
+    const other = { id: 'p-other', name: 'Fipronil Generic' };
+    const decision = classifyDecision({ kind: 'unsure', reason: 'x', product_id: 'p-taurus' }, ctx({
+      rawTitle: 'Taurus SC Termiticide 78 oz', candidates: [taurus], allActiveProducts: [taurus, other],
+      activeProductAliases: { 'p-other': ['taurus sc termiticide'] },
+    }));
+    expect(decision).not.toHaveProperty('suggestion');
+  });
+
   test('a title stating two categories holds whichever one the model picks', () => {
     const reading = { size_text: '12 Count', size_number: 12, size_unit: 'each', pack_count: 1 };
     for (const category of ['insecticide', 'bait']) {
