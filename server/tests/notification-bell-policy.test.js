@@ -414,12 +414,12 @@ describe('codex r1 — converted raw-insert sites (gate off = identical rows, ga
     });
   });
 
-  // This body is 149 chars — over the admin brevity guard's 110-char cap
-  // (admin-alerts-brevity scope, 2026-09-28), so it now diverges from the
-  // pre-guard raw insert on purpose: cut at a word boundary, full text
-  // preserved in `detail`. That guard applies to every admin row regardless
-  // of the bell-policy gate this describe block is otherwise pinning.
-  test('email spam-rescue-review row: the admin brevity guard cuts the long body into title/detail', async () => {
+  // This body is 149 chars — over the admin brevity guard's 110-char cap —
+  // but the guard's cut is scoped to category ops_digest ONLY (only the
+  // Activity feed ever reads `detail`, and only for ops_digest rows), so
+  // this 'email_rescue_review' row matches the pre-guard raw insert exactly,
+  // aside from the new `detail: null` column.
+  test('email spam-rescue-review row matches the old raw insert gate-off (non-ops_digest body is never cut)', async () => {
     const notifications = chainMock([{ id: 'd4' }]);
     mockTables({ notifications });
 
@@ -431,17 +431,17 @@ describe('codex r1 — converted raw-insert sites (gate off = identical rows, ga
       { icon: '⚠️', link: '/admin/email', metadata: { gmail_message_id: 'g1' } },
     );
 
-    const [row] = notifications.insert.mock.calls[0];
-    expect(row.recipient_type).toBe('admin');
-    expect(row.category).toBe('email_rescue_review');
-    expect(row.title).toBe('Spam-foldered mail claims a known sender (unverified)');
-    expect(row.body.length).toBeLessThanOrEqual(110);
-    expect(row.body.endsWith('…')).toBe(true);
-    expect(fullBody.startsWith(row.body.slice(0, -1))).toBe(true);
-    expect(row.detail).toBe(fullBody);
-    expect(row.icon).toBe('⚠️');
-    expect(row.link).toBe('/admin/email');
-    expect(row.metadata).toBe(JSON.stringify({ gmail_message_id: 'g1' }));
+    expect(notifications.insert).toHaveBeenCalledWith({
+      recipient_type: 'admin',
+      recipient_id: null,
+      category: 'email_rescue_review',
+      title: 'Spam-foldered mail claims a known sender (unverified)',
+      body: fullBody,
+      detail: null,
+      icon: '⚠️',
+      link: '/admin/email',
+      metadata: JSON.stringify({ gmail_message_id: 'g1' }),
+    });
   });
 
   test('refund-failed conversion pins bell:true + connection passthrough (money failure)', async () => {

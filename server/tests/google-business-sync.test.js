@@ -1847,10 +1847,9 @@ describe('Google Business review sync', () => {
     const degraded = (db.__state.rows.notifications || []).filter(n => n.title.includes('removal reconcile failing'));
     expect(degraded).toHaveLength(1);
     expect(degraded[0].body).toContain('pulled the GBP feed');
-    // Admin brevity guard (2026-09-28): a body over 110 chars is cut at a
-    // word boundary — the tail of this evidence now lives in `detail`,
-    // never dropped.
-    expect(degraded[0].detail).toContain('REMOVALS will not be detected');
+    // Admin brevity guard (2026-09-28) is scoped to category ops_digest —
+    // this is a plain 'review' bell, so its body is stored unchanged.
+    expect(degraded[0].body).toContain('REMOVALS will not be detected');
     const urls = global.fetch.mock.calls.map(c => String(c[0]));
     expect(urls.filter(u => u.includes('fields=reviews'))).toHaveLength(0);
   });
@@ -2157,9 +2156,9 @@ describe('Google Business review sync', () => {
       expect(notifs).toHaveLength(1);
       expect(notifs[0].title).toContain('Auto-linked');
       expect(notifs[0].body).toContain('2m before');
-      // Admin brevity guard (2026-09-28): the tail past 110 chars moves to
-      // `detail`, never dropped.
-      expect(notifs[0].detail).toContain('only click in the window');
+      // Admin brevity guard (2026-09-28) is scoped to category ops_digest —
+      // this 'review' bell's body is stored unchanged, whatever its length.
+      expect(notifs[0].body).toContain('only click in the window');
     });
 
     test('correlates on the LIVE row, not the collector payload: a reviewer_name rewritten by a newer runner reaches the matcher and the bell (GH codex r4 P1)', async () => {
@@ -2242,11 +2241,11 @@ describe('Google Business review sync', () => {
       expect(notifs).toHaveLength(1);
       // The WHY is the matcher's evidence verbatim — no canned claim about
       // other clicks the rung never checked (GH codex r2 P2). Admin brevity
-      // guard (2026-09-28): a body over 110 chars is cut for the bell, but
-      // the FULL original always lands in `detail` too — never dropped.
+      // guard (2026-09-28) is scoped to category ops_digest — this 'review'
+      // bell's body is stored unchanged, whatever its length.
       const evidenceText = "(the reviewer's last name matches this customer's; no other clicker at this location in the window)";
-      expect(notifs[0].detail).toContain(evidenceText);
-      expect(notifs[0].detail).not.toContain('other clicks in the window were other names');
+      expect(notifs[0].body).toContain(evidenceText);
+      expect(notifs[0].body).not.toContain('other clicks in the window were other names');
     });
 
     test('a location-less legacy click_name match refuses when a second unlinked review at ANOTHER location shares its forward window; alone it links; a trusted location keeps the guard scoped (GH codex r2 P1)', async () => {

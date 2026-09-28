@@ -201,6 +201,9 @@ describe("AgentActivityTab", () => {
     // The other item (n8) stays collapsed.
     expect(screen.queryByText("the whole report for n8")).not.toBeInTheDocument();
     expect(scrollIntoView).toHaveBeenCalled();
+    // The fetch itself carries ?focus= through, so the server can load that
+    // ONE row even when it's read and older than the window.
+    expect(adminFetch).toHaveBeenCalledWith("/admin/agents/activity?hours=24&focus=n9");
   });
 
   it("no focus param: nothing is pre-expanded", async () => {
@@ -216,5 +219,7 @@ describe("AgentActivityTab", () => {
     renderTab();
     await screen.findByText("3 promised quotes not sent");
     expect(screen.queryByText("the whole report for n9")).not.toBeInTheDocument();
+    // No &focus= on the fetch when the route carries none.
+    expect(adminFetch).toHaveBeenCalledWith("/admin/agents/activity?hours=24");
   });
 });

@@ -623,3 +623,43 @@ describe('NotificationBell admin desktop — digest chip + prefix strip', () => 
     expect(screen.getByText('Sends — duplicate detection failing')).toBeInTheDocument();
   });
 });
+
+describe('NotificationBell admin MOBILE path (<768px) — same digest treatment', () => {
+  // The owner reads the admin bell on a phone too: isMobile ({@link
+  // NotificationBell}'s ternary at ~line 516) serves BOTH admin and
+  // customer under 768px, so the digest chip/prefix-strip/focus-link must
+  // work there as well, not just the desktop dropdown.
+  it('strips a legacy prefix, shows the kind chip, and appends &focus= on a phone-width admin bell', async () => {
+    const previousWidth = window.innerWidth;
+    const previousLocation = window.location;
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 });
+    global.fetch = vi.fn(async (url) => {
+      if (String(url).includes('/unread-count')) return jsonResponse({ count: 1 });
+      return jsonResponse({
+        notifications: [{
+          id: 'd9', category: 'ops_digest', title: 'ACT: 3 promised quotes never went out',
+          body: null, metadata: { kind: 'ACT' }, created_at: new Date().toISOString(), read_at: null,
+          link: '/admin/agents?tab=activity',
+        }],
+      });
+    });
+    try {
+      render(<NotificationBell type="admin" />);
+      fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
+      await screen.findByText('Needs you');
+      // Legacy "ACT: " prefix is stripped for display.
+      expect(screen.queryByText('ACT: 3 promised quotes never went out')).toBeNull();
+      const row = await screen.findByText('3 promised quotes never went out');
+      const hrefSpy = vi.fn();
+      Object.defineProperty(window, 'location', {
+        configurable: true,
+        value: { ...window.location, set href(v) { hrefSpy(v); } },
+      });
+      fireEvent.click(row);
+      await waitFor(() => expect(hrefSpy).toHaveBeenCalledWith('/admin/agents?tab=activity&focus=d9'));
+    } finally {
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: previousWidth });
+      Object.defineProperty(window, 'location', { configurable: true, value: previousLocation });
+    }
+  });
+});

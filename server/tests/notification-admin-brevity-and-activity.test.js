@@ -1,9 +1,14 @@
 // Admin-alerts-brevity scope (owner ruling 2026-09-28):
-//   1. NotificationService.create's admin brevity guard — a body over 110
-//      chars is cut at a word boundary; the full original (+ any
-//      caller-supplied detail) lands in `detail`; a title is only LOGGED
-//      when it runs long, never cut (several senders dedupe/refresh by an
-//      exact title lookup, so cutting it here would break that probe).
+//   1. NotificationService.create's admin brevity guard — for category
+//      ops_digest ONLY, a body over 110 chars is cut at a word boundary;
+//      the full original (+ any caller-supplied detail) lands in `detail`.
+//      Every OTHER admin category's body is stored UNCHANGED, whatever its
+//      length — only the Activity feed ever reads `detail`, and it only
+//      reads ops_digest rows, so cutting another category's body would
+//      make the rest of it unreachable. A title is only LOGGED when it
+//      runs long, never cut, for ANY category (several senders
+//      dedupe/refresh by an exact title lookup, so cutting it here would
+//      break that probe).
 //   2. notifyAdmin's refresh path compares/stores through the SAME
 //      normalization, including `detail`, so a changed detail is stored
 //      and an unrelated guard artifact never reads as "content changed".
@@ -70,7 +75,7 @@ jest.mock('../models/db', () => {
 });
 
 const NotificationService = require('../services/notification-service');
-const { truncateAtWord, applyAdminBrevityGuard, MAX_ADMIN_BODY_CHARS, MAX_ADMIN_TITLE_CHARS } = NotificationService._private;
+const { truncateAtWord, applyAdminBrevityGuard, MAX_ADMIN_BODY_CHARS, MAX_ADMIN_TITLE_CHARS, DIGEST_CATEGORY } = NotificationService._private;
 
 beforeEach(() => {
   mockRows = { notifications: [] };
@@ -95,48 +100,72 @@ describe('truncateAtWord', () => {
 });
 
 describe('applyAdminBrevityGuard', () => {
-  test('a body at or under the cap is untouched and detail is whatever the caller passed', () => {
+  test('a body at or under the cap is untouched and detail is whatever the caller passed (ops_digest)', () => {
     const short = 'a'.repeat(MAX_ADMIN_BODY_CHARS);
-    const out = applyAdminBrevityGuard({ category: 'x', title: 't', body: short, detail: null });
+    const out = applyAdminBrevityGuard({ category: DIGEST_CATEGORY, title: 't', body: short, detail: null });
     expect(out.body).toBe(short);
     expect(out.detail).toBeNull();
   });
 
-  test('an over-length body is cut at a word boundary; the FULL original moves to detail', () => {
+  test('an over-length ops_digest body is cut at a word boundary; the FULL original moves to detail', () => {
     const body = 'word '.repeat(40).trim(); // well over 110 chars
-    const out = applyAdminBrevityGuard({ category: 'x', title: 't', body, detail: null });
+    const out = applyAdminBrevityGuard({ category: DIGEST_CATEGORY, title: 't', body, detail: null });
     expect(out.body.length).toBeLessThanOrEqual(MAX_ADMIN_BODY_CHARS);
     expect(out.body.endsWith('…')).toBe(true);
     expect(body.startsWith(out.body.slice(0, -1))).toBe(true);
     expect(out.detail).toBe(body);
   });
 
-  test('a caller-supplied detail is kept ALONGSIDE the full body, full body first', () => {
+  test('a caller-supplied detail is kept ALONGSIDE the full ops_digest body, full body first', () => {
     const body = 'word '.repeat(40).trim();
-    const out = applyAdminBrevityGuard({ category: 'x', title: 't', body, detail: 'caller extra context' });
+    const out = applyAdminBrevityGuard({ category: DIGEST_CATEGORY, title: 't', body, detail: 'caller extra context' });
     expect(out.detail).toBe(`${body}\n\ncaller extra context`);
   });
 
-  test('a caller-supplied detail that already contains the full body is not duplicated', () => {
+  test('a caller-supplied detail that already contains the full ops_digest body is not duplicated', () => {
     const body = 'word '.repeat(40).trim();
     const already = `${body}\n\nplus more`;
-    const out = applyAdminBrevityGuard({ category: 'x', title: 't', body, detail: already });
+    const out = applyAdminBrevityGuard({ category: DIGEST_CATEGORY, title: 't', body, detail: already });
     expect(out.detail).toBe(already);
+  });
+
+  // Restriction: only the Activity feed ever reads `detail`, and it only
+  // reads ops_digest — every OTHER category's body is stored unchanged,
+  // whatever its length, and just logged (never cut, never moved).
+  test('a non-ops_digest over-length body is left completely unchanged; detail stays whatever the caller passed', () => {
+    const body = 'word '.repeat(40).trim();
+    const out = applyAdminBrevityGuard({ category: 'alert', title: 't', body, detail: null });
+    expect(out.body).toBe(body);
+    expect(out.detail).toBeNull();
+  });
+
+  test('a non-ops_digest over-length body never absorbs a caller-supplied detail either', () => {
+    const body = 'word '.repeat(40).trim();
+    const out = applyAdminBrevityGuard({ category: 'review', title: 't', body, detail: 'caller extra context' });
+    expect(out.body).toBe(body);
+    expect(out.detail).toBe('caller extra context');
   });
 
   test('a title is never cut, only logged when it runs long — several senders dedupe on it exactly', () => {
     const longTitle = 'x'.repeat(MAX_ADMIN_TITLE_CHARS + 40);
-    const out = applyAdminBrevityGuard({ category: 'x', title: longTitle, body: 'short body', detail: null });
+    const out = applyAdminBrevityGuard({ category: DIGEST_CATEGORY, title: longTitle, body: 'short body', detail: null });
     expect(out.title).toBe(longTitle);
   });
 });
 
 describe('NotificationService.create — admin brevity guard end to end', () => {
-  test('a long admin body is cut in the stored row; detail carries the whole thing', async () => {
+  test('a long ops_digest body is cut in the stored row; detail carries the whole thing', async () => {
     const body = 'sentence '.repeat(30).trim();
-    const notif = await NotificationService.create({ recipientType: 'admin', category: 'alert', title: 'Short title', body });
+    const notif = await NotificationService.create({ recipientType: 'admin', category: DIGEST_CATEGORY, title: 'Short title', body });
     expect(notif.body.length).toBeLessThanOrEqual(110);
     expect(notif.detail).toBe(body);
+  });
+
+  test('a long body on any OTHER admin category is stored unchanged, with a null detail', async () => {
+    const body = 'sentence '.repeat(30).trim();
+    const notif = await NotificationService.create({ recipientType: 'admin', category: 'alert', title: 'Short title', body });
+    expect(notif.body).toBe(body);
+    expect(notif.detail).toBeNull();
   });
 
   test('a customer row is never touched by the guard', async () => {
@@ -187,6 +216,18 @@ describe('notifyAdmin refresh — detail participates in the change comparison a
     // Re-emitted with the exact same long body: normalized title/body/detail
     // are identical, so this must stay deduped, not "changed".
     const again = await NotificationService.notifyAdmin('system', 'Standing check', longBody, { dedupeKey: 'k3', refreshOnDedupe: true });
+    expect(again.refreshed).toBeUndefined();
+    expect(mockRows.notifications[0].read_at).not.toBeNull();
+  });
+
+  test('the same invariant holds on the ops_digest CUT path — a re-emission with the same long body stays deduped, not changed', async () => {
+    const longBody = 'sentence '.repeat(30).trim();
+    await NotificationService.notifyAdmin(DIGEST_CATEGORY, 'Standing check', longBody, { dedupeKey: 'k4', refreshOnDedupe: true });
+    const cutBody = mockRows.notifications[0].body;
+    expect(cutBody.length).toBeLessThanOrEqual(110); // confirms the cut path actually ran
+    expect(mockRows.notifications[0].detail).toBe(longBody);
+    mockRows.notifications[0].read_at = new Date();
+    const again = await NotificationService.notifyAdmin(DIGEST_CATEGORY, 'Standing check', longBody, { dedupeKey: 'k4', refreshOnDedupe: true });
     expect(again.refreshed).toBeUndefined();
     expect(mockRows.notifications[0].read_at).not.toBeNull();
   });

@@ -420,7 +420,13 @@ const DIGEST_COLUMNS = ['id', 'title', 'body', 'detail', 'link', 'metadata', 're
 // real pinned set (a handful of digests a day; the fall-off retires them),
 // never the feed's MAX_ITEMS, so the "pinned rows survive" promise holds.
 const PINNED_CAP = 5000;
-async function loadDigestRows(db, since) {
+// `focusId` (admin-alerts-brevity scope): the bell's deep link names one
+// notification id directly. Loaded whatever its read state or age — an
+// older ACT/REVIEW row already fell out of the pinned set once it was read,
+// and its full report now lives ONLY in `detail` (the email was suppressed
+// by GATE_OPS_DIGESTS_IN_APP), so the deep link must never land on an empty
+// feed just because the row aged out of both the pinned and windowed sets.
+async function loadDigestRows(db, since, focusId) {
   const base = () => db('notifications')
     .select(...DIGEST_COLUMNS)
     .where({ recipient_type: 'admin', category: DIGEST_CATEGORY });
@@ -443,9 +449,10 @@ async function loadDigestRows(db, since) {
       .orWhereRaw("NULLIF(metadata->>'resolvedAt', '')::timestamptz >= ?", [since]))
     .orderByRaw("GREATEST(created_at, NULLIF(metadata->>'resolvedAt', '')::timestamptz) DESC")
     .limit(MAX_ITEMS);
+  const focused = focusId ? await base().where('id', focusId).limit(1) : [];
   const seen = new Set();
   const rows = [];
-  for (const row of [].concat(pinned || [], windowed || [])) {
+  for (const row of [].concat(pinned || [], windowed || [], focused || [])) {
     const id = String(row.id);
     if (seen.has(id)) continue;
     seen.add(id);
@@ -454,7 +461,7 @@ async function loadDigestRows(db, since) {
   return rows;
 }
 
-async function loadRows(windowHours) {
+async function loadRows(windowHours, focusId) {
   const since = new Date(Date.now() - windowHours * 3600 * 1000);
   // Only a MISSING table (Postgres 42P01 — a ledger not yet migrated on
   // this deployment) degrades to an empty source, reported back as
@@ -516,7 +523,7 @@ async function loadRows(windowHours) {
             .orWhere('consecutive_failures', '>', 0))
         .orderBy('last_started_at', 'desc')
         .limit(MAX_ITEMS)),
-    safe('notifications', () => loadDigestRows(db, since)),
+    safe('notifications', () => loadDigestRows(db, since, focusId)),
   ]);
   // Approvals (any status — a terminal one tells us a pending-review run
   // was decided): every row on a loaded run, PLUS any still awaiting that
@@ -546,10 +553,10 @@ async function loadRows(windowHours) {
   return { runs: runs.concat(stragglers), approvals, drafts, jobs, digests, unavailable };
 }
 
-async function getActivity({ windowHours } = {}) {
+async function getActivity({ windowHours, focus } = {}) {
   if (gateEnvValue('GATE_AGENT_ACTIVITY') !== true) return { available: false, items: [], agents: [], summary: summarize([]) };
   const hours = clampWindowHours(windowHours);
-  const rows = await loadRows(hours);
+  const rows = await loadRows(hours, focus || null);
   const feed = buildActivity(rows);
   return {
     available: true,

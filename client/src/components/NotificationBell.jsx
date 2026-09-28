@@ -620,24 +620,27 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                   <div style={{ fontSize: 14, color: isDark ? '#71717A' : CUSTOMER_SURFACE.muted }}>Nothing new right now</div>
                 </div>
               )}
-              {!loading && !loadFailed && tab === 'account' && notifications.map(n => (
+              {!loading && !loadFailed && tab === 'account' && notifications.map(n => {
+                const href = linkFor(n);
+                const chip = digestKindChip(n);
+                return (
                 <div key={n.id}
-                  role={n.link ? 'link' : undefined}
-                  tabIndex={n.link ? 0 : undefined}
-                  className={n.link ? 'waves-focus-ring' : undefined}
+                  role={href ? 'link' : undefined}
+                  tabIndex={href ? 0 : undefined}
+                  className={href ? 'waves-focus-ring' : undefined}
                   onClick={async () => {
                     if (!n.read_at) await markRead(n.id);
-                    if (n.link) { setOpen(false); window.location.href = n.link; }
+                    if (href) { setOpen(false); window.location.href = href; }
                   }}
-                  onKeyDown={n.link ? async (e) => {
+                  onKeyDown={href ? async (e) => {
                     if (e.key !== 'Enter' && e.key !== ' ') return;
                     e.preventDefault();
                     if (!n.read_at) await markRead(n.id);
                     setOpen(false);
-                    window.location.href = n.link;
+                    window.location.href = href;
                   } : undefined}
                   style={{
-                    padding: '14px 20px', cursor: n.link ? 'pointer' : 'default',
+                    padding: '14px 20px', cursor: href ? 'pointer' : 'default',
                     borderBottom: `1px solid ${isDark ? '#F4F4F5' : 'rgba(27,44,91,0.08)'}`,
                     display: 'flex', gap: 12, alignItems: 'flex-start',
                   }}
@@ -651,25 +654,38 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                     )}
                   </div>
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{
-                      fontSize: 15, fontWeight: 700, color: isDark ? '#18181B' : CUSTOMER_SURFACE.text, lineHeight: 1.3,
-                    }}>{n.title}</div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                      <div style={{
+                        fontSize: 15, fontWeight: 700, color: isDark ? '#18181B' : CUSTOMER_SURFACE.text, lineHeight: 1.3,
+                        minWidth: 0, flex: '0 1 auto', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                      }}>{displayTitle(n)}</div>
+                      {chip && (
+                        <span style={{
+                          fontSize: 14, fontWeight: 600,
+                          padding: '1px 6px', borderRadius: 4, flexShrink: 0,
+                          color: chip.label === 'Broken' ? '#C0392B' : '#0A7EC2',
+                          background: chip.label === 'Broken' ? 'rgba(192,57,43,0.12)' : 'rgba(10,126,194,0.12)',
+                        }}>{chip.label}</span>
+                      )}
+                    </div>
                     {n.body && (
                       <div style={{
                         fontSize: 14, color: isDark ? '#52525B' : CUSTOMER_SURFACE.body, marginTop: 4, lineHeight: 1.4,
+                        display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden',
                       }}>{n.body}</div>
                     )}
                     <div style={{ fontSize: 12, color: isDark ? '#A1A1AA' : CUSTOMER_SURFACE.muted, marginTop: 6 }}>
                       {timeAgo(n.created_at)}
                     </div>
                   </div>
-                  {n.link && (
+                  {href && (
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke={isDark ? '#18181B' : CUSTOMER_SURFACE.text} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, marginTop: 2 }}>
                       <path d="M7 17L17 7M17 7H8M17 7V16"/>
                     </svg>
                   )}
                 </div>
-              ))}
+                );
+              })}
               {tab === 'account' && moreControl}
               {settingsLink}
             </div>
@@ -790,8 +806,8 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                           }}>{title}</div>
                           {chip && (
                             <span style={{
-                              fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.3,
-                              padding: '2px 6px', borderRadius: 4, flexShrink: 0,
+                              fontSize: 14, fontWeight: 600,
+                              padding: '1px 6px', borderRadius: 4, flexShrink: 0,
                               color: chip.label === 'Broken' ? colors.badge : colors.teal,
                               background: chip.label === 'Broken' ? 'rgba(192,57,43,0.12)' : 'rgba(10,126,194,0.12)',
                             }}>{chip.label}</span>

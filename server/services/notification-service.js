@@ -102,20 +102,27 @@ async function existingCustomerNotification(customerId, dedupeKey, connection = 
 const { stripEmoji } = require('../utils/strip-emoji');
 
 // Admin brevity guard (owner ruling 2026-09-28, admin-alerts-brevity scope):
-// next to the no-emoji rule above, an admin BODY over this length is cut at
-// a word boundary rather than left to run on for a screen-length jargon
-// dump — MAX_ADMIN_BODY_CHARS matches the scope doc's "one sentence, 110
-// characters or less" rule. The TITLE is never cut here (see
-// MAX_ADMIN_TITLE_CHARS below) — several senders dedupe/refresh by an exact
-// title lookup against the stored row (google-business.js's
-// "Review sync health escalation [...]" signature marker and its
-// per-location review-request title, voice-agent/relay-alert.js); a title
-// this guard silently shortened would never match that probe again and the
-// alert would re-ring on every run. ops-digest.js composes its OWN
-// ≤60-char headline before this guard ever sees it, so that path is
-// unaffected.
+// next to the no-emoji rule above, an `ops_digest` BODY over this length is
+// cut at a word boundary rather than left to run on for a screen-length
+// jargon dump — MAX_ADMIN_BODY_CHARS matches the scope doc's "one sentence,
+// 110 characters or less" rule. Scoped to `ops_digest` ONLY (see
+// DIGEST_CATEGORY below): only the Agents → Activity feed ever reads
+// `detail` (services/agent-activity.js, category ops_digest rows only), so
+// moving another admin category's body there would make the full text
+// unreachable — the bell would show a truncated line with nowhere to read
+// the rest. Every other admin category is stored byte-for-byte and merely
+// LOGGED when its body runs long, exactly like the title rule below. The
+// TITLE is never cut for ANY category (see MAX_ADMIN_TITLE_CHARS) —
+// several senders dedupe/refresh by an exact title lookup against the
+// stored row (google-business.js's "Review sync health escalation [...]"
+// signature marker and its per-location review-request title,
+// voice-agent/relay-alert.js); a title this guard silently shortened would
+// never match that probe again and the alert would re-ring on every run.
+// ops-digest.js composes its OWN ≤60-char headline before this guard ever
+// sees it, so that path is unaffected either way.
+const DIGEST_CATEGORY = 'ops_digest'; // written by services/ops-digest.js and routes/ops-digest-ingest.js
 const MAX_ADMIN_TITLE_CHARS = 80; // logged when exceeded; never enforced by cutting
-const MAX_ADMIN_BODY_CHARS = 110;
+const MAX_ADMIN_BODY_CHARS = 110; // enforced (cut into detail) for ops_digest only; logged for every other category
 
 // Cuts `text` to at most `max` chars, breaking on the last word boundary
 // inside the budget and appending an ellipsis — never mid-word, never over
@@ -132,11 +139,14 @@ function truncateAtWord(text, max) {
   return `${cut.trimEnd()}${ellipsis}`;
 }
 
-// Admin-only: cuts an over-length BODY at a word boundary and moves the
-// full original into `detail`. A caller-supplied detail is kept ALONGSIDE
-// the full body (full body first), unless it already contains it verbatim.
-// The TITLE is never cut (see MAX_ADMIN_TITLE_CHARS above) — only logged
-// when it runs long, so an offender can be found without breaking a
+// Admin-only: for `ops_digest` rows, cuts an over-length BODY at a word
+// boundary and moves the full original into `detail` (the Activity feed's
+// only reader of it). A caller-supplied detail is kept ALONGSIDE the full
+// body (full body first), unless it already contains it verbatim. Every
+// OTHER admin category's body is stored unchanged and merely logged when
+// it runs long — nothing reads THEIR `detail`, so cutting would just lose
+// text. The TITLE is never cut for any category (see MAX_ADMIN_TITLE_CHARS
+// above) — only logged, so an offender can be found without breaking a
 // sender's own exact-title dedupe/refresh probe. Never logs title/body
 // text — they carry customer names — only the category.
 function applyAdminBrevityGuard({ category, title, body, detail }) {
@@ -147,11 +157,15 @@ function applyAdminBrevityGuard({ category, title, body, detail }) {
     logger.info(`[notifications] admin title over ${MAX_ADMIN_TITLE_CHARS} chars (${category || 'notification'})`);
   }
   if (typeof body === 'string' && body.length > MAX_ADMIN_BODY_CHARS) {
-    nextBody = truncateAtWord(body, MAX_ADMIN_BODY_CHARS);
-    nextDetail = nextDetail && nextDetail.includes(body)
-      ? nextDetail
-      : [body, nextDetail].filter(Boolean).join('\n\n');
-    trimmed = true;
+    if (category === DIGEST_CATEGORY) {
+      nextBody = truncateAtWord(body, MAX_ADMIN_BODY_CHARS);
+      nextDetail = nextDetail && nextDetail.includes(body)
+        ? nextDetail
+        : [body, nextDetail].filter(Boolean).join('\n\n');
+      trimmed = true;
+    } else {
+      logger.info(`[notifications] admin body over ${MAX_ADMIN_BODY_CHARS} chars (${category || 'notification'})`);
+    }
   }
   if (trimmed) logger.info(`[notifications] brevity guard trimmed admin ${category || 'notification'}`);
   return { title, body: nextBody, detail: nextDetail };
@@ -701,4 +715,5 @@ module.exports._private = {
   excludeActivityOnlyFromBell,
   MAX_ADMIN_TITLE_CHARS,
   MAX_ADMIN_BODY_CHARS,
+  DIGEST_CATEGORY,
 };

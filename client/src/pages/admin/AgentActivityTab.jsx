@@ -248,14 +248,19 @@ export default function AgentActivityTab() {
     setLoading(true);
     setError(null);
     try {
-      const next = await adminFetch(`/admin/agents/activity?hours=${hours}`);
+      // Pass ?focus= through so the server can load that ONE row even when
+      // it's read and older than the window (server/routes/admin-agents.js
+      // -> agent-activity.js's loadDigestRows) — otherwise the bell's deep
+      // link can point at a row this fetch would never otherwise return.
+      const url = `/admin/agents/activity?hours=${hours}${focusParam ? `&focus=${encodeURIComponent(focusParam)}` : ""}`;
+      const next = await adminFetch(url);
       if (isCurrent()) setFeed(next);
     } catch (e) {
       if (isCurrent()) setError(e?.message || "Failed to load activity");
     } finally {
       if (isCurrent()) setLoading(false);
     }
-  }, [hours]);
+  }, [hours, focusParam]);
 
   useEffect(() => {
     load();
