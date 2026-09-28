@@ -168,3 +168,18 @@ describe('name sanitizers — canonical contact normalization', () => {
     expect(sanitizeContactFirstName('Sample\u0001').error.code).toBe('CONTACT_FIRST_NAME_INVALID');
   });
 });
+
+describe('computeContactGaps — multi-word given name with no surname', () => {
+  test('an estimate name equal to the linked multi-word first name still asks for a surname', () => {
+    const gaps = computeContactGaps({ estimate: { customer_name: 'Mary Ann', customer_email: 'x@example.com' }, linkedCustomer: { first_name: 'Mary Ann', last_name: null } });
+    expect(gaps.lastName).toBe(true);
+  });
+  test('the legacy "Mary Ann Customer" shape too', () => {
+    const gaps = computeContactGaps({ estimate: { customer_name: 'Mary Ann Customer' }, linkedCustomer: { first_name: 'Mary Ann', last_name: 'Customer' } });
+    expect(gaps.lastName).toBe(true);
+  });
+  test('a real surname on the profile still closes it', () => {
+    const gaps = computeContactGaps({ estimate: { customer_name: 'Mary Ann' }, linkedCustomer: { first_name: 'Mary Ann', last_name: 'Sample' } });
+    expect(gaps.lastName).toBe(false);
+  });
+});

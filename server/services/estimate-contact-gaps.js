@@ -75,7 +75,13 @@ function hasEmail(value) {
 // accept never mints a placeholder first name (codex #5102 r6).
 function computeContactGaps({ estimate = {}, linkedCustomer = null } = {}) {
   const tokens = cleanedNameTokens(estimate.customer_name);
-  const lastName = tokens.length < 2
+  // A multi-word given name ("Mary Ann") is two tokens with no surname:
+  // when the whole estimate name IS the linked profile's first name, the
+  // surname is still missing (codex #5102 r8).
+  const nameIsLinkedFirstName = tokens.length > 1
+    && hasRealFirstName(linkedCustomer?.first_name)
+    && tokens.join(' ').toLowerCase() === String(linkedCustomer.first_name).trim().replace(/\s+/g, ' ').toLowerCase();
+  const lastName = (tokens.length < 2 || nameIsLinkedFirstName)
     && !hasRealLastName(linkedCustomer?.last_name);
   const firstName = tokens.length === 0 && !hasRealFirstName(linkedCustomer?.first_name);
   const email = !hasEmail(estimate.customer_email) && !hasEmail(linkedCustomer?.email);

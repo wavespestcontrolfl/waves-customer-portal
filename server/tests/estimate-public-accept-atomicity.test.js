@@ -2068,6 +2068,25 @@ describe('Missing-contact capture (contactLastName/contactEmail) — owner rulin
     }
   });
 
+  test('a multi-word given name with no surname gets the surname appended to the whole given name', async () => {
+    resetStore(recurringPestEstimate({
+      id: 'est-contact-24',
+      token: 'tok-contact-24-x0123456789',
+      customer_id: 'cust-maryann-2',
+      customer_phone: null,
+      customer_name: 'Mary Ann',
+      customer_email: 'maryann@example.com',
+    }));
+    db.__state.tables.customers = [{ id: 'cust-maryann-2', first_name: 'Mary Ann', last_name: null, email: 'maryann@example.com', phone: null }];
+    conversionOk('cust-maryann-2');
+
+    const res = await putAccept('tok-contact-24-x0123456789', { contactLastName: 'Sample' });
+    expect(res.status).toBe(200);
+    expect(storedEstimate().customer_name).toBe('Mary Ann Sample');
+    const cust = db.__state.tables.customers.find((c) => c.id === 'cust-maryann-2');
+    expect(cust.last_name).toBe('Sample');
+  });
+
   test('a crafted request for a field the page never offered writes nothing (estimate already has full name + email)', async () => {
     resetStore(recurringPestEstimate({
       id: 'est-contact-10',

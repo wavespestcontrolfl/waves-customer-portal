@@ -10839,8 +10839,15 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           // stale tab that never showed the first-name field) the surname is
           // not applied — the accept never mints a placeholder first name.
           contactFillFirstName = (sanitizedContactFirstName && lockedGaps.firstName) ? sanitizedContactFirstName : null;
+          // A whole estimate name equal to the linked profile's multi-word
+          // first name ("Mary Ann") stays whole as the first name.
+          const lockedNameTokens = contactGapNameTokens(lockedContact.customer_name);
+          const linkedFirst = String(linkedCustomerForGaps?.first_name ?? '').trim().replace(/\s+/g, ' ');
+          const estimateNameIsLinkedFirst = lockedNameTokens.length > 1
+            && contactGapHasRealFirstName(linkedFirst)
+            && lockedNameTokens.join(' ').toLowerCase() === linkedFirst.toLowerCase();
           const patchFirstName = contactFillFirstName
-            || contactGapNameTokens(lockedContact.customer_name)[0]
+            || (estimateNameIsLinkedFirst ? lockedNameTokens.join(' ') : lockedNameTokens[0])
             || (contactGapHasRealFirstName(linkedCustomerForGaps?.first_name) ? String(linkedCustomerForGaps.first_name).trim() : null);
           if (!patchFirstName) {
             contactFillLastName = null;
