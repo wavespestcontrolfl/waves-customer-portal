@@ -39,6 +39,35 @@ const claimableStatusSql = `((status = 'pending' OR (
          )))`;
 
 const { THRESHOLDS, minScoreToActFor } = require('./scoring-config');
+const { writeRouteSql } = require('./opportunity-route-sql');
+
+// Route fence for aeo_question_gap, at the ONE chokepoint every producer's
+// rows pass through (claim). Producers insert independently (miner buckets,
+// intercept / category seeders), so insertion-order arbitration always has a
+// gap; claiming does not. Scoped to pairs involving a question row — other
+// buckets' claims are unchanged when none is involved:
+//   - no row is claimable while a question row for the same route is claimed
+//     or in review, and no question row while ANY other row for its route is;
+//   - a question row also waits while another row wrote its route within the
+//     cooldown (AEO_QUESTION_GAP_COOLDOWN_DAYS, the miner's refresh cooldown):
+//     a question ARTICLE left pending after a seed published the same slug
+//     would otherwise overwrite it. After the cooldown the next mine converts
+//     that row to a refresh of the now-live page (same key) or the recovery
+//     sweep retires it.
+// The day count is a parsed integer, never user text.
+function aeoRouteFenceSql() {
+  const raw = Number.parseInt(process.env.AEO_QUESTION_GAP_COOLDOWN_DAYS, 10);
+  const days = Number.isFinite(raw) && raw >= 0 ? raw : 28;
+  return `NOT EXISTS (
+           SELECT 1 FROM opportunity_queue route_fence
+            WHERE route_fence.id <> opportunity_queue.id
+              AND (route_fence.bucket = 'aeo_question_gap' OR opportunity_queue.bucket = 'aeo_question_gap')
+              AND (route_fence.status IN ('claimed', 'pending_review')
+                OR (opportunity_queue.bucket = 'aeo_question_gap' AND route_fence.status = 'done'
+                  AND route_fence.updated_at >= now() - make_interval(days => ${days})))
+              AND ${writeRouteSql('route_fence')} = ${writeRouteSql('opportunity_queue')}
+         )`;
+}
 
 const STALE_CLAIM_MS = 30 * 60 * 1000; // 30 minutes
 const DEFAULT_FETCH_LIMIT = 20;
@@ -134,6 +163,7 @@ class OpportunityQueue {
       // can claim" — see listicleFamilyLaneOpen).
       if (!listicleFamilyLaneOpen()) q = q.whereNot('bucket', 'listicle_family');
       if (!aeoQuestionLaneOpen()) q = q.whereNot('bucket', 'aeo_question_gap');
+      q = q.whereRaw(aeoRouteFenceSql());
       if (minScore != null) {
         // Same action-aware floor as claimNext (including the
         // listicle_family blog-floor ride), so previews show exactly what
@@ -223,6 +253,7 @@ class OpportunityQueue {
            ${whereExclude}
            ${whereFamilyGate}
            ${whereAeoQuestionGate}
+           AND ${aeoRouteFenceSql()}
          ORDER BY score DESC, mined_at ASC
          FOR UPDATE SKIP LOCKED
          LIMIT 1

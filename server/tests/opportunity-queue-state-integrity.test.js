@@ -427,6 +427,21 @@ describe('aeo_question_gap lane fence (kill-switch contract)', () => {
     expect(q._filters).toEqual(expect.arrayContaining([['not', 'bucket', 'aeo_question_gap']]));
   });
 
+  test('claimNext and peek both carry the question route fence (real-Postgres proof: aeo-question-claim-fence-postgres)', async () => {
+    process.env.GATE_AEO_QUESTION_GAP_MINING = 'true';
+    db.mockImplementation(() => chain());
+    db.raw.mockResolvedValue({ rows: [] });
+    await queue.claimNext({});
+    const [sql] = db.raw.mock.calls[0];
+    expect(sql).toMatch(/NOT EXISTS \(\s*SELECT 1 FROM opportunity_queue route_fence/);
+    expect(sql).toMatch(/route_fence\.bucket = 'aeo_question_gap' OR opportunity_queue\.bucket = 'aeo_question_gap'/);
+    expect(sql).toContain("intercept_brief'->>'slug'");
+    const q = peekChain();
+    db.mockImplementation(() => q);
+    await queue.peek({});
+    expect(q._filters.some((f) => f[0] === 'raw' && /route_fence/.test(f[1]))).toBe(true);
+  });
+
   test('gate on: question rows are claimable and peekable', async () => {
     process.env.GATE_AEO_QUESTION_GAP_MINING = 'true';
     db.mockImplementation(() => chain());

@@ -394,8 +394,12 @@ async function snapshotBaseline({ db: database = db, runId, pageUrl, deployedAt 
   const bucket = ctx.bucket;
   // For AEO rows, capture which managed mention queries to watch after the
   // deploy so the daily feedback check can tell if Waves started getting cited.
+  // A lookup failure THROWS: the impact row is insert-once, so an empty
+  // cohort frozen by a transient error would leave the experiment
+  // insufficient_data forever. sweepNewlyLive catches per run and retries
+  // on its next pass (no impact row was written).
   const aeoQueryIds = AEO_BUCKETS.includes(bucket)
-    ? await aeoQueryIdsForRun(database, ctx).catch(() => [])
+    ? await aeoQueryIdsForRun(database, ctx)
     : null;
 
   const [row] = await database('content_optimization_impact')

@@ -127,6 +127,40 @@ describe('AEO feedback loop covers aeo_question_gap', () => {
     expect(calls[1].filters.map((f) => f[0])).toEqual(['where', 'whereRaw', 'whereRaw']);
   });
 
+  test('a transient query-id lookup failure throws instead of freezing an empty cohort; the retry records the ids', async () => {
+    let lookupFails = true;
+    const inserts = [];
+    // Chainable fake: every builder method returns the chain; awaiting it
+    // resolves per table.
+    const database = (table) => {
+      const chain = new Proxy({}, {
+        get(_t, prop) {
+          if (prop === 'then') {
+            const value = table === 'seo_llm_mention_queries'
+              ? (lookupFails ? Promise.reject(new Error('connection reset')) : Promise.resolve([{ id: 42 }]))
+              : Promise.resolve([]);
+            return value.then.bind(value);
+          }
+          if (prop === 'first') {
+            return async () => (table === 'autonomous_runs as r' ? { bucket: 'aeo_question_gap', query: 'Q?', city: null, service: 'pest' } : undefined);
+          }
+          if (prop === 'insert') return (row) => { inserts.push(row); return chain; };
+          if (prop === 'returning') return async () => [inserts[inserts.length - 1]];
+          return () => chain;
+        },
+      });
+      return chain;
+    };
+    database.raw = (sql) => sql;
+    const args = { db: database, runId: 'run-1', pageUrl: 'https://www.wavespestcontrol.com/termite/termite-bond/' };
+    await expect(tracker.snapshotBaseline(args)).rejects.toThrow('connection reset');
+    expect(inserts).toHaveLength(0); // nothing frozen — sweepNewlyLive retries this run
+    lookupFails = false;
+    await tracker.snapshotBaseline(args);
+    expect(inserts).toHaveLength(1);
+    expect(inserts[0]).toMatchObject({ bucket: 'aeo_question_gap', aeo_query_ids: JSON.stringify([42]) });
+  });
+
   test('citation rechecks select both AEO buckets', async () => {
     const { database, calls } = fakeDb({ content_optimization_impact: [] });
     await tracker.checkAeoVisibility({ db: database });
