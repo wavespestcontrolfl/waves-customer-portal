@@ -55,7 +55,7 @@ async function createScratchDb() {
   // Same narrow schema as termite-annual-decline-before-install-coverage-
   // postgres.test.js (see its notes on omitted columns), plus what the
   // decline writes: the decision columns, annual_plan_version, activity_log.
-  await db.raw('CREATE TABLE customers (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), first_name text, last_name text)');
+  await db.raw('CREATE TABLE customers (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), first_name text, last_name text, deleted_at timestamptz)');
   await db.raw('CREATE TABLE customer_properties (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), customer_id uuid NOT NULL)');
   await db.raw('CREATE TABLE estimates (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), customer_id uuid, property_id uuid)');
   await db.raw(`CREATE TABLE invoices (
@@ -65,6 +65,8 @@ async function createScratchDb() {
     paid_at timestamptz,
     stripe_payment_intent_id text,
     stripe_charge_id text,
+    -- statement-backed parent revocation read (Codex #4971 r15/r16)
+    payer_statement_id uuid,
     created_at timestamptz NOT NULL DEFAULT now()
   )`);
   await db.raw(`CREATE TABLE payments (
@@ -72,7 +74,9 @@ async function createScratchDb() {
     status text,
     refund_status text,
     stripe_payment_intent_id text,
-    stripe_charge_id text
+    stripe_charge_id text,
+    statement_id uuid,
+    metadata jsonb
   )`);
   await db.raw('CREATE TABLE setup_fee_claims (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), invoice_id uuid, scheduled_service_id uuid, amount numeric)');
   // ADMIN-BUG-R18 (#4970): the end-at-term lapse upkeep checks for an open

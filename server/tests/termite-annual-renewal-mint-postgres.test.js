@@ -114,6 +114,10 @@ describeOrSkip('mintRenewalSuccessor — DB-level idempotency anchor, real Postg
     }));
     jest.doMock('../services/annual-prepay-renewals', () => ({
       TERMITE_RENEWAL_GRACE_DAYS: 30,
+      // mintRenewalSuccessor takes the parent-decision gate first (Codex
+      // #4971 r16); the lock itself is covered by the parent-decision-lock
+      // Postgres suite, so it passes straight through here.
+      withParentDecisionLock: jest.fn(async (_termId, fn) => fn()),
       createTermForAnnualPrepay: jest.fn(async ({ conn, customerId: custId, prepayInvoiceId, prepayAmount, termStart, termEnd, renewedFromTermId, annualPlanVersion }) => {
         const [row] = await conn('annual_prepay_terms').insert({
           customer_id: custId,

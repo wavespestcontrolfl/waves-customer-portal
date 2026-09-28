@@ -34,6 +34,10 @@ jest.mock('../models/db', () => {
     // table read must keep resolving null/no-row through these no-op chains.
     q.whereNot = () => q;
     q.whereNotIn = () => q;
+    // withCustomerDeletionGate (termite-annual-renewal-charge.js) reads the
+    // customer's renewable termite parents with whereIn('status', ...); this
+    // fixture has none, so the gate runs the archive directly.
+    q.whereIn = () => q;
     q.whereRaw = () => q;
     q.leftJoin = () => q;
     // findPendingPrepayInvoice (admin-cancellation.js, reused by
