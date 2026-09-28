@@ -96,13 +96,19 @@ async function previewCancelFee(scheduledServiceId, now) {
   };
 }
 
+// True only when the rails say, readably, that no card fee agreement exists.
+function feeRailClear(fee) {
+  return fee.rail === 'none' && fee.applies !== true && fee.unresolved !== true;
+}
+
 // Owner ruling 2026-09-28 (simple visits only): the bar confirms a cancel
 // only when none of these apply; each is a cancel side effect the card does
 // not pin, so the visit is cancelled from Dispatch instead. Sorted codes, so
 // the frozen impact (and its drift comparison) covers the verdict too.
 function cardCancelRefusals({ row, fee, invoices }) {
   const refusals = [];
-  if (fee.rail !== 'none') refusals.push('card_fee_agreement');
+  // Any card rail, any fee, or a card lane state that could not be read.
+  if (!feeRailClear(fee)) refusals.push('card_fee_agreement');
   if (invoices.some((inv) => inv.payment_intent)) refusals.push('card_payment_on_invoice');
   if (invoices.some((inv) => Number(inv.deposit_credit) > 0)) refusals.push('estimate_deposit');
   if (require('./recurring-series-cancel-reseed').cancelMayReseedPlan(row)) refusals.push('plan_makeup_visit');
@@ -186,5 +192,6 @@ module.exports = {
   computeCancelAppointmentImpact,
   cancelImpactsMatch,
   previewCancelFee,
+  feeRailClear,
   _stableStringify: stableStringify,
 };

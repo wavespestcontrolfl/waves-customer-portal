@@ -240,6 +240,15 @@ describe('card_cancel_refusals (owner ruling 2026-09-28: the bar cancels simple 
     expect(impact.card_cancel_refusals).toEqual([]);
   });
 
+  test.each([
+    ['unresolved with no rail named', { applies: true, amount: null, unresolved: true, rail: 'none' }],
+    ['a fee with no rail named', { applies: true, amount: 49, unresolved: false, rail: 'none' }],
+  ])('an unreadable card lane is refused: %s', (_label, fee) => {
+    const { feeRailClear } = require('../services/appointment-cancel-impact');
+    expect(feeRailClear(fee)).toBe(false);
+    expect(feeRailClear({ applies: false, amount: null, unresolved: false, rail: 'none' })).toBe(true);
+  });
+
   test('any card fee rail is refused, fee or no fee', async () => {
     mockCardHoldPreview.mockResolvedValue({ held: true, feeApplies: false, feeAmount: 49, rule: { code: 'outside_window' } });
     const impact = await computeCancelAppointmentImpact('svc-synthetic-1');

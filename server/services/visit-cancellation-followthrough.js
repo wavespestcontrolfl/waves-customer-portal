@@ -123,8 +123,8 @@ async function runVisitCancellationFollowThrough({
       // re-read the rails at the cancellation instant and send anything that
       // appeared since to office review.
       if (pinned) {
-        const { previewCancelFee } = require('./appointment-cancel-impact');
-        if ((await previewCancelFee(id, feeTime)).rail !== 'none') {
+        const { previewCancelFee, feeRailClear } = require('./appointment-cancel-impact');
+        if (!feeRailClear(await previewCancelFee(id, feeTime))) {
           throw new Error('A card fee agreement appeared since the confirmed card; fee requires review');
         }
         feeOutcome = { released: true, reason: 'pinned_no_card_rail' };
