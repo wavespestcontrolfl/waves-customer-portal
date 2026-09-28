@@ -2822,7 +2822,7 @@ export function HistoryView() {
                           Delete
                         </Button>
                       )}
-                      {(s.status === "failed" || s.sending_stale) && (
+                      {(s.status === "failed" || s.sending_stale || (s.status === "sent" && s.correctable)) && (
                         <Button
                           type="button"
                           onClick={() => resumeSend(s)}

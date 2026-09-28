@@ -9,6 +9,7 @@ const {
   sanitizePestInsiderDraft,
   assemblePestInsiderNewsletter,
   PEST_INSIDER_ROTATION,
+  FLAGSHIP_SEASONAL_CONTEXT,
 } = require('../services/newsletter-draft');
 const { getVoiceProfile } = require('../config/voice-profiles');
 const {
@@ -61,6 +62,11 @@ describe('pest-insider buildPestInsiderSystemPrompt', () => {
   // Codex PR #5187 r11: a figure restated in the rotation outlives the
   // register fact it came from (a withdrawn or flagged fact would still be
   // prompted). Slates name topics; the figures come only from the register.
+  test('the flagship seasonal context names topics only — no figure, duration, temperature or named-source number (codex round 14 P1)', () => {
+    expect(FLAGSHIP_SEASONAL_CONTEXT.split('\n')).toHaveLength(12);
+    expect(FLAGSHIP_SEASONAL_CONTEXT).not.toMatch(/\d+\s*(?:–|-|to)\s*\d+\s*days|\d+\s*days?\b|\d+\s*°|\bUF\b|\bCDC\b|IFAS|EPA|\d+\s*ft\b|\bJune\s+\d|\bSept\.?\s+\d/);
+  });
+
   test('no rotation entry carries a figure, a duration, a temperature or a named-source number', () => {
     const FIGURE = /\d+\s*(?:–|-|to)\s*\d+\s*days|\d+\s*°|\d+\s*days?\b|[½¼¾]|\d/;
     const SOURCE_CITATION = /\b(?:UF|CDC|IFAS|EPA)\b|\bper\s+UF\b/;

@@ -368,6 +368,20 @@ function applyRetryableDeliveryFilter(query, tableAlias = null) {
     .whereIn(col('status'), RETRYABLE_DELIVERY_STATUSES);
 }
 
+// Whether a campaign still has recipients a Resume would mail: at least one
+// delivery-ledger row in a retryable state with no success signal. THE
+// predicate behind "correctable" (codex round 14 on #5187): a fully
+// delivered campaign has a ledger too, and its archive must stay what its
+// recipients received, so a ledger row alone never makes a campaign
+// correctable.
+async function hasOutstandingDeliveries(sendId, database = db) {
+  const row = await applyRetryableDeliveryFilter(
+    database('newsletter_send_deliveries').where({ send_id: sendId }),
+    'newsletter_send_deliveries',
+  ).first('newsletter_send_deliveries.id');
+  return Boolean(row);
+}
+
 /**
  * THE terminal-skip write. A recipient that fails the eligibility predicate
  * (status active + not globally suppressed + no archived customer link)
@@ -1522,4 +1536,6 @@ async function markEventsFeatured(send) {
   }
 }
 
-module.exports = { sendCampaign, prepareResumeCampaign, resumeCampaign, processScheduledSends, buildSubscriberQuery, resolveSegmentCustomerIds, countSegmentRecipients, narrowServiceLineFilter, loadPersonalizationContext, sanitizePersonalizationToken, excludeGloballySuppressed, excludeArchivedCustomers, SKIPPED_DELIVERY_STATUS, markEventsFeatured, sendingClaimIsStale };
+module.exports = {
+  applyRetryableDeliveryFilter,
+  hasOutstandingDeliveries, sendCampaign, prepareResumeCampaign, resumeCampaign, processScheduledSends, buildSubscriberQuery, resolveSegmentCustomerIds, countSegmentRecipients, narrowServiceLineFilter, loadPersonalizationContext, sanitizePersonalizationToken, excludeGloballySuppressed, excludeArchivedCustomers, SKIPPED_DELIVERY_STATUS, markEventsFeatured, sendingClaimIsStale };

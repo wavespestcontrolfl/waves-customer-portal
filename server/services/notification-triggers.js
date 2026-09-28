@@ -839,7 +839,10 @@ const TRIGGER_REGISTRY = {
     build: (p) => ({
       title: 'Newsletter not sent',
       body: `"${p.subject || 'Untitled'}" changed after Send was clicked — nothing went out. Review the draft and send it again.`,
-      link: '/admin/newsletter?tab=compose',
+      // Deep-link THE affected draft: the bare compose tab opens the latest
+      // autopilot draft, not the campaign whose send was cancelled (codex
+      // round 14 P2).
+      link: p.sendId ? `/admin/newsletter?tab=compose&draftId=${encodeURIComponent(p.sendId)}` : '/admin/newsletter?tab=compose',
     }),
   },
   newsletter_proof_blocked: {

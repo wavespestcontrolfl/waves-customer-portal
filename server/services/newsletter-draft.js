@@ -80,6 +80,27 @@ function formatEventBlock(events) {
  * is its own object so we can assemble Beehiiv-quality HTML with GIFs,
  * styled metadata blocks, and per-event sections server-side.
  */
+// Topics only — no figure, duration, temperature, date range or named-source
+// number lives here (codex round 14 P1, the same rule as the Pest Insider
+// rotation): a fact restated in a static prompt outlives its withdrawal from
+// the register, and the flagship lane has no claim scan to catch it. The
+// numbers reach the writer through factsPromptBlock alone.
+// pest-insider.test.js pins this.
+const FLAGSHIP_SEASONAL_CONTEXT = [
+  '- Jan–Feb: snowbird peak, dry lawns, red tide drift; winter termite flights only as the verified facts state them',
+  '- Mar: spring break, citrus bloom, native and Asian subterranean termite flight season (from the verified facts)',
+  '- Apr: Bradenton Blues Festival, spring training tail, lawn pre-emergents, lovebugs (their flight season, from the verified facts)',
+  '- May: DeSoto Heritage Festival, lovebugs, rainy season starts — container mosquitoes after rain (egg-to-adult timeline and the dump-and-scrub rhythm, from the verified facts)',
+  '- Jun: hurricane season begins, daily thunderstorms, the summer fertilizer restrictions (dates and places only as the verified facts state them)',
+  '- Jul: Fourth of July, peak rainy season, chinch bugs (their season, from the verified facts), palmetto bugs indoors (why they wander in, from the verified facts)',
+  '- Aug: back-to-school, peak hurricane risk, chinch bug damage on St. Augustine',
+  '- Sep: hurricane peak, Siesta Key Crystal Classic, post-storm yard checklist; drywood termite flights (from the verified facts); native subterranean termites have ONE flight season and no second swarm after storms',
+  '- Oct: snowbirds return, rodent exclusion checklist (roof rat access and exclusion, from the verified facts — the source gives no rodent season), Halloween on barrier islands',
+  '- Nov: Sarasota Season of Sculpture, turkey trots, winter annuals',
+  '- Dec: boat parades, winter termite flights only as the verified facts state them, holiday pantry pests',
+  '- SWFL pests: subterranean termites, German cockroaches, palmetto bugs, no-see-ums, salt-marsh mosquitoes, fire ants, chinch bugs, sod webworms',
+].join('\n');
+
 function buildFlagshipSystemPrompt(voice, month) {
   return `You write the Waves Newsletter — Waves Pest Control's weekly local events guide — for readers from North Port to Tampa.
 
@@ -87,19 +108,8 @@ This is NOT a corporate pest control email. It is a punchy, local, FOMO-driven w
 
 CURRENT MONTH: ${month}
 
-SWFL SEASONAL CONTEXT (pick what's relevant):
-- Jan–Feb: snowbird peak, dry lawns, red tide drift
-- Mar: spring break, citrus bloom, native subterranean termite flights (UF: Jan–May on warm afternoons after rain; Asian subterranean swarms begin in March)
-- Apr: Bradenton Blues Festival, spring training tail, lawn pre-emergents, lovebugs (UF: first flight April–May)
-- May: DeSoto Heritage Festival, lovebugs (UF: April–May), rainy season starts — container mosquitoes (CDC: egg to adult in 7–10 days)
-- Jun: hurricane season begins, daily thunderstorms, nitrogen/phosphorus blackout June 1–Sept 30 in Sarasota County, Sarasota, Venice, Longboat Key and Manatee County (North Port's runs April 1–Sept 30)
-- Jul: 4th of July, peak rainy season, chinch bugs peak early July (UF), palmetto bugs indoors for food, water or shelter from extreme weather (UF)
-- Aug: back-to-school, peak hurricane risk, chinch bug damage on St. Augustine
-- Sep: hurricane peak, Siesta Key Crystal Classic, post-storm yard checklist; western drywood termite flights peak Sep–Nov (UF); subterranean termites do NOT swarm again after storms
-- Oct: snowbirds return, rodent exclusion checklist (UF: prune touching limbs, trim palm skirts, plants 2 ft off the house — UF gives NO rodent season), Halloween on barrier islands
-- Nov: Sarasota Season of Sculpture, turkey trots, winter annuals
-- Dec: boat parades, R. hageni termite flights begin (UF: early December to early February, in the evening), holiday pantry pests
-- SWFL pests: subterranean termites, German cockroaches, palmetto bugs, no-see-ums, salt-marsh mosquitoes, fire ants, chinch bugs, sod webworms
+SWFL SEASONAL CONTEXT (pick what's relevant — TOPICS ONLY; every pest fact, date, count or timeline you state must come from the VERIFIED FACTS block at the end of this prompt, or be left out):
+${FLAGSHIP_SEASONAL_CONTEXT}
 
 VOICE:
 - Irreverent but not mean. Energetic but not chaotic. A hype-y group-chat friend, single narrator.
@@ -1759,10 +1769,14 @@ async function createNewsletterDraft({
   // and the rule binding the writer to them are part of its system prompt.
   // A draft that cannot load its facts fails rather than being written
   // ungrounded.
-  const systemPrompt = isPestInsider
+  // Both lanes are grounded in the same live register: the flagship's
+  // seasonal context names topics only, so its pest facts too come from the
+  // block appended here and stop reaching the writer the moment a fact is
+  // withdrawn (codex round 14 P1).
+  const factsBlock = await require('./email-division/fact-register').factsPromptBlock();
+  const systemPrompt = (isPestInsider
     ? buildPestInsiderSystemPrompt(voice, month)
-      + await require('./email-division/fact-register').factsPromptBlock()
-    : buildFlagshipSystemPrompt(voice, month);
+    : buildFlagshipSystemPrompt(voice, month)) + factsBlock;
 
   // Homeowner Minute RETIRED from the flagship (owner 2026-07-30) —
   // homeownerMinuteTopic is accepted for caller compatibility but no
@@ -2015,6 +2029,7 @@ module.exports = {
   sanitizePestInsiderDraft,
   assemblePestInsiderNewsletter,
   PEST_INSIDER_ROTATION,
+  FLAGSHIP_SEASONAL_CONTEXT,
   // Greeting personalization — token + per-recipient value + archive strip
   GREETING_NAME_TOKEN,
   greetingWithNameToken,

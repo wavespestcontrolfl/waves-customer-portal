@@ -134,6 +134,8 @@ describe('notification trigger push tags', () => {
   });
 
   test('KB audit trigger summarizes flagged entries for the admin bell', () => {
+    const notDispatched = TRIGGER_REGISTRY.newsletter_send_not_dispatched.build({ sendId: 'send-42', subject: 'Pest Insider' });
+    expect(notDispatched.link).toBe('/admin/newsletter?tab=compose&draftId=send-42'); // codex round 14 P2: THE affected draft
     const built = TRIGGER_REGISTRY.kb_audit_flagged.build({
       count: 2,
       entries: [

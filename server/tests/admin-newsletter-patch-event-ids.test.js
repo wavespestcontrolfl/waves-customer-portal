@@ -16,7 +16,7 @@ jest.mock('../services/sendgrid-mail', () => ({
   unsubscribeUrl: jest.fn((token) => `https://example.com/unsubscribe/${token}`),
   sendOne: jest.fn(),
 }));
-jest.mock('../services/newsletter-sender', () => ({}));
+jest.mock('../services/newsletter-sender', () => ({ hasOutstandingDeliveries: jest.fn(async () => false) }));
 jest.mock('../services/logger', () => ({
   error: jest.fn(),
   info: jest.fn(),
@@ -25,6 +25,7 @@ jest.mock('../services/logger', () => ({
 
 const express = require('express');
 const db = require('../models/db');
+const NewsletterSender = require('../services/newsletter-sender');
 const adminNewsletterRouter = require('../routes/admin-newsletter');
 
 const EVENT_UUID = '2b0fcf1c-2a8e-4d3e-9b5a-1f2e3d4c5b6a';
@@ -188,15 +189,18 @@ describe('PATCH /sends/:id refuses retyping a Pest Insider draft', () => {
 describe('PATCH /sends/:id correct-and-resume for a partially delivered campaign', () => {
   beforeEach(() => { jest.clearAllMocks(); });
 
+  // `deliveryRow` stands for "a Resume still has someone to mail": the
+  // route asks the sender's outstanding-retryable predicate (codex round 14
+  // P2 — a ledger row alone never makes a campaign correctable).
   function mockTables({ send, deliveryRow }) {
     const update = jest.fn(async () => 1);
     const whereIns = [];
+    NewsletterSender.hasOutstandingDeliveries.mockResolvedValue(Boolean(deliveryRow));
     db.mockImplementation((table) => {
       const q = {};
       ['where', 'orderBy', 'limit', 'offset', 'select'].forEach((method) => { q[method] = jest.fn(() => q); });
       q.whereIn = jest.fn((...args) => { whereIns.push(args); return q; });
       if (table === 'newsletter_sends') { q.first = jest.fn(async () => send); q.update = update; return q; }
-      if (table === 'newsletter_send_deliveries') { q.first = jest.fn(async () => deliveryRow); return q; }
       throw new Error(`Unexpected table ${table}`);
     });
     return { update, whereIns };
@@ -252,7 +256,7 @@ describe('PATCH /sends/:id correct-and-resume for a partially delivered campaign
     expect(changed.update).not.toHaveBeenCalled();
   });
 
-  test('a failed campaign with NO delivery ledger is still not editable', async () => {
+  test('a failed campaign with NO outstanding recipient is still not editable', async () => {
     const { update } = mockTables({ send: failedInsider, deliveryRow: undefined });
     await withServer(async (baseUrl) => {
       const res = await patchSend(baseUrl, { htmlBody: '<p>Corrected</p>' });

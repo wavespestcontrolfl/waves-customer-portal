@@ -401,9 +401,16 @@ router.get('/sends', async (req, res, next) => {
       .select(
         'newsletter_sends.*',
         'technicians.name as created_by_name',
-        // Whether a delivery ledger exists: a failed/sent campaign WITH one
-        // can have its copy corrected in place (PATCH correct-and-resume).
-        db.raw('EXISTS (SELECT 1 FROM newsletter_send_deliveries d WHERE d.send_id = newsletter_sends.id) AS has_ledger'),
+        // Whether a Resume still has someone to mail: a failed/sent campaign
+        // with an outstanding retryable ledger row can have its copy
+        // corrected in place and resumed (PATCH correct-and-resume; the same
+        // predicate as hasOutstandingDeliveries, codex round 14 P2).
+        db.raw('EXISTS (?) AS has_outstanding', [
+          NewsletterSender.applyRetryableDeliveryFilter(
+            db('newsletter_send_deliveries').whereRaw('newsletter_send_deliveries.send_id = newsletter_sends.id'),
+            'newsletter_send_deliveries',
+          ).select(db.raw('1')),
+        ]),
       )
       .orderByRaw('COALESCE(newsletter_sends.sent_at, newsletter_sends.created_at) DESC')
       .limit(500);
@@ -415,7 +422,7 @@ router.get('/sends', async (req, res, next) => {
       ...row,
       rates: computeSendRates(row),
       sending_stale: NewsletterSender.sendingClaimIsStale(row),
-      correctable: ['failed', 'sent'].includes(row.status) && row.has_ledger === true,
+      correctable: ['failed', 'sent'].includes(row.status) && row.has_outstanding === true,
     }));
 
     // Pooled aggregate is summed across ALL sent campaigns in the DB — not
@@ -637,8 +644,11 @@ router.patch('/sends/:id', async (req, res, next) => {
     // received stays up) and the next Resume reaches only the ledger's
     // outstanding rows (sendCampaign's ledger guard). Copy fields only: the
     // audience is the ledger and the type is locked by the guards below.
+    // Only while a Resume still has someone to mail (an outstanding retryable
+    // ledger row): a fully delivered campaign's archive stays what its
+    // recipients received (codex round 14 P2).
     const correctingDelivered = ['failed', 'sent'].includes(send.status)
-      && Boolean(await db('newsletter_send_deliveries').where({ send_id: send.id }).first('id'));
+      && await NewsletterSender.hasOutstandingDeliveries(send.id);
     if (!['draft', 'scheduled'].includes(send.status) && !correctingDelivered) {
       return res.status(400).json({ error: 'can only edit drafts or scheduled sends, or correct the copy of a partially delivered campaign' });
     }

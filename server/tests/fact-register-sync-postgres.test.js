@@ -192,6 +192,20 @@ postgres('email-division fact register sync against migrated PostgreSQL', () => 
     expect(_internals.rowFingerprint(after)).toBe(after.metadata.register_hash); // the stamp still matches: not an edit
   });
 
+  test('a person\'s reclassification of a register fact survives a wording update (codex round 14 P2)', async () => {
+    const facts = [fact(1)];
+    await sync(facts);
+    await trx('knowledge_base').where({ slug: facts[0].slug }).update({ category: 'lawn-care' });
+    const r = await sync([{ ...facts[0], content: `${facts[0].content} Reworded once more.` }]);
+    expect(r.updated).toEqual([facts[0].slug]);
+    expect(r.held).toEqual([]);
+    const after = await rowOf(facts[0].slug);
+    expect(after.category).toBe('lawn-care');
+    expect(after.content).toContain('Reworded once more.');
+    // (that the writer still lists it is the unit test's where-clause assertion:
+    // listFacts selects register rows by source, not category)
+  });
+
   test('a wording update drops the fact\'s hybrid-index chunks at once; a metadata-only restamp keeps them (codex round 13 P2)', async () => {
     const facts = [fact(1)];
     await sync(facts);

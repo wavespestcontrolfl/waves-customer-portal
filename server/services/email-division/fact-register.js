@@ -299,6 +299,11 @@ async function applyFactPlan(trx, fact, row, plan, { now, today, hasAuditLog, ha
         : row.status;
       await trx('knowledge_base').where({ id: row.id }).update({
         ...rowValues(fact, meta, now),
+        // A person's reclassification of a register fact is theirs to keep:
+        // the category is not part of the fingerprint (it is not the
+        // fact's wording), so an update must not write 'facts' back over it
+        // (codex round 14 P2). Register rows are found by SOURCE.
+        category: row.category || CATEGORY,
         active: true,
         status,
         version: (Number(row.version) || 1) + 1,
@@ -503,7 +508,7 @@ function hasProvenance(row, today) {
  */
 async function listFacts({ tags, limit = 50, now = new Date() } = {}) {
   const rows = await db('knowledge_base')
-    .where({ category: CATEGORY, source: SOURCE, active: true, status: 'active' })
+    .where({ source: SOURCE, active: true, status: 'active' })
     .orderBy('title', 'asc');
 
   const today = etDateString(now);

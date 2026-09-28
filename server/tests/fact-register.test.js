@@ -77,7 +77,8 @@ describe('listFacts', () => {
   test("reads only the register's own rows that are active AND in status active — a flagged, archived or foreign row never reaches a writer", async () => {
     await listFacts({ now: NOW });
     const q = db.mock.results[db.mock.results.length - 1].value;
-    expect(q.where).toHaveBeenCalledWith({ category: 'facts', source: SOURCE, active: true, status: 'active' });
+    // by SOURCE, not category: a person may reclassify a register fact and it must still reach the writer (codex round 14 P2)
+    expect(q.where).toHaveBeenCalledWith({ source: SOURCE, active: true, status: 'active' });
   });
 
   test('filters to facts carrying ANY of the given tags', async () => {
