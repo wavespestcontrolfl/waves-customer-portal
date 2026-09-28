@@ -1645,6 +1645,16 @@ describe('replyQuotesUngroundedAmount — amounts are authorized by MEANING (Cod
   test('a reply that states both, each backed by its own fact → grounded', () => {
     const context = { billing: { outstandingBalance: 120.5, recentPayments: [{ amount: 95 }] } };
     expect(replyQuotesUngroundedAmount('We received your $95 payment; your remaining balance is $120.50.', context)).toBe(false);
+    expect(replyQuotesUngroundedAmount('We received your $95 payment and your remaining balance is $120.50.', context)).toBe(false);
+  });
+  test('the SAME two figures with their claims SWAPPED → ungrounded (each amount binds to its own clause, Codex r6)', () => {
+    const context = { billing: { outstandingBalance: 120.5, recentPayments: [{ amount: 95 }] } };
+    expect(replyQuotesUngroundedAmount('We received your $120.50 payment; your remaining balance is $95.', context)).toBe(true);
+    expect(replyQuotesUngroundedAmount('Your $120.50 payment went through and your balance is $95.', context)).toBe(true);
+  });
+  test('a clause whose amount cannot be bound to exactly one meaning fails closed', () => {
+    const context = { billing: { outstandingBalance: 120.5, recentPayments: [{ amount: 95 }] } };
+    expect(replyQuotesUngroundedAmount('It comes to $120.50.', context)).toBe(true); // neither owed nor acknowledgement language
   });
 });
 

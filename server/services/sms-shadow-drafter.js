@@ -801,41 +801,23 @@ const PAYMENT_ACK_RE = /\b(?:received|processed|went through)\b[^.\n]{0,30}\bpay
 function replyQuotesUngroundedAmount(reply, context) {
   const suggestMode = require('./sms-suggest-mode');
   const centsOf = (v) => Math.round(Number(v) * 100);
-  // Amounts are authorized by MEANING, not just by number (Codex r5): a
-  // balance, invoice or dues figure backs a statement about what is owed,
-  // and a payment-history figure backs a payment acknowledgement. Pooling
-  // them let "your $95 payment went through" pass on a $95 balance with no
-  // payment on file.
-  //
-  // GATE_SMS_REAL_ANSWERS only: with the gate off this guard keeps its
-  // original pooled allowlist, so live behavior is unchanged by this PR.
-  // The meaning tests run on the reply with its amounts masked — the ack
-  // grammar stops at a period, and "$95.50" must not end the clause.
-  const byMeaning = gateEnvValue('GATE_SMS_REAL_ANSWERS');
-  const masked = String(reply || '').replace(AMOUNT_MASK_RE, ' AMT ');
-  const owedLanguage = !byMeaning || AMOUNT_OWED_RE.test(masked);
-  const ackLanguage = !byMeaning || PAYMENT_ACK_RE.test(masked);
-  const authorizedCents = new Set([
-    ...(owedLanguage ? [
-      context.billing?.outstandingBalance > 0 ? centsOf(context.billing.outstandingBalance) : null,
-      context.billing?.openInvoice?.amountDue != null ? centsOf(context.billing.openInvoice.amountDue) : null,
-      ...require('./context-aggregator').authorizedDuesCents(context),
-    ] : []),
-    // Payment-history amounts authorize ONLY a payment acknowledgement
-    // (Codex r4: a zero-balance account with a recent $95 payment must not
-    // let "your balance is $95" through). Same ack grammar as the
-    // scheduler's fire-time recheck: "payment" near received/processed/
-    // went through, or "thank you … payment".
-    ...(ackLanguage ? (context.billing?.recentPayments || []).map((p) => (p?.amount != null ? centsOf(p.amount) : null)) : []),
-  ].filter((v) => Number.isFinite(v)));
+  const text = String(reply || '');
+  const finite = (list) => list.filter((v) => Number.isFinite(v));
+  // What is OWED: balance, open invoice, monthly dues (shared definition).
+  const owedCents = new Set(finite([
+    context.billing?.outstandingBalance > 0 ? centsOf(context.billing.outstandingBalance) : null,
+    context.billing?.openInvoice?.amountDue != null ? centsOf(context.billing.openInvoice.amountDue) : null,
+    ...require('./context-aggregator').authorizedDuesCents(context),
+  ]));
+  // What was PAID: payment history.
+  const paidCents = new Set(finite((context.billing?.recentPayments || []).map((p) => (p?.amount != null ? centsOf(p.amount) : null))));
   // Every amount syntax hasPriceQuote recognizes (Codex r7): $-prefixed,
   // USD-prefixed, and number-with-unit ("50 dollars"/"50 bucks"). Bare
   // unit-less numerals stay out of the deterministic guard (dates, house
   // numbers, zone counts would false-positive) — those remain the
   // verifier's + reviewer's territory.
   const AMOUNT_FORMS_RE = /(?:\$|\bUSD\s?)\s?\d[\d,]*(?:\.\d{1,2})?|\b\d[\d,]*(?:\.\d{1,2})?\s?(?:dollars|bucks|usd)\b/gi;
-  const replyAmounts = (reply.match(AMOUNT_FORMS_RE) || [])
-    .map((a) => centsOf(a.replace(/[^\d.]/g, '')));
+  const amountsIn = (t) => (t.match(AMOUNT_FORMS_RE) || []).map((a) => centsOf(a.replace(/[^\d.]/g, '')));
   // FAIL CLOSED on grammar the numeric extractor can't verify (Codex r8):
   // hasPriceQuote recognizes spelled amounts ("fifty dollars"), cents,
   // Spanish forms, and cadence ("45/mo") — if the price grammar fires and
@@ -845,11 +827,36 @@ function replyQuotesUngroundedAmount(reply, context) {
   // same rule as any other amount now that dues are authorized: "$98.50/mo"
   // extracts $98.50 and passes for a monthly member, while a bare "45/mo"
   // carries no currency marker, extracts nothing, and still withholds.
-  const priceGrammarFires = suggestMode.hasPriceQuote(reply);
-  const ungrounded = priceGrammarFires
-    ? (replyAmounts.length === 0 || replyAmounts.some((a) => !authorizedCents.has(a)))
-    : replyAmounts.some((a) => !authorizedCents.has(a));
-  return ungrounded;
+  const priceGrammarFires = suggestMode.hasPriceQuote(text);
+  const replyAmounts = amountsIn(text);
+  if (priceGrammarFires && replyAmounts.length === 0) return true;
+
+  // Gate OFF: the original pooled allowlist — any authoritative figure
+  // passes — so live behavior is unchanged by PR #5119.
+  if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) {
+    return replyAmounts.some((a) => !owedCents.has(a) && !paidCents.has(a));
+  }
+
+  // Gate ON: each amount is authorized by the MEANING of its own clause
+  // (Codex r5/r6). An owed figure backs a statement about what is owed; a
+  // payment figure backs a payment acknowledgement. Judging the language
+  // reply-wide let "We received your $120.50 payment; your remaining
+  // balance is $95" pass with the two figures swapped. A clause that reads
+  // as both, or as neither, cannot be bound and fails closed. The language
+  // tests run on the clause with its amounts masked — the ack grammar stops
+  // at a period, and "$95.50" must not end it.
+  const clauses = text.split(/(?<=[;!?\n])|(?<=\.)(?=\s|$)|,\s|\s(?:and|but)\s|\s[—–-]\s/);
+  for (const clause of clauses) {
+    const amounts = amountsIn(String(clause || ''));
+    if (!amounts.length) continue;
+    const masked = clause.replace(AMOUNT_MASK_RE, ' AMT ');
+    const owed = AMOUNT_OWED_RE.test(masked);
+    const ack = PAYMENT_ACK_RE.test(masked);
+    if (owed === ack) return true;
+    const allowed = owed ? owedCents : paidCents;
+    if (amounts.some((a) => !allowed.has(a))) return true;
+  }
+  return false;
 }
 
 // The minimum needed to recheck a draft's quoted OPEN TIMES at send time —
