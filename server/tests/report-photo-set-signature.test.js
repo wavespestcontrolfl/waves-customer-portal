@@ -113,6 +113,8 @@ describe('reportPhotoSetPdfSignature', () => {
     };
     const a = await reportPhotoSetPdfSignature('rec-1', vanished, { serviceData: null });
     expect(a).toMatch(/^-phu-/);
+    // Same without serviceData (pdf-queue's post-render re-check shape).
+    expect(await reportPhotoSetPdfSignature('rec-1', vanished)).toMatch(/^-phu-/);
   });
 });
 

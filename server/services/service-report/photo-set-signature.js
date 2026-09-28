@@ -98,10 +98,6 @@ async function reportPhotoSetPdfSignature(serviceRecordId, knex = null, options 
         : await knex('service_records')
           .where({ id: serviceRecordId })
           .first('customer_id', 'service_line', 'service_type', 'scheduled_service_id', 'service_id');
-      // A missing row here must not read as "not lawn": that would drop the
-      // -lp term and let a lawn PDF match its legacy key. Fail closed (the
-      // outer catch returns the unique '-phu' token).
-      if (!lawnFields) throw new Error('service record not found for photo signature');
     } else {
       const record = await knex('service_records')
         .where({ id: serviceRecordId })
@@ -109,6 +105,10 @@ async function reportPhotoSetPdfSignature(serviceRecordId, knex = null, options 
       serviceData = record ? record.service_data : null;
       lawnFields = record;
     }
+    // A missing row must not read as "not lawn": that would drop the -lp
+    // term and let a lawn PDF match its legacy key. Fail closed (the outer
+    // catch returns the unique '-phu' token).
+    if (!lawnFields) throw new Error('service record not found for photo signature');
     if (typeof serviceData === 'string') {
       try { serviceData = JSON.parse(serviceData); } catch { serviceData = null; }
     }
