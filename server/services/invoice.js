@@ -5630,6 +5630,9 @@ const InvoiceService = {
       // for one leg). No fan-out at all (acceptedChannelResults null) is
       // definitionally the plain SMS path — byte-identical to before.
       const emailAccepted = legAccepted(acceptedChannelResults?.email);
+      const emailTime = acceptedChannelResults?.email?.sentAt;
+      const originalEmailTime = emailTime && !Number.isNaN(new Date(emailTime).getTime())
+        ? new Date(emailTime) : null;
       const smsOrAppAccepted = acceptedChannelResults
         ? (legAccepted(acceptedChannelResults.sms) || legAccepted(acceptedChannelResults.push, "push"))
         : true;
@@ -5651,7 +5654,9 @@ const InvoiceService = {
           ),
           sent_at: settledEvent.eventVisibleAt || new Date(),
           ...(smsOrAppAccepted ? { sms_sent_at: smsFinalizationStamp(trx) } : {}),
-          ...(emailAccepted ? { email_sent_at: acceptedChannelResults.email.deduped ? trx.raw("email_sent_at") : new Date() } : {}),
+          ...(emailAccepted ? { email_sent_at: acceptedChannelResults.email.deduped
+            ? trx.raw("COALESCE(email_sent_at, ?::timestamptz)", [originalEmailTime])
+            : new Date() } : {}),
           scheduled_send_at: null,
           scheduled_send_error: require("./invoice-helpers").preserveWithdrawalStamp(trx),
           scheduled_request_review: false,

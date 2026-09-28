@@ -90,6 +90,17 @@ beforeEach(() => {
   persistAudit.mockResolvedValue({ id: 'audit-1' });
 });
 
+test('an accepted provider dedupe carries its original time through the canonical sender', async () => {
+  const acceptedAt = new Date('2026-05-20T14:00:00Z');
+  sendViaTwilio.mockResolvedValueOnce({ sent: true, deliveryOutcome: 'accepted', deduped: true,
+    sentAt: acceptedAt, providerMessageId: 'SM-prior' });
+
+  await expect(sendCustomerMessage(BASE_INPUT)).resolves.toMatchObject({
+    sent: true, deliveryOutcome: 'accepted', deduped: true,
+    sentAt: acceptedAt, providerMessageId: 'SM-prior',
+  });
+});
+
 test('a failing check blocks the send after all validators — no provider call, audited', async () => {
   const result = await sendCustomerMessage({
     ...BASE_INPUT,

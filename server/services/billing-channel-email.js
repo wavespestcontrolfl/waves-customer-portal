@@ -17,13 +17,21 @@ function emailNotificationBody(value) {
 }
 
 function acceptedResult(result) {
+  const storedTime = [result.message?.sent_at, result.message?.created_at]
+    .map((value) => (value == null ? null : new Date(value)))
+    .find((value) => value && !Number.isNaN(value.getTime())) || null;
   return {
     sent: true,
     provider: 'email',
     providerMessageId: result.message?.provider_message_id || null,
     deliveryOutcome: 'accepted',
     blocked: false,
-    ...(result.deduped ? { deduped: true } : {}),
+    ...(result.deduped ? {
+      deduped: true,
+      // The invoice finalizer may be repairing a lost acknowledgement. Keep
+      // its stamp tied to the stored Email, never to this retry's clock.
+      sentAt: storedTime,
+    } : {}),
   };
 }
 

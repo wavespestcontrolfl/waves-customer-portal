@@ -1256,6 +1256,24 @@ describe('invoice_send_via_sms explicit billing Email leg (send-customer-message
     expect(billingEmailPreSendCheck).toHaveBeenCalledWith({ channel: 'email', database: db });
   });
 
+  test('an accepted Email replay keeps its deduped identity and original time through routing', async () => {
+    prefs.invoice_channels = ['email'];
+    const acceptedAt = new Date('2026-01-02T14:00:00Z');
+    sendBillingChannelEmail.mockResolvedValueOnce({ sent: true, provider: 'email',
+      deliveryOutcome: 'accepted', providerMessageId: 'email:prior', deduped: true, sentAt: acceptedAt });
+
+    const result = await sendCustomerMessage(invoiceInput({
+      withProviderHandoff: jest.fn(async (dispatch) => dispatch()),
+      billingEmailPreSendCheck: jest.fn(async () => ({ ok: true })),
+    }));
+
+    expect(result).toMatchObject({ sent: true, deliveryOutcome: 'accepted', deduped: true });
+    expect(result.channelResults.email).toMatchObject({
+      sent: true, deliveryOutcome: 'accepted', deduped: true, sentAt: acceptedAt,
+    });
+    expect(Twilio.sendSMS).not.toHaveBeenCalled();
+  });
+
   test('an Email+Text explicit selection runs both legs; the Text leg still goes through withProviderHandoff', async () => {
     prefs.invoice_channels = ['email', 'sms'];
     const billingEmailPreSendCheck = jest.fn(async () => ({ ok: true }));

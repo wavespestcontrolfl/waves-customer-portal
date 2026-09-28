@@ -1194,6 +1194,7 @@ async function sendCustomerMessageCore(input) {
     deliveryOutcome: providerOutcome.deliveryOutcome,
     providerMessageId: providerOutcome.providerMessageId,
     sentAt: providerOutcome.sentAt,
+    ...(providerOutcome.deduped === true ? { deduped: true } : {}),
     channel: providerOutcome.provider === 'push' ? 'push' : sendInput.channel,
     auditLogId: audit.id,
     segmentCount: segmentMeta.segmentCount,
