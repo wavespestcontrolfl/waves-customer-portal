@@ -179,6 +179,9 @@ describe('groundRescheduleAgreement', () => {
       expect([said, agreedAt(THURSDAY_2PM, `We will see you ${said}.`, { day: 'Thursday', hour: said.includes(' 2 ') ? '2' : 'two', period: 'PM' }).reason])
         .toEqual([said, 'agreed_slot_ungrounded']);
     }
+    expect(agreedAt(THURSDAY_2PM, 'We will move it to two PM Thursday.', { day: 'Thursday', hour: 'two', period: 'PM' }).ok).toBe(true);
+    expect(agreedAt(THURSDAY_2PM, 'We will see you Thursday at ten minutes to two PM.', { day: 'Thursday', hour: 'two', period: 'PM' }))
+      .toMatchObject({ ok: false, reason: 'agreed_slot_ungrounded' });
     // Codex #5092 r13: twelve with a part of the day states no hour; with am/pm it does.
     expect(agreedAt('2026-09-23T12:00:00-04:00', 'We will see you at 12 tonight.', { day: 'tonight', hour: '12', period: 'tonight' }))
       .toMatchObject({ ok: false, reason: 'agreed_slot_words_mismatch' });

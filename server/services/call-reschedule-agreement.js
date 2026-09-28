@@ -290,7 +290,13 @@ const MINUTES_BEFORE = new Set(['past', 'after', 'to', 'til', 'till', 'of']);
 function hourHasMinutes(toks, [ha, hb]) {
   const next = toks[hb] || '';
   return (/^\d+$/.test(next) && !/^0+$/.test(next)) || MINUTE_WORDS.has(next) || Object.hasOwn(HOUR_WORDS, next)
-    || MINUTES_BEFORE.has(toks[ha - 1]);
+    || (MINUTES_BEFORE.has(toks[ha - 1]) && isMinuteCount(toks[ha - 2]));
+}
+
+// A minute count said before "to"/"past": "ten", "quarter", "15", "minutes"
+// ("ten minutes to two"). "Move it to two" has none, so its "to" is not one.
+function isMinuteCount(t) {
+  return Boolean(t) && (/^\d+$/.test(t) || MINUTE_WORDS.has(t) || Object.hasOwn(HOUR_WORDS, t) || t === 'minutes');
 }
 
 // Every token span where `words` sits in `toks`.
