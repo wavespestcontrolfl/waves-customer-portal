@@ -270,13 +270,14 @@ describe('GATE_DUNNING_COMBINED_MESSAGE — narrow rebuild', () => {
     expect(update2.update).toHaveBeenCalledWith(expect.objectContaining({ step_index: 1 }));
   });
 
-  test('2 due rows, same customer: the anchor (oldest invoice) sends combined; the sibling is re-timed to the anchor\'s new next_touch_at and advances its OWN step in lockstep, plus a best-effort audit row', async () => {
+  test('2 due rows, same customer: the anchor (oldest invoice) sends combined; the sibling advances its OWN step in lockstep and re-times on its own cadence, plus a best-effort audit row', async () => {
     const anchorSeq = followupRow({ id: 'seq-1', invoice_id: 'inv-1', invoice_created_at: '2026-05-20T12:00:00.000Z' });
     // Sibling is the NEWER invoice — never the anchor.
     const siblingSeq = followupRow({ id: 'seq-2', invoice_id: 'inv-2', invoice_created_at: '2026-05-21T12:00:00.000Z', step_index: 0 });
     const sequenceUpdate = chain();
     const siblingUpdate = chain();
     const siblingAudit = chain();
+    const siblingInvoiceLock = chain({ first: invoice({ id: 'inv-2' }) });
     setDbQueues({
       'invoice_followup_sequences as s': [chain({ result: [siblingSeq, anchorSeq] })], // batch order should not matter
       customers: [chain({ first: customer() })],
@@ -289,6 +290,7 @@ describe('GATE_DUNNING_COMBINED_MESSAGE — narrow rebuild', () => {
         ] }),
         chain({ first: invoice() }),
         chain({ first: invoice() }),
+        siblingInvoiceLock,
       ],
       notification_prefs: [chain({ first: { email_enabled: true } })],
       customer_interactions: [chain(), chain(), siblingAudit],
@@ -311,7 +313,13 @@ describe('GATE_DUNNING_COMBINED_MESSAGE — narrow rebuild', () => {
     // invoice_created_at at 10am NY), never a copy of the anchor's own
     // next_touch_at (the two invoices can be on very different cadences).
     // Still active (it has steps left).
-    expect(siblingUpdate.where).toHaveBeenCalledWith({ id: 'seq-2', status: 'active' });
+    // Advanced under the sibling invoice's row lock, and only from the batch
+    // snapshot's own state (same step, same owner, not claimed by a worker).
+    expect(siblingInvoiceLock.forUpdate).toHaveBeenCalled();
+    expect(siblingUpdate.where).toHaveBeenCalledWith({
+      id: 'seq-2', status: 'active', step_index: 0, customer_id: 'cust-1',
+    });
+    expect(siblingUpdate.where).toHaveBeenCalledWith('next_touch_at', '<=', expect.any(Date));
     const siblingPatch = siblingUpdate.update.mock.calls[0][0];
     expect(siblingPatch.step_index).toBe(1);
     expect(siblingPatch.status).toBe('active');
@@ -325,6 +333,38 @@ describe('GATE_DUNNING_COMBINED_MESSAGE — narrow rebuild', () => {
       customer_id: 'cust-1',
       metadata: expect.stringContaining('"invoice_id":"inv-2"'),
     }));
+  });
+
+  test('a sibling invoice paid after the batch select is neither advanced nor logged as covered', async () => {
+    const anchorSeq = followupRow({ id: 'seq-1', invoice_id: 'inv-1', invoice_created_at: '2026-05-20T12:00:00.000Z' });
+    const siblingSeq = followupRow({ id: 'seq-2', invoice_id: 'inv-2', invoice_created_at: '2026-05-21T12:00:00.000Z', step_index: 0 });
+    const sequenceUpdate = chain();
+    const siblingAudit = chain();
+    setDbQueues({
+      'invoice_followup_sequences as s': [chain({ result: [anchorSeq, siblingSeq] })],
+      customers: [chain({ first: customer() })],
+      invoices: [
+        chain({ first: invoice() }),
+        chain({ first: invoice() }),
+        chain({ result: [
+          { id: 'inv-1', invoice_number: 'WPC-2026-1042', title: 'Quarterly Pest Control' },
+          { id: 'inv-2', invoice_number: 'WPC-2026-1055', title: 'Lawn Care' },
+        ] }),
+        chain({ first: invoice() }),
+        chain({ first: invoice() }),
+        chain({ first: invoice({ id: 'inv-2', status: 'paid' }) }),
+      ],
+      notification_prefs: [chain({ first: { email_enabled: true } })],
+      customer_interactions: [chain(), chain(), siblingAudit],
+      invoice_followup_sequences: claimCycle(anchorSeq, sequenceUpdate),
+    });
+
+    await InvoiceFollowUps.runPending();
+
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledTimes(1);
+    // No sibling sequence write was attempted (the queue would have thrown
+    // "Unexpected db table" otherwise) and no audit row claims it was covered.
+    expect(siblingAudit.insert).not.toHaveBeenCalled();
   });
 
   test('the anchor is held (no channel delivered) — the sibling fires through its OWN normal touch instead of being re-timed', async () => {
@@ -475,6 +515,7 @@ describe('GATE_DUNNING_COMBINED_MESSAGE — narrow rebuild', () => {
           { id: 'inv-2', invoice_number: 'WPC-2026-1055', title: 'Lawn Care' },
         ] }),
         chain({ first: invoice() }), chain({ first: invoice() }),
+        chain({ first: invoice({ id: 'inv-2' }) }),
       ],
       notification_prefs: [chain({ first: { email_enabled: true } })],
       customer_interactions: [chain(), chain(), siblingAudit],

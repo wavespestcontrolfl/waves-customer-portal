@@ -1163,14 +1163,40 @@ async function fireGroupedRows(toFire) {
           || sibling.invoice_sms_sent_at || sibling.invoice_created_at || sibling.created_at;
         const nextAt = computeNextTouchAt(siblingAnchorAt, siblingNextIndex);
         const outOfSteps = nextAt === null;
-        const updated = await db('invoice_followup_sequences')
-          .where({ id: sibling.id, status: 'active' })
-          .update({
-            updated_at: db.fn.now(),
-            step_index: siblingNextIndex,
-            next_touch_at: nextAt,
-            status: outOfSteps ? 'completed' : 'active',
-          });
+        // Same ordering and revalidation as fireStep's claim: lock the
+        // invoice row first, then advance only if the sequence is still the
+        // batch snapshot's (active, same step, same owner, due) and no
+        // worker holds a live touch claim on it, and the invoice itself is
+        // still open. Anything else is left for the next run to re-select.
+        const updated = await db.transaction(async (trx) => {
+          const lockedInvoice = await trx('invoices')
+            .where({ id: sibling.invoice_id })
+            .forUpdate()
+            .first();
+          if (
+            !lockedInvoice
+            || TERMINAL_INVOICE_STATUSES.includes(lockedInvoice.status)
+            || String(lockedInvoice.customer_id) !== String(sibling.customer_id)
+          ) return 0;
+          const claimFloor = new Date(Date.now() - TOUCH_CLAIM_TTL_MS);
+          return trx('invoice_followup_sequences')
+            .where({
+              id: sibling.id,
+              status: 'active',
+              step_index: sibling.step_index,
+              customer_id: sibling.customer_id,
+            })
+            .where('next_touch_at', '<=', new Date())
+            .where(function () {
+              this.whereNull('touch_claimed_at').orWhere('touch_claimed_at', '<', claimFloor);
+            })
+            .update({
+              updated_at: trx.fn.now(),
+              step_index: siblingNextIndex,
+              next_touch_at: nextAt,
+              status: outOfSteps ? 'completed' : 'active',
+            });
+        });
         if (updated) {
           skipped++;
           // A lightweight audit trail only (never a new ledger/idempotency
