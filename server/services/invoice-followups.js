@@ -113,6 +113,16 @@ function followupLedgerKey(row, step, channel) {
   return `invoice_followups:${row.id}:${step.id}:${channel}`;
 }
 
+// Same shape as the notificationEventKey already stamped on the actual send
+// (sendCustomerMessage's metadata, below) — but stamped on the ledger row
+// ITSELF too, so a step that fires through multiple explicitly selected
+// channels writes ledger siblings collapseDunningReminderEvents (dunning
+// spacing shadow/replay) can group as one customer contact instead of
+// counting each channel's leg as an independent reminder (codex r2 P2).
+function followupEventKey(row, step) {
+  return `invoice-followup:${row.id}:${step.id}`;
+}
+
 async function currentStepLedgerIds(row, step, channels) {
   if (process.env.GATE_COLLECTIONS_POLICY !== 'true') return [];
   if (!channels.length) return [];
@@ -1548,7 +1558,7 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
         purpose: mdPending ? 'payment_verification' : 'invoice_followup',
         invoiceIds: [row.invoice_id],
         source: 'invoice_followups',
-        metadata: { step_id: step.id },
+        metadata: { step_id: step.id, notificationEventKey: followupEventKey(row, step) },
         ...(selectedChannels !== null ? { idempotencyKey: followupLedgerKey(row, step, 'email') } : {}),
       });
     } catch (ledgerErr) {
@@ -1629,7 +1639,8 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
           customerId: customer.id, channel,
           purpose: mdPending ? 'payment_verification' : 'invoice_followup',
           invoiceIds: [row.invoice_id], source: 'invoice_followups',
-          metadata: { step_id: step.id }, idempotencyKey: followupLedgerKey(row, step, channel),
+          metadata: { step_id: step.id, notificationEventKey: followupEventKey(row, step) },
+          idempotencyKey: followupLedgerKey(row, step, channel),
         });
       } catch (err) {
         smsSkipReason = 'ledger_unavailable';
@@ -1710,7 +1721,7 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
           purpose: mdPending ? 'payment_verification' : 'invoice_followup',
           invoiceIds: [row.invoice_id],
           source: 'invoice_followups',
-          metadata: { step_id: step.id },
+          metadata: { step_id: step.id, notificationEventKey: followupEventKey(row, step) },
         });
       } catch (ledgerErr) {
         smsSkipReason = 'ledger_unavailable';

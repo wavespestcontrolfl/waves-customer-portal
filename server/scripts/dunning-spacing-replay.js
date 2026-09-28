@@ -81,6 +81,10 @@ function bucketLabel(hours) {
     .whereIn('source', [...OVERDUE_SOURCES])
     .whereIn('purpose', [...OVERDUE_PURPOSES])
     .where('occurred_at', '>', lookbackStart)
+    // Close the historical interval at the captured `now`, not query time — a
+    // reminder committed after `now` but before this query runs would
+    // otherwise slip into a report labeled as ending at `now` (codex r2 P2).
+    .where('occurred_at', '<=', now)
     .orderBy(['customer_id', 'occurred_at', 'id'])
     .select('id', 'customer_id', 'source', 'occurred_at', 'metadata');
 
