@@ -181,8 +181,8 @@ The per-family "Next steps (up to 4)" chip picker is retired (owner ruling
 2026-09-27): **Recommendations (optional)** is the single place for technician
 advice, and it prints verbatim on the report. There is no next-step
 requirement, no chip validation, and no chip-derived "From your technician"
-sentence on new reports (`nextStepSentence()` returns null; snapshots from
-summary template v7 carry none). Snapshots frozen before the retirement keep
+sentence on new reports (`buildTodaysResult` stores `nextStep: null`;
+snapshots from summary template v7 carry none). Snapshots frozen before the retirement keep
 their stored sentence and chips and render unchanged. A client that still
 posts `nextStepChips` is accepted and the field is ignored.
 

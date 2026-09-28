@@ -206,7 +206,9 @@ describe('owner template composition', () => {
       activity: null,
       visitSequence: 1,
     });
-    expect(flagged.headline).toBe('Overall landscape condition is declining — see the recommendations below.');
+    // No pointer to recommendations the visit may not carry (owner ruling
+    // 2026-09-27 retired the chips; Codex r5 #5116).
+    expect(flagged.headline).toBe('Overall landscape condition is declining.');
     expect(flagged.body).toContain('A possible Ganoderma conk was observed on a palm — an arborist evaluation is recommended.');
 
     const trunkConcern = buildTodaysResult({

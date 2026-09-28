@@ -3267,8 +3267,11 @@ function buildTodaysResult({
       Excellent: 'Overall landscape condition is excellent.',
       Good: 'Overall landscape condition is good.',
       Fair: 'Overall landscape condition is fair.',
-      Poor: 'Overall landscape condition is poor — see the recommendations below.',
-      Declining: 'Overall landscape condition is declining — see the recommendations below.',
+      // No "see the recommendations below": since the Next steps chips were
+      // retired the visit may carry no advice at all, and this builder can't
+      // see the Recommendations field (Codex r5 #5116).
+      Poor: 'Overall landscape condition is poor.',
+      Declining: 'Overall landscape condition is declining.',
       Recovering: 'Overall landscape condition is recovering.',
     };
     const headline = conditionHeadlines[condition];
