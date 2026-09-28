@@ -528,16 +528,29 @@ It does NOT gate the existing `photos` array itself — that array (S3-presigned
 URLs plus each photo's own `service_photos.caption`, already the tech's
 reviewed/final text, never an unreviewed or deleted photo's caption) is
 unchanged, ungated, pre-existing behavior served on every mode regardless of
-this flag. The one thing the flag controls is additive: the token-gated MMS
-preview image (`GET /api/reports/:token/preview.jpg`, serving a stored
+this flag. Gate on ALSO adds `previewPhoto` (`{ url, caption } | null`) — a
+deliberately SEPARATE, minimal field, never a pointer into `photos`: the
+first `photos` entry with a resolvable `url`, but with its `caption` run
+through the SAME access-code redactor every other free-text field entering
+the generate-report grounding uses (`redactAccessCodes`,
+server/services/context-aggregator.js) before it reaches this
+customer-visible field — a tech caption can carry a gate/lockbox/alarm code
+exactly like a notes field can. `previewPhoto` is absent (not merely null)
+when the gate is off. The token-gated MMS preview image (`GET
+/api/reports/:token/preview.jpg`, serving a stored
 `service_report_notification_assets` row built by the `sms_preview` render)
-composites the FIRST available entry of that same `photos` array — its
-already-public URL and caption — into the preview card only when this flag
-is `true`; the screenshot's fixed viewport grows to fit the added photo
-(server/services/service-report/preview-image.js, capped to only ever grow,
-never shrink below the pre-existing default) and the asset's render version
-was bumped so no pre-feature cached preview is ever served as current. No
-new fields, captions, or images reach `preview.jpg` beyond what `/data`
+composites `previewPhoto` into the preview card only when
+`reportPhotoContentEnabled` is `true`; the screenshot's fixed viewport grows
+to fit the added photo (server/services/service-report/preview-image.js,
+capped to only ever grow, never shrink below the pre-existing default). The
+cached preview's identity (`service_report_notification_assets.input_hash`)
+includes whether the gate was on AND the visit's photo-row set (the same
+`reportPhotoSetPdfSignature` signature component the PDF storage key already
+carries) — so flipping the gate, or the eligible photo set changing (added/
+removed/reordered rows), never serves a preview cached under the other
+state; the asset's render version was also bumped so no pre-feature cached
+preview is ever served as current. No new fields, captions, or images reach
+`preview.jpg` beyond `previewPhoto` and the pre-existing `photos` `/data`
 already exposes for the SAME token,
 the legacy SPA `/recap/:token` link (token-shaped and rate-limited; redirects
 to `/report/:token#visit-recap`, where the report embeds the approved "Your

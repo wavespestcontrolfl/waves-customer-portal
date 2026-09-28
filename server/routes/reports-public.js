@@ -2338,6 +2338,25 @@ router.get('/:token/data', async (req, res, next) => {
       // ungated and already served on every mode, so the flag only controls
       // that one additive render, never the existing gallery/PDF photos.
       v1Data.reportPhotoContentEnabled = require('../config/feature-gates').reportPhotoContentLive();
+      // The ONE photo (first resolvable) the sms_preview card may composite —
+      // a deliberately separate, minimal field rather than reusing the raw
+      // v1Data.photos entry: its caption is redacted the same way every other
+      // free-text field in the generate-report grounding is (a tech caption
+      // is exactly as capable of carrying a gate/lockbox/alarm code as a
+      // notes field is), since this one rides into customer-visible MMS
+      // preview copy. v1Data.photos itself stays raw/ungated — the existing
+      // Field Photos section and PDF gallery are unaffected.
+      if (v1Data.reportPhotoContentEnabled) {
+        const eligiblePreviewPhoto = (v1Data.photos || []).find((p) => p && p.url);
+        v1Data.previewPhoto = eligiblePreviewPhoto
+          ? {
+            url: eligiblePreviewPhoto.url,
+            caption: eligiblePreviewPhoto.caption
+              ? require('../services/context-aggregator').redactAccessCodes(eligiblePreviewPhoto.caption)
+              : '',
+          }
+          : null;
+      }
       // "Your Visit, in Motion" — surface the tech-approved recap inside the
       // report (owner ask 2026-07-05; the standalone /recap/:token player was
       // retired 2026-07-09 — the report is now the only surface). Pest reports

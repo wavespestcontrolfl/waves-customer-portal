@@ -5,6 +5,8 @@ const config = require('../../config');
 const logger = require('../logger');
 const { launchBrowser, serviceReportViewerUrl } = require('./pdf');
 const { stableStringify } = require('./ai-summary');
+const { reportPhotoSetPdfSignature } = require('./photo-set-signature');
+const { reportPhotoContentLive } = require('../../config/feature-gates');
 
 // v2: GATE_REPORT_PHOTO_CONTENT can composite a photo thumbnail into the
 // card and grow the viewport to fit it — bump so a preview cached under v1
@@ -32,13 +34,24 @@ function publicPreviewUrl(token) {
   return `${base}/api/reports/${encodeURIComponent(token)}/preview.jpg`;
 }
 
-function computeSmsPreviewInputHash({ recordId, token, dynamicContext, currentPressureIndexOverride } = {}) {
+function computeSmsPreviewInputHash({
+  recordId, token, dynamicContext, currentPressureIndexOverride,
+  // GATE_REPORT_PHOTO_CONTENT + the chosen photo's identity (owner pre-push
+  // P1): a bare gate flip, or the eligible photo set changing, must move the
+  // cache key — otherwise a preview rendered under the OLD state (no photo,
+  // or a now-stale photo) would keep serving forever. Same suffix-join
+  // convention the PDF signatures use (e.g. -termv2 / -pex1). '' when the
+  // gate is off, so every pre-feature and gate-off preview keeps its
+  // existing identity untouched.
+  photoContentSignature = '',
+} = {}) {
   return sha256(stableStringify({
     recordId,
     token,
     dynamicContext,
     currentPressureIndexOverride,
     renderVersion: RENDER_VERSION,
+    photoContentSignature,
   }));
 }
 
@@ -131,11 +144,22 @@ async function buildAndStoreSmsPreviewImage({
     return null;
   }
 
+  // Gate state + the chosen photo's identity join the cache key — see
+  // computeSmsPreviewInputHash. reportPhotoSetPdfSignature (photo-set-
+  // signature.js) is the SAME photo-row-set signature the PDF pipeline's own
+  // storage key already carries; only read when the gate is on, so a
+  // gate-off render never pays the extra query and never moves its key.
+  const photoContentGateOn = reportPhotoContentLive();
+  const photoContentSignature = photoContentGateOn
+    ? `-pgon${await reportPhotoSetPdfSignature(recordId, knex).catch(() => '-phu')}`
+    : '';
+
   const inputHash = computeSmsPreviewInputHash({
     recordId,
     token,
     dynamicContext,
     currentPressureIndexOverride,
+    photoContentSignature,
   });
   const existing = await knex('service_report_notification_assets')
     .where({

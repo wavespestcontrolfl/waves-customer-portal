@@ -22586,16 +22586,23 @@ router.post('/generate-report', async (req, res) => {
     const MAX_REPORT_PHOTO_CAPTION_CHARS = 200;
     const MAX_REPORT_PHOTO_SUMMARY_CHARS = 600;
     const photoContentLive = reportPhotoContentLive();
+    // Same redactor every other free-text field in this prompt already runs
+    // through (promptNotes/promptActions/… below) — a tech-typed caption or
+    // summary is exactly as capable of carrying a gate/lockbox/alarm code as
+    // a notes field is, and this text reaches both the AI prompt and (via
+    // the MMS preview thumbnail) customer-visible copy. Redact BEFORE the
+    // char cap so a code isn't left half-truncated into something that
+    // still reads like a code.
     const cappedPhotoCaptions = photoContentLive && Array.isArray(photoCaptions)
       ? photoCaptions
         .filter((c) => typeof c === 'string')
         .map((c) => c.trim())
         .filter(Boolean)
         .slice(0, MAX_REPORT_PHOTO_CAPTIONS)
-        .map((c) => c.slice(0, MAX_REPORT_PHOTO_CAPTION_CHARS))
+        .map((c) => redactAccessCodes(c).slice(0, MAX_REPORT_PHOTO_CAPTION_CHARS))
       : [];
     const photoSummaryText = photoContentLive && typeof photoSummary === 'string'
-      ? photoSummary.trim().slice(0, MAX_REPORT_PHOTO_SUMMARY_CHARS)
+      ? redactAccessCodes(photoSummary.trim()).slice(0, MAX_REPORT_PHOTO_SUMMARY_CHARS)
       : '';
     // Same "is there enough to generate?" rule as the client (buildAiReportPayload).
     // photoCount is intentionally NOT sufficient on its own — the model can't see photos.

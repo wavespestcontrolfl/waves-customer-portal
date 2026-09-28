@@ -9,9 +9,12 @@ import legacyLawnReport from './__fixtures__/legacy-lawn-report.json';
 
 // GATE_REPORT_PHOTO_CONTENT (owner spec 2026-09-27): the MMS preview card
 // (SmsReportPreview, mode=sms_preview) composites one photo thumbnail only
-// when the server-set reportPhotoContentEnabled flag is true AND at least
-// one resolvable photo is present — mirrors ReportViewPage.render.test.jsx's
-// full-render pattern.
+// when the server-set reportPhotoContentEnabled flag is true AND the
+// server-computed previewPhoto field is present. previewPhoto is a
+// SEPARATE, already-redacted field (reports-public.js) — the component must
+// read ONLY previewPhoto for the thumbnail, never fall back to the raw
+// (unredacted) photos array, even when photos[0] would otherwise look
+// eligible. Mirrors ReportViewPage.render.test.jsx's full-render pattern.
 function renderPreview(payload) {
   vi.stubGlobal(
     'fetch',
@@ -39,12 +42,14 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 describe('SmsReportPreview photo thumbnail', () => {
-  it('gate on + a photo present → renders the first photo as a thumbnail', async () => {
+  it('gate on + previewPhoto present → renders it as a thumbnail with its (already-redacted) caption', async () => {
     renderPreview({
       ...legacyLawnReport,
       reportPhotoContentEnabled: true,
+      previewPhoto: { url: 'https://cdn.example/photo-1.jpg', caption: 'Front bed treated.' },
+      // The full gallery may carry other/different photos — the thumbnail
+      // must come from previewPhoto, never scan this array itself.
       photos: [
-        { id: 'photo-1', url: 'https://cdn.example/photo-1.jpg', caption: 'Front bed treated.' },
         { id: 'photo-2', url: 'https://cdn.example/photo-2.jpg', caption: 'Back bed treated.' },
       ],
     });
@@ -55,31 +60,42 @@ describe('SmsReportPreview photo thumbnail', () => {
     expect(screen.queryByText('Back bed treated.')).toBeNull();
   });
 
-  it('gate off → no thumbnail even with photos present', async () => {
+  it('gate on + previewPhoto.caption already redacted by the server → renders the redacted text verbatim, never the raw code', async () => {
+    renderPreview({
+      ...legacyLawnReport,
+      reportPhotoContentEnabled: true,
+      previewPhoto: { url: 'https://cdn.example/photo-1.jpg', caption: 'Lockbox [redacted] is by the front door.' },
+    });
+    await waitFor(() => expect(document.querySelector('.sms-preview-photo img')).toBeTruthy());
+    expect(screen.getByText('Lockbox [redacted] is by the front door.')).toBeInTheDocument();
+  });
+
+  it('gate off → no thumbnail even with previewPhoto present in the payload', async () => {
     renderPreview({
       ...legacyLawnReport,
       reportPhotoContentEnabled: false,
+      previewPhoto: { url: 'https://cdn.example/photo-1.jpg', caption: 'Front bed treated.' },
+    });
+    await waitFor(() => expect(document.querySelector('.sms-preview-card')).toBeTruthy());
+    expect(document.querySelector('.sms-preview-photo')).toBeNull();
+  });
+
+  it('gate on + previewPhoto null (no eligible photo) → no thumbnail', async () => {
+    renderPreview({
+      ...legacyLawnReport,
+      reportPhotoContentEnabled: true,
+      previewPhoto: null,
       photos: [{ id: 'photo-1', url: 'https://cdn.example/photo-1.jpg', caption: 'Front bed treated.' }],
     });
     await waitFor(() => expect(document.querySelector('.sms-preview-card')).toBeTruthy());
     expect(document.querySelector('.sms-preview-photo')).toBeNull();
   });
 
-  it('gate on + no photos → no thumbnail', async () => {
+  it('gate on + previewPhoto entirely absent from the payload → no thumbnail, no crash', async () => {
     renderPreview({
       ...legacyLawnReport,
       reportPhotoContentEnabled: true,
-      photos: [],
-    });
-    await waitFor(() => expect(document.querySelector('.sms-preview-card')).toBeTruthy());
-    expect(document.querySelector('.sms-preview-photo')).toBeNull();
-  });
-
-  it('gate on + only an unresolved photo URL → skips it rather than rendering a broken image', async () => {
-    renderPreview({
-      ...legacyLawnReport,
-      reportPhotoContentEnabled: true,
-      photos: [{ id: 'photo-1', url: null, caption: 'Front bed treated.' }],
+      photos: [{ id: 'photo-1', url: 'https://cdn.example/photo-1.jpg', caption: 'Front bed treated.' }],
     });
     await waitFor(() => expect(document.querySelector('.sms-preview-card')).toBeTruthy());
     expect(document.querySelector('.sms-preview-photo')).toBeNull();

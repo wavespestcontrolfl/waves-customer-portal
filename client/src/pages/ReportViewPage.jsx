@@ -5409,15 +5409,13 @@ function SmsReportPreview({ data }) {
     ? (data.lawnAssessment.customerSummary || 'Lawn assessment is complete.')
     : (aiSummary?.headline || 'Service is complete.');
   const body = isLawn ? lawnAssessmentBody(data.lawnAssessment) : aiSummary?.body;
-  // GATE_REPORT_PHOTO_CONTENT (owner spec 2026-09-27): the flag is server-set
-  // (v1Data.reportPhotoContentEnabled) — data.photos itself is ungated and
-  // already served on every mode, so gate reads decide only whether this one
-  // additive thumbnail composites into the MMS preview image. First/primary
-  // photo only (list order matches the report's own gallery); one whose URL
-  // failed to resolve is skipped rather than rendering a broken image.
-  const previewPhoto = data.reportPhotoContentEnabled
-    ? (data.photos || []).find((p) => p && p.url) || null
-    : null;
+  // GATE_REPORT_PHOTO_CONTENT (owner spec 2026-09-27): data.previewPhoto is a
+  // SEPARATE, server-computed field (reports-public.js) — the first
+  // resolvable photo from the ungated data.photos array, but with its
+  // caption redacted for access codes before it ever reaches this
+  // customer-visible MMS preview copy. Never read data.photos directly here
+  // for the caption text.
+  const previewPhoto = data.reportPhotoContentEnabled ? (data.previewPhoto || null) : null;
   return (
     <div className="sms-preview-page">
       <style>{`

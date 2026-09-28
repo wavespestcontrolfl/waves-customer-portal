@@ -110,3 +110,22 @@ test('gate on: non-string caption entries are dropped rather than crashing the r
   expect(text).toContain('Photo 1: Ants at the baseboard.');
   expect(text).not.toContain('Photo 2:');
 });
+
+test('gate on: an access code in a caption or the summary is redacted before it reaches the prompt (pre-push P1)', async () => {
+  process.env.GATE_REPORT_PHOTO_CONTENT = 'true';
+  const res = mkRes();
+  await handler(mkReq({
+    photoCaptions: [
+      'The photo under the sink shows the gate code 4821 written on the wall.',
+      'Lockbox 1234 is by the front door.',
+    ],
+    photoSummary: 'Notes mention the gate code 4821 and lockbox 1234 for access.',
+  }), res);
+  expect(res.statusCode).toBe(200);
+  const text = mockProvider.mock.calls[0][0].text;
+  expect(text).toContain('gate code [redacted]');
+  expect(text).toContain('Lockbox [redacted]');
+  expect(text).toContain('Summary: Notes mention the gate code [redacted] and lockbox [redacted] for access.');
+  expect(text).not.toContain('4821');
+  expect(text).not.toContain('1234');
+});

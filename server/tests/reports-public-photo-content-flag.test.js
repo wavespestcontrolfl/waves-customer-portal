@@ -164,4 +164,49 @@ describe('GET /reports/:token/data reportPhotoContentEnabled', () => {
       expect(body.photos).toEqual(PHOTOS);
     });
   });
+
+  test('gate off → previewPhoto is absent entirely (not merely null)', async () => {
+    reportPhotoContentLive.mockReturnValue(false);
+    mockDb();
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/reports/${VALID_TOKEN}/data`);
+      const body = await res.json();
+      expect(Object.hasOwn(body, 'previewPhoto')).toBe(false);
+    });
+  });
+
+  test('gate on + no eligible (resolvable-URL) photo → previewPhoto is null', async () => {
+    reportPhotoContentLive.mockReturnValue(true);
+    buildReportV1Data.mockResolvedValue({
+      typedReport: { headline: 'Perimeter looked quiet today.' },
+      pestPressure: null,
+      pdfUrl: `/api/reports/${VALID_TOKEN}`,
+      photos: [{ id: 'photo-1', url: null, caption: 'Unresolved.' }],
+    });
+    mockDb();
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/reports/${VALID_TOKEN}/data`);
+      const body = await res.json();
+      expect(body.previewPhoto).toBeNull();
+    });
+  });
+
+  test('gate on + an eligible photo whose caption carries an access code → previewPhoto.caption is redacted (pre-push P1)', async () => {
+    reportPhotoContentLive.mockReturnValue(true);
+    buildReportV1Data.mockResolvedValue({
+      typedReport: { headline: 'Perimeter looked quiet today.' },
+      pestPressure: null,
+      pdfUrl: `/api/reports/${VALID_TOKEN}`,
+      photos: [{ id: 'photo-1', url: 'https://cdn.example/photo-1.jpg', caption: 'Lockbox 1234 is by the front door.' }],
+    });
+    mockDb();
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/reports/${VALID_TOKEN}/data`);
+      const body = await res.json();
+      expect(body.previewPhoto).toEqual({
+        url: 'https://cdn.example/photo-1.jpg',
+        caption: 'Lockbox [redacted] is by the front door.',
+      });
+    });
+  });
 });
