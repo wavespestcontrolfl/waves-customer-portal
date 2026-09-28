@@ -7121,21 +7121,6 @@ function initScheduledJobs() {
   // DAILY 11AM — Balance reminders (upcoming services with outstanding balance)
   // =========================================================================
   cron.schedule('0 11 * * *', async () => {
-    // Retired (dunning unification, owner ruling 2026-09-27): the invoice
-    // follow-up ladder and the pre-visit balance reminder own these now.
-    // GATE_BALANCE_REMINDER_LEGACY_OFF, read at call time (strict 'true').
-    // latePaymentCheck additionally needs GATE_DUNNING_LADDER_90 live (its
-    // own Day 60/90 steps are what replaces it — Codex P2), so the whole
-    // cron body is skipped only when BOTH methods would actually retire;
-    // dailyCheck alone retiring (legacy-off on, ladder gate off) still
-    // needs the block entered so latePaymentCheck runs its legacy body —
-    // each method re-checks its own gate(s) and decides for itself.
-    const bothRetired = process.env.GATE_BALANCE_REMINDER_LEGACY_OFF === 'true'
-      && process.env.GATE_DUNNING_LADDER_90 === 'true';
-    if (bothRetired) {
-      logger.info('[balance-reminders] retired: GATE_BALANCE_REMINDER_LEGACY_OFF, the invoice follow-up ladder and the pre-visit balance reminder own these');
-      return;
-    }
     logger.info('Running: balance reminders');
     try {
       await runExclusive('balance-reminders', async () => {

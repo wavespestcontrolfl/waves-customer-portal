@@ -149,15 +149,6 @@ async function logLatePaymentEmailAttempt({
 
 class BalanceReminder {
   async dailyCheck() {
-    // Retired (dunning unification, owner ruling 2026-09-27): the invoice
-    // follow-up ladder and the pre-visit balance reminder own these now.
-    // GATE_BALANCE_REMINDER_LEGACY_OFF, read at call time (strict 'true');
-    // checked here too so a direct call bypassing the scheduler's own gate
-    // check is still inert.
-    if (process.env.GATE_BALANCE_REMINDER_LEGACY_OFF === 'true') {
-      logger.info('[balance-reminders] retired: GATE_BALANCE_REMINDER_LEGACY_OFF, the invoice follow-up ladder and the pre-visit balance reminder own these');
-      return;
-    }
     const today = etDateString();
     const day7 = etDateString(addETDays(new Date(), 7));
 
@@ -668,32 +659,13 @@ class BalanceReminder {
       body: `$${balance.totalBalance.toFixed(2)} overdue ${balance.daysOverdue} days.`,
       metadata: JSON.stringify({ channel, notificationEventKey: eventKey }),
     });
-    // Shared with the Day 90 ladder (invoice-followups.js fireTouch), which
-    // stamps the same at-risk tier for its own Day 60/90 steps — one
-    // implementation so the two callers can't drift.
-    if (stage >= 60 && result.deliveredNow.length) {
-      await require('../invoice-followups').markAtRiskForLongOverdue(customer.id);
-    }
+    if (stage >= 60 && result.deliveredNow.length) await db('customers').where({ id: customer.id }).update({
+      pipeline_stage: 'at_risk', pipeline_stage_changed_at: new Date(),
+    });
     return result.deliveredNow.length > 0;
   }
 
   async latePaymentCheck() {
-    // Retired (dunning unification, owner ruling 2026-09-27) — but ONLY
-    // together with GATE_DUNNING_LADDER_90: the Day 60/90 steps that
-    // replace this account-level 7/14/30/60/90 check exist only under the
-    // ladder gate (Codex P2), so retiring latePaymentCheck while the ladder
-    // gate is unset would drop every 60/90-day reminder with nothing
-    // replacing it. Checked here too (not just the scheduler's own gate
-    // check) so a direct call bypassing the scheduler is still inert.
-    // dailyCheck() has no such coupling — the pre-visit reminder already
-    // replaces it on its own.
-    if (process.env.GATE_BALANCE_REMINDER_LEGACY_OFF === 'true') {
-      if (process.env.GATE_DUNNING_LADDER_90 === 'true') {
-        logger.info('[balance-reminders] retired: GATE_BALANCE_REMINDER_LEGACY_OFF, the invoice follow-up ladder and the pre-visit balance reminder own these');
-        return;
-      }
-      logger.warn('[balance-reminders] GATE_BALANCE_REMINDER_LEGACY_OFF ignored for latePaymentCheck: GATE_DUNNING_LADDER_90 is not live');
-    }
     const customers = await db("customers")
       .where({ active: true })
       .whereNull("deleted_at")
@@ -790,12 +762,20 @@ class BalanceReminder {
         count <= 3
       ) {
         templateKey = "late_payment_60d";
-        // Shared with the Day 90 ladder (invoice-followups.js fireTouch) —
-        // one implementation so the two callers can't drift.
-        await require("../invoice-followups").markAtRiskForLongOverdue(customer.id);
+        await db("customers")
+          .where({ id: customer.id })
+          .update({
+            pipeline_stage: "at_risk",
+            pipeline_stage_changed_at: new Date(),
+          });
       } else if (balance.daysOverdue >= 90 && count <= 4) {
         templateKey = "late_payment_90d";
-        await require("../invoice-followups").markAtRiskForLongOverdue(customer.id);
+        await db("customers")
+          .where({ id: customer.id })
+          .update({
+            pipeline_stage: "at_risk",
+            pipeline_stage_changed_at: new Date(),
+          });
       } else continue;
 
       if (templateKey) {

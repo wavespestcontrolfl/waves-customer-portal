@@ -3169,24 +3169,6 @@ const gates = {
   // services/previsit-balance-reminder.js's leadDays() reads
   // GATE_PREVISIT_BALANCE_5DAY at call time.
   previsitBalance5Day: process.env.GATE_PREVISIT_BALANCE_5DAY === 'true',
-
-  // Retire the dormant legacy balance-reminder cron (dunning unification,
-  // owner ruling 2026-09-27): balanceReminder.dailyCheck() (gentle/firm/
-  // urgent pre-visit tiers) and .latePaymentCheck() (account-level 7/14/30/
-  // 60/90 late check) sent 0 messages in the last 30 days — the invoice
-  // follow-up ladder and the pre-visit balance reminder own these now.
-  // Ships DARK: off unless exactly 'true'. This entry is for logGateStatus
-  // only: scheduler.js's 11AM cron and services/workflows/balance-reminder.js's
-  // dailyCheck()/latePaymentCheck() read GATE_BALANCE_REMINDER_LEGACY_OFF at
-  // call time. latePaymentCheck() retires ONLY when GATE_DUNNING_LADDER_90
-  // is ALSO live (its Day 60/90 steps, which stamp the same at-risk tier via
-  // the shared markAtRiskForLongOverdue helper, are what actually replace
-  // it) — legacy-off with the ladder gate unset logs a warn and runs
-  // latePaymentCheck's legacy body unchanged; dailyCheck() has no such
-  // coupling. A legacy explicit-channel episode with one leg delivered and
-  // the other still pending the moment of the flip never drains (the 11:00
-  // cron was its only retrier); impact is nil (0 legacy sends in 30 days).
-  balanceReminderLegacyOff: process.env.GATE_BALANCE_REMINDER_LEGACY_OFF === 'true',
 };
 
 // Parse a gate env var at CALL time (for request-time availability checks

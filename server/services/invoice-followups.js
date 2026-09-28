@@ -1582,33 +1582,6 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
       }),
     });
   } catch { /* non-critical */ }
-
-  // Day 60/90 (Day 90 ladder, GATE_DUNNING_LADDER_90) inherits the legacy
-  // balance-reminder's at-risk stamp for these same debt-age tiers (Codex
-  // P2, dunning unification): the pre-visit reminder never carried this
-  // side effect, so retiring the legacy cron under
-  // GATE_BALANCE_REMINDER_LEGACY_OFF must not drop it. Delivery-gated, same
-  // point the sequence itself advances — the legacy explicit-channel branch
-  // (balance-reminder.js sendExplicitLatePaymentReminder) is delivery-gated
-  // too; the legacy implicit-channel branch (latePaymentCheck) stamped
-  // unconditionally at template selection, but "a step actually fired and
-  // delivered" is the ladder's own equivalent trigger.
-  if (ladderThrough90Live() && (step.id === 'd60_reminder' || step.id === 'd90_final_notice')) {
-    await markAtRiskForLongOverdue(customer.id);
-  }
-}
-
-// Shared with the legacy balance-reminder (balance-reminder.js), which
-// calls this same helper from its own 60/90-day branches instead of writing
-// the update inline — one implementation, so the two callers can never
-// drift apart on which fields this stamps. No predicate on the customer's
-// current pipeline_stage/status: the legacy code overwrote it unconditionally
-// once a customer crossed into the 60-day tier, and this preserves that.
-async function markAtRiskForLongOverdue(customerId, database = db) {
-  await database('customers').where({ id: customerId }).update({
-    pipeline_stage: 'at_risk',
-    pipeline_stage_changed_at: new Date(),
-  });
 }
 
 /**
@@ -2313,8 +2286,6 @@ module.exports = {
   skipStaleTouches,
   firstEligibleFireAt,
   STALE_TOUCH_GRACE_MS,
-  ladderThrough90Live,
-  markAtRiskForLongOverdue,
   // Pure predicates, exported for tests only.
   _test: { canSystemResume, isSystemStopStamp },
 };
