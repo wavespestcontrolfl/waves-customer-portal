@@ -56,8 +56,7 @@ const {
 // v4: + visitStage, so the first visit of a rodent trapping program reads as
 // the setup it is instead of a routine re-check (owner 2026-08-02).
 // v5: validate appointment date, window, and time claims through the shared guard.
-// v6: preserve grounded care timing without exempting appointment promises.
-const PROMPT_VERSION = 'typed_report_narrative_v6';
+const PROMPT_VERSION = 'typed_report_narrative_v5';
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const _cache = new Map();
 
