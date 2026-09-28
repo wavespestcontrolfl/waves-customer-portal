@@ -23,15 +23,30 @@
  * customer-facing report or its cache key); the order — photo_order, then
  * taken_at, then id as a final deterministic tiebreak — matches the
  * renderer's own gallery order.
+ *
+ * `options.failClosed` (pre-push P1, follow-up to the above): the RENDER
+ * path (report-data.js) wants the old fail-SOFT behavior — an unreadable
+ * photo set degrades to "no lawn photos" rather than 500ing a customer's
+ * report. A SIGNATURE caller (photo-set-signature.js) must NOT do that: an
+ * empty array on a genuine DB error is indistinguishable from "this
+ * assessment truly has no customer-visible photos", so
+ * reportPhotoSetPdfSignature would build a valid EMPTY-SET key on pure
+ * uncertainty — it could then match an older photo-less asset, or persist
+ * a render made during the same outage under that same (wrong) key,
+ * bypassing the unique '-phu' failure token this file's caller relies on
+ * elsewhere for exactly this "uncertain ⇒ never match" guarantee. Passing
+ * `failClosed: true` rethrows instead of swallowing, so a signature caller
+ * that does NOT catch it lets the failure reach ITS OWN try/catch and the
+ * unique token — never a false empty-set match.
  */
-async function resolveLawnReportPhotos(assessmentId, knex) {
+async function resolveLawnReportPhotos(assessmentId, knex, { failClosed = false } = {}) {
   if (!assessmentId || !knex) return [];
-  return knex('lawn_assessment_photos')
+  const query = knex('lawn_assessment_photos')
     .where({ assessment_id: assessmentId, customer_visible: true })
     .orderBy('photo_order', 'asc')
     .orderBy('taken_at', 'asc')
-    .orderBy('id', 'asc')
-    .catch(() => []);
+    .orderBy('id', 'asc');
+  return failClosed ? query : query.catch(() => []);
 }
 
 module.exports = { resolveLawnReportPhotos };

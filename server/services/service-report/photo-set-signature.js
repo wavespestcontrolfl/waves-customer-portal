@@ -91,6 +91,15 @@ async function reportPhotoSetPdfSignature(serviceRecordId, knex = null, options 
     // loadLinkedLawnAssessment is lazily required (report-data.js is a large
     // sibling module with no reason to load eagerly on every signature call,
     // and this file has no top-level dependency on it otherwise).
+    //
+    // Both lookups below run failClosed (pre-push P1, follow-up): a genuine
+    // "no assessment linked" / "no customer-visible photos" resolves normally
+    // (null / []) and simply contributes no lawn part — that is NOT an
+    // error. Only a real QUERY FAILURE throws here, and neither call is
+    // caught locally, so it propagates to this function's own outer
+    // try/catch below and comes back as the unique '-phu' failure token —
+    // never a valid empty-set signature an unreadable lawn photo set could
+    // otherwise be mistaken for (see report-photo-set.js's failClosed doc).
     let lawnPart = '';
     const serviceLine = lawnFields?.service_line || detectServiceLine(lawnFields?.service_type);
     if (serviceLine === 'lawn' && lawnFields?.customer_id) {
@@ -100,10 +109,9 @@ async function reportPhotoSetPdfSignature(serviceRecordId, knex = null, options 
           customer_id: lawnFields.customer_id,
           scheduled_service_id: lawnFields.scheduled_service_id,
           service_id: lawnFields.service_id,
-        }, knex)
-        .catch(() => null);
+        }, knex, { failClosed: true });
       if (assessment?.id) {
-        const turfPhotos = await resolveLawnReportPhotos(assessment.id, knex);
+        const turfPhotos = await resolveLawnReportPhotos(assessment.id, knex, { failClosed: true });
         if (turfPhotos.length) {
           const turfDigest = crypto.createHash('sha1')
             .update(turfPhotos.map((p) => `${p.id}:${p.updated_at ? new Date(p.updated_at).toISOString() : ''}`).join(','))

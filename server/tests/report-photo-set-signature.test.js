@@ -126,14 +126,32 @@ describe('reportPhotoSetPdfSignature — lawn turf photo identity (pre-push P1, 
         return { where() { return this; }, async first() { return serviceRecord; } };
       }
       if (table === 'lawn_assessments') {
-        const chain = { where() { return chain; }, orderBy() { return chain; }, async first() { return assessment; } };
-        return chain;
-      }
-      if (table === 'lawn_assessment_photos') {
         const chain = {
           where() { return chain; },
           orderBy() { return chain; },
-          catch(fn) { return Promise.resolve(turfPhotos).catch(fn); },
+          async first() {
+            if (assessment === 'throw') throw new Error('lawn_assessments query failed');
+            return assessment;
+          },
+        };
+        return chain;
+      }
+      if (table === 'lawn_assessment_photos') {
+        // failClosed:true (resolveLawnReportPhotos) awaits this chain
+        // directly, with no .catch() call of its own — so it must be
+        // properly thenable, not just support .catch(fn) the way the
+        // fail-soft render path calls it.
+        const chain = {
+          where() { return chain; },
+          orderBy() { return chain; },
+          then(resolve, reject) {
+            if (turfPhotos === 'throw') return Promise.reject(new Error('lawn_assessment_photos query failed')).then(resolve, reject);
+            return Promise.resolve(turfPhotos).then(resolve, reject);
+          },
+          catch(fn) {
+            if (turfPhotos === 'throw') return Promise.reject(new Error('lawn_assessment_photos query failed')).catch(fn);
+            return Promise.resolve(turfPhotos).catch(fn);
+          },
         };
         return chain;
       }
@@ -193,6 +211,152 @@ describe('reportPhotoSetPdfSignature — lawn turf photo identity (pre-push P1, 
   test('a lawn visit with no linked assessment → no lawn signature part', async () => {
     const result = await reportPhotoSetPdfSignature('rec-lawn-2', knexForLawn({ assessment: null }));
     expect(result).not.toMatch(/-lp/);
+  });
+
+  test('the turf-photo query throwing → the unique failure token, never a valid empty-set signature (pre-push P1, failClosed follow-up)', async () => {
+    const a = await reportPhotoSetPdfSignature('rec-lawn-1', knexForLawn({ turfPhotos: 'throw' }));
+    const b = await reportPhotoSetPdfSignature('rec-lawn-1', knexForLawn({ turfPhotos: 'throw' }));
+    const emptySet = await reportPhotoSetPdfSignature('rec-lawn-1', knexForLawn({ turfPhotos: [] }));
+    expect(a).toMatch(/^-phu-/);
+    // Two failures never collide (same guarantee as the existing
+    // "a failed lookup is a UNIQUE token" test above) — a stale render from
+    // one failed attempt can never be mistakenly served/stored against a
+    // later one.
+    expect(a).not.toBe(b);
+    // The core regression this closes: previously an unreadable photo set
+    // resolved to [] and produced the SAME signature as a genuinely empty
+    // one, so a caller could match/store against it. Now it can't.
+    expect(a).not.toBe(emptySet);
+    expect(emptySet).not.toMatch(/^-phu-/);
+  });
+
+  test('the linked-assessment lookup throwing → the same unique failure token, never a valid empty-set signature', async () => {
+    const a = await reportPhotoSetPdfSignature('rec-lawn-1', knexForLawn({ assessment: 'throw' }));
+    const b = await reportPhotoSetPdfSignature('rec-lawn-1', knexForLawn({ assessment: 'throw' }));
+    const noAssessment = await reportPhotoSetPdfSignature('rec-lawn-1', knexForLawn({ assessment: null }));
+    expect(a).toMatch(/^-phu-/);
+    expect(a).not.toBe(b);
+    // "couldn't tell if there's a linked assessment" must never look like
+    // "confirmed there is none" — the latter is a legitimate, stable '' key.
+    expect(a).not.toBe(noAssessment);
+    expect(noAssessment).not.toMatch(/^-phu-/);
+  });
+});
+
+describe('report-data.js render path keeps the fail-SOFT [] behavior (pre-push P1 follow-up: only the SIGNATURE path fails closed)', () => {
+  const { buildReportV1Data } = require('../services/service-report/report-data');
+
+  // Minimal known-good lawn fixture set, matching
+  // report-lawn-next-visit.test.js's makeKnex — trimmed to exactly what
+  // buildReportV1Data needs for a lawn render to complete.
+  function makeKnex(fixtures) {
+    const knex = (table) => {
+      let rows = [...(fixtures[table] || [])];
+      const sortKeys = [];
+      const q = {};
+      const applySort = () => {
+        rows = [...rows].sort((a, b) => {
+          for (const { col, dir } of sortKeys) {
+            const cmp = String(a[col] ?? '').localeCompare(String(b[col] ?? ''));
+            if (cmp !== 0) return dir === 'desc' ? -cmp : cmp;
+          }
+          return 0;
+        });
+      };
+      Object.assign(q, {
+        select: () => q,
+        leftJoin: () => q,
+        modify(fn) { fn(q); return q; },
+        limit(n) { rows = rows.slice(0, n); return q; },
+        where(a, b) {
+          if (typeof a === 'function') return q;
+          if (a && typeof a === 'object') {
+            rows = rows.filter((r) => Object.entries(a).every(([k, v]) => r[k] === v));
+          } else if (arguments.length === 2) {
+            rows = rows.filter((r) => r[a] === b);
+          }
+          return q;
+        },
+        whereIn(col, vals) { rows = rows.filter((r) => vals.includes(r[col])); return q; },
+        whereNot(a, b) {
+          if (a && typeof a === 'object') rows = rows.filter((r) => !Object.entries(a).every(([k, v]) => r[k] === v));
+          else rows = rows.filter((r) => r[a] !== b);
+          return q;
+        },
+        whereNotNull(col) { rows = rows.filter((r) => r[col] != null); return q; },
+        whereNull(col) { rows = rows.filter((r) => r[col] == null); return q; },
+        orderBy(col, dir = 'asc') { sortKeys.push({ col, dir }); applySort(); return q; },
+        first() { return Promise.resolve(rows[0] || null); },
+        columnInfo: () => Promise.resolve({}),
+        catch: () => Promise.resolve(rows),
+        then: (resolve, reject) => Promise.resolve(rows).then(resolve, reject),
+      });
+      return q;
+    };
+    knex.raw = (sql) => sql;
+    return knex;
+  }
+
+  const LAWN_SERVICE = {
+    id: 'svc-lawn-1',
+    scheduled_service_id: 'ss-current',
+    customer_id: 'cust-lawn',
+    service_line: 'lawn',
+    service_type: 'Lawn Care Treatment Program',
+    service_date: '2026-05-16',
+    first_name: 'Test',
+    last_name: 'Customer',
+    areas_serviced: JSON.stringify(['Front Lawn']),
+    structured_notes: '{}',
+    service_data: '{}',
+  };
+
+  const FIXTURES = {
+    service_products: [],
+    property_geometries: [],
+    property_zones: [],
+    service_findings: [],
+    service_photos: [],
+    lawn_water_intake_snapshots: [],
+    lawn_assessments: [{
+      id: 'la-1',
+      customer_id: 'cust-lawn',
+      service_record_id: 'svc-lawn-1',
+      confirmed_by_tech: true,
+      service_date: '2026-05-16',
+      created_at: '2026-05-16T14:00:00Z',
+      turf_density: 78,
+      weed_suppression: 82,
+      color_health: 75,
+      stress_damage: 30,
+    }],
+    // Deliberately NOT provided: lawn_assessment_photos — the render's own
+    // query for it (via resolveLawnReportPhotos, no failClosed) must reject.
+  };
+
+  test('a throwing lawn_assessment_photos query still renders the report, with no turf photos in the gallery', async () => {
+    const baseKnex = makeKnex(FIXTURES);
+    const throwingLawnPhotosChain = () => {
+      const chain = {
+        where() { return chain; },
+        orderBy() { return chain; },
+        // buildLawnAssessmentReportData's OWN separate lawn_assessment_photos
+        // query (the scorecard's "photos" field — a different call site,
+        // untouched by this fix's shared-resolver extraction) also chains
+        // .limit() before its own .catch(() => []); keep that pre-existing
+        // fail-soft behavior working here too.
+        limit() { return chain; },
+        then(resolve, reject) { return Promise.reject(new Error('lawn_assessment_photos query failed')).then(resolve, reject); },
+        catch(fn) { return Promise.reject(new Error('lawn_assessment_photos query failed')).catch(fn); },
+      };
+      return chain;
+    };
+    const knex = (table) => (table === 'lawn_assessment_photos' ? throwingLawnPhotosChain() : baseKnex(table));
+
+    const data = await buildReportV1Data(LAWN_SERVICE, 'token-lawn-render', knex);
+
+    expect(data.serviceLine).toBe('lawn');
+    expect((data.photos || []).some((p) => String(p.id).startsWith('lawn-'))).toBe(false);
   });
 });
 
