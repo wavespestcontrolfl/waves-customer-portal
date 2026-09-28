@@ -167,7 +167,7 @@ postgres('email-division fact register sync against migrated PostgreSQL', () => 
     expect(_internals.hasProvenance({ ...after, slug: 'fact-southern-chinch-bug' }, '2026-09-28')).toBe(true); // …but the row itself passes
   });
 
-  test('an expired fact retires its untouched row once (active=false, status untouched), and is never seeded fresh', async () => {
+  test('an expired fact retires its untouched row once (active=false + status archived, so shared search drops it), and is never seeded fresh', async () => {
     const facts = [fact(1)];
     await sync(facts);
     const before = await rowOf(facts[0].slug);
@@ -177,9 +177,13 @@ postgres('email-division fact register sync against migrated PostgreSQL', () => 
     expect(r.retired).toEqual([facts[0].slug]);
     const after = await rowOf(facts[0].slug);
     expect(after.active).toBe(false);
-    expect(after.status).toBe('active');
-    expect(after.metadata).toMatchObject({ retired_on: '2026-09-28', retired_reason: 'expired' });
+    expect(after.status).toBe('archived');
+    expect(after.metadata).toMatchObject({ retired_on: '2026-09-28', retired_reason: 'expired', status_before_retire: 'active' });
     expect(await audits(before.id, 'knowledge_base.fact_retired')).toHaveLength(1);
+    // The shared knowledge-base search reads status: the retired fact is gone from it.
+    const KnowledgeBase = require('../services/knowledge-base');
+    const hits = await KnowledgeBase.search(`"Quoted source text"`, { category: 'facts', limit: 50 });
+    expect(hits.map((h) => h.slug)).not.toContain(facts[0].slug);
 
     const again = await sync(expired);
     expect(again.retired).toEqual([]);
@@ -204,9 +208,11 @@ postgres('email-division fact register sync against migrated PostgreSQL', () => 
     expect(r.updated).toEqual([f.slug]);
     const back = await rowOf(f.slug);
     expect(back.active).toBe(true);
+    expect(back.status).toBe('active');
     expect(back.metadata.expires_on).toBe('2026-12-01');
     expect(back.metadata.retired_on).toBeUndefined();
     expect(back.metadata.retired_reason).toBeUndefined();
+    expect(back.metadata.status_before_retire).toBeUndefined();
     expect(back.metadata.register_hash).toBe(_internals.factFingerprint(extended));
     const updates = await audits(back.id, 'knowledge_base.fact_updated');
     expect(updates).toHaveLength(1);
@@ -218,6 +224,25 @@ postgres('email-division fact register sync against migrated PostgreSQL', () => 
     expect((await rowOf(f.slug)).metadata.expires_on).toBe('2027-01-01');
     const r3 = await sync([{ ...extended, expiresOn: '2027-01-01' }]);
     expect(r3.unchanged).toEqual([f.slug]);
+  });
+
+  test('retirement preserves a flag across the round trip, and never overrides a status a person set while the fact was retired', async () => {
+    const flaggedFact = fact(1, { expiresOn: '2026-09-20' });
+    const touchedFact = fact(2, { expiresOn: '2026-09-20' });
+    await syncFactRegister({ conn: trx, now: new Date('2026-09-01T12:00:00Z'), facts: [flaggedFact, touchedFact], retireStrays: false });
+    await trx('knowledge_base').where({ slug: flaggedFact.slug }).update({ status: 'flagged' });
+
+    await sync([flaggedFact, touchedFact]); // both expire → archived
+    expect((await rowOf(flaggedFact.slug))).toMatchObject({ active: false, status: 'archived' });
+    expect((await rowOf(flaggedFact.slug)).metadata.status_before_retire).toBe('flagged');
+    // A person re-opens the second one by hand while it is retired.
+    await trx('knowledge_base').where({ slug: touchedFact.slug }).update({ status: 'active' });
+
+    const extended = [{ ...flaggedFact, expiresOn: '2027-01-01' }, { ...touchedFact, expiresOn: '2027-01-01' }];
+    const r = await sync(extended);
+    expect(r.updated.sort()).toEqual([flaggedFact.slug, touchedFact.slug].sort());
+    expect(await rowOf(flaggedFact.slug)).toMatchObject({ active: true, status: 'flagged' });
+    expect(await rowOf(touchedFact.slug)).toMatchObject({ active: true, status: 'active' });
   });
 
   test('a register row whose slug left the register is retired; a foreign row under a register slug is held untouched', async () => {
@@ -238,6 +263,7 @@ postgres('email-division fact register sync against migrated PostgreSQL', () => 
     expect(r.retired).toContain(facts[0].slug);
     const stray = await rowOf(facts[0].slug);
     expect(stray.active).toBe(false);
+    expect(stray.status).toBe('archived');
     expect(stray.metadata).toMatchObject({ retired_reason: 'withdrawn_from_register' });
     expect(await audits(stray.id, 'knowledge_base.fact_retired')).toHaveLength(1);
     expect((await rowOf(facts[1].slug)).active).toBe(true);

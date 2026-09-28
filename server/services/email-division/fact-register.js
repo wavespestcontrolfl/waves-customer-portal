@@ -9,8 +9,11 @@
  *    rows the writer is prompted with — insert what is missing, update a row
  *    only when it still carries exactly what the register last wrote (the
  *    stored fingerprint proves nobody edited it), retire an expired or
- *    withdrawn fact, and HOLD a row a person has edited, with an audit row
- *    saying so. Runs daily (scheduler.js) and on demand before a draft.
+ *    withdrawn fact (active=false AND status 'archived', so the shared
+ *    knowledge-base search and the admin list drop it too; the status it had
+ *    is restored if the fact comes back), and HOLD a row a person has
+ *    edited, with an audit row saying so. Runs daily (scheduler.js) and on
+ *    demand before a draft.
  * 2. Lists the usable facts with their provenance checked: only register
  *    rows the sync stamped, with a source URL and a quote, active,
  *    status 'active' (the weekly knowledge-base audit hides a doubtful entry
@@ -140,7 +143,9 @@ function planStraySync(row) {
 
 function rowValues(fact, existingMeta, now) {
   // A row coming back from retirement drops its retirement stamps.
-  const { retired_on: _retiredOn, retired_reason: _retiredReason, ...carried } = existingMeta || {};
+  const {
+    retired_on: _retiredOn, retired_reason: _retiredReason, status_before_retire: _statusBefore, ...carried
+  } = existingMeta || {};
   const meta = {
     ...carried,
     source_url: fact.sourceUrls[0],
@@ -221,9 +226,16 @@ async function applyFactPlan(trx, fact, row, plan, { now, today, hasAuditLog, re
     }
     case 'update': {
       const meta = parseJson(row.metadata, {}) || {};
+      // Coming back from OUR retirement (status still 'archived'): restore
+      // the status the row had before — a person's or the audit's flag
+      // survives the round trip. Any other status is a person's and is kept.
+      const status = (plan.reactivate && row.status === 'archived')
+        ? (meta.status_before_retire || 'active')
+        : row.status;
       await trx('knowledge_base').where({ id: row.id }).update({
         ...rowValues(fact, meta, now),
         active: true,
+        status,
         version: (Number(row.version) || 1) + 1,
       });
       await audit(trx, hasAuditLog, AUDIT_ACTIONS.updated, row, {
@@ -234,13 +246,18 @@ async function applyFactPlan(trx, fact, row, plan, { now, today, hasAuditLog, re
       return;
     }
     case 'retire': {
+      // active=false alone is not enough: KnowledgeBase.search() (and so the
+      // assistant) and the admin list read status, not active. 'archived' is
+      // the knowledge base's own retired state; the prior status is kept in
+      // metadata so a comeback restores it.
       const meta = parseJson(row.metadata, {}) || {};
       await trx('knowledge_base').where({ id: row.id }).update({
         active: false,
+        status: 'archived',
         updated_at: now,
-        metadata: JSON.stringify({ ...meta, retired_on: today, retired_reason: plan.reason }),
+        metadata: JSON.stringify({ ...meta, retired_on: today, retired_reason: plan.reason, status_before_retire: row.status }),
       });
-      await audit(trx, hasAuditLog, AUDIT_ACTIONS.retired, row, { reason: plan.reason });
+      await audit(trx, hasAuditLog, AUDIT_ACTIONS.retired, row, { reason: plan.reason, status_before_retire: row.status });
       result.retired.push(row.slug);
       return;
     }
