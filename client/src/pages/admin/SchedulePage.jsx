@@ -15385,7 +15385,9 @@ export function CompletionPanel({
       saved && typeof saved === "object"
       && !companionSchemas.some((schema) => schema.type === type)
       && (Object.keys(saved.values || {}).length > 0
-        || Number.isInteger(saved.score))
+        || Number.isInteger(saved.score)
+        // Retired Next steps chips were generation input too (Codex #5116).
+        || (Array.isArray(saved.chips) && saved.chips.length > 0))
     ))) {
       restorePruned = true;
     }
