@@ -503,3 +503,22 @@ describe('llm decode anchoring', () => {
     }
   });
 });
+
+// Admin-alerts-brevity scope (owner ruling 2026-09-28): the ACT-needs-a-
+// human suggestion email's short bell copy — generic headline (no customer
+// name), summary names the candidate when one exists.
+describe('bounceSuggestionHeadlineAndSummary', () => {
+  test('a candidate found: summary names it and asks to confirm', () => {
+    expect(rescue.bounceSuggestionHeadlineAndSummary('jane@newdomain.com')).toEqual({
+      headline: 'Email — bounce needs a fix',
+      summary: 'Best guess is jane@newdomain.com. Confirm and apply it.',
+    });
+  });
+
+  test('no confident candidate: summary asks for a new address', () => {
+    expect(rescue.bounceSuggestionHeadlineAndSummary(null)).toEqual({
+      headline: 'Email — bounce needs a fix',
+      summary: 'No good replacement found. Ask for a new address.',
+    });
+  });
+});

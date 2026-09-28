@@ -57,3 +57,22 @@ test('the pinned predicate keeps unresolved FIX rows only when something can res
     expect(windowed._ops.some((o) => o[0] === 'orWhereRaw' && /resolvedAt/.test(String(o[1])))).toBe(true);
   });
 });
+
+// Admin-alerts-brevity scope (2026-09-28): new rows carry metadata.kind and
+// no title prefix — the pinned query's ACT/REVIEW and FIX predicates must
+// check metadata.kind FIRST, falling back to the legacy title regex only
+// when metadata.kind is absent (a pre-scope row).
+test("the pinned predicate checks metadata->>'kind' first, falling back to the legacy title regex only when kind is absent", () => {
+  const pinned = builder([]); const windowed = builder([]);
+  mockQueue.push(pinned, windowed);
+  const db = require('../models/db');
+  return _private.loadDigestRows(db, new Date('2026-09-10T00:00:00Z')).then(() => {
+    const raws = pinned._ops.filter((o) => o[0] === 'whereRaw' || o[0] === 'andWhereRaw' || o[0] === 'orWhereRaw').map((o) => String(o[1]));
+    const actOrReview = raws.find((sql) => sql.includes("kind' IN ('ACT', 'REVIEW')"));
+    expect(actOrReview).toBeDefined();
+    expect(actOrReview).toContain("metadata->>'kind' IS NULL AND title ~* '^(ACT:|\\[Review\\])'");
+    const isFix = raws.find((sql) => sql.includes("kind' = 'FIX'"));
+    expect(isFix).toBeDefined();
+    expect(isFix).toContain("metadata->>'kind' IS NULL AND title ~* '^FIX:'");
+  });
+});

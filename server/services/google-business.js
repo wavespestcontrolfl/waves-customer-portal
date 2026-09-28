@@ -1806,6 +1806,12 @@ class GoogleBusinessService {
       'Remediation: reconnect the GBP account for credential failures (/admin/reviews sync status); for silent_empty confirm the profile state in Google Business Profile (removed/suspended listings need the support case); stats_stale usually means the Places API call is failing — check GOOGLE_MAPS_API_KEY quota/validity.',
     ].join('\n');
     const subject = `${anyFix ? 'FIX' : 'ACT'}: Google review sync — ${findings.length} location${findings.length === 1 ? '' : 's'} degraded or stale`;
+    // Admin-alerts-brevity scope (owner ruling 2026-09-28): the ACT variant
+    // is the owner's decision (reconnect/verify), so it gets short bell copy.
+    // The FIX variant (a Places API/credential problem an engineer chases)
+    // relies on ops-digest.js's default: FIX -> engineering, Activity-only.
+    const headline = anyFix ? null : `Reviews — ${findings.length} GBP location${findings.length === 1 ? '' : 's'} degraded`;
+    const summary = anyFix ? null : 'Review sync is stale or down. Reconnect or check the profile.';
     const lockKey = 'ops-digest:gbp-sync-health';
     let result;
     try {
@@ -1897,6 +1903,8 @@ class GoogleBusinessService {
               key: 'gbp-sync-health',
               subject,
               text: body,
+              headline,
+              summary,
               link: '/admin/reviews',
               metadata: { observedAt },
               trx: savepoint,

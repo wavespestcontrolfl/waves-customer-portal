@@ -351,6 +351,7 @@ describe('codex r1 — converted raw-insert sites (gate off = identical rows, ga
       category: 'email_digest',
       title: 'Morning Email Digest',
       body: '12 emails overnight. 2 new leads. Check /admin/email for details.',
+      detail: null,
       icon: '📧',
       link: '/admin/email',
       metadata: JSON.stringify({ severity: 'low' }),
@@ -406,33 +407,41 @@ describe('codex r1 — converted raw-insert sites (gate off = identical rows, ga
       category: 'eval_regression',
       title: 'Incident eval: 1 regression(s) in LLM gates',
       body: 'fact-check/case-1: drift',
+      detail: null,
       icon: '🧪',
       link: '/admin/dashboard',
       metadata: JSON.stringify({ summary: { total: 1 } }),
     });
   });
 
-  test('email spam-rescue-review row matches the old raw insert gate-off', async () => {
+  // This body is 149 chars — over the admin brevity guard's 110-char cap
+  // (admin-alerts-brevity scope, 2026-09-28), so it now diverges from the
+  // pre-guard raw insert on purpose: cut at a word boundary, full text
+  // preserved in `detail`. That guard applies to every admin row regardless
+  // of the bell-policy gate this describe block is otherwise pinning.
+  test('email spam-rescue-review row: the admin brevity guard cuts the long body into title/detail', async () => {
     const notifications = chainMock([{ id: 'd4' }]);
     mockTables({ notifications });
 
+    const fullBody = 'A message claiming to be A Vendor ("subject") is in Gmail Spam but failed sender authentication — left in Spam. Review it in Gmail if expected.';
     await NotificationService.notifyAdmin(
       'email_rescue_review',
       'Spam-foldered mail claims a known sender (unverified)',
-      'A message claiming to be A Vendor ("subject") is in Gmail Spam but failed sender authentication — left in Spam. Review it in Gmail if expected.',
+      fullBody,
       { icon: '⚠️', link: '/admin/email', metadata: { gmail_message_id: 'g1' } },
     );
 
-    expect(notifications.insert).toHaveBeenCalledWith({
-      recipient_type: 'admin',
-      recipient_id: null,
-      category: 'email_rescue_review',
-      title: 'Spam-foldered mail claims a known sender (unverified)',
-      body: 'A message claiming to be A Vendor ("subject") is in Gmail Spam but failed sender authentication — left in Spam. Review it in Gmail if expected.',
-      icon: '⚠️',
-      link: '/admin/email',
-      metadata: JSON.stringify({ gmail_message_id: 'g1' }),
-    });
+    const [row] = notifications.insert.mock.calls[0];
+    expect(row.recipient_type).toBe('admin');
+    expect(row.category).toBe('email_rescue_review');
+    expect(row.title).toBe('Spam-foldered mail claims a known sender (unverified)');
+    expect(row.body.length).toBeLessThanOrEqual(110);
+    expect(row.body.endsWith('…')).toBe(true);
+    expect(fullBody.startsWith(row.body.slice(0, -1))).toBe(true);
+    expect(row.detail).toBe(fullBody);
+    expect(row.icon).toBe('⚠️');
+    expect(row.link).toBe('/admin/email');
+    expect(row.metadata).toBe(JSON.stringify({ gmail_message_id: 'g1' }));
   });
 
   test('refund-failed conversion pins bell:true + connection passthrough (money failure)', async () => {
@@ -548,6 +557,7 @@ describe('converted raw-insert sites (gate off = identical rows)', () => {
       category: 'payout',
       title: 'Payout deposited: $12.34',
       body: 'Stripe payout of $12.34 has been deposited to your Capital One account.',
+      detail: null,
       icon: '🏦',
       link: '/admin/banking',
       metadata: null,
@@ -571,6 +581,7 @@ describe('converted raw-insert sites (gate off = identical rows)', () => {
       category: 'dispute',
       title: 'Dispute opened: $80.00',
       body: 'Reason: fraudulent. Respond by soon. Charge: ch_123',
+      detail: null,
       icon: '⚠️',
       link: '/admin/invoices',
       metadata: null,
@@ -593,6 +604,7 @@ describe('converted raw-insert sites (gate off = identical rows)', () => {
       category: 'call_pipeline_drift',
       title: 'Call pipeline drift alert',
       body: 'Nightly self-audit breached thresholds: auditor down. Sample: 0 calls.',
+      detail: null,
       // The service fills the category-default icon where the raw insert
       // left the column null — the only intentional field difference.
       icon: '🔔',

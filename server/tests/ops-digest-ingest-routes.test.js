@@ -209,10 +209,96 @@ describe('payload', () => {
     expect(json.reason).toBe('invalid_payload');
     expect(mockNotifyAdmin).not.toHaveBeenCalled();
   });
+
+  test('headline: optional, 60 chars max, trimmed, blank -> null', () => {
+    expect(validateDigest({ ...good(), headline: 'Schedule — a call promise slipped' }).value.headline)
+      .toBe('Schedule — a call promise slipped');
+    expect(validateDigest({ ...good(), headline: '  ' }).value.headline).toBeNull();
+    expect(validateDigest({ ...good() }).value.headline).toBeNull();
+    expect(validateDigest({ ...good(), headline: 'h'.repeat(61) }).error).toMatch(/headline exceeds/);
+    expect(validateDigest({ ...good(), headline: 42 }).error).toMatch(/headline must be a string/);
+  });
+
+  test('summary: optional, 110 chars max, trimmed, blank -> null', () => {
+    expect(validateDigest({ ...good(), summary: 'Oldest is 3 days.' }).value.summary).toBe('Oldest is 3 days.');
+    expect(validateDigest({ ...good(), summary: '  ' }).value.summary).toBeNull();
+    expect(validateDigest({ ...good(), summary: 's'.repeat(111) }).error).toMatch(/summary exceeds/);
+    expect(validateDigest({ ...good(), summary: [] }).error).toMatch(/summary must be a string/);
+  });
+
+  test("audience: optional, one of owner/engineering/fyi", () => {
+    for (const audience of ['owner', 'engineering', 'fyi']) {
+      expect(validateDigest({ ...good(), audience }).value.audience).toBe(audience);
+    }
+    expect(validateDigest({ ...good() }).value.audience).toBeNull();
+    expect(validateDigest({ ...good(), audience: 'urgent' }).error).toMatch(/audience must be/);
+  });
+});
+
+describe('the check -> destination map fills in what the caller did not send', () => {
+  test('a mapped owner check gets its own area headline and its own admin page, overriding the caller\'s Activity-feed link', async () => {
+    mockNotifyAdmin.mockResolvedValue({ id: 'n-map', deduped: false });
+    await post({ ...good(), key: 'b08-uncharged-collectibles:2026-09-11', link: '/admin/agents?tab=activity' });
+    const [, title, , opts] = mockNotifyAdmin.mock.calls[0];
+    expect(title).toBe('Billing — schedule integrity — 3 overlapping visits');
+    expect(opts.link).toBe('/admin/invoices');
+    expect(opts.metadata.audience).toBe('owner');
+    expect(opts.metadata.feed).toBeNull();
+  });
+
+  test('an unmapped ACT check with no caller link falls back to the Activity feed, owner audience', async () => {
+    mockNotifyAdmin.mockResolvedValue({ id: 'n-unmapped', deduped: false });
+    await post({ ...good(), key: 'z99-brand-new-check:x', kind: 'ACT', link: undefined });
+    const opts = mockNotifyAdmin.mock.calls[0][3];
+    expect(opts.link).toBe('/admin/agents?tab=activity');
+    expect(opts.metadata.audience).toBe('owner');
+    expect(opts.metadata.feed).toBeNull();
+  });
+
+  test('an unmapped FIX check is engineering-audience, Activity-only (good()\'s default kind)', async () => {
+    mockNotifyAdmin.mockResolvedValue({ id: 'n-unmapped-fix', deduped: false });
+    await post({ ...good(), key: 'z99-brand-new-check:x' });
+    const opts = mockNotifyAdmin.mock.calls[0][3];
+    expect(opts.metadata.audience).toBe('engineering');
+    expect(opts.metadata.feed).toBe('activity');
+  });
+
+  test('the caller\'s own headline/summary/audience always win over the map', async () => {
+    mockNotifyAdmin.mockResolvedValue({ id: 'n-override', deduped: false });
+    await post({
+      ...good(), key: 'b08-uncharged-collectibles:2026-09-11',
+      headline: 'Billing — 5 invoices never charged', summary: '$1,253.75 with a card on file.', audience: 'fyi',
+    });
+    const [, title, body, opts] = mockNotifyAdmin.mock.calls[0];
+    expect(title).toBe('Billing — 5 invoices never charged');
+    expect(body).toBe('$1,253.75 with a card on file.');
+    expect(opts.metadata.audience).toBe('fyi');
+    expect(opts.metadata.feed).toBe('activity');
+  });
+
+  test('the data-hygiene sweep\'s own headline(subject) parser wins over the generic fallback', async () => {
+    mockNotifyAdmin.mockResolvedValue({ id: 'n-hygiene', deduped: false });
+    await post({
+      ...good(), key: 'local:data-hygiene_sweep_2_fixed_66_exceptions_2_new_',
+      subject: 'data-hygiene sweep — 3 fixed, 66 exceptions (2 new)',
+      link: undefined,
+    });
+    const [, title, , opts] = mockNotifyAdmin.mock.calls[0];
+    expect(title).toBe('Data hygiene — 2 new issues, 66 open');
+    expect(opts.link).toBe('/admin/agents?tab=activity'); // no better page than Activity for hygiene
+  });
+
+  test('title never carries the KIND: prefix any more — kind rides in metadata only', async () => {
+    mockNotifyAdmin.mockResolvedValue({ id: 'n-noprefix', deduped: false });
+    await post(good());
+    const [, title, , opts] = mockNotifyAdmin.mock.calls[0];
+    expect(title).not.toMatch(/^(ACT|FIX):/);
+    expect(opts.metadata.kind).toBe('FIX');
+  });
 });
 
 describe('bell write', () => {
-  test('201: one ops_digest row, bell:true, opsKey/subject/kind/source metadata, rolling-day dedupe', async () => {
+  test('201: one ops_digest row, bell:true, opsKey/subject/kind/audience/source metadata, rolling-day dedupe', async () => {
     mockNotifyAdmin.mockResolvedValue({ id: 'n1', deduped: false });
     const { status, json } = await post(good());
     expect(status).toBe(201);
@@ -220,11 +306,19 @@ describe('bell write', () => {
     expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
     const [category, title, body, opts] = mockNotifyAdmin.mock.calls[0];
     expect(category).toBe('ops_digest');
-    expect(title).toBe('FIX: schedule integrity — 3 overlapping visits');
-    expect(body).toBe('visit 0b9fce27 overlaps 11425c5f\nvisit 1a7f3f9a overlaps 1b0544b8');
+    // No caller headline and no prefix on the title any more (admin-alerts-
+    // brevity scope) — the check-map's own area ("e22-schedule-integrity" ->
+    // Schedule) fills the fallback `${area} — ${subject}`.
+    expect(title).toBe('Schedule — schedule integrity — 3 overlapping visits');
+    // No caller summary -> no bell body; the whole report is in `detail`.
+    expect(body).toBeNull();
+    expect(opts.detail).toBe('visit 0b9fce27 overlaps 11425c5f\nvisit 1a7f3f9a overlaps 1b0544b8');
     expect(opts).toEqual({
-      link: '/admin/agents?tab=activity',
+      // The caller's own link was the Activity feed itself, so the
+      // check-map's more specific page (Schedule -> /admin/dispatch) wins.
+      link: '/admin/dispatch',
       bell: true,
+      detail: 'visit 0b9fce27 overlaps 11425c5f\nvisit 1a7f3f9a overlaps 1b0544b8',
       dedupeKey: 'ops-crons:e22-schedule-integrity:overlaps-2026-09-11',
       dedupeWindowMs: 24 * 60 * 60 * 1000,
       // a later run's recurrence refreshes the standing row (observedAt above all)
@@ -235,8 +329,12 @@ describe('bell write', () => {
       metadata: {
         check: { id: 'e22-schedule-integrity', title: 'Schedule integrity', cadence: 'daily' },
         opsKey: 'e22-schedule-integrity:overlaps-2026-09-11',
-        subject: 'FIX: schedule integrity — 3 overlapping visits',
+        subject: 'schedule integrity — 3 overlapping visits',
         kind: 'FIX',
+        // e22-schedule-integrity is a mapped OWNER check (Schedule ->
+        // /admin/dispatch), so this FIX finding still rings the bell.
+        audience: 'owner',
+        feed: null,
         source: 'ops-crons',
         observedAt: expect.any(String),
       },
@@ -346,13 +444,15 @@ describe('bell write', () => {
 
   test('metadata cannot override the seam fields or pre-resolve the finding', async () => {
     mockNotifyAdmin.mockResolvedValue({ id: 'n2', deduped: false });
-    await post({ ...good(), metadata: { source: 'spoof', opsKey: 'spoof', kind: 'FYI', resolved: true, resolvedAt: 'x', resolvedBy: 'y', dedupeKey: 'z', keep: 1 } });
+    await post({ ...good(), metadata: { source: 'spoof', opsKey: 'spoof', kind: 'FYI', audience: 'fyi', feed: 'not-activity', resolved: true, resolvedAt: 'x', resolvedBy: 'y', dedupeKey: 'z', keep: 1 } });
     const opts = mockNotifyAdmin.mock.calls[0][3];
     expect(opts.metadata).toEqual({
       keep: 1,
       opsKey: 'e22-schedule-integrity:overlaps-2026-09-11',
-      subject: 'FIX: schedule integrity — 3 overlapping visits',
+      subject: 'schedule integrity — 3 overlapping visits',
       kind: 'FIX',
+      audience: 'owner',
+      feed: null,
       source: 'ops-crons',
       observedAt: expect.any(String),
     });

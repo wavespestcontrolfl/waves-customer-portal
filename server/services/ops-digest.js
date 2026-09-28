@@ -39,6 +39,51 @@ function notificationService() {
 
 const CATEGORY = 'ops_digest';
 const MAX_TITLE_CHARS = 200; // notifications.title is varchar(200); body is text (uncapped)
+
+// Admin-alerts-brevity scope (owner ruling 2026-09-28): the bell shows a
+// short headline + one-sentence summary; the WHOLE finding moves to
+// `detail`. `kind` is derived from the subject's action-grammar prefix
+// (ACT:/FIX:/FIRST:/FYI:/OK:/[Review] — the same grammar agent-activity.js's
+// digestItem already reads) so senders that haven't been converted to pass
+// an explicit `headline`/`summary` still get a sane title and audience.
+const SUBJECT_PREFIX_RE = /^(ACT:|FIX:|FIRST:|FYI:|OK:|\[Review\])\s*/i;
+const MAX_HEADLINE_CHARS = 60;
+
+function deriveKind(subject) {
+  const s = String(subject || '');
+  if (/^ACT:/i.test(s)) return 'ACT';
+  if (/^FIX:/i.test(s)) return 'FIX';
+  if (/^\[Review\]/i.test(s)) return 'REVIEW';
+  return 'FYI'; // FIRST:/FYI:/OK:/no prefix at all
+}
+
+// ACT and [Review] need the owner's decision; FIX is broken plumbing for an
+// engineer; everything else is informational. The sender can override.
+function defaultAudienceFor(kind) {
+  if (kind === 'ACT' || kind === 'REVIEW') return 'owner';
+  if (kind === 'FIX') return 'engineering';
+  return 'fyi';
+}
+
+// Same word-boundary cut as notification-service.js's admin brevity guard
+// (duplicated on purpose: this module lazy-requires notification-service at
+// CALL time to dodge a require cycle, and the cut is one line).
+function truncateAtWord(text, max) {
+  const s = String(text || '');
+  if (s.length <= max) return s;
+  const ellipsis = '…';
+  const budget = Math.max(max - ellipsis.length, 0);
+  let cut = s.slice(0, budget);
+  const lastSpace = cut.lastIndexOf(' ');
+  if (lastSpace > 0) cut = cut.slice(0, lastSpace);
+  return `${cut.trimEnd()}${ellipsis}`;
+}
+
+// The bell title when a sender hasn't composed its own headline yet: strip
+// the action-grammar prefix and cut to the same 60-char headline budget.
+function fallbackHeadline(subject) {
+  return truncateAtWord(String(subject || '').replace(SUBJECT_PREFIX_RE, '').trim(), MAX_HEADLINE_CHARS);
+}
 // system_settings.key is varchar(100); a full SHA-256 digest keeps even the
 // longest allowed source/key pair within it, without sharing a watermark.
 function cleanWatermarkKey(lockKey) {
@@ -112,6 +157,15 @@ function inAppEnabled() {
  * @param {string} [p.html]
  * @param {string} [p.link]     admin route the digest points at
  * @param {object} [p.metadata]
+ * @param {string} [p.headline]  bell title, 60 chars or less, `<Area> — <what needs doing>`.
+ *                               Falls back to the subject with its ACT:/FIX:/etc. prefix
+ *                               stripped, cut to 60 chars at a word boundary.
+ * @param {string} [p.summary]   bell body, one sentence, 110 chars or less. Omitted → no
+ *                               second line (never the whole email — that's `detail`).
+ * @param {'owner'|'engineering'|'fyi'} [p.audience]  who this is for. Default is derived
+ *                               from the subject's kind (ACT/[Review] → owner, FIX →
+ *                               engineering, else fyi); a non-owner audience is
+ *                               Activity-only (metadata.feed = 'activity', never the bell).
  * @param {string} [p.dedupeKey]      one standing row per key (notifyAdmin dedupe)
  * @param {number} [p.dedupeWindowMs] rolling window for that dedupe
  * @param {boolean} [p.refreshOnDedupe] rewrite the standing row (and re-bell it) when the content changed
@@ -125,28 +179,49 @@ function inAppEnabled() {
  * eval) still get an ops_digest row here: that row is what the Activity feed
  * lists, and it is created only on the email's cadence.
  */
-async function deliverOpsDigest({ key, subject, text, html, link = null, metadata = {}, dedupeKey, dedupeWindowMs, refreshOnDedupe, fallOff = false, trx = null, sendEmail }) {
+async function deliverOpsDigest({ key, subject, text, html, link = null, metadata = {}, headline = null, summary = null, audience = null, dedupeKey, dedupeWindowMs, refreshOnDedupe, fallOff = false, trx = null, sendEmail }) {
   if (typeof sendEmail !== 'function') throw new Error('deliverOpsDigest: sendEmail is required');
   if (!inAppEnabled()) {
     const result = await sendEmail();
     return emailOutcome(result);
   }
-  // Whole body: with the email skipped this row is the only copy.
-  const body = String(text || htmlToText(html) || '');
+  // The full finding: with the email skipped, `detail` is the only copy.
+  const fullText = String(text || htmlToText(html) || '');
+  const kind = deriveKind(subject);
+  const resolvedAudience = audience || defaultAudienceFor(kind);
   // Subjects carry aggregated text (customer names, bucket lists); the row
-  // keeps the full subject in metadata while the title fits the column.
-  const title = String(subject || '').slice(0, MAX_TITLE_CHARS);
+  // keeps the full subject in metadata while the bell title stays short.
+  const title = String(headline || fallbackHeadline(subject)).slice(0, MAX_TITLE_CHARS);
+  const bellBody = summary ? String(summary) : null;
   let row = null;
   try {
-    row = await notificationService().notifyAdmin(CATEGORY, title, body, {
+    row = await notificationService().notifyAdmin(CATEGORY, title, bellBody, {
       link,
       bell: true,
+      detail: fullText,
       ...(trx ? { trx } : {}),
       // Optional dedupe (2026-09-11 email shutoff): a daily digest that
       // reports the same standing list must hold ONE row, refreshed when
       // the list changes, not one unread row per morning.
       ...(dedupeKey ? { dedupeKey, ...(dedupeWindowMs ? { dedupeWindowMs } : {}), ...(refreshOnDedupe ? { refreshOnDedupe: true } : {}) } : {}),
-      metadata: { opsKey: key, subject, ...(fallOff ? { fallOff: true } : {}), ...metadata },
+      metadata: {
+        opsKey: key,
+        subject,
+        kind,
+        audience: resolvedAudience,
+        ...(fallOff ? { fallOff: true } : {}),
+        ...metadata,
+        // Written LAST and unconditionally (never spread-omitted): a sender
+        // whose kind flips between runs under the SAME dedupeKey (gbp-sync-
+        // health's FIX <-> ACT) must have notifyAdmin's refresh
+        // `{...existingMeta, ...metadata}` merge actually overwrite a stale
+        // `feed: 'activity'` with `feed: null` when it becomes owner-audience
+        // again — an omitted key would leave the old value standing and the
+        // row would never reach the bell (notification-service.js's
+        // excludeActivityOnlyFromBell). A sender's own `...metadata` above
+        // can never shadow this.
+        feed: resolvedAudience === 'owner' ? null : 'activity',
+      },
     });
   } catch (err) {
     logger.error(`[ops-digest] ${key}: bell write threw: ${err.message}`);
@@ -265,4 +340,7 @@ async function resolveOpsDigest({ key, source, resolvedBy = 'ops-crons', lockKey
   }
 }
 
-module.exports = { deliverOpsDigest, resolveOpsDigest, readCleanWatermark, cleanWatermarkKey, inAppEnabled, htmlToText, CATEGORY };
+module.exports = {
+  deliverOpsDigest, resolveOpsDigest, readCleanWatermark, cleanWatermarkKey, inAppEnabled, htmlToText, CATEGORY,
+  deriveKind, defaultAudienceFor, fallbackHeadline, truncateAtWord,
+};

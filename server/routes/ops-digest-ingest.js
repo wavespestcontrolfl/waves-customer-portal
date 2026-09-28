@@ -43,7 +43,8 @@ const { safeEqual } = require('../middleware/hermes-auth');
 const { notFoundBody } = require('../middleware/errors');
 const { noStore } = require('../middleware/no-store');
 const { unauthenticatedAuthLimitKey } = require('../middleware/rate-limit-key');
-const { inAppEnabled, resolveOpsDigest, readCleanWatermark, CATEGORY } = require('../services/ops-digest');
+const { inAppEnabled, resolveOpsDigest, readCleanWatermark, CATEGORY, truncateAtWord } = require('../services/ops-digest');
+const { ACTIVITY_LINK, routeFor } = require('../config/ops-alert-routes');
 
 const router = express.Router();
 // Token-route privacy baseline on every outcome (dark 404, 401, 4xx, 201):
@@ -57,6 +58,12 @@ const MAX_SUBJECT_CHARS = 180;   // + "KIND: " stays inside the varchar(200) tit
 const MAX_BODY_CHARS = 60000;
 const MAX_LINK_CHARS = 300;
 const MAX_METADATA_BYTES = 4096;
+// Admin-alerts-brevity scope (owner ruling 2026-09-28): the bell title/body
+// budgets — same numbers as notification-service.js's admin brevity guard
+// and ops-digest.js's deliverOpsDigest.
+const MAX_HEADLINE_CHARS = 60;
+const MAX_SUMMARY_CHARS = 110;
+const AUDIENCES = new Set(['owner', 'engineering', 'fyi']);
 const DEDUPE_WINDOW_MS = 24 * 60 * 60 * 1000;
 const SOURCE = 'ops-crons';
 
@@ -137,7 +144,48 @@ function validateDigest(body) {
   if (link.error) return link;
   const metadata = validateMetadata(body.metadata);
   if (metadata.error) return metadata;
-  return { value: { key, kind, subject, text, link: link.value, metadata: metadata.value, observedAt: observedAtFrom(body.observedAt) } };
+  const headline = validateHeadline(body.headline);
+  if (headline.error) return headline;
+  const summary = validateSummary(body.summary);
+  if (summary.error) return summary;
+  const audience = validateAudience(body.audience);
+  if (audience.error) return audience;
+  return {
+    value: {
+      key, kind, subject, text, link: link.value, metadata: metadata.value,
+      observedAt: observedAtFrom(body.observedAt),
+      headline: headline.value, summary: summary.value, audience: audience.value,
+    },
+  };
+}
+
+// A caller-composed bell title, 60 chars or less. Optional — the route
+// falls back to `${area} — ${subject}` (routeFor's area) when omitted.
+function validateHeadline(raw) {
+  if (raw === undefined || raw === null) return { value: null };
+  if (typeof raw !== 'string') return { error: 'headline must be a string' };
+  const headline = raw.trim();
+  if (!headline) return { value: null };
+  if (headline.length > MAX_HEADLINE_CHARS) return { error: `headline exceeds ${MAX_HEADLINE_CHARS} chars` };
+  return { value: headline };
+}
+
+// A caller-composed bell body, one sentence, 110 chars or less. Optional —
+// omitted means no second line (the full `body` still lands in `detail`).
+function validateSummary(raw) {
+  if (raw === undefined || raw === null) return { value: null };
+  if (typeof raw !== 'string') return { error: 'summary must be a string' };
+  const summary = raw.trim();
+  if (!summary) return { value: null };
+  if (summary.length > MAX_SUMMARY_CHARS) return { error: `summary exceeds ${MAX_SUMMARY_CHARS} chars` };
+  return { value: summary };
+}
+
+// Overrides the check-map's derived audience. Optional.
+function validateAudience(raw) {
+  if (raw === undefined || raw === null) return { value: null };
+  if (typeof raw !== 'string' || !AUDIENCES.has(raw)) return { error: "audience must be 'owner', 'engineering', or 'fyi'" };
+  return { value: raw };
 }
 
 // Admin-relative only: a digest never deep-links off the portal, and a
@@ -154,7 +202,7 @@ function validateLink(raw) {
 // render as cleared), re-key it, or spoof its source; the route sets these
 // after the caller's fields and the fall-off path is the only writer of
 // the resolved* stamps.
-const RESERVED_METADATA_KEYS = ['opsKey', 'subject', 'kind', 'source', 'dedupeKey', 'dedupeVersion', 'resolved', 'resolvedAt', 'resolvedBy', 'observedAt'];
+const RESERVED_METADATA_KEYS = ['opsKey', 'subject', 'kind', 'audience', 'feed', 'source', 'dedupeKey', 'dedupeVersion', 'resolved', 'resolvedAt', 'resolvedBy', 'observedAt'];
 
 // Observation time of a finding / clean run: the caller's ISO timestamp when
 // valid and not in the future, else now. Ordering resolves against ingests
@@ -182,8 +230,24 @@ router.post('/', darkUnlessConfigured, ingestAuth, async (req, res) => {
   const { error, value } = validateDigest(req.body);
   if (error) return res.status(400).json({ ok: false, reason: 'invalid_payload', error });
 
-  const { key, kind, subject, text, link, metadata, observedAt } = value;
-  const title = `${kind}: ${subject}`;
+  const { key, kind, subject, text, link, metadata, observedAt, headline, summary, audience } = value;
+  // The check → destination map fills in what an unconverted ops-crons
+  // check doesn't send itself: a fallback title area, where the bell should
+  // land, and who it's for. A caller's own headline/summary/audience/link
+  // always wins over the map.
+  const route = routeFor(key, kind);
+  const resolvedAudience = audience || route.audience;
+  // No prefix on the title any more (admin-alerts-brevity scope) — `kind`
+  // rides in metadata instead (agent-activity.js's digestItem reads it).
+  // Fallback order: the caller's own headline, then the check's own
+  // headline(subject) (e.g. the data-hygiene sweep's parsed "N new, M open"),
+  // then the generic `${area} — ${subject}`.
+  const routeHeadline = !headline && typeof route.headline === 'function' ? route.headline(subject) : null;
+  const title = headline || truncateAtWord(routeHeadline || `${route.area} — ${subject}`, MAX_HEADLINE_CHARS);
+  const bellBody = summary || null;
+  // "Absent or the Activity feed" — a caller that already points at the
+  // feed its own row will sit in gets the map's more specific page instead.
+  const resolvedLink = (!link || link === ACTIVITY_LINK) ? route.link : link;
   const dedupeKey = `${SOURCE}:${key}`;
   let outcome = null;
   try {
@@ -208,16 +272,37 @@ router.post('/', darkUnlessConfigured, ingestAuth, async (req, res) => {
       const effectiveObservedAt = laterOf(standing, observedAt);
       // A later run's recurrence changes dedupeVersion and refreshes the
       // standing row. A repeat of the same observation remains deduped.
-      const row = await NotificationService.notifyAdmin(CATEGORY, title, text, {
-        link,
+      // The full report goes to `detail` — the bell shows only the short
+      // title + optional one-line summary; `body` (`text`) is never stored
+      // on the row any more (admin-alerts-brevity scope, owner 2026-09-28).
+      const row = await NotificationService.notifyAdmin(CATEGORY, title, bellBody, {
+        link: resolvedLink,
         bell: true,
+        detail: text,
         dedupeKey,
         dedupeWindowMs: DEDUPE_WINDOW_MS,
         refreshOnDedupe: true,
         // Without a caller timestamp, identical content has no new event
         // identity. Let content changes refresh; retries keep their read state.
         dedupeVersion: req.body.observedAt == null ? undefined : effectiveObservedAt,
-        metadata: { ...metadata, opsKey: key, subject: title, kind, source: SOURCE, observedAt: effectiveObservedAt },
+        metadata: {
+          ...metadata,
+          opsKey: key,
+          subject,
+          kind,
+          audience: resolvedAudience,
+          source: SOURCE,
+          observedAt: effectiveObservedAt,
+          // Written LAST and unconditionally: a check whose kind flips
+          // between runs under the SAME dedupeKey must have notifyAdmin's
+          // refresh merge actually overwrite a stale feed value — an
+          // omitted key would leave the old one standing and a row that
+          // became owner-audience again would never reach the bell
+          // (notification-service.js's excludeActivityOnlyFromBell). The
+          // caller's own metadata (RESERVED_METADATA_KEYS-stripped above)
+          // can never shadow this either way.
+          feed: resolvedAudience === 'owner' ? null : 'activity',
+        },
         trx,
       });
       // Timestamp-less identical repeats must preserve read state, but they
@@ -293,4 +378,8 @@ const ingestPreParsers = [noStore, darkUnlessConfigured, ingestLimiter, ingestAu
 
 module.exports = router;
 module.exports.ingestPreParsers = ingestPreParsers;
-module.exports._private = { validateDigest, ingestAuth, darkUnlessConfigured, ingestBodyErrorHandler, genericNotFound, observedAtFrom, standingObservation, laterOf, KINDS, RESERVED_METADATA_KEYS };
+module.exports._private = {
+  validateDigest, ingestAuth, darkUnlessConfigured, ingestBodyErrorHandler, genericNotFound,
+  observedAtFrom, standingObservation, laterOf, KINDS, RESERVED_METADATA_KEYS,
+  validateHeadline, validateSummary, validateAudience, MAX_HEADLINE_CHARS, MAX_SUMMARY_CHARS,
+};

@@ -3,7 +3,7 @@ import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import NotificationBell from './NotificationBell';
+import NotificationBell, { _test } from './NotificationBell';
 import api from '../utils/api';
 import { CUSTOMER_SURFACE } from '../theme-customer';
 
@@ -553,5 +553,73 @@ describe('NotificationBell customer safe-area offsets', () => {
     } finally {
       Object.defineProperty(window, 'innerWidth', { configurable: true, value: original });
     }
+  });
+});
+
+// Admin-alerts-brevity scope (owner ruling 2026-09-28): a legacy ops_digest
+// row's ACT:/FIX:/etc. prefix is stripped for display, a small "Needs you"
+// / "Broken" chip reflects metadata.kind, and a click on a row whose link
+// is the shared Activity feed carries a `focus=<id>` param so that feed can
+// jump straight to the item.
+describe('NotificationBell _test helpers (pure)', () => {
+  it('displayTitle strips a legacy prefix only for ops_digest rows', () => {
+    expect(_test.displayTitle({ category: 'ops_digest', title: 'ACT: something' })).toBe('something');
+    expect(_test.displayTitle({ category: 'ops_digest', title: 'FIX: broken thing' })).toBe('broken thing');
+    expect(_test.displayTitle({ category: 'ops_digest', title: '[Review] a draft' })).toBe('a draft');
+    // A new-format row never carries a prefix — untouched either way.
+    expect(_test.displayTitle({ category: 'ops_digest', title: 'Schedule — a call promise slipped' }))
+      .toBe('Schedule — a call promise slipped');
+    // Non-digest categories are never touched, even if they happen to start
+    // with the same letters.
+    expect(_test.displayTitle({ category: 'alert', title: 'ACT: not a digest' })).toBe('ACT: not a digest');
+  });
+
+  it('digestKindChip reads metadata.kind for ops_digest rows only', () => {
+    expect(_test.digestKindChip({ category: 'ops_digest', metadata: { kind: 'ACT' } })).toEqual({ label: 'Needs you' });
+    expect(_test.digestKindChip({ category: 'ops_digest', metadata: { kind: 'REVIEW' } })).toEqual({ label: 'Needs you' });
+    expect(_test.digestKindChip({ category: 'ops_digest', metadata: { kind: 'FIX' } })).toEqual({ label: 'Broken' });
+    expect(_test.digestKindChip({ category: 'ops_digest', metadata: { kind: 'FYI' } })).toBeNull();
+    expect(_test.digestKindChip({ category: 'ops_digest', metadata: null })).toBeNull(); // legacy row, no chip
+    expect(_test.digestKindChip({ category: 'alert', metadata: { kind: 'ACT' } })).toBeNull(); // non-digest, never a chip
+  });
+
+  it('digestKindChip parses a stringified metadata column', () => {
+    expect(_test.digestKindChip({ category: 'ops_digest', metadata: JSON.stringify({ kind: 'FIX' }) })).toEqual({ label: 'Broken' });
+  });
+
+  it('linkFor appends &focus=<id> only for an ops_digest row pointed at the shared Activity feed', () => {
+    expect(_test.linkFor({ id: 42, category: 'ops_digest', link: '/admin/agents?tab=activity' }))
+      .toBe('/admin/agents?tab=activity&focus=42');
+    // A more specific admin page is left alone.
+    expect(_test.linkFor({ id: 42, category: 'ops_digest', link: '/admin/invoices' })).toBe('/admin/invoices');
+    // Non-digest categories are never touched.
+    expect(_test.linkFor({ id: 42, category: 'alert', link: '/admin/agents?tab=activity' })).toBe('/admin/agents?tab=activity');
+    // No link at all stays falsy.
+    expect(_test.linkFor({ id: 42, category: 'ops_digest', link: null })).toBeNull();
+  });
+});
+
+describe('NotificationBell admin desktop — digest chip + prefix strip', () => {
+  it('shows the "Needs you" / "Broken" chip and strips a legacy prefix, and a LONG title still ellipsizes with the chip visible', async () => {
+    const longTitle = 'ACT: ' + 'a very long legacy ops digest title that would overflow the row '.repeat(3).trim();
+    global.fetch = vi.fn(async (url) => {
+      if (String(url).includes('/unread-count')) return jsonResponse({ count: 2 });
+      return jsonResponse({
+        notifications: [
+          { id: 'd1', category: 'ops_digest', title: longTitle, body: null, metadata: { kind: 'ACT' }, created_at: new Date().toISOString(), read_at: null, link: null },
+          { id: 'd2', category: 'ops_digest', title: 'Sends — duplicate detection failing', body: null, metadata: { kind: 'FIX' }, created_at: new Date().toISOString(), read_at: null, link: null },
+        ],
+        hasMore: false,
+      });
+    });
+    render(<NotificationBell type="admin" />);
+    fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
+    await screen.findByText('Needs you');
+    expect(screen.getByText('Broken')).toBeInTheDocument();
+    // The legacy "ACT: " prefix is gone from the displayed title.
+    expect(screen.queryByText(longTitle)).toBeNull();
+    expect(screen.getByTitle(longTitle.replace(/^ACT: /, ''))).toBeInTheDocument();
+    // Both chips render alongside their (possibly very long) titles.
+    expect(screen.getByText('Sends — duplicate detection failing')).toBeInTheDocument();
   });
 });

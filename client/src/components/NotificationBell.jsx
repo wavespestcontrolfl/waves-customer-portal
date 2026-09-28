@@ -66,6 +66,51 @@ async function syncAppBadge(count, at) {
   } catch { /* badge sync must never surface to the bell */ }
 }
 
+// ops_digest legacy prefix (pre admin-alerts-brevity scope, 2026-09-28): a
+// row written before that scope still carries ACT:/FIX:/FIRST:/FYI:/OK:/
+// [Review] on its title. A new row never does — the same grammar rides in
+// metadata.kind instead (digestKindChip below), so this is display-only
+// cleanup for old rows, never something a new row needs stripped.
+const LEGACY_DIGEST_PREFIX = /^(ACT:|FIX:|FIRST:|FYI:|OK:|\[Review\])\s*/i;
+function displayTitle(n) {
+  return n && n.category === 'ops_digest' && n.title ? n.title.replace(LEGACY_DIGEST_PREFIX, '') : (n && n.title) || '';
+}
+
+function parsedMetadata(n) {
+  if (!n) return null;
+  if (n.metadata && typeof n.metadata === 'object') return n.metadata;
+  if (typeof n.metadata === 'string') {
+    try { return JSON.parse(n.metadata); } catch { return null; }
+  }
+  return null;
+}
+
+// Small chip for an ops_digest row's action grammar — 'Needs you' for
+// ACT/REVIEW, 'Broken' for FIX. No chip for FYI or a non-digest row (the
+// title carried the same grammar as a prefix before this scope; the chip
+// replaces that, so a legacy row with no metadata.kind gets no chip either
+// — it still reads fine once the prefix strip above runs).
+function digestKindChip(n) {
+  if (!n || n.category !== 'ops_digest') return null;
+  const kind = parsedMetadata(n)?.kind;
+  if (kind === 'ACT' || kind === 'REVIEW') return { label: 'Needs you' };
+  if (kind === 'FIX') return { label: 'Broken' };
+  return null;
+}
+
+// An ops_digest row whose link is the shared Activity feed gets `&focus=<id>`
+// appended on click, so AgentActivityTab can expand and scroll straight to
+// this row's item instead of landing on the top of a long feed.
+const ACTIVITY_FEED_LINK_RE = /^\/admin\/agents\?tab=activity\b/;
+function linkFor(n) {
+  const link = n && n.link;
+  if (!link) return link;
+  if (n.category === 'ops_digest' && ACTIVITY_FEED_LINK_RE.test(link)) {
+    return `${link}${link.includes('?') ? '&' : '?'}focus=${encodeURIComponent(n.id)}`;
+  }
+  return link;
+}
+
 export default function NotificationBell({ type = 'admin', customerId }) {
   // type: 'admin' or 'customer'
   // For admin: polls /api/admin/notifications/unread-count
@@ -707,24 +752,28 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                     background: isDark ? '#0f172a' : 'rgba(255,255,255,0.75)', position: 'sticky', top: 0,
                     backdropFilter: isDark ? 'none' : 'blur(8px)', WebkitBackdropFilter: isDark ? 'none' : 'blur(8px)',
                   }}>{group}</div>
-                  {items.map(n => (
+                  {items.map(n => {
+                    const href = linkFor(n);
+                    const chip = digestKindChip(n);
+                    const title = displayTitle(n);
+                    return (
                     <div key={n.id}
-                      role={n.link ? 'link' : undefined}
-                      tabIndex={n.link ? 0 : undefined}
-                      className={n.link ? 'waves-focus-ring' : undefined}
+                      role={href ? 'link' : undefined}
+                      tabIndex={href ? 0 : undefined}
+                      className={href ? 'waves-focus-ring' : undefined}
                       onClick={async () => {
                         if (!n.read_at) await markRead(n.id);
-                        if (n.link) { setOpen(false); window.location.href = n.link; }
+                        if (href) { setOpen(false); window.location.href = href; }
                       }}
-                      onKeyDown={n.link ? async (e) => {
+                      onKeyDown={href ? async (e) => {
                         if (e.key !== 'Enter' && e.key !== ' ') return;
                         e.preventDefault();
                         if (!n.read_at) await markRead(n.id);
                         setOpen(false);
-                        window.location.href = n.link;
+                        window.location.href = href;
                       } : undefined}
                       style={{
-                        padding: '12px 20px', cursor: n.link ? 'pointer' : 'default',
+                        padding: '12px 20px', cursor: href ? 'pointer' : 'default',
                         borderBottom: `1px solid ${colors.border}`,
                         background: n.read_at ? 'transparent' : colors.unreadBg,
                         display: 'flex', gap: 12, alignItems: 'flex-start',
@@ -733,10 +782,21 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                     >
                       <span style={{ fontSize: 20, flexShrink: 0, marginTop: 2 }}>{n.icon || '\u{1F514}'}</span>
                       <div style={{ flex: 1, minWidth: 0 }}>
-                        <div title={n.title} style={{
-                          fontSize: 15, fontWeight: n.read_at ? 400 : 700, color: colors.text,
-                          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                        }}>{n.title}</div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                          <div title={title} style={{
+                            fontSize: 15, fontWeight: n.read_at ? 400 : 700, color: colors.text,
+                            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                            minWidth: 0, flex: '0 1 auto',
+                          }}>{title}</div>
+                          {chip && (
+                            <span style={{
+                              fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.3,
+                              padding: '2px 6px', borderRadius: 4, flexShrink: 0,
+                              color: chip.label === 'Broken' ? colors.badge : colors.teal,
+                              background: chip.label === 'Broken' ? 'rgba(192,57,43,0.12)' : 'rgba(10,126,194,0.12)',
+                            }}>{chip.label}</span>
+                          )}
+                        </div>
                         {n.body && (
                           <div title={n.body} style={{
                             fontSize: 14, color: colors.muted, marginTop: 2, lineHeight: 1.4,
@@ -755,7 +815,8 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                         }} />
                       )}
                     </div>
-                  ))}
+                    );
+                  })}
                 </div>
               ))}
               {moreControl}
@@ -813,3 +874,7 @@ function PushEnableStrip({ admin, enabling, error, onClick }) {
     </div>
   );
 }
+
+// Pure helpers, exported for focused unit tests (avoids a full component
+// render just to pin the prefix strip / chip / focus-link logic).
+export const _test = { displayTitle, digestKindChip, linkFor };

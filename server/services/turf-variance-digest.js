@@ -160,7 +160,13 @@ function composeTurfVarianceDigest(rows, { thresholdPct = alertPct(), samplesFlo
     `<p><a href="${esc(adminPortalUrl())}/admin/estimates">Open the estimates ledger</a></p>`,
   ].join('\n');
 
-  return { subject, text, html, avgDeltaPct: Math.round(avg * 100) / 100, samples: samples.length, direction };
+  const avgDeltaPct = Math.round(avg * 100) / 100;
+  // Admin-alerts-brevity scope (owner ruling 2026-09-28): short bell copy;
+  // the full digest still lands in `detail`. Magnitude only (no +/- sign —
+  // `direction` above already says which way it's off).
+  const headline = `Estimates — turf estimates running ${direction}`;
+  const summary = `Avg ${Math.abs(avgDeltaPct)}% off across ${samples.length} services.`;
+  return { subject, text, html, avgDeltaPct, samples: samples.length, direction, headline, summary };
 }
 
 async function runTurfVarianceDigest(opts = {}) {
@@ -208,6 +214,8 @@ async function runTurfVarianceDigest(opts = {}) {
       subject: composed.subject,
       html: composed.html,
       text: composed.text,
+      headline: composed.headline,
+      summary: composed.summary,
       link: '/admin/estimates',
       sendEmail: () => mailer.sendOne({
         to,
