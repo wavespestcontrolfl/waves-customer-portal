@@ -28,7 +28,7 @@ describe('pest-insider buildPestInsiderSystemPrompt', () => {
     expect(prompt).toContain('The Lawn Corner');
     expect(prompt).toContain('Myth-Buster');
     expect(prompt).toContain('FEATURED SERVICE (the one pitch): mosquito treatment');
-    expect(prompt).toContain('LAWN CORNER BEAT: chinch bugs starting');
+    expect(prompt).toContain('LAWN CORNER BEAT: chinch bugs on St. Augustine (UF: thrive in warm, damp summer months)');
     expect(prompt).toContain('retention');
     expect(prompt).toContain('exactly ONE pitch and ONE CTA');
   });

@@ -657,6 +657,20 @@ router.patch('/sends/:id', async (req, res, next) => {
       });
     }
 
+    // Same class of guard for the Pest Insider: its proof kill switch
+    // (GATE_PEST_INSIDER_PROOF) and the fact-register claim scan both key on
+    // newsletter_type='pest-insider-monthly'. A template swap in the composer
+    // replaces only the HTML body, so retyping the draft would carry its old
+    // text body, subject or preview past both gates. Refuse the change —
+    // delete + recreate to genuinely retype.
+    if (newsletterType !== undefined
+        && send.newsletter_type === 'pest-insider-monthly'
+        && newsletterType !== 'pest-insider-monthly') {
+      return res.status(400).json({
+        error: 'Cannot change a Pest Insider newsletter to another type — it would bypass its fact-register send gate and proof kill switch. Delete and recreate instead.',
+      });
+    }
+
     // The win-back's audience belongs to the sunset lane: any saved segment
     // MUST keep the reengagement_due tag, or a segment edit (or a client
     // sending the UI-default null) would broadcast the "we'll stop sending"

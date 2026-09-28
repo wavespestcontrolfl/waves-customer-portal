@@ -141,11 +141,17 @@ function planFactSync(fact, row, { today, priorSeed = false } = {}) {
   if (!legacy && rowHash !== meta.register_hash && !converged) {
     return { action: 'hold', reason: 'edited_by_person', rowHash, shippedHash };
   }
-  if (expired) return row.active ? { action: 'retire', reason: 'expired' } : { action: 'unchanged' };
+  // Expired: archive the row (status is what the shared search reads) even
+  // when a person had already set active=false — that deactivation is
+  // remembered so a comeback never switches the row back on.
+  if (expired) {
+    if (row.status === 'archived') return { action: 'unchanged' };
+    return { action: 'retire', reason: 'expired', keepDeactivation: !row.active && !meta.retired_reason };
+  }
   // active=false with no retirement stamp is a person's deactivation (the
   // admin knowledge routes write arbitrary columns); the register does not
-  // switch it back on.
-  if (!row.active && !meta.retired_reason) return { action: 'hold', reason: 'deactivated_by_person' };
+  // switch it back on — nor after it retired and un-retired the row.
+  if (!row.active && (!meta.retired_reason || meta.deactivated_by_person)) return { action: 'hold', reason: 'deactivated_by_person' };
   const sameWording = converged || (!legacy && meta.register_hash === shippedHash);
   if (sameWording && !converged && row.active && managedMetadataCurrent(meta, fact)) return { action: 'unchanged' };
   return { action: 'update', legacy, reactivate: !row.active, metadataOnly: sameWording, converged };
@@ -314,9 +320,17 @@ async function applyFactPlan(trx, fact, row, plan, { now, today, hasAuditLog, re
         active: false,
         status: 'archived',
         updated_at: now,
-        metadata: JSON.stringify({ ...meta, retired_on: today, retired_reason: plan.reason, status_before_retire: row.status }),
+        metadata: JSON.stringify({
+          ...meta,
+          retired_on: today,
+          retired_reason: plan.reason,
+          status_before_retire: row.status,
+          ...(plan.keepDeactivation ? { deactivated_by_person: true } : {}),
+        }),
       });
-      await audit(trx, hasAuditLog, AUDIT_ACTIONS.retired, row, { reason: plan.reason, status_before_retire: row.status });
+      await audit(trx, hasAuditLog, AUDIT_ACTIONS.retired, row, {
+        reason: plan.reason, status_before_retire: row.status, deactivated_by_person: plan.keepDeactivation === true,
+      });
       result.retired.push(row.slug);
       return;
     }
@@ -649,7 +663,19 @@ function vacuumClaimInSentence(sentence) {
 // and "safe to say" are not product-safety claims either.
 // Hyphenated only: "keep your family safe from mosquitoes" is not a claim.
 const SAFE_COMPOUND = /\b(?:bee|pet|family|kid|child|children|baby|dog|cat|people|human|eco|environment(?:ally)?|earth|planet)-safe\b/i;
-const SAFE_CLAIM = /\b(?:is|are|it's|its|be|being|remains?|becomes?|considered|deemed|completely|totally|perfectly|entirely|100%)\s+(?:\w+\s+)?safe\b(?!\s+(?:from|to\s+say))|\bsafe\s+(?:for|around|near|with|once|when|after|as\s+soon\s+as)\b|\bsafe\s+to\s+(?!say\b)\w+/i;
+// Copula forms ("is safe"), prepositional forms ("safe for / around / once
+// dry"), and the bare adjective on a product or service ("our safe lawn
+// treatment", "a safe, effective spray", "the safe choice"). Not: "safe
+// from" (protection), "safe to say", "a safe distance / place / bet".
+const SAFE_PRODUCT_NOUN = '(?:lawn|pest|termite|mosquito|rodent|ant|flea|indoor|outdoor|home|yard|residential|commercial)?\\s*(?:treatments?|products?|sprays?|formulas?|formulations?|applications?|options?|choices?|ways?|solutions?|pesticides?|insecticides?|herbicides?|chemicals?|services?|barriers?|alternatives?|approach(?:es)?|methods?|programs?|plans?|ingredients?|materials?)';
+const SAFE_IDIOM_NOUN = '(?:from|to\\s+say|bet|distance|place|space|side|harbou?r|haven|spot|room|hands|travels?|trip|journey|holiday|weekend|season|drive|passage)';
+const SAFE_CLAIM = new RegExp(
+  `\\b(?:is|are|it's|its|be|being|remains?|becomes?|considered|deemed|completely|totally|perfectly|entirely|100%)\\s+(?:\\w+\\s+)?safe\\b(?!\\s+${SAFE_IDIOM_NOUN}\\b)`
+  + '|\\bsafe\\s+(?:for|around|near|with|once|when|after|as\\s+soon\\s+as)\\b'
+  + '|\\bsafe\\s+to\\s+(?!say\\b)\\w+'
+  + `|\\bsafe(?:,?\\s+(?:and\\s+)?\\w+)?\\s+${SAFE_PRODUCT_NOUN}\\b`,
+  'i',
+);
 const TECHNICIAN_CONFIRMS = /\btechnicians?\b[^.]{0,80}\b(?:confirm|tell|let\s+you\s+know|advise|say|give)|\b(?:confirm|tell|advise|check)\w*[^.]{0,40}\btechnicians?\b/i;
 // The technician idiom exempts ONLY dry-state re-entry guidance: "safe once
 // dry / when it has dried, and your technician confirms the timing". It

@@ -33,11 +33,12 @@
  * every day until someone edits it, and the owner was told the first time
  * (sendNewsletterProof notifies on a blocked draft), so the catch-up skips
  * it quietly unless the draft was edited since the LAST PROOF ATTEMPT that
- * ended in that validation failure — every attempt is stamped in
- * audit_log with its outcome; the creation-time proof on the first Tuesday
- * counts, so the same-day catch-up never repeats its notice, while an
- * attempt that never reached validation (gate off, SendGrid unconfigured)
- * suppresses nothing.
+ * ended in an owner-notified, deterministic block (the validator, or a
+ * segment matching nobody) — every attempt is stamped in audit_log with its
+ * outcome and the block is re-checked live; the creation-time proof on the
+ * first Tuesday counts, so the same-day catch-up never repeats its notice,
+ * while an attempt that never reached those checks (gate off, SendGrid
+ * unconfigured) suppresses nothing.
  *
  * A draft that cannot be written at all (the fact register empty, the
  * writer down) is reported to the owner through the same
@@ -228,9 +229,19 @@ async function retryPestInsiderProof({ now = new Date() } = {}) {
   // record (the gate was off when the issue was drafted) means the same:
   // attempt, so the owner is told once.
   const lastAttempt = await lastProofAttempt(draft.id);
-  if (lastAttempt?.reason === 'validation_failed' && !editedSince(draft, lastAttempt.at) && await draftFailsValidation(draft)) {
-    logger.info(`[pest-insider-autopilot] proof catch-up skipped for ${draft.id}: draft still fails validation and has not been edited since the last attempt`);
-    return { skipped: true, reason: 'validation_failed', sendId: draft.id };
+  if (lastAttempt && !editedSince(draft, lastAttempt.at)) {
+    // Each reason below is one sendNewsletterProof notified the owner about
+    // and that stays true until something changes: the draft (validation)
+    // or the audience (zero recipients). Re-checked live, so a fixed draft
+    // or a grown segment is proofed on the next tick.
+    if (lastAttempt.reason === 'validation_failed' && await draftFailsValidation(draft)) {
+      logger.info(`[pest-insider-autopilot] proof catch-up skipped for ${draft.id}: draft still fails validation and has not been edited since the last attempt`);
+      return { skipped: true, reason: 'validation_failed', sendId: draft.id };
+    }
+    if (lastAttempt.reason === 'zero_recipients' && await audienceStillEmpty(draft)) {
+      logger.info(`[pest-insider-autopilot] proof catch-up skipped for ${draft.id}: segment still matches 0 subscribers since the last attempt`);
+      return { skipped: true, reason: 'zero_recipients', sendId: draft.id };
+    }
   }
 
   const proof = await sendProofFor(draft.id);
@@ -252,6 +263,17 @@ async function draftFailsValidation(draft) {
     return Array.isArray(errors) && errors.length > 0;
   } catch (e) {
     logger.warn(`[pest-insider-autopilot] validation pre-check failed: ${e.message}`);
+    return false;
+  }
+}
+
+// Fail OPEN to the proof path, same as the validation pre-check.
+async function audienceStillEmpty(draft) {
+  try {
+    const { countSegmentRecipients } = require('./newsletter-sender');
+    return (await countSegmentRecipients(draft.segment_filter)) === 0;
+  } catch (e) {
+    logger.warn(`[pest-insider-autopilot] audience pre-check failed: ${e.message}`);
     return false;
   }
 }

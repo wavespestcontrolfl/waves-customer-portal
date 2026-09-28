@@ -242,7 +242,7 @@ const PEST_INSIDER_ROTATION = {
   },
   October: {
     service: 'rodent exclusion (UF: prune touching limbs, trim palm skirts, plants 2 ft off the house; roof rats jump 3 ft up and 4 ft across — UF gives no rodent season)',
-    lawn: 'fall fertilization (blackout ends Sept 30) + the irrigation schedule (SWFWMD one-day-a-week restrictions run through Oct 1, 2026)',
+    lawn: 'fall fertilization (blackout ends Sept 30) + watering days — state a district restriction ONLY if the verified facts below carry a current one; if they do not, say nothing about a schedule',
     beats: 'spooky season fun: spider myths, which Florida bugs are ACTUALLY dangerous — sourced facts only, no invented seasonality',
   },
   November: {

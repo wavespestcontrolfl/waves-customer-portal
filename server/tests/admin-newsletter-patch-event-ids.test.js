@@ -151,3 +151,30 @@ describe('PATCH /sends/:id event_ids preservation', () => {
     expect(payload.event_ids).toBe(JSON.stringify([EVENT_UUID]));
   });
 });
+
+// The Pest Insider's proof kill switch and its fact-register claim scan key on
+// newsletter_type='pest-insider-monthly' (email division fact register lane).
+// A template swap in the composer replaces only the HTML body, so retyping the
+// draft would carry its old text body, subject or preview past both gates.
+describe('PATCH /sends/:id refuses retyping a Pest Insider draft', () => {
+  beforeEach(() => { jest.clearAllMocks(); });
+
+  test('changing a Pest Insider draft to another type is refused before any write', async () => {
+    const update = mockSendsTable({ ...draftRow([]), newsletter_type: 'pest-insider-monthly' });
+    await withServer(async (baseUrl) => {
+      const res = await patchSend(baseUrl, { newsletterType: 'local-weekly-fresh-events', subject: 'Retyped' });
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toMatch(/Pest Insider/);
+    });
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  test('an edit that keeps the Pest Insider type goes through', async () => {
+    const update = mockSendsTable({ ...draftRow([]), newsletter_type: 'pest-insider-monthly' });
+    await withServer(async (baseUrl) => {
+      const res = await patchSend(baseUrl, { newsletterType: 'pest-insider-monthly', subject: 'Still the Pest Insider' });
+      expect(res.status).toBe(200);
+    });
+    expect(update).toHaveBeenCalledTimes(1);
+  });
+});

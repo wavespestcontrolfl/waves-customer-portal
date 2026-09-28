@@ -24,6 +24,8 @@ jest.mock('../services/newsletter-validator', () => ({
   lockedPricesForSend: mockLockedPrices,
 }));
 jest.mock('../services/audit-log', () => ({ recordAuditEvent: mockRecordAudit }));
+const mockCountRecipients = jest.fn(async () => 0);
+jest.mock('../services/newsletter-sender', () => ({ countSegmentRecipients: mockCountRecipients }));
 jest.mock('../services/newsletter-draft', () => ({
   createNewsletterDraft: mockCreateDraft,
 }));
@@ -273,6 +275,29 @@ describe('pest-insider proof catch-up', () => {
 
     expect(mockSendProof).toHaveBeenCalledWith('send-pi-1');
     expect(result.reason).toBe('validation_failed');
+  });
+
+  test('a segment that still matches nobody after a notified zero_recipients attempt is skipped quietly', async () => {
+    process.env.GATE_PEST_INSIDER_PROOF = 'true';
+    mockCountRecipients.mockResolvedValueOnce(0);
+    wireDb({ draft: { id: 'send-pi-1', updated_at: DRAFTED_AT, segment_filter: { tag: 'nobody' } }, lastAttempt: { created_at: new Date('2026-06-02T11:05:00Z'), metadata: { sent: false, reason: 'zero_recipients' } } });
+
+    const result = await retryPestInsiderProof({ now: DAY_AFTER });
+
+    expect(result).toEqual({ skipped: true, reason: 'zero_recipients', sendId: 'send-pi-1' });
+    expect(mockCountRecipients).toHaveBeenCalledWith({ tag: 'nobody' });
+    expect(mockSendProof).not.toHaveBeenCalled();
+  });
+
+  test('…but a grown audience is proofed on the next tick', async () => {
+    process.env.GATE_PEST_INSIDER_PROOF = 'true';
+    mockCountRecipients.mockResolvedValueOnce(12);
+    wireDb({ draft: { id: 'send-pi-1', updated_at: DRAFTED_AT }, lastAttempt: { created_at: new Date('2026-06-02T11:05:00Z'), metadata: { sent: false, reason: 'zero_recipients' } } });
+
+    const result = await retryPestInsiderProof({ now: DAY_AFTER });
+
+    expect(mockSendProof).toHaveBeenCalledWith('send-pi-1');
+    expect(result.skipped).toBe(false);
   });
 
   test('metadata stored as a JSON string is read the same way', async () => {

@@ -260,8 +260,8 @@ describe('planFactSync (pure)', () => {
 
   test('an expired fact retires its untouched active row, once', () => {
     const expired = { ...fact, expiresOn: '2026-09-28' };
-    expect(planFactSync(expired, syncedRow(), { today: TODAY })).toEqual({ action: 'retire', reason: 'expired' });
-    expect(planFactSync(expired, syncedRow({ active: false, metadata: syncedMeta({ retired_reason: 'expired' }) }), { today: TODAY })).toEqual({ action: 'unchanged' });
+    expect(planFactSync(expired, syncedRow(), { today: TODAY })).toEqual({ action: 'retire', reason: 'expired', keepDeactivation: false });
+    expect(planFactSync(expired, syncedRow({ active: false, status: 'archived', metadata: syncedMeta({ retired_reason: 'expired' }) }), { today: TODAY })).toEqual({ action: 'unchanged' });
     // the day before expiry it is still a live fact (its row already carries that expiry)
     expect(planFactSync(expired, syncedRow({ metadata: syncedMeta({ expires_on: '2026-09-28' }) }), { today: '2026-09-27' })).toEqual({ action: 'unchanged' });
   });
@@ -279,6 +279,14 @@ describe('planFactSync (pure)', () => {
 
   test('a row a PERSON deactivated (active=false, no retirement stamp) is held, never switched back on', () => {
     expect(planFactSync(fact, syncedRow({ active: false }), { today: TODAY })).toEqual({ action: 'hold', reason: 'deactivated_by_person' });
+  });
+
+  test('an expired fact still archives a person-deactivated row (shared search reads status), remembering the deactivation', () => {
+    const expired = { ...fact, expiresOn: '2026-09-01' };
+    expect(planFactSync(expired, syncedRow({ active: false }), { today: TODAY })).toEqual({ action: 'retire', reason: 'expired', keepDeactivation: true });
+    // …and when the fact comes back, the person's deactivation still holds.
+    const archived = syncedRow({ active: false, status: 'archived', metadata: syncedMeta({ retired_reason: 'expired', retired_on: '2026-09-28', deactivated_by_person: true, expires_on: '2026-09-01' }) });
+    expect(planFactSync(fact, archived, { today: TODAY })).toEqual({ action: 'hold', reason: 'deactivated_by_person' });
   });
 });
 
@@ -569,6 +577,10 @@ describe('findUnverifiedClaims', () => {
       'The lawn is safe once dry.',
       'Keep pets off the lawn until it is dry, then it is safe to let them back out.',
       'It is kid safe once dry.',
+      'Choose our safe lawn treatment.',
+      'We offer a safe treatment option.',
+      'A safe, effective spray for the whole yard.',
+      'The safe choice for Florida lawns.',
       'Our technician confirms this pesticide is completely safe for children and pets.',
       'The treatment is safe after 15 minutes, as your technician will confirm.',
       'Your technician will confirm the product is safe for your family.',
@@ -586,7 +598,10 @@ describe('findUnverifiedClaims', () => {
       'It is safe to say termites are active.',
       'Have a safe Labor Day weekend.',
       'The product is highly toxic to bees exposed to direct treatment.',
-    ])('the label\'s wording, "safe from", "safe to say" and the technician-confirms idiom pass: %s', (sentence) => {
+      'Keep a safe distance from fire ant mounds.',
+      'It is a safe bet that lovebugs return in September.',
+      'Have a safe trip home for the holidays.',
+    ])('the label\'s wording, "safe from", "safe to say", "safe distance/bet/trip" and the technician-confirms idiom pass: %s', (sentence) => {
       expect(rule(sentence, 'absolute_safety_claim')).toBe(false);
     });
   });
