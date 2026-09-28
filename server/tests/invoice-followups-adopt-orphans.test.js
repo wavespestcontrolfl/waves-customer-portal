@@ -47,11 +47,13 @@ beforeEach(() => {
   jest.clearAllMocks();
   delete process.env.GATE_DUNNING_ADOPT_ORPHANS;
   delete process.env.GATE_DUNNING_LADDER_90;
+  delete process.env.GATE_LATE_PAYMENT_CHECKER_OFF;
 });
 afterEach(() => {
   jest.useRealTimers();
   delete process.env.GATE_DUNNING_ADOPT_ORPHANS;
   delete process.env.GATE_DUNNING_LADDER_90;
+  delete process.env.GATE_LATE_PAYMENT_CHECKER_OFF;
 });
 
 // The `invoices as i` orphan-candidate query: records every filter clause so
@@ -61,13 +63,14 @@ afterEach(() => {
 // are visible too.
 function orphanCandidateQuery(rows) {
   const recorded = {
-    whereNulls: [], whereNotIn: null, notExistsCalled: false, withdrawnClause: [], orderByRaw: null,
+    whereNulls: [], whereNotIn: null, whereIn: null, notExistsCalled: false, withdrawnClause: [], orderByRaw: null,
   };
   const q = {};
   q.leftJoin = jest.fn(() => q);
   q.join = jest.fn(() => q);
   q.whereNull = jest.fn((col) => { recorded.whereNulls.push(col); return q; });
   q.whereNotIn = jest.fn((col, vals) => { recorded.whereNotIn = [col, vals]; return q; });
+  q.whereIn = jest.fn((col, vals) => { recorded.whereIn = [col, vals]; return q; });
   q.where = jest.fn((fn) => {
     if (typeof fn === 'function') {
       const b = {
@@ -175,9 +178,10 @@ describe('adoptOrphanInvoices selection', () => {
     await adoptOrphanInvoices({ dryRun: true });
     // "has a sequence" — the left join's NULL check.
     expect(orphanQuery.recorded.whereNulls).toEqual(expect.arrayContaining(['s.id', 'i.payer_id', 'c.deleted_at']));
-    // "draft/terminal" — isSchedulableInvoice's own status list.
-    expect(orphanQuery.recorded.whereNotIn[0]).toBe('i.status');
-    expect(orphanQuery.recorded.whereNotIn[1]).toEqual(expect.arrayContaining(['draft', 'paid', 'void']));
+    // Delivered statuses ONLY (never 'scheduled'/'sending' — not yet
+    // actually delivered to the customer) — the same whitelist
+    // late-payment-checker.js's own candidate query uses.
+    expect(orphanQuery.recorded.whereIn).toEqual(['i.status', ['sent', 'viewed', 'overdue']]);
     // "withdrawn to a payer" (payer_billed: stamp), same shape as runPending's own exclusion.
     expect(orphanQuery.recorded.withdrawnClause).toEqual([
       ['whereNull', 'i.scheduled_send_error'],
@@ -306,5 +310,50 @@ describe('runPending and the orphan sweep', () => {
     expect(seqUpdates[0].patch.step_index).toBe(4); // d60_reminder
     expect(seqUpdates[0].patch.next_touch_at).toEqual(tenAmET('2026-08-20')); // anchor + 60 days
     expect(new Date(seqUpdates[0].patch.next_touch_at).getTime()).toBeGreaterThan(NOW.getTime());
+  });
+});
+
+// Codex pre-push r1 P1: a sequence that finished BEFORE the legacy Day 30
+// end (paid after only its early touches fired) has always relied on the
+// legacy checker as its ONLY fallback if the invoice is later reopened
+// (hasActiveSequence deliberately excludes a low-step 'completed' row from
+// "owned"). GATE_LATE_PAYMENT_CHECKER_OFF must not remove that coverage.
+describe('runPending revives a reopened low-step sequence once the legacy checker retires', () => {
+  test('gate off (checker still running): runPending never looks for a reopened sequence', async () => {
+    const row = seqRow({ step_index: 1, next_touch_at: tenAmET('2026-08-05') });
+    // No revival read registered at all — a call to it throws, proving the
+    // revival never ran while the checker is still the fallback.
+    setupFullDb({ batchReads: [[row]] });
+    const result = await runPending();
+    expect(result).toEqual({ sent: 1, skipped: 0 });
+  });
+
+  test('gate on: a sequence completed at step 1 (paid early) on a reopened invoice resumes at step 1, without sending', async () => {
+    process.env.GATE_LATE_PAYMENT_CHECKER_OFF = 'true';
+    const anchor = tenAmET('2026-06-21'); // 45 days before NOW — its Day 7 (step 1) is long past
+    const finished = seqRow({
+      id: 'seq-reopened', invoice_id: 'inv-reopened', customer_id: 'cust-reopened', status: 'completed', step_index: 1, anchor_at: anchor, invoice_sent_at: anchor,
+    });
+    const { joinedBatch, seqUpdates } = setupFullDb({
+      // Revival read (checker retired, runs before the main batch select) finds the reopened sequence.
+      batchReads: [[finished], []],
+    });
+
+    const result = await runPending();
+
+    // The revival read targets [0, legacyCount) — the band the ladder's own
+    // Day 60/90 revival does NOT cover.
+    expect(joinedBatch[0].wheres).toEqual(expect.arrayContaining([
+      ['s.status', 'completed'], ['s.step_index', '>=', 0], ['s.step_index', '<', 4],
+    ]));
+    expect(seqUpdates).toHaveLength(1);
+    expect(seqUpdates[0].wheres).toEqual([[{ id: 'seq-reopened', status: 'completed', step_index: 1 }]]);
+    expect(seqUpdates[0].patch.status).toBe('active');
+    // Legacy Day 7 off the 06-21 anchor — long past NOW, so the main batch
+    // select (this run finds nothing new to send) is untouched by it; the
+    // NEXT run's stale-touch pass advances it forward, never sending late.
+    expect(seqUpdates[0].patch.next_touch_at).toEqual(tenAmET('2026-06-28'));
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('retired checker: 1 reopened invoice(s) resumed'));
+    expect(result).toEqual({ sent: 0, skipped: 0 });
   });
 });

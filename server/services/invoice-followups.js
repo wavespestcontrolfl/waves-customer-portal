@@ -63,6 +63,11 @@ const FOLLOWUP_EMAIL_TEMPLATE_BY_STEP_ID = {
 
 const TERMINAL_INVOICE_STATUSES = ['paid', 'prepaid', 'void', 'processing', 'refunded', 'canceled', 'cancelled'];
 const NON_SCHEDULABLE_INVOICE_STATUSES = [...TERMINAL_INVOICE_STATUSES, 'draft'];
+// The orphan-adoption sweep's own delivery-evidence check — the exact
+// statuses late-payment-checker.js's candidate query requires — is narrower
+// than "not draft/terminal" (which still admits 'scheduled'/'sending', an
+// invoice not yet actually delivered). See adoptOrphanInvoices.
+const PUBLISHED_INVOICE_STATUSES = ['sent', 'viewed', 'overdue'];
 
 // A dunning touch fires on its first ELIGIBLE send day or not at all (owner
 // ruling 2026-08-04, after the 07-29→08-04 cron outage left 17 sequences due).
@@ -598,7 +603,15 @@ async function adoptOrphanInvoices({ dryRun = false } = {}) {
     .leftJoin('invoice_followup_sequences as s', 's.invoice_id', 'i.id')
     .join('customers as c', 'c.id', 'i.customer_id')
     .whereNull('s.id')
-    .whereNotIn('i.status', NON_SCHEDULABLE_INVOICE_STATUSES)
+    // Published/delivered statuses ONLY — NOT "not draft/terminal": that
+    // wider isSchedulableInvoice test also passes 'scheduled'/'sending', an
+    // invoice queued for its FIRST send that has not reached the customer
+    // yet. scheduleForInvoice's own status check doesn't stop this (it's
+    // relying on its callers to invoke it only from the real send flow); the
+    // orphan sweep has no such context, so it must check delivery evidence
+    // itself, the same evidence late-payment-checker.js's own candidate
+    // query requires (Codex pre-push r1 P1).
+    .whereIn('i.status', PUBLISHED_INVOICE_STATUSES)
     .whereNull('i.payer_id')
     .where(function withdrawnExcluded() {
       this.whereNull('i.scheduled_send_error').orWhereNot('i.scheduled_send_error', 'like', 'payer_billed:%');
@@ -661,6 +674,7 @@ async function runPending() {
 
   const ladder = ladderThrough90Live();
   if (ladder) await reviveLegacyFinishedSequences();
+  if (latePaymentCheckerRetiredLive()) await reviveReopenedLowStepSequences();
   if (adoptOrphanInvoicesLive()) await adoptOrphanInvoices();
 
   // No deleted-customer filter here: fireStep() pauses those sequences
@@ -750,23 +764,19 @@ async function runPending() {
 }
 
 /**
- * Day 90 ladder (GATE_DUNNING_LADDER_90): a sequence finished at the Day 60
- * or Day 90 step on a still-open invoice picks up again at that step. That
- * is a sequence that ran out of the legacy Day 3/7/14/30 steps, or one a
- * payment finished at Day 60 or Day 90 whose invoice a dispute reopened.
- * A payment finish before Day 30 keeps its lower index and stays with the
- * legacy checker (hasActiveSequence). The same invoice guards as the send
- * batch apply. Each revival is guarded on the row still being that
- * finished sequence, and a step already past its send day is passed over by
- * the stale-touch pass in the same run, never sent late.
+ * Shared by both revival paths below: a 'completed' sequence in
+ * [minStepIndex, maxStepIndexExclusive) whose invoice is open again gets
+ * put back at the SAME step it finished on (never advanced), guarded on the
+ * row still being that finished sequence. A step whose send day already
+ * passed is passed over by the stale-touch pass in the same run, never sent
+ * late — the same guarantee adoptOrphanInvoices' fresh rows rely on.
  */
-async function reviveLegacyFinishedSequences() {
-  const legacyCount = config.steps.length;
+async function reviveFinishedSequences(minStepIndex, maxStepIndexExclusive) {
   const rows = await db('invoice_followup_sequences as s')
     .join('invoices as i', 's.invoice_id', 'i.id')
     .where('s.status', 'completed')
-    .where('s.step_index', '>=', legacyCount)
-    .where('s.step_index', '<', followupSteps().length)
+    .where('s.step_index', '>=', minStepIndex)
+    .where('s.step_index', '<', maxStepIndexExclusive)
     .whereNotIn('i.status', TERMINAL_INVOICE_STATUSES)
     .whereNull('i.payer_id')
     .where(function withdrawnExcluded() {
@@ -785,7 +795,42 @@ async function reviveLegacyFinishedSequences() {
       .update({ updated_at: db.fn.now(), status: 'active', next_touch_at: nextAt });
     revived += Number(updated) || 0;
   }
+  return revived;
+}
+
+/**
+ * Day 90 ladder (GATE_DUNNING_LADDER_90): a sequence finished at the Day 60
+ * or Day 90 step on a still-open invoice picks up again at that step. That
+ * is a sequence that ran out of the legacy Day 3/7/14/30 steps, or one a
+ * payment finished at Day 60 or Day 90 whose invoice a dispute reopened.
+ * A payment finish before Day 30 keeps its lower index; see
+ * reviveReopenedLowStepSequences below for what owns THAT case once the
+ * legacy checker retires. The same invoice guards as the send batch apply.
+ */
+async function reviveLegacyFinishedSequences() {
+  const revived = await reviveFinishedSequences(config.steps.length, followupSteps().length);
   if (revived) logger.info(`[invoice-followups] Day 90 ladder: ${revived} finished sequence(s) resumed at Day 60 or Day 90`);
+  return revived;
+}
+
+// GATE_LATE_PAYMENT_CHECKER_OFF, read at call time (strict 'true'). A
+// sequence that finished BEFORE the legacy Day 30 end — an invoice paid
+// (stopOnPayment) after only its early touches fired, then reopened by a
+// dispute/refund reversal — has always relied on the legacy
+// late-payment-checker.js as its ONLY fallback: hasActiveSequence
+// deliberately excludes a low-step 'completed' row from "owned" (codex
+// #5126 r1) precisely so that checker picks it back up. Retiring the
+// checker removes that fallback with nothing to replace it (Codex pre-push
+// r1 P1) — this revives it here instead, at the step it finished on, so the
+// ladder owns the reopened invoice the same way it already owns a Day 60/90
+// finish above. Off (checker still running): unchanged, this never runs.
+function latePaymentCheckerRetiredLive() {
+  return process.env.GATE_LATE_PAYMENT_CHECKER_OFF === 'true';
+}
+
+async function reviveReopenedLowStepSequences() {
+  const revived = await reviveFinishedSequences(0, config.steps.length);
+  if (revived) logger.info(`[invoice-followups] retired checker: ${revived} reopened invoice(s) resumed on their follow-up sequence`);
   return revived;
 }
 
