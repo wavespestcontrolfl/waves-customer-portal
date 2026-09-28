@@ -1212,6 +1212,46 @@ describe('OpenAI provider-failure fallback (mid-call switch to Claude)', () => {
     expect(spoken).toContain('Wednesday works.');
   });
 
+  test('a correction that lands during an earlier tool round of the turn still blocks the Claude retry', async () => {
+    process.env.GATE_VOICE_RELAY_OPENAI_INBOUND = 'true';
+    process.env.VOICE_RELAY_INBOUND_MODEL = LUNA;
+    let fetchCall = 0;
+    global.fetch = jest.fn(async () => {
+      fetchCall += 1;
+      if (fetchCall === 1) {
+        return {
+          ok: true, status: 200,
+          body: (async function* gen() {
+            yield `data: ${JSON.stringify({
+              type: 'response.completed',
+              response: {
+                id: 'r1', model: LUNA, status: 'completed',
+                output: [{ type: 'function_call', id: 'fc_1', call_id: 'call_1', name: 'lookup_customer', arguments: '{"phone":"+19415551234"}', status: 'completed' }],
+              },
+            })}\n\n`;
+          }()),
+        };
+      }
+      return { ok: false, status: 500, text: async () => 'server error' }; // the turn's next round fails
+    });
+    let releaseTool;
+    relayTools.executeTool.mockImplementationOnce(async () => { await new Promise((r) => { releaseTool = r; }); return 'Found: Pat Sample.'; });
+    const spoken = [];
+    const convo = new RelayConversation({ callSid: 'CA-fallback-tool-round', from: '+19415551234', send: (t) => spoken.push(t) });
+    convo.handlePrompt('book me for tuesday');
+    for (let i = 0; i < 50 && !releaseTool; i++) await new Promise((r) => setImmediate(r));
+    expect(releaseTool).toBeDefined(); // the first tool round is running
+    const second = convo.handlePrompt('actually make it wednesday');
+    mockAnthropicScriptedMessages.push({ content: [{ type: 'text', text: 'Wednesday works.' }], stop_reason: 'end_turn' });
+    releaseTool();
+    await second;
+
+    expect(mockAnthropicStreamCalls).toHaveLength(1); // only the new turn — no retry of the old one
+    const lastUser = [...mockAnthropicStreamCalls[0].messages].reverse().find((m) => m.role === 'user');
+    expect(JSON.stringify(lastUser.content)).toMatch(/wednesday/);
+    expect(spoken).toContain('Wednesday works.');
+  });
+
   test('a timed-out switch claim is not a win — the leg reads and adopts the recorded switch', async () => {
     const db = require('../models/db');
     const { ALLOWED_OVERRIDE_MODEL_IDS } = require('../services/voice-agent/relay-conversation');

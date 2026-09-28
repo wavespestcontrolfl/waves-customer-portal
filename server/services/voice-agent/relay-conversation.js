@@ -2316,6 +2316,10 @@ class RelayConversation {
     this._drainPlaying();
     const stat = {
       turn: this._userTurns.length,
+      // This prompt's place in the caller's activity (see _callerSeq): any
+      // later interrupt or prompt means the caller has moved past this turn
+      // (codex r9 — held for the whole turn, across its tool rounds).
+      callerSeq: this._callerSeq,
       // The PER-SOCKET generation this turn ran under (relay-server stamps
       // it from the upgrade token's nonce on every authenticated socket,
       // including the first leg of a call that never reconnects — this is
@@ -3395,11 +3399,12 @@ class RelayConversation {
    * eligible (one switch per call) switches the session to Claude, then:
    *   - ends the round as superseded when a replacement socket owns the call
    *     (never spend a Claude retry on a stale socket — codex r2);
-   *   - ends it as an interruption when the caller barged in or hung up at
-   *     any point since the call started (a timeout already aborted the
-   *     controller, so `_callerSeq` is the signal) or simply spoke again
-   *     (a new prompt queued behind this one — its reply must not be a
-   *     retried answer to the old request);
+   *   - ends it as an interruption when the caller barged in, hung up, or
+   *     simply spoke again (a new prompt queued behind this one) at any
+   *     point since this TURN's prompt — including during an earlier tool
+   *     round of the same turn (`stat.callerSeq` vs `_callerSeq`; a timeout
+   *     already aborted the controller, so the controller cannot say) — and
+   *     a completed retry is checked the same way before it is used;
    *   - otherwise retries the SAME round once on Claude, over the same
    *     `this.messages` (already cleaned of OpenAI-only history) — but only
    *     when nothing of the round reached the caller or failed trying
@@ -3415,10 +3420,10 @@ class RelayConversation {
    * (`_runLoop`) must return immediately on `null`.
    */
   async _runModelRound(stat, toolCtx) {
-    // The caller barged in, hung up, or spoke again since this round began —
-    // a Claude retry of it must never answer the old request (codex r7, r8).
-    const callerSeqAtStart = this._callerSeq;
-    const callerMovedOn = () => this.ended || this._callerSeq !== callerSeqAtStart;
+    // The caller barged in, hung up, or spoke again since this TURN's prompt
+    // (not just this round — a correction can land during an earlier tool
+    // round): a Claude retry must never answer the old request (codex r7–r9).
+    const callerMovedOn = () => this.ended || this._callerSeq !== stat.callerSeq;
     let retrying = false;
     for (;;) {
       // A retry must measure its own first token, not the failed call's.
@@ -3640,7 +3645,7 @@ class RelayConversation {
     }
     // Always a stat to write into: a loop with no caller turn (tests, a
     // future greeting round) records into a discarded one.
-    const stat = this._currentTurn || { modelMs: 0, toolMs: 0, toolCount: 0, rounds: 0 };
+    const stat = this._currentTurn || { modelMs: 0, toolMs: 0, toolCount: 0, rounds: 0, callerSeq: this._callerSeq };
 
     // The caller's turn, with the live clock attached as a per-turn note. Past
     // turns keep the time they actually happened at, so the message prefix stays
