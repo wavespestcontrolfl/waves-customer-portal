@@ -315,7 +315,9 @@ const MINUTES_BEFORE = new Set(['past', 'after', 'to', 'til', 'till', 'of', 'bef
 // starts are on the hour, so such a quote never states the slot.
 function hourHasMinutes(toks, [ha, hb]) {
   const next = toks[hb] || '';
-  return (/^\d+$/.test(next) && !/^0+$/.test(next)) || MINUTE_WORDS.has(next) || Object.hasOwn(HOUR_WORDS, next)
+  // "two zero five", "two o five" (but "two o'clock" is on the hour).
+  const zeroMinutes = next === 'zero' || (next === 'o' && toks[hb + 1] !== 'clock');
+  return (/^\d+$/.test(next) && !/^0+$/.test(next)) || MINUTE_WORDS.has(next) || Object.hasOwn(HOUR_WORDS, next) || zeroMinutes
     || isMinuteCount(toks[ha - 1]) // "half two", "quarter two", "October 2, 2 PM" all fail closed
     || (MINUTES_BEFORE.has(toks[ha - 1]) && isMinuteCount(toks[ha - 2]));
 }
@@ -354,13 +356,13 @@ function periodIsTheHours(quote, words) {
 
 // Does this slot quote hold every recorded word, with the period its hour's
 // and the hour on the hour?
-function statesSlotWords(quote, words, turns) {
+function statesSlotWords(quote, words, turns, agreementQuotes = []) {
   return slotPhrases(words).every((w) => holds(quote, w)) && periodIsTheHours(quote, words) && twelveSaidTogether(quote, words)
     // An hour read as business hours: the sentences the quote sits in must
     // state no half of the day and name no noon/midnight bound — "Thursday
     // at two" cut from "Thursday at two in the morning" never falls back.
     && (typeof words.period === 'string' || /^(?:noon|midnight)$/.test(normalize(words.hour))
-      || !statesAnyPeriod(sentencesHolding(turns, quote)));
+      || ![quote, ...agreementQuotes].some((q) => mayStatePeriod(sentencesHolding(turns, q))));
 }
 
 // The sentences, in every turn that holds this quote, that the quote
@@ -371,8 +373,18 @@ function sentencesHolding(turns, quote) {
     .flatMap((t) => sentencesAround(t, quote)).map((x) => x.ns).join(' ') || normalize(quote);
 }
 
-function statesAnyPeriod(quote) {
-  return halvesSaid(quote).length > 0 || /\b(?:noon|midnight)\b/.test(normalize(quote));
+// Before an unstated hour is read as business hours, the sentences of the
+// slot, commitment and acceptance quotes must carry NO sign of a half of the
+// day in any form: am/pm (also spelled "a m", "p m", or away from the hour:
+// "two sharp a.m."), a part of the day, noon or midnight. Only the verb "am"
+// right after "I" ("I am", "I really am") is exempt. Broad on purpose: any
+// doubt goes to the office.
+const PERIOD_SIGNS = new Set(['pm', 'morning', 'afternoon', 'evening', 'tonight', 'night', 'noon', 'midnight']);
+function mayStatePeriod(text) {
+  const toks = normalize(text).split(' ');
+  return toks.some((t, i) => PERIOD_SIGNS.has(t)
+    || ((t === 'a' || t === 'p') && toks[i + 1] === 'm') // "a m" / "p m" spelled apart
+    || (t === 'am' && toks[i - 1] !== 'i' && toks[i - 2] !== 'i'));
 }
 
 // Does this agent commitment quote commit to the recorded slot? It must say
@@ -465,7 +477,8 @@ function groundRescheduleAgreement({ v2, transcript, callStartedAt } = {}) {
   const words = scheduling.agreed_slot_words;
   if (typeof words?.hour !== 'string') return fail('agreed_slot_words_missing');
   if (!wordsStateSlot(words, slot, started, movedDate)) return fail('agreed_slot_words_mismatch');
-  if (!grounded('/scheduling/confirmed_start_at').some((q) => statesSlotWords(q, words, turns))) return fail('agreed_slot_ungrounded');
+  const agreementQuotes = [...commitments, ...grounded('/scheduling/caller_accepted_slot', 'caller')];
+  if (!grounded('/scheduling/confirmed_start_at').some((q) => statesSlotWords(q, words, turns, agreementQuotes))) return fail('agreed_slot_ungrounded');
   // The agent committed to THIS slot: the commitment quote says its hour,
   // on the hour, and no day but the slot's.
   if (!commitments.some((q) => commitsToSlot(q, words, slot.hour24, turns))) return fail('agent_commitment_not_the_slot');

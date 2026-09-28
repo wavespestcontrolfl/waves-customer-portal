@@ -279,6 +279,22 @@ describe('groundRescheduleAgreement', () => {
     expect(plain(THURSDAY_2PM, 'We will move it to Thursday at two in the a.m.', 'two')).toMatchObject({ ok: false, reason: 'agreed_slot_ungrounded' });
     // "Morning appointment" may be the old visit or the new one: fails closed.
     expect(plain(THURSDAY_2PM, 'I will move your morning appointment to Thursday at two.', 'two')).toMatchObject({ ok: false, reason: 'agreed_slot_ungrounded' });
+    // Codex #5163 r2: any sign of a period in the agreement's sentences, the
+    // caller's acceptance included, blocks the fallback; zero minutes too.
+    expect(plain(THURSDAY_2PM, 'We will move it to Thursday at two sharp a.m.', 'two')).toMatchObject({ ok: false, reason: 'agreed_slot_ungrounded' });
+    expect(plain(THURSDAY_2PM, 'We will move it to Thursday at two a m.', 'two')).toMatchObject({ ok: false, reason: 'agreed_slot_ungrounded' });
+    expect(plain(THURSDAY_2PM, 'We will move it to Thursday at two o five.', 'two')).toMatchObject({ ok: false, reason: 'agreed_slot_ungrounded' });
+    expect(plain(THURSDAY_2PM, 'We will move it to Thursday at two o clock.', 'two').ok).toBe(true);
+    expect(plain(THURSDAY_2PM, 'I really am moving you to Thursday at two, a tech will call.', 'two').ok).toBe(true);
+    expect(ground(v2({
+      scheduling: { agreed_slot_words: { day: 'Thursday', hour: 'two', period: null } },
+      evidence: [
+        quote('/scheduling/agent_committed_booking', 'agent', 'We will see you Thursday at two'),
+        quote('/scheduling/confirmed_start_at', 'agent', 'We will see you Thursday at two'),
+        quote('/scheduling/caller_accepted_slot', 'caller', 'Yes, Thursday at two AM works for me'),
+      ],
+    }), 'Caller: Can we move my visit?\nAgent: We will see you Thursday at two.\nCaller: Yes, Thursday at two AM works for me.'))
+      .toMatchObject({ ok: false, reason: 'agreed_slot_ungrounded' });
     // "Am" the verb is not a period.
     expect(plain(THURSDAY_2PM, 'I am moving you to Thursday at two.', 'two').ok).toBe(true);
     // Nor one said just past the end of the quote, in the same sentence.
