@@ -505,13 +505,15 @@ async function getRelatedPostsForBrief(target = {}, { database = db, limit = REL
 }
 
 // Publish-time recheck: of the frozen related paths, the ones still verified
-// live now. A post can be unpublished, noindexed or moved while a draft that
-// links it waits for review.
-async function getLiveRelatedPaths(paths = [], { database = db } = {}) {
+// live NOW on every frozen publish host (a post can be unpublished,
+// noindexed or moved to another fleet domain while a draft that links it
+// waits for review). Hosts default to the hub, like candidate targetSites.
+async function getLiveRelatedPaths(paths = [], { database = db, hosts = [] } = {}) {
   const wanted = new Set((Array.isArray(paths) ? paths : []).map(normalizePathForCompare).filter(Boolean));
   if (!wanted.size) return new Set();
-  const live = new Set((await loadVerifiedCandidates(database)).map((c) => normalizePathForCompare(c.path)));
-  return new Set([...wanted].filter((p) => live.has(p)));
+  const sites = Array.isArray(hosts) && hosts.length ? hosts : HUB_SITE_KEYS;
+  const liveKeys = new Set((await loadVerifiedCandidates(database)).flatMap(candidateLiveKeys));
+  return new Set([...wanted].filter((p) => sites.every((site) => liveKeys.has(`${site}|${p}`))));
 }
 
 module.exports = {

@@ -559,6 +559,27 @@ describe('getRelatedPostsForBrief — DB wrapper', () => {
     expect([...(await getLiveRelatedPaths([], { database }))]).toEqual([]);
   });
 
+  test('getLiveRelatedPaths requires the path to be live on the frozen publish host', async () => {
+    // The selected hub post has since moved to a spoke: its path is still
+    // live in the fleet, but not on the hub the draft publishes to.
+    const registryRows = [{
+      id: 'registry-moved',
+      canonical_url_normalized: '/termite/moved-post/',
+      live_url: 'https://www.sarasotaflpestcontrol.com/termite/moved-post/',
+      content_type: 'blog',
+      reconciliation_status: 'astro_only',
+      workflow_status: 'published',
+      astro_status: 'present',
+      live_status: 'live',
+      noindex_detected: false,
+      title: 'Moved Termite Post',
+      metadata: { frontmatter: { domains: ['sarasotaflpestcontrol.com'] } },
+    }];
+    const database = fakeDb({ registryRows });
+    expect([...(await getLiveRelatedPaths(['/termite/moved-post/'], { database, hosts: ['wavespestcontrol.com'] }))]).toEqual([]);
+    expect([...(await getLiveRelatedPaths(['/termite/moved-post/'], { database, hosts: ['sarasotaflpestcontrol.com'] }))]).toEqual(['/termite/moved-post/']);
+  });
+
   test('matches current registry health to an absolute spoke URL by domain and path', async () => {
     const spoke = 'sarasotaflpestcontrol.com';
     const path = '/termite/spoke-live/';

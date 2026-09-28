@@ -3420,7 +3420,7 @@ class AutonomousRunner {
     if (Array.isArray(options.relatedPostLinks) && options.relatedPostLinks.length) {
       try {
         const { getLiveRelatedPaths, _internals } = require('./related-posts');
-        const live = await getLiveRelatedPaths(options.relatedPostLinks);
+        const live = await getLiveRelatedPaths(options.relatedPostLinks, { hosts: options.relatedPostHosts });
         options.staleRelatedPostLinks = options.relatedPostLinks
           .filter((p) => !live.has(_internals.normalizePathForCompare(p)));
       } catch (err) {
