@@ -1203,6 +1203,19 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
       expect(weed).toHaveProperty('safety');
     });
 
+    test('finding 5 (pre-push audit): the workup\'s own named plant carries the safety line too, from the photo ladder and from the account', () => {
+      const base = {
+        subject: 'palm', possibilities: [], hostCandidates: [cand('fixture-sago-palm', 0.9)], observedTerms: [], currentMonth: 1, chips: {}, context: {}, photosCount: 1, quality: { usable: true, issue: 'none' },
+      };
+      const fromPhoto = engine.buildWorkup(base);
+      expect(fromPhoto.subject.plant).toMatchObject({ slug: 'fixture-sago-palm', source: 'photo', safety_line: 'Toxic to pets.' });
+      const fromAccount = engine.buildWorkup({
+        ...base, subject: 'lawn', hostCandidates: [], context: { grass_type_on_file: 'fixture_st_augustine' },
+      });
+      expect(fromAccount.subject.plant).toMatchObject({ slug: 'fixture-st-augustine', source: 'account' });
+      expect(fromAccount.subject.plant).toHaveProperty('safety_line');
+    });
+
     test('finding 6: a regulated pest possibility reads outcome "regulated", routes to the FDACS referral template and joins the outcome-class guard', () => {
       const regulated = engine.resolveConditionCandidate({ slug: 'fixture-regulated-pest', confidence: 0.9, elements_visible: [1, 2] }, pestEntries());
       expect(engine._test.pestOutcomeFor(catalog.getEntry('fixture-regulated-pest'))).toBe('regulated');
@@ -1260,6 +1273,19 @@ describe('plant-engine — schema-invalid answers flip their ledger row (Codex #
     // A failed leg (ok:false) is already a failure in the ledger — never re-rejected.
     expect(engine._test.validJson({ ok: false, reason: 'provider_error' }, 'candidatesA')).toBeNull();
     expect(rejectCall).toHaveBeenCalledTimes(1);
+  });
+
+  test('the rejection names the dispatcher\'s OWN result object, not the provider-stamped copy (the ledger keys rows by identity)', async () => {
+    const { dispatch } = require('../services/llm/call');
+    rejectCall.mockClear();
+    const original = { ok: true, json: { turf: 'not-an-array' }, model: 'gemini-3.8-flash-test' };
+    dispatch.mockResolvedValueOnce(original);
+    const stamped = await engine._test.callWithProvider({ provider: 'gemini', model: 'gemini-3.8-flash-test' }, { text: 'x' });
+    expect(stamped).not.toBe(original);
+    expect(stamped.provider).toBe('gemini');
+    expect(engine._test.validJson(stamped, 'candidatesA')).toBeNull();
+    expect(rejectCall).toHaveBeenCalledTimes(1);
+    expect(rejectCall.mock.calls[0][0]).toBe(original);
   });
 });
 

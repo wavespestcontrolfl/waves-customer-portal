@@ -879,13 +879,15 @@ function workupSubjectFor({
     // (pre-push audit on #5186 r1). An unapproved account turf still
     // outranks any photo guess, so the slot then stays empty.
     plant = isApproved(accountTurf) ? {
-      slug: accountTurf.slug, common_name: accountTurf.common_name, scientific_name: accountTurf.scientific_name || null, source: 'account', wording: null,
+      slug: accountTurf.slug, common_name: accountTurf.common_name, scientific_name: accountTurf.scientific_name || null, source: 'account', wording: null, ...plantSafetyFields(accountTurf),
     } : null;
   } else if (!namingBlocked) {
     const named = identityEntryLevelAnswer((subject === 'lawn' ? turfCandidates : hostCandidates)[0] || null, identityFlags[slot]);
     if (named) {
+      // The workup's named plant carries its safety line too (pre-push audit
+      // on #5186 r2: a pretty_sure sago palm lost its pet warning here).
       plant = {
-        slug: named.entry.slug, common_name: named.entry.common_name, scientific_name: named.entry.scientific_name || null, source: 'photo', wording: named.wording,
+        slug: named.entry.slug, common_name: named.entry.common_name, scientific_name: named.entry.scientific_name || null, source: 'photo', wording: named.wording, ...plantSafetyFields(named.entry),
       };
     }
   }
@@ -991,15 +993,22 @@ const SCHEMA_INVALID_REASON = 'schema_invalid';
 function validJson(result, kind) {
   if (!result?.ok || !result.json) return null;
   if (VALIDATE[kind](result.json)) return result.json;
-  rejectCall(result, `${SCHEMA_INVALID_REASON}:${kind}`);
+  // The dispatcher keys its ledger rows by the identity of the object it
+  // returned, so the rejection must name THAT object (`raw`), never this
+  // module's provider-stamped copy (pre-push audit on #5186 r2).
+  rejectCall(result.raw || result, `${SCHEMA_INVALID_REASON}:${kind}`);
   return null;
 }
 
+/** The dispatcher's result stamped with the route's provider/model, keeping
+ * the dispatcher's own object on `raw` for ledger rejection. */
 async function callWithProvider(route, payload) {
   if (!route || !route.provider || !route.model) return { ok: false, reason: 'no_route', provider: route?.provider || null, model: route?.model || null };
   const result = await dispatch(route, payload);
   if (!result) return { ok: false, reason: 'no_response', provider: route.provider, model: route.model };
-  return { ...result, provider: route.provider, model: result.model || route.model };
+  return {
+    ...result, provider: route.provider, model: result.model || route.model, raw: result,
+  };
 }
 
 const DEFAULT_TOTAL_BUDGET_MS = 4 * 60 * 1000;
@@ -1698,6 +1707,7 @@ module.exports = {
     pestOutcomeFor,
     verifyCoversAll,
     validJson,
+    callWithProvider,
     SCHEMA_INVALID_REASON,
   },
 };
