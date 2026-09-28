@@ -605,6 +605,24 @@ describe('findUnverifiedClaims', () => {
     ])('a downward threshold, large patch receding in the heat, or a figure that is not a temperature passes: %s', (sentence) => {
       expect(rule(sentence, 'large_patch_summer_disease')).toBe(false);
     });
+
+    test.each([
+      'Large patch is dormant, not active, in the summer.',
+      'Large patch slows down, of course, in the summer.',
+      'Large patch goes dormant, for the most part, in the hottest months.',
+      'Gray leaf spot thrives, unlike large patch, in the summer.',
+    ])('a verbless fragment is judged with the clause it hangs off — the fact stated across commas passes: %s', (sentence) => {
+      expect(rule(sentence, 'large_patch_summer_disease')).toBe(false);
+    });
+
+    test.each([
+      'Large patch is a common sight, especially in the summer.',
+      'Large patch is not dormant, in the summer.',
+      'Large patch is dormant in spring; in the summer it thrives.',
+      'Large patch shows up everywhere, in the 90s.',
+    ])('a fragment hanging off a claim, or a clause with its own verb, is still the claim: %s', (sentence) => {
+      expect(rule(sentence, 'large_patch_summer_disease')).toBe(true);
+    });
   });
 
   describe('non_flea_vacuum_advice', () => {

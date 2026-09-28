@@ -701,6 +701,25 @@ function lastLawnSubject(text) {
   return kind;
 }
 
+// A verbless fragment set off by commas — "..., in the summer", "...,
+// especially in July", "..., not active, ..." — has no verdict of its own:
+// it is judged with the clause it hangs off, back to the nearest clause that
+// carries a verb. "Large patch is dormant, not active, in the summer" states
+// the fact across three clauses; "Gray leaf spot thrives, unlike large
+// patch, in the summer" is the contrast. A fragment WITH a verb ("in the
+// summer it thrives") stands on its own, as before.
+const FRAGMENT_LEAD = /^(?:in|into|during|through(?:out)?|over|across|by|until|till|from|for|as|with|without|like|such|since|after|before|around|about|at|on|within|of|come|especially|particularly|mostly|mainly|usually|typically|often|even|only|not|never|rarely|seldom|less|more|much|far|well)\b/i;
+const CLAUSE_VERB = /\b(?:is|are|was|were|be|been|being|am|has|have|had|do|does|did|can|could|will|would|should|may|might|must|shall|gets?|got|becomes?|became|stays?|stayed|remains?|remained|keeps?|kept|tends?|seems?|appears?|appeared|looks?|shows?|showed|thrives?|thrived|flares?|flared|spreads?|peaks?|peaked|slows?|slowed|stops?|stopped|fades?|faded|goes|went|gone|comes?|came|hits?|strikes?|struck|develops?|developed|starts?|started|begins?|began|returns?|returned|takes?|took|makes?|made|causes?|caused|means?|meant|needs?|wants?|thinks?|sees?|saw|expect\w*|watch\w*|treat\w*|appl(?:y|ies|ied)|water\w*|mow\w*|hold\w*|skip\w*|wait\w*|call\w*|love\w*|like\w*|prefer\w*)\b/i;
+function isFragment(clause) {
+  return FRAGMENT_LEAD.test(clause) && !CLAUSE_VERB.test(clause);
+}
+function governingText(clauses, i) {
+  if (!isFragment(clauses[i])) return clauses[i];
+  let j = i;
+  while (j > 0 && isFragment(clauses[j])) j -= 1;
+  return clauses.slice(j, i + 1).join(' ');
+}
+
 function patchClaimInSentence(sentence, previousSentence = '') {
   const clauses = splitClauses(sentence);
   // The subject carries across clauses the same way it does for termites:
@@ -716,14 +735,17 @@ function patchClaimInSentence(sentence, previousSentence = '') {
     if (subject === null && LAWN_PRONOUN_SUBJECT.test(clause)) subject = lastLawnSubject(previousSentence);
     if (subject !== 'patch' || !PATCH_TRIGGER.test(clause)) continue;
     if (previousClauseIsMythLabel(clauses, i)) continue;
+    // A verbless fragment is judged with its governing clause (see
+    // governingText); a full clause on its own.
+    const judged = governingText(clauses, i);
     // "Large patch doesn't slow down in summer": the negation is on the
     // receding verb, so it asserts the claim — unless the clause calls it
     // a myth.
-    if (NEGATED_RECEDE.test(clause)) {
-      if (MYTH_WORD.test(clause)) continue;
+    if (NEGATED_RECEDE.test(judged)) {
+      if (MYTH_WORD.test(judged)) continue;
       return clause;
     }
-    if (patchRecedes(clause) || clauseDenies(clause, PATCH_CONTRAST)) continue;
+    if (patchRecedes(judged) || clauseDenies(judged, PATCH_CONTRAST)) continue;
     return clause;
   }
   return null;
