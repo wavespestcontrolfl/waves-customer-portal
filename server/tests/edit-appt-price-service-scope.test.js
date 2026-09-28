@@ -58,6 +58,12 @@ function makeConn(handler) {
       for (const m of ['where', 'orWhere', 'whereIn', 'whereNot', 'whereNotIn', 'orderBy', 'select', 'limit', 'forUpdate']) {
         b[m] = record(m);
       }
+      // The sibling mint-lock candidate read (owner ruling 2026-09-28)
+      // conditionally adds its own date filter inside `.modify()` — invoke
+      // the callback against this SAME builder (so its `.where(...)` lands
+      // in this query's own `calls`, not the real targetQuery's) and keep
+      // chaining.
+      b.modify = (cb) => { calls.push(['modify']); if (typeof cb === 'function') cb(b); return b; };
       b.first = (...args) => {
         calls.push(['first', ...args]);
         return Promise.resolve(handler({ table, calls, op: 'first' }));
