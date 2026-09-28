@@ -79,17 +79,6 @@ it('still locks on a real app switch while the camera is open', async () => {
   expect(lockShown()).toBeInTheDocument();
 });
 
-it('stops excusing a hidden page once the camera has returned', async () => {
-  await renderUnlocked();
-  fireEvent.click(screen.getByTestId('camera'));
-  setVisibility('hidden');
-  setVisibility('visible');
-
-  setVisibility('hidden');
-
-  expect(lockShown()).toBeInTheDocument();
-});
-
 it('still locks on a real background once the picker has reported back', async () => {
   await renderUnlocked();
   const camera = screen.getByTestId('camera');
@@ -119,6 +108,7 @@ it('waits for the camera to close before asking Face ID after a real app switch'
   expect(lockShown()).toBeInTheDocument();
   expect(authenticateBiometric).toHaveBeenCalledTimes(1); // no prompt under the camera
 
+  fireEvent.change(screen.getByTestId('camera'));
   setVisibility('visible'); // camera closed
   await waitFor(() => expect(lockShown()).not.toBeInTheDocument());
   expect(authenticateBiometric).toHaveBeenCalledTimes(2);
@@ -164,8 +154,8 @@ it('does not lock while the native camera sheet covers the page', async () => {
   nativePicker(true);
 
   setVisibility('hidden');
-  nativePicker(false);
   setVisibility('visible');
+  nativePicker(false);
 
   expect(lockShown()).not.toBeInTheDocument();
   expect(authenticateBiometric).toHaveBeenCalledTimes(1);
@@ -195,6 +185,21 @@ it('prompts once the picker closes when the real app switch arrives before the h
   expect(authenticateBiometric).toHaveBeenCalledTimes(1);
 
   setVisibility('visible');
+  fireEvent.change(screen.getByTestId('camera'));
+  await waitFor(() => expect(lockShown()).not.toBeInTheDocument());
+  expect(authenticateBiometric).toHaveBeenCalledTimes(2);
+});
+
+it('does not prompt under a picker that stays open on a visible page (iPad popover)', async () => {
+  await renderUnlocked();
+  fireEvent.click(screen.getByTestId('camera'));
+  appState(false); // real app switch, popover picker stays open
+  appState(true);
+  setVisibility('visible');
+  expect(lockShown()).toBeInTheDocument();
+  expect(authenticateBiometric).toHaveBeenCalledTimes(1);
+
+  fireEvent(screen.getByTestId('camera'), new Event('cancel')); // picker closes
   await waitFor(() => expect(lockShown()).not.toBeInTheDocument());
   expect(authenticateBiometric).toHaveBeenCalledTimes(2);
 });

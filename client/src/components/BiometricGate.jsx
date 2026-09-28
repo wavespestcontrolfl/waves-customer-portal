@@ -87,15 +87,16 @@ export default function BiometricGate({ children }) {
   // webview with a native sheet. That hides the document, which looked like a real
   // background: the app locked under the camera, and every Face ID success was then
   // discarded as "not foreground" (the camera still hid the page), so the prompt
-  // re-fired every few seconds. While a picker we opened is up, a hidden document is
-  // not leaving the app. A real app switch still resigns the app, and that always
-  // locks (appStateChange below) — the picker only excuses the hidden document.
+  // re-fired every few seconds. While a picker we opened is up (until its close
+  // signal: the input's change/cancel or the native camera's close event), a hidden
+  // document is not leaving the app. A real app switch still resigns the app, and
+  // that always locks (appStateChange below) — the picker only excuses the hidden
+  // document.
   const pickerOpenUntilRef = useRef(0);
-  const pickerCoveringRef = useRef(false); // that picker is hiding the page right now
-  // A real app switch while the picker covered the page: its Face ID prompt waits
-  // until the picker is gone and the page is visible, so the normal "still
-  // foreground" check judges it (a prompt under the camera can't tell the Face ID
-  // sheet's own resign from a real one).
+  // A real app switch while a picker was open: Face ID waits until the picker has
+  // closed and the page is visible, so the normal "still foreground" check judges it
+  // (a prompt under the camera can't tell the Face ID sheet's own resign from a real
+  // one, and an iPad popover picker can stay open on a visible page).
   const unlockAfterPickerRef = useRef(false);
   const pickerOpen = () => Date.now() < pickerOpenUntilRef.current;
 
@@ -105,6 +106,7 @@ export default function BiometricGate({ children }) {
     // biometric sheet's own dismissal re-enters attempt() and Face ID loops forever.
     if (promptInFlightRef.current) return;
     promptInFlightRef.current = true;
+    unlockAfterPickerRef.current = false; // this prompt is the deferred one, or replaces it
     // Cancel any pending suppression-clear from a previous prompt so its stale timer
     // can't flip suppression off while this new prompt's sheet is still showing.
     if (suppressTimerRef.current) { clearTimeout(suppressTimerRef.current); suppressTimerRef.current = null; }
@@ -147,23 +149,17 @@ export default function BiometricGate({ children }) {
     // NOT (the app stays foreground), so this fires only on a real background — making
     // it the authoritative signal that a fresh unlock is required on return, and it
     // can't be confused with the Face ID prompt's own resign/activate churn.
-    const pickerClosed = () => {
-      pickerOpenUntilRef.current = 0;
-      pickerCoveringRef.current = false;
-      const unlock = unlockAfterPickerRef.current;
+    const unlockAfterPicker = () => {
+      if (!unlockAfterPickerRef.current || pickerOpen() || document.visibilityState !== 'visible') return;
       unlockAfterPickerRef.current = false;
-      if (unlock && lockedRef.current && document.visibilityState === 'visible') attempt();
+      if (lockedRef.current) attempt();
     };
     const onVisibility = () => {
       if (document.visibilityState === 'visible') {
-        // The picker has closed once the page is visible again.
-        pickerClosed();
+        unlockAfterPicker();
         return;
       }
-      if (pickerOpen()) {
-        pickerCoveringRef.current = true;
-        return;
-      }
+      if (pickerOpen()) return;
       if (document.visibilityState === 'hidden' && isNativeApp() && hasSessionToken()) {
         setLocked(true);
         lockedRef.current = true;
@@ -172,11 +168,11 @@ export default function BiometricGate({ children }) {
     document.addEventListener('visibilitychange', onVisibility);
     const isFileInput = (el) => el?.tagName === 'INPUT' && el.type === 'file';
     const pickerOpened = () => { pickerOpenUntilRef.current = Date.now() + PICKER_GRACE_MS; };
-    // A pick/cancel can land while the sheet is still hiding the page: stop excusing
-    // new hides, but keep the coverage and any deferred unlock until it's visible.
+    // A pick/cancel can land while the sheet is still hiding the page: the deferred
+    // unlock then waits for the page to become visible.
     const pickerDone = () => {
       pickerOpenUntilRef.current = 0;
-      if (document.visibilityState === 'visible') pickerClosed();
+      unlockAfterPicker();
     };
     const onPickerOpen = (e) => { if (isFileInput(e.target)) pickerOpened(); };
     const onPickerDone = (e) => { if (isFileInput(e.target)) pickerDone(); };
@@ -197,7 +193,9 @@ export default function BiometricGate({ children }) {
           // Only (re)prompt when actually locked — a stray foreground while already
           // unlocked must never kick off another Face ID prompt.
           if (!lockedRef.current) return;
-          if (pickerCoveringRef.current) return; // prompts once the picker closes
+          // A picker is still open, or closed with the page not yet visible: the
+          // prompt runs from unlockAfterPicker() instead.
+          if (pickerOpen() || unlockAfterPickerRef.current) return;
           attempt();
         } else if (hasSessionToken()) {
           // ALWAYS lock on resign (willResignActive) — even during a prompt's
@@ -205,8 +203,7 @@ export default function BiometricGate({ children }) {
           // app-switcher snapshot.
           setLocked(true);
           lockedRef.current = true;
-          // Resign can arrive before the picker's hidden event: arm on either.
-          if (pickerCoveringRef.current || pickerOpen()) unlockAfterPickerRef.current = true;
+          if (pickerOpen()) unlockAfterPickerRef.current = true;
         }
       }))
       .then((l) => { listener = l; })
