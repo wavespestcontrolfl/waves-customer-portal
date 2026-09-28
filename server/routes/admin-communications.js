@@ -21,7 +21,7 @@ const {
   canonicalSmsLegacyLinkSql,
   canonicalSmsAddressProjectionSql,
 } = require('../services/sms-response-policy');
-const { loadPendingSmsConversations } = require('../services/sms-pending-conversations');
+const { loadPendingSmsConversations, NEEDS_REPLY_SINCE } = require('../services/sms-pending-conversations');
 const { mediaFromOutboundAttachments, signMediaForClient } = require('../services/sms-media');
 const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
 const { placeBridgeCall } = require('../services/call-bridge');
@@ -1991,6 +1991,7 @@ router.get('/log', async (req, res, next) => {
       const pending = await loadPendingSmsConversations({
         excludePhones: ADMIN_PHONES,
         customerId,
+        since: NEEDS_REPLY_SINCE,
       });
       pendingIds = pending.filter((row) => row.source === 'canonical').map((row) => row.id);
       pendingPeers = [...new Set(pending.map((row) => row.peer).filter(Boolean))];
@@ -2215,7 +2216,9 @@ router.get('/unread-count', requireAdmin, async (req, res, next) => {
       return res.status(400).json({ error: 'Invalid customer id' });
     }
     const { countUnreadInboundSms } = require('../services/inbound-sms-read');
-    res.json(await countUnreadInboundSms({ excludePhones: ADMIN_PHONES, customerId, role: req.techRole }));
+    res.json(await countUnreadInboundSms({
+      excludePhones: ADMIN_PHONES, customerId, role: req.techRole, since: NEEDS_REPLY_SINCE,
+    }));
   } catch (err) { next(err); }
 });
 
