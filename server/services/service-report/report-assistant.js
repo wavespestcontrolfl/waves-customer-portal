@@ -46,24 +46,24 @@ const OBSERVATION_QUESTION_RE = /\b(?:what|which|anything)\b[^?.!]{0,20}\bdid\s+
 // forms, so "waterproof" is not watering.
 const WATERING_WORD_RE = /\b(?:water|waters|watered|watering|irrigat\w*|sprinklers?|run\s?times?)\b/;
 const INCIDENTAL_WATERING_PHRASE_RE = new RegExp([
-  String.raw`\b(?:water|irrigation|sprinkler)\s+(?:damage|stains?|meters?|lines?|leaks?|bills?|pooling|puddles?|pipes?|valves?|heads?|boxes?|heaters?|softeners?|filters?|bowls?|features?|issues?|problems?)\b`,
+  String.raw`\b(?:water|irrigation|sprinkler)\s+(?:damage|stains?|meters?|lines?|leaks?|bills?|pooling|puddles?|pipes?|valves?|heads?|boxes?|heaters?|softeners?|filters?|bowls?|features?|issues?|problems?|areas?)\b`,
+  String.raw`\b(?:broken|damaged|leaking|leaky|clogged|cracked|missing|misaligned|faulty)\s+(?:sprinklers?|sprinkler\s+\w+|irrigation(?:\s+\w+)?|water\s+lines?)\b`,
   String.raw`\b(?:standing|pooling|pooled|surface|salt|rain)\s+water\b`,
   String.raw`\b(?:by|near|around|at|under|beside|next\s+to|close\s+to|along)\s+(?:the|my|a|your|our)\s+(?:sprinklers?|sprinkler\s+(?:heads?|lines?|zones?|area)|irrigation\s+(?:zones?|heads?|lines?|area))\b`,
 ].join('|'), 'g');
-// Recommendation copy that tells the customer to change watering: watering
-// as the action ("Water deeply before noon", "Avoid overwatering", "Irrigate
-// twice weekly") or a change verb governing the system ("Increase irrigation
-// to twice this week", "Run each zone for 20 minutes", "Add another cycle",
-// "Resume the normal schedule"). A watering noun alone is not a directive
-// ("Watch the sprinkler area for mushrooms", "Replace the controller
-// battery"), nor is standing water or water damage.
-const WATERING_RECOMMENDATION_RE = new RegExp([
-  String.raw`(?<!\b(?:standing|pooling|pooled|surface|salt|rain)\s)\b(?:(?:over|under)-?)?water(?:s|ed|ing)?\b(?!\s+(?:damage|stains?|meters?|lines?|leaks?|bills?|pooling|puddles?|heaters?|softeners?|filters?|bowls?|features?)\b)`,
-  String.raw`\birrigat(?:e|es|ed|ing)\b`,
-  String.raw`\b(?:run|increase|reduce|decrease|lower|raise|adjust|add|cut(?:\s+back(?:\s+on)?)?|skip|limit|change|resume|restart|turn|shut|stop|pause|program|keep|leave)\s+(?:(?:the|your|each|every|all|an?|one|another|extra|additional|back|on|off)\s+){0,3}(?:irrigation|sprinklers?|zones?|cycles?|controller|run\s?times?|(?:watering|irrigation|normal|regular|usual)\s+schedule)\b`,
-  String.raw`\bzones?\b[^.;]{0,24}\bmin(?:ute)?s?\b`,
-  String.raw`\brun\s?times?\b`,
-].join('|'), 'i');
+// Recommendation copy about watering, withheld while the aftercare
+// restricts watering. Same inversion as the question matcher: any watering
+// word counts once the incidental phrases are out ("Set the sprinklers for
+// 20 minutes", "Schedule two irrigation cycles", "Water deeply"), plus the
+// controller language that names no watering word ("Run each zone for 20
+// minutes", "Add another cycle", "Resume the normal schedule"). A noun with
+// no watering in it stays ("Replace the controller battery", "Watch the
+// sprinkler area for mushrooms", "Fix the standing water").
+const CONTROLLER_DIRECTIVE_RE = /\bzones?\b[^.;]{0,24}\bmin(?:ute)?s?\b|\b(?:another|extra|additional|second)\s+cycles?\b|\b(?:normal|regular|usual)\s+schedule\b|\b(?:over|under)-?water\w*/i;
+function isWateringRecommendation(text) {
+  const copy = String(text).toLowerCase();
+  return WATERING_WORD_RE.test(copy.replace(INCIDENTAL_WATERING_PHRASE_RE, ' ')) || CONTROLLER_DIRECTIVE_RE.test(copy);
+}
 // A request for the customer's own next move ("What do I need to do about
 // the mushrooms I observed?", "Anything we should do…", "Any action needed…",
 // "How do I handle…"). Observation words inside it qualify the request; they
@@ -130,7 +130,7 @@ function isReentryIntent(q) {
 const EFFECTIVENESS_RE = /\b(working|improving|improve[sd]?|helping|trending|results?|better|worse|affect(?:s|ed)?|impact\w*|lower\w*|reduc\w*|drop\w*|decreas\w*)\b|\bchang\w*\b(?=[^?.!]*\b(?:pressure|scores?|results?|trend\w*|activity|numbers?|index)\b)|\b(?:pressure|scores?|results?|trend\w*|activity|numbers?|index)\b[^?.!]*\bchang\w*/;
 // Explicit advice wording outranks the broad lawn-trend subjects ("What do
 // you recommend for the stress areas?").
-const ADVICE_RE = new RegExp(String.raw`\b(recommend\w*|what\s+should\s+i|should\s+i|what\s+(?:do|can|could)\s+(?:i|we)\s+do(?![^?.!]*\b(?:appointments?|appts?|visits?|schedul\w*|reschedul\w*)\b)|what\s+action${WAVES_ACTION_SRC}|next\s+step)\b`);
+const ADVICE_RE = new RegExp(String.raw`\b(recommend\w*|what\s+should\s+i|should\s+i|what\s+(?:do|can|could)\s+(?:i|we)\s+do(?![^?.!]*(?<!\b(?:before|until|till|by|prior\s+to|ahead\s+of)\s+(?:(?:my|the|our|your|next|upcoming)\s+){0,2})\b(?:appointments?|appts?|visits?)\b|[^?.!]*\b(?:schedul\w*|reschedul\w*)\b)|what\s+action${WAVES_ACTION_SRC}|next\s+step)\b`);
 // Explicit scheduling/appointment wording. Shared by the treatment guard
 // below (codex #4839 round-4 P2 4109926457: "What are you applying at my
 // next appointment?" must reach the appointment answer, not treatment) and
@@ -433,7 +433,7 @@ function answerNextSteps({ data = {}, nextAppointment } = {}) {
   // only watering instruction: a stored card or recommendation that changes
   // watering ("Increase irrigation to twice this week") would contradict it.
   const restrictsWatering = Boolean(wateringRestrictionAction(aftercare, weekPlan));
-  const answerable = (text) => Boolean(text) && !(restrictsWatering && WATERING_RECOMMENDATION_RE.test(text));
+  const answerable = (text) => Boolean(text) && !(restrictsWatering && isWateringRecommendation(text));
   const dynamic = data.dynamicContext || {};
   const lawnAssessment = data.lawnAssessment || null;
   if (data.serviceLine === 'lawn' && lawnAssessment?.snapshot) {
