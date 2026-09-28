@@ -299,6 +299,21 @@ describe('assertOwnerListForCommit', () => {
       .rejects.toMatchObject({ code: 'BLOG_OWNER_LIST_UNVERIFIED', retryable: true });
   });
 
+  test('humanApproved operator lane: the approved inventory reads only the stored draft, never brief-derived fields the publisher adds (Codex r13)', async () => {
+    // The publisher fills primary_keyword from the brief's target keyword;
+    // the operator approved a draft without it.
+    // (A name the deterministic gate can't see, so only the inventories decide.)
+    const brief = { ...BLOG_BRIEF, target_keyword: 'Bug Out alternatives' };
+    const approved = { frontmatter: { ...finalFm }, body: 'Orkin offers recurring residential plans.' };
+    companies(['Bug Out', 'Orkin'], ['Orkin']);
+    await expect(assertOwnerListForCommit({ draft: { ...approved }, brief, humanApproved: true, body: approved.body,
+      frontmatter: { ...finalFm, primary_keyword: 'Bug Out alternatives' } }))
+      .rejects.toMatchObject({ code: 'BLOG_OWNER_LIST_BLOCKED', reason: 'unreviewed_company_name', offList: ['Bug Out'] });
+    // The second (approved-draft) call never saw the brief-derived keyword.
+    expect(dispatchWithFallback.mock.calls[0][1].text).toContain('primary_keyword: Bug Out alternatives');
+    expect(dispatchWithFallback.mock.calls[1][1].text).not.toContain('Bug Out');
+  });
+
   test('humanApproved operator lane: a curated competitor the approved draft only LINKED counts as reviewed (#5146 r11)', async () => {
     const brief = { ...BLOG_BRIEF, voice_constraints: { operator_brief: { working_title: 'Prodigy Pest alternatives', primary_kw: 'prodigy pest alternatives' } } };
     const approved = { frontmatter: { title: 'Pest plan terms in Sarasota', slug: '/pest-control/plan-terms/', meta_description: 'Compare plans.' },

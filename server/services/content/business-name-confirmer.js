@@ -345,8 +345,11 @@ async function assertOwnerListForCommit({ draft, brief = {}, frontmatter = {}, b
     // out and call a pro") never vouches for a company a publisher-added alt
     // introduces ("a Bug Out technician" — Codex r12). A company only
     // publisher-added text names must be on the owner list (#5146 r10).
+    // Strictly the stored draft as approved (`final: true`: its own fields,
+    // never the publisher's normalizer, whose brief-derived defaults such as
+    // primary_keyword the operator never saw — Codex r13).
     const reviewedExtraction = await module.exports.extractCompanyNames(draft, {
-      prior: draft.reviewed_company_extraction, brief,
+      prior: draft.reviewed_company_extraction, brief, final: true,
     });
     if (reviewedExtraction.ok !== true) {
       throw ownerListError('BLOG_OWNER_LIST_UNVERIFIED',
