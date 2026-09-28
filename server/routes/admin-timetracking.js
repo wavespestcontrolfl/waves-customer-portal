@@ -623,7 +623,14 @@ function normalizeTechnicianEmail(value) {
 // through this endpoint, even by first editing the current owner row's
 // email away and then claiming it once it is free.
 function refuseIfAssigningFullAccessEmail(req, email) {
-  if (email && fullAccessAllowlist().includes(email) && !ibFullAccess(req)) {
+  // Defense in depth: both callers already pass an email normalized through
+  // normalizeTechnicianEmail → canonicalStaffEmail (trim + lowercase — the
+  // exact form fullAccessAllowlist() itself returns), but the comparison
+  // re-normalizes here too rather than trusting that invariant to hold
+  // forever, since this check is the one thing standing between a mixed-case
+  // variant of the owner's email and a silent grant of full IB access.
+  const canonical = typeof email === 'string' ? email.trim().toLowerCase() : email;
+  if (canonical && fullAccessAllowlist().includes(canonical) && !ibFullAccess(req)) {
     return { error: 'Only the owner account can assign this email address.' };
   }
   return null;

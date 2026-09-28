@@ -458,6 +458,25 @@ describe('admin timetracking technician data/auth boundaries', () => {
       expect(tx.remaining()).toHaveLength(0);
     });
 
+    // Pre-push audit P1: normalizeTechnicianEmail/canonicalStaffEmail already
+    // trim+lowercase before this guard sees the value, but the guard also
+    // re-normalizes defensively — this proves a mixed-case/whitespace
+    // variant of the owner's email is caught either way, never slipping
+    // through on a raw-case comparison.
+    test('create refuses a mixed-case/whitespace variant of the full-access email', async () => {
+      const tx = installTransaction([]);
+
+      const result = await invoke(createTechnician, {
+        body: { name: 'Impostor', email: '  Contact@WavesPestControl.COM  ' },
+        technician: { id: 'admin-2', role: 'admin', email: 'virginia@wavespestcontrol.com' },
+        techRole: 'admin',
+      });
+
+      expect(result.statusCode).toBe(403);
+      expect(result.body).toEqual({ error: 'Only the owner account can assign this email address.' });
+      expect(tx.remaining()).toHaveLength(0);
+    });
+
     test('create allows the full-access owner to assign the full-access email', async () => {
       const noConflict = makeChain({ first: undefined });
       const insert = makeChain({ returning: [{
