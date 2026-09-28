@@ -1847,9 +1847,10 @@ describe('internal-link replan of publishes whose post-merge planning failed', (
     jest.doMock('../services/content-astro/astro-publisher', () => ({ planInternalLinksForTarget, internalLinkPlanningDisabled }));
     const fresh = require('../services/content/internal-link-pr-executor');
     const instance = new fresh.InternalLinkPrExecutor();
-    // A null result stays NULL (retryable)…
+    // A null result keeps the marker (re-stamped to the back of the queue)…
     expect(await instance._replanUnplannedPublishes()).toBe(0);
-    expect(updates).toEqual([]);
+    expect(updates).toEqual([{ table: 'autonomous_runs', patch: expect.objectContaining({ link_planning_failed_at: expect.any(Date) }) }]);
+    updates.length = 0;
     // …the next sweep plans it and stamps the result.
     const replanned = await instance._replanUnplannedPublishes();
     expect(replanned).toBe(1);

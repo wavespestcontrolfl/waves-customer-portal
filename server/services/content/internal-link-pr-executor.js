@@ -597,14 +597,16 @@ class InternalLinkPrExecutor {
   // Recent autonomous blog publishes whose post-merge link planning failed or
   // could not run (the poller stamps link_planning_failed_at). One transient
   // outage must not leave a new post without inbound links for good.
-  async _replanUnplannedPublishes({ days = envInt('AUTONOMOUS_INTERNAL_LINK_REPLAN_DAYS', 7), limit = 5 } = {}) {
-    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+  // No age window: a marked run stays eligible until planning succeeds (an
+  // outage or kill switch can outlast any window). Oldest attempt first, and
+  // a failed retry re-stamps the marker, so a persistently failing run
+  // rotates to the back instead of starving the rest of the batch.
+  async _replanUnplannedPublishes({ limit = 5 } = {}) {
     const runs = await db('autonomous_runs')
       .where({ action_type: 'new_supporting_blog', outcome: 'completed_published', shadow_mode: false })
       .whereNotNull('link_planning_failed_at')
       .whereNotNull('published_url')
-      .where('completed_at', '>=', since)
-      .orderBy('completed_at', 'desc')
+      .orderBy('link_planning_failed_at', 'asc')
       .limit(limit)
       .select('*');
     if (!runs.length) return 0;
@@ -626,18 +628,27 @@ class InternalLinkPrExecutor {
           title: target?.title || null,
           url: run.published_url,
         });
-        // null = planning could not run (no corpus): the marker stays for
-        // the next sweep, same result guard as finalizeMerged.
-        if (!result) continue;
+        // null = planning could not run (no corpus): the marker stays (moved
+        // to the back of the queue), same result guard as finalizeMerged.
+        if (!result) {
+          await this._restampPlanningMarker(run.id);
+          continue;
+        }
         await db('autonomous_runs').where({ id: run.id }).whereNotNull('link_planning_failed_at')
           .update({ link_tasks_queued: result.queued || 0, link_planning_failed_at: null, updated_at: new Date() });
         replanned += 1;
       } catch (err) {
-        // Marker kept → retried on the next daily sweep (bounded by `days`).
+        // Marker kept (moved to the back) → retried on a later daily sweep.
         logger.warn(`[internal-link-pr-executor] replan failed for run ${run.id}: ${err.message}`);
+        await this._restampPlanningMarker(run.id).catch(() => {});
       }
     }
     return replanned;
+  }
+
+  async _restampPlanningMarker(runId) {
+    await db('autonomous_runs').where({ id: runId }).whereNotNull('link_planning_failed_at')
+      .update({ link_planning_failed_at: new Date(), updated_at: new Date() });
   }
 
   // Unattended merge for internal-link PRs (owner 2026-09-27: "fully
