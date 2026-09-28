@@ -3,10 +3,10 @@ const d = SKIP ? describe.skip : describe;
 
 // Every fixture and the migration run inside a transaction that is always
 // rolled back, so a populated database never loses its real catalog rows.
-d('20260928030000 catalog package-size vendor rows', () => {
+d('20260928040000 catalog pack-size recalc', () => {
   let db;
   const first = require('../models/migrations/20260928020000_catalog_package_size_corrections');
-  const migration = require('../models/migrations/20260928030000_catalog_package_size_vendor_rows');
+  const migration = require('../models/migrations/20260928040000_catalog_pack_size_recalc');
   const DOMINION = 'Dominion 2L 1 gal';
   const SEDGE = 'Sedgehammer Halosulfuron-methyl 75% Post Emergent Soluble Herbicide';
   const ROLLBACK = new Error('rollback');
@@ -18,17 +18,23 @@ d('20260928030000 catalog package-size vendor rows', () => {
     await expect(db.transaction(async (trx) => { await fn(trx); throw ROLLBACK; })).rejects.toBe(ROLLBACK);
   };
 
-  // A product with one winning vendor row, as the pricing import leaves it.
+  const vendorId = async (trx, name) => {
+    const found = await trx('vendors').whereRaw('lower(name) = ?', [name.toLowerCase()]).first('id');
+    if (found) return found.id;
+    const [row] = await trx('vendors').insert({ name }).returning('id');
+    return row.id;
+  };
+
+  // A product with one winning SiteOne row, as the pricing import leaves it.
   const seed = async (trx, { name, container, oz, bestPrice, vendorPrice, vendorQty }) => {
     await trx('products_catalog').where({ name }).update({ name: trx.raw("name || ' (pre-test)'") });
-    const [vendor] = await trx('vendors').insert({ name: `Test vendor ${name.slice(0, 8)}` }).returning('id');
     const [product] = await trx('products_catalog').insert({
       name, category: 'Insecticide', active_ingredient: 'x', epa_reg_number: 'x', formulation: 'SC', active: true,
       container_size: container, unit_size_oz: oz, best_price: bestPrice,
     }).returning('id');
     const [vp] = await trx('vendor_pricing').insert({
-      product_id: product.id, vendor_id: vendor.id, price: vendorPrice, quantity: vendorQty,
-      price_per_oz: 0.0001,
+      product_id: product.id, vendor_id: await vendorId(trx, 'SiteOne'), price: vendorPrice, quantity: vendorQty,
+      price_per_oz: 0.0001, approval_status: 'approved', is_active: true,
     }).returning('id');
     await trx('products_catalog').where({ id: product.id }).update({ best_vendor_pricing_id: vp.id });
     return { productId: product.id, vendorRowId: vp.id };
@@ -83,6 +89,23 @@ d('20260928030000 catalog package-size vendor rows', () => {
       expect(await state(trx, ids)).toEqual({
         container: '4 x 1 gal case', oz: 512, best: 469.53, vendorQty: '4 x 1 gal case', perOz: 0.9171,
       });
+    });
+  });
+
+  test("another vendor's gallon offer keeps its own pack size", async () => {
+    await inRollback(async (trx) => {
+      const ids = await seed(trx, { name: DOMINION, container: '1 gal', oz: 128, bestPrice: 469.53, vendorPrice: 469.53, vendorQty: '1 gal' });
+      const [other] = await trx('vendor_pricing').insert({
+        product_id: ids.productId, vendor_id: await vendorId(trx, 'Test Gallon Vendor'), price: 140, quantity: '1 gal',
+        approval_status: 'approved', is_active: true,
+      }).returning('id');
+      await migration.up(trx);
+      const row = await trx('vendor_pricing').where({ id: other.id }).first('quantity');
+      expect(row.quantity).toBe('1 gal');
+      // The case ($0.92/oz) is cheaper per ounce than $140/gal ($1.09/oz),
+      // so recalc keeps SiteOne and prices the 512 oz pack at the case price.
+      const p = await trx('products_catalog').where({ id: ids.productId }).first('best_price', 'best_vendor_pricing_id');
+      expect([Number(p.best_price), p.best_vendor_pricing_id]).toEqual([469.53, ids.vendorRowId]);
     });
   });
 
