@@ -67,9 +67,24 @@ describe('findUnverifiedClaims', () => {
     expect(claims.some((c) => c.rule === 'termite_second_swarm')).toBe(false);
   });
 
+  test('does NOT flag a LEADING negation before the claim\'s subject', () => {
+    const claims = findUnverifiedClaims('No native subterranean termites have a second swarm after storms.');
+    expect(claims.some((c) => c.rule === 'termite_second_swarm')).toBe(false);
+  });
+
+  test('a trailing, unrelated "not" after a comma does NOT exempt the real false claim', () => {
+    const claims = findUnverifiedClaims('Termites will have a second swarm after storms, not that anyone believes it.');
+    expect(claims.some((c) => c.rule === 'termite_second_swarm')).toBe(true);
+  });
+
   test('does NOT flag a correctly-scoped drywood swarm claim (a different species, a real wide window)', () => {
     const claims = findUnverifiedClaims('Western drywood termites can have another round of late-summer swarms.');
     expect(claims.some((c) => c.rule === 'termite_second_swarm')).toBe(false);
+  });
+
+  test('a contrastive drywood clause does NOT exempt a false claim about a DIFFERENT species in the same sentence', () => {
+    const claims = findUnverifiedClaims('Unlike drywood termites, native subterranean termites have a second swarm after storms.');
+    expect(claims.some((c) => c.rule === 'termite_second_swarm')).toBe(true);
   });
 
   test('still flags an unscoped "termites" claim naming the same false shape', () => {

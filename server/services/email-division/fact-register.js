@@ -43,8 +43,18 @@ const UNVERIFIED_CLAIM_RULES = [
     // triggered swarm (see fact-no-storm-triggered-second-termite-swarm). A
     // negated match ("termites do NOT swarm again after storms") is that
     // fact stated correctly, not the false claim — negatable exempts it.
+    // The anchor's negative lookbehind excludes "drywood termites" (and
+    // "western"/"west indian drywood termites") specifically — both
+    // drywood species correctly document wide/near-any-month flight
+    // windows (fact-west-indian-drywood-termite-dispersal,
+    // fact-western-drywood-termite-flight-season), so this rule's false
+    // claim, which is specific to native subterranean termites, must never
+    // anchor on a drywood mention even when one sits in an earlier
+    // contrastive clause of the same sentence ("Unlike drywood termites,
+    // native subterranean termites have a second swarm…" still anchors on
+    // — and blocks — the SECOND, non-drywood "termites").
     rule: 'termite_second_swarm',
-    pattern: /\btermites?\b[^.]{0,150}?\b(?:second|another|again|repeat(?:ed)?|late[-\s]?summer|post[-\s]?storm|storm[-\s]?(?:triggered|induced|driven)?)\b[^.]{0,60}?\bswarm/i,
+    pattern: /\b(?<!drywood[\s-])termites?\b[^.]{0,150}?\b(?:second|another|again|repeat(?:ed)?|late[-\s]?summer|post[-\s]?storm|storm[-\s]?(?:triggered|induced|driven)?)\b[^.]{0,60}?\bswarm/i,
     negatable: true,
   },
   {
@@ -84,20 +94,37 @@ const UNVERIFIED_CLAIM_RULES = [
 // words is that denial stated correctly, not the false claim.
 const NEGATION_RE = /\b(?:not|isn'?t|is\s+not|never|no)\b/i;
 
-// The exemption keyword ("drywood", "flea") must belong to the SAME
-// sentence as the matched claim — a fixed character radius bleeds across
-// sentence boundaries and lets an unrelated earlier/later sentence about a
-// different pest wrongly clear this one (Codex: "Drywood termites may fly
-// in fall. Native subterranean termites have a second swarm after
-// storms." must still block on the second sentence). Bounded the same way
-// the rule patterns themselves are ([^.]) — from the period before the
-// match (or the start of the text) to the period after it (or the end).
+// The exemption keyword ("flea") must belong to the SAME sentence as the
+// matched claim — a fixed character radius bleeds across sentence
+// boundaries and lets an unrelated sentence about a different pest wrongly
+// clear this one. Bounded the same way the rule patterns themselves are
+// ([^.]) — from the period before the match (or text start) to the period
+// after it (or text end).
 function sentenceWindow(body, match) {
   const idx = match.index ?? 0;
   const end = idx + match[0].length;
   const start = body.lastIndexOf('.', idx) + 1; // 0 when no prior '.'
   const stop = body.indexOf('.', end);
   return body.slice(start, stop === -1 ? body.length : stop);
+}
+
+// A leading negation ("No native subterranean termites have…") sits
+// BEFORE the match itself, so checking match[0] alone misses it — but a
+// plain sentence-wide window risks the opposite mistake: a trailing,
+// unrelated "not" after a comma in the SAME sentence ("Termites have a
+// second swarm after storms, not that anyone believes it.") would wrongly
+// exempt a real false claim. Bound the window at the nearest comma or
+// semicolon too (not just the sentence period) on each side, so only
+// negation in the match's OWN clause counts.
+function clauseWindow(body, match) {
+  const idx = match.index ?? 0;
+  const end = idx + match[0].length;
+  const before = body.slice(0, idx);
+  const after = body.slice(end);
+  const start = Math.max(before.lastIndexOf('.'), before.lastIndexOf(','), before.lastIndexOf(';')) + 1;
+  const boundaryInAfter = after.match(/[.,;]/);
+  const stop = boundaryInAfter ? end + boundaryInAfter.index : body.length;
+  return body.slice(start, stop);
 }
 
 // A global clone of a rule's pattern — matchAll needs the 'g' flag, and a
@@ -109,22 +136,15 @@ function globalPattern(pattern) {
 }
 
 // True when THIS occurrence is the rule's own correct fact stated
-// correctly (a negated denial, a correctly-scoped drywood swarm claim, or
-// — for the vacuum rule only — the affirmative flea-context instruction),
-// not the false claim.
+// correctly (a negated denial — leading or internal to the claim's own
+// clause — or, for the vacuum rule only, the affirmative flea-context
+// instruction), not the false claim. Species-scoping for the termite rule
+// (drywood vs. native subterranean) is handled at the PATTERN level (a
+// negative lookbehind on the anchor), not here — a nearby-text check
+// can't tell a real drywood subject from a contrastive clause naming
+// drywood only to assert something false about a DIFFERENT species.
 function isExemptOccurrence(body, match, rule, negatable) {
-  if (negatable && NEGATION_RE.test(match[0])) return true;
-  if (rule === 'termite_second_swarm') {
-    // The false claim is specific to NATIVE SUBTERRANEAN termites (no UF
-    // source documents a storm-triggered second swarm for that species) —
-    // fact-west-indian-drywood-termite-dispersal and
-    // fact-western-drywood-termite-flight-season both correctly document
-    // drywood species flying across most of the year, including late
-    // summer and repeat/near-any-month flights. A mention of "drywood" in
-    // the SAME SENTENCE as the match is that correct, wider window, not
-    // the false claim.
-    if (/\bdrywood\b/i.test(sentenceWindow(body, match))) return true;
-  }
+  if (negatable && NEGATION_RE.test(clauseWindow(body, match))) return true;
   if (rule === 'non_flea_vacuum_advice') {
     const negated = !!match[1];
     // A negated instruction ("do not"/"avoid" vacuuming for N days) is
