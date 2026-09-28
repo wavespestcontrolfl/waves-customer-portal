@@ -54,9 +54,9 @@ const OUTREACH_TEMPLATES = [
     // The one follow-up a RECURRING customer gets, and only when they raised a
     // topic about the service just done before the visit (owner ruling
     // 2026-09-28, GATE_REVIEW_DAY0_CONTEXT): about four days on, once the
-    // treatment has had time to take hold. The drafter asks about the topic
-    // in the customer's own words (review-ask-drafter.js
-    // draftTopicFollowupBody); this generic body is the fallback.
+    // treatment has had time to take hold. The drafter names the concern in a
+    // fixed question (review-ask-drafter.js draftTopicFollowupBody); this
+    // generic body is the fallback.
     id: 'topic_followup',
     name: 'Topic Follow-up',
     sentiment: 'happy',

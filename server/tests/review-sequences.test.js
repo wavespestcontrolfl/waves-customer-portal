@@ -544,7 +544,7 @@ describe('review sequences — cadence engine', () => {
     const RECURRING = [{ day: 0, channel: 'sms', templateKey: 'day0_ask' }];
     const FOLLOWUP = { day: 4, channel: 'sms', templateKey: 'topic_followup', weekdaysOnly: true };
     const TOPIC = JSON.stringify({ topic: 'ants in the kitchen', concern: 'ants', kind: 'service_concern', source: 'sms', evidenceId: 'sms-1', serviceLine: 'pest', confidence: 0.9, version: 'review-day0-context-v4' });
-    const DRAFTED = "Hi Dee! Are the ants backing off since the visit? A Google review means a lot: {review_url} Reply if anything's off.";
+    const DRAFTED = "Hi Dee! How's it going with the ants? A Google review means a lot: {review_url} Reply if anything's off.";
     const setup = ({ seq = {}, customer = {}, prefs = [], sms = [] } = {}) => {
       const mock = makeMock({
         customers: [{ id: 'tf-1', first_name: 'Dee', last_name: 'K', phone: '+19410000081', nearest_location_id: 'bradenton', ...customer }],
@@ -637,14 +637,35 @@ describe('review sequences — cadence engine', () => {
       expect(JSON.parse(seqRow(mock).plan)).toEqual(RECURRING);
     });
 
+    test('a failed topic lookup after the Day-0 send completes the sequence without a follow-up (codex r6 on #5246)', async () => {
+      const mock = setup();
+      let sent = false;
+      mockSendCustomerMessage.mockImplementationOnce(async () => {
+        sent = true;
+        return { sent: true, deliveryOutcome: 'accepted', auditLogId: 'audit-1' };
+      });
+      db.mockImplementation((table) => {
+        const q = mock(table);
+        if (!sent || table !== 'review_sequences') return q;
+        const first = q.first.bind(q);
+        q.first = (...cols) => (cols[0] === 'ask_context' ? Promise.reject(new Error('db blip')) : first(...cols));
+        return q;
+      });
+      await ReviewService.processReviewSequences();
+
+      expect(lastTouch(mock).template_key).toBe('day0_ask');
+      expect(seqRow(mock)).toMatchObject({ status: 'completed', current_step: 1 });
+      expect(JSON.parse(seqRow(mock).plan)).toEqual(RECURRING);
+    });
+
     const followupDue = { current_step: 1, touches_sent: 1, plan: JSON.stringify([...RECURRING, FOLLOWUP]), started_at: new Date(Date.now() - 5 * 86400000), last_touch_at: new Date(Date.now() - 4 * 86400000) };
 
     test('the follow-up asks about the customer\'s own topic, then the sequence completes', async () => {
       const mock = setup({ seq: followupDue });
       await ReviewService.processReviewSequences();
 
-      expect(mockDraftTopicFollowup).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'tf-1', recipientFirstName: 'Dee', topic: 'ants in the kitchen', concern: 'ants' }));
-      expect(mockSendCustomerMessage.mock.calls[0][0].body).toMatch(/^Hi Dee! Are the ants backing off since the visit\? A Google review means a lot: \S+ Reply if anything's off\.$/);
+      expect(mockDraftTopicFollowup).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'tf-1', recipientFirstName: 'Dee', concern: 'ants' }));
+      expect(mockSendCustomerMessage.mock.calls[0][0].body).toMatch(/^Hi Dee! How's it going with the ants\? A Google review means a lot: \S+ Reply if anything's off\.$/);
       expect(lastTouch(mock).template_key).toBe('topic_followup_personalized');
       expect(seqRow(mock)).toMatchObject({ status: 'completed', current_step: 2 });
     });

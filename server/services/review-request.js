@@ -524,8 +524,16 @@ async function topicFollowupPlan(seq, plan, { dayZeroToAccountHolder = false } =
   if (!dayZeroToAccountHolder || (seq.current_step || 0) !== 0) return null;
   if (!isRecurringAskPlan(plan)) return null;
   if (!require("../config/feature-gates").isEnabled("reviewDay0Context")) return null;
-  const row = await db("review_sequences").where({ id: seq.id }).first("ask_context");
-  return row?.ask_context != null ? [...plan, OUTREACH.TOPIC_FOLLOWUP_STEP] : null;
+  // Runs after the provider accepted the Day-0 text: a failed lookup must
+  // not skip the bookkeeping that completes the sequence (Codex r6 on
+  // #5246), so it means no follow-up, never a throw.
+  try {
+    const row = await db("review_sequences").where({ id: seq.id }).first("ask_context");
+    return row?.ask_context != null ? [...plan, OUTREACH.TOPIC_FOLLOWUP_STEP] : null;
+  } catch (err) {
+    logger.warn(`[review] topic follow-up lookup failed, no follow-up (sequenceId=${seq.id}): ${err.message}`);
+    return null;
+  }
 }
 
 // Service types whose Day-0 ask waits for the customer to see the result
@@ -4916,11 +4924,10 @@ const ReviewService = {
     try {
       const seq = await db("review_sequences").where({ id: sequenceId }).first("ask_context");
       const askContext = parseDecision(seq?.ask_context);
-      if (!askContext?.topic || !askContext?.concern) return null;
+      if (!askContext?.concern) return null;
       return await require("./review-ask-drafter").draftTopicFollowupBody({
         customerId: customer.id,
         recipientFirstName: firstNameFrom(contact.name) || customer.first_name || "",
-        topic: askContext.topic,
         concern: askContext.concern,
       });
     } catch (err) {

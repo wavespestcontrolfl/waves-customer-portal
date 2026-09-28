@@ -361,92 +361,40 @@ describe('till/til variants reject (codex #3235 r18)', () => {
 
 // GATE_REVIEW_DAY0_CONTEXT (owner rulings 2026-09-28): the Day-0 ask stays the
 // general fixed text; a recurring customer who raised a topic gets ONE
-// follow-up about four days on asking how that topic is doing. The model
-// writes one question from a closed vocabulary; code frames it.
+// follow-up about four days on asking how that topic is doing. Code fills one
+// fixed question with the concern; no model writes it.
 describe('draftTopicFollowupBody — the recurring topic follow-up', () => {
-  const TOPIC = 'ants in the kitchen';
-  const draft = (question, over = {}) => {
-    mockDispatch.mockResolvedValue({ ok: true, text: question });
-    return Drafter.draftTopicFollowupBody({ customerId: 'cust-1', recipientFirstName: 'Aaron', topic: TOPIC, concern: 'ants', ...over });
-  };
+  const draft = (over = {}) => Drafter.draftTopicFollowupBody({ customerId: 'cust-1', recipientFirstName: 'Aaron', concern: 'ants', ...over });
   const REAL_LINK = 'https://portal.wavespestcontrol.com/l/abcdefghjk';
 
-  test('frames the model\'s one question with the greeting and the uniform ending, one segment at the real link length', async () => {
-    const body = await draft('Are the ants backing off since the visit?');
-    expect(body).toBe("Hi Aaron! Are the ants backing off since the visit? A Google review means a lot: {review_url} Reply if anything's off.");
+  test('one fixed question naming the concern, framed by the greeting and the uniform ending, one segment at the real link length', async () => {
+    const body = await draft();
+    expect(body).toBe("Hi Aaron! How's it going with the ants? A Google review means a lot: {review_url} Reply if anything's off.");
     expect(body.replace('{review_url}', REAL_LINK).length).toBeLessThanOrEqual(160);
-  });
-
-  test('a question that fits the old 5-char sample but not a real 10-char link is refused', async () => {
-    const budgetFill = 'How are the ants in the kitchen looking since the visit?';
-    const body = `Hi Aaron! ${budgetFill} A Google review means a lot: {review_url} Reply if anything's off.`;
-    expect(body.replace('{review_url}', REAL_LINK).length).toBeGreaterThan(160);
-    expect(await draft(budgetFill)).toBeNull();
-  });
-
-  test('the drafter kill switch (GATE_REVIEW_ASK_PERSONALIZED) off, no first name, or no topic → null, no model call', async () => {
-    expect(await draft('Are the ants backing off?', { recipientFirstName: '' })).toBeNull();
-    expect(await draft('Are the ants backing off?', { topic: '' })).toBeNull();
-    expect(await draft('Are the ants backing off?', { concern: '' })).toBeNull();
-    mockGates.reviewAskPersonalized = false;
-    expect(await draft('Are the ants backing off?')).toBeNull();
     expect(mockDispatch).not.toHaveBeenCalled();
   });
 
-  test('the model sees only the topic and its concern, and the allowed words', async () => {
-    await draft('Are the ants backing off?');
-    const payload = mockDispatch.mock.calls[0][1];
-    expect(payload.text).toContain('ants in the kitchen');
-    expect(payload.text).toContain('CONCERN: ants');
-    expect(payload.text).not.toMatch(/Aaron/);
-    expect(payload.system).toMatch(/Use ONLY words from TOPIC/);
+  test('pest, plant and condition concerns render as written', async () => {
+    expect(await draft({ concern: 'Bermuda grass' })).toContain("How's it going with the Bermuda grass?");
+    expect(await draft({ concern: 'roof rats' })).toContain("How's it going with the roof rats?");
+    expect(await draft({ concern: 'grass dying' })).toContain("How's it going with the grass dying?");
+    expect(await draft({ concern: 'wasp nest' })).toContain("How's it going with the wasp nest?");
   });
 
-  test('both providers down, or a throw, → null (the topic_followup template sends)', async () => {
-    mockDispatch.mockResolvedValue({ ok: false, reason: 'all_providers_failed' });
-    expect(await Drafter.draftTopicFollowupBody({ customerId: 'c', recipientFirstName: 'Aaron', topic: TOPIC, concern: 'ants' })).toBeNull();
-    mockDispatch.mockRejectedValue(new Error('boom'));
-    expect(await Drafter.draftTopicFollowupBody({ customerId: 'c', recipientFirstName: 'Aaron', topic: TOPIC, concern: 'ants' })).toBeNull();
-  });
-});
-
-describe('verifyTopicFollowupQuestion — a closed vocabulary, not a banned-word list', () => {
-  const v = (text, topic = 'ants in the kitchen', concern = 'ants') => Drafter.verifyTopicFollowupQuestion(text, { topic, concern, budget: 60 });
-
-  test('natural check-in questions in the customer\'s own words pass', () => {
-    expect(v('Are the ants backing off since the visit?')).toBeNull();
-    expect(v('How are the ants in the kitchen looking since the visit?')).toBeNull();
-    expect(v('Still seeing the bugs in your bathroom?', 'bugs in my bathroom', 'bugs')).toBeNull();
-    expect(v('How is the Bermuda grass looking since the visit?', 'Bermuda grass', 'Bermuda grass')).toBeNull();
-    // Contractions split into a word plus a bare "s"/"t", both function words.
-    expect(v("How's the Bermuda grass looking?", 'Bermuda grass', 'Bermuda grass')).toBeNull();
-    expect(v("How's it going with the ants?")).toBeNull();
+  test('a place or a service action as the concern gets the generic template (codex r6 on #5246)', async () => {
+    for (const concern of ['kitchen', 'wasp nest treatment', 'the kitchen', 'ants gone', 'backyard', 'Main Street']) {
+      expect([concern, await draft({ concern })]).toEqual([concern, null]);
+    }
   });
 
-  test('claims of work, promised results, days, weather, places, names and second pests cannot be written (Codex r1 on #5246)', () => {
-    for (const text of [
-      'How are the ants after we worked on them?',
-      'How are the ants since we addressed them?',
-      'How are the ants since we treated?',
-      'Are the ants under control now?',
-      'Are the ants gone?',
-      'How are the ants since today?',
-      'How are the ants after the rain?',
-      'How are the ants on Main Street?',
-      'How are the ants and roaches?',
-      'Hi Aaron, how are the ants?',
-      'No more ants?',
-    ]) expect([text, v(text)]).toEqual([text, 'word_outside_vocabulary']);
+  test('the drafter kill switch (GATE_REVIEW_ASK_PERSONALIZED) off, no first name, or no concern → null', async () => {
+    expect(await draft({ recipientFirstName: '' })).toBeNull();
+    expect(await draft({ concern: '' })).toBeNull();
+    mockGates.reviewAskPersonalized = false;
+    expect(await draft()).toBeNull();
   });
 
-  test('it must name the concern itself, never just the place (codex r5 on #5246)', () => {
-    expect(v("How's the kitchen looking?")).toBe('concern_missing');
-    expect(v('How is everything?')).toBe('concern_missing');
-  });
-
-  test('it must be one question within budget', () => {
-    expect(v('The ants should settle down.')).toBe('not_a_question');
-    expect(v('Ants? Backing off?')).toBe('not_one_sentence');
-    expect(Drafter.verifyTopicFollowupQuestion('How are the ants in the kitchen looking since the visit?', { topic: 'ants in the kitchen', concern: 'ants', budget: 30 })).toBe('too_long');
+  test('a first name long enough to push the body past one segment → null', async () => {
+    expect(await draft({ recipientFirstName: 'Maximilianus-Bartholomew', concern: 'St Augustine grass' })).toBeNull();
   });
 });

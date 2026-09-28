@@ -486,22 +486,21 @@ describe('the concern — the pest, plant or condition itself (codex r5 on #5246
   });
 });
 
-describe('plural matching is symmetric and never accepts a stripped stem (codex r3 on #5246)', () => {
-  const { isTopicWord, mentionsTopic } = require('../services/review-ask-topic');
+describe('followupConcernPhrase — only listed pest, plant and condition words (codex r6 on #5246)', () => {
+  const { followupConcernPhrase } = require('../services/review-ask-topic');
 
-  test('a singular matches its plural in either direction', () => {
-    expect(isTopicWord('roach', 'roaches')).toBe(true);
-    expect(isTopicWord('roaches', 'roach')).toBe(true);
-    expect(isTopicWord('fly', 'flies')).toBe(true);
-    expect(isTopicWord('mosquito', 'mosquitoes')).toBe(true);
-    expect(isTopicWord('grass', 'grasses')).toBe(true);
-    expect(mentionsTopic('How are the roach droppings?', 'roaches')).toBe(true);
+  test('plural and singular forms of a listed word both pass, as written', () => {
+    for (const c of ['roach', 'roaches', 'flies', 'mosquitoes', 'grasses', 'mice', 'brown patches', 'St. Augustine grass']) {
+      expect([c, followupConcernPhrase(c)]).toEqual([c, c]);
+    }
+    expect(followupConcernPhrase('  ANTS ')).toBe('ants');
   });
 
-  test('a mechanically stripped stem, or a word hidden inside another, never matches', () => {
-    expect(isTopicWord('roache', 'roaches')).toBe(false);
-    expect(isTopicWord('ant', 'plants')).toBe(false);
-    expect(isTopicWord('rat', 'rather')).toBe(false);
+  test('a place, a claim of work, a stripped stem, a modifier alone, or too many words → null', () => {
+    for (const c of ['kitchen', 'wasp nest treatment', 'roache', 'roof', 'Bermuda', 'ants gone', 'ants in kitchen',
+      'no ants', 'fire ant mound activity', "ant's", 'ants!', '']) {
+      expect([c, followupConcernPhrase(c)]).toEqual([c, null]);
+    }
   });
 });
 

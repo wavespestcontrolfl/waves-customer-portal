@@ -47,7 +47,7 @@ const { SERVICE_LINE_IDS, detectServiceLine } = require("./service-report/servic
 // topic belongs to; a topic is kept only when that is the service just done.
 // v4: the model also names the concern itself (the pest, plant or condition,
 // never a place) from the topic's own words; the recurring follow-up question
-// must name it.
+// names it when followupConcernPhrase accepts it.
 const TOPIC_VERSION = "review-day0-context-v4";
 const MAX_CONCERN_WORDS = 3;
 
@@ -319,27 +319,45 @@ function isTopicGrounded(topic, citedText) {
   return checked.length > 0 && checked.every((w) => isWordInEvidence(w, evidenceLower));
 }
 
-/**
- * Whether `text` names the topic: at least one of the topic's own words
- * (function words aside) appears in it as a whole word. The recurring topic
- * follow-up question (review-ask-drafter.js) must name it.
- */
-function mentionsTopic(text, topic) {
-  const textLower = String(text || "").toLowerCase();
-  if (!textLower) return false;
-  const words = (String(topic || "").toLowerCase().match(/[a-z]+/g) || []).filter((w) => !TOPIC_FILLER_WORDS.has(w));
-  return words.some((w) => isWordInEvidence(w, textLower));
-}
+// The recurring follow-up question names the concern (review-ask-drafter.js
+// draftTopicFollowupBody), so the concern is checked against closed word
+// lists rather than trusted because it overlaps the topic: a place ("the
+// kitchen"), a service action ("wasp nest treatment") or any word not listed
+// here gets the generic follow-up text. Singular forms (singularForm).
+// Heads name the pest, plant or condition itself; a concern needs one.
+const CONCERN_HEADS = new Set([
+  "ant", "roach", "cockroach", "spider", "wasp", "hornet", "yellowjacket", "bee", "flea", "tick", "silverfish",
+  "earwig", "beetle", "bug", "fly", "gnat", "mosquito", "midge", "termite", "swarmer", "rat", "mouse", "mice",
+  "rodent", "cricket", "centipede", "millipede", "scorpion", "moth", "weevil", "chinch", "grub", "armyworm",
+  "webworm", "caterpillar", "whitefly", "aphid", "mealybug", "mite", "snail", "slug", "pillbug", "sowbug",
+  "nest", "web", "dropping", "weed", "crabgrass", "dollarweed", "sedge", "nutsedge", "clover", "spurge",
+  "dandelion", "chickweed", "grass", "lawn", "turf", "sod", "patch", "fungus", "disease", "mold", "mildew",
+  "rot", "blight", "hedge", "shrub", "bush", "tree", "palm", "plant", "frond", "leaf", "hibiscus", "ixora",
+  "croton", "citrus", "spot",
+]);
+// Words that only describe a head ("roof rats", "Bermuda grass", "grass dying").
+const CONCERN_MODIFIERS = new Set([
+  "fire", "ghost", "sugar", "carpenter", "crazy", "acrobat", "pharaoh", "argentine", "german", "american",
+  "palmetto", "smokybrown", "widow", "wolf", "recluse", "banana", "orb", "paper", "mud", "dauber", "roof",
+  "norway", "house", "fruit", "drain", "flying", "winged", "stink", "drywood", "subterranean", "formosan",
+  "mole", "sod", "scale", "bermuda", "st", "augustine", "zoysia", "bahia", "floratam", "black", "brown",
+  "yellow", "yellowing", "dead", "dying", "thin", "thinning", "bare", "large", "dollar", "sooty",
+]);
 
 /**
- * Whether `word` is one of the topic's own words (whole word, plural-aware)
- * or a plain function word — with its own check-in words, the only vocabulary
- * the recurring topic follow-up question may use (review-ask-drafter.js).
+ * The concern as the follow-up question may print it, or null. Every word
+ * must be a listed head or modifier and at least one a head, so the question
+ * can only ever name the pest, plant or condition — never a place, a claim
+ * of work, or any other word the classifier carried over from the topic.
  */
-function isTopicWord(word, topic) {
-  const w = String(word || "").toLowerCase();
-  if (!/^[a-z]+$/.test(w)) return false;
-  return TOPIC_FILLER_WORDS.has(w) || isWordInEvidence(w, String(topic || "").toLowerCase());
+function followupConcernPhrase(concern) {
+  const phrase = String(concern || "").trim().replace(/\s+/g, " ");
+  if (!/^[A-Za-z][A-Za-z .]*$/.test(phrase)) return null;
+  const words = (phrase.toLowerCase().match(/[a-z]+/g) || []).map(singularForm);
+  if (!words.length || words.length > MAX_CONCERN_WORDS) return null;
+  if (!words.every((w) => CONCERN_HEADS.has(w) || CONCERN_MODIFIERS.has(w))) return null;
+  if (!words.some((w) => CONCERN_HEADS.has(w))) return null;
+  return phrase.replace(/[A-Z]{2,}/g, (w) => w.toLowerCase());
 }
 
 function hasEvidenceToClassify(ev) {
@@ -475,8 +493,7 @@ async function resolveReviewTopicForEnrollment({ customerId, serviceRecordId = n
 module.exports = {
   TOPIC_VERSION,
   isRecurringAskPlan,
-  mentionsTopic,
-  isTopicWord,
+  followupConcernPhrase,
   readTopicEvidence,
   collectTopicEvidence,
   classifyTopic,
