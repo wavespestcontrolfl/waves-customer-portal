@@ -135,7 +135,7 @@ describe('aftercare verdict fixture table (PR #5033 findings)', () => {
   };
   // A report built as the product-note classifier will build it: the visit's
   // aftercare resolves to a verified, credited water-in.
-  const renderWithCredit = (scenario) => {
+  const renderWithCredit = (scenario, weekPlan = null) => {
     let report;
     jest.isolateModules(() => {
       const real = jest.requireActual('../services/service-report/lawn-aftercare');
@@ -144,7 +144,7 @@ describe('aftercare verdict fixture table (PR #5033 findings)', () => {
         normalizeLawnAftercare: (a, opts) => (a && a.waterInRequired === true && !a.evidenceSource ? creditedAftercare() : real.normalizeLawnAftercare(a, opts)),
       }));
       report = require('../services/service-report/lawn-report-v2').buildLawnReportV2({
-        lawnAssessment: CASES[scenario],
+        lawnAssessment: { ...CASES[scenario], waterContext: { ...CASES[scenario].waterContext, weekPlan } },
         applications: [{ product: { irrigation_required: true } }],
       });
     });
@@ -258,6 +258,21 @@ describe('aftercare verdict fixture table (PR #5033 findings)', () => {
     }, ({ before, out }) => {
       expect(out.water.explanation).toBe(before.water.explanation);
       expect(out.water.explanation).not.toMatch(/skip the product watering-in/);
+    }],
+    // Round 10 (PR #5033, codex P2 on lawn-report-v2.js:653): a reopened/
+    // history-carried report's own attached weekPlan can mark
+    // visitInPlanWeek: false — that visit's aftercare (review confirmation
+    // or a credited instruction) must stay a historical Aftercare-section
+    // note, never this week's hero action, noActionNeeded flip, or SMS line.
+    ['P2 a past-visit review confirmation does not become this visit’s current action', () => render('healthy', { ...RUN_PLAN, visitInPlanWeek: false }), (report) => {
+      expect(report.aftercare.needsReview).toBe(true);
+      expect(String(report.snapshot.customerAction || '')).not.toMatch(CONFIRM);
+      expect(String(report.smsSummary || '')).not.toMatch(CONFIRM);
+    }],
+    ['P2 a past-visit credited water-in does not become this visit’s current action', () => renderWithCredit('healthy', { ...RUN_PLAN, visitInPlanWeek: false }), (report) => {
+      expect(report.aftercare.creditableWaterIn).toBe(true);
+      expect(String(report.snapshot.customerAction || '')).not.toContain(creditedAftercare().watering);
+      expect(String(report.smsSummary || '')).not.toContain(creditedAftercare().watering);
     }],
   ])('%s', async (_finding, run, check) => check(await run()));
 });

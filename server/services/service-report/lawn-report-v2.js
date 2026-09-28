@@ -19,7 +19,7 @@ const { crossSeasonNote, crossSeasonNoteFromSeasons, dormancyLikely } = require(
 const { photoZoneLabel } = require('../lawn-visit-input');
 const {
   LEGACY_WATER_IN_COPY,
-  aftercareCustomerTask,
+  currentVisitAftercareTask,
   hasCreditableWaterIn,
   normalizeLawnAftercare,
   wateringRestrictionAction,
@@ -647,7 +647,11 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   // "What Waves will do next" label read as a tense error. Cards without a plan hide the row.
   // A credited water-in is still the customer's task (the hero never reads
   // "no action" beside a required watering-in).
-  const aftercareTask = aftercareCustomerTask(aftercare);
+  // A reopened/history-carried report's aftercare belongs to whichever visit
+  // earned it: outside this week's plan (visitInPlanWeek === false) it stays
+  // in the Aftercare section only, never promoted into the hero action,
+  // noActionNeeded, or the SMS summary derived from it below (codex P2 r10).
+  const aftercareTask = currentVisitAftercareTask(aftercare, water ? water.weekPlan : null);
   const realCustomerAction = aftercareTask && topIssue?.customerAction?.includes(aftercareTask)
     ? topIssue.customerAction
     : [aftercareTask, topIssue?.customerAction].filter(Boolean).join(' ') || null;

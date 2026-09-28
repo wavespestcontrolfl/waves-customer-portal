@@ -86,6 +86,20 @@ function aftercareCustomerTask(aftercare) {
   return resolveLawnAftercare(aftercare).customerTask;
 }
 
+// aftercareCustomerTask, scoped to the visit that actually earned it. A
+// reopened/history-carried report can attach an aftercare object that was
+// never this visit's own — an old credited water-in or an old review/hold
+// confirmation — and week membership is the only signal that distinguishes
+// them (the note itself is still shown in the Aftercare section either way).
+// Same guard as the client's aftercareAppliesToPlanWeek (LawnReportV2.jsx)
+// and wateringPlanCondition below: only an explicit visitInPlanWeek === false
+// withholds it; a plan with no membership marker (legacy payloads) or no
+// plan at all keeps the current-week reading.
+function currentVisitAftercareTask(aftercare, weekPlan) {
+  if (weekPlan && weekPlan.visitInPlanWeek === false) return null;
+  return aftercareCustomerTask(aftercare);
+}
+
 // A visit outside the plan's week cannot qualify that week's plan with its
 // own restriction; the note itself stays on the report. A plan without week
 // membership (older payloads) keeps the current-week reading.
@@ -146,6 +160,7 @@ module.exports = {
   hasCreditableWaterIn,
   wateringRestrictionAction,
   aftercareCustomerTask,
+  currentVisitAftercareTask,
   wateringPlanCondition,
   renderedWeekPlan,
   normalizeLawnAftercare,
