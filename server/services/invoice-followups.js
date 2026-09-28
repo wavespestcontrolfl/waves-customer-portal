@@ -653,16 +653,26 @@ function stepIndexPastTier(tierDays) {
  * computes its next touch from the correct, already-mapped step.
  */
 async function advanceAdoptedRowPastLegacyTier(row, anchorAt) {
+  // Only a row still in the state scheduleForInvoice left it in is mapped: a
+  // pause or stop that raced the adoption (admin action, STOP reply) wins,
+  // and the guarded update below no-ops if the state moved meanwhile.
+  if (!['active', 'autopay_hold'].includes(row.status)) return row;
   const { tierDays, lastDeliveredAt } = await latestLegacyCheckerDelivery(row.invoice_id);
-  if (tierDays === null) return row;
-  const steps = followupSteps();
-  let targetIndex = stepIndexPastTier(tierDays);
-  if (lastDeliveredAt !== null && (Date.now() - lastDeliveredAt) < 24 * 60 * 60 * 1000 && targetIndex < steps.length) {
-    targetIndex += 1;
-  }
-  if (targetIndex <= row.step_index) return row;
-  const nextAt = computeNextTouchAt(anchorAt, targetIndex);
+  if (tierDays === null && lastDeliveredAt === null) return row;
   const held = row.status === 'autopay_hold';
+  const targetIndex = tierDays === null ? row.step_index : Math.max(row.step_index, stepIndexPastTier(tierDays));
+  let nextAt = targetIndex === row.step_index
+    ? (row.next_touch_at ? new Date(row.next_touch_at) : null)
+    : computeNextTouchAt(anchorAt, targetIndex);
+  // A legacy delivery inside the owner's 7-day spacing window DELAYS the
+  // landing step to a week after that delivery (10:00 NY); it never skips a
+  // further step, so no reminder is lost to the handoff.
+  let delayed = false;
+  if (!held && nextAt && lastDeliveredAt !== null) {
+    const floor = anchorTo10amNY(new Date(lastDeliveredAt), 7, config.sendWindow.hour);
+    if (nextAt.getTime() < floor.getTime()) { nextAt = floor; delayed = true; }
+  }
+  if (targetIndex === row.step_index && !delayed) return row;
   const patch = {
     updated_at: db.fn.now(),
     step_index: targetIndex,
@@ -670,10 +680,12 @@ async function advanceAdoptedRowPastLegacyTier(row, anchorAt) {
     next_touch_at: held ? null : nextAt,
   };
   const updated = await db('invoice_followup_sequences')
-    .where({ id: row.id, step_index: row.step_index })
+    .where({ id: row.id, step_index: row.step_index, status: row.status })
     .update(patch);
   if (!updated) return row;
-  logger.info(`[invoice-followups] adopted invoice ${row.invoice_id} mapped past legacy tier ${tierDays}d to step ${targetIndex}`);
+  logger.info(`[invoice-followups] adopted invoice ${row.invoice_id} `
+    + (targetIndex !== row.step_index ? `mapped past legacy tier ${tierDays}d to step ${targetIndex}` : `kept at step ${targetIndex}`)
+    + (delayed ? `, first touch delayed to ${nextAt.toISOString()} (7 days after the legacy delivery)` : ''));
   return { ...row, ...patch };
 }
 
@@ -834,6 +846,23 @@ async function adoptOrphanInvoices({ dryRun = false } = {}) {
 /**
  * Cron entry point — fires all due touches.
  */
+/**
+ * A row adopted in THIS run never sends in this run. Its due step is moved
+ * to the next send-window day at 10:00 NY (guarded on the batch snapshot),
+ * so the next tick finds it due and fresh rather than past its stale grace
+ * and passes it over — the deferral costs a day, never the step.
+ */
+async function deferAdoptedFirstTouch(row, now) {
+  if (!row.next_touch_at || new Date(row.next_touch_at).getTime() > now.getTime()) return false;
+  const nextRun = firstEligibleFireAt(anchorTo10amNY(now, 1, config.sendWindow.hour));
+  const updated = await db('invoice_followup_sequences')
+    .where({ id: row.id, status: 'active', step_index: row.step_index, next_touch_at: row.next_touch_at })
+    .update({ updated_at: db.fn.now(), next_touch_at: nextRun });
+  logger.info(`[invoice-followups] invoice ${row.invoice_id} adopted this run — first touch `
+    + `${updated ? `deferred to ${nextRun.toISOString()}` : 'left alone (sequence moved since batch select)'}`);
+  return Number(updated) === 1;
+}
+
 async function runPending() {
   const now = new Date();
 
@@ -921,9 +950,13 @@ async function runPending() {
         const skip = await skipStaleTouches(row, now);
         skipped++;
         // Adopted THIS run: the timeline above is still advanced correctly,
-        // but the send itself waits for the NEXT run (Codex pre-push P0 A1).
+        // but the send itself waits for the NEXT run (Codex pre-push P0 A1),
+        // and a landing step due today is re-dated to the next run so that
+        // tick sends it instead of stale-skipping it.
         if (adoptedInvoiceIds?.has(row.invoice_id)) {
-          logger.info(`[invoice-followups] invoice ${row.invoice_id} adopted this run — first touch next run`);
+          if (skip.updated && skip.nextAt) {
+            await deferAdoptedFirstTouch({ ...row, step_index: skip.nextIndex, next_touch_at: skip.nextAt }, now);
+          }
           continue;
         }
         // The landing step can itself be due THIS run (a step went stale over
@@ -940,7 +973,7 @@ async function runPending() {
         continue;
       }
       if (adoptedInvoiceIds?.has(row.invoice_id)) {
-        logger.info(`[invoice-followups] invoice ${row.invoice_id} adopted this run — first touch next run`);
+        await deferAdoptedFirstTouch(row, now);
         skipped++;
         continue;
       }

@@ -326,21 +326,21 @@ describe('adoptOrphanInvoices maps past the legacy checker\'s delivered tier', (
     expect(result.adopted).toBe(1);
     const mapUpdate = seqUpdates.find((u) => u.patch.step_index === 4);
     expect(mapUpdate).toBeTruthy();
-    expect(mapUpdate.wheres).toEqual([{ id: 'seq-new', step_index: 0 }]);
+    expect(mapUpdate.wheres).toEqual([{ id: 'seq-new', step_index: 0, status: 'active' }]);
     expect(mapUpdate.patch.status).toBe('active');
     expect(mapUpdate.patch.next_touch_at).toEqual(tenAmET('2026-08-20')); // anchor + 60 days
     expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('mapped past legacy tier 30d to step 4'));
   });
 
-  test('a delivery inside the last 24h holds one step further still (belt and braces)', async () => {
+  test('a delivery inside the last 7 days delays the landing step to a week after it — never skips a further step', async () => {
     process.env.GATE_DUNNING_ADOPT_ORPHANS = 'true';
     process.env.GATE_DUNNING_LADDER_90 = 'true';
-    const oldSent = tenAmET('2026-06-21');
+    const oldSent = tenAmET('2026-06-01'); // Day 60 by the anchor = 2026-07-31, already past
     const previewInvoice = {
       id: 'inv-1', status: 'sent', payer_id: null, scheduled_send_error: null, customer_id: 'cust-1', sent_at: oldSent,
     };
     const insertedRow = {
-      id: 'seq-new', invoice_id: 'inv-1', customer_id: 'cust-1', status: 'active', step_index: 0, next_touch_at: tenAmET('2026-06-24'),
+      id: 'seq-new', invoice_id: 'inv-1', customer_id: 'cust-1', status: 'active', step_index: 0, next_touch_at: tenAmET('2026-06-04'),
     };
     const { seqUpdates } = setupFullDb({
       orphanRows: [{
@@ -360,9 +360,14 @@ describe('adoptOrphanInvoices maps past the legacy checker\'s delivered tier', (
 
     await adoptOrphanInvoices({ dryRun: false });
 
-    const mapUpdate = seqUpdates.find((u) => u.patch.step_index === 5); // one past the tier-30 target (Day 60 → Day 90)
+    const mapUpdate = seqUpdates.find((u) => u.patch.step_index === 4); // the tier-30 target (Day 60), not a step further
     expect(mapUpdate).toBeTruthy();
-    expect(mapUpdate.patch.next_touch_at).toEqual(tenAmET('2026-09-19')); // anchor + 90 days
+    expect(seqUpdates.find((u) => u.patch.step_index === 5)).toBeUndefined();
+    // Day 60 by the anchor (2026-07-31) is earlier than 7 days after the
+    // legacy delivery 2h ago (2026-08-05), so the landing step is floored to
+    // 2026-08-12 10:00 NY instead of being skipped to Day 90.
+    expect(mapUpdate.patch.next_touch_at).toEqual(tenAmET('2026-08-12'));
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('first touch delayed to'));
   });
 
   test('a non-delivered (send_failed) ledger row is ignored — no mapping', async () => {
@@ -655,14 +660,18 @@ describe('runPending and the orphan sweep', () => {
 
     expect(result).toEqual({ sent: 0, skipped: 1 });
     expect(logger.info).toHaveBeenCalledWith(
-      expect.stringContaining('invoice inv-orphan adopted this run — first touch next run'),
+      expect.stringContaining('invoice inv-orphan adopted this run — first touch deferred to 2026-08-06T14:00:00.000Z'),
     );
     // The skip-forward pass still advances the timeline correctly — Day 30
-    // (legacy cadence, gate off) lands exactly today — just never sends it.
-    expect(seqUpdates).toHaveLength(1);
+    // (legacy cadence, gate off) lands exactly today — then the landing step
+    // is re-dated to the next run (Thu 2026-08-06 10:00 NY) under a guard on
+    // the just-persisted step/due, so the next tick sends it fresh.
+    expect(seqUpdates).toHaveLength(2);
     expect(seqUpdates[0].patch.step_index).toBe(3);
     expect(seqUpdates[0].patch.next_touch_at).toEqual(tenAmET('2026-08-05'));
     expect(seqUpdates[0].patch.status).toBe('active');
+    expect(seqUpdates[1].wheres).toEqual([{ id: 'seq-orphan', status: 'active', step_index: 3, next_touch_at: tenAmET('2026-08-05') }]);
+    expect(seqUpdates[1].patch.next_touch_at).toEqual(tenAmET('2026-08-06'));
   });
 });
 
