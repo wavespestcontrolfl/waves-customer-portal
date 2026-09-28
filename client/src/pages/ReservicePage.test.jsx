@@ -450,9 +450,14 @@ describe('ReservicePage pest chips (GATE_RESERVICE_PEST_CHIPS)', () => {
   it('renders one-tap pest chips when the server sends pestChoices, and toggling flips aria-pressed', async () => {
     stubFetch({ get: jsonResponse(bookablePayload({ pestChoices: PEST_CHOICES })) });
     renderPage();
-    // The chip row heading and every choice render.
-    expect(await screen.findByText('What are you seeing?')).toBeInTheDocument();
-    const antsChip = screen.getByRole('button', { name: 'Ants' });
+    // Wait for the chip itself: the lane auto-selects in an effect AFTER the
+    // first data render, and before it the textarea's own label also has the
+    // direct text "What are you seeing?" (its "(optional …)" suffix is a child
+    // span) — so waiting on that text could resolve on the pre-lane render and
+    // look for the chips too early (flaked in CI).
+    const antsChip = await screen.findByRole('button', { name: 'Ants' });
+    // The chip row heading renders with the choices.
+    expect(screen.getAllByText('What are you seeing?').length).toBeGreaterThan(0);
     expect(antsChip).toHaveAttribute('aria-pressed', 'false');
     fireEvent.click(antsChip);
     expect(antsChip).toHaveAttribute('aria-pressed', 'true');
