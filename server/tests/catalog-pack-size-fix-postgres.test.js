@@ -6,6 +6,7 @@ const d = SKIP ? describe.skip : describe;
 d('20260928060000 catalog pack-size fix', () => {
   let db;
   const migration = require('../models/migrations/20260928060000_catalog_pack_size_fix');
+  const pendingFix = require('../models/migrations/20260928070000_catalog_pack_size_pending_snapshots');
   const DOMINION = 'Dominion 2L 1 gal';
   const SEDGE = 'Sedgehammer Halosulfuron-methyl 75% Post Emergent Soluble Herbicide';
   const ROLLBACK = new Error('rollback');
@@ -143,6 +144,37 @@ d('20260928060000 catalog pack-size fix', () => {
       expect(await state(trx, ids)).toEqual({
         container: '2 x 1.33 oz', oz: 2.66, best: 110, vendorQty: '2 x 1.33 oz', perOz: 0.0001,
       });
+    });
+  });
+  const snapshotWithEvent = async (trx, ids, { quantity, price, status, vendor }) => {
+    const vendorIdValue = vendor ? await vendorId(trx, vendor)
+      : (await trx('vendor_pricing').where({ id: ids.vendorRowId }).first('vendor_id')).vendor_id;
+    const [snap] = await trx('price_snapshots').insert({
+      product_id: ids.productId, vendor_id: vendorIdValue, vendor_pricing_id: ids.vendorRowId,
+      price, price_amount: price, quantity, normalized_unit_price: 0.9373, normalized_unit: 'oz', landed_unit_price: 0.95,
+    }).returning('id');
+    await trx('price_approval_events').insert({
+      snapshot_id: snap.id, product_id: ids.productId, vendor_id: vendorIdValue, vendor_pricing_id: ids.vendorRowId,
+      approval_status: status,
+    });
+    return snap.id;
+  };
+
+  test('070000: a pending SiteOne report on the old pack is moved to the corrected pack', async () => {
+    await inRollback(async (trx) => {
+      const ids = await seed(trx, { name: SEDGE, container: '64 oz', oz: 64, bestPrice: 3485.35, vendorPrice: 59.99, vendorQty: '64 oz' });
+      const pending = await snapshotWithEvent(trx, ids, { quantity: '64 oz', price: 59.99, status: 'pending' });
+      const approved = await snapshotWithEvent(trx, ids, { quantity: '64 oz', price: 72.43, status: 'approved' });
+      const other = await snapshotWithEvent(trx, ids, { quantity: '64 oz', price: 50, status: 'pending', vendor: 'Test Gallon Vendor' });
+      await migration.up(trx);
+      await pendingFix.up(trx);
+      const read = (id) => trx('price_snapshots').where({ id }).first('quantity', 'price', 'normalized_unit_price', 'landed_unit_price');
+      const p = await read(pending);
+      expect([p.quantity, Number(p.price), Number(p.normalized_unit_price), p.landed_unit_price]).toEqual(['1.33 oz', 59.99, 45.1053, null]);
+      expect((await read(approved)).quantity).toBe('64 oz');
+      expect((await read(other)).quantity).toBe('64 oz');
+      const e = await trx('price_approval_events').where({ snapshot_id: pending }).first('approval_status');
+      expect(e.approval_status).toBe('pending');
     });
   });
 });
