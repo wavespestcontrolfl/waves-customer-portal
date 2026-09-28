@@ -49,13 +49,86 @@ describe('rawConnectionSlots', () => {
 
       const late = { id: 'late' };
       settle(late);
-      await Promise.resolve();
-      await Promise.resolve();
+      // The late connection's slot frees once its close has COMPLETED
+      // (Codex #4971 r25 P2) — flush the close, not just the connect.
+      await jest.advanceTimersByTimeAsync(0);
       expect(db.client.destroyRawConnection).toHaveBeenCalledWith(late);
       expect(slots.openCount()).toBe(0);
     } finally {
       jest.useRealTimers();
     }
+  });
+
+  // Codex #4971 r25 P2: the slot is freed only once the session is
+  // confirmed gone — never while a close is still in flight, and never on a
+  // close that failed with no way to force the socket shut.
+  test('a slow close keeps its slot occupied until the close completes', async () => {
+    let finishClose;
+    db.client.destroyRawConnection = jest.fn(() => new Promise((resolve) => { finishClose = resolve; }));
+    const slots = rawConnectionSlots({ max: 1, connectMs: 60000, logPrefix: '[test] lock session' });
+    const conn = await slots.acquire();
+    const releasing = slots.release(conn);
+    await Promise.resolve();
+    expect(slots.openCount()).toBe(1);
+    expect(await slots.acquire()).toBeNull();
+    finishClose();
+    await releasing;
+    expect(slots.openCount()).toBe(0);
+    expect(await slots.acquire()).toBeTruthy();
+  });
+
+  test('a close that rejects force-closes the socket, then frees the slot', async () => {
+    db.client.destroyRawConnection = jest.fn(async () => { throw Object.assign(new Error('end failed'), { code: 'EPIPE' }); });
+    const destroy = jest.fn();
+    db.client.acquireRawConnection = jest.fn(async () => ({ connection: { stream: { destroy } } }));
+    const slots = rawConnectionSlots({ max: 1, connectMs: 1000, logPrefix: '[test] lock session' });
+    const conn = await slots.acquire();
+    await slots.release(conn);
+    expect(logger.warn).toHaveBeenCalledWith('[test] lock session close failed (EPIPE)');
+    expect(destroy).toHaveBeenCalledTimes(1);
+    expect(slots.openCount()).toBe(0);
+    expect(slots.unconfirmedCount()).toBe(0);
+  });
+
+  test('a close that rejects with NO socket to force shut keeps its slot occupied, loudly', async () => {
+    db.client.destroyRawConnection = jest.fn(async () => { throw Object.assign(new Error('end failed'), { code: 'EPIPE' }); });
+    const slots = rawConnectionSlots({ max: 1, connectMs: 1000, logPrefix: '[test] lock session' });
+    const conn = await slots.acquire();
+    await slots.release(conn);
+    expect(slots.openCount()).toBe(1);
+    expect(slots.unconfirmedCount()).toBe(1);
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('[test] lock session could not be confirmed closed'));
+    expect(await slots.acquire()).toBeNull();
+  });
+
+  test('a close that hangs past the time bound force-closes the socket and frees the slot', async () => {
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] });
+    try {
+      db.client.destroyRawConnection = jest.fn(() => new Promise(() => {}));
+      const destroy = jest.fn();
+      db.client.acquireRawConnection = jest.fn(async () => ({ connection: { stream: { destroy } } }));
+      const slots = rawConnectionSlots({ max: 1, connectMs: 5000, logPrefix: '[test] lock session' });
+      const conn = await slots.acquire();
+      const releasing = slots.release(conn);
+      await jest.advanceTimersByTimeAsync(4999);
+      expect(slots.openCount()).toBe(1);
+      await jest.advanceTimersByTimeAsync(2);
+      await releasing;
+      expect(destroy).toHaveBeenCalledTimes(1);
+      expect(slots.openCount()).toBe(0);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('an uncounted release closes the connection and never touches the count', async () => {
+    const slots = rawConnectionSlots({ max: 2, connectMs: 1000, logPrefix: '[test] lock session' });
+    const conn = await slots.acquire();
+    await slots.release({ id: 'stray' }, false);
+    expect(db.client.destroyRawConnection).toHaveBeenCalledWith({ id: 'stray' });
+    expect(slots.openCount()).toBe(1);
+    await slots.release(conn);
+    expect(slots.openCount()).toBe(0);
   });
 
   test('a connect that fails outright frees its slot at once', async () => {

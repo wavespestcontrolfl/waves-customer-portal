@@ -13,7 +13,13 @@
 //     within `connectMs`. The caller decides what null means (a retry, or an
 //     ordinary path without the session).
 //   release(connection, counted = true) — destroys the connection and frees
-//     its slot.
+//     its slot ONLY once the session is confirmed gone (Codex #4971 r25 P2):
+//     the count drops after destroy completes, never before. A destroy that
+//     rejects or does not finish within `connectMs` is followed by a forced
+//     close of the underlying socket (which ends the Postgres session and
+//     every advisory lock it held); only if that is impossible too does the
+//     slot stay occupied, loudly — a slot that cannot be proven free is
+//     never handed out again, so the cap can never be exceeded.
 //
 // A timed-out attempt keeps its slot until the underlying connect actually
 // settles (codex #4293 P1 r8): the timer winning the race proves nothing about
@@ -24,16 +30,58 @@
 const db = require('../models/db');
 
 const CONNECT_TIMED_OUT = 'raw connection connect timed out';
+const CLOSE_TIMED_OUT = 'raw connection close timed out';
+
+// Last resort when the driver's own close fails or hangs: destroy the TCP
+// socket under the connection (pg: client.connection.stream). The server
+// ends the session as soon as the socket drops. true = a socket was found
+// and destroyed.
+function forceCloseSocket(connection) {
+  const stream = connection?.connection?.stream || connection?.stream || null;
+  if (!stream || typeof stream.destroy !== 'function') return false;
+  try {
+    stream.destroy();
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 function rawConnectionSlots({ max, connectMs, logPrefix }) {
   let open = 0;
+  let unconfirmed = 0;
+
+  // true once the session is confirmed gone: the driver closed it, or its
+  // socket was force-closed after the driver's close failed / hung.
+  async function closeConfirmed(connection) {
+    let timer = null;
+    try {
+      await Promise.race([
+        Promise.resolve(db.client.destroyRawConnection(connection)),
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(CLOSE_TIMED_OUT)), connectMs); }),
+      ]);
+      return true;
+    } catch (err) {
+      require('./logger').warn(`${logPrefix} close failed (${err.code || err.name || 'error'})`);
+      return forceCloseSocket(connection);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
 
   async function release(connection, counted = true) {
-    if (counted) open -= 1;
-    if (!connection) return;
-    await db.client.destroyRawConnection(connection).catch((err) => {
-      require('./logger').warn(`${logPrefix} close failed (${err.code || err.name || 'error'})`);
-    });
+    if (!connection) {
+      if (counted) open -= 1;
+      return;
+    }
+    const closed = await closeConfirmed(connection);
+    if (!counted) return;
+    if (closed) {
+      open -= 1;
+      return;
+    }
+    unconfirmed += 1;
+    require('./logger').error(`${logPrefix} could not be confirmed closed — its slot stays occupied (${unconfirmed} unconfirmed, ${open}/${max} in use)`);
   }
 
   async function acquire() {
@@ -64,7 +112,7 @@ function rawConnectionSlots({ max, connectMs, logPrefix }) {
     }
   }
 
-  return { acquire, release, openCount: () => open };
+  return { acquire, release, openCount: () => open, unconfirmedCount: () => unconfirmed };
 }
 
 // A dedicated raw connection's own error/end/close events are the one

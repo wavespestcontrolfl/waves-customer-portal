@@ -1648,6 +1648,27 @@ function parentChangedAtSql(p = 'p', pi = 'pi', s = 't') {
   )`;
 }
 
+// SQL: when the successor's renewal payment actually SETTLED at the provider.
+// Codex #4971 r24 P2: invoices.paid_at is stamped when the webhook handler
+// RUNS — for a delayed ACH-success delivery that is later than the real
+// settlement, so a parent refunded or changed AFTER the debit settled but
+// BEFORE the delayed webhook arrived read as "paid after the change" and
+// rang a false refund-or-honor conflict. The payments ledger keeps the
+// event-derived settlement moment (metadata.settled_event_at — stripe.js
+// writes it from the PaymentIntent / charge itself, never from local clock
+// time); the earliest one on this invoice's own PaymentIntent / charge is
+// the settlement. Fallback: paid_at, for a payment with no ledger stamp (a
+// manual or credit-settled invoice, a legacy row). Column-tolerant
+// (to_jsonb): a payments table without metadata reads NULL → paid_at.
+// `i` is the successor's renewal invoice.
+function successorSettledAtSql(i = 'i') {
+  return `COALESCE(
+    (SELECT MIN((to_jsonb(sp) -> 'metadata' ->> 'settled_event_at')::timestamptz) FROM payments sp
+      WHERE (sp.stripe_payment_intent_id IS NOT NULL AND sp.stripe_payment_intent_id = ${i}.stripe_payment_intent_id)
+         OR (sp.stripe_charge_id IS NOT NULL AND sp.stripe_charge_id = ${i}.stripe_charge_id)),
+    ${i}.paid_at)`;
+}
+
 // JS entry for the same test: was the renewal paid after the parent changed?
 async function paidAfterParentChanged(conn, successor, parent) {
   if (!parent?.id) return false;
@@ -1657,7 +1678,7 @@ async function paidAfterParentChanged(conn, successor, parent) {
     .leftJoin('invoices as pi', 'pi.id', 'p.prepay_invoice_id')
     .joinRaw('JOIN annual_prepay_terms AS t ON t.id = ?', [successor.id])
     .where('p.id', parent.id)
-    .first(conn.raw(`(SELECT i.paid_at FROM invoices i WHERE i.id = ?) > ${parentChangedAtSql()} AS paid_after`, [successor.prepay_invoice_id]));
+    .first(conn.raw(`(SELECT ${successorSettledAtSql('i')} FROM invoices i WHERE i.id = ?) > ${parentChangedAtSql()} AS paid_after`, [successor.prepay_invoice_id]));
   return row?.paid_after === true;
 }
 
@@ -1695,7 +1716,7 @@ async function bellLatePaidRenewals({ conn = db, limit = 200, counts }) {
         // Paid AFTER the parent changed (twin of paidAfterParentChanged) —
         // an old legitimate renewal behind a later refund or dispute is
         // never selected, so it can never pin this page either.
-        .whereRaw(`i.paid_at > ${parentChangedAtSql()}`),
+        .whereRaw(`${successorSettledAtSql('i')} > ${parentChangedAtSql()}`),
       't',
       'i',
     )
@@ -4150,6 +4171,7 @@ module.exports = {
     resolveChargeEligibility,
     chargeRefusalUnderGate,
     paidAfterParentChanged,
+    successorSettledAtSql,
     retireAbandonedChargeClaim,
     resolvePendingChargeOutcomes,
     bellLatePaidRenewals,

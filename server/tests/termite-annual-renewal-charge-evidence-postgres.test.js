@@ -1471,6 +1471,46 @@ describeOrSkip('termite renewal charge — chokepoint A payment evidence, real P
     });
   });
 
+  // Codex #4971 r24 P2: "paid after the parent changed" compares the
+  // payment's real SETTLEMENT time (payments.metadata.settled_event_at, the
+  // provider's own timestamp), not invoices.paid_at — which is when the
+  // webhook handler ran, later than the settlement for a delayed delivery.
+  describe('r24 P2: the settlement time, not webhook processing time', () => {
+    const hoursAgo = (h) => new Date(Date.now() - h * 3600000);
+
+    // The parent is refunded (its change) `changedAgo` hours ago; the
+    // successor's invoice reads paid_at `paidAtAgo` hours ago.
+    async function refundedParentRenewal({ changedAgo, paidAtAgo, settledAgo = null, pi = `pi_${randomUUID()}` }) {
+      const parentInvoice = await insertInvoice({ status: 'refunded', paid_at: hoursAgo(100), stripe_payment_intent_id: `pi_parent_${randomUUID()}` });
+      await db('payments').insert({ status: 'refunded', refund_status: 'full', stripe_payment_intent_id: parentInvoice.stripe_payment_intent_id, updated_at: hoursAgo(changedAgo) });
+      const parent = await insertParent({ prepay_invoice_id: parentInvoice.id });
+      const invoice = await insertInvoice({ status: 'paid', paid_at: hoursAgo(paidAtAgo), stripe_payment_intent_id: pi });
+      if (settledAgo != null) {
+        await db('payments').insert({ status: 'paid', stripe_payment_intent_id: pi, updated_at: hoursAgo(paidAtAgo), metadata: JSON.stringify({ settled_event_at: hoursAgo(settledAgo).toISOString() }) });
+      }
+      const inserted = await insertSuccessor(parent, invoice, { status: 'active', created_at: hoursAgo(200) });
+      return { parent, successor: await db('annual_prepay_terms').where({ id: inserted.id }).first() };
+    }
+
+    test('a debit that SETTLED before the parent changed is not "paid after" just because its webhook arrived later', async () => {
+      // Settled 5h ago, parent refunded 3h ago, webhook processed 1h ago.
+      const { parent, successor } = await refundedParentRenewal({ settledAgo: 5, changedAgo: 3, paidAtAgo: 1 });
+      await expect(Charge._private.paidAfterParentChanged(db, successor, parent)).resolves.toBe(false);
+    });
+
+    test('a debit that settled AFTER the parent changed is still dated late', async () => {
+      const { parent, successor } = await refundedParentRenewal({ settledAgo: 2, changedAgo: 3, paidAtAgo: 1 });
+      await expect(Charge._private.paidAfterParentChanged(db, successor, parent)).resolves.toBe(true);
+    });
+
+    test('no ledger settlement stamp: paid_at is the fallback, exactly as before', async () => {
+      const late = await refundedParentRenewal({ changedAgo: 3, paidAtAgo: 1 });
+      await expect(Charge._private.paidAfterParentChanged(db, late.successor, late.parent)).resolves.toBe(true);
+      const early = await refundedParentRenewal({ changedAgo: 3, paidAtAgo: 5 });
+      await expect(Charge._private.paidAfterParentChanged(db, early.successor, early.parent)).resolves.toBe(false);
+    });
+  });
+
   // Codex #4971 r10 P1s — the charge's provider boundary (stripe.js, under
   // the invoice / customer locks; its own suite) refuses a payer-stamped
   // invoice (PAYER_BILLED_GUARD) and a deleted account (CUSTOMER_DELETED).
