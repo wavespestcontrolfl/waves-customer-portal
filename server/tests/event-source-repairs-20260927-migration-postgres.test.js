@@ -10,6 +10,7 @@ const { randomUUID } = require('crypto');
 const knex = require('knex');
 
 const migration = require('../models/migrations/20260927120000_event_source_repairs_20260927');
+const guardMigration = require('../models/migrations/20260927115000_guard_wellen_event_source_rename');
 const seedMigration = require('../models/migrations/20260927140000_seed_clearwater_wellen_event_sources');
 const wellenMigration = require('../models/migrations/20260927150000_convert_legacy_wellen_event_source');
 
@@ -285,5 +286,31 @@ async function seedSource(db, overrides) {
     const legacy = await db('event_sources').where({ feed_url: 'https://wellenpark.com/events/feed/' }).first();
     expect(legacy.enabled).toBe(false);
     expect(await db('event_sources').where({ feed_url: 'https://wellenpark.com/events/' })).toHaveLength(1);
+  });
+
+  test('full sequence succeeds when both Wellen URLs exist before the batch', async () => {
+    await db('event_sources').insert({
+      name: 'Wellen Park — Events (page)', url: 'https://wellenpark.com/events/',
+      feed_url: 'https://wellenpark.com/events/', feed_type: 'scrape', priority_tier: 2, enabled: true,
+    });
+    const legacyBefore = await db('event_sources').where({ feed_url: 'https://wellenpark.com/events/feed/' }).first();
+
+    await guardMigration.up(db);
+    await migration.up(db);
+    await seedMigration.up(db);
+    await wellenMigration.up(db);
+
+    const legacy = await db('event_sources').where({ id: legacyBefore.id }).first();
+    expect(legacy.enabled).toBe(false);
+    expect(legacy.feed_url).not.toBe('https://wellenpark.com/events/feed/');
+    const live = await db('event_sources').where({ feed_url: 'https://wellenpark.com/events/' });
+    expect(live).toHaveLength(1);
+    expect(live[0].enabled).toBe(true);
+  });
+
+  test('guard is a no-op when only the legacy Wellen row exists', async () => {
+    await guardMigration.up(db);
+    const legacy = await db('event_sources').where({ feed_url: 'https://wellenpark.com/events/feed/' }).first();
+    expect(legacy.enabled).toBe(true);
   });
 });
