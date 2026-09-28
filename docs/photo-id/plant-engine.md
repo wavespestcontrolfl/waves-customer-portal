@@ -316,6 +316,13 @@ are grouped under "Codex #5186 round 1 regressions" in the same file.
   it is final under the conservative quality combine, so verify, Call C and
   the escalation are not called.
 
+- Only contract §3 inputs are used or sent: `chips` keep the listed keys
+  and `context` keeps `grass_type_on_file`, `irrigation_type` and
+  `applications[{ kind, days_ago }]`, primitive values only (pre-push audit
+  on r6). Anything else the caller passes — a customer record's name, phone
+  or address, the app's free-text `plant_name` — never reaches a Gemini or
+  OpenAI prompt.
+
 ## What L4 must do
 
 - Wire `identifyPlantV2` into `POST /api/photo-id/lawn` / `/tree_shrub`

@@ -1661,6 +1661,37 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
       expect(identity.v2.answer.level).toBe('unknown');
       expect(identity.v2.tier).toBe('needs_more_evidence');
     });
+
+    test('pre-push audit on r6: only contract §3 chips and context reach a provider prompt', async () => {
+      queue(
+        candidatesLeg({ turf: [idItem('fixture-bahia', 0.95)] }),
+        verifyLeg([['fixture-bahia', 0.95]]),
+        conditionsLeg([['fixture-large-patch', 0.5]]), // low confidence, so the escalation prompt is built too
+        MISS,
+      );
+      const result = await engine.identifyPlantV2({
+        photos: PHOTOS,
+        subject: 'lawn',
+        chips: { light: 'full_sun', plant_name: 'Chip Free Text', nested: { note: 'Nested Chip Note' } },
+        context: {
+          grass_type_on_file: 'unknown',
+          applications: [{ kind: 'herbicide', days_ago: 5, product: 'Brand X Product' }],
+          name: 'Pat Example',
+          phone: '941-555-0100',
+          address: '1 Example Street',
+        },
+      });
+      expect(result.ok).toBe(true);
+      expect(dispatch).toHaveBeenCalledTimes(4);
+      const sent = JSON.stringify(dispatch.mock.calls);
+      for (const leaked of ['Pat Example', '941-555-0100', '1 Example Street', 'Brand X Product', 'Chip Free Text', 'Nested Chip Note']) {
+        expect(sent).not.toContain(leaked);
+      }
+      // The contract's own facts still arrive.
+      expect(sent).toContain('full_sun');
+      expect(sent).toContain('herbicide');
+      expect(sent).toContain('grass_type_on_file');
+    });
   });
 });
 
@@ -1719,15 +1750,20 @@ describe('plant-engine — real catalog', () => {
     engine = require('../services/photo-id-v2/plant-engine');
   });
 
-  test('unnamed identity safety line (Codex #5186 r6 P1): triaged for the worst real plant under the node', () => {
-    const {
-      base, swallowed, irritant, pets,
-    } = engine.UNNAMED_PLANT_SAFETY_CLAUSES;
+  test('unnamed identity safety line (Codex #5186 r6 P1): every real hazardous plant\'s own hazards reach its group\'s line', () => {
+    const clauses = engine.UNNAMED_PLANT_SAFETY_CLAUSES;
     const lineFor = engine._test.unnamedPlantSafetyLineFor;
-    expect(lineFor('lawn', 'broadleaf-weeds')).toBe(`${base} ${irritant}`); // spotted spurge's sap
-    expect(lineFor('tree_shrub', 'shrubs-trees')).toBe(`${base} ${swallowed} ${irritant} ${pets}`); // oleander, sago palm, croton
-    expect(lineFor('lawn', 'turfgrasses')).toBeNull();
-    expect(lineFor('palm', null)).toContain(pets); // sago palm is in the palm index
+    const hazardous = catalog.listEntries({ section: 'plant' })
+      .filter((e) => e.risk === 'medical' || e.risk === 'irritant' || e.safety?.irritant || e.safety?.toxic_to_pets);
+    expect(hazardous.map((e) => e.slug)).toEqual(expect.arrayContaining(['sago-palm', 'oleander', 'spotted-spurge']));
+    for (const entry of hazardous) {
+      const line = lineFor('tree_shrub', entry.group);
+      expect(line.startsWith(clauses.base)).toBe(true);
+      if (entry.risk === 'medical') expect(line).toContain(clauses.swallowed);
+      if (entry.safety?.irritant || entry.risk === 'irritant') expect(line).toContain(clauses.irritant);
+      if (entry.safety?.toxic_to_pets) expect(line).toContain(clauses.pets);
+    }
+    expect(lineFor('palm', null)).toContain(clauses.pets); // sago palm is in the palm index
   });
 
   test('identity index: palm subject includes sago-palm', () => {
@@ -1743,15 +1779,13 @@ describe('plant-engine — real catalog', () => {
     expect(slugs).toContain('dollarweed'); // broadleaf weed
   });
 
-  test('conditionIndexFor(lawn, st-augustinegrass): today\'s all-draft CONDITION content never enters the index, but owner-approved lawn pest possibilities do', () => {
+  test('conditionIndexFor(lawn, st-augustinegrass): a draft condition never enters the index; owner-approved lawn pest possibilities do', () => {
     const index = engine.conditionIndexFor('lawn', 'st-augustinegrass');
-    const conditionSlugsInIndex = index.filter((e) => e.condition).map((e) => e.slug);
-    expect(conditionSlugsInIndex).toEqual([]); // every real condition entry is still a draft
     expect(index.map((e) => e.slug)).toContain('chinch-bug'); // approved pest possibility
     for (const entry of index) expect(catalog.isApproved(entry)).toBe(true);
   });
 
-  test('naming gate walk over every real condition entry: with every element visible at 0.9 confidence, only confirmable_by "photo" entries would even be ELIGIBLE, and none are named because none are approved yet', () => {
+  test('naming gate walk over every real condition entry: with every element visible at 0.9 confidence, only an approved, confirmable_by "photo" entry can be named', () => {
     const conditions = catalog.listEntries({ section: 'condition' });
     expect(conditions.length).toBeGreaterThan(0);
     let sawPhotoConfirmable = false;
@@ -1760,9 +1794,8 @@ describe('plant-engine — real catalog', () => {
       const elementsVisible = entry.condition.required_signature.elements.map((_, i) => i + 1);
       const possibility = { slug: entry.slug, entry, sig, confidence: 0.9, elementsVisible: new Set(elementsVisible), signsVisible: new Set(), symptomsVisible: new Set() };
       if (sig.confirmableBy === 'photo') sawPhotoConfirmable = true;
-      // Never named today: the real catalog is all drafts.
-      expect(engine.namedAnswerFor([possibility], possibility)).toBeNull();
-      expect(catalog.isApproved(entry)).toBe(false);
+      // A draft, or a condition a photo cannot confirm, is never named.
+      if (!catalog.isApproved(entry) || sig.confirmableBy !== 'photo') expect(engine.namedAnswerFor([possibility], possibility)).toBeNull();
     }
     expect(sawPhotoConfirmable).toBe(true); // the gate's photo-confirmable path is real content, not vacuous
   });
@@ -1789,11 +1822,11 @@ describe('plant-engine — real catalog', () => {
     }
   });
 
-  test('a real-catalog lawn workup is symptom-only with zero possibilities today (every condition entry is a draft)', () => {
+  test('a real-catalog lawn workup never shows or names a draft condition, however confident the read', () => {
     const built = engine.buildWorkup({
       subject: 'lawn',
       // Simulate Call C selecting every real condition entry that hosts turf,
-      // fully confident and fully visible — even so, none are approved.
+      // fully confident and fully visible — a draft among them still never shows.
       possibilities: catalog.listEntries({ section: 'condition' })
         .filter((e) => (e.condition.hosts || []).includes('turf'))
         .map((entry) => {
@@ -1813,9 +1846,9 @@ describe('plant-engine — real catalog', () => {
       photosCount: 3,
       quality: { usable: true, issue: 'none' },
     });
-    expect(built.possibilities).toEqual([]);
-    expect(built.answer).toMatchObject({ level: 'symptom', headline: 'Brown patches in the lawn' });
-    expect(built.tier).toBe('needs_more_evidence');
+    const drafts = new Set(catalog.listEntries({ section: 'condition' }).filter((e) => !catalog.isApproved(e)).map((e) => e.slug));
+    expect(built.possibilities.filter((p) => drafts.has(p.slug))).toEqual([]);
+    expect(drafts.has(built.answer.node_id)).toBe(false);
   });
 
   test('headline table covers every OBSERVED_TERMS entry for both lawn and plant, or explicitly has no column', () => {

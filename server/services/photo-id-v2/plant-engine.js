@@ -1410,6 +1410,25 @@ function combineQuality(qualityReads = [], showsReads = []) {
 // ── orchestration (sequential: Gemini candidates -> verify -> Gemini
 // conditions -> OpenAI escalation, only when a trigger fires) ──────────────
 
+// Contract §3's inputs, and nothing else (pre-push audit on #5186 r6): the
+// prompts state chips and context to Gemini and OpenAI as plain facts, so a
+// key the contract does not list — a customer record's name, phone or
+// address in `context`, the free-text `plant_name` the app carries for a
+// later PR — never reaches a provider, and no rule reads one either. Values
+// stay primitive (a nested object in a known key is dropped too).
+const CHIP_KEYS = Object.freeze(['grass_type', 'watering_days', 'recent_application', 'onset', 'spreading', 'light', 'pets', 'plant_slug', 'watering', 'recently_planted', 'where_started', 'fronds', 'fruit_dropping']);
+const CONTEXT_KEYS = Object.freeze(['grass_type_on_file', 'irrigation_type']);
+const isPrimitive = (v) => v === null || ['string', 'number', 'boolean'].includes(typeof v);
+function pickPrimitives(source, keys) {
+  const src = source && typeof source === 'object' ? source : {};
+  return Object.fromEntries(keys.filter((key) => isPrimitive(src[key])).map((key) => [key, src[key]]));
+}
+function contractContext(context) {
+  const picked = pickPrimitives(context, CONTEXT_KEYS);
+  const applications = Array.isArray(context?.applications) ? context.applications : null;
+  return applications ? { ...picked, applications: applications.map((a) => pickPrimitives(a, ['kind', 'days_ago'])) } : picked;
+}
+
 function runContextFor({
   images, subject, chips, context, now, mode,
 }) {
@@ -1418,8 +1437,8 @@ function runContextFor({
   return {
     images,
     subject,
-    chips,
-    context,
+    chips: pickPrimitives(chips, CHIP_KEYS),
+    context: contractContext(context),
     mode,
     currentMonth: etParts(now).month,
     deadline,
