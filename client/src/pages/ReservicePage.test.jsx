@@ -450,9 +450,9 @@ describe('ReservicePage pest chips (GATE_RESERVICE_PEST_CHIPS)', () => {
   it('renders one-tap pest chips when the server sends pestChoices, and toggling flips aria-pressed', async () => {
     stubFetch({ get: jsonResponse(bookablePayload({ pestChoices: PEST_CHOICES })) });
     renderPage();
-    // The chip row heading and every choice render.
-    expect(await screen.findByText('What are you seeing?')).toBeInTheDocument();
-    const antsChip = screen.getByRole('button', { name: 'Ants' });
+    // Lane selection finishes after data loads; the textarea has the same label before chips render.
+    const antsChip = await screen.findByRole('button', { name: 'Ants' });
+    expect(screen.getByText('What are you seeing?')).toBeInTheDocument();
     expect(antsChip).toHaveAttribute('aria-pressed', 'false');
     fireEvent.click(antsChip);
     expect(antsChip).toHaveAttribute('aria-pressed', 'true');

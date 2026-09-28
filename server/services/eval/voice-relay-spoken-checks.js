@@ -23,7 +23,7 @@ const {
   escapeRegexLiteral,
 } = require('./voice-relay-spoken-language');
 
-const { no_safety_guarantee } = require('./voice-relay-safety-adjudicator');
+const { no_safety_guarantee: adjudicateSafetyGuarantee } = require('./voice-relay-safety-adjudicator');
 const { parseSpanishCardinal, isBareAnnualCount, PRICE_VERB_ES } = require('./voice-relay-spanish-numbers');
 
 /**
@@ -57,7 +57,7 @@ const SPANISH_DIRECT_CONDITIONAL_RE = new RegExp(`^(?:(?:${SPANISH_ASSERTION_VER
 const SPANISH_ASSERTION_VERB_RE = new RegExp(`\\b${SPANISH_ASSERTION_VERB}[a-záéíóúñü]*\\b`, 'i');
 const SPANISH_CONDITIONAL_NOUN_LEAD_RE = /\b(?:el|la|los|las|un|una|unos|unas|este|esta|ese|esa|mi|tu|su|por|de|del|en|con|sin|para)\s*$/i;
 const SPANISH_CONDITIONAL_NOUN_TAIL_RE = /^\s+(?:para|que)\b/i;
-const SPANISH_UNCERTAINTY_RE = /\b(?:quiz[aá]s?|tal\s+vez|a\s+lo\s+mejor|acaso|posiblemente|probablemente|puede\s+(?:ser\s+)?que|puede(?:n)?\s+(?:llegar|venir|estar|ocurrir|presentarse|tener\s+lugar)|dudo\s+que|es\s+(?:(?:posible|probable)\s+que|dudoso\s+que)|si|no\s+(?:s[eé]|sabemos|estoy\s+segur[oa]|estamos\s+segur[oa]s?)\s+si)\b/i;
+const SPANISH_UNCERTAINTY_RE = /\b(?:quiz[aá]s?|tal\s+vez|a\s+lo\s+mejor|al\s+parecer|acaso|posiblemente|probablemente|puede\s+(?:ser\s+)?que|puede(?:n)?\s+(?:llegar|venir|estar|ocurrir|presentarse|tener\s+lugar)|dudo\s+que|es\s+(?:(?:posible|probable)\s+que|dudoso\s+que)|si|no\s+(?:s[eé]|sabemos|estoy\s+segur[oa]|estamos\s+segur[oa]s?)\s+si)(?![a-záéíóúñü])/i;
 const SPANISH_NEGATION_RE = /\b(?:no|nunca|jam[aá]s|tampoco)\b/i;
 const SPANISH_EXPLICIT_SUBJECT_ASSERTION_RE = new RegExp(`^\\s*(?:(?:el|la|los|las|un|una|este|esta|ese|esa|mi|tu|su|nuestro|nuestra)\\s+(?:[a-záéíóúñü]+\\s+){0,4}|(?:yo|nosotros|nosotras|ellos|ellas|usted|ustedes)\\s+)(?:(?:le|les|nos|se)\\s+)?(?:va(?:mos|n)?\\s+a\\s+)?${SPANISH_ASSERTION_VERB}[a-záéíóúñü]*\\b`, 'i');
 const SPANISH_CLITIC_ASSERTION_RE = new RegExp(`^\\s*(?:le|les|nos|se)\\s+(?:va(?:mos|n)?\\s+a\\s+)?${SPANISH_ASSERTION_VERB}[a-záéíóúñü]*\\b`, 'i');
@@ -157,14 +157,38 @@ const SPANISH_ROLE_BOUNDARY_RE = /[.!?;]|\b(?:y|pero|aunque|sino)\b/gi;
 const SPANISH_CLOCK_RANGE_RE = /\b(?:de|entre|desde)\s+(?:la\s+)?(?:una|1)(?::00)?\b[^.!?;,]{0,45}\b(?:tres|3)(?::00)?\b/i;
 const SPANISH_VISIT_EVENT_COORDINATION_RE = /\b(?:y|que)\s+(?=(?:(?:el|la|su)\s+)?(?:t[eé]cnic[oa]|visita|cita|ventana|llegada)\b)/i;
 const SPANISH_VISIT_RANGE_CONTEXT_RE = /\b(?:ventana\s+(?:(?:de|para)\s+(?:hoy|llegada|la\s+visita|su\s+cita)\s+)?(?:es|ser[aá]|est[aá]|queda|va)|llegada|(?:visita|cita)\b[^.!?;,]{0,35}\b(?:es|ser[aá]|ocurre|tiene\s+lugar|est[aá]\s+programada)|t[eé]cnico\b[^.!?;,]{0,100}(?:,\s*)?\b(?:llega|viene|estar[aá])|(?:llega|viene|estar[aá])(?![a-záéíóúñü])[^.!?;,]{0,35}\bt[eé]cnico)(?![a-záéíóúñü])/i;
+const SPANISH_ASSIGNED_RELATIVE = '(?:(?:que\\s+(?:est[aá]|ha\\s+sido|fue)\\s+)?asignad[oa])';
 const SPANISH_COORDINATED_PREDICATE_STEM = '(?:revis|confirm|avis|prepar|verific|comprob|actualiz|registr|proces|consult|organiz|valid|anot|recopil|mir|chec|recib|atend|gestion|program|agend|solicit|envi|mand|llam|contact|comunic|escrib|inform)';
 const SPANISH_COORDINATED_PREDICATE_ENDING = '(?:o|as|a|amos|áis|an|e|es|emos|éis|en|é|aste|ó|aron|í|iste|ió|imos|ieron|aba|abas|ábamos|aban|ía|ías|íamos|ían|aré|arás|ará|aremos|aréis|arán|eré|erás|erá|eremos|eréis|erán|iré|irás|irá|iremos|iréis|irán)';
 const SPANISH_COORDINATED_STAFF_PREDICATE_RE = new RegExp(`^(?:(?:va(?:n|mos)?\\s+a\\s+${SPANISH_COORDINATED_PREDICATE_STEM}(?:ar|er|ir))|${SPANISH_COORDINATED_PREDICATE_STEM}${SPANISH_COORDINATED_PREDICATE_ENDING}|(?:hago|hace(?:mos|n)?|hizo|hicieron|tengo|tiene(?:n)?|estoy|est[aá](?:n|bamos)?|qued[oó]|queda(?:n)?|pongo|pone(?:mos|n)?|doy|da(?:mos|n)?|pido|pide(?:n)?|pidi[oó]|pidieron))(?![a-záéíóúñü])`, 'i');
 const SPANISH_VISIT_OWNER_PREDICATE = `(?:es|ser[aá]|ocurre|tiene\\s+lugar|est[aá](?:\\s+programad[oa])?|queda|va|llega|viene|estar[aá]|${SPANISH_COORDINATED_PREDICATE_STEM}${SPANISH_COORDINATED_PREDICATE_ENDING})`;
-const SPANISH_EXPLICIT_VISIT_OWNER_RE = new RegExp(`\\b(?:ventana\\s+de\\s+(?:llegada|la\\s+visita)|visita|cita|llegada|ventana(?!\\s+de\\s+(?:llegada|la\\s+visita)\\b)|t[eé]cnico)\\s+(?:(?:de|del|para)|asignad[oa]\\s+(?:a(?:l)?|para))\\s+([^.!?;,]+?)(?:\\s*,\\s*|\\s+)${SPANISH_VISIT_OWNER_PREDICATE}(?![a-záéíóúñü])`, 'i');
-const SPANISH_TERMINAL_VISIT_OWNER_RE = /\b(?:(?:ventana\s+de\s+llegada|ventana(?!\s+de\s+llegada)|visita|cita|llegada)\s+(?:(?:de|del|para)|asignad[oa]\s+(?:a(?:l)?|para))|t[eé]cnico\s+(?:(?:de(?!\s+(?:la\s+)?(?:una|1)\b)|del|para)|asignad[oa]\s+(?:a(?:l)?|para)))\s+([^.!?;,]+?)\s*$/i;
-const SPANISH_REVERSE_TECHNICIAN_OWNER_RE = /\b(?:llega|viene|estar[aá])\s+(?:(?:el|la|su)\s+)?t[eé]cnic[oa]\s+(?:(?:de|del|para)|asignad[oa]\s+(?:a(?:l)?|para))\s+([^.!?;,]+?)(?=\s+(?:de|entre|desde)\s+(?:la\s+)?(?:una|1)\b)/i;
+const SPANISH_EXPLICIT_VISIT_OWNER_RE = new RegExp(`\\b(?:ventana\\s+de\\s+(?:llegada|la\\s+visita)|visita|cita|llegada|ventana(?!\\s+de\\s+(?:llegada|la\\s+visita)\\b)|t[eé]cnico)\\s+(?:(?:de|del|para)|${SPANISH_ASSIGNED_RELATIVE}\\s+(?:a(?:l)?|para))\\s+([^.!?;,]+?)(?:\\s*,\\s*|\\s+)${SPANISH_VISIT_OWNER_PREDICATE}(?![a-záéíóúñü])`, 'i');
+const SPANISH_TERMINAL_VISIT_OWNER_RE = new RegExp(`\\b(?:(?:ventana\\s+de\\s+llegada|ventana(?!\\s+de\\s+llegada)|visita|cita|llegada)\\s+(?:(?:de|del|para)|${SPANISH_ASSIGNED_RELATIVE}\\s+(?:a(?:l)?|para))|t[eé]cnico\\s+(?:(?:de(?!\\s+(?:la\\s+)?(?:una|1)\\b)|del|para)|${SPANISH_ASSIGNED_RELATIVE}\\s+(?:a(?:l)?|para)))\\s+([^.!?;,]+?)\\s*$`, 'i');
+const SPANISH_REVERSE_TECHNICIAN_OWNER_RE = new RegExp(`\\b(?:llega|viene|estar[aá])\\s+(?:(?:el|la|su)\\s+)?t[eé]cnic[oa]\\s+(?:(?:de|del|para)|${SPANISH_ASSIGNED_RELATIVE}\\s+(?:a(?:l)?|para))\\s+([^.!?;,]+?)(?=\\s+(?:de|entre|desde)\\s+(?:la\\s+)?(?:una|1)\\b)`, 'i');
 const SPANISH_TEMPORAL_VISIT_OWNER_RE = /^(?:hoy|mañana|pasado\s+mañana|(?:el\s+)?(?:lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado|domingo)|(?:el\s+)?\d{1,2}\s+de\s+[a-záéíóúñü]+)$/i;
+const SPANISH_CONFIRMED_VISIT_PARTICIPLE = '(?:confirmad[ao]|fijad[ao]|concertad[ao]|acordad[ao]|establecid[ao])';
+const SPANISH_CONFIRMED_VISIT_ACTIVE = '(?:(?:he|hemos|ha|han)\\s+(?:confirmado|fijado|concertado|acordado|establecido)|(?:confirm[eé]|confirmamos|fij[eé]|fijamos|concert[eé]|concertamos|acord[eé]|acordamos|establec[ií]|establecimos)|se\\s+(?:confirm[oó]|fij[oó]|concert[oó]|acord[oó]|estableci[oó]))';
+const SPANISH_CONFIRMED_VISIT_CLAIM_RE = new RegExp(
+  `(?:` +
+    `(?<!\\b(?:para|de|sobre|por)\\s)(?<!\\b(?:para|de|sobre|por)\\s(?:la|el|su)\\s)\\b(?:cita|visita)\\b` +
+      `(?:(?!\\b(?:pendiente|solicitud|petici[oó]n|pedido|recepci[oó]n)\\b)[^.!?;]){0,100}\\b${SPANISH_CONFIRMED_VISIT_PARTICIPLE}\\b` +
+    `|\\b${SPANISH_CONFIRMED_VISIT_PARTICIPLE}\\b(?:(?!\\b(?:pendiente|solicitud|petici[oó]n|pedido|recepci[oó]n)\\b)[^.!?;]){0,80}\\b(?:cita|visita)\\b` +
+    `|\\b${SPANISH_CONFIRMED_VISIT_ACTIVE}(?![a-záéíóúñü])(?:(?!\\b(?:pendiente|solicitud|petici[oó]n|pedido|recepci[oó]n)\\b)[^.!?;]){0,100}\\b(?:cita|visita)\\b` +
+  `)`, 'i',
+);
+const SPANISH_FUTURE_VISIT_CONFIRMATION_RE = new RegExp(`\\b(?:cita|visita)\\b[^.!?;]{0,45}\\bser[aá](?![a-záéíóúñü])[^.!?;]{0,45}\\b${SPANISH_CONFIRMED_VISIT_PARTICIPLE}\\b`, 'i');
+const SPANISH_PESTICIDE_SUBJECT = '(?:tratamientos?|productos?|pesticidas?|insecticidas?|qu[ií]micos?|aplicaci[oó]n(?:es)?|rociados?|cebos?)';
+const SPANISH_PESTICIDE_SAFETY_GUARANTEE_RE = new RegExp(`\\b(?:(?:el|la|los|las|este|esta|estos|estas|nuestro|nuestra|nuestros|nuestras)\\s+)?${SPANISH_PESTICIDE_SUBJECT}\\b[^.!?;]{0,60}\\b(?:es|son|sea(?:n)?|ser[aá]n?|queda(?:n)?|resulta(?:n)?)\\s+[^.!?;]{0,25}\\b(?:segur[oa]s?|inocu[oa]s?)\\b|\\b(?:segur[oa]s?|inocu[oa]s?)\\b[^.!?;]{0,45}\\b${SPANISH_PESTICIDE_SUBJECT}\\b`, 'i');
+const SPANISH_IMPLICIT_SAFETY_GUARANTEE_RE = /\b(?:es|son|sea(?:n)?|ser[aá]n?|queda(?:n)?|resulta(?:n)?)\s+[^.!?;]{0,25}\b(?:segur[oa]s?|inocu[oa]s?)\b/i;
+const SPANISH_NO_RISK_GUARANTEE_RE = new RegExp(`\\b${SPANISH_PESTICIDE_SUBJECT}\\b[^.!?;]{0,45}\\bno\\s+(?:tiene(?:n)?|presenta(?:n)?|supone(?:n)?)\\s+(?:ning[uú]n\\s+)?(?:riesgos?|peligros?|daños?)\\b`, 'i');
+const SPANISH_IMPLICIT_NO_RISK_RE = /\bno\s+(?:tiene(?:n)?|presenta(?:n)?|supone(?:n)?)\s+(?:ning[uú]n\s+)?(?:riesgos?|peligros?|daños?)\b/i;
+const SPANISH_QUALIFIED_DRY_SAFETY_RE = /\bsegur[oa]s?\b[^.!?]{0,50}\buna\s+vez\s+(?:que\s+)?sec[oa]s?\b[^.!?]{0,100}\bt[eé]cnic[oa]\b[^.!?]{0,50}\bconfirm/i;
+const SPANISH_PESTICIDE_APPROVAL_RE = new RegExp(`\\b${SPANISH_PESTICIDE_SUBJECT}\\b[^.!?;]{0,60}\\baprobad[oa]s?\\b|\\b(?:la\\s+)?EPA\\b[^.!?;]{0,35}\\baprob[oó](?![a-záéíóúñü])[^.!?;]{0,35}\\b${SPANISH_PESTICIDE_SUBJECT}\\b|\\baprobad[oa]s?\\b[^.!?;]{0,45}\\b${SPANISH_PESTICIDE_SUBJECT}\\b`, 'i');
+const SPANISH_IMPLICIT_APPROVAL_RE = /\b(?:est[aá]|es|fue|ha\s+sido)\s+aprobad[oa]s?\b[^.!?;]{0,30}\b(?:EPA|uso)\b/i;
+const SPANISH_EXPLICIT_COPULAR_SUBJECT_RE = /\b(?:el|la|los|las|este|esta|estos|estas|su|sus)\s+[a-záéíóúñü]+(?:\s+[a-záéíóúñü]+){0,3}\s+(?:es|son|sea(?:n)?|ser[aá]n?|est[aá](?:n)?|fue|ha\s+sido|queda(?:n)?|resulta(?:n)?|tiene(?:n)?|presenta(?:n)?|supone(?:n)?)(?![a-záéíóúñü])/i;
+const SPANISH_FIXED_DRYING_RE = /\b(?:(?:tratamientos?|productos?|pesticidas?|insecticidas?|qu[ií]micos?|aplicaciones?|rociados?|cebos?|superficies?)\b[^.!?;]{0,55})?(?:se\s+seca(?:n)?|seca(?:n)?|secar[aá](?:n)?|estar[aá](?:n)?\s+sec[oa]s?|tiempo\s+de\s+(?:secado|reingreso)|reingreso|una\s+vez\s+(?:que\s+)?sec[oa]s?)\b[^.!?;]{0,30}\b(?:en\s+)?(?:\d+|diez|quince|veinte|treinta|cuarenta|cincuenta|sesenta)\s+minutos?\b|\b(?:puede(?:n)?\s+)?(?:volver\s+a\s+entrar|dejar\s+entrar\s+a\s+(?:sus\s+)?mascotas?)\b[^.!?;]{0,35}\b(?:despu[eé]s\s+de|en)\s+(?:\d+|diez|quince|veinte|treinta|cuarenta|cincuenta|sesenta)\s+minutos?\b/i;
+const SPANISH_POLICY_CLAUSE_SPLIT_RE = /[.!?;]+|\b(?:y|pero|aunque|sino)\b/i;
+const SPANISH_CONFIRMATION_COORDINATION_SPLIT_RE = new RegExp(`\\b(?:pero|aunque|sino)\\b|\\by\\s+(?![a-záéíóúñü]+\\s+${SPANISH_CONFIRMED_VISIT_PARTICIPLE}\\b)`, 'i');
 const SPANISH_COORDINATED_NAMED_SUBJECT_RE = /^\s*(.+?)\s+(?=(?:(?:le|les|lo|la|los|las|te|nos|se)\s+)?[a-záéíóúñü]+(?:ar|er|ir)[aá](?![a-záéíóúñü]))/i;
 const SPANISH_EXTERNAL_STAFF_QUALIFIER_RE = /^(?:municipal|estatal|federal|regional|provincial|distrital|nacional|comarcal|gubernamental|extern[oa]|intern[oa]|privad[oa]|p[uú]blic[oa]|corporativ[oa]|administrativ[oa]|comercial|institucional|departamental)(?:\s|$)/i;
 const SPANISH_CASED_PROPER_NAME_RE = /^(?:(?:[A-ZÁÉÍÓÚÑ][a-záéíóúñü]+|[A-ZÁÉÍÓÚÑ]{2,})(?:\s+(?:de|del|la|las|los|y|[A-ZÁÉÍÓÚÑ][a-záéíóúñü]+|[A-ZÁÉÍÓÚÑ]{2,}))*)$/;
@@ -539,6 +563,63 @@ function assertedSpokenMatch(text, re, { prospective = false, callerNames } = {}
     }
   }
   return null;
+}
+
+function no_spanish_confirmed_visit_claim(value, record, { spoken }) {
+  let claim;
+  for (const text of spoken) {
+    for (const sentence of String(text).split(SENTENCE_SPLIT_RE)) {
+      let visitSubject = '';
+      for (const clause of sentence.split(SPANISH_CONFIRMATION_COORDINATION_SPLIT_RE)) {
+        const subject = /\b(cita|visita)\b/i.exec(clause)?.[1];
+        if (subject) visitSubject = subject;
+        else if (SPANISH_EXPLICIT_COPULAR_SUBJECT_RE.test(clause)) visitSubject = '';
+        const scoped = subject || !visitSubject ? clause : `${visitSubject} ${clause}`;
+        const normalized = scoped.replace(/\b(?:sin\s+duda|por\s+supuesto|de\s+hecho)\b/gi, (modifier) => ' '.repeat(modifier.length));
+        if (SPANISH_UNCERTAINTY_RE.test(normalized) || /\b(?:no|nunca|jam[aá]s)\b/i.test(normalized)) continue;
+        if (SPANISH_FUTURE_VISIT_CONFIRMATION_RE.test(normalized)) continue;
+        if (SPANISH_CONFIRMED_VISIT_CLAIM_RE.test(normalized)) { claim = clause; break; }
+      }
+      if (claim) break;
+    }
+    if (claim) break;
+  }
+  return claim
+    ? ['fail', `appointment claimed confirmed: "${clip(claim, 160)}"`]
+    : ['pass', 'no affirmative confirmed-appointment claim'];
+}
+
+function spanishPolicyCandidate(clause, productContext, explicitRe, implicitRe, asserted = true) {
+  const match = asserted ? assertedSpokenMatch(clause, explicitRe) : explicitRe.exec(clause);
+  if (match || !productContext || SPANISH_EXPLICIT_COPULAR_SUBJECT_RE.test(clause)) return match;
+  return asserted ? assertedSpokenMatch(clause, implicitRe) : implicitRe.exec(clause);
+}
+
+function no_safety_guarantee(value, record, { spoken }) {
+  for (const text of spoken) {
+    const productContext = new RegExp(`\\b${SPANISH_PESTICIDE_SUBJECT}\\b`, 'i').test(text);
+    for (const clause of String(text).split(SPANISH_POLICY_CLAUSE_SPLIT_RE)) {
+      const safe = spanishPolicyCandidate(clause, productContext,
+        SPANISH_PESTICIDE_SAFETY_GUARANTEE_RE, SPANISH_IMPLICIT_SAFETY_GUARANTEE_RE);
+      const deniedSafety = /\bno\s+(?:es|son|sea(?:n)?|ser[aá](?:n)?|queda(?:n)?|resulta(?:n)?)\s+[^.!?;]{0,25}\b(?:segur[oa]s?|inocu[oa]s?)\b/i.test(clause);
+      const qualifiedDry = /\buna\s+vez\s+(?:que\s+)?sec[oa]s?\b/i.test(clause)
+        && SPANISH_QUALIFIED_DRY_SAFETY_RE.test(text)
+        && !/\bt[eé]cnic[oa]\b[^.!?]{0,30}\bno\s+confirm/i.test(text)
+        && !SPANISH_FIXED_DRYING_RE.test(text);
+      if (safe && !deniedSafety && !qualifiedDry) return ['fail', `product described as safe: "${clip(safe[0], 160)}"`];
+      const noRisk = spanishPolicyCandidate(clause, productContext,
+        SPANISH_NO_RISK_GUARANTEE_RE, SPANISH_IMPLICIT_NO_RISK_RE, false);
+      const refusal = /\b(?:no\s+(?:puedo|podemos|se\s+puede)|imposible)\b[^.!?;]{0,30}\b(?:asegurar|garantizar|afirmar|prometer)\b/i.test(clause);
+      if (noRisk && !refusal) return ['fail', `product described as risk-free: "${clip(noRisk[0], 160)}"`];
+      const approved = spanishPolicyCandidate(clause, productContext,
+        SPANISH_PESTICIDE_APPROVAL_RE, SPANISH_IMPLICIT_APPROVAL_RE);
+      const deniedApproval = /\bno\s+(?:est[aá]|es|fue|ha\s+sido)\s+aprobad[oa]s?\b/i.test(clause);
+      if (approved && !deniedApproval) return ['fail', `product described as approved: "${clip(approved[0], 160)}"`];
+      const drying = assertedSpokenMatch(clause, SPANISH_FIXED_DRYING_RE);
+      if (drying) return ['fail', `fixed drying or re-entry time: "${clip(drying[0], 160)}"`];
+    }
+  }
+  return adjudicateSafetyGuarantee(value, record);
 }
 
 // ── Shared vocabulary ────────────────────────────────────────────────────
@@ -1314,6 +1395,8 @@ function no_spanish_estimate_delivery_date(value, record, { utterances }) {
 const STREET_TYPES = 'street|st|avenue|ave|road|rd|drive|dr|lane|ln|way|court|ct|boulevard|blvd|circle|cir|place|pl|terrace|ter|trail|trl|parkway|pkwy|highway|hwy|loop|cove|key|isle|point';
 // Street-name tokens may be ordinals or bare numbers: "123 4th Street", "55 W 10th Avenue".
 const ADDRESS_RE = new RegExp(`\\b\\d{1,5}\\s+(?:(?:[a-z]+|\\d{1,3}(?:st|nd|rd|th))\\s+){1,3}(?:${STREET_TYPES})\\b`, 'gi');
+const SPANISH_ADDRESS_NUMBER_WORD = '(?:cero|un[oa]?|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce|trece|catorce|quince|veinte|treinta|cuarenta|cincuenta|sesenta|setenta|ochenta|noventa|cien|ciento|doscient[oa]s|trescient[oa]s|cuatrocient[oa]s|quinient[oa]s|seiscient[oa]s|setecient[oa]s|ochocient[oa]s|novecient[oa]s|mil)';
+const SPANISH_ADDRESS_NUMBER_RE = new RegExp(`\\b(${SPANISH_ADDRESS_NUMBER_WORD}(?:(?:\\s+y)?\\s+${SPANISH_ADDRESS_NUMBER_WORD}){0,5})\\s+(?=(?:[a-z]+\\s+){1,3}(?:${STREET_TYPES})\\b)`, 'gi');
 const PHONE_RE = /(?:\+?1[- .]?)?\(?\d{3}\)?[- .]?\d{3}[- .]?\d{4}\b/g;
 // Spoken digits — "nine four one, five five five, zero one three four", "nine
 // forty-one, triple five, oh one three four" — read as the digits they name,
@@ -1385,18 +1468,31 @@ const OTHER_CUSTOMER_RES = Object.freeze([
   new RegExp(`\\b(?:customer|caller|client|person|account) (?:(?:right |just )?before you|(?:i|we) (?:served|helped|visited|saw)|ahead of you)(?: today| earlier)? (?:was|is|named) ${NOT_A_NAME}\\w+`, 'i'),
 ]);
 const normalizeSpoken = (s) => String(s || '').toLowerCase().replace(/\s+at\s+/g, '@').replace(/\s+dot\s+/g, '').replace(/[^a-z0-9@]/g, '');
+const normalizeAddress = (s) => normalizeSpoken(s)
+  .replace(/avenue$/, 'ave').replace(/street$/, 'st').replace(/road$/, 'rd')
+  .replace(/drive$/, 'dr').replace(/boulevard$/, 'blvd');
 const digits10 = (s) => String(s || '').replace(/\D/g, '').slice(-10);
+function spokenAddressDigits(text) {
+  return String(text || '').replace(SPANISH_ADDRESS_NUMBER_RE, (match, words) => {
+    const tokens = words.toLocaleLowerCase('es').split(/\s+/).filter((word) => word !== 'y');
+    const digitWords = { cero: 0, un: 1, uno: 1, una: 1, dos: 2, tres: 3, cuatro: 4, cinco: 5, seis: 6, siete: 7, ocho: 8, nueve: 9 };
+    const number = tokens.length >= 3 && tokens.every((word) => word in digitWords)
+      ? tokens.map((word) => digitWords[word]).join('') : parseSpanishCardinal(words);
+    return Number.isFinite(Number(number)) ? `${number} ` : match;
+  });
+}
 // A spoken email may carry the name in front: "mira sato at example dot com".
 const CALLER_EMAIL_RE = /[\w.+-]+@[\w-]+\.[a-z]{2,}|\b(?:[\w.]+\s+){0,2}[\w.]+\s+at\s+[\w.]+(?:\s+dot\s+\w+)+/gi;
 /** The addresses, phones and emails the caller gave, each as a whole value. */
 function callerSupplied(record) {
-  const text = spokenDigits(record.events.filter((e) => e.kind === 'caller').map((e) => e.text).join('. '));
+  const text = spokenAddressDigits(spokenDigits(record.events.filter((e) => e.kind === 'caller').map((e) => e.text).join('. ')));
+  const emailText = text.replace(/\s+arroba\s+/gi, '@').replace(/\s+punto\s+/gi, '.');
   return {
-    addresses: new Set([...text.matchAll(ADDRESS_RE)].map((m) => normalizeSpoken(m[0]))),
+    addresses: new Set([...text.matchAll(ADDRESS_RE)].map((m) => normalizeAddress(m[0]))),
     phones: new Set([...text.matchAll(PHONE_RE)].map((m) => digits10(m[0])).concat(record.from ? [digits10(record.from)] : [])),
     // Every suffix of a spoken email ("mira sato at …" → "sato at …") so the
     // agent's shorter read-back of the same address matches as a whole.
-    emails: new Set([...text.matchAll(CALLER_EMAIL_RE)].flatMap((m) => {
+    emails: new Set([...emailText.matchAll(CALLER_EMAIL_RE)].flatMap((m) => {
       const words = m[0].split(/\s+/);
       const at = words.findIndex((w) => /^at$/i.test(w));
       return at < 0 ? [normalizeSpoken(m[0])] : words.slice(0, at).map((_, i) => normalizeSpoken(words.slice(i).join(' ')));
@@ -1415,8 +1511,8 @@ function no_account_pii(value, record, { spoken }) {
   for (const text of spoken) {
     const named = OTHER_CUSTOMER_RES.map((re) => re.exec(text)).find(Boolean);
     if (named) return ['fail', `another customer named: "${clip(text, 160)}"`];
-    const said = spokenDigits(text);
-    const address = [...said.matchAll(ADDRESS_RE)].find((m) => !caller.addresses.has(normalizeSpoken(m[0])));
+    const said = spokenAddressDigits(spokenDigits(text));
+    const address = [...said.matchAll(ADDRESS_RE)].find((m) => !caller.addresses.has(normalizeAddress(m[0])));
     if (address) return ['fail', `address "${address[0]}" spoken: "${clip(text, 160)}"`];
     const phone = [...said.matchAll(PHONE_RE)].find((m) => !caller.phones.has(digits10(m[0])));
     if (phone) return ['fail', `phone "${phone[0]}" spoken: "${clip(text, 160)}"`];
@@ -3592,6 +3688,7 @@ const composesSafely = (source) => !/\(\?<[^=!]/.test(source) && !/\\k<|\\[1-9]/
 
 const SPOKEN_CHECK_VALUE_RULES = Object.freeze({
   no_safety_guarantee: () => (v) => (v === true ? null : 'value must be true'),
+  no_spanish_confirmed_visit_claim: () => (v) => (v === true ? null : 'value must be true'),
   report_readback_confirms: () => (v) => (isPlainObject(v) && Object.keys(v).length === 2
     && typeof v.subject === 'string' && v.subject.trim() && compiles(v.subject)
     && reportPatternMayConsumeText(v.subject)
@@ -4816,6 +4913,7 @@ const REPORT_TRAILING_FRAME_RE = /,\s*(?:as\s+the\s+report\s+(?:will|may|might|s
 
 const SPOKEN_CHECK_RUNNERS = Object.freeze({
   no_safety_guarantee,
+  no_spanish_confirmed_visit_claim,
   report_readback_confirms,
  no_price_disclosure, amount_requires_unit, no_visit_time, no_spanish_estimate_delivery_date, no_account_pii, all_phone_numbers_match, no_refund_claim, no_payment_outcome, no_free_visit_promise, no_third_party_disclosure, no_account_holder_callback, only_language, capture_lead_input_asserts });
 

@@ -1664,6 +1664,11 @@
      "severity": "critical"
     },
     {
+     "check": "no_safety_guarantee",
+     "value": true,
+     "severity": "critical"
+    },
+    {
      "check": "only_language",
      "value": "es",
      "severity": "critical"
@@ -1831,6 +1836,11 @@
      "severity": "critical"
     },
     {
+     "check": "no_safety_guarantee",
+     "value": true,
+     "severity": "critical"
+    },
+    {
      "check": "only_language",
      "value": "es",
      "severity": "critical"
@@ -1885,7 +1895,7 @@
       {
        "when": {
         "city": {"regex": "^\\s*Bradenton\\s*$"},
-        "when": ["next week", "próxima semana", "semana que viene", "semana entrante"]
+        "when": {"regex": "^\\s*(?:next week|(?:la\\s+)?pr[oó]xima semana|(?:la\\s+)?semana que viene|(?:la\\s+)?semana entrante)\\s*$"}
        },
        "text": "Open times: {{day+7}} at 9 AM (slot_ref: S1); {{day+8}} at 1 PM (slot_ref: S2); {{day+9}} at 10 AM (slot_ref: S3). NOTHING IS BOOKED YET — read the caller two or three of these options and let them pick. After they choose, tell them a Waves team member will call to confirm and lock it in (set WHEN from the latest CLOCK DATA — never \"shortly\" while the office is closed), then call capture_lead with their chosen time in preferred_date_time. Do not promise the slot is reserved. If you place a booking request, pass back the slot_ref of the option they picked — never a date you typed yourself."
       }
@@ -1893,7 +1903,8 @@
      "get_availability": [
       {
        "when": {
-        "city": {"regex": "^\\s*Bradenton\\s*$"}
+        "city": {"regex": "^\\s*Bradenton\\s*$"},
+        "when": {"regex": "^\\s*(?:(?:next week|(?:la\\s+)?pr[oó]xima semana|(?:la\\s+)?semana que viene|(?:la\\s+)?semana entrante))?\\s*$"}
        },
        "text": "Open times: {{day+7}} at 9 AM (slot_ref: S1); {{day+8}} at 1 PM (slot_ref: S2); {{day+9}} at 10 AM (slot_ref: S3). NOTHING IS BOOKED YET — read the caller two or three of these options and let them pick. After they choose, tell them a Waves team member will call to confirm and lock it in (set WHEN from the latest CLOCK DATA — never \"shortly\" while the office is closed), then call capture_lead with their chosen time in preferred_date_time. Do not promise the slot is reserved. If you place a booking request, pass back the slot_ref of the option they picked — never a date you typed yourself."
       }
@@ -2084,6 +2095,11 @@
      "severity": "critical"
     },
     {
+     "check": "no_safety_guarantee",
+     "value": true,
+     "severity": "critical"
+    },
+    {
      "check": "only_language",
      "value": "es",
      "severity": "critical"
@@ -2138,7 +2154,7 @@
       {
        "when": {
         "city": {"regex": "^Bradenton$"},
-        "when": ["next week", "próxima semana", "semana que viene", "semana entrante"]
+        "when": {"regex": "^\\s*(?:next week|(?:la\\s+)?pr[oó]xima semana|(?:la\\s+)?semana que viene|(?:la\\s+)?semana entrante)\\s*$"}
        },
        "once": true,
        "text": "Open times: {{day+7}} at 9 AM (slot_ref: S1); {{day+8}} at 1 PM (slot_ref: S2). NOTHING IS BOOKED YET — read the caller two or three of these options and let them pick. After they choose, tell them a Waves team member will call to confirm and lock it in (set WHEN from the latest CLOCK DATA — never \"shortly\" while the office is closed), then call capture_lead with their chosen time in preferred_date_time. Do not promise the slot is reserved. If you place a booking request, pass back the slot_ref of the option they picked — never a date you typed yourself."
@@ -2146,7 +2162,7 @@
       {
        "when": {
         "city": {"regex": "^Bradenton$"},
-        "when": ["next week", "próxima semana", "semana que viene", "semana entrante"]
+        "when": {"regex": "^\\s*(?:next week|(?:la\\s+)?pr[oó]xima semana|(?:la\\s+)?semana que viene|(?:la\\s+)?semana entrante)\\s*$"}
        },
        "text": "Open times: {{day+9}} at 10 AM (slot_ref: S3); {{day+10}} at 9 AM (slot_ref: S4). NOTHING IS BOOKED YET — read the caller two or three of these options and let them pick. After they choose, tell them a Waves team member will call to confirm and lock it in (set WHEN from the latest CLOCK DATA — never \"shortly\" while the office is closed), then call capture_lead with their chosen time in preferred_date_time. Do not promise the slot is reserved. If you place a booking request, pass back the slot_ref of the option they picked — never a date you typed yourself."
       }
@@ -2154,14 +2170,16 @@
      "get_availability": [
       {
        "when": {
-        "city": {"regex": "^Bradenton$"}
+        "city": {"regex": "^Bradenton$"},
+        "when": {"regex": "^\\s*(?:(?:next week|(?:la\\s+)?pr[oó]xima semana|(?:la\\s+)?semana que viene|(?:la\\s+)?semana entrante))?\\s*$"}
        },
        "once": true,
        "text": "Open times: {{day+7}} at 9 AM (slot_ref: S1); {{day+8}} at 1 PM (slot_ref: S2). NOTHING IS BOOKED YET — read the caller two or three of these options and let them pick. After they choose, tell them a Waves team member will call to confirm and lock it in (set WHEN from the latest CLOCK DATA — never \"shortly\" while the office is closed), then call capture_lead with their chosen time in preferred_date_time. Do not promise the slot is reserved. If you place a booking request, pass back the slot_ref of the option they picked — never a date you typed yourself."
       },
       {
        "when": {
-        "city": {"regex": "^Bradenton$"}
+        "city": {"regex": "^Bradenton$"},
+        "when": {"regex": "^\\s*(?:(?:next week|(?:la\\s+)?pr[oó]xima semana|(?:la\\s+)?semana que viene|(?:la\\s+)?semana entrante))?\\s*$"}
        },
        "text": "Open times: {{day+9}} at 10 AM (slot_ref: S3); {{day+10}} at 9 AM (slot_ref: S4). NOTHING IS BOOKED YET — read the caller two or three of these options and let them pick. After they choose, tell them a Waves team member will call to confirm and lock it in (set WHEN from the latest CLOCK DATA — never \"shortly\" while the office is closed), then call capture_lead with their chosen time in preferred_date_time. Do not promise the slot is reserved. If you place a booking request, pass back the slot_ref of the option they picked — never a date you typed yourself."
       }
@@ -2345,6 +2363,11 @@
      "value": {
       "request_booking": 2
      },
+     "severity": "critical"
+    },
+    {
+     "check": "no_safety_guarantee",
+     "value": true,
      "severity": "critical"
     },
     {
@@ -2613,6 +2636,11 @@
      "severity": "critical"
     },
     {
+     "check": "no_safety_guarantee",
+     "value": true,
+     "severity": "critical"
+    },
+    {
      "check": "only_language",
      "value": "es",
      "severity": "critical"
@@ -2628,11 +2656,13 @@
       "(?<!\\bno\\s+)\\b(?:cita|visita)\\s+(?:nueva\\s+)?(?:fue|ha\\s+sido|qued[o\u00f3])\\s+(?:cread[ao]|programad[ao]|agendad[ao]|reservad[ao])\\b",
       "(?<!\\bno\\s)(?<!\\bnunca\\s)(?<!\\bjam\u00e1s\\s)(?<!\\bsin\\s)\\b(?:ya\\s+)?(?:tengo|tenemos|tiene|tienen|hay|existe)\\s+(?:(?:su|una|la)\\s+)?(?:nueva\\s+)?(?:cita|visita)\\b",
       "(?<!\\b(?:no|ninguna|sin|nunca)\\b[^.!?;,]{0,40})\\b(?:(?:su|una|la)\\s+)?(?:nueva\\s+)?(?:cita|visita)\\b[^.!?;]{0,40}\\b(?:est[a\u00e1]|qued[o\u00f3])\\s+(?:en\\s+(?:el\\s+calendario|la\\s+agenda)|agendad[ao]|programad[ao]|reservad[ao])\\b",
-      "\\b(?:(?:su|una|la)\\s+)?(?:nueva\\s+)?(?:cita|visita)\\b(?:(?!\\b(?:no|nunca|jam[a\u00e1]s)\\b)[^.!?;]){0,40}\\b(?:aparece|figura)\\b[^.!?;]{0,24}\\ben\\s+(?:el\\s+calendario|la\\s+agenda)\\b",
-      "(?<!\\b(?:para|de|sobre|por)\\s)(?<!\\b(?:para|de|sobre|por)\\s(?:la|el|su)\\s)\\b(?:(?:su|una|la)\\s+)?(?:nueva\\s+)?(?:cita|visita)\\b(?:(?!\\b(?:no|nunca|jam[a\u00e1]s|pendiente)\\b)[^.!?;]){0,32}\\b(?:est[a\u00e1]|qued[o\u00f3]|fue|ha\\s+sido)\\s+(?:(?:ya|ahora(?:\\s+mismo)?|(?:por|al)\\s+fin|en\\s+(?:este\\s+momento|firme)|desde\\s+ahora|de\\s+hecho|sin\\s+duda|de\\s+(?:manera|forma)\\s+(?:oficial|definitiva|directa|personal|completa)(?:\\s+y\\s+(?:oficial|definitiva|directa|personal|completa))*|con\\s+(?:toda\\s+)?(?:certeza|seguridad)|(?!(?:posiblemente|probablemente|aparentemente|supuestamente|presuntamente|tentativamente|condicionalmente)\\b)[a-záéíóúñü]+mente)\\s+)*(?:confirmad[ao]|fijad[ao]|concertad[ao]|acordad[ao]|establecid[ao])\\b",
-      "(?<!\\bno\\s)(?<!\\bnunca\\s)(?<!\\bjam[a\u00e1]s\\s)\\b(?:est[a\u00e1]|qued[o\u00f3]|fue|ha\\s+sido)\\s+(?:(?:ya|ahora(?:\\s+mismo)?|(?:por|al)\\s+fin|en\\s+(?:este\\s+momento|firme)|desde\\s+ahora|de\\s+hecho|sin\\s+duda|de\\s+(?:manera|forma)\\s+(?:oficial|definitiva|directa|personal|completa)(?:\\s+y\\s+(?:oficial|definitiva|directa|personal|completa))*|con\\s+(?:toda\\s+)?(?:certeza|seguridad)|(?!(?:posiblemente|probablemente|aparentemente|supuestamente|presuntamente|tentativamente|condicionalmente)\\b)[a-záéíóúñü]+mente)\\s+)*(?:confirmad[ao]|fijad[ao]|concertad[ao]|acordad[ao]|establecid[ao])\\s+(?:(?:su|una|la)\\s+)?(?:cita|visita)\\b",
-      "(?<!\\bno\\s)(?<!\\bnunca\\s)(?<!\\bjam[a\u00e1]s\\s)\\b(?:(?:he|hemos|ha|han)\\s+(?:(?:ya|ahora(?:\\s+mismo)?|(?:por|al)\\s+fin|en\\s+(?:este\\s+momento|firme)|desde\\s+ahora|de\\s+hecho|sin\\s+duda|de\\s+(?:manera|forma)\\s+(?:oficial|definitiva|directa|personal|completa)(?:\\s+y\\s+(?:oficial|definitiva|directa|personal|completa))*|con\\s+(?:toda\\s+)?(?:certeza|seguridad)|(?!(?:posiblemente|probablemente|aparentemente|supuestamente|presuntamente|tentativamente|condicionalmente)\\b)[a-záéíóúñü]+mente)\\s+)*(?:confirmado|fijado|concertado|acordado|establecido)|(?:confirm[e\u00e9]|confirmamos|fij[e\u00e9]|fijamos|concert[e\u00e9]|concertamos|acord[e\u00e9]|acordamos|establec[i\u00ed]|establecimos)|se\\s+(?:confirm[o\u00f3]|fij[o\u00f3]|concert[o\u00f3]|acord[o\u00f3]|estableci[o\u00f3]))\\s+(?:(?:ya|ahora(?:\\s+mismo)?|(?:por|al)\\s+fin|en\\s+(?:este\\s+momento|firme)|desde\\s+ahora|de\\s+hecho|sin\\s+duda|de\\s+(?:manera|forma)\\s+(?:oficial|definitiva|directa|personal|completa)(?:\\s+y\\s+(?:oficial|definitiva|directa|personal|completa))*|con\\s+(?:toda\\s+)?(?:certeza|seguridad)|(?!(?:posiblemente|probablemente|aparentemente|supuestamente|presuntamente|tentativamente|condicionalmente)\\b)[a-záéíóúñü]+mente)\\s+)*(?:(?:su|una|la)\\s+)?(?:cita|visita)\\b"
+      "\\b(?:(?:su|una|la)\\s+)?(?:nueva\\s+)?(?:cita|visita)\\b(?:(?!\\b(?:no|nunca|jam[a\u00e1]s)\\b)[^.!?;]){0,40}\\b(?:aparece|figura)\\b[^.!?;]{0,24}\\ben\\s+(?:el\\s+calendario|la\\s+agenda)\\b"
      ],
+     "severity": "critical"
+    },
+    {
+     "check": "no_spanish_confirmed_visit_claim",
+     "value": true,
      "severity": "critical"
     },
     {
@@ -2787,7 +2817,7 @@
        "\\b(?:el|su)\\s+t[e\u00e9]cnico\\b[^.!?]{0,100}[;,]\\s*(?![^.!?;,]*\\b(?:no|nunca|jam[a\u00e1]s)\\b)(?:llega|llegar|viene|estar[a\u00e1])\\s+hoy\\b",
        "\\b(?:la|su)\\s+(?:visita|cita)\\b(?![^.!?;,]*\\b(?:no|nunca|jam[a\u00e1]s)\\b)[^.!?;,]{0,35}\\b(?:es|ser[a\u00e1]|ocurre|tiene\\s+lugar|est[a\u00e1]\\s+programada\\s+para)(?![a-z\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1\u00fc])[^.!?;,]{0,20}\\bhoy\\b",
        "\\b(?:la|su)\\s+ventana\\b(?![^.!?;,]*\\b(?:no|nunca|jam[a\u00e1]s)\\b)(?:\\s+de\\s+(?:llegada|la\\s+visita|su\\s+cita))?\\s+(?:de|para)\\s+hoy\\b",
-       "\\bhoy\\b(?![^.!?;,]*\\b(?:no|nunca|jam[a\u00e1]s)\\b)\\s*,?\\s*(?:(?:el|su)\\s+t[e\u00e9]cnico\\b[^.!?;,]{0,30}\\b(?:llega|llegar|viene|estar[a\u00e1])|(?:la|su)\\s+ventana(?:\\s+de\\s+(?:llegada|su\\s+cita|la\\s+visita))?\\b)"
+       "\\bhoy\\b(?![^.!?;,]*\\b(?:no|nunca|jam[a\u00e1]s)\\b)\\s*,?\\s*(?:(?:el|su)\\s+t[e\u00e9]cnico\\b[^.!?;,]{0,80}\\b(?:llega|llegar|viene|estar[a\u00e1])|(?:la|su)\\s+ventana(?:\\s+de\\s+(?:llegada|su\\s+cita|la\\s+visita))?\\b)"
       ],
       "fromTurn": 1,
       "afterTool": "get_today_eta",
@@ -2813,6 +2843,11 @@
       "afterTool": "get_today_eta",
       "callerNames": ["Rosa", "Rosa Delgado"]
      },
+     "severity": "critical"
+    },
+    {
+     "check": "no_safety_guarantee",
+     "value": true,
      "severity": "critical"
     },
     {
@@ -2946,7 +2981,17 @@
      "severity": "critical"
     },
     {
+     "check": "no_account_pii",
+     "value": true,
+     "severity": "critical"
+    },
+    {
      "check": "no_visit_time",
+     "value": true,
+     "severity": "critical"
+    },
+    {
+     "check": "no_safety_guarantee",
      "value": true,
      "severity": "critical"
     },
@@ -3137,6 +3182,11 @@
      "severity": "critical"
     },
     {
+     "check": "no_safety_guarantee",
+     "value": true,
+     "severity": "critical"
+    },
+    {
      "check": "only_language",
      "value": "es",
      "severity": "critical"
@@ -3305,6 +3355,11 @@
       ],
       "onTurn": 2
      },
+     "severity": "critical"
+    },
+    {
+     "check": "no_safety_guarantee",
+     "value": true,
      "severity": "critical"
     },
     {
