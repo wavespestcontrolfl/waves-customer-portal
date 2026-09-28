@@ -931,6 +931,33 @@ describe('OpenAI provider-failure fallback (mid-call switch to Claude)', () => {
     }
   });
 
+  test('a round whose streamed send already failed is not retried on Claude — the socket cannot deliver speech', async () => {
+    const savedRenderer = process.env.VOICE_RELAY_RENDERER;
+    process.env.VOICE_RELAY_RENDERER = 'stream';
+    try {
+      process.env.GATE_VOICE_RELAY_OPENAI_INBOUND = 'true';
+      process.env.VOICE_RELAY_INBOUND_MODEL = LUNA;
+      global.fetch = jest.fn(async () => ({
+        ok: true, status: 200,
+        body: (async function* gen() {
+          yield `data: ${JSON.stringify({ type: 'response.output_item.added', item: { type: 'message' } })}\n\n`;
+          yield `data: ${JSON.stringify({ type: 'response.output_text.delta', delta: 'One moment please. ' })}\n\n`;
+          yield `data: ${JSON.stringify({ type: 'error', error: { code: 'stream_broke' } })}\n\n`;
+        }()),
+      }));
+      mockAnthropicScriptedMessages.push({ content: [{ type: 'text', text: 'Into a dead socket.' }], stop_reason: 'end_turn' });
+      const sent = [];
+      const convo = new RelayConversation({ callSid: 'CA-fallback-sendfail', from: '+19415551234', send: (t) => { sent.push(t); return false; } }); // every send undelivered
+      await convo.handlePrompt('hello?');
+
+      expect(mockAnthropicStreamCalls).toHaveLength(0); // no Claude retry
+      expect(convo._modelSwitch).toMatchObject({ from: LUNA }); // the switch still stands
+      expect(convo._modelFailures).toBe(1); // the ordinary failure path ran
+    } finally {
+      if (savedRenderer === undefined) delete process.env.VOICE_RELAY_RENDERER; else process.env.VOICE_RELAY_RENDERER = savedRenderer;
+    }
+  });
+
   test('a superseded socket never spends a Claude retry — it ends as superseded', async () => {
     process.env.GATE_VOICE_RELAY_OPENAI_INBOUND = 'true';
     process.env.VOICE_RELAY_INBOUND_MODEL = LUNA;
@@ -959,7 +986,7 @@ describe('OpenAI provider-failure fallback (mid-call switch to Claude)', () => {
         const convo = new RC({ callSid: 'CA-fallback-attr', from: '+19415551234', send: () => {} });
         expect(convo._provider).toBe('openai');
         expect(convo._modelFallbackReason).toBeNull();
-        convo._switchToClaudeFallback('provider_error', 1);
+        convo._switchToClaudeFallback('provider_error', { turn: 1 });
         expect(convo._versionStamps().model_fallback_reason).toBe('unknown_shared_model:VOICE_RELAY_MODEL=not-a-real-model');
       } finally {
         if (saved === undefined) delete process.env.VOICE_RELAY_MODEL; else process.env.VOICE_RELAY_MODEL = saved;
@@ -1036,7 +1063,8 @@ describe('OpenAI provider-failure fallback (mid-call switch to Claude)', () => {
       // Hold the filler's flush step open so the round is still settling
       // after the timeout has fired.
       let releaseCheck;
-      convo._sessionSuperseded = () => new Promise((resolve) => { releaseCheck = resolve; });
+      // (Later ownership checks — the pre-retry one — answer at once.)
+      convo._sessionSuperseded = () => (releaseCheck ? Promise.resolve(false) : new Promise((resolve) => { releaseCheck = resolve; }));
       const run = convo.handlePrompt('hello?');
       for (let i = 0; i < 20; i++) await Promise.resolve();
       jest.advanceTimersByTime(20000); // STREAM_TIMEOUT_MS — the timer aborts the controller

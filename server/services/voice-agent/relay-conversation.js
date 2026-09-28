@@ -2958,15 +2958,9 @@ class RelayConversation {
       if (!this._promises.has(p.kind)) this._promises.set(p.kind, { verdict: p.verdict === true, expectation: p.expectation || null, at: p.at ? new Date(p.at) : null });
     }
     // An earlier leg already switched this call from OpenAI to Claude (codex
-    // r1 P2 on #5209): the switch is once per CALL, so this leg stays on
-    // Claude instead of returning to the provider that failed, and carries
-    // the earlier record forward in its own stamps. Applied before this
-    // leg's first model round (_runLoop awaits _resumeReady first).
-    if (state.modelSwitch) {
-      if (this._provider === 'openai') this._pinClaudeFallback();
-      this._modelSwitch ||= state.modelSwitch;
-      if (this._currentTurn) this._currentTurn.effort = this._stampedEffort;
-    }
+    // r1 P2 on #5209) — applied before this leg's first model round
+    // (_runLoop awaits _resumeReady first).
+    if (state.modelSwitch) this._adoptEarlierSwitch(state.modelSwitch);
     // A segment may reveal its captured lead only after this leg booked.
     // Repair that existing card just as capture_lead and the capture floor do.
     if (this._leadId && this._bookingRequested) {
@@ -3195,10 +3189,13 @@ class RelayConversation {
    * is mutated mid-call. Called at most once per call (see
    * _canSwitchToClaudeFallback).
    */
-  _switchToClaudeFallback(reason, turn) {
+  _switchToClaudeFallback(reason, stat) {
     const from = this.model;
     this._pinClaudeFallback();
-    this._modelSwitch = { from, to: this.model, reason, turn: Number.isFinite(turn) ? turn : null };
+    this._modelSwitch = { from, to: this.model, reason, turn: Number.isFinite(stat.turn) ? stat.turn : null };
+    stat.modelSwitched = true;
+    stat.effort = this._stampedEffort; // the turn's reply now comes from Claude
+    if (reason === 'stream_timeout') stat.timedOut = true; // the caller still waited out the timeout, rescued or not
     logger.warn(`[voice-relay] provider-failure fallback callSid=${maskSid(this.callSid)} reason=${reason} from=${from} to=${this.model}`);
     // Stamped on the call row the moment it happens (codex r2 P2 on #5209):
     // a reconnect leg can start before this socket's close appends its
@@ -3212,6 +3209,19 @@ class RelayConversation {
         logger.warn(`[voice-relay] model switch stamp failed callSid=${maskSid(this.callSid)}: ${err.message}`);
       });
     }
+  }
+
+  /**
+   * A reconnected leg of a call an earlier leg already switched: the switch
+   * is once per CALL, so this leg runs on the same shared-chain Claude model
+   * for the rest of the call instead of returning to the provider that
+   * failed, and carries the earlier record forward in its own stamps (this
+   * leg's own record wins if it somehow switched first).
+   */
+  _adoptEarlierSwitch(earlier) {
+    this._pinClaudeFallback();
+    this._modelSwitch ||= earlier;
+    if (this._currentTurn) this._currentTurn.effort = this._stampedEffort;
   }
 
   /**
@@ -3236,192 +3246,176 @@ class RelayConversation {
   }
 
   /**
+   * One model call for the current round: a fresh AbortController, stream
+   * state, and STREAM_TIMEOUT_MS timer, the request built from this
+   * session's CURRENT pins (so a retry after a provider switch runs on the
+   * new provider's client), and the turn's model-time stats. Never throws:
+   * resolves `{ msg, streamState }` on a completed call, or `{ err,
+   * streamState, timedOut }` — `_runModelRound` decides what a failure
+   * becomes.
+   */
+  async _modelAttempt(stat) {
+    const client = clientFor(this._provider);
+    this._controller = new AbortController();
+    // PR C: fresh per attempt, never read outside it — see _newStreamState.
+    const streamState = this.renderer === 'stream' ? this._newStreamState(this._controller.signal) : null;
+    // Bound the model stream: without this a hung upstream call would pin the
+    // serialized turn chain open with no recovery. On timeout we abort the
+    // same controller barge-in uses, then surface a graceful reprompt.
+    let timedOut = false;
+    const streamTimer = setTimeout(() => {
+      timedOut = true;
+      try { this._controller.abort(); } catch { /* no-op */ }
+    }, STREAM_TIMEOUT_MS);
+    const modelStartAt = now();
+    stat.rounds += 1; // an ATTEMPT — a timed-out, aborted, or switched-and-retried call is still a round
+    try {
+      const stream = client.messages.stream(
+        {
+          model: this.model,
+          // Thinking-always-on ids reject `thinking: { type: 'disabled' }`
+          // and spend from max_tokens before the reply — raise the cap by
+          // the same registry floor `anthropic-wire.js` uses elsewhere so
+          // thinking cannot starve the spoken reply. Every other model's
+          // request is byte-identical to before (this._thinkingAlwaysOn is
+          // false for all of them, sandbox or not).
+          max_tokens: this._thinkingAlwaysOn ? anthropicMaxTokens(this.model, MAX_TOKENS) : MAX_TOKENS,
+          system: this._systemBlocks,
+          ...(this._thinkingAlwaysOn ? {} : { thinking: { type: 'disabled' } }),
+          // LIVE PHONE CALL. The default effort is `high`, which buys depth
+          // this lane cannot spend: every extra second of deliberation is dead
+          // air on an open line, and the work here is short receptionist turns
+          // driven by tools, not reasoning. `low` is the right end of the
+          // ladder for that.
+          // Omitted entirely for models that reject it (voiceEffortFor).
+          ...(this._effort ? { output_config: { effort: this._effort } } : {}),
+          tools: this._tools,
+          messages: this.messages,
+        },
+        { signal: this._controller.signal }
+      );
+      // First-token latency (test doubles expose only finalMessage). The
+      // first streamed CONTENT BLOCK, not the first text event: a round that
+      // opens with tool_use has produced output, and stamping only text
+      // would charge the tool's latency to the model (codex r9 P2). The
+      // turn keeps its FIRST stamp, not the last round's.
+      stream.on?.('streamEvent', (ev) => {
+        if (ev?.type !== 'content_block_start') return;
+        stat.firstTokenAt ??= now();
+        // PR C: the moment ANY tool call starts, stop flushing further
+        // progressive text this round — belt-and-braces alongside the
+        // widened commitment-or-success hold list (relay-stream-renderer.js):
+        // text already streamed before this point has already gone out as
+        // its own content block's deltas (this cannot un-send it), but any
+        // trailing text after a tool_use block waits for finalize, where
+        // the write-tool suppression check applies.
+        if (streamState && ev.content_block?.type === 'tool_use') streamState.holding = true;
+      });
+      // PR C: progressive sends — see _onStreamTextDelta for the chunk/hold
+      // policy. Only wired when this session pinned the stream renderer;
+      // the block path below is otherwise untouched.
+      if (streamState) stream.on?.('text', (delta) => this._onStreamTextDelta(streamState, delta, stat));
+      return { msg: await stream.finalMessage(), streamState };
+    } catch (err) {
+      return { err, streamState, timedOut };
+    } finally {
+      clearTimeout(streamTimer);
+      // Every path — success, timeout, barge-in abort, error — is model time.
+      stat.modelMs += now() - modelStartAt;
+    }
+  }
+
+  /**
    * One model round, WITH the mid-call OpenAI provider-failure fallback
-   * (see _canSwitchToClaudeFallback / _switchToClaudeFallback above): on an
-   * eligible OpenAI-round failure — a request error, a non-2xx, a stream
-   * error, or the STREAM_TIMEOUT_MS timeout; NEVER a caller barge-in abort
-   * (handled first, unchanged) — that has not yet reached the caller's ear
-   * this round (`streamState.entry` only exists once the stream renderer has
-   * actually sent a piece — see _flushStreamChunk; a block-renderer round
-   * never speaks before `finalMessage()` resolves, so it is always eligible
-   * on that count), this switches the session to Claude and retries the
-   * SAME round once — a fresh AbortController and stream, rebuilt with the
-   * now-pinned model/provider/effort/thinking, over the SAME `this.messages`
-   * (already stripped of `_openai` extras) — before the round is allowed to
-   * fail for real. A round that already sent something this attempt (the
-   * `spokeAlready` check) or a second failure after the switch both fall
-   * straight into the ordinary failure/handoff handling instead — one
-   * switch per call, and a round that already spoke is never replayed from
-   * the top (that would double-speak the caller).
+   * (see _canSwitchToClaudeFallback / _switchToClaudeFallback above). A
+   * caller barge-in mid-stream is never a provider failure: it closes the
+   * round as before. Any other failed call on an OpenAI session still
+   * eligible (one switch per call) switches the session to Claude, then:
+   *   - ends the round as superseded when a replacement socket owns the call
+   *     (never spend a Claude retry on a stale socket — codex r2);
+   *   - ends it as an interruption when the caller barged in or hung up at
+   *     any point since the call started (a timeout already aborted the
+   *     controller, so `_interruptSeq` is the signal);
+   *   - otherwise retries the SAME round once on Claude, over the same
+   *     `this.messages` (already cleaned of OpenAI-only history) — but only
+   *     when nothing of the round reached the caller or failed trying
+   *     (`streamState.entry` exists once a piece was sent; `failed` once a
+   *     send failed — codex r3), so a retry can never double-speak or talk
+   *     into a dead socket.
+   * A round that is not retried, or a retried call that fails too, takes the
+   * ordinary failure path: failure copy or the provider-failure handoff. The
+   * switch itself always stands for the rest of the call.
    *
    * Returns `{ msg, streamState }` on a completed round, or `null` once this
-   * method has fully handled the round's end itself (barge-in close, or
-   * failure copy/handoff already spoken) — the caller (`_runLoop`) must
-   * return immediately on `null`.
+   * method has fully handled the round's end itself — the caller
+   * (`_runLoop`) must return immediately on `null`.
    */
   async _runModelRound(stat, toolCtx) {
-    for (let attempt = 0; attempt < 2; attempt++) {
-      // Re-derived every attempt (never hoisted above the loop): a switch on
-      // attempt 0's catch repins this._provider before `continue`, and
-      // attempt 1 must run on the NEW provider's client, not a captured
-      // reference to the old one.
-      const client = clientFor(this._provider);
-      this._controller = new AbortController();
+    for (;;) {
       const interruptSeqAtStart = this._interruptSeq;
-      // A retry must measure its own first token, not the failed attempt's.
+      // A retry must measure its own first token, not the failed call's.
       const firstTokenAtStart = stat.firstTokenAt;
-      // PR C: fresh per attempt, never read outside it — see _newStreamState.
-      const streamState = this.renderer === 'stream' ? this._newStreamState(this._controller.signal) : null;
-      // Bound the model stream: without this a hung upstream call would pin the
-      // serialized turn chain open with no recovery. On timeout we abort the
-      // same controller barge-in uses, then surface a graceful reprompt.
-      let streamTimedOut = false;
-      const streamTimer = setTimeout(() => {
-        streamTimedOut = true;
-        try { this._controller.abort(); } catch { /* no-op */ }
-      }, STREAM_TIMEOUT_MS);
-      const modelStartAt = now();
-      stat.rounds += 1; // an ATTEMPT — a timed-out, aborted, or switched-and-retried round is still a round
-      try {
-        const stream = client.messages.stream(
-          {
-            model: this.model,
-            // Thinking-always-on ids reject `thinking: { type: 'disabled' }`
-            // and spend from max_tokens before the reply — raise the cap by
-            // the same registry floor `anthropic-wire.js` uses elsewhere so
-            // thinking cannot starve the spoken reply. Every other model's
-            // request is byte-identical to before (this._thinkingAlwaysOn is
-            // false for all of them, sandbox or not).
-            max_tokens: this._thinkingAlwaysOn ? anthropicMaxTokens(this.model, MAX_TOKENS) : MAX_TOKENS,
-            system: this._systemBlocks,
-            ...(this._thinkingAlwaysOn ? {} : { thinking: { type: 'disabled' } }),
-            // LIVE PHONE CALL. The default effort is `high`, which buys depth
-            // this lane cannot spend: every extra second of deliberation is dead
-            // air on an open line, and the work here is short receptionist turns
-            // driven by tools, not reasoning. `low` is the right end of the
-            // ladder for that.
-            // Omitted entirely for models that reject it (voiceEffortFor).
-            ...(this._effort ? { output_config: { effort: this._effort } } : {}),
-            tools: this._tools,
-            messages: this.messages,
-          },
-          { signal: this._controller.signal }
-        );
-        // First-token latency (test doubles expose only finalMessage). The
-        // first streamed CONTENT BLOCK, not the first text event: a round that
-        // opens with tool_use has produced output, and stamping only text
-        // would charge the tool's latency to the model (codex r9 P2). The
-        // turn keeps its FIRST stamp, not the last round's.
-        stream.on?.('streamEvent', (ev) => {
-          if (ev?.type !== 'content_block_start') return;
-          stat.firstTokenAt ??= now();
-          // PR C: the moment ANY tool call starts, stop flushing further
-          // progressive text this round — belt-and-braces alongside the
-          // widened commitment-or-success hold list (relay-stream-renderer.js):
-          // text already streamed before this point has already gone out as
-          // its own content block's deltas (this cannot un-send it), but any
-          // trailing text after a tool_use block waits for finalize, where
-          // the write-tool suppression check applies.
-          if (streamState && ev.content_block?.type === 'tool_use') streamState.holding = true;
-        });
-        // PR C: progressive sends — see _onStreamTextDelta for the chunk/hold
-        // policy. Only wired when this session pinned the stream renderer;
-        // the block path below is otherwise untouched.
-        if (streamState) stream.on?.('text', (delta) => this._onStreamTextDelta(streamState, delta, stat));
-        const msg = await stream.finalMessage();
+      const { msg, err, streamState, timedOut } = await this._modelAttempt(stat);
+      if (msg) {
         this._modelFailures = 0; // a completed round resets the streak
         this._clearedFailures.model = true;
         return { msg, streamState };
-      } catch (err) {
-        // PR C stream-renderer piece (flushChain await + interrupted/failed
-        // close) lives in `_closeStreamedRoundOnCatch` — see its doc comment
-        // for why the flush chain must be awaited before either branch below
-        // touches `streamState.entry`. A no-op for a block-renderer round.
-        if (!streamTimedOut && this._controller.signal.aborted) {
-          // Barge-in caught here (mid-model-stream, before finalMessage()
-          // resolved): the same chokepoint every other early exit uses —
-          // there is no `msg` (the model call never resolved), so only the
-          // sent prefix (if any) is pushed, no tool_use blocks to pair. Never
-          // eligible for the provider-failure switch — a caller-initiated
-          // abort is not a provider failure.
+      }
+      // PR C stream-renderer piece (flushChain await + interrupted/failed
+      // close) lives in `_closeStreamedRoundOnCatch` — see its doc comment
+      // for why the flush chain must be awaited before either branch below
+      // touches `streamState.entry`. A no-op for a block-renderer round.
+      if (!timedOut && this._controller.signal.aborted) {
+        // Barge-in caught mid-model-stream, before finalMessage() resolved:
+        // the same chokepoint every other early exit uses — there is no
+        // `msg`, so only the sent prefix (if any) is pushed, no tool_use
+        // blocks to pair.
+        await this._closeStreamedRoundOnCatch(streamState, 'interrupted');
+        return null;
+      }
+      // The last text-delta's flush is chained async: await it before
+      // reading `entry`/`failed`, or a send still in flight reads as "never
+      // spoke" and wrongly retries.
+      if (streamState) await streamState.flushChain;
+      if (this._canSwitchToClaudeFallback()) {
+        this._switchToClaudeFallback(timedOut ? 'stream_timeout' : 'provider_error', stat);
+        const retryable = !streamState || !(streamState.entry || streamState.failed);
+        if (retryable && await this._sessionSuperseded().catch(() => false)) {
+          logger.warn(`[voice-relay] provider-failure retry skipped — session superseded callSid=${this.callSid}`);
+          await this._closeStreamedRoundOnCatch(streamState, 'interrupted');
+          this._ending = true;
+          try { this._endSession?.({ reason: 'superseded', captured: this.leadCaptured }); } catch { /* closing */ }
+          return null;
+        }
+        if (this.ended || this._interruptSeq !== interruptSeqAtStart) {
           await this._closeStreamedRoundOnCatch(streamState, 'interrupted');
           return null;
         }
-        // The provider-failure fallback: an OpenAI session's first attempt at
-        // this round, still eligible (one switch per call). The switch
-        // itself happens whether or not this round already spoke — the
-        // session must run on Claude from here on regardless — but the
-        // RETRY-INLINE only happens when nothing of this round has reached
-        // the caller's ear yet. `streamState && streamState.entry` is the
-        // same "has this round actually spoken" signal _flushStreamChunk
-        // sets — null/absent means nothing reached Twilio yet, so retrying
-        // from the top cannot double-speak; present means it already did,
-        // so this round still fails normally (spoken failure copy / handoff
-        // below) and the switch stands for the NEXT round instead. The last
-        // text-delta event's own flush is chained async (`state.flushChain`),
-        // so — same reason `_closeStreamedRoundOnCatch` awaits it below —
-        // this must be awaited FIRST or a flush still in flight reads as
-        // "never spoke" and wrongly retries inline.
-        if (streamState) await streamState.flushChain;
-        const spokeAlready = Boolean(streamState && streamState.entry);
-        if (attempt === 0 && this._canSwitchToClaudeFallback()) {
-          stat.modelSwitched = true;
-          if (streamTimedOut) stat.timedOut = true; // the caller still waited out the timeout, rescued or not
-          this._switchToClaudeFallback(streamTimedOut ? 'stream_timeout' : 'provider_error', stat.turn);
-          stat.effort = this._stampedEffort; // the turn's reply now comes from Claude
-          // A barge-in or hang-up any time during this attempt — including
-          // after a stream timeout had already aborted its controller, during
-          // the flushChain await above, or during the ownership check below —
-          // means the caller has moved on: the round ends as an interruption
-          // rather than answering the old prompt on Claude. The switch stands.
-          const movedOn = () => this.ended || this._interruptSeq !== interruptSeqAtStart;
-          // A replacement socket that took the call claim while the failed
-          // request was in flight (codex r2 P2): never spend a Claude retry
-          // on the stale socket — end it the way a superseded finalize does.
-          // The block renderer has no progressive check of its own, so this
-          // re-asks the same ownership question before any retry.
-          if (!spokeAlready && !movedOn() && ((streamState && streamState.withheld) || await this._sessionSuperseded().catch(() => false))) {
-            logger.warn(`[voice-relay] provider-failure retry skipped — session superseded callSid=${this.callSid}`);
-            await this._closeStreamedRoundOnCatch(streamState, 'interrupted');
-            this._ending = true;
-            try { if (this._endSession) this._endSession({ reason: 'superseded', captured: this.leadCaptured }); } catch { /* closing */ }
-            return null;
-          }
-          if (movedOn()) {
-            await this._closeStreamedRoundOnCatch(streamState, 'interrupted');
-            return null;
-          }
-          if (!spokeAlready) {
-            stat.firstTokenAt = firstTokenAtStart;
-            continue; // retry THIS round once, now pinned to Claude — `finally` below still runs first
-          }
+        if (retryable) {
+          stat.firstTokenAt = firstTokenAtStart;
+          continue;
         }
-        stat.timedOut = stat.timedOut || streamTimedOut;
-        const failure = streamTimedOut ? { level: 'warn', copy: 'streamTimeout' } : { level: 'error', copy: 'modelError' };
-        logger[failure.level]( `[voice-relay] model round failed callSid=${maskSid(this.callSid)} timeout=${streamTimedOut}: ${err.message}`);
-        this._modelFailures += 1;
-        // PR C: a partial streaming utterance is still "open" on Twilio's side
-        // (it has only ever seen last:false frames) — close it out with a
-        // last:true empty token so playback finalizes, WITHOUT resending
-        // anything already sent, and record exactly that sent prefix as its
-        // own assistant message (role alternation stays valid — the very
-        // next thing pushed is either the caller's next `user` turn or this
-        // same round's tool_result user turn, never another assistant
-        // message back to back) — same chokepoint as every other early
-        // exit; there is no `msg` here either (the model call itself is what
-        // failed), so no tool_use blocks to pair. The failure copy below is
-        // spoken but, like every `say()` call, never enters `this.messages`
-        // — unchanged, existing behavior for both renderers.
-        await this._closeStreamedRoundOnCatch(streamState, 'failed');
-        if (!(await this._maybeHandoffForFailure(toolCtx))) this.say(require('./relay-language').copy(failure.copy, this.language));
-        return null;
-      } finally {
-        clearTimeout(streamTimer);
-        // Every path — success, timeout, barge-in abort, error — is model time.
-        stat.modelMs += now() - modelStartAt;
       }
+      stat.timedOut = stat.timedOut || timedOut;
+      const failure = timedOut ? { level: 'warn', copy: 'streamTimeout' } : { level: 'error', copy: 'modelError' };
+      logger[failure.level]( `[voice-relay] model round failed callSid=${maskSid(this.callSid)} timeout=${timedOut}: ${err.message}`);
+      this._modelFailures += 1;
+      // PR C: a partial streaming utterance is still "open" on Twilio's side
+      // (it has only ever seen last:false frames) — close it out with a
+      // last:true empty token so playback finalizes, WITHOUT resending
+      // anything already sent, and record exactly that sent prefix as its
+      // own assistant message (role alternation stays valid — the very
+      // next thing pushed is either the caller's next `user` turn or this
+      // same round's tool_result user turn, never another assistant
+      // message back to back) — same chokepoint as every other early
+      // exit; there is no `msg` here either (the model call itself is what
+      // failed), so no tool_use blocks to pair. The failure copy below is
+      // spoken but, like every `say()` call, never enters `this.messages`
+      // — unchanged, existing behavior for both renderers.
+      await this._closeStreamedRoundOnCatch(streamState, 'failed');
+      if (!(await this._maybeHandoffForFailure(toolCtx))) this.say(require('./relay-language').copy(failure.copy, this.language));
+      return null;
     }
-    return null; // unreachable — the loop above always returns or continues once
   }
 
   async _runLoop(callerText = null) {
