@@ -232,6 +232,69 @@ test('invoices carry the deposit credit the void would restore', async () => {
   expect(impact.invoices[0].deposit_credit).toBe(75);
 });
 
+describe('identity_fingerprint (Codex round-2 P1: pin the COMPLETE appointment identity, not just the display facts)', () => {
+  const noCard = () => {
+    mockCardHoldPreview.mockResolvedValue({ held: false, feeApplies: false, rule: { code: 'no_card' } });
+    mockApptCardPreview.mockResolvedValue({ secured: false, feeApplies: false, rule: { code: 'no_card' } });
+  };
+
+  test('is present and stable across two reads of the identical row', async () => {
+    noCard();
+    const a = await computeCancelAppointmentImpact('svc-synthetic-1');
+    const b = await computeCancelAppointmentImpact('svc-synthetic-1');
+    expect(typeof a.identity_fingerprint).toBe('string');
+    expect(a.identity_fingerprint.length).toBeGreaterThan(0);
+    expect(a.identity_fingerprint).toBe(b.identity_fingerprint);
+  });
+
+  // Codex round-2 P1: the display facts alone (status/scheduled_date/
+  // service_type/customer_name) can read IDENTICAL for a same-day window
+  // move or a repoint to a same-named customer — this fingerprint is what
+  // actually changes, so cancelImpactsMatch (which compares the whole
+  // impact object) catches it.
+  test('changes when the window moves (same date, same status)', async () => {
+    noCard();
+    const before = await computeCancelAppointmentImpact('svc-synthetic-1');
+    mockAppointmentRow = { ...mockAppointmentRow, window_start: '2026-10-02T13:00:00.000Z', window_end: '2026-10-02T15:00:00.000Z' };
+    const after = await computeCancelAppointmentImpact('svc-synthetic-1');
+    expect(after.identity_fingerprint).not.toBe(before.identity_fingerprint);
+    // The display facts (what the card actually PRINTS) are unaffected —
+    // this is exactly the case a text-only pin would miss.
+    expect(after.appointment).toEqual(before.appointment);
+  });
+
+  test('changes when the visit is repointed to a different customer_id (identically named account)', async () => {
+    noCard();
+    mockAppointmentRow = { ...mockAppointmentRow, customer_id: 'cust-original' };
+    const before = await computeCancelAppointmentImpact('svc-synthetic-1');
+    mockAppointmentRow = { ...mockAppointmentRow, customer_id: 'cust-repointed' };
+    const after = await computeCancelAppointmentImpact('svc-synthetic-1');
+    expect(after.identity_fingerprint).not.toBe(before.identity_fingerprint);
+    // Same displayed name both times (first_name/last_name unchanged) — the
+    // card would print identically; only the fingerprint catches the repoint.
+    expect(after.appointment.customer_name).toBe(before.appointment.customer_name);
+  });
+
+  test('changes when the technician changes', async () => {
+    noCard();
+    mockAppointmentRow = { ...mockAppointmentRow, technician_id: 'tech-1' };
+    const before = await computeCancelAppointmentImpact('svc-synthetic-1');
+    mockAppointmentRow = { ...mockAppointmentRow, technician_id: 'tech-2' };
+    const after = await computeCancelAppointmentImpact('svc-synthetic-1');
+    expect(after.identity_fingerprint).not.toBe(before.identity_fingerprint);
+  });
+
+  test('does NOT change on a volatile/display-only re-read with nothing actually different', async () => {
+    noCard();
+    const a = await computeCancelAppointmentImpact('svc-synthetic-1');
+    // A fresh row object, same values — proves the hash isn't accidentally
+    // keyed on object identity or insertion order.
+    mockAppointmentRow = { ...mockAppointmentRow };
+    const b = await computeCancelAppointmentImpact('svc-synthetic-1');
+    expect(a.identity_fingerprint).toBe(b.identity_fingerprint);
+  });
+});
+
 describe('customer_notice (Codex round-1 P1: disclose, never silently suppress, the real cancellation-notice hook)', () => {
   const noCard = () => {
     mockCardHoldPreview.mockResolvedValue({ held: false, feeApplies: false, rule: { code: 'no_card' } });
@@ -320,6 +383,38 @@ describe('card_cancel_refusals (owner ruling 2026-09-28: the bar cancels simple 
     mockUnresolvedAfterVoid.mockResolvedValue(true);
     const impact = await computeCancelAppointmentImpact('svc-synthetic-1');
     expect(impact.card_cancel_refusals).toEqual(['card_fee_agreement', 'invoice_holds_money']);
+  });
+
+  // Codex round-2 P1, owner's simple-visits ruling: the commit's own
+  // follow-through voids/reverses only the PINNED set the card showed, but
+  // inspection-credit.js's independent HOURLY sweep
+  // (sweepInspectionCreditRedemptions) later re-derives ANY stale redeemed
+  // offer on a non-live booking and calls voidOpenInvoicesForCancelledService
+  // UNPINNED — refuse outright rather than let that sweep touch a
+  // bar-cancelled booking at all.
+  test.each([
+    ['reversed', [{ id: 'offer-1', amount: 75, would_reverse: true, deferred: false }]],
+    ['deferred to office review', [{ id: 'offer-1', amount: 75, would_reverse: false, deferred: true }]],
+    ['rebound to a live alternate booking', [{ id: 'offer-1', amount: 75, would_reverse: false, deferred: false }]],
+  ])('a redeemed inspection-credit offer (%s) is refused even with an otherwise plain visit', async (_label, offers) => {
+    noCard();
+    mockCreditPreview.mockResolvedValue(offers);
+    const impact = await computeCancelAppointmentImpact('svc-synthetic-1');
+    expect(impact.card_cancel_refusals).toEqual(['inspection_credit']);
+  });
+
+  test('no redeemed offer at all (null): no inspection_credit refusal', async () => {
+    noCard();
+    mockCreditPreview.mockResolvedValue(null);
+    const impact = await computeCancelAppointmentImpact('svc-synthetic-1');
+    expect(impact.card_cancel_refusals).toEqual([]);
+  });
+
+  test('inspection_credit sorts alongside the other refusal codes', async () => {
+    mockCardHoldPreview.mockResolvedValue({ held: true, feeApplies: false, feeAmount: 49, rule: { code: 'outside_window' } });
+    mockCreditPreview.mockResolvedValue([{ id: 'offer-1', amount: 75, would_reverse: true, deferred: false }]);
+    const impact = await computeCancelAppointmentImpact('svc-synthetic-1');
+    expect(impact.card_cancel_refusals).toEqual(['card_fee_agreement', 'inspection_credit']);
   });
 });
 

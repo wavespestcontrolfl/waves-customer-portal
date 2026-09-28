@@ -1129,38 +1129,34 @@ const STATUS_ROUTE_ALLOWED_TARGETS = new Set([
 // (the 2026-08-05 fix, GATE_CANCEL_NOTICE_HOOK, exists precisely so a
 // cancellation surface can't go silent on the customer).
 //
-// Mirrors only the conditions that are UNCONDITIONAL and evidence-
-// independent — never the delivery-evidence check itself (whether a prior
-// reminder/confirmation already landed only decides WHEN the notice sends:
-// right away, or later via the 15-minute/72-hour sweep in
-// appointment-reminders.js#sweepStaleCancellationClaims — never whether it
-// CAN). Returning 'none' is reserved for the two cases where the real hook
-// truly never engages at all:
+// Mirrors only the conditions that are UNCONDITIONAL, evidence-independent,
+// AND cannot change between this preview and the moment the cancel actually
+// commits (Codex round-2 P1: a "merged-slot survivor" is neither — another
+// admin can cancel that sibling visit between the card's proposal-time
+// preview, or even between /confirm-action's fresh drift recheck and this
+// visit's own transition transaction, and the real hook would then text.
+// A pin that could go stale inside that window must never resolve to
+// 'none'). Returning 'none' is reserved for the two cases that are true at
+// this instant and CANNOT become false before commit:
 //   - the gate is off (no claim is ever minted), or
-//   - no `appointment_reminders` row exists for this visit (the in-trx
-//     claim's UPDATE matches zero rows, so processCancelNoticeClaim's own
-//     guard — no claim, no late-claim, no caller-claim — returns
-//     immediately and no worker ever runs), or
-//   - a live "merged-slot survivor" already covers this customer at the
-//     same appointment_time (the in-trx claim, the post-commit worker's
-//     caller-repair path, and the sweep's settlement all independently
-//     stamp this case terminally 'suppressed' before any evidence check).
-// Every other case is 'may_send': a 'pending' claim is minted, and the
-// hook sends as soon as delivery evidence exists (now, or up to 72 hours
-// later) — this function never claims to know that in advance, so a card
-// showing 'may_send' can never under-disclose a real send.
+//   - no `appointment_reminders` row exists for this visit at all (the
+//     in-trx claim's UPDATE matches zero rows, so processCancelNoticeClaim's
+//     own guard — no claim, no late-claim, no caller-claim — returns
+//     immediately and no worker ever runs; nothing can make a row appear).
+// Every other case — including a live merged-slot survivor existing RIGHT
+// NOW — is 'may_send': a 'pending' claim is minted, and the hook sends as
+// soon as delivery evidence exists (now, or up to 72 hours later), unless a
+// survivor is still live at COMMIT time (its own separate, real-time check).
+// This function never claims to know WHEN a text goes out, or whether a
+// currently-live survivor will still be live at commit — so a card showing
+// 'may_send' can never under-disclose a real send.
 async function previewCancellationNoticeVerdict(scheduledServiceId) {
   const { isEnabled } = require('../config/feature-gates');
   if (!isEnabled('cancelNoticeHook')) return 'none';
   const own = await db('appointment_reminders')
     .where({ scheduled_service_id: scheduledServiceId })
-    .first('customer_id', 'appointment_time');
-  if (!own) return 'none';
-  const survivor = await db('appointment_reminders')
-    .where({ customer_id: own.customer_id, appointment_time: own.appointment_time, cancelled: false })
-    .whereNot('scheduled_service_id', scheduledServiceId)
     .first('id');
-  if (survivor) return 'none';
+  if (!own) return 'none';
   return 'may_send';
 }
 

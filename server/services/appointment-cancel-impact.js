@@ -52,9 +52,24 @@ async function loadAppointmentFacts(scheduledServiceId) {
     .leftJoin('customers as c', 's.customer_id', 'c.id')
     .where('s.id', scheduledServiceId)
     .first('s.id', 's.status', 's.scheduled_date', 's.service_type', 'c.first_name', 'c.last_name',
-      's.is_recurring', 's.recurring_parent_id', 's.is_callback', 's.followup_included');
+      's.is_recurring', 's.recurring_parent_id', 's.is_callback', 's.followup_included',
+      // Full appointment identity (Codex round-2 P1): the display facts
+      // below (status/scheduled_date/service_type/customer_name) are NOT
+      // enough to pin — a same-day reschedule that keeps 'confirmed' and
+      // the SAME date, or a repoint to a different customer who happens to
+      // share a name, would produce an IDENTICAL impact and slip past the
+      // commit-time drift check. These extra columns feed
+      // normalizeAppointmentPin/appointmentPinFingerprint below — the SAME
+      // identity fingerprint reschedule_appointment's own proposal pin
+      // already trusts (proposal-pins.js), reused rather than a second
+      // definition of "this appointment" that could drift from it.
+      's.customer_id', 's.time_window', 's.window_start', 's.window_end',
+      's.estimated_duration_minutes', 's.technician_id', 's.visit_id',
+      's.track_state', 's.en_route_at', 's.arrived_at', 's.actual_start_time',
+      's.check_in_time', 's.track_sms_sent_at', 's.arrival_sms_sent_at');
   if (!row) return null;
   const customerName = [row.first_name, row.last_name].filter(Boolean).join(' ').trim() || null;
+  const { normalizeAppointmentPin, appointmentPinFingerprint } = require('./intelligence-bar/proposal-pins');
   return {
     facts: {
       id: row.id,
@@ -63,6 +78,11 @@ async function loadAppointmentFacts(scheduledServiceId) {
       service_type: row.service_type || null,
       customer_name: customerName,
     },
+    // A hash, not the raw pin object: matches every other pin in this
+    // codebase (reschedule/price-approval/email), and keeps this shape
+    // small — the fingerprint is what the drift check needs, not a second
+    // copy of every field's current value.
+    identityFingerprint: appointmentPinFingerprint(normalizeAppointmentPin(row)),
     row,
   };
 }
@@ -113,7 +133,7 @@ function feeRailClear(fee) {
 // only when none of these apply; each is a cancel side effect the card does
 // not pin, so the visit is cancelled from Dispatch instead. Sorted codes, so
 // the frozen impact (and its drift comparison) covers the verdict too.
-function cardCancelRefusals({ row, fee, invoices }) {
+function cardCancelRefusals({ row, fee, invoices, inspectionCreditReversal }) {
   const refusals = [];
   // Any card rail, any fee, or a card lane state that could not be read.
   if (!feeRailClear(fee)) refusals.push('card_fee_agreement');
@@ -129,6 +149,21 @@ function cardCancelRefusals({ row, fee, invoices }) {
   // state) — reusing it here means the refusal and the follow-through's own
   // office-review gate can never disagree.
   if (fee.blocked_by_invoice) refusals.push('invoice_holds_money');
+  // A redeemed inspection-credit offer — reversed, deferred to office
+  // review, OR rebound to a live alternate booking — refuses outright
+  // (Codex round-2 P1, owner's simple-visits ruling). The commit's own
+  // follow-through voids/reverses only the PINNED set the card showed, but
+  // inspection-credit.js's independent HOURLY sweep
+  // (sweepInspectionCreditRedemptions) later re-derives ANY stale redeemed
+  // offer on a non-live booking and calls voidOpenInvoicesForCancelledService
+  // UNPINNED — no card, no operator approval, no way for this lane to
+  // thread a skip flag into a cron that runs an hour later. A bar-cancelled
+  // visit with a redeemed offer left outstanding (deferred by an unresolved
+  // invoice, or a later-created/changed invoice) would let that sweep void
+  // something the operator never saw. Refusing here means the sweep never
+  // has a bar-cancelled booking to process at all — the visit cancels from
+  // Dispatch instead, where this constraint doesn't exist.
+  if (inspectionCreditReversal !== null) refusals.push('inspection_credit');
   return refusals.sort();
 }
 
@@ -143,7 +178,7 @@ function cardCancelRefusals({ row, fee, invoices }) {
 async function computeCancelAppointmentImpact(scheduledServiceId, { now = new Date() } = {}) {
   const loaded = await loadAppointmentFacts(scheduledServiceId);
   if (!loaded) return null;
-  const { facts: appointment, row } = loaded;
+  const { facts: appointment, row, identityFingerprint } = loaded;
 
   const InvoiceService = require('./invoice');
   const InspectionCredit = require('./inspection-credit');
@@ -193,8 +228,15 @@ async function computeCancelAppointmentImpact(scheduledServiceId, { now = new Da
     fee,
     invoices,
     inspection_credit_reversal: creditReversal,
-    card_cancel_refusals: cardCancelRefusals({ row, fee, invoices }),
+    card_cancel_refusals: cardCancelRefusals({ row, fee, invoices, inspectionCreditReversal: creditReversal }),
     customer_notice: customerNotice,
+    // Full appointment identity, hashed (Codex round-2 P1) — see
+    // loadAppointmentFacts above. Part of the impact object, so the
+    // existing cancelImpactsMatch drift check covers it automatically: a
+    // same-day reschedule (window change, same status/date) or a repoint
+    // to a different customer between proposal and confirm changes this
+    // hash even when every OTHER field above reads identical.
+    identity_fingerprint: identityFingerprint,
   };
 }
 

@@ -453,15 +453,28 @@ function withCacheBreakpoint(messages) {
 // invoice_holds_money (an invoice the void preview EXCLUDES — paid,
 // processing, or on a finalized statement — that would still hold money;
 // card_payment_on_invoice alone only covers a PaymentIntent on a WOULD-VOID
-// candidate) and customer_notice ('none' | 'may_send' — the existing
-// GATE_CANCEL_NOTICE_HOOK cancellation-text hook may still text the
-// customer; this card DISCLOSES that, via job-status.js's read-only
-// previewCancellationNoticeVerdict, rather than the earlier draft of this
-// lane silently claiming cancellations never contact anyone). Gate off
-// (default) is byte-identical to before this lane: every cancel_appointment
-// proposal and confirm refuses with CANCEL_NOT_CARD_CONFIRMABLE_MESSAGE,
-// and cancels happen from the Dispatch screen, which owns the waiver and
-// review controls.
+// candidate) and inspection_credit (ANY redeemed inspection-credit offer —
+// reversed, deferred, or rebound — refuses outright: inspection-credit.js's
+// independent HOURLY sweepInspectionCreditRedemptions sweep later re-voids
+// a stale redeemed offer's booking UNPINNED, no card, no way for this lane
+// to thread a skip into a cron; refusing here means it never has a
+// bar-cancelled booking to touch, Codex round-2 P1), plus customer_notice
+// ('none' | 'may_send' — the existing GATE_CANCEL_NOTICE_HOOK cancellation-
+// text hook may still text the customer; this card DISCLOSES that, via
+// job-status.js's read-only previewCancellationNoticeVerdict, rather than
+// the earlier draft of this lane silently claiming cancellations never
+// contact anyone — 'none' only for conditions that CANNOT change before
+// commit; a live merged-slot survivor is mutable, so it is never grounds
+// for 'none', Codex round-2 P1), plus identity_fingerprint (the visit's
+// FULL identity — window/customer/technician/visit-group, reusing
+// proposal-pins.js's normalizeAppointmentPin/appointmentPinFingerprint,
+// the same pin reschedule_appointment trusts — so a same-day window move
+// or a repoint to a differently-owned but identically-named customer is
+// drift too, even though the display facts alone would read identical,
+// Codex round-2 P1). Gate off (default) is byte-identical to before this
+// lane: every cancel_appointment proposal and confirm refuses with
+// CANCEL_NOT_CARD_CONFIRMABLE_MESSAGE, and cancels happen from the
+// Dispatch screen, which owns the waiver and review controls.
 const CANCEL_NOT_CARD_CONFIRMABLE_MESSAGE = 'Cancelling a visit can charge a late-cancel fee, void invoices, and reverse credits, which the confirmation card cannot pin exactly. Cancel it from the Dispatch screen (fee waiver and invoice review live there). Nothing was changed.';
 
 function ibWritesDisabled() {

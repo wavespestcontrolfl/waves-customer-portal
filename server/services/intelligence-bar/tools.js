@@ -3639,7 +3639,7 @@ async function rescheduleAppointment(input, actionContext = {}) {
 }
 
 
-const CARD_CANCEL_REFUSED_MESSAGE = 'This visit has a saved-card fee agreement, a card payment on its invoice, an invoice that would still hold money after the cancellation, an estimate deposit, or a plan make-up visit, so it can only be cancelled from the Dispatch screen. Nothing was changed.';
+const CARD_CANCEL_REFUSED_MESSAGE = 'This visit has a saved-card fee agreement, a card payment on its invoice, an invoice that would still hold money after the cancellation, a redeemed inspection-credit offer, an estimate deposit, or a plan make-up visit, so it can only be cancelled from the Dispatch screen. Nothing was changed.';
 
 // The follow-through's per-target pin for a cancel confirmed against a frozen
 // impact (see cancelAppointment); null when nothing was pinned.

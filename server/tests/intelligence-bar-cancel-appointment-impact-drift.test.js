@@ -75,6 +75,12 @@ const FROZEN = {
   invoices: [{ id: 'inv-1', invoice_number: 'WPC-2026-9001', status: 'sent', total: 89, credit_applied: 0 }],
   inspection_credit_reversal: null,
   card_cancel_refusals: [],
+  // Codex round-2 P1: the full appointment identity (window/customer/tech —
+  // see appointment-cancel-impact.js's loadAppointmentFacts), hashed. The
+  // display facts above (status/scheduled_date/service_type/customer_name)
+  // can read identical for a same-day window move or a same-named repoint —
+  // this is what actually catches it.
+  identity_fingerprint: 'fp-original',
 };
 
 beforeEach(() => {
@@ -134,6 +140,23 @@ test('a changed late-cancel fee amount is drift: REFUSED, nothing transitioned/c
 
 test('an invoice appearing that was not in the frozen preview is drift: REFUSED before commit', async () => {
   const drifted = { ...FROZEN, invoices: [...FROZEN.invoices, { id: 'inv-2', invoice_number: 'WPC-2026-9002', status: 'draft', total: 10, credit_applied: 0 }] };
+  mockComputeImpact.mockResolvedValue(drifted);
+  const result = await executeTool('cancel_appointment', {
+    appointment_id: 'svc-synthetic-1',
+    _frozen_cancellation_impact: FROZEN,
+  }, {});
+
+  expect(result.error).toMatch(/changed since this was proposed/);
+  expect(mockTransitionJobStatus).not.toHaveBeenCalled();
+});
+
+// Codex round-2 P1: a same-day window move (keeping status/date/service_type/
+// customer_name identical) or a repoint to a different customer_id that
+// happens to share a display name would otherwise slip past drift — every
+// OTHER field on the frozen impact still reads identical. Only the identity
+// fingerprint catches it.
+test('a window change or customer repoint between card and confirm is drift: REFUSED, even though every other field matches', async () => {
+  const drifted = { ...FROZEN, identity_fingerprint: 'fp-repointed' };
   mockComputeImpact.mockResolvedValue(drifted);
   const result = await executeTool('cancel_appointment', {
     appointment_id: 'svc-synthetic-1',
