@@ -1871,28 +1871,9 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // maybeAutoSend still refuses amount-bearing drafts (autonomy boundary —
     // relaxing that is a separate explicit owner call).
     //
-    // DETERMINISTIC source restriction (Codex r5+r6): the verifier treats
-    // the customer's literal words as grounding, so "I think my balance is
-    // $50" could be confirmed verbatim — and the rendered facts block
-    // CONTAINS the SMS thread, so scanning it would whitelist the
-    // customer's own figure. The whitelist is therefore built from the
-    // AUTHORITATIVE billing/estimate VALUES in context, compared numerically
-    // (so "$120" matches a $120.00 fact).
-    const centsOf = (v) => Math.round(Number(v) * 100);
-    // The monthly-membership dues are an AUTHORITATIVE account amount too
-    // (codex #3141 r1). Without them here the whitelist was built from
-    // balances, invoices and payments only, so the dues figure the facts
-    // block just published read as ungrounded, the draft was held shadow, and
-    // the monthly-lane exception this PR exists to make reachable stayed
-    // unreachable on the suggestion/auto-send path.
-    //
-    // Only what the facts actually STATE is authorized. The monthly dues come
-    // from the shared definition (codex #3141 r2, r3): the dues base whenever
-    // the monthly lane published dues, plus the total AND the fee it breaks
-    // out when the surcharge was resolved — the facts publish all three, so a
-    // draft that accurately repeats "the $2.85 credit-card fee" must not read
-    // as ungrounded. It is shared with the scheduler's fire-time
-    // revalidation because two copies of this list had already drifted.
+    // The whitelist itself (authoritative values only, never the thread text
+    // the facts block also carries; dues included) is replyQuotesUngroundedAmount
+    // above — shared with the estimate-review lane since Codex r3.
     const replyHasUngroundedAmount = replyQuotesUngroundedAmount(parsed.reply, context);
     if (replyHasUngroundedAmount) {
       logger.warn(`[sms-shadow] draft quotes an amount absent from the facts block — kept shadow (customer=${customer?.id || 'unknown'} intent=${intentName})`);
