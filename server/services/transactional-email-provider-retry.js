@@ -511,7 +511,9 @@ async function recordRetrySend(message, result) {
 async function retryOne(message) {
   // A row scheduled before the ruling took effect settles the same way.
   if (isSenderRenderedEmail(message)) {
-    return stopRetry(message, { status: 'failed', reason: 'Not re-sent from stored copy; the sender\'s next stage renders fresh.' });
+    const stopped = await stopRetry(message, { status: 'failed', reason: 'Not re-sent from stored copy (billing no-replay ruling).' });
+    await alertFinalNoticeMissed(message, 'blocked');
+    return stopped;
   }
   let suppression;
   try {

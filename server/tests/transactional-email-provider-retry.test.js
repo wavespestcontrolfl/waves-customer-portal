@@ -128,6 +128,22 @@ describe('transactional email provider retry classification', () => {
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
   });
 
+  test('an already-scheduled final notice alerts staff when it is stopped', async () => {
+    const chain = {};
+    chain.where = jest.fn(() => chain);
+    chain.update = jest.fn(() => chain);
+    chain.returning = jest.fn(async () => [{ id: 'message-1', status: 'failed' }]);
+    db.mockReturnValue(chain);
+
+    await retry.retryOne(message({ template_key: 'billing.previsit_balance', recipient_id: 'c1',
+      suppression_group_key_snapshot: 'transactional_required', send_attempt_token: 'attempt-3' }));
+
+    const finals = NotificationService.notifyAdmin.mock.calls.filter((c) => c[1] === 'Final billing notice not delivered');
+    expect(finals).toHaveLength(1);
+    expect(finals[0][3]).toMatchObject({ dedupeKey: 'billing-final-notice-missed:message-1' });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  });
+
   test('schedules 10 minute, 1 hour, and 6 hour backoff slots', () => {
     const now = new Date('2026-07-16T12:00:00Z');
     for (const [count, delay] of retry.RETRY_DELAYS_MS.entries()) {
