@@ -321,7 +321,10 @@ function dedupeDigestEvents(events) {
 // MATCH here would wrongly re-exclude a genuine first-of-year row (unsafe),
 // while a false NON-match only means the row falls through to the JS gate's
 // full check (always safe), so this only needs to avoid over-matching.
-const sqlNormalizedTitle = (colRef) => `regexp_replace(lower(${colRef}), '[^a-z0-9]+', ' ', 'g')`;
+// SQL mirror of normalizeDigestTitle: & to "and", punctuation to spaces,
+// filler words dropped, whitespace collapsed and trimmed. (`presents{0,1}`,
+// not `presents?`: knex reads a bare `?` in raw SQL as a binding.)
+const sqlNormalizedTitle = (colRef) => `btrim(regexp_replace(regexp_replace(regexp_replace(replace(lower(${colRef}), '&', ' and '), '[^a-z0-9]+', ' ', 'g'), '\\y(the|a|an|presents{0,1}|featuring|feat|with|at|in)\\y', ' ', 'g'), '\\s+', ' ', 'g'))`;
 const sqlEtYear = (colRef) => `date_part('year', (${colRef} AT TIME ZONE 'America/New_York'))`;
 // ET calendar day (not timestamp) — the SQL mirror of
 // newsletter-event-selection.js's occurrenceDayKey, the single JS definition
@@ -545,7 +548,10 @@ function isEligibleForFreshDigest(event, reference = new Date()) {
   // blocks it here once featured, instead of granting the calendar-year
   // refresh a genuinely recurring identity gets (Codex P2, 2026-09-27).
   const occurrenceCount = event.__recurrenceOccurrenceCount ?? null;
-  if (!isEditoriallyNewEvent(event, reference, { occurrenceCount }) && event.admin_status !== 'featured') return false;
+  // __identityRecurring: the pool-verified identity verdict (identityIsRecurring),
+  // which covers a row re-labeled one_time whose earlier rows were weekly.
+  const recurring = event.__identityRecurring === true ? true : null;
+  if (!isEditoriallyNewEvent(event, reference, { occurrenceCount, recurring }) && event.admin_status !== 'featured') return false;
 
   // Hard reject on terminal freshness states regardless of event_type. A
   // continuity-proven (non-debut) routine row still carries the stored

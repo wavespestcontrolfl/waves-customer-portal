@@ -44,7 +44,8 @@ describe('excludeRoutineRecurringFromQuery admits a genuine first-of-year routin
     // Identity match: normalized title, plus venue (or city when venue is
     // blank on either side) — mirrors newsletter-event-selection.js's
     // isSameSeriesSibling as closely as SQL reasonably can.
-    expect(sql).toMatch(/regexp_replace\(lower\(routine_sibling\.title\)/i);
+    // Title normalized like normalizeDigestTitle (& to "and", filler words dropped).
+    expect(sql).toMatch(/replace\(lower\(routine_sibling\.title\), '&', ' and '\)/i);
     // A venue counts only when it normalizes to non-empty text (blank = missing).
     expect(sql).toMatch(/COALESCE\(btrim\(regexp_replace\(lower\(routine_sibling\.venue_name\)/i);
     // City compared with the same normalization as the JS series context.

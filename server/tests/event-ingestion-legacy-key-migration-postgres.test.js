@@ -298,6 +298,33 @@ describeOrSkip('upsertExtractedEvents — legacy dedup-key migration on real Pos
     expect(new Date(kept.start_at).toISOString()).toBe(matinee.toISOString());
   });
 
+  test('when the live survivor is the legacy row, the current key moves onto it', async () => {
+    const source = { id: sourceId, coverage_geo: [] };
+    const title = 'TEST Legacy Row Survives Dedup';
+    const url = 'https://test.invalid/legacy-row-survives/';
+    const startIso = daysFromNowIso(40);
+    const start = parseExtractedStartAt(startIso);
+    const { externalId: newKey, legacyExternalId: legacyKey } = extractedEventDedupKeys(title, start, url);
+
+    const [legacyRow] = await db('events_raw').insert({
+      source_id: sourceId, external_id: legacyKey, title, start_at: start, event_url: url,
+    }).returning(['id']);
+    const legacyId = legacyRow.id || legacyRow;
+    const [deadRow] = await db('events_raw').insert({
+      source_id: sourceId, external_id: newKey, title, start_at: start, event_url: url,
+      merged_into: legacyId, admin_status: 'rejected',
+    }).returning(['id']);
+    const deadId = deadRow.id || deadRow;
+
+    await upsertExtractedEvents(source, [{ title, startAt: startIso, eventUrl: url, description: 'fresh copy' }]);
+
+    const legacy = await db('events_raw').where({ id: legacyId }).first();
+    const dead = await db('events_raw').where({ id: deadId }).first();
+    expect(legacy.external_id).toBe(newKey);
+    expect(legacy.description).toBe('fresh copy');
+    expect(dead.external_id).toBe(`retired:${deadId}`);
+  });
+
   test('with no legacy row present, a fresh pull inserts once under the new key', async () => {
     const source = { id: sourceId, coverage_geo: [] };
     const title = 'TEST Fresh Pull Event';

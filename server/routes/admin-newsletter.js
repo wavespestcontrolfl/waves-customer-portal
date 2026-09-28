@@ -1389,7 +1389,8 @@ ${tone ? `Tone: ${tone}` : ''}`;
     };
     const response = await dispatchWithFallback(legacyPolicy, {
       laneId: 'newsletter',
-      maxTokens: 8000,
+      // Opus 5.5 thinks from max_tokens; leave room for the HTML/text JSON.
+      maxTokens: 24000,
       timeoutMs: 5 * 60 * 1000,
       jsonMode: true,
       system: systemPrompt,
@@ -1629,6 +1630,10 @@ router.patch('/events/:id', async (req, res, next) => {
     const updates = { updated_at: new Date() };
     if (adminStatus !== undefined) {
       updates.admin_status = adminStatus;
+      if (adminStatus === 'pending') {
+        const { manualHoldScoreBreakdown } = require('../services/event-curation');
+        updates.score_breakdown = manualHoldScoreBreakdown(db);
+      }
       // Featuring is an editorial STAR for the upcoming issue — not ship
       // history. times_featured/last_featured_at advance only in
       // markEventsFeatured when an issue actually sends; incrementing on
@@ -1724,6 +1729,11 @@ router.post('/events/bulk-action', async (req, res, next) => {
     }
     if (action === 'approve' || action === 'reset') {
       updates.suppression_reason = null;
+    }
+    if (action === 'reset') {
+      // Keep the automatic rescore from re-approving what the operator reset.
+      const { manualHoldScoreBreakdown } = require('../services/event-curation');
+      updates.score_breakdown = manualHoldScoreBreakdown(db);
     }
     // Featuring is an editorial star, not ship history — counters advance
     // only in markEventsFeatured when an issue actually sends (Codex r3 P1).

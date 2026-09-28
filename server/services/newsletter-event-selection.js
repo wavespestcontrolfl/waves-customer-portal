@@ -466,9 +466,9 @@ async function filterRepeatedDateIdentities(
       const starredFirstOfYear = isFirstOccurrenceOfYear(event, calendarYearPool, reference);
       const starredDebut = event?.freshness_status === 'fresh_series_launch' && isSeriesDebutEvent(event);
       if (starredFirstOfYear && !starredDebut && isRoutineRecurringEvent(event)) {
-        return { ...event, __recurringFirstOfYear: true, __recurrenceOccurrenceCount: occurrenceCount };
+        return { ...event, __recurringFirstOfYear: true, __recurrenceOccurrenceCount: occurrenceCount, __identityRecurring: true };
       }
-      return { ...event, __recurrenceOccurrenceCount: occurrenceCount };
+      return { ...event, __recurrenceOccurrenceCount: occurrenceCount, __identityRecurring: true };
     }
 
     if (isRecurringIdentity) {
@@ -488,7 +488,7 @@ async function filterRepeatedDateIdentities(
         // Proven by continuity, not debut wording — isEligibleForFreshDigest's
         // routine hard-block only recognizes debut evidence on its own, so
         // stamp the pool-verified marker it also accepts.
-        return { ...event, __recurringFirstOfYear: true, __recurrenceOccurrenceCount: occurrenceCount };
+        return { ...event, __recurringFirstOfYear: true, __recurrenceOccurrenceCount: occurrenceCount, __identityRecurring: true };
       }
       // Annual/seasonal/unknown-with-repeats: __recurrenceOccurrenceCount
       // rides along so a LATER isEligibleForFreshDigest(row) call —
@@ -496,7 +496,7 @@ async function filterRepeatedDateIdentities(
       // filter — can also correctly recognize a repeated
       // recurrence_type='unknown' identity as recurring (Codex P2,
       // 2026-09-27; see event-freshness.js's own use of this marker).
-      return { ...event, __recurrenceOccurrenceCount: occurrenceCount };
+      return { ...event, __recurrenceOccurrenceCount: occurrenceCount, __identityRecurring: true };
     }
 
     if (event?.freshness_status === 'fresh_series_launch' && isSeriesDebutEvent(event)
@@ -570,6 +570,7 @@ function assessFlagshipEventSelection(
       ...(isRecurringIdentity && firstOfYear && isRoutineRecurringEvent(event) && !debut
         ? { __recurringFirstOfYear: true } : {}),
       __recurrenceOccurrenceCount: occurrenceCount,
+      ...(isRecurringIdentity ? { __identityRecurring: true } : {}),
     };
 
     // Codex P1, 2026-09-27: a verified recurring first-of-year occurrence is

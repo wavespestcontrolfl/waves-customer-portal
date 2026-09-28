@@ -381,4 +381,19 @@ describe('operator star override still bypasses the calendar-year rule', () => {
     });
     expect(rows.map((row) => row.id)).toEqual(['march-2026']);
   });
+
+  test('the pool-verified recurring verdict carries into the row-local newness check', () => {
+    const relabeled = weeklyEvent('first-2026', {
+      start_at: '2026-08-08T14:00:00Z', // after REFERENCE, so only newness decides
+      event_type: 'one_time',
+      recurrence_type: 'none',
+      freshness_status: 'fresh_one_time',
+      title: 'Riverside Harvest Market',
+      description: 'Produce and crafts.',
+      times_featured: 1,
+      last_featured_at: '2025-08-01T10:00:00Z',
+    });
+    expect(isEligibleForFreshDigest(relabeled, REFERENCE)).toBe(false);
+    expect(isEligibleForFreshDigest({ ...relabeled, __identityRecurring: true }, REFERENCE)).toBe(true);
+  });
 });

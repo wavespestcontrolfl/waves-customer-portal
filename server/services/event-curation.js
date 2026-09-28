@@ -423,6 +423,12 @@ function contentFingerprint(row) {
   return crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');
 }
 
+// Raw update value marking an operator's return-to-pending on the stored
+// assessment, so the deterministic rescore never re-approves it.
+function manualHoldScoreBreakdown(knex = db) {
+  return knex.raw(`CASE WHEN score_breakdown IS NULL THEN NULL ELSE score_breakdown || '{"manual_hold": true}'::jsonb END`);
+}
+
 function storedBreakdown(row) {
   let breakdown = row?.score_breakdown;
   if (typeof breakdown === 'string') { try { breakdown = JSON.parse(breakdown); } catch { breakdown = null; } }
@@ -673,6 +679,7 @@ async function applyRescore(row, decision, { canApprove = decision.approve } = {
     score_breakdown: JSON.stringify({
       ...decision.breakdown,
       content_fingerprint: storedBreakdown(row)?.content_fingerprint ?? null,
+      ...(storedBreakdown(row)?.manual_hold ? { manual_hold: true } : {}),
     }),
     curation_note: note,
   };
@@ -760,7 +767,10 @@ async function runScoreRescore({ limit = RESCORE_RUN_LIMIT } = {}) {
     }
     const decision = rescoreCuratedEvent(row);
     if (!decision) continue;
-    const canApprove = decision.approve && eligibleIds.has(String(row.id));
+    // An operator who put the row back to pending (manual_hold) decides it;
+    // the rescore still refreshes the score but never re-approves it.
+    const canApprove = decision.approve && eligibleIds.has(String(row.id))
+      && !storedBreakdown(row)?.manual_hold;
     const outcome = await applyRescore(row, decision, { canApprove });
     if (outcome === 'approved' || outcome === 'rescored' || outcome === 'raced') rescored += 1;
     if (outcome === 'approved') approved += 1;
@@ -863,6 +873,7 @@ module.exports = {
   runCurationEligibilityPipeline,
   hasContentChangedSinceCuration,
   contentFingerprint,
+  manualHoldScoreBreakdown,
   revalidateStaleRescoreCandidate,
   rescoreCuratedEvent,
   applyRescore,

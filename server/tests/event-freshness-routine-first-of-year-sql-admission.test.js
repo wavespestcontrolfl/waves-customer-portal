@@ -55,7 +55,7 @@ describeOrSkip('buildCurationCandidateQuery admits a genuine first-of-year stale
   jest.setTimeout(30000);
 
   const db = require('../models/db');
-  const { buildCurationCandidateQuery } = require('../services/event-curation');
+  const { buildCurationCandidateQuery, runScoreRescore, contentFingerprint } = require('../services/event-curation');
   const { filterRepeatedDateIdentities } = require('../services/newsletter-event-selection');
 
   const feedUrl = `https://test.invalid/curation-first-of-year-sql/${randomUUID()}`;
@@ -223,6 +223,47 @@ describeOrSkip('buildCurationCandidateQuery admits a genuine first-of-year stale
     const laterId = await insertEvent({ title, venue_name: null, city: 'Lakewood Ranch', start_at: etAt(laterDay) });
     const rows = await buildCurationCandidateQuery(500);
     expect(rows.map((r) => r.id)).not.toContain(laterId);
+  });
+
+  test('titles normalize like the JS filter: an earlier "Weekly Trivia!" suppresses a later "The Weekly Trivia"', async () => {
+    const { laterDay, earlierDay } = sameYearDays();
+    await insertEvent({ title: 'TEST Weekly Trivia & Tacos!', admin_status: 'approved', start_at: etAt(earlierDay) });
+    const laterId = await insertEvent({ title: 'The TEST Weekly Trivia and Tacos', start_at: etAt(laterDay) });
+    const rows = await buildCurationCandidateQuery(500);
+    expect(rows.map((r) => r.id)).not.toContain(laterId);
+  });
+
+  test('the rescore never re-approves a row an operator put back to pending', async () => {
+    const oneTime = {
+      event_type: 'one_time', recurrence_type: 'none', freshness_status: 'fresh_one_time',
+      venue_name: 'TEST Grand Hall', city: 'sarasota', curated_at: db.fn.now(),
+      rejection_codes: JSON.stringify([]),
+    };
+    const factors = {
+      specialness: 25, reader_pull: 20, audience_fit: 15, planning_value: 15,
+      local_relevance: 10, source_confidence: 10, accessibility: 5,
+    };
+    const insertScored = async (title, extraBreakdown) => {
+      const id = await insertEvent({ title, ...oneTime, start_at: etAt(sameYearDays().laterDay) });
+      const row = await db('events_raw').where({ id }).first();
+      await db('events_raw').where({ id }).update({
+        score_breakdown: JSON.stringify({
+          factors, penalty_flags: [], family_status: 'confirmed',
+          content_fingerprint: contentFingerprint(row), ...extraBreakdown,
+        }),
+      });
+      return id;
+    };
+    const heldId = await insertScored('TEST Held Gala Night', { manual_hold: true });
+    const freeId = await insertScored('TEST Free Gala Night', {});
+
+    await runScoreRescore();
+
+    const held = await db('events_raw').where({ id: heldId }).first();
+    const free = await db('events_raw').where({ id: freeId }).first();
+    expect(held.admin_status).toBe('pending');
+    expect(held.score_breakdown.manual_hold).toBe(true);
+    expect(free.admin_status).toBe('approved');
   });
 
   test('expired and needs_review rows remain excluded unconditionally, even with no earlier sibling at all', async () => {

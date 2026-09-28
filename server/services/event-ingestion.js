@@ -845,7 +845,21 @@ async function reconcileLegacyKey(sourceId, currentKey, legacyKey) {
   try {
     if (currentRow.merged_into) {
       const survivorId = await finalSurvivorId(currentRow.merged_into);
-      if (survivorId && survivorId !== legacyRow.id) await mergeEvents(survivorId, [legacyRow.id]);
+      if (survivorId === legacyRow.id) {
+        // The live survivor is the legacy row itself: move the current key
+        // off the merged-away row onto it, so this and later pulls update
+        // the live row instead of the dead one.
+        await db.transaction(async (trx) => {
+          await trx('events_raw').where({ id: currentRow.id })
+            .update({ external_id: `retired:${currentRow.id}`, updated_at: trx.fn.now() });
+          await trx('events_raw').where({ id: legacyRow.id }).whereNull('merged_into')
+            .update({ external_id: currentKey, updated_at: trx.fn.now() });
+        });
+      } else if (survivorId) {
+        // Survivor is another listing (cross-source dedup): the merged row
+        // keeps this source's key, as every cross-source merged row does.
+        await mergeEvents(survivorId, [legacyRow.id]);
+      }
       return;
     }
     if (pickSurvivor([currentRow, legacyRow]).id === currentRow.id) {
