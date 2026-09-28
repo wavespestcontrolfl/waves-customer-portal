@@ -110,6 +110,26 @@ async function renderServiceReportSmsPreviewImage({
     await page.goto(url, { waitUntil: 'networkidle', timeout: 30000 });
     await page.waitForSelector('.sms-preview-card', { timeout: 10000 });
 
+    // networkidle only proves the card's image requests SETTLED, not that
+    // they SUCCEEDED — a 403/404/timeout against S3 still fires the <img>'s
+    // load/error event and reaches networkidle just the same. Verify every
+    // image the card actually rendered finished loading before shooting: a
+    // broken thumbnail screenshotted here would upload and get CACHED under
+    // the current, valid photo-set signature (buildAndStoreSmsPreviewImage's
+    // input hash), so it would keep being served as a cache hit even once
+    // S3 recovers — nothing about the signature moves again on its own
+    // (pre-push P1). GATE_REPORT_PHOTO_CONTENT off ⇒ the card has no photo
+    // <img>, only the same-origin logo, which reliably loads — a no-op then.
+    // Same in-page-function spelling convention as the cardHeight read below
+    // and pdf-puppeteer.js's imageFailures (server-side lint disallows
+    // browser globals, so globalThis stands in for window here).
+    const imagesFailed = await page.evaluate(() => Array.from(globalThis.document.querySelectorAll('.sms-preview-card img'))
+      .some((img) => !img.complete || img.naturalWidth === 0))
+      .catch(() => true); // uncertain ⇒ treat as failed, never screenshot on faith
+    if (imagesFailed) {
+      throw new Error('sms_preview_image_asset_failed');
+    }
+
     // The card is a fixed-viewport, fullPage:false screenshot — content taller
     // than DEFAULT_HEIGHT is silently clipped, never reflowed. Ordinarily the
     // card's own min-height is tuned to fit; GATE_REPORT_PHOTO_CONTENT's photo

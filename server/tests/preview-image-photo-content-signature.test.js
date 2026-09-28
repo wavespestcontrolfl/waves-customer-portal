@@ -222,4 +222,72 @@ describe('buildAndStoreSmsPreviewImage — persists photo_content_signature on t
     expect(s3Instance.send).not.toHaveBeenCalled();
     expect(logger.warn).toHaveBeenCalled();
   });
+
+  // Pre-push P1 (2026-09-28, fourth round): networkidle only proves the
+  // card's <img> requests SETTLED, not that they SUCCEEDED — a broken S3
+  // thumbnail still reaches networkidle. renderServiceReportSmsPreviewImage
+  // now checks every <img> in .sms-preview-card (via page.evaluate, same
+  // in-page-function convention as the cardHeight read) and throws
+  // 'sms_preview_image_asset_failed' instead of screenshotting a broken
+  // image that would otherwise upload and cache under the CURRENT, valid
+  // signature — served forever even after S3 recovers.
+  test('the thumbnail <img> failing to load (networkidle reached, image broken) → throws before the screenshot, no S3 upload, no insert row', async () => {
+    reportPhotoContentLive.mockReturnValue(false);
+    const { buildAndStoreSmsPreviewImage } = require('../services/service-report/preview-image');
+    const { S3Client } = require('@aws-sdk/client-s3');
+    const { launchBrowser } = require('../services/service-report/pdf');
+    const insert = jest.fn();
+    const knex = jest.fn(() => ({
+      where: jest.fn().mockReturnThis(),
+      first: jest.fn().mockResolvedValue(null),
+      columnInfo: jest.fn().mockResolvedValue({}),
+      insert,
+    }));
+    // Same fake browser/page singletons buildAndStoreSmsPreviewImage's own
+    // render call will get (launchBrowser/newPage are mockResolvedValue, so
+    // every caller — this one included — receives the identical objects) —
+    // grabbing a reference here just lets this test override .evaluate's
+    // FIRST resolution (the img-failure check) to report a failure.
+    const fakeBrowser = await launchBrowser();
+    const fakePage = await fakeBrowser.newPage();
+    fakePage.evaluate.mockReset().mockResolvedValueOnce(true); // img check: failed
+
+    await expect(buildAndStoreSmsPreviewImage({
+      recordId: 'record-1', token: 'token-1', dynamicContext: {}, knex,
+    })).rejects.toThrow('sms_preview_image_asset_failed');
+
+    expect(fakePage.screenshot).not.toHaveBeenCalled();
+    expect(insert).not.toHaveBeenCalled();
+    const s3Instance = S3Client.mock.results[S3Client.mock.results.length - 1].value;
+    expect(s3Instance.send).not.toHaveBeenCalled();
+  });
+
+  test('the thumbnail <img> loading successfully → the render proceeds and the asset is still stored', async () => {
+    reportPhotoContentLive.mockReturnValue(false);
+    const { buildAndStoreSmsPreviewImage } = require('../services/service-report/preview-image');
+    const { launchBrowser } = require('../services/service-report/pdf');
+    let insertedRow = null;
+    const knex = jest.fn(() => ({
+      where: jest.fn().mockReturnThis(),
+      first: jest.fn().mockResolvedValue(null),
+      columnInfo: jest.fn().mockResolvedValue({}),
+      insert: jest.fn((row) => {
+        insertedRow = row;
+        return { returning: jest.fn().mockResolvedValue([{ ...row, id: 'asset-1' }]) };
+      }),
+    }));
+    const fakeBrowser = await launchBrowser();
+    const fakePage = await fakeBrowser.newPage();
+    // First evaluate() call is the img-failure check (false = nothing
+    // failed), second is the existing cardHeight read.
+    fakePage.evaluate.mockReset().mockResolvedValueOnce(false).mockResolvedValueOnce(0);
+
+    const result = await buildAndStoreSmsPreviewImage({
+      recordId: 'record-1', token: 'token-1', dynamicContext: {}, knex,
+    });
+
+    expect(fakePage.screenshot).toHaveBeenCalled();
+    expect(insertedRow).not.toBeNull();
+    expect(result.id).toBe('asset-1');
+  });
 });
