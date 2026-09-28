@@ -405,6 +405,10 @@ describe('rain-out service', () => {
       const legacyVars = renderSmsTemplate.mock.calls[1][1];
       expect(legacyVars.weather_phrase).toBe('heavy rain');
       expect(legacyVars.weather_lead).toBeUndefined();
+      // The legacy rung records its own key, not v2's.
+      const meta = sendCustomerMessage.mock.calls[0][0].metadata;
+      expect(meta.templateKey).toBe('rain_out_moved');
+      expect(meta.original_message_type).toBe('rain_out_moved');
     });
 
     test('a DISABLED v2 template row is the kill switch — no legacy reroute, no SMS', async () => {

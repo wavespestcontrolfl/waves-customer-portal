@@ -1611,7 +1611,7 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, cust
         ...longFormVars,
         weather_phrase: WEATHER_PHRASES[reasonCode] || 'weather',
       }, renderContext);
-      if (body) renderedKey = 'rain_out_moved_v2';
+      if (body) renderedKey = 'rain_out_moved';
     }
   }
   if (!body) {
