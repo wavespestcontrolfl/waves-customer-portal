@@ -242,28 +242,11 @@ function gateByField(gate, { frontmatter = {}, body = '', title, meta_descriptio
   };
 }
 
-// Whole-word text of the draft the operator approved (every frontmatter
-// string, the top-level metadata, the body), padded for ` word ` lookups.
-function reviewedWords(draft) {
-  const words = (value) => String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-  const text = [
-    ...textFields(draft?.frontmatter || {}, '', []),
-    ...textFields({ title: draft?.title, meta_description: draft?.meta_description, url: draft?.url, slug: draft?.slug }, '', []),
-    String(draft?.body || draft?.content || ''),
-  ].join('\n');
-  return ` ${words(text)} `;
-}
-
-// True when the approved draft names `name` — as written, or for a curated
-// competitor by any of its curated spellings (the extraction reports a
-// curated name canonically: "Massey" in the text comes back "Massey Services").
-function namedInReviewedDraft(name, reviewed) {
+// One key per company when comparing two inventories: the curated record,
+// else the case- and punctuation-insensitive name.
+function companyKey(name) {
   const rec = competitorFacts.findCompetitor(name);
-  const spellings = rec ? [rec.name, ...(rec.aliases || []), ...(rec.aliasesCS || [])] : [name];
-  return spellings.some((spelling) => {
-    const w = String(spelling || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-    return Boolean(w) && reviewed.includes(` ${w} `);
-  });
+  return rec ? `curated:${rec.id}` : String(name || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 }
 
 function ownerListError(code, message, fields) {
@@ -300,9 +283,9 @@ function ownerListError(code, message, fields) {
  * adds afterward (hero/body-image alt and similar), so the final
  * comparison-gate scan always runs (#5146 r9). The operator-approval lane
  * (a stored `draft`) merges on its approved head with no second look, so
- * the company extraction runs on its final text too, and every name must
- * be one the operator saw in the approved draft or be on the owner list
- * (#5146 r10). The admin lane (publishAstro, no stored draft) skips the
+ * the company extraction runs on its final text too, and every company must
+ * be one the approved draft itself names (its own gate scan + extraction,
+ * compared company by company) or be on the owner list (#5146 r10, r12). The admin lane (publishAstro, no stored draft) skips the
  * extraction: an admin merges that PR by hand after reading the final text,
  * and the returned requiresHumanMerge stamps it so pages-poll never
  * auto-merges it.
@@ -356,20 +339,30 @@ async function assertOwnerListForCommit({ draft, brief = {}, frontmatter = {}, b
   }
   const names = comparison.namedCompetitors;
   if (humanApproved) {
-    // The operator approved every name in the stored draft; a name only
-    // publisher-added text carries was never reviewed, so it must be on the
-    // owner list (#5146 r10).
-    // Seen = named in the approved draft's words, or detected in it by the
-    // same gate scan (a curated competitor linked only through its site —
-    // "[published terms](https://prodigypest.com/plans)" — Codex r11).
-    const reviewed = reviewedWords(draft);
-    const reviewedNames = new Set(gateByField(gate, {
-      frontmatter: draft.frontmatter || {}, body: String(draft.body || draft.content || ''),
-      title: draft.title, meta_description: draft.meta_description,
-    }, gateOptions).namedCompetitors);
+    // The operator approved the stored draft's own companies. Its inventory
+    // comes from the same two sources as the final text's (the gate scan and
+    // the company extraction), so a word the draft used generically ("bug
+    // out and call a pro") never vouches for a company a publisher-added alt
+    // introduces ("a Bug Out technician" — Codex r12). A company only
+    // publisher-added text names must be on the owner list (#5146 r10).
+    const reviewedExtraction = await module.exports.extractCompanyNames(draft, {
+      prior: draft.reviewed_company_extraction, brief,
+    });
+    if (reviewedExtraction.ok !== true) {
+      throw ownerListError('BLOG_OWNER_LIST_UNVERIFIED',
+        `company-name check unavailable for the approved draft (${reviewedExtraction.reason || 'unknown'})`,
+        { retryable: reviewedExtraction.retryable === true, extraction: reviewedExtraction });
+    }
+    draft.reviewed_company_extraction = reviewedExtraction;
+    const reviewed = new Set([
+      ...gateByField(gate, {
+        frontmatter: draft.frontmatter || {}, body: String(draft.body || draft.content || ''),
+        title: draft.title, meta_description: draft.meta_description,
+      }, gateOptions).namedCompetitors,
+      ...reviewedExtraction.companies,
+    ].map(companyKey));
     const unreviewed = [...new Set([...names, ...extraction.companies])]
-      .filter((nm) => !reviewedNames.has(competitorFacts.findCompetitor(nm)?.name || nm)
-        && !namedInReviewedDraft(nm, reviewed) && !competitorFacts.isOwnerApprovedForAutopublish(nm));
+      .filter((nm) => !reviewed.has(companyKey(nm)) && !competitorFacts.isOwnerApprovedForAutopublish(nm));
     if (unreviewed.length) {
       throw ownerListError('BLOG_OWNER_LIST_BLOCKED',
         `publisher-added text names company(ies) the operator never reviewed: ${unreviewed.join(', ')}`,

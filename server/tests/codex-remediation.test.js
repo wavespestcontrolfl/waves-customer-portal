@@ -1208,6 +1208,20 @@ describe('round-5 hardening (Codex findings on 2ef3b27)', () => {
       expect(r.remediated).toBe(true);
       expect(db._tables.blog_posts[0].astro_requires_human_merge).toBe(true);
     });
+
+    test('a candidate a later step rejects leaves no human-merge stamp (Codex r12 on #5146)', async () => {
+      confirmer.assertOwnerListForCommit.mockImplementation(async () => ({ extraction: null, requiresHumanMerge: true }));
+      const db = makeDb({ blog_posts: [row()] });
+      const gh = makeGh({ fileContent: orig });
+      // The editorial review after the owner-list check refuses the fix.
+      const editorialEvidence = { filesForDocument: jest.fn(async () => { throw Object.assign(new Error('Editorial review did not pass'), { code: 'BLOG_EDITORIAL_REVIEW_FAILED' }); }) };
+
+      const r = await maybeRemediateBlogPost({ id: 1 }, { db, gh, editorialEvidence, callAnthropic: makeCall('---\ntitle: T\n---\nOrkin offers recurring residential plans.'), validateFixedBlogFile: PASS });
+
+      expect(r.remediated).not.toBe(true);
+      expect(gh._calls.putFile).toHaveLength(0);
+      expect(db._tables.blog_posts[0].astro_requires_human_merge).toBeFalsy();
+    });
   });
 
   // r9/r11: two layers guard the sync. The pre-push check skips BEFORE the

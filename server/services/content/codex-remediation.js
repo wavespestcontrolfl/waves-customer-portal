@@ -2331,6 +2331,9 @@ async function maybeRemediateBlogPost(post, deps = {}) {
   // and the content gates need.
   const row = await db('blog_posts').where({ id: post.id }).first();
   if (!row) return { skipped: true, reason: 'post gone' };
+  // Set by revalidateOwnerList for the candidate being pushed; persisted by
+  // onRemediated only after the push succeeds.
+  let fixRequiresHumanMerge = false;
   return runRemediationForPr({
     prNumber: row.astro_pr_number,
     branch: row.astro_branch_name,
@@ -2360,8 +2363,8 @@ async function maybeRemediateBlogPost(post, deps = {}) {
     // publishAstro (Codex r7 on #5146): pages-poll auto-merges this PR
     // unless astro_requires_human_merge, so an off-list company refuses the
     // fix, competitor content naming only the approved list stamps the row
-    // for a human merge (sticky, claim-guarded), and a check outage is
-    // transient.
+    // for a human merge with the pushed fix (onRemediated — sticky,
+    // claim-guarded), and a check outage is transient.
     revalidateOwnerList: async (fixedMarkdown) => {
       let parsed;
       try { parsed = fm.parse(fixedMarkdown); } catch (e) { return { ok: false, reason: `unparseable fix: ${e.message}` }; }
@@ -2375,12 +2378,10 @@ async function maybeRemediateBlogPost(post, deps = {}) {
         if (err.code === 'BLOG_OWNER_LIST_UNVERIFIED') return { ok: false, transient: err.retryable === true, reason: err.message };
         return { ok: false, reason: err.message };
       }
-      if (verdict && verdict.requiresHumanMerge) {
-        const stamped = await db('blog_posts')
-          .where({ id: row.id, publish_status: 'publishing', astro_pr_number: row.astro_pr_number })
-          .update({ astro_requires_human_merge: true, updated_at: new Date() });
-        if (!stamped) return { ok: false, reason: 'could not stamp the human-merge requirement (row moved)' };
-      }
+      // Carried with this candidate and persisted by onRemediated with the
+      // pushed fix, never before it: a candidate a later step rejects must
+      // not leave the row stamped (Codex r12 on #5146).
+      fixRequiresHumanMerge = Boolean(verdict && verdict.requiresHumanMerge);
       return { ok: true };
     },
     revalidateBodyImages: async (fixedMarkdown) => {
@@ -2412,6 +2413,9 @@ async function maybeRemediateBlogPost(post, deps = {}) {
       const pub = deps.astroPublisher || require('../content-astro/astro-publisher');
       const mirrored = typeof pub.stripManagedBodyImagesForPost === 'function' ? pub.stripManagedBodyImagesForPost(body, row) : body;
       const patch = { content: mirrored, updated_at: new Date() };
+      // Competitor content naming only the approved list waits for a human
+      // merge (sticky once stamped — revalidateOwnerList above).
+      if (fixRequiresHumanMerge) patch.astro_requires_human_merge = true;
       // Whitelisted frontmatter fixes mirror into their row columns for the
       // same reason the body does: publishAstro rebuilds frontmatter from
       // blog_posts on a republish, so an unmirrored meta_description /

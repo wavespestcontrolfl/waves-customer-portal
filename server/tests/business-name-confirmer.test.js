@@ -255,44 +255,65 @@ describe('assertOwnerListForCommit', () => {
     expect(dispatchWithFallback).not.toHaveBeenCalled();
   });
 
-  test('humanApproved operator lane: names the operator saw pass; a name only publisher-added text carries must be on the owner list (#5146 r10)', async () => {
-    const heroFm = (alt) => ({ ...finalFm, hero_image: { src: '/images/blog/x/hero.webp', alt } });
+  // The operator-approval lane compares company INVENTORIES: the final
+  // text's (first extraction call) against the approved draft's own
+  // (second call) — company by company, never word by word (Codex r12).
+  const companies = (...lists) => lists.forEach((list) => dispatchWithFallback.mockResolvedValueOnce({ ok: true, json: { companies: list } }));
+  const heroFm = (alt) => ({ ...finalFm, hero_image: { src: '/images/blog/x/hero.webp', alt } });
+
+  test('humanApproved operator lane: companies the approved draft names pass; one only publisher-added text names must be on the owner list (#5146 r10)', async () => {
     const orkinOnly = { frontmatter: { ...finalFm }, body: 'Orkin offers recurring residential plans.' };
-    // Nothing added: the operator's own names pass.
-    dispatchWithFallback.mockResolvedValue({ ok: true, json: { companies: ['Orkin'] } });
+    // Nothing added: the operator's own companies pass.
+    companies(['Orkin'], ['Orkin']);
     await expect(assertOwnerListForCommit({ draft: { ...orkinOnly }, brief: BLOG_BRIEF, humanApproved: true, body: orkinOnly.body,
       frontmatter: heroFm('A technician inspects a Sarasota lanai') })).resolves.toMatchObject({ requiresHumanMerge: false, extraction: { ok: true } });
     // An off-list company only the hero alt names was never reviewed.
-    dispatchWithFallback.mockResolvedValue({ ok: true, json: { companies: ['Bug Out', 'Orkin'] } });
+    companies(['Bug Out', 'Orkin'], ['Orkin']);
     await expect(assertOwnerListForCommit({ draft: { ...orkinOnly }, brief: BLOG_BRIEF, humanApproved: true, body: orkinOnly.body,
       frontmatter: heroFm('A Bug Out technician at a lanai') }))
       .rejects.toMatchObject({ code: 'BLOG_OWNER_LIST_BLOCKED', reason: 'unreviewed_company_name', offList: ['Bug Out'] });
-    // The same name is fine when the operator saw it in the approved draft.
+    // The same company is fine when the approved draft names it.
     const withBugOut = { frontmatter: { ...finalFm }, body: 'Bug Out competes with local providers. Orkin offers recurring residential plans.' };
+    companies(['Bug Out', 'Orkin'], ['Bug Out', 'Orkin']);
     await expect(assertOwnerListForCommit({ draft: { ...withBugOut }, brief: BLOG_BRIEF, humanApproved: true, body: withBugOut.body,
       frontmatter: heroFm('A Bug Out technician at a lanai') })).resolves.toMatchObject({ requiresHumanMerge: false });
     // An owner-list competitor the publisher adds is allowed unattended anyway.
     const bugOutOnly = { frontmatter: { ...finalFm }, body: 'Bug Out competes with local providers.' };
-    dispatchWithFallback.mockResolvedValue({ ok: true, json: { companies: ['Bug Out', 'Orkin'] } });
+    companies(['Bug Out', 'Orkin'], ['Bug Out']);
     await expect(assertOwnerListForCommit({ draft: { ...bugOutOnly }, brief: BLOG_BRIEF, humanApproved: true, body: bugOutOnly.body,
       frontmatter: heroFm('An Orkin truck on a Sarasota street') })).resolves.toMatchObject({ requiresHumanMerge: false });
+  });
+
+  test('humanApproved operator lane: a word the approved draft used generically never vouches for a company (Codex r12)', async () => {
+    // "bug out" in the approved body is a verb phrase, not the company the
+    // alt later names — the approved draft's own inventory has no company.
+    const generic = { frontmatter: { ...finalFm }, body: 'When ants march in, bug out and call a pro.' };
+    companies(['Bug Out'], []);
+    await expect(assertOwnerListForCommit({ draft: { ...generic }, brief: BLOG_BRIEF, humanApproved: true, body: generic.body,
+      frontmatter: heroFm('A Bug Out technician at a lanai') }))
+      .rejects.toMatchObject({ code: 'BLOG_OWNER_LIST_BLOCKED', reason: 'unreviewed_company_name', offList: ['Bug Out'] });
+    // The approved draft's own check failing refuses the publish (retryable).
+    companies(['Orkin']);
+    dispatchWithFallback.mockResolvedValueOnce({ ok: false, reason: 'timeout' });
+    await expect(assertOwnerListForCommit({ draft: { ...generic }, brief: BLOG_BRIEF, humanApproved: true, body: generic.body, frontmatter: finalFm }))
+      .rejects.toMatchObject({ code: 'BLOG_OWNER_LIST_UNVERIFIED', retryable: true });
   });
 
   test('humanApproved operator lane: a curated competitor the approved draft only LINKED counts as reviewed (#5146 r11)', async () => {
     const brief = { ...BLOG_BRIEF, voice_constraints: { operator_brief: { working_title: 'Prodigy Pest alternatives', primary_kw: 'prodigy pest alternatives' } } };
     const approved = { frontmatter: { title: 'Pest plan terms in Sarasota', slug: '/pest-control/plan-terms/', meta_description: 'Compare plans.' },
       body: 'Read the [published terms](https://prodigypest.com/plans) before you sign.' };
-    dispatchWithFallback.mockResolvedValue({ ok: true, json: { companies: ['Prodigy Pest Solutions'] } });
+    // Even when the model misses it in the approved draft, its gate scan
+    // detects the link.
+    companies(['Prodigy Pest Solutions'], []);
     await expect(assertOwnerListForCommit({ draft: { ...approved }, brief, humanApproved: true, body: approved.body, frontmatter: approved.frontmatter }))
       .resolves.toMatchObject({ requiresHumanMerge: false });
   });
 
-  test('humanApproved operator lane: a curated name counts as reviewed under any curated spelling (#5146 r10)', async () => {
-    // The extraction reports curated names canonically ("Prodigy Pest" →
-    // "Prodigy Pest Solutions"); the operator saw the alias spelling.
+  test('humanApproved operator lane: the two inventories compare by curated company, whatever the spelling (#5146 r10)', async () => {
     const brief = { ...BLOG_BRIEF, voice_constraints: { operator_brief: { working_title: 'Prodigy Pest alternatives', primary_kw: 'prodigy pest alternatives' } } };
     const approved = { frontmatter: { title: 'Prodigy Pest alternatives in Sarasota', slug: '/pest-control/prodigy-pest-alternatives/', meta_description: 'Compare plans.' }, body: 'Prodigy Pest offers quarterly plans.' };
-    dispatchWithFallback.mockResolvedValue({ ok: true, json: { companies: ['Prodigy Pest'] } });
+    companies(['Prodigy Pest'], ['Prodigy Pest Solutions']);
     await expect(assertOwnerListForCommit({ draft: { ...approved }, brief, humanApproved: true, body: approved.body, frontmatter: approved.frontmatter }))
       .resolves.toMatchObject({ requiresHumanMerge: false, extraction: { companies: ['Prodigy Pest Solutions'] } });
   });
