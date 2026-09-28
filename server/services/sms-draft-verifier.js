@@ -55,16 +55,25 @@ or:
 // ("Wednesday 9-11" written, Tuesday declared), so the mapping rides here
 // for the verifier to check like any other fact. Empty/omitted → the prompt
 // is byte-identical to before (every gate-off caller and pinned exam).
+const OPEN_TIMES_HEADER = 'OPEN TIMES (real, bookable slots, ET'; // buildFactsBlock's section header, verbatim
 function buildVerifierUserPrompt(factsBlock, inboundMessage, draftReply, offeredTimes = []) {
   const declared = Array.isArray(offeredTimes)
     ? offeredTimes.filter((e) => e && typeof e.date === 'string' && typeof e.window === 'string' && e.date && e.window)
     : [];
-  const declaredSection = declared.length
+  // The section is present whenever OPEN TIMES was in play for this draft
+  // (real-answers gate on, slots fetched) — INCLUDING when the drafter
+  // declared nothing (pre-push audit P1: an empty declaration must still be
+  // checked, or a raw undeclared offer that happens to share a booked
+  // visit's window text passes the deterministic check AND reaches a
+  // verifier that was never told offers need declaring, and then no
+  // send-time snapshot exists to recheck it).
+  const openTimesInPlay = declared.length > 0 || String(factsBlock || '').includes(OPEN_TIMES_HEADER);
+  const declaredSection = openTimesInPlay
     ? `
 
 DECLARED OFFERS (the drafter says these are the ONLY new appointment times the draft offers, each copied from OPEN TIMES):
-${declared.map((e) => `- ${e.date}: ${e.window}`).join('\n')}
-Check the mapping: every appointment time the draft OFFERS must name the SAME day and window as one DECLARED OFFER (a draft that writes "Wednesday" for a Tuesday declaration, or offers a time with no declared entry, is a VIOLATION). A time in the draft that is NOT a declared offer may only restate an already-scheduled visit from UPCOMING SERVICES, on that visit's own day.`
+${declared.length ? declared.map((e) => `- ${e.date}: ${e.window}`).join('\n') : '(none — the drafter declares that this draft offers NO new appointment times)'}
+Check the mapping: every appointment time the draft OFFERS must name the SAME day and window as one DECLARED OFFER (a draft that writes "Wednesday" for a Tuesday declaration, or offers a time with no declared entry — including ANY offer when the declaration is "none" — is a VIOLATION). A time in the draft that is NOT a declared offer may only restate an already-scheduled visit from UPCOMING SERVICES, on that visit's own day.`
     : '';
   return `FACTS:
 ${factsBlock}

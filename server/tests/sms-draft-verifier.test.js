@@ -144,7 +144,16 @@ describe('verifier — DECLARED OFFERS mapping (PR #5119: the drafter\'s offered
   const { buildVerifierUserPrompt } = require('../services/sms-draft-verifier');
   const base = buildVerifierUserPrompt('FACTS HERE', 'When can you come?', 'How about Tuesday 9:00 AM - 11:00 AM?');
 
-  test('omitted, empty, or malformed offered_times → the prompt is byte-identical to the 3-arg form', () => {
+  test('facts WITH an OPEN TIMES section and an empty declaration → the section still appears, declaring "none" (an undeclared offer is then a violation)', () => {
+    const facts = 'OPEN TIMES (real, bookable slots, ET — offer ONLY from this list, never invent one):\n- Wednesday, September 30: 9:00 AM - 11:00 AM\n';
+    const p = buildVerifierUserPrompt(facts, 'When can you come?', 'You are set for Tuesday 9:00 AM - 11:00 AM.', []);
+    expect(p).toContain('DECLARED OFFERS');
+    expect(p).toContain('(none — the drafter declares that this draft offers NO new appointment times)');
+    expect(p).toMatch(/including ANY offer when the declaration is "none"/);
+    expect(buildVerifierUserPrompt(facts, 'When can you come?', 'You are set for Tuesday 9:00 AM - 11:00 AM.')).toBe(p); // omitted == []
+  });
+
+  test('facts WITHOUT OPEN TIMES: omitted, empty, or malformed offered_times → the prompt is byte-identical to the 3-arg form', () => {
     expect(buildVerifierUserPrompt('FACTS HERE', 'When can you come?', 'How about Tuesday 9:00 AM - 11:00 AM?', [])).toBe(base);
     expect(buildVerifierUserPrompt('FACTS HERE', 'When can you come?', 'How about Tuesday 9:00 AM - 11:00 AM?', 'nope')).toBe(base);
     expect(buildVerifierUserPrompt('FACTS HERE', 'When can you come?', 'How about Tuesday 9:00 AM - 11:00 AM?', [{ date: 'Tuesday' }])).toBe(base);

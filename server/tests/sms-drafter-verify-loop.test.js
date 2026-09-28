@@ -341,7 +341,7 @@ describe('generateGroundedDraft — the verifier receives the draft\'s offered_t
     jest.resetModules();
   });
 
-  test('the verifier call\'s user content lists the declared (date, window) pairs; a draft with none gets the unchanged prompt', async () => {
+  test('the verifier call\'s user content lists the declared (date, window) pairs; a draft with none is told the declaration is "none"', async () => {
     jest.resetModules();
     jest.doMock('../services/availability', () => ({
       getAvailableSlots: jest.fn(async () => ({ days: [{ fullDate: 'Tuesday, September 29', slots: [{ startTime24: '09:00' }] }] })),
@@ -371,6 +371,8 @@ describe('generateGroundedDraft — the verifier receives the draft\'s offered_t
       client: client2, context: CTX, inboundMessage: 'Can we book a visit?', intent: { intent: 'general_customer_sms_needs_review' },
       schedulingIntent: true, city: 'Venice',
     });
-    expect(client2.calls[1].messages[0].content).not.toContain('DECLARED OFFERS');
+    // OPEN TIMES was still in play (the slot was fetched), so the verifier is
+    // told the draft declares NO offers — an undeclared one is then a violation.
+    expect(client2.calls[1].messages[0].content).toContain('(none — the drafter declares that this draft offers NO new appointment times)');
   });
 });
