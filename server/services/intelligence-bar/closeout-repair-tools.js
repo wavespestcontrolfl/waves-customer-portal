@@ -20,10 +20,12 @@
  *   publish_report      ensureReportToken — mints the report link (internal)
  *   queue_report_email  enqueueServiceReportV1EmailDelivery — the delivery
  *                       worker emails the customer (one row per record)
- * Everything else stays manual. Paid receipts too: the receipt worker routes
- * per invoice (payer AP inbox, billing-email authority, channel settings), so
- * a card here could not name the real recipients without a second copy of
- * that routing. Otherwise: field evidence (application log, photos,
+ *   queue_receipt       enqueueReceiptDelivery — the receipt worker emails
+ *                       (and may text) the paid receipt; the card names the
+ *                       email recipient from the worker's own resolver
+ *                       (invoice-email resolveReceiptEmailRecipient) and
+ *                       opt-out check (receiptEmailOptOutState)
+ * Everything else stays manual: field evidence (application log, photos,
  * license) is never generated, billing / follow-up booking live inline in
  * their routes, and exhausted deliveries have no safe re-queue.
  *
@@ -39,6 +41,10 @@ const { enqueueServiceReportV1EmailDelivery } = require('../service-report/deliv
 const { isUserFeatureEnabled } = require('../feature-flags');
 const { publicPortalUrl } = require('../../utils/portal-url');
 const { detectServiceLine } = require('../service-report/service-line-configs');
+const { enqueueReceiptDelivery, receiptEmailOptOutState } = require('../receipt-delivery-queue');
+// Lazy: invoice-email pulls in the invoice/PDF graph — loaded only when a
+// receipt step is planned, never at IB boot.
+const invoiceEmail = () => require('../invoice-email');
 const {
   getServiceReportEmailRecipients, PREFS_UNAVAILABLE,
 } = require('../customer-contact');
@@ -47,8 +53,8 @@ const CLOSEOUT_REPAIR_TOOLS = [
   {
     name: 'repair_closeout',
     description: `Finish the closeout gaps the server can safely repair for ONE completed visit (scheduled_services id). The first call returns a PLAN and changes nothing: the repair steps it would run and the open items it will NOT touch (with where to fix them). The operator approves the exact plan on the confirmation card; the confirmed run executes only those steps and returns an itemized receipt (completed / failed / not attempted).
-Repairable today: publish a missing service report link, and queue a service-report email that was never queued (the customer gets an email).
-Never repaired here: application log, photos, technician license (field evidence — never generated), billing, invoice and receipt sends, follow-up booking, completion texts, and exhausted/failed deliveries.
+Repairable today: publish a missing service report link, queue a service-report email that was never queued (the customer gets an email), and queue a paid receipt that was never queued (the receipt worker emails it — to the payer's billing inbox for a payer-billed invoice — and may text it per the customer's receipt settings).
+Never repaired here: application log, photos, technician license (field evidence — never generated), billing, invoice sends and receipt RE-sends, follow-up booking, completion texts, and exhausted/failed deliveries.
 Use for: "fix the closeout for this visit", "finish what's missing on the job we just completed". Call get_closeout_status first when the operator only wants to know what is missing.`,
     input_schema: {
       type: 'object',
@@ -77,6 +83,7 @@ const MANUAL_REMEDY = {
 const STEP_EFFECTS = {
   publish_report: { kind: 'operational', label: 'Publish the service report link (internal — no message is sent by this step)' },
   queue_report_email: { kind: 'comms', label: 'Queue the service-report email — the delivery worker emails the customer the report on file' },
+  queue_receipt: { kind: 'comms', label: 'Queue the paid receipt — the receipt worker sends it' },
 };
 
 function parseNotes(value) {
@@ -127,6 +134,36 @@ async function reportEmailBlocker(status, recordRow, knex) {
   return null;
 }
 
+function maskPhone(phone) {
+  const digits = String(phone || '').replace(/\D/g, '');
+  return digits.length >= 4 ? `***${digits.slice(-4)}` : null;
+}
+
+// Who the receipt worker would reach — through its OWN resolvers, so the card
+// never names a different inbox than the send: the opt-out/kill-switch check,
+// then resolveReceiptEmailRecipient (payer AP inbox for payer-billed invoices,
+// the billing-email authority otherwise). The text leg is decided at send by
+// the messaging pipeline (consent, channel choice, STOP), so the card states
+// it as conditional; payer-billed receipts never text the homeowner.
+async function receiptRecipients(invoiceId, knex) {
+  const invoice = await knex('invoices').where({ id: invoiceId }).first();
+  if (!invoice) return { blocker: 'invoice not found' };
+  if (String(invoice.status || '').toLowerCase() !== 'paid') return { blocker: `invoice is ${invoice.status}, not paid` };
+  if (invoice.receipt_sent_at) return { blocker: 'receipt already sent' };
+  const job = await knex('receipt_delivery_jobs').where({ invoice_id: invoiceId }).first('id');
+  if (job) return { blocker: 'a receipt job already exists' };
+  const optOut = await receiptEmailOptOutState(invoice);
+  if (optOut.prefsLookupFailed) return { blocker: "the customer's receipt settings could not be read" };
+  if (optOut.receiptKillSwitch) return { blocker: 'the customer opted out of payment receipts' };
+  const resolved = await invoiceEmail().resolveReceiptEmailRecipient(invoice, { billingDeliveryCategory: 'payment_receipt' });
+  const email = resolved.ok ? String(resolved.recipient.email).trim().toLowerCase() : null;
+  const payerBilled = Boolean(invoice.payer_id);
+  const phone = payerBilled ? null
+    : (resolved.customer?.phone || (await knex('customers').where({ id: invoice.customer_id }).first('phone'))?.phone || null);
+  if (!email && !phone) return { blocker: resolved.ok ? 'no receipt recipient on file' : String(resolved.error).replace(/\.$/, '') };
+  return { email, phone, payerBilled };
+}
+
 function maskEmail(address) {
   const [local, domain] = String(address || '').split('@');
   return domain ? `${local.slice(0, 1)}***@${domain}` : null;
@@ -147,35 +184,18 @@ async function loadContact(customerId, knex) {
  * precondition reads — never writes. Deterministic for the same state so the
  * two-step fingerprint binds it.
  */
-async function planCloseoutRepair(status, { knex = db } = {}) {
-  const facts = status.facts || {};
+// Report link + report email. Both bind to the record the report facts were
+// derived from (closeout-status reportRecordId), which can be a sibling of
+// status.record — eligibility, dedupe and execution all use that record.
+async function planReportSteps(status, getContact, knex) {
+  const facts = status.facts;
   const steps = [];
-  const manual = [];
   const skipped = [];
-  const addManual = (name, why) => {
-    const f = facts[name];
-    manual.push({ fact: name, state: f.state, reason: f.reason, fix: why || MANUAL_REMEDY[name] });
-  };
-
-  if (facts.completion?.state !== 'done') {
-    if (facts.completion) addManual('completion');
-    return { steps, manual, skipped };
-  }
-
-  // The report facts were derived from the record owning the report artifact
-  // (closeout-status reportRecordId), which can be a sibling of status.record
-  // — eligibility, dedupe and execution all bind to that same record.
   const recordId = status.reportRecordId || null;
   const recordRow = recordId
     ? await knex('service_records').where({ id: recordId })
       .first('id', 'status', 'report_template_version', 'report_view_token', 'structured_notes', 'recap_sms_sent_at', 'customer_id', 'service_line', 'service_type')
     : null;
-
-  let contact = null;
-  const getContact = async () => {
-    contact = contact || await loadContact(status.visit?.customerId || null, knex);
-    return contact;
-  };
 
   const reportFact = facts.report;
   const publishable = reportFact?.state === 'pending'
@@ -188,77 +208,133 @@ async function planCloseoutRepair(status, { knex = db } = {}) {
   const deliveryFact = facts.reportDelivery;
   const emailCandidate = deliveryFact?.state === 'pending'
     && (deliveryFact.reason === 'not_enqueued' || (publishable && deliveryFact.reason === 'report_not_published'));
-  if (emailCandidate) {
-    let blocker = await reportEmailBlocker(status, recordRow, knex);
-    // Same resolver the delivery worker sends through — the card names who
-    // gets the email, and a plan with nobody to email is not offered.
-    const { customer, prefs } = blocker ? {} : await getContact();
-    const fullRecipients = blocker ? [] : getServiceReportEmailRecipients(customer, prefs)
-      .map((r) => String(r.email || '').trim().toLowerCase()).filter(Boolean).sort();
-    const recipients = fullRecipients.map(maskEmail).filter(Boolean);
-    if (!blocker && !recipients.length) blocker = 'no report email recipient on file, or report emails are turned off';
-    if (blocker) skipped.push({ fact: 'reportDelivery', reason: deliveryFact.reason, why: blocker });
-    else {
-      steps.push({
-        step: 'queue_report_email',
-        fact: 'reportDelivery',
-        reason: deliveryFact.reason,
-        service_record_id: recordRow.id,
-        recipients,
-        // Binds the FULL addresses (masks can collide): the confirm-time
-        // fingerprint and the executor's plan match both cover this key.
-        recipients_key: crypto.createHash('sha256').update(JSON.stringify(fullRecipients)).digest('hex').slice(0, 16),
-        ...(publishable ? { depends_on: 'publish_report' } : {}),
-      });
-    }
+  if (!emailCandidate) return { steps, skipped };
+  let blocker = await reportEmailBlocker(status, recordRow, knex);
+  // Same resolver the delivery worker sends through — the card names who
+  // gets the email, and a plan with nobody to email is not offered.
+  const { customer, prefs } = blocker ? {} : await getContact();
+  const fullRecipients = blocker ? [] : getServiceReportEmailRecipients(customer, prefs)
+    .map((r) => String(r.email || '').trim().toLowerCase()).filter(Boolean).sort();
+  const recipients = fullRecipients.map(maskEmail).filter(Boolean);
+  if (!blocker && !recipients.length) blocker = 'no report email recipient on file, or report emails are turned off';
+  if (blocker) {
+    skipped.push({ fact: 'reportDelivery', reason: deliveryFact.reason, why: blocker });
+    return { steps, skipped };
   }
+  steps.push({
+    step: 'queue_report_email',
+    fact: 'reportDelivery',
+    reason: deliveryFact.reason,
+    service_record_id: recordRow.id,
+    recipients,
+    // Binds the FULL addresses (masks can collide): the confirm-time
+    // fingerprint and the executor's plan match both cover this key.
+    recipients_key: crypto.createHash('sha256').update(JSON.stringify(fullRecipients)).digest('hex').slice(0, 16),
+    ...(publishable ? { depends_on: 'publish_report' } : {}),
+  });
+  return { steps, skipped };
+}
 
+// A paid invoice whose receipt was never queued.
+async function planReceiptStep(status, knex) {
+  const invDelivery = status.facts.invoiceDelivery;
+  if (!(invDelivery?.state === 'pending' && invDelivery.reason === 'paid_receipt_not_sent' && invDelivery.invoiceId)) return {};
+  const who = await receiptRecipients(invDelivery.invoiceId, knex);
+  if (who.blocker) return { skip: { fact: 'invoiceDelivery', reason: invDelivery.reason, why: who.blocker } };
+  return {
+    step: {
+      step: 'queue_receipt',
+      fact: 'invoiceDelivery',
+      reason: invDelivery.reason,
+      invoice_id: invDelivery.invoiceId,
+      recipients: who.email ? [maskEmail(who.email)] : [],
+      text_to: maskPhone(who.phone),
+      payer_billed: who.payerBilled,
+      // Binds the FULL email + phone (masks can collide).
+      recipients_key: crypto.createHash('sha256').update(JSON.stringify([who.email, who.phone])).digest('hex').slice(0, 16),
+    },
+  };
+}
+
+// Every open fact no step covers, with where it gets fixed.
+function manualItems(facts, steps, skipped) {
+  const manual = [];
   const planned = new Set(steps.map((s) => s.fact));
   const skippedFacts = new Set(skipped.map((s) => s.fact));
   for (const [name, f] of Object.entries(facts)) {
     if (!f || planned.has(name)) continue;
     if (f.state === 'unknown') {
       manual.push({ fact: name, state: f.state, reason: f.reason, fix: 'Lookup outage — status is unverified, not missing; re-check before acting.' });
-    } else if ((f.state === 'pending' || f.state === 'failed') && !skippedFacts.has(name)) {
-      // The report email waits on the report it would deliver.
-      if (name === 'reportDelivery' && f.reason === 'report_not_published' && planned.has('report')) continue;
-      addManual(name);
+      continue;
     }
+    if (!['pending', 'failed'].includes(f.state) || skippedFacts.has(name)) continue;
+    // The report email waits on the report it would deliver.
+    if (name === 'reportDelivery' && f.reason === 'report_not_published' && planned.has('report')) continue;
+    manual.push({ fact: name, state: f.state, reason: f.reason, fix: MANUAL_REMEDY[name] });
   }
   for (const s of skipped) manual.push({ fact: s.fact, state: facts[s.fact].state, reason: s.reason, fix: `Not repairable here: ${s.why}.` });
+  return manual;
+}
+
+async function planCloseoutRepair(status, { knex = db } = {}) {
+  const facts = status.facts || {};
+  if (facts.completion?.state !== 'done') {
+    const manual = facts.completion
+      ? [{ fact: 'completion', state: facts.completion.state, reason: facts.completion.reason, fix: MANUAL_REMEDY.completion }]
+      : [];
+    return { steps: [], manual, skipped: [] };
+  }
+  let contact = null;
+  const getContact = async () => {
+    contact = contact || await loadContact(status.visit?.customerId || null, knex);
+    return contact;
+  };
+  const report = await planReportSteps({ ...status, facts }, getContact, knex);
+  const receipt = await planReceiptStep({ ...status, facts }, knex);
+  const steps = [...report.steps, ...(receipt.step ? [receipt.step] : [])];
+  const skipped = [...report.skipped, ...(receipt.skip ? [receipt.skip] : [])];
   // Who the card is about — resolved by the server, never the model.
   const who = steps.length ? (await getContact()).customer : null;
   const customerName = who ? [who.first_name, who.last_name].filter(Boolean).join(' ') || null : null;
-  return { steps, manual, skipped, customerName };
+  return { steps, manual: manualItems(facts, steps, skipped), skipped, customerName };
 }
 
+const STEP_RUNNERS = {
+  async publish_report(step, knex) {
+    const token = await ensureReportToken(step.service_record_id, knex);
+    if (!token) return { status: 'failed', detail: 'service record not found' };
+    return { status: 'completed', detail: 'report link published' };
+  },
+  async queue_report_email(step, knex) {
+    const row = await knex('service_records').where({ id: step.service_record_id })
+      .first('id', 'customer_id', 'report_view_token', 'scheduled_service_id');
+    if (!row?.report_view_token) return { status: 'failed', detail: 'report link is not published' };
+    const portalUrl = publicPortalUrl();
+    const queued = await enqueueServiceReportV1EmailDelivery({
+      serviceRecordId: row.id,
+      customerId: row.customer_id,
+      token: row.report_view_token,
+      reportUrl: `${portalUrl}/report/${row.report_view_token}`,
+      pdfUrl: `${portalUrl}/api/reports/${row.report_view_token}`,
+      payload: { scheduled_service_id: row.scheduled_service_id || null, source: 'ib_closeout_repair' },
+    }, knex);
+    if (!queued?.ok) return { status: 'failed', detail: queued?.error || 'report email could not be queued' };
+    if (queued.queued === false) return { status: 'completed', detail: `report email already ${queued.delivery?.status || 'queued'} — nothing new queued`, delivery_id: queued.delivery?.id || null };
+    return { status: 'completed', detail: 'report email queued', delivery_id: queued.delivery?.id || null };
+  },
+  async queue_receipt(step, knex) {
+    // A machine-queued receipt (customerInitiated false): its text waits
+    // for the 8 AM–8 PM window, exactly like an autopay receipt.
+    const queued = await enqueueReceiptDelivery({ invoiceId: step.invoice_id, source: 'ib_closeout_repair', customerInitiated: false, database: knex });
+    if (queued?.enqueued) return { status: 'completed', detail: 'receipt queued', receipt_job_id: queued.job?.id || null };
+    if (queued?.deduped) return { status: 'completed', detail: 'a receipt job already existed — nothing new queued' };
+    return { status: 'failed', detail: queued?.reason || 'receipt could not be queued' };
+  },
+};
+
 async function runStep(step, { knex = db } = {}) {
-  switch (step.step) {
-    case 'publish_report': {
-      const token = await ensureReportToken(step.service_record_id, knex);
-      if (!token) return { status: 'failed', detail: 'service record not found' };
-      return { status: 'completed', detail: 'report link published' };
-    }
-    case 'queue_report_email': {
-      const row = await knex('service_records').where({ id: step.service_record_id })
-        .first('id', 'customer_id', 'report_view_token', 'scheduled_service_id');
-      if (!row?.report_view_token) return { status: 'failed', detail: 'report link is not published' };
-      const portalUrl = publicPortalUrl();
-      const queued = await enqueueServiceReportV1EmailDelivery({
-        serviceRecordId: row.id,
-        customerId: row.customer_id,
-        token: row.report_view_token,
-        reportUrl: `${portalUrl}/report/${row.report_view_token}`,
-        pdfUrl: `${portalUrl}/api/reports/${row.report_view_token}`,
-        payload: { scheduled_service_id: row.scheduled_service_id || null, source: 'ib_closeout_repair' },
-      }, knex);
-      if (!queued?.ok) return { status: 'failed', detail: queued?.error || 'report email could not be queued' };
-      if (queued.queued === false) return { status: 'completed', detail: `report email already ${queued.delivery?.status || 'queued'} — nothing new queued`, delivery_id: queued.delivery?.id || null };
-      return { status: 'completed', detail: 'report email queued', delivery_id: queued.delivery?.id || null };
-    }
-    default:
-      return { status: 'failed', detail: `unknown step ${step.step}` };
-  }
+  const runner = STEP_RUNNERS[step.step];
+  return runner ? runner(step, knex) : { status: 'failed', detail: `unknown step ${step.step}` };
 }
 
 async function executeCloseoutRepair(steps, { knex = db } = {}) {
@@ -284,7 +360,7 @@ async function executeCloseoutRepair(steps, { knex = db } = {}) {
 }
 
 function stepsKey(steps) {
-  return JSON.stringify((steps || []).map((s) => [s.step, s.service_record_id || null, s.depends_on || null, s.recipients_key || null]));
+  return JSON.stringify((steps || []).map((s) => [s.step, s.service_record_id || null, s.invoice_id || null, s.depends_on || null, s.recipients_key || null]));
 }
 
 function previewFromPlan(serviceId, status, plan) {
@@ -297,7 +373,9 @@ function previewFromPlan(serviceId, status, plan) {
     visit: [status.visit?.scheduledDate, status.visit?.serviceType].filter(Boolean).join(' · ') || null,
     steps: plan.steps.map((s) => ({
       ...s,
-      effect: s.recipients ? `${STEP_EFFECTS[s.step].label} — to ${s.recipients.length ? s.recipients.join(', ') : 'no recipient on file'}` : STEP_EFFECTS[s.step].label,
+      effect: s.step === 'queue_receipt'
+        ? `${STEP_EFFECTS[s.step].label}: email to ${s.recipients.length ? s.recipients.join(', ') : 'nobody (no receipt email on file)'}${s.payer_billed ? ' (the payer\'s billing inbox — no text for a payer-billed receipt)' : (s.text_to ? `; may also text ${s.text_to}, per the customer's receipt settings (texts wait for 8 AM–8 PM)` : '; no text (no phone on file)')}`
+        : s.recipients ? `${STEP_EFFECTS[s.step].label} — to ${s.recipients.length ? s.recipients.join(', ') : 'no recipient on file'}` : STEP_EFFECTS[s.step].label,
     })),
     manual: plan.manual,
     notifies_customer: plan.steps.some((s) => STEP_EFFECTS[s.step].kind === 'comms'),

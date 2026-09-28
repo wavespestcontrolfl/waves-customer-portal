@@ -9,11 +9,18 @@ jest.mock('../services/service-report/pdf-queue', () => ({ ensureReportToken: je
 jest.mock('../services/service-report/delivery-queue', () => ({ enqueueServiceReportV1EmailDelivery: jest.fn() }));
 jest.mock('../services/feature-flags', () => ({ isUserFeatureEnabled: jest.fn().mockResolvedValue(false) }));
 jest.mock('../utils/portal-url', () => ({ publicPortalUrl: () => 'https://portal.example.test' }));
+jest.mock('../services/receipt-delivery-queue', () => ({
+  enqueueReceiptDelivery: jest.fn(),
+  receiptEmailOptOutState: jest.fn(async () => ({ receiptKillSwitch: false, prefsLookupFailed: false })),
+}));
+jest.mock('../services/invoice-email', () => ({ resolveReceiptEmailRecipient: jest.fn() }));
 
 const db = require('../models/db');
 const { getCloseoutStatus } = require('../services/closeout-status');
 const { ensureReportToken } = require('../services/service-report/pdf-queue');
 const { enqueueServiceReportV1EmailDelivery } = require('../services/service-report/delivery-queue');
+const { enqueueReceiptDelivery, receiptEmailOptOutState } = require('../services/receipt-delivery-queue');
+const { resolveReceiptEmailRecipient } = require('../services/invoice-email');
 const { CLOSEOUT_REPAIR_TOOLS, executeCloseoutRepairTool } = require('../services/intelligence-bar/closeout-repair-tools');
 const gates = require('../services/intelligence-bar/write-gates');
 const { executionOutcome } = require('../services/intelligence-bar/outcomes');
@@ -159,15 +166,6 @@ test('field evidence, billing and unknown facts are listed manual, never planned
   expect(res.code).toBe('nothing_repairable');
   expect(res.manual.map((m) => m.fact).sort()).toEqual(['invoice', 'license', 'photos']);
   expect(res.manual.find((m) => m.fact === 'license').fix).toMatch(/unverified, not missing/);
-});
-
-test('an unsent paid receipt is manual — its recipients are routed per invoice by the receipt worker', async () => {
-  const facts = { invoiceDelivery: { state: 'pending', reason: 'paid_receipt_not_sent', invoiceId: 'inv-1' } };
-  getCloseoutStatus.mockResolvedValue(status({ facts }));
-  db.mockImplementation(fakeDb({ service_records: [RECORD], invoices: [{ id: 'inv-1', status: 'paid', receipt_sent_at: null }] }));
-  const res = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
-  expect(res.code).toBe('nothing_repairable');
-  expect(res.manual).toEqual([expect.objectContaining({ fact: 'invoiceDelivery', fix: expect.stringMatching(/invoice page/) })]);
 });
 
 test('confirmed: runs the steps in order and returns an itemized receipt', async () => {
@@ -327,4 +325,72 @@ test('a recipient swapped behind the same mask changes the plan: fingerprint and
   });
   expect(run.preview_changed).toBe(true);
   expect(ensureReportToken).not.toHaveBeenCalled();
+});
+
+describe('queue_receipt — the receipt worker, with its own recipient resolution on the card', () => {
+  const UNSENT = { invoiceDelivery: { state: 'pending', reason: 'paid_receipt_not_sent', invoiceId: 'inv-1' } };
+  const PAID = { id: 'inv-1', status: 'paid', receipt_sent_at: null, customer_id: 'cust-1', payer_id: null };
+
+  test('names the resolved receipt email and a conditional text; the worker resolver gets the payment_receipt category', async () => {
+    getCloseoutStatus.mockResolvedValue(status({ facts: UNSENT }));
+    db.mockImplementation(fakeDb({ service_records: [RECORD], invoices: [PAID] }));
+    resolveReceiptEmailRecipient.mockResolvedValue({ ok: true, recipient: { email: 'Billing@Example.com' }, customer: { phone: '9415550100' } });
+    const preview = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
+    expect(resolveReceiptEmailRecipient).toHaveBeenCalledWith(expect.objectContaining({ id: 'inv-1' }), { billingDeliveryCategory: 'payment_receipt' });
+    expect(preview.steps).toEqual([expect.objectContaining({ step: 'queue_receipt', invoice_id: 'inv-1', recipients: ['b***@example.com'], text_to: '***0100', payer_billed: false })]);
+    expect(preview.notifies_customer).toBe(true);
+    expect(JSON.stringify(preview)).not.toMatch(/billing@example\.com|9415550100/i);
+    const contract = buildContract({ toolName: 'repair_closeout', params: { service_id: SVC }, preview });
+    expect(contract.notifies_customer).toBe(true);
+    expect(contract.effects).toEqual(expect.arrayContaining([expect.objectContaining({
+      kind: 'comms', label: expect.stringMatching(/email to b\*\*\*@example\.com; may also text \*\*\*0100, per the customer's receipt settings \(texts wait for 8 AM–8 PM\)/),
+    })]));
+  });
+
+  test("a payer-billed receipt names the payer's inbox and no text", async () => {
+    getCloseoutStatus.mockResolvedValue(status({ facts: UNSENT }));
+    db.mockImplementation(fakeDb({ service_records: [RECORD], invoices: [{ ...PAID, payer_id: 'payer-1' }] }));
+    resolveReceiptEmailRecipient.mockResolvedValue({ ok: true, recipient: { email: 'ap@builder.example' }, customer: { phone: '9415550100' } });
+    const preview = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
+    expect(preview.steps[0]).toEqual(expect.objectContaining({ recipients: ['a***@builder.example'], text_to: null, payer_billed: true }));
+    expect(preview.steps[0].effect).toMatch(/payer's billing inbox — no text/);
+  });
+
+  test('opted out, unreadable settings, no recipient, or an existing job → manual, never planned', async () => {
+    getCloseoutStatus.mockResolvedValue(status({ facts: UNSENT }));
+    db.mockImplementation(fakeDb({ service_records: [RECORD], invoices: [PAID] }));
+    receiptEmailOptOutState.mockResolvedValueOnce({ receiptKillSwitch: true, prefsLookupFailed: false });
+    let res = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
+    expect(res.manual[0].fix).toMatch(/opted out of payment receipts/);
+
+    receiptEmailOptOutState.mockResolvedValueOnce({ receiptKillSwitch: false, prefsLookupFailed: true });
+    res = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
+    expect(res.manual[0].fix).toMatch(/could not be read/);
+
+    resolveReceiptEmailRecipient.mockResolvedValueOnce({ ok: false, error: 'No receipt recipient email' });
+    db.mockImplementation(fakeDb({ service_records: [RECORD], invoices: [PAID], customers: [{ ...CUSTOMER, phone: null }] }));
+    res = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
+    expect(res.manual[0].fix).toMatch(/No receipt recipient email/);
+
+    db.mockImplementation(fakeDb({ service_records: [RECORD], invoices: [PAID], receipt_delivery_jobs: [{ id: 'job-1' }] }));
+    res = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
+    expect(res.manual[0].fix).toMatch(/receipt job already exists/);
+  });
+
+  test('confirmed: queues through enqueueReceiptDelivery as a machine receipt; a recipient change refuses', async () => {
+    getCloseoutStatus.mockResolvedValue(status({ facts: UNSENT }));
+    db.mockImplementation(fakeDb({ service_records: [RECORD], invoices: [PAID] }));
+    resolveReceiptEmailRecipient.mockResolvedValue({ ok: true, recipient: { email: 'billing@example.com' }, customer: { phone: '9415550100' } });
+    const { steps: approved } = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
+    enqueueReceiptDelivery.mockResolvedValue({ enqueued: true, job: { id: 'job-9' } });
+    const run = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC }, { confirmed: true, executionPins: { _verified_repair_steps: approved } });
+    expect(run.success).toBe(true);
+    expect(enqueueReceiptDelivery).toHaveBeenCalledWith(expect.objectContaining({ invoiceId: 'inv-1', source: 'ib_closeout_repair', customerInitiated: false }));
+
+    enqueueReceiptDelivery.mockClear();
+    resolveReceiptEmailRecipient.mockResolvedValue({ ok: true, recipient: { email: 'bob@example.com' }, customer: { phone: '9415550100' } });
+    const drift = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC }, { confirmed: true, executionPins: { _verified_repair_steps: approved } });
+    expect(drift.preview_changed).toBe(true);
+    expect(enqueueReceiptDelivery).not.toHaveBeenCalled();
+  });
 });
