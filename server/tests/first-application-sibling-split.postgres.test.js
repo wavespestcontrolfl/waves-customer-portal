@@ -426,7 +426,7 @@ suite('first-application-sibling-split — periodic sweep', () => {
       id: lawnInvoiceId, customer_id: ids.customerId, scheduled_service_id: ids.lawnId,
       token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
       status: 'draft', title: 'Lawn Care', notes: 'Hand-split from the combined first-application invoice.',
-      line_items: JSON.stringify([{ description: 'Lawn Care', quantity: 1, unit_price: 42, amount: 42 }]),
+      line_items: JSON.stringify([{ client_id: `scheduled_${ids.lawnId}_primary`, description: 'Lawn Care', quantity: 1, unit_price: 42, amount: 42 }]),
       subtotal: 42, total: 42,
     });
 
@@ -457,7 +457,7 @@ suite('first-application-sibling-split — periodic sweep', () => {
       id: randomUUID(), customer_id: ids.customerId, scheduled_service_id: ids.lawnId,
       token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
       status: 'void', title: 'Lawn Care', notes: 'Voided draft — never actually billed.',
-      line_items: JSON.stringify([{ description: 'Lawn Care', quantity: 1, unit_price: 42, amount: 42 }]),
+      line_items: JSON.stringify([{ client_id: `scheduled_${ids.lawnId}_primary`, description: 'Lawn Care', quantity: 1, unit_price: 42, amount: 42 }]),
       subtotal: 42, total: 42,
     });
 
@@ -475,7 +475,7 @@ suite('first-application-sibling-split — periodic sweep', () => {
       id: randomUUID(), customer_id: ids.customerId, scheduled_service_id: ids.lawnId,
       token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
       status: 'cancelled', title: 'Lawn Care', notes: 'Cancelled draft — no replacement charge.',
-      line_items: JSON.stringify([{ description: 'Lawn Care', quantity: 1, unit_price: 42, amount: 42 }]),
+      line_items: JSON.stringify([{ client_id: `scheduled_${ids.lawnId}_primary`, description: 'Lawn Care', quantity: 1, unit_price: 42, amount: 42 }]),
       subtotal: 42, total: 42,
     });
 
@@ -547,7 +547,7 @@ suite('first-application-sibling-split — periodic sweep', () => {
       id: lawnInvoiceId, customer_id: ids.customerId, scheduled_service_id: ids.lawnId,
       token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
       status: 'draft', title: 'Lawn Care', notes: 'Hand-split from the combined first-application invoice.',
-      line_items: JSON.stringify([{ description: 'Lawn Care', quantity: 1, unit_price: 42, amount: 42 }]),
+      line_items: JSON.stringify([{ client_id: `scheduled_${ids.lawnId}_primary`, description: 'Lawn Care', quantity: 1, unit_price: 42, amount: 42 }]),
       subtotal: 42, total: 42,
     });
 
@@ -1016,7 +1016,7 @@ suite('first-application-sibling-split — periodic sweep', () => {
         id: randomUUID(), customer_id: customerId, scheduled_service_id: lawnId,
         token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
         status: 'draft', title: 'Lawn Care', notes: 'Standard invoice.',
-        line_items: JSON.stringify([{ description: 'Lawn Care', quantity: 1, unit_price: 80, amount: 80 }]),
+        line_items: JSON.stringify([{ client_id: `scheduled_${lawnId}_primary`, description: 'Lawn Care', quantity: 1, unit_price: 80, amount: 80 }]),
         subtotal: 80, total: 80,
       },
     ]);
@@ -1092,7 +1092,7 @@ suite('first-application-sibling-split — periodic sweep', () => {
       id: randomUUID(), customer_id: customerId, scheduled_service_id: bId,
       token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
       status: 'draft', title: 'Lawn Care', notes: 'Hand-split from the combined first-application invoice.',
-      line_items: JSON.stringify([{ description: 'Lawn Care', quantity: 1, unit_price: 60, amount: 60 }]),
+      line_items: JSON.stringify([{ client_id: `scheduled_${bId}_primary`, description: 'Lawn Care', quantity: 1, unit_price: 60, amount: 60 }]),
       subtotal: 60, total: 60,
     });
 
@@ -1169,7 +1169,7 @@ suite('first-application-sibling-split — periodic sweep', () => {
       id: randomUUID(), customer_id: customerId, scheduled_service_id: bId,
       token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
       status: 'draft', title: 'Lawn Care', notes: 'Hand-split from the combined first-application invoice.',
-      line_items: JSON.stringify([{ description: 'Lawn Care', quantity: 1, unit_price: 60, amount: 60 }]),
+      line_items: JSON.stringify([{ client_id: `scheduled_${bId}_primary`, description: 'Lawn Care', quantity: 1, unit_price: 60, amount: 60 }]),
       subtotal: 60, total: 60,
     });
 
@@ -1410,7 +1410,7 @@ suite('first-application-sibling-split — periodic sweep', () => {
       id: randomUUID(), customer_id: ids.customerId, scheduled_service_id: ids.lawnId,
       token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
       status: 'draft', title: 'Lawn Care', notes: 'Charge removed from the combined invoice and rebilled standalone.',
-      line_items: JSON.stringify([{ description: 'Lawn Care', quantity: 1, unit_price: 42, amount: 42 }]),
+      line_items: JSON.stringify([{ client_id: `scheduled_${ids.lawnId}_primary`, description: 'Lawn Care', quantity: 1, unit_price: 42, amount: 42 }]),
       subtotal: 42, total: 42,
     });
     const [resolved] = await sweepOnce(trx, ids.estimateId);
@@ -1454,7 +1454,7 @@ suite('first-application-sibling-split — periodic sweep', () => {
       id: randomUUID(), customer_id: ids.customerId, scheduled_service_id: ids.lawnId,
       token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
       status: 'draft', title: 'Lawn Care', notes: 'Hand-split from the combined first-application invoice.',
-      line_items: JSON.stringify([{ description: 'Lawn Care', quantity: 1, unit_price: 42, amount: 42 }]),
+      line_items: JSON.stringify([{ client_id: `scheduled_${ids.lawnId}_primary`, description: 'Lawn Care', quantity: 1, unit_price: 42, amount: 42 }]),
       subtotal: 42, total: 42,
     });
     const [resolved] = await sweepOnce(trx, ids.estimateId);
@@ -1491,7 +1491,7 @@ suite('first-application-sibling-split — periodic sweep', () => {
       id: randomUUID(), customer_id: ids.customerId, scheduled_service_id: ids.lawnId,
       token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
       status: 'draft', title: 'Lawn Care', notes: 'Hand-split from the combined first-application invoice.',
-      line_items: JSON.stringify([{ description: 'Lawn Care', quantity: 1, unit_price: 42, amount: 42 }]),
+      line_items: JSON.stringify([{ client_id: `scheduled_${ids.lawnId}_primary`, description: 'Lawn Care', quantity: 1, unit_price: 42, amount: 42 }]),
       subtotal: 42, total: 42,
     });
     const [resolved] = await sweepOnce(trx, ids.estimateId);
@@ -2400,7 +2400,7 @@ suite('first-application-sibling-split — periodic sweep', () => {
           id: randomUUID(), customer_id: customerId, scheduled_service_id: siblingId,
           token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
           status: 'sent', title: 'Lawn Care', notes: 'Hand-split lawn invoice',
-          line_items: JSON.stringify([{ description: 'Lawn Care', quantity: 1, unit_price: 60, amount: 60 }]),
+          line_items: JSON.stringify([{ client_id: `scheduled_${siblingId}_primary`, description: 'Lawn Care', quantity: 1, unit_price: 60, amount: 60 }]),
           subtotal: 60, total: 60,
         });
       }
@@ -3065,7 +3065,7 @@ suite('first-application-sibling-split — periodic sweep', () => {
           id: otherInvoiceId, customer_id: ids.customerId, scheduled_service_id: ids.siblingId,
           token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
           status: 'sent', title: 'Lawn Care', notes: 'An unrelated, already-existing invoice on the sibling.',
-          line_items: JSON.stringify([{ description: 'Lawn Care', quantity: 1, unit_price: 60, amount: 60 }]),
+          line_items: JSON.stringify([{ client_id: `scheduled_${ids.siblingId}_primary`, description: 'Lawn Care', quantity: 1, unit_price: 60, amount: 60 }]),
           subtotal: 60, total: 60,
         });
         // Simulate a pre-existing stamp (a real accept-time write, or a
@@ -3246,6 +3246,56 @@ suite('first-application-sibling-split — periodic sweep', () => {
       expect((await row(trx, ids.lawnId)).first_application_invoice_id).toBeNull();
       await backfillFirstApplicationInvoiceStamps(trx);
       expect((await row(trx, ids.lawnId)).first_application_invoice_id).toBe(ids.invoiceId);
+    }));
+
+    // Codex r16 P1: "any live invoice on the sibling's row" is not split
+    // evidence — an add-on or repair invoice must not clear the alert.
+    test('split evidence: an UNRELATED live invoice on the diverged sibling (no base-application line) does not clear the alert', () => rollbackTest(async (trx) => {
+      const ids = await fixture(trx);
+      await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: MOVED });
+      await trx('invoices').insert({
+        id: randomUUID(), customer_id: ids.customerId, scheduled_service_id: ids.lawnId,
+        token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
+        status: 'sent', title: 'Mosquito add-on', notes: 'One-off add-on billed separately.',
+        line_items: JSON.stringify([{ description: 'Mosquito add-on treatment', quantity: 1, unit_price: 35, amount: 35 }]),
+        subtotal: 35, total: 35,
+      });
+      const [result] = await sweepOnce(trx, ids.estimateId);
+      expect(result.action).toBe('alerted');
+      expect(await readBell(trx, DEDUPE_KEY(ids.estimateId, ids.invoiceId, [ids.lawnId]))).toBeTruthy();
+    }));
+
+    test('split evidence: an own live invoice that bills the base application (client_id scheduled_<id>_primary) DOES resolve the sibling', () => rollbackTest(async (trx) => {
+      const ids = await fixture(trx);
+      await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: MOVED });
+      await trx('invoices').insert({
+        id: randomUUID(), customer_id: ids.customerId, scheduled_service_id: ids.lawnId,
+        token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
+        status: 'draft', title: 'Lawn Care', notes: 'Split from the combined invoice.',
+        line_items: JSON.stringify([{ client_id: `scheduled_${ids.lawnId}_primary`, description: 'Lawn Care', quantity: 1, unit_price: 42, amount: 42 }]),
+        subtotal: 42, total: 42,
+      });
+      const [result] = await sweepOnce(trx, ids.estimateId);
+      expect(result.action).toBe('cleared');
+      expect(result.reason).toBe('split_completed');
+    }));
+
+    // Codex pre-push P1 on 15bb180830: the bounded runtime reconciliation
+    // must never widen an accept-time (authoritative) group.
+    test('reconciliation never adds an unlisted same-day bystander to an accept-time stamped group; only the unbounded historical run repairs partial groups', () => rollbackTest(async (trx) => {
+      const ids = await fixture(trx); // stamped at "accept": pest + lawn
+      const bystanderId = randomUUID();
+      await trx('scheduled_services').insert({
+        id: bystanderId, customer_id: ids.customerId, source_estimate_id: ids.estimateId, scheduled_date: '2026-10-01',
+        service_type: 'Mosquito Misting', status: 'confirmed', is_recurring: true, estimated_price: null,
+      });
+      await reconcileRecentUnstampedAccepts(trx);
+      expect((await row(trx, bystanderId)).first_application_invoice_id).toBeNull();
+      expect((await row(trx, ids.lawnId)).first_application_invoice_id).toBe(ids.invoiceId);
+      // The migrations' unbounded run is the historical repair path and is
+      // allowed to extend a partially stamped group (documented contract).
+      await backfillFirstApplicationInvoiceStamps(trx);
+      expect((await row(trx, bystanderId)).first_application_invoice_id).toBe(ids.invoiceId);
     }));
 
     test('backfill ownership: an old REFUNDED invoice attached to the anchor is dead, not a live claim — the pair is still stamped', () => rollbackTest(async (trx) => {

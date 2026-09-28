@@ -800,14 +800,28 @@ async function loadGoverningInvoice(conn, freshInvoice) {
 // stamped combined invoice and the governing invoice are excluded from that
 // evidence — both sit on the anchor's own id by construction, so counting
 // them would read "the anchor has its own invoice" for every group.
+//
+// Codex r16 P1 (PR #5021): "a live invoice on the sibling's row" is not, by
+// itself, evidence that the sibling's share was split off — several invoices
+// can share one visit (an add-on, a repair, a hand invoice for something
+// else). The split evidence is the ONE shared base-application identity the
+// whole codebase uses (invoiceBillsBaseApplication -> InvoiceService.
+// lineIsBaseApplication: a positive line tagged client_id
+// `scheduled_<id>_primary`, which "create invoice from service" writes, or
+// described "First service application"). An own live invoice that does not
+// bill the base application leaves the member UNresolved: the alert stands
+// and the office confirms by hand. Fails toward alerting, never toward a
+// silent clear.
 async function flagOwnLiveInvoices(conn, freshMembers, { anchorId, anchorExcludedInvoiceIds }) {
+  const { invoiceBillsBaseApplication } = require('./estimate-first-application-invoice');
   const ownInvoices = await conn('invoices')
     .whereIn('scheduled_service_id', freshMembers.map((m) => m.id))
     .whereNotIn('status', InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES)
-    .select('id', 'scheduled_service_id');
+    .select('id', 'scheduled_service_id', 'line_items');
   const excluded = new Set(anchorExcludedInvoiceIds.filter((id) => id != null).map(String));
   const ownInvoiceSet = new Set(ownInvoices
     .filter((inv) => String(inv.scheduled_service_id) !== String(anchorId) || !excluded.has(String(inv.id)))
+    .filter((inv) => invoiceBillsBaseApplication(inv))
     .map((inv) => String(inv.scheduled_service_id)));
   return freshMembers.map((m) => ({ ...m, has_own_live_invoice: ownInvoiceSet.has(String(m.id)) }));
 }

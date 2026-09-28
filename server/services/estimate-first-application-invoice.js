@@ -147,10 +147,21 @@ async function backfillFirstApplicationInvoiceStamps(conn = db, { sinceDays = nu
   // excludeInvoiceAlias also marks the ANCHOR query: an anchor already stamped
   // with that same invoice is still a candidate (a partially stamped group is
   // extended, never re-stamped); a sibling must be unstamped.
+  // Extending a PARTIALLY stamped group (anchor already stamped to this same
+  // invoice, a sibling still unstamped) is HISTORICAL repair only: the first
+  // frozen migration stamped anchor + still-aligned sibling and missed the
+  // already-moved one. It is allowed solely on the unbounded run the
+  // migrations make (sinceDays null). The bounded runtime reconciliation
+  // the sweep runs every tick considers UNSTAMPED anchors only: a recent
+  // invoice's accept-time stamp is authoritative membership, and inferring
+  // an extra same-day unpriced row into it would undo the stamper's explicit
+  // memberIds exclusion of a bystander program (Codex pre-push P1 on
+  // 15bb180830, PR #5021).
+  const extendPartialGroups = sinceDays == null;
   const notAlreadyClaimed = (query, alias, excludeInvoiceAlias = null) => query
     .where(function unstampedOrStampedToThisInvoice() {
       this.whereNull(`${alias}.first_application_invoice_id`);
-      if (excludeInvoiceAlias) this.orWhereRaw(`${alias}.first_application_invoice_id = ${excludeInvoiceAlias}.id`);
+      if (excludeInvoiceAlias && extendPartialGroups) this.orWhereRaw(`${alias}.first_application_invoice_id = ${excludeInvoiceAlias}.id`);
     })
     .whereNotExists(function anchorOfAnotherLiveInvoiceExists() {
       const sub = this.select(1).from('invoices as other')
