@@ -1013,10 +1013,12 @@ describe('internal-link dry-run executor helpers', () => {
     };
     let dbCall = 0;
     db.mockImplementation(() => (dbCall++ === 0 ? selectChain : updateChain));
+    GitHubClient.retireBranch = jest.fn(async () => true);
 
     const recovered = await new InternalLinkPrExecutor()._recoverStalePrReservedTasks();
 
     expect(recovered).toBe(1);
+    expect(GitHubClient.retireBranch).toHaveBeenCalledWith('content/internal-link-orphan-abc123');
     expect(selectChain.where).toHaveBeenCalledWith('status', 'pr_reserved');
     expect(selectChain.whereNull).toHaveBeenCalledWith('astro_pr_url');
     expect(selectChain.where).toHaveBeenCalledWith('updated_at', '<', expect.any(Date));
@@ -1710,5 +1712,23 @@ describe('internal-link ambiguous PR-open failure', () => {
     GitHubClient.retireBranch = jest.fn(async () => false);
     await new InternalLinkPrExecutor()._releaseReservedTasks([{ task: { id: 't1' } }], { branch: 'b', err: new Error('x') });
     expect(updates).toEqual([]);
+  });
+});
+
+describe('internal-link stale reservation keeps its branch reference until retired', () => {
+  test('an unconfirmed branch retirement leaves the reservation for the next sweep', async () => {
+    const updates = [];
+    const q = {
+      where: jest.fn(() => q),
+      whereNull: jest.fn(() => q),
+      select: jest.fn(async () => [{ id: 'r1', pr_branch: 'content/internal-link-x', reviewer_notes: null }]),
+      update: jest.fn(async (patch) => { updates.push(patch); return 1; }),
+    };
+    db.mockImplementation(() => q);
+    GitHubClient.findOpenPrByHead.mockResolvedValueOnce(null);
+    GitHubClient.retireBranch = jest.fn(async () => false);
+    expect(await new InternalLinkPrExecutor()._recoverStalePrReservedTasks()).toBe(0);
+    expect(updates).toEqual([]);
+    db.mockImplementation(() => undefined);
   });
 });

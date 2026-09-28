@@ -1179,6 +1179,7 @@ class InternalLinkPrExecutor {
       .whereNull('astro_pr_url')
       .where('updated_at', '<', cutoff)
       .select('id', 'pr_branch', 'reviewer_notes');
+    let freed = 0;
     for (const row of rows) {
       // A crash after createPr but before _markTasksPrOpen leaves a real open
       // PR behind a pr_reserved row with no URL. Restore that PR's lifecycle
@@ -1199,6 +1200,17 @@ class InternalLinkPrExecutor {
         });
         continue;
       }
+      // No PR: the branch (if any) must be CONFIRMED gone before the task is
+      // freed — a surviving branch could be PR'd or reopened outside tracking.
+      if (row.pr_branch) {
+        let retired = false;
+        try {
+          retired = await GitHubClient.retireBranch(row.pr_branch);
+        } catch (err) {
+          logger.warn(`[internal-link-pr-executor] stale reservation branch retirement failed for ${row.pr_branch}: ${err.message}`);
+        }
+        if (!retired) continue; // retried on the next sweep
+      }
       const note = `[${new Date().toISOString()}] system: recovered stale pr_reserved reservation`
         + `${row.pr_branch ? ` (branch ${row.pr_branch})` : ''} back to patch_candidate.`;
       await db(TABLE)
@@ -1209,11 +1221,12 @@ class InternalLinkPrExecutor {
           reviewer_notes: [String(row.reviewer_notes || '').trim(), note].filter(Boolean).join('\n').slice(-5000),
           updated_at: new Date(),
         });
+      freed += 1;
     }
-    if (rows.length) {
-      logger.info(`[internal-link-pr-executor] recovered ${rows.length} stale pr_reserved task(s) back to patch_candidate`);
+    if (freed) {
+      logger.info(`[internal-link-pr-executor] recovered ${freed} stale pr_reserved task(s) back to patch_candidate`);
     }
-    return rows.length;
+    return freed;
   }
 
   // Record a TRANSIENT verification error (GitHub API/network) without
