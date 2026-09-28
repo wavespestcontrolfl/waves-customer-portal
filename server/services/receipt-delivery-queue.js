@@ -419,7 +419,7 @@ async function claimReceiptJobForOperatorSend(invoiceId) {
       .onConflict(['invoice_id'])
       .ignore()
       .returning(['id']);
-    if (inserted?.[0]) return { id: inserted[0].id, token, prior: null };
+    if (inserted?.[0]) return { id: inserted[0].id, invoiceId, token, prior: null };
 
     const job = await trx('receipt_delivery_jobs')
       .where({ invoice_id: invoiceId })
@@ -433,7 +433,7 @@ async function claimReceiptJobForOperatorSend(invoiceId) {
     await trx('receipt_delivery_jobs')
       .where({ id: job.id })
       .update({ status: 'running', locked_at: trx.fn.now(), locked_by: token, updated_at: trx.fn.now() });
-    return { id: job.id, token, prior: { status: job.status, next_attempt_at: job.next_attempt_at } };
+    return { id: job.id, invoiceId, token, prior: { status: job.status, next_attempt_at: job.next_attempt_at } };
   });
 }
 
@@ -460,6 +460,10 @@ async function releaseOperatorReceiptClaim(claim, { emailDelivered = false, smsR
   const mine = () => db('receipt_delivery_jobs').where({ id: claim.id, status: 'running', locked_by: claim.token });
   try {
     if (emailDelivered) {
+      // The invoice is stamped first (the caller's own stamp may have
+      // failed): if this write fails too, the claim stays running with its
+      // email evidence and recoverStaleLocks stamps and closes it later.
+      await db('invoices').where({ id: claim.invoiceId }).whereNull('receipt_sent_at').update({ receipt_sent_at: db.fn.now() });
       await mine().update({
         status: 'completed',
         sms_result: smsResult,

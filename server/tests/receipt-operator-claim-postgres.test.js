@@ -229,4 +229,13 @@ postgres('operator receipt claim on PostgreSQL', () => {
     expect(await claimReceiptJobForOperatorSend(sentId)).toEqual({ id: null });
     expect(await job(sentId)).toMatchObject({ status: 'completed', email_result: { operator_claim: sentClaim.token } });
   });
+
+  test('a delivered release stamps the invoice itself — the caller\'s own stamp may have failed', async () => {
+    const invoiceId = await seedJob();
+    await mockPg('invoices').insert({ id: invoiceId, receipt_sent_at: null });
+    const claim = await claimReceiptJobForOperatorSend(invoiceId);
+    await releaseOperatorReceiptClaim(claim, { emailDelivered: true, emailResult: { ok: true } });
+    expect((await mockPg('invoices').where({ id: invoiceId }).first()).receipt_sent_at).toBeInstanceOf(Date);
+    expect(await job(invoiceId)).toMatchObject({ status: 'completed' });
+  });
 });
