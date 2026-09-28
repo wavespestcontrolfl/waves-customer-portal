@@ -571,6 +571,198 @@ async function scheduleForInvoice(invoiceId) {
   });
 }
 
+// GATE_DUNNING_ADOPT_ORPHANS, read at call time (strict 'true'): an invoice
+// sent outside the direct-send path (the only caller of scheduleForInvoice)
+// never got a sequence row and was left to the legacy late-payment-checker.js
+// alone. The sweep only runs once that checker is retired
+// (latePaymentCheckerRetiredLive): beside a still-running checker every
+// adoption is a same-morning handoff (#5179 drew seven audit rounds of
+// them). Off, or the checker still running: byte-identical — runPending
+// never looks for orphans (the adopt gate alone logs one warning).
+function adoptOrphanInvoicesLive() {
+  return process.env.GATE_DUNNING_ADOPT_ORPHANS === 'true' && latePaymentCheckerRetiredLive();
+}
+
+function adoptGateSetWithCheckerRunning() {
+  return process.env.GATE_DUNNING_ADOPT_ORPHANS === 'true' && !latePaymentCheckerRetiredLive();
+}
+
+// Has the legacy checker ever contacted the customer about this invoice?
+// Such an invoice carries state the ladder does not model (which tier was
+// delivered, a pending email retry, spacing from that delivery), so the
+// sweep leaves it alone and the dry-run lists it for a person to settle.
+// An unreadable history is not an empty one: the candidate is skipped for
+// this sweep.
+async function hasLegacyCheckerHistory(invoiceId) {
+  try {
+    const rows = await db('collections_contact_ledger')
+      .where({ source: 'late_payment_checker' })
+      .whereRaw('invoice_ids @> ?::jsonb', [JSON.stringify([invoiceId])]);
+    return { hasHistory: (rows || []).length > 0 };
+  } catch (err) {
+    logger.warn(`[invoice-followups] adoption legacy-history lookup failed for invoice ${invoiceId} — skipping this sweep: ${err.message}`);
+    return { unavailable: true };
+  }
+}
+
+/**
+ * scheduleForInvoice arms an autopay customer's fresh row at 'autopay_hold'
+ * with autopay_failures_observed starting at 0, but a customer already at or
+ * past the failure threshold (ach_failure_log — the same durable, 90-day,
+ * unresolved-only record handleAutopayFailure's own webhook counter reads)
+ * would then need MORE new failures before ever releasing, even though
+ * autopay is already known broken for them. Seeds the counter from that
+ * history for adopted rows only, releasing immediately through the same
+ * path the webhook uses when it is already at or past threshold.
+ */
+async function initializeAdoptedAutopayHold(row, customerId) {
+  if (!row || row.status !== 'autopay_hold') return row;
+  let priorFailures = 0;
+  try {
+    priorFailures = Number((await db('ach_failure_log')
+      .where({ customer_id: customerId, resolved: false })
+      .where('failure_date', '>=', new Date(Date.now() - 90 * 24 * 60 * 60 * 1000))
+      .count('* as cnt')
+      .first())?.cnt || 0);
+  } catch (err) {
+    logger.warn(`[invoice-followups] adoption autopay-history read failed for customer ${customerId} — holding at 0 prior failures: ${err.message}`);
+    return row;
+  }
+  if (!priorFailures) return row;
+  if (priorFailures >= config.autopayFailureThreshold) {
+    await releaseFromAutopayHold(row.invoice_id);
+    const released = await db('invoice_followup_sequences').where({ id: row.id }).first();
+    logger.info(`[invoice-followups] adopted invoice ${row.invoice_id} released from autopay_hold — customer already had ${priorFailures} unresolved ACH failure(s)`);
+    return released || row;
+  }
+  await db('invoice_followup_sequences').where({ id: row.id, status: 'autopay_hold' })
+    .update({ updated_at: db.fn.now(), autopay_failures_observed: priorFailures });
+  return { ...row, autopay_failures_observed: priorFailures };
+}
+
+/**
+ * Find delivered, open, homeowner-billed invoices with NO
+ * invoice_followup_sequences row and no legacy checker history, and arm one
+ * for each through scheduleForInvoice — the exact path a normal invoice send
+ * takes, so every one of its guards (payer-billed, active payment plan,
+ * autopay hold, ownership-under-lock) applies unchanged. Nothing is sent
+ * here: the row lands at step 0 anchored to when the invoice went out; when
+ * that anchor is already old, runPending's stale-touch pass advances it to
+ * the first step whose day has not passed, and a row adopted in a run never
+ * sends in that run (deferAdoptedFirstTouch re-dates a landing step that is
+ * already due to the next send-window day so it is sent fresh, never
+ * stale-skipped).
+ *
+ * `dryRun: true` writes nothing and returns the candidates plus the
+ * skipped-with-reason list (`has_legacy_history` is the hand list: invoices
+ * the retired checker already contacted, for a person to settle);
+ * oldest-sent-first either way, same selection as the live sweep.
+ */
+async function adoptOrphanInvoices({ dryRun = false } = {}) {
+  const rows = await db('invoices as i')
+    .leftJoin('invoice_followup_sequences as s', 's.invoice_id', 'i.id')
+    .join('customers as c', 'c.id', 'i.customer_id')
+    .whereNull('s.id')
+    // Delivered statuses ONLY — not "not draft/terminal", which also admits
+    // 'scheduled'/'sending', an invoice queued for its FIRST send that has
+    // not reached the customer; the same evidence late-payment-checker.js's
+    // own candidate query requires.
+    .whereIn('i.status', PUBLISHED_INVOICE_STATUSES)
+    .whereNull('i.payer_id')
+    .where(function withdrawnExcluded() {
+      this.whereNull('i.scheduled_send_error').orWhereNot('i.scheduled_send_error', 'like', 'payer_billed:%');
+    })
+    .whereNull('c.deleted_at')
+    // Same guard scheduleForInvoice applies under the invoice lock — filtered
+    // here too so the dry-run candidate set matches what adoption would do.
+    .whereNotExists(function noActivePlan() {
+      this.select(1).from('payment_plans')
+        .whereRaw('payment_plans.invoice_id = i.id')
+        .andWhere('payment_plans.status', 'active');
+    })
+    .orderByRaw('COALESCE(i.sent_at, i.sms_sent_at, i.created_at) asc')
+    .select(
+      'i.id as invoice_id', 'i.customer_id', 'i.total', 'i.credit_applied',
+      'i.sent_at', 'i.sms_sent_at', 'i.created_at',
+    );
+
+  const now = Date.now();
+  const mapped = rows
+    .map((row) => ({
+      invoice_id: row.invoice_id,
+      customer_id: row.customer_id,
+      sent_at: row.sent_at || row.sms_sent_at || row.created_at,
+      amount_due: invoiceAmountDue(row),
+    }))
+    // amount due > 0 — the same "is there anything to collect" test the
+    // legacy checker's own dunning decision is built on.
+    .filter((candidate) => candidate.amount_due > 0);
+
+  const candidates = [];
+  const skipped = [];
+  for (const candidate of mapped) {
+    const history = await hasLegacyCheckerHistory(candidate.invoice_id);
+    if (history.unavailable || history.hasHistory) {
+      const reason = history.unavailable ? 'legacy_history_unreadable' : 'has_legacy_history';
+      skipped.push({ invoice_id: candidate.invoice_id, customer_id: candidate.customer_id, reason });
+      continue;
+    }
+    candidates.push({
+      ...candidate,
+      days_since_sent: Math.floor((now - new Date(candidate.sent_at).getTime()) / 86400000),
+    });
+  }
+
+  if (dryRun) return { candidates, skipped };
+
+  if (!latePaymentCheckerRetiredLive()) {
+    logger.warn('[invoice-followups] adoption refused: GATE_LATE_PAYMENT_CHECKER_OFF is not live — the sweep (and the script\'s --execute) only run once the legacy checker is retired');
+    return { adopted: 0, invoiceIds: [], skipped, refused: 'checker_running' };
+  }
+  const adoptedIds = [];
+  for (const candidate of candidates) {
+    try {
+      const armed = await scheduleForInvoice(candidate.invoice_id);
+      if (!armed) continue;
+      // Recorded the moment the row exists: a failure in the autopay
+      // seeding below still leaves a row this run must not send.
+      adoptedIds.push(candidate.invoice_id);
+      await initializeAdoptedAutopayHold(armed, candidate.customer_id);
+    } catch (err) {
+      // One candidate's failure must never abort the whole sweep — the
+      // next run re-selects it fresh.
+      logger.error(`[invoice-followups] adoption failed for invoice ${candidate.invoice_id}: ${err.message}`);
+    }
+  }
+  const legacyLeft = skipped.filter((s) => s.reason === 'has_legacy_history').length;
+  if (legacyLeft) {
+    logger.info(`[invoice-followups] adoption left ${legacyLeft} invoice(s) with legacy checker history for a person to settle (see the dry-run script)`);
+  }
+  if (adoptedIds.length) {
+    logger.info(`[invoice-followups] adopted ${adoptedIds.length} orphan invoice(s): ${adoptedIds.join(', ')}`);
+  }
+  return {
+    adopted: adoptedIds.length, invoiceIds: adoptedIds, skipped,
+  };
+}
+
+/**
+ * A row adopted in THIS run never sends in this run. Its due step is moved
+ * to the next send-window day at 10:00 NY (guarded on the batch snapshot),
+ * so the next tick finds it due and fresh rather than past its stale grace
+ * and passes it over — the deferral costs a day, never the step.
+ */
+async function deferAdoptedFirstTouch(row, now) {
+  if (!row.next_touch_at || new Date(row.next_touch_at).getTime() > now.getTime()) return false;
+  const nextRun = firstEligibleFireAt(anchorTo10amNY(now, 1, config.sendWindow.hour));
+  const updated = await db('invoice_followup_sequences')
+    .where({ id: row.id, status: 'active', step_index: row.step_index, next_touch_at: row.next_touch_at })
+    .update({ updated_at: db.fn.now(), next_touch_at: nextRun });
+  logger.info(`[invoice-followups] invoice ${row.invoice_id} adopted this run — first touch `
+    + `${updated ? `deferred to ${nextRun.toISOString()}` : 'left alone (sequence moved since batch select)'}`);
+  return Number(updated) === 1;
+}
+
 /**
  * Cron entry point — fires all due touches.
  */
@@ -587,6 +779,13 @@ async function runPending() {
   const ladder = ladderThrough90Live();
   if (ladder) await reviveLegacyFinishedSequences();
   if (latePaymentCheckerRetiredLive()) await reviveReopenedLowStepSequences();
+  if (adoptGateSetWithCheckerRunning()) {
+    logger.warn('[invoice-followups] GATE_DUNNING_ADOPT_ORPHANS ignored: GATE_LATE_PAYMENT_CHECKER_OFF is not live — the sweep only runs once the legacy checker is retired');
+  }
+  // Adoption runs BEFORE the batch select so an adopted row's stale timeline
+  // is advanced in this same run; only the SEND is deferred to the next run.
+  const adoptedInvoiceIds = adoptOrphanInvoicesLive()
+    ? new Set((await adoptOrphanInvoices()).invoiceIds) : null;
 
   // No deleted-customer filter here: fireStep() pauses those sequences
   // (status='paused', next_touch_at=null) so they're handled terminally
@@ -650,6 +849,15 @@ async function runPending() {
       if (row.next_touch_at && isStaleTouch(row.next_touch_at, now)) {
         const skip = await skipStaleTouches(row, now);
         skipped++;
+        // Adopted THIS run: the timeline above is still advanced correctly,
+        // but the send itself waits for the NEXT run; a landing step due
+        // today is re-dated to that run so the next tick sends it fresh.
+        if (adoptedInvoiceIds?.has(row.invoice_id)) {
+          if (skip.updated && skip.nextAt) {
+            await deferAdoptedFirstTouch({ ...row, step_index: skip.nextIndex, next_touch_at: skip.nextAt }, now);
+          }
+          continue;
+        }
         // The landing step can itself be due THIS run (a step went stale over
         // a weekend and the next one anchors to today) — fire it now, or the
         // next tick would find it past ITS eligible day and stale-skip it too
@@ -661,6 +869,11 @@ async function runPending() {
           await fireStep({ ...row, step_index: skip.nextIndex, next_touch_at: skip.nextAt });
           sent++;
         }
+        continue;
+      }
+      if (adoptedInvoiceIds?.has(row.invoice_id)) {
+        await deferAdoptedFirstTouch(row, now);
+        skipped++;
         continue;
       }
       await fireStep(row);
@@ -2377,6 +2590,7 @@ async function isDunningStopped(invoiceId, database = db) {
 }
 
 module.exports = {
+  adoptOrphanInvoices,
   scheduleForInvoice,
   runPending,
   // Used by the scheduled-SMS executor to suppress stale deferred
