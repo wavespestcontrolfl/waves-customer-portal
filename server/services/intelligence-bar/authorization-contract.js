@@ -600,7 +600,19 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     for (const n of preview.all_customer_names) moreEffects.push({ kind: 'customer', label: String(n) });
     push('customer', `All ${preview.all_customer_names.length} customer names are listed under "Show more"`);
   }
-  if (!propertyAction && !customerEstimateAction && WRITE_TWO_STEP_TOOL_NAMES.has(toolName) && preview && typeof preview === 'object') {
+  // repair_closeout: one effect per planned step (server-owned labels), plus
+  // the open items the confirm will NOT touch — never a flattened dump of
+  // the plan object.
+  if (toolName === 'repair_closeout' && Array.isArray(preview?.steps)) {
+    push('customer', `Visit: ${preview.visit || preview.service_id} — ${preview.customer_name || preview.customer_id || 'customer unresolved'}`);
+    for (const st of preview.steps) {
+      push(/email/i.test(st.step) ? 'comms' : 'operational', String(st.effect || st.step));
+    }
+    if (Array.isArray(preview.manual) && preview.manual.length) {
+      push('operational', `Not touched (${preview.manual.length}): ${preview.manual.map((m) => m.fact).join(', ')}`);
+    }
+  }
+  if (toolName !== 'repair_closeout' && !propertyAction && !customerEstimateAction && WRITE_TWO_STEP_TOOL_NAMES.has(toolName) && preview && typeof preview === 'object') {
     let shown = 0;
     for (const [k, v] of Object.entries(preview)) {
       if (PREVIEW_NOISE_KEYS.has(k) || String(k).startsWith('_') || VOLATILE_KEY_RE.test(k)) continue;
@@ -752,12 +764,15 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   const bookingConfirmationText = toolName === 'create_appointment' && !!params?.time_window;
   const notifiesCustomer = toolName === 'move_stops_to_day'
     ? params?.notify_customers === true
-    : (CUSTOMER_CONTACT_TOOL_NAMES.has(toolName) || emailReplyToCustomer || emailChangeMayContact || bookingConfirmationText);
+    : (CUSTOMER_CONTACT_TOOL_NAMES.has(toolName) || emailReplyToCustomer || emailChangeMayContact || bookingConfirmationText
+      // A repair plan that queues a report email or receipt contacts the
+      // customer through the delivery workers.
+      || (toolName === 'repair_closeout' && preview?.notifies_customer === true));
   // "Will" only for tools whose whole point is the send; the conditional
   // double-opt-in path says "may" (GH r12 P2) — notifies_customer and the
   // irreversibility derivation stay conservative either way.
   if (notifiesCustomer) {
-    let contactLabel = CUSTOMER_CONTACT_TOOL_NAMES.has(toolName) || emailReplyToCustomer || toolName === 'move_stops_to_day'
+    let contactLabel = CUSTOMER_CONTACT_TOOL_NAMES.has(toolName) || emailReplyToCustomer || toolName === 'move_stops_to_day' || toolName === 'repair_closeout'
       ? 'Customer will be contacted'
       : 'Customer may be contacted (conditional double-opt-in re-send only)';
     if (bookingConfirmationText) {
