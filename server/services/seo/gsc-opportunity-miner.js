@@ -4193,11 +4193,17 @@ class GscOpportunityMiner {
       && GscOpportunityMiner.PAGE_EDITING_ACTIONS.includes(o.action_type)
       && o.page_url
       && o.score >= minScoreToActFor(o.action_type));
+    // Family refreshes (listicle_family keeps the blog floor) are excluded
+    // above — they yield to these edits — but one that SURVIVES still edits
+    // its page, and a pinned question article (no page_url, so no family
+    // arbitration sees it) must yield to it.
+    const familyRefreshes = batch.filter((o) => o.bucket === 'listicle_family'
+      && o.action_type === 'refresh_existing_page' && o.page_url && isPersistable(o));
     let frozenKeys = new Set();
     try {
-      if (candidates.length) {
+      if (candidates.length || familyRefreshes.length) {
         const rows = await db('opportunity_queue')
-          .whereIn('dedupe_key', candidates.map((o) => o.dedupe_key))
+          .whereIn('dedupe_key', [...candidates, ...familyRefreshes].map((o) => o.dedupe_key))
           .whereIn('status', ['done', 'skipped'])
           .select('dedupe_key');
         frozenKeys = new Set(rows.map((r) => r.dedupe_key));
@@ -4217,16 +4223,25 @@ class GscOpportunityMiner {
         if (u && u.query) liveQueries.add(String(u.query).toLowerCase());
       }
     }
-    return {
+    const arbitrated = {
       pages: new Set(live.map((o) => routeIdentity(o.page_url))),
-      // Pages another bucket will edit this batch — an aeo_question_gap
-      // refresh yields to them (aeoQuestionOppYields).
-      nonAeoQuestionPages: new Set(live.filter((o) => o.bucket !== AEO_QUESTION_GAP_BUCKET).map((o) => routeIdentity(o.page_url))),
       // A family BLOG whose variant one of these refreshes targets is the
       // same intent under a different key — a boosted ordinary refresh and
       // a family blog must not both persist (Codex r21).
       queries: liveQueries,
     };
+    // Routes another bucket will edit this batch — an aeo_question_gap row
+    // yields to them (aeoQuestionOppYields, _reconcileAeoQuestionPages):
+    // other buckets' live edits plus the family refreshes that survive
+    // their own arbitration (which never collide with a question REFRESH —
+    // those are in `pages`, so the family yields to them).
+    const liveFamily = familyRefreshes.filter((o) => !frozenKeys.has(o.dedupe_key)
+      && !GscOpportunityMiner.familyOppYields(o, arbitrated));
+    arbitrated.nonAeoQuestionPages = new Set([
+      ...live.filter((o) => o.bucket !== AEO_QUESTION_GAP_BUCKET),
+      ...liveFamily,
+    ].map((o) => routeIdentity(o.page_url)));
+    return arbitrated;
   }
 
   // Cross-run half of the aeo_question_gap page arbitration, inside the

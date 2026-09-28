@@ -3201,6 +3201,15 @@ describe('aeo_question_gap bucket', () => {
     expect(article.page_url).toBeNull();
     expect(GscOpportunityMiner.aeoQuestionOppYields(article, await miner._arbitratedRefreshPages([article, decay]))).toBe(true);
     expect(GscOpportunityMiner.aeoQuestionOppYields(article, await miner._arbitratedRefreshPages([article]))).toBe(false);
+    // A surviving FAMILY refresh of the route wins over the pinned article
+    // too (family rows are outside the ordinary refresh candidates)...
+    const famRefresh = { bucket: 'listicle_family', action_type: 'refresh_existing_page', page_url: `${HUB}/termite/termite-bond/`, query: 'termite bond florida', service: 'termite', city: null, score: 60, signal_metadata: { family_queries: [] }, dedupe_key: 'listicle_family::page::bond' };
+    expect(GscOpportunityMiner.aeoQuestionOppYields(article, await miner._arbitratedRefreshPages([article, famRefresh]))).toBe(true);
+    // ...but a family refresh that itself yields (to the question REFRESH of
+    // that page) never makes the question refresh yield back.
+    const famArb = await miner._arbitratedRefreshPages([mine, famRefresh]);
+    expect(GscOpportunityMiner.familyOppYields(famRefresh, famArb)).toBe(true);
+    expect(GscOpportunityMiner.aeoQuestionOppYields(mine, famArb)).toBe(false);
     db.mockReset();
   });
 
@@ -3255,6 +3264,18 @@ describe('aeo_question_gap bucket', () => {
       upserts.length = 0;
       expect(await miner.persistAll([decay], trx)).toBe(1);
       expect(queue[1]).toMatchObject({ status: 'expired', skip_reason: 'aeo_question_yielded_page_edit' });
+      queue.pop();
+      // Same for a family refresh arriving later against a pending pinned
+      // article, and a CLAIMED article makes the family refresh wait.
+      const fam = { bucket: 'listicle_family', action_type: 'refresh_existing_page', query: 'termite bond florida', page_url: page, service: 'termite', city: null, score: 60, score_breakdown: {}, signal_metadata: { family_queries: [] }, dedupe_key: 'listicle_family::page::bond' };
+      queue.push({ id: 3, bucket: 'aeo_question_gap', page_url: null, target_path: '/termite/termite-bond/', status: 'pending' });
+      upserts.length = 0;
+      expect(await miner.persistAll([fam], trx)).toBe(1);
+      expect(queue[1]).toMatchObject({ status: 'expired', skip_reason: 'aeo_question_yielded_page_edit' });
+      queue[1].status = 'claimed';
+      upserts.length = 0;
+      expect(await miner.persistAll([fam], trx)).toBe(0);
+      expect(upserts).toEqual([]);
       queue.pop();
       // A CLAIMED question write instead makes the incoming edit wait —
       // with the mining gate OFF too: the gate stops new questions, not the
