@@ -560,6 +560,32 @@ describe('owner-queue safety guard: ai_citation-discovered domains never read AU
     expect(P.isDiscoveryOnlyDomain(domain({ source: 'competitor_gap', source_detail: 'competitor_gap_scan ai_citation:' }))).toBe(false);
   });
 
+  // Codex P1 2026-09-28 (round 7): domains first-touched by the feeder's
+  // EARLIER pushes carry its old label (`ai_citation_feeder · …`), which
+  // ensureDomain never rewrites. After a rollback relabel AND an enrich run
+  // that replaced the enrichment marker, that label is the only signal left.
+  describe('pre-prefix feeder labels (every format the feeder ever wrote)', () => {
+    const rolledBackAndReEnriched = (detail) => domain({ source: 'legacy_unknown', source_detail: detail, enrichment: { domain_rating: 55 } });
+    test.each([
+      ['373b021243 base label', 'ai_citation_feeder · listing · 2x · gemini/openai · Q1 · local'],
+      ['373b021243 base label, no question, not local', 'ai_citation_feeder · editorial · 1x · openai'],
+      ['f0d12744f5 label with subtype', 'ai_citation_feeder · editorial · 1x · openai · Q1 · local · listicle_candidate'],
+      ['a label sliced at the old 120-char cap', `ai_citation_feeder · listing · 12x · gemini/openai/perplexity · ${'Who is the best pest control company in Sarasota FL?'.slice(0, 40)} · local`.slice(0, 120)],
+    ])('%s still decides OWNER_*, never AUTO_*', (_name, detail) => {
+      const d = rolledBackAndReEnriched(detail);
+      expect(P.isDiscoveryOnlyDomain(d)).toBe(true);
+      expect(level(P.decideAuthority({ path: path(), domain: d, policy: autoAllowsEverything() }), 'execution')).toBe('OWNER_FREE');
+    });
+    test('near-misses of the old label are NOT discovery-only (anchored, exact separators, enqueued categories only)', () => {
+      for (const detail of [
+        'imported: ai_citation_feeder · listing · 2x · openai', // not anchored
+        'ai_citation_feeder - listing - 2x - openai', // wrong separator
+        'ai_citation_feeder · other · 2x · openai', // a category the feeder never enqueued
+        'ai_citation_feeder · listing · x · openai', // no count
+      ]) expect(P.isDiscoveryOnlyDomain(rolledBackAndReEnriched(detail))).toBe(false);
+    });
+  });
+
   // Codex P1 2026-09-28 (round 5): the feeder now keeps every sampled cited
   // URL in full, so a first-touch detail routinely runs past 120 chars. The
   // prefix guard reads the stored column (text, unbounded), never the hashed

@@ -2,7 +2,7 @@
  * ai-citation-classifier — pure, deterministic classification of a cited URL
  * into the seven AEO discovery-feeder categories.
  */
-const { classifyUrl, isLocallyRelevant, isProviderIntentQuestion, ENQUEUABLE_CATEGORIES } = require('../services/seo/ai-citation-classifier');
+const { classifyUrl, isLocallyRelevant, isProviderIntentQuestion, ENQUEUABLE_CATEGORIES, _internals } = require('../services/seo/ai-citation-classifier');
 
 describe('classifyUrl', () => {
   test('owned: a wavespestcontrol.com citation is owned, never a discovery candidate', () => {
@@ -169,6 +169,18 @@ describe('classifyUrl', () => {
     expect(classifyUrl('https://www.quora.com/Whats-the-best-pest-control-company').category).toBe('community_video');
   });
 
+  // Codex P2 2026-09-28 (round 7): every social host competitor-discovery.js
+  // names is human-only here too — imported, so the two lists cannot drift.
+  test('community_video: every competitor-discovery SOCIAL_HOSTS platform (facebook aside) — instagram, tiktok, linkedin, pinterest, x/twitter', () => {
+    const { SOCIAL_HOSTS } = require('../services/seo/competitor-discovery')._internals;
+    for (const host of SOCIAL_HOSTS.filter((h) => h !== 'facebook.com')) {
+      expect(_internals.COMMUNITY_VIDEO_DOMAINS).toContain(host);
+      expect(classifyUrl(`https://www.${host}/sarasotapestpros`)).toEqual({ category: 'community_video', host, rule: 'community_video_domain' });
+    }
+    expect(classifyUrl('https://x.com/sarasotapestpros/status/1').category).toBe('community_video');
+    expect(classifyUrl('https://www.linkedin.com/company/sarasota-pest-pros').category).toBe('community_video');
+  });
+
   test('other: an unmatched domain falls through', () => {
     expect(classifyUrl('https://www.random-blog-example.test/pest-control-tips').category).toBe('other');
   });
@@ -262,6 +274,24 @@ describe('classifyUrl', () => {
       // the qualifying path is unchanged, with or without providerIntent
       expect(classifyUrl('https://www.forbes.com/home-improvement/pest-control/best-pest-control-sarasota/', { providerIntent: true }))
         .toEqual({ category: 'editorial', host: 'forbes.com', rule: 'special:forbes.com' });
+    });
+
+    // Codex P2 2026-09-28 (round 7): a social profile whose handle carries
+    // a service-area token is still a human-only social page — never
+    // promoted to an enqueued editorial listicle candidate.
+    test('instagram.com/sarasota_pest_control stays community_video on a provider question (never listicle_candidate)', () => {
+      const pi = { providerIntent: true };
+      expect(classifyUrl('https://www.instagram.com/sarasota_pest_control', pi))
+        .toEqual({ category: 'community_video', host: 'instagram.com', rule: 'community_video_domain' });
+      for (const url of [
+        'https://www.tiktok.com/@best_pest_control_sarasota',
+        'https://www.pinterest.com/bradentonpestcontrol/',
+        'https://www.linkedin.com/company/venice-fl-pest-control',
+        'https://twitter.com/SarasotaBestPest',
+      ]) {
+        expect(classifyUrl(url, pi)).toMatchObject({ category: 'community_video' });
+        expect(classifyUrl(url, pi).subtype).toBeUndefined();
+      }
     });
 
     test('providerIntent defaults to false when omitted — byte-identical to pre-heuristic behavior', () => {

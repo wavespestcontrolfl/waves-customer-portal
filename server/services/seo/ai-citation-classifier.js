@@ -92,7 +92,16 @@ function competitorDomains() {
   return [...competitorDiscovery.NATIONAL_CHAINS, ...competitorGapMiner.competitorDomains, ...EXTRA_COMPETITOR_DOMAINS];
 }
 
-const COMMUNITY_VIDEO_DOMAINS = Object.freeze(['reddit.com', 'youtube.com', 'quora.com']);
+// Human-only community / social / video hosts. Codex P2 2026-09-28 (round
+// 7): every social platform competitor-discovery.js already names
+// (SOCIAL_HOSTS — instagram, tiktok, linkedin, pinterest, x/twitter, plus
+// reddit and youtube) is imported, not re-typed, so a profile like
+// `instagram.com/sarasota_pest_control` lands here as a FINAL
+// community_video result instead of falling through to the provider-intent
+// listicle heuristic on its local token. facebook.com is in that list too
+// but never reaches this check: SPECIAL_HOSTS decides it first (business
+// Page = listing, content = community_video).
+const COMMUNITY_VIDEO_DOMAINS = Object.freeze([...new Set([...competitorDiscovery.SOCIAL_HOSTS, 'reddit.com', 'youtube.com', 'quora.com'])]);
 
 function matchesSuffix(host, domain) {
   return host === domain || host.endsWith(`.${domain}`);

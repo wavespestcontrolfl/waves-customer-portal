@@ -238,6 +238,18 @@ const AUTO_TO_OWNER_ON_DISCOVERY = Object.freeze({
 // least as durable as `source` itself, and MORE durable across the one
 // scenario (a schema rollback) that can actually clear `source`.
 const AI_CITATION_SOURCE_DETAIL_PREFIX = `${AI_CITATION_SOURCE}:`;
+// The feeder's EARLIER label format (Codex P1 2026-09-28, round 7): the
+// first pushes of link-registry-ai-citation-ingest.js (373b021243 through
+// f0d12744f5) wrote every new domain's first-touch source_detail as
+// `ai_citation_feeder · <category> · <n>x · <platforms>[ · <question>][ ·
+// local][ · <subtype>]`, sliced to 120 chars — only ever listing/editorial,
+// the two categories it enqueued. ensureDomain never rewrites a first-touch
+// detail, so a domain created then keeps that label forever; it is
+// recognized here exactly (anchored, the literal U+00B7 separators, a
+// positive count) rather than backfilled. Frozen — the same pattern string
+// is copied into 20260928110000_link_source_ai_citation_restore.js, and
+// link-source-ai-citation-restore-migration.test.js pins the two equal.
+const LEGACY_AI_CITATION_SOURCE_DETAIL_RE = /^ai_citation_feeder · (listing|editorial) · [0-9]+x · /;
 // BELT-AND-BRACES: the `enrichment` marker key
 // 20260928080000_link_source_ai_citation_rollback_marker.js's down() stamps
 // before 20260928060000's down() relabels `source` away — kept as a second
@@ -255,7 +267,8 @@ function parsedEnrichment(domain) {
 const isDiscoveryOnlyDomain = (domain) => {
   if (!domain) return false;
   if (domain.source === AI_CITATION_SOURCE) return true;
-  if (typeof domain.source_detail === 'string' && domain.source_detail.startsWith(AI_CITATION_SOURCE_DETAIL_PREFIX)) return true;
+  if (typeof domain.source_detail === 'string'
+    && (domain.source_detail.startsWith(AI_CITATION_SOURCE_DETAIL_PREFIX) || LEGACY_AI_CITATION_SOURCE_DETAIL_RE.test(domain.source_detail))) return true;
   const enrichment = parsedEnrichment(domain);
   return Boolean(enrichment && enrichment[AI_CITATION_ENRICHMENT_MARKER] === true);
 };
@@ -491,5 +504,5 @@ module.exports = {
   normalizePolicyRow, applyEnvTightening, loadPolicy, updatePolicy, parseField,
   requiredInstances, submitFirst, validityFailure, isValidMerchantBinding, validLegalTermsHash, decideAuthority,
   DIMENSION_INPUT_FIELDS, floorInputs, floorInputsHash, decisionInputs, decisionInputsHash,
-  AI_CITATION_SOURCE, AI_CITATION_SOURCE_DETAIL_PREFIX, AI_CITATION_ENRICHMENT_MARKER, AUTO_TO_OWNER_ON_DISCOVERY, isDiscoveryOnlyDomain,
+  AI_CITATION_SOURCE, AI_CITATION_SOURCE_DETAIL_PREFIX, LEGACY_AI_CITATION_SOURCE_DETAIL_RE, AI_CITATION_ENRICHMENT_MARKER, AUTO_TO_OWNER_ON_DISCOVERY, isDiscoveryOnlyDomain,
 };
