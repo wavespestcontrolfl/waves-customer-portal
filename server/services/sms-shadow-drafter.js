@@ -495,10 +495,14 @@ async function requestedServiceType(inboundMessage) {
     // General Pest default although a cleanout runs 90.
     const oneTimePest = !inspection && /\b(?:one[-\s]?time|initial|clean\s?out|knock\s?down)\b/i.test(text) && pestWords.test(text)
       ? 'pest_initial_cleanout' : null;
+    // Rodent exclusion / trapping (Codex #5194 r4): the pricing resolver's
+    // special-intent branch returns null for rodent work.
+    const rodentWork = !inspection && !oneTimePest && /\b(?:exclusion|trapping|traps?)\b/i.test(text) && /\b(?:rodent|rats?|mice|mouse)\b/i.test(text)
+      ? ['rodent_exclusion_only', 'rodent_exclusion', 'rodent_trapping'] : null;
     const { serviceKeyFromText } = require('./customer-pricing-ai');
     const explicit = inspection || oneTimePest;
-    const key = explicit ? null : serviceKeyFromText(text);
-    const candidates = explicit ? [explicit] : (key ? PRICING_KEY_TO_CATALOG_KEYS[key] : null);
+    const key = explicit || rodentWork ? null : serviceKeyFromText(text);
+    const candidates = explicit ? [explicit] : rodentWork || (key ? PRICING_KEY_TO_CATALOG_KEYS[key] : null);
     if (!candidates || !candidates.length) return null;
     const { resolveServiceType } = require('./service-library');
     for (const catalogKey of candidates) {
@@ -538,6 +542,39 @@ function serviceFamilyOf(serviceName) {
     if (SERVICE_FAMILY_ALIASES[family].test(name)) return family;
   }
   return null;
+}
+
+// The service identity an OPEN TIMES lookup should price, with a certainty
+// flag (Codex #5194 r4, structural): availability with the WRONG duration
+// is worse than no availability, so an uncertain identity withholds OPEN
+// TIMES and the draft defers ("we'll confirm a time"). Certain when:
+//   - the message names a service (requestedServiceType) — the matching
+//     scheduled visit's own (possibly combined) label when one is on the
+//     calendar, else the requested catalog service as a NEW booking;
+//   - the customer has exactly one upcoming visit (a reschedule, callback
+//     or "when can you come" is about it);
+//   - no upcoming visit but a completed one (a callback on it).
+// Uncertain only when several visits are scheduled and the message names
+// none of them; a customer with nothing on file keeps the engine's default.
+async function serviceIdentityFor(inboundMessage, context) {
+  const text = String(inboundMessage || '');
+  const upcoming = (context?.upcomingServices || []).filter((s) => s && s.type);
+  const requested = await requestedServiceType(text);
+  if (requested) {
+    const family = serviceFamilyOf(requested);
+    const scheduled = family ? upcoming.find((s) => SERVICE_FAMILY_ALIASES[family].test(String(s.type))) : null;
+    if (scheduled) return { serviceType: String(scheduled.type), certain: true, reason: 'named_scheduled_visit' };
+    const aboutExisting = EXISTING_VISIT_WORDS_RE.test(text) || SAVE_SALE_TEXT_RE.test(text);
+    if (!aboutExisting) return { serviceType: requested, certain: true, reason: 'new_booking' };
+  }
+  if (upcoming.length === 1) return { serviceType: String(upcoming[0].type), certain: true, reason: 'single_upcoming' };
+  if (upcoming.length > 1) return { serviceType: null, certain: false, reason: 'ambiguous_upcoming' };
+  const last = liveServiceType(context);
+  if (last) return { serviceType: last, certain: true, reason: 'last_completed' };
+  // Nothing on file at all (a brand-new customer): the engine's own default
+  // service is the right answer, as it was before this lane — the only
+  // genuinely ambiguous case is several visits with none named.
+  return { serviceType: null, certain: true, reason: 'engine_default' };
 }
 
 async function newBookingServiceType(inboundMessage, context) {
@@ -1018,7 +1055,13 @@ function replyQuotesUngroundedAmount(reply, context, opts = {}) {
   const clauses = text.split(/(?<=[;!?\n])|(?<=\.)(?=\s|$)|,\s|\s(?:and|but)\s|\s[—–-]\s/);
   for (const clause of clauses) {
     const amounts = amountsIn(String(clause || ''));
-    if (!amounts.length) continue;
+    if (!amounts.length) {
+      // A priced clause the extractor cannot read ("the fee is fifty
+      // dollars") must not ride along with a grounded figure elsewhere
+      // (Codex #5194 r4 P1): unverifiable → fail closed.
+      if (suggestMode.hasPriceQuote(String(clause || ''))) return true;
+      continue;
+    }
     const masked = clause.replace(AMOUNT_MASK_RE, ' AMT ');
     const owed = AMOUNT_OWED_RE.test(masked);
     const ack = PAYMENT_ACK_RE.test(masked);
@@ -1856,14 +1899,21 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   // about to use it (Codex #5194 r1): with the gate off, or on a frozen
   // replay, gate-off drafting stays free of catalog queries.
   const willFetchOpenTimes = !presetFactsBlock && needsOpenTimes && gateEnvValue('GATE_SMS_REAL_ANSWERS');
-  const serviceType = (willFetchOpenTimes ? await newBookingServiceType(inboundMessage, context) : null) || liveServiceType(context);
+  const identity = willFetchOpenTimes ? await serviceIdentityFor(inboundMessage, context) : { serviceType: liveServiceType(context), certain: true };
+  const serviceType = identity.serviceType;
+  // An estimate pins the service itself; otherwise an uncertain identity
+  // withholds OPEN TIMES rather than pricing the wrong job.
+  const identityCertain = Boolean(estimateId) || identity.certain;
+  if (willFetchOpenTimes && !identityCertain) {
+    logger.info(`[sms-shadow] OPEN TIMES withheld — service identity uncertain (${identity.reason})`);
+  }
   // A frozen replay validates offered_times against the OPEN TIMES it
   // actually saw (parsed back out of its own facts block); `block` stays
   // null there so no send-time snapshot is minted for a draft nothing sends.
   const { block: openTimesBlock, days: openTimesDays } = presetFactsBlock
     ? { block: null, days: parseOpenTimesDaysFromFactsBlock(presetFactsBlock) }
     : await fetchOpenTimesData({
-      city, customerId: context?.customer?.id || null, schedulingIntent: needsOpenTimes, estimateId, serviceType,
+      city, customerId: context?.customer?.id || null, schedulingIntent: needsOpenTimes && identityCertain, estimateId, serviceType,
     });
   // Frozen replays keep their own FREE RE-SERVICE line (or none); a live
   // draft resolves eligibility through the existing re-service mechanism.
@@ -2486,6 +2536,7 @@ module.exports = {
   liveServiceType,
   requestedServiceType,
   newBookingServiceType,
+  serviceIdentityFor,
   fetchReserviceLanes,
   reserviceFactLine,
   validateReserviceOffer,

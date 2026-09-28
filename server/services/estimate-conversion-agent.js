@@ -622,6 +622,10 @@ async function generateLlmReviewDraft({ customer, body, decision, estimate, esti
     const Anthropic = require('@anthropic-ai/sdk');
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
+    // An explicit service request ("can you add lawn service Tuesday?") is
+    // about THAT service, never an unlinked open estimate (Codex #5194 r4);
+    // resolved only with real answers on, since only that path prices it.
+    const explicitService = gateEnvValue('GATE_SMS_REAL_ANSWERS') ? await drafter.requestedServiceType(body) : null;
     const { parsed, passes, converged, model, promptVersion, openTimesSnapshot } = await drafter.generateGroundedDraft({
       laneId: 'estimate_followup', // the drafter's own lanes are the live SMS ones
       client,
@@ -644,7 +648,7 @@ async function generateLlmReviewDraft({ customer, body, decision, estimate, esti
       // good, can we do Tuesday?" (Codex #5194 r3) — when the customer has
       // no upcoming visit the reply could be about instead, so the
       // estimate is the only service context there is.
-      estimateId: estimate?.id && (estimateLinked || !(context?.upcomingServices || []).length) ? estimate.id : null,
+      estimateId: estimate?.id && (estimateLinked || (!(context?.upcomingServices || []).length && !explicitService)) ? estimate.id : null,
     });
     // Only a verified-clean draft may replace the template: unconverged means
     // the reply still asserts facts the context doesn't support after the

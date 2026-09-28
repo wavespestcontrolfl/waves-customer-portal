@@ -23,6 +23,7 @@ jest.mock('../services/sms-shadow-drafter', () => ({
   // authorized figures. Kept intentionally simple — the drafter's own unit
   // tests cover the full extraction/authorization grammar; this test file
   // only needs grounded-vs-ungrounded discrimination.
+  requestedServiceType: jest.fn(async () => null),
   replyQuotesUngroundedAmount: jest.fn((reply, context) => {
     const amounts = (String(reply || '').match(/\$\s?\d[\d,]*(?:\.\d{1,2})?/g) || [])
       .map((a) => Math.round(Number(a.replace(/[^\d.]/g, '')) * 100));
@@ -592,4 +593,17 @@ describe('generateLlmReviewDraft — estimate linkage from the conversation', ()
     await _test.generateLlmReviewDraft({ customer: CUSTOMER, body: 'About my estimate — can we do Tuesday?', decision: { intent: 'service_scheduling_window_reply', confidence: 0.9 }, estimate: { id: 'estimate-42' }, estimateLinked: true });
     expect(generateGroundedDraft).toHaveBeenLastCalledWith(expect.objectContaining({ estimateId: 'estimate-42' }));
   });
+});
+
+
+// #5194 r4: an explicit service request is about THAT service, never an
+// unlinked open estimate — even for a customer with no upcoming visit.
+test('an unlinked estimate + no upcoming visit + an explicit service request → estimateId null', async () => {
+  process.env.GATE_SMS_REAL_ANSWERS = 'true';
+  const drafter = require('../services/sms-shadow-drafter');
+  drafter.requestedServiceType.mockResolvedValueOnce('Lawn Care');
+  ContextAggregator.getContextForCustomer.mockResolvedValue({ summary: 'ctx', flags: [], upcomingServices: [] });
+  generateGroundedDraft.mockResolvedValue({ parsed: { reply: 'ok', intended_actions: [], auto_send_safe: true, missing_info: null }, passes: 1, converged: true, model: MODELS.OPENAI_SMS_DRAFT, promptVersion: 'house_voice_v12_real_answers' });
+  await _test.generateLlmReviewDraft({ customer: CUSTOMER, body: 'Can you add lawn service Tuesday?', decision: { intent: 'service_scheduling_window_reply', confidence: 0.9 }, estimate: { id: 'estimate-42' }, estimateLinked: false });
+  expect(generateGroundedDraft).toHaveBeenLastCalledWith(expect.objectContaining({ estimateId: null }));
 });

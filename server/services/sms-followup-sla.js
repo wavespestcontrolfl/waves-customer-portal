@@ -100,9 +100,16 @@ function followupDeadline(phrase, draftedAt) {
   }
   return null;
 }
-function followupDeadlinePassed({ body, draftedAt, now = new Date() }) {
+// The deadline is the ORIGINAL promise's (Codex #5194 r4): an operator who
+// updates "by 9 AM tomorrow morning" to the now-current "by 9 AM this
+// morning" on Tuesday at 8 AM has not moved the deadline, so it is derived
+// from the drafted reply's phrase and draft time; the outgoing body's
+// phrase is used only when the drafted reply carried none.
+function followupDeadlinePassed({ body, originalBody = null, draftedAt, now = new Date() }) {
   if (draftedAt == null) return false;
-  const text = String(body || '').toLowerCase();
+  const source = [originalBody, body].find((t) => t != null && slaPhraseStatus(t, now) !== 'none');
+  if (source == null) return false;
+  const text = String(source).toLowerCase();
   return SLA_PHRASES.some((p) => {
     if (!text.includes(p.toLowerCase())) return false;
     const deadline = followupDeadline(p, draftedAt);
@@ -113,7 +120,7 @@ function followupDeadlinePassed({ body, draftedAt, now = new Date() }) {
 // Both send seams ask one question: may this escalated draft's follow-up
 // promise go out as written? null when yes, else the reason.
 function followupPromiseBlockReason({ inputSnapshot, promptVersion = null, originalBody = null, body, draftedAt = null, now = new Date() }) {
-  if (draftPromisedFollowup(inputSnapshot, promptVersion) && followupDeadlinePassed({ body, draftedAt, now })) return 'sla_deadline_passed';
+  if (draftPromisedFollowup(inputSnapshot, promptVersion) && followupDeadlinePassed({ body, originalBody, draftedAt, now })) return 'sla_deadline_passed';
   if (followupPromiseIsStale({ inputSnapshot, promptVersion, body, now })) return 'sla_phrase_stale';
   if (followupPromiseEdited({ inputSnapshot, promptVersion, originalBody, body })) return 'sla_phrase_edited';
   return null;

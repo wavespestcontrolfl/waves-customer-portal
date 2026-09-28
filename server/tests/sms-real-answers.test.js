@@ -2037,3 +2037,65 @@ describe('#5194 round 3', () => {
     await expect(drafter.newBookingServiceType('Can you add pest control?', pestCtx)).resolves.toBeNull();
   });
 });
+
+
+describe('#5194 round 4', () => {
+  const priorGate = process.env.GATE_SMS_REAL_ANSWERS;
+  beforeEach(() => { process.env.GATE_SMS_REAL_ANSWERS = 'true'; jest.resetModules(); });
+  afterEach(() => {
+    if (priorGate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = priorGate;
+    jest.dontMock('../services/service-library'); jest.dontMock('../services/availability'); jest.resetModules();
+  });
+  const CATALOG = { pest_initial_cleanout: 'Initial Pest Cleanout', lawn_care_recurring: 'Lawn Care', rodent_exclusion_only: 'Rodent Exclusion Only', pest_general_quarterly: 'General Pest Control (Quarterly)' };
+  const mockCatalog = () => jest.doMock('../services/service-library', () => ({ resolveServiceType: async (key) => (CATALOG[key] ? { name: CATALOG[key], is_active: true, is_archived: false } : null) }));
+
+  test('serviceIdentityFor: a named service picks the MATCHING scheduled visit, not the first one; several visits with none named is uncertain', async () => {
+    mockCatalog();
+    const { serviceIdentityFor } = require('../services/sms-shadow-drafter');
+    const two = { upcomingServices: [{ type: 'Lawn Care', date: '2026-10-01' }, { type: 'Initial Pest Cleanout', date: '2026-10-02' }] };
+    await expect(serviceIdentityFor('What times do you have for my initial pest cleanout?', two)).resolves.toMatchObject({ serviceType: 'Initial Pest Cleanout', certain: true });
+    await expect(serviceIdentityFor('When are you coming?', two)).resolves.toMatchObject({ certain: false, reason: 'ambiguous_upcoming' });
+    await expect(serviceIdentityFor('When are you coming?', { upcomingServices: [{ type: 'Lawn Care', date: '2026-10-01' }] })).resolves.toMatchObject({ serviceType: 'Lawn Care', certain: true });
+    await expect(serviceIdentityFor('The ants came back', { upcomingServices: [], serviceHistory: [{ type: 'Pest + Mosquito', date: '2026-09-01' }] })).resolves.toMatchObject({ serviceType: 'Pest + Mosquito', certain: true });
+    await expect(serviceIdentityFor('When can you come?', { upcomingServices: [], serviceHistory: [] })).resolves.toMatchObject({ serviceType: null, certain: true, reason: 'engine_default' });
+    await expect(serviceIdentityFor('Can you add rodent exclusion Tuesday?', two)).resolves.toMatchObject({ serviceType: 'Rodent Exclusion Only', certain: true, reason: 'new_booking' });
+  });
+
+  test('an uncertain identity WITHHOLDS OPEN TIMES (no availability call, no section); an estimate pins it', async () => {
+    mockCatalog();
+    const getAvailableSlots = jest.fn(async () => ({ days: [{ fullDate: 'Tuesday, September 29', slots: [{ startTime24: '09:00' }] }] }));
+    jest.doMock('../services/availability', () => ({ getAvailableSlots }));
+    const drafter = require('../services/sms-shadow-drafter');
+    const client = { messages: { create: async () => ({ content: [{ text: JSON.stringify({ reply: 'Let me confirm and get right back to you.', intended_actions: [], missing_info: null }) }] }) } };
+    const two = { summary: 'x', upcomingServices: [{ type: 'Lawn Care', date: '2026-10-01' }, { type: 'Initial Pest Cleanout', date: '2026-10-02' }], customer: { id: 'c1' } };
+    const r = await drafter.generateGroundedDraft({ client, context: two, inboundMessage: 'When are you coming?', intent: { intent: 'general_customer_sms_needs_review' }, schedulingIntent: true, city: 'Venice' });
+    expect(getAvailableSlots).not.toHaveBeenCalled();
+    expect(r.factsBlock).not.toContain('OPEN TIMES (real');
+    await drafter.generateGroundedDraft({ client, context: two, inboundMessage: 'When are you coming?', intent: { intent: 'general_customer_sms_needs_review' }, schedulingIntent: true, city: 'Venice', estimateId: 'est-1' });
+    expect(getAvailableSlots).toHaveBeenCalledWith('Venice', 'est-1', expect.any(Object));
+  });
+
+  test('explicit rodent exclusion / trapping resolves to the active exclusion row (real keyword resolver)', async () => {
+    mockCatalog();
+    const drafter = require('../services/sms-shadow-drafter');
+    await expect(drafter.requestedServiceType('Can you book rodent exclusion Tuesday?')).resolves.toBe('Rodent Exclusion Only');
+    await expect(drafter.requestedServiceType('We need rat trapping at the house')).resolves.toBe('Rodent Exclusion Only');
+  });
+
+  test('amount guard: an unparseable priced clause cannot ride along with a grounded figure ("balance is $95, and the fee is fifty dollars")', () => {
+    const { replyQuotesUngroundedAmount } = require('../services/sms-shadow-drafter');
+    const context = { billing: { outstandingBalance: 95, recentPayments: [] } };
+    expect(replyQuotesUngroundedAmount('Your balance is $95, and the fee is fifty dollars.', context)).toBe(true);
+    expect(replyQuotesUngroundedAmount('Your balance is $95.', context)).toBe(false);
+  });
+
+  test('SLA edit: the deadline follows the ORIGINAL promise — "tomorrow morning" edited to the now-current "this morning" before 9 AM still sends', () => {
+    const { followupPromiseBlockReason } = require('../services/sms-followup-sla');
+    const promised = { intended_actions: [{ type: 'escalate', note: 'followup_promised' }] };
+    const original = 'A manager will reach out by 9 AM tomorrow morning.';
+    const edited = 'A manager will reach out by 9 AM this morning.';
+    const MON_NIGHT = new Date('2026-09-29T01:30:00Z');
+    expect(followupPromiseBlockReason({ inputSnapshot: promised, originalBody: original, body: edited, draftedAt: MON_NIGHT, now: new Date('2026-09-29T11:30:00Z') })).toBeNull(); // Tue 07:30 ET
+    expect(followupPromiseBlockReason({ inputSnapshot: promised, originalBody: original, body: edited, draftedAt: MON_NIGHT, now: new Date('2026-09-29T14:00:00Z') })).toBe('sla_deadline_passed'); // Tue 10:00 ET
+  });
+});
