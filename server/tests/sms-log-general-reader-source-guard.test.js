@@ -427,6 +427,11 @@ const ALLOWLIST = [
     reason: 'deliberately includes in-flight review-ask/reply reservations as ask-spacing evidence (the REBUTTED FINDING note at the top of review-ask-reservation.js) — excluding them here would break the spacing guarantee this function exists to provide.',
   },
   {
+    file: 'services/review-ask-topic.js',
+    snippet: 'let rows = await db("sms_log")',
+    reason: 'inbound-only (direction: "inbound") — the customer\'s own texts as Day-0 topic evidence; a send reservation is always an outbound row.',
+  },
+  {
     file: 'services/review-request.js',
     snippet: 'const stamped = await db("sms_log")',
     reason: 'status explicitly excludes \'sending\' in its own whereNotIn list (evidence of DELIVERY, not an in-flight attempt) — an unresolved reservation cannot match.',

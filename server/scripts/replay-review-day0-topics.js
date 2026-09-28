@@ -6,8 +6,9 @@
  * (review-ask-topic.js) over recent completed RECURRING visits and reports
  * what topic (if any) it would have found. Evidence sources are exactly the
  * two the live path is allowed to read — the customer's inbound texts since
- * their previous completed visit and the technician's completion notes for
- * THIS visit — as of that visit's own completed_at, not "now".
+ * their previous completed visit and what the customer told the technician on
+ * THIS visit (customerConcernText) — through the same collectTopicEvidence
+ * call, anchored on that visit's own completed_at.
  *
  * This script makes no writes: no DB write, no send, no gate flip. It DOES
  * make one live LLM classification call per matched visit (the same
@@ -101,6 +102,7 @@ async function classifyVisit(visit) {
     evidence = await collectTopicEvidence({
       customerId: visit.customer_id,
       serviceRecordId: visit.service_record_id,
+      scheduledServiceId: visit.visit_id,
       completedAt,
     });
     topic = await extractReviewTopic(evidence);

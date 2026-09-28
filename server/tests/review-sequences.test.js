@@ -26,7 +26,7 @@ jest.mock('../services/review-ask-drafter', () => ({
 }));
 // Day-0 contextual topic (own suite: review-ask-topic.test.js). Default null
 // = no topic, matching the gate-off production posture; this file only
-// asserts enrollPostService wires the result into decision.context.
+// asserts enrollPostService stores the result on review_sequences.ask_context.
 const mockResolveReviewTopic = jest.fn(async () => null);
 jest.mock('../services/review-ask-topic', () => ({
   resolveReviewTopicForEnrollment: (...a) => mockResolveReviewTopic(...a),
@@ -2829,7 +2829,7 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(plan[0]).toMatchObject({ day: 0, channel: 'sms' });
   });
 
-  test('GATE_REVIEW_DAY0_CONTEXT: a recurring-plan enrollment persists decision.context when the topic resolver returns one', async () => {
+  test('GATE_REVIEW_DAY0_CONTEXT: a recurring-plan enrollment stores the topic on ask_context, never on the rewritable decision', async () => {
     mockGates.reviewSequences = true;
     const topic = { topic: 'ants in kitchen', kind: 'service_concern', source: 'sms', evidenceId: 'sms-1', confidence: 0.9, version: 'review-day0-context-v1' };
     mockResolveReviewTopic.mockResolvedValue(topic);
@@ -2840,18 +2840,21 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     });
     db.mockImplementation(mock);
 
-    const result = await ReviewService.enrollPostService({ customerId: 'rc-ctx-1', serviceRecordId: 'sr-rc-ctx-1', completedAt: new Date() });
+    const result = await ReviewService.enrollPostService({ customerId: 'rc-ctx-1', serviceRecordId: 'sr-rc-ctx-1', scheduledServiceId: 'ss-rc-ctx-1', completedAt: new Date() });
 
     expect(result.started).toBe(true);
+    // The visit id travels so the resolver anchors on the visit's own
+    // completed_at even where the service record does not exist yet.
     expect(mockResolveReviewTopic).toHaveBeenCalledWith(expect.objectContaining({
-      customerId: 'rc-ctx-1', serviceRecordId: 'sr-rc-ctx-1',
+      customerId: 'rc-ctx-1', serviceRecordId: 'sr-rc-ctx-1', scheduledServiceId: 'ss-rc-ctx-1',
       plan: expect.arrayContaining([expect.objectContaining({ day: 0, channel: 'sms' })]),
     }));
-    const decision = JSON.parse(mock.__state.rows.review_sequences[0].decision);
-    expect(decision.context).toEqual(topic);
+    const row = mock.__state.rows.review_sequences[0];
+    expect(JSON.parse(row.ask_context)).toEqual(topic);
+    expect(JSON.parse(row.decision)).not.toHaveProperty('context');
   });
 
-  test('GATE_REVIEW_DAY0_CONTEXT: decision carries no context key when the topic resolver returns null', async () => {
+  test('GATE_REVIEW_DAY0_CONTEXT: no topic leaves the sequence insert unchanged (no ask_context key)', async () => {
     mockGates.reviewSequences = true;
     mockResolveReviewTopic.mockResolvedValue(null);
     const mock = makeMock({
@@ -2864,8 +2867,7 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     const result = await ReviewService.enrollPostService({ customerId: 'rc-ctx-2', serviceRecordId: 'sr-rc-ctx-2', completedAt: new Date() });
 
     expect(result.started).toBe(true);
-    const decision = JSON.parse(mock.__state.rows.review_sequences[0].decision);
-    expect(decision).not.toHaveProperty('context');
+    expect(mock.__state.rows.review_sequences[0]).not.toHaveProperty('ask_context');
   });
 
   test('a customer with live recurring coverage gets the single ask even off an unlinked completion', async () => {

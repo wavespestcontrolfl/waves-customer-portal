@@ -128,6 +128,54 @@ describe('collectTopicEvidence', () => {
     expect(floor.getTime()).toBeLessThan(new Date(NOW.getTime() - 10 * 86400000).getTime() + 1);
   });
 
+  test('anchors on the visit\'s own completion: a live enrollment (after markComplete) still reads pre-visit texts, and a same-stop sibling is not the previous visit', async () => {
+    db.mockImplementation(makeDb({
+      scheduled_services: [
+        { id: 'ss-prev', customer_id: 'c1', status: 'completed', completed_at: new Date(NOW.getTime() - 10 * 86400000) },
+        { id: 'ss-sibling', customer_id: 'c1', status: 'completed', completed_at: new Date(NOW.getTime() - 30 * 60000) },
+        // markComplete stamped THIS visit two minutes before enrollment ran.
+        { id: 'ss-now', customer_id: 'c1', status: 'completed', completed_at: new Date(NOW.getTime() - 2 * 60000) },
+      ],
+      service_records: [],
+      sms_log: [
+        { id: 's-pre', customer_id: 'c1', direction: 'inbound', message_body: 'Can you check for roof rats on the porch?', created_at: new Date(NOW.getTime() - 86400000) },
+      ],
+    }));
+
+    const evidence = await collectTopicEvidence({ customerId: 'c1', scheduledServiceId: 'ss-now', completedAt: NOW });
+    expect(evidence.texts.map((t) => t.id)).toEqual(['s-pre']);
+  });
+
+  test('texts after the visit\'s own completion are never evidence (paid-invoice enrollment days later, visit found through its service record)', async () => {
+    const visitDoneAt = new Date(NOW.getTime() - 3 * 86400000);
+    db.mockImplementation(makeDb({
+      scheduled_services: [
+        { id: 'ss-paid', customer_id: 'c1', status: 'completed', completed_at: visitDoneAt },
+      ],
+      service_records: [{ id: 'sr-paid', scheduled_service_id: 'ss-paid', structured_notes: null }],
+      sms_log: [
+        { id: 's-before', customer_id: 'c1', direction: 'inbound', message_body: 'Wasps under the back eave again', created_at: new Date(visitDoneAt.getTime() - 86400000) },
+        { id: 's-after', customer_id: 'c1', direction: 'inbound', message_body: 'The ants are back in the kitchen', created_at: new Date(NOW.getTime() - 86400000) },
+      ],
+    }));
+
+    const evidence = await collectTopicEvidence({ customerId: 'c1', serviceRecordId: 'sr-paid' });
+    expect(evidence.texts.map((t) => t.id)).toEqual(['s-before']);
+  });
+
+  test('with no visit completion and no fallback instant, no texts are read', async () => {
+    db.mockImplementation(makeDb({
+      scheduled_services: [],
+      service_records: [],
+      sms_log: [
+        { id: 's-any', customer_id: 'c1', direction: 'inbound', message_body: 'The ants are back in the kitchen', created_at: new Date(NOW.getTime() - 86400000) },
+      ],
+    }));
+
+    const evidence = await collectTopicEvidence({ customerId: 'c1' });
+    expect(evidence.texts).toEqual([]);
+  });
+
   test('excludes reactions and bodies under 12 characters', async () => {
     db.mockImplementation(makeDb({
       scheduled_services: [],

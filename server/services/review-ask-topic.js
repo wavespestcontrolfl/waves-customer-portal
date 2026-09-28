@@ -43,6 +43,11 @@ const TOPIC_VERSION = "review-day0-context-v2";
 
 const EVIDENCE_WINDOW_DAYS = 14;
 const EVIDENCE_WINDOW_MS = EVIDENCE_WINDOW_DAYS * 24 * 60 * 60 * 1000;
+// A visit completed within this long before the anchor is this same stop —
+// the visit itself (every live enrollment runs after markComplete stamped it)
+// or a sibling service completed alongside it — never the PREVIOUS visit.
+// Recurring visits are weeks apart.
+const SAME_STOP_GAP_MS = 12 * 60 * 60 * 1000;
 const MAX_TEXTS = 8;
 const MAX_TEXT_CHARS = 320;
 const MIN_TEXT_CHARS = 12;
@@ -96,32 +101,42 @@ function parseStructuredNotes(value) {
 
 // customerConcernText ONLY — `observations`/`customerRecap` are the
 // technician's own findings, not the customer's words (see module header).
-async function loadCompletionFields(serviceRecordId) {
-  if (!serviceRecordId) return { concernText: null };
-  const sr = await db("service_records").where({ id: serviceRecordId }).select("structured_notes").first();
+// Also resolves the visit's own completed_at, which anchors the text window.
+async function loadVisit({ serviceRecordId, scheduledServiceId }) {
+  const sr = serviceRecordId
+    ? await db("service_records").where({ id: serviceRecordId }).select("structured_notes", "scheduled_service_id").first()
+    : null;
   const notes = parseStructuredNotes(sr?.structured_notes);
   const concernText = typeof notes.customerConcernText === "string" ? notes.customerConcernText.trim() : "";
-  return { concernText: concernText || null };
+  const visitId = scheduledServiceId || sr?.scheduled_service_id || null;
+  const visit = visitId ? await db("scheduled_services").where({ id: visitId }).select("completed_at").first() : null;
+  return { concernText: concernText || null, completedAt: visit?.completed_at ? new Date(visit.completed_at) : null };
 }
 
 /**
- * Gathers the ONLY two evidence sources this lane is allowed to read: the
- * technician's completion notes for this visit, and the customer's own
- * inbound texts since their previous completed visit (capped at 14 days
- * back). Never throws — any lookup failure returns fully empty evidence.
+ * Gathers the ONLY two evidence sources this lane is allowed to read: what
+ * the customer told the technician on this visit (customerConcernText), and
+ * the customer's own inbound texts from their previous completed visit up to
+ * THIS visit's completion (capped at 14 days back). The window is anchored on
+ * the visit's own completed_at — never the enrollment time, which runs after
+ * the visit is completed (and, on the paid-invoice path, days later) — and
+ * falls back to `completedAt` only when the visit row has none; with neither,
+ * no texts are read. Never throws — any lookup failure returns fully empty
+ * evidence.
  */
-async function collectTopicEvidence({ customerId, serviceRecordId = null, completedAt = new Date() } = {}) {
-  const at = completedAt instanceof Date ? completedAt : new Date(completedAt);
+async function collectTopicEvidence({ customerId, serviceRecordId = null, scheduledServiceId = null, completedAt = null } = {}) {
   try {
-    const [prevVisit, completion] = await Promise.all([
-      db("scheduled_services")
-        .where({ customer_id: customerId, status: "completed" })
-        .where("completed_at", "<", at)
-        .orderBy("completed_at", "desc")
-        .select("completed_at")
-        .first(),
-      loadCompletionFields(serviceRecordId),
-    ]);
+    const visit = await loadVisit({ serviceRecordId, scheduledServiceId });
+    const completion = { concernText: visit.concernText };
+    const at = visit.completedAt || (completedAt ? new Date(completedAt) : null);
+    if (!at || Number.isNaN(at.getTime())) return { completion, texts: [] };
+
+    const prevVisit = await db("scheduled_services")
+      .where({ customer_id: customerId, status: "completed" })
+      .where("completed_at", "<", new Date(at.getTime() - SAME_STOP_GAP_MS))
+      .orderBy("completed_at", "desc")
+      .select("completed_at")
+      .first();
 
     const floor = new Date(at.getTime() - EVIDENCE_WINDOW_MS);
     const prevCompletedAt = prevVisit?.completed_at ? new Date(prevVisit.completed_at) : null;
@@ -264,7 +279,7 @@ async function extractReviewTopic(evidence, { firstName = null } = {}) {
  * touches (owner scope: recurring customers only). Gate off is a pure no-op:
  * no DB read, no model call. Never throws.
  */
-async function resolveReviewTopicForEnrollment({ customerId, serviceRecordId = null, completedAt = new Date(), plan, firstName = null } = {}) {
+async function resolveReviewTopicForEnrollment({ customerId, serviceRecordId = null, scheduledServiceId = null, completedAt = null, plan, firstName = null } = {}) {
   try {
     if (!isEnabled("reviewDay0Context")) {
       logger.info(`[review-topic] skipped (customerId=${customerId} reason=gate_off)`);
@@ -275,7 +290,7 @@ async function resolveReviewTopicForEnrollment({ customerId, serviceRecordId = n
       logger.info(`[review-topic] skipped (customerId=${customerId} reason=not_recurring_plan)`);
       return null;
     }
-    const evidence = await collectTopicEvidence({ customerId, serviceRecordId, completedAt });
+    const evidence = await collectTopicEvidence({ customerId, serviceRecordId, scheduledServiceId, completedAt });
     const result = await extractReviewTopic(evidence, { firstName });
     if (result) {
       logger.info(`[review-topic] topic stored (customerId=${customerId} kind=${result.kind} source=${result.source})`);

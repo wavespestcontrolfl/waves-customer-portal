@@ -475,7 +475,7 @@ function nextTouchRunAt({ startedAt, step, previousStep = null, now = new Date()
  * whether the owner has anything to do — a routine deferral is
  * ownerAction 'none', never a send/drop question.
  */
-function sequenceDecision({ reason, plannedAt = null, nextEvalAt = null, ownerAction = "none", enrollmentReason = null, context = null }) {
+function sequenceDecision({ reason, plannedAt = null, nextEvalAt = null, ownerAction = "none", enrollmentReason = null }) {
   return JSON.stringify({
     reason,
     plannedAt: plannedAt ? new Date(plannedAt).toISOString() : null,
@@ -485,10 +485,6 @@ function sequenceDecision({ reason, plannedAt = null, nextEvalAt = null, ownerAc
     // A parked series final keeps the enrollment's own reason so redemption
     // re-labels the active sequence honestly (codex #4140 r1).
     ...(enrollmentReason ? { enrollmentReason } : {}),
-    // GATE_REVIEW_DAY0_CONTEXT: the grounded topic resolved at enrollment
-    // (review-ask-topic.js) — storage only in this PR, a later PR reads it
-    // to word the ask. Never changes whether an ask is sent.
-    ...(context ? { context } : {}),
   });
 }
 // A send claim (next_run_at NULL on an active row) older than this is not a
@@ -1781,11 +1777,13 @@ const ReviewService = {
         ).at;
       // GATE_REVIEW_DAY0_CONTEXT (dark): resolves to null off-gate, off the
       // recurring plan, or on any lookup/model failure — never blocks or
-      // changes this enrollment (review-ask-topic.js).
-      const topicContext = await resolveReviewTopicForEnrollment({
+      // changes this enrollment (review-ask-topic.js). The visit's own
+      // completed_at anchors its evidence window; completedAt is the fallback.
+      const askContext = await resolveReviewTopicForEnrollment({
         customerId,
         serviceRecordId,
-        completedAt: completedAt ? new Date(completedAt) : new Date(),
+        scheduledServiceId,
+        completedAt: completedAt ? new Date(completedAt) : null,
         plan: resolved.plan,
       });
       const result = await this.startReviewSequence({
@@ -1799,11 +1797,11 @@ const ReviewService = {
         plan: resolved.plan,
         seriesFinal: resolved.seriesFinal === true,
         customerRequested: customerRequested || null,
+        askContext,
         decision: sequenceDecision({
           reason: customerRequested ? "customer_requested" : explicitTiming ? "operator_timing" : "smart_window",
           plannedAt: firstTouchAt,
           nextEvalAt: firstTouchAt,
-          context: topicContext,
         }),
       });
       if (result?.started) {
@@ -5829,7 +5827,7 @@ const ReviewService = {
 
 
   async startReviewSequence(options, captureRetries = 1) {
-    const { customerId, plan, startedBy, locationId, serviceType, techName, serviceRecordId, scheduledServiceId = null, firstTouchAt = null, seriesFinal = false, customerRequested = null, decision = null } = options;
+    const { customerId, plan, startedBy, locationId, serviceType, techName, serviceRecordId, scheduledServiceId = null, firstTouchAt = null, seriesFinal = false, customerRequested = null, askContext = null, decision = null } = options;
     const retryEnrollment = () => {
       // Re-run caps and visit dedupe too: the settled winner may have sent.
       // Persistent contention must fail visibly, never claim a lost capture.
@@ -6085,6 +6083,12 @@ const ReviewService = {
           started_by: startedBy || null,
           started_at: new Date(),
           customer_requested: customerRequested ? JSON.stringify(customerRequested) : null,
+          // GATE_REVIEW_DAY0_CONTEXT topic, written once here and never by
+          // the step runner — `decision` is rewritten on every deferral.
+          // Gate off = no topic = the insert is unchanged. A deferred-final
+          // park never carries one: parks are series finals only, and the
+          // resolver is null for every plan but the recurring one.
+          ...(askContext ? { ask_context: JSON.stringify(askContext) } : {}),
           decision: decision || sequenceDecision({
             reason: customerRequested ? "customer_requested" : firstTouchAt ? "operator_timing" : "immediate",
             plannedAt: firstTouchAt || new Date(),
