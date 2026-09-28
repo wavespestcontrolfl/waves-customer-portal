@@ -1294,7 +1294,7 @@ describe('internal-link PR auto-merge', () => {
     GitHubClient.getBranchSha = jest.fn(async () => 'e'.repeat(40));
     GitHubClient.mergePr = jest.fn(async () => ({ sha: 'b'.repeat(40), merged: true }));
     GitHubClient.closePr = jest.fn();
-    GitHubClient.retireBranch = jest.fn();
+    GitHubClient.retireBranch = jest.fn(async () => true);
     // The executor's own "@codex review" request for this head, 3h ago.
     GitHubClient.listIssueComments = jest.fn(async () => [{ user: { login: 'waves-bot' }, body: `@codex review\n\nPlease review this autonomous internal-link PR on head \`${HEAD}\`.`, created_at: new Date(Date.now() - 3 * 3600e3).toISOString() }]);
     GitHubClient.listPrReviews = jest.fn(async () => []);
@@ -1358,6 +1358,13 @@ describe('internal-link PR auto-merge', () => {
     await expect(instance.runAutoMerge()).rejects.toThrow('github down');
     // Publication evidence is on the rows before cleanup was attempted.
     expect(updates).toEqual([expect.objectContaining({ merged_at: expect.any(Date) })]);
+    expect(instance._markTaskMerged).not.toHaveBeenCalled();
+
+    // Next tick, branch retirement fails: still held, rows stay pr_open.
+    openTasks([{ id: 't1', status: 'pr_open', astro_pr_url: prUrl, pr_commit_sha: HEAD, merged_at: new Date().toISOString(), executor_version: 'internal-link-pr-executor-v2', source_file: 'src/content/blog/a.md', source_url: '/a/', target_url: '/termite-inspection/' }]);
+    GitHubClient.getPr.mockResolvedValue({ number: 77, state: 'closed', head: { sha: 'c'.repeat(40), ref: 'content/internal-link-x' }, base: { ref: 'main' } });
+    GitHubClient.retireBranch.mockResolvedValueOnce(false);
+    expect(await instance.runAutoMerge()).toMatchObject({ status: 'hold', reason: 'advanced_head_branch_retire_pending' });
     expect(instance._markTaskMerged).not.toHaveBeenCalled();
 
     // Next tick: the rows carry merged_at, so cleanup finishes (never "unmerged").

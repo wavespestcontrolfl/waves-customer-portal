@@ -164,11 +164,15 @@ const CANDIDATE_STAGES = [loadPagesStage, sourceProtectionStage, validateStage, 
 async function publishedCleanupGate(ctx) {
   if (!ctx.prTasks.length || !ctx.prTasks.every((t) => t.merged_at)) return null;
   if (String(ctx.pr?.state || '').toLowerCase() === 'open') await GitHubClient.closePr(ctx.prNumber);
+  // The branch holds unreviewed advanced-head commits: the rows stay pr_open
+  // (guard up, retried every tick) until its retirement is CONFIRMED.
+  let retired = false;
   try {
-    await GitHubClient.retireBranch(ctx.pr?.head?.ref);
+    retired = await GitHubClient.retireBranch(ctx.pr?.head?.ref);
   } catch (err) {
     logger.warn(`[internal-link-pr-executor] branch retirement after advanced head failed for PR #${ctx.prNumber}: ${err.message}`);
   }
+  if (!retired) return { hold: 'advanced_head_branch_retire_pending' };
   for (const task of ctx.prTasks) {
     await this._markTaskMerged(task.id, { mergedAt: new Date(task.merged_at), commitSha: task.pr_commit_sha || null });
   }
