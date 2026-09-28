@@ -2103,6 +2103,9 @@ describe('#5194 round 4', () => {
     const context = { billing: { outstandingBalance: 95, recentPayments: [] } };
     expect(replyQuotesUngroundedAmount('Your balance is $95, and the fee is fifty dollars.', context)).toBe(true);
     expect(replyQuotesUngroundedAmount('Your balance is $95.', context)).toBe(false);
+    // r8 P1: the same clause — a readable figure cannot carry an unreadable one
+    expect(replyQuotesUngroundedAmount('Your balance is $95 plus a fee of fifty dollars.', context)).toBe(true);
+    expect(replyQuotesUngroundedAmount('Your balance is $95 and the fee is 45.', context)).toBe(true);
   });
 
   test('SLA edit: the deadline follows the ORIGINAL promise — "tomorrow morning" edited to the now-current "this morning" before 9 AM still sends', () => {

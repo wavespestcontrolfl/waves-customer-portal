@@ -1113,15 +1113,15 @@ function replyQuotesUngroundedAmount(reply, context, opts = {}) {
   // at a period, and "$95.50" must not end it.
   const clauses = text.split(/(?<=[;!?\n])|(?<=\.)(?=\s|$)|,\s|\s(?:and|but)\s|\s[—–-]\s/);
   for (const clause of clauses) {
-    const amounts = amountsIn(String(clause || ''));
-    if (!amounts.length) {
-      // A priced clause the extractor cannot read ("the fee is fifty
-      // dollars") must not ride along with a grounded figure elsewhere
-      // (Codex #5194 r4 P1): unverifiable → fail closed.
-      if (suggestMode.hasPriceQuote(String(clause || ''))) return true;
-      continue;
-    }
-    const masked = clause.replace(AMOUNT_MASK_RE, ' AMT ');
+    const text = String(clause || '');
+    const masked = text.replace(AMOUNT_MASK_RE, ' AMT ');
+    // Price grammar left once the readable figures are masked is a price the
+    // extractor cannot verify ("fifty dollars", "the fee is 45"): it fails
+    // closed even beside a grounded figure, in another clause (Codex #5194
+    // r4 P1) or the same one (r8 P1: "$95 plus a fee of fifty dollars").
+    if (suggestMode.hasPriceQuote(masked)) return true;
+    const amounts = amountsIn(text);
+    if (!amounts.length) continue;
     const owed = AMOUNT_OWED_RE.test(masked);
     const ack = PAYMENT_ACK_RE.test(masked);
     if (owed === ack) return true;
