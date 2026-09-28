@@ -609,7 +609,7 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   if (toolName === 'repair_closeout' && Array.isArray(preview?.steps)) {
     push('customer', `Visit: ${preview.visit || preview.service_id} — ${preview.customer_name || preview.customer_id || 'customer unresolved'}`);
     for (const st of preview.steps) {
-      push(/email|receipt/i.test(st.step) ? 'comms' : 'operational', String(st.effect || st.step));
+      push(['comms', 'billing'].includes(st.kind) ? st.kind : 'operational', String(st.effect || st.step));
     }
     if (Array.isArray(preview.manual) && preview.manual.length) {
       push('operational', `Not touched (${preview.manual.length}): ${preview.manual.map((m) => m.fact).join(', ')}`);
@@ -823,6 +823,9 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     // PaymentIntent cannot be restored, and the customer's payment link is
     // dead (codex #4348 r7 P2).
     irreversible: IRREVERSIBLE_TOOL_NAMES.has(toolName) || notifiesCustomer || toolName === 'run_tax_advisor' || toolName === 'run_price_lookup'
+      // The Bill action writes a 'billed' visit disposition no portal path
+      // removes (voiding the draft leaves the visit "already handled").
+      || (toolName === 'repair_closeout' && Array.isArray(preview?.steps) && preview.steps.some((st) => st.step === 'bill_visit'))
       || preview?.financial_effects?.revertible_from_queue === false
       || cancelsStripeCheckoutSession(preview),
     notifies_customer: notifiesCustomer,

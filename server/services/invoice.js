@@ -5176,6 +5176,11 @@ const InvoiceService = {
       useScheduledReplay = false,
       dueDate,
       skipDepositCredit = false,
+      // refuseDepositCredit: the caller's approval did not cover consuming
+      // deposit money (the IB closeout repair). Checked on the LOCKED
+      // deposit read below — a 409 instead of any roll-forward, so no
+      // deposit that landed after the caller's own preview is consumed.
+      refuseDepositCredit = false,
       // Caller-supplied lines appended AFTER the service's own lines (secure
       // plan-choice setup fee): the caller owns the claim/idempotency for
       // these — this method just carries them into the same mint so the fee
@@ -5388,6 +5393,14 @@ const InvoiceService = {
         logger.warn(
           `[invoice] source-estimate lookup failed for service ${serviceRecordId}: ${err.message}`,
         );
+        // A caller that must not consume deposit money cannot tell a
+        // deposit-bearing visit from a plain one without this read — fail
+        // closed instead of minting a full-balance draft.
+        if (refuseDepositCredit) {
+          const refusal = new Error("Deposit provenance could not be read — bill it from Billing Recovery.");
+          refusal.status = 409;
+          throw refusal;
+        }
       }
     }
     if (sourceEstimateId) {
@@ -5419,6 +5432,11 @@ const InvoiceService = {
             const createParams = await buildParams(trx);
             await acquireEstimateDepositLedgerLock(trx, sourceEstimateId);
             const depositCredit = await pendingDepositCredit(sourceEstimateId, trx);
+            if (refuseDepositCredit && depositCredit) {
+              const refusal = new Error("An estimate deposit credit would apply to this invoice — bill it from Billing Recovery.");
+              refusal.status = 409;
+              throw refusal;
+            }
             // Request the full unapplied balance; create() caps it against
             // its own post-discount, after-tax total (a pre-discount cap
             // here consumed ledger dollars the discounted invoice never
@@ -5451,6 +5469,15 @@ const InvoiceService = {
           // same stale params can't fix them (mirrors the shared mint
           // helper's contract).
           if (err.status) throw err;
+          // A refuseDepositCredit caller (the IB closeout repair, incl. its
+          // rolled-back preview) must not trigger the retry/alert path:
+          // an unreadable deposit ledger is a quiet refusal, never a real
+          // estimate_deposit_reconcile_needed alert from a planning call.
+          if (refuseDepositCredit) {
+            const refusal = new Error("Deposit balance could not be verified — bill it from Billing Recovery.");
+            refusal.status = 409;
+            throw refusal;
+          }
           logger.warn(
             `[invoice] deposit roll-forward failed for estimate ${sourceEstimateId} (attempt ${attempt + 1}): ${err.message}`,
           );
@@ -6370,6 +6397,14 @@ const InvoiceService = {
       // The staff user behind an operator send (attribution for the
       // invoice-issued closeout's audit row); null for automated sends.
       actorTechnicianId = null,
+      // IB closeout repair: its approval never covered consuming account
+      // credit, so this send behaves exactly as with the autoApplyAccountCredit
+      // gate off — no credit is applied (the balance stays on the account).
+      skipAccountCreditAutoApply = false,
+      // IB closeout repair: the total its approval showed. Checked on the
+      // CLAIMED row (a claimed invoice is no longer an editable draft); a
+      // mismatch restores the claim and sends nothing.
+      expectedTotal = null,
       // Internal-only: retries this same call once more after a
       // not_zero_due chokepoint outcome (Codex round-6 P2 #4131) — a real
       // caller never sets this, so a race can retry at most once.
@@ -6381,7 +6416,7 @@ const InvoiceService = {
   ) {
     const retryOnce = () => this.sendViaSMSAndEmail(invoiceId, {
       requestReview, reviewDelayMinutes, allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold,
-      emailRecipientOverride, payUrlParams, operatorInitiated, actorTechnicianId, _zeroDueRetried: true, _underRenewalGate,
+      emailRecipientOverride, payUrlParams, operatorInitiated, actorTechnicianId, skipAccountCreditAutoApply, expectedTotal, _zeroDueRetried: true, _underRenewalGate,
     });
     // Phase 2: an accrued invoice (on a payer statement) is never delivered
     // individually. Refuse BEFORE claiming/applying credit so we don't flip its
@@ -6469,6 +6504,16 @@ const InvoiceService = {
     // without ever reaching a provider handoff's own assertion — so the
     // renewal gate is re-asserted here first. A lost gate restores the send
     // claim and throws; nothing was applied, nothing was sent.
+    if (expectedTotal !== null
+      && Math.round(Number(claim.invoice.total) * 100) !== Math.round(Number(expectedTotal) * 100)) {
+      await restoreSendClaim(invoiceId, claim.previousStatus, claim.claimed, consumedQueuedSendRows, db, claim.invoice.send_claim_token);
+      return {
+        ok: false,
+        code: "total_changed",
+        error: `Invoice total is $${Number(claim.invoice.total).toFixed(2)}, not the approved $${Number(expectedTotal).toFixed(2)} — not sent`,
+        sms: { ok: false }, email: { ok: false },
+      };
+    }
     if (_underRenewalGate) {
       try {
         assertRenewalGateAlive();
@@ -6478,7 +6523,7 @@ const InvoiceService = {
       }
     }
     const { autoApplyAccountCreditIfEnabled } = require("./customer-credit");
-    const sendCreditResult = await autoApplyAccountCreditIfEnabled(invoiceId);
+    const sendCreditResult = skipAccountCreditAutoApply ? null : await autoApplyAccountCreditIfEnabled(invoiceId);
     if (sendCreditResult?.fullyCovered) {
       // Resolve the adopted rows while the token still owns the row — the
       // resolution is token-scoped and would be a silent no-op after the
