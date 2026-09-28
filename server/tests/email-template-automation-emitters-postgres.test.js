@@ -24,7 +24,11 @@
  *    pending estimate.expired marker to the corrected address, and leave
  *    another customer's / a settled marker alone (codex P1 round 5);
  *  - a marker pending past the 24h replay shelf life settles stale in the
- *    real range UPDATE and is never replayed (pre-push audit P1).
+ *    real range UPDATE and is never replayed (pre-push audit P1);
+ *  - the shadow-mode values the executor writes (run status 'shadow',
+ *    event types would_send / would_block / promoted_from_shadow) are
+ *    accepted by the real runs / run_events schema — no CHECK constraint
+ *    rejects them (pre-push audit P1: every executor test mocks the db).
  */
 const SKIP = !process.env.DATABASE_URL;
 const { randomUUID } = require('crypto');
@@ -278,6 +282,32 @@ jest.mock('../services/email-template-automation-executor', () => ({
       expect(freshAfter.status).toBe('processed');
     } finally {
       await cleanup({ markerIds: [staleId, freshId] });
+    }
+  });
+
+  test('the runs / run_events schema accepts the shadow status and the shadow event types', async () => {
+    const runId = randomUUID();
+    try {
+      await db('email_template_automation_runs').insert({
+        id: runId,
+        automation_key: 'qa.shadow_schema',
+        trigger_event_key: 'estimate.expired',
+        template_key: 'qa.shadow_schema',
+        recipient_email: 'shadow-qa@example.com',
+        idempotency_key: `qa.shadow_schema:${runId}`,
+        status: 'running',
+      });
+      await db('email_template_automation_runs').where({ id: runId }).update({ status: 'shadow', completed_at: new Date() });
+      await db('email_template_automation_run_events').insert(
+        ['would_send', 'would_block', 'promoted_from_shadow'].map((eventType) => ({ run_id: runId, event_type: eventType })),
+      );
+
+      const run = await db('email_template_automation_runs').where({ id: runId }).first('status');
+      expect(run.status).toBe('shadow');
+      const events = await db('email_template_automation_run_events').where({ run_id: runId }).pluck('event_type');
+      expect(events.sort()).toEqual(['promoted_from_shadow', 'would_block', 'would_send']);
+    } finally {
+      await db('email_template_automation_runs').where({ id: runId }).del(); // events cascade
     }
   });
 
