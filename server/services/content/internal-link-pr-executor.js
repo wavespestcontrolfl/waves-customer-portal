@@ -615,9 +615,17 @@ class InternalLinkPrExecutor {
     let replanned = 0;
     for (const run of runs) {
       try {
+        // published_url is authoritative: finalizeMerged may have replaced a
+        // stale draft canonical with the verified route. The draft target is
+        // used for metadata (keyword/city/title) only; off-hub URLs are
+        // rejected by the planner's hub-only canonicalization anyway.
         const target = await resolveTargetForRun(run);
-        const url = target?.url || run.published_url;
-        const result = target?.planLinks === false ? { queued: 0 } : await publisher.planInternalLinksForTarget({ ...target, url });
+        const result = await publisher.planInternalLinksForTarget({
+          keyword: target?.keyword || null,
+          city: target?.city || null,
+          title: target?.title || null,
+          url: run.published_url,
+        });
         // null = planning could not run (no corpus): the marker stays for
         // the next sweep, same result guard as finalizeMerged.
         if (!result) continue;

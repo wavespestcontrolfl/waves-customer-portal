@@ -1838,7 +1838,8 @@ describe('internal-link replan of publishes whose post-merge planning failed', (
       });
       return db;
     });
-    jest.doMock('../services/content/autonomous-pr-poller', () => ({ _internals: { resolveTargetForRun: jest.fn(async () => ({ url: 'https://www.wavespestcontrol.com/new-post/', planLinks: true })) } }));
+    // The draft canonical is stale; the verified published_url must win.
+    jest.doMock('../services/content/autonomous-pr-poller', () => ({ _internals: { resolveTargetForRun: jest.fn(async () => ({ url: 'https://www.wavespestcontrol.com/stale-draft-canonical/', keyword: 'kw', planLinks: true })) } }));
     const planInternalLinksForTarget = jest.fn()
       .mockResolvedValueOnce(null) // no corpus: planning could not run
       .mockResolvedValueOnce({ queued: 4 });
@@ -1852,7 +1853,7 @@ describe('internal-link replan of publishes whose post-merge planning failed', (
     // …the next sweep plans it and stamps the result.
     const replanned = await instance._replanUnplannedPublishes();
     expect(replanned).toBe(1);
-    expect(planInternalLinksForTarget).toHaveBeenCalledWith(expect.objectContaining({ url: 'https://www.wavespestcontrol.com/new-post/' }));
+    expect(planInternalLinksForTarget).toHaveBeenLastCalledWith(expect.objectContaining({ url: 'https://www.wavespestcontrol.com/new-post/', keyword: 'kw' }));
     expect(updates).toEqual([{ table: 'autonomous_runs', patch: expect.objectContaining({ link_tasks_queued: 4, link_planning_failed_at: null }) }]);
     // The post-merge planning kill switch stops the replan too.
     internalLinkPlanningDisabled.mockReturnValueOnce(true);
