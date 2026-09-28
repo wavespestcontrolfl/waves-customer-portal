@@ -104,19 +104,14 @@ const CANONICAL_PRICE_PHRASES = Object.freeze({
   'german cockroach treatment': GERMAN_ROACH,
   'palm injection': ['palm_injection'],
   'palm tree injection': ['palm_injection'],
-  'tree and shrub care': ['tree_shrub_care'],
 });
 
 // Commercial work is custom-quoted and the feed is residential list price,
 // so a keyword (or title) with commercial wording gets no card. Terms = the
 // canonical commercial risk-type buckets' property terms
 // (pricing-engine/commercial-risk-type.js) plus the generic words.
-const escapeRe = (term) => term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-const COMMERCIAL = new RegExp(`\\b(?:${[
-  'commercial', 'business', 'businesses',
-  ...Object.values(COMMERCIAL_RISK_TYPE_TERMS).flat(),
-].map(escapeRe).join('|')})\\b`);
-
+// Terms go through the SAME normalizer as the keyword/title they are matched
+// against, so "multi-family" (→ "multi family") still matches.
 function normalizeWords(value) {
   return String(value || '').toLowerCase()
     .replace(/&/g, ' and ')
@@ -124,6 +119,12 @@ function normalizeWords(value) {
     .replace(/\s+/g, ' ')
     .trim();
 }
+
+const escapeRe = (term) => term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const COMMERCIAL = new RegExp(`\\b(?:${[...new Set([
+  'commercial', 'business', 'businesses',
+  ...Object.values(COMMERCIAL_RISK_TYPE_TERMS).flat(),
+].map(normalizeWords).filter(Boolean))].map(escapeRe).join('|')})\\b`);
 
 // Place words a keyword may end with: every served locality (config/locations
 // CITY_TO_LOCATION) plus county / region names.
@@ -169,10 +170,17 @@ function mappedKeys(frontmatter) {
   return CANONICAL_PRICE_PHRASES[servicePhrase(source)] || [];
 }
 
-// The feed's current keys, or null when the feed cannot be computed or is
-// INCOMPLETE — a row whose sweep errored is missing from `services` though
-// it still exists, and pruning a kept list against that gap would delete a
-// valid owner key.
+// A row whose feed unit is a per-month / per-year plan total (tree & shrub
+// care, the trap-only retainer) cannot go on the card: customer-facing
+// prices are per application or per job, never a combined "$X/mo" or
+// "$X/yr" plan total (AGENTS.md "Per application" price copy). Read from the
+// row's own `unit`, so a row that changes unit is handled without a list.
+const PLAN_TOTAL_UNIT = /\bper (?:month|year|mo|yr)\b/;
+
+// The feed's current card-presentable keys, or null when the feed cannot be
+// computed or is INCOMPLETE — a row whose sweep errored is missing from
+// `services` though it still exists, and pruning a kept list against that
+// gap would delete a valid owner key.
 function publishedPriceKeys() {
   try {
     const feed = computePublicPricingRanges();
@@ -180,19 +188,22 @@ function publishedPriceKeys() {
       logger.warn(`[price-range] public pricing feed incomplete (${feed.errors.map((e) => e.key).join(', ')}) — treated as unavailable`);
       return null;
     }
-    return new Set((feed.services || []).map((row) => row.key));
+    return new Set((feed.services || [])
+      .filter((row) => !PLAN_TOTAL_UNIT.test(String(row.unit || '').toLowerCase()))
+      .map((row) => row.key));
   } catch (err) {
     logger.warn(`[price-range] public pricing feed unavailable: ${err.message}`);
     return null;
   }
 }
 
-// The keys that may ship: published by the feed now, and not purchase-gated.
+// The keys that may ship: published by the feed now with a card-presentable
+// unit, and not purchase-gated.
 function usableKeys(keys, known) {
   const usable = (key) => known.has(key) && !PURCHASE_GATED_ROWS[key];
   const dropped = keys.filter((key) => !usable(key));
   if (dropped.length) {
-    logger.warn(`[price-range] dropped price_range keys the public pricing feed does not publish (or publishes only behind a purchase gate): ${dropped.join(', ')}`);
+    logger.warn(`[price-range] dropped price_range keys the public pricing feed does not publish, publishes only behind a purchase gate, or prices as a monthly/yearly plan total: ${dropped.join(', ')}`);
   }
   return keys.filter(usable);
 }
