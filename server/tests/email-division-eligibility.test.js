@@ -18,7 +18,7 @@ const NOW = new Date('2026-09-28T15:00:00Z'); // Mon Sep 28, 11:00 ET
 
 function chain({ result = [], first, firstError } = {}) {
   const q = {};
-  ['where', 'whereRaw', 'whereNotNull', 'select', 'orderBy'].forEach((m) => { q[m] = jest.fn(() => q); });
+  ['where', 'whereIn', 'whereRaw', 'whereNotNull', 'select', 'orderBy'].forEach((m) => { q[m] = jest.fn(() => q); });
   q.first = jest.fn(async () => { if (firstError) throw firstError; return first; });
   q.then = (resolve, reject) => Promise.resolve(result).then(resolve, reject);
   q.catch = (reject) => Promise.resolve(result).catch(reject);
@@ -38,7 +38,7 @@ function customerRow(overrides = {}) {
 // LOOKUP_FAILED cases, which must not wire ledger/sms_log/call_log at all).
 function evalWith({
   customer = customerRow(), suppressions = [], dnc, prefs = { email_enabled: true, marketing_offers: true, weather_alerts: true, referral_nudge: true },
-  estimates, ledger = [], smsOutbound, smsInbound, callInbound, tables,
+  estimates, ledger = [], smsOutbound, smsInbound, callInbound, callOutbound, tables,
 } = {}, args = {}) {
   db.mockImplementation((table) => {
     const map = tables || {
@@ -49,7 +49,7 @@ function evalWith({
       estimates: chain({ first: estimates }),
       marketing_email_ledger: ledger,
       sms_log: [chain({ first: smsOutbound }), chain({ first: smsInbound })],
-      call_log: chain({ first: callInbound }),
+      call_log: [chain({ first: callInbound }), chain({ first: callOutbound })],
     };
     const supply = map[table];
     if (!supply) throw new Error(`Unexpected db table ${table}`);
@@ -226,6 +226,32 @@ describe('email-division eligibility', () => {
     const r = await evalWith({ ledger: [chain({ result: [] })], callInbound: { id: 'call-1' } },
       { marketingClass: 'marketing', emailKey: 'lc.pest_tip' });
     expect(r.reason).toBe(REASONS.RECENT_HUMAN_CONTACT);
+  });
+
+  test('RECENT_HUMAN_CONTACT on a connected staff-placed outbound call in the last 3 days (codex GitHub P2)', async () => {
+    const outboundQ = chain({ first: { id: 'call-2' } });
+    const r = await evalWith({ ledger: [chain({ result: [] })], tables: {
+      customers: chain({ first: customerRow() }),
+      messaging_suppression: chain({ first: undefined }),
+      email_suppressions: chain({ result: [] }),
+      notification_prefs: chain({ first: { email_enabled: true, marketing_offers: true, weather_alerts: true, referral_nudge: true } }),
+      estimates: chain({ first: undefined }),
+      marketing_email_ledger: [chain({ result: [] })],
+      sms_log: [chain({ first: undefined }), chain({ first: undefined })],
+      call_log: [chain({ first: undefined }), outboundQ],
+    } }, { marketingClass: 'marketing', emailKey: 'lc.pest_tip' });
+    expect(r.reason).toBe(REASONS.RECENT_HUMAN_CONTACT);
+    // Only staff-placed, connected calls count — the query names both.
+    expect(outboundQ.whereIn).toHaveBeenCalledWith('source', ['admin-click', 'admin-callback', 'tech-click']);
+    expect(outboundQ.whereIn).toHaveBeenCalledWith('status', ['completed', 'in-progress', 'answered']);
+  });
+
+  test('a marketing unsubscribe (marketing_newsletter group) does not block an OPERATIONAL lifecycle email but does switch the embedded pitch off (codex GitHub P1)', async () => {
+    const r = await evalWith({
+      suppressions: [{ email: 'sandy@example.test', group_key: 'marketing_newsletter', suppression_type: 'unsubscribe', status: 'active' }],
+    }, { emailKey: 'lc.welcome' });
+    expect(r.ok).toBe(true);
+    expect(r.checks.allowPitch).toBe(false);
   });
 
   test('relationship class is exempt from caps and recent-contact checks (no ledger/sms_log/call_log wired)', async () => {

@@ -31,7 +31,7 @@ const Ledger = require('../services/email-division/ledger');
 function chain({ first, result = [], rows = [], updateReturn = 1 } = {}) {
   const calls = [];
   const q = { calls };
-  ['where', 'whereNot', 'whereNotNull', 'select', 'onConflict', 'ignore'].forEach((m) => {
+  ['where', 'whereNot', 'whereNotNull', 'whereIn', 'select', 'onConflict', 'ignore'].forEach((m) => {
     q[m] = jest.fn((...a) => { calls.push([m, ...a]); return q; });
   });
   q.first = jest.fn(async (...a) => { calls.push(['first', ...a]); return first; });
@@ -91,10 +91,29 @@ test('GitHub round P1: a stale reservation whose key email_messages shows as acc
     emailKey: 'mkt.broadcast.fall', idempotencyKey: 'key-1', now: new Date('2026-09-28T12:00:00Z'),
   });
 
-  expect(acceptedQ.calls).toEqual(expect.arrayContaining([['where', { idempotency_key: 'key-old' }], ['whereNotNull', 'sent_at']]));
+  expect(acceptedQ.calls).toEqual(expect.arrayContaining([['where', { idempotency_key: 'key-old' }]]));
   const settleUpdate = settleQ.calls.find((c) => c[0] === 'update');
   expect(settleUpdate[1]).toMatchObject({ status: 'sent', email_message_id: 'msg-9', sent_at: accepted.sent_at, reason: 'reconciled_from_email_messages' });
   expect(settleQ.calls.some((c) => c[0] === 'where' && c[1]?.id === 'row-stale' && c[1]?.status === 'reserved')).toBe(true);
+});
+
+test.each([
+  ['handoff started, response lost', { id: 'msg-u', sent_at: null, status: 'queued', provider_handoff_phase: 'started', updated_at: new Date('2026-09-28T11:20:00Z') }, { status: 'sent', email_message_id: 'msg-u', reason: 'provider_handoff_uncertain' }],
+  ['provider rejected', { id: 'msg-r', sent_at: null, status: 'queued', provider_handoff_phase: 'rejected', updated_at: new Date() }, { status: 'failed', reason: 'provider_rejected' }],
+  ['terminal failure before handoff', { id: 'msg-f', sent_at: null, status: 'failed', provider_handoff_phase: 'pending', updated_at: new Date() }, { status: 'failed', reason: 'provider_rejected' }],
+  ['never reached the provider', { id: 'msg-p', sent_at: null, status: 'queued', provider_handoff_phase: 'pending', updated_at: new Date() }, { status: 'failed', reason: 'abandoned_reservation' }],
+])('GitHub round P1: a stale reservation is settled from the handoff phase — %s', async (_label, message, expected) => {
+  eligibleForEmail.mockResolvedValue({ ok: true, reason: null, checks: { customerEmail: 'sandy@example.test' } });
+  const staleQ = chain({ rows: [{ id: 'row-stale', idempotency_key: 'key-old' }] });
+  const settleQ = chain({ updateReturn: 1 });
+  setQueue([staleQ, settleQ, chain({ first: undefined }), chain({ first: undefined }), chain({ result: [{ id: 'row-1' }] })], [chain({ first: message })]);
+
+  await Ledger.reserveWithCap({
+    customerId: 'cust-1', stream: 'broadcast', marketingClass: 'marketing',
+    emailKey: 'mkt.broadcast.fall', idempotencyKey: 'key-1', now: new Date('2026-09-28T12:00:00Z'),
+  });
+
+  expect(settleQ.calls.find((c) => c[0] === 'update')[1]).toMatchObject(expected);
 });
 
 test('finding 2: an existing idempotency key returns duplicate:true for whatever status it holds, without checking eligibility', async () => {

@@ -29,20 +29,42 @@ const RESERVATION_LIFETIME_MS = 30 * 60 * 1000; // 30 minutes
 // be counted toward the caps, never written off as abandoned (codex GitHub
 // round P1). A key with no accepted message is a reservation that never
 // reached the provider.
-async function acceptedMessageFor(trx, idempotencyKey) {
-  if (!idempotencyKey) return null;
-  return trx('email_messages')
+// What the delivery authority says about a key. email_messages carries
+// more than sent_at: the library stamps provider_handoff_phase 'started' the
+// moment the request is handed to SendGrid and 'rejected' when SendGrid
+// refuses it; a worker that dies between acceptance and recordAcceptance
+// leaves 'started' with no sent_at — an UNCERTAIN delivery the library itself
+// refuses to retry (codex GitHub round P1). Kinds:
+//   accepted  — sent_at set: the email went out.
+//   uncertain — handoff 'started', no sent_at: it may have gone out.
+//   rejected  — handoff 'rejected', or a terminal failed/blocked/aborted row.
+//   pending   — a row that never reached the provider (queued/pending).
+//   none      — no email_messages row for the key.
+async function messageStateFor(trx, idempotencyKey) {
+  if (!idempotencyKey) return { kind: 'none', message: null };
+  const message = await trx('email_messages')
     .where({ idempotency_key: idempotencyKey })
-    .whereNotNull('sent_at')
-    .first('id', 'sent_at');
+    .first('id', 'sent_at', 'status', 'provider_handoff_phase', 'updated_at');
+  if (!message) return { kind: 'none', message: null };
+  if (message.sent_at) return { kind: 'accepted', message };
+  const phase = String(message.provider_handoff_phase || '').toLowerCase();
+  if (phase === 'started') return { kind: 'uncertain', message };
+  if (phase === 'rejected' || ['failed', 'blocked', 'aborted'].includes(String(message.status || '').toLowerCase())) {
+    return { kind: 'rejected', message };
+  }
+  return { kind: 'pending', message };
 }
 
-async function completeFromAcceptedMessage(trx, id, accepted) {
+// An accepted OR uncertain handoff completes the reservation as `sent`: the
+// caps then count an email that went out (or may have), never the other way
+// round — a duplicate marketing email is the failure this ledger exists to
+// prevent, a possibly-uncounted miss is not.
+async function completeFromMessage(trx, id, state) {
   return trx('marketing_email_ledger').where({ id, status: 'reserved' }).update({
     status: 'sent',
-    sent_at: accepted.sent_at,
-    email_message_id: accepted.id,
-    reason: 'reconciled_from_email_messages',
+    sent_at: state.message.sent_at || state.message.updated_at || trx.fn.now(),
+    email_message_id: state.message.id,
+    reason: state.kind === 'accepted' ? 'reconciled_from_email_messages' : 'provider_handoff_uncertain',
     updated_at: trx.fn.now(),
   });
 }
@@ -54,13 +76,17 @@ async function settleAbandonedReservations(trx, customerId, now) {
     .where('reserved_at', '<=', staleCutoff)
     .select('id', 'idempotency_key');
   for (const row of stale) {
-    const accepted = await acceptedMessageFor(trx, row.idempotency_key);
-    if (accepted) {
-      await completeFromAcceptedMessage(trx, row.id, accepted);
+    const state = await messageStateFor(trx, row.idempotency_key);
+    if (state.kind === 'accepted' || state.kind === 'uncertain') {
+      await completeFromMessage(trx, row.id, state);
     } else {
       await trx('marketing_email_ledger')
         .where({ id: row.id, status: 'reserved' })
-        .update({ status: 'failed', reason: 'abandoned_reservation', updated_at: trx.fn.now() });
+        .update({
+          status: 'failed',
+          reason: state.kind === 'rejected' ? 'provider_rejected' : 'abandoned_reservation',
+          updated_at: trx.fn.now(),
+        });
     }
   }
   return stale.length;
@@ -154,10 +180,11 @@ async function settleReservedOnly(id, status, reason, conn) {
     const existing = await trx('marketing_email_ledger').where({ id }).first('customer_id', 'idempotency_key');
     if (!existing) return false;
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`marketing-email:${existing.customer_id}`]);
-    // A failure report against a message the provider already accepted is
-    // a lost response, not a failure: the row completes as sent instead.
-    const accepted = await acceptedMessageFor(trx, existing.idempotency_key);
-    if (accepted) return (await completeFromAcceptedMessage(trx, id, accepted)) > 0;
+    // A failure report against a message the provider accepted — or may
+    // have (handoff started, response lost) — is not a failure: the row
+    // completes as sent instead.
+    const state = await messageStateFor(trx, existing.idempotency_key);
+    if (state.kind === 'accepted' || state.kind === 'uncertain') return (await completeFromMessage(trx, id, state)) > 0;
     const changed = await trx('marketing_email_ledger')
       .where({ id, status: 'reserved' })
       .update({ status, reason, updated_at: trx.fn.now() });
@@ -182,11 +209,13 @@ async function markFailed(id, reason, { conn } = {}) {
  *
  * Under the SAME lock, before anything else:
  *   - any of this customer's `reserved` rows older than
- *     RESERVATION_LIFETIME_MS is settled: to `sent` (linked to the message)
- *     when email_messages shows the provider accepted that key — the
- *     crash-after-acceptance case, which must keep counting toward the caps —
- *     else to `failed`/`abandoned_reservation` (codex round-1 P1, GitHub
- *     round P1) — never counted as outstanding again.
+ *     RESERVATION_LIFETIME_MS is settled from email_messages: to `sent`
+ *     (linked to the message) when the provider accepted that key, or when
+ *     the handoff started and the response was lost — both must keep
+ *     counting toward the caps — else to `failed` (`provider_rejected`, or
+ *     `abandoned_reservation` for a key that never reached the provider)
+ *     (codex round-1 P1, GitHub rounds P1) — never counted as outstanding
+ *     again.
  *   - an idempotency key already held by ANOTHER customer/stream/email key
  *     is refused with IDEMPOTENCY_KEY_CONFLICT (codex GitHub round P2).
  *   - a retry of an idempotency key that already exists returns

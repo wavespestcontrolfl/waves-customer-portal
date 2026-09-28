@@ -158,6 +158,46 @@ describeOrSkip('email-division ledger (Postgres)', () => {
     }
   });
 
+  test('GitHub round P1: a handoff that STARTED with no acceptance recorded (worker died mid-response) is counted as sent, not abandoned', async () => {
+    const first = await attempt('uncertain-key');
+    const [message] = await db('email_messages').insert({
+      idempotency_key: 'uncertain-key', recipient_email_snapshot: customerEmail, recipient_type: 'customer', recipient_id: customerId,
+      template_key: 'mkt.broadcast.weekly', status: 'queued', provider_handoff_phase: 'started',
+    }).returning(['id']);
+    try {
+      await db('marketing_email_ledger').where({ idempotency_key: 'uncertain-key' })
+        .update({ reserved_at: new Date(Date.now() - 45 * 60 * 1000) });
+      const second = await attempt('after-uncertain');
+      const row = await db('marketing_email_ledger').where({ id: first.row.id }).first();
+      expect(row.status).toBe('sent');
+      expect(row.reason).toBe('provider_handoff_uncertain');
+      expect(row.email_message_id).toBe(message.id);
+      expect(second.ok).toBe(false);
+      expect(second.reason).toBe(Eligibility.REASONS.CAP_WEEKLY_BROADCAST);
+    } finally {
+      await db('email_messages').where({ id: message.id }).del();
+    }
+  });
+
+  test('GitHub round P1: a handoff SendGrid rejected settles as failed/provider_rejected and frees the cap', async () => {
+    const first = await attempt('rejected-key');
+    const [message] = await db('email_messages').insert({
+      idempotency_key: 'rejected-key', recipient_email_snapshot: customerEmail, recipient_type: 'customer', recipient_id: customerId,
+      template_key: 'mkt.broadcast.weekly', status: 'failed', provider_handoff_phase: 'rejected', error_message: 'synthetic 400',
+    }).returning(['id']);
+    try {
+      await db('marketing_email_ledger').where({ idempotency_key: 'rejected-key' })
+        .update({ reserved_at: new Date(Date.now() - 45 * 60 * 1000) });
+      const second = await attempt('after-rejected');
+      const row = await db('marketing_email_ledger').where({ id: first.row.id }).first();
+      expect(row.status).toBe('failed');
+      expect(row.reason).toBe('provider_rejected');
+      expect(second.ok).toBe(true);
+    } finally {
+      await db('email_messages').where({ id: message.id }).del();
+    }
+  });
+
   test('GitHub round P1: a failure reported against a message the provider accepted completes the row as sent instead', async () => {
     const first = await attempt('lost-response-key');
     const [message] = await db('email_messages').insert({

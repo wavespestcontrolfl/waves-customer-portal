@@ -27,6 +27,12 @@ const { etDateString } = require('../../utils/datetime-et');
 const { toE164 } = require('../../utils/phone');
 const { activeSuppressionsFor, GLOBAL_SUPPRESSION_TYPES } = require('../email-template-library');
 
+// call-bridge.js sources a person dials from (admin click-to-call, the
+// callback card, a technician's line) and the statuses meaning the call
+// connected. Automated outbound voice never carries these sources.
+const STAFF_CALL_SOURCES = ['admin-click', 'admin-callback', 'tech-click'];
+const CONNECTED_CALL_STATUSES = ['completed', 'in-progress', 'answered'];
+
 const REASONS = {
   CUSTOMER_MISSING: 'CUSTOMER_MISSING',
   CUSTOMER_DELETED: 'CUSTOMER_DELETED',
@@ -172,12 +178,20 @@ async function checkSuppression(ctx) {
   return isGlobal ? REASONS.EMAIL_SUPPRESSED_GLOBAL : REASONS.EMAIL_SUPPRESSED_GROUP;
 }
 
+async function marketingSuppressed(ctx) {
+  const rows = await activeSuppressionsFor(null, ctx.customer.email, 'marketing_newsletter', ctx.database);
+  return rows.length > 0;
+}
+
 async function checkEmailSwitchStreamFlagAndChannel(ctx) {
   const { customerId, stream, emailKey, database, checks } = ctx;
   const prefs = await database('notification_prefs').where({ customer_id: customerId }).first();
   ctx.prefs = prefs;
   if (prefs && prefs.email_enabled === false) return REASONS.EMAIL_SWITCH_OFF;
-  checks.allowPitch = prefs?.marketing_offers === true;
+  // An embedded pitch is marketing: it needs the marketing_offers flag AND
+  // no active marketing unsubscribe — an operational email's own suppression
+  // check only looked at service_operational (codex GitHub round P1).
+  checks.allowPitch = prefs?.marketing_offers === true && !(await marketingSuppressed(ctx));
   if (!streamFlagOk(stream, emailKey, prefs)) return REASONS.STREAM_FLAG_OFF;
   if (streamChannelBlocksEmail(stream, emailKey, prefs)) return REASONS.STREAM_CHANNEL_NOT_EMAIL;
   return null;
@@ -246,7 +260,19 @@ async function checkRecentHumanContact(ctx) {
     .where({ customer_id: customerId, direction: 'inbound' })
     .where('created_at', '>', threeDaysAgo)
     .first('id');
-  return inboundCall ? REASONS.RECENT_HUMAN_CONTACT : null;
+  if (inboundCall) return REASONS.RECENT_HUMAN_CONTACT;
+
+  // A staff member who just spoke to the customer counts too (codex GitHub
+  // round P2). Staff-placed calls are the click-to-call bridge rows
+  // (call-bridge.js, direction 'outbound', a staff source) that connected;
+  // automated outbound voice (collections, reminders) is not human contact.
+  const staffCall = await database('call_log')
+    .where({ customer_id: customerId, direction: 'outbound' })
+    .whereIn('source', STAFF_CALL_SOURCES)
+    .whereIn('status', CONNECTED_CALL_STATUSES)
+    .where('created_at', '>', threeDaysAgo)
+    .first('id');
+  return staffCall ? REASONS.RECENT_HUMAN_CONTACT : null;
 }
 
 // Order matches the documented rule set exactly: customer, staff
