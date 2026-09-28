@@ -46,7 +46,7 @@ jest.mock('../services/receipt-delivery-queue', () => ({
   enqueueReceiptDelivery: jest.fn(async () => ({ enqueued: true })),
   scheduleReceiptDeliveryDrain: jest.fn(),
   claimReceiptJobForOperatorSend: jest.fn(async () => ({ id: 'job-1', token: 'claim-1', prior: null })),
-  recordOperatorReceiptEmail: jest.fn(async () => undefined),
+  recordOperatorReceiptDelivered: jest.fn(async () => undefined),
   releaseOperatorReceiptClaim: jest.fn(async () => undefined),
 }));
 
@@ -478,6 +478,21 @@ describe('recordManualPayment — settlement', () => {
       expect.objectContaining({ emailDelivered: true }),
     );
     expect(ReceiptDeliveryQueue.releaseOperatorReceiptClaim.mock.invocationCallOrder[0]).toBeGreaterThan(InvoiceService.sendReceipt.mock.invocationCallOrder[0]);
+  });
+
+  test('each delivered inline leg is recorded on the claim', async () => {
+    settle(openInvoice());
+    await recordManualPayment('inv-1', { method: 'cash' });
+    expect(ReceiptDeliveryQueue.recordOperatorReceiptDelivered.mock.calls.map(([, leg]) => leg)).toEqual(['email', 'sms']);
+  });
+
+  test('another OPERATOR send holding the claim is no promise this receipt goes out: reported unsent, never queued', async () => {
+    settle(openInvoice());
+    ReceiptDeliveryQueue.claimReceiptJobForOperatorSend.mockResolvedValueOnce({ inFlight: true, byOperator: true });
+    const out = await recordManualPayment('inv-1', { method: 'cash' });
+    expect(out.receipt).toEqual({ email: { ok: false, error: expect.stringMatching(/another receipt send/) }, sms: null });
+    expect(sendReceiptEmail).not.toHaveBeenCalled();
+    expect(InvoiceService.sendReceipt).not.toHaveBeenCalled();
   });
 
   test('a receipt job the drain is delivering right now: nothing sent inline, reported as queued', async () => {
