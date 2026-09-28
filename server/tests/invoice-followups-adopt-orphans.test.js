@@ -378,12 +378,12 @@ describe('adoptOrphanInvoices seeds/releases an autopay-held row from prior ACH 
     };
   }
 
-  test('a customer already at the failure threshold is released immediately', async () => {
+  test('a customer already at the failure threshold is armed active with the counter seeded, in the same insert', async () => {
     process.env.GATE_DUNNING_ADOPT_ORPHANS = 'true';
     process.env.GATE_LATE_PAYMENT_CHECKER_OFF = 'true';
     process.env.GATE_DUNNING_LADDER_90 = 'true';
     const c = autopayCandidate();
-    const { seqUpdates } = setupFullDb({
+    const { insertCalls, seqUpdates } = setupFullDb({
       orphanRows: c.orphanRows,
       previewInvoice: c.previewInvoice,
       customer: { id: 'cust-1' },
@@ -395,20 +395,19 @@ describe('adoptOrphanInvoices seeds/releases an autopay-held row from prior ACH 
     const result = await adoptOrphanInvoices({ dryRun: false });
 
     expect(result.adopted).toBe(1);
-    const releaseUpdate = seqUpdates.find((u) => u.patch.status === 'active');
-    expect(releaseUpdate).toBeTruthy();
-    expect(releaseUpdate.wheres).toEqual([{ id: 'seq-new', status: 'autopay_hold' }]);
-    expect(logger.info).toHaveBeenCalledWith(
-      expect.stringContaining('released from autopay_hold — customer already had 3 unresolved ACH failure(s)'),
-    );
+    expect(insertCalls).toHaveLength(1);
+    expect(insertCalls[0]).toMatchObject({ status: 'active', is_autopay_held: false, autopay_failures_observed: 3 });
+    expect(insertCalls[0].next_touch_at).toBeInstanceOf(Date);
+    expect(seqUpdates).toHaveLength(0); // no post-insert release: one atomic write
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('3 unresolved ACH failure(s) — armed active, threshold already met'));
   });
 
-  test('a customer with SOME prior failures below threshold has the counter seeded, still held', async () => {
+  test('a customer with SOME prior failures below threshold is held with the counter seeded, in the same insert', async () => {
     process.env.GATE_DUNNING_ADOPT_ORPHANS = 'true';
     process.env.GATE_LATE_PAYMENT_CHECKER_OFF = 'true';
     process.env.GATE_DUNNING_LADDER_90 = 'true';
     const c = autopayCandidate();
-    const { seqUpdates } = setupFullDb({
+    const { insertCalls, seqUpdates } = setupFullDb({
       orphanRows: c.orphanRows,
       previewInvoice: c.previewInvoice,
       customer: { id: 'cust-1' },
@@ -420,13 +419,12 @@ describe('adoptOrphanInvoices seeds/releases an autopay-held row from prior ACH 
     const result = await adoptOrphanInvoices({ dryRun: false });
 
     expect(result.adopted).toBe(1);
-    const seedUpdate = seqUpdates.find((u) => u.patch.autopay_failures_observed === 1);
-    expect(seedUpdate).toBeTruthy();
-    expect(seedUpdate.wheres).toEqual([{ id: 'seq-new', status: 'autopay_hold' }]);
-    expect(seedUpdate.patch.status).toBeUndefined(); // still held — no status flip
+    expect(insertCalls).toHaveLength(1);
+    expect(insertCalls[0]).toMatchObject({ status: 'autopay_hold', is_autopay_held: true, next_touch_at: null, autopay_failures_observed: 1 });
+    expect(seqUpdates).toHaveLength(0);
   });
 
-  test('an unreadable ACH history fails closed BEFORE any row is created (the sweep could never retry a row that exists)', async () => {
+  test('an unreadable ACH history rolls the whole adoption back: no row, logged, retried next sweep', async () => {
     process.env.GATE_DUNNING_ADOPT_ORPHANS = 'true';
     process.env.GATE_LATE_PAYMENT_CHECKER_OFF = 'true';
     process.env.GATE_DUNNING_LADDER_90 = 'true';
@@ -440,9 +438,8 @@ describe('adoptOrphanInvoices seeds/releases an autopay-held row from prior ACH 
     const result = await adoptOrphanInvoices({ dryRun: false });
 
     expect(result.adopted).toBe(0);
-    expect(result.skipped).toEqual([{ invoice_id: 'inv-1', customer_id: 'cust-1', reason: 'ach_history_unreadable' }]);
     expect(insertCalls).toHaveLength(0);
-    expect(db.transaction).not.toHaveBeenCalled();
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('adoption failed for invoice inv-1: ach log unavailable'));
   });
 
   test('no prior failures — row is left exactly as scheduleForInvoice created it (regression)', async () => {

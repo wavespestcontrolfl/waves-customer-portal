@@ -368,7 +368,7 @@ function anchorTo10amNY(anchorDate, daysAfter, hour) {
  * Create (or re-hydrate) a sequence row for a newly-issued invoice.
  * Call this from the invoice-send flow.
  */
-async function scheduleForInvoice(invoiceId) {
+async function scheduleForInvoice(invoiceId, { seedAutopayFromAchHistory = false } = {}) {
   // Cheap unlocked pre-checks: a missing / non-schedulable / payer-billed
   // invoice never arms a sequence, and none of those verdicts can be flipped
   // by an ownership change (a merge moves customer_id, not status or payer).
@@ -552,6 +552,23 @@ async function scheduleForInvoice(invoiceId) {
 
     const customer = await trx('customers').where({ id: invoice.customer_id }).first();
     const onAutopay = await customerOnAutopay(customer, { db: trx });
+    // Orphan adoption only: a customer whose autopay retries already failed
+    // before this row existed would otherwise sit in a fresh hold waiting
+    // for webhooks that may never come. Seed the counter from the same
+    // durable record handleAutopayFailure reads (unresolved ACH failures,
+    // last 90 days), keyed by the invoice's owner under this lock, and arm
+    // the row active when the threshold is already met — all inside this
+    // transaction, so a failed read creates no row and the next sweep
+    // simply retries.
+    let priorFailures = 0;
+    if (onAutopay && seedAutopayFromAchHistory) {
+      priorFailures = Number((await trx('ach_failure_log')
+        .where({ customer_id: invoice.customer_id, resolved: false })
+        .where('failure_date', '>=', new Date(Date.now() - 90 * 24 * 60 * 60 * 1000))
+        .count('* as cnt')
+        .first())?.cnt || 0);
+    }
+    const held = onAutopay && priorFailures < config.autopayFailureThreshold;
 
     // Anchor the cadence to when the invoice went out. Falls back through
     // sent_at → sms_sent_at → created_at so edge cases (manual-only, email-only,
@@ -562,11 +579,16 @@ async function scheduleForInvoice(invoiceId) {
     const [row] = await trx('invoice_followup_sequences').insert({
       invoice_id: invoiceId,
       customer_id: invoice.customer_id,
-      status: onAutopay ? 'autopay_hold' : 'active',
+      status: held ? 'autopay_hold' : 'active',
       step_index: 0,
-      next_touch_at: onAutopay ? null : nextAt,
-      is_autopay_held: !!onAutopay,
+      next_touch_at: held ? null : nextAt,
+      is_autopay_held: held,
+      ...(seedAutopayFromAchHistory && onAutopay ? { autopay_failures_observed: priorFailures } : {}),
     }).returning('*');
+    if (seedAutopayFromAchHistory && onAutopay) {
+      logger.info(`[invoice-followups] adopted invoice ${invoiceId}: customer had ${priorFailures} unresolved ACH failure(s) — `
+        + (held ? 'held for autopay with the counter seeded' : 'armed active, threshold already met'));
+    }
     return row;
   });
 }
@@ -588,65 +610,15 @@ function adoptGateSetWithCheckerRunning() {
 }
 
 
-// The customer's unresolved ACH failures in the last 90 days: the same
-// durable record handleAutopayFailure's own webhook counter reads. Read
-// BEFORE a row is created (an unreadable history skips the candidate for
-// this sweep; once the row exists the sweep never re-selects it, so there
-// would be no retry).
-async function priorAchFailures(customerId) {
-  try {
-    const count = Number((await db('ach_failure_log')
-      .where({ customer_id: customerId, resolved: false })
-      .where('failure_date', '>=', new Date(Date.now() - 90 * 24 * 60 * 60 * 1000))
-      .count('* as cnt')
-      .first())?.cnt || 0);
-    return { count };
-  } catch (err) {
-    logger.warn(`[invoice-followups] adoption autopay-history read failed for customer ${customerId} — skipping this sweep: ${err.message}`);
-    return { unavailable: true };
-  }
-}
-
-/**
- * scheduleForInvoice arms an autopay customer's fresh row at 'autopay_hold'
- * with autopay_failures_observed starting at 0, but a customer already at or
- * past the failure threshold would then need MORE new failures before ever
- * releasing, even though autopay is already known broken for them. Seeds
- * the counter from the pre-read history for adopted rows only, releasing
- * immediately through the same path the webhook uses when it is already at
- * or past threshold. The history is keyed by the customer the LOCKED
- * sequence row names (the invoice's owner under scheduleForInvoice's lock),
- * re-read when that differs from the candidate's owner.
- */
-async function initializeAdoptedAutopayHold(row, candidate, preRead) {
-  if (!row || row.status !== 'autopay_hold') return row;
-  let history = preRead;
-  if (row.customer_id && row.customer_id !== candidate.customer_id) {
-    history = await priorAchFailures(row.customer_id);
-    if (history.unavailable) {
-      logger.error(`[invoice-followups] adopted invoice ${row.invoice_id} is held for autopay but its owner's ACH history could not be read — seed it by hand (customer ${row.customer_id})`);
-      return row;
-    }
-  }
-  const priorFailures = history.count;
-  if (!priorFailures) return row;
-  if (priorFailures >= config.autopayFailureThreshold) {
-    await releaseFromAutopayHold(row.invoice_id);
-    const released = await db('invoice_followup_sequences').where({ id: row.id }).first();
-    logger.info(`[invoice-followups] adopted invoice ${row.invoice_id} released from autopay_hold — customer already had ${priorFailures} unresolved ACH failure(s)`);
-    return released || row;
-  }
-  await db('invoice_followup_sequences').where({ id: row.id, status: 'autopay_hold' })
-    .update({ updated_at: db.fn.now(), autopay_failures_observed: priorFailures });
-  return { ...row, autopay_failures_observed: priorFailures };
-}
 
 /**
  * Find delivered, open, homeowner-billed invoices with NO
  * invoice_followup_sequences row and no legacy checker history, and arm one
  * for each through scheduleForInvoice — the exact path a normal invoice send
  * takes, so every one of its guards (payer-billed, active payment plan,
- * autopay hold, ownership-under-lock) applies unchanged. Nothing is sent
+ * autopay hold, ownership-under-lock) applies unchanged; an autopay hold is
+ * seeded from the customer's unresolved ACH failures inside that same
+ * transaction. Nothing is sent
  * here: the row lands at step 0 anchored to when the invoice went out; when
  * that anchor is already old, runPending's stale-touch pass advances it to
  * the first step whose day has not passed, and a row adopted in a run never
@@ -726,17 +698,12 @@ async function adoptOrphanInvoices({ dryRun = false } = {}) {
   const adoptedIds = [];
   for (const candidate of candidates) {
     try {
-      const achHistory = await priorAchFailures(candidate.customer_id);
-      if (achHistory.unavailable) {
-        skipped.push({ invoice_id: candidate.invoice_id, customer_id: candidate.customer_id, reason: 'ach_history_unreadable' });
-        continue;
-      }
-      const armed = await scheduleForInvoice(candidate.invoice_id);
+      // The autopay counter is seeded inside scheduleForInvoice's own
+      // transaction, so adoption is one atomic write: either the row exists
+      // fully initialised, or nothing exists and the next sweep retries.
+      const armed = await scheduleForInvoice(candidate.invoice_id, { seedAutopayFromAchHistory: true });
       if (!armed) continue;
-      // Recorded the moment the row exists: a failure in the autopay
-      // seeding below still leaves a row this run must not send.
       adoptedIds.push(candidate.invoice_id);
-      await initializeAdoptedAutopayHold(armed, candidate, achHistory);
     } catch (err) {
       // One candidate's failure must never abort the whole sweep — the
       // next run re-selects it fresh.
