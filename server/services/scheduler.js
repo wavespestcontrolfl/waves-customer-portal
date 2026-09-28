@@ -5349,8 +5349,13 @@ function initScheduledJobs() {
   // =========================================================================
   cron.schedule('20 1 * * *', async () => {
     try {
-      const result = await runContentRegistryMaintenance();
-      logger.info(`[content-registry] maintenance complete: sync=${JSON.stringify(result.sync)} live=${JSON.stringify(result.live)} ownedUrlHealth=${JSON.stringify(result.ownedUrlHealth)}`);
+      // runExclusive: a Railway deploy overlap must not run the sweep twice —
+      // the owned-URL health step sends a FIX digest, and a second instance
+      // would double-send it or race a clean retirement against a failure.
+      await runExclusive('content-registry-maintenance', async () => {
+        const result = await runContentRegistryMaintenance();
+        logger.info(`[content-registry] maintenance complete: sync=${JSON.stringify(result.sync)} live=${JSON.stringify(result.live)} ownedUrlHealth=${JSON.stringify(result.ownedUrlHealth)}`);
+      });
     } catch (err) {
       logger.error(`[content-registry] maintenance failed: ${err.message}`);
     }

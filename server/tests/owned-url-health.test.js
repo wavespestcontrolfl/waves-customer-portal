@@ -10,6 +10,7 @@ const {
   mapSharedResultToVerdict,
   checkOwnedUrlHealth,
   collectCitedOwnedUrls,
+  getCitedUrlHealthDashboard,
   VERDICTS,
   BAD_VERDICTS,
 } = require('../services/seo/owned-url-health');
@@ -55,6 +56,47 @@ describe('normalizeOwnedUrl', () => {
     expect(normalizeOwnedUrl('javascript:alert(1)')).toBe('');
     expect(normalizeOwnedUrl('not a url')).toBe('');
     expect(normalizeOwnedUrl('')).toBe('');
+  });
+
+  // Codex r3 on #5123: a nonstandard port is a different destination — it is
+  // rejected, never rewritten to the default-port page.
+  test('rejects a nonstandard port instead of rewriting it; keeps an explicit default port', () => {
+    expect(normalizeOwnedUrl('https://wavespestcontrol.com:8443/page')).toBe('');
+    expect(normalizeOwnedUrl('https://wavespestcontrol.com:443/page')).toBe('https://wavespestcontrol.com/page/');
+  });
+});
+
+// Codex r1/r3 on #5123: a cited URL is "checked" only by a RECENT health row —
+// no row, or a stale one, leaves it unchecked so the panel never reads clean.
+describe('getCitedUrlHealthDashboard', () => {
+  function twoTableDb({ mentions, health }) {
+    return jest.fn((table) => {
+      if (table === 'seo_llm_mentions') {
+        const b = { where: () => b, whereNotNull: () => b, select: async () => mentions };
+        return b;
+      }
+      let since = null;
+      const b = {
+        whereIn: () => b,
+        where: (col, op, value) => { if (col === 'checked_on' && op === '>=') since = value; return b; },
+        orderBy: async () => health.filter((r) => !since || String(r.checked_on) >= since),
+      };
+      return b;
+    });
+  }
+  const MEASURED = { measurement_version: 2, answer_available: true, citations_complete: true };
+  const cited = (urls) => ({ ...MEASURED, waves_cited_urls: JSON.stringify(urls) });
+
+  test('counts URLs without a recent health row as unchecked, not clean', async () => {
+    const database = twoTableDb({
+      mentions: [cited(['https://wavespestcontrol.com/checked/', 'https://wavespestcontrol.com/new-citation/', 'https://wavespestcontrol.com/stale/'])],
+      health: [
+        { url: 'https://wavespestcontrol.com/checked/', checked_on: '2026-09-27', verdict: 'ok' },
+        { url: 'https://wavespestcontrol.com/stale/', checked_on: '2026-09-10', verdict: 'ok' },
+      ],
+    });
+    const result = await getCitedUrlHealthDashboard({ database, now: new Date('2026-09-27T12:00:00Z') });
+    expect(result).toMatchObject({ candidates: 3, checked: 1, unchecked: 2, bad: 0 });
   });
 });
 

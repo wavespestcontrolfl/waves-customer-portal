@@ -274,6 +274,39 @@ describe('content registry live status helpers', () => {
     }));
   });
 
+  // Codex r3 on #5123: a chain that ends on another 3xx (no Location on the
+  // last hop) never reached a page, so it must not read as "redirected".
+  test('a redirect chain ending on a 3xx without Location classifies as error, not redirected', async () => {
+    await expect(liveStatus.checkRegistryRowLiveStatus(
+      { id: 'row-redirect-dead-end', canonical_url_normalized: '/legacy-dead-end/' },
+      {
+        fetchImpl: fetchMap({
+          'https://www.wavespestcontrol.com/legacy-dead-end/': response(301, '', { location: '/hop/' }),
+          'https://www.wavespestcontrol.com/hop/': response(302, '', {}, 'https://www.wavespestcontrol.com/hop/'),
+        }),
+      },
+    )).resolves.toEqual(expect.objectContaining({
+      http_status: '301',
+      live_status: 'error',
+    }));
+  });
+
+  // Codex r3 on #5123: challenge detection is the shared page-body
+  // classifier's strict mode — Cloudflare's JavaScript Detections script on
+  // an ordinary page is not a challenge; the interstitial's own markup is.
+  test('the JS Detections script on an ordinary page stays live; interstitial markup is a challenge', async () => {
+    const page = '<html><head><title>Ghost ants</title><script src="/cdn-cgi/challenge-platform/scripts/jsd/main.js"></script></head><body><p>Ghost ants are tiny pale ants common in Southwest Florida kitchens.</p></body></html>';
+    await expect(liveStatus.checkRegistryRowLiveStatus(
+      { id: 'row-jsd', canonical_url_normalized: '/ghost-ants/' },
+      { fetchImpl: fetchMap({ 'https://www.wavespestcontrol.com/ghost-ants/': response(200, page) }) },
+    )).resolves.toEqual(expect.objectContaining({ live_status: 'live' }));
+    const wall = '<html><head><title>Ghost ants</title><script>window._cf_chl_opt={cvId:"3"};</script></head><body></body></html>';
+    await expect(liveStatus.checkRegistryRowLiveStatus(
+      { id: 'row-wall', canonical_url_normalized: '/ghost-ants/' },
+      { fetchImpl: fetchMap({ 'https://www.wavespestcontrol.com/ghost-ants/': response(200, wall) }) },
+    )).resolves.toEqual(expect.objectContaining({ live_status: 'challenge' }));
+  });
+
   test('a redirect landing on a soft-404 template classifies as soft_404, not redirected', async () => {
     await expect(liveStatus.checkRegistryRowLiveStatus(
       { id: 'row-redirect-soft-404', canonical_url_normalized: '/legacy-ghost/' },

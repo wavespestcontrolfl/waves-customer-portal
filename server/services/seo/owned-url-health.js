@@ -48,6 +48,9 @@ const sendgrid = require('../sendgrid-mail');
 const { isInternalEmailRecipient } = require('../../utils/internal-email-recipients');
 
 const CITATION_WINDOW_DAYS = 30;
+// A health row older than this no longer counts as a current check (see
+// getCitedUrlHealthDashboard). The sweep runs nightly (1:20 AM ET).
+const HEALTH_FRESH_DAYS = 2;
 // A 2xx with no visible text (or a 204) is never a confirmed-healthy owned
 // page — a rule specific to this module's stricter bar for a page an answer
 // engine is actively citing. The shared checker deliberately leaves this
@@ -86,6 +89,10 @@ function normalizeOwnedUrl(value) {
   let parsed;
   try { parsed = new URL(String(value || '').trim()); } catch { return ''; }
   if (!/^https?:$/.test(parsed.protocol)) return '';
+  // A cited URL on a nonstandard port is a different destination: reject it
+  // rather than silently rewriting it to the default-port page (which could
+  // then report the cited URL healthy when it is unreachable).
+  if (parsed.port && !(parsed.protocol === 'https:' && parsed.port === '443') && !(parsed.protocol === 'http:' && parsed.port === '80')) return '';
   parsed.hash = '';
   parsed.username = '';
   parsed.password = '';
@@ -372,8 +379,14 @@ async function getCitedUrlHealthDashboard({ database = db, windowDays = CITATION
 
   const urls = candidates.map((c) => c.url);
   const citationByUrl = new Map(candidates.map((c) => [c.url, c.citationCount]));
+  // Only a recent row counts as "checked" (the sweep runs nightly; one day of
+  // slack covers its timing). An older row — a URL that dropped out of the
+  // window and is cited again, or a sweep that stopped running — is stale:
+  // the URL stays UNCHECKED rather than reading as verified-clean.
+  const freshSince = etDateString(addETDays(now, -(HEALTH_FRESH_DAYS - 1)));
   const rows = await database('seo_owned_url_health')
     .whereIn('url', urls)
+    .where('checked_on', '>=', freshSince)
     .orderBy('checked_on', 'desc');
 
   const latestByUrl = new Map();

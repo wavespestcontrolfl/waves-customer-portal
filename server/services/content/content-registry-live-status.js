@@ -2,6 +2,7 @@ const http = require('http');
 const https = require('https');
 const db = require('../../models/db');
 const registry = require('./content-registry');
+const { classifyPageBody } = require('../seo/page-body-classifier');
 const { _internals: contactFinderInternals } = require('../seo/contact-finder');
 
 const { rejectingLookup } = contactFinderInternals;
@@ -138,10 +139,6 @@ function extractTitle(html) {
 }
 
 const SOFT_404_RE = /\b(page not found|404[\s:—-]|we can.?t find that page|this page (doesn.?t|does not) exist)\b/i;
-const CHALLENGE_TITLE_RE = /^\s*(just a moment|attention required|access denied|verify you are human|checking your browser|security check|please wait)\b/i;
-const CHALLENGE_MARKUP_RE = /(cf_chl_opt|window\._cf_chl|\bchl_page\b|id=["']challenge-(form|running|stage)["']|cf-browser-verification)/i;
-const CHALLENGE_TEXT_RE = /\b(verify you are human|checking (your browser|if the site connection is secure)|enable javascript and cookies to continue|complete the security check)\b/i;
-const CHALLENGE_MAX_VISIBLE_CHARS = 1500;
 
 function visibleText(html) {
   return String(html || '')
@@ -151,11 +148,12 @@ function visibleText(html) {
     .trim();
 }
 
-function isChallengePage(title, body) {
-  if (CHALLENGE_TITLE_RE.test(title)) return true;
-  if (CHALLENGE_MARKUP_RE.test(body)) return true;
-  const text = visibleText(body);
-  return text.length <= CHALLENGE_MAX_VISIBLE_CHARS && CHALLENGE_TEXT_RE.test(text);
+// Challenge detection is the shared page-body classifier's strict mode
+// (server/services/seo/page-body-classifier.js — also used by the link
+// prospect verifier), not a second copy: interstitial title/h1, interstitial
+// markup, or a CAPTCHA/challenge wall on a thin page.
+function isChallengePage(body) {
+  return classifyPageBody(body, 'text/html', { strictChallenge: true }) === 'challenge';
 }
 
 /** Computed once per fetched body; harmless (and unused) for a non-2xx page. */
@@ -163,7 +161,7 @@ function computeBodySignals(html) {
   const title = extractTitle(html);
   return {
     title,
-    challenge: isChallengePage(title, html),
+    challenge: isChallengePage(html),
     softNotFound: SOFT_404_RE.test(title) || SOFT_404_RE.test(String(html || '').slice(0, 4000)),
     visibleTextLength: visibleText(html).length,
   };
@@ -192,6 +190,9 @@ function classifyLiveStatus({ status, redirectTargetUrl, canonicalTargetUrl, req
 function classifyRedirectLiveStatus({ finalStatus, redirectTargetUrl, noindex, challenge, softNotFound }) {
   const code = Number(finalStatus);
   if (!code) return redirectTargetUrl ? 'redirected' : 'unknown';
+  // The followed chain ended on another 3xx (e.g. no Location on a later
+  // hop) — it never reached a page, so it is not a healthy "redirected".
+  if (code >= 300 && code < 400) return 'error';
   if (code === 404 || code === 410) return 'missing';
   if (code >= 500) return 'server_error';
   if (code === 401 || code === 403) return 'blocked';

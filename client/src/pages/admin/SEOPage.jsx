@@ -2093,9 +2093,9 @@ function BacklinksTab() {
                 <p className="text-ui-body text-ink-secondary [margin-bottom:0px]">
                   {llmDash.citedUrlHealth.checked === 0 &&
                   llmDash.citedUrlHealth.unchecked > 0
-                    ? "Not checked yet — the daily check runs at 3:45 AM ET."
+                    ? "Not checked yet — the nightly check runs at 1:20 AM ET."
                     : llmDash.citedUrlHealth.unchecked > 0
-                      ? `No broken URLs among those checked; ${llmDash.citedUrlHealth.unchecked} not checked yet — the daily check runs at 3:45 AM ET.`
+                      ? `No broken URLs among those checked; ${llmDash.citedUrlHealth.unchecked} not checked yet — the nightly check runs at 1:20 AM ET.`
                       : "No broken owned URLs detected."}
                 </p>
               ) : (
