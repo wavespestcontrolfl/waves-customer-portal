@@ -164,7 +164,7 @@ const {
   mintSlotOfferField,
   verifySlotOfferField,
   isRealCalendarDate,
-  BOOK_INSERTION_OFFER_POLICY,
+  bookInsertionOfferPolicy,
   generateConfirmationCode,
 } = require('../utils/slot-offer-token');
 const RecurringAppointmentSeeder = require('../services/recurring-appointment-seeder');
@@ -1434,17 +1434,13 @@ function idleMinutesAgainst(dayOccupied, startMin, endMin, candidate = {}) {
 // (days[].slots) is never filtered.
 async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], excludeSelfBookingId = null, serviceKey = '', serviceIdentity = null, selfServeNotice = false, rankProfile, capacityPlacement }) {
   config = applySchedulingPolicy(config);
-  // The signed-offer policy tag (mintSlotOfferField, inside addCandidate
-  // below) for this build — a boolean-indexed array lookup, not a ternary
-  // or `&&`, so this declaration adds no branch to either this function
-  // (already at its own 54-warning ceiling) or addCandidate (sitting exactly
-  // AT the 20 threshold today — one more branch there would newly trip it).
-  // capacityPlacement true here means every offer this build mints was (or
-  // may have been) inserted mid-route; tagging it lets a GATE_BOOK_CAPACITY_
-  // COMMIT/GATE_SCHEDULING_CAPACITY flip during the offer's 45-minute
-  // lifetime fail the signature instead of confirming under the wrong
-  // policy (Codex round 2 P1 on PR #5231).
-  const offerPolicy = [undefined, BOOK_INSERTION_OFFER_POLICY][Number(capacityPlacement === true)];
+  // The signed-offer policy tag for this build (minted inside addCandidate
+  // below; createSelfBooking verifies with the same mapping). An offer built
+  // with mid-route insertion carries it, so a GATE_BOOK_CAPACITY_COMMIT /
+  // GATE_SCHEDULING_CAPACITY flip during the offer's 45-minute lifetime fails
+  // the signature instead of confirming under the wrong policy (Codex round 2
+  // P1 on PR #5231).
+  const offerPolicy = bookInsertionOfferPolicy(capacityPlacement);
   // addCandidate's customerWindowAdmits() call defaults dayEndMinutes to
   // currentDayEndMinutes() / lunchGateOn to lunchBlockEnabled() — both read
   // scheduling/customer-windows.js's shared, 60s-TTL cache. Unlike
@@ -2789,7 +2785,7 @@ async function createSelfBooking(payload = {}) {
       startMinutes: timeToMin(slot_start),
       technicianId: technician_id || null,
       durationMinutes: duration,
-      policy: bookInsertionOffersLive() ? BOOK_INSERTION_OFFER_POLICY : undefined,
+      policy: bookInsertionOfferPolicy(bookInsertionOffersLive()),
     }, slot_sig))) {
       return { ok: false, status: 409, error: 'That time slot is no longer available — please pick your time again.' };
     }

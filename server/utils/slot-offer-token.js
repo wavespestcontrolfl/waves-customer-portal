@@ -71,6 +71,12 @@ const CAPACITY_OFFER_POLICY = 'capacity_2026_09_09';
 // estimate surface.
 const BOOK_INSERTION_OFFER_POLICY = 'book_insertion_2026_09_28';
 
+// The one mapping /book minting (buildBookingAvailability) and /book
+// verification (createSelfBooking) share, so the two sides cannot drift.
+function bookInsertionOfferPolicy(insertion) {
+  return insertion === true ? BOOK_INSERTION_OFFER_POLICY : undefined;
+}
+
 function canonicalOfferString(payload = {}) {
   return [
     // v2: serviceKey + locationKey joined the signed scope (round 3). The tag
@@ -196,6 +202,7 @@ function generateConfirmationCode() {
 module.exports = {
   CAPACITY_OFFER_POLICY,
   BOOK_INSERTION_OFFER_POLICY,
+  bookInsertionOfferPolicy,
   SLOT_OFFER_TTL_MS,
   signSlotOffer,
   verifySlotOffer,
