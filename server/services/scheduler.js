@@ -3972,8 +3972,57 @@ function initScheduledJobs() {
                 }
               }
             }
-            if (anchorStale || amountsStale) {
-              const blockedReason = anchorStale ? 'stale_agent_decision' : 'stale_amount_agent_decision';
+            // OPEN TIMES revalidation (Codex P2): the same "can't see it
+            // from an inbound-anchored check" gap as the amount check above
+            // — a scheduled send can sit hours past drafting, and the
+            // calendar it quoted is never re-read before firing. Only when
+            // the anchor and amount checks already passed, and only for
+            // windows still present in the OUTGOING body (a human-edited
+            // reply that dropped every quoted window needs no recheck).
+            // Fail closed on a gone slot, a fetch error, or a timeout — same
+            // block+retire path as the checks above, no new mechanism.
+            let openTimesStale = false;
+            let openTimesReason = null;
+            if (!anchorStale && !amountsStale) {
+              try {
+                const decisionRow = await db('agent_decisions')
+                  .where({ id: claimMeta.agent_decision_id })
+                  .first('input_snapshot');
+                let snapshot = decisionRow?.input_snapshot;
+                if (typeof snapshot === 'string') {
+                  try { snapshot = JSON.parse(snapshot); } catch { snapshot = null; }
+                }
+                const openTimesSnapshot = snapshot?.open_times_snapshot;
+                if (openTimesSnapshot?.quotedWindows?.length) {
+                  const stillQuoted = openTimesSnapshot.quotedWindows.filter(
+                    (w) => String(msg.message_body || '').includes(w)
+                  );
+                  if (stillQuoted.length) {
+                    const { openTimesStillOffered } = require('./sms-shadow-drafter');
+                    const recheck = await openTimesStillOffered({
+                      city: openTimesSnapshot.lookup?.city || null,
+                      customerId: openTimesSnapshot.lookup?.customerId || null,
+                      estimateId: openTimesSnapshot.lookup?.estimateId || null,
+                      quotedWindows: stillQuoted,
+                    });
+                    if (!recheck.ok) {
+                      openTimesStale = true;
+                      openTimesReason = recheck.reason;
+                    }
+                  }
+                }
+              } catch (err) {
+                logger.warn(`[scheduler] open-times revalidation failed for scheduled sms ${msg.id}: ${err.message}; blocking send`);
+                openTimesStale = true;
+                openTimesReason = 'open_times_recheck_failed';
+              }
+            }
+            if (anchorStale || amountsStale || openTimesStale) {
+              const blockedReason = anchorStale
+                ? 'stale_agent_decision'
+                : amountsStale
+                  ? 'stale_amount_agent_decision'
+                  : 'stale_open_times_agent_decision';
               const threadKey = String(msg.to_phone || '').replace(/\D/g, '').slice(-10) || msg.customer_id || msg.id;
               // Everything under the lock, metadata read THROUGH the trx
               // AFTER acquiring it — the cancel route can transfer parked
@@ -3999,7 +4048,9 @@ function initScheduledJobs() {
                   fromStatus: 'scheduled',
                   note: anchorStale
                     ? 'A newer customer message arrived before this scheduled reply fired — review the thread.'
-                    : 'This scheduled reply quoted a price — house rule: no prices in SMS. Review the thread.',
+                    : amountsStale
+                      ? 'This scheduled reply quoted a price — house rule: no prices in SMS. Review the thread.'
+                      : `This scheduled reply quoted an appointment time that is no longer open (${openTimesReason}) — review the thread.`,
                   dbi: trx,
                   strict: true,
                 });

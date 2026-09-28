@@ -94,7 +94,13 @@ jest.mock('../services/sms-suggest-mode', () => ({
   sweepStaleSuggestionsAfterReply: jest.fn(async () => undefined),
   lockSuggestThread: jest.fn(async () => {}),
   suggestionAnchorIsStale: jest.fn(async () => false),
+  supersedeStaleDecision: jest.fn(async () => true),
 }));
+// Real-answers OPEN TIMES send-time recheck (Codex P2): verifyAgentDecisionForSend
+// re-fetches availability through sms-shadow-drafter's openTimesStillOffered,
+// which itself calls the real AvailabilityEngine — stub the engine here so
+// each recheck test controls what is "currently offered" without a DB.
+jest.mock('../services/availability', () => ({ getAvailableSlots: jest.fn() }));
 // Inert auto-send executor: the /sms route checks for an in-flight autonomous
 // reply under the park lock. Default to "none in flight" so the send tests
 // proceed; the executor's own behavior is covered by sms-auto-send.test.js.
@@ -3164,6 +3170,141 @@ describe('leadId in the body (consultation lead-only fallback): the send stays o
     expect(claimUpdates.some((u) => u.status === 'scheduled')).toBe(true);
     // ...and settled (scheduled/pending_review -> accepted) after a real send.
     expect(claimUpdates.some((u) => u.status === 'accepted')).toBe(true);
+  });
+});
+
+// Codex P2 (open-times send-time recheck): verifyAgentDecisionForSend is the
+// shared choke point for BOTH /sms (immediate send — Agent Review approve AND
+// the suggest-mode composer's accept/correct, which both post agentDecisionId
+// here) and /schedule-sms (queue-time verification, covered in its own
+// describe block below). A draft built with an OPEN TIMES section stores the
+// exact quoted windows + lookup inputs on agent_decisions.input_snapshot;
+// this recheck re-fetches availability right before the send and fails
+// closed on a gone slot, a fetch error, or a timeout.
+describe('/sms — OPEN TIMES send-time recheck on a claimed agent decision (Codex P2)', () => {
+  const send = (baseUrl, extra) => fetch(`${baseUrl}/admin/communications/sms`, {
+    method: 'POST',
+    headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      to: '+15551234567', agentDecisionId: 'dec-1', agentDraft: 'How about 9:00 AM - 11:00 AM?',
+      body: 'How about 9:00 AM - 11:00 AM?', ...extra,
+    }),
+  });
+
+  const OPEN_TIMES_SNAPSHOT = {
+    lookup: { city: 'Venice', customerId: 'cust-A', estimateId: null },
+    quotedWindows: ['9:00 AM - 11:00 AM'],
+  };
+  function decisionRow(overrides = {}) {
+    return {
+      id: 'dec-1', customer_id: 'cust-A', sms_log_id: null,
+      suggested_message: 'How about 9:00 AM - 11:00 AM?',
+      input_snapshot: JSON.stringify({ open_times_snapshot: OPEN_TIMES_SNAPSHOT }),
+      inbound_created_at: null, sms_from_phone: '+15551234567', sms_to_phone: null, customer_phone: null,
+      ...overrides,
+    };
+  }
+  function mockDb({ decision, claimUpdates }) {
+    db.mockImplementation((table) => {
+      if (table === 'agent_decisions as ad') {
+        const b = makeUniversalBuilder();
+        b.first = jest.fn(async () => decision);
+        return b;
+      }
+      if (table === 'agent_decisions') {
+        const b = makeUniversalBuilder();
+        b.update = jest.fn(async (patch) => { claimUpdates.push(patch); return 1; });
+        return b;
+      }
+      return makeUniversalBuilder();
+    });
+  }
+
+  let getAvailableSlots;
+  beforeEach(() => {
+    getAvailableSlots = require('../services/availability').getAvailableSlots;
+    getAvailableSlots.mockReset();
+    require('../services/sms-suggest-mode').supersedeStaleDecision.mockClear();
+    sendCustomerMessage.mockClear();
+    sendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM-open-times' });
+  });
+
+  test('a quoted slot that is STILL open sends normally, claim settles accepted', async () => {
+    getAvailableSlots.mockResolvedValue({ zone: 'Venice Zone', days: [{ date: '2026-09-29', slots: [{ startTime24: '09:00' }] }] });
+    const claimUpdates = [];
+    mockDb({ decision: decisionRow(), claimUpdates });
+    await withServer(async (baseUrl) => {
+      const res = await send(baseUrl, { body: 'How about 9:00 AM - 11:00 AM?' });
+      expect(res.status).toBe(200);
+    });
+    expect(sendCustomerMessage).toHaveBeenCalled();
+    expect(claimUpdates.some((u) => u.status === 'accepted')).toBe(true);
+    expect(require('../services/sms-suggest-mode').supersedeStaleDecision).not.toHaveBeenCalled();
+  });
+
+  test('a quoted slot that is GONE blocks the send and supersedes the decision', async () => {
+    getAvailableSlots.mockResolvedValue({ zone: 'Venice Zone', days: [{ date: '2026-09-29', slots: [{ startTime24: '14:00' }] }] }); // 9-11 no longer offered
+    const claimUpdates = [];
+    mockDb({ decision: decisionRow(), claimUpdates });
+    await withServer(async (baseUrl) => {
+      const res = await send(baseUrl, { body: 'How about 9:00 AM - 11:00 AM?' });
+      expect(res.status).toBe(409);
+    });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(claimUpdates.some((u) => u.status === 'scheduled')).toBe(false); // never claimed — refused before the claim
+    expect(require('../services/sms-suggest-mode').supersedeStaleDecision).toHaveBeenCalledWith({ decisionId: 'dec-1' });
+  });
+
+  test('an availability fetch error blocks the send (fail closed)', async () => {
+    getAvailableSlots.mockRejectedValue(new Error('zone lookup failed'));
+    const claimUpdates = [];
+    mockDb({ decision: decisionRow(), claimUpdates });
+    await withServer(async (baseUrl) => {
+      const res = await send(baseUrl, { body: 'How about 9:00 AM - 11:00 AM?' });
+      expect(res.status).toBe(409);
+    });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(require('../services/sms-suggest-mode').supersedeStaleDecision).toHaveBeenCalledWith({ decisionId: 'dec-1' });
+  });
+
+  // Real timers on purpose: this test drives the actual HTTP round trip
+  // (withServer/fetch), which fake timers would deadlock alongside the
+  // recheck's own real 3s internal timeout — so this one waits it out for
+  // real rather than faking the clock, same as the underlying
+  // openTimesStillOffered timeout test in sms-real-answers.test.js does
+  // with a directly-called (non-HTTP) function.
+  test('an availability timeout blocks the send (fail closed, never hangs)', async () => {
+    getAvailableSlots.mockImplementation(() => new Promise(() => {})); // never resolves
+    const claimUpdates = [];
+    mockDb({ decision: decisionRow(), claimUpdates });
+    await withServer(async (baseUrl) => {
+      const res = await send(baseUrl, { body: 'How about 9:00 AM - 11:00 AM?' });
+      expect(res.status).toBe(409);
+    });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  }, 15000);
+
+  test('a decision with NO open-times snapshot is completely unaffected — engine never called', async () => {
+    const claimUpdates = [];
+    mockDb({ decision: decisionRow({ input_snapshot: JSON.stringify({}) }), claimUpdates });
+    await withServer(async (baseUrl) => {
+      const res = await send(baseUrl, { body: 'How about 9:00 AM - 11:00 AM?' });
+      expect(res.status).toBe(200);
+    });
+    expect(getAvailableSlots).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).toHaveBeenCalled();
+  });
+
+  test('a reviewer correction that drops every quoted window skips the recheck entirely', async () => {
+    const claimUpdates = [];
+    mockDb({ decision: decisionRow(), claimUpdates });
+    await withServer(async (baseUrl) => {
+      // The outgoing body no longer contains "9:00 AM - 11:00 AM" at all.
+      const res = await send(baseUrl, { body: "I'll confirm a time and get right back to you." });
+      expect(res.status).toBe(200);
+    });
+    expect(getAvailableSlots).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).toHaveBeenCalled();
   });
 });
 

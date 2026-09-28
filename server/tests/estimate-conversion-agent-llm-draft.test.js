@@ -74,7 +74,7 @@ jest.mock('../models/db', () => {
 const db = require('../models/db');
 const { generateGroundedDraft } = require('../services/sms-shadow-drafter');
 const MODELS = require('../config/models');
-const { processInboundSms } = require('../services/estimate-conversion-agent');
+const { processInboundSms, _test } = require('../services/estimate-conversion-agent');
 
 const CUSTOMER = { id: 'cust-1', first_name: 'Catherine', last_name: 'Jones', city: 'Venice' };
 
@@ -182,6 +182,47 @@ describe('processInboundSms — grounded LLM review draft', () => {
 
     const payload = lastDecisionInsert();
     expect(payload.prompt_version).toBe('house_voice_v12_real_answers');
+  });
+
+  test('passes the already-resolved estimate id through to generateGroundedDraft (pre-push audit P2)', async () => {
+    // fetchOpenTimesBlock's getAvailableSlots(city, estimateId, {customerId})
+    // needs THAT estimate's own service minutes, not a generic default —
+    // generateLlmReviewDraft must forward estimate.id, not drop it.
+    generateGroundedDraft.mockResolvedValue({
+      parsed: { reply: 'ok', intended_actions: [], auto_send_safe: true, missing_info: null },
+      passes: 1,
+      converged: true,
+      model: MODELS.OPENAI_SMS_DRAFT,
+      promptVersion: 'house_voice_v8',
+    });
+
+    await _test.generateLlmReviewDraft({
+      customer: CUSTOMER,
+      body: 'Hello what happened this morning',
+      decision: { intent: 'service_scheduling_window_reply', confidence: 0.9 },
+      estimate: { id: 'estimate-42' },
+    });
+
+    expect(generateGroundedDraft).toHaveBeenCalledWith(expect.objectContaining({ estimateId: 'estimate-42' }));
+  });
+
+  test('no estimate resolved: estimateId is null, not undefined or omitted', async () => {
+    generateGroundedDraft.mockResolvedValue({
+      parsed: { reply: 'ok', intended_actions: [], auto_send_safe: true, missing_info: null },
+      passes: 1,
+      converged: true,
+      model: MODELS.OPENAI_SMS_DRAFT,
+      promptVersion: 'house_voice_v8',
+    });
+
+    await _test.generateLlmReviewDraft({
+      customer: CUSTOMER,
+      body: 'Hello what happened this morning',
+      decision: { intent: 'service_scheduling_window_reply', confidence: 0.9 },
+      estimate: undefined,
+    });
+
+    expect(generateGroundedDraft).toHaveBeenCalledWith(expect.objectContaining({ estimateId: null }));
   });
 
   test('LLM failure falls back to the deterministic template', async () => {

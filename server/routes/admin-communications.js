@@ -122,6 +122,7 @@ async function verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomer
         'ad.customer_id',
         'ad.sms_log_id',
         'ad.suggested_message',
+        'ad.input_snapshot',
         's.created_at as inbound_created_at',
         's.from_phone as sms_from_phone',
         's.to_phone as sms_to_phone',
@@ -167,6 +168,47 @@ async function verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomer
         // leaves this card resurfacing after every "refresh" 409, forever.
         await require('../services/sms-suggest-mode').supersedeStaleDecision({ decisionId: decision.id });
         return null;
+      }
+    }
+
+    // OPEN TIMES send-time recheck (Codex P2): a draft built with an OPEN
+    // TIMES section stores the exact windows it quoted plus the lookup
+    // inputs (input_snapshot.open_times_snapshot, written by
+    // sms-shadow-drafter / estimate-conversion-agent at draft time). This is
+    // the shared choke point for BOTH /sms (immediate send) and
+    // /schedule-sms (queue-time verification) — a card can sit in review up
+    // to 48h, or be scheduled for later, and the calendar never re-checks
+    // itself. Only windows still present in the OUTGOING body are rechecked
+    // (a reviewer's correction that drops every quoted window needs no
+    // recheck); a gone slot, a fetch error, or a timeout all fail closed,
+    // reusing the same supersede-and-refuse mechanism as the staleness check
+    // above rather than inventing a new one.
+    let openTimesSnapshot = null;
+    if (decision.input_snapshot) {
+      try {
+        const parsedSnapshot = typeof decision.input_snapshot === 'string'
+          ? JSON.parse(decision.input_snapshot)
+          : decision.input_snapshot;
+        openTimesSnapshot = parsedSnapshot?.open_times_snapshot || null;
+      } catch (_e) { openTimesSnapshot = null; }
+    }
+    if (openTimesSnapshot?.quotedWindows?.length) {
+      const stillQuoted = openTimesSnapshot.quotedWindows.filter(
+        (w) => outgoingBody && outgoingBody.includes(w)
+      );
+      if (stillQuoted.length) {
+        const { openTimesStillOffered } = require('../services/sms-shadow-drafter');
+        const recheck = await openTimesStillOffered({
+          city: openTimesSnapshot.lookup?.city || null,
+          customerId: openTimesSnapshot.lookup?.customerId || null,
+          estimateId: openTimesSnapshot.lookup?.estimateId || null,
+          quotedWindows: stillQuoted,
+        });
+        if (!recheck.ok) {
+          logger.info(`[agent-review] decision ${decision.id} open-times stale (${recheck.reason}) — refusing send`);
+          await require('../services/sms-suggest-mode').supersedeStaleDecision({ decisionId: decision.id });
+          return null;
+        }
       }
     }
     return decision;

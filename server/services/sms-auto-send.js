@@ -193,7 +193,7 @@ function autoSendPreflight({ gateOn, baseEligible, mode, actionsSafe, eligible }
  * claimed this draft. Does NOT send and does NOT touch the draft row — the
  * claim is purely the idempotency-keyed decision insert.
  */
-async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion }) {
+async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, openTimesSnapshot = null }) {
   const suggest = require('./sms-suggest-mode');
   return db.transaction(async (trx) => {
     // The inbound row is immutable — its phone IS the thread/lock key, and its
@@ -241,7 +241,14 @@ async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, re
         confidence_label: numericConfidence === null
           ? null
           : numericConfidence >= 0.85 ? 'high' : numericConfidence >= 0.6 ? 'medium' : 'low',
-        input_snapshot: JSON.stringify({ sms: { body: inboundMessage }, draft_id: draftId }),
+        input_snapshot: JSON.stringify({
+          sms: { body: inboundMessage },
+          draft_id: draftId,
+          // Codex P2 (open-times send-time recheck): the minimum needed to
+          // revalidate quoted OPEN TIMES windows at dispatch, threaded from
+          // the drafter through draftShadowReply's maybeAutoSend params.
+          ...(openTimesSnapshot ? { open_times_snapshot: openTimesSnapshot } : {}),
+        }),
         suggested_message: reply,
         reasoning_summary: 'House-voice reply auto-sent by the brand-voice loop executor (Phase E).',
         model: model || null,
@@ -285,7 +292,7 @@ async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, re
     });
     if (!reservationId) throw new Error('Auto-send holding reservation was not created');
 
-    return { decisionId: row.id, toPhone, fromNumber, threadLast10, parkedIds, reservationId };
+    return { decisionId: row.id, toPhone, fromNumber, threadLast10, parkedIds, reservationId, openTimesSnapshot };
   });
 }
 
@@ -763,6 +770,34 @@ async function dispatchClaimedSend({ claim, gratitudeLane, eligibilityPin, draft
   const checkHandoff = gratitudeLane ? gratitudeHandoffCheck(claim, eligibilityPin) : undefined;
   let result;
   try {
+    // OPEN TIMES send-time recheck (Codex P2): claim.openTimesSnapshot is
+    // threaded from claimAutoSend's own insert — the exact windows a
+    // drafted reply quoted plus the lookup inputs (same shape the shared
+    // /sms and /schedule-sms choke point in admin-communications.js
+    // rechecks). Applies to every claimed auto-send, gratitude included.
+    // Only windows still present in the reply that will actually send are
+    // rechecked; a gone slot, a fetch error, or a timeout all fail closed —
+    // same supersede-via-failClaim mechanism every other refusal in this
+    // function already uses, siblings reopened same as any other pre-send
+    // refusal so a stale slot never silently swallows the thread.
+    if (claim.openTimesSnapshot?.quotedWindows?.length) {
+      const stillQuoted = claim.openTimesSnapshot.quotedWindows.filter((w) => reply && reply.includes(w));
+      if (stillQuoted.length) {
+        const { openTimesStillOffered } = require('./sms-shadow-drafter');
+        const recheck = await openTimesStillOffered({
+          city: claim.openTimesSnapshot.lookup?.city || null,
+          customerId: claim.openTimesSnapshot.lookup?.customerId || null,
+          estimateId: claim.openTimesSnapshot.lookup?.estimateId || null,
+          quotedWindows: stillQuoted,
+        });
+        if (!recheck.ok) {
+          logger.warn(`[sms-auto-send] open-times stale (decision ${claim.decisionId}): ${recheck.reason}`);
+          const outcome = await notSent(recheck.reason);
+          await reopenParked('Auto-send held: a quoted appointment time is no longer open — suggestion reopened.');
+          return outcome;
+        }
+      }
+    }
     const verdict = checkHandoff ? await checkHandoff() : { ok: true };
     if (!verdict.ok) return await notSent(verdict.reason);
     const { sendCustomerMessage } = require('./messaging/send-customer-message');

@@ -200,10 +200,13 @@ const REAL_ANSWERS_HANDOFF_CATEGORIES = [
 ];
 
 // 1-business-hour follow-up SLA (owner ruling 2026-09-27): 8am-8pm ET reads
-// "within the hour"; outside that window reads "by 9 AM tomorrow morning".
-// Computed off the ET wall clock so the model is TOLD the answer, never
-// asked to compute it itself. `now` is test-only (defaults to the real
-// clock); production callers never pass it.
+// "within the hour". Outside that window, "9 AM" means the NEXT 9 AM on the
+// clock, which is TODAY before 8am and TOMORROW from 8pm on (pre-push audit
+// P2 — the original version said "tomorrow morning" for the whole outside-
+// hours range, which was wrong from midnight to 7:59 AM: 9 AM hasn't
+// happened yet that same calendar day). Computed off the ET wall clock so
+// the model is TOLD the answer, never asked to compute it itself. `now` is
+// test-only (defaults to the real clock); production callers never pass it.
 //
 // Pre-push audit P1: this value is TIME-VARYING (it flips at the 8am/8pm ET
 // boundaries) and must NEVER be interpolated into the SYSTEM prompt —
@@ -216,7 +219,8 @@ const REAL_ANSWERS_HANDOFF_CATEGORIES = [
 // RULE ("use the exact wording from the facts"), never the live value.
 function followupSlaPhrase(now = new Date()) {
   const { hour } = etParts(now);
-  return hour >= 8 && hour < 20 ? 'within the hour' : 'by 9 AM tomorrow morning';
+  if (hour >= 8 && hour < 20) return 'within the hour';
+  return hour < 8 ? 'by 9 AM this morning' : 'by 9 AM tomorrow morning';
 }
 
 // The real-answers ALSO-section hand-off bullets: a dynamic HELD-FOR-A-PERSON
@@ -269,7 +273,7 @@ function realAnswersHandoffBullets() {
 const OPEN_TIMES_TIMEOUT_MS = 3000;
 const OPEN_TIMES_MAX_DAYS = 3;
 const OPEN_TIMES_MAX_SLOTS_PER_DAY = 3;
-async function fetchOpenTimesBlock({ city, customerId, schedulingIntent } = {}) {
+async function fetchOpenTimesBlock({ city, customerId, schedulingIntent, estimateId = null } = {}) {
   if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return null;
   if (!schedulingIntent || !city) return null;
   let timer = null;
@@ -279,7 +283,11 @@ async function fetchOpenTimesBlock({ city, customerId, schedulingIntent } = {}) 
     const timeout = new Promise((_, reject) => {
       timer = setTimeout(() => reject(new Error('open-times timeout')), OPEN_TIMES_TIMEOUT_MS);
     });
-    const result = await Promise.race([Availability.getAvailableSlots(city, null, { customerId }), timeout]);
+    // estimateId (pre-push audit P2, estimate-conversion-agent.js): the SAME
+    // second argument check_availability itself passes — when the inbound
+    // thread already resolved to a specific estimate, the offered slots
+    // must reflect THAT estimate's service minutes, not a generic default.
+    const result = await Promise.race([Availability.getAvailableSlots(city, estimateId, { customerId }), timeout]);
     const lines = [];
     for (const d of (result?.days || [])) {
       const windows = (d.slots || [])
@@ -303,6 +311,82 @@ async function fetchOpenTimesBlock({ city, customerId, schedulingIntent } = {}) 
     // call — an uncleared setTimeout is a real leaked handle (it kept the
     // process alive for the timeout's own duration on every successful,
     // fast-resolving fetch too, not just on an actual timeout).
+    if (timer) clearTimeout(timer);
+  }
+}
+
+// Pre-push audit P2 — OPEN TIMES is a SNAPSHOT taken at draft time, but a
+// draft can sit in human review for up to 48h (suggest-mode /
+// Agent Review) or be scheduled for later, and nothing on those send paths
+// re-checked availability before this fix: a reviewer or the scheduler
+// could send a specific time the drafter offered that is no longer open.
+//
+// Which offered windows (from an already-rendered OPEN TIMES block) does
+// `reply` actually quote verbatim? Pure/sync — FACT DISCIPLINE requires the
+// model to copy a window string exactly out of OPEN TIMES, so a plain
+// substring check is a reliable, deterministic detector; no NLP needed.
+// Returns [] when the reply quotes none of them (including no OPEN TIMES at
+// all) — nothing time-sensitive to recheck at send time.
+function extractQuotedOpenTimesWindows(openTimesBlock, reply) {
+  if (!openTimesBlock || !reply) return [];
+  const windows = [];
+  for (const line of String(openTimesBlock).split('\n')) {
+    const idx = line.indexOf(': ');
+    if (idx === -1) continue;
+    for (const w of line.slice(idx + 2).split(', ')) {
+      const trimmed = w.trim();
+      if (trimmed) windows.push(trimmed);
+    }
+  }
+  return [...new Set(windows)].filter((w) => reply.includes(w));
+}
+
+// The minimum needed to recheck a draft's quoted OPEN TIMES at send time —
+// computed once per generation and carried on whichever row the caller
+// persists it to (message_drafts.intended_actions for the live SMS lane,
+// agent_decisions.input_snapshot for the estimate-follow-up lane and every
+// suggest-mode/auto-send decision). null when there's nothing to recheck:
+// no OPEN TIMES was fetched, or the reply didn't end up quoting any of it.
+function computeOpenTimesSnapshot({ openTimesBlock, reply, city, customerId, estimateId }) {
+  if (!openTimesBlock) return null;
+  const quotedWindows = extractQuotedOpenTimesWindows(openTimesBlock, reply || '');
+  if (!quotedWindows.length) return null;
+  return { lookup: { city, customerId: customerId || null, estimateId: estimateId || null }, quotedWindows };
+}
+
+// Re-fetch availability at SEND time and verify every window the draft
+// quoted is STILL offered — the structural fix itself. Read-only (the SAME
+// AvailabilityEngine.getAvailableSlots call fetchOpenTimesBlock and
+// check_availability make); never books, never holds a slot. Fails CLOSED:
+// a missing city, a fetch error, or a timeout all resolve to "not still
+// offered" — the one thing this function must never do is silently assume
+// a quoted time is fine when it couldn't actually confirm that.
+async function openTimesStillOffered({ city, customerId, estimateId = null, quotedWindows } = {}) {
+  if (!Array.isArray(quotedWindows) || !quotedWindows.length) return { ok: true };
+  if (!city) return { ok: false, reason: 'open_times_recheck_no_city' };
+  let timer = null;
+  try {
+    const Availability = require('./availability');
+    const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error('open-times recheck timeout')), OPEN_TIMES_TIMEOUT_MS);
+    });
+    const result = await Promise.race([Availability.getAvailableSlots(city, estimateId, { customerId }), timeout]);
+    const currentWindows = new Set();
+    for (const d of (result?.days || [])) {
+      for (const s of (d.slots || [])) {
+        const range = arrivalWindowRange(s.startTime24);
+        if (range) currentWindows.add(formatSmsTimeRange(range));
+      }
+    }
+    const goneWindows = quotedWindows.filter((w) => !currentWindows.has(w));
+    if (goneWindows.length) return { ok: false, reason: 'open_times_no_longer_offered', goneWindows };
+    return { ok: true };
+  } catch (err) {
+    logger.warn(`[sms-shadow] open-times send-time recheck failed (${err.message}) — failing closed`);
+    return { ok: false, reason: 'open_times_recheck_failed' };
+  } finally {
+    // Same leaked-handle fix as fetchOpenTimesBlock's own timer.
     if (timer) clearTimeout(timer);
   }
 }
@@ -1011,7 +1095,7 @@ async function generateDraftOnce(client, system, userContent, route = MODELS.ROU
  * verification miss must never break drafting. Caller supplies the Anthropic
  * client so live + backfill share one implementation.
  */
-async function generateGroundedDraft({ client, context, inboundMessage, intent, schedulingIntent, factsBlock: presetFactsBlock, routeOverride, voiceProfile: presetVoiceProfile, metricsLane, laneId: presetLaneId, city }) {
+async function generateGroundedDraft({ client, context, inboundMessage, intent, schedulingIntent, factsBlock: presetFactsBlock, routeOverride, voiceProfile: presetVoiceProfile, metricsLane, laneId: presetLaneId, city, estimateId = null }) {
   // v9: the owner-approved voice profile joins the system prompt for every
   // generation in the loop (revisions included). voiceProfileVersion rides
   // back in telemetry so cohort readouts can see which profile (if any)
@@ -1061,7 +1145,9 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     || SAVE_SALE_TEXT_RE.test(String(inboundMessage || ''));
   const openTimesBlock = presetFactsBlock
     ? null
-    : await fetchOpenTimesBlock({ city, customerId: context?.customer?.id || null, schedulingIntent: needsOpenTimes });
+    : await fetchOpenTimesBlock({
+      city, customerId: context?.customer?.id || null, schedulingIntent: needsOpenTimes, estimateId,
+    });
   const factsBlock = presetFactsBlock || buildFactsBlock(context, { openTimesBlock });
   // Few-shot voice grounding: intent-matched real human replies (redacted),
   // baked into the prompt once so they persist across the verify/revise loop.
@@ -1101,6 +1187,9 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   // Kill switch / single-pass mode: no verification claim, behave as pre-v3.
   if (!VERIFY_ENABLED) return {
     parsed, passes: 1, converged: true, model, servedModel, voiceProfileVersion, verifierModels: [], factsBlock, promptVersion,
+    openTimesSnapshot: computeOpenTimesSnapshot({
+      openTimesBlock, reply: parsed?.reply, city, customerId: context?.customer?.id || null, estimateId,
+    }),
   };
 
   const verifier = require('./sms-draft-verifier');
@@ -1163,7 +1252,15 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     passes += 1;
   }
 
-  return { parsed, passes, converged, model, servedModel, voiceProfileVersion, verifierModels, factsBlock, promptVersion };
+  return {
+    parsed, passes, converged, model, servedModel, voiceProfileVersion, verifierModels, factsBlock, promptVersion,
+    // Computed off the FINAL parsed.reply (after every revision pass) — an
+    // earlier draft may have quoted a window a REVISION dropped, or vice
+    // versa; only what's actually about to be sent matters here.
+    openTimesSnapshot: computeOpenTimesSnapshot({
+      openTimesBlock, reply: parsed?.reply, city, customerId: context?.customer?.id || null, estimateId,
+    }),
+  };
 }
 
 /**
@@ -1246,7 +1343,10 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // v3: draft → adversarial fact-check → revise loop (generateGroundedDraft).
     // city (real-answers OPEN TIMES fetch — see fetchOpenTimesBlock) comes
     // from the customer row the webhook already matched, never re-looked-up.
-    const { parsed, passes, converged, model: draftModel, voiceProfileVersion, factsBlock: factsForDraft, promptVersion } = await generateGroundedDraft({
+    const {
+      parsed, passes, converged, model: draftModel, voiceProfileVersion, factsBlock: factsForDraft, promptVersion,
+      openTimesSnapshot,
+    } = await generateGroundedDraft({
       client, context, inboundMessage, intent, schedulingIntent, city: customer?.city || null,
     });
     if (!parsed) {
@@ -1338,6 +1438,12 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
           // shaped this draft — null = base prompt. Lets cohort readouts
           // split v9 drafts by the profile that was live at draft time.
           voice_profile_version: voiceProfileVersion ?? null,
+          // The minimum needed to recheck quoted OPEN TIMES at send time
+          // (pre-push audit P2) — null when the draft quoted none. Carried
+          // through to whichever agent_decisions row a human-approved or
+          // auto-send publish creates, so every send path can re-verify
+          // without re-deriving it from facts_block text.
+          open_times_snapshot: openTimesSnapshot ?? null,
           ...(gratitudeCandidate ? {
             gratitude: {
               source: 'live_webhook',
@@ -1453,6 +1559,10 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
           // and a stale/base-prompt draft must not ride it (Codex r4 P1).
           voiceProfileVersion,
           schedulingIntent,
+          // Pre-push audit P2: the minimum needed to recheck quoted OPEN
+          // TIMES at send time — dispatchClaimedSend re-fetches and refuses
+          // to send if a quoted window is no longer offered.
+          openTimesSnapshot,
         });
         if (result?.sent) {
           deliveredAs = 'auto_sent';
@@ -1487,6 +1597,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
               model: draftModel,
               promptVersion,
               lintFailures: lint.failures,
+              openTimesSnapshot,
             });
             if (decisionId) deliveredAs = suggestMode.SUGGESTED_STATUS;
           }
@@ -1534,6 +1645,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
             model: draftModel,
             promptVersion,
             lintFailures: lint.failures,
+            openTimesSnapshot,
           });
           if (decisionId) deliveredAs = suggestMode.SUGGESTED_STATUS;
         }
@@ -1596,4 +1708,7 @@ module.exports = {
   REAL_ANSWERS_HANDOFF_CATEGORIES,
   followupSlaPhrase,
   fetchOpenTimesBlock,
+  extractQuotedOpenTimesWindows,
+  computeOpenTimesSnapshot,
+  openTimesStillOffered,
 };

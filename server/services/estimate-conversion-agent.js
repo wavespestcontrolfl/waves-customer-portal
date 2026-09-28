@@ -609,7 +609,7 @@ function buildInputSnapshot({ body, customer, estimate, lead, from, to, shortCod
  * phone re-lookup could aggregate a DIFFERENT account's facts into the prompt
  * (shared numbers) — lead-only estimate threads keep the template.
  */
-async function generateLlmReviewDraft({ customer, body, decision }) {
+async function generateLlmReviewDraft({ customer, body, decision, estimate }) {
   if (process.env.AGENT_REVIEW_LLM_DRAFTS === 'false') return null;
   if (!customer) return null;
   try {
@@ -621,7 +621,7 @@ async function generateLlmReviewDraft({ customer, body, decision }) {
     const Anthropic = require('@anthropic-ai/sdk');
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-    const { parsed, passes, converged, model, promptVersion } = await drafter.generateGroundedDraft({
+    const { parsed, passes, converged, model, promptVersion, openTimesSnapshot } = await drafter.generateGroundedDraft({
       laneId: 'estimate_followup', // the drafter's own lanes are the live SMS ones
       client,
       context,
@@ -634,6 +634,11 @@ async function generateLlmReviewDraft({ customer, body, decision }) {
       // prompt would tell the model to offer times it was never given.
       // Same customer row + convention draftShadowReply uses.
       city: customer?.city || null,
+      // Pre-push audit P2: the ALREADY-RESOLVED estimate (resolveEstimateContext,
+      // above this call in processInboundSms) so the offered slots reflect
+      // THAT estimate's own service minutes — the same second argument
+      // check_availability itself passes to getAvailableSlots.
+      estimateId: estimate?.id || null,
     });
     // Only a verified-clean draft may replace the template: unconverged means
     // the reply still asserts facts the context doesn't support after the
@@ -656,7 +661,7 @@ async function generateLlmReviewDraft({ customer, body, decision }) {
     // forever once GATE_SMS_REAL_ANSWERS goes live). Persisted onto
     // agent_decisions.prompt_version below (processInboundSms), so this
     // must record what generated THIS row, not a label that never moves.
-    return { reply: parsed.reply, model, promptVersion, passes };
+    return { reply: parsed.reply, model, promptVersion, passes, openTimesSnapshot: openTimesSnapshot ?? null };
   } catch (err) {
     logger.warn(`[estimate-conversion-agent] LLM review draft failed (${err.message}); using template`);
     return null;
@@ -695,7 +700,7 @@ async function processInboundSms({ customer, from, to, body, smsLogId, sourceMes
       if (existing) return null; // same semantics as the ignored insert: nothing new
     }
 
-    const llmDraft = await generateLlmReviewDraft({ customer, body, decision });
+    const llmDraft = await generateLlmReviewDraft({ customer, body, decision, estimate });
     // The house no-price rule applies to WHATEVER text lands in the composer
     // card — the deterministic scheduling templates echo raw inbound text, so
     // a customer's own "Tuesday for $50 works" would flow into the draft
@@ -738,6 +743,12 @@ async function processInboundSms({ customer, from, to, body, smsLogId, sourceMes
         review_draft: llmDraft
           ? { source: 'llm', passes: llmDraft.passes, no_reply: !llmDraft.reply }
           : { source: 'template' },
+        // Codex P2 (open-times send-time recheck): the minimum needed to
+        // revalidate quoted OPEN TIMES windows before this decision is ever
+        // sent — read back by verifyAgentDecisionForSend (admin-communications.js)
+        // at /sms and /schedule-sms time. Absent for template drafts and for
+        // any llm draft whose reply never quoted an open-times window.
+        ...(llmDraft?.openTimesSnapshot ? { open_times_snapshot: llmDraft.openTimesSnapshot } : {}),
       }),
       recommended_actions: JSON.stringify(decision.recommendedActions),
       auto_actions_allowed: JSON.stringify(decision.autoActionsAllowed),
@@ -784,5 +795,6 @@ module.exports = {
     confidenceLabel,
     hasActiveServiceSchedulingThread,
     resolveRecentSmsThread,
+    generateLlmReviewDraft,
   },
 };

@@ -137,7 +137,7 @@ describe('GATE_SMS_REAL_ANSWERS on — the rewritten prompt', () => {
       Date.now = () => new Date('2026-09-29T02:00:00Z').getTime(); // 10:00 PM ET — "by 9 AM tomorrow morning" territory
       const afterHours = buildSystemPrompt();
       expect(inHours).toBe(afterHours);
-      expect(inHours).not.toMatch(/within the hour|by 9 AM tomorrow morning/);
+      expect(inHours).not.toMatch(/within the hour|by 9 AM (?:this|tomorrow) morning/);
     } finally {
       Date.now = real;
     }
@@ -297,10 +297,46 @@ describe('followupSlaPhrase — the 1-business-hour SLA, computed off the ET clo
     expect(followupSlaPhrase(new Date('2026-09-28T23:00:00Z'))).toBe('within the hour'); // 7:00 PM ET
   });
 
-  test('outside 8am–8pm ET reads "by 9 AM tomorrow morning"', () => {
-    expect(followupSlaPhrase(new Date('2026-09-28T11:00:00Z'))).toBe('by 9 AM tomorrow morning'); // 7:00 AM ET
+  test('midnight through 7:59 AM ET reads "by 9 AM THIS morning" — 9 AM has not happened yet today (Codex P2)', () => {
+    // The pre-fix version said "tomorrow morning" for this whole range,
+    // which was wrong: at 3 AM, the next 9 AM is later TODAY, not tomorrow.
+    expect(followupSlaPhrase(new Date('2026-09-28T04:00:00Z'))).toBe('by 9 AM this morning'); // 12:00 AM (midnight) ET
+    expect(followupSlaPhrase(new Date('2026-09-28T06:00:00Z'))).toBe('by 9 AM this morning'); // 2:00 AM ET
+    expect(followupSlaPhrase(new Date('2026-09-28T11:59:00Z'))).toBe('by 9 AM this morning'); // 7:59 AM ET (boundary)
+  });
+
+  test('8pm through 11:59 PM ET reads "by 9 AM tomorrow morning" — 9 AM today has already passed', () => {
     expect(followupSlaPhrase(new Date('2026-09-29T00:00:00Z'))).toBe('by 9 AM tomorrow morning'); // 8:00 PM ET (boundary)
     expect(followupSlaPhrase(new Date('2026-09-29T02:00:00Z'))).toBe('by 9 AM tomorrow morning'); // 10:00 PM ET
+    expect(followupSlaPhrase(new Date('2026-09-29T03:59:00Z'))).toBe('by 9 AM tomorrow morning'); // 11:59 PM ET (boundary)
+  });
+
+  test('every hour boundary (00:00, 07:59, 08:00, 19:59, 20:00, 23:59 ET) resolves to the right side, in EDT (UTC-4)', () => {
+    const cases = [
+      ['2026-09-28T04:00:00Z', 'by 9 AM this morning'], // 00:00 ET
+      ['2026-09-28T11:59:00Z', 'by 9 AM this morning'], // 07:59 ET
+      ['2026-09-28T12:00:00Z', 'within the hour'], // 08:00 ET
+      ['2026-09-28T23:59:00Z', 'within the hour'], // 19:59 ET
+      ['2026-09-29T00:00:00Z', 'by 9 AM tomorrow morning'], // 20:00 ET
+      ['2026-09-29T03:59:00Z', 'by 9 AM tomorrow morning'], // 23:59 ET
+    ];
+    for (const [utc, expected] of cases) expect(followupSlaPhrase(new Date(utc))).toBe(expected);
+  });
+
+  test('the same six boundaries hold in EST (UTC-5, DST-safe ET math)', () => {
+    // Same wall-clock ET hours, a date where America/New_York is on
+    // standard time (mid-January, well clear of either DST transition) —
+    // proves etParts() converts the UTC offset correctly on both sides of
+    // the clock change, not just during EDT.
+    const cases = [
+      ['2026-01-15T05:00:00Z', 'by 9 AM this morning'], // 00:00 ET
+      ['2026-01-15T12:59:00Z', 'by 9 AM this morning'], // 07:59 ET
+      ['2026-01-15T13:00:00Z', 'within the hour'], // 08:00 ET
+      ['2026-01-16T00:59:00Z', 'within the hour'], // 19:59 ET
+      ['2026-01-16T01:00:00Z', 'by 9 AM tomorrow morning'], // 20:00 ET
+      ['2026-01-16T04:59:00Z', 'by 9 AM tomorrow morning'], // 23:59 ET
+    ];
+    for (const [utc, expected] of cases) expect(followupSlaPhrase(new Date(utc))).toBe(expected);
   });
 });
 
@@ -330,6 +366,9 @@ describe('buildFactsBlock — FOLLOW-UP SLA RIGHT NOW (pre-push audit P1: keeps 
     expect(inHours).toContain('FOLLOW-UP SLA RIGHT NOW: within the hour');
     const afterHours = buildFactsBlock(context, { now: new Date('2026-09-29T02:00:00Z') }); // 10:00 PM ET
     expect(afterHours).toContain('FOLLOW-UP SLA RIGHT NOW: by 9 AM tomorrow morning');
+    // pre-8am (Codex P2): 9 AM hasn't happened yet TODAY, never "tomorrow"
+    const preOpening = buildFactsBlock(context, { now: new Date('2026-09-28T06:00:00Z') }); // 2:00 AM ET
+    expect(preOpening).toContain('FOLLOW-UP SLA RIGHT NOW: by 9 AM this morning');
   });
 
   test('sits after OPEN TIMES and before BILLING when both are present', () => {
@@ -421,6 +460,32 @@ describe('fetchOpenTimesBlock — read-only AvailabilityEngine call, fully fail-
     expect(result).not.toContain('October 3'); // past the 3-day cap
   });
 
+  test('threads estimateId through to getAvailableSlots so the offered slots use THAT estimate\'s service minutes (pre-push audit P2)', async () => {
+    process.env[GATE] = 'true';
+    const getAvailableSlots = jest.fn(async () => ({
+      zone: 'Venice Zone',
+      days: [{ date: '2026-09-29', fullDate: 'Tuesday, September 29', slots: [{ startTime24: '09:00' }] }],
+    }));
+    jest.doMock('../services/availability', () => ({ getAvailableSlots }));
+    const drafter = freshDrafter();
+    await drafter.fetchOpenTimesBlock({
+      city: 'Venice', customerId: 'cust-9', schedulingIntent: true, estimateId: 'estimate-42',
+    });
+    expect(getAvailableSlots).toHaveBeenCalledWith('Venice', 'estimate-42', { customerId: 'cust-9' });
+  });
+
+  test('estimateId defaults to null (the existing no-estimate contract) when omitted', async () => {
+    process.env[GATE] = 'true';
+    const getAvailableSlots = jest.fn(async () => ({
+      zone: 'Venice Zone',
+      days: [{ date: '2026-09-29', fullDate: 'Tuesday, September 29', slots: [{ startTime24: '09:00' }] }],
+    }));
+    jest.doMock('../services/availability', () => ({ getAvailableSlots }));
+    const drafter = freshDrafter();
+    await drafter.fetchOpenTimesBlock({ city: 'Venice', customerId: 'cust-9', schedulingIntent: true });
+    expect(getAvailableSlots).toHaveBeenCalledWith('Venice', null, { customerId: 'cust-9' });
+  });
+
   test('a slot with no parseable startTime24 is dropped; a day left with none is skipped entirely', async () => {
     process.env[GATE] = 'true';
     const getAvailableSlots = jest.fn(async () => ({
@@ -465,6 +530,139 @@ describe('fetchOpenTimesBlock — read-only AvailabilityEngine call, fully fail-
       const promise = drafter.fetchOpenTimesBlock({ city: 'Venice', customerId: 'c1', schedulingIntent: true });
       await jest.advanceTimersByTimeAsync(3100);
       await expect(promise).resolves.toBeNull();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+});
+
+describe('extractQuotedOpenTimesWindows — pure detector: which offered windows did the reply actually quote', () => {
+  const { extractQuotedOpenTimesWindows } = require('../services/sms-shadow-drafter');
+  const block = '- Tuesday, September 29: 9:00 AM - 11:00 AM, 11:00 AM - 1:00 PM\n- Wednesday, September 30: 9:00 AM - 11:00 AM';
+
+  test('no OPEN TIMES block, or no reply → []', () => {
+    expect(extractQuotedOpenTimesWindows(null, 'Does 9:00 AM - 11:00 AM work?')).toEqual([]);
+    expect(extractQuotedOpenTimesWindows(block, null)).toEqual([]);
+    expect(extractQuotedOpenTimesWindows(block, '')).toEqual([]);
+  });
+
+  test('a reply that quotes none of the offered windows → []', () => {
+    expect(extractQuotedOpenTimesWindows(block, 'Sure, I will confirm a time and get back to you.')).toEqual([]);
+  });
+
+  test('a reply that quotes exactly one window → that one', () => {
+    expect(extractQuotedOpenTimesWindows(block, 'How about 9:00 AM - 11:00 AM on Wednesday?')).toEqual(['9:00 AM - 11:00 AM']);
+  });
+
+  test('a reply that quotes two DISTINCT windows → both, deduplicated across the two lines they appear on', () => {
+    const reply = 'We have 9:00 AM - 11:00 AM or 11:00 AM - 1:00 PM Tuesday — 9:00 AM - 11:00 AM also works Wednesday.';
+    // "9:00 AM - 11:00 AM" appears on BOTH lines in the block but is a single
+    // distinct window string — the Set dedup means it is returned once, not twice.
+    expect(extractQuotedOpenTimesWindows(block, reply)).toEqual(['9:00 AM - 11:00 AM', '11:00 AM - 1:00 PM']);
+  });
+});
+
+describe('computeOpenTimesSnapshot — the minimum needed to recheck at send time (Codex P2)', () => {
+  const { computeOpenTimesSnapshot } = require('../services/sms-shadow-drafter');
+  const block = '- Tuesday, September 29: 9:00 AM - 11:00 AM';
+
+  test('no OPEN TIMES block fetched → null (nothing to recheck)', () => {
+    expect(computeOpenTimesSnapshot({ openTimesBlock: null, reply: '9:00 AM - 11:00 AM works.', city: 'Venice' })).toBeNull();
+  });
+
+  test('OPEN TIMES fetched but the reply quotes none of it → null', () => {
+    expect(computeOpenTimesSnapshot({ openTimesBlock: block, reply: "I'll confirm and follow up.", city: 'Venice' })).toBeNull();
+  });
+
+  test('OPEN TIMES fetched and quoted → the quoted windows plus the exact lookup inputs', () => {
+    expect(computeOpenTimesSnapshot({
+      openTimesBlock: block, reply: 'How about 9:00 AM - 11:00 AM?', city: 'Venice', customerId: 'cust-9', estimateId: 'estimate-42',
+    })).toEqual({
+      lookup: { city: 'Venice', customerId: 'cust-9', estimateId: 'estimate-42' },
+      quotedWindows: ['9:00 AM - 11:00 AM'],
+    });
+  });
+
+  test('omitted customerId/estimateId default to null, not undefined (JSON-stable)', () => {
+    expect(computeOpenTimesSnapshot({ openTimesBlock: block, reply: '9:00 AM - 11:00 AM works.', city: 'Venice' })).toEqual({
+      lookup: { city: 'Venice', customerId: null, estimateId: null },
+      quotedWindows: ['9:00 AM - 11:00 AM'],
+    });
+  });
+});
+
+describe('openTimesStillOffered — send-time recheck, fails CLOSED on a gone slot, a fetch error, or a timeout', () => {
+  function freshDrafter() {
+    jest.resetModules();
+    return require('../services/sms-shadow-drafter');
+  }
+
+  afterEach(() => {
+    jest.dontMock('../services/availability');
+    jest.resetModules();
+  });
+
+  test('no quoted windows → ok:true, the availability engine is never called', async () => {
+    const getAvailableSlots = jest.fn();
+    jest.doMock('../services/availability', () => ({ getAvailableSlots }));
+    const drafter = freshDrafter();
+    await expect(drafter.openTimesStillOffered({ city: 'Venice', quotedWindows: [] })).resolves.toEqual({ ok: true });
+    expect(getAvailableSlots).not.toHaveBeenCalled();
+  });
+
+  test('quoted windows but no city → fails closed without calling the engine', async () => {
+    const getAvailableSlots = jest.fn();
+    jest.doMock('../services/availability', () => ({ getAvailableSlots }));
+    const drafter = freshDrafter();
+    await expect(drafter.openTimesStillOffered({ city: null, quotedWindows: ['9:00 AM - 11:00 AM'] }))
+      .resolves.toEqual({ ok: false, reason: 'open_times_recheck_no_city' });
+    expect(getAvailableSlots).not.toHaveBeenCalled();
+  });
+
+  test('a quoted slot that is STILL open → ok:true (sends)', async () => {
+    const getAvailableSlots = jest.fn(async () => ({
+      zone: 'Venice Zone',
+      days: [{ date: '2026-09-29', slots: [{ startTime24: '09:00' }, { startTime24: '14:00' }] }],
+    }));
+    jest.doMock('../services/availability', () => ({ getAvailableSlots }));
+    const drafter = freshDrafter();
+    const result = await drafter.openTimesStillOffered({
+      city: 'Venice', customerId: 'cust-9', estimateId: 'estimate-42', quotedWindows: ['9:00 AM - 11:00 AM'],
+    });
+    expect(result).toEqual({ ok: true });
+    expect(getAvailableSlots).toHaveBeenCalledWith('Venice', 'estimate-42', { customerId: 'cust-9' });
+  });
+
+  test('a quoted slot that is GONE → ok:false, blocked, names the gone window', async () => {
+    const getAvailableSlots = jest.fn(async () => ({
+      zone: 'Venice Zone',
+      days: [{ date: '2026-09-29', slots: [{ startTime24: '14:00' }] }], // 9-11 no longer offered
+    }));
+    jest.doMock('../services/availability', () => ({ getAvailableSlots }));
+    const drafter = freshDrafter();
+    const result = await drafter.openTimesStillOffered({
+      city: 'Venice', quotedWindows: ['9:00 AM - 11:00 AM'],
+    });
+    expect(result).toEqual({ ok: false, reason: 'open_times_no_longer_offered', goneWindows: ['9:00 AM - 11:00 AM'] });
+  });
+
+  test('a fetch error → ok:false, fails closed (never assumes a quoted time is still fine)', async () => {
+    const getAvailableSlots = jest.fn(async () => { throw new Error('zone lookup failed'); });
+    jest.doMock('../services/availability', () => ({ getAvailableSlots }));
+    const drafter = freshDrafter();
+    const result = await drafter.openTimesStillOffered({ city: 'Venice', quotedWindows: ['9:00 AM - 11:00 AM'] });
+    expect(result).toEqual({ ok: false, reason: 'open_times_recheck_failed' });
+  });
+
+  test('a timeout → ok:false, fails closed, never hangs the send path', async () => {
+    jest.useFakeTimers();
+    try {
+      const getAvailableSlots = jest.fn(() => new Promise(() => {})); // never resolves
+      jest.doMock('../services/availability', () => ({ getAvailableSlots }));
+      const drafter = freshDrafter();
+      const promise = drafter.openTimesStillOffered({ city: 'Venice', quotedWindows: ['9:00 AM - 11:00 AM'] });
+      await jest.advanceTimersByTimeAsync(3100);
+      await expect(promise).resolves.toEqual({ ok: false, reason: 'open_times_recheck_failed' });
     } finally {
       jest.useRealTimers();
     }
@@ -551,6 +749,30 @@ describe('generateGroundedDraft — real-answers wiring shares the facts block w
     expect(result.factsBlock).toContain('OPEN TIMES (real, bookable slots, ET');
     // the 2-hour customer-facing arrival window, never the raw 1-hour slot
     expect(result.factsBlock).toContain('Tuesday, September 29: 9:00 AM - 11:00 AM');
+  });
+
+  test('gate on: forwards estimateId through to fetchOpenTimesBlock/getAvailableSlots (pre-push audit P2)', async () => {
+    process.env[GATE] = 'true';
+    const getAvailableSlots = jest.fn(async () => ({
+      zone: 'Venice Zone',
+      days: [{ date: '2026-09-29', fullDate: 'Tuesday, September 29', slots: [{ startTime24: '09:00' }] }],
+    }));
+    mockDraftDeps({ getAvailableSlots });
+    jest.resetModules();
+    const drafter = require('../services/sms-shadow-drafter');
+
+    await drafter.generateGroundedDraft({
+      client: {},
+      context: { summary: 'Test customer', customer: { id: 'cust-1' }, upcomingServices: [] },
+      inboundMessage: 'Can I reschedule my visit?',
+      intent: { intent: 'service_scheduling_window_reply' },
+      schedulingIntent: true,
+      city: 'Venice',
+      voiceProfile: null,
+      estimateId: 'estimate-42',
+    });
+
+    expect(getAvailableSlots).toHaveBeenCalledWith('Venice', 'estimate-42', { customerId: 'cust-1' });
   });
 
   test('gate on: a cancellation message fetches OPEN TIMES even though the upstream scheduling classifier says false (pre-push audit)', async () => {
