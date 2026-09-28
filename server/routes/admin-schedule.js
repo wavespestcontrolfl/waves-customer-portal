@@ -24748,13 +24748,24 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
       // and the nightly reconcile honor, so an ended plan the office is
       // deliberately reviving needs the flag set first, mirroring the
       // non-rider convert_ongoing branch below (series-wide, base rows only).
-      if (action === 'convert_ongoing' && cols.recurring_ongoing && !parent.recurring_ongoing) {
-        await trx('scheduled_services')
-          .where(function () { this.where('recurring_parent_id', parentId).orWhere('id', parentId); })
-          .where('is_recurring', true)
-          .update({ recurring_ongoing: true });
+      // The flip and the sync share one savepoint: a skipped sync rolls the
+      // flip back too, so the 409 below leaves the series exactly as it was.
+      let riderSync;
+      const skippedSync = new Error('rider sync skipped');
+      try {
+        await trx.transaction(async (sp) => {
+          if (action === 'convert_ongoing' && cols.recurring_ongoing && !parent.recurring_ongoing) {
+            await sp('scheduled_services')
+              .where(function () { this.where('recurring_parent_id', parentId).orWhere('id', parentId); })
+              .where('is_recurring', true)
+              .update({ recurring_ongoing: true });
+          }
+          riderSync = await require('../services/rider-series').syncRiderSeries(sp, parentId, { source: 'alert_action' });
+          if (riderSync.skipped) throw skippedSync;
+        });
+      } catch (err) {
+        if (err !== skippedSync) throw err;
       }
-      const riderSync = await require('../services/rider-series').syncRiderSeries(trx, parentId, { source: 'alert_action' });
       if (riderSync.skipped) {
         // A skip (lock contention, the host link changing under us, a
         // failed immovable-row lookup, ...) means the rider was NOT

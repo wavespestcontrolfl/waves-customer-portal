@@ -1033,6 +1033,28 @@ postgres('rider-series sync against migrated PostgreSQL', () => {
     expect(parentAfter.recurring_ongoing).toBe(true);
   });
 
+  test('convert_ongoing on a lapsed rider whose sync is skipped returns 409 and leaves recurring_ongoing false', async () => {
+    const { runRecurringAlertAction } = require('../routes/admin-schedule')._test;
+    const { pestParent } = await linkedPair();
+    await trx('scheduled_services')
+      .where((q) => { q.where('id', pestParent.id).orWhere('recurring_parent_id', pestParent.id); })
+      .update({ recurring_ongoing: false });
+    await trx('customers').where({ id: customerId }).update({ pipeline_stage: 'churned' });
+    const before = await snapshot(pestParent.id);
+
+    const outcome = await runRecurringAlertAction(trx, {
+      idParam: `derived-${pestParent.id}`, action: 'convert_ongoing', count: 1, adminUserId: null,
+    });
+
+    expect(outcome.status).toBe(409);
+    expect(outcome.body.code).toBe('RIDER_SYNC_INCOMPLETE');
+    const flags = await trx('scheduled_services')
+      .where((q) => { q.where('id', pestParent.id).orWhere('recurring_parent_id', pestParent.id); })
+      .pluck('recurring_ongoing');
+    expect(flags.every((f) => f === false)).toBe(true);
+    expect(await snapshot(pestParent.id)).toEqual(before);
+  });
+
   // --- P1 fix #5: standalone-date conflict + tech-absence -----------------
   test('a standalone insert date that clashes with an existing visit is skipped this sync rather than double-booked (P1 fix #5)', async () => {
     const lawnTechId = randomUUID();
