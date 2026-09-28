@@ -35,6 +35,17 @@ beforeEach(() => {
   });
 });
 
+test('GET always reports receipts on, even for a legacy opt-out row', async () => {
+  db.mockImplementation(() => {
+    const chain = {};
+    chain.where = jest.fn(() => chain);
+    chain.first = jest.fn(async () => ({ customer_id: 'cust-1', payment_receipt: false }));
+    return chain;
+  });
+  const body = await (await fetch(base)).json();
+  expect(JSON.stringify(body)).toContain('"paymentReceipt":true');
+});
+
 const put = (body) => fetch(base, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
 
 test('paymentReceipt=false alone is not a valid field and writes nothing', async () => {
