@@ -862,7 +862,8 @@ describe('create_appointment — the visit carries a price like a Schedule-scree
       };
       const insertChain = chain();
       insertChain.returning.mockImplementation(async () => [{ id: 'appt-1', ...insertChain.insert.mock.calls[0][0] }]);
-      const live = () => chain({ first: jest.fn().mockResolvedValue({ id: 'rec-visit' }) });
+      const liveChecks = [];
+      const live = () => { const c = chain({ first: jest.fn().mockResolvedValue({ id: 'rec-visit' }) }); liveChecks.push(c); return c; };
       wireDb({
         customers: [chain({ first: jest.fn().mockResolvedValue(recurringOnly) }), chain({ first: jest.fn().mockResolvedValue(recurringOnly) })],
         services: [catalog([ONE_TIME_PEST]), catalog([ONE_TIME_PEST])],
@@ -878,6 +879,35 @@ describe('create_appointment — the visit carries a price like a Schedule-scree
       });
       expect(result).toMatchObject({ success: true, price: 212.5 });
       expect(insertChain.insert.mock.calls[0][0]).toMatchObject({ estimated_price: 212.5, line_discount_id: 'disc-member' });
+      // A 'rescheduled' row is a phantom, never live coverage (the coverage
+      // module's own terminal list).
+      expect(liveChecks[0].whereNotIn).toHaveBeenCalledWith('status', expect.arrayContaining(['rescheduled']));
+    });
+
+    test('the locked recheck never refreshes the exclusion catalog on the global pool — it holds a transaction connection already', async () => {
+      wireMember({ rows: [ONE_TIME_PEST], listed: [GENERIC], picked: GENERIC });
+      // Expire the catalog TTL the moment the booking transaction opens.
+      const realNow = Date.now;
+      const openTrx = db.transaction;
+      let primesInTrx = 0;
+      db.transaction = jest.fn(async (fn) => {
+        const offset = 10 * 60 * 1000;
+        const nowSpy = jest.spyOn(Date, 'now').mockImplementation(() => realNow() + offset);
+        const before = db.raw.mock.calls.filter(([sql]) => /engine_keys/.test(String(sql))).length;
+        try {
+          return await openTrx(fn);
+        } finally {
+          primesInTrx = db.raw.mock.calls.filter(([sql]) => /engine_keys/.test(String(sql))).length - before;
+          nowSpy.mockRestore();
+        }
+      });
+      const result = await book({
+        _booking_price: 212.5, _booking_service_id: 'svc-otp',
+        _booking_list_price: 250, _booking_discount_id: 'disc-member', _booking_discount_name: 'WaveGuard Member Discount',
+        _booking_discount_type: 'percentage', _booking_discount_amount: 15,
+      });
+      expect(result).toMatchObject({ success: true, price: 212.5 });
+      expect(primesInTrx).toBe(0);
     });
 
     test('a member outside the dues lane booking one extra visit of a plan service gets the member discount — the visit is a one-off', async () => {

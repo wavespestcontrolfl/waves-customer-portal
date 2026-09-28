@@ -2445,10 +2445,12 @@ const MEMBER_DISCOUNT_KEYS = ['waveguard_member'];
 // Live recurring coverage: a future, not-terminal recurring visit — the
 // "or recurring customers" half of the owner's rule (2026-09-27).
 async function hasLiveRecurringCoverage(customerId, conn = db) {
-  const { terminalHistoryStatuses } = require('../service-library');
+  // The coverage module's own terminal list: a 'rescheduled' row is a
+  // phantom awaiting SmartRebooker, never live coverage.
+  const { TERMINAL_STATUSES } = require('../waveguard-existing-services');
   const row = await conn('scheduled_services')
     .where({ customer_id: customerId, is_recurring: true })
-    .whereNotIn('status', terminalHistoryStatuses())
+    .whereNotIn('status', TERMINAL_STATUSES)
     .where('scheduled_date', '>=', etDateString())
     .first('id');
   return !!row;
@@ -2515,7 +2517,11 @@ async function memberOneOffDiscount({ customer, catalogRow, listPrice, conn = db
   // prime the middleware runs, then assert the same readiness the
   // calculators do — fail closed (refuse the automatic discount lookup)
   // rather than price it against a catalog that never loaded.
-  await primePercentDiscountExclusions();
+  // Only the unlocked pass refreshes: the prime reads on the global pool, and
+  // the locked recheck already holds a transaction connection (a small pool
+  // could stall both). Readiness never lapses once loaded, so the locked pass
+  // just asserts it.
+  if (conn === db) await primePercentDiscountExclusions();
   assertPercentExclusionCatalogReady();
   const serviceExcluded = lineExcludedFromPercentDiscount(catalogRow.service_key || null);
   const context = { subtotal: listPrice, serviceKey: catalogRow.service_key || null, serviceCategory: catalogRow.category || null };
