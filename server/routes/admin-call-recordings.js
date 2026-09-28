@@ -371,7 +371,8 @@ router.get('/commitments/open', async (req, res, next) => {
       let changed = 0;
       for (const id of callIds) {
         const r = await refreshFulfillment(db, id).catch(() => ({}));
-        changed += (r.fulfilled || 0) + (r.hinted || 0) + (r.cleared || 0);
+        // reopened: a promise a booking kept lapsed and is owed again (codex #5081 r6 P2).
+        changed += ['fulfilled', 'hinted', 'cleared', 'reopened'].reduce((n, k) => n + (r[k] || 0), 0);
       }
       if (changed > 0) rows = await listOpenCommitments(db, reread);
     }
@@ -607,8 +608,21 @@ router.put('/calls/:id/customer', requireAdmin, async (req, res, next) => {
           : 'voice_message_rehome_failed: the recording is still in the previous customer\'s thread; retry the unlink');
       }
     }
+    // A promise kept by a booking for its promised slot was matched through
+    // the call's customer: re-judge the call's promises now that the link
+    // committed. Gate off writes nothing — the commitments sweep judges it
+    // once the gate is back (listSlotKeptCallIds). Best-effort: a failed
+    // refresh leaves it to that sweep.
+    let promisesReopened = 0;
+    if (require('../config/feature-gates').isEnabled('callCommitments')) {
+      const refreshed = await require('../services/call-commitments').refreshFulfillment(db, call.id).catch((e) => {
+        logger.warn(`[call-recordings] promise refresh after relink failed for call ${call.id}: ${e.message}`);
+        return {};
+      });
+      promisesReopened = refreshed.reopened || 0;
+    }
     logger.info(`[call-recordings] call ${call.id} customer link set by operator (${customerId ? 'linked' : 'unlinked'}; timeline rows moved: ${timelineMoved})`);
-    res.json({ success: true, customer_id: customerId, override, timeline_rows_moved: timelineMoved, timeline_rows_created: moved.timelineCreated, leads_unlinked: moved.leadsUnlinked, leads_reconciled: moved.leadsReconciled, warnings });
+    res.json({ success: true, customer_id: customerId, override, timeline_rows_moved: timelineMoved, timeline_rows_created: moved.timelineCreated, leads_unlinked: moved.leadsUnlinked, leads_reconciled: moved.leadsReconciled, promises_reopened: promisesReopened, warnings });
   } catch (err) { next(err); }
 });
 
