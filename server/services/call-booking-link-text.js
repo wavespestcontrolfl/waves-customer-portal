@@ -708,11 +708,11 @@ const STAGING_CHECKS = [
   // ALSO covers an explicit "no" to "may I text you?" — the dry-run removal
   // above stopped catching that refusal along with the "never asked"
   // majority it was meant to unblock. sms_declined is the model's
-  // separately-judged field, true ONLY on an explicit decline. A pre-1.18
-  // extraction has no sms_declined field at all (never null — the field is
-  // simply absent, since the persisted schema doesn't require it so older
-  // rows keep validating) and fails CLOSED here rather than assume no
-  // refusal was made.
+  // separately-judged field, true ONLY on an explicit decline. It is
+  // additive/optional in both schemas (AGENTS.md: extraction schema changes
+  // never add to `required`), so a pre-1.18 extraction — or any row the
+  // field is simply absent or null on — fails CLOSED here rather than
+  // assume no refusal was made.
   (call, extraction) => {
     const declined = extraction.consent?.sms_declined;
     if (typeof declined !== 'boolean') return 'sms_refusal_unrecorded';

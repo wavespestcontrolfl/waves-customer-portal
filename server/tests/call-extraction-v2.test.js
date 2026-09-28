@@ -293,28 +293,31 @@ describe('schema validation', () => {
     // consent.sms_declined (schema 1.18.0, codex P1 on #5292): the
     // booking-link dry run's removal of the sms_consent_given===false
     // staging check also stopped catching an explicit refusal, which the
-    // model recorded the same way. sms_declined is required in the model
-    // output going forward (the extraction always judges it), but
-    // deliberately NOT required in the persisted schema, so a pre-1.18 row
-    // — which never has the field at all — still validates.
-    test('1.18.0: sms_declined is required in the model output', () => {
+    // model recorded the same way. Additive/optional in BOTH schemas
+    // (AGENTS.md: extraction schema changes are never added to `required`)
+    // — a pre-1.18 row, which never has the field at all, still validates.
+    // The booking-link staging check itself (not schema validation) is what
+    // fails closed on that absent-field shape (call-booking-link-text.js).
+    test('1.18.0: sms_declined is optional and nullable in the model output, and older rows without it still validate', () => {
       const out = validModelOutput();
       delete out.consent.sms_declined;
-      expect(validateModelOutput(out).valid).toBe(false);
+      expect(validateModelOutput(out).valid).toBe(true);
+      out.consent.sms_declined = null;
+      expect(validateModelOutput(out).valid).toBe(true);
       out.consent.sms_declined = false;
       expect(validateModelOutput(out).valid).toBe(true);
       out.consent.sms_declined = true;
       expect(validateModelOutput(out).valid).toBe(true);
-    });
-
-    test('1.18.0: sms_declined must be a boolean, and a pre-1.18 persisted row without it still validates', () => {
-      const out = validModelOutput();
-      out.consent.sms_declined = 'yes';
-      expect(validateModelOutput(out).valid).toBe(false);
       const old = validPersisted();
       old.meta.schema_version = '1.17.0';
       delete old.consent.sms_declined;
       expect(validatePersisted(old).valid).toBe(true);
+    });
+
+    test('1.18.0: sms_declined must be a boolean or null', () => {
+      const out = validModelOutput();
+      out.consent.sms_declined = 'yes';
+      expect(validateModelOutput(out).valid).toBe(false);
     });
 
     test('an as-heard invalid caller email does not fail the whole extraction (server re-validates)', () => {

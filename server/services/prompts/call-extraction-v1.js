@@ -55,7 +55,10 @@ const modelOutputSchema = require('../../schemas/call-extraction.model-output.sc
 // asked" and blocked 151/159 real new-lead calls) also stopped catching an
 // explicit "no" to "may I text you?", recorded the SAME way. sms_declined
 // is a new, separately-judged field: true ONLY on an explicit decline of
-// texting. New required field and instructions: a new cohort.
+// texting. Additive/optional in both schemas (never added to `required`,
+// per AGENTS.md's extraction-schema rule), but the model is instructed to
+// always give an explicit true/false. New field and instructions: a new
+// cohort.
 const PROMPT_VERSION = 'v16';
 
 // Cross-call threading (2026-07-11): callers finish one arrangement across

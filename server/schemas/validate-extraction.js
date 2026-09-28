@@ -96,18 +96,18 @@ const persistedSchema = require('./call-extraction.persisted.schema.json');
 // instead of parsing speech itself (call-reschedule-agreement.js). Nothing
 // consumes them yet outside that gated consumer. Optional/nullable: older
 // payloads still validate.
-// 1.18.0: additive — consent.sms_declined (boolean). Codex P1 on #5292: the
-// dry-run removal of the sms_consent_given===false staging check (owner
-// ruling — that field is true only on an explicit yes, so false means
-// "never asked", not "refused", and blocked 151/159 real new-lead calls)
-// also stopped catching an explicit "no" to "may I text you?", which the
-// model recorded the SAME way (sms_consent_given=false). sms_declined is
-// the dedicated field: true ONLY on an explicit decline, judged separately
-// from sms_consent_given. Required in the model output (the extraction
-// always judges it going forward); NOT required in the persisted schema, so
-// a pre-1.18 row — which never has the field at all — still validates. The
-// booking-link staging check (call-booking-link-text.js) fails CLOSED on a
-// pre-1.18 row (field absent/not boolean): 'sms_refusal_unrecorded'.
+// 1.18.0: additive — consent.sms_declined (boolean|null). Codex P1 on
+// #5292: the dry-run removal of the sms_consent_given===false staging check
+// (owner ruling — that field is true only on an explicit yes, so false
+// means "never asked", not "refused", and blocked 151/159 real new-lead
+// calls) also stopped catching an explicit "no" to "may I text you?",
+// which the model recorded the SAME way (sms_consent_given=false).
+// sms_declined is the dedicated field: true ONLY on an explicit decline,
+// judged separately from sms_consent_given. Optional/nullable in BOTH
+// schemas (AGENTS.md: extraction schema changes never add to `required`) —
+// a pre-1.18 row, which never has the field at all, still validates. The
+// booking-link staging check (call-booking-link-text.js) fails CLOSED
+// whenever the field is absent or not a boolean: 'sms_refusal_unrecorded'.
 const SCHEMA_VERSION = '1.18.0';
 
 const ajv = new Ajv({ allErrors: true, strict: false });
