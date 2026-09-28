@@ -6,9 +6,12 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/twilio', () => ({ sendSMS: jest.fn(), isKnownOwnerPhone: jest.fn(() => false) }));
+jest.mock('../services/push-notifications', () => ({ sendToAdminUser: jest.fn() }));
 
 const db = require('../models/db');
 const TwilioService = require('../services/twilio');
+const PushService = require('../services/push-notifications');
+const logger = require('../services/logger');
 const { runTechOpenVisitNudge, _test } = require('../services/tech-open-visit-nudge');
 
 const GATE = 'GATE_TECH_OPEN_VISIT_NUDGE';
@@ -58,7 +61,9 @@ beforeEach(() => {
   jest.clearAllMocks();
   delete process.env[GATE];
   TwilioService.sendSMS.mockResolvedValue({ success: true, sid: 'SM123' });
-  TwilioService.isKnownOwnerPhone.mockReturnValue(false);
+  // Fixture techs are the owner (texted) unless a test says otherwise.
+  TwilioService.isKnownOwnerPhone.mockReturnValue(true);
+  PushService.sendToAdminUser.mockResolvedValue({ sent: 0 });
 });
 
 describe('gate', () => {
@@ -121,7 +126,8 @@ describe('runTechOpenVisitNudge — grouping, eligibility, sends', () => {
       visitRow({ id: 'v2', techId: 'tech-a', techName: 'Maria Lopez', custFirst: 'Ben', custLast: 'Cole', windowStart: '13:00:00' }),
       // Prospective / not field-dispatchable — never texted.
       visitRow({ id: 'v3', techId: 'tech-b', techName: 'Ex Tech', employmentStatus: 'inactive', custFirst: 'Cy', custLast: 'Dole' }),
-      // Active + field-dispatchable but no usable phone on file.
+      // Active + field-dispatchable, no phone on file → not the owner, so the
+      // push path; the mocked push reaches no device → skipped.
       visitRow({ id: 'v4', techId: 'tech-c', techName: 'No Phone Tech', techPhone: null, custFirst: 'Dee', custLast: 'Earl' }),
     ];
     db.mockImplementation((table) => {
@@ -139,9 +145,10 @@ describe('runTechOpenVisitNudge — grouping, eligibility, sends', () => {
     expect(body).toContain('Waves: 2 visits from today are still open');
     expect(body).toContain('Ana R.');
     expect(body).toContain('Ben C.');
+    expect(PushService.sendToAdminUser).toHaveBeenCalledWith('tech-c', expect.any(Object));
   });
 
-  test('recipient guard: messageType internal_alert + allowUnknownInternalAlertRecipient ONLY for the verified, assignable tech phone', async () => {
+  test('the owner text is internal_alert + allowOwnerSms, with no unknown-recipient override', async () => {
     const rows = [visitRow({ id: 'v1', techId: 'tech-a' })];
     db.mockImplementation((table) => {
       if (table === 'scheduled_services as s') return chain({ select: jest.fn().mockResolvedValue(rows) });
@@ -153,8 +160,9 @@ describe('runTechOpenVisitNudge — grouping, eligibility, sends', () => {
       expect.any(String),
       // allowOwnerSms: the owner is the only tech, so without it twilio.js
       // turns the text into an admin-bell notice instead of an SMS.
-      expect.objectContaining({ messageType: 'internal_alert', allowUnknownInternalAlertRecipient: true, allowOwnerSms: true }),
+      expect.objectContaining({ messageType: 'internal_alert', allowOwnerSms: true }),
     );
+    expect(TwilioService.sendSMS.mock.calls[0][2]).not.toHaveProperty('allowUnknownInternalAlertRecipient');
   });
 
   test('a tech with no open visits today never appears — no row, no send', async () => {
@@ -352,16 +360,73 @@ describe('recipient, absence, and failure outcomes (Codex r1)', () => {
     expect(TwilioService.sendSMS.mock.calls[0][0]).not.toBe(officeLine);
   });
 
-  test('a Waves line that is NOT an owner phone still gets no text', async () => {
-    process.env.ADAM_PHONE = '941-555-0199';
-    const rows = [visitRow({ id: 'v1', techId: 'tech-b', techPhone: '+19413187612' })];
+  test('any tech who is not the owner gets a push, never a text (keeps staff out of customer threads)', async () => {
+    TwilioService.isKnownOwnerPhone.mockReturnValue(false);
+    PushService.sendToAdminUser.mockResolvedValue({ sent: 1 });
+    const rows = [visitRow({ id: 'v1', techId: 'tech-b', techPhone: '941-555-0144' })];
     db.mockImplementation((table) => {
       if (table === 'scheduled_services as s') return chain({ select: jest.fn().mockResolvedValue(rows) });
       return chain();
     });
     const r = await runTechOpenVisitNudge({ now: new Date('2026-09-28T23:00:00Z') });
-    expect(r).toMatchObject({ sent: 0, skipped: 1 });
+    expect(r).toMatchObject({ sent: 1, skipped: 0 });
     expect(TwilioService.sendSMS).not.toHaveBeenCalled();
+    expect(PushService.sendToAdminUser).toHaveBeenCalledWith('tech-b', expect.objectContaining({
+      title: '1 visit from today still open', url: '/tech',
+    }));
+  });
+
+  test('a push that reaches no device gives the day\'s slot back', async () => {
+    TwilioService.isKnownOwnerPhone.mockReturnValue(false);
+    PushService.sendToAdminUser.mockResolvedValue({ sent: 0 });
+    const rows = [visitRow({ id: 'v1', techId: 'tech-b', techPhone: '941-555-0144' })];
+    const notifChains = [];
+    db.mockImplementation((table) => {
+      if (table === 'scheduled_services as s') return chain({ select: jest.fn().mockResolvedValue(rows) });
+      if (table === 'tech_notifications') { const c = chain({ del: jest.fn().mockResolvedValue(1) }); notifChains.push(c); return c; }
+      return chain();
+    });
+    const r = await runTechOpenVisitNudge({ now: new Date('2026-09-28T23:00:00Z') });
+    expect(r).toMatchObject({ sent: 0, skipped: 1 });
+    expect(notifChains.some((c) => c.del.mock.calls.length > 0)).toBe(true);
+  });
+
+  test('members of one visit group are ONE stop: one line, services joined, count by stop', async () => {
+    const rows = [
+      { ...visitRow({ id: 'v1', techId: 'tech-a', custFirst: 'Ana', custLast: 'Ruiz', serviceType: 'Pest Control', windowStart: '09:00:00', status: 'confirmed' }), stop_id: 'grp-1' },
+      { ...visitRow({ id: 'v2', techId: 'tech-a', custFirst: 'Ana', custLast: 'Ruiz', serviceType: 'Lawn Care', windowStart: '09:00:00', status: 'on_site' }), stop_id: 'grp-1' },
+      visitRow({ id: 'v3', techId: 'tech-a', custFirst: 'Bo', custLast: 'Lee', windowStart: '11:00:00' }),
+    ];
+    let notifChain;
+    db.mockImplementation((table) => {
+      if (table === 'scheduled_services as s') return chain({ select: jest.fn().mockResolvedValue(rows) });
+      if (table === 'tech_notifications') { notifChain = chain(); return notifChain; }
+      return chain();
+    });
+    await runTechOpenVisitNudge({ now: new Date('2026-09-28T23:00:00Z') });
+    const lines = TwilioService.sendSMS.mock.calls[0][1].split('\n');
+    expect(lines[0]).toContain('Waves: 2 visits from today are still open');
+    // One member started → the stop is started (no "(not started)").
+    expect(lines[1]).toBe('9:00 AM · Ana R. · Pest Control + Lawn Care');
+    expect(lines).toHaveLength(3);
+    const payload = JSON.parse(notifChain.insert.mock.calls[0][0].payload);
+    expect(payload.visit_ids).toEqual(['v1', 'v2', 'v3']);
+    expect(payload.count).toBe(2);
+  });
+
+  test('a failed claim insert logs an error tag, never err.message (it can carry customer names)', async () => {
+    const rows = [visitRow({ id: 'v1', techId: 'tech-a', custFirst: 'Alexandra', custLast: 'Winterbottom' })];
+    const dbErr = Object.assign(new Error('insert into "tech_notifications" ... Alexandra W. - duplicate'), { code: '23502' });
+    db.mockImplementation((table) => {
+      if (table === 'scheduled_services as s') return chain({ select: jest.fn().mockResolvedValue(rows) });
+      if (table === 'tech_notifications') return chain({ returning: jest.fn().mockRejectedValue(dbErr) });
+      return chain();
+    });
+    const r = await runTechOpenVisitNudge({ now: new Date('2026-09-28T23:00:00Z') });
+    expect(r).toMatchObject({ sent: 0, skipped: 1 });
+    const logged = [...logger.error.mock.calls, ...logger.warn.mock.calls, ...logger.info.mock.calls].map((c) => String(c[0])).join('\n');
+    expect(logged).toContain('23502');
+    expect(logged).not.toContain('Alexandra');
   });
 
   test('a tech marked out today is skipped — no claim, no text', async () => {

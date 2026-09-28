@@ -24,26 +24,18 @@
  * tracker's own dedupe), so a concurrent claim from two instances can only
  * ever have one winner — no new migration needed. The loser skips the send.
  *
- * Recipient guard: sent through the raw Twilio `sendSMS` (not
- * sendCustomerMessage), so none of the customer consent / STOP / quiet-hours
- * rails apply — this is staff messaging, never a customer channel. It uses
- * messageType 'internal_alert' (twilio.js's `isInternalAdminAlertType`), the
- * same classification every other staff/admin alert SMS in the repo uses.
- * That type is normally reserved for the owner's own phone — sending it to
- * a hired tech's phone (never a known owner number) would otherwise be
- * blocked by the internal-alert recipient guard (twilio.js, "blocked
- * internal/admin alert to unknown recipient"), so this passes
- * `allowUnknownInternalAlertRecipient: true` — but ONLY once the recipient
- * has been read fresh off the technicians row and cleared by
- * technician-eligibility's isAssignable() + tech-line's usableCell(), i.e.
- * the verified phone of a currently active, field-dispatchable technician,
- * never an arbitrary caller-supplied number. The owner's technicians.phone is
- * the office line, so for a tech whose phone is a known owner number the text
- * goes to the owner's personal cell (ADAM_PHONE) instead (recipientFor). It
- * also passes `allowOwnerSms`: the owner is the only tech today, and an
- * owner-phone internal_alert is otherwise redirected into the admin bell
- * rather than texted. A tech marked out for today (technician_absences) is
- * skipped.
+ * Channel: the owner gets a text; every other tech gets a push. sendSMS
+ * writes sms_log + a conversations thread for every text, and only owner
+ * phones are filtered out of the communications views, so a hired tech's
+ * cell would land in the customer inbox (Codex r2) — push is the staff
+ * channel tech-line.js and tech-visit-notifications.js already use. The
+ * owner's technicians.phone is the office line, so the text goes to
+ * ADAM_PHONE (ownerCell); usableCell keeps a Waves line from ever being the
+ * recipient. messageType 'internal_alert' with `allowOwnerSms`, because an
+ * owner-phone internal_alert is otherwise redirected into the admin bell;
+ * OWNER_SMS_DISABLED still applies. A tech marked out for today
+ * (technician_absences) is skipped, and members of one visit group count as
+ * one stop.
  */
 const db = require('../models/db');
 const logger = require('./logger');
@@ -91,6 +83,7 @@ async function findOpenVisitsToday(now) {
     .orderBy('s.window_start', 'asc')
     .select(
       's.id as visit_id',
+      's.visit_id as stop_id',
       's.status',
       's.window_start',
       's.service_type',
@@ -105,7 +98,9 @@ async function findOpenVisitsToday(now) {
 }
 
 // Flat rows -> one entry per technician, in first-seen (= earliest window)
-// order.
+// order. Members of one visit group (shared scheduled_services.visit_id) are
+// ONE stop with one closeout in the tech portal, so they collapse into one
+// line: service types joined, "not started" only if no member has started.
 function groupByTechnician(rows) {
   const order = [];
   const byId = new Map();
@@ -121,19 +116,35 @@ function groupByTechnician(rows) {
           phone: row.tech_phone,
         },
         visits: [],
+        stops: new Map(),
       });
       order.push(id);
     }
-    byId.get(id).visits.push({
+    const group = byId.get(id);
+    const stopKey = String(row.stop_id || row.visit_id);
+    const existing = group.stops.get(stopKey);
+    if (existing) {
+      existing.ids.push(row.visit_id);
+      if (row.service_type && !existing.serviceTypes.includes(row.service_type)) existing.serviceTypes.push(row.service_type);
+      if (!NOT_STARTED.has(row.status)) existing.status = row.status;
+      continue;
+    }
+    const stop = {
       id: row.visit_id,
+      ids: [row.visit_id],
       status: row.status,
       windowStart: row.window_start,
-      serviceType: row.service_type,
+      serviceTypes: row.service_type ? [row.service_type] : [],
       customerFirst: row.cust_first_name,
       customerLast: row.cust_last_name,
-    });
+    };
+    group.stops.set(stopKey, stop);
+    group.visits.push(stop);
   }
-  return order.map((id) => byId.get(id));
+  return order.map((id) => {
+    const { tech, visits } = byId.get(id);
+    return { tech, visits };
+  });
 }
 
 // "Maria S." — first name + last initial ONLY. Never the full last name
@@ -161,7 +172,8 @@ function clock12(value) {
 
 function visitLine(visit) {
   const time = clock12(visit.windowStart) || '—';
-  const line = `${time} · ${customerLabel(visit)} · ${visit.serviceType || 'Service'}`;
+  const services = (visit.serviceTypes || []).join(' + ') || 'Service';
+  const line = `${time} · ${customerLabel(visit)} · ${services}`;
   return NOT_STARTED.has(visit.status) ? `${line} (not started)` : line;
 }
 
@@ -183,15 +195,22 @@ function dedupeKeyFor(technicianId, etDate) {
   return `${NOTIFICATION_TYPE}:${technicianId}:${etDate}`;
 }
 
-// Where the text goes: the tech's own cell, or — for the owner, whose
-// technicians.phone is the office line (tech-line.js usableCell note) — the
-// owner's personal cell (ADAM_PHONE, the number owner alerts already use).
-// Both pass usableCell, so a Waves line is never the recipient.
-function recipientFor(tech) {
-  const cell = usableCell(tech);
-  if (cell) return cell;
+// The SMS target, for the owner only. sendSMS writes sms_log + a
+// conversations thread for every text, and only owner phones are filtered
+// out of the communications views — a hired tech's cell would land in the
+// customer inbox as an unknown contact (Codex r2), so other techs get a push
+// instead. The owner's technicians.phone is the office line (tech-line.js
+// usableCell note), so the text goes to ADAM_PHONE, the cell owner alerts
+// already use. usableCell guards both: a Waves line is never the recipient.
+function ownerCell(tech) {
   if (!tech.phone || !TwilioService.isKnownOwnerPhone(tech.phone)) return null;
-  return usableCell({ id: tech.id, phone: process.env.ADAM_PHONE });
+  return usableCell(tech) || usableCell({ id: tech.id, phone: process.env.ADAM_PHONE });
+}
+
+// Log tag for a caught error: never err.message, which can carry the bound
+// SQL values (the message body names customers) or a recipient number.
+function errTag(err) {
+  return err?.code || err?.name || 'error';
 }
 
 // True only when nothing reached the provider. 'uncertain' may already be
@@ -235,14 +254,66 @@ async function releaseClaim(technicianId, etDate) {
       .where({ dedupe_key: dedupeKeyFor(technicianId, etDate), type: NOTIFICATION_TYPE })
       .del();
   } catch (err) {
-    logger.warn(`[tech-open-visit-nudge] claim release failed for ${technicianId}: ${err.message}`);
+    logger.warn(`[tech-open-visit-nudge] claim release failed for ${technicianId}: ${errTag(err)}`);
   }
+}
+
+// The owner: one text. Nothing went out → the day's slot goes back so a
+// re-run can retry; an uncertain outcome keeps it, because the text may
+// already be on the phone and a second copy is worse than a missed one.
+async function smsNudge(tech, cell, message, etDate) {
+  try {
+    const result = await TwilioService.sendSMS(cell, message, {
+      messageType: 'internal_alert',
+      // `cell` is always a known owner phone (ownerCell), so no
+      // unknown-recipient override is needed. Without allowOwnerSms,
+      // twilio.js redirects an owner-phone internal_alert into the admin
+      // bell instead of texting it — the channel this nudge replaces.
+      // OWNER_SMS_DISABLED still silences it (checked separately).
+      allowOwnerSms: true,
+    });
+    if (!result || result.success !== false) return true;
+    logger.warn(`[tech-open-visit-nudge] send failed for ${tech.id}: ${result.code || 'refused'}`);
+    if (definitelyNotSent(result.deliveryOutcome)) await releaseClaim(tech.id, etDate);
+    return false;
+  } catch (err) {
+    // sendSMS throws a provider rejection with providerOutcome attached;
+    // only an explicit not_sent is safe to retry.
+    logger.error(`[tech-open-visit-nudge] send threw for ${tech.id}: ${errTag(err)}`);
+    if (err?.providerOutcome?.deliveryOutcome === 'not_sent') await releaseClaim(tech.id, etDate);
+    return false;
+  }
+}
+
+// Every tech but the owner: one best-effort push (tech-line.js /
+// tech-visit-notifications.js pattern) — staff-only, never a customer
+// thread. Reaching no device gives the day's slot back so a re-run retries.
+async function pushNudge(tech, visits, etDate) {
+  const count = visits.length;
+  let delivered = 0;
+  try {
+    const PushService = require('./push-notifications');
+    const summary = await PushService.sendToAdminUser(tech.id, {
+      title: `${count} visit${count === 1 ? '' : 's'} from today still open`,
+      body: 'Tap to close them out.',
+      url: '/tech',
+      tag: `${NOTIFICATION_TYPE}-${etDate}`,
+    });
+    delivered = Number(summary?.sent || 0);
+  } catch (err) {
+    logger.warn(`[tech-open-visit-nudge] push failed for ${tech.id}: ${errTag(err)}`);
+  }
+  if (delivered > 0) return true;
+  logger.info(`[tech-open-visit-nudge] push reached no device for ${tech.id}`);
+  await releaseClaim(tech.id, etDate);
+  return false;
 }
 
 /**
  * Runs the whole sweep once: gate check, today's open visits grouped by
  * technician, eligibility + phone filtering, per-technician dedupe claim,
- * then one SMS per technician that claimed a slot. Never throws — a
+ * then one SMS (owner) or push (everyone else) per technician that claimed a
+ * slot. Never throws — a
  * per-technician send failure is logged and counted as skipped; the sweep
  * keeps going for the rest.
  */
@@ -272,22 +343,16 @@ async function runTechOpenVisitNudge({ now = new Date() } = {}) {
       skipped += 1;
       continue;
     }
-    const cell = recipientFor(tech);
-    if (!cell) {
-      logger.info(`[tech-open-visit-nudge] skip ${tech.id}: no usable phone`);
-      skipped += 1;
-      continue;
-    }
-
+    const cell = ownerCell(tech);
     const message = buildMessage(visits);
     let claimed;
     try {
       claimed = await claimToday(tech.id, etDate, message, {
-        visit_ids: visits.map((v) => v.id),
+        visit_ids: visits.flatMap((v) => v.ids),
         count: visits.length,
       });
     } catch (err) {
-      logger.error(`[tech-open-visit-nudge] claim failed for ${tech.id}: ${err.message}`);
+      logger.error(`[tech-open-visit-nudge] claim failed for ${tech.id}: ${errTag(err)}`);
       skipped += 1;
       continue;
     }
@@ -297,39 +362,11 @@ async function runTechOpenVisitNudge({ now = new Date() } = {}) {
       continue;
     }
 
-    try {
-      const result = await TwilioService.sendSMS(cell, message, {
-        messageType: 'internal_alert',
-        // Cleared above: tech.id came off the assignable-technician row
-        // this run just read, and `cell` is that SAME row's own usable
-        // phone (or, for the owner, the configured ADAM_PHONE) — never a
-        // caller-supplied or unverified number.
-        allowUnknownInternalAlertRecipient: true,
-        // The owner is today's only tech, so this phone IS a known owner
-        // phone — without the opt-out, twilio.js redirects an owner-phone
-        // internal_alert into the admin bell instead of texting it, and the
-        // bell is exactly the channel this nudge exists to replace.
-        // OWNER_SMS_DISABLED still silences it (checked separately).
-        allowOwnerSms: true,
-      });
-      if (result && result.success === false) {
-        // Nothing went out → give the day's slot back so a re-run can
-        // retry. An uncertain outcome keeps it: the text may already be on
-        // the phone, and a second copy is worse than a missed one.
-        logger.warn(`[tech-open-visit-nudge] send failed for ${tech.id}: ${result.error || result.code || 'unknown'}`);
-        if (definitelyNotSent(result.deliveryOutcome)) await releaseClaim(tech.id, etDate);
-        skipped += 1;
-      } else {
-        sent += 1;
-      }
-    } catch (err) {
-      // sendSMS throws a provider rejection with providerOutcome attached;
-      // only an explicit not_sent is safe to retry — a bare throw keeps the
-      // claim for the same reason an uncertain outcome does.
-      logger.error(`[tech-open-visit-nudge] send threw for ${tech.id}: ${err.message}`);
-      if (err?.providerOutcome?.deliveryOutcome === 'not_sent') await releaseClaim(tech.id, etDate);
-      skipped += 1;
-    }
+    const delivered = cell
+      ? await smsNudge(tech, cell, message, etDate)
+      : await pushNudge(tech, visits, etDate);
+    if (delivered) sent += 1;
+    else skipped += 1;
   }
 
   return { status: 'ok', techs: groups.length, sent, skipped, visits: rows.length };
@@ -349,7 +386,9 @@ module.exports = {
     dedupeKeyFor,
     claimToday,
     releaseClaim,
-    recipientFor,
+    ownerCell,
     definitelyNotSent,
+    pushNudge,
+    smsNudge,
   },
 };
