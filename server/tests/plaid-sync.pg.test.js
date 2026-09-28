@@ -250,6 +250,43 @@ async function activate(itemId, overrides = {}) {
     expect(rows['t-d'].matched_expense_id).toBe(exp2.id);
   });
 
+  test('a newer correction on an unlinked row supersedes the one parked while it was reviewed', async () => {
+    const itemId = await connect();
+    await activate(itemId);
+    plaid.transactionsSync.mockResolvedValueOnce(page([txn('t-a', 'acc-card', 10, '2026-09-05')], [], [], 'cursor-1'));
+    await plaidSync.syncItem(itemId);
+    const [exp] = await mockPg('expenses').insert({}).returning(['id']);
+    await mockPg('bank_transactions').where({ plaid_transaction_id: 't-a' }).update({ status: 'matched_expense', matched_expense_id: exp.id });
+    plaid.transactionsSync.mockResolvedValueOnce(page([], [txn('t-a', 'acc-card', 11, '2026-09-05')], [], 'cursor-2'));
+    await plaidSync.syncItem(itemId); // correction A parks
+    await mockPg('bank_transactions').where({ plaid_transaction_id: 't-a' }).update({ status: 'unmatched', matched_expense_id: null });
+    plaid.transactionsSync.mockResolvedValueOnce(page([], [txn('t-a', 'acc-card', 12, '2026-09-05')], [], 'cursor-3'));
+    expect(await plaidSync.syncItem(itemId)).toMatchObject({ updated: 1, flagged: 0 }); // correction B applies
+    const row = await mockPg('bank_transactions').where({ plaid_transaction_id: 't-a' }).first();
+    expect(Number(row.amount)).toBe(12);
+    expect(row.suggestion.plaidModified).toBeUndefined(); // A can no longer be re-applied
+  });
+
+  test('a row claimed while the sync waits on it still gets its correction parked', async () => {
+    const itemId = await connect();
+    await activate(itemId);
+    plaid.transactionsSync.mockResolvedValueOnce(page([txn('t-a', 'acc-card', 10, '2026-09-05')], [], [], 'cursor-1'));
+    await plaidSync.syncItem(itemId);
+    const [exp] = await mockPg('expenses').insert({}).returning(['id']);
+    // a concurrent claim holds the row lock when the sync reaches it…
+    const claim = await mockPg.transaction();
+    await claim('bank_transactions').where({ plaid_transaction_id: 't-a' }).update({ status: 'matched_expense', matched_expense_id: exp.id });
+    plaid.transactionsSync.mockResolvedValueOnce(page([], [txn('t-a', 'acc-card', 11, '2026-09-05')], [], 'cursor-2'));
+    const syncing = plaidSync.syncItem(itemId);
+    await new Promise(r => setTimeout(r, 300));
+    await claim.commit(); // …and commits first
+    expect(await syncing).toMatchObject({ updated: 0, flagged: 1 });
+    const row = await mockPg('bank_transactions').where({ plaid_transaction_id: 't-a' }).first();
+    expect(row.status).toBe('matched_expense');
+    expect(Number(row.amount)).toBe(10);
+    expect(row.suggestion.plaidModified).toMatchObject({ amount: 11 });
+  });
+
   test('a concurrent run that already moved the cursor wins', async () => {
     const itemId = await connect();
     await activate(itemId);

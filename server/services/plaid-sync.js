@@ -471,18 +471,24 @@ async function applyChanges(trx, accountsById, changes) {
     const m = mapTransaction(txn, accountsById.get(txn.account_id));
     if (m.skip) { skip(m.skip); continue; }
     const r = m.row;
-    const existing = await trx('bank_transactions').where({ plaid_transaction_id: r.plaid_transaction_id }).first('id', 'status', 'txn_date', 'amount', 'direction', 'description');
+    // Row-locked: the matcher or an operator claiming this row between the
+    // read and the write would otherwise make a status-conditional update
+    // miss, and the correction would be lost as the cursor moves past it.
+    const existing = await trx('bank_transactions').where({ plaid_transaction_id: r.plaid_transaction_id }).forUpdate().first('id', 'status');
     if (!existing) { toInsert.push(r); continue; }
     if (existing.status === 'unmatched') {
-      counts.updated += await trx('bank_transactions')
-        .where({ id: existing.id, status: 'unmatched' })
-        .update({
-          txn_date: r.txn_date, description: r.description, amount: r.amount, direction: r.direction,
-          updated_at: trx.fn.now(),
-        });
+      // the bank's newest values win, and any correction still parked from
+      // when the row was reviewed is superseded — "Apply" must never be able
+      // to restore older values over these
+      await trx('bank_transactions').where({ id: existing.id }).update({
+        txn_date: r.txn_date, description: r.description, amount: r.amount, direction: r.direction,
+        suggestion: trx.raw("coalesce(suggestion, '{}'::jsonb) - 'plaidModified'"),
+        updated_at: trx.fn.now(),
+      });
+      counts.updated++;
     } else {
       // a reviewed row is never rewritten under the operator — the change
-      // parks on the row for them to judge
+      // parks on the row (replacing an older parked one) for them to judge
       await trx('bank_transactions').where({ id: existing.id }).update({
         suggestion: trx.raw("coalesce(suggestion, '{}'::jsonb) || ?::jsonb", [JSON.stringify({
           plaidModified: { txn_date: r.txn_date, amount: r.amount, direction: r.direction, description: r.description },
