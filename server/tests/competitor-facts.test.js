@@ -105,7 +105,8 @@ describe('competitor-facts', () => {
 
   test('Aptive has a curated record sourced from its own site (aptivepestcontrol.com — aptive.com is an unrelated company)', () => {
     const rec = cf.findCompetitor('Aptive');
-    expect(rec).toMatchObject({ id: 'aptive', name: 'Aptive Environmental' });
+    expect(rec).toMatchObject({ id: 'aptive', name: 'Aptive Environmental', hosts: ['aptivepestcontrol.com', 'goaptive.com'] });
+    expect(rec.hosts).not.toContain('aptive.com');
     for (const a of Object.values(rec.attributes)) {
       expect(a.source).toMatch(/^https:\/\/aptivepestcontrol\.com\//);
       expect(a.asOf).toBe('2026-09-28');

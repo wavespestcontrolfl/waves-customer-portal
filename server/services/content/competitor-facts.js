@@ -240,7 +240,9 @@ const COMPETITORS = [
     id: 'aptive',
     name: 'Aptive Environmental',
     aliases: ['aptive', 'aptive pest control', 'aptive environmental llc'],
-    // Link destinations: the older goaptive.com host tokenizes to "goaptive".
+    // The company's official domains (verified 2026-09-28). Never aptive.com.
+    hosts: ['aptivepestcontrol.com', 'goaptive.com'],
+    // Link-path tokens: the older goaptive.com host tokenizes to "goaptive".
     urlAliases: ['goaptive'],
     attributes: {
       reach: { value: 'Multi-state (37 US states, per the company)', source: 'https://aptivepestcontrol.com/', asOf: '2026-09-28' },

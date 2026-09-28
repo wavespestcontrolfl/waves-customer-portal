@@ -2884,6 +2884,10 @@ describe('owner competitor list', () => {
       ['https://example.com/turner-field', []],
       ['https://example.com/sports/hometeam-advantage', []],
       ['https://www.goaptive.com/terms', ['Aptive Environmental']],
+      // Declared official hosts resolve by host, whatever the path.
+      ['https://goaptive.com/', ['Aptive Environmental']],
+      ['https://aptivepestcontrol.com/pest-control/', ['Aptive Environmental']],
+      ['https://aptive.com/solutions', []],
     ]) {
       expect(gate.evaluate({ body: `See [this](${url}).`, title: 'x' }, { namedCompetitorEnabled: true }).namedCompetitors).toEqual(names);
     }

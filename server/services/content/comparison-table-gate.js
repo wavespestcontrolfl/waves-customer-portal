@@ -1666,6 +1666,8 @@ function competitorHostIndex() {
   if (COMPETITOR_HOST_INDEX) return COMPETITOR_HOST_INDEX;
   COMPETITOR_HOST_INDEX = new Map();
   for (const c of (Array.isArray(competitorFacts.COMPETITORS) ? competitorFacts.COMPETITORS : [])) {
+    // A record's declared official domains (`hosts`) count too.
+    for (const h of (Array.isArray(c?.hosts) ? c.hosts : [])) COMPETITOR_HOST_INDEX.set(String(h).toLowerCase().replace(/^www\./, ''), c);
     for (const attr of Object.values(c?.attributes || {})) {
       const src = attr?.source;
       if (!src) continue;
@@ -1705,14 +1707,24 @@ function linkedCompetitorMentions(text) {
     // kept, deduped by name, so an uncurated brand can't hide behind a
     // curated one in the same URL.
     const hits = new Map();
+    let tokenSource = url;
     try {
-      const host = new URL(url).hostname.toLowerCase().replace(/^www\./, '');
+      const parsed = new URL(url);
+      const host = parsed.hostname.toLowerCase().replace(/^www\./, '');
       const idx = competitorHostIndex();
+      let curatedHost = false;
       for (const [h, c] of idx) {
-        if (host === h || host.endsWith(`.${h}`)) { hits.set(c.name, { name: c.name, inAllowlist: true }); break; }
+        if (host === h || host.endsWith(`.${h}`)) { hits.set(c.name, { name: c.name, inAllowlist: true }); curatedHost = true; break; }
+      }
+      // A domain whose name IS a competitor alias but is not one of that
+      // competitor's curated hosts belongs to someone else (aptive.com is a
+      // software company, not Aptive Environmental): scan its path only.
+      const label = host.split('.').slice(-2)[0] || '';
+      if (!curatedHost && label && competitorFacts.findCompetitor(label)) {
+        tokenSource = `${parsed.pathname} ${parsed.search}`;
       }
     } catch { /* unparseable URL — token scan below still runs */ }
-    for (const hit of competitorFacts.findBusinessMentions(url.replace(/[^a-z0-9]+/gi, ' '), { url: true })) {
+    for (const hit of competitorFacts.findBusinessMentions(tokenSource.replace(/[^a-z0-9]+/gi, ' '), { url: true })) {
       if (!hits.has(hit.name)) hits.set(hit.name, { name: hit.name, inAllowlist: hit.inAllowlist });
     }
     if (hits.size === 0) continue;
