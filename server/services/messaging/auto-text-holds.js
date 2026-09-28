@@ -151,14 +151,21 @@ async function autoTextHoldReason(phone, {
     .where((q) => q
       .where((v2) => v2.where('v2_extraction_status', 'valid')
         .whereRaw("ai_extraction_enriched->>'call_nature' = ANY(?)", [NOT_A_PROSPECT_NATURES]))
-      .orWhere((vendorSpam) => vendorSpam
-        .where('v2_extraction_status', 'valid')
-        .whereRaw("ai_extraction_enriched->>'call_nature' = 'vendor_or_partner'")
-        .where((spamFlag) => spamFlag
+      .orWhere((legacy) => legacy
+        .where((flag) => flag
           .whereRaw(`COALESCE(ai_extraction, '') ~ '"is_spam"\\s*:\\s*true'`)
-          .orWhereRaw(`COALESCE(ai_extraction, '') ~ '"call_type"\\s*:\\s*"spam"'`)))
-      .orWhereRaw(`COALESCE(ai_extraction, '') ~ '"is_spam"\\s*:\\s*true'`)
-      .orWhereRaw(`COALESCE(ai_extraction, '') ~ '"call_type"\\s*:\\s*"(spam|wrong_number)"'`))
+          .orWhereRaw(`COALESCE(ai_extraction, '') ~ '"call_type"\\s*:\\s*"(spam|wrong_number)"'`))
+        // A valid V2 vendor_or_partner call whose own spam_verdict cleared
+        // its content is authoritative over the legacy labels: a call
+        // processed while V2 was shadow-only keeps the legacy is_spam /
+        // call_type "spam" that V2-primary adoption would have cleared, and
+        // one such row in the number's history must not silence a genuine
+        // property manager or referral partner for good. COALESCE: a row
+        // with no V2 data evaluates the clear as false, so its legacy flag
+        // still holds.
+        .whereRaw(`NOT COALESCE(v2_extraction_status = 'valid'
+          AND ai_extraction_enriched->>'call_nature' = 'vendor_or_partner'
+          AND ai_extraction_enriched->'spam_verdict'->>'is_spam_content' = 'false', false)`)))
     .first('id');
   if (notAProspect) return 'not_a_prospect';
 

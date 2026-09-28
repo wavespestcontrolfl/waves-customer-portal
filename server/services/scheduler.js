@@ -376,6 +376,11 @@ async function claimDueScheduledSms(now) {
     UPDATE sms_log AS s
     SET status = 'sending',
         updated_at = ?,
+        -- A quiet-hours voicemail row claimed ahead of its old 8 AM
+        -- scheduled_for (above) is pulled to the claim time, so
+        -- recoverStaleScheduledSmsClaims (scheduled_for <= now) can recover
+        -- it if this worker dies mid-send. A plainly due row is unchanged.
+        scheduled_for = LEAST(s.scheduled_for, ?::timestamptz),
         metadata = COALESCE(s.metadata, '{}'::jsonb) || jsonb_build_object(
           'scheduled_sms_claimed_at', ?::timestamptz,
           'scheduled_sms_attempts',
@@ -397,7 +402,7 @@ async function claimDueScheduledSms(now) {
     FROM due
     WHERE s.id = due.id
     RETURNING s.*
-  `, [now, SCHEDULED_SMS_CLAIM_LIMIT, now, now]);
+  `, [now, SCHEDULED_SMS_CLAIM_LIMIT, now, now, now]);
 
   return result.rows || [];
 }

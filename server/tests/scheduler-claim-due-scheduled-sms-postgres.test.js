@@ -94,6 +94,20 @@ jest.setTimeout(30000);
     expect(await statusOf(otherEntryPoint.id)).toBe('scheduled');
   });
 
+  test('an accelerated claim pulls scheduled_for to the claim time so stale-claim recovery can see it', async () => {
+    const queuedFor8am = row({
+      scheduled_for: new Date(NOW.getTime() + 8 * 60 * 60 * 1000),
+      metadata: { entry_point: 'voicemail_lead_sms_deferred', original_block_code: 'QUIET_HOURS_HOLD' },
+    });
+    const due = row({ scheduled_for: new Date(NOW.getTime() - 60 * 1000) });
+    await database('sms_log').insert([queuedFor8am, due]);
+    await claimDueScheduledSms(NOW);
+    const after = await database('sms_log').whereIn('id', [queuedFor8am.id, due.id]).select('id', 'scheduled_for');
+    const byId = Object.fromEntries(after.map((r) => [r.id, new Date(r.scheduled_for).getTime()]));
+    expect(byId[queuedFor8am.id]).toBe(NOW.getTime());
+    expect(byId[due.id]).toBe(due.scheduled_for.getTime()); // a plainly due row keeps its own time
+  });
+
   test('claim -> retry -> claim: after the first accelerated attempt, a failure backoff is honored', async () => {
     const queuedFor8am = row({
       scheduled_for: new Date(NOW.getTime() + 8 * 60 * 60 * 1000),

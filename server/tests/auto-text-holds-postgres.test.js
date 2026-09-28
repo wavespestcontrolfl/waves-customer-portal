@@ -160,6 +160,33 @@ jest.setTimeout(30000);
         expect(await hold()).toBe('not_a_prospect');
       });
 
+      test('never: V2 explicitly cleared it (spam_verdict) even though a shadow-era legacy label still says spam', async () => {
+        await priorCall({
+          v2_extraction_status: 'valid',
+          ai_extraction_enriched: JSON.stringify({ call_nature: 'vendor_or_partner', spam_verdict: { is_spam_content: false } }),
+          ai_extraction: '{"is_spam": true, "call_type": "spam"}',
+        });
+        expect(await hold()).toBeNull();
+      });
+
+      test('a V2 spam verdict that did NOT clear it leaves the legacy spam flag holding', async () => {
+        await priorCall({
+          v2_extraction_status: 'valid',
+          ai_extraction_enriched: JSON.stringify({ call_nature: 'vendor_or_partner', spam_verdict: { is_spam_content: true } }),
+          ai_extraction: '{"is_spam": true}',
+        });
+        expect(await hold()).toBe('not_a_prospect');
+      });
+
+      test('the V2 clear only exempts vendor/partner: a cleared customer-nature call with a legacy spam flag still holds', async () => {
+        await priorCall({
+          v2_extraction_status: 'valid',
+          ai_extraction_enriched: JSON.stringify({ call_nature: 'new_customer_inquiry', spam_verdict: { is_spam_content: false } }),
+          ai_extraction: '{"is_spam": true}',
+        });
+        expect(await hold()).toBe('not_a_prospect');
+      });
+
       test('the call setting the text off is read by id here too', async () => {
         const id = randomUUID();
         await priorCall({
