@@ -587,23 +587,6 @@ function adoptGateSetWithCheckerRunning() {
   return process.env.GATE_DUNNING_ADOPT_ORPHANS === 'true' && !latePaymentCheckerRetiredLive();
 }
 
-// Has the legacy checker ever contacted the customer about this invoice?
-// Such an invoice carries state the ladder does not model (which tier was
-// delivered, a pending email retry, spacing from that delivery), so the
-// sweep leaves it alone and the dry-run lists it for a person to settle.
-// An unreadable history is not an empty one: the candidate is skipped for
-// this sweep.
-async function hasLegacyCheckerHistory(invoiceId) {
-  try {
-    const rows = await db('collections_contact_ledger')
-      .where({ source: 'late_payment_checker' })
-      .whereRaw('invoice_ids @> ?::jsonb', [JSON.stringify([invoiceId])]);
-    return { hasHistory: (rows || []).length > 0 };
-  } catch (err) {
-    logger.warn(`[invoice-followups] adoption legacy-history lookup failed for invoice ${invoiceId} — skipping this sweep: ${err.message}`);
-    return { unavailable: true };
-  }
-}
 
 /**
  * scheduleForInvoice arms an autopay customer's fresh row at 'autopay_hold'
@@ -701,8 +684,11 @@ async function adoptOrphanInvoices({ dryRun = false } = {}) {
   const candidates = [];
   const skipped = [];
   for (const candidate of mapped) {
-    const history = await hasLegacyCheckerHistory(candidate.invoice_id);
-    if (history.unavailable || history.hasHistory) {
+    // Same rule as the reopened-invoice revival: an invoice the legacy
+    // checker ever contacted carries state the ladder does not model, so the
+    // sweep leaves it and the dry-run lists it for a person to settle.
+    const history = await legacyCheckerContacted(candidate.invoice_id);
+    if (history.unavailable || history.contacted) {
       const reason = history.unavailable ? 'legacy_history_unreadable' : 'has_legacy_history';
       skipped.push({ invoice_id: candidate.invoice_id, customer_id: candidate.customer_id, reason });
       continue;
