@@ -375,8 +375,9 @@ function hourExactIn(text, words) {
   // the hour at the comma.
   const toks = joinMeridiem(text).toLowerCase().replace(/[,.;!?]/g, ' , ').replace(/[^a-z0-9,]+/g, ' ').trim().split(/\s+/);
   const at = spans(toks, words.hour);
-  return at.length > 0 && at.every(([ha, hb]) => {
+  return at.length > 0 && at.every(([ha, end]) => {
     const prev = toks[ha - 1];
+    const hb = toks[end] === '00' ? end + 1 : end; // "2:00" is exact; what follows it decides
     const next = toks[hb];
     const lead = EXACT_LEADS.has(prev) || DAY_WORDS.has(prev) || (prev === ',' && DAY_WORDS.has(toks[ha - 2]));
     const rangeEnd = (next === 'to' || next === 'through' || (next === 'and' && prev === 'between'))

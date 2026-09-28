@@ -306,6 +306,8 @@ describe('groundRescheduleAgreement', () => {
       expect([said, plain(THURSDAY_2PM, said, said.includes('02') ? '02' : 'two').ok]).toEqual([said, false]);
     }
     expect(plain(THURSDAY_2PM, 'We will move it to Thursday between two and four.', 'two').ok).toBe(true);
+    expect(plain(THURSDAY_2PM, 'We will move it to Thursday at 2:00.', '2').ok).toBe(true);
+    expect(plain(THURSDAY_2PM, 'We will move it to Thursday at 2:00 or 4:00.', '2').ok).toBe(false);
     // A quote cut short before a qualifier is judged by its whole turn.
     expect(ground(v2({
       scheduling: { agreed_slot_words: { day: 'Thursday', hour: 'two', period: null } },
