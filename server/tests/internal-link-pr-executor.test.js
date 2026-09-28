@@ -1295,7 +1295,8 @@ describe('internal-link PR auto-merge', () => {
     GitHubClient.mergePr = jest.fn(async () => ({ sha: 'b'.repeat(40), merged: true }));
     GitHubClient.closePr = jest.fn();
     GitHubClient.retireBranch = jest.fn();
-    GitHubClient.listIssueComments = jest.fn(async () => []);
+    // The executor's own "@codex review" request for this head, 3h ago.
+    GitHubClient.listIssueComments = jest.fn(async () => [{ user: { login: 'waves-bot' }, body: `@codex review\n\nPlease review this autonomous internal-link PR on head \`${HEAD}\`.`, created_at: new Date(Date.now() - 3 * 3600e3).toISOString() }]);
     GitHubClient.listPrReviews = jest.fn(async () => []);
     GitHubClient.listPrReviewComments = jest.fn(async () => []);
     instance = new InternalLinkPrExecutor();
@@ -1330,8 +1331,15 @@ describe('internal-link PR auto-merge', () => {
     expect(instance._markTaskMerged).not.toHaveBeenCalled();
   });
 
+  test('never merges on "silence" when the review was never requested; re-requests instead', async () => {
+    GitHubClient.listIssueComments.mockResolvedValue([]);
+    expect(await instance.runAutoMerge()).toMatchObject({ status: 'hold', reason: 'codex_review_not_requested' });
+    expect(GitHubClient.createIssueComment).toHaveBeenCalledWith(77, expect.stringContaining('@codex review'));
+    expect(GitHubClient.mergePr).not.toHaveBeenCalled();
+  });
+
   test('holds inside the grace window while Codex has not answered', async () => {
-    GitHubClient.getPr.mockResolvedValue({ number: 77, state: 'open', created_at: new Date().toISOString(), head: { sha: HEAD, ref: 'content/internal-link-x' }, base: { ref: 'main' } });
+    GitHubClient.listIssueComments.mockResolvedValue([{ user: { login: 'waves-bot' }, body: `@codex review on \`${HEAD}\``, created_at: new Date().toISOString() }]);
     expect(await instance.runAutoMerge()).toMatchObject({ status: 'hold', reason: 'codex_review_pending' });
     expect(GitHubClient.mergePr).not.toHaveBeenCalled();
   });
@@ -1354,7 +1362,10 @@ describe('internal-link PR auto-merge', () => {
   });
 
   test('a usage-limit reply counts as silence, not a rejection', async () => {
-    GitHubClient.listIssueComments.mockResolvedValue([{ user: { login: 'chatgpt-codex-connector[bot]' }, body: `Codex Review: You have reached your Codex usage limits. ${HEAD.slice(0, 10)}` }]);
+    GitHubClient.listIssueComments.mockResolvedValue([
+      { user: { login: 'waves-bot' }, body: `@codex review on \`${HEAD}\``, created_at: new Date(Date.now() - 3 * 3600e3).toISOString() },
+      { user: { login: 'chatgpt-codex-connector[bot]' }, body: `Codex Review: You have reached your Codex usage limits. ${HEAD.slice(0, 10)}` },
+    ]);
     expect(await instance.runAutoMerge()).toMatchObject({ status: 'merged', codex: 'silent' });
   });
 

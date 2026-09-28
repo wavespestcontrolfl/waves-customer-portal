@@ -248,11 +248,19 @@ async function codexFindingsGate(ctx) {
   };
 }
 
-// A clean verdict passes at once; silence passes after the grace window.
-function codexGraceGate(ctx) {
+// A clean verdict passes at once. Silence passes only after the grace
+// window measured from a PROVEN review request for this head: if the
+// request comment never landed (it is fire-and-forget at PR open), post it
+// again and hold — Codex silence is never inferred from a request that
+// wasn't made.
+async function codexGraceGate(ctx) {
+  if (ctx.codex.clean) return null;
+  if (!ctx.codex.requestedAt) {
+    await requestCodexReview(ctx.pr, ctx.headSha, ctx.prTasks.map((task) => ({ task })));
+    return { hold: 'codex_review_not_requested' };
+  }
   const graceMs = envInt('AUTONOMOUS_INTERNAL_LINK_CODEX_GRACE_MIN', 120) * 60 * 1000;
-  const openedAt = Date.parse(ctx.pr.created_at || '') || 0;
-  const waiting = !ctx.codex.clean && new Date(ctx.now).getTime() - openedAt < graceMs;
+  const waiting = new Date(ctx.now).getTime() - ctx.codex.requestedAt < graceMs;
   return waiting ? { hold: 'codex_review_pending' } : null;
 }
 
@@ -644,7 +652,14 @@ class InternalLinkPrExecutor {
       && /Codex Review/i.test(String(c.body || '')) && !isClean(c.body) && !isLimit(c.body)).length;
     const findings = inlineFindings + reviewFindings + commentFindings;
     const clean = !findings && codexReviewStatus({ comments, reviews, headSha }).clean === true;
-    return { clean, findings };
+    // When the review of THIS head was requested (the grace window runs from
+    // here): a non-Codex "@codex review" comment naming the head commit.
+    const requestedAt = (comments || [])
+      .filter((c) => !isCodexAuthor(c?.user?.login) && /@codex\s+review/i.test(String(c.body || '')) && mentionsHead(c.body))
+      .map((c) => Date.parse(c.created_at || c.createdAt || 0))
+      .filter(Number.isFinite)
+      .sort((a, b) => b - a)[0] || null;
+    return { clean, findings, requestedAt };
   }
 
   async _closeLinkPr(pr, prTasks, { status, skipReason = null, failureReason = null, note }) {
