@@ -19,7 +19,8 @@ const { VERSION, extractSmsOperations, explicitContactPreference, matchesExplici
 const { IRRIGATION_INPUT_FIELDS } = require('./irrigation-schedule-confirmation');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
 const { isSmsReaction } = require('./sms-intent');
-const { loadSmsFulfillmentEvidence, verifySmsFulfillment, revalidateSmsFulfillment, admissibleWitness, SYSTEM_EVENT_TYPES, PROVIDER_RETRY_MS, WITNESS_TRANSITION_STATUSES, LOGGED_MOVE_SQL } = require('./sms-commitment-fulfillment');
+const { parseETDateTime, etDateString, addETDays } = require('../utils/datetime-et');
+const { loadSmsFulfillmentEvidence, verifySmsFulfillment, revalidateSmsFulfillment, admissibleWitness, SYSTEM_EVENT_TYPES, PROVIDER_RETRY_MS, WITNESS_TRANSITION_STATUSES, LOGGED_MOVE_SQL, PAYMENT_WITNESS_KINDS, paymentEvidenceRow } = require('./sms-commitment-fulfillment');
 
 const { hashSensitiveValue } = require('./data-hygiene/sensitive-vault');
 const REPLAY_VERSION = `${VERSION}:replay`;
@@ -195,6 +196,38 @@ const TOPIC_CLAUSE = new RegExp(
 function withoutTopics(quote) {
   return String(quote || '').replace(TOPIC_CLAUSE, ' ');
 }
+
+// Owner ruling 2026-09-28: the exact same-day tokens that still leave a
+// Waves obligation undated below ("today", "tonight", the day-part trio,
+// "later today", "eod", "end of (the) day") — the subset of STATED_TIMING's
+// own vocabulary that names TODAY specifically, never a longer span ("this
+// week/month" stay out on purpose: those keep the legacy undated behavior).
+// NOT_POSSESSIVE follows every form, as in STATED_TIMING, so "today's
+// appointment" or "tonight's visit" names the topic and is left to the
+// existing per-kind handling (Codex #5170 r3 P2). A qualifier bound to the
+// same-day form ("later tonight", "any time today", "sometime this
+// afternoon") is part of it, so stripping takes it too and it never reads
+// as a later option below (r3 P2).
+const SAME_DAY_QUALIFIER = String.raw`(?:(?:later|any ?time|some ?time|early|late) )?`;
+const SAME_DAY_TIMING = new RegExp([
+  String.raw`\btoday\b${NOT_POSSESSIVE}`,
+  String.raw`\btonight\b${NOT_POSSESSIVE}`,
+  String.raw`\bthis (?:morning|afternoon|evening)\b${NOT_POSSESSIVE}`,
+  String.raw`\beod\b${NOT_POSSESSIVE}`,
+  String.raw`\bend of (?:the )?day\b${NOT_POSSESSIVE}`,
+].map((form) => String.raw`\b${SAME_DAY_QUALIFIER}${form.slice(2)}`).join('|'), 'i');
+// Global twin used only to strip every same-day occurrence before re-testing
+// STATED_TIMING on what is left (Codex conventions keep the stateful global
+// regex out of resolveDueDeadline's own module-level .test() calls).
+const SAME_DAY_TIMING_STRIP = new RegExp(SAME_DAY_TIMING.source, 'gi');
+// A later option offered beside the same-day timing ("today or next visit",
+// "today, otherwise whenever") that STATED_TIMING does not recognize on its
+// own (a bare "next visit" needs a preposition there) keeps the legacy
+// undated row: a same-day deadline would bell before the option the customer
+// allowed (Codex #5170 r1 P2). Only a later OPTION counts, never the bare
+// word "or": "today or not", "call or text me today" and "this afternoon or
+// tonight" stay same-day (r2 P2).
+const SAME_DAY_ALTERNATIVE = /\bnext (?:visit|appointment|service|time)\b|\b(?:whenever|any ?time|some ?time|later(?! today)|another (?:day|time)|some ?other (?:day|time)|a different (?:day|time))\b/i;
 
 // Outcomes a visit-only fact may reach without anyone needing to act: the
 // duration verdict itself and the scope/authority guards that can run before
@@ -399,9 +432,24 @@ const DEFAULT_DEADLINE_HOURS = Object.freeze({
 const PROMISE_DEFAULT_DEADLINE_HOURS = 48;
 
 // due_basis: 'stated' when the extractor grounded an explicit deadline in
-// the source text; 'default_kind' when this per-kind/basis table filled one
-// in instead; null when the kind has no default and nothing was stated
-// (legacy behavior — refreshSmsCommitments' null-due branch still applies).
+// the source text; 'default_kind' when either this per-kind/basis table or
+// the same-day rule below filled one in instead; null when the kind has no
+// default and nothing was stated (legacy behavior — refreshSmsCommitments'
+// null-due branch still applies).
+//
+// due_basis reuse (owner ruling 2026-09-28): the same-day rule below could
+// have introduced its own 'same_day' value, but call_commitments carries a
+// CHECK constraint enumerating due_basis ('stated' | 'suggested' |
+// 'default_kind' — see migrations 20260901000010/20260925000001/…000002),
+// and NEVER EDIT AN EXISTING MIGRATION rules out widening it in place; a new
+// value needs a new migration for a distinction no reader currently needs.
+// Every due_basis reader was checked (grep -rn due_basis server/): the Calls
+// tab only special-cases 'suggested' for its "(suggested)" label
+// (CallIntelligencePanel.jsx); nothing anywhere branches on 'default_kind'
+// specifically. A same-day deadline IS a default this per-kind/basis table
+// would otherwise have filled in — it fires only where R5's table already
+// would have — so it reuses 'default_kind' rather than add a migration and
+// an enum value for a rendering distinction no surface asks for.
 function resolveDueDeadline(item, messageCreatedAt) {
   if (item.due_at) return { due_at: item.due_at, due_basis: 'stated' };
   // Defaults are Waves' own service windows. A customer-owned promise ("I'll
@@ -423,7 +471,41 @@ function resolveDueDeadline(item, messageCreatedAt) {
   // and send the estimate" leaves the estimate its default — Codex #4816 r31).
   const unresolvedClock = item.timing_unverified && statesClock(item.quote);
   // Quotes are short excerpts; the cap keeps the timing regexes bounded.
-  if (item.due_text || unresolvedClock || STATED_TIMING.test(withoutTopics(String(item.quote || '').slice(0, 500)))) return { due_at: null, due_basis: null };
+  const strippedQuote = withoutTopics(String(item.quote || '').slice(0, 500));
+  if (item.due_text || unresolvedClock || STATED_TIMING.test(strippedQuote)) {
+    // Owner ruling 2026-09-28: an ask about TODAY ("Did you come to my house
+    // today?", "Should we skip today?") used to leave the row undated like
+    // any other stated timing, so it never bells staff. Give it an
+    // end-of-business-day deadline instead — but ONLY when every stated
+    // timing in play is a same-day token and no clock was stated at all: an
+    // unresolved clock (above) always wins undated, and a resolved due_at
+    // already returned 'stated' before reaching here.
+    // "Only same-day timing": strip the same-day tokens from both the
+    // topic-stripped quote and due_text, then re-run STATED_TIMING on each
+    // remainder. Either remainder still matching ("today or tomorrow",
+    // "today, else Friday", a due_text that names more than the same day)
+    // keeps the legacy undated behavior — the safer side, since a missed
+    // bell is worse than an early one (comment above).
+    const sameDayRemainderClear = (text) => !STATED_TIMING.test(String(text || '').replace(SAME_DAY_TIMING_STRIP, ' '));
+    const sameDayOnly = !unresolvedClock
+      && SAME_DAY_TIMING.test(strippedQuote) && sameDayRemainderClear(strippedQuote)
+      && !SAME_DAY_ALTERNATIVE.test(strippedQuote.replace(SAME_DAY_TIMING_STRIP, ' '))
+      && !SAME_DAY_ALTERNATIVE.test(String(item.due_text || '').replace(SAME_DAY_TIMING_STRIP, ' '))
+      && sameDayRemainderClear(item.due_text);
+    if (!sameDayOnly) return { due_at: null, due_basis: null };
+    const messageDate = new Date(messageCreatedAt);
+    // End of the business day on the message's own ET calendar date (8 PM
+    // ET matches the follow-up SLA's 8 AM–8 PM ET window). Less than an
+    // hour away (the text lands after ~7 PM ET) pushes the deadline to 9 AM
+    // ET the next morning instead of bell-in-an-hour. parseETDateTime does
+    // the DST-correct wall-clock -> instant conversion; never hand-roll the
+    // offset here.
+    const endOfDay = parseETDateTime(`${etDateString(messageDate)}T20:00`);
+    const dueAt = endOfDay.getTime() - messageDate.getTime() < 3600000
+      ? parseETDateTime(`${etDateString(addETDays(messageDate, 1))}T09:00`)
+      : endOfDay;
+    return { due_at: dueAt.toISOString(), due_basis: 'default_kind' };
+  }
   const hours = item.basis === 'promise' ? PROMISE_DEFAULT_DEADLINE_HOURS : DEFAULT_DEADLINE_HOURS[item.kind];
   if (hours == null) return { due_at: null, due_basis: null };
   return { due_at: new Date(new Date(messageCreatedAt).getTime() + hours * 3600000).toISOString(), due_basis: 'default_kind' };
@@ -488,7 +570,22 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
         // by a property that became the sole one later (Codex #4816 r20).
         sms_context: { basis: item.basis, due_text: item.due_text, property_id: propertyId,
           property_ambiguous: !propertyId,
-          customer_id: customer.id, source_at: message.created_at },
+          customer_id: customer.id, source_at: message.created_at,
+          // Whether money landing can answer this ask at all: the
+          // extraction's own judgement (answered_by_payment; a refund or a
+          // payment-method change never is, however worded). Payment
+          // admissibility and the event page read it, since an ask's words
+          // never change after intake (Codex #4996 r6).
+          ...(PAYMENT_WITNESS_KINDS.includes(item.kind) ? { money_answerable: item.answered_by_payment === true } : {}),
+          // Whether a plain human staff reply can answer this ask at all
+          // (owner ruling 2026-09-28, partly reversing R3 2026-09-24): the
+          // extraction's own judgement (answered_by_reply), stamped once
+          // here exactly like money_answerable (Codex #5088 precedent) — an
+          // unstamped row (extracted before this lane, or any kind other
+          // than 'other') is never reply-answerable, so it keeps R3: only a
+          // visit event or a payment landing closes it (sms-commitment-
+          // fulfillment.js witnessTypes).
+          ...(PAYMENT_WITNESS_KINDS.includes(item.kind) ? { reply_answerable: item.answered_by_reply === true } : {}) },
       };
     })).onConflict(['sms_log_id', 'commitment_key']).ignore();
     // The existing notifier writes only through trx. Preview rolls this back
@@ -718,7 +815,32 @@ const UNSEEN_FLOOR = `GREATEST(${SOURCE_AT}, COALESCE(${EVENT_SEEN_AT}, ${SOURCE
 // The floor and the tick bound sit in every branch, so each scan starts from
 // the row's watermark rather than the customer's whole visit history.
 const unseen = (column) => `${column} <= ? AND ${column} > ${UNSEEN_FLOOR}`;
-const UNSEEN_VISIT_ACTIVITY = `(SELECT MAX(a.at) FROM (
+// Visit activity, and money landing (R2): a payments row that can be
+// evidence (paymentEvidenceRow, the payment legs' own test) or a received
+// estimate deposit. Without the money branches a payment-only ask waited for
+// its cursor page — a full rotation under backlog (Codex #4996 r1). Money
+// wakes only the kinds that can cite it, and only through a row a leg reads:
+// a callback or report row it cannot answer must not take a slot from a
+// settlement question (r4), nor may a fee or a refund in flight (r9). A
+// payment or deposit counts from when its row last changed, not its
+// settlement stamp: a late webhook records a settlement from hours or days
+// ago (stripe-webhook.js), which the watermark has long passed.
+const PAYMENT_CHANGED_AT = "GREATEST(pm.updated_at, COALESCE((pm.metadata->>'settled_event_at')::timestamptz, pm.created_at))";
+// Read against the event page's candidate row, like RETRY_AFTER_SQL and
+// SOURCE_AT: `cc` is the open call_commitments row and `s` its source
+// sms_log row (openRows in refreshSmsCommitments). An ask money can answer
+// carries the extraction's stamp; one without it never wakes on money, as
+// money never answers it.
+const MONEY_KIND = `cc.kind IN (${PAYMENT_WITNESS_KINDS.map((v) => `'${v}'`).join(', ')})
+  AND cc.sms_context->>'money_answerable' = 'true'`;
+// Whose estimate a deposit is on: the customer's own, or an unowned one a
+// lead of theirs names. A superset of whereEstimateCustomerOwnership (which
+// also drops estimates another lead claims) is enough to trigger a check;
+// the evidence read applies the exact rule.
+const ESTIMATE_MAY_BELONG = `(e.customer_id = s.customer_id OR (e.customer_id IS NULL AND (
+    e.id IN (SELECT l.estimate_id FROM leads l WHERE l.deleted_at IS NULL AND l.customer_id = s.customer_id)
+    OR e.estimate_data ->> 'lead_id' IN (SELECT l.id::text FROM leads l WHERE l.deleted_at IS NULL AND l.customer_id = s.customer_id))))`;
+const UNSEEN_EVENT_ACTIVITY = `(SELECT MAX(a.at) FROM (
     SELECT v.created_at AS at FROM scheduled_services v WHERE v.customer_id = s.customer_id AND ${unseen('v.created_at')}
     UNION ALL SELECT v.completed_at FROM scheduled_services v WHERE v.customer_id = s.customer_id AND ${unseen('v.completed_at')}
     UNION ALL SELECT h.transitioned_at FROM job_status_history h JOIN scheduled_services v ON v.id = h.job_id
@@ -727,6 +849,11 @@ const UNSEEN_VISIT_ACTIVITY = `(SELECT MAX(a.at) FROM (
     UNION ALL SELECT r.created_at FROM reschedule_log r JOIN scheduled_services v ON v.id = r.scheduled_service_id
       WHERE v.customer_id = s.customer_id AND ${unseen('r.created_at')}
         AND ${LOGGED_MOVE_SQL('r')}
+    UNION ALL SELECT ${PAYMENT_CHANGED_AT} FROM payments pm WHERE ${MONEY_KIND} AND pm.customer_id = s.customer_id
+        AND ${paymentEvidenceRow('pm')} AND ${unseen(PAYMENT_CHANGED_AT)}
+    UNION ALL SELECT GREATEST(ed.updated_at, ed.received_at) FROM estimate_deposits ed JOIN estimates e ON e.id = ed.estimate_id
+      WHERE ${MONEY_KIND} AND ed.status IN ('received', 'credited') AND ${unseen('GREATEST(ed.updated_at, ed.received_at)')}
+        AND ${ESTIMATE_MAY_BELONG}
   ) a)`;
 
 // Match merge and intake: customer, source, then commitment. A relink, an
@@ -870,9 +997,10 @@ async function refreshSmsCommitments({ now = new Date(), conn = db, verify = ver
     return { cursorKey, rows };
   };
   // A third page, ahead of the cursors: any open row (due, undated or
-  // future) with unseen visit activity, so an event is checked on the next
-  // tick wherever the cursors stand (Codex #4816 r15–r17).
-  const tickBound = Array(4).fill(now);
+  // future) with unseen event activity (visit or payment), so an event is
+  // checked on the next tick wherever the cursors stand (Codex #4816
+  // r15–r17; Codex round 1 P2, #4996: payment activity joined the scan).
+  const tickBound = Array(6).fill(now);
   // A row waiting out a provider/schema failure's retry_after cannot make
   // progress on the same evidence (verify returns the stored failure until
   // then), so it yields its slot rather than pinning the page through an
@@ -887,7 +1015,7 @@ async function refreshSmsCommitments({ now = new Date(), conn = db, verify = ver
   // fence: without it Postgres flattens the one-column subquery and inlines
   // the scan back into every reference.
   const eventRows = await openRows()
-    .joinRaw(`CROSS JOIN LATERAL (SELECT ${UNSEEN_VISIT_ACTIVITY} AS unseen_at OFFSET 0) ev`, tickBound)
+    .joinRaw(`CROSS JOIN LATERAL (SELECT ${UNSEEN_EVENT_ACTIVITY} AS unseen_at OFFSET 0) ev`, tickBound)
     .whereNotNull('ev.unseen_at')
     // A stored failure reached for another owner (sms_context.customer_id is
     // rewritten with every persisted verdict) says nothing about the current

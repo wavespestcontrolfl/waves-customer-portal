@@ -44,9 +44,10 @@ overwritten in that window could then re-activate through move 2's
 ## Allowed moves
 
 `R` = `server/services/annual-prepay-renewals.js`, `AI` =
-`server/routes/admin-invoices.js`. Guards are the literal `WHERE` clauses on
-the `UPDATE`; an `UPDATE` whose guard misses is a no-op (race-safe,
-replay-idempotent), never an error.
+`server/routes/admin-invoices.js`, `TR` =
+`server/services/termite-annual-renewal-charge.js`. Guards are the literal
+`WHERE` clauses on the `UPDATE`; an `UPDATE` whose guard misses is a no-op
+(race-safe, replay-idempotent), never an error.
 
 | # | From | To | Trigger | Where | Guard |
 |---|---|---|---|---|---|
@@ -64,12 +65,23 @@ replay-idempotent), never an error.
 | 12 | `active` / `renewal_pending` / `payment_pending` | `payment_pending` | Admin reverses an applied credit on a prepaid invoice — the term is "un-paid"; stamps cleared, and (ADMIN-BUG-R17) `customers.billing_mode` is reset to the recorded prior mode via `resetBillingModeAfterTermCancel`, pairing the demotion exactly like move 10's dispute-suspend does — the customer no longer stays stranded in `annual_prepay` (serviced free / no monthly dues) until the reopened invoice is actually repaid. (The guard's `NOT IN` shape would also admit an undecided legacy `refunded` row — the only move that can touch a legacy row: move 9's upstream select is limited to `payment_pending`/`active`/`renewal_pending`. Code never writes the legacy names, but the 20260614 migration kept them in the CHECK and only normalized values *outside* it, so pre-existing rows may survive; see residue.) | `AI` `POST /:id/reverse-prepaid` (apply-credit reversal) | `renewal_decision IS NULL AND status NOT IN ('cancelled','canceled')` |
 | 13 | `payment_pending` / `cancelled` (undecided) | `cancelled` **(a)** | Admin removes the annual-prepay flag from an invoice marked by mistake (`DELETE /:id/annual-prepay`). The invoice survives as an ordinary invoice, so the route refuses (409) whenever the cancel could double-bill: a decided term, a PAID prepay (`status IN ACTIVE_STATUSES` — refund it instead, owner ruling 2026-09-26), and a prepay a flow owns — born from an accepted estimate (`source_estimate_id`, whose card auto-charge job could still collect it), a switch-superseded marker or a setup-fee claim — void it instead. Otherwise it runs the SAME `cancelTermWithRestorations` pipeline as move 9 (ADMIN-BUG-R16): stamps cleared (`throwOnError`), covered visit invoices reopened with their reminders re-armed after commit, credits reversed, `customers.billing_mode` reset to the recorded prior mode; only non-terminal attached visits are detached. Re-marking the invoice later re-derives the status via move 1. | `R` `cancelTermWithRestorations`, called from `AI` `DELETE /:id/annual-prepay` | `renewal_decision IS NULL`; the route refuses `ACTIVE_STATUSES` first |
 | 14 | `renewed` | `cancelled` **(b)** | The customer declines renewal online (termite annual plan, agreement v3: "at any time before the renewal date") while a staff-recorded `renew` is still UNPROCESSED — no successor term has been minted from it. Sets `renewal_decision = 'cancel'` and `cancel_disposition = 'end_at_term'` (the decline supersedes the renew); coverage for the paid window is kept. The caller also requires today before `term_end` (or a term still awaiting its installation) and a still-paid year. `switch_plan`, and a `renew` whose successor exists, never move. | `R` `supersedeRenewWithCustomerCancel` (from `declineTermiteAnnualRenewal`) | `status = 'renewed' AND renewal_decision = 'renew' AND NOT EXISTS (successor: renewed_from_term_id = id)` |
-| 15 | `payment_pending` | `cancelled` **(b)** | A signed termite annual plan the customer declined online while still `payment_pending` (an unpaid original invoice, or a dispute-suspended one) keeps status `payment_pending` with `renewal_decision = 'cancel'` + `cancel_disposition = 'end_at_term'` (the decision-only write `declinePaymentPendingWithCustomerCancel`, guarded `status = 'payment_pending' AND renewal_decision IS NULL` — no status change, so the pending rails keep it: the billing cron's payment-pending exclusion and the pre-visit payment reminders). When its prepay invoice RESOLVES it settles here instead of activating: paid → covered through `term_end` by the decided-lapse branch of `coveredTermsAsOf`, with the paid follow-through (attach + stamp, pending-window reconcile, dispute recovery) and never renewing — `billing_mode = annual_prepay` only while the term covers TODAY (paid after `term_end`, the mode is left as it was, never the nothing-bills limbo); the historical reconcile runs whenever the term is paid, expired or not, stamps any still-open in-window visit prepaid (the end-at-term upkeep, evaluated as of `term_end` once it has passed), and is retried by the covered-terms sweep (least-recently-attempted first) until an `annual_prepay_paid_lapse_reconciled` activity marker records a clean run; voided / refunded → nothing covered. If it never resolves, once its installation-derived end has passed the portal-decline retrieval sweep rings ONE staff bell (collection + station retrieval are a staff decision; no automatic task, no status change). Move 2 never takes a decided term. | `R` `settleDecidedPendingTerms` (from `syncTermForInvoicePayment`) | `status = 'payment_pending' AND renewal_decision = 'cancel'` |
+| 15 | `payment_pending` | `cancelled` **(b)** | A signed termite annual plan the customer declined online while still `payment_pending` (an unpaid original invoice, or a dispute-suspended one) keeps status `payment_pending` with `renewal_decision = 'cancel'` + `cancel_disposition = 'end_at_term'` (the decision-only write `declinePaymentPendingWithCustomerCancel`, guarded `status = 'payment_pending' AND renewal_decision IS NULL` — no status change, so the pending rails keep it: the billing cron's payment-pending exclusion). When its prepay invoice RESOLVES it settles here instead of activating: paid → covered through `term_end` by the decided-lapse branch of `coveredTermsAsOf`, with the paid follow-through (attach + stamp, pending-window reconcile, dispute recovery) and never renewing — `billing_mode = annual_prepay` only while the term covers TODAY (paid after `term_end`, the mode is left as it was, never the nothing-bills limbo); the historical reconcile runs whenever the term is paid, expired or not, stamps any still-open in-window visit prepaid (the end-at-term upkeep, evaluated as of `term_end` once it has passed), and is retried by the covered-terms sweep (least-recently-attempted first) until an `annual_prepay_paid_lapse_reconciled` activity marker records a clean run; voided / refunded → nothing covered. If it never resolves, once its installation-derived end has passed the portal-decline retrieval sweep rings ONE staff bell (collection + station retrieval are a staff decision; no automatic task, no status change). Move 2 never takes a decided term. | `R` `settleDecidedPendingTerms` (from `syncTermForInvoicePayment`) | `status = 'payment_pending' AND renewal_decision = 'cancel'` |
+| 16 | `active` / `renewal_pending` | `renewed` | Termite annual plan only (`annual_plan_version IS NOT NULL`), dark behind `GATE_TERMITE_ANNUAL_PLAN`: the renewal successor's OWN renewal invoice is genuinely paid — `syncTermForInvoicePayment`'s pending→active transition for a row carrying `renewed_from_term_id` calls `recordDecision('renew')` on the PARENT (`stampParentRenewedForSuccessor`). The same stamp runs when a successor the customer already declined (move 15's decided-pending shape) is paid: that payment still proves THIS renewal happened. Under the renewal gate the stamp re-reads the successor (live, or the paid decided-lapse `cancelled` + `cancel` shape, its own invoice settled and not revoked) and the parent before writing. Deliberately NOT at mint (P2-1 fix, superseding the original slice-6b design below the table) — a minted-but-unpaid successor can still lapse (move 17), and deciding `renew` before that is known would leave a lapsed-and-cancelled successor sitting behind a parent already marked `renewed`. This reuses the SAME writer an operator's manual "renew" click uses (move 6) — it is not a new status-write site in `TR`. | `R` `syncTermForInvoicePayment` (calls `recordDecision('renew')`) | `where({ id: termId }) AND status IN ACTIVE_STATUSES AND renewal_decision IS NULL` |
+| 17 | `active` / `renewal_pending` | `cancelled` **(b)** | Termite annual plan only: the renewal successor's own payment grace deadline passes unpaid (its invoice was actually presented to the customer — see `TR`'s grace-lapse pass) — the successor's invoice voids (cascading the successor itself to `cancelled` **(a)** through move 9) and, in the SAME tick, `TR`'s `processGraceLapseForTerm` calls `recordDecision('cancel')` on the PARENT, recording the decided lapse. Reuses the SAME writer an operator's manual "cancel" click uses (move 8). | `TR` `processGraceLapseForTerm` (calls `recordDecision('cancel')`) | `where({ id: termId }) AND status IN ACTIVE_STATUSES AND renewal_decision IS NULL` |
 
 Everything not in the table is not a move. In particular there is **no**
 `switch_plan → *` or `cancelled(b) → *` (move 13 now refuses a decided
 term), `renewed → *` only through the customer's unprocessed-renew
-supersession (move 14), and nothing ever writes `canceled` or `refunded`.
+supersession (move 14), and nothing ever writes `canceled` or `refunded`. Moves 16 and 17 are both
+automated *triggers* of the SAME `recordDecision` writer moves 6 and 8 use —
+neither is a new status-write site in `annual-prepay-renewals.js`, and
+neither reads or writes a row already carrying a `renewal_decision`
+(`recordDecision`'s own guard).
+
+`TR` = `server/services/termite-annual-renewal-charge.js`. Minting the
+renewal successor itself (`mintRenewalSuccessor`) writes NO status to the
+PARENT — see the module's own header for why (P2-1: mint only proposes a
+renewal; moves 16/17 above decide it once the outcome is actually known).
 
 ## Read-side groupings
 
@@ -100,8 +112,22 @@ These constants in `R` decide what each stage *means* to the rest of billing:
   plan's commit key (`tryHoldCancelCommitLockForTransaction`; a busy key
   waits for the next night). An `end_now_refund` lapse is never reseeded or
   stamped.
-- `PAYMENT_PENDING_STATUS = 'payment_pending'` — payment reminders (3d/1d),
-  card-expiry exemptions, `getPaymentPendingCustomerIds`.
+- `PAYMENT_PENDING_STATUS = 'payment_pending'` — card-expiry exemptions, `getPaymentPendingCustomerIds`.
+- Termite-renewal grace coverage (owner ruling 2026-09-26, P2-4): a
+  `payment_pending` termite renewal SUCCESSOR (`renewed_from_term_id NOT
+  NULL AND annual_plan_version NOT NULL`) is ALSO covered — no status
+  change, no seeding — through `TERMITE_RENEWAL_GRACE_DAYS` from whichever
+  is later of its own `term_start` or `created_at` (ET date):
+  `termiteRenewalGraceDeadlineFor` / `termiteRenewalGraceDeadlineSql`, the
+  SAME cutoff `TR`'s grace-lapse pass voids on, so coverage and the lapse
+  can never disagree about the exact day. `coveredTermsAsOf`'s own
+  `reconcileCoveredTermsSweep` caller skips this shape (confirms the
+  invoice is ACTUALLY paid before running any settle/credit leg) — grace
+  coverage never seeds a coverage stamp or settles a completion as paid;
+  it only keeps `getActivelyCoveredCustomerIds` (and every other reader of
+  `coveredTermsAsOf`) from treating the customer as uncovered while the
+  grace period runs. Coverage ends the moment the lapse pass actually
+  voids the invoice (the existing cancelled-invoice exclusion takes over).
 
 ## Known residue (not fixed here)
 

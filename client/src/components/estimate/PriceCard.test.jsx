@@ -1,12 +1,91 @@
 // @vitest-environment jsdom
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 import PriceCard from './PriceCard';
-import { setGlassDefault } from '../../lib/estimate-glass-copy';
+import { setGlassDefault, setCommercialGlass } from '../../lib/estimate-glass-copy';
 
 afterEach(() => cleanup());
+
+describe('PriceCard — estimate-wide no-guarantee policy', () => {
+  afterEach(() => { setGlassDefault(false); setCommercialGlass(false); });
+
+  it('filters recurring terms from expanded and print rows while preserving service scope', () => {
+    setGlassDefault(true);
+    const frequency = {
+      key: 'quarterly',
+      monthly: 50,
+      perServiceTreatments: [
+        { service: 'pest_control', label: 'Pest Control', displayPrice: 100, visitsPerYear: 4 },
+        { service: 'mosquito', label: 'Mosquito Control', displayPrice: 50, visitsPerYear: 4 },
+      ],
+    };
+    const { rerender } = render(<PriceCard frequency={frequency} />);
+
+    fireEvent(window, new Event('beforeprint'));
+    expect(screen.getByText(/unlimited free callbacks/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/money-back guarantee/i)).toHaveLength(2);
+    expect(screen.getAllByText(/No long-term contract/i).length).toBeGreaterThan(0);
+
+    rerender(<PriceCard frequency={frequency} noGuarantee />);
+    expect(screen.queryByText(/guarantee|callbacks|no long.term contract|cancel anytime/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/Premium non-repellent/i)).toBeInTheDocument();
+    expect(screen.getByText(/Weather-aware timing/i)).toBeInTheDocument();
+  });
+
+  // Owner ruling 2026-09-27: each service carries its own terms, so a pest
+  // row beside a rodent row keeps its plan terms on a satisfaction estimate.
+  it('each service row states its own terms (server termsScope)', () => {
+    setGlassDefault(true);
+    const frequency = {
+      key: 'quarterly',
+      monthly: 90,
+      perServiceTreatments: [
+        { service: 'pest_control', label: 'Pest Control', displayPrice: 100, visitsPerYear: 4, termsScope: 'all' },
+        { service: 'rodent_bait', label: 'Rodent Bait Stations', displayPrice: 40, visitsPerYear: 12, termsScope: 'satisfaction' },
+      ],
+    };
+    const { rerender } = render(<PriceCard frequency={frequency} guaranteeScope="satisfaction" />);
+    fireEvent(window, new Event('beforeprint'));
+    expect(screen.getByText(/unlimited free callbacks/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/money-back guarantee/i)).toHaveLength(1);
+
+    // An unstamped row follows the estimate; 'none' governs every row.
+    const unstamped = { ...frequency, perServiceTreatments: frequency.perServiceTreatments.map(({ termsScope, ...row }) => row) };
+    rerender(<PriceCard frequency={unstamped} guaranteeScope="satisfaction" />);
+    expect(screen.queryByText(/callbacks|money-back|no long.term contract/i)).not.toBeInTheDocument();
+    rerender(<PriceCard frequency={frequency} guaranteeScope="none" />);
+    expect(screen.queryByText(/guarantee|callbacks|no long.term contract/i)).not.toBeInTheDocument();
+  });
+
+  it('neutralizes included commercial re-service while preserving the exterior-treatment scope', () => {
+    setGlassDefault(true);
+    setCommercialGlass(true);
+    const frequency = { key: 'monthly', monthly: 55, perServiceTreatments: [{
+      service: 'commercial_pest', label: 'Commercial Pest Control', displayPrice: 55, visitsPerYear: 12,
+    }] };
+    const { rerender } = render(<PriceCard frequency={frequency} />);
+    fireEvent(window, new Event('beforeprint'));
+    expect(screen.getByText(/re-service requests are included in the plan/i)).toBeInTheDocument();
+    rerender(<PriceCard frequency={frequency} noGuarantee />);
+    expect(screen.queryByText(/re-service requests are included|no long.term contract/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/Recurring exterior treatment/i)).toBeInTheDocument();
+  });
+
+  it('filters the baseline free re-service assurance while retaining ordinary pest scope', () => {
+    render(<PriceCard noGuarantee frequency={{
+      key: 'quarterly', monthly: 25,
+      perServiceTreatments: [
+        { service: 'pest_control', label: 'Pest Control', displayPrice: 100, visitsPerYear: 4 },
+      ],
+    }} />);
+
+    expect(screen.queryByText(/Free re-service between recurring visits/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/Exterior perimeter protection/i)).toBeInTheDocument();
+    expect(screen.getByText(/Interior service support/i)).toBeInTheDocument();
+  });
+});
 
 describe('PriceCard — narrow low-confidence commercial range', () => {
   it('renders a ±20% "confirmed on site" range for a single all-LOW line', () => {

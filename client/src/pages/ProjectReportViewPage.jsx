@@ -10,8 +10,9 @@ import { CustomerColumn, PublicStateCard } from '../components/brand';
 import Icon from '../components/Icon';
 import DocumentActionBar from '../components/DocumentActionBar';
 import { ProjectAskWaves, ProjectReviewAsk } from '../components/report/ProjectReportEngage';
+import PoisonControlCopy, { applicatorIdLine } from '../components/report/PoisonControlCopy';
 import { useGlassSurface } from '../glass/glass-engine';
-import { WAVES_FDACS_LICENSE_NUMBER } from '../constants/business';
+import { WAVES_FDACS_LICENSE_NUMBER, WAVES_PRODUCTS_SAFETY_URL } from '../constants/business';
 import { INTERNAL_FINDING_KEYS } from '../lib/wdoReportFields';
 
 /**
@@ -382,6 +383,9 @@ export default function ProjectReportViewPage() {
   // PDF is a server-side artifact linked below, never rendered here.)
   const isCertificate = data?.projectType === 'pre_treatment_termite_certificate';
   const isPaperDocument = isCertificate || data?.projectType === 'wdo_inspection';
+  // The applicator is the tech who PERFORMED the linked visit, which can
+  // differ from the project's creator (technicianName) — Codex r2 #5032.
+  const applicatorLine = applicatorIdLine(data?.applicatorName || data?.technicianName, data?.applicatorFdacsId);
   const glassActive = !isPaperDocument;
   useGlassSurface(glassActive);
 
@@ -787,10 +791,35 @@ export default function ProjectReportViewPage() {
           </div>
         )}
 
+        {/* The server's verdict (projectPoisonControl): the canonical typed
+            treatment evidence for the visit or its follow-up, or a rodent
+            bait-station visit — never the WDO / certificate documents. */}
+        {data.poisonControl === true && (
+          <div data-glass="card" data-testid="project-poison-control" style={{ ...cardStyle, marginTop: 16 }}>
+            <div data-gt="eyebrow" style={{ ...eyebrowStyle, marginBottom: 8 }}>
+              Poison Control
+            </div>
+            <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5 }}>
+              <PoisonControlCopy linkStyle={{ color: ESTIMATE_TEXT, fontWeight: 700, whiteSpace: 'nowrap' }} />
+            </div>
+            {applicatorLine && (
+              <div data-testid="project-applicator-id" style={{ fontSize: 14, color: ESTIMATE_TEXT, fontWeight: 600, lineHeight: 1.5, marginTop: 8 }}>
+                {applicatorLine}
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Closing strip — owner ruling 2026-07-16: every report ends with the
             service report's footer line, not the Text Us / Call Us CTA. */}
         <footer style={{ marginTop: 20, padding: '16px 0', fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.6, textAlign: 'center' }}>
           Questions about today&apos;s service? Ask Waves in your portal or call {WAVES_PHONE_DISPLAY}.
+          {/* Owner ask 2026-09-28: every report links to the public Products &
+              Safety page; the closing strip renders on every project report. */}
+          {' '}
+          <a href={`${WAVES_PRODUCTS_SAFETY_URL}#safety-protocol`} target="_blank" rel="noopener noreferrer" style={{ color: ESTIMATE_TEXT, fontWeight: 700 }}>
+            See every product we use and our safety protocol
+          </a>.
           {' '}This report is provided for your records.
         </footer>
 

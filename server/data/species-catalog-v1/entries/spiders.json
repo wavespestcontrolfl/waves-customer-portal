@@ -16,7 +16,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "bd088ff0de9375d92e4edc6a34e592e18aabdd39dda312be7cb3eb47ce6d74c2"
     },
     "slug": "black-widow",
     "common_name": "Southern Black Widow",
@@ -41,7 +42,7 @@
       {
         "slug": "brown-widow",
         "difference": "Black widow is glossy black with a red hourglass; brown widow is tan-brown with an orange hourglass and a spiky, sandspur-like egg sac.",
-        "next_photo": "A close-up of the underside of the abdomen and any egg sac, from a few feet away.",
+        "next_photo": "From a safe distance, zoom in on the underside of the abdomen and any egg sac.",
         "photo_can_confirm": true
       }
     ],
@@ -128,7 +129,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "437cb0992328f8f8d7aa02ddcb1fc9b27caf068bd3cfa0d3311b89aef06a629b"
     },
     "slug": "brown-widow",
     "common_name": "Brown Widow",
@@ -151,7 +153,7 @@
       {
         "slug": "black-widow",
         "difference": "Brown widow is tan-brown with an orange hourglass and a spiky egg sac; black widow is glossy black with a red hourglass and a smooth egg sac.",
-        "next_photo": "A close-up of the underside of the abdomen and any egg sac, from a few feet away.",
+        "next_photo": "From a safe distance, zoom in on the underside of the abdomen and any egg sac.",
         "photo_can_confirm": true
       }
     ],
@@ -223,9 +225,7 @@
   },
   {
     "kind": "organism",
-    "aka": [
-      "Banana Spider"
-    ],
+    "aka": [],
     "stages": [
       "juvenile",
       "adult"
@@ -240,14 +240,14 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "50c97450fad095cca1d3a4506bf02d692aa02493d23eadf57f80f4427014449b"
     },
     "slug": "golden-silk-orbweaver",
     "common_name": "Golden Silk Orb-weaver",
     "aliases": [
       "golden silk orbweaver",
-      "golden silk spider",
-      "banana spider"
+      "golden silk spider"
     ],
     "scientific_name": "Trichonephila clavipes",
     "rank": "species",
@@ -264,7 +264,7 @@
       {
         "slug": "yellow-garden-spider",
         "difference": "Golden silk orb-weaver has banded, tufted legs and a golden web; yellow garden spider has a bold black-and-yellow abdomen and a zigzag web decoration.",
-        "next_photo": "A photo of the whole web plus a close-up of the leg pattern.",
+        "next_photo": "From a safe distance, photograph the whole web, then zoom in on the leg pattern.",
         "photo_can_confirm": true
       }
     ],
@@ -346,7 +346,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "07787610ed58957a2d26f887429280889a93ecaf5243dd89df9b7142b9b1574f"
     },
     "slug": "huntsman-spider",
     "common_name": "Huntsman Spider",
@@ -370,7 +371,7 @@
       {
         "slug": "wolf-spider",
         "difference": "Huntsman spiders are flatter with crab-like forward legs; wolf spiders are stouter, hairier, and their eyes reflect flashlight light distinctly.",
-        "next_photo": "A photo of the leg posture from above, plus a flashlight eye-shine check at night.",
+        "next_photo": "From a safe distance, photograph the leg posture from above, plus a flashlight eye-shine check at night.",
         "photo_can_confirm": true
       }
     ],
@@ -451,7 +452,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "049cd71d3f2e7fd56b0a0030f0df75926cbc386853beaa298a6f419fd5326447"
     },
     "slug": "wolf-spider",
     "common_name": "Wolf Spider",
@@ -475,7 +477,7 @@
       {
         "slug": "huntsman-spider",
         "difference": "Wolf spiders are stouter and hairier with distinct flashlight eye-shine; huntsman spiders are flatter with crab-like forward-angled legs.",
-        "next_photo": "A photo of the leg posture from above, plus a flashlight eye-shine check at night.",
+        "next_photo": "From a safe distance, photograph the leg posture from above, plus a flashlight eye-shine check at night.",
         "photo_can_confirm": true
       }
     ],
@@ -537,6 +539,1236 @@
     "links": {
       "site_page": "/pest-identifier/wolf-spider/",
       "guides": []
+    }
+  },
+  {
+    "slug": "spinybacked-orbweaver",
+    "kind": "organism",
+    "common_name": "Spinybacked Orb-weaver",
+    "role": "beneficial",
+    "risk": "defensive",
+    "action": "leave_alone",
+    "season_basis": "observed",
+    "verification": [],
+    "aka": [
+      "crablike spiny orbweaver"
+    ],
+    "aliases": [
+      "spinybacked orbweaver",
+      "spiny orbweaver",
+      "gasteracantha cancriformis"
+    ],
+    "scientific_name": "Gasteracantha cancriformis",
+    "rank": "species",
+    "group": "spiders",
+    "subgroup": "orb-weavers",
+    "site_category": "Spiders",
+    "stages": [
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Small, flat, hard shell-like abdomen shaped like a crab, white or yellow with black spots",
+      "Six pointed spines sticking out around the edge of the abdomen",
+      "Black legs with small white spots, held out flat rather than curled",
+      "Neat, wheel-shaped web strung between shrubs, porch rails or garden edges"
+    ],
+    "look_alikes": [
+      {
+        "slug": "yellow-garden-spider",
+        "difference": "Spinybacked orbweaver is tiny with a flat, spiny, disc-shaped body; yellow garden spider is much larger with a smooth, elongated black-and-yellow abdomen",
+        "next_photo": "From a safe distance, zoom in on the abdomen shape — flat and spiny versus large, smooth and black-and-yellow.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "trees-shrubs",
+      "lanai-patio",
+      "lawn-garden"
+    ],
+    "looks": [
+      "spider"
+    ],
+    "verdict": "ally",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "Its venom is negligible to people; it could in theory bite if handled, but this isn't a spider that bites in practice.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      9,
+      10,
+      11
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A harmless, oddly spiky little spider that spins a neat web at the edge of the yard and helps clean up flying insects. Its unusual crab-like shape is easy to spot but nothing to worry about.",
+      "fact": "Those hard spines on its back are thought to make it harder for birds to swallow, an unusual defense for such a small spider."
+    },
+    "tech_notes": "Harmless web builder; no control action needed unless web placement is a nuisance at an entryway. Per BRIEF Revision 3 rule 5, safety.bites is true as a capability flag (it is not aggressive and essentially never bites people in practice).",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Gasteracantha_cancriformis"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Per audit item 44: safety.bites changed from false to true (capability, not danger, per rule 5); risk changed from low to defensive to match. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "bb6f146295358917747ff45d9facce2308a882613fad964857ac128c62c0e332"
+    }
+  },
+  {
+    "slug": "yellow-garden-spider",
+    "kind": "organism",
+    "common_name": "Yellow Garden Spider",
+    "role": "beneficial",
+    "risk": "defensive",
+    "action": "leave_alone",
+    "season_basis": "observed",
+    "verification": [],
+    "aka": [
+      "writing spider",
+      "zipper spider"
+    ],
+    "aliases": [
+      "yellow garden spider",
+      "writing spider",
+      "zipper spider",
+      "argiope aurantia"
+    ],
+    "scientific_name": "Argiope aurantia",
+    "rank": "species",
+    "group": "spiders",
+    "subgroup": "orb-weavers",
+    "site_category": "Spiders",
+    "stages": [
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Large spider with a bold black-and-yellow patterned abdomen and a mostly white front section",
+      "A dense zigzag band of silk (stabilimentum) running through the center of its web",
+      "Big, round web up to about two feet across, usually low in sunny garden edges or against eaves",
+      "Sits still in the center of its web most of the day rather than hiding"
+    ],
+    "look_alikes": [
+      {
+        "slug": "golden-silk-orbweaver",
+        "difference": "Yellow garden spider's web has a zigzag band through the center; golden-silk orb-weaver has a long banana-shaped abdomen and a plain web",
+        "next_photo": "From a safe distance, photograph the whole web showing whether there is a zigzag pattern through the middle.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "large",
+    "where": [
+      "lawn-garden",
+      "trees-shrubs",
+      "lanai-patio"
+    ],
+    "looks": [
+      "spider"
+    ],
+    "verdict": "ally",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "Bites only if handled and cause no more than brief, mild irritation for most people.",
+    "range": "common",
+    "active_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+    ],
+    "peak_months": [
+      8,
+      9,
+      10
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A large, strikingly patterned garden spider that stays put in its web all day and helps control flying pests. It looks intimidating but is not aggressive and is worth leaving in place at the edge of a garden bed.",
+      "fact": "The zigzag band woven into the center of its web gave it the old nickname 'writing spider,' though no one is fully sure what the band is for."
+    },
+    "tech_notes": "Beneficial, non-aggressive web builder; no control action needed unless the web itself is a walkway nuisance.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Argiope_aurantia"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "12f413be733a9a29f979368c5adcea10c97c793bca178b7f9ea024caf405d38b"
+    }
+  },
+  {
+    "slug": "tropical-orbweaver",
+    "kind": "organism",
+    "common_name": "Tropical Orb-weaver",
+    "role": "beneficial",
+    "risk": "defensive",
+    "action": "leave_alone",
+    "season_basis": "year_round",
+    "verification": [],
+    "aka": [
+      "flame-bellied orbweaver"
+    ],
+    "aliases": [
+      "tropical orbweaver",
+      "eriophora ravilla"
+    ],
+    "scientific_name": "Eriophora ravilla",
+    "rank": "species",
+    "group": "spiders",
+    "subgroup": "orb-weavers",
+    "site_category": "Spiders",
+    "stages": [
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Plump, dull brown to gray spider with a rounded, humped abdomen",
+      "Builds a large, complete round web fresh each evening, strung between eaves, trees or porch corners",
+      "Web is usually gone by morning, along with the spider, which hides nearby during the day",
+      "Most often noticed at night near porch lights, where the web catches flying insects"
+    ],
+    "look_alikes": [
+      {
+        "slug": "huntsman-spider",
+        "difference": "Tropical orb-weaver hangs still in a large round web it rebuilds each night; huntsman spider has no web and moves fast across walls and ceilings",
+        "next_photo": "From a safe distance, photograph whether the spider is sitting in a web or moving freely on a flat surface.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "medium",
+    "where": [
+      "lanai-patio",
+      "trees-shrubs",
+      "lights-windows"
+    ],
+    "looks": [
+      "spider"
+    ],
+    "verdict": "ally",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "Its venom is negligible to people; it could in theory bite if handled, but this isn't a spider that bites in practice.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A common nighttime spider that builds a fresh web across a porch or between trees every evening and takes it down before morning, catching plenty of flying insects along the way. It is one of the more startling-looking spiders people find lit up near a porch light, and it isn't dangerous.",
+      "fact": "It tears down and eats its own web most mornings, recycling the silk to build a brand new one the following night."
+    },
+    "tech_notes": "Harmless nocturnal web builder; rebuilds nightly and is typically gone/hidden by day. No control action needed unless web placement blocks a doorway. Per BRIEF Revision 3 rule 5, safety.bites is true as a capability flag (not aggressive, essentially never bites people in practice).",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN568"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Confirmed against UF/IFAS EDIS IN568 (Featured Creatures: Tropical Orb Weaver Spider): \"the web is constructed after dark, and the orb is taken down before dawn,\" and all stages occur throughout the year in Florida. The source doesn't specifically mention porch lights, but that detail follows from its documented night-flying-insect diet and isn't contradicted. Per audit item 44: safety.bites changed from false to true (capability, not danger, per rule 5); risk changed from low to defensive to match; copy's 'harmless' softened since bites is now true. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "823f96f14c2625f026f8cad46acf52a79bd5c8a14f298bc02ba8035a85ea5ccb"
+    }
+  },
+  {
+    "slug": "orchard-orbweaver",
+    "kind": "organism",
+    "common_name": "Orchard Orb-weaver",
+    "role": "beneficial",
+    "risk": "defensive",
+    "action": "leave_alone",
+    "season_basis": "year_round",
+    "verification": [],
+    "aka": [],
+    "aliases": [
+      "orchard orbweaver",
+      "orchard spider",
+      "leucauge argyrobapta"
+    ],
+    "scientific_name": "Leucauge argyrobapta",
+    "rank": "species",
+    "group": "spiders",
+    "subgroup": "orb-weavers",
+    "site_category": "Spiders",
+    "stages": [
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Small, slender, elongated abdomen, silvery-white with dark lines down the back and reddish-orange marks underneath",
+      "Legs are long, thin and green to greenish-black with darker bands at the joints",
+      "Web is held nearly flat and tilted, unlike most orb webs which hang straight up and down",
+      "Usually found low in shaded shrubs, under tree branches or along garden edges rather than in open sun"
+    ],
+    "look_alikes": [
+      {
+        "slug": "cellar-spider",
+        "difference": "Orchard orb-weaver spins a neat, flat, tilted web and has silvery-green markings; cellar spider is plain pale gray with a messy, shapeless web",
+        "next_photo": "From a safe distance, photograph the whole web showing whether it is a neat round shape or a tangled mess.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "trees-shrubs",
+      "lanai-patio",
+      "lawn-garden"
+    ],
+    "looks": [
+      "spider"
+    ],
+    "verdict": "ally",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "Its venom is negligible to people; it could in theory bite if handled, but this isn't a spider that bites in practice.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A small, delicate spider that builds a neatly tilted web low in shady shrubs and helps keep flying insect numbers down. It is not aggressive and isn't dangerous, and rarely comes to anyone's attention beyond its unusual sideways-tilted web.",
+      "fact": "Unlike most orb-weavers, it holds its web nearly flat and at an angle instead of straight up and down, which is an easy way to recognize its web even before spotting the spider."
+    },
+    "tech_notes": "Non-aggressive web builder; no control action needed. Per BRIEF Revision 3 rule 5, safety.bites is true as a capability flag (not aggressive, essentially never bites people in practice).",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN1243"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Source corrected to UF/IFAS EDIS IN1243, which is specifically about Leucauge argyrobapta (and the near-identical L. venusta) and confirms silvery-white abdomen with dark lines and reddish-orange ventral marks, green/greenish-black legs banded at the joints, and a mostly horizontal (under 45 degrees) web. It also distinguishes the truly different L. argyra (dorsal lines that turn inward 90 degrees, no reddish-orange spots), so traits are now correctly matched to this species rather than argyra. Per audit item 44: safety.bites changed from false to true (capability, not danger, per rule 5); risk changed from low to defensive to match; copy's 'harmless' softened since bites is now true. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "8eba656e446eb3b7e57120977592dda0fcd688ef9b2644d34a63adab07653ddf"
+    }
+  },
+  {
+    "slug": "green-lynx-spider",
+    "kind": "organism",
+    "common_name": "Green Lynx Spider",
+    "role": "beneficial",
+    "risk": "defensive",
+    "action": "leave_alone",
+    "season_basis": "observed",
+    "verification": [],
+    "aka": [],
+    "aliases": [
+      "green lynx spider",
+      "peucetia viridans"
+    ],
+    "scientific_name": "Peucetia viridans",
+    "rank": "species",
+    "group": "spiders",
+    "subgroup": null,
+    "site_category": "Spiders",
+    "stages": [
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Bright green body with fine black spines and specks, blending in with leaves and stems",
+      "A reddish patch and a few red spots between the eyes",
+      "No web; sits still on flowers and shrubs, then pounces on passing insects",
+      "Females guard a round, spiky egg sac on a plant stem and defend it aggressively if disturbed"
+    ],
+    "look_alikes": [
+      {
+        "slug": "crab-spider",
+        "difference": "Green lynx spider is bright green with black spines and pounces cat-like from a leaf; crab spider sits still and moves sideways like a crab",
+        "next_photo": "From a safe distance, zoom in on the front legs and body shape while the spider is on the plant.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "medium",
+    "where": [
+      "lawn-garden",
+      "trees-shrubs"
+    ],
+    "looks": [
+      "spider"
+    ],
+    "verdict": "ally",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": true,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "Rarely bites unless handled or its egg sac is disturbed; the bite is painful but not dangerous, with swelling that fades after a day or two.",
+    "range": "common",
+    "active_months": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "peak_months": [
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A bright green, plant-dwelling spider that hunts by ambush instead of building a web and helps keep garden pest insects in check. It is not aggressive toward people unless it is picked up or its egg sac is disturbed, so it is best left alone on the plant.",
+      "fact": "It hunts like a cat stalking prey, pouncing on insects from a still position on a leaf rather than trapping them in silk."
+    },
+    "tech_notes": "Beneficial ambush predator on garden plants; avoid handling, especially near an egg sac, but no control action is needed.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Peucetia_viridans"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "161b584518f55ba0e6575c87a1f634d1552c00a37602ce1339ffb8be4f199086"
+    }
+  },
+  {
+    "slug": "regal-jumping-spider",
+    "kind": "organism",
+    "common_name": "Regal Jumping Spider",
+    "role": "beneficial",
+    "risk": "defensive",
+    "action": "leave_alone",
+    "season_basis": "year_round",
+    "verification": [],
+    "aka": [],
+    "aliases": [
+      "regal jumping spider",
+      "phidippus regius"
+    ],
+    "scientific_name": "Phidippus regius",
+    "rank": "species",
+    "group": "spiders",
+    "subgroup": "jumping-spiders",
+    "site_category": "Spiders",
+    "stages": [
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Large, fuzzy spider with big, forward-facing eyes and an alert, curious posture",
+      "Iridescent green or blue fangs (chelicerae) that can flash in the light",
+      "Males are black with bold white markings; females come in shades of orange, tan, brown or gray",
+      "Moves in short, sudden hops instead of running or spinning a web to catch prey"
+    ],
+    "look_alikes": [
+      {
+        "slug": "wolf-spider",
+        "difference": "Jumping spider has large forward-facing eyes and hops, often 'looking' at the camera; wolf spider has smaller eyes and just runs fast",
+        "next_photo": "From a safe distance, zoom in straight-on at the face showing eye size and arrangement.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "medium",
+    "where": [
+      "lanai-patio",
+      "trees-shrubs",
+      "lawn-garden"
+    ],
+    "looks": [
+      "spider"
+    ],
+    "verdict": "ally",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "Bites only if handled roughly, and reactions are usually mild and short-lived for most people.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "The largest jumping spider in the eastern US, a harmless, curious hunter that stalks and pounces on insects instead of building a web. Many people find it endearing once they notice it seems to watch them back.",
+      "fact": "It has some of the sharpest vision of any spider, which is why it often turns to track a person's movement instead of fleeing."
+    },
+    "tech_notes": "Harmless, non-aggressive hunting spider; beneficial insect predator. No control action needed.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Phidippus_regius"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "5c9128c9440065b895c276a0d9c2e9fe71ca0a5aada46cd99715678922300a37"
+    }
+  },
+  {
+    "slug": "southern-house-spider",
+    "kind": "organism",
+    "common_name": "Southern House Spider",
+    "role": "harmless_visitor",
+    "risk": "defensive",
+    "action": "leave_alone",
+    "season_basis": "year_round",
+    "verification": [],
+    "aka": [],
+    "aliases": [
+      "southern house spider",
+      "kukulcania hibernalis"
+    ],
+    "scientific_name": "Kukulcania hibernalis",
+    "rank": "species",
+    "group": "spiders",
+    "subgroup": null,
+    "site_category": "Spiders",
+    "stages": [
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Females are dark brown to black, compact, and stay hidden in a crack or crevice with a small tangled web around the entrance",
+      "Males are tan to gray-brown with unusually long, thin legs and are the ones people find wandering indoors",
+      "No violin-shaped marking on the head, unlike a brown recluse",
+      "Web looks like fine, velcro-like fuzz around a gap in siding, brick or a window frame rather than a neat wheel shape"
+    ],
+    "look_alikes": [
+      {
+        "slug": "brown-recluse",
+        "difference": "House spider males have very long thin legs and no head marking; brown recluse (rare in Florida) has a violin-shaped mark on the head",
+        "next_photo": "From a safe distance, zoom in on the top of the head/body showing whether a violin-shaped marking is present.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "medium",
+    "where": [
+      "attic-walls",
+      "garage-storage",
+      "lanai-patio"
+    ],
+    "looks": [
+      "spider"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "Not considered medically dangerous, but it can bite if handled. Leave it undisturbed rather than picking it up.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "One of the most commonly misidentified spiders in Florida: wandering males are often mistaken for brown recluse spiders, which aren't established here. It can bite if handled, but it isn't considered medically dangerous — better left undisturbed than picked up.",
+      "fact": "Its long-legged wandering males are the ones usually found indoors and mistaken for a brown recluse, even though checking for a violin mark tells them apart."
+    },
+    "tech_notes": "Frequent 'brown recluse' misidentification; confirm absence of violin marking and note that L. reclusa is not established in Florida. Not considered medically dangerous; can bite if handled — advise leaving it undisturbed rather than handling. No control action needed beyond routine perimeter service if client wants fewer web sites.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Kukulcania_hibernalis"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Corrected per outside review: UF/IFAS reports bite cases for this species; bites is now true and copy no longer claims it can't break skin. Per audit item 49: tech_notes cited 'P. brunnea' alongside L. reclusa as if both were the recluse's scientific name; P. brunnea (Periplaneta brunnea) is actually the brown cockroach, unrelated to spiders -- removed the erroneous reference. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "7ecfa8ca251fc8148f6fbf8ad6ebc17da6178d78129df71cb73631fb4671aafa"
+    }
+  },
+  {
+    "slug": "brown-recluse",
+    "kind": "organism",
+    "common_name": "Brown Recluse",
+    "role": "health_pest",
+    "risk": "medical",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": [],
+    "aka": [
+      "fiddleback spider",
+      "violin spider"
+    ],
+    "aliases": [
+      "brown recluse",
+      "fiddleback spider",
+      "violin spider",
+      "loxosceles reclusa"
+    ],
+    "scientific_name": "Loxosceles reclusa",
+    "rank": "species",
+    "group": "spiders",
+    "subgroup": "medically-significant-spiders",
+    "site_category": "Spiders",
+    "stages": [
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Plain tan to dark brown spider with a darker violin-shaped marking on the head/shoulder area",
+      "Six eyes arranged in three pairs rather than the eight eyes most spiders have",
+      "Legs are plain, with no spines, bands or bright markings",
+      "Body about 1/4 to 3/8 inch long (about quarter-sized with legs spread), with legs attached close to the body"
+    ],
+    "look_alikes": [
+      {
+        "slug": "southern-house-spider",
+        "difference": "Wandering male southern house spiders are the most common recluse look-alike in Florida, with much longer thin legs and no violin marking on the head",
+        "next_photo": "A photo can't confirm a brown recluse; the eye pattern needs magnification. From a safe distance, never handle it; a technician can confirm on site.",
+        "photo_can_confirm": false
+      },
+      {
+        "slug": "yellow-sac-spider",
+        "difference": "Yellow sac spider is smaller, pale yellow-beige with darker leg tips and no violin marking; a genuine brown recluse has a distinct dark violin shape on the head",
+        "next_photo": "A photo can't confirm a brown recluse; the eye pattern needs magnification. From a safe distance, never handle it; a technician can confirm on site.",
+        "photo_can_confirm": false
+      }
+    ],
+    "size": "small",
+    "where": [
+      "garage-storage",
+      "attic-walls",
+      "living-areas"
+    ],
+    "looks": [
+      "spider"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": true,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "A confirmed bite can occasionally cause a slow-healing wound; see a doctor if a bite site worsens, blisters or does not start healing within a few days.",
+    "range": "rare",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "A spider that is not actually established in Florida outside rare, isolated cases, even though its name gets used constantly for skin wounds of unknown cause. A clear photo of the violin marking suggests the ID, but doesn't prove it — most turn out to be a harmless local spider once confirmed.",
+      "fact": "It has six eyes arranged in three pairs instead of the eight most spiders have, which is one of the most reliable ways experts confirm the species under magnification."
+    },
+    "tech_notes": "Not established in Florida; isolated indoor populations have occasionally turned up but do not spread. Most submitted 'recluse' photos in FL are Kukulcania hibernalis males or other species; confirm violin marking and 6-eye arrangement before treating as a confirmed ID. Medical dermonecrotic wounds are frequently misattributed to this species (often actually MRSA or other causes) -- do not diagnose, refer to a doctor.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Brown_recluse_spider"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Verdict/urgency are a deliberate judgment call: kept at watch/moderate rather than call/high specifically because the species is not established in Florida, to avoid fear-marketing a spider that is very unlikely to be the true culprit; owner should confirm this framing is what they want for this entry. Per audit item 46: traits[3] previously stated the Florida non-establishment fact, which isn't a visible trait; replaced with a size feature. The non-establishment fact is still covered in copy.what_it_means and tech_notes. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "1d262473bea4815dad79c948d06a868e4302f05c17ca0ddf55f251b6896e7a4d"
+    }
+  },
+  {
+    "slug": "yellow-sac-spider",
+    "kind": "organism",
+    "common_name": "Yellow Sac Spider",
+    "role": "health_pest",
+    "risk": "defensive",
+    "action": "specialist",
+    "season_basis": "year_round",
+    "verification": [],
+    "aka": [],
+    "aliases": [
+      "yellow sac spider",
+      "cheiracanthium inclusum"
+    ],
+    "scientific_name": "Cheiracanthium inclusum",
+    "rank": "species",
+    "group": "spiders",
+    "subgroup": "medical-sac-spiders",
+    "site_category": "Spiders",
+    "stages": [
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Small, pale yellow-beige spider with noticeably darker tips on the legs and jaws",
+      "A faint orange-brown stripe often runs down the center of the back",
+      "Builds a small, flat silk sac tucked into a ceiling-wall corner or under furniture to hide in during the day",
+      "Hunts actively at night rather than sitting in a web"
+    ],
+    "look_alikes": [
+      {
+        "slug": "brown-recluse",
+        "difference": "Yellow sac spider is pale yellow-beige with dark leg tips; a genuine brown recluse is duller brown with a dark violin mark on the head",
+        "next_photo": "From a safe distance, zoom in on the top of the head/body showing overall color and whether a violin-shaped marking is present.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "bedroom",
+      "living-areas",
+      "garage-storage"
+    ],
+    "looks": [
+      "spider"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": true,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "The most common indoor spider bite in many homes; usually mild pain and itching that clears up in about a week. See a doctor if a bite site worsens or does not improve.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "One of the most common spiders to actually bite people indoors, usually while wandering at night or hiding in a small silk sac tucked in a corner or under clutter. Bites are painful but generally minor and heal within about a week, and routine indoor treatment helps reduce numbers.",
+      "fact": "It is often unfairly blamed for wounds actually caused by a brown recluse, even though its own bite is far more common and generally much milder."
+    },
+    "tech_notes": "Frequently the true culprit behind bites blamed on brown recluse in areas where the recluse is not established. Locate/remove silk sacs in corners; treat per label for indoor populations.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Cheiracanthium_inclusum"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "bf7f5248282661b33b0aa94f1fdd0b4fc764b03192ba3dac5de3ebd2489be550"
+    }
+  },
+  {
+    "slug": "cellar-spider",
+    "kind": "organism",
+    "common_name": "Cellar Spider",
+    "role": "beneficial",
+    "risk": "defensive",
+    "action": "leave_alone",
+    "season_basis": "year_round",
+    "verification": [],
+    "aka": [
+      "daddy longlegs",
+      "daddy long legs"
+    ],
+    "aliases": [
+      "cellar spider",
+      "cellar spiders",
+      "daddy longlegs",
+      "daddy long legs",
+      "pholcidae"
+    ],
+    "scientific_name": "Pholcidae",
+    "rank": "family",
+    "group": "spiders",
+    "subgroup": null,
+    "site_category": "Spiders",
+    "stages": [
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Small, pale grayish body with extremely long, thin, delicate legs",
+      "Loose, messy, irregular web strung in a high corner, garage or closet rather than a neat wheel shape",
+      "Hangs upside down in the web and vibrates rapidly when disturbed",
+      "Often confused with the non-spider daddy longlegs (harvestman), which has no web and a single oval body"
+    ],
+    "look_alikes": [
+      {
+        "slug": "harvestman",
+        "difference": "Cellar spider has a small two-part body, long legs and sits in a messy web; harvestman has one fused oval body, no web, and just walks",
+        "next_photo": "From a safe distance, photograph whether the body looks like one oval blob or two separate parts, and whether there is a web.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "garage-storage",
+      "attic-walls",
+      "bathroom"
+    ],
+    "looks": [
+      "spider"
+    ],
+    "verdict": "ally",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "Its venom is not considered medically significant, and it very rarely bites people even if picked up.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A harmless, gentle spider often called a daddy long legs, at the center of an old myth that it's the world's most venomous spider with fangs too weak to break skin. Neither part holds up — its venom isn't medically significant, and it can bite on the rare occasion it's handled, with no real effect.",
+      "fact": "Testing has shown its venom is nowhere near strong enough to be dangerous, putting the old 'world's most venomous spider' myth firmly to rest."
+    },
+    "tech_notes": "Harmless and beneficial (preys on other spiders/insects); commonly confused with harvestman. No control action needed beyond routine web removal for tidiness.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Pholcidae"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "safety.bites changed to true to match the copy's own admission that it rarely bites — an earlier draft said both 'cannot bite' and 'does bite on rare occasion' in the same entry. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "18666f49c01a985a52513866a024b51001ec76b65f77fdf92ef8f593d2ac9f79"
+    }
+  },
+  {
+    "slug": "crab-spider",
+    "kind": "organism",
+    "common_name": "Crab Spider",
+    "role": "beneficial",
+    "risk": "defensive",
+    "action": "leave_alone",
+    "season_basis": "year_round",
+    "verification": [],
+    "aka": [],
+    "aliases": [
+      "crab spider",
+      "crab spiders",
+      "thomisidae"
+    ],
+    "scientific_name": "Thomisidae",
+    "rank": "family",
+    "group": "spiders",
+    "subgroup": null,
+    "site_category": "Spiders",
+    "stages": [
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Front two pairs of legs are noticeably longer and held out to the sides, crab-like",
+      "Moves sideways and backward as easily as forward, unlike most spiders",
+      "Colors range from white, pink and yellow to green or brown, and some species slowly shift color to match the flower they sit on",
+      "No web; sits motionless on a flower or leaf waiting to ambush visiting insects"
+    ],
+    "look_alikes": [
+      {
+        "slug": "green-lynx-spider",
+        "difference": "Crab spider sits still on a flower, sometimes matching its color, and moves sideways; green lynx spider is bright green and pounces actively",
+        "next_photo": "From a safe distance, zoom in on the front legs and body shape while the spider is on the plant.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "lawn-garden",
+      "trees-shrubs"
+    ],
+    "looks": [
+      "spider"
+    ],
+    "verdict": "ally",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "Its venom is negligible to people; it could in theory bite if handled, but it is not aggressive and this isn't a spider that bites in practice.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      3,
+      4,
+      5,
+      6,
+      9,
+      10
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A little ambush hunter that sits still on flowers waiting for pollinators and other insects to come within reach. It is not known to be harmful to people and is a normal part of a healthy garden.",
+      "fact": "Some species can slowly change color over several days to blend in with the exact flower they are hunting from."
+    },
+    "tech_notes": "Non-aggressive garden predator; no control action needed. Per BRIEF Revision 3 rule 5, safety.bites is true as a capability flag (not aggressive, essentially never bites people in practice).",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Thomisidae"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Per audit item 44: safety.bites changed from false to true (capability, not danger, per rule 5); risk changed from low to defensive to match. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "89057777d27b169ad28da2b06e8bedae246a2888560ae4b8d09f1198f9e736a5"
     }
   }
 ]

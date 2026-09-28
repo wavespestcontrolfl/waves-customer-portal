@@ -20,6 +20,10 @@ const { etDateString, etMonthStart, etMonthEnd, etQuarterStart, etYearStart, etW
 // can't sneak past. Add new names here as they come up.
 // Shared so the MRR breakdown + snapshot exclude the same accounts this tool does.
 const { INTERNAL_TEST_CUSTOMERS } = require('../internal-test-customers');
+const { NON_PERFORMED_VISIT_OUTCOMES } = require('../pest-pressure/first-visit');
+const { customerVisibleServiceRecordPredicate } = require('../pest-pressure/history-filter');
+const { CANONICAL_SIBLING } = require('../completion-record-invariants');
+const { REPORT_QUESTION_TOPICS } = require('../service-report/report-assistant');
 
 // Returns a Knex builder with the standard exclusion applied to a
 // query against the `estimates` table aliased as `e`. Use this on every
@@ -173,7 +177,7 @@ period can be: "this_week", "last_week", "this_month", "last_month", "this_quart
   },
   {
     name: 'get_report_engagement',
-    description: `Service-report engagement: of the completed-visit reports SENT to customers in a period (report email via the delivery queue and/or the completion SMS), how many were opened, the open rate, the median minutes from first send to first open, and what customers did inside the report (PDF download, photo opened, map interacted, re-entry timer viewed, review link clicked, referral clicked, add-on requested, follow-up requested, question asked). Split by service line (pest, lawn, tree_shrub, mosquito, termite, rodent, palm; 'unknown' for older records) plus a total row. Use for "are customers opening their reports?", "report open rate", "which service line reads its report least?", "how fast do people open the report?". Defaults to the last 30 days.`,
+    description: `Service-report engagement: of the completed-visit reports SENT to customers in a period (report email via the delivery queue and/or the completion SMS), how many were opened, the open rate, the median minutes from first send to first open, and what customers did inside the report (PDF download, photo opened, map interacted, re-entry timer viewed, review link clicked, referral clicked, add-on requested, follow-up requested, question asked). Split by service line (pest, lawn, tree_shrub, mosquito, termite, rodent, palm; 'unknown' for older records) plus a total row. Also returns a top-level reserviceWithin14Days: { pest, lawn } (each {visits, reserviced, rate_pct}, rate_pct in percent 0-100) — of the performed visits on that line in the period whose 14-day follow-up window has fully closed, how many got a same-customer same-line re-service 1-14 days later; this is independent of report sends, so it's always present even for a line with no reports sent in the period. Also returns questionTopics: { <service_line>: { <topic>: count } } — Waves AI questions customers asked on their reports in the period, by what the answer covered (reentry, watering, findings, next_steps, next_visit, applied, results, summary, unrouted; the question text itself is never stored). Use for "what are customers asking on their lawn reports?",  "are customers opening their reports?", "report open rate", "which service line reads its report least?", "how fast do people open the report?", "does the pest report content cut re-services?". Defaults to the last 30 days.`,
     input_schema: {
       type: 'object',
       properties: {
@@ -918,6 +922,181 @@ const REPORT_ACTION_EVENTS = [
   'report_question_asked',
 ];
 
+// 14-day re-service tracking (owner ask 2026-09-28): pest and lawn are the
+// only two lines with a re-service program. There is NO foreign key from a
+// re-service to the visit it follows up on, so a match is inferred: same
+// customer, same service line, 1-14 days after a performed visit.
+//
+// The unit is the VISIT (scheduled_services), and ONE canonical completion
+// record speaks for it (a record from before the booking back-link existed
+// is its own visit) — CANONICAL_SIBLING from completion-record-invariants
+// (the record pinned by the newest succeeded completion attempt, else the
+// newest sibling, any status), exactly as closeout-status.js resolves it:
+// service_records.scheduled_service_id is one-to-many, and siblings can
+// disagree. That record's FROZEN completion-time evidence decides everything,
+// never the booking row an admin can still edit after closeout
+// (20260830000051_repair_recap_callback_flags.js): is_callback or
+// service_data.completedServiceKey = re-service, service_line = the line
+// (no line = excluded, never guessed), service_date = the day, for the
+// period AND the 14-day window.
+//
+// Visits (the denominator) are PERFORMED, customer-visible visits only — a
+// completed canonical record, outcome not incomplete / declined /
+// inspection-only (the Pest Pressure prior-visit rule,
+// pest-pressure/first-visit.js). A re-service counts whatever its outcome or
+// record status (an incomplete callback is still a callback), and credits
+// only ONE visit: the nearest performed visit before it on that line.
+//
+// Right-censoring: a visit from the last 14 days hasn't had its full 14-day
+// follow-up window pass yet, so counting it as a "no re-service" visit
+// biases the rate low. A visit exactly 14 days ago still has its 14th
+// follow-up day running today, so `cutoff` (the caller's ET "today" minus
+// 15 days — visit day D counts only when D + 14 < today) is an ADDITIONAL
+// upper bound on the visit's own service date — never on the [from, to]
+// window itself — so only visits whose window has fully closed are counted
+// at all.
+const RESERVICE_LINES = ['pest', 'lawn'];
+
+// One classification of a completion record, shared by the linked
+// (canonical) and legacy (unlinked) branches of the query below.
+const recordFields = (alias) => `
+             ${alias}.service_date,
+             ${alias}.status AS record_status,
+             NULLIF(${alias}.service_line, '') AS record_line,
+             ${alias}.service_data->>'completedServiceKey' AS frozen_key,
+             -- COALESCE both sides: a record with no frozen key must read
+             -- false here, never NULL (NOT NULL would drop the visit).
+             (COALESCE(${alias}.is_callback, false) = true
+              OR COALESCE(${alias}.service_data->>'completedServiceKey', '') IN ('pest_re_service', 'lawn_re_service')) AS is_reservice,
+             COALESCE(${alias}.structured_notes->>'visitOutcome', '') AS visit_outcome,
+             (${customerVisibleServiceRecordPredicate(alias)}) AS customer_visible`;
+
+async function getReserviceWithin14Days(from, to, cutoff) {
+  // Every date that can matter: visits in [from, LEAST(to, cutoff)] and the
+  // re-services (and nearer later visits) up to 14 days past that end.
+  const { rows } = await db.raw(`
+    WITH candidates AS (
+      -- Bound the canonical-record resolution to bookings with a completion
+      -- record dated in the window. The canonical record is always one of a
+      -- booking's own records, so a booking whose canonical date is in the
+      -- window is never dropped here; the exact date checks come after.
+      SELECT DISTINCT s.scheduled_service_id AS id
+      FROM service_records s
+      WHERE s.scheduled_service_id IS NOT NULL
+        AND s.service_date >= ?::date AND s.service_date <= LEAST(?::date, ?::date) + 14
+    ),
+    completed AS (
+      SELECT ss.id, ss.customer_id, ${recordFields('srec')}
+      FROM candidates c
+      JOIN scheduled_services ss ON ss.id = c.id
+      CROSS JOIN LATERAL (${CANONICAL_SIBLING}) canonical
+      JOIN service_records srec ON srec.id = canonical.id
+      WHERE ss.status = 'completed'
+      UNION ALL
+      -- Legacy records predating the booking back-link (migration
+      -- 20260427000007 left them NULL, no backfill; their callback flag and
+      -- line were backfilled since): each is its own visit, classified by
+      -- the same fields.
+      SELECT legacy.id, legacy.customer_id, ${recordFields('legacy')}
+      FROM service_records legacy
+      WHERE legacy.scheduled_service_id IS NULL
+        AND legacy.service_date >= ?::date AND legacy.service_date <= LEAST(?::date, ?::date) + 14
+    ),
+    performed AS (
+      -- Every performed treatment, visible or not: the nearest-visit choice
+      -- below must see an internal-only treatment too, or its callback would
+      -- land on an older visit. Visibility limits only the denominator.
+      SELECT id, customer_id, service_date, record_line AS service_line, customer_visible
+      FROM completed
+      WHERE NOT is_reservice
+        AND record_status = 'completed'
+        AND visit_outcome NOT IN (${NON_PERFORMED_VISIT_OUTCOMES.map(() => '?').join(', ')})
+    ),
+    visits AS (
+      SELECT id, customer_id, service_date, service_line
+      FROM performed
+      WHERE customer_visible
+        AND service_date >= ?::date AND service_date <= LEAST(?::date, ?::date)
+    ),
+    reservices AS (
+      SELECT id, customer_id, service_date,
+             CASE
+               WHEN frozen_key = 'pest_re_service' THEN 'pest'
+               WHEN frozen_key = 'lawn_re_service' THEN 'lawn'
+               ELSE record_line
+             END AS service_line
+      FROM completed
+      WHERE is_reservice
+    ),
+    attributed AS (
+      -- Each re-service credits ONE visit: the nearest performed visit before
+      -- it on the same line (1-14 days), so two visits close together never
+      -- both claim one callback. A nearer visit after the period wins too, so
+      -- an in-period visit is never credited with someone else's callback.
+      SELECT DISTINCT ON (r.id) r.id AS reservice_id, pv.id AS visit_id
+      FROM reservices r
+      JOIN performed pv
+        ON pv.customer_id = r.customer_id
+       AND pv.service_line = r.service_line
+       AND r.service_date > pv.service_date
+       AND r.service_date <= pv.service_date + INTERVAL '14 days'
+      ORDER BY r.id, pv.service_date DESC, pv.id DESC
+    )
+    SELECT v.service_line,
+           COUNT(DISTINCT v.id)::int AS visits,
+           COUNT(DISTINCT att.visit_id)::int AS reserviced
+    FROM visits v
+    LEFT JOIN attributed att ON att.visit_id = v.id
+    WHERE v.service_line IN (${RESERVICE_LINES.map(() => '?').join(', ')})
+    GROUP BY v.service_line
+  `, [from, to, cutoff, from, to, cutoff, ...NON_PERFORMED_VISIT_OUTCOMES, from, to, cutoff, ...RESERVICE_LINES]);
+
+  const byLine = {};
+  for (const row of rows) {
+    const visits = parseInt(row.visits, 10) || 0;
+    const reserviced = parseInt(row.reserviced, 10) || 0;
+    byLine[row.service_line] = {
+      visits,
+      reserviced,
+      // Percent (0-100), like this module's other rates (view_rate,
+      // open_rate_pct); null when there were no visits to measure.
+      rate_pct: visits > 0 ? Math.round((reserviced / visits) * 100) : null,
+    };
+  }
+  return byLine;
+}
+
+// What customers ask Waves AI on their reports, by the topic each answer
+// came from (report-assistant.js REPORT_QUESTION_TOPICS). The ask route
+// never stores the question text, only its length and this key (owner
+// ruling 2026-09-28). Keyed by service line, independent of report sends;
+// questions asked before topics were recorded carry none and are left out.
+// Only the ask route writes these rows: the report page's public events
+// endpoint refuses this event (reports-public.js SERVER_ONLY_REPORT_EVENTS).
+// Older rows could carry any metadata, so only the fixed topic list is
+// counted and an arbitrary string never reaches the Intelligence Bar's model
+// as a "topic".
+async function getReportQuestionTopics(fromTs, toTs) {
+  const { rows } = await db.raw(`
+    SELECT COALESCE(NULLIF(srec.service_line, ''), 'unknown') AS service_line,
+           sre.metadata->>'topic' AS topic,
+           COUNT(*)::int AS questions
+    FROM service_report_events sre
+    JOIN service_records srec ON srec.id = sre.service_record_id
+    WHERE sre.event_name = 'report_question_asked'
+      AND sre.metadata->>'topic' IN (${REPORT_QUESTION_TOPICS.map(() => '?').join(', ')})
+      AND sre.occurred_at >= ? AND sre.occurred_at < ?
+    GROUP BY 1, 2
+    ORDER BY 1, 3 DESC
+  `, [...REPORT_QUESTION_TOPICS, fromTs, toTs]);
+  const byLine = {};
+  for (const row of rows) {
+    if (!byLine[row.service_line]) byLine[row.service_line] = {};
+    byLine[row.service_line][row.topic] = parseInt(row.questions, 10) || 0;
+  }
+  return byLine;
+}
+
 async function getReportEngagement(input = {}) {
   const now = new Date();
   // Inclusive lower bound: 29 days back + today = exactly 30 ET calendar days.
@@ -1027,16 +1206,38 @@ async function getReportEngagement(input = {}) {
   const totalRow = rows.find((r) => Number(r.is_total) === 1);
   const byLine = rows.filter((r) => Number(r.is_total) !== 1);
 
+  // Top-level, independent of the send/open cohort above: reserviceWithin14Days
+  // is keyed off visit scheduled_date, not report-send date, so it must not
+  // depend on a report having actually been sent for that line in the
+  // window — a line with visits but no sent reports would otherwise silently
+  // lose the metric. It uses the same [from, to] window the caller asked
+  // for. reserviceCutoff (today ET minus 15 days, from the same `now` this
+  // tool's own window defaults use — a visit exactly 14 days ago still has
+  // its 14th follow-up day running today) right-censors it: a visit whose
+  // 14-day follow-up window hasn't fully passed yet is excluded rather than
+  // counted as "no re-service".
+  const reserviceCutoff = etDateString(addETDays(now, -15));
+  const reserviceByLine = await getReserviceWithin14Days(from, to, reserviceCutoff);
+  const questionTopics = await getReportQuestionTopics(fromTs, toTs);
+  const reserviceWithin14Days = {};
+  for (const line of RESERVICE_LINES) {
+    reserviceWithin14Days[line] = reserviceByLine[line] || { visits: 0, reserviced: 0, rate_pct: null };
+  }
+
   return {
     period: { from, to },
     cohort: 'service_report_v1 records first sent to the customer (report email per the email ledger / delivery queue, or the completion SMS/MMS per the server-stamped send status) in the period',
     total: totalRow ? shape(totalRow) : shape({ sent: 0, opened: 0 }),
     by_service_line: byLine.map((r) => ({ service_line: r.service_line, ...shape(r) })),
+    reserviceWithin14Days,
+    questionTopics,
     notes: [
       'opened = the report was first viewed at or after the first send, per the customer-only page-load event or the first-view stamp. Staff previews with a staff JWT and portal static views never count, but a staff download through the plain customer PDF link stamps the first view (that link cannot carry the staff JWT), so a small share of opens can be internal QA. A view that predates every send does not count, and does not hide a later real open.',
       'median_minutes_to_open is over those post-send first opens',
       'action counts are distinct reports with at least one such event at or after the first send (pdf_downloaded shares the staff-download caveat above)',
       "service_line 'unknown' = records completed before the line was stamped on the record",
+      'questionTopics counts Waves AI questions asked on reports in the period, by service line, by the topic each answer came from (reentry, watering, findings, next_steps, next_visit, applied, results, summary, unrouted); the question text is never stored, and questions asked before topics were recorded are not counted',
+      'reserviceWithin14Days (pest and lawn only, top-level — independent of whether a report was sent) counts performed, customer-visible, non-re-service visits in the period that got a same-customer same-line re-service 1-14 days later (each re-service credits only its nearest earlier visit), classified from the canonical completion record of each visit (not the editable booking); rate_pct is a percent (0-100), null when there were no such visits; a visit is only counted once its 14-day follow-up window has fully closed (excluded until the day after)',
     ],
   };
 }

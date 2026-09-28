@@ -103,6 +103,13 @@ describe('SSR commercial proposal card (GATE_ESTIMATE_COMMERCIAL_GLASS)', () => 
     expect(html).not.toContain('&times;');
   });
 
+  test('the server marks an authored proposal terms-neutral: no re-service or no-contract promise (Codex #4982)', () => {
+    const html = renderPage('proposal-neutral-token', { ...BASE_ESTIMATE, noEstimateWideGuarantee: true }, { proposal: AUTHORED_PROPOSAL });
+    expect(html).toContain('What your commercial pest service includes');
+    expect(html).not.toContain('Tenant-reported pests handled between visits');
+    expect(html).not.toContain('No long-term contract &mdash;');
+  });
+
   test('commercial inclusions carry no residential guarantee claims', () => {
     const html = renderPage('proposal-claims-token', BASE_ESTIMATE, { proposal: AUTHORED_PROPOSAL });
     const included = html.slice(html.indexOf('What your commercial pest service includes'));

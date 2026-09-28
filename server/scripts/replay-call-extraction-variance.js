@@ -32,6 +32,15 @@ const FIELD_GROUPS = {
     'preferred_date_time',
     'proposed_start_at',
     'agent_committed_booking',
+    // The reschedule agreement and the appointment it moves (schema 1.16.0)
+    // decide whether the applier moves a visit, and which one.
+    'caller_accepted_slot',
+    'moved_appointment_date',
+    // The agreed slot's and moved appointment's verbatim words (schema
+    // 1.17.0) are what the reschedule applier checks against the evidence
+    // quotes, so a model that drifts on either must show in the replay.
+    'agreed_slot_words',
+    'moved_appointment_words',
     'is_spam',
     'is_voicemail',
     'matched_service',
@@ -406,7 +415,20 @@ function normalizeTime(value) {
   return normalizeString(s);
 }
 
+// agreed_slot_words is an object ({ day, hour, period }), not a scalar, so
+// it needs its own signature — the default normalizeString(value) below
+// would stringify it as "[object Object]" and never surface a real drift.
+function normalizeAgreedSlotWords(value) {
+  if (!value || typeof value !== 'object') return null;
+  const day = normalizeString(value.day);
+  const hour = normalizeString(value.hour);
+  const period = normalizeString(value.period);
+  if (!hour) return null;
+  return `${day || ''}|${hour}|${period || ''}`;
+}
+
 function normalizeField(field, value) {
+  if (field === 'agreed_slot_words') return normalizeAgreedSlotWords(value);
   if (field === 'address_line1') return normalizeString(normalizeStreetLine(value));
   if (field === 'phone') return normalizePhone(value);
   if (field === 'email') return normalizeString(value);
@@ -423,7 +445,7 @@ function normalizeField(field, value) {
   // means "not committed", identical to false — collapse them so replays
   // don't report a spurious high-severity delta on every pre-1.8.0 row
   // (codex P2). A genuine true↔false disagreement still surfaces.
-  if (field === 'agent_committed_booking') return normalizeBool(value) === true;
+  if (field === 'agent_committed_booking' || field === 'caller_accepted_slot') return normalizeBool(value) === true;
   if (field === 'preferred_date_time' || field === 'proposed_start_at') return normalizeDateTime(value);
   return normalizeString(value);
 }

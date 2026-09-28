@@ -545,6 +545,21 @@ describe('buildReportCrossSell', () => {
     expect(offerFingerprint({ ...base, option: { ...base.option, perVisit: 74.51 } })).not.toBe(offerFingerprint(base));
   });
 
+  test('an offer without a reason keeps its pre-V2 fingerprint byte-for-byte (gate-off compatibility)', () => {
+    const { offerFingerprint } = _private;
+    const base = {
+      serviceKey: 'lawn_care', label: 'Lawn Care', mode: 'priced', relationship: 'add',
+      option: { id: 'lawn-basic', label: 'Lawn Care', cadence: '9 applications', perVisit: 74.5, waveguardTier: 'silver', confidence: 'high' },
+    };
+    // The canonical string exactly as main built it before the V2 reason field.
+    const preV2 = ['lawn_care', 'Lawn Care', 'priced', 'add', 'lawn-basic', 'Lawn Care', '9 applications', '74.50', 'silver', 'high'].join('|');
+    const expected = require('crypto').createHash('sha256').update(preV2).digest('hex').slice(0, 32);
+    expect(offerFingerprint(base)).toBe(expected);
+    expect(offerFingerprint({ ...base, reason: null })).toBe(expected);
+    // A reason, when present, still moves the digest.
+    expect(offerFingerprint({ ...base, reason: 'We noted roach activity during this visit.' })).not.toBe(expected);
+  });
+
   test('customer with no recurring ownership at all gets the start-relationship copy stance', async () => {
     // One-time-treatment customer: no upcoming recurring rows, a report
     // identity that resolves no ownership family, no plan-rate rows. There
@@ -1106,6 +1121,24 @@ describe('buildReportCrossSell', () => {
     expect(optionIsPriceable({ perVisit: 42 })).toBe(true);
     expect(optionIsPriceable({ perVisit: 42, dueAtStart: 99 })).toBe(false);
     expect(optionIsPriceable({ perVisit: 42, oneTime: 150 })).toBe(false);
+  });
+
+  test('rodent bait setup fee (codex round-1 P1): unwaived — and priceability must demote — only when the customer has no OTHER WaveGuard-qualifying recurring service', () => {
+    // The estimator's rodent_bait_setup line is separate from the priced
+    // rodent_bait option (findLineItem only matches the target service's
+    // own line), so optionIsPriceable's oneTime/dueAtStart check never sees
+    // it — this is the independent check that must catch it instead.
+    const { rodentSetupFeeUnwaived } = _private;
+    // No other qualifying family modeled at all → fee applies (unwaived).
+    expect(rodentSetupFeeUnwaived('rodent_bait', [])).toBe(true);
+    // rodent_bait never waives its own setup fee.
+    expect(rodentSetupFeeUnwaived('rodent_bait', ['rodent_bait'])).toBe(true);
+    // ANY other qualifying recurring family (on the modeled baseline)
+    // waives it.
+    expect(rodentSetupFeeUnwaived('rodent_bait', ['pest_control'])).toBe(false);
+    expect(rodentSetupFeeUnwaived('rodent_bait', ['rodent_bait', 'pest_control'])).toBe(false);
+    // Never demotes a non-rodent target — this check is rodent_bait-only.
+    expect(rodentSetupFeeUnwaived('pest_control', [])).toBe(false);
   });
 
   test('a HISTORICAL report identity does not advance the ladder without billing corroboration', async () => {

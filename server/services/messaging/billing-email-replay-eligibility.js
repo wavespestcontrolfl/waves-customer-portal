@@ -144,6 +144,8 @@ async function balanceReminderVisitRefusal(meta, database) {
 }
 
 async function invoiceRefusal(meta, database) {
+  const sendRefusal = await require('./invoice-send-replay-eligibility').invoiceSendRefusal(meta, database);
+  if (sendRefusal) return sendRefusal;
   if (!meta.invoice_id) return null;
   if (INVOICE_GUARDS.has(meta.source_entry_point)) {
     const verdict = await require('./deferred-replay-registry').invoiceStillCollectible(meta, database);
@@ -182,6 +184,10 @@ async function collectionsPolicyRefusal(meta, database) {
 
 async function billingEmailReplayEligible(meta, database = db) {
   try {
+    if (meta?.source_entry_point === 'previsit_balance_reminder') {
+      const verdict = await require('../previsit-balance-reminder').previsitReplayQuoteEligible(meta, database);
+      return verdict.ok === true ? { eligible: true } : refused(verdict.supersessionReason || verdict.reason, verdict.retryable === true);
+    }
     const checks = [prechargeRefusal, expiryRefusal, balanceReminderVisitRefusal, invoiceRefusal, collectionsPolicyRefusal];
     for (const check of checks) {
       const refusal = await check(meta || {}, database);

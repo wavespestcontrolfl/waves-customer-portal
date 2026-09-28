@@ -86,6 +86,28 @@ test.each([
   expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
 });
 
+// codex #5018 r15 P2: this manual send races call-booking-link-text.js's
+// own worker (its final linkSentRecently check vs. this send both landing
+// as if the other never happened) — serialized behind the SAME phone-locked
+// handoff that lane's automated send already uses. Manual semantics stay
+// unconditional; only the ORDERING of a concurrent automated attempt is
+// affected.
+test('the manual send carries the same phone-locked handoff the automated worker uses', async () => {
+  await send();
+  expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ withSmsHandoff: expect.any(Function) }));
+  const { withSmsHandoff } = sendCustomerMessage.mock.calls[0][0];
+  const trx = { raw: jest.fn(async () => {}) };
+  db.transaction = jest.fn(async (fn) => fn(trx));
+  const dispatch = jest.fn(async (t) => ({ sent: true, sawTrx: t === trx }));
+  const result = await withSmsHandoff(dispatch);
+  expect(db.transaction).toHaveBeenCalled();
+  // lockSmsPhone's own real implementation (utils/customer-comms-lock.js) —
+  // the SAME advisory key applyInboundOptout takes for a STOP.
+  expect(trx.raw).toHaveBeenCalledWith(expect.stringContaining('pg_advisory_xact_lock'), [lead.phone]);
+  expect(dispatch).toHaveBeenCalledWith(trx);
+  expect(result).toEqual({ sent: true, sawTrx: true });
+});
+
 test('rejects a stale destination before transport', async () => {
   expect((await send({ message: 'Synthetic outreach', to: '+19415550199' })).status).toBe(409);
   expect(sendCustomerMessage).not.toHaveBeenCalled();

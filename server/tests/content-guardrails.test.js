@@ -215,6 +215,16 @@ describe('isFaqBlockedService (exported policy helper)', () => {
     }
   });
 
+  test('named lawn pests resolve to the blocked lawn-pest id (Chinch Bugs, Sod Webworms, Mole Crickets, Grubs, Armyworms)', () => {
+    for (const tag of ['Chinch Bugs', 'chinch-bug', 'Sod Webworms', 'Mole Crickets', 'grubs', 'Armyworms']) {
+      expect(guardrails.isFaqBlockedService(tag)).toBe(true);
+    }
+    // Every alias targets a real blocklist id.
+    for (const target of guardrails.BLOCKED_SERVICE_ALIASES.values()) {
+      expect(guardrails.FAQ_BLOCKED_SERVICES.has(target)).toBe(true);
+    }
+  });
+
   test('every canonical blog tag whose service is blocked resolves as blocked', () => {
     // BLOG_TAGS (blog-writer) ∩ FAQ-blocked services — every canonical-tag
     // form of a blocked service must be covered, alias or normalization.
@@ -2394,6 +2404,136 @@ describe('internal-route allowlist (UNKNOWN_INTERNAL_ROUTE)', () => {
     expect(blocked.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
     const allowed = guardrails.evaluate({ body }, { allowedInternalLinks: ['/lawn-care/fall-armyworm-outbreak/'] });
     expect(allowed.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(false);
+  });
+
+  test('related-post links (voice_constraints.related_posts) ride the same allowance, exactly the listed paths, never an invented sibling', () => {
+    const { deriveSyncGuardrailOptions } = require('../services/content/guardrail-options');
+    const brief = {
+      action_type: 'new_supporting_blog',
+      page_type: 'supporting-blog',
+      target_sites: ['wavespestcontrol.com'],
+      voice_constraints: {
+        related_posts_target_sites: ['wavespestcontrol.com'],
+        related_posts: [
+          { title: 'Fall Armyworm Outbreak', path: '/lawn-care/fall-armyworm-outbreak/', keyword: 'fall armyworm' },
+          { title: 'Chinch Bug Damage', path: '/lawn-care/chinch-bug-damage/', keyword: 'chinch bugs' },
+        ],
+      },
+    };
+    const options = deriveSyncGuardrailOptions({}, brief);
+    expect(options.relatedPostLinks).toEqual(expect.arrayContaining([
+      '/lawn-care/fall-armyworm-outbreak/', '/lawn-care/chinch-bug-damage/',
+    ]));
+    const body = 'See our guide on [fall armyworms](/lawn-care/fall-armyworm-outbreak/) for background.';
+    const linked = guardrails.evaluate({ body }, options);
+    expect(linked.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(false);
+    // A blog post NOT on the brief's related_posts list is still an invented
+    // route — the allowance is exactly the listed paths, never every blog post.
+    const invented = 'See our guide on [drainage tips](/lawn-care/never-seeded-this-post/) for background.';
+    const notLinked = guardrails.evaluate({ body: invented }, options);
+    expect(notLinked.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
+    const wrongHost = 'See [fall armyworms](https://www.sarasotaflpestcontrol.com/lawn-care/fall-armyworm-outbreak/).';
+    const wrongHostResult = guardrails.evaluate({ body: wrongHost }, options);
+    expect(wrongHostResult.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
+    const hubAbsolute = 'See [fall armyworms](https://www.wavespestcontrol.com/lawn-care/fall-armyworm-outbreak/).';
+    const hubResult = guardrails.evaluate({ body: hubAbsolute }, options);
+    expect(hubResult.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(false);
+    for (const unsafeAbsolute of [
+      'https://www.wavespestcontrol.com:8443/lawn-care/fall-armyworm-outbreak/',
+      'https://user:pass@www.wavespestcontrol.com/lawn-care/fall-armyworm-outbreak/',
+    ]) {
+      const unsafeResult = guardrails.evaluate({ body: `See [fall armyworms](${unsafeAbsolute}).` }, options);
+      expect(unsafeResult.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
+    }
+    const standardPort = guardrails.evaluate({
+      body: 'See [fall armyworms](https://www.wavespestcontrol.com:443/lawn-care/fall-armyworm-outbreak/).',
+    }, options);
+    expect(standardPort.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(false);
+    // No related_posts on the brief at all → no extra allowance, unchanged behavior.
+    const bare = deriveSyncGuardrailOptions({}, { action_type: 'new_supporting_blog', page_type: 'supporting-blog' });
+    expect(bare.allowedInternalLinks).toEqual([]);
+    expect(bare.relatedPostLinks).toEqual([]);
+  });
+
+  test('related-post allowances fail closed when the spoke kill switch changes the publish host', () => {
+    const { deriveSyncGuardrailOptions } = require('../services/content/guardrail-options');
+    const previous = process.env.SPOKE_BLOG_NETWORK_ENABLED;
+    process.env.SPOKE_BLOG_NETWORK_ENABLED = 'false';
+    try {
+      const brief = {
+        action_type: 'new_supporting_blog',
+        target_sites: ['sarasotaflpestcontrol.com'],
+        voice_constraints: {
+          related_posts_target_sites: ['sarasotaflpestcontrol.com'],
+          related_posts: [{ path: '/termite/spoke-only/' }],
+        },
+      };
+      const options = deriveSyncGuardrailOptions({}, brief);
+      // The path keeps its identity as a related post bound to its FROZEN
+      // (spoke) host — never the drifted hub host — and relatedPostLinksLive
+      // is false, so internalRouteFinding quarantines every reference to it
+      // rather than dropping it into the untracked-route bucket (Codex
+      // #4984 r6+ P1: emptying relatedPostLinks let a wrong-host or even a
+      // relative link past the host check entirely if check_existing_content
+      // separately re-admitted the same path into the generic allowlist).
+      expect(options.relatedPostHosts).toEqual(['sarasotaflpestcontrol.com']);
+      expect(options.relatedPostLinks).toEqual(['/termite/spoke-only/']);
+      expect(options.relatedPostLinksLive).toBe(false);
+      const result = guardrails.evaluate({ body: '[Spoke only](/termite/spoke-only/)' }, options);
+      expect(result.findings.some((finding) => finding.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
+      // The escape hatch this finding closed: check_existing_content had
+      // separately re-admitted this SAME path into the generic allowlist
+      // (draft.checked_existing_routes) — under the old "drop the path"
+      // behavior that would have silently satisfied the generic,
+      // host-blind allowedInternalLinks check once relatedPaths no longer
+      // recognized it. It must still P0 today.
+      const draft = { body: '[Spoke only](/termite/spoke-only/)', checked_existing_routes: ['/termite/spoke-only/'] };
+      const stillDenied = guardrails.evaluate(draft, options);
+      expect(stillDenied.findings.some((finding) => finding.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
+      // An absolute link on the CURRENT (drifted) hub host must also P0 —
+      // the path was only ever verified live on the frozen spoke.
+      const hubAbsolute = guardrails.evaluate(
+        { body: '[Spoke only](https://www.wavespestcontrol.com/termite/spoke-only/)' },
+        options
+      );
+      expect(hubAbsolute.findings.some((finding) => finding.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
+      // And even an absolute link on its OWN frozen spoke host must still
+      // P0 — a full mismatch quarantines the path everywhere, not just off
+      // the new host, since the brief itself no longer targets that spoke.
+      const frozenHostAbsolute = guardrails.evaluate(
+        { body: '[Spoke only](https://www.sarasotaflpestcontrol.com/termite/spoke-only/)' },
+        options
+      );
+      expect(frozenHostAbsolute.findings.some((finding) => finding.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
+    } finally {
+      if (previous === undefined) delete process.env.SPOKE_BLOG_NETWORK_ENABLED;
+      else process.env.SPOKE_BLOG_NETWORK_ENABLED = previous;
+    }
+  });
+
+  test('a related path that failed the publish-time liveness recheck is denied, even via the generic allowlist', () => {
+    const options = {
+      relatedPostLinks: ['/termite/swarmers/', '/termite/live-post/'],
+      relatedPostHosts: ['wavespestcontrol.com'],
+      relatedPostLinksLive: true,
+      staleRelatedPostLinks: ['/termite/swarmers/'],
+    };
+    const stale = guardrails.evaluate({ body: '[Swarmers](/termite/swarmers/)', checked_existing_routes: ['/termite/swarmers/'] }, options);
+    expect(stale.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
+    const live = guardrails.evaluate({ body: '[Live](/termite/live-post/)' }, options);
+    expect(live.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(false);
+  });
+
+  test('related-post paths match with their canonical case', () => {
+    const options = {
+      relatedPostLinks: ['/termite/swarmers/'],
+      relatedPostHosts: ['wavespestcontrol.com'],
+      relatedPostLinksLive: true,
+    };
+    const exact = guardrails.evaluate({ body: '[Swarmers](/termite/swarmers/)' }, options);
+    expect(exact.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(false);
+    const recased = guardrails.evaluate({ body: '[Swarmers](/Termite/Swarmers/)' }, options);
+    expect(recased.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
   });
 
   test('member-expression components are rejected (Codex round 2)', () => {
@@ -5837,5 +5977,94 @@ describe('offFootprintCityFinding — metro-named compounds (PR #3549 hook)', ()
   test('pest / material compounds are not footprint claims; a served-city claim about the metro still is', () => {
     expect(guardrails._internals.offFootprintCityFinding('Our lawn techs treat Columbus grass, San Jose scale on citrus, and Boston ferns on the lanai.')).toBeNull();
     expect(guardrails._internals.offFootprintCityFinding('We proudly serve Portland homes every week.')).not.toBeNull();
+  });
+});
+
+// Shared corpus with the Ask Waves intake chokepoint (see the fixture's
+// header): every entry must be flagged by the shared rule set here, and the
+// intake suite requires its local chokepoint to flag the same entries.
+describe('reentrySafetyClaimFinding — shared claim corpus', () => {
+  const { reentrySafetyClaimFinding } = require('../services/content/content-guardrails');
+  const { FLAGGED_CLAIMS } = require('./fixtures/safety-claim-corpus');
+  test.each(FLAGGED_CLAIMS)('%s', (text) => {
+    expect(reentrySafetyClaimFinding(text)).toBeTruthy();
+  });
+});
+
+// #4905 guard: reentrySafetyClaimFinding runs synchronously on every live
+// voice-call turn (relay-visit.js / relay-context.js / relay-booking.js) and
+// email draft (email-reply-claims-verifier.js), plus comms-lint.js. Its
+// multi-second stalls were V8 compiling the ~50 large patterns to native code
+// on their first runs in a process — once for one-byte text and again for
+// two-byte text (an em dash, é) — landing on the first live call to reach
+// each path. A single warm-up call never fixed it: the function returns at
+// its first claim, and a one-byte call never compiles the two-byte code. The
+// server now runs warmReentrySafetyPatterns() once at boot, before it
+// listens. The tests below guard the patterns being compiled once, the boot
+// warm-up being wired before listen, and first-sight latency after that
+// warm-up, timed in a FRESH process (in-worker timing is flaky on CI; see
+// ask-waves-latency-probe.js).
+describe('reentrySafetyClaimFinding avoids rebuilding RegExp objects per call (#4905)', () => {
+  const { reentrySafetyClaimFinding, _internals } = require('../services/content/content-guardrails');
+  const { REENTRY_SAFETY_PATTERNS } = _internals;
+
+  test('reuses the SAME compiled RegExp objects across calls instead of rebuilding them', () => {
+    expect(REENTRY_SAFETY_PATTERNS.length).toBeGreaterThan(40);
+    const before = REENTRY_SAFETY_PATTERNS.map((entry) => entry.re);
+    reentrySafetyClaimFinding('Those sound like ghost ants — tiny, pale, and they love kitchens.');
+    reentrySafetyClaimFinding('A totally different sentence about billing questions today.');
+    const after = REENTRY_SAFETY_PATTERNS.map((entry) => entry.re);
+    // Object IDENTITY, not just equal sources: a regression back to
+    // `new RegExp(src, 'gi')` per call would produce a DIFFERENT object with
+    // the same source, which `toBe` catches and `toEqual` would not.
+    before.forEach((re, i) => expect(after[i]).toBe(re));
+  });
+});
+
+describe('reentrySafetyClaimFinding worst-case latency (#4905)', () => {
+  const { execFileSync } = require('child_process');
+  const path = require('path');
+  // The issue's own first-seen inputs, plus em-dash/en-dash/ASCII-hyphen
+  // variants (normalizeHardCopyText folds all dash variants to ASCII) and a
+  // couple of Spanish replies — ordinary short text, not adversarial input.
+  const corpus = [
+    'Those sound like ghost ants — tiny, pale, and they love kitchens.',
+    'No worries — it is safe for kids.',
+    'Hello — world, this is a short line.',
+    'Hello - world, this is a short line.',
+    'Hello – world, this is a short line.',
+    'Great question! Our barrier treatment covers the yard every 21 days.',
+    'Ghost ants – tiny and pale – love sugary kitchen spills.',
+    'No hay problema — es completamente normal en esta época del año.',
+    'Los técnicos llegarán mañana — por favor mantenga a las mascotas adentro.',
+    'Su patio se ve genial - gracias por elegir Waves.',
+  ];
+  // A super-linear or never-tiers regex fails fast instead of hanging CI
+  // (the child is synchronous, so jest's own test timeout cannot interrupt
+  // it).
+  const timeInFreshProcess = () => {
+    const out = execFileSync(process.execPath, [path.join(__dirname, 'fixtures', 'reentry-claim-latency-probe.js')], {
+      input: JSON.stringify(corpus), encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, timeout: 30000,
+    });
+    return JSON.parse(out.split('\n').find((line) => line.startsWith('LATENCY ')).slice('LATENCY '.length));
+  };
+
+  // Best of three fresh processes per input: one sample can catch a CI
+  // scheduling spike; a real regression fails all three.
+  let ms = [];
+  beforeAll(() => {
+    const runs = [timeInFreshProcess(), timeInFreshProcess(), timeInFreshProcess()];
+    ms = corpus.map((_, i) => Math.min(...runs.map((run) => run[i])));
+  });
+
+  test('the server compiles the patterns at boot, before it listens', () => {
+    const src = require('fs').readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
+    const warm = src.indexOf('warmReentrySafetyPatterns()');
+    expect(warm).toBeGreaterThan(-1);
+    expect(src.indexOf('primeGuardrails.then(() => httpServer.listen(')).toBeGreaterThan(warm);
+  });
+
+  test.each(corpus.map((text, index) => [text, index]))('stays well under budget for %j', (text, index) => {
+    expect(ms[index]).toBeLessThan(50);
   });
 });

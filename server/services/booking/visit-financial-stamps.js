@@ -367,7 +367,47 @@ function pruneObsoleteFrozenAddonCaps(frozen, liveAddonIds, lineDiscountId) {
   return { ...frozen, addons: prunedAddons };
 }
 
+// A NEW booking row's primary-line discount, stamped from
+// buildAppointmentPricing's own result. The Schedule create
+// (admin-schedule POST /) and the Intelligence Bar's create_appointment
+// write the same columns through here (owner 2026-09-27: the Intelligence
+// Bar books like the Schedule screen).
+function stampPrimaryLineDiscount(target, pricing, cols) {
+  const discount = pricing?.primaryDiscount;
+  if (!target || !discount) return;
+  if (cols.line_discount_id && discount.discountId) target.line_discount_id = discount.discountId;
+  if (cols.line_discount_name && discount.discountName) target.line_discount_name = String(discount.discountName).slice(0, 200);
+  if (cols.line_discount_type && discount.discountType) target.line_discount_type = String(discount.discountType).slice(0, 30);
+  if (cols.line_discount_amount && discount.discountAmount != null) target.line_discount_amount = Number(discount.discountAmount);
+  if (cols.line_discount_dollars && discount.discountDollars != null) target.line_discount_dollars = Number(discount.discountDollars);
+}
+
+// The caps a CREATE-time booking priced against (GitHub Codex round 1,
+// PRRT_kwDOR3YQi86kllyD): pricing.primaryDiscount / pricing.addonLines[i]
+// .discount already carry the catalog's max_discount_dollars, resolved
+// live once per request by resolveLineDiscount — the SAME set every
+// seeded child/booster in this request shares (a due-add-on subset never
+// changes which catalog cap a given discount_id maps to), so one snapshot
+// built here is reused across the parent + every child/booster's own
+// stampPricingRegimeMarker call, matching resolveStoredDiscountCaps'
+// { line, addons } shape exactly.
+function capsSnapshotFromPricing(pricing) {
+  const addons = {};
+  for (const line of pricing?.addonLines || []) {
+    if (line.discount?.discountId != null) addons[line.discount.discountId] = line.discount.maxDiscountDollars ?? null;
+  }
+  // Round 4: the line slot is keyed to its own discount id (matching
+  // resolveStoredDiscountCaps' { id, cap } shape) — see that function's
+  // own comment for why a bare cap number is no longer trustworthy.
+  return {
+    line: { id: pricing?.primaryDiscount?.discountId ?? null, cap: pricing?.primaryDiscount?.maxDiscountDollars ?? null },
+    addons,
+  };
+}
+
 module.exports = {
+  stampPrimaryLineDiscount,
+  capsSnapshotFromPricing,
   applyDiscount,
   copyLineDiscountFields,
   copyAppointmentDiscountFields,
