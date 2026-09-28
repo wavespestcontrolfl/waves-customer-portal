@@ -1059,13 +1059,43 @@ async function runSweepInner() {
   };
 }
 
+// Runtime reconciliation for accepts nobody stamped (Codex r15 P1 on PR
+// #5021): the stamp migrations run in Railway's pre-deploy phase while the
+// previous app version still serves, so a multi-program accept on an old
+// pod after the rerun finished has no first_application_invoice_id and
+// would be invisible to this sweep AND to the stamped completion lookup
+// forever. Every tick therefore first re-runs the exact, never-overwriting
+// backfill over recent invoices. Bounded (RECENT_STAMP_RECONCILE_DAYS) so it
+// stays cheap; logs only when it actually stamps; a failure here never
+// blocks the sweep itself (the sweep still evaluates every already-stamped
+// group), it is logged and retried next tick.
+const RECENT_STAMP_RECONCILE_DAYS = 14;
+async function reconcileRecentUnstampedAccepts(conn = db) {
+  try {
+    const { backfillFirstApplicationInvoiceStamps } = require('./estimate-first-application-invoice');
+    const result = await backfillFirstApplicationInvoiceStamps(conn, { sinceDays: RECENT_STAMP_RECONCILE_DAYS });
+    if (result?.stamped) {
+      logger.info(`[first-application-sibling-split] reconciliation stamped ${result.stamped} recent combined-invoice member row(s) that no accept path had stamped (${result.ambiguous || 0} ambiguous left for hand review)`);
+    }
+    return result;
+  } catch (err) {
+    logger.warn(`[first-application-sibling-split] recent-accept stamp reconciliation failed (sweep continues): ${err?.message || err}`);
+    return null;
+  }
+}
+
 async function runFirstApplicationSiblingSplitSweep() {
   const { runExclusive } = require('../utils/cron-lock');
-  return runExclusive('first-application-sibling-split-sweep', runSweepInner);
+  return runExclusive('first-application-sibling-split-sweep', async () => {
+    await reconcileRecentUnstampedAccepts();
+    return runSweepInner();
+  });
 }
 
 module.exports = {
   runFirstApplicationSiblingSplitSweep,
+  reconcileRecentUnstampedAccepts,
+  RECENT_STAMP_RECONCILE_DAYS,
   dateOnly,
   isInvoiceSettled,
   isInvoicePaid,

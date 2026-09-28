@@ -628,6 +628,40 @@ describe('FIX 1 — standard recurring conversion is atomic with acceptance', ()
     );
   });
 
+  // Codex round-15 P1: an INVOICE-MODE accept with no pre-existing visit
+  // (acceptLinkedSsId null) mints its combined invoice BEFORE convertEstimate
+  // creates the anchor, so it was neither attached to that anchor nor
+  // stamped. After conversion the route must attach the invoice to the
+  // converter's firstScheduledServiceId and stamp the converter's members.
+  test('Codex round-15 P1: an invoice-mode, no-slot, multi-program accept attaches the invoice to the converter anchor and stamps', async () => {
+    resetStore(recurringPestEstimate({ id: 'est-im-1', token: 'tok-im-1-x0123456789', bill_by_invoice: true }));
+    EstimateConverter.convertEstimate.mockResolvedValueOnce({
+      customerId: 'cust-1',
+      tier: 'Bronze',
+      monthlyRate: 60,
+      firstScheduledServiceId: 'ss-im-1',
+      combinedInvoiceMemberIds: ['ss-im-2'],
+      recurringConversionSkipped: false,
+      welcomeSms: null,
+      membershipEmail: null,
+      deferredFollowUpReminderRows: [],
+    });
+
+    const response = await putAccept('tok-im-1-x0123456789');
+
+    expect(response.status).toBe(200);
+    expect(response.data.invoiceMode).toBe(true);
+    expect(InvoiceService.create).toHaveBeenCalledTimes(1);
+    const attach = db.__state.ops.find((op) => op.type === 'update' && op.table === 'invoices'
+      && op.data && op.data.scheduled_service_id === 'ss-im-1');
+    expect(attach).toBeTruthy();
+    expect(EstimateConverter.stampCombinedFirstApplicationInvoiceCoverage).toHaveBeenCalledTimes(1);
+    expect(EstimateConverter.stampCombinedFirstApplicationInvoiceCoverage).toHaveBeenCalledWith(
+      expect.anything(),
+      { invoiceId: 'inv-1', anchorId: 'ss-im-1', memberIds: ['ss-im-2'] },
+    );
+  });
+
   test('control: a single-program accept (no reserved multi-program anchor) never calls the stamper', async () => {
     resetStore(recurringPestEstimate({ id: 'est-single-1', token: 'tok-single-1-x0123456789' }));
     EstimateConverter.convertEstimate.mockResolvedValueOnce({

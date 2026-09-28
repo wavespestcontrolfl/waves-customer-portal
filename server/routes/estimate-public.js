@@ -12136,12 +12136,31 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         // single-program guard) when there is no sibling to cover, and does
         // nothing at all when invoice-mode wasn't used or the invoice-mode
         // invoice was never attached to a scheduled row.
-        if (invoiceModeResult && invoiceIdResult && acceptLinkedSsId) {
-          await EstimateConverter.stampCombinedFirstApplicationInvoiceCoverage(trx, {
-            invoiceId: invoiceIdResult,
-            anchorId: acceptLinkedSsId,
-            memberIds: standardConversionResult?.combinedInvoiceMemberIds,
-          });
+        //
+        // Codex r15 P1 (PR #5021): acceptLinkedSsId is deliberately null for
+        // a NEW slotId and for a no-slot estimate with no pre-existing
+        // visit, so the invoice-mode invoice above was minted with no
+        // scheduled_service_id at all and this stamp never ran; the
+        // converter then created the anchor (firstScheduledServiceId) and
+        // its same-day members, all invisible to the sweep and to the
+        // stamped completion lookup. Use the converter's anchor when the
+        // pre-conversion link is absent: attach the invoice to it (same
+        // column every other first-application mint site sets, same
+        // transaction) and stamp. A pre-linked invoice keeps its own anchor
+        // and this changes nothing for it.
+        if (invoiceModeResult && invoiceIdResult) {
+          const invoiceModeAnchorId = acceptLinkedSsId || standardConversionResult?.firstScheduledServiceId || null;
+          if (invoiceModeAnchorId) {
+            if (!acceptLinkedSsId) {
+              await trx('invoices').where({ id: invoiceIdResult }).whereNull('scheduled_service_id')
+                .update({ scheduled_service_id: invoiceModeAnchorId });
+            }
+            await EstimateConverter.stampCombinedFirstApplicationInvoiceCoverage(trx, {
+              invoiceId: invoiceIdResult,
+              anchorId: invoiceModeAnchorId,
+              memberIds: standardConversionResult?.combinedInvoiceMemberIds,
+            });
+          }
         }
         // Mint the standard setup/first-application invoice on THIS
         // transaction — the same invoice the converter's standard branch

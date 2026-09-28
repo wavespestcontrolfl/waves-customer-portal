@@ -3156,4 +3156,104 @@ suite('first-application-sibling-split — periodic sweep', () => {
       }));
     });
   });
+  // Codex round 15 (PR #5021): the last gates that still ignored the stamp.
+  describe('round 15: stamp-aware void guard, fail-closed replacement, runtime reconciliation, backfill ownership', () => {
+    const { combinedInvoiceVoidedWithoutLiveReplacement, siblingInvoiceCoverageVerdict } = require('../services/billing-lane');
+    const {
+      findFirstApplicationInvoiceForEstimateService, backfillFirstApplicationInvoiceStamps,
+    } = require('../services/estimate-first-application-invoice');
+    const { reconcileRecentUnstampedAccepts, RECENT_STAMP_RECONCILE_DAYS } = require('../services/first-application-sibling-split');
+    const MOVED = '2026-10-09';
+    const row = (trx, id) => trx('scheduled_services').where({ id }).first();
+    const anchorInvoice = (trx, ids, over = {}) => trx('invoices').insert({
+      id: randomUUID(), customer_id: ids.customerId, scheduled_service_id: ids.pestId,
+      token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`, status: 'sent',
+      title: 'First Service Application',
+      notes: `Auto-generated from accepted estimate #${ids.estimateId}. Customer selected pay per application — first application only.`,
+      line_items: JSON.stringify([{ description: 'First service application', quantity: 1, unit_price: 153.6, amount: 153.6 }]),
+      subtotal: 153.6, total: 153.6, ...over,
+    }).returning('id').then((r) => r[0].id || r[0]);
+
+    test('void guard: a STAMPED sibling moved to another day + voided combined invoice + no replacement → hold (the voided row)', () => rollbackTest(async (trx) => {
+      const ids = await fixture(trx);
+      await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: MOVED });
+      await trx('invoices').where({ id: ids.invoiceId }).update({ status: 'void' });
+      const held = await combinedInvoiceVoidedWithoutLiveReplacement(await row(trx, ids.lawnId), trx);
+      expect(held?.id).toBe(ids.invoiceId);
+      // and the ordinary lookup (void-excluded) finds nothing — the guard is the fallback
+      expect((await findFirstApplicationInvoiceForEstimateService(await row(trx, ids.lawnId), trx)).invoice).toBeNull();
+    }));
+
+    test('void guard: same shape + a RECOGNIZED live replacement on the anchor → no hold (the replacement governs)', () => rollbackTest(async (trx) => {
+      const ids = await fixture(trx);
+      await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: MOVED });
+      await trx('invoices').where({ id: ids.invoiceId }).update({ status: 'void' });
+      const replacementId = await anchorInvoice(trx, ids);
+      expect(await combinedInvoiceVoidedWithoutLiveReplacement(await row(trx, ids.lawnId), trx)).toBeNull();
+      // the lookup sees the recognized replacement through the stamped anchor
+      expect((await findFirstApplicationInvoiceForEstimateService(await row(trx, ids.lawnId), trx)).invoice?.id).toBe(replacementId);
+    }));
+
+    test('fail closed: a RENAMED (unrecognized) live invoice on the anchor is neither coverage nor "none" — the guard holds and the verdict is needs_review', () => rollbackTest(async (trx) => {
+      const ids = await fixture(trx);
+      await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: MOVED });
+      await trx('invoices').where({ id: ids.invoiceId }).update({ status: 'void' });
+      await anchorInvoice(trx, ids, { title: 'Custom invoice title', notes: 'Renamed by the office, nothing recognizable.' });
+      const lawn = await row(trx, ids.lawnId);
+      expect((await findFirstApplicationInvoiceForEstimateService(lawn, trx)).invoice).toBeNull();
+      expect((await combinedInvoiceVoidedWithoutLiveReplacement(lawn, trx))?.id).toBe(ids.invoiceId);
+      const verdict = await siblingInvoiceCoverageVerdict(lawn, trx);
+      expect(verdict.status).toBe('needs_review');
+    }));
+
+    test('void guard: an UNSTAMPED moved sibling keeps the legacy date-only behaviour (nothing found)', () => rollbackTest(async (trx) => {
+      const ids = await fixture(trx, { stamp: false });
+      await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: MOVED });
+      await trx('invoices').where({ id: ids.invoiceId }).update({ status: 'void' });
+      expect(await combinedInvoiceVoidedWithoutLiveReplacement(await row(trx, ids.lawnId), trx)).toBeNull();
+    }));
+
+    test('void guard: a stamped sibling whose row was read with a narrow select still holds (fallback stamp read)', () => rollbackTest(async (trx) => {
+      const ids = await fixture(trx);
+      await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: MOVED });
+      await trx('invoices').where({ id: ids.invoiceId }).update({ status: 'void' });
+      const narrow = await trx('scheduled_services').where({ id: ids.lawnId })
+        .first('id', 'customer_id', 'source_estimate_id', 'scheduled_date');
+      expect(narrow.first_application_invoice_id).toBeUndefined();
+      expect((await combinedInvoiceVoidedWithoutLiveReplacement(narrow, trx))?.id).toBe(ids.invoiceId);
+    }));
+
+    test('runtime reconciliation: an accept nobody stamped (old pod during cutover) is stamped by the sweep tick and then alerts when it diverges', () => rollbackTest(async (trx) => {
+      const ids = await fixture(trx, { stamp: false });
+      expect((await row(trx, ids.lawnId)).first_application_invoice_id).toBeNull();
+      const result = await reconcileRecentUnstampedAccepts(trx);
+      expect(RECENT_STAMP_RECONCILE_DAYS).toBe(14);
+      expect(result.stamped).toBeGreaterThanOrEqual(2);
+      expect((await row(trx, ids.pestId)).first_application_invoice_id).toBe(ids.invoiceId);
+      expect((await row(trx, ids.lawnId)).first_application_invoice_id).toBe(ids.invoiceId);
+      await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: MOVED });
+      const [outcome] = await sweepOnce(trx, ids.estimateId);
+      expect(outcome.action).toBe('alerted');
+      expect(await readBell(trx, DEDUPE_KEY(ids.estimateId, ids.invoiceId, [ids.lawnId]))).toBeTruthy();
+    }));
+
+    test('runtime reconciliation: the sinceDays bound leaves an OLD unstamped invoice alone (the one-time migrations own history)', () => rollbackTest(async (trx) => {
+      const ids = await fixture(trx, { stamp: false });
+      const old = new Date(Date.now() - 40 * 86400000);
+      await trx('invoices').where({ id: ids.invoiceId }).update({ created_at: old });
+      await trx('scheduled_services').whereIn('id', [ids.pestId, ids.lawnId]).update({ created_at: old });
+      await backfillFirstApplicationInvoiceStamps(trx, { sinceDays: RECENT_STAMP_RECONCILE_DAYS });
+      expect((await row(trx, ids.lawnId)).first_application_invoice_id).toBeNull();
+      await backfillFirstApplicationInvoiceStamps(trx);
+      expect((await row(trx, ids.lawnId)).first_application_invoice_id).toBe(ids.invoiceId);
+    }));
+
+    test('backfill ownership: an old REFUNDED invoice attached to the anchor is dead, not a live claim — the pair is still stamped', () => rollbackTest(async (trx) => {
+      const ids = await fixture(trx, { stamp: false });
+      await anchorInvoice(trx, ids, { status: 'refunded', title: 'Old refunded visit invoice', notes: 'refunded' });
+      await backfillFirstApplicationInvoiceStamps(trx);
+      expect((await row(trx, ids.pestId)).first_application_invoice_id).toBe(ids.invoiceId);
+      expect((await row(trx, ids.lawnId)).first_application_invoice_id).toBe(ids.invoiceId);
+    }));
+  });
 });
