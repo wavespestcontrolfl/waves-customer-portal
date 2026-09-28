@@ -607,6 +607,11 @@ describe('FIX 1 — standard recurring conversion is atomic with acceptance', ()
       tier: 'Bronze',
       monthlyRate: 60,
       firstScheduledServiceId: 'ss-multi-1',
+      // Codex round-12 P2: convertEstimate's own additive field — the
+      // promoted same-trip sibling ids it actually inserted for this
+      // accept, threaded straight through to the stamper's memberIds
+      // rather than reconstructed here or by the stamper itself.
+      promotedSameTripMemberIds: ['ss-multi-2'],
       recurringConversionSkipped: false,
       welcomeSms: null,
       membershipEmail: null,
@@ -619,7 +624,7 @@ describe('FIX 1 — standard recurring conversion is atomic with acceptance', ()
     expect(EstimateConverter.stampCombinedFirstApplicationInvoiceCoverage).toHaveBeenCalledTimes(1);
     expect(EstimateConverter.stampCombinedFirstApplicationInvoiceCoverage).toHaveBeenCalledWith(
       expect.anything(), // the accept's own trx — same transaction the invoice itself commits in
-      { invoiceId: 'inv-1', anchorId: 'ss-multi-1' },
+      { invoiceId: 'inv-1', anchorId: 'ss-multi-1', memberIds: ['ss-multi-2'] },
     );
   });
 

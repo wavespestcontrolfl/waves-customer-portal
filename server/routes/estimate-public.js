@@ -11863,13 +11863,19 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         // invoice-mode's own mint time — the stamp can only run here, after
         // the siblings are in place, keyed off the invoice already minted
         // (invoiceIdResult) and the same reserved anchor
-        // (acceptLinkedSsId) that invoice was attached to. No-ops (via the
-        // stamper's own single-program guard) when there is no sibling to
-        // cover, and does nothing at all when invoice-mode wasn't used or
-        // the invoice-mode invoice was never attached to a scheduled row.
+        // (acceptLinkedSsId) that invoice was attached to. memberIds is
+        // convertEstimate's own additive promotedSameTripMemberIds — the
+        // ids it just promoted for THIS accept (Codex round-12 P2) — never
+        // a same-date guess that could also catch an unrelated,
+        // pre-existing same-day program. No-ops (via the stamper's own
+        // single-program guard) when there is no sibling to cover, and does
+        // nothing at all when invoice-mode wasn't used or the invoice-mode
+        // invoice was never attached to a scheduled row.
         if (invoiceModeResult && invoiceIdResult && acceptLinkedSsId) {
           await EstimateConverter.stampCombinedFirstApplicationInvoiceCoverage(trx, {
-            invoiceId: invoiceIdResult, anchorId: acceptLinkedSsId,
+            invoiceId: invoiceIdResult,
+            anchorId: acceptLinkedSsId,
+            memberIds: standardConversionResult?.promotedSameTripMemberIds,
           });
         }
         // Mint the standard setup/first-application invoice on THIS
@@ -12048,12 +12054,17 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             // skipSetupInvoice above) and, unlike estimate-converter.js's
             // own standard branch, never called the stamper — so a
             // multi-program public acceptance was invisible to the
-            // sibling-split sweep. Same transaction the invoice itself
-            // commits in; no-ops (via the stamper's own single-program
-            // guard) when only one program shares this invoice.
+            // sibling-split sweep. memberIds is convertEstimate's own
+            // additive promotedSameTripMemberIds — the ids it actually
+            // promoted for THIS accept (Codex round-12 P2), never a
+            // same-date guess. Same transaction the invoice itself commits
+            // in; no-ops (via the stamper's own single-program guard) when
+            // only one program shares this invoice.
             if (attachScheduledServiceId) {
               await EstimateConverter.stampCombinedFirstApplicationInvoiceCoverage(trx, {
-                invoiceId: inv.id, anchorId: attachScheduledServiceId,
+                invoiceId: inv.id,
+                anchorId: attachScheduledServiceId,
+                memberIds: standardConversionResult?.promotedSameTripMemberIds,
               });
             }
             // Immutable ledger for the setup this invoice bills (codex #3591

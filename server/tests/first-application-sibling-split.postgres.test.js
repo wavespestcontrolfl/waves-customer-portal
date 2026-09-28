@@ -61,7 +61,7 @@ suite('first-application-sibling-split — periodic sweep', () => {
     try { await fn(trx); } finally { await trx.rollback(); }
   }
 
-  const DEDUPE_KEY = (estimateId, siblingIds) => `first_application_sibling_divergence:${estimateId}:${[...siblingIds].map(String).sort().join(',')}`;
+  const DEDUPE_KEY = (estimateId, stampedInvoiceId, siblingIds) => `first_application_sibling_divergence:${estimateId}:${stampedInvoiceId}:${[...siblingIds].map(String).sort().join(',')}`;
 
   // A reserved pest row (priced — the invoice-holder) + a promoted lawn
   // parent (unpriced sibling), both accepted off the same estimate on the
@@ -170,7 +170,7 @@ suite('first-application-sibling-split — periodic sweep', () => {
     expect(lawn.estimated_price).toBeNull();
     expect(Number(invoice.total)).toBe(153.60);
 
-    const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
+    const dedupeKey = DEDUPE_KEY(ids.estimateId, ids.invoiceId, [ids.lawnId]);
     const bells = await trx('notifications').where({ recipient_type: 'admin', category: 'billing' })
       .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]);
     expect(bells).toHaveLength(1);
@@ -191,7 +191,7 @@ suite('first-application-sibling-split — periodic sweep', () => {
     await sweepOnce(trx, ids.estimateId);
     await sweepOnce(trx, ids.estimateId);
 
-    const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
+    const dedupeKey = DEDUPE_KEY(ids.estimateId, ids.invoiceId, [ids.lawnId]);
     const bells = await trx('notifications').where({ recipient_type: 'admin', category: 'billing' })
       .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]);
     expect(bells).toHaveLength(1);
@@ -201,7 +201,7 @@ suite('first-application-sibling-split — periodic sweep', () => {
     const ids = await fixture(trx);
     await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
     await sweepOnce(trx, ids.estimateId);
-    const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
+    const dedupeKey = DEDUPE_KEY(ids.estimateId, ids.invoiceId, [ids.lawnId]);
     expect((await readBell(trx, dedupeKey)).read_at).toBeNull();
 
     // The sibling moves back onto the anchor's day.
@@ -220,7 +220,7 @@ suite('first-application-sibling-split — periodic sweep', () => {
     const ids = await fixture(trx);
     await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
     await sweepOnce(trx, ids.estimateId);
-    const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
+    const dedupeKey = DEDUPE_KEY(ids.estimateId, ids.invoiceId, [ids.lawnId]);
     expect((await readBell(trx, dedupeKey)).read_at).toBeNull();
 
     await trx('invoices').where({ id: ids.invoiceId }).update({ status: 'paid' });
@@ -239,7 +239,7 @@ suite('first-application-sibling-split — periodic sweep', () => {
     const ids = await fixture(trx);
     await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
     await sweepOnce(trx, ids.estimateId);
-    const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
+    const dedupeKey = DEDUPE_KEY(ids.estimateId, ids.invoiceId, [ids.lawnId]);
     expect((await readBell(trx, dedupeKey)).read_at).toBeNull();
 
     await trx('invoices').where({ id: ids.invoiceId }).update({ status: 'processing' });
@@ -272,7 +272,7 @@ suite('first-application-sibling-split — periodic sweep', () => {
     const result = await evaluateEstimateCandidates(trx, staleGroup);
     expect(result.action).toBe('cleared');
     expect(result.reason).toBe('invoice_settled');
-    const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
+    const dedupeKey = DEDUPE_KEY(ids.estimateId, ids.invoiceId, [ids.lawnId]);
     expect(await readBell(trx, dedupeKey)).toBeUndefined();
   }));
 
@@ -303,7 +303,7 @@ suite('first-application-sibling-split — periodic sweep', () => {
       const ids = await fixture(trx);
       await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
       await sweepOnce(trx, ids.estimateId); // raises the standing alert
-      const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
+      const dedupeKey = DEDUPE_KEY(ids.estimateId, ids.invoiceId, [ids.lawnId]);
       expect((await readBell(trx, dedupeKey)).read_at).toBeNull();
 
       const staleCandidates = await loadCandidates(trx); // still diverged in this snapshot
@@ -346,7 +346,7 @@ suite('first-application-sibling-split — periodic sweep', () => {
     const ids = await fixture(trx);
     await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
     await sweepOnce(trx, ids.estimateId);
-    const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
+    const dedupeKey = DEDUPE_KEY(ids.estimateId, ids.invoiceId, [ids.lawnId]);
     const firstBell = await readBell(trx, dedupeKey);
     expect(firstBell.read_at).toBeNull();
 
@@ -373,7 +373,7 @@ suite('first-application-sibling-split — periodic sweep', () => {
     const ids = await fixture(trx);
     await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
     await sweepOnce(trx, ids.estimateId);
-    const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
+    const dedupeKey = DEDUPE_KEY(ids.estimateId, ids.invoiceId, [ids.lawnId]);
     const firstBell = await readBell(trx, dedupeKey);
     expect(firstBell.read_at).toBeNull();
 
@@ -405,7 +405,7 @@ suite('first-application-sibling-split — periodic sweep', () => {
     const ids = await fixture(trx);
     await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
     await sweepOnce(trx, ids.estimateId);
-    const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
+    const dedupeKey = DEDUPE_KEY(ids.estimateId, ids.invoiceId, [ids.lawnId]);
     expect((await readBell(trx, dedupeKey)).read_at).toBeNull();
 
     // Office completes the instructed manual split: the sibling visit gets
@@ -481,7 +481,7 @@ suite('first-application-sibling-split — periodic sweep', () => {
     const ids = await fixture(trx);
     await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
     await sweepOnce(trx, ids.estimateId);
-    const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
+    const dedupeKey = DEDUPE_KEY(ids.estimateId, ids.invoiceId, [ids.lawnId]);
     const firstBell = await readBell(trx, dedupeKey);
     expect(firstBell.read_at).toBeNull();
 
@@ -501,7 +501,7 @@ suite('first-application-sibling-split — periodic sweep', () => {
     const ids = await fixture(trx);
     await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
     await sweepOnce(trx, ids.estimateId);
-    const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
+    const dedupeKey = DEDUPE_KEY(ids.estimateId, ids.invoiceId, [ids.lawnId]);
     const firstBell = await readBell(trx, dedupeKey);
     expect(firstBell.read_at).toBeNull();
 
@@ -521,7 +521,7 @@ suite('first-application-sibling-split — periodic sweep', () => {
     const ids = await fixture(trx);
     await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
     await sweepOnce(trx, ids.estimateId);
-    const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
+    const dedupeKey = DEDUPE_KEY(ids.estimateId, ids.invoiceId, [ids.lawnId]);
     const firstBell = await readBell(trx, dedupeKey);
     expect(firstBell.read_at).toBeNull();
 
@@ -567,7 +567,7 @@ suite('first-application-sibling-split — periodic sweep', () => {
     const ids = await fixture(trx);
     await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
     await sweepOnce(trx, ids.estimateId);
-    const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
+    const dedupeKey = DEDUPE_KEY(ids.estimateId, ids.invoiceId, [ids.lawnId]);
     const firstBell = await readBell(trx, dedupeKey);
     expect(firstBell.read_at).toBeNull();
 
@@ -633,7 +633,7 @@ suite('first-application-sibling-split — periodic sweep', () => {
       const ids = await fixture(trx);
       await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
       await sweepOnce(trx, ids.estimateId);
-      const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
+      const dedupeKey = DEDUPE_KEY(ids.estimateId, ids.invoiceId, [ids.lawnId]);
       expect((await readBell(trx, dedupeKey)).read_at).toBeNull();
 
       // The original combined invoice is voided and a live replacement is
@@ -666,7 +666,7 @@ suite('first-application-sibling-split — periodic sweep', () => {
       await trx('invoices').where({ id: ids.invoiceId }).update({ status: 'void' });
       await mintRecognizedReplacement(trx, { anchorId: ids.pestId, customerId: ids.customerId });
 
-      const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
+      const dedupeKey = DEDUPE_KEY(ids.estimateId, ids.invoiceId, [ids.lawnId]);
       const [alignedResult] = await sweepOnce(trx, ids.estimateId);
       expect(alignedResult.action).toBe('cleared');
       expect(await readBell(trx, dedupeKey)).toBeUndefined();
@@ -687,7 +687,7 @@ suite('first-application-sibling-split — periodic sweep', () => {
       const ids = await fixture(trx);
       await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
       await sweepOnce(trx, ids.estimateId);
-      const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
+      const dedupeKey = DEDUPE_KEY(ids.estimateId, ids.invoiceId, [ids.lawnId]);
       expect((await readBell(trx, dedupeKey)).read_at).toBeNull();
 
       await trx('invoices').where({ id: ids.invoiceId }).update({ status: 'void' });
@@ -702,7 +702,7 @@ suite('first-application-sibling-split — periodic sweep', () => {
       const ids = await fixture(trx);
       await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
       await sweepOnce(trx, ids.estimateId);
-      const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
+      const dedupeKey = DEDUPE_KEY(ids.estimateId, ids.invoiceId, [ids.lawnId]);
       expect((await readBell(trx, dedupeKey)).read_at).toBeNull();
 
       await trx('invoices').where({ id: ids.invoiceId }).update({ status: 'void' });
@@ -739,7 +739,7 @@ suite('first-application-sibling-split — periodic sweep', () => {
       const ids = await fixture(trx);
       await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
       await sweepOnce(trx, ids.estimateId);
-      const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
+      const dedupeKey = DEDUPE_KEY(ids.estimateId, ids.invoiceId, [ids.lawnId]);
       const firstBell = await readBell(trx, dedupeKey);
       expect(firstBell.read_at).toBeNull();
 
@@ -768,7 +768,7 @@ suite('first-application-sibling-split — periodic sweep', () => {
       const ids = await fixture(trx);
       await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
       await sweepOnce(trx, ids.estimateId);
-      const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
+      const dedupeKey = DEDUPE_KEY(ids.estimateId, ids.invoiceId, [ids.lawnId]);
 
       await trx('invoices').where({ id: ids.invoiceId }).update({ status: 'void' });
       const replacementId = await mintRecognizedReplacement(trx, { anchorId: ids.pestId, customerId: ids.customerId });
@@ -797,7 +797,7 @@ suite('first-application-sibling-split — periodic sweep', () => {
       const ids = await fixture(trx);
       await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
       await sweepOnce(trx, ids.estimateId);
-      const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
+      const dedupeKey = DEDUPE_KEY(ids.estimateId, ids.invoiceId, [ids.lawnId]);
 
       await trx('invoices').where({ id: ids.invoiceId }).update({ status: 'void' });
       const replacementId = await mintRecognizedReplacement(trx, { anchorId: ids.pestId, customerId: ids.customerId });
@@ -898,7 +898,7 @@ suite('first-application-sibling-split — periodic sweep', () => {
     await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
     const [alerted] = await sweepOnce(trx, ids.estimateId);
     expect(alerted.action).toBe('alerted');
-    const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
+    const dedupeKey = DEDUPE_KEY(ids.estimateId, ids.invoiceId, [ids.lawnId]);
     const before = await readBell(trx, dedupeKey);
     expect(before).toBeTruthy();
     expect(before.read_at).toBeNull();
@@ -1071,7 +1071,7 @@ suite('first-application-sibling-split — periodic sweep', () => {
     const [firstResult] = await sweepOnce(trx, estimateId);
     expect(firstResult.action).toBe('alerted');
     expect(firstResult.divergingSiblingIds).toEqual([bId, cId].map(String).sort());
-    const dedupeKey = DEDUPE_KEY(estimateId, [bId, cId]);
+    const dedupeKey = DEDUPE_KEY(estimateId, anchorInvoiceId, [bId, cId]);
     expect((await readBell(trx, dedupeKey)).read_at).toBeNull();
 
     // Office splits B only: prices it and mints its own live invoice —
@@ -1100,7 +1100,7 @@ suite('first-application-sibling-split — periodic sweep', () => {
 
     // The alert for the now-narrower diverging set (just C, since B
     // resolved) is open and unread.
-    const newDedupeKey = DEDUPE_KEY(estimateId, [cId]);
+    const newDedupeKey = DEDUPE_KEY(estimateId, anchorInvoiceId, [cId]);
     const stillOpen = await readBell(trx, newDedupeKey);
     expect(stillOpen.read_at).toBeNull();
   }));
@@ -1150,7 +1150,7 @@ suite('first-application-sibling-split — periodic sweep', () => {
     const [firstResult] = await sweepOnce(trx, estimateId);
     expect(firstResult.action).toBe('alerted');
     expect(firstResult.divergingSiblingIds).toEqual([bId]);
-    const dedupeKey = DEDUPE_KEY(estimateId, [bId]);
+    const dedupeKey = DEDUPE_KEY(estimateId, anchorInvoiceId, [bId]);
     expect((await readBell(trx, dedupeKey)).read_at).toBeNull();
 
     // Office splits B: prices it and mints its own live invoice. C never
@@ -1172,7 +1172,7 @@ suite('first-application-sibling-split — periodic sweep', () => {
     expect(cleared.read_at).not.toBeNull();
 
     // No NEW alert about C was ever raised.
-    const cDedupeKey = DEDUPE_KEY(estimateId, [cId]);
+    const cDedupeKey = DEDUPE_KEY(estimateId, anchorInvoiceId, [cId]);
     expect(await readBell(trx, cDedupeKey)).toBeUndefined();
 
     // Repeated sweeps — with the original alert both left alone (still
@@ -1189,6 +1189,149 @@ suite('first-application-sibling-split — periodic sweep', () => {
     expect(afterDismiss.action).toBe('cleared');
     expect(await readBell(trx, cDedupeKey)).toBeUndefined();
   }));
+
+  // Two SEPARATE stamped combined-invoice groups under the SAME estimate —
+  // two acceptances of the estimate on different dates, each minting its
+  // own combined first-application invoice for its own reserved
+  // pest+lawn pair. Codex round-12 P1: the dedupe prefix used to be
+  // estimate-wide (`first_application_sibling_divergence:${estimateId}:`),
+  // so evaluating one group's clear-standing-alerts-before-raise (or any
+  // settle/realign/not_a_pair/invoice_missing/no_anchor clear) wiped out
+  // the OTHER group's still-valid standing alert. The prefix is now scoped
+  // to the group's own fixed stamped-invoice id, so each group's alert
+  // lives under its own prefix and can never step on the other's.
+  describe('two stamped groups under one estimate', () => {
+    async function mintGroup(trx, { customerId, estimateId, day }) {
+      const anchorId = randomUUID();
+      const siblingId = randomUUID();
+      await trx('scheduled_services').insert([
+        {
+          id: anchorId, customer_id: customerId, source_estimate_id: estimateId, scheduled_date: day,
+          service_type: 'Quarterly Pest Control', status: 'confirmed', is_recurring: true, estimated_price: 150,
+        },
+        {
+          id: siblingId, customer_id: customerId, source_estimate_id: estimateId, scheduled_date: day,
+          service_type: 'Lawn Care', status: 'confirmed', is_recurring: true, estimated_price: null,
+        },
+      ]);
+      const invoiceId = randomUUID();
+      await trx('invoices').insert({
+        id: invoiceId, customer_id: customerId, scheduled_service_id: anchorId,
+        token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
+        status: 'draft', title: 'First Service Application',
+        notes: `Auto-generated from accepted estimate #${estimateId}. Customer selected pay per application — first application only.`,
+        line_items: JSON.stringify([{ description: 'First service application', quantity: 1, unit_price: 150, amount: 150 }]),
+        subtotal: 150, total: 150,
+      });
+      await trx('scheduled_services').whereIn('id', [anchorId, siblingId]).update({ first_application_invoice_id: invoiceId });
+      return {
+        anchorId, siblingId, invoiceId,
+      };
+    }
+
+    // Evaluates exactly ONE invoice's group directly — unlike sweepOnce
+    // (which finds the FIRST group matching an estimate), this lets a test
+    // drive two same-estimate groups in a chosen order.
+    async function evaluateInvoiceGroup(trx, invoiceId) {
+      const candidates = await loadCandidates(trx);
+      const groups = groupCandidatesByInvoice(candidates);
+      const group = groups.find((g) => String(g[0].invoice_id) === String(invoiceId));
+      return evaluateEstimateCandidates(trx, group);
+    }
+
+    async function twoDivergingGroups(trx) {
+      const customerId = randomUUID();
+      const estimateId = randomUUID();
+      await trx('customers').insert({
+        id: customerId, first_name: 'Synthetic two-group fixture', phone: `qa-${customerId.slice(0, 8)}`, active: true,
+      });
+      await trx('estimates').insert({ id: estimateId, customer_id: customerId, status: 'accepted' });
+      const groupA = await mintGroup(trx, { customerId, estimateId, day: '2026-10-01' });
+      const groupB = await mintGroup(trx, { customerId, estimateId, day: '2026-11-01' });
+      await trx('scheduled_services').where({ id: groupA.siblingId }).update({ scheduled_date: '2026-10-02' });
+      await trx('scheduled_services').where({ id: groupB.siblingId }).update({ scheduled_date: '2026-11-02' });
+      return {
+        estimateId, groupA, groupB,
+      };
+    }
+
+    test('both diverging groups raise their own standing alert, evaluated A then B', () => rollbackTest(async (trx) => {
+      const { estimateId, groupA, groupB } = await twoDivergingGroups(trx);
+      const resultA = await evaluateInvoiceGroup(trx, groupA.invoiceId);
+      const resultB = await evaluateInvoiceGroup(trx, groupB.invoiceId);
+      expect(resultA.action).toBe('alerted');
+      expect(resultB.action).toBe('alerted');
+
+      const keyA = DEDUPE_KEY(estimateId, groupA.invoiceId, [groupA.siblingId]);
+      const keyB = DEDUPE_KEY(estimateId, groupB.invoiceId, [groupB.siblingId]);
+      expect(keyA).not.toBe(keyB);
+      const [bellA, bellB] = await Promise.all([readBell(trx, keyA), readBell(trx, keyB)]);
+      expect(bellA).toBeTruthy();
+      expect(bellA.read_at).toBeNull();
+      expect(bellB).toBeTruthy();
+      expect(bellB.read_at).toBeNull();
+    }));
+
+    test('both diverging groups raise their own standing alert, evaluated B then A (order-independent)', () => rollbackTest(async (trx) => {
+      const { estimateId, groupA, groupB } = await twoDivergingGroups(trx);
+      const resultB = await evaluateInvoiceGroup(trx, groupB.invoiceId);
+      const resultA = await evaluateInvoiceGroup(trx, groupA.invoiceId);
+      expect(resultA.action).toBe('alerted');
+      expect(resultB.action).toBe('alerted');
+
+      const keyA = DEDUPE_KEY(estimateId, groupA.invoiceId, [groupA.siblingId]);
+      const keyB = DEDUPE_KEY(estimateId, groupB.invoiceId, [groupB.siblingId]);
+      const [bellA, bellB] = await Promise.all([readBell(trx, keyA), readBell(trx, keyB)]);
+      expect(bellA).toBeTruthy();
+      expect(bellA.read_at).toBeNull();
+      expect(bellB).toBeTruthy();
+      expect(bellB.read_at).toBeNull();
+    }));
+
+    test('resolving group A clears only A\'s alert — B\'s standing alert survives', () => rollbackTest(async (trx) => {
+      const { estimateId, groupA, groupB } = await twoDivergingGroups(trx);
+      await evaluateInvoiceGroup(trx, groupA.invoiceId);
+      await evaluateInvoiceGroup(trx, groupB.invoiceId);
+      const keyA = DEDUPE_KEY(estimateId, groupA.invoiceId, [groupA.siblingId]);
+      const keyB = DEDUPE_KEY(estimateId, groupB.invoiceId, [groupB.siblingId]);
+      expect((await readBell(trx, keyA)).read_at).toBeNull();
+      expect((await readBell(trx, keyB)).read_at).toBeNull();
+
+      // Realign group A's sibling back onto the anchor's date — a genuine
+      // resolution for A alone.
+      await trx('scheduled_services').where({ id: groupA.siblingId }).update({ scheduled_date: '2026-10-01' });
+      const resultA = await evaluateInvoiceGroup(trx, groupA.invoiceId);
+      expect(resultA.action).toBe('cleared');
+
+      const [bellA, bellB] = await Promise.all([readBell(trx, keyA), readBell(trx, keyB)]);
+      expect(bellA.read_at).not.toBeNull();
+      // B was never touched by A's clear-standing-alerts call — its own
+      // alert must still be open.
+      expect(bellB.read_at).toBeNull();
+    }));
+
+    test('dismissing group B\'s alert does not affect group A\'s still-open alert', () => rollbackTest(async (trx) => {
+      const { estimateId, groupA, groupB } = await twoDivergingGroups(trx);
+      await evaluateInvoiceGroup(trx, groupA.invoiceId);
+      await evaluateInvoiceGroup(trx, groupB.invoiceId);
+      const keyA = DEDUPE_KEY(estimateId, groupA.invoiceId, [groupA.siblingId]);
+      const keyB = DEDUPE_KEY(estimateId, groupB.invoiceId, [groupB.siblingId]);
+
+      // Office dismisses B's bell (read_at set), B is still diverging.
+      const bellBBefore = await readBell(trx, keyB);
+      await trx('notifications').where({ id: bellBBefore.id }).update({ read_at: new Date() });
+
+      // A re-sweep of A (still diverging, unchanged) must never touch B's
+      // dismissal, and A's own alert must stay open/unread.
+      const resultA = await evaluateInvoiceGroup(trx, groupA.invoiceId);
+      expect(resultA.action).toBe('alerted');
+      const [bellA, bellBAfter] = await Promise.all([readBell(trx, keyA), readBell(trx, keyB)]);
+      expect(bellA.read_at).toBeNull();
+      expect(bellBAfter.read_at).not.toBeNull();
+      const bAfterMeta = typeof bellBAfter.metadata === 'string' ? JSON.parse(bellBAfter.metadata) : bellBAfter.metadata;
+      expect(bAfterMeta.autoCleared).not.toBe(true);
+    }));
+  });
 
   test('a priced (but still diverging) sibling still alerts (Codex P1 fix)', () => rollbackTest(async (trx) => {
     const ids = await fixture(trx);
@@ -1222,7 +1365,7 @@ suite('first-application-sibling-split — periodic sweep', () => {
     expect(result.action).toBe('alerted');
     expect(result.divergingSiblingIds).toEqual([ids.lawnId]);
 
-    const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
+    const dedupeKey = DEDUPE_KEY(ids.estimateId, ids.invoiceId, [ids.lawnId]);
     const bell = await readBell(trx, dedupeKey);
     expect(bell.body).toContain('was cancelled');
     expect(bell.body).toContain('remove its charge from the combined invoice');
@@ -1236,7 +1379,7 @@ suite('first-application-sibling-split — periodic sweep', () => {
     const [result] = await sweepOnce(trx, ids.estimateId);
     expect(result.action).toBe('alerted');
     expect(result.divergingSiblingIds).toEqual([ids.lawnId]);
-    const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
+    const dedupeKey = DEDUPE_KEY(ids.estimateId, ids.invoiceId, [ids.lawnId]);
     expect((await readBell(trx, dedupeKey)).body).toContain('remove its charge from the combined invoice');
   }));
 
@@ -1244,7 +1387,7 @@ suite('first-application-sibling-split — periodic sweep', () => {
     const ids = await fixture(trx);
     await trx('scheduled_services').where({ id: ids.lawnId }).update({ status: 'cancelled' });
     await sweepOnce(trx, ids.estimateId);
-    const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
+    const dedupeKey = DEDUPE_KEY(ids.estimateId, ids.invoiceId, [ids.lawnId]);
     const original = await readBell(trx, dedupeKey);
     await trx('notifications').where({ id: original.id }).update({ read_at: new Date() });
 
@@ -1274,7 +1417,7 @@ suite('first-application-sibling-split — periodic sweep', () => {
     expect(result.action).toBe('alerted');
     expect(result.divergingSiblingIds).toEqual([ids.lawnId]);
 
-    const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
+    const dedupeKey = DEDUPE_KEY(ids.estimateId, ids.invoiceId, [ids.lawnId]);
     const bell = await readBell(trx, dedupeKey);
     expect(bell.body).toContain('remove its charge from the combined invoice');
     expect(bell.body).not.toContain('split it by hand');
@@ -1309,7 +1452,7 @@ suite('first-application-sibling-split — periodic sweep', () => {
     expect(resolved.action).toBe('cleared');
     expect(resolved.reason).toBe('split_completed');
 
-    const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
+    const dedupeKey = DEDUPE_KEY(ids.estimateId, ids.invoiceId, [ids.lawnId]);
     const cleared = await readBell(trx, dedupeKey);
     const clearedMeta = typeof cleared.metadata === 'string' ? JSON.parse(cleared.metadata) : cleared.metadata;
     expect(clearedMeta.autoCleared).toBe(true);
@@ -1394,7 +1537,7 @@ suite('first-application-sibling-split — periodic sweep', () => {
       await outer('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
       const [result] = await sweepOnce(outer, ids.estimateId);
       expect(result.action).toBe('alerted');
-      dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
+      dedupeKey = DEDUPE_KEY(ids.estimateId, ids.invoiceId, [ids.lawnId]);
       expect(await readBell(outer, dedupeKey)).toBeTruthy();
     } finally {
       await outer.rollback();
@@ -1407,7 +1550,7 @@ suite('first-application-sibling-split — periodic sweep', () => {
 
   test('clearStandingAlerts is idempotent — clearing with nothing open is a no-op', () => rollbackTest(async (trx) => {
     const ids = await fixture(trx);
-    const cleared = await clearStandingAlerts(trx, `first_application_sibling_divergence:${ids.estimateId}:`);
+    const cleared = await clearStandingAlerts(trx, `first_application_sibling_divergence:${ids.estimateId}:${ids.invoiceId}:`);
     expect(cleared).toBe(0);
   }));
 
@@ -1482,39 +1625,51 @@ suite('first-application-sibling-split — periodic sweep', () => {
       return { customerId, estimateId };
     }
 
-    test('stamps the anchor + a promoted same-day top-level recurring sibling, both, inside the trx', () => rollbackTest(async (trx) => {
-      const { customerId, estimateId } = await seedCustomerAndEstimate(trx, 'stamp-pair');
-      const anchorId = await seedProgram(trx, { customerId, estimateId, estimatedPrice: 200 });
-      const siblingId = await seedProgram(trx, { customerId, estimateId });
-      const invoiceId = randomUUID();
+    async function mintInvoice(trx, { invoiceId, customerId, anchorId, amount = 200 }) {
       await trx('invoices').insert({
         id: invoiceId, customer_id: customerId, scheduled_service_id: anchorId,
         token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
         status: 'draft', title: 'First Service Application', notes: 'n/a',
-        line_items: JSON.stringify([{ description: 'First service application', quantity: 1, unit_price: 200, amount: 200 }]),
-        subtotal: 200, total: 200,
+        line_items: JSON.stringify([{ description: 'First service application', quantity: 1, unit_price: amount, amount }]),
+        subtotal: amount, total: amount,
       });
+    }
 
-      await stampCombinedFirstApplicationInvoiceCoverage(trx, { invoiceId, anchorId });
+    // Codex round-12 P2: memberIds is now the caller's OWN authoritative
+    // promoted-ids list — never a same-day reconstruction. A pre-existing
+    // same-day top-level recurring row that is NOT in memberIds (a
+    // separately accepted or already-priced program that merely shares the
+    // date) must never be swept up into the stamp any more.
+    test('stamps the anchor + every id in memberIds, and leaves an un-listed same-day bystander untouched', () => rollbackTest(async (trx) => {
+      const { customerId, estimateId } = await seedCustomerAndEstimate(trx, 'stamp-pair');
+      const anchorId = await seedProgram(trx, { customerId, estimateId, estimatedPrice: 200 });
+      const siblingId = await seedProgram(trx, { customerId, estimateId });
+      // A pre-existing same-day top-level recurring row from some OTHER
+      // acceptance — same customer/estimate/date, but never passed in
+      // memberIds. Regression coverage for the exact P2 bug: the old
+      // same-date reconstruction would have swept this in too.
+      const bystanderId = await seedProgram(trx, { customerId, estimateId });
+      const invoiceId = randomUUID();
+      await mintInvoice(trx, { invoiceId, customerId, anchorId });
 
-      const [anchor, sibling] = await Promise.all([
+      await stampCombinedFirstApplicationInvoiceCoverage(trx, { invoiceId, anchorId, memberIds: [siblingId] });
+
+      const [anchor, sibling, bystander] = await Promise.all([
         trx('scheduled_services').where({ id: anchorId }).first('first_application_invoice_id'),
         trx('scheduled_services').where({ id: siblingId }).first('first_application_invoice_id'),
+        trx('scheduled_services').where({ id: bystanderId }).first('first_application_invoice_id'),
       ]);
       expect(anchor.first_application_invoice_id).toBe(invoiceId);
       expect(sibling.first_application_invoice_id).toBe(invoiceId);
+      expect(bystander.first_application_invoice_id).toBeNull();
     }));
 
-    test('a single-program anchor (no sibling) leaves the column NULL', () => rollbackTest(async (trx) => {
+    test('no memberIds (single-program accept) leaves the column NULL', () => rollbackTest(async (trx) => {
       const { customerId, estimateId } = await seedCustomerAndEstimate(trx, 'stamp-solo');
       const anchorId = await seedProgram(trx, { customerId, estimateId, estimatedPrice: 99 });
       const invoiceId = randomUUID();
-      await trx('invoices').insert({
-        id: invoiceId, customer_id: customerId, scheduled_service_id: anchorId,
-        token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
-        status: 'draft', title: 'Quarterly Pest Control', notes: 'n/a',
-        line_items: JSON.stringify([{ description: 'Quarterly Pest Control', quantity: 1, unit_price: 99, amount: 99 }]),
-        subtotal: 99, total: 99,
+      await mintInvoice(trx, {
+        invoiceId, customerId, anchorId, amount: 99,
       });
 
       await stampCombinedFirstApplicationInvoiceCoverage(trx, { invoiceId, anchorId });
@@ -1523,21 +1678,31 @@ suite('first-application-sibling-split — periodic sweep', () => {
       expect(anchor.first_application_invoice_id).toBeNull();
     }));
 
-    test('a CHILD occurrence (recurring_parent_id set) on the same day is NOT stamped', () => rollbackTest(async (trx) => {
+    test('an empty memberIds array is the same as none — never stamped', () => rollbackTest(async (trx) => {
+      const { customerId, estimateId } = await seedCustomerAndEstimate(trx, 'stamp-empty');
+      const anchorId = await seedProgram(trx, { customerId, estimateId, estimatedPrice: 99 });
+      const invoiceId = randomUUID();
+      await mintInvoice(trx, {
+        invoiceId, customerId, anchorId, amount: 99,
+      });
+
+      await stampCombinedFirstApplicationInvoiceCoverage(trx, { invoiceId, anchorId, memberIds: [] });
+
+      const anchor = await trx('scheduled_services').where({ id: anchorId }).first('first_application_invoice_id');
+      expect(anchor.first_application_invoice_id).toBeNull();
+    }));
+
+    test('a CHILD occurrence (recurring_parent_id set) passed in memberIds is NOT stamped', () => rollbackTest(async (trx) => {
       const { customerId, estimateId } = await seedCustomerAndEstimate(trx, 'stamp-child');
       const anchorId = await seedProgram(trx, { customerId, estimateId, estimatedPrice: 200 });
       const siblingParentId = await seedProgram(trx, { customerId, estimateId });
       const childId = await seedProgram(trx, { customerId, estimateId, recurringParentId: siblingParentId });
       const invoiceId = randomUUID();
-      await trx('invoices').insert({
-        id: invoiceId, customer_id: customerId, scheduled_service_id: anchorId,
-        token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
-        status: 'draft', title: 'First Service Application', notes: 'n/a',
-        line_items: JSON.stringify([{ description: 'First service application', quantity: 1, unit_price: 200, amount: 200 }]),
-        subtotal: 200, total: 200,
-      });
+      await mintInvoice(trx, { invoiceId, customerId, anchorId });
 
-      await stampCombinedFirstApplicationInvoiceCoverage(trx, { invoiceId, anchorId });
+      await stampCombinedFirstApplicationInvoiceCoverage(trx, {
+        invoiceId, anchorId, memberIds: [siblingParentId, childId],
+      });
 
       const [siblingParent, child] = await Promise.all([
         trx('scheduled_services').where({ id: siblingParentId }).first('first_application_invoice_id'),
@@ -1547,20 +1712,14 @@ suite('first-application-sibling-split — periodic sweep', () => {
       expect(child.first_application_invoice_id).toBeNull();
     }));
 
-    test('a non-recurring one-time row on the same day is NOT stamped', () => rollbackTest(async (trx) => {
+    test('a non-recurring one-time row passed in memberIds is NOT stamped (and, alone, never justifies a pair)', () => rollbackTest(async (trx) => {
       const { customerId, estimateId } = await seedCustomerAndEstimate(trx, 'stamp-onetime');
       const anchorId = await seedProgram(trx, { customerId, estimateId, estimatedPrice: 200 });
       const oneTimeId = await seedProgram(trx, { customerId, estimateId, isRecurring: false, estimatedPrice: 75 });
       const invoiceId = randomUUID();
-      await trx('invoices').insert({
-        id: invoiceId, customer_id: customerId, scheduled_service_id: anchorId,
-        token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
-        status: 'draft', title: 'First Service Application', notes: 'n/a',
-        line_items: JSON.stringify([{ description: 'First service application', quantity: 1, unit_price: 200, amount: 200 }]),
-        subtotal: 200, total: 200,
-      });
+      await mintInvoice(trx, { invoiceId, customerId, anchorId });
 
-      await stampCombinedFirstApplicationInvoiceCoverage(trx, { invoiceId, anchorId });
+      await stampCombinedFirstApplicationInvoiceCoverage(trx, { invoiceId, anchorId, memberIds: [oneTimeId] });
 
       const [anchor, oneTime] = await Promise.all([
         trx('scheduled_services').where({ id: anchorId }).first('first_application_invoice_id'),
@@ -1568,32 +1727,40 @@ suite('first-application-sibling-split — periodic sweep', () => {
       ]);
       // The one-time row alone never qualifies as "the sibling that
       // justifies a pair" — the anchor itself is therefore left unstamped
-      // too (single-program-equivalent: no recurring sibling exists).
+      // too (single-program-equivalent: no VERIFIED recurring sibling
+      // exists once the bad id is thrown out).
       expect(anchor.first_application_invoice_id).toBeNull();
       expect(oneTime.first_application_invoice_id).toBeNull();
     }));
 
-    test('a sibling on a DIFFERENT date is NOT stamped', () => rollbackTest(async (trx) => {
-      const { customerId, estimateId } = await seedCustomerAndEstimate(trx, 'stamp-different-date');
+    // Codex round-12 P2: a bad id passed by a caller can never stamp an
+    // unrelated row — every memberId is independently re-verified here,
+    // never trusted blindly. A GENUINE sibling in the same call still
+    // stamps normally alongside the two rejected ids.
+    test('a memberId belonging to another customer/estimate, or already priced, is ignored — a genuine sibling in the same call still stamps', () => rollbackTest(async (trx) => {
+      const { customerId, estimateId } = await seedCustomerAndEstimate(trx, 'stamp-mixed');
       const anchorId = await seedProgram(trx, { customerId, estimateId, estimatedPrice: 200 });
-      const laterId = await seedProgram(trx, { customerId, estimateId, scheduledDate: '2026-11-01' });
+      const siblingId = await seedProgram(trx, { customerId, estimateId });
+      const pricedId = await seedProgram(trx, { customerId, estimateId, estimatedPrice: 60 });
+      const { customerId: otherCustomerId, estimateId: otherEstimateId } = await seedCustomerAndEstimate(trx, 'stamp-mixed-other');
+      const foreignId = await seedProgram(trx, { customerId: otherCustomerId, estimateId: otherEstimateId });
       const invoiceId = randomUUID();
-      await trx('invoices').insert({
-        id: invoiceId, customer_id: customerId, scheduled_service_id: anchorId,
-        token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
-        status: 'draft', title: 'First Service Application', notes: 'n/a',
-        line_items: JSON.stringify([{ description: 'First service application', quantity: 1, unit_price: 200, amount: 200 }]),
-        subtotal: 200, total: 200,
+      await mintInvoice(trx, { invoiceId, customerId, anchorId });
+
+      await stampCombinedFirstApplicationInvoiceCoverage(trx, {
+        invoiceId, anchorId, memberIds: [siblingId, pricedId, foreignId],
       });
 
-      await stampCombinedFirstApplicationInvoiceCoverage(trx, { invoiceId, anchorId });
-
-      const [anchor, later] = await Promise.all([
+      const [anchor, sibling, priced, foreign] = await Promise.all([
         trx('scheduled_services').where({ id: anchorId }).first('first_application_invoice_id'),
-        trx('scheduled_services').where({ id: laterId }).first('first_application_invoice_id'),
+        trx('scheduled_services').where({ id: siblingId }).first('first_application_invoice_id'),
+        trx('scheduled_services').where({ id: pricedId }).first('first_application_invoice_id'),
+        trx('scheduled_services').where({ id: foreignId }).first('first_application_invoice_id'),
       ]);
-      expect(anchor.first_application_invoice_id).toBeNull();
-      expect(later.first_application_invoice_id).toBeNull();
+      expect(anchor.first_application_invoice_id).toBe(invoiceId);
+      expect(sibling.first_application_invoice_id).toBe(invoiceId);
+      expect(priced.first_application_invoice_id).toBeNull();
+      expect(foreign.first_application_invoice_id).toBeNull();
     }));
   });
 

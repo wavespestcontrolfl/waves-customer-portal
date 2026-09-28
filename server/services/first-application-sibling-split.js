@@ -34,7 +34,9 @@
 // (every 10-15 minutes, see server/services/scheduler.js) finds every
 // stamped visit, groups by invoice, re-derives each group's state fresh
 // from current data, and opens/refreshes or clears ONE durable admin alert
-// per estimate — judged on live state, never on which write just happened.
+// per STAMPED INVOICE GROUP (an estimate can carry more than one, when it
+// has more than one stamped combined-invoice group from separate
+// acceptances) — judged on live state, never on which write just happened.
 // No auto-split, no invoice hold, no structural inference: the office
 // splits the invoice by hand.
 //
@@ -189,7 +191,18 @@ function neverRanPhrase(status) {
 // never locally drift from it (it once did, missing 'processing').
 const SETTLED_INVOICE_STATUSES = INVOICE_UNCOLLECTIBLE_STATUSES;
 const SWEEP_LIMIT = 500;
-const DEDUPE_PREFIX = (estimateId) => `first_application_sibling_divergence:${estimateId}:`;
+// Scoped to the STAMPED invoice group, not just the estimate (Codex
+// round-12 P1): when one estimate has more than one stamped combined-
+// invoice group (separate acceptances under the same estimate on
+// different dates), an estimate-wide prefix let evaluating group B's
+// clear-others-before-raise (and every settle/realign/not_a_pair/
+// invoice_missing/no_anchor clear) wipe out group A's still-valid standing
+// alert. stampedInvoiceId is the group's fixed identity for its whole
+// life — unlike the governing/replacement invoice id, which can shift to
+// a live replacement once the stamped invoice goes terminal — so every
+// clear and every raise for this group must stay under this exact prefix,
+// never the estimate-wide one.
+const DEDUPE_PREFIX = (estimateId, stampedInvoiceId) => `first_application_sibling_divergence:${estimateId}:${stampedInvoiceId}:`;
 
 function dateOnly(value) {
   if (!value) return null;
@@ -389,7 +402,9 @@ function groupCandidatesByInvoice(candidates) {
 }
 
 // Marks read (with an autoCleared stamp) every standing alert for this
-// estimate whose dedupeKey carries the given prefix — optionally excluding
+// stamped invoice group (the prefix is estimate + stamped invoice id, so
+// another combined invoice under the same estimate is never touched)
+// whose dedupeKey carries the given prefix — optionally excluding
 // one key that is about to be raised/refreshed instead. Deliberately NOT
 // scoped to whereNull('read_at'): an alert a human already DISMISSED while
 // the group was still diverging must ALSO get the autoCleared stamp once
@@ -561,7 +576,11 @@ async function evaluateEstimateCandidates(conn, membersForInvoice) {
     return { estimateId: membersForInvoice?.[0]?.source_estimate_id ?? null, action: 'skipped', reason: 'not_a_pair' };
   }
   const { source_estimate_id: estimateId, customer_id: customerId, invoice_id: invoiceId } = membersForInvoice[0];
-  const prefix = DEDUPE_PREFIX(estimateId);
+  // invoiceId here is the STAMPED invoice id (m.first_application_invoice_id)
+  // — fixed for the life of this group — so the prefix is scoped to this
+  // exact stamped invoice group, never shared with any other stamped group
+  // under the same estimate.
+  const prefix = DEDUPE_PREFIX(estimateId, invoiceId);
 
   // Re-read the invoice fresh under FOR UPDATE inside this transaction —
   // loadCandidates' own invoice status is read outside any per-estimate

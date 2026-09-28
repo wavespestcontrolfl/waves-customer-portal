@@ -2022,40 +2022,51 @@ function shouldAttachScheduledServiceToStandardDraftInvoice({
 
 // Stamps scheduled_services.first_application_invoice_id on every member a
 // freshly-minted combined first-application invoice covers — the reserved
-// anchor AND each promoted same-day, top-level, recurring sibling — in the
-// SAME transaction the invoice itself commits in. Durable provenance for
+// anchor AND each promoted same-trip sibling ACTUALLY PROMOTED for this
+// accept (memberIds, passed by the caller) — in the SAME transaction the
+// invoice itself commits in. Durable provenance for
 // first-application-sibling-split.js's sweep, replacing its old structural
 // guessing (Codex P1, PR #5021 pre-push): an unpriced sibling with no live
 // invoice of its own could not be told apart from a genuinely separate,
 // independently-billed recurring program that simply hadn't been invoiced
 // yet — this records the real relationship once, at the source, instead.
-// ONLY when 2+ programs actually share the invoice: a single-program
-// accept is never stamped as a pair (no same-day top-level recurring
-// sibling exists to stamp alongside the anchor), so the sweep's own
-// membership query (first_application_invoice_id IS NOT NULL, grouped)
-// never sees a group of one. Every same-day top-level recurring sibling
-// is, by construction, still estimated_price NULL at this exact instant
-// (the promotion insert above never sets a price) — no extra "unpriced"
-// filter is needed here the way the one-time backfill migration needs one
-// to infer the same relationship from current-state data alone.
-async function stampCombinedFirstApplicationInvoiceCoverage(trx, { invoiceId, anchorId }) {
+//
+// memberIds is the caller's OWN authoritative membership list (Codex
+// round-12 P2): estimate-converter.js's own reserved-accept promotion loop
+// and estimate-public.js's two mint sites pass the ids they actually just
+// inserted/promoted for THIS accept. A same-date RECONSTRUCTION (the prior
+// design) could also catch a pre-existing, separately accepted or already
+// priced program that merely happens to share the anchor's date — a false
+// "split this invoice" alert waiting to happen. So every id in memberIds
+// is still independently verified here (same customer, same estimate,
+// top-level, recurring, estimated_price IS NULL) before it is stamped —
+// never trusted blindly — so a bad id passed by a caller can never stamp
+// an unrelated row. No memberIds (or none that verify) means no sibling to
+// cover: a single-program accept is never stamped as a pair, so the
+// sweep's own membership query (first_application_invoice_id IS NOT NULL,
+// grouped) never sees a group of one.
+async function stampCombinedFirstApplicationInvoiceCoverage(trx, { invoiceId, anchorId, memberIds = [] } = {}) {
   if (!invoiceId || !anchorId) return;
+  const candidateIds = [...new Set((Array.isArray(memberIds) ? memberIds : [])
+    .map((id) => (id != null ? String(id) : null))
+    .filter((id) => id && id !== String(anchorId)))];
+  if (!candidateIds.length) return; // single-program accept — never stamped as a pair
   const anchor = await trx('scheduled_services').where({ id: anchorId })
-    .first('customer_id', 'source_estimate_id', 'scheduled_date');
-  if (!anchor || !anchor.source_estimate_id || !anchor.scheduled_date) return;
-  const siblings = await trx('scheduled_services')
+    .first('customer_id', 'source_estimate_id');
+  if (!anchor || !anchor.source_estimate_id) return;
+  const verifiedSiblings = await trx('scheduled_services')
+    .whereIn('id', candidateIds)
     .where({
       customer_id: anchor.customer_id,
       source_estimate_id: anchor.source_estimate_id,
-      scheduled_date: anchor.scheduled_date,
+      is_recurring: true,
     })
-    .whereNot('id', anchorId)
     .whereNull('recurring_parent_id')
-    .where('is_recurring', true)
+    .whereNull('estimated_price')
     .select('id');
-  if (!siblings.length) return; // single-program accept — never stamped as a pair
-  const memberIds = [anchorId, ...siblings.map((s) => s.id)];
-  await trx('scheduled_services').whereIn('id', memberIds).update({ first_application_invoice_id: invoiceId });
+  if (!verifiedSiblings.length) return; // no VERIFIED sibling — never stamped as a pair
+  const memberIdsToStamp = [anchorId, ...verifiedSiblings.map((s) => s.id)];
+  await trx('scheduled_services').whereIn('id', memberIdsToStamp).update({ first_application_invoice_id: invoiceId });
 }
 
 function normalizeEstimateData(value) {
@@ -5574,6 +5585,15 @@ const EstimateConverter = {
     let scheduledCount = 0;
     let termStartDate = null;
     let firstScheduledServiceId = null;
+    // Ids of same-trip sibling parents ACTUALLY PROMOTED for a reserved
+    // accept (Codex round-12 P2, PR #5021): carried into
+    // stampCombinedFirstApplicationInvoiceCoverage as memberIds so the
+    // stamp covers exactly what this accept inserted — never a same-day
+    // reconstruction that could also catch an unrelated, separately
+    // accepted/priced program that merely landed on the same date. Stays
+    // empty outside the reservation branch (single-program / auto-schedule
+    // accepts never populate it).
+    const promotedSameTripMemberIds = [];
     const deferredFollowUpReminderRows = [];
     // Per-property duplicate-series scope (codex #3244 r1): an accept that
     // resolves to a customer who already runs a series would read that
@@ -6463,6 +6483,11 @@ const EstimateConverter = {
             }
             const { parentRow, seedResult } = outcome;
             if (combinedCapacity && sameTrip) capacityMembers.push(parentRow);
+            // Same-day promoted sibling: this is exactly the membership
+            // the combined first-application invoice's stamp should cover
+            // (Codex round-12 P2) — the id is collected here, at the
+            // moment of promotion, rather than reconstructed later by date.
+            if (sameTrip && parentRow?.id) promotedSameTripMemberIds.push(parentRow.id);
             scheduledCount += 1;
             // The reserved row's reminders were registered by the public
             // accept route; this added row needs its own (Codex r2) —
@@ -7791,7 +7816,7 @@ const EstimateConverter = {
                 // rather than leaving an unstamped combined invoice.
                 if (created?.id && scheduledServiceId) {
                   await stampCombinedFirstApplicationInvoiceCoverage(trx, {
-                    invoiceId: created.id, anchorId: scheduledServiceId,
+                    invoiceId: created.id, anchorId: scheduledServiceId, memberIds: promotedSameTripMemberIds,
                   });
                 }
                 return created;
@@ -8313,6 +8338,14 @@ const EstimateConverter = {
       recurringScheduleCheck,
       requiresManualRecurringScheduling: hasCommercialRecurring,
       firstScheduledServiceId,
+      // Additive (Codex round-12 P2, PR #5021): ids of same-trip sibling
+      // parents actually promoted for THIS accept's reserved slot — empty
+      // for every non-reservation or single-program accept. Callers that
+      // mint their OWN combined first-application invoice after
+      // convertEstimate returns (estimate-public.js) pass this straight
+      // through to stampCombinedFirstApplicationInvoiceCoverage's
+      // memberIds instead of guessing membership by date.
+      promotedSameTripMemberIds,
       billingTerm,
       draftInvoiceId,
       draftInvoiceAmount,
