@@ -65,7 +65,23 @@ function linkAnchorOf(invoices = []) {
   return orderByDue(invoices).find((inv) => SEND_CLAIMABLE_STATUSES.includes(String(inv.status || ''))) || null;
 }
 
-const MODEL = process.env.VOICE_RELAY_MODEL || MODELS.VOICE;
+// VOICE_RELAY_MODEL / MODEL_VOICE are shared with relay-conversation.js's
+// inbound lane (see its file header) — relay-conversation.js validates the
+// resolved value against ALLOWED_OVERRIDE_MODEL_IDS before ever running on
+// it; this module previously read the env with no check at all. This lane
+// always sends `thinking: { type: 'disabled' }` below, which a
+// thinking-always-on id (Opus 5.5+) rejects, so it needs the same guard —
+// reusing relay-conversation's own allowlist (Anthropic text models,
+// thinking-always-on ids excluded) rather than a second hand-typed list.
+// Lazy require: this file loads at server boot too, and the two modules
+// have no other reason to depend on each other.
+const MODEL = (() => {
+  const raw = process.env.VOICE_RELAY_MODEL || MODELS.VOICE;
+  const { ALLOWED_OVERRIDE_MODEL_IDS } = require('../../voice-agent/relay-conversation');
+  if (ALLOWED_OVERRIDE_MODEL_IDS.has(raw)) return raw;
+  logger.warn(`[collections-voice] model ${raw} is not on the Anthropic voice allowlist — falling back to ${MODELS.DEFAULTS.VOICE}`);
+  return MODELS.DEFAULTS.VOICE;
+})();
 const VOICE_EFFORT = 'low'; // live phone call — same rationale as relay-conversation
 const MAX_TOOL_ROUNDS = 4;
 const MAX_CALL_TURNS = 30;

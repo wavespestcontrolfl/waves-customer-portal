@@ -120,6 +120,22 @@ function anthropicAcceptsEffort(model, level) {
 // inert for today's traffic.
 const ANTHROPIC_THINKING_FLOOR_RE = /^claude-opus-[5-9](?![0-9])|^claude-(fable|mythos)-/;
 
+// NARROWER than the floor above on purpose: bare Opus 5 (`claude-opus-5`)
+// thinks by default (ANTHROPIC_THINKING_FLOOR_RE) but still ACCEPTS
+// `thinking: { type: 'disabled' }` — the voice-relay override tests and the
+// live inbound/sandbox chain both rely on picking it with that literal still
+// sent. Opus 5.5 and later minors/majors (5-5, 5-6, 6, 7, …), plus Fable and
+// Mythos, are the ones that 400 on it outright. One id shape, so a future
+// Opus minor needs a change here only, never at either call site that reads
+// this.
+const ANTHROPIC_THINKING_REQUIRED_RE = /^claude-opus-5-[0-9]|^claude-opus-[6-9](?![0-9])|^claude-(fable|mythos)-/;
+// What a CALLER needs to know before building a request: can `thinking` be
+// sent as `{ type: 'disabled' }` at all? The two voice-relay lanes that
+// always send it check this before picking a model.
+function anthropicThinkingAlwaysOn(model) {
+  return ANTHROPIC_THINKING_REQUIRED_RE.test(String(model || ''));
+}
+
 // Code defaults for every env-overridable selector, in one place so the admin
 // switchboard can say what a selector returns to when its Railway override is
 // deleted. Each const below reads `process.env.X || DEFAULTS.KEY`.
@@ -289,6 +305,13 @@ const GEMINI_VIDEO_QUALITY = process.env.MODEL_GEMINI_VIDEO_QUALITY || DEFAULTS.
 // shown disabled).
 const MODEL_CATALOG = {
   'claude-opus-5': { label: 'Claude Opus 5', provider: 'anthropic', caps: ['text', 'vision'], status: 'current' },
+  // Opus 5.5 (see the flip-order note atop this file) — thinking is always
+  // on (anthropicThinkingAlwaysOn / ANTHROPIC_THINKING_FLOOR_RE), so it must
+  // never reach a lane that sends `thinking: { type: 'disabled' }`. The two
+  // voice-relay lanes filter it out of their own model allowlists for that
+  // reason (server/services/voice-agent/relay-conversation.js) — every other
+  // lane may offer it like any other catalog entry.
+  'claude-opus-5-5': { label: 'Claude Opus 5.5', provider: 'anthropic', caps: ['text', 'vision'], status: 'current' },
   'claude-opus-4-8': { label: 'Claude Opus 4.8', provider: 'anthropic', caps: ['text', 'vision'], status: 'legacy' },
   'claude-sonnet-5': { label: 'Claude Sonnet 5', provider: 'anthropic', caps: ['text', 'vision'], status: 'current' },
   // Fable's thinking blocks + refusal semantics are handled only by
@@ -484,6 +507,8 @@ module.exports = {
   ANTHROPIC_EFFORT_CAPABLE_RE,
   anthropicAcceptsEffort,
   ANTHROPIC_THINKING_FLOOR_RE,
+  ANTHROPIC_THINKING_REQUIRED_RE,
+  anthropicThinkingAlwaysOn,
   DEEP,
   EXTREME,
   FLAGSHIP,
