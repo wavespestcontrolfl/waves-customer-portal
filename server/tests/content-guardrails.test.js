@@ -5850,3 +5850,80 @@ describe('reentrySafetyClaimFinding — shared claim corpus', () => {
     expect(reentrySafetyClaimFinding(text)).toBeTruthy();
   });
 });
+
+// #4905 guard: reentrySafetyClaimFinding runs synchronously on every live
+// voice-call turn (relay-visit.js / relay-context.js / relay-booking.js) and
+// email draft (email-reply-claims-verifier.js), plus comms-lint.js. It used
+// to build a fresh `new RegExp(src, 'gi')` for each of the ~50 sources in
+// REENTRY_SAFETY_SRCS on EVERY call — real parsing + allocation work,
+// repeated forever, on top of whatever the match itself costs — instead of
+// compiling them once. V8 also runs any regex it hasn't executed yet in a
+// slow bytecode interpreter before tiering up to fast compiled code, so a
+// battery of ~50 patterns scanning a string while still cold is where the
+// worst reported latencies (tens of ms up to multiple seconds,
+// content-dependent) came from; a one-time warm-up call at server start
+// didn't reliably prevent it. The two tests below guard the actual code
+// shape from two angles:
+//   1. a DETERMINISTIC check that a call constructs zero `RegExp` objects
+//      (the ~50 patterns are compiled once, at module load, into
+//      REENTRY_SAFETY_PATTERNS, and reused with `lastIndex` reset per call)
+//      — this can't be flaky, since it doesn't depend on V8's tiering state;
+//   2. a latency budget timed in a FRESH Node process
+//      (fixtures/reentry-claim-latency-probe.js), with unrelated dynamic
+//      regexes interleaved between calls standing in for the app's own real
+//      per-request regex traffic. In-worker timing is flaky on CI
+//      (GC/background-compile from every earlier test file skews it — see
+//      ask-waves-latency-probe.js, the sibling probe for the same issue),
+//      so this also runs standalone.
+describe('reentrySafetyClaimFinding avoids rebuilding RegExp objects per call (#4905)', () => {
+  const { reentrySafetyClaimFinding, _internals } = require('../services/content/content-guardrails');
+  const { REENTRY_SAFETY_PATTERNS } = _internals;
+
+  test('reuses the SAME compiled RegExp objects across calls instead of rebuilding them', () => {
+    expect(REENTRY_SAFETY_PATTERNS.length).toBeGreaterThan(40);
+    const before = REENTRY_SAFETY_PATTERNS.map((entry) => entry.re);
+    reentrySafetyClaimFinding('Those sound like ghost ants — tiny, pale, and they love kitchens.');
+    reentrySafetyClaimFinding('A totally different sentence about billing questions today.');
+    const after = REENTRY_SAFETY_PATTERNS.map((entry) => entry.re);
+    // Object IDENTITY, not just equal sources: a regression back to
+    // `new RegExp(src, 'gi')` per call would produce a DIFFERENT object with
+    // the same source, which `toBe` catches and `toEqual` would not.
+    before.forEach((re, i) => expect(after[i]).toBe(re));
+  });
+});
+
+describe('reentrySafetyClaimFinding worst-case latency (#4905)', () => {
+  const { execFileSync } = require('child_process');
+  const path = require('path');
+  // The issue's own first-seen inputs, plus em-dash/en-dash/ASCII-hyphen
+  // variants (normalizeHardCopyText folds all dash variants to ASCII) and a
+  // couple of Spanish replies — ordinary short text, not adversarial input.
+  const corpus = [
+    'Those sound like ghost ants — tiny, pale, and they love kitchens.',
+    'No worries — it is safe for kids.',
+    'Hello — world, this is a short line.',
+    'Hello - world, this is a short line.',
+    'Hello – world, this is a short line.',
+    'Great question! Our barrier treatment covers the yard every 21 days.',
+    'Ghost ants – tiny and pale – love sugary kitchen spills.',
+    'No hay problema — es completamente normal en esta época del año.',
+    'Los técnicos llegarán mañana — por favor mantenga a las mascotas adentro.',
+    'Su patio se ve genial - gracias por elegir Waves.',
+  ];
+  // A super-linear or never-tiers regex fails fast instead of hanging CI
+  // (the child is synchronous, so jest's own test timeout cannot interrupt
+  // it).
+  const timeInFreshProcess = () => {
+    const out = execFileSync(process.execPath, [path.join(__dirname, 'fixtures', 'reentry-claim-latency-probe.js')], {
+      input: JSON.stringify(corpus), encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, timeout: 30000,
+    });
+    return JSON.parse(out.split('\n').find((line) => line.startsWith('LATENCY ')).slice('LATENCY '.length));
+  };
+
+  let ms = [];
+  beforeAll(() => { ms = timeInFreshProcess(); });
+
+  test.each(corpus.map((text, index) => [text, index]))('stays well under budget for %j', (text, index) => {
+    expect(ms[index]).toBeLessThan(50);
+  });
+});
