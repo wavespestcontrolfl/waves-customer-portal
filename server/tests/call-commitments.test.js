@@ -298,6 +298,9 @@ describe('groundModelCommitments', () => {
     expect(say('2026-07-10T15:00:00-04:00')).toBe('2026-07-10T19:00:00.000Z');
     expect(say('2026-07-10T15:00:00-05:00')).toBe('2026-07-10T19:00:00.000Z');
     expect(say('2026-07-10T15:00:30-0500')).toBe('2026-07-10T19:00:30.000Z');
+    // Fractional seconds never fall through to UTC parsing (pre-push audit P1).
+    expect(say('2026-07-10T15:00:00.000-04:00')).toBe('2026-07-10T19:00:00.000Z');
+    expect(say('2026-07-10T15:00:00.123456-05:00')).toBe('2026-07-10T19:00:00.000Z');
     expect(say('2026-07-10T15:00')).toBe('2026-07-10T19:00:00.000Z');
     // January is EST: the same rule the other way round.
     expect(say('2026-01-10T15:00:00-04:00')).toBe('2026-01-10T20:00:00.000Z');

@@ -319,7 +319,9 @@ function evidenceFor(v2, paths) {
 // 4 PM, a "3 PM" appointment promise never matching the 3 PM booking
 // (#5081 follow-up). Any other offset is a real instant. Office-typed
 // times go through parseDueAt directly and are not affected.
-const ET_OFFSET_TIME_RE = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)(?:-04:?00|-05:?00)$/;
+// Fractional seconds are dropped: the ET parser reads only naive
+// 'YYYY-MM-DDTHH:MM[:SS]' (anything else would fall through to UTC).
+const ET_OFFSET_TIME_RE = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?)(?:\.\d+)?(?:-04:?00|-05:?00)$/;
 function isoOrNull(value) {
   const et = ET_OFFSET_TIME_RE.exec(String(value ?? '').trim());
   const d = parseDueAt(et ? et[1] : value);
