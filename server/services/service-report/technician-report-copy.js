@@ -192,13 +192,16 @@ const REPORT_MEASUREMENT_UNIT_TEXT = String.raw`(?:feet|foot|ft|inch(?:es)?|yard
 const REPORT_WORK_ACTION_TEXT = String.raw`(?:appl(?:y|ied|ying)|treat(?:s|ed|ing)?|found|observ(?:e|es|ed|ing)|count(?:s|ed|ing)?|not(?:e|es|ed|ing)|record(?:s|ed|ing)?|servic(?:e|es|ed|ing)|inspect(?:s|ed|ing)?|check(?:s|ed|ing)?|replac(?:e|es|ed|ing)|spray(?:s|ed|ing)?|dust(?:s|ed|ing)?|clean(?:s|ed|ing)?|spread(?:s|ing)?|broadcast(?:s|ed|ing)?|distribut(?:e|es|ed|ing))`;
 const REPORT_PAST_ACCESS_WORK_ACTION_RE = new RegExp(String.raw`\b${REPORT_WORK_ACTION_TEXT}\b`, 'i');
 const REPORT_EXPLICIT_CREDENTIAL_NOUN_TEXT = String.raw`(?:code|pin|combo(?!\s+(?:of|with)\b)|combination(?!\s+(?:of|with)\b)|passcode|password|passphrase|keypad|lock\s?box)`;
-const REPORT_REVERSE_CREDENTIAL_LINK_TEXT = String.raw`(?:is|=|was|were|remains?|stays?|as|for)`;
+const REPORT_REVERSE_CREDENTIAL_STATE_ADVERB_TEXT = String.raw`(?:now|currently|still|today|temporarily|again|recently|just|always|previously|originally|briefly)`;
+const REPORT_REVERSE_CREDENTIAL_MODAL_TEXT = String.raw`(?:will|would|should|shall|must|might|may|can|could|has|have|had)`;
+const REPORT_REVERSE_CREDENTIAL_LINK_TEXT = String.raw`(?:is|=|was|were|remains?|remained|stays?|stayed|became|becomes|as|for|(?:${REPORT_REVERSE_CREDENTIAL_MODAL_TEXT}\s+)?continue[ds]?\s+to\s+(?:be|remain|stay)|(?:has|have|had)\s+(?:${REPORT_REVERSE_CREDENTIAL_STATE_ADVERB_TEXT}\s+)?(?:become|been|remained|stayed)|${REPORT_REVERSE_CREDENTIAL_MODAL_TEXT}\s+(?:${REPORT_REVERSE_CREDENTIAL_STATE_ADVERB_TEXT}\s+)?(?:be|remain|stay)|(?:is|are|was|were)\s+going\s+to\s+(?:be|remain|stay))`;
+const REPORT_REVERSE_CREDENTIAL_POST_LINK_ADVERB_TEXT = String.raw`(?:(?:now|currently|still|today|temporarily|again)\s+)?`;
 const REPORT_EXPLICIT_NUMERIC_CREDENTIAL_RE = new RegExp(
   String.raw`\b${REPORT_EXPLICIT_CREDENTIAL_NOUN_TEXT}\b[^\n.!?]{0,25}?["'‘’“”]?(${REPORT_NUMERIC_CREDENTIAL_TOKEN})`,
   'gi',
 );
 const REPORT_REVERSE_EXPLICIT_NUMERIC_CREDENTIAL_RE = new RegExp(
-  String.raw`(${REPORT_NUMERIC_CREDENTIAL_TOKEN})(?:\s*${REPORT_MEASUREMENT_UNIT_TEXT})?\s+${REPORT_REVERSE_CREDENTIAL_LINK_TEXT}\s+(?:the\s+)?(?:[a-z]+\s+){0,2}${REPORT_EXPLICIT_CREDENTIAL_NOUN_TEXT}\b`,
+  String.raw`(${REPORT_NUMERIC_CREDENTIAL_TOKEN})(?:\s*${REPORT_MEASUREMENT_UNIT_TEXT})?\s+${REPORT_REVERSE_CREDENTIAL_LINK_TEXT}\s+${REPORT_REVERSE_CREDENTIAL_POST_LINK_ADVERB_TEXT}(?:the\s+)?(?:[a-z]+\s+){0,2}${REPORT_EXPLICIT_CREDENTIAL_NOUN_TEXT}\b`,
   'gi',
 );
 const REPORT_REVERSE_DEVICE_WORK_PURPOSE_RE = new RegExp(

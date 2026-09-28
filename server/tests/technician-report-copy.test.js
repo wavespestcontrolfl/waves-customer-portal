@@ -207,6 +207,11 @@ const CREDENTIAL_CASES = {
     'Applied 100 ml for the keypad code',
     'Enter 2468 ml for spraying around keypad',
     'Applied 100 ml for spraying around keypad to gain access',
+    '2468 ft is still the gate code',
+    '2468 ml will remain the keypad PIN',
+    '2468 oz has now become the lockbox code',
+    '2468 grams continues to be the rear gate PIN',
+    '2468 ft is going to remain the gate code',
   ],
 };
 
@@ -316,6 +321,8 @@ const LEGITIMATE_CASES = {
     'Applied 100 ml for spraying around keypad',
     'Applied 100 ml for cleaning the keypad',
     'Applied 100 grams for dusting around lockbox',
+    '2468 ft is still the treated perimeter length',
+    '100 ml will remain the application amount near keypad',
   ],
 };
 
