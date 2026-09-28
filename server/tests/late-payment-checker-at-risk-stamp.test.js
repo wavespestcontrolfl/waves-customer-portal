@@ -9,8 +9,15 @@
 // GATE_DUNNING_ADOPT_ORPHANS, is dark by default) is never touched by the
 // ladder at all — late-payment-checker.js is the only sender left for it,
 // so it now shares the SAME markAtRiskForLongOverdue helper for its own
-// 60/90-day tiers, unconditional on either retirement gate (idempotent
-// alongside the legacy method while it still runs too).
+// 60/90-day tiers.
+//
+// Gated on GATE_BALANCE_REMINDER_LEGACY_OFF (Codex P1, round 3), NOT
+// unconditional: this checker reaches customers legacy latePaymentCheck()'s
+// own `active`/`waveguard_tier` filters would have excluded (an inactive-
+// flagged or non-WaveGuard/flat-commercial account) — an unconditional
+// stamp here would flip pipeline_stage for a customer the legacy method
+// would never have reached with the gate unset, breaking "unset =
+// byte-identical."
 jest.mock('../models/db', () => {
   const fn = jest.fn();
   fn.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
@@ -100,10 +107,12 @@ const customer = { id: 'cust-1', first_name: 'Taylor', phone: '+19415550101' };
 beforeEach(() => {
   jest.useFakeTimers().setSystemTime(new Date('2026-05-26T14:00:00.000Z'));
   jest.clearAllMocks();
+  process.env.GATE_BALANCE_REMINDER_LEGACY_OFF = 'true';
 });
 
 afterEach(() => {
   jest.useRealTimers();
+  delete process.env.GATE_BALANCE_REMINDER_LEGACY_OFF;
 });
 
 test('a delivered 60-day-overdue invoice with no sequence row stamps at_risk', async () => {
@@ -186,5 +195,46 @@ test('no channel reached the customer — 60-day tier does not stamp at_risk (re
 
   expect(result.notified).toBe(0);
   expect(result.emailedFallback).toBe(0);
+  expect(InvoiceFollowUps.markAtRiskForLongOverdue).not.toHaveBeenCalled();
+});
+
+test('GATE_BALANCE_REMINDER_LEGACY_OFF unset: a delivered 60-day tier does NOT stamp at_risk (byte-identical)', async () => {
+  delete process.env.GATE_BALANCE_REMINDER_LEGACY_OFF;
+  const invoice = invoiceRow({ dueDate: '2026-03-20' });
+  setDbQueues({
+    invoices: [
+      chain({ result: [invoice] }),
+      chain({ first: { payer_id: null, scheduled_send_error: null } }),
+      chain({ first: { payer_id: null, scheduled_send_error: null } }),
+      chain({ first: { payer_id: null, scheduled_send_error: null } }),
+    ],
+    activity_log: [chain({ first: null }), chain({ result: [] }), chain()],
+    customers: [chain({ first: customer })],
+  });
+
+  await LatePaymentChecker.checkAndNotify();
+
+  // Unset (or any non-'true' spelling): this checker's own stamp stays
+  // dark — balance-reminder.js's legacy latePaymentCheck() is still the one
+  // unconditionally stamping any customer IT reaches.
+  expect(InvoiceFollowUps.markAtRiskForLongOverdue).not.toHaveBeenCalled();
+});
+
+test('a non-strict spelling on the gate never enables the stamp (strict === "true" only)', async () => {
+  process.env.GATE_BALANCE_REMINDER_LEGACY_OFF = 'TRUE';
+  const invoice = invoiceRow({ dueDate: '2026-03-20' });
+  setDbQueues({
+    invoices: [
+      chain({ result: [invoice] }),
+      chain({ first: { payer_id: null, scheduled_send_error: null } }),
+      chain({ first: { payer_id: null, scheduled_send_error: null } }),
+      chain({ first: { payer_id: null, scheduled_send_error: null } }),
+    ],
+    activity_log: [chain({ first: null }), chain({ result: [] }), chain()],
+    customers: [chain({ first: customer })],
+  });
+
+  await LatePaymentChecker.checkAndNotify();
+
   expect(InvoiceFollowUps.markAtRiskForLongOverdue).not.toHaveBeenCalled();
 });

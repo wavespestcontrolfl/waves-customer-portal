@@ -3359,14 +3359,18 @@ const gates = {
   // checker.js system's own retirement/orphan-adoption and are independent
   // of whether this file's two methods still run. The at-risk
   // pipeline_stage stamp both methods carried for 60/90-day debt is shared
-  // (invoice-followups.js's markAtRiskForLongOverdue) with the ladder's own
-  // Day 60/90 steps and late-payment-checker.js's own tiers — including for
-  // an invoice with no invoice_followup_sequences row, which
-  // late-payment-checker.js is the only sender left for once this gate
-  // retires latePaymentCheck() (adoption, GATE_DUNNING_ADOPT_ORPHANS, is
-  // dark by default) — so the stamp keeps happening under any gate
-  // combination, and it is guarded against overwriting a churned/archived
-  // customer's stage. Unset = byte-identical.
+  // (invoice-followups.js's markAtRiskForLongOverdue, warn-and-continue on
+  // failure rather than a bare await) with the ladder's own Day 60/90 steps
+  // (fireTouch, unconditional on GATE_DUNNING_LADDER_90 alone) and with
+  // late-payment-checker.js's own tiers — including for an invoice with no
+  // invoice_followup_sequences row, which late-payment-checker.js is the
+  // only sender left for once this gate retires latePaymentCheck()
+  // (adoption, GATE_DUNNING_ADOPT_ORPHANS, is dark by default). That
+  // checker call is gated on THIS gate alone (not unconditional): it reaches
+  // customers latePaymentCheck()'s own active/waveguard_tier filters would
+  // have excluded, so stamping unconditionally there would break
+  // "unset = byte-identical." Also guarded against overwriting a
+  // churned/archived customer's stage. Unset = byte-identical.
   balanceReminderLegacyOff: process.env.GATE_BALANCE_REMINDER_LEGACY_OFF === 'true',
 };
 
