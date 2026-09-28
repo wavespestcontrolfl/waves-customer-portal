@@ -727,8 +727,8 @@
     "stages": [],
     "sign_of": [],
     "traits": [
-      "Leaflets or leaves brown or blacken within days of a cold snap, worst on the most exposed growth",
-      "Leaves often look water-soaked before turning brown or black on exposed parts of the plant",
+      "Leaflets or leaves browned or blackened, worst on the most exposed growth",
+      "Some leaves look water-soaked and others brown or black on the exposed parts of the plant",
       "Damage is worse on plants in open, unprotected spots than those under canopy or near a building"
     ],
     "look_alikes": [],
@@ -790,7 +790,7 @@
     "review": {
       "status": "owner_approved",
       "notes": "",
-      "approval_hash": "a9bc29d0f30c428c7d47089a9d5663a9740695805ffccbda8fec1ea6103dbba1"
+      "approval_hash": "3864a4b257d7280760ad5c26fe7c08745ea691018e519465d740ee312ec51e4b"
     },
     "condition": {
       "hosts": [
@@ -800,14 +800,14 @@
       ],
       "signs": [],
       "symptoms": [
-        "Leaflets or leaves brown or blacken within days of a cold snap, worst on the most exposed growth",
-        "Leaves often look water-soaked before turning brown or black on exposed parts of the plant"
+        "Leaflets or leaves browned or blackened, worst on the most exposed growth",
+        "Some leaves look water-soaked and others brown or black on the exposed parts of the plant"
       ],
       "required_signature": {
-        "text": "A wide photo showing the water-soaked, then browned or blackened, leaf pattern shortly after a cold snap.",
+        "text": "A wide photo showing water-soaked and browned or blackened leaves, worst on the most exposed growth.",
         "elements": [
-          "Leaflets or leaves brown or blacken within days of a cold snap, worst on the most exposed growth",
-          "Leaves often look water-soaked before turning brown or black on exposed parts of the plant"
+          "Leaflets or leaves browned or blackened, worst on the most exposed growth",
+          "Some leaves look water-soaked and others brown or black on the exposed parts of the plant"
         ],
         "confirmable_by": "photo"
       },
@@ -850,7 +850,7 @@
     "stages": [],
     "sign_of": [],
     "traits": [
-      "Leaf scorch, wilting or smaller-than-normal new leaves on a recently planted tree or shrub",
+      "Leaf scorch, wilting or undersized new leaves on a fresh planting (stakes, new mulch ring or exposed root ball)",
       "Premature fall color or early leaf drop out of season on a new planting",
       "Growth stalls or slows noticeably compared to before the plant was moved"
     ],
@@ -925,7 +925,7 @@
     "review": {
       "status": "owner_approved",
       "notes": "",
-      "approval_hash": "dcac44b47c84b83b66ccc19bcd252e24202ada6127878c60cd420b5fd5a569bd"
+      "approval_hash": "3cb385242a6413701a584ce1edd601dd53d02ae7a537746a61c9f23ed316c299"
     },
     "condition": {
       "hosts": [
@@ -934,12 +934,12 @@
       ],
       "signs": [],
       "symptoms": [
-        "Leaf scorch, wilting or smaller-than-normal new leaves on a recently planted tree or shrub"
+        "Leaf scorch, wilting or undersized new leaves on a fresh planting (stakes, new mulch ring or exposed root ball)"
       ],
       "required_signature": {
-        "text": "A wide photo of the struggling new planting, noting how recently it was installed and whether the soil is wet or dry.",
+        "text": "A wide photo of the struggling plant showing signs of a new installation (stakes, a fresh mulch ring or the root ball edge) and whether the soil looks wet or dry.",
         "elements": [
-          "Leaf scorch, wilting or smaller-than-normal new leaves on a recently planted tree or shrub"
+          "Leaf scorch, wilting or undersized new leaves on a fresh planting (stakes, new mulch ring or exposed root ball)"
         ],
         "confirmable_by": "photo"
       },
