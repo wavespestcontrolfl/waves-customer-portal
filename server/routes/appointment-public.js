@@ -1180,6 +1180,38 @@ const visitPrepUpload = multer({
   },
 });
 
+// The eligibility derivation for an ALREADY-LOADED token row — the ONE
+// function both the pre-multer guard and the service's late recheck (via
+// reloadEligibleVisitPrepRow below) call, so the rule is computed in
+// exactly one place and can never drift between the two reads.
+async function deriveVisitPrepEligibility(svc) {
+  const visitInfoRaw = svc.visit_id ? await visitServicesFor(svc) : {};
+  const { state } = visitInfoRaw.visitUnknown ? { state: 'not_available' } : pageStateForGroup(svc, visitInfoRaw);
+  return visitPrep.visitPrepEligibility({
+    svc,
+    state,
+    visitUnknown: visitInfoRaw.visitUnknown,
+    dispatchOwnedUnreviewed: dispatchOwnedUnreviewed(svc),
+  });
+}
+
+// Reload the token's CURRENT row and re-derive eligibility with the SAME
+// function above. Returns null when the row is missing, its customer is
+// deleted, it is no longer the SAME row `expectedId` names (this route
+// never re-mints the token, so a mismatch means something is badly wrong),
+// or eligibility is false; otherwise the current row. Passed to
+// visit-prep.js as its `recheck`, called under the canonical stop lock —
+// eligibility can change between the pre-multer read and the write (the
+// visit can go en route, get cancelled, or a grouped sibling can push the
+// stop's state), and this is the one place that re-proves it.
+async function reloadEligibleVisitPrepRow(token, expectedId) {
+  const svc = await loadByToken(token);
+  if (!svc || svc.customer_deleted_at) return null;
+  if (expectedId && String(svc.id) !== String(expectedId)) return null;
+  const eligibility = await deriveVisitPrepEligibility(svc);
+  return eligibility.eligible ? svc : null;
+}
+
 router.post(
   '/:token/photos',
   // Token format + the sub-gate run BEFORE this route's own limiter (AGENTS.md:
@@ -1194,26 +1226,19 @@ router.post(
   // Load the token row, prove eligibility, and run the cheap (unlocked) cap
   // pre-check — all BEFORE multer ever buffers a byte, so an ineligible or
   // already-capped request never costs the memory or the S3 round trip.
+  // This is advisory only: the write re-proves both under the stop lock.
   async (req, res, next) => {
     try {
       const svc = await loadByToken(req.params.token);
       if (!svc || svc.customer_deleted_at) return res.status(404).json({ error: 'Not found' });
 
-      const visitInfoRaw = svc.visit_id ? await visitServicesFor(svc) : {};
-      const { state } = visitInfoRaw.visitUnknown ? { state: 'not_available' } : pageStateForGroup(svc, visitInfoRaw);
-      const eligibility = visitPrep.visitPrepEligibility({
-        svc,
-        state,
-        visitUnknown: visitInfoRaw.visitUnknown,
-        dispatchOwnedUnreviewed: dispatchOwnedUnreviewed(svc),
-      });
+      const eligibility = await deriveVisitPrepEligibility(svc);
       if (!eligibility.eligible) {
         return res.status(409).json({ error: "Photos can't be added to this visit online.", code: 'PREP_NOT_AVAILABLE' });
       }
 
       const summary = await visitPrep.visitPrepSummary(svc);
-      if (summary.submissionCount >= visitPrep.VISIT_PREP_LIMITS.submissionsPerVisit
-        || summary.photoCount >= visitPrep.VISIT_PREP_LIMITS.photosPerVisit) {
+      if (visitPrep.capReached(summary, 1)) {
         return res.status(409).json({ error: "You've reached the photo limit for this visit.", code: 'PREP_CAP_REACHED' });
       }
 
@@ -1235,6 +1260,8 @@ router.post(
     });
   },
   async (req, res, next) => {
+    const token = req.params.token;
+    const expectedId = req.visitPrepSvc.id;
     try {
       const result = await visitPrep.createVisitPrepSubmission({
         svc: req.visitPrepSvc,
@@ -1243,6 +1270,9 @@ router.post(
         topic: req.body?.topic,
         locationOnProperty: req.body?.locationOnProperty,
         entry: 'appointment_page',
+        // Re-proves eligibility on FRESH state under visit-prep.js's stop
+        // lock — the write's actual authority, not this pre-check.
+        recheck: () => reloadEligibleVisitPrepRow(token, expectedId),
       });
       // Never photo URLs/keys, the note, or any customer identity — the
       // token is shared with whoever received the visit text, and nothing
@@ -1256,7 +1286,10 @@ router.post(
         },
       });
     } catch (err) {
-      if (err && err.statusCode) return res.status(err.statusCode).json({ error: err.message, code: err.code });
+      // Only OUR OWN errors (visitPrep.js's prepError, marked `visitPrep`)
+      // are echoed to an anonymous caller — a library error that happens to
+      // carry a statusCode must never leak its message here.
+      if (err && err.visitPrep) return res.status(err.statusCode).json({ error: err.message, code: err.code });
       return next(err);
     }
   },
@@ -1265,6 +1298,8 @@ router.post(
 router._test = {
   pageState,
   prepPhotosField,
+  deriveVisitPrepEligibility,
+  reloadEligibleVisitPrepRow,
   confirmRaceVerdict,
   icsEscape,
   icsFold,

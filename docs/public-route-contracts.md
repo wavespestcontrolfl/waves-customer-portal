@@ -2305,39 +2305,64 @@ grouped/ungrouped state the GET computes is `'upcoming'`, the token's
 membership is known (not `visitUnknown`), `customers.active === true`, the
 visit is recurring-lineage (a one-time visit is out of scope for this lane),
 and the visit is not `dispatchOwnedUnreviewed` (the office hasn't reviewed
-it yet — same invariant the confirm write enforces) — THEN a cheap, unlocked
-cap pre-check (409 `PREP_CAP_REACHED` when the visit already has 3
-submissions or 6 photos) that runs BEFORE multer ever buffers a byte. ONLY
-THEN does `multer` (memory storage; 5 MB/file, 3 files, 6 fields, 2 KB field
-size, 10 parts) parse the body — a multer size limit is 413, every other
-multer limit is 400, both customer-safe and generic. Each file's declared
-mimetype AND its magic bytes (JPEG/PNG/WebP/HEIC-HEIF `ftyp` box) must agree
-on JPEG/PNG/WebP/HEIC/HEIF; HEIC/HEIF is converted to JPEG
+it yet — same invariant the confirm write enforces; this whole derivation is
+ONE function, `deriveVisitPrepEligibility`, shared with the late recheck
+below so the rule can never drift between the two reads) — THEN a cheap,
+unlocked cap pre-check (409 `PREP_CAP_REACHED` via the shared `capReached()`
+rule — the visit already has 3 submissions, or one more photo would push it
+past 6) that runs BEFORE multer ever buffers a byte. ONLY THEN does `multer`
+(memory storage; 5 MB/file, 3 files, 6 fields, 2 KB field size, 10 parts)
+parse the body — a multer size limit is 413, every other multer limit is
+400, both customer-safe and generic. Each file's declared mimetype AND its
+magic bytes (JPEG/PNG/WebP/HEIC-HEIF `ftyp` box) must agree on
+JPEG/PNG/WebP/HEIC/HEIF; HEIC/HEIF is converted to JPEG
 (`convertHeicToJpeg`) before storage, and a conversion failure 400s that
-photo. Photos are deduped by `sha256` of the STORED bytes per
-`scheduled_service_id`; an all-duplicate resubmit writes nothing and answers
-200 (idempotent). The whole request succeeds or fails atomically: uploads
-must all succeed (a storage failure is 503 `PREP_STORAGE_UNAVAILABLE`, no
-rows written, and any already-uploaded objects for that request are
-deleted), and the final cap check re-runs under a `SELECT … FOR UPDATE` on
-the token's `scheduled_services` row inside the same transaction that
-inserts the submission + photo rows — a locked-recount cap miss rolls back
-the transaction and deletes the uploaded S3 objects. `property_id`,
-`customer_id`, and `visit_id` are copied from the locked `scheduled_services`
-row, never from the request body. The response is `{ ok: true, prepPhotos:
-{ eligible, photoCount, photosRemaining } }` — 201 when a submission was
-created, 200 on the idempotent duplicate-only case — and NEVER carries a
-photo URL, an S3 key, the note, or any customer identity: the token is
-shared with whoever received the visit text, so nothing submitted through
-it is ever shown back. Sends NOTHING to anyone (no SMS/email/push/admin
-alert) and never touches `scheduled_services.status`, date, window, or
-technician. Additive on the existing GET: gate on adds a top-level
-`prepPhotos: { eligible, photoCount, photosRemaining }` (the same shape,
-computed whether or not the visit is currently eligible, so the client can
-render the right empty/full state); gate off, the key is absent and the GET
-payload is byte-identical to before this lane. A prepPhotos lookup failure
-on GET fails soft — the key is omitted and a warning is logged, never a
-500).
+photo (`PREP_INVALID_PHOTO`); an unrecognized `topic`/`locationOnProperty`
+is its own code, `PREP_INVALID_FIELD`. Within-request duplicates (the same
+photo attached twice in one submission) fold to one candidate before upload.
+
+The write is NEVER trusted to the pre-check alone. `uploadFunnelPhotoToS3`
+runs first — storage must succeed for the request to succeed (a failure is
+503 `PREP_STORAGE_UNAVAILABLE`, no rows written, any already-uploaded
+objects for that request deleted) — and ONLY THEN does the write take the
+CANONICAL stop lock (`visit-groups.js`'s `lockStopForRow`, the same
+advisory lock every other stop writer takes, retried up to twice on a
+concurrent stop move before answering `PREP_NOT_AVAILABLE`) and re-run,
+under that lock, on FRESH state: (1) a late recheck — the SAME
+`deriveVisitPrepEligibility` the pre-check used, reloaded via `loadByToken`
+and refused (`PREP_NOT_AVAILABLE`, nothing written) if the row is gone, its
+customer deleted, it is no longer the row the pre-check saw, or it is no
+longer eligible (a status change — en route, cancelled, a grouped sibling
+moving the stop's state — landing between the two reads); (2) the dedupe
+check itself, by `sha256` of the STORED bytes per `scheduled_service_id` —
+run HERE, not before upload, so two concurrent identical submissions can
+both upload and the loser is recognized under the lock rather than racing
+the unique index; a photo found to already exist is dropped and its
+just-uploaded object deleted — an all-duplicate resubmit writes nothing and
+answers 200 (idempotent); (3) the real cap re-count (`capReached()` again,
+with the actual number of new photos), which a GROUPED visit computes
+across every member of the stop (by `visit_id`), so two members racing to
+add photos to the same stop can never together exceed the cap — the loser
+gets 409 `PREP_CAP_REACHED` and its uploaded object is deleted. `property_id`,
+`customer_id`, and `visit_id` on the inserted rows come from the RECHECKED
+row, never the pre-lock read and never the request body. The response is
+`{ ok: true, prepPhotos: { eligible, photoCount, photosRemaining } }` — 201
+when a submission was created, 200 on the idempotent duplicate-only case —
+and NEVER carries a photo URL, an S3 key, the note, or any customer
+identity: the token is shared with whoever received the visit text, so
+nothing submitted through it is ever shown back. Only the route's OWN
+errors (visit-prep.js's `prepError`, marked internally so the route can
+tell them apart) are ever echoed to the caller; any other error — a library
+error that happens to carry a `statusCode` included — goes to the generic
+error handler, never its raw message. Sends NOTHING to anyone (no
+SMS/email/push/admin alert) and never touches `scheduled_services.status`,
+date, window, or technician. Additive on the existing GET: gate on adds a
+top-level `prepPhotos: { eligible, photoCount, photosRemaining }` (the same
+shape, computed whether or not the visit is currently eligible, so the
+client can render the right empty/full state); gate off, the key is absent
+and the GET payload is byte-identical to before this lane. A prepPhotos
+lookup failure on GET fails soft — the key is omitted and a warning is
+logged, never a 500).
 `GET /api/booking/config` (the /book page's public config payload, no token)
 gains `van_scene` — the same `GATE_VAN_SCENE` boolean, read by booking step 4
 to show the van scene above the secure-card block. Unset gate = `false`

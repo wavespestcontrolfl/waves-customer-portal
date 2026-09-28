@@ -10,9 +10,8 @@
  */
 
 const db = require('../models/db');
-const config = require('../config');
 const logger = require('./logger');
-const { S3Client, DeleteObjectCommand } = require('@aws-sdk/client-s3');
+const PhotoService = require('./photos');
 const { visitPrepPhotosLive } = require('../config/feature-gates');
 const { MAX_PHOTOS, MAX_PHOTO_BYTES } = require('../utils/request-photo-validation');
 const { convertHeicToJpeg } = require('./heic-to-jpeg');
@@ -78,27 +77,25 @@ function isHeicFamily(mime) {
   return mimeFamily(mime) === 'image/heic';
 }
 
+// Every error this module throws is marked `visitPrep: true` so the route's
+// final handler can tell "our own, customer-safe message" apart from any
+// other error that happens to carry a statusCode (which would otherwise
+// leak an unrelated library message to an anonymous caller).
 function prepError(message, statusCode, code) {
   const err = new Error(message);
   err.statusCode = statusCode;
   err.code = code;
+  err.visitPrep = true;
   return err;
 }
 
-const s3 = new S3Client({
-  region: config.s3?.region,
-  credentials: config.s3?.accessKeyId
-    ? { accessKeyId: config.s3.accessKeyId, secretAccessKey: config.s3.secretAccessKey }
-    : undefined,
-});
-
-// Same best-effort delete-on-rollback pattern as service-photos.js's
-// deleteUploadedObject: a cleanup failure is logged, never thrown — the
-// caller is already unwinding a failed request.
+// Reuses the existing photo-delete authority (server/services/photos.js)
+// instead of a second S3 client — wrapped so a cleanup failure is logged,
+// never thrown: the caller is already unwinding a failed/duplicate request.
 async function deleteUploadedObject(key) {
   if (!key) return;
   try {
-    await s3.send(new DeleteObjectCommand({ Bucket: config.s3.bucket, Key: key }));
+    await PhotoService.deletePhoto(key);
   } catch (err) {
     logger.warn(`[visit-prep] S3 cleanup failed key=${key}: ${err.message}`);
   }
@@ -117,6 +114,15 @@ function visitPrepEligibility({ svc, state, visitUnknown, dispatchOwnedUnreviewe
   if (!isRecurringLineageVisit(svc)) return { eligible: false, reason: 'one_time_visit' };
   if (dispatchOwnedUnreviewed) return { eligible: false, reason: 'dispatch_owned_unreviewed' };
   return { eligible: true, reason: null };
+}
+
+// The ONE cap rule. `adding` is how many NEW photos this decision covers —
+// the route's cheap pre-check (files not parsed yet) asks "would even one
+// more be over?" (adding=1, the default); the locked check under the stop
+// lock asks with the real count about to be inserted.
+function capReached(summary, adding = 1) {
+  return summary.submissionCount >= VISIT_PREP_LIMITS.submissionsPerVisit
+    || summary.photoCount + adding > VISIT_PREP_LIMITS.photosPerVisit;
 }
 
 // Per-STOP counts: a grouped visit (svc.visit_id set) counts every
@@ -141,6 +147,22 @@ async function visitPrepSummary(svc, conn = db) {
     photoCount,
     photosRemaining: Math.max(0, VISIT_PREP_LIMITS.photosPerVisit - photoCount),
     submissionCount: Number(submissionRow?.count || 0),
+  };
+}
+
+// Stage 1 — field normalization. topic/location failures are their own
+// code (PREP_INVALID_FIELD), distinct from a bad photo.
+function normalizeSubmissionFields({ topic, locationOnProperty, note }) {
+  if (topic != null && topic !== '' && !TOPICS.includes(topic)) {
+    throw prepError('Unrecognized topic.', 400, 'PREP_INVALID_FIELD');
+  }
+  if (locationOnProperty != null && locationOnProperty !== '' && !LOCATIONS.includes(locationOnProperty)) {
+    throw prepError('Unrecognized location.', 400, 'PREP_INVALID_FIELD');
+  }
+  return {
+    topic: topic || null,
+    locationOnProperty: locationOnProperty || null,
+    note: stripHtml(String(note || '').trim()).slice(0, VISIT_PREP_LIMITS.noteMaxChars) || null,
   };
 }
 
@@ -176,23 +198,11 @@ async function prepareUploadFile(file) {
   return { buffer, mimeType: mimeFamily(declared) };
 }
 
-/**
- * Create one prep submission for `svc` (the token's scheduled_services row,
- * with at least id/customer_id/property_id/visit_id selected).
- *
- * @param {object} opts
- * @param {object} opts.svc
- * @param {Array}  opts.files    multer memory files: [{ buffer, mimetype, size, originalname }]
- * @param {string} [opts.note]
- * @param {string} [opts.topic]
- * @param {string} [opts.locationOnProperty]
- * @param {string} opts.entry
- * @returns {Promise<{ created: boolean, summary: { photoCount, photosRemaining, submissionCount } }>}
- */
-async function createVisitPrepSubmission({
-  svc, files, note, topic, locationOnProperty, entry,
-}) {
-  if (!svc || !svc.id) throw prepError('Visit not found.', 404, 'PREP_NOT_FOUND');
+// Stage 2 — file preparation: count bounds, per-file validate/convert, hash
+// (on the STORED, post-conversion bytes), and within-request dedupe (a
+// customer picking the same photo twice in one submission folds to one).
+// Pure/no I/O besides the per-file HEIC conversion — no DB, no S3.
+async function prepareFiles(files) {
   const fileList = Array.isArray(files) ? files : [];
   if (fileList.length < 1) {
     throw prepError('Attach at least one photo.', 400, 'PREP_INVALID_PHOTO');
@@ -200,55 +210,27 @@ async function createVisitPrepSubmission({
   if (fileList.length > VISIT_PREP_LIMITS.photosPerSubmission) {
     throw prepError(`Attach no more than ${VISIT_PREP_LIMITS.photosPerSubmission} photos.`, 400, 'PREP_INVALID_PHOTO');
   }
-  if (topic != null && topic !== '' && !TOPICS.includes(topic)) {
-    throw prepError('Unrecognized topic.', 400, 'PREP_INVALID_PHOTO');
-  }
-  if (locationOnProperty != null && locationOnProperty !== '' && !LOCATIONS.includes(locationOnProperty)) {
-    throw prepError('Unrecognized location.', 400, 'PREP_INVALID_PHOTO');
-  }
-  const cleanNote = stripHtml(String(note || '').trim()).slice(0, VISIT_PREP_LIMITS.noteMaxChars) || null;
-
-  // Cheap pre-check (unlocked) — the route also runs its own copy before
-  // multer parses the body; this one guards a direct service caller too.
-  const preSummary = await visitPrepSummary(svc);
-  if (preSummary.submissionCount >= VISIT_PREP_LIMITS.submissionsPerVisit
-    || preSummary.photoCount >= VISIT_PREP_LIMITS.photosPerVisit) {
-    throw prepError("You've reached the photo limit for this visit.", 409, 'PREP_CAP_REACHED');
-  }
-
-  // Validate + normalize every file (sniff, size, HEIC convert) BEFORE any
-  // upload — a rejected request never touches S3.
   const prepared = [];
-  for (const file of fileList) {
-    prepared.push(await prepareUploadFile(file));
-  }
-
-  // Dedupe against photos already stored for THIS scheduled_service_id, and
-  // within this request, on the STORED (post-conversion) bytes.
-  const existing = await db('visit_prep_photos').where({ scheduled_service_id: svc.id }).select('image_sha256');
-  const existingHashes = new Set(existing.map((r) => r.image_sha256));
   const seen = new Set();
-  const toStore = [];
-  for (const p of prepared) {
-    const sha256 = hashBuffer(p.buffer);
-    if (existingHashes.has(sha256) || seen.has(sha256)) continue;
+  for (const file of fileList) {
+    const item = await prepareUploadFile(file);
+    const sha256 = hashBuffer(item.buffer);
+    if (seen.has(sha256)) continue;
     seen.add(sha256);
-    toStore.push({ ...p, sha256 });
+    prepared.push({ ...item, sha256 });
   }
+  return prepared;
+}
 
-  if (toStore.length === 0) {
-    // Every photo in the request already exists — idempotent double-submit:
-    // write nothing, report the unchanged summary.
-    return { created: false, summary: await visitPrepSummary(svc) };
-  }
-
-  // Storage MUST succeed for the request to succeed (the response tells the
-  // customer the photos are attached) — best-effort is not acceptable here.
+// Stage 3 — upload all-or-clean-up. Storage MUST succeed for the request to
+// succeed (the response tells the customer the photos are attached) — a
+// failure deletes whatever this call already uploaded and throws.
+async function uploadAll(scheduledServiceId, prepared) {
   const uploaded = [];
   try {
-    for (const item of toStore) {
+    for (const item of prepared) {
       const s3Key = await uploadFunnelPhotoToS3({
-        rowId: svc.id,
+        rowId: scheduledServiceId,
         keyPrefix: 'visitprep',
         index: uploaded.length,
         mimeType: item.mimeType,
@@ -259,45 +241,138 @@ async function createVisitPrepSubmission({
     }
   } catch (err) {
     await Promise.all(uploaded.map((u) => deleteUploadedObject(u.s3Key)));
-    throw err.statusCode ? err : prepError('Photo storage is unavailable — try again shortly.', 503, 'PREP_STORAGE_UNAVAILABLE');
+    throw err.visitPrep ? err : prepError('Photo storage is unavailable — try again shortly.', 503, 'PREP_STORAGE_UNAVAILABLE');
+  }
+  return uploaded;
+}
+
+// Stage 4 — the locked persist, run as the callback under the canonical
+// stop lock (withStopLock below). Rechecks eligibility on FRESH state,
+// dedupes against the DB under the lock, re-checks the cap under the lock,
+// then inserts. `dropped` (DB-duplicate photos found under the lock) is
+// returned so the caller can delete their already-uploaded objects.
+async function persistLocked(trx, {
+  uploaded, recheck, topic, locationOnProperty, note, entry,
+}) {
+  const current = await recheck();
+  if (!current) {
+    throw prepError("Photos can't be added to this visit online.", 409, 'PREP_NOT_AVAILABLE');
   }
 
-  try {
-    await db.transaction(async (trx) => {
-      // Locked re-count: the cheap pre-check above is advisory only.
-      await trx('scheduled_services').where({ id: svc.id }).forUpdate().first('id');
-      const locked = await visitPrepSummary(svc, trx);
-      if (locked.submissionCount >= VISIT_PREP_LIMITS.submissionsPerVisit
-        || locked.photoCount + uploaded.length > VISIT_PREP_LIMITS.photosPerVisit) {
-        throw prepError("You've reached the photo limit for this visit.", 409, 'PREP_CAP_REACHED');
+  const existing = await trx('visit_prep_photos').where({ scheduled_service_id: current.id }).select('image_sha256');
+  const existingHashes = new Set(existing.map((r) => r.image_sha256));
+  const toStore = uploaded.filter((u) => !existingHashes.has(u.sha256));
+  const dropped = uploaded.filter((u) => existingHashes.has(u.sha256));
+
+  if (toStore.length === 0) {
+    return { created: false, dropped, current };
+  }
+
+  const locked = await visitPrepSummary(current, trx);
+  if (capReached(locked, toStore.length)) {
+    throw prepError("You've reached the photo limit for this visit.", 409, 'PREP_CAP_REACHED');
+  }
+
+  const [submission] = await trx('visit_prep_submissions').insert({
+    scheduled_service_id: current.id,
+    visit_id: current.visit_id || null,
+    customer_id: current.customer_id,
+    property_id: current.property_id || null,
+    topic,
+    location_on_property: locationOnProperty,
+    note,
+    entry: String(entry || '').slice(0, 30) || 'appointment_page',
+  }).returning('id');
+  const submissionId = submission.id || submission;
+  await trx('visit_prep_photos').insert(toStore.map((u, index) => ({
+    submission_id: submissionId,
+    scheduled_service_id: current.id,
+    s3_key: u.s3Key,
+    mime_type: u.mimeType,
+    byte_size: u.buffer.length,
+    image_sha256: u.sha256,
+    photo_index: index,
+  })));
+
+  return { created: true, dropped, current };
+}
+
+// Runs `fn(trx)` under the CANONICAL stop lock (visit-groups.js's
+// lockStopForRow — the same advisory lock every other stop writer takes),
+// retrying its peek->lock->verify VISIT_STOP_MOVED race up to 2 times, the
+// same retry shape as appointment-public.js's own underStopLock. Not
+// shared directly: that route requires this service, so importing its
+// helper back would form a require cycle — this is a deliberately minimal
+// local copy of just the retry loop, not the route's other logic.
+async function withStopLock(svcId, fn) {
+  const { lockStopForRow } = require('./visit-groups');
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await db.transaction(async (trx) => {
+        const locked = await lockStopForRow(trx, svcId);
+        if (locked === null) {
+          throw prepError("Photos can't be added to this visit online.", 409, 'PREP_NOT_AVAILABLE');
+        }
+        return fn(trx);
+      });
+    } catch (err) {
+      if (err && err.code === 'VISIT_STOP_MOVED') {
+        if (attempt < 2) continue;
+        throw prepError("Photos can't be added to this visit online.", 409, 'PREP_NOT_AVAILABLE');
       }
-      const [submission] = await trx('visit_prep_submissions').insert({
-        scheduled_service_id: svc.id,
-        visit_id: svc.visit_id || null,
-        customer_id: svc.customer_id,
-        property_id: svc.property_id || null,
-        topic: topic || null,
-        location_on_property: locationOnProperty || null,
-        note: cleanNote,
-        entry: String(entry || '').slice(0, 30) || 'appointment_page',
-      }).returning('id');
-      const submissionId = submission.id || submission;
-      await trx('visit_prep_photos').insert(uploaded.map((u, index) => ({
-        submission_id: submissionId,
-        scheduled_service_id: svc.id,
-        s3_key: u.s3Key,
-        mime_type: u.mimeType,
-        byte_size: u.buffer.length,
-        image_sha256: u.sha256,
-        photo_index: index,
-      })));
-    });
+      throw err;
+    }
+  }
+}
+
+/**
+ * Create one prep submission for `svc` (the token's scheduled_services row
+ * as read BEFORE the lock — used only to seed the upload's S3 folder and
+ * the unlocked stages; every DB write uses `recheck`'s fresh row instead).
+ *
+ * @param {object} opts
+ * @param {object} opts.svc
+ * @param {Array}  opts.files    multer memory files: [{ buffer, mimetype, size, originalname }]
+ * @param {string} [opts.note]
+ * @param {string} [opts.topic]
+ * @param {string} [opts.locationOnProperty]
+ * @param {string} opts.entry
+ * @param {() => Promise<object|null>} opts.recheck  called under the stop
+ *   lock; must return the CURRENT eligible visit row (same shape as `svc`,
+ *   at least id/customer_id/property_id/visit_id) or null when the visit is
+ *   no longer eligible. REQUIRED — the caller (appointment-public.js) owns
+ *   the eligibility rule and must not let this service go stale.
+ * @returns {Promise<{ created: boolean, summary: { photoCount, photosRemaining, submissionCount } }>}
+ */
+async function createVisitPrepSubmission({
+  svc, files, note, topic, locationOnProperty, entry, recheck,
+}) {
+  if (!svc || !svc.id) throw prepError('Visit not found.', 404, 'PREP_NOT_FOUND');
+  if (typeof recheck !== 'function') throw new Error('createVisitPrepSubmission requires a recheck function');
+
+  const fields = normalizeSubmissionFields({ topic, locationOnProperty, note });
+  const prepared = await prepareFiles(files);
+
+  if (prepared.length === 0) {
+    // Every candidate photo was a within-request duplicate of another one
+    // in the same submission — nothing to upload or persist.
+    return { created: false, summary: await visitPrepSummary(svc) };
+  }
+
+  const uploaded = await uploadAll(svc.id, prepared);
+
+  let result;
+  try {
+    result = await withStopLock(svc.id, (trx) => persistLocked(trx, { uploaded, recheck, ...fields, entry }));
   } catch (err) {
     await Promise.all(uploaded.map((u) => deleteUploadedObject(u.s3Key)));
     throw err;
   }
+  // Duplicates discovered under the lock were never persisted either way —
+  // their already-uploaded objects are cleaned up regardless of outcome.
+  await Promise.all(result.dropped.map((u) => deleteUploadedObject(u.s3Key)));
 
-  return { created: true, summary: await visitPrepSummary(svc) };
+  return { created: result.created, summary: await visitPrepSummary(result.current) };
 }
 
 module.exports = {
@@ -306,7 +381,10 @@ module.exports = {
   LOCATIONS,
   isRecurringLineageVisit,
   visitPrepEligibility,
+  capReached,
   visitPrepSummary,
   createVisitPrepSubmission,
-  _internal: { detectedImageMime, mimeFamily, stripHtml, prepareUploadFile, deleteUploadedObject },
+  _internal: {
+    detectedImageMime, mimeFamily, stripHtml, prepareUploadFile, prepareFiles, normalizeSubmissionFields, deleteUploadedObject,
+  },
 };

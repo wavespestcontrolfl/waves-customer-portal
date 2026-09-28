@@ -2,9 +2,14 @@
  * Real migrated PostgreSQL: visit_prep_submissions / visit_prep_photos.
  * Proves the migration's up/down/up is clean, the (scheduled_service_id,
  * image_sha256) dedupe index works, cascades/SET NULL behave as designed,
- * and the locked cap re-count (createVisitPrepSubmission) rejects a
- * submission that would exceed photosPerVisit. S3 is mocked throughout —
- * every fixture rolls back.
+ * and — through the REAL createVisitPrepSubmission against the REAL
+ * canonical stop lock (visit-groups.js's lockStopForRow, not mocked here) —
+ * that two members of one grouped stop cannot together exceed
+ * photosPerVisit, that two concurrent identical uploads settle to exactly
+ * one stored photo with the loser's object deleted, and that a recheck
+ * returning null writes nothing and cleans up its upload. S3 is mocked
+ * throughout (uploadFunnelPhotoToS3 + PhotoService.deletePhoto) — every
+ * fixture rolls back or is deleted manually where noted.
  */
 const SKIP = !process.env.DATABASE_URL;
 const postgres = SKIP ? describe.skip : describe;
@@ -17,16 +22,16 @@ jest.mock('../utils/funnel-photos', () => ({
   storeFunnelPhotos: jest.fn(),
   storeTreeShrubCustomerPhotos: jest.fn(),
 }));
-const mockS3Send = jest.fn().mockResolvedValue({});
-jest.mock('@aws-sdk/client-s3', () => ({
-  S3Client: jest.fn().mockImplementation(() => ({ send: (...args) => mockS3Send(...args) })),
-  DeleteObjectCommand: jest.fn((input) => ({ input })),
+const mockDeletePhoto = jest.fn().mockResolvedValue(undefined);
+jest.mock('../services/photos', () => ({
+  deletePhoto: (...args) => mockDeletePhoto(...args),
 }));
 
 function sha256(buf) { return crypto.createHash('sha256').update(buf).digest('hex'); }
 function jpegBytes(seed) {
   return Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.from(String(seed).padEnd(32, '0'))]);
 }
+let uploadCounter = 0;
 
 postgres('visit prep photos against migrated PostgreSQL', () => {
   let database;
@@ -39,7 +44,16 @@ postgres('visit prep photos against migrated PostgreSQL', () => {
       && url.pathname === `/waves_qa_${String(process.env.WAVES_WORKTREE_ID || '').replaceAll('-', '')}`;
     const ownedScratch = url.pathname.includes('visit_prep');
     if (!localCI && !ownedQA && !ownedScratch) throw new Error('Use a disposable local/CI/scratch database for this suite.');
-    database = require('knex')({ client: 'pg', connection, pool: { min: 0, max: 3 } });
+    database = require('knex')({ client: 'pg', connection, pool: { min: 0, max: 5 } });
+  });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    uploadCounter = 0;
+    mockUploadFunnelPhotoToS3.mockImplementation(async () => {
+      uploadCounter += 1;
+      return `visitprep/test-${uploadCounter}.jpg`;
+    });
   });
 
   afterAll(async () => {
@@ -61,6 +75,37 @@ postgres('visit prep photos against migrated PostgreSQL', () => {
       ...overrides,
     });
     return { customerId, svcId };
+  }
+
+  // A grouped stop: one service_visits row + TWO scheduled_services rows
+  // sharing visit_id, customer_id, and scheduled_date (no property_id) —
+  // the same customer_id+date pair is what lockStopForRow's stopBaseKey
+  // hashes, so both members serialize on the SAME advisory lock even
+  // though each has its own scheduled_service_id.
+  async function fixtureGroupedStop(trx) {
+    const customerId = randomUUID();
+    const visitId = randomUUID();
+    const svcAId = randomUUID();
+    const svcBId = randomUUID();
+    const scheduledDate = '2099-02-01';
+    await trx('customers').insert({
+      id: customerId, first_name: 'Synthetic', last_name: 'Grouped',
+      phone: `+1555${customerId.slice(0, 7)}`, address_line1: '200 Synthetic Ln',
+      city: 'Bradenton', zip: '34201', active: true,
+    });
+    await trx('service_visits').insert({
+      id: visitId, customer_id: customerId, scheduled_date: scheduledDate,
+      stop_base_key: `${customerId}:${scheduledDate}`, stop_seq: 1, status: 'open', created_by: 'test',
+    });
+    await trx('scheduled_services').insert({
+      id: svcAId, customer_id: customerId, scheduled_date: scheduledDate,
+      service_type: 'pest_control', status: 'confirmed', is_recurring: true, visit_id: visitId,
+    });
+    await trx('scheduled_services').insert({
+      id: svcBId, customer_id: customerId, scheduled_date: scheduledDate,
+      service_type: 'lawn_care', status: 'confirmed', is_recurring: true, visit_id: visitId,
+    });
+    return { customerId, visitId, svcAId, svcBId };
   }
 
   test('migration up/down/up is clean', async () => {
@@ -158,60 +203,188 @@ postgres('visit prep photos against migrated PostgreSQL', () => {
     }
   });
 
-  test('createVisitPrepSubmission: the locked cap re-count rejects a submission that would exceed photosPerVisit', async () => {
-    process.env.GATE_VISIT_PREP_PHOTOS = 'true';
-    const realDb = require('../models/db');
+  // The remaining tests exercise the REAL createVisitPrepSubmission end to
+  // end (its own internal db.transaction + the REAL lockStopForRow advisory
+  // lock), so fixtures must COMMIT — a rolled-back trx would never be
+  // visible to the service's own connection. Cleanup is manual.
+  describe('createVisitPrepSubmission against the real stop lock', () => {
     const { createVisitPrepSubmission, VISIT_PREP_LIMITS } = require('../services/visit-prep');
+    let realDb;
+    beforeAll(() => { realDb = require('../models/db'); });
 
-    let customerId;
-    let svcId;
-    const trx = await database.transaction();
-    try {
-      ({ customerId, svcId } = await fixtureSvc(trx));
-      // Seed the visit right up to one below the cap (5 of 6).
-      const submissionId = randomUUID();
-      await trx('visit_prep_submissions').insert({
-        id: submissionId, scheduled_service_id: svcId, customer_id: customerId, entry: 'appointment_page',
-      });
-      for (let i = 0; i < 5; i += 1) {
-        await trx('visit_prep_photos').insert({
-          id: randomUUID(), submission_id: submissionId, scheduled_service_id: svcId,
-          s3_key: `visitprep/seed-${i}.jpg`, mime_type: 'image/jpeg', byte_size: 100,
-          image_sha256: sha256(jpegBytes(`seed-${i}`)), photo_index: i,
+    test('the locked cap re-count rejects a submission that would exceed photosPerVisit', async () => {
+      let customerId;
+      let svcId;
+      const trx = await database.transaction();
+      try {
+        ({ customerId, svcId } = await fixtureSvc(trx));
+        const submissionId = randomUUID();
+        await trx('visit_prep_submissions').insert({
+          id: submissionId, scheduled_service_id: svcId, customer_id: customerId, entry: 'appointment_page',
         });
+        for (let i = 0; i < 5; i += 1) {
+          await trx('visit_prep_photos').insert({
+            id: randomUUID(), submission_id: submissionId, scheduled_service_id: svcId,
+            s3_key: `visitprep/seed-${i}.jpg`, mime_type: 'image/jpeg', byte_size: 100,
+            image_sha256: sha256(jpegBytes(`seed-${i}`)), photo_index: i,
+          });
+        }
+        await trx.commit();
+      } catch (err) {
+        await trx.rollback();
+        throw err;
       }
-      await trx.commit();
-    } catch (err) {
-      await trx.rollback();
-      throw err;
-    }
 
-    // createVisitPrepSubmission runs against the REAL db module (its own
-    // internal transaction), so the seed above had to commit first — clean
-    // up manually in `finally`.
-    try {
-      mockUploadFunnelPhotoToS3.mockImplementation(async ({ index }) => `visitprep/new-${index}.jpg`);
-      const svc = { id: svcId, customer_id: customerId, property_id: null, visit_id: null };
-      // 2 new (distinct-hash) photos on top of 5 existing = 7 > cap 6.
-      const files = [
-        { buffer: jpegBytes('new-0'), mimetype: 'image/jpeg' },
-        { buffer: jpegBytes('new-1'), mimetype: 'image/jpeg' },
-      ];
-      await expect(createVisitPrepSubmission({ svc, files, entry: 'appointment_page' }))
-        .rejects.toMatchObject({ statusCode: 409, code: 'PREP_CAP_REACHED' });
+      try {
+        const svc = { id: svcId, customer_id: customerId, property_id: null, visit_id: null };
+        const recheck = async () => svc;
+        // 2 new (distinct-hash) photos on top of 5 existing = 7 > cap 6.
+        const files = [
+          { buffer: jpegBytes('new-0'), mimetype: 'image/jpeg' },
+          { buffer: jpegBytes('new-1'), mimetype: 'image/jpeg' },
+        ];
+        await expect(createVisitPrepSubmission({ svc, files, entry: 'appointment_page', recheck }))
+          .rejects.toMatchObject({ statusCode: 409, code: 'PREP_CAP_REACHED' });
+        // Both candidate photos were uploaded before the lock rejected them
+        // — the caps rejection must have cleaned both up.
+        expect(mockDeletePhoto).toHaveBeenCalledTimes(2);
 
-      const photoCount = Number((await realDb('visit_prep_photos').where({ scheduled_service_id: svcId }).count('id as n').first()).n);
-      expect(photoCount).toBe(5); // unchanged — the transaction rolled back
-      expect(VISIT_PREP_LIMITS.photosPerVisit).toBe(6);
+        const photoCount = Number((await realDb('visit_prep_photos').where({ scheduled_service_id: svcId }).count('id as n').first()).n);
+        expect(photoCount).toBe(5); // unchanged — the transaction rolled back
+        expect(VISIT_PREP_LIMITS.photosPerVisit).toBe(6);
 
-      // One photo under the cap succeeds and lands exactly at the cap.
-      mockUploadFunnelPhotoToS3.mockClear();
-      const ok = await createVisitPrepSubmission({ svc, files: [{ buffer: jpegBytes('new-2'), mimetype: 'image/jpeg' }], entry: 'appointment_page' });
-      expect(ok.created).toBe(true);
-      expect(ok.summary.photoCount).toBe(6);
-      expect(ok.summary.photosRemaining).toBe(0);
-    } finally {
-      await realDb('scheduled_services').where({ id: svcId }).del();
-    }
+        // One photo under the cap succeeds and lands exactly at the cap.
+        mockDeletePhoto.mockClear();
+        const ok = await createVisitPrepSubmission({ svc, files: [{ buffer: jpegBytes('new-2'), mimetype: 'image/jpeg' }], entry: 'appointment_page', recheck });
+        expect(ok.created).toBe(true);
+        expect(ok.summary.photoCount).toBe(6);
+        expect(ok.summary.photosRemaining).toBe(0);
+        expect(mockDeletePhoto).not.toHaveBeenCalled();
+      } finally {
+        await realDb('scheduled_services').where({ id: svcId }).del();
+      }
+    });
+
+    test('a null recheck writes nothing and deletes the just-uploaded object', async () => {
+      let customerId;
+      let svcId;
+      const trx = await database.transaction();
+      try {
+        ({ customerId, svcId } = await fixtureSvc(trx));
+        await trx.commit();
+      } catch (err) {
+        await trx.rollback();
+        throw err;
+      }
+      try {
+        const svc = { id: svcId, customer_id: customerId, property_id: null, visit_id: null };
+        await expect(createVisitPrepSubmission({
+          svc, files: [{ buffer: jpegBytes('gone'), mimetype: 'image/jpeg' }], entry: 'appointment_page', recheck: async () => null,
+        })).rejects.toMatchObject({ statusCode: 409, code: 'PREP_NOT_AVAILABLE' });
+        expect(mockDeletePhoto).toHaveBeenCalledTimes(1);
+        const rows = await realDb('visit_prep_submissions').where({ scheduled_service_id: svcId });
+        expect(rows).toHaveLength(0);
+      } finally {
+        await realDb('scheduled_services').where({ id: svcId }).del();
+      }
+    });
+
+    test('two members of ONE grouped stop cannot together exceed photosPerVisit', async () => {
+      let fixture;
+      const trx = await database.transaction();
+      try {
+        fixture = await fixtureGroupedStop(trx);
+        // Seed 5 of 6 against member A, scoped by the shared visit_id.
+        const submissionId = randomUUID();
+        await trx('visit_prep_submissions').insert({
+          id: submissionId, scheduled_service_id: fixture.svcAId, visit_id: fixture.visitId,
+          customer_id: fixture.customerId, entry: 'appointment_page',
+        });
+        for (let i = 0; i < 5; i += 1) {
+          await trx('visit_prep_photos').insert({
+            id: randomUUID(), submission_id: submissionId, scheduled_service_id: fixture.svcAId,
+            s3_key: `visitprep/group-seed-${i}.jpg`, mime_type: 'image/jpeg', byte_size: 100,
+            image_sha256: sha256(jpegBytes(`group-seed-${i}`)), photo_index: i,
+          });
+        }
+        await trx.commit();
+      } catch (err) {
+        await trx.rollback();
+        throw err;
+      }
+
+      try {
+        const svcA = { id: fixture.svcAId, customer_id: fixture.customerId, property_id: null, visit_id: fixture.visitId };
+        const svcB = { id: fixture.svcBId, customer_id: fixture.customerId, property_id: null, visit_id: fixture.visitId };
+        // Both members try to add ONE new (distinct-hash) photo at the same
+        // time — together that is 5+1+1=7 > cap 6, but each alone would fit.
+        // The canonical stop lock must serialize member A and member B
+        // (different scheduled_service_id, SAME stop) so only one wins.
+        const results = await Promise.allSettled([
+          createVisitPrepSubmission({
+            svc: svcA, files: [{ buffer: jpegBytes('member-a'), mimetype: 'image/jpeg' }], entry: 'appointment_page', recheck: async () => svcA,
+          }),
+          createVisitPrepSubmission({
+            svc: svcB, files: [{ buffer: jpegBytes('member-b'), mimetype: 'image/jpeg' }], entry: 'appointment_page', recheck: async () => svcB,
+          }),
+        ]);
+
+        const fulfilled = results.filter((r) => r.status === 'fulfilled');
+        const rejected = results.filter((r) => r.status === 'rejected');
+        expect(fulfilled).toHaveLength(1);
+        expect(rejected).toHaveLength(1);
+        expect(rejected[0].reason).toMatchObject({ statusCode: 409, code: 'PREP_CAP_REACHED' });
+
+        // The STOP's total (both members' photos, counted by visit_id) is
+        // exactly 6 — never 7.
+        const total = Number((
+          await realDb('visit_prep_photos as p')
+            .join('visit_prep_submissions as s', 'p.submission_id', 's.id')
+            .where('s.visit_id', fixture.visitId)
+            .count('p.id as n')
+            .first()
+        ).n);
+        expect(total).toBe(6);
+      } finally {
+        await realDb('scheduled_services').whereIn('id', [fixture.svcAId, fixture.svcBId]).del();
+        await realDb('service_visits').where({ id: fixture.visitId }).del();
+      }
+    });
+
+    test('identical photos submitted concurrently for the same visit settle to ONE stored photo; the loser\'s upload is deleted', async () => {
+      let customerId;
+      let svcId;
+      const trx = await database.transaction();
+      try {
+        ({ customerId, svcId } = await fixtureSvc(trx));
+        await trx.commit();
+      } catch (err) {
+        await trx.rollback();
+        throw err;
+      }
+
+      try {
+        const svc = { id: svcId, customer_id: customerId, property_id: null, visit_id: null };
+        const recheck = async () => svc;
+        const sameBytes = jpegBytes('concurrent-dup');
+        const results = await Promise.allSettled([
+          createVisitPrepSubmission({ svc, files: [{ buffer: sameBytes, mimetype: 'image/jpeg' }], entry: 'appointment_page', recheck }),
+          createVisitPrepSubmission({ svc, files: [{ buffer: sameBytes, mimetype: 'image/jpeg' }], entry: 'appointment_page', recheck }),
+        ]);
+
+        // Neither call errors — the loser is a documented idempotent no-op
+        // (created:false), not a thrown duplicate-key error.
+        expect(results.every((r) => r.status === 'fulfilled')).toBe(true);
+        const createdFlags = results.map((r) => r.value.created).sort();
+        expect(createdFlags).toEqual([false, true]);
+
+        const rows = await realDb('visit_prep_photos').where({ scheduled_service_id: svcId, image_sha256: sha256(sameBytes) });
+        expect(rows).toHaveLength(1);
+        // One upload's object was never persisted and must have been deleted.
+        expect(mockDeletePhoto).toHaveBeenCalledTimes(1);
+      } finally {
+        await realDb('scheduled_services').where({ id: svcId }).del();
+      }
+    });
   });
 });

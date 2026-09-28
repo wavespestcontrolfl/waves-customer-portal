@@ -1,13 +1,17 @@
 /**
- * services/visit-prep.js — pure/unit coverage: eligibility, per-stop
- * summary scoping, the magic-byte sniff, and createVisitPrepSubmission's
- * input validation. Route-level guard-chain + storage/DB behavior is
+ * services/visit-prep.js — pure/unit coverage: eligibility, the ONE cap
+ * rule, per-stop summary scoping, the magic-byte sniff, field/file
+ * preparation staging, and createVisitPrepSubmission's late-recheck +
+ * stop-lock contract. Route-level guard-chain + storage/DB behavior is
  * covered by tests/appointment-public-prep-photos.test.js; the real-Postgres
- * migration/cascade/cap-race proof is tests/visit-prep-postgres.test.js.
+ * migration/cascade/cap-race/concurrent-stop proof is
+ * tests/visit-prep-postgres.test.js.
  */
 
 const mockUploadFunnelPhotoToS3 = jest.fn();
 const mockConvertHeicToJpeg = jest.fn();
+const mockDeletePhoto = jest.fn().mockResolvedValue(undefined);
+const mockLockStopForRow = jest.fn(async (trx, id) => id);
 
 jest.mock('../utils/funnel-photos', () => ({
   uploadFunnelPhotoToS3: (...args) => mockUploadFunnelPhotoToS3(...args),
@@ -18,6 +22,12 @@ jest.mock('../services/heic-to-jpeg', () => ({
   convertHeicToJpeg: (...args) => mockConvertHeicToJpeg(...args),
   MAX_HEIC_BYTES: 5 * 1024 * 1024,
 }));
+jest.mock('../services/photos', () => ({
+  deletePhoto: (...args) => mockDeletePhoto(...args),
+}));
+jest.mock('../services/visit-groups', () => ({
+  lockStopForRow: (...args) => mockLockStopForRow(...args),
+}));
 
 const queries = [];
 function chain(table) {
@@ -25,7 +35,6 @@ function chain(table) {
   let countMode = null;
   api.where = () => api;
   api.join = () => api;
-  api.forUpdate = () => api;
   api.select = async () => (table === 'visit_prep_photos' ? [] : []);
   api.count = () => { countMode = table.indexOf('visit_prep_photos') === 0 ? 'photos' : 'submissions'; return api; };
   api.first = async () => {
@@ -46,8 +55,12 @@ mockDb.transaction = async (fn) => fn(mockDb);
 jest.mock('../models/db', () => mockDb);
 
 const visitPrep = require('../services/visit-prep');
-const { VISIT_PREP_LIMITS, TOPICS, LOCATIONS, isRecurringLineageVisit, visitPrepEligibility, visitPrepSummary, createVisitPrepSubmission } = visitPrep;
-const { detectedImageMime, mimeFamily, stripHtml } = visitPrep._internal;
+const {
+  VISIT_PREP_LIMITS, TOPICS, LOCATIONS, isRecurringLineageVisit, visitPrepEligibility, capReached, visitPrepSummary, createVisitPrepSubmission,
+} = visitPrep;
+const {
+  detectedImageMime, mimeFamily, stripHtml, prepareFiles, normalizeSubmissionFields,
+} = visitPrep._internal;
 
 const JPEG_BYTES = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(32, 1)]);
 const PNG_BYTES = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(32, 2)]);
@@ -55,6 +68,7 @@ const WEBP_BYTES = Buffer.concat([Buffer.from('RIFF', 'ascii'), Buffer.alloc(4, 
 const HEIC_BYTES = Buffer.concat([Buffer.alloc(4, 0), Buffer.from('ftyp', 'ascii'), Buffer.from('heic', 'ascii'), Buffer.alloc(16, 4)]);
 
 const RECURRING_SVC = { id: 'svc-1', customer_id: 'cust-1', property_id: 'prop-1', is_recurring: true };
+const alwaysRecheck = (row = RECURRING_SVC) => async () => row;
 
 describe('constants', () => {
   test('caps match the shared request-photo-validation contract', () => {
@@ -114,8 +128,20 @@ describe('visitPrepEligibility', () => {
   });
 });
 
+describe('capReached — the ONE cap rule (route pre-check and the locked check both call this)', () => {
+  test('submission count at/over the cap is reached regardless of photos', () => {
+    expect(capReached({ submissionCount: 3, photoCount: 0 }, 1)).toBe(true);
+    expect(capReached({ submissionCount: 2, photoCount: 0 }, 1)).toBe(false);
+  });
+  test('adding N photos past the photo cap is reached', () => {
+    expect(capReached({ submissionCount: 0, photoCount: 5 }, 1)).toBe(false); // 5+1=6, at the cap, not over
+    expect(capReached({ submissionCount: 0, photoCount: 6 }, 1)).toBe(true); // the route's cheap pre-check shape
+    expect(capReached({ submissionCount: 0, photoCount: 5 }, 2)).toBe(true); // 5+2=7 > 6
+  });
+});
+
 describe('visitPrepSummary — per-STOP scoping', () => {
-  beforeEach(() => { queries.length = 0; mockDb.mockClear(); });
+  beforeEach(() => { queries.length = 0; mockDb.mockClear(); mockDb.mockImplementation((table) => chain(table)); });
 
   test('an ungrouped visit scopes counts by scheduled_service_id', async () => {
     const summary = await visitPrepSummary({ id: 'svc-1', visit_id: null });
@@ -173,47 +199,110 @@ describe('stripHtml', () => {
   });
 });
 
-describe('createVisitPrepSubmission — input validation (no upload reached)', () => {
+describe('normalizeSubmissionFields (stage 1) — topic/location get their own code', () => {
+  test('unrecognized topic or location is PREP_INVALID_FIELD, not PREP_INVALID_PHOTO', () => {
+    expect(() => normalizeSubmissionFields({ topic: 'raccoons' })).toThrow(expect.objectContaining({ statusCode: 400, code: 'PREP_INVALID_FIELD' }));
+    expect(() => normalizeSubmissionFields({ locationOnProperty: 'moon_base' })).toThrow(expect.objectContaining({ statusCode: 400, code: 'PREP_INVALID_FIELD' }));
+  });
+  test('note is trimmed, HTML-stripped, and truncated to 500 chars', () => {
+    const longNote = `  <b>hi</b> ${'x'.repeat(600)}  `;
+    const { note } = normalizeSubmissionFields({ note: longNote });
+    expect(note.startsWith('bhi/b')).toBe(true);
+    expect(note.length).toBe(500);
+  });
+  test('blank/omitted topic and location pass through as null', () => {
+    expect(normalizeSubmissionFields({})).toEqual({ topic: null, locationOnProperty: null, note: null });
+  });
+});
+
+describe('prepareFiles (stage 2) — count bounds + within-request dedupe', () => {
+  test('rejects zero or more than the per-submission cap', async () => {
+    await expect(prepareFiles([])).rejects.toMatchObject({ statusCode: 400, code: 'PREP_INVALID_PHOTO' });
+    const four = Array.from({ length: 4 }, () => ({ buffer: JPEG_BYTES, mimetype: 'image/jpeg' }));
+    await expect(prepareFiles(four)).rejects.toMatchObject({ statusCode: 400, code: 'PREP_INVALID_PHOTO' });
+  });
+  test('the SAME photo submitted twice in one request folds to one prepared item', async () => {
+    const prepared = await prepareFiles([
+      { buffer: JPEG_BYTES, mimetype: 'image/jpeg' },
+      { buffer: Buffer.from(JPEG_BYTES), mimetype: 'image/jpeg' }, // identical bytes, different Buffer instance
+    ]);
+    expect(prepared).toHaveLength(1);
+  });
+});
+
+describe('createVisitPrepSubmission', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockDb.mockImplementation((table) => chain(table));
+    mockLockStopForRow.mockImplementation(async (trx, id) => id);
+    mockUploadFunnelPhotoToS3.mockResolvedValue('visitprep/svc-1/photo_0.jpg');
+  });
+
+  test('requires a recheck function', async () => {
+    const files = [{ buffer: JPEG_BYTES, mimetype: 'image/jpeg' }];
+    await expect(createVisitPrepSubmission({ svc: RECURRING_SVC, files, entry: 'appointment_page' }))
+      .rejects.toThrow(/recheck/);
   });
 
   test('rejects zero files', async () => {
-    await expect(createVisitPrepSubmission({ svc: RECURRING_SVC, files: [], entry: 'appointment_page' }))
+    await expect(createVisitPrepSubmission({ svc: RECURRING_SVC, files: [], entry: 'appointment_page', recheck: alwaysRecheck() }))
       .rejects.toMatchObject({ statusCode: 400, code: 'PREP_INVALID_PHOTO' });
   });
 
-  test('rejects more than the per-submission cap', async () => {
+  test('rejects more than the per-submission cap before touching storage', async () => {
     const files = Array.from({ length: 4 }, () => ({ buffer: JPEG_BYTES, mimetype: 'image/jpeg' }));
-    await expect(createVisitPrepSubmission({ svc: RECURRING_SVC, files, entry: 'appointment_page' }))
+    await expect(createVisitPrepSubmission({ svc: RECURRING_SVC, files, entry: 'appointment_page', recheck: alwaysRecheck() }))
       .rejects.toMatchObject({ statusCode: 400, code: 'PREP_INVALID_PHOTO' });
     expect(mockUploadFunnelPhotoToS3).not.toHaveBeenCalled();
   });
 
-  test('rejects an unrecognized topic or location before touching storage', async () => {
+  test('rejects an unrecognized topic before touching storage — PREP_INVALID_FIELD', async () => {
     const files = [{ buffer: JPEG_BYTES, mimetype: 'image/jpeg' }];
-    await expect(createVisitPrepSubmission({ svc: RECURRING_SVC, files, topic: 'raccoons', entry: 'appointment_page' }))
-      .rejects.toMatchObject({ statusCode: 400, code: 'PREP_INVALID_PHOTO' });
-    await expect(createVisitPrepSubmission({ svc: RECURRING_SVC, files, locationOnProperty: 'moon_base', entry: 'appointment_page' }))
-      .rejects.toMatchObject({ statusCode: 400, code: 'PREP_INVALID_PHOTO' });
+    await expect(createVisitPrepSubmission({ svc: RECURRING_SVC, files, topic: 'raccoons', entry: 'appointment_page', recheck: alwaysRecheck() }))
+      .rejects.toMatchObject({ statusCode: 400, code: 'PREP_INVALID_FIELD' });
     expect(mockUploadFunnelPhotoToS3).not.toHaveBeenCalled();
   });
 
   test('rejects an oversize file before any sniff/upload', async () => {
     const files = [{ buffer: Buffer.alloc(VISIT_PREP_LIMITS.maxPhotoBytes + 1), mimetype: 'image/jpeg' }];
-    await expect(createVisitPrepSubmission({ svc: RECURRING_SVC, files, entry: 'appointment_page' }))
+    await expect(createVisitPrepSubmission({ svc: RECURRING_SVC, files, entry: 'appointment_page', recheck: alwaysRecheck() }))
       .rejects.toMatchObject({ statusCode: 413, code: 'PREP_PHOTO_TOO_LARGE' });
   });
 
-  test('note is trimmed, HTML-stripped, and truncated to 500 chars', async () => {
-    mockUploadFunnelPhotoToS3.mockResolvedValue('visitprep/svc-1/photo_0.jpg');
+  test('a null recheck (visit went ineligible under the lock) rejects with PREP_NOT_AVAILABLE and cleans up the upload', async () => {
     const files = [{ buffer: JPEG_BYTES, mimetype: 'image/jpeg' }];
-    const longNote = `  <b>hi</b> ${'x'.repeat(600)}  `;
-    await createVisitPrepSubmission({ svc: RECURRING_SVC, files, note: longNote, entry: 'appointment_page' });
-    // No direct return of the stored note (the route never echoes it back
-    // either) — the shape under test here is that creation succeeded and
-    // never threw on an over-length/markup note; the exact stored value is
-    // asserted against the transaction insert in the Postgres suite.
+    await expect(createVisitPrepSubmission({
+      svc: RECURRING_SVC, files, entry: 'appointment_page', recheck: async () => null,
+    })).rejects.toMatchObject({ statusCode: 409, code: 'PREP_NOT_AVAILABLE' });
+    expect(mockUploadFunnelPhotoToS3).toHaveBeenCalledTimes(1); // it uploads BEFORE the lock, per the all-or-cleanup contract
+    expect(mockDeletePhoto).toHaveBeenCalledWith('visitprep/svc-1/photo_0.jpg');
+  });
+
+  test('the write uses the RECHECKED row, not the pre-lock svc, for visit_id/customer_id/property_id', async () => {
+    const inserted = [];
+    mockDb.mockImplementation((table) => {
+      const api = chain(table);
+      if (table === 'visit_prep_submissions') {
+        const originalInsert = api.insert;
+        api.insert = (row) => { inserted.push(row); return originalInsert(row); };
+      }
+      return api;
+    });
+    const currentRow = { id: 'svc-1', customer_id: 'cust-RECHECKED', property_id: 'prop-RECHECKED', visit_id: 'visit-RECHECKED' };
+    const files = [{ buffer: JPEG_BYTES, mimetype: 'image/jpeg' }];
+    const result = await createVisitPrepSubmission({
+      svc: RECURRING_SVC, files, entry: 'appointment_page', recheck: alwaysRecheck(currentRow),
+    });
+    expect(result.created).toBe(true);
+    expect(inserted[0]).toMatchObject({ customer_id: 'cust-RECHECKED', property_id: 'prop-RECHECKED', visit_id: 'visit-RECHECKED' });
+  });
+
+  test('retries VISIT_STOP_MOVED up to twice, then answers PREP_NOT_AVAILABLE', async () => {
+    const err = Object.assign(new Error('stop moved'), { code: 'VISIT_STOP_MOVED' });
+    mockLockStopForRow.mockRejectedValue(err);
+    const files = [{ buffer: JPEG_BYTES, mimetype: 'image/jpeg' }];
+    await expect(createVisitPrepSubmission({ svc: RECURRING_SVC, files, entry: 'appointment_page', recheck: alwaysRecheck() }))
+      .rejects.toMatchObject({ statusCode: 409, code: 'PREP_NOT_AVAILABLE' });
+    expect(mockLockStopForRow).toHaveBeenCalledTimes(3); // initial + 2 retries
   });
 });

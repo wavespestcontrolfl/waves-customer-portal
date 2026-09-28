@@ -4,8 +4,9 @@
  *
  * Real HTTP server + fetch/FormData (same pattern as
  * tech-dictation-upload.test.js) so the full guard chain — token format,
- * sub-gate, rate limiter, eligibility, cap pre-check, multer, then the
- * service — is exercised in order, not just its pure pieces.
+ * sub-gate, rate limiter, eligibility, cap pre-check, multer, the locked
+ * late-recheck, then the service — is exercised in order, not just its
+ * pure pieces.
  */
 
 const crypto = require('crypto');
@@ -22,6 +23,8 @@ const CONVERTED_HEIC_JPEG = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe1])
 
 const mockConvertHeicToJpeg = jest.fn();
 const mockUploadFunnelPhotoToS3 = jest.fn();
+const mockDeletePhoto = jest.fn().mockResolvedValue(undefined);
+const mockLockStopForRow = jest.fn(async (trx, id) => id);
 
 jest.mock('../services/heic-to-jpeg', () => ({
   convertHeicToJpeg: (...args) => mockConvertHeicToJpeg(...args),
@@ -31,6 +34,18 @@ jest.mock('../utils/funnel-photos', () => ({
   uploadFunnelPhotoToS3: (...args) => mockUploadFunnelPhotoToS3(...args),
   storeFunnelPhotos: jest.fn(),
   storeTreeShrubCustomerPhotos: jest.fn(),
+}));
+jest.mock('../services/photos', () => ({
+  deletePhoto: (...args) => mockDeletePhoto(...args),
+}));
+// Real visit-groups.js's advisory-lock plumbing needs its own DB shape
+// (raw SQL + a peek/verify pair) that would bloat this route-level fake for
+// no benefit — the lock's own peek->lock->verify->retry contract is proven
+// against real Postgres in visit-prep-postgres.test.js and unit-tested in
+// visit-prep.test.js. Here it's a controllable stand-in so this file can
+// focus on the route's guard chain and response shape.
+jest.mock('../services/visit-groups', () => ({
+  lockStopForRow: (...args) => mockLockStopForRow(...args),
 }));
 jest.mock('../services/weather-forecast', () => ({ getDailyRainOutlookBounded: jest.fn().mockResolvedValue(null) }));
 jest.mock('../services/tech-photo', () => ({ resolveTechPhotoUrl: jest.fn().mockResolvedValue(null) }));
@@ -43,9 +58,12 @@ let dbState;
 
 // Minimal knex-chain fake covering exactly what loadByToken, visitServicesFor
 // (ungrouped short-circuits without touching the DB at all) and
-// services/visit-prep.js need. `dbState.svcRow` is what loadByToken /
-// the FOR UPDATE lock resolve to; count queries read
-// dbState.{submissionCount,photoCount} plus whatever this run has inserted.
+// services/visit-prep.js need. `dbState.svcRow` is what loadByToken
+// resolves to on its FIRST call (the pre-multer read); `dbState.svcRowAfterRecheck`,
+// when set, is what the SECOND call (the locked late recheck) resolves to
+// instead — modeling the visit changing state between the two reads. Count
+// queries read dbState.{submissionCount,photoCount} plus whatever this run
+// has inserted.
 function chain(table) {
   const api = {};
   let countMode = null;
@@ -60,7 +78,11 @@ function chain(table) {
   api.first = async () => {
     if (countMode === 'photos') return { count: dbState.photoCount + dbState.inserted.photos.length };
     if (countMode === 'submissions') return { count: dbState.submissionCount + dbState.inserted.submissions.length };
-    if (table.startsWith('scheduled_services')) return dbState.svcRow;
+    if (table.startsWith('scheduled_services')) {
+      dbState.loadByTokenCalls += 1;
+      if (dbState.loadByTokenCalls > 1 && dbState.svcRowAfterRecheck !== undefined) return dbState.svcRowAfterRecheck;
+      return dbState.svcRow;
+    }
     return null;
   };
   api.select = async () => {
@@ -119,6 +141,8 @@ function resetDbState(overrides = {}) {
       latitude: null,
       longitude: null,
     },
+    svcRowAfterRecheck: undefined,
+    loadByTokenCalls: 0,
     submissionCount: 0,
     photoCount: 0,
     existingHashes: [],
@@ -131,7 +155,11 @@ function resetDbState(overrides = {}) {
 async function withServer(fn) {
   const app = express();
   app.use('/api/public/appointment', router);
-  app.use((err, _req, res, _next) => res.status(err.status || 500).json({ error: err.message }));
+  // A GENERIC fallback — mirrors a real production error handler that never
+  // echoes a raw error message to an anonymous caller. Tests that need to
+  // prove the route itself never leaked a foreign error's message assert
+  // against THIS body, not a passthrough of err.message.
+  app.use((err, _req, res, _next) => res.status(500).json({ error: 'Internal server error' }));
   const server = app.listen(0);
   const baseUrl = `http://127.0.0.1:${server.address().port}`;
   try { return await fn(baseUrl); } finally { await new Promise((r) => server.close(r)); }
@@ -163,6 +191,7 @@ describe('POST /api/public/appointment/:token/photos', () => {
     process.env.GATE_VISIT_PREP_PHOTOS = 'true';
     mockUploadFunnelPhotoToS3.mockImplementation(async ({ index }) => `visitprep/svc-1/photo_${index}.jpg`);
     mockConvertHeicToJpeg.mockResolvedValue(CONVERTED_HEIC_JPEG);
+    mockLockStopForRow.mockImplementation(async (trx, id) => id);
     resetDbState();
     // Fresh require every test: express-rate-limit's in-memory store lives
     // on the router module instance, and this file's rate-limiter tests
@@ -288,6 +317,15 @@ describe('POST /api/public/appointment/:token/photos', () => {
     });
   });
 
+  test('invalid topic: 400 PREP_INVALID_FIELD', async () => {
+    await withServer(async (baseUrl) => {
+      const res = await postPhotos(baseUrl, { files: [{ bytes: JPEG_BYTES, mimetype: 'image/jpeg' }], topic: 'not-a-real-topic' });
+      expect(res.status).toBe(400);
+      expect((await res.json()).code).toBe('PREP_INVALID_FIELD');
+      expect(mockUploadFunnelPhotoToS3).not.toHaveBeenCalled();
+    });
+  });
+
   test('HEIC is converted to JPEG before storage', async () => {
     await withServer(async (baseUrl) => {
       const res = await postPhotos(baseUrl, { files: [{ bytes: HEIC_BYTES, mimetype: 'image/heic', name: 'photo.heic' }] });
@@ -297,14 +335,18 @@ describe('POST /api/public/appointment/:token/photos', () => {
     });
   });
 
-  test('all-duplicate resubmit is idempotent: 200, nothing new stored', async () => {
+  test('all-duplicate resubmit is idempotent: 200, nothing new stored, and the uploaded duplicate is cleaned up', async () => {
+    // Dedupe now happens UNDER THE LOCK (after the late recheck), so the
+    // photo IS uploaded first, then recognized as a DB duplicate and its
+    // object deleted — never left behind, never double-counted.
     const sha256 = crypto.createHash('sha256').update(JPEG_BYTES).digest('hex');
     resetDbState({ existingHashes: [sha256] });
     await withServer(async (baseUrl) => {
       const res = await postPhotos(baseUrl, { files: [{ bytes: JPEG_BYTES, mimetype: 'image/jpeg' }] });
       expect(res.status).toBe(200);
       expect(await res.json()).toEqual({ ok: true, prepPhotos: { eligible: true, photoCount: 0, photosRemaining: 6 } });
-      expect(mockUploadFunnelPhotoToS3).not.toHaveBeenCalled();
+      expect(mockUploadFunnelPhotoToS3).toHaveBeenCalledTimes(1);
+      expect(mockDeletePhoto).toHaveBeenCalledTimes(1);
       expect(dbState.inserted.submissions).toHaveLength(0);
     });
   });
@@ -317,6 +359,40 @@ describe('POST /api/public/appointment/:token/photos', () => {
       expect((await res.json()).code).toBe('PREP_STORAGE_UNAVAILABLE');
       expect(dbState.inserted.submissions).toHaveLength(0);
       expect(dbState.inserted.photos).toHaveLength(0);
+    });
+  });
+
+  test('visit becomes ineligible between the pre-check and the locked write: 409 PREP_NOT_AVAILABLE, nothing stored, upload cleaned up', async () => {
+    // The FIRST loadByToken read (pre-multer guard) sees an eligible visit;
+    // the SECOND (the recheck, called under the stop lock at write time)
+    // sees it cancelled — modeling a status change that lands between the
+    // two reads (e.g. dispatch marks the visit cancelled mid-submission).
+    resetDbState({ svcRowAfterRecheck: { ...dbStateSvc(), status: 'cancelled' } });
+    await withServer(async (baseUrl) => {
+      const res = await postPhotos(baseUrl, { files: [{ bytes: JPEG_BYTES, mimetype: 'image/jpeg' }] });
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe('PREP_NOT_AVAILABLE');
+      expect(dbState.inserted.submissions).toHaveLength(0);
+      expect(dbState.inserted.photos).toHaveLength(0);
+      // The photo WAS uploaded (upload happens before the lock) and must be
+      // cleaned up rather than left orphaned in storage.
+      expect(mockUploadFunnelPhotoToS3).toHaveBeenCalledTimes(1);
+      expect(mockDeletePhoto).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  test('a non-prepError with a statusCode is never echoed to the client', async () => {
+    // Simulate a library error surfacing from somewhere deep in the write
+    // (here, the lock helper) that happens to carry a `statusCode` — the
+    // route must hand this to next(err), never echo its own message.
+    const foreignErr = new Error('secret internal detail — connection string leaked');
+    foreignErr.statusCode = 418;
+    mockLockStopForRow.mockRejectedValueOnce(foreignErr);
+    await withServer(async (baseUrl) => {
+      const res = await postPhotos(baseUrl, { files: [{ bytes: JPEG_BYTES, mimetype: 'image/jpeg' }] });
+      expect(res.status).not.toBe(418);
+      const body = await res.json();
+      expect(JSON.stringify(body)).not.toMatch(/secret internal detail|connection string/i);
     });
   });
 
