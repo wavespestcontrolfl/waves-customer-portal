@@ -19,6 +19,7 @@ const { VERSION, extractSmsOperations, explicitContactPreference, matchesExplici
 const { IRRIGATION_INPUT_FIELDS } = require('./irrigation-schedule-confirmation');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
 const { isSmsReaction } = require('./sms-intent');
+const { parseETDateTime, etDateString, addETDays } = require('../utils/datetime-et');
 const { loadSmsFulfillmentEvidence, verifySmsFulfillment, revalidateSmsFulfillment, admissibleWitness, SYSTEM_EVENT_TYPES, PROVIDER_RETRY_MS, WITNESS_TRANSITION_STATUSES, LOGGED_MOVE_SQL, PAYMENT_WITNESS_KINDS, paymentEvidenceRow } = require('./sms-commitment-fulfillment');
 
 const { hashSensitiveValue } = require('./data-hygiene/sensitive-vault');
@@ -195,6 +196,26 @@ const TOPIC_CLAUSE = new RegExp(
 function withoutTopics(quote) {
   return String(quote || '').replace(TOPIC_CLAUSE, ' ');
 }
+
+// Owner ruling 2026-09-28: the exact same-day tokens that still leave a
+// Waves obligation undated below ("today", "tonight", the day-part trio,
+// "later today", "eod", "end of (the) day") — the subset of STATED_TIMING's
+// own vocabulary that names TODAY specifically, never a longer span ("this
+// week/month" stay out on purpose: those keep the legacy undated behavior).
+// NOT_POSSESSIVE mirrors STATED_TIMING so "today's appointment" is left to
+// the existing topic/possessive handling rather than double-covered here.
+const SAME_DAY_TIMING = new RegExp([
+  String.raw`\btoday\b${NOT_POSSESSIVE}`,
+  String.raw`\btonight\b`,
+  String.raw`\bthis (?:morning|afternoon|evening)\b`,
+  String.raw`\blater today\b`,
+  String.raw`\beod\b`,
+  String.raw`\bend of (?:the )?day\b`,
+].join('|'), 'i');
+// Global twin used only to strip every same-day occurrence before re-testing
+// STATED_TIMING on what is left (Codex conventions keep the stateful global
+// regex out of resolveDueDeadline's own module-level .test() calls).
+const SAME_DAY_TIMING_STRIP = new RegExp(SAME_DAY_TIMING.source, 'gi');
 
 // Outcomes a visit-only fact may reach without anyone needing to act: the
 // duration verdict itself and the scope/authority guards that can run before
@@ -399,9 +420,24 @@ const DEFAULT_DEADLINE_HOURS = Object.freeze({
 const PROMISE_DEFAULT_DEADLINE_HOURS = 48;
 
 // due_basis: 'stated' when the extractor grounded an explicit deadline in
-// the source text; 'default_kind' when this per-kind/basis table filled one
-// in instead; null when the kind has no default and nothing was stated
-// (legacy behavior — refreshSmsCommitments' null-due branch still applies).
+// the source text; 'default_kind' when either this per-kind/basis table or
+// the same-day rule below filled one in instead; null when the kind has no
+// default and nothing was stated (legacy behavior — refreshSmsCommitments'
+// null-due branch still applies).
+//
+// due_basis reuse (owner ruling 2026-09-28): the same-day rule below could
+// have introduced its own 'same_day' value, but call_commitments carries a
+// CHECK constraint enumerating due_basis ('stated' | 'suggested' |
+// 'default_kind' — see migrations 20260901000010/20260925000001/…000002),
+// and NEVER EDIT AN EXISTING MIGRATION rules out widening it in place; a new
+// value needs a new migration for a distinction no reader currently needs.
+// Every due_basis reader was checked (grep -rn due_basis server/): the Calls
+// tab only special-cases 'suggested' for its "(suggested)" label
+// (CallIntelligencePanel.jsx); nothing anywhere branches on 'default_kind'
+// specifically. A same-day deadline IS a default this per-kind/basis table
+// would otherwise have filled in — it fires only where R5's table already
+// would have — so it reuses 'default_kind' rather than add a migration and
+// an enum value for a rendering distinction no surface asks for.
 function resolveDueDeadline(item, messageCreatedAt) {
   if (item.due_at) return { due_at: item.due_at, due_basis: 'stated' };
   // Defaults are Waves' own service windows. A customer-owned promise ("I'll
@@ -423,7 +459,39 @@ function resolveDueDeadline(item, messageCreatedAt) {
   // and send the estimate" leaves the estimate its default — Codex #4816 r31).
   const unresolvedClock = item.timing_unverified && statesClock(item.quote);
   // Quotes are short excerpts; the cap keeps the timing regexes bounded.
-  if (item.due_text || unresolvedClock || STATED_TIMING.test(withoutTopics(String(item.quote || '').slice(0, 500)))) return { due_at: null, due_basis: null };
+  const strippedQuote = withoutTopics(String(item.quote || '').slice(0, 500));
+  if (item.due_text || unresolvedClock || STATED_TIMING.test(strippedQuote)) {
+    // Owner ruling 2026-09-28: an ask about TODAY ("Did you come to my house
+    // today?", "Should we skip today?") used to leave the row undated like
+    // any other stated timing, so it never bells staff. Give it an
+    // end-of-business-day deadline instead — but ONLY when every stated
+    // timing in play is a same-day token and no clock was stated at all: an
+    // unresolved clock (above) always wins undated, and a resolved due_at
+    // already returned 'stated' before reaching here.
+    // "Only same-day timing": strip the same-day tokens from both the
+    // topic-stripped quote and due_text, then re-run STATED_TIMING on each
+    // remainder. Either remainder still matching ("today or tomorrow",
+    // "today, else Friday", a due_text that names more than the same day)
+    // keeps the legacy undated behavior — the safer side, since a missed
+    // bell is worse than an early one (comment above).
+    const sameDayRemainderClear = (text) => !STATED_TIMING.test(String(text || '').replace(SAME_DAY_TIMING_STRIP, ' '));
+    const sameDayOnly = !unresolvedClock
+      && SAME_DAY_TIMING.test(strippedQuote) && sameDayRemainderClear(strippedQuote)
+      && sameDayRemainderClear(item.due_text);
+    if (!sameDayOnly) return { due_at: null, due_basis: null };
+    const messageDate = new Date(messageCreatedAt);
+    // End of the business day on the message's own ET calendar date (8 PM
+    // ET matches the follow-up SLA's 8 AM–8 PM ET window). Less than an
+    // hour away (the text lands after ~7 PM ET) pushes the deadline to 9 AM
+    // ET the next morning instead of bell-in-an-hour. parseETDateTime does
+    // the DST-correct wall-clock -> instant conversion; never hand-roll the
+    // offset here.
+    const endOfDay = parseETDateTime(`${etDateString(messageDate)}T20:00`);
+    const dueAt = endOfDay.getTime() - messageDate.getTime() < 3600000
+      ? parseETDateTime(`${etDateString(addETDays(messageDate, 1))}T09:00`)
+      : endOfDay;
+    return { due_at: dueAt.toISOString(), due_basis: 'default_kind' };
+  }
   const hours = item.basis === 'promise' ? PROMISE_DEFAULT_DEADLINE_HOURS : DEFAULT_DEADLINE_HOURS[item.kind];
   if (hours == null) return { due_at: null, due_basis: null };
   return { due_at: new Date(new Date(messageCreatedAt).getTime() + hours * 3600000).toISOString(), due_basis: 'default_kind' };
