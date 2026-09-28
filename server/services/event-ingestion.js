@@ -916,6 +916,8 @@ async function reconcileLegacyKey(sourceId, currentKey, legacyKey) {
 // reason, which keeps it out of every newsletter unless an operator
 // re-approves it. Only rows this pull did not refresh are touched; nothing
 // is deleted or re-timed.
+const TZ_SHIFT_QUARANTINE = 'tz_shift_quarantine';
+
 function shiftedLegacyKey(title, start, urlKey) {
   if (!start) return null;
   const shiftedIso = `${etDateString(start)}T${etWallClockHHMM(start)}:00.000Z`;
@@ -930,14 +932,19 @@ async function quarantineShiftedLegacyRows(sourceId, pulledRows, batchStartedAt)
     if (!key) continue;
     // Rejection is the durable quarantine: normalization never changes an
     // admin decision (a freshness flag would be recomputed), rejected rows
-    // never ship, and an operator can re-approve a genuine showtime.
+    // never ship, and an operator can re-approve a genuine showtime. Each row
+    // is quarantined at most once: approved_via 'tz_shift_quarantine' marks
+    // it, and an operator's later re-approval (which leaves approved_via
+    // alone) is never overridden by a later partial pull.
     quarantined += await db('events_raw')
       .where({ source_id: sourceId, external_id: key })
       .whereNull('merged_into')
       .where('pulled_at', '<', batchStartedAt)
       .whereNot('admin_status', 'rejected')
+      .where((q) => q.whereNull('approved_via').orWhereNot('approved_via', TZ_SHIFT_QUARANTINE))
       .update({
         admin_status: 'rejected',
+        approved_via: TZ_SHIFT_QUARANTINE,
         suppression_reason: `Possible time-shifted duplicate (pre-2026-09-28 parsing bug) of the listing now at ${etWallClockHHMM(row.start_at)} ET. Re-approve if this showtime is real.`.slice(0, 255),
         updated_at: db.fn.now(),
       });

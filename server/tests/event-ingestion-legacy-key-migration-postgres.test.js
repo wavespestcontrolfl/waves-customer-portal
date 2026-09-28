@@ -347,6 +347,13 @@ describeOrSkip('upsertExtractedEvents — legacy dedup-key migration on real Pos
     // Durable even for an unnormalized row: rejection survives normalization.
     expect(old.admin_status).toBe('rejected');
     expect(old.suppression_reason).toMatch(/time-shifted duplicate/);
+
+    // The operator decides it is a real showtime and re-approves it; the next
+    // pull (still listing only the evening) must not reject it again.
+    await db('events_raw').where({ id: staleId }).update({ admin_status: 'approved', suppression_reason: null });
+    await upsertExtractedEvents(source, [{ title, startAt: startIso, eventUrl: url }]);
+    const kept = await db('events_raw').where({ id: staleId }).first();
+    expect(kept.admin_status).toBe('approved');
     expect(new Date(old.start_at).toISOString()).toBe(shiftedIso);
     const fresh = await db('events_raw').where({ source_id: sourceId, title }).whereNot({ id: staleId });
     expect(fresh).toHaveLength(1);
