@@ -186,7 +186,9 @@ describe('source contracts', () => {
     const schedule = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
     const detailsTrxAt = schedule.indexOf("const commsPeek = await trx('scheduled_services')");
     const occupancyAt = schedule.indexOf('await acquireOccupancyLock(trx, occupancyDateKey);', detailsTrxAt);
-    const mintAt = schedule.indexOf('if (reServiceConversionZeroPrice) {\n        const { acquireScheduledInvoiceMintLock } = require(\'../services/scheduled-invoice-mint\');\n        await acquireScheduledInvoiceMintLock(trx, req.params.id);', detailsTrxAt);
+    // The re-price block (owner 2026-09-28) takes the same lock at the same
+    // point for a price edit, so the condition now names both.
+    const mintAt = schedule.indexOf('if (reServiceConversionZeroPrice || priceEditPosted) {\n        const { acquireScheduledInvoiceMintLock } = require(\'../services/scheduled-invoice-mint\');\n        await acquireScheduledInvoiceMintLock(trx, req.params.id);', detailsTrxAt);
     const firstRowLockAt = schedule.indexOf('.forUpdate()', detailsTrxAt);
     const conversionVoidAt = schedule.indexOf('await voidConversionInvoicesRestoringCredits({ trx, ids: nonAccruedIds, voidUpdate });', detailsTrxAt);
     expect(detailsTrxAt).toBeGreaterThan(-1);

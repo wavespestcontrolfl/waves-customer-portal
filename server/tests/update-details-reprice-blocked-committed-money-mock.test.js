@@ -285,7 +285,7 @@ test('the free re-service conversion is exempt from the repricing guard by const
   // an equally deep conditional.
   const fs = require('fs');
   const src = fs.readFileSync(require.resolve('../routes/admin-schedule.js'), 'utf8');
-  expect(src).toMatch(/const priceEditPosted = !reServiceConversionZeroPrice && updates\.estimated_price !== undefined;/);
+  expect(src).toMatch(/const priceEditPosted = !reServiceConversionZeroPrice && postedPriceKeys\.length > 0;/);
   // The conversion still takes the mint lock (it voids invoices under it),
   // it just never runs the coverage refusal.
   expect(src).toMatch(/if \(reServiceConversionZeroPrice \|\| priceEditPosted\) \{/);

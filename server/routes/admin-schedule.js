@@ -4679,9 +4679,8 @@ async function propagatePriceServiceToFollowingSiblings(conn, {
   // BEFORE its own visit-row FOR UPDATE (acquireScheduledMintLockChain); the
   // targetQuery just below already FOR UPDATEs every sibling row up front
   // (see its own comment), which already blocks a concurrent mint's row
-  // lock — but taking each sibling's mint lock first too keeps this writer
-  // on the SAME documented order as every other one, rather than relying
-  // solely on the row lock to make the race safe.
+  // lock — and each sibling's mint lock is also taken (below), so no mint
+  // on a sibling can be mid-flight while its price is rewritten.
   //
   // TRY, never the blocking acquire (pre-push audit P1): this call already
   // runs with the EDITED visit's own mint lock held (taken earlier in
@@ -4689,31 +4688,12 @@ async function propagatePriceServiceToFollowingSiblings(conn, {
   // waiting here for a sibling's lock risks a real ABBA deadlock — a second
   // concurrent 'following' save on an overlapping part of the same series
   // can hold that sibling's lock while it waits on the edited visit's,
-  // which this save already holds. Postgres would detect the cycle and
-  // abort one side with a raw deadlock error; taking each lock
-  // non-blocking, sorted by id, turns that into a clean, immediate refusal
-  // instead — the whole save rolls back and the operator retries. Candidate
-  // ids are read unlocked here (the authoritative set is still whatever
-  // targetQuery's locked read returns below).
-  if (priceChanged || serviceChanged) {
-    const candidateIds = await conn('scheduled_services')
-      .where(function () { this.where({ id: parentId }).orWhere({ recurring_parent_id: parentId }); })
-      .where('is_recurring', true)
-      .whereIn('status', UPCOMING_VISIT_STATUSES)
-      .whereNot({ id: editedId })
-      .modify((qb) => { if (fromDateStr) qb.where('scheduled_date', '>=', fromDateStr); })
-      .pluck('id');
-    const { tryAcquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
-    for (const id of [...candidateIds].sort()) {
-      const acquired = await tryAcquireScheduledInvoiceMintLock(conn, id);
-      if (!acquired) {
-        throw Object.assign(
-          new Error('Another change to a later visit in this series is in progress — try again in a moment.'),
-          { statusCode: 409, isOperational: true, code: 'VISIT_BUSY_RETRY' },
-        );
-      }
-    }
-  }
+  // which this save already holds. A non-blocking try, sorted by id, turns
+  // that into a clean, immediate refusal instead — the whole save rolls
+  // back and the operator retries. The ids come from targetQuery's LOCKED
+  // read below (a second pre-audit P1: an unlocked candidate read could miss
+  // a sibling that joins the set in between); a try never waits, so taking
+  // it after the row locks cannot deadlock.
   const targetQuery = conn('scheduled_services')
     .where(function () { this.where({ id: parentId }).orWhere({ recurring_parent_id: parentId }); })
     .where('is_recurring', true)
@@ -4730,6 +4710,17 @@ async function propagatePriceServiceToFollowingSiblings(conn, {
     .forUpdate();
   if (fromDateStr) targetQuery.where('scheduled_date', '>=', fromDateStr);
   const targets = await targetQuery;
+  if (priceChanged || serviceChanged) {
+    const { tryAcquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
+    for (const id of targets.map((row) => String(row.id)).sort()) {
+      if (!(await tryAcquireScheduledInvoiceMintLock(conn, id))) {
+        throw Object.assign(
+          new Error('Another change to a later visit in this series is in progress — try again in a moment.'),
+          { statusCode: 409, isOperational: true, code: 'VISIT_BUSY_RETRY' },
+        );
+      }
+    }
+  }
   // A SERVICE change is billing-relevant too (Codex #3505 r2 P1): linked
   // invoices describe the old service by line item, and a service-scoped
   // appointment discount keys off the service identity — so the invoice
@@ -12930,7 +12921,11 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     // read and this transaction taking the mint lock, and comparing against
     // the stale value could skip the refusal on a save that races in with
     // the real committed-money conflict (pre-push audit P1, this PR).
-    const priceEditPosted = !reServiceConversionZeroPrice && updates.estimated_price !== undefined;
+    // Every anchored price-authority key counts, not only estimated_price:
+    // under a stamped $0, dropping primary_line_price alone changes what the
+    // visit bills (hasAuthoritativeZeroPrice), so it is a re-price too.
+    const postedPriceKeys = [...ANCHORED_PRICE_AUTHORITY_KEYS].filter((key) => updates[key] !== undefined);
+    const priceEditPosted = !reServiceConversionZeroPrice && postedPriceKeys.length > 0;
     // Same retired-for-sale gate as POST / (codex r13 on #4786), on the
     // catalog ids this save ADDS — the resolved primary service and any
     // add-on line not already on the visit. A grandfathered visit that keeps
@@ -13195,11 +13190,11 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       // plain (unlocked) read is sufficient once the lock is held.
       if (priceEditPosted) {
         const priceGuardCols = await trx('scheduled_services').columnInfo();
-        const priceGuardSelect = ['id', 'estimated_price'];
+        const priceGuardSelect = ['id', ...postedPriceKeys.filter((key) => priceGuardCols[key])];
         if (priceGuardCols.annual_prepay_term_id) priceGuardSelect.push('annual_prepay_term_id');
         if (priceGuardCols.prepaid_amount) priceGuardSelect.push('prepaid_amount');
         const priceGuardRow = await trx('scheduled_services').where({ id: req.params.id }).first(...priceGuardSelect);
-        const priceActuallyChanging = moneyValuesDiffer(priceGuardRow?.estimated_price, updates.estimated_price);
+        const priceActuallyChanging = postedPriceKeys.some((key) => moneyValuesDiffer(priceGuardRow?.[key], updates[key]));
         if (priceActuallyChanging) {
           const covered = await findBillingCoveredVisits(trx, [priceGuardRow || { id: req.params.id }], { openBalance: true });
           if (covered.size > 0) {

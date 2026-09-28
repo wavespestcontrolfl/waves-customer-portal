@@ -88,6 +88,8 @@ function makeConn(handler) {
       hasColumn: async () => false,
     };
     fn.fn = { now: () => new Date() };
+    // The sibling mint try-lock (pg_try_advisory_xact_lock) — always free here.
+    fn.raw = async () => ({ rows: [{ acquired: true }] });
     return fn;
   };
   return make();

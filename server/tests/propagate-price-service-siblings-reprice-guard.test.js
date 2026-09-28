@@ -8,7 +8,7 @@
  *     sibling's invoice-mint lock — NON-BLOCKING (pre-push audit P1: the
  *     edited visit's own mint lock is already held when this runs, so a
  *     blocking wait here risks a real ABBA deadlock against a second
- *     overlapping 'following' save) — BEFORE the targetQuery's own row lock
+ *     overlapping 'following' save) — on the rows targetQuery's own locked read returns
  *     (`.forUpdate()`), in a stable (sorted) id order; any sibling whose
  *     try-lock fails refuses the whole save (409 VISIT_BUSY_RETRY).
  *
@@ -44,6 +44,7 @@ const { tryAcquireScheduledInvoiceMintLock } = require('../services/scheduled-in
 // is comparable against the mint-lock mock's (jest's invocationCallOrder is
 // one counter shared by every mock function in the environment).
 const rowForUpdateSpy = jest.fn();
+const siblingUpdateSpy = jest.fn();
 
 // `byTable` gives a fixed result set per exact table string (aliases
 // included, matching propagatePriceServiceToFollowingSiblings' own call
@@ -64,7 +65,7 @@ function makeConn({
       c.modify = jest.fn((cb) => { cb(c); return c; });
       c.forUpdate = jest.fn((...a) => { rowForUpdateSpy(...a); return c; });
       c.pluck = jest.fn(async () => candidateIds);
-      c.update = jest.fn(async () => 1);
+      c.update = jest.fn(async (...a) => { siblingUpdateSpy(...a); return 1; });
       c.then = (resolve, reject) => Promise.resolve(targets).then(resolve, reject);
       c.catch = (fn) => Promise.resolve(targets).catch(fn);
       return c;
@@ -104,6 +105,7 @@ const ALL_TABLES = {
 
 beforeEach(() => {
   rowForUpdateSpy.mockClear();
+  siblingUpdateSpy.mockClear();
   tryAcquireScheduledInvoiceMintLock.mockClear();
 });
 
@@ -125,7 +127,7 @@ test('a sibling with an OPEN (draft) invoice linked only via its service record 
   })).rejects.toMatchObject({ statusCode: 409 });
 });
 
-test('sibling mint locks are acquired BEFORE the targetQuery row lock, sorted by id', async () => {
+test('sibling mint locks are tried on the rows the locked targetQuery returns, sorted by id', async () => {
   const conn = makeConn({
     candidateIds: ['sib-b', 'sib-a'],
     targets: [
@@ -147,10 +149,28 @@ test('sibling mint locks are acquired BEFORE the targetQuery row lock, sorted by
   // Sorted order: sib-a before sib-b.
   expect(tryAcquireScheduledInvoiceMintLock.mock.calls[0][1]).toBe('sib-a');
   expect(tryAcquireScheduledInvoiceMintLock.mock.calls[1][1]).toBe('sib-b');
-  // Every mint-lock call precedes the (single, shared) row-lock spy's call.
-  const lastMintOrder = tryAcquireScheduledInvoiceMintLock.mock.invocationCallOrder[1];
+  // The tries follow the locked read (a try never waits, so this order
+  // cannot deadlock) and come from its rows, not an unlocked pre-read.
+  const firstMintOrder = tryAcquireScheduledInvoiceMintLock.mock.invocationCallOrder[0];
   const rowLockOrder = rowForUpdateSpy.mock.invocationCallOrder[0];
-  expect(lastMintOrder).toBeLessThan(rowLockOrder);
+  expect(firstMintOrder).toBeGreaterThan(rowLockOrder);
+});
+
+test('a sibling that appears only in the locked read is still try-locked (pre-push audit P1)', async () => {
+  const conn = makeConn({
+    candidateIds: [],
+    targets: [{ id: 'sib-new', scheduled_date: '2099-02-01', pre_service_brief_type: null }],
+    hasTables: ALL_TABLES,
+    byTable: {
+      invoices: [], 'invoices as inv': [], 'visit_completion_packet_items as p': [],
+      estimate_card_holds: [], appointment_card_requests: [], scheduled_service_addons: [],
+    },
+  });
+  await propagatePriceServiceToFollowingSiblings(conn, {
+    editedId: 'edited-1', editedRow: { id: 'edited-1' }, parentId: 'parent-1', fromDateStr: null,
+    fields: { estimated_price: 200 }, serviceChanged: false, priceChanged: true, cols: { estimated_price: {} },
+  });
+  expect(tryAcquireScheduledInvoiceMintLock.mock.calls.map((c) => c[1])).toEqual(['sib-new']);
 });
 
 test('a schedule-only propagation (no price/service change) never touches the mint lock', async () => {
@@ -187,8 +207,8 @@ test('ABBA-safe refusal (pre-push audit P1): a sibling whose mint lock is alread
     editedId: 'edited-1', editedRow: { id: 'edited-1' }, parentId: 'parent-1', fromDateStr: null,
     fields: { estimated_price: 200 }, serviceChanged: false, priceChanged: true, cols: { estimated_price: {} },
   })).rejects.toMatchObject({ statusCode: 409, code: 'VISIT_BUSY_RETRY' });
-  // The try-lock never blocks — sib-a (tried first, sorted) succeeded, but
-  // the row-locking targetQuery (and so every sibling UPDATE) never ran.
+  // The try-lock never blocks — sib-a (tried first, sorted) succeeded,
+  // sib-b refused, and no sibling UPDATE ran.
   expect(tryAcquireScheduledInvoiceMintLock).toHaveBeenCalledTimes(2);
-  expect(rowForUpdateSpy).not.toHaveBeenCalled();
+  expect(siblingUpdateSpy).not.toHaveBeenCalled();
 });
