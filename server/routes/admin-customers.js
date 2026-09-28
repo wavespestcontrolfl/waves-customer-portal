@@ -4505,6 +4505,15 @@ const ADMIN_PREFS_ALLOWED_FIELDS = [...PREFS_ALLOWED_FIELDS, ...ADMIN_ONLY_PREFS
 
 router.put('/:id/property-preferences', requireAdmin, async (req, res, next) => {
   try {
+    // A missing or archived customer is a 404, not a foreign-key 500 on the
+    // insert — and a stale Customer 360 tab must not keep editing a
+    // soft-deleted customer's preferences (codex r2).
+    const liveCustomer = await db('customers')
+      .where({ id: req.params.id })
+      .whereNull('deleted_at')
+      .first('id');
+    if (!liveCustomer) return res.status(404).json({ error: 'Customer not found' });
+
     const { value, rejected, presentCount } = validatePrefsBodyWithSchemas(ADMIN_PREFS_FIELD_SCHEMAS, req.body);
     if (presentCount > 0 && rejected.length === presentCount) {
       // Every field in the request failed validation — nothing to save.
@@ -4588,6 +4597,18 @@ router.put('/:id/property-preferences', requireAdmin, async (req, res, next) => 
     // route's address sync already take on this customer — one shared lock
     // order across every property_preferences writer avoids an AB-BA
     // deadlock between them (codex #3565 gh-r38/r39).
+    // Details on file mean a sensitivity exists: every tech-facing consumer
+    // (nextstop-alerts, job-card, dispatch) gates the warning on the
+    // boolean, so details saved without the flag would never reach the
+    // technician (codex r2). An explicit flag in the same request wins.
+    if (
+      typeof updates.chemical_sensitivity_details === 'string'
+      && updates.chemical_sensitivity_details.trim()
+      && !('chemical_sensitivities' in updates)
+    ) {
+      updates.chemical_sensitivities = true;
+    }
+
     await db.transaction(async (trx) => {
       await trx.raw(
         'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',

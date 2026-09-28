@@ -43,6 +43,7 @@ jest.mock('../models/db', () => {
   const customersTable = () => {
     const q = {};
     q.where = jest.fn(() => q);
+    q.whereNull = jest.fn(() => q);
     q.first = jest.fn(async () => mockState.customerRow);
     return q;
   };
@@ -304,5 +305,27 @@ describe('PUT /api/admin/customers/:id/property-preferences', () => {
       expect(res.status).toBe(200);
       expect(res.body.preferences.irrigation_system).toBe(false);
     });
+  });
+});
+
+describe('codex r2', () => {
+  it('404s for a missing or archived customer and writes nothing', async () => {
+    mockState.customerRow = null;
+    const result = await putPrefs({ neighborhoodGateCode: '1234' });
+    expect(result.status).toBe(404);
+    expect(mockState.prefsRow).toBeNull();
+  });
+
+  it('entering sensitivity details without the flag turns the flag on', async () => {
+    mockState.prefsRow = { id: 'pref-1', customer_id: 'cust-1', chemical_sensitivities: false };
+    const result = await putPrefs({ chemicalSensitivityDetails: 'Asthma in the household' });
+    expect(result.status).toBe(200);
+    expect(mockState.prefsRow.chemical_sensitivities).toBe(true);
+  });
+
+  it('an explicit flag in the same request wins over the details inference', async () => {
+    mockState.prefsRow = { id: 'pref-1', customer_id: 'cust-1', chemical_sensitivities: true };
+    await putPrefs({ chemicalSensitivities: false, chemicalSensitivityDetails: 'Resolved last year' });
+    expect(mockState.prefsRow.chemical_sensitivities).toBe(false);
   });
 });

@@ -229,6 +229,63 @@ describe('Customer 360 → Property → Access & Preferences', () => {
     expect(screen.getByRole('button', { name: 'Save' })).toBeInTheDocument();
   });
 
+  it('an unset contact preference shows Not set, and choosing Text actually saves it', async () => {
+    const bodies = [];
+    vi.stubGlobal('fetch', vi.fn((url, options) => {
+      const path = String(url);
+      if (path.endsWith('/admin/payers')) return response({ payers: [] });
+      if (path.split('?')[0].endsWith('/timeline')) return response({ timeline: [] });
+      if (path.endsWith('/admin/customers/customer-a/property-preferences')) {
+        bodies.push(JSON.parse(options.body));
+        return response({ success: true, saved: true, preferences: BASE_PREFS });
+      }
+      if (path.endsWith('/admin/customers/customer-a')) return response(customerDetail({ contact_preference: null }));
+      return response({});
+    }));
+
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+    await screen.findAllByText('Avery Customer');
+    await openPropertyTab();
+    await screen.findByText('Access & Preferences');
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Access & Preferences' }));
+    const select = (await screen.findByText('Contact Preference')).closest('label').querySelector('select');
+    expect(select.value).toBe('');
+    fireEvent.change(select, { target: { value: 'text' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(bodies).toHaveLength(1));
+    expect(bodies[0]).toEqual({ contactPreference: 'text' });
+  });
+
+  it('typing sensitivity details turns the flag on, and both switches are named', async () => {
+    const bodies = [];
+    vi.stubGlobal('fetch', vi.fn((url, options) => {
+      const path = String(url);
+      if (path.endsWith('/admin/payers')) return response({ payers: [] });
+      if (path.split('?')[0].endsWith('/timeline')) return response({ timeline: [] });
+      if (path.endsWith('/admin/customers/customer-a/property-preferences')) {
+        bodies.push(JSON.parse(options.body));
+        return response({ success: true, saved: true, preferences: BASE_PREFS });
+      }
+      if (path.endsWith('/admin/customers/customer-a')) return response(customerDetail());
+      return response({});
+    }));
+
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+    await screen.findAllByText('Avery Customer');
+    await openPropertyTab();
+    await screen.findByText('Access & Preferences');
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Access & Preferences' }));
+    expect(await screen.findByRole('switch', { name: 'Rain Sensor' })).toBeInTheDocument();
+    const flag = screen.getByRole('switch', { name: 'Chemical Sensitivities' });
+    expect(flag).toHaveAttribute('aria-checked', 'false');
+    const details = screen.getByText('Sensitivity Details').closest('label').querySelector('textarea');
+    fireEvent.change(details, { target: { value: 'Asthma in the household' } });
+    expect(flag).toHaveAttribute('aria-checked', 'true');
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(bodies).toHaveLength(1));
+    expect(bodies[0]).toMatchObject({ chemicalSensitivities: true, chemicalSensitivityDetails: 'Asthma in the household' });
+  });
+
   it('after a partial save, reverting a SAVED field still sends it on retry', async () => {
     const bodies = [];
     vi.stubGlobal('fetch', vi.fn((url, options) => {

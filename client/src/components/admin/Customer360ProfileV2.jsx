@@ -6636,6 +6636,7 @@ const ACCESS_PREFS_PREFERRED_TIME_OPTIONS = [
   ["afternoon", "Afternoon"],
 ];
 const ACCESS_PREFS_CONTACT_OPTIONS = [
+  ["", "Not set"],
   ["text", "Text"],
   ["call", "Call"],
   ["email", "Email"],
@@ -6782,7 +6783,7 @@ function accessPrefsDraftFromRow(prefs = {}) {
     petsSecuredPlan: prefs.pets_secured_plan || "",
     preferredDay: prefs.preferred_day || "no_preference",
     preferredTime: prefs.preferred_time || "no_preference",
-    contactPreference: prefs.contact_preference || "text",
+    contactPreference: prefs.contact_preference || "",
     blackoutStart: dateInputValue(prefs.blackout_start),
     blackoutEnd: dateInputValue(prefs.blackout_end),
     irrigationControllerLocation: prefs.irrigation_controller_location || "",
@@ -6845,7 +6846,7 @@ function accessPrefsSavePayload(draft) {
     petsSecuredPlan: draft.petsSecuredPlan,
     preferredDay: draft.preferredDay,
     preferredTime: draft.preferredTime,
-    contactPreference: draft.contactPreference,
+    contactPreference: draft.contactPreference || null,
     // null, never '' — property_preferences.blackout_start/end are real
     // Postgres `date` columns and '' 500s on save (codex P1). The server
     // schema now belt-and-braces normalizes '' -> null too, but the client
@@ -7279,7 +7280,7 @@ function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved }) {
         </AccessPrefsField>
         <div className="flex items-center justify-between py-1">
           <span className="ui-label text-ink-secondary">Rain Sensor</span>
-          <Switch checked={!!d.rainSensor} onChange={(val) => set("rainSensor")(val)} />
+          <Switch aria-label="Rain Sensor" checked={!!d.rainSensor} onChange={(val) => set("rainSensor")(val)} />
         </div>
         <AccessPrefsField label="Irrigation Notes" error={fieldErrors.irrigationScheduleNotes}>
           <Textarea rows={2} className={ACCESS_PREFS_TEXTAREA_CLASS} value={d.irrigationScheduleNotes} onChange={(e) => set("irrigationScheduleNotes")(e.target.value)} />
@@ -7335,10 +7336,19 @@ function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved }) {
         <AccessPrefsSubheading>Health &amp; Safety</AccessPrefsSubheading>
         <div className="flex items-center justify-between py-1">
           <span className="ui-label text-ink-secondary">Chemical Sensitivities</span>
-          <Switch checked={!!d.chemicalSensitivities} onChange={(val) => set("chemicalSensitivities")(val)} />
+          <Switch aria-label="Chemical Sensitivities" checked={!!d.chemicalSensitivities} onChange={(val) => set("chemicalSensitivities")(val)} />
         </div>
         <AccessPrefsField label="Sensitivity Details" error={fieldErrors.chemicalSensitivityDetails}>
-          <Textarea rows={2} className={ACCESS_PREFS_TEXTAREA_CLASS} value={d.chemicalSensitivityDetails} onChange={(e) => set("chemicalSensitivityDetails")(e.target.value)} />
+          <Textarea rows={2} className={ACCESS_PREFS_TEXTAREA_CLASS} value={d.chemicalSensitivityDetails} onChange={(e) => {
+            const next = e.target.value;
+            // Entering details turns the flag on — techs only see the
+            // warning when the flag is set.
+            setDraft((prev) => ({
+              ...(prev || {}),
+              chemicalSensitivityDetails: next,
+              ...(next.trim() ? { chemicalSensitivities: true } : {}),
+            }));
+          }} />
         </AccessPrefsField>
         <AccessPrefsField label="Special Instructions" error={fieldErrors.specialInstructions}>
           <Textarea rows={2} className={ACCESS_PREFS_TEXTAREA_CLASS} value={d.specialInstructions} onChange={(e) => set("specialInstructions")(e.target.value)} />
