@@ -53,6 +53,10 @@ const LOCK_KEYFRAMES = `
 }
 `;
 
+// How long a camera / photo picker the app opened may keep the lock from firing
+// if it never reports a pick or cancel (older iOS has no `cancel` event).
+const PICKER_GRACE_MS = 3 * 60 * 1000;
+
 /**
  * Face ID / Touch ID app-lock for the native shell.
  *
@@ -77,6 +81,14 @@ export default function BiometricGate({ children }) {
   const suppressStateRef = useRef(false);  // ignore app-state churn our own prompt causes
   const lockedRef = useRef(false);         // latest lock state for the stable listener closure
   const suppressTimerRef = useRef(null);   // pending timer that clears suppressStateRef
+  // Our own camera / photo picker (an <input type="file">, e.g. Photo ID) covers the
+  // webview with a native sheet. That hides the document, which looked like a real
+  // background: the app locked under the camera, and every Face ID success was then
+  // discarded as "not foreground" (the camera still hid the page), so the prompt
+  // re-fired every few seconds. While a picker we opened is up, it is not leaving
+  // the app. Bounded so a picker that never reports back can't disable the lock.
+  const pickerOpenUntilRef = useRef(0);
+  const pickerOpen = () => Date.now() < pickerOpenUntilRef.current;
 
   const attempt = useCallback(async () => {
     if (!isNativeApp() || !hasSessionToken()) { setLocked(false); return; }
@@ -100,7 +112,8 @@ export default function BiometricGate({ children }) {
       // foreground. If a real background landed during the prompt, its visibility
       // listener has already re-locked — don't let a stale success overwrite that
       // newer lock and expose content on the next return.
-      const stillForeground = typeof document === 'undefined' || document.visibilityState === 'visible';
+      const stillForeground = typeof document === 'undefined' || document.visibilityState === 'visible'
+        || pickerOpen();
       const unlocked = ok && stillForeground;
       setLocked(!unlocked);
       lockedRef.current = !unlocked;
@@ -127,12 +140,25 @@ export default function BiometricGate({ children }) {
     // it the authoritative signal that a fresh unlock is required on return, and it
     // can't be confused with the Face ID prompt's own resign/activate churn.
     const onVisibility = () => {
+      if (pickerOpen()) return;
       if (document.visibilityState === 'hidden' && isNativeApp() && hasSessionToken()) {
         setLocked(true);
         lockedRef.current = true;
       }
     };
     document.addEventListener('visibilitychange', onVisibility);
+    const isFileInput = (el) => el?.tagName === 'INPUT' && el.type === 'file';
+    const onPickerOpen = (e) => {
+      if (isFileInput(e.target)) pickerOpenUntilRef.current = Date.now() + PICKER_GRACE_MS;
+    };
+    const onPickerDone = (e) => {
+      if (isFileInput(e.target)) pickerOpenUntilRef.current = 0;
+    };
+    // Capture phase: the picker's input is usually hidden and clicked from code, and
+    // `cancel` doesn't bubble.
+    document.addEventListener('click', onPickerOpen, true);
+    document.addEventListener('change', onPickerDone, true);
+    document.addEventListener('cancel', onPickerDone, true);
     let listener;
     import('@capacitor/app')
       .then(({ App }) => App.addListener('appStateChange', ({ isActive }) => {
@@ -143,9 +169,10 @@ export default function BiometricGate({ children }) {
           // Only (re)prompt when actually locked — a stray foreground while already
           // unlocked must never kick off another Face ID prompt.
           if (lockedRef.current) attempt();
-        } else if (hasSessionToken()) {
+        } else if (hasSessionToken() && !pickerOpen()) {
           // ALWAYS lock on resign (willResignActive) — even during a prompt's
-          // suppression window — to cover the app-switcher snapshot.
+          // suppression window — to cover the app-switcher snapshot. (Not while our
+          // own picker is up: the camera covers the content in that snapshot.)
           setLocked(true);
           lockedRef.current = true;
         }
@@ -154,6 +181,9 @@ export default function BiometricGate({ children }) {
       .catch(() => {});
     return () => {
       document.removeEventListener('visibilitychange', onVisibility);
+      document.removeEventListener('click', onPickerOpen, true);
+      document.removeEventListener('change', onPickerDone, true);
+      document.removeEventListener('cancel', onPickerDone, true);
       try { listener?.remove?.(); } catch { /* noop */ }
     };
   }, [attempt]);
