@@ -28,7 +28,7 @@ const plaid = require('./plaid-client');
 const { isInfrastructureError } = require('./vendor-credentials');
 const { etDateString } = require('../utils/datetime-et');
 
-const MAX_SYNC_PAGES = 100;             // 100 × 500 = 50k transactions per run
+const MAX_SYNC_PAGES = 400;             // 400 × 500 = 200k transactions per run (two years for a small business is a few thousand)
 const MAX_PAGINATION_RESTARTS = 3;
 const MAX_AMOUNT = 9999999999.99;       // numeric(12,2) ceiling, as the CSV parser
 
@@ -427,7 +427,9 @@ async function fetchAllChanges(accessToken, startCursor) {
     let pages = 0;
     try {
       while (hasMore) {
-        if (++pages > MAX_SYNC_PAGES) break; // resumes from the saved cursor next run
+        // Plaid's contract: a cursor from the MIDDLE of a pagination run is
+        // not a valid restart point — only a complete run may be committed
+        if (++pages > MAX_SYNC_PAGES) throw new Error(`more than ${MAX_SYNC_PAGES * 500} changed transactions in one sync — nothing applied`);
         const page = await plaid.transactionsSync(accessToken, cursor);
         added.push(...(page.added || []));
         modified.push(...(page.modified || []));
@@ -435,7 +437,7 @@ async function fetchAllChanges(accessToken, startCursor) {
         cursor = page.next_cursor || cursor;
         hasMore = !!page.has_more;
       }
-      return { added, modified, removed, nextCursor: cursor, complete: !hasMore };
+      return { added, modified, removed, nextCursor: cursor };
     } catch (err) {
       // Plaid's documented recovery: restart the whole pagination loop from
       // the cursor the loop STARTED with
@@ -513,18 +515,22 @@ async function applyChanges(trx, accountsById, changes) {
 
   const removedIds = changes.removed.map(r => r && r.transaction_id).filter(Boolean);
   for (let i = 0; i < removedIds.length; i += 500) {
-    const slice = removedIds.slice(i, i + 500);
-    counts.deleted += await trx('bank_transactions')
-      .whereIn('plaid_transaction_id', slice)
-      .where({ status: 'unmatched' })
-      .del();
-    counts.flagged += await trx('bank_transactions')
-      .whereIn('plaid_transaction_id', slice)
-      .whereNot({ status: 'unmatched' })
-      .update({
+    // lock first, THEN decide per row: deciding by two status-filtered
+    // statements let a row unlinked between them escape both (neither
+    // deleted nor flagged) while the cursor moved past the withdrawal
+    const locked = await trx('bank_transactions')
+      .whereIn('plaid_transaction_id', removedIds.slice(i, i + 500))
+      .forUpdate()
+      .select('id', 'status');
+    const unmatched = locked.filter(r => r.status === 'unmatched').map(r => r.id);
+    const reviewed = locked.filter(r => r.status !== 'unmatched').map(r => r.id);
+    if (unmatched.length) counts.deleted += await trx('bank_transactions').whereIn('id', unmatched).del();
+    if (reviewed.length) {
+      counts.flagged += await trx('bank_transactions').whereIn('id', reviewed).update({
         suggestion: trx.raw("coalesce(suggestion, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ plaidRemoved: true })]),
         updated_at: trx.fn.now(),
       });
+    }
   }
   return counts;
 }
@@ -605,7 +611,7 @@ async function syncItem(itemId, { runMatching = true } = {}) {
         last_synced_at: trx.fn.now(),
         updated_at: trx.fn.now(),
       });
-      return { ...counts, complete: changes.complete };
+      return counts;
     });
   } catch (err) {
     const status = await recordFailure(itemId, err);

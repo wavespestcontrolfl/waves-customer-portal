@@ -194,7 +194,7 @@ async function activate(itemId, overrides = {}) {
     ];
     plaid.transactionsSync.mockResolvedValueOnce(page(added, [], [], 'cursor-1'));
     const out = await plaidSync.syncItem(itemId);
-    expect(out).toMatchObject({ inserted: 3, complete: true });
+    expect(out).toMatchObject({ inserted: 3 });
     expect(out.skipped).toBeUndefined(); // a whole-run skip only
     expect(out.skips).toEqual({ pending: 1, before_sync_from: 1, account_disabled: 1, currency: 1 });
     // the token handed to Plaid is the decrypted one
@@ -451,6 +451,35 @@ async function activate(itemId, overrides = {}) {
     expect(await plaidSync.syncItem(itemId)).toMatchObject({ inserted: 2 });
     expect(plaid.transactionsSync.mock.calls.map(c => c[1])).toEqual([null, 'p1', null, 'p1']);
     expect((await mockPg('plaid_items').where({ id: itemId }).first()).sync_cursor).toBe('p2');
+  });
+
+  test('a withdrawal for a row unlinked mid-sync is still handled (rows locked before deciding)', async () => {
+    const itemId = await connect();
+    await activate(itemId);
+    plaid.transactionsSync.mockResolvedValueOnce(page([txn('t-w', 'acc-card', 10, '2026-09-05')], [], [], 'cursor-1'));
+    await plaidSync.syncItem(itemId);
+    const [exp] = await mockPg('expenses').insert({}).returning(['id']);
+    await mockPg('bank_transactions').where({ plaid_transaction_id: 't-w' }).update({ status: 'matched_expense', matched_expense_id: exp.id });
+    // an unlink holds the row when the sync reaches it, then commits
+    const unlink = await mockPg.transaction();
+    await unlink('bank_transactions').where({ plaid_transaction_id: 't-w' }).update({ status: 'unmatched', matched_expense_id: null });
+    plaid.transactionsSync.mockResolvedValueOnce(page([], [], [{ transaction_id: 't-w' }], 'cursor-2'));
+    const syncing = plaidSync.syncItem(itemId);
+    await new Promise(r => setTimeout(r, 300));
+    await unlink.commit();
+    expect(await syncing).toMatchObject({ deleted: 1, flagged: 0 });
+    expect(await mockPg('bank_transactions').where({ plaid_transaction_id: 't-w' }).first()).toBeUndefined();
+  });
+
+  test('a pagination run too large to finish commits nothing (no mid-run cursor)', async () => {
+    const itemId = await connect();
+    await activate(itemId);
+    plaid.transactionsSync.mockResolvedValue({ added: [], modified: [], removed: [], next_cursor: 'mid', has_more: true });
+    const out = await plaidSync.syncItem(itemId);
+    plaid.transactionsSync.mockReset();
+    expect(out).toMatchObject({ status: 'error' });
+    expect(out.error).toMatch(/nothing applied/);
+    expect((await mockPg('plaid_items').where({ id: itemId }).first()).sync_cursor).toBeNull();
   });
 
   test('enabling an account or moving its start date earlier restarts the feed from scratch', async () => {

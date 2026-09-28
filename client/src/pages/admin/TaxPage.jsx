@@ -4871,7 +4871,6 @@ function syncSummary(sync) {
   if (sync.matching)
     text += ` — ${sync.matching.payoutsLinked} payouts + ${sync.matching.expensesLinked} expenses matched`;
   if (sync.matchingError) text += ` — ${sync.matchingError}`;
-  if (sync.complete === false) text += " — more pending, runs again next hour";
   return text;
 }
 
