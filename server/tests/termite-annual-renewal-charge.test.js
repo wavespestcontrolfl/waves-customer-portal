@@ -302,6 +302,29 @@ describe('termite annual renewal charge', () => {
       await _private.ringRenewalBell(successor, 'refused', 'Auto Pay inactive');
       expect(notifyAdmin).toHaveBeenCalledWith('billing', expect.any(String), expect.stringContaining('$249.00'), expect.any(Object));
     });
+
+    // Codex #4971 r18 P2: a failed pay-link delivery never claims "sent" —
+    // it rings under its own ':undelivered' dedupe key, so the later
+    // successful delivery's "sent" bell is not deduped behind it.
+    test('a refused bell after a FAILED pay-link delivery says it was not sent, under its own dedupe key', async () => {
+      mockCommon();
+      const notifyAdmin = jest.fn(async () => ({ id: 'n1' }));
+      jest.doMock('../services/notification-service', () => ({ notifyAdmin }));
+      jest.doMock('../models/db', () => jest.fn((table) => { throw new Error(`unexpected table ${table}`); }));
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      const successor = { id: 'succ-1', customer_id: 'cust-1', prepay_amount: 249, prepay_invoice_id: 'inv-1' };
+
+      await _private.ringRenewalBell(successor, 'refused', 'Auto Pay inactive', { delivered: false });
+      expect(notifyAdmin).toHaveBeenLastCalledWith('billing', expect.any(String), expect.stringMatching(/could NOT be sent yet/), expect.objectContaining({
+        dedupeKey: 'termite-renewal-charge:succ-1:refused:undelivered',
+      }));
+      expect(notifyAdmin.mock.calls[0][2]).not.toMatch(/was sent with its pay link/);
+
+      await _private.ringRenewalBell(successor, 'refused', 'Auto Pay inactive');
+      expect(notifyAdmin).toHaveBeenLastCalledWith('billing', expect.any(String), expect.stringMatching(/was sent with its pay link/), expect.objectContaining({
+        dedupeKey: 'termite-renewal-charge:succ-1:refused',
+      }));
+    });
   });
 
   // Codex #4971 r15 P2 — finding 4: the charge-failed customer notice's own

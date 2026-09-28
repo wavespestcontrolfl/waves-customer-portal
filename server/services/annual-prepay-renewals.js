@@ -4020,7 +4020,11 @@ async function recordParentRenewedIfEligible({ successorId, parentTermId }, conn
       return null;
     }
     const parent = await t('annual_prepay_terms').where({ id: parentTermId }).first();
-    if (!(await Charge.resolveParentEligibility(t, parent)).eligible) return null;
+    // Codex #4971 r18 P1: the SAME successor-specific predicate the charge
+    // and withdrawal paths use — a parent whose term_end moved since the
+    // mint (parent_term_moved) must not be stamped renewed against the
+    // stale successor window; the late-paid alert handles that conflict.
+    if (!(await Charge.parentRefusalForSuccessor(t, successor, parent)).eligible) return null;
     return recordDecision({ termId: parentTermId, action: 'renew', conn: t });
   };
   return typeof conn.transaction === 'function' ? conn.transaction(work) : work(conn);

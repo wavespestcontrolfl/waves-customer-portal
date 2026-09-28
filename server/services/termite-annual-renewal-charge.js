@@ -2134,7 +2134,7 @@ async function followThroughChargeOutcome(successor, kind, reason, conn, { first
     if (delivery?.code === 'payer_billed') bellKind = 'payer_billed';
     delivered = Boolean(delivery?.ok) || delivery?.code === 'payer_billed';
   }
-  const belled = await ringRenewalBell(successor, bellKind, reason);
+  const belled = await ringRenewalBell(successor, bellKind, reason, { delivered });
   // Codex #4971 r15 P2: the customer decline notice is its OWN persisted
   // follow-through obligation, not a fire-once side effect of `first`.
   // sendCustomerMessage can return a non-throwing { blocked: true,
@@ -2246,6 +2246,16 @@ async function recordChargeFollowThroughOwed(successor, kind, reason, conn) {
   });
 }
 
+// Codex #4971 r18 P2: the declined/refused copy states what actually
+// happened to the pay link — a failed delivery rings under its own dedupe
+// key (ringRenewalBell), so the later successful delivery still rings the
+// "sent" copy instead of being deduped behind a stale claim.
+function payLinkDeliveryClause(delivered) {
+  return delivered
+    ? 'The renewal invoice was sent with its pay link instead.'
+    : 'The renewal invoice and its pay link could NOT be sent yet — delivery will be retried automatically; check the account if a follow-up alert saying it was sent does not arrive.';
+}
+
 const RENEWAL_BELL_COPY = {
   // Codex round-7 P1: the delivery clause is now the dynamic `reason` —
   // built by deliverInvoiceAndStampSkip from deliverRenewalInvoice's OWN
@@ -2268,13 +2278,13 @@ const RENEWAL_BELL_COPY = {
   // the durable stripe_invoice_charge_attempts row) — never the full
   // prepay_amount, which overstates what Stripe was asked for whenever
   // account credit reduced the cash amount actually tried.
-  declined: (successor, reason, amount) => ({
+  declined: (successor, reason, amount, delivered = true) => ({
     title: 'Termite annual renewal — card on file declined',
-    body: `The renewal charge of $${Number(amount).toFixed(2)} for customer ${successor.customer_id}'s termite annual renewal was declined by the card on file: ${reason}. The renewal invoice was sent with its pay link instead. The card will NOT be retried automatically.`,
+    body: `The renewal charge of $${Number(amount).toFixed(2)} for customer ${successor.customer_id}'s termite annual renewal was declined by the card on file: ${reason}. ${payLinkDeliveryClause(delivered)} The card will NOT be retried automatically.`,
   }),
-  refused: (successor, reason) => ({
+  refused: (successor, reason, _amount, delivered = true) => ({
     title: 'Termite annual renewal — card on file not charged',
-    body: `The renewal charge of $${Number(successor.prepay_amount).toFixed(2)} for customer ${successor.customer_id}'s termite annual renewal was not attempted, or could not complete, for a reason other than a card decline: ${reason}. The renewal invoice was sent with its pay link instead. The card will NOT be retried automatically.`,
+    body: `The renewal charge of $${Number(successor.prepay_amount).toFixed(2)} for customer ${successor.customer_id}'s termite annual renewal was not attempted, or could not complete, for a reason other than a card decline: ${reason}. ${payLinkDeliveryClause(delivered)} The card will NOT be retried automatically.`,
   }),
   // Codex #4971 pre-push P0: the renewal now routes to a third-party payer
   // (assigned after the mint, or recorded by the charge's own payer guard).
@@ -2374,19 +2384,19 @@ const RENEWAL_BELL_COPY = {
 // Returns the underlying notifyAdmin result (or null on failure) so
 // callers that must not repeat a side effect (e.g. reconcileStuckSuccessors'
 // pay-link delivery) can check `result.deduped` first.
-async function ringRenewalBell(successor, kind, reason) {
+async function ringRenewalBell(successor, kind, reason, { delivered = true } = {}) {
   try {
     const NotificationService = require('./notification-service');
     // Codex #4971 r17 P2: the 'declined' copy needs the ACTUAL attempted
     // amount, not the full prepay_amount — computed only for that kind (the
     // other copy functions ignore the extra argument).
     const amount = kind === 'declined' ? await attemptedChargeAmount(successor) : Number(successor.prepay_amount);
-    const copy = (RENEWAL_BELL_COPY[kind] || RENEWAL_BELL_COPY.declined)(successor, reason, amount);
+    const copy = (RENEWAL_BELL_COPY[kind] || RENEWAL_BELL_COPY.declined)(successor, reason, amount, delivered);
     return await NotificationService.notifyAdmin('billing', copy.title, copy.body, {
       icon: '⚠️',
       bell: true,
       link: `/admin/customers?customerId=${encodeURIComponent(successor.customer_id)}`,
-      dedupeKey: `termite-renewal-charge:${successor.id}:${kind}`,
+      dedupeKey: `termite-renewal-charge:${successor.id}:${kind}${delivered ? '' : ':undelivered'}`,
       metadata: { termId: successor.id, customerId: successor.customer_id, reason: reason || null },
     });
   } catch (err) {

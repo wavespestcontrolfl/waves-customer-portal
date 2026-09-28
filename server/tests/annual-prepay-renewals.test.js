@@ -6729,6 +6729,37 @@ describe('stampParentRenewedForSuccessor (move 16) — the parent-renewed hook',
     }));
   });
 
+  // Codex #4971 r18 P1: the stamp uses the successor-specific predicate
+  // (parentRefusalForSuccessor), so a parent whose term_end moved since the
+  // mint is never stamped renewed against the stale successor window.
+  test('a parent whose term_end moved since the mint is never stamped renewed (parent_term_moved)', async () => {
+    const movedParent = { ...LIVE_PARENT, term_end: '2027-03-01' };
+    const staleSuccessor = { ...PAID_SUCCESSOR, term_start: '2026-10-01' };
+    const recordDecisionQ = query({ returning: [{ id: 'parent-term', status: 'renewed', renewal_decision: 'renew' }] });
+    setDbQueues({
+      annual_prepay_terms: [query({ rows: [] }), query({ first: staleSuccessor }), query({ first: movedParent }), recordDecisionQ, recordDecisionQ],
+      ...paidEvidence(),
+    });
+
+    await _private.stampParentRenewedForSuccessor({ id: 'succ-term', renewed_from_term_id: 'parent-term' }, 'test');
+
+    expect(recordDecisionQ.update).not.toHaveBeenCalled();
+  });
+
+  test('a parent whose term_end still lines up with the successor window is stamped renewed', async () => {
+    const parent = { ...LIVE_PARENT, term_end: '2026-09-30' };
+    const successor = { ...PAID_SUCCESSOR, term_start: '2026-10-01' };
+    const recordDecisionQ = query({ returning: [{ id: 'parent-term', status: 'renewed', renewal_decision: 'renew' }] });
+    setDbQueues({
+      annual_prepay_terms: [query({ rows: [] }), query({ first: successor }), query({ first: parent }), recordDecisionQ, recordDecisionQ],
+      ...paidEvidence(),
+    });
+
+    await _private.stampParentRenewedForSuccessor({ id: 'succ-term', renewed_from_term_id: 'parent-term' }, 'test');
+
+    expect(recordDecisionQ.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'renewed', renewal_decision: 'renew' }));
+  });
+
   // Codex #4971 pre-push P1: the successor's own payment is re-read under
   // the gate (both keys), never trusted from the caller's earlier read.
   test('the gate is taken over BOTH the parent and the successor keys', async () => {
