@@ -18,7 +18,13 @@ jest.mock('../services/typed-followup-obligation', () => ({
   typedFollowupVerdict: jest.fn(),
   FOLLOWUP_CHILD_INACTIVE_STATUSES: ['cancelled', 'skipped', 'no_show'],
 }));
-jest.mock('../utils/customer-comms-lock', () => ({ withCustomerCommsLock: jest.fn() }));
+jest.mock('../utils/customer-comms-lock', () => ({ lockCustomerComms: jest.fn(async () => {}) }));
+jest.mock('../services/scheduling/window-rules', () => ({
+  probeSlotOverlap: jest.fn(async () => []),
+  slotOverlapWarning: (date) => `overlap on ${date}`,
+  ADMIN_OCCUPANCY_EXCLUDE_STATUSES: ['cancelled', 'completed', 'skipped', 'no_show'],
+}));
+jest.mock('../services/scheduling/occupancy', () => ({ findConflictingVisits: jest.fn(async () => []) }));
 jest.mock('../services/technician-eligibility', () => ({ assertAssignableTechnician: jest.fn(async () => true) }));
 jest.mock('../utils/datetime-et', () => ({ etDateString: () => '2026-09-28' }));
 jest.mock('../services/booking/create-scheduled-service', () => ({
@@ -30,7 +36,9 @@ jest.mock('../services/tech-visit-notifications', () => ({ notifyTechVisitChange
 jest.mock('../services/appointment-reminders', () => ({ registerAppointment: jest.fn() }));
 
 const db = require('../models/db');
-const { withCustomerCommsLock } = require('../utils/customer-comms-lock');
+const { lockCustomerComms } = require('../utils/customer-comms-lock');
+const { probeSlotOverlap } = require('../services/scheduling/window-rules');
+const { findConflictingVisits } = require('../services/scheduling/occupancy');
 const { assertAssignableTechnician } = require('../services/technician-eligibility');
 const { completeScheduledServiceInsert } = require('../services/booking/create-scheduled-service');
 const { resolveAlert } = require('../services/dispatch-alerts');
@@ -66,7 +74,7 @@ function install({ existing = null, record = FROZEN, inserted = { id: 'fu-1', sc
     chain.where = (w) => { if (w && w.followup_source_service_id) chain._followupLookup = true; return origWhere(w); };
     return chain;
   });
-  withCustomerCommsLock.mockImplementation(async (_db, _cust, fn) => {
+  db.transaction = jest.fn(async (fn) => {
     const trx = (table) => {
       const q = {
         where: () => q,
@@ -90,10 +98,10 @@ test('dryRun + useSuggestedDate: every gate, then what would be booked — no wr
   expect(out.body).toEqual({
     dryRun: true,
     alreadyScheduled: false,
-    wouldBook: { date: '2026-10-05', windowStart: '09:00', windowEnd: '10:00', technicianId: 'tech-1', status: 'pending', serviceType: 'Bed Bug Treatment' },
+    wouldBook: { date: '2026-10-05', windowStart: '09:00', windowEnd: '10:00', technicianId: 'tech-1', status: 'pending', serviceType: 'Bed Bug Treatment', overlap: false },
   });
   expect(writes).toEqual([]);
-  expect(withCustomerCommsLock).not.toHaveBeenCalled();
+  expect(db.transaction).not.toHaveBeenCalled();
   expect(resolveAlert).not.toHaveBeenCalled();
   expect(registerAppointment).not.toHaveBeenCalled();
 });
@@ -152,7 +160,7 @@ test('expectedWindow: a source window changed since the approval refuses before 
   });
   expect(out).toEqual({ status: 409, body: expect.objectContaining({ code: 'followup_window_changed' }) });
   expect(writes).toEqual([]);
-  expect(withCustomerCommsLock).not.toHaveBeenCalled();
+  expect(db.transaction).not.toHaveBeenCalled();
 });
 
 test('an approved date that no longer matches the verdict refuses before any write (the CTA gate)', async () => {
@@ -162,4 +170,49 @@ test('an approved date that no longer matches the verdict refuses before any wri
   });
   expect(out).toEqual({ status: 409, body: expect.objectContaining({ code: 'followup_date_mismatch', suggestedDate: '2026-10-12' }) });
   expect(writes).toEqual([]);
+});
+
+test('rung 1 before rung 6: the overlap probe runs first and a hit is advisory — the booking commits with a warning', async () => {
+  const order = [];
+  const { writes } = install();
+  probeSlotOverlap.mockImplementationOnce(async () => { order.push('probe'); return [{ id: 'other' }]; });
+  lockCustomerComms.mockImplementationOnce(async () => { order.push('comms'); });
+  const out = await bookCompletionFollowup({ serviceId: 'svc-1', date: '2026-10-05', isAdmin: true });
+  expect(order).toEqual(['probe', 'comms']);
+  expect(out.status).toBe(200);
+  expect(out.body.overlapWarning).toBe('overlap on 2026-10-05');
+  expect(writes).toHaveLength(1);
+});
+
+test('the preview reports an overlap the write would warn about, without taking any lock', async () => {
+  install();
+  findConflictingVisits.mockResolvedValueOnce([{ id: 'other' }]);
+  const out = await bookCompletionFollowup({ serviceId: 'svc-1', useSuggestedDate: true, dryRun: true, isAdmin: true });
+  expect(out.body.wouldBook.overlap).toBe(true);
+  expect(probeSlotOverlap).not.toHaveBeenCalled();
+});
+
+test('expectedCustomerId refuses under the source-row lock when the visit changed hands', async () => {
+  const { writes } = install();
+  await expect(bookCompletionFollowup({ serviceId: 'svc-1', date: '2026-10-05', isAdmin: true, expectedCustomerId: 'cust-OTHER' }))
+    .rejects.toMatchObject({ statusCode: 409, code: 'FOLLOWUP_CUSTOMER_CHANGED' });
+  expect(writes).toEqual([]);
+});
+
+test('an existing follow-up that differs from the approval is a 409, never a reported success', async () => {
+  install({ existing: { id: 'fu-old', scheduled_date: '2026-10-05', status: 'pending', window_start: '13:00', window_end: '14:00', technician_id: 'tech-1', customer_id: 'cust-1' } });
+  const out = await bookCompletionFollowup({
+    serviceId: 'svc-1', date: '2026-10-05', isAdmin: true,
+    expectedWindow: { start: '09:00', end: '10:00' }, expectedTechnicianId: 'tech-1', expectedCustomerId: 'cust-1',
+  });
+  expect(out).toEqual({ status: 409, body: expect.objectContaining({ code: 'followup_exists_differs', appointment: expect.objectContaining({ id: 'fu-old' }) }) });
+});
+
+test('an existing follow-up matching every pin is the idempotent success', async () => {
+  install({ existing: { id: 'fu-old', scheduled_date: '2026-10-05', status: 'pending', window_start: '09:00', window_end: '10:00', technician_id: 'tech-1', customer_id: 'cust-1' } });
+  const out = await bookCompletionFollowup({
+    serviceId: 'svc-1', date: '2026-10-05', isAdmin: true,
+    expectedWindow: { start: '09:00', end: '10:00' }, expectedTechnicianId: 'tech-1', expectedCustomerId: 'cust-1',
+  });
+  expect(out).toEqual({ status: 200, body: expect.objectContaining({ success: true, alreadyScheduled: true }) });
 });
