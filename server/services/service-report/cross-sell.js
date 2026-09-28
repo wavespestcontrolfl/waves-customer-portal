@@ -1032,12 +1032,34 @@ async function buildReportCrossSell(service, database, {
         const ladderVocab = ladderKeysFor(fam);
         return familyUncorroborated(fam, ladderVocab.length ? ladderVocab : [...offerVocabulary([fam])]);
       });
-      // Only a LADDER family carries the both-answers-wrong ambiguity that
-      // suppresses the whole card on a recent report: it would either be
-      // offered to someone who owns it or advanced past for someone who
-      // doesn't. A non-ladder family moves no rung, so it simply drops.
-      const uncorroboratedLadder = uncorroborated.filter((fam) => ladderKeysFor(fam).length > 0);
-      if (uncorroboratedLadder.length) {
+      // A family V2 can ALSO offer (rodent monitoring, mosquito — the
+      // season/findings branches resolveReportCrossSellV2 adds — plus the
+      // one fixed-price target outside the targetKey system, cockroach)
+      // carries the SAME both-answers-wrong ambiguity as a ladder family
+      // (codex pre-push P1): a recent, uncorroborated mosquito or rodent
+      // report identity is exactly as ambiguous as a recent pest/lawn one
+      // — the unseeded-next-visit gap and a just-cancelled program are
+      // indistinguishable, and V2 offering the family right back is wrong
+      // in the first world. GATE-CONDITIONAL (PR r13 P2 byte-identical
+      // requirement): with the gate off, resolveReportCrossSellV2 never
+      // runs at all, so a non-ladder family cannot be re-offered — it
+      // still just drops (the classic ladder never reads it), same as
+      // today. Only widen the guard when V2 is actually live. Derived
+      // from the V2 offer table (V2_TARGET_PROMPTS) + COCKROACH_SERVICE_KEY,
+      // not a hand list, so a future V2 family is covered automatically
+      // without a second finding.
+      const guardedFamilies = process.env.GATE_REPORT_CROSS_SELL_V2 === 'true'
+        ? new Set([...OFFER_LADDER, ...Object.keys(V2_TARGET_PROMPTS), COCKROACH_SERVICE_KEY])
+        : new Set(OFFER_LADDER);
+      const guardedKeysFor = (fam) => [...offerVocabulary([fam])].filter((key) => guardedFamilies.has(key));
+      // Only a GUARDED family (every OFFER_LADDER rung, plus every family
+      // GATE_REPORT_CROSS_SELL_V2 can also offer) carries the
+      // both-answers-wrong ambiguity that suppresses the whole card on a
+      // recent report: it would either be offered to someone who owns it
+      // or advanced past for someone who doesn't. A family outside that
+      // set moves no rung and V2 never re-offers it, so it simply drops.
+      const uncorroboratedGuarded = uncorroborated.filter((fam) => guardedKeysFor(fam).length > 0);
+      if (uncorroboratedGuarded.length) {
         // ET calendar discipline (pre-push P1): service_date is a DATE —
         // compare ET calendar days, never UTC-midnight milliseconds, or
         // the suppress/offer boundary moves hours early around DST.

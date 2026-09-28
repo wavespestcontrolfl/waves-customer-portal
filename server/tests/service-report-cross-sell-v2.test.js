@@ -636,6 +636,63 @@ describe('buildReportCrossSell integration: GATE_REPORT_CROSS_SELL_V2 wiring', (
     );
     expect(result).toBeNull();
   });
+
+  // P1 fix (codex pre-push): the recent-report ambiguity guard used to
+  // check ONLY OFFER_LADDER families, so an uncorroborated mosquito/rodent
+  // report identity just DROPPED (non-ladder families never suppressed
+  // the whole card) instead of suppressing it — and with the family
+  // dropped from ladderEvidence, V2's own season/findings branches could
+  // then re-offer that SAME family right back, unaware the customer might
+  // still be on it with no next visit seeded yet.
+  test('gate on: a recent RECURRING mosquito report with no next visit seeded and no ledger evidence suppresses the whole card (season branch would otherwise re-offer it)', async () => {
+    process.env.GATE_REPORT_CROSS_SELL_V2 = 'true';
+    etDateString.mockReturnValue('2026-07-15'); // mosquito season — the branch that would otherwise fire
+    const result = await buildReportCrossSell(
+      // Recent (SERVICE()'s default service_date is a few days ago), recurring
+      // mosquito report identity — but NOTHING corroborates it: no next
+      // mosquito visit seeded, no ledger row.
+      SERVICE({ service_type: 'Mosquito Control' }),
+      dbFor({ serviceTypes: [], turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' } }),
+      { propertyLookup: missLookup },
+    );
+    expect(result).toBeNull();
+  });
+
+  test('gate on: a recent rodent-monitoring report with no next visit seeded and no ledger evidence suppresses the whole card (findings branch would otherwise re-offer it)', async () => {
+    process.env.GATE_REPORT_CROSS_SELL_V2 = 'true';
+    etDateString.mockReturnValue('2026-11-01'); // outside every season window — isolates the findings branch
+    // The visit's OWN typed snapshot shows rodent activity — exactly what
+    // a real rodent-monitoring completion records — so without the fix
+    // this would resolve straight through to resolveReportCrossSellV2's
+    // findings branch and re-offer rodent_bait.
+    const service = {
+      ...SERVICE({ service_type: 'Rodent Monitoring' }),
+      ...withTypedSnapshot({ primary: { type: 'rodent_trapping', values: { captures: 3 } } }),
+    };
+    const result = await buildReportCrossSell(
+      service,
+      dbFor({ serviceTypes: [], turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' } }),
+      { propertyLookup: missLookup },
+    );
+    expect(result).toBeNull();
+  });
+
+  // Corroborated (a next visit for the SAME family exists) → the guard
+  // never fires and the card renders exactly as before this fix — the
+  // identical mosquito scenario above, minus the missing corroboration.
+  test('gate on: a CORROBORATED recent mosquito report identity (next visit seeded) is not suppressed and is not re-offered', async () => {
+    process.env.GATE_REPORT_CROSS_SELL_V2 = 'true';
+    etDateString.mockReturnValue('2026-07-15'); // mosquito season
+    const result = await buildReportCrossSell(
+      SERVICE({ service_type: 'Mosquito Control' }),
+      dbFor({ serviceTypes: ['Mosquito Control'], turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' } }),
+      { propertyLookup: missLookup },
+    );
+    expect(result).not.toBeNull();
+    // Already owns mosquito (corroborated) — V2's season branch must not
+    // re-offer the family the customer already has.
+    expect(result.serviceKey).not.toBe('mosquito');
+  });
 });
 
 // ============================================================
