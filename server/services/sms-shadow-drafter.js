@@ -487,28 +487,27 @@ function serviceIdentityPrompt(inboundMessage, visits, openEstimate, services) {
     ...services.map((s) => `${s.service_key}: ${s.name}`),
     '',
     'A reply may offer open appointment times, sized for one job. Which job is this text about?',
-    '- "visit": one of their visits above (moving, cancelling or confirming it, asking when it is, a problem since it). Put its id in "visit".',
+    ...(visits.length ? ['- "visit": one of their visits above (moving, cancelling or confirming it, asking when it is, a problem since it). Put its id in "visit".'] : []),
     ...(openEstimate ? ['- "estimate": scheduling the work in their open estimate.'] : []),
-    '- "new_service": work none of their visits covers. Put the matching service key in "service".',
+    ...(services.length ? ['- "new_service": work none of their visits covers. Put the matching service key in "service".'] : []),
     '- "none": the text names no service and points at no particular visit.',
     '- "unclear": it could be more than one visit or service, or it asks about several at once.',
     'Choose only from the lists above. When unsure, answer "unclear".',
   ].join('\n');
 }
 
-// The provider can answer only with an offered option.
+// The provider can answer only with an offered option. A kind with nothing
+// to offer (a brand-new customer has no visit; a catalog load that failed
+// open has no service) is left out of the answer entirely rather than sent
+// as a bare null-typed property.
 function serviceIdentitySchema(visits, openEstimate, services) {
-  const optionEnum = (ids) => (ids.length ? { type: ['string', 'null'], enum: [...ids, null] } : { type: 'null' });
-  return {
-    type: 'object',
-    additionalProperties: false,
-    required: ['about', 'visit', 'service'],
-    properties: {
-      about: { type: 'string', enum: ['visit', ...(openEstimate ? ['estimate'] : []), 'new_service', 'none', 'unclear'] },
-      visit: optionEnum(visits.map((v) => v.id)),
-      service: optionEnum(services.map((s) => s.service_key)),
-    },
+  const nullableEnum = (ids) => ({ type: ['string', 'null'], enum: [...ids, null] });
+  const properties = {
+    about: { type: 'string', enum: [...(visits.length ? ['visit'] : []), ...(openEstimate ? ['estimate'] : []), ...(services.length ? ['new_service'] : []), 'none', 'unclear'] },
+    ...(visits.length ? { visit: nullableEnum(visits.map((v) => v.id)) } : {}),
+    ...(services.length ? { service: nullableEnum(services.map((s) => s.service_key)) } : {}),
   };
+  return { type: 'object', additionalProperties: false, required: Object.keys(properties), properties };
 }
 
 // The text names no job: the one upcoming visit (a reschedule or "when can
@@ -1866,9 +1865,11 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     || SAVE_SALE_INTENT_RE.test(String(intent?.intent || ''))
     || SAVE_SALE_TEXT_RE.test(String(inboundMessage || ''));
   // The identity step runs only when a live, gate-on OPEN TIMES fetch is
-  // about to use it (Codex #5194 r1): with the gate off, or on a frozen
-  // replay, drafting makes no catalog query and no extra model call.
-  const willFetchOpenTimes = !presetFactsBlock && needsOpenTimes && gateEnvValue('GATE_SMS_REAL_ANSWERS');
+  // about to use it (Codex #5194 r1): with the gate off, on a frozen replay,
+  // or with no city to look up (fetchOpenTimesData returns nothing then —
+  // the backfill lane never passes one), drafting makes no catalog query and
+  // no extra model call.
+  const willFetchOpenTimes = !presetFactsBlock && needsOpenTimes && Boolean(city) && gateEnvValue('GATE_SMS_REAL_ANSWERS');
   const identity = willFetchOpenTimes && !estimateId
     ? await serviceIdentityFor(inboundMessage, context, { openEstimate })
     : { serviceType: liveServiceType(context), certain: true };

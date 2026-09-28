@@ -1868,6 +1868,20 @@ describe('service identity: the model picks the job the OPEN TIMES are sized for
     answer({ about: 'unclear', visit: null, service: null });
     await draft(drafter, 'Can you add liquid termite treatment Tuesday?', bait);
     expect(dispatch.mock.calls[1][1].jsonSchema.properties.about.enum).toEqual(['visit', 'new_service', 'none', 'unclear']);
+    // a brand-new customer with a catalog that failed open: nothing to pick,
+    // so neither option property is sent (no bare null-typed property)
+    CATALOG.length = 0;
+    try {
+      none();
+      await draft(drafter, 'Can you come Tuesday?', { upcomingServices: [], serviceHistory: [] });
+      const schema = dispatch.mock.calls[2][1].jsonSchema;
+      expect(schema.required).toEqual(['about']);
+      expect(Object.keys(schema.properties)).toEqual(['about']);
+      expect(schema.properties.about.enum).toEqual(['none', 'unclear']);
+      expect(lastLookup()[2].serviceType).toBeUndefined(); // "none" → the engine default, times offered
+    } finally {
+      CATALOG.push({ service_key: 'termite_bait', name: 'Termite Bait Station System Service' }, { service_key: 'termite_liquid', name: 'Termite Liquid Treatment Service' }, { service_key: 'flea_tick', name: 'Flea Control Service' });
+    }
   });
 
   test('a picked visit or catalog service prices the lookup; a named treatment beside a same-family visit is new work', async () => {
@@ -1922,11 +1936,12 @@ describe('service identity: the model picks the job the OPEN TIMES are sized for
     expect(lastLookup()).toEqual(['Venice', null, expect.objectContaining({ serviceType: 'Flea Control Service' })]);
   });
 
-  test('no model call with the gate off, on a frozen replay, or when the message is linked to an estimate', async () => {
+  test('no model call with the gate off, on a frozen replay, with no city to look up, or when the message is linked to an estimate', async () => {
     const drafter = require('../services/sms-shadow-drafter');
     await draft(drafter, 'Can you come Tuesday?', bait, { estimateId: 'est-1' });
     expect(lastLookup()[1]).toBe('est-1');
     await draft(drafter, 'Can you come Tuesday?', bait, { factsBlock: 'FROZEN\nFOLLOW-UP SLA RIGHT NOW: within the hour\n' });
+    await draft(drafter, 'Can you come Tuesday?', bait, { city: null }); // the backfill lane passes no city
     process.env.GATE_SMS_REAL_ANSWERS = 'false';
     await draft(drafter, 'Can you come Tuesday?', bait);
     expect(dispatch).not.toHaveBeenCalled();
