@@ -540,9 +540,14 @@ function cellLabel(surface, failureMode) {
   return `${String(surface || '').replace(/_/g, ' ')} · ${String(failureMode || '').replace(/_/g, ' ')}`;
 }
 
-function ProposalCard({ proposal, busy, onReview }) {
+function ProposalCard({ proposal, busy, onReview, currentVersion }) {
   const [expanded, setExpanded] = useState(false);
   const pending = proposal.status === 'pending';
+  // A proposal targets the prompt version its evidence came from. After a
+  // gate flip an older pending card can outlive its version; the server
+  // refuses to accept it, and the card says so before the click.
+  const targetVersion = proposal.prompt_version || null;
+  const staleVersion = Boolean(pending && targetVersion && currentVersion && targetVersion !== currentVersion);
   return (
     <Card className="p-4 space-y-3">
       <div className="flex flex-wrap items-center gap-2">
@@ -550,6 +555,11 @@ function ProposalCard({ proposal, busy, onReview }) {
         <Badge tone={pending ? "alert" : "neutral"}>
           {pending ? "Proposed patch — review" : `Accepted${proposal.reviewed_by ? ` by ${proposal.reviewed_by}` : ""}`}
         </Badge>
+        {targetVersion && (
+          <Badge tone={staleVersion ? "alert" : "neutral"}>
+            {staleVersion ? `written for ${targetVersion} — live is ${currentVersion}` : `for ${targetVersion}`}
+          </Badge>
+        )}
         <span className="text-ui-caption text-ink-secondary u-nums">{proposal.evidence_count} failures behind it</span>
         <Button
           type="button"
@@ -567,7 +577,8 @@ function ProposalCard({ proposal, busy, onReview }) {
         <div className="ui-record-actions">
           <Button
             type="button"
-            disabled={busy}
+            disabled={busy || staleVersion}
+            title={staleVersion ? `Written for ${targetVersion}; the live prompt is ${currentVersion}. Dismiss it or wait for a replacement.` : undefined}
             onClick={(event) => onReview(proposal, "accept", event.currentTarget)}
             loading={busy}
           >
@@ -620,7 +631,7 @@ function PathologySection({ data, busy, onReview }) {
         </Card>
       )}
       {proposals.map((p) => (
-        <ProposalCard key={p.id} proposal={p} busy={busy} onReview={onReview} />
+        <ProposalCard key={p.id} proposal={p} busy={busy} onReview={onReview} currentVersion={data.currentVersion} />
       ))}
     </section>
   );
