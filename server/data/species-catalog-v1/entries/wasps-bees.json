@@ -236,7 +236,7 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": "Verdict changed from harmless to ally: it actively preys on spiders (including widows), which is a beneficial service, not just a neutral visitor.",
+      "notes": "Verdict changed from harmless to ally: it actively preys on spiders (including widows), which is a beneficial service, not just a neutral visitor. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
       "approval_hash": "c73f32f4135cee7035be26fc7dcc1596052bb4f0e955b44bc006bae8eb8d490e"
     },
     "slug": "mud-dauber",
@@ -446,7 +446,7 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": "role set to stinging_pest rather than beneficial even though honey bees are ecologically beneficial: verdict here is call (specialist removal, not leave-alone), and the validator ties role beneficial to verdict ally.",
+      "notes": "role set to stinging_pest rather than beneficial even though honey bees are ecologically beneficial: verdict here is call (specialist removal, not leave-alone), and the validator ties role beneficial to verdict ally. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
       "approval_hash": "d7e2494411e677902c44e7c8d8fcd64a5570167cc3a9c3c44f45004faf5600b7"
     },
     "slug": "honey-bee-wall-colony",
@@ -558,7 +558,7 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": "structural changed to true: they drill new tunnels into sound fascia/trim (not just nesting in existing damage), which fits the brief's structural-damage definition. Resolved 2026-09-26: EENY-100/IN257 (Grissell, Sanford & Fasulo, UF/IFAS) loaded directly via the FLVC/EDIS journal host (the ask.ifas.ufl.edu short link still errors). It confirms round drilled entry holes with sawdust below, boring into unpainted back-face trim/fascia under eaves, the shiny bare abdomen that distinguishes Xylocopa from fuzzy bumble bees, \"weakening of structural timbers\" as a recognized economic damage type, and that only females may sting (rarely) while males hover/dart at people near the nest. (Only females possess a stinger in Hymenoptera generally, which is why males cannot sting -- basic, undisputed apidology, not separately sourced.) Source URL added.",
+      "notes": "structural changed to true: they drill new tunnels into sound fascia/trim (not just nesting in existing damage), which fits the brief's structural-damage definition. Resolved 2026-09-26: EENY-100/IN257 (Grissell, Sanford & Fasulo, UF/IFAS) loaded directly via the FLVC/EDIS journal host (the ask.ifas.ufl.edu short link still errors). It confirms round drilled entry holes with sawdust below, boring into unpainted back-face trim/fascia under eaves, the shiny bare abdomen that distinguishes Xylocopa from fuzzy bumble bees, \"weakening of structural timbers\" as a recognized economic damage type, and that only females may sting (rarely) while males hover/dart at people near the nest. (Only females possess a stinger in Hymenoptera generally, which is why males cannot sting -- basic, undisputed apidology, not separately sourced.) Source URL added. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
       "approval_hash": "a6abcf171a12076834d750bd9bb5ca1f226cead8211748071df6661a9afa71a8"
     },
     "slug": "carpenter-bee",
@@ -953,7 +953,7 @@
     ],
     "review": {
       "status": "owner_approved",
-      "notes": "Per audit item 53: traits[3] previously described the audible squeak it makes 'if picked up' -- since this is one of the most painful stings around, that phrasing invited handling; replaced with a visible feature.",
+      "notes": "Per audit item 53: traits[3] previously described the audible squeak it makes 'if picked up' -- since this is one of the most painful stings around, that phrasing invited handling; replaced with a visible feature. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
       "approval_hash": "325f1e032057c39739aa07c8038a79cec708ea502f8b85fb7b997a91308fd5d8"
     }
   },
@@ -1468,7 +1468,7 @@
     ],
     "review": {
       "status": "owner_approved",
-      "notes": "Per audit item 54 (flagged as a low-value pair): kept the leaf-footed-bug look-alike rather than replacing it, since it answers a real customer question (a beneficial bee's clean leaf cutout vs. a pest bug's stippled/wilted damage) even though the insects themselves don't look alike; no better candidate among this catalog's other bee/wasp slugs (carpenter-bee, bumble-bee) is closer to this genus in size/behavior.",
+      "notes": "Per audit item 54 (flagged as a low-value pair): kept the leaf-footed-bug look-alike rather than replacing it, since it answers a real customer question (a beneficial bee's clean leaf cutout vs. a pest bug's stippled/wilted damage) even though the insects themselves don't look alike; no better candidate among this catalog's other bee/wasp slugs (carpenter-bee, bumble-bee) is closer to this genus in size/behavior. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
       "approval_hash": "b9cf5780399075b089847d4e16006dbc390c0d407fd044b8e2829942d6da6ab4"
     }
   }

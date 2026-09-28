@@ -547,7 +547,7 @@
     ],
     "review": {
       "status": "owner_approved",
-      "notes": "Confirmed against UF/IFAS EDIS IN1035: it explicitly says this species \"is not a primary vector of major concern\" for human disease, acting only as a secondary/bridge vector for EEE and VEE, and is \"a nuisance in Florida\" mainly through aggressive biting after rain and flooding. disease_vector stays true for its documented dog-heartworm vectoring; copy and tech_notes already frame it as a nuisance/pet-risk mosquito rather than a major human-disease threat, matching the source.",
+      "notes": "Confirmed against UF/IFAS EDIS IN1035: it explicitly says this species \"is not a primary vector of major concern\" for human disease, acting only as a secondary/bridge vector for EEE and VEE, and is \"a nuisance in Florida\" mainly through aggressive biting after rain and flooding. disease_vector stays true for its documented dog-heartworm vectoring; copy and tech_notes already frame it as a nuisance/pet-risk mosquito rather than a major human-disease threat, matching the source. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
       "approval_hash": "9f6aa22e9946a38126babf0cf90e79c1a5824c8a3619be55b52e2c712d04154b"
     }
   },

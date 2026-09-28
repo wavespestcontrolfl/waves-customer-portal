@@ -445,7 +445,7 @@
     ],
     "review": {
       "status": "owner_approved",
-      "notes": "Re-fetched UF/IFAS EDIS IN300 directly this session: it states 'human exposure to blacklegged ticks is greatest during the summer months when high nymphal Ixodes scapularis activity and human outdoor activity coincide,' and that adults become active in October and remain active through winter. Peak months moved from a guessed Nov-Mar adult-only window to Jun-Aug, matching IN300's own explicit 'greatest exposure' statement for nymphs (this entry's other tracked stage); season_basis moved to 'year_round' since the tick is present all year with this as the highlighted highest-exposure window. This is IN300's general species-level pattern, not a Florida- or SWFL-specific curve; Florida populations are noted elsewhere in this entry to bite people less often than northern populations.",
+      "notes": "Re-fetched UF/IFAS EDIS IN300 directly this session: it states 'human exposure to blacklegged ticks is greatest during the summer months when high nymphal Ixodes scapularis activity and human outdoor activity coincide,' and that adults become active in October and remain active through winter. Peak months moved from a guessed Nov-Mar adult-only window to Jun-Aug, matching IN300's own explicit 'greatest exposure' statement for nymphs (this entry's other tracked stage); season_basis moved to 'year_round' since the tick is present all year with this as the highlighted highest-exposure window. This is IN300's general species-level pattern, not a Florida- or SWFL-specific curve; Florida populations are noted elsewhere in this entry to bite people less often than northern populations. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
       "approval_hash": "5586acd3cfea105908c772c022c5656ba139ae8a2976eb5d4c1d40c2c394ec0a"
     }
   },
@@ -567,7 +567,7 @@
     ],
     "review": {
       "status": "owner_approved",
-      "notes": "Per audit item 26: removed the 'yard treatment ... helps a lot' effectiveness claim (BRIEF Revision 2 rule 3, no treatment promises). Per BRIEF Revision 3 (bite-pattern look-alikes): both look_alikes set to photo_can_confirm false, since a photo of welts can't say what bit; added a second look-alike to cat-flea (A/fleas).",
+      "notes": "Per audit item 26: removed the 'yard treatment ... helps a lot' effectiveness claim (BRIEF Revision 2 rule 3, no treatment promises). Per BRIEF Revision 3 (bite-pattern look-alikes): both look_alikes set to photo_can_confirm false, since a photo of welts can't say what bit; added a second look-alike to cat-flea (A/fleas). Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
       "approval_hash": "c756bc7c70906b80eeddd21487f5b5096967288f48c07cfc0174867058d23607"
     }
   },
@@ -684,7 +684,7 @@
     ],
     "review": {
       "status": "owner_approved",
-      "notes": "Could not load the UF/IFAS EDIS 'Mites That Attack Humans' (IG086) page directly in this session (server returned 410); facts cross-checked against Wikipedia's rodent mite dermatitis summary and general search results citing that same IFAS publication and a UF tropical fowl mite Featured Creatures page. Per audit item 26 / BRIEF Revision 3: look_alikes[0].photo_can_confirm set to false (bite-pattern comparison); softened a 'removing the source is what stops the bites' method-outcome claim in copy.",
+      "notes": "Could not load the UF/IFAS EDIS 'Mites That Attack Humans' (IG086) page directly in this session (server returned 410); facts cross-checked against Wikipedia's rodent mite dermatitis summary and general search results citing that same IFAS publication and a UF tropical fowl mite Featured Creatures page. Per audit item 26 / BRIEF Revision 3: look_alikes[0].photo_can_confirm set to false (bite-pattern comparison); softened a 'removing the source is what stops the bites' method-outcome claim in copy. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
       "approval_hash": "b354cc1b9cbdd057c1a9ef9b92a389033bef79b18f658fc131c748b812fa7894"
     }
   }

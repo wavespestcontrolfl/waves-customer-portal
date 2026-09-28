@@ -360,7 +360,7 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": "Verdict kept as call because a carpenter-ant trail is a moisture/damage clue worth an inspection, not because the ant itself is dangerous or structural.",
+      "notes": "Verdict kept as call because a carpenter-ant trail is a moisture/damage clue worth an inspection, not because the ant itself is dangerous or structural. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
       "approval_hash": "762a016d2c84d4fc17529304f8812f511d33983368dcd264be41cc4dfb1096fa"
     },
     "slug": "carpenter-ant",
@@ -914,7 +914,7 @@
     ],
     "review": {
       "status": "owner_approved",
-      "notes": "Confirmed against two UF/IFAS EDIS pages (IN296, IN1351): neither mentions any FDACS regulated/reportable designation for this species, so regulated stays false rather than asserting a formal duty that isn't documented. IN296 lists established, overwintering colonies as of 2000 in several Southwest Florida counties including Collier, Hardee, Hendry, Manatee and Sarasota; IN1351 describes the established range as spanning the Florida Keys north to Gainesville, tied to human-modified habitat (roadsides, residential areas) rather than blanket coverage. Range kept at 'occasional' since establishment is documented but patchy/localized, not a yard-by-yard certainty. Pet-eye-irritation claim resolved this session: the condition is actually named 'Florida keratopathy' / 'Florida spots' and has long been reported specifically in Florida cats and dogs (per Wikipedia's Florida keratopathy entry and prior veterinary literature), so it is not purely a Pacific-island phenomenon as the earlier note assumed — but a peer-reviewed 2021-2024 clinical case series (Veterinary Ophthalmology, 100 dogs/cats, PMC12754576) states directly that the causal link to little fire ant stings 'remains speculative and has not been confirmed by rigorous academic research,' citing lesions inconsistent with actual envenomation. safety_line rewritten accordingly: the eye condition is real and Florida-associated, but LFA causation is suspected, not proven.",
+      "notes": "Confirmed against two UF/IFAS EDIS pages (IN296, IN1351): neither mentions any FDACS regulated/reportable designation for this species, so regulated stays false rather than asserting a formal duty that isn't documented. IN296 lists established, overwintering colonies as of 2000 in several Southwest Florida counties including Collier, Hardee, Hendry, Manatee and Sarasota; IN1351 describes the established range as spanning the Florida Keys north to Gainesville, tied to human-modified habitat (roadsides, residential areas) rather than blanket coverage. Range kept at 'occasional' since establishment is documented but patchy/localized, not a yard-by-yard certainty. Pet-eye-irritation claim resolved this session: the condition is actually named 'Florida keratopathy' / 'Florida spots' and has long been reported specifically in Florida cats and dogs (per Wikipedia's Florida keratopathy entry and prior veterinary literature), so it is not purely a Pacific-island phenomenon as the earlier note assumed — but a peer-reviewed 2021-2024 clinical case series (Veterinary Ophthalmology, 100 dogs/cats, PMC12754576) states directly that the causal link to little fire ant stings 'remains speculative and has not been confirmed by rigorous academic research,' citing lesions inconsistent with actual envenomation. safety_line rewritten accordingly: the eye condition is real and Florida-associated, but LFA causation is suspected, not proven. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
       "approval_hash": "01f514e635e99afa414879d1b54ccfc2058e4f898e2fdf9fffe6b4c43edb984d"
     }
   },
@@ -1153,7 +1153,7 @@
     ],
     "review": {
       "status": "owner_approved",
-      "notes": "Per audit item 23: removed an outcome promise ('numbers usually drop once ... are in place') per BRIEF Revision 2 rule 3 (no treatment promises).",
+      "notes": "Per audit item 23: removed an outcome promise ('numbers usually drop once ... are in place') per BRIEF Revision 2 rule 3 (no treatment promises). Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
       "approval_hash": "44ccea12ab74200c2b5d9d87eded4bbbcf0e1a9adc8e20457383eac3382eca58"
     }
   },
@@ -1264,7 +1264,7 @@
     ],
     "review": {
       "status": "owner_approved",
-      "notes": "Per audit item 44: safety.bites changed from false to true (capability, not danger, per rule 5 -- ants generally can bite with their mandibles, often gripping before or while stinging).",
+      "notes": "Per audit item 44: safety.bites changed from false to true (capability, not danger, per rule 5 -- ants generally can bite with their mandibles, often gripping before or while stinging). Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
       "approval_hash": "c404c5a9312b090516f63a83c81ce74431299864353e2df406af0fd6c58777ca"
     }
   },
@@ -1603,7 +1603,7 @@
     ],
     "review": {
       "status": "owner_approved",
-      "notes": "Genus-level entry (several Odontomachus species occur in Florida). A directly-read FSU thesis on O. brunneus (citing Deyrup & Cover 2004) confirms it 'inhabits a variety of terrestrial habitats throughout Florida'; no source gives SWFL-county-level frequency data, so range stays 'occasional', this catalog's cautious default, rather than asserted as settled.",
+      "notes": "Genus-level entry (several Odontomachus species occur in Florida). A directly-read FSU thesis on O. brunneus (citing Deyrup & Cover 2004) confirms it 'inhabits a variety of terrestrial habitats throughout Florida'; no source gives SWFL-county-level frequency data, so range stays 'occasional', this catalog's cautious default, rather than asserted as settled. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
       "approval_hash": "b209c86e986d3206d498874ef2ac51191d836632741995157d47853cc60c8692"
     }
   },

@@ -216,7 +216,7 @@
     ],
     "review": {
       "status": "owner_approved",
-      "notes": "Active/peak months corrected against UF/IFAS EDIS IN595 (Featured Creatures: Yellow Fly, Diachlorus ferrugatus): 'occur in Florida from March to November, although the peak season is April through June' -- matches active/peak months exactly. IN595 states plainly that regional biting-pressure comparisons within Florida have not been studied, so no Gulf/Panhandle-vs-SWFL pressure comparison is claimed anywhere in this entry; copy and range rely only on the confirmed statewide season and IN595's 'especially common near large bodies of water' note.",
+      "notes": "Active/peak months corrected against UF/IFAS EDIS IN595 (Featured Creatures: Yellow Fly, Diachlorus ferrugatus): 'occur in Florida from March to November, although the peak season is April through June' -- matches active/peak months exactly. IN595 states plainly that regional biting-pressure comparisons within Florida have not been studied, so no Gulf/Panhandle-vs-SWFL pressure comparison is claimed anywhere in this entry; copy and range rely only on the confirmed statewide season and IN595's 'especially common near large bodies of water' note. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
       "approval_hash": "5cdc837f44f1c991790aefa1d84bca7e4b57113ef635467f9b6d236ac2713185"
     }
   },

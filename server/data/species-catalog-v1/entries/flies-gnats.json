@@ -883,7 +883,7 @@
     ],
     "review": {
       "status": "owner_approved",
-      "notes": "Verdict changed from harmless to ally: it's a beneficial decomposer, not just an inert visitor, so role beneficial / verdict ally fits better.",
+      "notes": "Verdict changed from harmless to ally: it's a beneficial decomposer, not just an inert visitor, so role beneficial / verdict ally fits better. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
       "approval_hash": "167164db361fc5cf1d566ebb631853c087864a4b7c8891a2809046a58856cf48"
     }
   },
@@ -998,7 +998,7 @@
     ],
     "review": {
       "status": "owner_approved",
-      "notes": "Larvae (leatherjackets) can occasionally feed on grass roots elsewhere in the US, but this is not established as a significant SWFL turf issue; kept scope to the adult, which is the form usually photographed indoors/on screens.",
+      "notes": "Larvae (leatherjackets) can occasionally feed on grass roots elsewhere in the US, but this is not established as a significant SWFL turf issue; kept scope to the adult, which is the form usually photographed indoors/on screens. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
       "approval_hash": "47d9a2f1e5c84af24dada3e2562c463d20c4897ca6578d33f873ecbada41ef76"
     }
   },
@@ -1335,7 +1335,7 @@
     ],
     "review": {
       "status": "owner_approved",
-      "notes": "Per audit item 40: role changed from nuisance to beneficial and verdict from watch to ally, since the copy/tech_notes already describe it as a beneficial predator (validator requires verdict ally when role is beneficial).",
+      "notes": "Per audit item 40: role changed from nuisance to beneficial and verdict from watch to ally, since the copy/tech_notes already describe it as a beneficial predator (validator requires verdict ally when role is beneficial). Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
       "approval_hash": "afa3225c7c2b37d678a5ce998ddbdb3af972bb9eac69aec034fdbc5ee025d875"
     }
   }
