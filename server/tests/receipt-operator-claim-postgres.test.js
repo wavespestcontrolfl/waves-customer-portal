@@ -25,6 +25,7 @@ const {
   releaseOperatorReceiptClaim,
   claimDueReceiptDeliveryJobs,
   enqueueReceiptDelivery,
+  _internals: { recoverStaleLocks },
 } = require('../services/receipt-delivery-queue');
 
 const connection = process.env.RECEIPT_CLAIM_TEST_DATABASE_URL;
@@ -48,6 +49,7 @@ postgres('operator receipt claim on PostgreSQL', () => {
     mockPg = knex({ client: 'pg', connection, searchPath: [schema], pool: { min: 0, max: 4 } });
     await jobsMigration.up(mockPg);
     await customerInitiatedMigration.up(mockPg);
+    await mockPg.schema.createTable('invoices', (t) => { t.uuid('id').primary(); t.timestamp('receipt_sent_at'); });
   });
   afterAll(async () => {
     await mockPg?.destroy();
@@ -165,5 +167,22 @@ postgres('operator receipt claim on PostgreSQL', () => {
     await mockPg('receipt_delivery_jobs').where({ id: claim.id }).update({ locked_by: 'worker-2' });
     await releaseOperatorReceiptClaim(claim, { emailDelivered: true });
     expect(await job(invoiceId)).toMatchObject({ status: 'running', locked_by: 'worker-2' });
+  });
+
+  test('a stale operator claim on an invoice already receipted is closed, never requeued to email again', async () => {
+    const stale = new Date(Date.now() - 60 * 60 * 1000);
+    const sentId = await seedJob({ status: 'running', source: 'operator_send', locked_at: stale, locked_by: 'operator:host:1:a' });
+    await mockPg('invoices').insert({ id: sentId, receipt_sent_at: new Date() });
+    const unsentId = await seedJob({ status: 'running', source: 'operator_send', locked_at: stale, locked_by: 'operator:host:1:b' });
+    await mockPg('invoices').insert({ id: unsentId, receipt_sent_at: null });
+    const workerId = await seedJob({ status: 'running', locked_at: stale, locked_by: 'worker-9' });
+    await mockPg('invoices').insert({ id: workerId, receipt_sent_at: new Date() });
+
+    await recoverStaleLocks();
+    expect(await job(sentId)).toMatchObject({ status: 'completed', locked_by: null, last_error: expect.stringMatching(/already sent/) });
+    // Nothing went out on this one: the drain delivers it.
+    expect(await job(unsentId)).toMatchObject({ status: 'retry_scheduled', locked_by: null });
+    // A drain worker's own stale job is recovered as before (its retry owes the email).
+    expect(await job(workerId)).toMatchObject({ status: 'retry_scheduled' });
   });
 });

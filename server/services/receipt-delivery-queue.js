@@ -73,6 +73,31 @@ async function enqueueReceiptDelivery({
 }
 
 async function recoverStaleLocks() {
+  // A stale operator claim (claimReceiptJobForOperatorSend) whose invoice is
+  // already stamped receipt_sent_at was never handed back after the operator's
+  // send delivered (a failed release, or a process that died after the
+  // stamp). Requeueing it would email the receipt again — the drain's email
+  // leg does not read the stamp — so it is closed instead. The one cost: a
+  // job an enqueue took over, whose operator send was text-only, loses its
+  // email; the customer already has the receipt text.
+  await db('receipt_delivery_jobs')
+    .where({ status: 'running' })
+    .where('locked_at', '<', db.raw(`now() - interval '${STALE_LOCK_MINUTES} minutes'`))
+    .where('locked_by', 'like', 'operator:%')
+    .whereExists(function receiptAlreadySent() {
+      this.select(db.raw('1'))
+        .from('invoices')
+        .whereRaw('invoices.id = receipt_delivery_jobs.invoice_id')
+        .whereNotNull('invoices.receipt_sent_at');
+    })
+    .update({
+      status: 'completed',
+      completed_at: db.fn.now(),
+      last_error: 'operator receipt claim was not released; the receipt was already sent',
+      locked_at: null,
+      locked_by: null,
+      updated_at: db.fn.now(),
+    });
   return db('receipt_delivery_jobs')
     .where({ status: 'running' })
     .where('locked_at', '<', db.raw(`now() - interval '${STALE_LOCK_MINUTES} minutes'`))
@@ -360,7 +385,8 @@ async function processDueReceiptDeliveryJobs({ limit = 10, id = workerId() } = {
 // refuses the operator send ({ inFlight: true }) rather than racing it.
 // A short transaction only: never held across the sends. A process that dies
 // holding the claim leaves a `running` row, which recoverStaleLocks hands to
-// the drain after STALE_LOCK_MINUTES — the receipt still goes out.
+// the drain after STALE_LOCK_MINUTES — the receipt still goes out — unless
+// the invoice was already stamped receipted, which closes it instead.
 async function claimReceiptJobForOperatorSend(invoiceId) {
   const token = `operator:${workerId()}:${randomUUID()}`;
   return db.transaction(async (trx) => {
@@ -469,6 +495,7 @@ module.exports = {
   claimReceiptJobForOperatorSend,
   releaseOperatorReceiptClaim,
   _internals: {
+    recoverStaleLocks,
     actionableSmsFailure,
     actionableEmailFailure,
     shouldRetryReceiptDelivery,
