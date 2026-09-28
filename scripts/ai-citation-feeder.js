@@ -37,8 +37,9 @@ function parseArgs() {
 function printCandidate(c) {
   const platforms = (c.platforms || []).join('/');
   const local = c.locallyRelevant ? ' [local]' : '';
+  const subtype = c.subtype ? ` [${c.subtype}]` : '';
   const existing = c.existing === true ? ' (existing domain — touch only)' : c.existing === false ? ' (new domain)' : '';
-  console.log(`  ${c.domain}  [${c.category}]  ${c.citationCount}x via ${platforms}${local}${existing}`);
+  console.log(`  ${c.domain}  [${c.category}]${subtype}  ${c.citationCount}x via ${platforms}${local}${existing}`);
   for (const q of c.questions.slice(0, 3)) {
     console.log(`      ← ${q.id ? `${q.id}: ` : ''}"${q.query}"${q.city ? ` (${q.city}${q.service ? `/${q.service}` : ''})` : ''}`);
   }

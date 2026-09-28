@@ -37,7 +37,7 @@
 
 const { isEnabled } = require('../../config/feature-gates');
 const { ensureDomain, isNeverTargetHost } = require('./link-registry');
-const { classifyUrl, isLocallyRelevant, ENQUEUABLE_CATEGORIES } = require('./ai-citation-classifier');
+const { classifyUrl, isLocallyRelevant, isProviderIntentQuestion, ENQUEUABLE_CATEGORIES } = require('./ai-citation-classifier');
 const { MEASUREMENT_VERSION, cleanUrls } = require('./aeo-measurement');
 const benchmark = require('../../data/aeo-benchmark-v1.json');
 
@@ -56,13 +56,21 @@ function sinceDate(now, lookbackDays) {
 }
 
 /**
- * aggregateCitations(rows, queryRows) → [{ host, category, rule, citationCount,
- *   sampleUrls, platforms, locallyRelevant, questions: [{id,query,city,service,intent}] }]
+ * aggregateCitations(rows, queryRows) → [{ host, category, rule, subtype,
+ *   citationCount, sampleUrls, platforms, locallyRelevant,
+ *   questions: [{id,query,city,service,intent}] }]
  * Pure — no I/O, no clock. `rows` are already-fetched seo_llm_mentions rows
  * (id, query, query_id, llm_platform, cited_urls); `queryRows` is the full
  * seo_llm_mention_queries table (id, query, city, service, active). Every
  * question a domain was cited under is attached, deduped by benchmark id (or
  * the raw query text when it isn't a benchmark question).
+ *
+ * Each citation's classification is passed `providerIntent` —
+ * isProviderIntentQuestion() on THIS citation's own question — so
+ * ai-citation-classifier.js's listicle heuristic (owner review 2026-09-28)
+ * can promote an otherwise-`other` local/best-token URL to `editorial` with
+ * `subtype: 'listicle_candidate'` when, and only when, it was cited
+ * answering a provider ("who/best/top/company") question.
  *
  * Aggregated by (host, category) — NEVER by host alone (Codex P1
  * 2026-09-28): classifyUrl is deterministic per URL, but a single host CAN
@@ -92,13 +100,14 @@ function aggregateCitations(rows, queryRows) {
       service: (managed && managed.service) || (bm && bm.service) || null,
       intent: (bm && bm.intent) || null,
     };
+    const providerIntent = isProviderIntentQuestion(question);
     for (const url of urls) {
-      const c = classifyUrl(url);
+      const c = classifyUrl(url, { providerIntent });
       if (!c) continue; // unparseable — never counted, never enqueued
       const key = `${c.host}::${c.category}`;
       if (!groups.has(key)) {
         groups.set(key, {
-          host: c.host, category: c.category, rule: c.rule, citationCount: 0,
+          host: c.host, category: c.category, rule: c.rule, subtype: c.subtype || null, citationCount: 0,
           sampleUrls: [], platforms: new Set(), locallyRelevant: false, questions: new Map(),
         });
       }
@@ -107,6 +116,7 @@ function aggregateCitations(rows, queryRows) {
       if (agg.sampleUrls.length < MAX_SAMPLE_URLS && !agg.sampleUrls.includes(url)) agg.sampleUrls.push(url);
       agg.platforms.add(row.llm_platform || 'unknown');
       if (!agg.locallyRelevant && isLocallyRelevant(url)) agg.locallyRelevant = true;
+      if (!agg.subtype && c.subtype) agg.subtype = c.subtype;
       const qKey = question.id || question.query || '-';
       if (!agg.questions.has(qKey)) agg.questions.set(qKey, question);
     }
@@ -128,14 +138,15 @@ function citationDetail(d) {
   const q = d.questions[0];
   const qLabel = q ? String(q.id || q.query || '').slice(0, 40) : '';
   const local = d.locallyRelevant ? ' · local' : '';
-  const label = `${SOURCE_DETAIL} · ${d.category} · ${d.citationCount}x · ${d.platforms.join('/')}${qLabel ? ` · ${qLabel}` : ''}${local}`;
+  const subtype = d.subtype ? ` · ${d.subtype}` : '';
+  const label = `${SOURCE_DETAIL} · ${d.category} · ${d.citationCount}x · ${d.platforms.join('/')}${qLabel ? ` · ${qLabel}` : ''}${local}${subtype}`;
   return label.slice(0, TOUCH_DETAIL_MAX);
 }
 
 /**
  * runAiCitationFeeder(db, { dryRun, lookbackDays, now })
  *   → { gated, dryRun, scanned, domains, byCategory: {category: n}, enqueued,
- *       inserted, touched, existing, candidates: [{domain, category, rule,
+ *       inserted, touched, existing, candidates: [{domain, category, rule, subtype,
  *       citationCount, platforms, sampleUrls, locallyRelevant, questions, existing?}] }
  * - scanned: measured seo_llm_mentions rows read.
  * - domains: distinct (host, category) pairs classified (every category, owned
@@ -166,7 +177,7 @@ async function runAiCitationFeeder(db, { dryRun = false, lookbackDays = DEFAULT_
   const enqueueable = aggregated.filter((d) => ENQUEUABLE_CATEGORIES.includes(d.category) && !isNeverTargetHost(d.host));
   out.enqueued = enqueueable.length;
   out.candidates = enqueueable.map((d) => ({
-    domain: d.host, category: d.category, rule: d.rule, citationCount: d.citationCount,
+    domain: d.host, category: d.category, rule: d.rule, subtype: d.subtype || null, citationCount: d.citationCount,
     platforms: d.platforms, sampleUrls: d.sampleUrls, locallyRelevant: d.locallyRelevant, questions: d.questions,
   }));
   if (!enqueueable.length) return out;

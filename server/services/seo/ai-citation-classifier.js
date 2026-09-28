@@ -30,6 +30,15 @@ const { canonicalProspectDomain } = require('./prospect-domain-lock');
 // trugreen.com, trulynolen.com, masseyservices.com, …) — reused verbatim
 // rather than re-typed, so a change there is picked up here too.
 const { _internals: competitorDiscovery } = require('./competitor-discovery');
+// competitor-gap-miner.js's `competitorDomains` getter is the portal's OTHER
+// tracked competitor list — local SWFL independents (turnerpest.com,
+// westfallspestcontrol.com, farrowpestservices.com, hughes-exterminators.com,
+// kellerspestcontrol.com, nativepestmanagement.com, …), overridable via
+// COMPETITOR_GAP_DOMAINS — imported live (the getter, not a snapshot) so an
+// operator's override is picked up here too (owner review 2026-09-28: Turner
+// is the #1 competitor AI engines name, 48x, and was falling through to
+// `other` before this).
+const competitorGapMiner = require('./competitor-gap-miner');
 
 // ---------------------------------------------------------------------------
 // Rules table
@@ -49,6 +58,10 @@ const LISTING_DOMAINS = Object.freeze([
   'chamberofcommerce.com', 'uschamber.com', 'manateechamber.com', 'sarasotachamber.com', 'veniceareachamber.com',
   'floridarealtors.org', // realtor-association sites
   'expertise.com', 'threebestrated.com', 'bestprosintown.com',
+  // Local directory / "best of" marketplaces cited on provider questions
+  // (owner review 2026-09-28) — a marketplace listing still routes through
+  // the owner queue + separate-spend rule; discovery grants nothing either way.
+  'cityvetted.com', 'exterminatorguild.com', 'homversa.com', 'lawnstarter.com', 'lawnlove.com',
 ]);
 
 const EDITORIAL_DOMAINS = Object.freeze([
@@ -58,6 +71,8 @@ const EDITORIAL_DOMAINS = Object.freeze([
   // home-services editorial / listicles
   'todayshomeowner.com', 'bobvila.com', 'thespruce.com',
   'forbes.com', // /home-improvement only — path-filtered in SPECIAL_HOSTS below
+  // owner review 2026-09-28: cited local-recommendation editorial sites
+  'floridist.com', 'smarfle.com',
 ]);
 
 const REFERENCE_SUFFIXES = Object.freeze(['.edu', '.gov']);
@@ -67,7 +82,15 @@ const REFERENCE_DOMAINS = Object.freeze(['wikipedia.org']);
 // plus the owner's 2026-09-27 correction: flapest.com (Florida Pest Control,
 // Gainesville, since 1949) is a COMPANY, never the trade association above.
 const EXTRA_COMPETITOR_DOMAINS = Object.freeze(['flapest.com', 'hometeampestdefense.com']);
-const COMPETITOR_DOMAINS = Object.freeze([...competitorDiscovery.NATIONAL_CHAINS, ...EXTRA_COMPETITOR_DOMAINS]);
+// The live union of BOTH tracked competitor lists this portal already
+// maintains (competitor-discovery.js's national/regional franchises +
+// competitor-gap-miner.js's local SWFL independents, itself overridable via
+// COMPETITOR_GAP_DOMAINS) plus the brief's extras — a FUNCTION, not a frozen
+// constant, so an env override to either list is picked up on the next call
+// rather than baked in at module load.
+function competitorDomains() {
+  return [...competitorDiscovery.NATIONAL_CHAINS, ...competitorGapMiner.competitorDomains, ...EXTRA_COMPETITOR_DOMAINS];
+}
 
 const COMMUNITY_VIDEO_DOMAINS = Object.freeze(['reddit.com', 'youtube.com', 'quora.com']);
 
@@ -122,14 +145,63 @@ function decodeURIComponentSafe(v) {
   try { return decodeURIComponent(v); } catch { return v; }
 }
 
+// ---------------------------------------------------------------------------
+// Provider-intent listicle heuristic (owner review 2026-09-28): a "best
+// pest control in <city>" question surfaces local directory/listicle pages
+// no static domain list will ever fully enumerate (cityvetted.com,
+// floridist.com, smarfle.com and their peers today; a new one next month).
+// A host that matches NOTHING above (owned/reference/competitor/listing/
+// editorial/community_video all already ran) and carries a local or
+// best/top/rated token, cited under a PROVIDER-intent question, is almost
+// certainly one of those pages — classified `editorial` with an explicit
+// `subtype: 'listicle_candidate'` marker so the owner can tell it came from
+// this heuristic rather than the static rules table. It NEVER runs before —
+// and so can never override — owned/reference/competitor/community_video,
+// and it never promotes a page that already matched listing/editorial by
+// domain (those return before this is reached).
+// ---------------------------------------------------------------------------
+const BEST_TOKENS = Object.freeze(['best', 'top', 'rated', 'near-me', 'near me', 'nearme']);
+function hasBestToken(urlString) {
+  let u;
+  try { u = new URL(urlString); } catch { return false; }
+  const hay = `${u.hostname} ${decodeURIComponentSafe(u.pathname)} ${u.search}`.toLowerCase();
+  return BEST_TOKENS.some((t) => hay.includes(t));
+}
+// A benchmark question's own `intent: 'provider'` (aeo-benchmark-v1.json),
+// or — for a managed/legacy query the benchmark doesn't cover — the raw
+// query text asking who/best/top/company. `question` is the same
+// { id, query, city, service, intent } shape link-registry-ai-citation-
+// ingest.js's aggregateCitations already builds per row.
+const PROVIDER_INTENT_WORDS_RE = /\b(who|best|top|company)\b/i;
+function isProviderIntentQuestion(question) {
+  if (!question) return false;
+  if (question.intent === 'provider') return true;
+  return PROVIDER_INTENT_WORDS_RE.test(question.query || '');
+}
+
 /**
- * classifyUrl(urlString) → { category, host, rule } | null (unparseable URL)
+ * classifyUrl(urlString, { providerIntent }) → { category, host, rule, subtype? } | null (unparseable URL)
  * category ∈ 'owned' | 'listing' | 'editorial' | 'reference' | 'competitor' | 'community_video' | 'other'
+ * `providerIntent` (default false) — the CALLER'S determination of
+ * isProviderIntentQuestion() for the question this citation came from; only
+ * used by the listicle heuristic above, and only once every other rule has
+ * already found no match. A host that qualifies gets `subtype:
+ * 'listicle_candidate'` alongside `category: 'editorial'`; every other
+ * result never carries `subtype`.
  */
-function classifyUrl(urlString) {
+function classifyUrl(urlString, { providerIntent = false } = {}) {
   let u;
   try { u = new URL(urlString); } catch { return null; }
   const host = canonicalProspectDomain(u.hostname) || u.hostname.toLowerCase().replace(/^www\./, '');
+  // The ONE path to 'other' — every fallthrough in this function funnels
+  // through here, so the heuristic is applied (or not) in exactly one place.
+  const other = (rule) => {
+    if (providerIntent && (isLocallyRelevant(urlString) || hasBestToken(urlString))) {
+      return { category: 'editorial', host, rule: `heuristic:listicle_candidate:${rule}`, subtype: 'listicle_candidate' };
+    }
+    return { category: 'other', host, rule };
+  };
+
   if (isOwnedUrl(urlString)) return { category: 'owned', host, rule: 'owned_fleet_domain' };
 
   for (const suffix of REFERENCE_SUFFIXES) {
@@ -141,15 +213,15 @@ function classifyUrl(urlString) {
   if (specialHost) {
     const category = SPECIAL_HOSTS[specialHost](u);
     if (category) return { category, host, rule: `special:${specialHost}` };
-    return { category: 'other', host, rule: `special:${specialHost}:excluded_path` };
+    return other(`special:${specialHost}:excluded_path`);
   }
 
-  if (matchesAny(host, COMPETITOR_DOMAINS)) return { category: 'competitor', host, rule: 'competitor_domain' };
+  if (matchesAny(host, competitorDomains())) return { category: 'competitor', host, rule: 'competitor_domain' };
   if (matchesAny(host, LISTING_DOMAINS)) return { category: 'listing', host, rule: 'listing_domain' };
   if (matchesAny(host, EDITORIAL_DOMAINS)) return { category: 'editorial', host, rule: 'editorial_domain' };
   if (matchesAny(host, COMMUNITY_VIDEO_DOMAINS)) return { category: 'community_video', host, rule: 'community_video_domain' };
 
-  return { category: 'other', host, rule: 'unmatched' };
+  return other('unmatched');
 }
 
 // The two categories the feeder ever enqueues to registry intake (§3 of the
@@ -158,10 +230,10 @@ function classifyUrl(urlString) {
 const ENQUEUABLE_CATEGORIES = Object.freeze(['listing', 'editorial']);
 
 module.exports = {
-  classifyUrl, isLocallyRelevant, ENQUEUABLE_CATEGORIES,
+  classifyUrl, isLocallyRelevant, isProviderIntentQuestion, ENQUEUABLE_CATEGORIES,
   _internals: {
-    LISTING_DOMAINS, EDITORIAL_DOMAINS, REFERENCE_SUFFIXES, REFERENCE_DOMAINS, COMPETITOR_DOMAINS,
-    EXTRA_COMPETITOR_DOMAINS, COMMUNITY_VIDEO_DOMAINS, SWFL_LOCAL_DOMAINS, GEO_TERMS,
-    matchesSuffix, matchesAny, facebookCategory, forbesCategory,
+    LISTING_DOMAINS, EDITORIAL_DOMAINS, REFERENCE_SUFFIXES, REFERENCE_DOMAINS, competitorDomains,
+    EXTRA_COMPETITOR_DOMAINS, COMMUNITY_VIDEO_DOMAINS, SWFL_LOCAL_DOMAINS, GEO_TERMS, BEST_TOKENS,
+    matchesSuffix, matchesAny, facebookCategory, forbesCategory, hasBestToken, PROVIDER_INTENT_WORDS_RE,
   },
 };

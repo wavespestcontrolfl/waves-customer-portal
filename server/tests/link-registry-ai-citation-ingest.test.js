@@ -137,6 +137,38 @@ describe('aggregateCitations (pure)', () => {
     expect(forward.map((d) => [d.host, d.category, d.citationCount]).sort())
       .toEqual(reverse.map((d) => [d.host, d.category, d.citationCount]).sort());
   });
+
+  // Owner review 2026-09-28: the provider-intent listicle heuristic wired
+  // end-to-end — a domain no static rules-table entry covers, cited on a
+  // real PROVIDER question, is promoted to editorial/listicle_candidate; the
+  // SAME domain cited on a non-provider question is not.
+  describe('provider-intent listicle heuristic, wired through aggregateCitations', () => {
+    const LOCAL_LISTICLE_URL = 'https://www.unknownlocaldirectory.example/best-pest-control-sarasota-fl';
+    const Q12_IDENTIFY_NON_PROVIDER = 'How can I tell ghost ants from other small ants in Sarasota?'; // benchmark Q12, intent 'identify'
+
+    test('a provider question (Q1_SARASOTA_PEST default) promotes an otherwise-other local listicle URL', () => {
+      const out = aggregateCitations([mention({ cited_urls: [LOCAL_LISTICLE_URL] })], []);
+      expect(out).toEqual([{
+        host: 'unknownlocaldirectory.example', category: 'editorial', rule: expect.stringMatching(/^heuristic:listicle_candidate:/),
+        subtype: 'listicle_candidate', citationCount: 1, sampleUrls: [LOCAL_LISTICLE_URL], platforms: ['openai'],
+        locallyRelevant: true, questions: [{ id: 'Q1', query: Q1_SARASOTA_PEST, city: 'Sarasota', service: 'pest control', intent: 'provider' }],
+      }]);
+    });
+
+    test('negative: the SAME URL on a non-provider question stays other, no subtype', () => {
+      const out = aggregateCitations([mention({ query: Q12_IDENTIFY_NON_PROVIDER, cited_urls: [LOCAL_LISTICLE_URL] })], []);
+      expect(out).toEqual([{
+        host: 'unknownlocaldirectory.example', category: 'other', rule: 'unmatched', subtype: null,
+        citationCount: 1, sampleUrls: [LOCAL_LISTICLE_URL], platforms: ['openai'], locallyRelevant: true,
+        questions: [{ id: 'Q12', query: Q12_IDENTIFY_NON_PROVIDER, city: 'Sarasota', service: 'pest control', intent: 'identify' }],
+      }]);
+    });
+
+    test('citationDetail surfaces the subtype on a heuristic-promoted candidate', () => {
+      const out = aggregateCitations([mention({ cited_urls: [LOCAL_LISTICLE_URL] })], []);
+      expect(citationDetail(out[0])).toMatch(/listicle_candidate/);
+    });
+  });
 });
 
 describe('citationDetail', () => {
