@@ -1737,10 +1737,14 @@ async function resolveCombinedIncludedInvoices(rows, customerId) {
         'token', 'due_date', 'invoice_number', 'stripe_payment_intent_id', 'service_date', 'created_at')
       .catch(() => undefined);
     if (liveInvoice === undefined) {
-      await db('invoice_followup_sequences').where({ id: row.id }).where({ status: 'active' })
-        .update({ updated_at: db.fn.now(), next_touch_at: new Date(Date.now() + 30 * 60 * 1000) })
+      // Retried at the next day's floor, like a held touch: the cron runs
+      // once a day, so a 30-minute retry time would be past its stale grace
+      // by the next tick. Guarded on the snapshot step like every other
+      // write here, so a sequence that moved meanwhile is left alone.
+      await db('invoice_followup_sequences').where({ id: row.id, status: 'active', step_index: row.step_index })
+        .update({ updated_at: db.fn.now(), next_touch_at: heldTouchFloor() })
         .catch(() => {});
-      logger.warn(`[invoice-followups] excluded invoice ${row.invoice_id} from combined touch for customer ${customerId} — could not re-read ownership; retrying in 30m`);
+      logger.warn(`[invoice-followups] excluded invoice ${row.invoice_id} from combined touch for customer ${customerId} — could not re-read ownership; retrying next run`);
       continue;
     }
     const payerId = liveInvoice.payer_id ?? null;
