@@ -20,9 +20,10 @@
  *   publish_report      ensureReportToken — mints the report link (internal)
  *   queue_report_email  enqueueServiceReportV1EmailDelivery — the delivery
  *                       worker emails the customer (one row per record)
- *   queue_receipt       enqueueReceiptDelivery — the receipt worker texts /
- *                       emails the customer (one job per invoice)
- * Everything else stays manual: field evidence (application log, photos,
+ * Everything else stays manual. Paid receipts too: the receipt worker routes
+ * per invoice (payer AP inbox, billing-email authority, channel settings), so
+ * a card here could not name the real recipients without a second copy of
+ * that routing. Otherwise: field evidence (application log, photos,
  * license) is never generated, billing / follow-up booking live inline in
  * their routes, and exhausted deliveries have no safe re-queue.
  *
@@ -34,19 +35,18 @@ const logger = require('../logger');
 const CloseoutStatus = require('../closeout-status');
 const { ensureReportToken } = require('../service-report/pdf-queue');
 const { enqueueServiceReportV1EmailDelivery } = require('../service-report/delivery-queue');
-const { enqueueReceiptDelivery } = require('../receipt-delivery-queue');
 const { isUserFeatureEnabled } = require('../feature-flags');
 const { publicPortalUrl } = require('../../utils/portal-url');
 const {
-  getServiceReportEmailRecipients, getReceiptEmailRecipients, getPrimaryContact, PREFS_UNAVAILABLE,
+  getServiceReportEmailRecipients, PREFS_UNAVAILABLE,
 } = require('../customer-contact');
 
 const CLOSEOUT_REPAIR_TOOLS = [
   {
     name: 'repair_closeout',
     description: `Finish the closeout gaps the server can safely repair for ONE completed visit (scheduled_services id). The first call returns a PLAN and changes nothing: the repair steps it would run and the open items it will NOT touch (with where to fix them). The operator approves the exact plan on the confirmation card; the confirmed run executes only those steps and returns an itemized receipt (completed / failed / not attempted).
-Repairable today: publish a missing service report link, queue a service-report email that was never queued (the customer gets an email), and queue a paid receipt that was never queued (the customer gets a receipt text/email).
-Never repaired here: application log, photos, technician license (field evidence — never generated), billing, invoice sends, follow-up booking, completion texts, and exhausted/failed deliveries.
+Repairable today: publish a missing service report link, and queue a service-report email that was never queued (the customer gets an email).
+Never repaired here: application log, photos, technician license (field evidence — never generated), billing, invoice and receipt sends, follow-up booking, completion texts, and exhausted/failed deliveries.
 Use for: "fix the closeout for this visit", "finish what's missing on the job we just completed". Call get_closeout_status first when the operator only wants to know what is missing.`,
     input_schema: {
       type: 'object',
@@ -75,7 +75,6 @@ const MANUAL_REMEDY = {
 const STEP_EFFECTS = {
   publish_report: { kind: 'operational', label: 'Publish the service report link (internal — no message is sent by this step)' },
   queue_report_email: { kind: 'comms', label: 'Queue the service-report email — the delivery worker emails the customer the report on file' },
-  queue_receipt: { kind: 'comms', label: 'Queue the paid receipt — the receipt worker texts/emails the customer (quiet hours apply)' },
 };
 
 function parseNotes(value) {
@@ -119,24 +118,9 @@ async function reportEmailBlocker(status, recordRow, knex) {
   return null;
 }
 
-async function receiptBlocker(invoiceId, knex) {
-  const inv = await knex('invoices').where({ id: invoiceId }).first('id', 'status', 'receipt_sent_at');
-  if (!inv) return 'invoice not found';
-  if (String(inv.status || '').toLowerCase() !== 'paid') return `invoice is ${inv.status}, not paid`;
-  if (inv.receipt_sent_at) return 'receipt already sent';
-  const job = await knex('receipt_delivery_jobs').where({ invoice_id: invoiceId }).first('id');
-  if (job) return 'a receipt job already exists';
-  return null;
-}
-
 function maskEmail(address) {
   const [local, domain] = String(address || '').split('@');
   return domain ? `${local.slice(0, 1)}***@${domain}` : null;
-}
-
-function maskPhone(phone) {
-  const digits = String(phone || '').replace(/\D/g, '');
-  return digits.length >= 4 ? `***${digits.slice(-4)}` : null;
 }
 
 // The customer + contact prefs the delivery workers resolve recipients from,
@@ -215,22 +199,6 @@ async function planCloseoutRepair(status, { knex = db } = {}) {
     }
   }
 
-  const invDelivery = facts.invoiceDelivery;
-  if (invDelivery?.state === 'pending' && invDelivery.reason === 'paid_receipt_not_sent' && invDelivery.invoiceId) {
-    const blocker = await receiptBlocker(invDelivery.invoiceId, knex);
-    if (blocker) skipped.push({ fact: 'invoiceDelivery', reason: invDelivery.reason, why: blocker });
-    else {
-      // The receipt worker's own resolvers: the billing/primary email and
-      // the primary phone; the customer's receipt settings pick the legs.
-      const { customer, prefs } = await getContact();
-      const recipients = [
-        ...getReceiptEmailRecipients(customer, prefs).map((r) => maskEmail(r.email)),
-        maskPhone(customer ? getPrimaryContact(customer).phone : null),
-      ].filter(Boolean);
-      steps.push({ step: 'queue_receipt', fact: 'invoiceDelivery', reason: invDelivery.reason, invoice_id: invDelivery.invoiceId, recipients });
-    }
-  }
-
   const planned = new Set(steps.map((s) => s.fact));
   const skippedFacts = new Set(skipped.map((s) => s.fact));
   for (const [name, f] of Object.entries(facts)) {
@@ -273,12 +241,6 @@ async function runStep(step, { knex = db } = {}) {
       if (!queued?.ok) return { status: 'failed', detail: queued?.error || 'report email could not be queued' };
       if (queued.queued === false) return { status: 'completed', detail: `report email already ${queued.delivery?.status || 'queued'} — nothing new queued`, delivery_id: queued.delivery?.id || null };
       return { status: 'completed', detail: 'report email queued', delivery_id: queued.delivery?.id || null };
-    }
-    case 'queue_receipt': {
-      const queued = await enqueueReceiptDelivery({ invoiceId: step.invoice_id, source: 'ib_closeout_repair', customerInitiated: false, database: knex });
-      if (queued?.enqueued) return { status: 'completed', detail: 'receipt queued', receipt_job_id: queued.job?.id || null };
-      if (queued?.deduped) return { status: 'completed', detail: 'a receipt job already existed — nothing new queued' };
-      return { status: 'failed', detail: queued?.reason || 'receipt could not be queued' };
     }
     default:
       return { status: 'failed', detail: `unknown step ${step.step}` };

@@ -7,7 +7,6 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/closeout-status', () => ({ getCloseoutStatus: jest.fn() }));
 jest.mock('../services/service-report/pdf-queue', () => ({ ensureReportToken: jest.fn() }));
 jest.mock('../services/service-report/delivery-queue', () => ({ enqueueServiceReportV1EmailDelivery: jest.fn() }));
-jest.mock('../services/receipt-delivery-queue', () => ({ enqueueReceiptDelivery: jest.fn() }));
 jest.mock('../services/feature-flags', () => ({ isUserFeatureEnabled: jest.fn().mockResolvedValue(false) }));
 jest.mock('../utils/portal-url', () => ({ publicPortalUrl: () => 'https://portal.example.test' }));
 
@@ -15,7 +14,6 @@ const db = require('../models/db');
 const { getCloseoutStatus } = require('../services/closeout-status');
 const { ensureReportToken } = require('../services/service-report/pdf-queue');
 const { enqueueServiceReportV1EmailDelivery } = require('../services/service-report/delivery-queue');
-const { enqueueReceiptDelivery } = require('../services/receipt-delivery-queue');
 const { CLOSEOUT_REPAIR_TOOLS, executeCloseoutRepairTool } = require('../services/intelligence-bar/closeout-repair-tools');
 const gates = require('../services/intelligence-bar/write-gates');
 const { executionOutcome } = require('../services/intelligence-bar/outcomes');
@@ -162,16 +160,13 @@ test('field evidence, billing and unknown facts are listed manual, never planned
   expect(res.manual.find((m) => m.fact === 'license').fix).toMatch(/unverified, not missing/);
 });
 
-test('paid receipt never queued: plans queue_receipt only when the invoice is paid and has no job', async () => {
+test('an unsent paid receipt is manual — its recipients are routed per invoice by the receipt worker', async () => {
   const facts = { invoiceDelivery: { state: 'pending', reason: 'paid_receipt_not_sent', invoiceId: 'inv-1' } };
   getCloseoutStatus.mockResolvedValue(status({ facts }));
   db.mockImplementation(fakeDb({ service_records: [RECORD], invoices: [{ id: 'inv-1', status: 'paid', receipt_sent_at: null }] }));
-  const preview = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
-  expect(preview.steps).toEqual([expect.objectContaining({ step: 'queue_receipt', invoice_id: 'inv-1' })]);
-
-  db.mockImplementation(fakeDb({ service_records: [RECORD], invoices: [{ id: 'inv-1', status: 'paid' }], receipt_delivery_jobs: [{ id: 'job-1' }] }));
-  const blocked = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
-  expect(blocked.code).toBe('nothing_repairable');
+  const res = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
+  expect(res.code).toBe('nothing_repairable');
+  expect(res.manual).toEqual([expect.objectContaining({ fact: 'invoiceDelivery', fix: expect.stringMatching(/invoice page/) })]);
 });
 
 test('confirmed: runs the steps in order and returns an itemized receipt', async () => {
@@ -204,30 +199,43 @@ test('confirmed: runs the steps in order and returns an itemized receipt', async
   }), expect.anything());
 });
 
-test('confirmed: a failed prerequisite leaves its dependent not_attempted and the run partial', async () => {
-  getCloseoutStatus.mockResolvedValue(status({ facts: {
-    ...MISSING_REPORT,
-    invoiceDelivery: { state: 'pending', reason: 'paid_receipt_not_sent', invoiceId: 'inv-1' },
-  } }));
-  db.mockImplementation(fakeDb({ service_records: [RECORD], invoices: [{ id: 'inv-1', status: 'paid', receipt_sent_at: null }] }));
-  ensureReportToken.mockRejectedValue(new Error('db down'));
-  enqueueReceiptDelivery.mockResolvedValue({ enqueued: true, job: { id: 'job-2' } });
-
+test('confirmed: a failed prerequisite leaves its dependent not_attempted; a later failure makes the run partial', async () => {
+  getCloseoutStatus.mockResolvedValue(status({ facts: MISSING_REPORT }));
+  db.mockImplementation(fakeDb({ service_records: [RECORD] }));
   const approved = [
     { step: 'publish_report', service_record_id: 'rec-1' },
     { step: 'queue_report_email', service_record_id: 'rec-1', depends_on: 'publish_report' },
-    { step: 'queue_receipt', invoice_id: 'inv-1' },
   ];
-  const result = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC }, { confirmed: true, executionPins: { _verified_repair_steps: approved } });
-  expect(result.partial).toBe(true);
-  expect(executionOutcome(result)).toBe('partially_completed');
-  expect(result.receipt.map((r) => [r.step, r.status])).toEqual([
-    ['publish_report', 'failed'],
-    ['queue_report_email', 'not_attempted'],
-    ['queue_receipt', 'completed'],
-  ]);
+  ensureReportToken.mockRejectedValue(new Error('db down'));
+  const failed = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC }, { confirmed: true, executionPins: { _verified_repair_steps: approved } });
+  expect(executionOutcome(failed)).toBe('failed');
+  expect(failed.receipt.map((r) => [r.step, r.status])).toEqual([['publish_report', 'failed'], ['queue_report_email', 'not_attempted']]);
   expect(enqueueServiceReportV1EmailDelivery).not.toHaveBeenCalled();
-  expect(enqueueReceiptDelivery).toHaveBeenCalledWith(expect.objectContaining({ invoiceId: 'inv-1', source: 'ib_closeout_repair', customerInitiated: false }));
+
+  // Link published, email refused → partial, reported, never re-run.
+  const minted = { ...RECORD, report_view_token: 'd'.repeat(32) };
+  db.mockImplementation(fakeDb({ service_records: [minted] }));
+  ensureReportToken.mockResolvedValue('d'.repeat(32));
+  enqueueServiceReportV1EmailDelivery.mockResolvedValue({ ok: false, error: 'queue unavailable' });
+  getCloseoutStatus.mockResolvedValue(status({ facts: MISSING_REPORT }));
+  // The plan is built from a tokenless record; execution re-reads the minted one.
+  let reads = 0;
+  db.mockImplementation(jest.fn((table) => {
+    const chain = {
+      where: () => chain,
+      first: async () => {
+        if (table === 'customers') return CUSTOMER;
+        if (table !== 'service_records') return undefined;
+        reads += 1;
+        return reads === 1 ? RECORD : minted;
+      },
+    };
+    return chain;
+  }));
+  const partial = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC }, { confirmed: true, executionPins: { _verified_repair_steps: approved } });
+  expect(partial.partial).toBe(true);
+  expect(executionOutcome(partial)).toBe('partially_completed');
+  expect(partial.receipt.map((r) => [r.step, r.status])).toEqual([['publish_report', 'completed'], ['queue_report_email', 'failed']]);
 });
 
 test('a params-level confirmed without the route signal still only plans', async () => {
@@ -239,24 +247,19 @@ test('a params-level confirmed without the route signal still only plans', async
 });
 
 test('confirmed: never runs without the verified plan, and never adds a step the card lacked', async () => {
-  const facts = {
-    report: { state: 'pending', reason: 'no_report_artifact', posture: 'internal_only' },
-    reportDelivery: { state: 'not_required', reason: 'frozen_posture_internal_only' },
-    invoiceDelivery: { state: 'pending', reason: 'paid_receipt_not_sent', invoiceId: 'inv-1' },
-  };
-  getCloseoutStatus.mockResolvedValue(status({ facts }));
-  db.mockImplementation(fakeDb({ service_records: [RECORD], invoices: [{ id: 'inv-1', status: 'paid', receipt_sent_at: null }] }));
+  getCloseoutStatus.mockResolvedValue(status({ facts: MISSING_REPORT }));
+  db.mockImplementation(fakeDb({ service_records: [RECORD] }));
 
   const unpinned = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC }, { confirmed: true });
   expect(unpinned.preview_changed).toBe(true);
 
-  // The card approved only the report; the invoice was paid after it was shown.
+  // The card approved only the report link; the email became plannable after it was shown.
   const drifted = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC }, {
     confirmed: true, executionPins: { _verified_repair_steps: [{ step: 'publish_report', service_record_id: 'rec-1' }] },
   });
   expect(drifted.preview_changed).toBe(true);
   expect(ensureReportToken).not.toHaveBeenCalled();
-  expect(enqueueReceiptDelivery).not.toHaveBeenCalled();
+  expect(enqueueServiceReportV1EmailDelivery).not.toHaveBeenCalled();
 });
 
 test('report steps bind to the record owning the report artifact, not the primary record', async () => {
@@ -282,10 +285,7 @@ test('report steps bind to the record owning the report artifact, not the primar
 
 test('the card names the customer, the visit and the masked recipients, and nobody-to-email is not offered', async () => {
   getCloseoutStatus.mockResolvedValue({
-    ...status({ facts: {
-      ...MISSING_REPORT,
-      invoiceDelivery: { state: 'pending', reason: 'paid_receipt_not_sent', invoiceId: 'inv-1' },
-    } }),
+    ...status({ facts: MISSING_REPORT }),
     visit: { customerId: 'cust-1', technicianId: 'tech-1', scheduledDate: '2026-09-27', serviceType: 'Pest Control' },
   });
   db.mockImplementation(fakeDb({ service_records: [RECORD], invoices: [{ id: 'inv-1', status: 'paid', receipt_sent_at: null }] }));
@@ -294,7 +294,6 @@ test('the card names the customer, the visit and the masked recipients, and nobo
   expect(preview.visit).toBe('2026-09-27 · Pest Control');
   const email = preview.steps.find((s) => s.step === 'queue_report_email');
   expect(email.recipients).toEqual(['p***@example.com']);
-  expect(preview.steps.find((s) => s.step === 'queue_receipt').recipients).toEqual(['p***@example.com', '***0100']);
   expect(JSON.stringify(preview)).not.toMatch(/pat@example\.com|9415550100/);
   const contract = buildContract({ toolName: 'repair_closeout', params: { service_id: SVC }, preview });
   const labels = contract.effects.map((e) => e.label).join('\n');
@@ -304,6 +303,6 @@ test('the card names the customer, the visit and the masked recipients, and nobo
   // Report emails turned off for this customer: the email step is not offered.
   db.mockImplementation(fakeDb({ service_records: [RECORD], notification_prefs: [{ customer_id: 'cust-1', service_completed: false }], invoices: [{ id: 'inv-1', status: 'paid', receipt_sent_at: null }] }));
   const off = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
-  expect(off.steps.map((s) => s.step)).toEqual(['publish_report', 'queue_receipt']);
+  expect(off.steps.map((s) => s.step)).toEqual(['publish_report']);
   expect(off.manual).toEqual(expect.arrayContaining([expect.objectContaining({ fact: 'reportDelivery', fix: expect.stringMatching(/no report email recipient/) })]));
 });
