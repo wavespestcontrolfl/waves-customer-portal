@@ -8492,7 +8492,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // A billable per-application visit with no amount on file (multi-service
     // accept: fee + row prices intentionally NULL) completes UNINVOICED — flag
     // it loudly so the visit gets billed manually instead of leaking.
+    // A stamped $0 is a deliberately free visit (owner 2026-09-28), not a
+    // missing price — never flagged for manual invoicing.
     if (!packetEffects && (perApplicationBilling && !reviewedVisitPrice && !(invoiceAmount > 0)
+      && !isStampedZeroEstimate(svc.estimated_price)
       && !svc.is_callback && !isAlwaysFreeServiceType(svc.service_type))) {
       logger.warn(`[dispatch] per-application visit ${svc.id} (customer ${svc.customer_id}) completed with no billable amount on file (no visit price, no per_application_fee — multi-service plan?) — invoice manually`);
     }
