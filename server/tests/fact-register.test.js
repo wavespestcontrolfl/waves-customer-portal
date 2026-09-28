@@ -550,6 +550,9 @@ describe('findUnverifiedClaims', () => {
 
   describe('large_patch_summer_disease', () => {
     test.each([
+      // the register's own scientific name, full and abbreviated (codex round 20 P1)
+      'Rhizoctonia solani thrives in summer heat.',
+      'R. solani thrives in summer heat.',
       'Watch for large patch this summer as temperatures climb.',
       'Large patch takes off once temperatures climb above 80 degrees.',
       'Large patch is not a summer disease up north, but here large patch thrives in summer heat.',
@@ -670,6 +673,10 @@ describe('findUnverifiedClaims', () => {
 
   describe('non_flea_vacuum_advice', () => {
     test.each([
+      // every spelled number, not an allowlist (codex round 20 P1)
+      'Vacuum for eleven days after treatment.',
+      'Vacuum for fifteen days after treatment.',
+      'Keep vacuuming for twenty-one days.',
       'Avoid vacuuming for 14 days after your ant treatment.',
       'For fleas, avoid vacuuming for 14 days so pupae hatch into the residual.',
       'Vacuum daily for 14 days after your ant treatment.',
@@ -704,6 +711,10 @@ describe('findUnverifiedClaims', () => {
 
   describe('absolute_safety_claim', () => {
     test.each([
+      // any audience "-safe" compound (codex round 20 P1), and a negation elsewhere in the sentence does not clear it
+      'Our treatment is pollinator-safe.',
+      'This pesticide is wildlife-safe.',
+      "Our pet-safe treatment won't stain.",
       'Our family-safe treatment keeps everyone comfortable.',
       'It is safe for the whole family.',
       'Kid-safe once it dries.',
@@ -783,6 +794,9 @@ describe('findUnverifiedClaims', () => {
 
   describe('fixed_reentry_time — a minute or hour figure for re-entry or drying, with or without "safe"', () => {
     test.each([
+      // the same number grammar as every duration rule (codex round 20)
+      'Keep pets off the lawn for seven minutes.',
+      'Stay off the treated yard for forty five minutes.',
       'Keep children and pets off the treated lawn for 30 minutes.',
       'The spray dries in about 20 minutes.',
       'Wait 2 hours before letting the dog back out.',
@@ -882,3 +896,26 @@ describe('factsPromptBlock', () => {
     expect(block).toContain(CHINCH.title);
   });
 });
+
+describe('codex round 20 — what the widened rules must still leave alone', () => {
+  const { findUnverifiedClaims } = require('../services/email-division/fact-register');
+  test.each([
+    ['This pesticide is not pet-safe.', 'absolute_safety_claim'],
+    ["This pesticide isn't really wildlife-safe.", 'absolute_safety_claim'],
+    ['The design is fail-safe.', 'absolute_safety_claim'],
+    ['R. zeae thrives in summer heat.', 'large_patch_summer_disease'],
+    ['Rhizoctonia zeae leaf and sheath spot is a summer disease.', 'large_patch_summer_disease'],
+    ['For fleas, keep vacuuming for a few weeks.', 'non_flea_vacuum_advice'],
+    ['Postpone watering or mowing for 24 hours.', 'fixed_reentry_time'],
+  ])('does NOT flag: %s', (sentence, rule) => {
+    expect(findUnverifiedClaims(sentence).some((r) => r.rule === rule)).toBe(false);
+  });
+
+  test('generic product nouns in event copy are not treatment context; owned or pest-qualified ones are (codex round 20 P2)', () => {
+    const scoped = (t) => findUnverifiedClaims(t, { treatmentContextOnly: true }).some((r) => r.rule === 'absolute_safety_claim');
+    expect(scoped("Browse family-safe products at Saturday's market.")).toBe(false);
+    expect(scoped('Our lawn products are pollinator-safe.')).toBe(true);
+    expect(scoped('Our pest control products are family-safe.')).toBe(true);
+  });
+});
+

@@ -371,14 +371,17 @@ function applyRetryableDeliveryFilter(query, tableAlias = null) {
 // The rows a Resume would actually mail: retryable ledger rows with no
 // success signal whose subscriber is still active, not globally suppressed
 // and not an archived customer — the resume precheck's own predicate, in
-// one place. `sendId` is a value, or a raw SQL correlation such as
-// `newsletter_sends.id` when the caller embeds this as an EXISTS subquery.
+// one place. `sendId` is a value, or (with `correlate`) a column reference
+// such as `newsletter_sends.id` when the caller embeds this as an EXISTS
+// subquery.
 function outstandingEligibleDeliveries(sendId, { database = db, correlate = false } = {}) {
   const base = database('newsletter_send_deliveries')
     .join('newsletter_subscribers', 'newsletter_subscribers.id', 'newsletter_send_deliveries.subscriber_id')
     .where({ 'newsletter_subscribers.status': 'active' });
+  // A correlated caller passes a column reference; whereColumn quotes it as
+  // an identifier, so nothing is ever interpolated into SQL (pre-push audit).
   const scoped = correlate
-    ? base.whereRaw(`newsletter_send_deliveries.send_id = ${sendId}`)
+    ? base.whereColumn('newsletter_send_deliveries.send_id', sendId)
     : base.where({ 'newsletter_send_deliveries.send_id': sendId });
   return excludeArchivedCustomers(excludeGloballySuppressed(applyRetryableDeliveryFilter(scoped, 'newsletter_send_deliveries')));
 }

@@ -684,7 +684,11 @@ function termiteClaimInSentence(sentence, previousSentence) {
 // patch together with summer or heat, or with a temperature at or past the
 // 80°F line in any wording, is the claim; UF's own "occurs in warm, humid
 // weather" and "below 80°F" are not.
-const PATCH = /\b(?:brown|large)\s+patch\b/i;
+// The register names the large-patch fungus Rhizoctonia solani; the full and
+// abbreviated binomial are the same subject (codex round 20 P1). The summer
+// Rhizoctonia species (R. zeae, R. oryzae: leaf and sheath spot) are OTHER
+// lawn subjects, and the bare genus alone names neither.
+const PATCH = /\b(?:(?:brown|large)\s+patch|rhizoctonia\s+solani|r\.\s?solani)\b/i;
 // The trigger is the CLASS of the threshold, not the one literal "above 80"
 // (codex round 10 P1): (i) the season or heat itself; (ii) any upward
 // comparator ("exceeds", "more than", "tops", "climbs to", "north of")
@@ -732,7 +736,7 @@ const PATCH_CONTRAST = /\b(?:unlike|differs?\s+from|different\s+from|distinct\s+
 
 // Another lawn problem named as a clause's own subject ("..., gray leaf
 // spot is a summer disease") is not large patch.
-const OTHER_LAWN_SUBJECT = /\b(?:gray\s+leaf\s+spot|chinch\s+bugs?|chinch\s+damage|dollar\s*weed|dove\s*weed|take-?all(?:\s+root\s+rot)?|root\s+rot|sod\s+webworms?|army\s*worms?|grubs?|mole\s+crickets?|nematodes?|drought|dry\s+spots?|dog\s+spots?|pythium|rhizoctonia\s+leaf|leaf\s+and\s+sheath\s+spot|fairy\s+ring|rust|weeds?)\b/i;
+const OTHER_LAWN_SUBJECT = /\b(?:gray\s+leaf\s+spot|chinch\s+bugs?|chinch\s+damage|dollar\s*weed|dove\s*weed|take-?all(?:\s+root\s+rot)?|root\s+rot|sod\s+webworms?|army\s*worms?|grubs?|mole\s+crickets?|nematodes?|drought|dry\s+spots?|dog\s+spots?|pythium|rhizoctonia\s+leaf|rhizoctonia\s+(?:zeae|oryzae)|r\.\s?(?:zeae|oryzae)|leaf\s+and\s+sheath\s+spot|fairy\s+ring|rust|weeds?)\b/i;
 
 // "Large patch normally appears in spring. It thrives in summer." — the
 // pronoun means the disease named in the sentence before (codex round 9).
@@ -825,8 +829,16 @@ function patchClaimInSentence(sentence, previousSentence = '') {
 // for 14 days" is a made-up number even in a flea sentence, and so is "for
 // a month" — every unit counts, months and years included, and the sourced
 // exemption stays limited to its documented week ranges (codex round 12 P1).
+// ONE spelled-number grammar for every duration rule (codex round 20 P1:
+// the old allowlists skipped eleven, fifteen, seven minutes, ...): digits,
+// one–nineteen, the tens with an optional unit ("twenty-one", "forty five"),
+// a hundred, a dozen, and the vague counts (a few, several, a couple, a/an).
+const NUMBER_UNITS = 'one|two|three|four|five|six|seven|eight|nine';
+const NUMBER_WORD = '(?:(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:[-\\s](?:' + NUMBER_UNITS + '))?'
+  + '|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|' + NUMBER_UNITS
+  + '|(?:a|one)\\s+hundred|(?:a|one)\\s+dozen|a\\s+few|several|a\\s+couple(?:\\s+of)?|half\\s+an?|an?)';
 const VACUUM = /\bvacuum\w*\b/i;
-const DURATION = /\b(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|twelve|fourteen|a\s+few|several|a\s+couple\s+of|an?)\s*(?:(?:to|-|–)\s*(?:\d+|one|two|three|four)\s*)?(?:days?|weeks?|months?|years?)\b/gi;
+const DURATION = new RegExp(`\\b(?:\\d+|${NUMBER_WORD})\\s*(?:(?:to|or|-|–)\\s*(?:\\d+|${NUMBER_WORD})\\s*)?(?:days?|weeks?|months?|years?|fortnights?)\\b`, 'gi');
 const SOURCED_FLEA_DURATION = /\b(?:a\s+few|several)\s+weeks\b|\b(?:1|one)\s*(?:to|-|–)\s*(?:4|four)\s+weeks\b|\b(?:up\s+to\s+)?(?:4|four)\s+weeks\b/gi;
 const VACUUM_NEGATION = /\b(?:avoid|hold\s+off|wait|skip|delay|postpone|refrain|stop|before\s+vacuum\w*)\b/i;
 const FLEA = /\bfleas?\b/i;
@@ -860,7 +872,19 @@ function vacuumClaimInSentence(sentence) {
 // until the spray has dried") is not a safety claim; "safe to say", "a safe
 // distance" and "a safe trip" are not product-safety claims either.
 // Hyphenated only: "keep your family safe from mosquitoes" is not a claim.
-const SAFE_COMPOUND = /\b(?:bee|pet|family|kid|child|children|baby|dog|cat|people|human|eco|environment(?:ally)?|earth|planet)-safe(?:r|st)?\b/i;
+// Any audience "-safe" compound is the claim — pollinator-safe, wildlife-safe,
+// fish-safe, not only a fixed list (codex round 20 P1) — except the idiom
+// "fail-safe". A negation directly governing the compound ("is not
+// pet-safe", "isn't really wildlife-safe") states the opposite and clears it
+// (codex round 20 P2); a negation elsewhere in the sentence does not.
+const SAFE_COMPOUND = /\b(?!fail-)[a-z]+-safe(?:r|st)?\b/gi;
+const COMPOUND_NEGATED_BEFORE = /\b(?:not|never|nor|isn't|aren't|wasn't|weren't|no\s+longer)\s+(?:\w+\s+)?$/i;
+function assertedSafeCompound(sentence) {
+  for (const match of sentence.matchAll(SAFE_COMPOUND)) {
+    if (!COMPOUND_NEGATED_BEFORE.test(sentence.slice(Math.max(0, match.index - 40), match.index))) return true;
+  }
+  return false;
+}
 // Copula forms ("is safe"), prepositional forms ("safe for / around / once
 // dry"), and the bare adjective on a product or service ("our safe lawn
 // treatment", "a safe, effective spray", "the safe choice"). Not: "safe
@@ -895,7 +919,8 @@ const DRY_STATE = /\b(?:once|when|after|until)\b[^.,;]{0,40}?\b(?:dry|dried|drie
 // Worded fractions of an hour are the same fixed figure (codex round 11
 // P1): "a quarter hour", "a quarter-hour", "a quarter of an hour", "three
 // quarters of an hour", "a half hour", "half an hour", "an hour and a half".
-const FIXED_REENTRY_TIME = /\b(?:\d+|one|two|three|four|five|six|eight|ten|twelve|fifteen|twenty|thirty|forty-?five|sixty|ninety|half\s+an|a\s+couple\s+of|a\s+few|an?)\s*(?:minutes?|mins?|hours?|hrs?)\b|\b(?:(?:a|one)\s+)?quarter(?:-|\s+of\s+an?\s+|\s+)hour\b|\bthree[-\s]quarters?\s+of\s+an\s+hour\b|\ba\s+half[-\s]hour\b|\ban?\s+hour\s+and\s+a\s+half\b/i;
+const FIXED_REENTRY_TIME = new RegExp(`\\b(?:\\d+|${NUMBER_WORD})\\s*(?:(?:to|or|-|–)\\s*(?:\\d+|${NUMBER_WORD})\\s*)?(?:minutes?|mins?|hours?|hrs?)\\b|`
+  + String.raw`\b(?:(?:a|one)\s+)?quarter(?:-|\s+of\s+an?\s+|\s+)hour\b|\bthree[-\s]quarters?\s+of\s+an\s+hour\b|\ba\s+half[-\s]hour\b|\ban?\s+hour\s+and\s+a\s+half\b`, 'i');
 // Every protected audience, in every degree ("safer for pets", "safest for
 // pollinators"): never inside the dry-state idiom (codex round 8 P1).
 // Any degree of "safe" other than the plain adjective (codex round 10 P1).
@@ -941,7 +966,7 @@ function adjectiveInDryStateIdiom(sentence, clauses, match) {
 function safetyClaimInSentence(sentence) {
   const canonical = canonicalFinding(sentence);
   if (canonical && !canonical.isDuration) return sentence;
-  if (SAFE_COMPOUND.test(sentence)) return sentence;
+  if (assertedSafeCompound(sentence)) return sentence;
   const clauses = splitClauses(sentence);
   for (const match of sentence.matchAll(new RegExp(SAFE_ADJECTIVE_PRODUCT.source, 'gi'))) {
     if (!adjectiveInDryStateIdiom(sentence, clauses, match)) return sentence;
@@ -1000,7 +1025,7 @@ function reentryTimeInSentence(sentence) {
 // program of concerts", "the safest way to the fireworks") stays event copy.
 const PEST_QUALIFIER = '(?:pest|lawn|mosquito|termite|rodent|ants?|fleas?|roach|bug|weed|fertiliz\\w*|irrigation|yard|turf|indoor|outdoor|perimeter)';
 const TREATMENT_CONTEXT = new RegExp(
-  '\\b(?:treat\\w*|spray\\w*|pesticides?|insecticides?|herbicides?|chemicals?|products?|applications?|applied|appl(?:y|ies|ying)'
+  '\\b(?:treat\\w*|spray\\w*|pesticides?|insecticides?|herbicides?|chemicals?|applied|appl(?:y|ies|ying)'
   + '|formulas?|formulations?|solutions?|ingredients?|repellents?'
   + '|technicians?|barriers?|baits?|granul\\w*|dusts?|fogg\\w*|misting|exterminat\\w*|fumigat\\w*|waveguard'
   + '|re-?ent(?:ry|er)\\w*|(?:once|until|when|after)\\s+(?:it\\s+(?:is|has)\\s+)?dr(?:y|ied|ies)'
