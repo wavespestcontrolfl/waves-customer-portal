@@ -4503,49 +4503,93 @@ const ADMIN_ONLY_PREFS_ALLOWED_FIELDS = ['chemical_sensitivities', 'chemical_sen
 const ADMIN_PREFS_FIELD_SCHEMAS = { ...PREFS_FIELD_SCHEMAS, ...ADMIN_ONLY_PREFS_FIELD_SCHEMAS };
 const ADMIN_PREFS_ALLOWED_FIELDS = [...PREFS_ALLOWED_FIELDS, ...ADMIN_ONLY_PREFS_ALLOWED_FIELDS];
 
+const BLACKOUT_FIELDS = ['blackout_start', 'blackout_end'];
+
+// Blackout window integrity (codex P2): both-or-neither, and start on or
+// before end. The client always submits the pair together when either
+// changes, so a lone field is a malformed call, not a UX case. Auto-dispatch
+// only honors a complete, ordered window, so anything else would silently
+// allow bookings inside the period staff meant to block.
+function blackoutPairError(updates) {
+  const sent = BLACKOUT_FIELDS.filter((f) => f in updates);
+  if (!sent.length) return null;
+  const [start, end] = BLACKOUT_FIELDS.map((f) => updates[f] ?? null);
+  if (sent.length === 1 || (start === null) !== (end === null)) {
+    return 'Blackout start and end dates must be set or cleared together.';
+  }
+  if (start !== null && new Date(start) > new Date(end)) {
+    return 'Blackout end date must be on or after the start date.';
+  }
+  return null;
+}
+
+// The locked write. Returns false when the customer is missing or archived:
+// checked under a row lock inside the transaction so an archive committing
+// mid-request can't slip between the check and the upsert (codex r2/r4).
+async function writeAdminPreferences(customerId, updates) {
+  return db.transaction(async (trx) => {
+    // Same advisory-lock key/order the portal PUT and the customer-edit
+    // route's address sync already take on this customer — one shared lock
+    // order across every property_preferences writer avoids an AB-BA
+    // deadlock between them (codex #3565 gh-r38/r39).
+    await trx.raw(
+      'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+      ['property-preferences', String(customerId)],
+    );
+    const liveCustomer = await trx('customers')
+      .where({ id: customerId })
+      .whereNull('deleted_at')
+      .forShare()
+      .first('id');
+    if (!liveCustomer) return false;
+
+    const current = await trx('property_preferences')
+      .where({ customer_id: customerId })
+      .first();
+    // Irrigation is ON by default (owner ruling 2026-08-27: no toggle);
+    // ANY genuine irrigation-field edit — including a staff correction —
+    // is the row working a system that exists, mirroring the portal
+    // writer (property.js `stampIrrigationOn`) so a legacy irrigation_
+    // system=false row doesn't keep suppressing a figure staff just set
+    // (report-data.js portalIrrigationInches, the weekly email).
+    const row = PREFS_IRRIGATION_INPUT_FIELDS.some((f) => f in updates)
+      ? { ...updates, irrigation_system: true }
+      : { ...updates };
+    if (!current) {
+      await trx('property_preferences').insert({ customer_id: customerId, ...row });
+      return true;
+    }
+    // Strip any sizing field / rain_sensor whose value actually CHANGES
+    // from irrigation_confirmed_fields — a staff write is not the
+    // customer's re-confirmation for the current home (see the module
+    // comment above the route).
+    const toUnconfirm = prefsChangedSizingFields(current, updates);
+    if (toUnconfirm.length) {
+      row.irrigation_confirmed_fields = prefsUnconfirmedFieldsRaw(trx, toUnconfirm);
+    }
+    await trx('property_preferences')
+      .where({ customer_id: customerId })
+      .update({ ...row, updated_at: trx.fn.now() });
+    return true;
+  });
+}
+
 router.put('/:id/property-preferences', requireAdmin, async (req, res, next) => {
   try {
-    const { value, rejected, presentCount } = validatePrefsBodyWithSchemas(ADMIN_PREFS_FIELD_SCHEMAS, req.body);
-    if (presentCount > 0 && rejected.length === presentCount) {
-      // Every field in the request failed validation — nothing to save.
-      // Mirrors the portal route's contract for this case (per-field detail,
-      // not only a joined string).
-      return res.status(400).json({
-        error: rejected.map((r) => r.message).join('; '),
-        rejected,
-      });
-    }
-
+    const customerId = req.params.id;
+    // A mixed batch saves the valid fields and 200s with `rejected` (the
+    // portal's per-field contract); nothing valid left is a 400 below.
+    const { value, rejected } = validatePrefsBodyWithSchemas(ADMIN_PREFS_FIELD_SCHEMAS, req.body);
     const snakeBody = prefsTransformKeys(value, prefsCamelToSnake);
     const updates = {};
     for (const field of ADMIN_PREFS_ALLOWED_FIELDS) {
       if (field in snakeBody) updates[field] = snakeBody[field];
     }
 
-    // Blackout window integrity (codex P2): both-or-neither, and start on
-    // or before end. The client always submits the pair together when
-    // either changes, so requiring both here — rather than reading the
-    // current row to reason about a lone field — is a floor against a
-    // malformed/partial call, not a UX regression.
-    const blackoutFieldsSent = ['blackout_start', 'blackout_end'].filter((f) => f in updates);
-    if (blackoutFieldsSent.length === 1) {
-      rejected.push({
-        field: blackoutFieldsSent[0] === 'blackout_start' ? 'blackoutStart' : 'blackoutEnd',
-        message: 'Blackout start and end dates must be set or cleared together.',
-      });
-      delete updates.blackout_start;
-      delete updates.blackout_end;
-    } else if (blackoutFieldsSent.length === 2) {
-      const { blackout_start: bStart, blackout_end: bEnd } = updates;
-      if ((bStart == null) !== (bEnd == null)) {
-        rejected.push({ field: 'blackoutEnd', message: 'Blackout start and end dates must be set or cleared together.' });
-        delete updates.blackout_start;
-        delete updates.blackout_end;
-      } else if (bStart != null && bEnd != null && new Date(bStart) > new Date(bEnd)) {
-        rejected.push({ field: 'blackoutEnd', message: 'Blackout end date must be on or after the start date.' });
-        delete updates.blackout_start;
-        delete updates.blackout_end;
-      }
+    const blackoutError = blackoutPairError(updates);
+    if (blackoutError) {
+      rejected.push({ field: 'blackoutEnd', message: blackoutError });
+      BLACKOUT_FIELDS.forEach((f) => delete updates[f]);
     }
 
     // Same Weekly-Inches eligibility gate as the portal write: never persist
@@ -4555,15 +4599,14 @@ router.put('/:id/property-preferences', requireAdmin, async (req, res, next) => 
     // 200). An explicit clear (null) always goes through regardless of
     // eligibility — there is nothing ineligible about removing a number
     // (codex P2) — and an ineligible non-null value is reported back in
-    // `rejected` instead of silently dropped, so staff see why it didn't
-    // save rather than a save that quietly did less than asked.
-    if ('irrigation_inches_per_week' in updates && updates.irrigation_inches_per_week !== null) {
-      const customer = await db('customers').where({ id: req.params.id }).first();
+    // `rejected` instead of silently dropped.
+    if ((updates.irrigation_inches_per_week ?? null) !== null) {
       let eligible;
       try {
+        const customer = await db('customers').where({ id: customerId }).first();
         eligible = await customerQualifiesForLawnInches(customer || {});
       } catch (err) {
-        logger.warn(`[customers:${req.params.id}] property_preferences lawn evidence lookup failed: ${err.message}`);
+        logger.warn(`[customers:${customerId}] property_preferences lawn evidence lookup failed: ${err.message}`);
         return res.status(503).json({ error: "Couldn't verify this customer's lawn service just now — please try again." });
       }
       if (!eligible) {
@@ -4579,8 +4622,8 @@ router.put('/:id/property-preferences', requireAdmin, async (req, res, next) => 
 
     if (Object.keys(updates).length === 0) {
       return res.status(400).json({
-        error: rejected.length ? rejected.map((r) => r.message).join('; ') : 'No valid fields to update',
-        ...(rejected.length ? { rejected } : {}),
+        error: rejected.map((r) => r.message).join('; ') || 'No valid fields to update',
+        rejected,
       });
     }
 
@@ -4588,73 +4631,18 @@ router.put('/:id/property-preferences', requireAdmin, async (req, res, next) => 
     // (nextstop-alerts, job-card, dispatch) gates the warning on the
     // boolean, so details saved without the flag would never reach the
     // technician (codex r2). An explicit flag in the same request wins.
-    if (
-      typeof updates.chemical_sensitivity_details === 'string'
-      && updates.chemical_sensitivity_details.trim()
-      && !('chemical_sensitivities' in updates)
-    ) {
+    if (String(updates.chemical_sensitivity_details ?? '').trim() && !('chemical_sensitivities' in updates)) {
       updates.chemical_sensitivities = true;
     }
 
-    let customerMissing = false;
-    // Same advisory-lock key/order the portal PUT and the customer-edit
-    // route's address sync already take on this customer — one shared lock
-    // order across every property_preferences writer avoids an AB-BA
-    // deadlock between them (codex #3565 gh-r38/r39).
-    await db.transaction(async (trx) => {
-      await trx.raw(
-        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-        ['property-preferences', String(req.params.id)],
-      );
-      // A missing or archived customer is a 404, not a foreign-key 500 on
-      // the insert, and a stale tab must not edit a soft-deleted customer.
-      // Checked under a row lock inside the write so an archive committing
-      // mid-request can't slip between the check and the upsert (codex r2/r4).
-      const liveCustomer = await trx('customers')
-        .where({ id: req.params.id })
-        .whereNull('deleted_at')
-        .forShare()
-        .first('id');
-      if (!liveCustomer) {
-        customerMissing = true;
-        return;
-      }
-      const current = await trx('property_preferences')
-        .where({ customer_id: req.params.id })
-        .first();
-
-      // Irrigation is ON by default (owner ruling 2026-08-27: no toggle);
-      // ANY genuine irrigation-field edit — including a staff correction —
-      // is the row working a system that exists, mirroring the portal
-      // writer (property.js `stampIrrigationOn`) so a legacy irrigation_
-      // system=false row doesn't keep suppressing a figure staff just set
-      // (report-data.js portalIrrigationInches, the weekly email).
-      const stampIrrigationOn = PREFS_IRRIGATION_INPUT_FIELDS.some((f) => f in updates)
-        ? { irrigation_system: true }
-        : {};
-
-      // Strip any sizing field / rain_sensor whose value actually CHANGES
-      // from irrigation_confirmed_fields — a staff write is not the
-      // customer's re-confirmation for the current home (see the module
-      // comment above the route).
-      const toUnconfirm = current ? prefsChangedSizingFields(current, updates) : [];
-      const unconfirmFields = toUnconfirm.length
-        ? { irrigation_confirmed_fields: prefsUnconfirmedFieldsRaw(trx, toUnconfirm) }
-        : {};
-
-      if (current) {
-        await trx('property_preferences')
-          .where({ customer_id: req.params.id })
-          .update({ ...updates, ...stampIrrigationOn, ...unconfirmFields, updated_at: trx.fn.now() });
-      } else {
-        await trx('property_preferences').insert({ customer_id: req.params.id, ...updates, ...stampIrrigationOn });
-      }
-    });
-
-    if (customerMissing) return res.status(404).json({ error: 'Customer not found' });
+    // A missing or archived customer is a 404, not a foreign-key 500 on
+    // the insert, and a stale tab must not edit a soft-deleted customer.
+    if (!(await writeAdminPreferences(customerId, updates))) {
+      return res.status(404).json({ error: 'Customer not found' });
+    }
 
     const preferences = await db('property_preferences')
-      .where({ customer_id: req.params.id })
+      .where({ customer_id: customerId })
       .first();
 
     const loggedFields = Object.keys(updates).sort();
@@ -4663,14 +4651,14 @@ router.put('/:id/property-preferences', requireAdmin, async (req, res, next) => 
       actor_id: req.technicianId || null,
       action: 'customer.property_preferences.updated',
       resource_type: 'customer',
-      resource_id: req.params.id,
+      resource_id: customerId,
       // Field NAMES only — gate/lockbox/garage codes and other sensitive
       // values never ride in audit metadata or logs in the clear.
       metadata: { fields: loggedFields },
       ip_address: req.ip,
       user_agent: req.get('user-agent') || null,
-    }).catch((err) => logger.warn(`[customers:${req.params.id}] property_preferences audit failed: ${err.message}`));
-    logger.info(`[customers] property_preferences updated for ${req.params.id}: ${JSON.stringify({ fields: loggedFields })}`);
+    }).catch((err) => logger.warn(`[customers:${customerId}] property_preferences audit failed: ${err.message}`));
+    logger.info(`[customers] property_preferences updated for ${customerId}: ${JSON.stringify({ fields: loggedFields })}`);
 
     res.json({ success: true, preferences, saved: true, ...(rejected.length ? { rejected } : {}) });
   } catch (err) { next(err); }

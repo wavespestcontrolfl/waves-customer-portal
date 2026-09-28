@@ -293,6 +293,76 @@ describe('Customer 360 → Property → Access & Preferences', () => {
     expect(screen.getByRole('button', { name: 'Save' })).toBeInTheDocument();
   });
 
+  it('masks access codes for a technician, and shows them to an admin', async () => {
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'technician' }));
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const path = String(url);
+      if (path.endsWith('/admin/payers')) return response({ payers: [] });
+      if (path.split('?')[0].endsWith('/timeline')) return response({ timeline: [] });
+      if (path.endsWith('/admin/customers/customer-a')) return response(customerDetail());
+      return response({});
+    }));
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+    await screen.findAllByText('Avery Customer');
+    await openPropertyTab();
+    await screen.findByText('Access & Preferences');
+    expect(screen.queryByText('4477')).not.toBeInTheDocument();
+    expect(screen.queryByText('2299')).not.toBeInTheDocument();
+    expect(screen.queryByText('8810')).not.toBeInTheDocument();
+    expect(screen.getAllByText('Shown in the tech app on service day')).toHaveLength(3);
+    expect(screen.queryByRole('button', { name: 'Edit Access & Preferences' })).not.toBeInTheDocument();
+  });
+
+  it('clicking the Watering Days title does not toggle a day', async () => {
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const path = String(url);
+      if (path.endsWith('/admin/payers')) return response({ payers: [] });
+      if (path.split('?')[0].endsWith('/timeline')) return response({ timeline: [] });
+      if (path.endsWith('/admin/customers/customer-a')) return response(customerDetail({ watering_days: [] }));
+      return response({});
+    }));
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+    await screen.findAllByText('Avery Customer');
+    await openPropertyTab();
+    await screen.findByText('Access & Preferences');
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Access & Preferences' }));
+    const title = await screen.findByText('Watering Days');
+    fireEvent.click(title);
+    const group = title.closest('fieldset');
+    expect(group).not.toBeNull();
+    expect(group.querySelectorAll('button[aria-pressed="true"]')).toHaveLength(0);
+  });
+
+  it('legacy day names and retired head types are restated so a correction saves cleanly', async () => {
+    const bodies = [];
+    vi.stubGlobal('fetch', vi.fn((url, options) => {
+      const path = String(url);
+      if (path.endsWith('/admin/payers')) return response({ payers: [] });
+      if (path.split('?')[0].endsWith('/timeline')) return response({ timeline: [] });
+      if (path.endsWith('/admin/customers/customer-a/property-preferences')) {
+        bodies.push(JSON.parse(options.body));
+        return response({ success: true, saved: true, preferences: BASE_PREFS });
+      }
+      if (path.endsWith('/admin/customers/customer-a')) {
+        return response(customerDetail({ watering_days: ['Monday', 'wed'], irrigation_system_type: ['bubbler', 'Spray'] }));
+      }
+      return response({});
+    }));
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+    await screen.findAllByText('Avery Customer');
+    await openPropertyTab();
+    await screen.findByText('Access & Preferences');
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Access & Preferences' }));
+    const days = (await screen.findByText('Watering Days')).closest('fieldset');
+    fireEvent.click(Array.from(days.querySelectorAll('button')).find((b) => b.textContent === 'Fri'));
+    const types = screen.getByText('Irrigation System Type').closest('fieldset');
+    fireEvent.click(Array.from(types.querySelectorAll('button')).find((b) => b.textContent === 'Drip'));
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(bodies).toHaveLength(1));
+    expect(bodies[0].wateringDays).toEqual(['Mon', 'Wed', 'Fri']);
+    expect(bodies[0].irrigationSystemType).toEqual(['spray', 'drip']);
+  });
+
   it('an unset contact preference shows Not set, and choosing Text actually saves it', async () => {
     const bodies = [];
     vi.stubGlobal('fetch', vi.fn((url, options) => {
