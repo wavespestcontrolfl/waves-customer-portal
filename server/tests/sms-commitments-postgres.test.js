@@ -2834,7 +2834,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     expect((await mockPg('call_commitments').first()).status).toBe('fulfilled');
   });
 
-  test('owner ruling 2026-09-28: a DUE plain-information "other" ask closes on a completed call of 60s or more', async () => {
+  test('owner ruling 2026-09-28: Codex #5169 r1 P1: a completed call never closes a reply-answerable "other" ask — call_log records no human provenance', async () => {
     result.facts = [];
     result.obligations[0] = { ...result.obligations[0], kind: 'other', answered_by_payment: false, answered_by_reply: true,
       due_at: new Date(message.created_at.getTime() + 1000).toISOString(),
@@ -2848,8 +2848,44 @@ postgres('SMS commitments on PostgreSQL', () => {
     dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'fulfilled', record_ref: `call:${call.id}`, quote: 'The Zelle number is 941-555-0101.' } });
     const outcome = await refreshSmsCommitments({ conn: mockPg, now });
     expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
-    expect(outcome).toMatchObject({ scanned: 1, fulfilled: 1 });
+    expect(outcome).toMatchObject({ scanned: 1, fulfilled: 0 });
+    expect((await mockPg('call_commitments').first()).status).toBe('open');
+  });
+
+  test('Codex #5169 r1 P1: a staff text closes a reply-answerable ask only with persisted operator provenance — a bare manual type never does, the composer stamp does', async () => {
+    result.facts = [];
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', answered_by_payment: false, answered_by_reply: true,
+      due_at: new Date(message.created_at.getTime() + 1000).toISOString(),
+      quote: "What's the Zelle number?", description: "What's the Zelle number?" };
+    await recordMessageOperations(mockPg, message, result, context);
+    const after = new Date(message.created_at.getTime() + 1000);
+    const now = new Date(after.getTime() + 2000);
+    const [reply] = await mockPg('sms_log').insert({ ...message, id: randomUUID(), direction: 'outbound',
+      from_phone: message.to_phone, to_phone: message.from_phone,
+      message_body: 'The Zelle number is 941-555-0101.', message_type: 'manual', admin_user_id: null,
+      status: 'delivered', created_at: after }).returning('id');
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'fulfilled', record_ref: `sms:${reply.id}`, quote: 'The Zelle number is 941-555-0101.' } });
+    expect(await refreshSmsCommitments({ conn: mockPg, now })).toMatchObject({ scanned: 1, fulfilled: 0 });
+    expect((await mockPg('call_commitments').first()).status).toBe('open');
+    await mockPg('sms_log').where({ id: reply.id }).update({ metadata: JSON.stringify({ human_authored: true }) });
+    expect(await refreshSmsCommitments({ conn: mockPg, now: new Date(now.getTime() + 1000) })).toMatchObject({ fulfilled: 1 });
     expect((await mockPg('call_commitments').first()).status).toBe('fulfilled');
+  });
+
+  test('Codex #5169 r1 P2: a plain question that names an email address still closes on the staff text that answers it', async () => {
+    result.facts = [];
+    const quote = 'Is sample.customer@example.com the email on my account?';
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', answered_by_payment: false, answered_by_reply: true,
+      due_at: new Date(message.created_at.getTime() + 1000).toISOString(), quote, description: quote };
+    await recordMessageOperations(mockPg, message, result, context);
+    const after = new Date(message.created_at.getTime() + 1000);
+    const now = new Date(after.getTime() + 2000);
+    const [reply] = await mockPg('sms_log').insert({ ...message, id: randomUUID(), direction: 'outbound',
+      from_phone: message.to_phone, to_phone: message.from_phone,
+      message_body: 'Yes, that is the email we have on file.', message_type: 'manual',
+      admin_user_id: '00000000-0000-4000-8000-000000000104', status: 'delivered', created_at: after }).returning('id');
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'fulfilled', record_ref: `sms:${reply.id}`, quote: 'Yes, that is the email we have on file.' } });
+    expect(await refreshSmsCommitments({ conn: mockPg, now })).toMatchObject({ scanned: 1, fulfilled: 1 });
   });
 
   test('owner ruling 2026-09-28: a short (<60s) call never closes a reply-answerable "other" ask', async () => {

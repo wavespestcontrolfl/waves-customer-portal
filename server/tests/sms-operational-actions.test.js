@@ -924,15 +924,17 @@ describe('fulfillment proof', () => {
     expect(admissibleWitness({ type: 'call', status: 'completed', duration_seconds: 90 }, { kind: 'callback' })).toBe(true);
   });
 
-  test('owner ruling 2026-09-28 partly reverses R3: a plain-information "other" ask (reply_answerable) admits a human staff sms/call; an unstamped or action-request ask keeps R3', () => {
+  test('owner ruling 2026-09-28 partly reverses R3: a plain-information "other" ask (reply_answerable) admits an operator-sent staff sms; an unstamped or action-request ask keeps R3', () => {
     const info = { kind: 'other', sms_context: { reply_answerable: true } };
-    const humanSms = { type: 'sms', status: 'delivered', message_type: 'manual' };
+    const humanSms = { type: 'sms', status: 'delivered', message_type: 'manual', operator_sent: true };
     const humanCall = { type: 'call', status: 'completed', duration_seconds: 90 };
     expect(admissibleWitness(humanSms, info)).toBe(true);
-    expect(admissibleWitness(humanCall, info)).toBe(true);
-    // The existing call rule is unaffected: still ≥60s and completed.
-    expect(admissibleWitness({ ...humanCall, duration_seconds: 30 }, info)).toBe(false);
-    expect(admissibleWitness({ ...humanCall, status: 'no-answer' }, info)).toBe(false);
+    // Staff draft-approval sends carry their own provenance type.
+    expect(admissibleWitness({ ...humanSms, operator_sent: false, message_type: 'ai_approved' }, info)).toBe(true);
+    // Codex #5169 r1 P1: a bare 'manual' type is overloaded across automated
+    // senders, and call_log records no human provenance at all.
+    expect(admissibleWitness({ ...humanSms, operator_sent: false }, info)).toBe(false);
+    expect(admissibleWitness(humanCall, info)).toBe(false);
     // An automated notice never answers, even on a reply-answerable row.
     expect(admissibleWitness({ ...humanSms, message_type: 'confirmation' }, info)).toBe(false);
     // Unstamped (a row from before this lane, the R3 "separate the charges"
