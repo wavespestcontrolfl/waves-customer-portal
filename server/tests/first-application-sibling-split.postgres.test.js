@@ -630,7 +630,12 @@ suite('first-application-sibling-split — periodic sweep', () => {
   // real race needs both sessions to see already-COMMITTED state, so this
   // suite cannot run inside rollbackTest's single shared transaction.
   // ---------------------------------------------------------------------
-  describe('raiseDivergenceAlert refresh vs. a concurrent dismissal (Codex round 21 P2)', () => {
+  // markReadAdmin writes through notification-service's module-level db,
+  // configured from DATABASE_URL, so these run only when that IS the fixture
+  // database — otherwise the dismissal would target another database
+  // (Codex r1 P2 on #5226).
+  const describeSameDb = process.env.DATABASE_URL === testUrl ? describe : describe.skip;
+  describeSameDb('raiseDivergenceAlert refresh vs. a concurrent dismissal (Codex round 21 P2)', () => {
     const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
     const notificationService = require('../services/notification-service');
     const { markReadAdmin } = notificationService;
@@ -651,7 +656,17 @@ suite('first-application-sibling-split — periodic sweep', () => {
       // Delays ONLY the call raiseDivergenceAlert makes into notifyAdmin —
       // landing squarely between its own read of `existing` and notifyAdmin's
       // actual dedupe read + write, which is exactly the window Codex found.
+      // raiseDivergenceAlert calls notifyAdmin only AFTER its FOR UPDATE read,
+      // so reaching the spy means the row lock is held: the dismissal starts
+      // on that signal, never on elapsed time (Codex r1 P2 on #5226). The
+      // first tick below is a fresh insert and also passes through here, so
+      // only the refresh tick's call is armed.
+      let armed = false;
+      let signalLockHeld;
+      const lockHeld = new Promise((resolve) => { signalLockHeld = resolve; });
       const spy = jest.spyOn(notificationService, 'notifyAdmin').mockImplementation(async (...args) => {
+        if (!armed) return realNotifyAdmin(...args);
+        signalLockHeld();
         await sleep(300);
         return realNotifyAdmin(...args);
       });
@@ -675,6 +690,7 @@ suite('first-application-sibling-split — periodic sweep', () => {
         // read happens almost immediately; the mocked 300ms delay then sits
         // between that read and notifyAdmin's actual write, all inside this
         // one open transaction.
+        armed = true;
         const refreshDone = db.transaction((trx) => sweepOnce(trx, ids.estimateId));
 
         // Session B: a genuinely separate connection (notification-service's
@@ -682,7 +698,7 @@ suite('first-application-sibling-split — periodic sweep', () => {
         // once session A's read has certainly already happened, and races
         // the still-open refresh transaction.
         const dismissDone = (async () => {
-          await sleep(60);
+          await lockHeld;
           const startedAt = Date.now();
           await markReadAdmin(initial.id);
           return Date.now() - startedAt;
