@@ -23,6 +23,13 @@
  * same idempotency on proof_sent_at, same fail-open error handling. Kill
  * switch: unset GATE_PEST_INSIDER_PROOF — draft + notification only,
  * today's behavior.
+ *
+ * Proof catch-up (retryPestInsiderProof, daily cron): the draft survives a
+ * failed proof send, and every later autopilot call stops at the
+ * already-drafted check, so without a retry one SendGrid outage would
+ * silently cost the month's issue. The catch-up re-sends the proof for
+ * this month's draft while it is still an unproofed draft, through the
+ * 10th of the ET month.
  */
 
 const db = require('../models/db');
@@ -30,6 +37,28 @@ const logger = require('./logger');
 const { etParts, etDateString } = require('../utils/datetime-et');
 
 const PEST_INSIDER_TYPE = 'pest-insider-monthly';
+// Last ET day of the month the catch-up still proofs a draft. The issue is
+// drafted on the first Tuesday (day 1–7); three more days covers an outage
+// without proofing a stale draft late in the month.
+const PROOF_RETRY_LAST_DAY = 10;
+
+function proofGateOn() {
+  return process.env.GATE_PEST_INSIDER_PROOF === 'true';
+}
+
+// sendNewsletterProof is itself gated behind GATE_NEWSLETTER_PROOF_APPROVAL
+// and idempotent on proof_sent_at. A failure is logged and reported, never
+// thrown: the draft is already saved and the catch-up will try again.
+async function sendProofFor(sendId) {
+  try {
+    const { sendNewsletterProof } = require('./newsletter-proof');
+    await sendNewsletterProof(sendId);
+    return true;
+  } catch (e) {
+    logger.warn(`[pest-insider-autopilot] proof send failed: ${e.message}`);
+    return false;
+  }
+}
 
 /**
  * First-Tuesday gate. node-cron's day-of-month × day-of-week semantics
@@ -94,24 +123,41 @@ async function runPestInsiderAutopilot({ now = new Date() } = {}) {
 
   // Proof-approval flow (GATE_PEST_INSIDER_PROOF, dark by default — kill =
   // unset, today's behavior: draft + notification only). Read at call time,
-  // same as its neighbour gates. sendNewsletterProof is itself gated behind
-  // GATE_NEWSLETTER_PROOF_APPROVAL and is idempotent on proof_sent_at, so
-  // this mirrors the flagship autopilot's call exactly — same error
-  // handling, same retry semantics.
-  if (process.env.GATE_PEST_INSIDER_PROOF === 'true') {
-    try {
-      const { sendNewsletterProof } = require('./newsletter-proof');
-      await sendNewsletterProof(send.id);
-    } catch (e) {
-      logger.warn(`[pest-insider-autopilot] proof send failed: ${e.message}`);
-    }
-  }
+  // same as its neighbour gates; mirrors the flagship autopilot's call.
+  if (proofGateOn()) await sendProofFor(send.id);
 
   return { skipped: false, sendId: send.id, subject: send.subject, voiceWarnings: draft.voiceWarnings };
 }
 
+/**
+ * Proof catch-up: re-send the proof for this ET month's Pest Insider draft
+ * when it is still a draft with no proof on record. A deleted or sent issue
+ * is not status 'draft' and is never touched; a proof already on record
+ * (proof_sent_at set) is never re-sent.
+ */
+async function retryPestInsiderProof({ now = new Date() } = {}) {
+  if (!proofGateOn()) return { skipped: true, reason: 'proof gate off' };
+  if (etParts(now).day > PROOF_RETRY_LAST_DAY) {
+    return { skipped: true, reason: `past day ${PROOF_RETRY_LAST_DAY} of the month (ET)` };
+  }
+
+  const { start, end } = etMonthBounds(now);
+  const draft = await db('newsletter_sends')
+    .where('newsletter_type', PEST_INSIDER_TYPE)
+    .where('status', 'draft')
+    .whereNull('proof_sent_at')
+    .where('created_at', '>=', start)
+    .where('created_at', '<', end)
+    .first('id');
+  if (!draft) return { skipped: true, reason: 'no unproofed draft this month' };
+
+  const proofSent = await sendProofFor(draft.id);
+  return { skipped: false, sendId: draft.id, proofSent };
+}
+
 module.exports = {
   runPestInsiderAutopilot,
+  retryPestInsiderProof,
   isFirstTuesdayET,
   etMonthBounds,
   PEST_INSIDER_TYPE,

@@ -27,7 +27,7 @@ jest.mock('../services/newsletter-proof', () => ({
 }));
 
 const db = require('../models/db');
-const { runPestInsiderAutopilot } = require('../services/pest-insider-autopilot');
+const { runPestInsiderAutopilot, retryPestInsiderProof } = require('../services/pest-insider-autopilot');
 
 // Tue Jun 2, 2026, 7:05am ET — the first Tuesday of the month, matching the
 // cron guard tests in pest-insider.test.js.
@@ -35,7 +35,7 @@ const FIRST_TUESDAY = new Date('2026-06-02T11:05:00Z');
 
 function chain(overrides = {}) {
   const q = {};
-  ['where', 'select'].forEach((m) => { q[m] = jest.fn(() => q); });
+  ['where', 'whereNull', 'select'].forEach((m) => { q[m] = jest.fn(() => q); });
   q.first = jest.fn(async () => overrides.first);
   return q;
 }
@@ -80,5 +80,63 @@ describe('pest-insider proof gate', () => {
     expect(result.skipped).toBe(false);
     expect(result.sendId).toBe('send-pi-1');
     expect(mockSendProof).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('pest-insider proof catch-up', () => {
+  // Wed Jun 3, 2026, 2:15pm ET — the day after the first Tuesday.
+  const DAY_AFTER = new Date('2026-06-03T18:15:00Z');
+
+  test('re-sends the proof for this month\'s draft when none is on record', async () => {
+    process.env.GATE_PEST_INSIDER_PROOF = 'true';
+    const q = chain({ first: { id: 'send-pi-1' } });
+    db.mockImplementation(() => q);
+
+    const result = await retryPestInsiderProof({ now: DAY_AFTER });
+
+    expect(result).toEqual({ skipped: false, sendId: 'send-pi-1', proofSent: true });
+    expect(mockSendProof).toHaveBeenCalledWith('send-pi-1');
+    // Only an unproofed DRAFT of this type qualifies.
+    expect(q.where).toHaveBeenCalledWith('newsletter_type', 'pest-insider-monthly');
+    expect(q.where).toHaveBeenCalledWith('status', 'draft');
+    expect(q.whereNull).toHaveBeenCalledWith('proof_sent_at');
+  });
+
+  test('a second failure is reported, not thrown, so the next day retries', async () => {
+    process.env.GATE_PEST_INSIDER_PROOF = 'true';
+    db.mockImplementation(() => chain({ first: { id: 'send-pi-1' } }));
+    mockSendProof.mockImplementationOnce(async () => { throw new Error('sendgrid 503'); });
+
+    const result = await retryPestInsiderProof({ now: DAY_AFTER });
+
+    expect(result).toEqual({ skipped: false, sendId: 'send-pi-1', proofSent: false });
+  });
+
+  test('nothing to do when the proof is on record, the issue was sent or deleted, or no draft exists', async () => {
+    process.env.GATE_PEST_INSIDER_PROOF = 'true';
+    db.mockImplementation(() => chain({ first: undefined }));
+
+    const result = await retryPestInsiderProof({ now: DAY_AFTER });
+
+    expect(result.skipped).toBe(true);
+    expect(mockSendProof).not.toHaveBeenCalled();
+  });
+
+  test('gate off — never queries, never proofs', async () => {
+    const result = await retryPestInsiderProof({ now: DAY_AFTER });
+
+    expect(result).toEqual({ skipped: true, reason: 'proof gate off' });
+    expect(db).not.toHaveBeenCalled();
+    expect(mockSendProof).not.toHaveBeenCalled();
+  });
+
+  test('after the 10th of the month a stale draft is not proofed', async () => {
+    process.env.GATE_PEST_INSIDER_PROOF = 'true';
+    db.mockImplementation(() => chain({ first: { id: 'send-pi-1' } }));
+
+    const result = await retryPestInsiderProof({ now: new Date('2026-06-11T18:15:00Z') });
+
+    expect(result.skipped).toBe(true);
+    expect(mockSendProof).not.toHaveBeenCalled();
   });
 });

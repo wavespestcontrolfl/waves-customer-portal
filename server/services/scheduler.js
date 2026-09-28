@@ -2900,6 +2900,27 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 2:15PM ET — Pest Insider proof catch-up (GATE_PEST_INSIDER_PROOF).
+  // The draft survives a failed proof send and the Tuesday autopilot stops
+  // at its already-drafted check, so this is the only retry. No-op unless
+  // the gate is on, it is day 1–10 of the ET month, and this month's issue
+  // is still a draft with no proof on record.
+  // =========================================================================
+  cron.schedule('15 14 * * *', async () => {
+    try {
+      await runExclusive('pest-insider-proof-retry', async () => {
+        const { retryPestInsiderProof } = require('./pest-insider-autopilot');
+        const result = await retryPestInsiderProof();
+        if (!result.skipped) {
+          logger.info(`[pest-insider-proof-retry] proof ${result.proofSent ? 'sent' : 'failed again'} for send ${result.sendId}`);
+        }
+      });
+    } catch (err) {
+      logger.error(`[pest-insider-proof-retry] failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY MONDAY 7AM ET — Newsletter autopilot
   // Auto-drafts the weekly flagship digest from approved events. Never
   // auto-sends — creates a draft for admin review. Skips if fewer than 3
