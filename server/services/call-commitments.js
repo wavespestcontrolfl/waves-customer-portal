@@ -1994,8 +1994,11 @@ async function rejudgeSlotKept(conn, kept, row, callLogId) {
 // the calls with open promises, so a lapse is caught whenever it happened —
 // long after the slot, or while the commitments gate was off (codex #5081
 // r5/r6 P1) — while the sweep's work follows the lapses, not every promise
-// this rule ever kept (r7 P2). A rewritten confirmed slot comes with a
-// reprocess, which refreshes the call itself.
+// this rule ever kept (r7 P2). A reprocess only rewrites rows, so the
+// grounding is checked here too: the promise turned into a deadline, or the
+// call's V2 extraction no longer confirms that wall clock (an ET-offset or
+// naive confirmed_start_at compared as written — the booking path's rule;
+// any other encoding is simply re-judged).
 async function listSlotKeptCallIds(conn) {
   const rows = await conn.raw(
     `SELECT DISTINCT cc.call_log_id
@@ -2010,7 +2013,15 @@ async function listSlotKeptCallIds(conn) {
           OR cc.due_at IS NULL
           OR ss.created_at >= cc.due_at
           OR to_char(ss.scheduled_date, 'YYYY-MM-DD') IS DISTINCT FROM to_char(cc.due_at AT TIME ZONE 'America/New_York', 'YYYY-MM-DD')
-          OR to_char(ss.window_start, 'HH24:MI') IS DISTINCT FROM to_char(cc.due_at AT TIME ZONE 'America/New_York', 'HH24:MI'))`,
+          OR to_char(ss.window_start, 'HH24:MI') IS DISTINCT FROM to_char(cc.due_at AT TIME ZONE 'America/New_York', 'HH24:MI')
+          OR cc.kind IS DISTINCT FROM 'schedule_visit'
+          OR cc.due_type IS NOT DISTINCT FROM 'deadline'
+          OR cl.v2_extraction_status IS DISTINCT FROM 'valid'
+          OR cl.ai_extraction_enriched #>> '{scheduling,status}' IS DISTINCT FROM 'confirmed'
+          OR NOT COALESCE(
+            cl.ai_extraction_enriched #>> '{scheduling,confirmed_start_at}' ~ '^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}(:\\d{2}(\\.\\d+){0,1}){0,1}(-0[45]:{0,1}00){0,1}$'
+            AND left(cl.ai_extraction_enriched #>> '{scheduling,confirmed_start_at}', 16)
+              = to_char(cc.due_at AT TIME ZONE 'America/New_York', 'YYYY-MM-DD"T"HH24:MI'), false))`,
     [SLOT_BOOKING_BASIS, SLOT_OFF_BOOKS_STATUSES],
   );
   return (rows?.rows || []).map((r) => r.call_log_id);

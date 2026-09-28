@@ -350,10 +350,12 @@ maybeDescribe('call_commitments (live Postgres)', () => {
     const { addETDays, etDateString, parseETDateTime } = require('../utils/datetime-et');
     const day = etDateString(addETDays(new Date(), 7));
     const threePm = parseETDateTime(`${day}T15:00`).toISOString();
+    // V2 writes the agreed time with its ET offset, as the booking path reads it.
+    const threePmEt = `${day}T15:00:00${new Date(threePm).getUTCHours() === 19 ? '-04:00' : '-05:00'}`;
     const [call] = await db('call_log').insert({
       twilio_call_sid: 'CA' + '7'.repeat(30) + 's2', direction: 'inbound', from_phone: '+15555550176', to_phone: OUR_NUMBER,
       status: 'completed', customer_id: cust.id, created_at: new Date(Date.now() - 10 * 60 * 1000),
-      v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ scheduling: { status: 'confirmed', confirmed_start_at: threePm } }),
+      v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ scheduling: { status: 'confirmed', confirmed_start_at: threePmEt } }),
     }).returning('*');
     cleanup.callIds.push(call.id);
     const promise = { kind: 'schedule_visit', due_at: threePm, due_type: 'floor' };
@@ -394,9 +396,9 @@ maybeDescribe('call_commitments (live Postgres)', () => {
     // could be a different spoken time, so it stays a hint (codex #5081 r6 P1).
     const wrongSeasonDue = new Date(`${day}T15:00:00${wrongSeason}`).toISOString();
     expect(await cc.resolveFulfillment(db, { ...promise, due_at: wrongSeasonDue }, call)).toMatchObject({ strength: 'association' });
-    await scheduling({ status: 'confirmed', confirmed_start_at: threePm });
+    await scheduling({ status: 'confirmed', confirmed_start_at: threePmEt });
     expect(await cc.resolveFulfillment(db, { ...promise, due_at: wrongSeasonDue }, call)).toMatchObject({ strength: 'association' });
-    await scheduling({ status: 'confirmed', confirmed_start_at: threePm });
+    await scheduling({ status: 'confirmed', confirmed_start_at: threePmEt });
 
     // Kept by the booking, never final: every refresh judges it again and
     // it reopens the moment the booking, the confirmed slot or the call's
@@ -437,7 +439,13 @@ maybeDescribe('call_commitments (live Postgres)', () => {
     // Entered once the slot had come: a record of it, not the booking (codex #5081 r6 P2).
     await lapses(visitTo({ created_at: new Date(Date.parse(threePm) + 60 * 60 * 1000) }), visitTo({ created_at: new Date(Date.now() - 60 * 1000) }));
     // A reprocess rewrote the confirmed slot.
-    await lapses(() => scheduling({ status: 'confirmed', confirmed_start_at: parseETDateTime(`${day}T16:00`).toISOString() }), () => scheduling({ status: 'confirmed', confirmed_start_at: threePm }), { swept: false });
+    await lapses(() => scheduling({ status: 'confirmed', confirmed_start_at: `${day}T16:00:00${threePmEt.slice(-6)}` }), () => scheduling({ status: 'confirmed', confirmed_start_at: threePmEt }), { swept: true });
+    // A reprocess only rewrites rows — the sweep reads the grounding too
+    // (pre-push audit P1 on c7f7e1cbef): the promise turned into a deadline,
+    // or the call no longer confirms the appointment.
+    const promiseTo = (patch) => () => db('call_commitments').where({ id: kept.id }).update(patch);
+    await lapses(promiseTo({ due_type: 'deadline' }), promiseTo({ due_type: 'floor' }));
+    await lapses(() => scheduling({ status: 'reschedule_requested', confirmed_start_at: threePmEt }), () => scheduling({ status: 'confirmed', confirmed_start_at: threePmEt }));
     // The office moved the call to another customer.
     const [elsewhere] = await db('customers').insert({ first_name: 'Elsewhere', phone: '+15555550173' }).returning('id');
     cleanup.customerIds.push(elsewhere.id);
