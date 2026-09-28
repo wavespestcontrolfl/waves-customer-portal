@@ -214,8 +214,14 @@ function formatFlaggedSentAt(iso) {
 // `photoSignature` (the current photo ids, joined) re-runs the fetch when a
 // brief refresh brings a new submission, so its thumbnails load without
 // reopening the panel (Codex #5239 r1 P2).
+// The server signs these for one hour (visit-prep.js
+// TECH_PHOTO_VIEW_TTL_SECONDS); the panel can stay open longer, so the links
+// are re-fetched before they expire (Codex #5239 r4 P2).
+const VISIT_PREP_URL_REFRESH_MS = 50 * 60 * 1000;
+
 function useVisitPrepPhotoUrls(serviceId, active, request, photoSignature) {
   const [byId, setById] = useState({});
+  const [refreshTick, setRefreshTick] = useState(0);
   useEffect(() => {
     if (!active || !serviceId || typeof request !== 'function') return;
     let cancelled = false;
@@ -227,8 +233,9 @@ function useVisitPrepPhotoUrls(serviceId, active, request, photoSignature) {
         setById(next);
       })
       .catch(() => {});
-    return () => { cancelled = true; };
-  }, [serviceId, active, request, photoSignature]);
+    const refresh = setTimeout(() => setRefreshTick((n) => n + 1), VISIT_PREP_URL_REFRESH_MS);
+    return () => { cancelled = true; clearTimeout(refresh); };
+  }, [serviceId, active, request, photoSignature, refreshTick]);
   return byId;
 }
 

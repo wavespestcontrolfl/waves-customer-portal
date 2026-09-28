@@ -24,7 +24,15 @@ const { customerFlaggedFacts, stopPhotoViewUrls, TECH_PHOTO_VIEW_TTL_SECONDS } =
 // A minimal chainable knex stub keyed by table + an in-memory row set per
 // table. Supports exactly the calls these two functions make: where /
 // whereIn / orderBy (no-op) / select (array) / first (scalar, unused here).
+// The service_visits rows the canonical stop rule (visit-groups.js
+// rowStillAtVisitStop) compares members against, unless a test supplies its own.
+const DEFAULT_VISITS = [
+  { id: 'visit-9', scheduled_date: '2026-10-02', window_start: null, window_end: null },
+  { id: 'visit-10', scheduled_date: '2026-10-02', window_start: null, window_end: null },
+];
+
 function fakeConn(tables) {
+  tables = { service_visits: DEFAULT_VISITS, ...tables };
   return (table) => {
     const q = { _table: table, _where: {}, _whereIn: null, _order: [] };
     q.where = (w) => { Object.assign(q._where, w); return q; };
@@ -100,8 +108,8 @@ describe('customerFlaggedFacts', () => {
     // it as a member, so its photos must NOT appear for this stop.
     const conn = fakeConn({
       scheduled_services: [
-        { id: 'svc-A', visit_id: 'visit-9' },
-        { id: 'svc-B', visit_id: 'visit-9' },
+        { id: 'svc-A', visit_id: 'visit-9', scheduled_date: '2026-10-02' },
+        { id: 'svc-B', visit_id: 'visit-9', scheduled_date: '2026-10-02' },
       ],
       visit_prep_submissions: [
         { id: 'sub-A', scheduled_service_id: 'svc-A', created_at: new Date('2026-09-30T10:00:00Z'), topic: 'pest', location_on_property: null, note: null },
@@ -266,6 +274,34 @@ describe('anchor re-read from the database (Codex #5239 r3 P2)', () => {
   });
 });
 
+describe('canonical physical-stop rule (Codex #5239 r4 P2)', () => {
+  const { techStopMemberIds } = visitPrep;
+  const visit = [{ id: 'visit-9', scheduled_date: '2026-10-02', window_start: '09:00', window_end: '11:00' }];
+
+  test('a same-technician member moved to a non-overlapping window the same day is a second stop', async () => {
+    const conn = fakeConn({
+      service_visits: visit,
+      scheduled_services: [
+        { id: 'svc-A', visit_id: 'visit-9', technician_id: 'tech-1', scheduled_date: '2026-10-02', window_start: '09:00', window_end: '10:00', status: 'confirmed' },
+        { id: 'svc-B', visit_id: 'visit-9', technician_id: 'tech-1', scheduled_date: '2026-10-02', window_start: '10:00', window_end: '11:00', status: 'confirmed' },
+        { id: 'svc-moved', visit_id: 'visit-9', technician_id: 'tech-1', scheduled_date: '2026-10-02', window_start: '15:00', window_end: '16:00', status: 'confirmed' },
+      ],
+    });
+    expect(await techStopMemberIds({ id: 'svc-A', visit_id: 'visit-9' }, conn)).toEqual(['svc-A', 'svc-B']);
+  });
+
+  test('a requested row itself moved off the stop resolves to itself only', async () => {
+    const conn = fakeConn({
+      service_visits: visit,
+      scheduled_services: [
+        { id: 'svc-A', visit_id: 'visit-9', technician_id: 'tech-1', scheduled_date: '2026-10-02', window_start: '15:00', window_end: '16:00', status: 'confirmed' },
+        { id: 'svc-B', visit_id: 'visit-9', technician_id: 'tech-1', scheduled_date: '2026-10-02', window_start: '09:00', window_end: '10:00', status: 'confirmed' },
+      ],
+    });
+    expect(await techStopMemberIds({ id: 'svc-A', visit_id: 'visit-9' }, conn)).toEqual(['svc-A']);
+  });
+});
+
 describe('stopPhotoViewUrls', () => {
   beforeEach(() => jest.clearAllMocks());
 
@@ -297,8 +333,8 @@ describe('stopPhotoViewUrls', () => {
   test('grouped stop: only CURRENT members\' photos are signed', async () => {
     const conn = fakeConn({
       scheduled_services: [
-        { id: 'svc-A', visit_id: 'visit-9' },
-        { id: 'svc-B', visit_id: 'visit-9' },
+        { id: 'svc-A', visit_id: 'visit-9', scheduled_date: '2026-10-02' },
+        { id: 'svc-B', visit_id: 'visit-9', scheduled_date: '2026-10-02' },
       ],
       visit_prep_photos: [
         { id: 'photo-A', submission_id: 'sub-A', photo_index: 0, s3_key: 'visitprep/A.jpg', scheduled_service_id: 'svc-A' },

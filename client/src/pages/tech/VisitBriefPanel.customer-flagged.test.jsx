@@ -112,6 +112,22 @@ describe('VisitBriefPanel — Customer flagged section', () => {
     expect(request).toHaveBeenCalledTimes(2);
   });
 
+  it('re-fetches the signed links before their one-hour expiry while the panel stays open', async () => {
+    vi.useFakeTimers();
+    try {
+      const request = vi.fn(async () => ({ photos: [] }));
+      renderPanel({ request });
+      await act(async () => { await Promise.resolve(); });
+      expect(request).toHaveBeenCalledTimes(1);
+      await act(async () => { vi.advanceTimersByTime(49 * 60 * 1000); });
+      expect(request).toHaveBeenCalledTimes(1);
+      await act(async () => { vi.advanceTimersByTime(2 * 60 * 1000); await Promise.resolve(); });
+      expect(request).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('renders nothing when facts carry no customerFlagged entries (gate off, or nothing sent)', () => {
     renderPanel({ customerFlagged: null });
     expect(screen.queryByText('Customer flagged')).not.toBeInTheDocument();

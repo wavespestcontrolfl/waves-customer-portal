@@ -30,7 +30,7 @@ const { convertHeicToJpeg } = require('./heic-to-jpeg');
 const { hashBuffer } = require('./service-report/photo-chain');
 const { uploadFunnelPhotoToS3 } = require('../utils/funnel-photos');
 const { isRecurringLineageVisit } = require('../utils/recurring-lineage');
-const { dateOnlyString } = require('../utils/datetime-et');
+const { TERMINAL_ROW_STATUSES } = require('./visit-context/statuses');
 // The same location-chip set the customer portal's service-request form
 // uses (server/routes/requests.js) — reused rather than redefined, the same
 // route-module-from-a-service pattern already used by several services
@@ -472,38 +472,48 @@ async function createVisitPrepSubmission({
 // rows through techStopMemberIds (below) — NEVER a submission's own
 // snapshotted visit_id (see the file header).
 
-// The stop AS IT STANDS for whoever holds `svc` — the member set for the
-// two tech-facing reads below (Codex #5239 r1 P1). A frozen visit keeps a
-// member's visit_id when dispatch reassigns or moves that one row
-// (handleChildStopChanged), so `stopMemberIds` can include rows now on
-// another technician or day. The caller authorized `svc` only; a member
-// counts here only while it is still on svc's CURRENT technician and date
-// (read from the database, not the caller's copy). Its status does not
-// matter: a cancelled service on the same technician's same stop is still
-// this customer's property on this visit, and nobody else sees it, so its
-// photos stay useful (the stop chip, PR 3b, uses the same rule so the chip
-// and this brief always agree). `stopMemberIds` keeps its wider set for the
-// customer-side cap counts, which are about the visit, not access.
+// The stop AS IT STANDS for whoever holds `svc`: the member set for the
+// two tech-facing reads below. A frozen visit keeps visit_id on a member
+// dispatch reassigned or moved (handleChildStopChanged preserves
+// membership), so `stopMemberIds` can include rows that are now someone
+// else's stop or a second physical stop. The caller authorized `svc` only,
+// so a member counts only while:
+// - it is on svc's CURRENT technician (Codex #5239 r1 P1); and
+// - it is still at the visit's physical stop by the canonical grouping rule,
+//   `visit-groups.js` `rowStillAtVisitStop` (same date, customer and property,
+//   and a window that overlaps the live members still at the stop; Codex
+//   #5239 r4 P2: a member moved to a non-overlapping window on the same day
+//   is a second stop).
+// The requested row is re-read by id (Codex #5239 r3 P2), so a row detached
+// or regrouped mid-request resolves its CURRENT stop, and a requested row no
+// longer at its visit's stop resolves to itself. Status does not matter for
+// a candidate: a cancelled service at the same technician's same stop is the
+// same customer's visit and nobody else sees it. `stopMemberIds` keeps its
+// wider set for the customer-side cap counts, which are about the visit, not
+// access.
 async function techStopMemberIds(svc, conn) {
   if (!svc?.id) return [];
-  // The anchor is re-read by id (Codex #5239 r3 P2): its visit_id,
-  // technician and date all come from the database, never the caller's
-  // copy, so a row detached or regrouped mid-request resolves its CURRENT
-  // stop instead of the old group it left. A row that no longer exists
-  // resolves to nothing.
-  const anchor = await conn('scheduled_services')
-    .where({ id: svc.id })
-    .first('id', 'visit_id', 'technician_id', 'scheduled_date');
+  const cols = ['id', 'visit_id', 'technician_id', 'customer_id', 'property_id',
+    'scheduled_date', 'window_start', 'window_end', 'status'];
+  const anchor = await conn('scheduled_services').where({ id: svc.id }).first(...cols);
   if (!anchor) return [];
   if (!anchor.visit_id) return [anchor.id];
-  const rows = await conn('scheduled_services')
-    .where({ visit_id: anchor.visit_id })
-    .select('id', 'technician_id', 'scheduled_date');
+  const [visit, rows] = await Promise.all([
+    conn('service_visits').where({ id: anchor.visit_id })
+      .first('id', 'customer_id', 'property_id', 'scheduled_date', 'window_start', 'window_end'),
+    conn('scheduled_services').where({ visit_id: anchor.visit_id }).select(...cols),
+  ]);
+  if (!visit) return [anchor.id];
+  const { rowStillAtVisitStop } = require('./visit-groups');
+  // Same inputs the grouping code uses: the row against the visit, anchored
+  // on the OTHER members that are still live.
+  const atStop = (row) => rowStillAtVisitStop(row, visit, rows.filter((m) => String(m.id) !== String(row.id)
+    && !TERMINAL_ROW_STATUSES.includes(m.status)));
+  if (!atStop(anchor)) return [anchor.id];
   const techKey = anchor.technician_id == null ? null : String(anchor.technician_id);
-  const dateKey = dateOnlyString(anchor.scheduled_date);
   const others = rows.filter((r) => String(r.id) !== String(anchor.id)
     && (r.technician_id == null ? null : String(r.technician_id)) === techKey
-    && dateOnlyString(r.scheduled_date) === dateKey);
+    && atStop(r));
   return [anchor.id, ...others.map((r) => r.id)];
 }
 
