@@ -31,6 +31,9 @@ describe('shared estimate termite-scope classification', () => {
     ['Bora-Care Foam Application', TERMITE_SCOPE.TERMITE],
     // "Sealing" alone never demotes a drill/recurring foam form.
     ['Drill & Foam Treatment – Seal Holes', TERMITE_SCOPE.RECURRING_FOAM],
+    // The termite word beside a drill/recurring foam form keeps the foam scope.
+    ['Drill-and-Foam Termite Treatment', TERMITE_SCOPE.RECURRING_FOAM],
+    ['Recurring Termite Foam Service (Quarterly)', TERMITE_SCOPE.FOAM],
     ['Bora-Care Wood Treatment', TERMITE_SCOPE.TERMITE],
     ['BoraCare Wood Treatment', TERMITE_SCOPE.TERMITE],
     ['Borate Wood Treatment', TERMITE_SCOPE.TERMITE],
@@ -57,6 +60,8 @@ describe('shared estimate termite-scope classification', () => {
     expect(normalizeServiceType('Termite Foaming Service (Quarterly)')).toBe('Termite Foaming Service (Quarterly)');
     expect(normalizeServiceType('Drill & Foam Treatment – Seal Holes')).toBe('Drill & Foam Treatment – Seal Holes');
     expect(normalizeServiceType('Termite Treatment (Foam)')).toBe('Termite Treatment');
+    expect(normalizeServiceType('Drill-and-Foam Termite Treatment (Quarterly)')).toBe('Drill-and-Foam Termite Treatment (Quarterly)');
+    expect(normalizeServiceType('Drill-and-Foam Termite Treatment')).toBe('Drill-and-Foam Termite Treatment');
     expect(normalizeServiceType('Bora-Care Foam Application')).not.toBe('Bora-Care Foam Application');
   });
 

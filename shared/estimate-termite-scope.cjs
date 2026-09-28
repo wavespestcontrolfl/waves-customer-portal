@@ -25,18 +25,20 @@ function classifyTermiteScope(value) {
   // the same adjacency the replaced foam-label regex required, so "Termite
   // Treatment (Foam)" still normalizes like any termite treatment.
   if (/\b(?:termites?|termidor)\s*foam(?:ing)?/.test(text)) return TERMITE_SCOPE.FOAM;
-  if (explicitTermite) return TERMITE_SCOPE.TERMITE;
 
-  // Historical drill/recurring foam product names omit "termite." A rodent
-  // word rules them out (foam sealant is rodent-exclusion material); the
-  // forms themselves are specific enough that "sealing" alone is not
-  // excluded ("Drill & Foam Treatment – Seal Holes" stays termite work).
-  // Separators are optional: "FoamRecurring", "RecurringFoam", "FoamDrill"
-  // and "DrillAndFoam" are legacy engine-backed labels (Codex #5195 r1).
-  if (/\brodents?\b|\brats?\b|\bmice\b|\bmouse\b/.test(text)) return null;
-  if (/\bfoam(?:ing)?\s*drill\b|\bdrill\s*(?:and\s*)?foam(?:ing)?\b|\brecurring\s*foam(?:ing)?\b|\bfoam(?:ing)?(?:\s+treatment)?\s*recurring\b/.test(text)) {
-    return TERMITE_SCOPE.RECURRING_FOAM;
-  }
+  // Drill/recurring foam product names, checked BEFORE the generic termite
+  // scope so "Drill-and-Foam Termite Treatment (Quarterly)" keeps the foam
+  // scope the schedule preserves verbatim (pre-push audit P1 on ac72a01eab).
+  // Historical forms omit "termite"; a rodent word rules those out (foam
+  // sealant is rodent-exclusion material), while the forms themselves are
+  // specific enough that "sealing" alone is not excluded ("Drill & Foam
+  // Treatment – Seal Holes" stays termite work). Separators are optional:
+  // "FoamRecurring", "RecurringFoam", "FoamDrill" and "DrillAndFoam" are
+  // legacy engine-backed labels (Codex #5195 r1).
+  const drillOrRecurringFoam = /\bfoam(?:ing)?\s*drill\b|\bdrill\s*(?:and\s*)?foam(?:ing)?\b|\brecurring\s*foam(?:ing)?\b|\bfoam(?:ing)?(?:\s+treatment)?\s*recurring\b/.test(text);
+  const rodentWord = /\brodents?\b|\brats?\b|\bmice\b|\bmouse\b/.test(text);
+  if (drillOrRecurringFoam && (explicitTermite || !rodentWord)) return TERMITE_SCOPE.RECURRING_FOAM;
+  if (explicitTermite) return TERMITE_SCOPE.TERMITE;
   return null;
 }
 
