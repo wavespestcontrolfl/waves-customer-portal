@@ -2908,6 +2908,12 @@ function legacyHeroRefs(body, heroSrc, { mdx = true } = {}) {
 // since this pipeline has no concept of "this prose section is the
 // identification slot" to exempt the rest.
 const LICENSED_PHOTO_MAX_BYTES = 8 * 1024 * 1024;
+// Codex P1 (5th round): every other risk on this fetch was hardened (SSRF
+// host allowlist, no-follow redirects, streaming byte cap), but nothing
+// bounded the REQUEST ITSELF — a stalled TCP connection or an
+// unresponsive host would hang the async publish job forever. A fixed,
+// generous timeout fails closed (BLOG_BODY_IMAGES_FAILED) instead.
+const LICENSED_PHOTO_FETCH_TIMEOUT_MS = 20000;
 // Only a bare `![alt](url)` alone on its own line is recognized — exactly
 // how the writer prompt instructs it to be embedded, and how every other
 // body image in this file is placed. An inline or otherwise-decorated
@@ -2960,15 +2966,23 @@ async function readCappedResponseBody(res, cap, slug, url) {
   const chunks = [];
   let total = 0;
   for (;;) {
-     
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.length;
+    let chunk;
+    try {
+      chunk = await reader.read();
+    } catch (readErr) {
+      // Covers a mid-stream abort (the fetch timeout signal firing while
+      // bytes are still arriving) with the same BLOG_BODY_IMAGES_FAILED
+      // code every other failure on this path carries, not a raw
+      // AbortError the caller's error classification wouldn't recognize.
+      throw licensedPhotoError(slug, url, `stream read failed: ${readErr.message}`);
+    }
+    if (chunk.done) break;
+    total += chunk.value.length;
     if (total > cap) {
       await reader.cancel().catch(() => {});
       throw licensedPhotoError(slug, url, `exceeds the ${cap}-byte cap while streaming (aborted at ${total} bytes)`);
     }
-    chunks.push(Buffer.from(value));
+    chunks.push(Buffer.from(chunk.value));
   }
   return Buffer.concat(chunks);
 }
@@ -2985,7 +2999,12 @@ async function fetchAndVerifyLicensedPhoto(url, slug) {
     // resulting opaqueredirect response) is a hard failure instead of a
     // followed hop, so the allowlist check on the ORIGINAL url is the
     // only host this function ever actually contacts.
-    res = await fetch(url, { redirect: 'manual' });
+    // AbortSignal.timeout bounds the whole request lifecycle — the
+    // initial connect/headers AND any pending body-stream reads
+    // (readCappedResponseBody below), since both ride the same fetch
+    // signal in the WHATWG spec (Node's undici aborts an in-flight
+    // reader.read() the instant the request's own signal fires).
+    res = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(LICENSED_PHOTO_FETCH_TIMEOUT_MS) });
   } catch (fetchErr) {
     throw licensedPhotoError(slug, url, `could not be fetched: ${fetchErr.message}`);
   }

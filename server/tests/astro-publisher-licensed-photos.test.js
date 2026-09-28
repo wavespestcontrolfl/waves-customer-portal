@@ -335,4 +335,32 @@ describe('assertLicensedPhotoUrlAllowed / fetchAndVerifyLicensedPhoto — host a
     global.fetch = jest.fn().mockResolvedValue({ ok: false, status: 0, type: 'opaqueredirect', headers: { get: () => null } });
     await expect(fetchAndVerifyLicensedPhoto(LICENSED_URL, 'fire-ant-id')).rejects.toMatchObject({ code: 'BLOG_BODY_IMAGES_FAILED' });
   });
+
+  // Codex P1 (5th round): every other risk on this fetch was bounded
+  // except the request itself — a stalled connection would hang the
+  // publish job forever with no timeout.
+  test('fetch() is called with an AbortSignal (a bounded timeout, not an unbounded request)', async () => {
+    global.fetch = jest.fn().mockResolvedValue({ ok: false, status: 404, headers: { get: () => null } });
+    await expect(fetchAndVerifyLicensedPhoto(LICENSED_URL, 'fire-ant-id')).rejects.toMatchObject({ code: 'BLOG_BODY_IMAGES_FAILED' });
+    const [, opts] = global.fetch.mock.calls[0];
+    expect(opts.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  test('a fetch() rejection from an aborted (timed-out) request fails closed with BLOG_BODY_IMAGES_FAILED, not a raw AbortError', async () => {
+    global.fetch = jest.fn().mockRejectedValue(new DOMException('The operation was aborted due to timeout', 'TimeoutError'));
+    await expect(fetchAndVerifyLicensedPhoto(LICENSED_URL, 'fire-ant-id')).rejects.toMatchObject({ code: 'BLOG_BODY_IMAGES_FAILED' });
+  });
+
+  test('a mid-stream abort (reader.read() rejects after headers arrive) also fails closed with BLOG_BODY_IMAGES_FAILED', async () => {
+    const res = {
+      body: {
+        getReader: () => ({
+          read: async () => { throw new DOMException('The operation was aborted due to timeout', 'TimeoutError'); },
+          cancel: async () => {},
+        }),
+      },
+    };
+    await expect(readCappedResponseBody(res, LICENSED_PHOTO_MAX_BYTES, 'fire-ant-id', LICENSED_URL))
+      .rejects.toMatchObject({ code: 'BLOG_BODY_IMAGES_FAILED' });
+  });
 });
