@@ -204,6 +204,27 @@ describeOrSkip('buildCurationCandidateQuery admits a genuine first-of-year stale
     expect(rows.map((r) => r.id)).toEqual([firstId]);
   });
 
+  test('a series recognized only by its wording ("Weekly Yoga") reaches the first-of-year check', async () => {
+    const id = await insertEvent({
+      title: 'TEST Weekly Yoga On The Lawn',
+      event_type: 'one_time',
+      recurrence_type: 'unknown',
+      freshness_status: 'stale_recurring',
+      start_at: etAt(sameYearDays().laterDay),
+    });
+    const rows = await buildCurationCandidateQuery(500);
+    expect(rows.map((r) => r.id)).toContain(id);
+  });
+
+  test('differently formatted cities still match: an earlier "lakewood-ranch" row suppresses a later "Lakewood Ranch" one', async () => {
+    const title = 'TEST Weekly Trivia City Formatting';
+    const { laterDay, earlierDay } = sameYearDays();
+    await insertEvent({ title, venue_name: null, city: 'lakewood-ranch', admin_status: 'approved', start_at: etAt(earlierDay) });
+    const laterId = await insertEvent({ title, venue_name: null, city: 'Lakewood Ranch', start_at: etAt(laterDay) });
+    const rows = await buildCurationCandidateQuery(500);
+    expect(rows.map((r) => r.id)).not.toContain(laterId);
+  });
+
   test('expired and needs_review rows remain excluded unconditionally, even with no earlier sibling at all', async () => {
     const expiredId = await insertEvent({
       title: 'TEST Expired Row No Sibling',

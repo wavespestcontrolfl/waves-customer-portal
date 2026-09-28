@@ -125,6 +125,9 @@ const ROUTINE_TEXT_PATTERNS = [
   /\b(?:daily|weekly|monthly|recurring|ongoing)\s+(?:class(?:es)?|session(?:s)?|series|meetup(?:s)?|market(?:s)?|yoga|pilates|fitness|trivia|karaoke|night(?:s)?|event(?:s)?)\b/i,
 ];
 
+// ROUTINE_TEXT_PATTERNS in PostgreSQL regex syntax (\\b becomes \\y).
+const SQL_ROUTINE_TEXT_PATTERNS = ROUTINE_TEXT_PATTERNS.map((pattern) => pattern.source.replace(/\\b/g, '\\y'));
+
 function isRoutineRecurringEvent(event = {}) {
   const eventType = String(event.event_type || '').toLowerCase();
   const recurrenceType = String(event.recurrence_type || '').toLowerCase();
@@ -353,21 +356,28 @@ function buildRoutineFirstOfYearAdmission(alias) {
       AND ${sqlEtYear(sib('start_at'))} = ${sqlEtYear(outer('start_at'))}
       AND ${sqlNormalizedTitle(sib('title'))} = ${sqlNormalizedTitle(outer('title'))}
       AND (
-        (${venuePresent(sib('venue_name'))} AND ${venuePresent(outer('venue_name'))}
-          AND ${sqlNormalizedTitle(sib('venue_name'))} = ${sqlNormalizedTitle(outer('venue_name'))})
+        (${contextPresent(sib('venue_name'))} AND ${contextPresent(outer('venue_name'))}
+          AND ${sqlSeriesContext(sib('venue_name'))} = ${sqlSeriesContext(outer('venue_name'))})
         OR (
-          (NOT ${venuePresent(sib('venue_name'))} OR NOT ${venuePresent(outer('venue_name'))})
-          AND ${sib('city')} IS NOT NULL AND ${outer('city')} IS NOT NULL
-          AND lower(${sib('city')}) = lower(${outer('city')})
+          (NOT ${contextPresent(sib('venue_name'))} OR NOT ${contextPresent(outer('venue_name'))})
+          AND ${contextPresent(sib('city'))} AND ${contextPresent(outer('city'))}
+          AND ${sqlSeriesContext(sib('city'))} = ${sqlSeriesContext(outer('city'))}
         )
       )
   )`;
 }
 
-// A venue counts as present only when it normalizes to non-empty text — the
-// same rule the JS identity predicate applies ('' and whitespace are missing).
-function venuePresent(column) {
-  return `(COALESCE(btrim(${sqlNormalizedTitle(column)}), '') <> '')`;
+// SQL mirror of newsletter-event-selection.js's normalizeSeriesContext, used
+// for venue and city alike: lowercase, punctuation to spaces, trimmed, so
+// "lakewood-ranch" matches "Lakewood Ranch".
+function sqlSeriesContext(column) {
+  return `btrim(regexp_replace(lower(${column}), '[^a-z0-9]+', ' ', 'g'))`;
+}
+
+// Present only when it normalizes to non-empty text ('' and whitespace are
+// missing), NULL-safe.
+function contextPresent(column) {
+  return `(COALESCE(${sqlSeriesContext(column)}, '') <> '')`;
 }
 
 /**
@@ -419,6 +429,15 @@ function excludeRoutineRecurringFromQuery(query, alias = 'e') {
         this.where(function routineMetadata() {
           this.whereIn(col('event_type'), ROUTINE_EVENT_TYPES)
             .orWhereIn(col('recurrence_type'), ROUTINE_RECURRENCE_TYPES);
+          // Same text evidence isRoutineRecurringEvent uses ("Weekly Yoga",
+          // "every Tuesday"), so a series labeled only by its wording still
+          // reaches the first-of-year check.
+          for (const pattern of SQL_ROUTINE_TEXT_PATTERNS) {
+            this.orWhereRaw(
+              `(COALESCE(${col('title')}, '') || ' ' || COALESCE(${col('description')}, '')) ~* ?`,
+              [pattern],
+            );
+          }
         }).whereRaw(buildRoutineFirstOfYearAdmission(alias));
       });
     }

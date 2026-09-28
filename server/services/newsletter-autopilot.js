@@ -145,7 +145,10 @@ async function applyListwiseRerank(scored) {
     // actual thinking depth.
     const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.newsletterWriter, {
       laneId: 'newsletter',
-      maxTokens: 4000,
+      // Opus 5.5 at max effort spends thinking from max_tokens; 4000 was
+      // lifted only to the 8192 wire floor, which max-effort thinking can
+      // exhaust before the ranking JSON arrives.
+      maxTokens: 16000,
       timeoutMs: 5 * 60 * 1000,
       jsonMode: true,
       jsonSchema: RANKING_SCHEMA,

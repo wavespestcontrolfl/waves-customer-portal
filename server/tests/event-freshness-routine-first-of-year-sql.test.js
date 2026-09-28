@@ -47,7 +47,8 @@ describe('excludeRoutineRecurringFromQuery admits a genuine first-of-year routin
     expect(sql).toMatch(/regexp_replace\(lower\(routine_sibling\.title\)/i);
     // A venue counts only when it normalizes to non-empty text (blank = missing).
     expect(sql).toMatch(/COALESCE\(btrim\(regexp_replace\(lower\(routine_sibling\.venue_name\)/i);
-    expect(sql).toMatch(/routine_sibling\.city is not null/i);
+    // City compared with the same normalization as the JS series context.
+    expect(sql).toMatch(/btrim\(regexp_replace\(lower\(routine_sibling\.city\)/i);
   });
 
   test('the admission clause excludes the row itself and requires a strictly earlier sibling ET CALENDAR DAY (not just an earlier timestamp)', () => {
