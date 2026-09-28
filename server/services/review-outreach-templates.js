@@ -51,6 +51,18 @@ const OUTREACH_TEMPLATES = [
     body: "Hey {first}, it's Waves. If we earned it, a quick Google review would mean the world:\n\n{review_url}",
   },
   {
+    // The one follow-up a RECURRING customer gets, and only when they raised a
+    // topic about the service just done before the visit (owner ruling
+    // 2026-09-28, GATE_REVIEW_DAY0_CONTEXT): about four days on, once the
+    // treatment has had time to take hold. The drafter asks about the topic
+    // in the customer's own words (review-ask-drafter.js
+    // draftTopicFollowupBody); this generic body is the fallback.
+    id: 'topic_followup',
+    name: 'Topic Follow-up',
+    sentiment: 'happy',
+    body: "Hi {first}! How's everything since the visit? A Google review means a lot: {review_url} Reply if anything's off.",
+  },
+  {
     id: 'soft_reminder',
     name: 'Soft Reminder',
     sentiment: 'happy',
@@ -218,6 +230,10 @@ const DEFAULT_SEQUENCE_PLAN = [
   { day: 4, channel: 'sms', templateKey: 'soft_reminder', weekdaysOnly: true },
   { day: 7, channel: 'email', templateKey: 'final_nudge' },
 ];
+const TOPIC_FOLLOWUP_TEMPLATE_KEY = 'topic_followup';
+// Appended to a recurring plan once its Day-0 ask has gone out (review-request
+// .js topicFollowupPlan) — same day-4 weekday timing one-time customers get.
+const TOPIC_FOLLOWUP_STEP = Object.freeze({ day: 4, channel: 'sms', templateKey: TOPIC_FOLLOWUP_TEMPLATE_KEY, weekdaysOnly: true });
 const RECURRING_SEQUENCE_PLAN = [
   { day: 0, channel: 'sms', templateKey: DAY0_ASK_TEMPLATE_KEY },
 ];
@@ -274,6 +290,8 @@ module.exports = {
   OUTREACH_TEMPLATES,
   TEMPLATES_BY_ID,
   DAY0_ASK_TEMPLATE_KEY,
+  TOPIC_FOLLOWUP_TEMPLATE_KEY,
+  TOPIC_FOLLOWUP_STEP,
   isDay0ControlledAsk,
   DEFAULT_SEQUENCE_PLAN,
   RECURRING_SEQUENCE_PLAN,

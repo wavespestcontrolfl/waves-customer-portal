@@ -500,6 +500,26 @@ function parseDecision(v) {
   try { return JSON.parse(v); } catch { return null; }
 }
 
+// The resolved SMS recipient IS the account holder — not a tenant, buyer or
+// other service contact, who must never see the account's own history.
+function isAccountHolderRecipient(contact, customer) {
+  return !!(contact.phone && customer.phone
+    && (toE164(contact.phone) || contact.phone) === (toE164(customer.phone) || customer.phone));
+}
+
+// GATE_REVIEW_DAY0_CONTEXT (owner rulings 2026-09-28): once a recurring
+// sequence's Day-0 ask has gone out, a stored topic earns it ONE follow-up
+// about four days on; every other recurring customer still gets the one ask.
+// Null = the plan stays as it is. Decided at the step that just sent, so the
+// first-send plan re-resolve (which only runs before anything is sent) can
+// never undo it.
+function topicFollowupPlan(seq, plan) {
+  if ((seq.current_step || 0) !== 0 || seq.ask_context == null) return null;
+  if (!isRecurringAskPlan(plan)) return null;
+  if (!require("../config/feature-gates").isEnabled("reviewDay0Context")) return null;
+  return [...plan, OUTREACH.TOPIC_FOLLOWUP_STEP];
+}
+
 // Service types whose Day-0 ask waits for the customer to see the result
 // (calculateReviewSendPlan): same afternoon before 3 PM, else next morning.
 const JITTER_MAX_MINUTES = 15;
@@ -3818,8 +3838,11 @@ const ReviewService = {
     if (seq.status !== "active" && !parked) return false;
     let plan = Array.isArray(seq.plan) ? seq.plan : JSON.parse(seq.plan || "[]");
     if (!Array.isArray(plan)) plan = [];
+    // Same topic follow-up the ordinary runner adds once a Day-0 ask is out.
+    const followupPlan = topicFollowupPlan(seq, plan);
+    if (followupPlan) plan = followupPlan;
     const nextStep = seq.current_step + 1;
-    const advance = { current_step: nextStep, touches_sent: (seq.touches_sent || 0) + 1, last_touch_at: now, updated_at: now };
+    const advance = { current_step: nextStep, touches_sent: (seq.touches_sent || 0) + 1, last_touch_at: now, updated_at: now, ...(followupPlan ? { plan: JSON.stringify(followupPlan) } : {}) };
     const updates = nextStep >= plan.length
       ? { ...advance, status: "completed", stop_reason: "completed", next_run_at: null, completed_at: now }
       // previousStep carries the 72-hour spacing rule the ordinary runner
@@ -4582,19 +4605,12 @@ const ReviewService = {
       // shape, matching create()-minted rows) — never 'custom'.
       : canonicalTemplate ? null : smsTemplateId || "custom";
 
-    // GATE_REVIEW_DAY0_CONTEXT: the one narrow exception to the controlled
-    // Day-0 composition above. A recurring customer who raised a topic before
-    // the visit (stored at enrollment on ask_context; owner ruling 2026-09-28:
-    // same service only) gets a Day-0 text naming it, drafted fresh at this
-    // send tick and never reused. Every miss sends the day0_ask template, and
-    // the touch records its own template key so the outreach funnel can
-    // compare the two.
-    if (day0Controlled && require("../config/feature-gates").isEnabled("reviewDay0Context")) {
-      const contextBody = await this._day0ContextBody({ sequenceId, customer, contact, serviceRecordId, serviceDate });
-      if (contextBody) {
-        persistedBody = contextBody;
-        recordedTemplateKey = `${OUTREACH.DAY0_ASK_TEMPLATE_KEY}_context`;
-      }
+    // The recurring topic follow-up is one TEXT to the account holder about
+    // their own topic (owner ruling 2026-09-28): never an email fallback, and
+    // never a second ask to someone else on the account.
+    if (templateId === OUTREACH.TOPIC_FOLLOWUP_TEMPLATE_KEY
+      && !(actualChannel === "sms" && isAccountHolderRecipient(contact, customer))) {
+      return { ok: false, reason: "topic_followup_skipped", terminal: true };
     }
 
     // Personalized ask body (GATE_REVIEW_ASK_PERSONALIZED): CADENCE SMS ask
@@ -4613,8 +4629,7 @@ const ReviewService = {
       // holder's name or private conversation details. Checked BEFORE retry
       // reuse: a draft persisted for the account holder must not be re-sent
       // to a recipient who changed between attempts (Codex P1, r2).
-      const recipientIsAccountHolder = !!(contact.phone && customer.phone
-        && (toE164(contact.phone) || contact.phone) === (toE164(customer.phone) || customer.phone));
+      const recipientIsAccountHolder = isAccountHolderRecipient(contact, customer);
 
       // Retry reuse: a deferred/transiently-failed step re-enters here with no
       // customBody — reuse the draft already persisted for this exact step so
@@ -4634,14 +4649,19 @@ const ReviewService = {
       }
 
       if (!persistedBody && recipientIsAccountHolder) {
-        const drafted = await require("./review-ask-drafter").draftAskBody({
-          customer,
-          recipientFirstName: firstNameFrom(contact.name) || customer.first_name || "",
-          serviceType,
-          techName,
-          sequenceStep,
-          serviceDate,
-        });
+        // The recurring topic follow-up asks about the customer's own topic
+        // (GATE_REVIEW_DAY0_CONTEXT), never the 60-day history the other
+        // follow-ups draw from; a miss sends the topic_followup template.
+        const drafted = templateId === OUTREACH.TOPIC_FOLLOWUP_TEMPLATE_KEY
+          ? await this._topicFollowupBody({ sequenceId, customer, contact })
+          : await require("./review-ask-drafter").draftAskBody({
+            customer,
+            recipientFirstName: firstNameFrom(contact.name) || customer.first_name || "",
+            serviceType,
+            techName,
+            sequenceStep,
+            serviceDate,
+          });
         if (drafted) persistedBody = drafted;
       }
       // Analytics provenance (Codex P1, r1): personalized touches must not be
@@ -4879,34 +4899,23 @@ const ReviewService = {
   },
 
   /**
-   * The Day-0 body naming the customer's pre-visit topic, or null for the
-   * day0_ask template. Only while the sequence is still on the recurring plan
-   * (a first-send re-resolve can swap it) and holds a stored topic, and only
-   * to the account holder — the topic is their own words, so a tenant or
-   * other service contact never sees it. Never throws.
+   * The recurring topic follow-up body, or null for the topic_followup
+   * template: the question about the topic the customer raised before the
+   * visit (stored on ask_context at enrollment). The caller only asks for the
+   * account holder — the topic is their own words. Never throws.
    */
-  async _day0ContextBody({ sequenceId, customer, contact, serviceRecordId, serviceDate }) {
+  async _topicFollowupBody({ sequenceId, customer, contact }) {
     try {
-      const recipientIsAccountHolder = !!(contact.phone && customer.phone
-        && (toE164(contact.phone) || contact.phone) === (toE164(customer.phone) || customer.phone));
-      if (!recipientIsAccountHolder) return null;
-      const seq = await db("review_sequences").where({ id: sequenceId }).first("plan", "ask_context");
-      const plan = typeof seq?.plan === "string" ? JSON.parse(seq.plan) : seq?.plan;
+      const seq = await db("review_sequences").where({ id: sequenceId }).first("ask_context");
       const askContext = parseDecision(seq?.ask_context);
-      if (!isRecurringAskPlan(plan) || !askContext?.topic) return null;
-      const record = serviceRecordId
-        ? await db("service_records").where({ id: serviceRecordId }).first("structured_notes")
-        : null;
-      const drafted = await require("./review-ask-drafter").draftDay0ContextBody({
+      if (!askContext?.topic) return null;
+      return await require("./review-ask-drafter").draftTopicFollowupBody({
         customerId: customer.id,
         recipientFirstName: firstNameFrom(contact.name) || customer.first_name || "",
         topic: askContext.topic,
-        completionNotes: record?.structured_notes,
-        serviceDate,
       });
-      return drafted?.body || null;
     } catch (err) {
-      logger.warn(`[review] Day-0 context skipped (sequenceId=${sequenceId}): ${err.message}`);
+      logger.warn(`[review] topic follow-up draft skipped (sequenceId=${sequenceId}): ${err.message}`);
       return null;
     }
   },
@@ -6553,6 +6562,12 @@ const ReviewService = {
       return { ran: false, deferred: true, reason: "spacing", retryAt: spacedAt };
     }
     const step = plan[seq.current_step] || {};
+    // GATE_REVIEW_DAY0_CONTEXT is the topic follow-up's kill switch too: off,
+    // a follow-up not yet sent ends the sequence instead of going out.
+    if (step.templateKey === OUTREACH.TOPIC_FOLLOWUP_TEMPLATE_KEY
+      && !require("../config/feature-gates").isEnabled("reviewDay0Context")) {
+      return stop("completed");
+    }
 
     // Final atomic claim right before sending: an admin Stop (or a completing
     // touch on a sibling row) can land between the reads above and here. Flip
@@ -6599,6 +6614,8 @@ const ReviewService = {
     }
 
     if (outcome.ok && outcome.sent) {
+      const followupPlan = topicFollowupPlan(seq, plan);
+      if (followupPlan) plan = followupPlan;
       const nextStep = seq.current_step + 1;
       // The post-send advance/complete is conditional on status='active': if an
       // admin Stop landed WHILE sendOutreachTouch was awaiting Twilio/SendGrid,
@@ -6635,6 +6652,7 @@ const ReviewService = {
       // mid-send.
       const next_run_at = nextTouchRunAt({ startedAt: seq.started_at, step: plan[nextStep], previousStep: plan[seq.current_step] || null });
       await advanceSentStep({
+        ...(followupPlan ? { plan: JSON.stringify(followupPlan) } : {}),
         current_step: nextStep,
         touches_sent: seq.touches_sent + 1,
         last_touch_at: new Date(),
@@ -6667,6 +6685,9 @@ const ReviewService = {
       return { ran: false, deferred: true, uncertain: true, step: seq.current_step };
     }
     if (outcome.terminal || outcome.blocked) {
+      // The Day-0 ask already went out; a follow-up that is not a text to the
+      // account holder is skipped by design, not an opt-out.
+      if (outcome.reason === "topic_followup_skipped") return stop("completed");
       if (outcome.reason === "no_contact") return stop("no_contact");
       if (outcome.reason === "already_reviewed") return stop("reviewed");
       return stop("opted_out");

@@ -81,9 +81,11 @@ describe('review g.page URL drift guard (audit 2026-08-07)', () => {
 describe('ReviewVelocityEngine outreach-template mirror parity', () => {
   const source = CLIENT('pages/admin/ReviewVelocityEngine.jsx');
 
-  // Cadence-internal template deliberately absent from the composer mirror
-  // (codex #3235 r12 P1 — a one-off send would detach it from its series).
-  const MIRROR_EXEMPT = new Set(['first_treatment_ask']);
+  // Cadence-internal templates deliberately absent from the composer mirror
+  // (codex #3235 r12 P1 — a one-off send would detach it from its series;
+  // topic_followup only means something inside a recurring sequence that
+  // holds the customer's topic, GATE_REVIEW_DAY0_CONTEXT).
+  const MIRROR_EXEMPT = new Set(['first_treatment_ask', 'topic_followup']);
 
   test('every server template body appears verbatim in the client mirror', () => {
     for (const t of OUTREACH_TEMPLATES) {

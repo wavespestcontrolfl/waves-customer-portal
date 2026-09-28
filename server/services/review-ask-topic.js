@@ -307,16 +307,25 @@ function isTopicGrounded(topic, citedText) {
 
 /**
  * Whether `text` names the topic: at least one of the topic's own words
- * (function words aside) appears in it as a whole word. The Day-0 wording
- * (review-ask-drafter.js) uses it twice — the sentence must name the topic,
- * and it may claim the work was done only when the technician's completion
- * notes name it too.
+ * (function words aside) appears in it as a whole word. The recurring topic
+ * follow-up question (review-ask-drafter.js) must name it.
  */
 function mentionsTopic(text, topic) {
   const textLower = String(text || "").toLowerCase();
   if (!textLower) return false;
   const words = (String(topic || "").toLowerCase().match(/[a-z]+/g) || []).filter((w) => !TOPIC_FILLER_WORDS.has(w));
   return words.some((w) => isWordInEvidence(w, textLower));
+}
+
+/**
+ * Whether `word` is one of the topic's own words (whole word, plural-aware)
+ * or a plain function word — with its own check-in words, the only vocabulary
+ * the recurring topic follow-up question may use (review-ask-drafter.js).
+ */
+function isTopicWord(word, topic) {
+  const w = String(word || "").toLowerCase();
+  if (!/^[a-z]+$/.test(w)) return false;
+  return TOPIC_FILLER_WORDS.has(w) || isWordInEvidence(w, String(topic || "").toLowerCase());
 }
 
 function hasEvidenceToClassify(ev) {
@@ -446,6 +455,7 @@ module.exports = {
   TOPIC_VERSION,
   isRecurringAskPlan,
   mentionsTopic,
+  isTopicWord,
   readTopicEvidence,
   collectTopicEvidence,
   classifyTopic,

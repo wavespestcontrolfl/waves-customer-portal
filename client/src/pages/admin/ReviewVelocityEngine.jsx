@@ -271,7 +271,9 @@ const TEMPLATES = [
   // P1, superseding the r3 mirror-parity note): it is a cadence-internal,
   // cap-exempt plan template — a one-off composer send would detach it from
   // its treatment series (no sequence linkage for the final-visit exemption)
-  // and hand it to the legacy follow-up machinery.
+  // and hand it to the legacy follow-up machinery. topic_followup is left out
+  // for the same reason: it is the recurring sequence's own follow-up and
+  // asks about the topic stored on that sequence.
 ];
 
 // ── Helpers ──

@@ -820,13 +820,14 @@ const gates = {
   // itself stays live either way (old links, fallback for unknown locations).
   reviewDirectLink: process.env.GATE_REVIEW_DIRECT_LINK === 'true',
 
-  // Day-0 review-ask contextual topic (recurring customers only): stores a
-  // grounded service topic (review-ask-topic.js) on review_sequences.ask_context
-  // at enrollment, and at the Day-0 send words that text around it
-  // (review-ask-drafter.js draftDay0ContextBody, which also needs
+  // Recurring topic follow-up (owner rulings 2026-09-28): stores a grounded
+  // service topic (review-ask-topic.js) on review_sequences.ask_context at
+  // enrollment; once the general Day-0 ask has gone out, that sequence gets
+  // ONE follow-up about four days on asking how the topic is doing
+  // (review-ask-drafter.js draftTopicFollowupBody, which also needs
   // GATE_REVIEW_ASK_PERSONALIZED). Customer-facing: owner flips it only after
-  // reading the dry-run drafts. Off = no extra DB read, no model call, and the
-  // fixed day0_ask template, exactly as before.
+  // reading the dry-run drafts. Off = no extra DB read, no model call, one
+  // Day-0 ask as before, and any follow-up not yet sent is cancelled.
   reviewDay0Context: process.env.GATE_REVIEW_DAY0_CONTEXT === 'true',
 
   // Digital business card — the card.issued email a customer gets after their

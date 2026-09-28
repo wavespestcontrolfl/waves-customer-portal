@@ -20,11 +20,11 @@ jest.mock('../config/feature-gates', () => ({
 // null = template path, matching the gate-off production posture.
 const mockDraftAskBody = jest.fn(async () => null);
 const mockDraftEmailIntro = jest.fn(async () => null);
-const mockDraftDay0Context = jest.fn(async () => null);
+const mockDraftTopicFollowup = jest.fn(async () => null);
 jest.mock('../services/review-ask-drafter', () => ({
   draftAskBody: (...a) => mockDraftAskBody(...a),
   draftEmailIntro: (...a) => mockDraftEmailIntro(...a),
-  draftDay0ContextBody: (...a) => mockDraftDay0Context(...a),
+  draftTopicFollowupBody: (...a) => mockDraftTopicFollowup(...a),
 }));
 // Day-0 contextual topic (own suite: review-ask-topic.test.js). Default null
 // = no topic, matching the gate-off production posture; this file only
@@ -190,7 +190,7 @@ beforeEach(() => {
   mockGates.reviewDirectLink = false;
   mockDraftAskBody.mockReset().mockResolvedValue(null);
   mockDraftEmailIntro.mockReset().mockResolvedValue(null);
-  mockDraftDay0Context.mockReset().mockResolvedValue(null);
+  mockDraftTopicFollowup.mockReset().mockResolvedValue(null);
   mockResolveReviewTopic.mockReset().mockResolvedValue(null);
   mockGates.reviewDay0Context = false;
 });
@@ -540,68 +540,104 @@ describe('review sequences — cadence engine', () => {
     expect(payload.intro_paragraph).toMatch(/small, family-owned/);
   });
 
-  describe('GATE_REVIEW_DAY0_CONTEXT — the recurring Day-0 text names the customer\'s topic', () => {
-    const RECURRING = JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'day0_ask' }]);
+  describe('GATE_REVIEW_DAY0_CONTEXT — the recurring topic follow-up (owner rulings 2026-09-28)', () => {
+    const RECURRING = [{ day: 0, channel: 'sms', templateKey: 'day0_ask' }];
+    const FOLLOWUP = { day: 4, channel: 'sms', templateKey: 'topic_followup', weekdaysOnly: true };
     const TOPIC = JSON.stringify({ topic: 'ants in the kitchen', kind: 'service_concern', source: 'sms', evidenceId: 'sms-1', serviceLine: 'pest', confidence: 0.9, version: 'review-day0-context-v3' });
-    const CONTEXT_BODY = "Hi Dee! How are the ants looking since the visit? A Google review means a lot: {review_url} Reply if anything's off.";
-    const setup = ({ seq = {}, customer = {}, requests = [] } = {}) => {
+    const DRAFTED = "Hi Dee! Are the ants backing off since the visit? A Google review means a lot: {review_url} Reply if anything's off.";
+    const setup = ({ seq = {}, customer = {}, prefs = [] } = {}) => {
       const mock = makeMock({
-        customers: [{ id: 'dc-1', first_name: 'Dee', last_name: 'K', phone: '+19410000081', nearest_location_id: 'bradenton', ...customer }],
-        review_sequences: [{ id: 'seq-dc', customer_id: 'dc-1', status: 'active', current_step: 0, touches_sent: 0, plan: RECURRING, ask_context: TOPIC, ...seq }],
-        service_records: [{ id: 'sr-dc', customer_id: 'dc-1', service_date: '2026-09-28', structured_notes: JSON.stringify({ observations: ['ant trail under the sink'] }) }],
-        review_requests: requests,
+        customers: [{ id: 'tf-1', first_name: 'Dee', last_name: 'K', phone: '+19410000081', nearest_location_id: 'bradenton', ...customer }],
+        notification_prefs: prefs,
+        review_sequences: [{
+          id: 'seq-tf', customer_id: 'tf-1', status: 'active', current_step: 0, touches_sent: 0, started_by: 'admin',
+          plan: JSON.stringify(RECURRING), ask_context: TOPIC,
+          started_at: new Date(Date.now() - 3600000), next_run_at: new Date(Date.now() - 60000), ...seq,
+        }],
       });
       db.mockImplementation(mock);
       return mock;
     };
-    const send = (mock) => ReviewService.sendOutreachTouch({
-      customer: mock.__state.rows.customers[0], channel: 'sms', templateId: 'day0_ask',
-      serviceRecordId: 'sr-dc', sequenceId: 'seq-dc', sequenceStep: 0, manageRetryVia: 'sequence',
-    });
-    const sentTouch = (mock) => mock.__state.rows.review_requests[mock.__state.rows.review_requests.length - 1];
+    const seqRow = (mock) => mock.__state.rows.review_sequences[0];
+    const lastTouch = (mock) => mock.__state.rows.review_requests[mock.__state.rows.review_requests.length - 1];
 
     beforeEach(() => {
       mockGates.reviewDay0Context = true;
-      mockDraftDay0Context.mockResolvedValue({ body: CONTEXT_BODY, mode: 'ask' });
+      mockDraftTopicFollowup.mockResolvedValue(DRAFTED);
     });
 
-    test('gate on, recurring plan, stored topic, account holder → the Day-0 text names the topic', async () => {
+    test('Day 0 stays the general fixed text; once it is out, a stored topic earns ONE follow-up four days on', async () => {
       const mock = setup();
-      const out = await send(mock);
+      await ReviewService.processReviewSequences();
 
-      expect(out.ok).toBe(true);
-      expect(mockDraftDay0Context).toHaveBeenCalledWith(expect.objectContaining({
-        customerId: 'dc-1', recipientFirstName: 'Dee', topic: 'ants in the kitchen',
-        completionNotes: expect.stringContaining('ant trail'),
-      }));
-      expect(mockSendCustomerMessage.mock.calls[0][0].body).toMatch(/^Hi Dee! How are the ants looking since the visit\? A Google review means a lot: \S+ Reply if anything's off\.$/);
-      expect(sentTouch(mock).template_key).toBe('day0_ask_context');
+      expect(lastTouch(mock).template_key).toBe('day0_ask');
+      expect(mockSendCustomerMessage.mock.calls[0][0].body).toMatch(/If we earned it/);
+      expect(mockDraftTopicFollowup).not.toHaveBeenCalled();
+      const seq = seqRow(mock);
+      expect(seq.status).toBe('active');
+      expect(seq.current_step).toBe(1);
+      expect(JSON.parse(seq.plan)).toEqual([...RECURRING, FOLLOWUP]);
+      expect(new Date(seq.next_run_at).getTime()).toBeGreaterThan(Date.now() + 2 * 86400000);
     });
 
     test.each([
       ['the gate is off', { gateOff: true }],
-      ['the plan is no longer the recurring one', { seq: { plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'day0_ask' }, { day: 4, channel: 'sms', templateKey: 'soft_reminder' }]) } }],
       ['no topic was stored', { seq: { ask_context: null } }],
-      ['the text goes to a service contact, not the account holder', { customer: { service_contact_phone: '+19410000099' } }],
-    ])('%s → the fixed day0_ask template, and no draft', async (_label, { gateOff, ...opts }) => {
+    ])('%s → the recurring sequence completes after its one Day-0 ask, as before', async (_label, { gateOff, ...opts }) => {
       if (gateOff) mockGates.reviewDay0Context = false;
       const mock = setup(opts);
-      await send(mock);
+      await ReviewService.processReviewSequences();
 
-      expect(mockDraftDay0Context).not.toHaveBeenCalled();
-      expect(sentTouch(mock).template_key).toBe('day0_ask');
-      expect(mockSendCustomerMessage.mock.calls[0][0].body).toMatch(/If we earned it/);
+      expect(lastTouch(mock).template_key).toBe('day0_ask');
+      expect(seqRow(mock)).toMatchObject({ status: 'completed', current_step: 1 });
+      expect(JSON.parse(seqRow(mock).plan)).toEqual(RECURRING);
     });
 
-    test('a refused draft sends the fixed template, and an earlier attempt\'s draft is never reused (owner decision 2026-09-07)', async () => {
-      mockDraftDay0Context.mockResolvedValue(null);
-      const mock = setup({ requests: [{ id: 'rr-prior', sequence_id: 'seq-dc', sequence_step: 0, customer_id: 'dc-1', channel: 'sms', status: 'failed', custom_body: CONTEXT_BODY, created_at: new Date(Date.now() - 3600000) }] });
-      await send(mock);
+    const followupDue = { current_step: 1, touches_sent: 1, plan: JSON.stringify([...RECURRING, FOLLOWUP]), started_at: new Date(Date.now() - 5 * 86400000) };
 
-      expect(mockDraftDay0Context).toHaveBeenCalledTimes(1);
-      expect(sentTouch(mock).template_key).toBe('day0_ask');
-      expect(mockSendCustomerMessage.mock.calls[0][0].body).toMatch(/If we earned it/);
-      expect(mockSendCustomerMessage.mock.calls[0][0].body).not.toMatch(/ants/);
+    test('the follow-up asks about the customer\'s own topic, then the sequence completes', async () => {
+      const mock = setup({ seq: followupDue });
+      await ReviewService.processReviewSequences();
+
+      expect(mockDraftTopicFollowup).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'tf-1', recipientFirstName: 'Dee', topic: 'ants in the kitchen' }));
+      expect(mockSendCustomerMessage.mock.calls[0][0].body).toMatch(/^Hi Dee! Are the ants backing off since the visit\? A Google review means a lot: \S+ Reply if anything's off\.$/);
+      expect(lastTouch(mock).template_key).toBe('topic_followup_personalized');
+      expect(seqRow(mock)).toMatchObject({ status: 'completed', current_step: 2 });
+    });
+
+    test('a refused draft sends the generic follow-up text', async () => {
+      mockDraftTopicFollowup.mockResolvedValue(null);
+      const mock = setup({ seq: followupDue });
+      await ReviewService.processReviewSequences();
+
+      expect(lastTouch(mock).template_key).toBe('topic_followup');
+      expect(mockSendCustomerMessage.mock.calls[0][0].body).toMatch(/^Hi Dee! How's everything since the visit\?/);
+    });
+
+    test.each([
+      ['the texts go to a service contact, not the account holder', { customer: { service_contact_phone: '+19410000099' } }],
+      ['the customer can only be emailed (the SMS step would fall back to email)', {
+        customer: { phone: null, email: 'dee@example.com' },
+        prefs: [{ customer_id: 'tf-1', review_request: true, sms_enabled: true, email_enabled: true, review_request_channel: 'sms' }],
+      }],
+    ])('%s → no follow-up at all, and the sequence completes (one extra TEXT to the account holder only)', async (_label, opts) => {
+      const mock = setup({ seq: followupDue, ...opts });
+      await ReviewService.processReviewSequences();
+
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+      expect(mockEmailSendTemplate).not.toHaveBeenCalled();
+      expect(mockDraftTopicFollowup).not.toHaveBeenCalled();
+      expect(mock.__state.rows.review_requests).toHaveLength(0);
+      expect(seqRow(mock)).toMatchObject({ status: 'completed', stop_reason: 'completed' });
+    });
+
+    test('turning the gate off cancels a follow-up not yet sent', async () => {
+      mockGates.reviewDay0Context = false;
+      const mock = setup({ seq: followupDue });
+      await ReviewService.processReviewSequences();
+
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+      expect(seqRow(mock).status).toBe('completed');
     });
   });
 
