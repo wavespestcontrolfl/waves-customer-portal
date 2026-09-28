@@ -188,17 +188,48 @@ const REPORT_CREDENTIAL_TRAILING_AFFIX_GROUP = String.raw`(?!(?:AND|THEN|OR|BUT|
 const REPORT_CREDENTIAL_HYPHEN_TRAILING_AFFIX_GROUP = String.raw`(?=[A-Za-z0-9#*]{1,12}(?![A-Za-z0-9#*]))(?=[A-Za-z0-9#*]*[A-Za-z#*])[A-Za-z0-9#*]{1,12}`;
 const REPORT_CREDENTIAL_TRAILING_AFFIX_RE = new RegExp(String.raw`^${REPORT_CREDENTIAL_TRAILING_AFFIX_GROUP}$`);
 const REPORT_NUMERIC_CREDENTIAL_TOKEN = String.raw`(?:${REPORT_CREDENTIAL_LEADING_AFFIX_GROUP}[\s–—-]+){0,3}${REPORT_NUMERIC_CREDENTIAL_GROUP}(?:[\s–—-]+${REPORT_NUMERIC_CREDENTIAL_GROUP})*(?:(?:\s+${REPORT_CREDENTIAL_TRAILING_AFFIX_GROUP}|\s*[–—-]\s*${REPORT_CREDENTIAL_HYPHEN_TRAILING_AFFIX_GROUP})){0,3}`;
+const REPORT_MEASUREMENT_UNIT_TEXT = String.raw`(?:feet|foot|ft|inch(?:es)?|yards?|yds?|meters?|metres?|acres?|linear\s+(?:feet|foot|ft|yards?|yds?|meters?|metres?)|square\s+(?:feet|foot|ft|yards?|yds?|meters?|metres?)|sqft|sq\.?\s*(?:ft|feet|foot|yds?|yards?|meters?|metres?)|percent|min(?:utes?)?|h(?:ou)?rs?|days?|weeks?|months?|years?|dollars?|gallons?|gal|ml|millilit(?:er|re)s?|lit(?:er|re)s?|fl\.?\s*oz|oz|ounces?|pounds?|lbs?|grams?|kg)`;
+const REPORT_WORK_ACTION_TEXT = String.raw`(?:appl(?:y|ied|ying)|treat(?:s|ed|ing)?|found|observ(?:e|es|ed|ing)|count(?:s|ed|ing)?|not(?:e|es|ed|ing)|record(?:s|ed|ing)?|servic(?:e|es|ed|ing)|inspect(?:s|ed|ing)?|check(?:s|ed|ing)?|replac(?:e|es|ed|ing)|spray(?:s|ed|ing)?|dust(?:s|ed|ing)?|clean(?:s|ed|ing)?|spread(?:s|ing)?|broadcast(?:s|ed|ing)?|distribut(?:e|es|ed|ing))`;
+const REPORT_PAST_ACCESS_WORK_ACTION_RE = new RegExp(String.raw`\b${REPORT_WORK_ACTION_TEXT}\b`, 'i');
+const REPORT_EXPLICIT_CREDENTIAL_NOUN_TEXT = String.raw`(?:code|pin|combo(?!\s+(?:of|with)\b)|combination(?!\s+(?:of|with)\b)|passcode|password|passphrase|keypad|lock\s?box)`;
+const REPORT_REVERSE_CREDENTIAL_LINK_TEXT = String.raw`(?:is|=|was|were|remains?|stays?|as|for)`;
 const REPORT_EXPLICIT_NUMERIC_CREDENTIAL_RE = new RegExp(
-  String.raw`\b(?:code|pin|combo(?!\s+(?:of|with)\b)|combination(?!\s+(?:of|with)\b)|passcode|password|passphrase|keypad|lock\s?box)\b[^\n.!?]{0,25}?["'‘’“”]?(${REPORT_NUMERIC_CREDENTIAL_TOKEN})`,
+  String.raw`\b${REPORT_EXPLICIT_CREDENTIAL_NOUN_TEXT}\b[^\n.!?]{0,25}?["'‘’“”]?(${REPORT_NUMERIC_CREDENTIAL_TOKEN})`,
   'gi',
 );
 const REPORT_REVERSE_EXPLICIT_NUMERIC_CREDENTIAL_RE = new RegExp(
-  String.raw`(${REPORT_NUMERIC_CREDENTIAL_TOKEN})\s+(?:is|=|was|were|remains?|stays?)\s+(?:the\s+)?(?:[a-z]+\s+){0,2}(?:code|pin|combo|combination|passcode|password|passphrase|keypad|lock\s?box)\b`,
+  String.raw`(${REPORT_NUMERIC_CREDENTIAL_TOKEN})(?:\s*${REPORT_MEASUREMENT_UNIT_TEXT})?\s+${REPORT_REVERSE_CREDENTIAL_LINK_TEXT}\s+(?:the\s+)?(?:[a-z]+\s+){0,2}${REPORT_EXPLICIT_CREDENTIAL_NOUN_TEXT}\b`,
   'gi',
 );
+const REPORT_REVERSE_DEVICE_WORK_PURPOSE_RE = new RegExp(
+  String.raw`^\s*${REPORT_MEASUREMENT_UNIT_TEXT}\s+for\s+(?:(?:the|a|an)\s+)?(?:${REPORT_WORK_ACTION_TEXT}|treatment|application)\b(?:\s+(?:the|near|around|at|on|by|beside)){0,2}\s+(?:keypad|lock\s?box)\b`,
+  'i',
+);
+
+function isReverseDeviceWorkMeasurement(value, match) {
+  const tokenOffset = match[0].indexOf(match[1]);
+  if (tokenOffset < 0) return false;
+  const digitOffset = match[1].search(/\d/);
+  if (digitOffset < 0) return false;
+  const embeddedUnit = match[1].match(new RegExp(String.raw`\s+${REPORT_MEASUREMENT_UNIT_TEXT}$`, 'i'))?.[0] || '';
+  const purpose = embeddedUnit + match[0].slice(tokenOffset + match[1].length);
+  if (!REPORT_REVERSE_DEVICE_WORK_PURPOSE_RE.test(purpose)) return false;
+
+  const before = value.slice(
+    Math.max(value.lastIndexOf('.', match.index), value.lastIndexOf('!', match.index), value.lastIndexOf('?', match.index), value.lastIndexOf('\n', match.index)) + 1,
+    match.index,
+  ) + match[1].slice(0, digitOffset);
+  if (!REPORT_PAST_ACCESS_WORK_ACTION_RE.test(before)) return false;
+  if (/\b(?:use|using|enter(?:s|ed|ing)?|typ(?:e|es|ed|ing)|press(?:es|ed|ing)?|input(?:s|ted|ting)?|open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?)\b/i.test(before)) return false;
+
+  const after = value.slice(match.index + match[0].length).match(/^[^\n.!?]*/)?.[0] || '';
+  return !REPORT_POSITIONAL_INTERFACE_ACCESS_TAIL_RE.test(after);
+}
 
 function isExplicitDeviceWorkMeasurement(value, match) {
-  if (!/^(?:keypad|lock\s?box)\b/i.test(match[0])) return false;
+  if (!/^(?:keypad|lock\s?box)\b/i.test(match[0])) {
+    return isReverseDeviceWorkMeasurement(value, match);
+  }
   const digitIndex = match[0].search(/\d/);
   if (digitIndex < 0) return false;
   const beforeDigits = match[0].slice(0, digitIndex);
@@ -230,7 +261,6 @@ function containsExplicitNumericCredential(text) {
 // so the unit is the evidence that quantities such as "400 sqft" and "100 ml"
 // are treatment details. Bare "in" stays out because it is commonly a
 // preposition ("2468 in the morning"), not reliable evidence of inches.
-const REPORT_MEASUREMENT_UNIT_TEXT = String.raw`(?:feet|foot|ft|inch(?:es)?|yards?|yds?|meters?|metres?|acres?|linear\s+(?:feet|foot|ft|yards?|yds?|meters?|metres?)|square\s+(?:feet|foot|ft|yards?|yds?|meters?|metres?)|sqft|sq\.?\s*(?:ft|feet|foot|yds?|yards?|meters?|metres?)|percent|min(?:utes?)?|h(?:ou)?rs?|days?|weeks?|months?|years?|dollars?|gallons?|gal|ml|millilit(?:er|re)s?|lit(?:er|re)s?|fl\.?\s*oz|oz|ounces?|pounds?|lbs?|grams?|kg)`;
 const REPORT_MEASUREMENT_QUANTITY_RE = new RegExp(
   String.raw`\b(?:\d+(?:\.\d+)?(?:\s*[-–—]\s*\d+(?:\.\d+)?)?|\d(?:[\s-]+\d){2,7})\s*${REPORT_MEASUREMENT_UNIT_TEXT}(?=\s|[.,;:!?)]|$)`,
   'gi',
@@ -240,19 +270,6 @@ const REPORT_MEASUREMENT_AT_START_RE = new RegExp(
   'i',
 );
 const REPORT_MEASUREMENT_AFTER_NUMBER_RE = new RegExp(String.raw`^\s*${REPORT_MEASUREMENT_UNIT_TEXT}\b`, 'i');
-const REPORT_AS_LINKED_MEASUREMENT_CREDENTIAL_RE = new RegExp(
-  String.raw`(${REPORT_NUMERIC_CREDENTIAL_TOKEN})\s+${REPORT_MEASUREMENT_UNIT_TEXT}\s+as\s+(?:the\s+)?(?:[a-z]+\s+){0,2}(?:code|pin|combo|combination|passcode|password|passphrase|keypad|lock\s?box)\b`,
-  'gi',
-);
-
-function containsAsLinkedMeasurementCredential(text) {
-  for (const match of String(text || '').matchAll(REPORT_AS_LINKED_MEASUREMENT_CREDENTIAL_RE)) {
-    const digitCount = match[1].replace(/\D/g, '').length;
-    if (digitCount >= 2 && digitCount <= 8) return true;
-  }
-  return false;
-}
-
 // Past access actions can legitimately be followed by a service date or a
 // labeled property/unit identifier. Inspect each bounded numeric candidate so
 // those structured values stay legal without exempting an unlabeled number.
@@ -262,11 +279,9 @@ const REPORT_PAST_ACCESS_NUMBER_RE = /\b\d{3,8}\b(?!\.\d)/g;
 const REPORT_STRUCTURED_DATE_TEXT = String.raw`(?:\d{4}\s*[/-]\s*\d{1,2}\s*[/-]\s*\d{1,2}|\d{1,2}\s*[/-]\s*\d{1,2}\s*[/-]\s*(?:\d{2}|\d{4}))`;
 const REPORT_STRUCTURED_DATE_RE = new RegExp(String.raw`\b${REPORT_STRUCTURED_DATE_TEXT}\b`, 'g');
 const REPORT_AFFIXED_OR_GROUPED_NUMBER_RE = /(?:\b[A-Za-z#*]+\d[A-Za-z0-9#*]*\b|\b\d[A-Za-z0-9#*]*[A-Za-z#*]\b|\b\d{1,2}(?:[\s–—-]+\d{1,2}){1,7}\b)/;
-const REPORT_WORK_ACTION_TEXT = String.raw`(?:appl(?:y|ied|ying)|treat(?:s|ed|ing)?|found|observ(?:e|es|ed|ing)|count(?:s|ed|ing)?|not(?:e|es|ed|ing)|record(?:s|ed|ing)?|servic(?:e|es|ed|ing)|inspect(?:s|ed|ing)?|check(?:s|ed|ing)?|replac(?:e|es|ed|ing)|spray(?:s|ed|ing)?|dust(?:s|ed|ing)?|clean(?:s|ed|ing)?)`;
-const REPORT_PAST_ACCESS_WORK_ACTION_RE = new RegExp(String.raw`\b${REPORT_WORK_ACTION_TEXT}\b`, 'i');
 // A work verb plus a pest noun establishes a count, including bounded species
 // and state modifiers. Explicit access relationships are screened first.
-const REPORT_PEST_COUNT_RE = /\b(?:found|observ(?:e|es|ed|ing)|count(?:s|ed|ing)?|not(?:e|es|ed|ing)|record(?:s|ed|ing)?)\s+\d{1,8}\s+(?:[a-z][a-z’'-]{0,23}\s+){0,3}(?:ants?|termites?|roaches?|cockroaches?|mosquitoes?|fleas?|ticks?|spiders?|rodents?|mice|rats?|wasps?|bees?|flies|beetles?|silverfish|earwigs?)\b/gi;
+const REPORT_PEST_COUNT_RE = /\b(?:found|saw|observ(?:e|es|ed|ing)|count(?:s|ed|ing)?|not(?:e|es|ed|ing)|record(?:s|ed|ing)?)\s+\d{1,8}\s+(?:[a-z][a-z’'-]{0,23}\s+){0,3}(?:ants?|termites?|roaches?|cockroaches?|mosquitoes?|fleas?|ticks?|spiders?|rodents?|mice|rats?|wasps?|bees?|flies|beetles?|silverfish|earwigs?)\b/gi;
 const REPORT_SERVICE_IDENTIFIER_RE = /\b(?:treat(?:s|ed|ing)?|servic(?:e|es|ed|ing)|inspect(?:s|ed|ing)?|check(?:s|ed|ing)?)\s+(?:bait\s+)?(?:station|trap|device|unit)\s*#?\s*\d{3,8}\b/gi;
 
 function isValidStructuredDate(value) {
@@ -308,6 +323,15 @@ function maskPastAccessWorkDetails(value) {
     .replace(REPORT_SERVICE_IDENTIFIER_RE, (detail) => detail.replace(/\d{3,8}/, '[work-detail]'));
 }
 
+function isObservedPestCountNumber(value, index, length) {
+  for (const match of value.matchAll(REPORT_PEST_COUNT_RE)) {
+    const numberOffset = match[0].search(/\d/);
+    if (match.index + numberOffset === index
+      && match[0].slice(numberOffset).match(/^\d{1,8}/)?.[0].length === length) return true;
+  }
+  return false;
+}
+
 function containsPastAccessCredential(text) {
   const value = String(text || '');
   for (const relationship of value.matchAll(REPORT_PAST_ACCESS_DEVICE_RE)) {
@@ -323,6 +347,7 @@ function containsPastAccessCredential(text) {
       if (/\bunit\s*$/i.test(before)) continue;
       if (isStructuredDateNumber(value, index, numeric[0].length)) continue;
       if (REPORT_MEASUREMENT_AFTER_NUMBER_RE.test(after)) continue;
+      if (isObservedPestCountNumber(value, index, numeric[0].length)) continue;
       return true;
     }
   }
@@ -471,6 +496,26 @@ const REPORT_INPUT_ACTION_TEXT = String.raw`(?:enter(?:s|ed|ing)?|typ(?:e|es|ed|
 const REPORT_ACCESS_INSTRUCTION_ACTION_TEXT = String.raw`(?:us(?:e|es|ed|ing)|${REPORT_INPUT_ACTION_TEXT}|provid(?:e|es|ed|ing)|giv(?:e|es|ing)|gave|sa(?:y|ys|id|ying))`;
 const REPORT_INPUT_ACCESS_LINK_TEXT = String.raw`(?:before|after|when|(?:and\s+)?then)`;
 const REPORT_DIRECT_ACCESS_ACTION_TEXT = String.raw`(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?|enter(?:s|ed|ing)?)`;
+const REPORT_ACTIVE_ACCESS_DEVICE_CODE_RE = new RegExp(
+  String.raw`\b${REPORT_DIRECT_ACCESS_ACTION_TEXT}\b[^\n.!?]{0,25}\b${REPORT_DIRECT_ACCESS_DEVICE_TARGET_TEXT}\b(?:\s+(?!${REPORT_WORK_ACTION_TEXT}\b)[a-z][a-z'’\-]*){0,5}(?:\s+(?:with|using|via|code|pin|combo|combination)|\s*[:=])\s*(${REPORT_STRUCTURED_DATE_TEXT}|${REPORT_NUMERIC_CREDENTIAL_TOKEN})(?=$|[^A-Za-z0-9])`,
+  'gi',
+);
+const REPORT_PASSIVE_ACCESS_DEVICE_CODE_RE = new RegExp(
+  String.raw`\b${REPORT_DIRECT_ACCESS_DEVICE_TARGET_TEXT}\b\s+(?:was|were|is|are|has|have|had)\s+(?:been\s+)?${REPORT_DIRECT_ACCESS_ACTION_TEXT}\s+by\s+(?:using|entering|typing|inputting|pressing)\s+(${REPORT_STRUCTURED_DATE_TEXT}|${REPORT_NUMERIC_CREDENTIAL_TOKEN})(?=$|[^A-Za-z0-9])`,
+  'gi',
+);
+
+function containsRawAccessDeviceCredential(text) {
+  const value = String(text || '');
+  for (const pattern of [REPORT_ACTIVE_ACCESS_DEVICE_CODE_RE, REPORT_PASSIVE_ACCESS_DEVICE_CODE_RE]) {
+    for (const match of value.matchAll(pattern)) {
+      const digitCount = match[1].replace(/\D/g, '').length;
+      if (digitCount >= 3 && digitCount <= 8) return true;
+    }
+  }
+  return false;
+}
+
 const REPORT_POSITIONAL_CREDENTIAL_INTERFACE_RE = new RegExp(
   String.raw`\bus(?:e|es|ed|ing)\s+\d{3,8}\s*${REPORT_MEASUREMENT_UNIT_TEXT}\s+(?:at|for|on|into|near|by)\s+(?:the\s+)?(?:[a-z]+\s+){0,2}(?:keypad|lock\s?box)\b`,
   'gi',
@@ -496,9 +541,7 @@ function containsPositionalCredentialInterface(text) {
 
 const REPORT_DIRECT_ACCESS_CODE_RES = [
   /\b(?:gate|door|garage|entry|keypad|lock\s?box|lock|alarm)\b\s*(?:is|:|=|was|were|reads?)\s*\d{3,8}\s*(?:gallons?|gal|ml|millilit(?:er|re)s?|lit(?:er|re)s?|fl\.?\s*oz|oz|ounces?|pounds?|lbs?|grams?|kg)\b/i,
-  /\b(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?|enter(?:s|ed|ing)?)\b[^\n.!?]{0,25}\b(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b\s*(?:with|using|via|code|pin|combo|combination|[:=])\s*\d{3,8}\b/i,
   new RegExp(String.raw`\b(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?|enter(?:s|ed|ing)?)\b[^\n.!?]{0,25}\b(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b\s*(?:with|using|via|code|pin|combo|combination|[:=])\s*${REPORT_STRUCTURED_DATE_TEXT}\b`, 'i'),
-  new RegExp(String.raw`\b(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?|enter(?:s|ed|ing)?)\b[^\n.!?]{0,25}\b(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b(?:\s+(?!(?:appl(?:y|ied|ying)|treat(?:s|ed|ing)?|broadcast(?:ed|ing)?|spread(?:ing)?|distribut(?:e|ed|ing)|spray(?:ed|ing)?|dust(?:ed|ing)?|clean(?:ed|ing)?)\b)[a-z][a-z'’\-]*){1,5}\s+(?:with|using|via|code|pin|combo|combination|[:=])\s*\d{3,8}\b`, 'i'),
   new RegExp(String.raw`\b\d{3,8}\b\s+(?:${REPORT_MEASUREMENT_UNIT_TEXT}\s+)?${REPORT_NUMERIC_ACCESS_ACTION_LINK_TEXT}(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?|enter(?:s|ed|ing)?)\s+${REPORT_DIRECT_ACCESS_DEVICE_TARGET_TEXT}\b`, 'i'),
   new RegExp(String.raw`\b${REPORT_INPUT_ACTION_TEXT}\s+\d{3,8}\b\s+(?:${REPORT_MEASUREMENT_UNIT_TEXT}\s+)?(?:at|for|on|into|near|by)\s+(?:the\s+)?(?:[a-z]+\s+){0,2}(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b`, 'i'),
   new RegExp(String.raw`\b${REPORT_ACCESS_INSTRUCTION_ACTION_TEXT}\s+\d{3,8}\b\s+(?:${REPORT_MEASUREMENT_UNIT_TEXT}(?:\s+|(?=,)))?(?:,\s*)?${REPORT_INPUT_ACCESS_LINK_TEXT}\s+(?:(?:we|you|they|the\s+technician|the\s+customer)\s+)?${REPORT_DIRECT_ACCESS_ACTION_TEXT}\s+${REPORT_DIRECT_ACCESS_DEVICE_TARGET_TEXT}\b`, 'i'),
@@ -511,13 +554,13 @@ const REPORT_POSITIONAL_USE_CODE_RE = /\b(?:use|using)\s+\d{3,8}\b\s+(?:at|for|o
 function containsReportAccessCode(text) {
   const raw = String(text || '');
   if (containsExplicitNumericCredential(raw)) return true;
-  if (containsAsLinkedMeasurementCredential(raw)) return true;
   if (containsPositionalCredentialInterface(raw)) return true;
   if (containsPastAccessCredential(raw)) return true;
   // Direct token-to-device relationships outrank fertilizer context. Check the
   // original copy before an application qualifier can mask an N-P-K-shaped
   // credential ("Applied override 24-0-11 to open the rear gate").
   const originalRelationship = accessCodeDetectionText(raw);
+  if (containsRawAccessDeviceCredential(raw)) return true;
   if (containsSubordinateAccessCredential(raw)) return true;
   if (REPORT_DIRECT_ACCESS_CODE_RES.some((re) => re.test(raw) || re.test(originalRelationship))) return true;
   if (REPORT_PAST_ACCESS_CONTEXT_RE.test(raw)) {
