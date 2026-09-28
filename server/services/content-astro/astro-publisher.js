@@ -3522,7 +3522,9 @@ async function publishOrUpdatePage(draft, brief = {}, { humanApproved = false } 
   const pr = await gh.createPr({
     head: branch,
     title: `Blog: ${frontmatter.title}`.slice(0, 72),
-    body: withCompetitorUnlinkNote(buildDraftPrBody({ frontmatter, slug, branch, content: finalBody, brief, images: { hero, body: bodyImages.images } }), allUnlinked),
+    // Built from the committed (unlinked) text, so a competitor URL never
+    // renders as a live link in the PR description either.
+    body: withCompetitorUnlinkNote(buildDraftPrBody({ frontmatter: committedFrontmatter, slug, branch, content: committedBody, brief, images: { hero, body: bodyImages.images } }), allUnlinked),
   });
   await requestCodexReview({
     pr,
@@ -3655,7 +3657,7 @@ async function publishMetadataRewrite(draft, brief = {}) {
     assertValidBlogFrontmatter(nextFrontmatter);
   }
 
-  const { markdown, unlinked: competitorUnlinked } = competitorFreeMarkdown(nextFrontmatter, parsed.content || '', { validate: isBlogTarget(filePath) ? assertValidBlogFrontmatter : null });
+  const { markdown, unlinked: competitorUnlinked, frontmatter: committedFrontmatter } = competitorFreeMarkdown(nextFrontmatter, parsed.content || '', { validate: isBlogTarget(filePath) ? assertValidBlogFrontmatter : null });
   recordUnlinks(draft, competitorUnlinked);
   if (markdown === existing.content) {
     return {
@@ -3717,7 +3719,8 @@ async function publishMetadataRewrite(draft, brief = {}) {
       targetUrl,
       branch,
       before: currentFrontmatter,
-      after: nextFrontmatter,
+      // The committed (unlinked) values: the table renders them.
+      after: committedFrontmatter,
       titleField,
       metaField,
       brief,
@@ -4011,7 +4014,8 @@ async function publishRefresh(draft, brief = {}, { humanApproved = false } = {})
   const pr = await gh.createPr({
     head: branch,
     title: `Refresh: ${nextFrontmatter.title || nextFrontmatter.metaTitle || publicPathFromAstroFile(filePath)}`.slice(0, 72),
-    body: withCompetitorUnlinkNote(buildRefreshPrBody({ filePath, targetUrl, branch, before: currentFrontmatter, after: nextFrontmatter, oldBody, newBody: finalBody, brief, backfilledFields, images: { hero: null, body: refreshImages.images || [] } }), recordUnlinks(draft)),
+    // Committed (unlinked) values: the before/after table renders them.
+    body: withCompetitorUnlinkNote(buildRefreshPrBody({ filePath, targetUrl, branch, before: currentFrontmatter, after: committedFrontmatter, oldBody, newBody: committedBody, brief, backfilledFields, images: { hero: null, body: refreshImages.images || [] } }), recordUnlinks(draft)),
   });
   await requestCodexReview({
     pr,

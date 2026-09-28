@@ -452,6 +452,11 @@ describe('publishRefresh blog-schema validation gate', () => {
     expect(written).toContain('Compare our approach with orkin.com and see');
     expect(written).not.toMatch(/https?:\/\/(?:www\.)?orkin\.com/);
     expect(gh.createPr.mock.calls[0][0].body).toMatch(/Competitor links removed/);
+    // The PR's before/after table shows the committed (unlinked) meta, so
+    // the competitor URL is never a live link in the description either.
+    const prTable = gh.createPr.mock.calls[0][0].body.split('### Competitor links removed')[0];
+    expect(prTable).toContain('Compare our approach with orkin.com and see');
+    expect(prTable).not.toMatch(/https?:\/\/(?:www\.)?orkin\.com/);
 
     // A service page target: a competitor link in a frontmatter field the
     // rewrite never touches is still unlinked (the ruling covers every
