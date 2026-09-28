@@ -140,16 +140,41 @@ postgres('email-division fact register sync against migrated PostgreSQL', () => 
     expect((await rowOf(facts[0].slug)).content).toBe('Corrected wording from the source.');
   });
 
-  test('the sync never touches status: a row the knowledge-base audit flagged stays flagged through an update', async () => {
+  test.each([
+    ['the weekly AI audit', 'ai-review', 'ai-cron'],
+    ['a person', 'manual-flag', 'waves'],
+  ])('a flag set by %s survives a wording update — the knowledge base\'s content-change trigger does not lift it for register rows', async (_who, auditType, auditedBy) => {
     const facts = [fact(1)];
     await sync(facts);
     const before = await rowOf(facts[0].slug);
+    // A real flag: the audit row that makes kb_restore_ai_flag_on_content_change
+    // treat the flag as AI-owned (for 'ai-review'), then the status itself.
+    await trx('knowledge_base_audits').insert({
+      kb_entry_id: before.id, audit_type: auditType, result: 'flagged', findings: 'synthetic doubt', audited_by: auditedBy,
+    });
     await trx('knowledge_base').where({ id: before.id }).update({ status: 'flagged' });
 
-    await sync([{ ...facts[0], content: 'New content.' }]);
+    const r = await sync([{ ...facts[0], content: 'New wording from the source.' }]);
+    expect(r.updated).toEqual([facts[0].slug]);
     const after = await rowOf(facts[0].slug);
-    expect(after.content).toBe('New content.');
+    expect(after.content).toBe('New wording from the source.');
     expect(after.status).toBe('flagged');
+    expect(after.version).toBe(2);
+    // …and the row still carries exactly what the register wrote (a plain
+    // row edited the same way by the KB's own writers WOULD be un-hidden).
+    expect(_internals.rowFingerprint(after)).toBe(after.metadata.register_hash);
+  });
+
+  test('control: the knowledge base\'s trigger does un-hide a NON-register AI-flagged row on a content change (so the test above is not vacuous)', async () => {
+    const slug = fact(7).slug;
+    const [row] = await trx('knowledge_base').insert({
+      path: `kb/manual/${slug}.md`, slug, title: 'Plain entry', category: 'facts', content: 'old', summary: 'x',
+      tags: JSON.stringify([]), source: 'manual', status: 'active', active: true, version: 1, metadata: JSON.stringify({}),
+    }).returning(['id']);
+    await trx('knowledge_base_audits').insert({ kb_entry_id: row.id, audit_type: 'ai-review', result: 'flagged', findings: 'doubt', audited_by: 'ai-cron' });
+    await trx('knowledge_base').where({ id: row.id }).update({ status: 'flagged' });
+    await trx('knowledge_base').where({ id: row.id }).update({ content: 'new' });
+    expect((await rowOf(slug)).status).toBe('active');
   });
 
   test('the knowledge-base audit\'s verified_by stamp is not an edit: the row stays unchanged for the sync and keeps its provenance', async () => {
@@ -163,8 +188,8 @@ postgres('email-division fact register sync against migrated PostgreSQL', () => 
     expect(r.held).toEqual([]);
     const after = await rowOf(facts[0].slug);
     expect(after.verified_by).toBe('ai-cron');
-    expect(_internals.hasProvenance(after, '2026-09-28')).toBe(false); // synthetic slug is not in the register…
-    expect(_internals.hasProvenance({ ...after, slug: 'fact-southern-chinch-bug' }, '2026-09-28')).toBe(true); // …but the row itself passes
+    expect(after.version).toBe(1);
+    expect(_internals.rowFingerprint(after)).toBe(after.metadata.register_hash); // the stamp still matches: not an edit
   });
 
   test('an expired fact retires its untouched row once (active=false + status archived, so shared search drops it), and is never seeded fresh', async () => {
@@ -180,10 +205,15 @@ postgres('email-division fact register sync against migrated PostgreSQL', () => 
     expect(after.status).toBe('archived');
     expect(after.metadata).toMatchObject({ retired_on: '2026-09-28', retired_reason: 'expired', status_before_retire: 'active' });
     expect(await audits(before.id, 'knowledge_base.fact_retired')).toHaveLength(1);
-    // The shared knowledge-base search reads status: the retired fact is gone from it.
+    // The shared knowledge-base search reads status: the retired fact is gone
+    // from it. (search_vector covers title + content; the title carries
+    // "Synthetic", and the still-live second fact proves the search works.)
     const KnowledgeBase = require('../services/knowledge-base');
-    const hits = await KnowledgeBase.search(`"Quoted source text"`, { category: 'facts', limit: 50 });
+    const hits = await KnowledgeBase.search('Synthetic', { category: 'facts', limit: 50 });
     expect(hits.map((h) => h.slug)).not.toContain(facts[0].slug);
+    await sync([fact(2)]);
+    const hitsAfter = await KnowledgeBase.search('Synthetic', { category: 'facts', limit: 50 });
+    expect(hitsAfter.map((h) => h.slug)).toContain(fact(2).slug);
 
     const again = await sync(expired);
     expect(again.retired).toEqual([]);
@@ -286,6 +316,63 @@ postgres('email-division fact register sync against migrated PostgreSQL', () => 
     const updates = await audits(legacy.id, 'knowledge_base.fact_updated');
     expect(updates).toHaveLength(1);
     expect(updates[0].metadata).toMatchObject({ legacy_row: true });
+  });
+
+  test('a fact a person DELETED is not put back: held as deleted_by_person, audited once', async () => {
+    const f = fact(1);
+    await sync([f]);
+    const before = await rowOf(f.slug);
+    await trx('knowledge_base_audits').where({ kb_entry_id: before.id }).del();
+    await trx('knowledge_base').where({ id: before.id }).del();
+
+    const r1 = await sync([f]);
+    expect(r1.held).toEqual([{ slug: f.slug, reason: 'deleted_by_person' }]);
+    expect(r1.inserted).toEqual([]);
+    expect(await rowOf(f.slug)).toBeUndefined();
+    await sync([f]);
+    const holds = await trx('audit_log').where({ action: 'knowledge_base.fact_sync_held' }).whereNull('resource_id')
+      .whereRaw("metadata->>'slug' = ?", [f.slug]);
+    expect(holds).toHaveLength(1);
+  });
+
+  test('a row a person DEACTIVATED (active=false, no retirement stamp) is held, never switched back on', async () => {
+    const f = fact(1);
+    await sync([f]);
+    await trx('knowledge_base').where({ slug: f.slug }).update({ active: false });
+
+    const r = await sync([f]);
+    expect(r.held).toEqual([{ slug: f.slug, reason: 'deactivated_by_person' }]);
+    expect((await rowOf(f.slug)).active).toBe(false);
+  });
+
+  test('an edit that landed on exactly the register\'s new wording converges: restamped as a metadata-only update, not held forever', async () => {
+    const f = fact(1);
+    await sync([f]);
+    const before = await rowOf(f.slug);
+    // A person corrects the row; the register later adopts the same words.
+    await trx('knowledge_base').where({ id: before.id }).update({ content: 'The corrected sentence.' });
+    const adopted = { ...f, content: 'The corrected sentence.' };
+    const r = await sync([adopted]);
+    expect(r.updated).toEqual([f.slug]);
+    expect(r.held).toEqual([]);
+    const after = await rowOf(f.slug);
+    expect(after.content).toBe('The corrected sentence.');
+    expect(after.metadata.register_hash).toBe(_internals.factFingerprint(adopted));
+    const updates = await audits(before.id, 'knowledge_base.fact_updated');
+    expect(updates[updates.length - 1].metadata).toMatchObject({ converged: true, metadata_only: true });
+    expect((await sync([adopted])).unchanged).toEqual([f.slug]);
+  });
+
+  test('an insert blocked by a foreign row holding this fact\'s path is held, not thrown', async () => {
+    const f = fact(1);
+    await trx('knowledge_base').insert({
+      path: `kb/facts/${f.slug}.md`, slug: `${f.slug}-renamed`, title: 'Renamed by a person', category: 'facts',
+      content: 'x', summary: 'x', tags: JSON.stringify([]), source: 'manual', status: 'active', active: true, version: 1, metadata: JSON.stringify({}),
+    });
+    const r = await sync([f]);
+    expect(r.held).toEqual([{ slug: f.slug, reason: 'insert_conflict' }]);
+    expect(r.errors).toEqual([]);
+    expect(await rowOf(f.slug)).toBeUndefined();
   });
 
   test('one bad fact does not stop the others', async () => {

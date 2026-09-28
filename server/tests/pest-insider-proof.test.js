@@ -16,12 +16,14 @@ const mockTrigger = jest.fn(async () => ({ ok: true }));
 const mockSendProof = jest.fn(async () => ({ sent: true, token: 'abcd1234' }));
 const mockValidate = jest.fn(() => ({ errors: [], warnings: [] }));
 const mockLockedPrices = jest.fn(async () => []);
+const mockRecordAudit = jest.fn(async () => ({ id: 'audit-1' }));
 
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/newsletter-validator', () => ({
   validateNewsletterDraft: mockValidate,
   lockedPricesForSend: mockLockedPrices,
 }));
+jest.mock('../services/audit-log', () => ({ recordAuditEvent: mockRecordAudit }));
 jest.mock('../services/newsletter-draft', () => ({
   createNewsletterDraft: mockCreateDraft,
 }));
@@ -41,16 +43,25 @@ const FIRST_TUESDAY = new Date('2026-06-02T11:05:00Z');
 
 function chain(overrides = {}) {
   const q = {};
-  ['where', 'whereNull', 'select'].forEach((m) => { q[m] = jest.fn(() => q); });
+  ['where', 'whereNull', 'select', 'orderBy'].forEach((m) => { q[m] = jest.fn(() => q); });
   q.first = jest.fn(async () => overrides.first);
   return q;
+}
+
+// newsletter_sends answers with the draft (or nothing); audit_log answers
+// with the last recorded proof attempt (or nothing).
+function wireDb({ draft, lastAttempt } = {}) {
+  const sends = chain({ first: draft });
+  const audit = chain({ first: lastAttempt });
+  db.mockImplementation((table) => (table === 'audit_log' ? audit : sends));
+  return { sends, audit };
 }
 
 beforeEach(() => {
   jest.clearAllMocks();
   mockValidate.mockImplementation(() => ({ errors: [], warnings: [] }));
   delete process.env.GATE_PEST_INSIDER_PROOF;
-  db.mockImplementation(() => chain({ first: undefined })); // no draft yet this month
+  wireDb({}); // no draft yet this month, no attempt on record
 });
 
 afterAll(() => {
@@ -72,12 +83,31 @@ describe('pest-insider proof gate', () => {
     expect(mockSendProof).not.toHaveBeenCalled();
   });
 
-  test('gate on — sendNewsletterProof called exactly once for the new draft', async () => {
+  test('gate on — sendNewsletterProof called exactly once for the new draft, and the attempt is recorded', async () => {
     process.env.GATE_PEST_INSIDER_PROOF = 'true';
     const result = await runPestInsiderAutopilot({ now: FIRST_TUESDAY });
     expect(result.skipped).toBe(false);
     expect(mockSendProof).toHaveBeenCalledTimes(1);
     expect(mockSendProof).toHaveBeenCalledWith('send-pi-1');
+    expect(mockRecordAudit).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'newsletter.pest_insider_proof_attempted', resource_type: 'newsletter_sends', resource_id: 'send-pi-1',
+      metadata: { sent: true, reason: null },
+    }));
+  });
+
+  test('a blocked first attempt is recorded with its reason (so the catch-up can compare against it)', async () => {
+    process.env.GATE_PEST_INSIDER_PROOF = 'true';
+    mockSendProof.mockImplementationOnce(async () => ({ skipped: true, reason: 'validation_failed' }));
+    await runPestInsiderAutopilot({ now: FIRST_TUESDAY });
+    expect(mockRecordAudit).toHaveBeenCalledWith(expect.objectContaining({ metadata: { sent: false, reason: 'validation_failed' } }));
+  });
+
+  test('a failure to record the attempt never masks the proof outcome', async () => {
+    process.env.GATE_PEST_INSIDER_PROOF = 'true';
+    mockRecordAudit.mockRejectedValueOnce(new Error('audit down'));
+    const result = await runPestInsiderAutopilot({ now: FIRST_TUESDAY });
+    expect(result.skipped).toBe(false);
+    expect(mockSendProof).toHaveBeenCalledTimes(1);
   });
 
   test('gate on but proof send throws — failure is swallowed, draft result unaffected', async () => {
@@ -120,22 +150,21 @@ describe('pest-insider proof catch-up', () => {
 
   test('re-sends the proof for this month\'s draft when none is on record', async () => {
     process.env.GATE_PEST_INSIDER_PROOF = 'true';
-    const q = chain({ first: { id: 'send-pi-1' } });
-    db.mockImplementation(() => q);
+    const { sends } = wireDb({ draft: { id: 'send-pi-1' } });
 
     const result = await retryPestInsiderProof({ now: DAY_AFTER });
 
     expect(result).toEqual({ skipped: false, sendId: 'send-pi-1', proofSent: true, reason: null });
     expect(mockSendProof).toHaveBeenCalledWith('send-pi-1');
     // Only an unproofed DRAFT of this type qualifies.
-    expect(q.where).toHaveBeenCalledWith('newsletter_type', 'pest-insider-monthly');
-    expect(q.where).toHaveBeenCalledWith('status', 'draft');
-    expect(q.whereNull).toHaveBeenCalledWith('proof_sent_at');
+    expect(sends.where).toHaveBeenCalledWith('newsletter_type', 'pest-insider-monthly');
+    expect(sends.where).toHaveBeenCalledWith('status', 'draft');
+    expect(sends.whereNull).toHaveBeenCalledWith('proof_sent_at');
   });
 
   test('a second failure is reported, not thrown, so the next day retries', async () => {
     process.env.GATE_PEST_INSIDER_PROOF = 'true';
-    db.mockImplementation(() => chain({ first: { id: 'send-pi-1' } }));
+    wireDb({ draft: { id: 'send-pi-1' } });
     mockSendProof.mockImplementationOnce(async () => { throw new Error('sendgrid 503'); });
 
     const result = await retryPestInsiderProof({ now: DAY_AFTER });
@@ -149,7 +178,7 @@ describe('pest-insider proof catch-up', () => {
     ['the shared proof gate being off', 'gate_off'],
   ])('%s is a RESULT, not an exception, and is never reported as sent', async (_label, reason) => {
     process.env.GATE_PEST_INSIDER_PROOF = 'true';
-    db.mockImplementation(() => chain({ first: { id: 'send-pi-1' } }));
+    wireDb({ draft: { id: 'send-pi-1' } });
     mockSendProof.mockImplementationOnce(async () => ({ skipped: true, reason }));
 
     const result = await retryPestInsiderProof({ now: DAY_AFTER });
@@ -159,7 +188,7 @@ describe('pest-insider proof catch-up', () => {
 
   test('nothing to do when the proof is on record, the issue was sent or deleted, or no draft exists', async () => {
     process.env.GATE_PEST_INSIDER_PROOF = 'true';
-    db.mockImplementation(() => chain({ first: undefined }));
+    wireDb({});
 
     const result = await retryPestInsiderProof({ now: DAY_AFTER });
 
@@ -175,24 +204,37 @@ describe('pest-insider proof catch-up', () => {
     expect(mockSendProof).not.toHaveBeenCalled();
   });
 
-  test('a draft the validator still blocks, unedited since yesterday, is skipped quietly — no proof attempt, no fresh notice', async () => {
+  const DRAFTED_AT = new Date('2026-06-02T11:00:00Z'); // the first-Tuesday 7:00 AM ET creation
+  const FIRST_ATTEMPT = { created_at: new Date('2026-06-02T11:05:00Z') }; // the autopilot's own proof attempt
+
+  test('the same-day catch-up on a blocked, unedited draft is skipped quietly — the owner was told at the first attempt', async () => {
     process.env.GATE_PEST_INSIDER_PROOF = 'true';
-    const stale = { id: 'send-pi-1', subject: 'Pest Insider — June', updated_at: new Date(DAY_AFTER.getTime() - 3 * 24 * 3600e3) };
-    db.mockImplementation(() => chain({ first: stale }));
+    const draft = { id: 'send-pi-1', subject: 'Pest Insider — June', updated_at: DRAFTED_AT };
+    wireDb({ draft, lastAttempt: FIRST_ATTEMPT });
     mockValidate.mockImplementation(() => ({ errors: ['Unverified claim (termite_second_swarm): "..."'], warnings: [] }));
 
-    const result = await retryPestInsiderProof({ now: DAY_AFTER });
+    const result = await retryPestInsiderProof({ now: new Date('2026-06-02T18:15:00Z') });
 
     expect(result).toEqual({ skipped: true, reason: 'validation_failed', sendId: 'send-pi-1' });
-    expect(mockValidate).toHaveBeenCalledWith(stale, expect.objectContaining({ lockedPrices: [] }));
+    expect(mockValidate).toHaveBeenCalledWith(draft, expect.objectContaining({ lockedPrices: [] }));
     expect(mockSendProof).not.toHaveBeenCalled();
     expect(mockTrigger).not.toHaveBeenCalled();
   });
 
-  test('a blocked draft edited since the last tick gets a fresh proof attempt (which reports the outcome)', async () => {
+  test('…and so is every later day until someone edits it', async () => {
     process.env.GATE_PEST_INSIDER_PROOF = 'true';
-    const edited = { id: 'send-pi-1', subject: 'Pest Insider — June', updated_at: new Date(DAY_AFTER.getTime() - 60 * 60e3) };
-    db.mockImplementation(() => chain({ first: edited }));
+    wireDb({ draft: { id: 'send-pi-1', updated_at: DRAFTED_AT }, lastAttempt: FIRST_ATTEMPT });
+    mockValidate.mockImplementation(() => ({ errors: ['still blocked'], warnings: [] }));
+
+    const result = await retryPestInsiderProof({ now: new Date('2026-06-05T18:15:00Z') });
+
+    expect(result.skipped).toBe(true);
+    expect(mockSendProof).not.toHaveBeenCalled();
+  });
+
+  test('a blocked draft EDITED since the last attempt gets a fresh proof attempt (which reports the outcome)', async () => {
+    process.env.GATE_PEST_INSIDER_PROOF = 'true';
+    wireDb({ draft: { id: 'send-pi-1', updated_at: new Date('2026-06-03T14:00:00Z') }, lastAttempt: FIRST_ATTEMPT });
     mockValidate.mockImplementation(() => ({ errors: ['still blocked'], warnings: [] }));
     mockSendProof.mockImplementationOnce(async () => ({ skipped: true, reason: 'validation_failed' }));
 
@@ -200,11 +242,34 @@ describe('pest-insider proof catch-up', () => {
 
     expect(mockSendProof).toHaveBeenCalledWith('send-pi-1');
     expect(result).toEqual({ skipped: false, sendId: 'send-pi-1', proofSent: false, reason: 'validation_failed' });
+    expect(mockRecordAudit).toHaveBeenCalledTimes(1);
+  });
+
+  test('no attempt on record (the gate was off when the issue was drafted) → attempt, so the owner is told once', async () => {
+    process.env.GATE_PEST_INSIDER_PROOF = 'true';
+    wireDb({ draft: { id: 'send-pi-1', updated_at: DRAFTED_AT } });
+    mockValidate.mockImplementation(() => ({ errors: ['blocked'], warnings: [] }));
+    mockSendProof.mockImplementationOnce(async () => ({ skipped: true, reason: 'validation_failed' }));
+
+    const result = await retryPestInsiderProof({ now: DAY_AFTER });
+
+    expect(mockSendProof).toHaveBeenCalledWith('send-pi-1');
+    expect(result.reason).toBe('validation_failed');
+  });
+
+  test('a transient failure (validation passes now) is retried even with an attempt on record', async () => {
+    process.env.GATE_PEST_INSIDER_PROOF = 'true';
+    wireDb({ draft: { id: 'send-pi-1', updated_at: DRAFTED_AT }, lastAttempt: FIRST_ATTEMPT });
+
+    const result = await retryPestInsiderProof({ now: DAY_AFTER });
+
+    expect(mockSendProof).toHaveBeenCalledWith('send-pi-1');
+    expect(result).toEqual({ skipped: false, sendId: 'send-pi-1', proofSent: true, reason: null });
   });
 
   test('a pre-check that itself throws fails open to the proof path', async () => {
     process.env.GATE_PEST_INSIDER_PROOF = 'true';
-    db.mockImplementation(() => chain({ first: { id: 'send-pi-1', updated_at: new Date(DAY_AFTER.getTime() - 3 * 24 * 3600e3) } }));
+    wireDb({ draft: { id: 'send-pi-1', updated_at: DRAFTED_AT }, lastAttempt: FIRST_ATTEMPT });
     mockValidate.mockImplementation(() => { throw new Error('validator exploded'); });
 
     const result = await retryPestInsiderProof({ now: DAY_AFTER });
@@ -215,7 +280,7 @@ describe('pest-insider proof catch-up', () => {
 
   test('after the 10th of the month a stale draft is not proofed', async () => {
     process.env.GATE_PEST_INSIDER_PROOF = 'true';
-    db.mockImplementation(() => chain({ first: { id: 'send-pi-1' } }));
+    wireDb({ draft: { id: 'send-pi-1' } });
 
     const result = await retryPestInsiderProof({ now: new Date('2026-06-11T18:15:00Z') });
 

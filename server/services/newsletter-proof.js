@@ -757,9 +757,15 @@ async function maybeHandleProofApproval(email) {
 
   logger.info(`[newsletter-proof] send ${send.id} approved by ${maskEmail(from)} — scheduled for ${scheduledFor.toISOString()}`);
 
-  // The weekly flagship always waits for Tuesday's scheduler tick. Preserve
-  // the legacy fast path only for any non-flagship proof flow.
-  if (!eventSelection.flagship) {
+  // The weekly flagship always waits for Tuesday's scheduler tick, and so
+  // does a Pest Insider issue: processScheduledSends re-reads the row, re-runs
+  // the gates and the validator against what is stored THEN, and a PATCH
+  // that lands after this approval has already returned the row to 'draft'
+  // (off the scheduler's 'scheduled' query). Dispatching straight from here
+  // could hand sendCampaign an edited, unapproved row — it accepts draft or
+  // scheduled and does not re-validate. Preserve the legacy fast path only
+  // for any other non-flagship proof flow.
+  if (!eventSelection.flagship && send.newsletter_type !== PEST_INSIDER_TYPE) {
     NewsletterSender.sendCampaign(send.id).catch((err) => {
       logger.error(`[newsletter-proof] approved campaign ${send.id} failed: ${err.message}`, { stack: err.stack });
     });

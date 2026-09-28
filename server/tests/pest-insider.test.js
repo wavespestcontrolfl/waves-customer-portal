@@ -235,6 +235,33 @@ describe('pest-insider claim validation at the send gates', () => {
     expect(errors.some((e) => e.includes('Unverified claim (termite_second_swarm)'))).toBe(true);
   });
 
+  test('a "Myth-Buster" heading glued to the paragraph under it does NOT exempt a false claim in that paragraph', () => {
+    const draft = {
+      ...baseSend,
+      html_body: `${baseSend.html_body}<h2>Myth-Buster: do termites swarm again after storms?</h2><p>Yes — termites swarm again after every big storm.</p><ul><li>Termites swarm again after storms</li><li>Vacuum daily for 14 days after ant treatment</li></ul>`,
+    };
+    const { errors } = validateNewsletterDraft(draft, { recipientCount: 100 });
+    expect(errors.some((e) => e.includes('Unverified claim (termite_second_swarm)'))).toBe(true);
+    expect(errors.some((e) => e.includes('Unverified claim (non_flea_vacuum_advice)'))).toBe(true);
+  });
+
+  test.each([
+    ['a curly apostrophe', 'Termites don’t have a second swarm after storms.'],
+    ['an &rsquo; entity', 'Termites don&rsquo;t have a second swarm after storms.'],
+  ])('a denial written with %s is normalised before the scan and does not block', (_label, sentence) => {
+    const draft = { ...baseSend, html_body: `${baseSend.html_body}<p>${sentence}</p>` };
+    const { errors } = validateNewsletterDraft(draft, { recipientCount: 100 });
+    expect(errors.some((e) => e.includes('Unverified claim (termite_second_swarm)'))).toBe(false);
+  });
+
+  test('the register rules are the Pest Insider\'s: the same sentence in a weekly flagship body is not scanned by them', () => {
+    const { validateNewsletterDraft: validate } = require('../services/newsletter-validator');
+    // 'local-weekly-fresh-events' is the flagship key and a claim-validated type.
+    const weekly = { ...baseSend, newsletter_type: 'local-weekly-fresh-events', html_body: `${baseSend.html_body}<p>A kid-safe family event this Saturday.</p>` };
+    const { errors } = validate(weekly, { recipientCount: 100 });
+    expect(errors.some((e) => e.includes('Unverified claim'))).toBe(false);
+  });
+
   test('an entity-encoded DENIAL is decoded before the scan and does not block', () => {
     const draft = { ...baseSend, html_body: `${baseSend.html_body}<p>Termites don&#39;t have a second swarm after storms.</p>` };
     const { errors } = validateNewsletterDraft(draft, { recipientCount: 100 });

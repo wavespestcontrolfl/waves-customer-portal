@@ -95,7 +95,7 @@ SWFL SEASONAL CONTEXT (pick what's relevant):
 - Jun: hurricane season begins, daily thunderstorms, nitrogen blackout on lawns
 - Jul: 4th of July, peak rainy season, German roach pressure, palmetto bugs
 - Aug: back-to-school, peak hurricane risk, chinch bug damage on St. Augustine
-- Sep: hurricane peak, Siesta Key Crystal Classic, termite swarms after storms
+- Sep: hurricane peak, Siesta Key Crystal Classic, post-storm yard checklist; western drywood termite flights peak Sep–Nov (UF); subterranean termites do NOT swarm again after storms
 - Oct: snowbirds return, rodent season begins, Halloween on barrier islands
 - Nov: Sarasota Season of Sculpture, turkey trots, winter annuals
 - Dec: boat parades, cooler weather drives indoor pest activity
@@ -236,9 +236,9 @@ const PEST_INSIDER_ROTATION = {
     beats: 'peak hurricane risk — post-storm yard checklist; back-to-school',
   },
   September: {
-    service: 'termite inspection (post-storm swarms) + lawn recovery',
+    service: 'termite & WDO inspection (storm-damaged, wet wood is what termites find; half of Florida\'s recorded western drywood flights are Sep–Nov per UF — native subterranean termites have ONE flight season, Dec–May, and no second swarm after storms) + lawn recovery',
     lawn: 'fall fertilization window opens as blackout ends',
-    beats: 'hurricane peak; termite swarms after storms',
+    beats: 'hurricane peak; post-storm yard checklist (standing water, debris piles, displaced rodents); drywood termite flights in fall — never a "second subterranean swarm after storms"',
   },
   October: {
     service: 'rodent exclusion (season begins as nights cool)',

@@ -524,9 +524,12 @@ describe('maybeHandleProofApproval', () => {
 
       expect(r).toBe(true);
       expect(sendsChain.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'scheduled', proof_approved_at: expect.any(Date) }));
-      // Non-flagship approvals take the direct dispatch path: the issue is
-      // actually handed to the sender, not just marked scheduled.
-      expect(mockSendCampaign).toHaveBeenCalledWith('send-pi-1');
+      // A Pest Insider approval never dispatches straight from here: the
+      // scheduler tick re-reads the row, re-runs the gates and the validator
+      // and only then hands it to the sender — a PATCH that lands right
+      // after this approval has already returned the row to draft.
+      expect(sendsChain.update).toHaveBeenCalledWith(expect.objectContaining({ scheduled_for: expect.any(Date) }));
+      expect(mockSendCampaign).not.toHaveBeenCalled();
     });
 
     test('a reply that does not say approved is handled before the gate, with no blocked notice', async () => {

@@ -32,7 +32,9 @@
  * 10th of the ET month. A draft the validator blocks fails the same way
  * every day until someone edits it, and the owner was told the first time
  * (sendNewsletterProof notifies on a blocked draft), so the catch-up skips
- * it quietly unless the draft was edited since the last daily tick.
+ * it quietly unless the draft was edited since the LAST PROOF ATTEMPT —
+ * every attempt is stamped in audit_log; the creation-time proof on the
+ * first Tuesday counts, so the same-day catch-up never repeats its notice.
  *
  * A draft that cannot be written at all (the fact register empty, the
  * writer down) is reported to the owner through the same
@@ -49,10 +51,10 @@ const PEST_INSIDER_TYPE = 'pest-insider-monthly';
 // drafted on the first Tuesday (day 1–7); three more days covers an outage
 // without proofing a stale draft late in the month.
 const PROOF_RETRY_LAST_DAY = 10;
-// A blocked draft edited within this window gets a fresh proof attempt (and
-// the owner a fresh blocked notice if it still fails); older ones are skipped
-// quietly — the daily tick is 24h, so this catches an edit since the last one.
-const RECENT_EDIT_MS = 25 * 60 * 60 * 1000;
+// Every proof attempt this module makes is recorded here (audit_log), so the
+// catch-up can tell "edited since the last attempt" from "same blocked
+// draft as yesterday" without guessing from timestamps.
+const PROOF_ATTEMPT_ACTION = 'newsletter.pest_insider_proof_attempted';
 
 function proofGateOn() {
   return require('../config/feature-gates').pestInsiderProofLive();
@@ -66,16 +68,49 @@ function proofGateOn() {
 // counts. Nothing here throws: the draft is already saved and the catch-up
 // tries again.
 async function sendProofFor(sendId) {
+  let outcome;
   try {
     const { sendNewsletterProof } = require('./newsletter-proof');
     const result = await sendNewsletterProof(sendId);
-    if (result?.sent === true) return { sent: true, reason: null };
-    const reason = result?.reason || 'unknown';
-    logger.warn(`[pest-insider-autopilot] proof not sent for ${sendId}: ${reason}`);
-    return { sent: false, reason };
+    if (result?.sent === true) outcome = { sent: true, reason: null };
+    else {
+      const reason = result?.reason || 'unknown';
+      logger.warn(`[pest-insider-autopilot] proof not sent for ${sendId}: ${reason}`);
+      outcome = { sent: false, reason };
+    }
   } catch (e) {
     logger.warn(`[pest-insider-autopilot] proof send failed: ${e.message}`);
-    return { sent: false, reason: 'threw' };
+    outcome = { sent: false, reason: 'threw' };
+  }
+  await recordProofAttempt(sendId, outcome);
+  return outcome;
+}
+
+// Non-critical: a missing stamp only means the next catch-up tries again.
+async function recordProofAttempt(sendId, outcome) {
+  try {
+    await require('./audit-log').recordAuditEvent({
+      actor_type: 'system',
+      action: PROOF_ATTEMPT_ACTION,
+      resource_type: 'newsletter_sends',
+      resource_id: sendId,
+      metadata: { sent: outcome.sent, reason: outcome.reason },
+    });
+  } catch (e) {
+    logger.warn(`[pest-insider-autopilot] could not record the proof attempt: ${e.message}`);
+  }
+}
+
+async function lastProofAttemptAt(sendId) {
+  try {
+    const last = await db('audit_log')
+      .where({ action: PROOF_ATTEMPT_ACTION, resource_type: 'newsletter_sends', resource_id: sendId })
+      .orderBy('created_at', 'desc')
+      .first('created_at');
+    return last?.created_at ? new Date(last.created_at) : null;
+  } catch (e) {
+    logger.warn(`[pest-insider-autopilot] could not read the last proof attempt: ${e.message}`);
+    return null;
   }
 }
 
@@ -179,10 +214,13 @@ async function retryPestInsiderProof({ now = new Date() } = {}) {
   if (!draft) return { skipped: true, reason: 'no unproofed draft this month' };
 
   // Deterministic failure: the validator blocks this draft, nobody has
-  // edited it since the last tick, and the owner was notified when the
-  // proof was first attempted — retrying would only re-send that notice.
-  if (!editedRecently(draft, now) && await draftFailsValidation(draft)) {
-    logger.info(`[pest-insider-autopilot] proof catch-up skipped for ${draft.id}: draft still fails validation and has not been edited`);
+  // edited it since the last proof attempt (the owner was notified then —
+  // sendNewsletterProof notifies on a blocked draft), so retrying would only
+  // re-send that notice. No attempt on record (the gate was off when the
+  // issue was drafted) means the owner has never been told: attempt.
+  const lastAttempt = await lastProofAttemptAt(draft.id);
+  if (lastAttempt && !editedSince(draft, lastAttempt) && await draftFailsValidation(draft)) {
+    logger.info(`[pest-insider-autopilot] proof catch-up skipped for ${draft.id}: draft still fails validation and has not been edited since the last attempt`);
     return { skipped: true, reason: 'validation_failed', sendId: draft.id };
   }
 
@@ -190,9 +228,9 @@ async function retryPestInsiderProof({ now = new Date() } = {}) {
   return { skipped: false, sendId: draft.id, proofSent: proof.sent, reason: proof.reason };
 }
 
-function editedRecently(draft, now) {
-  const at = draft?.updated_at ? new Date(draft.updated_at).getTime() : NaN;
-  return Number.isFinite(at) && (new Date(now).getTime() - at) < RECENT_EDIT_MS;
+function editedSince(draft, at) {
+  const edited = draft?.updated_at ? new Date(draft.updated_at).getTime() : NaN;
+  return Number.isFinite(edited) && edited > at.getTime();
 }
 
 // Fail OPEN to the proof path: if the pre-check itself breaks, the proof

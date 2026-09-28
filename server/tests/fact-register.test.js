@@ -1,8 +1,9 @@
 /**
  * Email division fact register: listFacts provenance + tag filtering, the
- * sync planner (pure), the on-demand ensure, and the findUnverifiedClaims
- * deterministic rule list newsletter-validator.js wires in as a hard block.
- * The sync against real PostgreSQL is fact-register-sync-postgres.test.js.
+ * sync planner (pure), the on-demand ensure, the data invariants, and the
+ * findUnverifiedClaims sentence-and-clause tripwire newsletter-validator.js
+ * wires in as a hard block. The sync against real PostgreSQL is
+ * fact-register-sync-postgres.test.js.
  */
 
 function chain(rows) {
@@ -20,42 +21,45 @@ const {
   listFacts, findUnverifiedClaims, factsPromptBlock, ensureFactRegister, SOURCE, _internals,
 } = require('../services/email-division/fact-register');
 const { FACTS, VERIFIED_ON } = require('../services/email-division/fact-register-data');
-const { planFactSync, planStraySync, factFingerprint, rowFingerprint, hasProvenance, resetEnsureStamp } = _internals;
+const {
+  planFactSync, planStraySync, factFingerprint, rowFingerprint, hasProvenance, splitSentences, splitClauses, resetEnsureStamp,
+} = _internals;
 
 const NOW = new Date('2026-09-28T12:00:00Z');
+const bySlug = (slug) => FACTS.find((f) => f.slug === slug);
 
-function meta(extra = {}) {
+// Exactly what the sync writes for a register fact (see rowValues), with the
+// fingerprint stamped — the only shape hasProvenance admits.
+function rowFor(fact, overrides = {}) {
   return {
-    source_url: 'https://ask.ifas.ufl.edu/publication/IN369',
-    source_urls: ['https://ask.ifas.ufl.edu/publication/IN369'],
-    quote: '"flights start in early January and end in April"',
-    register_hash: 'abc',
-    ...extra,
-  };
-}
-
-function row(overrides = {}) {
-  return {
-    id: 'f1',
-    slug: 'fact-native-subterranean-termite-flight-season',
-    title: 'Native subterranean termite swarm season',
-    summary: '"flights start in early January and end in April"',
-    content: 'UF gives one flight season.',
-    tags: ['termites', 'swarm-season'],
+    id: fact.slug,
+    slug: fact.slug,
+    title: fact.title,
+    summary: fact.quote,
+    content: fact.content,
+    tags: fact.tags,
     active: true,
     status: 'active',
     source: SOURCE,
     verified_by: SOURCE,
-    metadata: meta(),
+    metadata: {
+      source_url: fact.sourceUrls[0],
+      source_urls: fact.sourceUrls,
+      quote: fact.quote,
+      verified_on: VERIFIED_ON,
+      derived: fact.derived === true,
+      expires_on: fact.expiresOn || null,
+      register_hash: factFingerprint(fact),
+    },
     ...overrides,
   };
 }
+const withMeta = (fact, extra) => rowFor(fact, { metadata: { ...rowFor(fact).metadata, ...extra } });
 
-const ROWS = [
-  row(),
-  row({ id: 'f2', slug: 'fact-southern-chinch-bug', title: 'Southern chinch bug', tags: ['chinch-bugs', 'lawn'] }),
-  row({ id: 'f3', slug: 'fact-fire-ant-mating-flights', title: 'Fire ant mating flights', tags: ['fire-ants', 'swarm-season'] }),
-];
+const TERMITE = bySlug('fact-native-subterranean-termite-flight-season');
+const CHINCH = bySlug('fact-southern-chinch-bug');
+const FIRE_ANT = bySlug('fact-fire-ant-mating-flights');
+const ROWS = [rowFor(TERMITE), rowFor(CHINCH), rowFor(FIRE_ANT)];
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -77,49 +81,53 @@ describe('listFacts', () => {
   });
 
   test('filters to facts carrying ANY of the given tags', async () => {
-    const facts = await listFacts({ tags: ['swarm-season'], now: NOW });
-    expect(facts.map((f) => f.id).sort()).toEqual(['f1', 'f3']);
+    const facts = await listFacts({ tags: ['swarm-season', 'fire-ants'], now: NOW });
+    expect(facts.map((f) => f.slug).sort()).toEqual([FIRE_ANT.slug, TERMITE.slug].sort());
   });
 
   test('accepts a single tag string as well as an array, and tags stored as a JSON string', async () => {
-    db.mockImplementation(() => chain([ROWS[0], { ...ROWS[1], tags: JSON.stringify(['chinch-bugs', 'lawn']) }]));
+    db.mockImplementation(() => chain([ROWS[0], { ...ROWS[1], tags: JSON.stringify(CHINCH.tags) }]));
     const facts = await listFacts({ tags: 'lawn', now: NOW });
-    expect(facts.map((f) => f.id)).toEqual(['f2']);
+    expect(facts.map((f) => f.slug)).toEqual([CHINCH.slug]);
   });
 
   test('respects limit after filtering', async () => {
-    const facts = await listFacts({ tags: ['swarm-season'], limit: 1, now: NOW });
+    const facts = await listFacts({ tags: ['termites', 'lawn'], limit: 1, now: NOW });
     expect(facts).toHaveLength(1);
   });
 
-  describe('provenance — a row is fed to a writer only when it is this register\'s fact with its source intact', () => {
+  describe("provenance — a row is fed to a writer only when it is this register's fact, exactly as the register states it", () => {
     test.each([
-      ['a slug that is not in the register', row({ slug: 'fact-somebody-added-this' })],
-      ['a row the sync never stamped (no register_hash)', row({ metadata: meta({ register_hash: undefined }) })],
-      ['a row from another source', row({ source: 'manual' })],
-      ['no https source URL', row({ metadata: meta({ source_url: 'see file' }) })],
-      ['a missing source URL', row({ metadata: meta({ source_url: undefined }) })],
-      ['no quoted source text', row({ summary: '   ' })],
-      ['an expired row (metadata.expires_on reached)', row({ metadata: meta({ expires_on: '2026-09-28' }) })],
+      ['a slug that is not in the register', rowFor(TERMITE, { slug: 'fact-somebody-added-this' })],
+      ['a row the sync never stamped (no register_hash)', withMeta(TERMITE, { register_hash: undefined })],
+      ['a row from another source', rowFor(TERMITE, { source: 'manual' })],
+      ['no https source URL', withMeta(TERMITE, { source_url: 'see file' })],
+      ['a missing source URL', withMeta(TERMITE, { source_url: undefined })],
+      ['no quoted source text', rowFor(TERMITE, { summary: '   ' })],
+      ['an expired row (metadata.expires_on reached)', withMeta(TERMITE, { expires_on: '2026-09-28' })],
+      ['a row a person edited (content differs from the register)', rowFor(TERMITE, { content: `${TERMITE.content} A person added this.` })],
+      ['a row another writer appended to (the WikiQA file-back shape)', rowFor(TERMITE, { content: `${TERMITE.content}\n\n## Q&A\nAI-written answer.` })],
+      ['a row whose title a person changed', rowFor(TERMITE, { title: 'Renamed' })],
     ])('drops %s', async (_label, bad) => {
       db.mockImplementation(() => chain([bad, ROWS[1]]));
       const facts = await listFacts({ now: NOW });
-      expect(facts.map((f) => f.id)).toEqual(['f2']);
+      expect(facts.map((f) => f.slug)).toEqual([CHINCH.slug]);
     });
 
-    test('accepts metadata stored as a JSON string', () => {
-      expect(hasProvenance(row({ metadata: JSON.stringify(meta()) }), '2026-09-28')).toBe(true);
+    test('accepts metadata and tags stored as JSON strings', () => {
+      const r = rowFor(TERMITE);
+      expect(hasProvenance({ ...r, metadata: JSON.stringify(r.metadata), tags: JSON.stringify(r.tags) }, '2026-09-28')).toBe(true);
     });
 
     test('a fact the weekly knowledge-base audit or a person VERIFIED stays usable (verified_by is not provenance)', () => {
-      expect(hasProvenance(row({ verified_by: 'ai-cron', last_verified_at: new Date('2026-10-05T03:00:00Z') }), '2026-10-05')).toBe(true);
-      expect(hasProvenance(row({ verified_by: 'waves', confidence: 'medium' }), '2026-10-05')).toBe(true);
+      expect(hasProvenance(rowFor(TERMITE, { verified_by: 'ai-cron', last_verified_at: new Date('2026-10-05T03:00:00Z'), confidence: 'medium' }), '2026-10-05')).toBe(true);
+      expect(hasProvenance(rowFor(TERMITE, { verified_by: 'waves' }), '2026-10-05')).toBe(true);
     });
 
     test("the register's own expiry applies even when the stored row predates it", () => {
-      const swfwmd = FACTS.find((f) => f.slug === 'fact-swfwmd-modified-phase-iii-water-shortage');
+      const swfwmd = bySlug('fact-swfwmd-modified-phase-iii-water-shortage');
       expect(swfwmd.expiresOn).toBe('2026-10-02');
-      const r = row({ slug: swfwmd.slug, metadata: meta({ expires_on: undefined }) });
+      const r = withMeta(swfwmd, { expires_on: undefined });
       expect(hasProvenance(r, '2026-10-01')).toBe(true);
       expect(hasProvenance(r, '2026-10-02')).toBe(false);
     });
@@ -143,17 +151,20 @@ describe('the register data', () => {
     }
   });
 
-  test('no fact cites a retailer page', () => {
+  test('no fact cites a retailer page or a news outlet — sources are UF/IFAS, labels, manufacturers, governments, CDC', () => {
     for (const fact of FACTS) {
-      fact.sourceUrls.forEach((u) => expect(u).not.toMatch(/domyown|solutionsstores|amazon\.|pestcontrolsupplies|doityourselfpestcontrol/i));
+      fact.sourceUrls.forEach((u) => {
+        expect(u).not.toMatch(/domyown|solutionsstores|amazon\.|pestcontrolsupplies|doityourselfpestcontrol/i);
+        expect(u).not.toMatch(/wusf\.org|heraldtribune|tampabay\.com|patch\.com|wfla\.com|baynews9|yoursun\.com/i);
+      });
     }
   });
 
   test('every number of days, weeks or months in a fact\'s content also appears in its quote', () => {
-    // "7 to 10 days", "7–10 days" and "7-10 days" are the same range.
+    // "7 to 10 days", "7–10 days" and "7-10 days" are the same range;
+    // "one-day-per-week" in a quote and "one day per week" in content too.
     const numbers = (text) => (text.match(/\b\d+(?:\s*(?:–|-|to)\s*\d+)?\s*(?:days?|weeks?|months?)\b/gi) || [])
       .map((n) => n.toLowerCase().replace(/\s+/g, ' ').replace(/(\d)\s*(?:–|-|to)\s*(\d)/, '$1–$2'));
-    // "one-day-per-week" in a quote and "one day per week" in content are the same.
     const wordNumbers = (text) => (text.replace(/-/g, ' ').match(/\b(?:one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:days?|weeks?|months?)\b/gi) || [])
       .map((n) => n.toLowerCase());
     const missing = [];
@@ -165,32 +176,31 @@ describe('the register data', () => {
     }
     expect(missing).toEqual([]);
   });
+
+  test('every percentage in a fact\'s title or content also appears in its quote', () => {
+    const missing = [];
+    for (const fact of FACTS) {
+      for (const pct of (`${fact.title} ${fact.content}`).match(/\d+(?:\.\d+)?%/g) || []) {
+        if (!fact.quote.includes(pct)) missing.push({ slug: fact.slug, pct });
+      }
+    }
+    expect(missing).toEqual([]);
+  });
 });
 
 describe('planFactSync (pure)', () => {
   const fact = FACTS[0];
-  const shipped = factFingerprint(fact);
   const TODAY = '2026-09-28';
-
-  function syncedMeta(extra = {}) {
-    return meta({
-      source_url: fact.sourceUrls[0], source_urls: fact.sourceUrls, quote: fact.quote, register_hash: shipped,
-      verified_on: VERIFIED_ON, derived: fact.derived === true, expires_on: fact.expiresOn || null, ...extra,
-    });
-  }
-
-  function syncedRow(overrides = {}) {
-    // Exactly what the sync writes for `fact`, with the hash stamped.
-    return row({
-      slug: fact.slug, title: fact.title, summary: fact.quote, content: fact.content, tags: fact.tags,
-      metadata: syncedMeta(),
-      ...overrides,
-    });
-  }
+  const syncedRow = (overrides = {}) => rowFor(fact, overrides);
+  const syncedMeta = (extra = {}) => ({ ...rowFor(fact).metadata, ...extra });
 
   test('no row → insert; an expired fact with no row is never seeded', () => {
     expect(planFactSync(fact, undefined, { today: TODAY })).toEqual({ action: 'insert' });
     expect(planFactSync({ ...fact, expiresOn: '2026-09-01' }, undefined, { today: TODAY })).toEqual({ action: 'skip', reason: 'expired_never_seeded' });
+  });
+
+  test('no row but the register seeded this slug before → a person deleted it; it is not put back', () => {
+    expect(planFactSync(fact, undefined, { today: TODAY, priorSeed: true })).toEqual({ action: 'hold', reason: 'deleted_by_person' });
   });
 
   test("a row under the slug that is not the register's is held, whatever it says", () => {
@@ -216,32 +226,31 @@ describe('planFactSync (pure)', () => {
     expect(planFactSync(fact, syncedRow({ summary: '"a different quote"' }), { today: TODAY }).action).toBe('hold');
   });
 
+  test('an edit that landed on exactly the register\'s current wording has converged: restamp, do not hold forever', () => {
+    const converged = syncedRow({ metadata: syncedMeta({ register_hash: 'stamp-from-before-the-edit' }) });
+    expect(planFactSync(fact, converged, { today: TODAY })).toEqual({ action: 'update', legacy: false, reactivate: false, metadataOnly: true, converged: true });
+  });
+
   test('an untouched row whose shipped content changed is updated', () => {
     const plan = planFactSync({ ...fact, content: `${fact.content} New sentence.` }, syncedRow(), { today: TODAY });
-    expect(plan).toEqual({ action: 'update', legacy: false, reactivate: false, metadataOnly: false });
+    expect(plan).toEqual({ action: 'update', legacy: false, reactivate: false, metadataOnly: false, converged: false });
   });
 
   test('a register row from before fingerprinting (no register_hash) is brought under management as a legacy update', () => {
-    const legacy = syncedRow({ content: 'retailer-sourced content from the first seed', metadata: meta({ register_hash: undefined }) });
-    expect(planFactSync(fact, legacy, { today: TODAY })).toEqual({ action: 'update', legacy: true, reactivate: false, metadataOnly: false });
+    const legacy = syncedRow({ content: 'retailer-sourced content from the first seed', metadata: syncedMeta({ register_hash: undefined }) });
+    expect(planFactSync(fact, legacy, { today: TODAY })).toEqual({ action: 'update', legacy: true, reactivate: false, metadataOnly: false, converged: false });
   });
 
   test.each([
-    ['an expiry added', { expiresOn: '2027-01-01' }, syncedMeta()],
-    ['an expiry extended', { expiresOn: '2027-01-01' }, syncedMeta({ expires_on: '2026-10-02' })],
-    ['an expiry removed', {}, syncedMeta({ expires_on: '2026-12-01' })],
-    ['the derived flag changed', { derived: true }, syncedMeta()],
-    ['the verification date moved', {}, syncedMeta({ verified_on: '2026-09-01' })],
-    ['the primary source URL changed (same wording)', {}, syncedMeta({ source_url: 'https://ask.ifas.ufl.edu/publication/OLD' })],
-  ])('managed metadata that changed with no change of wording still updates the row: %s', (_label, factChange, metadata) => {
-    const plan = planFactSync({ ...fact, ...factChange }, syncedRow({ metadata }), { today: TODAY });
-    expect(plan).toEqual({ action: 'update', legacy: false, reactivate: false, metadataOnly: true });
-  });
-
-  test('a fact retired at its old expiry comes back, restamped, when the register extends the expiry', () => {
-    const retired = syncedRow({ active: false, metadata: syncedMeta({ expires_on: '2026-09-20', retired_on: '2026-09-20', retired_reason: 'expired' }) });
-    expect(planFactSync({ ...fact, expiresOn: '2026-12-01' }, retired, { today: TODAY }))
-      .toEqual({ action: 'update', legacy: false, reactivate: true, metadataOnly: true });
+    ['an expiry added', { expiresOn: '2027-01-01' }, {}],
+    ['an expiry extended', { expiresOn: '2027-01-01' }, { expires_on: '2026-10-02' }],
+    ['an expiry removed', {}, { expires_on: '2026-12-01' }],
+    ['the derived flag changed', { derived: true }, {}],
+    ['the verification date moved', {}, { verified_on: '2026-09-01' }],
+    ['the primary source URL changed (same wording)', {}, { source_url: 'https://ask.ifas.ufl.edu/publication/OLD' }],
+  ])('managed metadata that changed with no change of wording still updates the row: %s', (_label, factChange, metaChange) => {
+    const plan = planFactSync({ ...fact, ...factChange }, syncedRow({ metadata: syncedMeta(metaChange) }), { today: TODAY });
+    expect(plan).toEqual({ action: 'update', legacy: false, reactivate: false, metadataOnly: true, converged: false });
   });
 
   test('metadata stored as a JSON string is read the same way', () => {
@@ -252,7 +261,7 @@ describe('planFactSync (pure)', () => {
   test('an expired fact retires its untouched active row, once', () => {
     const expired = { ...fact, expiresOn: '2026-09-28' };
     expect(planFactSync(expired, syncedRow(), { today: TODAY })).toEqual({ action: 'retire', reason: 'expired' });
-    expect(planFactSync(expired, syncedRow({ active: false }), { today: TODAY })).toEqual({ action: 'unchanged' });
+    expect(planFactSync(expired, syncedRow({ active: false, metadata: syncedMeta({ retired_reason: 'expired' }) }), { today: TODAY })).toEqual({ action: 'unchanged' });
     // the day before expiry it is still a live fact (its row already carries that expiry)
     expect(planFactSync(expired, syncedRow({ metadata: syncedMeta({ expires_on: '2026-09-28' }) }), { today: '2026-09-27' })).toEqual({ action: 'unchanged' });
   });
@@ -262,29 +271,36 @@ describe('planFactSync (pure)', () => {
     expect(planFactSync(expired, syncedRow({ content: 'edited' }), { today: TODAY }).action).toBe('hold');
   });
 
-  test('a retired-then-restored fact reactivates its untouched row', () => {
-    expect(planFactSync(fact, syncedRow({ active: false }), { today: TODAY })).toEqual({ action: 'update', legacy: false, reactivate: true, metadataOnly: true });
+  test('a fact the REGISTER retired comes back, restamped, when the register extends the expiry', () => {
+    const retired = syncedRow({ active: false, metadata: syncedMeta({ expires_on: '2026-09-20', retired_on: '2026-09-20', retired_reason: 'expired' }) });
+    expect(planFactSync({ ...fact, expiresOn: '2026-12-01' }, retired, { today: TODAY }))
+      .toEqual({ action: 'update', legacy: false, reactivate: true, metadataOnly: true, converged: false });
+  });
+
+  test('a row a PERSON deactivated (active=false, no retirement stamp) is held, never switched back on', () => {
+    expect(planFactSync(fact, syncedRow({ active: false }), { today: TODAY })).toEqual({ action: 'hold', reason: 'deactivated_by_person' });
   });
 });
 
 describe('planStraySync (pure) — a register row whose slug left the register', () => {
+  const fact = FACTS[0];
   test('ignores rows that are not the register\'s, leaves inactive rows alone', () => {
-    expect(planStraySync(row({ source: 'manual' }))).toEqual({ action: 'ignore' });
-    expect(planStraySync(row({ active: false }))).toEqual({ action: 'unchanged' });
+    expect(planStraySync(rowFor(fact, { source: 'manual' }))).toEqual({ action: 'ignore' });
+    expect(planStraySync(rowFor(fact, { active: false }))).toEqual({ action: 'unchanged' });
   });
 
   test('retires an untouched or legacy row, holds an edited one', () => {
-    const untouched = row({ metadata: meta({ register_hash: rowFingerprint(row()) }) });
-    expect(planStraySync(untouched)).toEqual({ action: 'retire', reason: 'withdrawn_from_register' });
-    expect(planStraySync(row({ metadata: meta({ register_hash: undefined }) }))).toEqual({ action: 'retire', reason: 'withdrawn_from_register' });
-    const edited = row({ metadata: meta({ register_hash: 'stamped-before-the-edit' }) });
-    expect(planStraySync(edited)).toMatchObject({ action: 'hold', reason: 'edited_by_person' });
+    expect(planStraySync(rowFor(fact))).toEqual({ action: 'retire', reason: 'withdrawn_from_register' });
+    expect(planStraySync(withMeta(fact, { register_hash: undefined }))).toEqual({ action: 'retire', reason: 'withdrawn_from_register' });
+    expect(planStraySync(rowFor(fact, { content: 'edited by a person' }))).toMatchObject({ action: 'hold', reason: 'edited_by_person' });
   });
 });
 
 describe('ensureFactRegister', () => {
+  const clean = () => ({ inserted: [], updated: [], retired: [], held: [], unchanged: [], skipped: [], errors: [] });
+
   test('syncs once, then not again within the interval, then again when forced', async () => {
-    const sync = jest.fn(async () => ({ inserted: ['x'], updated: [], retired: [], held: [], unchanged: [], skipped: [], errors: [] }));
+    const sync = jest.fn(async () => ({ ...clean(), inserted: ['x'] }));
     const first = await ensureFactRegister({ now: NOW, sync });
     expect(first.inserted).toEqual(['x']);
     const second = await ensureFactRegister({ now: new Date(NOW.getTime() + 60 * 60e3), sync });
@@ -294,7 +310,7 @@ describe('ensureFactRegister', () => {
   });
 
   test('runs again after the interval has passed', async () => {
-    const sync = jest.fn(async () => ({ errors: [] }));
+    const sync = jest.fn(async () => clean());
     await ensureFactRegister({ now: NOW, sync });
     await ensureFactRegister({ now: new Date(NOW.getTime() + 60 * 60e3), sync });
     expect(sync).toHaveBeenCalledTimes(1);
@@ -302,11 +318,19 @@ describe('ensureFactRegister', () => {
     expect(sync).toHaveBeenCalledTimes(2);
   });
 
+  test('a failed sync leaves no stamp, so the next call retries', async () => {
+    const sync = jest.fn()
+      .mockRejectedValueOnce(new Error('db down'))
+      .mockResolvedValueOnce(clean());
+    await expect(ensureFactRegister({ now: NOW, sync })).rejects.toThrow('db down');
+    await expect(ensureFactRegister({ now: new Date(NOW.getTime() + 1000), sync })).resolves.toEqual(clean());
+  });
+
   test('a sync that RESOLVED with a per-fact error is not a success: the next call retries at once', async () => {
     const sync = jest.fn()
-      .mockResolvedValueOnce({ inserted: ['a'], updated: [], retired: [], held: [], unchanged: [], skipped: [], errors: [{ slug: 'b', error: 'connection reset' }] })
-      .mockResolvedValueOnce({ inserted: ['b'], updated: [], retired: [], held: [], unchanged: ['a'], skipped: [], errors: [] })
-      .mockResolvedValueOnce({ errors: [] });
+      .mockResolvedValueOnce({ ...clean(), inserted: ['a'], errors: [{ slug: 'b', error: 'connection reset' }] })
+      .mockResolvedValueOnce({ ...clean(), inserted: ['b'], unchanged: ['a'] })
+      .mockResolvedValueOnce(clean());
     const first = await ensureFactRegister({ now: NOW, sync });
     expect(first.errors).toHaveLength(1);
     const second = await ensureFactRegister({ now: new Date(NOW.getTime() + 1000), sync });
@@ -316,248 +340,264 @@ describe('ensureFactRegister', () => {
     expect(third).toEqual({ skipped: true, reason: 'recently synced' });
     expect(sync).toHaveBeenCalledTimes(2);
   });
+});
 
-  test('a failed sync leaves no stamp, so the next call retries', async () => {
-    const sync = jest.fn()
-      .mockRejectedValueOnce(new Error('db down'))
-      .mockResolvedValueOnce({ ok: true });
-    await expect(ensureFactRegister({ now: NOW, sync })).rejects.toThrow('db down');
-    await expect(ensureFactRegister({ now: new Date(NOW.getTime() + 1000), sync })).resolves.toEqual({ ok: true });
+describe('sentence and clause splitting', () => {
+  test('a period after an abbreviation does not end the sentence', () => {
+    expect(splitSentences('Large patch in St. Augustinegrass flares up in summer. Water at 6 a.m. or 8 p.m. only.'))
+      .toEqual(['Large patch in St. Augustinegrass flares up in summer.', 'Water at 6 a.m. or 8 p.m. only.']);
+  });
+
+  test('clauses break at punctuation, brackets, a spaced hyphen and statement conjunctions — never inside a hyphenated word', () => {
+    expect(splitClauses('Termites do not swarm only in spring - they swarm again after late-summer storms, but not in winter'))
+      .toEqual(['Termites do not swarm only in spring', 'they swarm again after late-summer storms', 'not in winter']);
   });
 });
 
 describe('findUnverifiedClaims', () => {
-  test('flags a storm-triggered "second swarm" termite claim', () => {
-    const claims = findUnverifiedClaims('Termites will throw a second swarm event after significant rain and storm activity.');
-    expect(claims).toEqual([{ rule: 'termite_second_swarm', excerpt: expect.stringContaining('second') }]);
-  });
+  const rule = (sentence, name) => findUnverifiedClaims(sentence).some((c) => c.rule === name);
 
-  test('does NOT flag the correct, verified swarm-season fact', () => {
-    const claims = findUnverifiedClaims('Native subterranean termites swarm January through May, on warm days after rain.');
-    expect(claims).toEqual([]);
-  });
+  describe('termite_second_swarm — the September 2026 claim in every phrasing', () => {
+    test.each([
+      'Termites will throw a second swarm event after significant rain and storm activity.',
+      'After a wet week, termites swarm again after storms roll through.',
+      'Termites will swarm for a second time after summer storms.',
+      'Termites swarm a second time when the storms come.',
+      'Termites make another flight after storms.',
+      'Termites will have a second flight in late summer.',
+      'A second termite flight follows hurricanes.',
+      'Storms can trigger another subterranean termite flight.',
+      'Expect a second termite swarm after the next storm.',
+      'Storms can trigger another termite swarm.',
+      'A second subterranean termite swarm follows hurricanes.',
+      'Termites swarm once again after summer storms.',
+      'Termites take flight again after storms.',
+      'A second swarm of subterranean termites often follows summer storms.',
+      'Summer storms can trigger subterranean termite swarms.',
+      'Subterranean termites also swarm in late summer.',
+      'Termites can have a second, smaller swarm after storms.',
+      'Termites can have a second (and bigger) swarm after storms.',
+      'Termite swarms after storms are common here.',
+      'Hurricane season brings termite swarmers out again.',
+    ])('flags: %s', (sentence) => {
+      expect(rule(sentence, 'termite_second_swarm')).toBe(true);
+    });
 
-  test('does NOT flag a correctly-negated denial of the false swarm claim', () => {
-    const claims = findUnverifiedClaims('Termites do not have a second swarm after storms.');
-    expect(claims.some((c) => c.rule === 'termite_second_swarm')).toBe(false);
-  });
+    test.each([
+      'Native subterranean termites swarm January through May, on warm days after rain.',
+      'Formosan subterranean termites begin swarming in late April.',
+      'Termite swarmers appear on warm afternoons after rain in spring.',
+      'After a storm, check the house for termite damage.',
+      'Swarm season, January through May, is unrelated to hurricane season.',
+    ])('does NOT flag the verified swarm-season facts: %s', (sentence) => {
+      expect(rule(sentence, 'termite_second_swarm')).toBe(false);
+    });
 
-  test('does NOT flag a LEADING negation before the claim\'s subject', () => {
-    const claims = findUnverifiedClaims('No native subterranean termites have a second swarm after storms.');
-    expect(claims.some((c) => c.rule === 'termite_second_swarm')).toBe(false);
-  });
+    test.each([
+      'Termites do not have a second swarm after storms.',
+      'Termites do not swarm again after storms.',
+      'Termites do not swarm for a second time after storms.',
+      'No native subterranean termites have a second swarm after storms.',
+      'For termites, there is no second swarm after storms.',
+      'There is no such thing as a second termite swarm.',
+      'There is no second termite swarm after storms.',
+      'UF documents no second termite swarm.',
+      'This is not a second termite swarm.',
+      'Termite swarms are not triggered by storms.',
+      "Storms don't cause termite swarms.",
+    ])('does NOT flag a denial with the negation attached inside the claim clause: %s', (sentence) => {
+      expect(rule(sentence, 'termite_second_swarm')).toBe(false);
+    });
 
-  test('a trailing, unrelated "not" after a comma does NOT exempt the real false claim', () => {
-    const claims = findUnverifiedClaims('Termites will have a second swarm after storms, not that anyone believes it.');
-    expect(claims.some((c) => c.rule === 'termite_second_swarm')).toBe(true);
-  });
+    test.each([
+      'Western drywood termites can have another round of late-summer swarms.',
+      'A second drywood termite swarm is possible in fall.',
+      'Drywood termites fly in most months. They swarm again in fall.',
+      'Native subterranean termites fly in spring, but drywood termites fly most months. They swarm again in fall.',
+    ])('does NOT flag a drywood subject (a real wide flight window): %s', (sentence) => {
+      expect(rule(sentence, 'termite_second_swarm')).toBe(false);
+    });
 
-  test('does NOT flag a correctly-scoped drywood swarm claim (a different species, a real wide window)', () => {
-    const claims = findUnverifiedClaims('Western drywood termites can have another round of late-summer swarms.');
-    expect(claims.some((c) => c.rule === 'termite_second_swarm')).toBe(false);
-  });
+    test.each([
+      'Unlike drywood termites, native subterranean termites have a second swarm after storms.',
+      'Drywood termites may fly in fall. Native subterranean termites have a second swarm after storms.',
+      'Drywood termites fly in almost any month, but subterranean termites are different. They swarm again after late-summer storms.',
+      'Drywood termites may fly in fall, but native subterranean termites fly in spring. They swarm again after storms.',
+      'Subterranean termites swarm again after storms, unlike drywood termites.',
+    ])('a drywood mention elsewhere does NOT shield a subterranean claim (the nearest termite decides): %s', (sentence) => {
+      expect(rule(sentence, 'termite_second_swarm')).toBe(true);
+    });
 
-  test('a contrastive drywood clause does NOT exempt a false claim about a DIFFERENT species in the same sentence', () => {
-    const claims = findUnverifiedClaims('Unlike drywood termites, native subterranean termites have a second swarm after storms.');
-    expect(claims.some((c) => c.rule === 'termite_second_swarm')).toBe(true);
-  });
+    test.each([
+      ['no doubt', 'There is no doubt termites will swarm a second time after storms.'],
+      ['no doubt these', 'No doubt these termites have a second swarm after storms.'],
+      ['no wonder', 'No wonder termites have a second swarm after every storm.'],
+      ['no question', 'No question, termites have a second swarm after storms.'],
+      ['no second-guessing', 'No second-guessing: termites swarm again after storms.'],
+      ['not only', 'Not only do termites swarm in spring, termites swarm again after storms.'],
+      ['never fail to', 'Termites never fail to swarm again after a storm.'],
+      ['a negated aside inside the sentence', 'Termites, which are not picky, have a second swarm after storms.'],
+      ['a negated different verb', 'Termites do not eat concrete, yet termites have a second swarm after storms.'],
+      ['a denial of a different claim before a dash', 'Termites do not swarm only in spring — they swarm again after storms.'],
+      ['a denial of a different claim before a hyphen', 'Termites do not swarm only in spring - they swarm again after storms.'],
+      ['a denial of a different claim before "but"', "Termites don't swarm in winter but they swarm again after summer storms."],
+      ['another subject denied in the same sentence', 'Fire ants do not swarm again after storms and termites swarm again after storms.'],
+      ['a trailing unrelated "not"', 'Termites will have a second swarm after storms, not that anyone believes it.'],
+      ['"no myth" (an affirmation)', 'Termites swarm again after storms, and that is no myth.'],
+      ['a double negative that asserts the claim', 'It is a myth that termites do not swarm again after storms.'],
+    ])('a negation idiom, or a negation in another clause, clears nothing: %s', (_label, sentence) => {
+      expect(rule(sentence, 'termite_second_swarm')).toBe(true);
+    });
 
-  test('a correct drywood sentence does NOT exempt a false claim about a DIFFERENT sentence/species', () => {
-    const claims = findUnverifiedClaims('Drywood termites may fly in fall. Native subterranean termites have a second swarm after storms.');
-    expect(claims.some((c) => c.rule === 'termite_second_swarm')).toBe(true);
-  });
-
-  test('flags the natural word order "swarm again after storms"', () => {
-    const claims = findUnverifiedClaims('After a wet week, termites swarm again after storms roll through.');
-    expect(claims.some((c) => c.rule === 'termite_second_swarm')).toBe(true);
-  });
-
-  test.each([
-    'Termites will swarm for a second time after summer storms.',
-    'Termites swarm a second time when the storms come.',
-    'Termites make another flight after storms.',
-    'Termites will have a second flight in late summer.',
-    'A second termite flight follows hurricanes.',
-    'Storms can trigger another subterranean termite flight.',
-  ])('flags "(for) a second time" and the "flight" noun: %s', (sentence) => {
-    expect(findUnverifiedClaims(sentence).some((c) => c.rule === 'termite_second_swarm')).toBe(true);
-  });
-
-  test('exempts an explicit denial in that word order', () => {
-    expect(findUnverifiedClaims('Termites do not swarm again after storms.')).toEqual([]);
-    expect(findUnverifiedClaims('Termites do not swarm for a second time after storms.')).toEqual([]);
-    expect(findUnverifiedClaims('For termites, there is no second swarm after storms.')).toEqual([]);
-    expect(findUnverifiedClaims('There is no such thing as a second termite swarm.')).toEqual([]);
-  });
-
-  test.each([
-    ['no doubt', 'There is no doubt termites will swarm a second time after storms.'],
-    ['not only', 'Not only do termites swarm in spring, termites swarm again after storms.'],
-    ['never fail to', 'Termites never fail to swarm again after a storm.'],
-    ['a negated aside inside the match', 'Termites, which are not picky, have a second swarm after storms.'],
-    ['a negated different verb', 'Termites do not eat concrete, yet termites have a second swarm after storms.'],
-    ['a denial of a different claim before a dash', 'Termites do not swarm only in spring — they swarm again after storms.'],
-    ['a denial of a different claim before a hyphen', 'Termites do not swarm only in spring - they swarm again after storms.'],
-    ['"no wonder"', 'No wonder termites have a second swarm after every storm.'],
-    ['"no doubt these"', 'No doubt these termites have a second swarm after storms.'],
-    ['"no question"', 'No question, termites have a second swarm after storms.'],
-    ['"no myth" (an affirmation)', 'Termites swarm again after storms, and that is no myth.'],
-  ])('a negation idiom or unrelated negation (%s) does NOT exempt the false claim', (_label, sentence) => {
-    expect(findUnverifiedClaims(sentence).some((c) => c.rule === 'termite_second_swarm')).toBe(true);
-  });
-
-  describe('a pronoun subject is the claim only in termite context', () => {
     test.each([
       'Subterranean termites fly in spring. They swarm again after storms.',
       'Native termites swarm from January to May. They have a second swarm after every hurricane.',
       'Once termites establish, they fly again after late-summer storms.',
-    ])('flags: %s', (sentence) => {
-      expect(findUnverifiedClaims(sentence).some((c) => c.rule === 'termite_second_swarm')).toBe(true);
+    ])('a pronoun subject is the claim when the nearest termite named is not drywood: %s', (sentence) => {
+      expect(rule(sentence, 'termite_second_swarm')).toBe(true);
     });
 
     test.each([
       'Fire ants make six to eight mating flights a year. They fly again after rain.',
-      'Drywood termites fly in most months. They swarm again in fall.',
       'Mosquitoes breed in containers. They swarm again after every rain.',
-    ])('does NOT flag: %s', (sentence) => {
-      expect(findUnverifiedClaims(sentence).some((c) => c.rule === 'termite_second_swarm')).toBe(false);
+      'Love bugs are back. They swarm again in September.',
+    ])('a pronoun with no termite antecedent is not the claim: %s', (sentence) => {
+      expect(rule(sentence, 'termite_second_swarm')).toBe(false);
     });
   });
 
-  test.each([
-    'Summer large patch outbreaks are a myth.',
-    'The idea of a second termite swarm after storms is a myth.',
-    'A storm-triggered second termite swarm is just an old wives\' tale.',
-    'Myth: termites swarm again after storms.',
-    'Myth — large patch is a summer disease.',
-    'Myth: that termites have a second swarm after late-summer storms.',
-  ])('the matched claim itself named a myth is the correct fact, not the claim: %s', (sentence) => {
-    expect(findUnverifiedClaims(sentence)).toEqual([]);
+  describe('"myth" clears a claim only when it names THAT claim', () => {
+    test.each([
+      'The idea of a second termite swarm after storms is a myth.',
+      "A storm-triggered second termite swarm is just an old wives' tale.",
+      'Myth: termites swarm again after storms.',
+      'Myth — large patch is a summer disease.',
+      'Myth: that termites have a second swarm after late-summer storms.',
+      'Summer large patch outbreaks are a myth.',
+    ])('the claim named a myth passes: %s', (sentence) => {
+      expect(findUnverifiedClaims(sentence)).toEqual([]);
+    });
+
+    test.each([
+      ['a myth phrase in another clause of the same sentence', 'Termites swarm again after storms, but winter swarms are a myth.', 'termite_second_swarm'],
+      ['a myth phrase after a semicolon', 'Termites have a second swarm after storms; the rest is a myth.', 'termite_second_swarm'],
+      ['a myth phrase after a dash', 'Termites swarm again after storms — the winter swarm is a myth.', 'termite_second_swarm'],
+      ['a myth phrase joined by "and"', 'Termites swarm again after storms and the winter swarm is a myth.', 'termite_second_swarm'],
+      ['a myth about something else', 'Termites have a second swarm after storms, but the idea that every winged insect is a termite is a myth.', 'termite_second_swarm'],
+      ['a myth about something else, large patch', 'Large patch thrives in summer, and the idea that it is harmless is a myth.', 'large_patch_summer_disease'],
+      ['"Myth:" labelling an EARLIER claim, then the false one', 'Myth: termites never swarm. Fact: termites swarm again after every storm.', 'termite_second_swarm'],
+      ['a quiz label that poses the claim', 'Fact or myth: termites swarm again after summer storms? Fact.', 'termite_second_swarm'],
+      ['a label that affirms the claim', 'Not a myth: termites swarm again after big summer storms.', 'termite_second_swarm'],
+    ])('a myth phrase that is not about the matched claim clears nothing: %s', (_label, sentence, name) => {
+      expect(rule(sentence, name)).toBe(true);
+    });
   });
 
-  test.each([
-    ['a myth phrase in another clause of the same sentence', 'Termites swarm again after storms, but winter swarms are a myth.', 'termite_second_swarm'],
-    ['a myth phrase after a semicolon', 'Termites have a second swarm after storms; the rest is a myth.', 'termite_second_swarm'],
-    ['a myth phrase after a dash', 'Termites swarm again after storms — the winter swarm is a myth.', 'termite_second_swarm'],
-    ['a myth phrase about something else in the sentence', 'Large patch thrives in summer, and the idea that it is harmless is a myth.', 'large_patch_summer_disease'],
-    ['"Myth:" labelling an EARLIER claim, then the false one', 'Myth: termites never swarm. Fact: termites swarm again after every storm.', 'termite_second_swarm'],
-  ])('a myth phrase that is not about the matched claim clears nothing: %s', (_label, sentence, rule) => {
-    expect(findUnverifiedClaims(sentence).some((c) => c.rule === rule)).toBe(true);
+  describe('large_patch_summer_disease', () => {
+    test.each([
+      'Watch for large patch this summer as temperatures climb.',
+      'Large patch takes off once temperatures climb above 80 degrees.',
+      'Large patch is not a summer disease up north, but here large patch thrives in summer heat.',
+      'Brown patch is no joke in summer heat.',
+      'Large patch in St. Augustinegrass flares up in summer.',
+      'Large patch peaks in July and August.',
+      'Brown patch loves the rainy season.',
+    ])('flags: %s', (sentence) => {
+      expect(rule(sentence, 'large_patch_summer_disease')).toBe(true);
+    });
+
+    test.each([
+      'Large patch occurs in warm, humid weather and is encouraged by excessive nitrogen.',
+      'Large patch is normally not observed in the summer months.',
+      'Large patch is most likely from November through May when temperatures are below 80°F.',
+      'Large patch appears in spring and fall; it is not a summer disease.',
+      'In summer, brown spots are usually chinch bugs, not large patch.',
+      'Rhizoctonia leaf and sheath spot occurs in summer above 80°F, and its controls are very different from large patch.',
+      'A summer patch is often mistaken for large patch.',
+      'Unlike large patch, gray leaf spot is a summer disease.',
+    ])('UF\'s own wording and the correct contrasts pass: %s', (sentence) => {
+      expect(rule(sentence, 'large_patch_summer_disease')).toBe(false);
+    });
   });
 
-  test('a correct denial earlier in the sentence does NOT exempt a later false claim in it', () => {
-    const claims = findUnverifiedClaims('Large patch is not a summer disease up north, but here large patch thrives in summer heat.');
-    expect(claims.some((c) => c.rule === 'large_patch_summer_disease')).toBe(true);
+  describe('non_flea_vacuum_advice', () => {
+    test.each([
+      'Avoid vacuuming for 14 days after your ant treatment.',
+      'For fleas, avoid vacuuming for 14 days so pupae hatch into the residual.',
+      'Vacuum daily for 14 days after your ant treatment.',
+      'For fleas, vacuum daily for about 14 days so pupae hatch into the residual.',
+      'For fleas, vacuum daily for 3 weeks.',
+      'Fleas may linger after treatment, but after ant treatment vacuum daily for 14 days.',
+      'Wait 14 days before vacuuming after your ant treatment.',
+      "Don't vacuum for 14 days after your flea treatment.",
+      'Don’t vacuum for 14 days after your flea treatment.',
+      'No vacuuming for 14 days after your flea treatment.',
+      'Hold off on vacuuming for two weeks after your flea treatment.',
+      'For fleas, vacuum daily for 14 days. For fleas, keep vacuuming for a few weeks.',
+      'For fleas, keep vacuuming for a few weeks. Vacuum daily for 14 days after your ant treatment.',
+    ])('flags a fixed or negated vacuuming instruction the source does not support: %s', (sentence) => {
+      expect(rule(sentence, 'non_flea_vacuum_advice')).toBe(true);
+    });
+
+    test.each([
+      'For fleas, keep vacuuming for a few weeks after treatment.',
+      'After a flea treatment, keep vacuuming for several weeks.',
+      'For fleas, vacuum for 1 to 4 weeks; the cocoon stage lasts that long.',
+      'Expect to see some fleas for a few weeks; keep vacuuming and retreat if they persist beyond 4 weeks.',
+      'Vacuum before your treatment and keep vacuuming afterwards.',
+    ])('the sourced flea guidance passes: %s', (sentence) => {
+      expect(rule(sentence, 'non_flea_vacuum_advice')).toBe(false);
+    });
   });
 
-  test('"no joke" is not a denial of the large-patch claim', () => {
-    const claims = findUnverifiedClaims('Brown patch is no joke in summer heat.');
-    expect(claims.some((c) => c.rule === 'large_patch_summer_disease')).toBe(true);
-  });
+  describe('absolute_safety_claim', () => {
+    test.each([
+      'Our family-safe treatment keeps everyone comfortable.',
+      'It is safe for the whole family.',
+      'Kid-safe once it dries.',
+      'Safe for children and pets.',
+      'A child-safe barrier.',
+      'Completely safe for your pets.',
+      'Safe around kids and dogs once dry.',
+      'A cat-safe, dog-safe formula.',
+      'It is safe around our pets.',
+      'Our spray is completely bee-safe.',
+      'This treatment is pet-safe for the whole family.',
+      'Our spray is safe for people and pets.',
+      'It is safe to use around pets.',
+      'The lawn is safe once dry.',
+      'Keep pets off the lawn until it is dry, then it is safe to let them back out.',
+      'It is kid safe once dry.',
+    ])('flags: %s', (sentence) => {
+      expect(rule(sentence, 'absolute_safety_claim')).toBe(true);
+    });
 
-  test.each([
-    'Expect a second termite swarm after the next storm.',
-    'Storms can trigger another termite swarm.',
-    'A second subterranean termite swarm follows hurricanes.',
-    'No doubt a second termite swarm is coming.',
-  ])('flags the claim when the modifier comes before "termite swarm": %s', (sentence) => {
-    expect(findUnverifiedClaims(sentence).some((c) => c.rule === 'termite_second_swarm')).toBe(true);
-  });
-
-  test.each([
-    'There is no second termite swarm after storms.',
-    'UF documents no second termite swarm.',
-    'This is not a second termite swarm.',
-    'A second drywood termite swarm is possible in fall.',
-  ])('does NOT flag a denial or a drywood subject in that word order: %s', (sentence) => {
-    expect(findUnverifiedClaims(sentence).some((c) => c.rule === 'termite_second_swarm')).toBe(false);
-  });
-
-  test('flags brown/large patch mis-described as a summer disease', () => {
-    const claims = findUnverifiedClaims('Watch for large patch this summer as temperatures climb.');
-    expect(claims.some((c) => c.rule === 'large_patch_summer_disease')).toBe(true);
-  });
-
-  test('UF\'s own wording about large patch passes: warm humid weather, and not observed in summer', () => {
-    expect(findUnverifiedClaims('Large patch occurs in warm, humid weather and is encouraged by excessive nitrogen.')).toEqual([]);
-    expect(findUnverifiedClaims('Large patch is normally not observed in the summer months.')).toEqual([]);
-    expect(findUnverifiedClaims('Large patch is most likely from November through May when temperatures are below 80°F.')).toEqual([]);
-  });
-
-  test('flags large patch placed above 80 degrees', () => {
-    const claims = findUnverifiedClaims('Large patch takes off once temperatures climb above 80 degrees.');
-    expect(claims.some((c) => c.rule === 'large_patch_summer_disease')).toBe(true);
-  });
-
-  test('does NOT flag the correct, negated large-patch explanation', () => {
-    const claims = findUnverifiedClaims('Large patch appears in spring and fall; it is not a summer disease.');
-    expect(claims.some((c) => c.rule === 'large_patch_summer_disease')).toBe(false);
-  });
-
-  test.each([
-    'In summer, brown spots are usually chinch bugs, not large patch.',
-    'Rhizoctonia leaf and sheath spot occurs in summer above 80°F, and its controls are very different from large patch.',
-    'A summer patch is often mistaken for large patch.',
-    'Unlike large patch, gray leaf spot is a summer disease.',
-  ])('the correct "not / different from / mistaken for large patch" contrast passes: %s', (sentence) => {
-    expect(findUnverifiedClaims(sentence).some((c) => c.rule === 'large_patch_summer_disease')).toBe(false);
-  });
-
-  test('flags a generalized "do not vacuum" instruction — never correct, any context', () => {
-    expect(findUnverifiedClaims('Avoid vacuuming for 14 days after your ant treatment.')
-      .some((c) => c.rule === 'non_flea_vacuum_advice')).toBe(true);
-    // Even in a flea context, telling customers to AVOID vacuuming is wrong
-    // — the actual guidance says to vacuum, so this is flagged too.
-    expect(findUnverifiedClaims('For fleas, avoid vacuuming for 14 days so pupae hatch into the residual.')
-      .some((c) => c.rule === 'non_flea_vacuum_advice')).toBe(true);
-  });
-
-  test('flags the affirmative "vacuum for N days" instruction generalized outside fleas', () => {
-    const claims = findUnverifiedClaims('Vacuum daily for 14 days after your ant treatment.');
-    expect(claims.some((c) => c.rule === 'non_flea_vacuum_advice')).toBe(true);
-  });
-
-  test('does NOT flag the correct affirmative flea vacuuming guidance', () => {
-    const claims = findUnverifiedClaims('For fleas, vacuum daily for about 14 days so pupae hatch into the residual.');
-    expect(claims.some((c) => c.rule === 'non_flea_vacuum_advice')).toBe(false);
-  });
-
-  test('a later non-exempt occurrence still blocks after an earlier exempt one', () => {
-    const claims = findUnverifiedClaims('For fleas, vacuum daily for 14 days. For fleas, avoid vacuuming for 14 days.');
-    expect(claims.some((c) => c.rule === 'non_flea_vacuum_advice')).toBe(true);
-  });
-
-  test('correct flea guidance in one sentence does NOT exempt a false claim about a DIFFERENT pest in another', () => {
-    const claims = findUnverifiedClaims('For fleas, vacuum daily for about 14 days so pupae hatch into the residual. Vacuum daily for 14 days after your ant treatment.');
-    expect(claims.some((c) => c.rule === 'non_flea_vacuum_advice')).toBe(true);
-  });
-
-  test.each([
-    'Our family-safe treatment keeps everyone comfortable.',
-    'It is safe for the whole family.',
-    'Kid-safe once it dries.',
-    'Safe for children and pets.',
-    'A child-safe barrier.',
-    'Completely safe for your pets.',
-    'Safe around kids and dogs once dry.',
-    'A cat-safe, dog-safe formula.',
-    'It is safe around our pets.',
-  ])('flags family, kid, child, pet, dog and cat safety claims: %s', (sentence) => {
-    expect(findUnverifiedClaims(sentence).some((c) => c.rule === 'absolute_safety_claim')).toBe(true);
-  });
-
-  test('the label\'s own re-entry wording is not a safety claim', () => {
-    expect(findUnverifiedClaims('Do not allow people or pets on treated surfaces until spray has dried.')).toEqual([]);
-    expect(findUnverifiedClaims('Keep pets off the lawn until it is dry, then it is safe to let them back out.')).toEqual([]);
-  });
-
-  test('flags absolute "bee-safe" / "pet-safe" claims', () => {
-    expect(findUnverifiedClaims('Our spray is completely bee-safe.').some((c) => c.rule === 'absolute_safety_claim')).toBe(true);
-    expect(findUnverifiedClaims('This treatment is pet-safe for the whole family.').some((c) => c.rule === 'absolute_safety_claim')).toBe(true);
+    test.each([
+      'Do not permit humans or pets to contact treated surfaces until the spray has dried.',
+      'Do not allow people or pets on treated surfaces until spray has dried.',
+      'Keep pets off the lawn until it is dry; your technician will confirm when it is safe to let them back out.',
+      'Keep your family safe from mosquitoes this summer.',
+      'It is safe to say termites are active.',
+      'Have a safe Labor Day weekend.',
+      'The product is highly toxic to bees exposed to direct treatment.',
+    ])('the label\'s wording, "safe from", "safe to say" and the technician-confirms idiom pass: %s', (sentence) => {
+      expect(rule(sentence, 'absolute_safety_claim')).toBe(false);
+    });
   });
 
   test('a clean draft with no known-false claim shapes returns nothing', () => {
     expect(findUnverifiedClaims('Mosquito season is here. Call us for a quote.')).toEqual([]);
+  });
+
+  test('curly apostrophes and quotes are normalised before the rules run', () => {
+    expect(findUnverifiedClaims('Termites don’t have a second swarm after storms.')).toEqual([]);
+    expect(rule('Termites “swarm again” after storms.', 'termite_second_swarm')).toBe(true);
+  });
+
+  test('one result per rule, with the offending clause as the excerpt', () => {
+    const claims = findUnverifiedClaims('Termites swarm again after storms. Termites have a second swarm every fall. Vacuum for 14 days after ant treatment.');
+    expect(claims.map((c) => c.rule)).toEqual(['termite_second_swarm', 'non_flea_vacuum_advice']);
+    expect(claims[0].excerpt).toBe('Termites swarm again after storms');
   });
 
   test('the register\'s own titles and content never trip its own rules (a writer may repeat them)', () => {
@@ -575,23 +615,11 @@ describe('findUnverifiedClaims', () => {
 
 describe('factsPromptBlock', () => {
   test('lists every fact with its source text, its limits and its source, then binds the writer to the list', async () => {
+    const mosquito = bySlug('fact-container-mosquitoes');
+    const taurus = bySlug('fact-taurus-sc-non-repellent');
     db.mockImplementation(() => chain([
-      row({
-        slug: 'fact-container-mosquitoes',
-        title: 'Aedes mosquitoes: containers and the 7–10 day life cycle',
-        summary: '"A mosquito egg takes 7–10 days to develop into an adult mosquito."',
-        content: 'Per CDC, an egg takes 7 to 10 days to develop into an adult.',
-        metadata: JSON.stringify(meta({ source_url: 'https://www.cdc.gov/mosquitoes/about/life-cycle-of-aedes-mosquitoes.html' })),
-        tags: ['mosquitoes'],
-      }),
-      row({
-        slug: 'fact-taurus-sc-non-repellent',
-        title: 'Taurus SC: non-repellent',
-        summary: '"Taurus SC is a non-repellent insecticide"',
-        content: 'The manufacturer states no time to control.',
-        metadata: meta({ source_url: 'https://www.controlsolutionsinc.com/csi-pest/products/taurus-sc' }),
-        tags: ['products'],
-      }),
+      { ...rowFor(mosquito), metadata: JSON.stringify(rowFor(mosquito).metadata) },
+      rowFor(taurus),
     ]));
 
     const block = await factsPromptBlock({ ensure: false, now: NOW });
@@ -599,7 +627,7 @@ describe('factsPromptBlock', () => {
     expect(block).toContain('VERIFIED FACTS');
     expect(block).toContain('A mosquito egg takes 7–10 days');
     expect(block).toContain('https://www.cdc.gov/mosquitoes/about/life-cycle-of-aedes-mosquitoes.html');
-    expect(block).toContain('The manufacturer states no time to control.');
+    expect(block).toContain('The manufacturer states no time to control');
     expect(block).toContain('If the list does not cover a claim, leave the claim out');
     expect(block).toContain('Never write a number of days, weeks or months that does not appear in the list');
   });
@@ -610,7 +638,7 @@ describe('factsPromptBlock', () => {
   });
 
   test('a row without provenance is not rendered even when it is the only row', async () => {
-    db.mockImplementation(() => chain([row({ metadata: meta({ register_hash: undefined }) })]));
+    db.mockImplementation(() => chain([rowFor(TERMITE, { content: 'edited by a person' })]));
     await expect(factsPromptBlock({ ensure: false, now: NOW })).rejects.toThrow(/fact register is empty/);
   });
 
@@ -619,6 +647,6 @@ describe('factsPromptBlock', () => {
     // draft must still be grounded in what is stored.
     const block = await factsPromptBlock({ now: NOW });
     expect(block).toContain('VERIFIED FACTS');
-    expect(block).toContain('Southern chinch bug');
+    expect(block).toContain(CHINCH.title);
   });
 });

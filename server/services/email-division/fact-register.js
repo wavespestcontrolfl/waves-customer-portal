@@ -12,22 +12,30 @@
  *    withdrawn fact (active=false AND status 'archived', so the shared
  *    knowledge-base search and the admin list drop it too; the status it had
  *    is restored if the fact comes back), and HOLD a row a person has
- *    edited, with an audit row saying so. Runs daily (scheduler.js) and on
- *    demand before a draft.
+ *    edited, deleted or deactivated, with an audit row saying so. Status is
+ *    otherwise never changed by the sync — not even through the knowledge
+ *    base's own "content changed, lift the AI flag" trigger, which the sync
+ *    undoes for its rows: a flag is lifted by a person's Verify or an
+ *    admin-run flagged-only re-review, never by a wording update. Runs
+ *    daily (scheduler.js) and on demand before a draft.
  * 2. Lists the usable facts with their provenance checked: only register
- *    rows the sync stamped, with a source URL and a quote, active,
- *    status 'active' (the weekly knowledge-base audit hides a doubtful entry
- *    by setting status 'flagged'), and not expired.
- * 3. Flags a small, deterministic set of known-false or overreaching claim
- *    shapes so the newsletter validator can hard-block them before a draft
- *    is proofed or sent.
+ *    rows the sync stamped, still carrying the register's exact wording,
+ *    with a source URL and a quote, active, status 'active' (the weekly
+ *    knowledge-base audit hides a doubtful entry by setting status
+ *    'flagged'), and not expired. An edited row is shown in the knowledge
+ *    base and reported, but never fed to a writer as a verified fact.
+ * 3. Flags known-false or overreaching claim shapes so the newsletter
+ *    validator can hard-block them before a draft is proofed or sent.
  *
  * The claim rules are a tripwire, not a proof: a false hold costs one proof
- * review, a false pass mails a wrong claim to the list. So every exemption
- * below is an ALLOWLIST of explicit denial shapes for that one claim — never
- * "the clause contains a negation word", which lets idioms ("no doubt", "no
- * joke", "never fails to", "not only") and unrelated asides clear a real
- * false claim.
+ * review, a false pass mails a wrong claim to the list. They work on
+ * sentences and clauses, not phrases: a clause that names the pest, the
+ * behaviour and the false trigger is the claim, whatever the word order,
+ * and the only thing that clears it is a negation attached inside that same
+ * clause (never "the sentence contains a negation somewhere": idioms such
+ * as "no doubt", "no joke", "never fails to" and "not only" are struck
+ * before the negation is looked for, and a negation in a neighbouring
+ * clause clears nothing).
  */
 
 const crypto = require('crypto');
@@ -86,35 +94,6 @@ function isExpired(fact, today) {
   return typeof fact?.expiresOn === 'string' && today >= fact.expiresOn;
 }
 
-/**
- * Pure: what the sync does with one register fact given the row currently
- * stored under its slug (or none). Never touches a row a person edited.
- *
- * A register row with no register_hash predates fingerprinting (the seed
- * migrations of the first three cuts of this lane, present only in
- * preview/QA databases) — it is the register's own writing, brought under
- * management like an untouched row; a person's edit to one of those cannot
- * be told apart, and the alternative leaves superseded content live in the
- * writer's prompt.
- */
-function planFactSync(fact, row, { today } = {}) {
-  const expired = isExpired(fact, today);
-  if (!row) return expired ? { action: 'skip', reason: 'expired_never_seeded' } : { action: 'insert' };
-  if (row.source !== SOURCE) return { action: 'hold', reason: 'foreign_row' };
-
-  const meta = parseJson(row.metadata, {}) || {};
-  const shippedHash = factFingerprint(fact);
-  const legacy = !meta.register_hash;
-  const rowHash = rowFingerprint(row);
-  if (!legacy && rowHash !== meta.register_hash) {
-    return { action: 'hold', reason: 'edited_by_person', rowHash, shippedHash };
-  }
-  if (expired) return row.active ? { action: 'retire', reason: 'expired' } : { action: 'unchanged' };
-  const sameWording = !legacy && meta.register_hash === shippedHash;
-  if (sameWording && row.active && managedMetadataCurrent(meta, fact)) return { action: 'unchanged' };
-  return { action: 'update', legacy, reactivate: !row.active, metadataOnly: sameWording };
-}
-
 // The metadata the register manages outside the wording fingerprint. An
 // expiry extended (or removed), a derived flag or the verification date
 // changing must reach the row even when no word of the fact changed —
@@ -124,6 +103,52 @@ function managedMetadataCurrent(meta, fact) {
     && (meta.derived === true) === (fact.derived === true)
     && meta.verified_on === VERIFIED_ON
     && meta.source_url === fact.sourceUrls[0];
+}
+
+/**
+ * Pure: what the sync does with one register fact given the row currently
+ * stored under its slug (or none). Never touches a row a person edited,
+ * deactivated or deleted.
+ *
+ * `priorSeed` says the register seeded this slug before (an audit row
+ * exists) — with no row left, a person deleted it, and the register does
+ * not put it back.
+ *
+ * A register row with no register_hash predates fingerprinting (the seed
+ * migrations of the first three cuts of this lane, present only in
+ * preview/QA databases) — it is the register's own writing, brought under
+ * management like an untouched row; a person's edit to one of those cannot
+ * be told apart, and the alternative leaves superseded content live in the
+ * writer's prompt.
+ */
+function planFactSync(fact, row, { today, priorSeed = false } = {}) {
+  const expired = isExpired(fact, today);
+  if (!row) {
+    if (expired) return { action: 'skip', reason: 'expired_never_seeded' };
+    if (priorSeed) return { action: 'hold', reason: 'deleted_by_person' };
+    return { action: 'insert' };
+  }
+  if (row.source !== SOURCE) return { action: 'hold', reason: 'foreign_row' };
+
+  const meta = parseJson(row.metadata, {}) || {};
+  const shippedHash = factFingerprint(fact);
+  const legacy = !meta.register_hash;
+  const rowHash = rowFingerprint(row);
+  // An edit that landed on exactly the register's current wording (the
+  // register adopted a person's correction word for word, or the person
+  // typed the register's) has converged: restamp it, do not hold it forever.
+  const converged = !legacy && rowHash !== meta.register_hash && rowHash === shippedHash;
+  if (!legacy && rowHash !== meta.register_hash && !converged) {
+    return { action: 'hold', reason: 'edited_by_person', rowHash, shippedHash };
+  }
+  if (expired) return row.active ? { action: 'retire', reason: 'expired' } : { action: 'unchanged' };
+  // active=false with no retirement stamp is a person's deactivation (the
+  // admin knowledge routes write arbitrary columns); the register does not
+  // switch it back on.
+  if (!row.active && !meta.retired_reason) return { action: 'hold', reason: 'deactivated_by_person' };
+  const sameWording = converged || (!legacy && meta.register_hash === shippedHash);
+  if (sameWording && !converged && row.active && managedMetadataCurrent(meta, fact)) return { action: 'unchanged' };
+  return { action: 'update', legacy, reactivate: !row.active, metadataOnly: sameWording, converged };
 }
 
 /**
@@ -185,26 +210,39 @@ async function audit(trx, hasAuditLog, action, row, metadata) {
   });
 }
 
-// One hold audit per (row, shipped content, row content): the daily run
-// must not append the same hold every day.
+// One hold audit per (row, reason, shipped content, row content): the daily
+// run must not append the same hold every day. A hold with no row (a
+// deleted fact) is keyed by slug through resource_id NULL.
 async function auditHold(trx, hasAuditLog, row, plan) {
   if (!hasAuditLog) return;
-  const last = await trx('audit_log')
-    .where({ action: AUDIT_ACTIONS.held, resource_type: 'knowledge_base', resource_id: row.id })
-    .orderBy('created_at', 'desc')
-    .first();
+  const query = trx('audit_log').where({ action: AUDIT_ACTIONS.held, resource_type: 'knowledge_base' });
+  if (row?.id) query.where({ resource_id: row.id });
+  else query.whereNull('resource_id').whereRaw("metadata->>'slug' = ?", [row.slug]);
+  const last = await query.orderBy('created_at', 'desc').first();
   const lastMeta = last ? (parseJson(last.metadata, {}) || {}) : null;
   if (lastMeta && lastMeta.reason === plan.reason
     && lastMeta.shipped_hash === (plan.shippedHash || null)
     && lastMeta.row_hash === (plan.rowHash || null)) return;
-  await audit(trx, hasAuditLog, AUDIT_ACTIONS.held, row, {
-    reason: plan.reason, shipped_hash: plan.shippedHash || null, row_hash: plan.rowHash || null,
+  await require('../audit-log').recordAuditEvent({
+    actor_type: 'system',
+    actor_id: null,
+    action: AUDIT_ACTIONS.held,
+    resource_type: 'knowledge_base',
+    resource_id: row?.id || null,
+    metadata: {
+      slug: row.slug, source: SOURCE, reason: plan.reason,
+      shipped_hash: plan.shippedHash || null, row_hash: plan.rowHash || null,
+    },
+    trx,
+    critical: true,
   });
 }
 
 async function applyFactPlan(trx, fact, row, plan, { now, today, hasAuditLog, result }) {
   switch (plan.action) {
     case 'insert': {
+      // ON CONFLICT DO NOTHING on any constraint: a concurrent insert of the
+      // same slug, or a foreign row already holding this fact's path.
       const inserted = await trx('knowledge_base')
         .insert({
           path: `kb/facts/${fact.slug}.md`,
@@ -215,11 +253,18 @@ async function applyFactPlan(trx, fact, row, plan, { now, today, hasAuditLog, re
           created_at: now,
           ...rowValues(fact, null, now),
         })
-        .onConflict('slug')
+        .onConflict()
         .ignore()
         .returning(['id', 'slug']);
       const created = Array.isArray(inserted) ? inserted[0] : null;
-      if (!created?.id) { result.unchanged.push(fact.slug); return; } // lost an insert race: the other writer's row stands
+      if (!created?.id) {
+        const raced = await trx('knowledge_base').where({ slug: fact.slug }).first('id');
+        if (raced) { result.unchanged.push(fact.slug); return; } // lost an insert race: the other writer's row stands
+        const held = { action: 'hold', reason: 'insert_conflict' };
+        await auditHold(trx, hasAuditLog, { slug: fact.slug }, held);
+        result.held.push({ slug: fact.slug, reason: held.reason });
+        return;
+      }
       await audit(trx, hasAuditLog, AUDIT_ACTIONS.seeded, created, { verified_on: VERIFIED_ON });
       result.inserted.push(fact.slug);
       return;
@@ -238,9 +283,23 @@ async function applyFactPlan(trx, fact, row, plan, { now, today, hasAuditLog, re
         status,
         version: (Number(row.version) || 1) + 1,
       });
+      // The knowledge base's own trigger (kb_restore_ai_flag_on_content_change)
+      // turns an AI-flagged entry back to 'active' when its content changes —
+      // "the edit is the fix the flag asked for". Not for register rows: the
+      // audit's flag is the audit's to lift, so a corrected fact stays hidden
+      // from the writer until a person verifies it or an admin-run
+      // flagged-only re-review passes it. Re-assert the intended status in
+      // the same transaction (a status-only UPDATE does not fire the trigger).
+      if (status !== 'active') {
+        await trx('knowledge_base').where({ id: row.id }).whereNot({ status }).update({ status });
+      }
       await audit(trx, hasAuditLog, AUDIT_ACTIONS.updated, row, {
-        legacy_row: plan.legacy === true, reactivated: plan.reactivate === true, metadata_only: plan.metadataOnly === true,
-        previous_hash: meta.register_hash || null, register_hash: factFingerprint(fact),
+        legacy_row: plan.legacy === true,
+        reactivated: plan.reactivate === true,
+        metadata_only: plan.metadataOnly === true,
+        converged: plan.converged === true,
+        previous_hash: meta.register_hash || null,
+        register_hash: factFingerprint(fact),
       });
       result.updated.push(fact.slug);
       return;
@@ -262,8 +321,8 @@ async function applyFactPlan(trx, fact, row, plan, { now, today, hasAuditLog, re
       return;
     }
     case 'hold':
-      await auditHold(trx, hasAuditLog, row, plan);
-      result.held.push({ slug: row.slug, reason: plan.reason });
+      await auditHold(trx, hasAuditLog, row || { slug: fact.slug }, plan);
+      result.held.push({ slug: row?.slug || fact.slug, reason: plan.reason });
       return;
     case 'skip':
       result.skipped.push({ slug: fact.slug, reason: plan.reason });
@@ -273,13 +332,24 @@ async function applyFactPlan(trx, fact, row, plan, { now, today, hasAuditLog, re
   }
 }
 
+// True when the register seeded this slug before (so a missing row is a
+// person's deletion, not a fact that never landed).
+async function seededBefore(trx, hasAuditLog, slug) {
+  if (!hasAuditLog) return false;
+  const prior = await trx('audit_log')
+    .where({ action: AUDIT_ACTIONS.seeded, resource_type: 'knowledge_base' })
+    .whereRaw("metadata->>'slug' = ?", [slug])
+    .first('id');
+  return !!prior;
+}
+
 /**
  * Sync the code register into knowledge_base. Each fact is its own
  * transaction with the row locked, so a concurrent run (two instances, or
  * the cron beside an on-demand ensure) cannot double-write; an insert race
- * is absorbed by ON CONFLICT DO NOTHING. A row a person edited is never
- * overwritten — it is reported in `held` and audited once. Errors on one
- * fact never stop the others.
+ * is absorbed by ON CONFLICT DO NOTHING. A row a person edited, deleted or
+ * deactivated is never overwritten — it is reported in `held` and audited
+ * once per state. Errors on one fact never stop the others.
  */
 async function syncFactRegister({ conn = db, now = new Date(), facts = FACTS, retireStrays = true } = {}) {
   const result = { inserted: [], updated: [], retired: [], held: [], unchanged: [], skipped: [], errors: [] };
@@ -294,7 +364,8 @@ async function syncFactRegister({ conn = db, now = new Date(), facts = FACTS, re
     try {
       await conn.transaction(async (trx) => {
         const row = await trx('knowledge_base').where({ slug: fact.slug }).forUpdate().first();
-        const plan = planFactSync(fact, row, { today });
+        const priorSeed = row ? false : await seededBefore(trx, hasAuditLog, fact.slug);
+        const plan = planFactSync(fact, row, { today, priorSeed });
         await applyFactPlan(trx, fact, row, plan, { now, today, hasAuditLog, result });
       });
     } catch (err) {
@@ -353,9 +424,11 @@ async function ensureFactRegister({ now = new Date(), force = false, sync = sync
  * True when a knowledge_base row is one of THIS register's facts with its
  * provenance intact: a register slug, the register's source, the register's
  * own fingerprint stamp (metadata.register_hash — what proves the row was
- * written by the sync, never a hand-made row in the same category), a
- * source URL and a quote on file, and not past its expiry. A row that
- * fails is never fed to a writer, whatever its category says.
+ * written by the sync, never a hand-made row in the same category), the
+ * register's EXACT current wording (a row a person edited, or that another
+ * writer appended to, is not the verified fact any more — it stays in the
+ * knowledge base and is reported held, but never reaches a writer), a
+ * source URL and a quote on file, and not past its expiry.
  *
  * verified_by / last_verified_at are deliberately NOT provenance: the weekly
  * knowledge-base audit stamps verified_by on every entry it passes and a
@@ -370,7 +443,9 @@ function hasProvenance(row, today) {
   if (typeof meta.source_url !== 'string' || !/^https:\/\//i.test(meta.source_url)) return false;
   if (typeof row.summary !== 'string' || !row.summary.trim()) return false;
   if (typeof meta.expires_on === 'string' && today >= meta.expires_on) return false;
-  if (isExpired(FACT_BY_SLUG.get(row.slug), today)) return false;
+  const fact = FACT_BY_SLUG.get(row.slug);
+  if (isExpired(fact, today)) return false;
+  if (rowFingerprint(row) !== factFingerprint(fact)) return false;
   return true;
 }
 
@@ -383,9 +458,7 @@ function hasProvenance(row, today) {
  * AND status 'active', with provenance (see hasProvenance). The weekly
  * knowledge-base audit hides an entry it doubts by setting status 'flagged'
  * and leaves `active` alone, so filtering on `active` only would feed a
- * flagged or archived fact straight into a customer-facing prompt. A row a
- * person edited (held by the sync) is still listed: the edit is the
- * operator's call and the knowledge-base audit reviews it.
+ * flagged or archived fact straight into a customer-facing prompt.
  */
 async function listFacts({ tags, limit = 50, now = new Date() } = {}) {
   const rows = await db('knowledge_base')
@@ -406,237 +479,207 @@ async function listFacts({ tags, limit = 50, now = new Date() } = {}) {
 }
 
 // ---------------------------------------------------------------------------
-// Known-false / overreaching claim shapes
+// Known-false / overreaching claim shapes — a sentence-and-clause tripwire
 // ---------------------------------------------------------------------------
 
-// The words that make the termite claim false: a SECOND / repeat /
-// late-summer / storm-triggered swarm (the January–May swarm "on warm days
-// after rain" is the true fact and carries none of them).
-const REPEAT_SWARM = '(?:second|another|again|repeat(?:ed)?|late[-\\s]?summer|post[-\\s]?storm|storm[-\\s]?(?:triggered|induced|driven)?)';
-const NEGATOR = "(?:do(?:es)?\\s+not|don'?t|doesn'?t|did\\s+not|didn'?t|will\\s+not|won'?t|cannot|can'?t|never)";
-const SWARM_VERB = '(?:have|throw|produce|swarm|get|trigger|stage|make|fly)';
-// "swarm again", "swarm (for) a second time", "swarm twice", "swarm once more"
-const SECOND_TIME = '(?:again|(?:for\\s+)?a\\s+second\\s+time|twice|once\\s+more)';
-// The swarming verb forms that take SECOND_TIME.
-const SWARM_OR_FLY = '(?:swarm(?:s|ed|ing)?|fl(?:y|ies|ew|ying))';
-// A swarm is also called a flight.
-const SWARM_NOUN = '(?:swarm|flight)';
-// The same idea when the modifier comes FIRST ("a second termite swarm",
-// "another termite swarm"). "again" and a bare "storm" are left out here:
-// they only make the claim false after the verb.
-const REPEAT_MODIFIER = '(?:second|another|repeat(?:ed)?|late[-\\s]?summer|post[-\\s]?storm|storm[-\\s]?(?:triggered|induced|driven))';
-// What may stand between a leading "No" and "termites" in a denial ("No
-// native subterranean termites have a second swarm"): the species and
-// qualifiers, never "doubt"/"wonder"/"question" ("No doubt these termites
-// have a second swarm" is the false claim).
-const TERMITE_QUALIFIER = '(?:native|subterranean|drywood|dampwood|florida|eastern|western|asian|formosan|invasive|local|known|documented|reticulitermes|coptotermes|species\\s+of|kind\\s+of|type\\s+of|of\\s+these|of\\s+our)';
-// A subject standing in for termites named in the sentence before ("They
-// swarm again after storms."). Only a claim when the surrounding text is
-// about (non-drywood) termites — see isTermiteContext.
-const PRONOUN_SUBJECT = '(?:they|these\\s+(?:insects|pests|bugs)|the\\s+colony|colonies)';
-// The span a denial's negation may reach across: no clause break, no dash.
-const DENIAL_SPAN = '[^.,;:—–-]{0,60}?';
+// Sentence ends: . ! ? followed by whitespace — except after an abbreviation
+// ("St. Augustinegrass", "a.m.", "spp."), whose period is protected first.
+const ABBREVIATION = /\b(?:St|Dr|Mr|Mrs|Ms|Jr|Sr|vs|etc|spp|sp|No|Inc|Co|Ave|Blvd|Rd|Ft|Mt|approx|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec|U\.S|a\.m|p\.m|e\.g|i\.e)\./gi;
+const PROTECTED_DOT = '\u0001';
 
-// "X is a myth" / "Myth: X" — the claim named as a falsehood. Bound to the
-// MATCHED claim, never to the sentence around it: the myth phrase must sit
-// right after the match inside the same clause ("... a second termite swarm
-// after storms is a myth"), or right before it as a label ("Myth: termites
-// swarm again after storms"). A myth phrase in ANOTHER clause of the same
-// sentence ("Termites swarm again after storms, but winter swarms are a
-// myth") clears nothing. At most three words may stand between the match
-// and the verb ("outbreaks are a myth", "after storms is a myth").
-const MYTH_SUFFIX = /^\s*(?:[\w'’-]+\s+){0,3}?(?:is|are|was|were|remains?)\s+(?:just\s+|only\s+|simply\s+)?(?:a\s+|an\s+)?(?:myth|misconception|misunderstanding|old\s+wives'?\s+tale|folklore)\b/i;
-const MYTH_PREFIX = /\bmyth\s*[:—–-]\s*(?:that\s+)?$/i;
-// Where a clause ends after the match: a period, comma, semicolon, colon,
-// em/en dash, or a spaced hyphen (never the hyphen inside "late-summer").
-const CLAUSE_BREAK_AFTER = /[.,;:—–]|\s-\s/;
+function normaliseText(text) {
+  return String(text ?? '')
+    .replace(/[‘’‚]/g, "'")
+    .replace(/[“”„]/g, '"')
+    .normalize('NFKC')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
 
-// Known-false or overreaching claim shapes an AI-written newsletter draft
-// must never state. `denials` lists the ONLY phrasings that exempt an
-// occurrence: the rule's own correct fact stated as a denial of that claim.
-const UNVERIFIED_CLAIM_RULES = [
-  {
-    // The September 2026 Pest Insider draft's actual error: native
-    // subterranean termites do NOT have a second, storm/late-summer
-    // triggered swarm (fact-no-storm-triggered-second-termite-swarm). Word
-    // orders: "... a second swarm/flight", "... swarm again / (for) a second
-    // time", "a second termite swarm", and a pronoun subject in termite
-    // context. The anchor's negative lookbehind keeps a drywood subject out:
-    // both drywood species correctly document wide, near-any-month flight
-    // windows, while a contrastive "Unlike drywood termites, native
-    // subterranean termites have a second swarm" still anchors on — and
-    // blocks — the second, non-drywood "termites".
-    rule: 'termite_second_swarm',
-    pattern: new RegExp(
-      `\\b(?<!drywood[\\s-])termites?\\b[^.]{0,150}?\\b${REPEAT_SWARM}\\b[^.]{0,60}?\\b${SWARM_NOUN}`
-      + `|\\b(?<!drywood[\\s-])termites?\\b[^.]{0,80}?\\b${SWARM_OR_FLY}\\s+${SECOND_TIME}\\b`
-      // modifier first: "a second termite swarm", "another subterranean
-      // termite flight" — never when the termite named is a drywood.
-      + `|\\b${REPEAT_MODIFIER}\\s+(?!(?:[\\w-]+\\s+){0,2}?drywood\\b)(?:[\\w-]+\\s+){0,2}?termite\\s+${SWARM_NOUN}`
-      // pronoun subject: "They swarm again after storms", "they have a
-      // second swarm" — a claim only in termite context (isExemptOccurrence).
-      + `|\\b${PRONOUN_SUBJECT}\\b[^.]{0,40}?\\b${SWARM_OR_FLY}\\s+${SECOND_TIME}\\b`
-      + `|\\b${PRONOUN_SUBJECT}\\b[^.]{0,40}?\\b${SWARM_VERB}\\b[^.]{0,30}?\\b(?:second|another|repeat(?:ed)?)\\s+${SWARM_NOUN}`,
-      'i',
-    ),
-    denials: [
-      // "termites do not have a second swarm", "termites never swarm again",
-      // "termites do not swarm for a second time"
-      new RegExp(`\\b${NEGATOR}\\s+${SWARM_VERB}\\b${DENIAL_SPAN}\\b(?:${REPEAT_SWARM}|${SECOND_TIME})`, 'i'),
-      // "No native subterranean termites have a second swarm"
-      new RegExp(`\\bno\\s+(?:${TERMITE_QUALIFIER}\\s+){0,4}?termites?\\s+${SWARM_VERB}\\b${DENIAL_SPAN}\\b${REPEAT_SWARM}`, 'i'),
-      // "there is no second swarm" (never "there is no doubt ...")
-      new RegExp(`\\b(?:there\\s+is|there'?s|there\\s+are)\\s+no\\s+(?:such\\s+)?${REPEAT_SWARM}\\b`, 'i'),
-      // "no such thing as a second termite swarm"
-      new RegExp(`\\bno\\s+such\\s+thing\\s+as\\s+(?:a\\s+|an\\s+)?${REPEAT_MODIFIER}\\b`, 'i'),
-      // "no second termite swarm", "not a second termite swarm" — the
-      // negation must sit directly on the modifier, so "no doubt a second
-      // termite swarm" is still the false claim.
-      new RegExp(`\\b(?:no|never)\\s+(?:such\\s+)?${REPEAT_MODIFIER}\\b`, 'i'),
-      new RegExp(`\\bnot\\s+(?:a|an|any)\\s+${REPEAT_MODIFIER}\\b`, 'i'),
-    ],
-    mythDenial: true,
-  },
-  {
-    // Large patch is "most likely to be observed from November through May
-    // when temperatures are below 80°F" and "normally not observed in the
-    // summer months" (fact-large-patch, UF/IFAS LH044). Only the summer and
-    // above-80°F claims trip this rule: UF's own St. Augustinegrass guide
-    // says large patch "occurs in warm, humid weather", so "warm weather"
-    // is not a false claim and is not matched.
-    rule: 'large_patch_summer_disease',
-    pattern: /\b(?:brown|large)\s+patch\b[^.]{0,100}?\b(?:summer|above[-\s]?80)\b|\b(?:summer|above[-\s]?80\s*(?:°|degrees?)?)\b[^.]{0,100}?\b(?:brown|large)\s+patch\b/i,
-    denials: [
-      // "it is not a summer disease"
-      /\b(?:is\s+not|isn'?t|are\s+not|aren'?t|it'?s\s+not|was\s+not|never)\s+(?:a\s+|an\s+)?summer\b/i,
-      // "spring and fall, not in summer"
-      /\bnot\s+(?:in|during)\s+(?:the\s+)?summer\b/i,
-      // UF's own wording: "normally not observed in the summer months"
-      /\bnot\s+(?:normally\s+|usually\s+)?(?:observed|seen|found|active)\s+(?:in|during)\s+(?:the\s+)?summer\b/i,
-      // "summer brown spots are usually chinch bugs, not large patch";
-      // "leaf and sheath spot ... is different from large patch"
-      /\b(?:unlike|differs?\s+from|different\s+from|distinct\s+from|confused\s+with|mistaken\s+for|not)\s+(?:a\s+|the\s+)?(?:brown|large)\s+patch\b/i,
-    ],
-    mythDenial: true,
-  },
-  {
-    // Continuing to vacuum after treatment is flea guidance: it stimulates
-    // pupae to hatch into the treatment (fact-flea-vacuuming-after-treatment,
-    // University of Kentucky ENTFACT-602). An instruction to vacuum for N
-    // days or weeks is exempt only in a sentence about fleas; a NEGATED
-    // instruction ("do not"/"avoid" vacuuming for N days) is never correct,
-    // for fleas or anything else. Capture group 1 carries the negation.
-    rule: 'non_flea_vacuum_advice',
-    pattern: /\b((?:do\s*not|don'?t|avoid)\s+)?vacuum(?:ing)?\b[^.]{0,80}?\b\d+\s*(?:days?|weeks?)\b/i,
-  },
-  {
-    // Absolute safety guarantees no label supports (AGENTS.md: no safety or
-    // efficacy claims). The label's own wording is the only safe one:
-    // "Do not allow people or pets on treated surfaces until spray has
-    // dried." Covers bees, pets, dogs, cats, kids, children, babies and the
-    // family, hyphenated ("pet-safe") or "safe for/around (your) pets".
-    rule: 'absolute_safety_claim',
-    pattern: /\b(?:bee|pet|family|kid|child|baby|dog|cat)[-\s]?safe\b|\bsafe\s+(?:for|around)\s+(?:the\s+|your\s+|our\s+)?(?:bees|pets?|kids?|children|babies|dogs?|cats?|(?:whole\s+|entire\s+)?family)\b/i,
-  },
+function splitSentences(text) {
+  const shielded = text.replace(ABBREVIATION, (abbr) => abbr.slice(0, -1) + PROTECTED_DOT);
+  return shielded
+    .split(/(?<=[.!?])\s+/)
+    .map((sentence) => sentence.replace(new RegExp(PROTECTED_DOT, 'g'), '.').trim())
+    .filter(Boolean);
+}
+
+// Clause breaks: punctuation, brackets, a spaced hyphen, and the
+// conjunctions that start a new statement. Splitting more than English
+// strictly needs only ever makes the tripwire stricter (a claim clause must
+// carry its own negation), never looser.
+const CLAUSE_BREAK = /\s*(?:[,;:—–!?]|\s-\s|[()[\]]|\b(?:but|yet|and|so|however|though|although|while|whereas|then|because|since|unless|except)\b)\s*/i;
+
+function splitClauses(sentence) {
+  return sentence.replace(/[.!?]+\s*$/, '').split(CLAUSE_BREAK).map((clause) => clause.trim()).filter(Boolean);
+}
+
+// Negations that clear a claim clause — after the idioms that merely
+// contain a negation word are struck out.
+const NEGATION_IDIOMS = /\b(?:no\s+doubt|no\s+question|no\s+wonder|no\s+joke|not\s+only|not\s+just|never\s+fails?\s+to|no\s+second-?guessing|no\s+matter|not\s+to\s+mention|no\s+surprise|not\s+least)\b/gi;
+const NEGATION = /\b(?:no|not|never|nor|don't|doesn't|didn't|won't|wouldn't|cannot|can't|couldn't|isn't|aren't|wasn't|weren't|hasn't|haven't|without|unrelated|independent|nothing\s+to\s+do|myth|misconception|misunderstanding|folklore|old\s+wives'?\s+tales?|false|untrue|wrong)\b/i;
+// "It's a myth that termites DON'T swarm again" asserts the claim.
+const MYTH_THAT_NEGATED = /\bmyth\s+that\b[^]*?\b(?:no|not|never|don't|doesn't|won't|cannot|can't)\b/i;
+// A bare "Myth" label as the clause before the claim ("Myth: ...",
+// "Myth — ...") names the claim false. "Fact or myth" and "Not a myth" do
+// not.
+const BARE_MYTH_LABEL = /^\s*(?:the\s+)?myth(?:-?busters?)?\s*$/i;
+
+function clauseDenies(clause, extraNegation) {
+  const struck = clause.replace(NEGATION_IDIOMS, ' ');
+  if (MYTH_THAT_NEGATED.test(struck)) return false;
+  if (NEGATION.test(struck)) return true;
+  return !!(extraNegation && extraNegation.test(struck));
+}
+
+function previousClauseIsMythLabel(clauses, index) {
+  return index > 0 && BARE_MYTH_LABEL.test(clauses[index - 1]);
+}
+
+// --- termite_second_swarm --------------------------------------------------
+//
+// The September 2026 Pest Insider draft's actual error: native subterranean
+// termites do NOT have a second, storm/late-summer triggered swarm
+// (fact-no-storm-triggered-second-termite-swarm). A clause is the claim when
+// its subject is termites that are not drywood (both drywood species
+// correctly document wide, near-any-month flight windows), it has a
+// swarming word and a repeat/storm/late-season word. The subject may sit in
+// an earlier clause of the sentence ("Termites, which are not picky, have a
+// second swarm after storms") or, for a pronoun subject, in the sentence
+// before ("... native subterranean termites fly in spring. They swarm again
+// after storms.") — the NEAREST termite mention decides, so a contrastive
+// "drywood" earlier in the text does not shield the subterranean claim.
+const TERMITE_MENTION = /\b((?:[\w'-]+\s+){0,3}?)termites?\b/gi;
+const PRONOUN_SUBJECT = /\b(?:they|them|these\s+(?:insects|pests|bugs|termites)|the\s+colony|colonies|the\s+swarmers?|swarmers|alates)\b/i;
+const SWARM_WORD = /\b(?:swarm\w*|fl(?:y|ies|ew|ying|own)|flights?|take\s+flight|took\s+flight|taking\s+flight|alates?|winged|emerg\w+|come\s+out|coming\s+out|came\s+out)\b/i;
+const REPEAT_TRIGGER = /\b(?:second|another|again|repeat\w*|twice|once\s+more|all\s+over\s+again|late[-\s]?summer|summer(?:s|time)?|storms?|hurricanes?|post[-\s]?storms?|tropical|rainy\s+season)\b/i;
+
+// The kind of termite the last mention in `text` names: 'drywood',
+// 'other', or null when no termite is mentioned.
+function lastTermiteKind(text) {
+  let kind = null;
+  for (const match of text.matchAll(TERMITE_MENTION)) {
+    kind = /\bdrywood\b/i.test(match[1]) ? 'drywood' : 'other';
+  }
+  return kind;
+}
+
+function termiteClaimInSentence(sentence, previousSentence) {
+  const clauses = splitClauses(sentence);
+  const sentenceHasTermite = lastTermiteKind(sentence) !== null;
+  let subject = sentenceHasTermite ? null : (PRONOUN_SUBJECT.test(sentence) ? lastTermiteKind(previousSentence) : null);
+  for (let i = 0; i < clauses.length; i += 1) {
+    const clause = clauses[i];
+    const own = lastTermiteKind(clause);
+    if (own) subject = own;
+    if (subject !== 'other') continue;
+    if (!SWARM_WORD.test(clause) || !REPEAT_TRIGGER.test(clause)) continue;
+    if (clauseDenies(clause) || previousClauseIsMythLabel(clauses, i)) continue;
+    return clause;
+  }
+  return null;
+}
+
+// --- large_patch_summer_disease --------------------------------------------
+//
+// Large patch is "most likely to be observed from November through May when
+// temperatures are below 80°F" and "normally not observed in the summer
+// months" (fact-large-patch, UF/IFAS LH044). A clause naming large/brown
+// patch together with summer, the summer months, the rainy season or
+// above-80°F is the claim; UF's own "occurs in warm, humid weather" is not.
+const PATCH = /\b(?:brown|large)\s+patch\b/i;
+const PATCH_TRIGGER = /\b(?:summer(?:s|time)?|above[-\s]?80|june|july|august|september|rainy\s+season|hot\s+months?)\b/i;
+const PATCH_CONTRAST = /\b(?:unlike|differs?\s+from|different\s+from|distinct\s+from|confused\s+with|mistaken\s+for|instead\s+of|rather\s+than)\b/i;
+
+function patchClaimInSentence(sentence) {
+  const clauses = splitClauses(sentence);
+  for (let i = 0; i < clauses.length; i += 1) {
+    const clause = clauses[i];
+    if (!PATCH.test(clause) || !PATCH_TRIGGER.test(clause)) continue;
+    if (clauseDenies(clause, PATCH_CONTRAST) || previousClauseIsMythLabel(clauses, i)) continue;
+    return clause;
+  }
+  return null;
+}
+
+// --- non_flea_vacuum_advice ------------------------------------------------
+//
+// Continuing to vacuum after treatment is flea guidance: it stimulates pupae
+// to hatch into the treatment (fact-flea-vacuuming-after-treatment,
+// University of Kentucky ENTFACT-602). A clause telling the customer to
+// vacuum for a fixed time is exempt only when the clause (or a lead-in
+// clause before it: "For fleas, ...") is about fleas, the instruction is
+// affirmative (never "avoid", "hold off", "wait N days before vacuuming" —
+// not for fleas, not for anything) and every duration in it is one the
+// source states (a few weeks; 1 to 4 weeks; up to 4 weeks). "Vacuum daily
+// for 14 days" is a made-up number even in a flea sentence.
+const VACUUM = /\bvacuum\w*\b/i;
+const DURATION = /\b(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|twelve|fourteen|a\s+few|several|a\s+couple\s+of)\s*(?:(?:to|-|–)\s*(?:\d+|one|two|three|four)\s*)?(?:days?|weeks?)\b/gi;
+const SOURCED_FLEA_DURATION = /\b(?:a\s+few|several)\s+weeks\b|\b(?:1|one)\s*(?:to|-|–)\s*(?:4|four)\s+weeks\b|\b(?:up\s+to\s+)?(?:4|four)\s+weeks\b/gi;
+const VACUUM_NEGATION = /\b(?:avoid|hold\s+off|wait|skip|delay|postpone|refrain|stop|before\s+vacuum\w*)\b/i;
+const FLEA = /\bfleas?\b/i;
+const FLEA_LEAD_IN = /^(?:for|with|after|following|against|during|if|when|once)\b[^]*\bfleas?\b/i;
+
+function vacuumClaimInSentence(sentence) {
+  const clauses = splitClauses(sentence);
+  for (let i = 0; i < clauses.length; i += 1) {
+    const clause = clauses[i];
+    if (!VACUUM.test(clause) || !new RegExp(DURATION.source, 'i').test(clause)) continue;
+    const fleaContext = FLEA.test(clause) || (i > 0 && FLEA_LEAD_IN.test(clauses[i - 1]));
+    const affirmative = !clauseDenies(clause, VACUUM_NEGATION);
+    const unsourced = new RegExp(DURATION.source, 'i').test(clause.replace(SOURCED_FLEA_DURATION, ' '));
+    if (fleaContext && affirmative && !unsourced) continue;
+    return clause;
+  }
+  return null;
+}
+
+// --- absolute_safety_claim -------------------------------------------------
+//
+// AGENTS.md: no pesticide is ever "safe" (incl. "pet-safe"/"family-safe"),
+// and the one allowed idiom — "safe once dry" — must come with the
+// technician confirming the timing. The label's own wording ("Do not permit
+// humans or pets to contact treated surfaces until the spray has dried") is
+// not a safety claim. "safe from" (keeping a family safe FROM mosquitoes)
+// and "safe to say" are not product-safety claims either.
+// Hyphenated only: "keep your family safe from mosquitoes" is not a claim.
+const SAFE_COMPOUND = /\b(?:bee|pet|family|kid|child|children|baby|dog|cat|people|human|eco|environment(?:ally)?|earth|planet)-safe\b/i;
+const SAFE_CLAIM = /\b(?:is|are|it's|its|be|being|remains?|becomes?|considered|deemed|completely|totally|perfectly|entirely|100%)\s+(?:\w+\s+)?safe\b(?!\s+(?:from|to\s+say))|\bsafe\s+(?:for|around|near|with|once|when|after|as\s+soon\s+as)\b|\bsafe\s+to\s+(?!say\b)\w+/i;
+const TECHNICIAN_CONFIRMS = /\btechnicians?\b[^.]{0,80}\b(?:confirm|tell|let\s+you\s+know|advise|say|give)|\b(?:confirm|tell|advise|check)\w*[^.]{0,40}\btechnicians?\b/i;
+
+function safetyClaimInSentence(sentence) {
+  if (SAFE_COMPOUND.test(sentence)) return sentence;
+  if (SAFE_CLAIM.test(sentence) && !TECHNICIAN_CONFIRMS.test(sentence)) return sentence;
+  return null;
+}
+
+const CLAIM_RULES = [
+  { rule: 'termite_second_swarm', find: (sentence, previous) => termiteClaimInSentence(sentence, previous) },
+  { rule: 'large_patch_summer_disease', find: (sentence) => patchClaimInSentence(sentence) },
+  { rule: 'non_flea_vacuum_advice', find: (sentence) => vacuumClaimInSentence(sentence) },
+  { rule: 'absolute_safety_claim', find: (sentence) => safetyClaimInSentence(sentence) },
 ];
-
-// The sentence an occurrence sits in: from the period before the match (or
-// text start) to the period after it (or text end).
-function sentenceWindow(body, match) {
-  const idx = match.index ?? 0;
-  const end = idx + match[0].length;
-  const start = body.lastIndexOf('.', idx) + 1; // 0 when no prior '.'
-  const stop = body.indexOf('.', end);
-  return body.slice(start, stop === -1 ? body.length : stop);
-}
-
-// The sentence before the one the occurrence sits in (for a pronoun subject
-// whose noun is in the previous sentence).
-function previousSentence(body, match) {
-  const idx = match.index ?? 0;
-  const thisStart = body.lastIndexOf('.', idx);
-  if (thisStart <= 0) return '';
-  const prevStart = body.lastIndexOf('.', thisStart - 1) + 1;
-  return body.slice(prevStart, thisStart);
-}
-
-// Where a denial may sit: from the start of the match's own clause (the
-// nearest period, comma or semicolon before it, so a leading "No native
-// subterranean termites ..." counts) to the END OF THE MATCH. Nothing after
-// the match is read: a trailing "..., not that anyone believes it" and a
-// correct denial elsewhere in the same sentence must not clear this
-// occurrence.
-function denialWindow(body, match) {
-  const idx = match.index ?? 0;
-  const before = body.slice(0, idx);
-  const start = Math.max(before.lastIndexOf('.'), before.lastIndexOf(','), before.lastIndexOf(';')) + 1;
-  return body.slice(start, idx + match[0].length);
-}
-
-// A global clone of a rule's pattern — matchAll needs the 'g' flag, and a
-// single `body.match(pattern)` only ever checks the FIRST occurrence: a
-// draft repeating a rule's shape (one exempt mention, then a real one)
-// would have the exempt first match wrongly clear the whole rule.
-function globalPattern(pattern) {
-  return new RegExp(pattern.source, pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`);
-}
-
-const PRONOUN_START = new RegExp(`^${PRONOUN_SUBJECT}\\b`, 'i');
-
-// True when the matched claim itself is named a myth: "<claim> is a myth"
-// within the same clause, or "Myth: <claim>" directly before it.
-function isNamedAsMyth(body, match) {
-  const idx = match.index ?? 0;
-  const end = idx + match[0].length;
-  const rest = body.slice(end);
-  const breakAt = rest.search(CLAUSE_BREAK_AFTER);
-  const suffix = breakAt === -1 ? rest : rest.slice(0, breakAt);
-  if (MYTH_SUFFIX.test(suffix)) return true;
-  const before = body.slice(0, idx);
-  const clauseStart = Math.max(before.lastIndexOf('.'), before.lastIndexOf(','), before.lastIndexOf(';')) + 1;
-  return MYTH_PREFIX.test(before.slice(clauseStart));
-}
-
-// A pronoun-subject occurrence is the termite claim only when this sentence
-// or the one before it names termites and neither names a drywood species.
-function isTermiteContext(body, match) {
-  const context = `${previousSentence(body, match)} ${sentenceWindow(body, match)}`;
-  return /\btermites?\b/i.test(context) && !/\bdrywood\b/i.test(context);
-}
-
-// True when THIS occurrence is the rule's own correct fact (one of its
-// allowlisted denial shapes, or — vacuum rule only — the affirmative
-// instruction in a sentence about fleas), not the false claim.
-function isExemptOccurrence(body, match, { rule, denials, mythDenial }) {
-  if (rule === 'termite_second_swarm' && PRONOUN_START.test(match[0]) && !isTermiteContext(body, match)) return true;
-  if (Array.isArray(denials) && denials.length) {
-    const window = denialWindow(body, match);
-    if (denials.some((denial) => denial.test(window))) return true;
-  }
-  if (mythDenial && isNamedAsMyth(body, match)) return true;
-  if (rule === 'non_flea_vacuum_advice') {
-    const negated = !!match[1];
-    if (!negated && /\bflea/i.test(sentenceWindow(body, match))) return true;
-  }
-  return false;
-}
 
 /**
  * Scan customer-facing copy for the known-false/overreaching claim shapes
  * above. Returns one { rule, excerpt } per rule that matched (never more
- * than one per rule, mirroring findHallucinatedClaims' one-per-label shape).
- * Every occurrence of a rule's pattern is checked — one exempt mention does
- * not clear a LATER, non-exempt occurrence of the same shape.
+ * than one per rule, mirroring findHallucinatedClaims' one-per-label shape);
+ * the excerpt is the offending clause. Every sentence is checked — one
+ * exempt mention does not clear a LATER, non-exempt occurrence of the same
+ * shape.
  */
 function findUnverifiedClaims(text) {
-  const body = String(text ?? '');
+  const body = normaliseText(text);
   if (!body) return [];
+  const sentences = splitSentences(body);
   const results = [];
-  for (const claimRule of UNVERIFIED_CLAIM_RULES) {
-    for (const match of body.matchAll(globalPattern(claimRule.pattern))) {
-      if (isExemptOccurrence(body, match, claimRule)) continue;
-      results.push({ rule: claimRule.rule, excerpt: match[0].trim().slice(0, 160) });
-      break; // one result per rule, mirroring findHallucinatedClaims
+  for (const { rule, find } of CLAIM_RULES) {
+    for (let i = 0; i < sentences.length; i += 1) {
+      const hit = find(sentences[i], i > 0 ? sentences[i - 1] : '');
+      if (hit) {
+        results.push({ rule, excerpt: hit.trim().slice(0, 160) });
+        break; // one result per rule, mirroring findHallucinatedClaims
+      }
     }
   }
   return results;
@@ -692,6 +735,7 @@ module.exports._internals = {
   factFingerprint,
   rowFingerprint,
   hasProvenance,
-  UNVERIFIED_CLAIM_RULES,
+  splitSentences,
+  splitClauses,
   resetEnsureStamp: () => { lastEnsureAt = null; },
 };

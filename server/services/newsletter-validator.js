@@ -144,10 +144,18 @@ function scanUnverifiedClaims(send) {
   const seen = new Set();
   for (const body of [send.subject, send.preview_text, send.html_body, send.text_body]) {
     if (!body) continue;
-    // Same normalisation as the hallucinated-claim scan: an entity-encoded
-    // or homoglyph "&#115;econd" / "ｓecond swarm" renders as the claim to
-    // subscribers and must not slip past the ASCII rule patterns.
-    const bodyText = decodeEntities(body.replace(/<[^>]+>/g, ' ')).normalize('NFKC');
+    // Block-level tags end a sentence (a heading glued to the paragraph
+    // under it must not read as one sentence — the register's denial
+    // windows are sentence- and clause-bound); every other tag is a space.
+    // Then the same normalisation as the hallucinated-claim scan: an
+    // entity-encoded or homoglyph "&#115;econd" / "ｓecond swarm" / "don&rsquo;t"
+    // renders as the claim to subscribers and must not slip past the rules.
+    const bodyText = decodeEntities(body
+      .replace(/<\/(?:p|li|h[1-6]|div|tr|td|th|blockquote|section|article|ul|ol|table)\s*>|<br\s*\/?>/gi, '. ')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/&(?:rsquo|lsquo|#8217|#8216);/gi, "'")
+      .replace(/&(?:rdquo|ldquo|#8221|#8220);/gi, '"'))
+      .normalize('NFKC');
     for (const { rule, excerpt } of findUnverifiedClaims(bodyText)) {
       if (seen.has(rule)) continue;
       seen.add(rule);
@@ -239,7 +247,13 @@ function validateNewsletterDraft(send, opts = {}) {
     scanSegment(send.html_body, opts.lockedPrices || [], 'html');
     scanSegment(send.text_body, opts.lockedPrices || [], 'text');
 
-    errors.push(...scanUnverifiedClaims(send));
+    // The register's rules are the Pest Insider's grounding: the weekly
+
+    // events flagship keeps its own claim patterns (an event blurb saying
+
+    // "family-safe fun" is not a pesticide claim and must not hold the week).
+
+    if (send.newsletter_type === 'pest-insider-monthly') errors.push(...scanUnverifiedClaims(send));
   }
 
   // Affiliate links are WEB-ONLY (owner monetization pilot 2026-08-31: the
