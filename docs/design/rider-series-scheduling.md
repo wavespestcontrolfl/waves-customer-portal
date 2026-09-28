@@ -43,7 +43,7 @@ plans for the pattern in a year), capped at `MAX_HORIZON_EXTRA_DAYS` (730)
 past the standalone horizon — a host row seeded or hand-edited an arbitrary
 distance out can never blow the plan's horizon out to match it.
 
-Constants (`server/services/rider-series-preview.js`, byte-identical to the
+Constants (`server/services/rider-series-preview.js`, same values as the
 write engine's own `server/services/rider-series.js`):
 
 | constant | value | meaning |
@@ -55,12 +55,24 @@ write engine's own `server/services/rider-series.js`):
 | `OVERDUE_WAIT_DAYS` | 28 | `MAX_WAIT_DAYS - MIN_GAP_DAYS` |
 | `MAX_HORIZON_EXTRA_DAYS` | 730 | horizon cap past the standalone horizon |
 
-`planRiderDates` (pure, no DB) and `computeRiderHorizon` are the exact same
-functions the write engine uses — copied, not re-derived, so the preview and
-the eventual write engine can never silently disagree about "what the plan
-is." `server/tests/rider-series-preview-plan.test.js` is the write engine's
-own `rider-series-plan.test.js` (branch `feat/pest-rides-lawn-core-20260928`,
-PR #5268), copied verbatim except its require path.
+`planRiderDates` (pure, no DB) and `computeRiderHorizon` apply the SAME rule
+the write engine uses — copied, not re-derived, so the preview and the
+eventual write engine can never silently disagree about "what the plan is."
+`server/tests/rider-series-preview-plan.test.js` is the write engine's own
+`rider-series-plan.test.js` (branch `feat/pest-rides-lawn-core-20260928`, PR
+#5268), copied verbatim except its require path — all 19 cases pass
+unchanged.
+
+**Not byte-identical to PR #5268 any more** (Codex P2 round, this repo's PR
+#5290): `planRiderDates`' own decision count was over this repo's complexity
+warning ceiling (20; AGENTS.md), so its per-step candidate-selection logic
+(the min/max/overdue window, the host-date-vs-standalone-fallback choice, the
+weekend shift, the blackout clear) is factored into a helper, `nextRiderDate`
+— same operations, same order, called once per loop iteration, so the RESULT
+is identical (proved by the same 19 tests) even though the source is no
+longer a literal copy of `rider-series.js#planRiderDates`. Unresolved: when
+PR #5268 resumes, either it adopts the same split or this note is corrected
+to "same rule, not same source" for good.
 
 ## The read rules (`previewRiderPair`)
 
@@ -90,13 +102,23 @@ already-stamped link (for a future PR 2/3 world). Returns:
 - `host_is_rider` — the host itself rides another series (one level of
   chaining only; never followed).
 - `cross_customer` — rider and host belong to different customers.
-- `different_property` — rider and host are stamped to different
-  `customer_properties` rows.
+- `different_property` — the rider's and the host's resolved property scope
+  (below) disagree — never guessed from a raw `property_id` compare alone.
 - `not_series_root` — the id given is a child row, not a series parent.
 - `not_recurring` — the rider has no `recurring_pattern`.
 - `not_ongoing` — the rider's `recurring_ongoing` flag is false.
 - `plan_stopped` — the rider's latest resolved `recurring_plan_alerts`
   decision is `cancel_series` or `let_lapse`.
+- `property_unresolved` — the rider's or the host's resolved property scope
+  (below) couldn't be resolved at all: no `property_id`, no parseable
+  address anywhere, not even the customer's own primary address. Refuses
+  conservatively rather than guessing the pair shares a property.
+- `rider_reschedule_pending` — at least one live rider row (parent or child)
+  is `status = 'rescheduled'`: a visit awaiting re-placement, not history.
+  See "Rider rows and movability" below — the conservative choice is to
+  block eligibility (so the office can't plan an insert that would
+  duplicate that row) rather than silently skip past it; the plan still
+  shows.
 
 `rider_not_found`, `not_a_rider` (no `hostParentId` given and no
 `rides_parent_id` stamped), and `host_missing` are added when the ids
@@ -113,21 +135,51 @@ office what it WOULD do.
 ### Customer gates
 
 Reused from `server/services/series-customer-eligibility.js` — the same
-table-driven rule set the nightly visit-count top-up applies
-(`seriesCustomerSkipReason`): `customer_deleted`, `customer_service_held` (a
-genuine hand-set hold; `autopay_final_failure` alone never holds scheduling —
-see that file's own comment), `customer_inactive`, `customer_churned`.
+table-driven rule set the nightly visit-count top-up applies:
+`customer_deleted`, `customer_service_held` (a genuine hand-set hold;
+`autopay_final_failure` alone never holds scheduling — see that file's own
+comment), `customer_inactive`, `customer_churned`. The top-up itself keeps
+calling the original first-hit `seriesCustomerSkipReason` (byte-identical —
+a write path only ever needs ONE reason to skip). The preview calls the
+all-hits twin, `seriesCustomerSkipReasons`, added alongside it: same table,
+same order, never short-circuited, so `reasons` can list every applicable
+customer gate rather than hiding a second one behind the first.
 
 ### Series gates
 
-Reused **read-only** from `routes/admin-schedule.js#topupSeriesSkipReason` —
-the same annual-prepay / family-plan-hold / duplicate-active-series checks
-the nightly top-up applies before adding a visit: `annual_prepay_series`,
-`plan_hold`, `duplicate_series`. The write engine (and the nightly top-up
-itself) takes a per-customer advisory try-lock before calling this — the
-preview does **not**: a lock is meaningless (and would silently no-op) for a
-read that commits nothing. `admin-schedule.js` gained one export for this —
-see "What changed in admin-schedule.js" below.
+Reused **read-only** from `routes/admin-schedule.js` — the same annual-prepay
+/ family-plan-hold / duplicate-active-series checks the nightly top-up
+applies before adding a visit: `annual_prepay_series`, `plan_hold`,
+`duplicate_series`. The write engine (and the nightly top-up itself) takes a
+per-customer advisory try-lock before calling this — the preview does
+**not**: a lock is meaningless (and would silently no-op) for a read that
+commits nothing. As with the customer gates, the top-up's own first-hit
+`topupSeriesSkipReason` is untouched; the preview calls the all-hits twin,
+`topupAllSeriesSkipReasons` (same `TOPUP_SERIES_INELIGIBILITY_RULES` table,
+looped without the early return). `admin-schedule.js` gained these exports
+— see "What changed in admin-schedule.js" below.
+
+### Property scope
+
+`different_property` and `property_unresolved` (above) are decided by
+`resolveSeriesPropertyScope(conn, parent)` + `seriesPropertyVerdict(a, b)`
+(`services/rider-series-preview.js`, exported for the report script to reuse
+— see "What the preview reports" below), not by a raw `property_id` compare.
+Each root's scope is resolved with the SAME address resolution the
+duplicate-series guard scopes on (`admin-schedule.js#topUpScopeInput`: the
+override-aware stamped address, else an unstamped root's own source
+estimate, else the customer's primary address), then reduced to a
+comparable key with `estimate-property-linkage.js`'s canonical
+`normalizedEstimatePropertyKey` / `samePropertyKey` ("identical street+unit
+in different cities/ZIPs are DISTINCT properties" — the same primitive the
+duplicate-series guard's own street compare is built from). `property_id`
+decides when BOTH sides carry one (authoritative, no street compare); else
+the normalized key decides; either side unresolved (no `property_id`, no
+parseable address anywhere) reports `property_unresolved` rather than
+guessing a match. This replaces the earlier, narrower rule ("only checked
+when BOTH parents already had a stamped `property_id`") — a pair where one
+or both sides are unstamped now actually resolves an address instead of
+silently passing the gate.
 
 ### Host dates
 
@@ -161,38 +213,98 @@ immovable. **Immovable** (each reported in `pinned[].why`):
 | `card_request` | an `appointment_card_requests` row, same DEAD-status exclusion |
 | `closeout_packet` | a `visit_completion_packet_items` row |
 | `completion_claim` | a live `service_completion_attempts` row |
-| `messaged` | a `messaging_audit_log` row with `sent_at` set, any purpose except `appointment_cancellation` — the one durable record of an actual customer-facing send; `appointment_reminders`' own `*_sent` flags are bookkeeping, not proof of a send (a sibling-suppressed registration stamps them true with no send at all) |
+| `messaged` | a `messaging_audit_log` row with `sent_at` set, any purpose except `appointment_cancellation` (the one durable record of an actual customer-facing send; `appointment_reminders`' own `*_sent` flags are bookkeeping, not proof of a send — a sibling-suppressed registration stamps them true with no send at all), **or** a delivered promise event from `no-show-detector.js#loadPromiseEvents` (below) |
+| `rescheduled_pending` | the row's status is `rescheduled` — a live visit awaiting re-placement, not history |
 | `null_status` | the row has no stamped status — a legacy live row, never movable, but still a real row |
 | `near_term` | within `NEAR_TERM_DAYS` of today — close enough the customer may already be acting on it |
 | `other_status` | any other non-terminal, non-movable status |
 
-A terminal row (completed / cancelled / skipped / no_show / rescheduled) is
-never reported in `pinned` — it's history, not a movability question.
+A terminal row (completed / cancelled / skipped / no_show) is never reported
+in `pinned` — it's history, not a movability question. A `rescheduled` row
+is the one exception: it is LIVE (awaiting re-placement, not history), so it
+reports `pinned`/`rescheduled_pending` instead — see "Anchor" below for why
+it still never anchors.
+
+**`messaged` evidence (Codex P1 round, PR #5290):** a plain
+`messaging_audit_log` scan keyed on `appointment_id` alone misses three real
+"the customer was told" cases — a pre-2026-08-06 row linked only by
+`metadata.scheduled_service_id` (that sender didn't start stamping
+`appointment_id` until that date), a delivered appointment EMAIL (no SMS row
+at all), and a call-derived promise (an applied phone reschedule, or the
+call that booked the visit — neither ever sends a text of its own). Rather
+than re-deriving that unification, the preview calls
+`no-show-detector.js#loadPromiseEvents(conn, ids)` — the SAME canonical
+"was the customer told" evidence the no-show detector alerts against — and
+pins any row it returns an event for, alongside the existing
+`messaging_audit_log` scan (either source pins; same `why: 'messaged'`).
+Read-only, same posture as every other lookup here. A cancellation notice
+still never pins: `loadPromiseEvents` only reads scheduling-notice purposes
+(confirmation/reminder tiers) and call-derived events, never
+`appointment_cancellation`.
 
 ### Anchor
 
 Only a `completed` row, or a live pinned (immovable) row, anchors the plan —
 never a movable (pending/confirmed, unpinned) row, and **never** a
-cancelled/skipped/no_show/rescheduled row, however recent or however many
+cancelled/skipped/no_show row, however recent or however many
 immovable-looking stamps it still carries (a leftover invoice or sent-message
 stamp on a cancelled row must never restart the plan from a visit that never
 happened). A NULL-status row **can** anchor (it's a real live row) even
-though it can never move. No completed/pinned row at all falls back to the
+though it can never move. A `rescheduled` row is the one case that is
+`pinned` (see "Rider rows and movability" above) but **still never
+anchors**: it's a live row, but its `scheduled_date` is the STALE date it's
+waiting to be moved off of, not "when this last actually happened" — reading
+it as the anchor would plan the next date from a date that was never really
+kept. No completed/pinned-and-anchor-eligible row at all falls back to the
 rider parent's own `scheduled_date`.
 
 ## What the preview reports
 
 `scripts/rider-series-preview-report.js` — read-only, `--json` for
 machine-readable output, `--eligible-only` to filter. Finds every candidate
-pair (same customer, same `customer_properties` row, an active ongoing lawn
-`every_6_weeks` series + an active ongoing pest `quarterly` series, matched
-by the shared `familyOfServiceRow` classifier — never by reading
-`rides_parent_id`, since nothing sets it) inside one `SET TRANSACTION READ
-ONLY` snapshot, then prints `previewRiderPair`'s answer for each: eligible or
-not (and every reason), the anchor/horizon/plan, and the keep/move/insert/
-cancel/pinned breakdown. Prints customer and series **ids only, never a
-customer name** — same convention as
-`server/scripts/dunning-adopt-orphans-dry-run.js`.
+pair (same customer, an active ongoing lawn `every_6_weeks` series + an
+active ongoing pest `quarterly` series, matched by the shared
+`familyOfServiceRow` classifier — never by reading `rides_parent_id`, since
+nothing sets it) inside one `SET TRANSACTION READ ONLY` snapshot, then
+prints `previewRiderPair`'s answer for each: eligible or not (and every
+reason), the anchor/horizon/plan, and the keep/move/insert/cancel/pinned
+breakdown. Prints customer and series **ids only, never a customer name** —
+same convention as `server/scripts/dunning-adopt-orphans-dry-run.js`.
+
+**Candidate classification (Codex P2 round, PR #5290) reads the CURRENT
+template**: `overlayRecurringTemplateOverrides`
+(`services/recurring-template-overrides.js`, the same function
+`findActiveRecurringSeries`'s own duplicate-series scan applies to both
+sides of its compare) is applied to each candidate root before
+`familyOfServiceRow` classifies it, so a series reassigned via
+`recurring_template_overrides.service_id` (an admin edit, gated by
+`GATE_EDIT_APPT_PRICE_SERVICE_SCOPE` — the overlay is a no-op when that gate
+is off, same as everywhere else it's used) is classified by its FUTURE
+service, not its original one. When the override redirects `service_id`,
+the catalog identity (`service_key`/`name`) is re-resolved from the new
+service via a small in-memory `services` map rather than the row's original
+join.
+
+**Bucketing and ambiguity (Codex P1/P2 rounds, PR #5290):** every qualifying
+lawn and pest root is kept, grouped per customer, then clustered into
+property buckets with the SAME resolver and comparator
+`previewRiderPair`'s own `different_property`/`property_unresolved` gates
+use (`resolveSeriesPropertyScope`/`seriesPropertyVerdict`, "Property scope"
+above) — a pair this script buckets together can never fail the preview's
+own gate as a different property, or the reverse. This replaces the old
+`${customer_id}::${property_id || 'unstamped'}` key, which collapsed every
+null-property root for a customer into one bucket regardless of whether
+they were really the same address. A root whose scope cannot be resolved at
+all never silently joins another root's bucket — it lands in the
+customer's own shared `property_unresolved` bucket instead (still reported,
+not dropped). Every lawn×pest combination inside a bucket is emitted (never
+one root picked arbitrarily); a bucket with more than one qualifying lawn or
+pest root is tagged `host_ambiguous` / `rider_ambiguous` (merged into that
+pair's `reasons`, forcing `eligible: false` — `previewRiderPair` has no way
+to know about sibling roots, so this is decided here, not inside the
+per-pair preview) and every combination inside it is still shown. Order is
+deterministic (customer id, then root id) both for the bucketing walk and
+for the emitted pairs.
 
 ## Why nothing is linked yet
 
@@ -224,7 +336,11 @@ the office has seen what the rule actually does to real customers.
 
 ## What changed in `admin-schedule.js`
 
-No behavior change. Two edits:
+No behavior change to any existing exported function — every new export is
+additive, and the two functions the nightly top-up itself calls
+(`topupSeriesSkipReason`, `topupCustomerSkipReason`) are unchanged (round 2
+below aside, which is itself a read-only refactor to a shared table, not a
+rule change). Four edits:
 
 - `module.exports.topupSeriesSkipReason = topupSeriesSkipReason`: the
   existing series-eligibility function the nightly top-up already uses,
@@ -234,6 +350,16 @@ No behavior change. Two edits:
   `services/series-customer-eligibility.js#seriesCustomerSkipReason`
   instead of an inline copy of the same four rules (identical rows, in the
   same order), so the preview and the top-up read one table and can't drift.
+- `module.exports.topupAllSeriesSkipReasons`: an all-hits twin of
+  `topupSeriesSkipReason` added for the preview (Codex P2 round, PR #5290)
+  — same `TOPUP_SERIES_INELIGIBILITY_RULES` table, looped without the early
+  return, so the preview's `reasons` can list every applicable series gate
+  instead of only the first. `topupSeriesSkipReason` itself is untouched.
+- `module.exports.topUpScopeInput`: the override-aware address resolver the
+  duplicate-series guard already scopes on, now reachable read-only for the
+  preview's AND the report script's own property-scope resolution
+  (`resolveSeriesPropertyScope`, `services/rider-series-preview.js` — see
+  "Property scope" above).
 
 No hook, no new call site, no lock added or removed.
 

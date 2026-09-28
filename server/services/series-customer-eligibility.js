@@ -37,4 +37,21 @@ function seriesCustomerSkipReason(customer) {
   return hit ? hit[0] : null;
 }
 
-module.exports = { SERIES_CUSTOMER_COLUMNS, SERIES_CUSTOMER_INELIGIBILITY_RULES, seriesCustomerSkipReason };
+// All-hits variant for the pest-rides-lawn preview (Codex P2 round on PR
+// #5290): the top-up's own topupCustomerSkipReason stays first-hit
+// (byte-identical, one skip reason is all a write path needs), but the
+// preview's `reasons` array is documented to list EVERY applicable gate, not
+// just the first — a customer can be both inactive AND churned, and an
+// office list should show both rather than hide the second behind the
+// first. Same rule set, same order, just not short-circuited.
+function seriesCustomerSkipReasons(customer) {
+  if (!customer) return ['customer_not_found'];
+  return SERIES_CUSTOMER_INELIGIBILITY_RULES.filter(([, test]) => test(customer)).map(([reason]) => reason);
+}
+
+module.exports = {
+  SERIES_CUSTOMER_COLUMNS,
+  SERIES_CUSTOMER_INELIGIBILITY_RULES,
+  seriesCustomerSkipReason,
+  seriesCustomerSkipReasons,
+};

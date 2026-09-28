@@ -190,7 +190,11 @@ postgres('rider-series preview against migrated PostgreSQL', () => {
   test('a failed series-gate read is isolated: reported as series_check_error, and the caller transaction stays usable', async () => {
     const { lawnParent, pestParent } = await buildValidPair();
     const adminSchedule = require('../routes/admin-schedule');
-    const spy = jest.spyOn(adminSchedule, 'topupSeriesSkipReason').mockImplementation(async (sp) => sp.raw('SELECT 1/0'));
+    // previewRiderPair reads the all-hits variant (topupAllSeriesSkipReasons)
+    // so `reasons` can list every applicable series gate, not just the
+    // first — topupSeriesSkipReason itself (the nightly top-up's own
+    // first-hit function) stays untouched.
+    const spy = jest.spyOn(adminSchedule, 'topupAllSeriesSkipReasons').mockImplementation(async (sp) => sp.raw('SELECT 1/0'));
     try {
       const preview = await previewRiderPair(trx, { riderParentId: pestParent.id, hostParentId: lawnParent.id });
       expect(preview.reasons).toContain('series_check_error');
@@ -579,5 +583,100 @@ postgres('rider-series preview against migrated PostgreSQL', () => {
     const preview = await previewRiderPair(trx, { riderParentId: pestParent.id });
     expect(preview.reasons).toContain('not_a_rider');
     expect(preview.plan).toEqual([]);
+  });
+
+  // --- promise evidence (Codex P1 round on PR #5290: reuse loadPromiseEvents) ---
+  describe('promise evidence pins beyond a plain appointment_id-scoped message', () => {
+    test('a messaging_audit_log row linked ONLY by metadata.scheduled_service_id (the pre-2026-08-06 legacy shape) pins', async () => {
+      const { lawnParent, pestParent } = await buildValidPair();
+      const target = await trx('scheduled_services').where({ recurring_parent_id: pestParent.id })
+        .orderBy('scheduled_date', 'asc').first('id');
+      // No appointment_id at all — the OLD messagedRowIds scan (whereIn
+      // appointment_id) can never see this row. provider: 'push' proves
+      // delivery on its own (loadPromiseEvents' textActuallyWentOut), so no
+      // sms_log row is needed.
+      await trx('messaging_audit_log').insert({
+        id: randomUUID(), to_hash: 'x'.repeat(64), to_last4: '1234', body_hash: 'y'.repeat(64), customer_id: customerId,
+        appointment_id: null, metadata: JSON.stringify({ scheduled_service_id: target.id }),
+        audience: 'customer', purpose: 'appointment_confirmation', channel: 'sms', provider: 'push', sent_at: new Date(),
+      });
+      const preview = await previewRiderPair(trx, { riderParentId: pestParent.id, hostParentId: lawnParent.id });
+      expect(preview.pinned.find((p) => p.id === target.id)?.why).toBe('messaged');
+    });
+
+    test('a delivered appointment CONFIRMATION EMAIL (no messaging_audit_log/sms row at all) pins', async () => {
+      const { lawnParent, pestParent } = await buildValidPair();
+      const target = await trx('scheduled_services').where({ recurring_parent_id: pestParent.id })
+        .orderBy('scheduled_date', 'asc').first('id');
+      await trx('customer_interactions').insert({
+        id: randomUUID(), customer_id: customerId, interaction_type: 'email_outbound',
+        subject: 'Appointment confirmed', created_at: new Date(),
+        metadata: JSON.stringify({ event_type: 'appointment.confirmation', scheduled_service_id: target.id, status: 'sent' }),
+      });
+      const preview = await previewRiderPair(trx, { riderParentId: pestParent.id, hostParentId: lawnParent.id });
+      expect(preview.pinned.find((p) => p.id === target.id)?.why).toBe('messaged');
+    });
+  });
+
+  // --- rescheduled rider rows (Codex P1 round on PR #5290) -----------------
+  describe('a rescheduled rider row', () => {
+    test('is a LIVE pinned row (why: rescheduled_pending), never anchors, and blocks eligibility with rider_reschedule_pending', async () => {
+      const { lawnParent, pestParent } = await buildValidPair({ pestChildren: false });
+      const rescheduled = await row({
+        recurring_parent_id: pestParent.id, status: 'rescheduled', is_recurring: true,
+        recurring_pattern: 'quarterly', scheduled_date: addDays(ANCHOR, 50),
+      });
+      const preview = await previewRiderPair(trx, { riderParentId: pestParent.id, hostParentId: lawnParent.id });
+      // Pinned and labeled, not silently dropped as history.
+      expect(preview.pinned.find((p) => p.id === rescheduled.id)?.why).toBe('rescheduled_pending');
+      // Its date (ANCHOR+50) is STALE — must never become the anchor even
+      // though it is later than the completed parent's own ANCHOR date.
+      expect(preview.anchor).toBe(ANCHOR);
+      // Never movable/cancellable: it must not appear in move/cancel/keep.
+      expect(preview.move.find((m) => m.id === rescheduled.id)).toBeUndefined();
+      expect(preview.cancel.find((c) => c.id === rescheduled.id)).toBeUndefined();
+      expect(preview.keep.find((k) => k.id === rescheduled.id)).toBeUndefined();
+      // Blocks eligibility so the office can't plan an insert that
+      // duplicates it, but is NOT a structural blocker — the plan still
+      // shows (same "still shows what the plan WOULD be" posture as every
+      // other policy gate).
+      expect(preview.reasons).toContain('rider_reschedule_pending');
+      expect(preview.eligible).toBe(false);
+      expect(preview.plan.length).toBeGreaterThan(0);
+    });
+  });
+
+  // --- property scope resolution (Codex P1 round on PR #5290) --------------
+  describe('property scope resolution', () => {
+    test('property_unresolved: neither root has a property_id or ANY resolvable address (conservative refusal)', async () => {
+      const bareCustomer = randomUUID();
+      await trx('customers').insert({
+        id: bareCustomer, first_name: 'Bare', last_name: 'Address', phone: `fixture-${bareCustomer.slice(0, 8)}`,
+        active: true, pipeline_stage: 'active_customer',
+        // Deliberately no address_line1/city/zip at all — topUpScopeInput's
+        // customer-primary-address fallback has nothing to resolve.
+      });
+      const bareRow = async (overrides) => {
+        const [r] = await trx('scheduled_services').insert({
+          id: randomUUID(), customer_id: bareCustomer, status: 'confirmed', is_recurring: true,
+          recurring_ongoing: false, service_type: 'Test Service', ...overrides,
+        }).returning('*');
+        return r;
+      };
+      const lawnParent = await bareRow({
+        is_recurring: true, recurring_ongoing: true, recurring_pattern: 'every_6_weeks',
+        service_type: 'Lawn Care - Every 6 Weeks', scheduled_date: LAWN_START,
+      });
+      const pestParent = await bareRow({
+        status: 'completed', is_recurring: true, recurring_ongoing: true, recurring_pattern: 'quarterly',
+        service_type: 'Quarterly Pest Control', scheduled_date: ANCHOR,
+      });
+      const preview = await previewRiderPair(trx, { riderParentId: pestParent.id, hostParentId: lawnParent.id });
+      expect(preview.reasons).toContain('property_unresolved');
+      expect(preview.reasons).not.toContain('different_property');
+      // Not a structural blocker — the plan still shows.
+      expect(preview.eligible).toBe(false);
+      expect(preview.plan.length).toBeGreaterThan(0);
+    });
   });
 });

@@ -18626,6 +18626,19 @@ async function topupSeriesSkipReason(conn, parent, parentId, cols) {
   return null;
 }
 
+// All-hits variant for the pest-rides-lawn preview (Codex P2 round on PR
+// #5290): topupSeriesSkipReason itself stays first-hit and byte-identical
+// (the nightly top-up only ever needs ONE reason to skip a write), but the
+// preview's `reasons` array documents that it lists EVERY applicable gate.
+// Same table, same sequential DB-read order, just never short-circuited.
+async function topupAllSeriesSkipReasons(conn, parent, parentId, cols) {
+  const hits = [];
+  for (const [reason, test] of TOPUP_SERIES_INELIGIBILITY_RULES) {
+    if (await test(conn, parent, parentId, cols)) hits.push(reason);
+  }
+  return hits;
+}
+
 // Reads a pg_try_advisory_xact_lock(...)::AS locked result the same way
 // customer-comms-lock.js's own tryLockCustomerComms does (knex's raw()
 // result shape differs by driver/version — `{ rows: [...] }` vs a bare
@@ -25722,3 +25735,12 @@ module.exports.nextRecurringDate = nextRecurringDate;
 // for a read that commits nothing. Lazy require only, same avoid-a-route-
 // load-cycle reason as every other export in this block.
 module.exports.topupSeriesSkipReason = topupSeriesSkipReason;
+// All-hits twin of the above, same read-only posture — see its own comment.
+module.exports.topupAllSeriesSkipReasons = topupAllSeriesSkipReasons;
+// The override-aware address resolver the duplicate-series guard scopes on
+// (see its own header comment above topUpScopeInput): read-only reuse for
+// the preview's AND the ops report script's own property-scope resolution
+// (resolveSeriesPropertyScope, services/rider-series-preview.js) — one
+// address resolver, so "same property" can never mean something different
+// in the duplicate guard than it does in the pest-rides-lawn preview.
+module.exports.topUpScopeInput = topUpScopeInput;

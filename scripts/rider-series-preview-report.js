@@ -30,8 +30,9 @@
 require('dotenv').config();
 
 const db = require('../server/models/db');
-const { previewRiderPair } = require('../server/services/rider-series-preview');
+const { previewRiderPair, resolveSeriesPropertyScope, seriesPropertyVerdict } = require('../server/services/rider-series-preview');
 const { familyOfServiceRow } = require('../server/services/cancellation-processor');
+const { overlayRecurringTemplateOverrides } = require('../server/services/recurring-template-overrides');
 
 const json = process.argv.includes('--json');
 const eligibleOnly = process.argv.includes('--eligible-only');
@@ -39,16 +40,119 @@ const eligibleOnly = process.argv.includes('--eligible-only');
 const LAWN_PATTERN = 'every_6_weeks';
 const PEST_PATTERN = 'quarterly';
 
-// Finds every (lawn every-6-weeks parent, pest quarterly parent) pair at the
-// same customer + property — the scope doc's "who's in scope" — from ONE
-// read of every ongoing series-root row of either pattern. Grouped by
-// customer_id + property_id (an unstamped root's `property_id` is NULL; two
-// unstamped roots for the SAME customer are still grouped together — an
-// unstamped series lives at the customer's own primary address by
-// convention elsewhere in this codebase, e.g.
-// recurring-appointment-seeder.js#findActiveRecurringSeries's own duplicate
-// scoping — but a stamped root is never matched against an unstamped one,
-// since that would silently guess they're the same property).
+function sortById(rows) {
+  return [...rows].sort((a, b) => String(a.id).localeCompare(String(b.id)));
+}
+
+// Classifies ONE candidate root by its CURRENT template (Codex P2 round on
+// PR #5290): a series reassigned via recurring_template_overrides (an
+// admin edit under GATE_EDIT_APPT_PRICE_SERVICE_SCOPE — overlayRecurringTemplateOverrides
+// is itself a no-op when that gate is off, same as everywhere else it's
+// applied) is classified by its FUTURE service, not its original one —
+// the same rule findActiveRecurringSeries's own duplicate-series scan
+// applies to both sides of ITS compare. When the override redirects
+// service_id, the catalog identity (service_key/name) is re-resolved from
+// the NEW service via `serviceMap` rather than the row's original join,
+// since familyOfServiceRow reads the catalog fields, not the id.
+function classifyCandidate(row, serviceMap) {
+  const overlaid = overlayRecurringTemplateOverrides(row, { recurring_template_overrides: true });
+  let serviceKey = row.service_key;
+  let serviceName = row.service_name;
+  if (overlaid.service_id != null && String(overlaid.service_id) !== String(row.service_id)) {
+    const svc = serviceMap.get(String(overlaid.service_id));
+    if (svc) { serviceKey = svc.service_key; serviceName = svc.name; }
+  }
+  const family = familyOfServiceRow({ ...overlaid, service_key: serviceKey, service_name: serviceName });
+  return family;
+}
+
+// Finds every (lawn every-6-weeks parent, pest quarterly parent) pair for
+// the same customer at the SAME resolved property — the scope doc's "who's
+// in scope" — from ONE read of every ongoing series-root row of either
+// pattern. Every qualifying root is kept (not just the last one seen per
+// bucket): a customer with more than one qualifying lawn or pest root at
+// the same resolved property is reported `host_ambiguous` / `rider_ambiguous`
+// for every combination, rather than one pair picked arbitrarily (Codex P2
+// round on PR #5290).
+//
+// Property scope is resolved with the SAME mechanism (and the SAME
+// comparator) previewRiderPair's own different_property gate uses —
+// resolveSeriesPropertyScope / seriesPropertyVerdict
+// (services/rider-series-preview.js), built on the duplicate-series
+// guard's own address resolution (admin-schedule.js#topUpScopeInput) — so
+// a pair this script buckets together can never fail the preview's own
+// gate as a different property, or the reverse (Codex P1 round on PR
+// #5290: the old key collapsed every null-property root into one
+// 'unstamped' bucket per customer, which the preview's OLD narrower gate
+// then never caught as different_property either). A root whose scope
+// cannot be resolved at all (no property_id anywhere, no parseable address
+// — not even the customer's own primary) never silently joins another
+// root's bucket: it gets its own per-customer `property_unresolved`
+// bucket, reported rather than dropped.
+// Every qualifying root, classified and grouped by customer (Codex P2 round
+// on PR #5290 — findCandidatePairs' own complexity). Keeps EVERY qualifying
+// root, not just the last one seen — the caller decides ambiguity.
+function classifyAndGroupByCustomer(rows, serviceMap) {
+  const byCustomer = new Map();
+  for (const row of rows) {
+    const family = classifyCandidate(row, serviceMap);
+    if (family !== 'lawn_care' && family !== 'pest_control') continue;
+    if (family === 'lawn_care' && row.recurring_pattern !== LAWN_PATTERN) continue;
+    if (family === 'pest_control' && row.recurring_pattern !== PEST_PATTERN) continue;
+    const key = String(row.customer_id);
+    if (!byCustomer.has(key)) byCustomer.set(key, []);
+    byCustomer.get(key).push({ row, family });
+  }
+  return byCustomer;
+}
+
+// Clusters ONE customer's qualifying roots into property buckets: a
+// RESOLVED root joins the first bucket its scope matches
+// (seriesPropertyVerdict === 'same'); an UNRESOLVED root always gets the
+// customer's one shared unresolved bucket (conservative — never guessed
+// into, or out of, a resolved bucket). Order is deterministic (root id).
+async function clusterIntoPropertyBuckets(trx, group) {
+  const scoped = await Promise.all(group.map(async (c) => ({ ...c, scope: await resolveSeriesPropertyScope(trx, c.row) })));
+  const ordered = scoped.sort((a, b) => String(a.row.id).localeCompare(String(b.row.id)));
+  const buckets = [];
+  let unresolvedBucket = null;
+  for (const c of ordered) {
+    let bucket = null;
+    if (!c.scope.resolved) {
+      if (!unresolvedBucket) { unresolvedBucket = { unresolved: true, lawn: [], pest: [] }; buckets.push(unresolvedBucket); }
+      bucket = unresolvedBucket;
+    } else {
+      bucket = buckets.find((b) => !b.unresolved && seriesPropertyVerdict(b.scope, c.scope) === 'same');
+      if (!bucket) { bucket = { scope: c.scope, lawn: [], pest: [] }; buckets.push(bucket); }
+    }
+    bucket[c.family === 'lawn_care' ? 'lawn' : 'pest'].push(c.row);
+  }
+  return buckets;
+}
+
+// Every lawn×pest combination for ONE property bucket (finding: keep every
+// qualifying root, emit every combination), tagged with every extra reason
+// this script's own bucketing decided — property_unresolved for the
+// customer's shared unresolved bucket, host_ambiguous/rider_ambiguous when
+// the bucket holds more than one qualifying root on either side.
+function pairsFromBucket(bucket, customerId) {
+  if (!bucket.lawn.length || !bucket.pest.length) return [];
+  const extraReasons = [];
+  if (bucket.unresolved) extraReasons.push('property_unresolved');
+  if (bucket.lawn.length > 1) extraReasons.push('host_ambiguous');
+  if (bucket.pest.length > 1) extraReasons.push('rider_ambiguous');
+  const propertyId = bucket.unresolved ? null : (bucket.scope.propertyId || null);
+  const pairs = [];
+  for (const lawn of sortById(bucket.lawn)) {
+    for (const pest of sortById(bucket.pest)) {
+      pairs.push({
+        lawnParentId: lawn.id, pestParentId: pest.id, customerId, propertyId, extraReasons,
+      });
+    }
+  }
+  return pairs;
+}
+
 async function findCandidatePairs(trx) {
   const rows = await trx('scheduled_services as s')
     .leftJoin('services as sv', 's.service_id', 'sv.id')
@@ -57,33 +161,20 @@ async function findCandidatePairs(trx) {
     .where('s.recurring_ongoing', true)
     .whereIn('s.recurring_pattern', [LAWN_PATTERN, PEST_PATTERN])
     .select(
-      's.id', 's.customer_id', 's.property_id', 's.recurring_pattern', 's.service_type',
+      's.id', 's.customer_id', 's.property_id', 's.recurring_pattern', 's.service_type', 's.service_id',
+      's.recurring_template_overrides', 's.source_estimate_id',
       'sv.service_key', 'sv.name as service_name',
     );
+  if (!rows.length) return [];
 
-  const byKey = new Map();
-  for (const row of rows) {
-    const family = familyOfServiceRow({
-      ...row, service_key: row.service_key, service_name: row.service_name,
-    });
-    if (family !== 'lawn_care' && family !== 'pest_control') continue;
-    const key = `${row.customer_id}::${row.property_id || 'unstamped'}`;
-    if (!byKey.has(key)) byKey.set(key, {});
-    const bucket = byKey.get(key);
-    if (family === 'lawn_care' && row.recurring_pattern === LAWN_PATTERN) bucket.lawn = row;
-    if (family === 'pest_control' && row.recurring_pattern === PEST_PATTERN) bucket.pest = row;
-  }
+  const serviceMap = new Map((await trx('services').select('id', 'service_key', 'name'))
+    .map((s) => [String(s.id), s]));
+  const byCustomer = classifyAndGroupByCustomer(rows, serviceMap);
 
   const pairs = [];
-  for (const bucket of byKey.values()) {
-    if (bucket.lawn && bucket.pest) {
-      pairs.push({
-        lawnParentId: bucket.lawn.id,
-        pestParentId: bucket.pest.id,
-        customerId: bucket.lawn.customer_id,
-        propertyId: bucket.lawn.property_id || null,
-      });
-    }
+  for (const [customerId, group] of [...byCustomer.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+    const buckets = await clusterIntoPropertyBuckets(trx, group);
+    for (const bucket of buckets) pairs.push(...pairsFromBucket(bucket, customerId));
   }
   return pairs;
 }
@@ -132,6 +223,19 @@ async function main() {
       } catch (err) {
         preview = err.preview || {
           eligible: false, reasons: ['error'], error: err.message, anchor: null, plan: [], keep: [], move: [], insert: [], cancel: [], pinned: [],
+        };
+      }
+      // Bucket-level reasons this script's OWN candidate-finding decided
+      // (property_unresolved when the bucket couldn't be resolved at all,
+      // host_ambiguous/rider_ambiguous when the bucket held more than one
+      // qualifying root on either side) — previewRiderPair has no way to
+      // know about sibling roots, so these are merged in here rather than
+      // computed inside the pair-level preview.
+      if (pair.extraReasons?.length) {
+        preview = {
+          ...preview,
+          eligible: false,
+          reasons: [...new Set([...preview.reasons, ...pair.extraReasons])],
         };
       }
       results.push({ pair, preview });
