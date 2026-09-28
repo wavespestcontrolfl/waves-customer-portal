@@ -3152,6 +3152,46 @@ function lineExcludedFromPercentDiscount(serviceKey, catalog = percentExclusionC
   return alias ? serviceExcludedFromPercentDiscount(alias) : false;
 }
 
+// Owner ruling 2026-09-28 (#5181): refuse a price change while money is
+// committed at the old price. Unchanged prices pass. Read under the caller's
+// transaction (the visit row is already locked by update-details).
+async function assertRepriceAllowed(conn, scheduledServiceId, nextPrice) {
+  const current = await conn('scheduled_services').where({ id: scheduledServiceId }).first('estimated_price');
+  const cents = (v) => (v == null || v === '' ? null : Math.round(Number(v) * 100));
+  if (!current || cents(current.estimated_price) === cents(nextPrice)) return;
+  const openInvoices = await conn('invoices')
+    .where({ scheduled_service_id: scheduledServiceId })
+    .whereNotIn('status', ['void', 'paid', 'prepaid', 'refunded', 'canceled', 'cancelled'])
+    .select('id', 'status', 'total', 'credit_applied');
+  const owed = (openInvoices || []).find((inv) => invoiceAmountDue(inv) > 0);
+  if (owed) {
+    throw Object.assign(
+      httpError(409, 'This visit has an open invoice at its current price. Void or adjust that invoice in Billing before changing the visit price.'),
+      { code: 'REPRICE_BLOCKED_OPEN_INVOICE' },
+    );
+  }
+  const hold = await conn('estimate_card_holds')
+    .where({ scheduled_service_id: scheduledServiceId })
+    .whereNotIn('status', ['released', 'cancelled', 'failed'])
+    .first('id');
+  if (hold) {
+    throw Object.assign(
+      httpError(409, 'This visit has a card hold at its accepted price. Release the hold before changing the visit price.'),
+      { code: 'REPRICE_BLOCKED_CARD_HOLD' },
+    );
+  }
+  const cardLane = await conn('appointment_card_requests')
+    .where({ scheduled_service_id: scheduledServiceId, status: 'completed' })
+    .where('accepted_amount', '>', 0)
+    .first('id');
+  if (cardLane) {
+    throw Object.assign(
+      httpError(409, 'The customer approved a card charge at this visit\'s current price. Cancel that approval before changing the visit price.'),
+      { code: 'REPRICE_BLOCKED_CARD_APPROVAL' },
+    );
+  }
+}
+
 function calculateVisitFinancialsForAddons(pricing, addonLines) {
   const addons = Array.isArray(addonLines) ? addonLines : [];
   const subtotal = (pricing.primaryNet || 0)
@@ -4805,6 +4845,10 @@ async function propagatePriceServiceToFollowingSiblings(conn, {
           : (fields.estimated_price === 0 ? 0 : financials.price);
       }
       if (cols.discount_dollars) siblingUpdates.discount_dollars = financials.appointmentDiscountDollars;
+    }
+    // Same committed-money guard as the edited visit (owner 2026-09-28).
+    if (siblingUpdates.estimated_price !== undefined) {
+      await assertRepriceAllowed(conn, sibling.id, siblingUpdates.estimated_price);
     }
     await conn('scheduled_services').where({ id: sibling.id }).update(siblingUpdates);
     updatedIds.push(sibling.id);
@@ -13670,6 +13714,16 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         // commit and then sees the invoice in 'sending'. A payer can never
         // land between the claim and the provider request. Recurring children
         // keep inheriting the parent's Bill-To through this update.)
+        // Owner ruling 2026-09-28: a visit's price cannot change while money
+        // is already committed at the old price — an open invoice with a
+        // balance, a live estimate card hold, or an approved appointment-card
+        // charge. Every collector (completion, the balance sweep, card holds,
+        // the card lane, grouped closeout) would otherwise still collect the
+        // old amount. Staff void / release it first. A re-service conversion
+        // voids its own invoices and is exempt.
+        if (updates.estimated_price !== undefined && !reServiceConversion) {
+          await assertRepriceAllowed(trx, req.params.id, updates.estimated_price);
+        }
         await trx('scheduled_services').where({ id: req.params.id }).update(updates);
         // A job Bill-To edit (payer cleared, self-pay override set) that makes a
         // withdrawn combined-visit invoice self-pay again requeues it here.
@@ -25284,3 +25338,4 @@ module.exports.cancelSpawnedReminderIfVisitTerminal = cancelSpawnedReminderIfVis
 module.exports.typedFindingsPromptSections = typedFindingsPromptSections;
 // Parity-test surface (series-move incident): see tests/recurring-date-parity.test.js.
 module.exports.nextRecurringDate = nextRecurringDate;
+module.exports.assertRepriceAllowed = assertRepriceAllowed;
