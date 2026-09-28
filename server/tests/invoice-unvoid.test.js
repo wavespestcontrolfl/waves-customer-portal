@@ -462,23 +462,25 @@ describe('InvoiceService.unvoidInvoice', () => {
   // Owner ruling 2026-09-28: the re-price guard makes staff void a visit's
   // old invoice before re-pricing it to $0 — restoring that invoice would put
   // the pre-reprice charge back in front of the customer.
-  test('refuses a visit now priced at exactly $0 (not a callback)', async () => {
-    const svc = { id: 'svc-1', status: 'completed', is_callback: false, estimated_price: '0.00' };
+  test('refuses a per-application visit now priced at exactly $0 (not a callback)', async () => {
+    const svc = { id: 'svc-1', status: 'completed', is_callback: false, estimated_price: '0.00', customer_id: 'c1' };
     db
       .mockReturnValueOnce(chain({ first: voidInvoice({ scheduled_service_id: 'svc-1' }) }))
       .mockReturnValueOnce(noRow())
-      .mockReturnValueOnce(chain({ first: svc }));
+      .mockReturnValueOnce(chain({ first: svc }))
+      .mockReturnValueOnce(chain({ first: { billing_mode: 'per_application' } }));
     await expect(InvoiceService.unvoidInvoice('inv-1')).rejects.toThrow(/now priced at \$0/);
     expect(db.transaction).not.toHaveBeenCalled();
   });
 
   test('refuses a service-record-linked invoice whose visit is now priced at $0', async () => {
-    const svc = { id: 'svc-1', status: 'completed', is_callback: false, estimated_price: 0 };
+    const svc = { id: 'svc-1', status: 'completed', is_callback: false, estimated_price: 0, customer_id: 'c1' };
     db
       .mockReturnValueOnce(chain({ first: voidInvoice({ scheduled_service_id: null, service_record_id: 'sr-1' }) }))
       .mockReturnValueOnce(noRow())
       .mockReturnValueOnce(chain({ first: { scheduled_service_id: 'svc-1' } }))
-      .mockReturnValueOnce(chain({ first: svc }));
+      .mockReturnValueOnce(chain({ first: svc }))
+      .mockReturnValueOnce(chain({ first: { billing_mode: 'per_application' } }));
     await expect(InvoiceService.unvoidInvoice('inv-1')).rejects.toThrow(/now priced at \$0/);
     expect(db.transaction).not.toHaveBeenCalled();
   });

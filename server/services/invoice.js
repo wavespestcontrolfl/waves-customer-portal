@@ -505,7 +505,21 @@ async function assertUnvoidableLinkedVisit(conn, invoiceRow, { lock = false } = 
   // re-price guard makes staff void its old invoice before the $0 lands, so
   // restoring that invoice would put the pre-reprice charge back in front of
   // the customer. Re-price the visit first.
-  if (svc.estimated_price != null && svc.estimated_price !== "" && Number(svc.estimated_price) === 0) {
+  // Scoped to per-application customers, the lane where a stamped $0 bills
+  // nothing in this change; a legacy monthly $0 visit still bills its dues.
+  const zeroPriced = svc.estimated_price != null && svc.estimated_price !== "" && Number(svc.estimated_price) === 0;
+  let perApplicationCustomer = false;
+  if (zeroPriced && svc.customer_id) {
+    try {
+      const cust = await conn("customers").where({ id: svc.customer_id }).first("billing_mode");
+      perApplicationCustomer = cust?.billing_mode === "per_application";
+    } catch (err) {
+      throw new Error(
+        `Could not verify the linked customer's billing mode — refusing to unvoid (${err.message})`,
+      );
+    }
+  }
+  if (zeroPriced && perApplicationCustomer) {
     throw new Error(
       "Cannot unvoid — this visit is now priced at $0; re-price the visit before restoring a charge",
     );

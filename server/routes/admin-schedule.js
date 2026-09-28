@@ -13742,9 +13742,9 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         // balance, a live estimate card hold, or an approved appointment-card
         // charge. Every collector (completion, the balance sweep, card holds,
         // the card lane, grouped closeout) would otherwise still collect the
-        // old amount. Staff void / release it first. A re-service conversion
-        // voids its own invoices and is exempt.
-        if (updates.estimated_price !== undefined && !reServiceConversion) {
+        // old amount. Staff void / release it first. Only a FREE re-service
+        // conversion (which voids its own invoices) is exempt.
+        if (updates.estimated_price !== undefined && !reServiceConversionZeroPrice) {
           await assertRepriceAllowed(trx, req.params.id, updates.estimated_price);
         }
         await trx('scheduled_services').where({ id: req.params.id }).update(updates);
