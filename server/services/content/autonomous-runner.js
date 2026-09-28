@@ -2146,25 +2146,22 @@ class AutonomousRunner {
       const citedUrls = typeof seeder.externalUrlsFromMarkdown === 'function'
         ? seeder.externalUrlsFromMarkdown(draft?.body || '')
         : [];
-      // Owner ruling 2026-09-28 unlinks a competitor URL out of the body at
-      // draft capture (brief-driven-tools.js emit_draft) — before this body
-      // sweep ever runs — so a manifest source described only in prose
-      // ("Orkin's terms page") that the agent cited as a competitor link
-      // would otherwise vanish from both the sources list AND the archive
-      // audit. Its removed URL is still stamped on the draft; feed it in too
-      // (a Wayback snapshot is archival evidence, not a published link — it
-      // never re-adds the link to the post).
+      // Owner ruling 2026-09-28: a post never links a competitor's own site,
+      // so a competitor page the writer relied on is listed in
+      // notes_for_reviewer instead (editorial-evidence.evidenceUrlsFor) —
+      // otherwise it would vanish from both the sources list AND the archive
+      // audit. A Wayback snapshot is archival evidence, not a published link.
       // Normalized to https like the review's copy (a protocol-relative,
       // www. or escaped destination would otherwise be dropped or sent to
       // Wayback malformed — Codex r4).
-      const unlinkedCompetitorUrls = require('./editorial-evidence').unlinkedCompetitorUrls(draft);
+      const evidenceUrls = require('./editorial-evidence').evidenceUrlsFor(draft);
       // One cap on the FINAL list (Codex r2 on #5191): the body sweep caps
-      // itself, but manifest sources and capture-time removals add to it,
-      // and the outer timeout below cannot cancel snapshots already started.
+      // itself, but manifest sources and the notes' evidence add to it, and
+      // the outer timeout below cannot cancel snapshots already started.
       const sources = Array.from(new Set([
         ...(Array.isArray(manifestSources) ? manifestSources : []),
         ...citedUrls,
-        ...unlinkedCompetitorUrls,
+        ...evidenceUrls,
       ])).filter((s) => /^https?:\/\//i.test(String(s || '').trim())).slice(0, SNAPSHOT_SOURCE_LIMIT);
       if (sources.length === 0) return;
 

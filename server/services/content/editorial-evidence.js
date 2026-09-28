@@ -63,15 +63,15 @@ function trimTrailingUrlNoise(url) {
 }
 
 // `evidenceUrls`: sources that support the text but are not published with it —
-// the competitor pages the no-competitor-links rule unlinked (owner ruling
-// 2026-09-28). The review still reads them, so a claim sourced from a
-// competitor's own page keeps its evidence without the post linking it
-// (Codex r2 on #5191).
-// An unlinked destination in any form the unlinker recognizes (http://,
+// the competitor pages a post may name but never link (owner ruling
+// 2026-09-28; evidenceUrlsFor below). The review still reads them, so a claim
+// sourced from a competitor's own page keeps its evidence without the post
+// linking it (Codex r2, r6 on #5191).
+// A destination in any form competitor-links.js detects (http://,
 // protocol-relative, www., entity- or backslash-escaped, backslash
 // separators) as the https URL the review's filter below accepts (Codex r3,
 // r5 on #5191); null when it isn't a web URL at all. Same WHATWG rules as
-// the unlinker's hostOf: an http(s) scheme is parsed as written, where a
+// competitor-links' hostOf: an http(s) scheme is parsed as written, where a
 // backslash is a slash ("https:\\orkin.com\\plans").
 function evidenceUrl(raw) {
   const url = require('./competitor-links').readableUrl(raw);
@@ -177,13 +177,21 @@ async function refreshReviewFrontmatter(draft, brief) {
 // Review/repair loop: evaluates the assembled document, attempts one repair
 // pass on a clean (non-error) failure, then re-evaluates. Frontmatter is
 // frozen for the whole loop — repair may only change the body bytes.
-// The competitor URLs taken out of a draft (capture time, plus any the
-// publisher's commit pass took out: `extra`) — evidence, never published.
-// Normalized to the https URL a browser requests (evidenceUrl), so every
-// consumer (the review, the publish-day snapshots) gets the same list.
-function unlinkedCompetitorUrls(draft, extra = []) {
-  return [...new Set([...(Array.isArray(draft?.competitor_links_unlinked) ? draft.competitor_links_unlinked : []), ...extra]
-    .map((u) => evidenceUrl(u?.url)).filter(Boolean))];
+// A competitor page the writer relied on is named in the post but never
+// linked (owner ruling 2026-09-28), so its URL goes in notes_for_reviewer,
+// which never publishes. Only competitor-host URLs are taken from the notes:
+// every other source is linked in the body, where the link allowlist
+// applies. Read token by token (never joined across lines, unlike the
+// publish-time detector) and normalized to the https URL a browser requests
+// (evidenceUrl), so every consumer (the review, the publish-day snapshots)
+// gets the same clean list.
+function evidenceUrlsFor(draft) {
+  const notes = typeof draft?.notes_for_reviewer === 'string' ? draft.notes_for_reviewer : '';
+  const { isCompetitorHost } = require('./competitor-links');
+  const urls = notes.split(/[\s<>()[\]"'`]+/)
+    .map((token) => evidenceUrl(token.replace(/[.,;:!?]+$/, '')))
+    .filter((url) => url && isCompetitorHost(new URL(url).hostname));
+  return [...new Set(urls)];
 }
 
 async function reviewAndRepairDraft(draft, reviewFrontmatter, brief) {
@@ -191,7 +199,7 @@ async function reviewAndRepairDraft(draft, reviewFrontmatter, brief) {
   let document = original;
   let result;
   for (let attempt = 0; attempt < 2; attempt++) {
-    result = await evaluate(document, brief, { evidenceUrls: unlinkedCompetitorUrls(draft) });
+    result = await evaluate(document, brief, { evidenceUrls: evidenceUrlsFor(draft) });
     if (result?.pass === true) {
       const body = fm.parse(document).content;
       return { ...draft, body, editorial_review: result };
@@ -420,4 +428,4 @@ async function verifyEvidenceOnlyAdvance({ pinnedSha, headSha }, deps = {}) {
 const evidenceDomain = (document) => domainContextFromDocument(document)?.hostname || null;
 
 module.exports = { enabled, applicable, prepareDraft, filesForDocument, assertPrEvidence,
-  verifyEvidenceOnlyAdvance, sourceUrls, reviewError, evidenceDomain, unlinkedCompetitorUrls };
+  verifyEvidenceOnlyAdvance, sourceUrls, reviewError, evidenceDomain, evidenceUrlsFor };

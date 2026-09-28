@@ -49,7 +49,6 @@ const getSerpProfiler = lazy('serp-profiler', '../../seo/serp-profiler');
 const getGithubClient = lazy('github-client', '../../content-astro/github-client');
 const getFrontmatter = lazy('frontmatter', '../../content-astro/frontmatter');
 const getContentGuardrails = lazy('content-guardrails', '../content-guardrails');
-const getCompetitorLinks = lazy('competitor-links', '../competitor-links');
 const getGateRetryDirectives = lazy('gate-retry-directives', '../gate-retry-directives');
 
 // ── tool executor ────────────────────────────────────────────────────
@@ -529,23 +528,6 @@ async function executeBriefTool(toolName, input, { sessionId } = {}) {
           logger.warn(`[brief-driven-tools] emit_draft(${sessionId}): stripped citation residue from the draft — the writer model is still emitting citation markup despite the prompt ban`);
         }
       }
-      // Owner ruling 2026-09-28: never link a competitor's own site. Links
-      // to a competitor host become their anchor text at capture, so every
-      // gate (and the in-loop self-lint) judges the body that will publish;
-      // the publisher repeats the same pass at commit for every lane.
-      const competitorLinksUnlinked = [];
-      const competitorLinks = getCompetitorLinks();
-      if (competitorLinks) {
-        const hosts = competitorLinks.competitorHosts();
-        const b = competitorLinks.unlinkCompetitorLinks(cleanBody, hosts);
-        const f = competitorLinks.unlinkCompetitorLinksDeep(cleanFrontmatter, hosts);
-        cleanBody = b.text;
-        cleanFrontmatter = f.value;
-        competitorLinksUnlinked.push(...b.unlinked, ...f.unlinked);
-        if (competitorLinksUnlinked.length) {
-          logger.info(`[brief-driven-tools] emit_draft(${sessionId}): unlinked ${competitorLinksUnlinked.length} competitor link(s) (owner ruling: no links to competitor sites)`);
-        }
-      }
       // Bind the approved plan to what's actually being emitted: the plan
       // passed validate_answer_plan, but nothing upstream stops the draft's
       // real sections from diverging from it. requiresExistingTitle marks a
@@ -646,7 +628,6 @@ async function executeBriefTool(toolName, input, { sessionId } = {}) {
         claims_ledger: Array.isArray(claims_ledger) ? claims_ledger : [],
         notes_for_reviewer: notes_for_reviewer || null,
         citation_residue_stripped: residueStripped,
-        competitor_links_unlinked: competitorLinksUnlinked,
         // Audit trail: how many in-loop redrafts this draft took (null when
         // the lint wasn't armed for the session). Rides the persisted
         // draft_payload like citation_residue_stripped above.
@@ -658,30 +639,8 @@ async function executeBriefTool(toolName, input, { sessionId } = {}) {
 
     case 'emit_metadata_only': {
       if (!sessionId) return { error: 'session context missing — dispatcher must pass sessionId' };
-      const { title: rawTitle, meta_description: rawMetaDescription, notes_for_reviewer } = input || {};
-      if (!rawTitle || !rawMetaDescription) return { error: 'title + meta_description required' };
-      // Owner ruling 2026-09-28: never link a competitor's own site — mirrors
-      // emit_draft's capture-time unlink above. Without this, a competitor
-      // URL in the title/description trips the authoritative metadata
-      // guardrail (which runs the SAME unlink-then-check policy) before
-      // publishMetadataRewrite ever gets a chance to unlink it — that lane
-      // only unlinks blog targets at commit, and a metadata rewrite can also
-      // target a non-blog (service/location) page.
-      let title = rawTitle;
-      let meta_description = rawMetaDescription;
-      const metaCompetitorLinksUnlinked = [];
-      const metaCompetitorLinks = getCompetitorLinks();
-      if (metaCompetitorLinks) {
-        const hosts = metaCompetitorLinks.competitorHosts();
-        const t = metaCompetitorLinks.unlinkCompetitorLinks(title, hosts);
-        const d = metaCompetitorLinks.unlinkCompetitorLinks(meta_description, hosts);
-        title = t.text;
-        meta_description = d.text;
-        metaCompetitorLinksUnlinked.push(...t.unlinked, ...d.unlinked);
-        if (metaCompetitorLinksUnlinked.length) {
-          logger.info(`[brief-driven-tools] emit_metadata_only(${sessionId}): unlinked ${metaCompetitorLinksUnlinked.length} competitor link(s) (owner ruling: no links to competitor sites)`);
-        }
-      }
+      const { title, meta_description, notes_for_reviewer } = input || {};
+      if (!title || !meta_description) return { error: 'title + meta_description required' };
       // W1 in-loop self-lint, metadata edition: meta text ships on every
       // customer surface, so the publishable-text guardrails (compliance,
       // price, product claims, prevention promises, tenure) run at capture
@@ -761,7 +720,6 @@ async function executeBriefTool(toolName, input, { sessionId } = {}) {
         title,
         meta_description,
         notes_for_reviewer: notes_for_reviewer || null,
-        competitor_links_unlinked: metaCompetitorLinksUnlinked,
         // Same audit trail full drafts carry (null when lint not armed).
         self_lint: metaSelfLintAudit,
         captured_at: new Date(),

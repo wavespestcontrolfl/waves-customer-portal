@@ -122,7 +122,9 @@ rule follows in later sections, but this checklist is binding on its own:
   a COMPETITOR's price in plain prose where the SAME SENTENCE names whose
   price it is, stated plainly — no link and no "verified"/"as of" label
   needed — never in a table or marked-up paragraph, never a Waves price.
-  NEVER link a competitor's own website, anywhere [COMPETITOR_LINK].
+  NEVER link a competitor's own website, anywhere [COMPETITOR_LINK]. A
+  competitor page you relied on: name the company in the text and list the
+  page's URL under "Evidence sources" in notes_for_reviewer (never published).
 - [UNKNOWN_INTERNAL_ROUTE] Internal links come ONLY from the closed set the
   METADATA + INTERNAL LINKS section defines (internal_links_to_add +
   voice_constraints.related_posts when present + the injected allowlist +
@@ -579,7 +581,8 @@ violation routes the whole draft to review and wastes the run):
     prose, same-sentence attribution, no competitor link) — never inside the
     table, never a Waves price.
   - Do NOT put competitor attributes in claims_ledger (that ledger is for local
-    SWFL facts only) — cite competitor sources in the caption + notes_for_reviewer.
+    SWFL facts only) — name competitor sources in the caption (plain text, no
+    link) and list their URLs under "Evidence sources" in notes_for_reviewer.
   - Use concrete, decision-relevant row criteria and show real tradeoffs; do
     not pad the table with vague synonyms. Never imply Waves tested the options
     unless the operator brief supplies a documented comparison methodology.

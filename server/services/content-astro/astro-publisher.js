@@ -47,65 +47,22 @@ const competitorLinks = require('../content/competitor-links');
 
 const ASTRO_BLOG_DIR = 'src/content/blog';
 
-// Owner ruling 2026-09-28: "I do not want to link to a competitor's website,
-// whatsoever." The last step before EVERY commit — blog, service and location
-// targets alike (publishAstro, publishOrUpdatePage, publishRefresh,
-// publishMetadataRewrite): each link to a competitor host becomes its anchor
-// text, in body and frontmatter — deterministic, no LLM. A competitor URL
-// that somehow survives refuses the publish. Every removal is listed in the
-// PR notes (withCompetitorUnlinkNote), so a metadata or refresh PR on a
-// service page never drops a link silently. `validate` is the frontmatter
-// check the lane already ran (blog schema for blog targets): unlinking a
-// frontmatter URL shortens the string, so the transformed frontmatter is
-// re-validated before it is committed.
-function competitorFreeMarkdown(frontmatter, body, { validate = null } = {}) {
-  const hosts = competitorLinks.competitorHosts();
-  const b = competitorLinks.unlinkCompetitorLinks(body, hosts);
-  const f = competitorLinks.unlinkCompetitorLinksDeep(frontmatter, hosts);
-  if (f.unlinked.length && validate) validate(f.value);
-  const markdown = fm.stringify(f.value, b.text);
-  const left = competitorLinks.competitorLinkUrls(markdown, hosts);
-  if (left.length) {
-    const err = new Error(`competitor link "${left[0]}" survived unlinking — publish refused (owner ruling: no links to competitor sites)`);
+// Owner rulings 2026-09-28: "I do not want to link to a competitor's
+// website, whatsoever" — and refuse, don't rewrite. The last step before
+// EVERY commit, blog, service and location targets alike (publishAstro,
+// publishOrUpdatePage, publishRefresh, publishMetadataRewrite): a link to a
+// competitor host anywhere in the body or frontmatter refuses the publish
+// before any branch exists. Nothing is rewritten. The writer's self-lint
+// (content-guardrails' COMPETITOR_LINK) sends such a draft back first, and an
+// admin/calendar post meets the same guardrail and is fixed by hand.
+function competitorFreeMarkdown(frontmatter, body) {
+  const found = competitorLinks.competitorLinkUrlsIn(frontmatter, body);
+  if (found.length) {
+    const err = new Error(`competitor link "${found[0]}" in the page — publish refused (owner ruling: no links to competitor sites)`);
     err.code = 'COMPETITOR_LINK';
     throw err;
   }
-  const unlinked = [...b.unlinked, ...f.unlinked];
-  if (unlinked.length) logger.info(`[astro-publisher] unlinked ${unlinked.length} competitor link(s) before commit`);
-  // The committed frontmatter and body too, so the owner-list check judges
-  // exactly the text that ships.
-  return { markdown, unlinked, frontmatter: f.value, body: b.text };
-}
-
-// The generated PR's own description lists what was unlinked.
-// One list of removed competitor links per draft: the capture step's
-// (emit_draft / emit_metadata_only stamp them) plus this commit's. It is
-// stamped back on the draft, which the runner persists (draft_payload), so
-// the PR notes, the final editorial review and a later Codex remediation
-// all read the same list (Codex r3).
-function recordUnlinks(draft, unlinked = []) {
-  const captured = Array.isArray(draft?.competitor_links_unlinked) ? draft.competitor_links_unlinked : [];
-  if (!unlinked.length || !draft || typeof draft !== 'object') return captured;
-  const seen = new Set(captured.map((u) => `${u?.url}\u0000${u?.text}`));
-  const all = [...captured, ...unlinked.filter((u) => !seen.has(`${u?.url}\u0000${u?.text}`))];
-  draft.competitor_links_unlinked = all;
-  return all;
-}
-
-// Bounded (Codex r4): one line per distinct URL, at most 25 lines of at
-// most ~200 characters, then a count of the rest, so a link-heavy page can
-// never push the PR body past GitHub's size limit after the branch exists.
-const UNLINK_NOTE_MAX_LINES = 25;
-function withCompetitorUnlinkNote(prBody, unlinked = []) {
-  if (!unlinked.length) return prBody;
-  const byUrl = new Map();
-  for (const u of unlinked) if (!byUrl.has(String(u.url))) byUrl.set(String(u.url), u);
-  const distinct = [...byUrl.values()];
-  const lines = distinct.slice(0, UNLINK_NOTE_MAX_LINES)
-    .map((u) => `- \`${String(u.url).replace(/`/g, '').slice(0, 120)}\` → "${String(u.text).replace(/\s+/g, ' ').slice(0, 80)}"`);
-  const more = distinct.length - lines.length;
-  if (more > 0) lines.push(`- …and ${more} more`);
-  return `${prBody}\n\n### Competitor links removed\n\nOwner ruling 2026-09-28: no links to competitor sites. The wording stays; these links became plain text:\n\n${lines.join('\n')}\n`;
+  return fm.stringify(frontmatter, body);
 }
 const ASTRO_HERO_DIR = 'public/images/blog';
 
@@ -1443,15 +1400,7 @@ async function publishAstro(postId, { humanApproved = false } = {}) {
     });
     assertValidBlogFrontmatter(data);
     const prepared = await editorialEvidence.prepareDraft({ frontmatter: data, body: post.content || '' }, { page_type: 'supporting-blog' });
-    // Unlink competitor links BEFORE this lane's guardrail pass below (the
-    // commit-time pass in competitorFreeMarkdown then finds nothing left),
-    // so an admin/calendar post is unlinked and published, not blocked.
-    const earlyUnlink = competitorLinks.unlinkCompetitorLinks(String(prepared.body || '').trim());
-    const earlyMetaUnlink = competitorLinks.unlinkCompetitorLinksDeep(data);
-    Object.assign(data, earlyMetaUnlink.value);
-    if (earlyMetaUnlink.unlinked.length) assertValidBlogFrontmatter(data);
-    const earlyUnlinked = [...earlyUnlink.unlinked, ...earlyMetaUnlink.unlinked];
-    const body = earlyUnlink.text;
+    const body = String(prepared.body || '').trim();
     if (!post.reading_time_min) data.reading_time_min = estimateReadingTime(body);
     // A repair can add or remove the body's visible FAQ section — recompute
     // schema_types against the REPAIRED body so FAQPage tracks what actually
@@ -1601,16 +1550,14 @@ async function publishAstro(postId, { humanApproved = false } = {}) {
     // applied once the live post is known so a republish keeps its list.
     applyCostGuidePriceRange(data, liveFile ? liveFrontmatterOf(liveFile) : null);
     assertValidBlogFrontmatter(data);
-    const { markdown, unlinked: competitorUnlinked, frontmatter: committedData, body: committedBody } = competitorFreeMarkdown(data, finalBody + '\n', { validate: assertValidBlogFrontmatter });
-    // Owner competitor list on the FINAL committed text (Codex r6 on #5146),
-    // after the competitor-link pass: the scheduler's publish auto-merges
-    // through pages-poll, so an off-list company is refused before any
-    // branch; competitor content naming only owner-list competitors keeps the
-    // human-merge stamp. An admin publish (humanApproved) is a human
-    // decision: the check stamps its PR for an admin merge.
-    const ownerList = await assertOwnerListForCommit({ draft: null, brief: {}, frontmatter: committedData, body: committedBody, humanApproved, humanMergeFallback: true });
-    const editorialFiles = await editorialEvidence.filesForDocument({ document: markdown, path: filePath,
-      evidenceUrls: editorialEvidence.unlinkedCompetitorUrls(null, [...earlyUnlinked, ...competitorUnlinked]) });
+    const markdown = competitorFreeMarkdown(data, finalBody + '\n');
+    // Owner competitor list on the FINAL text (Codex r6 on #5146): the
+    // scheduler's publish auto-merges through pages-poll, so an off-list
+    // company is refused before any branch; competitor content naming only
+    // owner-list competitors keeps the human-merge stamp. An admin publish (humanApproved)
+    // is a human decision: the check stamps its PR for an admin merge.
+    const ownerList = await assertOwnerListForCommit({ draft: null, brief: {}, frontmatter: data, body: finalBody, humanApproved, humanMergeFallback: true });
+    const editorialFiles = await editorialEvidence.filesForDocument({ document: markdown, path: filePath });
 
     await gh.createBranch(branch);
     branchCreated = true;
@@ -1652,7 +1599,7 @@ async function publishAstro(postId, { humanApproved = false } = {}) {
     });
 
     // 4. PR
-    const prBody = withCompetitorUnlinkNote(buildPrBody({ post, slug, branch, content: finalBody, images: { hero: heroImage, body: bodyImages.images } }), [...earlyUnlinked, ...competitorUnlinked]);
+    const prBody = buildPrBody({ post, slug, branch, content: finalBody, images: { hero: heroImage, body: bodyImages.images } });
     prCreateAttempted = true;
     const pr = await gh.createPr({
       head: branch,
@@ -3463,19 +3410,12 @@ async function publishOrUpdatePage(draft, brief = {}, { humanApproved = false } 
   // so what we validate is exactly what we commit.
   assertValidBlogFrontmatter(frontmatter);
 
-  const { markdown, unlinked: competitorUnlinked, frontmatter: committedFrontmatter, body: committedBody } = competitorFreeMarkdown(frontmatter, `${finalBody}\n`, { validate: assertValidBlogFrontmatter });
-  // emit_draft already unlinked competitor links at capture (brief-driven-
-  // tools.js) — this commit-time pass on the captured draft normally finds
-  // nothing left, so competitorUnlinked alone would under-report what
-  // actually changed. Merge in the capture-time removals so the PR notes
-  // show the whole story.
-  const allUnlinked = recordUnlinks(draft, competitorUnlinked);
+  const markdown = competitorFreeMarkdown(frontmatter, `${finalBody}\n`);
   // Owner competitor list on the FINAL committed text — hero / body-image
-  // alts included (Codex r5 on #5146), after the competitor-link pass.
-  // Throws before any branch exists.
-  await assertOwnerListForCommit({ draft, brief, frontmatter: committedFrontmatter, body: committedBody, humanApproved });
+  // alts included (Codex r5 on #5146). Throws before any branch exists.
+  await assertOwnerListForCommit({ draft, brief, frontmatter, body: finalBody, humanApproved });
   const editorialFiles = await editorialEvidence.filesForDocument({ document: markdown, path: filePath, brief,
-    evidenceUrls: editorialEvidence.unlinkedCompetitorUrls(draft) });
+    evidenceUrls: editorialEvidence.evidenceUrlsFor(draft) });
 
   await gh.createBranch(branch);
   // Reused body pictures are pinned to the blob they were judged on; a
@@ -3522,9 +3462,7 @@ async function publishOrUpdatePage(draft, brief = {}, { humanApproved = false } 
   const pr = await gh.createPr({
     head: branch,
     title: `Blog: ${frontmatter.title}`.slice(0, 72),
-    // Built from the committed (unlinked) text, so a competitor URL never
-    // renders as a live link in the PR description either.
-    body: withCompetitorUnlinkNote(buildDraftPrBody({ frontmatter: committedFrontmatter, slug, branch, content: committedBody, brief, images: { hero, body: bodyImages.images } }), allUnlinked),
+    body: buildDraftPrBody({ frontmatter, slug, branch, content: finalBody, brief, images: { hero, body: bodyImages.images } }),
   });
   await requestCodexReview({
     pr,
@@ -3657,8 +3595,7 @@ async function publishMetadataRewrite(draft, brief = {}) {
     assertValidBlogFrontmatter(nextFrontmatter);
   }
 
-  const { markdown, unlinked: competitorUnlinked, frontmatter: committedFrontmatter } = competitorFreeMarkdown(nextFrontmatter, parsed.content || '', { validate: isBlogTarget(filePath) ? assertValidBlogFrontmatter : null });
-  recordUnlinks(draft, competitorUnlinked);
+  const markdown = competitorFreeMarkdown(nextFrontmatter, parsed.content || '');
   if (markdown === existing.content) {
     return {
       url: canonicalForExistingPage(targetUrl, currentFrontmatter, filePath),
@@ -3691,7 +3628,7 @@ async function publishMetadataRewrite(draft, brief = {}) {
   const branchSlug = slugify(filePath.replace(/^src\/content\//, '').replace(/\.mdx?$/, '').replace(/\//g, ' '));
   const branch = `content/meta-${branchSlug}-${shortId()}`;
   const editorialFiles = await editorialEvidence.filesForDocument({ document: markdown, path: filePath, brief,
-    evidenceUrls: editorialEvidence.unlinkedCompetitorUrls(draft) });
+    evidenceUrls: editorialEvidence.evidenceUrlsFor(draft) });
   await gh.createBranch(branch);
   if (editorialFiles.length) {
     const current = await gh.getFile(filePath, branch);
@@ -3714,18 +3651,17 @@ async function publishMetadataRewrite(draft, brief = {}) {
   const pr = await gh.createPr({
     head: branch,
     title: `SEO metadata: ${nextFrontmatter[titleField]}`.slice(0, 72),
-    body: withCompetitorUnlinkNote(buildMetadataPrBody({
+    body: buildMetadataPrBody({
       filePath,
       targetUrl,
       branch,
       before: currentFrontmatter,
-      // The committed (unlinked) values: the table renders them.
-      after: committedFrontmatter,
+      after: nextFrontmatter,
       titleField,
       metaField,
       brief,
       backfilledFields,
-    }), recordUnlinks(draft)),
+    }),
   });
   await requestCodexReview({
     pr,
@@ -3959,14 +3895,12 @@ async function publishRefresh(draft, brief = {}, { humanApproved = false } = {})
     }
   }
   const finalBody = refreshImages.body;
-  const { markdown, unlinked: competitorUnlinked, frontmatter: committedFrontmatter, body: committedBody } = competitorFreeMarkdown(nextFrontmatter, `${finalBody}\n`, { validate: isBlogTarget(filePath) ? assertValidBlogFrontmatter : null });
-  recordUnlinks(draft, competitorUnlinked);
-  // Same owner-list chokepoint as the new-post lane, on the committed text:
-  // refreshes auto-merge under AUTONOMOUS_BLOG_AUTO_MERGE too (Codex r5 on
-  // #5146).
-  await assertOwnerListForCommit({ draft, brief, frontmatter: committedFrontmatter, body: committedBody, humanApproved });
+  const markdown = competitorFreeMarkdown(nextFrontmatter, `${finalBody}\n`);
+  // Same owner-list chokepoint as the new-post lane: refreshes auto-merge
+  // under AUTONOMOUS_BLOG_AUTO_MERGE too (Codex r5 on #5146).
+  await assertOwnerListForCommit({ draft, brief, frontmatter: nextFrontmatter, body: finalBody, humanApproved });
   const editorialFiles = await editorialEvidence.filesForDocument({ document: markdown, path: filePath, brief,
-    evidenceUrls: editorialEvidence.unlinkedCompetitorUrls(draft) });
+    evidenceUrls: editorialEvidence.evidenceUrlsFor(draft) });
 
   const branchSlug = slugify(filePath.replace(/^src\/content\//, '').replace(/\.mdx?$/, '').replace(/\//g, ' '));
   const branch = `content/refresh-${branchSlug}-${shortId()}`;
@@ -4014,8 +3948,7 @@ async function publishRefresh(draft, brief = {}, { humanApproved = false } = {})
   const pr = await gh.createPr({
     head: branch,
     title: `Refresh: ${nextFrontmatter.title || nextFrontmatter.metaTitle || publicPathFromAstroFile(filePath)}`.slice(0, 72),
-    // Committed (unlinked) values: the before/after table renders them.
-    body: withCompetitorUnlinkNote(buildRefreshPrBody({ filePath, targetUrl, branch, before: currentFrontmatter, after: committedFrontmatter, oldBody, newBody: committedBody, brief, backfilledFields, images: { hero: null, body: refreshImages.images || [] } }), recordUnlinks(draft)),
+    body: buildRefreshPrBody({ filePath, targetUrl, branch, before: currentFrontmatter, after: nextFrontmatter, oldBody, newBody: finalBody, brief, backfilledFields, images: { hero: null, body: refreshImages.images || [] } }),
   });
   await requestCodexReview({
     pr,
@@ -5351,7 +5284,6 @@ module.exports = {
   clampMetaDescription,
   _internals: {
     competitorFreeMarkdown,
-    withCompetitorUnlinkNote,
     generateHeroBuffer,
     compressToWebp,
     resolveAutonomousHero,

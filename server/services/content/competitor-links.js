@@ -1,8 +1,12 @@
 /**
  * competitor-links.js — owner ruling 2026-09-28: "I do not want to link to a
- * competitor's website, whatsoever." A blog post never links a competitor's
- * own site — as a source, citation or CTA. The wording stays; only the link
- * goes. Deterministic string work, no LLM, no I/O.
+ * competitor's website, whatsoever." Nothing Waves publishes links a
+ * competitor's own site — as a source, citation or CTA. Second ruling, same
+ * day (#5191): refuse, don't rewrite. A draft carrying a competitor link goes
+ * back to the writer (content-guardrails' COMPETITOR_LINK, in the writer's
+ * in-loop self-lint), and a publish that still carries one is refused
+ * (astro-publisher's competitorFreeMarkdown). Nothing rewrites a link, so
+ * this module only DETECTS them. Deterministic string work, no LLM, no I/O.
  *
  * ONE competitor-host matcher, the union of the competitor host lists this
  * portal already maintains (imported, never re-typed, so an addition to any
@@ -108,208 +112,40 @@ function isCompetitorUrl(url, hosts) {
 // A scheme's slashes may be backslashes or absent ("https:\\orkin.com",
 // "https:orkin.com" — both reach orkin.com in a browser).
 const ANY_URL_RE = /(?:\bhttps?:(?:[\\/]+|(?=[a-z0-9-]+(?:\\?\.[a-z0-9-]+)*\\?\.[a-z]{2,}))|(?<![:\w/\\])[\\/]{2}(?=[a-z0-9-]+(?:\\?\.[a-z0-9-]+)*\\?\.[a-z]{2,})|\bwww\.)[^\s<>()[\]"'`]+/gi;
-// A bare URL in prose: not glued to a preceding path/word (so the embedded
-// URL inside an archive.org link is left alone — its host is archive.org).
-// Protocol-relative ("//orkin.com/plans") is included, gated on a
-// dotted-TLD lookahead like ANY_URL_RE's — otherwise a plain path
-// beginning "//" (there isn't one in Markdown prose, but belt-and-braces)
-// could be mistaken for a host.
-const BARE_URL_RE = /(?<![\w/@.=:\\])(?:https?:(?:[\\/]+|(?=[a-z0-9-]+(?:\\?\.[a-z0-9-]+)*\\?\.[a-z]{2,}))|www\.|[\\/]{2}(?=[a-z0-9-]+(?:\\?\.[a-z0-9-]+)*\\?\.[a-z]{2,}))[^\s<>()[\]"'`]+/gi;
 const TRAILING_PUNCT_RE = /[.,;:!?]+$/;
+// A browser removes every ASCII tab and newline from a URL before parsing it
+// (WHATWG URL), so "https://or\tkin.com" — or an href split across lines —
+// still reaches orkin.com (Codex r6 on #5191).
+const URL_IGNORED_RE = /[\t\n\r]/g;
 
-// Every competitor URL still present in `text` (any context), read with HTML
-// entities decoded. Used by the guardrail and the publisher's post-unlink
-// assertion.
+// Every competitor URL in `text`, in any context — Markdown, HTML, JSX
+// props, code, prose — read as a browser would: HTML entities decoded, and
+// scanned both as written and with tabs/newlines removed.
 function competitorLinkUrls(text, hosts = competitorHosts()) {
-  const out = [];
-  for (const m of decodeHTML(String(text || '')).matchAll(ANY_URL_RE)) {
-    const url = m[0].replace(TRAILING_PUNCT_RE, '');
-    if (isCompetitorUrl(url, hosts)) out.push(url);
+  const decoded = decodeHTML(String(text ?? ''));
+  const out = new Set();
+  for (const variant of [decoded, decoded.replace(URL_IGNORED_RE, '')]) {
+    for (const m of variant.matchAll(ANY_URL_RE)) {
+      const url = m[0].replace(TRAILING_PUNCT_RE, '');
+      if (isCompetitorUrl(url, hosts)) out.add(url);
+    }
   }
-  return out;
+  return [...out];
 }
 
-// An inline destination's URL: `<…>` as written, else up to the title.
-function inlineDestination(dest) {
-  const d = String(dest || '').trim();
-  if (d.startsWith('<')) return d.slice(1, d.includes('>') ? d.indexOf('>') : d.length);
-  return d.split(/\s+/)[0] || '';
-}
-const REF_DEF_RE = /^ {0,3}\[([^\]\n]+)\]:[ \t]*\n?[ \t]*(<[^>\n]*>|\S+)(?:[ \t]+(?:"[^"\n]*"|'[^'\n]*'|\([^)\n]*\)))?[ \t]*(?:\n|$)/gm;
-const ANCHOR_RE = /<a\b([^>]*)>([\s\S]*?)<\/a\s*>/gi;
-// A plain-quoted value, OR a JSX string-expression ({"…"} / {'…'} — MDX
-// renders content-guardrails.js already treats this syntax as a rendered
-// destination, e.g. <a href={"https://orkin.com/x"}>), structurally — never
-// the bare fallback, which would capture the literal "{...}" text and never
-// match a competitor host.
-const HREF_ATTR_RE = /\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|\{\s*"([^"]*)"\s*\}|\{\s*'([^']*)'\s*\}|([^\s>]+))/i;
-const COMPONENT_TAG_RE = /<([A-Z][\w.]*)\b([^<>]*?)(\/?)>/g;
-const URL_ATTR_RE = /\s+([A-Za-z_][\w-]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|\{\s*"([^"]*)"\s*\}|\{\s*'([^']*)'\s*\})/g;
-// A component's visible label, when it has one ("Visit Orkin").
-const LABEL_ATTR_RE = /(?:^|\s)(?:ctaLabel|label|text|title|alt|ariaLabel|aria-label)\s*=\s*(?:"([^"]*)"|'([^']*)'|\{\s*"([^"]*)"\s*\}|\{\s*'([^']*)'\s*\})/i;
-const IMG_TAG_RE = /<img\b((?:[^>"']|"[^"]*"|'[^']*')*)>/gi;
-const SRC_ATTR_RE = /(?:^|\s)src\s*=\s*(?:"([^"]*)"|'([^']*)'|\{\s*"([^"]*)"\s*\}|\{\s*'([^']*)'\s*\}|([^\s>]+))/i;
-const ALT_ATTR_RE = /(?:^|\s)alt\s*=\s*(?:"([^"]*)"|'([^']*)'|\{\s*"([^"]*)"\s*\}|\{\s*'([^']*)'\s*\})/i;
-// Any remaining HTML / JSX tag, quote- and brace-aware.
-const ANY_TAG_RE = /<\/?[A-Za-z][\w.:-]*(?:[^<>"'{}]|"[^"]*"|'[^']*'|\{[^{}]*\})*>/g;
-const AUTOLINK_RE = /<((?:https?:\/\/|www\.)[^<>\s]+)>/gi;
-
-const normLabel = (s) => String(s || '').trim().toLowerCase().replace(/\s+/g, ' ');
-const stripAngles = (s) => String(s || '').replace(/^<|>$/g, '');
-
-/**
- * unlinkCompetitorLinks(text) → { text, unlinked: [{ url, text }] }
- * Replaces every link whose destination is a competitor host with its anchor
- * text: Markdown inline links (an image becomes its alt text), reference
- * links (their definitions are dropped), HTML anchors, HTML images (their
- * alt text), a self-closing component with a competitor URL prop (its label,
- * else the plain domain — never the component minus the prop, which a CTA
- * would render with its default Waves link), autolinks and bare URLs in
- * prose (reduced to the plain, non-linking domain, e.g. "orkin.com").
- * Markup it cannot rewrite safely (a competitor URL in an iframe, a
- * component with children, a template-literal prop) is left exactly as
- * written, so the publisher's survivor check refuses the commit instead of
- * shipping a broken or re-pointed link (Codex r2).
- */
-function unlinkCompetitorLinks(input, hosts = competitorHosts()) {
-  let text = String(input ?? '');
-  const unlinked = [];
-  const record = (url, anchor) => unlinked.push({ url, text: anchor });
-  const plainDomain = (url) => hostOf(url) || url;
-
-  // Reference definitions first: remember competitor labels, drop the lines.
-  // CommonMark resolves a duplicate label to its FIRST definition — a later
-  // redefinition never wins resolution, whichever way the change runs (an
-  // earlier legitimate source "shadowed" by a later competitor definition
-  // stays legitimate; an earlier competitor definition stays authoritative
-  // even past a later non-competitor "override"). Every definition line
-  // that names a competitor host is still dropped either way, so a
-  // shadowed one never survives as a raw URL for the leftover scan below.
-  const definedLabels = new Set();
-  const refLabels = new Map(); // normalized label → url (from its FIRST definition only)
-  text = text.replace(REF_DEF_RE, (whole, label, dest) => {
-    const key = normLabel(label);
-    const isFirst = !definedLabels.has(key);
-    definedLabels.add(key);
-    const url = stripAngles(dest);
-    if (!isCompetitorUrl(url, hosts)) return whole;
-    if (isFirst) refLabels.set(key, url);
-    return '';
-  });
-
-  // Inline links and images, found by the guardrails' balanced Markdown
-  // scanner (nested parentheses in a destination, escapes, images inside
-  // link labels — Codex r4). One at a time, rescanning after each rewrite,
-  // so nested spans never use stale offsets.
-  const { eachMarkdownLink } = require('./content-guardrails');
-  for (let guard = 0; guard < 1000; guard += 1) {
-    const span = [...eachMarkdownLink(text)].find((sp) => sp.kind === 'inline'
-      && isCompetitorUrl(inlineDestination(text.slice(sp.destStart, sp.destEnd + 1)), hosts));
-    if (!span) break;
-    const label = text.slice(span.labelStart + 1, span.labelEnd);
-    record(inlineDestination(text.slice(span.destStart, span.destEnd + 1)), label);
-    text = text.slice(0, span.start) + label + text.slice(span.end + 1);
-  }
-
-  if (refLabels.size) {
-    text = text.replace(/(!?)\[((?:\\.|[^[\]\\])*)\]\[((?:\\.|[^[\]\\])*)\]/g, (whole, bang, anchor, label) => {
-      const key = normLabel(label || anchor);
-      if (!refLabels.has(key)) return whole;
-      record(refLabels.get(key), anchor);
-      return anchor;
-    });
-    text = text.replace(/(!?)\[((?:\\.|[^[\]\\])*)\](?![[(:])/g, (whole, bang, anchor) => {
-      if (!refLabels.has(normLabel(anchor))) return whole;
-      record(refLabels.get(normLabel(anchor)), anchor);
-      return anchor;
-    });
-  }
-
-  text = text.replace(ANCHOR_RE, (whole, attrs, inner) => {
-    const m = HREF_ATTR_RE.exec(attrs);
-    const url = m ? (m[1] ?? m[2] ?? m[3] ?? m[4] ?? m[5]) : '';
-    if (!url || !isCompetitorUrl(url, hosts)) return whole;
-    record(url, inner);
-    return inner;
-  });
-
-  text = text.replace(IMG_TAG_RE, (whole, attrs) => {
-    const m = SRC_ATTR_RE.exec(attrs);
-    const url = m ? (m[1] ?? m[2] ?? m[3] ?? m[4] ?? m[5]) : '';
-    if (!url || !isCompetitorUrl(url, hosts)) return whole;
-    const alt = ALT_ATTR_RE.exec(attrs);
-    const label = alt ? (alt[1] ?? alt[2] ?? alt[3] ?? alt[4]) : '';
-    record(url, label);
-    return label;
-  });
-
-  text = text.replace(COMPONENT_TAG_RE, (whole, name, attrs, selfClose) => {
-    let url = null;
-    for (const m of attrs.matchAll(URL_ATTR_RE)) {
-      const value = m[2] ?? m[3] ?? m[4] ?? m[5];
-      // URL-valued props only (entities decoded) — a plain-text prop that
-      // merely names a domain is wording, not a link.
-      if (/^(?:https?:)?\/\/|^www\./i.test(decodeHTML(value).trim()) && isCompetitorUrl(value, hosts)) { url = value; break; }
-    }
-    // A component with children is left for the survivor check: its closing
-    // tag and children sit outside this match.
-    if (!url || !selfClose) return whole;
-    const label = LABEL_ATTR_RE.exec(attrs);
-    const textOut = label ? (label[1] ?? label[2] ?? label[3] ?? label[4]) : plainDomain(url);
-    record(url, textOut);
-    return textOut;
-  });
-
-  text = text.replace(AUTOLINK_RE, (whole, url) => {
-    if (!isCompetitorUrl(url, hosts)) return whole;
-    record(url, plainDomain(url));
-    return plainDomain(url);
-  });
-
-  // Bare URLs in PROSE only: every remaining tag is set aside first, so an
-  // attribute no pass above rewrote keeps its URL intact instead of becoming
-  // a broken relative one (src="orkin.com").
-  const tags = [];
-  text = text.replace(ANY_TAG_RE, (tag) => { tags.push(tag); return `<\u0000${tags.length - 1}\u0000>`; });
-  text = text.replace(BARE_URL_RE, (whole) => {
-    const url = whole.replace(TRAILING_PUNCT_RE, '');
-    if (!isCompetitorUrl(url, hosts)) return whole;
-    record(url, plainDomain(url));
-    return plainDomain(url) + whole.slice(url.length);
-  });
-  text = text.replace(/<\u0000(\d+)\u0000>/g, (whole, i) => tags[Number(i)]);
-
-  return { text, unlinked };
-}
-
-// A URL-valued field (next_steps[].href, an image src, a canonical) holds
-// a destination with no wording to keep; a text field that happens to hold
-// a URL (a tag) is wording.
-const WHOLE_URL_RE = /^(?:[a-z][a-z0-9+.-]*:|[\\/]{2}|www\.)\S*$/i;
-const URL_FIELD_RE = /(?:^|_)(?:href|src|url|link|canonical)$|(?:Href|Src|Url|Link)$/i;
-
-// Frontmatter: every string value, at any depth, gets the same treatment,
-// except a URL-valued field (by its key) holding a competitor URL. Rewritten to a bare
-// domain it would become a broken relative destination (and a next step's
-// renderer drops it with its label — Codex r4), so it is left as written:
-// the guardrail's COMPETITOR_LINK tells the writer in-loop, and the
-// publisher's survivor check refuses the commit.
-function unlinkCompetitorLinksDeep(value, hosts = competitorHosts()) {
-  const unlinked = [];
-  const walk = (v, key = '') => {
-    if (typeof v === 'string') {
-      if (URL_FIELD_RE.test(key) && WHOLE_URL_RE.test(v.trim()) && isCompetitorUrl(v.trim(), hosts)) return v;
-      const r = unlinkCompetitorLinks(v, hosts);
-      unlinked.push(...r.unlinked);
-      return r.text;
-    }
-    if (Array.isArray(v)) return v.map((x) => walk(x, key));
-    if (v && typeof v === 'object' && !(v instanceof Date)) {
-      return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, walk(x, k)]));
-    }
-    return v;
+// A document's competitor URLs: the body plus every frontmatter string, at
+// any depth, each scanned on its own. The parsed values, never the YAML
+// text: a double-quoted scalar's escapes ("or\tkin.com") would hide the
+// character the page actually renders.
+function competitorLinkUrlsIn(frontmatter, body, hosts = competitorHosts()) {
+  const out = new Set(competitorLinkUrls(body, hosts));
+  const walk = (v) => {
+    if (typeof v === 'string') competitorLinkUrls(v, hosts).forEach((u) => out.add(u));
+    else if (Array.isArray(v)) v.forEach(walk);
+    else if (v && typeof v === 'object' && !(v instanceof Date)) Object.values(v).forEach(walk);
   };
-  return { value: walk(value), unlinked };
+  walk(frontmatter);
+  return [...out];
 }
 
 module.exports = {
@@ -317,6 +153,5 @@ module.exports = {
   competitorHosts,
   isCompetitorHost,
   competitorLinkUrls,
-  unlinkCompetitorLinks,
-  unlinkCompetitorLinksDeep,
+  competitorLinkUrlsIn,
 };

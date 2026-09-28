@@ -1454,8 +1454,8 @@ function normalizeHost(host) {
 
 // Established educational, regulatory and consumer-reference sources. This
 // baseline applies to both mined and operator-directed content. Competitor
-// websites are never linkable (owner ruling 2026-09-28): the publisher
-// unlinks them and COMPETITOR_LINK blocks any that remain.
+// websites are never linkable (owner ruling 2026-09-28): COMPETITOR_LINK
+// sends a draft that links one back, and the publisher refuses to commit one.
 const TRUSTED_CITATION_HOSTS = [
   'ufl.edu', 'epa.gov', 'cdc.gov', 'fdacs.gov', 'myfloridalicense.com',
   'consumeraffairs.com', 'bbb.org',
@@ -3263,17 +3263,12 @@ function externalLinkFinding(text, { operatorCitations = false, requiredSourceUr
   return null;
 }
 
-function stringLeaves(value, out = []) {
-  if (typeof value === 'string') out.push(value);
-  else if (Array.isArray(value)) value.forEach((v) => stringLeaves(v, out));
-  else if (value && typeof value === 'object' && !(value instanceof Date)) Object.values(value).forEach((v) => stringLeaves(v, out));
-  return out;
-}
-
-function competitorLinkFinding(text) {
+// `frontmatter`: every string in it is checked on its own, a URL-valued
+// field (next_steps[].href) included.
+function competitorLinkFinding(text, frontmatter = null) {
   let urls = [];
   try {
-    urls = require('./competitor-links').competitorLinkUrls(text);
+    urls = require('./competitor-links').competitorLinkUrlsIn(frontmatter, text);
   } catch (err) {
     return finding('P1', 'COMPETITOR_LINK', `Competitor-link check unavailable (${err.message}) — held for review rather than risk publishing a link to a competitor's site.`);
   }
@@ -6512,13 +6507,11 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
     // Outbound links are scanned across body AND meta too — an injected spam
     // URL hiding in a meta description ships exactly like one in the body.
     externalLinkFinding(publishableText, { operatorCitations, requiredSourceUrls }),
-    // Owner ruling 2026-09-28: never a link to a competitor's own site. Draft
-    // capture and the publisher unlink them (competitor-links.js); one that
-    // somehow remains blocks here.
-    // Every frontmatter string too: a competitor URL in a URL-valued field
-    // (next_steps[].href) is never rewritten by the unlinker, so the writer
-    // hears about it here, in-loop (Codex r4 on #5191).
-    competitorLinkFinding([publishableText, ...stringLeaves(frontmatter)].join('\n\n')),
+    // Owner rulings 2026-09-28: never a link to a competitor's own site, and
+    // refuse, don't rewrite. Body, meta and every frontmatter string: the
+    // writer's self-lint sends such a draft back for a redraft, and the
+    // publisher refuses to commit one (competitor-links.js).
+    competitorLinkFinding(publishableText, frontmatter),
     // Affiliate links: blog bodies reference registry product IDs through
     // <AffiliateLink> only (raw tracking URLs stay DISALLOWED_EXTERNAL_LINK
     // above, no bypass). affiliateComponentFindings owns registration,

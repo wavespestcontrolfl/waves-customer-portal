@@ -486,12 +486,11 @@ describe('autonomous-runner._snapshotInterceptSources', () => {
     expect(persisted.intercept_snapshots).toEqual(snapshots);
   });
 
-  test('a competitor URL already unlinked out of the body at capture is still fed into the snapshot sources (Codex r1 P2)', async () => {
-    // Owner ruling 2026-09-28 unlinks a competitor URL out of the draft body
-    // before this ever runs, so a manifest source described only in prose
-    // ("Orkin's terms page") that the agent cited as a link would otherwise
-    // vanish from both the sources list and the archive audit — it is never
-    // re-added to the post, only archived as evidence.
+  test('a competitor page the writer listed in notes_for_reviewer is fed into the snapshot sources (Codex r1 P2, r6 on #5191)', async () => {
+    // A post never links a competitor's own site (owner ruling 2026-09-28),
+    // so a manifest source described only in prose ("Orkin's terms page")
+    // reaches the archive audit through the writer's notes — it is only
+    // archived as evidence, never added to the post.
     jest.spyOn(seeder, 'snapshotSources').mockResolvedValueOnce({ attempted: 1, ok: 1, snapshots: [] });
     const update = jest.fn(() => Promise.resolve(1));
     const where = jest.fn(() => ({ update }));
@@ -504,31 +503,31 @@ describe('autonomous-runner._snapshotInterceptSources', () => {
     };
     const draft = {
       body: 'Per Orkin\'s terms, pricing is quote-based.',
-      competitor_links_unlinked: [{ url: 'https://www.orkin.com/terms', text: "Orkin's terms" }],
+      notes_for_reviewer: 'Evidence sources: https://www.orkin.com/terms',
     };
     await runner._snapshotInterceptSources(opp, draft, {});
 
     expect(seeder.snapshotSources).toHaveBeenCalledWith(['https://www.orkin.com/terms']);
   });
 
-  test('removed URLs in any destination form reach Wayback as https (Codex r4 on #5191)', async () => {
+  test('notes URLs in any destination form reach Wayback as https (Codex r4 on #5191)', async () => {
     jest.spyOn(seeder, 'snapshotSources').mockResolvedValueOnce({ attempted: 2, ok: 2, snapshots: [] });
     db.mockImplementation(() => ({ where: jest.fn(() => ({ update: jest.fn(() => Promise.resolve(1)) })) }));
     const opp = { id: 'opp-1', bucket: 'operator_intercept', signal_metadata: { intercept_brief: { sources: [] } } };
-    await runner._snapshotInterceptSources(opp, { body: 'Plain.', competitor_links_unlinked: [{ url: '//orkin.com/terms', text: 't' }, { url: 'www.terminix.com/fees', text: 'f' }, { url: 'https://orkin\\.com/plans', text: 'p' }] }, {});
+    await runner._snapshotInterceptSources(opp, { body: 'Plain.', notes_for_reviewer: 'Evidence sources: //orkin.com/terms, www.terminix.com/fees, https://orkin\\.com/plans' }, {});
     expect(seeder.snapshotSources).toHaveBeenCalledWith(['https://orkin.com/terms', 'https://www.terminix.com/fees', 'https://orkin.com/plans']);
   });
 
-  test('the snapshot cap applies to the FINAL deduplicated list, capture-time removals included (Codex r2 on #5191)', async () => {
+  test('the snapshot cap applies to the FINAL deduplicated list, notes evidence included (Codex r2 on #5191)', async () => {
     jest.spyOn(seeder, 'snapshotSources').mockResolvedValueOnce({ attempted: 10, ok: 10, snapshots: [] });
     db.mockImplementation(() => ({ where: jest.fn(() => ({ update: jest.fn(() => Promise.resolve(1)) })) }));
-    const removed = Array.from({ length: 14 }, (_, i) => ({ url: `https://www.orkin.com/page-${i}`, text: `page ${i}` }));
+    const notes = `Evidence sources: ${Array.from({ length: 14 }, (_, i) => `https://www.orkin.com/page-${i}`).join(' ')}`;
     const opp = {
       id: 'opp-1',
       bucket: 'operator_intercept',
       signal_metadata: { intercept_brief: { sources: ['https://example.com/a/', 'Orkin published terms (a note, not a URL)'] } },
     };
-    await runner._snapshotInterceptSources(opp, { body: 'Plain body.', competitor_links_unlinked: removed }, {});
+    await runner._snapshotInterceptSources(opp, { body: 'Plain body.', notes_for_reviewer: notes }, {});
     const sent = seeder.snapshotSources.mock.calls[0][0];
     expect(sent).toHaveLength(10);
     expect(sent[0]).toBe('https://example.com/a/');

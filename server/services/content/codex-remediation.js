@@ -2036,7 +2036,8 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
       document: fixed,
       path: targetPath,
       brief: editorialBrief || {},
-      // Competitor pages the run's draft unlinked: evidence, never published.
+      // Competitor pages the run's draft listed in its reviewer notes:
+      // evidence, never published.
       evidenceUrls: editorialEvidenceUrls,
     });
     if (!Array.isArray(editorialFiles)) throw new Error('editorial evidence generator returned no file list');
@@ -2656,7 +2657,7 @@ async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
         operatorFaqException = !!guardOptions && guardOptions.operatorFaqException === true;
         let dp = fullRun.draft_payload;
         if (typeof dp === 'string') { try { dp = JSON.parse(dp); } catch (_) { dp = null; } }
-        trustedEditorialEvidenceUrls = require('./editorial-evidence').unlinkedCompetitorUrls(dp);
+        trustedEditorialEvidenceUrls = require('./editorial-evidence').evidenceUrlsFor(dp);
         guardContext = {
           ...guardOptions,
           checkedExistingRoutes: Array.isArray(dp?.checked_existing_routes) ? dp.checked_existing_routes : [],

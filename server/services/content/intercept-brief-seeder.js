@@ -414,7 +414,7 @@ function buildBindingInstructions({ payload, byline, ctaDirectives, globalRules,
     payload.thesis ? `THESIS (the post must argue exactly this): ${payload.thesis}` : null,
     'OUTLINE: cover every outline item in the brief\'s required_sections, in order — they are the content plan, not suggestions.',
     requiredSources.length
-      ? `REQUIRED SOURCES (cite IN-POST): every source below must be cited in the body with explicit attribution (name the source where you cite it) and linked — EXCEPT a competitor's own website, which is named in plain text and never linked. Quote exactly where the brief calls for verbatim quotes. Sources: ${requiredSources.join(' | ')}`
+      ? `REQUIRED SOURCES (cite IN-POST): every source below must be cited in the body with explicit attribution (name the source where you cite it) and linked — EXCEPT a competitor's own website, which is named in plain text and never linked (list its URL under "Evidence sources" in notes_for_reviewer, which is never published). Quote exactly where the brief calls for verbatim quotes. Sources: ${requiredSources.join(' | ')}`
       : null,
     // Non-URL sourcing directives (manifest `source_notes`) are instructions
     // for sources the writer must locate ("Orkin published terms/plan pages",
@@ -422,7 +422,7 @@ function buildBindingInstructions({ payload, byline, ctaDirectives, globalRules,
     // must-link URL list above so the snapshot step never tries to archive a
     // sentence.
     sourceNotes.length
-      ? `SOURCING DIRECTIVES (binding): ${sourceNotes.join(' | ')}. Locate the live pages these directives describe, cite them in-post with explicit attribution (a real linked URL — EXCEPT a competitor's own website, which is named in plain text and never linked), and OMIT any claim those pages do not support.`
+      ? `SOURCING DIRECTIVES (binding): ${sourceNotes.join(' | ')}. Locate the live pages these directives describe, cite them in-post with explicit attribution (a real linked URL — EXCEPT a competitor's own website, which is named in plain text and never linked; list its URL under "Evidence sources" in notes_for_reviewer, which is never published), and OMIT any claim those pages do not support.`
       : null,
     ...(Array.isArray(payload.verify_notes) ? payload.verify_notes.map((n) => `VERIFY BEFORE WRITING (mandatory): ${n} If a claim cannot be verified against the cited source, OMIT the claim entirely.`) : []),
     payload.internal_links?.length
@@ -447,7 +447,7 @@ function buildBindingInstructions({ payload, byline, ctaDirectives, globalRules,
     // site, or say verified or not verified." This line outranks the
     // manifest's older global rules (in-post competitor links, dated
     // attribution, a verify-current-terms footer), which predate them.
-    'COMPETITOR FACTS (owner ruling 2026-09-28 — overrides any rule above): NEVER link a competitor\'s own website, anywhere (body, CTA, caption, frontmatter). State competitor facts and prices plainly, naming the company — no link to their site, no "verified"/"not verified" label, no "as of" date or "verify current terms" footer required. Public-record sources about a competitor (court/AG/regulator releases, BBB, ConsumerAffairs) may still be linked.',
+    'COMPETITOR FACTS (owner ruling 2026-09-28 — overrides any rule above): NEVER link a competitor\'s own website, anywhere (body, CTA, caption, frontmatter). State competitor facts and prices plainly, naming the company — no link to their site, no "verified"/"not verified" label, no "as of" date or "verify current terms" footer required. A competitor page you relied on is named in the text and its URL listed under "Evidence sources" in notes_for_reviewer (never published): that is where the reviewer checks the claim. Public-record sources about a competitor (court/AG/regulator releases, BBB, ConsumerAffairs) may still be linked.',
     'Never hardcode Waves pricing — link to /pest-control-calculator/ instead.',
     // Mirrors the publish-time price guard (content-guardrails
     // findHardcodedPrice): on an intercept brief a dollar figure passes only
