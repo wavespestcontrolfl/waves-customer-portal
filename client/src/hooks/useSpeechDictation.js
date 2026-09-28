@@ -32,6 +32,8 @@ const IDLE_STOP_MS = 60000;
  *     last final result (a timer stops the live session; onend re-checks)
  *   - the page is hidden (`document.visibilityState === "hidden"`; a
  *     visibilitychange listener stops the live session; onend re-checks)
+ *   - the user presses any button or link or submits a form (Save, Send,
+ *     Generate, Complete read the field on that press)
  *   - 3 consecutive sessions each ended under 1000ms after their own
  *     `start()` with no final result (a fast-end loop, e.g. mic denied by OS)
  *   - `recognitionRef.current` no longer points at this instance
@@ -348,14 +350,21 @@ export default function useSpeechDictation(onTranscript, options = {}) {
     setListening(true);
   }, [mode, toggleUpload]);
 
-  // Leaving the page ends a speech session right away (a browser that keeps
-  // a continuous session open would otherwise record in the background). The
-  // MediaRecorder upload path records until tap-to-stop and is unaffected.
+  // A live speech session ends the moment the user moves on, the way a pause
+  // used to end it before keep-listening:
+  //   - leaving the page (a browser that keeps a continuous session open
+  //     would otherwise record in the background);
+  //   - pressing any button or link, or submitting a form. Save, Send,
+  //     Generate and Complete read the dictated field on that press, so
+  //     speech after it must not land in state the action already took. The
+  //     mic's own press is a stop anyway, and another mic's press starts that
+  //     field's session.
+  // The MediaRecorder upload path records until tap-to-stop and is unaffected.
   useEffect(() => {
     if (!listening || typeof document === "undefined") return undefined;
-    const onVisibilityChange = () => {
+    const stopLive = () => {
       const rec = recognitionRef.current;
-      if (document.visibilityState !== "hidden" || !rec) return;
+      if (!rec) return;
       stopRequestedRef.current = true;
       try {
         rec.stop();
@@ -363,8 +372,21 @@ export default function useSpeechDictation(onTranscript, options = {}) {
         /* already ending */
       }
     };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "hidden") stopLive();
+    };
+    const onPointerDown = (event) => {
+      const el = event.target instanceof Element ? event.target : null;
+      if (el?.closest('button, [role="button"], input[type="submit"], input[type="button"], a[href]')) stopLive();
+    };
     document.addEventListener("visibilitychange", onVisibilityChange);
-    return () => document.removeEventListener("visibilitychange", onVisibilityChange);
+    document.addEventListener("pointerdown", onPointerDown, true);
+    document.addEventListener("submit", stopLive, true);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      document.removeEventListener("pointerdown", onPointerDown, true);
+      document.removeEventListener("submit", stopLive, true);
+    };
   }, [listening]);
 
   // Stop an in-progress session if the consumer unmounts (e.g. the completion

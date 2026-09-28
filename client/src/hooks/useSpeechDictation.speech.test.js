@@ -317,6 +317,47 @@ describe("useSpeechDictation speech path — keep listening through pauses", () 
     }
   });
 
+  it("pressing any other button (Save, Generate, Send) stops a live session; a press on plain content does not", () => {
+    const { result } = renderHook(() => useSpeechDictation(vi.fn()));
+    act(() => result.current.toggle());
+    const instance = FakeSpeechRecognition.instances[0];
+
+    const text = document.createElement("p");
+    text.textContent = "report text";
+    const save = document.createElement("button");
+    const saveLabel = document.createElement("span"); // a press lands on the label inside
+    save.appendChild(saveLabel);
+    document.body.append(text, save);
+    try {
+      act(() => text.dispatchEvent(new Event("pointerdown", { bubbles: true })));
+      expect(instance.stop).not.toHaveBeenCalled();
+
+      act(() => saveLabel.dispatchEvent(new Event("pointerdown", { bubbles: true })));
+      expect(instance.stop).toHaveBeenCalledTimes(1);
+      act(() => instance.onend());
+      expect(instance.start).toHaveBeenCalledTimes(1); // stopped, not restarted
+      expect(result.current.listening).toBe(false);
+    } finally {
+      text.remove();
+      save.remove();
+    }
+  });
+
+  it("submitting a form stops a live session", () => {
+    const { result } = renderHook(() => useSpeechDictation(vi.fn()));
+    act(() => result.current.toggle());
+    const instance = FakeSpeechRecognition.instances[0];
+
+    const form = document.createElement("form");
+    document.body.append(form);
+    try {
+      act(() => form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+      expect(instance.stop).toHaveBeenCalledTimes(1);
+    } finally {
+      form.remove();
+    }
+  });
+
   it("hiding the page stops a live session right away, without waiting for onend", () => {
     const { result } = renderHook(() => useSpeechDictation(vi.fn()));
     act(() => result.current.toggle());
