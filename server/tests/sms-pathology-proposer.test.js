@@ -250,6 +250,29 @@ function makeReviewDb({ row } = {}) {
   return dbi;
 }
 
+describe('reviewPatchProposal — a proposal written for a superseded prompt version cannot be accepted (PR #5119 follow-up #3)', () => {
+  const drafter = require('../services/sms-shadow-drafter');
+  test('accept → 409 naming both versions; dismiss still allowed; a same-version proposal accepts', async () => {
+    const spy = jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue('house_voice_v12_real_answers');
+    try {
+      const stale = { id: 'p1', status: 'pending', surface: 's', failure_mode: 'f', prompt_version: 'house_voice_v11' };
+      const out = await reviewPatchProposal({ id: 'p1', action: 'accept', reviewedBy: 'Adam', adminUserId: 'a1', dbi: makeReviewDb({ row: stale }) });
+      expect(out).toMatchObject({ ok: false, status: 409 });
+      expect(out.error).toMatch(/written for house_voice_v11; the live prompt is house_voice_v12_real_answers/);
+      const dismissed = await reviewPatchProposal({ id: 'p1', action: 'dismiss', reviewedBy: 'Adam', adminUserId: 'a1', dbi: makeReviewDb({ row: stale }) });
+      expect(dismissed).toMatchObject({ ok: true, status: 'dismissed' });
+      const current = { ...stale, prompt_version: 'house_voice_v12_real_answers' };
+      const accepted = await reviewPatchProposal({ id: 'p1', action: 'accept', reviewedBy: 'Adam', adminUserId: 'a1', dbi: makeReviewDb({ row: current }) });
+      expect(accepted).toMatchObject({ ok: true, status: 'accepted' });
+      // legacy rows with no version (pre-backfill) are not blocked
+      const legacy = { ...stale, prompt_version: null };
+      expect(await reviewPatchProposal({ id: 'p1', action: 'accept', reviewedBy: 'Adam', adminUserId: 'a1', dbi: makeReviewDb({ row: legacy }) })).toMatchObject({ ok: true });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
 describe('reviewPatchProposal — pending-only transitions with audit', () => {
   test('accept flips pending → accepted and writes the audit row in the same transaction', async () => {
     const dbi = makeReviewDb({ row: { id: 'p1', status: 'pending', surface: 's', failure_mode: 'f' } });

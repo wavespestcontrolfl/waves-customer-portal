@@ -639,6 +639,13 @@ function effectiveSuppressionGroupKeyFor(template, suppressionGroupKey) {
   return template.suppression_group_key || template.send_stream || null;
 }
 
+// Suppression types that block EVERY stream regardless of which group_key
+// the row carries (a bounce/complaint/do-not-email is a fact about the
+// address, not a single mailing list) — the one classification other
+// suppression-aware callers (email-division/eligibility.js) must reuse
+// rather than re-derive, per AGENTS.md's "extend existing mechanisms".
+const GLOBAL_SUPPRESSION_TYPES = new Set(['bounce', 'spam_complaint', 'do_not_email']);
+
 // ALL suppressions that would block this send. The schema permits several
 // active rows per address (a bounce AND a do_not_email), and which one
 // "the" suppression is depends on the caller: the send path only needs any
@@ -652,14 +659,13 @@ async function activeSuppressionsFor(template, email, suppressionGroupKey, datab
   const rows = await database('email_suppressions')
     .whereRaw('LOWER(email) = ?', [String(email).trim().toLowerCase()])
     .where({ status: 'active' });
-  const globalTypes = new Set(['bounce', 'spam_complaint', 'do_not_email']);
   if (isTransactionalRequiredGroupKey(groupKey) && templateCanBypassSuppressions(template)) {
-    return rows.filter((row) => globalTypes.has(String(row.suppression_type || '').toLowerCase()));
+    return rows.filter((row) => GLOBAL_SUPPRESSION_TYPES.has(String(row.suppression_type || '').toLowerCase()));
   }
   return rows.filter((row) => (
     !row.group_key ||
     (groupKey && row.group_key === groupKey) ||
-    globalTypes.has(String(row.suppression_type || '').toLowerCase())
+    GLOBAL_SUPPRESSION_TYPES.has(String(row.suppression_type || '').toLowerCase())
   ));
 }
 
@@ -1888,6 +1894,7 @@ module.exports = {
   productionPlaceholderRenderedValues,
   activeSuppressionFor,
   activeSuppressionsFor,
+  GLOBAL_SUPPRESSION_TYPES,
   renderTemplate,
   renderVersion,
   loadTemplateByKey,

@@ -610,7 +610,7 @@ function buildInputSnapshot({ body, customer, estimate, lead, from, to, shortCod
  * phone re-lookup could aggregate a DIFFERENT account's facts into the prompt
  * (shared numbers) — lead-only estimate threads keep the template.
  */
-async function generateLlmReviewDraft({ customer, body, decision, estimate }) {
+async function generateLlmReviewDraft({ customer, body, decision, estimate, estimateLinked = true }) {
   if (process.env.AGENT_REVIEW_LLM_DRAFTS === 'false') return null;
   if (!customer) return null;
   try {
@@ -622,6 +622,10 @@ async function generateLlmReviewDraft({ customer, body, decision, estimate }) {
     const Anthropic = require('@anthropic-ai/sdk');
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
+    // An explicit service request ("can you add lawn service Tuesday?") is
+    // about THAT service, never an unlinked open estimate (Codex #5194 r4);
+    // resolved only with real answers on, since only that path prices it.
+    const explicitService = gateEnvValue('GATE_SMS_REAL_ANSWERS') ? await drafter.requestedServiceType(body) : null;
     const { parsed, passes, converged, model, promptVersion, openTimesSnapshot } = await drafter.generateGroundedDraft({
       laneId: 'estimate_followup', // the drafter's own lanes are the live SMS ones
       client,
@@ -639,7 +643,12 @@ async function generateLlmReviewDraft({ customer, body, decision, estimate }) {
       // above this call in processInboundSms) so the offered slots reflect
       // THAT estimate's own service minutes — the same second argument
       // check_availability itself passes to getAvailableSlots.
-      estimateId: estimate?.id || null,
+      // The estimate prices availability when the message is explicitly
+      // linked to it, or — for a conversational reply such as "Sounds
+      // good, can we do Tuesday?" (Codex #5194 r3) — when the customer has
+      // no upcoming visit the reply could be about instead, so the
+      // estimate is the only service context there is.
+      estimateId: estimate?.id && (estimateLinked || (!(context?.upcomingServices || []).length && !explicitService)) ? estimate.id : null,
     });
     // Only a verified-clean draft may replace the template: unconverged means
     // the reply still asserts facts the context doesn't support after the
@@ -721,7 +730,15 @@ async function processInboundSms({ customer, from, to, body, smsLogId, sourceMes
       if (existing) return null; // same semantics as the ignored insert: nothing new
     }
 
-    const llmDraft = await generateLlmReviewDraft({ customer, body, decision, estimate });
+    // Follow-up #8 (Codex r9): the resolved estimate reaches the drafter's
+    // availability lookup only when the inbound is routed as an ESTIMATE
+    // interaction — a reschedule of an existing visit is priced with that
+    // visit's service, not an unrelated open estimate's service_interest.
+    // …and only when the message is actually LINKED to that estimate
+    // (Codex #5194 r2): it carried the estimate's short code, or names the
+    // estimate/quote — never merely because the customer has one open.
+    const estimateLinked = Boolean(shortCode) || /\b(?:estimate|quote|proposal)\b/i.test(String(body || ''));
+    const llmDraft = await generateLlmReviewDraft({ customer, body, decision, estimate: workflow === WORKFLOW ? estimate : null, estimateLinked });
     // The house no-price rule applies to WHATEVER text lands in the composer
     // card — the deterministic scheduling templates echo raw inbound text, so
     // a customer's own "Tuesday for $50 works" would flow into the draft
