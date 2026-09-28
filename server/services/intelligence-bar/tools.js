@@ -3722,6 +3722,25 @@ async function cancelAppointment(input, actionContext = {}) {
     return { error: `This appointment is already ${appt.status} and can't be cancelled.` };
   }
 
+  // Exact-effect confirm (W0B / PR A of the cancel-pinned-effects lane): a
+  // pending action proposed against a frozen impact snapshot (fee, invoices,
+  // inspection-credit reversal — see appointment-cancel-impact.js) pins it
+  // on `_frozen_cancellation_impact`. Recompute the SAME snapshot fresh,
+  // right before committing anything, and refuse if state moved since the
+  // operator approved the card — never settle a different fee/void/reversal
+  // than what was shown. No frozen pin (every caller today — the route
+  // refuses cancel_appointment before any pending action can carry one; see
+  // CANCEL_NOT_CARD_CONFIRMABLE_MESSAGE in admin-intelligence-bar.js) means
+  // this check is a no-op, so this is inert until a later PR wires the
+  // proposal side and lifts that refusal.
+  if (input._frozen_cancellation_impact) {
+    const { computeCancelAppointmentImpact, cancelImpactsMatch } = require('../appointment-cancel-impact');
+    const freshImpact = await computeCancelAppointmentImpact(appointment_id);
+    if (!cancelImpactsMatch(freshImpact, input._frozen_cancellation_impact)) {
+      return { error: 'The cancellation effects (late-cancel fee, invoices, or inspection credit) changed since this was proposed — nothing was changed. Ask again for a fresh preview.' };
+    }
+  }
+
   // Route through the SHARED status writer, not a direct status update
   // (Codex r3 on PR #3091): transitionJobStatus is where the cross-cutting
   // cancellation behavior lives — the atomic racing-transition guard, the

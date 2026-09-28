@@ -1573,6 +1573,97 @@ async function alertReversalNeedsOffice(offer, scheduledServiceId, { reason, bod
   }
 }
 
+// The series-child rebind probe of reverseInspectionCreditForBooking,
+// shared with previewInspectionCreditReversalForBooking so the preview the
+// Intelligence Bar card pins and the real reversal can never disagree about
+// whether a live series child still earns a redeemed offer. Returns the
+// earliest live child row ({ id }) or null; a probe failure is logged and
+// reads as null (never fail-closed), exactly as it always has.
+// A recurring anchor's seeded children carry no events of their own
+// — only the anchor was BOOKED, and the children were seeded inside
+// that same proven transaction. Cancelling just the anchor while
+// the series stays live must not claw the credit back (PR #3178
+// r17 P1): rebind to the earliest live child OF THE PROVEN ANCHOR.
+// Descendants of proven bookings only — an unrelated seeder row
+// still never qualifies.
+async function findLiveSeriesChildForReversal(offer, scheduledServiceId) {
+  let seriesChild = null;
+  try {
+    // The proven anchor is either the cancelled booking itself, or —
+    // when the cancelled booking is a seeded child the offer was
+    // REBOUND to after its anchor cancelled (Codex #3178 r23 P1) —
+    // the child's recurring parent. A seeded child carries no booking
+    // event of its own, so judging provenance by the cancelled row
+    // alone reversed the credit while live siblings kept the series
+    // going.
+    let provenAnchorId = null;
+    const anchorProven = await db('inspection_credit_booking_events')
+      .where({ scheduled_service_id: scheduledServiceId })
+      .first('id');
+    if (anchorProven) {
+      provenAnchorId = scheduledServiceId;
+    } else {
+      const cancelledRow = await db('scheduled_services')
+        .where({ id: scheduledServiceId })
+        .first('recurring_parent_id');
+      const parentId = cancelledRow?.recurring_parent_id;
+      if (parentId) {
+        const parentProven = await db('inspection_credit_booking_events')
+          .where({ scheduled_service_id: parentId })
+          .first('id');
+        if (parentProven) provenAnchorId = parentId;
+      }
+    }
+    if (provenAnchorId) {
+      seriesChild = await db('scheduled_services')
+        .where({ recurring_parent_id: provenAnchorId })
+        .whereNot({ id: scheduledServiceId })
+        .whereNotIn('status', NON_LIVE_APPOINTMENT_STATUSES)
+        // A callback child is not a collectible booking (r36 P2) —
+        // same exclusion the mint and evidence probes apply.
+        .whereRaw('COALESCE(is_callback, false) = false')
+        .whereRaw(notAssessmentSql(''))
+        .orderBy('scheduled_date', 'asc')
+        .first('id');
+    }
+    // OTHER proven series in the window (Codex #3178 r27 P2): the
+    // alternate probe above only sees live rows carrying their own
+    // event, and the chain probe only follows THIS cancellation's
+    // lineage. An offer bound to standalone booking B still deserves
+    // rebinding when a different proven anchor C in the window was
+    // cancelled while its seeded child D lives on — C is non-live
+    // and D has no event, so both probes miss the continuing series.
+    // Descendants of proven in-window anchors only; seeder chains
+    // still never qualify.
+    if (!seriesChild) {
+      const provenAnchors = await db('inspection_credit_booking_events')
+        .where({ customer_id: offer.customer_id })
+        // A card-approved credit-free anchor's children are not
+        // rebind targets — see CREDIT_FREE_CARD_EVENT_SOURCE.
+        .whereRaw("COALESCE(source, '') <> ?", [CREDIT_FREE_CARD_EVENT_SOURCE])
+        .where('created_at', '>=', offer.created_at)
+        .where('created_at', '<=', offer.expires_at)
+        .whereNotIn('scheduled_service_id',
+          [scheduledServiceId, offer.source_scheduled_service_id].filter(Boolean))
+        .select('scheduled_service_id');
+      const anchorIds = provenAnchors.map((r) => r.scheduled_service_id).filter(Boolean);
+      if (anchorIds.length) {
+        seriesChild = await db('scheduled_services')
+          .whereIn('recurring_parent_id', anchorIds)
+          .whereNot({ id: scheduledServiceId })
+          .whereNotIn('status', NON_LIVE_APPOINTMENT_STATUSES)
+          .whereRaw('COALESCE(is_callback, false) = false')
+          .whereRaw(notAssessmentSql(''))
+          .orderBy('scheduled_date', 'asc')
+          .first('id');
+      }
+    }
+  } catch (childErr) {
+    logger.warn(`[inspection-credit] series-child probe failed for ${scheduledServiceId}: ${childErr.message}`);
+  }
+  return seriesChild;
+}
+
 async function reverseInspectionCreditForBooking({
   scheduledServiceId,
   createdBy = 'system:inspection_credit_reversal',
@@ -1637,87 +1728,7 @@ async function reverseInspectionCreditForBooking({
           logger.info(`[inspection-credit] offer ${offer.id} rebound to live booking ${alternate.id} instead of reversing`);
           continue;
         }
-        // A recurring anchor's seeded children carry no events of their own
-        // — only the anchor was BOOKED, and the children were seeded inside
-        // that same proven transaction. Cancelling just the anchor while
-        // the series stays live must not claw the credit back (PR #3178
-        // r17 P1): rebind to the earliest live child OF THE PROVEN ANCHOR.
-        // Descendants of proven bookings only — an unrelated seeder row
-        // still never qualifies.
-        let seriesChild = null;
-        try {
-          // The proven anchor is either the cancelled booking itself, or —
-          // when the cancelled booking is a seeded child the offer was
-          // REBOUND to after its anchor cancelled (Codex #3178 r23 P1) —
-          // the child's recurring parent. A seeded child carries no booking
-          // event of its own, so judging provenance by the cancelled row
-          // alone reversed the credit while live siblings kept the series
-          // going.
-          let provenAnchorId = null;
-          const anchorProven = await db('inspection_credit_booking_events')
-            .where({ scheduled_service_id: scheduledServiceId })
-            .first('id');
-          if (anchorProven) {
-            provenAnchorId = scheduledServiceId;
-          } else {
-            const cancelledRow = await db('scheduled_services')
-              .where({ id: scheduledServiceId })
-              .first('recurring_parent_id');
-            const parentId = cancelledRow?.recurring_parent_id;
-            if (parentId) {
-              const parentProven = await db('inspection_credit_booking_events')
-                .where({ scheduled_service_id: parentId })
-                .first('id');
-              if (parentProven) provenAnchorId = parentId;
-            }
-          }
-          if (provenAnchorId) {
-            seriesChild = await db('scheduled_services')
-              .where({ recurring_parent_id: provenAnchorId })
-              .whereNot({ id: scheduledServiceId })
-              .whereNotIn('status', NON_LIVE_APPOINTMENT_STATUSES)
-              // A callback child is not a collectible booking (r36 P2) —
-              // same exclusion the mint and evidence probes apply.
-              .whereRaw('COALESCE(is_callback, false) = false')
-              .whereRaw(notAssessmentSql(''))
-              .orderBy('scheduled_date', 'asc')
-              .first('id');
-          }
-          // OTHER proven series in the window (Codex #3178 r27 P2): the
-          // alternate probe above only sees live rows carrying their own
-          // event, and the chain probe only follows THIS cancellation's
-          // lineage. An offer bound to standalone booking B still deserves
-          // rebinding when a different proven anchor C in the window was
-          // cancelled while its seeded child D lives on — C is non-live
-          // and D has no event, so both probes miss the continuing series.
-          // Descendants of proven in-window anchors only; seeder chains
-          // still never qualify.
-          if (!seriesChild) {
-            const provenAnchors = await db('inspection_credit_booking_events')
-              .where({ customer_id: offer.customer_id })
-              // A card-approved credit-free anchor's children are not
-              // rebind targets — see CREDIT_FREE_CARD_EVENT_SOURCE.
-              .whereRaw("COALESCE(source, '') <> ?", [CREDIT_FREE_CARD_EVENT_SOURCE])
-              .where('created_at', '>=', offer.created_at)
-              .where('created_at', '<=', offer.expires_at)
-              .whereNotIn('scheduled_service_id',
-                [scheduledServiceId, offer.source_scheduled_service_id].filter(Boolean))
-              .select('scheduled_service_id');
-            const anchorIds = provenAnchors.map((r) => r.scheduled_service_id).filter(Boolean);
-            if (anchorIds.length) {
-              seriesChild = await db('scheduled_services')
-                .whereIn('recurring_parent_id', anchorIds)
-                .whereNot({ id: scheduledServiceId })
-                .whereNotIn('status', NON_LIVE_APPOINTMENT_STATUSES)
-                .whereRaw('COALESCE(is_callback, false) = false')
-                .whereRaw(notAssessmentSql(''))
-                .orderBy('scheduled_date', 'asc')
-                .first('id');
-            }
-          }
-        } catch (childErr) {
-          logger.warn(`[inspection-credit] series-child probe failed for ${scheduledServiceId}: ${childErr.message}`);
-        }
+        const seriesChild = await findLiveSeriesChildForReversal(offer, scheduledServiceId);
         if (seriesChild && await rebindRedeemedOffer(offer.id, seriesChild.id)) {
           logger.info(`[inspection-credit] offer ${offer.id} rebound to live series child ${seriesChild.id} — anchor cancelled, series continues`);
           continue;
@@ -1794,6 +1805,91 @@ async function reverseInspectionCreditForBooking({
   } catch (err) {
     logger.error(`[inspection-credit] reversal sweep FAILED for booking ${scheduledServiceId}: ${err.message}`);
     return { reversed: 0, reason: 'error', error: err.message };
+  }
+}
+
+/**
+ * Read-only preview of reverseInspectionCreditForBooking — which redeemed
+ * offer(s) bound to this booking WOULD be reversed right now, for how much,
+ * versus deferred to office review or left alone because a live alternate
+ * booking (or series child) still earns the credit. Mirrors that function's
+ * READ path exactly, in the same order, and stops before the point where it
+ * claims and writes a reversal (rebindRedeemedOffer / the ledger movement) —
+ * this function never itself moves money. Kept beside it deliberately (same
+ * pattern as cardHoldCancelPreview beside handleCardHoldCancellation in
+ * estimate-card-holds.js): the series-child probe is the shared
+ * findLiveSeriesChildForReversal, and a change to the reversal's other read
+ * rules must be mirrored here. The Intelligence Bar cancel_appointment preview
+ * (appointment-cancel-impact.js) calls this — never a private copy of these
+ * queries — so the confirmation card and the commit-time drift check both
+ * see the same verdict reverseInspectionCreditForBooking would reach.
+ * Returns null when there is nothing redeemed against this booking (the
+ * dominant case — most cancels never touch inspection credit at all).
+ * Never throws.
+ */
+async function previewInspectionCreditReversalForBooking(scheduledServiceId, { voidedInvoiceIds = [] } = {}) {
+  if (!scheduledServiceId) return null;
+  try {
+    const redeemedOffers = await db('inspection_credit_offers')
+      .where({ redeemed_scheduled_service_id: scheduledServiceId, status: 'redeemed' })
+      .orderBy('id')
+      .select('id', 'customer_id', 'amount', 'created_at', 'expires_at', 'source_scheduled_service_id');
+    if (!redeemedOffers.length) return null;
+
+    // Same posture as the real reversal's invoice-state guard: an
+    // unresolved invoice (still holding money, not yet void/refunded/
+    // cancelled) means neither reversing nor rebinding is safe — flag for
+    // office review. A failed check is the SAME fail-closed posture (the
+    // real function `continue`s past the offer on a check failure, i.e.
+    // does nothing this pass) — "deferred" covers both. The real guard runs
+    // AFTER the void (reverseInspectionCreditForBooking is called from
+    // voidOpenInvoicesForCancelledService's `finally`), so the invoices the
+    // void preview says it would void count as resolved here — otherwise an
+    // open invoice the cancel is about to void would show "deferred" while
+    // the real cancel reverses the credit. The guard does not depend on the
+    // offer, so it is read once.
+    const invoiceUnresolved = await require('./invoice')
+      .previewUnresolvedInvoiceAfterCancelVoid(scheduledServiceId, { voidedInvoiceIds });
+
+    const offers = [];
+    for (const offer of redeemedOffers) {
+      let deferred = invoiceUnresolved;
+
+      // A live alternate booking (or, for a proven anchor, a live series
+      // child) in the offer's window still earns the credit — the real
+      // reversal REBINDS rather than reverses. Same two probes, same order.
+      let rebindCandidate = false;
+      if (!deferred) {
+        try {
+          const alternate = await provenBookingInWindow({
+            customerId: offer.customer_id,
+            from: offer.created_at,
+            to: offer.expires_at,
+            excludeIds: [scheduledServiceId, offer.source_scheduled_service_id],
+          });
+          rebindCandidate = !!alternate;
+        } catch (err) {
+          logger.warn(`[inspection-credit] reversal-preview alternate-booking check failed for offer ${offer.id}: ${err.message}`);
+          deferred = true;
+        }
+      }
+      // The SAME series-child probe the real reversal runs (shared helper,
+      // so the two cannot drift); a probe failure reads as "no child" there
+      // and here alike.
+      if (!deferred && !rebindCandidate) {
+        rebindCandidate = !!(await findLiveSeriesChildForReversal(offer, scheduledServiceId));
+      }
+      offers.push({
+        id: offer.id,
+        amount: round2(offer.amount),
+        would_reverse: !deferred && !rebindCandidate,
+        deferred,
+      });
+    }
+    return offers.length ? offers : null;
+  } catch (err) {
+    logger.error(`[inspection-credit] reversal preview FAILED for booking ${scheduledServiceId}: ${err.message}`);
+    return null;
   }
 }
 
@@ -2106,6 +2202,7 @@ module.exports = {
   CREDIT_FREE_CARD_EVENT_SOURCE,
   recordInspectionCreditOffer,
   reverseInspectionCreditForBooking,
+  previewInspectionCreditReversalForBooking,
   sweepInspectionCreditRedemptions,
   configuredCreditAmount,
   configuredCreditAmountForServiceKey,

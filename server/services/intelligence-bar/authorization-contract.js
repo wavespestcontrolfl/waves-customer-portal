@@ -555,7 +555,13 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     // may still land in review (office alerted), a hold may be parked for
     // the rebooked visit instead of released, and a void is skipped when
     // money is in flight or the invoice sits on a finalized statement.
-    if (c.fee?.applies) {
+    if (c.fee?.blocked_by_invoice) {
+      // visit-cancellation-followthrough.js throws before either card rail
+      // when an invoice still holds money after the void — no charge, no
+      // release, office alerted. Stated first so no fee sentence below can
+      // promise a charge the commit will skip.
+      push('billing', 'No late-cancel fee is charged and no card hold is released automatically — an invoice for this visit still holds money after the void, so the office is alerted to review the fee');
+    } else if (c.fee?.applies) {
       const amt = c.fee.amount != null ? `$${Number(c.fee.amount).toFixed(2)}` : 'the agreed';
       push('billing', c.fee.unresolved
         ? `A late-cancel fee MAY be charged to the card on file (${amt} — lane state could not be verified; unresolved outcomes go to office review)`
@@ -575,6 +581,25 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     }
     if ((c.invoices || []).length) {
       push('billing', 'Only the invoices listed above are voided — anything created after this card is left for office review');
+    }
+    // Inspection-credit reversal (appointment-cancel-impact.js's read-only
+    // mirror of inspection-credit.reverseInspectionCreditForBooking): most
+    // cancels have nothing redeemed against them (null, nothing pushed). A
+    // redeemed offer either reverses for its exact amount, or is deferred to
+    // office review (an unresolved invoice / a lookup failure) — the SAME
+    // two outcomes the real reversal reaches; a rebind (a live alternate
+    // booking or series child still earns it) is a no-op the card need not
+    // disclose as a billing effect, so it is skipped here (it stays in the
+    // pinned structure). A reversal takes the credit back out of the
+    // customer's balance; when that balance was already spent the real
+    // reversal refuses and alerts the office, which the sentence states.
+    for (const credit of c.inspection_credit_reversal || []) {
+      const amt = `$${Number(credit.amount).toFixed(2)}`;
+      if (credit.deferred) {
+        push('billing', `A ${amt} inspection credit tied to this booking is NOT reversed at cancel (an invoice for this visit still holds money, or the check could not run) — the office is alerted or the hourly sweep retries it`);
+      } else if (credit.would_reverse) {
+        push('billing', `The ${amt} inspection credit this booking earned is taken back out of the customer's account balance (if it was already spent, the office is alerted to collect or write it off)`);
+      }
     }
   }
 
@@ -839,6 +864,13 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     ...(preview?.pinned_recipient ? { pinned_recipient: preview.pinned_recipient } : {}),
     ...(preview?.pinned_customer ? { pinned_customer: preview.pinned_customer } : {}),
     ...(preview?.pinned_appointment ? { pinned_appointment: preview.pinned_appointment } : {}),
+    // The exact structured effect set (fee amount, invoice ids/credit_applied,
+    // inspection-credit offer ids/amounts) — not just its formatted text
+    // above — so two different effect sets that happen to render identical
+    // sentences (rare, but possible with a rounded dollar amount) can never
+    // hash alike. cancel_appointment's commit path recomputes this same
+    // shape (appointment-cancel-impact.js) and refuses on any mismatch.
+    ...(toolName === 'cancel_appointment' && preview?.cancellation ? { pinned_cancellation: preview.cancellation } : {}),
     ...(preview?.pinned_approval ? { pinned_approval: preview.pinned_approval } : {}),
     ...(preview?.pinned_estimate ? { pinned_estimate: preview.pinned_estimate } : {}),
     // The card caps/truncates preview lines for presentation only — the
