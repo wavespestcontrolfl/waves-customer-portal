@@ -560,11 +560,9 @@ describe('shared resolver import wiring (so report-data.js and the preview-image
 });
 
 describe('reportPhotoSetPdfSignature threads propertyHistoryEnabled/lawnHistory through, rather than re-deriving its own default (Sonnet fallback-audit P1, 2026-09-28)', () => {
-  // The gate-ON resolution path (installedForVisit, lawn-assessment-history.js)
-  // does real, separately-tested DB work of its own and is dark in every
-  // environment (docs/…, GATE_LAWN_PROPERTY_HISTORY) — exercising it here
-  // would duplicate that module's own tests without adding coverage. This
-  // isolates report-photo-set.js instead, to prove the exact plumbing bug
+  // The gate-ON resolution itself (GATE_LAWN_PROPERTY_HISTORY, which is ON
+  // in prod) is covered end to end by the next describe block. This one
+  // isolates report-photo-set.js, to prove the exact plumbing bug
   // class the finding named: that reportPhotoSetPdfSignature forwards the
   // CALLER's propertyHistoryEnabled/lawnHistory into resolveLawnPhotoAssessmentIds
   // instead of letting the resolver re-derive its own default independently.
@@ -627,5 +625,66 @@ describe('reportPhotoSetPdfSignature threads propertyHistoryEnabled/lawnHistory 
     expect(capturedOptions).not.toBeNull();
     expect(capturedOptions.propertyHistoryEnabled).toBeUndefined();
     expect(capturedOptions.lawnHistory).toBeUndefined();
+  });
+});
+
+describe('reportPhotoSetPdfSignature with GATE_LAWN_PROPERTY_HISTORY on (the live prod path)', () => {
+  const CURRENT = { id: 'assess-current', customer_id: 'cust-1' };
+  const BASELINE = { id: 'assess-baseline', customer_id: 'cust-1' };
+  const record = {
+    service_data: null, customer_id: 'cust-1', service_line: 'lawn', service_type: 'Lawn Care',
+    scheduled_service_id: 'sched-1', service_id: null,
+  };
+  const knexFor = (photosByAssessment) => (table) => {
+    if (table === 'service_photos') return { where() { return this; }, orderBy() { return this; }, async select() { return []; } };
+    if (table === 'service_records') return { where() { return this; }, async first() { return record; } };
+    if (table === 'lawn_assessment_photos') {
+      let ids = [];
+      const run = async () => {
+        if (ids.some((id) => photosByAssessment[id] === 'throw')) throw new Error('down');
+        return ids.flatMap((id) => photosByAssessment[id] || []);
+      };
+      const chain = {
+        whereIn(_col, value) { ids = value; return chain; },
+        where() { return chain; },
+        orderBy() { return chain; },
+        catch(fn) { return run().catch(fn); },
+        then(ok, fail) { return run().then(ok, fail); },
+      };
+      return chain;
+    }
+    throw new Error(`unexpected table: ${table}`);
+  };
+  const load = ({ installed = async () => CURRENT, history = async () => ({ current: CURRENT, isBaseline: false, rows: [BASELINE, CURRENT] }) } = {}) => {
+    jest.resetModules();
+    jest.doMock('../services/lawn-assessment-history', () => ({ installedForVisit: installed, historyForAssessment: history }));
+    return require('../services/service-report/photo-set-signature').reportPhotoSetPdfSignature;
+  };
+  const photo = (id, assessmentId) => ({ id, assessment_id: assessmentId, updated_at: '2026-09-01T00:00:00Z' });
+
+  afterEach(() => {
+    jest.dontMock('../services/lawn-assessment-history');
+    jest.resetModules();
+  });
+
+  test('hiding the BASELINE assessment\'s turf photo changes the signature', async () => {
+    const sign = load();
+    const both = await sign('rec-lawn', knexFor({ 'assess-current': [photo('c1', 'assess-current')], 'assess-baseline': [photo('b1', 'assess-baseline')] }), { serviceData: null, propertyHistoryEnabled: true });
+    const baselineHidden = await sign('rec-lawn', knexFor({ 'assess-current': [photo('c1', 'assess-current')] }), { serviceData: null, propertyHistoryEnabled: true });
+    expect(both).toMatch(/-lp2-[0-9a-f]{8}$/);
+    expect(baselineHidden).toMatch(/-lp1-[0-9a-f]{8}$/);
+    expect(both).not.toBe(baselineHidden);
+  });
+
+  test('the property-history lookup throwing → the unique failure token', async () => {
+    const sign = load({ history: async () => { throw new Error('down'); } });
+    const a = await sign('rec-lawn', knexFor({}), { serviceData: null, propertyHistoryEnabled: true });
+    expect(a).toMatch(/^-phu-/);
+  });
+
+  test('the installed-assessment lookup throwing → the unique failure token', async () => {
+    const sign = load({ installed: async () => { throw new Error('down'); } });
+    const a = await sign('rec-lawn', knexFor({}), { serviceData: null, propertyHistoryEnabled: true });
+    expect(a).toMatch(/^-phu-/);
   });
 });
