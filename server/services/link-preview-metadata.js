@@ -183,6 +183,26 @@ function metadataFromCardContent(kind, token, content) {
   };
 }
 
+// Preview tags for a server-rendered page that doesn't go through the SPA's
+// renderHTML (the legacy /estimate/:token view): only og:/twitter: tags for
+// a fixed card, leaving the page's own <title> and other head tags alone.
+function fixedCardHeadTags(kind) {
+  const content = fixedCard(kind);
+  if (!content) return '';
+  const { image, previewTitle } = metadataFromCardContent(kind, null, content);
+  const esc = (v) => String(v).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return [
+    `<meta property="og:title" content="${esc(previewTitle)}">`,
+    `<meta property="og:image" content="${esc(image.url)}">`,
+    `<meta property="og:image:width" content="${image.width}">`,
+    `<meta property="og:image:height" content="${image.height}">`,
+    `<meta property="og:image:alt" content="${esc(image.alt)}">`,
+    '<meta name="twitter:card" content="summary_large_image">',
+    `<meta name="twitter:title" content="${esc(previewTitle)}">`,
+    `<meta name="twitter:image" content="${esc(image.url)}">`,
+  ].join('\n');
+}
+
 // Single entry point renderHTML calls per request. Tries the existing
 // service-report loader first (unchanged behavior/suppression), then every
 // other known kind; returns null when nothing matches (the caller's default
@@ -208,6 +228,7 @@ module.exports = {
   FIXED_CARDS,
   PREVIEW_TITLE,
   fixedCard,
+  fixedCardHeadTags,
   matchLinkPreviewRoute,
   resolveCardContent,
   loadLinkPreviewMetadata,

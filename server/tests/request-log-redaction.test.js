@@ -64,6 +64,10 @@ describe('request URL log redaction', () => {
     expect(redactRequestUrl(`/og/report/${'a'.repeat(32)}.jpg`)).toBe('/og/report/[REDACTED]');
     expect(redactRequestUrl('/og/pay/some-invoice-token-abc.jpg')).toBe('/og/pay/[REDACTED]');
     expect(redactRequestUrl('/OG/Pay/some-invoice-token-abc.JPG')).toBe('/OG/Pay/[REDACTED]');
+    expect(redactRequestUrl(`/og/report/${'a'.repeat(32)}%2Ejpg`)).toBe('/og/report/[REDACTED]');
+    expect(redactRequestUrl(`/og/report/x%2F${'a'.repeat(32)}.jpg`)).toBe('/og/report/[REDACTED]');
+    expect(redactRequestUrl(`/og/report/${'a'.repeat(32)}`)).toBe('/og/report/[REDACTED]');
+    expect(redactRequestUrl(`/og/report/a/${'b'.repeat(32)}.jpg`)).toBe('/og/report/[REDACTED]/[REDACTED]');
     expect(redactRequestUrl('/og/pay.jpg')).toBe('/og/pay.jpg');
     expect(redactRequestUrl('/og/default.jpg')).toBe('/og/default.jpg');
   });

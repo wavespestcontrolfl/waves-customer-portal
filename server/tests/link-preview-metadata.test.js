@@ -20,6 +20,7 @@ const gates = require('../config/feature-gates');
 const { reserviceSelfServeEnabled } = require('../services/reservice-scheduler');
 const {
   FIXED_CARDS,
+  fixedCardHeadTags,
   matchLinkPreviewRoute,
   resolveCardContent,
   loadLinkPreviewMetadata,
@@ -209,5 +210,21 @@ describe('loadLinkPreviewMetadata (the full HTML <head> path)', () => {
     expect(metadata.image.url).not.toContain('f'.repeat(64));
     expect(metadata.previewTitle).toBe('Waves');
     expect(metadata.title).toBe('Your appointment · Waves Pest Control');
+  });
+});
+
+describe('legacy server-rendered estimate view', () => {
+  test('fixedCardHeadTags gives only the preview tags for the estimate card', () => {
+    const tags = fixedCardHeadTags('estimate');
+    expect(tags).toMatch(/<meta property="og:image" content="https?:\/\/[^"]+\/og\/estimate\.jpg">/);
+    expect(tags).toContain('<meta property="og:title" content="Waves">');
+    expect(tags).toContain('<meta name="twitter:card" content="summary_large_image">');
+    expect(tags).not.toMatch(/<title>|name="description"/);
+    expect(fixedCardHeadTags('not-a-kind')).toBe('');
+  });
+
+  test('the legacy renderPage head carries them', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes', 'estimate-public.js'), 'utf8');
+    expect(src).toMatch(/<title>Your Waves Estimate<\/title>[\s\S]{0,200}fixedCardHeadTags\('estimate'\)/);
   });
 });
