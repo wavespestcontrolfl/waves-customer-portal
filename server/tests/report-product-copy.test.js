@@ -75,6 +75,26 @@ describe('REPORT_PRODUCT_COPY config', () => {
   });
 });
 
+describe('passesReportCopyScreen', () => {
+  const { passesReportCopyScreen } = require('../services/service-report/report-product-copy');
+
+  it('passes every owner-approved line', () => {
+    for (const entry of REPORT_PRODUCT_COPY) {
+      expect(passesReportCopyScreen(entry.howItWorks)).toBe(true);
+      if (entry.alsoLabeledFor) expect(passesReportCopyScreen(entry.alsoLabeledFor)).toBe(true);
+      expect(passesReportCopyScreen(entry.petsKids)).toBe(true);
+    }
+  });
+
+  it.each([
+    'Pet-safe once the spray is down.',
+    'Safe for your kids and pets.',
+    'An EPA-approved barrier around your home.',
+  ])('fails closed on a banned compliance claim: %s', (line) => {
+    expect(passesReportCopyScreen(line)).toBe(false);
+  });
+});
+
 describe('findReportProductCopyEntry / reportProductCopyFor — matching', () => {
   it.each(APPROVED_CATALOG_PRODUCTS)('matches $name by its real catalog name + EPA reg', ({ name, epaReg }) => {
     const byEpa = epaReg ? findReportProductCopyEntry({ epaReg, name: 'some unrelated free-text name' }) : null;

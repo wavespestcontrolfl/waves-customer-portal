@@ -6,7 +6,7 @@
  */
 const { reportProductCopyFor } = require('../../config/report-product-copy');
 const { validateCustomerCopy } = require('./premium-experience');
-const { stripFixedReentryTiming, REENTRY_SAFE_COPY } = require('../social-media');
+const { stripFixedReentryTiming, complianceLanguageIssues, REENTRY_SAFE_COPY } = require('../social-media');
 
 // Strict `=== 'true'` — repo gate convention (matches reportPhotoContentLive
 // / discountStackingLive in feature-gates.js). The `reportProductCopy`
@@ -14,6 +14,12 @@ const { stripFixedReentryTiming, REENTRY_SAFE_COPY } = require('../social-media'
 // one canonical CALL-TIME reader every caller must use.
 function reportProductCopyGateOn() {
   return process.env.GATE_REPORT_PRODUCT_COPY === 'true';
+}
+
+// Every line accompanies an applied product, so product context is implicit.
+function passesReportCopyScreen(line) {
+  return validateCustomerCopy(line)
+    && complianceLanguageIssues(line, { impliedTreatmentContext: true }).length === 0;
 }
 
 // `product` is report-data.js's enriched service_products row (the one
@@ -27,14 +33,12 @@ function reportProductCopyForApplicationProduct(product = {}) {
     name: product?.product_name || product?.name || '',
   });
   if (!copy) return null;
-  // Same banned-copy screen every other synthesized customer-facing line in
-  // this directory runs through (pest-report-expectations.js's module
-  // header) before it can render — belt-and-suspenders on reviewed static
-  // text, and it keeps this module honest if the config is ever edited
-  // without re-review.
-  if (!validateCustomerCopy(copy.how_it_works)) return null;
-  if (copy.also_labeled_for && !validateCustomerCopy(copy.also_labeled_for)) return null;
-  if (!validateCustomerCopy(copy.pets_kids)) return null;
+  // Belt-and-suspenders on reviewed static text, so a config edit that skips
+  // re-review still fails closed: the report directory's banned-copy screen
+  // plus the shared compliance-language screen ("pet-safe", "EPA-approved").
+  if (!passesReportCopyScreen(copy.how_it_works)) return null;
+  if (copy.also_labeled_for && !passesReportCopyScreen(copy.also_labeled_for)) return null;
+  if (!passesReportCopyScreen(copy.pets_kids)) return null;
   // pets_kids is a re-entry-adjacent claim, screened at the SOURCE — every
   // mode (live, PDF, static, sms_preview) reads applications through this
   // one function, so stripping here (rather than only in reports-public.js's
@@ -62,4 +66,5 @@ module.exports = {
   reportProductCopyGateOn,
   reportProductCopyForApplicationProduct,
   reportProductCopyPdfSignature,
+  passesReportCopyScreen,
 };
