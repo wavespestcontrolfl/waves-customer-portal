@@ -47,6 +47,12 @@ async function createScratchDb() {
     stripe_payment_intent_id text,
     stripe_charge_id text
   )`);
+  // Codex #4971 (termite annual renewal-charge, merged with #4940):
+  // coveredTermsAsOf's grace-coverage branch references t.annual_plan_version,
+  // t.renewed_from_term_id, and t.created_at unconditionally in its WHERE
+  // clause — Postgres validates every referenced column at parse time
+  // regardless of which OR branch a row actually takes, so all three must
+  // exist even though this suite's own rows never hit that branch.
   await db.raw(`CREATE TABLE annual_prepay_terms (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     customer_id uuid NOT NULL,
@@ -54,7 +60,10 @@ async function createScratchDb() {
     term_start date NOT NULL,
     term_end date NOT NULL,
     status text NOT NULL,
-    renewal_decision text
+    renewal_decision text,
+    renewed_from_term_id uuid,
+    annual_plan_version text,
+    created_at timestamptz NOT NULL DEFAULT now()
   )`);
   return { db, async destroy() { await db.raw('DROP SCHEMA ?? CASCADE', [schema]); await db.destroy(); } };
 }

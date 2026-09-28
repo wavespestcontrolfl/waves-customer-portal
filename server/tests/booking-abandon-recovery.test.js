@@ -132,8 +132,11 @@ describe('runSmsStage (touch 1)', () => {
     await _internals.runSmsStage(NOW, new Set());
 
     const vars = smsTemplates.getTemplate.mock.calls[0][1];
-    // service label: unknown id → generic, never the attacker string
-    expect(vars.service_type).toBe('your service');
+    // service label: unknown id → generic, never the attacker string. The SMS
+    // path's own fallback is 'service' (not the email path's 'your service')
+    // since the template already reads "Your {service_type} spot…" — owner
+    // report 2026-09-28, "Your your service spot" (#booking_abandonment_recovery).
+    expect(vars.service_type).toBe('service');
     // first_name: first token, name chars only → 'Pay', no URL/injection
     expect(vars.first_name).toBe('Pay');
     expect(JSON.stringify(vars)).not.toContain('evil.example');

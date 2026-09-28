@@ -17,6 +17,7 @@ const {
   validateModeChange,
   splitPendingSuggestions,
   classifySendVerdict,
+  sanitizeIntendedActions,
 } = require('../services/sms-suggest-mode');
 
 describe('hasRedactionPlaceholder — never deliver a copied corpus placeholder', () => {
@@ -304,5 +305,45 @@ describe('threadHasLiveAnswer — the inbound must never count as its own "newer
     expect(inboundQuery.excludedIds).toEqual([SELF]);
     // The outbound checks use the same stored-timestamp bound.
     for (const s of log.filter((x) => x.direction === 'outbound')) expect(s.boundIsRaw).toBe(true);
+  });
+});
+
+// Codex r3 P1: publishSuggestion's intended_actions sanitizer — the only
+// gate between an arbitrary model-shaped array and what a reviewer's card
+// (and agent_decisions.input_snapshot) actually persists.
+describe('sanitizeIntendedActions — what publishSuggestion persists on the review card (Codex r3 P1)', () => {
+  test('absent/malformed input (not an array) returns null — caller omits the key entirely', () => {
+    expect(sanitizeIntendedActions(null)).toBeNull();
+    expect(sanitizeIntendedActions(undefined)).toBeNull();
+    expect(sanitizeIntendedActions('send_payment_link')).toBeNull();
+    expect(sanitizeIntendedActions({ type: 'send_payment_link' })).toBeNull();
+  });
+
+  test('an empty array stays an empty array (verified no action) — never omitted', () => {
+    expect(sanitizeIntendedActions([])).toEqual([]);
+  });
+
+  test('keeps type + note, trims a note to 200 chars', () => {
+    const longNote = 'x'.repeat(500);
+    expect(sanitizeIntendedActions([{ type: 'send_payment_link', note: longNote }]))
+      .toEqual([{ type: 'send_payment_link', note: 'x'.repeat(200) }]);
+  });
+
+  test('drops the note key entirely when absent or blank — never an empty string', () => {
+    expect(sanitizeIntendedActions([{ type: 'book_appointment' }])).toEqual([{ type: 'book_appointment' }]);
+    expect(sanitizeIntendedActions([{ type: 'book_appointment', note: '   ' }])).toEqual([{ type: 'book_appointment' }]);
+  });
+
+  test('drops entries with a missing/non-string/blank type', () => {
+    expect(sanitizeIntendedActions([{ note: 'no type' }, { type: 42 }, { type: '' }, null, 'bare-string']))
+      .toEqual([]);
+  });
+
+  test('caps at 10 entries', () => {
+    const many = Array.from({ length: 15 }, (_, i) => ({ type: `action_${i}` }));
+    const sanitized = sanitizeIntendedActions(many);
+    expect(sanitized).toHaveLength(10);
+    expect(sanitized[0]).toEqual({ type: 'action_0' });
+    expect(sanitized[9]).toEqual({ type: 'action_9' });
   });
 });

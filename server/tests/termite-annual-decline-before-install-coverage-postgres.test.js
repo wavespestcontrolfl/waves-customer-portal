@@ -121,6 +121,12 @@ async function createScratchDb() {
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now()
   )`);
+  // Codex #4971 (termite annual renewal-charge, merged with #4940):
+  // coveredTermsAsOf's grace-coverage branch references t.annual_plan_version
+  // unconditionally in its WHERE clause — Postgres validates every
+  // referenced column at parse time regardless of which OR branch a row
+  // actually takes, so it must exist even though this suite's own rows
+  // never hit that branch.
   await db.raw(`CREATE TABLE annual_prepay_terms (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     customer_id uuid NOT NULL,
@@ -140,6 +146,7 @@ async function createScratchDb() {
     renewal_decision text,
     cancel_disposition text,
     renewed_from_term_id uuid,
+    annual_plan_version text,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now()
   )`);
@@ -182,7 +189,10 @@ describeOrSkip('a decided-lapse termite term (declined before install) gets real
     return { db, anchorTermToInstallation };
   }
 
-  const etDateString = () => new Date().toISOString().slice(0, 10);
+  // Production anchoring/coverage checks use the Eastern business date.
+  // A UTC "today" is tomorrow in ET between midnight UTC and midnight ET,
+  // so the install visit would read as not-yet-happened in that window.
+  const etDateString = () => jest.requireActual('../utils/datetime-et').etDateString();
   const addYear = (ymdStr) => {
     const d = new Date(`${ymdStr}T00:00:00Z`);
     d.setUTCFullYear(d.getUTCFullYear() + 1);

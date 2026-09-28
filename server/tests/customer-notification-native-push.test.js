@@ -34,7 +34,7 @@ test('a durable customer bell event dispatches the matching native push', async 
     { link: '/?tab=documents', icon: 'home' },
   );
 
-  expect(result).toEqual({ id: 'notification-1', push: { queued: true } });
+  expect(result).toEqual({ id: 'notification-1', deduped: false, push: { queued: true } });
   expect(mockInsert).toHaveBeenCalledWith(expect.objectContaining({
     recipient_type: 'customer',
     recipient_id: 'customer-1',
@@ -60,5 +60,5 @@ test('native push failure never turns a stored in-app notification into a failed
     'billing',
     'Payment received',
     'Thank you.',
-  )).resolves.toEqual({ id: 'notification-1', push: { queued: true } });
+  )).resolves.toEqual({ id: 'notification-1', deduped: false, push: { queued: true } });
 });

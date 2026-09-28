@@ -1,7 +1,6 @@
 const os = require('os');
 const db = require('../models/db');
 const logger = require('./logger');
-const { billingChannelAllowed } = require('./billing-delivery-channels');
 
 const QUEUED_STATUSES = ['queued', 'retry_scheduled'];
 const STALE_LOCK_MINUTES = 10;
@@ -105,14 +104,11 @@ async function claimDueReceiptDeliveryJobs({ limit = 10, id = workerId() } = {})
 function expectedEmailSkip(result) {
   // 'receipt_opted_out' is the payment_receipt=false kill switch (migration
   // 104) — the customer opted out of payment receipts entirely, so the email
-  // leg is skipped on purpose, exactly like the no-recipient case.
-  // 'email_opted_out' is the portal-wide email_enabled=false opt-out — the
-  // transactional_required stream bypasses suppression-group filtering, so
-  // senders must honor it themselves (the deposit / no-show email legs
-  // already do; the SMS leg carries the receipt for these customers).
+  // leg is skipped on purpose, exactly like the no-recipient case. The
+  // portal-wide email switch never skips a receipt email (owner ruling
+  // 2026-09-26: payment emails cannot be turned off).
   return result?.error === 'No receipt recipient email'
     || result?.error === 'receipt_opted_out'
-    || result?.error === 'email_opted_out'
     || result?.error === 'billing_email_not_selected';
 }
 
@@ -212,6 +208,26 @@ async function markJobRetry(job, err, { smsResult = null, emailResult = null } =
     });
 }
 
+// payment_receipt=false is the full receipt kill switch (migration 104):
+// the customer opted out of payment receipts on EVERY channel, not just
+// texts. Payer-billed invoices are exempt: their receipt goes to the
+// third-party payer's AP inbox, which the homeowner's prefs don't govern. A
+// transient lookup failure must NOT read as "no opt-out" (that would email a
+// kill-switch customer on a DB blip) — it comes back as prefsLookupFailed.
+// Shared by the worker below and the Intelligence Bar closeout repair's card.
+async function receiptEmailOptOutState(invoice) {
+  if (invoice.payer_id) return { receiptKillSwitch: false, prefsLookupFailed: false };
+  let prefsLookupFailed = false;
+  const prefs = await db('notification_prefs')
+    .where({ customer_id: invoice.customer_id })
+    .first()
+    .catch(() => {
+      prefsLookupFailed = true;
+      return null;
+    });
+  return { receiptKillSwitch: prefs?.payment_receipt === false, prefsLookupFailed };
+}
+
 async function processReceiptDeliveryJob(job) {
   let smsResult = null;
   let emailResult = null;
@@ -253,27 +269,11 @@ async function processReceiptDeliveryJob(job) {
     // delivers. Payer-billed invoices are exempt: their receipt goes to the
     // third-party payer's AP inbox, which the homeowner's prefs don't govern.
     // No receipt_sent_at stamp on this path (the stamp below requires a
-    // delivered email) — nothing was sent.
-    let receiptKillSwitch = false;
-    let emailOptedOut = false;
-    let emailSelected = true;
-    let prefsLookupFailed = false;
-    if (!invoice.payer_id) {
-      const prefs = await db('notification_prefs')
-        .where({ customer_id: invoice.customer_id })
-        .first()
-        .catch(() => {
-          // A transient lookup failure must NOT read as "no opt-out" — that
-          // would email a kill-switch customer on a DB blip. Fail the email
-          // leg actionably so the retry ladder re-runs the lookup (the email
-          // idempotency key makes the eventual send safe to repeat).
-          prefsLookupFailed = true;
-          return null;
-        });
-      receiptKillSwitch = prefs?.payment_receipt === false;
-      emailOptedOut = prefs?.email_enabled === false;
-      emailSelected = billingChannelAllowed(prefs || {}, 'payment_receipt', 'email') !== false;
-    }
+    // delivered email) — nothing was sent. The receipt channel choice is read
+    // by the shared billing email authority inside sendReceiptEmail (owner
+    // ruling 2026-09-27), which reports an unselected Email as the expected
+    // 'billing_email_not_selected' skip.
+    const { receiptKillSwitch, prefsLookupFailed } = await receiptEmailOptOutState(invoice);
     // The email leg is deliberately NOT gated on payment_receipt_channel:
     // migration 104 seeded 'sms' as the column DEFAULT on every existing row,
     // so "channel === 'sms'" cannot distinguish a customer who chose Text in
@@ -286,14 +286,10 @@ async function processReceiptDeliveryJob(job) {
       ? { ok: false, error: 'receipt prefs lookup failed' }
       : receiptKillSwitch
         ? { ok: false, error: 'receipt_opted_out' }
-        : emailOptedOut
-          ? { ok: false, error: 'email_opted_out' }
-          : !emailSelected
-            ? { ok: false, skipped: true, error: 'billing_email_not_selected' }
-            : await sendReceiptEmail(invoice.id, {
-            idempotencyKey: `receipt_email_auto:${invoice.id}`,
-            billingDeliveryCategory: 'payment_receipt',
-          }).catch((err) => ({ ok: false, error: err.message }));
+        : await sendReceiptEmail(invoice.id, {
+          idempotencyKey: `receipt_email_auto:${invoice.id}`,
+          billingDeliveryCategory: 'payment_receipt',
+        }).catch((err) => ({ ok: false, error: err.message }));
     if (actionableEmailFailure(emailResult)) {
       logger.warn(`[receipt-delivery-queue] Receipt email not sent for invoice ${invoice.invoice_number}: ${emailResult.error || 'unknown'}`);
     }
@@ -350,6 +346,9 @@ function scheduleReceiptDeliveryDrain({ delayMs = 0, limit = 10 } = {}) {
 }
 
 module.exports = {
+  receiptEmailOptOutState,
+  // Also the IB closeout repair card's rule for "no email, on purpose".
+  expectedEmailSkip,
   enqueueReceiptDelivery,
   claimDueReceiptDeliveryJobs,
   processDueReceiptDeliveryJobs,

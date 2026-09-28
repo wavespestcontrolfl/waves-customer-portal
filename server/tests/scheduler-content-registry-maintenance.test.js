@@ -13,6 +13,7 @@ const {
   runAutonomousOpportunityMining,
   runContentRegistryMaintenance,
 } = require('../services/scheduler');
+const { isEnabled } = require('../config/feature-gates');
 
 describe('scheduler content registry maintenance', () => {
   const originalEnv = { ...process.env };
@@ -32,6 +33,22 @@ describe('scheduler content registry maintenance', () => {
     expect(parsePositiveEnvInt('25', 300)).toBe(25);
     expect(parsePositiveEnvInt('-1', 300)).toBe(300);
     expect(parsePositiveEnvInt('bad', 300)).toBe(300);
+  });
+
+  test('refreshes Astro-only registry rows by default so direct posts can become verified live', async () => {
+    delete process.env.CONTENT_REGISTRY_LIVE_STATUS_STATUSES;
+    const registry = {
+      runContentRegistrySync: jest.fn().mockResolvedValue({ ok: true, sync_run_id: 'sync-astro', summary: {} }),
+    };
+    const liveStatus = {
+      runContentRegistryLiveStatusCheck: jest.fn().mockResolvedValue({ ok: true, summary: {} }),
+    };
+
+    await runContentRegistryMaintenance({ registry, liveStatus });
+
+    expect(liveStatus.runContentRegistryLiveStatusCheck).toHaveBeenCalledWith(expect.objectContaining({
+      statuses: expect.arrayContaining(['astro_only', 'astro_changed_since_sync']),
+    }));
   });
 
   test('runs GitHub-backed sync before live status refresh', async () => {
@@ -86,6 +103,42 @@ describe('scheduler content registry maintenance', () => {
 
     await expect(runContentRegistryMaintenance({ registry, liveStatus })).rejects.toThrow(/GitHub source unavailable/);
     expect(liveStatus.runContentRegistryLiveStatusCheck).not.toHaveBeenCalled();
+  });
+
+  // Owned cited-URL health rides this same run (AGENTS.md: one sweep, not a
+  // parallel cron) rather than its own standalone cron job.
+  test('runs the owned cited-URL health check as a step of this run when seoIntelligence is on', async () => {
+    const registry = { runContentRegistrySync: jest.fn().mockResolvedValue({ ok: true, sync_run_id: 'sync-1', summary: {} }) };
+    const liveStatus = { runContentRegistryLiveStatusCheck: jest.fn().mockResolvedValue({ ok: true, summary: {} }) };
+    const ownedUrlHealth = { runOwnedUrlHealthCheck: jest.fn().mockResolvedValue({ checked: 12, bad: 2, results: [], digest: {} }) };
+
+    const result = await runContentRegistryMaintenance({ registry, liveStatus, ownedUrlHealth });
+
+    expect(ownedUrlHealth.runOwnedUrlHealthCheck).toHaveBeenCalledTimes(1);
+    expect(result.ownedUrlHealth).toEqual({ checked: 12, bad: 2 });
+  });
+
+  test('skips the owned cited-URL health check when seoIntelligence is off', async () => {
+    isEnabled.mockReturnValueOnce(false);
+    const registry = { runContentRegistrySync: jest.fn().mockResolvedValue({ ok: true, sync_run_id: 'sync-1', summary: {} }) };
+    const liveStatus = { runContentRegistryLiveStatusCheck: jest.fn().mockResolvedValue({ ok: true, summary: {} }) };
+    const ownedUrlHealth = { runOwnedUrlHealthCheck: jest.fn() };
+
+    const result = await runContentRegistryMaintenance({ registry, liveStatus, ownedUrlHealth });
+
+    expect(ownedUrlHealth.runOwnedUrlHealthCheck).not.toHaveBeenCalled();
+    expect(result.ownedUrlHealth).toBeNull();
+  });
+
+  test('an owned cited-URL health failure never fails the maintenance run', async () => {
+    const registry = { runContentRegistrySync: jest.fn().mockResolvedValue({ ok: true, sync_run_id: 'sync-1', summary: {} }) };
+    const liveStatus = { runContentRegistryLiveStatusCheck: jest.fn().mockResolvedValue({ ok: true, summary: {} }) };
+    const ownedUrlHealth = { runOwnedUrlHealthCheck: jest.fn().mockRejectedValue(new Error('db unavailable')) };
+
+    const result = await runContentRegistryMaintenance({ registry, liveStatus, ownedUrlHealth });
+
+    expect(result.ownedUrlHealth).toEqual({ error: 'db unavailable' });
+    expect(result.sync_run_id).toBe('sync-1');
   });
 });
 

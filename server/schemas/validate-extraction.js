@@ -72,7 +72,31 @@ const persistedSchema = require('./call-extraction.persisted.schema.json');
 // Feeds the deterministic callback_number_needed triage flag
 // (call-triage-flags.js) when no spoken callback number also covers it.
 // Optional/nullable: older payloads still validate.
-const SCHEMA_VERSION = '1.14.0';
+// 1.16.0: additive — scheduling.caller_accepted_slot (boolean|null) and
+// scheduling.moved_appointment_date (date|null), each evidence-pinned. Owner
+// decision 2026-09-27: the extraction judges a reschedule's agreement (the
+// caller accepting the final slot, over the whole call) and names the
+// existing appointment being moved; the reschedule applier only verifies the
+// pinned quotes verbatim and that they name the agreed time
+// (call-reschedule-apply.js). Optional/nullable: older payloads still
+// validate.
+// 1.15.0: additive enum widening — caller.relationship_to_property gains
+// home_buyer (owner ruling 2026-09-26: a buyer under contract ordering their
+// own WDO inspection is authorized like a lender or realtor). Buyers used to
+// land on "other", which also covers strangers, so no rule could single them
+// out. Feeds isAuthorizedWdoArrangerBooking (call-triage-flags.js). Older
+// payloads still validate.
+// 1.17.0: additive — scheduling.agreed_slot_words (object|null: day/hour/
+// period, each verbatim words from the transcript) and
+// scheduling.moved_appointment_words (string|null). Owner decision
+// 2026-09-27: the extraction now records the agreed time and the moved
+// appointment's date as VERBATIM WORDS pinned to the existing
+// confirmed_start_at / moved_appointment_date evidence quotes, so the
+// reschedule applier only checks the quote is real and contains those words
+// instead of parsing speech itself (call-reschedule-agreement.js). Nothing
+// consumes them yet outside that gated consumer. Optional/nullable: older
+// payloads still validate.
+const SCHEMA_VERSION = '1.17.0';
 
 const ajv = new Ajv({ allErrors: true, strict: false });
 addFormats(ajv);

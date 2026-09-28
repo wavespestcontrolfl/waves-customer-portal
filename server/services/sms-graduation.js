@@ -89,7 +89,18 @@ function resolveCohortVersions({ raw = process.env.GRAD_COHORT_VERSIONS, current
   if (trimmed.toLowerCase() === 'all_live') return null;
   // Lazy require: sms-shadow-drafter reaches sms-auto-send which reaches this
   // module — a top-level require would be circular.
-  const current = currentVersion || require('./sms-shadow-drafter').PROMPT_VERSION;
+  // currentPromptVersion() (not the static PROMPT_VERSION) — "current" here
+  // means "whichever prompt is ACTUALLY drafting right now", exactly the
+  // module's own documented contract above. PROMPT_VERSION never moves once
+  // GATE_SMS_REAL_ANSWERS goes live (it stays 'house_voice_v11' forever by
+  // design — see sms-shadow-drafter.js), so pinning the cohort default to it
+  // would keep measuring a drafter that stopped running the moment the gate
+  // flipped on, while the real-answers rewrite's own evidence never counts —
+  // the exact "poison the denominator forever" failure this function's
+  // docstring already warns about for an ordinary prompt bump. Gate off:
+  // currentPromptVersion() === PROMPT_VERSION, so this is byte-identical to
+  // before.
+  const current = currentVersion || require('./sms-shadow-drafter').currentPromptVersion();
   if (!trimmed) return [current];
   const versions = [...new Set(trimmed.split(',').map((v) => v.trim()).filter(Boolean))];
   if (!versions.includes(current)) {

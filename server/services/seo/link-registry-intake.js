@@ -19,7 +19,7 @@
 const { canonicalProspectDomain } = require('./prospect-domain-lock');
 const { parse: parseCsv } = require('csv-parse/sync');
 const registry = require('./link-registry');
-const { LINK_SOURCES, isNeverTargetHost, intakeItemKey } = registry;
+const { LINK_SOURCES, isNeverTargetHost, intakeItemKey, AI_CITATION_SOURCE_DETAIL_PREFIX } = registry;
 const { SPOKE_SITE_KEYS } = require('../content-astro/spoke-sites');
 
 // Anything that looks like a host or URL. Emails are stripped first so
@@ -220,8 +220,17 @@ async function upsertItem(q, item) {
  * be upserted with no writes. Accepts a pasted list, free text, or a CSV with a
  * website/domain/url column (same endpoint, plan §11).
  */
-async function intake(db, { text, source = 'list_import', sourceDetail = null, sourceRef = null, dryRun = false } = {}) {
+async function intake(db, { text, source = 'list_import', sourceDetail: rawDetail = null, sourceRef = null, dryRun = false } = {}) {
   if (!LINK_SOURCES.includes(source)) throw Object.assign(new Error(`invalid source '${source}'`), { code: 'invalid_source' });
+  // An ai_citation batch always carries the durable discovery-only prefix
+  // (Codex P1 2026-09-28, round 11): `ai_citation:intake[ <detail>]`. Every
+  // candidate touch, parked item and resolver touch below is built from this
+  // detail (touchDetail keeps it as the leading part), so an intake-created
+  // citation domain is recognized by isDiscoveryOnlyDomain and the 110000
+  // restore migration exactly like a feeder-created one.
+  const sourceDetail = source === 'ai_citation' && !String(rawDetail || '').startsWith(AI_CITATION_SOURCE_DETAIL_PREFIX)
+    ? `${AI_CITATION_SOURCE_DETAIL_PREFIX}intake${rawDetail ? ` ${rawDetail}` : ''}`
+    : rawDetail;
   const parsed = parseOpportunities(text);
   const base = {
     ...parsed, source, sourceDetail, dryRun: !!dryRun,

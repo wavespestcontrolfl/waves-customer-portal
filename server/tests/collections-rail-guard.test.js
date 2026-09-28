@@ -72,6 +72,16 @@ describe('gate on', () => {
     await expect(collectionsChannelPermitted({ ...BASE, invoiceId: '41' })).resolves.toBe(true);
   });
 
+  test('a frozen aggregate requires every quoted invoice in one policy verdict', async () => {
+    ContactPolicy.evaluate.mockResolvedValue({ allowed: true, eligibleInvoiceIds: ['inv-2'], denialReasons: [] });
+    await expect(collectionsChannelPermitted({ ...BASE, invoiceIds: ['inv-1', 'inv-2'], detail: true }))
+      .resolves.toEqual({ allowed: false, durable: false });
+    expect(ContactPolicy.evaluate).toHaveBeenCalledTimes(1);
+    ContactPolicy.evaluate.mockResolvedValue({ allowed: true, eligibleInvoiceIds: ['inv-1', 'inv-2'], denialReasons: [] });
+    await expect(collectionsChannelPermitted({ ...BASE, invoiceIds: ['inv-1', 'inv-2'] })).resolves.toBe(true);
+    await expect(collectionsChannelPermitted({ ...BASE, invoiceIds: [] })).resolves.toBe(true);
+  });
+
   test('invoiceId null skips membership — aggregate rails need only the channel allow', async () => {
     ContactPolicy.evaluate.mockResolvedValue({ allowed: true, eligibleInvoiceIds: [], denialReasons: [] });
     await expect(collectionsChannelPermitted({ ...BASE, invoiceId: null })).resolves.toBe(true);
@@ -113,11 +123,32 @@ describe('collectionsChannelVerdict', () => {
       .toEqual({ permitted: false, eligibleInvoiceIds: ['inv-1'] });
   });
 
+  test('gate on: preserves incomplete balance evidence without changing channel permission', async () => {
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    ContactPolicy.evaluate.mockResolvedValueOnce({
+      allowed: true,
+      eligibleInvoiceIds: ['inv-1'],
+      denialReasons: [],
+      balanceIncomplete: 'payer resolve failed',
+    });
+    expect(await collectionsChannelVerdict({
+      customerId: 'cust-1', channel: 'sms', purpose: 'balance_reminder',
+    })).toEqual({
+      permitted: true,
+      eligibleInvoiceIds: ['inv-1'],
+      balanceIncomplete: 'payer resolve failed',
+    });
+  });
+
   test('gate on: a consult failure denies with an EMPTY set (nothing quotable)', async () => {
     process.env.GATE_COLLECTIONS_POLICY = 'true';
     ContactPolicy.evaluate.mockRejectedValueOnce(new Error('db down'));
     expect(await collectionsChannelVerdict({ customerId: 'cust-1', channel: 'sms', purpose: 'balance_reminder' }))
-      .toEqual({ permitted: false, eligibleInvoiceIds: [] });
+      .toEqual({
+        permitted: false,
+        eligibleInvoiceIds: [],
+        balanceIncomplete: 'policy evaluation failed',
+      });
   });
 });
 
@@ -149,5 +180,14 @@ describe('detail verdict', () => {
     ContactPolicy.evaluate.mockRejectedValueOnce(new Error('db down'));
     await expect(collectionsChannelPermitted({ ...BASE, invoiceId: 'inv-1', detail: true }))
       .resolves.toEqual({ allowed: false, durable: false });
+  });
+
+  test.each(['payer resolve failed', 'dunning-stop check failed'])('preserves incomplete reason %s in the detailed verdict', async (reason) => {
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    ContactPolicy.evaluate.mockResolvedValue({ allowed: true, denialReasons: [],
+      eligibleInvoiceIds: ['inv-1'], balanceIncomplete: reason });
+    await expect(collectionsChannelPermitted({ ...BASE, invoiceId: 'inv-1', detail: true }))
+      .resolves.toEqual({ allowed: true, durable: false, balanceIncomplete: reason });
+    await expect(collectionsChannelPermitted({ ...BASE, invoiceId: 'inv-1' })).resolves.toBe(true);
   });
 });
