@@ -2942,6 +2942,14 @@ async function resolvePestWeekWeatherForBuild(service, serviceLine, knex, mode) 
 // degrades to "no lawn section" rather than 500ing a customer's report — a
 // signature caller opts in so the same failure reaches its own unique-token
 // fence instead of resolving a false empty identity.
+//
+// loadLinkedLawnAssessment already branches on `failClosed` on its own (see
+// its doc a few lines above, issue #3135: `const swallow = (err) => {
+// if (failClosed) throw err; return null; }` on every lookup inside it) —
+// that behavior predates this function and is unchanged here; this resolver
+// only forwards the flag. The photo-set-signature.js failClosed tests
+// (server/tests/report-photo-set-signature.test.js, "the linked-assessment
+// lookup throwing") exercise this exact path end-to-end.
 async function resolveLawnAssessmentAndHistory(service, knex = db, {
   pinnedAssessmentId = null,
   propertyHistoryEnabled = featureGates.gateEnvValue('GATE_LAWN_PROPERTY_HISTORY'),

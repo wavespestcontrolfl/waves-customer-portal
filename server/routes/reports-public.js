@@ -2181,7 +2181,10 @@ router.get('/:token', async (req, res, next) => {
       // attach rows while this untracked render runs (Codex #4091 P1). The
       // parked-summary marker is derived from THIS loaded snapshot; the
       // post-render re-read below sees live state (photo-set-signature.js).
-      const photoSetSignature = await reportPhotoSetPdfSignature(service.id, db, { serviceData: service.service_data });
+      // lawnFields: `service` is already service_records.* (loaded above) —
+      // reuse it so the lawn-photo identity lookup skips a second
+      // service_records read (Sonnet fallback-audit P1, 2026-09-28).
+      const photoSetSignature = await reportPhotoSetPdfSignature(service.id, db, { serviceData: service.service_data, lawnFields: service });
       // Treatment-zone key component: gate flips and re-traces change the
       // key so cached PDFs re-render with/without the traced map.
       const tzSignature = await treatmentZonePdfSignature(service, db);

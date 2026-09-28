@@ -201,6 +201,31 @@ describe('reportPhotoSetPdfSignature — lawn turf photo identity (pre-push P1s,
     };
   }
 
+  test('options.lawnFields (caller already has the service_records row) skips the extra service_records read (Sonnet fallback-audit P1, 2026-09-28)', async () => {
+    let recordReads = 0;
+    const counting = (config) => (table) => {
+      const chain = knexForLawn(config)(table);
+      if (table === 'service_records') {
+        const first = chain.first;
+        chain.first = async (...args) => { recordReads += 1; return first(...args); };
+      }
+      return chain;
+    };
+    const turfPhotosByAssessment = { [CURRENT_ASSESSMENT.id]: [{ id: 'tp-1', assessment_id: CURRENT_ASSESSMENT.id, updated_at: '2026-09-01T00:00:00Z' }] };
+    const withLawnFields = await reportPhotoSetPdfSignature('rec-lawn-1', counting({ turfPhotosByAssessment }), {
+      serviceData: null,
+      lawnFields: LAWN_SERVICE_RECORD,
+    });
+    expect(recordReads).toBe(0);
+    // Identical to the same scenario resolved the slow way (an extra
+    // service_records read) — passing lawnFields changes nothing about the
+    // computed signature, only whether this function fetches it itself.
+    const withoutLawnFields = await reportPhotoSetPdfSignature('rec-lawn-1', counting({ turfPhotosByAssessment }), { serviceData: null });
+    expect(recordReads).toBe(1);
+    expect(withLawnFields).toBe(withoutLawnFields);
+    expect(withLawnFields).toMatch(/-lp1-[0-9a-f]{8}/);
+  });
+
   test('a lawn visit with zero service_photos and one linked customer-visible turf photo → signature differs from the empty set', async () => {
     const withPhoto = await reportPhotoSetPdfSignature('rec-lawn-1', knexForLawn({
       turfPhotosByAssessment: { [CURRENT_ASSESSMENT.id]: [{ id: 'tp-1', assessment_id: CURRENT_ASSESSMENT.id, updated_at: '2026-09-01T00:00:00Z' }] },

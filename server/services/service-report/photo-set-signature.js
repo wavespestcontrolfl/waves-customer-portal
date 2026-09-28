@@ -84,9 +84,20 @@ async function reportPhotoSetPdfSignature(serviceRecordId, knex = null, options 
     let lawnFields;
     if (Object.hasOwn(options || {}, 'serviceData')) {
       serviceData = options.serviceData;
-      lawnFields = await knex('service_records')
-        .where({ id: serviceRecordId })
-        .first('customer_id', 'service_line', 'service_type', 'scheduled_service_id', 'service_id');
+      // options.lawnFields — the caller's ALREADY-LOADED service_records row
+      // (every current caller that passes serviceData loads the full row via
+      // service_records.* or an explicit column list that already includes
+      // these fields for its OWN lawn-assessment lookups, per pdf-queue.js's
+      // and reports-public.js's own comments on why customer_id/service_id
+      // ride along). Reusing it here is what keeps this branch's original
+      // zero-extra-read contract for a caller that opts in; a caller that
+      // does not pass it gets exactly one service_records read to learn the
+      // service line, same as before the lawn-photo term existed.
+      lawnFields = Object.hasOwn(options, 'lawnFields') && options.lawnFields
+        ? options.lawnFields
+        : await knex('service_records')
+          .where({ id: serviceRecordId })
+          .first('customer_id', 'service_line', 'service_type', 'scheduled_service_id', 'service_id');
     } else {
       const record = await knex('service_records')
         .where({ id: serviceRecordId })
@@ -109,6 +120,17 @@ async function reportPhotoSetPdfSignature(serviceRecordId, knex = null, options 
     // unique '-phu' failure token — never a valid (empty or non-empty)
     // lawn-photo signature an unreadable lawn photo set could otherwise be
     // mistaken for.
+    // No pinnedAssessmentId here (Sonnet fallback-audit P1, 2026-09-28,
+    // verified false positive): this mirrors lawnAssessmentPdfSignature
+    // (report-data.js's resolveCanonicalLawnRender), which ALSO resolves the
+    // unpinned/canonical assessment only, never a delivery pin — by design.
+    // A genuine delivery pin (pdf-queue.js's pinnedLawnAssessmentId) forces
+    // `mustRenderFresh` there, which skips the cached-key comparison AND the
+    // store entirely ("a PINNED render must not clear the correction marker:
+    // it stored nothing" — pdf-queue.js), so this unpinned resolution is
+    // never compared against a pinned render's actual content. Whenever this
+    // signature IS consulted for a cache decision, the render it describes
+    // is the canonical (unpinned) one.
     let lawnPart = '';
     const serviceLine = lawnFields?.service_line || detectServiceLine(lawnFields?.service_type);
     if (serviceLine === 'lawn') {

@@ -238,7 +238,12 @@ async function renderAndStoreServiceReportPdf(recordId, {
   // recovery can attach rows mid-render (Codex #4091 P1, photo-set-signature.js).
   // The parked-summary marker comes from the snapshot this render uses
   // (`service`, loaded above), never a fresh read — see the module doc.
-  const photoSetBefore = await reportPhotoSetPdfSignature(recordId, knex, { serviceData: service.service_data });
+  // lawnFields: this `service` row is already service_records.* (see
+  // loadServiceRecordForPdf above) — passing it through the lawn-photo
+  // identity lookup skips a second service_records read here (Sonnet
+  // fallback-audit P1, 2026-09-28: this call's whole point is avoiding a
+  // fresh read when the caller already has the row).
+  const photoSetBefore = await reportPhotoSetPdfSignature(recordId, knex, { serviceData: service.service_data, lawnFields: service });
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const renderSignature = visibilitySignature;
     const data = await buildReportV1Data(service, reportToken, knex, { pestPressureConfig, pinnedLawnAssessmentId: effectivePin, pinnedWeekPlanAvailableAt: canonical.weekPlanAvailableAt, propertyHistoryEnabled, lawnHistory, pinnedLawnHistoryIdentity, pestWeekWeather: true });
