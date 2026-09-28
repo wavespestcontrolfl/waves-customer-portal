@@ -3770,7 +3770,7 @@ describe('custom rung: the dispatcher note never re-greets the customer (owner 2
     ['Hey Sam, the cleaner was there today, so we moved this appointment.', 'the cleaner was there today, so we moved this appointment.'],
     ['Hello Sam, as requested we moved your appointment.', 'as requested we moved your appointment.'],
     ['Hi there! Storms rolled in this afternoon.', 'Storms rolled in this afternoon.'],
-    ['Good morning Mrs. Lee - the gate was locked.', 'the gate was locked.'],
+    ['Good morning Sam - the gate was locked.', 'the gate was locked.'],
     ['Hey Sam the tech is out sick today.', 'the tech is out sick today.'],
     ['Hi Sam, Thursday works better for the crew.', 'Thursday works better for the crew.'],
     ['Hi Sam, Thanks, we moved this appointment.', 'Thanks, we moved this appointment.'],
@@ -3786,6 +3786,12 @@ describe('custom rung: the dispatcher note never re-greets the customer (owner 2
     'Hey the cleaner was there today, so we moved it.',
     'History: the gate was locked.',
     'Hi-rise access was closed today.',
+    // Only this customer's own first name (or "there", or no one) is a
+    // greeting's addressee — any other capitalized word is content.
+    'Hi FYI, appointment moved.',
+    'Hey ASAP - please call the office.',
+    'Good morning Mrs. Lee - the gate was locked.',
+    'Hey Samantha, the gate was locked.',
   ])('leaves a note without a leading greeting exactly as typed: %s', async (typed) => {
     expect(await noteAsSent(typed)).toBe(typed);
   });
@@ -3793,7 +3799,7 @@ describe('custom rung: the dispatcher note never re-greets the customer (owner 2
   test('an accented name is a name: the greeting still goes (any script)', async () => {
     expect(await noteAsSent('Hi José, the gate was locked.', 'José')).toBe('the gate was locked.');
     expect(await noteAsSent('Hey Zoë the tech is out sick today.', 'Zoë')).toBe('the tech is out sick today.');
-    expect(await noteAsSent('Hello Renée, see you Thursday.')).toBe('see you Thursday.');
+    expect(await noteAsSent('Hello Renée, see you Thursday.', 'Renée')).toBe('see you Thursday.');
   });
 
   test("a possessive after the name is part of the sentence, not a greeting", async () => {

@@ -131,31 +131,32 @@ function customLinkClause(rescheduleUrl) {
 // A dispatcher often opens the Custom note with a greeting of their own
 // ("Hey Sam, the cleaner was there today…"), but the template already
 // greets the customer ("Hi {first_name} - "), so the text read "Hi Sam -
-// Hey Sam, …" (owner 2026-09-28). Drop that leading greeting: the greeting
-// word, then "there" or up to three capitalized name words (any script:
-// "José", "Zoë"), ended by a comma / "!" / "." / ":" / dash — or the
-// greeting word and the customer's own first name with no punctuation
-// ("Hey Sam the tech is out…"; the name must end at a space, punctuation or
-// the end, so "Hey Sam's gate…" is a sentence, not a greeting).
-// One final check covers both forms: when what is left starts the way a
-// salutation continues — a conjunction ("and Pat, …", "& Pat …") or a list
-// of two or more names ending in its own punctuation ("Pat, and Alex, …",
-// "Pat, Alex, …"), never a sentence like "Thursday and Friday both work" —
-// the greeting addresses more than the customer and the note is sent
-// exactly as typed rather than cut mid-address. A note that was only a
-// greeting (with or without punctuation: "Hi there", "Good morning!") falls
-// back to the default line.
-const NOTE_GREETING_WORD = '(?:[Hh]i|[Hh]ello|[Hh]ey|[Gg]ood (?:[Mm]orning|[Aa]fternoon|[Ee]vening))';
+// Hey Sam, …" (owner 2026-09-28). Drop that leading greeting — but only a
+// greeting addressed to THIS customer by their own first name, to "there",
+// or to no one ("Hi, …"): the greeting word, then optionally that
+// addressee, ended by a comma / "!" / "." / ":" / dash, by the end of the
+// note, or (after the addressee) by a space ("Hey Sam the tech is out…").
+// Any other capitalized word is never taken for a name ("Hi FYI, …" and
+// "Good morning Mrs. Lee - …" are sent as typed), and the addressee must end
+// at a space, punctuation or the end ("Hey Sam's gate…" is a sentence).
+// When what is left starts the way a salutation continues — a conjunction
+// ("and Pat, …", "& Pat …") or a list of names ending in its own
+// punctuation ("Pat, and Alex, …") — the greeting addresses more than the
+// customer and the note is sent exactly as typed. A note that was only a
+// greeting falls back to the default line.
+const NOTE_GREETING_WORD = '(?:hi|hello|hey|good (?:morning|afternoon|evening))';
+const NOTE_DELIM = '[,!.:\u2013\u2014-]';
 const NOTE_NAME = "(?:there|\\p{Lu}[\\p{L}'.-]*)";
-const NOTE_LEADING_GREETING_RE = new RegExp(`^${NOTE_GREETING_WORD}(?:\\s+${NOTE_NAME}){0,3}(?:\\s*[,!.:\u2013\u2014-]+(?:\\s+|$)|\\s*$)`, 'u');
-const NOTE_CONTINUED_SALUTATION_RE = new RegExp(`^(?:(?:and|or|&|\\+)(?![\\p{L}\\p{N}])|${NOTE_NAME}(?:\\s*,\\s*(?:(?:and|or|&|\\+)\\s+)?${NOTE_NAME}|\\s*(?:&|\\+|and|or)\\s+${NOTE_NAME})+\\s*[,!.:\u2013\u2014-](?:\\s|$))`, 'u');
+const NOTE_CONTINUED_SALUTATION_RE = new RegExp(`^(?:(?:and|or|&|\\+)(?![\\p{L}\\p{N}])|${NOTE_NAME}(?:\\s*,\\s*(?:(?:and|or|&|\\+)\\s+)?${NOTE_NAME}|\\s*(?:&|\\+|and|or)\\s+${NOTE_NAME})+\\s*${NOTE_DELIM}(?:\\s|$))`, 'u');
 function withoutLeadingGreeting(note, firstName) {
   const text = String(note || '');
-  let stripped = text.replace(NOTE_LEADING_GREETING_RE, '');
-  if (stripped === text && firstName) {
-    const name = String(firstName).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    if (name) stripped = text.replace(new RegExp(`^${NOTE_GREETING_WORD}\\s+${name}(?=[\\s,!.:\u2013\u2014-]|$)[\\s,!.:\u2013\u2014-]*`, 'iu'), '');
-  }
+  const name = String(firstName || '').trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const addressee = name ? `(?:there|${name})` : 'there';
+  const greeting = new RegExp(
+    `^${NOTE_GREETING_WORD}(?:(?:\\s+${addressee})?(?:\\s*${NOTE_DELIM}+(?:\\s+|$)|\\s*$)|\\s+${addressee}\\s+)`,
+    'iu',
+  );
+  const stripped = text.replace(greeting, '');
   if (stripped !== text && NOTE_CONTINUED_SALUTATION_RE.test(stripped)) return text;
   return stripped;
 }
