@@ -121,15 +121,14 @@ function aggregateCitations(rows, queryRows) {
   const groups = new Map();
   for (const row of rows || []) {
     const urls = cleanUrls(row.cited_urls);
-    if (!urls.length) continue;
-    const managed = row.query_id ? queryById.get(row.query_id) : null;
-    const bm = benchmarkByQuery.get(row.query);
+    const managed = queryById.get(row.query_id) || {};
+    const bm = benchmarkByQuery.get(row.query) || {};
     const question = {
-      id: (bm && bm.id) || null,
+      id: bm.id || null,
       query: row.query || null,
-      city: (managed && managed.city) || (bm && bm.city) || null,
-      service: (managed && managed.service) || (bm && bm.service) || null,
-      intent: (bm && bm.intent) || null,
+      city: managed.city || bm.city || null,
+      service: managed.service || bm.service || null,
+      intent: bm.intent || null,
     };
     const providerIntent = isProviderIntentQuestion(question);
     for (const url of urls) {
@@ -138,7 +137,7 @@ function aggregateCitations(rows, queryRows) {
       const key = `${c.host}::${c.category}`;
       if (!groups.has(key)) {
         groups.set(key, {
-          host: c.host, category: c.category, rule: c.rule, subtype: c.subtype || null, citationCount: 0,
+          host: c.host, category: c.category, rule: c.rule, subtype: null, citationCount: 0,
           urlCounts: new Map(), platforms: new Set(), locallyRelevant: false, questions: new Map(),
         });
       }
@@ -146,8 +145,8 @@ function aggregateCitations(rows, queryRows) {
       agg.citationCount += 1;
       agg.urlCounts.set(url, (agg.urlCounts.get(url) || 0) + 1);
       agg.platforms.add(row.llm_platform || 'unknown');
-      if (!agg.locallyRelevant && isLocallyRelevant(url)) agg.locallyRelevant = true;
-      if (!agg.subtype && c.subtype) agg.subtype = c.subtype;
+      agg.locallyRelevant ||= isLocallyRelevant(url);
+      agg.subtype ||= c.subtype || null;
       const qKey = question.id || question.query || '-';
       if (!agg.questions.has(qKey)) agg.questions.set(qKey, question);
     }
