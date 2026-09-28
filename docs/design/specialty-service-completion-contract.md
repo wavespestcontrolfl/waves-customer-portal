@@ -73,11 +73,12 @@ and bed bug (`20260731400000_bed_bug_untyped_completion.js`).
 | Tier | Types | Required interactions | Target |
 |---|---|---|---|
 | 1 — routine | mosquito_event, palm_injection, one_time_lawn_treatment | outcome → confirm products/photos → submit | 20–45s |
-| 2 — findings | pest_inspection, one_time_pest_treatment, cockroach, flea, rodent_exclusion, rodent_trapping, wildlife_trapping, bed_bug | outcome → required selects (≤4; the activity score derives from the findings field) → optional Recommendations → submit | <60s |
+| 2 — findings | pest_inspection, one_time_pest_treatment, cockroach, flea, rodent_exclusion, rodent_trapping, wildlife_trapping, bed_bug | outcome → required selects (≤4) → activity tap only for tech-set gauges (rodent_exclusion, rodent_trapping, wildlife_trapping; derive-mapped types score from their findings field) → optional Recommendations → submit | <60s |
 | 3 — compliance | termite_treatment (later termite_inspection if WDO-adjacent) | full mandated fields | accuracy over speed |
 
 Quick path for "nothing major found" (Tier 2): outcome tap → zero-state
-activity tap → "No action needed" chip → submit. 4 interactions.
+findings select (or zero-state activity tap on a tech-set gauge) → submit.
+3 interactions.
 
 ## 4. Per-type contract
 
