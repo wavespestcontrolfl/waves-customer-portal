@@ -33,7 +33,13 @@ const OFFER_LADDER = ['pest_control', 'lawn_care', 'tree_shrub', 'termite'];
 
 // Prompts routed through customer-pricing-ai's own SERVICE_MATCHERS so the
 // offer prices exactly what the portal pricing panel would price for the same
-// words — one vocabulary, no parallel matcher to drift.
+// words — one vocabulary, no parallel matcher to drift. SHARED with the
+// portal/photo-triage offer surfaces below (buildPortalOffer,
+// buildOfferForFamily) — never add a family here that those surfaces should
+// not also start reaching by requestedTargetKey. GATE_REPORT_CROSS_SELL_V2's
+// two extra targets (rodent_bait, mosquito) are deliberately kept in the
+// separate V2_TARGET_* maps further down instead, reachable ONLY through
+// buildReportCrossSell's own V2 resolution.
 const OFFER_PROMPTS = {
   pest_control: 'pest control',
   lawn_care: 'lawn care',
@@ -59,6 +65,19 @@ const PREFERRED_OPTION_IDS = {
   tree_shrub: 'tree-standard',
   termite: 'termite-basic',
 };
+
+// GATE_REPORT_CROSS_SELL_V2-only targets — reuse customer-pricing-ai.js's
+// SAME SERVICE_MATCHERS entries (/\brodent|rat|...\b/i, /\bmosquito...\b/i)
+// and PRICE_OPTIONS ids, but are deliberately NOT added to the shared
+// OFFER_PROMPTS/OFFER_LABELS/PREFERRED_OPTION_IDS maps above: those are also
+// the portal offer card's and the photo-triage lane's requestedTargetKey
+// vocabulary (buildPortalOffer / buildOfferForFamily), and extending them
+// there would make 'mosquito'/'rodent_bait' newly requestable/priceable on
+// those surfaces too — out of scope for a report-card-only feature. Merged
+// into the shared maps only at buildReportCrossSell's own use sites, for a
+// targetKey it already proved came from its own V2 resolution.
+const V2_TARGET_PROMPTS = { rodent_bait: 'rodent control', mosquito: 'mosquito control' };
+const V2_TARGET_LABELS = { rodent_bait: 'Rodent Control', mosquito: 'Mosquito Control' };
 
 // Ownership vocabulary (waveguard-existing-services) spells the termite
 // family 'termite_bait'; the pricing-ai offer vocabulary spells it 'termite'.
@@ -291,6 +310,10 @@ function offerFingerprint(payload = {}) {
     o.id || '', o.label || '', o.cadence || '',
     o.perVisit == null ? '' : Number(o.perVisit).toFixed(2),
     o.waveguardTier || '', o.confidence || '',
+    // GATE_REPORT_CROSS_SELL_V2's reason-tied copy is customer-visible, so
+    // it rides the fingerprint like every other rendered field — a reason
+    // change under a stable serviceKey/option must still 409 a stale tap.
+    payload.reason || '',
   ].join('|');
   return require('crypto').createHash('sha256').update(canonical).digest('hex').slice(0, 32);
 }
@@ -495,6 +518,202 @@ async function loadEstimateSeed(database, customerId, scopeStreet) {
 async function cacheOnlyPropertyLookup(address) {
   const { performPropertyLookup } = require('../../routes/property-lookup-v2');
   return performPropertyLookup(address, { cacheOnly: true, persist: false });
+}
+
+// ============================================================
+// GATE_REPORT_CROSS_SELL_V2 (owner-approved 2026-09-27) — findings- and
+// season-aware offer priority, layered on top of the report's cross-sell
+// card. Read directly at call time (not through feature-gates.js's
+// load-time `gates` map — same convention as the report's other same-file
+// dark features: TERMITE_REPORT_V2, GATE_RODENT_REPORT_REFRESH,
+// COCKROACH_REPORT_V2 in report-data.js) so a flip needs no restart. Off
+// (unset or anything other than exactly 'true'): buildReportCrossSell picks
+// the same OFFER_LADDER target it always has — byte-identical output.
+// Inert unless GATE_REPORT_CROSS_SELL is also on (there is no card to
+// prioritize without it).
+// ============================================================
+
+const V2_ROACH_RE = /\b(?:roach|roaches|cockroach|cockroaches)\b/;
+const V2_RODENT_RE = /\b(?:rodent|rodents|rat|rats|mouse|mice)\b/;
+const V2_TERMITE_RE = /\b(?:termite|termites|swarmer|swarmers|swarming|mud\s*tubes?|wood\s*damage)\b/;
+const V2_MOSQUITO_RE = /\bmosquito(?:e?s)?\b/g;
+
+// The one catalog service this module prices OUTSIDE buildCustomerPricingResponse:
+// a fixed one-time $350 two-treatment package (20260602000002_cockroach_control_service),
+// not a recurring per-application family the estimator engine models. Its
+// offer is therefore always the unpriced request-a-quote CTA — never a
+// per-application figure this module did not compute.
+const COCKROACH_SERVICE_KEY = 'cockroach_control';
+
+// Structured, staff/AI-reviewed evidence ONLY — service_findings (title/
+// detail/recommendation, the same rows the report's Findings section
+// renders) and the visit's typed companion identity. Deliberately never
+// reads technician_notes: raw tech-note text must not egress on a customer
+// surface (AGENTS.md; codex P1 r3 + inline on #3516), and a cross-sell
+// reason is exactly that — customer-facing copy.
+function parseJsonColumnLocal(value) {
+  if (!value) return {};
+  if (typeof value === 'object' && !Array.isArray(value)) return value;
+  if (typeof value !== 'string') return {};
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+async function detectReportFindingsSignal(service, database) {
+  const serviceData = parseJsonColumnLocal(service.service_data);
+  const primaryType = serviceData.typedReportSnapshot && typeof serviceData.typedReportSnapshot === 'object'
+    ? serviceData.typedReportSnapshot.type
+    : null;
+  const companionTypes = Array.isArray(serviceData.companionReportSnapshots)
+    ? serviceData.companionReportSnapshots
+      .filter((snap) => snap && typeof snap === 'object')
+      .map((snap) => snap.type)
+    : [];
+  // A cockroach-PRIMARY report means the customer is already mid-program
+  // today (the same visit this report documents) — never "start" what they
+  // already have. Only a companion typed cockroach snapshot (roach activity
+  // flagged alongside a DIFFERENT primary service) counts as new evidence
+  // toward the offer; the primary case falls through to the text signal,
+  // which the "already scheduled" check in buildCockroachFindingsOffer
+  // below also guards.
+  const roachCompanionTyped = primaryType !== 'cockroach' && companionTypes.includes('cockroach');
+
+  let findings = [];
+  try {
+    findings = await database('service_findings')
+      .where({ service_record_id: service.id })
+      .select('category', 'severity', 'title', 'detail', 'recommendation');
+  } catch { /* best-effort: an unreadable findings table reads as no signal */ }
+  const text = (Array.isArray(findings) ? findings : [])
+    .flatMap((f) => [f.category, f.severity, f.title, f.detail, f.recommendation])
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+  const mosquitoMentions = (text.match(V2_MOSQUITO_RE) || []).length;
+
+  return {
+    roachesIndoors: roachCompanionTyped || V2_ROACH_RE.test(text),
+    rodentEvidence: V2_RODENT_RE.test(text),
+    termiteActivity: V2_TERMITE_RE.test(text),
+    heavyMosquito: mosquitoMentions >= 2,
+  };
+}
+
+// buildCockroachFindingsOffer(service, database) → fingerprinted payload | null.
+// The one V2 target that never goes through buildCustomerPricingResponse —
+// cockroach_control is a fixed one-time price, not a recurring family the
+// estimator prices. Verifies the catalog row is real, active, and
+// customer-offerable (customer_visible + booking_enabled, the same columns
+// public-services-menu.js and call-booking-catalog.js gate on) and that the
+// customer does not already have one on the books before returning the
+// unpriced quote_cta card.
+async function buildCockroachFindingsOffer(service, database) {
+  try {
+    const catalogRow = await database('services')
+      .where({ service_key: COCKROACH_SERVICE_KEY })
+      .first('id', 'is_active', 'is_archived', 'customer_visible', 'booking_enabled');
+    if (!catalogRow
+      || catalogRow.is_active !== true
+      || catalogRow.is_archived === true
+      || catalogRow.customer_visible !== true
+      || catalogRow.booking_enabled !== true) {
+      return null;
+    }
+    // Already has it: an open (not yet completed/cancelled) visit linked to
+    // this catalog row — a mid-program customer (initial treatment already
+    // done, follow-up scheduled ~14 days out per the catalog description)
+    // must never be re-pitched the program they are already in. Filtered
+    // client-side (status membership, not a bare .whereIn) so this reads
+    // like every other best-effort DB read in this module.
+    const linkedRows = await database('scheduled_services')
+      .where({ customer_id: service.customer_id, service_id: catalogRow.id })
+      .select('id', 'status');
+    const openStatuses = new Set(['pending', 'confirmed', 'en_route', 'on_site']);
+    const alreadyScheduled = (Array.isArray(linkedRows) ? linkedRows : [])
+      .some((row) => openStatuses.has(row.status));
+    if (alreadyScheduled) return null;
+
+    const payload = {
+      serviceKey: COCKROACH_SERVICE_KEY,
+      label: 'Cockroach Control',
+      mode: 'quote_cta',
+      relationship: 'start',
+      option: null,
+      reason: 'We noted roach activity inside today — our cockroach control program is a focused two-treatment cleanout.',
+    };
+    return { fullPayload: { ...payload, fingerprint: offerFingerprint(payload) } };
+  } catch (err) {
+    logger.warn(`[report-cross-sell] cockroach offer suppressed (code=${err?.code || 'none'})`);
+    return null;
+  }
+}
+
+// resolveReportCrossSellV2(...) → { fullPayload } | { targetKey, reason } | null.
+//   { fullPayload }        — a fully-composed, already-fingerprinted card
+//                             (cockroach_control: never priced through the
+//                             estimator) — the caller returns it as-is.
+//   { targetKey, reason }  — override the ladder's picked target with this
+//                             V2 target; the caller's normal pricing flow
+//                             (buildCustomerPricingResponse, pickOption,
+//                             optionIsPriceable) runs exactly as it does for
+//                             the ladder, and `reason` rides the final
+//                             payload as reason-tied copy.
+//   null                    — no V2 override; the caller keeps its existing
+//                             ladder pick (pickOfferTarget / startFamilyForIdentity).
+// `ladderEvidence` is the SAME property-scoped, corroborated evidence array
+// buildReportCrossSell already computed — reused verbatim so V2 can never
+// offer a family the ladder's own ownership authority disagrees about.
+async function resolveReportCrossSellV2({ service, database, ladderEvidence, planRateFamilies }) {
+  const owned = offerVocabulary(ladderEvidence);
+  const billed = offerVocabulary(planRateFamilies);
+  const notOwned = (key) => !owned.has(key) && !billed.has(key);
+
+  const signal = await detectReportFindingsSignal(service, database).catch(() => null);
+  if (signal) {
+    if (signal.roachesIndoors) {
+      const cockroachOffer = await buildCockroachFindingsOffer(service, database);
+      if (cockroachOffer) return cockroachOffer;
+      // Catalog unavailable, or already mid-program: fall through to the
+      // next priority rather than dropping the card entirely.
+    }
+    if (signal.rodentEvidence && notOwned('rodent_bait')) {
+      return {
+        targetKey: 'rodent_bait',
+        reason: 'We noted signs of rodent activity today — our rodent bait monitoring program keeps stations checked and baited year-round.',
+      };
+    }
+    if (signal.termiteActivity && notOwned('termite')) {
+      return {
+        targetKey: 'termite',
+        reason: 'We noted possible termite activity today — a termite inspection can confirm what’s there and get monitoring in place.',
+      };
+    }
+    if (signal.heavyMosquito && notOwned('mosquito')) {
+      return {
+        targetKey: 'mosquito',
+        reason: 'You mentioned heavy mosquito pressure today — our mosquito program treats the yard through peak season.',
+      };
+    }
+  }
+
+  // Season (America/New_York calendar month) — owner matrix 2026-09-27:
+  // May-Oct is mosquito season, Feb-May is termite swarm season. May falls
+  // in both windows; mosquito is checked first (listed first in the
+  // owner's ruling), so a not-yet-owned mosquito plan wins in May and
+  // termite is only offered that month once mosquito is already owned.
+  const { etDateString } = require('../../utils/datetime-et');
+  const etMonth = Number(String(etDateString()).slice(5, 7));
+  if (etMonth >= 5 && etMonth <= 10 && notOwned('mosquito')) {
+    return { targetKey: 'mosquito', reason: 'Mosquito season is here in SW Florida — ask about our seasonal mosquito program.' };
+  }
+  if (etMonth >= 2 && etMonth <= 5 && notOwned('termite')) {
+    return { targetKey: 'termite', reason: 'It’s termite swarm season in SW Florida — a termite inspection is a smart yearly check.' };
+  }
+  return null;
 }
 
 // buildReportCrossSell(service, database) → crossSell payload | null.
@@ -798,13 +1017,32 @@ async function buildReportCrossSell(service, database, {
     // policy) is bounded here because the ownership reads on this same
     // connection succeeded milliseconds earlier.
     const ladderEvidence = [...ownedKeys, ...reportFamilies];
+
+    // GATE_REPORT_CROSS_SELL_V2 (owner-approved 2026-09-27): findings- and
+    // season-aware priority, layered on the ladder above. Read directly at
+    // call time (see the block's own header comment). `null` (gate off, or
+    // no V2 signal fired) falls straight through to the unchanged ladder
+    // pick below — byte-identical to today's output either way.
+    const v2 = process.env.GATE_REPORT_CROSS_SELL_V2 === 'true'
+      ? await resolveReportCrossSellV2({ service, database, ladderEvidence, planRateFamilies }).catch((err) => {
+        logger.warn(`[report-cross-sell] v2 priority skipped (code=${err?.code || 'none'})`);
+        return null;
+      })
+      : null;
+    // cockroach_control is never priced through the estimator below — its
+    // fully-composed, already-fingerprinted card returns as-is.
+    if (v2?.fullPayload) return v2.fullPayload;
+    // Reason-tied copy for a V2-picked target rides the payload built below;
+    // absent for the unchanged ladder pick (never customer-facing then).
+    const reportOfferReason = v2?.reason || null;
+
     // No recurring evidence at all → the identity-start branch: offer starts
     // the family today's report belongs to (owner matrix 2026-08-13). With
     // evidence, the ownership matrix decides. relationship below stays
     // evidence-driven, so identity-start cards always say "Start".
-    const targetKey = ladderEvidence.length
+    const targetKey = v2?.targetKey || (ladderEvidence.length
       ? pickOfferTarget(ladderEvidence)
-      : startFamilyForIdentity(reportIdentity);
+      : startFamilyForIdentity(reportIdentity));
     // Owns everything → nothing to offer; the report still shows the
     // referral card, which needs no crossSell payload.
     if (!targetKey) return null;
@@ -859,7 +1097,9 @@ async function buildReportCrossSell(service, database, {
     const { buildCustomerPricingResponse, addressForCustomer } = require('../customer-pricing-ai');
     const result = await buildCustomerPricingResponse({
       customer,
-      prompt: OFFER_PROMPTS[targetKey],
+      // V2_TARGET_PROMPTS covers rodent_bait/mosquito — targetKey can only
+      // be one of those here when V2 itself picked it (never the ladder).
+      prompt: OFFER_PROMPTS[targetKey] || V2_TARGET_PROMPTS[targetKey],
       db: database,
       propertyLookup: trackedPropertyLookup,
       propertySeed,
@@ -925,7 +1165,8 @@ async function buildReportCrossSell(service, database, {
 
     const payload = {
       serviceKey: targetKey,
-      label: OFFER_LABELS[targetKey],
+      // V2_TARGET_LABELS covers rodent_bait/mosquito (see the prompt above).
+      label: OFFER_LABELS[targetKey] || V2_TARGET_LABELS[targetKey],
       mode: priced ? 'priced' : 'quote_cta',
       // Server-trusted copy stance (codex #3367 PR r2): a customer with no
       // recurring ownership at all (one-time treatment, nothing seeded)
@@ -949,6 +1190,11 @@ async function buildReportCrossSell(service, database, {
         waveguardTier: option.waveguardTier || null,
         confidence: option.confidence || null,
       } : null,
+      // GATE_REPORT_CROSS_SELL_V2 only: short, honest, reason-tied copy for
+      // a findings/season-picked target ("We noted roach activity inside
+      // today..."). Absent for the unchanged ladder pick — the card renders
+      // exactly as it does today.
+      ...(reportOfferReason ? { reason: reportOfferReason } : {}),
     };
     // Server-issued fingerprint over EVERY customer-visible field (pre-push
     // P1): the click path compares this one value instead of enumerating
@@ -1384,5 +1630,8 @@ module.exports = {
     // is the money-bearing contract here — every modifier it drops prices
     // as if the property did not have it.
     loadEstimateSeed, estimateRequiresFieldVerification, qualifyingBaselineMismatch,
+    // GATE_REPORT_CROSS_SELL_V2 test hooks: the findings/season priority
+    // and its one non-estimator target are the decisions this gate adds.
+    detectReportFindingsSignal, buildCockroachFindingsOffer, resolveReportCrossSellV2,
   },
 };

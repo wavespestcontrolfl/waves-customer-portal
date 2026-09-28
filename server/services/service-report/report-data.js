@@ -1867,6 +1867,7 @@ function structuredCustomerConcern(structured = {}) {
 function stripLiveOnlyScheduleFields(data) {
   if (!data || typeof data !== 'object') return data;
   delete data.nextAppointment;
+  delete data.upcomingVisitsCard;
   delete data.termiteNextMonitoringVisit;
   delete data.cockroachNextTreatmentVisit;
   if (data.reportV2?.snapshot?.nextVisit) delete data.reportV2.snapshot.nextVisit;
@@ -5042,6 +5043,147 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     } catch { /* best-effort */ }
   }
 
+  // "Your upcoming visits" card (owner-approved 2026-09-27,
+  // GATE_REPORT_UPCOMING_VISITS): every LIVE report can list ALL of the
+  // customer's upcoming scheduled visits across EVERY program (pest, lawn,
+  // tree & shrub, mosquito, termite, rodent, …) for THIS report's property,
+  // for the next 90 days — cap ~6. Distinct from nextAppointment above,
+  // which stays scoped to the report's OWN service line and is left
+  // unchanged. Live-view-only for the same staleness reason as
+  // nextAppointment (a reschedule after render must not fossilize into a
+  // cached PDF — see stripLiveOnlyScheduleFields). Ships dark: unset or
+  // anything other than exactly 'true' keeps the payload absent. Read
+  // directly at call time (same same-file convention as
+  // GATE_RODENT_REPORT_REFRESH / COCKROACH_REPORT_V2 above). Best-effort:
+  // never blocks the report.
+  let upcomingVisitsCard = null;
+  if (opts.mode === 'live' && process.env.GATE_REPORT_UPCOMING_VISITS === 'true') {
+    try {
+      const { addressKey } = require('../customer-properties');
+      // THIS report's property identity. A linked visit's own stamp /
+      // property_id is the truth (a phone-booked rental's report must
+      // never list another property's visits) — an unlinked/legacy report
+      // falls back to the route's already-COALESCEd mirror address
+      // (service.address_line1/city/zip), the SAME premise every other
+      // live-only field on this report (map, cross-sell) is anchored to.
+      let reportPropertyId = null;
+      let reportStampAddressKey = null;
+      if (service.scheduled_service_id) {
+        const reportSs = await knex('scheduled_services')
+          .where({ id: service.scheduled_service_id })
+          .first('property_id', 'service_address_line1', 'service_address_city', 'service_address_zip')
+          .catch(() => null);
+        if (reportSs) {
+          reportPropertyId = reportSs.property_id || null;
+          if (reportSs.service_address_line1) {
+            reportStampAddressKey = addressKey({
+              address_line1: reportSs.service_address_line1,
+              city: reportSs.service_address_city,
+              zip: reportSs.service_address_zip,
+            }) || null;
+          }
+        }
+      }
+      const mirrorAddressKey = addressKey({
+        address_line1: service.address_line1,
+        city: service.city,
+        zip: service.zip,
+      }) || null;
+      // Address fallback order when the report carries a property_id but no
+      // stamp text (property_id and the stamp are normally written
+      // together — an edge case): the linked property's OWN address, never
+      // the customer mirror, or a report for a secondary property would
+      // key against the primary and match nothing (or worse, match the
+      // primary's OTHER visits).
+      let reportPropertyOwnAddressKey = null;
+
+      if (reportPropertyId || reportStampAddressKey || mirrorAddressKey) {
+        const todayIso = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+        const cutoffIso = new Date(Date.now() + 90 * 24 * 3600 * 1000)
+          .toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+        // Disclosable statuses only (same allow-list as nextAppointment
+        // above): pending/confirmed/en_route/on_site excludes
+        // cancelled/completed/rescheduled by construction. A 60-row buffer
+        // (same pattern as the 200-row nextAppointment window) covers
+        // property filtering before the ~6 cap below.
+        const candidates = await knex('scheduled_services')
+          .where('customer_id', service.customer_id)
+          .andWhere('scheduled_date', '>=', todayIso)
+          .andWhere('scheduled_date', '<=', cutoffIso)
+          .whereIn('status', ['pending', 'confirmed', 'en_route', 'on_site'])
+          .modify((qb) => {
+            if (service.scheduled_service_id) qb.whereNot('id', service.scheduled_service_id);
+          })
+          .orderBy('scheduled_date', 'asc')
+          .orderBy('window_start', 'asc')
+          .limit(60)
+          .select('id', 'service_type', 'scheduled_date', 'window_start', 'property_id',
+            'service_address_line1', 'service_address_city', 'service_address_zip')
+          .catch(() => null);
+
+        if (Array.isArray(candidates) && candidates.length) {
+          // Resolve every property_id in play (the report's own, plus every
+          // candidate's) in one batched read, and each candidate's OWN
+          // premises — preferring its own stamp, then its property_id
+          // link, then — unstamped legacy rows — the same customer-mirror
+          // fallback every reader COALESCEs to.
+          const propertyIds = [...new Set(
+            [reportPropertyId, ...candidates.map((row) => row.property_id)].filter(Boolean),
+          )];
+          let propertyKeyById = new Map();
+          if (propertyIds.length) {
+            const propertyRows = await knex('customer_properties')
+              .whereIn('id', propertyIds)
+              .select('id', 'address_line1', 'address_line2', 'city', 'zip')
+              .catch(() => []);
+            propertyKeyById = new Map(
+              (Array.isArray(propertyRows) ? propertyRows : []).map((row) => [row.id, addressKey(row) || null]),
+            );
+          }
+          if (reportPropertyId) reportPropertyOwnAddressKey = propertyKeyById.get(reportPropertyId) || null;
+          const reportAddressKey = reportStampAddressKey || reportPropertyOwnAddressKey || mirrorAddressKey;
+
+          let mirrorKey = null;
+          if (candidates.some((row) => !row.service_address_line1 && !row.property_id)) {
+            const customerRow = await knex('customers')
+              .where({ id: service.customer_id })
+              .first('address_line1', 'address_line2', 'city', 'zip')
+              .catch(() => null);
+            mirrorKey = customerRow ? (addressKey(customerRow) || null) : null;
+          }
+          const matchesReportProperty = (row) => {
+            if (reportPropertyId && row.property_id) return row.property_id === reportPropertyId;
+            let rowKey = null;
+            if (row.service_address_line1) {
+              rowKey = addressKey({
+                address_line1: row.service_address_line1,
+                city: row.service_address_city,
+                zip: row.service_address_zip,
+              }) || null;
+            } else if (row.property_id) {
+              rowKey = propertyKeyById.get(row.property_id) || null;
+            } else {
+              rowKey = mirrorKey;
+            }
+            return !!rowKey && !!reportAddressKey && rowKey === reportAddressKey;
+          };
+
+          const visits = candidates
+            .filter(matchesReportProperty)
+            .slice(0, 6)
+            .map((row) => ({
+              serviceType: row.service_type || null,
+              scheduledDate: row.scheduled_date instanceof Date
+                ? row.scheduled_date.toISOString().slice(0, 10)
+                : String(row.scheduled_date).slice(0, 10),
+              windowStart: row.window_start || null,
+            }));
+          if (visits.length) upcomingVisitsCard = { visits };
+        }
+      }
+    } catch { /* best-effort */ }
+  }
+
   // Pest Visit Summary narrative (env-gated, additive): reweave the frozen
   // completion recap through the same grounded-narrative pattern the lawn
   // report uses, folding in the Pest Pressure trend, the visit's findings,
@@ -5597,6 +5739,10 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     // the gate dark keeps today's static pins bit-for-bit.
     termiteStationPins: termiteStationPinsFlag({ stationMap, mode: opts.mode }),
     nextAppointment,
+    // "Your upcoming visits" card (GATE_REPORT_UPCOMING_VISITS) — live-view
+    // only, stripped for pdf/static by stripLiveOnlyScheduleFields below,
+    // same as nextAppointment.
+    upcomingVisitsCard,
     termiteNextMonitoringVisit,
     // Present (possibly null) ONLY when the live cockroach pick ran — the
     // attach composer reads presence as "schedule resolved" (pdf/static
