@@ -545,30 +545,125 @@ describe('thinking-always-on Anthropic candidates (Opus 5.5+)', () => {
     expect(assistantMessage.content[1]).toMatchObject({ type: 'tool_use', id: 't1' });
   });
 
-  // withThinkingFirst is the fix for the streamed-round history rewrites
-  // (`_closeStreamedRoundEarly`, `_closeStreamedRoundSentOnly`,
-  // `_noteInterruptForModel`) that synthesize a text block ahead of
-  // whatever they keep from the model's real content — without this, a
-  // thinking block would end up AFTER that synthesized text, which Anthropic
-  // rejects on the next request for a thinking-always-on model. A no-op for
-  // every other model: their `msg.content` never carries a thinking block.
-  describe('withThinkingFirst — the streamed-history reordering fix', () => {
-    const { withThinkingFirst } = require('../services/voice-agent/relay-conversation');
-    const thinking = { type: 'thinking', thinking: 'reasoning', signature: 'sig-1' };
-    const text = { type: 'text', text: 'hello' };
-    const toolUse = { type: 'tool_use', id: 't1', name: 'get_pricing', input: {} };
+  describe('signed thinking replay prefixes', () => {
+    afterEach(() => { delete process.env.GATE_VOICE_RELAY_INTERRUPT_CONTEXT; });
 
-    test('moves a thinking block ahead of a text block synthesized in front of it', () => {
-      expect(withThinkingFirst([text, thinking, toolUse])).toEqual([thinking, text, toolUse]);
+    function thinkingConvo(callSid) {
+      process.env.VOICE_RELAY_SANDBOX_MODEL = OPUS_55;
+      return new RelayConversation({ callSid, from: '+19415551234', send: jest.fn(), sandbox: true });
+    }
+
+    test('keeps legal interleaved response blocks unchanged and appends sent-only guidance to the tool-result turn', async () => {
+      const convo = thinkingConvo('CA-opus55-interleaved');
+      jest.spyOn(convo, '_runStreamSendOrFail').mockReturnValue(null);
+      jest.spyOn(convo, '_executeToolBounded').mockResolvedValue('Price result.');
+      const content = [
+        { type: 'text', text: 'Let me check. That request is complete.' },
+        { type: 'thinking', thinking: 'reasoning', signature: 'sig-interleaved' },
+        { type: 'tool_use', id: 't1', name: 'get_pricing', input: {} },
+      ];
+      const msg = { content, stop_reason: 'tool_use' };
+      const entry = { planned: 'Let me check. ' };
+
+      const { assistantMessage } = convo._closeStreamedRoundSentOnly(
+        { entry }, msg, entry.planned, 'That request is complete.', true
+      );
+
+      expect(assistantMessage.content).toBe(content);
+      expect(assistantMessage.content).toEqual(content);
+      expect(entry.historyMessage).toBe(assistantMessage);
+      await expect(convo._runToolUseRound(msg, {}, { toolMs: 0, toolCount: 0 }, null)).resolves.toEqual({ done: false });
+      expect(convo.messages.at(-1)).toEqual({
+        role: 'user',
+        content: [
+          { type: 'tool_result', tool_use_id: 't1', content: 'Price result.' },
+          expect.objectContaining({
+            type: 'text',
+            text: expect.stringContaining('Only this text'),
+          }),
+        ],
+      });
     });
 
-    test('no-op when there is no thinking block (every non-thinking-always-on model)', () => {
-      const blocks = [text, toolUse];
-      expect(withThinkingFirst(blocks)).toBe(blocks); // same reference — never re-allocated
+    test('an interruption after a thinking tool follow-up does not rewrite either signed assistant response', () => {
+      process.env.GATE_VOICE_RELAY_INTERRUPT_CONTEXT = 'true';
+      const convo = thinkingConvo('CA-opus55-interrupt-followup');
+      const toolContent = [
+        { type: 'text', text: 'Let me check that. ' },
+        { type: 'thinking', thinking: 'tool reasoning', signature: 'sig-tool' },
+        { type: 'tool_use', id: 't1', name: 'get_pricing', input: {} },
+      ];
+      const followupContent = [
+        { type: 'thinking', thinking: 'follow-up reasoning', signature: 'sig-followup' },
+        { type: 'text', text: 'The follow-up answer.' },
+      ];
+      const toolMessage = { role: 'assistant', content: toolContent };
+      const followupMessage = { role: 'assistant', content: followupContent };
+      convo.messages.push(
+        toolMessage,
+        { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: 'Price result.' }] },
+        followupMessage,
+      );
+
+      convo._noteInterruptForModel(
+        { historyMessage: toolMessage, text: 'Let me check [interrupted]', played: 'Let me check', playedUnknown: false },
+        [{ historyMessage: followupMessage, text: '[not played — caller interrupted]' }],
+      );
+
+      expect(toolMessage.content).toBe(toolContent);
+      expect(toolMessage.content).toEqual(toolContent);
+      expect(followupMessage.content).toBe(followupContent);
+      expect(followupMessage.content).toEqual(followupContent);
+      expect(convo._consumeInterruptNote()).toContain('Let me check');
     });
 
-    test('no-op when the thinking block is already first', () => {
-      expect(withThinkingFirst([thinking, text, toolUse])).toEqual([thinking, text, toolUse]);
+    test('an abort before finalMessage resolves still records its unsigned sent prefix', () => {
+      const convo = thinkingConvo('CA-opus55-early-abort');
+      const entry = { planned: 'One moment please. ', interrupted: false };
+
+      const result = convo._closeStreamedRoundEarly({ entry }, null, 'interrupted');
+
+      expect(result).toEqual({ aborted: true });
+      expect(convo.messages).toContainEqual({
+        role: 'assistant',
+        content: [{ type: 'text', text: 'One moment please.' }],
+      });
+    });
+
+    test('a completed response interrupted before any stream entry carries an unsaid note into the next real caller turn', async () => {
+      delete process.env.GATE_VOICE_RELAY_INTERRUPT_CONTEXT;
+      const convo = thinkingConvo('CA-opus55-no-entry-interrupt');
+      const content = [
+        { type: 'thinking', thinking: 'amount reasoning', signature: 'sig-amount' },
+        { type: 'text', text: 'That will be $149.' },
+      ];
+      const result = convo._closeStreamedRoundEarly(
+        { entry: null },
+        { content, stop_reason: 'end_turn' },
+        'interrupted',
+      );
+      expect(result).toEqual({ aborted: true });
+      expect(convo.messages.at(-1).content).toBe(content);
+      expect(convo._pendingInterruptNote).toBeNull();
+
+      mockScriptedMessages.push({
+        content: [{ type: 'text', text: 'Of course — let me repeat that.' }],
+        stop_reason: 'end_turn',
+      });
+      await convo._runLoop('Can you repeat that?');
+
+      const request = mockStreamCalls.at(-1);
+      const callerTurn = request.messages.find((message) => {
+        const text = typeof message.content === 'string'
+          ? message.content
+          : message.content.filter((block) => block.type === 'text').map((block) => block.text).join(' ');
+        return message.role === 'user' && text.includes('Can you repeat that?');
+      });
+      const callerText = typeof callerTurn.content === 'string'
+        ? callerTurn.content
+        : callerTurn.content.filter((block) => block.type === 'text').map((block) => block.text).join(' ');
+      expect(callerText).toContain('None of the text in your preceding reply was sent to the caller');
+      expect(convo._pendingDeliveryNote).toBeNull();
     });
   });
 });

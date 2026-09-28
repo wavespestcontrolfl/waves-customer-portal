@@ -97,7 +97,7 @@ const { loadMatchCatalog, normalizeForMatch } = require(server('services/purchas
 const { parseAmazonDeliveredEmail, AMAZON_DELIVERY_FROM } = require(server('services/purchase-receipts/amazon-delivery-parser'));
 const siteOne = require(server('services/purchase-receipts/siteone-invoices'));
 const { amazonEmailLines, siteOneInvoiceLines, authenticated } = require(server('services/purchase-receipts/sweep'));
-const { decideForTitle, loadAllowedCategories, loadActiveCatalog, siteOneLineFields } = require(server('services/purchase-receipts/inventory-agent'));
+const { decideForTitle, loadActiveCatalog, siteOneLineFields } = require(server('services/purchase-receipts/inventory-agent'));
 const { parseETDateTime, etDateString } = require(server('utils/datetime-et'));
 const { dispatchWithFallback } = require(server('services/llm/call'));
 // The shared pool: the sweep's own SiteOne builders read through it, and
@@ -397,16 +397,16 @@ async function agentProposal(conn, line, found, state, { recordEffects = true } 
   const earlier = state.decided.get(question);
   if (earlier) return `${earlier} (same as an earlier line)`;
   if (state.llmCalls >= state.limit) return '(skipped — --limit reached)';
-  // Categories load once, as the live runner loads them once per run; the
-  // active catalog reloads before every decision, as the live runner
+  // The active catalog reloads before every decision, as the live runner
   // reloads it per line — staff can add a product or alias while this
-  // replay waits on the model.
-  if (!state.allowedCategories) state.allowedCategories = await loadAllowedCategories(conn);
+  // replay waits on the model. (A new product's category comes from the
+  // agent's own fixed canonical list, not a DB read, so there's no
+  // categories-load to do here any more.)
   const catalog = await loadActiveCatalog(conn);
   state.llmCalls += 1;
   const outcome = await decideForTitle(conn, dispatchWithFallback, {
     rawTitle: line.item.title, quantity: line.item.quantity, vendor: line.vendor, siteOneFields,
-  }, { allowedCategories: state.allowedCategories, ...catalog });
+  }, catalog);
   const text = outcomeSummary(outcome);
   // A failed call is never reused: the next identical line asks again.
   if (outcome.llmFailed) {
@@ -556,7 +556,7 @@ async function main() {
     // One paid call per distinct question: `decided` maps each asked
     // question (title, quantity, vendor, invoice evidence) to its answer.
     const state = {
-      limit, tally: {}, handedToAgent: 0, llmCalls: 0, llmFailures: 0, allowedCategories: null,
+      limit, tally: {}, handedToAgent: 0, llmCalls: 0, llmFailures: 0,
       decided: new Map(), recorded: new Map(), invoiceOwner: new Map(), proposals: emptyProposals(), dependsOnEarlier: 0,
     };
     const rows = [];

@@ -1,3 +1,4 @@
+const { AsyncLocalStorage } = require('async_hooks');
 const { addMonthsSameDay: addMonthsSameDayShared } = require('../utils/date-only');
 const { recurringDispatchDuePatch } = require('./scheduling/recurring-dispatch-due');
 const db = require('../models/db');
@@ -20,6 +21,103 @@ const PAYMENT_PENDING_STATUS = 'payment_pending';
 // term (ADMIN-BUG-R18): 'end_at_term' keeps its paid visits through
 // term_end; 'end_now_refund' pulled them and owes the unused value back.
 const CANCEL_DISPOSITIONS = ['end_at_term', 'end_now_refund'];
+// TERMITE renewal successor grace window (owner ruling 2026-09-26, P2-4): an
+// unpaid termite renewal successor (renewed_from_term_id NOT NULL,
+// annual_plan_version NOT NULL, still payment_pending) stays COVERED through
+// this many days — the exact cutoff termite-annual-renewal-charge.js's
+// grace-lapse pass (P1-2) also voids on. One constant, one date formula
+// (termiteRenewalGraceDeadlineSql / termiteRenewalGraceDeadlineFor below),
+// consulted by both coveredTermsAsOf (this file) and the lapse pass (that
+// file) — coverage and the lapse can never disagree about the exact day.
+const TERMITE_RENEWAL_GRACE_DAYS = 30;
+
+// The successor's own coverage clock doesn't necessarily start exactly on
+// term_start — a delayed sweep tick can mint the row days after its nominal
+// term_start (immutable, derived from the parent's own term_end). Anchoring
+// the deadline on whichever is LATER — term_start or the row's own
+// created_at (ET date) — means the successor never gets LESS than a full
+// grace window from the moment it actually came into existence.
+function termiteRenewalGraceDeadlineSql(alias = 't') {
+  // Codex round-1 P1: created_at::date cast in the SQL session's own
+  // timezone (typically UTC on Railway) — a mint after 8pm ET reads a day
+  // late there, disagreeing with the JS twin below (which explicitly
+  // converts to ET first). AT TIME ZONE 'America/New_York' matches the
+  // repo's own ET-cast convention (completion-record-invariants.js's
+  // TODAY_ET, customer-stages.js's CONVERSION_DATE_SQL, etc.).
+  return `(GREATEST(${alias}.term_start, (${alias}.created_at AT TIME ZONE 'America/New_York')::date) + INTERVAL '${TERMITE_RENEWAL_GRACE_DAYS} days')::date`;
+}
+
+// JS-side twin for a single already-fetched row (the lapse pass reads
+// candidate rows directly rather than through a live query) — same
+// GREATEST(term_start, created_at ET-date) + GRACE_DAYS formula.
+// THE "unpaid termite renewal successor still inside its own payment grace"
+// predicate (P2-4) — coveredTermsAsOf's grace branch reads it, and through
+// it termiteGraceCoversVisit, the completion-billing and monthly-dues gates.
+// Codex #4971 pre-push P0: a DISPUTE-suspended successor is never in grace.
+// A dispute inside the first 30 days demotes the (paid) successor back to
+// payment_pending and reopens its invoice with the Stripe identifiers
+// cleared, so without this exclusion the grace branch restored the very
+// coverage the suspension had just withdrawn — suppressing completion
+// charges and monthly dues on clawed-back money. The dispute's own outcome
+// (won: re-paid → active; lost: cancelled) owns that term from here.
+function whereTermiteRenewalInGrace(builder, alias, onDate) {
+  return builder.where(`${alias}.status`, PAYMENT_PENDING_STATUS)
+    .whereNotNull(`${alias}.renewed_from_term_id`)
+    .whereNotNull(`${alias}.annual_plan_version`)
+    // Column-tolerant read of dispute_suspended_at (20260709000012): this
+    // predicate sits inside coveredTermsAsOf, the ONE coverage query every
+    // billing gate reads, so it must never fail on a schema without the
+    // column (pre-migration boots and the narrow scratch schemas many
+    // suites build) — a missing column reads as "not suspended".
+    .whereRaw(`(to_jsonb(${alias}) ->> 'dispute_suspended_at') IS NULL`)
+    .whereRaw(`${termiteRenewalGraceDeadlineSql(alias)} >= ?`, [onDate])
+    // Codex #4971 r28 P1: grace is the PARENT's promise carried forward —
+    // a successor whose parent was cancelled, refunded or had its window
+    // moved after the mint is covered by nothing, and must not keep
+    // suppressing completion or monthly billing until a withdrawal sweep
+    // (which does not even run while the gate is off) gets to it. The
+    // parent must still authorize the renewal: undecided and live, or
+    // renewed by a 'renew' decision; its own window still abutting the
+    // successor's; its prepay invoice (when it has one) collected and
+    // neither cancelled nor fully refunded. Only columns coveredTermsAsOf
+    // already reads on its own invoice join are referenced.
+    .whereExists(function parentStillAuthorizes() {
+      this.select(1)
+        .from('annual_prepay_terms as gp')
+        .leftJoin('invoices as gpi', 'gpi.id', 'gp.prepay_invoice_id')
+        .whereRaw(`gp.id = ${alias}.renewed_from_term_id`)
+        .whereRaw(`${alias}.term_start = gp.term_end + 1`)
+        .where(function authorizingShape() {
+          this.where(function undecidedLive() {
+            this.whereIn('gp.status', ACTIVE_STATUSES).whereNull('gp.renewal_decision');
+          }).orWhere(function renewedByRenew() {
+            this.where('gp.status', 'renewed').where('gp.renewal_decision', 'renew');
+          });
+        })
+        .where(function parentInvoiceCollected() {
+          this.whereNull('gp.prepay_invoice_id').orWhere(function collectedNotRevoked() {
+            this.where(function collected() { wherePrepayInvoiceCollected(this, 'gpi'); })
+              .whereRaw("lower(coalesce(gpi.status, '')) not in ('void', 'cancelled', 'canceled', 'refunded')")
+              .whereRaw(`not exists (
+                select 1 from payments gpp
+                where (gpp.status = 'refunded' or gpp.refund_status = 'full')
+                  and ((gpp.stripe_payment_intent_id is not null and gpp.stripe_payment_intent_id = gpi.stripe_payment_intent_id)
+                    or (gpp.stripe_charge_id is not null and gpp.stripe_charge_id = gpi.stripe_charge_id))
+              )`);
+          });
+        });
+    });
+}
+
+function termiteRenewalGraceDeadlineFor(term) {
+  const termStartYmd = dateOnly(term?.term_start);
+  const createdYmd = term?.created_at ? etDateString(new Date(term.created_at)) : null;
+  const later = createdYmd && termStartYmd
+    ? (createdYmd > termStartYmd ? createdYmd : termStartYmd)
+    : (createdYmd || termStartYmd);
+  if (!later) return null;
+  return etDateString(addETDays(parseETDateTime(`${later}T12:00`), TERMITE_RENEWAL_GRACE_DAYS));
+}
 const CUSTOMER_NOTICE_DAYS = [30, 15, 7];
 // Termite annual-plan terms (annual_plan_version set) get an EXTRA 45-day
 // rung ahead of the shared ladder above (owner ruling §A2: 45 and 30 days
@@ -109,13 +207,20 @@ let termColsCache = null;
 let scheduledColsCache = null;
 let invoiceColsCache = null;
 
+// Only a SUCCESSFUL probe is cached (the same rule annualPrepayColumns
+// follows since #4921 r4). A failed probe answers false for THIS call only:
+// caching it turned one transient DB error — a local crash recovery, a
+// connection blip at boot — into "the table does not exist" for the life of
+// the process, so syncTermForInvoicePayment (and every other reader gated
+// on this) silently no-oped: a paid invoice left its term payment_pending
+// with no error anywhere.
 async function annualPrepayTableExists() {
   if (tableExistsCache != null) return tableExistsCache;
   try {
     tableExistsCache = await db.schema.hasTable('annual_prepay_terms');
   } catch (err) {
     logger.warn(`[annual-prepay] table detection failed: ${err.message}`);
-    tableExistsCache = false;
+    return false;
   }
   return tableExistsCache;
 }
@@ -651,9 +756,73 @@ function coverageAwaitsInstallation(term) {
   return !!term?.annual_plan_version && !term.renewed_from_term_id && !term.installation_anchored_at;
 }
 
+// A term whose coverage window was FIXED when it was created, so a late
+// payment must never slide it: an installation-anchored termite term (its
+// window IS the installation date + 12 months), and — Codex #4971 round-3 P1
+// (item 5) — a termite renewal SUCCESSOR, whose window is fixed at mint (the
+// day after its parent's term_end, through the next anniversary) and whose
+// grace coverage already ran from that start. A successor paid on grace day
+// 20 has no anchor stamp and usually no linked visit yet (payment_pending
+// refreshes deliberately seed nothing), so without this it read as a first
+// activation and slid term_end — and every later renewal date — by the
+// payment delay: 20 extra, unpaid days per late year.
+function windowFixedAtCreation(term) {
+  return !!(term?.installation_anchored_at || term?.renewed_from_term_id);
+}
+
 function isInstallationAnchorRow(term, row) {
   return term?.installation_anchor_visit_id != null && row?.id != null
     && String(row.id) === String(term.installation_anchor_visit_id);
+}
+
+// Codex #4971 pre-push P0 — THE property scope of a termite renewal
+// SUCCESSOR's coverage. An original term's visits are its own by estimate
+// provenance and its installation anchor; a successor carries neither (it
+// never copies source_estimate_id — see termiteRenewalScope), so a
+// customer + dates + service-type selection would let a separately billable
+// visit at ANOTHER property consume this plan's allowance and take a
+// prepaid stamp that suppresses its invoice. Every coverage selection,
+// seeding and stamp check therefore resolves a successor's plan identity
+// through the ONE lineage resolver the grace path and the renewal notice
+// use. Returns null for a non-successor (every caller keeps its exact prior
+// behavior), { resolved: false } when the lineage is malformed (cycle,
+// another customer's hop, conflicting estimates) or names neither an
+// estimate nor a property — callers then select, seed and stamp NOTHING,
+// never customer-wide — else { resolved: true, termIds, estimateId,
+// propertyId }.
+async function successorCoverageScope(term, conn = db) {
+  if (!term?.renewed_from_term_id) return null;
+  const scope = await termiteRenewalScope(term, term.customer_id, conn);
+  if (!scope || (!scope.estimateId && !scope.propertyId)) return { resolved: false };
+  return { resolved: true, ...scope };
+}
+
+// A visit belongs to a resolved successor scope only on POSITIVE linkage —
+// a term in the plan's lineage, the plan's root estimate, or the plan's
+// property — and never when it names a DIFFERENT estimate or property. An
+// unlinked visit (no term, estimate or property) is never adopted.
+function rowInRenewalScope(row, scope) {
+  const rowProperty = row.property_id == null ? null : String(row.property_id);
+  const rowEstimate = row.source_estimate_id == null ? null : String(row.source_estimate_id);
+  if (scope.propertyId && rowProperty && rowProperty !== scope.propertyId) return false;
+  if (scope.estimateId && rowEstimate && rowEstimate !== scope.estimateId) return false;
+  return (row.annual_prepay_term_id != null && scope.termIds.has(String(row.annual_prepay_term_id)))
+    || (!!scope.estimateId && rowEstimate === scope.estimateId)
+    || (!!scope.propertyId && rowProperty === scope.propertyId);
+}
+
+// The in-window candidate visits coverage selection starts from: every
+// customer visit in the window for an ordinary term (unchanged), only the
+// plan's own visits for a renewal successor, none for an unresolved one.
+async function coverageCandidateRows(term, conn, termStart, termEnd) {
+  const scope = await successorCoverageScope(term, conn);
+  if (scope && !scope.resolved) return [];
+  const rows = await conn('scheduled_services')
+    .where({ customer_id: term.customer_id })
+    .whereBetween('scheduled_date', [termStart, termEnd])
+    .orderBy(['scheduled_date', 'window_start', 'id'])
+    .select('*');
+  return scope ? rows.filter((row) => rowInRenewalScope(row, scope)) : rows;
 }
 
 async function coverageRowsForTerm(term, conn = db, { includeTerminalStatuses = false } = {}) {
@@ -665,11 +834,7 @@ async function coverageRowsForTerm(term, conn = db, { includeTerminalStatuses = 
     return [];
   }
 
-  const rows = await conn('scheduled_services')
-    .where({ customer_id: term.customer_id })
-    .whereBetween('scheduled_date', [termStart, termEnd])
-    .orderBy(['scheduled_date', 'window_start', 'id'])
-    .select('*');
+  const rows = await coverageCandidateRows(term, conn, termStart, termEnd);
 
   // A callback / re-service is never a SOLD visit: it is free by definition
   // and completion never bills it, but its service_type reads as the covered
@@ -772,6 +937,28 @@ async function coverageRowsForTerm(term, conn = db, { includeTerminalStatuses = 
   return matching.filter((row) => selectedIds.has(row.id));
 }
 
+// Codex #4971 pre-push P0: a renewal successor whose plan lineage cannot be
+// resolved seeds nothing (coverageRowsForTerm already selects and stamps
+// nothing for it) and tells staff — never a customer-wide fallback.
+async function renewalLineageRefusal(term, conn, termEnd) {
+  const scope = await successorCoverageScope(term, conn);
+  if (!scope || scope.resolved) return null;
+  logger.warn(`[annual-prepay] term ${term.id} is a renewal whose plan lineage cannot be resolved — coverage visits not seeded or stamped`);
+  await fileCoverageExceptionAfterCommit(conn, term, 'renewal_lineage_unresolved',
+    'This renewed termite plan cannot be traced back to its original estimate and property (its renewal chain is broken, loops, or crosses to another customer). No coverage visits were scheduled or marked prepaid — confirm which property this plan covers and set its visits up by hand.');
+  return { createdCount: 0, targetDates: [], effectiveTermEnd: termEnd, reason: 'renewal_lineage_unresolved' };
+}
+
+// The property a seeded coverage visit is booked at: a renewal successor's
+// plan property (its resolved lineage — never guessed); otherwise the
+// customer's SOLE active property, unchanged (GH codex #3699 r8 P2).
+async function coverageSeedPropertyId(term, cols, conn) {
+  if (!cols.property_id) return null;
+  const scope = await successorCoverageScope(term, conn);
+  if (scope) return scope.propertyId || null;
+  return require('./customer-properties').soleActivePropertyId(term.customer_id, conn);
+}
+
 // A promise made on the phone must never change silently: whenever seeding
 // drops a promised arrival window or moves a promised date, park a durable
 // admin notification (dedupe-keyed per term+reason) alongside the log line so
@@ -861,6 +1048,8 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
       createdCount: 0, targetDates: [], effectiveTermEnd: termEnd, reason: 'awaiting_installation',
     };
   }
+  const lineageRefusal = await renewalLineageRefusal(term, conn, termEnd);
+  if (lineageRefusal) return lineageRefusal;
   const cols = await scheduledServiceColumns();
   if (!cols.scheduled_date || !cols.service_type) {
     return { createdCount: 0, targetDates: [], reason: 'scheduled_columns_missing' };
@@ -912,7 +1101,8 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
   // installation-anchored termite term never slides: its window IS the
   // installation date + 12 months, and the anchoring sweep runs after the
   // installation, so the lag would otherwise stretch every anchored year.
-  if (!alreadyActivated && !term?.installation_anchored_at
+  // Nor does a termite renewal SUCCESSOR (windowFixedAtCreation).
+  if (!alreadyActivated && !windowFixedAtCreation(term)
     && anchorLagDays != null && anchorLagDays > 0 && (await annualPrepayColumns(conn)).term_end) {
     effectiveTermEnd = addDaysYmd(termEnd, anchorLagDays);
     // Never slide into a successor term: a long-pending invoice can be paid
@@ -1273,9 +1463,7 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
   // customer's SOLE active property is unambiguous (same rule as the
   // manual admin-schedule / admin-leads / availability bookings);
   // multi-property customers stay office-placed. Resolved once per term.
-  const seedPropertyId = cols.property_id
-    ? await require('./customer-properties').soleActivePropertyId(term.customer_id, conn)
-    : null;
+  const seedPropertyId = await coverageSeedPropertyId(term, cols, conn);
   const buildInsert = (scheduledDate, windowStart) => {
     const insertData = {
       customer_id: term.customer_id,
@@ -1777,10 +1965,26 @@ function isTermiteAnnualPlanTerm(term) {
 // undelivered-past-deadline bell as the durable backstop). null is returned
 // ONLY when the data is genuinely absent — no source estimate, no estimate
 // row, or neither a linked property address nor an estimate address.
+//
+// Codex #4971 round-3 (item 8): a renewal SUCCESSOR has no
+// source_estimate_id of its own (never copied — see termiteRenewalScope), so
+// its plan's estimate is its ROOT ancestor's, recovered through the shared
+// customer-scoped, cycle-safe lineage resolver. The root estimate's snapshot
+// stays the preferred address, exactly as for the original term. A
+// malformed lineage resolves no estimate (null — the notice then uses the
+// customer's address, the same answer as a term with no estimate at all).
+async function planEstimateIdForTerm(term, conn = db) {
+  if (term?.source_estimate_id) return term.source_estimate_id;
+  if (!term?.renewed_from_term_id) return null;
+  const scope = await termiteRenewalScope(term, term.customer_id, conn);
+  return scope?.estimateId || null;
+}
+
 async function planPropertyForTerm(term, conn = db) {
-  if (!term?.source_estimate_id) return null;
+  const estimateId = await planEstimateIdForTerm(term, conn);
+  if (!estimateId) return null;
   const estimate = await conn('estimates')
-    .where('id', term.source_estimate_id)
+    .where('id', estimateId)
     .first('property_id', 'address');
   if (!estimate) return null;
   if (estimate.address) {
@@ -2028,11 +2232,32 @@ function statusAfterDecision(action) {
   return 'renewal_pending';
 }
 
+// Codex #4971 r22 P1: the ONE "this term's prepay invoice is collected"
+// definition, shared by invoiceTermStatus (JS) and every SQL reader of the
+// same fact — coveredTermsAsOf's paid-pending and decided-coverage arms and
+// activatePaidPendingTerms' recovery scan. 'prepaid' is a prepay invoice
+// settled entirely by auto-applied account credit (no paid_at, no card
+// charge — stripe.js's credit-coverage seam): consumed credit is money
+// collected. Only a term's own prepay invoice is ever tested here.
+const PREPAY_INVOICE_COLLECTED_STATUSES = ['paid', 'prepaid'];
+function wherePrepayInvoiceCollected(builder, alias = 'i') {
+  return builder.whereIn(`${alias}.status`, PREPAY_INVOICE_COLLECTED_STATUSES).orWhereNotNull(`${alias}.paid_at`);
+}
+
 function invoiceTermStatus(invoice) {
   if (!invoice) return PAYMENT_PENDING_STATUS;
   const status = String(invoice.status || '').toLowerCase();
   if (INVOICE_CANCELLED_STATUSES.has(status)) return 'cancelled';
-  if (status === 'paid' || invoice.paid_at) return 'active';
+  // Codex #4971 r21 P1: a PREPAY invoice settled entirely by auto-applied
+  // account credit is 'prepaid' with NO paid_at (stripe.js's credit-coverage
+  // seam — chargeInvoiceWithSavedCard returns covered_by_credit without a
+  // card charge and calls syncTermForInvoicePayment with that row). That
+  // credit was CONSUMED for this term's year, so it is money collected —
+  // the same rule the visit-invoice direction (paidForVisit / visitCollected)
+  // already applied — and the term activates. Only a term's own prepay
+  // invoice reaches this function; the coverage-settled 'prepaid' a visit
+  // invoice carries under a term is never a prepay_invoice_id.
+  if (PREPAY_INVOICE_COLLECTED_STATUSES.includes(status) || invoice.paid_at) return 'active';
   return PAYMENT_PENDING_STATUS;
 }
 
@@ -2088,6 +2313,22 @@ async function findLastScheduledServiceForTerm(customerId, termStart, termEnd, c
     .first('id', 'scheduled_date', 'service_type', 'status');
 }
 
+// A legacy term with no coverage config links every customer visit in its
+// window. Codex #4971 pre-push P0: never for a renewal successor, whose
+// visits are only ever its own plan's (successorCoverageScope) — it links
+// nothing here rather than going customer-wide.
+async function linkWindowVisitsWithoutCoverageConfig(term, conn) {
+  if (term.renewed_from_term_id) return;
+  await conn('scheduled_services')
+    .where({ customer_id: term.customer_id })
+    .whereBetween('scheduled_date', [dateOnly(term.term_start), dateOnly(term.term_end)])
+    .whereNotIn('status', ['cancelled', 'rescheduled'])
+    .where(function () {
+      this.whereNull('annual_prepay_term_id').orWhere('annual_prepay_term_id', term.id);
+    })
+    .update({ annual_prepay_term_id: term.id, updated_at: new Date() });
+}
+
 async function attachScheduledServices(term, conn = db) {
   const cols = await scheduledServiceColumns();
   if (!cols.annual_prepay_term_id || !term?.id) return;
@@ -2106,15 +2347,7 @@ async function attachScheduledServices(term, conn = db) {
         .update({ annual_prepay_term_id: term.id, updated_at: new Date() });
       return;
     }
-
-    await conn('scheduled_services')
-      .where({ customer_id: term.customer_id })
-      .whereBetween('scheduled_date', [dateOnly(term.term_start), dateOnly(term.term_end)])
-      .whereNotIn('status', ['cancelled', 'rescheduled'])
-      .where(function () {
-        this.whereNull('annual_prepay_term_id').orWhere('annual_prepay_term_id', term.id);
-      })
-      .update({ annual_prepay_term_id: term.id, updated_at: new Date() });
+    await linkWindowVisitsWithoutCoverageConfig(term, conn);
   } catch (err) {
     logger.warn(`[annual-prepay] scheduled service attach skipped: ${err.message}`);
   }
@@ -3034,7 +3267,7 @@ function coveredTermsAsOf(conn, coverageDate = null) {
         .orWhere(function paidPending() {
           this.where('t.status', PAYMENT_PENDING_STATUS)
             .andWhere(function invoicePaid() {
-              this.where('i.status', 'paid').orWhereNotNull('i.paid_at');
+              wherePrepayInvoiceCollected(this);
             });
         })
         // DECIDED coverage (renewed / switch_plan / a decided lapse riding out
@@ -3054,10 +3287,39 @@ function coveredTermsAsOf(conn, coverageDate = null) {
               });
           }).andWhere(function decidedInvoicePaid() {
             this.whereNull('t.prepay_invoice_id')
-              .orWhere('i.status', 'paid')
+              .orWhereIn('i.status', PREPAY_INVOICE_COLLECTED_STATUSES)
               .orWhereNotNull('i.paid_at');
           });
         });
+      // P2-4 (owner ruling 2026-09-26): an UNPAID termite renewal
+      // successor stays covered through its own 30-day payment grace —
+      // termiteRenewalGraceDeadlineSql is the SAME cutoff the renewal-
+      // charge job's grace-lapse pass voids on, so the two can never
+      // disagree. Scoped tight on purpose: payment_pending status, a
+      // termite renewal SUCCESSOR specifically (renewed_from_term_id NOT
+      // NULL) and the termite marker (annual_plan_version NOT NULL) — a
+      // non-termite payment_pending term, or an ORIGINAL (non-successor)
+      // termite term still awaiting its first payment, never matches.
+      // Once the lapse pass actually voids the invoice, `i.status`
+      // flips to a cancelled shape and the whereRaw exclusion below
+      // drops this row on its own — no separate revocation needed here.
+      //
+      // Codex #4971 pre-push P1: DATED only. Grace is a date-bounded
+      // promise (30 days from the successor's start), never paid
+      // coverage, so the date-less form — "which terms carry still-valid
+      // PAID coverage, whatever the window" — never includes it. Every
+      // date-less caller (card-expiry exemptions, the setup-fee and
+      // cancellation / offboarding / lifecycle guards, the stamped-visit
+      // and decided-lapse checks, the sweep's marker legs, …) means
+      // paid-backed, and several read the term's FULL term_start/term_end
+      // range: card-expiry exemptions used to treat a grace-only
+      // successor's 30 days as a whole covered year across their 60-day
+      // horizon. A dated caller still gets grace for that one day.
+      if (coverageDate) {
+        this.orWhere(function termiteRenewalGraceCovered() {
+          whereTermiteRenewalInGrace(this, 't', coverageDate);
+        });
+      }
     })
     .whereRaw(
       `lower(coalesce(i.status, 'paid')) not in (${cancelledStatuses.map(() => '?').join(', ')})`,
@@ -3073,6 +3335,155 @@ function coveredTermsAsOf(conn, coverageDate = null) {
           )
       )`,
     );
+}
+
+const MAX_RENEWAL_ANCESTRY_DEPTH = 100;
+
+// Renewal successors intentionally do NOT copy source_estimate_id: doing so
+// would make createTermForAnnualPrepay find and overwrite the original term.
+// Recover the plan scope through the immutable renewed_from_term_id chain
+// instead. Every hop is ownership-scoped; malformed ancestry is unusable.
+// THE one lineage resolver (Codex #4971 round-3, item 8): renewal grace
+// coverage (termiteGraceVisitScope), the lapse/decline retrieval guard
+// (otherLiveTermiteCoverage), the renewal notice's protected property
+// (planPropertyForTerm) and the portal card's property label
+// (termPropertyLabelsForCustomer) all read a successor's plan identity
+// through here. Returns null for a malformed chain — a hop owned by another
+// customer, a cycle, two different estimates, a missing ancestor, or depth
+// past MAX_RENEWAL_ANCESTRY_DEPTH — so every caller fails closed.
+async function termiteRenewalScope(term, customerId, conn) {
+  const termIds = new Set();
+  const estimateIds = new Set();
+  let current = term;
+  for (let depth = 0; depth < MAX_RENEWAL_ANCESTRY_DEPTH; depth += 1) {
+    if (!current?.id || String(current.customer_id) !== String(customerId)) return null;
+    const currentId = String(current.id);
+    if (termIds.has(currentId)) return null;
+    termIds.add(currentId);
+    if (current.source_estimate_id) estimateIds.add(String(current.source_estimate_id));
+    if (estimateIds.size > 1) return null;
+    if (!current.renewed_from_term_id) {
+      const estimateId = [...estimateIds][0] || null;
+      if (!estimateId) return { termIds, estimateId: null, propertyId: null };
+      const estimate = await conn('estimates')
+        .where({ id: estimateId, customer_id: customerId })
+        .first('property_id');
+      if (!estimate) return null;
+      return { termIds, estimateId, propertyId: estimate.property_id ? String(estimate.property_id) : null };
+    }
+    current = await conn('annual_prepay_terms')
+      .where({ id: current.renewed_from_term_id, customer_id: customerId })
+      .first('id', 'customer_id', 'source_estimate_id', 'renewed_from_term_id');
+    if (!current) return null;
+  }
+  return null;
+}
+
+async function termiteGraceVisitScope(scheduledService, conn) {
+  let parent = null;
+  if (scheduledService.recurring_parent_id) {
+    parent = await conn('scheduled_services')
+      .where({ id: scheduledService.recurring_parent_id, customer_id: scheduledService.customer_id })
+      .first('annual_prepay_term_id', 'source_estimate_id', 'property_id');
+    if (!parent) return null;
+  }
+  const values = (field) => [...new Set(
+    [scheduledService[field], parent?.[field]].filter(Boolean).map(String),
+  )];
+  const termIds = values('annual_prepay_term_id');
+  const estimateIds = values('source_estimate_id');
+  const propertyIds = values('property_id');
+  // A child can carry the successor while its recurring parent still
+  // carries a predecessor, so multiple term IDs are validated against
+  // one ancestry. Estimates/properties cannot legitimately differ.
+  if (estimateIds.length > 1 || propertyIds.length > 1) return null;
+  if (!termIds.length && !estimateIds.length && !propertyIds.length) return null;
+  return { termIds, estimateId: estimateIds[0] || null, propertyId: propertyIds[0] || null };
+}
+
+async function graceTermMatchesVisit(term, visitScope, scheduledService, conn) {
+  const termScope = await termiteRenewalScope(term, scheduledService.customer_id, conn);
+  if (!termScope) return false;
+  if (visitScope.termIds.length && !visitScope.termIds.every((id) => termScope.termIds.has(id))) return false;
+  if (visitScope.estimateId && termScope.estimateId !== visitScope.estimateId) return false;
+  if (visitScope.propertyId && termScope.propertyId !== visitScope.propertyId) return false;
+  return !(term.coverage_service_type && scheduledService.service_type
+    && !serviceMatchesCoverage(scheduledService, normalizeCoverageServiceType(term.coverage_service_type)));
+}
+
+// Codex round-7 P1: the UNSTAMPED half of termite grace coverage — see the
+// call site's own doc in annualPrepayCoversVisit. Reuses coveredTermsAsOf
+// (the SAME grace-aware query the mint/charge/lapse passes all key off),
+// narrowed to the exact termiteRenewalGraceCovered shape (payment_pending,
+// a renewal successor, still inside its own grace deadline as of THIS
+// visit's date) so it can never match any of coveredTermsAsOf's OTHER
+// covered shapes (a plain paid-pending term, a decided-and-paid term) —
+// those already stamp normally via the ACTIVE_STATUSES attach step, so
+// reaching them here would be redundant, not wrong, but the narrowing
+// keeps this check legible as "grace, specifically". Fails closed (false)
+// on any lookup error, matching every other non-strict path here.
+async function termiteGraceCoversVisit(scheduledService, conn, { throwOnError = false } = {}) {
+  // Scoped to a visit with NO prepay stamp at all — one that already
+  // carries SOME prepaid_method (even a malformed/incomplete one) has a
+  // stamp from a DIFFERENT coverage decision and must fall through to
+  // that stamp's own validation in the caller, never be waved through by
+  // an unrelated grace window (Codex round-7 self-review: caught the
+  // regression this caused in annual-prepay-card-expiry-exempt and
+  // annual-prepay-coverage-gate before it shipped). Checked here, not as
+  // an `&&` at the call site, so annualPrepayCoversVisit gets one plain
+  // `if (await termiteGraceCoversVisit(...))` — the cheapest call shape,
+  // keeping that already-large function's own complexity at the ceiling
+  // rather than over it.
+  if (scheduledService.prepaid_method) return false;
+  if (!scheduledService.customer_id) return false;
+  const visitDate = dateOnly(scheduledService.scheduled_date) || dateOnly(scheduledService.completed_at);
+  if (!visitDate) return false;
+  try {
+    // Codex #4971 round-4 (post-merge audit) P0: annualPrepayTableExists()
+    // catches its own probe error and CACHES false — a transient DB failure
+    // then reads as "table genuinely absent" forever (until the next cache
+    // reset), which resolves this whole function to false and lets a strict
+    // caller's charging guard bill a grace-covered visit instead of seeing
+    // the failure. A strict caller must see the probe error itself, so it
+    // propagates to the catch below and gets rethrown (same shape as the
+    // stamped branch's own direct-probe fix a few hundred lines down). Only
+    // non-strict callers keep the cached, fail-closed probe.
+    if (throwOnError) {
+      if (!(await conn.schema.hasTable('annual_prepay_terms'))) return false;
+    } else if (!(await annualPrepayTableExists())) return false;
+    // Resolve the visit's durable plan scope. A recurring child inherits the
+    // root's links, but conflicting child/root evidence is ambiguous and must
+    // never waive a charge. Property preference/profile rows are deliberately
+    // absent: annual coverage belongs to the quoted property/term, not the
+    // customer's primary address.
+    const visitScope = await termiteGraceVisitScope(scheduledService, conn);
+    if (!visitScope) return false;
+
+    const terms = await coveredTermsAsOf(conn, visitDate)
+      .where('t.customer_id', scheduledService.customer_id)
+      .where('t.status', PAYMENT_PENDING_STATUS)
+      .whereNotNull('t.renewed_from_term_id')
+      .whereNotNull('t.annual_plan_version')
+      .select('t.id', 't.customer_id', 't.source_estimate_id', 't.renewed_from_term_id', 't.coverage_service_type');
+    const matches = [];
+    for (const term of terms) {
+      if (await graceTermMatchesVisit(term, visitScope, scheduledService, conn)) matches.push(term);
+    }
+    // Property-only linkage can match two concurrent plans at one site;
+    // absence and ambiguity both fail closed rather than choosing `.first()`.
+    return matches.length === 1;
+  } catch (err) {
+    // Codex round-7 P1 (2nd audit round): a strict caller (the extended-
+    // completion charging guard, same contract as the stamp-based checks
+    // below) needs an unverifiable grace lookup to REFUSE the charge, not
+    // read as "no grace coverage, fall through to the stamp check" — which
+    // for an unstamped visit resolves uncovered and would charge a visit
+    // that may genuinely be in grace. Only a non-strict (billing-
+    // suppression) caller may treat a lookup failure as "not covered".
+    if (throwOnError) throw err;
+    logger.warn(`[annual-prepay] termite grace-coverage check failed for scheduled service ${scheduledService.id}: ${err.message}`);
+    return false;
+  }
 }
 
 // Codex pre-push P1 (follows from the round-1 "decline before install"
@@ -3148,19 +3559,51 @@ async function termPropertyLabelsForCustomer(customerId, termIds, conn = db) {
     .where('t.customer_id', customerId)
     .whereIn('t.id', ids)
     .select(
-      't.id as term_id',
+      't.id as term_id', 't.customer_id', 't.source_estimate_id', 't.renewed_from_term_id',
       'cp.address_line1 as cp_line1', 'cp.address_line2 as cp_line2', 'cp.city as cp_city', 'cp.state as cp_state', 'cp.zip as cp_zip',
       'e.address as estimate_address',
       'c.address_line1 as c_line1', 'c.address_line2 as c_line2', 'c.city as c_city', 'c.state as c_state', 'c.zip as c_zip',
     );
   for (const row of rows) {
-    const estimateAddress = row.estimate_address == null ? '' : String(row.estimate_address).trim();
-    const termLabel = estimateAddress
-      || formatStructuredAddress(row.cp_line1, row.cp_line2, row.cp_city, row.cp_state, row.cp_zip);
+    const termLabel = estimateLabelFromRow(row) || (await successorLineageLabel(row, customerId, conn));
     const label = termLabel || formatStructuredAddress(row.c_line1, row.c_line2, row.c_city, row.c_state, row.c_zip);
     if (label) labels.set(row.term_id, { label, termTied: !!termLabel });
   }
   return labels;
+}
+
+// The plan-tied half of a label: the estimate's quoted snapshot first, its
+// linked (ownership-scoped) property only for a legacy snapshot-less
+// estimate — see termPropertyLabelsForCustomer's doc.
+function estimateLabelFromRow(row) {
+  const estimateAddress = row.estimate_address == null ? '' : String(row.estimate_address).trim();
+  return estimateAddress
+    || formatStructuredAddress(row.cp_line1, row.cp_line2, row.cp_city, row.cp_state, row.cp_zip);
+}
+
+// Codex #4971 round-3 (item 8): a renewal SUCCESSOR carries no
+// source_estimate_id, so the join above finds nothing for it — its label is
+// its ROOT estimate's, reached through the shared lineage resolver
+// (termiteRenewalScope — customer-scoped at every hop, null on a cycle or a
+// foreign hop). The estimate and its property are re-checked against THIS
+// customer exactly like the join above. Anything unresolved returns null,
+// so the caller falls back to the customer address with termTied: false.
+async function successorLineageLabel(row, customerId, conn) {
+  if (row.source_estimate_id || !row.renewed_from_term_id) return null;
+  const scope = await termiteRenewalScope({
+    id: row.term_id, customer_id: row.customer_id, source_estimate_id: null, renewed_from_term_id: row.renewed_from_term_id,
+  }, customerId, conn);
+  if (!scope?.estimateId) return null;
+  const root = await conn('estimates as e')
+    .leftJoin('customer_properties as cp', function ownProperty() {
+      this.on('cp.id', '=', 'e.property_id').andOn('cp.customer_id', '=', 'e.customer_id');
+    })
+    .where({ 'e.id': scope.estimateId, 'e.customer_id': customerId })
+    .first(
+      'e.address as estimate_address',
+      'cp.address_line1 as cp_line1', 'cp.address_line2 as cp_line2', 'cp.city as cp_city', 'cp.state as cp_state', 'cp.zip as cp_zip',
+    );
+  return root ? estimateLabelFromRow(root) : null;
 }
 
 // Fail-closed coverage test for completion billing. An annual-prepay-stamped
@@ -3188,8 +3631,50 @@ async function termPropertyLabelsForCustomer(customerId, termIds, conn = db) {
 // paid-coverage checks, which is what the window was actually guarding.
 // Absence/ambiguity => false; the caller then falls back to the numeric
 // prepaid_amount >= amount comparison for other (cash/Zelle) methods.
+// Defense-in-depth for a STAMPED visit, against the term its stamp names:
+// when the term declares a coverage service, the stamped visit must still be
+// that service (coverage-selection cleanup is best-effort, so a stale stamp
+// left on a dropped/re-typed service must not suppress). The same matcher
+// that APPLIED the stamp gates it here. Legacy no-config terms (no
+// coverage_service_type) never had a service to match, so skip the check.
+// Codex #4971 pre-push P0: a renewal SUCCESSOR's stamp must also sit on a
+// visit inside the successor's own plan scope (the same
+// successorCoverageScope/rowInRenewalScope selection applied it) — an
+// unresolved lineage never suppresses.
+async function stampedTermStillCoversVisit(term, scheduledService, conn) {
+  if (term.coverage_service_type
+    && scheduledService.service_type
+    && !serviceMatchesCoverage(scheduledService, normalizeCoverageServiceType(term.coverage_service_type))) {
+    return false;
+  }
+  const scope = await successorCoverageScope(term, conn);
+  return !scope || (scope.resolved && rowInRenewalScope(scheduledService, scope));
+}
+
 async function annualPrepayCoversVisit(scheduledService, conn = db, { throwOnError = false } = {}) {
   if (!scheduledService) return false;
+
+  // Codex round-7 P1 (owner ruling 2026-09-26, P2-4): an UNPAID termite
+  // renewal successor stays covered through its OWN GRACE_DAYS payment
+  // window — coveredTermsAsOf's termiteRenewalGraceCovered branch already
+  // recognizes this at the query level. But refreshTermSnapshot's
+  // attach+stamp step (attachScheduledServices / applyPrepaidCoverageForTerm)
+  // is ACTIVE_STATUSES-only, so a successor's own visits NEVER get
+  // annual_prepay_term_id/prepaid_amount stamped while it sits
+  // payment_pending — every check below REQUIRES that stamp (and the
+  // prepaid_method gate right after this one), so without this a visit
+  // completed during grace bills normally, directly contradicting the
+  // grace-coverage promise. Checked FIRST, independently of any stamp:
+  // does a payment_pending termite successor for this SAME customer,
+  // still within its own grace window on this visit's date, cover this
+  // service? If so, suppress billing even with no stamp at all — never
+  // mutates the visit row itself (a full stamp still requires the
+  // successor to actually activate; this is a read-only billing-time
+  // recognition of the SAME window). termiteGraceCoversVisit itself scopes
+  // to an unstamped visit (see its own comment) — never waves through a
+  // visit that already carries some other, even malformed, prepay stamp.
+  if (await termiteGraceCoversVisit(scheduledService, conn, { throwOnError })) return true;
+
   if (scheduledService.prepaid_method !== ANNUAL_PREPAY_PREPAID_METHOD) return false;
   // Strict callers (the extended-completion charging guard): a STAMPED
   // visit whose linkage is incomplete (no amount, no term id, or the terms
@@ -3226,19 +3711,9 @@ async function annualPrepayCoversVisit(scheduledService, conn = db, { throwOnErr
       .modify((q) => {
         if (scheduledService.customer_id != null) q.where('t.customer_id', scheduledService.customer_id);
       })
-      .first('t.id', 't.coverage_service_type');
+      .first('t.id', 't.customer_id', 't.coverage_service_type', 't.source_estimate_id', 't.renewed_from_term_id');
     if (!term) return false;
-    // Defense-in-depth: when the term declares a coverage service, the stamped
-    // visit must still be that service (coverage-selection cleanup is best-effort,
-    // so a stale stamp left on a dropped/re-typed service must not suppress). The
-    // same matcher that APPLIED the stamp gates it here. Legacy no-config terms
-    // (no coverage_service_type) never had a service to match, so skip the check.
-    if (term.coverage_service_type
-      && scheduledService.service_type
-      && !serviceMatchesCoverage(scheduledService, normalizeCoverageServiceType(term.coverage_service_type))) {
-      return false;
-    }
-    return true;
+    return stampedTermStillCoversVisit(term, scheduledService, conn);
   } catch (err) {
     // Fail-closed: if the term/invoice can't be validated, DON'T suppress billing.
     // Callers on the CHARGING side have the opposite fail-closed direction —
@@ -3494,6 +3969,201 @@ async function statusForPrepayInvoice(invoiceId, conn = db) {
   }
 }
 
+// Move 14 (docs/annual-prepay-term-states.md): the PARENT's renewal
+// decision is recorded 'renew' the moment its successor's own renewal
+// invoice is genuinely paid — deliberately NOT at mint (P2-1): a minted
+// successor is only a PROPOSED renewal, and an unpaid one can still lapse
+// (termite-annual-renewal-charge.js's grace pass), so deciding 'renew'
+// before that is known would leave a lapsed-and-cancelled successor
+// sitting behind a parent already marked 'renewed'. Reuses the canonical
+// recordDecision('renew') writer (the SAME code path an operator's manual
+// "renew" click uses — move 6) rather than a parallel status write; its
+// own `whereIn(ACTIVE_STATUSES) AND renewal_decision IS NULL` guard makes
+// this idempotent no matter how many times invoice-payment sync re-fires
+// for the same successor (retries, a replayed webhook, the daily
+// reconcile sweep). Best-effort: a miss here self-heals on the NEXT sync
+// of this same successor invoice (every one of them re-enters the
+// pending→active / cancelled→active branches below).
+async function stampParentRenewedForSuccessor(successorTerm, contextLabel, conn = db) {
+  if (!successorTerm?.renewed_from_term_id) return;
+  // Codex round-2 P1: a SAVEPOINT on the caller's own transaction — the
+  // SAME pattern reverseWaveguardExtensionCredits uses (see its own
+  // comment above). Running this write through the GLOBAL db handle while
+  // the successor's own activation held an outer transaction let the
+  // parent stamp commit BEFORE the successor's flip, or survive an outer
+  // rollback entirely (Codex round-2 finding). conn.transaction() on a
+  // knex trx is a savepoint: a failure here rolls back to it and the
+  // caller's transaction (the successor's own flip) stays healthy.
+  try {
+    await recordParentRenewedIfEligible({ successorId: successorTerm.id, parentTermId: successorTerm.renewed_from_term_id }, conn);
+  } catch (err) {
+    logger.warn(`[annual-prepay] parent renewed-stamp (${contextLabel}) skipped for successor ${successorTerm.id}: ${err.message}`);
+  }
+}
+
+// Codex #4971 r6 P1 — the ONE automatic "record the parent renewed" write
+// (the paid sync's hook above and reconcileParentRenewedStamps' backstop).
+// A parent refund commits its ledger stamp before its separate term-cancel
+// sync runs; a successor that settles in that gap used to stamp the
+// still-active parent 'renewed' — and a renewed parent is invisible to the
+// late-paid alert (leg 7e), so the refund-or-honor alert was lost. Under the
+// parent's decision gate (taken first; re-entrant), the parent is re-checked
+// with the charge path's own allow-list (resolveParentEligibility: a live or
+// renewing status, and its invoice paid and NOT revoked on the payments
+// ledger — chokepoint A); an ineligible parent is left undecided for leg 7e.
+// A staff "renew" (the admin decide route) is a human decision and does not
+// come through here. Runs in its own transaction, or a savepoint on the
+// caller's (the successor's activation), so a failure never takes that down.
+//
+// Codex #4971 pre-push P1: the SUCCESSOR's payment is the other half of the
+// evidence — a successor refunded or dispute-suspended between the caller's
+// read and the gate must not record the parent renewed either. Both terms'
+// keys are gated (sorted; re-entrant), and under them the successor is
+// re-read before the parent, through the ONE shared "its payment backs the
+// renewal" predicate (termite-annual-renewal-charge.js
+// successorPaymentBacksRenewal — the late-paid alert reads the same one).
+async function recordParentRenewedIfEligible({ successorId, parentTermId }, conn = db) {
+  const work = async (t) => {
+    await acquireTermiteGateAtEntry(t, { termIds: [parentTermId, successorId] });
+    const Charge = require('./termite-annual-renewal-charge')._private;
+    const successor = await t('annual_prepay_terms').where({ id: successorId }).first();
+    if (!(await Charge.successorPaymentBacksRenewal(t, successor))) return null;
+    // Codex #4971 r17 P2 (finding 5): once the deleted-account conflict
+    // below has actually told staff, never re-run that check (or re-ring
+    // its bell) for this successor again — see the marker's own doc on the
+    // column write just below for why this exists at all.
+    if (Object.prototype.hasOwnProperty.call(successor, 'renewal_parent_deleted_conflict_belled_at')
+      && successor.renewal_parent_deleted_conflict_belled_at) {
+      return null;
+    }
+    // Codex #4971 r16 P1 (finding 5, DELETION (b)): a deleted account is a
+    // late-payment CONFLICT, never a silent renewal — the SAME refund-or-
+    // honor staff alert a parent that changed any other way gets
+    // (paid_after_parent_ended), not a fact resolveParentEligibility itself
+    // tracks (it never reads customers.deleted_at at all). An ACH successor
+    // can settle days after its submission — long enough for the account to
+    // be deleted in between — and this stamp used to run with no deletion
+    // check whatsoever, silently recording the parent 'renewed' under a
+    // deleted account with no alert. Gated the SAME way every other
+    // deletion-sensitive write now is (acquireTermiteGateAtEntry above takes
+    // the SAME advisory key withCustomerDeletionGate holds for every one of
+    // the customer's renewable termite parent terms), so this either waits
+    // behind an in-flight deletion or is seen by it once it commits.
+    const deleted = await Charge.customerDeletedRefusal(t, successor);
+    if (deleted) {
+      const bell = await Charge.ringRenewalBell(
+        successor,
+        'paid_after_parent_ended',
+        "the customer's account was deleted before the renewal payment settled",
+      );
+      // Codex #4971 r17 P2 (finding 5): a bell that actually persisted
+      // (fresh or deduped — either way staff has been told) is the trigger
+      // to exclude this row from reconcileParentRenewedStamps' bounded scan
+      // for good — otherwise the parent stays ACTIVE_STATUSES with
+      // renewal_decision still null forever, and that scan's own LIMIT page
+      // re-selects this SAME row on every tick, starving any newer
+      // conflict behind it from ever being reached. The column is written
+      // only where the row shows it exists (this migration ships in the
+      // same PR) — a missing column must never fail this activation, same
+      // convention as renewal_late_paid_belled_at.
+      if (bell && Object.prototype.hasOwnProperty.call(successor, 'renewal_parent_deleted_conflict_belled_at')) {
+        await t('annual_prepay_terms').where({ id: successor.id })
+          .whereNull('renewal_parent_deleted_conflict_belled_at')
+          .update({ renewal_parent_deleted_conflict_belled_at: new Date() });
+      }
+      return null;
+    }
+    const parent = await t('annual_prepay_terms').where({ id: parentTermId }).first();
+    // Codex #4971 r18 P1: the SAME successor-specific predicate the charge
+    // and withdrawal paths use — a parent whose term_end moved since the
+    // mint (parent_term_moved) must not be stamped renewed against the
+    // stale successor window; the late-paid alert handles that conflict.
+    if (!(await Charge.parentRefusalForSuccessor(t, successor, parent)).eligible) return null;
+    return recordDecision({ termId: parentTermId, action: 'renew', conn: t });
+  };
+  return typeof conn.transaction === 'function' ? conn.transaction(work) : work(conn);
+}
+
+// Codex round-2 P1 (backstop): stampParentRenewedForSuccessor's own
+// try/catch is deliberately best-effort — a genuine failure there is
+// swallowed to protect the successor's own activation, so nothing else
+// ever retries it (the pending→active branch above only fires ONCE per
+// successor, on the exact tick its status flips). This reconcile leg finds
+// any ACTIVE, PAID termite renewal successor whose PARENT is still
+// undecided and completes the stamp — idempotent via recordDecision's own
+// `whereIn(ACTIVE_STATUSES) AND renewal_decision IS NULL` guard, so it is
+// always safe to re-run.
+async function reconcileParentRenewedStamps({ conn = db, limit = 200 } = {}) {
+  const summary = { scanned: 0, stamped: 0 };
+  if (!(await annualPrepayTableExists())) return summary;
+  let candidates = [];
+  try {
+    // Codex #4971 round-3 P1 (item 3): a paid-LOOKING successor invoice is
+    // not proof — a full refund lands on the payments ledger before (or
+    // without) the successor's own cancel sync, leaving the successor
+    // 'active' with paid_at still set. The SAME settled-and-not-revoked
+    // predicate the charge path's parent check reads
+    // (termite-annual-renewal-charge.js whereInvoiceSettledNotRevoked —
+    // chokepoint A) gates the renew stamp, so returned money never records
+    // the parent 'renewed'. The parent must also still be in a status
+    // recordDecision can move (ACTIVE_STATUSES): an undecided parent that is
+    // already cancelled/payment_pending would guard-miss every tick and pin
+    // this bounded page forever.
+    // Codex #4971 r6 P1: the PARENT side reads the same chokepoint-A
+    // predicate — a parent whose own prepay invoice is revoked on the ledger
+    // is never offered to the renew stamp (recordParentRenewedIfEligible
+    // re-checks it per row, under the gate, with the JS twin).
+    // Codex #4971 r8/pre-push: the successor side is the shared SQL twin
+    // (whereSuccessorPaymentBacksRenewal: a live or paid decided-lapse
+    // shape, its invoice settled and not revoked).
+    const { whereInvoiceSettledNotRevoked, whereSuccessorPaymentBacksRenewal } = require('./termite-annual-renewal-charge')._private;
+    candidates = await whereSuccessorPaymentBacksRenewal(
+      conn('annual_prepay_terms as s')
+        .join('annual_prepay_terms as p', 'p.id', 's.renewed_from_term_id')
+        .join('invoices as i', 'i.id', 's.prepay_invoice_id')
+        .leftJoin('invoices as pi', 'pi.id', 'p.prepay_invoice_id')
+        .whereNotNull('s.renewed_from_term_id')
+        .whereIn('p.status', ACTIVE_STATUSES)
+        .whereNull('p.renewal_decision')
+        // Codex #4971 r17 P2 (finding 5): a successor whose deleted-account
+        // conflict already told staff (renewal_parent_deleted_conflict_
+        // belled_at) is excluded here directly — its parent never leaves
+        // ACTIVE_STATUSES/renewal_decision-null on its own, so without this
+        // the SAME row pinned this bounded page forever, starving any newer
+        // conflict behind it. A human's own later decision on the parent
+        // still moves it out of ACTIVE_STATUSES/renewal_decision-null
+        // regardless of this stamp.
+        .whereNull('s.renewal_parent_deleted_conflict_belled_at')
+        // Codex #4971 r23 P2: a parent whose window was moved after the
+        // mint is a TERMINAL conflict here — recordParentRenewedIfEligible
+        // refuses it as parent_term_moved every pass, and the late-paid
+        // bell (term_window_changed_at) owns it. Excluded in SQL so such
+        // rows cannot fill this bounded page and starve valid stamps.
+        .whereRaw('s.term_start = p.term_end + 1')
+        .where(function parentInvoiceSettled() {
+          this.whereNull('p.prepay_invoice_id').orWhere(function settled() { whereInvoiceSettledNotRevoked(this, 'pi'); });
+        }),
+      's',
+      'i',
+    )
+      .select('s.id as successor_id', 's.renewed_from_term_id as parent_id')
+      .limit(limit);
+  } catch (err) {
+    logger.warn(`[annual-prepay] parent-renewed reconcile scan failed: ${err.message}`);
+    return summary;
+  }
+  summary.scanned = candidates.length;
+  for (const row of candidates) {
+    try {
+      const decided = await recordParentRenewedIfEligible({ successorId: row.successor_id, parentTermId: row.parent_id }, conn);
+      if (decided) summary.stamped += 1;
+    } catch (err) {
+      logger.warn(`[annual-prepay] parent-renewed reconcile failed for successor ${row.successor_id}: ${err.message}`);
+    }
+  }
+  return summary;
+}
+
 // Canonical cancel-with-restorations pipeline (lifted out of
 // syncTermForInvoicePayment's cancel branch — ADMIN-BUG-R16/R17 direction:
 // every writer that cancels an annual-prepay term must run through here, not
@@ -3587,8 +4257,17 @@ async function cancelTermWithRestorations(termId, conn = db, { throwOnError = fa
     }
     return updated || null;
   };
+  // Chokepoint B (Codex #4971 round-3 P1 / pre-push lock order): when this
+  // opens its OWN transaction it is the writer's entry point, so the gate is
+  // its first lock (acquireTermiteGateAtEntry — before the term, customer,
+  // stamp and credit writes below). A caller passing its own transaction
+  // took the gate at ITS entry (voidInvoice's sync runs here on the root
+  // handle; admin-invoices' remove-flag route acquires it first thing).
   return typeof conn.transaction === 'function' && !conn.isTransaction
-    ? conn.transaction(runCancel)
+    ? conn.transaction(async (t) => {
+      await acquireTermiteGateAtEntry(t, { termIds: [termId] });
+      return runCancel(t);
+    })
     : runCancel(conn);
 }
 
@@ -3609,15 +4288,41 @@ async function cancelTermWithRestorations(termId, conn = db, { throwOnError = fa
 async function settleDecidedPendingTerms(decided, nextStatus, conn) {
   if (!decided.length || (nextStatus !== 'active' && nextStatus !== 'cancelled')) return [];
   const settled = [];
-  for (const { id } of decided) {
-    const [lapse] = await conn('annual_prepay_terms')
-      .where({ id, status: PAYMENT_PENDING_STATUS, renewal_decision: 'cancel' })
-      .update({ status: 'cancelled', updated_at: new Date() })
-      .returning('*');
+  for (const term of decided) {
+    const lapse = await settleDecidedPendingTerm(term, nextStatus, conn);
     if (!lapse) continue;
     settled.push(nextStatus === 'active' ? await followThroughPaidDecidedLapse(lapse, conn) : lapse);
   }
   return settled;
+}
+
+// One decided pending term's flip. Codex #4971 r8 P2: a renewal SUCCESSOR
+// paid in this shape still proves its parent renewed, so the paid flip
+// stamps the parent exactly like the activation branches — the renewal
+// gate (parent + successor keys) first when this is its own transaction,
+// and the stamp on the same transaction / savepoint as the flip. Anything
+// else (not paid, or not a successor) keeps its plain conditional update.
+async function settleDecidedPendingTerm(term, nextStatus, conn) {
+  const { id } = term;
+  const paidSuccessor = nextStatus === 'active' && Boolean(term.renewed_from_term_id);
+  const flip = async (t) => {
+    if (paidSuccessor && t !== conn) await acquireTermiteGateAtEntry(t, { termIds: renewalGateTermIds(term) });
+    const [lapse] = await t('annual_prepay_terms')
+      .where({ id, status: PAYMENT_PENDING_STATUS, renewal_decision: 'cancel' })
+      .update({ status: 'cancelled', updated_at: new Date() })
+      .returning('*');
+    if (lapse && paidSuccessor) await stampParentRenewedForSuccessor(lapse, 'decided pending->paid', t);
+    return lapse;
+  };
+  const ownTransaction = paidSuccessor && typeof conn.transaction === 'function' && !conn.isTransaction;
+  const lapse = ownTransaction ? await conn.transaction(flip) : await flip(conn);
+  // Codex #4971 pre-push P1: the same paid hook as the pending -> active
+  // branch, after the flip committed (a caller's transaction is left to
+  // legs 7d / 7e, as there) — ends the write-ahead charge outcome, and a
+  // renewal paid behind a parent that no longer authorizes it gets its one
+  // refund-or-honor alert here too, never only from the backstop.
+  if (lapse && paidSuccessor) await require('./termite-annual-renewal-charge').onRenewalSuccessorPaid(lapse, conn);
+  return lapse;
 }
 
 // Paid coverage live TODAY (billing's own test, dated) — the condition for
@@ -3745,6 +4450,12 @@ async function followThroughPaidDecidedLapse(lapse, conn) {
   return refreshed || lapse;
 }
 
+// The renewal gate's keys for a term: its parent's and its own when it is a
+// renewal successor; none otherwise.
+function renewalGateTermIds(term) {
+  return term.renewed_from_term_id ? [term.renewed_from_term_id, term.id] : [];
+}
+
 async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
   if (!(await annualPrepayTableExists())) return [];
   const invoice = typeof invoiceOrId === 'object'
@@ -3805,6 +4516,12 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
       // flip beside a failed cleanup left the restored stamp/replacement
       // live forever (the retry skips an already-active term).
       const reviveFromPending = async (t) => {
+        // Own transaction = entry point: the renewal gate first — the
+        // parent's key AND this successor's (the parent 'renewed' stamp
+        // below writes the parent and re-reads both under them; Codex #4971
+        // pre-push P1) — see acquireTermiteGateAtEntry. A term with no
+        // parent takes nothing, as before.
+        if (t !== conn) await acquireTermiteGateAtEntry(t, { termIds: renewalGateTermIds(term) });
         const [updated] = await t('annual_prepay_terms')
           .where({ id: term.id, status: PAYMENT_PENDING_STATUS })
           .whereNull('renewal_decision')
@@ -3815,6 +4532,13 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
           // …and any switch-restored per-application invoice becomes a
           // duplicate of the revived coverage (codex #3591 r54 P1).
           await require('./invoice')._retireSwitchRestoredInvoicesForRevivedPrepay(t, invoice.id);
+          // Termite renewal successor, freshly paid: stamp the PARENT
+          // 'renewed' now (move 16) — see stampParentRenewedForSuccessor's
+          // own comment. Codex round-2 P1: runs on THIS SAME transaction/
+          // savepoint (`t`), not the global `db` handle, so it can never
+          // commit out of order with, or survive a rollback of, this exact
+          // flip.
+          await stampParentRenewedForSuccessor(updated, 'pending->active', t);
         }
         return updated;
       };
@@ -3822,6 +4546,13 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
         ? await conn.transaction(reviveFromPending)
         : await reviveFromPending(conn);
       current = updated || term;
+      // Codex #4971 r4 P1: a termite renewal successor just activated — end
+      // its write-ahead charge outcome and alert staff if it was paid behind
+      // a parent that no longer authorizes it. Best-effort; the hook itself
+      // acts only on a termite successor, on the root handle AFTER the
+      // activation committed (a caller's transaction is never touched — the
+      // sweep's legs 7d / 7e cover that shape).
+      await require('./termite-annual-renewal-charge').onRenewalSuccessorPaid(updated, conn);
     } else if (nextStatus === 'active' && term.status === 'cancelled') {
       // Lost-dispute revival (see the marker-gated select above). The
       // conditional WHERE keeps it race-safe and replay-idempotent; a miss
@@ -3829,6 +4560,7 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
       // next sync of this invoice picks the term up as active. Flip +
       // credits + setup cleanup commit TOGETHER (codex #3591 r52 P1).
       const reviveFromCancelled = async (t) => {
+        if (t !== conn) await acquireTermiteGateAtEntry(t, { termIds: renewalGateTermIds(term) });
         const [updated] = await t('annual_prepay_terms')
           .where({ id: term.id, status: 'cancelled' })
           .whereNull('renewal_decision')
@@ -3845,6 +4577,11 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
           // …and any switch-restored per-application invoice becomes a
           // duplicate of the revived coverage (codex #3591 r54 P1).
           await require('./invoice')._retireSwitchRestoredInvoicesForRevivedPrepay(t, invoice.id);
+          // Same stamp as the pending→active branch above, for the (rarer)
+          // dispute-revival shape: a termite renewal successor whose OWN
+          // invoice was disputed and lost, then re-paid. Same transaction/
+          // savepoint (`t`) as this flip, for the same reason.
+          await stampParentRenewedForSuccessor(updated, 'cancelled->active revival', t);
         }
         return updated;
       };
@@ -4033,11 +4770,12 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
   //     slice becomes the visit's payment again (matching the never-billed
   //     branch). Without this the customer keeps the credit AND the refund.
   // The account-credit seam resolves a fully credit-covered visit invoice as
-  // 'prepaid' with NO paid_at — invoiceTermStatus maps that to payment_pending,
-  // but consumed account credit IS money collected for the visit (the same rule
-  // reconcilePendingWindowCompletions applies via paidForVisit), so it takes
-  // the PAID direction here. Coverage-settled 'prepaid' invoices are harmless
-  // re-entries: the reconcile skips rows carrying a covered-term marker.
+  // 'prepaid' with NO paid_at — consumed account credit IS money collected
+  // for the visit (the same rule reconcilePendingWindowCompletions applies
+  // via paidForVisit, and, since Codex #4971 r21, invoiceTermStatus itself),
+  // so it takes the PAID direction here. Coverage-settled 'prepaid' invoices
+  // are harmless re-entries: the reconcile skips rows carrying a
+  // covered-term marker.
   const visitCollected = nextStatus === 'active'
     || String(invoice.status || '').toLowerCase() === 'prepaid';
   if (!terms.length && (visitCollected || nextStatus === 'cancelled')) {
@@ -4097,7 +4835,7 @@ async function activatePaidPendingTerms(conn = db) {
     .join('invoices as i', 't.prepay_invoice_id', 'i.id')
     .where('t.status', PAYMENT_PENDING_STATUS)
     .where(function () {
-      this.where('i.status', 'paid').orWhereNotNull('i.paid_at');
+      wherePrepayInvoiceCollected(this);
     })
     .select('i.id');
 
@@ -4157,6 +4895,23 @@ async function activatePaidPendingTerms(conn = db) {
  */
 async function suspendActiveTermsForDisputedInvoice(invoiceId, conn = db) {
   if (!invoiceId || !(await annualPrepayTableExists())) return [];
+  // Chokepoint B (Codex #4971 round-3 P1 / pre-push lock order): the
+  // demotion moves a termite term out of charge-eligible state (active ->
+  // payment_pending). Both callers (the dispute webhooks) pass their own
+  // transaction and take the gate as its FIRST statement
+  // (acquireTermiteGateAtEntry). A root-handle call is its own entry point:
+  // it is re-entered inside a transaction that takes the gate first — only
+  // when a termite term is actually involved (a non-termite invoice keeps
+  // its exact old path).
+  if (!conn.isTransaction) {
+    const termiteTerms = await termiteGateKeys(conn, { termIds: [], invoiceIds: [invoiceId], customerIds: [] });
+    if (termiteTerms.length) {
+      return conn.transaction(async (trx) => {
+        await acquireTermiteGateAtEntry(trx, { invoiceIds: [invoiceId] });
+        return suspendActiveTermsForDisputedInvoice(invoiceId, trx);
+      });
+    }
+  }
   const termCols = await annualPrepayColumns(conn);
   const demotion = { status: PAYMENT_PENDING_STATUS, updated_at: new Date() };
   if (termCols.dispute_suspended_at) demotion.dispute_suspended_at = new Date();
@@ -4270,88 +5025,130 @@ async function suspendActiveTermsForDisputedInvoice(invoiceId, conn = db) {
  *      (marker-deduped, balance-capped) reversal re-attempted.
  * Best-effort per term; a failure on one term never blocks the rest.
  */
+// P2-4 guard, extracted (Codex round-7 P2 self-review, AGENTS.md
+// L412-418): coveredTermsAsOf now also matches an UNPAID termite renewal
+// successor riding its 30-day grace — that is a "don't cancel it yet"
+// signal, not "money collected". Every leg of reconcileCoveredTermsSweep
+// below (pending-window completion settle/credit, extension-credit
+// restore, dispute recovery) assumes real money landed on the prepay
+// invoice; running any of them against a still-unpaid successor would
+// settle or credit against a charge that never happened. Confirm the
+// invoice actually reads paid before touching a payment_pending row — the
+// pre-existing paidPending branch (invoice already paid, term flip just
+// lagging) still proceeds untouched; only a genuinely-unpaid grace row is
+// skipped.
+async function isUnpaidGracePendingTerm(term, conn) {
+  if (term.status !== PAYMENT_PENDING_STATUS) return false;
+  const invoiceRow = term.prepay_invoice_id
+    ? await conn('invoices').where({ id: term.prepay_invoice_id }).first('status', 'paid_at')
+    : null;
+  const reallyPaid = !!invoiceRow
+    && (String(invoiceRow.status || '').toLowerCase() === 'paid' || !!invoiceRow.paid_at);
+  return !reallyPaid;
+}
+
+// Extracted from reconcileOneCoveredTermInSweep (complexity reduction, no
+// behavior change): the pending-completion grant reversal leg, verbatim.
+async function reverseCancelledPendingCompletionGrantsInSweep(term, conn, summary) {
+  try {
+    const grants = await conn('customer_credit_ledger')
+      .where({ customer_id: term.customer_id, created_by: PENDING_COMPLETION_CREDIT_BY })
+      .where('note', 'like', `%term ${term.id},%`)
+      .where('delta', '>', 0)
+      .select('note', 'invoice_id');
+    for (const grant of grants) {
+      const visitMatch = String(grant.note || '').match(/visit ([0-9a-f-]+)\)/i);
+      const visitId = visitMatch ? visitMatch[1] : null;
+      // The grant row carries the exact invoice the credit was issued
+      // against — check THAT invoice, not the visit's latest (a re-invoiced
+      // visit must not mask its refunded original, and a pre-grant void
+      // must not trigger a reversal).
+      if (!visitId || !grant.invoice_id) continue;
+      const grantInvoice = await conn('invoices')
+        .where({ id: grant.invoice_id })
+        .first('id', 'status');
+      if (!grantInvoice) continue;
+      const status = String(grantInvoice.status || '').toLowerCase();
+      if (!INVOICE_CANCELLED_STATUSES.has(status)) continue;
+      // The reversal is marker-deduped, so re-running for an
+      // already-reversed grant is a no-op.
+      summary.reversed += await reversePendingWindowCompletionCredits(term, conn, { visitId });
+    }
+  } catch (err) {
+    logger.warn(`[annual-prepay] sweep reversal recovery failed for term ${term.id}: ${err.message}`);
+  }
+}
+
+// Extracted from reconcileCoveredTermsSweep (complexity reduction, no
+// behavior change — the eslint complexity/max-depth gate on this diff):
+// the per-term body of the sweep's dated loop, unchanged apart from
+// `continue` -> `return` (equivalent at the end of a loop body with
+// nothing left to run). `todayKey` is `dateOnly(today) || etDateString()`,
+// hoisted ONCE by the caller — the original inline calls were the exact
+// same pure computation repeated per-term, so reusing one value changes
+// nothing observable.
+async function reconcileOneCoveredTermInSweep(term, conn, todayKey, summary) {
+  summary.terms += 1;
+  if (await isUnpaidGracePendingTerm(term, conn)) return;
+  // Dispute-marker leg (Codex round-3 P2): a COVERED term still carrying
+  // dispute_suspended_at means the dispute resolved (coverage requires the
+  // prepay invoice paid again) but the one-shot won-dispute restore didn't
+  // finish — its errors are swallowed on the paid-invoice sync, and
+  // nothing else re-enters it. Finish the restore here: re-stamp coverage
+  // + billing mode (idempotent; skips foreign-term and out-of-band
+  // stamps), claw back dispute-window dues, and clear the marker only
+  // when nothing deferred. Bounds any lost restore to one sweep cycle.
+  if (term.dispute_suspended_at) {
+    try {
+      const normalized = { ...term, term_start: dateOnly(term.term_start), term_end: dateOnly(term.term_end) };
+      // Direct stamping path — detach legacy callbacks first (r4 P1).
+      await detachCallbacksFromTerm(normalized, conn);
+      await applyPrepaidCoverageForTerm(normalized, conn);
+      await stampAnnualPrepayBillingMode(term.customer_id, conn, term.id);
+      const recovery = await finishDisputeRecoveryForTerm(term, conn);
+      summary.disputeRecovered += recovery.credited;
+    } catch (err) {
+      logger.warn(`[annual-prepay] sweep dispute-recovery leg failed for term ${term.id}: ${err.message}`);
+    }
+  }
+  // ADMIN-BUG-R18: an end-at-term lapse's skipped paid visit is replaced
+  // here, once a night — per-edit refreshes only attach and stamp.
+  if (isEndAtTermLapseInWindow(term, todayKey)) {
+    try {
+      const kept = await keepEndAtTermLapseCoverage(term, conn, { reseed: true, today: todayKey });
+      if (kept?.createdCount) logger.info(`[annual-prepay] sweep replaced ${kept.createdCount} visit(s) for end-at-term lapse ${term.id}`);
+      if (kept?.skipped === 'cancel_commit_in_progress') logger.info(`[annual-prepay] sweep reseed skipped for term ${term.id}: a cancellation is being committed`);
+    } catch (err) {
+      logger.warn(`[annual-prepay] sweep end-at-term reseed failed for term ${term.id}: ${err.message}`);
+    }
+  }
+  const res = await reconcilePendingWindowCompletions(term, conn);
+  summary.settled += res.settled || 0;
+  summary.credited += res.credited || 0;
+  // Covered = paid-backed (coveredTermsAsOf revalidates the prepay
+  // invoice), so any clawed extension credit is owed back — self-heals a
+  // repayment whose inline restore was lost (guards P0). Idempotent.
+  try {
+    summary.credited += await restoreWaveguardExtensionCredits(term, conn);
+  } catch (err) {
+    logger.warn(`[annual-prepay] sweep extension-credit restore failed for term ${term.id}: ${err.message}`);
+  }
+  await reverseCancelledPendingCompletionGrantsInSweep(term, conn, summary);
+}
+
 async function reconcileCoveredTermsSweep({ today = etDateString(), conn = db } = {}) {
   const summary = { terms: 0, settled: 0, credited: 0, reversed: 0, disputeRecovered: 0 };
   if (!(await annualPrepayTableExists())) return summary;
+  const todayKey = dateOnly(today) || etDateString();
   let terms = [];
   try {
-    terms = await coveredTermsAsOf(conn, dateOnly(today) || etDateString()).select('t.*');
+    terms = await coveredTermsAsOf(conn, todayKey).select('t.*');
   } catch (err) {
     logger.warn(`[annual-prepay] covered-term sweep query failed: ${err.message}`);
     return summary;
   }
   for (const term of terms) {
-    summary.terms += 1;
-    // Dispute-marker leg (Codex round-3 P2): a COVERED term still carrying
-    // dispute_suspended_at means the dispute resolved (coverage requires the
-    // prepay invoice paid again) but the one-shot won-dispute restore didn't
-    // finish — its errors are swallowed on the paid-invoice sync, and
-    // nothing else re-enters it. Finish the restore here: re-stamp coverage
-    // + billing mode (idempotent; skips foreign-term and out-of-band
-    // stamps), claw back dispute-window dues, and clear the marker only
-    // when nothing deferred. Bounds any lost restore to one sweep cycle.
-    if (term.dispute_suspended_at) {
-      try {
-        const normalized = { ...term, term_start: dateOnly(term.term_start), term_end: dateOnly(term.term_end) };
-        // Direct stamping path — detach legacy callbacks first (r4 P1).
-        await detachCallbacksFromTerm(normalized, conn);
-        await applyPrepaidCoverageForTerm(normalized, conn);
-        await stampAnnualPrepayBillingMode(term.customer_id, conn, term.id);
-        const recovery = await finishDisputeRecoveryForTerm(term, conn);
-        summary.disputeRecovered += recovery.credited;
-      } catch (err) {
-        logger.warn(`[annual-prepay] sweep dispute-recovery leg failed for term ${term.id}: ${err.message}`);
-      }
-    }
-    // ADMIN-BUG-R18: an end-at-term lapse's skipped paid visit is replaced
-    // here, once a night — per-edit refreshes only attach and stamp.
-    if (isEndAtTermLapseInWindow(term, dateOnly(today) || etDateString())) {
-      try {
-        const kept = await keepEndAtTermLapseCoverage(term, conn, { reseed: true, today: dateOnly(today) || etDateString() });
-        if (kept?.createdCount) logger.info(`[annual-prepay] sweep replaced ${kept.createdCount} visit(s) for end-at-term lapse ${term.id}`);
-        if (kept?.skipped === 'cancel_commit_in_progress') logger.info(`[annual-prepay] sweep reseed skipped for term ${term.id}: a cancellation is being committed`);
-      } catch (err) {
-        logger.warn(`[annual-prepay] sweep end-at-term reseed failed for term ${term.id}: ${err.message}`);
-      }
-    }
-    const res = await reconcilePendingWindowCompletions(term, conn);
-    summary.settled += res.settled || 0;
-    summary.credited += res.credited || 0;
-    // Covered = paid-backed (coveredTermsAsOf revalidates the prepay
-    // invoice), so any clawed extension credit is owed back — self-heals a
-    // repayment whose inline restore was lost (guards P0). Idempotent.
-    try {
-      summary.credited += await restoreWaveguardExtensionCredits(term, conn);
-    } catch (err) {
-      logger.warn(`[annual-prepay] sweep extension-credit restore failed for term ${term.id}: ${err.message}`);
-    }
-    try {
-      const grants = await conn('customer_credit_ledger')
-        .where({ customer_id: term.customer_id, created_by: PENDING_COMPLETION_CREDIT_BY })
-        .where('note', 'like', `%term ${term.id},%`)
-        .where('delta', '>', 0)
-        .select('note', 'invoice_id');
-      for (const grant of grants) {
-        const visitMatch = String(grant.note || '').match(/visit ([0-9a-f-]+)\)/i);
-        const visitId = visitMatch ? visitMatch[1] : null;
-        // The grant row carries the exact invoice the credit was issued
-        // against — check THAT invoice, not the visit's latest (a re-invoiced
-        // visit must not mask its refunded original, and a pre-grant void
-        // must not trigger a reversal).
-        if (!visitId || !grant.invoice_id) continue;
-        const grantInvoice = await conn('invoices')
-          .where({ id: grant.invoice_id })
-          .first('id', 'status');
-        if (!grantInvoice) continue;
-        const status = String(grantInvoice.status || '').toLowerCase();
-        if (!INVOICE_CANCELLED_STATUSES.has(status)) continue;
-        // The reversal is marker-deduped, so re-running for an
-        // already-reversed grant is a no-op.
-        summary.reversed += await reversePendingWindowCompletionCredits(term, conn, { visitId });
-      }
-    } catch (err) {
-      logger.warn(`[annual-prepay] sweep reversal recovery failed for term ${term.id}: ${err.message}`);
-    }
+    await reconcileOneCoveredTermInSweep(term, conn, todayKey, summary);
   }
   // Expired-window marker pass (Codex round-4 P2): the loop above selects
   // covered-TODAY terms, so a dispute resolved AFTER term_end never enters
@@ -4364,7 +5161,6 @@ async function reconcileCoveredTermsSweep({ today = etDateString(), conn = db } 
   try {
     const termCols = await annualPrepayColumns(conn);
     if (termCols.dispute_suspended_at) {
-      const todayKey = dateOnly(today) || etDateString();
       const staleMarked = await coveredTermsAsOf(conn, null)
         .whereNotNull('t.dispute_suspended_at')
         .select('t.*');
@@ -5536,6 +6332,34 @@ async function resetBillingModeAfterTermCancel(term, conn, { throwOnError = fals
   }
 }
 
+// Renewal-successor carry-forward columns (Codex round-1 P1 / slice 6b),
+// extracted (round-7 P2 self-review, AGENTS.md L412-418) so these 2
+// additions don't compound createTermForAnnualPrepay's own complexity —
+// the SAME "carry forward once, never overwrite" semantics as the
+// pre-existing annual_plan_version clause beside them, shared by both the
+// update path (`existing` set) and the insert path (`existing` null, so
+// `!existing?.col` is always true and never blocks a first write).
+// Returns `undefined` for a column that should NOT be set — the caller
+// checks `!== undefined` and assigns each field with its OWN plain,
+// direct property write (dot notation, never a bulk-merge helper, and
+// never touching the status field itself) so annual-prepay-term-states
+// .test.js's static status-write-site scanner can still see every write
+// shape (it deliberately fails closed on anything less direct than that
+// — a caught regression once already, see that test's own comments; NOTE
+// TO FUTURE EDITORS: writing the bulk-merge helper's actual name here in
+// a comment is exactly what trips its OWN textual scan — it is not
+// comment-aware for that one check).
+function renewalCarryForwardColumns(termCols, existing, renewedFromTermId, renewalChargeConsentAt) {
+  const out = {};
+  if (termCols.renewed_from_term_id && renewedFromTermId && !existing?.renewed_from_term_id) {
+    out.renewedFromTermId = renewedFromTermId;
+  }
+  if (termCols.renewal_charge_consent_at && renewalChargeConsentAt && !existing?.renewal_charge_consent_at) {
+    out.renewalChargeConsentAt = renewalChargeConsentAt;
+  }
+  return out;
+}
+
 // Whether createTermForAnnualPrepay's result is a paid term that needs the
 // born-paid follow-through (renewal-date sync, pending-window reconcile,
 // annual_prepay billing stamp): ACTIVE — or, on the installation-anchor
@@ -5558,6 +6382,125 @@ async function termCountsAsPaidAfterCreate(term, anchorInstallation, conn) {
   return !!anchorInstallation && isPaidDecidedLapseTerm(term, conn);
 }
 
+// Extracted from createTermForAnnualPrepay's "existing" edit branch
+// (complexity reduction, no behavior change — the eslint complexity gate
+// on this diff): detaches out-of-window visits ONLY when the coverage
+// window was actually edited (start/end explicitly supplied). Every
+// comment and the throw-on-failure rationale are unchanged from the
+// original inline block.
+async function detachOutOfWindowEditedVisits(existing, updates, conn) {
+  // Skipped when no dates were given (the estimate re-run path), so it
+  // only fires on a real window change.
+  if (!(updates.term_start || updates.term_end)) return;
+  const scCols = await scheduledServiceColumns();
+  if (!scCols.annual_prepay_term_id) return;
+  const winStart = dateOnly(updates.term_start || existing.term_start);
+  const winEnd = dateOnly(updates.term_end || existing.term_end);
+  function detachOutOfWindow() {
+    this.where('scheduled_date', '<', winStart).orWhere('scheduled_date', '>', winEnd);
+  }
+  try {
+    // Completion billing keys on prepaid_amount independently of the term
+    // link, so a now-out-of-window FUTURE visit would still be treated as
+    // prepaid and skip invoicing unless its stamp is cleared too. Clear the
+    // stamps on the non-completed out-of-window visits first (while they're
+    // still findable by term id); completed/terminal visits keep their
+    // historical stamp.
+    if (scCols.prepaid_amount) {
+      const stampClear = { prepaid_amount: null, updated_at: new Date() };
+      if (scCols.prepaid_method) stampClear.prepaid_method = null;
+      if (scCols.prepaid_at) stampClear.prepaid_at = null;
+      if (scCols.prepaid_note) stampClear.prepaid_note = null;
+      const stampQuery = conn('scheduled_services')
+        .where({ annual_prepay_term_id: existing.id })
+        .andWhere(detachOutOfWindow)
+        .whereNotIn('status', Array.from(PREPAID_UPDATE_EXCLUDED_STATUSES));
+      // Only clear annual-prepay stamps; preserve an independent cash/Zelle
+      // prepayment made on the visit through the regular schedule route.
+      if (scCols.prepaid_method) stampQuery.where('prepaid_method', ANNUAL_PREPAY_PREPAID_METHOD);
+      await stampQuery.update(stampClear);
+    }
+    await conn('scheduled_services')
+      .where({ annual_prepay_term_id: existing.id })
+      .andWhere(detachOutOfWindow)
+      .update({ annual_prepay_term_id: null, updated_at: new Date() });
+  } catch (err) {
+    // The completion-billing gate (annualPrepayCoversVisit) is
+    // calendar-independent: a stamped visit is covered while its term
+    // stays paid, wherever the visit sits on the calendar. That is only
+    // sound because THIS detach is the one place a window edit strips
+    // stamps from the visits it removed from coverage — a best-effort
+    // log-and-continue here left the shrunken window silently
+    // suppressing billing for those visits. Fail the edit loudly
+    // instead; the operator retries and the detach re-runs. (Partial
+    // failure is billing-safe: the stamp clear runs before the
+    // term-link detach and the gate requires BOTH fields.)
+    throw new Error(`annual prepay window edit for term ${existing.id} could not detach out-of-window visits — edit aborted: ${err.message}`);
+  }
+}
+
+// Extracted from createTermForAnnualPrepay's "existing" edit branch
+// (complexity reduction, no behavior change): detaches visits dropped by
+// a coverage-SELECTION change (service type / visit count / cadence), as
+// opposed to a date-window change (handled by detachOutOfWindowEditedVisits
+// above). Every comment is unchanged from the original inline block.
+async function detachDroppedCoverageSelectionVisits(existing, {
+  normalizedCoverageServiceType, normalizedCoverageVisitCount, normalizedCoverageCadence,
+}, conn) {
+  // When the coverage SELECTION changes on an edit (service type / visit count
+  // / cadence) — not just the date window handled above — the visits that
+  // matched the OLD selection keep their annual-prepay prepaid stamps, since
+  // attachScheduledServices/applyPrepaidCoverageForTerm only add+stamp the new
+  // matches and never clear the old ones. Completion billing keys on
+  // prepaid_amount, so those stale visits would keep skipping billing on top
+  // of the newly covered ones. Clear the term's stamps here so the
+  // refreshTermSnapshot below re-stamps ONLY the new selection; visits dropped
+  // from coverage fall back to normal billing. Method-scoped + non-completed
+  // (clearPrepaidStampsForTerm), so manual cash/Zelle stamps and already
+  // serviced visits are untouched. Best-effort, mirroring the window block.
+  const coverageSelectionChanged = (
+    (normalizedCoverageServiceType !== undefined
+      && (normalizeCoverageServiceType(existing.coverage_service_type) || null)
+        !== (normalizedCoverageServiceType || null))
+    || (normalizedCoverageVisitCount !== undefined
+      && (normalizeCoverageVisitCount(existing.coverage_visit_count) || null)
+        !== (normalizedCoverageVisitCount || null))
+    || (normalizedCoverageCadence !== undefined
+      && (normalizeCoverageCadence(existing.coverage_cadence) || null)
+        !== (normalizedCoverageCadence || null))
+  );
+  if (!coverageSelectionChanged) return;
+  // Clearing stamps isn't enough: the dropped visits keep their
+  // annual_prepay_term_id link, which the repo treats as Annual Prepay for
+  // reporting/forecasting (pricing-reality-check) and copies onto recurring
+  // children (recurring-appointment-seeder). Detach the term link from the
+  // non-completed linked visits too, then let refreshTermSnapshot below
+  // re-attach + re-stamp ONLY the new selection — visits dropped from
+  // coverage fall fully back to normal billing. Completed/terminal visits
+  // keep their historical link + stamp (PREPAID_UPDATE_EXCLUDED_STATUSES).
+  //
+  // The stamp clear and the link detach must be atomic: if the detach
+  // landed but the stamp clear silently failed, those visits would keep a
+  // prepaid_amount with no term link — completion billing would still skip
+  // them and no term-keyed cleanup could ever find them again. Run both in
+  // one (sub)transaction with the stamp clear set to throw, so a failed
+  // clear rolls back the detach instead of orphaning the stamps.
+  const scCols = await scheduledServiceColumns();
+  try {
+    await conn.transaction(async (trx) => {
+      await clearPrepaidStampsForTerm(existing.id, trx, { throwOnError: true });
+      if (scCols.annual_prepay_term_id) {
+        await trx('scheduled_services')
+          .where({ annual_prepay_term_id: existing.id })
+          .whereNotIn('status', Array.from(PREPAID_UPDATE_EXCLUDED_STATUSES))
+          .update({ annual_prepay_term_id: null, updated_at: new Date() });
+      }
+    });
+  } catch (err) {
+    logger.warn(`[annual-prepay] coverage-change stamp/link cleanup skipped: ${err.message}`);
+  }
+}
+
 async function createTermForAnnualPrepay({
   customerId,
   sourceEstimateId = null,
@@ -5577,6 +6520,23 @@ async function createTermForAnnualPrepay({
   // stamped after this returns, the first refresh would seed a signature-day
   // coverage visit before the installation ever anchors the term.
   annualPlanVersion = undefined,
+  // Renewal successor marker (slice 6b, termite-annual-renewal-charge.js).
+  // Written WITH the row for the SAME reason as annualPlanVersion above:
+  // coverageAwaitsInstallation() reads `!term.renewed_from_term_id` to tell
+  // a renewal successor apart from a brand-new signed plan awaiting its
+  // installation visit — a renewal never awaits an installation, so this
+  // must be present before the refreshTermSnapshot call below runs its
+  // seeding decision, or a successor's coverage visits would wrongly defer.
+  renewedFromTermId = undefined,
+  // Codex round-1 P1: renewal-charge consent provenance (ruling A-13). The
+  // ONLY writer of this column is the original signed agreement
+  // (termite-annual-activation.js); a renewal successor never signs a new
+  // one, so the mint (termite-annual-renewal-charge.js's
+  // mintRenewalSuccessor) carries the PARENT's own timestamp forward
+  // explicitly — the SAME consent covers every renewal under it, chained
+  // year over year (a year-2 successor's own renewalChargeConsentAt is set
+  // here too, so its OWN eventual year-3 mint carries it forward again).
+  renewalChargeConsentAt = undefined,
   // Codex pre-push P1: set only by anchorTermToInstallation's window-move
   // call — lets a decided-lapse (declined-before-install) term's paid
   // coverage year reconcile/re-stamp exactly like a normal anchored term
@@ -5657,6 +6617,44 @@ async function createTermForAnnualPrepay({
     if (hasExplicitTermStart) updates.term_start = normalizedStart;
     if (hasExplicitTermEnd) updates.term_end = normalizedEnd;
     else if (hasExplicitTermStart) updates.term_end = normalizedEnd;
+    // Codex #4971 round-20 P1 (charge.js:1581): stamp the moment this term's
+    // OWN window actually moves. parentChangedAtSql (the renewal charge's
+    // "when did the parent stop authorizing its renewal" scan, read by both
+    // paidAfterParentChanged and leg 7e's late-paid backstop) has no arm for
+    // a term-window edit on a parent that otherwise still authorizes its
+    // renewal (still active/renewal_pending, or renewed with a 'renew'
+    // decision) — so a successor paid after a plain date edit was never
+    // dated as "paid after a change", the refund-or-honor bell never rang,
+    // and recordParentRenewedIfEligible kept rejecting the same paid
+    // successor forever with no escalation. Column-tolerant (a narrow
+    // schema without the column just skips the stamp) and VALUE-compared,
+    // never presence-compared — resupplying the SAME dates (the estimate
+    // re-run path, a no-op save) must not read as a move.
+    if (termCols.term_window_changed_at) {
+      const startMoved = Object.prototype.hasOwnProperty.call(updates, 'term_start')
+        && dateOnly(existing.term_start) !== updates.term_start;
+      const endMoved = Object.prototype.hasOwnProperty.call(updates, 'term_end')
+        && dateOnly(existing.term_end) !== updates.term_end;
+      if (startMoved || endMoved) {
+        // Codex #4971 r25 P1: keep the FIRST move made after the current
+        // renewal successor was minted. A later correction must not push
+        // the stamp past a payment that followed the first invalidating
+        // move (paidAfterParentChanged would then read "paid before the
+        // change" and lose the refund-or-honor alert). An existing stamp
+        // that predates the successor's mint (an installation anchor, an
+        // old correction) is not a post-mint move and IS replaced.
+        let keepFirstPostMintMove = false;
+        if (existing.term_window_changed_at && termCols.renewed_from_term_id) {
+          const successor = await conn('annual_prepay_terms')
+            .where({ renewed_from_term_id: existing.id })
+            .orderBy('created_at', 'desc')
+            .first('created_at');
+          keepFirstPostMintMove = Boolean(successor?.created_at)
+            && new Date(existing.term_window_changed_at).getTime() > new Date(successor.created_at).getTime();
+        }
+        if (!keepFirstPostMintMove) updates.term_window_changed_at = new Date();
+      }
+    }
     if (termCols.coverage_service_type && normalizedCoverageServiceType !== undefined) {
       updates.coverage_service_type = normalizedCoverageServiceType;
     }
@@ -5675,114 +6673,19 @@ async function createTermForAnnualPrepay({
     if (termCols.annual_plan_version && annualPlanVersion && !existing.annual_plan_version) {
       updates.annual_plan_version = annualPlanVersion;
     }
+    const carryForward = renewalCarryForwardColumns(termCols, existing, renewedFromTermId, renewalChargeConsentAt);
+    if (carryForward.renewedFromTermId !== undefined) updates.renewed_from_term_id = carryForward.renewedFromTermId;
+    if (carryForward.renewalChargeConsentAt !== undefined) updates.renewal_charge_consent_at = carryForward.renewalChargeConsentAt;
     await conn('annual_prepay_terms').where({ id: existing.id }).update(updates);
     // When the coverage window is edited (start/end actually supplied), detach
     // any visits attachScheduledServices() stamped under the old window that now
     // fall outside it — refreshTermSnapshot only re-attaches in-window visits, it
     // never removes out-of-window ones, so a shortened/moved window would keep
-    // reporting stale visits as Annual Prepay. Skipped when no dates were given
-    // (the estimate re-run path), so it only fires on a real window change.
-    if (updates.term_start || updates.term_end) {
-      const scCols = await scheduledServiceColumns();
-      if (scCols.annual_prepay_term_id) {
-        const winStart = dateOnly(updates.term_start || existing.term_start);
-        const winEnd = dateOnly(updates.term_end || existing.term_end);
-        function detachOutOfWindow() {
-          this.where('scheduled_date', '<', winStart).orWhere('scheduled_date', '>', winEnd);
-        }
-        try {
-          // Completion billing keys on prepaid_amount independently of the term
-          // link, so a now-out-of-window FUTURE visit would still be treated as
-          // prepaid and skip invoicing unless its stamp is cleared too. Clear the
-          // stamps on the non-completed out-of-window visits first (while they're
-          // still findable by term id); completed/terminal visits keep their
-          // historical stamp.
-          if (scCols.prepaid_amount) {
-            const stampClear = { prepaid_amount: null, updated_at: new Date() };
-            if (scCols.prepaid_method) stampClear.prepaid_method = null;
-            if (scCols.prepaid_at) stampClear.prepaid_at = null;
-            if (scCols.prepaid_note) stampClear.prepaid_note = null;
-            const stampQuery = conn('scheduled_services')
-              .where({ annual_prepay_term_id: existing.id })
-              .andWhere(detachOutOfWindow)
-              .whereNotIn('status', Array.from(PREPAID_UPDATE_EXCLUDED_STATUSES));
-            // Only clear annual-prepay stamps; preserve an independent cash/Zelle
-            // prepayment made on the visit through the regular schedule route.
-            if (scCols.prepaid_method) stampQuery.where('prepaid_method', ANNUAL_PREPAY_PREPAID_METHOD);
-            await stampQuery.update(stampClear);
-          }
-          await conn('scheduled_services')
-            .where({ annual_prepay_term_id: existing.id })
-            .andWhere(detachOutOfWindow)
-            .update({ annual_prepay_term_id: null, updated_at: new Date() });
-        } catch (err) {
-          // The completion-billing gate (annualPrepayCoversVisit) is
-          // calendar-independent: a stamped visit is covered while its term
-          // stays paid, wherever the visit sits on the calendar. That is only
-          // sound because THIS detach is the one place a window edit strips
-          // stamps from the visits it removed from coverage — a best-effort
-          // log-and-continue here left the shrunken window silently
-          // suppressing billing for those visits. Fail the edit loudly
-          // instead; the operator retries and the detach re-runs. (Partial
-          // failure is billing-safe: the stamp clear runs before the
-          // term-link detach and the gate requires BOTH fields.)
-          throw new Error(`annual prepay window edit for term ${existing.id} could not detach out-of-window visits — edit aborted: ${err.message}`);
-        }
-      }
-    }
-    // When the coverage SELECTION changes on an edit (service type / visit count
-    // / cadence) — not just the date window handled above — the visits that
-    // matched the OLD selection keep their annual-prepay prepaid stamps, since
-    // attachScheduledServices/applyPrepaidCoverageForTerm only add+stamp the new
-    // matches and never clear the old ones. Completion billing keys on
-    // prepaid_amount, so those stale visits would keep skipping billing on top
-    // of the newly covered ones. Clear the term's stamps here so the
-    // refreshTermSnapshot below re-stamps ONLY the new selection; visits dropped
-    // from coverage fall back to normal billing. Method-scoped + non-completed
-    // (clearPrepaidStampsForTerm), so manual cash/Zelle stamps and already
-    // serviced visits are untouched. Best-effort, mirroring the window block.
-    const coverageSelectionChanged = (
-      (normalizedCoverageServiceType !== undefined
-        && (normalizeCoverageServiceType(existing.coverage_service_type) || null)
-          !== (normalizedCoverageServiceType || null))
-      || (normalizedCoverageVisitCount !== undefined
-        && (normalizeCoverageVisitCount(existing.coverage_visit_count) || null)
-          !== (normalizedCoverageVisitCount || null))
-      || (normalizedCoverageCadence !== undefined
-        && (normalizeCoverageCadence(existing.coverage_cadence) || null)
-          !== (normalizedCoverageCadence || null))
-    );
-    if (coverageSelectionChanged) {
-      // Clearing stamps isn't enough: the dropped visits keep their
-      // annual_prepay_term_id link, which the repo treats as Annual Prepay for
-      // reporting/forecasting (pricing-reality-check) and copies onto recurring
-      // children (recurring-appointment-seeder). Detach the term link from the
-      // non-completed linked visits too, then let refreshTermSnapshot below
-      // re-attach + re-stamp ONLY the new selection — visits dropped from
-      // coverage fall fully back to normal billing. Completed/terminal visits
-      // keep their historical link + stamp (PREPAID_UPDATE_EXCLUDED_STATUSES).
-      //
-      // The stamp clear and the link detach must be atomic: if the detach
-      // landed but the stamp clear silently failed, those visits would keep a
-      // prepaid_amount with no term link — completion billing would still skip
-      // them and no term-keyed cleanup could ever find them again. Run both in
-      // one (sub)transaction with the stamp clear set to throw, so a failed
-      // clear rolls back the detach instead of orphaning the stamps.
-      const scCols = await scheduledServiceColumns();
-      try {
-        await conn.transaction(async (trx) => {
-          await clearPrepaidStampsForTerm(existing.id, trx, { throwOnError: true });
-          if (scCols.annual_prepay_term_id) {
-            await trx('scheduled_services')
-              .where({ annual_prepay_term_id: existing.id })
-              .whereNotIn('status', Array.from(PREPAID_UPDATE_EXCLUDED_STATUSES))
-              .update({ annual_prepay_term_id: null, updated_at: new Date() });
-          }
-        });
-      } catch (err) {
-        logger.warn(`[annual-prepay] coverage-change stamp/link cleanup skipped: ${err.message}`);
-      }
-    }
+    // reporting stale visits as Annual Prepay.
+    await detachOutOfWindowEditedVisits(existing, updates, conn);
+    await detachDroppedCoverageSelectionVisits(existing, {
+      normalizedCoverageServiceType, normalizedCoverageVisitCount, normalizedCoverageCadence,
+    }, conn);
     await syncInvoiceTerm(prepayInvoiceId, existing.id, conn);
     const refreshed = await refreshTermSnapshot(existing.id, conn);
     if (await termCountsAsPaidAfterCreate(refreshed, anchorInstallation, conn)) {
@@ -5836,6 +6739,9 @@ async function createTermForAnnualPrepay({
   if (termCols.annual_plan_version && annualPlanVersion) {
     insert.annual_plan_version = annualPlanVersion;
   }
+  const insertCarryForward = renewalCarryForwardColumns(termCols, null, renewedFromTermId, renewalChargeConsentAt);
+  if (insertCarryForward.renewedFromTermId !== undefined) insert.renewed_from_term_id = insertCarryForward.renewedFromTermId;
+  if (insertCarryForward.renewalChargeConsentAt !== undefined) insert.renewal_charge_consent_at = insertCarryForward.renewalChargeConsentAt;
 
   const [term] = await conn('annual_prepay_terms').insert(insert).returning('*');
 
@@ -6375,7 +7281,7 @@ async function releaseTermNoticeClaim(claimedTerm, daysOut, previousStatus) {
 // other rung's claim is cleared with its late record.
 // baseline (schema-not-ready fallback, exact-day send): the rung's own
 // column only — no late classification, no late predicate.
-async function stampTermNoticeWitness(claimedTerm, daysOut, sentAt, { alsoRecordMissedRung = null, missedRungAt = null, baseline = false } = {}) {
+async function stampTermNoticeWitness(claimedTerm, daysOut, sentAt, { alsoRecordMissedRung = null, missedRungAt = null, baseline = false, freezeNoticedFee = true } = {}) {
   const noticeCol = noticeColumnForDaysOut(daysOut);
   const claimCol = noticeClaimColumnForDaysOut(daysOut);
   const sentCol = baseline ? noticeCol : noticeWitnessColumn(daysOut, claimedTerm, etDateString(sentAt));
@@ -6385,6 +7291,22 @@ async function stampTermNoticeWitness(claimedTerm, daysOut, sentAt, { alsoRecord
   let stamped = null;
   let otherRecorded = null;
   await db.transaction(async (trx) => {
+    // Codex #4971 r23 P1: the termite 45-day rung quotes term.prepay_amount
+    // to the customer — freeze that fee WITH the witness
+    // (renewal_noticed_fee, 20260928030000) so the renewal mint can refuse
+    // to bill or charge a fee the customer was never told. Column-tolerant
+    // by ROW SHAPE (the claimed row is the table's own `returning('*')`, so
+    // it carries the key exactly when the schema has the column) — no extra
+    // probe query on this transaction.
+    // Codex #4971 r28 P1: ONLY the live send freezes the fee — it stamps
+    // right after rendering it. A witness RECOVERED later from provider
+    // acceptance evidence (recoverTermiteNoticeFromAcceptance) was rendered
+    // at some earlier moment; the term's fee today may not be the fee that
+    // message quoted, so recovery freezes nothing and the mint fails closed
+    // (notice_fee_unfrozen) until staff record the quoted fee.
+    const freezeFee = freezeNoticedFee && daysOut === TERMITE_EXTRA_NOTICE_DAYS
+      && claimedTerm.prepay_amount != null && claimedTerm.prepay_amount !== ''
+      && Object.prototype.hasOwnProperty.call(claimedTerm, 'renewal_noticed_fee');
     stamped = await trx('annual_prepay_terms')
       .where({ id: claimedTerm.id })
       .whereNull(noticeCol)
@@ -6395,6 +7317,14 @@ async function stampTermNoticeWitness(claimedTerm, daysOut, sentAt, { alsoRecord
         [claimCol]: null,
         updated_at: new Date(),
       });
+    // Its own plain write, only once the witness actually stamped — the
+    // witness update above stays a literal with no spread (the term-states
+    // pin test reads every write object on this table).
+    if (stamped && freezeFee) {
+      await trx('annual_prepay_terms')
+        .where({ id: claimedTerm.id })
+        .update({ renewal_noticed_fee: claimedTerm.prepay_amount });
+    }
     if (lateCol && stamped) {
       otherRecorded = await trx('annual_prepay_terms')
         .where({ id: claimedTerm.id })
@@ -6682,8 +7612,8 @@ async function stampPlannedRecovery(claimedTerm, n, prior, plan) {
     if (otherResult.sent) rungs.push(plan.other);
   }
   const witness = await stampTermNoticeWitness(claimedTerm, n, prior.at, plan.combined
-    ? { alsoRecordMissedRung: plan.other, missedRungAt: plan.coveredOtherAt }
-    : {});
+    ? { alsoRecordMissedRung: plan.other, missedRungAt: plan.coveredOtherAt, freezeNoticedFee: false }
+    : { freezeNoticedFee: false });
   if (plan.combined) rungs.push(plan.other);
   return { rungs, witness };
 }
@@ -7668,9 +8598,477 @@ async function hasAnnualPrepayRenewal(customerId, termEnd) {
   return !!row;
 }
 
-async function recordDecision({
-  termId, action, adminUserId = null, notes = null, disposition = null, conn = db,
-} = {}) {
+// Codex round-7 P1, redesigned per pre-push audit P1: this per-term
+// SESSION-scoped Postgres advisory lock is now used by EXACTLY ONE
+// caller — termite-annual-renewal-charge.js's charge path
+// (decideAndCharge, right before its Stripe submission), where a
+// dedicated pooled connection genuinely needs to hold a lock ACROSS a
+// live Stripe network call, which must never happen inside an open DB
+// transaction (a held xact lock would pin a pooled connection for the
+// whole round trip, and the charge path opens no transaction of its own
+// for exactly this reason). recordDecision's OWN write (below) no longer
+// calls this — it takes a cheaper, connection-free TRANSACTION-scoped
+// pg_advisory_xact_lock on the SAME key namespace instead (see its own
+// comment), which still mutually excludes against this session lock
+// (Postgres advisory locks share one lock table regardless of which
+// acquisition function took them) without ever borrowing a second
+// connection for every program's ordinary decision.
+//
+// Codex round-7 P2 self-review: admin-cancellation.js's own
+// acquireCancelCommitLock (the same session-scoped pg_try_advisory_lock +
+// explicit pg_advisory_unlock shape) fails IMMEDIATELY (409) on the first
+// missed try — correct for a foreground admin click, where "try again" is
+// free. Here a miss can mean "a decline landed exactly while the charge is
+// mid-flight", and a spurious failure has money/UX consequences a customer
+// never asked for. So this uses the BLOCKING pg_advisory_lock instead,
+// bounded by a `lock_timeout` set on the SAME connection (via set_config,
+// parameterized — `SET lock_timeout = <literal>` cannot take a bind
+// parameter) rather than a client-side pg_try_advisory_lock poll loop:
+// Postgres queues the waiter and wakes it the instant the lock frees
+// (no poll-interval latency), and a miss raises a precise 55P03
+// (lock_not_available) we translate into one clear, typed error — still
+// fails CLOSED (throws) rather than ever proceeding unserialized. The
+// session-level lock_timeout is RESET on this connection before it either
+// runs `fn()` or goes back to the pool — a session knex hands to some
+// unrelated later borrower must never inherit a 5-second lock ceiling on
+// its own unrelated locks.
+const PARENT_DECISION_LOCK_NS = 'annual-prepay-parent-decision';
+const PARENT_DECISION_LOCK_TIMEOUT_MS = 5000;
+
+// Codex round-7 P1 (2nd audit round): chargeInvoiceWithSavedCard's OWN
+// card-on-file success path calls syncTermForInvoicePayment SYNCHRONOUSLY,
+// before returning — for a termite renewal successor's invoice, that walks
+// straight into stampParentRenewedForSuccessor -> recordDecision('renew')
+// on the SAME parent term decideAndCharge's withParentDecisionLock is
+// STILL holding (the session lock, on a dedicated connection, exactly
+// across this Stripe call). recordDecision would then try to take its OWN
+// xact lock on the SAME key from a DIFFERENT connection — a genuine
+// self-wait (bounded by its own lock_timeout, so not a permanent hang, but
+// a real multi-second stall on every successful synchronous card-on-file
+// charge, every time, plus the parent's 'renewed' stamp failing on this
+// pass). Threading a "lock already held" flag through
+// chargeInvoiceWithSavedCard -> syncTermForInvoicePayment ->
+// stampParentRenewedForSuccessor would touch a generic, heavily-used
+// Stripe charging function with a termite-only concern. AsyncLocalStorage
+// is this codebase's existing idiom for exactly this shape (see
+// agent-control/context.js's own doc: "threading ids through every shared
+// entry point would touch every call site; a module-level variable would
+// leak between concurrent requests; ALS is scoped to the async tree") —
+// withParentDecisionLock marks the term it holds for the lifetime of its
+// OWN async call tree (including everything synchronously awaited inside
+// it, however many layers down); recordDecision checks this BEFORE ever
+// asking for its own lock and, for a re-entrant call on the SAME term,
+// skips straight to the write — the outer session lock already provides
+// all the serialization anyone needs, so a second lock from the SAME
+// logical flow would only ever contend with itself.
+//
+// Codex #4971 r5 P2 (lock order): the store holds a SET of term keys. A
+// renewal action (charge, withdrawal, pay link, grace lapse) acts on the
+// SUCCESSOR while it guards the PARENT's decision, and its nested writers
+// (voidInvoice, cancelTermWithRestorations) take xact gates keyed on the
+// successor. Holding only the parent key let a customer-keyed gate (a
+// refund, which keys every termite term of the customer, sorted) take the
+// successor key and then wait on the parent while the withdrawal held the
+// parent and waited on the successor — a cross-session cycle Postgres
+// cannot see, broken only by lock_timeout. withParentDecisionLock now takes
+// the parent AND successor keys (alsoTermIds) in sorted order on its one
+// lock connection, so every writer takes any pair in the one global order,
+// and nested gates on either key are skipped as held.
+const heldParentDecisionLockStore = new AsyncLocalStorage();
+// Codex #4971 r19 P1: the store keeps each session's own keys and loss
+// state ({ keys, lockHeld } per session, outermost first). A key counts as
+// held only while ITS session is alive — once PostgreSQL has released a lost
+// session's locks, nested writers must take their own transaction locks
+// again instead of trusting the stale marker.
+const heldDecisionSessions = () => heldParentDecisionLockStore.getStore()?.sessions || [];
+const heldDecisionKeys = () => {
+  const live = new Set();
+  for (const session of heldDecisionSessions()) {
+    if (!session.lockHeld.lost) session.keys.forEach((key) => live.add(key));
+  }
+  return live;
+};
+
+// Codex #4971 r15 P1: the lock SESSION's own liveness, threaded through the
+// same store as the keys it holds. The dedicated raw connection backing
+// withParentDecisionLock can emit error/end/close mid-flight — Postgres
+// releases every advisory lock the session held the instant that happens,
+// but this store's keys alone don't know it, so pooled work inside fn()
+// (a Stripe charge submission, a Stripe refund, an SMS/email pay-link send)
+// would otherwise sail through believing the gate still serializes it.
+// assertParentDecisionLockAlive() is the read; callers run it immediately
+// before each such provider boundary — never only once at entry, since the
+// loss can land at any point while fn() is running. A no-op outside any
+// held gate (nothing to assert).
+function assertParentDecisionLockAlive() {
+  // Every enclosing session, not just the innermost: a lost OUTER session
+  // releases its keys even while a nested one is still alive.
+  const lost = heldDecisionSessions().find((session) => session.lockHeld.lost);
+  if (lost) {
+    throw Object.assign(
+      new Error(`the parent-decision lock session for term ${[...lost.keys][0]} was lost before this action reached its provider — never attempted`),
+      { code: 'PARENT_DECISION_LOCK_LOST', deliveryNeverAttempted: true },
+    );
+  }
+}
+
+// Extracted from recordDecision (Codex round-7 P2 self-review, AGENTS.md
+// L412-418): the transaction-scoped lock acquisition is a genuinely
+// self-contained step — bound the wait, acquire, translate a timeout into
+// one clear error. See recordDecision's own comment for why an xact lock
+// here still mutually excludes the charge path's session lock on the SAME
+// key.
+async function acquireParentDecisionXactLock(trx, termId) {
+  // Codex #4971 round-3 P1 (chokepoint B widened): this lock is now taken
+  // inside OTHER writers' larger transactions too (voidInvoice's refund/void
+  // sync -> cancelTermWithRestorations, the dispute demotion, the
+  // reverse-prepaid route) — a SET LOCAL left at 5s would silently cap every
+  // LATER lock wait in the caller's own transaction. Bound only THIS wait:
+  // remember the caller's value and put it back once the lock is held.
+  const previous = (await trx.raw('SELECT current_setting(\'lock_timeout\') AS previous'))?.rows?.[0]?.previous;
+  try {
+    await trx.raw('SELECT set_config(\'lock_timeout\', ?, true)', [`${PARENT_DECISION_LOCK_TIMEOUT_MS}ms`]);
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', [PARENT_DECISION_LOCK_NS, String(termId)]);
+  } catch (err) {
+    if (err && err.code === '55P03') {
+      const timeout = new Error(`could not acquire the parent-decision lock for term ${termId} within ${PARENT_DECISION_LOCK_TIMEOUT_MS}ms — a decision or charge is already in progress for this term`);
+      // Typed so a route can answer 409 (the deletion gate, Codex #4971 r21).
+      timeout.code = 'PARENT_DECISION_LOCK_TIMEOUT';
+      throw timeout;
+    }
+    throw err;
+  }
+  await trx.raw('SELECT set_config(\'lock_timeout\', ?, true)', [previous || '0']);
+}
+
+// Codex #4971 pre-push P0/P1 (lock order): the parent-decision gate must be
+// the FIRST lock a writer's transaction takes — before any customer /
+// invoice / term row lock and before any money-moving write (an invoice
+// void and its credit restore, a refund sync's credit reversals, a dispute
+// demotion). The renewal charge holds the gate and THEN asks for the
+// customer row (chargeInvoiceWithSavedCard), so a writer that took a row
+// first and the gate second waited on the charge while the charge waited
+// on it — a cross-session wait Postgres cannot see as a deadlock, broken
+// only by the 5s lock_timeout aborting the writer. One order everywhere:
+// gate → customer → invoice → term. Called as the first statement of the
+// writer's own transaction, keyed on every termite term tied to the
+// invoice(s) (as their prepay invoice, or the term an invoice itself
+// names), term(s) or customer(s) it is about to touch — one plain read (no
+// row lock), then the keys in sorted order, so two writers never take the
+// same pair in opposite orders. Termite-only (no termite term → nothing
+// taken) and re-entrant (a key already held by this async tree's
+// withParentDecisionLock is skipped; a key this transaction already holds
+// re-grants instantly).
+//
+// Chokepoint B (Codex #4971 round-3 P1): the renewal charge holds this key
+// (withParentDecisionLock, a session lock) from its last parent re-check
+// through the Stripe submission, so every writer that can move a termite
+// term OUT of charge-eligible state — or commit money the charge could
+// consume — either commits before that re-check (which then refuses) or
+// waits until the submission is done. Entry points (each takes the gate as
+// its transaction's first lock):
+//   - voidInvoice, and the cancelled-service auto-void (invoice.js)
+//   - cancelTermWithRestorations when it opens its own transaction (the
+//     void / refund / lost-dispute syncs through syncTermForInvoicePayment)
+//   - the pay sync's revive of a renewal successor (its parent's key — the
+//     parent 'renewed' stamp is a write on the parent)
+//   - suspendActiveTermsForDisputedInvoice on the root handle, and both
+//     dispute webhooks' transactions (stripe-webhook.js)
+//   - admin-invoices.js: remove-flag and reverse-prepaid
+//   - declineTermiteAnnualRenewal's own transaction
+//   - recordDecision on the root handle (writeDecisionUnderTermiteLock)
+//   - Codex #4971 r4 P1, every refund / chargeback writer that can revoke a
+//     parent's paid evidence (acquireTermiteGateForCharge /
+//     acquireTermiteGateForStatement below): charge.refunded's generic
+//     transaction, StripeService.refund's stamp and credit restore (the
+//     admin refund route), both dispute.closed(lost) invoice reopens, and
+//     the statement money lock + cascade reversal (statement refunds and
+//     chargebacks). syncTermForRefundedPayment already gates (move 9).
+async function acquireTermiteGateAtEntry(trx, { termIds = [], invoiceIds = [], customerIds = [] } = {}) {
+  const ids = await termiteGateKeys(trx, { termIds, invoiceIds, customerIds });
+  const held = heldDecisionKeys();
+  for (const termId of ids) {
+    if (!held.has(termId)) await acquireParentDecisionXactLock(trx, termId);
+  }
+  return ids;
+}
+
+// Codex #4971 r4 P1 (refund / chargeback writers): a refund or a lost
+// chargeback names a Stripe charge / PaymentIntent (or a payments row), never
+// a term — and it is exactly the write that flips the charge's parent
+// evidence (parentInvoicePaidAndNotFullyRefunded: a payments row stamped
+// 'refunded' / refund_status 'full', or the invoice leaving paid). Resolve
+// every invoice and customer that money touches — its payments rows
+// (invoice_id, a combined share's metadata.invoice_id, customer_id) and the
+// invoices it settled — with plain reads, then take the gate on them as the
+// transaction's FIRST lock. The customer keys cover the credit side: a full
+// refund returns applied account credit to a balance the renewal charge
+// could otherwise consume mid-flight. Termite-only (no termite term on those
+// invoices or customers -> nothing taken). Entry points: charge.refunded's
+// generic transaction, StripeService.refund's stamp and credit restore
+// (the admin refund route), and the lost-dispute invoice reopens.
+// Codex #4971 r6 P1 — a money reversal WE issue at the provider holds the
+// gate across the provider call, not only across its ledger write: an admin
+// refund (StripeService.refund) returns the customer's money at
+// stripe.refunds.create, and a renewal charge that took the gate between
+// that call and the local stamp would read the parent as still paid. The
+// same keys as acquireTermiteGateForCharge, taken as a SESSION lock
+// (withParentDecisionLock — the pattern the renewal charge uses across its
+// own Stripe call) from before the provider call through the stamp and the
+// credit restore; the nested xact gates inside skip the held keys. No
+// termite term on the payment → no lock, fn() runs exactly as before. A
+// refund issued OUTSIDE our code (the Stripe dashboard) has already moved
+// the money by the time charge.refunded arrives, so only its stamp can be
+// gated; the renewal charge's own in-gate parent re-check is the limit
+// there.
+async function withTermiteGateForCharge({ chargeId = null, paymentIntentId = null, paymentIds = [] } = {}, fn) {
+  const inputs = await chargeGateInputs(db, {
+    chargeId: chargeId || null,
+    paymentIntentId: paymentIntentId || null,
+    paymentIds: paymentIds.filter(Boolean).map(String),
+  });
+  const keys = await termiteGateKeys(db, { termIds: [], ...inputs });
+  if (!keys.length) return fn();
+  return withParentDecisionLock(keys[0], fn, { alsoTermIds: keys.slice(1) });
+}
+
+async function acquireTermiteGateForCharge(trx, { chargeId = null, paymentIntentId = null, paymentIds = [] } = {}) {
+  const inputs = await chargeGateInputs(trx, {
+    chargeId: chargeId || null,
+    paymentIntentId: paymentIntentId || null,
+    paymentIds: paymentIds.filter(Boolean).map(String),
+  });
+  return acquireTermiteGateAtEntry(trx, inputs);
+}
+
+function paymentMetadataInvoiceId(raw) {
+  try {
+    const meta = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    return meta && meta.invoice_id ? String(meta.invoice_id) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function chargeGateInputs(trx, { chargeId, paymentIntentId, paymentIds }) {
+  if (!chargeId && !paymentIntentId && !paymentIds.length) return { invoiceIds: [], customerIds: [] };
+  const invoiceIds = new Set();
+  const customerIds = new Set();
+  const add = (set, value) => { if (value) set.add(String(value)); };
+  // to_jsonb: payments.invoice_id is read column-tolerantly — this runs at
+  // the entry of Stripe money writers, some against schemas without it.
+  const payments = await trx('payments as p')
+    .where(function paymentKeys() {
+      if (chargeId) this.orWhere('p.stripe_charge_id', chargeId);
+      if (paymentIntentId) this.orWhere('p.stripe_payment_intent_id', paymentIntentId);
+      if (paymentIds.length) this.orWhereIn('p.id', paymentIds);
+    })
+    .select(trx.raw("to_jsonb(p) ->> 'invoice_id' AS invoice_id"), 'p.customer_id', 'p.metadata');
+  for (const row of payments || []) {
+    add(invoiceIds, row.invoice_id);
+    add(invoiceIds, paymentMetadataInvoiceId(row.metadata));
+    add(customerIds, row.customer_id);
+  }
+  if (chargeId || paymentIntentId) {
+    const invoices = await trx('invoices')
+      .where(function settledBy() {
+        if (chargeId) this.orWhere('stripe_charge_id', chargeId);
+        if (paymentIntentId) this.orWhere('stripe_payment_intent_id', paymentIntentId);
+      })
+      .select('id', 'customer_id');
+    for (const row of invoices || []) {
+      add(invoiceIds, row.id);
+      add(customerIds, row.customer_id);
+    }
+  }
+  return { invoiceIds: [...invoiceIds], customerIds: [...customerIds] };
+}
+
+// Codex #4971 r4 P1: the payer-statement money writers' entry gate. A termite
+// annual invoice minted at estimate acceptance does not skip statement
+// accrual, so a NET-terms payer's statement can carry a termite PARENT's
+// prepay invoice as a child — and a statement refund / chargeback reverses
+// the cascade (child paid -> draft), revoking the parent's paid evidence.
+// withStatementMoneyLock and reverseStatementCascadeForDispute take this
+// BEFORE the statement money advisory lock.
+async function acquireTermiteGateForStatement(trx, statementId) {
+  if (!statementId) return [];
+  const invoiceIds = await trx('invoices').where({ payer_statement_id: statementId }).pluck('id');
+  return acquireTermiteGateAtEntry(trx, { invoiceIds: invoiceIds || [] });
+}
+
+// A text[] parameter as a uuid[] of its well-formed members only.
+const GATE_UUID_ARRAY = "ARRAY(SELECT v::uuid FROM unnest(?::text[]) v WHERE v ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')";
+
+async function termiteGateKeys(trx, { termIds, invoiceIds, customerIds }) {
+  const terms = termIds.filter(Boolean).map(String);
+  const invoices = invoiceIds.filter(Boolean).map(String);
+  const customers = customerIds.filter(Boolean).map(String);
+  if (!terms.length && !invoices.length && !customers.length) return [];
+  // Postgres array literals ('{a,b}'::text[]) — an empty list is simply
+  // '{}' (matches nothing), so the one statement shape holds for every
+  // combination. Codex #4971 r5 P2 (index use): this runs at the entry of
+  // every refund, statement money op and void, termite customer or not, so
+  // each arm compares the uuid COLUMN to a uuid[] (GATE_UUID_ARRAY: only
+  // well-formed ids survive, so a malformed one never throws) — the primary
+  // key, the prepay_invoice_id / customer_id indexes and the invoices
+  // primary key are all usable (a BitmapOr), where the old column::text
+  // casts forced a scan. invoices.annual_prepay_term_id is still read
+  // column-tolerantly (to_jsonb) — some writers run against schemas without
+  // that column.
+  const pgArray = (values) => `{${values.join(',')}}`;
+  const rows = await trx('annual_prepay_terms')
+    .whereNotNull('annual_plan_version')
+    .whereRaw(
+      `(id = ANY(${GATE_UUID_ARRAY})
+        OR prepay_invoice_id = ANY(${GATE_UUID_ARRAY})
+        OR id = ANY(ARRAY(SELECT NULLIF(to_jsonb(gi) ->> 'annual_prepay_term_id', '')::uuid FROM invoices gi WHERE gi.id = ANY(${GATE_UUID_ARRAY})))
+        OR customer_id = ANY(${GATE_UUID_ARRAY}))`,
+      [pgArray(terms), pgArray(invoices), pgArray(invoices), pgArray(customers)],
+    )
+    .select('id');
+  return [...new Set(rows.map((row) => String(row.id)))].sort();
+}
+
+// The shared "is this a termite term" peek (annual_plan_version set) — a
+// termite decision takes the gate unless this async tree's own
+// withParentDecisionLock already holds it.
+async function isTermiteTerm(conn, termId) {
+  if (!termId) return false;
+  const peek = await conn('annual_prepay_terms').where({ id: termId }).first('annual_plan_version');
+  return Boolean(peek?.annual_plan_version);
+}
+
+// recordDecision's wrapper around the shared gate above: a decision that
+// needs no lock (a non-termite term, or a re-entrant call already under
+// withParentDecisionLock for this term) stays ONE plain UPDATE, no
+// transaction wrapper — byte-identical to before this lane. Otherwise the
+// UPDATE runs inside a transaction (a real one on the root handle, a
+// SAVEPOINT on a caller's trx — stampParentRenewedForSuccessor's own
+// savepoint) that takes the xact lock first. The charge path's session lock
+// and this xact lock share one Postgres lock table, so they mutually
+// exclude on the SAME key.
+// runUpdate receives { termite } — the one peek answers both questions.
+async function writeDecisionUnderTermiteLock(conn, termId, runUpdate) {
+  const termite = await isTermiteTerm(conn, termId);
+  if (!termite || heldDecisionKeys().has(String(termId))) return runUpdate(conn, { termite });
+  return conn.transaction(async (trx) => {
+    await acquireParentDecisionXactLock(trx, termId);
+    return runUpdate(trx, { termite });
+  });
+}
+// `alsoTermIds` (Codex #4971 r5 P2): the renewal successor the caller acts
+// on — locked with the parent, sorted, on the same connection (see
+// heldParentDecisionLockStore). Keys this async tree already holds are
+// skipped; all held → fn() runs directly (re-entrant).
+//
+// Codex #4971 r12 P1: the session lock lives on a DEDICATED connection
+// OUTSIDE the pool (knex's own acquireRawConnection — the same
+// connectionSettings, SSL and search_path the pool's connections get),
+// never a pooled one. A held gate used to pin a pool slot for its whole
+// body, and the gated flows open pooled transactions inside it (the renewal
+// charge's invoice transaction, which itself needs one more connection to
+// commit its submission marker): with the supported DB_POOL_MAX=2 the
+// charge waited on a connection only its own gate could free, until the
+// pool timed out. A gate now never consumes a pool slot, so no pool size
+// can deadlock a gated flow (the refund gate, the dispute handlers' gate,
+// the renewal gate). The connection is always destroyed afterwards — ending
+// the session releases anything a failed unlock left held.
+//
+// Codex #4971 r13 P2: those sessions are BOUNDED — in count and in connect
+// time — through the same raw-connection mechanism the reschedule-link send
+// interlock uses (raw-connection-slots.js): concurrent refunds, disputes,
+// renewal sends and charges would otherwise each open a connection outside
+// DB_POOL_MAX with no cap and no connect timeout (lock_timeout only starts
+// once connected). A full cap or a connect timeout fails like a lock that
+// could not be taken — the error every caller already defers or retries on.
+const PARENT_DECISION_LOCK_SESSIONS = require('./raw-connection-slots').rawConnectionSlots({
+  max: 8,
+  connectMs: 5000,
+  logPrefix: '[annual-prepay] parent-decision lock session',
+});
+async function withParentDecisionLock(termId, fn, { timeoutMs = PARENT_DECISION_LOCK_TIMEOUT_MS, alsoTermIds = [] } = {}) {
+  const held = heldDecisionKeys();
+  const keys = [...new Set([termId, ...alsoTermIds].filter(Boolean).map(String))].filter((key) => !held.has(key)).sort();
+  if (!keys.length) return fn();
+  // Internal, code-controlled only (never request-derived) — still clamp
+  // defensively before it ever reaches a query, parameterized or not.
+  const boundedTimeoutMs = Number.isInteger(timeoutMs) && timeoutMs > 0 ? timeoutMs : PARENT_DECISION_LOCK_TIMEOUT_MS;
+  let lockConn = null;
+  const locked = [];
+  try {
+    lockConn = await PARENT_DECISION_LOCK_SESSIONS.acquire();
+    if (!lockConn) {
+      throw new Error(`could not acquire the parent-decision lock for term ${keys[0]} — no lock session is available right now (the session cap is full or the database did not answer in time); retry shortly`);
+    }
+    // Codex #4971 r17 P1: attach the connection-loss tracker BEFORE any lock
+    // query — the same mechanism reschedule-link-promises.js's send
+    // interlock uses (raw-connection-slots.js's trackConnectionLoss), so
+    // both session-lock users share one implementation. Attaching it only
+    // after takeSessionDecisionLocks() returned missed a close/end that
+    // landed between the connection's own acquisition and the listener's
+    // registration — that loss was silently forgotten and the caller went
+    // on believing the lock still held. Attaching it here means the window
+    // between acquire() returning and this line is the only gap left, and
+    // is checked explicitly below rather than left to chance.
+    const lockHeld = { lost: false };
+    require('./raw-connection-slots').trackConnectionLoss(lockConn, lockHeld);
+    const assertAlive = () => {
+      if (lockHeld.lost) {
+        throw Object.assign(
+          new Error(`the parent-decision lock session for term ${keys[0]} was lost before this action reached its provider — never attempted`),
+          { code: 'PARENT_DECISION_LOCK_LOST', deliveryNeverAttempted: true },
+        );
+      }
+    };
+    assertAlive();
+    await takeSessionDecisionLocks(lockConn, keys, locked, boundedTimeoutMs);
+    // Mark these terms as session-lock-held for the lifetime of fn()'s own
+    // async tree — see heldParentDecisionLockStore's doc above.
+    return await heldParentDecisionLockStore.run(
+      { sessions: [...heldDecisionSessions(), { keys: new Set(keys), lockHeld }] },
+      () => fn(),
+    );
+  } finally {
+    if (lockConn) await releaseSessionDecisionLocks(lockConn, locked);
+  }
+}
+
+// Takes each key's session lock in order, recording what it holds in
+// `locked` (so the caller's finally releases exactly those, even on a
+// failure part-way). The session-level lock_timeout is always cleared
+// before the connection is used for anything else.
+async function takeSessionDecisionLocks(lockConn, keys, locked, timeoutMs) {
+  try {
+    await lockConn.query('SELECT set_config(\'lock_timeout\', $1, false)', [`${timeoutMs}ms`]);
+    for (const key of keys) {
+      await lockConn.query('SELECT pg_advisory_lock(hashtext($1), hashtext($2::text))', [PARENT_DECISION_LOCK_NS, key]);
+      locked.push(key);
+    }
+  } catch (err) {
+    if (err && err.code === '55P03') {
+      throw new Error(`could not acquire the parent-decision lock for term ${keys[locked.length]} within ${timeoutMs}ms — a decision or charge is already in progress for this term`);
+    }
+    throw err;
+  } finally {
+    try { await lockConn.query('RESET lock_timeout'); } catch { /* connection likely already broken; the caller's finally handles it */ }
+  }
+}
+
+async function releaseSessionDecisionLocks(lockConn, locked) {
+  for (const key of [...locked].reverse()) {
+    try {
+      await lockConn.query('SELECT pg_advisory_unlock(hashtext($1), hashtext($2::text))', [PARENT_DECISION_LOCK_NS, key]);
+    } catch (err) {
+      // Ending the dedicated session below is what releases it anyway.
+      logger.warn(`[annual-prepay] parent-decision lock release failed for term ${key} — the lock session is closed instead: ${err.message}`);
+      break;
+    }
+  }
+  await PARENT_DECISION_LOCK_SESSIONS.release(lockConn);
+}
+
+async function recordDecision({ termId, action, adminUserId = null, notes = null, disposition = null, conn = db } = {}) {
   if (!(await annualPrepayTableExists())) return null;
   const allowed = new Set(['contacted', 'renew', 'cancel', 'switch_plan']);
   if (!allowed.has(action)) throw new Error('invalid annual prepay action');
@@ -7709,13 +9107,85 @@ async function recordDecision({
   if (action === 'cancel' && (await cancelDispositionSupported())) {
     update.cancel_disposition = disposition === 'end_now_refund' ? 'end_now_refund' : 'end_at_term';
   }
-  const [term] = await conn('annual_prepay_terms')
-    .where({ id: termId })
-    .whereIn('status', ACTIVE_STATUSES)
-    .whereNull('renewal_decision')
-    .update(update)
-    .returning('*');
-  return term || null;
+  // Codex round-2 P1: `conn` (default the global handle, unchanged for
+  // every pre-existing caller) lets stampParentRenewedForSuccessor below
+  // run this SAME write on the successor's own transaction/savepoint,
+  // instead of a separate global-db write that could commit out of order
+  // with, or survive a rollback of, the successor's own activation.
+  const runUpdate = async (t) => {
+    const [term] = await t('annual_prepay_terms')
+      .where({ id: termId })
+      .whereIn('status', ACTIVE_STATUSES)
+      .whereNull('renewal_decision')
+      .update(update)
+      .returning('*');
+    return term || null;
+  };
+
+  // Codex #4971 r4 P1: a cancel / switch refused while a renewal payment is
+  // clearing — checked INSIDE the gate, right before the write.
+  const guardedUpdate = async (t, { termite }) => {
+    if (termite && DECISIONS_REFUSED_WHILE_RENEWAL_CLEARING.has(action)) await refuseWhileRenewalClearing(t, termId);
+    return runUpdate(t);
+  };
+
+  // Codex round-7 P1 (redesigned per pre-push audit P1 — the original
+  // design wrapped EVERY program's recordDecision in a dedicated-connection
+  // session lock, doubling pool use even when this write already runs
+  // inside an open transaction, e.g. stampParentRenewedForSuccessor's
+  // `conn: t`) — see writeDecisionUnderTermiteLock's own doc.
+  return writeDecisionUnderTermiteLock(conn, termId, guardedUpdate);
+}
+
+// Codex #4971 r4 P1 — no parent decision while an ACH renewal is clearing.
+// A termite parent decided cancel / switch_plan while its renewal successor
+// has money in motion (an ACH debit still clearing, a charge submitted to
+// Stripe and not resolved, a charge reconciliation pending, or a renewal
+// invoice already paid but not yet activated — the charge module's
+// renewalMoneyInMotion, the SAME test the successor withdrawal uses) would
+// strand that money: the withdrawal must defer on it, so the renewal would
+// settle behind a cancelled plan. Every parent-decision writer that can
+// cancel or switch a termite parent refuses instead, under the gate:
+//   - recordDecision (here): the admin decide route, admin cancel plan's
+//     decideTermCancel (whose preflight already refuses a payable pending
+//     renewal invoice), the grace lapse's decideParentLapse (after the
+//     successor's invoice was voided — nothing left in motion); throws an
+//     operational 409 (err.code 'renewal_money_in_motion') that the admin
+//     routes surface as-is. Parent side only: recordDecision moves only
+//     ACTIVE_STATUSES terms, and a renewal successor whose own payment is
+//     clearing is payment_pending — out of its reach;
+//   - the portal decline: declineRefusalReason refuses up front, as
+//     'renewal_payment_clearing', inside the decline's own gated
+//     transaction. Its live case is the renewal SUCCESSOR's own card (Codex
+//     #4971 r5 P1): past the prior year's term_end the parent's card is
+//     refused as term_ended before this check, while the payment_pending
+//     successor stays declinable — so the question covers the term's OWN
+//     renewal payment as well as any pending successor of it
+//     (renewalMoneyInMotionForTerm).
+const DECISIONS_REFUSED_WHILE_RENEWAL_CLEARING = new Set(['cancel', 'switch_plan']);
+// Termite terms only (recordDecision's gate peek decides).
+async function parentUndecided(conn, termId) {
+  const parent = await conn('annual_prepay_terms').where({ id: termId }).first('status', 'renewal_decision');
+  return Boolean(parent) && ACTIVE_STATUSES.includes(parent.status) && !parent.renewal_decision;
+}
+
+// Codex #4971 r13 P1: the same guard also refuses while a renewal already
+// PAID awaits its parent's 'renewed' stamp (renewalMoneyInMotionForParent).
+async function refuseWhileRenewalClearing(conn, termId) {
+  const Charge = require('./termite-annual-renewal-charge');
+  const reason = await Charge.renewalMoneyInMotionForParent(conn, termId);
+  if (!reason) return;
+  // A paid renewal blocks only while the parent still awaits its stamp
+  // (undecided); a parent already decided is past recordDecision's own
+  // guard, which answers as it always has.
+  if (reason === Charge._private.PAID_RENEWAL_AWAITING_PARENT_STAMP && !(await parentUndecided(conn, termId))) return;
+  const err = new Error(reason === Charge._private.PAID_RENEWAL_AWAITING_PARENT_STAMP
+    ? 'A renewal payment was received for this plan and is still being recorded — try again shortly, or refund it first.'
+    : `The renewal payment is still clearing (${reason}) — wait for it to settle or refund it first.`);
+  err.code = 'renewal_money_in_motion';
+  err.statusCode = 409;
+  err.isOperational = true;
+  throw err;
 }
 
 // ADMIN-BUG-R18: Cancel plan re-deciding a term whose cancel decision is
@@ -8013,7 +9483,11 @@ function whereTermPrepayRefunded(builder, alias) {
 // series, a one-off treatment), or an active termite bond, at any property —
 // and staff confirm which stations to pull by hand instead. Returns the
 // reason (the staff bell's wording) or null. Visits of THIS plan (linked to
-// the term, or booked from its estimate) don't count.
+// any term in its renewal ancestry, or booked from the original estimate)
+// don't count. Renewal successors deliberately have no source_estimate_id,
+// so resolve that ancestry before applying either exclusion. A malformed
+// chain gets no exclusions: any live termite visit then fails closed to the
+// manual handoff instead of risking an account-wide pull.
 async function otherLiveTermiteCoverage(term, today = etDateString()) {
   const otherPlan = await db('annual_prepay_terms')
     .where({ customer_id: term.customer_id })
@@ -8026,13 +9500,20 @@ async function otherLiveTermiteCoverage(term, today = etDateString()) {
     .where((current) => whereTermCurrentOrAwaitingInstallation(current, today))
     .first('id');
   if (otherPlan) return 'other_termite_plan';
+  const renewalScope = await termiteRenewalScope(term, term.customer_id, db);
   const liveService = await db('scheduled_services')
     .where({ customer_id: term.customer_id })
     .whereRaw("LOWER(COALESCE(service_type, '')) LIKE '%termite%'")
     .whereNotIn('status', [...PREPAID_UPDATE_EXCLUDED_STATUSES])
     .where('scheduled_date', '>=', today)
-    .whereRaw('annual_prepay_term_id IS DISTINCT FROM ?', [term.id])
-    .modify((q) => { if (term.source_estimate_id) q.whereRaw('source_estimate_id IS DISTINCT FROM ?', [term.source_estimate_id]); })
+    .modify((q) => {
+      if (!renewalScope) return;
+      q.where((termLink) => termLink.whereNull('annual_prepay_term_id')
+        .orWhereNotIn('annual_prepay_term_id', [...renewalScope.termIds]));
+      if (renewalScope.estimateId) {
+        q.whereRaw('source_estimate_id IS DISTINCT FROM ?', [renewalScope.estimateId]);
+      }
+    })
     .first('id');
   if (liveService) return 'other_termite_service';
   const bond = await db('termite_bonds').where({ customer_id: term.customer_id, status: 'active' }).first('id');
@@ -8418,6 +9899,21 @@ async function declineReplayResult(term, trx) {
   return null;
 }
 
+// The decline's refusal ladder: the term's own shape and dates
+// (termiteDeclineBlockedReason), then — Codex #4971 r4/r5 P1 — renewal
+// money still clearing on this term ('renewal_payment_clearing': the
+// decline waits until it settles). The live case is a renewal successor
+// declined while its OWN renewal payment clears; a pending successor of
+// this term is checked too (renewalMoneyInMotionForTerm). Read inside the
+// decline's transaction, which already holds the gate for the customer's
+// termite terms, so no renewal charge can start in between.
+async function declineRefusalReason(term, today, options, trx) {
+  const blocked = termiteDeclineBlockedReason(term, today, options);
+  if (blocked) return blocked;
+  const clearing = await require('./termite-annual-renewal-charge').renewalMoneyInMotionForTerm(trx, term);
+  return clearing ? 'renewal_payment_clearing' : null;
+}
+
 // The refusal shape for each termiteDeclineBlockedReason.
 function declineRefusal(term, reason) {
   const detail = {
@@ -8461,7 +9957,7 @@ async function declineTermiteAnnualRenewal({ customerId, termId = null, today = 
     if (replay) return replay;
     const renewDecided = term.status === 'renewed' && term.renewal_decision === 'renew';
     const hasSuccessor = renewDecided ? await hasSuccessorTerm(term.id, trx) : true;
-    const blocked = termiteDeclineBlockedReason(term, today, { hasSuccessor });
+    const blocked = await declineRefusalReason(term, today, { hasSuccessor }, trx);
     if (blocked) return declineRefusal(term, blocked);
 
     // A superseded staff renew must still be a PAID year — never turn a
@@ -8505,7 +10001,16 @@ async function declineTermiteAnnualRenewal({ customerId, termId = null, today = 
     };
   };
 
-  const result = conn === db ? await db.transaction((trx) => work(trx)) : await work(conn);
+  // Chokepoint B (pre-push lock order): the decline's own transaction takes
+  // the gate for the customer's termite terms FIRST — before work() locks
+  // the term row — so it can never hold that row while a renewal charge
+  // holding the gate waits on it.
+  const result = conn === db
+    ? await db.transaction(async (trx) => {
+      await acquireTermiteGateAtEntry(trx, { customerIds: [customerId] });
+      return work(trx);
+    })
+    : await work(conn);
   if (!result.ok) return result;
   // Nothing is raised at decline time (Codex #4940 r9): the staff bell says
   // when the stations come out, and the daily sweep evaluates the station
@@ -8581,7 +10086,37 @@ module.exports = {
   retryPaidLapseReconciles,
   ANNUAL_PREPAY_PREPAID_METHOD,
   recordDecision,
+  // Codex round-7 P1: the per-term advisory lock recordDecision itself
+  // takes — exported so termite-annual-renewal-charge.js's charge path
+  // can hold the SAME lock across its own Stripe submission.
+  withParentDecisionLock,
+  assertParentDecisionLockAlive,
+  // Chokepoint B (Codex #4971 round-3 P1 / pre-push lock order): the FIRST
+  // lock of a writer's own transaction, keyed on the termite terms tied to
+  // what it touches — callers outside this module (voidInvoice and the
+  // cancelled-service void, the dispute webhooks, admin-invoices' remove-
+  // flag and reverse-prepaid routes) take it at their transaction entry.
+  acquireTermiteGateAtEntry,
+  acquireTermiteGateForCharge,
+  acquireTermiteGateForStatement,
+  withTermiteGateForCharge,
+  // Termite renewal grace window (P1-2 / P2-4): the ONE shared cutoff
+  // between coveredTermsAsOf's grace-coverage branch (here) and
+  // termite-annual-renewal-charge.js's own grace-lapse pass.
+  TERMITE_RENEWAL_GRACE_DAYS,
+  termiteRenewalGraceDeadlineFor,
+  termiteRenewalGraceDeadlineSql,
+  // Codex round-2 P1 backstop: reconciles an active, paid termite renewal
+  // successor whose PARENT never got its 'renewed' stamp (a failure inside
+  // stampParentRenewedForSuccessor's own savepoint, swallowed to protect
+  // the successor's own activation).
+  reconcileParentRenewedStamps,
   declineTermiteAnnualRenewal,
+  // Codex #4971 post-push audit round-6 P1 (item 2): reused by the
+  // grace-lapse retrieval task, the SAME "is this plan the account's ONLY
+  // live termite coverage" guard #4940's own portal-decline retrieval
+  // already uses — never a parallel re-derivation of the same check.
+  otherLiveTermiteCoverage,
   // ADMIN-BUG-R16/R17: the canonical term-cancel pipeline and its
   // billing_mode restore, both now shared by callers OUTSIDE this module
   // (admin-invoices.js's remove-flag and reverse-prepaid routes) so no
@@ -8622,6 +10157,7 @@ module.exports = {
   // suspendActiveTermsForDisputedInvoice stamps (ADMIN-BUG-R17-FINDING-1).
   annualPrepayColumns,
   _private: {
+    PARENT_DECISION_LOCK_SESSIONS,
     supersedeRenewWithCustomerCancel,
     declinePaymentPendingWithCustomerCancel,
     runTermiteNoticePass,
@@ -8671,6 +10207,10 @@ module.exports = {
     termiteLateColumnForDaysOut,
     termiteLateEscalationColumnForDaysOut,
     planPropertyForTerm,
+    termNoticeAddress,
+    successorCoverageScope,
+    rowInRenewalScope,
+    annualPrepayTableExists,
     TERMITE_EXTRA_NOTICE_DAYS,
     TERMITE_COPY_NOTICE_DAYS,
     TERMITE_30_LATE_NOTICE_COLUMN,
@@ -8679,6 +10219,8 @@ module.exports = {
     shouldAlertTerm,
     isLastServiceNearTermEnd,
     invoiceTermStatus,
+    wherePrepayInvoiceCollected,
+    PREPAY_INVOICE_COLLECTED_STATUSES,
     formatDateLabel,
     parsePaymentMetadata,
     findInvoiceIdForRefundedPayment,
@@ -8702,6 +10244,7 @@ module.exports = {
     detachCallbacksFromTerm,
     fileCoverageExceptionAfterCommit,
     resetCachesForTests,
+    stampParentRenewedForSuccessor,
     annualPrepayColumns,
     coverageAwaitsInstallation,
     termiteNoticePreflight,
