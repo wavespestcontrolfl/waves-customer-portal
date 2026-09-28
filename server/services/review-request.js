@@ -514,12 +514,14 @@ function isAccountHolderRecipient(contact, customer) {
 // must reach the same person, never add a second recipient. Null = the plan
 // stays as it is. Decided at the step that just sent, so the first-send plan
 // re-resolve (which only runs before anything is sent) can never undo it.
-function topicFollowupPlan(seq, plan, { dayZeroToAccountHolder = false } = {}) {
-  if (!dayZeroToAccountHolder) return null;
-  if ((seq.current_step || 0) !== 0 || seq.ask_context == null) return null;
+// The topic is read fresh from the row: the detached classifier can store it
+// while the Day-0 send is in flight, after the runner loaded `seq`.
+async function topicFollowupPlan(seq, plan, { dayZeroToAccountHolder = false } = {}) {
+  if (!dayZeroToAccountHolder || (seq.current_step || 0) !== 0) return null;
   if (!isRecurringAskPlan(plan)) return null;
   if (!require("../config/feature-gates").isEnabled("reviewDay0Context")) return null;
-  return [...plan, OUTREACH.TOPIC_FOLLOWUP_STEP];
+  const row = await db("review_sequences").where({ id: seq.id }).first("ask_context");
+  return row?.ask_context != null ? [...plan, OUTREACH.TOPIC_FOLLOWUP_STEP] : null;
 }
 
 // Service types whose Day-0 ask waits for the customer to see the result
@@ -6570,12 +6572,15 @@ const ReviewService = {
       if (!require("../config/feature-gates").isEnabled("reviewDay0Context")) return stop("completed");
       // The Day-0 text invites "Reply if anything's off": a customer who has
       // texted since it went out is in a conversation with the office, so no
-      // automated review follow-up. Counted from the Day-0 touch's own row,
-      // minted before the send — last_touch_at is only written after the
-      // send's bookkeeping, and a fast reply can land before it.
+      // automated review follow-up. Counted from the Day-0 attempt that went
+      // out — the latest step-0 row (the runner mints no attempt after a
+      // successful send), anchored on its own created_at, minted before the
+      // send: last_touch_at is only written after the send's bookkeeping, and
+      // a fast reply can land before it. A text between a failed attempt and
+      // the retry that delivered is not a reply to it.
       const dayZeroTouch = await db("review_requests")
         .where({ sequence_id: seq.id, sequence_step: 0 })
-        .orderBy("created_at", "asc")
+        .orderBy("created_at", "desc")
         .first("created_at");
       const repliedSince = await db("sms_log")
         .where({ customer_id: seq.customer_id, direction: "inbound" })
@@ -6630,7 +6635,7 @@ const ReviewService = {
 
     if (outcome.ok && outcome.sent) {
       // Same resolver and customer row sendOutreachTouch just used.
-      const followupPlan = topicFollowupPlan(seq, plan, {
+      const followupPlan = await topicFollowupPlan(seq, plan, {
         dayZeroToAccountHolder: outcome.channel === "sms"
           && isAccountHolderRecipient(require("./customer-contact").getServiceContactSmsRecipient(customer), customer),
       });

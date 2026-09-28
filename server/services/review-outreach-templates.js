@@ -234,6 +234,11 @@ const TOPIC_FOLLOWUP_TEMPLATE_KEY = 'topic_followup';
 // Appended to a recurring plan once its Day-0 ask has gone out (review-request
 // .js topicFollowupPlan) — same day-4 weekday timing one-time customers get.
 const TOPIC_FOLLOWUP_STEP = Object.freeze({ day: 4, channel: 'sms', templateKey: TOPIC_FOLLOWUP_TEMPLATE_KEY, weekdaysOnly: true });
+// Templates only the cadence runner may send — never a one-off send or an
+// operator-built plan (admin-reviews.js refuses them; the composer registry
+// leaves them out). topic_followup asks about the topic stored on its own
+// recurring sequence.
+const CADENCE_ONLY_TEMPLATE_KEYS = Object.freeze([TOPIC_FOLLOWUP_TEMPLATE_KEY]);
 const RECURRING_SEQUENCE_PLAN = [
   { day: 0, channel: 'sms', templateKey: DAY0_ASK_TEMPLATE_KEY },
 ];
@@ -292,6 +297,7 @@ module.exports = {
   DAY0_ASK_TEMPLATE_KEY,
   TOPIC_FOLLOWUP_TEMPLATE_KEY,
   TOPIC_FOLLOWUP_STEP,
+  CADENCE_ONLY_TEMPLATE_KEYS,
   isDay0ControlledAsk,
   DEFAULT_SEQUENCE_PLAN,
   RECURRING_SEQUENCE_PLAN,

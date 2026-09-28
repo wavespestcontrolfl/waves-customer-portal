@@ -581,6 +581,18 @@ describe('review sequences — cadence engine', () => {
       expect(new Date(seq.next_run_at).getTime()).toBeGreaterThan(Date.now() + 2 * 86400000);
     });
 
+    test('a topic the classifier stores while the Day-0 send is in flight still earns the follow-up (codex r4 on #5246)', async () => {
+      const mock = setup({ seq: { ask_context: null } });
+      mockSendCustomerMessage.mockImplementationOnce(async () => {
+        mock.__state.rows.review_sequences[0].ask_context = TOPIC;
+        return { sent: true, deliveryOutcome: 'accepted', auditLogId: 'audit-1' };
+      });
+      await ReviewService.processReviewSequences();
+
+      expect(seqRow(mock)).toMatchObject({ status: 'active', current_step: 1 });
+      expect(JSON.parse(seqRow(mock).plan)).toEqual([...RECURRING, FOLLOWUP]);
+    });
+
     test.each([
       ['the gate is off', { gateOff: true }],
       ['no topic was stored', { seq: { ask_context: null } }],
@@ -656,6 +668,21 @@ describe('review sequences — cadence engine', () => {
 
       expect(mockSendCustomerMessage).not.toHaveBeenCalled();
       expect(seqRow(mock)).toMatchObject({ status: 'stopped', stop_reason: 'responded' });
+    });
+
+    test('a text between a failed Day-0 attempt and the retry that delivered does not cancel the follow-up (codex r4 on #5246)', async () => {
+      const failedAt = Date.now() - 5 * 86400000;
+      const deliveredAt = Date.now() - 4 * 86400000;
+      const mock = setup({ seq: { ...followupDue, last_touch_at: new Date(deliveredAt + 5000) }, sms: [
+        { id: 'in-mid', customer_id: 'tf-1', direction: 'inbound', message_body: 'Gate code changed to the new one', created_at: new Date(failedAt + 3600000) },
+      ] });
+      mock.__state.rows.review_requests.push(
+        { id: 'rr-d0-failed', sequence_id: 'seq-tf', sequence_step: 0, customer_id: 'tf-1', channel: 'sms', template_key: 'day0_ask', status: 'failed', created_at: new Date(failedAt) },
+        { id: 'rr-d0-sent', sequence_id: 'seq-tf', sequence_step: 0, customer_id: 'tf-1', channel: 'sms', template_key: 'day0_ask', status: 'sent', created_at: new Date(deliveredAt) },
+      );
+      await ReviewService.processReviewSequences();
+
+      expect(lastTouch(mock).template_key).toBe('topic_followup_personalized');
     });
 
     test('a text from BEFORE the Day-0 ask (the one that raised the topic) does not cancel the follow-up', async () => {

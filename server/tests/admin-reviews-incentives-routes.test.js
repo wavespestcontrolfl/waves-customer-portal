@@ -106,3 +106,35 @@ describe('POST /admin/reviews/send-request — review hold response', () => {
     expect(res.json).toHaveBeenCalledWith({ error: reason });
   });
 });
+
+// GATE_REVIEW_DAY0_CONTEXT (codex r4 on #5246): topic_followup is sent only by
+// the cadence runner, about the topic stored on its own recurring sequence.
+describe('cadence-only templates never leave the cadence runner', () => {
+  const router = require('../routes/admin-reviews');
+  const review = require('../services/review-request');
+  const handlerFor = (method, routePath) => router.stack
+    .find((layer) => layer.route?.path === routePath && layer.route.methods[method]).route.stack.at(-1).handle;
+  const response = () => ({ status: jest.fn().mockReturnThis(), json: jest.fn() });
+
+  test('a one-off send of topic_followup is refused before any send is attempted', async () => {
+    review.sendGatedAsk.mockClear();
+    const res = response();
+    await handlerFor('post', '/send-request')({ body: { customerId: 'cust-1', templateId: 'topic_followup' } }, res, jest.fn());
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(review.sendGatedAsk).not.toHaveBeenCalled();
+  });
+
+  test('an operator-built plan containing it is refused', async () => {
+    const res = response();
+    await handlerFor('post', '/outreach/start-sequence')({ body: { customerId: 'cust-1', plan: [{ day: 0, channel: 'sms', templateKey: 'day0_ask' }, { day: 4, channel: 'sms', templateKey: 'topic_followup' }] } }, res, jest.fn());
+    expect(res.status).toHaveBeenCalledWith(400);
+  });
+
+  test('the template registry served to clients leaves it out', () => {
+    const res = response();
+    handlerFor('get', '/outreach-templates')({}, res);
+    const ids = res.json.mock.calls[0][0].templates.map((t) => t.id);
+    expect(ids).toContain('day0_ask');
+    expect(ids).not.toContain('topic_followup');
+  });
+});

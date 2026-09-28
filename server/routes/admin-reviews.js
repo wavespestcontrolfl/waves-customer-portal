@@ -860,6 +860,9 @@ router.post('/send-request', requireAdmin, async (req, res, next) => {
     if (templateId && !OUTREACH.getOutreachTemplate(templateId)) {
       return res.status(400).json({ error: 'Unknown templateId' });
     }
+    if (templateId && OUTREACH.CADENCE_ONLY_TEMPLATE_KEYS.includes(templateId)) {
+      return res.status(400).json({ error: 'That template is only sent by a review cadence' });
+    }
 
     // The whole gate stack (archived / already-reviewed / consented recipient /
     // per-customer lock / active-cadence block / 3-ask cap / 30-day cooldown /
@@ -992,7 +995,7 @@ router.get('/outreach-activity', requireAdmin, async (req, res, next) => {
 // GET /api/admin/reviews/outreach-templates — template registry for the composer.
 router.get('/outreach-templates', requireAdmin, (req, res) => {
   res.json({
-    templates: OUTREACH.OUTREACH_TEMPLATES,
+    templates: OUTREACH.OUTREACH_TEMPLATES.filter((t) => !OUTREACH.CADENCE_ONLY_TEMPLATE_KEYS.includes(t.id)),
     defaultPlan: OUTREACH.DEFAULT_SEQUENCE_PLAN,
   });
 });
@@ -1002,6 +1005,9 @@ router.get('/outreach-templates', requireAdmin, (req, res) => {
 // only advances when GATE_REVIEW_SEQUENCES is on; the first touch fires now.
 router.post('/outreach/start-sequence', requireAdmin, async (req, res, next) => {
   try {
+    if (Array.isArray(req.body?.plan) && req.body.plan.some((step) => OUTREACH.CADENCE_ONLY_TEMPLATE_KEYS.includes(step?.templateKey))) {
+      return res.status(400).json({ error: 'That template is only sent by a review cadence' });
+    }
     // Don't start cadences while the gate is off: the cron won't advance them,
     // so the row would sit 'active' forever — firing Day 0 then blocking the
     // customer from one-off sends without ever delivering Day 3/4.
