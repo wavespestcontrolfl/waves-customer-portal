@@ -504,14 +504,13 @@ function parseOpenTimesDaysFromFactsBlock(factsBlock) {
 // reviewer edit re-drafts; a stale offer never sends.
 const TIME_RANGE_RE = /\d{1,2}:\d{2} [AP]M - \d{1,2}:\d{2} [AP]M/g;
 const WEEKDAY_RE = /\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/gi;
-function normalizeBodyForComparison(value) {
-  return String(value || '').replace(/\s+/g, ' ').trim();
-}
 function planOpenTimesRecheck({ snapshot, outgoingBody, originalBody = null }) {
   const pairs = (snapshot?.quotedWindows || []).filter((w) => w && typeof w.window === 'string' && w.window);
   if (!pairs.length) return { action: 'skip' };
   const body = String(outgoingBody || '');
-  const edited = originalBody != null && normalizeBodyForComparison(body) !== normalizeBodyForComparison(originalBody);
+  // Any byte difference is an edit — whitespace inside a time range is
+  // enough to break the exact-text filter, so it must not pass as "unedited".
+  const edited = originalBody != null && body.trim() !== String(originalBody).trim();
   if (!edited) {
     const still = pairs.filter((w) => body.includes(w.window));
     return still.length ? { action: 'recheck', quotedWindows: still } : { action: 'skip' };
@@ -533,21 +532,31 @@ function planOpenTimesRecheck({ snapshot, outgoingBody, originalBody = null }) {
   // each pair's offer span (the shortest stretch of the drafted reply that
   // holds its day name and its window text) must survive the edit verbatim.
   const original = String(originalBody || '');
-  const lowerBody = body.toLowerCase();
   const kept = [];
+  let residual = body;
+  let anyNotKept = false;
   for (const w of pairs) {
     const day = String(w.date || '').split(',')[0].trim();
     const span = offerSpanInText(original, day, w.window);
-    if (span && body.includes(span)) { kept.push(w); continue; }
-    // Dropped outright: when the drafted reply named the day, the day name
-    // is gone (the window text may legitimately survive on another day's
-    // kept offer); otherwise the window text itself is gone.
-    const dayInOriginal = Boolean(day) && original.toLowerCase().includes(day.toLowerCase());
-    const dropped = dayInOriginal ? !lowerBody.includes(day.toLowerCase()) : countQuotedWindow(body, w.window) === 0;
-    if (dropped) continue;
-    return { action: 'refuse', reason: 'edited_offer_text' };
+    if (span && body.includes(span)) { kept.push(w); residual = residual.split(span).join(' '); continue; }
+    anyNotKept = true;
   }
+  // A pair that did not survive verbatim is DROPPED only when nothing
+  // offer-like is left once the kept spans are removed — missing exact text
+  // is not proof of removal ("Tue 9–11 AM" is a rewrite, not a deletion).
+  // Anything time- or day-shaped in the residual refuses.
+  if (anyNotKept && looksLikeOfferText(residual)) return { action: 'refuse', reason: 'edited_offer_text' };
   return kept.length ? { action: 'recheck', quotedWindows: kept } : { action: 'skip' };
+}
+
+// Anything a customer could read as an appointment time or day: weekday
+// names or abbreviations, clock times, bare hour ranges, or relative-day
+// words. Deliberately broad — it only decides whether an EDIT that lost an
+// offer's verbatim text may be treated as a deletion, and the safe answer
+// to "not sure" is refuse.
+const OFFER_TOKEN_RE = /\b(mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun)(day|nesday|rsday|urday|sday)?\b|\b\d{1,2}(:\d{2})?\s*(a\.?m|p\.?m)\b|\b\d{1,2}(:\d{2})?\s*[-–—]\s*\d{1,2}(:\d{2})?\b|\b(today|tomorrow|tonight|morning|afternoon|evening|noon)\b/i;
+function looksLikeOfferText(text) {
+  return OFFER_TOKEN_RE.test(String(text || ''));
 }
 
 // The shortest substring of `text` containing both `day` (case-insensitive)
@@ -2009,6 +2018,7 @@ module.exports = {
   parseOpenTimesDaysFromFactsBlock,
   stripOpenTimesSection,
   planOpenTimesRecheck,
+  looksLikeOfferText,
   computeOpenTimesSnapshot,
   openTimesStillOffered,
 };

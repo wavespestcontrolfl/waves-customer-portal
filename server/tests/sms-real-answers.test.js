@@ -1296,9 +1296,26 @@ describe('planOpenTimesRecheck — what a send path rechecks given the body that
     expect(planOpenTimesRecheck({ snapshot: { quotedWindows: [] }, outgoingBody: 'x' })).toEqual({ action: 'skip' });
   });
 
-  test('UNEDITED body → recheck every pair still quoted (whitespace differences are not an edit)', () => {
+  test('UNEDITED body → recheck every pair still quoted; spacing edits AROUND the offers still keep both spans verbatim', () => {
     expect(planOpenTimesRecheck({ snapshot, outgoingBody: original, originalBody: original })).toEqual({ action: 'recheck', quotedWindows: snapshot.quotedWindows });
-    expect(planOpenTimesRecheck({ snapshot, outgoingBody: `  ${original.replace(' or ', '  or  ')} `, originalBody: original }).action).toBe('recheck');
+    expect(planOpenTimesRecheck({ snapshot, outgoingBody: `  ${original.replace(' or ', '  or  ')} `, originalBody: original })).toEqual({ action: 'recheck', quotedWindows: snapshot.quotedWindows });
+  });
+
+  test('edited: extra spaces INSIDE a time range break its exact text → refuse, never skip', () => {
+    const body = 'How about Tuesday 9:00 AM  -  11:00 AM or Wednesday 2:00 PM - 4:00 PM?';
+    expect(planOpenTimesRecheck({ snapshot, outgoingBody: body, originalBody: original })).toEqual({ action: 'refuse', reason: 'edited_offer_text' });
+  });
+
+  test('edited: an abbreviated rewrite ("Tue 9–11 AM") is a rewrite, not a deletion → refuse', () => {
+    const body = 'How about Tue 9–11 AM or Wednesday 2:00 PM - 4:00 PM?';
+    expect(planOpenTimesRecheck({ snapshot, outgoingBody: body, originalBody: original })).toEqual({ action: 'refuse', reason: 'edited_offer_text' });
+    expect(planOpenTimesRecheck({ snapshot, outgoingBody: 'Does 9-11 tomorrow work?', originalBody: original })).toEqual({ action: 'refuse', reason: 'edited_offer_text' });
+  });
+
+  test('looksLikeOfferText: broad on purpose', () => {
+    const { looksLikeOfferText } = require('../services/sms-shadow-drafter');
+    for (const t of ['Tue 9–11 AM', 'thurs', '2pm', '9 - 11', 'tomorrow morning', 'Sat.', '10:30 a.m.']) expect(looksLikeOfferText(t)).toBe(true);
+    for (const t of ["I'll confirm a time and get right back to you.", 'Your balance is $99.', 'Thanks!', '']) expect(looksLikeOfferText(t)).toBe(false);
   });
 
   test('no original body known (fire-time path) → the exact-text filter, as before', () => {
