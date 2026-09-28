@@ -229,10 +229,30 @@ describe('seed migration 20260928220000 (re-cut of #5160)', () => {
     expect(nurtureAutomation.legal_classification).toBe('commercial_marketing');
   });
 
-  test("nurture.expired_1's idempotency key includes {estimate_id}, not just {customer_email} (Codex P2 :239)", () => {
+  test("nurture.expired_1's idempotency key includes {estimate_id}, and carries no PII placeholder (Codex P2 :239, local pre-push audit round 4)", () => {
     const a = migration.AUTOMATIONS.find((x) => x.key === 'nurture.expired_1');
     expect(a.idempotency).toContain('{estimate_id}');
-    expect(a.idempotency).toContain('{customer_email}');
+    // {estimate_id} alone already keys one touch per estimate — a raw
+    // {customer_email} (or any other free-text PII placeholder) would land
+    // literal PII in execution/dedupe log lines that echo the rendered key
+    // (AGENTS.md: log ids, not PII). {customer_id} is also excluded here:
+    // many expired estimates are lead-only, and email-template-automation-
+    // executor.js's renderIdempotencyKey throws on a blank placeholder.
+    expect(a.idempotency).not.toMatch(/\{customer_email\}/);
+    expect(a.idempotency).not.toMatch(/\{[a-z_]*email[a-z_]*\}/i);
+  });
+
+  test('purpose has no admin-API enum to validate against (confirmed from source, not assumed) — local pre-push audit round 4', () => {
+    // admin-email-templates.js declares MODES/LEGAL_CLASSIFICATIONS/
+    // AUDIENCES/PRIORITIES/SENSITIVITIES/STREAMS as validated Sets; `purpose`
+    // is read with plain cleanString(), no assertOneOf — this pins that fact
+    // so a future admin-route change that DOES add a purpose enum breaks
+    // this test instead of shipping an unvalidated seed value silently.
+    const routeSrc = require('fs').readFileSync(
+      require.resolve('../routes/admin-email-templates.js'), 'utf8',
+    );
+    expect(routeSrc).toMatch(/purpose:\s*cleanString\(body\.purpose/);
+    expect(routeSrc).not.toMatch(/PURPOSES\s*=\s*new Set/);
   });
 
   test('every referenced variable is allowed and every required variable is referenced', () => {
@@ -272,7 +292,7 @@ describe('seed migration 20260928220000 (re-cut of #5160)', () => {
     });
     expect(byKey['nurture.expired_1']).toMatchObject({
       trigger_event_key: 'estimate.expired', delay_minutes: 4320,
-      suppression_group_key: 'marketing_nurture', idempotency_key_template: 'nurture.expired_1:{customer_email}:{estimate_id}',
+      suppression_group_key: 'marketing_nurture', idempotency_key_template: 'nurture.expired_1:{estimate_id}',
     });
     expect(JSON.parse(byKey['lc.first_visit_pest'].exit_conditions)).toEqual({ stop_if: ['customer.cancelled'] });
     expect(JSON.parse(byKey['nurture.expired_1'].exit_conditions)).toEqual({ stop_if: ['estimate.accepted', 'estimate.archived'] });

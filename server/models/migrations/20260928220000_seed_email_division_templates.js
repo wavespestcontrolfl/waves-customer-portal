@@ -299,9 +299,16 @@ const AUTOMATIONS = [
     key: 'nurture.expired_1', name: 'Nurture · Estimate Expired (Touch 1)',
     trigger: 'estimate.expired', template: 'nurture.expired_1', delayMinutes: 4320,
     suppressionGroup: 'marketing_nurture', legal: 'commercial_marketing',
-    // {estimate_id} keeps two different estimates emailed to the same
-    // address from deduplicating into one automation run (Codex P2).
-    frequencyCap: 'once_per_estimate', idempotency: 'nurture.expired_1:{customer_email}:{estimate_id}',
+    // {estimate_id} alone already keys one touch per estimate (Codex P2 on
+    // #5160: two different estimates emailed to the same address must not
+    // dedupe into one run) — no {customer_email}/{customer_id} needed. A
+    // raw email in the key would land literal PII in any execution/dedupe
+    // log line that echoes it (AGENTS.md: log ids, not PII); customer_id
+    // is also unsafe here since many expired estimates are lead-only
+    // (renderIdempotencyKey throws on a blank placeholder) — estimate_id is
+    // the one field guaranteed present on this trigger's payload either way
+    // (local pre-push audit round 4).
+    frequencyCap: 'once_per_estimate', idempotency: 'nurture.expired_1:{estimate_id}',
     exit: { stop_if: ['estimate.accepted', 'estimate.archived'] },
     dryRunNotes: 'Fires 3 days after an estimate expires (estimate.expired).',
   },
