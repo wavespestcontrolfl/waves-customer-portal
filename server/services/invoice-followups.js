@@ -1,4 +1,4 @@
-const { billingLegDeliveryState, billingLegContactTime } = require('./messaging/billing-channel-routing');
+const { billingLegDeliveryState, billingLegContactTime, originalBillingContactArgs } = require('./messaging/billing-channel-routing');
 /**
  * Per-Invoice Follow-up Sequence Engine
  *
@@ -131,10 +131,12 @@ function followupEmailOutcomeUncertain(result, explicit) {
     || (result?.deduped && !result?.blocked));
 }
 
-async function settleFollowupEmailLedger(ContactLedger, ledger, result, explicit) {
+async function settleFollowupEmailLedger(ContactLedger, ledger, result, explicit, originalDeliveryTimes) {
   if (result?.ok === true) {
-    return explicit && typeof ContactLedger.markDelivered === 'function'
-      && !await ContactLedger.markDelivered(ledger);
+    const originalContact = originalBillingContactArgs(result);
+    originalDeliveryTimes.push(...originalContact.map((stamp) => stamp.occurredAt));
+    return (explicit || originalContact.length > 0) && typeof ContactLedger.markDelivered === 'function'
+      && !await ContactLedger.markDelivered(ledger, ...originalContact);
   }
   if (followupEmailOutcomeUncertain(result, explicit)) return true;
   // A retryable refusal before the provider never reached the customer. An
@@ -1061,7 +1063,7 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
             })
           : await sendFollowupEmail({ row, customer, step, ctx, enforceBillingPreference: !operatorInitiated });
         const attemptHeld = await settleFollowupEmailLedger(
-          ContactLedger, emailLedger, emailResult, selectedChannels !== null,
+          ContactLedger, emailLedger, emailResult, selectedChannels !== null, originalDeliveryTimes,
         );
         emailHold = emailHold || attemptHeld;
       }

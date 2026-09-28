@@ -167,6 +167,11 @@ function previouslySettledBillingLegs(results) {
     ? new Date(Math.max(...times.map((time) => time.getTime()))) : null };
 }
 
+function originalBillingContactArgs(result) {
+  const originalAt = result?.deduped ? billingLegContactTime(result) : null;
+  return originalAt ? [{ occurredAt: originalAt }] : [];
+}
+
 function needsRetry(result) {
   if (result?.bellPersisted === true || result?.reason === 'app_event_already_visible') return false;
   return result?.retryable || result?.deliveryOutcome === 'uncertain';
@@ -286,5 +291,5 @@ async function dispatchBillingChannels(input, prefs, sendLeg) {
 module.exports = {
   BILLING_MESSAGE_CATEGORIES, billingDeliveryCategory, isBillingDeliveryCandidate, usesBillingDeliveryPreferences,
   billingNotificationEventKey, dispatchBillingChannels, REPLAY_HOLD_CODES, isReplayHold, preferenceChangeHold, billingLegDeliveryState,
-  billingLegContactTime, previouslySettledBillingLegs, storedEmailAcceptedAt,
+  billingLegContactTime, previouslySettledBillingLegs, originalBillingContactArgs, storedEmailAcceptedAt,
 };

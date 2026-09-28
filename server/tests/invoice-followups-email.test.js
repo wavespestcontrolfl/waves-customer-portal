@@ -714,6 +714,38 @@ describe('invoice follow-up email sidecar', () => {
     }
   });
 
+  test.each([['selected', ['email']], ['legacy', null]])('%s provider-deduped Email repairs this step and contact from stored sentAt', async (_kind, channels) => {
+    const priorStepAt = new Date('2026-05-10T14:00:00Z');
+    const acceptedAt = new Date('2026-05-20T14:00:00Z');
+    EmailTemplates.sendTemplate.mockResolvedValueOnce({ sent: true, deduped: true,
+      message: { provider_message_id: 'sg-original', sent_at: acceptedAt } });
+    const sequenceUpdate = chain();
+    const interaction = chain();
+    setDbQueues({
+      'invoice_followup_sequences as s': [chain({ result: [followupRow({ last_touch_at: priorStepAt })] })],
+      customers: [chain({ first: customer({ phone: null }) })],
+      invoices: Array.from({ length: 5 }, () => chain({ first: invoice() })),
+      notification_prefs: [chain({ first: channels ? { invoice_channels: channels } : { email_enabled: true } }),
+        chain({ first: channels ? { invoice_channels: channels } : { email_enabled: true } })],
+      customer_interactions: [interaction],
+      invoice_followup_sequences: [
+        chain({ first: { id: 'seq-1', customer_id: 'cust-1', status: 'active', step_index: 0,
+          next_touch_at: '2026-05-26T13:00:00Z', anchor_at: null } }),
+        chain({ result: 1 }), sequenceUpdate, chain({ result: 1 }),
+      ],
+    });
+
+    await InvoiceFollowUps.runPending();
+
+    expect(sequenceUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
+      step_index: 1, last_touch_at: acceptedAt,
+    }));
+    expect(require('../services/collections/contact-ledger').markDelivered)
+      .toHaveBeenCalledWith(expect.anything(), { occurredAt: acceptedAt });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(interaction.insert).not.toHaveBeenCalled();
+  });
+
   test('a prior App bell with uncertain Email keeps this credit draw held for replay', async () => {
     const credit = require('../services/customer-credit');
     credit.autoApplyAccountCreditIfEnabled.mockResolvedValueOnce({ applied: 50 });
