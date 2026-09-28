@@ -114,7 +114,7 @@ function parseTurns(transcript) {
     // Each keeps whether it was a question ("Will we see you Thursday at two?").
     const sentences = (joinMeridiem(m[2]).match(/[^.!?]+[.!?]*/g) || [])
       .map((raw) => ({ ns: normalize(raw), question: /\?/.test(raw) })).filter((x) => x.ns);
-    turns.push({ agent: m[1].toLowerCase() === 'agent', ns: normalize(m[2]), sentences });
+    turns.push({ agent: m[1].toLowerCase() === 'agent', raw: m[2], ns: normalize(m[2]), sentences });
   }
   return turns;
 }
@@ -362,11 +362,20 @@ function periodIsTheHours(quote, words) {
 // a day. "Around two", "by two", "two or four", "two-ish" never qualify.
 const EXACT_LEADS = new Set(['at', 'to', 'for', 'between']);
 const EXACT_TAILS = new Set(['o', 'oclock', 'on', 'then', 'this', 'next', 'please', 'sharp']);
-function saidExactly(quote, words) {
+// Judged over the whole turns that hold the quote, and EVERY place a turn
+// says the hour must be exact: "at two" cut from "at two or four" fails.
+function saidExactly(quote, words, turns) {
+  const nq = padded(normalize(quote));
+  const holding = turns.filter((t) => padded(t.ns).includes(nq));
+  return holding.length > 0 && holding.every((t) => hourExactIn(t.raw, words));
+}
+
+function hourExactIn(text, words) {
   // Tokens keeping clause punctuation, so "at two, a tech will call" ends
   // the hour at the comma.
-  const toks = joinMeridiem(quote).toLowerCase().replace(/[,.;!?]/g, ' , ').replace(/[^a-z0-9,]+/g, ' ').trim().split(/\s+/);
-  return spans(toks, words.hour).some(([ha, hb]) => {
+  const toks = joinMeridiem(text).toLowerCase().replace(/[,.;!?]/g, ' , ').replace(/[^a-z0-9,]+/g, ' ').trim().split(/\s+/);
+  const at = spans(toks, words.hour);
+  return at.length > 0 && at.every(([ha, hb]) => {
     const prev = toks[ha - 1];
     const next = toks[hb];
     const lead = EXACT_LEADS.has(prev) || DAY_WORDS.has(prev) || (prev === ',' && DAY_WORDS.has(toks[ha - 2]));
@@ -379,7 +388,7 @@ function saidExactly(quote, words) {
 
 function statesSlotWords(quote, words, turns, agreementQuotes = []) {
   return slotPhrases(words).every((w) => holds(quote, w)) && periodIsTheHours(quote, words) && twelveSaidTogether(quote, words)
-    && (typeof words.period === 'string' || /^(?:noon|midnight)$/.test(normalize(words.hour)) || saidExactly(quote, words))
+    && (typeof words.period === 'string' || /^(?:noon|midnight)$/.test(normalize(words.hour)) || saidExactly(quote, words, turns))
     // An hour read as business hours: the sentences the quote sits in must
     // state no half of the day and name no noon/midnight bound — "Thursday
     // at two" cut from "Thursday at two in the morning" never falls back.

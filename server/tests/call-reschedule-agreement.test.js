@@ -306,6 +306,15 @@ describe('groundRescheduleAgreement', () => {
       expect([said, plain(THURSDAY_2PM, said, said.includes('02') ? '02' : 'two').ok]).toEqual([said, false]);
     }
     expect(plain(THURSDAY_2PM, 'We will move it to Thursday between two and four.', 'two').ok).toBe(true);
+    // A quote cut short before a qualifier is judged by its whole turn.
+    expect(ground(v2({
+      scheduling: { agreed_slot_words: { day: 'Thursday', hour: 'two', period: null } },
+      evidence: [
+        quote('/scheduling/agent_committed_booking', 'agent', 'We will move it to Thursday at two'),
+        quote('/scheduling/confirmed_start_at', 'agent', 'We will move it to Thursday at two'),
+        quote('/scheduling/caller_accepted_slot', 'caller', ACCEPT),
+      ],
+    }), `Caller: Can we move my visit?\nAgent: We will move it to Thursday at two or four.\nCaller: ${ACCEPT}`).ok).toBe(false);
     // "Am" the verb is not a period.
     expect(plain(THURSDAY_2PM, 'I am moving you to Thursday at two.', 'two').ok).toBe(true);
     // Nor one said just past the end of the quote, in the same sentence.
