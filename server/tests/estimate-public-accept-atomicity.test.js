@@ -611,7 +611,7 @@ describe('FIX 1 — standard recurring conversion is atomic with acceptance', ()
       // promoted same-trip sibling ids it actually inserted for this
       // accept, threaded straight through to the stamper's memberIds
       // rather than reconstructed here or by the stamper itself.
-      promotedSameTripMemberIds: ['ss-multi-2'],
+      combinedInvoiceMemberIds: ['ss-multi-2'],
       recurringConversionSkipped: false,
       welcomeSms: null,
       membershipEmail: null,

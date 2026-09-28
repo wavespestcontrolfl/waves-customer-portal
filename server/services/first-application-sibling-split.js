@@ -190,6 +190,22 @@ function neverRanPhrase(status) {
 // vocabulary — reused directly from invoice-helpers.js so this module can
 // never locally drift from it (it once did, missing 'processing').
 const SETTLED_INVOICE_STATUSES = INVOICE_UNCOLLECTIBLE_STATUSES;
+// The subset of SETTLED_INVOICE_STATUSES that actually COLLECTED money
+// (as opposed to void/refunded/canceled/cancelled, which never collected
+// outstanding money or already gave it back). Same literal set already
+// used ad hoc elsewhere in the app (e.g. appointment-card-request.js,
+// annual-prepay-renewals.js) for the identical "has this invoice actually
+// been charged" question — kept local here rather than promoted to
+// invoice-helpers.js since nothing else in THIS module needs it exported.
+// P1-C (Codex round 13): a governing invoice going straight to 'clear' the
+// instant it settles used to treat a PAID invoice exactly like a VOIDED
+// one — but a paid invoice that still covers a member who will never run
+// (cancelled/skipped/no-show) left the office holding money for work that
+// will not happen, with no alert telling them to refund or credit it.
+const PAID_INVOICE_STATUSES = Object.freeze(['paid', 'prepaid', 'processing']);
+function isInvoicePaid(status) {
+  return PAID_INVOICE_STATUSES.includes(String(status));
+}
 const SWEEP_LIMIT = 500;
 // Scoped to the STAMPED invoice group, not just the estimate (Codex
 // round-12 P1): when one estimate has more than one stamped combined-
@@ -232,6 +248,23 @@ function divergingSiblings(anchor, members) {
     && dateOnly(m.scheduled_date) !== anchorDate);
 }
 
+// A top-level sibling in ANY "work will not be performed" terminal status
+// (cancelled/skipped/no-show) still covered by the combined invoice: none
+// of those statuses removes its share of the combined charge, whether or
+// not its date ever diverged from the anchor's. "Covered" mirrors
+// has_own_live_invoice's own scope: once the sibling has its own live
+// invoice, the office has already hand-split it and it no longer needs
+// review. Shared by evaluateGroupDivergence's own open-invoice branch
+// (neverRanNeedingReview) AND its paid-invoice branch (P1-C) — the exact
+// same membership question ("which covered members will never run and
+// haven't been split off yet") whether the invoice is still open or has
+// already collected money; only what happens next (alert copy, whether a
+// plain date divergence alone also qualifies) differs between the two.
+function neverRanCoveredMembers(anchor, members) {
+  return members.filter((m) => String(m.id) !== String(anchor.id)
+    && neverRan(m.status) && !m.has_own_live_invoice);
+}
+
 // The pure detection predicate: given the group's anchor row, every member
 // row (each carrying has_own_live_invoice and status), and the shared
 // invoice's current status, decide whether to alert, clear a standing
@@ -242,6 +275,21 @@ function evaluateGroupDivergence({ anchor, members, invoiceStatus }) {
     return { action: 'clear', reason: 'no_group' };
   }
   if (isInvoiceSettled(invoiceStatus)) {
+    // P1-C: a PAID (collected) governing invoice does not clear
+    // unconditionally any more. If a stamped member that invoice's payment
+    // covers will never run (cancelled/skipped/no-show) and hasn't been
+    // split off with its own live invoice, the office already collected
+    // money for work that will not happen — that needs a refund/credit
+    // alert, distinct from the "split it by hand while still open" one
+    // below. A voided/refunded/canceled/cancelled invoice never collected
+    // outstanding money (or already gave it back), so it keeps clearing
+    // unconditionally exactly as before.
+    if (isInvoicePaid(invoiceStatus)) {
+      const paidNeverRan = neverRanCoveredMembers(anchor, members);
+      if (paidNeverRan.length) {
+        return { action: 'alert', reason: 'paid_never_ran', diverging: paidNeverRan };
+      }
+    }
     return { action: 'clear', reason: 'invoice_settled' };
   }
   const diverging = divergingSiblings(anchor, members);
@@ -254,14 +302,9 @@ function evaluateGroupDivergence({ anchor, members, invoiceStatus }) {
   // needs review even when it never diverged by date at all.
   const unresolvedDiverging = diverging.filter((m) => !m.has_own_live_invoice && !neverRan(m.status));
 
-  // A top-level sibling in ANY "work will not be performed" terminal
-  // status still covered by the combined invoice: none of those statuses
-  // removes its share of the combined charge, so it leaves a stale charge
-  // whether or not its date ever diverged from the anchor's. "Covered"
-  // mirrors has_own_live_invoice's own scope: once the sibling has its own
-  // live invoice, it no longer needs review here.
-  const neverRanNeedingReview = members.filter((m) => String(m.id) !== String(anchor.id)
-    && neverRan(m.status) && !m.has_own_live_invoice);
+  // Same membership question as the paid-invoice branch above (shared via
+  // neverRanCoveredMembers), for the still-open invoice.
+  const neverRanNeedingReview = neverRanCoveredMembers(anchor, members);
 
   const unresolved = [...unresolvedDiverging, ...neverRanNeedingReview];
   if (!unresolved.length) {
@@ -363,6 +406,33 @@ async function loadCandidates(conn, { limit = SWEEP_LIMIT } = {}) {
                 .whereRaw('r.id <> i.id')
                 .whereNotIn('r.status', InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES);
             });
+        })
+        // P1-C: a PAID (collected) invoice is normally excluded by the
+        // first clause above (it's in SETTLED_INVOICE_STATUSES) — but a
+        // group whose payment covers a stamped member that will never run
+        // (cancelled/skipped/no-show) and has no own live invoice needs a
+        // fresh refund/credit alert (evaluateGroupDivergence's
+        // paid_never_ran verdict) the FIRST time that member goes never-ran,
+        // before any standing alert exists to be recovered by the clause
+        // above. Scoped to the invoice's OWN stamped members via the
+        // first_application_invoice_id linkage (never the whole estimate),
+        // and only a member with no own live invoice — one already
+        // hand-split off is excluded here exactly like everywhere else in
+        // this module, so a resolved paid group never becomes a candidate
+        // through this clause alone.
+        .orWhere((paidWithNeverRanMember) => {
+          paidWithNeverRanMember
+            .whereIn('i.status', PAID_INVOICE_STATUSES)
+            .whereExists(function neverRanMemberOnInvoiceExists() {
+              this.select(1).from('scheduled_services as nr')
+                .whereRaw('nr.first_application_invoice_id = i.id')
+                .whereIn('nr.status', VISIT_NEVER_RAN_STATUSES)
+                .whereNotExists(function ownLiveInvoiceExists() {
+                  this.select(1).from('invoices as own')
+                    .whereRaw('own.scheduled_service_id = nr.id')
+                    .whereNotIn('own.status', InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES);
+                });
+            });
         });
     })
     .orderBy('m.first_application_invoice_id', 'asc')
@@ -436,13 +506,54 @@ function alertInvoiceReference(invoice, estimateId) {
     : `Invoice ${ref}.`;
 }
 
+// Pure: the alert's body copy (per-member detail lines, lead sentence,
+// action sentence) for one diverging set — extracted out of
+// raiseDivergenceAlert so that function's own complexity stays bounded and
+// this copy logic is unit-testable on its own. Never-ran members
+// (cancelled/skipped/no-show) get distinct copy from a plain moved member:
+// the office action isn't "split it by hand" — the visit already isn't
+// happening. A never-ran member can ALSO have moved off the anchor's date;
+// the never-ran copy always wins for it since that's the actual remaining
+// action, regardless of date. paid_never_ran (P1-C) narrows further: the
+// combined invoice already COLLECTED money (paid/prepaid/processing), so
+// the action is a refund/credit, never "remove its charge" from a
+// still-open invoice. evaluateGroupDivergence only ever produces that
+// verdict from neverRanCoveredMembers alone, so movedMembers is always
+// empty for it — the branches below still cover it defensively rather than
+// assuming that invariant holds forever.
+function buildDivergenceAlertCopy({ diverging, anchorDate, alertKind }) {
+  const neverRanMembers = diverging.filter((d) => neverRan(d.status));
+  const movedMembers = diverging.filter((d) => !neverRan(d.status));
+  const isPaidNeverRan = alertKind === 'paid_never_ran';
+  const detailParts = [
+    ...movedMembers.map((d) => `visit ${d.id} now on ${dateOnly(d.scheduled_date)} (was ${anchorDate})`),
+    ...neverRanMembers.map((d) => (isPaidNeverRan
+      ? `visit ${d.id} ${neverRanPhrase(d.status)} — refund or credit its share of the already-paid invoice`
+      : `visit ${d.id} ${neverRanPhrase(d.status)} — remove its charge from the combined invoice`)),
+  ];
+  // A Postgres regression test asserts the exact "split it by hand"
+  // substring survives whenever a moved member is present, so that phrase
+  // is never rewritten for that case.
+  const leadSentence = isPaidNeverRan
+    ? 'A same-trip visit from one estimate will not be serviced, and the combined invoice has already been paid'
+    : (movedMembers.length
+      ? 'Same-trip visits from one estimate landed on different days'
+      : 'A same-trip visit from one estimate will not be serviced');
+  const actionSentence = isPaidNeverRan
+    ? 'The combined first-application invoice already collected money for it — refund or credit that share.'
+    : (movedMembers.length
+      ? 'The combined first-application invoice still charges for both — split it by hand.'
+      : 'The combined first-application invoice still charges for it — remove that charge.');
+  return { detail: detailParts.join('; '), leadSentence, actionSentence };
+}
+
 // Raises (or refreshes) the durable admin alert for this exact diverging
 // set. Takes the SAME advisory lock notifyAdmin's own dedupe path takes,
 // and holds it through notifyAdmin's own write, so a concurrent dismissal
 // can never land between the decision and the write. Never touches the
 // invoice or any visit row.
 async function raiseDivergenceAlert(conn, {
-  estimateId, anchor, diverging, invoice, customerId, dedupeKey, stampedInvoiceId = null,
+  estimateId, anchor, diverging, invoice, customerId, dedupeKey, stampedInvoiceId = null, alertKind = 'diverged',
 }) {
   await conn.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:${dedupeKey}`]);
   const baseFingerprint = divergenceStateFingerprint({
@@ -464,32 +575,14 @@ async function raiseDivergenceAlert(conn, {
   const generation = wasAutoCleared ? priorGeneration + 1 : priorGeneration;
   const dedupeVersion = `${baseFingerprint}::g${generation}`;
   const anchorDate = dateOnly(anchor.scheduled_date);
-  // Never-ran members (cancelled/skipped/no-show) get distinct copy: the
-  // office action isn't "split it by hand" — the visit already isn't
-  // happening — it's removing that sibling's share of the still-open
-  // combined charge. A never-ran member can ALSO have moved off the
-  // anchor's date; the never-ran copy always wins for it since that's the
-  // actual remaining action, regardless of date.
-  const neverRanMembers = diverging.filter((d) => neverRan(d.status));
-  const movedMembers = diverging.filter((d) => !neverRan(d.status));
-  const detailParts = [
-    ...movedMembers.map((d) => `visit ${d.id} now on ${dateOnly(d.scheduled_date)} (was ${anchorDate})`),
-    ...neverRanMembers.map((d) => `visit ${d.id} ${neverRanPhrase(d.status)} — remove its charge from the combined invoice`),
-  ];
-  const detail = detailParts.join('; ');
+  const isPaidNeverRan = alertKind === 'paid_never_ran';
+  const { detail, leadSentence, actionSentence } = buildDivergenceAlertCopy({ diverging, anchorDate, alertKind });
   const invoiceRef = alertInvoiceReference(invoice, estimateId);
-  // A Postgres regression test asserts the exact "split it by hand"
-  // substring survives whenever a moved member is present, so that phrase
-  // is never rewritten for that case.
-  const leadSentence = movedMembers.length
-    ? 'Same-trip visits from one estimate landed on different days'
-    : 'A same-trip visit from one estimate will not be serviced';
-  const actionSentence = movedMembers.length
-    ? 'The combined first-application invoice still charges for both — split it by hand.'
-    : 'The combined first-application invoice still charges for it — remove that charge.';
   await require('./notification-service').notifyAdmin(
     'billing',
-    'First-application invoice may need to be split by hand',
+    isPaidNeverRan
+      ? 'Paid first-application invoice covers a visit that will not run'
+      : 'First-application invoice may need to be split by hand',
     `${leadSentence}: ${detail}. ${actionSentence} ${invoiceRef}`,
     {
       link: invoice ? `/admin/invoices?invoice=${invoice.invoice_id}` : `/admin/estimates/${estimateId}`,
@@ -523,6 +616,14 @@ async function raiseDivergenceAlert(conn, {
         // alert forever.
         autoCleared: false,
         recurrenceGeneration: generation,
+        // Which kind of alert this is (P1-C): 'paid_never_ran' when the
+        // combined invoice already collected money and a covered member
+        // will never run (refund/credit action), 'diverged' for the
+        // ordinary still-open split-by-hand alert. Informational only —
+        // no read path branches on it; the dedupeKey's own 'refund:'
+        // marker (see evaluateEstimateCandidates) is what actually keeps
+        // the two alert kinds from colliding.
+        alertKind,
       },
       dedupeKey,
       dedupeVersion,
@@ -690,7 +791,17 @@ async function evaluateEstimateCandidates(conn, membersForInvoice) {
 
   const diverging = verdict.diverging;
   const sortedIds = [...new Set(diverging.map((d) => String(d.id)))].sort();
-  const dedupeKey = `${prefix}${sortedIds.join(',')}`;
+  // P1-C: paid_never_ran gets a distinct dedupe suffix ('refund:') so it can
+  // never collide with the ordinary still-open diverging alert's dedupeKey
+  // for the SAME diverging id set (e.g. a member that was already flagged
+  // diverging before the invoice was paid, and now qualifies as
+  // paid-and-never-ran too) — the two are different alerts with different
+  // required office actions and must be tracked, dismissed, and reopened
+  // independently.
+  const alertKind = verdict.reason === 'paid_never_ran' ? 'paid_never_ran' : 'diverged';
+  const dedupeKey = alertKind === 'paid_never_ran'
+    ? `${prefix}refund:${sortedIds.join(',')}`
+    : `${prefix}${sortedIds.join(',')}`;
   // The alert's invoice reference — number, total, and the id read back by
   // loadCandidates' own alert-recovery EXISTS — is always the GOVERNING
   // invoice, never the dead stamped row, so office staff are pointed at the
@@ -707,7 +818,7 @@ async function evaluateEstimateCandidates(conn, membersForInvoice) {
   // than the one we're about to raise/refresh) is stale — clear it first.
   await clearStandingAlerts(conn, prefix, { exceptKey: dedupeKey });
   await raiseDivergenceAlert(conn, {
-    estimateId, anchor: anchorWithFlag, diverging, customerId, invoice, dedupeKey, stampedInvoiceId: invoiceId,
+    estimateId, anchor: anchorWithFlag, diverging, customerId, invoice, dedupeKey, stampedInvoiceId: invoiceId, alertKind,
   });
   return { estimateId, action: 'alerted', divergingSiblingIds: sortedIds };
 }
@@ -815,13 +926,17 @@ module.exports = {
   runFirstApplicationSiblingSplitSweep,
   dateOnly,
   isInvoiceSettled,
+  isInvoicePaid,
+  PAID_INVOICE_STATUSES,
   divergingSiblings,
+  neverRanCoveredMembers,
   evaluateGroupDivergence,
   divergenceStateFingerprint,
   resolveGoverningInvoice,
   loadCandidates,
   groupCandidatesByInvoice,
   clearStandingAlerts,
+  buildDivergenceAlertCopy,
   raiseDivergenceAlert,
   evaluateEstimateCandidates,
   SETTLED_INVOICE_STATUSES,

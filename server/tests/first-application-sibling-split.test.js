@@ -11,10 +11,14 @@
 const {
   evaluateGroupDivergence,
   divergingSiblings,
+  neverRanCoveredMembers,
+  buildDivergenceAlertCopy,
   divergenceStateFingerprint,
   resolveGoverningInvoice,
   groupCandidatesByInvoice,
   isInvoiceSettled,
+  isInvoicePaid,
+  PAID_INVOICE_STATUSES,
   dateOnly,
   SETTLED_INVOICE_STATUSES,
   selectSweepBatch,
@@ -51,6 +55,31 @@ describe('isInvoiceSettled', () => {
   });
 });
 
+// P1-C: the PAID (collected) subset of SETTLED_INVOICE_STATUSES —
+// void/refunded/canceled/cancelled never collected outstanding money (or
+// already gave it back), so isInvoicePaid must be false for them even
+// though isInvoiceSettled is true for the whole set.
+describe('isInvoicePaid', () => {
+  test('paid/prepaid/processing are paid', () => {
+    for (const status of PAID_INVOICE_STATUSES) {
+      expect(isInvoicePaid(status)).toBe(true);
+    }
+  });
+
+  test('void/refunded/canceled/cancelled are settled but NOT paid', () => {
+    for (const status of ['void', 'refunded', 'canceled', 'cancelled']) {
+      expect(isInvoiceSettled(status)).toBe(true);
+      expect(isInvoicePaid(status)).toBe(false);
+    }
+  });
+
+  test('an open status (draft/sent) is neither settled nor paid', () => {
+    for (const status of ['draft', 'sent']) {
+      expect(isInvoicePaid(status)).toBe(false);
+    }
+  });
+});
+
 describe('divergingSiblings', () => {
   test('excludes the anchor itself, and any member sharing the anchor date', () => {
     const a = anchor();
@@ -78,6 +107,53 @@ describe('divergingSiblings', () => {
   });
 });
 
+// neverRanCoveredMembers is the shared pure helper (P1-C) behind BOTH
+// evaluateGroupDivergence's open-invoice branch (neverRanNeedingReview) AND
+// its new paid-invoice branch (paid_never_ran) — same membership question
+// ("which covered members will never run and haven't been split off yet")
+// regardless of the invoice's settlement state.
+describe('neverRanCoveredMembers', () => {
+  test.each(['cancelled', 'skipped', 'no_show'])('a %s member with no own live invoice is returned', (status) => {
+    const a = anchor();
+    const m = member('m', { status });
+    expect(neverRanCoveredMembers(a, [a, m]).map((x) => x.id)).toEqual(['m']);
+  });
+
+  test('a never-ran member WITH its own live invoice is excluded — already hand-split', () => {
+    const a = anchor();
+    const m = member('m', { status: 'cancelled', has_own_live_invoice: true });
+    expect(neverRanCoveredMembers(a, [a, m])).toEqual([]);
+  });
+
+  test.each(['confirmed', 'pending', 'en_route', 'on_site', 'rescheduled'])('an active member (status %s) is excluded', (status) => {
+    const a = anchor();
+    const m = member('m', { status });
+    expect(neverRanCoveredMembers(a, [a, m])).toEqual([]);
+  });
+
+  test('a completed member is excluded — completed is never a never-ran status', () => {
+    const a = anchor();
+    const m = member('m', { status: 'completed', completed_at: new Date('2026-10-01') });
+    expect(neverRanCoveredMembers(a, [a, m])).toEqual([]);
+  });
+
+  test('the anchor itself is never returned, even if its own status is never-ran', () => {
+    const a = anchor({ status: 'cancelled' });
+    const m = member('m', { status: 'confirmed' });
+    expect(neverRanCoveredMembers(a, [a, m])).toEqual([]);
+  });
+
+  test('multiple never-ran members are all returned, active/resolved ones excluded', () => {
+    const a = anchor();
+    const cancelled = member('cancelled', { status: 'cancelled' });
+    const noShow = member('no-show', { status: 'no_show' });
+    const resolved = member('resolved', { status: 'skipped', has_own_live_invoice: true });
+    const active = member('active', { status: 'confirmed' });
+    const result = neverRanCoveredMembers(a, [a, cancelled, noShow, resolved, active]).map((x) => x.id).sort();
+    expect(result).toEqual(['cancelled', 'no-show']);
+  });
+});
+
 describe('evaluateGroupDivergence', () => {
   test('diverged + unpaid (open) invoice → alert', () => {
     const a = anchor();
@@ -102,11 +178,82 @@ describe('evaluateGroupDivergence', () => {
     expect(verdict.diverging.map((m) => m.id)).toEqual(['b']);
   });
 
-  test('paid invoice → no alert, even while the visits still diverge', () => {
+  // Renamed (P1-C follow-up): this test's own fixture only ever exercises
+  // an ACTIVE diverging member (default status 'confirmed') — that
+  // contract is still true (a paid invoice clears when nothing covered by
+  // it is never-ran), but the old name's blanket "no alert" claim no
+  // longer holds for every paid invoice — see the 'paid_never_ran' P1-C
+  // block below for the exception (a covered member that will never run).
+  test('paid invoice + an ACTIVE diverging member (not never-ran) → no alert, even though it still diverges', () => {
     const a = anchor();
     const b = member('b', { scheduled_date: '2026-10-05' });
     const verdict = evaluateGroupDivergence({ anchor: a, members: [a, b], invoiceStatus: 'paid' });
     expect(verdict).toEqual({ action: 'clear', reason: 'invoice_settled' });
+  });
+
+  // -------------------------------------------------------------------
+  // P1-C (Codex round 13 on PR #5021): a PAID (collected) governing
+  // invoice does not clear unconditionally any more — a stamped member
+  // that invoice's payment covers, but that will never run (cancelled/
+  // skipped/no-show) and has no own live invoice, needs a refund/credit
+  // alert instead of silently clearing.
+  // -------------------------------------------------------------------
+  describe('paid_never_ran (P1-C)', () => {
+    test.each(['paid', 'prepaid', 'processing'])('%s invoice + one never-ran covered member, no own live invoice → alert naming that member', (status) => {
+      const a = anchor();
+      const cancelled = member('cancelled-covered', { status: 'cancelled' });
+      const verdict = evaluateGroupDivergence({ anchor: a, members: [a, cancelled], invoiceStatus: status });
+      expect(verdict.action).toBe('alert');
+      expect(verdict.reason).toBe('paid_never_ran');
+      expect(verdict.diverging.map((m) => m.id)).toEqual(['cancelled-covered']);
+    });
+
+    test.each(['paid', 'prepaid', 'processing'])('%s invoice + every member still active → clear (nothing never-ran)', (status) => {
+      const a = anchor();
+      const b = member('b', { scheduled_date: '2026-10-05', status: 'confirmed' });
+      const verdict = evaluateGroupDivergence({ anchor: a, members: [a, b], invoiceStatus: status });
+      expect(verdict).toEqual({ action: 'clear', reason: 'invoice_settled' });
+    });
+
+    // A never-ran member that ALREADY has its own live invoice has been
+    // hand-split off — no refund/credit alert needed for it.
+    test('paid invoice + never-ran member WITH its own live invoice → clear, not alert', () => {
+      const a = anchor();
+      const cancelled = member('cancelled-resolved', { status: 'cancelled', has_own_live_invoice: true });
+      const verdict = evaluateGroupDivergence({ anchor: a, members: [a, cancelled], invoiceStatus: 'paid' });
+      expect(verdict).toEqual({ action: 'clear', reason: 'invoice_settled' });
+    });
+
+    // The uncollectible vocabulary (void/refunded/canceled/cancelled) never
+    // collected outstanding money, or already gave it back — a covered
+    // never-ran member needs no refund/credit action there, unlike the
+    // PAID/PREPAID/PROCESSING case above. Keeps clearing unconditionally.
+    test.each(['void', 'refunded', 'canceled', 'cancelled'])('%s invoice + a never-ran covered member → clear, never a refund alert', (status) => {
+      const a = anchor();
+      const cancelled = member('cancelled-covered', { status: 'cancelled' });
+      const verdict = evaluateGroupDivergence({ anchor: a, members: [a, cancelled], invoiceStatus: status });
+      expect(verdict).toEqual({ action: 'clear', reason: 'invoice_settled' });
+    });
+
+    test.each(['skipped', 'no_show'])('paid invoice + a %s covered member behaves exactly like cancelled → alert', (neverRanStatus) => {
+      const a = anchor();
+      const m = member('m', { status: neverRanStatus });
+      const verdict = evaluateGroupDivergence({ anchor: a, members: [a, m], invoiceStatus: 'paid' });
+      expect(verdict.action).toBe('alert');
+      expect(verdict.reason).toBe('paid_never_ran');
+      expect(verdict.diverging.map((d) => d.id)).toEqual(['m']);
+    });
+
+    // Diverged-by-date is irrelevant to this verdict — it fires purely off
+    // never-ran status + no own live invoice, same-day or not.
+    test('a never-ran member that ALSO diverged by date is still covered by the paid_never_ran verdict', () => {
+      const a = anchor();
+      const cancelled = member('cancelled-moved', { scheduled_date: '2026-11-20', status: 'cancelled' });
+      const verdict = evaluateGroupDivergence({ anchor: a, members: [a, cancelled], invoiceStatus: 'prepaid' });
+      expect(verdict.action).toBe('alert');
+      expect(verdict.reason).toBe('paid_never_ran');
+      expect(verdict.diverging.map((d) => d.id)).toEqual(['cancelled-moved']);
+    });
   });
 
   test('a voided invoice → no alert either', () => {
@@ -241,6 +388,65 @@ describe('evaluateGroupDivergence', () => {
       expect(verdict).toEqual({ action: 'clear', reason: 'realigned' });
     },
   );
+});
+
+// buildDivergenceAlertCopy is the pure copy-builder extracted out of
+// raiseDivergenceAlert — covers both the ordinary 'diverged' alert copy
+// (unchanged) and the new 'paid_never_ran' copy (P1-C), which must name
+// that the invoice was already paid and say to refund or credit the
+// member's share, never "remove that charge" (that phrase is for a
+// still-open invoice only).
+describe('buildDivergenceAlertCopy', () => {
+  const anchorDate = '2026-10-01';
+
+  test("paid_never_ran: mentions the invoice was already paid, and says to refund or credit — never 'remove that charge'", () => {
+    const cancelled = member('cancelled-covered', { status: 'cancelled' });
+    const { detail, leadSentence, actionSentence } = buildDivergenceAlertCopy({
+      diverging: [cancelled], anchorDate, alertKind: 'paid_never_ran',
+    });
+    expect(leadSentence.toLowerCase()).toContain('already been paid');
+    expect(actionSentence.toLowerCase()).toMatch(/refund or credit/);
+    expect(detail).toContain('refund or credit its share of the already-paid invoice');
+    expect(detail).not.toContain('remove its charge from the combined invoice');
+    expect(actionSentence).not.toContain('remove that charge');
+    expect(actionSentence).not.toContain('split it by hand');
+  });
+
+  test.each(['skipped', 'no_show'])("paid_never_ran with a %s member says the same refund/credit action", (status) => {
+    const m = member('m', { status });
+    const { actionSentence } = buildDivergenceAlertCopy({ diverging: [m], anchorDate, alertKind: 'paid_never_ran' });
+    expect(actionSentence.toLowerCase()).toMatch(/refund or credit/);
+  });
+
+  // The ordinary (still-open-invoice) copy is byte-identical to before —
+  // P1-C's new branch must never leak into the default alertKind.
+  test("the ordinary 'diverged' never-ran copy is unchanged — still says remove the charge, never refund/credit", () => {
+    const cancelled = member('cancelled-covered', { status: 'cancelled' });
+    const { detail, leadSentence, actionSentence } = buildDivergenceAlertCopy({
+      diverging: [cancelled], anchorDate, alertKind: 'diverged',
+    });
+    expect(leadSentence).toBe('A same-trip visit from one estimate will not be serviced');
+    expect(actionSentence).toBe('The combined first-application invoice still charges for it — remove that charge.');
+    expect(detail).toContain('remove its charge from the combined invoice');
+    expect(detail).not.toMatch(/refund or credit/);
+    expect(leadSentence.toLowerCase()).not.toContain('already been paid');
+  });
+
+  test("the ordinary 'diverged' copy for a plain MOVED (not never-ran) member is unchanged — 'split it by hand'", () => {
+    const moved = member('moved', { scheduled_date: '2026-10-09' });
+    const { leadSentence, actionSentence, detail } = buildDivergenceAlertCopy({
+      diverging: [moved], anchorDate, alertKind: 'diverged',
+    });
+    expect(leadSentence).toBe('Same-trip visits from one estimate landed on different days');
+    expect(actionSentence).toBe('The combined first-application invoice still charges for both — split it by hand.');
+    expect(detail).toContain(`visit ${moved.id} now on 2026-10-09 (was ${anchorDate})`);
+  });
+
+  test('defaults to the ordinary diverged copy when alertKind is omitted', () => {
+    const cancelled = member('cancelled-covered', { status: 'cancelled' });
+    const { actionSentence } = buildDivergenceAlertCopy({ diverging: [cancelled], anchorDate });
+    expect(actionSentence).toBe('The combined first-application invoice still charges for it — remove that charge.');
+  });
 });
 
 describe('divergenceStateFingerprint', () => {

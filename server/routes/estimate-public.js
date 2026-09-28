@@ -11864,7 +11864,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         // the siblings are in place, keyed off the invoice already minted
         // (invoiceIdResult) and the same reserved anchor
         // (acceptLinkedSsId) that invoice was attached to. memberIds is
-        // convertEstimate's own additive promotedSameTripMemberIds — the
+        // convertEstimate's own additive combinedInvoiceMemberIds — the
         // ids it just promoted for THIS accept (Codex round-12 P2) — never
         // a same-date guess that could also catch an unrelated,
         // pre-existing same-day program. No-ops (via the stamper's own
@@ -11875,7 +11875,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           await EstimateConverter.stampCombinedFirstApplicationInvoiceCoverage(trx, {
             invoiceId: invoiceIdResult,
             anchorId: acceptLinkedSsId,
-            memberIds: standardConversionResult?.promotedSameTripMemberIds,
+            memberIds: standardConversionResult?.combinedInvoiceMemberIds,
           });
         }
         // Mint the standard setup/first-application invoice on THIS
@@ -12055,16 +12055,20 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             // own standard branch, never called the stamper — so a
             // multi-program public acceptance was invisible to the
             // sibling-split sweep. memberIds is convertEstimate's own
-            // additive promotedSameTripMemberIds — the ids it actually
-            // promoted for THIS accept (Codex round-12 P2), never a
-            // same-date guess. Same transaction the invoice itself commits
-            // in; no-ops (via the stamper's own single-program guard) when
-            // only one program shares this invoice.
+            // additive combinedInvoiceMemberIds — the ids it actually
+            // created for THIS accept and shares the combined invoice with
+            // (Codex round-12 P2 for a reserved-slot accept's promoted
+            // siblings; Codex round-13 P1-B for a PLAIN auto-scheduled
+            // accept's own same-day recurring parents, e.g. pest + lawn
+            // both auto-scheduled with no slot reservation at all) — never
+            // a same-date guess. Same transaction the invoice itself
+            // commits in; no-ops (via the stamper's own single-program
+            // guard) when only one program shares this invoice.
             if (attachScheduledServiceId) {
               await EstimateConverter.stampCombinedFirstApplicationInvoiceCoverage(trx, {
                 invoiceId: inv.id,
                 anchorId: attachScheduledServiceId,
-                memberIds: standardConversionResult?.promotedSameTripMemberIds,
+                memberIds: standardConversionResult?.combinedInvoiceMemberIds,
               });
             }
             // Immutable ledger for the setup this invoice bills (codex #3591

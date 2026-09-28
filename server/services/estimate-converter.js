@@ -2733,6 +2733,24 @@ function lineAnnualPerVisitAmount(svc, acceptedPlanFrequency) {
   return roundMoney(annual / visits);
 }
 
+// Pure: does this newly-inserted, plain-auto-scheduled unit's first-visit
+// amount belong on the SAME combined first-application invoice as the
+// anchor unit (P1-B, Codex round 13 on PR #5021)? Extracted out of
+// convertEstimate's auto-schedule loop so the decision is directly unit
+// testable without the full conversion integration harness. Requires ALL
+// of: the unit's own row was left unpriced specifically because more than
+// one recurring program is being auto-scheduled together
+// (sharesCombinedInvoicePricing — see the call site for what that
+// excludes), an anchor date is already known (the anchor unit inserted
+// first in loop order), and this unit landed on that EXACT anchor date —
+// never an inferred "close enough" comparison, since a seasonal roll can
+// legitimately land a companion unit on a different date at the same
+// moment of creation, in which case it was never part of this trip's
+// combined charge to begin with.
+function isAutoScheduledCombinedInvoiceSibling({ sharesCombinedInvoicePricing, unitFirstDate, anchorScheduledDate }) {
+  return !!(sharesCombinedInvoicePricing && anchorScheduledDate && unitFirstDate === anchorScheduledDate);
+}
+
 function reservedAcceptPerVisitSplit({
   reservedPrice,
   reservedService,
@@ -5585,15 +5603,24 @@ const EstimateConverter = {
     let scheduledCount = 0;
     let termStartDate = null;
     let firstScheduledServiceId = null;
-    // Ids of same-trip sibling parents ACTUALLY PROMOTED for a reserved
-    // accept (Codex round-12 P2, PR #5021): carried into
+    // Ids of same-trip top-level recurring parents this accept ACTUALLY
+    // CREATED whose first-visit amount is covered by the combined
+    // first-application invoice — never a same-day reconstruction that
+    // could also catch an unrelated, separately accepted/priced program
+    // that merely landed on the same date. Carried into
     // stampCombinedFirstApplicationInvoiceCoverage as memberIds so the
-    // stamp covers exactly what this accept inserted — never a same-day
-    // reconstruction that could also catch an unrelated, separately
-    // accepted/priced program that merely landed on the same date. Stays
-    // empty outside the reservation branch (single-program / auto-schedule
-    // accepts never populate it).
-    const promotedSameTripMemberIds = [];
+    // stamp covers exactly what this accept inserted. Populated from TWO
+    // places, each at the exact moment of insertion:
+    //   - the reserved-accept promotion branch below (Codex round-12 P2,
+    //     PR #5021) — a promoted same-trip sibling parent;
+    //   - the plain auto-schedule branch (P1-B, Codex round 13 on #5021,
+    //     this same PR) — a second-or-later top-level recurring parent the
+    //     unit loop inserts on the SAME date as the first (anchor) unit,
+    //     when recurringUnitCount > 1 left it unpriced for the shared
+    //     combined invoice exactly like the reserved-accept siblings are.
+    // Stays empty for a genuine single-program accept either way (nothing
+    // to stamp as a pair).
+    const combinedInvoiceMemberIds = [];
     const deferredFollowUpReminderRows = [];
     // Per-property duplicate-series scope (codex #3244 r1): an accept that
     // resolves to a customer who already runs a series would read that
@@ -6487,7 +6514,7 @@ const EstimateConverter = {
             // the combined first-application invoice's stamp should cover
             // (Codex round-12 P2) — the id is collected here, at the
             // moment of promotion, rather than reconstructed later by date.
-            if (sameTrip && parentRow?.id) promotedSameTripMemberIds.push(parentRow.id);
+            if (sameTrip && parentRow?.id) combinedInvoiceMemberIds.push(parentRow.id);
             scheduledCount += 1;
             // The reserved row's reminders were registered by the public
             // accept route; this added row needs its own (Codex r2) —
@@ -6848,6 +6875,14 @@ const EstimateConverter = {
       // Earliest date actually inserted by the loop below — replaces the
       // picked date when a seasonal roll moved the real first visit.
       let earliestScheduledUnitDate = null;
+      // The ANCHOR's own scheduled date — the exact date of whichever unit
+      // becomes firstScheduledServiceId below (P1-B) — kept separate from
+      // earliestScheduledUnitDate above (which tracks the MINIMUM across
+      // every inserted unit, including a seasonal roll that can land
+      // earlier OR later than the anchor). combinedInvoiceMemberIds below
+      // needs the anchor's own date specifically: "shares the anchor's
+      // date", not "is the earliest".
+      let anchorScheduledDate = null;
 
       // Combined-service routing: matching-cadence pairs schedule as ONE
       // combined service; standalone rewrites (e.g. rodent bait) schedule
@@ -6964,6 +6999,18 @@ const EstimateConverter = {
         const estimatedPrice = billingCadence && recurringUnitCount === 1
           ? perApplicationAmount
           : null;
+        // P1-B: this unit's row is left unpriced specifically BECAUSE more
+        // than one recurring program is being auto-scheduled together —
+        // the same condition (recurringUnitCount > 1) that makes its
+        // first-visit amount part of the combined first-application
+        // invoice the public route mints for the whole accept
+        // (estimate-public.js sameDayVisitTotalForPricingFrequency sums
+        // every recurring service's first-visit amount into ONE invoice
+        // attached to only the first unit's row). A genuine single-program
+        // accept has nothing to combine with and never contributes here,
+        // even though estimatedPrice can independently be null for it too
+        // (no resolvable billingCadence).
+        const sharesCombinedInvoicePricing = recurringUnitCount > 1 && !estimatedPrice;
         const durationMinutes = durationMinutesForRecurringService(svc, pattern);
 
         try {
@@ -7087,7 +7134,23 @@ const EstimateConverter = {
             }
             continue;
           }
-          if (!firstScheduledServiceId && outcome.insertedId) firstScheduledServiceId = outcome.insertedId;
+          if (outcome.insertedId && !firstScheduledServiceId) {
+            firstScheduledServiceId = outcome.insertedId;
+            anchorScheduledDate = unitFirstDate || null;
+          } else if (outcome.insertedId && isAutoScheduledCombinedInvoiceSibling({
+            sharesCombinedInvoicePricing, unitFirstDate, anchorScheduledDate,
+          })) {
+            // P1-B: a second-or-later top-level recurring parent this loop
+            // just inserted, on the SAME date as the anchor, left unpriced
+            // because it shares the combined first-application invoice with
+            // the anchor — collected at the exact moment of insertion
+            // (never a later date query, which could also catch an
+            // unrelated program that merely happens to land on the same
+            // day). estimate-public.js's stamp call site now covers it
+            // alongside the anchor instead of leaving it invisible to the
+            // sibling-split sweep.
+            combinedInvoiceMemberIds.push(outcome.insertedId);
+          }
           if (outcome.insertedId && unitFirstDate
             && (!earliestScheduledUnitDate || unitFirstDate < earliestScheduledUnitDate)) {
             earliestScheduledUnitDate = unitFirstDate;
@@ -7816,7 +7879,7 @@ const EstimateConverter = {
                 // rather than leaving an unstamped combined invoice.
                 if (created?.id && scheduledServiceId) {
                   await stampCombinedFirstApplicationInvoiceCoverage(trx, {
-                    invoiceId: created.id, anchorId: scheduledServiceId, memberIds: promotedSameTripMemberIds,
+                    invoiceId: created.id, anchorId: scheduledServiceId, memberIds: combinedInvoiceMemberIds,
                   });
                 }
                 return created;
@@ -8345,7 +8408,7 @@ const EstimateConverter = {
       // convertEstimate returns (estimate-public.js) pass this straight
       // through to stampCombinedFirstApplicationInvoiceCoverage's
       // memberIds instead of guessing membership by date.
-      promotedSameTripMemberIds,
+      combinedInvoiceMemberIds,
       billingTerm,
       draftInvoiceId,
       draftInvoiceAmount,
@@ -8429,6 +8492,7 @@ async function buildSeriesAddressScope(database, estimate, customerId) {
 
 module.exports = EstimateConverter;
 module.exports.reservedAcceptPerVisitSplit = reservedAcceptPerVisitSplit;
+module.exports.isAutoScheduledCombinedInvoiceSibling = isAutoScheduledCombinedInvoiceSibling;
 module.exports.buildSeriesAddressScope = buildSeriesAddressScope;
 module.exports.visitCountAliasValues = visitCountAliasValues;
 module.exports.visitCountFieldsConflict = visitCountFieldsConflict;
