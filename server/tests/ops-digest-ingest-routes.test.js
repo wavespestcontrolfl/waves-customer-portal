@@ -216,6 +216,12 @@ describe('payload', () => {
     expect(validateDigest({ ...good(), headline: '  ' }).value.headline).toBeNull();
     expect(validateDigest({ ...good() }).value.headline).toBeNull();
     expect(validateDigest({ ...good(), headline: 'h'.repeat(61) }).error).toMatch(/headline exceeds/);
+  });
+
+  test('count/newCount: an explicit null is rejected (only an omitted field falls back)', () => {
+    expect(validateDigest({ ...good(), count: null }).error).toMatch(/count must be a non-negative integer/);
+    expect(validateDigest({ ...good(), newCount: null }).error).toMatch(/newCount must be a non-negative integer/);
+    expect(validateDigest({ ...good() }).error).toBeUndefined();
     expect(validateDigest({ ...good(), headline: 42 }).error).toMatch(/headline must be a string/);
   });
 
@@ -552,6 +558,15 @@ describe('bell write', () => {
     const opts = mockNotifyAdmin.mock.calls[0][3];
     expect(opts.metadata.observedAt).toBe('2026-09-11T13:00:00.000Z');
     expect(opts.dedupeVersion).toBe('2026-09-11T13:00:00.000Z');
+  });
+
+  test('a ringing row stamps rungAt at delivery time, never its (possibly old) observedAt', async () => {
+    mockNotifyAdmin.mockResolvedValue({ id: 'n-old-obs', deduped: false });
+    await post({ ...good(), observedAt: '2026-09-11T13:00:00Z' });
+    const { metadata } = mockNotifyAdmin.mock.calls[0][3];
+    expect(metadata.quiet).toBe(false);
+    expect(metadata.observedAt).toBe('2026-09-11T13:00:00.000Z');
+    expect(Date.now() - Date.parse(metadata.rungAt)).toBeLessThan(60_000);
   });
 
   test('T2 clean with zero standing rows suppresses delayed T1 but permits later T3', async () => {

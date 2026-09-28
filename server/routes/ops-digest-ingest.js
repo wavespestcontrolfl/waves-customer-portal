@@ -232,7 +232,8 @@ function validateAudience(raw) {
 // optional; absent, the route falls back to the check-map's own counts(),
 // then to the first integer in the subject (see resolveCounts below).
 function validateCount(raw, label) {
-  if (raw === undefined || raw === null) return { value: null };
+  // Only an OMITTED field falls back; an explicit null is a malformed value.
+  if (raw === undefined) return { value: null };
   if (!Number.isInteger(raw) || raw < 0 || raw > MAX_COUNT) return { error: `${label} must be a non-negative integer` };
   return { value: raw };
 }
@@ -385,7 +386,7 @@ router.post('/', darkUnlessConfigured, ingestAuth, async (req, res) => {
           // rungAt from notification-service.js's mergeRefreshMetadata,
           // which ignores this precomputed value entirely on a quiet
           // refresh (shouldRing decided separately, by ringOnRefresh above).
-          ...(!quiet ? { rungAt: effectiveObservedAt } : {}),
+          ...(!quiet ? { rungAt: new Date().toISOString() } : {}),
         },
         trx,
       });

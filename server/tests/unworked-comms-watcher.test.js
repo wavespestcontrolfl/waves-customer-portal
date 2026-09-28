@@ -43,6 +43,11 @@ const request = (over = {}) => ({
 });
 
 describe('composeUnworkedCommsDigest', () => {
+  test('itemKeys are lane-prefixed so ids from different tables never collide', () => {
+    const out = composeUnworkedCommsDigest({ callbacks: [callback({ id: 42, total_count: 1 })], followUps: [followUp({ id: 42, total_count: 1 })] });
+    expect(out.itemKeys).toEqual(expect.arrayContaining(['call:42', 'task:42']));
+  });
+
   test('card totals retain disposition-only callback details and their own overflow count', () => {
     const out = composeUnworkedCommsDigest({ callbacks: [callback({ total_count: 2 }),
       { id: 'ledger-summary', callback_card_summary: true, total_count: 4 }] });

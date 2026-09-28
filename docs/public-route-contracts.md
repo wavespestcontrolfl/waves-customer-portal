@@ -3872,7 +3872,7 @@ which are unchanged from the paragraph above).
 Admin-alerts-ring scope (owner ruling 2026-09-28, "ring only when something
 changed"): the payload also accepts optional `count` and `newCount`, each a
 non-negative integer no larger than `Number.MAX_SAFE_INTEGER` (any other
-type or a negative/oversized value → 400); both are optional and resolve
+type, an explicit `null`, or a negative/oversized value → 400); both are optional and resolve
 INDEPENDENTLY — a caller-supplied value always wins for that field alone,
 and only a field the caller left out falls back. `count` falls back to the
 check-map's own `counts(subject)` for that check (data-hygiene: its parsed

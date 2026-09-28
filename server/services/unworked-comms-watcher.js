@@ -620,7 +620,11 @@ function composeUnworkedCommsDigest({ callbacks = [], followUps = [], unanswered
   // Only when every lane's page is its whole backlog: past a lane's row
   // cap, an older item moving onto the page would read as a new one.
   const shownAll = callbackCards.length + a.length + b.length + c.length + d.length === total;
-  const itemKeys = shownAll ? [...callbackCards, ...a, ...b, ...c, ...d].map((r) => String(r.id)).filter(Boolean) : null;
+  // Lane-prefixed: the lanes read different tables whose ids can collide.
+  const laneKeys = (lane, rows) => rows.filter((r) => r.id != null).map((r) => `${lane}:${r.id}`);
+  const itemKeys = shownAll
+    ? [...laneKeys('card', callbackCards), ...laneKeys('call', a), ...laneKeys('task', b), ...laneKeys('text', c), ...laneKeys('request', d)]
+    : null;
 
   return {
     subject,

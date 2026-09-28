@@ -503,12 +503,14 @@ async function deliverOpsDigest({ key, subject, text, html, link = null, metadat
       metadata: {
         opsKey: key,
         subject,
+        ...(fallOff ? { fallOff: true } : {}),
+        ...metadata,
+        // Ring stamps after the sender's own metadata: the ring decision
+        // above used these values, so a stray key can't store different ones.
         alertClass,
         ...countMeta,
         ...newCountMeta,
         ...itemKeysMeta,
-        ...(fallOff ? { fallOff: true } : {}),
-        ...metadata,
         // kind/audience/feed are the seam's classification, written after the
         // sender's own metadata so it can't shadow them (an override goes
         // through the `audience` param, which feeds all three consistently).
