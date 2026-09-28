@@ -5239,7 +5239,14 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           const customerRow = await knex('customers')
             .where({ id: service.customer_id })
             .first('has_multi_home');
-          singlePremisesProof = await customerHasOnlyPrimaryPremises(knex, service.customer_id, customerRow, mirrorKey);
+          // unresolvedFails: true (codex round-6 P1) — an unstamped witness
+          // row whose property_id/source_estimate_id cannot be resolved is
+          // NOT "no evidence either way" for this card's purposes: it might
+          // be the primary, or it might be the very secondary premises the
+          // mirror fallback would otherwise wrongly disclose. cross-sell.js
+          // keeps the default (unresolvedFails omitted) so its own
+          // behavior and tests stay byte-identical.
+          singlePremisesProof = await customerHasOnlyPrimaryPremises(knex, service.customer_id, customerRow, mirrorKey, { unresolvedFails: true });
         } catch {
           singlePremisesProof = false;
         }

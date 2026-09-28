@@ -757,6 +757,91 @@ describe('multi-property scoping', () => {
       );
       expect(data.upcomingVisitsCard).toBeNull();
     });
+
+    // P1 fix (codex round-6): the proof's own witness scan used to `continue`
+    // past an UNRESOLVABLE witness (a dangling property_id/source_estimate_id
+    // elsewhere on the account) as "not evidence of a second premises" — the
+    // doctrine cross-sell.js's own callers need. This card cannot accept that:
+    // an unresolvable witness might BE the second premises the mirror would
+    // then wrongly disclose, so report-data.js now passes
+    // `{ unresolvedFails: true }`, and a witness like this must fail the
+    // proof outright (not merely be skipped) — excluding the unscoped
+    // candidate, not just the witness row itself.
+    test('an unresolvable property_id witness elsewhere on the account → the proof fails strictly, excluding the unscoped candidate', async () => {
+      process.env.GATE_REPORT_UPCOMING_VISITS = 'true';
+      const knex = makeKnex({
+        ...BASE_FIXTURES,
+        // Only the primary property on file — the customer_properties count
+        // check alone would pass this account as single-premises.
+        customer_properties: [PROP_A],
+        scheduled_services: [
+          { id: 'scheduled-current', customer_id: 'customer-1', scheduled_date: '2026-05-16', status: 'completed', service_type: 'Quarterly Pest Control Service', property_id: 'prop-a' },
+          // The unscoped candidate under test — no stamp, no property_id, no
+          // source_estimate_id. Would be included via the mirror if (and
+          // only if) the proof clears.
+          { id: 'scheduled-unscoped', customer_id: 'customer-1', scheduled_date: todayPlus(5), status: 'confirmed', service_type: 'Should never appear (unresolvable witness elsewhere on the account)', window_start: '09:00:00' },
+          // A THIRD row on the SAME account — unstamped, and its property_id
+          // names no customer_properties row at all. Neither the report's
+          // own row nor the candidate under test; just another witness the
+          // proof's internal scan reads (unscoped by status/date).
+          { id: 'scheduled-witness-property-gone', customer_id: 'customer-1', scheduled_date: '2019-06-01', status: 'completed', service_type: 'Old visit, deleted property', property_id: 'prop-ghost' },
+        ],
+      });
+      const data = await buildReportV1Data(
+        { ...BASE_SERVICE, service_date: '2026-05-16' },
+        'token-witness-property-unresolvable',
+        knex,
+        LIVE,
+      );
+      expect(data.upcomingVisitsCard).toBeNull();
+    });
+
+    test('an unresolvable (missing/addressless) source_estimate_id witness elsewhere on the account → the proof fails strictly, excluding the unscoped candidate', async () => {
+      process.env.GATE_REPORT_UPCOMING_VISITS = 'true';
+      const knex = makeKnex({
+        ...BASE_FIXTURES,
+        customer_properties: [PROP_A],
+        // No 'est-ghost' entry at all — the witness row's source_estimate_id
+        // resolves to nothing.
+        estimates: [],
+        scheduled_services: [
+          { id: 'scheduled-current', customer_id: 'customer-1', scheduled_date: '2026-05-16', status: 'completed', service_type: 'Quarterly Pest Control Service', property_id: 'prop-a' },
+          { id: 'scheduled-unscoped', customer_id: 'customer-1', scheduled_date: todayPlus(5), status: 'confirmed', service_type: 'Should never appear (unresolvable estimate witness elsewhere on the account)', window_start: '09:00:00' },
+          { id: 'scheduled-witness-estimate-gone', customer_id: 'customer-1', scheduled_date: '2019-06-01', status: 'completed', service_type: 'Old visit, deleted estimate', source_estimate_id: 'est-ghost' },
+        ],
+      });
+      const data = await buildReportV1Data(
+        { ...BASE_SERVICE, service_date: '2026-05-16' },
+        'token-witness-estimate-unresolvable',
+        knex,
+        LIVE,
+      );
+      expect(data.upcomingVisitsCard).toBeNull();
+    });
+
+    test('every witness on the account resolves to the primary (including an unstamped one linked only by property_id) → the unscoped candidate is still included via the mirror', async () => {
+      process.env.GATE_REPORT_UPCOMING_VISITS = 'true';
+      const knex = makeKnex({
+        ...BASE_FIXTURES,
+        customer_properties: [PROP_A],
+        scheduled_services: [
+          { id: 'scheduled-current', customer_id: 'customer-1', scheduled_date: '2026-05-16', status: 'completed', service_type: 'Quarterly Pest Control Service', property_id: 'prop-a' },
+          { id: 'scheduled-unscoped', customer_id: 'customer-1', scheduled_date: todayPlus(5), status: 'confirmed', service_type: 'Lawn Care Treatment', window_start: '09:00:00' },
+          // A third, unstamped witness row that DOES resolve — via
+          // property_id, to the primary property. Proves the strict option
+          // only fails the proof on a genuinely UNRESOLVABLE witness, never
+          // on a resolvable one.
+          { id: 'scheduled-witness-resolves-primary', customer_id: 'customer-1', scheduled_date: '2019-06-01', status: 'completed', service_type: 'Old visit, same property', property_id: 'prop-a' },
+        ],
+      });
+      const data = await buildReportV1Data(
+        { ...BASE_SERVICE, service_date: '2026-05-16' },
+        'token-witness-resolves-primary',
+        knex,
+        LIVE,
+      );
+      expect(data.upcomingVisitsCard.visits.map((v) => v.serviceType)).toEqual(['Lawn Care Treatment']);
+    });
   });
 
   // P1 fix (codex round-4, fourth consecutive property-scoping finding on

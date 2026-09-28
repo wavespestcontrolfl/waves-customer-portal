@@ -138,7 +138,22 @@ function sameResolvedProperty(a, b) {
 // witness throws and the caller decides the fail-closed consequence (the
 // whole card suppresses in cross-sell.js's unlinked-report branch; the
 // one unscoped row excludes in the upcoming-visits card).
-async function customerHasOnlyPrimaryPremises(database, customerId, customer, primaryStreet) {
+//
+// options.unresolvedFails (default false, codex round-6 P1): an
+// UNSTAMPED witness row whose property_id names no customer_properties
+// row, or whose source_estimate_id names no estimate (or one with no
+// address), is genuinely UNRESOLVABLE — it might be the primary, or it
+// might be a second premises this account has, and there is no way to
+// tell which. cross-sell.js's original callers treat that as "not
+// evidence of a second premises" (`continue`) — a doctrine this function
+// keeps by DEFAULT so cross-sell.js's own behavior and tests stay
+// byte-identical. The upcoming-visits card cannot accept that risk: its
+// mirror fallback is a "prove single-premises, THEN allow the fallback"
+// gate, and an unresolved witness proves nothing either way — so it
+// passes `{ unresolvedFails: true }` to fail the proof (return false)
+// instead, matching its own fail-closed doctrine for every other
+// unresolvable link in this module.
+async function customerHasOnlyPrimaryPremises(database, customerId, customer, primaryStreet, { unresolvedFails = false } = {}) {
   // The eligibility flag the discount engine already trusts for multi-home
   // status — admins hand-set it for customers whose second property never
   // made it into customer_properties.
@@ -211,8 +226,10 @@ async function customerHasOnlyPrimaryPremises(database, customerId, customer, pr
       // An unresolvable property link names no premises — the row is not
       // evidence of a second one (the linked-report branch suppresses on
       // it because THAT report is the one being priced; here the row is
-      // just another visit on the account).
-      if (!prop) continue;
+      // just another visit on the account) — UNLESS the caller opted into
+      // unresolvedFails: it might just as easily BE the second premises,
+      // and there is no way to tell which from an unresolvable link alone.
+      if (!prop) { if (unresolvedFails) return false; continue; }
       if (!provablyPrimary(linkage.normalizedStampedStreet(
         prop.address_line1, prop.address_line2, prop.city, prop.zip
       ))) return false;
@@ -222,7 +239,8 @@ async function customerHasOnlyPrimaryPremises(database, customerId, customer, pr
       const src = await database('estimates')
         .where({ id: row.source_estimate_id })
         .first('address');
-      if (!src?.address) continue;
+      // Same unresolvedFails doctrine as the property_id leg above.
+      if (!src?.address) { if (unresolvedFails) return false; continue; }
       if (!provablyPrimary(linkage.normalizedEstimateStreet(src.address))) return false;
       continue;
     }

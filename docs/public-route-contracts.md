@@ -602,8 +602,18 @@ one (`customerHasOnlyPrimaryPremises`, also moved into
 own legacy no-evidence row is exactly as likely to be the OTHER property,
 and the mirror alone cannot tell the two apart). That proof fails CLOSED
 on any unreadable witness — a second premises the account has ever had
-(active or since deactivated), or a query failure, refuses the mirror
+(active or since deactivated), a query failure, or (this card's own
+strict option, `{ unresolvedFails: true }`, codex round-6 P1) an
+UNRESOLVED witness elsewhere on the account: an unstamped
+`scheduled_services` row whose `property_id` names no `customer_properties`
+row, or whose `source_estimate_id` names no `estimates` row or one with no
+address, fails the proof outright rather than being skipped as "not
+evidence either way" — it might just as easily BE the second premises this
+card would then wrongly disclose. Any of these refuses the mirror
 outright, and the one unscoped row is excluded rather than shown.
+`cross-sell.js` calls the same proof WITHOUT this strict option (its
+unchanged, pre-existing behavior): there, an unresolved witness is treated
+as not being evidence of a second premises and the proof continues past it.
 Every address key folds in `address_line2` (the unit — a normalized
 "Apt 4"/"#4"/"Unit 4" all key identically), so a condo/apartment
 building's units never compare equal (a unit on one side and none on the

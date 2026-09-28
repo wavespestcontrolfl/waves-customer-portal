@@ -6,7 +6,7 @@
 // (cross-sell.js and report-data.js) actually import it rather than
 // re-deriving their own copy again.
 const fs = require('fs');
-const { resolveVisitPropertyScope, sameResolvedProperty } = require('../services/service-report/visit-property-scope');
+const { resolveVisitPropertyScope, sameResolvedProperty, customerHasOnlyPrimaryPremises } = require('../services/service-report/visit-property-scope');
 
 function fakeDb(tables = {}) {
   return (table) => {
@@ -18,8 +18,27 @@ function fakeDb(tables = {}) {
           first: (...cols) => Promise.resolve(filtered[0]
             ? (cols.length ? Object.fromEntries(cols.map((c) => [c, filtered[0][c]])) : filtered[0])
             : null),
+          // customerHasOnlyPrimaryPremises reads customer_properties/
+          // scheduled_services with select()/distinct() rather than first()
+          // — both just materialize the whole filtered set here.
+          select: (...cols) => Promise.resolve(filtered.map((row) => (cols.length
+            ? Object.fromEntries(cols.map((c) => [c, row[c]]))
+            : row))),
+          distinct: (cols) => Promise.resolve(filtered.map((row) => (cols?.length
+            ? Object.fromEntries(cols.map((c) => [c, row[c]]))
+            : row))),
         };
       },
+      // Mirrors the live scheduled_services schema so the proof's own
+      // column-presence checks (stamp/property_id/source_estimate_id) don't
+      // silently skip a leg in tests.
+      columnInfo: () => Promise.resolve(table === 'scheduled_services'
+        ? {
+          service_address_line1: {}, service_address_line2: {},
+          service_address_city: {}, service_address_zip: {},
+          property_id: {}, source_estimate_id: {},
+        }
+        : {}),
     };
   };
 }
@@ -113,6 +132,95 @@ describe('sameResolvedProperty', () => {
   test('either side null/empty never matches', () => {
     expect(sameResolvedProperty(null, '100sampletrail|bradenton|34211')).toBe(false);
     expect(sameResolvedProperty('100sampletrail|bradenton|34211', null)).toBe(false);
+  });
+});
+
+// customerHasOnlyPrimaryPremises: the single-premises proof (codex #3367 PR
+// r11 P1; moved here round-5 so cross-sell.js and the upcoming-visits card
+// share one implementation). round-6 P1 added the `unresolvedFails` option
+// covered here — cross-sell.js's own tests already pin the function's
+// DEFAULT (lenient) behavior end-to-end, so this file's job is the option
+// itself: both modes, isolated from either caller.
+describe('customerHasOnlyPrimaryPremises', () => {
+  const PRIMARY_STREET = '100sampletrail|bradenton|34211';
+  const PRIMARY_PROPERTY = { ...PROP_A, customer_id: 'customer-1' };
+
+  describe('default mode (unresolvedFails omitted) — an unresolvable witness is not evidence of a second premises', () => {
+    test('an unstamped witness row whose property_id resolves to nothing → continues; the proof still passes', async () => {
+      const db = fakeDb({
+        customer_properties: [PRIMARY_PROPERTY],
+        scheduled_services: [
+          { customer_id: 'customer-1', property_id: 'prop-ghost' },
+        ],
+      });
+      expect(await customerHasOnlyPrimaryPremises(db, 'customer-1', {}, PRIMARY_STREET)).toBe(true);
+    });
+
+    test('an unstamped witness row whose source_estimate_id resolves to nothing → continues; the proof still passes', async () => {
+      const db = fakeDb({
+        customer_properties: [PRIMARY_PROPERTY],
+        scheduled_services: [
+          { customer_id: 'customer-1', source_estimate_id: 'est-ghost' },
+        ],
+        estimates: [],
+      });
+      expect(await customerHasOnlyPrimaryPremises(db, 'customer-1', {}, PRIMARY_STREET)).toBe(true);
+    });
+
+    test('a witness row whose source_estimate_id resolves but the estimate carries no address → continues; the proof still passes', async () => {
+      const db = fakeDb({
+        customer_properties: [PRIMARY_PROPERTY],
+        scheduled_services: [
+          { customer_id: 'customer-1', source_estimate_id: 'est-blank' },
+        ],
+        estimates: [{ id: 'est-blank', address: null }],
+      });
+      expect(await customerHasOnlyPrimaryPremises(db, 'customer-1', {}, PRIMARY_STREET)).toBe(true);
+    });
+  });
+
+  describe('strict mode ({ unresolvedFails: true }) — an unresolvable witness fails the proof outright', () => {
+    test('an unstamped witness row whose property_id resolves to nothing → the proof returns false', async () => {
+      const db = fakeDb({
+        customer_properties: [PRIMARY_PROPERTY],
+        scheduled_services: [
+          { customer_id: 'customer-1', property_id: 'prop-ghost' },
+        ],
+      });
+      expect(await customerHasOnlyPrimaryPremises(db, 'customer-1', {}, PRIMARY_STREET, { unresolvedFails: true })).toBe(false);
+    });
+
+    test('an unstamped witness row whose source_estimate_id resolves to nothing → the proof returns false', async () => {
+      const db = fakeDb({
+        customer_properties: [PRIMARY_PROPERTY],
+        scheduled_services: [
+          { customer_id: 'customer-1', source_estimate_id: 'est-ghost' },
+        ],
+        estimates: [],
+      });
+      expect(await customerHasOnlyPrimaryPremises(db, 'customer-1', {}, PRIMARY_STREET, { unresolvedFails: true })).toBe(false);
+    });
+
+    test('a witness row whose source_estimate_id resolves but the estimate carries no address → the proof returns false (addressless, not just missing)', async () => {
+      const db = fakeDb({
+        customer_properties: [PRIMARY_PROPERTY],
+        scheduled_services: [
+          { customer_id: 'customer-1', source_estimate_id: 'est-blank' },
+        ],
+        estimates: [{ id: 'est-blank', address: null }],
+      });
+      expect(await customerHasOnlyPrimaryPremises(db, 'customer-1', {}, PRIMARY_STREET, { unresolvedFails: true })).toBe(false);
+    });
+
+    test('every witness resolves cleanly to the primary → the proof still passes (strict mode only fails on a genuinely unresolvable witness)', async () => {
+      const db = fakeDb({
+        customer_properties: [PRIMARY_PROPERTY],
+        scheduled_services: [
+          { customer_id: 'customer-1', property_id: 'prop-a' },
+        ],
+      });
+      expect(await customerHasOnlyPrimaryPremises(db, 'customer-1', {}, PRIMARY_STREET, { unresolvedFails: true })).toBe(true);
+    });
   });
 });
 
