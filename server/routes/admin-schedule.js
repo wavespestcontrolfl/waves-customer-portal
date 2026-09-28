@@ -13441,11 +13441,15 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       // card-fee capture all write this row (Codex r1 P1 + parallel review on
       // #5253). The row's CURRENT price is read under these locks, never
       // before the transaction.
-      // A free re-service conversion voids this visit's DIRECTLY linked
-      // unpaid invoices itself, so those alone are waived; money anywhere,
-      // and any live invoice linked through a service record or a combined
-      // packet (which that cleanup never sees), still blocks it (Codex r1 +
-      // r2 P1).
+      // A free re-service conversion is a re-price like any other (owner
+      // ruling 2026-09-28 on #5253 r3): ANY live invoice blocks it — direct,
+      // service-record, packet, or a line already on a payer statement —
+      // and staff void or release first. Its own void cleanup below never
+      // sees indirect links and skips frozen statement lines, so waiving
+      // even the direct ones left old-price money on a $0 visit. A
+      // series-wide conversion zeroes every upcoming sibling too, so each of
+      // those is locked and guarded the same way here, before the first
+      // write and the Bill-To Stripe cancel (Codex r3 P1).
       if (priceEditPosted) {
         const priceGuardCols = await trx('scheduled_services').columnInfo();
         const priceGuardSelect = ['id', ...postedPriceKeys.filter((key) => priceGuardCols[key])];
@@ -13454,13 +13458,57 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         const priceGuardRow = await trx('scheduled_services').where({ id: req.params.id }).forUpdate().first(...priceGuardSelect);
         const priceActuallyChanging = postedPriceKeys.some((key) => moneyValuesDiffer(priceGuardRow?.[key], updates[key]));
         if (priceActuallyChanging) {
-          const covered = await findBillingCoveredVisits(trx, [priceGuardRow || { id: req.params.id }], reServiceConversionZeroPrice ? { liveIndirectInvoice: true } : { liveInvoice: true });
+          const covered = await findBillingCoveredVisits(trx, [priceGuardRow || { id: req.params.id }], { liveInvoice: true });
           if (covered.size > 0) {
             const [, reason] = [...covered.entries()][0];
             throw Object.assign(
               httpError(409, `Can't change this visit's price: it's ${reason}. Void or release that first, then set the new price.`),
               { code: 'REPRICE_BLOCKED_COMMITTED_MONEY', isOperational: true },
             );
+          }
+        }
+      }
+      // The series-wide free conversion's sibling set — exactly the rows the
+      // conversion block below zeroes: a TEMPLATE edit (no
+      // recurring_parent_id), not scoped this_only, upcoming pending/
+      // confirmed children. Rows locked FOR UPDATE by id, then each mint lock
+      // TRIED (never waited on — this save already holds the edited visit's
+      // mint lock; same ABBA reasoning as the 'following' propagation).
+      if (reServiceConversionZeroPrice
+        && !(wantsPriceServiceScope && normalizePriceServiceScope(priceServiceScope) === 'this_only')) {
+        const sibGuardCols = await trx('scheduled_services').columnInfo();
+        const sibSelf = sibGuardCols.recurring_parent_id
+          ? await trx('scheduled_services').where({ id: req.params.id }).first('recurring_parent_id')
+          : null;
+        if (sibGuardCols.recurring_parent_id && sibSelf && !sibSelf.recurring_parent_id) {
+          const sibSelect = ['id', 'scheduled_date'];
+          if (sibGuardCols.annual_prepay_term_id) sibSelect.push('annual_prepay_term_id');
+          if (sibGuardCols.prepaid_amount) sibSelect.push('prepaid_amount');
+          const convSiblings = await trx('scheduled_services')
+            .where({ recurring_parent_id: req.params.id })
+            .whereIn('status', ['pending', 'confirmed'])
+            .orderBy('id', 'asc')
+            .forUpdate()
+            .select(...sibSelect);
+          if (convSiblings.length > 0) {
+            const { tryAcquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
+            for (const id of convSiblings.map((row) => String(row.id)).sort()) {
+              if (!(await tryAcquireScheduledInvoiceMintLock(trx, id))) {
+                throw Object.assign(
+                  new Error('Another change to a later visit in this series is in progress — try again in a moment.'),
+                  { statusCode: 409, isOperational: true, code: 'VISIT_BUSY_RETRY' },
+                );
+              }
+            }
+            const sibCovered = await findBillingCoveredVisits(trx, convSiblings, { liveInvoice: true });
+            if (sibCovered.size > 0) {
+              const [firstId, reason] = [...sibCovered.entries()][0];
+              const when = convSiblings.find((visit) => visit.id === firstId);
+              throw Object.assign(
+                httpError(409, `Can't convert this series to a free re-service: the ${dateOnly(when?.scheduled_date) || 'later'} visit is ${reason}. Void or release that first, or convert this appointment only.`),
+                { code: 'REPRICE_BLOCKED_COMMITTED_MONEY', isOperational: true },
+              );
+            }
           }
         }
       }
@@ -17291,17 +17339,16 @@ async function liveUpcomingSeriesVisits(conn, parentId) {
 // live attached invoice that hasn't taken money yet — a draft never sent, a
 // sent/viewed/overdue invoice sitting unpaid, or a $0 one — because
 // completion and Charge Now reuse it at the OLD price.
-// `liveIndirectInvoice` (defaults to liveInvoice) applies that same rule only
-// to invoices linked through a service record or a combined-visit packet —
-// the free re-service conversion's case: its own cleanup voids the visit's
-// DIRECTLY linked unpaid invoices but never sees the indirect ones (Codex r2
-// P1 on #5253). Either option also discovers the indirect links, so money
-// on an indirectly linked invoice always blocks. None of the three
+// It also discovers invoices linked through a service record or a
+// combined-visit packet (Codex r2 P1 on #5253), so money or a live invoice
+// on an indirectly linked invoice blocks too. A free re-service conversion
+// gets no exemption (owner ruling 2026-09-28, #5253 r3: "same rule as any
+// re-price") — staff void or release first. None of the three
 // existing callers (the plan trim, the series-cancel fee rails, the price/
 // service sibling propagation before this option was threaded onto it) ever
 // needed to know about an invoice nobody has paid — so this stays opt-in,
 // default false, keeping every pre-existing call byte-identical.
-async function findBillingCoveredVisits(conn, visits, { feeRails = true, liveInvoice = false, liveIndirectInvoice = liveInvoice } = {}) {
+async function findBillingCoveredVisits(conn, visits, { feeRails = true, liveInvoice = false } = {}) {
   const covered = new Map();
   const mark = (id, reason) => { if (!covered.has(id)) covered.set(id, reason); };
   // The term LINK outlives the coverage: a voided/refunded prepay flips the
@@ -17395,7 +17442,7 @@ async function findBillingCoveredVisits(conn, visits, { feeRails = true, liveInv
       .whereIn('scheduled_service_id', ids)
       .whereNotIn('status', [...NO_MONEY_HELD])
       .select('scheduled_service_id', 'status', 'credit_applied', 'line_items', 'stripe_payment_intent_id', 'total');
-    // liveIndirectInvoice (on whenever liveInvoice is) reaches an invoice
+    // liveInvoice also reaches an invoice
     // this visit carries WITHOUT its own
     // invoices.scheduled_service_id — the two indirect links the repricing
     // guard has to check because the direct query above misses them:
@@ -17411,7 +17458,7 @@ async function findBillingCoveredVisits(conn, visits, { feeRails = true, liveInv
     // asked "does this visit carry an unpaid invoice at all," only "has
     // money already moved," so widening the match set here would change
     // their answer for a case they were never built to consider.
-    if (liveIndirectInvoice) {
+    if (liveInvoice) {
       if (await conn.schema.hasTable('service_records')) {
         const srLinked = await conn('invoices as inv')
           .join('service_records as sr', 'sr.id', 'inv.service_record_id')
@@ -17421,7 +17468,7 @@ async function findBillingCoveredVisits(conn, visits, { feeRails = true, liveInv
             'sr.scheduled_service_id as scheduled_service_id',
             'inv.status', 'inv.credit_applied', 'inv.line_items', 'inv.stripe_payment_intent_id', 'inv.total',
           );
-        invoiced.push(...srLinked.map((row) => ({ ...row, viaIndirectLink: true })));
+        invoiced.push(...srLinked);
       }
       if (await conn.schema.hasTable('visit_completion_packet_items')) {
         const packetLinked = await conn('visit_completion_packet_items as p')
@@ -17432,7 +17479,7 @@ async function findBillingCoveredVisits(conn, visits, { feeRails = true, liveInv
             'p.scheduled_service_id as scheduled_service_id',
             'inv.status', 'inv.credit_applied', 'inv.line_items', 'inv.stripe_payment_intent_id', 'inv.total',
           );
-        invoiced.push(...packetLinked.map((row) => ({ ...row, viaIndirectLink: true })));
+        invoiced.push(...packetLinked);
       }
     }
     const hasDepositCreditLine = (items) => {
@@ -17458,7 +17505,7 @@ async function findBillingCoveredVisits(conn, visits, { feeRails = true, liveInv
         // conservative: no Stripe round-trip in a refusal path, and an
         // already-dead PI just means the operator voids the invoice first.
         mark(inv.scheduled_service_id, 'attached to an invoice with a card payment that can still settle');
-      } else if (liveInvoice || (liveIndirectInvoice && inv.viaIndirectLink)) {
+      } else if (liveInvoice) {
         // Nothing above fired, yet a live invoice is attached: a draft never
         // sent, a sent/viewed/overdue invoice sitting unpaid, or a $0 one.
         // Completion and Charge Now reuse any live attached invoice, so it

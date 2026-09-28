@@ -272,9 +272,9 @@ test('changed price is allowed when there is no covered invoice — mint lock is
   expect(Number(write.payload.estimated_price)).toBeCloseTo(150, 2);
 });
 
-test('the free re-service conversion runs the base money check (not liveInvoice), and service edits take the mint lock', () => {
-  // A conversion voids this visit's unpaid invoices itself, so only money it
-  // cannot undo refuses it (Codex r1 P1 on #5253). Driving
+test('the free re-service conversion runs the same any-live-invoice check, guards its series siblings, and service edits take the mint lock', () => {
+  // Owner ruling 2026-09-28 (#5253 r3): a conversion is a re-price like any
+  // other — no exemption for the invoices its own cleanup would void. Driving
   // resolveReServiceConversion's full eligibility chain through this mock
   // harness would exercise a large, separately tested surface to re-prove a
   // one-line argument — asserted against the route source instead, the same
@@ -282,7 +282,13 @@ test('the free re-service conversion runs the base money check (not liveInvoice)
   const fs = require('fs');
   const src = fs.readFileSync(require.resolve('../routes/admin-schedule.js'), 'utf8');
   expect(src).toMatch(/const priceEditPosted = postedPriceKeys\.length > 0;/);
-  expect(src).toMatch(/findBillingCoveredVisits\(trx, \[priceGuardRow \|\| \{ id: req\.params\.id \}\], reServiceConversionZeroPrice \? \{ liveIndirectInvoice: true \} : \{ liveInvoice: true \}\)/);
+  expect(src).toMatch(/findBillingCoveredVisits\(trx, \[priceGuardRow \|\| \{ id: req\.params\.id \}\], \{ liveInvoice: true \}\)/);
+  // Series-wide conversion: every sibling the conversion block zeroes is
+  // locked, mint-try-locked and guarded BEFORE the first write (Codex r3 P1).
+  const sibGuardAt = src.indexOf('const sibCovered = await findBillingCoveredVisits(trx, convSiblings, { liveInvoice: true });');
+  expect(sibGuardAt).toBeGreaterThan(-1);
+  expect(sibGuardAt).toBeLessThan(src.indexOf('if (addressPlan) addressUpdatedIds = await applyAppointmentAddress(trx, addressPlan, req.technicianId);'));
+  expect(src).not.toMatch(/liveIndirectInvoice/);
   expect(src).toMatch(/if \(reServiceConversionZeroPrice \|\| priceEditPosted \|\| serviceEditPosted\) \{/);
   // The check reads the row under its own FOR UPDATE, before the first
   // route-owned write (applyAppointmentAddress).
