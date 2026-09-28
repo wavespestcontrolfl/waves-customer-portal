@@ -131,11 +131,18 @@ function antsRainThresholdInches(rainConfidence, rainySeason) {
 // buildRainExpectation to keep the two independent decisions (the rain-fact
 // sentence vs. the rain-fast clause) from compounding into one function's
 // branch count.
+//
+// codex P2 2026-09-29 (round 2): when SEVERAL applied products each carry a
+// positive rainfastMinutes, state the LONGEST one — the customer needs to
+// know how long to wait for every applied product to be rain-fast, and a
+// shorter interval from an earlier array entry would understate that
+// (array order is incidental, never a safety ranking).
 function rainfastClauseText(products) {
-  const rainfastMinutes = products
+  const rainfastValues = products
     .map((p) => finiteOrNull(p?.rainfastMinutes))
-    .find((n) => n != null && n > 0);
-  const rainfastLabel = rainfastMinutes != null ? formatRainfastMinutes(rainfastMinutes) : null;
+    .filter((n) => n != null && n > 0);
+  if (!rainfastValues.length) return '';
+  const rainfastLabel = formatRainfastMinutes(Math.max(...rainfastValues));
   return rainfastLabel ? ` Your treatment is rain-fast about ${rainfastLabel} after it dries, per the label.` : '';
 }
 
@@ -338,6 +345,16 @@ function normalizeProductName(name) {
 const PRODUCT_EXPECTATION_CLASS = new Map([
   ['taurus sc', 'non_repellent'],
   ['alpine wsg', 'non_repellent'],
+  // codex P2 2026-09-29 (round 2): the CATALOG's canonical products_catalog.name
+  // is "Atticus Talak" (migration 20260712100000_catalog_label_rate_backfill.js,
+  // and every other seed/backfill migration that touches this row) —
+  // client/src/lib/pest-default-mix.js's house-mix matcher also resolves
+  // against that exact catalog row name. "Atticus Talak 7.9 F" is kept too:
+  // several purchase-receipt / Amazon-parser / completion-default-products
+  // fixtures use the longer display string, and this map fails closed on
+  // ANY spelling it doesn't carry — a name mismatch here silently drops a
+  // product's classification with no error, so both spellings stay mapped.
+  ['atticus talak', 'pyrethroid'],
   ['atticus talak 7.9 f', 'pyrethroid'],
   ['demand cs', 'pyrethroid'],
   ['onslaught fastcap', 'pyrethroid'],

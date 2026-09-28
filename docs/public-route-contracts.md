@@ -87,15 +87,24 @@ exact number), then an OPTIONAL rain-fast clause ("...rain-fast about N
 after it dries, per the label.") that appears ONLY when
 `products_catalog.rainfast_minutes` is actually set for an applied product —
 NULL for every current pest product as of 2026-09-27, so this clause never
-fires against real data today. There is deliberately NO generic fallback
-sentence when the catalog has no number (revised 2026-09-28): a plain
-"rain-fast once it has dried" claim is itself unsupported — most labels
-don't state rain-fastness at all, and some instead say to avoid rain within
-a window after application — so with no sourced number the clause is simply
-absent, never a hard-coded or invented duration. Then, **live view only**,
-a forward-looking heavy-rain caveat
+fires against real data today. When MORE THAN ONE applied product carries a
+positive `rainfast_minutes` (a future catalog state), the clause states the
+LONGEST interval across them (codex P2 2026-09-29 round 2: array order is
+incidental, never a safety ranking — the customer needs the wait time that
+covers every applied product, not whichever happened to sort first). There
+is deliberately NO generic fallback sentence when the catalog has no number
+(revised 2026-09-28): a plain "rain-fast once it has dried" claim is itself
+unsupported — most labels don't state rain-fastness at all, and some
+instead say to avoid rain within a window after application — so with no
+sourced number the clause is simply absent, never a hard-coded or invented
+duration. Then, **live view only**, a forward-looking heavy-rain caveat
 sourced from the NWS forecast (`weather-forecast.js`
-`getDailyRainOutlookBounded`) — `reports-public.js` computes that forecast
+`getDailyRainOutlookBounded`) — read from forecast TEXT only
+(storm/thunderstorm/heavy rain in `shortForecast`; codex P2 2026-09-29
+round 2: `rainChance` alone is the probability of ANY precipitation, not its
+intensity, and `getDailyRainOutlookBounded` exposes no quantitative amount
+to fall back on, so a high chance of light rain must never trigger this
+caveat on the bare percentage) — `reports-public.js` computes that forecast
 signal only when `mode === 'live'` and always passes `false` for the PDF and
 any other static render, so the PDF/static payload's `rain.lines` can only
 ever be the trailing-week fact + optional rainfast clause, never the
@@ -148,11 +157,18 @@ never for a fetch that ran and failed), and the result is not both settled
 and populated — an open window, a provider outage disguised as a "settled"
 empty reading (`fetchServiceWeekWeather`'s own fallback can legitimately
 return `{ rainInches: null, windowClosed: true }` for a geocoded property
-when every source misses), and an unexpected fetch exception (an explicit
-`{ unavailable: true }` sentinel, never folded into the same `null` "no
-coordinates" uses) are ALL treated as not-yet-cacheable, since a retry can
-recover any of them and the render only shows "no rain block" because the
-data is missing, not because none exists. "No coordinates" is the one
+when every source misses), an unexpected fetch exception, and a fetch that
+did not settle within ~1200ms (codex P2 2026-09-29 round 2: a direct,
+unbounded await here could hold every live pest report render up to ~7s on
+a cold cache or provider outage — `fetchPestWeekWeatherSafe` now races the
+lookup the same way `fetchPestRainForecastHeavySafe` already bounds its own
+NWS call, and a timeout returns the SAME `{ unavailable: true }` sentinel
+an exception does; the in-flight lookup keeps running and still warms
+`fetchServiceWeekWeather`'s own cache for the next request) are ALL treated
+as not-yet-cacheable (the sentinel, never folded into the same `null` "no
+coordinates" uses), since a retry can recover any of them and the render
+only shows "no rain block" because the data is missing, not because none
+exists. "No coordinates" is the one
 legitimate, permanently-cacheable absence. Both PDF cache-decision sites
 (the direct `/:token` route and the queued renderer in `pdf-queue.js`, via
 the shared `pestWeekWeatherUncacheableForPdf` in `pest-report-v2.js`, which
@@ -205,7 +221,10 @@ the exact catalog product name only (owner ruling 2026-09-28, revised:
 active_ingredient / moa_group / category inference was replaced after 2
 rounds of misclassification — e.g. it would have called an Advion Ant Bait
 Gel a roach product via the shared "bait" category). Currently mapped:
-Taurus SC, Alpine WSG → non-repellent; Atticus Talak 7.9 F, Demand CS,
+Taurus SC, Alpine WSG → non-repellent; Atticus Talak (the catalog's
+canonical `products_catalog.name` — migration
+20260712100000_catalog_label_rate_backfill.js) AND the longer "Atticus
+Talak 7.9 F" display spelling several fixtures use, Demand CS,
 Onslaught Fastcap → pyrethroid barrier; Delta Dust → its OWN `dust` class
 (owner ruling 2026-09-28, P1 audit round 2: a dust formulation goes into
 cracks/voids, never a surface barrier, so it never shares the pyrethroid

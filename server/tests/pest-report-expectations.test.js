@@ -83,6 +83,25 @@ describe('buildRainExpectation', () => {
     expect(out.lines[0]).not.toMatch(/rain-fast/i);
   });
 
+  // codex P2 2026-09-29 (round 2): with several applied products each
+  // carrying a positive rainfastMinutes, the clause must state the LONGEST
+  // one — array order is incidental, never a safety ranking.
+  it('states the LONGER rain-fast interval when two products carry different ones, independent of array order', () => {
+    const shortFirst = buildRainExpectation({
+      weekWeather: { rainInches: 0.5, rainConfidence: null },
+      products: [{ rainfastMinutes: 30 }, { rainfastMinutes: 120 }],
+      serviceMonth: 2,
+    });
+    expect(shortFirst.lines[0]).toMatch(/rain-fast about 2 hr after it dries, per the label\./);
+
+    const longFirst = buildRainExpectation({
+      weekWeather: { rainInches: 0.5, rainConfidence: null },
+      products: [{ rainfastMinutes: 120 }, { rainfastMinutes: 30 }],
+      serviceMonth: 2,
+    });
+    expect(longFirst.lines[0]).toMatch(/rain-fast about 2 hr after it dries, per the label\./);
+  });
+
   it('formats a >=60min rainfast time in hours', () => {
     expect(formatRainfastMinutes(120)).toBe('2 hr');
     expect(formatRainfastMinutes(90)).toBe('1.5 hr');
@@ -268,6 +287,10 @@ describe('classifyProductExpectation — explicit product-name map (no heuristic
   const cases = [
     [{ name: 'Taurus SC' }, 'non_repellent'],
     [{ name: 'Alpine WSG' }, 'non_repellent'],
+    // Atticus Talak: the CATALOG's canonical spelling (no suffix) and the
+    // longer display form some fixtures use both classify (codex P2
+    // 2026-09-29 round 2 — see the dedicated describe block below).
+    [{ name: 'Atticus Talak' }, 'pyrethroid'],
     [{ name: 'Atticus Talak 7.9 F' }, 'pyrethroid'],
     [{ name: 'Demand CS' }, 'pyrethroid'],
     [{ name: 'Onslaught Fastcap' }, 'pyrethroid'],
@@ -306,6 +329,45 @@ describe('classifyProductExpectation — explicit product-name map (no heuristic
     expect(classifyProductExpectation({ activeIngredient: 'Fipronil', category: 'insecticide', moaGroup: 'Group 2B' })).toBeNull();
     expect(classifyProductExpectation({ category: 'bait', activeIngredient: 'Indoxacarb' })).toBeNull();
     expect(classifyProductExpectation({ category: 'IGR' })).toBeNull();
+  });
+});
+
+// codex P2 2026-09-29 (round 2): the closed map is only useful if its keys
+// match the CATALOG's actual canonical name — a spelling mismatch silently
+// drops a product's classification with no error, since an unmapped
+// product just gets no line. Every name below is spelled EXACTLY as
+// server/models/migrations/20260712100000_catalog_label_rate_backfill.js
+// (and every other seed/backfill migration touching these rows) seeds
+// products_catalog.name — the same spelling client/src/lib/pest-default-mix.js's
+// house-mix matcher resolves against for the standard recurring-pest tank
+// mix (Taurus SC + Atticus Talak + LESCO 90/10 Nonionic Surfactant).
+describe('every catalog product name this map claims to know classifies (codex P2 2026-09-29 round 2)', () => {
+  const CATALOG_NAMES = [
+    ['Taurus SC', 'non_repellent'],
+    ['Alpine WSG', 'non_repellent'],
+    ['Atticus Talak', 'pyrethroid'],
+    ['Demand CS', 'pyrethroid'],
+    ['Onslaught Fastcap', 'pyrethroid'],
+    ['Delta Dust', 'dust'],
+    ['Advion Evolution Cockroach Gel Bait', 'roach_gel_bait'],
+    ['Advion Cockroach Gel Bait', 'roach_gel_bait'],
+    ['Advion Ant Bait Gel', 'ant_bait'],
+    ['Advion WDG Granular', 'ant_bait'],
+    ['Gentrol IGR', 'igr'],
+    ['Tekko Pro IGR', 'igr'],
+    // Deliberately mapped to no class (documented decision, not a gap) —
+    // this is the ONE catalog name in the map that is EXPECTED to be null.
+    ['LESCO 90/10 Nonionic Surfactant', null],
+  ];
+  it.each(CATALOG_NAMES)('catalog name %j → %s', (name, expected) => {
+    expect(classifyProductExpectation({ name })).toBe(expected);
+  });
+
+  it('the recurring-pest house-mix trio (client/src/lib/pest-default-mix.js) all classify to a non-null class', () => {
+    // LESCO is the mix's own third product but is deliberately no-class —
+    // asserted separately above, not part of this "must have a class" check.
+    expect(classifyProductExpectation({ name: 'Taurus SC' })).not.toBeNull();
+    expect(classifyProductExpectation({ name: 'Atticus Talak' })).not.toBeNull();
   });
 });
 

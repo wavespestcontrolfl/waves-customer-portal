@@ -105,23 +105,55 @@ async function fetchSeasonalForecastSafe(zip) {
 // `null` the "no coordinates" case uses. pestWeekWeatherUncacheable below
 // reads `rainInches`/`windowClosed` (and this sentinel) to tell a settled,
 // populated reading from every other, non-cacheable outcome.
+// codex P2 2026-09-29 (round 2): fetchServiceWeekWeather's own cache is
+// keyed by coordinate+date and can cost two live provider fetches (2.5s
+// timeout each) on a cold key or an outage — a direct, unbounded await here
+// could hold every live pest report render up to ~7s. Bounded the same way
+// fetchPestRainForecastHeavySafe already bounds its own NWS lookup below
+// (~1200ms, Promise.race against a deadline): on a slow fetch the caller
+// gets the UNAVAILABLE sentinel now while the in-flight lookup keeps
+// running and warms fetchServiceWeekWeather's own cache for the next
+// request — a deadline is fail-soft on VIEWING (the rain block is simply
+// absent) and correctly fail-closed on CACHING, since the sentinel already
+// marks the render uncacheable (see pestWeekWeatherUncacheable below) so a
+// later, faster render is what gets stored, never a permanent "no rain
+// block" copy baked in by a slow one.
+const PEST_WEEK_WEATHER_DEADLINE_MS = 1200;
+
 async function fetchPestWeekWeatherSafe(service) {
   const { fetchServiceWeekWeather, toCoordinate } = require('../services/service-report/application-conditions');
   const lat = toCoordinate(service.customer_latitude ?? service.latitude ?? service.lat);
   const lng = toCoordinate(service.customer_longitude ?? service.longitude ?? service.lng);
   if (lat == null || lng == null) return null;
-  try {
-    return await fetchServiceWeekWeather({ latitude: lat, longitude: lng, serviceDate: service.service_date });
-  } catch {
-    return { rainInches: null, windowClosed: false, unavailable: true };
-  }
+  const UNAVAILABLE = { rainInches: null, windowClosed: false, unavailable: true };
+  const DEADLINE = Symbol('deadline');
+  // Pre-caught so a rejection landing AFTER the deadline already won the
+  // race never surfaces as an unhandled rejection (same shape
+  // getDailyRainOutlookBounded uses for its own in-flight lookup).
+  const lookup = fetchServiceWeekWeather({ latitude: lat, longitude: lng, serviceDate: service.service_date })
+    .catch(() => null);
+  let timer;
+  const result = await Promise.race([
+    lookup,
+    new Promise((resolve) => { timer = setTimeout(resolve, PEST_WEEK_WEATHER_DEADLINE_MS, DEADLINE); }),
+  ]).finally(() => clearTimeout(timer));
+  return (result === DEADLINE || result == null) ? UNAVAILABLE : result;
 }
 
 // LIVE VIEW ONLY — never called for a PDF/static render (see the call site).
 // True when the NWS forecast (weather-forecast.js — the same source the tech
-// rain-out badges use) shows a high rain chance or a storm in roughly the
-// next few forecast periods. Fail-open (false) on any miss; bounded to a
-// short deadline so a slow NWS response never holds up the live report.
+// rain-out badges use) shows a STORM/HEAVY-RAIN forecast in roughly the next
+// few forecast periods. Fail-open (false) on any miss; bounded to a short
+// deadline so a slow NWS response never holds up the live report.
+//
+// codex P2 2026-09-29 (round 2): `rainChance` is the probability of ANY
+// measurable precipitation (NWS's probabilityOfPrecipitation), not its
+// intensity — a 70% chance of "Light Rain" is not "heavy rain right after a
+// treatment can reduce it" and must not trigger that caveat on probability
+// alone. getDailyRainOutlookBounded exposes no quantitative precipitation
+// amount to fall back on (only `rainChance` / `shortForecast` — see its own
+// return-shape doc comment), so intensity is read ONLY from the forecast
+// TEXT (storm/thunderstorm/heavy rain), never the bare percentage.
 async function fetchPestRainForecastHeavySafe(service) {
   try {
     const { getDailyRainOutlookBounded } = require('../services/weather-forecast');
@@ -130,8 +162,7 @@ async function fetchPestRainForecastHeavySafe(service) {
     const outlook = await getDailyRainOutlookBounded(lat, lng, { deadlineMs: 1200 });
     if (!outlook) return false;
     return Object.values(outlook).slice(0, 3).some((day) => (
-      (Number.isFinite(day?.rainChance) && day.rainChance >= 70)
-      || /storm|thunderstorm|heavy rain/i.test(String(day?.shortForecast || ''))
+      /storm|thunderstorm|heavy rain/i.test(String(day?.shortForecast || ''))
     ));
   } catch {
     return false;
@@ -2720,3 +2751,5 @@ module.exports.reportsAskPrivacyHeaders = reportsAskPrivacyHeaders;
 module.exports.storedRevisionMatches = storedRevisionMatches;
 module.exports.suppressedTypedReport = suppressedTypedReport;
 module.exports.settledWeekWeatherForRender = settledWeekWeatherForRender;
+module.exports.fetchPestWeekWeatherSafe = fetchPestWeekWeatherSafe;
+module.exports.fetchPestRainForecastHeavySafe = fetchPestRainForecastHeavySafe;

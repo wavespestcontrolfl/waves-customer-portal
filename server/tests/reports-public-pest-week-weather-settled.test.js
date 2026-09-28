@@ -115,9 +115,51 @@ describe('pestWeekWeatherUncacheable — PDF/static renders never bake an unsett
     );
     // No-coordinates early return is the ONLY bare `return null;`.
     expect(fn).toMatch(/if \(lat == null \|\| lng == null\) return null;/);
-    // The fetch itself is OUTSIDE that early return's try/catch — an
-    // exception there returns a distinguishable sentinel, not `null`.
-    expect(fn).toMatch(/catch \{\s*return \{ rainInches: null, windowClosed: false, unavailable: true \};\s*\}/);
+    // Every other outcome (a fetch exception OR a fetch that outran the
+    // deadline) resolves to the SAME distinguishable UNAVAILABLE sentinel,
+    // never a bare `null`.
+    expect(fn).toMatch(/const UNAVAILABLE = \{ rainInches: null, windowClosed: false, unavailable: true \};/);
+    expect(fn).toMatch(/return \(result === DEADLINE \|\| result == null\) \? UNAVAILABLE : result;/);
+  });
+
+  // codex P2 2026-09-29 (round 2): a direct, unbounded await on
+  // fetchServiceWeekWeather could hold every live pest report render up to
+  // ~7s on a cold cache or provider outage. Bounded the same way the
+  // forecast helper already bounds its own NWS call.
+  describe('fetchPestWeekWeatherSafe is bounded by a short deadline', () => {
+    const GEOCODED = { customer_latitude: 27.4, customer_longitude: -82.5, service_date: '2026-07-16' };
+
+    function toCoordinateStub(value) {
+      if (value == null || value === '') return null;
+      const n = Number(value);
+      return Number.isFinite(n) ? n : null;
+    }
+
+    beforeEach(() => { jest.resetModules(); });
+    afterEach(() => { jest.dontMock('../services/service-report/application-conditions'); });
+
+    test('a slow fetch (never settling within the deadline) resolves to the UNAVAILABLE sentinel, bounded to ~1200ms', async () => {
+      jest.useFakeTimers();
+      jest.doMock('../services/service-report/application-conditions', () => ({
+        toCoordinate: toCoordinateStub,
+        fetchServiceWeekWeather: () => new Promise(() => {}), // never settles
+      }));
+      const { fetchPestWeekWeatherSafe } = require('../routes/reports-public');
+      const promise = fetchPestWeekWeatherSafe(GEOCODED);
+      jest.advanceTimersByTime(1200);
+      await expect(promise).resolves.toEqual({ rainInches: null, windowClosed: false, unavailable: true });
+      jest.useRealTimers();
+    });
+
+    test('a fast fetch resolves with the normal result, not the sentinel', async () => {
+      const SETTLED = { rainInches: 0.6, windowClosed: true, rainConfidence: null };
+      jest.doMock('../services/service-report/application-conditions', () => ({
+        toCoordinate: toCoordinateStub,
+        fetchServiceWeekWeather: jest.fn().mockResolvedValue(SETTLED),
+      }));
+      const { fetchPestWeekWeatherSafe } = require('../routes/reports-public');
+      await expect(fetchPestWeekWeatherSafe(GEOCODED)).resolves.toEqual(SETTLED);
+    });
   });
 
   test('BOTH PDF cache-decision sites consult it — the direct route (reports-public.js) and the queued renderer (pdf-queue.js)', () => {
@@ -231,5 +273,64 @@ describe('pestWeekWeatherUncacheable — PDF/static renders never bake an unsett
       const { pestWeekWeatherUncacheableForPdf } = require('../services/service-report/pest-report-v2');
       await expect(pestWeekWeatherUncacheableForPdf(GEOCODED, { mode: 'static' })).resolves.toBe(true);
     });
+  });
+});
+
+// codex P2 2026-09-29 (round 2): rainChance is the PROBABILITY of any
+// measurable precipitation, not its intensity — a 70% chance of light rain
+// is not "heavy rain right after a treatment can reduce it". Intensity now
+// reads ONLY from the forecast text (storm/thunderstorm/heavy rain).
+describe('fetchPestRainForecastHeavySafe — probability alone never marks heavy rain', () => {
+  const SERVICE = { customer_latitude: 27.4, customer_longitude: -82.5 };
+
+  beforeEach(() => { jest.resetModules(); });
+  afterEach(() => { jest.dontMock('../services/weather-forecast'); });
+
+  test('rainChance 70 + "Light Rain" text: NOT heavy', async () => {
+    jest.doMock('../services/weather-forecast', () => ({
+      getDailyRainOutlookBounded: jest.fn().mockResolvedValue({
+        '2026-07-16': { rainChance: 70, shortForecast: 'Light Rain' },
+      }),
+    }));
+    const { fetchPestRainForecastHeavySafe } = require('../routes/reports-public');
+    await expect(fetchPestRainForecastHeavySafe(SERVICE)).resolves.toBe(false);
+  });
+
+  test('a high rainChance with no storm/heavy-rain text anywhere: NOT heavy, regardless of the percentage', async () => {
+    jest.doMock('../services/weather-forecast', () => ({
+      getDailyRainOutlookBounded: jest.fn().mockResolvedValue({
+        '2026-07-16': { rainChance: 95, shortForecast: 'Mostly Cloudy' },
+      }),
+    }));
+    const { fetchPestRainForecastHeavySafe } = require('../routes/reports-public');
+    await expect(fetchPestRainForecastHeavySafe(SERVICE)).resolves.toBe(false);
+  });
+
+  test('"Thunderstorms" forecast text: heavy, even with a low rainChance', async () => {
+    jest.doMock('../services/weather-forecast', () => ({
+      getDailyRainOutlookBounded: jest.fn().mockResolvedValue({
+        '2026-07-16': { rainChance: 30, shortForecast: 'Thunderstorms' },
+      }),
+    }));
+    const { fetchPestRainForecastHeavySafe } = require('../routes/reports-public');
+    await expect(fetchPestRainForecastHeavySafe(SERVICE)).resolves.toBe(true);
+  });
+
+  test('"heavy rain" forecast text also qualifies', async () => {
+    jest.doMock('../services/weather-forecast', () => ({
+      getDailyRainOutlookBounded: jest.fn().mockResolvedValue({
+        '2026-07-16': { rainChance: null, shortForecast: 'Heavy Rain Likely' },
+      }),
+    }));
+    const { fetchPestRainForecastHeavySafe } = require('../routes/reports-public');
+    await expect(fetchPestRainForecastHeavySafe(SERVICE)).resolves.toBe(true);
+  });
+
+  test('no outlook at all: fail-open false', async () => {
+    jest.doMock('../services/weather-forecast', () => ({
+      getDailyRainOutlookBounded: jest.fn().mockResolvedValue(null),
+    }));
+    const { fetchPestRainForecastHeavySafe } = require('../routes/reports-public');
+    await expect(fetchPestRainForecastHeavySafe(SERVICE)).resolves.toBe(false);
   });
 });
