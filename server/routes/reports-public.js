@@ -507,6 +507,19 @@ async function buildServiceReportV1ResponseData(service, token, {
   // only the /data render shows it, so only it pays for the city-wide
   // lawn-findings read.
   nearYou = false,
+  // OPT-IN on the same terms (codex P2 #5137 deferred finding a): only a
+  // caller that actually RENDERS the pest expectations block — the /data
+  // live render and the direct PDF route — pays for either of the two
+  // external weather lookups that feed it: the pest week-weather resolution
+  // (threaded to buildReportV1Data's own `pestWeekWeather` opt-in below) AND
+  // the live heavy-rain NWS forecast fetched further down in this function.
+  // The Q&A endpoint (/ask) calls this builder purely for report CONTEXT —
+  // answerServiceReportQuestion never reads data.pestReportV2.expectations —
+  // so every customer question was paying up to ~1.2s for the week-weather
+  // lookup plus another ~1.2s for the forecast, for a field it never uses.
+  // Defaulting to off means a future caller cannot inherit that cost by
+  // accident either.
+  pestExpectationsWeather = false,
 } = {}) {
   // staffViewer gates internal_only companion sections (combined-service
   // completions): report-data omits them from customer payloads entirely.
@@ -525,9 +538,11 @@ async function buildServiceReportV1ResponseData(service, token, {
     pestPressureConfig, staffViewer, mode, pinnedLawnAssessmentId, pinnedWeekPlanAvailableAt,
     propertyHistoryEnabled, lawnHistory, pinnedLawnHistoryIdentity, expectationFactsOut, planSummary, upcomingVisitsCard,
     nearYou,
-    // pest week-weather is opt-in (codex P2 round 4): this builder renders
-    // the expectations block (live /data + the direct PDF route), so it pays.
-    pestWeekWeather: true,
+    // pest week-weather is opt-in (codex P2 round 4, tightened by codex P2
+    // #5137 deferred finding a): only a caller that opts into
+    // pestExpectationsWeather above — the /data live render and the direct
+    // PDF route — pays for the lookup. /ask never sets it, so it never pays.
+    pestWeekWeather: pestExpectationsWeather,
   });
   if (service?.report_template_version !== 'service_report_v1') return data;
 
@@ -651,7 +666,11 @@ async function buildServiceReportV1ResponseData(service, token, {
       // nothing to do with a treatment from long ago — see
       // isRecentServiceDate's own comment.
       const expectationsGateOn = pestReportExpectationsGateOn();
-      const forecastHeavyRain = expectationsGateOn && mode === 'live' && isRecentServiceDate(service.service_date)
+      // pestExpectationsWeather gates this fetch too (codex P2 #5137
+      // deferred finding a) — the same opt-in that gates the week-weather
+      // resolution above, so /ask never pays for this ~1.2s NWS lookup
+      // either, on top of the mode/recency guards that were already here.
+      const forecastHeavyRain = pestExpectationsWeather && expectationsGateOn && mode === 'live' && isRecentServiceDate(service.service_date)
         ? await fetchPestRainForecastHeavySafe(service)
         : false;
       // codex P1 2026-09-29 round 3: weekWeather is no longer fetched here —
@@ -2258,6 +2277,10 @@ router.get('/:token', async (req, res, next) => {
           const data = await buildServiceReportV1ResponseData(service, req.params.token, {
             mode: 'pdf', pestPressureConfig, pinnedLawnAssessmentId: canonicalPin, pinnedWeekPlanAvailableAt: canonical.weekPlanAvailableAt,
             propertyHistoryEnabled, lawnHistory: canonical.lawnHistory, pinnedLawnHistoryIdentity: canonical.lawnHistory?.identity,
+            // This direct PDF route renders the pest expectations block, so
+            // it pays for the weather lookups (codex P2 #5137 deferred
+            // finding a) — see pestExpectationsWeather's own doc above.
+            pestExpectationsWeather: true,
           });
           tnRenderedSignature = data?.treatmentNarrativeRenderedSignature || '-tn0';
           apRenderedSignature = applicatorRenderedPdfSignature(data);
@@ -2573,6 +2596,11 @@ router.get('/:token/data', async (req, res, next) => {
         // The render path is the only consumer of the cross-sell/referral
         // keys, so it is the only caller that pays to compose them.
         mode, staffViewer, pinnedLawnAssessmentId, pinnedWeekPlanAvailableAt, pinnedLawnHistoryIdentity, composeOffers: true, planSummary: true, upcomingVisitsCard: true, nearYou: true,
+        // This route renders the pest expectations block on every mode it
+        // serves (live/pdf/static/sms_preview), so it pays for the weather
+        // lookups (codex P2 #5137 deferred finding a) — see
+        // pestExpectationsWeather's own doc above.
+        pestExpectationsWeather: true,
       });
       // "Your Visit, in Motion" — surface the tech-approved recap inside the
       // report (owner ask 2026-07-05; the standalone /recap/:token player was
@@ -2796,5 +2824,6 @@ module.exports.reportsAskPrivacyHeaders = reportsAskPrivacyHeaders;
 module.exports.storedRevisionMatches = storedRevisionMatches;
 module.exports.suppressedTypedReport = suppressedTypedReport;
 module.exports.settledWeekWeatherForRender = settledWeekWeatherForRender;
+module.exports.buildServiceReportV1ResponseData = buildServiceReportV1ResponseData;
 module.exports.fetchPestRainForecastHeavySafe = fetchPestRainForecastHeavySafe;
 module.exports.isRecentServiceDate = isRecentServiceDate;
