@@ -570,8 +570,22 @@ describe('runPending and the orphan sweep', () => {
     expect(result).toEqual({ sent: 1, skipped: 0 });
   });
 
+  test('adopt gate set while the legacy checker still runs: no sweep, one warning', async () => {
+    process.env.GATE_DUNNING_ADOPT_ORPHANS = 'true';
+    const row = seqRow({ step_index: 1, next_touch_at: tenAmET('2026-08-05') });
+    // 'invoices as i' is NOT registered — a call to it throws, proving the
+    // sweep never ran with the checker gate unset.
+    setupFullDb({ batchReads: [[row]] });
+
+    const result = await runPending();
+
+    expect(result).toEqual({ sent: 1, skipped: 0 });
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('GATE_DUNNING_ADOPT_ORPHANS ignored: GATE_LATE_PAYMENT_CHECKER_OFF is not live'));
+  });
+
   test('gate on: an adopted orphan sent 45 days ago lands on its Day 60 step in the same run, without sending', async () => {
     process.env.GATE_DUNNING_ADOPT_ORPHANS = 'true';
+    process.env.GATE_LATE_PAYMENT_CHECKER_OFF = 'true';
     process.env.GATE_DUNNING_LADDER_90 = 'true';
     const anchor = tenAmET('2026-06-21'); // 45 days before NOW (2026-08-05)
     const previewInvoice = {
@@ -604,7 +618,7 @@ describe('runPending and the orphan sweep', () => {
       insertedRow,
       // Revival read (ladder on, runs before adoption) finds nothing, then
       // the main batch select runs AFTER adoption and picks up the fresh row.
-      batchReads: [[], [batchRowAfterAdoption]],
+      batchReads: [[], [], [batchRowAfterAdoption]],
     });
     customerOnAutopay.mockResolvedValue(false);
 
@@ -625,6 +639,7 @@ describe('runPending and the orphan sweep', () => {
   // step genuinely due today — the send still waits for the next run.
   test('an orphan whose skip-forward lands on a step due today is NOT fired this run — fires next run', async () => {
     process.env.GATE_DUNNING_ADOPT_ORPHANS = 'true';
+    process.env.GATE_LATE_PAYMENT_CHECKER_OFF = 'true';
     const anchor = tenAmET('2026-07-06'); // 30 days before NOW
     const previewInvoice = {
       id: 'inv-orphan', status: 'sent', payer_id: null, scheduled_send_error: null, customer_id: 'cust-orphan', sent_at: anchor,
@@ -651,8 +666,8 @@ describe('runPending and the orphan sweep', () => {
       previewInvoice,
       customer: { id: 'cust-orphan' },
       insertedRow,
-      // Gate off ladder / checker-retired revival: this is the only 's' read.
-      batchReads: [[batchRowAfterAdoption]],
+      // Checker retired (required by the adopt gate): one empty revival read, then the batch.
+      batchReads: [[], [batchRowAfterAdoption]],
     });
     customerOnAutopay.mockResolvedValue(false);
 

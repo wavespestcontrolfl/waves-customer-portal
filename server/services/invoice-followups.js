@@ -578,7 +578,15 @@ async function scheduleForInvoice(invoiceId) {
 // never got a sequence row and was left to the legacy late-payment-checker.js
 // alone. Off: byte-identical — runPending never looks for orphans.
 function adoptOrphanInvoicesLive() {
-  return process.env.GATE_DUNNING_ADOPT_ORPHANS === 'true';
+  return process.env.GATE_DUNNING_ADOPT_ORPHANS === 'true' && latePaymentCheckerRetiredLive();
+}
+
+// The sweep only runs once the legacy checker is retired (Codex pre-push
+// rounds 2–4 on #5179 each found another way an adoption could collide with
+// a checker still sending the same morning); the adopt gate alone does
+// nothing but warn.
+function adoptGateSetWithCheckerRunning() {
+  return process.env.GATE_DUNNING_ADOPT_ORPHANS === 'true' && !latePaymentCheckerRetiredLive();
 }
 
 function ledgerRowMetadata(row) {
@@ -659,6 +667,7 @@ async function advanceAdoptedRowPastLegacyTier(row, anchorAt) {
   if (!['active', 'autopay_hold'].includes(row.status)) return row;
   const { tierDays, lastDeliveredAt } = await latestLegacyCheckerDelivery(row.invoice_id);
   if (tierDays === null && lastDeliveredAt === null) return row;
+  row = { ...row, legacy_last_delivered_at: lastDeliveredAt };
   const held = row.status === 'autopay_hold';
   const targetIndex = tierDays === null ? row.step_index : Math.max(row.step_index, stepIndexPastTier(tierDays));
   let nextAt = targetIndex === row.step_index
@@ -716,9 +725,23 @@ async function initializeAdoptedAutopayHold(row, customerId) {
   if (!priorFailures) return row;
   if (priorFailures >= config.autopayFailureThreshold) {
     await releaseFromAutopayHold(row.invoice_id);
-    const released = await db('invoice_followup_sequences').where({ id: row.id }).first();
+    let released = (await db('invoice_followup_sequences').where({ id: row.id }).first()) || row;
     logger.info(`[invoice-followups] adopted invoice ${row.invoice_id} released from autopay_hold — customer already had ${priorFailures} unresolved ACH failure(s)`);
-    return released || row;
+    // The release computes next_touch_at from the step alone; keep the
+    // 7-day spacing from the last legacy delivery the mapping applied.
+    if (row.legacy_last_delivered_at && released.status === 'active' && released.next_touch_at) {
+      const floor = anchorTo10amNY(new Date(row.legacy_last_delivered_at), 7, config.sendWindow.hour);
+      if (new Date(released.next_touch_at).getTime() < floor.getTime()) {
+        const updated = await db('invoice_followup_sequences')
+          .where({ id: released.id, status: 'active', step_index: released.step_index })
+          .update({ updated_at: db.fn.now(), next_touch_at: floor });
+        if (updated) {
+          released = { ...released, next_touch_at: floor };
+          logger.info(`[invoice-followups] adopted invoice ${row.invoice_id} first touch delayed to ${floor.toISOString()} (7 days after the legacy delivery)`);
+        }
+      }
+    }
+    return released;
   }
   await db('invoice_followup_sequences').where({ id: row.id, status: 'autopay_hold' })
     .update({ updated_at: db.fn.now(), autopay_failures_observed: priorFailures });
@@ -826,9 +849,13 @@ async function adoptOrphanInvoices({ dryRun = false } = {}) {
     try {
       let armed = await scheduleForInvoice(candidate.invoice_id);
       if (!armed) continue;
+      // Recorded the moment the row exists: a failure in the mapping or the
+      // autopay seeding below still leaves a row this run must not send
+      // (the next sweep re-selects nothing — the row exists — so the run
+      // after this one takes it from wherever it landed).
+      adoptedIds.push(candidate.invoice_id);
       armed = await advanceAdoptedRowPastLegacyTier(armed, candidate.sent_at);
       armed = await initializeAdoptedAutopayHold(armed, candidate.customer_id);
-      adoptedIds.push(candidate.invoice_id);
     } catch (err) {
       // One candidate's failure must never abort the whole sweep — the
       // next run re-selects it fresh (Fable pre-push P2).
@@ -884,6 +911,9 @@ async function runPending() {
   // "genuinely due" on its own. The batch select just below still runs
   // AFTER adoption so a fresh row's stale timeline is advanced correctly —
   // only the actual SEND is deferred to the next run.
+  if (adoptGateSetWithCheckerRunning()) {
+    logger.warn('[invoice-followups] GATE_DUNNING_ADOPT_ORPHANS ignored: GATE_LATE_PAYMENT_CHECKER_OFF is not live — the sweep only runs once the legacy checker is retired');
+  }
   const adoptedInvoiceIds = adoptOrphanInvoicesLive()
     ? new Set((await adoptOrphanInvoices()).invoiceIds) : null;
 
