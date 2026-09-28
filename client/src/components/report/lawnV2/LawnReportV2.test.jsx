@@ -250,6 +250,17 @@ describe('WaterIntakeBar week-plan aftercare credit (codex gh-r14)', () => {
     expect(screen.getByTestId('lawn-week-plan-title')).toHaveTextContent('This week: run once');
     expect(screen.queryByText('No further turf runs this week.')).toBeNull();
   });
+  // PR #5033 round 4: the card mirrors the server's fail-closed table.
+  it.each([
+    [{ ...recordedWaterIn, watering: '' }, 'no recorded instruction'],
+    [{ ...recordedWaterIn, evidenceSource: 'irrigation_requirement' }, 'unsupported evidence source'],
+  ])('puts a %s under the review condition and never credits it', (aftercare) => {
+    const afterTreatment = { title: 'This week: covered by today’s treatment watering-in', detail: 'No further turf runs this week.' };
+    render(<WaterIntakeBar water={{ ...water, weekPlan: { ...water.weekPlan, afterTreatment } }} aftercare={aftercare} />);
+    expect(screen.getByTestId('lawn-week-plan-condition')).toHaveTextContent(/Confirm the product watering directions/);
+    expect(screen.queryByTestId('lawn-week-plan-aftercare-note')).toBeNull();
+    expect(screen.getByTestId('lawn-week-plan-title')).toHaveTextContent('This week: run once');
+  });
   it('places review-required aftercare before the full plan', () => {
     render(<WaterIntakeBar water={water} aftercare={{
       watering: 'Use the recorded product note.',

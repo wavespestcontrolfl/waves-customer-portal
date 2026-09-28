@@ -4,26 +4,66 @@ const LEGACY_WATER_IN_COPY = 'Water in today’s application — give the lawn a
 const WATER_IN_CONFIRMATION = 'Today’s application is recorded as requiring water-in. Confirm the directions with your technician before changing irrigation.';
 const LEGACY_NOTE_CONFIRMATION = 'Confirm the product watering directions with your technician before changing irrigation.';
 
-// The one resolved verdict on this visit's watering aftercare. Every surface
-// that credits a watering-in, suppresses watering advice, or states a
-// customer task (hero, insights, follow-up card, narrative rewrite, report
-// assistant) reads it
-// through the helpers below — never the raw flags.
-//   review — the recorded direction is unverified; the customer confirms it
-//   hold   — a product instruction restricts watering
-//   credit — a verified product instruction requires a watering-in
-//   none   — no product-driven watering task
+// The one resolved state of this visit's watering aftercare. Every surface
+// that credits a watering-in, suppresses watering advice, reduces the weekly
+// plan, or states a customer task (hero, insights, follow-up card, narrative
+// rewrite, report assistant) reads resolveLawnAftercare() through the helpers
+// below — never the raw flags. The client card mirrors the same table
+// (LawnReportV2.jsx aftercareVerdict).
+//
+// Fail closed, first match wins:
+//   neutral fallback, no direction claimed          → none
+//   no recorded instruction, a direction claimed    → review
+//   instruction, evidence source not allowlisted    → review
+//   instruction, allowlisted but unverified source  → review
+//   verified instruction, needsReview               → review
+//   verified instruction, wateringHold              → hold
+//   verified instruction, creditableWaterIn         → credit
+//   verified instruction, no hold or water-in       → none
+// Outputs: verdict; customerTask (review/hold confirmation or restriction
+// copy; the credited instruction itself); restricts (review/hold outrank all
+// other watering advice); credited (the water-in may reduce this week's plan).
+const EVIDENCE_SOURCES = {
+  product_instruction: 'verified',
+  legacy_unverified_instruction: 'unverified',
+};
+
+const HOLD_TASK = 'Follow the product-specific watering restriction in Aftercare before making any other irrigation changes.';
+
+function recordedInstruction(aftercare) {
+  return typeof aftercare?.watering === 'string' ? aftercare.watering.trim() : '';
+}
+
+function claimsDirection(aftercare) {
+  return aftercare.waterInRequired === true || aftercare.creditableWaterIn === true
+    || aftercare.wateringHold === true || aftercare.needsReview === true || Boolean(aftercare.evidenceSource);
+}
+
 function aftercareVerdict(aftercare) {
-  if (aftercare?.needsReview === true) return 'review';
-  if (aftercare?.wateringHold === true) return 'hold';
-  if (aftercare?.creditableWaterIn === true && aftercare?.evidenceSource === 'product_instruction') return 'credit';
+  if (!aftercare || typeof aftercare !== 'object') return 'none';
+  const claimed = claimsDirection(aftercare);
+  if (aftercare.neutral === true && !claimed) return 'none';
+  if (!recordedInstruction(aftercare)) return claimed ? 'review' : 'none';
+  if (EVIDENCE_SOURCES[aftercare.evidenceSource] !== 'verified' || aftercare.needsReview === true) return 'review';
+  if (aftercare.wateringHold === true) return 'hold';
+  if (aftercare.creditableWaterIn === true) return 'credit';
   return 'none';
 }
 
-const VERDICT_TASK = {
-  review: LEGACY_NOTE_CONFIRMATION,
-  hold: 'Follow the product-specific watering restriction in Aftercare before making any other irrigation changes.',
-};
+function resolveLawnAftercare(aftercare) {
+  const verdict = aftercareVerdict(aftercare);
+  const customerTask = {
+    review: LEGACY_NOTE_CONFIRMATION,
+    hold: HOLD_TASK,
+    credit: recordedInstruction(aftercare),
+  }[verdict] || null;
+  return {
+    verdict,
+    customerTask,
+    restricts: verdict === 'review' || verdict === 'hold',
+    credited: verdict === 'credit',
+  };
+}
 
 // Condition placed ahead of a weekly plan while the verdict is unresolved.
 const VERDICT_PLAN_CONDITION = {
@@ -32,11 +72,18 @@ const VERDICT_PLAN_CONDITION = {
 };
 
 function hasCreditableWaterIn(aftercare) {
-  return aftercareVerdict(aftercare) === 'credit';
+  return resolveLawnAftercare(aftercare).credited;
 }
 
+// The task that outranks every other watering instruction (review / hold).
 function wateringRestrictionAction(aftercare) {
-  return VERDICT_TASK[aftercareVerdict(aftercare)] || null;
+  const state = resolveLawnAftercare(aftercare);
+  return state.restricts ? state.customerTask : null;
+}
+
+// Any customer task the aftercare creates, including a credited water-in.
+function aftercareCustomerTask(aftercare) {
+  return resolveLawnAftercare(aftercare).customerTask;
 }
 
 // A visit outside the plan's week cannot qualify that week's plan with its
@@ -47,19 +94,34 @@ function wateringPlanCondition(aftercare, weekPlan) {
   return VERDICT_PLAN_CONDITION[aftercareVerdict(aftercare)] || null;
 }
 
+// The weekly plan the report actually shows: reduced by a credited water-in
+// only for a visit inside the plan week on a plan that prescribes a run.
+function renderedWeekPlan(aftercare, weekPlan) {
+  if (!weekPlan?.title) return null;
+  const reduced = hasCreditableWaterIn(aftercare) && weekPlan.visitInPlanWeek === true
+    && weekPlan.prescribesRun === true && weekPlan.afterTreatment?.title;
+  return reduced ? weekPlan.afterTreatment : weekPlan;
+}
+
 function normalizeLawnAftercare(aftercare, { recordedWateringNotes = [] } = {}) {
   if (!aftercare || typeof aftercare !== 'object') return aftercare;
-  // Historical neutral fallbacks carry no product direction. Preserve their
-  // payload exactly so this guard can land before the product-note classifier.
-  if (aftercare.neutral === true || !aftercare.watering) return aftercare;
-  if (aftercare.evidenceSource) {
+  // Historical neutral fallbacks and payloads with no direction at all carry
+  // nothing to verify. Preserve them exactly.
+  if (!claimsDirection(aftercare) && (aftercare.neutral === true || !recordedInstruction(aftercare))) return aftercare;
+  const source = recordedInstruction(aftercare) ? EVIDENCE_SOURCES[aftercare.evidenceSource] : null;
+  if (source === 'verified') {
     return { ...aftercare, creditableWaterIn: hasCreditableWaterIn(aftercare) };
   }
+  if (source === 'unverified') {
+    return { ...aftercare, needsReview: true, creditableWaterIn: false };
+  }
 
+  // Legacy, unsupported, or instruction-less evidence: fail closed into review
+  // with every recorded note kept beside the confirmation.
   const notes = [...new Set((recordedWateringNotes || [])
     .map((note) => String(note || '').trim())
     .filter(Boolean))];
-  const legacyWatering = String(aftercare.watering || '').trim();
+  const legacyWatering = recordedInstruction(aftercare);
   if (!notes.length && legacyWatering && legacyWatering !== LEGACY_WATER_IN_COPY) {
     notes.push(legacyWatering);
   }
@@ -80,8 +142,11 @@ module.exports = {
   LEGACY_WATER_IN_COPY,
   WATER_IN_CONFIRMATION,
   aftercareVerdict,
+  resolveLawnAftercare,
   hasCreditableWaterIn,
   wateringRestrictionAction,
+  aftercareCustomerTask,
   wateringPlanCondition,
+  renderedWeekPlan,
   normalizeLawnAftercare,
 };

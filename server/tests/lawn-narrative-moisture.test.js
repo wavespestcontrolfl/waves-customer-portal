@@ -95,9 +95,11 @@ describe('structured moisture governs the optional whole-report narrative', () =
       creditableWaterIn: true, evidenceSource: 'product_instruction', wateringHold: false, needsReview: false,
     };
     const wording = 'Based on rain this week, the lawn needs checking the flagged area’s coverage.';
-    const callModel = jest.fn(async () => ({ ok: true, json: { water: wording } }));
+    const callModel = jest.fn(async () => ({ ok: true, json: { water: wording, statusHeadline: 'Coverage is the thing to watch' } }));
     const out = await applyLawnReportNarrative(v2, { observations: 'Unique affirmative aftercare.' }, { callModel });
     expect(callModel).toHaveBeenCalledTimes(1);
-    expect(out.water.explanation).toBe(wording);
+    // The credited verdict owns the watering story; other prose still varies.
+    expect(out.water.explanation).toBe(v2.water.explanation);
+    expect(out.snapshot.statusHeadline).toBe('Coverage is the thing to watch');
   });
 });

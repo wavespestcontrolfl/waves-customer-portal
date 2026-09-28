@@ -19,6 +19,7 @@ const { crossSeasonNote, crossSeasonNoteFromSeasons, dormancyLikely } = require(
 const { photoZoneLabel } = require('../lawn-visit-input');
 const {
   LEGACY_WATER_IN_COPY,
+  aftercareCustomerTask,
   hasCreditableWaterIn,
   normalizeLawnAftercare,
   wateringRestrictionAction,
@@ -644,9 +645,12 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   // next-visit task. wavesNext carries what Waves WILL do — future tense only: falling
   // back to the past-tense wavesAction ("Applied a fungicide…") under the client's
   // "What Waves will do next" label read as a tense error. Cards without a plan hide the row.
-  const realCustomerAction = aftercareWaterAction && topIssue?.customerAction?.includes(aftercareWaterAction)
+  // A credited water-in is still the customer's task (the hero never reads
+  // "no action" beside a required watering-in).
+  const aftercareTask = aftercareCustomerTask(aftercare);
+  const realCustomerAction = aftercareTask && topIssue?.customerAction?.includes(aftercareTask)
     ? topIssue.customerAction
-    : [aftercareWaterAction, topIssue?.customerAction].filter(Boolean).join(' ') || null;
+    : [aftercareTask, topIssue?.customerAction].filter(Boolean).join(' ') || null;
   const wavesNext = topIssue ? (topIssue.nextVisitPlan || null) : null;
 
   // Cross-signal ROOT CAUSE: connect water + coverage + mowing + stress into one

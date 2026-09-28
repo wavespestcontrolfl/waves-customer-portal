@@ -606,12 +606,23 @@ const PLAN_CONDITION_COPY = {
   review: 'Confirm the product watering directions with your technician before applying the plan below. Any recorded restriction must also have ended; use only the plan’s listed days and watering windows.',
   hold: 'The recorded product watering restriction comes first. Use the plan below only after that restriction has ended, and only within the plan’s listed days and watering windows.',
 };
-const PLAN_CONDITION_STATE = {
-  'false:false': null,
-  'false:true': 'hold',
-  'true:false': 'review',
-  'true:true': 'review',
-};
+// Mirror of the server's fail-closed aftercare table
+// (server/services/service-report/lawn-aftercare.js aftercareVerdict): only a
+// recorded instruction with verified product-instruction evidence escapes
+// review, and only that can hold or credit a watering-in.
+const VERIFIED_AFTERCARE_SOURCE = 'product_instruction';
+function aftercareVerdict(care) {
+  if (!care || typeof care !== 'object') return 'none';
+  const claimed = care.waterInRequired === true || care.creditableWaterIn === true
+    || care.wateringHold === true || care.needsReview === true || Boolean(care.evidenceSource);
+  if (care.neutral === true && !claimed) return 'none';
+  const instruction = typeof care.watering === 'string' ? care.watering.trim() : '';
+  if (!instruction) return claimed ? 'review' : 'none';
+  if (care.evidenceSource !== VERIFIED_AFTERCARE_SOURCE || care.needsReview === true) return 'review';
+  if (care.wateringHold === true) return 'hold';
+  if (care.creditableWaterIn === true) return 'credit';
+  return 'none';
+}
 const PLAN_CREDIT_COPY = {
   run: 'Today’s treatment comes first — follow the after-visit watering note below. That watering counts as one of this week’s runs (a one-run plan is covered by it); only pick the plan back up if it called for more.',
   hold: 'Today’s treatment comes first — follow the after-visit watering note below. Beyond that one watering-in, this week’s plan stands: no extra runs.',
@@ -620,22 +631,14 @@ const PLAN_CREDIT_COPY = {
 function WeekPlanCallout({ weekPlan, aftercare }) {
   if (!weekPlan?.title) return null;
   const care = aftercare || {};
-  const legacyNeedsReview = Boolean(care.watering)
-    && care.neutral !== true && !care.evidenceSource;
-  const needsReview = care.needsReview === true || legacyNeedsReview;
-  const canCreditWaterIn = care.creditableWaterIn === true
-    && care.evidenceSource === 'product_instruction'
-    && care.wateringHold !== true
-    && !needsReview;
+  const verdict = aftercareVerdict(care);
+  const canCreditWaterIn = verdict === 'credit';
   // Week membership cannot establish whether a timed restriction has ended,
   // but an explicitly historical visit cannot qualify this week's plan with
   // that old restriction. Legacy payloads without membership keep the safer
   // current-week interpretation. The note itself remains visible below.
   const aftercareAppliesToPlanWeek = weekPlan.visitInPlanWeek !== false;
-  const planConditionState = aftercareAppliesToPlanWeek
-    ? PLAN_CONDITION_STATE[`${needsReview}:${care.wateringHold === true}`]
-    : null;
-  const planCondition = PLAN_CONDITION_COPY[planConditionState];
+  const planCondition = aftercareAppliesToPlanWeek ? PLAN_CONDITION_COPY[verdict] : null;
   const visitCredit = canCreditWaterIn && weekPlan.visitInPlanWeek === true;
   const credited = visitCredit && weekPlan.prescribesRun === true && weekPlan.afterTreatment;
   const shown = credited ? weekPlan.afterTreatment : weekPlan;

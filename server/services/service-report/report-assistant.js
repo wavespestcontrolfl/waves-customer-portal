@@ -1,6 +1,6 @@
 const { customerVisiblePressureIndex } = require('../pest-pressure/display');
 const {
-  hasCreditableWaterIn, normalizeLawnAftercare, wateringPlanCondition, wateringRestrictionAction,
+  aftercareCustomerTask, hasCreditableWaterIn, normalizeLawnAftercare, renderedWeekPlan, wateringPlanCondition, wateringRestrictionAction,
 } = require('./lawn-aftercare');
 
 const { WAVES_SUPPORT_PHONE_DISPLAY: WAVES_PHONE_DISPLAY } = require('../../constants/business');
@@ -51,8 +51,15 @@ const WATERING_ADVICE_QUESTION_RE = new RegExp(
   + String.raw`|\bwhat\s+is\s+(?:my|the)\s+(?:watering|irrigation)\s+plan\b`,
 );
 // Watering-schedule topics asked without a verb ("What's my watering
-// schedule?", "Any irrigation changes this week?", "What run time?").
-const WATERING_TOPIC_RE = /\b(?:watering|irrigation|sprinklers?)\s+(?:plan|schedule|advice|instructions?|directions?|restrictions?|changes?|guidance|settings?|days?)\b|\brun\s?times?\b/;
+// schedule?", "Any irrigation changes this week?", "What run time?") and
+// system activation requests ("Can I turn my sprinklers back on?", "Should I
+// switch irrigation back on?", "May I start the sprinkler system?", "Can I
+// start watering?"). An activation verb must govern the system, so a bare
+// noun ("water damage", "the irrigation meter") is never a request.
+const WATERING_ACTIVATION_SRC = String.raw`\b(?:turn|switch|start|restart|resume|enable|run|put|kick)\s+(?:(?:back\s+)?on\s+)?(?:(?:the|my|our|your)\s+)?(?:sprinklers?|irrigation|water(?:ing)?|zones?)\b(?!\s+(?:damage|stains?|meters?|lines?|leaks?|bills?|pooling|puddles?)\b)`;
+const WATERING_TOPIC_RE = new RegExp(
+  String.raw`\b(?:watering|irrigation|sprinklers?)\s+(?:plan|schedule|advice|instructions?|directions?|restrictions?|changes?|guidance|settings?|days?)\b|\brun\s?times?\b|${WATERING_ACTIVATION_SRC}`,
+);
 // A request for the customer's own next move ("What do I need to do about
 // the mushrooms I observed?", "Anything we should do…", "Any action needed…",
 // "How do I handle…"). Observation words inside it qualify the request; they
@@ -410,7 +417,7 @@ function targetsFromApplications(applications = []) {
 }
 
 function answerNextSteps({ data = {}, nextAppointment } = {}) {
-  const wateringTask = wateringRestrictionAction(normalizeLawnAftercare(data.reportV2?.aftercare));
+  const wateringTask = aftercareCustomerTask(normalizeLawnAftercare(data.reportV2?.aftercare));
   const dynamic = data.dynamicContext || {};
   const lawnAssessment = data.lawnAssessment || null;
   if (data.serviceLine === 'lawn' && lawnAssessment?.snapshot) {
@@ -580,8 +587,8 @@ function answerWateringAftercare({ data, weekPlan, aftercare }) {
   // REQUIRED watering-in, on a visit inside the plan week, on a plan that
   // prescribes a run (codex gh-r31).
   const recordedWaterIn = hasCreditableWaterIn(aftercare);
-  const credited = recordedWaterIn && weekPlan?.visitInPlanWeek === true && weekPlan?.prescribesRun === true;
-  const reduced = credited && weekPlan?.afterTreatment?.title ? weekPlan.afterTreatment : null;
+  const shown = renderedWeekPlan(aftercare, weekPlan);
+  const reduced = shown && shown !== weekPlan ? shown : null;
   // Keep the full plan beside uncredited aftercare. A HOLD plan also stays
   // beside an affirmative water-in so it cannot read as permission to resume.
   const planBeside = !reduced && weekPlan?.title
