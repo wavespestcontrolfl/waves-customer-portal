@@ -1717,6 +1717,7 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     ['names a competitor off the owner list', { pass: true, findings: [], requiresHumanReview: true, namedCompetitors: ['Orkin', 'Truly Nolen'], companyExtraction: { ok: true, key: 'k', companies: [] } }],
     ['has no recorded names (pre-list verdict)', { pass: true, findings: [], requiresHumanReview: true }],
     ['has no stored company extraction', { pass: true, findings: [], requiresHumanReview: true, namedCompetitors: ['Orkin'] }],
+    ['is an unflagged blog verdict recorded before the company check (no extraction)', { pass: true, findings: [], requiresHumanReview: false, namedCompetitors: [] }],
     ['is unflagged but its stored extraction found an off-list company', { pass: true, findings: [], requiresHumanReview: false, namedCompetitors: [], companyExtraction: { ok: true, key: 'k', companies: ['Bug Out'] } }],
   ])('governed run whose verdict %s is withheld at merge time', async (_label, verdict) => {
     process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
@@ -1729,6 +1730,21 @@ describe('auto-merge gating (each condition individually blocking)', () => {
       expect(gh.mergePr).not.toHaveBeenCalled();
       expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_autopublish_revoked' });
     });
+  });
+
+  test('an unflagged blog whose stored extraction found no company auto-merges', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    setupDb({ pending: [makeRun({ brief_id: 'brief-1' })], briefs: INTERCEPT_BRIEFS,
+      runFirst: governedRun({ verdict: { pass: true, findings: [], requiresHumanReview: false, namedCompetitors: [], companyExtraction: { ok: true, key: 'k', companies: [] } } }) });
+    greenMergePath();
+    gh.mergePr.mockResolvedValue({ merged: true });
+    indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
+    publisher.planInternalLinksForTarget.mockResolvedValue(null);
+
+    const res = await poller.pollPending();
+
+    expect(gh.mergePr).toHaveBeenCalledTimes(1);
+    expect(res.results[0]).toMatchObject({ merged: true, autoMerged: true });
   });
 
   test('a verified evidence-only descendant of the publisher pin auto-merges without repinning the run', async () => {

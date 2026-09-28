@@ -1451,9 +1451,13 @@ async function maybeAutoMerge(run, pr) {
         // re-calls the extractor: it judges the extraction the runner /
         // remediation persisted with this exact verdict (pinned head = the
         // text it judged).
+        // A new_supporting_blog verdict with NO extraction (a PR opened
+        // before this check shipped) governs too: its names were never
+        // checked, so it waits for a human (pre-push r8).
         const extraction = ctr && ctr.companyExtraction;
-        const extractionGoverns = Boolean(extraction
-          && (extraction.ok !== true || (Array.isArray(extraction.companies) && extraction.companies.length > 0)));
+        const extractionGoverns = run.action_type === 'new_supporting_blog'
+          ? !(extraction && extraction.ok === true && Array.isArray(extraction.companies) && extraction.companies.length === 0)
+          : Boolean(extraction && (extraction.ok !== true || (Array.isArray(extraction.companies) && extraction.companies.length > 0)));
         const flagged = ctr === undefined ? true : Boolean(ctr && (ctr.requiresHumanReview === true || extractionGoverns));
         let dp = fresh.draft_payload;
         if (typeof dp === 'string') { try { dp = JSON.parse(dp); } catch (_) { dp = null; } }
