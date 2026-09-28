@@ -115,29 +115,31 @@ function sinceDate(now, lookbackDays) {
  * regardless of row order, and the one place that cares about "the same
  * host twice" (ensureDomain) is naturally idempotent about it.
  */
+// Where each attached question field comes from, in precedence order: the
+// managed query row (operator-edited city/service) before the benchmark
+// entry; the query text is the mention row's own.
+const QUESTION_FIELD_SOURCES = Object.freeze({
+  id: ['benchmark'], query: ['row'], city: ['managed', 'benchmark'], service: ['managed', 'benchmark'], intent: ['benchmark'],
+});
+
 function aggregateCitations(rows, queryRows) {
   const queryById = new Map((queryRows || []).map((q) => [q.id, q]));
   const benchmarkByQuery = new Map(benchmark.questions.map((q) => [q.query, q]));
   const groups = new Map();
   for (const row of rows || []) {
-    const urls = cleanUrls(row.cited_urls);
-    const managed = queryById.get(row.query_id) || {};
-    const bm = benchmarkByQuery.get(row.query) || {};
-    const question = {
-      id: bm.id || null,
-      query: row.query || null,
-      city: managed.city || bm.city || null,
-      service: managed.service || bm.service || null,
-      intent: bm.intent || null,
-    };
+    const from = { row, managed: queryById.get(row.query_id), benchmark: benchmarkByQuery.get(row.query) };
+    const question = Object.fromEntries(Object.entries(QUESTION_FIELD_SOURCES)
+      .map(([field, sources]) => [field, sources.map((src) => from[src]?.[field]).find(Boolean) || null]));
     const providerIntent = isProviderIntentQuestion(question);
-    for (const url of urls) {
+    for (const url of cleanUrls(row.cited_urls)) {
       const c = classifyUrl(url, { providerIntent });
       if (!c) continue; // unparseable — never counted, never enqueued
       const key = `${c.host}::${c.category}`;
+      // subtype is fixed per (host, category): only the listicle heuristic
+      // sets one, and it only ever runs for a host no rule matched
       if (!groups.has(key)) {
         groups.set(key, {
-          host: c.host, category: c.category, rule: c.rule, subtype: null, citationCount: 0,
+          host: c.host, category: c.category, rule: c.rule, subtype: c.subtype || null, citationCount: 0,
           urlCounts: new Map(), platforms: new Set(), locallyRelevant: false, questions: new Map(),
         });
       }
@@ -146,7 +148,6 @@ function aggregateCitations(rows, queryRows) {
       agg.urlCounts.set(url, (agg.urlCounts.get(url) || 0) + 1);
       agg.platforms.add(row.llm_platform || 'unknown');
       agg.locallyRelevant ||= isLocallyRelevant(url);
-      agg.subtype ||= c.subtype || null;
       const qKey = question.id || question.query || '-';
       if (!agg.questions.has(qKey)) agg.questions.set(qKey, question);
     }

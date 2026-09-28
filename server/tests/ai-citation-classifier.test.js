@@ -244,6 +244,20 @@ describe('classifyUrl', () => {
 
     // Codex P2 2026-09-28 (round 9): an entity-cohort question asks ABOUT
     // Waves ("Who owns …?") — its bare "who" is never provider intent.
+    // Codex P2 2026-09-28 (round 11): an explicit benchmark intent is
+    // authoritative; the wording fallback runs only when intent is absent.
+    test('isProviderIntentQuestion: an explicit non-provider intent is false even when the text says "hire" (Q6 identify, Q23 decision)', () => {
+      const benchmark = require('../data/aeo-benchmark-v1.json');
+      for (const id of ['Q6', 'Q23']) {
+        const q = benchmark.questions.find((b) => b.id === id);
+        expect(q.query).toMatch(/\bhire\b/);
+        expect(q.intent).not.toBe('provider');
+        expect(isProviderIntentQuestion({ id: q.id, query: q.query, intent: q.intent })).toBe(false);
+        // the same text with NO recorded intent still reads as provider wording
+        expect(isProviderIntentQuestion({ id: null, query: q.query, intent: null })).toBe(true);
+      }
+    });
+
     test('isProviderIntentQuestion: entity-cohort questions are never provider intent, despite who/company words', () => {
       expect(isProviderIntentQuestion({ id: null, query: 'Who owns Waves Pest Control?', intent: null })).toBe(false);
       expect(isProviderIntentQuestion({ id: null, query: 'Is Waves Pest Control independently owned or a franchise?', intent: null })).toBe(false);
@@ -319,6 +333,23 @@ describe('classifyUrl', () => {
     // Codex P2 2026-09-28 (round 7): a social profile whose handle carries
     // a service-area token is still a human-only social page — never
     // promoted to an enqueued editorial listicle candidate.
+    // Codex P2 2026-09-28 (round 11): search-engine and map result pages
+    // are never-target hosts — never promoted, whatever tokens they carry.
+    test('search-engine / map result URLs stay other on a provider question (never listicle_candidate)', () => {
+      const pi = { providerIntent: true };
+      for (const [url, host] of [
+        ['https://www.bing.com/search?q=best+pest+control+sarasota', 'bing.com'],
+        ['https://maps.apple.com/?q=pest+control+near+me&near=Sarasota', 'maps.apple.com'],
+        ['https://duckduckgo.com/?q=top+exterminators+venice+fl', 'duckduckgo.com'],
+        ['https://search.yahoo.com/search?p=best+pest+control+bradenton', 'search.yahoo.com'],
+        ['https://www.google.com/maps/search/pest+control+lakewood+ranch', 'google.com'],
+      ]) {
+        const r = classifyUrl(url, pi);
+        expect(r).toMatchObject({ category: 'other', host });
+        expect(r.subtype).toBeUndefined();
+      }
+    });
+
     test('instagram.com/sarasota_pest_control stays community_video on a provider question (never listicle_candidate)', () => {
       const pi = { providerIntent: true };
       expect(classifyUrl('https://www.instagram.com/sarasota_pest_control', pi))
@@ -342,6 +373,16 @@ describe('classifyUrl', () => {
 });
 
 describe('isLocallyRelevant', () => {
+  // Codex P2 2026-09-28 (round 11): separators in a slug read as spaces, so
+  // multi-word places match in path and decoded query alike.
+  test('a multi-word place in a hyphen/underscore/dot/slash slug is found', () => {
+    expect(isLocallyRelevant('https://example.com/pest-control-lakewood-ranch-fl')).toBe(true);
+    expect(isLocallyRelevant('https://example.com/port-charlotte-exterminators')).toBe(true);
+    expect(isLocallyRelevant('https://example.com/north_port/pest.control')).toBe(true);
+    expect(isLocallyRelevant('https://example.com/siesta/key-pest')).toBe(true); // a path boundary is a separator too
+    expect(isLocallyRelevant('https://example.com/search?city=punta-gorda')).toBe(true);
+    expect(isLocallyRelevant('https://example.com/pest-control-companies')).toBe(false);
+  });
   test('a multi-word place in a percent-encoded or +-encoded query is found (decoded, round 8)', () => {
     expect(isLocallyRelevant('https://example.com/search?city=north%20port')).toBe(true);
     expect(isLocallyRelevant('https://example.com/search?city=lakewood+ranch')).toBe(true);

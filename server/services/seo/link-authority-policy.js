@@ -30,6 +30,7 @@
 const crypto = require('crypto');
 const {
   ATTEMPT_PROVIDERS, PAID_ACQUISITION_TYPES, OUTREACH_ACQUISITION_TYPES, ACQUISITION_TYPES, CURRENCIES, FEE_SCOPES,
+  AI_CITATION_SOURCE_DETAIL_PREFIX,
 } = require('./link-registry');
 const { URL_REQUIRED_ACQUISITION_TYPES, OUTREACH_LINK_TYPES, SIGNUP_LINK_TYPES } = require('./link-path-investigation-schema');
 
@@ -236,8 +237,9 @@ const AUTO_TO_OWNER_ON_DISCOVERY = Object.freeze({
 // source_detail starting with this exact prefix
 // (`ai_citation:<category>[:<subtype>] <sample cited urls>`), so it is at
 // least as durable as `source` itself, and MORE durable across the one
-// scenario (a schema rollback) that can actually clear `source`.
-const AI_CITATION_SOURCE_DETAIL_PREFIX = `${AI_CITATION_SOURCE}:`;
+// scenario (a schema rollback) that can actually clear `source`. The prefix
+// itself lives in link-registry.js (imported above), where ensureDomain
+// refuses any ai_citation touch without it — intake() included.
 // The feeder's EARLIER label format (Codex P1 2026-09-28, round 7): the
 // first pushes of link-registry-ai-citation-ingest.js (373b021243 through
 // f0d12744f5) wrote every new domain's first-touch source_detail as

@@ -26,6 +26,7 @@
 const { isOwnedUrl } = require('./aeo-measurement');
 const { canonicalProspectDomain } = require('./prospect-domain-lock');
 const { isEntityQuestion } = require('./aeo-entity-facts');
+const { isNeverTargetHost } = require('./link-registry');
 // competitor-discovery.js's NATIONAL_CHAINS is the portal's existing tracked
 // national/regional pest-and-lawn franchise list (orkin.com, terminix.com,
 // trugreen.com, trulynolen.com, masseyservices.com, …) — reused verbatim
@@ -161,7 +162,11 @@ function isLocallyRelevant(urlString) {
   try { u = new URL(urlString); } catch { return false; }
   const host = canonicalProspectDomain(u.hostname) || u.hostname.toLowerCase();
   if (matchesAny(host, SWFL_LOCAL_DOMAINS)) return true;
-  const hay = `${host} ${decodeURIComponentSafe(u.pathname)} ${decodedQuery(u)}`.toLowerCase();
+  // Every separator run (`-`, `_`, `+`, `/`, `.`, a decoded space, …) is one
+  // space, in host, path AND decoded query alike, so a multi-word place in a
+  // slug (`/pest-control-lakewood-ranch-fl`, `/port-charlotte-exterminators`)
+  // reads the same as it does in prose (Codex P2 2026-09-28, round 11).
+  const hay = tokenize(`${host} ${decodeURIComponentSafe(u.pathname)} ${decodedQuery(u)}`).join(' ');
   return GEO_TERMS.some((t) => hay.includes(t));
 }
 function decodeURIComponentSafe(v) {
@@ -238,7 +243,10 @@ function isProviderIntentQuestion(question) {
   // 9). Same exclusion gsc-opportunity-miner.js's mineAeoGaps applies, via
   // the same shared isEntityQuestion().
   if (isEntityQuestion(question.query)) return false;
-  if (question.intent === 'provider') return true;
+  // An explicit intent is authoritative: the wording fallback runs ONLY when
+  // no intent is recorded (Codex P2 2026-09-28, round 11 — benchmark Q6
+  // `identify` and Q23 `decision` both say "hire").
+  if (question.intent) return question.intent === 'provider';
   return PROVIDER_INTENT_WORDS_RE.test(question.query || '');
 }
 
@@ -260,8 +268,12 @@ function classifyUrl(urlString, { providerIntent = false } = {}) {
   // through here, so the heuristic is applied (or not) in exactly one place.
   // A SPECIAL_HOSTS exclusion never comes through here: it returns its own
   // unpromotable result below.
+  // A never-target host (link-registry.js's ONE list: search engines, map
+  // results, shorteners, our own fleet …) is never promoted (Codex P2
+  // 2026-09-28, round 11: a `bing.com/search?q=best+pest+control+sarasota`
+  // or `maps.apple.com` result carried the tokens and became editorial).
   const other = (rule) => {
-    if (providerIntent && (isLocallyRelevant(urlString) || hasBestToken(urlString))) {
+    if (providerIntent && !isNeverTargetHost(host) && (isLocallyRelevant(urlString) || hasBestToken(urlString))) {
       return { category: 'editorial', host, rule: `heuristic:listicle_candidate:${rule}`, subtype: 'listicle_candidate' };
     }
     return { category: 'other', host, rule };
