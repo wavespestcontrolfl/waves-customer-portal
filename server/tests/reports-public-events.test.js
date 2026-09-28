@@ -178,6 +178,7 @@ describe('cross-sell click: identical resubmit vs material refresh (PR r12 P2)',
   function clickDb({ openRequest }) {
     const updates = [];
     const inserts = [];
+    const selects = [];
     const q = (table) => {
       const chain = {
         leftJoin: () => chain,
@@ -188,7 +189,13 @@ describe('cross-sell click: identical resubmit vs material refresh (PR r12 P2)',
         orderBy: () => chain,
         whereNotIn: () => chain,
         forUpdate: () => chain,
-        select: () => chain,
+        // GATE_REPORT_CROSS_SELL_V2 parity regression (audit finding
+        // cross-sell.js:567): captured so a test can assert the click
+        // path's SELECT for 'service_records as sr' still carries
+        // sr.service_data — the render path is service_records.* (every
+        // column) and a findings-driven V2 offer needs it, so a future
+        // trim of this column list must fail a test, not a customer tap.
+        select: (...cols) => { selects.push({ table, cols }); return chain; },
         returning: async () => [{ id: 'req-new' }],
         update: async (patch) => { updates.push({ table, patch }); return 1; },
         insert: (row) => {
@@ -209,7 +216,7 @@ describe('cross-sell click: identical resubmit vs material refresh (PR r12 P2)',
       };
       return chain;
     };
-    return { q, updates, inserts };
+    return { q, updates, inserts, selects };
   }
 
   const clickBody = {
@@ -289,6 +296,20 @@ describe('cross-sell click: identical resubmit vs material refresh (PR r12 P2)',
     expect(triggerNotification).toHaveBeenCalledWith('bundle_quote_requested', expect.objectContaining({
       refreshed: false,
     }));
+  });
+
+  // GATE_REPORT_CROSS_SELL_V2 parity regression: the click-path row must
+  // carry the same inputs the render path's row does, or a findings-driven
+  // offer recomputes differently on tap (service-report-cross-sell-v2.test.js
+  // proves the composer-level failure mode this locks the SELECT for).
+  test('the click-path SELECT for service_records as sr includes service_data', async () => {
+    const { q, selects } = clickDb({ openRequest: null });
+    db.mockImplementation(q);
+
+    expect(await click('1010101010101010f123456789abcdef')).toBe(200);
+    const sr = selects.find((s) => s.table === 'service_records as sr');
+    expect(sr).toBeTruthy();
+    expect(sr.cols).toContain('sr.service_data');
   });
 });
 

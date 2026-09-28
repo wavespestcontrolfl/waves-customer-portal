@@ -104,6 +104,58 @@ describe('detectReportFindingsSignal', () => {
     const signal = await detectReportFindingsSignal(service, db);
     expect(signal.roachesIndoors).toBe(false);
   });
+
+  // Negation guard: a regex match on a pest term must not fire on a
+  // negation or an explicit absence value — "no roaches observed" is not
+  // evidence of roaches. Covers both shapes technicians actually write:
+  // negation BEFORE the term (prose) and the term followed by an absence
+  // value (a structured label:value shorthand).
+  describe('negation / absence guard — a finding is never asserted from a negated mention', () => {
+    test.each([
+      ['roachesIndoors', 'No roaches observed in the kitchen'],
+      ['roachesIndoors', 'Did not see any cockroaches today'],
+      ['roachesIndoors', 'Roaches - not observed'],
+      ['roachesIndoors', 'Cockroach activity: none'],
+      ['rodentEvidence', 'No signs of rodents in the attic'],
+      ['rodentEvidence', "Didn't find any mice or rats"],
+      ['rodentEvidence', 'Rodent activity: none found'],
+      ['termiteActivity', 'Termite: none'],
+      ['termiteActivity', 'No termite activity noted'],
+      ['termiteActivity', 'No signs of swarmers this visit'],
+    ])('%s stays false for "%s"', async (key, title) => {
+      const db = fakeDb({ service_findings: [{ service_record_id: 'sr-1', title }] });
+      const signal = await detectReportFindingsSignal({ id: 'sr-1', service_data: '{}' }, db);
+      expect(signal[key]).toBe(false);
+    });
+
+    test('negated mosquito mentions never count toward "heavy" — two negations do not out-count zero genuine ones', async () => {
+      const db = fakeDb({
+        service_findings: [{ service_record_id: 'sr-1', title: 'No mosquitoes seen. No mosquito activity noted.' }],
+      });
+      const signal = await detectReportFindingsSignal({ id: 'sr-1', service_data: '{}' }, db);
+      expect(signal.heavyMosquito).toBe(false);
+    });
+
+    test('the adversative exception still holds under the guard: "no ants but roaches everywhere" keeps the affirmative mention', async () => {
+      const db = fakeDb({
+        service_findings: [{ service_record_id: 'sr-1', title: 'No ants but roaches are everywhere' }],
+      });
+      const signal = await detectReportFindingsSignal({ id: 'sr-1', service_data: '{}' }, db);
+      expect(signal.roachesIndoors).toBe(true);
+    });
+
+    test('a negated mention alone falls through resolveReportCrossSellV2 to season/ladder, never claiming the finding', async () => {
+      etDateString.mockReturnValue('2026-11-01'); // outside both season windows
+      const db = fakeDb({ service_findings: [{ service_record_id: 'sr-1', title: 'No signs of rodents in the attic' }] });
+      const result = await resolveReportCrossSellV2({
+        service: { id: 'sr-1', customer_id: 'cust-1', service_data: '{}' },
+        database: db,
+        ladderEvidence: [],
+        planRateFamilies: [],
+      });
+      expect(result).toBeNull();
+    });
+  });
 });
 
 // ============================================================
@@ -463,5 +515,96 @@ describe('buildReportCrossSell integration: GATE_REPORT_CROSS_SELL_V2 wiring', (
     );
     expect(Array.isArray(result)).toBe(false);
     expect(result).not.toBeNull();
+  });
+});
+
+// ============================================================
+// Render/click parity: the click path's row (reports-public.js's
+// cross_sell_requested handler) must carry the SAME inputs the render
+// path's row does, or a findings-driven offer recomputes differently on
+// tap and either 409s a fingerprint the customer actually saw, or silently
+// swaps in a different offer. The render path's row is `service_records.*`
+// (every column, service_data included); the click path builds its own
+// narrower SELECT that must be kept in step by hand — this pins that it is.
+// ============================================================
+describe('render/click parity for a findings-driven offer (service_data must ride the click-path recompute)', () => {
+  test('a roach COMPANION-typed signal (no text mention) resolves the SAME offer whether service_data is present the render way or the click way', async () => {
+    process.env.GATE_REPORT_CROSS_SELL_V2 = 'true';
+    const serviceData = JSON.stringify({
+      typedReportSnapshot: { type: 'pest' },
+      companionReportSnapshots: [{ type: 'cockroach' }],
+    });
+    const db = dbFor({
+      serviceTypes: ['Pest Control'],
+      turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
+      // No text mention — ONLY the typed companion snapshot carries the
+      // signal, so this scenario is blind to a service_data omission
+      // exactly the way a real report can be.
+      serviceFindings: [],
+      catalogServices: [ACTIVE_COCKROACH_ROW],
+    });
+
+    // Shaped like the RENDER path's row (service_records.* — every column).
+    const renderRow = { ...SERVICE(), service_data: serviceData };
+    // Shaped like the CLICK path's row (reports-public.js's own narrower
+    // SELECT list for 'service_records as sr' — id, customer_id,
+    // service_type, scheduled_service_id, is_callback, service_date,
+    // created_at, service_data, address_line1/2/city/zip, first_name,
+    // last_name). Listed explicitly (not spread from SERVICE()) so this
+    // test fails the moment that SELECT list drops a field the composer
+    // reads, the same way it would have caught service_data's omission.
+    const clickRow = {
+      id: renderRow.id,
+      customer_id: renderRow.customer_id,
+      service_type: renderRow.service_type,
+      scheduled_service_id: renderRow.scheduled_service_id,
+      is_callback: renderRow.is_callback,
+      service_date: renderRow.service_date,
+      created_at: renderRow.created_at,
+      address_line1: renderRow.address_line1,
+      city: renderRow.city,
+      zip: renderRow.zip,
+      first_name: renderRow.first_name,
+      last_name: renderRow.last_name,
+      service_data: serviceData,
+    };
+
+    const rendered = await buildReportCrossSell(renderRow, db, { propertyLookup: missLookup });
+    const clicked = await buildReportCrossSell(clickRow, dbFor({
+      serviceTypes: ['Pest Control'],
+      turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
+      serviceFindings: [],
+      catalogServices: [ACTIVE_COCKROACH_ROW],
+    }), { propertyLookup: missLookup });
+
+    expect(rendered.serviceKey).toBe('cockroach_control');
+    expect(clicked).toEqual(rendered);
+  });
+
+  test('regression guard: a click-path row missing service_data silently loses the companion-typed roach signal', async () => {
+    // This pins the FAILURE MODE the fix closes — if service_data is ever
+    // dropped from the click path's SELECT again, this test catches it by
+    // showing the offer actually diverges (never offers cockroach_control
+    // once the only companion evidence is gone), rather than relying on a
+    // production 409 nobody sees in CI.
+    process.env.GATE_REPORT_CROSS_SELL_V2 = 'true';
+    const db = dbFor({
+      serviceTypes: ['Pest Control'],
+      turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
+      serviceFindings: [],
+      catalogServices: [ACTIVE_COCKROACH_ROW],
+    });
+    const withServiceData = {
+      ...SERVICE(),
+      service_data: JSON.stringify({
+        typedReportSnapshot: { type: 'pest' },
+        companionReportSnapshots: [{ type: 'cockroach' }],
+      }),
+    };
+    const withoutServiceData = { ...SERVICE() }; // service_data undefined — the pre-fix click-path shape
+    const result = await buildReportCrossSell(withoutServiceData, db, { propertyLookup: missLookup });
+    expect(result.serviceKey).not.toBe('cockroach_control');
+    const control = await buildReportCrossSell(withServiceData, db, { propertyLookup: missLookup });
+    expect(control.serviceKey).toBe('cockroach_control');
   });
 });

@@ -533,10 +533,59 @@ async function cacheOnlyPropertyLookup(address) {
 // prioritize without it).
 // ============================================================
 
-const V2_ROACH_RE = /\b(?:roach|roaches|cockroach|cockroaches)\b/;
-const V2_RODENT_RE = /\b(?:rodent|rodents|rat|rats|mouse|mice)\b/;
-const V2_TERMITE_RE = /\b(?:termite|termites|swarmer|swarmers|swarming|mud\s*tubes?|wood\s*damage)\b/;
-const V2_MOSQUITO_RE = /\bmosquito(?:e?s)?\b/g;
+const ROACH_TERM = "(?:roach(?:es)?|cockroach(?:es)?)";
+const RODENT_TERM = '(?:rodents?|rats?|mouse|mice)';
+const TERMITE_TERM = "(?:termites?|swarmers?|swarming|mud\\s*tubes?|wood\\s*damage)";
+const MOSQUITO_TERM = 'mosquito(?:e?s)?';
+const V2_ROACH_RE = new RegExp(`\\b${ROACH_TERM}\\b`, 'i');
+const V2_RODENT_RE = new RegExp(`\\b${RODENT_TERM}\\b`, 'i');
+const V2_TERMITE_RE = new RegExp(`\\b${TERMITE_TERM}\\b`, 'i');
+const V2_MOSQUITO_RE = new RegExp(`\\b${MOSQUITO_TERM}\\b`, 'gi');
+
+// A finding only asserts what it POSITIVELY reports, never what a negation
+// or an explicit absence value rules out — "no roaches observed", "no
+// signs of rodents", and the structured label:value shape technicians
+// actually write ("Termite: none", "Roaches - not observed") must never
+// read as the activity they name. Same negation-window technique
+// call-booking-catalog.js's hasAffirmativeRoachMention /
+// hasAffirmativeRodentMention use for spoken call transcripts (negation
+// word + up to 4 plain-word fillers — punctuation breaks the run so
+// negation never crosses a clause boundary; adversative conjunctions
+// excepted so "no ants but roaches everywhere" keeps its affirmative
+// mention) — not reused directly: those also strip HISTORICAL mentions,
+// tuned for conversational recaps of a past visit, which service_findings
+// rows (short, dated, staff/AI-written facts about THIS visit) have no
+// analogue for and would be untested complexity here. Both negation
+// SHAPES are stripped before the affirmative regex runs; when in doubt,
+// no signal — the caller falls through to season/ladder rather than claim
+// a finding it can't back.
+const NEGATION_BEFORE = "(?:no|not|none|isn['’]?t|aren['’]?t|wasn['’]?t|weren['’]?t|don['’]?t|doesn['’]?t|didn['’]?t|haven['’]?t|hasn['’]?t|never|without)";
+const ABSENCE_AFTER = "(?:none(?:\\s+(?:observed|seen|found|noted|present))?|not\\s+(?:observed|seen|found|noted|present)|no\\s+(?:activity|evidence|signs?|damage)|n\\/a|negative)";
+
+function stripNegatedMentions(text, termCore) {
+  // The negation also consumes a COORDINATED second term ("no mice or
+  // rats", "not rats and mice") — without this trailing group, "didn't
+  // find any mice or rats" strips only "didn't find any mice" and the
+  // surviving "rats" would read as an affirmative mention on its own.
+  const before = new RegExp(
+    `\\b${NEGATION_BEFORE}\\s+(?:(?!(?:but|however|though|except)\\b)[\\w'’]+\\s+){0,4}?${termCore}`
+    + `(?:(?:\\s*,\\s*(?:or|and|nor)\\s+|\\s*,\\s*|\\s+(?:or|and|nor)\\s+)${termCore})*`,
+    'gi',
+  );
+  // One optional descriptor noun between the term and its absence value —
+  // the structured shorthand technicians actually write is as often
+  // "Rodent activity: none" / "Cockroach activity: none" as the bare
+  // "Termite: none".
+  const after = new RegExp(
+    `\\b${termCore}\\b\\s*(?:activity|evidence|signs?|damage)?\\s*[:\\-]?\\s*${ABSENCE_AFTER}\\b`,
+    'gi',
+  );
+  return String(text || '').replace(before, ' ').replace(after, ' ');
+}
+
+function hasAffirmativeMention(text, termCore, anchoredRe) {
+  return anchoredRe.test(stripNegatedMentions(text, termCore));
+}
 
 // The one catalog service this module prices OUTSIDE buildCustomerPricingResponse:
 // a fixed one-time $350 two-treatment package (20260602000002_cockroach_control_service),
@@ -593,12 +642,14 @@ async function detectReportFindingsSignal(service, database) {
     .filter(Boolean)
     .join(' ')
     .toLowerCase();
-  const mosquitoMentions = (text.match(V2_MOSQUITO_RE) || []).length;
+  // Negated mosquito mentions never count toward "heavy" — two "no
+  // mosquitoes seen" findings must not out-count a single genuine one.
+  const mosquitoMentions = (stripNegatedMentions(text, MOSQUITO_TERM).match(V2_MOSQUITO_RE) || []).length;
 
   return {
-    roachesIndoors: roachCompanionTyped || V2_ROACH_RE.test(text),
-    rodentEvidence: V2_RODENT_RE.test(text),
-    termiteActivity: V2_TERMITE_RE.test(text),
+    roachesIndoors: roachCompanionTyped || hasAffirmativeMention(text, ROACH_TERM, V2_ROACH_RE),
+    rodentEvidence: hasAffirmativeMention(text, RODENT_TERM, V2_RODENT_RE),
+    termiteActivity: hasAffirmativeMention(text, TERMITE_TERM, V2_TERMITE_RE),
     heavyMosquito: mosquitoMentions >= 2,
   };
 }

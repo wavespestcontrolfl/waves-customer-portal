@@ -480,6 +480,66 @@ is omitted and that leg stays live. The PDF filename and the canonical lawn
 pin read the same overlaid row. Presentation (technician photo URL, copy
 config) and the deliberately live sections (next visit, review CTA,
 cross-sell) are unchanged. `services/service-report/report-identity-snapshot.js`.
+
+"Your upcoming visits" card (owner-approved 2026-09-27): on the same
+`/api/reports/:token/*` payload, `GATE_REPORT_UPCOMING_VISITS` (dark, off
+unless exactly `true`, read at call time) adds an optional
+`upcomingVisitsCard: { visits: [{ serviceType, scheduledDate, windowStart }] }`
+— LIVE VIEW ONLY (`opts.mode === 'live'`; absent from the PDF, `/map.svg`,
+static, and sms_preview renders, and stripped by the shared
+`stripLiveOnlyScheduleFields` the same way `nextAppointment` already is, so a
+reschedule after a cached PDF render never fossilizes into the download).
+Lists every one of the customer's upcoming scheduled visits across ANY
+program (pest, lawn, tree & shrub, mosquito, termite, rodent, …), not just
+the report's own service line (`nextAppointment` above is unchanged and
+stays same-line-first with a cross-line fallback), for the next 90 days,
+capped at 6, excluding cancelled/completed/rescheduled rows (same
+disclosable-status allow-list as `nextAppointment`: pending/confirmed/
+en_route/on_site). Scoped to THIS report's property only: the linked
+visit's own `scheduled_services.property_id` or stamped `service_address_*`
+is authoritative; an unlinked/legacy report falls back to the
+already-COALESCEd customer-mirror address. Each candidate row is resolved
+the same way (its own stamp, else its `property_id`'s resolved
+`customer_properties` address, else the customer mirror) before being
+compared to the report's property, so a multi-property account's report can
+never list another property's visits. Gate off (default): the field is
+absent and the payload is byte-identical to today.
+
+Findings- and season-aware cross-sell priority (owner-approved 2026-09-27):
+`GATE_REPORT_CROSS_SELL_V2` (dark, off unless exactly `true`, read at call
+time; inert unless `GATE_REPORT_CROSS_SELL` is also on — there is no card
+to prioritize without it) layers a priority on top of the existing
+`crossSell` offer ladder (`services/service-report/cross-sell.js`'s
+`buildReportCrossSell`). On, the payload's existing `crossSell` object may
+additionally carry `reason` — one short, honest, reason-tied sentence
+rendered above the CTA button (e.g. "We noted roach activity inside today
+— our cockroach control program is a focused two-treatment cleanout.") —
+and `serviceKey` may resolve to two targets the ladder itself never picks:
+`rodent_bait` and `mosquito`, priced through the SAME
+`buildCustomerPricingResponse` estimator path and per-application-only
+serialization rule as the existing ladder targets. Their prompts/labels
+live in cross-sell.js's own `V2_TARGET_PROMPTS`/`V2_TARGET_LABELS` maps,
+deliberately NOT added to the shared `OFFER_PROMPTS`/`OFFER_LABELS`
+vocabulary the portal offer card and the photo-triage lane
+(`buildPortalOffer`, `buildOfferForFamily`) also read by
+`requestedTargetKey` — those two surfaces are unaffected by this gate and
+still refuse `rodent_bait`/`mosquito` as an unknown family. `serviceKey`
+may also resolve to `cockroach_control` — the one target priced OUTSIDE
+the estimator (a fixed one-time catalog price; `mode` is always
+`quote_cta`, `option` is always `null`) — gated on the live `services`
+catalog row (`is_active`, `!is_archived`, `customer_visible`,
+`booking_enabled`) and on the customer having no already-open
+(pending/confirmed/en_route/on_site) visit linked to it. Priority reads
+ONLY the visit's own `service_findings` rows (title/detail/category/
+severity/recommendation — the same structured rows the report's Findings
+section renders) plus its typed companion-report identity, NEVER
+`technician_notes` (raw notes must never egress on a customer surface).
+Never offers a family the customer already owns — reuses the ladder's own
+property-scoped ownership + plan-rate evidence, including the
+`termite_bait` → `termite` ownership mapping. Gate off (default):
+`crossSell` is byte-identical to today's unchanged ladder pick and carries
+no `reason` field.
+
 The payload's `protocol.structuredObservations` contains only the saved
 completion-form observation snapshot, and a nonempty snapshot carries
 `structuredObservationsProvenance: "completion_form_snapshot"`. Live reports
