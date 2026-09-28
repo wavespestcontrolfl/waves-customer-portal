@@ -241,6 +241,24 @@ test('a malformed email ("@" missing) is never a candidate, and is counted under
   expect(result.excluded.invalid_email).toBe(1);
 });
 
+// Regression guard for the exact behavior commit 547e380767 ("make the
+// import write provably unable to resubscribe anyone") introduced: an
+// archived customer (deleted_at set, active still true) must never be a
+// candidate and must never be (re)subscribed, even mid-batch.
+test('an archived customer (deleted_at set) is never a candidate and is never (re)subscribed', async () => {
+  const state = {
+    customers: [cust({ id: 'c1', email: 'archived@example.com', deleted_at: new Date() })],
+    subscribers: [],
+    prefs: [{ customer_id: 'c1', marketing_offers: true }],
+  };
+  const dry = await reconcileCustomers({ conn: makeConn(state) });
+  expect(dry.candidates).toBe(0); // deleted_at excludes it before it's ever classified
+  const write = await reconcileCustomers({ dryRun: false, conn: makeConn(state) });
+  expect(write.imported).toBe(0);
+  expect(linkToCustomer).not.toHaveBeenCalled();
+  expect(state.subscribers).toHaveLength(0);
+});
+
 test.each(['unsubscribed', 'pending', 'inactive'])(
   'a previously %s address is NEVER (re)subscribed even when marketing_offers is true — the INSERT has no UPDATE branch to take',
   async (status) => {
