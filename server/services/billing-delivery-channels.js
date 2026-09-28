@@ -40,21 +40,23 @@ function billingChannelAllowed(prefs = {}, category, channel) {
 function legacyChannels(prefs = {}, category, emailAvailable) {
   const legacy = category === 'payment_issue' && prefs.payment_issue_channel == null
     ? prefs.billing_channel : prefs[LEGACY_FIELDS[category]];
-  const independentEmail = emailAvailable && prefs.email_enabled !== false;
+  // Only a missing address takes billing email away. The portal-wide email
+  // switch never does (owner ruling 2026-09-26: payment emails cannot be
+  // turned off).
   if (category === 'billing') {
-    if (legacy === 'email') return independentEmail ? ['email'] : ['sms'];
-    if (legacy === 'both') return independentEmail ? ['email', 'sms'] : ['sms'];
+    if (legacy === 'email') return emailAvailable ? ['email'] : ['sms'];
+    if (legacy === 'both') return emailAvailable ? ['email', 'sms'] : ['sms'];
     if (legacy === 'push') return ['push'];
     return ['sms'];
   }
 
   if (category === 'payment_receipt') {
-    if (legacy === 'email') return independentEmail ? ['email'] : ['sms'];
-    if (legacy === 'both') return independentEmail ? ['email', 'sms'] : ['sms'];
+    if (legacy === 'email') return emailAvailable ? ['email'] : ['sms'];
+    if (legacy === 'both') return emailAvailable ? ['email', 'sms'] : ['sms'];
   }
 
   const channels = [legacy === 'push' ? 'push' : 'sms'];
-  if (independentEmail) channels.push('email');
+  if (emailAvailable) channels.push('email');
   return canonicalChannels(channels);
 }
 
@@ -81,8 +83,10 @@ function mergeLegacyChannels(prefs, category) {
 
 function channelEnabledAfterMerge(winner, loser, category, channel) {
   const enabled = (field) => [winner, loser].every((row) => row?.[field] !== false);
-  if (category === 'payment_receipt' && !enabled('payment_receipt')) return false;
-  if (channel === 'email') return enabled('email_enabled');
+  // No payment_receipt check: customers cannot turn payment receipts off
+  // (owner ruling 2026-09-26), so a legacy false never narrows a merge.
+  // Billing email is not governed by the portal-wide email switch.
+  if (channel === 'email') return true;
   if (channel === 'push') return enabled('push_enabled');
   return enabled('sms_enabled')
     && (category !== 'payment_receipt' || enabled('payment_confirmation_sms'));

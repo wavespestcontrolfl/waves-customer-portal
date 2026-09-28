@@ -230,7 +230,7 @@ function HelpCard({ children }) {
   );
 }
 
-function EmptyTimesCard({ aiFiltered, serviceAreaUnavailable, onRetry }) {
+function EmptyTimesCard({ aiFiltered, serviceAreaUnavailable, locationReviewRequired, onRetry }) {
   // Inspection GET can answer state:'ok' with availability:null and
   // service_area_unavailable:true (the county lookup itself failed, not a
   // verdict either way — Codex pre-push P1, 2026-09-24). Same recoverable
@@ -251,6 +251,16 @@ function EmptyTimesCard({ aiFiltered, serviceAreaUnavailable, onRetry }) {
           >
             Try again
           </button>
+        </div>
+        <ContactRow />
+      </Card>
+    );
+  }
+  if (locationReviewRequired) {
+    return (
+      <Card>
+        <div style={{ fontSize: 16, color: S.body, lineHeight: 1.55 }}>
+          We need to confirm your service address before we can schedule this re-service online. Text or call us and we&apos;ll take care of it.
         </div>
         <ContactRow />
       </Card>
@@ -798,9 +808,15 @@ function ReserviceCoveredView({ data }) {
 }
 
 // Hero (eyebrow → title → intro) plus the "what needs another look"
-// card: the lane choice when more than one plan family is bookable, and the
-// optional details line the tech preps from.
-function ReserviceHero({ data, bookableLanes, selectedLane, onSelectLane, details, onDetails }) {
+// card: the lane choice when more than one plan family is bookable, the
+// optional one-tap pest chips (GATE_RESERVICE_PEST_CHIPS — data.pestChoices
+// absent entirely while the gate is dark, so this renders nothing extra),
+// and the details line the tech preps from.
+function ReserviceHero({
+  data, bookableLanes, selectedLane, onSelectLane, details, onDetails,
+  selectedPests, onTogglePest,
+}) {
+  const pestChoices = data?.pestChoices?.[selectedLane] || null;
   return (
     <>
       <div style={{ margin: '8px 2px 20px' }}>
@@ -811,8 +827,11 @@ function ReserviceHero({ data, bookableLanes, selectedLane, onSelectLane, detail
           {data?.customerFirstName ? `Hi ${data.customerFirstName} — ` : ''}pests back between visits?
         </h1>
         <div style={{ marginTop: 12, color: S.body, fontSize: 16, lineHeight: 1.55 }}>
-          Breakthrough activity between regular visits is covered — pick a time
-          below and we&apos;ll send a tech back out at <strong style={{ color: S.text }}>no charge</strong>.
+          {data?.location_review_required ? (
+            <>Your re-service is covered at <strong style={{ color: S.text }}>no charge</strong>. We need to confirm the service address before we can schedule it.</>
+          ) : (
+            <>Breakthrough activity between regular visits is covered — pick a time below and we&apos;ll send a tech back out at <strong style={{ color: S.text }}>no charge</strong>.</>
+          )}
         </div>
       </div>
       <Card>
@@ -847,8 +866,45 @@ function ReserviceHero({ data, bookableLanes, selectedLane, onSelectLane, detail
             </div>
           </div>
         ) : null}
+        {pestChoices ? (
+          <div style={{ marginBottom: 14 }}>
+            <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 8 }}>What are you seeing?</div>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              {pestChoices.map((pest) => {
+                const active = selectedPests.includes(pest.key);
+                return (
+                  <button
+                    key={pest.key}
+                    type="button"
+                    aria-pressed={active}
+                    {...(active ? { 'data-glass-accent': '' } : { 'data-glass': 'chip' })}
+                    onClick={() => onTogglePest(pest.key)}
+                    style={{
+                      background: active ? COLORS.glassNavy : '#fff',
+                      color: active ? COLORS.white : S.text,
+                      border: `2px solid ${active ? COLORS.glassNavy : '#E7E2D7'}`,
+                      borderRadius: 999,
+                      padding: '9px 16px',
+                      minHeight: 44,
+                      cursor: 'pointer',
+                      fontFamily: FONT_BODY,
+                      fontSize: 14,
+                      fontWeight: 700,
+                    }}
+                  >
+                    {pest.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        ) : null}
         <label htmlFor="reservice-details" style={{ display: 'block', fontSize: 14, fontWeight: 700, marginBottom: 6 }}>
-          What are you seeing? <span style={{ fontWeight: 500, color: S.body }}>(optional — helps your tech prep)</span>
+          {pestChoices ? (
+            <>Anything else? <span style={{ fontWeight: 500, color: S.body }}>(optional)</span></>
+          ) : (
+            <>What are you seeing? <span style={{ fontWeight: 500, color: S.body }}>(optional — helps your tech prep)</span></>
+          )}
         </label>
         <textarea
           id="reservice-details"
@@ -1246,11 +1302,14 @@ const FLOWS = {
     Success: ({ result }) => <ReserviceSuccessCard result={result} />,
     canConfirm: ({ lane }) => !!lane,
     actionLabel: ({ submitting, lane }) => (submitting ? 'Booking…' : !lane ? 'Pick what needs another look above' : `Book ${'→'} free`),
-    payload: ({ slot, lane, details }) => ({
+    payload: ({ slot, lane, details, pests }) => ({
       lane,
       date: slot.date,
       start_time: slot.start_time,
       details: details.trim() || undefined,
+      // Only sent when at least one chip is selected (GATE_RESERVICE_PEST_CHIPS
+      // absent/off customers never see chips, so this is always undefined then).
+      ...(pests && pests.length ? { pests } : {}),
     }),
     // ALREADY_BOOKED / NOT_ELIGIBLE: office booked one, plan lapsed.
     stateChangedCodes: ['ALREADY_BOOKED', 'NOT_ELIGIBLE'],
@@ -1343,9 +1402,13 @@ export default function ScheduleFlowPage({ flow }) {
   // the filter — a stale "Two openings Tuesday afternoon" line must not sit
   // above the unfiltered calendar.
   const [aiSession, setAiSession] = useState(0);
-  // Re-service only: which plan family and the optional details line.
+  // Re-service only: which plan family, the optional details line, and any
+  // one-tap pest chips selected (GATE_RESERVICE_PEST_CHIPS). Chips are kept
+  // per lane, so a lawn selection can never ride into a pest booking.
   const [selectedLane, setSelectedLane] = useState(null);
   const [details, setDetails] = useState('');
+  const [pestsByLane, setPestsByLane] = useState({});
+  const selectedPests = pestsByLane[selectedLane] || [];
   // Inspection only: the out-of-area stop (STOPs the page like `blocked`,
   // but it's raised from a POST response rather than the GET's own state)
   // and the ?slot= preselect's "we moved you" notice.
@@ -1419,6 +1482,7 @@ export default function ScheduleFlowPage({ flow }) {
     });
   }, [data]);
 
+
   // Inspection only: ?slot=YYYY-MM-DD|HH:MM preselect (the new-lead email's
   // three slot buttons link with one). Applies once, the first time real
   // availability shows up — a later refresh (AI search, SLOT_TAKEN recovery)
@@ -1460,6 +1524,14 @@ export default function ScheduleFlowPage({ flow }) {
   const mergeData = useCallback((patch) => {
     setData((prev) => (prev ? { ...prev, ...patch } : prev));
   }, []);
+
+  const showReserviceLocationReview = useCallback(() => {
+    setSelectedSlot(null);
+    setAiFiltered(false);
+    setAiSession((n) => n + 1);
+    mergeData({ availability: null, location_review_required: true });
+    setSubmitError(null);
+  }, [mergeData]);
 
   // Inspection only — the ONE client helper that refreshes availability on
   // any post-load path (Codex pre-push P1, 2026-09-24): "Show all open
@@ -1519,6 +1591,10 @@ export default function ScheduleFlowPage({ flow }) {
     });
     const body = await res.json().catch(() => ({}));
     if (signal?.aborted) throw new Error('search superseded');
+    if (flow === 'reservice' && body.code === 'LOCATION_REVIEW_REQUIRED') {
+      showReserviceLocationReview();
+      return { summary: null };
+    }
     if (!res.ok) throw new Error(body.error || 'search failed');
     // Inspection: a terminal state (already_booked / converted / gone) from
     // the server's eligibility re-check replaces the page, exactly as the
@@ -1555,7 +1631,7 @@ export default function ScheduleFlowPage({ flow }) {
     if (!selectedSlot || submitting || !cfg.canConfirm({ lane: selectedLane })) return;
     setSubmitting(true);
     setSubmitError(null);
-    const payload = cfg.payload({ slot: selectedSlot, data, lane: selectedLane, details, address: resolvedAddress });
+    const payload = cfg.payload({ slot: selectedSlot, data, lane: selectedLane, details, pests: selectedPests, address: resolvedAddress });
     try {
       const res = await fetch(`${API_BASE}/public/${cfg.endpoint}/${token}`, {
         method: 'POST',
@@ -1600,6 +1676,10 @@ export default function ScheduleFlowPage({ flow }) {
       if (flow === 'inspection' && res.ok && body.state && body.state !== 'ok') {
         setSelectedSlot(null);
         setData(body);
+        return;
+      }
+      if (flow === 'reservice' && body.code === 'LOCATION_REVIEW_REQUIRED') {
+        showReserviceLocationReview();
         return;
       }
       if (body.code === 'SLOT_TAKEN') {
@@ -1692,6 +1772,14 @@ export default function ScheduleFlowPage({ flow }) {
         }}
         details={details}
         onDetails={setDetails}
+        selectedPests={selectedPests}
+        onTogglePest={(key) => setPestsByLane((prev) => {
+          const current = prev[selectedLane] || [];
+          return {
+            ...prev,
+            [selectedLane]: current.includes(key) ? current.filter((k) => k !== key) : [...current, key],
+          };
+        })}
         // Inspection only: re-open the address form to correct the address
         // (Codex #4737 r5 P1 — an explicitly typed address wins on the
         // server, so a corrected retry books there).
@@ -1712,7 +1800,9 @@ export default function ScheduleFlowPage({ flow }) {
       {flow === 'reservice' && !selectedLane ? (
         <Card><p style={{ margin: 0, fontSize: 14, color: S.body }}>Choose a service above to see available times.</p></Card>
       ) : (<>
-        <AskCard key={aiSession} onSearch={runAiSearch} aiFiltered={aiFiltered} onShowAll={showAllTimes} />
+        {flow === 'reservice' && data?.location_review_required
+          ? null
+          : <AskCard key={aiSession} onSearch={runAiSearch} aiFiltered={aiFiltered} onShowAll={showAllTimes} />}
         <SchedulePicker
           availability={data?.availability}
           // Every other flow hides "Our best times for you" once an AI
@@ -1757,12 +1847,15 @@ export default function ScheduleFlowPage({ flow }) {
             <EmptyTimesCard
               aiFiltered={aiFiltered}
               serviceAreaUnavailable={flow === 'inspection' && !!data?.service_area_unavailable}
+              locationReviewRequired={flow === 'reservice' && !!data?.location_review_required}
               onRetry={load}
             />
           )}
         />
       </>)}
-      <HelpCard>Don&apos;t see a time that works? Text or call {WAVES_SUPPORT_PHONE_DISPLAY} and our team will fit you in.</HelpCard>
+      {flow === 'reservice' && data?.location_review_required
+        ? null
+        : <HelpCard>Don&apos;t see a time that works? Text or call {WAVES_SUPPORT_PHONE_DISPLAY} and our team will fit you in.</HelpCard>}
     </Page>
   );
 }

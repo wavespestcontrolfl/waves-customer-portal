@@ -172,6 +172,40 @@ test.each(['outside_service_area', 'revoke'])('%s broadcasts cleared visits afte
   expect(state.committed).toBe(true);
 });
 
+test('rejected-pin fallback normalizes a blank customer field against a null review snapshot value', async () => {
+  const storedReviewPin = { latitude: 27.51, longitude: -82.51 };
+  const customerNoPin = { ...customer, address_line2: '', latitude: null, longitude: null };
+  const addressSnapshot = [customer.address_line1, null, customer.city, customer.state, customer.zip];
+  const { conn, state } = connection();
+  visits.clearMatchingPins.mockResolvedValueOnce({ visitIds: ['visit-3'] });
+  review.saveReview.mockResolvedValue();
+  const inputForAction = {
+    action: 'outside_service_area', revision: 'current', confirmed: true, source: 'site_visit', evidence: 'Synthetic observation',
+  };
+  const actionConn = table => {
+    const row = table === 'customers' ? customerNoPin : table === 'customer_properties'
+      ? { ...customerNoPin, id: 'property-1', customer_id: customer.id, latitude: null, longitude: null }
+      : { ...storedReviewPin, address_snapshot: addressSnapshot, source: 'site_visit', evidence: 'Synthetic observation' };
+    const query = { where: () => query, forUpdate: () => query, first: async () => row, select: async () => [row], update: async () => 1 };
+    return query;
+  };
+  actionConn.raw = conn.raw;
+  actionConn.transaction = async callback => { await callback(actionConn); state.committed = true; };
+
+  await resolveCustomerGeocodeReview(customer.id, inputForAction, 'actor-1', actionConn);
+
+  // The stored review's address (line2: null) still describes this customer (line2: ''), so the
+  // rejected-pin fallback must recover the review's evidence pin instead of dropping it to null.
+  expect(review.saveReview).toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.objectContaining({
+    latitude: storedReviewPin.latitude, longitude: storedReviewPin.longitude,
+  }));
+  expect(visits.clearMatchingPins).toHaveBeenCalledWith(
+    expect.anything(), expect.anything(), expect.anything(),
+    expect.objectContaining({ latitude: storedReviewPin.latitude, longitude: storedReviewPin.longitude }),
+    expect.anything(), expect.anything(),
+  );
+});
+
 test('audit rejection prevents commit and all post-commit work', async () => {
   const { conn, state } = connection();
   audit.recordAuditEvent.mockRejectedValueOnce(new Error('audit unavailable'));

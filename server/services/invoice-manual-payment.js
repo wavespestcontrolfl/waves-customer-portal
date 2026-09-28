@@ -31,7 +31,7 @@
  * a button, so the receipt is NOT sent inline — a receipt_delivery_jobs row
  * is inserted IN the settlement transaction (the automatic receipt queue,
  * receipt-delivery-queue.js, is the one mechanism that honors
- * payment_receipt / email_enabled opt-outs, the SMS send window and the
+ * the payment_receipt opt-out, the SMS send window and the
  * retry ladder) and drained after commit. The job commits with the
  * payment or not at all. `receipt` then reads { queued: true }. Operator
  * paths leave it false and send inline.

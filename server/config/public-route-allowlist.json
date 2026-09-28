@@ -130,6 +130,17 @@
       ]
     },
     {
+      "router": "server/routes/og-preview.js",
+      "mount": "/og",
+      "reason": "Link-preview images for iMessage/SMS/email crawlers (no login possible; owner sign-off 2026-09-28). Only /og/report/:token.jpg reads its token: 32-hex gate, typedReportDelivery suppression, no-store/noindex/no-referrer, per-IP limiter; unknown links get the byte-identical default card. /og/<kind>.jpg are fixed brand images with no token and no lookup.",
+      "routes": [
+        "GET /og<re:^\\/([a-z-]+)\\.jpg$>",
+        "GET /og<re:^\\/report\\/([a-f0-9]{32})\\.jpg$/i>",
+        "GET /og<re:.*>",
+        "USE /og (inline function#844ec3c3)"
+      ]
+    },
+    {
       "router": "server/routes/card-public.js",
       "mount": "/api/card",
       "reason": "Digital business card / vCard / wallet pass by unguessable token",
@@ -531,10 +542,11 @@
     {
       "router": "server/routes/public-pest-forecast.js",
       "mount": "/api/public/pest-forecast",
-      "reason": "Pest forecast content for the marketing sites — public data",
+      "reason": "Pest forecast content for the marketing sites — public data. /nearest (owner ruling 2026-09-27: first-time blog visitors see their own Florida city) returns only a curated city slug or null, derived from Cloudflare's visitor-location request headers; nothing is logged or stored, private/no-store",
       "routes": [
         "GET /api/public/pest-forecast",
-        "GET /api/public/pest-forecast/locations"
+        "GET /api/public/pest-forecast/locations",
+        "GET /api/public/pest-forecast/nearest"
       ]
     },
     {

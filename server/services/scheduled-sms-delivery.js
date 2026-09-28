@@ -27,6 +27,7 @@ async function acceptedScheduledSms(id, err) {
 
 async function markScheduledSmsSent(msg, meta, result, reviewAsk = !!meta.bundled_review_request_id || meta.replay_purpose === 'review_request' || looksLikeReviewAsk(msg.message_body)) {
   const completedAt = new Date();
+  const evidence = require('./messaging/billing-prior-delivery').scheduledPriorInvoiceEvidence(meta, result, msg);
   // Preserve the queue time while ordering the conversation by delivery.
   // Finalization evidence rides the same atomic update so a crash cannot
   // lose the owed replay hooks or the accepted SID they need.
@@ -36,13 +37,16 @@ async function markScheduledSmsSent(msg, meta, result, reviewAsk = !!meta.bundle
     metadataSql += " || jsonb_build_object('finalize_pending', true, 'provider_message_id', ?::text)";
     bindings.push(result.providerMessageId || null);
   }
+  metadataSql += evidence.metadataSql;
+  bindings.push(...evidence.bindings);
   if (reviewAsk) {
     metadataSql += " || jsonb_build_object('review_ask_delivered_at', ?::timestamptz)";
     bindings.push(completedAt);
   }
   await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
     status: 'sent',
-    created_at: completedAt,
+    // An event dedupe retires the queue; it is not a fresh contact.
+    created_at: evidence.createdAt || completedAt,
     updated_at: completedAt,
     metadata: db.raw(metadataSql, bindings),
   });

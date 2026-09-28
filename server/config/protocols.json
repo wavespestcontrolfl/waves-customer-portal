@@ -1616,21 +1616,24 @@
             "treatmentApplied": true,
             "catalogProductHints": [
               "Advion Cockroach Gel Bait"
-            ]
+            ],
+            "completionApplicationMethod": "bait_placement"
           },
           "Use non-repellent crack-and-crevice treatment where label allows": {
             "scope": "interior",
             "treatmentApplied": true,
             "catalogProductHints": [
               "Alpine WSG"
-            ]
+            ],
+            "completionApplicationMethod": "spot_treatment"
           },
           "Apply IGR point-source or aerosol where label allows": {
             "scope": "interior",
             "treatmentApplied": true,
             "catalogProductHints": [
               "Gentrol IGR"
-            ]
+            ],
+            "completionApplicationMethod": "spot_treatment"
           }
         },
         "material_cost": "inventory",
@@ -1641,7 +1644,8 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "Bait-first, non-repellent approach. Schedule 10-14 day follow-up for confirmed live German roach activity."
+        "notes": "Bait-first, non-repellent approach. Schedule 10-14 day follow-up for confirmed live German roach activity.",
+        "completionDefaultProducts": ["Alpine WSG", "Gentrol IGR", "Advion Cockroach Gel Bait"]
       },
       {
         "visit": 2,

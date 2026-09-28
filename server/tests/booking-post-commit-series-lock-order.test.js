@@ -58,10 +58,10 @@ describe('booking.js post-commit follow-up seeding — customer row lock before 
     // right occurrence even as unrelated code shifts line numbers.
     const blockAt = booking.indexOf('Duplicate-series guard: don\'t seed a SECOND active series');
     expect(blockAt).toBeGreaterThan(-1);
-    const commsLockAt = booking.indexOf('await lockCustomerComms(trx, custId);', blockAt);
+    const commsLockAt = booking.indexOf('for (const id of seedingOwnershipCustomerIds) await lockCustomerComms(trx, id);', blockAt);
     expect(commsLockAt).toBeGreaterThan(blockAt);
     const rowLockAt = booking.indexOf(
-      "await trx('customers').where({ id: custId }).forUpdate().first('id');",
+      'await lockCustomerAccountRows(trx, seedingOwnershipCustomerIds, { forUpdate: true });',
       commsLockAt,
     );
     expect(rowLockAt).toBeGreaterThan(commsLockAt);
@@ -86,7 +86,7 @@ describe('booking.js post-commit follow-up seeding — customer row lock before 
     const nextBlockMarker = booking.indexOf('duplicateSeriesKept = pestDuplicateKeptAtBooking;', blockAt);
     expect(nextBlockMarker).toBeGreaterThan(blockAt);
     const rowLockAt = booking.indexOf(
-      "await trx('customers').where({ id: custId }).forUpdate().first('id');",
+      'await lockCustomerAccountRows(trx, seedingOwnershipCustomerIds, { forUpdate: true });',
       blockAt,
     );
     const firstSeriesLockAfterBlock = booking.indexOf('RecurringAppointmentSeeder.checkActiveSeriesLocked(trx, {', blockAt);
@@ -101,10 +101,10 @@ describe('booking.js activateWizardSeries — customer row lock before the paren
     // db.transaction, so this one fix covers every entry into it.
     const fnAt = booking.indexOf('const activateWizardSeries = async (seriesParentRow) => {');
     expect(fnAt).toBeGreaterThan(-1);
-    const commsLockAt = booking.indexOf('await lockCustomerComms(trx, custId);', fnAt);
+    const commsLockAt = booking.indexOf('for (const id of activationOwnershipCustomerIds) await lockCustomerComms(trx, id);', fnAt);
     expect(commsLockAt).toBeGreaterThan(fnAt);
     const rowLockAt = booking.indexOf(
-      "await trx('customers').where({ id: custId }).forUpdate().first('id');",
+      'const activationOwnershipCustomers = await lockCustomerAccountRows(',
       commsLockAt,
     );
     expect(rowLockAt).toBeGreaterThan(commsLockAt);
@@ -126,7 +126,7 @@ describe('booking.js activateWizardSeries — customer row lock before the paren
   test('regression: the customer row lock strictly precedes the parent scheduled_services FOR UPDATE inside activateWizardSeries', () => {
     const fnAt = booking.indexOf('const activateWizardSeries = async (seriesParentRow) => {');
     const rowLockAt = booking.indexOf(
-      "await trx('customers').where({ id: custId }).forUpdate().first('id');",
+      'const activationOwnershipCustomers = await lockCustomerAccountRows(',
       fnAt,
     );
     const parentRowLockAt = booking.indexOf("const lockedParent = await trx('scheduled_services')", fnAt);
@@ -435,7 +435,7 @@ describe('booking.js pest follow-up seeding — re-verifies the parent owner und
 
   test('the parent row lock/verify (lockAndVerifySeriesParentOwner) sits between the customers FOR UPDATE and checkActiveSeriesLocked', () => {
     const blockAt = booking.indexOf('Duplicate-series guard: don\'t seed a SECOND active series');
-    const rowLockAt = booking.indexOf("await trx('customers').where({ id: custId }).forUpdate().first('id');", blockAt);
+    const rowLockAt = booking.indexOf('await lockCustomerAccountRows(trx, seedingOwnershipCustomerIds, { forUpdate: true });', blockAt);
     expect(rowLockAt).toBeGreaterThan(blockAt);
     const verifyAt = booking.indexOf('const lockedParentRow = await lockAndVerifySeriesParentOwner(trx, {', rowLockAt);
     expect(verifyAt).toBeGreaterThan(rowLockAt);
@@ -463,7 +463,7 @@ describe('booking.js pest follow-up seeding — re-verifies the parent owner und
     // re-verified row too.
     expect(body).toMatch(/serviceId: effectiveParent\.service_id \|\| null,/);
     expect(body).toMatch(/excludeParentId: effectiveParent\.id,/);
-    expect(body).toMatch(/stampDisclosedSetupFee\(trx, \{ stampServiceRow: effectiveParent \}\);/);
+    expect(body).toMatch(/stampDisclosedSetupFee\(trx, \{[\s\S]{0,120}stampServiceRow: effectiveParent,[\s\S]{0,120}ownershipSnapshot: seedingOwnershipSnapshot,/);
     // The seeder itself really does copy customer_id straight from the
     // parent object it is handed (proves the re-read row is what decides
     // the children's owner, not merely passed through unused).
@@ -533,7 +533,7 @@ describe('booking.js activateWizardSeries — re-verifies the parent owner under
     const fnAt = booking.indexOf('const activateWizardSeries = async (seriesParentRow) => {');
     const lockedParentAt = booking.indexOf("const lockedParent = await trx('scheduled_services')", fnAt);
     const throwAt = booking.indexOf('throw new SeriesOwnerMovedError(lockedParent.customer_id, lockedParent);', lockedParentAt);
-    const draftOwnerCheckAt = booking.indexOf("String(lockedDraft.customer_id) === String(custId)", lockedParentAt);
+    const draftOwnerCheckAt = booking.indexOf('estimateOwnershipMatchesLockedRows(', lockedParentAt);
     const dupGuardAt = booking.indexOf('checkActiveSeriesLocked(trx, {', lockedParentAt);
     expect(throwAt).toBeGreaterThan(lockedParentAt);
     expect(draftOwnerCheckAt).toBeGreaterThan(throwAt);

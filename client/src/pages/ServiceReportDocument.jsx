@@ -1,12 +1,13 @@
 import React, { useEffect, useState } from 'react';
-import { WAVES_FL_LICENSE_LINE, WAVES_SUPPORT_PHONE_DISPLAY } from '../constants/business';
+import { WAVES_FL_LICENSE_LINE, WAVES_PRODUCTS_SAFETY_URL, WAVES_SUPPORT_PHONE_DISPLAY } from '../constants/business';
 import { cleanVisitSummary } from './ReportViewPage';
-import { epaReg, isProductApplication } from '../lib/product-application';
+import { epaReg, isProductApplication, reportHasRodenticide } from '../lib/product-application';
 import { TERMITE_V2_DASHBOARD_FIELD_KEYS } from '../components/report/termiteV2/TermiteReportV2';
 import { COCKROACH_V2_DASHBOARD_FIELD_KEYS } from '../components/report/cockroachV2/CockroachReportV2';
 import {
   MARKED_PHOTO_INTRO, markColor, markedPhotoCaption,
 } from '../components/report/markedPhotoCopy';
+import PoisonControlCopy, { applicatorIdLine } from '../components/report/PoisonControlCopy';
 
 // Work-order style service report document (owner direction 2026-08-03,
 // modeled on the TruGreen WO / All U Need service-notification formats):
@@ -308,6 +309,21 @@ function InfoRow({ label, children }) {
     <div style={{ display: 'flex', gap: 8, alignItems: 'baseline', padding: '1.5px 0', minWidth: 0 }}>
       <Label>{label}</Label>
       <span style={{ color: INK, fontSize: 11.5, lineHeight: 1.35, minWidth: 0, overflowWrap: 'anywhere' }}>{children}</span>
+    </div>
+  );
+}
+
+// titled: the standalone block already heads it "Poison Control".
+// showApplicator: the visit recorded an actual application.
+function DocPoisonControl({ data, listsProducts = false, titled = false, showApplicator = false }) {
+  const applicator = showApplicator ? applicatorIdLine(data.technicianName, data.applicatorFdacsId) : null;
+  return (
+    <div className="doc-keep" data-testid="doc-poison-control" style={{ margin: '8px 0 0', fontSize: 10.5, lineHeight: 1.5, color: MUTED }}>
+      <p style={{ margin: 0 }}>
+        {!titled && <><strong style={{ color: INK, fontWeight: 700 }}>Poison Control:</strong>{' '}</>}
+        <PoisonControlCopy listsProducts={listsProducts} linkStyle={{ color: INK, fontWeight: 700 }} />
+      </p>
+      {applicator && <p style={{ margin: '2px 0 0', color: INK, fontWeight: 600 }}>{applicator}</p>}
     </div>
   );
 }
@@ -1009,6 +1025,40 @@ export default function ServiceReportDocument({ data, token }) {
           </div>
         )}
 
+        {/* Rain / spiders / what-to-expect (GATE_PEST_REPORT_EXPECTATIONS, dark).
+            pestV2.expectations is built server-side (pest-report-v2.js) with
+            forecastHeavyRain always false for this render (mode !== 'live'
+            in reports-public.js) — the NWS forecast piece never reaches a
+            permanent PDF; everything here is already PDF-safe as delivered. */}
+        {pestV2?.expectations?.rain?.lines?.length > 0 && (
+          <div className="doc-keep">
+            <SectionHeader>Rain and your treatment</SectionHeader>
+            {pestV2.expectations.rain.lines.map((line) => (
+              <p key={line} style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{line}</p>
+            ))}
+          </div>
+        )}
+        {pestV2?.expectations?.spiders?.expectation && (
+          <div className="doc-keep">
+            <SectionHeader>{pestV2.expectations.spiders.headline || 'Spiders'}</SectionHeader>
+            {pestV2.expectations.spiders.whatWeDid && (
+              <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{pestV2.expectations.spiders.whatWeDid}</p>
+            )}
+            <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{pestV2.expectations.spiders.expectation}</p>
+            {pestV2.expectations.spiders.nextStep && (
+              <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{pestV2.expectations.spiders.nextStep}</p>
+            )}
+          </div>
+        )}
+        {pestV2?.expectations?.whatToExpect?.lines?.length > 0 && (
+          <div className="doc-keep">
+            <SectionHeader>What to expect</SectionHeader>
+            {pestV2.expectations.whatToExpect.lines.map((line) => (
+              <Bullet key={line}>{line}</Bullet>
+            ))}
+          </div>
+        )}
+
         {/* A promised revisit is a commitment — dropping it from the permanent
             artifact leaves the customer with no record of it. */}
         {v2?.followUp && (v2.followUp.headline || v2.followUp.reason) && (
@@ -1257,6 +1307,22 @@ export default function ServiceReportDocument({ data, token }) {
                   );
               })}
             </table>
+            {/* Same gate as the web section: only a visit that applied a
+                product prints Poison Control. The tel: link stays tappable
+                in the PDF. */}
+            <DocPoisonControl data={data} listsProducts showApplicator />
+          </div>
+        )}
+
+        {/* No product rows, yet something went down (the server's
+            applicationMade verdict, an unknown verdict — null, fail toward
+            the safety line — or rodenticide in bait stations): Poison
+            Control prints on its own, mirroring the web report. The
+            applicator is named only on real application evidence. */}
+        {appliedProducts.length === 0 && (data.applicationMade === true || data.applicationMade === null || reportHasRodenticide(data)) && (
+          <div className="doc-keep">
+            <SectionHeader>Poison Control</SectionHeader>
+            <DocPoisonControl data={data} titled showApplicator={data.applicationMade === true} />
           </div>
         )}
 
@@ -1599,6 +1665,13 @@ export default function ServiceReportDocument({ data, token }) {
                 autodetection is optional, and this is the only route to the
                 analysis this record intentionally omits */}
             <a href={reportUrl} style={{ color: NAVY, textDecoration: 'underline' }}>{reportUrl}</a>
+            <br />
+            {/* Owner ask 2026-09-28: every record of service links to the
+                public Products & Safety page. The footer prints on every
+                record, product rows or not; the URL shows in full so a
+                printed copy carries it. */}
+            Every product we use and our safety protocol:{' '}
+            <a href={`${WAVES_PRODUCTS_SAFETY_URL}#safety-protocol`} target="_blank" rel="noopener noreferrer" style={{ color: NAVY, textDecoration: 'underline' }}>{WAVES_PRODUCTS_SAFETY_URL}</a>
             <br />
             This report is provided for your records. This is not an invoice.
             {/* Claim tamper-evidence only when photos are actually displayed

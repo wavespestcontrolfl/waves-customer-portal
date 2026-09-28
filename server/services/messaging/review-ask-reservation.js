@@ -91,6 +91,14 @@ const REPLY_RESERVATION_MARKERS = [
   'provider_handoff_reservation',
 ];
 const SEND_RESERVATION_MARKERS = [REVIEW_ASK_MARKER, ...REPLY_RESERVATION_MARKERS];
+// billing-text-leg-dedupe.js's claim row: an empty 'sending' placeholder
+// that can outlive its send (an uncertain outcome, or an accepted send
+// whose durable row was not yet visible). Like a review-ask reservation it
+// is SYNTHETIC — the real text, if any, is its own sms_log row — so it is
+// hidden from general readers while 'sending', at any age. Deliberately NOT
+// in REPLY_RESERVATION_MARKERS or SEND_RESERVATION_MARKERS: the reply
+// cleanup sweeps must never see or settle it.
+const BILLING_TEXT_LEG_CLAIM_MARKER = 'billing_text_leg_claim';
 // A reply placeholder is hidden only while its reconciliation hold runs
 // (sms-auto-send's uncertain-claim hold). Past that it SURFACES as the
 // unresolved attempt it is, so an operator can see and settle it — an
@@ -148,6 +156,7 @@ function isUnresolvedSendReservation(row, now = Date.now()) {
     return !['sent', 'delivered'].includes(row.status) && metadata.finalize_only !== true;
   }
   if (row.status !== 'sending') return false;
+  if (metadata[BILLING_TEXT_LEG_CLAIM_MARKER] === true) return true;
   if (!REPLY_RESERVATION_MARKERS.some(marker => metadata[marker] === true)) return false;
   const createdAt = row.created_at ? new Date(row.created_at).getTime() : NaN;
   return !Number.isFinite(createdAt) || createdAt >= now - REPLY_RESERVATION_HOLD_MS;
@@ -167,6 +176,8 @@ function excludeUnresolvedSendReservations(query, table = 'sms_log') {
     `NOT ((COALESCE(${table}.metadata->>'${REVIEW_ASK_MARKER}', 'false') = 'true'`
       + ` AND ${table}.status NOT IN ('sent', 'delivered')`
       + ` AND COALESCE(${table}.metadata->>'finalize_only', 'false') <> 'true')`
+      + ` OR (${table}.status = 'sending'`
+      + ` AND COALESCE(${table}.metadata->>'${BILLING_TEXT_LEG_CLAIM_MARKER}', 'false') = 'true')`
       + ` OR (${table}.status = 'sending' AND (${replyMarkers})`
       + ` AND ${table}.created_at >= NOW() - INTERVAL '${REPLY_RESERVATION_HOLD_HOURS} hours'))`,
   );
@@ -453,13 +464,18 @@ async function countStaleUnresolved({ trx } = {}) {
 // reader (and permanently counted stale) with nothing left holding it
 // accountable. Called from reconcileStrandedSends alongside
 // countStaleUnresolved, so it runs on the existing cron cadence rather
-// than a new one.
+// than a new one. Also sweeps billing-text-leg-dedupe.js's claims, which
+// use the same release_pending mark when their own delete keeps failing
+// after a definite outcome.
 async function releasePending({ trx } = {}) {
   const conn = trx || defaultDb();
   const logger = require('../logger');
   const marked = await conn('sms_log')
     .where({ status: 'sending' })
-    .whereRaw(`metadata->>'${REVIEW_ASK_MARKER}' = 'true'`)
+    .where(function reviewAskOrBillingClaim() {
+      this.whereRaw(`metadata->>'${REVIEW_ASK_MARKER}' = 'true'`)
+        .orWhereRaw(`metadata->>'${BILLING_TEXT_LEG_CLAIM_MARKER}' = 'true'`);
+    })
     .whereRaw("metadata->>'release_pending' = 'true'")
     .select('id');
   let released = 0;
@@ -480,6 +496,7 @@ module.exports = {
   excludeUnresolvedSendReservations,
   preserveSoleAcceptedReplyReceipts,
   SEND_RESERVATION_MARKERS,
+  BILLING_TEXT_LEG_CLAIM_MARKER,
   REPLY_RESERVATION_HOLD_HOURS,
   REVIEW_ASK_RESERVATION_HOLD_HOURS,
   REVIEW_ASK_MARKER,

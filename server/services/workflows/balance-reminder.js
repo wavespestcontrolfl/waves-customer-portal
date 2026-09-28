@@ -8,15 +8,19 @@ const { renderSmsTemplate } = require("../sms-template-renderer");
 const { publicPortalUrl } = require("../../utils/portal-url");
 const EmailTemplateLibrary = require("../email-template-library");
 const { currency } = require("../email-template");
-const { getInvoiceEmailRecipients } = require("../customer-contact");
 const { dateOnlyString, formatDateOnly } = require("../../utils/date-only");
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require("../../constants/business");
 const { collectionsChannelPermitted } = require("../collections/rail-guard");
 const ContactLedger = require("../collections/contact-ledger");
 const { billingChannelAllowed, explicitBillingChannels } = require('../billing-delivery-channels');
 const { reminderProgress, sendReminderChannels } = require('../billing-reminder-delivery');
-const { isDefiniteRejection } = require('../sendgrid-mail');
-const { withCustomerCommsLock } = require('../../utils/customer-comms-lock');
+const { dispatchUnderBillingEmailAuthority } = require('../billing-channel-email-authority');
+const { billingEmailRecipient, billingEmailSendOutcome, billingEmailSendFailure } = require('../billing-email-sender');
+const { originalBillingContactArgs, previouslySettledBillingLegs } = require('../messaging/billing-channel-routing');
+
+async function markReminderDelivery(ledger, result) {
+  return ContactLedger.markDelivered(ledger, ...originalBillingContactArgs(result));
+}
 
 const LATE_PAYMENT_EMAIL_BY_SMS_TEMPLATE = {
   late_payment_7d: { templateKey: "billing_late_payment_7_day", stageDays: 7 },
@@ -30,18 +34,6 @@ const EMAIL_ELIGIBLE_INVOICE_STATUSES = new Set(["sent", "viewed", "overdue", "u
 // Overdue stage thresholds, highest first; below 14 days is the 7-day stage.
 const LATE_PAYMENT_STAGE_DAYS = [90, 60, 30, 14];
 const CONTACT_EMAIL = "contact@wavespestcontrol.com";
-
-function clean(value) {
-  return String(value || "").trim();
-}
-
-function cleanEmail(value) {
-  return clean(value).toLowerCase();
-}
-
-function isEmailLike(value) {
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail(value));
-}
 
 // The invoice title and service-date phrasing every late-payment text
 // renders, shared by the explicit-channel and legacy paths.
@@ -523,7 +515,6 @@ class BalanceReminder {
     invoiceTitle,
     serviceDateClause,
     payUrl,
-    initialPrefs,
   }) {
     const config = LATE_PAYMENT_EMAIL_BY_SMS_TEMPLATE[smsTemplateKey];
     if (!config) return { ok: false, skipped: true, reason: "no_email_template_mapping" };
@@ -551,28 +542,16 @@ class BalanceReminder {
       return { ok: false, skipped: true, reason: "missing_pay_url" };
     }
 
-    let prefs = initialPrefs;
-    if (prefs === undefined) {
-      try {
-        prefs = await db("notification_prefs").where({ customer_id: customer.id }).first();
-      } catch (err) {
-        logger.warn(`[balance-reminder] notification_prefs lookup failed for ${customer.id}: ${err.message}`);
-        prefs = null;
-      }
-    }
-    if (prefs?.email_enabled === false) {
-      return { ok: false, skipped: true, reason: 'email_disabled' };
-    }
-    if (billingChannelAllowed(prefs || {}, 'billing', 'email') === false) {
-      return { ok: false, skipped: true, reason: 'billing_email_not_selected' };
-    }
-
-    const [recipient] = getInvoiceEmailRecipients(customer, prefs || {})
-      .filter((entry) => isEmailLike(entry.email));
-    if (!recipient?.email) {
-      logger.info(`[balance-reminder] late-payment email skipped for customer ${customer.id}: no valid billing email`);
-      return { ok: false, skipped: true, reason: "missing_email" };
-    }
+    // The customer's billing choices, recipient and invoice ownership come
+    // from the shared billing email authority (owner ruling 2026-09-27): read
+    // here, then again under its locks at the provider handoff, with the
+    // recipient and suppression rechecks the routed billing Email leg uses.
+    const authorityInput = {
+      customerId: customer.id, invoiceId: invoice.id, channel: "email",
+      metadata: { billingDeliveryCategory: "billing" },
+    };
+    const { recipient, to, refusal } = await billingEmailRecipient(authorityInput, "balance-reminder");
+    if (refusal) return refusal;
 
     const payload = latePaymentPayload({
       customer: { ...customer, first_name: recipient.name || customer.first_name },
@@ -587,107 +566,42 @@ class BalanceReminder {
       return { ok: false, skipped: true, reason: "missing_due_date" };
     }
 
-    const triggerEventId = `late_payment:${latestInvoice.id}:${config.stageDays}`;
-    const idempotencyKey = `late_payment_email:${latestInvoice.id}:${config.stageDays}`;
-    let providerHandoffStarted = false;
-    let emailDisabledAtHandoff = false;
+    const log = (fields) => logLatePaymentEmailAttempt({
+      customerId: customer.id,
+      invoiceId: latestInvoice.id,
+      templateKey: config.templateKey,
+      stageDays: config.stageDays,
+      ...fields,
+    });
+    const state = { boundaryBlock: null, handoffStarted: false, providerAccepted: false };
     try {
       const result = await EmailTemplateLibrary.sendTemplate({
         templateKey: config.templateKey,
-        to: recipient.email,
+        to,
         payload,
         recipientType: "customer",
         recipientId: customer.id,
-        triggerEventId,
-        idempotencyKey,
+        triggerEventId: `late_payment:${latestInvoice.id}:${config.stageDays}`,
+        idempotencyKey: `late_payment_email:${latestInvoice.id}:${config.stageDays}`,
         categories: [
           "billing",
           "late_payment",
           `late_payment_${config.stageDays}d`,
         ],
         suppressionGroupKey: "transactional_required",
-        // …and again at the provider boundary, inside the library's handoff:
-        // the recipient resolution and payload render are awaited after the
-        // read above. Fail-closed, like the follow-up engine's email leg.
-        // Same customer-comms lock as the follow-up engine and preference saves.
-        withProviderHandoff: async (dispatch) => withCustomerCommsLock(db, customer.id, async (trx) => {
-          const verdict = await require("../invoice-helpers").selfPayAtDispatch(invoice.id, trx)();
-          if (verdict.ok !== true) return verdict;
-          const freshPrefs = await trx('notification_prefs').where({ customer_id: customer.id }).first();
-          if (freshPrefs?.email_enabled === false) {
-            emailDisabledAtHandoff = true;
-            return { ok: false };
-          }
-          if (billingChannelAllowed(freshPrefs || {}, 'billing', 'email') === false) return { ok: false };
-          const freshCustomer = await trx('customers').where({ id: customer.id }).first();
-          const [freshRecipient] = getInvoiceEmailRecipients(freshCustomer, freshPrefs || {})
-            .filter((entry) => isEmailLike(entry.email));
-          if (cleanEmail(freshRecipient?.email) !== cleanEmail(recipient.email)) return { ok: false };
-          providerHandoffStarted = true;
-          await dispatch(trx);
-          return { ok: true };
+        withProviderHandoff: (dispatch) => dispatchUnderBillingEmailAuthority({
+          input: authorityInput, recipientEmail: to, templateKey: config.templateKey, dispatch, state,
         }),
       });
-
-      if (emailDisabledAtHandoff && !result.sent) {
-        return { ok: false, skipped: true, reason: 'email_disabled' };
+      const outcome = await billingEmailSendOutcome(result, state, log);
+      if (outcome.ok && !outcome.deduped) {
+        logger.info(`[balance-reminder] late-payment ${config.stageDays}d email sent for invoice ${latestInvoice.id}`);
       }
-
-      if (result.deduped) {
-        return {
-          ok: !!result.sent,
-          deduped: true,
-          blocked: !!result.blocked,
-          reason: result.reason || null,
-          messageId: result.message?.provider_message_id || null,
-        };
-      }
-
-      const status = result.sent ? "sent" : result.blocked ? "blocked" : "failed";
-      await logLatePaymentEmailAttempt({
-        customerId: customer.id,
-        invoiceId: latestInvoice.id,
-        templateKey: config.templateKey,
-        stageDays: config.stageDays,
-        status,
-        providerMessageId: result.message?.provider_message_id || null,
-        sentAt: result.message?.sent_at || null,
-        failureReason: result.sent ? null : result.reason || result.message?.error_message || "email_not_sent",
-      });
-
-      if (!result.sent) {
-        return {
-          ok: false,
-          blocked: !!result.blocked,
-          reason: result.reason || "email_not_sent",
-        };
-      }
-
-      logger.info(`[balance-reminder] late-payment ${config.stageDays}d email sent for invoice ${latestInvoice.id}`);
-      return { ok: true, messageId: result.message?.provider_message_id || null };
+      return outcome;
     } catch (err) {
-      await logLatePaymentEmailAttempt({
-        customerId: customer.id,
-        invoiceId: latestInvoice.id,
-        templateKey: config.templateKey,
-        stageDays: config.stageDays,
-        status: "failed",
-        failureReason: err.message,
+      return billingEmailSendFailure(err, state.handoffStarted, log, {
+        logTag: "balance-reminder", label: `late-payment ${config.stageDays}d for invoice ${latestInvoice.id}`,
       });
-      logger.error(`[balance-reminder] late-payment ${config.stageDays}d email failed for invoice ${latestInvoice.id}: ${err.message}`);
-      if (['EMAIL_TEMPLATE_DISABLED', 'EMAIL_TEMPLATE_UNAVAILABLE'].includes(err.code)) {
-        return { ok: false, skipped: true, reason: 'template_unavailable' };
-      }
-      // Same evidence rule as the invoice follow-up wrapper: a failure
-      // before the provider handoff, or a definite provider refusal, is
-      // known not sent and may reopen the reservation; an unknown failure
-      // after the handoff (5xx / network) stays uncertain so the keyed
-      // reservation is held instead of re-sent.
-      const definitelyNotSent = err.code !== 'EMAIL_SEND_IN_PROGRESS'
-        && (err.providerOutcome?.deliveryOutcome === 'not_sent'
-          || (err.providerOutcome?.deliveryOutcome !== 'uncertain'
-            && (!providerHandoffStarted || isDefiniteRejection(err))));
-      return { ok: false, error: err.message, deliveryOutcome: definitelyNotSent ? 'not_sent' : 'uncertain' };
     }
   }
 
@@ -728,7 +642,7 @@ class BalanceReminder {
       metadata: { invoiceId: invoice.id, templateKey, template_key: templateKey, days_overdue: balance.daysOverdue },
       send: (channel, ledger) => channel === 'email'
         ? this.sendLatePaymentEmail({ customer, invoice, balance, smsTemplateKey: templateKey,
-          invoiceTitle, serviceDateClause: dateClause, payUrl: link, initialPrefs: prefs })
+          invoiceTitle, serviceDateClause: dateClause, payUrl: link })
         : sendCustomerMessage({
           to: customer.phone, body: message, channel, audience: 'customer', purpose: 'payment_link',
           customerId: customer.id, invoiceId: invoice.id, entryPoint: 'balance_reminder_late_payment_check',
@@ -748,7 +662,7 @@ class BalanceReminder {
     if (stage >= 60 && result.deliveredNow.length) await db('customers').where({ id: customer.id }).update({
       pipeline_stage: 'at_risk', pipeline_stage_changed_at: new Date(),
     });
-    return result.complete;
+    return result.deliveredNow.length > 0;
   }
 
   async latePaymentCheck() {
@@ -921,14 +835,22 @@ class BalanceReminder {
         if (!emailLedger) return emailResult;
         emailResult = await this.sendLatePaymentEmail({
           customer, invoice: oldestInvoice, balance, smsTemplateKey: templateKey,
-          invoiceTitle, serviceDateClause: dateClause, payUrl: link, initialPrefs: prefs,
+          invoiceTitle, serviceDateClause: dateClause, payUrl: link,
         }).catch((err) => {
           logger.error(`[balance-reminder] late-payment email sidecar failed for customer ${customer.id}: ${err.message}`);
           return null;
         });
-        if (emailResult?.ok === true) await ContactLedger.markDelivered(emailLedger);
+        if (emailResult?.ok === true) await markReminderDelivery(emailLedger, emailResult);
         else if (emailResult?.deliveryOutcome !== 'uncertain') {
-          await ContactLedger.markSendFailed(emailLedger, { reason: emailResult?.reason || 'email_not_sent' });
+          // A retryable refusal before the provider never reached the
+          // customer. This row is unkeyed, so it is stamped never_contacted
+          // (the pre-send doctrine, outbound-voice/origination.js), retried
+          // once, or the collections 24-hour window would refuse this
+          // customer's next run over a contact that never happened.
+          const neverContacted = emailResult?.retryable === true && emailResult.deliveryOutcome === 'not_sent';
+          const stamp = { reason: emailResult?.reason || 'email_not_sent', ...(neverContacted ? { never_contacted: true } : {}) };
+          const stamped = await ContactLedger.markSendFailed(emailLedger, stamp);
+          if (!stamped && neverContacted) await ContactLedger.markSendFailed(emailLedger, stamp);
         }
         return emailResult;
       };
@@ -975,9 +897,10 @@ class BalanceReminder {
         );
         if (emailResult?.ok !== true) continue;
       } else {
-        await ContactLedger.markDelivered(smsLedger);
+        await markReminderDelivery(smsLedger, sendResult);
       }
       await attemptEmail();
+      if (previouslySettledBillingLegs([sendResult, emailResult])) continue;
       await db("customer_interactions").insert({
         customer_id: customer.id,
         interaction_type: sendResult.sent ? "sms_outbound" : "email_outbound",

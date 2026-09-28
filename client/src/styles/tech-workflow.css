@@ -104,6 +104,20 @@
 .tech-visit-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
 .tech-visit-products { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
 .ui-action.tech-visit-product { border-radius: 24px; white-space: normal; }
+/* Fast Complete (PR C): a deselected default-mix tile stays visible, struck
+   through, rather than disappearing — tapping again restores it. */
+.ui-action.tech-visit-product--off { text-decoration: line-through; opacity: 0.55; }
+/* Fast Complete's one-screen tile sections (products / pests / where /
+   activity) — a fixed 2-column grid instead of the recap modal's wrapping
+   flex row, per the owner's one-screen spec. */
+.tech-visit-tile-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-bottom: 16px; }
+/* Compact choice rows so the Fast Complete choices fit a typical phone
+   screen: three- or four-across tiles, tighter section rhythm. */
+.tech-visit-tile-grid--3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.tech-visit-tile-grid--4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.tech-visit-choice-section { margin-bottom: 12px; }
+.tech-visit-choice-section .tech-visit-tile-grid { margin-bottom: 0; }
+.tech-visit-amount-block { margin-bottom: 8px; }
 .tech-visit-timeline-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; font-size: 14px; }
 .tech-visit-choice { display: flex; gap: 12px; color: var(--tech-text); margin-top: 8px; font-size: 14px; }
 .tech-visit-checkbox { flex-shrink: 0; background: var(--tech-card); border-color: var(--tech-muted); }
@@ -159,3 +173,6 @@
 }
 .tech-visit-mark-badge--above { bottom: 13px; }
 .tech-visit-mark-badge--below { top: 13px; }
+.tech-visit-section-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.tech-visit-amount-row { display: grid; grid-template-columns: minmax(0, 1fr) 96px 88px; align-items: center; gap: 8px; margin: 8px 0; }
+.tech-visit-amount-label { font-size: 14px; color: var(--tech-text); overflow-wrap: anywhere; }

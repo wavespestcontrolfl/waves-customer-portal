@@ -20,9 +20,14 @@ const { spokeBlogNetworkEnabled } = require('../content/spoke-blog-network');
 // self-canonical); a hub target, an empty target, or multiple spokes all fall
 // back to the hub-only blog policy.
 function resolveSpokeTarget(brief = {}) {
+  // Related-post selection freezes the effective publish domain in the
+  // persisted voice_constraints JSONB. content_briefs has no target_sites
+  // column, so this marker must win after the brief is reloaded; otherwise an
+  // explicit hub decision can fall back to a stale spoke in operator_brief.
+  const fromRelatedSelection = normalizeSpokeSites(brief?.voice_constraints?.related_posts_target_sites);
   const fromBrief = normalizeSpokeSites(brief.target_sites);
   const fromOverlay = normalizeSpokeSites(brief?.voice_constraints?.operator_brief?.target_sites);
-  const sites = (fromBrief.length ? fromBrief : fromOverlay)
+  const sites = (fromRelatedSelection.length ? fromRelatedSelection : (fromBrief.length ? fromBrief : fromOverlay))
     .filter((k) => !HUB_SITE_KEYS.includes(k));
   const spoke = sites.length === 1 ? sites[0] : null;
   // Kill-switch enforcement at the PUBLISHING chokepoint. The seeder gate stops

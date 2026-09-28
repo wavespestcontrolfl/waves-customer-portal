@@ -151,15 +151,15 @@ const cspDirectives = {
   // PostHog (*.posthog.com) is loaded only on the public funnel pages
   // (/book, /estimate, /pay) and only after consent — see the client's
   // PublicFunnelTracking. Listing the host here is harmless when no key is set.
-  scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'", "https://maps.googleapis.com", "https://js.stripe.com", "https://static.cloudflareinsights.com", "https://*.posthog.com", "https://challenges.cloudflare.com"],
+  scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'", "https://maps.googleapis.com", "https://js.stripe.com", "https://static.cloudflareinsights.com", "https://*.posthog.com", "https://challenges.cloudflare.com", "https://cdn.plaid.com"],
   styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
   fontSrc: ["'self'", "https://fonts.gstatic.com", "data:"],
   imgSrc: ["'self'", "https:", "data:", "blob:"],
-  connectSrc: ["'self'", "https://fonts.googleapis.com", "https://fonts.gstatic.com", "https://maps.googleapis.com", "https://api.dataforseo.com", "https://fawn.ifas.ufl.edu", "https://generativelanguage.googleapis.com", "https://www.googleapis.com", "https://api.stripe.com", "https://*.posthog.com"],
+  connectSrc: ["'self'", "https://fonts.googleapis.com", "https://fonts.gstatic.com", "https://maps.googleapis.com", "https://api.dataforseo.com", "https://fawn.ifas.ufl.edu", "https://generativelanguage.googleapis.com", "https://www.googleapis.com", "https://api.stripe.com", "https://*.posthog.com", "https://*.plaid.com"],
   // blob: — the customer portal's in-app document viewer renders Bearer-only
   // report PDFs through an iframe on a blob URL (Capacitor shell has no
   // download pipeline); blob frames are same-origin script-created only.
-  frameSrc: ["'self'", "blob:", "https://www.google.com", "https://js.stripe.com", "https://hooks.stripe.com", "https://challenges.cloudflare.com"],
+  frameSrc: ["'self'", "blob:", "https://www.google.com", "https://js.stripe.com", "https://hooks.stripe.com", "https://challenges.cloudflare.com", "https://cdn.plaid.com"],
   // Authenticated call recordings are fetched with a Bearer header and played
   // from short-lived, script-created Blob URLs (revoked when the player leaves).
   mediaSrc: ["'self'", "https:", "blob:"],
@@ -612,6 +612,13 @@ function requireCustomerPhotoIdGateOpen(req, res, next) {
 app.use('/api/photo-id', requireCustomerPhotoIdGateOpen);
 app.use('/api/photo-id', require('./middleware/large-body-auth').requireCustomerTokenForLargeBody);
 app.use('/api/photo-id', express.json({ limit: '30mb' }));
+// Per-link Open Graph preview images (/og/report/:token.jpg, /og/<kind>.jpg)
+// — the endpoint iMessage/SMS/email link-preview crawlers fetch, outside any
+// auth. Mounted BEFORE the global body parsers below: it reads no body, and
+// a junk body must never be parsed (or rejected) ahead of its privacy
+// headers and limiter. See server/routes/og-preview.js.
+app.use('/og', require('./routes/og-preview'));
+
 // Worker-route HMAC signing (link-worker-auth) hashes the RAW request bytes;
 // the verify hook stores them for /api/integrations/*-worker paths only.
 app.use(express.json({ limit: '1mb', verify: require('./middleware/link-worker-auth').rawBodyVerify }));
@@ -982,9 +989,9 @@ if (config.nodeEnv === 'production') {
   const fs = require('fs');
   const {
     applyHtmlMetadata,
-    loadServiceReportPageMetadata,
-    redactReportPath,
   } = require('./services/report-page-metadata');
+  const { loadLinkPreviewMetadata, redactLinkPreviewPath } = require('./services/link-preview-metadata');
+  const { portalUrl } = require('./utils/portal-url');
 
   // Per-section PWA shape. /admin and /tech each install as their own
   // home-screen icon with their own name/manifest/start_url, instead of
@@ -1023,6 +1030,21 @@ if (config.nodeEnv === 'production') {
     // surrounding handlers are already no-cache, so fresh reads keep
     // deploys snappy without a stale-cache footgun.
     let html = fs.readFileSync(path.join(clientBuild, 'index.html'), 'utf8');
+    // Every page gets a branded, absolute default og:image FIRST — before
+    // the section/link-preview overrides below, which is what lets a more
+    // specific override (title/description included) win for a page that
+    // has one, while an ordinary page keeps this default image with the
+    // static title/description index.html already carries (applyHtmlMetadata
+    // falls back to those same defaults when a field isn't given).
+    html = applyHtmlMetadata(html, {
+      previewTitle: 'Waves',
+      image: {
+        url: portalUrl('/og/default.jpg'),
+        width: 1200,
+        height: 630,
+        alt: 'Waves Pest Control',
+      },
+    });
     const section = pickSection(reqPath);
     if (section) {
       html = html.replace(/href="\/manifest\.json"/, `href="${section.manifest}"`);
@@ -1034,10 +1056,10 @@ if (config.nodeEnv === 'production') {
       });
     }
     try {
-      const reportMetadata = await loadServiceReportPageMetadata(reqPath);
-      if (reportMetadata) html = applyHtmlMetadata(html, reportMetadata);
+      const linkPreviewMetadata = await loadLinkPreviewMetadata(reqPath);
+      if (linkPreviewMetadata) html = applyHtmlMetadata(html, linkPreviewMetadata);
     } catch (err) {
-      logger.warn(`[report-meta] Failed to render report metadata for ${redactReportPath(reqPath)}: ${err.message}`);
+      logger.warn(`[link-preview] Failed to render link-preview metadata for ${redactLinkPreviewPath(reqPath)}: ${err.code || err.name}`);
     }
     return html;
   }
@@ -1174,7 +1196,20 @@ const primeCatalogNames = config.nodeEnv === 'test'
   ? Promise.resolve()
   : require('./services/service-catalog-names').startCatalogNameRefresh(logger);
 
-primeCatalogNames.then(() => httpServer.listen(PORT, process.env.WAVES_LOCAL_DEV === '1' ? '127.0.0.1' : undefined, () => {
+// Compile the shared re-entry claim patterns before accepting traffic, so
+// the first live voice turn or email draft doesn't pay V8's one-time regex
+// compilation (about a second, synchronous; #4905). Never blocks boot.
+const primeGuardrails = primeCatalogNames.then(() => {
+  if (config.nodeEnv === 'test') return;
+  try {
+    const ms = require('./services/content/content-guardrails').warmReentrySafetyPatterns();
+    logger.info(`[boot] re-entry claim patterns compiled in ${ms}ms`);
+  } catch (err) {
+    logger.warn(`[boot] re-entry claim pattern warm-up failed: ${err.message}`);
+  }
+});
+
+primeGuardrails.then(() => httpServer.listen(PORT, process.env.WAVES_LOCAL_DEV === '1' ? '127.0.0.1' : undefined, () => {
   const mem = process.memoryUsage();
   logger.info(`Waves API running on port ${PORT} | RSS: ${Math.round(mem.rss/1024/1024)}MB | Heap: ${Math.round(mem.heapUsed/1024/1024)}MB`);
   logger.info(`   Environment: ${config.nodeEnv} | Client: ${config.clientUrl}`);

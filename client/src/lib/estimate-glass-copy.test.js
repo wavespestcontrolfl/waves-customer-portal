@@ -1,8 +1,10 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  glassPackWithoutGuarantee,
   applyCommercialExteriorScope,
   commercialGlassActive,
+  copyHasPlanTermsClaim,
   glassCopyActive,
   glassCtaMicroFor,
   glassCtaMicroForKeys,
@@ -136,10 +138,166 @@ describe('glassCtaMicroFor', () => {
     expect(glassCtaMicroFor('termite_trenching')).toMatch(/Licensed & insured/);
     expect(glassCtaMicroFor('termite_trenching')).not.toMatch(/JB351547/);
     expect(glassCtaMicroFor('termite_trenching')).not.toMatch(/long-term contract/);
-    expect(glassCtaMicroFor('bora_care')).toMatch(/Satisfaction guaranteed/);
+    // Bora-Care is termite work, and termite carries no guarantee of any kind
+    // (owner ruling; the same rule as the server's estimateMakesNoGuaranteeClaim).
+    expect(glassCtaMicroFor('bora_care')).not.toMatch(/guarantee/i);
+    expect(glassCtaMicroFor('bora_care')).toMatch(/Licensed & insured/);
     // Row-slug spelling of rodent resolves to the rodent pack's line.
     expect(glassCtaMicroFor('rodent_bait')).toBe(glassCtaMicroFor('rodent'));
     expect(glassCtaMicroFor('rodent')).not.toMatch(/callbacks/);
+  });
+});
+
+describe('termite work never carries a guarantee (owner ruling; server estimateMakesNoGuaranteeClaim)', () => {
+  const TERMITE = ['termite_bait', 'foam_recurring', 'termite_trenching', 'pre_slab_termiticide', 'bora_care', 'termite_foam', 'wdo_inspection'];
+
+  it.each(TERMITE)('the %s CTA line makes no guarantee', (slug) => {
+    expect(glassCtaMicroFor(slug)).not.toMatch(/guarantee/i);
+    expect(glassCtaMicroFor(slug)).toMatch(/Licensed & insured/);
+  });
+
+  it('a CTA covering termite beside another service makes no guarantee', () => {
+    expect(glassCtaMicroForKeys(['pest_control', 'termite_bait'])).not.toMatch(/guarantee/i);
+    expect(glassCtaMicroForKeys(['Pest Control', 'Termite Trenching'])).not.toMatch(/guarantee/i);
+  });
+
+  it('a CTA covering a service the page cannot classify makes no guarantee', () => {
+    expect(glassCtaMicroForKeys(['bundle'])).not.toMatch(/guarantee/i);
+    expect(glassCtaMicroForKeys([])).not.toMatch(/guarantee/i);
+  });
+
+  it('non-termite plans keep their guarantee lines', () => {
+    expect(glassCtaMicroForKeys(['pest_control'])).toBe(GLASS_COPY.ctaMicro);
+    expect(glassCtaMicroForKeys(['rodent'])).toMatch(/Satisfaction guaranteed/);
+    expect(glassCtaMicroForKeys(['pest_control', 'rodent_bait'])).toMatch(/Satisfaction guaranteed/);
+  });
+
+  it('the satisfaction scope keeps a satisfaction-only micro and neutralizes plan terms', () => {
+    expect(glassCtaMicroForKeys(['rodent'], { scope: 'satisfaction' })).toMatch(/Satisfaction guaranteed/);
+    expect(glassCtaMicroForKeys(['pest_control'], { scope: 'satisfaction' })).not.toMatch(/callbacks|money-back|contract/i);
+    expect(glassCtaMicroForKeys(['pest_control'], { scope: 'satisfaction' })).toMatch(/Satisfaction guaranteed/);
+    expect(glassCtaMicroForKeys(['pest_control'], { scope: 'none' })).not.toMatch(/guarantee/i);
+  });
+
+  it('the server noGuaranteeClaims decision overrides otherwise guaranteed recurring keys', () => {
+    expect(glassCtaMicroForKeys(['pest_control'], { noGuarantee: true })).not.toMatch(/guarantee|callbacks/i);
+    expect(glassCtaMicroForKeys(['pest_control'], { noGuarantee: true })).toMatch(/Licensed & insured/);
+  });
+});
+
+describe('glassPackWithoutGuarantee (server noGuaranteeClaims on a recurring estimate)', () => {
+  it('neutralizes every claim-bearing field it renders, not only the hero subline (Codex #4982)', () => {
+    // The trap-only pack's aiBody promises an extra callback allowance; with
+    // an intelligence payload the page renders it in the Waves AI card.
+    const trapOnly = { heroSub: 'Setup and monitoring are shown separately.',
+      aiBody: 'The priced lines separate setup, scheduled monitoring, and any additional callback allowance included in the plan.',
+      askChips: ['What is included in setup?', 'What happens if I need an extra callback?'] };
+    const stripped = glassPackWithoutGuarantee(trapOnly);
+    expect(stripped.heroSub).toBe(trapOnly.heroSub);
+    expect(stripped.aiBody).not.toMatch(/callback/i);
+    expect(stripped.askChips).toEqual(['What is included in setup?']);
+    // A pack with no claim in any field is returned as is.
+    const plain = { heroSub: 'Priced from your property.', aiBody: 'We measured your home.' };
+    expect(glassPackWithoutGuarantee(plain)).toBe(plain);
+  });
+
+  it.each([
+    'Rain re-spray guarantee',
+    'Retreat warranty applies',
+    'Warranties apply to covered work',
+    'Unlimited free callbacks',
+    'Re-service between visits at no charge',
+    'Between-visit service calls at no charge',
+    'Free re-service between recurring visits',
+    'Tenant-reported pests handled between visits — re-service requests are included in the plan',
+    'No long-term contract — cancel anytime',
+    'No contracts and no lock-in',
+    'No long-term commitment',
+    'Stop after any visit, without a cancellation fee',
+    'Cancel any time',
+  ])('recognizes recurring-plan terms in customer copy: %s', (claim) => {
+    expect(copyHasPlanTermsClaim(claim)).toBe(true);
+  });
+
+  it('leaves neutral scope detail alone', () => {
+    expect(copyHasPlanTermsClaim('Targets shaded foliage and standing water')).toBe(false);
+  });
+
+  it('replaces a hero subline that promises a guarantee and keeps the rest of the pack', () => {
+    setGlassDefault(true);
+    const pest = glassEstimateCopyFor('pest_control');
+    expect(pest.heroSub).toMatch(/money-back guarantee/);
+    const stripped = glassPackWithoutGuarantee(pest);
+    expect(stripped.heroSub).not.toMatch(/guarantee/i);
+    expect(stripped.heroSub).toBe(glassEstimateCopyFor('bundle').heroSub);
+    expect(stripped.heroH1).toBe(pest.heroH1);
+    expect(stripped.aiTitle).toBe(pest.aiTitle);
+  });
+
+  it.each(['30-day callback included', 'Free re-treatment if activity returns'])(
+    'replaces a one-time hero whose guarantee is phrased as %s',
+    (claim) => {
+      setGlassDefault(true);
+      const base = glassEstimateCopyFor('bundle');
+      const staleHero = { ...base, heroSub: `One visit, licensed and insured. ${claim}.` };
+      const stripped = glassPackWithoutGuarantee(staleHero);
+      expect(stripped.heroSub).toBe(base.heroSub);
+      expect(stripped.heroSub).not.toMatch(/callback|re[- ]?treat|guarantee/i);
+    },
+  );
+
+  it('leaves a guarantee-free pack, or no pack, untouched', () => {
+    setGlassDefault(true);
+    const termite = glassEstimateCopyFor('termite_bait');
+    expect(glassPackWithoutGuarantee(termite)).toBe(termite);
+    expect(glassPackWithoutGuarantee(null)).toBeNull();
+  });
+});
+
+describe('foam slug: termite foam only (rodent foam sealing stays rodent)', () => {
+  it('routes rodent foam-sealing rows away from the termite foam slug', () => {
+    expect(glassServiceSlug('Rodent Exclusion – Foam Sealing')).toBe('rodent_bait');
+    expect(glassServiceSlug('Foam Sealing Follow-Up (Rodent)')).toBe('rodent_bait');
+    expect(glassCtaMicroForKeys(['Rodent Exclusion – Foam Sealing'])).toMatch(/Satisfaction guaranteed/);
+  });
+
+  it('keeps termite foam work on its slugs', () => {
+    expect(glassServiceSlug('foam_recurring')).toBe('foam_recurring');
+    expect(glassServiceSlug('Foam Drill Treatment')).toBe('foam_recurring');
+    expect(glassServiceSlug('Drill & Foam Treatment')).toBe('foam_recurring');
+    expect(glassServiceSlug('Recurring Foam Treatment (Quarterly)')).toBe('foam_recurring');
+    expect(glassServiceSlug('Termite Foam Treatment')).toBe('termite_foam');
+    expect(glassServiceSlug('Termidor Foam Treatment')).toBe('termite_foam');
+    expect(glassServiceSlug('Termite Treatment (Foam)')).toBe('termite_foam');
+    expect(glassServiceSlug('Termite Foaming Treatment')).toBe('termite_foam');
+  });
+
+  it.each([
+    ['WDO Inspection', 'wdo_inspection'],
+    ['Pre-Slab Termiticide Treatment', 'pre_slab_termiticide'],
+    ['Bora-Care Wood Treatment', 'termite_bait'],
+    ['Borate Wood Treatment', 'termite_bait'],
+    ['Trelona Bait Monitoring', 'termite_bait'],
+    ['Lawn Care and Termite Bait Monitoring', 'lawn_care'],
+    ['Mosquito and Termite Bait Monitoring', 'mosquito'],
+    ['Plain Foam Treatment', null],
+  ])('shares termite scope without changing the primary slug for %s', (name, slug) => {
+    expect(glassServiceSlug(name)).toBe(slug);
+  });
+
+  it.each([
+    ['Pest Control with Foam Drill', 'pest_control'],
+    ['Lawn Care with Recurring Foam Treatment', 'lawn_care'],
+    ['Tree & Shrub with Termidor Foam', 'tree_shrub'],
+  ])('preserves the primary client slug for combined label %s', (name, slug) => {
+    expect(glassServiceSlug(name)).toBe(slug);
+  });
+
+  it.each([
+    'trap_only Termite Foam',
+    'Trap-only Retainer with Termite Foam Treatment',
+  ])('keeps trap-only precedence over a termite-foam suffix in %s', (name) => {
+    expect(glassServiceSlug(name)).toBe('trap_only');
   });
 });
 
@@ -149,6 +307,19 @@ describe('glassOneTimeHeroOverlay', () => {
     const wdo = glassEstimateCopyFor('wdo_inspection');
     expect(glassOneTimeHeroOverlay(wdo, { preserveServiceHero: true }).heroH1).toMatch(/WDO inspection/i);
     expect(glassOneTimeHeroOverlay(glassEstimateCopyFor('pest_control')).heroH1).toMatch(/service quote/i);
+  });
+
+  it('a no-guarantee estimate (server noGuaranteeClaims) drops "satisfaction guaranteed" from both one-time heroes', () => {
+    setGlassDefault(true);
+    const pack = glassEstimateCopyFor('bundle');
+    expect(glassOneTimeHeroOverlay(pack).heroSub).toMatch(/satisfaction guaranteed/i);
+    for (const reviewBeforeBooking of [false, true]) {
+      const hero = glassOneTimeHeroOverlay(pack, { reviewBeforeBooking, noGuarantee: true });
+      expect(hero.heroSub).not.toMatch(/guarantee/i);
+      expect(hero.heroSub).toMatch(/Licensed & insured\./);
+    }
+    // The review-gated variant keeps its confirm-with-you clause.
+    expect(glassOneTimeHeroOverlay(pack, { reviewBeforeBooking: true, noGuarantee: true }).heroSub).toMatch(/our team reviews it/);
   });
 });
 
@@ -172,6 +343,19 @@ describe('glassPackWithOneTimeHero', () => {
     const base = glassOneTimeHeroOverlay(glassEstimateCopyFor('pest_control'), { reviewBeforeBooking: true });
     expect(glassPackWithOneTimeHero(base, { hero }, { reviewBeforeBooking: true }).heroSub).toBe(base.heroSub);
     expect(glassPackWithOneTimeHero(null, { hero }, { reviewBeforeBooking: true }).heroSub).toBeNull();
+  });
+  it('the no-guarantee transform runs after a stale guaranteed service hero overlay', () => {
+    setGlassDefault(true);
+    const base = glassOneTimeHeroOverlay(glassEstimateCopyFor('pest_control'));
+    const staleServiceHero = {
+      hero: { ...hero, sub: 'Two targeted visits — 100% guaranteed with the Waves Guarantee.' },
+    };
+    const overlaid = glassPackWithOneTimeHero(base, staleServiceHero);
+    expect(overlaid.heroSub).toMatch(/100% guaranteed/i);
+
+    const finalPack = glassPackWithoutGuarantee(overlaid);
+    expect(finalPack.heroSub).not.toMatch(/guarantee/i);
+    expect(finalPack.heroSub).toMatch(/actual property/);
   });
   it('no service hero leaves the pack untouched', () => {
     expect(glassPackWithOneTimeHero(null, null)).toBeNull();

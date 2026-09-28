@@ -12,6 +12,8 @@
  * embeddable — well beyond the immediate service area.
  */
 
+const { haversine } = require('../route-optimizer');
+
 // region drives nothing weather-wise (we fetch live by lat/lng) but is exposed
 // so the widget/landing can group or label points. sw = Southwest FL service area.
 const LOCATIONS = [
@@ -104,8 +106,43 @@ function resolveLocation({ location, zip } = {}) {
   return DEFAULT_LOCATION;
 }
 
+// Every point in Florida sits within ~175 mi of a curated city (Pensacola →
+// Tallahassee), so a nearest city farther than this means the geolocation
+// contradicts itself (a Florida region with out-of-state coordinates).
+const MAX_VISITOR_MILES = 250;
+
+function coordinate(value) {
+  if (value == null || String(value).trim() === '') return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * The curated city nearest a visitor who is in Florida, from an IP-based
+ * location estimate (the public route passes Cloudflare's visitor-location
+ * headers). Only an in-state visitor gets a city: anyone geolocated outside
+ * Florida — California, New York, south Georgia — gets null, and the caller
+ * keeps its default. Never throws.
+ */
+function nearestFloridaLocation({ country, regionCode, latitude, longitude } = {}) {
+  if (String(country || '').toUpperCase() !== 'US' || String(regionCode || '').toUpperCase() !== 'FL') return null;
+  const lat = coordinate(latitude);
+  const lng = coordinate(longitude);
+  if (lat == null || lng == null || Math.abs(lat) > 90 || Math.abs(lng) > 180) return null;
+  let nearest = null;
+  let nearestMiles = Infinity;
+  for (const loc of LOCATIONS) {
+    const miles = haversine(lat, lng, loc.lat, loc.lng);
+    if (miles < nearestMiles) {
+      nearest = loc;
+      nearestMiles = miles;
+    }
+  }
+  return nearestMiles <= MAX_VISITOR_MILES ? nearest : null;
+}
+
 function listLocations() {
   return LOCATIONS.map(({ slug, label, region, county }) => ({ slug, label, region, county }));
 }
 
-module.exports = { LOCATIONS, DEFAULT_LOCATION, resolveLocation, resolveZip, listLocations, BY_SLUG };
+module.exports = { LOCATIONS, DEFAULT_LOCATION, resolveLocation, resolveZip, nearestFloridaLocation, listLocations, BY_SLUG };
