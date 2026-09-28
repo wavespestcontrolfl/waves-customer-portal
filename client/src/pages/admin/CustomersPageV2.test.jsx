@@ -690,20 +690,25 @@ describe('CustomersPageV2 workflow state', () => {
 
     render(<MemoryRouter initialEntries={['/admin/customers']}>
       <a href="/admin/customers" onClick={(e) => { e.preventDefault(); linkClicks(); }}>Customers</a>
+      <a href="/admin/customers#queue" onClick={(e) => { e.preventDefault(); linkClicks(); }}>Queue section</a>
+      <a href="/admin/communications#notifications" onClick={(e) => { e.preventDefault(); linkClicks(); }}>Notifications</a>
       <CustomersPageV2 />
     </MemoryRouter>);
     fireEvent.click(await screen.findByRole('button', { name: 'Open queue draft' }));
     fireEvent.click(screen.getByRole('link', { name: 'Customers' }));
+    fireEvent.click(screen.getByRole('link', { name: 'Queue section' }));
     expect(confirmSpy).not.toHaveBeenCalled();
-    expect(linkClicks).toHaveBeenCalledOnce();
+    expect(linkClicks).toHaveBeenCalledTimes(2);
+
+    // A fragment on a different page still leaves this one.
+    fireEvent.click(screen.getByRole('link', { name: 'Notifications' }));
+    expect(confirmSpy).toHaveBeenCalledOnce();
+    expect(linkClicks).toHaveBeenCalledTimes(2);
   });
 
-  // Overlay mode mounts the directory queue and a profile together; closing
-  // the profile's draft must not drop the guard for the queue's open draft.
-  // The profile opens BEFORE the queue draft here (rather than after, as a
-  // real admin opening the queue first would trigger the guarded directory
-  // open below) so this test's own setup exercises the profile-draft-close
-  // behavior it names without also going through that separate guard.
+  // Overlay mode mounts the directory queue and a profile together: opening
+  // a profile keeps the queue draft (no prompt), and closing the profile's
+  // draft must not drop the guard for the queue's open draft.
   it('keeps guarding an open queue draft after an overlay profile draft closes', async () => {
     vi.stubGlobal('fetch', vi.fn((url) => String(url).includes('/admin/customers?') ? response(list) : response({})));
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
@@ -713,10 +718,11 @@ describe('CustomersPageV2 workflow state', () => {
       <a href="/admin/dashboard" onClick={(e) => { e.preventDefault(); linkClicks(); }}>Leave to Dashboard</a>
       <CustomersPageV2 />
     </MemoryRouter>);
-    fireEvent.click(await screen.findByRole('button', { name: 'Open Avery Customer customer profile' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Open queue draft' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Open Avery Customer customer profile' }));
+    expect(confirmSpy).not.toHaveBeenCalled();
     fireEvent.click(await screen.findByRole('button', { name: 'Open address draft' }));
     fireEvent.click(screen.getByRole('button', { name: 'Close address draft' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Open queue draft' }));
     expect(screen.getByTestId('queue-draft-open')).toHaveTextContent('true');
 
     fireEvent.click(screen.getByRole('link', { name: 'Leave to Dashboard' }));
@@ -758,6 +764,10 @@ describe('CustomersPageV2 workflow state', () => {
     render(<MemoryRouter initialEntries={['/admin/customers']}><CustomersPageV2 /></MemoryRouter>);
     fireEvent.click(await screen.findByRole('button', { name: 'Open queue draft' }));
     expect(screen.getByTestId('queue-draft-open')).toHaveTextContent('true');
+
+    // Re-selecting the view already shown discards nothing.
+    fireEvent.click(screen.getByRole('button', { name: 'Directory' }));
+    expect(confirmSpy).not.toHaveBeenCalled();
 
     // Declined: stays on Directory with the queue draft intact.
     fireEvent.click(screen.getByRole('button', { name: 'Map' }));

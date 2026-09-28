@@ -1813,8 +1813,9 @@ export default function CustomersPageV2() {
   const changeView = (nextView) => {
     // Switching away from "directory" unmounts the queue panel below
     // (CustomerDirectoryView only renders it there) exactly like a route
-    // change would — same guardNavigateAway choke point.
-    if (!guardNavigateAway()) return;
+    // change would — same guardNavigateAway choke point. Re-selecting the
+    // view already shown changes nothing, so it neither asks nor navigates.
+    if (nextView === view || !guardNavigateAway()) return;
     setSearchParams((current) => {
       const next = new URLSearchParams(current);
       if (nextView === "directory") next.delete("view");
@@ -1938,8 +1939,12 @@ export default function CustomersPageV2() {
   // confirm dialog closes — checking hasOpenDraft() again here would
   // double-prompt on the same navigation.
   const guardNavigateAway = () => !hasOpenDraft() || confirmDiscardDraft();
+  // Opening a profile replaces the directory (and its queue) only in
+  // workspace mode; the overlay keeps the directory mounted, so there only
+  // an open profile draft is at stake.
   const guardedOpenCustomerProfile = (customerId) => {
-    if (guardNavigateAway()) openCustomerProfile(customerId);
+    const draftAtStake = workspaceMode ? hasOpenDraft() : draftActiveRef.current.profile;
+    if (!draftAtStake || confirmDiscardDraft()) openCustomerProfile(customerId);
   };
   // BrowserRouter stamps an index on each history entry. Kept in sync on
   // every settled render so a declined Back/Forward can step back to the
@@ -1967,7 +1972,8 @@ export default function CustomersPageV2() {
     // e.g. AdminLayoutV2's sidebar/tab bar) never fires 'popstate' at all —
     // it's a push, not a pop — so guardHistory alone misses it. Same
     // capture-phase anchor-click pattern as EstimateToolViewV2 (guardLink),
-    // skipping a link to the page already open, which discards nothing.
+    // skipping a link to the page already open (a same-page #fragment
+    // included), which discards nothing.
     const guardLink = (event) => {
       if (!hasOpenDraft()) return;
       const link = event.target.closest?.("a[href]");
@@ -1975,7 +1981,7 @@ export default function CustomersPageV2() {
       // _blank/meta/ctrl — none of those unmount this page, so none discard
       // the draft (no shared modifier-click helper exists in the repo;
       // AdminLayoutV2/AdminWorkspaceNavigation each inline this same check).
-      if (!link || link.target === "_blank" || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || link.hash) return;
+      if (!link || link.target === "_blank" || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
       if (link.origin === window.location.origin
         && `${link.pathname}${link.search}` === `${window.location.pathname}${window.location.search}`) return;
       if (!confirmDiscardDraft()) {
