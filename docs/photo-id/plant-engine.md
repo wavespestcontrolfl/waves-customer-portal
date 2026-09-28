@@ -126,7 +126,8 @@ viable host → the class index). An OpenAI host correction inside that union
 was therefore already covered. When the escalation's top host is OUTSIDE the
 union, the engine runs Call C ONCE more against union + corrected host,
 within what is left of the total time budget, and recombines it with
-OpenAI's own condition picks. With no budget left, or if that call misses,
+OpenAI's own condition picks (read against the index OpenAI was actually
+shown — a condition new to the expanded index comes only from the re-run). With no budget left, or if that call misses,
 the possibilities fall back to the class index (host-specific conditions
 for a host neither provider settled on are dropped). `internal.conditions`
 records `host_union` and `corrected_host`; `internal.models.condition_rerun`

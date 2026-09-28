@@ -527,8 +527,11 @@ function settleItFor(possibilities, subject) {
 function referralOutcomeCandidateAmong(possibilities) {
   return possibilities.slice(0, 2).find((p) => p.entry.service?.referral && ['no_cure', 'regulated'].includes(p.sig.outcome)) || null;
 }
+/** Contract §6.6: referrals look at the top 2 only, but ANY displayed
+ * possibility needing inspection routes `inspection` (herbicide injury
+ * ranked 3rd still does) — pre-push audit on #5186 r1. */
 function inspectionCandidateAmong(possibilities) {
-  return possibilities.slice(0, 2).find((p) => p.entry.service?.inspection_first || ['inspection', 'specialist'].includes(p.entry.action)) || null;
+  return possibilities.slice(0, 3).find((p) => p.entry.service?.inspection_first || ['inspection', 'specialist'].includes(p.entry.action)) || null;
 }
 
 function nextStepHintFor(possibilities) {
@@ -1368,7 +1371,11 @@ async function reconcileCorrectedHost(run, conditions, hostCombined, escalationJ
     const classSlugs = new Set(conditionIndexFor(run.subject, null).map((e) => e.slug));
     return { ...combined, possibilities: combined.possibilities.filter((p) => classSlugs.has(p.slug)), rerun };
   }
-  const recombined = combinePossibilities(resolvePossibilities(json.candidates, index), escalationJson.conditions, index);
+  // OpenAI's picks are resolved against the index it was actually shown
+  // (`conditions.index`) — a condition only the re-run's expanded index
+  // lists, and element numbers OpenAI never saw for it, are not evidence
+  // (pre-push audit on #5186 r1). New conditions come only from the re-run.
+  const recombined = combinePossibilities(resolvePossibilities(json.candidates, index), escalationJson.conditions, conditions.index);
   return { ...recombined, observedTerms: json.observed_terms, rerun };
 }
 

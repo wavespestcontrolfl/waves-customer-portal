@@ -995,6 +995,27 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
         expect(built.subject.plant).toBeNull();
       });
 
+      test('an inspection-required possibility ranked 3rd still routes inspection (contract §6.6 "any possibility")', () => {
+        const ranked = [possibility('fixture-cosmetic-spot', 0.9, [1]), possibility('fixture-drought', 0.5, [1]), possibility('fixture-herbicide-injury', 0.3, [1])];
+        expect(engine.nextStepHintFor(ranked).hint).toEqual({ kind: 'inspection', text: engine.NEXT_STEP_TEMPLATES.inspection });
+      });
+
+      test('after a host re-run, OpenAI\'s conditions are read against the index it was shown, not the expanded one', async () => {
+        queue(
+          candidatesLeg({ host: [idItem('fixture-sago-palm', 0.9)] }),
+          verifyLeg([['fixture-sago-palm', 0.6]]),
+          conditionsLeg([['fixture-manganese-deficiency-palm', 0.5]]),
+          // OpenAI names a condition that was NOT in its index, with element citations.
+          escalationLeg({ host: [escIdItem('fixture-citrus', 0.9)], conditions: [['fixture-citrus-greening', 0.9, [1]]] }),
+          // The re-run (which did list it) sees it weakly, with no element visible.
+          conditionsLeg([['fixture-citrus-greening', 0.5, []]]),
+        );
+        const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'tree_shrub' });
+        expect(dispatch).toHaveBeenCalledTimes(5);
+        const greening = result.v2.possibilities.find((p) => p.slug === 'fixture-citrus-greening');
+        expect(greening).toMatchObject({ strength: 'possible', fits: [] });
+      });
+
       test('an off-catalog top below the threshold escalates too', async () => {
         queue(
           candidatesLeg({ host: [idItem('', 0.5, { off_catalog_name: 'Foxtail palm', group_id: 'palms' })] }),
