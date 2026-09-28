@@ -92,16 +92,21 @@ async function hasActiveAutomation(triggerEventKey) {
 
 // Estimates the direct emitter (estimate-expiration.js) may have missed:
 // flipped to 'expired' within the window, no run recorded for THIS trigger
-// key against this entity. expires_at is the sweep's own bound (mirrors
-// the direct emitter's own 7-day-ish cadence, not a precision requirement
-// — the NOT EXISTS below is what actually decides "missed").
+// key against this entity. Bound on updated_at, NOT expires_at (codex P1):
+// expiredUpdate() stamps updated_at on EVERY flip, but only Rule 2's
+// explicit-expires_at rows have a fresh expires_at — Rule 1's aged-out
+// rows (sent/viewed past the inactivity threshold, no explicit deadline)
+// never get expires_at touched at flip time, so bounding on it would
+// silently exclude exactly the cohort most likely to need this safety
+// net. updated_at is guaranteed fresh for both rules — again just a
+// window, not the correctness check (the NOT EXISTS below is).
 async function sweepMissedExpiredEstimates(since) {
   if (!(await hasActiveAutomation('estimate.expired'))) return 0;
   let rows;
   try {
     rows = await db('estimates as e')
       .where('e.status', 'expired')
-      .where('e.expires_at', '>=', since)
+      .where('e.updated_at', '>=', since)
       .whereNotExists(function notEmitted() {
         this.select(1).from('email_template_automation_runs as r')
           .whereRaw('r.entity_type = ? AND r.entity_id = e.id AND r.trigger_event_key = ?', ['estimate', 'estimate.expired']);
