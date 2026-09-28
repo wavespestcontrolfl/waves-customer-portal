@@ -2073,9 +2073,10 @@ class AutonomousRunner {
       // audit. Its removed URL is still stamped on the draft; feed it in too
       // (a Wayback snapshot is archival evidence, not a published link — it
       // never re-adds the link to the post).
-      const unlinkedCompetitorUrls = Array.isArray(draft?.competitor_links_unlinked)
-        ? draft.competitor_links_unlinked.map((u) => u?.url).filter(Boolean)
-        : [];
+      // Normalized to https like the review's copy (a protocol-relative,
+      // www. or escaped destination would otherwise be dropped or sent to
+      // Wayback malformed — Codex r4).
+      const unlinkedCompetitorUrls = require('./editorial-evidence').unlinkedCompetitorUrls(draft);
       // One cap on the FINAL list (Codex r2 on #5191): the body sweep caps
       // itself, but manifest sources and capture-time removals add to it,
       // and the outer timeout below cannot cancel snapshots already started.

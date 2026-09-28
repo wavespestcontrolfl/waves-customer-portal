@@ -122,6 +122,29 @@ describe('unlinkCompetitorLinks', () => {
     expect(competitorLinkUrls('a//b and see https://edis.ifas.ufl.edu//x')).toEqual([]);
   });
 
+  test('balanced destinations and browser URL rules (Codex r4 on #5191)', () => {
+    // Nested parentheses: the whole link goes, never a broken relative remnant.
+    expect(un('[plans](https://orkin.com/foo(bar(baz)))').text).toBe('plans');
+    expect(un('[ok](https://edis.ifas.ufl.edu/x(1))').text).toBe('[ok](https://edis.ifas.ufl.edu/x(1))');
+    // Backslash separators reach the competitor host in a browser.
+    expect(un('[x](https:\\\\orkin.com\\\\plans) and <a href="https:\\\\www.terminix.com">T</a>').text).toBe('x and T');
+    expect(un('See https:\\\\orkin.com\\\\x now').text).toBe('See orkin.com now');
+    expect(competitorLinkUrls('<a href="https:\\\\orkin.com">o</a>')).toHaveLength(1);
+    // Angle-bracket destination with a title; an image inside a link label.
+    expect(un('[t](<https://orkin.com/a b> "title")').text).toBe('t');
+    expect(un('[![logo](https://orkin.com/l.png)](https://terminix.com/)').text).toBe('logo');
+  });
+
+  test('a URL-valued frontmatter field is left as written for the survivor check, never made a broken destination (Codex r4)', () => {
+    const { value } = unlinkCompetitorLinksDeep({
+      next_steps: [{ label: 'See plans', href: 'https://orkin.com/plans' }],
+      meta_description: 'Compare https://orkin.com/x here',
+    });
+    expect(value.next_steps[0].href).toBe('https://orkin.com/plans');
+    expect(value.meta_description).toBe('Compare orkin.com here');
+    expect(competitorLinkUrls(JSON.stringify(value))).toEqual(['https://orkin.com/plans']);
+  });
+
   test('a competitor-hosted image becomes its alt text (no request to their site)', () => {
     expect(un('![Orkin logo](https://www.orkin.com/logo.png)').text).toBe('Orkin logo');
   });
@@ -202,7 +225,14 @@ describe('unlinkCompetitorLinks', () => {
 });
 
 describe('publisher commit helper', () => {
-  const { competitorFreeMarkdown } = require('../services/content-astro/astro-publisher')._internals;
+  const { competitorFreeMarkdown, withCompetitorUnlinkNote } = require('../services/content-astro/astro-publisher')._internals;
+  test('the PR note is bounded: one line per distinct URL, at most 25, then a count (Codex r4)', () => {
+    const many = Array.from({ length: 60 }, (_, i) => ({ url: `https://www.orkin.com/p${i % 40}`, text: `page ${i}` }));
+    const note = withCompetitorUnlinkNote('Body', many);
+    expect((note.match(/^- `/gm) || [])).toHaveLength(25);
+    expect(note).toContain('…and 15 more');
+    expect(withCompetitorUnlinkNote('Body', [{ url: `https://www.orkin.com/${'x'.repeat(500)}`, text: 'y'.repeat(500) }]).length).toBeLessThan(600);
+  });
   test('re-validates frontmatter the unlinking changed (pre-push audit), and refuses a surviving competitor URL', () => {
     const validate = jest.fn(() => { throw new Error('meta_description too short'); });
     expect(() => competitorFreeMarkdown({ meta_description: 'Plans at https://www.orkin.com/plans compared.' }, 'Body.', { validate }))
@@ -224,5 +254,10 @@ describe('guardrail: COMPETITOR_LINK (P1)', () => {
     expect(r.pass).toBe(false);
     const clean = guardrails.evaluate({ body: 'Per Orkin terms as of June 2026. See [UF/IFAS](https://edis.ifas.ufl.edu/x).' }, { operatorCitations: true });
     expect(clean.findings.some((f) => f.code === 'COMPETITOR_LINK')).toBe(false);
+  });
+
+  test('a competitor URL in any frontmatter field is flagged in-loop, next_steps included (Codex r4)', () => {
+    const r = guardrails.evaluate({ body: 'Plain body about ants.', frontmatter: { next_steps: [{ label: 'See plans', href: 'https://orkin.com/plans' }] } }, { operatorCitations: true });
+    expect(r.findings).toEqual(expect.arrayContaining([expect.objectContaining({ code: 'COMPETITOR_LINK', severity: 'P1' })]));
   });
 });

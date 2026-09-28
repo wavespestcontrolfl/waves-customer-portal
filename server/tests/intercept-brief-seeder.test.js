@@ -511,6 +511,14 @@ describe('autonomous-runner._snapshotInterceptSources', () => {
     expect(seeder.snapshotSources).toHaveBeenCalledWith(['https://www.orkin.com/terms']);
   });
 
+  test('removed URLs in any destination form reach Wayback as https (Codex r4 on #5191)', async () => {
+    jest.spyOn(seeder, 'snapshotSources').mockResolvedValueOnce({ attempted: 2, ok: 2, snapshots: [] });
+    db.mockImplementation(() => ({ where: jest.fn(() => ({ update: jest.fn(() => Promise.resolve(1)) })) }));
+    const opp = { id: 'opp-1', bucket: 'operator_intercept', signal_metadata: { intercept_brief: { sources: [] } } };
+    await runner._snapshotInterceptSources(opp, { body: 'Plain.', competitor_links_unlinked: [{ url: '//orkin.com/terms', text: 't' }, { url: 'www.terminix.com/fees', text: 'f' }, { url: 'https://orkin\\.com/plans', text: 'p' }] }, {});
+    expect(seeder.snapshotSources).toHaveBeenCalledWith(['https://orkin.com/terms', 'https://www.terminix.com/fees', 'https://orkin.com/plans']);
+  });
+
   test('the snapshot cap applies to the FINAL deduplicated list, capture-time removals included (Codex r2 on #5191)', async () => {
     jest.spyOn(seeder, 'snapshotSources').mockResolvedValueOnce({ attempted: 10, ok: 10, snapshots: [] });
     db.mockImplementation(() => ({ where: jest.fn(() => ({ update: jest.fn(() => Promise.resolve(1)) })) }));

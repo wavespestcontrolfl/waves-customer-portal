@@ -47,12 +47,15 @@ function readableUrl(url) {
 }
 
 // Destinations are compared as a browser reads them: HTML entities decoded
-// ("orkin&#46;com"), Markdown backslash-escapes decoded ("orkin\.com"),
-// protocol-relative ("//orkin.com/x") resolved to https.
+// ("orkin&#46;com"), Markdown backslash-escapes decoded ("orkin\.com"), then
+// the WHATWG URL rules: a scheme is parsed as written (for http(s) a
+// backslash is a slash, so "https:\\orkin.com\\x" reaches orkin.com —
+// Codex r4), "//host" or "\\host" is protocol-relative, anything else is a
+// bare host.
 function hostOf(url) {
   const raw = readableUrl(url);
   if (!raw) return null;
-  const absolute = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `https://${raw.replace(/^\/\//, '')}`;
+  const absolute = /^[a-z][a-z0-9+.-]*:/i.test(raw) ? raw : /^[\\/]{2}/.test(raw) ? `https:${raw}` : `https://${raw}`;
   try {
     return normalizeHost(new URL(absolute).hostname);
   } catch {
@@ -102,14 +105,16 @@ function isCompetitorUrl(url, hosts) {
 
 // Absolute http(s) URLs, protocol-relative "//host.tld" destinations and GFM
 // "www." autolinks, anywhere in the text.
-const ANY_URL_RE = /(?:\bhttps?:\/\/|(?<![:\w/])\/\/(?=[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,})|\bwww\.)[^\s<>()[\]"'`]+/gi;
+// A scheme's slashes may be backslashes or absent ("https:\\orkin.com",
+// "https:orkin.com" — both reach orkin.com in a browser).
+const ANY_URL_RE = /(?:\bhttps?:(?:[\\/]+|(?=[a-z0-9-]+(?:\\?\.[a-z0-9-]+)*\\?\.[a-z]{2,}))|(?<![:\w/\\])[\\/]{2}(?=[a-z0-9-]+(?:\\?\.[a-z0-9-]+)*\\?\.[a-z]{2,})|\bwww\.)[^\s<>()[\]"'`]+/gi;
 // A bare URL in prose: not glued to a preceding path/word (so the embedded
 // URL inside an archive.org link is left alone — its host is archive.org).
 // Protocol-relative ("//orkin.com/plans") is included, gated on a
 // dotted-TLD lookahead like ANY_URL_RE's — otherwise a plain path
 // beginning "//" (there isn't one in Markdown prose, but belt-and-braces)
 // could be mistaken for a host.
-const BARE_URL_RE = /(?<![\w/@.=:])(?:https?:\/\/|www\.|\/\/(?=[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}))[^\s<>()[\]"'`]+/gi;
+const BARE_URL_RE = /(?<![\w/@.=:\\])(?:https?:(?:[\\/]+|(?=[a-z0-9-]+(?:\\?\.[a-z0-9-]+)*\\?\.[a-z]{2,}))|www\.|[\\/]{2}(?=[a-z0-9-]+(?:\\?\.[a-z0-9-]+)*\\?\.[a-z]{2,}))[^\s<>()[\]"'`]+/gi;
 const TRAILING_PUNCT_RE = /[.,;:!?]+$/;
 
 // Every competitor URL still present in `text` (any context), read with HTML
@@ -124,7 +129,12 @@ function competitorLinkUrls(text, hosts = competitorHosts()) {
   return out;
 }
 
-const INLINE_LINK_RE = /(!?)\[((?:\\.|[^[\]\\]|\[(?:\\.|[^[\]\\])*\])*)\]\(\s*(<[^>\n]*>|[^\s()]*(?:\([^\s()]*\)[^\s()]*)*)(?:\s+(?:"[^"]*"|'[^']*'|\([^()]*\)))?\s*\)/g;
+// An inline destination's URL: `<…>` as written, else up to the title.
+function inlineDestination(dest) {
+  const d = String(dest || '').trim();
+  if (d.startsWith('<')) return d.slice(1, d.includes('>') ? d.indexOf('>') : d.length);
+  return d.split(/\s+/)[0] || '';
+}
 const REF_DEF_RE = /^ {0,3}\[([^\]\n]+)\]:[ \t]*\n?[ \t]*(<[^>\n]*>|\S+)(?:[ \t]+(?:"[^"\n]*"|'[^'\n]*'|\([^)\n]*\)))?[ \t]*(?:\n|$)/gm;
 const ANCHOR_RE = /<a\b([^>]*)>([\s\S]*?)<\/a\s*>/gi;
 // A plain-quoted value, OR a JSX string-expression ({"…"} / {'…'} — MDX
@@ -187,12 +197,19 @@ function unlinkCompetitorLinks(input, hosts = competitorHosts()) {
     return '';
   });
 
-  text = text.replace(INLINE_LINK_RE, (whole, bang, anchor, dest) => {
-    const url = stripAngles(dest);
-    if (!isCompetitorUrl(url, hosts)) return whole;
-    record(url, anchor);
-    return anchor;
-  });
+  // Inline links and images, found by the guardrails' balanced Markdown
+  // scanner (nested parentheses in a destination, escapes, images inside
+  // link labels — Codex r4). One at a time, rescanning after each rewrite,
+  // so nested spans never use stale offsets.
+  const { eachMarkdownLink } = require('./content-guardrails');
+  for (let guard = 0; guard < 1000; guard += 1) {
+    const span = [...eachMarkdownLink(text)].find((sp) => sp.kind === 'inline'
+      && isCompetitorUrl(inlineDestination(text.slice(sp.destStart, sp.destEnd + 1)), hosts));
+    if (!span) break;
+    const label = text.slice(span.labelStart + 1, span.labelEnd);
+    record(inlineDestination(text.slice(span.destStart, span.destEnd + 1)), label);
+    text = text.slice(0, span.start) + label + text.slice(span.end + 1);
+  }
 
   if (refLabels.size) {
     text = text.replace(/(!?)\[((?:\\.|[^[\]\\])*)\]\[((?:\\.|[^[\]\\])*)\]/g, (whole, bang, anchor, label) => {
@@ -265,18 +282,30 @@ function unlinkCompetitorLinks(input, hosts = competitorHosts()) {
   return { text, unlinked };
 }
 
-// Frontmatter: every string value, at any depth, gets the same treatment.
+// A URL-valued field (next_steps[].href, an image src, a canonical) holds
+// a destination with no wording to keep; a text field that happens to hold
+// a URL (a tag) is wording.
+const WHOLE_URL_RE = /^(?:[a-z][a-z0-9+.-]*:|[\\/]{2}|www\.)\S*$/i;
+const URL_FIELD_RE = /(?:^|_)(?:href|src|url|link|canonical)$|(?:Href|Src|Url|Link)$/i;
+
+// Frontmatter: every string value, at any depth, gets the same treatment,
+// except a URL-valued field (by its key) holding a competitor URL. Rewritten to a bare
+// domain it would become a broken relative destination (and a next step's
+// renderer drops it with its label — Codex r4), so it is left as written:
+// the guardrail's COMPETITOR_LINK tells the writer in-loop, and the
+// publisher's survivor check refuses the commit.
 function unlinkCompetitorLinksDeep(value, hosts = competitorHosts()) {
   const unlinked = [];
-  const walk = (v) => {
+  const walk = (v, key = '') => {
     if (typeof v === 'string') {
+      if (URL_FIELD_RE.test(key) && WHOLE_URL_RE.test(v.trim()) && isCompetitorUrl(v.trim(), hosts)) return v;
       const r = unlinkCompetitorLinks(v, hosts);
       unlinked.push(...r.unlinked);
       return r.text;
     }
-    if (Array.isArray(v)) return v.map(walk);
+    if (Array.isArray(v)) return v.map((x) => walk(x, key));
     if (v && typeof v === 'object' && !(v instanceof Date)) {
-      return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, walk(x)]));
+      return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, walk(x, k)]));
     }
     return v;
   };

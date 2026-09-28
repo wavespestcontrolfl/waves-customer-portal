@@ -3263,6 +3263,13 @@ function externalLinkFinding(text, { operatorCitations = false, requiredSourceUr
   return null;
 }
 
+function stringLeaves(value, out = []) {
+  if (typeof value === 'string') out.push(value);
+  else if (Array.isArray(value)) value.forEach((v) => stringLeaves(v, out));
+  else if (value && typeof value === 'object' && !(value instanceof Date)) Object.values(value).forEach((v) => stringLeaves(v, out));
+  return out;
+}
+
 function competitorLinkFinding(text) {
   let urls = [];
   try {
@@ -6508,7 +6515,10 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
     // Owner ruling 2026-09-28: never a link to a competitor's own site. Draft
     // capture and the publisher unlink them (competitor-links.js); one that
     // somehow remains blocks here.
-    competitorLinkFinding(publishableText),
+    // Every frontmatter string too: a competitor URL in a URL-valued field
+    // (next_steps[].href) is never rewritten by the unlinker, so the writer
+    // hears about it here, in-loop (Codex r4 on #5191).
+    competitorLinkFinding([publishableText, ...stringLeaves(frontmatter)].join('\n\n')),
     // Affiliate links: blog bodies reference registry product IDs through
     // <AffiliateLink> only (raw tracking URLs stay DISALLOWED_EXTERNAL_LINK
     // above, no bypass). affiliateComponentFindings owns registration,

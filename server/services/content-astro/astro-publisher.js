@@ -89,9 +89,19 @@ function recordUnlinks(draft, unlinked = []) {
   return all;
 }
 
+// Bounded (Codex r4): one line per distinct URL, at most 25 lines of at
+// most ~200 characters, then a count of the rest, so a link-heavy page can
+// never push the PR body past GitHub's size limit after the branch exists.
+const UNLINK_NOTE_MAX_LINES = 25;
 function withCompetitorUnlinkNote(prBody, unlinked = []) {
   if (!unlinked.length) return prBody;
-  const lines = unlinked.map((u) => `- \`${String(u.url).replace(/`/g, '')}\` → "${String(u.text).replace(/\s+/g, ' ').slice(0, 80)}"`);
+  const byUrl = new Map();
+  for (const u of unlinked) if (!byUrl.has(String(u.url))) byUrl.set(String(u.url), u);
+  const distinct = [...byUrl.values()];
+  const lines = distinct.slice(0, UNLINK_NOTE_MAX_LINES)
+    .map((u) => `- \`${String(u.url).replace(/`/g, '').slice(0, 120)}\` → "${String(u.text).replace(/\s+/g, ' ').slice(0, 80)}"`);
+  const more = distinct.length - lines.length;
+  if (more > 0) lines.push(`- …and ${more} more`);
   return `${prBody}\n\n### Competitor links removed\n\nOwner ruling 2026-09-28: no links to competitor sites. The wording stays; these links became plain text:\n\n${lines.join('\n')}\n`;
 }
 const ASTRO_HERO_DIR = 'public/images/blog';
@@ -5319,6 +5329,7 @@ module.exports = {
   clampMetaDescription,
   _internals: {
     competitorFreeMarkdown,
+    withCompetitorUnlinkNote,
     generateHeroBuffer,
     compressToWebp,
     resolveAutonomousHero,

@@ -177,9 +177,11 @@ async function refreshReviewFrontmatter(draft, brief) {
 // frozen for the whole loop — repair may only change the body bytes.
 // The competitor URLs taken out of a draft (capture time, plus any the
 // publisher's commit pass took out: `extra`) — evidence, never published.
+// Normalized to the https URL a browser requests (evidenceUrl), so every
+// consumer (the review, the publish-day snapshots) gets the same list.
 function unlinkedCompetitorUrls(draft, extra = []) {
   return [...new Set([...(Array.isArray(draft?.competitor_links_unlinked) ? draft.competitor_links_unlinked : []), ...extra]
-    .map((u) => u?.url).filter(Boolean))];
+    .map((u) => evidenceUrl(u?.url)).filter(Boolean))];
 }
 
 async function reviewAndRepairDraft(draft, reviewFrontmatter, brief) {
