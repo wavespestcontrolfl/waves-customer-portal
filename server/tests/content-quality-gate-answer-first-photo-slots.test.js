@@ -332,6 +332,24 @@ describe('checkNextStepsRelatedPostsClosedSet', () => {
     expect(r.ok).toBe(true);
   });
 
+  test('fails closed when next_steps is a non-array value instead of being silently ignored (Codex P1)', () => {
+    const r = checkNextStepsRelatedPostsClosedSet(
+      { frontmatter: { next_steps: { label: 'Get an estimate', href: '/contact/' } } },
+      brief({ internal_links_to_add: ['/contact/'] }),
+    );
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('next_steps_not_an_array');
+  });
+
+  test('fails closed when related_posts is a non-array value instead of being silently ignored (Codex P1)', () => {
+    const r = checkNextStepsRelatedPostsClosedSet(
+      { frontmatter: { related_posts: '/pest-control/made-up-post/' } },
+      brief(),
+    );
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('related_posts_not_an_array');
+  });
+
   test('fails when next_steps has more than 4 entries', () => {
     const nextSteps = Array.from({ length: 5 }, (_, i) => ({ label: `Step ${i}`, href: '/contact/' }));
     const r = checkNextStepsRelatedPostsClosedSet(

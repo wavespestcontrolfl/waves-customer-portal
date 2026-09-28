@@ -831,16 +831,21 @@ class ContentBriefBuilder {
     const effectivePublishTargetSites = publishTargetSites
       || (decision.action_type === 'new_supporting_blog' ? resolvedPublishTargetSites(opportunity) : null);
 
+    // representative_query fallback: local_gap's keyword lives in
+    // signal_metadata (see _gatherSignals) — a null target_keyword here
+    // is what made the lane hard-fail no_serp_signal. Named once so the
+    // photo_slots computation below (voice_constraints) resolves the SAME
+    // topic string as the brief's own target_keyword, never a second,
+    // independently-drifting copy of this fallback chain.
+    const targetKeyword = opportunity.query || opportunity.signal_metadata?.representative_query || null;
+
     return {
       facts_pack: factsPack,
       opportunity_id: opportunity.id,
       version: existingBriefVersions + 1,
       action_type: decision.action_type,
       target_url: opportunity.page_url || null,
-      // representative_query fallback: local_gap's keyword lives in
-      // signal_metadata (see _gatherSignals) — a null target_keyword here
-      // is what made the lane hard-fail no_serp_signal.
-      target_keyword: opportunity.query || opportunity.signal_metadata?.representative_query || null,
+      target_keyword: targetKeyword,
       city: opportunity.city || null,
       service: opportunity.service || null,
       page_type: pageType,
@@ -988,7 +993,7 @@ class ContentBriefBuilder {
         // target_keyword — a slot with no verified match carries photo: null
         // and is never backfilled with AI art (see licensed-photo-library.js).
         const withPhotoSlots = (pageType === 'supporting-blog' || pageType === 'customer-question')
-          ? { ...withRetry, photo_slots: buildPhotoSlots(opportunity.query || opportunity.signal_metadata?.representative_query || null) }
+          ? { ...withRetry, photo_slots: buildPhotoSlots(targetKeyword) }
           : withRetry;
         // Related-post link allowance rides here (not internal_links_to_add,
         // which is a MUST-appear checklist) — see _loadRelatedPosts. No

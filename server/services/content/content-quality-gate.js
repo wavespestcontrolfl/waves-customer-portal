@@ -1249,6 +1249,13 @@ function firstUnverifiedNextStep(nextSteps, isVerified) {
 
 function checkNextStepsRelatedPostsClosedSet(draft, brief) {
   const fm = draft.frontmatter || {};
+  // Codex P1: coercing any non-array value to [] via Array.isArray(...) ? x
+  // : [] made a malformed field (a single {label,href} object, a string) a
+  // silent no-op — same fail-open class the photo gate was fixed for
+  // (round above). A PRESENT (not null/undefined) non-array value is now a
+  // hard failure of its own, never silently skipped.
+  if (fm.next_steps != null && !Array.isArray(fm.next_steps)) return { ok: false, reason: 'next_steps_not_an_array' };
+  if (fm.related_posts != null && !Array.isArray(fm.related_posts)) return { ok: false, reason: 'related_posts_not_an_array' };
   const nextSteps = Array.isArray(fm.next_steps) ? fm.next_steps : [];
   const relatedPosts = Array.isArray(fm.related_posts) ? fm.related_posts : [];
   if (!nextSteps.length && !relatedPosts.length) return { ok: true, reason: 'no_next_steps_or_related_posts' };
