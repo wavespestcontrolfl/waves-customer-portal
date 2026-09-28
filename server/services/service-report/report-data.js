@@ -27,6 +27,7 @@ const { resolveZoneRowsImageDrift } = require('./zone-drift');
 const { buildStationMapReportContext } = require('../termite-stations');
 const { fetchServiceWeekWeather, toCoordinate } = require('./application-conditions');
 const { pestReportExpectationsGateOn } = require('./pest-report-expectations');
+const { reportProductCopyGateOn, reportProductCopyForApplicationProduct } = require('./report-product-copy');
 const { validatePhotoChainRows } = require('./photo-chain');
 const { buildSatelliteTreatmentMapContext } = require('./satellite-treatment-map');
 const { computeLinearFt, computeOnSiteMin } = require('./metrics-band');
@@ -2011,6 +2012,21 @@ function stripLiveOnlyScheduleFields(data) {
   delete data.planSummary;
   delete data.nearYou;
   if (data.reportV2?.snapshot?.nextVisit) delete data.reportV2.snapshot.nextVisit;
+  return data;
+}
+
+// report_copy (GATE_REPORT_PRODUCT_COPY) is LIVE-VIEW ONLY (codex P1
+// 2026-09-28): the PDF/static/sms_preview cache keys never varied on this
+// gate, so a rolling deploy could otherwise cache copy under the worker's
+// OWN gate state rather than what the browser actually rendered. Same
+// contract/shape as stripLiveOnlyScheduleFields above — called from the
+// route helper's mode !== 'live' block AND directly from pdf-queue.js's
+// queued renderer, which builds its payload outside that helper.
+function stripLiveOnlyReportProductCopy(data) {
+  if (!data || typeof data !== 'object' || !Array.isArray(data.applications)) return data;
+  data.applications.forEach((app) => {
+    if (app?.product && 'report_copy' in app.product) delete app.product.report_copy;
+  });
   return data;
 }
 
@@ -4071,6 +4087,35 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         // part of the public /api/reports/:token/data payload (gate on or
         // off, every service line). See expectationFactsOut below — the
         // ONLY channel that carries them to the render path.
+        //
+        // report_copy (GATE_REPORT_PRODUCT_COPY, owner-approved 2026-09-28):
+        // the three short customer-facing lines for THIS product, matched
+        // against the static reviewed config — never fuzzy, never guessed.
+        // KEY OMITTED (not null) when the gate is off, the product has no
+        // approved wording, or the report is a termite-family visit — same
+        // "omit, never serialize null" contract the top-level
+        // planSummary/nearYou keys follow. LIVE-VIEW ONLY: stripped back off
+        // for every non-live render by stripLiveOnlyReportProductCopy above
+        // (the PDF cache key doesn't vary on this gate).
+        //
+        // Termite exclusion (codex P1 2026-09-28): the approved wording is
+        // written for the PEST line (ant/roach/spider labeled-for text).
+        // Taurus SC and other shared products are also used on termite
+        // liquid/trench/bait visits, where that wording is wrong. Reuses the
+        // SAME service-line classifier every other termite-vs-not decision
+        // in this file already reads (`serviceLine`, resolved above from
+        // `service.service_line || detectServiceLine(service.service_type)`)
+        // rather than a new regex — `detectServiceLine` always resolves to a
+        // line (defaults to 'pest' when it can't tell), so an unclassifiable
+        // service type never surfaces as "termite" and never spuriously gets
+        // copy it can't confirm is termite-safe either; it comes down to
+        // "not termite" only through that same existing default.
+        ...(reportProductCopyGateOn() && serviceLine !== 'termite'
+          ? (() => {
+            const copy = reportProductCopyForApplicationProduct(product);
+            return copy ? { report_copy: copy } : {};
+          })()
+          : {}),
       },
       method,
       // Explicit vs inferred decides whether pesticide identity may override
@@ -6495,6 +6540,7 @@ module.exports = {
   resolveTracedExteriorZone,
   structuredCustomerConcern,
   stripLiveOnlyScheduleFields,
+  stripLiveOnlyReportProductCopy,
   loadNearYouLawnPest,
   lawnScoreDelta,
   singleVoiceObservation,
