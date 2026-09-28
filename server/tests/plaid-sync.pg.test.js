@@ -397,6 +397,19 @@ async function activate(itemId, overrides = {}) {
     await expect(activate(itemId, { 'acc-card': { syncFrom: next2.toISOString().slice(0, 10) } })).rejects.toThrow(/at most tomorrow/);
   });
 
+  test('a correction that zeroes a staged transaction withdraws it (unmatched: removed; reviewed: flagged)', async () => {
+    const itemId = await connect();
+    await activate(itemId);
+    plaid.transactionsSync.mockResolvedValueOnce(page([txn('t-u', 'acc-card', 10, '2026-09-05'), txn('t-r', 'acc-card', 20, '2026-09-05')], [], [], 'cursor-1'));
+    await plaidSync.syncItem(itemId);
+    const [exp] = await mockPg('expenses').insert({}).returning(['id']);
+    await mockPg('bank_transactions').where({ plaid_transaction_id: 't-r' }).update({ status: 'matched_expense', matched_expense_id: exp.id });
+    plaid.transactionsSync.mockResolvedValueOnce(page([], [txn('t-u', 'acc-card', 0, '2026-09-05'), txn('t-r', 'acc-card', 0, '2026-09-05')], [], 'cursor-2'));
+    expect(await plaidSync.syncItem(itemId)).toMatchObject({ deleted: 1, flagged: 1, skips: { zero_amount: 2 } });
+    expect(await mockPg('bank_transactions').where({ plaid_transaction_id: 't-u' }).first()).toBeUndefined();
+    expect((await mockPg('bank_transactions').where({ plaid_transaction_id: 't-r' }).first()).suggestion).toEqual({ plaidRemoved: true });
+  });
+
   test('a concurrent run that already moved the cursor wins', async () => {
     const itemId = await connect();
     await activate(itemId);

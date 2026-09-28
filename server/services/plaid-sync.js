@@ -591,9 +591,14 @@ async function applyChanges(trx, accountsById, changes) {
   }
 
   const toInsert = [];
+  // a correction that makes a STAGED transaction unstageable (zeroed out,
+  // non-USD, malformed) must not leave the old values live — it is handled
+  // like a withdrawal: unmatched rows go, reviewed rows get flagged
+  const withdrawnByCorrection = [];
   for (const txn of changes.upserts) {
     const existing = existingById.get(txn.transaction_id);
     const m = mapTransaction(txn, accountsById.get(txn.account_id), { correction: !!existing });
+    if (m.skip && existing) { skip(m.skip); withdrawnByCorrection.push(txn.transaction_id); continue; }
     if (m.skip) { skip(m.skip); continue; }
     const r = m.row;
     if (!existing) { toInsert.push(r); continue; }
@@ -636,7 +641,7 @@ async function applyChanges(trx, accountsById, changes) {
     counts.inserted += batch.length;
   }
 
-  const { removedIds } = changes;
+  const removedIds = [...changes.removedIds, ...withdrawnByCorrection];
   for (let i = 0; i < removedIds.length; i += 500) {
     // lock first, THEN decide per row: deciding by two status-filtered
     // statements let a row unlinked between them escape both (neither
