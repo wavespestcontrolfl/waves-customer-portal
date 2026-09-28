@@ -136,7 +136,7 @@ const INVOICE_STATUS_TEXT = {
 };
 import CallBridgeLink, { callViaBridge } from "./CallBridgeLink";
 import CustomerRequestsPanel from "./CustomerRequestsPanel";
-import CustomerGeocodeReviewPanel from "./CustomerGeocodeReviewPanel";
+import CustomerGeocodeReviewPanel, { confirmDiscardDraft } from "./CustomerGeocodeReviewPanel";
 import CustomerPropertiesPanelV2 from "./CustomerPropertiesPanelV2";
 import CancelPlanDialog from "./CancelPlanDialog";
 import { CONTACT_ROLE_OPTIONS, contactRoleLabel, contactRoleTitle } from "../../lib/contact-roles";
@@ -9902,6 +9902,7 @@ function useCustomerProfileNavigation({
   data,
   reloadCustomer,
   customerId,
+  onDraftActiveChange,
 }) {
   const [requestedTab, setActiveTab] = useState(initialTab);
   const [timelineFilter, setTimelineFilter] = useState("all");
@@ -9926,6 +9927,27 @@ function useCustomerProfileNavigation({
     embedded && !isAdmin && requestedTab === "billing"
       ? "overview"
       : requestedTab;
+  // Single "draft active" choke point for every control that can unmount
+  // the address-review panel (it lives only in the overview tab): tab
+  // switches, the header/menu quick actions that jump tabs, Escape, and
+  // (via the onDraftActiveChange callback below) an owning Workspace's own
+  // "All customers" button and this profile's customer-switch links.
+  // A ref, not state — read synchronously from event handlers with no
+  // re-render dependency, same pattern as the panel's own activeIdRef.
+  const draftActiveRef = useRef(false);
+  const handleDraftActiveChange = useCallback((active) => {
+    draftActiveRef.current = active;
+    onDraftActiveChange?.(active);
+  }, [onDraftActiveChange]);
+  const guardNavigateAway = useCallback(
+    () => !draftActiveRef.current || confirmDiscardDraft(),
+    [],
+  );
+  const requestTabChange = (next) => {
+    if (next !== activeTab && !guardNavigateAway()) return false;
+    setActiveTab(next);
+    return true;
+  };
   useEffect(() => {
     if (!loading)
       activeTabButtonRef.current?.scrollIntoView?.({
@@ -9948,11 +9970,12 @@ function useCustomerProfileNavigation({
     if (embedded) return undefined;
     const handler = (e) => {
       if (e.key !== "Escape" || subModalOpen) return;
+      if (!guardNavigateAway()) return;
       onClose();
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [onClose, embedded, subModalOpen]);
+  }, [onClose, embedded, subModalOpen, guardNavigateAway]);
   useEffect(() => {
     if (!menuOpen) return;
     const handler = (e) => {
@@ -9967,7 +9990,7 @@ function useCustomerProfileNavigation({
     };
   }, [menuOpen]);
   const changeWorkspaceTab = (next) => {
-    setActiveTab(next);
+    if (!requestTabChange(next)) return;
     requestAnimationFrame(() => {
       if (panelRef.current && tabsAnchorRef.current) {
         panelRef.current.scrollTo({
@@ -9990,7 +10013,7 @@ function useCustomerProfileNavigation({
     return () => observer.disconnect();
   }, [embedded, loading, data?.customer?.id]);
   const viewServiceRecords = () => {
-    setActiveTab("comms");
+    if (!requestTabChange("comms")) return;
     requestAnimationFrame(() => {
       const records = panelRef.current?.querySelector(".c360-service-records");
       if (records) {
@@ -10003,7 +10026,7 @@ function useCustomerProfileNavigation({
     await reloadCustomer();
     setAnnualPrepayOpen(false);
     setAnnualPrepayInvoiceOpen(false);
-    setActiveTab("billing");
+    requestTabChange("billing");
   };
   useEffect(() => {
     setMenuOpen(false);
@@ -10032,7 +10055,10 @@ function useCustomerProfileNavigation({
     menuOpen,
     setMenuOpen,
     menuRef,
-    setActiveTab,
+    // Every external consumer of this (the overlay tab bar, the mobile
+    // action menu's tab jumps) gets the same draft guard as changeWorkspaceTab
+    // for free — this is no longer the raw useState setter.
+    setActiveTab: requestTabChange,
     tabsAnchorRef,
     profileContentId,
     menuButtonRef,
@@ -10042,6 +10068,8 @@ function useCustomerProfileNavigation({
     cancelSignupOpen,
     cancelPlanOpen,
     refundPayment,
+    handleDraftActiveChange,
+    guardNavigateAway,
   };
 }
 
@@ -10278,6 +10306,10 @@ export default function Customer360ProfileV2({
   initialTab = "overview",
   initialScheduledServiceId = null,
   embedded = false,
+  // Lets an owning Workspace guard its own controls (e.g. "All customers")
+  // against unmounting this profile while its address-review draft is open —
+  // see the draftActiveRef/guardNavigateAway note in useCustomerProfileNavigation.
+  onDraftActiveChange,
 }) {
   const customerIdRef = useRef(customerId);
   customerIdRef.current = customerId;
@@ -10378,6 +10410,8 @@ export default function Customer360ProfileV2({
     cancelSignupOpen,
     cancelPlanOpen,
     refundPayment,
+    handleDraftActiveChange,
+    guardNavigateAway,
   } = useCustomerProfileNavigation({
     profileReloadKey,
     initialTab,
@@ -10389,7 +10423,16 @@ export default function Customer360ProfileV2({
     data,
     reloadCustomer,
     customerId,
+    onDraftActiveChange,
   });
+  // Shared choke point for the controls INSIDE this profile that would
+  // otherwise unmount the address-review panel with no warning: the
+  // close button/backdrop/mobile-back (all "onClose"), and the account
+  // properties / "others at this address" customer-switch links.
+  const guardedClose = () => { if (guardNavigateAway()) onClose?.(); };
+  const guardedSelectCustomer = onSelectCustomer
+    ? (id) => { if (guardNavigateAway()) onSelectCustomer(id); }
+    : undefined;
   const [historySearch, setHistorySearch] = useState("");
   useEffect(() => {
     const timer = setTimeout(() => setHistorySearch(timelineSearch.trim()), 250);
@@ -10606,7 +10649,7 @@ export default function Customer360ProfileV2({
         referral={referral}
         customerId={customerId}
         accountProperties={accountProperties}
-        onSelectCustomer={onSelectCustomer}
+        onSelectCustomer={guardedSelectCustomer}
         addressNeighbors={addressNeighbors}
         setData={setData}
         setProfileActionErr={setProfileActionErr}
@@ -10617,6 +10660,7 @@ export default function Customer360ProfileV2({
             customerId={customerId}
             refreshToken={profileVersion}
             onResolved={resolveAddressReview}
+            onDraftActiveChange={handleDraftActiveChange}
           />
         ) : null}
       />
@@ -10733,7 +10777,7 @@ export default function Customer360ProfileV2({
         setMenuOpen,
         menuRef,
         score,
-        onClose,
+        onClose: guardedClose,
         customerId,
         setAnnualPrepayInvoiceOpen,
         setActiveTab,
@@ -10752,7 +10796,7 @@ export default function Customer360ProfileV2({
       profileActionErr={profileActionErr}
       actions={
         <CustomerProfileMobileActions
-          onClose={onClose}
+          onClose={guardedClose}
           c={c}
           isAdmin={isAdmin}
           openIntelligenceBar={openIntelligenceBar}

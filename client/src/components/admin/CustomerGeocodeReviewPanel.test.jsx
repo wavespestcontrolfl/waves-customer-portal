@@ -854,6 +854,40 @@ describe("CustomerGeocodeReviewPanel", () => {
     expect(screen.getByRole("alert")).toHaveTextContent("the customer profile could not refresh");
   });
 
+  it("serializes a double-clicked Refresh retry instead of starting a second reload", async () => {
+    vi.stubGlobal("fetch", vi.fn((url, options = {}) => {
+      if (options.method === "POST") return response({ enabled: true, ...record(), review: { status: "verified" } });
+      return response({ enabled: true, ...record() });
+    }));
+    const pendingRetry = deferred();
+    const onResolved = vi.fn()
+      .mockRejectedValueOnce(new Error("profile reload failed"))
+      .mockImplementationOnce(() => pendingRetry.promise);
+
+    render(<CustomerGeocodeReviewPanel customerId="customer-1" onResolved={onResolved} />);
+    fireEvent.click(await screen.findByRole("button", { name: /Primary service location review/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Review location" }));
+    fireEvent.change(screen.getByLabelText("Evidence"), { target: { value: "Confirmed at the gate." } });
+    fireEvent.click(screen.getByLabelText("I confirmed this is the primary service location"));
+    fireEvent.click(screen.getByRole("button", { name: "Verify pin" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("the customer profile could not refresh");
+
+    const refreshButton = screen.getByRole("button", { name: "Refresh" });
+    fireEvent.click(refreshButton);
+    // The retry is now in flight — a second click must not start another
+    // reload (previously, the profile's stale-response guard would abort
+    // that second reload and resolve it as null, letting THIS click's own
+    // success handler clear profileRefreshPending before the real retry
+    // had actually finished).
+    expect(refreshButton).toBeDisabled();
+    fireEvent.click(refreshButton);
+    expect(onResolved).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole("alert")).toHaveTextContent("the customer profile could not refresh");
+
+    await act(async () => pendingRetry.resolve());
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
   it("disables the draft's editable fields while its save is pending", async () => {
     const pendingSave = deferred();
     vi.stubGlobal("fetch", vi.fn((url, options = {}) => {

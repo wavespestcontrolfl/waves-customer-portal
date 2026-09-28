@@ -48,6 +48,14 @@ function reviewHelp(review) {
   return REVIEW_REASON_HELP[review?.reason] || STATUS_HELP[review?.status] || "Review the primary service address and location.";
 }
 
+// Shared by every control that would discard an open address-review draft —
+// the queue's own customer links here, and the profile/workspace navigation
+// guard in Customer360ProfileV2 (tab switches, All customers, customer
+// switching, closing the profile) — so the wording never drifts between them.
+export function confirmDiscardDraft() {
+  return window.confirm("This will discard the unsaved address review draft. Continue?");
+}
+
 function customerName(customer) {
   return [customer?.first_name, customer?.last_name].filter(Boolean).join(" ") || "Unnamed customer";
 }
@@ -98,7 +106,7 @@ function ReviewSummary({ record, draftActive, onSelectCustomer }) {
               type="button"
               className="p-0 border-0 bg-transparent text-left text-14 font-medium text-zinc-900 hover:underline cursor-pointer u-focus-ring"
               onClick={() => {
-                if (draftActive && !window.confirm("Opening this customer will discard the unsaved address review draft. Continue?")) return;
+                if (draftActive && !confirmDiscardDraft()) return;
                 onSelectCustomer(record.customer.id);
               }}
             >
@@ -168,7 +176,7 @@ function loadedReviewRecords(payload, customerId, previousRecords, editingId) {
   };
 }
 
-function useGeocodeReview({ customerId, onResolved, refreshToken }) {
+function useGeocodeReview({ customerId, onResolved, refreshToken, onDraftActiveChange }) {
   const [state, setState] = useState({ enabled: null, records: [], total: 0 });
   const [offset, setOffset] = useState(0);
   const [activeId, setActiveId] = useState(null);
@@ -178,6 +186,7 @@ function useGeocodeReview({ customerId, onResolved, refreshToken }) {
   const [loadError, setLoadError] = useState("");
   const [detailLoading, setDetailLoading] = useState(false);
   const [profileRefreshPending, setProfileRefreshPending] = useState(false);
+  const [retryingProfileRefresh, setRetryingProfileRefresh] = useState(false);
   const requestRef = useRef(0);
   const abortRef = useRef(null);
   const saveAbortRef = useRef(null);
@@ -185,8 +194,29 @@ function useGeocodeReview({ customerId, onResolved, refreshToken }) {
   const scopeRef = useRef(0);
   const recordsRef = useRef(state.records);
   const activeIdRef = useRef(activeId);
+  const retryInFlightRef = useRef(false);
   recordsRef.current = state.records;
   activeIdRef.current = activeId;
+
+  // Lets a caller embedding this panel inside a larger navigation shell
+  // (Customer 360's profile/workspace) guard its own tab switches, back
+  // controls, and customer-switch links against silently discarding an
+  // open draft — the same "draft active" signal this panel already uses
+  // for its own row-level active/disabled state.
+  useEffect(() => {
+    onDraftActiveChange?.(Boolean(activeId));
+    return () => onDraftActiveChange?.(false);
+  }, [activeId, onDraftActiveChange]);
+
+  // A closed tab/window loses an open draft just as silently as an in-app
+  // navigation would — warn the same way the codebase's other unsaved-draft
+  // surfaces do (e.g. TechServicePhotosModal, useServiceRecapDraft).
+  useEffect(() => {
+    if (!activeId) return undefined;
+    const warn = (event) => { event.preventDefault(); event.returnValue = ""; };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [activeId]);
 
   const acceptLoad = useCallback((payload, { preserveDraft, editingId }) => {
     const { records, total, previousRecord, refreshedRecord } = loadedReviewRecords(payload, customerId, recordsRef.current, editingId);
@@ -377,7 +407,15 @@ function useGeocodeReview({ customerId, onResolved, refreshToken }) {
   // onResolved reload failed: retry that same reload rather than the
   // geocode-review load() (which has already refreshed and would otherwise
   // clear this warning without the customer profile ever having recovered).
+  // Guarded against re-entry: a double-click used to start a second reload
+  // that the profile's own stale-response guard would abort and resolve as
+  // null, letting the FIRST click's success handler clear the pending flag
+  // before the customer profile had actually recovered. Serializing here
+  // means only one retry is ever in flight, so that race cannot happen.
   const retryProfileRefresh = async () => {
+    if (retryInFlightRef.current) return;
+    retryInFlightRef.current = true;
+    setRetryingProfileRefresh(true);
     const scope = scopeRef.current;
     const current = () => mountedRef.current && scope === scopeRef.current;
     try {
@@ -388,6 +426,9 @@ function useGeocodeReview({ customerId, onResolved, refreshToken }) {
     } catch {
       if (!current()) return;
       setError("Address review saved, but the customer profile could not refresh. Reload the profile to see the latest details.");
+    } finally {
+      retryInFlightRef.current = false;
+      if (current()) setRetryingProfileRefresh(false);
     }
   };
 
@@ -405,11 +446,11 @@ function useGeocodeReview({ customerId, onResolved, refreshToken }) {
     setActiveId((id) => id === customerId ? null : customerId);
     setError("");
   };
-  return { state, offset, setOffset, activeId, conflictId, savingId, error, loadError, detailLoading, profileRefreshPending, load, resolve, retryProfileRefresh, acknowledgeConflict, editRecord };
+  return { state, offset, setOffset, activeId, conflictId, savingId, error, loadError, detailLoading, profileRefreshPending, retryingProfileRefresh, load, resolve, retryProfileRefresh, acknowledgeConflict, editRecord };
 }
 
 function ReviewContents({ customerId, onSelectCustomer, model }) {
-  const { state, offset, setOffset, activeId, conflictId, savingId, error, loadError, detailLoading, profileRefreshPending, load, resolve, retryProfileRefresh, acknowledgeConflict, editRecord } = model;
+  const { state, offset, setOffset, activeId, conflictId, savingId, error, loadError, detailLoading, profileRefreshPending, retryingProfileRefresh, load, resolve, retryProfileRefresh, acknowledgeConflict, editRecord } = model;
   const recordsUnavailable = detailLoading || Boolean(loadError);
   const visibleRecords = recordsUnavailable
     ? state.records.filter((record) => record.customer.id === activeId)
@@ -422,16 +463,21 @@ function ReviewContents({ customerId, onSelectCustomer, model }) {
       {panelError && (
         <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
           <div role="alert" className="text-14 text-alert-fg">{panelError}</div>
-          <Button variant="secondary" onClick={async () => {
-            // A pending profile refresh has nothing to do with the geocode
-            // queue itself — retry the failed profile reload so the warning
-            // clears only once the customer profile has actually recovered.
-            if (profileRefreshPending) {
-              await retryProfileRefresh();
-              return;
-            }
-            await load({ preserveDraft: Boolean(activeId) });
-          }}>Refresh</Button>
+          <Button
+            variant="secondary"
+            disabled={profileRefreshPending && retryingProfileRefresh}
+            loading={profileRefreshPending && retryingProfileRefresh}
+            onClick={async () => {
+              // A pending profile refresh has nothing to do with the geocode
+              // queue itself — retry the failed profile reload so the warning
+              // clears only once the customer profile has actually recovered.
+              if (profileRefreshPending) {
+                await retryProfileRefresh();
+                return;
+              }
+              await load({ preserveDraft: Boolean(activeId) });
+            }}
+          >Refresh</Button>
         </div>
       )}
       {detailLoading && <div className="pt-3 border-t border-hairline border-zinc-200 text-14 text-ink-secondary">Loading address review…</div>}
@@ -465,9 +511,9 @@ function ReviewContents({ customerId, onSelectCustomer, model }) {
   );
 }
 
-export default function CustomerGeocodeReviewPanel({ customerId = null, onSelectCustomer, onResolved, refreshToken = 0 }) {
+export default function CustomerGeocodeReviewPanel({ customerId = null, onSelectCustomer, onResolved, refreshToken = 0, onDraftActiveChange }) {
   const [open, setOpen] = useState(false);
-  const model = useGeocodeReview({ customerId, onResolved, refreshToken });
+  const model = useGeocodeReview({ customerId, onResolved, refreshToken, onDraftActiveChange });
   const { state, loadError, error } = model;
   if (state.enabled === false) return null;
   if (state.enabled === null && !loadError && !error) return null;

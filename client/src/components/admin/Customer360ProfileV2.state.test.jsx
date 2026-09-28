@@ -5,6 +5,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 import Customer360ProfileV2, { CancelSignupModal, RefundPaymentModal } from './Customer360ProfileV2';
+import Customer360Workspace from './Customer360Workspace';
 import { IntelligenceBarPageDataProvider, useIntelligenceBarActions } from '../../hooks/useIntelligenceBarPageData';
 
 vi.mock('./StickyActionBar', async (importOriginal) => ({
@@ -990,6 +991,82 @@ describe('Customer360ProfileV2 profile state', () => {
     await waitFor(() => expect(onCustomerMutation).toHaveBeenCalledWith({ customerId: 'customer-a', action: 'update' }));
     expect(onCustomerMutation).toHaveBeenCalledOnce();
     expect(await screen.findByText(/customer profile could not refresh/i)).toBeInTheDocument();
+  });
+
+  function unresolvedGeocodeFetchMock() {
+    const review = {
+      enabled: true,
+      customer: {
+        id: 'customer-a', first_name: 'Avery', last_name: 'Customer', address_line1: '100 Retry Ave',
+        address_line2: '', city: 'Naples', state: 'FL', zip: '34102', latitude: null, longitude: null,
+      },
+      review: { status: 'provider_unavailable', reason: 'provider_unavailable', source: 'automatic' },
+      revision: 'revision-1',
+    };
+    return vi.fn((url) => {
+      const path = String(url).split('?')[0];
+      if (path.endsWith('/admin/customer-geocodes/customer-a')) return response(review);
+      if (path.endsWith('/admin/customers/customer-a')) return response(customerDetail('customer-a', 'Avery'));
+      return response({});
+    });
+  }
+
+  // One of 3+ consecutive Codex rounds finding a new unguarded path that
+  // unmounts an open address-review draft. Rather than patch this one
+  // control, the panel now reports "draft active" upward and a single
+  // guard (requestTabChange, via useCustomerProfileNavigation's
+  // guardNavigateAway) sits in front of every control that would unmount
+  // it — this test pins the tab-switch path.
+  it('guards a tab switch away from an open address-review draft', async () => {
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
+    vi.stubGlobal('fetch', unresolvedGeocodeFetchMock());
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+    fireEvent.click(await screen.findByRole('button', { name: /Primary service location review/ }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Review location' }));
+    await screen.findByLabelText('Evidence');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Billing' }));
+    expect(confirmSpy).toHaveBeenCalledWith('This will discard the unsaved address review draft. Continue?');
+    // Declined: the switch never happened, the draft form is still there.
+    expect(screen.getByRole('button', { name: 'Billing' })).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.getByLabelText('Evidence')).toBeInTheDocument();
+
+    confirmSpy.mockReturnValue(true);
+    fireEvent.click(screen.getByRole('button', { name: 'Billing' }));
+    expect(screen.getByRole('button', { name: 'Billing' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.queryByLabelText('Evidence')).not.toBeInTheDocument();
+    confirmSpy.mockRestore();
+  });
+
+  // Same choke point, but the control lives OUTSIDE this component's own
+  // subtree: Customer360Workspace's "All customers" button is a sibling of
+  // the embedded profile, not a descendant, so it can only see the draft
+  // through the lifted onDraftActiveChange callback.
+  it('guards the Workspace "All customers" button while an address-review draft is open', async () => {
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
+    vi.stubGlobal('fetch', unresolvedGeocodeFetchMock());
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    const onClose = vi.fn();
+
+    render(
+      <MemoryRouter>
+        <Customer360Workspace selectedId="customer-a" initialTab="overview" onSelect={vi.fn()} onClose={onClose} onCustomerMutation={vi.fn()} />
+      </MemoryRouter>,
+    );
+    fireEvent.click(await screen.findByRole('button', { name: /Primary service location review/ }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Review location' }));
+    await screen.findByLabelText('Evidence');
+
+    fireEvent.click(screen.getByRole('button', { name: 'All customers' }));
+    expect(confirmSpy).toHaveBeenCalledWith('This will discard the unsaved address review draft. Continue?');
+    expect(onClose).not.toHaveBeenCalled();
+
+    confirmSpy.mockReturnValue(true);
+    fireEvent.click(screen.getByRole('button', { name: 'All customers' }));
+    expect(onClose).toHaveBeenCalledOnce();
+    confirmSpy.mockRestore();
   });
 
   it('saves a city correction without resubmitting unchanged shared contacts or billing settings', async () => {
