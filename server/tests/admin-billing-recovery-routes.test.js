@@ -471,28 +471,21 @@ describe('billing-recovery-bill billVisit (shared with the IB closeout repair)',
 describe('billVisit refuseDepositCredit', () => {
   beforeEach(() => { jest.clearAllMocks(); });
 
-  test('refuses under the lock when an estimate deposit would roll onto the invoice', async () => {
-    jest.resetModules();
-    jest.doMock('../services/estimate-deposits', () => ({ pendingDepositCredit: jest.fn().mockResolvedValue({ amount: 50 }) }));
-    const freshDb = require('../models/db');
-    const Inv = require('../services/invoice');
-    const { customerOnAutopay: onAutopay } = require('../services/autopay-eligibility');
+  test('passes the refusal to the locked mint and maps its 409 to a refusal', async () => {
     const { billVisit } = require('../services/billing-recovery-bill');
-    freshDb.mockImplementation((arg) => {
+    db.mockImplementation((arg) => {
       if (typeof arg === 'object' && arg.ss) return makeQB({ first: BILLABLE_VISIT });
-      if (arg === 'scheduled_services') return makeQB({ first: { source_estimate_id: 'est-1' } });
       return makeQB({ first: null });
     });
-    onAutopay.mockResolvedValue(false);
-    freshDb.transaction = jest.fn(async (cb) => {
-      const trx = (a) => freshDb(a);
-      trx.raw = jest.fn((sql) => (typeof sql === 'string' ? sql : Promise.resolve()));
-      trx.schema = freshDb.schema;
-      return cb(trx);
+    customerOnAutopay.mockResolvedValue(false);
+    installTransaction((arg) => {
+      if (arg === 'invoices' || arg === 'visit_billing_dispositions') return makeQB({ first: null });
+      throw new Error('fall through');
     });
+    const refusal = Object.assign(new Error('An estimate deposit credit would apply to this invoice — bill it from Billing Recovery.'), { status: 409 });
+    InvoiceService.createFromService.mockRejectedValue(refusal);
     const result = await billVisit('ss-1', { expectedPrice: 129, refuseDepositCredit: true });
+    expect(InvoiceService.createFromService).toHaveBeenCalledWith('sr-1', expect.objectContaining({ refuseDepositCredit: true }));
     expect(result).toEqual(expect.objectContaining({ ok: false, status: 409, error: expect.stringMatching(/deposit credit/) }));
-    expect(Inv.createFromService).not.toHaveBeenCalled();
-    jest.dontMock('../services/estimate-deposits');
   });
 });

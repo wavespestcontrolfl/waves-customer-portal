@@ -4955,6 +4955,11 @@ const InvoiceService = {
       useScheduledReplay = false,
       dueDate,
       skipDepositCredit = false,
+      // refuseDepositCredit: the caller's approval did not cover consuming
+      // deposit money (the IB closeout repair). Checked on the LOCKED
+      // deposit read below — a 409 instead of any roll-forward, so no
+      // deposit that landed after the caller's own preview is consumed.
+      refuseDepositCredit = false,
       // Caller-supplied lines appended AFTER the service's own lines (secure
       // plan-choice setup fee): the caller owns the claim/idempotency for
       // these — this method just carries them into the same mint so the fee
@@ -5198,6 +5203,11 @@ const InvoiceService = {
             const createParams = await buildParams(trx);
             await acquireEstimateDepositLedgerLock(trx, sourceEstimateId);
             const depositCredit = await pendingDepositCredit(sourceEstimateId, trx);
+            if (refuseDepositCredit && depositCredit) {
+              const refusal = new Error("An estimate deposit credit would apply to this invoice — bill it from Billing Recovery.");
+              refusal.status = 409;
+              throw refusal;
+            }
             // Request the full unapplied balance; create() caps it against
             // its own post-discount, after-tax total (a pre-discount cap
             // here consumed ledger dollars the discounted invoice never

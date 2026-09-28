@@ -399,6 +399,24 @@ describe('createFromService — estimate-deposit roll-forward', () => {
     expect(mockConsumeDepositCredit).toHaveBeenCalled();
   });
 
+  it('refuseDepositCredit (IB closeout repair) refuses 409 on the LOCKED deposit read — nothing minted or consumed, no alert', async () => {
+    const { getInsertedInvoice } = setupServiceDb();
+    mockPendingDepositCredit.mockResolvedValue({ amount: 99 });
+
+    await expect(InvoiceService.createFromService('sr-1', { amount: 250, refuseDepositCredit: true }))
+      .rejects.toMatchObject({ status: 409, message: expect.stringMatching(/deposit credit/) });
+    expect(mockPendingDepositCredit).toHaveBeenCalled();
+    expect(mockConsumeDepositCredit).not.toHaveBeenCalled();
+    expect(mockTriggerNotification).not.toHaveBeenCalled();
+    expect(getInsertedInvoice()).toBeFalsy();
+
+    // No open balance: the refusal never fires and the plain invoice mints.
+    setupServiceDb();
+    mockPendingDepositCredit.mockResolvedValue(null);
+    const inv = await InvoiceService.createFromService('sr-1', { amount: 250, refuseDepositCredit: true });
+    expect(inv.total).toBe(250);
+  });
+
   it('an allocation mismatch holds invoicing and alerts instead of returning an uncredited invoice', async () => {
     setupServiceDb();
     mockPendingDepositCredit.mockResolvedValue({ amount: 99 });

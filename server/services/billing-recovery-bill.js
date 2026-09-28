@@ -196,8 +196,9 @@ async function pendingDepositForVisit(scheduledServiceId, database = db) {
 // assessment runs under the mint lock, so a reprice between the approval
 // and this write refuses instead of minting a different figure.
 // refuseDepositCredit: the approval did not cover consuming deposit money
-// (the IB repair leaves deposit-bearing visits manual) — refuse under the
-// lock if any unapplied deposit would roll onto this invoice.
+// (the IB repair leaves deposit-bearing visits manual) — createFromService
+// refuses on its locked deposit read if any unapplied deposit would roll
+// onto this invoice.
 async function billVisit(scheduledServiceId, {
   actorId = null, expectedPrice = null, refuseDepositCredit = false, database = db,
 } = {}) {
@@ -213,11 +214,6 @@ async function billVisit(scheduledServiceId, {
         throw e;
       }
       const { visit, price, rowPrice } = assessed;
-      if (refuseDepositCredit && (await pendingDepositForVisit(scheduledServiceId, trx)) > 0) {
-        const e = new Error('An estimate deposit credit would apply to this invoice — bill it from Billing Recovery.');
-        e.status = 409;
-        throw e;
-      }
       if (expectedPrice !== null && cents(price) !== cents(expectedPrice)) {
         const e = new Error(`The visit's price changed since it was approved ($${Number(expectedPrice).toFixed(2)} → $${price.toFixed(2)}).`);
         e.status = 409;
@@ -269,6 +265,7 @@ async function billVisit(scheduledServiceId, {
         // lane) have no basis to drift.
         scheduledPriceBasis: rowPrice > 0 ? visit.estimated_price : undefined,
         dueDate: dueDateFromVisit(visit), // age from the service date, not today+30
+        refuseDepositCredit,
       });
 
       await trx('visit_billing_dispositions').insert({
