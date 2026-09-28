@@ -337,12 +337,11 @@ function candidateFromAutonomousRun(row) {
 }
 
 // Reconciliation statuses that still mean "this IS the Astro-only row for
-// this post" — astro_only is the steady state; astro_changed_since_sync is
-// the SAME lineage (content-registry.js only assigns it in the astro-item,
-// no-db-match branch) with a transient astro_file_hash drift flagged on top,
-// cleared by the next unchanged sync. Never db_changed_since_sync (that
-// status is reachable from a DB-MATCHED row, which the blog_posts query
-// already covers) and never conflict/db_only/etc.
+// this post" — astro_only is the steady state. astro_changed_since_sync is
+// assigned to BOTH DB-matched and unmatched rows whose Astro hash drifted
+// (content-registry.js changeStatus), so it counts as Astro-only lineage
+// only when the row has no db_blog_id; a DB-matched row is covered by the
+// blog_posts query instead. Never db_changed_since_sync, conflict, etc.
 const REGISTRY_ASTRO_OWNED_STATUSES = new Set(['astro_only', 'astro_changed_since_sync']);
 
 // The registry is the only durable inventory for Astro-authored posts that
@@ -359,6 +358,7 @@ function candidateFromRegistryRow(row) {
   const frontmatter = registryFrontmatter(safeRow);
   const path = registryRowLivePath(safeRow);
   if (!path || !REGISTRY_ASTRO_OWNED_STATUSES.has(safeRow.reconciliation_status)) return null;
+  if (safeRow.reconciliation_status === 'astro_changed_since_sync' && safeRow.db_blog_id != null) return null;
   const verifiedSites = registryRowVerifiedSites(safeRow);
   if (!verifiedSites.length) return null;
   return {
@@ -422,6 +422,7 @@ async function getRelatedPostsForBrief(target = {}, { database = db, limit = REL
       'astro_status',
       'live_status',
       'reconciliation_status',
+      'db_blog_id',
       'noindex_detected',
       'title',
       'target_keyword',
