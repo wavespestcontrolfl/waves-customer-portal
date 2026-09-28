@@ -7,7 +7,7 @@ try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
 const { createDeepMessage } = require('./llm/deep');
 const { etDateString } = require('../utils/datetime-et');
-const { costLineFromUsage, countUnitsCompatible, parsePackCount } = require('./product-costing');
+const { convertToOz, costLineFromUsage, countUnitsCompatible, normalizeUnit, parsePackCount } = require('./product-costing');
 
 // ══════════════════════════════════════════════════════════════
 // SLUG GENERATION
@@ -192,7 +192,13 @@ function packCountForUsage(containerSize, usageUnit) {
 }
 
 function cogsUnitCost(p) {
-  const one = costLineFromUsage({ ...p, usage_amount: 1, usage_per_1000sf: null, notes: '' }, 0);
+  // cost_per_unit only applies when its unit is the usage unit or both
+  // convert to ounces — an $/oz cost never prices a bottle or a block.
+  const costUnit = p.cost_unit || p.usage_unit;
+  const sameUnit = normalizeUnit(costUnit) === normalizeUnit(p.usage_unit);
+  const bothMeasured = convertToOz(1, costUnit) != null && convertToOz(1, p.usage_unit) != null;
+  const usable = p.cost_per_unit != null && (sameUnit || bothMeasured);
+  const one = costLineFromUsage({ ...p, ...(usable ? {} : { cost_per_unit: null }), usage_amount: 1, usage_per_1000sf: null, notes: '' }, 0);
   if (!one.warning && Number.isFinite(one.cost)) return one.cost;
   const price = parseFloat(p.best_price);
   if (!Number.isFinite(price) || price < 0) return null;

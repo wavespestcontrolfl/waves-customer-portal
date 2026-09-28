@@ -81,6 +81,13 @@ describe('KB COGS sync lines', () => {
     expect(pails.term.fixed).toBeCloseTo(29.015, 2);
   });
 
+  test('a per-ounce cost never prices container usage', () => {
+    const c = cogsLineForUsage(row({ best_price: '100', unit_size_oz: '100', cost_per_unit: '1', cost_unit: 'oz', usage_unit: 'bottle' }));
+    expect(c.term.fixed).toBe(100);
+    const oz = cogsLineForUsage(row({ best_price: '100', unit_size_oz: '100', cost_per_unit: '1.5', cost_unit: 'oz', usage_amount: '2', usage_unit: 'fl_oz' }));
+    expect(oz.term.fixed).toBe(3);
+  });
+
   test('a generic counted pack resolves before the whole-package fallback', () => {
     const each = cogsLineForUsage(row({ best_price: '100', container_size: '20 count', unit_size_oz: null, usage_unit: 'each' }));
     expect(each.term.fixed).toBe(5);
