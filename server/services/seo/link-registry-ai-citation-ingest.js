@@ -139,12 +139,12 @@ function aggregateCitations(rows, queryRows) {
       if (!groups.has(key)) {
         groups.set(key, {
           host: c.host, category: c.category, rule: c.rule, subtype: c.subtype || null, citationCount: 0,
-          sampleUrls: [], platforms: new Set(), locallyRelevant: false, questions: new Map(),
+          urlCounts: new Map(), platforms: new Set(), locallyRelevant: false, questions: new Map(),
         });
       }
       const agg = groups.get(key);
       agg.citationCount += 1;
-      if (agg.sampleUrls.length < MAX_SAMPLE_URLS && !agg.sampleUrls.includes(url)) agg.sampleUrls.push(url);
+      agg.urlCounts.set(url, (agg.urlCounts.get(url) || 0) + 1);
       agg.platforms.add(row.llm_platform || 'unknown');
       if (!agg.locallyRelevant && isLocallyRelevant(url)) agg.locallyRelevant = true;
       if (!agg.subtype && c.subtype) agg.subtype = c.subtype;
@@ -152,7 +152,19 @@ function aggregateCitations(rows, queryRows) {
       if (!agg.questions.has(qKey)) agg.questions.set(qKey, question);
     }
   }
-  return [...groups.values()].map((d) => ({ ...d, platforms: [...d.platforms].sort(), questions: [...d.questions.values()] }));
+  // The sample is chosen AFTER aggregation — most-cited first, then URL
+  // order — so the same evidence read in any row order yields the same
+  // citationDetail and therefore the same touch_key; encounter order made
+  // repeated runs insert duplicate touches (Codex P2 2026-09-28, round 6).
+  return [...groups.values()].map(({ urlCounts, ...d }) => ({
+    ...d,
+    sampleUrls: [...urlCounts]
+      .sort(([urlA, countA], [urlB, countB]) => countB - countA || (urlA < urlB ? -1 : urlA > urlB ? 1 : 0))
+      .slice(0, MAX_SAMPLE_URLS)
+      .map(([url]) => url),
+    platforms: [...d.platforms].sort(),
+    questions: [...d.questions.values()],
+  }));
 }
 
 /**

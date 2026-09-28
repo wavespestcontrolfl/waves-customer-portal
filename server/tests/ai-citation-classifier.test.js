@@ -56,9 +56,16 @@ describe('classifyUrl', () => {
       'https://www.facebook.com/WavesPestControlVenice/reels/123',
       'https://www.facebook.com/share/p/abc123/',
       'https://www.facebook.com/story.php?story_fbid=1&id=2',
+      // Codex P2 round 6: the content marker is in the query alone
+      'https://www.facebook.com/WavesPestControlVenice/?story_fbid=1&id=2',
+      'https://www.facebook.com/media/set/?set=a.12345',
+      'https://www.facebook.com/profile.php?id=2&fbid=3',
     ]) {
       expect(classifyUrl(url).category).toBe('community_video');
     }
+    // a page tab is still the business page
+    expect(classifyUrl('https://www.facebook.com/WavesPestControlVenice/?sk=reviews').category).toBe('listing');
+    expect(classifyUrl('https://www.facebook.com/pages/Waves-Pest-Control/123?v=info').category).toBe('listing');
   });
 
   test('facebook content is never promoted to an enqueued editorial candidate, even under provider intent', () => {

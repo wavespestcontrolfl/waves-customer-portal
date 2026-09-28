@@ -219,7 +219,7 @@ describe('citationDetail', () => {
     const urls = Array.from({ length: 8 }, (_, i) => `https://www.bbb.org/us/fl/sarasota/profile/pest-control/company-${i}`);
     const [agg] = aggregateCitations([mention({ cited_urls: urls }), mention({ id: 'm2', cited_urls: [urls[0]] })], []);
     expect(agg.citationCount).toBe(9);
-    expect(agg.sampleUrls).toEqual(urls.slice(0, 5));
+    expect(agg.sampleUrls).toEqual(urls.slice(0, 5)); // most-cited first, then URL order
     expect(citationDetail(agg).split(' ').slice(1)).toEqual(urls.slice(0, 5));
     // and citationDetail itself never emits more than 5, even if handed more
     expect(citationDetail({ category: 'listing', sampleUrls: urls }).split(' ').slice(1)).toEqual(urls.slice(0, 5));
@@ -227,6 +227,22 @@ describe('citationDetail', () => {
 
   test('with no sample URLs it is just the prefix and category', () => {
     expect(citationDetail({ category: 'listing', sampleUrls: [] })).toBe('ai_citation:listing');
+  });
+
+  // Codex P2 round 6: the DB read has no ordering guarantee, so the sample
+  // (and the touch_key derived from it) must not depend on row order.
+  test('the same evidence in any row order yields the same sample, detail and touch key', () => {
+    const urls = Array.from({ length: 7 }, (_, i) => `https://www.bbb.org/us/fl/sarasota/profile/pest-control/company-${i}`);
+    const rows = [
+      mention({ id: 'm1', cited_urls: [urls[6], urls[1]] }),
+      mention({ id: 'm2', cited_urls: [urls[5], urls[4], urls[3]] }),
+      mention({ id: 'm3', cited_urls: [urls[2], urls[0], urls[6]] }),
+    ];
+    const [forward] = aggregateCitations(rows, []);
+    const [reversed] = aggregateCitations([...rows].reverse(), []);
+    expect(forward.sampleUrls).toEqual(reversed.sampleUrls);
+    expect(forward.sampleUrls[0]).toBe(urls[6]); // cited twice — sampled first
+    expect(touchKey(SOURCE, null, citationDetail(forward))).toBe(touchKey(SOURCE, null, citationDetail(reversed)));
   });
 });
 

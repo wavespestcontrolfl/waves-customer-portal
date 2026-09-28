@@ -112,9 +112,16 @@ function matchesAny(host, list) {
 // never matched "/reels/…"), /share/…, and /story.php (a segment named
 // "story" alone also excludes the plain "/story/…" path and, via the
 // existing `\.php` boundary alternative, "/story.php" itself).
-const FACEBOOK_NON_PAGE_PATH_RE = /\/(posts|photos?|videos?|watch|reels?|permalink\.php|groups|events|stories|story|share)(\/|$|\?|\.php)/i;
+const FACEBOOK_NON_PAGE_PATH_RE = /\/(posts|photos?|videos?|watch|reels?|permalink\.php|groups|events|stories|story|share|media|notes)(\/|$|\?|\.php)/i;
+// Codex P2 2026-09-28 (round 6): a content permalink can carry its marker in
+// the QUERY alone (`/<page>/?story_fbid=…`, `/media/set/?set=…`), which no
+// path alternative sees — any of these parameters makes the URL content.
+// Not `v`: the video routes that use it are already path matches (watch,
+// video.php), and a legacy page tab (`?v=info`) is still the business page.
+const FACEBOOK_CONTENT_PARAMS = Object.freeze(['story_fbid', 'fbid', 'set', 'comment_id', 'multi_permalinks', 'post_id', 'photo_id', 'video_id']);
 function facebookCategory(u) {
-  return FACEBOOK_NON_PAGE_PATH_RE.test(u.pathname) ? null : 'listing';
+  if (FACEBOOK_NON_PAGE_PATH_RE.test(u.pathname)) return null;
+  return FACEBOOK_CONTENT_PARAMS.some((param) => u.searchParams.has(param)) ? null : 'listing';
 }
 const FORBES_HOME_IMPROVEMENT_RE = /^\/(?:[a-z]{2}\/)?home-improvement(\/|$)/i;
 function forbesCategory(u) {
