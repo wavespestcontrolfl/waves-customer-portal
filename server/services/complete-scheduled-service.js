@@ -8682,6 +8682,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
               const hasOwnPrice = (svc.estimated_price != null && Number(svc.estimated_price) > 0)
                 || hasAuthoritativeZeroPrice(svc.estimated_price, svc.primary_line_price);
               // Priced covered member still refuses (r21 P1, #5021).
+              // Deliberately NOT perApplicationCompletionVoidHold: that helper
+              // swallows a lookup error into "no hold" (right for read-only
+              // projections), while completion must let the error propagate
+              // so a failed lookup never auto-mints. Keep the gate identical
+              // to the helper's when either changes.
               if (isSiblingCoverageEligibleVisit({
                 sourceEstimateId: svc.source_estimate_id, hasOwnPrice, isCallback: svc.is_callback, serviceType: svc.service_type,
                 isPricedCoveredMember: hasOwnPrice ? await isPricedCoveredMemberVisit(svc, db) : false,
