@@ -688,7 +688,6 @@ describe('next-visit claims fixture table', () => {
     ['Visit Tuesday at 9 AM.', true],
     ['Please schedule your visit for Tuesday.', true],
     ["We'll do another visit Tuesday.", true],
-    ['Water for 20 minutes at 6 AM before your next visit.', true],
     // a provider subject carries into a later coordinated clause that names
     // no subject of its own (codex P1 on #5055 followups, ~L157)
     ['We checked all traps and will return tomorrow.', true],
@@ -806,6 +805,29 @@ describe('next-visit claims fixture table', () => {
     expect(unscheduledProblems('We will return in 2 weeks.', ['We will return in 2 weeks to recheck the traps.'])).toEqual([]);
   });
 
+  // Codex round 3 on #5262.
+  test.each([
+    // a subjectless purpose clause after a return continues the promise
+    ['We will return and check the traps Monday.', ['visit_timing_stated:monday'], 'We will return.'],
+    // only the timed clause leaves ratified copy; the care stays
+    ['Keep the traps dry, and we will return Monday.', ['visit_timing_stated:monday'], 'Keep the traps dry.'],
+    ['We will return Monday, and keep pets inside until 2 PM.', ['visit_timing_stated:monday', 'ungrounded_time:2 PM'], 'Keep pets inside until 2 PM.'],
+    // a visit named only as the anchor of a customer step claims nothing
+    ['Mow Monday before your next visit.', [], 'Mow Monday before your next visit.'],
+    ['Keep pets off the lawn until your next visit.', [], 'Keep pets off the lawn until your next visit.'],
+  ])('%s', (text, problems, ratified) => {
+    expect(problemsFor(text)).toEqual(problems);
+    expect(withoutTimedVisitClaims(text, facts.nextVisit)).toBe(ratified);
+  });
+
+  test('ratified care anchored on the visit is exempt when copied verbatim, and never visit timing', () => {
+    const care = 'Water for 20 minutes at 6 AM before your next visit.';
+    expect(isVisitClaim(care)).toBe(true);
+    expect(problemsFor(care, [care])).toEqual([]);
+    expect(problemsFor(care).some((p) => p.startsWith('visit_timing_stated'))).toBe(false);
+    expect(withoutTimedVisitClaims(care, facts.nextVisit)).toBe(care);
+  });
+
   test('a clause with its own noun subject never inherits the provider', () => {
     expect(isVisitClaim('We treated the area and activity subsided but may return tomorrow.')).toBe(false);
     expect(isVisitClaim('We carefully inspected all interior and exterior bait stations throughout the property and will return tomorrow.')).toBe(true);
@@ -897,6 +919,21 @@ test('the hidden next-visit numbers never ground a count, and a scheduled visit 
   expect(ungroundedClaims('Since your last visit, activity dropped.', facts)).not.toContain('contradicted_scheduled_visit');
   const noVisit = groundingFacts(input({ nextAppointment: null }));
   expect(ungroundedClaims('This was our final visit.', noVisit)).not.toContain('contradicted_scheduled_visit');
+});
+
+test('a ratified denial of the scheduled visit never reaches the facts (codex r3 on #5262)', () => {
+  const args = input();
+  args.typedReport = {
+    ...args.typedReport,
+    todaysResult: { ...args.typedReport.todaysResult, body: 'We checked 7 traps today. This was our final visit.', nextStep: 'We do not plan to return.' },
+  };
+  const facts = groundingFacts(args);
+  expect(facts.todaysResult.body).toBe('We checked 7 traps today.');
+  expect(facts.todaysResult.nextStep).toBeNull();
+  expect(deterministicSummary(facts)).not.toMatch(/final visit|plan to return/);
+  // with nothing scheduled there is nothing to contradict
+  const undated = groundingFacts({ ...args, nextAppointment: null });
+  expect(undated.todaysResult.body).toBe('We checked 7 traps today. This was our final visit.');
 });
 
 test('the model never sees the next visit date, only that one is scheduled (owner ruling 2026-09-28)', () => {

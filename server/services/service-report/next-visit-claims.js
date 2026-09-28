@@ -686,25 +686,53 @@ function withoutVisitAnchoredTiming(text) {
     RELATIONAL_DATE_ANCHOR_RE.test(anchor) ? ' '.repeat(phrase.length) : phrase));
 }
 
+// The visit named only as the anchor of a customer step ("Water at 6 AM
+// before your scheduled visit", "Keep pets off the lawn until your next
+// visit") makes no claim about when we come: the step's own timing is the
+// customer's.
+const VISIT_ANCHOR_MENTION_RE = /\b(?:before|after|until|till|by|at|for|during|ahead\s+of|prior\s+to|between)\s+(?:(?:your|the|our|this|each|every|a|an)\s+)?(?:(?:next|scheduled|upcoming|planned|booked|follow[-\s]?up|return|regular|second)\s+){0,2}(?:visits?|appointments?|services?|treatments?|follow[-\s]?ups?|inspections?)\b/gi;
+const withoutAnchorMentions = (text) => text.replace(VISIT_ANCHOR_MENTION_RE, (phrase) => ' '.repeat(phrase.length));
+// A clause with no subject of its own right after a promise of our return
+// continues that promise ("We will return and check the traps Monday").
+// A clause opening with its own subject (a pronoun, or a noun before an
+// auxiliary or past verb: "activity subsided") or with an instruction to
+// the customer ("keep pets inside", "call us") does not continue it.
+const OWN_SUBJECT_START_RE = new RegExp(`^${CLAUSE_LEAD_RE}(?:${PROVIDER_SUBJECT}\\b|${OTHER_CLAUSE_SUBJECT_RE}|[a-z][a-z'-]*\\s+(?:[a-z]+ly\\s+)?(?:has|have|had|is|are|was|were|will|would|shall|should|can|could|may|might|must|[a-z]{2,}ed)\\b)`, 'i');
+const CUSTOMER_STEP_START_RE = new RegExp(`^${CLAUSE_LEAD_RE}(?:please\\s+)?(?:keep|water|mow|avoid|stay|wait|call|contact|text|let|close|remove|leave|store|seal|clean|vacuum|sweep|don[’']?t|do\\s+not|make\\s+sure|be\\s+sure)\\b`, 'i');
+
 function claimClauses(text) {
   const cuts = [0, ...[...text.matchAll(new RegExp(CLAUSE_COORDINATOR_RE, 'gi'))].map((m) => m.index), text.length];
   const coordinated = coordinatedClauseClaims(text).map(({ match }) => match.index);
-  return cuts.slice(0, -1).map((start, i) => {
+  const clauses = [];
+  cuts.slice(0, -1).forEach((start, i) => {
     const end = cuts[i + 1];
     const raw = text.slice(start, end);
     const offset = start + (CLAUSE_PREFIX_RE.exec(raw)?.[0].length || 0);
     const body = text.slice(offset, end);
     const carried = coordinated.some((index) => index >= start && index < end);
+    const previous = clauses[clauses.length - 1];
+    const continues = Boolean(previous?.promise) && !OWN_SUBJECT_START_RE.test(body) && !CUSTOMER_STEP_START_RE.test(body);
     const unanchored = withoutVisitAnchoredTiming(body);
-    return {
+    clauses.push({
       start,
       end,
       offset,
+      raw,
       body: unanchored,
-      claim: carried || isVisitClaim(body),
-      promise: carried || isProviderVisitPromise(unanchored),
-    };
+      claim: carried || continues || isVisitClaim(withoutAnchorMentions(body)),
+      promise: carried || continues || isProviderVisitPromise(withoutAnchorMentions(unanchored)),
+    });
   });
+  return clauses;
+}
+
+const RETURN_TIMEFRAME_TEST_RE = new RegExp(RETURN_TIMEFRAME_RE.source, 'i');
+
+// True when one clause states timing for the visit it claims.
+function clauseStatesTiming(clause) {
+  if (!clause.claim) return false;
+  return temporalTokens(normalizeTemporalText(clause.body), true).length > 0
+    || (clause.promise && RETURN_TIMEFRAME_TEST_RE.test(clause.body));
 }
 
 function visitTimingTokens(sentence) {
@@ -755,7 +783,7 @@ function nextVisitProblems(text, facts, options = {}) {
   // leaves the text only when it is not a future visit claim.
   const exemptText = groundedCare.reduce((copy, sentence) => {
     const care = String(sentence || '').trim();
-    return care && !isFutureVisitClaim(care) ? copy.replaceAll(care, ' ') : copy;
+    return care && !isFutureVisitClaim(withoutAnchorMentions(care)) ? copy.replaceAll(care, ' ') : copy;
   }, String(text));
   const expected = expectedAppointment(facts, groundedCare);
   const scheduled = Boolean(facts?.nextVisit);
@@ -789,8 +817,24 @@ function nextVisitProblems(text, facts, options = {}) {
 function withoutTimedVisitClaims(block, nextVisit) {
   if (!nextVisit) return block;
   return splitSentences(block)
-    .filter((sentence) => !isFutureVisitClaim(sentence) || !visitTimingTokens(sentence).tokens.length)
+    .map((sentence) => (isFutureVisitClaim(sentence) && visitTimingTokens(sentence).tokens.length
+      ? withoutTimedClauses(sentence) : sentence))
+    .filter(Boolean)
     .join(' ');
+}
+
+// Only the clause that times the visit leaves: "Keep the traps dry, and we
+// will return Monday." keeps "Keep the traps dry." — ratified care is never
+// lost because stale scheduling prose was appended to it.
+function withoutTimedClauses(sentence) {
+  const clauses = claimClauses(sentence);
+  const kept = clauses.filter((clause) => !clauseStatesTiming(clause));
+  if (!kept.length) return '';
+  const joined = kept.map((clause, i) => (i === 0 ? clause.raw.replace(CLAUSE_PREFIX_RE, '') : clause.raw)).join('')
+    .replace(/[\s,;:–—-]+$/, '').replace(/[.!?]+$/, '').trim();
+  if (!joined) return '';
+  const terminal = /[.!?]$/.exec(sentence.trim())?.[0] || '.';
+  return `${joined[0].toUpperCase()}${joined.slice(1)}${terminal}`;
 }
 
 module.exports = {

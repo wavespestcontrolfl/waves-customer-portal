@@ -233,7 +233,13 @@ function groundingFacts({
   // upcoming-visits section is the one place the date appears). Every
   // consumer reads these facts — the prompt, the deterministic fallback, and
   // the mandatory-care append after validation — so no path can publish one.
-  const ratified = (value) => cleanText(withoutTimedVisitClaims(cleanText(value), groundedVisit));
+  // A ratified sentence denying the scheduled visit ("This was our final
+  // visit") leaves too: the fallback and the care append copy ratified text
+  // without the model-output guard (codex P1 on #5262 r3).
+  const withoutDenials = (value) => (groundedVisit
+    ? splitSentences(value).filter((sentence) => !SCHEDULED_VISIT_DENIAL_RE.test(sentence)).join(' ')
+    : value);
+  const ratified = (value) => cleanText(withoutDenials(withoutTimedVisitClaims(cleanText(value), groundedVisit)));
   return {
     recap: ratified(recap),
     serviceTypeDisplay: cleanText(serviceTypeDisplay) || 'service visit',
