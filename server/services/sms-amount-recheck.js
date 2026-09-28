@@ -49,7 +49,16 @@ async function outgoingAmountsStale({ customerId, body, dbh = db } = {}) {
       ...ContextAggregator.authorizedDuesCents(ctx),
       ...(ackBody ? (ctx?.billing?.recentPayments || []).map((p) => (p?.amount != null ? cents(p.amount) : null)) : []),
     ].filter((v) => Number.isFinite(v)));
-    const stale = bodyAmounts.some((a) => !authorized.has(a));
+    let stale = bodyAmounts.some((a) => !authorized.has(a));
+    // With real answers on, the drafter's clause-aware guard is the
+    // stricter authority (Codex #5194 r1 P1): each amount binds to the
+    // meaning of its own clause, and only payments that went through back
+    // an acknowledgement — a payment that later failed, was refunded or
+    // disputed no longer authorizes "we received your $95 payment", even
+    // when the reversal reopened a balance for the same figure.
+    if (!stale && require('./sms-followup-sla').realAnswersGateOn()) {
+      stale = require('./sms-shadow-drafter').replyQuotesUngroundedAmount(String(body || ''), ctx || {});
+    }
     return stale ? { stale: true, reason: 'amount_no_longer_authorized' } : { stale: false };
   } catch (err) {
     logger.warn(`[sms-amount-recheck] amount revalidation failed for customer ${customerId}: ${err.message}; blocking send`);

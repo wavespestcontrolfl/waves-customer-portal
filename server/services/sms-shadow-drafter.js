@@ -455,6 +455,20 @@ function validateReserviceOffer({ reply, factsBlock }) {
 // serviceKeyFromText → service-library resolveServiceType). Null when the
 // message names no service, or on any resolver error (fail-safe: the
 // caller falls back to the customer's own visit).
+// Pricing-family key → exact catalog service_key (Codex #5194 r1): the
+// pricing resolver's families are not catalog keys, and a partial match on
+// "termite" lands on the lowest-sorted termite row, not the bait system.
+const PRICING_KEY_TO_CATALOG_KEY = Object.freeze({
+  pest_control: 'pest_control',
+  lawn_care: 'lawn_care',
+  one_time_lawn: 'lawn_care',
+  mosquito: 'mosquito',
+  one_time_mosquito: 'mosquito_one_time',
+  tree_shrub: 'tree_shrub',
+  palm: 'palm_injection',
+  termite: 'termite_bait',
+  rodent_bait: 'rodent_bait',
+});
 async function requestedServiceType(inboundMessage) {
   const text = String(inboundMessage || '').trim();
   if (!text) return null;
@@ -462,8 +476,10 @@ async function requestedServiceType(inboundMessage) {
     const { serviceKeyFromText } = require('./customer-pricing-ai');
     const key = serviceKeyFromText(text);
     if (!key) return null;
+    const catalogKey = PRICING_KEY_TO_CATALOG_KEY[key];
+    if (!catalogKey) return null;
     const { resolveServiceType } = require('./service-library');
-    const row = await resolveServiceType(String(key).replace(/_/g, ' '));
+    const row = await resolveServiceType(catalogKey);
     return row?.name ? String(row.name) : null;
   } catch (err) {
     logger.warn(`[sms-shadow] requested-service resolution failed (${err.message}); using the customer's own visit`);
@@ -480,7 +496,10 @@ async function requestedServiceType(inboundMessage) {
 const EXISTING_VISIT_WORDS_RE = /\b(?:move|moving|reschedul\w*|change|changing|cancel\w*|skip\w*|push(?:ed|ing)?\s+(?:back|out)|bump\w*|postpone\w*|delay\w*|earlier|later)\b/i;
 async function newBookingServiceType(inboundMessage, context) {
   const text = String(inboundMessage || '');
-  if (EXISTING_VISIT_WORDS_RE.test(text)) return null;
+  // A complaint or cancellation is about the visit the customer already
+  // had (Codex #5194 r1): "the mosquitoes came back" is a callback on the
+  // completed combined visit, never a new standalone booking.
+  if (EXISTING_VISIT_WORDS_RE.test(text) || SAVE_SALE_TEXT_RE.test(text)) return null;
   const requested = await requestedServiceType(text);
   if (!requested) return null;
   const head = requested.toLowerCase().split(/[\s&+/-]+/)[0];
@@ -1777,10 +1796,14 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   // must be priced with lawn minutes. The requested service is resolved
   // from the inbound text through the existing catalog resolvers; when the
   // message names none, the customer's own next (else last) visit stands.
-  const serviceType = (await newBookingServiceType(inboundMessage, context)) || liveServiceType(context);
   const needsOpenTimes = Boolean(schedulingIntent)
     || SAVE_SALE_INTENT_RE.test(String(intent?.intent || ''))
     || SAVE_SALE_TEXT_RE.test(String(inboundMessage || ''));
+  // The catalog lookup runs only when a live, gate-on OPEN TIMES fetch is
+  // about to use it (Codex #5194 r1): with the gate off, or on a frozen
+  // replay, gate-off drafting stays free of catalog queries.
+  const willFetchOpenTimes = !presetFactsBlock && needsOpenTimes && gateEnvValue('GATE_SMS_REAL_ANSWERS');
+  const serviceType = (willFetchOpenTimes ? await newBookingServiceType(inboundMessage, context) : null) || liveServiceType(context);
   // A frozen replay validates offered_times against the OPEN TIMES it
   // actually saw (parsed back out of its own facts block); `block` stays
   // null there so no send-time snapshot is minted for a draft nothing sends.

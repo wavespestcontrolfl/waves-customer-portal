@@ -1818,11 +1818,11 @@ describe('follow-up #5: a NEW booking is priced with the requested service, not 
 
   test('requestedServiceType resolves the message through the existing catalog resolvers; no service named → null; resolver error → null', async () => {
     jest.doMock('../services/customer-pricing-ai', () => ({ serviceKeyFromText: (t) => (/lawn/i.test(t) ? 'lawn_care' : null) }));
-    const resolveServiceType = jest.fn(async (text) => (text === 'lawn care' ? { name: 'Lawn Care' } : null));
+    const resolveServiceType = jest.fn(async (key) => (key === 'lawn_care' ? { name: 'Lawn Care' } : null));
     jest.doMock('../services/service-library', () => ({ resolveServiceType }));
     const drafter = require('../services/sms-shadow-drafter');
     await expect(drafter.requestedServiceType('Can you add lawn service for me?')).resolves.toBe('Lawn Care');
-    expect(resolveServiceType).toHaveBeenCalledWith('lawn care');
+    expect(resolveServiceType).toHaveBeenCalledWith('lawn_care'); // the exact catalog key, never a partial-match phrase
     await expect(drafter.requestedServiceType('When are you coming next?')).resolves.toBeNull();
     resolveServiceType.mockRejectedValueOnce(new Error('boom'));
     await expect(drafter.requestedServiceType('lawn please')).resolves.toBeNull();
@@ -1897,5 +1897,54 @@ describe('follow-up #7: the promised deadline is pinned by phrase + draft time, 
     expect(followupPromiseBlockReason({ inputSnapshot: promised, body, draftedAt: MON_10AM, now: new Date('2026-09-28T16:30:00Z') })).toBe('sla_deadline_passed');
     expect(followupPromiseBlockReason({ inputSnapshot: promised, body, draftedAt: MON_10AM, now: new Date('2026-09-28T14:30:00Z') })).toBeNull();
     expect(followupPromiseBlockReason({ inputSnapshot: promised, body, draftedAt: null, now: new Date('2026-09-28T16:30:00Z') })).toBeNull();
+  });
+});
+
+
+describe('#5194 round 1', () => {
+  const priorGate = process.env.GATE_SMS_REAL_ANSWERS;
+  beforeEach(() => { process.env.GATE_SMS_REAL_ANSWERS = 'true'; jest.resetModules(); });
+  afterEach(() => {
+    if (priorGate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = priorGate;
+    jest.dontMock('../services/customer-pricing-ai'); jest.dontMock('../services/service-library'); jest.dontMock('../services/availability');
+    jest.resetModules();
+  });
+  const mockCatalog = () => {
+    const resolveServiceType = jest.fn(async (key) => ({ termite_bait: { name: 'Termite Bait Station System' }, palm_injection: { name: 'Palm Injection' }, mosquito: { name: 'Mosquito Control' } }[key] || null));
+    jest.doMock('../services/customer-pricing-ai', () => ({ serviceKeyFromText: (t) => (/termite/i.test(t) ? 'termite' : /palm/i.test(t) ? 'palm' : /mosquito/i.test(t) ? 'mosquito' : null) }));
+    jest.doMock('../services/service-library', () => ({ resolveServiceType }));
+    return resolveServiceType;
+  };
+
+  test('pricing families resolve through their exact catalog keys (termite → termite_bait, palm → palm_injection)', async () => {
+    const resolveServiceType = mockCatalog();
+    const drafter = require('../services/sms-shadow-drafter');
+    await expect(drafter.requestedServiceType('Can you add termite protection?')).resolves.toBe('Termite Bait Station System');
+    expect(resolveServiceType).toHaveBeenLastCalledWith('termite_bait');
+    await expect(drafter.requestedServiceType('Can you do my palms?')).resolves.toBe('Palm Injection');
+    expect(resolveServiceType).toHaveBeenLastCalledWith('palm_injection');
+  });
+
+  test('a complaint callback ("the mosquitoes came back") keeps the completed visit\'s service — never a new standalone booking', async () => {
+    mockCatalog();
+    const drafter = require('../services/sms-shadow-drafter');
+    const ctx = { summary: 'x', upcomingServices: [], serviceHistory: [{ type: 'Pest + Mosquito', date: '2026-09-20' }], customer: { id: 'c1' } };
+    await expect(drafter.newBookingServiceType('The mosquitoes came back after the last visit', ctx)).resolves.toBeNull();
+    await expect(drafter.newBookingServiceType('Can you add mosquito service?', ctx)).resolves.toBe('Mosquito Control');
+  });
+
+  test('with the gate OFF, or on a frozen replay, the catalog is never queried', async () => {
+    const resolveServiceType = mockCatalog();
+    const getAvailableSlots = jest.fn(async () => ({ days: [] }));
+    jest.doMock('../services/availability', () => ({ getAvailableSlots }));
+    const drafter = require('../services/sms-shadow-drafter');
+    const client = { messages: { create: async () => ({ content: [{ text: JSON.stringify({ reply: 'Sure.', intended_actions: [], missing_info: null }) }] }) } };
+    const base = { client, context: { summary: 'x', upcomingServices: [], customer: { id: 'c1' } }, inboundMessage: 'Can you add termite protection?', intent: { intent: 'general_customer_sms_needs_review' }, schedulingIntent: true, city: 'Venice' };
+    await drafter.generateGroundedDraft({ ...base, factsBlock: 'FROZEN\nFOLLOW-UP SLA RIGHT NOW: within the hour\n' });
+    expect(resolveServiceType).not.toHaveBeenCalled();
+    delete process.env.GATE_SMS_REAL_ANSWERS;
+    await drafter.generateGroundedDraft(base);
+    expect(resolveServiceType).not.toHaveBeenCalled();
+    expect(getAvailableSlots).not.toHaveBeenCalled();
   });
 });

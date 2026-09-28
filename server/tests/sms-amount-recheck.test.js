@@ -9,6 +9,10 @@ jest.mock('../services/context-aggregator', () => ({
   getContextForCustomer: jest.fn(),
   authorizedDuesCents: jest.fn(() => []),
 }));
+jest.mock('../services/sms-shadow-drafter', () => ({ replyQuotesUngroundedAmount: jest.fn(() => false) }));
+jest.mock('../services/sms-followup-sla', () => ({ realAnswersGateOn: jest.fn(() => false) }));
+const { replyQuotesUngroundedAmount } = require('../services/sms-shadow-drafter');
+const { realAnswersGateOn } = require('../services/sms-followup-sla');
 const ContextAggregator = require('../services/context-aggregator');
 const { outgoingAmountsStale, bodyAmountCents } = require('../services/sms-amount-recheck');
 
@@ -19,6 +23,25 @@ function dbWithCustomer(row) {
 beforeEach(() => {
   ContextAggregator.getContextForCustomer.mockReset();
   ContextAggregator.authorizedDuesCents.mockReset().mockReturnValue([]);
+  replyQuotesUngroundedAmount.mockReset().mockReturnValue(false);
+  realAnswersGateOn.mockReset().mockReturnValue(false);
+});
+
+test('gate ON: the drafter\'s clause-aware guard is the stricter authority (a reversed payment no longer backs an acknowledgement)', async () => {
+  realAnswersGateOn.mockReturnValue(true);
+  const ctx = { billing: { outstandingBalance: 95, recentPayments: [{ amount: 95, status: 'failed' }] } };
+  ContextAggregator.getContextForCustomer.mockResolvedValue(ctx);
+  replyQuotesUngroundedAmount.mockReturnValue(true);
+  await expect(outgoingAmountsStale({ customerId: 'c1', body: 'We received your $95 payment — thank you!', dbh: dbWithCustomer({ id: 'c1' }) })).resolves.toEqual({ stale: true, reason: 'amount_no_longer_authorized' });
+  expect(replyQuotesUngroundedAmount).toHaveBeenCalledWith('We received your $95 payment — thank you!', ctx);
+  replyQuotesUngroundedAmount.mockReturnValue(false);
+  await expect(outgoingAmountsStale({ customerId: 'c1', body: 'We received your $95 payment — thank you!', dbh: dbWithCustomer({ id: 'c1' }) })).resolves.toEqual({ stale: false });
+});
+
+test('gate OFF: the guard is not consulted', async () => {
+  ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: { outstandingBalance: 120.5, recentPayments: [] } });
+  await outgoingAmountsStale({ customerId: 'c1', body: 'Your balance is $120.50.', dbh: dbWithCustomer({ id: 'c1' }) });
+  expect(replyQuotesUngroundedAmount).not.toHaveBeenCalled();
 });
 
 test('bodyAmountCents extracts every priced form in cents', () => {

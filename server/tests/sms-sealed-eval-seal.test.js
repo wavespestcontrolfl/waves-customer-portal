@@ -155,7 +155,8 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
       const record = (name) => (...args) => {
         calls.push([name, args, tableKey]);
         if (name === 'count') b._isCount = true;
-        if (name === 'whereRaw' && String(args[0]).includes('LIKE') && !String(args[0]).includes('NOT LIKE') && String(args[1]?.[0] || '').includes(MARKER)) b._compat = true;
+        // the compatibility predicate (count + candidates) starts with the LIKE clause; retirement wraps it in NOT (...)
+        if (name === 'whereRaw' && /^(?:md\.facts_block|COALESCE\(facts_block, ''\)) LIKE \?/.test(String(args[0])) && String(args[1]?.[0] || '').includes(MARKER)) b._compat = true;
         if (name === 'whereRaw') b._raws.push([args[0], args[1]]);
         if (name === 'modify') args[0](b);
         if (name === 'insert') { b._insertRows = args[0]; inserts.push(args[0]); }
@@ -227,6 +228,7 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
     expect(likeRaws.length).toBeGreaterThanOrEqual(3); // count, candidates, retirement
     for (const [, args] of likeRaws) {
       expect(args[1]).toEqual(['%FOLLOW-UP SLA RIGHT NOW:%', '%FREE RE-SERVICE:%']);
+      expect(String(args[0])).not.toMatch(/NOT LIKE/); // +c: every category fact is required, none forbidden
     }
     expect(likeRaws.some(([, args]) => /^NOT \(/.test(String(args[0])))).toBe(true);
   });
@@ -241,4 +243,30 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
     expect(dbi.calls.some(([name, args]) => name === 'whereRaw' && /md\.facts_block LIKE/.test(String(args[0])))).toBe(false);
     expect(dbi.updates).toHaveLength(0);
   });
+});
+
+
+// #5194 r1 P1: the contract is exact — under plain v12 (complaints off) the
+// freezer counts, selects and keeps only rows WITHOUT the FREE RE-SERVICE line.
+test('v12 without +c: the compatibility SQL requires the SLA line AND forbids the FREE RE-SERVICE line', async () => {
+  const drafter = require('../services/sms-shadow-drafter');
+  const spy = jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue('house_voice_v12_real_answers');
+  try {
+    const calls = [];
+    const dbi = (table) => {
+      const b = {};
+      for (const m of ['where', 'whereIn', 'whereRaw', 'join', 'leftJoin', 'select', 'count', 'orderBy', 'limit', 'insert', 'onConflict', 'ignore', 'update']) {
+        b[m] = (...args) => { calls.push([m, args]); return b; };
+      }
+      b.then = (resolve) => Promise.resolve(calls.some(([m]) => m === 'count') && !calls.some(([m]) => m === 'insert') ? [{ count: '100' }] : []).then(resolve);
+      return b;
+    };
+    dbi.raw = (sql) => sql;
+    await sealEvalItems({ target: 100, dbi });
+    const compat = calls.find(([m, args]) => m === 'whereRaw' && /LIKE \?/.test(String(args[0])));
+    expect(compat[1][0]).toBe("COALESCE(facts_block, '') LIKE ? AND COALESCE(facts_block, '') NOT LIKE ?");
+    expect(compat[1][1]).toEqual(['%FOLLOW-UP SLA RIGHT NOW:%', '%FREE RE-SERVICE:%']);
+  } finally {
+    spy.mockRestore();
+  }
 });

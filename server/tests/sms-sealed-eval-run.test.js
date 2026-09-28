@@ -970,11 +970,13 @@ describe('category-aware sealed compatibility', () => {
     expect(requiredFactMarkers('house_voice_v12_real_answers+bl')).toEqual(['FOLLOW-UP SLA RIGHT NOW:']);
   });
 
-  test('itemCompatibleWith: an item frozen under plain v12 is compatible with v12 but NOT with +c; one frozen under +c is compatible with both', () => {
+  test('itemCompatibleWith: an item frozen under plain v12 is compatible with v12 but NOT with +c; one frozen under +c is compatible ONLY with +c', () => {
     expect(itemCompatibleWith(`X\n${SLA}\n`, 'house_voice_v12_real_answers')).toBe(true);
     expect(itemCompatibleWith(`X\n${SLA}\n`, 'house_voice_v12_real_answers+c')).toBe(false);
     expect(itemCompatibleWith(`X\n${SLA}\n${RS}\n`, 'house_voice_v12_real_answers+c')).toBe(true);
-    expect(itemCompatibleWith(`X\n${SLA}\n${RS}\n`, 'house_voice_v12_real_answers')).toBe(true);
+    // EXACT contract (#5194 r1 P1): a category fact the version does not carry must be absent
+    expect(itemCompatibleWith(`X\n${SLA}\n${RS}\n`, 'house_voice_v12_real_answers')).toBe(false);
+    expect(itemCompatibleWith(`X\n${SLA}\n${RS}\n`, 'house_voice_v12_real_answers+bl')).toBe(false);
     expect(itemCompatibleWith('CUSTOMER: old', 'house_voice_v11')).toBe(true);
   });
 

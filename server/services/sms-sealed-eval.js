@@ -140,16 +140,28 @@ function requiredFactMarkers(promptVersion) {
   const tags = String(promptVersion).split('+')[1] || '';
   return [V12_FACTS_MARKER, ...[...tags].map((t) => CATEGORY_FACT_MARKERS[t]).filter(Boolean)];
 }
+// The contract is EXACT (Codex #5194 r1 P1): a category fact the version
+// does not carry must be ABSENT too — an item frozen while complaints were
+// on carries FREE RE-SERVICE, which live gate-off drafts never receive, so
+// it must not grade the plain v12 prompt after a rollback or switch.
+function forbiddenFactMarkers(promptVersion) {
+  if (!isV12PromptVersion(promptVersion)) return [];
+  const required = new Set(requiredFactMarkers(promptVersion));
+  return Object.values(CATEGORY_FACT_MARKERS).filter((m) => !required.has(m));
+}
 function itemCompatibleWith(factsBlock, promptVersion) {
   const facts = String(factsBlock || '');
-  return requiredFactMarkers(promptVersion).every((m) => facts.includes(m));
+  return requiredFactMarkers(promptVersion).every((m) => facts.includes(m))
+    && forbiddenFactMarkers(promptVersion).every((m) => !facts.includes(m));
 }
-// SQL for "this row carries every marker" / "is missing one", parameterized.
-function compatibleWhereRaw(markers) {
-  return {
-    sql: markers.map(() => "COALESCE(facts_block, '') LIKE ?").join(' AND ') || 'TRUE',
-    bindings: markers.map((m) => `%${m}%`),
-  };
+// SQL for "this row matches the exact contract" (wrap in NOT (...) for the
+// complement), parameterized: required markers present, forbidden absent.
+function compatibleWhereRaw(markers, forbidden = []) {
+  const clauses = [
+    ...markers.map(() => "COALESCE(facts_block, '') LIKE ?"),
+    ...forbidden.map(() => "COALESCE(facts_block, '') NOT LIKE ?"),
+  ];
+  return { sql: clauses.join(' AND ') || 'TRUE', bindings: [...markers, ...forbidden].map((m) => `%${m}%`) };
 }
 
 /* ── Freezer ──────────────────────────────────────────────────────────── */
@@ -163,9 +175,9 @@ function compatibleWhereRaw(markers) {
  */
 // Retire (active=false, never delete) the OLDEST pre-v12 items beyond the
 // target; rows and every historical result stay. Returns the count retired.
-async function retireDisplacedPreV12Items({ dbi, overflow, markers = [V12_FACTS_MARKER] }) {
+async function retireDisplacedPreV12Items({ dbi, overflow, markers = [V12_FACTS_MARKER], forbidden = [] }) {
   if (!(overflow > 0)) return 0;
-  const compat = compatibleWhereRaw(markers);
+  const compat = compatibleWhereRaw(markers, forbidden);
   const retired = await dbi('sms_sealed_eval_items')
     .whereIn('id', dbi('sms_sealed_eval_items')
       .select('id')
@@ -193,9 +205,10 @@ async function sealEvalItems({ target = SEALED_EVAL_TARGET, dbi = db } = {}) {
   const sealVersion = require('./sms-shadow-drafter').currentPromptVersion();
   const v12 = isV12PromptVersion(sealVersion);
   const markers = requiredFactMarkers(sealVersion);
+  const forbidden = forbiddenFactMarkers(sealVersion);
   let compatibleCount = Number(activeCount);
   if (v12) {
-    const compat = compatibleWhereRaw(markers);
+    const compat = compatibleWhereRaw(markers, forbidden);
     const [{ count }] = await dbi('sms_sealed_eval_items')
       .where('active', true)
       .whereRaw(compat.sql, compat.bindings)
@@ -209,7 +222,7 @@ async function sealEvalItems({ target = SEALED_EVAL_TARGET, dbi = db } = {}) {
     // oversized active pool that would otherwise never shrink (and trips
     // the auto-exam spend cap). Prune here too, so the two steps need not
     // be atomic to converge.
-    const retired = v12 ? await retireDisplacedPreV12Items({ dbi, overflow: Number(activeCount) - target, markers }) : 0;
+    const retired = v12 ? await retireDisplacedPreV12Items({ dbi, overflow: Number(activeCount) - target, markers, forbidden }) : 0;
     return { sealed: 0, retired, activeCount: Number(activeCount) - retired, ms: Date.now() - startedAt };
   }
 
@@ -230,7 +243,7 @@ async function sealEvalItems({ target = SEALED_EVAL_TARGET, dbi = db } = {}) {
     .whereRaw("TRIM(COALESCE(md.inbound_message, '')) <> ''");
   // v12: only drafts frozen WITH the v12 facts are representative
   if (v12) {
-    const compat = compatibleWhereRaw(markers);
+    const compat = compatibleWhereRaw(markers, forbidden);
     candidateQuery = candidateQuery.whereRaw(compat.sql.replace(/COALESCE\(facts_block, ''\)/g, 'md.facts_block'), compat.bindings);
   }
   const candidates = await candidateQuery
@@ -282,7 +295,7 @@ async function sealEvalItems({ target = SEALED_EVAL_TARGET, dbi = db } = {}) {
   await dbi('sms_sealed_eval_items').insert(rows).onConflict('source_draft_id').ignore();
   // Keep the active pool at the target: retire the OLDEST pre-v12 items that
   // the new compatible ones displaced (never delete — results reference them).
-  const retired = v12 ? await retireDisplacedPreV12Items({ dbi, overflow: Number(activeCount) + rows.length - target, markers }) : 0;
+  const retired = v12 ? await retireDisplacedPreV12Items({ dbi, overflow: Number(activeCount) + rows.length - target, markers, forbidden }) : 0;
 
   const summary = { sealed: rows.length, retired, activeCount: Number(activeCount) + rows.length - retired, ms: Date.now() - startedAt };
   logger.info(`[sealed-eval] seal complete: ${JSON.stringify(summary)}`);
@@ -1332,6 +1345,7 @@ async function runAutoExamSweep({ dbi = db, examRunner = runSealedExam, summaryF
 
 module.exports = {
   requiredFactMarkers,
+  forbiddenFactMarkers,
   itemCompatibleWith,
   sealEvalItems,
   createExamRun,
