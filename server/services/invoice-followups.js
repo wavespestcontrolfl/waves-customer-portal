@@ -155,6 +155,55 @@ async function collectionsChannelPermitted(customerId, invoiceId, channel, exclu
   });
 }
 
+/**
+ * The LAST eligibility check, run by the canonical sender immediately
+ * before provider preparation (Codex #4311 r42 P1) — extended to the FULL
+ * combined set for a combined touch (Codex round-4 P2). Before this, only
+ * the anchor invoice (row.invoice_id) was re-verified at the true dispatch
+ * boundary; a covered SIBLING paid, credited, stopped, paused, put on an
+ * autopay hold, or moved to a third-party payer between
+ * resolveCombinedVariant's snapshot and the actual provider request still
+ * rode the anchor's clearance — the combined text would dun the customer
+ * about it and the linked pay page would still attempt to charge it.
+ * Wired as the preDispatchCheck for the SMS/push leg (sendCustomerMessage)
+ * and as the preSendCheck for the email leg
+ * (dispatchUnderBillingEmailAuthority) — both run this at their own true
+ * provider boundary, under whatever lock each already holds there. A
+ * single-invoice touch (combinedVariant null) is byte-identical to
+ * before: the same selfPayAtDispatch call, same failure shape — this
+ * never invents a new outcome, only a wider set to check it against.
+ */
+function dunningDispatchCheck(invoiceId, customerId, combinedVariant) {
+  if (!combinedVariant) return invoiceHelpers.selfPayAtDispatch(invoiceId, db);
+  const coveredIds = combinedVariant.coveredInvoiceIds;
+  const selfPayMany = invoiceHelpers.selfPayAtDispatchMany(
+    coveredIds, db, combinedVariant.coveredInvoiceCents, customerId,
+  );
+  return async () => {
+    const verdict = await selfPayMany();
+    if (verdict.ok !== true) return verdict;
+    // The same disqualifying-status re-check resolveCombinedVariant itself
+    // runs (Codex round-2 P1, local finding #1) — an admin stop/pause/
+    // autopay-hold landing in the window between that resolution and this
+    // true dispatch boundary is exactly the race this check exists for.
+    // Never filter the set down: refuse the whole leg, since the linked
+    // pay page would still charge the excluded invoice.
+    const disqualified = await db('invoice_followup_sequences')
+      .whereIn('invoice_id', coveredIds)
+      .whereIn('status', ['stopped', 'paused', 'autopay_hold'])
+      .first('invoice_id');
+    if (disqualified) {
+      return {
+        ok: false,
+        code: 'INVOICE_SEQUENCE_DISQUALIFIED',
+        retryable: true,
+        reason: `invoice ${disqualified.invoice_id}'s follow-up sequence is stopped, paused, or on an autopay hold`,
+      };
+    }
+    return { ok: true };
+  };
+}
+
 function followupLedgerKey(row, step, channel) {
   return `invoice_followups:${row.id}:${step.id}:${channel}`;
 }
@@ -357,6 +406,16 @@ async function sendFollowupEmail({
       withProviderHandoff: enforceBillingPreference
         ? (dispatch) => dispatchUnderBillingEmailAuthority({
           input: authorityInput, recipientEmail: to, templateKey, dispatch, state,
+          // The email path's own true-provider-boundary check (Codex
+          // round-4 P2) — contextBlock already re-verifies row.invoice_id
+          // alone on every read this authority makes; this is what widens
+          // that to the full combined set. combinedVariant is always null
+          // when enforceBillingPreference is false (operator sends force
+          // allowCombined:false — see sendNextTouchNow), so
+          // selfPayOnlyHandoff below never needs it.
+          // Combined touches only: a single-invoice email keeps its existing
+          // (contextBlock-only) path byte-identical.
+          ...(combinedVariant ? { preSendCheck: dunningDispatchCheck(row.invoice_id, customer.id, combinedVariant) } : {}),
         })
         : selfPayOnlyHandoff(row.invoice_id, state),
     });
@@ -488,6 +547,13 @@ async function resolveCombinedVariant(customer, invoiceId, step) {
       // status, …), and a sibling outside it was never actually
       // communicated to the customer this run.
       coveredInvoiceIds: coveredIds,
+      // The per-invoice amount-due-cents snapshot the rendered message's
+      // own itemized lines came from (`lineCents` above) — carried out so
+      // the true provider-boundary check (Codex round-4 P2,
+      // selfPayAtDispatchMany's expectedCents) can refuse a stale-amount
+      // send instead of the dispatch itself re-deriving a second,
+      // possibly-inconsistent snapshot.
+      coveredInvoiceCents: lineCents,
     };
   } catch (err) {
     logger.warn(`[invoice-followups] combined variant resolution failed for customer ${customer.id}: ${err.message}`);
@@ -1153,6 +1219,230 @@ async function runPending() {
 }
 
 /**
+ * Advances ONE invoice that a delivered combined touch NAMED
+ * (coveredInvoiceIds) — whether or not it was itself due this run (Codex
+ * round-4 P1: every invoice a delivered combined message actually named
+ * counts as touched, matching the owner's "the other invoices wait for
+ * that one reminder" — not just the ones runPending's batch select
+ * happened to find due today). Shared by:
+ *   - a DUE sibling (`dueRow` supplied — a batch snapshot row runPending's
+ *     query already selected this run): pins next_touch_at to the batch
+ *     snapshot's own value (a concurrent reschedule makes the advance a
+ *     no-op) and requires it be on the batch snapshot's own step_index and
+ *     actually due (<= now).
+ *   - a covered invoice that was NOT due this run (`dueRow` omitted — e.g.
+ *     its own next_touch_at is tomorrow): resolved live by invoice_id +
+ *     customer_id, with no next_touch_at requirement at all — it advances
+ *     purely because the anchor's delivered message named it.
+ * Common guards either way: the invoice locked, not terminal, same
+ * customer; the sequence read LIVE inside that same lock, active, same
+ * customer, and never further along than the anchor's OWN step (a sibling
+ * already ahead of the anchor keeps its own schedule untouched — Claude
+ * pre-push review P1).
+ */
+async function advanceCoveredInvoice(invoiceId, customerId, anchorStepIndex, dueRow = null) {
+  try {
+    let result = { updated: false };
+    const updated = await db.transaction(async (trx) => {
+      const lockedInvoice = await trx('invoices')
+        .where({ id: invoiceId })
+        .forUpdate()
+        .first();
+      if (
+        !lockedInvoice
+        || TERMINAL_INVOICE_STATUSES.includes(lockedInvoice.status)
+        || String(lockedInvoice.customer_id) !== String(customerId)
+      ) return 0;
+      // Live re-read under the lock (Codex round-1 P1 + local finding #6):
+      // a due row's own batch snapshot can go stale between select and
+      // this transaction (an admin due-date edit, a status/step change),
+      // and a not-due covered invoice has NO batch snapshot to trust in
+      // the first place — either way this is the only state the advance
+      // itself is allowed to act on.
+      const liveSeq = dueRow
+        ? await trx('invoice_followup_sequences').where({ id: dueRow.id }).first()
+        : await trx('invoice_followup_sequences').where({ invoice_id: invoiceId, customer_id: customerId }).first();
+      if (
+        !liveSeq
+        || liveSeq.status !== 'active'
+        || String(liveSeq.customer_id) !== String(customerId)
+        // Never pull a sibling further along its OWN cadence back to the
+        // anchor's step — it keeps its own schedule untouched.
+        || liveSeq.step_index > anchorStepIndex
+        // A DUE row's own claim: still the batch snapshot's exact step,
+        // still actually due. A not-due covered invoice (dueRow null)
+        // carries neither requirement — it advances purely because the
+        // anchor's delivered message named it.
+        || (dueRow && (
+          liveSeq.step_index !== dueRow.step_index
+          || !liveSeq.next_touch_at
+          || new Date(liveSeq.next_touch_at).getTime() > Date.now()
+        ))
+      ) return 0;
+      const nextIndex = liveSeq.step_index + 1;
+      // The sibling's OWN cadence-appropriate interval. anchor_at is the
+      // only field an admin edit (rescheduleForInvoiceEdit) can move on
+      // this row, so it is always taken from the LIVE read; the
+      // invoice-joined sent/created timestamps are immutable, so a DUE
+      // row (dueRow supplied — a batch snapshot query already joined
+      // them) reuses those exact values, the same discipline fireStep's
+      // own claimedSeq merge (`row.anchor_at = claimedSeq.anchor_at`)
+      // applies to the anchor's own touch — never a flat constant, never
+      // the anchor touch's own nextTouchAt (Claude pre-push review r2
+      // P1). A not-yet-due covered invoice (dueRow null) has no batch
+      // join to reuse, so it falls back to the invoice row JUST locked
+      // above.
+      const nextAt = computeNextTouchAt(
+        sequenceAnchor(dueRow ? { ...dueRow, anchor_at: liveSeq.anchor_at } : {
+          anchor_at: liveSeq.anchor_at,
+          invoice_sent_at: lockedInvoice.sent_at,
+          invoice_sms_sent_at: lockedInvoice.sms_sent_at,
+          invoice_created_at: lockedInvoice.created_at,
+          created_at: liveSeq.created_at,
+        }),
+        nextIndex,
+      );
+      const outOfSteps = nextAt === null;
+      const claimFloor = new Date(Date.now() - TOUCH_CLAIM_TTL_MS);
+      const write = await trx('invoice_followup_sequences')
+        .where({
+          id: liveSeq.id,
+          status: 'active',
+          step_index: liveSeq.step_index,
+          customer_id: customerId,
+          // Pinned to the row just locked/read above (local finding #6,
+          // same discipline skipStaleTouches applies to its own
+          // next_touch_at): a concurrent reschedule landing between that
+          // read and this write makes the advance a no-op instead of
+          // clobbering a newer next_touch_at with a stale one.
+          next_touch_at: liveSeq.next_touch_at,
+        })
+        .where(function () {
+          this.whereNull('touch_claimed_at').orWhere('touch_claimed_at', '<', claimFloor);
+        })
+        .update({
+          updated_at: trx.fn.now(),
+          step_index: nextIndex,
+          next_touch_at: nextAt,
+          status: outOfSteps ? 'completed' : 'active',
+          // The customer was told about this invoice in the anchor's
+          // message, so it counts as a touch sent — same last_touch_at
+          // semantics a normal delivered follow-up stamps (fireTouch's own
+          // freshDelivery branch). The pre-visit balance rail reads this
+          // column for its 72h recent-contact guard (Codex round-1 P1).
+          last_touch_at: trx.fn.now(),
+          touches_sent: trx.raw('touches_sent + 1'),
+        });
+      if (write) result = { updated: true, beforeStepIndex: liveSeq.step_index, nextIndex, invoiceNumber: lockedInvoice.invoice_number };
+      return write;
+    });
+    return updated ? result : { updated: false };
+  } catch (err) {
+    logger.error(`[invoice-followups] could not advance covered invoice ${invoiceId} after combined anchor send: ${err.message}`);
+    return { updated: false };
+  }
+}
+
+// A lightweight audit trail only (never a new ledger/idempotency record —
+// that would reintroduce the cross-invoice ledger complexity this narrow
+// rebuild deliberately avoids): the anchor's own fireTouch already wrote
+// the real customer_interactions/contact-ledger rows for its own
+// invoice_id, so staff reading a covered invoice's own history would
+// otherwise see no touch for a run it was in fact named in (Claude
+// pre-push review P1). Best-effort; never blocks or fails the touch.
+async function auditCoveredAdvance(anchor, anchorOutcome, invoiceId, invoiceNumber, beforeStepIndex, nextIndex) {
+  try {
+    await db('customer_interactions').insert({
+      customer_id: anchor.customer_id,
+      interaction_type: anchorOutcome.interactionType || 'sms_outbound',
+      subject: `Invoice follow-up — combined with invoice ${anchor.invoice_number || anchor.invoice_id} (${invoiceNumber || invoiceId})`,
+      body: `Included in the combined reminder sent for invoice ${anchor.invoice_number || anchor.invoice_id} this run.`,
+      metadata: JSON.stringify({
+        invoice_id: invoiceId,
+        combined_anchor_invoice_id: anchor.invoice_id,
+        step_index: beforeStepIndex,
+        next_step_index: nextIndex,
+      }),
+    });
+  } catch { /* non-critical — best-effort audit trail only */ }
+}
+
+/**
+ * Every invoice a delivered combined touch NAMED but that had no batch row
+ * this run (not due today) — advanced purely because the anchor's message
+ * counted it (Codex round-4 P1, owner: "the other invoices wait for that
+ * one reminder"), never left to send its own reminder next run naming the
+ * exact invoices this run's combined message already covered.
+ * `excludeInvoiceIds` carries the anchor's own invoice_id plus every DUE
+ * sibling's (handled, whatever the outcome, by the caller's own loop) so
+ * this never double-processes one. Counted the same way a due sibling's
+ * own advance attempt already is: "no send of its own this run," whether
+ * or not the guarded write actually landed.
+ */
+async function advanceUnbatchedCoveredInvoices(anchor, anchorOutcome, excludeInvoiceIds) {
+  const coveredIds = anchorOutcome?.coveredInvoiceIds || null;
+  if (!coveredIds) return 0;
+  let skipped = 0;
+  for (const id of coveredIds) {
+    if (excludeInvoiceIds.has(String(id))) continue;
+    skipped++;
+    const result = await advanceCoveredInvoice(id, anchor.customer_id, anchor.step_index, null);
+    if (result.updated) {
+      await auditCoveredAdvance(anchor, anchorOutcome, id, result.invoiceNumber, result.beforeStepIndex, result.nextIndex);
+    }
+  }
+  return skipped;
+}
+
+// A single row's fire, with a THROW kept distinct from an ordinary
+// "nothing delivered" outcome (Codex round-2 P1) — fireOne's own catch
+// (below) collapses both into the same `undefined`, and fireStep/fireTouch
+// CAN throw after a leg already delivered (the SMS await, the final
+// step_index-advance write itself), so a caller that needs to tell the two
+// apart — never fire/advance a covered invoice on a throw specifically —
+// uses this instead of fireOne.
+async function fireTracked(row) {
+  try {
+    return { outcome: await fireStep(row), threw: false };
+  } catch (err) {
+    logger.error(`[invoice-followups] step fire failed for invoice ${row.invoice_id}: ${err.message}`);
+    return { outcome: undefined, threw: true };
+  }
+}
+
+/**
+ * Did a fired row's outcome tell the customer about every invoice its
+ * coveredInvoiceIds names? Shared by the multi-row anchor and the
+ * singleton-group path in fireGroupedRows below (Codex round-4 P1: a
+ * customer with only ONE due row this run can still have 2+ open
+ * invoices — the singleton path needs the exact same derivation the
+ * grouped anchor uses).
+ */
+function combinedDeliveryVerdict(outcome, threw) {
+  const sent = !threw && outcome?.sent === true;
+  // Partial delivery (Codex round-1 P1): a held/deferred leg stopped
+  // fireTouch short of its own `sent: true` return, but a DIFFERENT leg
+  // already delivered the combined copy this run — the customer WAS told,
+  // but THIS row's own sequence did NOT advance (it re-fires the same step
+  // later), so covered invoices must not be pulled ahead of it.
+  const partialDelivered = !threw && !sent && outcome?.deliveredCombined === true
+    && outcome?.anchorAdvanced !== true;
+  // A deduped retry (Codex round-3 P1) that found every leg already
+  // delivered from an earlier attempt still advances ITS OWN row (fireTouch
+  // itself did that write), so covered invoices advance exactly like a
+  // fresh send.
+  const dedupedAdvance = !threw && !sent && outcome?.deliveredCombined === true
+    && outcome?.anchorAdvanced === true;
+  return {
+    sent,
+    partialDelivered,
+    dedupedAdvance,
+    toldCustomer: sent || partialDelivered || dedupedAdvance,
+    coveredIds: outcome?.coveredInvoiceIds || null,
+  };
+}
+
+/**
  * GATE_DUNNING_COMBINED_MESSAGE: fires every row due this run, grouping a
  * customer's 2+ due rows so only one touch goes out. The ANCHOR is the
  * oldest invoice (by the ladder's own cadence anchor — sequenceAnchor);
@@ -1166,7 +1456,9 @@ async function runPending() {
  * and are no further along their OWN cadence than the anchor. A sibling
  * that fires normally goes through this exact same fireStep call a
  * singleton row would use — no new send path, no new guard, no new
- * transaction.
+ * transaction. Every OTHER invoice the anchor's message named — due or
+ * not, and even for a singleton group with no batch-selected siblings at
+ * all — is also advanced (Codex round-4 P1); see advanceUnbatchedCoveredInvoices.
  */
 async function fireGroupedRows(toFire) {
   let sent = 0, skipped = 0;
@@ -1191,70 +1483,54 @@ async function fireGroupedRows(toFire) {
 
   for (const groupRows of groups.values()) {
     if (groupRows.length === 1) {
-      await fireOne(groupRows[0]);
+      const row = groupRows[0];
+      // fireTracked, not fireOne (Codex round-2 P1 — see its own comment):
+      // this row can still cover 2+ open invoices on its own
+      // (resolveCombinedVariant needs 2+ COVERED, not 2+ due) even though
+      // it is the only one due this run, so its outcome needs the same
+      // throw-aware combined derivation the multi-row anchor uses below.
+      const { outcome, threw } = await fireTracked(row);
+      if (threw) skipped++; else sent++;
+      const verdict = combinedDeliveryVerdict(outcome, threw);
+      // No batch-selected siblings exist for a singleton group at all
+      // (Codex round-4 P1) — every OTHER invoice the delivered message
+      // named is resolved live here, purely because it was named.
+      if (!threw && verdict.toldCustomer && !verdict.partialDelivered) {
+        skipped += await advanceUnbatchedCoveredInvoices(row, outcome, new Set([String(row.invoice_id)]));
+      }
       continue;
     }
     const sorted = [...groupRows].sort(
       (a, b) => new Date(sequenceAnchor(a)).getTime() - new Date(sequenceAnchor(b)).getTime(),
     );
     const [anchor, ...siblings] = sorted;
-    // Fired inline rather than through fireOne (Codex round-2 P1): fireOne
-    // swallows a thrown error into the SAME `undefined` outcome an early,
-    // nothing-delivered RETURN produces, and fireStep/fireTouch can throw
-    // AFTER a leg already delivered (the SMS await, the final sequence-
-    // advance write, …) — a throw carries no outcome at all, so there is
-    // no way to tell from an `undefined` outcome alone whether the
-    // customer was already told. `anchorThrew` keeps that distinction so
-    // the sibling loop below can refuse to fire them individually on a
-    // throw specifically (risking a DUPLICATE collection contact), while
-    // an ordinary "nothing delivered" outcome (anchorToldCustomer false,
-    // anchorThrew false) still lets a sibling fire on its own as before.
-    let anchorThrew = false;
-    let anchorOutcome;
-    try {
-      anchorOutcome = await fireStep(anchor);
-      sent++;
-    } catch (err) {
-      logger.error(`[invoice-followups] step fire failed for invoice ${anchor.invoice_id}: ${err.message}`);
-      skipped++;
-      anchorThrew = true;
-    }
+    // fireTracked, not fireOne (Codex round-2 P1): fireOne swallows a
+    // thrown error into the SAME `undefined` outcome an early, nothing-
+    // delivered RETURN produces, and fireStep/fireTouch can throw AFTER a
+    // leg already delivered (the SMS await, the final sequence-advance
+    // write, …) — a throw carries no outcome at all, so there is no way to
+    // tell from an `undefined` outcome alone whether the customer was
+    // already told. `anchorThrew` keeps that distinction so the sibling
+    // loop below can refuse to fire/advance them on a throw specifically
+    // (risking a DUPLICATE collection contact), while an ordinary
+    // "nothing delivered" outcome (anchorToldCustomer false, anchorThrew
+    // false) still lets a sibling fire on its own as before.
+    const { outcome: anchorOutcome, threw: anchorThrew } = await fireTracked(anchor);
+    if (anchorThrew) skipped++; else sent++;
     // The anchor told the customer about every covered invoice whenever it
-    // completed the normal send path (`sent: true`) OR — Codex round-1 P1
-    // — it returned early with `deliveredCombined: true`: a held/deferred
-    // leg stopped fireTouch from reaching its own completed-touch return,
-    // but a DIFFERENT leg (email, most commonly) already delivered the
-    // combined copy this run. Either way the coveredInvoiceIds set names
-    // exactly what the customer was actually told; a bare "the anchor
-    // didn't fully complete" read would otherwise fire every sibling
-    // individually and dun the customer with several separate reminders in
-    // one run for invoices the anchor's own message already named.
-    const anchorSent = anchorOutcome?.sent === true;
-    // Partial delivery (Codex round-1 P1): the anchor's OWN sequence did
-    // NOT advance (its held SMS leg re-fires this same step at the window
-    // open — see the smsHoldUnowned branch in fireTouch), but a different
-    // leg already delivered the combined copy this run, so the customer
-    // WAS told about every covered invoice. Advancing a sibling's own
-    // step_index here, while the anchor's is deliberately held at its
-    // current one, would let the two drift out of the lockstep this
-    // grouping is built on — so the smallest correct fix is the minimum
-    // the finding calls for: never fire the sibling individually (it was
-    // already told), but leave its sequence exactly where it is; the next
-    // run re-decides once the anchor's held retry has resolved.
-    // anchorAdvanced: a deduped retry that finished the anchor's step (it
-    // covers siblings like a fresh send); without it the anchor is held.
-    const anchorPartialDelivered = !anchorSent && anchorOutcome?.deliveredCombined === true
-      && anchorOutcome?.anchorAdvanced !== true;
-    const anchorDedupedAdvance = !anchorSent && anchorOutcome?.deliveredCombined === true
-      && anchorOutcome?.anchorAdvanced === true;
-    const anchorToldCustomer = anchorSent || anchorPartialDelivered || anchorDedupedAdvance;
-    // Which invoices the anchor's ACTUAL rendered message named — null
-    // unless it rendered combined (the anchor may have sent its own plain
-    // single-invoice touch: template inactive, link unavailable, fewer
-    // than 2 covered invoices, …). A due sibling not in this set was never
-    // told about, whatever its coincidental presence in this customer's
-    // group — Claude pre-push review r2 P1.
-    const coveredIds = anchorOutcome?.coveredInvoiceIds || null;
+    // completed the normal send path (`sent: true`), a deduped retry that
+    // still advanced its OWN row (`anchorAdvanced`, Codex round-3 P1), or
+    // returned early with `deliveredCombined: true` (Codex round-1 P1: a
+    // held/deferred leg stopped fireTouch from reaching its own completed-
+    // touch return, but a DIFFERENT leg already delivered the combined
+    // copy). Either way the coveredInvoiceIds set names exactly what the
+    // customer was actually told; a bare "the anchor didn't fully
+    // complete" read would otherwise fire every sibling individually and
+    // dun the customer with several separate reminders in one run for
+    // invoices the anchor's own message already named.
+    const {
+      toldCustomer: anchorToldCustomer, partialDelivered: anchorPartialDelivered, coveredIds,
+    } = combinedDeliveryVerdict(anchorOutcome, anchorThrew);
     for (const sibling of siblings) {
       const siblingCovered = !!coveredIds && coveredIds.includes(String(sibling.invoice_id));
       // The anchor's own fire THREW (Codex round-2 P1) — unlike an
@@ -1291,125 +1567,24 @@ async function fireGroupedRows(toFire) {
       // off the end of the ladder exactly as a normal touch does:
       // 'completed', next_touch_at null. Guarded on the row still being
       // active (a concurrent payment/pause since the batch select is left
-      // alone, not revived).
-      // Set inside the transaction below (it depends on the LIVE re-read),
-      // but read afterward by the best-effort audit insert — declared here
-      // so that insert isn't reaching into the transaction's own closure.
-      let siblingNextIndex;
-      try {
-        // Same ordering and revalidation as fireStep's claim: lock the
-        // invoice row first, then advance only if the sequence is still the
-        // batch snapshot's (active, same step, same owner, due) and no
-        // worker holds a live touch claim on it, and the invoice itself is
-        // still open. Anything else is left for the next run to re-select.
-        const updated = await db.transaction(async (trx) => {
-          const lockedInvoice = await trx('invoices')
-            .where({ id: sibling.invoice_id })
-            .forUpdate()
-            .first();
-          if (
-            !lockedInvoice
-            || TERMINAL_INVOICE_STATUSES.includes(lockedInvoice.status)
-            || String(lockedInvoice.customer_id) !== String(sibling.customer_id)
-          ) return 0;
-          // Live re-read under the lock (Codex round-1 P1 + local finding
-          // #6): `sibling` is a batch snapshot — an admin due-date edit can
-          // shift anchor_at, or a status/step change can land, between that
-          // select and this transaction. Re-derive from the LIVE row here,
-          // the same discipline fireStep's own liveSeq re-read applies to
-          // the anchor's own touch, rather than trusting the stale
-          // snapshot's anchor_at/step_index.
-          const liveSeq = await trx('invoice_followup_sequences').where({ id: sibling.id }).first();
-          if (
-            !liveSeq
-            || liveSeq.status !== 'active'
-            || liveSeq.step_index !== sibling.step_index
-            || String(liveSeq.customer_id) !== String(sibling.customer_id)
-            || !liveSeq.next_touch_at
-            || new Date(liveSeq.next_touch_at).getTime() > Date.now()
-          ) return 0;
-          siblingNextIndex = liveSeq.step_index + 1;
-          // The sibling's OWN cadence-appropriate interval computed from
-          // its LIVE anchor_at, the SAME computation a normal touch would
-          // use for it — never the anchor's own nextTouchAt (which is null
-          // whenever the anchor's send just finished ITS last ladder step,
-          // a common case here since the anchor is always the OLDER,
-          // further-along invoice) and never a flat constant (Claude
-          // pre-push review r2 P1). anchor_at is the only field an admin
-          // edit (rescheduleForInvoiceEdit) can move on this row — the
-          // invoice's own sent/created timestamps the batch join supplied
-          // are immutable — so only it is taken from the live read here;
-          // everything else stays the batch snapshot's, the same
-          // discipline fireStep's own claimedSeq merge (`row.anchor_at =
-          // claimedSeq.anchor_at`) applies to the anchor's own touch.
-          const nextAt = computeNextTouchAt(
-            sequenceAnchor({ ...sibling, anchor_at: liveSeq.anchor_at }), siblingNextIndex,
-          );
-          const outOfSteps = nextAt === null;
-          const claimFloor = new Date(Date.now() - TOUCH_CLAIM_TTL_MS);
-          return trx('invoice_followup_sequences')
-            .where({
-              id: sibling.id,
-              status: 'active',
-              step_index: liveSeq.step_index,
-              customer_id: sibling.customer_id,
-              // Pinned to the row just locked/read above (local finding
-              // #6, same discipline skipStaleTouches applies to its own
-              // next_touch_at): a concurrent reschedule landing between
-              // that read and this write makes the advance a no-op instead
-              // of clobbering a newer next_touch_at with a stale one.
-              next_touch_at: liveSeq.next_touch_at,
-            })
-            .where(function () {
-              this.whereNull('touch_claimed_at').orWhere('touch_claimed_at', '<', claimFloor);
-            })
-            .update({
-              updated_at: trx.fn.now(),
-              step_index: siblingNextIndex,
-              next_touch_at: nextAt,
-              status: outOfSteps ? 'completed' : 'active',
-              // The customer was told about this invoice in the anchor's
-              // message, so it counts as a touch sent — same last_touch_at
-              // semantics a normal delivered follow-up stamps (fireTouch's
-              // own freshDelivery branch). The pre-visit balance rail reads
-              // this column for its 72h recent-contact guard (Codex
-              // round-1 P1).
-              last_touch_at: trx.fn.now(),
-              touches_sent: trx.raw('touches_sent + 1'),
-            });
-        });
-        // Covered or lost to a concurrent change, either way no send of
-        // its own this run.
-        skipped++;
-        if (updated) {
-          // A lightweight audit trail only (never a new ledger/idempotency
-          // record — that would reintroduce the cross-invoice ledger
-          // complexity this narrow rebuild deliberately avoids): the
-          // anchor's own fireTouch already wrote the real
-          // customer_interactions/contact-ledger rows for its own
-          // invoice_id, so staff reading a sibling invoice's own history
-          // would otherwise see no touch for a run it was in fact named
-          // in (Claude pre-push review P1). Best-effort; never blocks or
-          // fails the touch.
-          try {
-            await db('customer_interactions').insert({
-              customer_id: sibling.customer_id,
-              interaction_type: anchorOutcome.interactionType || 'sms_outbound',
-              subject: `Invoice follow-up — combined with invoice ${anchor.invoice_number || anchor.invoice_id} (${sibling.invoice_number || sibling.invoice_id})`,
-              body: `Included in the combined reminder sent for invoice ${anchor.invoice_number || anchor.invoice_id} this run.`,
-              metadata: JSON.stringify({
-                invoice_id: sibling.invoice_id,
-                combined_anchor_invoice_id: anchor.invoice_id,
-                step_index: sibling.step_index,
-                next_step_index: siblingNextIndex,
-              }),
-            });
-          } catch { /* non-critical — best-effort audit trail only */ }
-        }
-      } catch (err) {
-        logger.error(`[invoice-followups] could not re-time sibling sequence ${sibling.id} after combined anchor send: ${err.message}`);
-        skipped++;
+      // alone, not revived). Shared with the not-yet-due covered-invoice
+      // path below via advanceCoveredInvoice (Codex round-4 P1).
+      skipped++;
+      const result = await advanceCoveredInvoice(sibling.invoice_id, sibling.customer_id, anchor.step_index, sibling);
+      if (result.updated) {
+        await auditCoveredAdvance(
+          anchor, anchorOutcome, sibling.invoice_id, sibling.invoice_number, result.beforeStepIndex, result.nextIndex,
+        );
       }
+    }
+    // Every OTHER invoice the anchor's delivered combined message named —
+    // due or not (Codex round-4 P1) — counts as touched too; a covered
+    // invoice that wasn't due today would otherwise keep its own step and
+    // send its own reminder next run, naming an invoice this run's
+    // combined message already covered.
+    if (!anchorThrew && anchorToldCustomer && !anchorPartialDelivered) {
+      const handled = new Set([String(anchor.invoice_id), ...siblings.map((s) => String(s.invoice_id))]);
+      skipped += await advanceUnbatchedCoveredInvoices(anchor, anchorOutcome, handled);
     }
   }
   return { sent, skipped };
@@ -2241,7 +2416,7 @@ async function fireTouch(row, { operatorInitiated = false, allowCombined = true 
             ...(channel === 'push' ? { appOnly: true } : {}),
           },
           hasEmailLeg: emailSelected,
-          preDispatchCheck: invoiceHelpers.selfPayAtDispatch(row.invoice_id, db),
+          preDispatchCheck: dunningDispatchCheck(row.invoice_id, row.customer_id, combinedVariant),
         });
       } catch (err) {
         result = err.providerOutcome || { deliveryOutcome: 'uncertain', deferred: true };
@@ -2324,7 +2499,7 @@ async function fireTouch(row, { operatorInitiated = false, allowCombined = true 
         // round-trip and the contact-ledger writes are awaited after the
         // re-read above, and this rail holds no claim a Bill-To writer
         // fences on. Fail-closed, with no lock held across provider I/O.
-        preDispatchCheck: invoiceHelpers.selfPayAtDispatch(row.invoice_id, db),
+        preDispatchCheck: dunningDispatchCheck(row.invoice_id, row.customer_id, combinedVariant),
       }) : null;
       if (sendResult && (sendResult.blocked || sendResult.sent === false)) {
         smsOutcomeMayHaveDelivered = ['accepted', 'uncertain'].includes(sendResult.deliveryOutcome);

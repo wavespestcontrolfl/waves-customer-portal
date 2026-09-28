@@ -1167,4 +1167,171 @@ describe('GATE_DUNNING_COMBINED_MESSAGE — narrow rebuild', () => {
       delete process.env.GATE_COLLECTIONS_POLICY;
     }
   });
+
+  // ---------------------------------------------------------------------
+  // Codex round 4 (#5270) — each proven to fail with its own fix reverted.
+  // ---------------------------------------------------------------------
+
+  test('a singleton due row that still covers 2+ open invoices advances the NOT-due covered invoice too (round-4 finding #1a)', async () => {
+    // Only inv-1 is due/batch-selected this run — no "siblings" exist in
+    // this run's batch at all — but buildPayBalanceLink (mocked payLink()
+    // default) still covers inv-1 + inv-2, so inv-2 is NAMED by the
+    // delivered combined message even though its own next_touch_at is not
+    // due today.
+    const seq = followupRow();
+    const sequenceUpdate = chain();
+    const unbatchedLiveRead = chain({ first: {
+      id: 'seq-2', invoice_id: 'inv-2', customer_id: 'cust-1', status: 'active',
+      step_index: 0, next_touch_at: '2026-05-29T13:00:00.000Z', anchor_at: null,
+    } });
+    const unbatchedUpdate = chain();
+    const unbatchedInvoiceLock = chain({ first: invoice({ id: 'inv-2', created_at: '2026-05-21T12:00:00.000Z' }) });
+    const unbatchedAudit = chain();
+    setDbQueues({
+      'invoice_followup_sequences as s': [chain({ result: [seq] })],
+      customers: [chain({ first: customer() })],
+      invoices: [
+        chain({ first: invoice() }), // claim-txn row lock read
+        chain({ first: invoice() }), // liveInvoice
+        chain({ first: invoice() }), // pre-dun refresh
+        chain({ result: [
+          { id: 'inv-1', invoice_number: 'WPC-2026-1042', title: 'Quarterly Pest Control' },
+          { id: 'inv-2', invoice_number: 'WPC-2026-1055', title: 'Lawn Care' },
+        ] }), // resolveCombinedVariant's per-invoice line lookup
+        chain({ first: invoice() }), // sendFollowupEmail's own fresh read
+        unbatchedInvoiceLock, // advanceUnbatchedCoveredInvoices' own lock on inv-2
+      ],
+      notification_prefs: [chain({ first: { email_enabled: true } })],
+      customer_interactions: [chain(), chain(), unbatchedAudit],
+      invoice_followup_sequences: [
+        ...claimCycle(seq, sequenceUpdate, { combinedCheck: true }),
+        unbatchedLiveRead, unbatchedUpdate,
+      ],
+    });
+
+    await InvoiceFollowUps.runPending();
+
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      templateKey: 'invoice.followup_combined_3_day',
+    }));
+    expect(unbatchedInvoiceLock.forUpdate).toHaveBeenCalled();
+    const unbatchedPatch = unbatchedUpdate.update.mock.calls[0][0];
+    expect(unbatchedPatch.step_index).toBe(1);
+    expect(unbatchedPatch.status).toBe('active');
+    expect(unbatchedPatch.last_touch_at).toBe('CURRENT_TIMESTAMP');
+    expect(unbatchedAudit.insert).toHaveBeenCalledWith(expect.objectContaining({
+      customer_id: 'cust-1',
+      metadata: expect.stringContaining('"invoice_id":"inv-2"'),
+    }));
+  });
+
+  test('a covered invoice already at a HIGHER step than the anchor is left untouched (round-4 finding #1b)', async () => {
+    const seq = followupRow();
+    const sequenceUpdate = chain();
+    const unbatchedLiveRead = chain({ first: {
+      id: 'seq-2', invoice_id: 'inv-2', customer_id: 'cust-1', status: 'active',
+      // Higher than the anchor's own step_index (0) — must never be pulled
+      // back to the anchor's step; left exactly where it is.
+      step_index: 1, next_touch_at: '2026-05-29T13:00:00.000Z', anchor_at: null,
+    } });
+    // Provided but must never be consumed — a working chain here (rather
+    // than an absent one) proves the assertion below catches a REAL
+    // regression, not an incidental "table not queued" throw.
+    const unbatchedUpdate = chain();
+    const unbatchedInvoiceLock = chain({ first: invoice({ id: 'inv-2', created_at: '2026-05-21T12:00:00.000Z' }) });
+    setDbQueues({
+      'invoice_followup_sequences as s': [chain({ result: [seq] })],
+      customers: [chain({ first: customer() })],
+      invoices: [
+        chain({ first: invoice() }), chain({ first: invoice() }), chain({ first: invoice() }),
+        chain({ result: [
+          { id: 'inv-1', invoice_number: 'WPC-2026-1042', title: 'Quarterly Pest Control' },
+          { id: 'inv-2', invoice_number: 'WPC-2026-1055', title: 'Lawn Care' },
+        ] }),
+        chain({ first: invoice() }),
+        unbatchedInvoiceLock,
+      ],
+      notification_prefs: [chain({ first: { email_enabled: true } })],
+      customer_interactions: [chain(), chain()],
+      invoice_followup_sequences: [
+        ...claimCycle(seq, sequenceUpdate, { combinedCheck: true }),
+        unbatchedLiveRead, unbatchedUpdate,
+      ],
+    });
+
+    await InvoiceFollowUps.runPending();
+
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      templateKey: 'invoice.followup_combined_3_day',
+    }));
+    expect(unbatchedInvoiceLock.forUpdate).toHaveBeenCalled();
+    expect(unbatchedUpdate.update).not.toHaveBeenCalled();
+  });
+
+  test('a covered sibling paid between resolve and dispatch refuses the combined SMS leg at the true provider boundary (round-4 finding #2)', async () => {
+    const seq = followupRow();
+    const sequenceUpdate = chain();
+    setDbQueues({
+      'invoice_followup_sequences as s': [chain({ result: [seq] })],
+      customers: [chain({ first: customer() })],
+      invoices: [
+        chain({ first: invoice() }), chain({ first: invoice() }), chain({ first: invoice() }),
+        chain({ result: [
+          { id: 'inv-1', invoice_number: 'WPC-2026-1042', title: 'Quarterly Pest Control' },
+          { id: 'inv-2', invoice_number: 'WPC-2026-1055', title: 'Lawn Care' },
+        ] }),
+        chain({ first: invoice() }),
+      ],
+      notification_prefs: [chain({ first: { email_enabled: true } })],
+      customer_interactions: [chain(), chain()],
+      invoice_followup_sequences: claimCycle(seq, sequenceUpdate, { combinedCheck: true }),
+    });
+
+    await InvoiceFollowUps.runPending();
+
+    // The email leg's own dispatch was wired with a preSendCheck too (both
+    // legs, per the finding) — EmailTemplateLibrary.sendTemplate is mocked
+    // and never itself invokes withProviderHandoff, so it's invoked here
+    // directly to prove dispatchUnderBillingEmailAuthority receives one.
+    const emailCall = EmailTemplates.sendTemplate.mock.calls.find(
+      (call) => call[0]?.templateKey === 'invoice.followup_combined_3_day',
+    );
+    expect(emailCall).toBeTruthy();
+    await emailCall[0].withProviderHandoff(async () => {});
+    expect(BillingEmailAuthority.dispatchUnderBillingEmailAuthority).toHaveBeenCalledWith(
+      expect.objectContaining({ preSendCheck: expect.any(Function) }),
+    );
+
+    // Pull the ACTUAL preDispatchCheck wired onto the combined SMS leg and
+    // re-invoke it directly against a fresh DB state where inv-2 (a
+    // covered sibling, not the anchor) has since been paid — proving the
+    // boundary check covers the FULL combined set, not just row.invoice_id.
+    const dispatchCall = sendCustomerMessage.mock.calls.find((call) => call[0]?.preDispatchCheck);
+    expect(dispatchCall).toBeTruthy();
+    const preDispatchCheck = dispatchCall[0].preDispatchCheck;
+
+    db.mockImplementationOnce((table) => {
+      if (table !== 'invoices') throw new Error(`unexpected table: ${table}`);
+      return {
+        whereIn: () => ({
+          select: async () => [
+            {
+              id: 'inv-1', customer_id: 'cust-1', status: 'sent', payer_id: null,
+              scheduled_send_error: null, total: 129, credit_applied: 0,
+            },
+            // Paid since the message was composed.
+            {
+              id: 'inv-2', customer_id: 'cust-1', status: 'paid', payer_id: null,
+              scheduled_send_error: null, total: 129, credit_applied: 0,
+            },
+          ],
+        }),
+      };
+    });
+
+    const verdict = await preDispatchCheck();
+    expect(verdict.ok).toBe(false);
+    expect(verdict.code).toBe('INVOICE_TERMINAL');
+    expect(verdict.reason).toContain('inv-2');
+  });
 });
