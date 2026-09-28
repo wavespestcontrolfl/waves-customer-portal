@@ -25,7 +25,7 @@ const logger = require('./logger');
 const sendgrid = require('./sendgrid-mail');
 const emailLib = require('./email-template-library');
 const billingReplay = require('./billing-email-provider-replay');
-const { isSenderRenderedEmail, isFinalSenderRenderedEmail } = require('./billing-email-no-replay');
+const { isSenderRenderedEmail, alertFinalNoticeMissed } = require('./billing-email-no-replay');
 const NotificationService = require('./notification-service');
 const { correctEmailDomain, meetsConfidence } = require('../utils/email-typo-correction');
 
@@ -689,6 +689,9 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
  */
 async function attemptRecovery(bouncedMessage, ev = {}) {
   try {
+    // A final billing notice is never re-sent, whatever recovery decides
+    // (or when recovery is off); the helper dedupes per email.
+    if (bouncedMessage?.id && !isRecoveryMessage(bouncedMessage)) await alertFinalNoticeMissed(bouncedMessage, 'bounced');
     if (!recoveryEnabled()) return { skipped: 'disabled' };
     if (!bouncedMessage || !bouncedMessage.id) return { skipped: 'no_message' };
 
@@ -1113,7 +1116,7 @@ const UNRECOVERABLE_REASONS = {
   recovery_error: 'the automatic recovery hit an unexpected error',
   billing_replay_reauthorization_required: 'the billing source must be reauthorized before it can be re-sent',
   send_failed: 're-sending to the corrected address failed',
-  sender_rendered_not_replayed: 'billing reminders are not re-sent from their old copy (the next reminder goes to the address on file)',
+  sender_rendered_not_replayed: 'billing reminders are not re-sent from their old copy',
   skipped_low_confidence: 'the likely correction was not confident enough to send automatically',
   no_candidate: 'no safe address correction was possible',
 };
@@ -1124,14 +1127,9 @@ async function alertUnrecoverableBounce({ bouncedMessage, bouncedEmail, customer
   if (stream.startsWith('marketing_')) return;
   const email = String(bouncedEmail || '').trim().toLowerCase();
   if (!email) return;
-  let reasonLabel = status === 'corrected_owned_by_other' && candidate?.corrected
+  const reasonLabel = status === 'corrected_owned_by_other' && candidate?.corrected
     ? `the likely correction (${candidate.corrected}) already belongs to another customer`
     : (UNRECOVERABLE_REASONS[status] || UNRECOVERABLE_REASONS.no_candidate);
-  // The last notice in its sequence has no next reminder to carry the fixed
-  // address: say so, so fixing the address is not mistaken for enough.
-  if (status === 'sender_rendered_not_replayed' && isFinalSenderRenderedEmail(bouncedMessage)) {
-    reasonLabel = 'it was the final notice, so no later reminder will be sent — contact the customer directly';
-  }
   // Surface the suggested address only when proposing it is actionable (i.e. it
   // wasn't itself suppressed).
   const suggestion = candidate?.corrected

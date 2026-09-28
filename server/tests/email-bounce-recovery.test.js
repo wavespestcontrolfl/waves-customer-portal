@@ -334,9 +334,26 @@ describe('attemptRecovery codex-fix behaviors', () => {
         trigger_event_id: touch ? `microdeposit_verification_email:inv1:${touch}` : null },
       { event: 'bounce', type: 'bounce' },
     );
-    const body = NotificationService.notifyAdmin.mock.calls[0][2];
-    expect(body.includes('contact the customer directly')).toBe(final);
-    expect(body.includes('the next reminder goes to the address on file')).toBe(!final);
+    const finalAlerts = NotificationService.notifyAdmin.mock.calls.filter((c) => c[1] === 'Final billing notice not delivered');
+    expect(finalAlerts).toHaveLength(final ? 1 : 0);
+    if (final) {
+      expect(finalAlerts[0][2]).toContain('Contact the customer directly');
+      expect(finalAlerts[0][3].metadata).toMatchObject({ dedupeKey: 'billing-final-notice-missed:orig1', cause: 'bounced' });
+    }
+  });
+
+  test('a final notice is flagged even when another skip applies or recovery is off', async () => {
+    // The address was already changed on file: address_no_longer_on_file.
+    db.mockImplementation(orderedDb({
+      first: (table) => (table === 'customers' ? { id: 'c1', email: 'new@example.com' } : null),
+      returning: (table) => (table === 'email_bounce_recoveries' ? [{ id: 'rec1' }] : []),
+    }));
+    const bounced = { id: 'orig9', recipient_type: 'customer', recipient_id: 'c1', recipient_email_snapshot: 'jane@gmial.com', template_key: 'billing_late_payment_90_day', suppression_group_key_snapshot: 'transactional_required', categories: ['email_template'] };
+    await recovery.attemptRecovery(bounced, { event: 'bounce', type: 'bounce' });
+    process.env.EMAIL_BOUNCE_RECOVERY = 'off';
+    await recovery.attemptRecovery({ ...bounced, id: 'orig10' }, { event: 'bounce', type: 'bounce' });
+    const finals = NotificationService.notifyAdmin.mock.calls.filter((c) => c[1] === 'Final billing notice not delivered');
+    expect(finals.map((c) => c[3].metadata.original_message_id)).toEqual(['orig9', 'orig10']);
   });
 
   test('links the ledger BEFORE publishing the provider id (delivery-race fix)', async () => {

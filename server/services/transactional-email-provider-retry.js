@@ -6,7 +6,7 @@ const emailTemplates = require('./email-template-library');
 const NotificationService = require('./notification-service');
 const billingReplay = require('./billing-email-provider-replay');
 const billingReservation = require('./billing-email-reservation');
-const { isSenderRenderedEmail } = require('./billing-email-no-replay');
+const { isSenderRenderedEmail, alertFinalNoticeMissed } = require('./billing-email-no-replay');
 
 const RETRY_DELAYS_MS = [10 * 60 * 1000, 60 * 60 * 1000, 6 * 60 * 60 * 1000];
 const MAX_RETRIES = RETRY_DELAYS_MS.length;
@@ -285,7 +285,13 @@ async function alertExhausted(message, reason) {
 }
 
 async function alertIfProviderRetriesExhausted(message, ev) {
-  if (!isProviderBlockedEvent(ev) || !isTransactionalRetryEligible(message)) return;
+  if (!isProviderBlockedEvent(ev)) return;
+  // Not retried at all: a final notice has no later stage either.
+  if (isSenderRenderedEmail(message)) {
+    await alertFinalNoticeMissed(message, 'blocked');
+    return;
+  }
+  if (!isTransactionalRetryEligible(message)) return;
   if (Number(message.provider_retry_count || 0) < MAX_RETRIES) return;
   await alertExhausted(
     { ...message, provider_retry_count: MAX_RETRIES },

@@ -86,6 +86,24 @@ describe('transactional email provider retry classification', () => {
     });
   });
 
+  test.each([
+    ['billing.previsit_balance', null, true],
+    ['payment.microdeposit_verification', 'microdeposit_verification_email:inv1:90d', true],
+    ['payment.microdeposit_verification', 'microdeposit_verification_email:inv1:30d', false],
+    ['billing_late_payment_30_day', null, false],
+  ])('a blocked %s (%s) alerts staff only when it is a final notice: %s', async (templateKey, triggerEventId, final) => {
+    const chain = {};
+    chain.where = jest.fn(() => chain);
+    chain.whereRaw = jest.fn(() => chain);
+    chain.first = jest.fn(async () => null);
+    db.mockReturnValue(chain);
+    await retry.alertIfProviderRetriesExhausted(message({ template_key: templateKey, trigger_event_id: triggerEventId,
+      recipient_id: 'c1', provider_retry_count: 0 }), { event: 'blocked' });
+    const finals = NotificationService.notifyAdmin.mock.calls.filter((c) => c[1] === 'Final billing notice not delivered');
+    expect(finals).toHaveLength(final ? 1 : 0);
+    if (final) expect(finals[0][3].metadata).toMatchObject({ cause: 'blocked', customer_id: 'c1' });
+  });
+
   test('other billing emails keep the retry rail', () => {
     expect(retry.isSenderRenderedEmail(message({ template_key: 'billing.notice' }))).toBe(false);
     expect(retry.isTransactionalRetryEligible(message({ template_key: 'billing.notice' }))).toBe(true);
