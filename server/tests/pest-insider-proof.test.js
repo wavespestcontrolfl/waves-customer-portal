@@ -93,15 +93,22 @@ describe('pest-insider proof gate', () => {
     expect(mockSendProof).toHaveBeenCalledWith('send-pi-1');
     expect(mockRecordAudit).toHaveBeenCalledWith(expect.objectContaining({
       action: 'newsletter.pest_insider_proof_attempted', resource_type: 'newsletter_sends', resource_id: 'send-pi-1',
-      metadata: { sent: true, reason: null },
+      metadata: { sent: true, reason: null, notified: false },
     }));
   });
 
   test('a blocked first attempt is recorded with its reason (so the catch-up can compare against it)', async () => {
     process.env.GATE_PEST_INSIDER_PROOF = 'true';
-    mockSendProof.mockImplementationOnce(async () => ({ skipped: true, reason: 'validation_failed' }));
+    mockSendProof.mockImplementationOnce(async () => ({ skipped: true, reason: 'validation_failed', notified: true }));
     await runPestInsiderAutopilot({ now: FIRST_TUESDAY });
-    expect(mockRecordAudit).toHaveBeenCalledWith(expect.objectContaining({ metadata: { sent: false, reason: 'validation_failed' } }));
+    expect(mockRecordAudit).toHaveBeenCalledWith(expect.objectContaining({ metadata: { sent: false, reason: 'validation_failed', notified: true } }));
+  });
+
+  test('a blocked attempt whose owner notice was NOT delivered is recorded as not notified', async () => {
+    process.env.GATE_PEST_INSIDER_PROOF = 'true';
+    mockSendProof.mockImplementationOnce(async () => ({ skipped: true, reason: 'validation_failed', notified: false }));
+    await runPestInsiderAutopilot({ now: FIRST_TUESDAY });
+    expect(mockRecordAudit).toHaveBeenCalledWith(expect.objectContaining({ metadata: { sent: false, reason: 'validation_failed', notified: false } }));
   });
 
   test('a failure to record the attempt never masks the proof outcome', async () => {
@@ -121,12 +128,11 @@ describe('pest-insider proof gate', () => {
     expect(mockSendProof).toHaveBeenCalledTimes(1);
   });
 
-  test('a draft that cannot be written is reported to the owner, not only logged', async () => {
+  test('a draft that cannot be written is reported to the owner AND fails the job (scheduled-job health sees it)', async () => {
     mockCreateDraft.mockRejectedValueOnce(new Error('fact register is empty: no verified facts to ground the draft'));
 
-    const result = await runPestInsiderAutopilot({ now: FIRST_TUESDAY });
+    await expect(runPestInsiderAutopilot({ now: FIRST_TUESDAY })).rejects.toThrow(/fact register is empty/);
 
-    expect(result).toEqual({ skipped: true, reason: 'draft_failed', error: expect.stringContaining('fact register is empty') });
     expect(mockTrigger).toHaveBeenCalledWith('newsletter_proof_blocked', expect.objectContaining({
       subject: expect.stringContaining('Pest Insider'),
       errors: expect.arrayContaining([expect.stringContaining('fact register is empty')]),
@@ -135,14 +141,11 @@ describe('pest-insider proof gate', () => {
     expect(mockSendProof).not.toHaveBeenCalled();
   });
 
-  test('a failing draft-failure notification never masks the draft failure', async () => {
+  test('a failing draft-failure notification never masks the draft failure — the original error is what the job fails with', async () => {
     mockCreateDraft.mockRejectedValueOnce(new Error('writer down'));
     mockTrigger.mockRejectedValueOnce(new Error('notify down'));
 
-    const result = await runPestInsiderAutopilot({ now: FIRST_TUESDAY });
-
-    expect(result.skipped).toBe(true);
-    expect(result.reason).toBe('draft_failed');
+    await expect(runPestInsiderAutopilot({ now: FIRST_TUESDAY })).rejects.toThrow('writer down');
   });
 });
 
@@ -208,7 +211,7 @@ describe('pest-insider proof catch-up', () => {
 
   const DRAFTED_AT = new Date('2026-06-02T11:00:00Z'); // the first-Tuesday 7:00 AM ET creation
   // The autopilot's own proof attempt at creation time, blocked by the validator (owner notified then).
-  const FIRST_ATTEMPT = { created_at: new Date('2026-06-02T11:05:00Z'), metadata: { sent: false, reason: 'validation_failed' } };
+  const FIRST_ATTEMPT = { created_at: new Date('2026-06-02T11:05:00Z'), metadata: { sent: false, reason: 'validation_failed', notified: true } };
 
   test('the same-day catch-up on a blocked, unedited draft is skipped quietly — the owner was told at the first attempt', async () => {
     process.env.GATE_PEST_INSIDER_PROOF = 'true';
@@ -280,7 +283,7 @@ describe('pest-insider proof catch-up', () => {
   test('a segment that still matches nobody after a notified zero_recipients attempt is skipped quietly', async () => {
     process.env.GATE_PEST_INSIDER_PROOF = 'true';
     mockCountRecipients.mockResolvedValueOnce(0);
-    wireDb({ draft: { id: 'send-pi-1', updated_at: DRAFTED_AT, segment_filter: { tag: 'nobody' } }, lastAttempt: { created_at: new Date('2026-06-02T11:05:00Z'), metadata: { sent: false, reason: 'zero_recipients' } } });
+    wireDb({ draft: { id: 'send-pi-1', updated_at: DRAFTED_AT, segment_filter: { tag: 'nobody' } }, lastAttempt: { created_at: new Date('2026-06-02T11:05:00Z'), metadata: { sent: false, reason: 'zero_recipients', notified: true } } });
 
     const result = await retryPestInsiderProof({ now: DAY_AFTER });
 
@@ -292,7 +295,7 @@ describe('pest-insider proof catch-up', () => {
   test('…but a grown audience is proofed on the next tick', async () => {
     process.env.GATE_PEST_INSIDER_PROOF = 'true';
     mockCountRecipients.mockResolvedValueOnce(12);
-    wireDb({ draft: { id: 'send-pi-1', updated_at: DRAFTED_AT }, lastAttempt: { created_at: new Date('2026-06-02T11:05:00Z'), metadata: { sent: false, reason: 'zero_recipients' } } });
+    wireDb({ draft: { id: 'send-pi-1', updated_at: DRAFTED_AT }, lastAttempt: { created_at: new Date('2026-06-02T11:05:00Z'), metadata: { sent: false, reason: 'zero_recipients', notified: true } } });
 
     const result = await retryPestInsiderProof({ now: DAY_AFTER });
 
@@ -302,13 +305,25 @@ describe('pest-insider proof catch-up', () => {
 
   test('metadata stored as a JSON string is read the same way', async () => {
     process.env.GATE_PEST_INSIDER_PROOF = 'true';
-    wireDb({ draft: { id: 'send-pi-1', updated_at: DRAFTED_AT }, lastAttempt: { created_at: new Date('2026-06-02T11:05:00Z'), metadata: JSON.stringify({ sent: false, reason: 'validation_failed' }) } });
+    wireDb({ draft: { id: 'send-pi-1', updated_at: DRAFTED_AT }, lastAttempt: { created_at: new Date('2026-06-02T11:05:00Z'), metadata: JSON.stringify({ sent: false, reason: 'validation_failed', notified: true }) } });
     mockValidate.mockImplementation(() => ({ errors: ['blocked'], warnings: [] }));
 
     const result = await retryPestInsiderProof({ now: DAY_AFTER });
 
     expect(result).toEqual({ skipped: true, reason: 'validation_failed', sendId: 'send-pi-1' });
     expect(mockSendProof).not.toHaveBeenCalled();
+  });
+
+  test('a recorded block whose owner notice was never delivered suppresses nothing: the owner has not been told', async () => {
+    process.env.GATE_PEST_INSIDER_PROOF = 'true';
+    wireDb({ draft: { id: 'send-pi-1', updated_at: DRAFTED_AT }, lastAttempt: { created_at: new Date('2026-06-02T11:05:00Z'), metadata: { sent: false, reason: 'validation_failed', notified: false } } });
+    mockValidate.mockImplementation(() => ({ errors: ['blocked'], warnings: [] }));
+    mockSendProof.mockImplementationOnce(async () => ({ skipped: true, reason: 'validation_failed', notified: true }));
+
+    const result = await retryPestInsiderProof({ now: DAY_AFTER });
+
+    expect(mockSendProof).toHaveBeenCalledWith('send-pi-1');
+    expect(result.reason).toBe('validation_failed');
   });
 
   test('a transient failure (validation passes now) is retried even with an attempt on record', async () => {

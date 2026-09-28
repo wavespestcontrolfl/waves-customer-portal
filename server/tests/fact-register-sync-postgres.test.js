@@ -316,6 +316,17 @@ postgres('email-division fact register sync against migrated PostgreSQL', () => 
     expect((await rowOf(facts[0].slug)).active).toBe(false);
   });
 
+  test('an edited row whose fact expires is archived with the edit intact', async () => {
+    const f = fact(1, { expiresOn: '2026-09-20' });
+    await syncFactRegister({ conn: trx, now: new Date('2026-09-01T12:00:00Z'), facts: [f], retireStrays: false });
+    await trx('knowledge_base').where({ slug: f.slug }).update({ content: 'A person corrected this.' });
+
+    const r = await sync([f]);
+    expect(r.retired).toEqual([f.slug]);
+    const row = await rowOf(f.slug);
+    expect(row).toMatchObject({ active: false, status: 'archived', content: 'A person corrected this.' });
+  });
+
   test('a legacy register row (no register_hash, from the pre-fingerprint seeds) is brought under management', async () => {
     const f = fact(1);
     const [legacy] = await trx('knowledge_base').insert({

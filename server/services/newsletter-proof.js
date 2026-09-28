@@ -397,12 +397,17 @@ async function countRecipients(send) {
   return NewsletterSender.countSegmentRecipients(send.segment_filter);
 }
 
+// Returns whether the notification was actually delivered — a caller that
+// records "the owner was told" must not take a swallowed failure for a
+// delivery (Pest Insider catch-up, codex round 6 P1).
 async function notifyProof(type, payload) {
   try {
     const { triggerNotification } = require('./notification-triggers');
     await triggerNotification(type, payload);
+    return true;
   } catch (e) {
     logger.warn(`[newsletter-proof] ${type} notification failed: ${e.message}`);
+    return false;
   }
 }
 
@@ -411,7 +416,8 @@ async function notifyProof(type, payload) {
  * proof_sent_at (or isn't a draft anymore) is skipped, so the Monday/early-
  * Tuesday catch-up jobs can call this safely every tick.
  *
- * @returns {{ sent?: boolean, skipped?: boolean, reason?: string }}
+ * @returns {{ sent?: boolean, skipped?: boolean, reason?: string, notified?: boolean }} — `notified`
+ *   says whether the owner's blocked notice was actually delivered.
  */
 async function sendNewsletterProof(sendId) {
   if (!isProofApprovalEnabled()) return { skipped: true, reason: 'gate_off' };
@@ -435,31 +441,31 @@ async function sendNewsletterProof(sendId) {
   // blocked from sending gets no proof, it gets a "fix me" notification.
   const recipientCount = await countRecipients(send);
   if (recipientCount === 0) {
-    await notifyProof('newsletter_proof_blocked', {
+    const notified = await notifyProof('newsletter_proof_blocked', {
       subject: send.subject,
       errors: ['Segment matches 0 active subscribers'],
     });
-    return { skipped: true, reason: 'zero_recipients' };
+    return { skipped: true, reason: 'zero_recipients', notified };
   }
   if (requiresClaimValidation(send.newsletter_type)) {
     const lockedPrices = await lockedPricesForSend(send, db);
     const { errors } = validateNewsletterDraft(send, { recipientCount, lockedPrices });
     if (errors.length > 0) {
-      await notifyProof('newsletter_proof_blocked', { subject: send.subject, errors });
-      return { skipped: true, reason: 'validation_failed', errors };
+      const notified = await notifyProof('newsletter_proof_blocked', { subject: send.subject, errors });
+      return { skipped: true, reason: 'validation_failed', errors, notified };
     }
   }
   const calendarContext = await resolveFlagshipCalendarContext(send);
   if (!calendarContext.valid) {
     const errors = ['The linked calendar must target its own future issue Tuesday at exactly 6:00 AM ET.'];
-    await notifyProof('newsletter_proof_blocked', { subject: send.subject, errors });
-    return { skipped: true, reason: 'calendar_target_invalid', errors };
+    const notified = await notifyProof('newsletter_proof_blocked', { subject: send.subject, errors });
+    return { skipped: true, reason: 'calendar_target_invalid', errors, notified };
   }
   const selectionReference = calendarContext.flagship ? calendarContext.scheduledFor : new Date();
   const eventSelection = await validateFlagshipEventSelection(send, { reference: selectionReference });
   if (!eventSelection.valid) {
-    await notifyProof('newsletter_proof_blocked', { subject: send.subject, errors: eventSelection.errors });
-    return { skipped: true, reason: 'event_selection_invalid', errors: eventSelection.errors };
+    const notified = await notifyProof('newsletter_proof_blocked', { subject: send.subject, errors: eventSelection.errors });
+    return { skipped: true, reason: 'event_selection_invalid', errors: eventSelection.errors, notified };
   }
   // Live official-page recheck (dark behind NEWSLETTER_LIVE_REVERIFY):
   // don't proof a lineup carrying a confirmed-dead event — the owner
@@ -469,8 +475,8 @@ async function sendNewsletterProof(sendId) {
     const errors = proofRecheck.failures.map((f) => `Locked event failed live recheck: ${f.title} — ${f.reason}`);
     const suggestion = await alternateSuggestionLine(send);
     if (suggestion) errors.push(suggestion);
-    await notifyProof('newsletter_proof_blocked', { subject: send.subject, errors });
-    return { skipped: true, reason: 'live_reverify_failed', errors };
+    const notified = await notifyProof('newsletter_proof_blocked', { subject: send.subject, errors });
+    return { skipped: true, reason: 'live_reverify_failed', errors, notified };
   }
 
   // Atomic proof claim BEFORE the external SendGrid call: overlapping

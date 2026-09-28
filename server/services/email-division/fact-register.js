@@ -139,15 +139,17 @@ function planFactSync(fact, row, { today, priorSeed = false } = {}) {
   // register adopted a person's correction word for word, or the person
   // typed the register's) has converged: restamp it, do not hold it forever.
   const converged = !legacy && rowHash !== meta.register_hash && rowHash === shippedHash;
-  if (!legacy && rowHash !== meta.register_hash && !converged) {
-    return { action: 'hold', reason: 'edited_by_person', rowHash, shippedHash };
-  }
-  // Expired: archive the row (status is what the shared search reads) even
-  // when a person had already set active=false — that deactivation is
-  // remembered so a comeback never switches the row back on.
+  // Expired: archive the row (status is what the shared search reads) — a
+  // person's edit is kept word for word, but expired guidance leaves the
+  // shared search like any other (codex round 6 P2) — and even when a
+  // person had already set active=false, that deactivation is remembered
+  // so a comeback never switches the row back on.
   if (expired) {
     if (row.status === 'archived') return { action: 'unchanged' };
     return { action: 'retire', reason: 'expired', keepDeactivation: !row.active && !meta.retired_reason };
+  }
+  if (!legacy && rowHash !== meta.register_hash && !converged) {
+    return { action: 'hold', reason: 'edited_by_person', rowHash, shippedHash };
   }
   // active=false with no retirement stamp is a person's deactivation (the
   // admin knowledge routes write arbitrary columns); the register does not

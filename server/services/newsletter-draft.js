@@ -92,7 +92,7 @@ SWFL SEASONAL CONTEXT (pick what's relevant):
 - Mar: spring break, citrus bloom, native subterranean termite flights (UF: Jan–May on warm afternoons after rain; Asian subterranean swarms begin in March)
 - Apr: Bradenton Blues Festival, spring training tail, lawn pre-emergents, lovebugs (UF: first flight April–May)
 - May: DeSoto Heritage Festival, lovebugs (UF: April–May), rainy season starts — container mosquitoes (CDC: egg to adult in 7–10 days)
-- Jun: hurricane season begins, daily thunderstorms, nitrogen/phosphorus blackout June 1–Sept 30 (Sarasota + Manatee ordinances)
+- Jun: hurricane season begins, daily thunderstorms, nitrogen/phosphorus blackout June 1–Sept 30 in Sarasota County, Sarasota, Venice, Longboat Key and Manatee County (North Port's runs April 1–Sept 30)
 - Jul: 4th of July, peak rainy season, chinch bugs peak early July (UF), palmetto bugs indoors for food, water or shelter from extreme weather (UF)
 - Aug: back-to-school, peak hurricane risk, chinch bug damage on St. Augustine
 - Sep: hurricane peak, Siesta Key Crystal Classic, post-storm yard checklist; western drywood termite flights peak Sep–Nov (UF); subterranean termites do NOT swarm again after storms
@@ -222,7 +222,7 @@ const PEST_INSIDER_ROTATION = {
   },
   June: {
     service: 'mosquito treatment (daily thunderstorms = standing water everywhere)',
-    lawn: 'chinch bugs on St. Augustine (UF: thrive in warm, damp summer months); nitrogen/phosphorus blackout begins June 1',
+    lawn: 'chinch bugs on St. Augustine (UF: thrive in warm, damp summer months); nitrogen/phosphorus blackout begins June 1 (April 1 in North Port)',
     beats: 'hurricane season opens — the post-storm yard checklist (standing water is a mosquito nursery in 7–10 days per CDC; clear debris); say only what the register supports about pests after storms',
   },
   July: {

@@ -266,9 +266,13 @@ describe('planFactSync (pure)', () => {
     expect(planFactSync(expired, syncedRow({ metadata: syncedMeta({ expires_on: '2026-09-28' }) }), { today: '2026-09-27' })).toEqual({ action: 'unchanged' });
   });
 
-  test('an expired fact never overwrites a person\'s edit, even to retire it', () => {
+  test('an expired fact still archives a person-edited row — the edit is kept word for word, the expired guidance leaves the shared search', () => {
     const expired = { ...fact, expiresOn: '2026-09-01' };
-    expect(planFactSync(expired, syncedRow({ content: 'edited' }), { today: TODAY }).action).toBe('hold');
+    expect(planFactSync(expired, syncedRow({ content: 'edited' }), { today: TODAY })).toEqual({ action: 'retire', reason: 'expired', keepDeactivation: false });
+    // …and once archived the edited row is left alone; if the fact comes back unexpired the edit is held, never overwritten.
+    const archived = syncedRow({ content: 'edited', active: false, status: 'archived', metadata: syncedMeta({ retired_reason: 'expired', retired_on: '2026-09-28' }) });
+    expect(planFactSync(expired, archived, { today: TODAY })).toEqual({ action: 'unchanged' });
+    expect(planFactSync(fact, archived, { today: TODAY })).toMatchObject({ action: 'hold', reason: 'edited_by_person' });
   });
 
   test('a fact the REGISTER retired comes back, restamped, when the register extends the expiry', () => {

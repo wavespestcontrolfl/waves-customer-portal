@@ -42,8 +42,9 @@
  *
  * A draft that cannot be written at all (the fact register empty, the
  * writer down) is reported to the owner through the same
- * newsletter_proof_blocked notification instead of only a log line: the
- * month's issue is otherwise silently missing.
+ * newsletter_proof_blocked notification and then rethrown, so the
+ * scheduler's exclusive job records a failure: the month's issue is
+ * otherwise silently missing.
  */
 
 const db = require('../models/db');
@@ -76,15 +77,17 @@ async function sendProofFor(sendId) {
   try {
     const { sendNewsletterProof } = require('./newsletter-proof');
     const result = await sendNewsletterProof(sendId);
-    if (result?.sent === true) outcome = { sent: true, reason: null };
+    if (result?.sent === true) outcome = { sent: true, reason: null, notified: false };
     else {
       const reason = result?.reason || 'unknown';
       logger.warn(`[pest-insider-autopilot] proof not sent for ${sendId}: ${reason}`);
-      outcome = { sent: false, reason };
+      // `notified` is sendNewsletterProof's word that the owner's blocked
+      // notice was DELIVERED — a swallowed notification failure is not one.
+      outcome = { sent: false, reason, notified: result?.notified === true };
     }
   } catch (e) {
     logger.warn(`[pest-insider-autopilot] proof send failed: ${e.message}`);
-    outcome = { sent: false, reason: 'threw' };
+    outcome = { sent: false, reason: 'threw', notified: false };
   }
   await recordProofAttempt(sendId, outcome);
   return outcome;
@@ -98,7 +101,7 @@ async function recordProofAttempt(sendId, outcome) {
       action: PROOF_ATTEMPT_ACTION,
       resource_type: 'newsletter_sends',
       resource_id: sendId,
-      metadata: { sent: outcome.sent, reason: outcome.reason },
+      metadata: { sent: outcome.sent, reason: outcome.reason, notified: outcome.notified === true },
     });
   } catch (e) {
     logger.warn(`[pest-insider-autopilot] could not record the proof attempt: ${e.message}`);
@@ -114,7 +117,7 @@ async function lastProofAttempt(sendId) {
       .first('created_at', 'metadata');
     if (!last?.created_at) return null;
     const meta = typeof last.metadata === 'string' ? JSON.parse(last.metadata || '{}') : (last.metadata || {});
-    return { at: new Date(last.created_at), reason: meta.reason || null };
+    return { at: new Date(last.created_at), reason: meta.reason || null, notified: meta.notified === true };
   } catch (e) {
     logger.warn(`[pest-insider-autopilot] could not read the last proof attempt: ${e.message}`);
     return null;
@@ -171,9 +174,12 @@ async function runPestInsiderAutopilot({ now = new Date() } = {}) {
       newsletterType: PEST_INSIDER_TYPE,
     });
   } catch (err) {
+    // Tell the owner, then FAIL the job: runExclusive records the outcome
+    // in job health, and a month with no draft must not read as a success
+    // there (codex round 6 P2) — especially if the notice also failed.
     logger.error(`[pest-insider-autopilot] draft failed: ${err.message}`);
     await notifyDraftFailed(month, err);
-    return { skipped: true, reason: 'draft_failed', error: err.message };
+    throw err;
   }
   const { send, draft } = created;
 
@@ -229,11 +235,12 @@ async function retryPestInsiderProof({ now = new Date() } = {}) {
   // record (the gate was off when the issue was drafted) means the same:
   // attempt, so the owner is told once.
   const lastAttempt = await lastProofAttempt(draft.id);
-  if (lastAttempt && !editedSince(draft, lastAttempt.at)) {
-    // Each reason below is one sendNewsletterProof notified the owner about
-    // and that stays true until something changes: the draft (validation)
-    // or the audience (zero recipients). Re-checked live, so a fixed draft
-    // or a grown segment is proofed on the next tick.
+  if (lastAttempt?.notified && !editedSince(draft, lastAttempt.at)) {
+    // Only an attempt whose blocked notice was DELIVERED counts as "the owner
+    // was told" (a swallowed notification failure suppresses nothing). Each
+    // reason below stays true until something changes: the draft
+    // (validation) or the audience (zero recipients). Re-checked live, so a
+    // fixed draft or a grown segment is proofed on the next tick.
     if (lastAttempt.reason === 'validation_failed' && await draftFailsValidation(draft)) {
       logger.info(`[pest-insider-autopilot] proof catch-up skipped for ${draft.id}: draft still fails validation and has not been edited since the last attempt`);
       return { skipped: true, reason: 'validation_failed', sendId: draft.id };
