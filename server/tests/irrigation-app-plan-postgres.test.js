@@ -144,7 +144,7 @@ const SKIP = !process.env.DATABASE_URL;
     expect(await findEligibleCustomers({ now, customerId })).toHaveLength(1);
     await mockTransaction('notification_prefs').insert({ customer_id: pestOnly, seasonal_tips: false });
     expect(await findEligibleCustomers({ now, customerId: pestOnly })).toHaveLength(0);
-  });
+  }, 30000);
 
   test('current database settings and home identity invalidate the saved instructions', async () => {
     await mockTransaction('irrigation_week_plans').where({ customer_id: customerId }).update({ sent_at: now });

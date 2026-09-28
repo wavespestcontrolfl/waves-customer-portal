@@ -984,6 +984,19 @@ async function hasLawnServiceEvidence(customerId, { now = new Date() } = {}) {
   return !!row;
 }
 
+// Is ONE customer tagged into the Monday email? The portal's irrigation
+// surfaces (Weekly Inches, the watering-plan card the plan push links to)
+// accept this too via customerQualifiesForLawnInches — otherwise the email's
+// schedule ask and the plan push dead-end for an opted-in customer.
+async function hasIrrigationEmailOptIn(customerId) {
+  if (!customerId) return false;
+  const row = await db('customer_tags')
+    .where('customer_id', customerId)
+    .whereRaw('LOWER(tag) = ?', [IRRIGATION_EMAIL_OPT_IN_TAG])
+    .first('id');
+  return !!row;
+}
+
 async function findEligibleCustomers({ now = new Date(), customerId = null, includeApp = false, conn = db } = {}) {
   const lawnServiceCutoff = etDateString(addETDays(now, -LAWN_SERVICE_RECENCY_DAYS));
   const todayET = etDateString(now);
@@ -2071,6 +2084,7 @@ module.exports = {
   findLawnEmailAudienceGaps,
   hasLawnServiceEvidence,
   hasRecurringLawnEvidence,
+  hasIrrigationEmailOptIn,
   fetchUpcomingWeekForecast,
   TEMPLATE_CUT_BACK,
   TEMPLATE_ADD_WATER,
