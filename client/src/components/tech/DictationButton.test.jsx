@@ -76,8 +76,12 @@ describe("DictationButton", () => {
     const instance = FakeSpeechRecognition.instances[0];
     expect(screen.getByRole("button")).toHaveAttribute("aria-pressed", "true");
 
-    rerender(<DictationButton onAppend={vi.fn()} disabled />);
+    const onAppendWhileBusy = vi.fn();
+    rerender(<DictationButton onAppend={onAppendWhileBusy} disabled />);
     expect(instance.stop).toHaveBeenCalledTimes(1);
+    // A result still in flight when the mic went busy never lands.
+    act(() => instance.onresult?.({ resultIndex: 0, results: [{ isFinal: true, 0: { transcript: "late" }, length: 1 }] }));
+    expect(onAppendWhileBusy).not.toHaveBeenCalled();
 
     act(() => instance.onend()); // the browser's onend after stop()
     expect(instance.start).toHaveBeenCalledTimes(1); // no restart

@@ -77,6 +77,14 @@ export default function useSpeechDictation(onTranscript, options = {}) {
   // Ends a session that stays open with no final result for IDLE_STOP_MS —
   // a browser that honors `continuous` may never fire onend on its own.
   const idleTimerRef = useRef(null);
+  // The element whose click started the live session: its own press is the
+  // normal tap-to-stop, never an "other button" stop that could let one
+  // gesture both stop and restart it.
+  const micElRef = useRef(null);
+  // Set by a stop the user did NOT make on the mic (another button, a form
+  // submit, a disabled mic): that action already read the field, so a final
+  // result still in flight is dropped instead of landing after it.
+  const discardResultsRef = useRef(false);
 
   const speechSupported =
     typeof window !== "undefined" &&
@@ -228,7 +236,7 @@ export default function useSpeechDictation(onTranscript, options = {}) {
     setListening(true);
   }, [uploadClip, uploading]);
 
-  const toggle = useCallback(() => {
+  const toggle = useCallback((event) => {
     const SR =
       typeof window !== "undefined"
         ? window.SpeechRecognition || window.webkitSpeechRecognition
@@ -269,6 +277,7 @@ export default function useSpeechDictation(onTranscript, options = {}) {
     rec.interimResults = false;
     rec.lang = "en-US";
     rec.onresult = (ev) => {
+      if (discardResultsRef.current) return;
       let append = "";
       for (let i = ev.resultIndex; i < ev.results.length; i++) {
         if (ev.results[i].isFinal) append += ev.results[i][0].transcript;
@@ -331,6 +340,8 @@ export default function useSpeechDictation(onTranscript, options = {}) {
       }
     };
     stopRequestedRef.current = false;
+    discardResultsRef.current = false;
+    micElRef.current = event?.currentTarget instanceof Element ? event.currentTarget : null;
     fatalErrorRef.current = false;
     fastEndStreakRef.current = 0;
     gotResultThisSessionRef.current = false;
@@ -356,16 +367,18 @@ export default function useSpeechDictation(onTranscript, options = {}) {
   //     would otherwise record in the background);
   //   - pressing any button or link, or submitting a form. Save, Send,
   //     Generate and Complete read the dictated field on that press, so
-  //     speech after it must not land in state the action already took. The
-  //     mic's own press is a stop anyway, and another mic's press starts that
-  //     field's session.
+  //     speech after it — and a final result still in flight — must not land
+  //     in state the action already took. The mic that started the session
+  //     is excluded: its press is the normal tap-to-stop, which still
+  //     delivers the last words. Another mic's press starts that field.
   // The MediaRecorder upload path records until tap-to-stop and is unaffected.
   useEffect(() => {
     if (!listening || typeof document === "undefined") return undefined;
-    const stopLive = () => {
+    const stopLive = ({ discard = false } = {}) => {
       const rec = recognitionRef.current;
       if (!rec) return;
       stopRequestedRef.current = true;
+      if (discard) discardResultsRef.current = true;
       try {
         rec.stop();
       } catch {
@@ -377,15 +390,19 @@ export default function useSpeechDictation(onTranscript, options = {}) {
     };
     const onPointerDown = (event) => {
       const el = event.target instanceof Element ? event.target : null;
-      if (el?.closest('button, [role="button"], input[type="submit"], input[type="button"], a[href]')) stopLive();
+      if (!el || micElRef.current?.contains(el)) return;
+      if (el.closest('button, [role="button"], input[type="submit"], input[type="button"], a[href]')) {
+        stopLive({ discard: true });
+      }
     };
+    const onSubmit = () => stopLive({ discard: true });
     document.addEventListener("visibilitychange", onVisibilityChange);
     document.addEventListener("pointerdown", onPointerDown, true);
-    document.addEventListener("submit", stopLive, true);
+    document.addEventListener("submit", onSubmit, true);
     return () => {
       document.removeEventListener("visibilitychange", onVisibilityChange);
       document.removeEventListener("pointerdown", onPointerDown, true);
-      document.removeEventListener("submit", stopLive, true);
+      document.removeEventListener("submit", onSubmit, true);
     };
   }, [listening]);
 
@@ -427,5 +444,21 @@ export default function useSpeechDictation(onTranscript, options = {}) {
     };
   }, []);
 
-  return { listening, supported, toggle, mode, uploading };
+  // Ends a live SPEECH session for a consumer that has gone busy (e.g. a
+  // disabled mic while its field is being rewritten) and drops any result
+  // still in flight. The MediaRecorder upload path records until
+  // tap-to-stop and has no in-flight speech results to drop.
+  const cancel = useCallback(() => {
+    const rec = recognitionRef.current;
+    if (!rec) return;
+    stopRequestedRef.current = true;
+    discardResultsRef.current = true;
+    try {
+      rec.stop();
+    } catch {
+      /* already ending */
+    }
+  }, []);
+
+  return { listening, supported, toggle, cancel, mode, uploading };
 }

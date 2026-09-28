@@ -343,6 +343,68 @@ describe("useSpeechDictation speech path — keep listening through pauses", () 
     }
   });
 
+  it("the mic's own press is the normal tap-to-stop: the press itself does not stop, the click does, and the last words still arrive", () => {
+    const onTranscript = vi.fn();
+    const { result } = renderHook(() => useSpeechDictation(onTranscript));
+    const mic = document.createElement("button");
+    const micIcon = document.createElement("svg");
+    mic.appendChild(micIcon);
+    document.body.append(mic);
+    try {
+      act(() => result.current.toggle({ currentTarget: mic })); // the click that started it
+      const instance = FakeSpeechRecognition.instances[0];
+
+      // Holding the mic: pointerdown alone must not stop (and so can never
+      // let the same gesture's click restart it).
+      act(() => micIcon.dispatchEvent(new Event("pointerdown", { bubbles: true })));
+      expect(instance.stop).not.toHaveBeenCalled();
+
+      act(() => result.current.toggle({ currentTarget: mic })); // the click: tap-to-stop
+      expect(instance.stop).toHaveBeenCalledTimes(1);
+      act(() => fireFinalResult(instance, "last words"));
+      expect(onTranscript).toHaveBeenCalledWith("last words");
+      act(() => instance.onend());
+      expect(instance.start).toHaveBeenCalledTimes(1);
+      expect(result.current.listening).toBe(false);
+    } finally {
+      mic.remove();
+    }
+  });
+
+  it("a final result still in flight after another button stops the session is dropped", () => {
+    const onTranscript = vi.fn();
+    const { result } = renderHook(() => useSpeechDictation(onTranscript));
+    act(() => result.current.toggle());
+    const instance = FakeSpeechRecognition.instances[0];
+    const save = document.createElement("button");
+    document.body.append(save);
+    try {
+      act(() => save.dispatchEvent(new Event("pointerdown", { bubbles: true })));
+      act(() => fireFinalResult(instance, "said while pressing save"));
+      expect(onTranscript).not.toHaveBeenCalled();
+    } finally {
+      save.remove();
+    }
+  });
+
+  it("cancel() stops the live session and drops a result still in flight; the next session delivers normally", () => {
+    const onTranscript = vi.fn();
+    const { result } = renderHook(() => useSpeechDictation(onTranscript));
+    act(() => result.current.toggle());
+    const first = FakeSpeechRecognition.instances[0];
+    act(() => result.current.cancel());
+    expect(first.stop).toHaveBeenCalledTimes(1);
+    act(() => fireFinalResult(first, "in flight"));
+    act(() => first.onend());
+    expect(onTranscript).not.toHaveBeenCalled();
+    expect(result.current.listening).toBe(false);
+
+    act(() => result.current.toggle());
+    const second = FakeSpeechRecognition.instances[1];
+    act(() => fireFinalResult(second, "fresh words"));
+    expect(onTranscript).toHaveBeenCalledWith("fresh words");
+  });
+
   it("submitting a form stops a live session", () => {
     const { result } = renderHook(() => useSpeechDictation(vi.fn()));
     act(() => result.current.toggle());
