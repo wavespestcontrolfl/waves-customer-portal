@@ -430,21 +430,21 @@ class InternalLinkPrExecutor {
     let pr = null;
     let headSha = null;
     try {
-      await GitHubClient.createBranch(branch);
-      const commits = [];
-      for (const item of selected) {
-        const commit = await GitHubClient.putFile({
-          // item.source.file is the RESOLVED path (handles a source post that
-          // was migrated .md->.mdx after this task was planned); fall back to
-          // the task path for safety.
-          path: item.source.file || item.task.source_file,
-          content: item.patchedContent,
-          message: `chore(seo): add internal link to ${item.targetUrl}`,
-          branch,
-          sha: item.source.sha,
-        });
-        commits.push(commit);
-      }
+      const created = await GitHubClient.createBranch(branch);
+      // ONE commit for the whole batch: Cloudflare Pages may build only the
+      // first commit of a rapid push burst, which would leave the auto-merge
+      // preview gate waiting on a stale build forever. A main edit to a
+      // source between our read and this commit is caught by the link-only
+      // diff gate (head with the link unwrapped must equal main).
+      const commit = await GitHubClient.commitFiles({
+        branch,
+        message: `chore(seo): add ${selected.length} internal link${selected.length === 1 ? '' : 's'}`,
+        // item.source.file is the RESOLVED path (handles a source post that
+        // was migrated .md->.mdx after this task was planned).
+        files: selected.map((item) => ({ path: item.source.file || item.task.source_file, content: item.patchedContent })),
+        expectedHeadSha: created?.object?.sha || null,
+      });
+      const commits = [commit];
 
       pr = await GitHubClient.createPr({
         head: branch,

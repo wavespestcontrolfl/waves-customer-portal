@@ -2489,7 +2489,9 @@ class AutonomousRunner {
     }
 
     const t = Date.now();
-    const corpus = await this._loadAstroCorpus({ required: false });
+    // Live runs need the real corpus: a GitHub outage must throw (the action
+    // catch releases the claim for retry), not look like "no candidates".
+    const corpus = await this._loadAstroCorpus({ required: !run.shadow_mode });
     const excludeSource = await getProtectedPages()?.protectedSourcePredicate?.({ db });
     const tasks = planner.planForTarget(
       { url: brief.target_url, keyword: brief.target_keyword, city: brief.city, service: brief.service, title: brief.title },

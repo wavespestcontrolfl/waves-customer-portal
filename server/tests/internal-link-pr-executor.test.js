@@ -5,6 +5,7 @@ jest.mock('../services/content-astro/github-client', () => ({
   getPr: jest.fn(),
   createBranch: jest.fn(),
   putFile: jest.fn(),
+  commitFiles: jest.fn(),
   createPr: jest.fn(),
   createIssueComment: jest.fn(),
   findOpenPrByHead: jest.fn(async () => null),
@@ -486,7 +487,7 @@ describe('internal-link dry-run executor helpers', () => {
 
   test('opens an auto-merge Astro PR for validated patch candidates', async () => {
     GitHubClient.createBranch.mockResolvedValue({});
-    GitHubClient.putFile.mockResolvedValue({ commit: { sha: 'link-commit-sha' } });
+    GitHubClient.commitFiles.mockResolvedValue({ commit: { sha: 'link-commit-sha' } });
     GitHubClient.createPr.mockResolvedValue({
       number: 77,
       html_url: 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/77',
@@ -537,12 +538,16 @@ describe('internal-link dry-run executor helpers', () => {
     expect(result.status).toBe('pr_open');
     expect(result.count).toBe(1);
     expect(GitHubClient.createBranch).toHaveBeenCalledWith(expect.stringMatching(/^content\/internal-link-pest-control-bradenton-fl-/));
-    expect(GitHubClient.putFile).toHaveBeenCalledWith(expect.objectContaining({
+    // One commit for the whole batch (Cloudflare builds only the first
+    // commit of a push burst).
+    expect(GitHubClient.putFile).not.toHaveBeenCalled();
+    expect(GitHubClient.commitFiles).toHaveBeenCalledTimes(1);
+    const [{ files }] = GitHubClient.commitFiles.mock.calls[0];
+    expect(files).toEqual([expect.objectContaining({
       path: 'src/content/services/pest-control-quote-bradenton-fl.md',
-      sha: 'source-sha',
       content: expect.stringContaining('[Bradenton pest control](/pest-control-bradenton-fl/) quote today.'),
-    }));
-    expect(GitHubClient.putFile.mock.calls[0][0].content).toContain('slug: /pest-control-quote-bradenton-fl/');
+    })]);
+    expect(files[0].content).toContain('slug: /pest-control-quote-bradenton-fl/');
     expect(GitHubClient.createPr).toHaveBeenCalledWith(expect.objectContaining({
       head: expect.stringMatching(/^content\/internal-link-pest-control-bradenton-fl-/),
       title: expect.stringContaining('SEO links: 1 internal link'),

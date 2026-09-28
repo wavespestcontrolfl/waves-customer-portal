@@ -2239,7 +2239,7 @@ describe('runNext Astro corpus loading', () => {
     }
   });
 
-  test('optional GitHub corpus load failures degrade to an empty corpus for internal-link runs', async () => {
+  test('a live internal-link run releases the claim when the corpus cannot load (retry, not "no candidates")', async () => {
     const previousAstroDir = process.env.ASTRO_REPO_DIR;
     const previousShadow = process.env.SHADOW_MODE_ADD_INTERNAL_LINKS;
     delete process.env.ASTRO_REPO_DIR;
@@ -2274,17 +2274,12 @@ describe('runNext Astro corpus loading', () => {
 
       const result = await runner.runNext();
 
-      // Nothing to ship is a plain skip, not a review-queue item.
-      expect(result.outcome).toBe('skipped_gate_fail');
-      expect(result.skip_reason).toBe('internal_links_no_candidates');
-      expect(result.link_tasks_queued).toBe(0);
-      expect(linkPlanner.planForTarget).toHaveBeenCalledWith(
-        expect.objectContaining({ url: '/blog/ghost-ants/' }),
-        { corpus: [], opportunityId: 'opp_links_optional_1' }
-      );
-      expect(queue.skip).toHaveBeenCalledWith('opp_links_optional_1', 'internal_links_no_candidates', { claimToken: claimedAt });
+      expect(result.outcome).toBe('failed');
+      expect(result.failure_message).toContain('GitHub token missing');
+      expect(linkPlanner.planForTarget).not.toHaveBeenCalled();
+      expect(queue.release).toHaveBeenCalledWith('opp_links_optional_1', { claimToken: claimedAt });
+      expect(queue.skip).not.toHaveBeenCalled();
       expect(queue.pendingReview).not.toHaveBeenCalled();
-      expect(queue.release).not.toHaveBeenCalled();
     } finally {
       if (previousAstroDir === undefined) delete process.env.ASTRO_REPO_DIR;
       else process.env.ASTRO_REPO_DIR = previousAstroDir;
