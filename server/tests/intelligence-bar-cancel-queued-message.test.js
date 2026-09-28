@@ -130,21 +130,10 @@ function makeSmsDbMock(matchRows) {
   let limitN = null;
   let after = null;
   const smsQ = {
-    where: (arg) => {
-      if (typeof arg === 'function') {
-        // The cursor predicate: record its (scheduled_for, id) bindings.
-        after = {};
-        const rec = {
-          whereRaw: (_sql, b) => { if (after.sf === undefined) after.sf = b[0]; return rec; },
-          orWhere: (fn) => { fn.call(rec); return rec; },
-          andWhere: (_c, _op, v) => { after.id = v; return rec; },
-          orWhereNull: () => rec,
-          whereNull: () => rec,
-        };
-        arg.call(rec);
-      }
-      return smsQ;
-    },
+    where: () => smsQ,
+    modify: (fn, arg) => { fn(smsQ, arg); return smsQ; },
+    // The keyset cursor predicate: record its (scheduled_for, id) bindings.
+    whereRaw: (_sql, b) => { after = { sf: b[0], id: b[1] }; return smsQ; },
     orderBy: () => smsQ, orderByRaw: () => smsQ,
     limit: (n) => { limitN = n; return smsQ; },
     select: () => {
@@ -353,6 +342,7 @@ test('the SMS commit calls the shared cancel workflow with the pinned scheduled_
     id: MESSAGE_ID, techRole: 'admin', technicianId: null,
     expectedScheduledFor: scheduledFor.toISOString(), expectedToPhone: '+19415550100',
     expectedBodyDigest: require('crypto').createHash('md5').update('Synthetic reminder body', 'utf8').digest('hex'),
+    expectedCustomerId: CUSTOMER_ID,
     simpleOnly: true,
   });
   expect(refused.success).not.toBe(true);

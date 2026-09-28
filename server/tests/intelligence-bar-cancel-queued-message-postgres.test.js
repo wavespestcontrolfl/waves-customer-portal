@@ -345,6 +345,36 @@ postgres('cancel_queued_message / list_queued_messages (real PostgreSQL, SMS-onl
     expect((await trx('sms_log').where({ id: targetId }).first()).status).toBe('scheduled');
   });
 
+  test('the writer refuses when customer ownership moved (customer-dedupe repoint) — expectedCustomerId pin', async () => {
+    const { cancelScheduledSmsRow } = require('../services/scheduled-sms-cancel');
+    const custId = await customer();
+    const otherId = await customer();
+    const targetId = await scheduledSms(custId);
+    await trx('sms_log').where({ id: targetId }).update({ customer_id: otherId });
+    const result = await cancelScheduledSmsRow({ id: targetId, techRole: 'admin', expectedCustomerId: custId, simpleOnly: true });
+    expect(result.cancelled).toBe(false);
+    expect((await trx('sms_log').where({ id: targetId }).first()).status).toBe('scheduled');
+  });
+
+  test('list_queued_messages pages by cursor across equal and NULL scheduled_for values without skipping or repeating', async () => {
+    const custId = await customer();
+    const same = new Date(Date.now() + 3600000);
+    const ids = [];
+    for (let i = 0; i < 3; i += 1) ids.push(await scheduledSms(custId, { scheduled_for: same }));
+    ids.push(await scheduledSms(custId, { scheduled_for: null }));
+    const seen = [];
+    let cursor;
+    for (let guard = 0; guard < 10; guard += 1) {
+      const page = await executeCommsTool('list_queued_messages', { customer_id: custId, channel: 'sms', limit: 1, ...(cursor ? { cursor } : {}) });
+      expect(page.error).toBeUndefined();
+      seen.push(...page.messages.map((m) => m.message_id));
+      if (!page.next_cursor) break;
+      cursor = page.next_cursor;
+    }
+    expect([...seen].sort()).toEqual([...ids].sort());
+    expect(seen[seen.length - 1]).toBe(ids[3]); // NULL scheduled_for sorts last
+  });
+
   test('refuses when the sms was rescheduled after the preview — the pinned scheduled_for no longer matches', async () => {
     const custId = await customer();
     const targetId = await scheduledSms(custId);

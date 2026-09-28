@@ -113,9 +113,19 @@ function simpleOnlyWhere(query, simpleOnly) {
     .whereRaw("COALESCE(metadata->'parked_decision_ids', '[]'::jsonb) IN ('[]'::jsonb, 'null'::jsonb)");
 }
 
-function pinned(query, expectedScheduledFor, expectedToPhone, expectedBodyDigest, simpleOnly) {
+// Customer ownership (Codex round 8 on #5224, P2): customer-dedupe.js can
+// repoint sms_log.customer_id on a merge or merge reversal without touching
+// schedule, phone or body.
+function pinnedCustomer(query, expectedCustomerId) {
+  return expectedCustomerId === undefined ? query : query.where({ customer_id: expectedCustomerId });
+}
+
+function pinned(query, { expectedScheduledFor, expectedToPhone, expectedBodyDigest, expectedCustomerId, simpleOnly }) {
   return simpleOnlyWhere(
-    pinnedBodyDigest(pinnedToPhone(pinnedScheduledFor(query, expectedScheduledFor), expectedToPhone), expectedBodyDigest),
+    pinnedCustomer(
+      pinnedBodyDigest(pinnedToPhone(pinnedScheduledFor(query, expectedScheduledFor), expectedToPhone), expectedBodyDigest),
+      expectedCustomerId,
+    ),
     simpleOnly,
   );
 }
@@ -129,7 +139,8 @@ function pinned(query, expectedScheduledFor, expectedToPhone, expectedBodyDigest
  *   only when THIS call actually neutralized the row (deleted it, or
  *   flipped it to 'canceled' in place).
  */
-async function cancelScheduledSmsRow({ id, techRole, technicianId, expectedScheduledFor, expectedToPhone, expectedBodyDigest, simpleOnly = false } = {}) {
+async function cancelScheduledSmsRow({ id, techRole, technicianId, expectedScheduledFor, expectedToPhone, expectedBodyDigest, expectedCustomerId, simpleOnly = false } = {}) {
+  const pins = { expectedScheduledFor, expectedToPhone, expectedBodyDigest, expectedCustomerId, simpleOnly };
   const peek = await db('sms_log').where({ id, status: 'scheduled' }).first('id', 'to_phone');
   if (!peek) return { outcome: 'not_found', cancelled: false, row: null };
   if (techRole !== 'admin') {
@@ -171,7 +182,7 @@ async function cancelScheduledSmsRow({ id, techRole, technicianId, expectedSched
     // have invalidated.
     let row = (await pinned(
       trx('sms_log').where({ id, status: 'scheduled' }),
-      expectedScheduledFor, expectedToPhone, expectedBodyDigest, simpleOnly,
+      pins,
     )
       .whereRaw("COALESCE(metadata->>'review_ask_reservation', '') <> 'true'")
       .del(['id', 'metadata', 'created_at']))?.[0];
@@ -186,7 +197,7 @@ async function cancelScheduledSmsRow({ id, techRole, technicianId, expectedSched
       // 72-hour spacing hold survives.
       row = (await pinned(
         trx('sms_log').where({ id, status: 'scheduled' }),
-        expectedScheduledFor, expectedToPhone, expectedBodyDigest, simpleOnly,
+        pins,
       )
         .update({ status: 'canceled', updated_at: new Date() }, ['id', 'metadata', 'created_at']))?.[0];
     }

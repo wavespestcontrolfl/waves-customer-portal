@@ -621,7 +621,25 @@ function decodeQueueCursor(cursor) {
   // make Postgres reject the query instead of this clean refusal (Codex
   // round 7 P2).
   if (!UUID_RE.test(id) || (sf && Number.isNaN(Date.parse(sf)))) return undefined;
-  return { sf: sf || null, id };
+  return { scheduled_for: sf || null, id };
+}
+
+// Rows strictly after the cursor row in the listing's own order
+// ((scheduled_for ms, id), NULL scheduled_for last): one row-value
+// comparison, with 'infinity' standing in for NULL so it sorts last.
+function afterQueueCursor(query, at) {
+  if (!at) return;
+  query.whereRaw(
+    `(COALESCE(${SF_MS}, 'infinity'::timestamptz), id) > (COALESCE(?::timestamptz, 'infinity'::timestamptz), ?::uuid)`,
+    [at.scheduled_for ? new Date(at.scheduled_for).toISOString() : null, at.id],
+  );
+}
+
+function queueListNote(excluded, hasMore) {
+  const parts = [];
+  if (excluded > 0) parts.push(`${excluded} other scheduled text(s) on this page are still queued to send but can't be cancelled from the bar (workflow-owned, already attempted, or tied to Agent Review) — the office handles those.`);
+  if (hasMore) parts.push('More are queued; call again with next_cursor.');
+  return parts.length ? { note: parts.join(' ') } : {};
 }
 
 async function listQueuedMessages(input) {
@@ -645,22 +663,10 @@ async function listQueuedMessages(input) {
   let lastExamined = null;
   let hasMore = false;
   for (let batch = 0; batch < LIST_QUEUED_MESSAGES_MAX_BATCHES && messages.length < limit; batch += 1) {
-    const query = db('sms_log')
-      .where({ customer_id: customer.id, direction: 'outbound', status: 'scheduled' });
-    if (cursor) {
-      const at = cursor;
-      query.where(function () {
-        if (at.sf) {
-          this.whereRaw(`${SF_MS} > ?::timestamptz`, [at.sf])
-            .orWhere(function () { this.whereRaw(`${SF_MS} = ?::timestamptz`, [at.sf]).andWhere('id', '>', at.id); })
-            .orWhereNull('scheduled_for');
-        } else {
-          this.whereNull('scheduled_for').andWhere('id', '>', at.id);
-        }
-      });
-    }
     const want = limit - messages.length;
-    const rows = await query
+    const rows = await db('sms_log')
+      .where({ customer_id: customer.id, direction: 'outbound', status: 'scheduled' })
+      .modify(afterQueueCursor, cursor)
       .orderByRaw(`${SF_MS} ASC NULLS LAST, id ASC`)
       .limit(want + 1)
       .select('id', 'to_phone', 'message_type', 'scheduled_for', 'metadata', 'message_body');
@@ -677,10 +683,7 @@ async function listQueuedMessages(input) {
       });
     }
     if (!hasMore) break;
-    cursor = {
-      sf: lastExamined.scheduled_for ? new Date(lastExamined.scheduled_for).toISOString() : null,
-      id: lastExamined.id,
-    };
+    cursor = lastExamined;
   }
   return {
     customer_id: customer.id,
@@ -691,11 +694,7 @@ async function listQueuedMessages(input) {
     // Codex round 7 P2: texts the bar cannot cancel are still queued to
     // send — say so, or [] reads as "nothing is queued".
     excluded_count: excluded,
-    ...(excluded > 0
-      ? { note: `${excluded} other scheduled text(s) on this page are still queued to send but can't be cancelled from the bar (workflow-owned, already attempted, or tied to Agent Review) — the office handles those.${hasMore ? ' More are queued; call again with next_cursor.' : ''}` }
-      : hasMore && messages.length === 0
-        ? { note: 'More texts are queued; call again with next_cursor.' }
-        : {}),
+    ...queueListNote(excluded, hasMore),
   };
 }
 
@@ -729,6 +728,7 @@ async function commitCancelSms(input, preview, technicianId) {
     expectedScheduledFor: fresh._version.scheduled_for,
     expectedToPhone: fresh._version.to_phone,
     expectedBodyDigest: fresh._version.body_digest,
+    expectedCustomerId: fresh.customer_id,
     simpleOnly: true,
   });
   if (result.outcome !== 'ok' || !result.cancelled) {
