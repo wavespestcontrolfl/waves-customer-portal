@@ -35,12 +35,23 @@ function buildFixtureCatalog({
   const getCategory = (id) => categoryMap.get(id) || null;
   const getNode = (id) => getGroup(id) || getSubgroup(id) || getEntry(id) || getCategory(id) || null;
 
-  // Mirrors the real loader's sectionOf: entry -> group -> category ->
-  // section, defaulting a category with no declared `section` to `'pest'`
-  // (every fixture catalog built before the plant/condition sections
-  // existed never sets one).
-  function sectionOf(entry) {
-    const group = getGroup(entry.group);
+  // Mirrors the real loader's sectionOf: accepts a node object (category,
+  // group, subgroup, or entry — anything with a `level`) or a bare id/slug,
+  // and climbs entry/subgroup -> group -> category -> section, defaulting a
+  // category with no declared `section` to `'pest'` (every fixture catalog
+  // built before the plant/condition sections existed never sets one).
+  // Codex #5143 r1 P2 (pre-push audit on this fixture): the first version of
+  // this helper only accepted an ENTRY, so `candidateNodeId`'s new
+  // `sectionOf(group)` call on an off-catalog group id always fell through
+  // to null against every fixture catalog — silently rejecting every
+  // off-catalog candidate, pest groups included.
+  function sectionOf(nodeOrSlug) {
+    const node = (nodeOrSlug && typeof nodeOrSlug === 'object' && nodeOrSlug.level)
+      ? nodeOrSlug
+      : getNode(nodeOrSlug);
+    if (!node) return null;
+    if (node.level === 'category') return node.section || 'pest';
+    const group = node.level === 'group' ? node : getGroup(node.group);
     const category = group ? getCategory(group.category) : null;
     return category ? (category.section || 'pest') : null;
   }

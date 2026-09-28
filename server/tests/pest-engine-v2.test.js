@@ -1419,4 +1419,69 @@ describe('L1: pest engine reads only the pest section', () => {
     expect(pestOnly.map((e) => e.slug).sort()).toEqual(all.map((e) => e.slug).sort());
     expect(pestOnly.length).toBe(239);
   });
+
+  // Codex #5143 r1 P2: filtering the PROMPT to pest-section entries doesn't
+  // bound what the model can hand back — a hallucinated or leaked slug/group
+  // id could still resolve to a real, non-pest node once plant/condition
+  // content exists. `resolveCandidate`/`candidateNodeId` are the one place
+  // every model-returned identifier becomes a catalog node (candidates,
+  // verify's merge-by-slug, and escalation all route through them), so the
+  // section guard belongs there too. Uses a fresh, isolated require of
+  // `pest-engine.js` bound to its own small mixed-section catalog (built
+  // with `buildFixtureCatalog`) — never the shared `FIXTURE` — so no other
+  // test in this file is affected.
+  describe('resolution boundary: a model-returned identifier outside the pest section is rejected', () => {
+    let freshEngine;
+
+    beforeAll(() => {
+      jest.isolateModules(() => {
+        const { buildFixtureCatalog } = require('./helpers/pest-engine-fixtures');
+        const mixed = buildFixtureCatalog({
+          categories: {
+            insect: { label: 'Insect', generic: 'an insect' },
+            plant: { label: 'Plant', generic: 'a plant', section: 'plant' },
+          },
+          groups: [
+            { id: 'ants', label: 'Ants', category: 'insect', generic: 'an ant' },
+            { id: 'turfgrasses', label: 'Lawn grasses', category: 'plant', generic: 'a lawn grass' },
+          ],
+          entries: [
+            {
+              slug: 'fire-ant', common_name: 'Fire Ant', scientific_name: 'Solenopsis invicta', kind: 'organism',
+              group: 'ants', subgroup: null, look_alikes: [], traits: ['Reddish-brown mound builders'],
+            },
+            {
+              slug: 'st-augustinegrass', common_name: 'St. Augustinegrass', scientific_name: 'Stenotaphrum secundatum', kind: 'turfgrass',
+              group: 'turfgrasses', subgroup: null, look_alikes: [], traits: ['Coarse, rolled blades'],
+            },
+          ],
+        });
+        jest.doMock('../services/species-catalog', () => mixed);
+        freshEngine = require('../services/photo-id-v2/pest-engine');
+      });
+    });
+
+    test('a model-returned SLUG that resolves to a plant-section entry is rejected — off-catalog, never a v2 entry', () => {
+      const resolved = freshEngine.resolveCandidate({ slug: 'st-augustinegrass', group_id: 'turfgrasses', confidence: 0.9 });
+      expect(resolved.entry).toBeNull();
+      expect(resolved.slug).toBeNull();
+      expect(freshEngine.candidateNodeId(resolved)).toBeNull();
+    });
+
+    test('a model-returned GROUP_ID naming a plant-section group (off-catalog answer) is rejected the same way', () => {
+      const offCatalog = freshEngine.resolveCandidate({ slug: '', off_catalog_name: 'Some Grass', group_id: 'turfgrasses', confidence: 0.7 });
+      expect(offCatalog.entry).toBeNull();
+      expect(freshEngine.candidateNodeId(offCatalog)).toBeNull();
+    });
+
+    test('a real pest slug and a real pest group_id still resolve exactly as before', () => {
+      const resolved = freshEngine.resolveCandidate({ slug: 'fire-ant', confidence: 0.9 });
+      expect(resolved.entry).toBeTruthy();
+      expect(resolved.entry.slug).toBe('fire-ant');
+      expect(freshEngine.candidateNodeId(resolved)).toBe('fire-ant');
+
+      const offCatalogPest = freshEngine.resolveCandidate({ slug: '', off_catalog_name: 'Some Ant', group_id: 'ants', confidence: 0.6 });
+      expect(freshEngine.candidateNodeId(offCatalogPest)).toBe('ants');
+    });
+  });
 });

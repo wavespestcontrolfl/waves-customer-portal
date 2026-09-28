@@ -319,10 +319,21 @@ function toImages(photos) {
  * a human's typed text. An unresolvable/hallucinated slug degrades to an
  * off-catalog candidate rather than being dropped, so it still contributes
  * its confidence/group signal to the lineage climb.
+ *
+ * Codex #5143 r1 P2: the candidates/escalation prompts only LIST pest-section
+ * entries, but nothing stopped a resolved slug from a DIFFERENT section
+ * (once plant/condition content lands) from being treated as a real pest
+ * identity — the prompt filter alone doesn't bound what the model can
+ * return. A slug that resolves to a non-pest node is rejected here, at the
+ * one place every model-returned identifier becomes a catalog node
+ * (candidates, verify's merge-by-slug, and escalation all route through
+ * this function) — treated exactly like an off-catalog/unresolved slug,
+ * never a v2 entry answer.
  */
 function resolveCandidate(raw) {
   const rawSlug = String(raw?.slug || '').trim();
-  const entry = rawSlug ? catalog.getEntry(rawSlug) : null;
+  const rawEntry = rawSlug ? catalog.getEntry(rawSlug) : null;
+  const entry = rawEntry && catalog.sectionOf(rawEntry) === 'pest' ? rawEntry : null;
   const confidence = clamp01(raw?.confidence);
   const traitsVisible = Array.isArray(raw?.traits_visible) ? raw.traits_visible.filter(Number.isFinite) : [];
   const traitsNotVisible = Array.isArray(raw?.traits_not_visible) ? raw.traits_not_visible.filter(Number.isFinite) : [];
@@ -380,7 +391,15 @@ function sameCandidateKey(a, b) {
 function candidateNodeId(candidate) {
   if (!candidate) return null;
   if (candidate.slug) return candidate.slug;
-  if (candidate.groupId && catalog.getGroup(candidate.groupId)) return candidate.groupId;
+  // Codex #5143 r1 P2: `group_id` is free-form model output — the same
+  // section guard `resolveCandidate` applies to a resolved slug applies
+  // here too, or an off-catalog answer naming e.g. `group_id: "turfgrasses"`
+  // (or, before this PR, the assay-only "nematodes") would still climb to a
+  // named group-level pest answer.
+  if (candidate.groupId) {
+    const group = catalog.getGroup(candidate.groupId);
+    if (group && catalog.sectionOf(group) === 'pest') return candidate.groupId;
+  }
   return null;
 }
 

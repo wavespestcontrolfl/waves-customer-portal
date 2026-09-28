@@ -409,14 +409,16 @@ describe('L1: plant and condition sections (index additions, no content)', () =>
       expect(group).toBeTruthy();
       expect(index.categories[group.category]).toBeTruthy();
     }
-    // The two new sections' groups sit under `plant`/`condition`; the
-    // brief's one exception — nematodes — stays under the existing pest
-    // `other` category (kind `organism`, confirmable only by lab assay).
-    expect(catalog.getGroup('nematodes').category).toBe('other');
+    // All 13 new groups sit under `plant`/`condition` — including
+    // `nematodes` (Codex #5143 r1 P2: a nematode's `kind` stays `organism`,
+    // but it can never be a photo identity — a soil assay is the only
+    // confirmation — so it must not be visible to the pest engine at all;
+    // the loader doesn't tie `kind` to `section`, so this is a pure
+    // category move).
     for (const id of ['turfgrasses', 'broadleaf-weeds', 'grassy-weeds', 'sedges', 'palms', 'shrubs-trees']) {
       expect(catalog.getGroup(id).category).toBe('plant');
     }
-    for (const id of ['turf-diseases', 'ornamental-diseases', 'palm-diseases', 'nutrient-disorders', 'water-and-site', 'cultural-and-chemical']) {
+    for (const id of ['nematodes', 'turf-diseases', 'ornamental-diseases', 'palm-diseases', 'nutrient-disorders', 'water-and-site', 'cultural-and-chemical']) {
       expect(catalog.getGroup(id).category).toBe('condition');
     }
   });
@@ -444,7 +446,7 @@ describe('L1: plant and condition sections (index additions, no content)', () =>
     expect(catalog.sectionOf(catalog.getCategory('insect'))).toBe('pest');
     expect(catalog.sectionOf(catalog.getGroup('turfgrasses'))).toBe('plant');
     expect(catalog.sectionOf(catalog.getGroup('turf-diseases'))).toBe('condition');
-    expect(catalog.sectionOf(catalog.getGroup('nematodes'))).toBe('pest');
+    expect(catalog.sectionOf(catalog.getGroup('nematodes'))).toBe('condition');
     expect(catalog.sectionOf(catalog.getGroup('ants'))).toBe('pest');
     expect(catalog.sectionOf(catalog.getSubgroup('date-palms'))).toBe('plant');
     expect(catalog.sectionOf(catalog.getSubgroup('turf-nutrient'))).toBe('condition');

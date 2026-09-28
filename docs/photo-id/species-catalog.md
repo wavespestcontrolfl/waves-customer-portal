@@ -72,13 +72,15 @@ usual ladder (category → group → subgroup → entry):
   `broadleaf-weeds`, `grassy-weeds`, `sedges`, `palms`, `shrubs-trees` — for
   the kinds `turfgrass`, `weed`, and `host_plant`.
 - `condition` (generic "a lawn or plant problem we want a closer look at")
-  holds six new groups — `turf-diseases`, `ornamental-diseases`,
-  `palm-diseases`, `nutrient-disorders`, `water-and-site`,
-  `cultural-and-chemical` — for the kinds `disease` and `disorder`.
-- One exception: lawn nematodes (`nematodes` group, `sting-nematode` slug
-  planned) stay under the existing pest `other` category — they're an
-  `organism`, just one a photo can never confirm (a soil assay is the only
-  confirmation) — so their section is `pest`, not `condition`.
+  holds seven new groups — `nematodes`, `turf-diseases`,
+  `ornamental-diseases`, `palm-diseases`, `nutrient-disorders`,
+  `water-and-site`, `cultural-and-chemical` — for the kinds `organism`
+  (nematodes only), `disease`, and `disorder`. Lawn nematodes (`nematodes`
+  group, `sting-nematode` slug planned) keep `kind: "organism"` — the loader
+  doesn't tie `kind` to `section` — but live in `condition`, not the pest
+  `other` category: a nematode is never a photo identity (a soil assay is
+  the only confirmation), so it must stay out of the pest engine's reach
+  the same way every other condition does.
 - Four new subgroups: `date-palms` and `fan-palms` under `palms`,
   `turf-nutrient` and `palm-nutrient` under `nutrient-disorders`.
 - Seven new `site_categories`: "Lawn grasses", "Lawn weeds", "Palms",
@@ -114,6 +116,16 @@ fixture entry, alongside a real-catalog check that the filtered and
 unfiltered lists still match today. `species-catalog.js` also exports a
 `sectionOf(nodeOrSlug)` helper for any other caller that needs a node's
 section without walking `lineage()` itself.
+
+Filtering the prompt alone doesn't bound what the model can *return*
+(Codex #5143 r1 P2): a hallucinated or leaked slug/group id could still
+resolve to a real, non-pest catalog node once plant/condition content
+exists. `resolveCandidate` and `candidateNodeId` — the one place every
+model-returned identifier (candidates, verify's merge-by-slug, and
+escalation all route through them) becomes a catalog node — reject any
+resolved node whose `sectionOf(...) !== 'pest'`, treating it exactly like an
+off-catalog/unresolved candidate. Proven by the same describe block with a
+model response that names a plant-section slug and group id directly.
 
 `server/data/species-catalog-v1/index.json#planned_slugs` also changed
 contract here: it now stages the lawn/plant build's 119 not-yet-built
