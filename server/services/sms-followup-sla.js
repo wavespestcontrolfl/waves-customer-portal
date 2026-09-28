@@ -126,8 +126,36 @@ function followupPromiseBlockReason({ inputSnapshot, promptVersion = null, origi
   return null;
 }
 
+// Codex #5194 P2 ("Timestamp the SLA when its facts are generated"): the
+// FOLLOW-UP SLA RIGHT NOW phrase a draft carries is rendered off the instant
+// sms-shadow-drafter built its facts block (generateGroundedDraft's
+// factsAt), not off the agent_decisions row's own created_at — created_at
+// lands only after the whole draft→verify→revise loop finishes, which can
+// cross the 8am/8pm ET phrase boundary the phrase itself was computed
+// against. Both send seams (agent-decision-send-checks.js's followupBlock
+// and the scheduler's queued-SMS SLA block) call this ONE helper instead of
+// each re-deriving the choice, so they can't drift apart. `decision` is
+// whatever a `agent_decisions` read handed back — a plain object with
+// `input_snapshot` (string or already-parsed) and `created_at` is enough,
+// so both seams' partial column selects work unchanged. A row written
+// before this change (or one whose caller predates the field, or an
+// unparseable/garbage value) carries no usable facts_generated_at and falls
+// back to created_at — the ONLY anchor those rows ever had.
+function slaDraftedAt(decision) {
+  let snapshot = decision?.input_snapshot;
+  if (typeof snapshot === 'string') {
+    try { snapshot = JSON.parse(snapshot); } catch { snapshot = null; }
+  }
+  const raw = snapshot && typeof snapshot === 'object' ? snapshot.facts_generated_at : null;
+  if (typeof raw === 'string' && raw) {
+    const parsed = new Date(raw);
+    if (Number.isFinite(parsed.getTime())) return parsed;
+  }
+  return decision?.created_at ?? null;
+}
+
 module.exports = {
   SLA_PHRASES, FOLLOWUP_PROMISED_NOTE, realAnswersGateOn, replyPromisesFollowup, slaPhraseStatus,
   draftPromisedFollowup, followupPromiseIsStale, followupPromiseEdited, followupPromiseBlockReason,
-  followupDeadline, followupDeadlinePassed,
+  followupDeadline, followupDeadlinePassed, slaDraftedAt,
 };

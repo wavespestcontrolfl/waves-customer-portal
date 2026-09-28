@@ -358,6 +358,7 @@ class BalanceReminder {
       invoiceId: balance.oldestInvoiceId,
       channel: "sms",
       purpose: "balance_reminder",
+      source: "balance_reminder_workflow",
       logTag: "balance-reminder",
     }))) {
       return false;
@@ -805,6 +806,7 @@ class BalanceReminder {
         invoiceId: oldestInvoice.id,
         channel: 'email',
         purpose: 'late_payment',
+        source: 'balance_reminder_late_payment_check',
         logTag: 'balance-reminder',
       });
       const smsPolicyPermitted = await collectionsChannelPermitted({
@@ -812,6 +814,7 @@ class BalanceReminder {
         invoiceId: oldestInvoice.id,
         channel: "sms",
         purpose: "late_payment",
+        source: "balance_reminder_late_payment_check",
         logTag: "balance-reminder",
       });
       let emailResult = null;

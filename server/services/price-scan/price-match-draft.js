@@ -7,7 +7,7 @@ const { randomUUID } = require('crypto');
 const sendgrid = require('../sendgrid-mail');
 const logger = require('../logger');
 const { deliverOpsDigest } = require('../ops-digest');
-const { composeMarkEmail } = require('./mark-email');
+const { composeMarkEmail, lineFor } = require('./mark-email');
 
 // Mark Roczkowski, SiteOne rep. Overridable via env; defaults to the known
 // address so the feature works without extra config.
@@ -27,6 +27,44 @@ const adminPortalUrl = () => (process.env.ADMIN_PORTAL_URL || 'https://portal.wa
 // lock/DB connection. It's a convenience email — timing out just skips it.
 const OWNER_NOTIFY_TIMEOUT_MS = Number(process.env.PRICE_MATCH_NOTIFY_TIMEOUT_MS) || 8000;
 const sameAddress = (a, b) => String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase();
+
+// Admin-alerts-brevity scope (owner ruling 2026-09-28): short bell copy for
+// the owner-copy digest; the full vendor email still lands in `detail`.
+// `lines` are mark-email.js's `lineFor()` output (product, sitePrice,
+// savingsPct — savingsPct is a FRACTION, e.g. 0.383 for 38.3%, the same
+// normalized $/oz-equivalent basis composeMarkEmail sorts and labels by, so
+// it's the one number that's comparable across different pack sizes/units
+// (a raw sitePrice-minus-compPrice is NOT, when the packs don't match). A
+// line's contribution to the per-order total is `sitePrice * savingsPct`
+// (what this SiteOne pack would cost less at the competitor's per-unit
+// rate); a line missing either number is skipped from the sum, not the list
+// of names, and an all-skipped set just omits the dollar figure.
+function priceMatchHeadlineAndSummary(lines) {
+  const rows = lines || [];
+  const n = rows.length;
+  const headline = `Price match — ${n} lower price${n === 1 ? '' : 's'} for SiteOne`;
+  const names = rows.map((l) => l.product).filter(Boolean);
+  const namesText = (list) => list.length === 0 ? 'these products'
+    : list.length === 1 ? list[0]
+      : list.length === 2 ? `${list[0]} and ${list[1]}`
+        : `${list.slice(0, -1).join(', ')} and ${list[list.length - 1]}`;
+  let total = 0;
+  let anyValid = false;
+  for (const l of rows) {
+    if (Number.isFinite(l.sitePrice) && Number.isFinite(l.savingsPct)) {
+      total += l.sitePrice * l.savingsPct;
+      anyValid = true;
+    }
+  }
+  const savingsText = anyValid && total > 0 ? `, about $${Math.round(total)} less per order` : '';
+  let summary = `${namesText(names)}${savingsText}. Draft not sent.`;
+  if (summary.length > 110) {
+    // Too many/long names to fit — name the first and count the rest.
+    const shortList = names.length ? [names[0], ...(names.length > 1 ? [`${names.length - 1} more`] : [])] : ['these products'];
+    summary = `${namesText(shortList)}${savingsText}. Draft not sent.`;
+  }
+  return { headline, summary };
+}
 
 // Resolve `promise` but reject if it hasn't settled within `ms`. Clears its timer so a
 // fast resolve leaves no dangling handle.
@@ -118,11 +156,18 @@ async function notifyOwnerOfStagedDraft(row, composed, opts = {}) {
     const ownerHtml = bodyOpen.test(composed.html)
       ? composed.html.replace(bodyOpen, (m) => `${m}${bannerHtml}`)
       : `${bannerHtml}${composed.html}`;
+    const { headline, summary } = priceMatchHeadlineAndSummary((composed.included || []).map(lineFor));
     const sendPromise = deliverOpsDigest({
       key: 'price-match-owner-copy',
       subject,
       html: ownerHtml,
       text: `${banner}\n\n----\n\n${composed.text}`,
+      headline,
+      summary,
+      // Each staged draft is its own new news — count and newCount are the
+      // same number, so the ring test's newCount>0 branch always fires.
+      count: n,
+      newCount: n,
       link: '/admin/price-match',
       sendEmail: () => mailer.sendOne({
         to,
@@ -322,4 +367,5 @@ async function resetStuckDraft(db, id, { nowMs = Date.now() } = {}) {
 
 module.exports = {
   createDraft, listDrafts, getDraft, sendDraft, dismissDraft, resetStuckDraft, markEmail,
+  priceMatchHeadlineAndSummary,
 };

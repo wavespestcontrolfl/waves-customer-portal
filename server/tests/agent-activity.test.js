@@ -274,6 +274,35 @@ describe('buildActivity digests', () => {
     expect(items[0].finishedAt).toBe('2026-09-14T11:26:00.000Z');
     expect(items[1].finishedAt).toBe('2026-09-12T11:26:00.000Z');
   });
+
+  it('admin-alerts-brevity scope: status comes from metadata.kind (no title prefix any more), and `detail` is preferred over `body`', () => {
+    const { items } = buildActivity({
+      digests: [
+        // New-format ACT row: short title, no ACT: prefix, kind in metadata, the
+        // full report in `detail` (the bell body is a short summary or null).
+        { id: 'a1', title: 'Estimates — 3 promised quotes not sent', body: 'Oldest is 80 days.', detail: 'the whole report', link: '/admin/pipeline', metadata: { opsKey: 'promised-estimate', kind: 'ACT', audience: 'owner' }, read_at: null, created_at: '2026-09-02T07:11:00Z' },
+        // New-format FIX row, Activity-only (feed: 'activity'), no prefix either.
+        { id: 'a2', title: 'Sends — duplicate detection failing', body: null, detail: 'engineer-facing detail', metadata: { opsKey: 'd17-duplicate-sends', kind: 'FIX', audience: 'engineering', feed: 'activity' }, read_at: null, created_at: '2026-09-02T06:55:00Z' },
+        // New-format FYI row: never "needs you" or "needs a fix".
+        { id: 'a3', title: 'Content — 4 improved', body: null, detail: 'fyi detail', metadata: { opsKey: 'content-impact', kind: 'FYI', audience: 'fyi', feed: 'activity' }, read_at: null, created_at: '2026-09-02T05:00:00Z' },
+      ],
+    });
+    expect(items.map((i) => [i.id, i.status, i.title, i.subtitle, i.detail])).toEqual([
+      ['digest:a1', 'awaiting_review', 'Estimates — 3 promised quotes not sent', 'promised estimate · needs you', 'the whole report'],
+      ['digest:a2', 'failed', 'Sends — duplicate detection failing', 'd17 duplicate sends · needs a fix', 'engineer-facing detail'],
+      ['digest:a3', 'completed', 'Content — 4 improved', 'content impact · FYI', 'fyi detail'],
+    ]);
+  });
+
+  it('a legacy row with no metadata.kind still falls back to the title-prefix grammar', () => {
+    const { items } = buildActivity({
+      digests: [
+        { id: 'l1', title: 'ACT: legacy row', body: 'x', metadata: {}, read_at: null, created_at: '2026-09-02T07:00:00Z' },
+        { id: 'l2', title: 'FIX: legacy row', body: 'x', metadata: null, read_at: null, created_at: '2026-09-02T06:00:00Z' },
+      ],
+    });
+    expect(items.map((i) => i.status)).toEqual(['awaiting_review', 'failed']);
+  });
 });
 
 describe('getActivity gate', () => {

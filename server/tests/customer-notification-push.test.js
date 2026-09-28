@@ -410,14 +410,19 @@ describe('admin feed role scoping (adminRoleOnly triggers)', () => {
     expect(q.whereRaw).toHaveBeenCalled();
   });
 
-  test('markAllReadAdmin scopes by role; admin stays global', async () => {
+  test('markAllReadAdmin scopes by role; admin stays global (aside from the activity-only exclusion every role gets)', async () => {
     const techQ = setupAdminDb({});
     await NotificationService.markAllReadAdmin({ role: 'technician' });
-    expect(techQ.whereRaw).toHaveBeenCalled();
+    // Both the role's triggerKey allowlist AND the activity-only exclusion
+    // are whereRaw predicates — a technician gets both.
+    expect(techQ.whereRaw.mock.calls.some(([sql]) => sql.includes("metadata->>'triggerKey'"))).toBe(true);
 
     const adminQ = setupAdminDb({});
     await NotificationService.markAllReadAdmin({ role: 'admin' });
-    expect(adminQ.whereRaw).not.toHaveBeenCalled();
+    // Admin gets NO role predicate — only the activity-only exclusion
+    // (metadata.feed = 'activity' rows never reach the bell for any role).
+    expect(adminQ.whereRaw.mock.calls.some(([sql]) => sql.includes("metadata->>'triggerKey'"))).toBe(false);
+    expect(adminQ.whereRaw.mock.calls.some(([sql]) => sql.includes("metadata->>'feed'"))).toBe(true);
     expect(adminQ.update).toHaveBeenCalled();
   });
 });

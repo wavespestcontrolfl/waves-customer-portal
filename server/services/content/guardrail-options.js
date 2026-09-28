@@ -150,6 +150,10 @@ function deriveSyncGuardrailOptions(opp = {}, brief = {}) {
     relatedPostLinks: relatedPostPaths,
     relatedPostHosts: frozenRelatedHosts,
     relatedPostLinksLive: relatedTargetMatches,
+    // The post's resolved publish host(s) — what an ABSOLUTE frontmatter
+    // next_steps href must name (content-guardrails nextStepsFrontmatter
+    // Finding): the effective spoke, else the hub. Never the whole fleet.
+    publishHosts: effectiveRelatedHosts,
     isRefresh,
   };
 }

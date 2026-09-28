@@ -96,8 +96,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": "Peak months are a general warm-season estimate; UF/IFAS residential lawn nematode guidance gives no Florida-specific seasonal calendar for sting nematode, so season_basis is set to unverified."
+      "status": "owner_approved",
+      "notes": "Peak months are a general warm-season estimate; UF/IFAS residential lawn nematode guidance gives no Florida-specific seasonal calendar for sting nematode, so season_basis is set to unverified.",
+      "approval_hash": "0c96feebe3918fef4b781f5bfdb1b2757d315010552f74b07ff308ad81e52ef6"
     },
     "condition": {
       "hosts": [

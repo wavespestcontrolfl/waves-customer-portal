@@ -5322,6 +5322,11 @@ const InvoiceService = {
       // caller's transaction, and the invoice commits atomically with the
       // caller's own writes.
       database = null,
+      // The caller's check under the visit row lock, run on every linked
+      // mint (see buildParams): same contract as
+      // mintScheduledServiceInvoiceWithDeposit's recheckInTrx. Completion
+      // passes refuseCoveredMemberMintInTrx (Codex r4 P1 on #5237).
+      recheckInTrx = null,
     },
   ) {
     const sr = await db("service_records")
@@ -5378,6 +5383,22 @@ const InvoiceService = {
             throw scheduledPriceMovedError(lockedRow);
           }
         }
+      }
+      // The caller's in-lock check runs on EVERY linked mint, not only the
+      // replay lane (pre-push P1 on 645ccccaee — completion's backfill mint
+      // is explicit-amount). The non-replay lanes hold only the advisory mint
+      // lock here, so they take the same shared chain first (the advisory
+      // re-acquire is a same-transaction no-op): the check then reads under
+      // the visit row lock, the one the stamp writer also takes.
+      if (recheckInTrx && conn && sr.scheduled_service_id) {
+        if (!replayFromScheduled) {
+          const { acquireScheduledMintLockChain } = require("./scheduled-invoice-mint");
+          await acquireScheduledMintLockChain(conn, {
+            scheduledServiceId: sr.scheduled_service_id,
+            customerId: sr.customer_id,
+          });
+        }
+        await recheckInTrx(conn);
       }
       const scheduledInvoice = replayFromScheduled
         ? await buildScheduledServiceInvoiceLines(sr.scheduled_service_id, {

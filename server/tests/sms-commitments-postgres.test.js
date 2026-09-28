@@ -2914,6 +2914,46 @@ postgres('SMS commitments on PostgreSQL', () => {
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
 
+  test.each([false, true])('owner ruling 2026-09-28 (Codex #5248 r3): a promise kept after its deadline rings the bell, then clears (bell suppressed: %s)', async (suppressed) => {
+    const actualNotifications = jest.requireActual('../services/notification-service');
+    NotificationService.notifyAdmin.mockImplementation(suppressed
+      ? async () => ({ id: null, suppressed: true })
+      : actualNotifications.notifyAdmin.bind(actualNotifications));
+    message = { ...message, direction: 'outbound', from_phone: message.to_phone, to_phone: message.from_phone, message_type: 'manual',
+      admin_user_id: '00000000-0000-4000-8000-000000000104', status: 'delivered', message_body: "Ok, we'll get the prep guide today" };
+    await mockPg('sms_log').where({ id: message.id }).update(message);
+    context = await loadMessageContext(mockPg, message);
+    result.facts = [];
+    const dueAt = new Date(message.created_at.getTime() + 1000);
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', answered_by_payment: false, basis: 'promise', promise_firm: true,
+      quote: message.message_body, description: 'get the prep guide today', due_at: dueAt.toISOString() };
+    await recordMessageOperations(mockPg, message, result, context);
+    // The guide goes out after the deadline, and no tick ran in between.
+    const late = new Date(dueAt.getTime() + 60000);
+    const [guide] = await mockPg('sms_log').insert({ ...message, id: randomUUID(), message_type: 'prep_guide', admin_user_id: null,
+      message_body: 'Your treatment prep guide: portal.example.invalid/prep', created_at: late }).returning('id');
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'fulfilled', record_ref: `sms:${guide.id}`, quote: 'Your treatment prep guide' } });
+    const first = await refreshSmsCommitments({ conn: mockPg, now: new Date(late.getTime() + 2000) });
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('alert', 'A promise texted to a customer needs follow-up',
+      expect.stringContaining('only after the promised deadline'), expect.objectContaining({ bell: true,
+        metadata: expect.objectContaining({ verification: 'kept_late' }) }));
+    if (suppressed) {
+      // No bell row to find next tick, so the row closes now.
+      expect(first).toMatchObject({ fulfilled: 1 });
+      expect((await mockPg('call_commitments').first()).status).toBe('fulfilled');
+      return;
+    }
+    expect(first).toMatchObject({ scanned: 1, fulfilled: 0 });
+    expect((await mockPg('call_commitments').first()).status).toBe('open');
+    expect(await mockPg('notifications').whereNull('read_at')).toHaveLength(1);
+    await mockPg('system_settings').where({ key: 'sms_operations.fulfillment_cursor' }).del();
+    const second = await refreshSmsCommitments({ conn: mockPg, now: new Date(late.getTime() + 5 * 60000) });
+    expect(second).toMatchObject({ fulfilled: 1 });
+    expect((await mockPg('call_commitments').first()).fulfillment).toMatchObject({ record_type: 'sms', record_id: guide.id });
+    expect(await mockPg('notifications')).toHaveLength(1);
+    expect(await mockPg('notifications').whereNull('read_at')).toHaveLength(0);
+  });
+
   test('owner ruling 2026-09-28: a promise staff texted is kept by doing it — a later reply never closes it; the model judges', async () => {
     message = { ...message, direction: 'outbound', from_phone: message.to_phone, to_phone: message.from_phone, message_type: 'manual',
       admin_user_id: '00000000-0000-4000-8000-000000000104', status: 'delivered', message_body: "Ok, we'll get the prep guide today" };

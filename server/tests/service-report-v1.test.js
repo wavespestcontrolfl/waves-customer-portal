@@ -2649,6 +2649,10 @@ describe('service report v1', () => {
           }
           return query;
         },
+        whereIn(column, values) {
+          rows = rows.filter((row) => values.includes(row[column]));
+          return query;
+        },
         whereNotNull(column) {
           rows = rows.filter((row) => row[column] !== null && row[column] !== undefined);
           return query;
@@ -2769,6 +2773,10 @@ describe('service report v1', () => {
             rows = rows.filter((row) => Object.entries(criteria)
               .every(([key, value]) => row[key] === value));
           }
+          return query;
+        },
+        whereIn(column, values) {
+          rows = rows.filter((row) => values.includes(row[column]));
           return query;
         },
         orderBy: () => query,
