@@ -107,6 +107,7 @@ beforeEach(() => {
   jest.useFakeTimers().setSystemTime(new Date('2026-05-26T14:00:00.000Z'));
   jest.clearAllMocks();
   process.env.GATE_DUNNING_LADDER_90 = 'true';
+  process.env.GATE_BALANCE_REMINDER_LEGACY_OFF = 'true';
   RailGuard.collectionsChannelPermitted.mockResolvedValue({ allowed: true });
   BillingEmailAuthority.loadBillingEmailContext.mockResolvedValue({
     category: 'invoice', recipient: { email: 'billing@example.com', name: 'Taylor' }, recipientEmail: 'billing@example.com',
@@ -124,6 +125,7 @@ beforeEach(() => {
 afterEach(() => {
   jest.useRealTimers();
   delete process.env.GATE_DUNNING_LADDER_90;
+  delete process.env.GATE_BALANCE_REMINDER_LEGACY_OFF;
 });
 
 test('a delivered Day 60 touch stamps at_risk exactly as the legacy path would', async () => {
@@ -156,6 +158,31 @@ test('a delivered Day 60 touch stamps at_risk exactly as the legacy path would',
   expect(atRiskChain.whereNotIn).toHaveBeenCalledWith(
     'pipeline_stage', ['churned', 'past_customer', 'dormant'],
   );
+});
+
+test('legacy retirement off: a delivered Day 60 touch leaves the stage alone (the legacy cron still owns the stamp)', async () => {
+  delete process.env.GATE_BALANCE_REMINDER_LEGACY_OFF;
+  const sequenceUpdate = chain();
+  const atRiskChain = chain();
+  setDbQueues({
+    'invoice_followup_sequences as s': [chain({ result: [] }), chain({ result: [followupRow({ step_index: 4, next_touch_at: '2030-01-01T14:00:00.000Z' })] })],
+    customers: [chain({ first: customer() }), atRiskChain],
+    invoices: Array.from({ length: 6 }, () => chain({ first: invoice() })),
+    notification_prefs: [chain({ first: { email_enabled: true } })],
+    customer_interactions: [chain(), chain()],
+    invoice_followup_sequences: [
+      chain({ first: { id: 'seq-1', customer_id: 'cust-1', status: 'active', step_index: 4, next_touch_at: '2026-05-26T13:00:00.000Z', anchor_at: null } }),
+      chain({ result: 1 }),
+      sequenceUpdate,
+      chain({ result: 1 }),
+    ],
+  });
+
+  const result = await InvoiceFollowUps.runPending();
+
+  expect(result).toEqual({ sent: 1, skipped: 0 });
+  expect(sequenceUpdate.update).toHaveBeenCalledWith(expect.objectContaining({ step_index: 5 }));
+  expect(atRiskChain.update).not.toHaveBeenCalled();
 });
 
 test('a deduped Day 60 replay (every leg already delivered — freshDelivery false) still stamps at_risk', async () => {

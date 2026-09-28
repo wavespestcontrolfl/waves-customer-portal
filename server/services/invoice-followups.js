@@ -1978,7 +1978,12 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
   // the step advance / interaction logging below, or strand the sequence on
   // this step for as long as the stamp keeps failing. Same reasoning
   // late-payment-checker.js's own callers use.
-  if (ladderThrough90Live() && (step.id === 'd60_reminder' || step.id === 'd90_final_notice')) {
+  // Only once the legacy latePaymentCheck is actually retired (its gate on
+  // AND the ladder live, the same pair it honours): until then that cron
+  // still owns this stamp, and an ungated stamp here would change live
+  // lifecycle stages the moment this merges.
+  if (ladderThrough90Live() && process.env.GATE_BALANCE_REMINDER_LEGACY_OFF === 'true'
+    && (step.id === 'd60_reminder' || step.id === 'd90_final_notice')) {
     try {
       await markAtRiskForLongOverdue(row.customer_id);
     } catch (stampErr) {
