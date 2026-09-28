@@ -2585,7 +2585,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
           const byName = new Map(tools.map(t => [t.name, t]));
           for (const tool of discovered.definitions) byName.set(tool.name, apiToolDefinition(tool));
           tools = [...byName.values()];
-          gapCollector.discovery(toolUse.input, result);
+          gapCollector?.discovery(toolUse.input, result);
         } else if (platformEnabled && !tools.some(tool => tool.name === toolUse.name)) {
           result = { error: 'Discover this capability before using it', code: 'capability_not_loaded' };
           failed = true;

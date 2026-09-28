@@ -6,6 +6,7 @@ describe('agent-gap-reports', () => {
   let mergedCalls;
   let returningRows;
   let loggerMock;
+  let sightings;
 
   beforeEach(() => {
     jest.resetModules();
@@ -15,8 +16,9 @@ describe('agent-gap-reports', () => {
     returningRows = [{ id: '7', occurrences: 1, status: 'new' }];
     loggerMock = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
 
-    dbMock = jest.fn((table) => {
-      if (table === 'agent_gap_reports') {
+    sightings = [];
+    const table = jest.fn((name) => {
+      if (name === 'agent_gap_reports') {
         return {
           insert: jest.fn((row) => {
             insertedRows.push(row);
@@ -29,11 +31,19 @@ describe('agent-gap-reports', () => {
               })),
             };
           }),
+          where: jest.fn(() => ({
+            update: jest.fn((fields) => ({ returning: jest.fn().mockResolvedValue([{ id: '7', kind: 'missing_capability', occurrences: 1, ...fields }]) })),
+          })),
         };
       }
-      throw new Error(`Unexpected table ${table}`);
+      if (name === 'agent_gap_report_sightings') {
+        return { insert: jest.fn(async (row) => { sightings.push(row); }) };
+      }
+      throw new Error(`Unexpected table ${name}`);
     });
-    dbMock.raw = jest.fn((sql) => ({ __raw: sql }));
+    table.raw = jest.fn((sql) => ({ __raw: sql }));
+    dbMock = table;
+    dbMock.transaction = jest.fn(async (work) => work(table));
 
     jest.doMock('../models/db', () => dbMock);
     jest.doMock('../services/logger', () => loggerMock);
@@ -81,6 +91,7 @@ describe('agent-gap-reports', () => {
         source: 'intelligence-bar',
         kind: 'missing_capability',
         summary: 'Add property 61760 for Dana Synthwell, dana@example.com, 941-555-0100, id 3f6012af-0fff-4b41-865a-76061b85818d',
+        freeText: true,
         attempted: 'Tried update_customer for Synthwell',
       }, ['Dana Synthwell', 'Dana', 'Synthwell']);
       expect(row.summary).not.toMatch(/Dana|Synthwell|dana@example\.com|941-555-0100|61760|3f6012af/);
@@ -97,6 +108,27 @@ describe('agent-gap-reports', () => {
       const row = prepareGapRow({ source: 'intelligence-bar', kind: 'missing_capability', summary: 'add a rental for José Núñez and Chloé' },
         ['José Núñez', 'José', 'Núñez', 'Chloé']);
       expect(row.summary).toBe('add a rental for [name] and [name]');
+    });
+
+    test('model-written text loses names and new addresses the request never resolved', () => {
+      const { _private: { prepareGapRow } } = load();
+      const row = prepareGapRow({ source: 'intelligence-bar', kind: 'missing_capability', freeText: true,
+        summary: 'Refund a Stripe payment for Dana Synthwell at 12 Palm Row on Monday' });
+      expect(row.summary).toBe('Refund a Stripe payment for [name] [name] at [address] on Monday');
+    });
+
+    test('a capitalized first word is kept only when it reads as the verb; acronyms and tiers stay', () => {
+      const { _private: { scrubProperNouns } } = load();
+      expect(scrubProperNouns('Dana wants a WDO inspection')).toBe('[name] wants a WDO inspection');
+      expect(scrubProperNouns('Add a Silver tier discount for GA4 visitors')).toBe('Add a Silver tier discount for GA4 visitors');
+    });
+
+    test("the server's own phrasing is not scrubbed as if a model wrote it", () => {
+      const { _private: { prepareGapRow } } = load();
+      const row = prepareGapRow({ source: 'intelligence-bar', kind: 'missing_capability', summary: 'Asked for a tool that does not exist: create_property',
+        attempted: 'Searched the bar; no matching tool' });
+      expect(row.summary).toBe('Asked for a tool that does not exist: create_property');
+      expect(row.attempted).toBe('Searched the bar; no matching tool');
     });
 
     test('an empty summary after cleaning records nothing', () => {
@@ -124,6 +156,8 @@ describe('agent-gap-reports', () => {
       expect(merge.domain.__raw).toMatch(/COALESCE\(agent_gap_reports.domain, EXCLUDED.domain\)/);
       expect(merge.closest_tool.__raw).toMatch(/COALESCE\(agent_gap_reports.closest_tool, EXCLUDED.closest_tool\)/);
       expect(merge.attempted.__raw).toMatch(/COALESCE\(EXCLUDED.attempted, agent_gap_reports.attempted\)/);
+      expect(dbMock.transaction).toHaveBeenCalledTimes(1);
+      expect(sightings).toEqual([{ gap_id: '7', seen_at: expect.any(Date) }]);
     });
 
     test('the same gap twice in one batch is written once', async () => {
@@ -136,7 +170,7 @@ describe('agent-gap-reports', () => {
     });
 
     test('never throws when the insert rejects, and logs only the error code', async () => {
-      dbMock.mockImplementation(() => { throw Object.assign(new Error('insert into agent_gap_reports ... dana@example.com'), { code: '23505' }); });
+      dbMock.transaction.mockImplementation(async () => { throw Object.assign(new Error('insert into agent_gap_reports ... dana@example.com'), { code: '23505' }); });
       const { writeGapRows } = load();
       await expect(writeGapRows([{ source: 'intelligence-bar', kind: 'missing_capability', summary: 'x y z' }])).resolves.toEqual([]);
       expect(loggerMock.warn).toHaveBeenCalledWith('[agent-gap-reports] record failed (23505)');
@@ -149,6 +183,14 @@ describe('agent-gap-reports', () => {
       expect(gapReportPromptLine()).toBe('');
       await expect(writeGapRows([{ source: 'intelligence-bar', kind: 'missing_capability', summary: 'add a second service address' }])).resolves.toEqual([]);
       expect(dbMock).not.toHaveBeenCalled();
+      expect(dbMock.transaction).not.toHaveBeenCalled();
+    });
+
+    test('setGapStatus writes one of the lifecycle statuses and refuses anything else', async () => {
+      const { setGapStatus, GAP_STATUSES } = load();
+      expect(GAP_STATUSES).toEqual(['new', 'building', 'fixed', 'by_design', 'dismissed']);
+      await expect(setGapStatus(7, 'done')).rejects.toThrow(/status must be one of/);
+      await expect(setGapStatus(7, 'by_design')).resolves.toMatchObject({ status: 'by_design' });
     });
 
     test('with the switch on, the prompt line asks for a general search before declining', () => {
@@ -166,7 +208,7 @@ describe('agent-gap-reports', () => {
       const collector = createGapCollector({ source: 'intelligence-bar' });
       collector.discovery({ query: 'add a second service address' }, MISS);
       await collector.flush({ reply: 'Here are the three customers you asked about.' });
-      expect(dbMock).not.toHaveBeenCalled();
+      expect(dbMock.transaction).not.toHaveBeenCalled();
     });
 
     test('a search that found nothing is recorded with the search as its summary', async () => {
@@ -243,7 +285,7 @@ describe('agent-gap-reports', () => {
     });
 
     test('flush never rejects, even when the database throws', async () => {
-      dbMock.mockImplementation(() => { throw new Error('down'); });
+      dbMock.transaction.mockImplementation(async () => { throw new Error('down'); });
       const { createGapCollector } = load();
       const collector = createGapCollector({ source: 'intelligence-bar' });
       collector.discovery({ query: 'add a second service address' }, MISS);

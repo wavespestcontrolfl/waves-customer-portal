@@ -51,16 +51,26 @@ issuing one), so a declined request records every search it made, each
 noting whether a related tool ran. Broken tools are not gap reports: every
 tool call's outcome is already in `tool_health_events` (Tool Health). The platform
 prompt asks the model to search with a short, general description before
-declining, so that search becomes the gap's summary. Text is cleaned with the
-shared `redactText` plus the request's resolved customer names and
-addresses; UUIDs and record numbers are stripped. Rows dedupe by a
-fingerprint of source, kind and the summary's word set: a recurrence bumps
-`occurrences`, reopens a `fixed` gap as `new`, and fills in a domain or tool
-the first sighting lacked.
+declining, so that search becomes the gap's summary. That model-written text
+is cleaned with the shared `redactText` plus the request's resolved customer
+names and addresses. After that, a fixed rule replaces every capitalized word
+except acronyms, a short keep list (vendor names, plan tiers, days and months)
+and a leading verb, and it turns a house number with its street into
+`[address]`. UUIDs and record numbers are stripped too. Rows dedupe by a
+fingerprint of source, kind and the summary's word set. A recurrence bumps
+the lifetime `occurrences`, reopens a `fixed` gap as `new`, and fills in a
+domain or tool the first sighting lacked. It also writes one
+`agent_gap_report_sightings` row in the same transaction; windowed counts
+read those rows.
 
-`list_gap_reports` (`gap-report-tools.js`) is the read side, grouped by domain
-and most-hit first, for "show gap reports" and "what should we build next".
-It returns up to 50 rows with the real `total_matching` and `has_more`.
+`list_gap_reports` (`gap-report-tools.js`) is the read side, for "show gap
+reports" and "what should we build next". It groups by domain and ranks by
+sightings in the window, showing `times_seen_in_window` beside
+`times_seen_total`. It returns up to 50 rows with the real `total_matching`
+and `has_more`. The list tool and the digest share one reader,
+`listRecentGaps()`. The owner's triage (`building`, `fixed`, `by_design`,
+`dismissed`) is set by a session through `ops/agents/gap-status.js`, which
+dry-runs by default.
 `server/services/agent-gap-digest.js` sends a short weekly reminder (Monday
 8:15am ET, `scheduler.js`) when the last 7 days recorded anything still open
 (not fixed, by_design or dismissed); a quiet week sends nothing. The bell carries a fixed two-line instruction, and the

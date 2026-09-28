@@ -59,7 +59,7 @@ postgres('agent-gap-reports against PostgreSQL', () => {
     expect(result.returned).toBe(50);
     expect(result.total_matching).toBeGreaterThanOrEqual(51);
     expect(result.has_more).toBe(true);
-    expect(result.note).toMatch(/most-hit of/);
+    expect(result.note).toMatch(/most-seen of/);
   });
 
   test('a recurrence fills in the domain and tool the first sighting lacked and keeps the latest attempt', async () => {
@@ -113,6 +113,40 @@ postgres('agent-gap-reports against PostgreSQL', () => {
     expect(recurredDismissed.status).toBe('dismissed');
   });
 
+  test('every hit writes a sighting, and a window counts only its own sightings', async () => {
+    const gap = await record({ summary: 'Synthetic windowed gap' });
+    await record({ summary: 'Synthetic windowed gap' });
+    // Two older sightings, outside a 7-day window but inside 30 days.
+    const old = new Date(Date.now() - 20 * 24 * 60 * 60 * 1000);
+    await db('agent_gap_report_sightings').insert([{ gap_id: gap.id, seen_at: old }, { gap_id: gap.id, seen_at: old }]);
+    await db('agent_gap_reports').where('id', gap.id).update({ occurrences: 4 });
+    expect(Number((await db('agent_gap_report_sightings').where('gap_id', gap.id).count('* as n'))[0].n)).toBe(4);
+    const week = (await listGapReports({ days: 7 })).groups.flatMap((g) => g.gaps).find((g) => g.gap_id === gap.id);
+    expect(week).toMatchObject({ times_seen_in_window: 2, times_seen_total: 4 });
+    const month = (await listGapReports({ days: 30 })).groups.flatMap((g) => g.gaps).find((g) => g.gap_id === gap.id);
+    expect(month.times_seen_in_window).toBe(4);
+  });
+
+  test('a gap busy this week outranks one with more lifetime hits but fewer this week', async () => {
+    const veteran = await record({ summary: 'Synthetic veteran gap', domain: 'ops' });
+    await db('agent_gap_reports').where('id', veteran.id).update({ occurrences: 100 });
+    const fresh = await record({ summary: 'Synthetic fresh gap', domain: 'ops' });
+    await record({ summary: 'Synthetic fresh gap', domain: 'ops' });
+    await record({ summary: 'Synthetic fresh gap', domain: 'ops' });
+    const ids = (await listGapReports({ days: 7 })).groups.find((g) => g.domain === 'ops').gaps.map((g) => g.gap_id);
+    expect(ids.indexOf(fresh.id)).toBeLessThan(ids.indexOf(veteran.id));
+  });
+
+  test('setGapStatus moves a gap through the lifecycle; closed statuses leave the default list', async () => {
+    const { setGapStatus } = require('../services/agent-gap-reports');
+    const gap = await record({ summary: 'Synthetic gap the owner rules by design' });
+    await expect(setGapStatus(gap.id, 'by_design')).resolves.toMatchObject({ status: 'by_design' });
+    const ids = (await listGapReports({ days: 7 })).groups.flatMap((g) => g.gaps).map((g) => g.gap_id);
+    expect(ids).not.toContain(gap.id);
+    await expect(setGapStatus(gap.id, 'shipped')).rejects.toThrow(/status must be one of/);
+    await expect(setGapStatus(987654321, 'fixed')).resolves.toBeNull();
+  });
+
   test('list_gap_reports groups by domain, orders by occurrence volume, and excludes closed statuses by default', async () => {
     const heavy = await record({ summary: 'Heavy hit gap in ops domain', domain: 'ops' });
     for (let i = 0; i < 3; i += 1) await record({ summary: 'Heavy hit gap in ops domain', domain: 'ops' });
@@ -129,7 +163,8 @@ postgres('agent-gap-reports against PostgreSQL', () => {
     // ops (4 occurrences on the heavy gap) outranks other (1 occurrence).
     expect(result.groups.indexOf(opsGroup)).toBeLessThan(result.groups.indexOf(otherGroup));
     expect(opsGroup.gaps[0].gap_id).toBe(heavy.id);
-    expect(opsGroup.gaps[0].times_seen).toBe(4);
+    expect(opsGroup.gaps[0].times_seen_in_window).toBe(4);
+    expect(opsGroup.gaps[0].times_seen_total).toBe(4);
     expect(opsGroup.gaps.some((g) => g.gap_id === closed.id)).toBe(false);
     expect(otherGroup.gaps.some((g) => g.gap_id === light.id)).toBe(true);
     expect(result.note).toMatch(/gap #/);

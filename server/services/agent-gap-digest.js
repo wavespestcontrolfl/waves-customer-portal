@@ -19,33 +19,27 @@ const db = require('../models/db');
 const { deliverOpsDigest } = require('./ops-digest');
 const { isInternalEmailRecipient } = require('../utils/internal-email-recipients');
 const { etWeekStart } = require('../utils/datetime-et');
-const { gapReportsEnabled } = require('./agent-gap-reports');
+const { gapReportsEnabled, listRecentGaps } = require('./agent-gap-reports');
 
 const digestEmail = () => process.env.AGENT_GAP_DIGEST_EMAIL || 'contact@wavespestcontrol.com';
 const fromEmail = () => process.env.SENDGRID_FROM_EMAIL || 'contact@wavespestcontrol.com';
 const FROM_NAME = process.env.SENDGRID_FROM_NAME || 'Waves Pest Control';
 
 const WINDOW_DAYS = 7;
-// Gaps the owner already settled stay out of the reminder. A `fixed` gap
-// that happens again is reopened to `new` by the recorder, so a regression
-// still shows up; `new` and `building` are the ones worth a reminder.
-const QUIET_STATUSES = ['fixed', 'by_design', 'dismissed'];
 // Fixed, short instruction — never the list itself (bell-body length rule).
 const BELL_BODY = 'Ask the bar "show gap reports" for the list. Tell any session "build gap #N" to start a PR.';
 
+// Gaps the owner already settled (fixed, by_design, dismissed) stay out of
+// the reminder; the recorder reopens a `fixed` gap that happens again, so a
+// regression still shows up. Most-seen this week first.
 async function loadRecentGaps() {
-  const cutoff = new Date(Date.now() - WINDOW_DAYS * 24 * 60 * 60 * 1000);
-  return db('agent_gap_reports')
-    .where('last_seen_at', '>=', cutoff)
-    .whereNotIn('status', QUIET_STATUSES)
-    .orderBy('occurrences', 'desc')
-    .orderBy('last_seen_at', 'desc');
+  return listRecentGaps({ days: WINDOW_DAYS });
 }
 
 function gapLine(row) {
   const tried = row.attempted ? ` — tried: ${row.attempted}` : '';
   const tool = row.closest_tool ? ` [${row.closest_tool}]` : '';
-  return `gap #${row.id} (${row.status}, seen ${row.occurrences}x): ${row.summary}${tried}${tool}`;
+  return `gap #${row.id} (${row.status}, seen ${row.seen_in_window}x this week, ${row.occurrences}x total): ${row.summary}${tried}${tool}`;
 }
 
 // Pure composition: null = nothing worth an email (the common, quiet case).

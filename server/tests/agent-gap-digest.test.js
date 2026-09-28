@@ -28,6 +28,7 @@ function gapRow(overrides = {}) {
     attempted: null,
     closest_tool: null,
     occurrences: 1,
+    seen_in_window: 1,
     status: 'new',
     first_seen_at: '2026-09-22T00:00:00.000Z',
     last_seen_at: '2026-09-28T00:00:00.000Z',
@@ -49,8 +50,9 @@ describe('composeAgentGapDigest', () => {
   });
 
   test('an ACT subject counts the gaps and the body lists each one', () => {
-    const rows = [gapRow({ id: 1 }), gapRow({ id: 2, summary: 'Second gap', closest_tool: 'send_sms', attempted: 'tried the sms tool' })];
+    const rows = [gapRow({ id: 1, seen_in_window: 3, occurrences: 40 }), gapRow({ id: 2, summary: 'Second gap', closest_tool: 'send_sms', attempted: 'tried the sms tool' })];
     const composed = composeAgentGapDigest(rows);
+    expect(composed.text).toContain('gap #1 (new, seen 3x this week, 40x total)');
     expect(composed.subject).toBe("ACT: 2 things the bar couldn't do this week");
     expect(composed.count).toBe(2);
     expect(composed.text).toContain('gap #1');
