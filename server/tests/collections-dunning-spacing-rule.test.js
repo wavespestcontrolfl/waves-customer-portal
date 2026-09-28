@@ -302,6 +302,13 @@ describe('lastOverdueReminderWithin7d', () => {
     expect(result).toEqual(earlier);
   });
 
+  test('a deferred verification re-nudge flagged verification_renudge never holds, and replay drops it (Codex r7)', async () => {
+    const renudge = row({ source: 'invoice_followup_replay', metadata: { verification_renudge: true }, occurred_at: new Date(NOW.getTime() - HOUR_MS).toISOString() });
+    const database = fakeDatabase([renudge]);
+    expect(await lastOverdueReminderWithin7d('cust-1', { now: NOW, database })).toBeNull();
+    expect(collapseDunningReminderEvents([renudge])).toEqual([]);
+  });
+
   test('no rows at all returns null', async () => {
     const database = fakeDatabase([]);
     const result = await lastOverdueReminderWithin7d('cust-1', { now: NOW, database });

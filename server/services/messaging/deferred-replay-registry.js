@@ -393,6 +393,8 @@ const REGISTRY = {
               // The touch this leg belongs to, so spacing groups it with its
               // delivered email sibling (Codex #5189 r6).
               ...(meta.notificationEventKey ? { notificationEventKey: meta.notificationEventKey } : {}),
+              // Spacing evidence skips a verification re-nudge (Codex #5189 r7).
+              ...(followupReplayIsVerification(meta) ? { verification_renudge: true } : {}),
             },
           });
         }
@@ -428,6 +430,7 @@ const REGISTRY = {
           original_block_code: meta.original_block_code || null,
           replay: true,
           ...(meta.notificationEventKey ? { notificationEventKey: meta.notificationEventKey } : {}),
+          ...(followupReplayIsVerification(meta) ? { verification_renudge: true } : {}),
         },
       });
     },

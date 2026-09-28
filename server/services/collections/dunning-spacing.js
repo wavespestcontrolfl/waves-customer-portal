@@ -69,9 +69,12 @@ function metadataOf(row) {
 }
 
 // The row-shape filter: this source + this purpose is an overdue reminder.
+// A deferred bank-verification re-nudge is stored with the follow-up
+// replay's late_payment shape but flagged verification_renudge (Codex #5189
+// r7); it is not an overdue reminder.
 function isOverdueReminderRow(row) {
   return !!row && !EXEMPT_SOURCES.has(row.source) && OVERDUE_SOURCES.has(row.source)
-    && OVERDUE_PURPOSES.has(row.purpose);
+    && OVERDUE_PURPOSES.has(row.purpose) && metadataOf(row).verification_renudge !== true;
 }
 
 // Whether the row counts as having reached the customer — see module header.
@@ -114,7 +117,9 @@ function invoiceSetOf(row) {
 }
 
 function collapseDunningReminderEvents(rows) {
-  const sent = [...(rows || [])].filter(countsAsSent).sort(compareReplayRows);
+  const sent = [...(rows || [])]
+    .filter((row) => countsAsSent(row) && metadataOf(row).verification_renudge !== true)
+    .sort(compareReplayRows);
   const events = [];
   const keyedEventIndexes = new Map();
   const keylessEvents = new Map();
