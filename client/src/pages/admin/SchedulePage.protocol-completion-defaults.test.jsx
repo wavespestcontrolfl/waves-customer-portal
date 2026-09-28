@@ -229,6 +229,42 @@ it('a restored pre-retirement draft with Next steps chips drops its stale genera
   await waitFor(() => expect(screen.getByText(/the draft\s+was cleared/)).toBeTruthy());
 });
 
+it('a chips-only pre-retirement draft restored after its profile went untyped drops its stale generated report (Codex r2 #5116)', async () => {
+  const visit = cockroachService({
+    id: 'cockroach-visit-untyped',
+    completionProfile: { serviceKey: 'cockroach_control', findingsType: null, requiresProducts: true },
+    findingsSchema: null,
+  });
+  const report = 'WHAT WE DID:\nPlaced gel bait in the kitchen.';
+  localStorage.setItem(`waves_completion_draft_${visit.id}`, JSON.stringify({
+    serviceId: visit.id,
+    savedAt: Date.now(),
+    notes: report,
+    generatedReportText: report,
+    aiReportUsed: true,
+    typedNextStepChips: ['Monitor activity'],
+  }));
+  const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
+  stubFetchWithImmediateDefaults();
+  try {
+    await act(async () => {
+      render(
+        <CompletionPanel
+          service={visit}
+          products={cockroachCatalog}
+          onClose={() => {}}
+          onSubmit={vi.fn().mockResolvedValue({})}
+        />,
+      );
+    });
+    fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+    await waitFor(() => expect(alertSpy).toHaveBeenCalled());
+    await waitFor(() => expect(screen.getByText(/the draft\s+was cleared/)).toBeTruthy());
+  } finally {
+    alertSpy.mockRestore();
+  }
+});
+
 it('clears the seeded rows on customer_declined, then reseeds once the outcome returns to completed (pre-push audit P1, PR #5049 r1)', async () => {
   // cockroach has no specialtyCompletionFor preset, so the submit-time
   // noApplicationOutcomeConflict guard never runs for it — a seeded

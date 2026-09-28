@@ -15319,7 +15319,10 @@ export function CompletionPanel({
           Array.isArray(v) ? v.length > 0 : String(v ?? "").trim() !== "",
         )
         || Number.isInteger(savedDraft.typedActivityScore)
-        || String(savedDraft.typedRecommendations || "").trim() !== "";
+        || String(savedDraft.typedRecommendations || "").trim() !== ""
+        // Retired Next steps chips count too: copy generated from them must
+        // not survive a profile that went untyped (Codex r2 #5116).
+        || (Array.isArray(savedDraft.typedNextStepChips) && savedDraft.typedNextStepChips.length > 0);
       if (draftHadTypedEntries) {
         restorePruned = true;
         alert(
