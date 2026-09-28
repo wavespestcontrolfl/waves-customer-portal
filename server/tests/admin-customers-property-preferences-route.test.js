@@ -58,6 +58,7 @@ jest.mock('../models/db', () => {
 });
 
 const router = require('../routes/admin-customers');
+const db = require('../models/db');
 const { recordAuditEvent } = require('../services/audit-log');
 const { hasLawnServiceEvidence } = require('../services/irrigation-weekly-email');
 
@@ -159,12 +160,27 @@ describe('PUT /api/admin/customers/:id/property-preferences', () => {
     expect(JSON.stringify(call.metadata)).not.toContain('5501');
   });
 
-  test('irrigationInchesPerWeek is dropped (not saved) for a customer with no lawn-care evidence', async () => {
+  test('irrigationInchesPerWeek is REJECTED (not silently dropped) for a customer with no lawn-care evidence, but the rest of the batch still saves', async () => {
     hasLawnServiceEvidence.mockResolvedValueOnce(false);
     const res = await putPrefs({ irrigationInchesPerWeek: 1.5, accessNotes: 'note' });
     expect(res.status).toBe(200);
     expect(mockState.prefsRow.irrigation_inches_per_week).toBeUndefined();
     expect(mockState.prefsRow.access_notes).toBe('note');
+    expect(res.body.rejected).toEqual([{
+      field: 'irrigationInchesPerWeek',
+      message: expect.stringMatching(/not eligible/i),
+    }]);
+  });
+
+  test('irrigationInchesPerWeek alone, ineligible customer, 400s with nothing saved (still reported via rejected, not just a joined string)', async () => {
+    hasLawnServiceEvidence.mockResolvedValueOnce(false);
+    const res = await putPrefs({ irrigationInchesPerWeek: 1.5 });
+    expect(res.status).toBe(400);
+    expect(res.body.rejected).toEqual([{
+      field: 'irrigationInchesPerWeek',
+      message: expect.stringMatching(/not eligible/i),
+    }]);
+    expect(mockState.prefsRow).toBeNull();
   });
 
   test('irrigationInchesPerWeek saves for a WaveGuard tier customer without a lookup', async () => {
@@ -175,11 +191,118 @@ describe('PUT /api/admin/customers/:id/property-preferences', () => {
     expect(hasLawnServiceEvidence).not.toHaveBeenCalled();
   });
 
+  test('clearing irrigationInchesPerWeek to null succeeds even for an ineligible customer — a clear is never gated', async () => {
+    mockState.prefsRow = { id: 'pref-1', customer_id: 'cust-1', irrigation_inches_per_week: 1.5 };
+    const res = await putPrefs({ irrigationInchesPerWeek: null });
+    expect(res.status).toBe(200);
+    expect(res.body.rejected).toBeUndefined();
+    expect(mockState.prefsRow.irrigation_inches_per_week).toBeNull();
+    expect(hasLawnServiceEvidence).not.toHaveBeenCalled();
+  });
+
   test('wateringDays and mowingDays round-trip as JSON-stringified jsonb writes', async () => {
     const res = await putPrefs({ wateringDays: ['Mon', 'Wed'], mowingDays: ['Tue'] });
     expect(res.status).toBe(200);
     expect(typeof mockState.prefsRow.watering_days).toBe('string');
     expect(JSON.parse(mockState.prefsRow.watering_days)).toEqual(['Mon', 'Wed']);
     expect(JSON.parse(mockState.prefsRow.mowing_days)).toEqual(['Tue']);
+  });
+
+  describe('blackout window integrity', () => {
+    test('rejects a lone blackoutEnd with no blackoutStart (neither saved)', async () => {
+      const res = await putPrefs({ blackoutEnd: '2026-12-25', accessNotes: 'note' });
+      expect(res.status).toBe(200);
+      expect(res.body.rejected).toEqual([{
+        field: 'blackoutEnd',
+        message: expect.stringMatching(/set or cleared together/i),
+      }]);
+      expect(mockState.prefsRow.blackout_end).toBeUndefined();
+      expect(mockState.prefsRow.blackout_start).toBeUndefined();
+      expect(mockState.prefsRow.access_notes).toBe('note');
+    });
+
+    test('rejects end before start', async () => {
+      const res = await putPrefs({ blackoutStart: '2026-12-25', blackoutEnd: '2026-12-01' });
+      expect(res.status).toBe(400);
+      expect(res.body.rejected).toEqual([{
+        field: 'blackoutEnd',
+        message: expect.stringMatching(/on or after/i),
+      }]);
+      expect(mockState.prefsRow).toBeNull();
+    });
+
+    test('accepts a valid start/end pair', async () => {
+      const res = await putPrefs({ blackoutStart: '2026-12-01', blackoutEnd: '2026-12-25' });
+      expect(res.status).toBe(200);
+      expect(res.body.rejected).toBeUndefined();
+      expect(mockState.prefsRow.blackout_start).toBeTruthy();
+      expect(mockState.prefsRow.blackout_end).toBeTruthy();
+    });
+
+    test('accepts clearing both together (both null/empty)', async () => {
+      mockState.prefsRow = { id: 'pref-1', customer_id: 'cust-1', blackout_start: '2026-01-01', blackout_end: '2026-01-05' };
+      const res = await putPrefs({ blackoutStart: '', blackoutEnd: '' });
+      expect(res.status).toBe(200);
+      expect(res.body.rejected).toBeUndefined();
+      // The Joi date schema normalizes '' to null before it ever reaches
+      // storage — belt-and-braces even though the client sends null itself.
+      expect(mockState.prefsRow.blackout_start).toBeNull();
+      expect(mockState.prefsRow.blackout_end).toBeNull();
+    });
+  });
+
+  describe('irrigation_confirmed_fields ledger (admin writes UNCONFIRM, never confirm)', () => {
+    test('a genuinely changed sizing field is stripped from irrigation_confirmed_fields in the same update', async () => {
+      mockState.prefsRow = {
+        id: 'pref-1', customer_id: 'cust-1',
+        irrigation_run_minutes: 15,
+        irrigation_confirmed_fields: ['irrigation_run_minutes', 'watering_days'],
+      };
+      await putPrefs({ irrigationRunMinutes: 30 });
+      const rawCalls = db.raw.mock.calls.filter(([sql]) => String(sql).includes('jsonb_array_elements_text'));
+      expect(rawCalls).toHaveLength(1);
+      // Bindings are [ [...fieldsToRemove] ] — irrigation_run_minutes changed
+      // (15 -> 30) so it's the one being unconfirmed; watering_days was not
+      // touched this save and is left alone.
+      expect(rawCalls[0][1][0]).toEqual(['irrigation_run_minutes']);
+    });
+
+    test('re-saving a sizing field with the SAME value does not touch the confirmed-fields ledger', async () => {
+      mockState.prefsRow = {
+        id: 'pref-1', customer_id: 'cust-1',
+        irrigation_run_minutes: 30,
+        irrigation_confirmed_fields: ['irrigation_run_minutes'],
+      };
+      await putPrefs({ irrigationRunMinutes: 30, accessNotes: 'note' });
+      const rawCalls = db.raw.mock.calls.filter(([sql]) => String(sql).includes('jsonb_array_elements_text'));
+      expect(rawCalls).toHaveLength(0);
+    });
+
+    test('rain_sensor changing is stripped from the confirmed set too', async () => {
+      mockState.prefsRow = {
+        id: 'pref-1', customer_id: 'cust-1', rain_sensor: false,
+        irrigation_confirmed_fields: ['rain_sensor'],
+      };
+      await putPrefs({ rainSensor: true });
+      const rawCalls = db.raw.mock.calls.filter(([sql]) => String(sql).includes('jsonb_array_elements_text'));
+      expect(rawCalls).toHaveLength(1);
+      expect(rawCalls[0][1][0]).toEqual(['rain_sensor']);
+    });
+  });
+
+  describe('irrigation_system stamp (mirrors the portal writer)', () => {
+    test('any genuine irrigation-field edit stamps irrigation_system: true, unblocking a legacy false row', async () => {
+      mockState.prefsRow = { id: 'pref-1', customer_id: 'cust-1', irrigation_system: false };
+      const res = await putPrefs({ irrigationControllerLocation: 'Side yard' });
+      expect(res.status).toBe(200);
+      expect(res.body.preferences.irrigation_system).toBe(true);
+    });
+
+    test('a non-irrigation edit does not touch irrigation_system', async () => {
+      mockState.prefsRow = { id: 'pref-1', customer_id: 'cust-1', irrigation_system: false };
+      const res = await putPrefs({ accessNotes: 'note' });
+      expect(res.status).toBe(200);
+      expect(res.body.preferences.irrigation_system).toBe(false);
+    });
   });
 });

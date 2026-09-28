@@ -46,6 +46,11 @@ const {
   customerQualifiesForLawnInches,
   normalizeUpdatesForStorage: normalizePrefsUpdatesForStorage,
 } = require('../services/property-preferences-schema');
+const {
+  IRRIGATION_INPUT_FIELDS: PREFS_IRRIGATION_INPUT_FIELDS,
+  changedSizingFields: prefsChangedSizingFields,
+  unconfirmedFieldsRaw: prefsUnconfirmedFieldsRaw,
+} = require('../services/irrigation-schedule-confirmation');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -4482,12 +4487,12 @@ router.put('/:id/notification-prefs', requireAdmin, async (req, res, next) => {
 //   - No customer notification of any kind (no account.updated email) —
 //     this is staff correcting/recording the file, not the customer
 //     editing their own preferences.
-//   - No irrigation_confirmed_fields ledger participation: that ledger
-//     means "the CUSTOMER re-affirmed this setting is still right for the
-//     current home after a move" (server/services/irrigation-schedule-
-//     confirmation.js) — a staff edit is not that affirmation, so it is
-//     left untouched here (the customer's next portal save still confirms
-//     it normally).
+//   - irrigation_confirmed_fields ledger: the OPPOSITE direction from the
+//     portal — a staff overwrite of a sizing field or rain_sensor is not
+//     the CUSTOMER re-affirming the new value is right for the current
+//     home, so a genuinely changed value is stripped from the confirmed
+//     set (unconfirmedFieldsRaw) rather than left carrying a stale
+//     confirmation stamped for whatever number used to be there.
 //   - Field names only in the log/audit trail, never gate/lockbox/garage
 //     code VALUES in the clear.
 const ADMIN_ONLY_PREFS_FIELD_SCHEMAS = {
@@ -4517,11 +4522,42 @@ router.put('/:id/property-preferences', requireAdmin, async (req, res, next) => 
       if (field in snakeBody) updates[field] = snakeBody[field];
     }
 
+    // Blackout window integrity (codex P2): both-or-neither, and start on
+    // or before end. The client always submits the pair together when
+    // either changes, so requiring both here — rather than reading the
+    // current row to reason about a lone field — is a floor against a
+    // malformed/partial call, not a UX regression.
+    const blackoutFieldsSent = ['blackout_start', 'blackout_end'].filter((f) => f in updates);
+    if (blackoutFieldsSent.length === 1) {
+      rejected.push({
+        field: blackoutFieldsSent[0] === 'blackout_start' ? 'blackoutStart' : 'blackoutEnd',
+        message: 'Blackout start and end dates must be set or cleared together.',
+      });
+      delete updates.blackout_start;
+      delete updates.blackout_end;
+    } else if (blackoutFieldsSent.length === 2) {
+      const { blackout_start: bStart, blackout_end: bEnd } = updates;
+      if ((bStart == null) !== (bEnd == null)) {
+        rejected.push({ field: 'blackoutEnd', message: 'Blackout start and end dates must be set or cleared together.' });
+        delete updates.blackout_start;
+        delete updates.blackout_end;
+      } else if (bStart != null && bEnd != null && new Date(bStart) > new Date(bEnd)) {
+        rejected.push({ field: 'blackoutEnd', message: 'Blackout end date must be on or after the start date.' });
+        delete updates.blackout_start;
+        delete updates.blackout_end;
+      }
+    }
+
     // Same Weekly-Inches eligibility gate as the portal write: never persist
-    // irrigation_inches_per_week for a customer who wouldn't otherwise see
-    // the field (GH codex P2 on #3557 — a swallowed lookup error must fail
-    // the save, not silently drop/clear the value with a 200).
-    if ('irrigation_inches_per_week' in updates) {
+    // a NEW irrigation_inches_per_week value for a customer who wouldn't
+    // otherwise see the field (GH codex P2 on #3557 — a swallowed lookup
+    // error must fail the save, not silently drop/clear the value with a
+    // 200). An explicit clear (null) always goes through regardless of
+    // eligibility — there is nothing ineligible about removing a number
+    // (codex P2) — and an ineligible non-null value is reported back in
+    // `rejected` instead of silently dropped, so staff see why it didn't
+    // save rather than a save that quietly did less than asked.
+    if ('irrigation_inches_per_week' in updates && updates.irrigation_inches_per_week !== null) {
       const customer = await db('customers').where({ id: req.params.id }).first();
       let eligible;
       try {
@@ -4530,13 +4566,22 @@ router.put('/:id/property-preferences', requireAdmin, async (req, res, next) => 
         logger.warn(`[customers:${req.params.id}] property_preferences lawn evidence lookup failed: ${err.message}`);
         return res.status(503).json({ error: "Couldn't verify this customer's lawn service just now — please try again." });
       }
-      if (!eligible) delete updates.irrigation_inches_per_week;
+      if (!eligible) {
+        delete updates.irrigation_inches_per_week;
+        rejected.push({
+          field: 'irrigationInchesPerWeek',
+          message: 'This customer is not eligible for weekly-inches tracking (no WaveGuard lawn tier and no recent lawn-service evidence on file).',
+        });
+      }
     }
 
     normalizePrefsUpdatesForStorage(updates);
 
     if (Object.keys(updates).length === 0) {
-      return res.status(400).json({ error: 'No valid fields to update' });
+      return res.status(400).json({
+        error: rejected.length ? rejected.map((r) => r.message).join('; ') : 'No valid fields to update',
+        ...(rejected.length ? { rejected } : {}),
+      });
     }
 
     // Same advisory-lock key/order the portal PUT and the customer-edit
@@ -4551,12 +4596,32 @@ router.put('/:id/property-preferences', requireAdmin, async (req, res, next) => 
       const current = await trx('property_preferences')
         .where({ customer_id: req.params.id })
         .first();
+
+      // Irrigation is ON by default (owner ruling 2026-08-27: no toggle);
+      // ANY genuine irrigation-field edit — including a staff correction —
+      // is the row working a system that exists, mirroring the portal
+      // writer (property.js `stampIrrigationOn`) so a legacy irrigation_
+      // system=false row doesn't keep suppressing a figure staff just set
+      // (report-data.js portalIrrigationInches, the weekly email).
+      const stampIrrigationOn = PREFS_IRRIGATION_INPUT_FIELDS.some((f) => f in updates)
+        ? { irrigation_system: true }
+        : {};
+
+      // Strip any sizing field / rain_sensor whose value actually CHANGES
+      // from irrigation_confirmed_fields — a staff write is not the
+      // customer's re-confirmation for the current home (see the module
+      // comment above the route).
+      const toUnconfirm = current ? prefsChangedSizingFields(current, updates) : [];
+      const unconfirmFields = toUnconfirm.length
+        ? { irrigation_confirmed_fields: prefsUnconfirmedFieldsRaw(trx, toUnconfirm) }
+        : {};
+
       if (current) {
         await trx('property_preferences')
           .where({ customer_id: req.params.id })
-          .update({ ...updates, updated_at: trx.fn.now() });
+          .update({ ...updates, ...stampIrrigationOn, ...unconfirmFields, updated_at: trx.fn.now() });
       } else {
-        await trx('property_preferences').insert({ customer_id: req.params.id, ...updates });
+        await trx('property_preferences').insert({ customer_id: req.params.id, ...updates, ...stampIrrigationOn });
       }
     });
 

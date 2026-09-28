@@ -191,21 +191,23 @@ describe('Customer 360 → Property → Access & Preferences', () => {
   });
 
   it('shows server-reported rejected fields without discarding the rest of the edit', async () => {
+    let prefsOverride = {};
     vi.stubGlobal('fetch', vi.fn((url, options) => {
       const path = String(url);
       if (path.endsWith('/admin/payers')) return response({ payers: [] });
       if (path.split('?')[0].endsWith('/timeline')) return response({ timeline: [] });
       if (path.endsWith('/admin/customers/customer-a/property-preferences')) {
         expect(options?.method).toBe('PUT');
+        prefsOverride = { access_notes: 'kept this one' };
         return response({
           success: true,
           saved: true,
-          preferences: { ...BASE_PREFS, access_notes: 'kept this one' },
+          preferences: { ...BASE_PREFS, ...prefsOverride },
           rejected: [{ field: 'hoaEmail', message: '"hoaEmail" must be a valid email' }],
         });
       }
       if (path.endsWith('/admin/customers/customer-a')) {
-        return response(customerDetail({ access_notes: 'kept this one' }));
+        return response(customerDetail(prefsOverride));
       }
       return response({});
     }));
@@ -216,10 +218,205 @@ describe('Customer 360 → Property → Access & Preferences', () => {
     await screen.findByText('Access & Preferences');
 
     fireEvent.click(screen.getByRole('button', { name: 'Edit Access & Preferences' }));
+    const accessNotesLabel = await screen.findByText('Access Notes');
+    fireEvent.change(accessNotesLabel.closest('label').querySelector('textarea'), {
+      target: { value: 'kept this one' },
+    });
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
     expect(await screen.findByText(/could not be saved/i)).toBeInTheDocument();
     // Stays in edit mode so staff can fix the flagged field.
     expect(screen.getByRole('button', { name: 'Save' })).toBeInTheDocument();
+  });
+
+  it('sends ONLY the field actually changed — not a full-snapshot resubmit that could clobber a newer portal autosave', async () => {
+    const fetchMock = vi.fn((url, options) => {
+      const path = String(url);
+      if (path.endsWith('/admin/payers')) return response({ payers: [] });
+      if (path.split('?')[0].endsWith('/timeline')) return response({ timeline: [] });
+      if (path.endsWith('/admin/customers/customer-a/property-preferences')) {
+        const body = JSON.parse(options.body);
+        // Only the one touched field rides the PUT — every other
+        // BASE_PREFS-backed value (neighborhoodGateCode, petDetails,
+        // preferredDay, wateringDays, …) is absent, not merely unchanged.
+        expect(Object.keys(body)).toEqual(['accessNotes']);
+        return response({ success: true, saved: true, preferences: { ...BASE_PREFS, access_notes: body.accessNotes } });
+      }
+      if (path.endsWith('/admin/customers/customer-a')) return response(customerDetail());
+      return response({});
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+    await screen.findAllByText('Avery Customer');
+    await openPropertyTab();
+    await screen.findByText('Access & Preferences');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Access & Preferences' }));
+    const accessNotesLabel = await screen.findByText('Access Notes');
+    fireEvent.change(accessNotesLabel.closest('label').querySelector('textarea'), {
+      target: { value: 'Only this changed' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.some(
+        ([u, o]) => String(u).endsWith('/property-preferences') && o?.method === 'PUT',
+      )).toBe(true);
+    });
+  });
+
+  it('clicking Save with nothing changed closes the form without a network call', async () => {
+    const fetchMock = vi.fn((url) => {
+      const path = String(url);
+      if (path.endsWith('/admin/payers')) return response({ payers: [] });
+      if (path.split('?')[0].endsWith('/timeline')) return response({ timeline: [] });
+      if (path.endsWith('/admin/customers/customer-a')) return response(customerDetail());
+      return response({});
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+    await screen.findAllByText('Avery Customer');
+    await openPropertyTab();
+    await screen.findByText('Access & Preferences');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Access & Preferences' }));
+    await screen.findByText('Access Notes');
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => {
+      expect(screen.queryByRole('button', { name: 'Save' })).not.toBeInTheDocument();
+    });
+    expect(fetchMock.mock.calls.some(([u, o]) => String(u).endsWith('/property-preferences') && o?.method === 'PUT')).toBe(false);
+  });
+
+  it('blocks Save and shows an inline error for a lone blackout date (client-side mirror of the server rule)', async () => {
+    const fetchMock = vi.fn((url) => {
+      const path = String(url);
+      if (path.endsWith('/admin/payers')) return response({ payers: [] });
+      if (path.split('?')[0].endsWith('/timeline')) return response({ timeline: [] });
+      if (path.endsWith('/admin/customers/customer-a')) return response(customerDetail());
+      return response({});
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+    await screen.findAllByText('Avery Customer');
+    await openPropertyTab();
+    await screen.findByText('Access & Preferences');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Access & Preferences' }));
+    const startLabel = await screen.findByText('Blackout Start');
+    fireEvent.change(startLabel.closest('label').querySelector('input'), { target: { value: '2026-12-01' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    expect((await screen.findAllByText(/set or cleared together/i)).length).toBeGreaterThan(0);
+    // Never reached the network — this is a client-side pre-check.
+    expect(fetchMock.mock.calls.some(([u, o]) => String(u).endsWith('/property-preferences') && o?.method === 'PUT')).toBe(false);
+    // Stays in edit mode so staff can fix it.
+    expect(screen.getByRole('button', { name: 'Save' })).toBeInTheDocument();
+  });
+
+  it('blocks Save when the blackout end date is before the start date', async () => {
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const path = String(url);
+      if (path.endsWith('/admin/payers')) return response({ payers: [] });
+      if (path.split('?')[0].endsWith('/timeline')) return response({ timeline: [] });
+      if (path.endsWith('/admin/customers/customer-a')) return response(customerDetail());
+      return response({});
+    }));
+
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+    await screen.findAllByText('Avery Customer');
+    await openPropertyTab();
+    await screen.findByText('Access & Preferences');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Access & Preferences' }));
+    const startLabel = await screen.findByText('Blackout Start');
+    const endLabel = await screen.findByText('Blackout End');
+    fireEvent.change(startLabel.closest('label').querySelector('input'), { target: { value: '2026-12-25' } });
+    fireEvent.change(endLabel.closest('label').querySelector('input'), { target: { value: '2026-12-01' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    expect((await screen.findAllByText(/on or after the start date/i)).length).toBeGreaterThan(0);
+  });
+
+  it('sends null (never an empty string) when clearing both blackout dates together', async () => {
+    const fetchMock = vi.fn((url, options) => {
+      const path = String(url);
+      if (path.endsWith('/admin/payers')) return response({ payers: [] });
+      if (path.split('?')[0].endsWith('/timeline')) return response({ timeline: [] });
+      if (path.endsWith('/admin/customers/customer-a/property-preferences')) {
+        const body = JSON.parse(options.body);
+        expect(body.blackoutStart).toBeNull();
+        expect(body.blackoutEnd).toBeNull();
+        return response({ success: true, saved: true, preferences: { ...BASE_PREFS, blackout_start: null, blackout_end: null } });
+      }
+      if (path.endsWith('/admin/customers/customer-a')) {
+        return response(customerDetail({ blackout_start: '2026-06-01', blackout_end: '2026-06-10' }));
+      }
+      return response({});
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+    await screen.findAllByText('Avery Customer');
+    await openPropertyTab();
+    await screen.findByText('Access & Preferences');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Access & Preferences' }));
+    const startLabel = await screen.findByText('Blackout Start');
+    const endLabel = await screen.findByText('Blackout End');
+    fireEvent.change(startLabel.closest('label').querySelector('input'), { target: { value: '' } });
+    fireEvent.change(endLabel.closest('label').querySelector('input'), { target: { value: '' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.some(
+        ([u, o]) => String(u).endsWith('/property-preferences') && o?.method === 'PUT',
+      )).toBe(true);
+    });
+  });
+
+  it('shows every editable HOA field (not just name/company) and irrigation issues, and lists pets_structured read-only', async () => {
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const path = String(url);
+      if (path.endsWith('/admin/payers')) return response({ payers: [] });
+      if (path.split('?')[0].endsWith('/timeline')) return response({ timeline: [] });
+      if (path.endsWith('/admin/customers/customer-a')) {
+        return response(customerDetail({
+          // Only hoa_phone set — the old view required hoa_name OR
+          // hoa_company to show the section at all, hiding this entirely.
+          hoa_name: null,
+          hoa_company: null,
+          hoa_phone: '941-555-0100',
+          hoa_signage_rules: 'No yard signs',
+          hoa_timing_restrictions: 'No service before 8am',
+          hoa_inspection_period: 'Spring',
+          irrigation_issues: 'Zone 3 head is broken',
+          pets_structured: [
+            { name: 'Rex', species: 'dog', friendly: true, secured: true, notes: 'Kept in the garage' },
+          ],
+        }));
+      }
+      return response({});
+    }));
+
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+    await screen.findAllByText('Avery Customer');
+    await openPropertyTab();
+    await screen.findByText('Access & Preferences');
+
+    // HOA section shows even with only hoa_phone set.
+    expect(await screen.findByText('941-555-0100')).toBeInTheDocument();
+    expect(screen.getByText('No yard signs')).toBeInTheDocument();
+    expect(screen.getByText('No service before 8am')).toBeInTheDocument();
+    expect(screen.getByText('Spring')).toBeInTheDocument();
+
+    expect(screen.getByText('Zone 3 head is broken')).toBeInTheDocument();
+
+    expect(screen.getByText(/Rex/)).toBeInTheDocument();
+    expect(screen.getByText(/Kept in the garage/)).toBeInTheDocument();
   });
 });

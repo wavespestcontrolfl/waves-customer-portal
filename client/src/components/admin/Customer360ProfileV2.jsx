@@ -6658,6 +6658,29 @@ function accessPrefsOptionLabel(options, value) {
   return hit ? hit[1] : null;
 }
 
+// Read-only summary lines for pets_structured (name/species/breed/friendly/
+// secured/notes, each shown only when present) — job-card.js prioritizes
+// this array over the free-text pet fields for the technician's pet line,
+// so staff should be able to see what's actually on file for it, not just
+// the free-text petDetails/petsSecuredPlan fields this section already
+// shows. Not editable here (a nested repeating-group editor is a separate
+// piece of work); this is read visibility only.
+function accessPrefsFormatPetsStructured(petsStructured) {
+  const pets = Array.isArray(petsStructured) ? petsStructured : [];
+  return pets.map((pet) => {
+    const nameSpecies = [pet?.name, pet?.species || pet?.breed]
+      .filter(Boolean)
+      .join(" — ");
+    const traits = [
+      pet?.friendly === true ? "friendly" : pet?.friendly === false ? "not friendly" : null,
+      pet?.secured === true ? "secured" : pet?.secured === false ? "not secured" : null,
+    ].filter(Boolean);
+    const parts = [nameSpecies || "Pet", traits.join(", "), pet?.notes]
+      .filter(Boolean);
+    return parts.join(" · ");
+  });
+}
+
 // Renders one key/value row; empty/missing important values read as a
 // muted "Not set" instead of the row disappearing, so staff can see what's
 // missing at a glance rather than assume it was never asked.
@@ -6823,8 +6846,12 @@ function accessPrefsSavePayload(draft) {
     preferredDay: draft.preferredDay,
     preferredTime: draft.preferredTime,
     contactPreference: draft.contactPreference,
-    blackoutStart: draft.blackoutStart || "",
-    blackoutEnd: draft.blackoutEnd || "",
+    // null, never '' — property_preferences.blackout_start/end are real
+    // Postgres `date` columns and '' 500s on save (codex P1). The server
+    // schema now belt-and-braces normalizes '' -> null too, but the client
+    // should never rely on that.
+    blackoutStart: draft.blackoutStart || null,
+    blackoutEnd: draft.blackoutEnd || null,
     irrigationControllerLocation: draft.irrigationControllerLocation,
     irrigationZones: numOrNull(draft.irrigationZones),
     irrigationInchesPerWeek: numOrNull(draft.irrigationInchesPerWeek),
@@ -6852,18 +6879,70 @@ function accessPrefsSavePayload(draft) {
   };
 }
 
+function accessPrefsValuesEqual(a, b) {
+  if (Array.isArray(a) || Array.isArray(b)) {
+    const aa = Array.isArray(a) ? [...a].sort() : [];
+    const bb = Array.isArray(b) ? [...b].sort() : [];
+    return JSON.stringify(aa) === JSON.stringify(bb);
+  }
+  return a === b;
+}
+
+// Which draft keys actually changed since the form opened (codex P2): the
+// form previously resubmitted the ENTIRE snapshot on every save, so an
+// admin save could clobber a newer customer portal autosave on a field
+// nobody touched in this form. `initial` is the snapshot captured at
+// openEdit — a field equal to it is left out of the PUT body entirely.
+// blackoutStart/blackoutEnd travel together whenever EITHER changes (the
+// server enforces both-or-neither and start<=end as one pair, so a partial
+// pair would either 400 or leave a stale unpaired date on the row).
+function accessPrefsDirtyKeys(initial, current) {
+  if (!initial) return Object.keys(current);
+  const keys = Object.keys(current).filter(
+    (k) => !accessPrefsValuesEqual(initial[k], current[k]),
+  );
+  if (keys.includes("blackoutStart") || keys.includes("blackoutEnd")) {
+    if (!keys.includes("blackoutStart")) keys.push("blackoutStart");
+    if (!keys.includes("blackoutEnd")) keys.push("blackoutEnd");
+  }
+  return keys;
+}
+
+// Client-side mirror of the server's blackout-pair rule (codex P2): both
+// set or both cleared, and start on or before end. Checked against the
+// raw draft's "YYYY-MM-DD" `<input type=date>` strings, which sort
+// lexicographically the same as chronologically.
+function accessPrefsBlackoutError(draft) {
+  const hasStart = !!draft.blackoutStart;
+  const hasEnd = !!draft.blackoutEnd;
+  if (hasStart !== hasEnd) {
+    return "Blackout start and end dates must be set or cleared together.";
+  }
+  if (hasStart && hasEnd && draft.blackoutStart > draft.blackoutEnd) {
+    return "Blackout end date must be on or after the start date.";
+  }
+  return null;
+}
+
 function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(null);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
   const [fieldErrors, setFieldErrors] = useState({});
+  // The snapshot the form opened with — diffed against on Save so only
+  // fields actually touched in THIS edit go in the PUT body (codex P2: a
+  // full-snapshot resubmit could clobber a newer customer portal autosave
+  // on a field nobody touched here).
+  const initialDraftRef = useRef(null);
 
   const set = (key) => (value) =>
     setDraft((prev) => ({ ...(prev || {}), [key]: value }));
 
   const openEdit = () => {
-    setDraft(accessPrefsDraftFromRow(prefs));
+    const snapshot = accessPrefsDraftFromRow(prefs);
+    initialDraftRef.current = snapshot;
+    setDraft(snapshot);
     setFieldErrors({});
     setErr("");
     setEditing(true);
@@ -6871,11 +6950,32 @@ function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved }) {
   const cancelEdit = () => {
     setEditing(false);
     setDraft(null);
+    initialDraftRef.current = null;
     setFieldErrors({});
     setErr("");
   };
 
   const handleSave = async () => {
+    const blackoutError = accessPrefsBlackoutError(draft);
+    if (blackoutError) {
+      setFieldErrors((prev) => ({ ...prev, blackoutEnd: blackoutError }));
+      setErr(blackoutError);
+      return;
+    }
+    const dirtyKeys = accessPrefsDirtyKeys(initialDraftRef.current, draft);
+    if (!dirtyKeys.length) {
+      // Nothing actually changed — close without a round trip.
+      setEditing(false);
+      setDraft(null);
+      initialDraftRef.current = null;
+      return;
+    }
+    const fullPayload = accessPrefsSavePayload(draft);
+    const payload = {};
+    dirtyKeys.forEach((k) => {
+      payload[k] = fullPayload[k];
+    });
+
     setSaving(true);
     setErr("");
     try {
@@ -6883,7 +6983,7 @@ function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved }) {
         `/admin/customers/${customerId}/property-preferences`,
         {
           method: "PUT",
-          body: JSON.stringify(accessPrefsSavePayload(draft)),
+          body: JSON.stringify(payload),
         },
       );
       if (response?.rejected?.length) {
@@ -6898,6 +6998,7 @@ function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved }) {
       } else {
         setEditing(false);
         setDraft(null);
+        initialDraftRef.current = null;
       }
       await onSaved?.();
     } catch (e) {
@@ -6949,6 +7050,13 @@ function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved }) {
         <AccessPrefRow label="Pet Count" value={p.pet_count || null} />
         <AccessPrefRow label="Pet Details" value={p.pet_details} />
         <AccessPrefRow label="Pets Secured Plan" value={p.pets_secured_plan} />
+        {accessPrefsFormatPetsStructured(p.pets_structured).map((line, i) => (
+          <AccessPrefRow
+            key={`pet-${i}`}
+            label={i === 0 ? "Pets on File" : ""}
+            value={line}
+          />
+        ))}
 
         <AccessPrefsSubheading>Scheduling</AccessPrefsSubheading>
         <AccessPrefRow
@@ -7009,6 +7117,7 @@ function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved }) {
           value={p.rain_sensor ? "Yes" : "No"}
         />
         <AccessPrefRow label="Irrigation Notes" value={p.irrigation_schedule_notes} />
+        <AccessPrefRow label="Irrigation Issues" value={p.irrigation_issues} />
         <AccessPrefRow label="Mowing Days" value={p.mowing_days} />
         <AccessPrefRow
           label="Mowing Time"
@@ -7019,7 +7128,11 @@ function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved }) {
         />
         <AccessPrefRow label="Mowing Notes" value={p.mowing_notes} />
 
-        {(p.hoa_name || p.hoa_company) && (
+        {[
+          p.hoa_name, p.hoa_company, p.hoa_phone, p.hoa_email,
+          p.hoa_lawn_height, p.hoa_restrictions, p.hoa_signage_rules,
+          p.hoa_timing_restrictions, p.hoa_inspection_period,
+        ].some((v) => v !== null && v !== undefined && v !== "") && (
           <>
             <AccessPrefsSubheading>HOA</AccessPrefsSubheading>
             <AccessPrefRow label="HOA Name" value={p.hoa_name} />
@@ -7027,7 +7140,10 @@ function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved }) {
             <AccessPrefRow label="HOA Phone" value={p.hoa_phone} />
             <AccessPrefRow label="HOA Email" value={p.hoa_email} />
             <AccessPrefRow label="Lawn Height Rule" value={p.hoa_lawn_height} />
+            <AccessPrefRow label="Inspection Period" value={p.hoa_inspection_period} />
             <AccessPrefRow label="Restrictions" value={p.hoa_restrictions} />
+            <AccessPrefRow label="Signage Rules" value={p.hoa_signage_rules} />
+            <AccessPrefRow label="Timing Restrictions" value={p.hoa_timing_restrictions} />
           </>
         )}
 
@@ -7062,19 +7178,19 @@ function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved }) {
       <div className="space-y-3">
         <AccessPrefsSubheading>Access</AccessPrefsSubheading>
         <AccessPrefsField label="Property/Yard Gate" error={fieldErrors.propertyGateCode}>
-          <Input className={ACCESS_PREFS_INPUT_CLASS} value={d.propertyGateCode} onChange={(e) => set("propertyGateCode")(e.target.value)} />
+          <Input maxLength={100} className={ACCESS_PREFS_INPUT_CLASS} value={d.propertyGateCode} onChange={(e) => set("propertyGateCode")(e.target.value)} />
         </AccessPrefsField>
         <AccessPrefsField label="Neighborhood Gate" error={fieldErrors.neighborhoodGateCode}>
-          <Input className={ACCESS_PREFS_INPUT_CLASS} value={d.neighborhoodGateCode} onChange={(e) => set("neighborhoodGateCode")(e.target.value)} />
+          <Input maxLength={100} className={ACCESS_PREFS_INPUT_CLASS} value={d.neighborhoodGateCode} onChange={(e) => set("neighborhoodGateCode")(e.target.value)} />
         </AccessPrefsField>
         <AccessPrefsField label="Garage Code" error={fieldErrors.garageCode}>
-          <Input className={ACCESS_PREFS_INPUT_CLASS} value={d.garageCode} onChange={(e) => set("garageCode")(e.target.value)} />
+          <Input maxLength={100} className={ACCESS_PREFS_INPUT_CLASS} value={d.garageCode} onChange={(e) => set("garageCode")(e.target.value)} />
         </AccessPrefsField>
         <AccessPrefsField label="Lockbox Code" error={fieldErrors.lockboxCode}>
-          <Input className={ACCESS_PREFS_INPUT_CLASS} value={d.lockboxCode} onChange={(e) => set("lockboxCode")(e.target.value)} />
+          <Input maxLength={100} className={ACCESS_PREFS_INPUT_CLASS} value={d.lockboxCode} onChange={(e) => set("lockboxCode")(e.target.value)} />
         </AccessPrefsField>
         <AccessPrefsField label="Side Gate" error={fieldErrors.sideGateAccess}>
-          <Input className={ACCESS_PREFS_INPUT_CLASS} value={d.sideGateAccess} onChange={(e) => set("sideGateAccess")(e.target.value)} />
+          <Input maxLength={200} className={ACCESS_PREFS_INPUT_CLASS} value={d.sideGateAccess} onChange={(e) => set("sideGateAccess")(e.target.value)} />
         </AccessPrefsField>
         <AccessPrefsField label="Parking Notes" error={fieldErrors.parkingNotes}>
           <Textarea rows={2} className={ACCESS_PREFS_TEXTAREA_CLASS} value={d.parkingNotes} onChange={(e) => set("parkingNotes")(e.target.value)} />
@@ -7141,7 +7257,7 @@ function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved }) {
           <AccessPrefsPillToggle options={ACCESS_PREFS_DAY_KEYS} value={d.wateringDays} onChange={set("wateringDays")} />
         </AccessPrefsField>
         <AccessPrefsField label="Controller Location" error={fieldErrors.irrigationControllerLocation}>
-          <Input className={ACCESS_PREFS_INPUT_CLASS} value={d.irrigationControllerLocation} onChange={(e) => set("irrigationControllerLocation")(e.target.value)} />
+          <Input maxLength={200} className={ACCESS_PREFS_INPUT_CLASS} value={d.irrigationControllerLocation} onChange={(e) => set("irrigationControllerLocation")(e.target.value)} />
         </AccessPrefsField>
         <AccessPrefsField label="Zones" error={fieldErrors.irrigationZones}>
           <Input type="number" min="0" max="100" className={ACCESS_PREFS_INPUT_CLASS} value={d.irrigationZones} onChange={(e) => set("irrigationZones")(e.target.value)} />
@@ -7173,22 +7289,22 @@ function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved }) {
         <AccessPrefsSubheading>HOA</AccessPrefsSubheading>
         <div className="grid grid-cols-2 gap-2">
           <AccessPrefsField label="HOA Name" error={fieldErrors.hoaName}>
-            <Input className={ACCESS_PREFS_INPUT_CLASS} value={d.hoaName} onChange={(e) => set("hoaName")(e.target.value)} />
+            <Input maxLength={150} className={ACCESS_PREFS_INPUT_CLASS} value={d.hoaName} onChange={(e) => set("hoaName")(e.target.value)} />
           </AccessPrefsField>
           <AccessPrefsField label="HOA Company" error={fieldErrors.hoaCompany}>
-            <Input className={ACCESS_PREFS_INPUT_CLASS} value={d.hoaCompany} onChange={(e) => set("hoaCompany")(e.target.value)} />
+            <Input maxLength={200} className={ACCESS_PREFS_INPUT_CLASS} value={d.hoaCompany} onChange={(e) => set("hoaCompany")(e.target.value)} />
           </AccessPrefsField>
           <AccessPrefsField label="HOA Phone" error={fieldErrors.hoaPhone}>
-            <Input className={ACCESS_PREFS_INPUT_CLASS} value={d.hoaPhone} onChange={(e) => set("hoaPhone")(e.target.value)} />
+            <Input maxLength={30} className={ACCESS_PREFS_INPUT_CLASS} value={d.hoaPhone} onChange={(e) => set("hoaPhone")(e.target.value)} />
           </AccessPrefsField>
           <AccessPrefsField label="HOA Email" error={fieldErrors.hoaEmail}>
-            <Input type="email" className={ACCESS_PREFS_INPUT_CLASS} value={d.hoaEmail} onChange={(e) => set("hoaEmail")(e.target.value)} />
+            <Input type="email" maxLength={100} className={ACCESS_PREFS_INPUT_CLASS} value={d.hoaEmail} onChange={(e) => set("hoaEmail")(e.target.value)} />
           </AccessPrefsField>
           <AccessPrefsField label="Lawn Height Rule" error={fieldErrors.hoaLawnHeight}>
-            <Input className={ACCESS_PREFS_INPUT_CLASS} value={d.hoaLawnHeight} onChange={(e) => set("hoaLawnHeight")(e.target.value)} />
+            <Input maxLength={100} className={ACCESS_PREFS_INPUT_CLASS} value={d.hoaLawnHeight} onChange={(e) => set("hoaLawnHeight")(e.target.value)} />
           </AccessPrefsField>
           <AccessPrefsField label="Inspection Period" error={fieldErrors.hoaInspectionPeriod}>
-            <Input className={ACCESS_PREFS_INPUT_CLASS} value={d.hoaInspectionPeriod} onChange={(e) => set("hoaInspectionPeriod")(e.target.value)} />
+            <Input maxLength={100} className={ACCESS_PREFS_INPUT_CLASS} value={d.hoaInspectionPeriod} onChange={(e) => set("hoaInspectionPeriod")(e.target.value)} />
           </AccessPrefsField>
         </div>
         <AccessPrefsField label="Restrictions" error={fieldErrors.hoaRestrictions}>

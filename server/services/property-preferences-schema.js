@@ -17,8 +17,34 @@
 const Joi = require('joi');
 const { hasLawnServiceEvidence } = require('./irrigation-weekly-email');
 
+// Default free-text cap for fields with no real column-width constraint
+// (the DB-enforced enum columns — preferredDay/preferredTime/
+// contactPreference — validate on VALUE, not length, so 200 is just an
+// app-level sanity cap for them, not a column width).
 const shortText = Joi.string().trim().allow('', null).max(200);
+// Column-width-matched short text (codex P2): several PREFS_FIELD_SCHEMAS
+// entries used the generic 200-char `shortText` even though their real
+// `property_preferences` column is a narrower varchar (access codes are
+// varchar(100), hoa_phone varchar(30), …) — a value between the column
+// width and 200 chars validated fine here and then 500'd on the INSERT/
+// UPDATE as a Postgres 22001 "value too long" error instead of a clean
+// field-level rejection. Every column width below is read directly off
+// the migrations that created it (see the comment on each field).
+function shortTextMax(max) {
+  return Joi.string().trim().allow('', null).max(max);
+}
 const longText = Joi.string().trim().allow('', null).max(2000);
+// Date-or-clear (codex P1): blackoutStart/blackoutEnd are real Postgres
+// `date` columns. `.allow(null, '')` alone still passes '' straight
+// through as the literal string '' (Joi's allow-list bypasses the type
+// check entirely for an exact match), and Postgres 22007s on an empty
+// string bound to a date column — belt-and-braces here even though the
+// client is now fixed to send null, never '', to clear the field.
+// `.empty('')` treats '' as "not provided" pre-validation, and
+// `.default(null)` then supplies null for that now-absent value.
+function dateOrNull() {
+  return Joi.date().iso().allow(null).empty('').default(null);
+}
 const petSchema = Joi.object({
   name: Joi.string().trim().allow('', null).max(60),
   species: Joi.string().trim().allow('', null).max(40),
@@ -29,22 +55,27 @@ const petSchema = Joi.object({
 }).unknown(true);
 
 const PREFS_FIELD_SCHEMAS = {
-  neighborhoodGateCode: shortText,
-  propertyGateCode: shortText,
-  garageCode: shortText,
-  lockboxCode: shortText,
+  // Access codes: 20260401000005_property_preferences.js — varchar(100).
+  neighborhoodGateCode: shortTextMax(100),
+  propertyGateCode: shortTextMax(100),
+  garageCode: shortTextMax(100),
+  lockboxCode: shortTextMax(100),
   parkingNotes: longText,
-  sideGateAccess: shortText,
+  // 20260401000084_property_prefs_expanded.js — varchar(200).
+  sideGateAccess: shortTextMax(200),
   petCount: Joi.number().integer().min(0).max(20),
   petDetails: longText,
   petsSecuredPlan: longText,
   petsStructured: Joi.array().items(petSchema).max(20),
+  // Postgres ENUM columns, not varchar — constrained by VALUE, not length,
+  // so the generic 200-char shortText is a plain app-level sanity cap here.
   preferredDay: shortText,
   preferredTime: shortText,
   contactPreference: shortText,
-  blackoutStart: Joi.date().allow(null, ''),
-  blackoutEnd: Joi.date().allow(null, ''),
-  irrigationControllerLocation: shortText,
+  blackoutStart: dateOrNull(),
+  blackoutEnd: dateOrNull(),
+  // 20260401000005_property_preferences.js — varchar(200).
+  irrigationControllerLocation: shortTextMax(200),
   irrigationZones: Joi.number().integer().min(0).max(100).allow(null),
   irrigationInchesPerWeek: Joi.number().min(0).max(5).precision(2).allow(null),
   // Minutes each zone runs on a watering day — the natural-unit schedule
@@ -85,15 +116,19 @@ const PREFS_FIELD_SCHEMAS = {
   // The four keys mirror the portal's Typical Time pills.
   mowingTimeOfDay: Joi.string().trim().valid('', 'morning', 'midday', 'afternoon', 'varies').allow(null),
   mowingNotes: longText,
-  hoaName: shortText,
+  // HOA varchar widths: 20260401000005_property_preferences.js (hoa_name)
+  // and 20260401000084_property_prefs_expanded.js (the rest).
+  hoaName: shortTextMax(150),
   hoaRestrictions: longText,
-  hoaCompany: shortText,
-  hoaPhone: shortText,
-  hoaEmail: Joi.string().trim().allow('', null).email().max(254),
-  hoaLawnHeight: shortText,
+  hoaCompany: shortTextMax(200),
+  hoaPhone: shortTextMax(30),
+  // hoa_email is varchar(100) — .email() alone allows up to 254 (RFC 5321),
+  // which validated fine here and then 500'd as a Postgres 22001 on save.
+  hoaEmail: Joi.string().trim().allow('', null).email().max(100),
+  hoaLawnHeight: shortTextMax(100),
   hoaSignageRules: longText,
   hoaTimingRestrictions: longText,
-  hoaInspectionPeriod: shortText,
+  hoaInspectionPeriod: shortTextMax(100),
   accessNotes: longText,
   specialInstructions: longText,
 };
@@ -214,7 +249,9 @@ function normalizeUpdatesForStorage(updates) {
 
 module.exports = {
   shortText,
+  shortTextMax,
   longText,
+  dateOrNull,
   petSchema,
   PREFS_FIELD_SCHEMAS,
   ALLOWED_FIELDS,
