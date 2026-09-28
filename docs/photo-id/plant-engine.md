@@ -51,7 +51,9 @@ be merged into `v2`.
 kind: "identity", answer, entry, evidence: { matches, still_need },
 candidates, next_photo, quality }`) for Layer A only, so the existing
 `V2Result` card renders its "What matches" / "What we still need to see"
-sections. The one identity lane is the host for `tree_shrub`/`palm`; for a
+sections; that evidence (and the next-photo pair) is read only from the
+candidates that support the chosen answer node, never from a top candidate
+outside the group the headline names. The one identity lane is the host for `tree_shrub`/`palm`; for a
 lawn it is whichever of turf and weeds the photos populated, and when both
 are populated the one whose top candidate has the higher verified
 confidence (turf on a tie) — a photo of a weed returns the weed, not an
@@ -91,8 +93,9 @@ empty turf answer. `internal.identity.lane` records the choice.
   wins, and otherwise Gemini's stands — never the `Math.max` of a checked
   and an unchecked number. OpenAI's cue numbers count as a check only for
   slugs it was given a numbered cue list for.
-- Self-contradiction (raw vs verified top) and low confidence are checked
-  per slot — turf, weeds and host separately, off-catalog tops included — so
+- Self-contradiction (raw vs verified top, compared by candidate identity)
+  and low confidence are checked per slot — turf, weeds and host
+  separately, off-catalog tops included — so
   a flipped or uncertain turf answer escalates even under a
   higher-confidence weed, and a turf/weed confidence swap does not.
 - The lawn's account turf (`context.grass_type_on_file`) outranks any photo

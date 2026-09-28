@@ -1016,6 +1016,26 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
         expect(greening).toMatchObject({ strength: 'possible', fits: [] });
       });
 
+      test('identity evidence comes from the candidates that support the chosen answer', () => {
+        const built = engine.buildIdentityResult(
+          [cand('fixture-citrus', 0.45), cand('fixture-queen-palm', 0.35), cand('fixture-royal-palm', 0.3)],
+          { subject: 'tree_shrub', currentMonth: 6 },
+        );
+        expect(built.answer.node_id).toBe('palms');
+        expect(built.evidence.matches).toEqual(['Plumose drooping leaflets']);
+      });
+
+      test('a catalog top verified down below an off-catalog candidate is a self-contradiction', async () => {
+        queue(
+          candidatesLeg({ host: [idItem('fixture-citrus', 0.9), idItem('', 0.85, { off_catalog_name: 'Foxtail palm', group_id: 'palms' })] }),
+          verifyLeg([['fixture-citrus', 0.1]]),
+          MISS,
+        );
+        const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'tree_shrub', mode: 'identify' });
+        expect(dispatch).toHaveBeenCalledTimes(3);
+        expect(result.internal.escalation_reasons).toEqual(['self_contradiction']);
+      });
+
       test('an off-catalog top below the threshold escalates too', async () => {
         queue(
           candidatesLeg({ host: [idItem('', 0.5, { off_catalog_name: 'Foxtail palm', group_id: 'palms' })] }),

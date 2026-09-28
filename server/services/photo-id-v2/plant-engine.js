@@ -728,9 +728,22 @@ function decisiveLookAlike({
     const top = candidates[0];
     return (top.entry.look_alikes || []).find((l) => isApproved(catalog.getEntry(l.slug))) || null;
   }
-  if (!nodeId) return null;
-  const supporters = candidates.filter((c) => c.slug && catalog.lineage(c.slug).some((r) => r.id === nodeId));
-  return lookAlikeBetween(supporters);
+  return lookAlikeBetween(plantCandidatesSupporting(candidates, level, nodeId));
+}
+
+/** The candidates that support the chosen answer node — the one list both
+ * the evidence block and the next-photo pair read (the pest engine's
+ * `candidatesSupporting`, section-'plant'-aware). An unknown answer has
+ * none. Pre-push audit on #5186 r1: evidence read the first approved
+ * candidate even when the answer climbed to a group that candidate is not
+ * in. */
+function plantCandidatesSupporting(candidates, level, nodeId) {
+  if (!nodeId) return [];
+  if (level === 'entry') return candidates.filter((c) => c.slug === nodeId);
+  return candidates.filter((c) => {
+    const id = candidateNodeIdPlant(c);
+    return !!id && catalog.lineage(id).some((r) => r.level === level && r.id === nodeId);
+  });
 }
 
 function plantNextPhotoFor(answer, candidates, subject, disagreementPair = null) {
@@ -819,7 +832,7 @@ function buildIdentityResult(candidates, {
   return {
     answer,
     entry,
-    evidence: plantEvidenceFor(candidates),
+    evidence: plantEvidenceFor(plantCandidatesSupporting(candidates, answer.level, answer.node_id)),
     candidates: plantCandidatesBlockFor(candidates, currentMonth),
     next_photo: plantNextPhotoFor(answer, candidates, subject, pair),
     tier: answer.level === 'entry' ? 'ai_suggestion' : 'needs_more_evidence',
@@ -1210,14 +1223,17 @@ function runContextFor({
 }
 
 /** Per-slot self-contradiction (Codex #5186 r1 P1): the candidates call's
- * own top pick for THIS slot vs. the verified top catalog candidate of the
- * same slot. Slots are independent — a turf/weed confidence swap is not a
- * contradiction, and a flipped turf answer is one even when a weed outranks
- * both. */
+ * own top for THIS slot vs. the verified top of the same slot. Slots are
+ * independent — a turf/weed confidence swap is not a contradiction, and a
+ * flipped turf answer is one even when a weed outranks both. The tops are
+ * compared by candidate identity, off-catalog ones included (pre-push
+ * audit on #5186 r1: a catalog top verified down below an off-catalog
+ * candidate is a flip too); an off-catalog candidate passes through
+ * verification as the same object. */
 function slotFlipped(call1Slot, verifiedSlot) {
-  const rawTop = call1Slot[0];
-  const verifiedTop = verifiedSlot.find((c) => c.entry);
-  return !!(rawTop?.slug && verifiedTop && verifiedTop.slug !== rawTop.slug);
+  const [rawTop] = call1Slot;
+  const [verifiedTop] = verifiedSlot;
+  return !!(rawTop && verifiedTop && rawTop !== verifiedTop && !sameCandidateKey(rawTop, verifiedTop));
 }
 
 /** Calls A (identity candidates) and B (identity verify). Each identity
