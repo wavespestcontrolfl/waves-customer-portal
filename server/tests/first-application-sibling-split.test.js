@@ -18,6 +18,7 @@ const {
   groupCandidatesByInvoice,
   isInvoiceSettled,
   isInvoicePaid,
+  isInvoicePaymentPending,
   PAID_INVOICE_STATUSES,
   dateOnly,
   SETTLED_INVOICE_STATUSES,
@@ -60,9 +61,21 @@ describe('isInvoiceSettled', () => {
 // already gave it back), so isInvoicePaid must be false for them even
 // though isInvoiceSettled is true for the whole set.
 describe('isInvoicePaid', () => {
-  test('paid/prepaid/processing are paid', () => {
+  test('paid/prepaid are paid', () => {
+    expect([...PAID_INVOICE_STATUSES].sort()).toEqual(['paid', 'prepaid']);
     for (const status of PAID_INVOICE_STATUSES) {
       expect(isInvoicePaid(status)).toBe(true);
+    }
+  });
+
+  // Codex round 14 P1: 'processing' is an ACH debit still in flight — settled
+  // for collection, but NOT collected money (it can still bounce).
+  test("'processing' is settled and payment-pending, but NOT paid", () => {
+    expect(isInvoiceSettled('processing')).toBe(true);
+    expect(isInvoicePaid('processing')).toBe(false);
+    expect(isInvoicePaymentPending('processing')).toBe(true);
+    for (const status of ['paid', 'prepaid', 'sent', 'void']) {
+      expect(isInvoicePaymentPending(status)).toBe(false);
     }
   });
 
@@ -137,10 +150,27 @@ describe('neverRanCoveredMembers', () => {
     expect(neverRanCoveredMembers(a, [a, m])).toEqual([]);
   });
 
-  test('the anchor itself is never returned, even if its own status is never-ran', () => {
+  test('the anchor itself is never returned by default, even if its own status is never-ran', () => {
     const a = anchor({ status: 'cancelled' });
     const m = member('m', { status: 'confirmed' });
     expect(neverRanCoveredMembers(a, [a, m])).toEqual([]);
+  });
+
+  // Codex round 14 P1 (paid/processing review): the combined invoice bills
+  // the anchor's own share too, so a never-ran anchor is returned — and no
+  // invoice on the anchor counts as "split off", since the combined invoice
+  // sits on the anchor's own id.
+  test('includeAnchor: a never-ran anchor is returned, even with has_own_live_invoice', () => {
+    const a = anchor({ status: 'cancelled', has_own_live_invoice: true });
+    const m = member('m', { status: 'confirmed' });
+    expect(neverRanCoveredMembers(a, [a, m], { includeAnchor: true }).map((x) => x.id)).toEqual(['anchor-1']);
+  });
+
+  test('includeAnchor: an active anchor is still excluded, and siblings keep their own split rule', () => {
+    const a = anchor({ status: 'confirmed' });
+    const split = member('split', { status: 'cancelled', has_own_live_invoice: true });
+    const unsplit = member('unsplit', { status: 'skipped' });
+    expect(neverRanCoveredMembers(a, [a, split, unsplit], { includeAnchor: true }).map((x) => x.id)).toEqual(['unsplit']);
   });
 
   test('multiple never-ran members are all returned, active/resolved ones excluded', () => {
@@ -191,6 +221,21 @@ describe('evaluateGroupDivergence', () => {
     expect(verdict).toEqual({ action: 'clear', reason: 'invoice_settled' });
   });
 
+  // CONTRACT (Codex round 14, PR #5021): clearing a PAID group whose active
+  // members merely diverged is safe only because the shared lookup
+  // (findFirstApplicationInvoiceForEstimateService) now finds the combined
+  // invoice by the member's stamp, so completing or charging the moved
+  // sibling reuses the paid invoice instead of minting a second charge —
+  // estimate-first-application-invoice.test.js and the PG suite pin that
+  // side. No alert is added for paid-but-diverged active members.
+  test.each(['paid', 'prepaid', 'processing'])('contract: %s + every active member diverged (money safe via the stamp-aware lookup) → clear, no alert', (status) => {
+    const a = anchor();
+    const moved = member('moved', { scheduled_date: '2026-10-20', estimated_price: null });
+    const completedMoved = member('completed-moved', { scheduled_date: '2026-10-22', status: 'completed', completed_at: new Date('2026-10-22') });
+    const verdict = evaluateGroupDivergence({ anchor: a, members: [a, moved, completedMoved], invoiceStatus: status });
+    expect(verdict).toEqual({ action: 'clear', reason: 'invoice_settled' });
+  });
+
   // -------------------------------------------------------------------
   // P1-C (Codex round 13 on PR #5021): a PAID (collected) governing
   // invoice does not clear unconditionally any more — a stamped member
@@ -199,7 +244,7 @@ describe('evaluateGroupDivergence', () => {
   // alert instead of silently clearing.
   // -------------------------------------------------------------------
   describe('paid_never_ran (P1-C)', () => {
-    test.each(['paid', 'prepaid', 'processing'])('%s invoice + one never-ran covered member, no own live invoice → alert naming that member', (status) => {
+    test.each(['paid', 'prepaid'])('%s invoice + one never-ran covered member, no own live invoice → alert naming that member', (status) => {
       const a = anchor();
       const cancelled = member('cancelled-covered', { status: 'cancelled' });
       const verdict = evaluateGroupDivergence({ anchor: a, members: [a, cancelled], invoiceStatus: status });
@@ -235,6 +280,32 @@ describe('evaluateGroupDivergence', () => {
       expect(verdict).toEqual({ action: 'clear', reason: 'invoice_settled' });
     });
 
+    // Codex round 14 P1: a cancelled/skipped/no-show ANCHOR on a paid
+    // combined invoice holds money for work that will not happen too.
+    test.each(['cancelled', 'skipped', 'no_show'])('paid invoice + %s ANCHOR (sibling active) → alert naming the anchor', (status) => {
+      const a = anchor({ status });
+      const b = member('b', { status: 'confirmed' });
+      const verdict = evaluateGroupDivergence({ anchor: a, members: [a, b], invoiceStatus: 'paid' });
+      expect(verdict.action).toBe('alert');
+      expect(verdict.reason).toBe('paid_never_ran');
+      expect(verdict.diverging.map((m) => m.id)).toEqual(['anchor-1']);
+    });
+
+    test('paid invoice + cancelled anchor WITH a separate live invoice on it → still alerts (the combined charge never moved)', () => {
+      const a = anchor({ status: 'cancelled', has_own_live_invoice: true });
+      const b = member('b', { status: 'completed', completed_at: new Date('2026-10-01') });
+      const verdict = evaluateGroupDivergence({ anchor: a, members: [a, b], invoiceStatus: 'paid' });
+      expect(verdict.reason).toBe('paid_never_ran');
+      expect(verdict.diverging.map((m) => m.id)).toEqual(['anchor-1']);
+    });
+
+    test('an OPEN invoice with a cancelled anchor is unchanged — the anchor is never in the open-invoice review', () => {
+      const a = anchor({ status: 'cancelled' });
+      const b = member('b', { status: 'confirmed' });
+      const verdict = evaluateGroupDivergence({ anchor: a, members: [a, b], invoiceStatus: 'sent' });
+      expect(verdict).toEqual({ action: 'clear', reason: 'realigned' });
+    });
+
     test.each(['skipped', 'no_show'])('paid invoice + a %s covered member behaves exactly like cancelled → alert', (neverRanStatus) => {
       const a = anchor();
       const m = member('m', { status: neverRanStatus });
@@ -253,6 +324,45 @@ describe('evaluateGroupDivergence', () => {
       expect(verdict.action).toBe('alert');
       expect(verdict.reason).toBe('paid_never_ran');
       expect(verdict.diverging.map((d) => d.id)).toEqual(['cancelled-moved']);
+    });
+  });
+
+  // Codex round 14 P1: 'processing' is an ACH debit still in flight — the
+  // money is not collected yet, so never "refund or credit" copy.
+  describe('payment_pending_never_ran', () => {
+    test('processing invoice + one never-ran covered member → pending alert naming that member', () => {
+      const a = anchor();
+      const cancelled = member('cancelled-covered', { status: 'cancelled' });
+      const verdict = evaluateGroupDivergence({ anchor: a, members: [a, cancelled], invoiceStatus: 'processing' });
+      expect(verdict).toEqual({ action: 'alert', reason: 'payment_pending_never_ran', diverging: [cancelled] });
+    });
+
+    test('processing invoice + cancelled anchor → pending alert naming the anchor', () => {
+      const a = anchor({ status: 'cancelled' });
+      const b = member('b', { status: 'confirmed' });
+      const verdict = evaluateGroupDivergence({ anchor: a, members: [a, b], invoiceStatus: 'processing' });
+      expect(verdict.reason).toBe('payment_pending_never_ran');
+      expect(verdict.diverging.map((m) => m.id)).toEqual(['anchor-1']);
+    });
+
+    test('transitions: processing → paid switches to paid_never_ran; → refunded/void clears; member reactivated clears', () => {
+      const a = anchor();
+      const cancelled = member('c', { status: 'cancelled' });
+      expect(evaluateGroupDivergence({ anchor: a, members: [a, cancelled], invoiceStatus: 'paid' }).reason).toBe('paid_never_ran');
+      for (const status of ['refunded', 'void']) {
+        expect(evaluateGroupDivergence({ anchor: a, members: [a, cancelled], invoiceStatus: status }))
+          .toEqual({ action: 'clear', reason: 'invoice_settled' });
+      }
+      const reactivated = member('c', { status: 'confirmed' });
+      expect(evaluateGroupDivergence({ anchor: a, members: [a, reactivated], invoiceStatus: 'processing' }))
+        .toEqual({ action: 'clear', reason: 'invoice_settled' });
+    });
+
+    test('a bounced ACH (back to an open status) falls into the ordinary open-invoice review', () => {
+      const a = anchor();
+      const cancelled = member('c', { status: 'cancelled' });
+      const verdict = evaluateGroupDivergence({ anchor: a, members: [a, cancelled], invoiceStatus: 'sent' });
+      expect(verdict.reason).toBe('diverged');
     });
   });
 
@@ -442,6 +552,21 @@ describe('buildDivergenceAlertCopy', () => {
     expect(detail).toContain(`visit ${moved.id} now on 2026-10-09 (was ${anchorDate})`);
   });
 
+  test("payment_pending_never_ran: says the ACH payment is still settling and to wait — never 'refund or credit' now", () => {
+    const cancelled = member('cancelled-covered', { status: 'cancelled' });
+    const { detail, leadSentence, actionSentence } = buildDivergenceAlertCopy({
+      diverging: [cancelled], anchorDate, alertKind: 'payment_pending_never_ran',
+    });
+    expect(leadSentence).toContain('ACH payment is still settling');
+    expect(actionSentence).toMatch(/^Wait for the ACH payment to settle or fail before refunding or crediting/);
+    expect(detail).toContain(`visit ${cancelled.id} was cancelled — its share is part of an ACH payment that is still settling`);
+    for (const text of [detail, leadSentence, actionSentence]) {
+      expect(text).not.toMatch(/refund or credit/);
+      expect(text).not.toContain('already been paid');
+      expect(text).not.toContain('remove that charge');
+    }
+  });
+
   test('defaults to the ordinary diverged copy when alertKind is omitted', () => {
     const cancelled = member('cancelled-covered', { status: 'cancelled' });
     const { actionSentence } = buildDivergenceAlertCopy({ diverging: [cancelled], anchorDate });
@@ -578,11 +703,44 @@ describe('resolveGoverningInvoice', () => {
     expect(resolveGoverningInvoice(stamped, [hand])).toBe(hand);
   });
 
-  test('newest-first ordering — the FIRST live invoice wins when more than one sits on the anchor', () => {
+  // Codex round 14 P1: the NEWEST live invoice is not necessarily the one
+  // still charging the group — a newer, unrelated, already-paid invoice on
+  // the same visit must never hide an older, still-collectible replacement.
+  describe('several live invoices on the anchor (Codex round 14 P1)', () => {
     const stamped = { id: 'stamped-1', status: 'void' };
-    const newer = liveInvoice({ id: 'replacement-newer' });
-    const older = liveInvoice({ id: 'replacement-older' });
-    expect(resolveGoverningInvoice(stamped, [newer, older])).toBe(newer);
+    const olderSent = liveInvoice({ id: 'older-sent', status: 'sent', created_at: '2026-10-02T10:00:00Z' });
+    const newerPaid = handInvoice({ id: 'newer-paid', status: 'paid', created_at: '2026-10-05T10:00:00Z' });
+    const olderPaid = handInvoice({ id: 'older-paid', status: 'paid', created_at: '2026-10-02T10:00:00Z' });
+    const newerSent = liveInvoice({ id: 'newer-sent', status: 'sent', created_at: '2026-10-05T10:00:00Z' });
+
+    test('older collectible + newer paid → the older collectible governs, whatever the array order', () => {
+      expect(resolveGoverningInvoice(stamped, [newerPaid, olderSent])).toBe(olderSent);
+      expect(resolveGoverningInvoice(stamped, [olderSent, newerPaid])).toBe(olderSent);
+    });
+
+    test('older paid + newer collectible → the newer collectible governs, whatever the array order', () => {
+      expect(resolveGoverningInvoice(stamped, [newerSent, olderPaid])).toBe(newerSent);
+      expect(resolveGoverningInvoice(stamped, [olderPaid, newerSent])).toBe(newerSent);
+    });
+
+    test('two collectible → the OLDEST collectible governs', () => {
+      expect(resolveGoverningInvoice(stamped, [newerSent, olderSent])).toBe(olderSent);
+    });
+
+    test.each(['paid', 'prepaid', 'processing'])('every live invoice settled (%s) → the NEWEST settled governs', (status) => {
+      const older = handInvoice({ id: 'older', status, created_at: '2026-10-02T10:00:00Z' });
+      const newer = handInvoice({ id: 'newer', status, created_at: '2026-10-05T10:00:00Z' });
+      expect(resolveGoverningInvoice(stamped, [older, newer])).toBe(newer);
+    });
+
+    test('rows without created_at keep the caller\'s newest-first order', () => {
+      const first = liveInvoice({ id: 'first', status: 'paid' });
+      const second = liveInvoice({ id: 'second', status: 'paid' });
+      expect(resolveGoverningInvoice(stamped, [first, second])).toBe(first);
+      const collectibleA = liveInvoice({ id: 'a' });
+      const collectibleB = liveInvoice({ id: 'b' });
+      expect(resolveGoverningInvoice(stamped, [collectibleA, collectibleB])).toBe(collectibleB);
+    });
   });
 });
 

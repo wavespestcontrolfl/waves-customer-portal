@@ -4997,6 +4997,10 @@ async function computeCardExpiryExemptions(horizon = etDateString(), conn = db) 
         'ss.id', 'ss.customer_id', 'ss.status', 'ss.estimated_price', 'ss.primary_line_price', 'ss.is_callback', 'ss.service_type',
         'ss.prepaid_amount', 'ss.prepaid_method', 'ss.annual_prepay_term_id', 'ss.is_recurring',
         'ss.source_estimate_id', 'ss.scheduled_date', 'ss.recurring_parent_id', 'ss.recurring_pattern',
+        // Stamped combined-invoice provenance (PR #5021): the sibling lookup
+        // honours it directly; selecting it here spares the lookup's fallback
+        // read per visit.
+        'ss.first_application_invoice_id',
         'c.billing_mode', 'c.waveguard_tier', 'c.monthly_rate', 'c.autopay_enabled',
         'c.autopay_paused_until as customer_autopay_paused_until',
         'c.autopay_payment_method_id as customer_autopay_payment_method_id',
