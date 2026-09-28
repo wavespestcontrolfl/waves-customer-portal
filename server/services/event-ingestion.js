@@ -912,9 +912,10 @@ async function reconcileLegacyKey(sourceId, currentKey, legacyKey) {
 // clock read as UTC (7:30 PM ET became 19:30Z), under a legacy key built from
 // that shifted instant. A shifted key can't be migrated automatically (in EDT
 // a 7 PM event's shifted key equals a real 3 PM showtime's correct key), so
-// after a pull such a row is QUARANTINED instead: marked needs_review, which
-// keeps it out of every newsletter until an operator looks. Only rows this
-// pull did not refresh are touched; nothing is deleted or re-timed.
+// after a pull such a row is QUARANTINED instead: rejected with a suppression
+// reason, which keeps it out of every newsletter unless an operator
+// re-approves it. Only rows this pull did not refresh are touched; nothing
+// is deleted or re-timed.
 function shiftedLegacyKey(title, start, urlKey) {
   if (!start) return null;
   const shiftedIso = `${etDateString(start)}T${etWallClockHHMM(start)}:00.000Z`;
@@ -927,14 +928,17 @@ async function quarantineShiftedLegacyRows(sourceId, pulledRows, batchStartedAt)
   for (const row of pulledRows) {
     const key = shiftedLegacyKey(row.title, row.start_at, row.event_url || '');
     if (!key) continue;
+    // Rejection is the durable quarantine: normalization never changes an
+    // admin decision (a freshness flag would be recomputed), rejected rows
+    // never ship, and an operator can re-approve a genuine showtime.
     quarantined += await db('events_raw')
       .where({ source_id: sourceId, external_id: key })
       .whereNull('merged_into')
       .where('pulled_at', '<', batchStartedAt)
-      .whereNot('freshness_status', 'needs_review')
+      .whereNot('admin_status', 'rejected')
       .update({
-        freshness_status: 'needs_review',
-        curation_note: `Possible time-shifted duplicate (pre-2026-09-28 parsing bug) of the listing now at ${etWallClockHHMM(row.start_at)} ET. Review before featuring.`.slice(0, 200),
+        admin_status: 'rejected',
+        suppression_reason: `Possible time-shifted duplicate (pre-2026-09-28 parsing bug) of the listing now at ${etWallClockHHMM(row.start_at)} ET. Re-approve if this showtime is real.`.slice(0, 255),
         updated_at: db.fn.now(),
       });
   }
