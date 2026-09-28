@@ -430,6 +430,12 @@ function withCacheBreakpoint(messages) {
 // contract the card shows can be exact. Cancels happen on the Dispatch
 // screen, which owns the waiver and review controls, until a rails-binding
 // lane makes the effect set pinnable.
+// PR A of that lane (ib-cancel-pinned-effects) built the deterministic
+// pre-commit impact computation (server/services/appointment-cancel-
+// impact.js) and the commit-side refuse-on-drift check (tools.js
+// cancelAppointment) but ships DARK — this refusal is deliberately left in
+// place here. PR B removes it and wires proposePendingWrite to populate
+// preview.cancellation from that module, once it has been reviewed.
 const CANCEL_NOT_CARD_CONFIRMABLE_MESSAGE = 'Cancelling a visit can charge a late-cancel fee, void invoices, and reverse credits, which the confirmation card cannot pin exactly. Cancel it from the Dispatch screen (fee waiver and invoice review live there). Nothing was changed.';
 
 function ibWritesDisabled() {
