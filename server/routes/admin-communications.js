@@ -1075,7 +1075,11 @@ router.post('/sms', async (req, res, next) => {
         await lockSmsPhone(trx, to);
         if (outreachLeadId) {
           const { linkSentRecently, MANUAL_SEND_RACE_GUARD_WINDOW_MS } = require('../services/call-booking-link-text');
-          if (await linkSentRecently(trx, outreachLeadId, new Date(), { windowMs: MANUAL_SEND_RACE_GUARD_WINDOW_MS })) {
+          // codex #5196 P2: matchPhone scopes this manual-window check to
+          // THIS send's own destination (`to`) — see admin-leads.js's
+          // identical guard for why a lead-wide check over-refuses after a
+          // phone correction.
+          if (await linkSentRecently(trx, outreachLeadId, new Date(), { windowMs: MANUAL_SEND_RACE_GUARD_WINDOW_MS, matchPhone: to })) {
             return { ok: false, code: 'LINK_SENT_RECENTLY_RACE', reason: 'A booking link was just texted to this number a moment ago', retryable: false };
           }
         }

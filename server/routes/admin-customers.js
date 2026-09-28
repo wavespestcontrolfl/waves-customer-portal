@@ -17,7 +17,7 @@ const { openBalanceSummary } = require('../services/open-balance');
 const { formatAddress, normalizeUnitLine } = require('../utils/address-normalizer');
 const { findCustomersAtAddress, rankByContact } = require('../services/customer-address-match');
 const { recordAuditEvent } = require('../services/audit-log');
-const { lockCustomerComms, withCustomerCommsLock } = require('../utils/customer-comms-lock');
+const { lockCustomerComms, withCustomerCommsLock, lockSmsPhone } = require('../utils/customer-comms-lock');
 const { invoiceAmountDue } = require('../services/invoice-helpers');
 const PhotoService = require('../services/photos');
 const { acceptanceServiceLists } = require('./estimate-public');
@@ -1966,7 +1966,41 @@ async function findAccountByContact(trx, {
   return null;
 }
 
+// codex #5196 P1-A: lockPhone (default false) fences customer CREATION
+// against call-booking-link-text.js's own phone-locked handoff
+// (utils/customer-comms-lock.js lockSmsPhone, the SAME key/namespace) — a
+// customer minted for a phone the handoff is mid-send on now waits for the
+// handoff's transaction to finish instead of landing invisibly in the gap
+// between the handoff's own candidate-customer snapshot and its provider
+// call. Taken FIRST, before findAccountByContact's own duplicate/phone
+// lookup — the same "before the lookup and insert" contract quick-add's
+// Codex round documented, so an attach onto an existing account is fenced
+// too, not only a fresh mint.
+//
+// Only opt-in callers that hold NO other lock before reaching here may pass
+// this (asserted below): lockSmsPhone is a plain blocking advisory lock, and
+// a caller that already holds a row lock or another advisory lock the
+// handoff itself acquires AFTER its own phone lock (the handoff's own order
+// is estimate-lock -> customer-comms -> phone -> leads/call_log row locks,
+// see call-booking-link-text.js) would invert that order and risk a genuine
+// deadlock. admin-customers.js's quick-add and POST / routes call
+// ensureCustomerAccount as literally the first statement of their own
+// transaction, so there is nothing to invert against — they pass
+// lockPhone: true. admin-leads.js's lead-conversion path already holds an
+// occupancy lock and a `leads` row FOR UPDATE before it can reach the
+// needsCustomer branch (the exact inverse of the handoff's own order), so it
+// does NOT pass this flag — see the comment at that call site.
+function assertLockPhoneTransaction(trx) {
+  if (!trx || trx.isTransaction !== true) {
+    throw new Error('ensureCustomerAccount: lockPhone requires a knex transaction (got root knex) — the phone fence would not span the create');
+  }
+}
+
 async function ensureCustomerAccount(trx, input) {
+  if (input.lockPhone) {
+    assertLockPhoneTransaction(trx);
+    await lockSmsPhone(trx, input.phone);
+  }
   const existing = await findAccountByContact(trx, input);
   if (existing?.accountId) return existing;
   if (existing?.requiresConfirmation && existing.phoneMatch) {
@@ -2314,7 +2348,10 @@ router.post('/quick-add', requireAdmin, async (req, res, next) => {
       // fenceAttach: same concurrency fence as POST / below — lock + re-
       // resolve the matched row inside this transaction, CUSTOMER_BUSY on
       // any drift.
-      let account = await ensureCustomerAccount(trx, { ...normalized, forceNewAccount, ignorePhoneMatch, fenceAttach: true });
+      // codex #5196 P1-A: lockPhone: true — this route's own insert
+      // transaction, first statement, nothing held before it (see
+      // ensureCustomerAccount's own comment for the full contract).
+      let account = await ensureCustomerAccount(trx, { ...normalized, forceNewAccount, ignorePhoneMatch, fenceAttach: true, lockPhone: true });
       account = await resolveExplicitAttachTarget(trx, account, attachToCustomerId, normalized.phone, forceNewAccount);
       await assertPhoneAttachConfirmed(trx, account, { streetLine1: normalized.address, confirmDuplicate, confirmAttach, confirmMatchedAccountId });
       const siblingCount = await trx('customers').where({ account_id: account.accountId }).whereNull('deleted_at').count('* as count').first();
@@ -3561,7 +3598,8 @@ router.post('/', requireAdmin, async (req, res, next) => {
       // concurrent phone/account edit between lookup and insert fails closed
       // with CUSTOMER_BUSY instead of attaching on stale match data. Safe
       // here because this caller always runs inside db.transaction.
-      let account = await ensureCustomerAccount(trx, { ...normalized, forceNewAccount, ignorePhoneMatch, fenceAttach: true });
+      // codex #5196 P1-A: lockPhone: true — same contract as quick-add above.
+      let account = await ensureCustomerAccount(trx, { ...normalized, forceNewAccount, ignorePhoneMatch, fenceAttach: true, lockPhone: true });
       account = await resolveExplicitAttachTarget(trx, account, attachToCustomerId, normalized.phone, forceNewAccount);
       await assertPhoneAttachConfirmed(trx, account, { streetLine1: normalized.addressLine1, confirmDuplicate, confirmAttach, confirmMatchedAccountId });
       const siblingCount = await trx('customers').where({ account_id: account.accountId }).whereNull('deleted_at').count('* as count').first();

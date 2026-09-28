@@ -9,7 +9,7 @@ const { recurringDispatchDuePatch } = require('../scheduling/recurring-dispatch-
  */
 
 const db = require('../../models/db');
-const { lockCustomerComms } = require('../../utils/customer-comms-lock');
+const { lockCustomerComms, lockSmsPhone } = require('../../utils/customer-comms-lock');
 // Shared admin window rules + gated occupancy probe (scheduling/window-rules.js).
 const { assertAdminAppointmentWindow, probeSlotOverlap, slotOverlapWarning } = require('../scheduling/window-rules');
 const logger = require('../logger');
@@ -1225,6 +1225,13 @@ async function createCustomer(input) {
   }
 
   const created = await db.transaction(async (trx) => {
+    // codex #5196 P1-A: fence this admin-UI mint against
+    // call-booking-link-text.js's phone-locked handoff (same lockSmsPhone
+    // key/namespace) — the FIRST statement of this transaction, nothing
+    // else held before it, so no lock-order inversion risk (see
+    // routes/admin-customers.js ensureCustomerAccount's lockPhone comment
+    // for the full contract this mirrors).
+    await lockSmsPhone(trx, phone);
     const [account] = await trx('customer_accounts').insert({
       first_name: firstName,
       last_name: lastName,

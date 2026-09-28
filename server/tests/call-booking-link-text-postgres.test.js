@@ -58,6 +58,13 @@ const { randomUUID } = require('node:crypto');
 const callBookingLinkText = require('../services/call-booking-link-text');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { buildLeadConsultationSmsLine } = require('../services/lead-consultation-link');
+// codex #5196 P1-A: required at module scope, not inside the test that uses
+// it — routes/admin-customers.js's own require graph is large enough that
+// loading it for the first time costs several real seconds under Jest's
+// transform, which blew past that one test's own timeout when the require
+// sat inside its body. Paying that cost once here, during this file's
+// normal module-load phase, keeps it out of any individual test's budget.
+const { ensureCustomerAccount } = require('../routes/admin-customers');
 
 const connection = process.env.CALL_BOOKING_LINK_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
@@ -67,7 +74,10 @@ const schema = `call_booking_link_${randomUUID().replaceAll('-', '')}`;
 // this file runs against must be FULLY migrated (never the possibly-stale
 // waves_test template alone) for it to exist in `public` before the clone
 // below runs.
-const TABLES = ['customers', 'leads', 'call_log', 'system_settings', 'scheduled_services', 'short_codes', 'sms_log', 'activity_log', 'call_booking_link_text_handoffs', 'estimates'];
+// customer_accounts (codex #5196 P1-A): ensureCustomerAccount's own account
+// row — needed once the quick-add lock-fence test below drives that real
+// function, not merely a `customers` insert.
+const TABLES = ['customers', 'customer_accounts', 'leads', 'call_log', 'system_settings', 'scheduled_services', 'short_codes', 'sms_log', 'activity_log', 'call_booking_link_text_handoffs', 'estimates'];
 let admin;
 let mockPg;
 jest.setTimeout(30000);
@@ -769,6 +779,60 @@ postgres('call-booking-link-text against PostgreSQL', () => {
     // included, under its own fresh locks.
     const refreshed = await mockPg('call_log').where({ id: callId }).first('metadata');
     expect(refreshed.metadata.call_booking_link_text.status).toBe('pending');
+  }, 10000);
+
+  // codex #5196 P1-A: the structural fix for the race the test above proves
+  // — quick-add's own customer CREATION (routes/admin-customers.js
+  // ensureCustomerAccount, lockPhone: true) now takes this SAME lockSmsPhone
+  // key as the first statement of its own insert transaction, before its
+  // own duplicate/phone lookup. Proof a mocked knex cannot give: hold the
+  // real phone lock, start quick-add's own ensureCustomerAccount against a
+  // SEPARATE real connection, and show it genuinely blocks — never even
+  // reaching its duplicate lookup or insert — until the phone lock releases.
+  test('quick-add customer creation blocks on the SAME phone lock a handoff holds, and only lands once it releases', async () => {
+    const phone = '+15555551090';
+
+    const { lockSmsPhone } = require('../utils/customer-comms-lock');
+    let releasePhoneHold;
+    const phoneHoldHeld = new Promise((resolve) => { releasePhoneHold = resolve; });
+    const phoneHoldTx = mockPg.transaction(async (trx) => {
+      await lockSmsPhone(trx, phone);
+      await phoneHoldHeld; // held open until this test explicitly releases it
+    });
+
+    // Give the phone-hold transaction a moment to actually acquire the lock
+    // before quick-add starts.
+    await new Promise((r) => setTimeout(r, 100));
+
+    let quickAddSettled = false;
+    const quickAddPromise = mockPg.transaction(async (trx) => {
+      // The exact call quick-add's own route makes (routes/admin-customers.js
+      // POST /quick-add): lockPhone: true, before findAccountByContact's own
+      // duplicate/phone lookup.
+      const account = await ensureCustomerAccount(trx, {
+        firstName: 'Quick', lastName: 'Added', phone, email: null, lockPhone: true, fenceAttach: true,
+      });
+      const [created] = await trx('customers').insert({
+        account_id: account.accountId, is_primary_profile: true, profile_label: 'Primary',
+        first_name: 'Quick', last_name: 'Added', phone, address_line1: '9 Example St', city: 'Bradenton', zip: '34205',
+      }).returning('*');
+      return created;
+    }).then((row) => { quickAddSettled = true; return row; });
+
+    // Give quick-add's own transaction a moment to reach — and genuinely
+    // block on — the same phone lock (pg_advisory_xact_lock waits, it does
+    // not error).
+    await new Promise((r) => setTimeout(r, 200));
+    expect(quickAddSettled).toBe(false);
+
+    releasePhoneHold();
+    await phoneHoldTx;
+    const created = await quickAddPromise;
+
+    expect(quickAddSettled).toBe(true);
+    expect(created.phone).toBe(phone);
+    const row = await mockPg('customers').where({ id: created.id }).first();
+    expect(row).toBeTruthy();
   }, 10000);
 
   // codex #5018 r15 P2: proof a mocked knex/sendCustomerMessage cannot give

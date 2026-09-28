@@ -8,6 +8,7 @@ const { normalizeGsmPunctuation } = require("./messaging/gsm-normalize");
 const { stripSmsUrlScheme } = require("./messaging/sms-link-policy");
 const { formatTechnicianForCustomer } = require("../utils/technician-name");
 const { publicPortalUrl } = require("../utils/portal-url");
+const { lockSmsPhone } = require("../utils/customer-comms-lock");
 
 // Owner/admin SMS controls.
 //
@@ -1368,44 +1369,74 @@ const TwilioService = {
         // transaction insert further down (`if (!options.logInHandoff)`),
         // byte-identical to origin/main's behavior.
         if (options.logInHandoff) {
+          // codex #5018 r15/r16 P1 follow-up: take the SAME advisory key
+          // the recovery insert below already does
+          // (hashtextextended('sms_log_sid:'||sid, 0)) — on `trx` itself,
+          // never inside a savepoint: pg_advisory_xact_lock releases only
+          // at REAL transaction end (COMMIT/ROLLBACK), never at a savepoint
+          // boundary, so one acquisition here covers every attempt below.
+          // Only when a real trx is held: an xact-scoped lock taken on a
+          // bare `db` call (no transaction) would release the instant that
+          // single query finished, guarding nothing — the ORIGINAL window
+          // this closes only exists for the opt-in, transaction-scoped path
+          // this whole block already requires. See the recovery lock's own
+          // comment, below, for what taking it HERE too actually closes: if
+          // the COMMIT here succeeded but its acknowledgement was lost,
+          // recovery's own lock acquisition now genuinely blocks until this
+          // transaction ends, then its SELECT sees the committed row and
+          // skips inserting; if this transaction instead rolled back,
+          // recovery finds nothing and inserts once, itself.
+          const sidLockKey = `sms_log_sid:${message.sid}`;
+          if (trx) {
+            await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [sidLockKey]);
+          }
+          const insertLogRow = (conn) => conn('sms_log').insert(buildSmsLogRow());
           try {
-            // codex #5018 r15/r16 P1 follow-up: take the SAME advisory key
-            // the recovery insert below already does
-            // (hashtextextended('sms_log_sid:'||sid, 0)) — transaction-
-            // scoped on THIS held trx, so it releases only at trx's own
-            // COMMIT/ROLLBACK, never earlier. Only when a real trx is held:
-            // an xact-scoped lock taken on a bare `db` call (no transaction)
-            // would release the instant that single query finished,
-            // guarding nothing — the ORIGINAL window this closes only
-            // exists for the opt-in, transaction-scoped path this whole
-            // block already requires. See the recovery lock's own comment,
-            // below, for what taking it HERE too actually closes: if the
-            // COMMIT here succeeded but its acknowledgement was lost,
-            // recovery's own lock acquisition now genuinely blocks until
-            // this transaction ends, then its SELECT sees the committed
-            // row and skips inserting; if this transaction instead rolled
-            // back, recovery finds nothing and inserts once, itself.
+            // codex #5196 P1-B: SAVEPOINT-wrapped — `trx.transaction(...)`
+            // called on an already-open `trx` is a nested SAVEPOINT in knex
+            // (the same idiom routes/booking.js and others already use),
+            // never a new top-level transaction. Before this fix, a failed
+            // INSERT here left the OUTER transaction aborted (Postgres:
+            // once a statement inside a transaction errors, every later
+            // statement — including COMMIT — fails too, until a ROLLBACK
+            // brings it back), which is exactly why the old code below had
+            // to `throw logErr` and force the caller's whole transaction to
+            // roll back, releasing its phone lock (lockSmsPhone) before ANY
+            // recovery could run — the gap a waiting composer send, Leads
+            // send, or this lane's own worker tick could land in. A
+            // savepoint failure instead leaves `trx` itself valid, so the
+            // catch below can recover WHILE the phone lock is still held.
             if (trx) {
-              await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`sms_log_sid:${message.sid}`]);
+              await trx.transaction((sp) => insertLogRow(sp));
+            } else {
+              await insertLogRow(db);
             }
-            await (trx || db)("sms_log").insert(buildSmsLogRow());
           } catch (logErr) {
             logger.error(`SMS log failed: ${logErr.message}`);
-            // codex #5018 round-3 P1: on a HELD trx, this failed INSERT
-            // leaves Postgres's transaction aborted — its later COMMIT does
-            // not error, it silently performs a ROLLBACK instead (standard
-            // Postgres protocol behavior for a COMMIT issued on an aborted
-            // transaction), so swallowing this error here would let the
-            // caller's own `conn.transaction(...)` resolve as if it had
-            // succeeded. That would skip the withSmsHandoff catch's own
-            // accepted-send recovery entirely (it only runs when
-            // withSmsHandoff's promise actually REJECTS), losing the sms_log
-            // row with no recovery attempt at all. Rethrow so the caller's
-            // transaction genuinely rolls back and rejects, landing in that
-            // recovery path. A bare `dispatch()` call (no trx) has no
-            // transaction to abort — this insert's own failure is already
-            // the final word there, so it stays swallowed, unchanged.
-            if (trx) throw logErr;
+            if (trx) {
+              // Recover INSIDE this still-open transaction, on a FRESH
+              // savepoint, idempotent on twilio_sid exactly like the
+              // post-rollback recovery further below (same check-then-
+              // insert shape). Succeeding here means the recovered row
+              // commits ATOMICALLY with everything else this handoff
+              // writes — by the time the phone lock actually releases
+              // (trx's own COMMIT), the row is already visible to any
+              // waiter, closing the insert-failure case fully. Only a
+              // genuinely broken connection/transaction reaches the
+              // rethrow, which falls through to the post-rollback recovery
+              // below as the last-resort backstop — the same outcome this
+              // whole block produced before this fix, unchanged for that
+              // narrow case.
+              try {
+                await trx.transaction(async (sp) => {
+                  const alreadyLogged = await sp('sms_log').where({ twilio_sid: message.sid }).first('id');
+                  if (!alreadyLogged) await insertLogRow(sp);
+                });
+              } catch (recoverErr) {
+                logger.error(`SMS log in-handoff recovery also failed, falling back to post-rollback recovery: ${recoverErr.message}`);
+                throw logErr;
+              }
+            }
           }
         }
       };
@@ -1512,7 +1543,29 @@ const TwilioService = {
                 // commit genuinely lost in flight (a real network partition
                 // mid-COMMIT) rather than merely un-acknowledged; ordinary
                 // Postgres commit visibility has no such gap on one primary.
+                //
+                // codex #5196 P1-B: this is the COMMIT-failure case — the
+                // caller's own transaction already rolled back (or failed to
+                // commit) by the time this catch runs, which means its
+                // lockSmsPhone has ALREADY released. Re-acquire it here,
+                // BEFORE the sid lock and the check-then-insert, so this
+                // recovery competes fairly for the SAME phone lock against
+                // any waiter (a composer send, admin-leads' manual send, or
+                // this lane's own next worker tick) instead of writing the
+                // recovery row unprotected while a waiter already reads
+                // linkSentRecently with no evidence. This narrows the window
+                // (recovery attempts the lock immediately, in the same tick
+                // the original transaction just released it) but does not
+                // fully close it — Postgres's own lock queue can still grant
+                // a waiter that was already blocked on this key before this
+                // recovery transaction even opens. linkSentRecently's own
+                // call_booking_link_text_handoffs marker check (codex #5196
+                // P1-B, see that function) is the other half of narrowing
+                // this specific gap for this lane's own sends; it does not
+                // cover every possible caller of this recovery path (see
+                // that comment for exactly which ones it does).
                 await db.transaction(async (trx) => {
+                  await lockSmsPhone(trx, to);
                   await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`sms_log_sid:${message.sid}`]);
                   const alreadyLogged = await trx('sms_log').where({ twilio_sid: message.sid }).first('id');
                   if (!alreadyLogged) await trx('sms_log').insert(buildSmsLogRow());

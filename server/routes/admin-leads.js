@@ -1489,7 +1489,12 @@ router.post('/:id/send-sms', async (req, res, next) => {
         await lockSmsPhone(trx, lead.phone);
         if (bearerCheck.consultationLeadId) {
           const { linkSentRecently, MANUAL_SEND_RACE_GUARD_WINDOW_MS } = require('../services/call-booking-link-text');
-          if (await linkSentRecently(trx, bearerCheck.consultationLeadId, new Date(), { windowMs: MANUAL_SEND_RACE_GUARD_WINDOW_MS })) {
+          // codex #5196 P2: matchPhone scopes this manual-window check to
+          // THIS send's own destination (lead.phone) — the lead-wide check
+          // used to refuse a send to a NEW number just because the OLD
+          // number got this link inside the same window (e.g. the lead's
+          // phone was corrected right after a send).
+          if (await linkSentRecently(trx, bearerCheck.consultationLeadId, new Date(), { windowMs: MANUAL_SEND_RACE_GUARD_WINDOW_MS, matchPhone: lead.phone })) {
             return { ok: false, code: 'LINK_SENT_RECENTLY_RACE', reason: 'A booking link was just texted to this number a moment ago', retryable: false };
           }
         }
@@ -1819,6 +1824,25 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
         }
       }
       if (needsCustomer) {
+        // codex #5196 P1-A: deliberately NOT passing lockPhone here. By this
+        // point the transaction already holds the date-wide occupancy lock
+        // and this exact `leads` row FOR UPDATE (both taken above) — the
+        // handoff's own order is phone-lock BEFORE its leads-row FOR UPDATE
+        // (neverSendRecheck, same transaction), so taking the phone lock
+        // here, after the row lock, would invert that order: this
+        // transaction would hold leads-row(this lead) and wait on
+        // phone-lock, while a handoff for the SAME lead holds phone-lock
+        // and waits on leads-row(this lead) — a genuine two-resource cycle.
+        // This path is still largely covered without it: when the customer
+        // being created is for THIS lead (the common case — converting the
+        // lead the call-booking-link-text send is about), the `leads` row
+        // FOR UPDATE both sides already take serializes them on that row
+        // alone, no phone lock needed. The residual gap is a phone shared
+        // across a DIFFERENT lead row than the one the handoff is texting —
+        // that case is not fenced here and relies on bookedSinceCall's own
+        // fresh, phone-matched re-read inside the handoff's still-open
+        // transaction (see call-booking-link-text.js) to catch a booking
+        // that lands after this converts.
         const account = await ensureCustomerAccount(trx, {
           firstName: fallbackName,
           lastName: lockedLead.last_name || '',

@@ -1028,16 +1028,63 @@ async function bookedSinceCall(conn, customerId, since, leadPhone) {
 // MANUAL_SEND_RACE_GUARD_WINDOW_MS instead — a short race-only window — when
 // reusing this same read as a post-lock manual-send guard; see that
 // constant's own comment for why.
-async function linkSentRecently(conn, leadId, now, { windowMs = LINK_SENT_RECENTLY_DEFAULT_WINDOW_MS } = {}) {
+// matchPhone (codex #5196 P2): the manual guards ALSO pass the send's own
+// current destination phone — scoping the sms_log match to THAT number
+// (sms_log.to_phone, via the same nanpStoredPhoneClause matcher every other
+// phone comparison in this file already uses), not merely the lead. Before
+// this, the guard was lead-wide: a send to phone A, then a lead phone
+// change to B, refused a legitimate send to the NEW number B for the same
+// lead — the lead's own recent history at the OLD number blocked it. Never
+// passed by this lane's own worker call (dispatchIneligibleReason, 14-day
+// dedupe) — that stays lead-wide, unchanged: the worker's own concern is
+// "has ANY current number for this lead already gotten this link," not one
+// specific destination.
+async function linkSentRecently(conn, leadId, now, { windowMs = LINK_SENT_RECENTLY_DEFAULT_WINDOW_MS, matchPhone = null } = {}) {
   const since = new Date(now.getTime() - windowMs);
+  const matchPhoneKey = matchPhone ? phoneIdentityKey(matchPhone) : null;
+  const { nanpStoredPhoneClause } = require('./outbound-call-reason');
+  const applyPhoneScope = (query) => (matchPhoneKey && matchPhoneKey.length === 10
+    ? query.whereRaw(nanpStoredPhoneClause('sms_log.to_phone'), [matchPhoneKey])
+    : query);
+  // codex #5196 P1-B: an unresolved call_booking_link_text_handoffs marker
+  // for THIS lead's own staged call, dated inside the window, is durable
+  // evidence written on a SEPARATE, immediately-committed connection
+  // (markerDb(), never `trx`) at twilio.js's REAL attempt boundary —
+  // onDispatchStart, right before messages.create() runs — so it exists
+  // regardless of whether the handoff transaction that opened around it
+  // later committed, rolled back, or is still mid-recovery right now (see
+  // twilio.js's in-handoff sms_log insert/recovery comment for the gap
+  // this specifically closes: a waiter's read landing between the phone
+  // lock releasing and that recovery's own write landing). A marker for an
+  // attempt that provably never reached Twilio does not linger here — it
+  // is deleted at that refusal (onDispatchAbort) or at the definite-
+  // failure cleanup in recordRetryableDecision — so this cannot mistake
+  // "never attempted" for "sent"; it can only ever over-count a genuine
+  // attempt (success, crash-recovered ambiguous, or a still-settling one)
+  // as "recently sent," which is the same safe-over-silent direction every
+  // other check in this function already takes.
+  //
+  // Deliberately NOT phone-scoped even when matchPhone (codex #5196 P2) is
+  // given — the marker carries no destination phone of its own to compare
+  // (only call_log_id), and this table is a coarse, short-lived safety net
+  // (see its own doc comment), not the primary phone-matched evidence
+  // (sms_log.to_phone) the check below already scopes correctly. Staying
+  // lead-wide here is the same safe-over-precise direction as every other
+  // check in this function.
+  const recentHandoff = await conn(HANDOFF_MARKER_TABLE)
+    .join('call_log', 'call_log.id', `${HANDOFF_MARKER_TABLE}.call_log_id`)
+    .where(`${HANDOFF_MARKER_TABLE}.handoff_started_at`, '>=', since)
+    .whereRaw("call_log.metadata->:key->>'lead_id' = :leadId", { key: METADATA_KEY, leadId: String(leadId) })
+    .first(`${HANDOFF_MARKER_TABLE}.call_log_id`);
+  if (recentHandoff) return true;
   // excludeUnresolvedSendReservations (codex r1 P2): 'sending' also covers
   // a pre-provider reply/review-ask RESERVATION row — a placeholder that
   // never reached Twilio, not delivery evidence. Every other caller of
   // this helper applies it before its own further .where()s.
-  const recentOutbound = () => excludeUnresolvedSendReservations(conn('sms_log'))
+  const recentOutbound = () => applyPhoneScope(excludeUnresolvedSendReservations(conn('sms_log'))
     .where('sms_log.direction', 'outbound')
     .where('sms_log.created_at', '>=', since)
-    .whereIn('sms_log.status', ['queued', 'accepted', 'sending', 'sent', 'delivered', 'read']);
+    .whereIn('sms_log.status', ['queued', 'accepted', 'sending', 'sent', 'delivered', 'read']));
   const shortRow = await recentOutbound()
     .whereExists(
       conn('short_codes')
@@ -1635,10 +1682,30 @@ async function dispatchClaimedCall(conn, call, now) {
       // call.metadata.created_customer_id, so the ONLY value lead.customer_id
       // can hold by the time bookedSinceCall actually runs is either null or
       // exactly that id. The PHONE-MATCH source below is NOT: it is a live
-      // SELECT against `customers`, and a customer created by
-      // /customers/quick-add for this exact destinationPhone AFTER this read
-      // but before the re-check just below would never be locked at all —
-      // see that re-check's own comment (codex #5018 r15/r16 P1 follow-up).
+      // SELECT against `customers`, and a customer minted for this exact
+      // destinationPhone AFTER this read but before the re-check just below
+      // would never be locked at all — see that re-check's own comment
+      // (codex #5018 r15/r16 P1 follow-up).
+      //
+      // codex #5196 P1-A: /customers/quick-add, the admin "Add customer"
+      // form (POST /api/admin/customers/), and the Intelligence Bar's
+      // create_customer tool now take THIS SAME lockSmsPhone key/namespace
+      // as the first statement of their own insert transaction (before
+      // their own duplicate/phone lookup) — see routes/admin-customers.js
+      // ensureCustomerAccount's lockPhone comment. Any of those three
+      // creating a customer for destinationPhone now BLOCKS until this
+      // handoff's transaction commits or rolls back, so they can no longer
+      // land invisibly in the gap this re-resolve exists to catch. Not
+      // every creator is fenced this way, though — admin-leads.js's own
+      // lead-conversion path deliberately does NOT take this lock (would
+      // invert lock order against its own occupancy/leads-row locks; see
+      // its own comment) beyond the same-lead case its leads-row FOR UPDATE
+      // already serializes, and neither the call-recording-processor's
+      // automatic call-answered mint nor the public self-service creation
+      // paths (booking.js, public-quote.js, estimate-public.js,
+      // lead-webhook.js) take it at all. The re-resolve below stays as the
+      // backstop for exactly those un-fenced writers — it is NOT
+      // superseded, only narrowed.
       const candidateCustomerIds = new Set();
       const createdCustomerId = parseMetadata(call).created_customer_id;
       if (createdCustomerId) candidateCustomerIds.add(String(createdCustomerId));
@@ -1654,14 +1721,16 @@ async function dispatchClaimedCall(conn, call, now) {
         await lockCustomerComms(trx, id);
       }
       await lockSmsPhone(trx, destinationPhone);
-      // codex #5018 r15/r16 P1 follow-up: candidateCustomerIds' phone-match
-      // half was read BEFORE any lockCustomerComms call above — a customer
-      // quick-added for this SAME destinationPhone in the gap between that
-      // read and this handoff's own locks is not among them, so a booking
-      // committed for it between bookedSinceCall's own read (inside
-      // neverSendRecheck, below, on this same `trx`) and the actual
-      // provider request is never fenced by this handoff at all — exactly
-      // the race lockCustomerComms exists to close. Re-resolve the SAME
+      // codex #5018 r15/r16 P1 follow-up (narrowed by codex #5196 P1-A —
+      // see the comment above candidateCustomerIds): candidateCustomerIds'
+      // phone-match half was read BEFORE any lockCustomerComms call above —
+      // a customer minted for this SAME destinationPhone by a writer that
+      // does NOT take lockSmsPhone (see that comment for the current list)
+      // in the gap between that read and this handoff's own locks is not
+      // among them, so a booking committed for it between bookedSinceCall's
+      // own read (inside neverSendRecheck, below, on this same `trx`) and
+      // the actual provider request is never fenced by this handoff at all
+      // — exactly the race lockCustomerComms exists to close. Re-resolve the SAME
       // phone-match query now that every lock above is held: a newly
       // visible id proves the candidate set changed between the two reads.
       // It cannot simply be locked NOW — LOCK ORDER above requires comms

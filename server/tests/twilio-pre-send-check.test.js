@@ -218,6 +218,14 @@ describe('TwilioService.sendSMS preSendCheck (provider-handoff gate)', () => {
     // a real knex trx carries `.raw` directly on the transaction object,
     // same as `db`.
     trx.raw = jest.fn(async () => ({}));
+    // codex #5196 P1-B: the in-handoff insert now runs inside a SAVEPOINT
+    // (`trx.transaction(...)`) so a failed insert doesn't abort the whole
+    // handoff transaction — a real knex trx exposes `.transaction()` for
+    // this the same way it exposes `.raw()`; forwarding the SAME mock trx
+    // to the callback is enough to exercise the real code path here, since
+    // this repo's own convention treats a savepoint connection identically
+    // to its parent for table access.
+    trx.transaction = jest.fn((cb) => cb(trx));
     require('../models/db').mockImplementation(() => ({
       insert: jest.fn(async () => { throw new Error('sms_log must not write on the plain db when a trx is held'); }),
     }));
@@ -249,6 +257,7 @@ describe('TwilioService.sendSMS preSendCheck (provider-handoff gate)', () => {
     const trxInsert = jest.fn(async () => { order.push('insert'); });
     const trx = jest.fn((_table) => ({ insert: trxInsert }));
     trx.raw = jest.fn(async (...args) => { order.push('raw'); return args; });
+    trx.transaction = jest.fn((cb) => cb(trx));
     require('../models/db').mockImplementation(() => ({ insert: jest.fn(async () => {}) }));
     try {
       const result = await TwilioService.sendSMS(TO, 'Reminder body', {
@@ -306,6 +315,7 @@ describe('TwilioService.sendSMS preSendCheck (provider-handoff gate)', () => {
     // a real knex trx carries `.raw` directly on the transaction object,
     // same as `db`.
     trx.raw = jest.fn(async () => ({}));
+    trx.transaction = jest.fn((cb) => cb(trx));
     const baseInserted = [];
     require('../models/db').mockImplementation((table) => {
       if (table !== 'sms_log') throw new Error(`unexpected table: ${table}`);
@@ -372,6 +382,7 @@ describe('TwilioService.sendSMS preSendCheck (provider-handoff gate)', () => {
     // a real knex trx carries `.raw` directly on the transaction object,
     // same as `db`.
     trx.raw = jest.fn(async () => ({}));
+    trx.transaction = jest.fn((cb) => cb(trx));
     const baseInsert = jest.fn(async () => {});
     require('../models/db').mockImplementation((table) => {
       if (table !== 'sms_log') throw new Error(`unexpected table: ${table}`);
@@ -420,6 +431,7 @@ describe('TwilioService.sendSMS preSendCheck (provider-handoff gate)', () => {
     // a real knex trx carries `.raw` directly on the transaction object,
     // same as `db`.
     trx.raw = jest.fn(async () => ({}));
+    trx.transaction = jest.fn((cb) => cb(trx));
     const baseInserted = [];
     require('../models/db').mockImplementation((table) => {
       if (table !== 'sms_log') throw new Error(`unexpected table: ${table}`);

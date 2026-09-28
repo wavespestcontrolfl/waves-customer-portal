@@ -143,7 +143,9 @@ describe('the manual-send race guard (codex #5018 r15 P2 follow-up)', () => {
     db.transaction = jest.fn(async (fn) => fn(trx));
     const dispatch = jest.fn(async () => ({ sent: true }));
     const result = await withSmsHandoff(dispatch);
-    expect(linkSentRecently).toHaveBeenCalledWith(trx, 'lead-qa', expect.any(Date), { windowMs: 10 * 60 * 1000 });
+    // codex #5196 P2: matchPhone scopes the manual-window check to this
+    // send's own destination (lead.phone), not just the lead.
+    expect(linkSentRecently).toHaveBeenCalledWith(trx, 'lead-qa', expect.any(Date), { windowMs: 10 * 60 * 1000, matchPhone: '+19415550103' });
     expect(dispatch).not.toHaveBeenCalled();
     expect(result).toEqual({ ok: false, code: 'LINK_SENT_RECENTLY_RACE', reason: expect.stringMatching(/just texted/i), retryable: false });
   });
