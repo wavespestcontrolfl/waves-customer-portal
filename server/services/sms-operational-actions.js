@@ -216,12 +216,14 @@ const SAME_DAY_TIMING = new RegExp([
 // STATED_TIMING on what is left (Codex conventions keep the stateful global
 // regex out of resolveDueDeadline's own module-level .test() calls).
 const SAME_DAY_TIMING_STRIP = new RegExp(SAME_DAY_TIMING.source, 'gi');
-// An alternative offered beside the same-day timing ("today or next visit",
-// "today, otherwise whenever") names a later option STATED_TIMING may not
-// recognize on its own (a bare "next visit" needs a preposition there), so
-// any alternative keeps the legacy undated row: a same-day deadline would
-// bell before the option the customer allowed (Codex #5170 r1 P2).
-const SAME_DAY_ALTERNATIVE = /\b(?:or|else|otherwise|either|unless)\b|\bnext (?:visit|appointment|service|time)\b/i;
+// A later option offered beside the same-day timing ("today or next visit",
+// "today, otherwise whenever") that STATED_TIMING does not recognize on its
+// own (a bare "next visit" needs a preposition there) keeps the legacy
+// undated row: a same-day deadline would bell before the option the customer
+// allowed (Codex #5170 r1 P2). Only a later OPTION counts, never the bare
+// word "or": "today or not", "call or text me today" and "this afternoon or
+// tonight" stay same-day (r2 P2).
+const SAME_DAY_ALTERNATIVE = /\bnext (?:visit|appointment|service|time)\b|\b(?:whenever|any ?time|some ?time|later(?! today)|another (?:day|time)|some ?other (?:day|time)|a different (?:day|time))\b/i;
 
 // Outcomes a visit-only fact may reach without anyone needing to act: the
 // duration verdict itself and the scope/authority guards that can run before

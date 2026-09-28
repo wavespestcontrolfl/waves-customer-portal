@@ -817,6 +817,13 @@ describe('R5 owner ruling 2026-09-24: per-kind default deadlines', () => {
 describe('Owner ruling 2026-09-28: a same-day-only ask about TODAY gets an end-of-day deadline instead of staying undated', () => {
   const wavesItem = (quote, overrides = {}) => ({ party: 'waves', kind: 'other', basis: 'request', due_at: null, due_text: null, quote, ...overrides });
 
+  test.each(['Did you come today or not?', 'Can you call or text me today?', 'Can you come this afternoon or tonight?'])(
+    // Codex #5170 r2 P2: a bare "or" with only same-day timing is still same-day.
+    '"%s" offers no later option, so it gets the 8 PM ET same-day deadline', (quote) => {
+      const at = parseETDateTime('2040-03-12T10:00');
+      expect(resolveDueDeadline(wavesItem(quote), at)).toEqual({ due_at: parseETDateTime('2040-03-12T20:00').toISOString(), due_basis: 'default_kind' });
+    });
+
   test('"Did you come to my house today?" at 10:00 ET gets an 8 PM ET same-day deadline', () => {
     const at = parseETDateTime('2040-03-12T10:00');
     expect(resolveDueDeadline(wavesItem('Did you come to my house today?'), at))
