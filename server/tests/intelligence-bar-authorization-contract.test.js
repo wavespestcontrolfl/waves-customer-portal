@@ -234,6 +234,30 @@ test('cancel_appointment: customer_notice may_send discloses the notice, marks n
   expect(contractHash(maySend)).not.toBe(contractHash(none));
 });
 
+// Codex round-5 P2: the assigned technician's cancel notice
+// (tech-visit-notifications.js#notifyVisitCancelled, wired unconditionally
+// into every transitionJobStatus cancel) is a real staff-comms effect the
+// card must disclose, separately from the customer notice above.
+test('cancel_appointment: technician_notice may_notify discloses the notice, marks notifies_technician, and binds the hash', () => {
+  const mayNotify = buildContract({
+    toolName: 'cancel_appointment', params: {}, displayParams: {},
+    preview: { cancellation: { ...synthCancellationBase(), technician_notice: 'may_notify' } },
+  });
+  const none = buildContract({
+    toolName: 'cancel_appointment', params: {}, displayParams: {},
+    preview: { cancellation: { ...synthCancellationBase(), technician_notice: 'none' } },
+  });
+  expect(mayNotify.notifies_technician).toBe(true);
+  expect(mayNotify.effects.some((e) => e.kind === 'comms' && /technician/i.test(e.label))).toBe(true);
+  expect(mayNotify.effects.find((e) => e.kind === 'comms' && /technician/i.test(e.label)).label).toMatch(/MAY get a cancelled-visit notice/);
+  expect(none.notifies_technician).toBe(false);
+  expect(none.effects.some((e) => e.kind === 'comms' && /technician/i.test(e.label))).toBe(false);
+  expect(contractHash(mayNotify)).not.toBe(contractHash(none));
+  // Absent entirely (no cancellation preview at all) reads as 'none', same
+  // safe default as customer_notice.
+  expect(buildContract({ toolName: 'cancel_appointment', params: {}, displayParams: {} }).notifies_technician).toBe(false);
+});
+
 test('cancel_appointment is irreversible unconditionally — money moves no portal path undoes, notice or not', () => {
   const notified = buildContract({
     toolName: 'cancel_appointment', params: {}, displayParams: {},

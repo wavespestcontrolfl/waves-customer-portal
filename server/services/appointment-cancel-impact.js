@@ -47,6 +47,7 @@
 const crypto = require('crypto');
 const db = require('../models/db');
 const { dateOnlyString, parseETDateTime, formatETTime } = require('../utils/datetime-et');
+const { gateEnvValue } = require('../config/feature-gates');
 
 // Human-readable arrival window for the card (Codex round-3 P1: two
 // same-day visits for the same customer are otherwise indistinguishable on
@@ -107,6 +108,24 @@ function effectiveAddress(row) {
     line1: row.customer_address_line1, line2: row.customer_address_line2,
     city: row.customer_city, state: row.customer_state, zip: row.customer_zip,
   });
+}
+
+// Codex round-5 P2: a legacy row with no stamped service_address_* falls
+// back to the CUSTOMER's own primary address (effectiveAddress above) —
+// but that address lives on the `customers` table, never on
+// scheduled_services, so computeRowFingerprint (deliberately pinned to the
+// scheduled_services row alone — see its own header) can never catch that
+// address moving between the proposal read and the commit. This is a
+// SEPARATE, narrow fingerprint over just the raw address fields, computed
+// once at proposal time (loadAppointmentFacts, only for an unstamped row)
+// and re-derived under the commit's own row lock (tools.js
+// cancelAppointment) from a FOR SHARE read of the SAME customer row,
+// refusing on any mismatch — the identity fingerprint itself stays
+// scheduled_services-only, exactly as before.
+function legacyAddressFingerprint({ line1, line2, city, state, zip } = {}) {
+  return crypto.createHash('sha256').update(JSON.stringify({
+    line1: line1 ?? null, line2: line2 ?? null, city: city ?? null, state: state ?? null, zip: zip ?? null,
+  })).digest('hex');
 }
 
 // Columns that legitimately change on scheduled_services without changing
@@ -218,6 +237,13 @@ async function loadAppointmentFacts(scheduledServiceId) {
     // (the fingerprint is what the drift check needs, not a second copy of
     // every column's current value) while still covering the whole row.
     identityFingerprint: computeRowFingerprint(serviceRow),
+    // Only for a legacy/unstamped row (see legacyAddressFingerprint's own
+    // header) — null when the row carries its own stamped service address,
+    // since that case is already fully covered by identityFingerprint.
+    addressFingerprint: row.service_address_line1 ? null : legacyAddressFingerprint({
+      line1: row.customer_address_line1, line2: row.customer_address_line2,
+      city: row.customer_city, state: row.customer_state, zip: row.customer_zip,
+    }),
     row,
   };
 }
@@ -264,11 +290,13 @@ function feeRailClear(fee) {
   return fee.rail === 'none' && fee.applies !== true && fee.unresolved !== true;
 }
 
-// Owner ruling 2026-09-28 (simple visits only): the bar confirms a cancel
-// only when none of these apply; each is a cancel side effect the card does
-// not pin, so the visit is cancelled from Dispatch instead. Sorted codes, so
-// the frozen impact (and its drift comparison) covers the verdict too.
-function cardCancelRefusals({ row, fee, invoices, inspectionCreditReversal }) {
+// Owner ruling 2026-09-28 ("bare visits only" — supersedes the earlier
+// "simple visits only" ruling this same function encoded): the bar confirms
+// a cancel only when none of these apply; each is a cancel side effect the
+// card does not pin, so the visit is cancelled from Dispatch instead. Sorted
+// codes, so the frozen impact (and its drift comparison) covers the verdict
+// too.
+function cardCancelRefusals({ row, fee, invoices, inspectionCreditReversal, anyInvoiceLinked, anyInspectionCreditOffer }) {
   const refusals = [];
   // Any card rail, any fee, or a card lane state that could not be read.
   if (!feeRailClear(fee)) refusals.push('card_fee_agreement');
@@ -284,6 +312,15 @@ function cardCancelRefusals({ row, fee, invoices, inspectionCreditReversal }) {
   // visit to reach; the visit cancels from Dispatch instead, where the
   // group screen shows it.
   if (row.visit_id) refusals.push('grouped_visit');
+  // NOT a follow-up child (owner ruling 2026-09-28, "bare visits only"):
+  // cancelling a follow-up child re-parks the source visit's follow-up
+  // obligation as a fresh dispatch alert (job-status.js's
+  // maybeReparkFollowupObligation → typed-followup-obligation.js) — a real
+  // side effect the card does not disclose. followup_source_service_id is
+  // also a plain scheduled_services column, so identity_fingerprint already
+  // catches it drifting between proposal and confirm; this is the display
+  // verdict shown on the card itself.
+  if (row.followup_source_service_id) refusals.push('followup_child');
   // Money already collected on an invoice the void preview would NOT touch
   // (paid/processing/on a finalized statement) — `card_payment_on_invoice`
   // above only covers a PaymentIntent on a would-void CANDIDATE invoice, so
@@ -308,7 +345,23 @@ function cardCancelRefusals({ row, fee, invoices, inspectionCreditReversal }) {
   // has a bar-cancelled booking to process at all — the visit cancels from
   // Dispatch instead, where this constraint doesn't exist.
   if (inspectionCreditReversal !== null) refusals.push('inspection_credit');
-  return refusals.sort();
+  // Broadened (owner ruling 2026-09-28, "bare visits only"): the check
+  // above only catches an offer REDEEMED at this visit. An offer this visit
+  // ITSELF promised as an inspection (source_scheduled_service_id) — open,
+  // expired, or void — is just as live an obligation the card never
+  // discloses, so it refuses the same way. `refusals` is returned sorted, so
+  // a duplicate push (both conditions true at once) is harmless either way,
+  // but the shared 'inspection_credit' code is pushed at most once here.
+  if (inspectionCreditReversal === null && anyInspectionCreditOffer) refusals.push('inspection_credit');
+  // NO invoice of any kind, any status (owner ruling 2026-09-28, "bare
+  // visits only") — broader than card_payment_on_invoice/estimate_deposit/
+  // invoice_holds_money above, which only look at the voidable-status
+  // subset previewInvoiceVoidForCancelledService returns (or the post-void
+  // gate). A paid, void, or refunded invoice has nothing left for this card
+  // to void, but it is still proof the visit isn't bare — refuse and let
+  // Dispatch show that history.
+  if (anyInvoiceLinked) refusals.push('invoice_linked');
+  return [...new Set(refusals)].sort();
 }
 
 /**
@@ -319,16 +372,16 @@ function cardCancelRefusals({ row, fee, invoices, inspectionCreditReversal }) {
  * part cannot be read: a failed read must never pass for "no effect", so
  * callers refuse to propose or confirm a pinned cancel on a throw.
  */
-async function computeCancelAppointmentImpact(scheduledServiceId, { now = new Date() } = {}) {
+async function computeCancelAppointmentImpact(scheduledServiceId, { now = new Date(), actorId = null } = {}) {
   const loaded = await loadAppointmentFacts(scheduledServiceId);
   if (!loaded) return null;
-  const { facts: appointment, row, identityFingerprint } = loaded;
+  const { facts: appointment, row, identityFingerprint, addressFingerprint } = loaded;
 
   const InvoiceService = require('./invoice');
   const InspectionCredit = require('./inspection-credit');
   const { previewCancellationNoticeVerdict } = require('./job-status');
 
-  const [railFee, invoiceRows, customerNotice] = await Promise.all([
+  const [railFee, invoiceRows, customerNotice, anyInvoiceRow, anyCreditRow] = await Promise.all([
     previewCancelFee(scheduledServiceId, now),
     InvoiceService.previewInvoiceVoidForCancelledService(scheduledServiceId),
     // Read-only mirror of job-status.js's real cancellation-notice hook
@@ -339,6 +392,17 @@ async function computeCancelAppointmentImpact(scheduledServiceId, { now = new Da
     // previewCancellationNoticeVerdict's own header for exactly which real
     // suppression conditions it mirrors.
     previewCancellationNoticeVerdict(scheduledServiceId),
+    // Owner ruling 2026-09-28 ("bare visits only"): ANY invoice on record
+    // for this visit, whatever its status — not just the voidable subset
+    // previewInvoiceVoidForCancelledService above returns. Same linkage
+    // (direct scheduled_service_id, or through a service_records row this
+    // visit created).
+    InvoiceService.anyInvoiceLinkedToVisit(db, scheduledServiceId).first('id'),
+    // ANY inspection-credit offer tied to this visit at all — as the
+    // inspection that promised one, or the booking that redeemed one — in
+    // any status, not just a REDEEMED one (previewInspectionCreditReversalForBooking
+    // below only covers that narrower case).
+    InspectionCredit.anyInspectionCreditOfferForVisit(db, scheduledServiceId).first('id'),
   ]);
   // The commit runs the void FIRST, then gates both later money steps on
   // what is left (visit-cancellation-followthrough.js step 1; the credit
@@ -367,13 +431,37 @@ async function computeCancelAppointmentImpact(scheduledServiceId, { now = new Da
     payment_intent: inv.payment_intent === true,
   }));
 
+  // Tech-facing cancel notice (tech-visit-notifications.js#notifyVisitCancelled,
+  // wired unconditionally into transitionJobStatus for every cancel caller):
+  // GATE_TECH_VISIT_NOTIFICATIONS on, a technician assigned, and that
+  // technician different from the confirming actor. Computed here so it is
+  // PINNED like customer_notice — disclosed on the card rather than a real
+  // effect the card stays silent about (Codex round-5 P2). `actorId` is the
+  // proposing/confirming operator's own id; omitted (proposal called with no
+  // actor context) reads as "different from the visit's tech" — the
+  // conservative direction, matching customer_notice's own "may" wording
+  // rather than promising silence this cannot verify.
+  const technicianNotice = gateEnvValue('GATE_TECH_VISIT_NOTIFICATIONS')
+    && row.technician_id
+    && String(row.technician_id) !== String(actorId || '')
+    ? 'may_notify' : 'none';
+
   return {
     appointment,
     fee,
     invoices,
     inspection_credit_reversal: creditReversal,
-    card_cancel_refusals: cardCancelRefusals({ row, fee, invoices, inspectionCreditReversal: creditReversal }),
+    card_cancel_refusals: cardCancelRefusals({
+      row, fee, invoices, inspectionCreditReversal: creditReversal,
+      anyInvoiceLinked: Boolean(anyInvoiceRow),
+      anyInspectionCreditOffer: Boolean(anyCreditRow),
+    }),
     customer_notice: customerNotice,
+    technician_notice: technicianNotice,
+    // Codex round-5 P2 — see legacyAddressFingerprint's own header. Always
+    // null for a stamped row (its address is already fully covered by
+    // identity_fingerprint below).
+    legacy_address_fingerprint: addressFingerprint,
     // Full appointment identity, hashed (Codex round-2 P1) — see
     // loadAppointmentFacts above. Part of the impact object, so the
     // existing cancelImpactsMatch drift check covers it automatically: a
@@ -411,5 +499,10 @@ module.exports = {
   // its own FOR UPDATE lock sees, immediately before transitioning
   // anything, and refuses on any mismatch from the frozen proposal.
   computeRowFingerprint,
+  // The narrow legacy-address fingerprint (see its own header) — tools.js's
+  // cancelAppointment recomputes this from a FOR SHARE read of the SAME
+  // customer row, under the same lock as the identity recheck, for a row
+  // with no stamped service_address_*.
+  legacyAddressFingerprint,
   _stableStringify: stableStringify,
 };

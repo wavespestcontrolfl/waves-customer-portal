@@ -19,6 +19,11 @@ let mockApptRow = null;
 // scheduled_services inside the transition trx (db === trx in this mock —
 // see db.transaction below) — asserted by the notes-append-race tests.
 let capturedNotesUpdate = null;
+// The customer row the round-5 P2 address-fallback recheck reads FOR SHARE
+// under the SAME lock (only reached when mockApptRow has no
+// service_address_line1 AND a customer_id — the default DEFAULT_APPT_ROW
+// below has neither, so most tests never touch this).
+let mockCustomerRow = { first_name: 'Synthia', last_name: 'Tester' };
 jest.mock('../models/db', () => {
   const db = jest.fn((table) => {
     if (table === 'scheduled_services') {
@@ -38,7 +43,11 @@ jest.mock('../models/db', () => {
       return chain;
     }
     if (table === 'customers') {
-      return { where: () => ({ first: async () => ({ first_name: 'Synthia', last_name: 'Tester' }) }) };
+      // .forShare() is the round-5 P2 address recheck (tools.js
+      // cancelAppointment, inside the SAME mutation trx) — chainable no-op
+      // here, same shape as scheduled_services' .forUpdate() above.
+      const reader = { first: async () => mockCustomerRow };
+      return { where: () => ({ ...reader, forShare: () => reader }) };
     }
     throw new Error(`unexpected table in this suite: ${table}`);
   });
@@ -51,6 +60,19 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
+// The round-5 P1 under-lock existence rechecks (tools.js cancelAppointment)
+// — bare-visits-only, so both default to "nothing found" here; individual
+// tests override to prove the recheck actually refuses on what the
+// pre-check (outside any lock) could have missed.
+const mockAnyInvoiceLinked = jest.fn(() => ({ first: async () => null }));
+jest.mock('../services/invoice', () => ({
+  anyInvoiceLinkedToVisit: (...a) => mockAnyInvoiceLinked(...a),
+}));
+const mockAnyCreditOffer = jest.fn(() => ({ first: async () => null }));
+jest.mock('../services/inspection-credit', () => ({
+  anyInspectionCreditOfferForVisit: (...a) => mockAnyCreditOffer(...a),
+}));
+
 const mockComputeImpact = jest.fn();
 // computeRowFingerprint is NOT mocked (jest.requireActual) — the round-3/4
 // P1a lock recheck (tools.js cancelAppointment) computes this same whole-row
@@ -62,6 +84,7 @@ jest.mock('../services/appointment-cancel-impact', () => {
     computeCancelAppointmentImpact: (...a) => mockComputeImpact(...a),
     cancelImpactsMatch: actual.cancelImpactsMatch,
     computeRowFingerprint: actual.computeRowFingerprint,
+    legacyAddressFingerprint: actual.legacyAddressFingerprint,
   };
 });
 
@@ -130,7 +153,13 @@ beforeEach(() => {
   jest.clearAllMocks();
   capturedNotesUpdate = null;
   mockApptRow = { ...DEFAULT_APPT_ROW };
+  mockCustomerRow = { first_name: 'Synthia', last_name: 'Tester' };
   mockCancelMayReseedPlan.mockReturnValue(false);
+  // Bare by default (owner ruling 2026-09-28) — clearAllMocks() only clears
+  // call history, not a factory-provided implementation, but reset
+  // explicitly anyway so a test that overrides one never leaks into the next.
+  mockAnyInvoiceLinked.mockReturnValue({ first: async () => null });
+  mockAnyCreditOffer.mockReturnValue({ first: async () => null });
   // transitionJobStatus is only reached once the drift check clears — throw
   // a distinctive sentinel so a passing-through test can assert we GOT
   // there without modeling the rest of the (pre-existing, unrelated) commit
@@ -154,7 +183,10 @@ test('frozen impact matches the freshly recomputed one: proceeds to commit, noth
     _frozen_cancellation_impact: FROZEN,
   }, {});
 
-  expect(mockComputeImpact).toHaveBeenCalledWith('svc-synthetic-1');
+  // actorId threads the confirming operator (actionContext.technicianId) so
+  // technician_notice reads consistently between proposal and confirm; {}
+  // as actionContext here means null.
+  expect(mockComputeImpact).toHaveBeenCalledWith('svc-synthetic-1', { actorId: null });
   expect(mockTransitionJobStatus).toHaveBeenCalledTimes(1);
   // The sentinel error from transitionJobStatus is a plain throw the tool
   // doesn't specially handle (unlike the "not in state" message) — surfaces
@@ -340,6 +372,136 @@ describe('round-4 P1/P2: reseed eligibility and grouped-visit membership are rec
   });
 });
 
+// Owner ruling 2026-09-28 ("bare visits only"), Codex round-5 P1: neither an
+// invoice nor an inspection-credit offer lives on scheduled_services, so
+// the whole-row fingerprint match can never catch one created in the gap
+// between the pre-check (outside any lock) and this lock — only an
+// explicit re-query, under the SAME lock, can. followup_source_service_id
+// IS a plain column (the fingerprint already implies it), rechecked
+// explicitly anyway for the same defense-in-depth discipline as the
+// reseed/grouped checks above.
+describe('round-5 P1: invoice/credit-offer existence and follow-up-child membership are rechecked explicitly under the row lock', () => {
+  test('an invoice appearing under the lock is REFUSED before commit, even with a matching fingerprint and no frozen refusal', async () => {
+    mockComputeImpact.mockResolvedValue(FROZEN); // pre-check sees no drift, no refusal
+    mockAnyInvoiceLinked.mockReturnValue({ first: async () => ({ id: 'inv-race-1' }) });
+    const result = await executeTool('cancel_appointment', {
+      appointment_id: 'svc-synthetic-1',
+      _frozen_cancellation_impact: FROZEN,
+    }, {});
+
+    expect(result.error).toMatch(/can only be cancelled from the Dispatch screen/);
+    expect(mockTransitionJobStatus).not.toHaveBeenCalled();
+    expect(mockFollowThrough).not.toHaveBeenCalled();
+  });
+
+  test('an inspection-credit offer appearing under the lock is REFUSED before commit, even with a matching fingerprint and no frozen refusal', async () => {
+    mockComputeImpact.mockResolvedValue(FROZEN);
+    mockAnyCreditOffer.mockReturnValue({ first: async () => ({ id: 'offer-race-1' }) });
+    const result = await executeTool('cancel_appointment', {
+      appointment_id: 'svc-synthetic-1',
+      _frozen_cancellation_impact: FROZEN,
+    }, {});
+
+    expect(result.error).toMatch(/can only be cancelled from the Dispatch screen/);
+    expect(mockTransitionJobStatus).not.toHaveBeenCalled();
+    expect(mockFollowThrough).not.toHaveBeenCalled();
+  });
+
+  test('a follow-up-child locked row is REFUSED before commit, even with a matching fingerprint and no frozen refusal', async () => {
+    const row = { ...DEFAULT_APPT_ROW, followup_source_service_id: 'svc-source-1' };
+    const frozen = { ...FROZEN, identity_fingerprint: computeRowFingerprint(row) };
+    mockApptRow = row;
+    mockComputeImpact.mockResolvedValue(frozen);
+    const result = await executeTool('cancel_appointment', {
+      appointment_id: 'svc-synthetic-1',
+      _frozen_cancellation_impact: frozen,
+    }, {});
+
+    expect(result.error).toMatch(/can only be cancelled from the Dispatch screen/);
+    expect(mockTransitionJobStatus).not.toHaveBeenCalled();
+    expect(mockFollowThrough).not.toHaveBeenCalled();
+  });
+
+  test('a bare row (no invoice, no credit offer, no follow-up link) proceeds to commit, as before', async () => {
+    mockComputeImpact.mockResolvedValue(FROZEN);
+    mockTransitionJobStatus.mockResolvedValue(undefined);
+    const result = await executeTool('cancel_appointment', {
+      appointment_id: 'svc-synthetic-1',
+      _frozen_cancellation_impact: FROZEN,
+    }, {});
+    expect(result.success).toBe(true);
+    expect(mockTransitionJobStatus).toHaveBeenCalledTimes(1);
+  });
+
+  test('no frozen pin: the under-lock invoice/credit/follow-up recheck is a no-op (today\'s only real caller)', async () => {
+    mockAnyInvoiceLinked.mockReturnValue({ first: async () => ({ id: 'inv-race-1' }) });
+    mockTransitionJobStatus.mockRejectedValue(new Error('__reached_transition__'));
+    const result = await executeTool('cancel_appointment', { appointment_id: 'svc-synthetic-1' }, {});
+    expect(mockAnyInvoiceLinked).not.toHaveBeenCalled();
+    expect(result.error).toBe('__reached_transition__');
+  });
+});
+
+// Owner ruling 2026-09-28, Codex round-5 P2: a legacy row with no stamped
+// service_address_* shows the CUSTOMER's primary address on the card — a
+// `customers` column the whole-row fingerprint (deliberately
+// scheduled_services-only) can never cover. Re-verified under the SAME lock
+// via a SEPARATE narrow fingerprint (legacy_address_fingerprint).
+describe('round-5 P2: the legacy unstamped-address fallback is rechecked under the row lock, via a customers FOR SHARE read', () => {
+  const { legacyAddressFingerprint } = jest.requireActual('../services/appointment-cancel-impact');
+  const LEGACY_ROW = { ...DEFAULT_APPT_ROW, customer_id: 'cust-1', service_address_line1: null };
+  const FROZEN_LEGACY = {
+    ...FROZEN,
+    identity_fingerprint: computeRowFingerprint(LEGACY_ROW),
+    legacy_address_fingerprint: legacyAddressFingerprint({
+      line1: '999 Other Rd', line2: null, city: 'Sarasota', state: 'FL', zip: '34231',
+    }),
+  };
+
+  test('an unchanged customer address passes the recheck and reaches the transition', async () => {
+    mockApptRow = LEGACY_ROW;
+    mockCustomerRow = { address_line1: '999 Other Rd', address_line2: null, city: 'Sarasota', state: 'FL', zip: '34231' };
+    mockComputeImpact.mockResolvedValue(FROZEN_LEGACY);
+    mockTransitionJobStatus.mockResolvedValue(undefined);
+    const result = await executeTool('cancel_appointment', {
+      appointment_id: 'svc-synthetic-1',
+      _frozen_cancellation_impact: FROZEN_LEGACY,
+    }, {});
+    expect(result.success).toBe(true);
+    expect(mockTransitionJobStatus).toHaveBeenCalledTimes(1);
+  });
+
+  test('a customer address that moved since the frozen proposal is REFUSED before commit, even with a matching row fingerprint', async () => {
+    mockApptRow = LEGACY_ROW;
+    // The customer moved between the pre-check and this lock — same row
+    // identity, different address.
+    mockCustomerRow = { address_line1: '1 New Address Way', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34209' };
+    mockComputeImpact.mockResolvedValue(FROZEN_LEGACY);
+    const result = await executeTool('cancel_appointment', {
+      appointment_id: 'svc-synthetic-1',
+      _frozen_cancellation_impact: FROZEN_LEGACY,
+    }, {});
+    expect(result.error).toMatch(/changed since this was proposed/);
+    expect(mockTransitionJobStatus).not.toHaveBeenCalled();
+  });
+
+  test('a stamped row (service_address_line1 set) never triggers the customer re-read at all', async () => {
+    const stampedRow = { ...DEFAULT_APPT_ROW, customer_id: 'cust-1', service_address_line1: '123 Main St' };
+    const frozenStamped = { ...FROZEN, identity_fingerprint: computeRowFingerprint(stampedRow), legacy_address_fingerprint: null };
+    mockApptRow = stampedRow;
+    // A customer address change must NOT matter for a stamped row — if the
+    // recheck wrongly ran anyway, this mismatched mock would refuse it.
+    mockCustomerRow = { address_line1: 'irrelevant', city: 'irrelevant', state: 'FL', zip: '00000' };
+    mockComputeImpact.mockResolvedValue(frozenStamped);
+    mockTransitionJobStatus.mockResolvedValue(undefined);
+    const result = await executeTool('cancel_appointment', {
+      appointment_id: 'svc-synthetic-1',
+      _frozen_cancellation_impact: frozenStamped,
+    }, {});
+    expect(result.success).toBe(true);
+  });
+});
+
 test('an inspection-credit reversal appearing where the frozen preview had none is drift: REFUSED', async () => {
   const drifted = { ...FROZEN, inspection_credit_reversal: [{ id: 'offer-1', amount: 75, would_reverse: true, deferred: false }] };
   mockComputeImpact.mockResolvedValue(drifted);
@@ -366,9 +528,7 @@ test('an impact that cannot be read is REFUSED, never treated as "no effect"', a
   expect(mockFollowThrough).not.toHaveBeenCalled();
 });
 
-const PINNED = { 'svc-synthetic-1': { invoices: FROZEN.invoices, fee: FROZEN.fee, creditReversalOfferIds: [] } };
-
-test('a matched confirm carries the pin into the follow-through (only the listed invoices, the shown fee)', async () => {
+test('a matched confirm reaches the follow-through UNPINNED — bare visits have nothing to void or reverse', async () => {
   mockComputeImpact.mockResolvedValue(FROZEN);
   mockTransitionJobStatus.mockResolvedValue(undefined);
   const result = await executeTool('cancel_appointment', {
@@ -378,37 +538,35 @@ test('a matched confirm carries the pin into the follow-through (only the listed
 
   expect(result.success).toBe(true);
   expect(mockFollowThrough).toHaveBeenCalledWith(expect.objectContaining({
-    targetIds: ['svc-synthetic-1'], pinnedEffects: PINNED,
+    targetIds: ['svc-synthetic-1'],
   }));
+  // No pinnedEffects key at all — owner ruling 2026-09-28 ("bare visits
+  // only") removed the bar-owned pinned follow-through entirely; this call
+  // is now identical in shape to an unpinned Dispatch cancel's.
+  expect(mockFollowThrough.mock.calls[0][0]).not.toHaveProperty('pinnedEffects');
 });
 
-// Codex round-1 P1: this tool ALWAYS runs its own pinned follow-through
-// (runVisitCancellationFollowThrough, mocked as mockFollowThrough above)
-// right after the transition commits — pinned or not (an unpinned run
-// still voids every voidable invoice via the SAME invoice.js entry point).
-// The shared status writer's own maybeReparkFollowupObligation hook also
-// calls that entry point, UNPINNED, post-commit — racing it against this
-// tool's pinned/scoped call could void an invoice the operator never
-// approved. skipCancellationMoneySeam: true tells the writer to skip
-// ONLY that seam (see job-status.js's own test coverage for the
-// non-money re-park hook still running).
-test('the commit always tells the status writer to skip its own unpinned invoice-void seam (pinned or not)', async () => {
+// Owner ruling 2026-09-28 ("bare visits only"): every check (proposal-side
+// and, again, under the commit's own row lock) guarantees a card-confirmed
+// cancel is a visit with NO invoice and NO inspection-credit offer at all —
+// nothing left for a scoped, pinned money seam to protect against racing.
+// The shared status writer's own UNPINNED voidOpenInvoicesForCancelledService
+// post-commit seam now runs exactly as it would for a Dispatch cancel — no
+// skip (this replaces the round-1 P1 skipCancellationMoneySeam mechanism,
+// which existed only to protect the now-removed pinned follow-through).
+test('the commit no longer tells the status writer to skip its own invoice-void seam', async () => {
   mockComputeImpact.mockResolvedValue(FROZEN);
   mockTransitionJobStatus.mockResolvedValue(undefined);
   await executeTool('cancel_appointment', {
     appointment_id: 'svc-synthetic-1',
     _frozen_cancellation_impact: FROZEN,
   }, {});
-  expect(mockTransitionJobStatus).toHaveBeenCalledWith(expect.objectContaining({
-    skipCancellationMoneySeam: true,
-  }));
+  expect(mockTransitionJobStatus.mock.calls[0][0]).not.toHaveProperty('skipCancellationMoneySeam');
 
   mockTransitionJobStatus.mockClear();
   mockTransitionJobStatus.mockResolvedValue(undefined);
   await executeTool('cancel_appointment', { appointment_id: 'svc-synthetic-1' }, {});
-  expect(mockTransitionJobStatus).toHaveBeenCalledWith(expect.objectContaining({
-    skipCancellationMoneySeam: true,
-  }));
+  expect(mockTransitionJobStatus.mock.calls[0][0]).not.toHaveProperty('skipCancellationMoneySeam');
 });
 
 // Codex round-1 P1: the reason append must read the CURRENT `notes` column
@@ -449,7 +607,7 @@ test('no reason: no notes update at all (unchanged from before)', async () => {
   expect(capturedNotesUpdate).toBeNull();
 });
 
-test('a replay of a pinned confirm (visit already cancelled) keeps the pin', async () => {
+test('a replay of a pinned confirm (visit already cancelled) still runs the follow-through, unpinned', async () => {
   mockApptRow = { ...mockApptRow, status: 'cancelled' };
   const result = await executeTool('cancel_appointment', {
     appointment_id: 'svc-synthetic-1',
@@ -457,16 +615,17 @@ test('a replay of a pinned confirm (visit already cancelled) keeps the pin', asy
   }, {});
 
   expect(result.already_cancelled).toBe(true);
-  expect(mockFollowThrough).toHaveBeenCalledWith(expect.objectContaining({ pinnedEffects: PINNED }));
+  expect(mockFollowThrough).toHaveBeenCalledWith(expect.objectContaining({ targetIds: ['svc-synthetic-1'] }));
+  expect(mockFollowThrough.mock.calls[0][0]).not.toHaveProperty('pinnedEffects');
 });
 
 test('no frozen pin: the follow-through runs unpinned, as before', async () => {
   mockTransitionJobStatus.mockResolvedValue(undefined);
   await executeTool('cancel_appointment', { appointment_id: 'svc-synthetic-1' }, {});
-  expect(mockFollowThrough).toHaveBeenCalledWith(expect.objectContaining({ pinnedEffects: null }));
+  expect(mockFollowThrough.mock.calls[0][0]).not.toHaveProperty('pinnedEffects');
 });
 
-test('a visit the bar may not cancel (owner ruling: simple visits only) is REFUSED even when nothing drifted', async () => {
+test('a visit the bar may not cancel (owner ruling: bare visits only) is REFUSED even when nothing drifted', async () => {
   const refused = { ...FROZEN, card_cancel_refusals: ['card_fee_agreement'] };
   mockComputeImpact.mockResolvedValue(refused);
   const result = await executeTool('cancel_appointment', {

@@ -3332,10 +3332,9 @@ const gates = {
   // GATE_PREVISIT_BALANCE_5DAY at call time.
   previsitBalance5Day: process.env.GATE_PREVISIT_BALANCE_5DAY === 'true',
 
-  // Intelligence Bar cancel_appointment card-confirm (PR B of the
-  // ib-cancel-pinned-effects lane, owner ruling 2026-09-28: the bar cancels
-  // SIMPLE visits only — see card_cancel_refusals in
-  // services/appointment-cancel-impact.js). Ships DARK: off unless exactly
+  // Intelligence Bar cancel_appointment card-confirm (ib-cancel-pinned-effects
+  // lane, owner ruling 2026-09-28: the bar cancels BARE visits only — see
+  // card_cancel_refusals in services/appointment-cancel-impact.js). Ships DARK: off unless exactly
   // 'true'. This entry is for logGateStatus only — the canonical CALL-TIME
   // reader is ibCancelAppointmentLive() below, same discountStackingLive()
   // convention, so a flip needs no redeploy.

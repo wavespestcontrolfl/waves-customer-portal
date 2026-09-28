@@ -47,13 +47,17 @@ jest.mock('../services/appointment-card-request', () => ({
 // REAL merge, not a stand-in for it.
 const mockInvoicePreview = jest.fn();
 const mockUnresolvedAfterVoid = jest.fn();
+const mockAnyInvoiceLinked = jest.fn();
 jest.mock('../services/invoice', () => ({
   previewInvoiceVoidForCancelledService: (...a) => mockInvoicePreview(...a),
   previewUnresolvedInvoiceAfterCancelVoid: (...a) => mockUnresolvedAfterVoid(...a),
+  anyInvoiceLinkedToVisit: (...a) => mockAnyInvoiceLinked(...a),
 }));
 const mockCreditPreview = jest.fn();
+const mockAnyCreditOffer = jest.fn();
 jest.mock('../services/inspection-credit', () => ({
   previewInspectionCreditReversalForBooking: (...a) => mockCreditPreview(...a),
+  anyInspectionCreditOfferForVisit: (...a) => mockAnyCreditOffer(...a),
 }));
 const mockNoticeVerdict = jest.fn();
 jest.mock('../services/job-status', () => ({
@@ -79,6 +83,12 @@ beforeEach(() => {
   mockUnresolvedAfterVoid.mockResolvedValue(false);
   mockCreditPreview.mockResolvedValue(null);
   mockNoticeVerdict.mockResolvedValue('none');
+  // Bare by default: no invoice and no inspection-credit offer at all
+  // (owner ruling 2026-09-28, "bare visits only"). Both are query-builder
+  // shaped (a real `.first('id')` call), matching how
+  // computeCancelAppointmentImpact calls them.
+  mockAnyInvoiceLinked.mockReturnValue({ first: async () => null });
+  mockAnyCreditOffer.mockReturnValue({ first: async () => null });
 });
 
 // The proposal-side fingerprint must hash EXACTLY the scheduled_services
@@ -323,6 +333,41 @@ describe('appointment.address (Codex round-4 P1: show the visit\'s effective ser
   });
 });
 
+describe('legacy_address_fingerprint (Codex round-5 P2: a separate, narrow fingerprint over the customer fallback address, since identity_fingerprint is deliberately scheduled_services-only)', () => {
+  const noCard = () => {
+    mockCardHoldPreview.mockResolvedValue({ held: false, feeApplies: false, rule: { code: 'no_card' } });
+    mockApptCardPreview.mockResolvedValue({ secured: false, feeApplies: false, rule: { code: 'no_card' } });
+  };
+
+  test('null for a stamped row — its address is already fully covered by identity_fingerprint', async () => {
+    noCard();
+    mockAppointmentRow = { ...mockAppointmentRow, service_address_line1: '123 Main St', service_address_city: 'Bradenton', service_address_state: 'FL', service_address_zip: '34209' };
+    const impact = await computeCancelAppointmentImpact('svc-synthetic-1');
+    expect(impact.legacy_address_fingerprint).toBeNull();
+  });
+
+  test('set for a legacy unstamped row, and matches legacyAddressFingerprint over the SAME raw customer columns', async () => {
+    noCard();
+    mockAppointmentRow = { ...mockAppointmentRow, service_address_line1: null };
+    mockCustomerRow = { ...mockCustomerRow, address_line1: '999 Other Rd', address_line2: null, city: 'Sarasota', state: 'FL', zip: '34231' };
+    const { legacyAddressFingerprint } = require('../services/appointment-cancel-impact');
+    const impact = await computeCancelAppointmentImpact('svc-synthetic-1');
+    expect(impact.legacy_address_fingerprint).toBe(legacyAddressFingerprint({
+      line1: '999 Other Rd', line2: null, city: 'Sarasota', state: 'FL', zip: '34231',
+    }));
+  });
+
+  test('changes when the customer\'s primary address changes, for a legacy row', async () => {
+    noCard();
+    mockAppointmentRow = { ...mockAppointmentRow, service_address_line1: null };
+    mockCustomerRow = { ...mockCustomerRow, address_line1: '999 Other Rd', city: 'Sarasota', state: 'FL', zip: '34231' };
+    const before = await computeCancelAppointmentImpact('svc-synthetic-1');
+    mockCustomerRow = { ...mockCustomerRow, address_line1: '1 New Address Way' };
+    const after = await computeCancelAppointmentImpact('svc-synthetic-1');
+    expect(after.legacy_address_fingerprint).not.toBe(before.legacy_address_fingerprint);
+  });
+});
+
 describe('identity_fingerprint (Codex round-2 through round-4 P1s: pin the WHOLE scheduled_services row, not a hand-picked subset)', () => {
   const noCard = () => {
     mockCardHoldPreview.mockResolvedValue({ held: false, feeApplies: false, rule: { code: 'no_card' } });
@@ -454,15 +499,14 @@ describe('customer_notice (Codex round-1 P1: disclose, never silently suppress, 
   });
 });
 
-describe('card_cancel_refusals (owner ruling 2026-09-28: the bar cancels simple visits only)', () => {
+describe('card_cancel_refusals (owner ruling 2026-09-28: the bar cancels bare visits only)', () => {
   const noCard = () => {
     mockCardHoldPreview.mockResolvedValue({ held: false, feeApplies: false, rule: { code: 'no_card' } });
     mockApptCardPreview.mockResolvedValue({ secured: false, feeApplies: false, rule: { code: 'no_card' } });
   };
 
-  test('a plain visit (no card rail, plain invoice, no plan make-up) has no refusals', async () => {
+  test('a truly bare visit (no card rail, no invoice or credit at all, no plan make-up) has no refusals', async () => {
     noCard();
-    mockInvoicePreview.mockResolvedValue([{ id: 'inv-1', invoice_number: 'WPC-2026-9001', status: 'draft', total: 89, credit_applied: 0, deposit_credit: 0, payment_intent: false }]);
     const impact = await computeCancelAppointmentImpact('svc-synthetic-1');
     expect(impact.card_cancel_refusals).toEqual([]);
   });
@@ -572,6 +616,109 @@ describe('card_cancel_refusals (owner ruling 2026-09-28: the bar cancels simple 
     const impact = await computeCancelAppointmentImpact('svc-synthetic-1');
     expect(impact.card_cancel_refusals).toEqual(['card_fee_agreement', 'grouped_visit']);
   });
+
+  // Owner ruling 2026-09-28, "bare visits only": NOT a follow-up child.
+  test('a follow-up child (followup_source_service_id set) is refused even with an otherwise plain visit', async () => {
+    noCard();
+    mockAppointmentRow = { ...mockAppointmentRow, followup_source_service_id: 'svc-source-1' };
+    const impact = await computeCancelAppointmentImpact('svc-synthetic-1');
+    expect(impact.card_cancel_refusals).toEqual(['followup_child']);
+  });
+
+  test('not a follow-up child (followup_source_service_id null) has no followup_child refusal', async () => {
+    noCard();
+    mockAppointmentRow = { ...mockAppointmentRow, followup_source_service_id: null };
+    const impact = await computeCancelAppointmentImpact('svc-synthetic-1');
+    expect(impact.card_cancel_refusals).toEqual([]);
+  });
+
+  // Owner ruling 2026-09-28, "bare visits only": NO invoice of any kind,
+  // any status — broader than the voidable-status subset
+  // previewInvoiceVoidForCancelledService (mockInvoicePreview) returns. A
+  // paid/void/refunded invoice would never show up there at all, but
+  // anyInvoiceLinkedToVisit still finds it.
+  test('an invoice of ANY status on record refuses (invoice_linked), even one the void preview never sees', async () => {
+    noCard();
+    mockInvoicePreview.mockResolvedValue([]); // nothing voidable
+    mockAnyInvoiceLinked.mockReturnValue({ first: async () => ({ id: 'inv-paid-1' }) });
+    const impact = await computeCancelAppointmentImpact('svc-synthetic-1');
+    expect(impact.card_cancel_refusals).toEqual(['invoice_linked']);
+  });
+
+  test('invoice_linked sorts alongside the other refusal codes', async () => {
+    mockCardHoldPreview.mockResolvedValue({ held: true, feeApplies: false, feeAmount: 49, rule: { code: 'outside_window' } });
+    mockAnyInvoiceLinked.mockReturnValue({ first: async () => ({ id: 'inv-paid-1' }) });
+    const impact = await computeCancelAppointmentImpact('svc-synthetic-1');
+    expect(impact.card_cancel_refusals).toEqual(['card_fee_agreement', 'invoice_linked']);
+  });
+
+  // Owner ruling 2026-09-28, "bare visits only": broadened inspection_credit
+  // — an OPEN offer this visit itself sourced (never redeemed, so the
+  // narrower previewInspectionCreditReversalForBooking/mockCreditPreview
+  // above sees nothing) still refuses.
+  test('an open (never-redeemed) inspection-credit offer sourced from this visit refuses (inspection_credit)', async () => {
+    noCard();
+    mockCreditPreview.mockResolvedValue(null); // nothing REDEEMED at this visit
+    mockAnyCreditOffer.mockReturnValue({ first: async () => ({ id: 'offer-open-1' }) });
+    const impact = await computeCancelAppointmentImpact('svc-synthetic-1');
+    expect(impact.card_cancel_refusals).toEqual(['inspection_credit']);
+  });
+
+  test('the broadened inspection_credit check never double-pushes when a redeemed offer ALSO exists', async () => {
+    noCard();
+    mockCreditPreview.mockResolvedValue([{ id: 'offer-1', amount: 75, would_reverse: true, deferred: false }]);
+    mockAnyCreditOffer.mockReturnValue({ first: async () => ({ id: 'offer-1' }) });
+    const impact = await computeCancelAppointmentImpact('svc-synthetic-1');
+    expect(impact.card_cancel_refusals).toEqual(['inspection_credit']);
+  });
+});
+
+describe('technician_notice (Codex round-5 P2: disclose the assigned-tech cancel notice, pinned like customer_notice)', () => {
+  const noCard = () => {
+    mockCardHoldPreview.mockResolvedValue({ held: false, feeApplies: false, rule: { code: 'no_card' } });
+    mockApptCardPreview.mockResolvedValue({ secured: false, feeApplies: false, rule: { code: 'no_card' } });
+  };
+  const withGate = (fn) => {
+    const prior = process.env.GATE_TECH_VISIT_NOTIFICATIONS;
+    process.env.GATE_TECH_VISIT_NOTIFICATIONS = 'true';
+    return fn().finally(() => { process.env.GATE_TECH_VISIT_NOTIFICATIONS = prior; });
+  };
+
+  test('none: gate off, whatever the technician/actor', async () => {
+    noCard();
+    delete process.env.GATE_TECH_VISIT_NOTIFICATIONS;
+    mockAppointmentRow = { ...mockAppointmentRow, technician_id: 'tech-1' };
+    const impact = await computeCancelAppointmentImpact('svc-synthetic-1', { actorId: 'tech-2' });
+    expect(impact.technician_notice).toBe('none');
+  });
+
+  test('none: gate on but no technician assigned', () => withGate(async () => {
+    noCard();
+    mockAppointmentRow = { ...mockAppointmentRow, technician_id: null };
+    const impact = await computeCancelAppointmentImpact('svc-synthetic-1', { actorId: 'tech-2' });
+    expect(impact.technician_notice).toBe('none');
+  }));
+
+  test('none: gate on, but the confirming actor IS the assigned technician', () => withGate(async () => {
+    noCard();
+    mockAppointmentRow = { ...mockAppointmentRow, technician_id: 'tech-1' };
+    const impact = await computeCancelAppointmentImpact('svc-synthetic-1', { actorId: 'tech-1' });
+    expect(impact.technician_notice).toBe('none');
+  }));
+
+  test('may_notify: gate on, technician assigned, different from the confirming actor', () => withGate(async () => {
+    noCard();
+    mockAppointmentRow = { ...mockAppointmentRow, technician_id: 'tech-1' };
+    const impact = await computeCancelAppointmentImpact('svc-synthetic-1', { actorId: 'tech-2' });
+    expect(impact.technician_notice).toBe('may_notify');
+  }));
+
+  test('may_notify: no actorId supplied at all — the conservative default', () => withGate(async () => {
+    noCard();
+    mockAppointmentRow = { ...mockAppointmentRow, technician_id: 'tech-1' };
+    const impact = await computeCancelAppointmentImpact('svc-synthetic-1');
+    expect(impact.technician_notice).toBe('may_notify');
+  }));
 });
 
 describe('cancelImpactsMatch (the commit-time drift check)', () => {

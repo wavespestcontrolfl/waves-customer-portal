@@ -1256,14 +1256,18 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       }
       // Gate on: compute the SAME deterministic pre-commit impact the
       // commit path (tools.js cancelAppointment) recomputes and compares
-      // against — fee, invoices, inspection-credit reversal, and the
-      // card_cancel_refusals verdict (appointment-cancel-impact.js). A
-      // throw means some part of that effect set could not be read, which
-      // must refuse rather than propose an unverified card.
+      // against — fee, invoices, inspection-credit, the technician/customer
+      // notice verdicts, and the card_cancel_refusals verdict
+      // (appointment-cancel-impact.js). A throw means some part of that
+      // effect set could not be read, which must refuse rather than
+      // propose an unverified card. actorId is the proposing operator —
+      // the SAME id the commit-time recheck passes as its own confirming
+      // actor in the common case (propose then immediately confirm), so
+      // technician_notice reads the same at both points.
       const { computeCancelAppointmentImpact } = require('../services/appointment-cancel-impact');
       let impact;
       try {
-        impact = await computeCancelAppointmentImpact(params.appointment_id);
+        impact = await computeCancelAppointmentImpact(params.appointment_id, { actorId: getAdminActorId(req) });
       } catch (err) {
         logger.warn(`[intelligence-bar] cancel proposal impact unavailable for ${params.appointment_id}: ${err.message}`);
         return { failed: true, modelResult: { error: 'The cancellation effects could not be verified right now — nothing was proposed.' } };
@@ -1282,11 +1286,12 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       if (TERMINAL_APPOINTMENT_STATUSES_FOR_PINS.includes(String(impact.appointment?.status))) {
         return { failed: true, modelResult: { error: `This appointment is already ${impact.appointment.status} and can't be cancelled.` } };
       }
-      // Owner ruling 2026-09-28: the bar cancels SIMPLE visits only — a
-      // card fee agreement, a card payment on the invoice, an estimate
-      // deposit, or a possible plan make-up visit sends the operator to
-      // Dispatch instead. Shares CARD_CANCEL_REFUSED_MESSAGE's wording with
-      // the commit-side refusal (tools.js) rather than a second copy.
+      // Owner ruling 2026-09-28: the bar cancels BARE visits only — no
+      // invoice of any kind on record, no inspection-credit offer tied to
+      // it, no card fee agreement or hold, no plan make-up visit, not a
+      // follow-up visit, not grouped — sends the operator to Dispatch
+      // instead. Shares CARD_CANCEL_REFUSED_MESSAGE's wording with the
+      // commit-side refusal (tools.js) rather than a second copy.
       if ((impact.card_cancel_refusals || []).length) {
         return { failed: true, modelResult: { error: CARD_CANCEL_REFUSED_MESSAGE } };
       }

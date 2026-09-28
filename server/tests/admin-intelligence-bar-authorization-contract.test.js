@@ -341,7 +341,9 @@ describe('W0B cancel_appointment card-confirm (GATE_IB_CANCEL_APPOINTMENT)', () 
     await withServer(async (baseUrl) => {
       const { status, body } = await postQuery(baseUrl, { prompt: 'cancel it', context: 'schedule' });
       expect(status).toBe(200);
-      expect(mockComputeCancelImpact).toHaveBeenCalledWith(APPOINTMENT_ID);
+      // actorId threads the proposing operator so technician_notice reads
+      // consistently at confirm (same admin, common case).
+      expect(mockComputeCancelImpact).toHaveBeenCalledWith(APPOINTMENT_ID, { actorId: 'admin-1' });
       expect(mockCreatePendingAction).toHaveBeenCalledTimes(1);
       const stored = mockCreatePendingAction.mock.calls[0][0];
       expect(stored.params._frozen_cancellation_impact).toEqual(SIMPLE_IMPACT);

@@ -870,6 +870,21 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     push('comms', contactLabel);
   }
 
+  // cancel_appointment's assigned-technician cancel notice
+  // (tech-visit-notifications.js#notifyVisitCancelled, wired unconditionally
+  // into every transitionJobStatus cancel) is staff comms, not a customer
+  // effect — disclosed separately from notifiesCustomer above (Codex round-5
+  // P2: a real side effect the card stayed silent about). 'none' means the
+  // gate is off, no technician is assigned, or the assigned technician IS
+  // the confirming actor (silent for their own cancel); 'may_notify'
+  // discloses it, in the same evidence-independent "may" register as the
+  // customer notice above rather than promising a certain send.
+  const cancelTechnicianNotice = toolName === 'cancel_appointment'
+    ? (preview?.cancellation?.technician_notice || 'none') : 'none';
+  if (cancelTechnicianNotice !== 'none') {
+    push('comms', 'The assigned technician MAY get a cancelled-visit notice (tech home card + push) by the existing tech-notifications system, depending on conditions at the moment it processes the cancellation');
+  }
+
   // Canonical order (kind, then label) so the contract — and therefore its
   // hash — never depends on param key order. The card groups by kind anyway.
   const KIND_RANK = { comms: 0, billing: 1, customer: 2, operational: 3 };
@@ -898,6 +913,7 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       || preview?.financial_effects?.revertible_from_queue === false
       || cancelsStripeCheckoutSession(preview),
     notifies_customer: notifiesCustomer,
+    notifies_technician: cancelTechnicianNotice !== 'none',
     summary: summary || null,
     ...(moreEffects.length ? { more_effects: moreEffects } : {}),
     ...(toolName === 'bulk_update_leads' && Array.isArray(params?.lead_ids)

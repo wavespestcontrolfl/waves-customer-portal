@@ -11423,6 +11423,31 @@ const InvoiceService = {
       .whereNotIn("status", InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES);
   },
 
+  /**
+   * ALL invoices linked to this scheduled service, in ANY status — the
+   * same direct-or-through-service-record link
+   * unresolvedInvoicesForCancelledService uses above, minus its
+   * resolved-status filter. Owner ruling 2026-09-28 ("bare visits only"):
+   * the Intelligence Bar cancel card refuses a visit with ANY invoice on
+   * record at all — paid, void, refunded, draft, whatever — since a bare
+   * visit is one with nothing on the books to begin with, not just nothing
+   * currently voidable. Accepts `conn` (db or a trx) so the commit-time
+   * recheck (tools.js cancelAppointment) can run this same query under the
+   * row lock it already holds. Returns a query builder; callers decide the
+   * columns/limit (an existence check at proposal time, the identical shape
+   * re-run under the lock at commit).
+   */
+  anyInvoiceLinkedToVisit(conn, scheduledServiceId) {
+    return conn("invoices")
+      .where((q) => {
+        q.where({ scheduled_service_id: scheduledServiceId })
+          .orWhereIn(
+            "service_record_id",
+            conn("service_records").where({ scheduled_service_id: scheduledServiceId }).select("id"),
+          );
+      });
+  },
+
   async getStats() {
     const today = etDateString();
     const [totals] = await db("invoices")
