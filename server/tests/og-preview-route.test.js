@@ -84,3 +84,19 @@ test('token-free cards are public and cacheable; an unknown name gets the defaul
   expect(resolveCardContent).not.toHaveBeenCalled();
   expect(renderLinkPreviewJpeg).toHaveBeenCalled();
 }));
+
+test('every HTML page whose <head> looks a token up is mounted behind a limiter', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
+  const mount = /app\.get\(\s*(\/\^[^\n]*\/i),\s*ogPreviewRoutes\.linkPreviewLimiter,\s*sendSpaHtml/.exec(src);
+  expect(mount).not.toBeNull();
+   
+  const re = new Function(`return ${mount[1]};`)();
+  for (const p of ['/report/project/jane-sample-0123456789ab', `/appointment/${HEX}`, `/reschedule/${HEX}`, `/prep/${'c'.repeat(32)}`]) {
+    expect(re.test(p)).toBe(true);
+  }
+  // /report and /recap resolve through the report limiter's own mounts
+  expect(src).toMatch(/app\.get\(\/\^\\\/report\\\/\[a-f0-9\]\{32\}\\\/\?\$\/i, reportsPublicRoutes\.reportLimiter, sendSpaHtml\)/);
+  expect(src).toMatch(/app\.get\(\/\^\\\/recap\\\/\[a-f0-9\]\{32\}\\\/\?\$\/i, reportsPublicRoutes\.reportLimiter, sendSpaHtml\)/);
+});

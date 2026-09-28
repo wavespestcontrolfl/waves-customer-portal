@@ -977,7 +977,8 @@ app.get('/api/health', async (req, res) => {
 // — mounted before the SPA catch-all below and outside any auth; it's the
 // endpoint iMessage/SMS/email link-preview crawlers actually fetch. See
 // server/routes/og-preview.js.
-app.use('/og', require('./routes/og-preview'));
+const ogPreviewRoutes = require('./routes/og-preview');
+app.use('/og', ogPreviewRoutes);
 
 // =========================================================================
 // SERVE FRONTEND (Production)
@@ -1094,6 +1095,14 @@ if (config.nodeEnv === 'production') {
   app.get(/^\/report\/[a-f0-9]{32}\/?$/i, reportsPublicRoutes.reportLimiter, sendSpaHtml);
   app.get(/^\/recap\/[a-f0-9]{32}\/?$/i, reportsPublicRoutes.reportLimiter, sendSpaHtml);
   app.get(/^\/visit\/[a-f0-9]{64}\/?$/, require('./middleware/no-store').noStore, reportsPublicRoutes.reportLimiter, sendSpaHtml);
+  // These pages' <head> looks the token up for its link-preview tags
+  // (services/link-preview-metadata.js RESOLVERS) — rate-limited like /og.
+  // /report and /recap are covered by the report limiter above.
+  app.get(
+    /^\/(?:report\/project|appointment|reschedule|prep)\/[^/]+\/?$/i,
+    ogPreviewRoutes.linkPreviewLimiter,
+    sendSpaHtml,
+  );
 
   app.use(express.static(clientBuild, {
     maxAge: '1y',       // Cache hashed assets (/assets/*) for 1 year

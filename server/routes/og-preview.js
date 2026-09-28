@@ -36,13 +36,14 @@ router.use((req, res, next) => {
 // Public and outside the /api limiter, and a token-bearing card costs a DB
 // lookup — same per-IP budget as the /l short links. Preview crawlers fetch
 // one image per shared link, far under this.
-router.use(require('express-rate-limit')({
+const linkPreviewLimiter = require('express-rate-limit')({
   windowMs: 60 * 1000,
   max: 120,
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: require('../middleware/rate-limit-key').unauthenticatedAuthLimitKey,
-}));
+});
+router.use(linkPreviewLimiter);
 
 const DEFAULT_CONTENT = {
   eyebrow: 'CUSTOMER PORTAL',
@@ -144,4 +145,7 @@ router.get('/:kind/:tokenFile', async (req, res) => {
 });
 
 module.exports = router;
+// The same budget guards the customer HTML pages whose <head> looks a token
+// up for its preview tags (server/index.js).
+module.exports.linkPreviewLimiter = linkPreviewLimiter;
 module.exports._internals = { cache, DEFAULT_CONTENT };
