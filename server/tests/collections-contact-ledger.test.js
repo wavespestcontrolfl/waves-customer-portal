@@ -211,7 +211,7 @@ describe('seven-day spacing re-check (GATE_COLLECTIONS_POLICY + GATE_DUNNING_SPA
 
   function lockedTrx(rows) {
     const check = {};
-    for (const method of ['where', 'whereIn', 'whereNot', 'orderBy']) check[method] = jest.fn(() => check);
+    for (const method of ['where', 'whereIn', 'orderBy']) check[method] = jest.fn(() => check);
     check.select = jest.fn(async () => rows);
     const insert = insertChain();
     const trx = jest.fn()
@@ -221,6 +221,7 @@ describe('seven-day spacing re-check (GATE_COLLECTIONS_POLICY + GATE_DUNNING_SPA
     db.transaction = jest.fn(async (work) => work(trx));
     return { trx, check, insert };
   }
+  const twoDaysAgo = () => new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString();
 
   test('gates off, a call, an exempt source or an already-sent record keeps the plain insert', async () => {
     db.transaction = jest.fn();
@@ -231,16 +232,20 @@ describe('seven-day spacing re-check (GATE_COLLECTIONS_POLICY + GATE_DUNNING_SPA
     await recordContact({ ...ARGS, channel: 'voice' });
     await recordContact({ ...ARGS, source: 'collections_voice_paylink' });
     await recordContact({ ...ARGS, source: 'annual_prepay_payment_reminder' });
-    await recordContact({ ...ARGS, enforceSpacing: false });
+    await recordContact({ ...ARGS, enforceSpacing: false, spacingEpisode: 'ep-1' });
     expect(db.transaction).not.toHaveBeenCalled();
     expect(q.insert).toHaveBeenCalledTimes(5);
+    // The episode is stored only on the guarded path.
+    expect(q.insert.mock.calls[4][0].metadata).toBeNull();
   });
 
-  test('another rail\'s message inside the window throws DUNNING_SPACING_HELD before any insert', async () => {
+  test('another message inside the window throws DUNNING_SPACING_HELD before any insert — even from the same rail', async () => {
     gatesOn();
-    const sent = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString();
+    // codex #5108 r3: two admin send-nows for different invoices share a
+    // source; the first one's row must still hold the second.
     const { trx, check, insert } = lockedTrx([
-      { id: 'led-7', channel: 'email', source: 'late_payment_checker', occurred_at: sent, metadata: null },
+      { id: 'led-7', channel: 'email', source: 'invoice_followup_replay', occurred_at: twoDaysAgo(),
+        metadata: null, idempotency_key: 'followup-replay:rk-0' },
     ]);
     const held = recordContact({ ...ARGS, idempotencyKey: 'followup-replay:rk-1' });
     await expect(held).rejects.toMatchObject({ code: 'DUNNING_SPACING_HELD' });
@@ -248,22 +253,48 @@ describe('seven-day spacing re-check (GATE_COLLECTIONS_POLICY + GATE_DUNNING_SPA
     expect(trx.raw).toHaveBeenCalledWith(expect.stringContaining('pg_advisory_xact_lock'), ['dunning-spacing', 'cust-1']);
     expect(check.where).toHaveBeenCalledWith({ customer_id: 'cust-1' });
     expect(check.whereIn).toHaveBeenCalledWith('channel', ['sms', 'email', 'push']);
-    // The rail's own rows are the policy's business (excludeLedgerIds).
-    expect(check.whereNot).toHaveBeenCalledWith('source', 'invoice_followup_replay');
     expect(insert.insert).not.toHaveBeenCalled();
     expect(db).not.toHaveBeenCalled();
   });
 
-  test('a failed message of another rail does not hold: the reservation lands inside the locked transaction', async () => {
+  test('only the message itself is set aside: its own key and its legs on other channels', async () => {
     gatesOn();
-    const sent = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString();
-    const { trx, insert } = lockedTrx([
-      { id: 'led-7', channel: 'sms', source: 'late_payment_checker', occurred_at: sent, metadata: { send_failed: true } },
-    ]);
-    await expect(recordContact(ARGS)).resolves.toMatchObject({ id: 'led-1' });
-    expect(trx.raw).toHaveBeenCalledTimes(1);
-    expect(insert.insert).toHaveBeenCalledWith(expect.objectContaining({ customer_id: 'cust-1', source: 'invoice_followup_replay' }));
-    expect(db).not.toHaveBeenCalled();
+    const rows = [
+      // The same reservation being re-attempted (same key).
+      { id: 'led-1', channel: 'sms', source: 'invoice_followups', occurred_at: twoDaysAgo(),
+        metadata: null, idempotency_key: 'invoice_followups:seq-1:step-2:sms' },
+      // Its keyed email leg, and a keyless push leg naming the episode.
+      { id: 'led-2', channel: 'email', source: 'invoice_followups', occurred_at: twoDaysAgo(),
+        metadata: null, idempotency_key: 'invoice_followups:seq-1:step-2:email' },
+      { id: 'led-3', channel: 'push', source: 'invoice_followups', occurred_at: twoDaysAgo(),
+        metadata: { spacing_episode: 'invoice_followups:seq-1:step-2' }, idempotency_key: null },
+      // Another rail's failed message never holds.
+      { id: 'led-4', channel: 'sms', source: 'late_payment_checker', occurred_at: twoDaysAgo(),
+        metadata: { send_failed: true }, idempotency_key: 'late_payment_checker:inv-1:14:sms' },
+    ];
+    const { insert } = lockedTrx(rows);
+    await expect(recordContact({ ...ARGS, source: 'invoice_followups', idempotencyKey: 'invoice_followups:seq-1:step-2:sms' }))
+      .resolves.toMatchObject({ id: 'led-1' });
+    expect(insert.insert).toHaveBeenCalledTimes(1);
+
+    // A keyless leg names its episode explicitly, and it is stored.
+    const keyless = lockedTrx(rows.slice(1));
+    await recordContact({ ...ARGS, source: 'invoice_followups', spacingEpisode: 'invoice_followups:seq-1:step-2' });
+    expect(keyless.insert.insert).toHaveBeenCalledWith(expect.objectContaining({
+      metadata: JSON.stringify({ spacing_episode: 'invoice_followups:seq-1:step-2' }),
+    }));
+
+    // The same episode on the SAME channel is another send of the leg: held.
+    lockedTrx([{ id: 'led-5', channel: 'sms', source: 'invoice_followups', occurred_at: twoDaysAgo(),
+      metadata: { spacing_episode: 'invoice_followups:seq-1:step-2' }, idempotency_key: null }]);
+    await expect(recordContact({ ...ARGS, source: 'invoice_followups', spacingEpisode: 'invoice_followups:seq-1:step-2' }))
+      .rejects.toMatchObject({ code: 'DUNNING_SPACING_HELD' });
+
+    // A different step of the same sequence is a different message: held.
+    lockedTrx([{ id: 'led-6', channel: 'email', source: 'invoice_followups', occurred_at: twoDaysAgo(),
+      metadata: null, idempotency_key: 'invoice_followups:seq-1:step-1:email' }]);
+    await expect(recordContact({ ...ARGS, source: 'invoice_followups', idempotencyKey: 'invoice_followups:seq-1:step-2:sms' }))
+      .rejects.toMatchObject({ code: 'DUNNING_SPACING_HELD' });
   });
 });
 

@@ -179,7 +179,17 @@ async function collectionsPolicyRefusal(meta, database) {
     detail: true,
     database,
   });
-  return permitted?.allowed === true ? null : refused('collections-policy-denied', permitted?.durable !== true);
+  if (permitted?.allowed !== true) return refused('collections-policy-denied', permitted?.durable !== true);
+  // Seven-day overdue-message spacing (codex #5108 r3): this retry re-sends
+  // a reserved message whose reservation may have been released as
+  // send_failed. Re-check and re-arm it in one locked step, so no other
+  // rail's message can slip in before the provider request.
+  try {
+    const rearm = await require('../collections/contact-ledger').rearmForRetry(meta.collections_ledger_id);
+    return rearm?.held ? refused('dunning-spacing-held', true) : null;
+  } catch {
+    return refused('dunning-spacing-check-failed', true);
+  }
 }
 
 async function billingEmailReplayEligible(meta, database = db) {

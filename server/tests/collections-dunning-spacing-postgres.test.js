@@ -1,10 +1,11 @@
 /**
- * Seven-day overdue-message spacing against real Postgres (codex #5108 r1):
- * the policy read and the ledger reservation are separate steps, so the
- * reservation re-checks under a per-customer advisory lock. Two rails that
- * both passed the read can no longer both reserve; a rail's own sibling legs
- * still can; re-arming a failed reservation takes the same lock; and a late
- * acceptance moves the row's time forward, never back.
+ * Seven-day overdue-message spacing against real Postgres (codex #5108
+ * r1–r3): the policy read and the ledger reservation are separate steps, so
+ * the reservation re-checks under a per-customer advisory lock. Two
+ * messages that both passed the read can no longer both reserve, whether
+ * from two rails or one; one message's legs on several channels still can;
+ * re-arming a failed reservation, and a provider retry, take the same lock;
+ * and a late acceptance moves the row's time forward, never back.
  */
 
 let mockPg;
@@ -79,12 +80,31 @@ postgres('seven-day spacing at reservation time', () => {
     expect(await mockPg('collections_contact_ledger').where({ customer_id: customerId })).toHaveLength(1);
   });
 
-  test('a rail\'s own sibling legs both land; another customer is unaffected', async () => {
+  test('one message\'s legs on several channels all land; another customer is unaffected', async () => {
     const customerId = randomUUID();
-    await reserve(customerId, 'invoice_followups', 'sms');
-    await reserve(customerId, 'invoice_followups', 'email');
+    const episode = { spacingEpisode: `invoice_followups:seq-1:step-2` };
+    await reserve(customerId, 'invoice_followups', 'sms', episode);
+    await reserve(customerId, 'invoice_followups', 'email', episode);
+    await reserve(customerId, 'invoice_followups', 'push', { idempotencyKey: 'invoice_followups:seq-1:step-2:push' });
     await reserve(randomUUID(), 'late_payment_checker', 'sms');
-    expect(await mockPg('collections_contact_ledger').where({ customer_id: customerId })).toHaveLength(2);
+    expect(await mockPg('collections_contact_ledger').where({ customer_id: customerId })).toHaveLength(3);
+  });
+
+  // codex #5108 r3: two admin send-nows for different invoices of one
+  // customer run outside the scheduler's lock and share a source.
+  test('the same rail reserving two different messages at once: exactly one lands', async () => {
+    const customerId = randomUUID();
+    const blocker = await mockPg.transaction();
+    await blocker.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['dunning-spacing', customerId]);
+    const racing = Promise.allSettled([
+      reserve(customerId, 'invoice_followups', 'sms', { idempotencyKey: 'invoice_followups:seq-a:step-1:sms' }),
+      reserve(customerId, 'invoice_followups', 'sms', { idempotencyKey: 'invoice_followups:seq-b:step-1:sms' }),
+    ]);
+    await new Promise((resolve) => { setTimeout(resolve, 250); });
+    await blocker.commit();
+    const outcomes = await racing;
+    expect(outcomes.filter((o) => o.status === 'fulfilled')).toHaveLength(1);
+    expect(outcomes.find((o) => o.status === 'rejected').reason.code).toBe('DUNNING_SPACING_HELD');
   });
 
   test('another rail\'s failed or settled message does not hold; delivery evidence does', async () => {
@@ -131,6 +151,53 @@ postgres('seven-day spacing at reservation time', () => {
     await Ledger.markSendFailed(entry, { code: 'provider_refused' });
     const retry = await reserve(customerId, 'late_payment_checker', 'sms', { idempotencyKey: `lpc:${customerId}:sms` });
     await expect(Ledger.claimAttempt(retry)).resolves.toEqual({ allowed: true });
+  });
+
+  describe('a provider retry re-arms its reservation (codex #5108 r3)', () => {
+    const failedReservation = async (customerId) => {
+      const entry = await reserve(customerId, 'late_payment_checker', 'email', {
+        idempotencyKey: `late_payment_checker:inv-1:14:email`,
+      });
+      await Ledger.markSendFailed(entry, { code: 'provider_refused' });
+      return entry;
+    };
+
+    test('nothing else holds: the released reservation holds again from now', async () => {
+      const customerId = randomUUID();
+      const entry = await failedReservation(customerId);
+      const before = Date.now();
+      await expect(Ledger.rearmForRetry(entry.id)).resolves.toEqual({ ok: true });
+      const stored = await mockPg('collections_contact_ledger').where({ id: entry.id }).first('occurred_at', 'metadata');
+      expect(stored.metadata.send_failed).toBe(false);
+      expect(new Date(stored.occurred_at).getTime()).toBeGreaterThanOrEqual(before - 1000);
+      // Another rail now waits for it.
+      await expect(reserve(customerId, 'invoice_followups', 'sms')).rejects.toMatchObject({ code: 'DUNNING_SPACING_HELD' });
+    });
+
+    test('another rail sent while it was released: the retry is held and nothing changes', async () => {
+      const customerId = randomUUID();
+      const entry = await failedReservation(customerId);
+      await reserve(customerId, 'invoice_followups', 'sms');
+      await expect(Ledger.rearmForRetry(entry.id)).resolves.toMatchObject({ ok: false, held: true });
+      const stored = await mockPg('collections_contact_ledger').where({ id: entry.id }).first('metadata');
+      expect(stored.metadata.send_failed).toBe(true);
+    });
+
+    test('its own sibling leg does not hold it', async () => {
+      const customerId = randomUUID();
+      const entry = await failedReservation(customerId);
+      await reserve(customerId, 'late_payment_checker', 'sms', { idempotencyKey: 'late_payment_checker:inv-1:14:sms' });
+      await expect(Ledger.rearmForRetry(entry.id)).resolves.toEqual({ ok: true });
+    });
+
+    test('gates off: no read, no write', async () => {
+      const customerId = randomUUID();
+      const entry = await failedReservation(customerId);
+      delete process.env.GATE_DUNNING_SPACING;
+      await expect(Ledger.rearmForRetry(entry.id)).resolves.toEqual({ ok: true });
+      const stored = await mockPg('collections_contact_ledger').where({ id: entry.id }).first('metadata');
+      expect(stored.metadata.send_failed).toBe(true);
+    });
   });
 
   test('a late acceptance moves the row\'s time forward, never back', async () => {

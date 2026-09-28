@@ -811,6 +811,8 @@ class BalanceReminder {
       });
       let emailResult = null;
       let emailAttempted = false;
+      // This check's text and email are one message for the seven-day rule.
+      const lateCheckSpacingEpisode = `balance_reminder_late_payment_check:${oldestInvoice.id}:${templateKey}`;
       const attemptEmail = async () => {
         if (emailAttempted || !emailPolicyPermitted) return emailResult;
         emailAttempted = true;
@@ -823,6 +825,7 @@ class BalanceReminder {
             invoiceIds: [oldestInvoice.id],
             source: 'balance_reminder_late_payment_check',
             metadata: { template_key: templateKey, days_overdue: balance.daysOverdue },
+            spacingEpisode: lateCheckSpacingEpisode,
           });
         } catch (ledgerErr) {
           logger.warn(`[balance-reminder] late-payment email sidecar skipped for customer ${customer.id} — contact ledger unavailable: ${ledgerErr.message}`);
@@ -862,6 +865,7 @@ class BalanceReminder {
           invoiceIds: [oldestInvoice.id],
           source: "balance_reminder_late_payment_check",
           metadata: { template_key: templateKey, days_overdue: balance.daysOverdue },
+          spacingEpisode: lateCheckSpacingEpisode,
         });
       } catch (ledgerErr) {
         logger.warn(`[balance-reminder] late-payment SMS skipped for customer ${customer.id} — contact ledger unavailable: ${ledgerErr.message}`);

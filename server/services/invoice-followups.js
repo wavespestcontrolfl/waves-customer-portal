@@ -107,6 +107,12 @@ function followupLedgerKey(row, step, channel) {
   return `invoice_followups:${row.id}:${step.id}:${channel}`;
 }
 
+// One step's legs are one overdue message for the seven-day spacing rule
+// (dunning-spacing.js); keyed legs already name it in their key.
+function followupSpacingEpisode(row, step) {
+  return `invoice_followups:${row.id}:${step.id}`;
+}
+
 async function currentStepLedgerIds(row, step, channels) {
   if (process.env.GATE_COLLECTIONS_POLICY !== 'true') return [];
   if (!channels.length) return [];
@@ -1029,6 +1035,7 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
         source: 'invoice_followups',
         metadata: { step_id: step.id },
         ...(selectedChannels !== null ? { idempotencyKey: followupLedgerKey(row, step, 'email') } : {}),
+        spacingEpisode: followupSpacingEpisode(row, step),
       });
     } catch (ledgerErr) {
       emailResult = { ok: false, skipped: true, reason: 'ledger_unavailable' };
@@ -1183,6 +1190,7 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
           invoiceIds: [row.invoice_id],
           source: 'invoice_followups',
           metadata: { step_id: step.id },
+          spacingEpisode: followupSpacingEpisode(row, step),
         });
       } catch (ledgerErr) {
         smsSkipReason = 'ledger_unavailable';

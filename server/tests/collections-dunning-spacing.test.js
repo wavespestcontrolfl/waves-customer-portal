@@ -72,6 +72,24 @@ describe('holdsNextMessage', () => {
   });
 });
 
+describe('spacing episodes (one message, several channels)', () => {
+  test('an explicit episode wins; a reservation key names its message without the channel', () => {
+    expect(DunningSpacing.spacingEpisodeOf({ spacingEpisode: 'ep-1', idempotencyKey: 'x:sms' })).toBe('ep-1');
+    expect(DunningSpacing.spacingEpisodeOf({ idempotencyKey: 'invoice_followups:seq-1:step-2:email' }))
+      .toBe('invoice_followups:seq-1:step-2');
+    expect(DunningSpacing.spacingEpisodeOf({ idempotencyKey: 'billing-reminder:abc:push' })).toBe('billing-reminder:abc');
+    expect(DunningSpacing.spacingEpisodeOf({ idempotencyKey: 'followup-replay:rk-1' })).toBe('followup-replay:rk-1');
+    expect(DunningSpacing.spacingEpisodeOf({})).toBeNull();
+  });
+
+  test('a stored row reads its episode from metadata, else from its key', () => {
+    expect(DunningSpacing.rowEpisode({ metadata: '{"spacing_episode":"ep-2"}', idempotency_key: null })).toBe('ep-2');
+    expect(DunningSpacing.rowEpisode({ metadata: null, idempotency_key: 'late_payment_checker:inv-1:14:sms' }))
+      .toBe('late_payment_checker:inv-1:14');
+    expect(DunningSpacing.rowEpisode({ metadata: null, idempotency_key: null })).toBeNull();
+  });
+});
+
 describe('gating', () => {
   test('the policy rule applies only with GATE_DUNNING_SPACING, only to text channels, never to exempt requesters', () => {
     expect(DunningSpacing.spacingApplies({ channel: 'sms', source: 'invoice_followups' })).toBe(false);

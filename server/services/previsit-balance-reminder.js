@@ -319,6 +319,8 @@ function legacyLedgerInput(visit, amount, fresh, channel) {
     invoiceIds: fresh.map((invoice) => invoice.id),
     source: 'previsit_balance_reminder',
     metadata: { scheduled_service_id: visit.id, amount },
+    // The visit's text and email are one message for the seven-day rule.
+    spacingEpisode: `previsit_balance_reminder:${visit.id}`,
   };
 }
 

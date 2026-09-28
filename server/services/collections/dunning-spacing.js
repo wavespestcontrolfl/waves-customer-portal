@@ -18,6 +18,13 @@
  * Two sources are not overdue reminders, so they neither wait nor hold the
  * next one: the annual prepay renewal's payment reminder, and the pay link a
  * customer asks for during a collections call.
+ *
+ * A message can go out on several channels at once (a step's text and
+ * email). Its legs share a spacing episode, so they never hold each other:
+ * an explicit spacingEpisode, else the reservation key without its channel
+ * suffix. Only a message's own row and its sibling legs are set aside at
+ * reservation time; every other row counts, whichever rail wrote it
+ * (codex #5108 r3: an admin send-now runs outside the scheduler's lock).
  */
 
 const { dunningSpacingLive } = require('../../config/feature-gates');
@@ -25,6 +32,7 @@ const { dunningSpacingLive } = require('../../config/feature-gates');
 const DAY_MS = 24 * 60 * 60 * 1000;
 const SPACING_DAYS = 7;
 const TEXT_CHANNELS = ['sms', 'email', 'push'];
+const CHANNEL_SUFFIX = /:(sms|email|push)$/;
 const EXEMPT_SOURCES = new Set(['annual_prepay_payment_reminder', 'collections_voice_paylink']);
 
 function metadataOf(row) {
@@ -45,6 +53,15 @@ function holdsNextMessage(row, now) {
   return now.getTime() < spacingHeldUntil(row.occurred_at).getTime();
 }
 
+function spacingEpisodeOf({ spacingEpisode = null, idempotencyKey = null } = {}) {
+  if (spacingEpisode) return String(spacingEpisode);
+  return idempotencyKey ? String(idempotencyKey).replace(CHANNEL_SUFFIX, '') : null;
+}
+
+function rowEpisode(row) {
+  return spacingEpisodeOf({ spacingEpisode: metadataOf(row).spacing_episode, idempotencyKey: row?.idempotency_key });
+}
+
 // Whether a message from `source` on `channel` waits for the rule.
 function spacingApplies({ channel, source = null }) {
   return dunningSpacingLive() && TEXT_CHANNELS.includes(channel) && !EXEMPT_SOURCES.has(source);
@@ -60,18 +77,25 @@ function reservationGuarded({ channel, source = null }) {
 }
 
 // Inside the caller's transaction: serializes one customer's overdue-message
-// reservations until it commits, then returns another rail's message that
-// still holds at `now`, or null. A rail's own rows are left to the policy's
-// excludeLedgerIds, and runExclusive keeps a rail from racing itself.
-async function lockedHoldingMessage(trx, { customerId, source = null, now = new Date() }) {
+// reservations until it commits, then returns a message that still holds at
+// `now`, or null. Set aside: this message's own row (ownId, or its
+// reservation key) and its sibling legs on other channels (same episode).
+async function lockedHoldingMessage(trx, {
+  customerId, channel, episode = null, idempotencyKey = null, ownId = null, now = new Date(),
+}) {
   await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['dunning-spacing', String(customerId)]);
-  const query = trx('collections_contact_ledger')
+  const rows = await trx('collections_contact_ledger')
     .where({ customer_id: customerId })
     .whereIn('channel', TEXT_CHANNELS)
-    .where('occurred_at', '>', new Date(now.getTime() - SPACING_DAYS * DAY_MS));
-  if (source) query.whereNot('source', source);
-  const rows = await query.orderBy('occurred_at', 'desc').select('id', 'channel', 'source', 'occurred_at', 'metadata');
-  return (rows || []).find((row) => holdsNextMessage(row, now)) || null;
+    .where('occurred_at', '>', new Date(now.getTime() - SPACING_DAYS * DAY_MS))
+    .orderBy('occurred_at', 'desc')
+    .select('id', 'channel', 'source', 'occurred_at', 'metadata', 'idempotency_key');
+  return (rows || []).find((row) => {
+    if (ownId != null && String(row.id) === String(ownId)) return false;
+    if (idempotencyKey && row.idempotency_key === idempotencyKey) return false;
+    if (episode && row.channel !== channel && rowEpisode(row) === episode) return false;
+    return holdsNextMessage(row, now);
+  }) || null;
 }
 
 function spacingHeldError(row) {
@@ -84,5 +108,5 @@ function spacingHeldError(row) {
 module.exports = {
   SPACING_DAYS, EXEMPT_SOURCES,
   spacingHeldUntil, holdsNextMessage, spacingApplies, spacingEnforced, reservationGuarded, lockedHoldingMessage,
-  spacingHeldError,
+  spacingHeldError, spacingEpisodeOf, rowEpisode,
 };

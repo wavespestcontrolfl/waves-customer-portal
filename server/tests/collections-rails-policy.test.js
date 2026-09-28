@@ -1086,7 +1086,10 @@ describe('invoice-followups rail', () => {
       invoiceIds: ['inv-1'],
       source: 'invoice_followups',
       metadata: { step_id: 'd3_friendly' },
+      // The step's legs are one message for the seven-day spacing rule.
+      spacingEpisode: 'invoice_followups:seq-1:d3_friendly',
     });
+    expect(ContactLedger.recordContact.mock.calls[1][0].spacingEpisode).toBe('invoice_followups:seq-1:d3_friendly');
     expect(ContactLedger.recordContact.mock.calls[1][0]).toEqual(expect.objectContaining({
       channel: 'sms', purpose: 'invoice_followup',
     }));

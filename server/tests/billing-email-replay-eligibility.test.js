@@ -248,6 +248,43 @@ describe('collections-policy replay eligibility', () => {
     await expect(billingEmailReplayEligible(meta, databaseWith({ collections_contact_ledger: ledger })))
       .resolves.toEqual({ eligible: false, reason: 'collections-policy-denied', retryable: true });
   });
+
+  // codex #5108 r3: the provider retry re-arms its own reservation under the
+  // seven-day spacing lock before it may reach the provider.
+  describe('seven-day spacing re-arm', () => {
+    const ContactLedger = require('../services/collections/contact-ledger');
+    let rearm;
+    beforeEach(() => {
+      process.env.GATE_COLLECTIONS_POLICY = 'true';
+      rearm = jest.spyOn(ContactLedger, 'rearmForRetry');
+    });
+    afterEach(() => rearm.mockRestore());
+
+    test('an allowed retry re-arms its own reservation and proceeds', async () => {
+      rearm.mockResolvedValueOnce({ ok: true });
+      await expect(billingEmailReplayEligible(meta, databaseWith({ collections_contact_ledger: ledger })))
+        .resolves.toEqual({ eligible: true });
+      expect(rearm).toHaveBeenCalledWith('own-email');
+    });
+
+    test('another message inside the window holds the retry, retryable', async () => {
+      rearm.mockResolvedValueOnce({ ok: false, held: true });
+      await expect(billingEmailReplayEligible(meta, databaseWith({ collections_contact_ledger: ledger })))
+        .resolves.toEqual({ eligible: false, reason: 'dunning-spacing-held', retryable: true });
+    });
+
+    test('a failed re-check holds the retry rather than sending', async () => {
+      rearm.mockRejectedValueOnce(new Error('database unavailable'));
+      await expect(billingEmailReplayEligible(meta, databaseWith({ collections_contact_ledger: ledger })))
+        .resolves.toEqual({ eligible: false, reason: 'dunning-spacing-check-failed', retryable: true });
+    });
+
+    test('a policy denial never re-arms', async () => {
+      collectionsChannelPermitted.mockResolvedValueOnce({ allowed: false, durable: false });
+      await billingEmailReplayEligible(meta, databaseWith({ collections_contact_ledger: ledger }));
+      expect(rearm).not.toHaveBeenCalled();
+    });
+  });
 });
 
 test('an unreadable eligibility dependency fails closed for retry', async () => {

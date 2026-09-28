@@ -24,10 +24,12 @@
  * gate): the policy read and this reservation are separate steps, so two
  * rails on different schedules could both pass the read before either
  * reserved (codex #5108 r1). Under a per-customer lock, a reservation
- * re-checks for another rail's message and lands in the same transaction; a
- * hold throws DUNNING_SPACING_HELD, which every caller already treats as
- * "skip this send for now". enforceSpacing:false is only for recording a
- * message that has already gone out.
+ * re-checks for any other message and lands in the same transaction; a hold
+ * throws DUNNING_SPACING_HELD, which every caller already treats as "skip
+ * this send for now". A message's legs on several channels pass a shared
+ * spacingEpisode unless their keys already name it (dunning-spacing.js).
+ * enforceSpacing:false is only for recording a message that already went
+ * out. A provider retry re-arms its reservation through rearmForRetry.
  */
 
 const db = require('../../models/db');
@@ -43,14 +45,20 @@ async function recordContact({
   metadata = null,
   occurredAt = new Date(),
   idempotencyKey = null,
+  spacingEpisode = null,
   enforceSpacing = true,
 }) {
   const entry = { customerId, channel, purpose, invoiceIds, source, metadata, occurredAt, idempotencyKey };
   if (enforceSpacing && DunningSpacing.reservationGuarded({ channel, source })) {
+    const episode = DunningSpacing.spacingEpisodeOf({ spacingEpisode, idempotencyKey });
     return db.transaction(async (trx) => {
-      const holding = await DunningSpacing.lockedHoldingMessage(trx, { customerId, source, now: new Date(occurredAt) });
+      const holding = await DunningSpacing.lockedHoldingMessage(trx, {
+        customerId, channel, episode, idempotencyKey, now: new Date(occurredAt),
+      });
       if (holding) throw DunningSpacing.spacingHeldError(holding);
-      return reserve(trx, entry);
+      return reserve(trx, spacingEpisode
+        ? { ...entry, metadata: { ...(metadata || {}), spacing_episode: String(spacingEpisode) } }
+        : entry);
     });
   }
   return reserve(db, entry);
@@ -186,15 +194,54 @@ async function claimAttempt(entry, refresh = null) {
   // a new one: another rail could reserve between the refresh and this claim.
   const changed = DunningSpacing.spacingEnforced()
     ? await db.transaction(async (trx) => {
-      const row = await trx('collections_contact_ledger').where({ id: entry.id })
-        .first('customer_id', 'channel', 'source');
-      if (row && DunningSpacing.reservationGuarded(row) && await DunningSpacing.lockedHoldingMessage(trx, {
-        customerId: row.customer_id, source: row.source,
-      })) return 0;
+      const row = await lockedReservationRow(trx, entry.id);
+      if (row?.holding) return 0;
       return rearm(trx);
     })
     : await rearm(db);
   return changed === 1 ? { allowed: true } : { allowed: false, held: true };
+}
+
+// The reservation row, with `holding` set when another message holds it
+// back. Takes the customer's spacing lock only for a guarded row.
+async function lockedReservationRow(trx, id, now = new Date()) {
+  const row = await trx('collections_contact_ledger').where({ id })
+    .first('id', 'customer_id', 'channel', 'source', 'idempotency_key', 'metadata');
+  if (!row || !DunningSpacing.reservationGuarded(row)) return row;
+  const holding = await DunningSpacing.lockedHoldingMessage(trx, {
+    customerId: row.customer_id, channel: row.channel, episode: DunningSpacing.rowEpisode(row),
+    idempotencyKey: row.idempotency_key, ownId: row.id, now,
+  });
+  return { ...row, holding };
+}
+
+/**
+ * A provider retry re-sends a reserved message, possibly after its
+ * reservation was released as send_failed (codex #5108 r3). Under the
+ * spacing gate, re-check and re-arm it in one locked step before the retry
+ * reaches the provider: { held: true } when another message holds it back;
+ * otherwise the row holds again from now. Gates off: no read, no write.
+ * Throws on a database failure; the caller holds the retry.
+ */
+async function rearmForRetry(ledgerId) {
+  if (!ledgerId || !DunningSpacing.spacingEnforced()) return { ok: true };
+  return db.transaction(async (trx) => {
+    const now = new Date();
+    const row = await lockedReservationRow(trx, ledgerId, now);
+    if (!row || !DunningSpacing.reservationGuarded(row)) return { ok: true };
+    if (row.holding) {
+      return { ok: false, held: true, nextEligibleAt: DunningSpacing.spacingHeldUntil(row.holding.occurred_at) };
+    }
+    await trx('collections_contact_ledger').where({ id: row.id })
+      .whereRaw("NOT (COALESCE(metadata, '{}'::jsonb) @> ?::jsonb) AND NOT (COALESCE(metadata, '{}'::jsonb) @> ?::jsonb)", [
+        JSON.stringify({ delivered: true }), JSON.stringify({ resolved: true }),
+      ])
+      .update({
+        metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ send_failed: false })]),
+        occurred_at: trx.raw('GREATEST(occurred_at, ?::timestamptz)', [now]),
+      });
+    return { ok: true };
+  });
 }
 
 /**
@@ -229,4 +276,4 @@ async function markSendFailed(entry, extra = {}, { database = db, match = {} } =
   }
 }
 
-module.exports = { recordContact, markSendFailed, markDelivered, claimAttempt };
+module.exports = { recordContact, markSendFailed, markDelivered, claimAttempt, rearmForRetry };
