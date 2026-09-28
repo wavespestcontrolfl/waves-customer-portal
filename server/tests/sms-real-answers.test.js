@@ -2026,6 +2026,12 @@ describe('#5194 round 3', () => {
     expect(resolveServiceType).toHaveBeenCalledWith('lawn_care_one_time');
     await expect(drafter.requestedServiceType('Can you do an event spray for a party?')).resolves.toBe('One-Time Mosquito Treatment');
     await expect(drafter.requestedServiceType('Can you add lawn service?')).resolves.toBeNull(); // only archived rows → nothing
+    // an active but no-longer-offered row (booking_enabled=false, the bi-monthly lawn service) is skipped too
+    CATALOG.lawn_care_recurring = { name: 'Bi-Monthly Lawn Care Service', is_archived: false, is_active: true, booking_enabled: false };
+    CATALOG.lawn_care_monthly = { name: 'Monthly Lawn Care Service', is_archived: false, is_active: true, booking_enabled: true };
+    await expect(drafter.requestedServiceType('Can you add lawn service?')).resolves.toBe('Monthly Lawn Care Service');
+    delete CATALOG.lawn_care_monthly;
+    await expect(drafter.requestedServiceType('Can you add lawn service?')).resolves.toBeNull();
   });
 
   test('the pest family matches identity terms only: a "Quarterly Tree & Shrub Care Service" visit does not make pest control already scheduled', async () => {

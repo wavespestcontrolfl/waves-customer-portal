@@ -467,7 +467,7 @@ function validateReserviceOffer({ reply, factsBlock }) {
 // (requestedServiceType skips is_archived / is_active=false rows).
 const PRICING_KEY_TO_CATALOG_KEYS = Object.freeze({
   pest_control: ['pest_general_quarterly', 'pest_control'],
-  lawn_care: ['lawn_care_recurring', 'lawn_care', 'lawn_fertilization'],
+  lawn_care: ['lawn_care_monthly', 'lawn_care_quarterly', 'lawn_care', 'lawn_care_recurring', 'lawn_fertilization'],
   one_time_lawn: ['lawn_care_one_time', 'lawn_fertilization'],
   mosquito: ['mosquito_monthly', 'mosquito_seasonal', 'mosquito'],
   one_time_mosquito: ['mosquito_one_time', 'mosquito_event'],
@@ -524,6 +524,7 @@ async function resolveRequestedService(inboundMessage) {
       const row = await resolveServiceType(catalogKey);
       if (!row?.name) continue;
       if (row.is_archived === true || row.is_active === false) continue; // retired rows never price a booking
+      if (row.booking_enabled === false) continue; // offered no longer (e.g. bi-monthly lawn) — historical visits keep their own identity elsewhere
       return { name: String(row.name), explicit: Boolean(explicit || rodentWork) };
     }
     return null;
