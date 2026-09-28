@@ -256,9 +256,10 @@ function isPlain(holding, quote, fieldPath) {
   return holding.length > 0 && holding.every((turn) => plainlySaid(turn, quote, ASKING_FAILS.has(fieldPath)));
 }
 
-// Is a number a clock hour or a named one?
+// Is a number a clock hour or a named one? A clock's ":00" minutes ("2:00
+// PM" normalizes to "2 00 pm") are not another hour.
 function isHourToken(t) {
-  return /^\d+$/.test(t) || Object.hasOwn(HOUR_WORDS, t) || t === 'noon' || t === 'midnight';
+  return (/^\d+$/.test(t) && !/^0+$/.test(t)) || Object.hasOwn(HOUR_WORDS, t) || t === 'noon' || t === 'midnight';
 }
 
 // Every token span where `words` sits in `toks`.

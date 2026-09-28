@@ -162,6 +162,7 @@ describe('groundRescheduleAgreement', () => {
     expect(agreedAt('2026-09-24T10:00:00-04:00', 'We will be there Thursday between 10 and 2 PM.', { day: 'Thursday', hour: '10', period: 'PM' }))
       .toMatchObject({ ok: false, reason: 'agreed_slot_words_mismatch' });
     expect(agreedAt(THURSDAY_2PM, 'We will see you Thursday afternoon at two.', { day: 'Thursday', hour: 'two', period: 'afternoon' }).ok).toBe(true);
+    expect(agreedAt(THURSDAY_2PM, 'We will see you Thursday at 2:00 PM.', { day: 'Thursday', hour: '2', period: 'PM' }).ok).toBe(true);
     // Codex #5092 r9: twelve beside a window's named end is not "12 midnight".
     expect(agreedAt('2026-09-24T00:00:00-04:00', 'We will be there between 12 and midnight tomorrow.', { day: 'tomorrow', hour: '12', period: 'midnight' }))
       .toMatchObject({ ok: false, reason: 'agreed_slot_ungrounded' });
