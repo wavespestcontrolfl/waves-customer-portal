@@ -6992,6 +6992,21 @@ function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved }) {
           map[r.field] = r.message;
         });
         setFieldErrors(map);
+        // Advance the dirty baseline for every field that DID save, so a
+        // later edit back to the original value is still sent (otherwise
+        // the diff would call it unchanged and the saved value would stick).
+        // Rejected fields keep their old baseline; the blackout pair saves
+        // or fails as one.
+        const failed = new Set(Object.keys(map));
+        if (failed.has("blackoutStart") || failed.has("blackoutEnd")) {
+          failed.add("blackoutStart");
+          failed.add("blackoutEnd");
+        }
+        const baseline = { ...(initialDraftRef.current || {}) };
+        dirtyKeys.forEach((k) => {
+          if (!failed.has(k)) baseline[k] = draft[k];
+        });
+        initialDraftRef.current = baseline;
         setErr(
           `${response.rejected.length} field${response.rejected.length > 1 ? "s" : ""} could not be saved — fix and try again. Everything else was saved.`,
         );

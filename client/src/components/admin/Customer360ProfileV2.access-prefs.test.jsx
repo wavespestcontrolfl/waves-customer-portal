@@ -229,6 +229,52 @@ describe('Customer 360 → Property → Access & Preferences', () => {
     expect(screen.getByRole('button', { name: 'Save' })).toBeInTheDocument();
   });
 
+  it('after a partial save, reverting a SAVED field still sends it on retry', async () => {
+    const bodies = [];
+    vi.stubGlobal('fetch', vi.fn((url, options) => {
+      const path = String(url);
+      if (path.endsWith('/admin/payers')) return response({ payers: [] });
+      if (path.split('?')[0].endsWith('/timeline')) return response({ timeline: [] });
+      if (path.endsWith('/admin/customers/customer-a/property-preferences')) {
+        const body = JSON.parse(options.body);
+        bodies.push(body);
+        if (bodies.length === 1) {
+          return response({
+            success: true,
+            saved: true,
+            preferences: { ...BASE_PREFS, access_notes: 'B' },
+            rejected: [{ field: 'hoaEmail', message: '"hoaEmail" must be a valid email' }],
+          });
+        }
+        return response({ success: true, saved: true, preferences: BASE_PREFS });
+      }
+      if (path.endsWith('/admin/customers/customer-a')) return response(customerDetail());
+      return response({});
+    }));
+
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+    await screen.findAllByText('Avery Customer');
+    await openPropertyTab();
+    await screen.findByText('Access & Preferences');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Access & Preferences' }));
+    const notes = (await screen.findByText('Access Notes')).closest('label').querySelector('textarea');
+    const hoaEmail = screen.getByText('HOA Email').closest('label').querySelector('input');
+    fireEvent.change(notes, { target: { value: 'B' } });
+    fireEvent.change(hoaEmail, { target: { value: 'not-an-email' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    expect(await screen.findByText(/could not be saved/i)).toBeInTheDocument();
+    expect(bodies[0]).toMatchObject({ accessNotes: 'B', hoaEmail: 'not-an-email' });
+
+    // Revert the note to its original (empty) value and fix the email.
+    fireEvent.change(notes, { target: { value: '' } });
+    fireEvent.change(hoaEmail, { target: { value: 'board@example.com' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(bodies).toHaveLength(2));
+    expect(bodies[1]).toHaveProperty('accessNotes', '');
+    expect(bodies[1]).toHaveProperty('hoaEmail', 'board@example.com');
+  });
+
   it('sends ONLY the field actually changed — not a full-snapshot resubmit that could clobber a newer portal autosave', async () => {
     const fetchMock = vi.fn((url, options) => {
       const path = String(url);
