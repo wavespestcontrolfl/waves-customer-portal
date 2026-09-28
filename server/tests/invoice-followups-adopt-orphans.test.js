@@ -1,17 +1,35 @@
 // Orphan-invoice adoption sweep (GATE_DUNNING_ADOPT_ORPHANS, dunning
 // unification PR 3): an invoice sent outside the direct-send path never got
 // an invoice_followup_sequences row and was left to the legacy
-// late-payment-checker.js alone. Gate off: runPending never looks for
-// orphans, byte-identical. Gate on: an eligible orphan gets armed through
-// scheduleForInvoice — the exact path a normal send takes — BEFORE the batch
-// select, so a stale anchor is caught by the SAME run's stale-touch pass,
-// never sent late. The legacy checker (Mon–Fri 10:10 ET) can still be live
-// alongside this sweep (Tue–Fri 10:16 ET) during rollout, so adoption also:
-// maps a freshly-armed row PAST whatever tier the checker already delivered
-// (Codex pre-push P0 A2), never fires a touch in the SAME run it adopted a
-// row (P0 A1), skips a candidate the checker still has a pending
-// delivered-SMS/failed-email retry episode for (P0 B), and seeds/releases an
-// autopay-held row from the customer's own prior ACH-failure history (P0 C).
+// late-payment-checker.js alone.
+//
+// Design (post Codex r1 rewrite): NO seeding pass and no post-insert release
+// — a candidate is either armed once, atomically, or left on the hand list.
+// `selectAdoptionCandidates` (shared by the dry-run script and the live
+// sweep) walks delivered, homeowner-billed, no-active-plan, no-existing-row
+// invoices with a balance and buckets each one as a candidate or a skip
+// reason: has_legacy_history (a collections_contact_ledger row OR the
+// checker's own activity_log 'late_payment_reminder' dedupe row, matched by
+// metadata.invoiceId or an invoiceKey prefix), legacy_history_unreadable,
+// past_final_step (every ladder day has passed — adoptionLanding has
+// nowhere to land it), ach_failure_history (ANY unresolved ACH failure,
+// independent of autopay standing), ach_history_unreadable. A survivor is
+// hand ed to `scheduleForInvoice(id, { adoption: true })` — the exact path a
+// normal invoice send takes — which computes its OWN landing under the
+// invoice lock: an autopay customer takes the 'ach.escalation' advisory
+// lock, is left for a person on any unresolved failure, and otherwise lands
+// an autopay_hold row (next_touch_at null) at `adoptionLanding`'s step; a
+// non-autopay customer lands an active row directly at the first step whose
+// send day is not stale, re-dated to the next send-window day if that step
+// is due at/before now — so an adopted row's next_touch_at is NEVER in the
+// past and NEVER sent in the run that adopted it, by construction (no
+// separate deferral write, unlike the retired design).
+//
+// The live sweep runs candidate selection AND scheduling inside
+// runExclusive('late-payment-check', …) (server/utils/cron-lock.js, mocked
+// below) — the legacy checker's own lease — refusing outright
+// (refused: 'checker_lock_held') rather than racing an in-flight checker
+// run's history writes.
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/invoice-helpers', () => ({
@@ -34,19 +52,19 @@ jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMe
 jest.mock('../services/autopay-eligibility', () => ({ customerOnAutopay: jest.fn() }));
 jest.mock('../utils/portal-url', () => ({ publicPortalUrl: jest.fn() }));
 jest.mock('../services/email-template-library', () => ({}));
-jest.mock('../services/customer-contact', () => ({ getInvoiceEmailRecipients: jest.fn() }));
 jest.mock('../services/email-template', () => ({ currency: jest.fn() }));
 jest.mock('../utils/date-only', () => ({ formatDateOnly: jest.fn() }));
-// Fully mocked (never the real module — that avoids pulling in ITS whole
-// dependency tree) so adoptOrphanInvoices' lazy require sees a controllable
-// recoverPendingEmailEpisode. Default: nothing pending.
-jest.mock('../services/late-payment-checker', () => ({ recoverPendingEmailEpisode: jest.fn(async () => null) }));
+// adoptOrphanInvoices lazy-requires this for the live sweep's lock. Default:
+// runs the callback for real (the same as an uncontended lock in
+// production); individual tests override with mockResolvedValueOnce to
+// simulate a refusal.
+jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn((jobName, fn) => fn()) }));
 
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { customerOnAutopay } = require('../services/autopay-eligibility');
-const { recoverPendingEmailEpisode } = require('../services/late-payment-checker');
-const { runPending, adoptOrphanInvoices } = require('../services/invoice-followups');
+const { runExclusive } = require('../utils/cron-lock');
+const { runPending, adoptOrphanInvoices, scheduleForInvoice } = require('../services/invoice-followups');
 
 // Wednesday 2026-08-05 10:16 AM ET, inside the Tue–Fri send window.
 const NOW = new Date('2026-08-05T14:16:00Z');
@@ -56,7 +74,6 @@ beforeEach(() => {
   jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] });
   jest.setSystemTime(NOW);
   jest.clearAllMocks();
-  recoverPendingEmailEpisode.mockResolvedValue(null);
   delete process.env.GATE_DUNNING_ADOPT_ORPHANS;
   delete process.env.GATE_DUNNING_LADDER_90;
   delete process.env.GATE_LATE_PAYMENT_CHECKER_OFF;
@@ -107,45 +124,67 @@ function orphanCandidateQuery(rows) {
   return { q, recorded };
 }
 
-// Full db router: the orphan-candidate select (`invoices as i`) plus every
-// table scheduleForInvoice's new-row path touches (`invoices` pre-lock read
-// AND the same table under the transaction — db.transaction runs its
-// callback against `db` itself, matching invoice-followups-unvoid-rearm's
-// pattern), plus the legacy-tier-mapping and autopay-history reads (A2/C:
-// `collections_contact_ledger`, `ach_failure_log`), and (for the runPending
-// integration tests) the batch-select reads (`invoice_followup_sequences as
-// s`) plus the plain `invoice_followup_sequences` table.
+// The `activity_log` 'late_payment_reminder' dedupe lookup legacyCheckerContacted
+// falls back to when the collections_contact_ledger has no row: records the
+// action filter and the whereRaw/orWhereRaw pair (metadata.invoiceId, then the
+// invoiceKey prefix IN (...)) so tests can assert the exact refs probed.
+function activityLogQuery(row) {
+  const recorded = { where: null, whereRaw: [] };
+  const q = {};
+  q.where = jest.fn((arg) => {
+    if (typeof arg === 'function') {
+      const b = {
+        whereRaw: jest.fn((sql, bindings) => { recorded.whereRaw.push([sql, bindings]); return b; }),
+        orWhereRaw: jest.fn((sql, bindings) => { recorded.whereRaw.push([sql, bindings]); return b; }),
+      };
+      arg.call(b, b);
+    } else {
+      recorded.where = arg;
+    }
+    return q;
+  });
+  q.first = jest.fn(async () => row || undefined);
+  return { q, recorded };
+}
+
+// Full db router: the orphan-candidate select (`invoices as i`), the
+// activity_log dedupe fallback, every table scheduleForInvoice's new-row
+// path touches (`invoices` pre-lock read AND the same table under the
+// transaction — db.transaction runs its callback against `db` itself,
+// matching invoice-followups-unvoid-rearm's pattern), plus the
+// legacy-history and ACH-history reads (`collections_contact_ledger`,
+// `ach_failure_log`), and (for the runPending integration tests) the
+// revival + batch-select reads (`invoice_followup_sequences as s`).
 //
-// The plain `invoice_followup_sequences` table is a light stateful stand-in
-// so releaseFromAutopayHold's OWN independent re-read (a second
-// `.where({invoice_id}).first()`, after the insert) sees the row: the FIRST
-// call for a given invoice_id (scheduleForInvoice's pre-insert existing-row
-// check) returns undefined, every call after returns `insertedRow`; a
-// `.where({id}).first()` for `insertedRow.id` always returns it too.
+// `existingRow`, when given, makes the pre-INSERT existing-row check inside
+// scheduleForInvoice see a row already there (adoption must leave it alone).
+// Otherwise the plain `invoice_followup_sequences` table is a light
+// stateful stand-in: the FIRST `.where({invoice_id}).first()` returns
+// undefined (no row yet), every call after returns `insertedRow`.
 function setupFullDb({
   orphanRows = [], previewInvoice = null, customer = null, activePlan = null,
-  insertedRow = null, batchReads = [], seqUpdateResult = 1,
-  legacyLedgerRows = [], legacyLedgerError = null, achFailureCount = 0, achReadError = null,
+  existingRow = null, insertedRow = null, batchReads = [], seqUpdateResult = 1,
+  legacyLedgerRows = [], legacyLedgerError = null, activityLogRow = null,
+  achFailureCount = 0, achReadError = null,
 } = {}) {
   const orphanQuery = orphanCandidateQuery(orphanRows);
+  const activityLog = activityLogQuery(activityLogRow);
   const batchQueue = [...batchReads];
-  const joinedBatch = [];
   const seqUpdates = [];
-  const ledgerUpdates = [];
-  db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
   const insertCalls = [];
   const seenInvoiceIds = new Set();
+  db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
   db.fn = { now: jest.fn(() => 'CURRENT_TIMESTAMP') };
   db.transaction = jest.fn(async (fn) => fn(db));
   db.mockImplementation((table) => {
     if (table === 'invoices as i') return orphanQuery.q;
+    if (table === 'activity_log') return activityLog.q;
     if (table === 'invoice_followup_sequences as s') {
       const rows = batchQueue.shift() || [];
       const q = { wheres: [] };
       for (const method of ['join', 'whereNotIn', 'whereIn', 'whereNull', 'select']) q[method] = jest.fn(() => q);
       q.where = jest.fn((...args) => { q.wheres.push(args); return q; });
       q.then = (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
-      joinedBatch.push(q);
       return q;
     }
     if (table === 'invoice_followup_sequences') {
@@ -153,10 +192,13 @@ function setupFullDb({
       qq.where = jest.fn((cond) => { qq.wheres.push(cond); return qq; });
       qq.first = jest.fn(async () => {
         const cond = qq.wheres[qq.wheres.length - 1] || {};
-        if (cond.invoice_id && insertedRow && cond.invoice_id === insertedRow.invoice_id) {
-          if (seenInvoiceIds.has(cond.invoice_id)) return insertedRow;
-          seenInvoiceIds.add(cond.invoice_id);
-          return undefined;
+        if (cond.invoice_id) {
+          if (existingRow && cond.invoice_id === existingRow.invoice_id) return existingRow;
+          if (insertedRow && cond.invoice_id === insertedRow.invoice_id) {
+            if (seenInvoiceIds.has(cond.invoice_id)) return insertedRow;
+            seenInvoiceIds.add(cond.invoice_id);
+            return undefined;
+          }
         }
         if (cond.id && insertedRow && cond.id === insertedRow.id) return insertedRow;
         return undefined;
@@ -181,9 +223,8 @@ function setupFullDb({
       return qq;
     }
     if (table === 'collections_contact_ledger') {
-      const qq = { wheres: [], whereRaw: jest.fn(() => qq) };
-      qq.where = jest.fn((cond) => { qq.wheres.push(cond); return qq; });
-      qq.update = jest.fn(async (patch) => { ledgerUpdates.push({ wheres: qq.wheres, patch }); return 1; });
+      const qq = { whereRaw: jest.fn(() => qq) };
+      qq.where = jest.fn(() => qq);
       qq.then = (resolve, reject) => (legacyLedgerError ? Promise.reject(legacyLedgerError) : Promise.resolve(legacyLedgerRows)).then(resolve, reject);
       return qq;
     }
@@ -194,7 +235,7 @@ function setupFullDb({
     throw new Error(`unexpected table in test: ${table}`);
   });
   return {
-    orphanQuery, joinedBatch, seqUpdates, ledgerUpdates, insertCalls,
+    orphanQuery, activityLogRecorded: activityLog.recorded, seqUpdates, insertCalls,
   };
 }
 
@@ -205,7 +246,6 @@ function seqRow(overrides = {}) {
     customer_id: 'cust-1',
     status: 'active',
     step_index: 0,
-    touches_sent: 0,
     anchor_at: null,
     created_at: tenAmET('2026-07-29'),
     invoice_sent_at: tenAmET('2026-07-29'),
@@ -215,7 +255,7 @@ function seqRow(overrides = {}) {
   };
 }
 
-describe('adoptOrphanInvoices selection', () => {
+describe('selectAdoptionCandidates (dry run)', () => {
   test('excludes an invoice with a sequence, a draft/terminal status, a payer, a payment plan, or a deleted customer', async () => {
     const { orphanQuery } = setupFullDb({ orphanRows: [] });
     await adoptOrphanInvoices({ dryRun: true });
@@ -235,7 +275,8 @@ describe('adoptOrphanInvoices selection', () => {
     expect(orphanQuery.q.orderByRaw).toHaveBeenCalledWith(expect.stringContaining('COALESCE'));
   });
 
-  test('dryRun returns only invoices with amount due > 0, oldest-sent metadata included, and writes nothing', async () => {
+  test('returns only invoices with amount due > 0, oldest-sent metadata included, and writes nothing', async () => {
+    process.env.GATE_DUNNING_LADDER_90 = 'true'; // Day 60 still ahead at 45 days — the fixture below is about the $ filter, not landing
     const oldSent = tenAmET('2026-06-21'); // 45 days before NOW
     const rows = [
       {
@@ -257,209 +298,322 @@ describe('adoptOrphanInvoices selection', () => {
     expect(db.transaction).not.toHaveBeenCalled();
   });
 
-  test('live mode arms an eligible orphan through scheduleForInvoice and logs its id', async () => {
-    process.env.GATE_LATE_PAYMENT_CHECKER_OFF = 'true';
-    process.env.GATE_DUNNING_LADDER_90 = 'true';
-    const oldSent = tenAmET('2026-06-21');
-    const previewInvoice = {
-      id: 'inv-1', status: 'sent', payer_id: null, scheduled_send_error: null, customer_id: 'cust-1', sent_at: oldSent,
-    };
-    const insertedRow = {
-      id: 'seq-new', invoice_id: 'inv-1', customer_id: 'cust-1', status: 'active', step_index: 0, next_touch_at: tenAmET('2026-06-24'),
-    };
+  test('skips has_legacy_history when collections_contact_ledger has a row for the invoice', async () => {
+    const recentSent = tenAmET('2026-08-04'); // 1 day old — Day 3 not yet due, so this isn't a landing skip
     setupFullDb({
       orphanRows: [{
-        invoice_id: 'inv-1', customer_id: 'cust-1', total: '150.00', credit_applied: '0', sent_at: oldSent, sms_sent_at: null, created_at: oldSent,
-      }],
-      previewInvoice,
-      customer: { id: 'cust-1' },
-      activePlan: null,
-      insertedRow,
-    });
-    customerOnAutopay.mockResolvedValue(false);
-
-    const result = await adoptOrphanInvoices({ dryRun: false });
-
-    expect(result).toEqual({ adopted: 1, invoiceIds: ['inv-1'], skipped: [] });
-    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('adopted 1 orphan invoice(s): inv-1'));
-  });
-
-  test('a fully-credited orphan (amount due 0) is never handed to scheduleForInvoice', async () => {
-    process.env.GATE_LATE_PAYMENT_CHECKER_OFF = 'true';
-    process.env.GATE_DUNNING_LADDER_90 = 'true';
-    const oldSent = tenAmET('2026-06-21');
-    setupFullDb({
-      orphanRows: [{
-        invoice_id: 'inv-2', customer_id: 'cust-2', total: '50.00', credit_applied: '50.00', sent_at: oldSent, sms_sent_at: null, created_at: oldSent,
-      }],
-    });
-    const result = await adoptOrphanInvoices({ dryRun: false });
-    expect(result).toEqual({ adopted: 0, invoiceIds: [], skipped: [] });
-    expect(db.transaction).not.toHaveBeenCalled();
-    expect(logger.info).not.toHaveBeenCalled();
-  });
-
-  test('an invoice the legacy checker already contacted is left for a person: skipped as has_legacy_history, never scheduled', async () => {
-    process.env.GATE_DUNNING_ADOPT_ORPHANS = 'true';
-    process.env.GATE_LATE_PAYMENT_CHECKER_OFF = 'true';
-    process.env.GATE_DUNNING_LADDER_90 = 'true';
-    const oldSent = tenAmET('2026-06-21');
-    setupFullDb({
-      orphanRows: [{
-        invoice_id: 'inv-1', customer_id: 'cust-1', total: '150.00', credit_applied: '0', sent_at: oldSent, sms_sent_at: null, created_at: oldSent,
+        invoice_id: 'inv-1', invoice_number: 'INV-1001', customer_id: 'cust-1', total: '150.00', credit_applied: '0',
+        sent_at: recentSent, sms_sent_at: null, created_at: recentSent,
       }],
       legacyLedgerRows: [{ idempotency_key: 'late_payment_checker:inv-1:30:sms', metadata: { delivered: true }, invoice_ids: ['inv-1'] }],
     });
-
-    const live = await adoptOrphanInvoices({ dryRun: false });
-    expect(live).toEqual({ adopted: 0, invoiceIds: [], skipped: [{ invoice_id: 'inv-1', customer_id: 'cust-1', reason: 'has_legacy_history' }] });
-    expect(db.transaction).not.toHaveBeenCalled();
-    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('left 1 invoice(s) with legacy checker history for a person to settle'));
-
-    const dry = await adoptOrphanInvoices({ dryRun: true });
-    expect(dry.candidates).toHaveLength(0);
-    expect(dry.skipped).toEqual([{ invoice_id: 'inv-1', customer_id: 'cust-1', reason: 'has_legacy_history' }]);
+    const result = await adoptOrphanInvoices({ dryRun: true });
+    expect(result).toEqual({ candidates: [], skipped: [{ invoice_id: 'inv-1', customer_id: 'cust-1', reason: 'has_legacy_history' }] });
   });
 
-  test('an unreadable legacy history fails closed for that sweep', async () => {
-    process.env.GATE_DUNNING_ADOPT_ORPHANS = 'true';
-    process.env.GATE_LATE_PAYMENT_CHECKER_OFF = 'true';
-    process.env.GATE_DUNNING_LADDER_90 = 'true';
-    const oldSent = tenAmET('2026-06-21');
+  test('skips has_legacy_history via the checker\'s own activity_log dedupe row when the ledger has none, matched by invoiceId then the invoiceKey prefix', async () => {
+    const recentSent = tenAmET('2026-08-04');
+    const { activityLogRecorded } = setupFullDb({
+      orphanRows: [{
+        invoice_id: 'inv-1', invoice_number: 'INV-1001', customer_id: 'cust-1', total: '150.00', credit_applied: '0',
+        sent_at: recentSent, sms_sent_at: null, created_at: recentSent,
+      }],
+      legacyLedgerRows: [],
+      activityLogRow: { id: 'act-1' },
+    });
+    const result = await adoptOrphanInvoices({ dryRun: true });
+    expect(result).toEqual({ candidates: [], skipped: [{ invoice_id: 'inv-1', customer_id: 'cust-1', reason: 'has_legacy_history' }] });
+    expect(activityLogRecorded.where).toEqual({ action: 'late_payment_reminder' });
+    expect(activityLogRecorded.whereRaw[0]).toEqual(["metadata->>'invoiceId' = ?", ['inv-1']]);
+    expect(activityLogRecorded.whereRaw[1][0]).toContain("split_part(metadata->>'invoiceKey', '|', 1) IN");
+    expect(activityLogRecorded.whereRaw[1][1]).toEqual(['inv-1', 'INV-1001']);
+  });
+
+  test('an unreadable legacy history (ledger read throws) fails closed as legacy_history_unreadable', async () => {
+    const recentSent = tenAmET('2026-08-04');
     setupFullDb({
       orphanRows: [{
-        invoice_id: 'inv-1', customer_id: 'cust-1', total: '150.00', credit_applied: '0', sent_at: oldSent, sms_sent_at: null, created_at: oldSent,
+        invoice_id: 'inv-1', customer_id: 'cust-1', total: '150.00', credit_applied: '0', sent_at: recentSent, sms_sent_at: null, created_at: recentSent,
       }],
       legacyLedgerError: new Error('ledger unavailable'),
     });
-
-    const result = await adoptOrphanInvoices({ dryRun: false });
-
-    expect(result.adopted).toBe(0);
-    expect(result.skipped).toEqual([{ invoice_id: 'inv-1', customer_id: 'cust-1', reason: 'legacy_history_unreadable' }]);
-    expect(db.transaction).not.toHaveBeenCalled();
+    const result = await adoptOrphanInvoices({ dryRun: true });
+    expect(result).toEqual({ candidates: [], skipped: [{ invoice_id: 'inv-1', customer_id: 'cust-1', reason: 'legacy_history_unreadable' }] });
   });
 
-  test('live mode with the checker still running is refused before any write', async () => {
-    process.env.GATE_DUNNING_ADOPT_ORPHANS = 'true';
-    const oldSent = tenAmET('2026-06-21');
+  test('skips past_final_step when every ladder day has already passed — before any ACH read', async () => {
+    const veryOldSent = new Date(NOW.getTime() - 40 * 24 * 60 * 60 * 1000); // past the legacy Day 30 end (gate off)
     setupFullDb({
       orphanRows: [{
-        invoice_id: 'inv-1', customer_id: 'cust-1', total: '150.00', credit_applied: '0', sent_at: oldSent, sms_sent_at: null, created_at: oldSent,
+        invoice_id: 'inv-1', customer_id: 'cust-1', total: '150.00', credit_applied: '0', sent_at: veryOldSent, sms_sent_at: null, created_at: veryOldSent,
+      }],
+      // Proves ordering: if the ACH table were reached, this throw would
+      // surface as ach_history_unreadable instead.
+      achReadError: new Error('should never be reached — past_final_step short-circuits first'),
+    });
+    const result = await adoptOrphanInvoices({ dryRun: true });
+    expect(result).toEqual({ candidates: [], skipped: [{ invoice_id: 'inv-1', customer_id: 'cust-1', reason: 'past_final_step' }] });
+  });
+
+  test('skips ach_failure_history on ANY unresolved ACH failure, independent of autopay standing', async () => {
+    const recentSent = tenAmET('2026-08-04');
+    setupFullDb({
+      orphanRows: [{
+        invoice_id: 'inv-1', customer_id: 'cust-1', total: '150.00', credit_applied: '0', sent_at: recentSent, sms_sent_at: null, created_at: recentSent,
+      }],
+      achFailureCount: 1,
+    });
+    const result = await adoptOrphanInvoices({ dryRun: true });
+    expect(result).toEqual({ candidates: [], skipped: [{ invoice_id: 'inv-1', customer_id: 'cust-1', reason: 'ach_failure_history' }] });
+    // selectAdoptionCandidates never consults autopay standing — that's scheduleForInvoice's job.
+    expect(customerOnAutopay).not.toHaveBeenCalled();
+  });
+
+  test('skips ach_history_unreadable when the ACH log read throws, retried next sweep', async () => {
+    const recentSent = tenAmET('2026-08-04');
+    setupFullDb({
+      orphanRows: [{
+        invoice_id: 'inv-1', customer_id: 'cust-1', total: '150.00', credit_applied: '0', sent_at: recentSent, sms_sent_at: null, created_at: recentSent,
+      }],
+      achReadError: new Error('ach log unavailable'),
+    });
+    const result = await adoptOrphanInvoices({ dryRun: true });
+    expect(result).toEqual({ candidates: [], skipped: [{ invoice_id: 'inv-1', customer_id: 'cust-1', reason: 'ach_history_unreadable' }] });
+  });
+});
+
+describe('scheduleForInvoice(id, { adoption: true })', () => {
+  test('fails closed when the autopay read throws: the transaction rolls back, no row is inserted', async () => {
+    const anchor = tenAmET('2026-08-04');
+    const previewInvoice = { id: 'inv-1', status: 'sent', payer_id: null, scheduled_send_error: null, customer_id: 'cust-1', sent_at: anchor };
+    const { insertCalls } = setupFullDb({ previewInvoice, customer: { id: 'cust-1' } });
+    customerOnAutopay.mockRejectedValue(new Error('payment method read failed'));
+
+    await expect(scheduleForInvoice('inv-1', { adoption: true })).rejects.toThrow('payment method read failed');
+
+    expect(insertCalls).toHaveLength(0);
+    expect(customerOnAutopay).toHaveBeenCalledWith({ id: 'cust-1' }, expect.objectContaining({ failClosed: true }));
+  });
+
+  test('an autopay customer with an unresolved ACH failure is left for a person: advisory lock taken, no row inserted', async () => {
+    const anchor = tenAmET('2026-08-04');
+    const previewInvoice = { id: 'inv-1', status: 'sent', payer_id: null, scheduled_send_error: null, customer_id: 'cust-1', sent_at: anchor };
+    const { insertCalls } = setupFullDb({ previewInvoice, customer: { id: 'cust-1' }, achFailureCount: 1 });
+    customerOnAutopay.mockResolvedValue(true);
+
+    const result = await scheduleForInvoice('inv-1', { adoption: true });
+
+    expect(result).toBeNull();
+    expect(insertCalls).toHaveLength(0);
+    expect(db.raw).toHaveBeenCalledWith(
+      'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+      ['ach.escalation', 'cust-1'],
+    );
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('adoption left invoice inv-1 for a person: autopay customer has unresolved ACH failures'));
+  });
+
+  test('an autopay customer with no unresolved ACH failures lands an autopay_hold row at the landing step, next_touch_at null', async () => {
+    process.env.GATE_DUNNING_LADDER_90 = 'true';
+    const anchor = tenAmET('2026-06-21'); // 45 days before NOW -> Day 60 (index 4) under the ladder
+    const previewInvoice = { id: 'inv-1', status: 'sent', payer_id: null, scheduled_send_error: null, customer_id: 'cust-1', sent_at: anchor };
+    const insertedRow = { id: 'seq-1', invoice_id: 'inv-1' };
+    const { insertCalls } = setupFullDb({ previewInvoice, customer: { id: 'cust-1' }, insertedRow, achFailureCount: 0 });
+    customerOnAutopay.mockResolvedValue(true);
+
+    await scheduleForInvoice('inv-1', { adoption: true });
+
+    expect(insertCalls).toHaveLength(1);
+    expect(insertCalls[0]).toMatchObject({
+      invoice_id: 'inv-1', customer_id: 'cust-1', status: 'autopay_hold', step_index: 4, next_touch_at: null, is_autopay_held: true,
+    });
+  });
+
+  test('an invoice that already gained a row is left alone: no insert, autopay never read', async () => {
+    const anchor = tenAmET('2026-08-04');
+    const previewInvoice = { id: 'inv-1', status: 'sent', payer_id: null, scheduled_send_error: null, customer_id: 'cust-1', sent_at: anchor };
+    const { insertCalls } = setupFullDb({ previewInvoice, customer: { id: 'cust-1' }, existingRow: { invoice_id: 'inv-1', id: 'seq-existing' } });
+
+    const result = await scheduleForInvoice('inv-1', { adoption: true });
+
+    expect(result).toBeNull();
+    expect(insertCalls).toHaveLength(0);
+    expect(customerOnAutopay).not.toHaveBeenCalled();
+  });
+
+  test('landing (ladder on): sent 45 days ago lands directly on the Day 60 step', async () => {
+    process.env.GATE_DUNNING_LADDER_90 = 'true';
+    const anchor = tenAmET('2026-06-21');
+    const previewInvoice = { id: 'inv-1', status: 'sent', payer_id: null, scheduled_send_error: null, customer_id: 'cust-1', sent_at: anchor };
+    const insertedRow = { id: 'seq-1', invoice_id: 'inv-1' };
+    const { insertCalls } = setupFullDb({ previewInvoice, customer: { id: 'cust-1' }, insertedRow });
+    customerOnAutopay.mockResolvedValue(false);
+
+    await scheduleForInvoice('inv-1', { adoption: true });
+
+    expect(insertCalls).toHaveLength(1);
+    expect(insertCalls[0]).toMatchObject({ status: 'active', step_index: 4, is_autopay_held: false });
+    expect(insertCalls[0].next_touch_at).toEqual(tenAmET('2026-08-20'));
+  });
+
+  test('landing (ladder off): sent 45 days ago has passed every legacy step — left for a person', async () => {
+    const anchor = tenAmET('2026-06-21');
+    const previewInvoice = { id: 'inv-1', status: 'sent', payer_id: null, scheduled_send_error: null, customer_id: 'cust-1', sent_at: anchor };
+    const { insertCalls } = setupFullDb({ previewInvoice, customer: { id: 'cust-1' } });
+    customerOnAutopay.mockResolvedValue(false);
+
+    const result = await scheduleForInvoice('inv-1', { adoption: true });
+
+    expect(result).toBeNull();
+    expect(insertCalls).toHaveLength(0);
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('adoption left invoice inv-1 for a person: every ladder step has passed'));
+  });
+
+  test('landing (ladder on): a step due exactly today re-dates to tomorrow 10:00 NY, never landing already due', async () => {
+    process.env.GATE_DUNNING_LADDER_90 = 'true';
+    const anchor = tenAmET('2026-07-06'); // Day 30 lands exactly on NOW's date on either cadence
+    const previewInvoice = { id: 'inv-1', status: 'sent', payer_id: null, scheduled_send_error: null, customer_id: 'cust-1', sent_at: anchor };
+    const insertedRow = { id: 'seq-1', invoice_id: 'inv-1' };
+    const { insertCalls } = setupFullDb({ previewInvoice, customer: { id: 'cust-1' }, insertedRow });
+    customerOnAutopay.mockResolvedValue(false);
+
+    await scheduleForInvoice('inv-1', { adoption: true });
+
+    expect(insertCalls[0]).toMatchObject({ status: 'active', step_index: 3 });
+    expect(insertCalls[0].next_touch_at).toEqual(tenAmET('2026-08-06'));
+  });
+
+  test('landing (ladder off): a step due exactly today re-dates to tomorrow 10:00 NY, same as the ladder', async () => {
+    const anchor = tenAmET('2026-07-06');
+    const previewInvoice = { id: 'inv-1', status: 'sent', payer_id: null, scheduled_send_error: null, customer_id: 'cust-1', sent_at: anchor };
+    const insertedRow = { id: 'seq-1', invoice_id: 'inv-1' };
+    const { insertCalls } = setupFullDb({ previewInvoice, customer: { id: 'cust-1' }, insertedRow });
+    customerOnAutopay.mockResolvedValue(false);
+
+    await scheduleForInvoice('inv-1', { adoption: true });
+
+    expect(insertCalls[0]).toMatchObject({ status: 'active', step_index: 3 });
+    expect(insertCalls[0].next_touch_at).toEqual(tenAmET('2026-08-06'));
+  });
+
+  test('landing (ladder on): sent 200 days ago has passed even Day 90 — left for a person', async () => {
+    process.env.GATE_DUNNING_LADDER_90 = 'true';
+    const anchor = new Date(NOW.getTime() - 200 * 24 * 60 * 60 * 1000);
+    const previewInvoice = { id: 'inv-1', status: 'sent', payer_id: null, scheduled_send_error: null, customer_id: 'cust-1', sent_at: anchor };
+    const { insertCalls } = setupFullDb({ previewInvoice, customer: { id: 'cust-1' } });
+    customerOnAutopay.mockResolvedValue(false);
+
+    const result = await scheduleForInvoice('inv-1', { adoption: true });
+
+    expect(result).toBeNull();
+    expect(insertCalls).toHaveLength(0);
+  });
+});
+
+describe('adoptOrphanInvoices: live sweep locking', () => {
+  test('refused before the checker retires: no lock taken, nothing written', async () => {
+    const recentSent = tenAmET('2026-08-04');
+    setupFullDb({
+      orphanRows: [{
+        invoice_id: 'inv-1', customer_id: 'cust-1', total: '150.00', credit_applied: '0', sent_at: recentSent, sms_sent_at: null, created_at: recentSent,
       }],
     });
 
     const result = await adoptOrphanInvoices({ dryRun: false });
 
     expect(result).toEqual({ adopted: 0, invoiceIds: [], skipped: [], refused: 'checker_running' });
+    expect(runExclusive).not.toHaveBeenCalled();
     expect(db.transaction).not.toHaveBeenCalled();
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('adoption refused: GATE_LATE_PAYMENT_CHECKER_OFF is not live'));
   });
-});
 
-// Codex pre-push P0 (A2): the legacy checker's own delivered tier maps onto
-// the ladder so a freshly-adopted row never repeats a reminder already sent.
-// Codex pre-push P0 (C).
-describe('adoptOrphanInvoices seeds/releases an autopay-held row from prior ACH failure history', () => {
-  function autopayCandidate(overrides = {}) {
-    const oldSent = tenAmET('2026-06-21');
-    return {
-      oldSent,
-      previewInvoice: {
-        id: 'inv-1', status: 'sent', payer_id: null, scheduled_send_error: null, customer_id: 'cust-1', sent_at: oldSent,
-      },
-      insertedRow: {
-        id: 'seq-new', invoice_id: 'inv-1', customer_id: 'cust-1', status: 'autopay_hold', step_index: 0, next_touch_at: null, is_autopay_held: true, autopay_failures_observed: 0,
-      },
+  test('runs candidate selection and scheduling under runExclusive("late-payment-check", …, { recordHealth: false, waitForSlot: false })', async () => {
+    process.env.GATE_LATE_PAYMENT_CHECKER_OFF = 'true';
+    process.env.GATE_DUNNING_LADDER_90 = 'true';
+    setupFullDb({ orphanRows: [] });
+
+    await adoptOrphanInvoices({ dryRun: false });
+
+    expect(runExclusive).toHaveBeenCalledWith('late-payment-check', expect.any(Function), { recordHealth: false, waitForSlot: false });
+  });
+
+  test('a lock refused as lease_held is reported refused: checker_lock_held, and candidate selection never runs', async () => {
+    process.env.GATE_LATE_PAYMENT_CHECKER_OFF = 'true';
+    process.env.GATE_DUNNING_LADDER_90 = 'true';
+    runExclusive.mockResolvedValueOnce({ skipped: true, reason: 'lease_held' });
+    const recentSent = tenAmET('2026-08-04');
+    setupFullDb({
       orphanRows: [{
-        invoice_id: 'inv-1', customer_id: 'cust-1', total: '150.00', credit_applied: '0', sent_at: oldSent, sms_sent_at: null, created_at: oldSent,
+        invoice_id: 'inv-1', customer_id: 'cust-1', total: '150.00', credit_applied: '0', sent_at: recentSent, sms_sent_at: null, created_at: recentSent,
       }],
-      ...overrides,
-    };
-  }
-
-  test('a customer already at the failure threshold is armed active with the counter seeded, in the same insert', async () => {
-    process.env.GATE_DUNNING_ADOPT_ORPHANS = 'true';
-    process.env.GATE_LATE_PAYMENT_CHECKER_OFF = 'true';
-    process.env.GATE_DUNNING_LADDER_90 = 'true';
-    const c = autopayCandidate();
-    const { insertCalls, seqUpdates } = setupFullDb({
-      orphanRows: c.orphanRows,
-      previewInvoice: c.previewInvoice,
-      customer: { id: 'cust-1' },
-      insertedRow: c.insertedRow,
-      achFailureCount: 3, // config.autopayFailureThreshold
     });
-    customerOnAutopay.mockResolvedValue(true);
 
     const result = await adoptOrphanInvoices({ dryRun: false });
 
-    expect(result.adopted).toBe(1);
-    expect(insertCalls).toHaveLength(1);
-    expect(insertCalls[0]).toMatchObject({ status: 'active', is_autopay_held: false, autopay_failures_observed: 3 });
-    expect(insertCalls[0].next_touch_at).toBeInstanceOf(Date);
-    expect(seqUpdates).toHaveLength(0); // no post-insert release: one atomic write
-    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('3 unresolved ACH failure(s) — armed active, threshold already met'));
+    expect(result).toEqual({ adopted: 0, invoiceIds: [], skipped: [], refused: 'checker_lock_held' });
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("adoption refused this run: the late-payment checker's lock is held (lease_held)"));
+    // Candidate selection (selectAdoptionCandidates -> `invoices as i`) runs
+    // INSIDE the lock callback — a refused lock never reaches it.
+    expect(db.mock.calls.some(([table]) => table === 'invoices as i')).toBe(false);
+    expect(db.transaction).not.toHaveBeenCalled();
   });
 
-  test('a customer with SOME prior failures below threshold is held with the counter seeded, in the same insert', async () => {
-    process.env.GATE_DUNNING_ADOPT_ORPHANS = 'true';
+  test('a genuinely eligible orphan is armed for real under an acquired lock', async () => {
     process.env.GATE_LATE_PAYMENT_CHECKER_OFF = 'true';
     process.env.GATE_DUNNING_LADDER_90 = 'true';
-    const c = autopayCandidate();
-    const { insertCalls, seqUpdates } = setupFullDb({
-      orphanRows: c.orphanRows,
-      previewInvoice: c.previewInvoice,
-      customer: { id: 'cust-1' },
-      insertedRow: c.insertedRow,
-      achFailureCount: 1,
-    });
-    customerOnAutopay.mockResolvedValue(true);
-
-    const result = await adoptOrphanInvoices({ dryRun: false });
-
-    expect(result.adopted).toBe(1);
-    expect(insertCalls).toHaveLength(1);
-    expect(insertCalls[0]).toMatchObject({ status: 'autopay_hold', is_autopay_held: true, next_touch_at: null, autopay_failures_observed: 1 });
-    expect(seqUpdates).toHaveLength(0);
-  });
-
-  test('an unreadable ACH history rolls the whole adoption back: no row, logged, retried next sweep', async () => {
-    process.env.GATE_DUNNING_ADOPT_ORPHANS = 'true';
-    process.env.GATE_LATE_PAYMENT_CHECKER_OFF = 'true';
-    process.env.GATE_DUNNING_LADDER_90 = 'true';
-    const c = autopayCandidate();
+    const oldSent = tenAmET('2026-06-21');
+    const previewInvoice = { id: 'inv-1', status: 'sent', payer_id: null, scheduled_send_error: null, customer_id: 'cust-1', sent_at: oldSent };
+    const insertedRow = { id: 'seq-new', invoice_id: 'inv-1' };
     const { insertCalls } = setupFullDb({
-      orphanRows: c.orphanRows, previewInvoice: c.previewInvoice, customer: { id: 'cust-1' }, insertedRow: c.insertedRow,
-      achReadError: new Error('ach log unavailable'),
+      orphanRows: [{ invoice_id: 'inv-1', customer_id: 'cust-1', total: '150.00', credit_applied: '0', sent_at: oldSent, sms_sent_at: null, created_at: oldSent }],
+      previewInvoice,
+      customer: { id: 'cust-1' },
+      insertedRow,
     });
-    customerOnAutopay.mockResolvedValue(true);
+    customerOnAutopay.mockResolvedValue(false);
 
-    const result = await adoptOrphanInvoices({ dryRun: false });
+    await adoptOrphanInvoices({ dryRun: false });
 
-    expect(result.adopted).toBe(0);
-    expect(insertCalls).toHaveLength(0);
-    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('adoption failed for invoice inv-1: ach log unavailable'));
+    expect(insertCalls).toHaveLength(1);
+    expect(insertCalls[0]).toMatchObject({ invoice_id: 'inv-1', customer_id: 'cust-1', status: 'active', step_index: 4 });
   });
 
-  test('no prior failures — row is left exactly as scheduleForInvoice created it (regression)', async () => {
-    process.env.GATE_DUNNING_ADOPT_ORPHANS = 'true';
+  test('a candidate with legacy checker history is filtered inside the lock and never reaches scheduleForInvoice', async () => {
     process.env.GATE_LATE_PAYMENT_CHECKER_OFF = 'true';
     process.env.GATE_DUNNING_LADDER_90 = 'true';
-    const c = autopayCandidate();
-    const { seqUpdates } = setupFullDb({
-      orphanRows: c.orphanRows,
-      previewInvoice: c.previewInvoice,
-      customer: { id: 'cust-1' },
-      insertedRow: c.insertedRow,
-      achFailureCount: 0,
+    const oldSent = tenAmET('2026-06-21');
+    setupFullDb({
+      orphanRows: [{ invoice_id: 'inv-1', customer_id: 'cust-1', total: '150.00', credit_applied: '0', sent_at: oldSent, sms_sent_at: null, created_at: oldSent }],
+      legacyLedgerRows: [{ idempotency_key: 'late_payment_checker:inv-1:30:sms', metadata: {}, invoice_ids: ['inv-1'] }],
     });
-    customerOnAutopay.mockResolvedValue(true);
+
+    await adoptOrphanInvoices({ dryRun: false });
+
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  // runExclusive's refusal is { skipped: true, reason }; the body's own
+  // result carries a skipped ARRAY (truthy even when empty), so a success
+  // must never be read as a refusal.
+  test('a successful lock run reports the adopted row, never a refusal', async () => {
+    process.env.GATE_LATE_PAYMENT_CHECKER_OFF = 'true';
+    process.env.GATE_DUNNING_LADDER_90 = 'true';
+    const oldSent = tenAmET('2026-06-21');
+    const previewInvoice = { id: 'inv-1', status: 'sent', payer_id: null, scheduled_send_error: null, customer_id: 'cust-1', sent_at: oldSent };
+    const insertedRow = { id: 'seq-new', invoice_id: 'inv-1' };
+    const { insertCalls } = setupFullDb({
+      orphanRows: [{ invoice_id: 'inv-1', customer_id: 'cust-1', total: '150.00', credit_applied: '0', sent_at: oldSent, sms_sent_at: null, created_at: oldSent }],
+      previewInvoice,
+      customer: { id: 'cust-1' },
+      insertedRow,
+    });
+    customerOnAutopay.mockResolvedValue(false);
 
     const result = await adoptOrphanInvoices({ dryRun: false });
 
-    expect(result.adopted).toBe(1);
-    expect(seqUpdates.filter((u) => u.wheres[0]?.id === 'seq-new')).toHaveLength(0);
+    expect(insertCalls).toHaveLength(1); // the row really was written
+    expect(result).toEqual({ adopted: 1, invoiceIds: ['inv-1'], skipped: [] });
+    expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining('adoption refused'));
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('adopted 1 orphan invoice(s): inv-1'));
   });
 });
 
@@ -486,114 +640,65 @@ describe('runPending and the orphan sweep', () => {
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('GATE_DUNNING_ADOPT_ORPHANS ignored: GATE_LATE_PAYMENT_CHECKER_OFF is not live'));
   });
 
-  test('gate on: an adopted orphan sent 45 days ago lands on its Day 60 step in the same run, without sending', async () => {
+  test('gate on: an adopted orphan sent 45 days ago lands on Day 60 with a future next_touch_at and is not sent this run', async () => {
     process.env.GATE_DUNNING_ADOPT_ORPHANS = 'true';
-    process.env.GATE_LATE_PAYMENT_CHECKER_OFF = 'true';
-    process.env.GATE_DUNNING_LADDER_90 = 'true';
     process.env.GATE_LATE_PAYMENT_CHECKER_OFF = 'true';
     process.env.GATE_DUNNING_LADDER_90 = 'true';
     const anchor = tenAmET('2026-06-21'); // 45 days before NOW (2026-08-05)
     const previewInvoice = {
       id: 'inv-orphan', status: 'sent', payer_id: null, scheduled_send_error: null, customer_id: 'cust-orphan', sent_at: anchor,
     };
-    const insertedRow = {
-      id: 'seq-orphan', invoice_id: 'inv-orphan', customer_id: 'cust-orphan', status: 'active', step_index: 0, next_touch_at: tenAmET('2026-06-24'),
-    };
-    // What the SAME run's batch select would now see, now that the row
-    // exists: step 0, next_touch_at long past (Day 3 from a 45-day-old anchor).
-    const batchRowAfterAdoption = seqRow({
-      id: 'seq-orphan',
-      invoice_id: 'inv-orphan',
-      customer_id: 'cust-orphan',
-      step_index: 0,
-      next_touch_at: insertedRow.next_touch_at,
-      anchor_at: null,
-      invoice_sent_at: anchor,
-      invoice_sms_sent_at: null,
-      invoice_created_at: anchor,
-      created_at: anchor,
-    });
-    const { seqUpdates } = setupFullDb({
+    const insertedRow = { id: 'seq-orphan', invoice_id: 'inv-orphan', customer_id: 'cust-orphan' };
+    const { insertCalls } = setupFullDb({
       orphanRows: [{
         invoice_id: 'inv-orphan', customer_id: 'cust-orphan', total: '150.00', credit_applied: '0', sent_at: anchor, sms_sent_at: null, created_at: anchor,
       }],
       previewInvoice,
       customer: { id: 'cust-orphan' },
-      activePlan: null,
       insertedRow,
-      // Revival read (ladder on, runs before adoption) finds nothing, then
-      // the main batch select runs AFTER adoption and picks up the fresh row.
-      batchReads: [[], [], [batchRowAfterAdoption]],
+      // Landing computes a next_touch_at of 2026-08-20 directly at insert —
+      // weeks past NOW — so this SAME run's revival reads (ladder on ⇒
+      // reviveLegacyFinishedSequences; checker retired ⇒
+      // reviveReopenedLowStepSequences) and the main batch select (all
+      // against `invoice_followup_sequences as s`) all find nothing due.
+      batchReads: [[], [], []],
     });
     customerOnAutopay.mockResolvedValue(false);
 
     const result = await runPending();
 
-    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('adopted 1 orphan invoice(s): inv-orphan'));
-    // Never sent — only advanced past the stale Day 3/10/17/30 steps.
-    expect(result).toEqual({ sent: 0, skipped: 1 });
-    expect(seqUpdates).toHaveLength(1);
-    expect(seqUpdates[0].patch.status).toBe('active');
-    expect(seqUpdates[0].patch.step_index).toBe(4); // d60_reminder
-    expect(seqUpdates[0].patch.next_touch_at).toEqual(tenAmET('2026-08-20')); // anchor + 60 days
-    expect(new Date(seqUpdates[0].patch.next_touch_at).getTime()).toBeGreaterThan(NOW.getTime());
+    expect(insertCalls).toHaveLength(1);
+    expect(insertCalls[0]).toMatchObject({ invoice_id: 'inv-orphan', customer_id: 'cust-orphan', status: 'active', step_index: 4 });
+    expect(insertCalls[0].next_touch_at).toEqual(tenAmET('2026-08-20'));
+    expect(new Date(insertCalls[0].next_touch_at).getTime()).toBeGreaterThan(NOW.getTime());
+    expect(result).toEqual({ sent: 0, skipped: 0 });
   });
 
-  // Codex pre-push P0 (A1) / Fable pre-push P2 (G): the adopted-this-run
-  // suppression must hold even when the skip-forward LANDS the row on a
-  // step genuinely due today — the send still waits for the next run.
-  test('an orphan whose skip-forward lands on a step due today is NOT fired this run — fires next run', async () => {
+  test('gate on: an orphan whose landing day is exactly today lands on tomorrow 10:00 NY instead — never sent this run', async () => {
     process.env.GATE_DUNNING_ADOPT_ORPHANS = 'true';
     process.env.GATE_LATE_PAYMENT_CHECKER_OFF = 'true';
     process.env.GATE_DUNNING_LADDER_90 = 'true';
-    process.env.GATE_LATE_PAYMENT_CHECKER_OFF = 'true';
-    process.env.GATE_DUNNING_LADDER_90 = 'true';
-    const anchor = tenAmET('2026-07-06'); // 30 days before NOW (Day 30 on both cadences)
+    const anchor = tenAmET('2026-07-06'); // Day 30 on both cadences — due today
     const previewInvoice = {
       id: 'inv-orphan', status: 'sent', payer_id: null, scheduled_send_error: null, customer_id: 'cust-orphan', sent_at: anchor,
     };
-    const insertedRow = {
-      id: 'seq-orphan', invoice_id: 'inv-orphan', customer_id: 'cust-orphan', status: 'active', step_index: 0, next_touch_at: tenAmET('2026-07-09'),
-    };
-    const batchRowAfterAdoption = seqRow({
-      id: 'seq-orphan',
-      invoice_id: 'inv-orphan',
-      customer_id: 'cust-orphan',
-      step_index: 0,
-      next_touch_at: insertedRow.next_touch_at,
-      anchor_at: null,
-      invoice_sent_at: anchor,
-      invoice_sms_sent_at: null,
-      invoice_created_at: anchor,
-      created_at: anchor,
-    });
-    const { seqUpdates } = setupFullDb({
+    const insertedRow = { id: 'seq-orphan', invoice_id: 'inv-orphan', customer_id: 'cust-orphan' };
+    const { insertCalls } = setupFullDb({
       orphanRows: [{
         invoice_id: 'inv-orphan', customer_id: 'cust-orphan', total: '150.00', credit_applied: '0', sent_at: anchor, sms_sent_at: null, created_at: anchor,
       }],
       previewInvoice,
       customer: { id: 'cust-orphan' },
       insertedRow,
-      // Ladder + checker retired (both required by the adopt gate): two empty revival reads, then the batch.
-      batchReads: [[], [], [batchRowAfterAdoption]],
+      batchReads: [[], [], []],
     });
     customerOnAutopay.mockResolvedValue(false);
 
     const result = await runPending();
 
-    expect(result).toEqual({ sent: 0, skipped: 1 });
-    expect(logger.info).toHaveBeenCalledWith(
-      expect.stringContaining('invoice inv-orphan adopted this run — first touch deferred to 2026-08-06T14:00:00.000Z'),
-    );
-    // The skip-forward pass still advances the timeline correctly — Day 30
-    // lands exactly today — then the landing step
-    // is re-dated to the next run (Thu 2026-08-06 10:00 NY) under a guard on
-    // the just-persisted step/due, so the next tick sends it fresh.
-    expect(seqUpdates).toHaveLength(2);
-    expect(seqUpdates[0].patch.step_index).toBe(3);
-    expect(seqUpdates[0].patch.next_touch_at).toEqual(tenAmET('2026-08-05'));
-    expect(seqUpdates[0].patch.status).toBe('active');
-    expect(seqUpdates[1].wheres).toEqual([{ id: 'seq-orphan', status: 'active', step_index: 3, next_touch_at: tenAmET('2026-08-05') }]);
-    expect(seqUpdates[1].patch.next_touch_at).toEqual(tenAmET('2026-08-06'));
+    expect(insertCalls).toHaveLength(1);
+    expect(insertCalls[0]).toMatchObject({ invoice_id: 'inv-orphan', status: 'active', step_index: 3 });
+    expect(insertCalls[0].next_touch_at).toEqual(tenAmET('2026-08-06'));
+    expect(result).toEqual({ sent: 0, skipped: 0 });
   });
 });
