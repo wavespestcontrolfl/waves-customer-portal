@@ -1576,7 +1576,7 @@ async function publishAstro(postId) {
     assertValidBlogFrontmatter(data);
     const { markdown, unlinked: competitorUnlinked } = competitorFreeMarkdown(data, finalBody + '\n', { validate: assertValidBlogFrontmatter });
     const editorialFiles = await editorialEvidence.filesForDocument({ document: markdown, path: filePath,
-      evidenceUrls: editorialEvidence.unlinkedCompetitorUrls(null, competitorUnlinked) });
+      evidenceUrls: editorialEvidence.unlinkedCompetitorUrls(null, [...earlyUnlinked, ...competitorUnlinked]) });
 
     await gh.createBranch(branch);
     branchCreated = true;

@@ -1853,13 +1853,22 @@ describe('Astro publisher hero image republish', () => {
     const queries = [read, update];
     db.mockImplementation(() => queries.shift() || chain());
 
-    await AstroPublisher.publishAstro('post-1');
-    const commit = gh.commitFiles.mock.calls.at(-1)?.[0];
-    const written = commit ? commit.files.find((f) => /\.mdx?$/.test(f.path)).content : gh.putFile.mock.calls.at(-1)[0].content;
-    expect(written).toContain('One national guide says the same');
-    expect(written).not.toMatch(/terminix\.com/);
-    expect(written).toContain('[UF/IFAS](https://edis.ifas.ufl.edu/x)');
-    expect(gh.createPr.mock.calls.at(-1)[0].body).toMatch(/Competitor links removed[\s\S]*terminix\.com\/ants/);
+    const editorialEvidence = require('../services/content/editorial-evidence');
+    const filesSpy = jest.spyOn(editorialEvidence, 'filesForDocument').mockResolvedValue([]);
+    try {
+      await AstroPublisher.publishAstro('post-1');
+      const commit = gh.commitFiles.mock.calls.at(-1)?.[0];
+      const written = commit ? commit.files.find((f) => /\.mdx?$/.test(f.path)).content : gh.putFile.mock.calls.at(-1)[0].content;
+      expect(written).toContain('One national guide says the same');
+      expect(written).not.toMatch(/terminix\.com/);
+      expect(written).toContain('[UF/IFAS](https://edis.ifas.ufl.edu/x)');
+      expect(gh.createPr.mock.calls.at(-1)[0].body).toMatch(/Competitor links removed[\s\S]*terminix\.com\/ants/);
+      // The final editorial review still reads the page the early pass
+      // unlinked, as evidence it never publishes (pre-push audit on #5191).
+      expect(filesSpy).toHaveBeenCalledWith(expect.objectContaining({ evidenceUrls: ['https://www.terminix.com/ants/'] }));
+    } finally {
+      filesSpy.mockRestore();
+    }
   });
 
   describe('cost-guide price card on the scheduled/admin lane', () => {
