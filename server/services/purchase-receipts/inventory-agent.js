@@ -438,17 +438,21 @@ function titleAnchorWordIndex(rawTitle) {
     if (packMatch && Number(packMatch[1]) > 0 && packMatch.index < cutoff) cutoff = packMatch.index;
   }
   const titleWords = normalizeForMatch(title).split(' ').filter(Boolean);
-  // A recognized category phrase ("Caterpillar Control", "Weed Killer",
-  // "Insecticide") closes off the identity portion the same way a size
-  // does: "Southern Ag Thuricide BT Caterpillar Control, 16oz" anchors on
-  // "BT", never "Caterpillar". Only when some identity word precedes it —
-  // otherwise the title's anchor is read as if no phrase were there.
-  const categoryCut = categoryPhraseStart(title);
-  if (categoryCut != null && categoryCut < cutoff) {
-    const anchored = lastIdentityWordBefore(title, categoryCut, titleWords);
-    if (anchored != null) return anchored;
+  // The anchor never lands INSIDE a recognized category phrase: for
+  // "Southern Ag Thuricide BT Caterpillar Control, 16oz" the last identity
+  // word before the size is "caterpillar" — part of "Caterpillar Control",
+  // category wording, not identity — so the anchor moves to the last
+  // identity word before that phrase ("BT"). A category word EARLIER in the
+  // title ("Syngenta Insecticide Demand CS 8 oz") never moves it: the anchor
+  // is still "CS", so a manufacturer-only name stays refused.
+  let anchor = lastIdentityWordBefore(title, cutoff, titleWords);
+  const spans = categoryPhraseWordSpans(title);
+  for (let guard = 0; anchor != null && guard < spans.length; guard += 1) {
+    const span = spans.find((sp) => anchor >= sp.first && anchor <= sp.last);
+    if (!span) break;
+    anchor = lastIdentityWordBefore(title, span.startChar, titleWords);
   }
-  return lastIdentityWordBefore(title, cutoff, titleWords);
+  return anchor;
 }
 
 function lastIdentityWordBefore(title, cutoff, titleWords) {
@@ -459,19 +463,25 @@ function lastIdentityWordBefore(title, cutoff, titleWords) {
   return null;
 }
 
-// The character index where the title's earliest category wording (literal
-// or plain-language, CANONICAL_CATEGORIES) starts, or null. Read on the
-// separator-folded text, whose folding keeps every character position.
-function categoryPhraseStart(title) {
-  const folded = String(title || '').replace(/[_/|.,:;+]/g, ' ').replace(/(?<!\d)-|-(?!\d)/g, ' ');
-  let earliest = null;
+// Every recognized category phrase in the title (literal or plain-language,
+// CANONICAL_CATEGORIES) as { startChar, first, last } — its starting
+// character and its first/last word indexes in normalizeForMatch(title)
+// terms. Read on separator-folded text whose folding keeps every character
+// position.
+function categoryPhraseWordSpans(title) {
+  const raw = String(title || '');
+  const folded = raw.replace(/[_/|.,:;+]/g, ' ').replace(/(?<!\d)-|-(?!\d)/g, ' ');
+  const wordsIn = (text) => normalizeForMatch(text).split(' ').filter(Boolean).length;
+  const spans = [];
   for (const c of CANONICAL_CATEGORIES) {
     for (const re of [c.statedBy, c.plainPhrase].filter(Boolean)) {
-      const at = folded.search(re);
-      if (at >= 0 && (earliest == null || at < earliest)) earliest = at;
+      for (const m of folded.matchAll(new RegExp(re.source, 'gi'))) {
+        const first = wordsIn(raw.slice(0, m.index));
+        spans.push({ startChar: m.index, first, last: first + Math.max(wordsIn(m[0]), 1) - 1 });
+      }
     }
   }
-  return earliest;
+  return spans;
 }
 
 // The candidate's container_size normalized to ONE shape, so

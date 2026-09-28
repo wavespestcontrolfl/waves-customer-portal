@@ -321,6 +321,11 @@ describe('classifyDecision — a new product\'s category must be one the listing
       .toMatchObject({ kind: 'new_product', status: 'logged', newProduct: { name: 'Southern Ag Thuricide BT', category: 'insecticide' } });
   });
 
+  test('an EARLY category word never moves the anchor: a manufacturer-only name is still refused', () => {
+    expect(decide('Syngenta Insecticide Demand CS 8 oz', 'Syngenta Insecticide', 'insecticide', oz(8)))
+      .toMatchObject({ kind: 'unsure', reason: expect.stringMatching(/product-identity word/) });
+  });
+
   test('"Southern Ag Thuricide BT Caterpillar Control 16 oz" states Insecticide via the stating phrase, not the word "Insecticide" itself', () => {
     expect(decide('Southern Ag Thuricide BT Caterpillar Control 16 oz', 'Southern Ag Thuricide BT Caterpillar', 'insecticide', oz(16)))
       .toMatchObject({ kind: 'new_product', status: 'logged', newProduct: { category: 'insecticide' } });
