@@ -68,7 +68,7 @@ function predictedOpeningScript({ firstName, amountDollars, invoiceTitle, invoic
   const balance = invoiceCount > 1
     ? `an open balance of $${amountDollars} across ${invoiceCount} invoices, the oldest for your ${title} service`
     : `an open balance of $${amountDollars} for your ${title} service`;
-  return `Hi ${name}, this is Waves Pest Control with a quick billing follow-up. `
+  return `Hi ${name}, it's Waves with a quick billing follow-up. `
     + `Our records show ${balance}. `
     + `Do you have a moment to take care of that today, or would a payment link by text be easier?`;
 }
