@@ -414,42 +414,52 @@ async function claimReceiptJobForOperatorSend(invoiceId, { sawUnsent = false } =
   const settled = await recoverStaleLocks({ invoiceId });
   if (settled.closedDelivered > 0) return { alreadySent: true };
   const token = `operator:${workerId()}:${randomUUID()}`;
-  return db.transaction(async (trx) => {
-    if (sawUnsent) {
-      const invoice = await trx('invoices').where({ id: invoiceId }).first('receipt_sent_at');
-      if (invoice?.receipt_sent_at) return { alreadySent: true };
-    }
-    const inserted = await trx('receipt_delivery_jobs')
-      .insert({
-        invoice_id: invoiceId,
-        source: 'operator_send',
-        status: 'running',
-        next_attempt_at: trx.fn.now(),
-        locked_at: trx.fn.now(),
-        locked_by: token,
-        attempts: 0,
-        max_attempts: DEFAULT_MAX_ATTEMPTS,
-        updated_at: trx.fn.now(),
-      })
-      .onConflict(['invoice_id'])
-      .ignore()
-      .returning(['id']);
-    if (inserted?.[0]) return { id: inserted[0].id, invoiceId, token, prior: null };
+  const ALREADY_SENT = Symbol('already sent');
+  try {
+    return await db.transaction(async (trx) => {
+      // Read only once this transaction holds the job slot (inserted, or
+      // locked below): whatever delivered it had already stamped the invoice.
+      const stampedSinceRead = async () => sawUnsent
+        && Boolean((await trx('invoices').where({ id: invoiceId }).first('receipt_sent_at'))?.receipt_sent_at);
+      const inserted = await trx('receipt_delivery_jobs')
+        .insert({
+          invoice_id: invoiceId,
+          source: 'operator_send',
+          status: 'running',
+          next_attempt_at: trx.fn.now(),
+          locked_at: trx.fn.now(),
+          locked_by: token,
+          attempts: 0,
+          max_attempts: DEFAULT_MAX_ATTEMPTS,
+          updated_at: trx.fn.now(),
+        })
+        .onConflict(['invoice_id'])
+        .ignore()
+        .returning(['id']);
+      if (inserted?.[0]) {
+        if (await stampedSinceRead()) throw ALREADY_SENT; // rolls the claim row back
+        return { id: inserted[0].id, invoiceId, token, prior: null };
+      }
 
-    const job = await trx('receipt_delivery_jobs')
-      .where({ invoice_id: invoiceId })
-      .forUpdate()
-      .first('id', 'status', 'next_attempt_at');
-    if (!job) throw new Error(`receipt job for invoice ${invoiceId} vanished during the operator claim`);
-    if (job.status === 'running') return { inFlight: true };
-    // A completed or failed job sends nothing more: no claim to hold.
-    if (!QUEUED_STATUSES.includes(job.status)) return { id: null };
+      const job = await trx('receipt_delivery_jobs')
+        .where({ invoice_id: invoiceId })
+        .forUpdate()
+        .first('id', 'status', 'next_attempt_at');
+      if (!job) throw new Error(`receipt job for invoice ${invoiceId} vanished during the operator claim`);
+      if (job.status === 'running') return { inFlight: true };
+      if (await stampedSinceRead()) return { alreadySent: true };
+      // A completed or failed job sends nothing more: no claim to hold.
+      if (!QUEUED_STATUSES.includes(job.status)) return { id: null };
 
-    await trx('receipt_delivery_jobs')
-      .where({ id: job.id })
-      .update({ status: 'running', locked_at: trx.fn.now(), locked_by: token, updated_at: trx.fn.now() });
-    return { id: job.id, invoiceId, token, prior: { status: job.status, next_attempt_at: job.next_attempt_at } };
-  });
+      await trx('receipt_delivery_jobs')
+        .where({ id: job.id })
+        .update({ status: 'running', locked_at: trx.fn.now(), locked_by: token, updated_at: trx.fn.now() });
+      return { id: job.id, invoiceId, token, prior: { status: job.status, next_attempt_at: job.next_attempt_at } };
+    });
+  } catch (err) {
+    if (err === ALREADY_SENT) return { alreadySent: true };
+    throw err;
+  }
 }
 
 // Right after the operator's email leg delivers: claim-specific evidence on

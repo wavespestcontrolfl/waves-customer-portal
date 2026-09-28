@@ -254,4 +254,30 @@ postgres('operator receipt claim on PostgreSQL', () => {
     // An operator who saw it already receipted is resending on purpose.
     expect(await claimReceiptJobForOperatorSend(invoiceId, { sawUnsent: false })).toEqual({ id: null });
   });
+
+  test('the drain completes the job while the claim waits on its lock: the claim re-reads the stamp after locking and refuses', async () => {
+    const invoiceId = await seedJob();
+    await mockPg('invoices').insert({ id: invoiceId, receipt_sent_at: null });
+    // The drain holds the job row; the route has already read the invoice unstamped.
+    let release;
+    const drainDone = new Promise((r) => { release = r; });
+    const drain = mockPg.transaction(async (trx) => {
+      await trx('receipt_delivery_jobs').where({ invoice_id: invoiceId }).forUpdate().first();
+      await drainDone;
+      await trx('invoices').where({ id: invoiceId }).update({ receipt_sent_at: new Date() });
+      await trx('receipt_delivery_jobs').where({ invoice_id: invoiceId }).update({ status: 'completed' });
+    });
+    const claiming = claimReceiptJobForOperatorSend(invoiceId, { sawUnsent: true });
+    await new Promise((r) => { setTimeout(r, 300); }); // the claim is now blocked on the job lock
+    release();
+    await drain;
+    expect(await claiming).toEqual({ alreadySent: true });
+  });
+
+  test('a claim row inserted for an invoice that turns out already stamped is rolled back', async () => {
+    const invoiceId = randomUUID();
+    await mockPg('invoices').insert({ id: invoiceId, receipt_sent_at: new Date() });
+    expect(await claimReceiptJobForOperatorSend(invoiceId, { sawUnsent: true })).toEqual({ alreadySent: true });
+    expect(await job(invoiceId)).toBeUndefined();
+  });
 });
