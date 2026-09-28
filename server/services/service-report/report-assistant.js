@@ -46,7 +46,7 @@ const OBSERVATION_QUESTION_RE = /\b(?:what|which|anything)\b[^?.!]{0,20}\bdid\s+
 // forms, so "waterproof" is not watering.
 const WATERING_WORD_RE = /\b(?:water|waters|watered|watering|irrigat\w*|sprinklers?|run\s?times?)\b/;
 const INCIDENTAL_WATERING_PHRASE_RE = new RegExp([
-  String.raw`\b(?:water|irrigation|sprinkler)\s+(?:damage|stains?|meters?|lines?|leaks?|bills?|pooling|puddles?|pipes?|valves?|heads?|boxes?|heaters?|softeners?|filters?|bowls?|features?|issues?|problems?|areas?)\b`,
+  String.raw`\b(?:water|irrigation|sprinkler)\s+(?:damage|stains?|meters?|leaks?|bills?|pooling|puddles?|heaters?|softeners?|filters?|bowls?|features?|areas?)\b|\bwater\s+(?:lines?|pipes?|mains?)\b`,
   String.raw`\b(?:broken|damaged|leaking|leaky|clogged|cracked|missing|misaligned|faulty)\s+(?:sprinklers?|sprinkler\s+\w+|irrigation(?:\s+\w+)?|water\s+lines?)\b`,
   String.raw`\b(?:standing|pooling|pooled|surface|salt|rain)\s+water\b`,
   String.raw`\b(?:by|near|around|at|under|beside|next\s+to|close\s+to|along)\s+(?:the|my|a|your|our)\s+(?:sprinklers?|sprinkler\s+(?:heads?|lines?|zones?|area)|irrigation\s+(?:zones?|heads?|lines?|area))\b`,
@@ -68,10 +68,12 @@ function isWateringRecommendation(text) {
 // the mushrooms I observed?", "Anything we should do…", "Any action needed…",
 // "How do I handle…"). Observation words inside it qualify the request; they
 // do not turn it into a findings recap. "…, do you know what they are?" asks
-// Waves, not the customer; so does "What action did you take…?" or "What
-// action was taken…?".
-const WAVES_ACTION_SRC = String.raw`(?!s?\s+(?:(?:did|do|does|will|would|have|has|had)\s+(?:you|they|waves|y'?all|(?:the|your)\s+tech\w*)\b|(?:(?:was|were|is|are|has\s+been|have\s+been|had\s+been|got|being)\s+)?(?:taken|done|performed|completed)\b))`;
-const CUSTOMER_ACTION_RE = new RegExp(String.raw`\b(?:i|we)\b[^?.!]{0,24}\b(?:do|handle)\b(?!\s+you\b)|\baction\b${WAVES_ACTION_SRC}|\bnext\s+steps?\b`);
+// Waves, not the customer. "Action" counts only as an action requested of
+// the customer ("Any action needed…", "What action should I take?"), never
+// what Waves did ("What action did you take…?", "…was taken…") or a cause
+// ("What mowing action caused the damage?").
+const CUSTOMER_ACTION_SRC = String.raw`\b(?:any|what|which)\s+actions?\s+(?:is\s+|are\s+)?(?:needed|required|necessary|recommended)\b|\bactions?\s+(?:needed|required|necessary|items?|to\s+take)\b|\bactions?\s+(?:should|do|can|could|must|would)\s+(?:i|we)\b`;
+const CUSTOMER_ACTION_RE = new RegExp(String.raw`\b(?:i|we)\b[^?.!]{0,24}\b(?:do|handle)\b(?!\s+you\b)|${CUSTOMER_ACTION_SRC}|\bnext\s+steps?\b`);
 // Future treatment timing ("When are you spraying next?", "What are you
 // treating next?", "When is the next treatment?") is a scheduling question.
 const FUTURE_TREATMENT_RE = /\b(?:next|again|upcoming|will\s+you|are\s+you\s+(?:going\s+to|coming)|when\s+(?:are|will|do|does|is|can|could|would|should)\b)/;
@@ -130,7 +132,7 @@ function isReentryIntent(q) {
 const EFFECTIVENESS_RE = /\b(working|improving|improve[sd]?|helping|trending|results?|better|worse|affect(?:s|ed)?|impact\w*|lower\w*|reduc\w*|drop\w*|decreas\w*)\b|\bchang\w*\b(?=[^?.!]*\b(?:pressure|scores?|results?|trend\w*|activity|numbers?|index)\b)|\b(?:pressure|scores?|results?|trend\w*|activity|numbers?|index)\b[^?.!]*\bchang\w*/;
 // Explicit advice wording outranks the broad lawn-trend subjects ("What do
 // you recommend for the stress areas?").
-const ADVICE_RE = new RegExp(String.raw`\b(recommend\w*|what\s+should\s+i|should\s+i|what\s+(?:do|can|could)\s+(?:i|we)\s+do(?![^?.!]*(?<!\b(?:before|until|till|by|prior\s+to|ahead\s+of)\s+(?:(?:my|the|our|your|next|upcoming)\s+){0,2})\b(?:appointments?|appts?|visits?)\b|[^?.!]*\b(?:schedul\w*|reschedul\w*)\b)|what\s+action${WAVES_ACTION_SRC}|next\s+step)\b`);
+const ADVICE_RE = new RegExp(String.raw`\b(recommend\w*|what\s+should\s+i|should\s+i|what\s+(?:do|can|could)\s+(?:i|we)\s+do(?![^?.!]*(?<!\b(?:before|until|till|by|prior\s+to|ahead\s+of)\s+(?:(?:my|the|our|your|next|upcoming)\s+){0,2})\b(?:appointments?|appts?|visits?|next\s+services?)\b|[^?.!]*\b(?:schedul\w*|reschedul\w*)\b)|next\s+step)\b|${CUSTOMER_ACTION_SRC}`);
 // Explicit scheduling/appointment wording. Shared by the treatment guard
 // below (codex #4839 round-4 P2 4109926457: "What are you applying at my
 // next appointment?" must reach the appointment answer, not treatment) and

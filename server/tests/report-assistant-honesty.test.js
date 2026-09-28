@@ -407,12 +407,12 @@ describe('watering questions answer with the weekly plan when the report carries
       ...withAftercare(HELD, 'snapshot'),
       lawnAssessment: {
         snapshot: {},
-        recommendationCards: ['Run each zone for 20 minutes.', 'Add another cycle this week.', 'Resume the normal schedule tomorrow.', 'Set the sprinklers for 20 minutes tomorrow.', 'Schedule two irrigation cycles this week.', 'Keep mowing at 3.5 inches.']
+        recommendationCards: ['Run each zone for 20 minutes.', 'Add another cycle this week.', 'Resume the normal schedule tomorrow.', 'Set the sprinklers for 20 minutes tomorrow.', 'Schedule two irrigation cycles this week.', 'Turn the sprinkler heads back on tonight.', 'Keep mowing at 3.5 inches.']
           .map((customerCopy) => ({ customerCopy })),
       },
     };
     const answer = answerServiceReportQuestion({ question: 'What should I do next?', data });
-    expect(answer).not.toMatch(/each zone|another cycle|normal schedule|Set the sprinklers|irrigation cycles/);
+    expect(answer).not.toMatch(/each zone|another cycle|normal schedule|Set the sprinklers|irrigation cycles|sprinkler heads/);
     expect(answer).toContain('Keep mowing at 3.5 inches.');
     // A watering noun with no watering action is not a directive (round 2).
     for (const keep of ['Watch the sprinkler area for recurring mushrooms.', 'Replace the damaged controller battery.', 'Set a timer to inspect the treated area tomorrow.']) {
@@ -436,6 +436,10 @@ describe('watering questions answer with the weekly plan when the report carries
     ['What can I do about the weeds before my next appointment?', 'next_steps'],
     ['What do I do until the next visit?', 'next_steps'],
     ['Did you find any broken sprinklers?', 'findings'],
+    ['What mowing action caused the damage you observed?', 'findings'],
+    ['What action should I take after spraying?', 'next_steps'],
+    ['What can we do to move our next service?', 'next_visit'],
+    ['Can I turn the sprinkler heads back on?', 'watering'],
     ['Any action needed for what you spotted?', 'next_steps'],
   ])('"%s" routes to %s (PR #5258 P2)', (question, topic) => {
     const data = withAftercare(REVIEW, 'none');
