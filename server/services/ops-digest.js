@@ -168,19 +168,22 @@ function alertClassFor(key, source) {
 // change even when a different call replaced an old one. deliverOpsDigest's
 // optional `itemKeys` carries the sender's own record ids (never customer
 // names/phones/emails) so the ring test can tell "same 5" from "5 different
-// ones" — deduped, sorted, capped so the comparison and the stored column
-// both stay bounded.
-const MAX_ITEM_KEYS = 200;
-// An explicit null (a sender whose page overflowed its row cap) clears a
-// stored list, so a later full page never compares against a stale one.
+// ones" — deduped and sorted. A set larger than MAX_ITEM_KEYS is NOT
+// truncated (a sliced prefix would read a promoted key as new, or hide a
+// swap past the cut): it has no stored identity at all, and the count test
+// alone decides — the same as a sender with no item evidence.
+const MAX_ITEM_KEYS = 500;
+// A sender that REPORTED identity but has none usable (explicit null — its
+// page overflowed — or a set past the cap) clears a stored list, so a later
+// comparison never runs against a stale one. An omitted itemKeys leaves it.
 function itemKeysMetaFor(raw, normalized) {
   if (normalized) return { itemKeys: normalized };
-  return raw === null ? { itemKeys: null } : {};
+  return raw === null || Array.isArray(raw) ? { itemKeys: null } : {};
 }
 function normalizeItemKeys(raw) {
   if (!Array.isArray(raw)) return null;
   const cleaned = [...new Set(raw.map((k) => String(k ?? '').trim()).filter(Boolean))].sort();
-  return cleaned.length ? cleaned.slice(0, MAX_ITEM_KEYS) : null;
+  return cleaned.length && cleaned.length <= MAX_ITEM_KEYS ? cleaned : null;
 }
 // A capped query's FULL-set identity: `all_ids` (ARRAY_AGG(id) OVER (),
 // computed before LIMIT like total_count) when the query carries it; else

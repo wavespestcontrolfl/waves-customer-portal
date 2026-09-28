@@ -628,7 +628,9 @@ function composeUnworkedCommsDigest({ callbacks = [], followUps = [], unanswered
     fullSetItemKeys(callbackCards, { prefix: 'card:' }),
     fullSetItemKeys(a, { prefix: 'call:' }),
     fullSetItemKeys(b, { prefix: 'task:' }),
-    fullSetItemKeys(c, { prefix: 'text:', idOf: (row) => row.peer }),
+    // Texts: the latest unanswered INBOUND message (source + our endpoint +
+    // its id), so a customer texting again after a reply is a new item.
+    fullSetItemKeys(c, { prefix: 'text:', idOf: (row) => (row.id == null ? null : `${row.source || 'sms'}:${row.endpoint || ''}:${row.id}`) }),
     fullSetItemKeys(d, { prefix: 'request:' }),
   ];
   const itemKeys = laneKeys.every(Array.isArray) ? laneKeys.flat() : null;

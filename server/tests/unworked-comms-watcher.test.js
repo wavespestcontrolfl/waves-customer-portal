@@ -48,6 +48,13 @@ describe('composeUnworkedCommsDigest', () => {
     expect(out.itemKeys).toEqual(expect.arrayContaining(['call:42', 'task:42']));
   });
 
+  test('texts key on the latest unanswered inbound message, so a new text from the same peer is a new item', () => {
+    const first = composeUnworkedCommsDigest({ unanswered: [thread({ id: 'm1', source: 'canonical', endpoint: 'ep1', total_count: 1 })] });
+    const again = composeUnworkedCommsDigest({ unanswered: [thread({ id: 'm2', source: 'canonical', endpoint: 'ep1', total_count: 1 })] });
+    expect(first.itemKeys).toEqual(['text:canonical:ep1:m1']);
+    expect(again.itemKeys).toEqual(['text:canonical:ep1:m2']);
+  });
+
   test('card totals retain disposition-only callback details and their own overflow count', () => {
     const out = composeUnworkedCommsDigest({ callbacks: [callback({ total_count: 2 }),
       { id: 'ledger-summary', callback_card_summary: true, total_count: 4 }] });

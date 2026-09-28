@@ -230,6 +230,14 @@ describe('deliverOpsDigest — itemKeys', () => {
     expect(mockNotifyAdmin.mock.calls[0][3].metadata).not.toHaveProperty('itemKeys');
   });
 
+  it('a reported set past the cap stores itemKeys: null too (counts decide; no stale list)', async () => {
+    withGate(true);
+    mockNotifyAdmin.mockResolvedValue({ id: 'n-huge', deduped: false });
+    const huge = Array.from({ length: 501 }, (_, i) => `id-${i}`);
+    await deliverOpsDigest({ key: 'k', subject: 'ACT: something needs a decision', text: 't', count: 501, itemKeys: huge, sendEmail: jest.fn() });
+    expect(mockNotifyAdmin.mock.calls[0][3].metadata.itemKeys).toBeNull();
+  });
+
   it('an explicit null itemKeys (page past its row cap) stores itemKeys: null, clearing a stale list on refresh', async () => {
     withGate(true);
     mockNotifyAdmin.mockResolvedValue({ id: 'n-overflow', deduped: false });

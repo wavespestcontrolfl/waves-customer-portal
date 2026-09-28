@@ -317,9 +317,9 @@ describe('normalizeItemKeys + hasNewItemKeys', () => {
     expect(normalizeItemKeys([])).toBeNull();
     expect(normalizeItemKeys(['', null])).toBeNull();
   });
-  test('caps at 200 entries', () => {
-    const many = Array.from({ length: 250 }, (_, i) => `id-${i}`);
-    expect(normalizeItemKeys(many)).toHaveLength(200);
+  test('a set past 500 has no identity at all (never a truncated prefix)', () => {
+    expect(normalizeItemKeys(Array.from({ length: 500 }, (_, i) => `id-${i}`))).toHaveLength(500);
+    expect(normalizeItemKeys(Array.from({ length: 501 }, (_, i) => `id-${i}`))).toBeNull();
   });
   test('hasNewItemKeys: true only when a current key is absent from the prior list', () => {
     expect(hasNewItemKeys(['a', 'b'], ['a', 'b'])).toBe(false);
