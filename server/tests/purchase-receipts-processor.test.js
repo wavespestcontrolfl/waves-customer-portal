@@ -90,7 +90,7 @@ jest.mock('../models/db', () => {
   return mockDb;
 });
 
-const { processReceiptLine, classifyItem } = require('../services/purchase-receipts/receipt-processor');
+const { processReceiptLine, classifyItem, lineDisposition } = require('../services/purchase-receipts/receipt-processor');
 const { matchTitleToProduct } = require('../services/purchase-receipts/product-matcher');
 
 const taurus = { id: 'p-taurus', name: 'Taurus SC', container_size: '78 fl oz', inventory_unit: 'fl_oz' };
@@ -107,6 +107,37 @@ beforeEach(() => {
   mockDbState.lockedProducts = [];
   mockAdjustStock.mockClear();
   matchTitleToProduct.mockClear();
+});
+
+// The one disposition processReceiptLine applies, shared with the read-only
+// replay tool so it hands the agent exactly the lines the live lane would.
+describe('lineDisposition', () => {
+  const product = { id: 'p1', name: 'Taurus SC' };
+  const logged = { status: 'logged', productId: 'p1', product, receivedQty: 78, receivedUnit: 'fl_oz' };
+
+  test('a hold applies once a product matched, without the amount it would have posted', () => {
+    expect(lineDisposition(logged, { holdAs: 'unverified' })).toEqual({ status: 'unverified', productId: 'p1', product });
+  });
+
+  test('an unmatched held line keeps its own classification, and is never handed to the agent', () => {
+    const unmatched = { status: 'unmatched', productId: null };
+    expect(lineDisposition(unmatched, { holdAs: 'returned' }, { agentOn: true })).toBe(unmatched);
+  });
+
+  test('with the agent on, the three statuses it resolves are handed off, keeping where they came from', () => {
+    for (const status of ['unmatched', 'needs_size', 'size_mismatch']) {
+      expect(lineDisposition({ status, productId: null, product: null }, {}, { agentOn: true }))
+        .toEqual({ status: 'agent_pending', productId: null, product: null, handoffFrom: status });
+    }
+  });
+
+  test('with the agent off, or a forced placeholder, nothing is handed off', () => {
+    const unmatched = { status: 'unmatched', productId: null };
+    expect(lineDisposition(unmatched, {}, { agentOn: false })).toBe(unmatched);
+    const placeholder = { status: 'no_items', productId: null, product: null };
+    expect(lineDisposition(placeholder, { forcedStatus: 'no_items' }, { agentOn: true })).toBe(placeholder);
+    expect(lineDisposition(logged, {}, { agentOn: true })).toBe(logged);
+  });
 });
 
 describe('classifyItem', () => {
@@ -496,6 +527,65 @@ describe('processReceiptLine', () => {
     const needsSize = await processReceiptLine(taurusLine({ item: { title: 'No Size Product', quantity: 1 }, lineNo: 2 }));
     expect(needsSize).toEqual({ status: 'needs_size', inserted: true, product: noSize, lineId });
     expect(mockAdjustStock).not.toHaveBeenCalled();
+  });
+
+  describe('GATE_INVENTORY_AGENT hand-off', () => {
+    const GATE_ORIGINAL = process.env.GATE_INVENTORY_AGENT;
+    afterEach(() => {
+      if (GATE_ORIGINAL === undefined) delete process.env.GATE_INVENTORY_AGENT;
+      else process.env.GATE_INVENTORY_AGENT = GATE_ORIGINAL;
+    });
+
+    test('gate off: unmatched/needs_size/size_mismatch are byte-for-byte unchanged', async () => {
+      delete process.env.GATE_INVENTORY_AGENT;
+      const outcome = await processReceiptLine({ vendor: 'amazon', email, orderNumber: '900-7000007-7000007', shipmentKey: 'ship-1', item: { title: 'Chromebook', quantity: 1 }, lineNo: 1 });
+      expect(outcome).toEqual({ status: 'unmatched', inserted: true, product: null, lineId });
+      expect(mockAdjustStock).not.toHaveBeenCalled();
+    });
+
+    test('gate on: an unmatched line hands off to the agent — no bell, no movement, no product_id', async () => {
+      process.env.GATE_INVENTORY_AGENT = 'true';
+      const ringBell = jest.fn(async () => {});
+      const outcome = await processReceiptLine({ vendor: 'amazon', email, orderNumber: '900-7000007-7000007', shipmentKey: 'ship-1', item: { title: 'Chromebook', quantity: 1 }, lineNo: 1, ringBell });
+      expect(outcome).toEqual({ status: 'agent_pending', inserted: true, product: null, lineId });
+      expect(mockAdjustStock).not.toHaveBeenCalled();
+      expect(mockDbState.lines['amazon|900-7000007-7000007|ship-1|1']).toMatchObject({ status: 'agent_pending', product_id: null });
+      // ringBell is still invoked (processReceiptLine always calls it), but it
+      // rings nothing because 'agent_pending' isn't a HELD_REASONS entry —
+      // sweep.js's own tests cover that no-bell behavior.
+      expect(ringBell).toHaveBeenCalledTimes(1);
+    });
+
+    test('gate on: needs_size/size_mismatch also hand off, keeping the matched product_id', async () => {
+      process.env.GATE_INVENTORY_AGENT = 'true';
+      mockState.match = { matched: true, product: taurus };
+      const outcome = await processReceiptLine(taurusLine({ item: { title: 'Taurus SC Termiticide 96 oz', quantity: 1 } }));
+      expect(outcome).toEqual({ status: 'agent_pending', inserted: true, product: taurus, lineId });
+      expect(mockAdjustStock).not.toHaveBeenCalled();
+      expect(mockDbState.lines['amazon|900-1000001-1000001|ship-1|1']).toMatchObject({ status: 'agent_pending', product_id: 'p-taurus' });
+    });
+
+    test('gate on: a holdAs line never becomes agent_pending, even one the deterministic classifier would hand off', async () => {
+      process.env.GATE_INVENTORY_AGENT = 'true';
+      mockState.match = { matched: true, product: taurus };
+      const outcome = await processReceiptLine(taurusLine({ orderNumber: null, holdAs: 'no_order_number' }));
+      expect(outcome).toEqual({ status: 'no_order_number', inserted: true, product: taurus, lineId });
+    });
+
+    test('gate on: holdAs on an otherwise-unmatched line still skips hand-off (stays unmatched, not agent_pending)', async () => {
+      process.env.GATE_INVENTORY_AGENT = 'true';
+      const outcome = await processReceiptLine(taurusLine({ holdAs: 'returned', item: { title: 'Chromebook', quantity: -1 } }));
+      expect(outcome).toMatchObject({ status: 'unmatched' });
+    });
+
+    test('gate on: a forcedStatus line (no_items) never becomes agent_pending', async () => {
+      process.env.GATE_INVENTORY_AGENT = 'true';
+      const outcome = await processReceiptLine({
+        vendor: 'amazon', email, orderNumber: '900-8000008-8000008', shipmentKey: 'ship-1',
+        item: { title: 'Delivered: 1 Lawn & Garden item', quantity: 1 }, lineNo: 1, forcedStatus: 'no_items',
+      });
+      expect(outcome).toEqual({ status: 'no_items', inserted: true, product: null, lineId });
+    });
   });
 
   test('forcedStatus "no_items": one placeholder row, no matching, no inventory-operations call', async () => {

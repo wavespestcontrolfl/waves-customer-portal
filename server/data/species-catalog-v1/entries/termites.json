@@ -17,7 +17,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "6c9ff913cdaa9dc6893ae4980f58ea53ab9d99fa6360e09312ff8bead99ad267"
     },
     "slug": "subterranean-termite",
     "common_name": "Subterranean Termite",
@@ -25,11 +26,7 @@
       "subterranean termite",
       "subterranean termites",
       "termite",
-      "termites",
-      "mud tube",
-      "mud tubes",
-      "termite swarmer",
-      "swarmers"
+      "termites"
     ],
     "scientific_name": "Reticulitermes flavipes",
     "rank": "complex",
@@ -46,7 +43,7 @@
       {
         "slug": "carpenter-ant",
         "difference": "Termite swarmers have a straight waist and straight antennae; carpenter ant swarmers have a pinched waist and elbowed antennae.",
-        "next_photo": "A close-up from the side of the waist and antennae of a winged individual, next to a coin.",
+        "next_photo": "From a safe distance, zoom in from the side on the waist and antennae of a winged individual.",
         "photo_can_confirm": true
       }
     ],
@@ -134,7 +131,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "",
+      "approval_hash": "e394ceff7c81e8dcd55b6c2fbad5633d2cdc7b46b324935e9f510645b78c54c4"
     },
     "slug": "formosan-termite",
     "common_name": "Formosan Termite",
@@ -234,7 +232,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "8b01024ad6db3250f4b2d24266e727c088e8f6bb152509c7c94db0f9d10f6dfa"
     },
     "slug": "drywood-termite",
     "common_name": "Drywood Termite",
@@ -242,7 +241,6 @@
       "drywood termite",
       "drywood termites",
       "frass",
-      "termite pellets",
       "kick out holes",
       "kick-out holes"
     ],
@@ -261,7 +259,7 @@
       {
         "slug": "carpenter-ant",
         "difference": "Drywood termite pellets are hard, six-sided, and uniform; carpenter ant frass is fibrous sawdust mixed with insect parts.",
-        "next_photo": "A close-up of the pellet or debris pile next to a coin, on a light-colored surface.",
+        "next_photo": "From a safe distance, zoom in on the pellet or debris pile on a light-colored surface.",
         "photo_can_confirm": true
       }
     ],
@@ -320,6 +318,716 @@
     "links": {
       "site_page": "/pest-identifier/drywood-termite/",
       "guides": []
+    }
+  },
+  {
+    "slug": "asian-subterranean-termite",
+    "kind": "organism",
+    "common_name": "Asian Subterranean Termite",
+    "role": "structural_pest",
+    "risk": "low",
+    "action": "inspection",
+    "season_basis": "swarming",
+    "verification": [],
+    "aka": [],
+    "aliases": [
+      "asian subterranean termite",
+      "coptotermes gestroi"
+    ],
+    "scientific_name": "Coptotermes gestroi",
+    "rank": "species",
+    "group": "termites",
+    "subgroup": "subterranean-termites",
+    "site_category": "Termites",
+    "stages": [
+      "worker",
+      "soldier",
+      "winged swarmer"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Soldiers have a teardrop-shaped head with a round pore (fontanelle) on the forehead that can release a milky defensive fluid",
+      "Pale, creamy-white workers that avoid light",
+      "Swarmers are caramel-colored with wings and fly mainly February through May, often at dusk",
+      "Colonies can hollow out large living trees as well as structural wood"
+    ],
+    "look_alikes": [
+      {
+        "slug": "formosan-termite",
+        "difference": "Both are Coptotermes with a teardrop soldier head and a milky-oozing fontanelle pore; told apart only by soldier head-hair pattern under magnification",
+        "next_photo": "A technician confirms the species from a soldier sample collected on-site — a photo alone can't separate these two Coptotermes species",
+        "photo_can_confirm": false
+      }
+    ],
+    "size": "small",
+    "where": [
+      "attic-walls",
+      "trees-shrubs",
+      "garage-storage"
+    ],
+    "looks": [
+      "winged-swarmer",
+      "crawler"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": true,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "",
+    "range": "occasional",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      2,
+      3,
+      4,
+      5
+    ],
+    "service": {
+      "line": "termite",
+      "key": null,
+      "label": "Termite Protection",
+      "inspection_first": true,
+      "referral": null
+    },
+    "urgency": "high",
+    "copy": {
+      "what_it_means": "An invasive termite that has been spreading in parts of Florida and can build large colonies quickly, in trees as well as homes. A photo suggests this species but can't confirm it or the extent of any damage — that takes an in-person inspection and, for a firm species call, a lab-checked sample.",
+      "fact": "It is a tropical relative of the Formosan termite and can hollow out large, healthy trees as well as structural wood."
+    },
+    "tech_notes": "Confirm via soldier head hair pattern under magnification; visually similar to C. formosanus, cannot be split by eye alone. Full inspection for colony extent, moisture/wood contact, and tree infestations before any treatment.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN1360"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Species-level soldier ID is a magnification-level distinction from Formosan termite; app photo ID should stay suggestive only and route to inspection, per brief hard rule. Per audit item 53: traits[0] reworded from 'oozes ... when squeezed' to avoid inviting a customer to squeeze/handle a termite soldier.",
+      "approval_hash": "70fcdb242ee480f00fbcea2910ba9e631dc15df8b646ff4f70e0cead776ef079"
+    }
+  },
+  {
+    "slug": "dampwood-termite",
+    "kind": "organism",
+    "common_name": "Florida Dampwood Termite",
+    "role": "structural_pest",
+    "risk": "low",
+    "action": "inspection",
+    "season_basis": "swarming",
+    "verification": [],
+    "aka": [],
+    "aliases": [
+      "florida dampwood termite",
+      "dampwood termite",
+      "dampwood termites",
+      "neotermes castaneus"
+    ],
+    "scientific_name": "Neotermes castaneus",
+    "rank": "species",
+    "group": "termites",
+    "subgroup": null,
+    "site_category": "Termites",
+    "stages": [
+      "worker",
+      "soldier",
+      "winged swarmer"
+    ],
+    "sign_of": [],
+    "traits": [
+      "The largest termite found in Florida, with swarmer wings over half an inch long",
+      "Found in damp or decaying wood, especially dead branches on living trees, stumps and old fence posts",
+      "Does not build mud tubes and does not need soil contact",
+      "Swarms mainly in late fall and early winter, unlike most other Florida termites"
+    ],
+    "look_alikes": [
+      {
+        "slug": "drywood-termite",
+        "difference": "Dampwood termite is much larger and lives only in damp or decaying wood; drywood termite is smaller and infests dry, sound wood with no moisture problem",
+        "next_photo": "A photo with a coin next to the wings or the insect for a size comparison",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "large",
+    "where": [
+      "trees-shrubs",
+      "garage-storage",
+      "lanai-patio"
+    ],
+    "looks": [
+      "winged-swarmer",
+      "crawler"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "",
+    "range": "occasional",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      10,
+      11,
+      12
+    ],
+    "service": {
+      "line": "termite",
+      "key": null,
+      "label": "Termite Protection",
+      "inspection_first": true,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "A large termite that lives in damp, decaying wood — most often dead limbs on live trees, old stumps or wet fence posts. It's rarely a threat to sound structural wood on its own, but a sighting near the house is worth an inspection to check for a moisture problem.",
+      "fact": "It is the largest termite in the eastern United States, with swarmers whose wings can be longer than half an inch."
+    },
+    "tech_notes": "Uncommon structural pest in SE US; usually indicates chronic moisture/decay rather than a colony threat to sound wood. Inspect for the moisture source; confirm species vs drywood/subterranean before any treatment recommendation.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://edis.ifas.ufl.edu/in279"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Verdict judgment call: IFAS describes this species as not economically important in the southeastern US, so set to watch rather than call; owner may prefer call to stay consistent with other termite entries. Per audit item 37: safety.structural changed from true to false to match this entry's own copy ('rarely a threat to sound structural wood on its own') and rule 6 (structural only when the organism damages sound structural material; this species needs already-damp/decaying wood, not sound wood).",
+      "approval_hash": "5639d8ee84806f631b27e16c46342f23ea842bd2dd1154c3313bfb72b5fdc837"
+    }
+  },
+  {
+    "slug": "termite-swarmers",
+    "kind": "organism",
+    "common_name": "Termite Swarmers",
+    "role": "structural_pest",
+    "risk": "low",
+    "action": "inspection",
+    "season_basis": "swarming",
+    "verification": [],
+    "aka": [
+      "winged termites"
+    ],
+    "aliases": [
+      "termite swarmers",
+      "termite swarmer",
+      "flying termites"
+    ],
+    "scientific_name": "Isoptera (winged reproductives)",
+    "rank": "group",
+    "group": "termites",
+    "subgroup": null,
+    "site_category": "Termites",
+    "stages": [
+      "winged reproductive"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Two pairs of wings that are equal in length and both extend well past the body",
+      "Straight, bead-like (not elbowed) antennae",
+      "Thick waist with no pinch between thorax and abdomen",
+      "Often found near light fixtures or window sills with a scatter of shed wings and few or no bodies left behind"
+    ],
+    "look_alikes": [
+      {
+        "slug": "winged-ants",
+        "difference": "Termite swarmers have equal-length wing pairs, straight antennae and a thick waist; ant swarmers have unequal wings, bent antennae and a pinched waist",
+        "next_photo": "A close-up from directly above showing the waist shape and whether the wing pairs are equal length",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "lights-windows",
+      "living-areas",
+      "attic-walls"
+    ],
+    "looks": [
+      "winged-swarmer"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": true,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+    ],
+    "service": {
+      "line": "termite",
+      "key": null,
+      "label": "Termite Protection",
+      "inspection_first": true,
+      "referral": null
+    },
+    "urgency": "high",
+    "copy": {
+      "what_it_means": "Winged termites leaving a mature colony to start new ones nearby — one of the clearer warning signs of termite activity in or near a home. A photo can flag the shape, but only an inspection can find the colony and confirm the species.",
+      "fact": "A swarm can release thousands of winged termites at once, but only a tiny fraction survive to start a new colony."
+    },
+    "tech_notes": "Photo ID is suggestive only; confirm species (subterranean vs drywood vs Formosan/Asian) and locate colony with full inspection before treatment recommendation.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN369",
+      "https://ask.ifas.ufl.edu/publication/IN278",
+      "https://ask.ifas.ufl.edu/publication/IN537"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Peak months checked against three UF/IFAS EDIS species pages: native subterranean termites swarm Reticulitermes hageni (early Dec-early Feb), R. flavipes (Jan-Apr) and R. virginicus (Feb-late May) per IN369; Formosan subterranean termite swarms April-June, peak May, per IN278; drywood termite (Cryptotermes cavifrons) swarms year-round with peak March-May per IN537. Combined, this supports a Jan-June peak window rather than a single exact figure -- this entry deliberately stays a blended, multi-species estimate (as its own copy and tech_notes already say), not a claim that one set of months is exact for every species swarming in SWFL. Returned to draft after removing generic alate aliases, which can mean winged ants or termites; owner re-approval is required. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "30e0d7558aeee5fa5c89385a032f4fd5add643e09133e7a0be429851745f7bb3"
+    }
+  },
+  {
+    "slug": "termite-mud-tubes",
+    "kind": "sign",
+    "common_name": "Termite Mud Tubes",
+    "role": "structural_pest",
+    "risk": "low",
+    "action": "inspection",
+    "season_basis": "year_round",
+    "verification": [],
+    "aka": [
+      "shelter tubes"
+    ],
+    "aliases": [
+      "termite mud tubes",
+      "mud tubes",
+      "shelter tubes"
+    ],
+    "scientific_name": "Subterranean termites (sign)",
+    "rank": "group",
+    "group": "termites",
+    "subgroup": "subterranean-termites",
+    "site_category": "Termites",
+    "stages": [
+      "sign"
+    ],
+    "sign_of": [
+      "subterranean-termite",
+      "formosan-termite",
+      "asian-subterranean-termite"
+    ],
+    "traits": [
+      "Thin, pencil-width tunnels of packed dirt running up a foundation, pier or wall",
+      "Usually found where wood meets soil or concrete, often hidden behind siding, mulch or stored items",
+      "Surface crumbles easily and reveals a hollow tunnel and sometimes live termites inside",
+      "Tubes can be dry and abandoned or currently active with soft, moist mud"
+    ],
+    "look_alikes": [
+      {
+        "slug": "drywood-termite-frass",
+        "difference": "Mud tubes are built tunnels of packed dirt on a surface; drywood termite frass is loose piles of tiny pellets with no tunnel structure",
+        "next_photo": "A close-up showing whether the material is a solid tube or a loose pile of pellets",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "attic-walls",
+      "garage-storage",
+      "lanai-patio"
+    ],
+    "looks": [
+      "sign"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": true,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "service": {
+      "line": "termite",
+      "key": null,
+      "label": "Termite Protection",
+      "inspection_first": true,
+      "referral": null
+    },
+    "urgency": "high",
+    "copy": {
+      "what_it_means": "Subterranean termites build these tubes to travel safely between the soil and the wood they're feeding on. A tube is evidence of activity, but it doesn't say whether it's still in use — finding one, dry or moist, is a strong reason for an inspection rather than guessing from a photo.",
+      "fact": "The tubes exist because subterranean termites need to stay moist; the mud shields them from open, dry air as they travel."
+    },
+    "tech_notes": "Break open a short section to check for live termites/moisture before deciding active vs relic. Full inspection for extent and entry points; do not treat off a photo alone.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN1277"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "b8c9600de0bd6b5ed464bea84addb967fb9cd198ab91310b6abb8659dcc71a78"
+    }
+  },
+  {
+    "slug": "drywood-termite-frass",
+    "kind": "sign",
+    "common_name": "Termite Pellets (Frass)",
+    "role": "structural_pest",
+    "risk": "low",
+    "action": "inspection",
+    "season_basis": "year_round",
+    "verification": [],
+    "aka": [
+      "termite frass",
+      "termite droppings"
+    ],
+    "aliases": [
+      "drywood termite pellets",
+      "termite frass",
+      "termite droppings",
+      "termite pellets"
+    ],
+    "scientific_name": "Kalotermitidae (sign)",
+    "rank": "group",
+    "group": "termites",
+    "subgroup": "drywood-termites",
+    "site_category": "Termites",
+    "stages": [
+      "sign"
+    ],
+    "sign_of": [
+      "drywood-termite",
+      "dampwood-termite"
+    ],
+    "traits": [
+      "Tiny, oval pellets, about the size of ground pepper, uniform in shape",
+      "Pellets are pushed out of small round 'kick-out' holes in wood and pile up below or on nearby surfaces",
+      "Color ranges from light tan to dark brown depending on the wood",
+      "No mud, webbing or tunnel structure attached to the pile, unlike mud tubes"
+    ],
+    "look_alikes": [
+      {
+        "slug": "roach-droppings-egg-cases",
+        "difference": "Termite pellets are uniform, ridged ovals with rounded ends; roach droppings vary in size and shape and are often mixed with egg cases",
+        "next_photo": "From a safe distance, zoom in on the pile showing whether the pieces are all the same uniform shape.",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "termite-mud-tubes",
+        "difference": "Frass is a loose pile of dry pellets with no structure; mud tubes are solid, built tunnels of packed dirt",
+        "next_photo": "A close-up showing whether the material is a loose pile or a solid tube",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "tiny",
+    "where": [
+      "attic-walls",
+      "garage-storage",
+      "living-areas"
+    ],
+    "looks": [
+      "sign"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": true,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "service": {
+      "line": "termite",
+      "key": null,
+      "label": "Termite Protection",
+      "inspection_first": true,
+      "referral": null
+    },
+    "urgency": "high",
+    "copy": {
+      "what_it_means": "Drywood termites, and less often dampwood termites, push pellets like these out of the wood they feed on, so a pile points to termite activity in that wood. It doesn't show which kind, whether the colony is still active, or how far it's spread; an inspection determines that.",
+      "fact": "Drywood termites push these pellets straight out of their tunnels to keep their living space clean, which is often the only visible sign of an infestation inside sound-looking wood."
+    },
+    "tech_notes": "Look for the kick-out hole near the pellet pile; sound the surrounding wood. Full inspection before any treatment recommendation.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://journals.flvc.org/edis/article/download/117299/115411"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "c9011609fcc5e0557c5efb6878e8d2640d183f288fe1674f9de753f33d74379e"
+    }
+  },
+  {
+    "slug": "discarded-wings",
+    "kind": "sign",
+    "common_name": "Piles of Discarded Wings",
+    "role": "structural_pest",
+    "risk": "low",
+    "action": "inspection",
+    "season_basis": "swarming",
+    "verification": [],
+    "aka": [
+      "shed swarmer wings"
+    ],
+    "aliases": [
+      "discarded wings",
+      "shed wings",
+      "swarmer wings"
+    ],
+    "scientific_name": "Termite or ant swarm (sign)",
+    "rank": "group",
+    "group": "termites",
+    "subgroup": null,
+    "site_category": "Termites",
+    "stages": [
+      "sign"
+    ],
+    "sign_of": [
+      "termite-swarmers",
+      "winged-ants",
+      "subterranean-termite",
+      "drywood-termite",
+      "formosan-termite"
+    ],
+    "traits": [
+      "Small, papery, translucent wings scattered on a windowsill, floor or in a spiderweb, with few or no bodies",
+      "Usually appears suddenly after a warm evening, often following rain",
+      "Wings are shed in pairs, so look for whether the two pairs on each side are the same length or not",
+      "Found near light fixtures, windows or doors where the swarm was drawn to light"
+    ],
+    "look_alikes": [
+      {
+        "slug": "termite-swarmers",
+        "difference": "If the shed wing pairs on each side are the same length, the swarm was termites; if the front pair is clearly longer than the back pair, it was ants",
+        "next_photo": "A close, well-lit photo of a few wings laid flat, showing the length of both pairs",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "tiny",
+    "where": [
+      "lights-windows",
+      "living-areas"
+    ],
+    "looks": [
+      "sign"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      2,
+      3,
+      4,
+      5,
+      6,
+      9,
+      10
+    ],
+    "service": {
+      "line": "termite",
+      "key": null,
+      "label": "Termite Protection",
+      "inspection_first": true,
+      "referral": null
+    },
+    "urgency": "high",
+    "copy": {
+      "what_it_means": "A pile of shed wings with no bodies means a swarm happened nearby, and wing shape is the fastest way to suggest whether it was termites or ants. Either way, a swarm indoors means a colony is close by, so it's worth an inspection to find it and confirm what it was.",
+      "fact": "Swarmers shed their wings within minutes of landing because a pair that has already mated has no more use for flight."
+    },
+    "tech_notes": "Wing-pair length ratio is the key photo clue for termite vs ant; confirm with full inspection to locate the parent colony regardless of which it turns out to be.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://blogs.ifas.ufl.edu/monroeco/2020/05/13/rainy-season-and-termite-swarms/"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "This entry's own design already avoids the overclaim in the verification note: it never asserts a wing pile is always termites (sign_of lists both termite-swarmers and winged-ants, copy says wing shape is what 'suggests' termite vs ant, and tech_notes call for a full inspection either way). Ants also shed their wings after a mating flight (see the winged-ants entry's own traits), so a bodies-free wing pile can genuinely come from either group; role/risk default to the more consequential possibility (termites) as a cautious default pending the wing-length check, which matches how this entry is actually written.",
+      "approval_hash": "83e8ca1415625e8243b19e7d099406ee2c3adf74dbfbf32a69ee241460fa6cd4"
     }
   }
 ]

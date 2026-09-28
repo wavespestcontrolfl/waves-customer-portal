@@ -1019,6 +1019,37 @@ describe('OpenAI candidates — GATE_VOICE_RELAY_OPENAI wiring', () => {
   });
 });
 
+describe('thinking-always-on Anthropic candidates (Opus 5.5+) — no gate needed', () => {
+  const OPUS_55 = 'claude-opus-5-5';
+  let savedAnthropicKey;
+
+  beforeEach(() => {
+    savedAnthropicKey = process.env.ANTHROPIC_API_KEY;
+    process.env.ANTHROPIC_API_KEY = 'sk-ant-test';
+  });
+
+  afterEach(() => {
+    if (savedAnthropicKey === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = savedAnthropicKey;
+  });
+
+  test('buildConditions never sets GATE_VOICE_RELAY_OPENAI for it — plain Anthropic, just a different request shape', () => {
+    const conditions = buildConditions(OPUS_55, 'anthropic');
+    expect(conditions.find((c) => c.id === 'candidate-block').env).toEqual({ VOICE_RELAY_INBOUND_MODEL: OPUS_55 });
+    for (const c of conditions) expect(c.env).not.toHaveProperty('GATE_VOICE_RELAY_OPENAI');
+  });
+
+  test('is accepted by the allowlist check even though it is EXCLUDED from ALLOWED_OVERRIDE_MODEL_IDS', () => {
+    const { ALLOWED_OVERRIDE_MODEL_IDS, ANTHROPIC_SANDBOX_OVERRIDE_MODEL_IDS } = require('../services/voice-agent/relay-conversation');
+    expect(ALLOWED_OVERRIDE_MODEL_IDS.has(OPUS_55)).toBe(false);
+    expect(ANTHROPIC_SANDBOX_OVERRIDE_MODEL_IDS.has(OPUS_55)).toBe(true);
+    const execFileImpl = (file, args, opts, cb) => {
+      cb(null, JSON.stringify({ status: 'pass', summary: { scenarios: 1, passed: 1 }, attempts: [{ status: 'pass', summary: { scenarios: 1, passed: 1 } }] }), '');
+    };
+    return expect(runBenchmark({ argv: [`--candidate-model=${OPUS_55}`, '--trials=1'], execFileImpl }))
+      .resolves.toMatchObject({ exitCode: 0 });
+  });
+});
+
 describe('CHILD_TIMEOUT_MS — a ceiling compatible with the eval harness\'s own operational bound', () => {
   // Each child this runner spawns IS a full run-voice-relay-eval.js
   // invocation (the shipped fixture, its own retry-once wrapper, and

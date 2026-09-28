@@ -18,7 +18,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "",
+      "approval_hash": "f590a6812c6d77acb0ec994fffefe9c516145b4ad266d3c315b8e232eb5fd086"
     },
     "slug": "american-cockroach",
     "common_name": "American Cockroach",
@@ -132,7 +133,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": "Sourced from a UF entomology project gallery page rather than a Featured Creatures EDIS number; the dedicated EDIS page for this species could not be located during this pass."
+      "notes": "Sourced from a UF entomology project gallery page rather than a Featured Creatures EDIS number; the dedicated EDIS page for this species could not be located during this pass.",
+      "approval_hash": "fb5ad86d489a47fd2d6e071d2090023605dcf7c7a49f943f0c5c82195e786d6d"
     },
     "slug": "smokybrown-cockroach",
     "common_name": "Smokybrown Cockroach",
@@ -242,7 +244,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "2f97adc40f7220c3d146f7332d6167e4b42361e6e32bc30118cfc11f09cb5aab"
     },
     "slug": "german-cockroach",
     "common_name": "German Cockroach",
@@ -254,7 +257,7 @@
     "scientific_name": "Blattella germanica",
     "rank": "species",
     "group": "roaches",
-    "subgroup": "small-roaches",
+    "subgroup": "high-risk-indoor-roaches",
     "site_category": "Roaches",
     "traits": [
       "Small, tan, with two dark parallel racing stripes behind the head",
@@ -266,7 +269,7 @@
       {
         "slug": "brown-banded-cockroach",
         "difference": "German cockroaches have two straight parallel stripes on the pronotum; brown-banded cockroaches have bands across the wings and a more mottled look.",
-        "next_photo": "A close-up from above of the stripe or band pattern, next to a coin.",
+        "next_photo": "From a safe distance, zoom in from above on the stripe or band pattern.",
         "photo_can_confirm": true
       }
     ],
@@ -340,6 +343,931 @@
     "links": {
       "site_page": "/pest-identifier/german-cockroach/",
       "guides": []
+    }
+  },
+  {
+    "slug": "florida-woods-roach",
+    "kind": "organism",
+    "common_name": "Florida Woods Roach",
+    "role": "nuisance",
+    "risk": "irritant",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": [],
+    "aka": [
+      "stink roach",
+      "skunk cockroach"
+    ],
+    "aliases": [
+      "florida woods roach",
+      "stink roach",
+      "skunk cockroach",
+      "eurycotis floridana"
+    ],
+    "scientific_name": "Eurycotis floridana",
+    "rank": "species",
+    "group": "roaches",
+    "subgroup": "large-roaches",
+    "site_category": "Roaches",
+    "stages": [
+      "nymph",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Large, wide, dark reddish-brown to black roach, up to about 1.5 inches long",
+      "Only short wing pads, never full wings; adults cannot fly",
+      "Releases a strong, skunky odor when threatened or crushed",
+      "Found outdoors in mulch, woodpiles, palmetto thatch and under rotting logs, not usually deep inside a house"
+    ],
+    "look_alikes": [
+      {
+        "slug": "smokybrown-cockroach",
+        "difference": "Florida woods roach has only short wing pads and cannot fly; smokybrown cockroach has full, shiny wings and flies well",
+        "next_photo": "From a safe distance, a zoomed photo from directly above showing whether the wings cover the abdomen or stop short.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "large",
+    "where": [
+      "lawn-garden",
+      "lanai-patio",
+      "garage-storage"
+    ],
+    "looks": [
+      "roach-like"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": true,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": true
+    },
+    "safety_line": "Releases a strong-smelling defensive spray if handled or crushed; wash hands after contact.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A large, flightless outdoor roach common in mulch and landscaping around Southwest Florida homes. It rarely sets up indoors, so most sightings just call for less mulch and debris right against the foundation.",
+      "fact": "It is sometimes called the stink roach because it sprays a skunk-like defensive fluid when it feels threatened."
+    },
+    "tech_notes": "Peridomestic species; does not typically colonize indoors. Reduce harborage (mulch, woodpiles) against foundation; perimeter treatment per label if numbers are heavy.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://journals.flvc.org/edis/article/view/119483"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Per audit item 55: removed the 'palmetto bug' alias/aka, which also appears on american-cockroach (A entry) -- that is the more classic Florida usage for the American cockroach specifically, so it's kept there and dropped here to avoid a shared-name collision. 'Stink roach' and 'skunk cockroach' remain distinctive to this species. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "ab9afb7c5b63447e34342e4a161b3fdedcda765175670ad33db698e75819c1d5"
+    }
+  },
+  {
+    "slug": "australian-cockroach",
+    "kind": "organism",
+    "common_name": "Australian Cockroach",
+    "role": "nuisance",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": [],
+    "aka": [],
+    "aliases": [
+      "australian cockroach",
+      "australian cockroaches",
+      "periplaneta australasiae"
+    ],
+    "scientific_name": "Periplaneta australasiae",
+    "rank": "species",
+    "group": "roaches",
+    "subgroup": "large-roaches",
+    "site_category": "Roaches",
+    "stages": [
+      "nymph",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Large, reddish-brown roach similar in size to an American cockroach",
+      "Pale yellow stripe along the leading edge of each wing, near the head",
+      "Pale yellow band around the edge of the shield behind the head (pronotum)",
+      "Flies readily and is often found around outdoor plants and mulch as well as indoors"
+    ],
+    "look_alikes": [
+      {
+        "slug": "american-cockroach",
+        "difference": "Australian cockroach has a yellow stripe along the front edge of each wing; American cockroach's wings are plain reddish-brown with no yellow wing stripe",
+        "next_photo": "A close-up from directly above showing the front edge of the wings and the band around the pronotum",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "large",
+    "where": [
+      "lanai-patio",
+      "lawn-garden",
+      "attic-walls",
+      "garage-storage"
+    ],
+    "looks": [
+      "roach-like"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "Can contaminate food and surfaces it crawls over; wash any exposed dishes or counters.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "A large, flying roach that behaves a lot like the American cockroach, moving between mulch, plants and the house. An occasional sighting outdoors is normal in Florida; a technician can evaluate if it's getting inside regularly, especially around door thresholds and vents.",
+      "fact": "Despite the name, it likely originated in Africa and simply picked up the 'Australian' name from where it was first described."
+    },
+    "tech_notes": "Confirm yellow wing stripe/pronotum band to rule out American cockroach. Perimeter and harborage treatment per label; check attic/soffit vents for entry points.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Australian_cockroach"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Primary distinguishing traits (yellow wing stripe, pronotum band) cross-checked across several pest-control and reference sources; could not load a UF/IFAS EENY page dedicated specifically to this species. Per audit item 52: aligned verdict/role/risk/action/safety.allergen with american-cockroach (A entry, read for reference) -- this is a closely related Periplaneta species that this entry's own copy says 'behaves a lot like the American cockroach,' so there was no documented basis for the earlier call/specialist/allergen-true posture being more severe than its American counterpart's watch/monitor/allergen-false. A-side (american-cockroach) should be checked to confirm it stays at this same posture once its own audit fixes (item 9) land.",
+      "approval_hash": "484c92982acfa84ba154b049d68f85dad4e243129d42f3d831f52e7825d01f12"
+    }
+  },
+  {
+    "slug": "brown-cockroach",
+    "kind": "organism",
+    "common_name": "Brown Cockroach",
+    "role": "nuisance",
+    "risk": "low",
+    "action": "specialist",
+    "season_basis": "year_round",
+    "verification": [],
+    "aka": [],
+    "aliases": [
+      "brown cockroach",
+      "brown cockroaches",
+      "periplaneta brunnea"
+    ],
+    "scientific_name": "Periplaneta brunnea",
+    "rank": "species",
+    "group": "roaches",
+    "subgroup": "large-roaches",
+    "site_category": "Roaches",
+    "stages": [
+      "nymph",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Large reddish-brown roach, almost identical in size and color to an American cockroach",
+      "Short, blunt, stubby tail appendages (cerci) at the tip of the abdomen",
+      "Wings held flat and shorter relative to the body than an American cockroach's",
+      "Found in tree holes, mulch, attics and wall voids, especially in warmer, humid spots"
+    ],
+    "look_alikes": [
+      {
+        "slug": "american-cockroach",
+        "difference": "Brown cockroach has short, stubby tail appendages at the abdomen tip; American cockroach's tail appendages are long and thread-like",
+        "next_photo": "A close-up straight down the tail end of the roach, filling the frame with just the abdomen tip",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "large",
+    "where": [
+      "attic-walls",
+      "garage-storage",
+      "lawn-garden"
+    ],
+    "looks": [
+      "roach-like"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": true,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "Can contaminate food and surfaces it crawls over; wash any exposed dishes or counters.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "A large roach that is easy to mistake for the American cockroach but tends to breed higher up, in attics, palm boots and wall voids, rather than mostly at ground level. Worth treating like any other large roach problem.",
+      "fact": "It prefers to glue its egg case out of sight in a hidden crevice rather than carrying it around, which is one reason infestations can go unnoticed for a while."
+    },
+    "tech_notes": "Confirm via short/stubby cerci vs American cockroach's long cerci. Check attics, palm boots and upper wall voids in addition to usual ground-level harborage; treat per label.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://entnemdept.ufl.edu/projex/gallery/dl/cockroaches/text/brown_cockroach.htm"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "bc42b2d9459f008ba41bc46784ceeb41ffe362ed8a1f6cbd2f12b58c69a85436"
+    }
+  },
+  {
+    "slug": "asian-cockroach",
+    "kind": "organism",
+    "common_name": "Asian Cockroach",
+    "role": "nuisance",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "observed",
+    "verification": [],
+    "aka": [],
+    "aliases": [
+      "asian cockroach",
+      "asian cockroaches",
+      "blattella asahinai"
+    ],
+    "scientific_name": "Blattella asahinai",
+    "rank": "species",
+    "group": "roaches",
+    "subgroup": "small-roaches",
+    "site_category": "Roaches",
+    "stages": [
+      "nymph",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Small, light brown roach with two dark stripes behind the head, nearly identical to a German cockroach",
+      "Flies readily and strongly, often bursting into flight when disturbed",
+      "Drawn to lights at dusk and often seen swarming around porch lights or windows from outside",
+      "Lives mainly in mulch, thatch and leaf litter rather than setting up long-term indoor colonies"
+    ],
+    "look_alikes": [
+      {
+        "slug": "german-cockroach",
+        "difference": "Asian cockroach flies readily and is drawn outdoors to light at dusk; German cockroach looks nearly identical but rarely flies and stays hidden indoors",
+        "next_photo": "From a safe distance, take a short video showing whether it takes flight when approached.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "lawn-garden",
+      "lights-windows",
+      "lanai-patio"
+    ],
+    "looks": [
+      "roach-like"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": true,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "",
+    "range": "common",
+    "active_months": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A strong-flying lawn roach that swarms toward outdoor lights at dusk and can look just like a German cockroach, but it lives in the grass and mulch rather than nesting inside. Reducing outdoor lighting and treating the yard usually help more than spraying indoors.",
+      "fact": "It looks almost identical to the German cockroach, but flight is the tell — this one flies readily and the German cockroach almost never does."
+    },
+    "tech_notes": "Behavioral ID (flight, outdoor light attraction) is the practical way to separate from B. germanica since they look nearly identical. Focus treatment on lawn/mulch harborage and exterior lighting fixtures rather than indoor voids.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://blogs.ifas.ufl.edu/pestalert/2020/04/17/which-roach-is-around-your-yard/"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "53682a7799d17d2b538d88a70a9470bc77d9830e02d8c1fe0c0e8c17e1a2f9c8"
+    }
+  },
+  {
+    "slug": "brown-banded-cockroach",
+    "kind": "organism",
+    "common_name": "Brown-banded Cockroach",
+    "role": "nuisance",
+    "risk": "low",
+    "action": "specialist",
+    "season_basis": "year_round",
+    "verification": [],
+    "aka": [],
+    "aliases": [
+      "brown banded cockroach",
+      "brown banded cockroaches",
+      "supella longipalpa"
+    ],
+    "scientific_name": "Supella longipalpa",
+    "rank": "species",
+    "group": "roaches",
+    "subgroup": "small-roaches",
+    "site_category": "Roaches",
+    "stages": [
+      "nymph",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Small tan to dark brown roach with two light bands crossing the wings and abdomen",
+      "Males have wings longer than the body and a more slender look than females",
+      "Prefers warm, dry spots up high, like inside cabinets, behind picture frames and inside electronics",
+      "Rarely found near sinks or drains, unlike most other indoor roaches"
+    ],
+    "look_alikes": [
+      {
+        "slug": "german-cockroach",
+        "difference": "Brown-banded has two pale crossbands and stays up high in dry areas; German cockroach has two dark stripes behind the head and stays low near water",
+        "next_photo": "From a safe distance, zoom in from above showing whether the pale marks are crossbands on the wings or stripes behind the head.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "living-areas",
+      "bedroom",
+      "kitchen",
+      "garage-storage"
+    ],
+    "looks": [
+      "roach-like"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": true,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "Can contaminate food and surfaces it crawls over; wash any exposed dishes or counters.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "A small roach that spreads out through a home instead of staying near the kitchen sink, so it often turns up in bedrooms, closets and behind picture frames. It breeds indoors year-round, so it's worth treating like any established roach problem.",
+      "fact": "Unlike most household roaches, it can thrive in dry rooms far from water because it gets enough moisture from the food it eats."
+    },
+    "tech_notes": "Check up high (cabinets, picture frames, electronics, closets) as well as usual low harborage; egg cases are often glued to hidden surfaces away from the ootheca-carrying female. Treat per label.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://www.fws.gov/species/brownbanded-cockroach-supella-longipalpa"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "0769f0bf6013b4f3ca540a1868cfc4e6a201957be3d89f6925d9bc1d56ef3f76"
+    }
+  },
+  {
+    "slug": "surinam-cockroach",
+    "kind": "organism",
+    "common_name": "Surinam Cockroach",
+    "role": "plant_pest",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": [],
+    "aka": [
+      "greenhouse cockroach"
+    ],
+    "aliases": [
+      "surinam cockroach",
+      "surinam cockroaches",
+      "greenhouse cockroach",
+      "pycnoscelus surinamensis"
+    ],
+    "scientific_name": "Pycnoscelus surinamensis",
+    "rank": "species",
+    "group": "roaches",
+    "subgroup": null,
+    "site_category": "Roaches",
+    "stages": [
+      "nymph",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Small, shiny, dark brown to black roach with pale tan wings that leave the tip of the head visible",
+      "Burrows a few inches into loose soil, mulch, compost and lawn thatch rather than hiding under debris",
+      "Feeds on plant roots and can wilt or damage container plants and garden beds",
+      "Almost never found deep indoors; stays in soil, mulch and potted plants"
+    ],
+    "look_alikes": [
+      {
+        "slug": "cuban-cockroach",
+        "difference": "Surinam cockroach is dark brown to black and burrows in soil and mulch; Cuban cockroach is pale green and flies to lights instead of digging",
+        "next_photo": "A photo on a light background showing the overall body color",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "lawn-garden",
+      "trees-shrubs"
+    ],
+    "looks": [
+      "roach-like"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A burrowing roach that lives in mulch, compost and potted plant soil and feeds on roots, which can stress container plants and garden beds. It's a yard and garden nuisance rather than a home-invading pest.",
+      "fact": "Nearly all Surinam cockroaches are female; the species reproduces largely by cloning itself without needing to mate."
+    },
+    "tech_notes": "Check potted plant soil and mulch beds for burrowing damage on ornamentals. Reduce mulch depth/moisture; perimeter or bed treatment per label if damaging valued plants.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Surinam_cockroach"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Primary source is Wikipedia cross-checked against pest-industry summaries; could not load a dedicated UF/IFAS EENY page for this species in this session.",
+      "approval_hash": "155493294a39319585a871d3ea45a6551efaa8daad291b3b6cec490c478890dc"
+    }
+  },
+  {
+    "slug": "cuban-cockroach",
+    "kind": "organism",
+    "common_name": "Cuban Cockroach (green banana roach)",
+    "role": "harmless_visitor",
+    "risk": "low",
+    "action": "leave_alone",
+    "season_basis": "observed",
+    "verification": [],
+    "aka": [
+      "green banana roach",
+      "banana cockroach"
+    ],
+    "aliases": [
+      "cuban cockroach",
+      "green banana roach",
+      "banana cockroach",
+      "panchlora nivea"
+    ],
+    "scientific_name": "Panchlora nivea",
+    "rank": "species",
+    "group": "roaches",
+    "subgroup": null,
+    "site_category": "Roaches",
+    "stages": [
+      "nymph",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Pale green to yellow-green roach, unlike any other common Florida roach color",
+      "Strong flier, often seen at night circling porch lights or landing on screens",
+      "Adults are small and delicate-looking with a thin yellow line along the body edges",
+      "Rarely found indoors and does not form indoor colonies"
+    ],
+    "look_alikes": [
+      {
+        "slug": "surinam-cockroach",
+        "difference": "Cuban cockroach is pale green and flies to lights; Surinam cockroach is dark brown to black and burrows in soil instead of flying",
+        "next_photo": "A photo on a light background showing the overall body color",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "lanai-patio",
+      "lights-windows",
+      "trees-shrubs"
+    ],
+    "looks": [
+      "roach-like"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "",
+    "range": "occasional",
+    "active_months": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A harmless-looking, pale green roach that lives in trees, shrubs and leaf litter and only shows up around porch lights at night. It isn't known to bite, doesn't go after indoor food, and isn't worth treating on its own.",
+      "fact": "Its pale green color and habit of hitchhiking on fruit shipments from the Caribbean are how it earned the nickname banana roach."
+    },
+    "tech_notes": "Outdoor, light-attracted species; does not establish indoor infestations. No treatment typically warranted beyond reducing unnecessary exterior lighting if it is a nuisance.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Panchlora_nivea"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Could not load a dedicated UF/IFAS EENY page for this species in this session; facts cross-checked across multiple general reference/pest-industry sources.",
+      "approval_hash": "f7dd35d0b757ddb80c4185d981c7169b74f7c02543dbccd7ef9ea2b2bfb02c2a"
+    }
+  },
+  {
+    "slug": "roach-droppings-egg-cases",
+    "kind": "sign",
+    "common_name": "Roach Droppings and Egg Cases",
+    "role": "nuisance",
+    "risk": "medical",
+    "action": "specialist",
+    "season_basis": "year_round",
+    "verification": [],
+    "aka": [
+      "roach frass",
+      "ootheca"
+    ],
+    "aliases": [
+      "roach droppings",
+      "roach egg cases",
+      "ootheca",
+      "roach frass"
+    ],
+    "scientific_name": "Blattodea (sign)",
+    "rank": "group",
+    "group": "roaches",
+    "subgroup": "roach-signs",
+    "site_category": "Roaches",
+    "stages": [
+      "sign"
+    ],
+    "sign_of": [
+      "german-cockroach",
+      "american-cockroach",
+      "smokybrown-cockroach",
+      "brown-banded-cockroach",
+      "asian-cockroach"
+    ],
+    "traits": [
+      "Droppings look like coarse ground pepper or small dark smears, often streaked along edges where roaches travel",
+      "Egg cases (oothecae) are hard, purse- or bean-shaped capsules with a ridged seam along one edge",
+      "Found clustered in cabinet corners, behind appliances, under sinks and along baseboards",
+      "A strong, musty, oily smell in a cabinet or pantry often shows up alongside heavier droppings"
+    ],
+    "look_alikes": [
+      {
+        "slug": "drywood-termite-frass",
+        "difference": "Roach droppings vary in size and are often smeared or mixed with irregular egg cases; drywood termite pellets are uniform, ridged ovals with no smearing",
+        "next_photo": "From a safe distance, zoom in on the pile showing whether the pieces are uniform in shape or mixed and smeared.",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "bed-bug-signs",
+        "difference": "Roach droppings show up in cabinets and along baseboards; bed bug signs (dark spotting, shed skins) cluster on mattress seams and bed frames",
+        "next_photo": "From a safe distance, zoom in on the mattress seam or bed frame instead of the kitchen or pantry area.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "tiny",
+    "where": [
+      "kitchen",
+      "bathroom",
+      "garage-storage"
+    ],
+    "looks": [
+      "sign"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": true,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "Wipe down and disinfect any surfaces where droppings or egg cases are found before storing food or dishes there again.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "high",
+    "copy": {
+      "what_it_means": "Droppings and egg cases suggest roaches are breeding nearby rather than just passing through, though the amount and spread are what actually confirm that. Finding them in a kitchen or bathroom is a good reason to have it looked at even without spotting a live roach.",
+      "fact": "A single egg case can hold dozens of roach eggs, which is why droppings and cases turning up together often point to an established population."
+    },
+    "tech_notes": "Note distribution (kitchen/bath vs bedroom/closet) to help narrow likely species before treatment. Clean thoroughly and treat harborage per label; heavy droppings suggest an established population, not an occasional wanderer.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://journals.flvc.org/edis/article/view/119483"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "76145c6a43c2533e0547857736488f236981a33e5ee52df4deeaf156b6d9e05e"
     }
   }
 ]

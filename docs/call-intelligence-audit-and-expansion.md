@@ -245,7 +245,15 @@ basis, matched_at), `human_state` (confirmed|dismissed|edited), `human_note`,
 **Fulfillment** (`refreshFulfillment`, run on read): two strengths of proof.
 *Direct* — a later record linked to this call (a `scheduled_services` row
 with `source_call_log_id` = this call, the estimate on the lead this call
-minted, the invoice for that visit) — marks the open AI row fulfilled.
+minted, the invoice for that visit), or, for a `schedule_visit` promise, a
+same-customer visit booked after the call, before the slot came, for exactly
+its stated slot (the
+stated ET day and start minute, confirmed by the call's own scheduling
+extraction; not a deadline; owner ruling 2026-09-27) — marks the open AI row
+fulfilled. That slot proof is never final: every refresh judges it again (the
+commitments watchdog sweeps any whose visit or call no longer supports it), so a
+cancelled, skipped or moved visit, a changed confirmed slot or a relink
+reopens it.
 *Association* — a record that merely belongs to the same customer or phone
 within 14 days (a `confirmation` text to the caller, a completed outbound
 call ≥20 s, an inbound message with media, a customer estimate/visit/invoice)

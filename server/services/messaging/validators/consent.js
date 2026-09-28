@@ -217,7 +217,9 @@ async function checkConsentForPurpose(input, policy, contactState) {
       retryable: true, deliveryOutcome: 'not_sent',
     };
   }
-  if (input.channel === 'email' && prefs.email_enabled === false) {
+  // The portal-wide email switch never stops a billing email: payment emails
+  // cannot be turned off (owner ruling 2026-09-26). Texts still honor STOP.
+  if (input.channel === 'email' && prefs.email_enabled === false && !billingDeliveryCategory(input)) {
     return { ok: false, code: 'EMAIL_OPTED_OUT', reason: 'Recipient has disabled email notifications' };
   }
   const toggles = contactState?.propertyToggles || prefs;
@@ -229,13 +231,10 @@ async function checkConsentForPurpose(input, policy, contactState) {
     && !purposeToggledOff
     && (policy.channelGate !== 'opt_in' || input.hasEmailLeg === true);
   if (channelGateApplies && prefs[policy.channelColumn] === 'email') {
-    // email_enabled=false is the portal-wide email opt-out: every receipt /
-    // billing email leg skips it, so an address on file is NOT deliverable —
-    // suppressing the SMS too would drop the notice entirely. The portal UI
-    // now locks the dropdowns to Text in that state, but pre-existing rows
-    // and direct preference writes can still carry channel='email'.
-    const deliverableEmail = prefs.email_enabled !== false
-      && (prefs.billing_email || contactState.customer?.email);
+    // Only the billing and payment_receipt policies carry a channelColumn,
+    // and their email legs send whatever the portal-wide email switch says
+    // (owner ruling 2026-09-26), so an address on file is deliverable.
+    const deliverableEmail = prefs.billing_email || contactState.customer?.email;
     if (deliverableEmail) {
       return {
         ok: false,

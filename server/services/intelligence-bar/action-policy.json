@@ -87,6 +87,14 @@
     "approval": "ui_confirm",
     "scope": "record"
   },
+  "cancel_pending_payout": {
+    "module": "banking-tools.js",
+    "domain": "banking",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "confirmed_endpoint",
+    "scope": "none"
+  },
   "cancel_plan": {
     "module": "tools.js",
     "domain": "customers",
@@ -413,6 +421,14 @@
     "kind": "read",
     "role": "admin",
     "approval": null,
+    "scope": "record"
+  },
+  "repair_closeout": {
+    "module": "closeout-repair-tools.js",
+    "domain": "closeout",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
     "scope": "record"
   },
   "get_cloudflare_edge_errors": {
@@ -1286,6 +1302,14 @@
     "role": "admin",
     "approval": null,
     "scope": "broad"
+  },
+  "list_pending_payouts": {
+    "module": "banking-tools.js",
+    "domain": "banking",
+    "kind": "read",
+    "role": "admin",
+    "approval": null,
+    "scope": "none"
   },
   "lookup_property": {
     "module": "estimate-tools.js",

@@ -31,7 +31,15 @@ jest.mock('../services/invoice-followups', () => ({
 }));
 jest.mock('../services/invoice-issued-closeout', () => ({ closeOutVisitForIssuedInvoice: jest.fn(async () => null), issuedCloseoutOwnsRecord: () => false }));
 jest.mock('../services/inspection-credit', () => ({ reverseInspectionCreditForBooking: jest.fn(async () => null) }));
-jest.mock('../services/annual-prepay-renewals', () => ({ syncTermForInvoicePayment: async () => null }));
+// Chokepoint B (Codex #4971): invoice writers (voidInvoice, the cancelled-
+// visit auto-void) take the renewal parent-decision gate at transaction
+// entry — no termite term here, so the gate takes nothing.
+jest.mock('../services/annual-prepay-renewals', () => ({
+  syncTermForInvoicePayment: async () => null,
+  acquireTermiteGateAtEntry: async () => [],
+  acquireTermiteGateForCharge: async () => [],
+  acquireTermiteGateForStatement: async () => [],
+}));
 jest.mock('../services/lead-estimate-link', () => ({ convertLeadFromEvent: async () => null }));
 jest.mock('../config/feature-gates', () => ({ gateEnvTimestamp: () => null, isEnabled: () => false }));
 jest.mock('../services/review-request', () => ({ enrollForPaidInvoice: jest.fn(async () => ({ enrolled: true })) }));

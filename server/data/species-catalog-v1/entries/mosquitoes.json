@@ -1,9 +1,7 @@
 [
   {
     "kind": "organism",
-    "aka": [
-      "Container Mosquito"
-    ],
+    "aka": [],
     "stages": [
       "larva",
       "adult"
@@ -18,13 +16,13 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "da022a9120d6b2abafda4eac93419e014036165a360585308d86243eff962988"
     },
     "slug": "aedes-mosquito",
     "common_name": "Yellow Fever Mosquito",
     "aliases": [
       "yellow fever mosquito",
-      "container mosquito",
       "aedes aegypti"
     ],
     "scientific_name": "Aedes aegypti",
@@ -42,7 +40,7 @@
       {
         "slug": "asian-tiger-mosquito",
         "difference": "Yellow fever mosquito has a lyre-shaped mark on the thorax; Asian tiger mosquito has a single straight white stripe down the center of the back.",
-        "next_photo": "A close-up of the back (thorax) while it rests on skin or a wall.",
+        "next_photo": "From a safe distance, use zoom on the thorax while it rests on a wall or another non-contact surface. Never use skin as a perch.",
         "photo_can_confirm": true
       }
     ],
@@ -128,7 +126,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "c75e13e3ec40577d7c38f1aca17ffffc6eda6aff34d4a22fabce26e576714092"
     },
     "slug": "asian-tiger-mosquito",
     "common_name": "Asian Tiger Mosquito",
@@ -152,7 +151,7 @@
       {
         "slug": "aedes-mosquito",
         "difference": "Asian tiger mosquito has one straight white stripe down the back; yellow fever mosquito has a lyre-shaped mark instead.",
-        "next_photo": "A close-up of the back (thorax) while it rests on skin or a wall.",
+        "next_photo": "From a safe distance, use zoom on the thorax while it rests on a wall or another non-contact surface. Never use skin as a perch.",
         "photo_can_confirm": true
       }
     ],
@@ -219,6 +218,451 @@
     "links": {
       "site_page": "/pest-identifier/asian-tiger-mosquito/",
       "guides": []
+    }
+  },
+  {
+    "slug": "southern-house-mosquito",
+    "kind": "organism",
+    "common_name": "Southern House Mosquito",
+    "role": "health_pest",
+    "risk": "medical",
+    "action": "specialist",
+    "season_basis": "year_round",
+    "verification": [],
+    "aka": [],
+    "aliases": [
+      "southern house mosquito",
+      "culex quinquefasciatus"
+    ],
+    "scientific_name": "Culex quinquefasciatus",
+    "rank": "species",
+    "group": "mosquitoes",
+    "subgroup": "culex-mosquitoes",
+    "site_category": "Mosquitoes & biters",
+    "stages": [
+      "larva",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Medium, plain light-brown mosquito with faint pale bands on the legs and abdomen",
+      "Bites mainly at dusk, night and dawn rather than in bright daylight",
+      "Breeds in stagnant, often dirty water: clogged gutters, ditches, birdbaths, storm drains",
+      "Rests with its body nearly parallel to the surface it lands on"
+    ],
+    "look_alikes": [
+      {
+        "slug": "asian-tiger-mosquito",
+        "difference": "Southern house mosquito is plain brown and bites at night; Asian tiger mosquito has bold black-and-white stripes and bites during the day",
+        "next_photo": "From a safe distance, zoom in showing whether the legs and body have bold white stripes or are plain brown.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "lanai-patio",
+      "lawn-garden",
+      "pool-water"
+    ],
+    "looks": [
+      "flying-biter"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": false,
+      "disease_vector": true,
+      "structural": false,
+      "allergen": true,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "Can spread West Nile virus and other diseases carried between birds and people. See a doctor if a bite site becomes very swollen or you develop a fever after being bitten.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "service": {
+      "line": "mosquito",
+      "key": "mosquito",
+      "label": "Mosquito Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "high",
+    "copy": {
+      "what_it_means": "Florida's most common night-biting mosquito, and the main local carrier of West Nile virus, breeding in stagnant water around the yard. Dumping standing water and routine mosquito treatment both help knock down numbers.",
+      "fact": "It picks up West Nile virus by feeding on infected birds, then can pass it along the next time it bites a person or another animal."
+    },
+    "tech_notes": "Primary WNV/SLE vector in FL; inspect for stagnant/organic-rich water sources (clogged gutters, drains, containers). Larvicide breeding sites and barrier-treat vegetation per label.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN837"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "ac94c79ef82c9fb98a5ea54a6645a9bcb2f9821b90af5cfa9af92dfb513e6a57"
+    }
+  },
+  {
+    "slug": "gallinipper",
+    "kind": "organism",
+    "common_name": "Gallinipper",
+    "role": "nuisance",
+    "risk": "defensive",
+    "action": "fix_conditions",
+    "season_basis": "observed",
+    "verification": [],
+    "aka": [
+      "american gallinipper",
+      "shaggy-legged gallinipper"
+    ],
+    "aliases": [
+      "gallinipper",
+      "gallinippers",
+      "american gallinipper",
+      "psorophora ciliata"
+    ],
+    "scientific_name": "Psorophora ciliata",
+    "rank": "species",
+    "group": "mosquitoes",
+    "subgroup": null,
+    "site_category": "Mosquitoes & biters",
+    "stages": [
+      "larva",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Huge mosquito, up to about half an inch long, several times the size of a typical mosquito",
+      "Black-and-white patterned body and noticeably hairy, banded legs",
+      "Bites hard enough that people often feel it right away, unlike most mosquito bites",
+      "Shows up suddenly in large numbers after heavy rain or flooding, then fades over a few weeks"
+    ],
+    "look_alikes": [
+      {
+        "slug": "asian-tiger-mosquito",
+        "difference": "Gallinipper is much bigger, roughly the size of a small fly, with shaggy legs; Asian tiger mosquito is normal mosquito size with clean, sharp white stripes",
+        "next_photo": "From a safe distance, zoom in to compare overall size and leg thickness to a typical mosquito.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "medium",
+    "where": [
+      "lawn-garden",
+      "lanai-patio"
+    ],
+    "looks": [
+      "flying-biter"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": true,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "The bite is unusually painful for a mosquito and can leave a larger welt than most mosquito bites.",
+    "range": "occasional",
+    "active_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "peak_months": [
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "mosquito",
+      "key": "mosquito",
+      "label": "Mosquito Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "An oversized, hard-biting mosquito that appears in bursts after heavy rain or flooding, then dies back within a few weeks. It's more painful than dangerous; draining any standing floodwater and a technician-timed treatment after a big rain event both help knock numbers down.",
+      "fact": "Its eggs can sit dry in the soil for years and only hatch once flooding rain covers them, which is why it can appear seemingly out of nowhere after a big storm."
+    },
+    "tech_notes": "Floodwater breeder; not a significant human disease vector in FL. Barrier treatment after heavy rain/flood events; larvae are also predatory on other mosquito larvae so treat standing water directly when found.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://blogs.ifas.ufl.edu/news/2013/03/04/huge-aggressive-mosquito-may-be-abundant-in-florida-this-summer-ufifas-expert-warns"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "3ccaeece320276c5a070da41fc41eb29657ab5ad832cf764f6113cce6d8640e8"
+    }
+  },
+  {
+    "slug": "saltmarsh-mosquito",
+    "kind": "organism",
+    "common_name": "Black Salt Marsh Mosquito",
+    "role": "health_pest",
+    "risk": "medical",
+    "action": "specialist",
+    "season_basis": "year_round",
+    "verification": [],
+    "aka": [
+      "salt marsh mosquito"
+    ],
+    "aliases": [
+      "black salt marsh mosquito",
+      "salt marsh mosquito",
+      "aedes taeniorhynchus"
+    ],
+    "scientific_name": "Aedes taeniorhynchus",
+    "rank": "species",
+    "group": "mosquitoes",
+    "subgroup": "aedes",
+    "site_category": "Mosquitoes & biters",
+    "stages": [
+      "larva",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Dark, almost black mosquito with narrow white bands on the legs and abdomen",
+      "Aggressive daytime biter, unlike many mosquitoes that wait for dusk",
+      "Appears in large swarms near coastal areas, mangroves and marshes after rain or high tides",
+      "Can travel miles from where it hatched on strong winds"
+    ],
+    "look_alikes": [
+      {
+        "slug": "asian-tiger-mosquito",
+        "difference": "Salt marsh mosquito is dark with faint leg bands and swarms near coastal marshes; Asian tiger mosquito has one bold white back stripe and is common well inland",
+        "next_photo": "From a safe distance, zoom in on the top of the thorax showing whether there is one bold white center stripe.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "lawn-garden",
+      "lanai-patio",
+      "trees-shrubs"
+    ],
+    "looks": [
+      "flying-biter"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": false,
+      "disease_vector": true,
+      "structural": false,
+      "allergen": true,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "A persistent, aggressive daytime biter near coastal areas; it can also spread dog heartworm between pets.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "service": {
+      "line": "mosquito",
+      "key": "mosquito",
+      "label": "Mosquito Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "A relentless daytime-biting mosquito that breeds in mangroves and salt marshes and can swarm inland on the wind, especially near the coast after rain or high tides. Routine yard mosquito treatment and screening outdoor gathering areas both help.",
+      "fact": "It can fly many miles from the salt marsh where it hatched, which is why coastal neighborhoods can get swarmed even with no obvious breeding water nearby."
+    },
+    "tech_notes": "Not a primary human-disease vector locally but is a natural vector of dog heartworm and can carry other pathogens; recommend heartworm prevention discussion for pet-owning clients in heavy-pressure areas. Barrier treat vegetation; source is often off-property (marsh/mangrove) so control is largely adulticide-based.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN1035"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Confirmed against UF/IFAS EDIS IN1035: it explicitly says this species \"is not a primary vector of major concern\" for human disease, acting only as a secondary/bridge vector for EEE and VEE, and is \"a nuisance in Florida\" mainly through aggressive biting after rain and flooding. disease_vector stays true for its documented dog-heartworm vectoring; copy and tech_notes already frame it as a nuisance/pet-risk mosquito rather than a major human-disease threat, matching the source. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "9f6aa22e9946a38126babf0cf90e79c1a5824c8a3619be55b52e2c712d04154b"
+    }
+  },
+  {
+    "slug": "mosquito-larvae",
+    "kind": "organism",
+    "common_name": "Mosquito Larvae (wigglers)",
+    "role": "health_pest",
+    "risk": "low",
+    "action": "fix_conditions",
+    "season_basis": "year_round",
+    "verification": [],
+    "aka": [
+      "wigglers"
+    ],
+    "aliases": [
+      "mosquito larvae",
+      "wigglers",
+      "mosquito wigglers"
+    ],
+    "scientific_name": "Culicidae (larvae)",
+    "rank": "family",
+    "group": "mosquitoes",
+    "subgroup": null,
+    "site_category": "Mosquitoes & biters",
+    "stages": [
+      "larva"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Small, worm-like creatures with a large head and a slender, curved body, floating just under the water surface",
+      "Wiggle in a quick, jerky S-shaped motion when the water is disturbed",
+      "Found in standing water: buckets, clogged gutters, plant saucers, old tires, birdbaths",
+      "Come to the surface to breathe through a short tube, then dive back down"
+    ],
+    "look_alikes": [
+      {
+        "slug": "non-biting-midge",
+        "difference": "Mosquito larvae hang near the surface and dive down when disturbed; midge larvae are thin and stay down in sediment or algae, rarely at the surface",
+        "next_photo": "From a safe distance, zoom in on the water surface showing whether anything dives down and re-surfaces to breathe.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "tiny",
+    "where": [
+      "pool-water",
+      "lanai-patio",
+      "lawn-garden",
+      "garage-storage"
+    ],
+    "looks": [
+      "crawler"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "service": {
+      "line": "mosquito",
+      "key": "mosquito",
+      "label": "Mosquito Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "Wigglers in standing water are next week's biting mosquitoes. Dumping or draining the water is the fastest fix; ongoing yard treatment helps for water sources that cannot be removed, like ponds or low spots that hold rain.",
+      "fact": "A mosquito can go from egg to biting adult in as little as a week during warm Florida weather, which is why standing water gets refilled with mosquitoes so fast."
+    },
+    "tech_notes": "Identify and eliminate or larvicide standing water sources; note sources that cannot be drained (ornamental ponds, low-lying yard areas) for follow-up larvicide treatment per label.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://edis.ifas.ufl.edu/publication/in594"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "2ab00713b8f217d851f4f602e3845343eb498f3ad75431fc208d561c3a74da6d"
     }
   }
 ]

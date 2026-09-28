@@ -41,9 +41,30 @@ const { gateEnvValue } = require('../config/feature-gates');
 const { normalizePropertyType } = require('./pricing-engine/commercial-helpers');
 const geocodeReview = require('./customer-geocode-review');
 
-async function withReviewWriteFence({ propertyId, customerId }, write) {
+async function withReviewWriteFence({ propertyId, customerId, visitIds }, write) {
   if (!geocodeReview.reviewEnabled()) return write(db);
   return db.transaction(async (trx) => {
+    // Property-preferences advisory lock FIRST (the global order: prefs
+    // advisory → row locks). A staff geocode decision holds it while it
+    // locks the customer and THEN the visits (customer-geocode-review-
+    // actions.js); without it this fence (visit, then customer) and a
+    // concurrent decision on the same customer form an ABBA cycle and
+    // Postgres aborts one side with 40P01.
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+      ['property-preferences', String(customerId)]);
+    // Visit-then-customer, matching the annual-prepay switch's lock order
+    // (admin-schedule.js: scheduled_services then customers) — a caller
+    // writing to scheduled_services under this fence must lock those rows
+    // BEFORE the customer row, or a concurrent switch on the same visit can
+    // deadlock (it locks the visit first, then the customer).
+    if (visitIds?.length) {
+      // Deterministic scan order (matching prelockVisitContext's own
+      // orderBy('id') FOR UPDATE in customer-geocode-review-visits.js) — two
+      // transactions locking an overlapping visit set in different orders can
+      // still deadlock each other even though both lock visits before the
+      // customer.
+      await trx('scheduled_services').whereIn('id', visitIds).orderBy('id').forUpdate().select('id');
+    }
     const customer = await trx('customers').where({ id: customerId }).forUpdate().first('id');
     if (!customer) return null;
     const property = await trx('customer_properties')
@@ -346,7 +367,7 @@ async function enrichPropertyById(propertyId) {
           }) === propKey)
           .map((v) => v.id);
         if (matchedIds.length) {
-          await withReviewWriteFence({ propertyId, customerId: row.customer_id }, async (conn) => {
+          await withReviewWriteFence({ propertyId, customerId: row.customer_id, visitIds: matchedIds }, async (conn) => {
             let visitUpdate = conn('scheduled_services')
               .whereIn('id', matchedIds)
               .whereNull('lat')
@@ -859,7 +880,7 @@ async function reconcileVisitCoordinates() {
         if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
         // Null-pair re-asserted: fill-only under concurrent writers.
         filled += (await withReviewWriteFence({
-          propertyId: r.property_id, customerId: r.property_customer_id,
+          propertyId: r.property_id, customerId: r.property_customer_id, visitIds: [r.visit_id],
         }, async (conn) => {
           let visitUpdate = conn('scheduled_services')
             .where({ id: r.visit_id })
