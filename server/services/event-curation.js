@@ -35,6 +35,7 @@
  * this lane autonomous like the blog lane).
  */
 
+const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
 const {
@@ -391,6 +392,32 @@ function missingAssessmentFallbacks(batch, assessments) {
  * row in both branches — the proof diagnostics panel and the Event
  * Inbox read it.
  */
+/**
+ * Fingerprint of the content the model actually assessed: the fields the
+ * classify prompt shows plus the classification that gates eligibility.
+ * Stored inside score_breakdown at curation time; the rescore pass compares
+ * it with the row's current content. updated_at can't serve: daily
+ * ingestion advances it on every re-pull even when nothing changed.
+ */
+function contentFingerprint(row) {
+  const iso = (value) => {
+    const t = value ? new Date(value) : null;
+    return t && !Number.isNaN(t.getTime()) ? t.toISOString() : null;
+  };
+  const payload = [
+    row?.title ?? null, row?.description ?? null, iso(row?.start_at), iso(row?.end_at),
+    row?.venue_name ?? null, row?.city ?? null, row?.is_free ?? null, row?.family_friendly ?? null,
+    row?.price_text ?? null, row?.event_url ?? null, row?.event_type ?? null, row?.recurrence_type ?? null,
+  ];
+  return crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');
+}
+
+function storedBreakdown(row) {
+  let breakdown = row?.score_breakdown;
+  if (typeof breakdown === 'string') { try { breakdown = JSON.parse(breakdown); } catch { breakdown = null; } }
+  return breakdown && typeof breakdown === 'object' && !Array.isArray(breakdown) ? breakdown : null;
+}
+
 async function applyDecision(event, rawAssessment, reference = new Date()) {
   // Missing AND structurally malformed assessments take the same
   // fail-closed path: examined, pending, and — critically — the
@@ -426,7 +453,7 @@ async function applyDecision(event, rawAssessment, reference = new Date()) {
   ).slice(0, NOTE_MAX);
   const assessmentFields = {
     editorial_score: decision.score,
-    score_breakdown: JSON.stringify(decision.breakdown),
+    score_breakdown: JSON.stringify({ ...decision.breakdown, content_fingerprint: contentFingerprint(event) }),
     rejection_codes: JSON.stringify(decision.rejectionCodes),
     audience_tags: JSON.stringify(decision.audienceTags),
     novelty_type: decision.noveltyType,
@@ -484,23 +511,16 @@ function buildRescoreCandidateQuery(limit = RESCORE_RUN_LIMIT) {
 }
 
 /**
- * True when the row's content-bearing fields or classification were touched
- * AFTER the model examined it. Every writer that changes what the row means —
- * ingestion re-pull (event-ingestion.js), normalizer reclassification
- * (event-normalizer.js), the expiry sweep, and every admin PATCH/bulk-action
- * (admin-newsletter.js) — bumps updated_at; applyDecision sets curated_at and
- * updated_at from the SAME db.fn.now() call, so they start out equal, and
- * applyRescore (below) deliberately never touches updated_at, so this stays a
- * reliable signal across repeated rescore runs. Codex P1: a later ingestion
- * pull that replaces the description with a cancellation notice must never
- * let a pre-cancellation stored score ride to approval.
+ * True when the row's content no longer matches what the model assessed —
+ * or when that can't be proven (rows curated before content fingerprints
+ * existed carry none). Either way the stored assessment can't be trusted
+ * for an approval, so the caller returns the row to fresh curation. Codex
+ * P1: a later re-pull that replaces the description with a cancellation
+ * notice must never let a pre-cancellation stored score ride to approval.
  */
 function hasContentChangedSinceCuration(row) {
-  if (!row?.updated_at || !row?.curated_at) return false;
-  const updated = new Date(row.updated_at).getTime();
-  const curated = new Date(row.curated_at).getTime();
-  if (Number.isNaN(updated) || Number.isNaN(curated)) return false;
-  return updated > curated;
+  const stored = storedBreakdown(row)?.content_fingerprint;
+  return !stored || stored !== contentFingerprint(row);
 }
 
 /**
@@ -579,9 +599,9 @@ function rescoreCuratedEvent(row) {
  * by itself know the row was later marked needs_review/expired or lost its
  * event_url. The approval UPDATE also re-checks the column-level hard gates
  * in its own WHERE, atomically, in case they changed between the SELECT
- * above and this write. updated_at is deliberately never written here (unlike
- * applyDecision) — hasContentChangedSinceCuration's drift check depends on it
- * staying put across repeated rescore passes.
+ * above and this write. The content fingerprint rides along unchanged in the
+ * rewritten score_breakdown, so the next rescore pass still compares against
+ * what the model actually assessed.
  *
  * Codex P1, 2026-09-27 (second pass): hasContentChangedSinceCuration in the
  * caller only inspects the batch's OWN fetch-time snapshot — it catches drift
@@ -615,7 +635,10 @@ async function applyRescore(row, decision, { canApprove = decision.approve } = {
   ).slice(0, NOTE_MAX);
   const assessmentFields = {
     editorial_score: decision.score,
-    score_breakdown: JSON.stringify(decision.breakdown),
+    score_breakdown: JSON.stringify({
+      ...decision.breakdown,
+      content_fingerprint: storedBreakdown(row)?.content_fingerprint ?? null,
+    }),
     curation_note: note,
   };
   if (canApprove) {
@@ -804,6 +827,7 @@ module.exports = {
   applyCurationHardGates,
   runCurationEligibilityPipeline,
   hasContentChangedSinceCuration,
+  contentFingerprint,
   revalidateStaleRescoreCandidate,
   rescoreCuratedEvent,
   applyRescore,

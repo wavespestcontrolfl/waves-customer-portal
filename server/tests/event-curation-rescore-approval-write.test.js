@@ -82,11 +82,15 @@ describe('applyRescore write path obeys canApprove, not decision.approve alone',
     expect(calls[0].approved_via).toBe('auto_curation');
   });
 
-  test('neither write path touches updated_at — hasContentChangedSinceCuration must stay valid across repeated rescore passes', async () => {
+  test('both write paths keep the stored content fingerprint, so the next pass still compares against what the model assessed', async () => {
     const { calls } = wireDb();
-    await applyRescore(row, APPROVING_DECISION, { canApprove: true });
-    await applyRescore(row, APPROVING_DECISION, { canApprove: false });
-    for (const patch of calls) expect(patch.updated_at).toBeUndefined();
+    const fingerprinted = { ...row, score_breakdown: JSON.stringify({ factors: {}, content_fingerprint: 'abc123' }) };
+    await applyRescore(fingerprinted, APPROVING_DECISION, { canApprove: true });
+    await applyRescore(fingerprinted, APPROVING_DECISION, { canApprove: false });
+    for (const patch of calls) {
+      expect(JSON.parse(patch.score_breakdown).content_fingerprint).toBe('abc123');
+      expect(patch.updated_at).toBeUndefined();
+    }
   });
 
   test('a rejected-policy decision (approve: false) never approves regardless of canApprove', async () => {
@@ -138,16 +142,5 @@ describe('revalidateStaleRescoreCandidate clears the assessment and curated_at (
     expect(calls[0].editorial_score).toBeNull();
     expect(calls[0].score_breakdown).toBeNull();
     expect(calls[0].curation_note).toBe('content changed');
-  });
-});
-
-// Re-asserted here (also covered directly in event-curation.test.js) so this
-// file stands on its own as the "before/after" proof for the write path.
-describe('hasContentChangedSinceCuration', () => {
-  test('detects drift introduced by a later write that bumps updated_at past curated_at', () => {
-    expect(hasContentChangedSinceCuration({
-      curated_at: '2026-09-27T06:15:00.000Z',
-      updated_at: '2026-09-27T09:00:00.000Z',
-    })).toBe(true);
   });
 });

@@ -14,6 +14,7 @@ const {
   buildRescoreCandidateQuery,
   rescoreCuratedEvent,
   hasContentChangedSinceCuration,
+  contentFingerprint,
   CURATION_FRESHNESS_EXCLUSIONS,
 } = require('../services/event-curation');
 const { FACTOR_MAXES, REJECTION_CODES, featureScoreFloor } = require('../services/event-scoring');
@@ -268,22 +269,39 @@ describe('event-curation buildRescoreCandidateQuery', () => {
   });
 });
 
-describe('event-curation hasContentChangedSinceCuration (Codex P1)', () => {
-  test('false when updated_at and curated_at are the same instant (the normal post-curation state)', () => {
-    const stamp = '2026-09-27T06:15:00.000Z';
-    expect(hasContentChangedSinceCuration({ updated_at: stamp, curated_at: stamp })).toBe(false);
+describe('event-curation hasContentChangedSinceCuration (content fingerprint)', () => {
+  const assessed = {
+    title: 'Harvest Moon Lantern Walk',
+    description: 'An evening lantern walk along the bay.',
+    start_at: '2026-10-17T23:00:00.000Z',
+    venue_name: 'Bayfront Park',
+    city: 'Sarasota',
+    event_url: 'https://events.example/lantern',
+    event_type: 'one_time',
+    recurrence_type: 'none',
+  };
+  const withStoredFingerprint = (row, fingerprintOf = row) => ({
+    ...row,
+    score_breakdown: JSON.stringify({ factors: {}, content_fingerprint: contentFingerprint(fingerprintOf) }),
   });
 
-  test('true when updated_at moved past curated_at — a later ingestion re-pull, normalizer reclassification, or admin edit', () => {
-    expect(hasContentChangedSinceCuration({
-      curated_at: '2026-09-27T06:15:00.000Z',
-      updated_at: '2026-09-27T08:00:00.000Z', // e.g. the 4am ingestion re-pull rewrote the description
-    })).toBe(true);
+  test('false when only updated_at moved (daily ingestion re-pull with identical content)', () => {
+    const row = withStoredFingerprint({
+      ...assessed, curated_at: '2026-09-27T10:15:00.000Z', updated_at: '2026-09-28T08:00:00.000Z',
+    });
+    expect(hasContentChangedSinceCuration(row)).toBe(false);
   });
 
-  test('false (fail-safe, not fail-open toward drift) when either timestamp is missing', () => {
-    expect(hasContentChangedSinceCuration({ updated_at: null, curated_at: '2026-09-27T06:15:00.000Z' })).toBe(false);
-    expect(hasContentChangedSinceCuration({ updated_at: '2026-09-27T06:15:00.000Z', curated_at: null })).toBe(false);
+  test('true when the description changed after assessment (e.g. a cancellation notice)', () => {
+    const row = withStoredFingerprint(
+      { ...assessed, description: 'CANCELLED due to weather.' },
+      assessed,
+    );
+    expect(hasContentChangedSinceCuration(row)).toBe(true);
+  });
+
+  test('true (cannot prove unchanged) for a row curated before fingerprints existed', () => {
+    expect(hasContentChangedSinceCuration({ ...assessed, score_breakdown: JSON.stringify({ factors: {} }) })).toBe(true);
   });
 });
 
@@ -390,7 +408,9 @@ describe('event-curation rescore approval must re-check current eligibility, not
     const decision = rescoreCuratedEvent(row);
     expect(decision.approve).toBe(true);
     expect(isEligibleForFreshDigest(row, new Date())).toBe(true);
-    expect(hasContentChangedSinceCuration({ ...row, curated_at: '2026-09-27T06:15:00.000Z', updated_at: '2026-09-27T06:15:00.000Z' })).toBe(false);
+    const breakdown = typeof row.score_breakdown === 'string' ? JSON.parse(row.score_breakdown) : row.score_breakdown;
+    const assessedRow = { ...row, score_breakdown: JSON.stringify({ ...breakdown, content_fingerprint: contentFingerprint(row) }) };
+    expect(hasContentChangedSinceCuration(assessedRow)).toBe(false);
   });
 });
 
