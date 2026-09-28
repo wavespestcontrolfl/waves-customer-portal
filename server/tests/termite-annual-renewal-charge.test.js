@@ -1439,6 +1439,29 @@ describe('termite annual renewal charge', () => {
       expect(skipStampUpdate).toHaveBeenCalledWith(expect.objectContaining({ renewal_charge_skip_reason: 'no_method' }));
     });
 
+    // Codex #4971 r29 P2: a lookup FAILURE defers (bell + sweep rotation,
+    // retried by leg 7a) — never the terminal no_method skip.
+    test('a transient saved-method lookup failure defers the charge — no no_method skip stamp, no pay link', async () => {
+      mockCommon();
+      const sendViaSMSAndEmail = jest.fn(async () => ({ ok: true }));
+      jest.doMock('../services/invoice', () => ({ sendViaSMSAndEmail }));
+      const notifyAdmin = jest.fn(async () => ({ id: 'n1' }));
+      jest.doMock('../services/notification-service', () => ({ notifyAdmin }));
+      jest.doMock('../services/recurring-card-on-file', () => ({ resolvePrepayChargeMethod: jest.fn(async () => { throw new Error('connection reset'); }) }));
+      const chargeInvoiceWithSavedCard = jest.fn();
+      jest.doMock('../services/stripe', () => ({ assertNoInvoiceChargeReconciliationPending: jest.fn(async () => undefined), chargeInvoiceWithSavedCard, quoteInvoiceSavedCardCharge: jest.fn() }));
+
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      const { conn, skipStampUpdate } = makeClaimConn();
+      const outcome = await _private.decideAndCharge(baseSuccessor(), baseParent(), conn);
+
+      expect(outcome).toEqual({ status: 'deferred', reason: 'saved_method_unavailable' });
+      expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+      expect(sendViaSMSAndEmail).not.toHaveBeenCalled();
+      expect(skipStampUpdate).not.toHaveBeenCalledWith(expect.objectContaining({ renewal_charge_skip_reason: 'no_method' }));
+      expect(notifyAdmin).toHaveBeenCalledWith('billing', expect.any(String), expect.stringContaining('connection reset'), expect.any(Object));
+    });
+
     test('P1-5: a surcharge that would exceed the flat renewal fee skips the charge, delivers the pay link, and rings a dedicated bell — no fence stamp, no SMS', async () => {
       mockCommon();
       const sendViaSMSAndEmail = jest.fn(async () => ({ ok: true }));

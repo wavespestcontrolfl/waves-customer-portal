@@ -1327,6 +1327,25 @@ describeOrSkip('termite renewal charge — chokepoint A payment evidence, real P
       await expect(Charge._private.chargeRefusalUnderGate(successor, db)).resolves.toBeNull();
     });
 
+    // Codex #4971 r29 P1: dispute.closed(lost) commits the statement row
+    // 'disputed' before it reopens the children — a crash between the two
+    // leaves this child PAID-looking over lost money, and it has no Stripe
+    // ids of its own for the ledger arm. The statement's latest row rules.
+    test('a paid-looking statement child over a LOST statement dispute is refused durably; a newer paid statement row restores it', async () => {
+      const { parentInvoice, successor } = await statementParentRenewal();
+      await db('invoices').where({ id: parentInvoice.id }).update({ status: 'paid', paid_at: new Date() });
+      await db('payments').insert({
+        status: 'disputed', statement_id: statementId, updated_at: new Date(Date.now() - 60000),
+        metadata: JSON.stringify({ statement_id: statementId, dispute_id: 'dp_9', dispute_final: 'lost' }),
+      });
+      await expect(Charge._private.chargeRefusalUnderGate(successor, db)).resolves.toEqual({
+        eligible: false, reason: 'parent_invoice_unpaid_or_refunded', durable: true,
+      });
+      // A replacement payment on the statement, newer than the lost row.
+      await db('payments').insert({ status: 'paid', statement_id: statementId, updated_at: new Date() });
+      await expect(Charge._private.chargeRefusalUnderGate(successor, db)).resolves.toBeNull();
+    });
+
     test('no statement-level payments row at all: an ordinary reopened/unpaid parent stays transient, exactly as before', async () => {
       const { successor } = await statementParentRenewal();
       await expect(Charge._private.chargeRefusalUnderGate(successor, db)).resolves.toEqual({

@@ -2059,7 +2059,7 @@ const StripeService = {
   // 2026-08-29). Default false = machine ('admin_card_on_file' rails:
   // completion/balance sweeps, admin card-on-file, no-show, recurring) —
   // fenced to the 8AM-8PM window like every other schedule-driven send.
-  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { customerInitiated = false, deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, maxAuthorizedChargeCents = null, maxAuthorizedTotalCents = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null, requireSelfPayCustomerId = null, requireOneTimeLane = false, requireInvoiceScheduledServiceBinding = false, requireCompletedOneTimeVisit = false, requireCompletedVisit = false, requireNoAppointmentCardLane = false, requireExtendedCompletionAnchor = false, refuseWhenDunningStopped = false, requireVisitCompletionPacketId = null } = {}) {
+  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { customerInitiated = false, deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, maxAuthorizedChargeCents = null, maxAuthorizedTotalCents = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null, requireSelfPayCustomerId = null, requireOneTimeLane = false, requireInvoiceScheduledServiceBinding = false, requireCompletedOneTimeVisit = false, requireCompletedVisit = false, requireNoAppointmentCardLane = false, requireExtendedCompletionAnchor = false, refuseWhenDunningStopped = false, requireVisitCompletionPacketId = null, assertBeforeMoneyMoves = null } = {}) {
     // The performed-visit gate runs under the visit lock; asking for it
     // without naming the visit would silently skip it.
     if (requireCompletedVisit && requireSelfPayScheduledServiceId == null) {
@@ -2497,6 +2497,11 @@ const StripeService = {
             await trx('invoices').where({ id: invoiceId }).update({ stripe_payment_intent_id: null });
             lockedInvoice.stripe_payment_intent_id = null;
           }
+          // Codex #4971 r29 P1: a caller holding a session gate over this
+          // charge (the termite renewal) re-asserts it immediately before
+          // each money-moving step inside this flow — here the credit
+          // apply (a throw rolls this transaction back, nothing applied).
+          if (typeof assertBeforeMoneyMoves === 'function') assertBeforeMoneyMoves();
           const { applyAccountCreditToInvoice } = require('./customer-credit');
           await applyAccountCreditToInvoice({ invoiceId }, trx).catch((e) =>
             logger.warn(`[stripe] charge-time account-credit apply skipped for invoice ${invoiceId}: ${e.message}`));
@@ -2615,6 +2620,10 @@ const StripeService = {
           },
         };
         if (invSurchargeDetails) invPiParams.amount_details = invSurchargeDetails;
+        // Codex #4971 r29 P1: ...and again right before the submission
+        // boundary — a throw here lands BEFORE the durable submission marker,
+        // so the claim stays releasable and nothing reached Stripe.
+        if (typeof assertBeforeMoneyMoves === 'function') assertBeforeMoneyMoves();
         // This durable marker is the fail-closed submission boundary. It is
         // written immediately before the synchronous SDK invocation: claims
         // abandoned earlier remain releasable, while any process death from

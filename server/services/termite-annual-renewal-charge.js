@@ -453,11 +453,18 @@ async function invoiceLedgerRevocation(conn, invoice) {
 // durable marker) is money gone for good — durable, same as a refund.
 async function statementRevocationForInvoice(conn, invoice) {
   if (!invoice?.payer_statement_id) return null;
-  const revoked = await conn('payments')
+  // The statement's LATEST payment row, whatever its status (Codex #4971
+  // r29 P1): a restored or replacement-paid statement writes a newer paid
+  // row, which reads as "no revocation" — only a latest row that is itself
+  // revoked counts.
+  const latest = await conn('payments')
     .where('statement_id', invoice.payer_statement_id)
-    .whereRaw(`(status in ('refunded', 'disputed') or refund_status = 'full')`)
     .orderBy('updated_at', 'desc')
     .first('id', 'status', 'refund_status', 'metadata');
+  if (!latest) return null;
+  const revoked = ['refunded', 'disputed'].includes(String(latest.status || '').toLowerCase()) || latest.refund_status === 'full'
+    ? latest
+    : null;
   if (!revoked) return null;
   if (revoked.status !== 'disputed' || revoked.refund_status === 'full') return 'refunded';
   let meta = {};
@@ -638,7 +645,21 @@ async function resolveParentEligibility(trx, parent) {
   const evidence = classifyRenewalInvoice(invoice);
   const payable = evidence.paidEvidence && !evidence.cancelled;
   const revocation = payable ? await invoiceLedgerRevocation(trx, invoice) : null;
-  if (payable && !revocation) return { eligible: true };
+  if (payable && !revocation) {
+    // Codex #4971 r29 P1: a NET-terms statement child carries no Stripe ids
+    // of its own, so the ledger arm above finds nothing for it — and
+    // dispute.closed(lost) commits the statement payment's 'disputed' row
+    // BEFORE it reopens the children, so a crash between the two leaves
+    // this invoice paid-looking over permanently lost statement money.
+    // The statement's own latest payment row is the authority; a later
+    // genuinely restored / replacement-paid row reads as no revocation.
+    if (invoice.payer_statement_id) {
+      const statementRevocation = await statementRevocationForInvoice(trx, invoice);
+      if (statementRevocation === 'disputed') return { eligible: false, reason: 'parent_payment_disputed', durable: false };
+      if (statementRevocation === 'refunded') return { eligible: false, reason: 'parent_invoice_unpaid_or_refunded', durable: true };
+    }
+    return { eligible: true };
+  }
   if (revocation === 'disputed') return { eligible: false, reason: 'parent_payment_disputed', durable: false };
   // Codex #4971 r15 P1: a statement-cascade reversal (reverseStatementCascadeForDispute)
   // reopens this invoice DIRECTLY as draft/paid_at-null — no ledger row keyed
@@ -1907,8 +1928,12 @@ async function resolveChargeableSavedMethod(customerId, termId) {
     });
     return method?.paymentMethodRowId ? method : null;
   } catch (err) {
+    // Codex #4971 r29 P2: a lookup FAILURE is not "no saved method" — a
+    // momentary database / payment-method outage must never record the
+    // terminal no_method skip (which excludes the renewal from leg 7a for
+    // good). Distinct result; decideAndCharge defers and retries.
     logger.warn(`[termite-annual-renewal] saved-method resolution failed for term ${termId}: ${err.message}`);
-    return null;
+    return { unavailable: true, reason: err.message || 'saved-method lookup failed' };
   }
 }
 
@@ -1967,6 +1992,11 @@ async function decideAndCharge(successor, parentTerm, conn = db) {
   }
 
   const method = await resolveChargeableSavedMethod(successor.customer_id, successor.id);
+  if (method?.unavailable) {
+    await ringRenewalBell(successor, 'ineligible', `the saved payment method could not be looked up (${method.reason}); the charge will be retried`);
+    await stampSweepDeferred(successor, conn);
+    return { status: 'deferred', reason: 'saved_method_unavailable' };
+  }
   if (!method) {
     await deliverInvoiceAndStampSkip(successor, 'no_method', 'No consented, chargeable saved payment method was found on file.', conn);
     return { status: 'no_method' };
@@ -2010,6 +2040,10 @@ async function decideAndCharge(successor, parentTerm, conn = db) {
     ...ceiling.options,
     requireAutopayForCustomerId: successor.customer_id,
     requireSelfPayCustomerId: successor.customer_id,
+    // Codex #4971 r29 P1: the gate's liveness is re-asserted INSIDE the
+    // saved-card flow too — before its credit apply and before its Stripe
+    // submission — not only at this closure's entry.
+    assertBeforeMoneyMoves: assertRenewalLockAlive,
   });
 
   let chargeResult;

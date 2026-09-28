@@ -697,9 +697,13 @@ router.delete('/account', authenticate, async (req, res, next) => {
     // double-delete still reports 0 the second time through.
     const affectedIds = await scopeToAccount(db('customers').whereNull('deleted_at')).pluck('id');
     const { withCustomerDeletionGate } = require('../services/termite-annual-renewal-charge');
+    // Codex #4971 r29 P1: the gated write deletes exactly the ids the gate
+    // was taken for (the frozen snapshot), never a re-derived account scope
+    // — a profile attached to the account after the snapshot has no lock in
+    // common with this deletion and is left for its own request.
     const deletedProfiles = await withCustomerDeletionGate(
       affectedIds,
-      (trx) => scopeToAccount(trx('customers').whereNull('deleted_at')).update({ deleted_at: new Date() }),
+      (trx) => trx('customers').whereIn('id', affectedIds).whereNull('deleted_at').update({ deleted_at: new Date() }),
     );
 
     // Account deletion terminates every portal refresh session for the account
