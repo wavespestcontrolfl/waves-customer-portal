@@ -622,7 +622,7 @@ async function generateLlmReviewDraft({ customer, body, decision, estimate, esti
     const Anthropic = require('@anthropic-ai/sdk');
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-    const { parsed, passes, converged, model, promptVersion, openTimesSnapshot } = await drafter.generateGroundedDraft({
+    const { parsed, passes, converged, model, promptVersion, openTimesSnapshot, factsGeneratedAt } = await drafter.generateGroundedDraft({
       laneId: 'estimate_followup', // the drafter's own lanes are the live SMS ones
       client,
       context,
@@ -689,6 +689,7 @@ async function generateLlmReviewDraft({ customer, body, decision, estimate, esti
     return {
       reply: parsed.reply, model, promptVersion, passes, openTimesSnapshot: openTimesSnapshot ?? null,
       intendedActions: Array.isArray(parsed.intended_actions) ? parsed.intended_actions : [],
+      factsGeneratedAt: factsGeneratedAt ?? null,
     };
   } catch (err) {
     logger.warn(`[estimate-conversion-agent] LLM review draft failed (${err.message}); using template`);
@@ -799,6 +800,12 @@ async function processInboundSms({ customer, from, to, body, smsLogId, sourceMes
         // GET /agent-draft (pre-push audit P1). Template drafts carry none.
         ...(llmDraft && Array.isArray(llmDraft.intendedActions)
           ? { intended_actions: require('./sms-suggest-mode').sanitizeIntendedActions(llmDraft.intendedActions) || [] }
+          : {}),
+        // Codex #5194 P2: the instant the drafter rendered FOLLOW-UP SLA
+        // RIGHT NOW, read back by slaDraftedAt (sms-followup-sla.js) at both
+        // send seams in place of this row's later created_at.
+        ...(llmDraft?.factsGeneratedAt instanceof Date && Number.isFinite(llmDraft.factsGeneratedAt.getTime())
+          ? { facts_generated_at: llmDraft.factsGeneratedAt.toISOString() }
           : {}),
       }),
       recommended_actions: JSON.stringify(decision.recommendedActions),

@@ -42,6 +42,13 @@ beforeEach(() => {
 });
 
 describe('composeTurfVarianceDigest', () => {
+  test('itemKeys cover EVERY sample, not only the displayed outliers', () => {
+    const rows = [20, 21, 22, 23, 24, 25, 26, 27].map((d) => row(d));
+    const composed = composeTurfVarianceDigest(rows);
+    expect(composed.itemKeys).toHaveLength(9); // 8 samples + the drift direction
+    expect(composed.itemKeys).toContain('direction:low');
+  });
+
   test('quiet window (within threshold) composes nothing', () => {
     expect(composeTurfVarianceDigest([row(5), row(-8), row(10)])).toBeNull();
   });
@@ -81,6 +88,21 @@ describe('composeTurfVarianceDigest', () => {
       row(30), row(30),
     ]);
     expect(composed.text).toContain('2,500 sq ft');
+  });
+
+  // Admin-alerts-brevity scope (owner ruling 2026-09-28): short bell copy;
+  // the full digest still lands in `detail`. No count in the headline, so
+  // no zero-guard is needed here.
+  test('headline/summary give the owner-facing short form', () => {
+    const composed = composeTurfVarianceDigest([row(20), row(30), row(25)]);
+    expect(composed.headline).toBe('Estimates — turf estimates running low');
+    expect(composed.summary).toBe('Avg 25% off across 3 services.');
+  });
+
+  test('a "high" (overpriced) direction reads the same way, magnitude only (no minus sign)', () => {
+    const composed = composeTurfVarianceDigest([row(-20), row(-25), row(-30)]);
+    expect(composed.headline).toBe('Estimates — turf estimates running high');
+    expect(composed.summary).toBe('Avg 25% off across 3 services.');
   });
 
   test('thresholds come from env', () => {

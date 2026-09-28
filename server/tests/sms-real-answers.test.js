@@ -1985,6 +1985,71 @@ describe('follow-up #7: the promised deadline is pinned by phrase + draft time, 
 });
 
 
+// Codex #5194 P2 ("Timestamp the SLA when its facts are generated"): the
+// phrase a draft carries is rendered off the instant the facts block was
+// built, not the agent_decisions row's created_at (which lands after the
+// whole draft→verify→revise loop). slaDraftedAt is the one shared helper
+// both send seams (agent-decision-send-checks.js, scheduler.js) call to
+// resolve which instant anchors the deadline.
+describe('slaDraftedAt: anchors the SLA deadline to facts_generated_at, falling back to created_at', () => {
+  const { slaDraftedAt, followupPromiseBlockReason } = require('../services/sms-followup-sla');
+  const promised = { intended_actions: [{ type: 'escalate', note: 'followup_promised' }] };
+
+  test('a facts timestamp before the 8 PM boundary, with created_at drifted past the SAME boundary a day later, anchors on the facts time', () => {
+    // Facts built Monday 8:01 PM ET (hour 20) — the drafter renders "by 9 AM
+    // tomorrow morning" (Tuesday 9 AM) from THIS instant. An abnormally slow
+    // verify/revise loop (retries, provider latency) doesn't finish until
+    // Tuesday 8:30 PM ET — past the SAME 8 PM boundary a full day later.
+    const factsGeneratedAt = '2026-09-29T00:01:00.000Z'; // Mon 2026-09-28 20:01 ET
+    const createdAt = new Date('2026-09-30T00:30:00.000Z'); // Tue 2026-09-29 20:30 ET
+    const decision = { input_snapshot: JSON.stringify({ facts_generated_at: factsGeneratedAt }), created_at: createdAt };
+
+    expect(slaDraftedAt(decision).toISOString()).toBe(new Date(factsGeneratedAt).toISOString());
+
+    const body = 'A manager will reach out by 9 AM tomorrow morning.';
+    // Checked 5 minutes after the row was finally written: Tuesday 8:35 PM
+    // ET. The window rule alone reads this as CURRENT (it's evening again,
+    // so "tomorrow morning" is once more the live phrase) — only the pinned
+    // deadline can catch that the ORIGINAL Tuesday 9 AM promise is now over
+    // 11 hours late.
+    const now = new Date('2026-09-30T00:35:00.000Z'); // Tue 2026-09-29 20:35 ET
+    expect(followupPromiseBlockReason({
+      inputSnapshot: promised, body, draftedAt: slaDraftedAt(decision), now,
+    })).toBe('sla_deadline_passed');
+    // The BUG this fixes: anchoring on the stale created_at instead re-reads
+    // the boundary check a day later, rolling "tomorrow morning" out to
+    // WEDNESDAY 9 AM — not yet passed — and the window-only check also
+    // reads the phrase as current, so the very same send-check would
+    // wrongly wave the day-late promise through.
+    expect(followupPromiseBlockReason({
+      inputSnapshot: promised, body, draftedAt: createdAt, now,
+    })).toBeNull();
+  });
+
+  test('a legacy row with no facts_generated_at falls back to created_at', () => {
+    const createdAt = new Date('2026-09-28T14:00:00.000Z');
+    expect(slaDraftedAt({ input_snapshot: JSON.stringify({ sms: { body: 'hi' } }), created_at: createdAt })).toBe(createdAt);
+    expect(slaDraftedAt({ input_snapshot: null, created_at: createdAt })).toBe(createdAt);
+    expect(slaDraftedAt({ created_at: createdAt })).toBe(createdAt);
+  });
+
+  test('an invalid or garbage facts_generated_at falls back to created_at', () => {
+    const createdAt = new Date('2026-09-28T14:00:00.000Z');
+    expect(slaDraftedAt({ input_snapshot: JSON.stringify({ facts_generated_at: 'not-a-date' }), created_at: createdAt })).toBe(createdAt);
+    expect(slaDraftedAt({ input_snapshot: JSON.stringify({ facts_generated_at: 12345 }), created_at: createdAt })).toBe(createdAt);
+    expect(slaDraftedAt({ input_snapshot: JSON.stringify({ facts_generated_at: '' }), created_at: createdAt })).toBe(createdAt);
+    expect(slaDraftedAt({ input_snapshot: '{not json', created_at: createdAt })).toBe(createdAt);
+  });
+
+  test('input_snapshot may already be a parsed object (not every caller stores JSON text)', () => {
+    const createdAt = new Date('2026-09-28T14:00:00.000Z');
+    const factsGeneratedAt = '2026-09-28T13:00:00.000Z';
+    expect(slaDraftedAt({ input_snapshot: { facts_generated_at: factsGeneratedAt }, created_at: createdAt }).toISOString())
+      .toBe(new Date(factsGeneratedAt).toISOString());
+  });
+});
+
+
 describe('#5194 review rounds', () => {
   const priorGate = process.env.GATE_SMS_REAL_ANSWERS;
   beforeEach(() => { process.env.GATE_SMS_REAL_ANSWERS = 'true'; jest.resetModules(); });

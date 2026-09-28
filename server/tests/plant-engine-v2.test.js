@@ -1290,9 +1290,16 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
       const draftB = cand('fixture-zoysia-draft', 0.4, { confidence: 0.4 });
       const rows = engine._test.plantCandidatesBlockFor([draftA, draftB, cand('fixture-bahia', 0.3)], 6);
       expect(rows).toEqual([
-        { slug: null, common_name: 'a turfgrass', scientific_name: null, strength: 'possible', local: null },
-        { slug: 'fixture-bahia', common_name: 'Fixture Bahia', scientific_name: 'Paspalum fixturicus', strength: 'possible', local: 'common_here_now' },
+        {
+          slug: null, common_name: 'a turfgrass', scientific_name: null, strength: 'possible', local: null, safety_line: null,
+        },
+        {
+          slug: 'fixture-bahia', common_name: 'Fixture Bahia', scientific_name: 'Paspalum fixturicus', strength: 'possible', local: 'common_here_now', safety_line: null,
+        },
       ]);
+      // A named alternative carries its catalog warning (Codex #5250 r6): sago palm as a runner-up keeps its pet line.
+      const withSago = engine._test.plantCandidatesBlockFor([cand('fixture-citrus', 0.8), cand('fixture-sago-palm', 0.3)], 6);
+      expect(withSago[1]).toMatchObject({ slug: 'fixture-sago-palm', safety_line: 'Toxic to pets.' });
     });
 
     test('finding 4: a usable photo read of multiple_subjects still blocks naming (symptom / unknown, needs_more_evidence) while the workup keeps its possibilities', () => {
@@ -1722,6 +1729,22 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
       expect(built.next_photo).toEqual({ ask: NO_PHOTO_CONFIRMS.ask, why: NO_PHOTO_CONFIRMS.why, photo_can_confirm: false });
       expect(built.tier).toBe('needs_more_evidence');
       expect(JSON.stringify(built)).not.toContain('Draft-only');
+    });
+  });
+
+  describe('catalog approvals (#5250) regressions', () => {
+    const cand = (slug, confidence) => ({
+      slug, entry: catalog.getEntry(slug), confidence, verified: true, checked: true, uncovered: false, cuesVisible: [1], cuesNotVisible: [], offCatalogName: null, groupId: catalog.getEntry(slug).group,
+    });
+
+    test('r7: the next-photo comparison carries the compared look-alike\'s warning, even when that plant is not a candidate', () => {
+      // Citrus (likely) is compared against sago palm, which is not among the candidates.
+      const citrus = engine.buildIdentityResult([cand('fixture-citrus', 0.7)], { subject: 'tree_shrub', currentMonth: 6 });
+      expect(citrus.candidates.map((c) => c.slug)).toEqual(['fixture-citrus']);
+      expect(citrus.next_photo).toMatchObject({ photo_can_confirm: true, safety_line: 'Toxic to pets.' });
+      // A look-alike with no warning adds none.
+      const paspalum = engine.buildIdentityResult([cand('fixture-seashore-paspalum', 0.95)], { subject: 'lawn', currentMonth: 6 });
+      expect(paspalum.next_photo).not.toHaveProperty('safety_line');
     });
   });
 

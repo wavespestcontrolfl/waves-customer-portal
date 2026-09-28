@@ -17,6 +17,10 @@ jest.mock('../services/service-report/report-data', () => ({
   // Real implementation: pure, synchronous, and part of the render path
   // (queued PDFs must never fossilize live-only schedule fields).
   stripLiveOnlyScheduleFields: jest.requireActual('../services/service-report/report-data').stripLiveOnlyScheduleFields,
+  // Same precedent for report_copy's own live-only strip (codex P1
+  // 2026-09-28, GATE_REPORT_PRODUCT_COPY) — pdf-queue.js calls this
+  // unconditionally on every render.
+  stripLiveOnlyReportProductCopy: jest.requireActual('../services/service-report/report-data').stripLiveOnlyReportProductCopy,
   // Storage-key component (#3168). Stubbed empty here the same way
   // timeOnSiteAdjustedPdfSignature is: this suite asserts the Pest Pressure
   // config threading, and a non-empty component would only add noise to the

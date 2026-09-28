@@ -600,10 +600,15 @@ async function executeBriefTool(toolName, input, { sessionId } = {}) {
             // legitimate link targets — gate 3c reads them off the draft
             // (draft.checked_existing_routes), so the self-lint must see them
             // the same way or it rejects a link the agent just verified.
+            // The reviewer notes too: a competitor price is exempt only when
+            // they list its source (content-guardrails
+            // competitorPriceEvidenced), and gate 3c reads them off the
+            // captured draft.
             lintResult = guardrails.evaluate({
               frontmatter: cleanFrontmatter,
               body: cleanBody,
               checked_existing_routes: getCheckedRoutes(sessionId),
+              notes_for_reviewer: notes_for_reviewer || null,
             }, lintOptions);
           } catch (err) {
             logger.warn(`[brief-driven-tools] emit_draft(${sessionId}): self-lint evaluator threw (${err.message}) — capturing without in-loop lint (run-level gates stay authoritative)`);

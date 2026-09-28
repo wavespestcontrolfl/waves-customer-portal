@@ -32,6 +32,64 @@ See `docs/intelligence-bar-platform-implementation.md` for rollout, verification
 and remaining work. The wiring below describes the retained non-platform path;
 new platform-only tools do not need another branch in that legacy dispatcher.
 
+## Gap reports
+
+What the bar could not do, recorded for the owner's weekly review. The model
+has no tool that writes here: a model-facing write goes through the
+confirmation card (#1568), so collection is server-owned. The route feeds
+`createGapCollector()` (`server/services/agent-gap-reports.js`) what the
+server itself observed in the tool loop:
+
+- its own `discover_capabilities` results, noting whether a tool a search
+  surfaced later ran successfully;
+- `capability_unimplemented`: a tool name the registry does not have, or a
+  registered tool that does not support this case. The latter keeps the
+  tool's own description of the case.
+
+At the end of the request, `flush()` records those signals only when the reply
+told the operator the bar could not do something. The server cannot tell
+which part of a partly declined request failed (listing refunds is not
+issuing one), so a declined request records every search it made, each
+noting whether a related tool ran. Broken tools are not gap reports: every
+tool call's outcome is already in `tool_health_events` (Tool Health). The platform
+prompt asks the model to search with a short, general description before
+declining, so that search becomes the gap's summary. That model-written text
+is cleaned in several passes:
+- the shared `redactText`, with the request's resolved customer names and
+  addresses;
+- any customer or lead first or last name stored in the database, in any
+  case (so "josé" is caught even when the request never resolved it);
+- street addresses in any case (a house number with a street type);
+- a fixed rule that replaces every other capitalized word except acronyms, a
+  short keep list (vendor names, plan tiers, days and months) and a leading
+  verb;
+- UUIDs and record numbers.
+
+If the stored-name lookup fails, nothing is written. The Monday email carries
+gap numbers, areas and counts only; the descriptions stay in the bar. Rows dedupe by a
+fingerprint of source, kind and the summary's word set. A recurrence bumps
+the lifetime `occurrences`, reopens a `fixed` gap as `new`, and fills in a
+domain or tool the first sighting lacked. It also writes one
+`agent_gap_report_sightings` row in the same transaction; windowed counts
+read those rows.
+
+`list_gap_reports` (`gap-report-tools.js`) is the read side, for "show gap
+reports" and "what should we build next". It groups by domain and ranks by
+sightings in the window, showing `times_seen_in_window` beside
+`times_seen_total`. It returns up to 50 rows with the real `total_matching`
+and `has_more`. The list tool and the digest share one reader,
+`listRecentGaps()`. The owner's triage (`building`, `fixed`, `by_design`,
+`dismissed`) is set by a session through `ops/agents/gap-status.js`, which
+dry-runs by default.
+`server/services/agent-gap-digest.js` sends a short weekly reminder (Monday
+8:15am ET, `scheduler.js`) when the last 7 days recorded anything still open
+(not fixed, by_design or dismissed); a quiet week sends nothing. The bell carries a fixed two-line instruction, and the
+full list is in the bar and in the email fallback (`AGENT_GAP_DIGEST_EMAIL`,
+internal recipients only, default contact@). Kill switch:
+`AGENT_GAP_REPORTS=off`, read at call time. It drops the prompt line, stops
+every write and skips the digest; `list_gap_reports` keeps reading what was
+already recorded.
+
 ## Retained context modules
 
 How to add a new context-specific tool module. One file per context, six lines of wiring in the route, optional UI hookup.

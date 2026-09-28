@@ -35,7 +35,7 @@ const { findReportFollowupAppointment } = require('../services/report-followup-a
 // re-exported below so existing consumers/tests keep their import path.
 const { storedRevisionMatches, writeOrRefreshCtaRequest } = require('../services/cta-service-request');
 
-const { buildReportV1Data, stripLiveOnlyScheduleFields, PIN_NO_ASSESSMENT, lawnAssessmentPdfSignature, resolveCanonicalLawnRender, resolveProjectReportPreviewFields, completedProtocolActionLabels, completedProtocolActionEntries } = require('../services/service-report/report-data');
+const { buildReportV1Data, stripLiveOnlyScheduleFields, stripLiveOnlyReportProductCopy, PIN_NO_ASSESSMENT, lawnAssessmentPdfSignature, resolveCanonicalLawnRender, resolveProjectReportPreviewFields, completedProtocolActionLabels, completedProtocolActionEntries } = require('../services/service-report/report-data');
 const { applyReportIdentitySnapshot } = require('../services/service-report/report-identity-snapshot');
 
 // lawn_assessments.id is a Postgres uuid — anything else must be refused
@@ -262,10 +262,8 @@ const {
 const { buildPestPressureCustomerView } = require('../services/pest-pressure/customer-view');
 const { isOneTimePressureExcludedRecord } = require('../services/pest-pressure/one-time-exclusion');
 const { renderServiceReportV1Pdf, countUnreachableReportPhotos } = require('../services/service-report/pdf');
-const { stripFixedReentryTiming, sanitizeProductTargets } = require('../services/social-media');
+const { stripFixedReentryTiming, sanitizeProductTargets, REENTRY_SAFE_COPY } = require('../services/social-media');
 const { publicOriginPdfSignature } = require('../utils/portal-url');
-// The approved idiom that replaces a stripped fixed-timing clause.
-const REENTRY_SAFE_COPY = 'Ready once dry — your technician confirms timing.';
 const { dateOnlyStamp } = require('../services/service-report/time-format');
 const {
   getHealthyStoredReportPdf,
@@ -509,6 +507,19 @@ async function buildServiceReportV1ResponseData(service, token, {
   // only the /data render shows it, so only it pays for the city-wide
   // lawn-findings read.
   nearYou = false,
+  // OPT-IN on the same terms (codex P2 #5137 deferred finding a): only a
+  // caller that actually RENDERS the pest expectations block — the /data
+  // live render and the direct PDF route — pays for either of the two
+  // external weather lookups that feed it: the pest week-weather resolution
+  // (threaded to buildReportV1Data's own `pestWeekWeather` opt-in below) AND
+  // the live heavy-rain NWS forecast fetched further down in this function.
+  // The Q&A endpoint (/ask) calls this builder purely for report CONTEXT —
+  // answerServiceReportQuestion never reads data.pestReportV2.expectations —
+  // so every customer question was paying up to ~1.2s for the week-weather
+  // lookup plus another ~1.2s for the forecast, for a field it never uses.
+  // Defaulting to off means a future caller cannot inherit that cost by
+  // accident either.
+  pestExpectationsWeather = false,
 } = {}) {
   // staffViewer gates internal_only companion sections (combined-service
   // completions): report-data omits them from customer payloads entirely.
@@ -527,9 +538,11 @@ async function buildServiceReportV1ResponseData(service, token, {
     pestPressureConfig, staffViewer, mode, pinnedLawnAssessmentId, pinnedWeekPlanAvailableAt,
     propertyHistoryEnabled, lawnHistory, pinnedLawnHistoryIdentity, expectationFactsOut, planSummary, upcomingVisitsCard,
     nearYou,
-    // pest week-weather is opt-in (codex P2 round 4): this builder renders
-    // the expectations block (live /data + the direct PDF route), so it pays.
-    pestWeekWeather: true,
+    // pest week-weather is opt-in (codex P2 round 4, tightened by codex P2
+    // #5137 deferred finding a): only a caller that opts into
+    // pestExpectationsWeather above — the /data live render and the direct
+    // PDF route — pays for the lookup. /ask never sets it, so it never pays.
+    pestWeekWeather: pestExpectationsWeather,
   });
   if (service?.report_template_version !== 'service_report_v1') return data;
 
@@ -566,6 +579,14 @@ async function buildServiceReportV1ResponseData(service, token, {
       if (app.product.precaution_summary) app.product.precaution_summary = strip(app.product.precaution_summary);
       if (app.product.reentry_summary) app.product.reentry_summary = strip(app.product.reentry_summary);
     });
+    // report_copy (GATE_REPORT_PRODUCT_COPY) is LIVE-VIEW ONLY (codex P1
+    // 2026-09-28): the PDF/static/sms_preview cache keys don't vary on this
+    // gate, so a rolling deploy could otherwise cache copy under the
+    // worker's OWN gate state rather than what the browser actually
+    // rendered. Stripped here at the SAME payload boundary every other
+    // live-only field uses (stripLiveOnlyReportProductCopy — report-data.js,
+    // same shape as stripLiveOnlyScheduleFields).
+    stripLiveOnlyReportProductCopy(data);
     if (data.reportV2?.aftercare?.reentry) {
       data.reportV2.aftercare.reentry = strip(data.reportV2.aftercare.reentry);
     }
@@ -645,7 +666,11 @@ async function buildServiceReportV1ResponseData(service, token, {
       // nothing to do with a treatment from long ago — see
       // isRecentServiceDate's own comment.
       const expectationsGateOn = pestReportExpectationsGateOn();
-      const forecastHeavyRain = expectationsGateOn && mode === 'live' && isRecentServiceDate(service.service_date)
+      // pestExpectationsWeather gates this fetch too (codex P2 #5137
+      // deferred finding a) — the same opt-in that gates the week-weather
+      // resolution above, so /ask never pays for this ~1.2s NWS lookup
+      // either, on top of the mode/recency guards that were already here.
+      const forecastHeavyRain = pestExpectationsWeather && expectationsGateOn && mode === 'live' && isRecentServiceDate(service.service_date)
         ? await fetchPestRainForecastHeavySafe(service)
         : false;
       // codex P1 2026-09-29 round 3: weekWeather is no longer fetched here —
@@ -2171,11 +2196,22 @@ router.get('/:token', async (req, res, next) => {
       // must re-render the cached document.
       const reserviceV2Signature = await reserviceReportPdfSignature(service, { knex: db });
       const reserviceTrendsSignature = await reserviceTrendsPdfSignature(service, db);
+      // Hoisted here (rather than redeclared further down, where it used to
+      // live right before resolveCanonicalLawnRender) so the photo-set
+      // signature's lawn-photo resolution and the canonical lawn render
+      // below read the exact SAME propertyHistoryEnabled value, instead of
+      // each independently re-deriving its own default from the gate
+      // (Sonnet fallback-audit P1, 2026-09-28). A bare env-flag read, so
+      // hoisting it earlier changes nothing about when the gate is checked.
+      const propertyHistoryEnabled = require('../config/feature-gates').gateEnvValue('GATE_LAWN_PROPERTY_HISTORY');
       // Photo-set key component + render fence: closeout photo recovery can
       // attach rows while this untracked render runs (Codex #4091 P1). The
       // parked-summary marker is derived from THIS loaded snapshot; the
       // post-render re-read below sees live state (photo-set-signature.js).
-      const photoSetSignature = await reportPhotoSetPdfSignature(service.id, db, { serviceData: service.service_data });
+      // lawnFields: `service` is already service_records.* (loaded above) —
+      // reuse it so the lawn-photo identity lookup skips a second
+      // service_records read (Sonnet fallback-audit P1, 2026-09-28).
+      const photoSetSignature = await reportPhotoSetPdfSignature(service.id, db, { serviceData: service.service_data, lawnFields: service, propertyHistoryEnabled });
       // Treatment-zone key component: gate flips and re-traces change the
       // key so cached PDFs re-render with/without the traced map.
       const tzSignature = await treatmentZonePdfSignature(service, db);
@@ -2230,7 +2266,9 @@ router.get('/:token', async (req, res, next) => {
         // ONE canonical lookup feeds BOTH the pin and the storage-key component
         // (#3172 r1) — two lookups can straddle a selection change and cache a
         // B-pinned PDF under A's key, which is the race this closes.
-        const propertyHistoryEnabled = require('../config/feature-gates').gateEnvValue('GATE_LAWN_PROPERTY_HISTORY');
+        // propertyHistoryEnabled is hoisted above (before photoSetSignature),
+        // not re-read here, so every lawn-identity resolution in this handler
+        // shares the exact same value.
         const canonical = await resolveCanonicalLawnRender(service, db, { propertyHistoryEnabled });
         const canonicalPin = canonical.pin;
         laRenderSignature = canonical.signature;
@@ -2239,6 +2277,10 @@ router.get('/:token', async (req, res, next) => {
           const data = await buildServiceReportV1ResponseData(service, req.params.token, {
             mode: 'pdf', pestPressureConfig, pinnedLawnAssessmentId: canonicalPin, pinnedWeekPlanAvailableAt: canonical.weekPlanAvailableAt,
             propertyHistoryEnabled, lawnHistory: canonical.lawnHistory, pinnedLawnHistoryIdentity: canonical.lawnHistory?.identity,
+            // This direct PDF route renders the pest expectations block, so
+            // it pays for the weather lookups (codex P2 #5137 deferred
+            // finding a) — see pestExpectationsWeather's own doc above.
+            pestExpectationsWeather: true,
           });
           tnRenderedSignature = data?.treatmentNarrativeRenderedSignature || '-tn0';
           apRenderedSignature = applicatorRenderedPdfSignature(data);
@@ -2330,7 +2372,7 @@ router.get('/:token', async (req, res, next) => {
           // Same fence as pdf-queue: a callback inserted/reclassified
           // mid-render must not store the old chart under the new key.
           logger.warn(`[reports-public] callback set changed during PDF render for ${service.id} — not caching this render`);
-        } else if (await reportPhotoSetPdfSignature(service.id, db) !== photoSetSignature) {
+        } else if (await reportPhotoSetPdfSignature(service.id, db, { propertyHistoryEnabled }) !== photoSetSignature) {
           // Recovered closeout photos landed mid-render: this output describes
           // the OLD photo set and must not become the cached document.
           logger.warn(`[reports-public] photo set changed during PDF render for ${service.id} — not caching this render`);
@@ -2554,6 +2596,11 @@ router.get('/:token/data', async (req, res, next) => {
         // The render path is the only consumer of the cross-sell/referral
         // keys, so it is the only caller that pays to compose them.
         mode, staffViewer, pinnedLawnAssessmentId, pinnedWeekPlanAvailableAt, pinnedLawnHistoryIdentity, composeOffers: true, planSummary: true, upcomingVisitsCard: true, nearYou: true,
+        // This route renders the pest expectations block on every mode it
+        // serves (live/pdf/static/sms_preview), so it pays for the weather
+        // lookups (codex P2 #5137 deferred finding a) — see
+        // pestExpectationsWeather's own doc above.
+        pestExpectationsWeather: true,
       });
       // "Your Visit, in Motion" — surface the tech-approved recap inside the
       // report (owner ask 2026-07-05; the standalone /recap/:token player was
@@ -2777,5 +2824,6 @@ module.exports.reportsAskPrivacyHeaders = reportsAskPrivacyHeaders;
 module.exports.storedRevisionMatches = storedRevisionMatches;
 module.exports.suppressedTypedReport = suppressedTypedReport;
 module.exports.settledWeekWeatherForRender = settledWeekWeatherForRender;
+module.exports.buildServiceReportV1ResponseData = buildServiceReportV1ResponseData;
 module.exports.fetchPestRainForecastHeavySafe = fetchPestRainForecastHeavySafe;
 module.exports.isRecentServiceDate = isRecentServiceDate;
