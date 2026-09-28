@@ -445,7 +445,11 @@ async function loadVerifiedCandidates(database) {
     // never offer a build_failed or still-pending target to a hard link gate.
     .filter((c) => c && c.path && c.pathVerified && c.astroStatus === 'live'
       && c.workflowStatus === 'published' && candidateLiveKeys(c).some((key) => liveRegistryKeys.has(key)));
-  const registryCandidatesByPath = new Map();
+  // Keyed by the row's own domain+path keys, not pathname alone: two live
+  // rows can share a pathname on different fleet hosts, and each must stay
+  // a candidate for briefs targeting its host.
+  const registryCandidatesByKey = new Map();
+  const registryCandidateList = [];
   // Every qualifying registry row's domain+path keys, BEFORE rows that share
   // a pathname on different fleet hosts collapse into one candidate by path
   // (the publish-time recheck must see each host).
@@ -454,8 +458,11 @@ async function loadVerifiedCandidates(database) {
     try {
       const candidate = candidateFromRegistryRow(row);
       if (candidate) {
-        registryCandidatesByPath.set(candidate.path, candidate);
-        qualifyingRegistryKeys.push(...candidateLiveKeys(candidate));
+        registryCandidateList.push(candidate);
+        for (const key of candidateLiveKeys(candidate)) {
+          if (!registryCandidatesByKey.has(key)) registryCandidatesByKey.set(key, candidate);
+          qualifyingRegistryKeys.push(key);
+        }
       }
     } catch { /* malformed registry row: exclude it */ }
   }
@@ -481,17 +488,16 @@ async function loadVerifiedCandidates(database) {
       newestAutonomousByKey.set(key, { candidate, completedAt });
     }
   }
-  const autonomousPaths = new Set();
+  const consumedRegistry = new Set();
   for (const { candidate } of newestAutonomousByKey.values()) {
-    const registryCandidate = registryCandidatesByPath.get(candidate.path);
     // A path match alone is not enough — the run and the current registry
     // row must share a live domain+path key, or an old hub run can donate
     // its metadata to an unrelated spoke page whose pathname was reused.
-    const verified = registryCandidate
-      && candidateLiveKeys(candidate).some((key) => candidateLiveKeys(registryCandidate).includes(key))
-      ? registryCandidate
-      : null;
+    const verified = candidateLiveKeys(candidate)
+      .map((key) => registryCandidatesByKey.get(key))
+      .find(Boolean) || null;
     if (!verified) continue;
+    consumedRegistry.add(verified);
     // Current registry truth controls both rendering and topical identity.
     // Historical run metadata fills only fields the live registry lacks.
     for (const field of ['title', 'keyword', 'city', 'service', 'category']) {
@@ -499,10 +505,9 @@ async function loadVerifiedCandidates(database) {
     }
     candidate.targetSites = verified.targetSites;
     candidates.push(candidate);
-    autonomousPaths.add(candidate.path);
   }
-  for (const candidate of registryCandidatesByPath.values()) {
-    if (!autonomousPaths.has(candidate.path)) candidates.push(candidate);
+  for (const candidate of registryCandidateList) {
+    if (!consumedRegistry.has(candidate)) candidates.push(candidate);
   }
   const liveKeys = new Set([...candidates.flatMap(candidateLiveKeys), ...qualifyingRegistryKeys]);
   return { candidates, liveKeys };

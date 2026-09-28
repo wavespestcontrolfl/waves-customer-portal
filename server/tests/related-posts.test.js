@@ -581,6 +581,32 @@ describe('getRelatedPostsForBrief — DB wrapper', () => {
     }
   });
 
+  test('a spoke brief still gets its spoke row when a hub row shares the pathname', async () => {
+    const base = {
+      canonical_url_normalized: '/termite/shared-path/',
+      content_type: 'blog',
+      reconciliation_status: 'astro_only',
+      workflow_status: 'published',
+      astro_status: 'present',
+      live_status: 'live',
+      noindex_detected: false,
+      title: 'Termite swarm season guide',
+      target_keyword: 'termite swarm season',
+      target_service: 'termite',
+    };
+    const registryRows = [
+      { ...base, id: 'hub-row', metadata: { frontmatter: {} } },
+      { ...base, id: 'spoke-row', live_url: 'https://www.sarasotaflpestcontrol.com/termite/shared-path/', metadata: { frontmatter: { domains: ['sarasotaflpestcontrol.com'] } } },
+    ];
+    for (const rows of [registryRows, [...registryRows].reverse()]) {
+      const out = await getRelatedPostsForBrief(
+        { service: 'termite', keyword: 'termite swarm season', domains: ['sarasotaflpestcontrol.com'] },
+        { database: fakeDb({ registryRows: rows }) }
+      );
+      expect(out.map((r) => r.path)).toEqual(['/termite/shared-path/']);
+    }
+  });
+
   test('getLiveRelatedPaths requires the path to be live on the frozen publish host', async () => {
     // The selected hub post has since moved to a spoke: its path is still
     // live in the fleet, but not on the hub the draft publishes to.
