@@ -449,3 +449,14 @@ test('queue_receipt: an unreadable payment amount blocks the plan; a receipt sen
   expect(run.receipt).toEqual([expect.objectContaining({ step: 'queue_receipt', status: 'failed', detail: expect.stringMatching(/sent in the meantime/) })]);
   expect(enqueueReceiptDelivery).not.toHaveBeenCalled();
 });
+
+test('queue_receipt: a legacy payment_receipt_channel of push shows the App leg for a phone-bearing customer', async () => {
+  const UNSENT = { invoiceDelivery: { state: 'pending', reason: 'paid_receipt_not_sent', invoiceId: 'inv-1' } };
+  const PAID = { id: 'inv-1', invoice_number: 'INV-00042', status: 'paid', receipt_sent_at: null, customer_id: 'cust-1', payer_id: null };
+  getCloseoutStatus.mockResolvedValue(status({ facts: UNSENT }));
+  db.mockImplementation(fakeDb({ service_records: [RECORD], invoices: [PAID], notification_prefs: [{ customer_id: 'cust-1', payment_receipt_channel: 'push' }] }));
+  resolveReceiptEmailRecipient.mockResolvedValue({ ok: true, recipient: { email: 'billing@example.com' }, customer: { phone: '9415550100' } });
+  const preview = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
+  expect(preview.steps[0]).toEqual(expect.objectContaining({ step: 'queue_receipt', app: true, text_to: '***0100' }));
+  expect(preview.steps[0].effect).toMatch(/may also send text \*\*\*0100 or a Waves app notification/);
+});

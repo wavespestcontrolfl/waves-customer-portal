@@ -175,6 +175,21 @@ async function receiptEmailLeg(invoice) {
   return { email: null, customer: null, skipReason: String(resolved.error || '') };
 }
 
+// Whether the receipt may notify the Waves app: the phone-less admission
+// sendReceipt uses (explicitBillingAppSelected), OR the customer's full
+// payment-receipt channel resolution — explicit channels or the legacy
+// single payment_receipt_channel (billingChannelsPayload, the one reader of
+// both) — naming App, which the App routing reads for phone-bearing
+// customers too. A prefs read failure is treated as "may" (never hidden).
+async function receiptMayReachApp(customerId, emailAvailable, knex) {
+  if (await require('../invoice').explicitBillingAppSelected(customerId, 'payment_receipt')) return true;
+  const READ_FAILED = Symbol('prefs-read-failed');
+  const prefs = await knex('notification_prefs').where({ customer_id: customerId }).first().catch(() => READ_FAILED);
+  if (prefs === READ_FAILED) return true;
+  const { billingChannelsPayload } = require('../billing-delivery-channels');
+  return (billingChannelsPayload(prefs || {}, { emailAvailable }).paymentConfirmationChannels || []).includes('push');
+}
+
 async function receiptRecipients(invoiceId, knex) {
   const eligible = await receiptInvoiceOrBlocker(invoiceId, knex);
   if (eligible.blocker) return eligible;
@@ -184,7 +199,7 @@ async function receiptRecipients(invoiceId, knex) {
   const payerBilled = Boolean(invoice.payer_id);
   const phone = payerBilled ? null
     : (emailLeg.customer?.phone || (await knex('customers').where({ id: invoice.customer_id }).first('phone'))?.phone || null);
-  const app = !payerBilled && await require('../invoice').explicitBillingAppSelected(invoice.customer_id, 'payment_receipt');
+  const app = !payerBilled && await receiptMayReachApp(invoice.customer_id, Boolean(emailLeg.email), knex);
   if (!emailLeg.email && !phone && !app) return { blocker: emailLeg.skipReason || 'no receipt recipient on file' };
   // Which receipt, for how much — the amount the receipt itself states.
   let amount;
