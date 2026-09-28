@@ -74,6 +74,13 @@ describe('KB COGS sync lines', () => {
     expect(packets.term).toBeNull();
   });
 
+  test('an outer case label is not the multiplied item', () => {
+    const c = cogsLineForUsage(row({ best_price: '469.53', container_size: '4 x 1 gal case', unit_size_oz: '512', usage_unit: 'case' }));
+    expect(c.term.fixed).toBeCloseTo(469.53, 2);
+    const pails = cogsLineForUsage(row({ best_price: '116.06', container_size: '4 x 4 lb pails', unit_size_oz: '256', usage_unit: 'pail' }));
+    expect(pails.term.fixed).toBeCloseTo(29.015, 2);
+  });
+
   test('a generic counted pack resolves before the whole-package fallback', () => {
     const each = cogsLineForUsage(row({ best_price: '100', container_size: '20 count', unit_size_oz: null, usage_unit: 'each' }));
     expect(each.term.fixed).toBe(5);

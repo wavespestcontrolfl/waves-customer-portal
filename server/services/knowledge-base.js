@@ -184,7 +184,10 @@ function packCountForUsage(containerSize, usageUnit) {
   const pack = parsePackCount(containerSize);
   if (pack && countUnitsCompatible(pack.unit, singular(usageUnit))) return pack.count;
   const multi = String(containerSize || '').trim().toLowerCase().match(/^(\d+)\s*x\s.*?([a-z]+)$/);
-  if (multi && Number(multi[1]) > 0 && singular(multi[2]) === singular(usageUnit)) return Number(multi[1]);
+  // "4 x 1 gal case": a trailing case/pack/box/kit names the outer wrapper,
+  // not the multiplied item, so one case keeps the full package price.
+  const outer = /^(?:case|pack|box|boxe|kit|carton)$/;
+  if (multi && Number(multi[1]) > 0 && !outer.test(singular(multi[2])) && singular(multi[2]) === singular(usageUnit)) return Number(multi[1]);
   return null;
 }
 
