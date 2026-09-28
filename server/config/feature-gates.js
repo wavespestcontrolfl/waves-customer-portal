@@ -3124,6 +3124,12 @@ const gates = {
   // so the dark 404 is checked on every request, before the route's own
   // rate limiter (see server/routes/public-blog-read-depth.js).
   blogReadDepth: process.env.GATE_BLOG_READ_DEPTH === 'true',
+
+  // Invoice follow-up ladder through Day 90 (dunning unification, owner
+  // rulings 2026-09-27). Ships DARK: off unless exactly 'true'. This entry is
+  // for logGateStatus only: services/invoice-followups.js reads
+  // GATE_DUNNING_LADDER_90 at call time.
+  dunningLadder90: process.env.GATE_DUNNING_LADDER_90 === 'true',
 };
 
 // Parse a gate env var at CALL time (for request-time availability checks

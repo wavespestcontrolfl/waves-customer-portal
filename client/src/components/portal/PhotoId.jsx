@@ -7,6 +7,7 @@ import useLockBodyScroll from '../../hooks/useLockBodyScroll';
 import useModalFocus from '../../hooks/useModalFocus';
 import { captureCameraPhoto } from '../../native/camera';
 import { formatETDateTime } from '../../lib/timezone';
+import CustomerSelect from './CustomerSelect';
 
 // =========================================================================
 // Photo ID — customer-facing photo identifier (GATE_CUSTOMER_PHOTO_ID).
@@ -249,11 +250,12 @@ export function usePhotoIdGate(sessionKey, enabled = true) {
 // =========================================================================
 // Floating button
 // =========================================================================
-export function PhotoIdFab({ onOpen, hasBottomNav }) {
+export function PhotoIdFab({ onOpen, hasBottomNav, hidden = false }) {
   return (
     <button
       type="button"
       onClick={onOpen}
+      hidden={hidden}
       aria-label="Photo ID — identify a bug, lawn spot, tree or shrub"
       data-glass-accent=""
       style={{
@@ -262,13 +264,13 @@ export function PhotoIdFab({ onOpen, hasBottomNav }) {
         // The mobile nav includes the home-indicator inset in its height.
         // Keep the whole button above that bar, including its bottom gap.
         bottom: hasBottomNav
-          ? 'calc(90px + env(safe-area-inset-bottom, 0px))'
+          ? 'calc(var(--portal-bottom-nav-height, calc(70px + env(safe-area-inset-bottom, 0px))) + 20px)'
           : 'calc(20px + env(safe-area-inset-bottom, 0px))',
         zIndex: 97,
         minHeight: 48,
         padding: '0 18px 0 14px',
         borderRadius: 999,
-        display: 'inline-flex',
+        display: hidden ? 'none' : 'inline-flex',
         alignItems: 'center',
         gap: 8,
         border: 'none',
@@ -665,6 +667,16 @@ export function PhotoIdSheet({ open, onClose, items = [], onRefreshHistory, onOp
           <CloseButton onClick={onClose} label="Close Photo ID" />
         </div>
 
+        <div
+          role="status"
+          aria-label="Photo ID status"
+          aria-live="polite"
+          aria-atomic="true"
+          style={{ position: 'absolute', width: 1, height: 1, padding: 0, margin: -1, overflow: 'hidden', clip: 'rect(0, 0, 0, 0)', whiteSpace: 'nowrap', border: 0 }}
+        >
+          {step === 'result' && resultData ? 'Photo ID result ready.' : ''}
+        </div>
+
         {step === 'picker' && (
           <PickerStep items={items} historyError={historyError} loadingHistoryId={loadingHistoryId}
             onPick={pickType} onOpenHistoryItem={openHistoryItem} onClose={onClose} />
@@ -830,11 +842,13 @@ function PhotosStep({ type, photos, busyPhotos, note, location, submitError, ret
           <div key={idx} style={{ position: 'relative', width: 84, height: 84, borderRadius: 8, overflow: 'hidden', border: `1px solid ${SHELL.border}` }}>
             <img src={p.preview} alt={`Photo ${idx + 1}`} style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
             <button type="button" onClick={() => onRemovePhoto(idx)} aria-label={`Remove photo ${idx + 1}`} style={{
-              position: 'absolute', top: 3, right: 3, width: 24, height: 24, minWidth: 24, minHeight: 24,
-              borderRadius: 999, border: 'none', background: 'rgba(15,23,42,0.65)', color: '#fff',
+              position: 'absolute', top: 0, right: 0, width: 44, height: 44, minWidth: 44, minHeight: 44,
+              borderRadius: 999, border: 'none', background: 'transparent', color: '#fff', padding: 0,
               display: 'inline-flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer',
             }}>
-              <Icon name="x" size={13} strokeWidth={2.5} />
+              <span style={{ position: 'absolute', top: 3, right: 3, width: 24, height: 24, borderRadius: 999, background: 'rgba(15,23,42,0.65)', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', pointerEvents: 'none' }}>
+                <Icon name="x" size={13} strokeWidth={2.5} />
+              </span>
             </button>
           </div>
         ))}
@@ -869,20 +883,16 @@ function PhotosStep({ type, photos, busyPhotos, note, location, submitError, ret
 
       <label style={{ display: 'block' }}>
         <span style={{ display: 'block', fontSize: 15, fontWeight: 700, color: SHELL.text, marginBottom: 6 }}>Where on the property (optional)</span>
-        <select
+        <CustomerSelect
           value={location}
           onChange={(e) => onLocationChange(e.target.value)}
-          style={{
-            width: '100%', boxSizing: 'border-box', minHeight: 44, padding: '0 12px', borderRadius: 8,
-            border: `1px solid ${SHELL.borderStrong}`, background: SHELL.surface, color: SHELL.text,
-            fontSize: 15, fontFamily: FONTS.body,
-          }}
+          fullWidth
         >
           <option value="">Not sure</option>
           {PHOTO_ID_LOCATION_OPTIONS.map((l) => (
             <option key={l.value} value={l.value}>{l.label}</option>
           ))}
-        </select>
+        </CustomerSelect>
       </label>
 
       {submitError && <div role="alert" style={{ fontSize: 15, color: B.red }}>{submitError}</div>}

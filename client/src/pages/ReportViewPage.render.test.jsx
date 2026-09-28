@@ -755,6 +755,35 @@ describe('ReportViewPage — legacy lawn fallback (historical tokens, reportV2 n
     }
   });
 
+  // Owner ask 2026-09-28: legacy (pre-v1) reports link to the Products &
+  // Safety page too. They render LegacyReport, which never mounts the v1 footer.
+  it('links legacy reports to the Products & Safety page', async () => {
+    renderReport({ ...legacyLawnReport, reportVersion: undefined });
+    const link = await screen.findByRole('link', { name: /see every product we use and our safety protocol/i });
+    expect(link).toHaveAttribute('href', 'https://www.wavespestcontrol.com/products-and-safety/#safety-protocol');
+    expect(link).toHaveAttribute('target', '_blank');
+    expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+    expect(screen.getByRole('link', { name: /download pdf/i })).toBeInTheDocument();
+  });
+
+  // Owner ask 2026-09-28: every report links to the portal login and the
+  // public Products & Safety page. The safety link sits in the footer, so a
+  // visit that applied nothing carries it too.
+  it.each([
+    ['with products applied', legacyLawnReport],
+    ['with nothing applied', { ...legacyLawnReport, applications: [], applicationMade: false }],
+  ])('links to the portal login and the Products & Safety page (%s)', async (_label, report) => {
+    const { container } = renderReport(report);
+    await screen.findByText('Visit Summary');
+
+    expect(screen.getByRole('link', { name: /portal login/i })).toHaveAttribute('href', '/login');
+    const footer = container.querySelector('footer.sr-footer');
+    const safetyLink = within(footer).getByRole('link', { name: /see every product we use and our safety protocol/i });
+    expect(safetyLink).toHaveAttribute('href', 'https://www.wavespestcontrol.com/products-and-safety/#safety-protocol');
+    expect(safetyLink).toHaveAttribute('target', '_blank');
+    expect(safetyLink).toHaveAttribute('rel', 'noopener noreferrer');
+  });
+
   it('omits the lawn trend chart on a first assessment (single data point)', async () => {
     // Fixture trend has one entry — nothing to trend yet.
     const { container } = renderReport(legacyLawnReport);
