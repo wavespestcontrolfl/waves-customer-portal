@@ -25,9 +25,12 @@
  *                       email recipient from the worker's own resolver
  *                       (invoice-email resolveReceiptEmailRecipient) and
  *                       opt-out check (receiptEmailOptOutState)
+ *   book_followup       completion-followup-booking bookCompletionFollowup —
+ *                       the Dispatch follow-up CTA: a PENDING $0 visit on the
+ *                       frozen verdict's date (idempotent per source visit)
  * Everything else stays manual: field evidence (application log, photos,
- * license) is never generated, billing / follow-up booking live inline in
- * their routes, and exhausted deliveries have no safe re-queue.
+ * license) is never generated, billing lives inline in its route, and
+ * exhausted deliveries have no safe re-queue.
  *
  * Results carry ids, states and reasons — no customer names, phones or
  * addresses.
@@ -45,6 +48,9 @@ const { enqueueReceiptDelivery, receiptEmailOptOutState, expectedEmailSkip } = r
 // Lazy: invoice-email pulls in the invoice/PDF graph — loaded only when a
 // receipt step is planned, never at IB boot.
 const invoiceEmail = () => require('../invoice-email');
+// Lazy: the booking service pulls in the whole completion module graph —
+// loaded only when a follow-up step is planned or run, never at IB boot.
+const followupBooking = () => require('../completion-followup-booking');
 const {
   getServiceReportEmailRecipients, PREFS_UNAVAILABLE,
 } = require('../customer-contact');
@@ -53,8 +59,8 @@ const CLOSEOUT_REPAIR_TOOLS = [
   {
     name: 'repair_closeout',
     description: `Finish the closeout gaps the server can safely repair for ONE completed visit (scheduled_services id). The first call returns a PLAN and changes nothing: the repair steps it would run and the open items it will NOT touch (with where to fix them). The operator approves the exact plan on the confirmation card; the confirmed run executes only those steps and returns an itemized receipt (completed / failed / not attempted).
-Repairable today: publish a missing service report link, queue a service-report email that was never queued (the customer gets an email), and queue a paid receipt that was never queued (the receipt worker emails it — to the payer's billing inbox for a payer-billed invoice — and may text it per the customer's receipt settings).
-Never repaired here: application log, photos, technician license (field evidence — never generated), billing, invoice sends and receipt RE-sends, follow-up booking, completion texts, and exhausted/failed deliveries.
+Repairable today: publish a missing service report link, queue a service-report email that was never queued (the customer gets an email), queue a paid receipt that was never queued (the receipt worker emails it — to the payer's billing inbox for a payer-billed invoice — and may text it per the customer's receipt settings), and book a follow-up visit the completion called for but nobody booked (a PENDING $0 visit on the program-interval date, exactly as the Dispatch follow-up button books it — no text now; the usual reminders go out before the visit).
+Never repaired here: application log, photos, technician license (field evidence — never generated), billing, invoice sends and receipt RE-sends, follow-ups whose date has passed, completion texts, and exhausted/failed deliveries.
 Use for: "fix the closeout for this visit", "finish what's missing on the job we just completed". Call get_closeout_status first when the operator only wants to know what is missing.`,
     input_schema: {
       type: 'object',
@@ -84,6 +90,7 @@ const STEP_EFFECTS = {
   publish_report: { kind: 'operational', label: 'Publish the service report link (internal — no message is sent by this step)' },
   queue_report_email: { kind: 'comms', label: 'Queue the service-report email — the delivery worker emails the customer the report on file' },
   queue_receipt: { kind: 'comms', label: 'Queue the paid receipt — the receipt worker sends it' },
+  book_followup: { kind: 'operational', label: 'Book the PENDING $0 follow-up visit (the Dispatch follow-up action)' },
 };
 
 function parseNotes(value) {
@@ -316,6 +323,43 @@ async function planReceiptStep(status, knex) {
   };
 }
 
+// The Dispatch follow-up CTA's own dry run on the verdict's date.
+async function planFollowupStep(status, knex) {
+  const followUpFact = status.facts.followUp;
+  if (!(followUpFact?.state === 'pending' && followUpFact.reason === 'followup_required_not_booked')) return {};
+  // The Dispatch CTA's own gates, run as a preview on the verdict's date.
+  const probe = await followupBooking().bookCompletionFollowup({
+    serviceId: status.serviceId, useSuggestedDate: true, dryRun: true, isAdmin: true,
+  });
+  const would = probe.status === 200 && probe.body?.dryRun && !probe.body.alreadyScheduled ? probe.body.wouldBook : null;
+  if (!would) return { skip: { fact: 'followUp', reason: followUpFact.reason, why: followupRefusalWhy(probe) } };
+  const tech = would.technicianId
+    ? await knex('technicians').where({ id: would.technicianId }).first('name').catch(() => null)
+    : null;
+  return {
+    step: {
+      step: 'book_followup',
+      fact: 'followUp',
+      reason: followUpFact.reason,
+      scheduled_service_id: status.serviceId,
+      date: would.date,
+      window_start: would.windowStart || null,
+      window_end: would.windowEnd || null,
+      technician_id: would.technicianId || null,
+      technician_name: tech?.name || null,
+      // The card names this customer; the booking re-checks it on the
+      // locked source visit (a merge/repoint refuses).
+      customer_id: status.visit?.customerId || null,
+      overlap: would.overlap === true,
+    },
+  };
+}
+
+function followupRefusalWhy(probe) {
+  const why = probe.body?.alreadyScheduled ? 'a follow-up is already on the schedule' : (probe.body?.error || 'the follow-up cannot be booked');
+  return String(why).replace(/\.$/, '');
+}
+
 // Every open fact no step covers, with where it gets fixed.
 function manualItems(facts, steps, skipped) {
   const manual = [];
@@ -351,8 +395,9 @@ async function planCloseoutRepair(status, { knex = db } = {}) {
   };
   const report = await planReportSteps({ ...status, facts }, getContact, knex);
   const receipt = await planReceiptStep({ ...status, facts }, knex);
-  const steps = [...report.steps, ...(receipt.step ? [receipt.step] : [])];
-  const skipped = [...report.skipped, ...(receipt.skip ? [receipt.skip] : [])];
+  const followup = await planFollowupStep({ ...status, facts }, knex);
+  const steps = [...report.steps, ...(receipt.step ? [receipt.step] : []), ...(followup.step ? [followup.step] : [])];
+  const skipped = [...report.skipped, ...(receipt.skip ? [receipt.skip] : []), ...(followup.skip ? [followup.skip] : [])];
   // Who the card is about — resolved by the server, never the model.
   const who = steps.length ? (await getContact()).customer : null;
   const customerName = who ? [who.first_name, who.last_name].filter(Boolean).join(' ') || null : null;
@@ -360,6 +405,38 @@ async function planCloseoutRepair(status, { knex = db } = {}) {
 }
 
 const STEP_RUNNERS = {
+  async book_followup(step) {
+    let booked;
+    try {
+      // Everything the card showed is pinned BEFORE any write: the
+      // approved date goes through the CTA's own match-the-verdict gate,
+      // the window and technician are refused on a mismatch.
+      booked = await followupBooking().bookCompletionFollowup({
+        serviceId: step.scheduled_service_id,
+        date: step.date,
+        isAdmin: true,
+        actorId: step.actor_id || null,
+        expectedWindow: { start: step.window_start || null, end: step.window_end || null },
+        // The card showed this technician (null = unassigned) and customer.
+        expectedTechnicianId: step.technician_id || null,
+        expectedCustomerId: step.customer_id || null,
+        sourceAction: 'admin_ib',
+      });
+    } catch (err) {
+      if (err && err.statusCode) return { status: 'failed', detail: err.message };
+      throw err;
+    }
+    if (booked.status !== 200 || !booked.body?.appointment) return { status: 'failed', detail: booked.body?.error || 'follow-up not booked' };
+    if (String(booked.body.appointment.scheduledDate || '') !== String(step.date)) {
+      return { status: 'failed', detail: `an existing follow-up is on ${booked.body.appointment.scheduledDate}, not the approved ${step.date}`, appointment_id: booked.body.appointment.id };
+    }
+    return {
+      status: 'completed',
+      detail: booked.body.alreadyScheduled ? 'the follow-up was already booked — nothing new created' : 'pending follow-up booked',
+      appointment_id: booked.body.appointment.id,
+      ...(booked.body.overlapWarning ? { warning: booked.body.overlapWarning } : {}),
+    };
+  },
   async publish_report(step, knex) {
     const token = await ensureReportToken(step.service_record_id, knex);
     if (!token) return { status: 'failed', detail: 'service record not found' };
@@ -430,7 +507,10 @@ async function executeCloseoutRepair(steps, { knex = db } = {}) {
 }
 
 function stepsKey(steps) {
-  return JSON.stringify((steps || []).map((s) => [s.step, s.service_record_id || null, s.invoice_id || null, s.depends_on || null, s.recipients_key || null, s.amount ?? null]));
+  return JSON.stringify((steps || []).map((s) => [
+    s.step, s.service_record_id || null, s.invoice_id || null, s.depends_on || null, s.recipients_key || null, s.amount ?? null,
+    s.date || null, s.window_start || null, s.window_end || null, s.technician_id || null, s.customer_id || null, s.overlap === true,
+  ]));
 }
 
 function previewFromPlan(serviceId, status, plan) {
@@ -445,6 +525,8 @@ function previewFromPlan(serviceId, status, plan) {
       ...s,
       effect: s.step === 'queue_receipt'
         ? `${STEP_EFFECTS[s.step].label}: ${receiptReach(s)}`
+        : s.step === 'book_followup'
+        ? `${STEP_EFFECTS[s.step].label} on ${s.date}${s.window_start ? ` ${String(s.window_start).slice(0, 5)}–${String(s.window_end || '').slice(0, 5)}` : ''} with ${s.technician_name || (s.technician_id ? 'the source visit\'s technician' : 'no technician (unassigned)')}${s.overlap ? ' (overlaps another appointment on the schedule — both are kept)' : ''} — nothing is sent now; it is registered for the usual appointment reminders, which go out per the customer's reminder settings`
         : s.recipients ? `${STEP_EFFECTS[s.step].label} — to ${s.recipients.length ? s.recipients.join(', ') : 'no recipient on file'}` : STEP_EFFECTS[s.step].label,
     })),
     manual: plan.manual,
@@ -494,7 +576,9 @@ async function repairCloseout(input, actionContext = {}) {
   if (stepsKey(approved) !== stepsKey(plan.steps)) {
     return { error: 'What this repair would do changed after the card was shown. Ask again for a fresh confirmation card.', preview_changed: true };
   }
-  const receipt = await executeCloseoutRepair(plan.steps);
+  // The confirming operator is recorded on anything a step writes (the
+  // follow-up booking's alert resolution) — route-derived, never a model param.
+  const receipt = await executeCloseoutRepair(plan.steps.map((st) => ({ ...st, actor_id: actionContext.technicianId || null })));
   const completed = receipt.filter((r) => r.status === 'completed').length;
   logger.info(`[intelligence-bar:closeout-repair] ${serviceId}: ${completed}/${receipt.length} steps completed`);
   const allDone = completed === receipt.length;

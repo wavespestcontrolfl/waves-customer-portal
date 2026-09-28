@@ -69,7 +69,7 @@ describe('Appointment texts per saved property', () => {
       ['24-hour reminder', 'The day before a visit'],
       ['Tech en route', 'Live GPS, about an hour out'],
       ['Tech arrived', 'The moment we reach the property'],
-      ['Send these to me too', "Copy this property's notifications to you as well as the on-location contacts"],
+      ['Send me appointment alerts', "Receive this property's appointment and technician alerts in addition to any on-location contacts."],
     ];
     for (const [label, description] of explanations) {
       const summary = screen.getByText(label, { selector: 'summary span' }).closest('summary');

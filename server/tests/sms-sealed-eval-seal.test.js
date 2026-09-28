@@ -131,3 +131,102 @@ describe('sealEvalItems — selection contract', () => {
     expect(dbi.inserts[0][0].intent).toBe('GENERAL');
   });
 });
+
+
+// Pre-push audit P1 on Codex r3 (PR #5119): once the exam grades under a v12
+// prompt, a pool already full of pre-v12 items must still replenish — the
+// target counts only compatible items, only compatible drafts are sealed,
+// and the oldest displaced pre-v12 items are retired (active=false), never
+// deleted. v11 runs take none of these branches.
+describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
+  const MARKER = 'FOLLOW-UP SLA RIGHT NOW:';
+  const drafter = require('../services/sms-shadow-drafter');
+  let versionSpy;
+  afterEach(() => { if (versionSpy) versionSpy.mockRestore(); versionSpy = null; });
+
+  // A fake that answers the two counts differently and records updates.
+  function makeV12FakeDb({ activeCount, compatibleCount, candidates }) {
+    const calls = [];
+    const inserts = [];
+    const updates = [];
+    const dbi = (table) => {
+      const tableKey = typeof table === 'object' ? Object.values(table)[0] : table;
+      const b = { _table: tableKey, _isCount: false, _compat: false, _insertRows: null, _update: null, _raws: [] };
+      const record = (name) => (...args) => {
+        calls.push([name, args, tableKey]);
+        if (name === 'count') b._isCount = true;
+        if (name === 'whereRaw' && String(args[0]).includes('LIKE') && !String(args[0]).includes('NOT LIKE') && String(args[1]?.[0] || '').includes(MARKER)) b._compat = true;
+        if (name === 'whereRaw') b._raws.push([args[0], args[1]]);
+        if (name === 'modify') args[0](b);
+        if (name === 'insert') { b._insertRows = args[0]; inserts.push(args[0]); }
+        if (name === 'update') { b._update = args[0]; updates.push({ patch: args[0], raws: b._raws }); }
+        return b;
+      };
+      for (const m of ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereRaw', 'modify',
+        'join', 'leftJoin', 'select', 'count', 'groupBy', 'orderBy', 'limit', 'insert', 'onConflict', 'ignore', 'first', 'update']) {
+        b[m] = record(m);
+      }
+      b.then = (resolve, reject) => {
+        let rows;
+        if (b._update) rows = 3; // rows retired
+        else if (b._insertRows) rows = [];
+        else if (b._isCount) rows = [{ count: String(b._compat ? compatibleCount : activeCount) }];
+        else rows = candidates;
+        return Promise.resolve(rows).then(resolve, reject);
+      };
+      return b;
+    };
+    dbi.raw = (sql) => sql;
+    return Object.assign(dbi, { calls, inserts, updates });
+  }
+  const v12cand = (id, createdAt) => ({ ...cand(id, 'SCHEDULING', createdAt), facts_block: `CUSTOMER: x\n${MARKER} within the hour\n` });
+
+  test('v12: a pool FULL of pre-v12 items still seals compatible candidates and retires the displaced oldest pre-v12 items', async () => {
+    versionSpy = jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue('house_voice_v12_real_answers+b');
+    const dbi = makeV12FakeDb({ activeCount: 100, compatibleCount: 0, candidates: [v12cand('a', '2026-08-01'), v12cand('b', '2026-08-02'), v12cand('c', '2026-08-03')] });
+    const out = await sealEvalItems({ target: 100, dbi });
+    expect(out.sealed).toBe(3);
+    expect(out.retired).toBe(3);
+    expect(out.activeCount).toBe(100);
+    // candidates were restricted to v12-compatible drafts
+    expect(dbi.calls.some(([name, args]) => name === 'whereRaw' && /md\.facts_block LIKE/.test(String(args[0])))).toBe(true);
+    // the retirement targeted pre-v12 rows (NOT LIKE marker), oldest first, capped at the overflow
+    expect(dbi.updates).toHaveLength(1);
+    expect(dbi.updates[0].patch).toEqual({ active: false });
+    expect(dbi.calls.some(([name, args]) => name === 'whereRaw' && /NOT LIKE/.test(String(args[0])))).toBe(true);
+    expect(dbi.calls.some(([name, args]) => name === 'limit' && args[0] === 3)).toBe(true);
+    expect(dbi.calls.some(([name, args]) => name === 'orderBy' && args[0] === 'sealed_at' && args[1] === 'asc')).toBe(true);
+  });
+
+  test('v12: an OVERSIZED pool with enough compatible items seals nothing but still prunes the pre-v12 overflow (Codex r4)', async () => {
+    versionSpy = jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue('house_voice_v12_real_answers');
+    const dbi = makeV12FakeDb({ activeCount: 200, compatibleCount: 100, candidates: [] });
+    const out = await sealEvalItems({ target: 100, dbi });
+    expect(out.sealed).toBe(0);
+    expect(out.retired).toBe(3); // the fake reports 3 rows updated
+    expect(dbi.inserts).toHaveLength(0);
+    expect(dbi.updates).toHaveLength(1);
+    expect(dbi.updates[0].patch).toEqual({ active: false });
+    expect(dbi.calls.some(([name, args]) => name === 'limit' && args[0] === 100)).toBe(true);
+  });
+
+  test('v12: a pool with enough compatible items seals nothing', async () => {
+    versionSpy = jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue('house_voice_v12_real_answers');
+    const dbi = makeV12FakeDb({ activeCount: 100, compatibleCount: 100, candidates: [v12cand('a', '2026-08-01')] });
+    const out = await sealEvalItems({ target: 100, dbi });
+    expect(out.sealed).toBe(0);
+    expect(dbi.inserts).toHaveLength(0);
+    expect(dbi.updates).toHaveLength(0);
+  });
+
+  test('v11: no compatibility count, no candidate restriction, no retirement (unchanged)', async () => {
+    versionSpy = jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue('house_voice_v11');
+    const dbi = makeV12FakeDb({ activeCount: 98, compatibleCount: 0, candidates: [cand('a', 'GENERAL', '2026-08-01'), cand('b', 'GENERAL', '2026-08-02'), cand('c', 'GENERAL', '2026-08-03')] });
+    const out = await sealEvalItems({ target: 100, dbi });
+    expect(out.sealed).toBe(2);
+    expect(out.retired).toBe(0);
+    expect(dbi.calls.filter(([name]) => name === 'count')).toHaveLength(1);
+    expect(dbi.calls.some(([name, args]) => name === 'whereRaw' && /md\.facts_block LIKE/.test(String(args[0])))).toBe(false);
+    expect(dbi.updates).toHaveLength(0);
+  });
+});

@@ -102,8 +102,8 @@ describe('v2 extraction prompt', () => {
   });
 
   test('prompt version and hash are stable', () => {
-    expect(PROMPT_VERSION).toBe('v14');
-    expect(PROMPT_HASH).toMatch(/^v14-[a-f0-9]{12}$/);
+    expect(PROMPT_VERSION).toBe('v15');
+    expect(PROMPT_HASH).toMatch(/^v15-[a-f0-9]{12}$/);
   });
 
   test('includes the reschedule agreement and moved-appointment rules (schema 1.16.0)', () => {

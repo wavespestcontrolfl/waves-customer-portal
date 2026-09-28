@@ -39,6 +39,8 @@ async function createScratchDb() {
     status text NOT NULL,
     renewal_decision text,
     annual_plan_version text,
+    prepay_amount numeric(10,2),
+    renewal_noticed_fee numeric(10,2),
     notice_45_sent_at timestamptz,
     notice_45_claimed_at timestamptz,
     notice_45_late_sent_at timestamptz,
@@ -736,6 +738,28 @@ describeOrSkip('termite annual-plan notice obligations — against a schema buil
     const insert = async (fields = {}) => (await db('annual_prepay_terms').insert({ ...base, customer_id: randomUUID(), ...fields }).returning('*'))[0];
     const onTime = new Date('2026-09-26T16:00:00Z');
     const successorAt = new Date(Date.now() + 5000);
+
+    // Codex #4971 r23 P1: an on-time 45-day witness freezes the fee the
+    // notice quoted (renewal_noticed_fee = prepay_amount as rendered); the
+    // 30-day rung freezes nothing.
+    await db.raw('ALTER TABLE annual_prepay_terms ADD COLUMN IF NOT EXISTS prepay_amount numeric(10,2), ADD COLUMN IF NOT EXISTS renewal_noticed_fee numeric(10,2)');
+    const priced = await insert({ prepay_amount: 249 });
+    const claimedPriced = await _private.claimTermNotice(priced, 45);
+    await expect(_private.stampTermNoticeWitness(claimedPriced, 45, onTime)).resolves.toBe('stamped');
+    expect(Number((await db('annual_prepay_terms').where({ id: priced.id }).first('renewal_noticed_fee')).renewal_noticed_fee)).toBe(249);
+    const priced30 = await insert({ prepay_amount: 249, term_end: '2026-10-20', notice_45_sent_at: new Date('2026-09-05T16:00:00Z') });
+    const claimedPriced30 = await _private.claimTermNotice(priced30, 30);
+    await expect(_private.stampTermNoticeWitness(claimedPriced30, 30, new Date('2026-09-20T16:00:00Z'))).resolves.toBe('stamped');
+    expect((await db('annual_prepay_terms').where({ id: priced30.id }).first('renewal_noticed_fee')).renewal_noticed_fee).toBeNull();
+
+    // Codex #4971 r28 P1: a witness RECOVERED from acceptance evidence
+    // freezes nothing — today's fee may not be the fee that message quoted.
+    const recovered = await insert({ prepay_amount: 275 });
+    const claimedRecovered = await _private.claimTermNotice(recovered, 45);
+    await expect(_private.stampTermNoticeWitness(claimedRecovered, 45, onTime, { freezeNoticedFee: false })).resolves.toBe('stamped');
+    const recoveredRow = await db('annual_prepay_terms').where({ id: recovered.id }).first('notice_45_sent_at', 'renewal_noticed_fee');
+    expect(recoveredRow.notice_45_sent_at).not.toBeNull();
+    expect(recoveredRow.renewal_noticed_fee).toBeNull();
 
     const a = await insert();
     const staleA = await _private.claimTermNotice(a, 45);
