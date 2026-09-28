@@ -47,7 +47,7 @@ router.use(adminAuthenticate, requireAdmin);
 // namespace would let a recovery Bill and a concurrent mint both create
 // duplicate drafts. Imported, never re-declared (codex #3344 r8).
 const { acquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
-const { billVisit, dueDateFromVisit } = require('../services/billing-recovery-bill');
+const { billVisit, dueDateFromVisit, siblingCoverageStatus } = require('../services/billing-recovery-bill');
 
 // Service-type patterns that are intentionally $0 and must never be flagged as a
 // leak or auto-billed. Matched case-insensitively against scheduled_services.service_type.
@@ -183,6 +183,10 @@ router.get('/leaks', async (req, res) => {
         'ss.annual_prepay_term_id',
         'ss.scheduled_date',
         'ss.completed_at',
+        // Sibling first-application coverage (siblingCoverageStatus).
+        'ss.source_estimate_id',
+        'ss.first_application_invoice_id',
+        'ss.primary_line_price',
         'c.id as customer_id',
         'c.first_name',
         'c.last_name',
@@ -201,7 +205,18 @@ router.get('/leaks', async (req, res) => {
     const coveredFlags = await Promise.all(
       rows.map((r) => AnnualPrepayRenewals.annualPrepayCoversVisit(r)),
     );
-    const activeRows = rows.filter((_, i) => !coveredFlags[i]);
+    const prepayActiveRows = rows.filter((_, i) => !coveredFlags[i]);
+    // A visit billed on its trip's combined first-application invoice has no
+    // invoice of its own, so the leak query lists it — and Bill refuses it
+    // (billing-recovery-bill.js siblingCoverageRefusal). Drop only a
+    // DEFINITIVE 'covered' verdict. A needs-review one (combined invoice
+    // voided or refunded) or a lookup error stays listed — the money may
+    // still be owed, and hiding it could read as handled; Bill refuses those
+    // with the reason. Leak rows exclude callbacks by construction.
+    const siblingStatuses = await Promise.all(
+      prepayActiveRows.map((r) => siblingCoverageStatus(r, db, { trustRowStamp: true })),
+    );
+    const activeRows = prepayActiveRows.filter((_, i) => siblingStatuses[i] !== 'covered');
 
     // Effective price mirrors the query + the bill route: row price →
     // per-application fee (never monthly_rate).
