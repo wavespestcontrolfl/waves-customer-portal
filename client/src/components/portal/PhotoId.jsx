@@ -8,6 +8,10 @@ import useModalFocus from '../../hooks/useModalFocus';
 import { captureCameraPhoto } from '../../native/camera';
 import { formatETDateTime } from '../../lib/timezone';
 import CustomerSelect from './CustomerSelect';
+import PhotoIdSubjectChips from './PhotoIdSubjectChips';
+import PhotoIdWorkupCard from './PhotoIdWorkupCard';
+import { buildChipsPayload, GUIDED_SHOT_LABELS, SUBJECT_BODY_VALUE, SUBJECT_ROUTE_TYPE } from './photoIdCopy';
+import { Chip, ResultPhotos, V2_TIER_LABEL } from './photoIdShared';
 
 // =========================================================================
 // Photo ID — customer-facing photo identifier (GATE_CUSTOMER_PHOTO_ID).
@@ -33,10 +37,16 @@ import CustomerSelect from './CustomerSelect';
 // the More-sheet row can never disagree about whether the feature is live.
 // =========================================================================
 
+// `value` is the subject the sheet tracks as `selectedType`. `palm` is its
+// own subject (lawn-ts-photo-id-scope-20260927.md §5, decision 7) but has no
+// route of its own — it POSTs to the existing `/api/photo-id/tree_shrub`
+// with `subject: 'palm'` in the body (see SUBJECT_ROUTE_TYPE/
+// SUBJECT_BODY_VALUE in photoIdCopy.js).
 export const PHOTO_ID_TYPES = [
   { value: 'pest', label: 'Bug or pest', icon: 'bug', description: 'Something crawling, flying, or nesting.' },
   { value: 'lawn', label: 'Lawn spot', icon: 'leaf', description: 'Brown patches, thinning, or discoloration.' },
   { value: 'tree_shrub', label: 'Tree or shrub', icon: 'tree', description: 'Leaves, branches, or plant health.' },
+  { value: 'palm', label: 'Palm', icon: 'tree', description: 'Fronds, fruit, trunk, or crown.' },
 ];
 
 // Same options the New Request form offers for "Where on the property" —
@@ -78,17 +88,6 @@ const NEXT_STEP_CTA_LABEL = {
   request: 'Request service',
   inspection: 'Request service',
   unclear: 'Send to the team',
-};
-
-// v2 result card (GATE_PHOTO_ID_V2, server side) — rendered only when the
-// response carries a `data.v2` object (see V2-CONTRACT.md). Every string a
-// customer sees below is either payload text verbatim (headline, subhead,
-// verdict_label, safety_line, evidence, candidate names, referral text,
-// next_photo ask/why, entry facts) or one of these two fixed tier labels —
-// never composed species facts.
-const V2_TIER_LABEL = {
-  ai_suggestion: 'AI suggestion',
-  needs_more_evidence: 'Needs more evidence',
 };
 
 // Fallback category for a LIVE result's request handoff when the server
@@ -316,32 +315,6 @@ function BackButton({ onClick }) {
   );
 }
 
-// tone: 'default' | 'alert' | 'accent' plus the four v2 verdict tones —
-// ally/harmless/watch/call are deliberately calm and distinct from one
-// another; `call` ("Worth a pro look") is NOT alarm-red (that's `alert`,
-// reserved for the pest-result safety chips above).
-// Verdict chip text is 14px on the light glass chip, so each tone uses a
-// dark shade of its hue (≥ 4.5:1 on white): the brand green, sky and amber
-// are too light to read as text at this size.
-const VERDICT_TEXT = {
-  ally: '#166534', // green-800
-  harmless: '#075985', // sky-800
-  watch: '#92400E', // amber-800
-  call: B.glassNavy,
-};
-
-function Chip({ children, tone = 'default' }) {
-  const toneColor = tone === 'alert' ? B.red
-    : tone === 'accent' ? B.glassNavy
-    : VERDICT_TEXT[tone] || SHELL.text;
-  return (
-    <span data-glass="chip" style={{
-      display: 'inline-flex', alignItems: 'center', padding: '5px 12px', borderRadius: 999,
-      fontSize: 14, fontWeight: 700, color: toneColor,
-    }}>{children}</span>
-  );
-}
-
 // =========================================================================
 // The sheet: picker -> photos -> analyzing -> result, + history.
 // =========================================================================
@@ -356,6 +329,13 @@ export function PhotoIdSheet({ open, onClose, items = [], onRefreshHistory, onOp
   const [busyPhotos, setBusyPhotos] = useState(false);
   const [note, setNote] = useState('');
   const [location, setLocation] = useState('');
+  // Lawn / tree_shrub / palm only (photoIdCopy.js CHIP_QUESTIONS) —
+  // { [chipKey]: optionValue | NOT_SURE_VALUE }. Every chip is optional, so
+  // this never gates Identify. Free-text plant name maps to
+  // chips.plant_name (no host-plant search yet — chips.plant_slug stays
+  // null); see buildChipsPayload.
+  const [chipAnswers, setChipAnswers] = useState({});
+  const [plantName, setPlantName] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState('');
   const [resultData, setResultData] = useState(null); // { id, type, created_at, result, next_step, photos? }
@@ -390,6 +370,8 @@ export function PhotoIdSheet({ open, onClose, items = [], onRefreshHistory, onOp
       setPhotos([]);
       setNote('');
       setLocation('');
+      setChipAnswers({});
+      setPlantName('');
       setSubmitError('');
       setSubmitting(false);
       setBusyPhotos(false);
@@ -415,10 +397,24 @@ export function PhotoIdSheet({ open, onClose, items = [], onRefreshHistory, onOp
     setBusyPhotos(false);
     setNote('');
     setLocation('');
+    setChipAnswers({});
+    setPlantName('');
     setSubmitError('');
     setUnavailableHistoryPhotoIds([]);
     setRetakeBanner(null);
     setStep('photos');
+  };
+
+  const onChipAnswerChange = (key, value) => {
+    setChipAnswers((prev) => {
+      if (value === null) {
+        if (!(key in prev)) return prev;
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      }
+      return { ...prev, [key]: value };
+    });
   };
 
   const addFiles = async (fileList) => {
@@ -485,7 +481,20 @@ export function PhotoIdSheet({ open, onClose, items = [], onRefreshHistory, onOp
       const payload = { photos: photos.map((p) => p.data) };
       if (note.trim()) payload.note = note.trim().slice(0, NOTE_LIMIT);
       if (location) payload.location = location;
-      const result = await api.createPhotoId(selectedType, payload);
+      // Lawn / tree_shrub / palm carry the plant-engine's subject + chips
+      // fields (PLANT-ENGINE-CONTRACT.md §2/§3). `/api/photo-id` parses its
+      // JSON body by named field (server/routes/photo-id.js) and ignores
+      // anything it doesn't read, so sending these today — while the route
+      // still only reads photos/note/location — is inert, not breaking:
+      // today's request/response stay byte-for-byte the same until L4 wires
+      // the route to read them.
+      const subjectBodyValue = SUBJECT_BODY_VALUE[selectedType];
+      if (subjectBodyValue) {
+        payload.subject = subjectBodyValue;
+        payload.chips = buildChipsPayload(selectedType, { ...chipAnswers, plant_name: plantName });
+      }
+      const routeType = SUBJECT_ROUTE_TYPE[selectedType] || selectedType;
+      const result = await api.createPhotoId(routeType, payload);
       if (genRef.current !== myGen) return; // sheet closed / reset mid-request
       setResultData(result);
       setResultSource('live');
@@ -565,6 +574,8 @@ export function PhotoIdSheet({ open, onClose, items = [], onRefreshHistory, onOp
     if (resultSource === 'history') {
       setNote('');
       setLocation('');
+      setChipAnswers({});
+      setPlantName('');
     }
     setRetakeBanner({ ask: nextPhoto?.ask || '' });
     setStep('photos');
@@ -689,6 +700,10 @@ export function PhotoIdSheet({ open, onClose, items = [], onRefreshHistory, onOp
             busyPhotos={busyPhotos}
             note={note}
             location={location}
+            chipAnswers={chipAnswers}
+            onChipAnswerChange={onChipAnswerChange}
+            plantName={plantName}
+            onPlantNameChange={setPlantName}
             submitError={submitError}
             retakeBanner={retakeBanner}
             fileInputRef={fileInputRef}
@@ -812,11 +827,27 @@ function PickerStep({ items, historyError, loadingHistoryId, onPick, onOpenHisto
   );
 }
 
-function PhotosStep({ type, photos, busyPhotos, note, location, submitError, retakeBanner, fileInputRef, onAddFiles, onCameraTap, onRemovePhoto, onNoteChange, onLocationChange, onSubmit }) {
+function PhotosStep({ type, photos, busyPhotos, note, location, chipAnswers, onChipAnswerChange, plantName, onPlantNameChange, submitError, retakeBanner, fileInputRef, onAddFiles, onCameraTap, onRemovePhoto, onNoteChange, onLocationChange, onSubmit }) {
   const remaining = PHOTO_LIMIT - photos.length;
   const canSubmit = photos.length > 0 && !busyPhotos;
+  // Guided three shots (lawn-ts-photo-id-scope-20260927.md §5) — role hints
+  // only; camera/HEIC/retake mechanics below are unchanged for every type,
+  // including pest.
+  const shotLabels = GUIDED_SHOT_LABELS[type];
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      {shotLabels && (
+        <div data-glass="soft" style={{ borderRadius: 8, border: `1px solid ${SHELL.border}`, padding: 12 }}>
+          <div style={{ fontSize: 14, fontWeight: 700, color: SHELL.muted, textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 6 }}>
+            Three photos that help most
+          </div>
+          <ol style={{ margin: 0, padding: '0 0 0 18px', display: 'flex', flexDirection: 'column', gap: 4 }}>
+            {shotLabels.map((label, i) => (
+              <li key={i} style={{ fontSize: 15, color: SHELL.body, lineHeight: 1.4 }}>{label}</li>
+            ))}
+          </ol>
+        </div>
+      )}
       {retakeBanner && (
         <div data-glass="soft" role="status" style={{ borderRadius: 8, border: `1px solid ${SHELL.border}`, padding: 12, display: 'flex', flexDirection: 'column', gap: 4 }}>
           {retakeBanner.ask && <div style={{ fontSize: 16, fontWeight: 700, color: SHELL.text, lineHeight: 1.4 }}>{retakeBanner.ask}</div>}
@@ -865,6 +896,16 @@ function PhotosStep({ type, photos, busyPhotos, note, location, submitError, ret
         )}
       </div>
       <div style={{ fontSize: 14, color: SHELL.muted }}>Up to {PHOTO_LIMIT} photos. {remaining} remaining.</div>
+
+      {(type === 'lawn' || type === 'tree_shrub' || type === 'palm') && (
+        <PhotoIdSubjectChips
+          subject={type}
+          answers={chipAnswers}
+          onAnswersChange={onChipAnswerChange}
+          plantName={plantName}
+          onPlantNameChange={onPlantNameChange}
+        />
+      )}
 
       <label style={{ display: 'block' }}>
         <span style={{ display: 'block', fontSize: 15, fontWeight: 700, color: SHELL.text, marginBottom: 6 }}>Note (optional)</span>
@@ -1051,40 +1092,6 @@ function TreeShrubResult({ result }) {
 }
 
 const RESULT_BODY_BY_TYPE = { pest: PestResult, lawn: LawnResult, tree_shrub: TreeShrubResult };
-
-function ResultPhotos({ photos, unavailablePhotoIds, onPhotoUnavailable }) {
-  if (!Array.isArray(photos) || photos.length === 0) {
-    return <div role="status" style={{ fontSize: 14, color: SHELL.muted }}>Original photos are unavailable. Add a new photo to your request.</div>;
-  }
-  const unavailable = new Set(unavailablePhotoIds || []);
-  const available = photos.filter((photo) => photo?.url && !unavailable.has(photo.id));
-  const unavailableCount = photos.length - available.length;
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-      {available.length > 0 && (
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-          {available.map((photo, index) => (
-            <img
-              key={photo.id || `${photo.url}-${index}`}
-              src={photo.url}
-              alt={`Saved photo ${index + 1}`}
-              onError={() => { if (photo.id) onPhotoUnavailable?.(photo.id); }}
-              style={{ width: 84, height: 84, objectFit: 'cover', borderRadius: 8, border: `1px solid ${SHELL.border}` }}
-            />
-          ))}
-        </div>
-      )}
-      {unavailableCount > 0 && (
-        <div role="status" style={{ fontSize: 14, color: SHELL.muted, lineHeight: 1.45 }}>
-          {unavailableCount === 1
-            ? 'One saved photo could not be loaded.'
-            : `${unavailableCount} saved photos could not be loaded.`}
-        </div>
-      )}
-    </div>
-  );
-}
 
 // =========================================================================
 // v2 result card (server-decided; every string below is payload text) —
@@ -1317,14 +1324,40 @@ function V2Result({ v2, photos, unavailablePhotoIds, onPhotoUnavailable, onRetak
   );
 }
 
+// The lawn/tree_shrub/palm workup (PLANT-ENGINE-CONTRACT.md §6.7) is its own
+// shape and rendering path, distinguished by `data.v2.kind === 'workup'`.
+// Every other v2 shape — the pest engine's (no `kind` field today) and the
+// plant engine's `kind: 'identity'` mode — renders through the existing
+// V2Result unchanged, since both are the same pest-identity-style contract
+// (headline/tier/entry/candidates/next_photo). Any OTHER, unrecognized
+// `kind` falls back to today's v1 LawnResult/TreeShrubResult rather than
+// risk V2Result rendering an unfamiliar shape.
+function resultRenderMode(v2) {
+  if (!v2) return 'v1';
+  if (v2.kind === 'workup') return 'workup';
+  if (v2.kind === undefined || v2.kind === 'identity') return 'v2';
+  return 'v1';
+}
+
 function ResultStep({ data, photos, unavailablePhotoIds, onPhotoUnavailable, onOpenRequestCta, onDone, onRetakePhoto }) {
   const result = data.result || {};
   const ResultBody = RESULT_BODY_BY_TYPE[data.type];
   const v2 = data.v2;
+  const renderMode = resultRenderMode(v2);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      {v2 ? (
+      {renderMode === 'workup' ? (
+        <PhotoIdWorkupCard
+          v2={v2}
+          photos={photos}
+          unavailablePhotoIds={unavailablePhotoIds}
+          onPhotoUnavailable={onPhotoUnavailable}
+          onRetakePhoto={onRetakePhoto}
+          onOpenRequestCta={onOpenRequestCta}
+          onDone={onDone}
+        />
+      ) : renderMode === 'v2' ? (
         <V2Result
           v2={v2}
           photos={photos}
@@ -1339,7 +1372,13 @@ function ResultStep({ data, photos, unavailablePhotoIds, onPhotoUnavailable, onO
         </section>
       )}
 
-      <NextStepBlock nextStep={data.next_step} onOpenRequestCta={onOpenRequestCta} onDone={onDone} />
+      {/* A workup owns its own next-step block (built from v2.next_step_hint
+          / v2.referral, a different vocabulary from data.next_step) —
+          rendered inside PhotoIdWorkupCard above, so it is not duplicated
+          here. */}
+      {renderMode !== 'workup' && (
+        <NextStepBlock nextStep={data.next_step} onOpenRequestCta={onOpenRequestCta} onDone={onDone} />
+      )}
     </div>
   );
 }
