@@ -3196,3 +3196,100 @@ test('a consultation link to an active applicant phone is refused before the rec
     isRecruitingPhone.mockResolvedValue(false);
   }
 });
+
+// Follow-up to codex #5018 r15 P2: the phone lock above only serialized
+// ORDERING against call-booking-link-text.js's own worker — it never
+// actually stopped a same-moment duplicate. Now that the lock is held, this
+// composer route re-runs that lane's own linkSentRecently read on the SAME
+// held connection — but only when this send itself carries a validated
+// consultation link (outreachLeadId) — scoped to a short race window, never
+// the lane's own 14-day dedupe window.
+describe('the manual-send race guard (codex #5018 r15 P2 follow-up)', () => {
+  const LEAD_ID = 'aaaaaaaa-1111-4111-8111-111111111111';
+  let bearerSpy;
+  let linkSentRecentlySpy;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.mockReset();
+    db.mockImplementation(() => makeUniversalBuilder());
+    sendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM-race-guard' });
+    bearerSpy = jest.spyOn(require('../services/composer-customer-links'), 'bearerLinkSendCheck')
+      .mockResolvedValue({ ok: true, consultationLeadId: LEAD_ID });
+    linkSentRecentlySpy = jest.spyOn(require('../services/call-booking-link-text'), 'linkSentRecently').mockResolvedValue(false);
+  });
+  afterEach(() => {
+    bearerSpy.mockRestore();
+    linkSentRecentlySpy.mockRestore();
+  });
+
+  const send = (baseUrl, overrides = {}) => fetch(`${baseUrl}/admin/communications/sms`, {
+    method: 'POST',
+    headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ to: '+15551234567', body: 'Pick a time: portal.wavespestcontrol.com/l/cons1', leadId: LEAD_ID, ...overrides }),
+  });
+
+  test('a consultation-link send re-checks linkSentRecently on the held connection and dispatches when the window is clear (resend of an old link allowed)', async () => {
+    await withServer(async (baseUrl) => {
+      const res = await send(baseUrl);
+      expect(res.status).toBe(200);
+    });
+    expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ withSmsHandoff: expect.any(Function) }));
+    const { withSmsHandoff } = sendCustomerMessage.mock.calls[0][0];
+    const trx = { raw: jest.fn(async () => {}) };
+    db.transaction = jest.fn(async (fn) => fn(trx));
+    const dispatch = jest.fn(async (t) => ({ sent: true, sawTrx: t === trx }));
+    const result = await withSmsHandoff(dispatch);
+    expect(linkSentRecentlySpy).toHaveBeenCalledWith(trx, LEAD_ID, expect.any(Date), { windowMs: 10 * 60 * 1000 });
+    expect(dispatch).toHaveBeenCalledWith(trx);
+    expect(result).toEqual({ sent: true, sawTrx: true });
+  });
+
+  test('an automated send landing just before this one refuses with 409, never dispatching', async () => {
+    linkSentRecentlySpy.mockResolvedValue(true);
+    await withServer(async (baseUrl) => {
+      await send(baseUrl);
+    });
+    const { withSmsHandoff } = sendCustomerMessage.mock.calls[0][0];
+    const trx = { raw: jest.fn(async () => {}) };
+    db.transaction = jest.fn(async (fn) => fn(trx));
+    const dispatch = jest.fn(async () => ({ sent: true }));
+    const result = await withSmsHandoff(dispatch);
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      ok: false,
+      code: 'LINK_SENT_RECENTLY_RACE',
+      reason: expect.stringMatching(/just texted/i),
+      retryable: false,
+    });
+  });
+
+  test('the route maps LINK_SENT_RECENTLY_RACE to a 409 with a clear message', async () => {
+    sendCustomerMessage.mockResolvedValue({
+      sent: false, blocked: true, code: 'LINK_SENT_RECENTLY_RACE',
+      reason: 'A booking link was just texted to this number a moment ago',
+    });
+    await withServer(async (baseUrl) => {
+      const res = await send(baseUrl);
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body.error).toMatch(/just texted/i);
+    });
+  });
+
+  test('no consultation link in the body: linkSentRecently is never consulted', async () => {
+    bearerSpy.mockResolvedValue({ ok: true }); // no consultationLeadId
+    await withServer(async (baseUrl) => {
+      const res = await send(baseUrl, { body: 'Running a bit late today.' });
+      expect(res.status).toBe(200);
+    });
+    const { withSmsHandoff } = sendCustomerMessage.mock.calls[0][0];
+    const trx = { raw: jest.fn(async () => {}) };
+    db.transaction = jest.fn(async (fn) => fn(trx));
+    const dispatch = jest.fn(async (t) => ({ sent: true, sawTrx: t === trx }));
+    const result = await withSmsHandoff(dispatch);
+    expect(linkSentRecentlySpy).not.toHaveBeenCalled();
+    expect(dispatch).toHaveBeenCalledWith(trx);
+    expect(result).toEqual({ sent: true, sawTrx: true });
+  });
+});

@@ -1464,18 +1464,25 @@ router.post('/:id/send-sms', async (req, res, next) => {
       // so it's allowlisted in validators/send-window.js like the other
       // admin compose surfaces.
       entryPoint: 'admin_leads_send_sms',
-      // codex #5018 r15 P2: without this, a staff-typed message (a manual
-      // consultation link included) can race call-booking-link-text.js's
-      // own worker — its final linkSentRecently check and this send could
-      // interleave, both landing as if the other never happened. The SAME
-      // phone-locked handoff that lane's own automated send already uses
-      // (lockSmsPhone, matching applyInboundOptout's own key) serializes
-      // the two: manual semantics are otherwise UNCHANGED — staff can
-      // always send here, with no 14-day delivered-link block on this
-      // path; only the ORDERING of a concurrent automated attempt against
-      // this one is affected.
+      // codex #5018 r15 P2, closed by its own r16/r17 follow-up: a
+      // staff-typed message (a manual consultation link included) can race
+      // call-booking-link-text.js's own worker — its final linkSentRecently
+      // check and this send could interleave, both landing as if the other
+      // never happened. The SAME phone-locked handoff that lane's own
+      // automated send already uses (lockSmsPhone, matching
+      // applyInboundOptout's own key) serializes the two, and — now that
+      // the lock is held — this route re-runs THAT lane's own
+      // linkSentRecently read on the SAME held connection, scoped to
+      // MANUAL_SEND_RACE_GUARD_WINDOW_MS (minutes, not the lane's own
+      // 14-day dedupe window): manual semantics are otherwise UNCHANGED —
+      // staff can always resend an OLDER link; only a delivery landing in
+      // this same tiny race window is refused (409, below).
       withSmsHandoff: (dispatch) => db.transaction(async (trx) => {
         await lockSmsPhone(trx, lead.phone);
+        const { linkSentRecently, MANUAL_SEND_RACE_GUARD_WINDOW_MS } = require('../services/call-booking-link-text');
+        if (await linkSentRecently(trx, lead.id, new Date(), { windowMs: MANUAL_SEND_RACE_GUARD_WINDOW_MS })) {
+          return { ok: false, code: 'LINK_SENT_RECENTLY_RACE', reason: 'A booking link was just texted to this number a moment ago', retryable: false };
+        }
         return dispatch(trx);
       }),
       // codex #5018 structural fix (post-r7): opts INTO twilio.js's in-
@@ -1496,6 +1503,13 @@ router.post('/:id/send-sms', async (req, res, next) => {
       },
     });
     const { isRealProviderSend } = require('../services/sms-auto-send');
+    // The manual-send race guard above (LINK_SENT_RECENTLY_RACE) is its own
+    // refusal, not the generic blocked-send 422: 409 matches the "conflict
+    // with something that just happened" the composer route below returns
+    // for the same race.
+    if (sendResult.code === 'LINK_SENT_RECENTLY_RACE') {
+      return res.status(409).json({ error: sendResult.reason });
+    }
     if (sendResult.blocked || !isRealProviderSend(sendResult)) {
       return res.status(422).json(sendResult);
     }

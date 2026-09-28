@@ -103,6 +103,22 @@ const HANDOFF_MARKER_TABLE = 'call_booking_link_text_handoffs';
 // well under a day), so it is never read again; the live sweep prunes it.
 const HANDOFF_MARKER_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 
+// linkSentRecently's own default dedupe window — "was this lead's link
+// already sent" for the automated lane's own final pre-send refusal.
+const LINK_SENT_RECENTLY_DEFAULT_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
+
+// Follow-up to codex #5018 r15 P2: admin-leads.js's lead send-sms route and
+// admin-communications.js's composer route both take lockSmsPhone before
+// dispatch — serializing against THIS lane's own worker send — but neither
+// re-checked linkSentRecently on that held connection, so a worker send
+// landing moments earlier left staff free to text the same link again
+// seconds later. Both now re-run linkSentRecently with THIS short window
+// instead of the 14-day default above: staff may deliberately resend an
+// older link (that's allowed, unchanged), so only a delivery inside this
+// same tiny race window — the two sends interleaving around one
+// lockSmsPhone acquisition — is refused.
+const MANUAL_SEND_RACE_GUARD_WINDOW_MS = 10 * 60 * 1000;
+
 // Bounds how far back the staging pass looks for never-yet-evaluated calls —
 // extraction normally lands within minutes, so a call still unevaluated
 // after this long is not worth an indefinite retry.
@@ -1007,8 +1023,13 @@ async function bookedSinceCall(conn, customerId, since, leadPhone) {
 // allowing an automated text inside the promised 14-day exclusion). Only
 // sms_log's own filters (excludeUnresolvedSendReservations, direction,
 // since, status) bound the window.
-async function linkSentRecently(conn, leadId, now) {
-  const since = new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000);
+// windowMs (follow-up to codex #5018 r15 P2): defaults to this lane's own
+// 14-day dedupe window. admin-leads.js and admin-communications.js pass
+// MANUAL_SEND_RACE_GUARD_WINDOW_MS instead — a short race-only window — when
+// reusing this same read as a post-lock manual-send guard; see that
+// constant's own comment for why.
+async function linkSentRecently(conn, leadId, now, { windowMs = LINK_SENT_RECENTLY_DEFAULT_WINDOW_MS } = {}) {
+  const since = new Date(now.getTime() - windowMs);
   // excludeUnresolvedSendReservations (codex r1 P2): 'sending' also covers
   // a pre-provider reply/review-ask RESERVATION row — a placeholder that
   // never reached Twilio, not delivery evidence. Every other caller of
@@ -1966,5 +1987,13 @@ module.exports = {
   HANDOFF_MARKER_RETENTION_MS,
   pruneHandoffMarkers,
   sweep,
+  // linkSentRecently + its manual-send race-guard window: reused directly by
+  // admin-leads.js and admin-communications.js (see
+  // MANUAL_SEND_RACE_GUARD_WINDOW_MS's own comment) — exported properly
+  // rather than through _private since these are now real cross-module
+  // callers, not test-only reach-ins.
+  linkSentRecently,
+  LINK_SENT_RECENTLY_DEFAULT_WINDOW_MS,
+  MANUAL_SEND_RACE_GUARD_WINDOW_MS,
   _private: { leadIdOf, extractionOf, parseMetadata, bookedSinceCall, linkSentRecently },
 };

@@ -1061,8 +1061,24 @@ router.post('/sms', async (req, res, next) => {
       // unconditionally unchanged either way, and narrowing it to just the
       // consultation-carrying sends would add conditional complexity for
       // no behavioral difference.
+      //
+      // codex #5018 r15 P2 follow-up: now that the lock is held, ALSO
+      // re-run that lane's own linkSentRecently read on this same
+      // connection — but only when this send itself carries a validated
+      // consultation link (outreachLeadId, set above by bearerCheck's own
+      // checkConsultationLinkSend — the SAME short/long-form resolution
+      // linkSentRecently uses). An ordinary composer text with no
+      // consultation link has nothing for that lane's worker to race.
+      // Scoped to MANUAL_SEND_RACE_GUARD_WINDOW_MS (minutes), never the
+      // 14-day dedupe window — staff may deliberately resend an older link.
       withSmsHandoff: (dispatch) => db.transaction(async (trx) => {
         await lockSmsPhone(trx, to);
+        if (outreachLeadId) {
+          const { linkSentRecently, MANUAL_SEND_RACE_GUARD_WINDOW_MS } = require('../services/call-booking-link-text');
+          if (await linkSentRecently(trx, outreachLeadId, new Date(), { windowMs: MANUAL_SEND_RACE_GUARD_WINDOW_MS })) {
+            return { ok: false, code: 'LINK_SENT_RECENTLY_RACE', reason: 'A booking link was just texted to this number a moment ago', retryable: false };
+          }
+        }
         return dispatch(trx);
       }),
       // codex #5018 structural fix (post-r7): opts INTO twilio.js's in-
@@ -1257,7 +1273,14 @@ router.post('/sms', async (req, res, next) => {
           reason: 'Send was blocked or failed — suggestion reopened.',
         });
       }
-      return res.status(result.httpStatus || 422).json({
+      // LINK_SENT_RECENTLY_RACE (the manual-send race guard, above) rides
+      // through the ordinary withSmsHandoff → sendCustomerMessage → result
+      // pipeline, which carries no httpStatus of its own (unlike the
+      // early short-circuit blocks above that set one directly) — mapped
+      // to 409 here, same status the pre-push review-claim-lost block uses
+      // for "conflicts with something that just happened".
+      const statusCode = result.code === 'LINK_SENT_RECENTLY_RACE' ? 409 : (result.httpStatus || 422);
+      return res.status(statusCode).json({
         ...result,
         error: result.reason || result.code || 'SMS send blocked/failed',
       });

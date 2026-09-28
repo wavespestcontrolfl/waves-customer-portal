@@ -16,6 +16,14 @@ jest.mock('../services/lead-attribution', () => ({
   logFirstResponse: jest.fn(async () => {}),
 }));
 jest.mock('../services/lead-funnel-bridge', () => ({ bridgeLeadFunnelStage: jest.fn(async () => {}) }));
+// Follow-up to codex #5018 r15 P2: the manual-send race guard's own
+// linkSentRecently read, lazily required inside withSmsHandoff — mocked so
+// its behavior (hit vs. no hit) is asserted directly rather than through a
+// real DB read.
+jest.mock('../services/call-booking-link-text', () => ({
+  linkSentRecently: jest.fn(async () => false),
+  MANUAL_SEND_RACE_GUARD_WINDOW_MS: 10 * 60 * 1000,
+}));
 // Deterministic fromNumber validation only — mediaFromOutboundAttachments
 // is left real (pure, no I/O) so attachment shape assertions below exercise
 // the actual transform the generic /admin/communications/sms route relies on.
@@ -28,6 +36,7 @@ const db = require('../models/db');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { logFirstResponse } = require('../services/lead-attribution');
 const { bridgeLeadFunnelStage } = require('../services/lead-funnel-bridge');
+const { linkSentRecently } = require('../services/call-booking-link-text');
 const router = require('../routes/admin-leads');
 let lead;
 let activities;
@@ -106,6 +115,48 @@ test('the manual send carries the same phone-locked handoff the automated worker
   expect(trx.raw).toHaveBeenCalledWith(expect.stringContaining('pg_advisory_xact_lock'), [lead.phone]);
   expect(dispatch).toHaveBeenCalledWith(trx);
   expect(result).toEqual({ sent: true, sawTrx: true });
+});
+
+// Follow-up to codex #5018 r15 P2: the phone lock above only serialized
+// ORDERING — it never actually stopped a same-moment duplicate. Now that the
+// lock is held, this route re-runs the automated lane's own linkSentRecently
+// read on that same connection, scoped to a short race window rather than
+// its 14-day dedupe window.
+describe('the manual-send race guard (codex #5018 r15 P2 follow-up)', () => {
+  test('an automated send landing just before this one refuses with 409, never dispatching', async () => {
+    linkSentRecently.mockResolvedValueOnce(true);
+    await send();
+    const { withSmsHandoff } = sendCustomerMessage.mock.calls[0][0];
+    const trx = { raw: jest.fn(async () => {}) };
+    db.transaction = jest.fn(async (fn) => fn(trx));
+    const dispatch = jest.fn(async () => ({ sent: true }));
+    const result = await withSmsHandoff(dispatch);
+    expect(linkSentRecently).toHaveBeenCalledWith(trx, 'lead-qa', expect.any(Date), { windowMs: 10 * 60 * 1000 });
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(result).toEqual({ ok: false, code: 'LINK_SENT_RECENTLY_RACE', reason: expect.stringMatching(/just texted/i), retryable: false });
+  });
+
+  test('a link texted days ago (outside the race window) is not blocked — dispatch still runs', async () => {
+    linkSentRecently.mockResolvedValueOnce(false);
+    await send();
+    const { withSmsHandoff } = sendCustomerMessage.mock.calls[0][0];
+    const trx = { raw: jest.fn(async () => {}) };
+    db.transaction = jest.fn(async (fn) => fn(trx));
+    const dispatch = jest.fn(async (t) => ({ sent: true, sawTrx: t === trx }));
+    const result = await withSmsHandoff(dispatch);
+    expect(dispatch).toHaveBeenCalledWith(trx);
+    expect(result).toEqual({ sent: true, sawTrx: true });
+  });
+
+  test('the route maps LINK_SENT_RECENTLY_RACE to a 409 with a clear message', async () => {
+    sendCustomerMessage.mockResolvedValue({
+      sent: false, blocked: true, code: 'LINK_SENT_RECENTLY_RACE',
+      reason: 'A booking link was just texted to this number a moment ago',
+    });
+    const response = await send();
+    expect(response.status).toBe(409);
+    expect(response.body.error).toMatch(/just texted/i);
+  });
 });
 
 test('rejects a stale destination before transport', async () => {
