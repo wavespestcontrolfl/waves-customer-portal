@@ -1410,6 +1410,19 @@ describe('internal-link PR auto-merge', () => {
     expect(instance._closeLinkPr).toHaveBeenCalledWith(expect.any(Object), expect.any(Array), expect.objectContaining({ status: 'skipped', skipReason: 'codex_findings' }));
   });
 
+  test('Codex findings are recorded as a rejection even when main also moved', async () => {
+    GitHubClient.listPrReviewComments.mockResolvedValue([{ user: { login: 'chatgpt-codex-connector[bot]' }, commit_id: HEAD, body: 'P1' }]);
+    GitHubClient.getFile.mockImplementation(async (_path, ref) => ({ content: ref === HEAD ? `${headBody}moved\n` : baseBody }));
+    expect(await instance.runAutoMerge()).toMatchObject({ status: 'closed', reason: 'codex_findings' });
+    expect(instance._closeLinkPr).toHaveBeenCalledWith(expect.any(Object), expect.any(Array), expect.objectContaining({ skipReason: 'codex_findings' }));
+  });
+
+  test('a crash-recovered PR is held for a human, never auto-merged', async () => {
+    openTasks([{ id: 't1', status: 'pr_open', astro_pr_url: prUrl, pr_commit_sha: HEAD, executor_version: 'internal-link-pr-executor-recovered', source_file: 'src/content/blog/a.md', target_url: '/termite-inspection/' }]);
+    expect(await instance.runAutoMerge()).toMatchObject({ status: 'hold', reason: 'pre_judge_pr' });
+    expect(GitHubClient.mergePr).not.toHaveBeenCalled();
+  });
+
   test('kill switch and shadow mode disable it', async () => {
     process.env.AUTONOMOUS_INTERNAL_LINK_AUTO_MERGE = 'false';
     expect(await instance.runAutoMerge()).toEqual({ status: 'disabled' });
@@ -1450,7 +1463,7 @@ describe('internal-link stale reservation recovery', () => {
     GitHubClient.findOpenPrByHead.mockResolvedValueOnce({ html_url: 'https://github.com/x/y/pull/88', head: { sha: 'f'.repeat(40) } });
     await instance._recoverStalePrReservedTasks();
     expect(GitHubClient.findOpenPrByHead).toHaveBeenCalledWith('content/internal-link-x');
-    expect(updates).toEqual([expect.objectContaining({ status: 'pr_open', astro_pr_url: 'https://github.com/x/y/pull/88', pr_commit_sha: 'f'.repeat(40) })]);
+    expect(updates).toEqual([expect.objectContaining({ status: 'pr_open', astro_pr_url: 'https://github.com/x/y/pull/88', pr_commit_sha: 'f'.repeat(40), executor_version: 'internal-link-pr-executor-recovered' })]);
   });
 });
 

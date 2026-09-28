@@ -43,6 +43,7 @@ const EXECUTOR_VERSION = 'internal-link-dry-run-v1';
 // anchor_not_target_specific rule. runAutoMerge merges ONLY v2 PRs; a PR
 // opened by an older executor stays for a human.
 const PR_EXECUTOR_VERSION = 'internal-link-pr-executor-v2';
+const RECOVERED_PR_EXECUTOR_VERSION = 'internal-link-pr-executor-recovered';
 const DEFAULT_LIMIT = 10;
 // A pr_reserved row normally flips to pr_open/failed within seconds; one
 // untouched for 2h with no PR URL is a crash orphan (see
@@ -225,16 +226,20 @@ async function previewBuildGate(ctx) {
   return preview.ok ? null : { hold: preview.reason };
 }
 
-// Findings close the PR (a link PR has nothing to remediate). A clean verdict
-// passes at once; silence passes after the grace window.
-async function codexGate(ctx) {
+// Findings close the PR as a reviewer rejection (a link PR has nothing to
+// remediate). Runs BEFORE any gate that recycles tasks (link-only diff), so
+// a PR Codex rejected is never returned to the candidate pool unrecorded.
+async function codexFindingsGate(ctx) {
   ctx.codex = await this._codexVerdict(ctx.prNumber, ctx.headSha);
-  if (ctx.codex.findings) {
-    return {
-      reason: 'codex_findings',
-      close: { status: 'skipped', skipReason: 'codex_findings', note: `Codex left ${ctx.codex.findings} finding(s) on ${ctx.headSha.slice(0, 10)}; PR closed without merging.` },
-    };
-  }
+  if (!ctx.codex.findings) return null;
+  return {
+    reason: 'codex_findings',
+    close: { status: 'skipped', skipReason: 'codex_findings', note: `Codex left ${ctx.codex.findings} finding(s) on ${ctx.headSha.slice(0, 10)}; PR closed without merging.` },
+  };
+}
+
+// A clean verdict passes at once; silence passes after the grace window.
+function codexGraceGate(ctx) {
   const graceMs = envInt('AUTONOMOUS_INTERNAL_LINK_CODEX_GRACE_MIN', 120) * 60 * 1000;
   const openedAt = Date.parse(ctx.pr.created_at || '') || 0;
   const waiting = !ctx.codex.clean && new Date(ctx.now).getTime() - openedAt < graceMs;
@@ -246,7 +251,7 @@ function mergeCapGate(ctx) {
   return ctx.allowMerge ? null : { hold: 'merge_cap_reached' };
 }
 
-const MERGE_GATES = [prStateGate, provenanceGate, productionBaseGate, linkOnlyDiffGate, previewBuildGate, codexGate, mergeCapGate];
+const MERGE_GATES = [prStateGate, provenanceGate, productionBaseGate, codexFindingsGate, linkOnlyDiffGate, previewBuildGate, codexGraceGate, mergeCapGate];
 
 class InternalLinkPrExecutor {
   async runDryRun({ limit = DEFAULT_LIMIT, taskIds = null } = {}) {
@@ -1008,10 +1013,14 @@ class InternalLinkPrExecutor {
       // instead of freeing the task (which would open a duplicate PR).
       const livePr = row.pr_branch ? await GitHubClient.findOpenPrByHead(row.pr_branch) : null;
       if (livePr?.html_url) {
+        // The live head cannot be proven to be the executor's own push (the
+        // crash lost that record), so the recovered PR is stamped with a
+        // non-v2 version: provenanceGate holds it for a human, never merges.
         await db(TABLE).where({ id: row.id, status: 'pr_reserved' }).update({
           status: 'pr_open',
           astro_pr_url: livePr.html_url,
           pr_commit_sha: livePr.head?.sha || null,
+          executor_version: RECOVERED_PR_EXECUTOR_VERSION,
           reviewer_notes: [String(row.reviewer_notes || '').trim(), `[${new Date().toISOString()}] system: restored stale reservation to its open PR ${livePr.html_url}.`]
             .filter(Boolean).join('\n').slice(-5000),
           updated_at: new Date(),
