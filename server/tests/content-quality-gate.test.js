@@ -67,6 +67,13 @@ describe('hard checks: schema/canonical/indexable', () => {
     expect(checkSchemaValid({ frontmatter: { schema_types: ['Article'] } }, { action_type: 'refresh_existing_page' }))
       .toEqual({ ok: true, reason: 'refresh_schema_frozen_to_live_page' });
     expect(checkSchemaValid({}, { action_type: 'new_supporting_blog' }).ok).toBe(false);
+    // Wired through evaluate(): every check receives the brief.
+    const gate = require('../services/content/content-quality-gate');
+    const draft = { url: '/pest-control/signs-of-termites/', body: 'Refreshed guidance about termite signs.', frontmatter: {} };
+    expect(gate.evaluate(draft, { action_type: 'refresh_existing_page', page_type: 'refresh' }, {}).checks.schema_valid)
+      .toMatchObject({ ok: true, reason: 'refresh_schema_frozen_to_live_page' });
+    expect(gate.evaluate(draft, { action_type: 'new_supporting_blog', page_type: 'supporting-blog' }, {}).checks.schema_valid)
+      .toMatchObject({ ok: false, reason: 'no_schema_block' });
   });
   test('title_meta_spam_free hard-fails stuffed title patterns', () => {
     const result = checkTitleMetaSpamFree({
