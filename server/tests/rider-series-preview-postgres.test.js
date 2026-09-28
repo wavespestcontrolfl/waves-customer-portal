@@ -187,6 +187,21 @@ postgres('rider-series preview against migrated PostgreSQL', () => {
     expect(preview.pinned).toEqual([]); // the completed anchor row is history, not "pinned"
   });
 
+  test('a failed series-gate read is isolated: reported as series_check_error, and the caller transaction stays usable', async () => {
+    const { lawnParent, pestParent } = await buildValidPair();
+    const adminSchedule = require('../routes/admin-schedule');
+    const spy = jest.spyOn(adminSchedule, 'topupSeriesSkipReason').mockImplementation(async (sp) => sp.raw('SELECT 1/0'));
+    try {
+      const preview = await previewRiderPair(trx, { riderParentId: pestParent.id, hostParentId: lawnParent.id });
+      expect(preview.reasons).toContain('series_check_error');
+      expect(preview.error).toBeUndefined();
+      const [{ ok }] = (await trx.raw('SELECT 1 AS ok')).rows;
+      expect(ok).toBe(1);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   test('the preview writes nothing — a full scheduled_services snapshot is byte-identical before and after', async () => {
     const { lawnParent, pestParent } = await buildValidPair();
     const before = await tableSnapshot();

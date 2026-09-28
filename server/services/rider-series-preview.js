@@ -363,7 +363,9 @@ async function previewRiderPair(conn, { riderParentId, hostParentId } = {}) {
     // that export's own comment in admin-schedule.js).
     try {
       const { topupSeriesSkipReason } = require('../routes/admin-schedule');
-      const seriesSkip = await topupSeriesSkipReason(conn, riderParent, riderParentId, cols);
+      // Savepoint: a failed read here must not abort the caller's
+      // transaction (25P02) for every read after it.
+      const seriesSkip = await conn.transaction((sp) => topupSeriesSkipReason(sp, riderParent, riderParentId, cols));
       if (seriesSkip) reasons.push(seriesSkip);
     } catch {
       reasons.push('series_check_error');
@@ -438,7 +440,7 @@ async function previewRiderPair(conn, { riderParentId, hostParentId } = {}) {
     try {
       const from = standaloneAnchor < todayStr ? standaloneAnchor : todayStr;
       const to = horizonDate > from ? horizonDate : from;
-      blackoutDates = await getBlackoutLayers(from, to, conn);
+      blackoutDates = await conn.transaction((sp) => getBlackoutLayers(from, to, sp));
     } catch { blackoutDates = null; }
 
     const plan = planRiderDates({

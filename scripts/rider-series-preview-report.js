@@ -93,6 +93,7 @@ function printHuman(pair, preview) {
   process.stdout.write(`\npair  lawn=${pair.lawnParentId}  pest=${pair.pestParentId}  customer=${pair.customerId}  property=${propertyLabel}\n`);
   process.stdout.write(`  eligible: ${preview.eligible}\n`);
   if (preview.reasons.length) process.stdout.write(`  reasons: ${preview.reasons.join(', ')}\n`);
+  if (preview.error) process.stdout.write(`  error: ${preview.error}\n`);
   if (preview.anchor) {
     process.stdout.write(`  anchor: ${preview.anchor}  planFloor: ${preview.planFloor}  horizon: ${preview.horizon}\n`);
     process.stdout.write(`  plan (${preview.plan.length}): ${preview.plan.join(', ') || '(none)'}\n`);
@@ -113,10 +114,26 @@ async function main() {
     for (const pair of pairs) {
       // Sequential — one small, bounded set of candidate pairs, and each
       // preview shares this transaction's own snapshot.
-      const preview = await previewRiderPair(trx, {
-        riderParentId: pair.pestParentId,
-        hostParentId: pair.lawnParentId,
-      });
+      // Own savepoint per pair: a failed read in one preview rolls back to
+      // here and never aborts the shared READ ONLY transaction (25P02),
+      // which would otherwise turn every later pair into 'error'.
+      let preview;
+      try {
+        preview = await trx.transaction(async (sp) => {
+          const result = await previewRiderPair(sp, {
+            riderParentId: pair.pestParentId,
+            hostParentId: pair.lawnParentId,
+          });
+          // previewRiderPair reports a failed read instead of throwing;
+          // throw here so the savepoint actually rolls back.
+          if (result.error) throw Object.assign(new Error(result.error), { preview: result });
+          return result;
+        });
+      } catch (err) {
+        preview = err.preview || {
+          eligible: false, reasons: ['error'], error: err.message, anchor: null, plan: [], keep: [], move: [], insert: [], cancel: [], pinned: [],
+        };
+      }
       results.push({ pair, preview });
     }
     return results;

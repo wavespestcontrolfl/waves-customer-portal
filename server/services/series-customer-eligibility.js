@@ -1,7 +1,8 @@
-// Table-driven customer eligibility for writers that add or move a recurring
-// series' future visits without a person asking for that visit: the
-// visit-count top-up (routes/admin-schedule.js) and the rider-series sync
-// (services/rider-series.js). One independent check per row, evaluated in
+// Table-driven customer eligibility for adding a recurring series' future
+// visits without a person asking for that visit: the visit-count top-up
+// (routes/admin-schedule.js#topupCustomerSkipReason) applies it, and the
+// pest-rides-lawn preview (services/rider-series-preview.js) reads the same
+// table so its verdicts match. One independent check per row, evaluated in
 // order, so a new disqualifying condition is one more row, not one more `if`.
 //
 // service_paused_at is set two ways, and only one of them is a genuine

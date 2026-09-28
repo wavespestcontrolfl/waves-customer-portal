@@ -224,13 +224,18 @@ the office has seen what the rule actually does to real customers.
 
 ## What changed in `admin-schedule.js`
 
-One export, no behavior change: `module.exports.topupSeriesSkipReason =
-topupSeriesSkipReason` — the existing series-eligibility function (already
-used by the nightly top-up) is now reachable from
-`services/rider-series-preview.js` the same lazy-require way every other
-export in that file's tail is reached from `services/rider-series.js` (see
-that block's own comments). No hook, no new call site inside
-`admin-schedule.js` itself, no lock added or removed.
+No behavior change. Two edits:
+
+- `module.exports.topupSeriesSkipReason = topupSeriesSkipReason`: the
+  existing series-eligibility function the nightly top-up already uses,
+  now reachable read-only from `services/rider-series-preview.js`. No
+  lock is taken on that path.
+- `topupCustomerSkipReason` now calls
+  `services/series-customer-eligibility.js#seriesCustomerSkipReason`
+  instead of an inline copy of the same four rules (identical rows, in the
+  same order), so the preview and the top-up read one table and can't drift.
+
+No hook, no new call site, no lock added or removed.
 
 ## Not in scope (this PR)
 
