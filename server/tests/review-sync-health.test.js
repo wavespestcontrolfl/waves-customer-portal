@@ -99,6 +99,21 @@ describe('_classifyLocationSyncHealth (pure classifier)', () => {
       .toMatchObject({ cls: 'silent_empty', severity: 'ACT' });
   });
 
+  test('a profile that has never had a review is quiet only when Google agrees and nothing was ever stored (Venice 2026-09-28)', () => {
+    // Also never stats_stale: Places writes no stats row for a listing with
+    // no reviews, so statsUpdatedAt stays null here.
+    const neverReviewed = { pulledCount: 0, rowCount: 0, storedCount: 0, placesTotal: 0, statsTotal: undefined, statsUpdatedAt: null, newestIngestAt: null };
+    expect(classify(neverReviewed)).toBeNull();
+    // Places did not answer this run: nothing confirms the profile is empty.
+    expect(classify({ ...neverReviewed, placesTotal: undefined })).toMatchObject({ cls: 'silent_empty' });
+    // Google's public listing shows reviews the feed does not return.
+    expect(classify({ ...neverReviewed, placesTotal: 12 })).toMatchObject({ cls: 'silent_empty' });
+    // A wipe: both sources now read zero, but the removal-stamped rows stay stored.
+    expect(classify({ ...neverReviewed, storedCount: 47, newestIngestAt: daysAgo(60) })).toMatchObject({ cls: 'silent_empty' });
+    // A wipe before anything was ingested: the stored Places total remembers the reviews.
+    expect(classify({ ...neverReviewed, statsTotal: 30, statsUpdatedAt: daysAgo(40) })).toMatchObject({ cls: 'silent_empty' });
+  });
+
   test('Google shows more reviews than ever ingested + 14d of silence → ingest_stale ACT', () => {
     expect(classify({ rowCount: 47, statsTotal: 60, newestIngestAt: daysAgo(58) }))
       .toMatchObject({ cls: 'ingest_stale', severity: 'ACT' });
@@ -213,6 +228,29 @@ describe('_assessReviewSyncHealth (escalation)', () => {
       lockKey: 'ops-digest:gbp-sync-health',
       notAfter: cleanObservedAt,
     });
+  });
+
+  test('a never-reviewed profile Google confirms empty leaves the fleet healthy; the same empty feed after a wipe still escalates', async () => {
+    // Production 2026-09-28: Venice has no stored row at all, so the
+    // aggregate query returns no row for it.
+    const fleet = [
+      { location_id: 'bradenton', row_count: '117', stored_count: '119', newest_ingest_at: daysAgo(1), stats_updated_at: daysAgo(1) },
+      { location_id: 'parrish', row_count: '39', stored_count: '39', newest_ingest_at: daysAgo(1), stats_updated_at: daysAgo(1) },
+      { location_id: 'sarasota', row_count: '48', stored_count: '48', newest_ingest_at: daysAgo(1), stats_updated_at: daysAgo(1) },
+    ];
+    const sources = { bradenton: 'gbp', parrish: 'gbp', sarasota: 'gbp', venice: 'gbp' };
+    const pulled = { bradenton: 117, parrish: 39, sarasota: 48, venice: 0 };
+    const observedAt = new Date(NOW).toISOString();
+
+    installDb({ aggregates: fleet, stats: [] });
+    expect(await gbp._assessReviewSyncHealth(sources, pulled, {}, observedAt, { venice: 0 })).toEqual({ healthy: true });
+    expect(mockEmailSend).not.toHaveBeenCalled();
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+
+    installDb({ aggregates: [...fleet, { location_id: 'venice', row_count: '0', stored_count: '12', newest_ingest_at: daysAgo(30), stats_updated_at: null }], stats: [] });
+    const out = await gbp._assessReviewSyncHealth(sources, pulled, {}, observedAt, { venice: 0 });
+    expect(out.emailed).toBe(true);
+    expect(mockNotifyAdmin.mock.calls[0][1]).toBe('Review sync health escalation [venice:silent_empty]');
   });
 
   test('problems email contact@ FIRST with the ACT:/FIX: subject and bell as dedupe marker', async () => {
