@@ -1023,6 +1023,22 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // Plaid bank feed → Bank Import staging (GATE_PLAID_SYNC + GATE_BANK_IMPORT,
+  // read at call time). Staging only — nothing reaches the P&L until an
+  // exact match or the operator links it. Items waiting on a re-login skip.
+  cron.schedule('33 * * * *', async () => {
+    if (!gateEnvValue('GATE_BANK_IMPORT') || !gateEnvValue('GATE_PLAID_SYNC')) return;
+    try {
+      await runExclusive('plaid-bank-sync', async () => {
+        const out = await require('./plaid-sync').syncAllItems();
+        const failed = (out.results || []).filter(r => r.error);
+        if (failed.length) logger.warn(`[plaid-sync] hourly sync: ${failed.length}/${out.items} connection(s) failed`);
+      });
+    } catch (err) {
+      logger.error(`[plaid-sync] hourly sync failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   cron.schedule('40 2 * * *', async () => {
     if (!isEnabled('hybridKnowledge')) return;
     try {
