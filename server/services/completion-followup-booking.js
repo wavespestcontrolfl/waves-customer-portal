@@ -20,6 +20,8 @@
  *                         resolution, no notifications.
  *   expectedTechnicianId  the technician an approval showed (null =
  *                         unassigned); a different outcome refuses 409.
+ *   expectedWindow        { start, end } an approval showed; a different
+ *                         window refuses 409 before any write.
  */
 const db = require('../models/db');
 const logger = require('./logger');
@@ -42,6 +44,7 @@ async function bookCompletionFollowup(input = {}) {
     useSuggestedDate = false,
     dryRun = false,
     expectedTechnicianId = undefined,
+    expectedWindow = undefined,
     // source_action stamped by the booking contract: the Dispatch CTA is a
     // staff booking; the IB repair passes 'admin_ib'.
     sourceAction = 'admin_manual',
@@ -237,6 +240,12 @@ async function bookCompletionFollowup(input = {}) {
   if (cols.estimated_price) insertData.estimated_price = 0;
   if (cols.create_invoice_on_complete) insertData.create_invoice_on_complete = false;
   if (cols.time_window && svc.time_window) insertData.time_window = svc.time_window;
+
+  if (expectedWindow !== undefined
+    && (String(insertData.window_start || '') !== String(expectedWindow?.start || '')
+      || String(insertData.window_end || '') !== String(expectedWindow?.end || ''))) {
+    return reply(409, { error: 'The follow-up window changed since it was approved — ask again for a fresh card.', code: 'followup_window_changed' });
+  }
 
   if (dryRun) {
     // Preview (IB closeout repair plan): everything above is read-only; stop

@@ -272,11 +272,15 @@ async function runStep(step, { knex = db } = {}) {
     case 'book_followup': {
       let booked;
       try {
+        // Everything the card showed is pinned BEFORE any write: the
+        // approved date goes through the CTA's own match-the-verdict gate,
+        // the window and technician are refused on a mismatch.
         booked = await followupBooking().bookCompletionFollowup({
           serviceId: step.scheduled_service_id,
-          useSuggestedDate: true,
+          date: step.date,
           isAdmin: true,
           actorId: step.actor_id || null,
+          expectedWindow: { start: step.window_start || null, end: step.window_end || null },
           // The card showed this technician (null = unassigned).
           expectedTechnicianId: step.technician_id || null,
           sourceAction: 'admin_ib',

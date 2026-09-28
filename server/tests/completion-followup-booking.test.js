@@ -144,3 +144,22 @@ test('the Dispatch CTA shape is unchanged: a typed date must match the verdict; 
   expect(ok.status).toBe(200);
   expect(completeScheduledServiceInsert).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ source: { sourceAction: 'admin_manual' } }));
 });
+
+test('expectedWindow: a source window changed since the approval refuses before any write', async () => {
+  const { writes } = install();
+  const out = await bookCompletionFollowup({
+    serviceId: 'svc-1', date: '2026-10-05', isAdmin: true, expectedWindow: { start: '08:00', end: '09:00' }, expectedTechnicianId: 'tech-1',
+  });
+  expect(out).toEqual({ status: 409, body: expect.objectContaining({ code: 'followup_window_changed' }) });
+  expect(writes).toEqual([]);
+  expect(withCustomerCommsLock).not.toHaveBeenCalled();
+});
+
+test('an approved date that no longer matches the verdict refuses before any write (the CTA gate)', async () => {
+  const { writes } = install({ record: { structured_notes: { typedFollowupVerdict: { required: true, suggestedDate: '2026-10-12' } } } });
+  const out = await bookCompletionFollowup({
+    serviceId: 'svc-1', date: '2026-10-05', isAdmin: true, expectedWindow: { start: '09:00', end: '10:00' }, expectedTechnicianId: 'tech-1',
+  });
+  expect(out).toEqual({ status: 409, body: expect.objectContaining({ code: 'followup_date_mismatch', suggestedDate: '2026-10-12' }) });
+  expect(writes).toEqual([]);
+});

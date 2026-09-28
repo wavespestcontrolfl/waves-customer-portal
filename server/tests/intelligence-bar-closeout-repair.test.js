@@ -369,9 +369,11 @@ describe('book_followup — the Dispatch follow-up action as a repair step', () 
     expect(run.success).toBe(true);
     expect(run.receipt).toEqual([expect.objectContaining({ step: 'book_followup', status: 'completed', appointment_id: 'fu-1' })]);
     expect(bookCompletionFollowup).toHaveBeenLastCalledWith(expect.objectContaining({
-      serviceId: SVC, useSuggestedDate: true, actorId: 'admin-1', expectedTechnicianId: 'tech-1', sourceAction: 'admin_ib',
+      serviceId: SVC, date: '2026-10-05', actorId: 'admin-1', sourceAction: 'admin_ib',
+      expectedWindow: { start: '09:00:00', end: '10:00:00' }, expectedTechnicianId: 'tech-1',
     }));
     expect(bookCompletionFollowup.mock.calls.at(-1)[0].dryRun).toBeUndefined();
+    expect(bookCompletionFollowup.mock.calls.at(-1)[0].useSuggestedDate).toBeUndefined();
   });
 
   test('confirmed: a technician change under the lock is a failed step, never a different booking', async () => {
