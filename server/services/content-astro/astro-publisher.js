@@ -3025,7 +3025,14 @@ async function fetchAndVerifyLicensedPhoto(url, slug) {
   if (declaredLength > LICENSED_PHOTO_MAX_BYTES) throw licensedPhotoError(slug, url, `exceeds the ${LICENSED_PHOTO_MAX_BYTES}-byte cap (${declaredLength} declared bytes)`);
   const rawBuffer = await readCappedResponseBody(res, LICENSED_PHOTO_MAX_BYTES, slug, url);
   if (!rawBuffer.length) throw licensedPhotoError(slug, url, 'fetched 0 bytes');
-  return compressToWebp(rawBuffer, { width: BODY_IMAGE_WIDTH });
+  // Undecodable bytes behind an image/* content-type fail with the same
+  // BLOG_BODY_IMAGES_FAILED code as every other failure on this path, so
+  // the caller parks deterministically instead of retrying a raw error.
+  try {
+    return await compressToWebp(rawBuffer, { width: BODY_IMAGE_WIDTH });
+  } catch (err) {
+    throw licensedPhotoError(slug, url, `could not be decoded as an image: ${err.message}`);
+  }
 }
 
 // Same free-name convention the generation loop below uses (body-N.webp,

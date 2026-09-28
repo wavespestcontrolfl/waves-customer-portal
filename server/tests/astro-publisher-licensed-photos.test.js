@@ -514,3 +514,9 @@ describe('assertBodyImagesAtHead — diagnostic exemption from the image minimum
     expect(isIdentificationPost(null)).toBe(false);
   });
 });
+
+test('undecodable bytes behind an image content-type fail closed with BLOG_BODY_IMAGES_FAILED', async () => {
+  mockFetchOnce({ contentType: 'image/jpeg', body: Buffer.from('definitely not an image') });
+  await expect(fetchAndVerifyLicensedPhoto(LICENSED_URL, 'fire-ant-id')).rejects.toMatchObject({ code: 'BLOG_BODY_IMAGES_FAILED' });
+  delete global.fetch;
+});
