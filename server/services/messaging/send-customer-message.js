@@ -1105,7 +1105,10 @@ async function sendCustomerMessageCore(input) {
   // Push fan-out normalizes a provider-hook refusal to false and therefore
   // loses its code. Restore that boundary refusal only when the provider
   // proves no leg was sent. Accepted or uncertain remains authoritative.
-  if (providerBoundaryBlock && providerOutcome.deliveryOutcome === 'not_sent') {
+  // A prior visible App event settles its original copy independently of
+  // a later native guard refusal; never replace that event's witness.
+  if (providerBoundaryBlock && providerOutcome.deliveryOutcome === 'not_sent'
+    && !(providerOutcome.provider === 'push' && providerOutcome.error === 'app_event_already_visible')) {
     providerOutcome = {
       ...providerOutcome,
       blocked: true,
@@ -1193,7 +1196,7 @@ async function sendCustomerMessageCore(input) {
       return { sent: false, blocked: true, ...preferenceChangeHold(), auditLogId: audit.id };
     }
     if (sendInput.metadata?.appOnly === true || sendInput.metadata?.billingDeliveryLeg === 'push') {
-      return { sent: false, blocked: true, deliveryOutcome: providerOutcome.deliveryOutcome, code: 'APP_UNAVAILABLE', reason: providerOutcome.error, auditLogId: audit.id, ...(providerOutcome.bellPersisted ? { bellPersisted: true } : {}) };
+      return { sent: false, blocked: true, deliveryOutcome: providerOutcome.deliveryOutcome, code: 'APP_UNAVAILABLE', reason: providerOutcome.error, auditLogId: audit.id, ...(providerOutcome.eventVisibleAt ? { eventVisibleAt: providerOutcome.eventVisibleAt } : {}), ...(providerOutcome.bellPersisted ? { bellPersisted: true } : {}) };
     }
     if (providerOutcome.error === 'preference_changed'
       && ['appointment_reminder_72h', 'appointment_reminder_24h'].includes(sendInput.purpose)) {
@@ -1251,6 +1254,7 @@ async function sendCustomerMessageCore(input) {
     deliveryOutcome: providerOutcome.deliveryOutcome,
     providerMessageId: providerOutcome.providerMessageId,
     sentAt: providerOutcome.sentAt,
+    ...(providerOutcome.deduped === true ? { deduped: true } : {}),
     channel: providerOutcome.provider === 'push' ? 'push' : sendInput.channel,
     auditLogId: audit.id,
     segmentCount: segmentMeta.segmentCount,

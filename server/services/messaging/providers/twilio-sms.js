@@ -254,7 +254,7 @@ async function sendViaTwilioOnce(input, {
       return { sent: false, blocked: true, provider: input.channel === 'push' ? 'push' : 'twilio', deliveryOutcome: 'not_sent', code: 'DELIVERY_SUPPRESSED', error: result.error || result.sid, validator: 'delivery_guard' };
     }
     if (result.appUnavailable) {
-      return { sent: false, provider: 'push', deliveryOutcome: 'not_sent', appUnavailable: true, error: result.error || 'push_unavailable', ...(result.bellPersisted ? { bellPersisted: true } : {}) };
+      return { sent: false, provider: 'push', deliveryOutcome: 'not_sent', appUnavailable: true, error: result.error || 'push_unavailable', ...(result.eventVisibleAt ? { eventVisibleAt: result.eventVisibleAt } : {}), ...(result.bellPersisted ? { bellPersisted: true } : {}) };
     }
     if (result.appPending) {
       return { sent: false, blocked: true, provider: 'push', deliveryOutcome: explicitDeliveryOutcome(result.deliveryOutcome) || 'uncertain', code: 'PUSH_IN_FLIGHT', error: 'push_in_flight', retryable: true, deferred: true, nextAllowedAt: new Date(Date.now() + 60000).toISOString(), ...(result.bellPersisted ? { bellPersisted: true } : {}) };

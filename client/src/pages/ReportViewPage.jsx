@@ -2927,10 +2927,18 @@ function FloatingAskWaves({ mode, token, serviceLine, data }) {
     if (!q || asking) return;
     setAsking(true);
     setAnswer('');
+    // Staff browsers send their portal JWT, as on the /data read, so the
+    // server can leave a staff QA question out of customer engagement.
+    // Guarded like that read: sandboxed webviews can throw on localStorage.
+    let staffToken = null;
+    try { staffToken = localStorage.getItem('waves_admin_token'); } catch { /* storage blocked */ }
     try {
       const response = await fetch(`${API_BASE}/reports/${token}/ask`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(staffToken ? { Authorization: `Bearer ${staffToken}` } : {}),
+        },
         body: JSON.stringify({ question: q }),
       });
       const payload = await response.json();
@@ -2990,7 +2998,11 @@ function FloatingAskWaves({ mode, token, serviceLine, data }) {
       </div>
       {answer && (
         <div className="waves-ask-answer" role="status">
-          <span>{answer}</span>
+          {/* AW-06 line-break fix: several answer builders (e.g. answerAppliedToday,
+              answerNextSteps, answerFindings) join recorded facts / next actions
+              with "\n" so they read as separate lines, not one run-on paragraph —
+              this class preserves those breaks without dangerouslySetInnerHTML. */}
+          <span className="waves-ask-answer-text">{answer}</span>
           <button type="button" className="waves-ask-dismiss" onClick={() => setAnswer('')} aria-label="Dismiss answer"><Icon name="close" size={16} strokeWidth={2} /></button>
         </div>
       )}

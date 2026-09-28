@@ -358,8 +358,25 @@ async function claimDueScheduledSms(now) {
       SELECT id
       FROM sms_log
       WHERE status = 'scheduled'
-        AND scheduled_for IS NOT NULL
-        AND scheduled_for <= ?
+        AND (
+          (scheduled_for IS NOT NULL AND scheduled_for <= ?)
+          -- Owner ruling 2026-09-28: the 8am-8pm window no longer fences the
+          -- voicemail text-back at all (missed_call_text_back /
+          -- voicemail_lead_sms are CUSTOMER_ACTION_ENTRY_POINTS), so a row
+          -- queued only because that window was closed
+          -- (original_block_code QUIET_HOURS_HOLD) is due NOW — whether it
+          -- was queued before this code shipped, or by an old instance
+          -- still running mid-deploy. Every OTHER voicemail_lead_sms_deferred
+          -- retry reason (suppression retry, an in-flight dedupe wait, …)
+          -- keeps its own scheduled_for. Only a row never claimed yet
+          -- (no scheduled_sms_attempts) is pulled forward: original_block_code
+          -- survives retries, so once the first accelerated attempt has run,
+          -- a failure's backoff (scheduled_for) must be honored rather than
+          -- re-claimed every tick until its attempts are exhausted.
+          OR (metadata->>'entry_point' = 'voicemail_lead_sms_deferred'
+              AND metadata->>'original_block_code' = 'QUIET_HOURS_HOLD'
+              AND COALESCE(NULLIF(metadata->>'scheduled_sms_attempts', ''), '0') = '0')
+        )
       ORDER BY scheduled_for ASC, created_at ASC
       FOR UPDATE SKIP LOCKED
       LIMIT ?
@@ -367,6 +384,11 @@ async function claimDueScheduledSms(now) {
     UPDATE sms_log AS s
     SET status = 'sending',
         updated_at = ?,
+        -- A quiet-hours voicemail row claimed ahead of its old 8 AM
+        -- scheduled_for (above) is pulled to the claim time, so
+        -- recoverStaleScheduledSmsClaims (scheduled_for <= now) can recover
+        -- it if this worker dies mid-send. A plainly due row is unchanged.
+        scheduled_for = LEAST(s.scheduled_for, ?::timestamptz),
         metadata = COALESCE(s.metadata, '{}'::jsonb) || jsonb_build_object(
           'scheduled_sms_claimed_at', ?::timestamptz,
           'scheduled_sms_attempts',
@@ -388,7 +410,7 @@ async function claimDueScheduledSms(now) {
     FROM due
     WHERE s.id = due.id
     RETURNING s.*
-  `, [now, SCHEDULED_SMS_CLAIM_LIMIT, now, now]);
+  `, [now, SCHEDULED_SMS_CLAIM_LIMIT, now, now, now]);
 
   return result.rows || [];
 }
@@ -2129,13 +2151,16 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // WEEKLY SUNDAY 4:10AM — Registry feeders, after the 3:30 backlink scan (§4):
-  // existing-profile baseline (idempotent) → competitor-gap ingestion → enrich
-  // (DataForSEO, gated by GATE_SEO_INTELLIGENCE inside the service). Services
-  // are called directly — never the admin HTTP route. The feeders consume
-  // seo_backlinks, so they run INSIDE the scan's own lock ('backlink-scan'):
-  // a scan still paging at 4:10 keeps the lease and the feeders wait (10-min
-  // retries, up to an hour) rather than reading rows the scan is still
-  // transitioning; while they run, no scan can start.
+  // existing-profile baseline (idempotent) → competitor-gap ingestion →
+  // ai_citation discovery (AEO answer-engine citations, gated by
+  // GATE_SEO_INTELLIGENCE inside the service — DISCOVERY NEVER GRANTS
+  // AUTHORITY: see link-authority-policy.js) → enrich (DataForSEO, gated by
+  // GATE_SEO_INTELLIGENCE inside the service). Services are called directly —
+  // never the admin HTTP route. The feeders consume seo_backlinks, so they
+  // run INSIDE the scan's own lock ('backlink-scan'): a scan still paging at
+  // 4:10 keeps the lease and the feeders wait (10-min retries, up to an hour)
+  // rather than reading rows the scan is still transitioning; while they run,
+  // no scan can start.
   cron.schedule('10 4 * * 0', async () => {
     try {
       await runExclusive('link-registry-sunday-feeders', async () => {
@@ -2144,6 +2169,8 @@ function initScheduledJobs() {
           logger.info(`[link-intake] baseline: scanned ${b.scanned} domains +${b.domainsCreated} placements +${b.placementsCreated} reconciled ${b.placementsReconciled} mappings +${b.mappingsCreated} paths +${b.pathsCreated} skipped ${b.skipped.length}`);
           const g = await require('./seo/link-registry-gap-ingest').ingestCompetitorGap(db);
           logger.info(`[link-intake] competitor gap: scanned ${g.scanned} candidates ${g.candidates} inserted ${g.inserted} touched ${g.touched} existing ${g.existing}`);
+          const ai = await require('./seo/link-registry-ai-citation-ingest').runAiCitationFeeder(db);
+          logger.info(`[link-intake] ai_citation: ${ai.gated ? 'GATED (GATE_SEO_INTELLIGENCE off)' : ''}scanned ${ai.scanned} domains ${ai.domains} byCategory ${JSON.stringify(ai.byCategory)} enqueued ${ai.enqueued} inserted ${ai.inserted} touched ${ai.touched} existing ${ai.existing}`);
           const e = await require('./seo/link-registry-enrich').enrichDomains(db, { limit: 1000 });
           logger.info(`[link-intake] enrich: ${e.gated ? 'GATED (GATE_SEO_INTELLIGENCE off)' : ''}${e.skipped ? `SKIPPED (${e.skipped}) ` : ''} selected ${e.selected} enriched ${e.enriched} failed ${e.failed.length} calls ${e.calls}`);
           return { ran: true };
@@ -4075,8 +4102,93 @@ function initScheduledJobs() {
                 }
               }
             }
-            if (anchorStale || amountsStale) {
-              const blockedReason = anchorStale ? 'stale_agent_decision' : 'stale_amount_agent_decision';
+            // OPEN TIMES revalidation (Codex P2): the same "can't see it
+            // from an inbound-anchored check" gap as the amount check above
+            // — a scheduled send can sit hours past drafting, and the
+            // calendar it quoted is never re-read before firing. Only when
+            // the anchor and amount checks already passed, and only for
+            // pairs the OUTGOING body still carries (planOpenTimesRecheck:
+            // a human-edited reply that dropped every quoted window needs
+            // no recheck; an unverifiable edit refuses).
+            // Fail closed on a gone slot, a fetch error, or a timeout — same
+            // block+retire path as the checks above, no new mechanism.
+            let openTimesStale = false;
+            let openTimesReason = null;
+            if (!anchorStale && !amountsStale) {
+              try {
+                const decisionRow = await db('agent_decisions')
+                  .where({ id: claimMeta.agent_decision_id })
+                  .first('input_snapshot', 'suggested_message');
+                let snapshot = decisionRow?.input_snapshot;
+                if (typeof snapshot === 'string') {
+                  try { snapshot = JSON.parse(snapshot); } catch { snapshot = null; }
+                }
+                const openTimesSnapshot = snapshot?.open_times_snapshot;
+                if (openTimesSnapshot?.quotedWindows?.length) {
+                  // Same planner as the queue-time seam (Codex r2): a
+                  // reviewer-edited body is matched to its snapshot pair by
+                  // pair against the drafted text, so a dropped day that
+                  // shares its window with a kept day is not rechecked, and
+                  // an unverifiable edit refuses here too.
+                  const { openTimesStillOffered, planOpenTimesRecheck } = require('./sms-shadow-drafter');
+                  const plan = planOpenTimesRecheck({
+                    snapshot: openTimesSnapshot,
+                    outgoingBody: msg.message_body,
+                    originalBody: decisionRow?.suggested_message ?? null,
+                  });
+                  if (plan.action === 'refuse') {
+                    openTimesStale = true;
+                    openTimesReason = plan.reason;
+                  } else if (plan.action === 'recheck') {
+                    const recheck = await openTimesStillOffered({
+                      city: openTimesSnapshot.lookup?.city || null,
+                      customerId: openTimesSnapshot.lookup?.customerId || null,
+                      estimateId: openTimesSnapshot.lookup?.estimateId || null,
+                      ...(openTimesSnapshot.lookup?.serviceType ? { serviceType: openTimesSnapshot.lookup.serviceType } : {}),
+                      quotedWindows: plan.quotedWindows,
+                    });
+                    if (!recheck.ok) {
+                      openTimesStale = true;
+                      openTimesReason = recheck.reason;
+                    }
+                  }
+                }
+              } catch (err) {
+                logger.warn(`[scheduler] open-times revalidation failed for scheduled sms ${msg.id}: ${err.message}; blocking send`);
+                openTimesStale = true;
+                openTimesReason = 'open_times_recheck_failed';
+              }
+            }
+            // Follow-up SLA phrase revalidation (Codex r3 P2): the relative
+            // wording ("within the hour" / "by 9 AM this morning"/"tomorrow
+            // morning") is frozen at draft time, but this scheduled reply can
+            // fire hours later, past the 8am/8pm ET boundary the phrase was
+            // computed against — the exact "quoted a window that's gone"
+            // staleness the open-times check above covers, for the SLA
+            // phrase. Same fail-closed block+retire path, no new mechanism.
+            let slaStale = false;
+            if (!anchorStale && !amountsStale && !openTimesStale) {
+              try {
+                // Scoped to drafts that recorded an escalation (Codex r5):
+                // wording alone never blocks a scheduled reply.
+                const { followupPromiseIsStale } = require('./sms-followup-sla');
+                const slaDecision = await db('agent_decisions')
+                  .where({ id: claimMeta.agent_decision_id })
+                  .first('input_snapshot', 'prompt_version');
+                if (followupPromiseIsStale({ inputSnapshot: slaDecision?.input_snapshot, promptVersion: slaDecision?.prompt_version, body: msg.message_body })) slaStale = true;
+              } catch (err) {
+                logger.warn(`[scheduler] SLA phrase revalidation failed for scheduled sms ${msg.id}: ${err.message}; blocking send`);
+                slaStale = true;
+              }
+            }
+            if (anchorStale || amountsStale || openTimesStale || slaStale) {
+              const blockedReason = anchorStale
+                ? 'stale_agent_decision'
+                : amountsStale
+                  ? 'stale_amount_agent_decision'
+                  : openTimesStale
+                    ? 'stale_open_times_agent_decision'
+                    : 'stale_sla_agent_decision';
               const threadKey = String(msg.to_phone || '').replace(/\D/g, '').slice(-10) || msg.customer_id || msg.id;
               // Everything under the lock, metadata read THROUGH the trx
               // AFTER acquiring it — the cancel route can transfer parked
@@ -4102,7 +4214,11 @@ function initScheduledJobs() {
                   fromStatus: 'scheduled',
                   note: anchorStale
                     ? 'A newer customer message arrived before this scheduled reply fired — review the thread.'
-                    : 'This scheduled reply quoted a price — house rule: no prices in SMS. Review the thread.',
+                    : amountsStale
+                      ? 'This scheduled reply quoted a price — house rule: no prices in SMS. Review the thread.'
+                      : openTimesStale
+                        ? `This scheduled reply quoted an appointment time that is no longer open (${openTimesReason}) — review the thread.`
+                        : 'This scheduled reply’s follow-up timing no longer matches the current window — review the thread.',
                   dbi: trx,
                   strict: true,
                 });
@@ -4275,6 +4391,14 @@ function initScheduledJobs() {
             // payment. Persisted at enqueue by the customer-action
             // requeue; automated rows never carry it.
             ...(claimMeta.customer_initiated === true ? { customerInitiated: true } : {}),
+            // A voicemail quote-link text queued before this lane's own
+            // window check was removed (owner ruling 2026-09-28) is still
+            // sitting on the rail waiting for 8 AM — this entry point is
+            // used for nothing else, so any row wearing it is by
+            // construction the answer to a prospect's own voicemail. Send
+            // it on the very next replay instead of making it wait out the
+            // window it no longer needs to.
+            ...(claimMeta.entry_point === 'voicemail_lead_sms_deferred' ? { customerInitiated: true } : {}),
             ...(claimMeta.hasEmailLeg === true ? { hasEmailLeg: true } : {}),
             // Forward the consent basis the ORIGINAL enqueue ran under (e.g. a
             // deferred voicemail text-back persists transactional_allowed)
@@ -4375,7 +4499,7 @@ function initScheduledJobs() {
             // settlement above) convert failures into bounded
             // finalize_only retries that never resend.
             {
-              const fin = await finalizeReplay(claimMeta.entry_point, { ...claimMeta, customer_id: msg.customer_id || claimMeta.customer_id || null }, { providerMessageId: smsResult.providerMessageId, customerId: msg.customer_id || null });
+              const fin = await finalizeReplay(claimMeta.entry_point, { ...claimMeta, ...await readFreshMeta(), customer_id: msg.customer_id || claimMeta.customer_id || null }, { providerMessageId: smsResult.providerMessageId, customerId: msg.customer_id || null });
               if (fin && owesFinalization) {
                 if (fin.ok) {
                   await db('sms_log').where({ id: msg.id }).update({
@@ -7479,6 +7603,7 @@ module.exports = {
   holdFinalReviewUncertainty,
   shouldLogInventoryAgentSummary,
   recoverStaleScheduledSmsClaims,
+  claimDueScheduledSms,
   runContentRegistryMaintenance,
   runAutonomousOpportunityMining,
   parseListEnv,

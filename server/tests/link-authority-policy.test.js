@@ -456,3 +456,150 @@ describe('the follow-up instance (§6.4)', () => {
     expect(P.decisionInputsHash('communication', { ...ctx, instanceKey: 'followup:1' })).not.toBe(P.decisionInputsHash('communication', { ...ctx, instanceKey: '-:1' }));
   });
 });
+
+// ---------------------------------------------------------------------------
+// Owner-queue safety guard (AEO ai_citation feeder, owner ruling 2026-09-27):
+// DISCOVERY NEVER GRANTS AUTHORITY. A domain whose first-touch provenance is
+// `ai_citation` never reads an AUTO_* level from decideAuthority, whatever
+// the policy allows every other domain — it always reads the OWNER_
+// equivalent instead, so the placement parks awaiting_owner exactly like a
+// policy that had auto_* off would produce for any other domain.
+// ---------------------------------------------------------------------------
+describe('owner-queue safety guard: ai_citation-discovered domains never read AUTO_*', () => {
+  const autoAllowsEverything = () => ({
+    ...defaults(), auto_free_acquisition: true, auto_account_creation: true,
+    auto_outreach_min_score: 0, auto_outreach_daily_cap: 10,
+    monthly_paid_budget_cents: 50000, max_auto_purchase_cents: 5000, auto_paid_min_score: 0, auto_paid_min_d30_confidence: 0,
+  });
+  const aiCitationDomain = (over = {}) => domain({ source: 'ai_citation', ...over });
+
+  test('AUTO_FREE downgrades to OWNER_FREE for a self_service_free path', () => {
+    const ordinary = P.decideAuthority({ path: path(), domain: domain(), policy: autoAllowsEverything() });
+    expect(level(ordinary, 'execution')).toBe('AUTO_FREE');
+    const r = P.decideAuthority({ path: path(), domain: aiCitationDomain(), policy: autoAllowsEverything() });
+    expect(level(r, 'execution')).toBe('OWNER_FREE');
+    expect(r.instances[0].reason).toMatch(/discovery-only \(ai_citation\): owner decision required/);
+  });
+
+  test('AUTO_ACCOUNT downgrades to OWNER_ACCOUNT for an account-required path', () => {
+    const p = path({ account_required: true });
+    expect(level(P.decideAuthority({ path: p, domain: domain(), policy: autoAllowsEverything() }), 'execution')).toBe('AUTO_ACCOUNT');
+    expect(level(P.decideAuthority({ path: p, domain: aiCitationDomain(), policy: autoAllowsEverything() }), 'execution')).toBe('OWNER_ACCOUNT');
+  });
+
+  test('AUTO_ACCOUNT (terms instance) downgrades to OWNER_ACCOUNT', () => {
+    const p = path({ legal_attestation: true, legal_terms_hash: HASH });
+    const auto = { ...autoAllowsEverything(), legal_attestation_requires_owner: false };
+    expect(level(P.decideAuthority({ path: p, domain: domain(), policy: auto }), 'execution', 'terms')).toBe('AUTO_ACCOUNT');
+    expect(level(P.decideAuthority({ path: p, domain: aiCitationDomain(), policy: auto }), 'execution', 'terms')).toBe('OWNER_ACCOUNT');
+  });
+
+  test('AUTO_PAID_WITHIN_POLICY downgrades to OWNER_PAYMENT', () => {
+    const ordinary = P.decideAuthority({ path: paid(), domain: domain(), policy: autoAllowsEverything(), d30Confidence: 0.9 });
+    expect(level(ordinary, 'payment')).toBe('AUTO_PAID_WITHIN_POLICY');
+    const r = P.decideAuthority({ path: paid(), domain: aiCitationDomain(), policy: autoAllowsEverything(), d30Confidence: 0.9 });
+    expect(level(r, 'payment')).toBe('OWNER_PAYMENT');
+  });
+
+  test('AUTO_OUTREACH downgrades to OWNER_OUTREACH', () => {
+    const ordinary = P.decideAuthority({ path: outreach(), domain: domain({ score: 90 }), policy: autoAllowsEverything(), draftClean: true });
+    expect(level(ordinary, 'communication')).toBe('AUTO_OUTREACH');
+    const r = P.decideAuthority({ path: outreach(), domain: aiCitationDomain({ score: 90 }), policy: autoAllowsEverything(), draftClean: true });
+    expect(level(r, 'communication')).toBe('OWNER_OUTREACH');
+  });
+
+  test('OWNER_* levels the policy would produce anyway are unaffected (no double-downgrade, no OWNER_HUMAN_STEP rewrite)', () => {
+    const r = P.decideAuthority({ path: path({ agent_completable: false }), domain: aiCitationDomain(), policy: autoAllowsEverything() });
+    expect(level(r, 'execution')).toBe('OWNER_HUMAN_STEP');
+  });
+
+  test('a domain touched by ai_citation but first discovered by a real feeder is unaffected (first-touch source rules)', () => {
+    const r = P.decideAuthority({ path: path(), domain: domain({ source: 'competitor_gap' }), policy: autoAllowsEverything() });
+    expect(level(r, 'execution')).toBe('AUTO_FREE');
+  });
+
+  test('isDiscoveryOnlyDomain', () => {
+    expect(P.isDiscoveryOnlyDomain(aiCitationDomain())).toBe(true);
+    expect(P.isDiscoveryOnlyDomain(domain({ source: 'competitor_gap' }))).toBe(false);
+    expect(P.isDiscoveryOnlyDomain(null)).toBe(false);
+    expect(P.isDiscoveryOnlyDomain(undefined)).toBe(false);
+  });
+
+  // Codex P1 2026-09-28 (second round): a rollback of the source-widening
+  // migration pair relabels `source` away from 'ai_citation' to keep the
+  // narrowed CHECK satisfiable — the marker migration
+  // (20260928080000_link_source_ai_citation_rollback_marker.js) stamps this
+  // enrichment key first, so the guard survives on the marker ALONE even
+  // once `source` no longer says ai_citation.
+  test('isDiscoveryOnlyDomain also honors the rollback-safety enrichment marker, independent of `source`', () => {
+    const relabeled = domain({ source: 'legacy_unknown', enrichment: { ai_citation_discovered: true } });
+    expect(P.isDiscoveryOnlyDomain(relabeled)).toBe(true);
+    // a JSON-STRING enrichment (a raw pg read that wasn't auto-parsed) is honored too
+    expect(P.isDiscoveryOnlyDomain(domain({ source: 'legacy_unknown', enrichment: '{"ai_citation_discovered":true}' }))).toBe(true);
+    // an ordinary domain's own unrelated enrichment never false-positives
+    expect(P.isDiscoveryOnlyDomain(domain({ source: 'competitor_gap', enrichment: { domain_rating: 40 } }))).toBe(false);
+    expect(P.isDiscoveryOnlyDomain(domain({ source: 'competitor_gap', enrichment: null }))).toBe(false);
+    // malformed JSON string never throws, never false-positives
+    expect(P.isDiscoveryOnlyDomain(domain({ source: 'legacy_unknown', enrichment: 'not json' }))).toBe(false);
+  });
+
+  // Codex P1 2026-09-28 (third round, fixed structurally): the durable
+  // signal is the FIRST-TOUCH source_detail prefix — ensureDomain writes it
+  // only on insert and nothing rewrites it (not the 060000 rollback relabel,
+  // not the enrich job that replaces `enrichment` wholesale).
+  test('a rolled-back, re-enriched ai_citation domain still decides OWNER_*, never AUTO_* (source_detail prefix)', () => {
+    const relabeledAndReEnriched = domain({
+      source: 'legacy_unknown',
+      source_detail: 'ai_citation:listing https://www.bbb.org/us/fl/sarasota/category/pest-control',
+      enrichment: { domain_rating: 55 }, // enrich replaced the column; the marker is gone
+    });
+    expect(P.isDiscoveryOnlyDomain(relabeledAndReEnriched)).toBe(true);
+    const r = P.decideAuthority({ path: path(), domain: relabeledAndReEnriched, policy: autoAllowsEverything() });
+    expect(level(r, 'execution')).toBe('OWNER_FREE');
+    // an ordinary domain's detail that merely mentions the word is unaffected
+    expect(P.isDiscoveryOnlyDomain(domain({ source: 'competitor_gap', source_detail: 'competitor_gap_scan ai_citation:' }))).toBe(false);
+  });
+
+  // Codex P1 2026-09-28 (round 7): domains first-touched by the feeder's
+  // EARLIER pushes carry its old label (`ai_citation_feeder · …`), which
+  // ensureDomain never rewrites. After a rollback relabel AND an enrich run
+  // that replaced the enrichment marker, that label is the only signal left.
+  describe('pre-prefix feeder labels (every format the feeder ever wrote)', () => {
+    const rolledBackAndReEnriched = (detail) => domain({ source: 'legacy_unknown', source_detail: detail, enrichment: { domain_rating: 55 } });
+    test.each([
+      ['373b021243 base label', 'ai_citation_feeder · listing · 2x · gemini/openai · Q1 · local'],
+      ['373b021243 base label, no question, not local', 'ai_citation_feeder · editorial · 1x · openai'],
+      ['f0d12744f5 label with subtype', 'ai_citation_feeder · editorial · 1x · openai · Q1 · local · listicle_candidate'],
+      ['a label sliced at the old 120-char cap', `ai_citation_feeder · listing · 12x · gemini/openai/perplexity · ${'Who is the best pest control company in Sarasota FL?'.slice(0, 40)} · local`.slice(0, 120)],
+    ])('%s still decides OWNER_*, never AUTO_*', (_name, detail) => {
+      const d = rolledBackAndReEnriched(detail);
+      expect(P.isDiscoveryOnlyDomain(d)).toBe(true);
+      expect(level(P.decideAuthority({ path: path(), domain: d, policy: autoAllowsEverything() }), 'execution')).toBe('OWNER_FREE');
+    });
+    test('near-misses of the old label are NOT discovery-only (anchored, exact separators, enqueued categories only)', () => {
+      for (const detail of [
+        'imported: ai_citation_feeder · listing · 2x · openai', // not anchored
+        'ai_citation_feeder - listing - 2x - openai', // wrong separator
+        'ai_citation_feeder · other · 2x · openai', // a category the feeder never enqueued
+        'ai_citation_feeder · listing · x · openai', // no count
+      ]) expect(P.isDiscoveryOnlyDomain(rolledBackAndReEnriched(detail))).toBe(false);
+    });
+  });
+
+  // Codex P1 2026-09-28 (round 5): the feeder now keeps every sampled cited
+  // URL in full, so a first-touch detail routinely runs past 120 chars. The
+  // prefix guard reads the stored column (text, unbounded), never the hashed
+  // touch_key, so a long detail is still discovery-only.
+  test('a long (> 120 char) ai_citation source_detail still reads as discovery-only', () => {
+    const longDetail = `ai_citation:editorial:listicle_candidate https://cityvetted.com/sarasota/best-pest-control-companies?utm_source=${'x'.repeat(120)} https://cityvetted.com/venice/pest-control`;
+    expect(longDetail.length).toBeGreaterThan(120);
+    const d = domain({ source: 'legacy_unknown', source_detail: longDetail, enrichment: null });
+    expect(P.isDiscoveryOnlyDomain(d)).toBe(true);
+    expect(level(P.decideAuthority({ path: path(), domain: d, policy: autoAllowsEverything() }), 'execution')).toBe('OWNER_FREE');
+  });
+
+  test('AI_CITATION_SOURCE is the registry enum value', () => {
+    expect(R.LINK_SOURCES).toContain(P.AI_CITATION_SOURCE);
+    expect(P.AI_CITATION_SOURCE).toBe('ai_citation');
+  });
+});

@@ -16,6 +16,11 @@ const { billingChannelAllowed, explicitBillingChannels } = require('../billing-d
 const { reminderProgress, sendReminderChannels } = require('../billing-reminder-delivery');
 const { dispatchUnderBillingEmailAuthority } = require('../billing-channel-email-authority');
 const { billingEmailRecipient, billingEmailSendOutcome, billingEmailSendFailure } = require('../billing-email-sender');
+const { originalBillingContactArgs, previouslySettledBillingLegs } = require('../messaging/billing-channel-routing');
+
+async function markReminderDelivery(ledger, result) {
+  return ContactLedger.markDelivered(ledger, ...originalBillingContactArgs(result));
+}
 
 const LATE_PAYMENT_EMAIL_BY_SMS_TEMPLATE = {
   late_payment_7d: { templateKey: "billing_late_payment_7_day", stageDays: 7 },
@@ -657,7 +662,7 @@ class BalanceReminder {
     if (stage >= 60 && result.deliveredNow.length) await db('customers').where({ id: customer.id }).update({
       pipeline_stage: 'at_risk', pipeline_stage_changed_at: new Date(),
     });
-    return result.complete;
+    return result.deliveredNow.length > 0;
   }
 
   async latePaymentCheck() {
@@ -835,7 +840,7 @@ class BalanceReminder {
           logger.error(`[balance-reminder] late-payment email sidecar failed for customer ${customer.id}: ${err.message}`);
           return null;
         });
-        if (emailResult?.ok === true) await ContactLedger.markDelivered(emailLedger);
+        if (emailResult?.ok === true) await markReminderDelivery(emailLedger, emailResult);
         else if (emailResult?.deliveryOutcome !== 'uncertain') {
           // A retryable refusal before the provider never reached the
           // customer. This row is unkeyed, so it is stamped never_contacted
@@ -892,9 +897,10 @@ class BalanceReminder {
         );
         if (emailResult?.ok !== true) continue;
       } else {
-        await ContactLedger.markDelivered(smsLedger);
+        await markReminderDelivery(smsLedger, sendResult);
       }
       await attemptEmail();
+      if (previouslySettledBillingLegs([sendResult, emailResult])) continue;
       await db("customer_interactions").insert({
         customer_id: customer.id,
         interaction_type: sendResult.sent ? "sms_outbound" : "email_outbound",

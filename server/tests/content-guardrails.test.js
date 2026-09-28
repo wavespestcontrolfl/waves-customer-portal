@@ -215,6 +215,16 @@ describe('isFaqBlockedService (exported policy helper)', () => {
     }
   });
 
+  test('named lawn pests resolve to the blocked lawn-pest id (Chinch Bugs, Sod Webworms, Mole Crickets, Grubs, Armyworms)', () => {
+    for (const tag of ['Chinch Bugs', 'chinch-bug', 'Sod Webworms', 'Mole Crickets', 'grubs', 'Armyworms']) {
+      expect(guardrails.isFaqBlockedService(tag)).toBe(true);
+    }
+    // Every alias targets a real blocklist id.
+    for (const target of guardrails.BLOCKED_SERVICE_ALIASES.values()) {
+      expect(guardrails.FAQ_BLOCKED_SERVICES.has(target)).toBe(true);
+    }
+  });
+
   test('every canonical blog tag whose service is blocked resolves as blocked', () => {
     // BLOG_TAGS (blog-writer) ∩ FAQ-blocked services — every canonical-tag
     // form of a blocked service must be covered, alias or normalization.
@@ -2394,6 +2404,136 @@ describe('internal-route allowlist (UNKNOWN_INTERNAL_ROUTE)', () => {
     expect(blocked.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
     const allowed = guardrails.evaluate({ body }, { allowedInternalLinks: ['/lawn-care/fall-armyworm-outbreak/'] });
     expect(allowed.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(false);
+  });
+
+  test('related-post links (voice_constraints.related_posts) ride the same allowance, exactly the listed paths, never an invented sibling', () => {
+    const { deriveSyncGuardrailOptions } = require('../services/content/guardrail-options');
+    const brief = {
+      action_type: 'new_supporting_blog',
+      page_type: 'supporting-blog',
+      target_sites: ['wavespestcontrol.com'],
+      voice_constraints: {
+        related_posts_target_sites: ['wavespestcontrol.com'],
+        related_posts: [
+          { title: 'Fall Armyworm Outbreak', path: '/lawn-care/fall-armyworm-outbreak/', keyword: 'fall armyworm' },
+          { title: 'Chinch Bug Damage', path: '/lawn-care/chinch-bug-damage/', keyword: 'chinch bugs' },
+        ],
+      },
+    };
+    const options = deriveSyncGuardrailOptions({}, brief);
+    expect(options.relatedPostLinks).toEqual(expect.arrayContaining([
+      '/lawn-care/fall-armyworm-outbreak/', '/lawn-care/chinch-bug-damage/',
+    ]));
+    const body = 'See our guide on [fall armyworms](/lawn-care/fall-armyworm-outbreak/) for background.';
+    const linked = guardrails.evaluate({ body }, options);
+    expect(linked.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(false);
+    // A blog post NOT on the brief's related_posts list is still an invented
+    // route — the allowance is exactly the listed paths, never every blog post.
+    const invented = 'See our guide on [drainage tips](/lawn-care/never-seeded-this-post/) for background.';
+    const notLinked = guardrails.evaluate({ body: invented }, options);
+    expect(notLinked.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
+    const wrongHost = 'See [fall armyworms](https://www.sarasotaflpestcontrol.com/lawn-care/fall-armyworm-outbreak/).';
+    const wrongHostResult = guardrails.evaluate({ body: wrongHost }, options);
+    expect(wrongHostResult.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
+    const hubAbsolute = 'See [fall armyworms](https://www.wavespestcontrol.com/lawn-care/fall-armyworm-outbreak/).';
+    const hubResult = guardrails.evaluate({ body: hubAbsolute }, options);
+    expect(hubResult.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(false);
+    for (const unsafeAbsolute of [
+      'https://www.wavespestcontrol.com:8443/lawn-care/fall-armyworm-outbreak/',
+      'https://user:pass@www.wavespestcontrol.com/lawn-care/fall-armyworm-outbreak/',
+    ]) {
+      const unsafeResult = guardrails.evaluate({ body: `See [fall armyworms](${unsafeAbsolute}).` }, options);
+      expect(unsafeResult.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
+    }
+    const standardPort = guardrails.evaluate({
+      body: 'See [fall armyworms](https://www.wavespestcontrol.com:443/lawn-care/fall-armyworm-outbreak/).',
+    }, options);
+    expect(standardPort.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(false);
+    // No related_posts on the brief at all → no extra allowance, unchanged behavior.
+    const bare = deriveSyncGuardrailOptions({}, { action_type: 'new_supporting_blog', page_type: 'supporting-blog' });
+    expect(bare.allowedInternalLinks).toEqual([]);
+    expect(bare.relatedPostLinks).toEqual([]);
+  });
+
+  test('related-post allowances fail closed when the spoke kill switch changes the publish host', () => {
+    const { deriveSyncGuardrailOptions } = require('../services/content/guardrail-options');
+    const previous = process.env.SPOKE_BLOG_NETWORK_ENABLED;
+    process.env.SPOKE_BLOG_NETWORK_ENABLED = 'false';
+    try {
+      const brief = {
+        action_type: 'new_supporting_blog',
+        target_sites: ['sarasotaflpestcontrol.com'],
+        voice_constraints: {
+          related_posts_target_sites: ['sarasotaflpestcontrol.com'],
+          related_posts: [{ path: '/termite/spoke-only/' }],
+        },
+      };
+      const options = deriveSyncGuardrailOptions({}, brief);
+      // The path keeps its identity as a related post bound to its FROZEN
+      // (spoke) host — never the drifted hub host — and relatedPostLinksLive
+      // is false, so internalRouteFinding quarantines every reference to it
+      // rather than dropping it into the untracked-route bucket (Codex
+      // #4984 r6+ P1: emptying relatedPostLinks let a wrong-host or even a
+      // relative link past the host check entirely if check_existing_content
+      // separately re-admitted the same path into the generic allowlist).
+      expect(options.relatedPostHosts).toEqual(['sarasotaflpestcontrol.com']);
+      expect(options.relatedPostLinks).toEqual(['/termite/spoke-only/']);
+      expect(options.relatedPostLinksLive).toBe(false);
+      const result = guardrails.evaluate({ body: '[Spoke only](/termite/spoke-only/)' }, options);
+      expect(result.findings.some((finding) => finding.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
+      // The escape hatch this finding closed: check_existing_content had
+      // separately re-admitted this SAME path into the generic allowlist
+      // (draft.checked_existing_routes) — under the old "drop the path"
+      // behavior that would have silently satisfied the generic,
+      // host-blind allowedInternalLinks check once relatedPaths no longer
+      // recognized it. It must still P0 today.
+      const draft = { body: '[Spoke only](/termite/spoke-only/)', checked_existing_routes: ['/termite/spoke-only/'] };
+      const stillDenied = guardrails.evaluate(draft, options);
+      expect(stillDenied.findings.some((finding) => finding.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
+      // An absolute link on the CURRENT (drifted) hub host must also P0 —
+      // the path was only ever verified live on the frozen spoke.
+      const hubAbsolute = guardrails.evaluate(
+        { body: '[Spoke only](https://www.wavespestcontrol.com/termite/spoke-only/)' },
+        options
+      );
+      expect(hubAbsolute.findings.some((finding) => finding.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
+      // And even an absolute link on its OWN frozen spoke host must still
+      // P0 — a full mismatch quarantines the path everywhere, not just off
+      // the new host, since the brief itself no longer targets that spoke.
+      const frozenHostAbsolute = guardrails.evaluate(
+        { body: '[Spoke only](https://www.sarasotaflpestcontrol.com/termite/spoke-only/)' },
+        options
+      );
+      expect(frozenHostAbsolute.findings.some((finding) => finding.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
+    } finally {
+      if (previous === undefined) delete process.env.SPOKE_BLOG_NETWORK_ENABLED;
+      else process.env.SPOKE_BLOG_NETWORK_ENABLED = previous;
+    }
+  });
+
+  test('a related path that failed the publish-time liveness recheck is denied, even via the generic allowlist', () => {
+    const options = {
+      relatedPostLinks: ['/termite/swarmers/', '/termite/live-post/'],
+      relatedPostHosts: ['wavespestcontrol.com'],
+      relatedPostLinksLive: true,
+      staleRelatedPostLinks: ['/termite/swarmers/'],
+    };
+    const stale = guardrails.evaluate({ body: '[Swarmers](/termite/swarmers/)', checked_existing_routes: ['/termite/swarmers/'] }, options);
+    expect(stale.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
+    const live = guardrails.evaluate({ body: '[Live](/termite/live-post/)' }, options);
+    expect(live.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(false);
+  });
+
+  test('related-post paths match with their canonical case', () => {
+    const options = {
+      relatedPostLinks: ['/termite/swarmers/'],
+      relatedPostHosts: ['wavespestcontrol.com'],
+      relatedPostLinksLive: true,
+    };
+    const exact = guardrails.evaluate({ body: '[Swarmers](/termite/swarmers/)' }, options);
+    expect(exact.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(false);
+    const recased = guardrails.evaluate({ body: '[Swarmers](/Termite/Swarmers/)' }, options);
+    expect(recased.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
   });
 
   test('member-expression components are rejected (Codex round 2)', () => {

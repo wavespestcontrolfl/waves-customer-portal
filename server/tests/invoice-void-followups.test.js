@@ -7,8 +7,13 @@ jest.mock('../services/logger', () => ({
 jest.mock('../services/invoice-followups', () => ({
   stopSequence: jest.fn(async () => undefined),
 }));
+// The void transaction's first statement takes the termite renewal
+// parent-decision gate (Codex #4971 pre-push lock order) — covered against
+// real Postgres in annual-prepay-parent-decision-lock-postgres; a no-op here.
+const mockAcquireTermiteGateAtEntry = jest.fn(async () => []);
 jest.mock('../services/annual-prepay-renewals', () => ({
   syncTermForInvoicePayment: jest.fn(async () => undefined),
+  acquireTermiteGateAtEntry: (...args) => mockAcquireTermiteGateAtEntry(...args),
 }));
 const mockRestoreDepositCredit = jest.fn(async () => 0);
 jest.mock('../services/estimate-deposits', () => ({
@@ -64,6 +69,8 @@ describe('InvoiceService.voidInvoice follow-up cleanup', () => {
     expect(FollowUps.stopSequence).toHaveBeenCalledWith('inv-1', {
       reason: 'invoice_voided',
     });
+    // The void transaction's FIRST statement is the termite gate for this invoice.
+    expect(mockAcquireTermiteGateAtEntry).toHaveBeenCalledWith(expect.anything(), { invoiceIds: ['inv-1'] });
   });
 
   test('also stops a stale sequence when the invoice is already void', async () => {

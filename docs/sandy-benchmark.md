@@ -186,12 +186,30 @@ existing provider-failure handling. It never quietly re-runs the turn on
 Claude; a benchmark candidate that hits an OpenAI outage must show up as a
 failed/inconclusive run, not a clean pass on the wrong provider.
 
+### Thinking-always-on Anthropic candidates (Opus 5.5+)
+
+`--candidate-model` may also be an Anthropic id whose thinking cannot be
+turned off (`MODELS.anthropicThinkingAlwaysOn` — Opus 5.5 and later, e.g.
+`claude-opus-5-5`). These never reach production inbound or the shared
+`VOICE_RELAY_MODEL`/`MODEL_VOICE` chain (`ALLOWED_OVERRIDE_MODEL_IDS`
+excludes them for exactly that reason — that lane always sends
+`thinking: { type: 'disabled' }`, which they reject), but every condition
+here runs through the eval harness (`evalHarness: true`), the same context
+flag that admits a sandbox/benchmark OpenAI candidate — so the runner's
+allowlist check and `buildConditions` both accept them with **no feature
+gate**: unlike an OpenAI candidate, they are plain Anthropic, just a
+different request shape (no `thinking` field, `low` effort, `max_tokens`
+raised by the same floor `anthropic-wire.js` uses elsewhere). A candidate in
+this Set never sets `GATE_VOICE_RELAY_OPENAI`.
+
 ### Model-stamp verification (candidate conditions only)
 
 `--candidate-model` is checked against the relay's OWN catalog-eligible id
-sets (`relay-conversation.js`'s `ALLOWED_OVERRIDE_MODEL_IDS` — Anthropic — and
+sets (`relay-conversation.js`'s `ALLOWED_OVERRIDE_MODEL_IDS` — Anthropic,
+thinking-always-on ids excluded — `ANTHROPIC_SANDBOX_OVERRIDE_MODEL_IDS` —
+the thinking-always-on Anthropic ids just above — and
 `OPENAI_VOICE_OVERRIDE_MODEL_IDS` — OpenAI, see "OpenAI candidates" above —
-both derived from `config/models.js` `MODEL_CATALOG`) before any condition
+all derived from `config/models.js` `MODEL_CATALOG`) before any condition
 runs at all — an unrecognized id is a usage error (exit 2), not four wasted
 API-billed conditions. That check alone does not prove the candidate model actually ran,
 though: each condition's run is also checked AFTER it completes. Every
