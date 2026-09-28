@@ -22,6 +22,10 @@ describe('routeServiceReportQuestion topics', () => {
   test.each([
     ['Is it safe for my dog to go outside?', pestData, 'reentry'],
     ['How often should I water?', lawnWithPlan, 'watering'],
+    ['When can I turn on my irrigation?', lawnWithPlan, 'watering'],
+    // No plan to quote: the irrigation fallback answers with the re-entry
+    // copy, so the recorded topic is reentry, never watering.
+    ['When can I turn on my irrigation?', { serviceLine: 'lawn' }, 'reentry'],
     ['What did you find?', pestData, 'findings'],
     ['What should I do next?', pestData, 'next_steps'],
     ['When is my next appointment?', pestData, 'next_visit'],

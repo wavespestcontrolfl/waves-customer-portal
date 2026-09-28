@@ -584,7 +584,9 @@ function questionRoutingRules({
       topic: 'watering',
       answer: () => [weekPlan.title, weekPlan.detail].filter(Boolean).join(' '),
     },
-    { test: (q) => /\b(irrigation)\b/.test(q), topic: 'watering', answer: () => answerReentry({ data }) },
+    // With no watering plan or aftercare to quote, an irrigation question gets
+    // the re-entry answer, so it is recorded under that answer's topic.
+    { test: (q) => /\b(irrigation)\b/.test(q), topic: 'reentry', answer: () => answerReentry({ data }) },
     // AW-06: exact-word matching missed inflections ("treated", "applying",
     // "products", "used") — this is the branch "What was applied outside
     // today?" and "Why was <product> used?" must reach. A question naming
