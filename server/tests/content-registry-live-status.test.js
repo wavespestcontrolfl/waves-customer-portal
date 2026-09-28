@@ -212,6 +212,161 @@ describe('content registry live status helpers', () => {
     }));
   });
 
+  // codex pre-push audit finding: the documented health contract covers
+  // meta robots OR the X-Robots-Tag header — a header-only noindex (no meta
+  // tag at all) must not be reported as healthy, on a direct response or on
+  // a redirect's landed page.
+  test('an X-Robots-Tag header noindex is detected even with no meta tag at all', async () => {
+    await expect(liveStatus.checkRegistryRowLiveStatus(
+      { id: 'row-header-noindex', canonical_url_normalized: '/header-hidden/' },
+      {
+        fetchImpl: fetchMap({
+          'https://www.wavespestcontrol.com/header-hidden/': response(200, '<html></html>', { 'x-robots-tag': 'noindex' }),
+        }),
+      },
+    )).resolves.toEqual(expect.objectContaining({
+      http_status: '200',
+      live_status: 'noindex',
+      noindex_detected: true,
+    }));
+  });
+
+  test('an X-Robots-Tag header noindex on a redirect\'s landed page is detected too', async () => {
+    await expect(liveStatus.checkRegistryRowLiveStatus(
+      { id: 'row-redirect-header-noindex', canonical_url_normalized: '/legacy-header-hidden/' },
+      {
+        fetchImpl: fetchMap({
+          'https://www.wavespestcontrol.com/legacy-header-hidden/': response(301, '', { location: '/header-hidden/' }),
+          'https://www.wavespestcontrol.com/header-hidden/': response(200, '<html></html>', { 'x-robots-tag': 'noindex' }, 'https://www.wavespestcontrol.com/header-hidden/'),
+        }),
+      },
+    )).resolves.toEqual(expect.objectContaining({
+      http_status: '301',
+      live_status: 'noindex',
+      noindex_detected: true,
+    }));
+  });
+
+  test('a 5xx classifies as server_error, distinct from a generic checker error', async () => {
+    await expect(liveStatus.checkRegistryRowLiveStatus(
+      { id: 'row-5xx', canonical_url_normalized: '/down/' },
+      { fetchImpl: fetchMap({ 'https://www.wavespestcontrol.com/down/': response(503) }) },
+    )).resolves.toEqual(expect.objectContaining({
+      http_status: '503',
+      live_status: 'server_error',
+    }));
+  });
+
+  // Shared body-aware detection (owner finding 2026-09-27, dedup'd with
+  // owned-url-health.js): a registry row now benefits from the same
+  // soft-404/challenge signals a bare HTTP status cannot see.
+  test('a 2xx page rendering a not-found template classifies as soft_404, not live', async () => {
+    await expect(liveStatus.checkRegistryRowLiveStatus(
+      { id: 'row-soft-404', canonical_url_normalized: '/ghost/' },
+      {
+        fetchImpl: fetchMap({
+          'https://www.wavespestcontrol.com/ghost/': response(200, '<html><head><title>Page Not Found — Waves Pest Control</title></head><body>Page Not Found</body></html>'),
+        }),
+      },
+    )).resolves.toEqual(expect.objectContaining({
+      http_status: '200',
+      live_status: 'soft_404',
+    }));
+  });
+
+  // Codex r3 on #5123: a chain that ends on another 3xx (no Location on the
+  // last hop) never reached a page, so it must not read as "redirected".
+  test('a redirect chain ending on a 3xx without Location classifies as error, not redirected', async () => {
+    await expect(liveStatus.checkRegistryRowLiveStatus(
+      { id: 'row-redirect-dead-end', canonical_url_normalized: '/legacy-dead-end/' },
+      {
+        fetchImpl: fetchMap({
+          'https://www.wavespestcontrol.com/legacy-dead-end/': response(301, '', { location: '/hop/' }),
+          'https://www.wavespestcontrol.com/hop/': response(302, '', {}, 'https://www.wavespestcontrol.com/hop/'),
+        }),
+      },
+    )).resolves.toEqual(expect.objectContaining({
+      http_status: '301',
+      live_status: 'error',
+    }));
+  });
+
+  // Codex r3 on #5123: challenge detection is the shared page-body
+  // classifier's strict mode — Cloudflare's JavaScript Detections script on
+  // an ordinary page is not a challenge; the interstitial's own markup is.
+  test('the JS Detections script on an ordinary page stays live; interstitial markup is a challenge', async () => {
+    const page = '<html><head><title>Ghost ants</title><script src="/cdn-cgi/challenge-platform/scripts/jsd/main.js"></script></head><body><p>Ghost ants are tiny pale ants common in Southwest Florida kitchens.</p></body></html>';
+    await expect(liveStatus.checkRegistryRowLiveStatus(
+      { id: 'row-jsd', canonical_url_normalized: '/ghost-ants/' },
+      { fetchImpl: fetchMap({ 'https://www.wavespestcontrol.com/ghost-ants/': response(200, page) }) },
+    )).resolves.toEqual(expect.objectContaining({ live_status: 'live' }));
+    const wall = '<html><head><title>Ghost ants</title><script>window._cf_chl_opt={cvId:"3"};</script></head><body></body></html>';
+    await expect(liveStatus.checkRegistryRowLiveStatus(
+      { id: 'row-wall', canonical_url_normalized: '/ghost-ants/' },
+      { fetchImpl: fetchMap({ 'https://www.wavespestcontrol.com/ghost-ants/': response(200, wall) }) },
+    )).resolves.toEqual(expect.objectContaining({ live_status: 'challenge' }));
+  });
+
+  // Codex r5 on #5123: the response's real Content-Type reaches the shared
+  // classifier — a 200 JSON error or image at a page URL is not the page,
+  // directly or at the end of a redirect; an HTML page stays live.
+  test('a 200 non-HTML payload at a page URL classifies as soft_404, never live or redirected', async () => {
+    await expect(liveStatus.checkRegistryRowLiveStatus(
+      { id: 'row-json', canonical_url_normalized: '/ghost/' },
+      { fetchImpl: fetchMap({ 'https://www.wavespestcontrol.com/ghost/': response(200, '{"error":"not_found","message":"No document exists at this address any longer."}', { 'content-type': 'application/json; charset=utf-8' }) }) },
+    )).resolves.toEqual(expect.objectContaining({ http_status: '200', live_status: 'soft_404' }));
+    await expect(liveStatus.checkRegistryRowLiveStatus(
+      { id: 'row-image', canonical_url_normalized: '/legacy-ghost/' },
+      {
+        fetchImpl: fetchMap({
+          'https://www.wavespestcontrol.com/legacy-ghost/': response(301, '', { location: '/ghost.png' }),
+          'https://www.wavespestcontrol.com/ghost.png': response(200, 'PNG-bytes', { 'content-type': 'image/png' }, 'https://www.wavespestcontrol.com/ghost.png'),
+        }),
+      },
+    )).resolves.toEqual(expect.objectContaining({ http_status: '301', live_status: 'soft_404' }));
+    await expect(liveStatus.checkRegistryRowLiveStatus(
+      { id: 'row-html', canonical_url_normalized: '/ghost-ants/' },
+      { fetchImpl: fetchMap({ 'https://www.wavespestcontrol.com/ghost-ants/': response(200, '<html><head><title>Ghost ants</title></head><body><p>Ghost ants are tiny pale ants.</p></body></html>', { 'content-type': 'text/html; charset=utf-8' }) }) },
+    )).resolves.toEqual(expect.objectContaining({ live_status: 'live' }));
+  });
+
+  test('a redirect landing on a soft-404 template classifies as soft_404, not redirected', async () => {
+    await expect(liveStatus.checkRegistryRowLiveStatus(
+      { id: 'row-redirect-soft-404', canonical_url_normalized: '/legacy-ghost/' },
+      {
+        fetchImpl: fetchMap({
+          'https://www.wavespestcontrol.com/legacy-ghost/': response(301, '', { location: '/ghost/' }),
+          'https://www.wavespestcontrol.com/ghost/': response(200, '<html><head><title>Page Not Found</title></head></html>', {}, 'https://www.wavespestcontrol.com/ghost/'),
+        }),
+      },
+    )).resolves.toEqual(expect.objectContaining({
+      http_status: '301',
+      live_status: 'soft_404',
+    }));
+  });
+
+  test('an interstitial-only Cloudflare challenge classifies as challenge, never a generic error', async () => {
+    const body = '<html><head><title>Just a moment...</title></head><body>Checking your browser before access.</body></html>';
+    await expect(liveStatus.checkRegistryRowLiveStatus(
+      { id: 'row-challenge', canonical_url_normalized: '/blocked/' },
+      { fetchImpl: fetchMap({ 'https://www.wavespestcontrol.com/blocked/': response(200, body) }) },
+    )).resolves.toEqual(expect.objectContaining({
+      http_status: '200',
+      live_status: 'challenge',
+    }));
+  });
+
+  test('a healthy page mentioning captcha/access in its own copy is never misread as a challenge', async () => {
+    const body = '<html><head><title>Report a Break-In or Access Denied Area</title></head><body>Our CAPTCHA-protected contact form keeps spam out, and our technicians never deny access to a scheduled visit.</body></html>';
+    await expect(liveStatus.checkRegistryRowLiveStatus(
+      { id: 'row-safe-words', canonical_url_normalized: '/faq/' },
+      { fetchImpl: fetchMap({ 'https://www.wavespestcontrol.com/faq/': response(200, body) }) },
+    )).resolves.toEqual(expect.objectContaining({
+      http_status: '200',
+      live_status: 'live',
+    }));
+  });
+
   test('fetch errors keep sitemap signal from loaded sitemap paths', async () => {
     const result = await liveStatus.checkRegistryRowLiveStatus(
       { id: 'row-fetch-error', canonical_url_normalized: '/known-in-sitemap/' },

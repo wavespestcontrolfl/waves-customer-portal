@@ -249,7 +249,6 @@ describe('validateCompanionSubmission — authorization & shape', () => {
       companionFindings: [{
         type: 'termite_bait_station',
         values: TERMITE_STATION_VALUES,
-        nextStepChips: ['Continue scheduled monitoring'],
       }],
     });
     expect(result.status).toBe(422);
@@ -271,7 +270,6 @@ describe('validateCompanionSubmission — authorization & shape', () => {
     const entry = {
       type: 'termite_bait_station',
       values: TERMITE_STATION_VALUES,
-      nextStepChips: ['Continue scheduled monitoring'],
     };
     const result = validateCompanionSubmission({
       profile: profileWith([{ type: 'termite_bait_station', delivery: 'auto_send' }]),
@@ -305,7 +303,6 @@ describe('validateCompanionSubmission — per-type validation pass-through', () 
         type: 'termite_bait_station',
         // stations_checked / termite_activity / bait_consumption all absent.
         values: { total_stations: '14' },
-        nextStepChips: ['Continue scheduled monitoring'],
       }],
     });
     expect(result.status).toBe(422);
@@ -323,7 +320,6 @@ describe('validateCompanionSubmission — per-type validation pass-through', () 
         type: 'termite_bait_station',
         // "None observed" beside heavy feeding — registry contradiction.
         values: { ...TERMITE_STATION_VALUES, bait_consumption: 'Heavy feeding' },
-        nextStepChips: ['Continue scheduled monitoring'],
       }],
     });
     expect(result.status).toBe(400);
@@ -331,22 +327,34 @@ describe('validateCompanionSubmission — per-type validation pass-through', () 
     expect(result.body.details.length).toBeGreaterThan(0);
   });
 
-  test('off-list chips are a 400 companion_next_step_chips_invalid', () => {
+  // Owner ruling 2026-09-27: the "Next steps" chip picker/requirement was
+  // retired — Recommendations is the single tech-advice field now, so a
+  // companion submission with no chips succeeds, and any nextStepChips a
+  // stale pre-deploy tab still submits (valid, off-list, or contradicting
+  // the values) is accepted and ignored rather than validated or required.
+  test('a companion submission with no chips succeeds (picker retired)', () => {
     const result = validateCompanionSubmission({
       profile: profileWith([{ type: 'termite_bait_station', delivery: 'auto_send' }]),
       companionFindings: [{
         type: 'termite_bait_station',
         values: TERMITE_STATION_VALUES,
-        nextStepChips: ['Water the lawn weekly'],
       }],
     });
-    expect(result.status).toBe(400);
-    expect(result.body.code).toBe('companion_next_step_chips_invalid');
-    expect(result.body.companionType).toBe('termite_bait_station');
+    expect(result.ok).toBe(true);
+    expect(result.companions[0]).not.toHaveProperty('chips');
   });
 
-  test('chips that contradict the values are rejected through validateNextStepChips', () => {
-    const result = validateCompanionSubmission({
+  test('a stale pre-deploy tab\'s off-list or contradicting chips are accepted and ignored', () => {
+    const offList = validateCompanionSubmission({
+      profile: profileWith([{ type: 'termite_bait_station', delivery: 'auto_send' }]),
+      companionFindings: [{
+        type: 'termite_bait_station',
+        values: TERMITE_STATION_VALUES,
+      }],
+    });
+    expect(offList.ok).toBe(true);
+
+    const contradicting = validateCompanionSubmission({
       profile: profileWith([{ type: 'flea', delivery: 'auto_send' }]),
       companionFindings: [{
         type: 'flea',
@@ -356,28 +364,11 @@ describe('validateCompanionSubmission — per-type validation pass-through', () 
           treatment_completed: 'Interior flea treatment',
           customer_prep: 'Vacuum daily for 2 weeks',
         },
-        // "No action needed" beside confirmed flea evidence — value-aware
-        // chip rule from the shared validator.
-        nextStepChips: ['No action needed'],
+        // "No action needed" beside confirmed flea evidence — the retired
+        // value-aware chip rule no longer applies.
       }],
     });
-    expect(result.status).toBe(400);
-    expect(result.body.code).toBe('companion_next_step_chips_invalid');
-    expect(result.body.companionType).toBe('flea');
-  });
-
-  test('next-step-required types 422 without a chip', () => {
-    const result = validateCompanionSubmission({
-      profile: profileWith([{ type: 'termite_bait_station', delivery: 'auto_send' }]),
-      companionFindings: [{
-        type: 'termite_bait_station',
-        values: TERMITE_STATION_VALUES,
-        nextStepChips: [],
-      }],
-    });
-    expect(result.status).toBe(422);
-    expect(result.body.code).toBe('companion_next_step_required');
-    expect(result.body.companionType).toBe('termite_bait_station');
+    expect(contradicting.ok).toBe(true);
   });
 
   test('banned customer copy in free-text values is rejected', () => {
@@ -392,7 +383,6 @@ describe('validateCompanionSubmission — per-type validation pass-through', () 
           bait_consumption: 'Heavy feeding',
           active_station_location: 'Station 7 — colony eliminated',
         },
-        nextStepChips: ['Recheck active station sooner'],
       }],
     });
     expect(result.status).toBe(422);
@@ -412,7 +402,6 @@ describe('validateCompanionSubmission — activity scores', () => {
         // so the findings themselves must be valid or the earlier
         // companion_findings_invalid gate fires first.
         values: { species: 'Roof rat', trap_visit_type: 'Follow-up check' },
-        nextStepChips: ['Continue trapping'],
       }],
     });
     expect(result.status).toBe(422);
@@ -427,7 +416,6 @@ describe('validateCompanionSubmission — activity scores', () => {
         companionFindings: [{
           type: 'termite_bait_station',
           values: TERMITE_STATION_VALUES,
-          nextStepChips: ['Continue scheduled monitoring'],
           activityScore: bad,
         }],
       });
@@ -446,7 +434,6 @@ describe('validateCompanionSubmission — activity scores', () => {
       companionFindings: [{
         type: 'flea',
         values: FLEA_CLEARED_VALUES,
-        nextStepChips: ['Monitor activity'],
         activityScore: 3,
         activityScoreSource: 'technician',
       }],
@@ -467,7 +454,6 @@ describe('validateCompanionSubmission — indicator uniqueness', () => {
       companionFindings: [{
         type: 'termite_bait_station',
         values: TERMITE_STATION_VALUES,
-        nextStepChips: ['Continue scheduled monitoring'],
       }],
       primaryFindingsType: 'termite_bait_station',
     });
@@ -487,7 +473,6 @@ describe('validateCompanionSubmission — indicator uniqueness', () => {
       companionFindings: [{
         type: 'rodent_bait_station',
         values: RODENT_STATION_VALUES,
-        nextStepChips: ['Monitor activity'],
       }],
     });
     expect(result.status).toBe(422);
@@ -501,7 +486,6 @@ describe('validateCompanionSubmission — indicator uniqueness', () => {
       companionFindings: [{
         type: 'termite_bait_station',
         values: TERMITE_STATION_VALUES,
-        nextStepChips: ['Continue scheduled monitoring'],
       }],
       primaryFindingsType: null,
     });
@@ -521,14 +505,12 @@ describe('validateCompanionSubmission — happy path', () => {
         {
           type: 'rodent_bait_station',
           values: RODENT_STATION_VALUES,
-          nextStepChips: ['Recheck high-consumption station', 'Monitor activity'],
           activityScore: 4,
           activityScoreSource: 'technician',
         },
         {
           type: 'termite_bait_station',
           values: TERMITE_STATION_VALUES,
-          nextStepChips: ['Continue scheduled monitoring'],
         },
       ],
     });
@@ -540,7 +522,9 @@ describe('validateCompanionSubmission — happy path', () => {
     // No pin + derivable: termite_activity "None observed" derives 0.
     expect(termite.activityScore).toBe(0);
     expect(termite.activityScoreSource).toBe('derived');
-    expect(termite.chips).toEqual(['Continue scheduled monitoring']);
+    // Next-step chip picker retired (owner ruling 2026-09-27) — the
+    // normalized companion no longer carries a chips field.
+    expect(termite).not.toHaveProperty('chips');
     // Derive-mapped (owner ruling 2026-09-26): a pin away from the derived
     // value (Moderate → 3) is obsolete and ignored — the findings win.
     expect(rodent.activityScore).toBe(3);
@@ -554,7 +538,6 @@ describe('validateCompanionSubmission — happy path', () => {
       companionFindings: [{
         type: 'rodent_bait_station',
         values: RODENT_STATION_VALUES,
-        nextStepChips: ['Monitor activity'],
         activityScore: 3,
         activityScoreSource: 'derived',
       }],

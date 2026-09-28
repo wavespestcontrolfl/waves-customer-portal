@@ -142,11 +142,32 @@ function getNode(id) {
 }
 
 function listEntries(filter = {}) {
-  const { group, subgroup, kind } = filter || {};
+  const { group, subgroup, kind, section } = filter || {};
   let list = group ? (CATALOG.entriesByGroup.get(group) || []) : Array.from(CATALOG.entries.values());
   if (subgroup) list = list.filter((e) => e.subgroup === subgroup);
   if (kind) list = list.filter((e) => e.kind === kind);
+  if (section) list = list.filter((e) => sectionOf(e) === section);
   return list;
+}
+
+/**
+ * The section (`'pest' | 'plant' | 'condition'`) a catalog node lives under,
+ * climbing entry/subgroup → group → category the same way `lineage` does.
+ * Accepts either a node object (as returned by `getNode`/`listEntries`) or a
+ * bare id/slug. Returns `null` for an unknown node. A category with no
+ * declared `section` (shouldn't happen post-migration, but keeps this
+ * defensive rather than throwing) defaults to `'pest'` — every category this
+ * catalog shipped with before the plant/condition sections existed.
+ */
+function sectionOf(nodeOrSlug) {
+  const node = (nodeOrSlug && typeof nodeOrSlug === 'object' && nodeOrSlug.level)
+    ? nodeOrSlug
+    : getNode(nodeOrSlug);
+  if (!node) return null;
+  if (node.level === 'category') return node.section || 'pest';
+  const group = node.level === 'group' ? node : getGroup(node.group);
+  const category = group ? getCategory(group.category) : null;
+  return category ? (category.section || 'pest') : null;
 }
 
 /**
@@ -579,6 +600,7 @@ module.exports = {
   getCategory,
   getNode,
   listEntries,
+  sectionOf,
   lineage,
   lookAlikes,
   resolveName,

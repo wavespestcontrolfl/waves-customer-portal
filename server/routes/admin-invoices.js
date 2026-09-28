@@ -3714,7 +3714,8 @@ router.get('/:id/followup', async (req, res, next) => {
       // Config-field rename: steps now expose daysAfterSend (PR #106
       // anchored the cadence to invoice.sent_at). daysAfterDue is kept
       // as an alias so any pre-update client still renders a number.
-      steps: followupConfig.steps.map(s => ({
+      // The live cadence: Day 90 ladder when GATE_DUNNING_LADDER_90 is on.
+      steps: FollowUps.followupSteps().map(s => ({
         id: s.id,
         label: s.label,
         daysAfterSend: s.daysAfterSend,

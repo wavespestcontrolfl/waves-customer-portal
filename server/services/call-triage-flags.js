@@ -2745,6 +2745,8 @@ module.exports = {
   CANONICAL_WRITE_BLOCKING_FLAGS,
   confirmedStartOnTheHour,
   quoteBindsConfirmedSlot,
+  turnHasNegationOrHedge,
+  turnHasUnresolvedConditional,
   normalizeCommitmentText,
   hasAgentCommittedEvidence,
   etWallClockOfConfirmedStart,

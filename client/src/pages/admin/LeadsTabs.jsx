@@ -399,6 +399,25 @@ const TIMELINE_LABELS = {
   browsing: "Just pricing it out",
 };
 
+// Self-reported "How did you hear about us?" answer (leads.heard_about,
+// optional quote-form question, owner-approved 2026-09-27) — keys match the
+// Astro quote form's allowlisted <select> options and the portal's own
+// server-side allowlist (lead-webhook.js sanitizeHeardAbout). Kept SEPARATE
+// from the technically-observed lead source (source_name / SOURCE_NAMES on
+// the server) — this is what the customer typed, never merged with it.
+const HEARD_ABOUT_LABELS = {
+  google_search: "Google search",
+  google_maps: "Google Maps / Business Profile",
+  chatgpt: "ChatGPT",
+  other_ai: "Another AI assistant",
+  facebook_instagram: "Facebook or Instagram",
+  nextdoor: "Nextdoor",
+  yelp: "Yelp",
+  friend_neighbor: "Friend or neighbor",
+  truck_yard_sign: "Truck or yard sign",
+  other: "Other",
+};
+
 // preferred_date_time is an ET wall-clock string with NO timezone
 // ("2026-04-20T14:00" — the call extraction stores Eastern local time).
 // Don't route it through new Date(): a non-Eastern browser would reinterpret
@@ -2112,6 +2131,16 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                           Notes:{" "}
                                           <span className="text-zinc-900">
                                             {lead.transcript_summary}
+                                          </span>
+                                        </div>
+                                      )}
+                                      {lead.heard_about && (
+                                        <div>
+                                          Heard about us:{" "}
+                                          <span className="text-zinc-900">
+                                            {HEARD_ABOUT_LABELS[
+                                              lead.heard_about
+                                            ] || lead.heard_about}
                                           </span>
                                         </div>
                                       )}

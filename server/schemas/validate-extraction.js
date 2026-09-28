@@ -86,7 +86,17 @@ const persistedSchema = require('./call-extraction.persisted.schema.json');
 // land on "other", which also covers strangers, so no rule could single them
 // out. Feeds isAuthorizedWdoArrangerBooking (call-triage-flags.js). Older
 // payloads still validate.
-const SCHEMA_VERSION = '1.16.0';
+// 1.17.0: additive — scheduling.agreed_slot_words (object|null: day/hour/
+// period, each verbatim words from the transcript) and
+// scheduling.moved_appointment_words (string|null). Owner decision
+// 2026-09-27: the extraction now records the agreed time and the moved
+// appointment's date as VERBATIM WORDS pinned to the existing
+// confirmed_start_at / moved_appointment_date evidence quotes, so the
+// reschedule applier only checks the quote is real and contains those words
+// instead of parsing speech itself (call-reschedule-agreement.js). Nothing
+// consumes them yet outside that gated consumer. Optional/nullable: older
+// payloads still validate.
+const SCHEMA_VERSION = '1.17.0';
 
 const ajv = new Ajv({ allErrors: true, strict: false });
 addFormats(ajv);
