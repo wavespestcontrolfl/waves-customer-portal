@@ -3775,6 +3775,8 @@ describe('custom rung: the dispatcher note never re-greets the customer (owner 2
     ['Hi Sam, Thursday works better for the crew.', 'Thursday works better for the crew.'],
     ['Hi Sam, Thanks, we moved this appointment.', 'Thanks, we moved this appointment.'],
     ['Hey Sam, Also, the gate code changed.', 'Also, the gate code changed.'],
+    ['Hi Sam, Tomorrow, the technician will be out.', 'Tomorrow, the technician will be out.'],
+    ['Hi Sam, Thursday and Friday both work.', 'Thursday and Friday both work.'],
   ])('drops the leading greeting: %s', async (typed, sent) => {
     expect(await noteAsSent(typed)).toBe(sent);
   });
@@ -3808,5 +3810,8 @@ describe('custom rung: the dispatcher note never re-greets the customer (owner 2
 
   test('a note that was only a greeting falls back to the default line', async () => {
     expect(await noteAsSent('Hi Sam!')).toBe('quick update on your upcoming appointment.');
+    for (const bare of ['Hi there', 'Hello there', 'Good morning', 'Hey Sam']) {
+      expect(await noteAsSent(bare)).toBe('quick update on your upcoming appointment.');
+    }
   });
 });
