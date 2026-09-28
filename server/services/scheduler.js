@@ -3977,8 +3977,9 @@ function initScheduledJobs() {
             // — a scheduled send can sit hours past drafting, and the
             // calendar it quoted is never re-read before firing. Only when
             // the anchor and amount checks already passed, and only for
-            // windows still present in the OUTGOING body (a human-edited
-            // reply that dropped every quoted window needs no recheck).
+            // pairs the OUTGOING body still carries (planOpenTimesRecheck:
+            // a human-edited reply that dropped every quoted window needs
+            // no recheck; an unverifiable edit refuses).
             // Fail closed on a gone slot, a fetch error, or a timeout — same
             // block+retire path as the checks above, no new mechanism.
             let openTimesStale = false;
@@ -3987,23 +3988,33 @@ function initScheduledJobs() {
               try {
                 const decisionRow = await db('agent_decisions')
                   .where({ id: claimMeta.agent_decision_id })
-                  .first('input_snapshot');
+                  .first('input_snapshot', 'suggested_message');
                 let snapshot = decisionRow?.input_snapshot;
                 if (typeof snapshot === 'string') {
                   try { snapshot = JSON.parse(snapshot); } catch { snapshot = null; }
                 }
                 const openTimesSnapshot = snapshot?.open_times_snapshot;
                 if (openTimesSnapshot?.quotedWindows?.length) {
-                  const stillQuoted = openTimesSnapshot.quotedWindows.filter(
-                    (w) => w?.window && String(msg.message_body || '').includes(w.window)
-                  );
-                  if (stillQuoted.length) {
-                    const { openTimesStillOffered } = require('./sms-shadow-drafter');
+                  // Same planner as the queue-time seam (Codex r2): a
+                  // reviewer-edited body is matched to its snapshot pair by
+                  // pair against the drafted text, so a dropped day that
+                  // shares its window with a kept day is not rechecked, and
+                  // an unverifiable edit refuses here too.
+                  const { openTimesStillOffered, planOpenTimesRecheck } = require('./sms-shadow-drafter');
+                  const plan = planOpenTimesRecheck({
+                    snapshot: openTimesSnapshot,
+                    outgoingBody: msg.message_body,
+                    originalBody: decisionRow?.suggested_message ?? null,
+                  });
+                  if (plan.action === 'refuse') {
+                    openTimesStale = true;
+                    openTimesReason = plan.reason;
+                  } else if (plan.action === 'recheck') {
                     const recheck = await openTimesStillOffered({
                       city: openTimesSnapshot.lookup?.city || null,
                       customerId: openTimesSnapshot.lookup?.customerId || null,
                       estimateId: openTimesSnapshot.lookup?.estimateId || null,
-                      quotedWindows: stillQuoted,
+                      quotedWindows: plan.quotedWindows,
                     });
                     if (!recheck.ok) {
                       openTimesStale = true;
