@@ -1063,51 +1063,6 @@ async function dispatchIneligibleReason(ctx) {
 function neverSendRecheck(call, leadId, destinationPhone) {
   return async ({ dbi }) => {
     try {
-      // codex #5018 pre-push P2 (2nd finding): every customer bookedSinceCall
-      // (below) will consider, locked BEFORE this handoff's own row locks.
-      // LOCK ORDER — customer-comms is taken FIRST, matching the two writers
-      // that could otherwise race a booking in underneath this check:
-      //   - admin-leads.js's own lead-conversion booking flow: "take the
-      //     comms advisory lock FIRST — the merge-undo holds it as its
-      //     first lock and later repoints the lead, so a lead row lock
-      //     taken before it could deadlock" (that flow ALSO takes leads
-      //     FOR UPDATE, right after comms, on the very lead this handoff
-      //     holds — reversing the order here would cycle against it).
-      //   - admin-schedule.js's booking writer (~7941-7959): occupancy lock,
-      //     then lockCustomerComms, then the customer row lock, then the
-      //     scheduled_services insert — never touches leads/call_log at
-      //     all, so it can only ever wait on this handoff's comms lock,
-      //     never cycle against the leads/call_log locks below.
-      // lockSmsPhone (an advisory key, taken by withSmsHandoff BEFORE this
-      // function ever runs) never conflicts with lockCustomerComms —
-      // Postgres's single-key (pg_advisory_xact_lock(bigint)) and two-key
-      // (pg_advisory_xact_lock(int,int)) advisory lock families are
-      // entirely separate lock spaces, so their relative order never
-      // matters.
-      //
-      // Both candidate sources are closure-stable — no speculative read (or
-      // later escalation) needed: leadLinkedToExistingCustomer (below)
-      // already refuses whenever lead.customer_id is truthy and differs
-      // from call.metadata.created_customer_id, so the ONLY value
-      // lead.customer_id can hold by the time bookedSinceCall actually runs
-      // is either null or exactly that id — read here from `call`, which
-      // this whole handoff already trusts for that exact comparison, not a
-      // fresh, lockable row. destinationPhone is the same phone
-      // bookedSinceCall's own phone-match branch resolves against, enforced
-      // by the phone_changed_before_send check a few lines down.
-      const candidateCustomerIds = new Set();
-      const createdCustomerId = parseMetadata(call).created_customer_id;
-      if (createdCustomerId) candidateCustomerIds.add(String(createdCustomerId));
-      const phoneKey = phoneIdentityKey(destinationPhone);
-      if (phoneKey && phoneKey.length === 10) {
-        const { nanpStoredPhoneClause } = require('./outbound-call-reason');
-        const phoneMatches = await dbi('customers').whereNull('deleted_at')
-          .whereRaw(nanpStoredPhoneClause('phone'), [phoneKey]).pluck('id');
-        for (const id of phoneMatches) candidateCustomerIds.add(String(id));
-      }
-      for (const id of [...candidateCustomerIds].sort()) {
-        await lockCustomerComms(dbi, id);
-      }
       // .forUpdate() (codex #5018 r12 P1): a plain SELECT let a phone
       // correction committed between this read and messages.create() go
       // unnoticed — admin-leads.js's own PATCH updates leads.phone under a
@@ -1437,6 +1392,53 @@ async function dispatchClaimedCall(conn, call, now) {
     // and consent before handing off to neverSendRecheck and then Twilio —
     // nothing lane-specific needs re-checking here, only the lock.
     withSmsHandoff: (handoff) => conn.transaction(async (trx) => {
+      // codex #5018 pre-push P2 (round 2 finding): customer-comms BEFORE
+      // the phone lock — the established order every withSmsConsentLock
+      // caller uses (utils/customer-comms-lock.js: lockCustomerComms, then
+      // lockSmsPhone). Taking phone first, as this handoff used to, can
+      // deadlock against ANY of those callers for a customer that also
+      // owns this exact phone: that caller holds comms(customer) and wants
+      // phone(this number), while this handoff holds phone(this number)
+      // and wants comms(customer) — a genuine two-resource cycle. Separate
+      // advisory-lock namespaces (lockSmsPhone's two-key family vs
+      // lockCustomerComms's single-key family) only guarantee the two
+      // locks are never the SAME lock; they do nothing to prevent this
+      // kind of opposite-order cycle between two DIFFERENT locks.
+      //
+      // Locks every customer neverSendRecheck's own bookedSinceCall call
+      // will consider — the lead's own call-created customer id, plus
+      // every customer matched by this exact phone via nanpStoredPhoneClause
+      // — so a booking writer for any of them (admin-schedule.js's booking
+      // route: occupancy lock, then customer-comms, then the customer row
+      // lock, then the scheduled_services insert — never touches leads/
+      // call_log; admin-leads.js's own lead-conversion booking flow, which
+      // documents "take the comms advisory lock FIRST... a lead row lock
+      // taken before it could deadlock" and then locks the very lead this
+      // handoff holds) genuinely blocks until this handoff finishes,
+      // instead of committing a booking in the gap between
+      // bookedSinceCall's SELECT and the actual provider request.
+      //
+      // Both candidate sources are closure-stable — no speculative read
+      // needed: leadLinkedToExistingCustomer (inside neverSendRecheck)
+      // refuses whenever lead.customer_id is truthy and differs from
+      // call.metadata.created_customer_id, so the ONLY value
+      // lead.customer_id can hold by the time bookedSinceCall actually runs
+      // is either null or exactly that id; destinationPhone is the same
+      // phone bookedSinceCall's own phone-match branch resolves against,
+      // enforced by neverSendRecheck's own phone_changed_before_send check.
+      const candidateCustomerIds = new Set();
+      const createdCustomerId = parseMetadata(call).created_customer_id;
+      if (createdCustomerId) candidateCustomerIds.add(String(createdCustomerId));
+      const phoneKey = phoneIdentityKey(destinationPhone);
+      if (phoneKey && phoneKey.length === 10) {
+        const { nanpStoredPhoneClause } = require('./outbound-call-reason');
+        const phoneMatches = await trx('customers').whereNull('deleted_at')
+          .whereRaw(nanpStoredPhoneClause('phone'), [phoneKey]).pluck('id');
+        for (const id of phoneMatches) candidateCustomerIds.add(String(id));
+      }
+      for (const id of [...candidateCustomerIds].sort()) {
+        await lockCustomerComms(trx, id);
+      }
       await lockSmsPhone(trx, destinationPhone);
       return handoff(trx);
     }),

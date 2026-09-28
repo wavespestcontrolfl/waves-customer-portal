@@ -810,6 +810,118 @@ postgres('call-booking-link-text against PostgreSQL', () => {
     expect(result).toEqual({ sent: false, skipped: 'link_sent_recently' });
   }, 10000);
 
+  /**
+   * codex #5018 pre-push P2 (round 2 finding): withSmsHandoff used to take
+   * the phone lock (lockSmsPhone) FIRST and only reach customer-comms
+   * (lockCustomerComms) afterward, inside its own bookedSinceCall guard —
+   * the OPPOSITE of the order every withSmsConsentLock caller
+   * (previsit-balance-reminder.js, lead-auto-reply.js, lead-response-
+   * tools.js) uses for the SAME two locks: comms, then phone. A concurrent
+   * send to a customer who also owns the exact phone this handoff is
+   * texting could deadlock — this handoff holding phone and wanting comms,
+   * that caller holding comms and wanting phone. Separate advisory-lock
+   * namespaces (lockSmsPhone's two-key family vs lockCustomerComms's
+   * single-key family) only guarantee the two are never the SAME lock;
+   * they do nothing to prevent this opposite-order cycle between two
+   * DIFFERENT locks. The fix takes customer-comms first, matching
+   * customer-comms-lock.js's own established order.
+   */
+  describe('lock ordering: withSmsHandoff locks customer-comms before the phone lock (codex #5018 pre-push P2, round 2)', () => {
+    test('mechanism: phone-then-comms deadlocks against a comms-then-phone withSmsConsentLock-shaped writer — the exact pre-fix hazard', async () => {
+      const customerId = randomUUID();
+      const phone = '+15555551111';
+      await mockPg('customers').insert({ id: customerId, first_name: 'Pat', last_name: 'Customer', phone, address_line1: '1 Example St', city: 'Bradenton', zip: '34205' });
+
+      const { lockSmsPhone, lockCustomerComms } = require('../utils/customer-comms-lock');
+      // txHandoff: the PRE-FIX withSmsHandoff shape (phone first).
+      // txConsentLock: withSmsConsentLock's real, unchanged order (comms first).
+      const txHandoff = await mockPg.transaction();
+      const txConsentLock = await mockPg.transaction();
+      try {
+        // Step 1 (sequenced, not raced): txHandoff takes the phone lock.
+        await lockSmsPhone(txHandoff, phone);
+        // Step 2 (sequenced): txConsentLock takes customer-comms.
+        await lockCustomerComms(txConsentLock, customerId);
+
+        // Step 3: cross, concurrently, the resource the OTHER side already
+        // holds — a genuine wait-for cycle by construction, exactly like
+        // this file's other lock-order mechanism tests.
+        const crossed = await Promise.allSettled([
+          lockCustomerComms(txHandoff, customerId),
+          lockSmsPhone(txConsentLock, phone),
+        ]);
+
+        const rejected = crossed.filter((r) => r.status === 'rejected');
+        const fulfilled = crossed.filter((r) => r.status === 'fulfilled');
+        expect(fulfilled).toHaveLength(1);
+        expect(rejected).toHaveLength(1);
+        expect(String(rejected[0].reason?.code || rejected[0].reason?.message || '')).toMatch(/40P01|deadlock/i);
+      } finally {
+        await txHandoff.rollback().catch(() => {});
+        await txConsentLock.rollback().catch(() => {});
+      }
+    }, 15000);
+
+    test('fix: the real withSmsHandoff transaction and a real withSmsConsentLock caller for the same phone+customer never deadlock', async () => {
+      const customerId = randomUUID();
+      const phone = '+15555552222';
+      await mockPg('customers').insert({ id: customerId, first_name: 'Pat', last_name: 'Customer', phone, address_line1: '1 Example St', city: 'Bradenton', zip: '34205' });
+      const leadId = await insertLead(mockPg, { phone, customer_id: null });
+      const send_at = new Date(NOW.getTime() - 60 * 60 * 1000).toISOString();
+      const callId = await insertCall(mockPg, {
+        from_phone: phone,
+        metadata: { lead_id: leadId, call_booking_link_text: { status: 'claimed', lead_id: leadId, send_at, original_send_at: send_at } },
+      });
+      buildLeadConsultationSmsLine.mockResolvedValue({ url: 'https://portal.example.com/inspection/tok-lock2', line: 'Pick a time.\n\n', phone });
+
+      let providerEntered;
+      const entered = new Promise((resolve) => { providerEntered = resolve; });
+      let releaseProvider;
+      const providerDone = new Promise((resolve) => { releaseProvider = resolve; });
+      sendCustomerMessage.mockImplementation(async ({ withSmsHandoff, providerPreSendCheck, onDispatchStart }) => {
+        const verdict = await withSmsHandoff(async (trx) => {
+          const v = await providerPreSendCheck({ dbi: trx });
+          if (v.ok) {
+            // By now the real withSmsHandoff transaction holds BOTH
+            // customer-comms(customerId) [this handoff's phone-matched
+            // candidate] and the phone lock — held open here so the
+            // concurrent withSmsConsentLock call below has something real
+            // to contend with.
+            providerEntered();
+            await providerDone;
+            await onDispatchStart();
+          }
+          return v;
+        });
+        return verdict.ok
+          ? { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SMtest000000000000000000000000c' }
+          : { sent: false, ...verdict };
+      });
+
+      const call = await mockPg('call_log').where({ id: callId }).first();
+      const handoffPromise = callBookingLinkText.dispatchClaimedCall(mockPg, call, NOW);
+
+      // Wait until the real handoff transaction is genuinely holding both
+      // locks (inside the held provider callback) before racing it.
+      await entered;
+
+      const { withSmsConsentLock } = require('../utils/customer-comms-lock');
+      let consentLockSettled = false;
+      const consentLockCall = withSmsConsentLock(mockPg, { phone, customerId }, async () => {})
+        .then(() => { consentLockSettled = true; });
+
+      // The consent-lock caller wants customer-comms(customerId) FIRST —
+      // already held by the handoff — so it must genuinely wait, not
+      // deadlock (pg_advisory_xact_lock waits, it does not error).
+      await new Promise((r) => setTimeout(r, 150));
+      expect(consentLockSettled).toBe(false);
+
+      releaseProvider();
+      await Promise.all([handoffPromise, consentLockCall]);
+      expect(consentLockSettled).toBe(true);
+    }, 15000);
+  });
+
   test('link_sent_recently: a same-code sending reservation does not block, but a real accepted send does', async () => {
     const leadId = await insertLead(mockPg, { phone: '+15555550333' });
     const send_at = new Date(NOW.getTime() - 60 * 60 * 1000).toISOString();
