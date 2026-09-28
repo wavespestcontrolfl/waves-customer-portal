@@ -128,6 +128,26 @@ describe('VisitBriefPanel — Customer flagged section', () => {
     }
   });
 
+  it('withholds expired links and re-fetches when a suspended tab resumes', async () => {
+    vi.useFakeTimers();
+    const start = Date.now();
+    try {
+      const request = vi.fn(async () => ({ photos: [] }));
+      renderPanel({ request });
+      await act(async () => { await Promise.resolve(); });
+      expect(request).toHaveBeenCalledTimes(1);
+      // The phone was locked: the clock moved but the timer never fired.
+      vi.setSystemTime(start + 70 * 60 * 1000);
+      await act(async () => { document.dispatchEvent(new Event('visibilitychange')); await Promise.resolve(); });
+      expect(request).toHaveBeenCalledTimes(2);
+      // A resume while the links are still fresh does not re-fetch.
+      await act(async () => { document.dispatchEvent(new Event('visibilitychange')); await Promise.resolve(); });
+      expect(request).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('renders nothing when facts carry no customerFlagged entries (gate off, or nothing sent)', () => {
     renderPanel({ customerFlagged: null });
     expect(screen.queryByText('Customer flagged')).not.toBeInTheDocument();

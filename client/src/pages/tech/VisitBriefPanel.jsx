@@ -220,8 +220,9 @@ function formatFlaggedSentAt(iso) {
 const VISIT_PREP_URL_REFRESH_MS = 50 * 60 * 1000;
 
 function useVisitPrepPhotoUrls(serviceId, active, request, photoSignature) {
-  const [byId, setById] = useState({});
+  const [links, setLinks] = useState({ byId: {}, fetchedAt: 0 });
   const [refreshTick, setRefreshTick] = useState(0);
+  const fetchedAtRef = useRef(0);
   useEffect(() => {
     if (!active || !serviceId || typeof request !== 'function') return;
     let cancelled = false;
@@ -230,13 +231,35 @@ function useVisitPrepPhotoUrls(serviceId, active, request, photoSignature) {
         if (cancelled) return;
         const next = {};
         for (const p of (data?.photos || [])) { if (p?.id) next[p.id] = p.url; }
-        setById(next);
+        fetchedAtRef.current = Date.now();
+        setLinks({ byId: next, fetchedAt: fetchedAtRef.current });
       })
       .catch(() => {});
     const refresh = setTimeout(() => setRefreshTick((n) => n + 1), VISIT_PREP_URL_REFRESH_MS);
     return () => { cancelled = true; clearTimeout(refresh); };
   }, [serviceId, active, request, photoSignature, refreshTick]);
-  return byId;
+  // A backgrounded tab or a locked phone can suspend the timer above past
+  // the links' expiry. On resume, stale links are withheld at once (so a tap
+  // never opens an expired url) and re-fetched (Codex #5239 r6 P2).
+  useEffect(() => {
+    if (!active || typeof document === 'undefined') return undefined;
+    const onResume = () => {
+      if (document.visibilityState === 'hidden') return;
+      const at = fetchedAtRef.current;
+      if (!at || Date.now() - at < VISIT_PREP_URL_REFRESH_MS) return;
+      fetchedAtRef.current = 0;
+      setLinks({ byId: {}, fetchedAt: 0 });
+      setRefreshTick((n) => n + 1);
+    };
+    document.addEventListener('visibilitychange', onResume);
+    window.addEventListener('focus', onResume);
+    return () => {
+      document.removeEventListener('visibilitychange', onResume);
+      window.removeEventListener('focus', onResume);
+    };
+  }, [active]);
+  const fresh = links.fetchedAt && Date.now() - links.fetchedAt < VISIT_PREP_URL_REFRESH_MS;
+  return fresh ? links.byId : {};
 }
 
 function CustomerFlaggedSection({ serviceId, customerFlagged, request }) {
