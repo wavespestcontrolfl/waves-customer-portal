@@ -78,19 +78,25 @@ function competitorHosts() {
     if (n && n.includes('.') && !OWN_HOSTS.has(n)) hosts.add(n);
   };
   const { COMPETITORS } = require('./competitor-facts');
-  for (const c of COMPETITORS || []) {
-    for (const attr of Object.values(c?.attributes || {})) {
-      const h = hostOf(attr?.source);
-      if (h) add(h);
-    }
-    for (const declared of Array.isArray(c?.hosts) ? c.hosts : []) {
-      const h = hostOf(declared);
-      if (h) add(h);
-    }
-  }
+  for (const c of COMPETITORS || []) competitorRecordHosts(c).forEach(add);
   const { _internals: classifier } = require('../seo/ai-citation-classifier');
   for (const d of classifier.competitorDomains()) add(d);
   return hosts;
+}
+
+// One curated competitor-facts record's own hosts: the hosts its sourced
+// attributes cite plus any it declares in `hosts`.
+function competitorRecordHosts(record) {
+  const out = new Set();
+  for (const attr of Object.values(record?.attributes || {})) {
+    const h = hostOf(attr?.source);
+    if (h && h.includes('.') && !OWN_HOSTS.has(h)) out.add(h);
+  }
+  for (const declared of Array.isArray(record?.hosts) ? record.hosts : []) {
+    const h = hostOf(declared);
+    if (h && h.includes('.') && !OWN_HOSTS.has(h)) out.add(h);
+  }
+  return [...out];
 }
 
 function isCompetitorHost(host, hosts = competitorHosts()) {
@@ -201,6 +207,7 @@ module.exports = {
   unescapeMarkdown,
   URL_START_RE,
   competitorHosts,
+  competitorRecordHosts,
   isCompetitorHost,
   competitorLinkUrls,
   competitorLinkUrlsIn,

@@ -681,6 +681,9 @@ async function validateFixedBlogFile(markdown, opts = {}, deps = {}) {
       body,
       frontmatter: data,
       checked_existing_routes: Array.isArray(runContext.checkedExistingRoutes) ? runContext.checkedExistingRoutes : undefined,
+      // The run's reviewer notes: a competitor price is exempt only when
+      // they list its source (Codex r9 on #5191).
+      notes_for_reviewer: typeof runContext.notesForReviewer === 'string' ? runContext.notesForReviewer : null,
     },
     {
       domains,
@@ -2661,6 +2664,7 @@ async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
         guardContext = {
           ...guardOptions,
           checkedExistingRoutes: Array.isArray(dp?.checked_existing_routes) ? dp.checked_existing_routes : [],
+          notesForReviewer: typeof dp?.notes_for_reviewer === 'string' ? dp.notes_for_reviewer : null,
           // Operator competitor authorization for the preflight comparison
           // gate — same derivation the run-context revalidation uses.
           operatorBriefText: (runner._internals && typeof runner._internals.operatorBriefTextForComparisonGate === 'function')
@@ -2854,6 +2858,7 @@ async function reconcileAutonomousPr(options, deps = {}) {
   const guardContext = {
     ...await runner._deriveGuardrailOptions(opp, brief),
     checkedExistingRoutes: draft.checked_existing_routes,
+    notesForReviewer: typeof draft.notes_for_reviewer === 'string' ? draft.notes_for_reviewer : null,
     operatorBriefText: runner._internals.operatorBriefTextForComparisonGate(opp, brief),
   };
   const preflight = await (deps.validateFixedBlogFile || validateFixedBlogFile)(candidate.content, {

@@ -122,6 +122,9 @@ rule follows in later sections, but this checklist is binding on its own:
   a COMPETITOR's price in plain prose where the SAME SENTENCE names whose
   price it is, stated plainly — no link and no "verified"/"as of" label
   needed — never in a table or marked-up paragraph, never a Waves price.
+  The page the figure came from MUST be listed under "Evidence sources" in
+  notes_for_reviewer (the company's own page, or a BBB/ConsumerAffairs page
+  about it); a figure with no listed source fails the gate — drop it.
   NEVER link a competitor's own website, anywhere [COMPETITOR_LINK]. A
   competitor page you relied on: name the company in the text and list the
   page's URL under "Evidence sources" in notes_for_reviewer (never published).
@@ -578,7 +581,8 @@ violation routes the whole draft to review and wastes the run):
     hardcoded dollar figure — link to /pest-control-calculator/ for numbers.
     EXCEPTION: an operator competitor-intercept brief that binds a sourced
     competitor amount keeps it under the HARDCODED_PRICE carve-out (plain
-    prose, same-sentence attribution, no competitor link) — never inside the
+    prose, same-sentence attribution, no competitor link, its source listed
+    under "Evidence sources" in notes_for_reviewer) — never inside the
     table, never a Waves price.
   - Do NOT put competitor attributes in claims_ledger (that ledger is for local
     SWFL facts only) — name competitor sources in the caption (plain text, no

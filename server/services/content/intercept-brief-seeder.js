@@ -452,8 +452,10 @@ function buildBindingInstructions({ payload, byline, ctaDirectives, globalRules,
     // Mirrors the publish-time price guard (content-guardrails
     // findHardcodedPrice): on an intercept brief a dollar figure passes only
     // when its OWN sentence names whose price it is, in plain prose outside
-    // any table; framing words ("pricing varies") do not exempt an amount.
-    'COMPETITOR PRICING (mandatory for every dollar figure): each competitor dollar amount must sit in a plain-prose sentence that names whose price it is — e.g. "Aptive\'s early-cancellation fee is $199." — never in a table, never next to a Waves price, never with first-person wording ("we", "our") in the same sentence. An unattributed dollar figure blocks the post at the publish-time price guard.',
+    // any table, AND that company's source is in notes_for_reviewer or this
+    // brief's sources (competitorPriceEvidenced); framing words ("pricing
+    // varies") do not exempt an amount.
+    'COMPETITOR PRICING (mandatory for every dollar figure): each competitor dollar amount must sit in a plain-prose sentence that names whose price it is — e.g. "Aptive\'s early-cancellation fee is $199." — never in a table, never next to a Waves price, never with first-person wording ("we", "our") in the same sentence. List the page each figure came from under "Evidence sources" in notes_for_reviewer (the company\'s own page, or a BBB/ConsumerAffairs page about it) unless it is one of this brief\'s sources. An unattributed or unsourced dollar figure blocks the post at the publish-time price guard.',
   ];
   return lines.filter(Boolean);
 }

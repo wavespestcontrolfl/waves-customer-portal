@@ -3713,7 +3713,15 @@ describe('third-party price citations and trusted sources', () => {
   // Operator provenance unlocks the PRICE exemption. Trusted-source links
   // alone never permit prices in mined drafts.
   // A competitor-price draft is ALWAYS an operator draft.
-  const OP = { thirdPartyCitations: true, operatorCitations: true };
+  // Every competitor carries evidence here (Codex r9 on #5191): these tests
+  // exercise ATTRIBUTION. The evidence requirement has its own tests below.
+  const { COMPETITORS, COMPETITOR_BRAND_SIGNALS } = require('../services/content/competitor-facts');
+  const { competitorRecordHosts } = require('../services/content/competitor-links');
+  const ALL_EVIDENCE = [
+    ...COMPETITORS.flatMap((c) => competitorRecordHosts(c).map((h) => `https://${h}/pricing`)),
+    ...COMPETITOR_BRAND_SIGNALS.map((n) => `https://www.bbb.org/profile/${n.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`),
+  ];
+  const OP = { thirdPartyCitations: true, operatorCitations: true, evidenceUrls: ALL_EVIDENCE };
   // Fixtures written under the retired source-and-date rule (r12–r15) keep
   // this harmless prefix. Since the owner ruling of 2026-09-28 a competitor
   // price needs no link or date; the prefix neither helps nor hurts.
@@ -3857,8 +3865,9 @@ describe('third-party price citations and trusted sources', () => {
     // "though pricing varies by contract" is exactly the phrasing the seeder
     // tells writers to add. On an intercept draft it never exempts an amount
     // by itself; only attribution to a competitor does. Since the owner
-    // ruling of 2026-09-28 an attributed competitor price needs no source or
-    // date, so the attributed forms now pass (deliberate contract change).
+    // ruling of 2026-09-28 an attributed competitor price needs no in-post
+    // source or date (its source rides the evidence notes), so the attributed
+    // forms now pass (deliberate contract change).
     expect(findHardcodedPrice('Quarterly pest control is $199, though pricing varies by contract.', OP)).not.toBeNull();
     expect(findHardcodedPrice('Quarterly pest control is $199 — get a quote for your home.', OP)).not.toBeNull();
     expect(findHardcodedPrice('Aptive charges $199, though pricing varies by contract.', OP)).toBeNull();
@@ -3871,7 +3880,8 @@ describe('third-party price citations and trusted sources', () => {
   // included, are stated plainly. This deliberately retires the r12–r15
   // source-and-date contract (citation link + "as of" date in the amount's
   // sentence); it is an owner-ruled change, not a review-driven rewrite.
-  test('a competitor price needs NO citation link and NO as-of date (owner ruling 2026-09-28)', () => {
+  // The source moved to the unpublished evidence notes (Codex r9 on #5191).
+  test('a competitor price needs NO in-post citation link and NO as-of date (owner ruling 2026-09-28)', () => {
     for (const body of [
       'Orkin charges a $199 cancellation fee.',
       'Aptive charges from $49 to $99 per month for comparable plans.',
@@ -3882,8 +3892,71 @@ describe('third-party price citations and trusted sources', () => {
       'Orkin charges a $199 fee. June 2026 was rainy.',
     ]) {
       expect(findHardcodedPrice(body, OP)).toBeNull();
-      expect(findHardcodedPrice(body, { thirdPartyCitations: true })).toBeNull();
+      // …but its source must be in the evidence notes.
+      expect(findHardcodedPrice(body, { thirdPartyCitations: true })).not.toBeNull();
     }
+  });
+
+  // Codex r9 on #5191: with no link on the page, "Orkin charges $199" passed
+  // on the name alone, so an invented figure could auto-publish. The source
+  // rides the unpublished evidence instead, and it has to be THAT company's.
+  describe('a competitor price needs its source in the unpublished evidence (Codex r9 on #5191)', () => {
+    const IC = { thirdPartyCitations: true };
+    const ORKIN = 'Orkin charges a $199 cancellation fee.';
+    const APTIVE = "Aptive's early-cancellation fee is $199.";
+
+    test('no evidence, or another company\'s, keeps the P0', () => {
+      expect(findHardcodedPrice(ORKIN, IC)).toBe('$199');
+      expect(findHardcodedPrice(ORKIN, { ...IC, evidenceUrls: ['https://www.terminix.com/pricing'] })).toBe('$199');
+      // A page naming Orkin on an arbitrary host is not a public record.
+      expect(findHardcodedPrice(ORKIN, { ...IC, evidenceUrls: ['https://example.com/orkin-prices'] })).toBe('$199');
+      // aptive.com is an unrelated company (not an Aptive host).
+      expect(findHardcodedPrice(APTIVE, { ...IC, evidenceUrls: ['https://aptive.com/terms'] })).toBe('$199');
+      // Not a web URL at all.
+      expect(findHardcodedPrice(ORKIN, { ...IC, evidenceUrls: ['ftp://www.orkin.com/pricing'] })).toBe('$199');
+    });
+
+    test('the company\'s own page, or a public-record page naming it, is evidence', () => {
+      expect(findHardcodedPrice(ORKIN, { ...IC, evidenceUrls: ['https://www.orkin.com/pricing'] })).toBeNull();
+      expect(findHardcodedPrice(APTIVE, { ...IC, evidenceUrls: ['https://goaptive.com/terms'] })).toBeNull();
+      expect(findHardcodedPrice(ORKIN, { ...IC, evidenceUrls: ['https://www.bbb.org/us/ga/atlanta/profile/pest-control/orkin-llc-0443/complaints'] })).toBeNull();
+      expect(findHardcodedPrice(APTIVE, { ...IC, evidenceUrls: ['https://www.consumeraffairs.com/homeowners/aptive-environmental-llc.html'] })).toBeNull();
+      // The public-record page must name THIS company.
+      expect(findHardcodedPrice(APTIVE, { ...IC, evidenceUrls: ['https://www.bbb.org/us/ga/atlanta/profile/pest-control/orkin-llc-0443/complaints'] })).toBe('$199');
+    });
+
+    test('a source the operator brief binds is evidence when it names the company (B1/B3)', () => {
+      const bound = ['https://www.consumeraffairs.com/homeowners/aptive-environmental-llc.html', 'Orkin published terms/plan pages'];
+      expect(findHardcodedPrice(APTIVE, { ...IC, boundSourceUrls: bound })).toBeNull();
+      expect(findHardcodedPrice('Aptive charges a $199 fee.', { ...IC, boundSourceUrls: ['https://legalclarity.org/how-to-cancel-aptive/'] })).toBeNull();
+      // A bound source about someone else, or prose, is not.
+      expect(findHardcodedPrice(ORKIN, { ...IC, boundSourceUrls: bound })).toBe('$199');
+      expect(findHardcodedPrice(ORKIN, { ...IC, boundSourceUrls: ['https://legalclarity.org/how-to-cancel-trugreen-phone-mail-or-online/'] })).toBe('$199');
+    });
+
+    test('a detection-only brand is evidenced by a public-record page naming it', () => {
+      const HAWX = 'Hawx charges a $149 early-termination fee.';
+      expect(findHardcodedPrice(HAWX, IC)).toBe('$149');
+      expect(findHardcodedPrice(HAWX, { ...IC, evidenceUrls: ['https://www.bbb.org/us/tn/x/profile/pest-control/hawx-pest-control/complaints'] })).toBeNull();
+    });
+
+    test('evaluate() reads the draft\'s notes_for_reviewer', () => {
+      const hasPrice = (r) => r.findings.some((f) => f.code === 'HARDCODED_PRICE');
+      const opts = { operatorCitations: true, competitorPriceCitations: true };
+      expect(hasPrice(guardrails.evaluate({ body: ORKIN }, opts))).toBe(true);
+      expect(hasPrice(guardrails.evaluate({ body: ORKIN, notes_for_reviewer: 'Evidence sources:\n- https://www.orkin.com/pricing' }, opts))).toBe(false);
+      // Escaped and protocol-relative forms read as the browser reads them.
+      expect(hasPrice(guardrails.evaluate({ body: ORKIN, notes_for_reviewer: 'Evidence sources: //www.orkin&#46;com/pricing' }, opts))).toBe(false);
+      // The brief's bound sources count too.
+      expect(hasPrice(guardrails.evaluate({ body: APTIVE }, { ...opts, requiredSourceUrls: ['https://www.consumeraffairs.com/homeowners/aptive-environmental-llc.html'] }))).toBe(false);
+      // The redraft directive says where the source goes.
+      const f = guardrails.evaluate({ body: ORKIN }, opts).findings.find((x) => x.code === 'HARDCODED_PRICE');
+      expect(f.message).toMatch(/Evidence sources/);
+      // Mined drafts get neither the exemption nor the hint.
+      const mined = guardrails.evaluate({ body: ORKIN, notes_for_reviewer: 'https://www.orkin.com/pricing' }, {}).findings.find((x) => x.code === 'HARDCODED_PRICE');
+      expect(mined).toBeTruthy();
+      expect(mined.message).not.toMatch(/Evidence sources/);
+    });
   });
 
   // With no link or date to check, an ANONYMOUS figure would publish a price
@@ -4221,7 +4294,7 @@ describe('third-party price citations and trusted sources', () => {
     const seedish = guardrails.evaluate({ body }, { operatorCitations: true });
     expect(seedish.findings.some((f) => f.code === 'HARDCODED_PRICE')).toBe(true);
     // True intercepts pass via the dedicated flag.
-    const intercept = guardrails.evaluate({ body }, { operatorCitations: true, competitorPriceCitations: true });
+    const intercept = guardrails.evaluate({ body, notes_for_reviewer: 'Evidence sources: https://www.orkin.com/pricing' }, { operatorCitations: true, competitorPriceCitations: true });
     expect(intercept.findings.some((f) => f.code === 'HARDCODED_PRICE')).toBe(false);
   });
 

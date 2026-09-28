@@ -885,7 +885,7 @@ function isInsideTableMarkup(text, index) {
  * ONE price policy. Exported for seo-completion-gate (its previous private
  * copy had drifted: no comma support, no regulatory exemption).
  */
-function findHardcodedPrice(text, { thirdPartyCitations = false, forbidAllPrices = false } = {}) {
+function findHardcodedPrice(text, { thirdPartyCitations = false, forbidAllPrices = false, evidenceUrls = [], boundSourceUrls = [] } = {}) {
   const s = String(text || '');
   // Attribution is decided against what READERS SEE. Comments and tag
   // attributes are stripped at render, so "{/* other companies charge */} $89
@@ -922,8 +922,10 @@ function findHardcodedPrice(text, { thirdPartyCitations = false, forbidAllPrices
     // It is stated PLAINLY: no citation link and no as-of / verified label
     // (owner ruling 2026-09-28: "list them, we don't have to link to their
     // site, or say verified or not verified"). That ruling retired the old
-    // source-and-date requirement; a blog post never links a competitor's
-    // site at all (competitor-links.js).
+    // in-post source-and-date requirement; a blog post never links a
+    // competitor's site at all (competitor-links.js). The source still has
+    // to exist: it moved to the draft's unpublished evidence channel
+    // (competitorPriceEvidenced — Codex r9 on #5191).
     //
     // PROSE ONLY. A table-cell exemption was built and then REMOVED (owner
     // ruling 2026-08-01, second): deciding ownership inside Markdown/JSX
@@ -969,7 +971,7 @@ function findHardcodedPrice(text, { thirdPartyCitations = false, forbidAllPrices
       && !isMarkdownTableRow(s, tokenIndex)
       && !isInsideTableMarkup(s, tokenIndex)
       && !paragraphHasMarkup(s, tokenIndex)
-      && isThirdPartyPriceCitation(proseText, tokenIndex, s)) continue;
+      && competitorPriceEvidenced(thirdPartyPriceOwners(proseText, tokenIndex, s), { evidenceUrls, boundSourceUrls })) continue;
     return match[0].trim();
   }
   return null;
@@ -978,7 +980,24 @@ function findHardcodedPrice(text, { thirdPartyCitations = false, forbidAllPrices
 function priceFinding(body, opts = {}) {
   const hit = findHardcodedPrice(body, opts);
   if (!hit) return null;
-  return finding('P0', 'HARDCODED_PRICE', `Body contains a hardcoded price ("${hit}") with no calculator/quote framing nearby — link to /pest-control-calculator/ instead.`);
+  // On a competitor-intercept draft the redraft has a second way out, so it
+  // is spelled out: most of these are a sourced competitor figure whose
+  // source was never listed.
+  const competitorWay = opts.thirdPartyCitations
+    ? ' A COMPETITOR\'s price may stay only in a plain-prose sentence that names the company, with the page it came from listed under "Evidence sources" in notes_for_reviewer (the company\'s own page, or a BBB/ConsumerAffairs page about it) — otherwise drop the figure.'
+    : '';
+  return finding('P0', 'HARDCODED_PRICE', `Body contains a hardcoded price ("${hit}") with no calculator/quote framing nearby — link to /pest-control-calculator/ instead.${competitorWay}`);
+}
+
+// The URLs in a draft's notes_for_reviewer (editorial-evidence reads them the
+// same way for the review). Unreadable → none, which only withholds the
+// competitor-price exemption.
+function priceEvidenceUrls(draft) {
+  try {
+    return require('./editorial-evidence').notesEvidenceUrls(draft);
+  } catch {
+    return [];
+  }
 }
 
 // Third-party price attribution (owner ruling 2026-08-01). A dollar figure
@@ -1327,8 +1346,15 @@ function clauseAround(sentence, localIndex) {
 // disqualifier is SENTENCE-wide (deliberately broader than the attribution
 // scope): any mention of us anywhere in the sentence blocks the exemption.
 function isThirdPartyPriceCitation(text, amountIndex, vetoText) {
+  return thirdPartyPriceOwners(text, amountIndex, vetoText).length > 0;
+}
+
+// The competitor names that own the amount under the test above (empty when
+// none does). findHardcodedPrice needs WHO, to look for that company's
+// evidence.
+function thirdPartyPriceOwners(text, amountIndex, vetoText) {
   const { text: sentence, offset: sentenceOffset } = sentenceAround(text, amountIndex);
-  if (!sentence) return false;
+  if (!sentence) return [];
   // The first-party VETO reads the sentence DECODED — "O&#117;r service is
   // different; Orkin charges $89" renders as "Our service…" and the raw text
   // hid the marker (Codex r9 P0). Decoding is safe here because the sentence
@@ -1350,11 +1376,12 @@ function isThirdPartyPriceCitation(text, amountIndex, vetoText) {
   const paraStart = (() => { const i = vt.lastIndexOf('\n\n', amountIndex); return i === -1 ? 0 : i + 2; })();
   const paraEndRaw = vt.indexOf('\n\n', amountIndex);
   const paragraph = vt.slice(paraStart, paraEndRaw === -1 ? vt.length : paraEndRaw);
-  if (hasFirstPartyMarker(cellIdentity(paragraph))) return false;
+  if (hasFirstPartyMarker(cellIdentity(paragraph))) return [];
   const localAmountIndex = amountIndex - sentenceOffset;
   const { text: clause, offset: clauseOffset } = clauseAround(sentence, localAmountIndex);
-  if (!clause) return false;
+  if (!clause) return [];
   const clauseAmountIndex = localAmountIndex - clauseOffset;
+  const owners = [];
   for (const re of competitorNamePatterns()) {
     if (!re) continue;
     const scan = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
@@ -1364,12 +1391,68 @@ function isThirdPartyPriceCitation(text, amountIndex, vetoText) {
       const between = clause.slice(m.index + m[0].length, clauseAmountIndex);
       // (A) the party is the subject of a pricing predicate that owns THIS
       // amount — every linking token whitelisted (see attributionBindsToAmount).
-      if (attributionBindsToAmount(between)) return true;
       // (B) possessive price noun: "Orkin's cancellation fee is $199".
-      if (POSSESSIVE_PRICE_RE.test(between)) return true;
+      if (attributionBindsToAmount(between) || POSSESSIVE_PRICE_RE.test(between)) owners.push(m[0]);
     }
   }
-  return false;
+  return owners;
+}
+
+// Evidence for a competitor price (Codex r9 on #5191). The owner ruling of
+// 2026-09-28 keeps the source OFF the page — no link, no verified label — but
+// a figure nobody sourced must not publish, so the source rides the draft's
+// unpublished evidence channel instead: a URL under "Evidence sources" in
+// notes_for_reviewer, or a source the operator's brief binds (the brief is
+// operator-authored, so its sources are evidence already). A URL evidences
+// the company that OWNS the amount only:
+//   - a page on one of that company's own hosts (its curated
+//     competitor-facts record), or
+//   - a page whose PATH names the company (its name or an alias, letters and
+//     digits only) on a public-record host — the trusted citation hosts and
+//     any .gov (BBB, ConsumerAffairs, an AG release) — or bound by the brief
+//     ("consumeraffairs.com/homeowners/aptive-environmental-llc.html" for
+//     Aptive's $199 fee in the B1/B3 briefs).
+// Every owner the clause names needs its own evidence. A name with no curated
+// record (a detection-only brand) can only be evidenced by path.
+const nameKey = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+const EVIDENCE_NAME_KEY_MIN = 4;
+
+function competitorEvidenceTarget(ownerName) {
+  const key = nameKey(ownerName);
+  let record = null;
+  try {
+    const { COMPETITORS } = require('./competitor-facts');
+    record = (Array.isArray(COMPETITORS) ? COMPETITORS : []).find((c) => (
+      [c?.name, ...(c?.aliases || []), ...(c?.aliasesCS || [])].some((n) => nameKey(n) === key)
+    )) || null;
+  } catch { /* no records — path evidence only */ }
+  const names = record ? [record.name, ...(record.aliases || []), ...(record.aliasesCS || [])] : [];
+  const keys = [...new Set([key, ...names.map(nameKey)])].filter((k) => k.length >= EVIDENCE_NAME_KEY_MIN);
+  let hosts = [];
+  try { hosts = record ? require('./competitor-links').competitorRecordHosts(record) : []; } catch { hosts = []; }
+  return { hosts, keys };
+}
+
+function urlEvidences(rawUrl, { hosts, keys }, { bound }) {
+  let url;
+  try { url = new URL(String(rawUrl || '').trim()); } catch { return false; }
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') return false;
+  const host = normalizeHost(url.hostname);
+  if (hosts.some((h) => host === h || host.endsWith(`.${h}`))) return true;
+  if (!bound && !hostAllowed(host, new Set(TRUSTED_CITATION_HOSTS.map(normalizeHost)))) return false;
+  let path = url.pathname;
+  try { path = decodeURIComponent(path); } catch { /* keep the raw path */ }
+  const pathKey = nameKey(path);
+  return keys.some((k) => pathKey.includes(k));
+}
+
+function competitorPriceEvidenced(owners, { evidenceUrls = [], boundSourceUrls = [] } = {}) {
+  if (!owners.length) return false;
+  return owners.every((owner) => {
+    const target = competitorEvidenceTarget(owner);
+    return evidenceUrls.some((u) => urlEvidences(u, target, { bound: false }))
+      || boundSourceUrls.some((u) => urlEvidences(u, target, { bound: true }));
+  });
 }
 
 function isRegulatoryPenaltyAmount(amount, context) {
@@ -6504,7 +6587,14 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
     // citation hosts, but only true competitor-intercept briefs may cite
     // competitor prices (Codex: seed lanes auto-publish informational posts
     // and must keep the full price guard).
-    priceFinding(publishableText, { thirdPartyCitations: competitorPriceCitations, forbidAllPrices }),
+    // A competitor price needs its source in the draft's unpublished
+    // evidence (notes_for_reviewer) or the brief's bound sources.
+    priceFinding(publishableText, {
+      thirdPartyCitations: competitorPriceCitations,
+      forbidAllPrices,
+      evidenceUrls: competitorPriceCitations ? priceEvidenceUrls(draft) : [],
+      boundSourceUrls: requiredSourceUrls,
+    }),
     // Outbound links are scanned across body AND meta too — an injected spam
     // URL hiding in a meta description ships exactly like one in the body.
     externalLinkFinding(publishableText, { operatorCitations, requiredSourceUrls })
@@ -6671,6 +6761,7 @@ module.exports = {
   // single source of truth for the hardcoded-price policy — consumed by
   // seo-completion-gate so the two price P0s can never drift again.
   findHardcodedPrice,
+  priceEvidenceUrls,
   isThirdPartyPriceCitation,
   // single source of truth for the re-entry/safety compliance predicate
   // (AGENTS.md "Compliance language on any customer surface") — consumed by

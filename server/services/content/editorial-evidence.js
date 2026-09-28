@@ -188,13 +188,22 @@ async function refreshReviewFrontmatter(draft, brief) {
 // (evidenceUrl), so every consumer (the review, the publish-day snapshots)
 // gets the same clean list.
 function evidenceUrlsFor(draft) {
+  const { isCompetitorHost } = require('./competitor-links');
+  return notesEvidenceUrls(draft).filter((url) => isCompetitorHost(new URL(url).hostname));
+}
+
+// Every URL in the draft's notes_for_reviewer, read and normalized as above.
+// The price guard reads the whole list: a competitor price needs a source
+// there even when it is a public-record page (content-guardrails
+// competitorPriceEvidenced; Codex r9 on #5191).
+function notesEvidenceUrls(draft) {
   const notes = typeof draft?.notes_for_reviewer === 'string' ? draft.notes_for_reviewer : '';
-  const { URL_START_RE, isCompetitorHost, readableUrl } = require('./competitor-links');
+  const { URL_START_RE, readableUrl } = require('./competitor-links');
   const urlRe = new RegExp(`(?:${URL_START_RE.source})[^\\s<>"'\`\\]}]+`, 'gi');
   // Read as the detector reads it: entities decoded, Markdown escapes removed.
   const urls = (readableUrl(notes).match(urlRe) || [])
     .map((raw) => evidenceUrl(trimTrailingUrlNoise(raw)))
-    .filter((url) => url && isCompetitorHost(new URL(url).hostname));
+    .filter(Boolean);
   return [...new Set(urls)];
 }
 
@@ -432,4 +441,4 @@ async function verifyEvidenceOnlyAdvance({ pinnedSha, headSha }, deps = {}) {
 const evidenceDomain = (document) => domainContextFromDocument(document)?.hostname || null;
 
 module.exports = { enabled, applicable, prepareDraft, filesForDocument, assertPrEvidence,
-  verifyEvidenceOnlyAdvance, sourceUrls, reviewError, evidenceDomain, evidenceUrlsFor };
+  verifyEvidenceOnlyAdvance, sourceUrls, reviewError, evidenceDomain, evidenceUrlsFor, notesEvidenceUrls };

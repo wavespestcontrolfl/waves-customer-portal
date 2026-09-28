@@ -2373,6 +2373,16 @@ describe('sourced competitor prices survive the SEO price check (r13)', () => {
   test('a non-intercept brief keeps the full guard', () => {
     expect(detectHardcodedPrice(sourced, { gsc_signal: { bucket: 'seasonal_rising' } })).toBe(true);
   });
+
+  // Codex r9 on #5191: the source moved off the page, not away. The brief's
+  // Aptive source covers Aptive above; an Orkin figure needs Orkin's source
+  // in the draft's notes_for_reviewer, exactly as the guardrails require.
+  test('a competitor price with no source for THAT company parks; the draft\'s evidence notes clear it', () => {
+    const orkin = 'Orkin charges a $199 cancellation fee.';
+    expect(detectHardcodedPrice(orkin, brief)).toBe(true);
+    expect(detectHardcodedPrice(orkin, brief, { notes_for_reviewer: 'Evidence sources: https://www.orkin.com/pricing' })).toBe(false);
+    expect(detectHardcodedPrice(orkin, brief, { notes_for_reviewer: 'Evidence sources: https://www.terminix.com/pricing' })).toBe(true);
+  });
 });
 
 describe('a brief-level price ban reaches this gate too (r13)', () => {
