@@ -128,45 +128,11 @@ function customLinkClause(rescheduleUrl) {
 //     static template text can't mask the loss (codex r3 P2). The list is
 //     the SHARED map the template write validator enforces at save time
 //     (codex r8 P1) — one source, so save and render can never disagree.
-// A dispatcher often opens the Custom note with a greeting of their own
-// ("Hey Sam, the cleaner was there today…"), but the template already
-// greets the customer ("Hi {first_name} - "), so the text read "Hi Sam -
-// Hey Sam, …" (owner 2026-09-28). Drop that leading greeting — but only a
-// greeting addressed to THIS customer by their own first name, to "there",
-// or to no one ("Hi, …"): the greeting word, then optionally that
-// addressee, ended by a comma / "!" / "." / ":" / dash, by the end of the
-// note, or (after the addressee) by a space ("Hey Sam the tech is out…").
-// Any other capitalized word is never taken for a name ("Hi FYI, …" and
-// "Good morning Mrs. Lee - …" are sent as typed), and the addressee must end
-// at a space, punctuation or the end ("Hey Sam's gate…" is a sentence).
-// When what is left starts the way a salutation continues — a conjunction
-// and another name ("and Pat, …", "& Pat …"; not "and the tech will…") or
-// a list of names ending in its own
-// punctuation ("Pat, and Alex, …") — the greeting addresses more than the
-// customer and the note is sent exactly as typed. A note that was only a
-// greeting falls back to the default line.
-const NOTE_GREETING_WORD = '(?:hi|hello|hey|good (?:morning|afternoon|evening))';
-const NOTE_DELIM = '[,!.:\u2013\u2014-]';
-const NOTE_NAME = "(?:there|\\p{Lu}[\\p{L}'.-]*)";
-const NOTE_CONTINUED_SALUTATION_RE = new RegExp(`^(?:(?:and|or|&|\\+)\\s+\\p{Lu}|${NOTE_NAME}(?:\\s*,\\s*(?:(?:and|or|&|\\+)\\s+)?${NOTE_NAME}|\\s*(?:&|\\+|and|or)\\s+${NOTE_NAME})+\\s*${NOTE_DELIM}(?:\\s|$))`, 'u');
-function withoutLeadingGreeting(note, firstName) {
-  const text = String(note || '');
-  const name = String(firstName || '').trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const addressee = name ? `(?:there|${name})` : 'there';
-  const greeting = new RegExp(
-    `^${NOTE_GREETING_WORD}(?:(?:\\s+${addressee})?(?:\\s*${NOTE_DELIM}+(?:\\s+|$)|\\s*$)|\\s+${addressee}\\s+)`,
-    'iu',
-  );
-  const stripped = text.replace(greeting, '');
-  if (stripped !== text && NOTE_CONTINUED_SALUTATION_RE.test(stripped)) return text;
-  return stripped;
-}
-
 async function renderCustomMovedBody({ firstName, serviceType, date, window, customMessage, rescheduleUrl, serviceId }) {
   const { REQUIRED_TEMPLATE_PLACEHOLDERS } = require('../routes/admin-sms-templates');
   return renderSmsTemplate(CUSTOM_TEMPLATE_KEY, {
     first_name: firstName || 'there',
-    custom_message: withoutLeadingGreeting(customMessage, firstName) || CUSTOM_DEFAULT_MESSAGE,
+    custom_message: customMessage,
     service_type: (serviceType || 'service').toLowerCase(),
     new_option: customerArrivalOption(date, window),
     link_clause: customLinkClause(rescheduleUrl),
