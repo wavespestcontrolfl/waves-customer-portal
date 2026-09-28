@@ -576,9 +576,16 @@ describe('CustomersPageV2 workflow state', () => {
 
     // The profile, its draft, and the URL all stay exactly as they were —
     // no unmount/remount round trip through a blank customerId.
-    expect(window.location.search).toBe('?customerId=customer-a');
+    await waitFor(() => expect(window.location.search).toBe('?customerId=customer-a'));
     expect(screen.getByTestId('customer-profile')).toHaveTextContent('customer-a');
     expect(screen.getByTestId('draft-open')).toHaveTextContent('true');
+
+    // The decline stepped forward rather than overwriting the entry it popped
+    // to, so a later confirmed Back still reaches the directory.
+    confirmSpy.mockReturnValue(true);
+    act(() => { window.history.back(); });
+    await waitFor(() => expect(window.location.search).toBe(''));
+    expect(window.location.pathname).toBe('/admin/customers');
   });
 
   it('lets browser Back through once the draft discard is confirmed', async () => {
@@ -672,6 +679,22 @@ describe('CustomersPageV2 workflow state', () => {
     confirmSpy.mockReturnValue(true);
     fireEvent.click(screen.getByRole('link', { name: 'Leave to Dashboard' }));
     expect(confirmSpy).toHaveBeenCalledTimes(2);
+    expect(linkClicks).toHaveBeenCalledOnce();
+  });
+
+  it('does not prompt for a link to the page already open', async () => {
+    vi.stubGlobal('fetch', vi.fn((url) => String(url).includes('/admin/customers?') ? response(list) : response({})));
+    window.history.replaceState({ idx: 0 }, '', '/admin/customers');
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    const linkClicks = vi.fn();
+
+    render(<MemoryRouter initialEntries={['/admin/customers']}>
+      <a href="/admin/customers" onClick={(e) => { e.preventDefault(); linkClicks(); }}>Customers</a>
+      <CustomersPageV2 />
+    </MemoryRouter>);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open queue draft' }));
+    fireEvent.click(screen.getByRole('link', { name: 'Customers' }));
+    expect(confirmSpy).not.toHaveBeenCalled();
     expect(linkClicks).toHaveBeenCalledOnce();
   });
 

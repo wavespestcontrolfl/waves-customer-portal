@@ -1907,41 +1907,51 @@ export default function CustomersPageV2() {
   const hasOpenDraft = () => draftActiveRef.current.profile || draftActiveRef.current.queue;
   const handleProfileDraftActiveChange = (active) => { draftActiveRef.current.profile = active; };
   const handleQueueDraftActiveChange = (active) => { draftActiveRef.current.queue = active; };
-  // Kept in sync on every settled render so a later popstate can restore
-  // exactly the URL the draft was open on.
-  const currentUrlRef = useRef(`${location.pathname}${location.search}`);
+  // BrowserRouter stamps an index on each history entry. Kept in sync on
+  // every settled render so a declined Back/Forward can step back to the
+  // draft's own entry instead of overwriting the one it popped to.
+  const entryIndexRef = useRef(window.history.state?.idx);
   useEffect(() => {
-    currentUrlRef.current = `${location.pathname}${location.search}`;
-  }, [location.pathname, location.search]);
+    entryIndexRef.current = window.history.state?.idx;
+  }, [location.key]);
   useEffect(() => {
-    const guardHistory = () => {
-      if (!hasOpenDraft() || confirmDiscardDraft()) return;
-      // Declined: the browser already popped to the new entry before this
-      // event fired — put the draft's own URL back on top rather than a new
-      // history-manipulation mechanism (minimal, scoped to a live draft).
-      navigate(currentUrlRef.current, { replace: true });
+    // Same index-restore pattern as EstimateToolViewV2's unsaved-draft guard:
+    // a capture-phase listener runs before the router's own popstate
+    // handler, so a declined pop is undone before the draft can unmount.
+    let restoring = false;
+    const guardHistory = (event) => {
+      if (restoring) { restoring = false; event.stopImmediatePropagation(); return; }
+      const entryIndex = entryIndexRef.current;
+      const nextIndex = event.state?.idx;
+      if (!hasOpenDraft() || !Number.isInteger(entryIndex) || !Number.isInteger(nextIndex) || entryIndex === nextIndex) return;
+      if (confirmDiscardDraft()) return;
+      event.stopImmediatePropagation();
+      restoring = true;
+      window.history.go(entryIndex - nextIndex);
     };
     // Same-document navigation via a real <a href> (react-router's <Link>,
     // e.g. AdminLayoutV2's sidebar/tab bar) never fires 'popstate' at all —
     // it's a push, not a pop — so guardHistory alone misses it. Same
-    // capture-phase anchor-click pattern as EstimateToolViewV2's own
-    // unsaved-draft guard (guardLink).
+    // capture-phase anchor-click pattern as EstimateToolViewV2 (guardLink),
+    // skipping a link to the page already open, which discards nothing.
     const guardLink = (event) => {
       if (!hasOpenDraft()) return;
       const link = event.target.closest?.("a[href]");
       if (!link || link.target === "_blank" || event.metaKey || event.ctrlKey || link.hash) return;
+      if (link.origin === window.location.origin
+        && `${link.pathname}${link.search}` === `${window.location.pathname}${window.location.search}`) return;
       if (!confirmDiscardDraft()) {
         event.preventDefault();
         event.stopPropagation();
       }
     };
-    window.addEventListener("popstate", guardHistory);
+    window.addEventListener("popstate", guardHistory, true);
     document.addEventListener("click", guardLink, true);
     return () => {
-      window.removeEventListener("popstate", guardHistory);
+      window.removeEventListener("popstate", guardHistory, true);
       document.removeEventListener("click", guardLink, true);
     };
-  }, [navigate]);
+  }, []);
 
   function loadCustomers(p) {
     const pg = p || page;
