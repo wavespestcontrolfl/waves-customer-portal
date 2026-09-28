@@ -525,21 +525,31 @@ class AutonomousRunner {
       return finalize(run, t0, { outcome: 'failed', failure_message: 'agent-dispatcher unavailable' });
     }
     const t3 = Date.now();
+    // W1 in-loop self-lint options: gate 3c's own derivation, so the
+    // writer's lint and the authoritative gate can never diverge. A refresh
+    // needs gate 3c's async live-page hydration too (live domains, the
+    // protected metaTitle, the live meta, the prior body), run here before
+    // the session. Without it refreshes had no in-loop lint at all, so every
+    // mechanical miss (brand token, disallowed link, meta length or phone
+    // token, CTA wording) parked the run at gate 3c instead of costing a
+    // redraft. A hydration failure only disarms the lint; gate 3c re-derives
+    // and stays fail-closed.
+    // Kill switch (house rule: every lane keeps one): default ON; set
+    // AUTONOMOUS_WRITER_SELF_LINT=false to disarm the in-loop lint — the
+    // authoritative run-level gates are untouched either way.
+    let selfLintOptions = null;
+    if (envBool('AUTONOMOUS_WRITER_SELF_LINT', true)) {
+      selfLintOptions = brief.action_type === 'refresh_existing_page'
+        ? await this._deriveGuardrailOptions(opp, brief).catch((err) => {
+          logger.warn(`[autonomous-runner] refresh self-lint options unavailable (${err.message}) — writer runs without the in-loop lint; gate 3c stays authoritative`);
+          return null;
+        })
+        : deriveSyncGuardrailOptions(opp, brief);
+    }
     const dispatchOptions = {
       dryRun,
       sessionTimeoutMs: agentSessionTimeoutMs(run.action_type, brief),
-      // W1 in-loop self-lint options — the SAME sync derivation gate 3c
-      // builds on (guardrail-options.js), so the writer's lint and the
-      // authoritative gate can never diverge. Refresh briefs are excluded:
-      // their guard options need the async live-page hydration (prior body,
-      // live meta) the in-loop lint deliberately skips; gate 3c covers them
-      // unchanged.
-      // Kill switch (house rule: every lane keeps one): default ON; set
-      // AUTONOMOUS_WRITER_SELF_LINT=false to disarm the in-loop lint — the
-      // authoritative run-level gates are untouched either way.
-      selfLintOptions: (brief.action_type === 'refresh_existing_page' || !envBool('AUTONOMOUS_WRITER_SELF_LINT', true))
-        ? null
-        : deriveSyncGuardrailOptions(opp, brief),
+      selfLintOptions,
     };
     const dispatchOnce = () => dispatcher.runWithBrief(brief, dispatchOptions).catch((err) => ({
       ok: false, reason: `dispatch_threw:${err.message}`,
