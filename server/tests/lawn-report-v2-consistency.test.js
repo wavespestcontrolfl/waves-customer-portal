@@ -359,6 +359,11 @@ describe('aftercare verdict fixture table (PR #5033 findings)', () => {
       .map((question) => ask(question)), (answers) => {
       for (const answer of answers) expect(answer).toMatch(CONFIRM);
     }],
+    // PR #5258 round 1.
+    ['P1 system-subject activation requests carry the aftercare task', () => ['Can the sprinklers be turned back on?', 'Should the irrigation stay off?', 'When can watering be resumed?', 'Can my sprinklers run tonight?', 'Can the irrigation be reduced?']
+      .map((question) => ask(question)), (answers) => {
+      for (const answer of answers) expect(answer).toMatch(CONFIRM);
+    }],
   ])('%s', async (_finding, run, check) => check(await run()));
 });
 

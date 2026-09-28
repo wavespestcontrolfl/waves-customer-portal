@@ -402,6 +402,37 @@ describe('watering questions answer with the weekly plan when the report carries
     }
   });
 
+  test('controller and cycle directives count as watering recommendations under a restriction (PR #5258 P1)', () => {
+    const data = {
+      ...withAftercare(HELD, 'snapshot'),
+      lawnAssessment: {
+        snapshot: {},
+        recommendationCards: ['Run each zone for 20 minutes.', 'Add another cycle this week.', 'Resume the normal schedule tomorrow.', 'Keep mowing at 3.5 inches.']
+          .map((customerCopy) => ({ customerCopy })),
+      },
+    };
+    const answer = answerServiceReportQuestion({ question: 'What should I do next?', data });
+    expect(answer).not.toMatch(/each zone|another cycle|normal schedule/);
+    expect(answer).toContain('Keep mowing at 3.5 inches.');
+    // A pest's life cycle is not a watering directive.
+    const pest = { ...withAftercare(HELD, 'recommendation'), recommendations: ['A second visit breaks the flea life cycle.'] };
+    expect(answerServiceReportQuestion({ question: 'What should I do next?', data: pest })).toContain('flea life cycle');
+  });
+
+  test.each([
+    ['What can we do to move the appointment?', 'next_visit'],
+    ['What action did you take after you spotted fungus?', 'findings'],
+    ['Any action needed for what you spotted?', 'next_steps'],
+  ])('"%s" routes to %s (PR #5258 P2)', (question, topic) => {
+    const data = withAftercare(REVIEW, 'none');
+    expect(routeServiceReportQuestion({ question, data, nextAppointment: { scheduled_date: '2026-10-05' } }).topic).toBe(topic);
+  });
+
+  test.each(['Is the irrigation meter broken?', 'What caused the irrigation leak?'])('incidental irrigation noun "%s" never gets the re-entry answer (PR #5258 P2)', (question) => {
+    const data = { pressureIndex: null, dynamicContext: {}, reportV2: { water: { weekPlan: null } } };
+    expect(routeServiceReportQuestion({ question, data }).topic).not.toBe('reentry');
+  });
+
   test('watering recommendations still answer when the aftercare restricts nothing', () => {
     for (const source of ['snapshot', 'recommendation']) {
       const answer = answerServiceReportQuestion({ question: 'What should I do next?', data: withAftercare(null, source) });
