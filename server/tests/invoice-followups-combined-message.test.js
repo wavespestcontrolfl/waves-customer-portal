@@ -65,6 +65,7 @@ const invoiceHelpers = require('../services/invoice-helpers');
 const { gates } = require('../config/feature-gates');
 const StripeService = require('../services/stripe');
 const { sendMicrodepositVerificationEmail } = require('../services/microdeposit-verification-email');
+const { shortenOrPassthrough } = require('../services/short-url');
 const { runPending } = require('../services/invoice-followups');
 
 // Wednesday 2026-08-05 10:16 AM ET, inside the Tue–Fri send window.
@@ -98,12 +99,22 @@ beforeEach(() => {
   buildPayBalanceLink.mockResolvedValue({
     url: 'https://portal.wavespestcontrol.com/pay/combined',
     coveredInvoiceIds: ['inv-A', 'inv-B'],
+    // The pay page's OWN reported balance — total_due is now derived from
+    // THIS, not a separately-summed invoiceAmountDue() total (Claude
+    // fallback-audit P1). 150 (inv-A) + 80 (inv-B: 80.5 total − 0.5
+    // credit_applied) = 230.00, matching the two-invoice group's default.
+    balance: { total: 230, count: 2 },
   });
   smsTemplatesRouter.getTemplate.mockResolvedValue('rendered sms body');
   sendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted' });
   billingEmailRecipient.mockResolvedValue({ recipient: { name: 'Taylor', email: 'taylor@example.com' }, to: 'taylor@example.com' });
   EmailTemplateLibrary.sendTemplate.mockResolvedValue({ sent: true, message: {} });
   billingEmailSendOutcome.mockImplementation(async (result) => ({ ok: !!result.sent }));
+  // Reset to the default pass-through — jest.clearAllMocks() clears
+  // mock.calls but NOT a mockImplementation a prior test installed (e.g.
+  // the individual-fallback failure test below), so every test that
+  // customizes this must be able to rely on a clean slate here too.
+  shortenOrPassthrough.mockImplementation(async (url) => url);
 });
 afterEach(() => {
   jest.useRealTimers();
@@ -372,7 +383,9 @@ describe('gate on: a customer with 2 due rows gets ONE combined message', () => 
         invoiceRow({ id: invIdB, customer_id: '33333333-3333-3333-3333-333333333333' })],
       customers: [{ id: '33333333-3333-3333-3333-333333333333', first_name: 'Taylor', phone: '+19410000000', deleted_at: null }],
     });
-    buildPayBalanceLink.mockResolvedValue({ url: 'https://portal.wavespestcontrol.com/pay/combined', coveredInvoiceIds: [invIdA, invIdB] });
+    buildPayBalanceLink.mockResolvedValue({
+      url: 'https://portal.wavespestcontrol.com/pay/combined', coveredInvoiceIds: [invIdA, invIdB], balance: { total: 200, count: 2 },
+    });
     await runPending();
     const smsCall = ContactLedger.recordContact.mock.calls.find((c) => c[0].channel === 'sms')[0];
     expect(smsCall.idempotencyKey.length).toBeLessThanOrEqual(120);
@@ -659,7 +672,7 @@ describe('gate on: a customer with 2 due rows gets ONE combined message', () => 
       invoices: [invoiceRow({ id: 'inv-A' }), invoiceRow({ id: 'inv-B' }), invoiceRow({ id: 'inv-C' })],
     });
     buildPayBalanceLink.mockResolvedValue({
-      url: 'https://portal.wavespestcontrol.com/pay/combined', coveredInvoiceIds: ['inv-A', 'inv-C'],
+      url: 'https://portal.wavespestcontrol.com/pay/combined', coveredInvoiceIds: ['inv-A', 'inv-C'], balance: { total: 200, count: 2 },
     });
     const result = await runPending();
     expect(result).toEqual({ sent: 1, skipped: 0 });
@@ -689,7 +702,7 @@ describe('gate on: a customer with 2 due rows gets ONE combined message', () => 
     buildPayBalanceLink.mockResolvedValue({ url: 'https://portal.wavespestcontrol.com/pay/combined', coveredInvoiceIds: ['inv-A'] });
     // inv-B's individual fireTouch throws deep inside (shortenOrPassthrough,
     // uncaught within fireTouch itself) — inv-A must still be attempted.
-    const { shortenOrPassthrough } = require('../services/short-url');
+    // (beforeEach restores the default pass-through for every other test.)
     shortenOrPassthrough.mockImplementation(async (url, { entityId }) => {
       if (entityId === 'inv-B') throw new Error('short-url service unavailable');
       return url;
@@ -737,5 +750,43 @@ describe('gate on: a customer with 2 due rows gets ONE combined message', () => 
     expect(invoiceHelpers.selfPayAtDispatchMany).toHaveBeenCalledWith(
       expect.arrayContaining(['inv-A', 'inv-B']), expect.anything(),
     );
+  });
+
+  // Claude fallback-audit P1 (Codex was over its usage limit for this
+  // round): total_due must be the pay link's OWN reported balance, not a
+  // separately-summed invoiceAmountDue() total — the two can diverge by a
+  // cent on rounding order even over the IDENTICAL invoice set, and the
+  // message must never quote an amount the linked page itself would not
+  // also show.
+  test('total_due is taken from the pay link\'s own reported balance, not re-derived from invoiceAmountDue — even when the two would disagree', async () => {
+    const { invA, invB } = twoInvoiceSetup();
+    // invoiceAmountDue would sum these to 230.00 (150 + 80), but the pay
+    // page's own cents-based balance disagrees by a cent — simulating a
+    // real per-invoice rounding-order divergence.
+    buildPayBalanceLink.mockResolvedValue({
+      url: 'https://portal.wavespestcontrol.com/pay/combined',
+      coveredInvoiceIds: ['inv-A', 'inv-B'],
+      balance: { total: 230.01, count: 2 },
+    });
+    await runPending();
+    const smsVars = smsTemplatesRouter.getTemplate.mock.calls[0][1];
+    expect(smsVars.total_due).toBe('230.01'); // the pay link's figure, not the independently-summed 230.00
+    const emailPayload = EmailTemplateLibrary.sendTemplate.mock.calls[0][0].payload;
+    expect(emailPayload.total_due).toBe('$230.01');
+    void invA; void invB;
+  });
+
+  test('the combined send never quotes an amount when the pay link reports no positive balance — falls back to individual touches', async () => {
+    const { seqTable } = twoInvoiceSetup();
+    buildPayBalanceLink.mockResolvedValue({
+      url: 'https://portal.wavespestcontrol.com/pay/combined',
+      coveredInvoiceIds: ['inv-A', 'inv-B'],
+      balance: { total: 0, count: 2 },
+    });
+    const result = await runPending();
+    expect(result).toEqual({ sent: 1, skipped: 0 });
+    expect(smsTemplatesRouter.getTemplate).not.toHaveBeenCalledWith('invoice_followup_combined_3day', expect.anything(), expect.anything());
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(2); // individual fallback
+    expect(seqTable.rows.get('seq-A').step_index).toBe(1);
   });
 });

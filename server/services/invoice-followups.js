@@ -1585,12 +1585,18 @@ async function fireCombinedTouchClaimed(rows) {
   // exact match falls back to firing every included invoice through its
   // own per-invoice touch instead, same as the single-survivor fallback
   // above (Codex pre-push r2 + r4).
-  const payUrl = await resolveCombinedPayLink(customer, includedIds);
+  const { payUrl, totalDue: linkTotalDue } = await resolveCombinedPayLink(customer, includedIds);
   if (!payUrl) {
     logger.info(`[invoice-followups] no pay link covers every invoice in the combined touch for customer ${customerId} — falling back to ${included.length} individual touches`);
     await fireIndividualTouchesForCombined(included, rows);
     return;
   }
+  // The pay link's OWN reported balance, not a separately-derived sum
+  // (Claude fallback-audit P1): this lane's own dollar-based total and the
+  // pay page's cents-based one can disagree by a cent on rounding order
+  // even over the identical invoice set, and the message must never quote
+  // an amount the linked page itself would not also show.
+  const totalDue = linkTotalDue.toFixed(2);
 
   const channelSelection = await resolveCombinedChannelPolicy(customer);
   if (!channelSelection) return;
@@ -1646,9 +1652,6 @@ async function fireCombinedTouchClaimed(rows) {
     await fireIndividualTouchesForCombined(included, rows);
     return;
   }
-
-  const totalDueNum = included.reduce((sum, inv) => sum + invoiceAmountDue(inv), 0);
-  const totalDue = totalDueNum.toFixed(2);
 
   // LAST-MINUTE re-verification, immediately before dispatch (Codex
   // pre-push r4): the guard pass in resolveCombinedIncludedInvoices ran
@@ -1885,7 +1888,18 @@ async function fireIndividualTouchesForCombined(included, rows) {
  * (GATE_PAY_INCLUDE_BALANCE on, no payer/incomplete-read degradation, no
  * sibling excluded for its own reason, and no OTHER open invoice not due
  * today riding along and inflating the page's total past what the message
- * promised). Returns null on anything short of an exact match.
+ * promised). Returns { payUrl: null, totalDue: null } on anything short of
+ * an exact match.
+ *
+ * totalDue is buildPayBalanceLink's OWN reported balance (pay-combined.js's
+ * amountDueCents, summed in cents per invoice then divided back to
+ * dollars) — the SAME figure the linked page will display and charge —
+ * not re-derived here. Two independently-computed totals (this lane's own
+ * dollar-based sum vs. the pay page's cents-based one) can diverge by a
+ * cent on rounding order even when they agree on every input invoice, and
+ * the caller must never quote a total the pay link itself would not also
+ * show (Claude fallback-audit P1, AGENTS.md single-source-of-truth for
+ * money math).
  */
 async function resolveCombinedPayLink(customer, includedIds) {
   const { buildPayBalanceLink } = require('./composer-customer-links');
@@ -1894,10 +1908,13 @@ async function resolveCombinedPayLink(customer, includedIds) {
     const coveredIds = new Set((balanceLink?.coveredInvoiceIds || []).map(String));
     const matchesIncludedSetExactly = coveredIds.size === includedIds.length
       && includedIds.every((id) => coveredIds.has(String(id)));
-    return matchesIncludedSetExactly ? (balanceLink?.url || null) : null;
+    if (!matchesIncludedSetExactly || !balanceLink?.url || !(balanceLink?.balance?.total > 0)) {
+      return { payUrl: null, totalDue: null };
+    }
+    return { payUrl: balanceLink.url, totalDue: balanceLink.balance.total };
   } catch (err) {
     logger.warn(`[invoice-followups] combined pay-balance link failed for customer ${customer.id}: ${err.message}`);
-    return null;
+    return { payUrl: null, totalDue: null };
   }
 }
 
