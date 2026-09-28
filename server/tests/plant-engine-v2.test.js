@@ -1247,6 +1247,70 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
       });
     });
   });
+
+  describe('Codex #5186 round 3 regressions', () => {
+    const cand = (slug, confidence, extra = {}) => {
+      const entry = catalog.getEntry(slug);
+      return {
+        slug, entry, confidence, verified: true, checked: true, uncovered: false, cuesVisible: [1], cuesNotVisible: [], offCatalogName: null, groupId: entry.group, ...extra,
+      };
+    };
+    const OK = { usable: true, issue: 'none' };
+
+    test('finding 1: a displayed workup possibility carries the catalog safety line and flags (a regulated pest keeps its warning)', () => {
+      const block = engine.possibilityBlockFor(possibility('fixture-regulated-pest', 0.9, [1, 2]));
+      const entry = catalog.getEntry('fixture-regulated-pest');
+      expect(block.safety_line).toBe(entry.safety_line);
+      expect(block.safety).toEqual(entry.safety);
+      expect(block.risk).toBe(entry.risk);
+    });
+
+    test('finding 2: an identity whose look-alike a photo cannot settle never reads pretty_sure, and its next photo is that pair\'s guidance', () => {
+      const paspalum = catalog.getEntry('fixture-seashore-paspalum');
+      expect(engine._test.hasPhotoVetoLookAlike(paspalum)).toBe(true);
+      expect(engine._test.hasPhotoVetoLookAlike(catalog.getEntry('fixture-bahia'))).toBe(false);
+      expect(engine.identityEntryLevelAnswer(cand('fixture-seashore-paspalum', 0.95)).wording).toBe('likely');
+      expect(engine.identityEntryLevelAnswer(cand('fixture-bahia', 0.95)).wording).toBe('pretty_sure');
+      const built = engine.buildIdentityResult([cand('fixture-seashore-paspalum', 0.95)], { subject: 'lawn', currentMonth: 6 });
+      expect(built.answer).toMatchObject({ level: 'entry', wording: 'likely' });
+      expect(built.next_photo).toEqual({ ask: paspalum.look_alikes[0].next_photo, why: paspalum.look_alikes[0].difference, photo_can_confirm: false });
+    });
+
+    test('finding 3: several unapproved candidates of one group collapse into one masked row with no locality badge', () => {
+      const draftA = cand('fixture-zoysia-draft', 0.5);
+      const draftB = cand('fixture-zoysia-draft', 0.4, { confidence: 0.4 });
+      const rows = engine._test.plantCandidatesBlockFor([draftA, draftB, cand('fixture-bahia', 0.3)], 6);
+      expect(rows).toEqual([
+        { slug: null, common_name: 'a turfgrass', scientific_name: null, strength: 'possible', local: null },
+        { slug: 'fixture-bahia', common_name: 'Fixture Bahia', scientific_name: 'Paspalum fixturicus', strength: 'possible', local: 'common_here_now' },
+      ]);
+    });
+
+    test('finding 4: a usable photo read of multiple_subjects still blocks naming (symptom / unknown, needs_more_evidence) while the workup keeps its possibilities', () => {
+      const quality = { usable: true, issue: 'multiple_subjects' };
+      expect(engine._test.namingGateFor(quality)).toEqual({ unusable: false, blocked: true });
+      const large = possibility('fixture-large-patch', 0.9, [1]);
+      const workup = engine.buildWorkup({
+        subject: 'lawn', possibilities: [large], observedTerms: ['browning'], currentMonth: 1, chips: {}, context: {}, photosCount: 2, quality,
+      });
+      expect(workup.answer.level).toBe('symptom');
+      expect(workup.tier).toBe('needs_more_evidence');
+      expect(workup.possibilities.map((p) => p.slug)).toEqual(['fixture-large-patch']);
+      const identity = engine.buildIdentityResult([cand('fixture-bahia', 0.95)], { subject: 'lawn', currentMonth: 6, quality });
+      expect(identity.answer.level).not.toBe('entry');
+      expect(identity.tier).toBe('needs_more_evidence');
+      // The plain usable read still names.
+      expect(engine.buildIdentityResult([cand('fixture-bahia', 0.95)], { subject: 'lawn', currentMonth: 6, quality: OK }).answer.level).toBe('entry');
+    });
+
+    test('finding 5: a plant_slug chip outside the subject\'s own host index is ignored for the condition-index host union', () => {
+      const run = (plantSlug) => ({ subject: 'palm', chips: { plant_slug: plantSlug }, indexes: { host: engine.hostIndexFor('palm') } });
+      expect(engine._test.viableHostSlugs(run('fixture-citrus'), [])).toEqual([]);
+      expect(engine._test.viableHostSlugs(run('fixture-queen-palm'), [])).toEqual(['fixture-queen-palm']);
+      // The palm index admits the REAL catalog's `sago-palm` slug by design; the fixture's own sago lives in shrubs-trees, so it is outside the palm index here.
+      expect(engine._test.viableHostSlugs(run('fixture-sago-palm'), [])).toEqual([]);
+    });
+  });
 });
 
 describe('plant-engine — schema-invalid answers flip their ledger row (Codex #5186 round 2, finding 7)', () => {

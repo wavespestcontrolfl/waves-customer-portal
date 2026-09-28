@@ -166,6 +166,18 @@ const FIXTURE = buildFixtureCatalog({
       service: { line: 'tree_shrub', key: null, label: 'Tree & Shrub Care', inspection_first: false, referral: null }, urgency: 'low',
       plant: { type: 'cycad', id_cues: ['Stiff glossy feather-like leaflets'], common_problems: ['fixture-manganese-deficiency-palm'] },
     }),
+    // A turfgrass whose only look-alike a photo cannot settle (Codex #5186
+    // r3 P1): the catalog's own veto on `pretty_sure`.
+    ownerApproved({
+      slug: 'fixture-seashore-paspalum', common_name: 'Fixture Seashore Paspalum', scientific_name: 'Paspalum vaginatum-fixturicus', kind: 'turfgrass',
+      group: 'turfgrasses', subgroup: null, verdict: 'harmless', role: 'lawn_grass', risk: 'low', action: 'monitor',
+      safety_line: null, safety: COMMON_SAFETY, range: 'occasional', active_months: ALL_MONTHS, peak_months: [5, 6],
+      traits: ['Blue-green pointed blades'],
+      look_alikes: [{ slug: 'fixture-bahia', difference: 'Both spread by runners and rhizomes; only growth over a week and the site tell them apart.', next_photo: 'Not reliably separable from a photo — a technician checks the site and growth pattern.', photo_can_confirm: false }],
+      copy: { what_it_means: 'A fixture paspalum.', fact: 'Fixture paspalum fact.' }, links: {},
+      service: { line: 'lawn', key: null, label: 'Lawn Care', inspection_first: false, referral: null }, urgency: 'low',
+      plant: { type: 'turf', id_cues: ['Blue-green blades tapering to a point'], common_problems: ['fixture-large-patch'] },
+    }),
     // Second turfgrass so a single lawn slot can flip between two catalog
     // candidates (per-slot self-contradiction, Codex #5186 r1 finding 14).
     ownerApproved({

@@ -237,6 +237,19 @@ are grouped under "Codex #5186 round 1 regressions" in the same file.
   answering model**; **a schema-invalid answer flips its ledger row**
   (`rejectCall`, reason `schema_invalid:<call>`).
 
+## Round 3 hardening (Codex #5186 r3)
+
+- Displayed workup possibilities carry `safety_line`, `safety` and `risk`
+  (a workup has no separate `entry` payload).
+- An identity whose catalog look-alike is `photo_can_confirm: false` never
+  reads `pretty_sure` (`hasPhotoVetoLookAlike`); its next-photo card shows
+  that pair's technician / time-based guidance.
+- Several unapproved candidates of one group collapse into one masked row
+  in the identity candidates block, with no locality badge.
+- A `multiple_subjects` photo read blocks naming even when `usable: true`.
+- A `plant_slug` chip counts toward the condition-index host union only
+  when it names a plant in the subject's own host index.
+
 ## What L4 must do
 
 - Wire `identifyPlantV2` into `POST /api/photo-id/lawn` / `/tree_shrub`

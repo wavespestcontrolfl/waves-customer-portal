@@ -384,9 +384,17 @@ function verifyCoversAll(verifyJson, catalogCandidates) {
  * An `uncovered` top (an answered verify leg skipped it, and no checked
  * escalation score replaced it) is never named (Codex #5186 r1 P1).
  */
+/** The catalog's own veto on a photo identity (Codex #5186 r3 P1): an
+ * entry with a look-alike that `photo_can_confirm: false` cannot be
+ * separated from it by a photo, so it never reads `pretty_sure` — the pair's
+ * technician or time-based guidance is what `plantNextPhotoFor` then shows. */
+function hasPhotoVetoLookAlike(entry) {
+  return (entry.look_alikes || []).some((la) => la.photo_can_confirm === false);
+}
+
 function identityEntryLevelAnswer(top, { blockPrettySure = false, disagreed = false } = {}) {
   if (disagreed || !top?.entry || top.uncovered || !isApproved(top.entry)) return null;
-  const blocked = !top.verified || blockPrettySure;
+  const blocked = !top.verified || blockPrettySure || hasPhotoVetoLookAlike(top.entry);
   if (top.confidence >= PRETTY_SURE_MIN && !blocked) return { wording: 'pretty_sure', entry: top.entry };
   if (top.confidence >= LIKELY_MIN) return { wording: 'likely', entry: top.entry };
   return null;
@@ -577,6 +585,9 @@ function possibilityBlockFor(possibility) {
     fits: visibleStringsFor(possibility),
     not_yet: notYetFor(possibility),
     local: localAnnotationsFor(entry, sig, possibility.localCtx),
+    // A workup has no separate `entry` payload, so a poison / sting /
+    // quarantine warning rides on the possibility itself (Codex #5186 r3 P1).
+    ...plantSafetyFields(entry),
     what_it_means: entry.copy?.what_it_means || null,
     verdict: entry.verdict,
     action: entry.action,
@@ -706,20 +717,32 @@ function plantEvidenceFor(candidates) {
   return { matches: pick(top.cuesVisible), still_need: pick(top.cuesNotVisible) };
 }
 
+/** The candidates block: approved entries by name; an unapproved entry is
+ * masked to its group generic, and several masked entries of one group
+ * collapse into ONE row (the highest-ranked, its locality withheld — a
+ * hidden species must not leak a badge), as the pest engine's projection
+ * does (Codex #5186 r3 P2). */
 function plantCandidatesBlockFor(candidates, currentMonth) {
-  return candidates.filter((c) => c.entry).slice(0, 3).map((c) => {
+  const rows = [];
+  const seen = new Set();
+  for (const c of candidates.filter((x) => x.entry)) {
     const approved = isApproved(c.entry);
     const group = catalog.getGroup(c.entry.group);
-    const local = c.entry.range === 'common' && Array.isArray(c.entry.active_months) && c.entry.active_months.includes(currentMonth)
-      ? 'common_here_now' : (c.entry.range === 'rare' ? 'uncommon_here' : null);
-    return {
+    const key = approved ? `entry:${c.entry.slug}` : `group:${c.entry.group}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const local = !approved ? null : (c.entry.range === 'common' && Array.isArray(c.entry.active_months) && c.entry.active_months.includes(currentMonth)
+      ? 'common_here_now' : (c.entry.range === 'rare' ? 'uncommon_here' : null));
+    rows.push({
       slug: approved ? c.entry.slug : null,
       common_name: approved ? c.entry.common_name : (group ? group.generic : null),
       scientific_name: approved ? (c.entry.scientific_name || null) : null,
       strength: c.confidence >= LINEAGE_CLIMB_MIN ? 'strong' : 'possible',
       local,
-    };
-  });
+    });
+    if (rows.length >= 3) break;
+  }
+  return rows;
 }
 
 /** The look-alike that separates two of `candidates` — the first approved
@@ -746,7 +769,11 @@ function decisiveLookAlike({
   if (disagreementPair) return lookAlikeBetween(disagreementPair);
   if (level === 'entry') {
     const top = candidates[0];
-    return (top.entry.look_alikes || []).find((l) => isApproved(catalog.getEntry(l.slug))) || null;
+    const approvedPairs = (top.entry.look_alikes || []).filter((l) => isApproved(catalog.getEntry(l.slug)));
+    // A pair a photo cannot settle is the one that capped the wording, so
+    // its technician / time-based guidance is what the customer needs first
+    // (Codex #5186 r3 P1).
+    return approvedPairs.find((l) => l.photo_can_confirm === false) || approvedPairs[0] || null;
   }
   return lookAlikeBetween(plantCandidatesSupporting(candidates, level, nodeId));
 }
@@ -782,7 +809,12 @@ function plantNextPhotoFor(answer, candidates, subject, disagreementPair = null)
  * `damage`), so nothing is named. */
 function namingGateFor(quality = {}) {
   const unusable = quality.usable === false;
-  return { unusable, blocked: unusable || quality.shows === SHOWS_CONFLICTING };
+  // `multiple_subjects` with `usable: true` is still evidence-blocking
+  // (Codex #5186 r3 P1): cues read off one plant may belong to another, so
+  // nothing is named and the tier stays needs_more_evidence — the pest
+  // engine's own rule.
+  const blocked = unusable || quality.shows === SHOWS_CONFLICTING || quality.issue === 'multiple_subjects';
+  return { unusable, blocked };
 }
 
 const UNKNOWN_IDENTITY_ANSWER = Object.freeze({
@@ -1311,7 +1343,12 @@ async function runIdentityLadder(run) {
 function viableHostSlugs(run, hostCandidates) {
   if (run.subject === 'lawn') return [];
   const slugs = hostCandidates.filter((c) => c.entry && c.confidence >= HOST_UNION_MIN).map((c) => c.slug);
-  if (run.chips.plant_slug) slugs.push(String(run.chips.plant_slug));
+  // The customer's chip counts only when it names a plant in THIS subject's
+  // own host index — a stale or tampered `plant_slug` (citrus on a palm
+  // request) must not pull another plant's problems into the workup (Codex
+  // #5186 r3 P2), the same restriction the model candidates already have.
+  const chipSlug = String(run.chips.plant_slug || '').trim();
+  if (chipSlug && run.indexes.host.some((e) => e.slug === chipSlug)) slugs.push(chipSlug);
   return [...new Set(slugs)];
 }
 
@@ -1704,6 +1741,9 @@ module.exports = {
     legFailureReason,
     legInfo,
     pestOutcomeFor,
+    viableHostSlugs,
+    hasPhotoVetoLookAlike,
+    namingGateFor,
     verifyCoversAll,
     validJson,
     callWithProvider,
