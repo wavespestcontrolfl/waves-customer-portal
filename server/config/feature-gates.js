@@ -3178,7 +3178,14 @@ const gates = {
   // Ships DARK: off unless exactly 'true'. This entry is for logGateStatus
   // only: scheduler.js's 11AM cron and services/workflows/balance-reminder.js's
   // dailyCheck()/latePaymentCheck() read GATE_BALANCE_REMINDER_LEGACY_OFF at
-  // call time.
+  // call time. latePaymentCheck() retires ONLY when GATE_DUNNING_LADDER_90
+  // is ALSO live (its Day 60/90 steps, which stamp the same at-risk tier via
+  // the shared markAtRiskForLongOverdue helper, are what actually replace
+  // it) — legacy-off with the ladder gate unset logs a warn and runs
+  // latePaymentCheck's legacy body unchanged; dailyCheck() has no such
+  // coupling. A legacy explicit-channel episode with one leg delivered and
+  // the other still pending the moment of the flip never drains (the 11:00
+  // cron was its only retrier); impact is nil (0 legacy sends in 30 days).
   balanceReminderLegacyOff: process.env.GATE_BALANCE_REMINDER_LEGACY_OFF === 'true',
 };
 
