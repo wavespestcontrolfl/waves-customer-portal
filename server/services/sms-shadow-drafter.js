@@ -499,11 +499,10 @@ function parseOpenTimesDaysFromFactsBlock(factsBlock) {
 // rechecks the wrong day. With no prose parsing available, an edited body
 // fails closed unless each pair is either fully KEPT (window text present,
 // and the day name present when the drafted reply named it) or fully
-// DROPPED (neither present); any other time-range or weekday name in the
-// edited body that the snapshot does not know also refuses. A refused
+// DROPPED (its day name and window text gone from what remains), and
+// nothing time- or day-shaped may be added beyond what the drafted reply
+// already carried outside its offers. A refused
 // reviewer edit re-drafts; a stale offer never sends.
-const TIME_RANGE_RE = /\d{1,2}:\d{2} [AP]M - \d{1,2}:\d{2} [AP]M/g;
-const WEEKDAY_RE = /\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/gi;
 function planOpenTimesRecheck({ snapshot, outgoingBody, originalBody = null }) {
   const pairs = (snapshot?.quotedWindows || []).filter((w) => w && typeof w.window === 'string' && w.window);
   if (!pairs.length) return { action: 'skip' };
@@ -516,15 +515,6 @@ function planOpenTimesRecheck({ snapshot, outgoingBody, originalBody = null }) {
     return still.length ? { action: 'recheck', quotedWindows: still } : { action: 'skip' };
   }
 
-  const knownWindows = new Set(pairs.map((w) => w.window));
-  for (const m of body.match(TIME_RANGE_RE) || []) {
-    if (!knownWindows.has(m)) return { action: 'refuse', reason: 'edited_offer_unknown_window' };
-  }
-  const knownDays = new Set(pairs.map((w) => String(w.date || '').split(',')[0].trim().toLowerCase()).filter(Boolean));
-  for (const m of body.match(WEEKDAY_RE) || []) {
-    if (!knownDays.has(m.toLowerCase())) return { action: 'refuse', reason: 'edited_offer_unknown_day' };
-  }
-
   // Pre-push audit P1: day and window must be checked as a BOUND pair, not
   // independently — "Tuesday 9-11 or Wednesday 2-4" edited to "Tuesday 2-4
   // or Wednesday 9-11" has every day and every window present. The binding
@@ -534,29 +524,55 @@ function planOpenTimesRecheck({ snapshot, outgoingBody, originalBody = null }) {
   const original = String(originalBody || '');
   const kept = [];
   let residual = body;
-  let anyNotKept = false;
+  let originalResidual = original;
+  const notKept = [];
   for (const w of pairs) {
     const day = String(w.date || '').split(',')[0].trim();
     const span = offerSpanInText(original, day, w.window);
-    if (span && body.includes(span)) { kept.push(w); residual = residual.split(span).join(' '); continue; }
-    anyNotKept = true;
+    if (span && body.includes(span)) {
+      kept.push(w);
+      residual = residual.split(span).join(' ');
+      originalResidual = originalResidual.split(span).join(' ');
+      continue;
+    }
+    notKept.push({ w, day });
   }
-  // A pair that did not survive verbatim is DROPPED only when nothing
-  // offer-like is left once the kept spans are removed — missing exact text
-  // is not proof of removal ("Tue 9–11 AM" is a rewrite, not a deletion).
-  // Anything time- or day-shaped in the residual refuses.
-  if (anyNotKept && looksLikeOfferText(residual)) return { action: 'refuse', reason: 'edited_offer_text' };
+  // (1) A pair that did not survive verbatim must be GONE: neither its
+  //     window text nor its day name (when the drafted reply named it) may
+  //     remain in the residual — a swap or a re-spaced range keeps them.
+  const lowerResidual = residual.toLowerCase();
+  for (const { w, day } of notKept) {
+    if (countQuotedWindow(residual, w.window) > 0) return { action: 'refuse', reason: 'edited_offer_text' };
+    if (day && original.toLowerCase().includes(day.toLowerCase()) && lowerResidual.includes(day.toLowerCase())) {
+      return { action: 'refuse', reason: 'edited_offer_text' };
+    }
+  }
+  // (2) Nothing offer-like may be ADDED (pre-push audit P1: an appended
+  //     "Or tomorrow 2pm?" beside intact offers): every time- or day-shaped
+  //     token left in the edited residual must already have been in the
+  //     drafted reply outside its kept offers. Missing exact text is never
+  //     proof of removal ("Tue 9–11 AM" is a rewrite), and a rewrite's own
+  //     tokens are new, so it refuses here.
+  const allowed = new Map();
+  for (const t of offerTokens(originalResidual)) allowed.set(t, (allowed.get(t) || 0) + 1);
+  for (const t of offerTokens(residual)) {
+    const n = allowed.get(t) || 0;
+    if (!n) return { action: 'refuse', reason: 'edited_offer_text' };
+    allowed.set(t, n - 1);
+  }
   return kept.length ? { action: 'recheck', quotedWindows: kept } : { action: 'skip' };
 }
 
 // Anything a customer could read as an appointment time or day: weekday
 // names or abbreviations, clock times, bare hour ranges, or relative-day
-// words. Deliberately broad — it only decides whether an EDIT that lost an
-// offer's verbatim text may be treated as a deletion, and the safe answer
-// to "not sure" is refuse.
-const OFFER_TOKEN_RE = /\b(mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun)(day|nesday|rsday|urday|sday)?\b|\b\d{1,2}(:\d{2})?\s*(a\.?m|p\.?m)\b|\b\d{1,2}(:\d{2})?\s*[-–—]\s*\d{1,2}(:\d{2})?\b|\b(today|tomorrow|tonight|morning|afternoon|evening|noon)\b/i;
+// words. Deliberately broad — it only decides what an EDIT may leave behind
+// or add, and the safe answer to "not sure" is refuse.
+const OFFER_TOKEN_RE = /\b(mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun)(day|nesday|rsday|urday|sday)?\b|\b\d{1,2}(:\d{2})?\s*(a\.?m|p\.?m)\b|\b\d{1,2}(:\d{2})?\s*[-–—]\s*\d{1,2}(:\d{2})?\b|\b(today|tomorrow|tonight|morning|afternoon|evening|noon)\b/gi;
+function offerTokens(text) {
+  return (String(text || '').match(OFFER_TOKEN_RE) || []).map((t) => t.toLowerCase().replace(/\s+/g, ' ').replace(/\./g, ''));
+}
 function looksLikeOfferText(text) {
-  return OFFER_TOKEN_RE.test(String(text || ''));
+  return offerTokens(text).length > 0;
 }
 
 // The shortest substring of `text` containing both `day` (case-insensitive)

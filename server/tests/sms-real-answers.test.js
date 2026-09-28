@@ -1312,6 +1312,24 @@ describe('planOpenTimesRecheck — what a send path rechecks given the body that
     expect(planOpenTimesRecheck({ snapshot, outgoingBody: 'Does 9-11 tomorrow work?', originalBody: original })).toEqual({ action: 'refuse', reason: 'edited_offer_text' });
   });
 
+  test('edited: a NEW offer appended beside intact offers ("Or tomorrow 2pm?") → refuse', () => {
+    const body = `${original} Or tomorrow 2pm?`;
+    expect(planOpenTimesRecheck({ snapshot, outgoingBody: body, originalBody: original })).toEqual({ action: 'refuse', reason: 'edited_offer_text' });
+    const snap = { lookup: {}, quotedWindows: [{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }] };
+    const orig = 'How about Tuesday 9:00 AM - 11:00 AM?';
+    expect(planOpenTimesRecheck({ snapshot: snap, outgoingBody: 'How about Tuesday 9:00 AM - 11:00 AM? Or Friday 2 - 4?', originalBody: orig })).toEqual({ action: 'refuse', reason: 'edited_offer_text' });
+    expect(planOpenTimesRecheck({ snapshot: snap, outgoingBody: 'How about Tuesday 9:00 AM - 11:00 AM? Or this afternoon?', originalBody: orig })).toEqual({ action: 'refuse', reason: 'edited_offer_text' });
+  });
+
+  test('edited: day/time words the drafted reply ALREADY had outside its offers are not "added" — a typo fix elsewhere still rechecks', () => {
+    const snap = { lookup: {}, quotedWindows: [{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }] };
+    const orig = 'Your visit is Friday morning. To move it, how about Tuesday 9:00 AM - 11:00 AM?';
+    const body = 'Your visit is Friday morning. To move it, how about Tuesday 9:00 AM - 11:00 AM? Thanks!';
+    expect(planOpenTimesRecheck({ snapshot: snap, outgoingBody: body, originalBody: orig })).toEqual({ action: 'recheck', quotedWindows: snap.quotedWindows });
+    // ...but mentioning Friday TWICE when the draft had it once is new text → refuse
+    expect(planOpenTimesRecheck({ snapshot: snap, outgoingBody: `${orig} Friday works too.`, originalBody: orig })).toEqual({ action: 'refuse', reason: 'edited_offer_text' });
+  });
+
   test('looksLikeOfferText: broad on purpose', () => {
     const { looksLikeOfferText } = require('../services/sms-shadow-drafter');
     for (const t of ['Tue 9–11 AM', 'thurs', '2pm', '9 - 11', 'tomorrow morning', 'Sat.', '10:30 a.m.']) expect(looksLikeOfferText(t)).toBe(true);
@@ -1346,7 +1364,7 @@ describe('planOpenTimesRecheck — what a send path rechecks given the body that
 
   test('edited: the DAY changed while the time text stayed → refuse (never rechecks the old day)', () => {
     const body = 'How about Thursday 9:00 AM - 11:00 AM or Wednesday 2:00 PM - 4:00 PM?';
-    expect(planOpenTimesRecheck({ snapshot, outgoingBody: body, originalBody: original })).toEqual({ action: 'refuse', reason: 'edited_offer_unknown_day' });
+    expect(planOpenTimesRecheck({ snapshot, outgoingBody: body, originalBody: original })).toEqual({ action: 'refuse', reason: 'edited_offer_text' });
   });
 
   test('edited: a day the snapshot knows, swapped onto the other window → refuse', () => {
@@ -1372,7 +1390,7 @@ describe('planOpenTimesRecheck — what a send path rechecks given the body that
 
   test('edited: a full time range the snapshot never offered → refuse', () => {
     const body = 'How about Tuesday 9:00 AM - 11:00 AM or Wednesday 4:00 PM - 6:00 PM?';
-    expect(planOpenTimesRecheck({ snapshot, outgoingBody: body, originalBody: original })).toEqual({ action: 'refuse', reason: 'edited_offer_unknown_window' });
+    expect(planOpenTimesRecheck({ snapshot, outgoingBody: body, originalBody: original })).toEqual({ action: 'refuse', reason: 'edited_offer_text' });
   });
 
   test('edited: when the drafted reply never named the day, the window alone decides keep vs drop', () => {
