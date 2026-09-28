@@ -91,14 +91,15 @@ describe('competitor-facts', () => {
   });
 
   test('owner autopublish list: the six approved companies under every approved spelling, nobody else (rulings 2026-09-27 D2 + 2026-09-28)', () => {
-    for (const name of ['Orkin', 'Terminix', 'HomeTeam', 'HomeTeam Pest Defense', 'TAEXX', 'Turner Pest Control', 'Massey', 'Massey Services', 'TruGreen']) {
+    for (const name of ['Orkin', 'Terminix', 'HomeTeam', 'HomeTeam Pest Defense', 'TAEXX', 'Turner', 'Turner Pest Control', 'Massey', 'Massey Services', 'TruGreen']) {
       expect(cf.isOwnerApprovedForAutopublish(name)).toBe(true);
     }
     for (const name of ['Truly Nolen', 'Aptive', 'Keller\'s Pest Control', 'Hulett']) {
       expect(cf.isOwnerApprovedForAutopublish(name)).toBe(false);
     }
     expect(cf.findBusinessMentions('HomeTeam installs TAEXX tubes.').map((m) => m.name)).toEqual(['HomeTeam Pest Defense']);
-    // Lowercase "hometeam" / "home team" stay ordinary prose.
-    expect(cf.findBusinessMentions('Cheer for the home team; hometeam spirit.')).toEqual([]);
+    // Lowercase "hometeam" / "home team" / "turner" stay ordinary prose.
+    expect(cf.findBusinessMentions('Cheer for the home team; hometeam spirit; a pancake turner.')).toEqual([]);
+    expect(cf.findBusinessMentions('Turner runs its plan under TurnerGuard.').map((m) => m.name)).toEqual(['Turner Pest Control']);
   });
 });

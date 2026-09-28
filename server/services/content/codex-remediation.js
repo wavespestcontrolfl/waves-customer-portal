@@ -1317,9 +1317,9 @@ async function validateAutonomousRunGates(fixedMarkdown, run, deps = {}) {
       if (!namedCompetitorAutopublishEligible(strictBrief)) {
         return { ok: false, reason: 'fix introduces named-competitor content under run context (requires human sign-off)' };
       }
-      // Owner list + fact rules on the FIXED body (owner rulings 2026-09-27
-      // D2 + 2026-09-28) — a fix must not add an unapproved name or an
-      // unverified "does not offer" claim to an unattended PR.
+      // Owner list on the FIXED body (owner rulings 2026-09-27 D2 +
+      // 2026-09-28) — a fix must not add an unapproved name to an
+      // unattended PR.
       const list = namedCompetitorListVerdict(comparisonResult);
       if (!list.ok) {
         return { ok: false, reason: `fix breaks the named-competitor owner list (${list.reason}${list.offList ? `: ${list.offList.join(', ')}` : ''})` };

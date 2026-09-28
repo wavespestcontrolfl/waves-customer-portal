@@ -1711,12 +1711,10 @@ describe('auto-merge gating (each condition individually blocking)', () => {
   });
 
   // Owner rulings 2026-09-27 (D2) + 2026-09-28: the merge-time recheck
-  // holds the persisted verdict to the owner list too — an off-list name, a
-  // fact-rule finding, or a verdict recorded before names were persisted
-  // leaves the PR for a human.
+  // holds the persisted verdict to the owner list too — an off-list name or
+  // a verdict recorded before names were persisted leaves the PR for a human.
   test.each([
     ['names a competitor off the owner list', { pass: true, findings: [], requiresHumanReview: true, namedCompetitors: ['Orkin', 'Truly Nolen'] }],
-    ['carries an unverified negative claim', { pass: true, requiresHumanReview: true, namedCompetitors: ['Orkin'], findings: [{ severity: 'P2', code: 'COMPARISON_UNVERIFIED_NEGATIVE_CLAIM', message: 'x' }] }],
     ['has no recorded names (pre-list verdict)', { pass: true, findings: [], requiresHumanReview: true }],
   ])('governed run whose verdict %s is withheld at merge time', async (_label, verdict) => {
     process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';

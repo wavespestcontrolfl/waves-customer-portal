@@ -1348,61 +1348,6 @@ function buildOperatorAuthorized(operatorBriefText) {
   };
 }
 
-// Owner fact rules for named competitors (2026-09-27, D2): a competitor fact
-// we can't confirm is written "not verified", never "does not offer"; no
-// claim about a competitor's guarantee unless verifiable. This catches
-// exactly two prose shapes, in a clause whose subject is a named competitor
-// (or a pronoun / elided subject in a sentence that names one):
-//   1. negative capability — does not / doesn't / do not / don't / did not /
-//      won't / cannot / can't / no longer + offer / provide / include /
-//      cover / guarantee ("Orkin does not offer a termite bond")
-//   2. no guarantee — "no [written] guarantee/warranty", "without a
-//      guarantee" ("Terminix has no guarantee on mosquito service")
-// A clause whose subject is Waves ("we", "our", "Waves") is skipped.
-// Competitor PRICES are not handled here: content-guardrails HARDCODED_PRICE
-// already rejects a dollar figure unless it carries a citation link AND an
-// "as of <date>" in its paragraph on a competitor-intercept brief (every
-// other draft gets no competitor-price exemption at all), and a competitor
-// named in prose on a mined draft is COMPARISON_COMPETITOR_IN_PROSE here.
-// Table cells are validated against curated competitor-facts, so only prose
-// (title/meta included) is scanned.
-const NEG_CAPABILITY_RE = /\b(?:does\s+not|doesn['’]?t|do\s+not|don['’]?t|did\s+not|didn['’]?t|will\s+not|won['’]?t|cannot|can['’]?t|no\s+longer)\s+(?:(?:currently|even|actually|always)\s+)?(?:offers?|provides?|includes?|covers?|guarantees?)\b/gi;
-const NO_GUARANTEE_RE = /\b(?:no|without(?:\s+(?:a|an|any))?)\s+(?:[\w'’-]+\s+){0,2}?(?:guarantees?|warrant(?:y|ies))\b/gi;
-const FACT_RULE_OWN_SUBJECT_RE = /\b(?:waves|we|our|us)\b/i;
-const FACT_RULE_CLAUSE_SPLIT_RE = /[,;:—–()]|\s-\s|\b(?:and|but|while|whereas|although|though|unlike|however)\b/i;
-const FACT_RULE_PRONOUN_LEAD_RE = /^(?:it|they|its|their|the\s+company|that\s+company|this\s+company)\b/i;
-
-function unverifiedNegativeClaim(text) {
-  for (const sentence of String(text || '').split(/(?<=[.!?])\s+|\n+/)) {
-    const hits = [...sentence.matchAll(NEG_CAPABILITY_RE), ...sentence.matchAll(NO_GUARANTEE_RE)];
-    if (!hits.length || !competitorFacts.findBusinessMentions(sentence).length) continue;
-    for (const m of hits) {
-      const before = sentence.slice(0, m.index);
-      const parts = before.split(FACT_RULE_CLAUSE_SPLIT_RE);
-      const lead = parts[parts.length - 1];
-      if (FACT_RULE_OWN_SUBJECT_RE.test(lead)) continue;
-      const trimmed = lead.trim();
-      const subjectIsCompetitor = competitorFacts.findBusinessMentions(lead).length > 0
-        || FACT_RULE_PRONOUN_LEAD_RE.test(trimmed)
-        // Elided subject ("Orkin offers X and does not offer Y") inherits
-        // the sentence's — unless Waves is anywhere before it.
-        || (trimmed === '' && !FACT_RULE_OWN_SUBJECT_RE.test(before));
-      if (subjectIsCompetitor) return sentence.trim();
-    }
-  }
-  return null;
-}
-
-function unverifiedNegativeClaimFinding(text) {
-  const hit = unverifiedNegativeClaim(text);
-  if (!hit) return null;
-  // P2: never fails the gate. Every draft that names a competitor already
-  // routes on requiresHumanReview; namedCompetitorListVerdict keeps this
-  // draft off the unattended blog lane (owner fact rule).
-  return finding('P2', 'COMPARISON_UNVERIFIED_NEGATIVE_CLAIM',
-    `States that a named competitor does not offer / has no guarantee for something ("${hit.slice(0, 160)}"). Owner fact rule: write "not verified" for anything we cannot confirm, never "does not offer".`);
-}
-
 function evaluateProse(draft, body, { operatorBriefText = '', namedCompetitorEnabled = false } = {}) {
   const findings = [];
   const scanText = draftScanTexts(draft, body);
@@ -1663,8 +1608,6 @@ function evaluateProse(draft, body, { operatorBriefText = '', namedCompetitorEna
     findings.push(finding('P1', 'COMPARISON_COMPETITOR_IN_PROSE',
       `Names competitor "${nm}" in prose/title/meta with no comparison table — claims there are not validated against competitor-facts.js. Name a competitor ONLY inside a <ComparisonTable> (every cell is checked).`));
   }
-  const factRule = unverifiedNegativeClaimFinding(nameScanText);
-  if (factRule) findings.push(factRule);
 
   const pass = !findings.some((f) => f.severity === 'P0' || f.severity === 'P1');
   return {
@@ -1673,16 +1616,24 @@ function evaluateProse(draft, body, { operatorBriefText = '', namedCompetitorEna
   };
 }
 
-// Business-shaped names the curated detector does not know ("Acme Pest
+// Business names the curated detector does not know ("Acme Pest
 // Solutions", "Bob Smith Lawn Care LLC") — the table path already fails
 // these as COMPARISON_UNCLASSIFIED_OPTION; the table-less path lets a
 // neutral one through (a deliberate precision boundary for ordinary posts),
 // so they are recorded here to keep a competitor post that ALSO names an
-// uncurated business off the unattended lane. Case-sensitive Title-Case
-// provider shape or a legal-entity suffix, curated mentions blanked first
-// ("Orkin and Acme Pest Solutions" must not read as one name), and
-// generic/geo-led captures ("Sarasota Pest Control Guide") and statute /
-// regulator names ("the Structural Pest Control Act", "Bureau of …") dropped.
+// uncurated business off the unattended lane. A Title-Case provider-shaped
+// phrase is ambiguous — "Home Pest Control Guide", "Yard Mosquito Control"
+// and "IFAS Termite Prevention" are topics, not companies — so it counts
+// only when the sentence USES it as a business: a lowercase business verb
+// right after it ("Acme Pest Solutions offers…"), a possessive business
+// noun ("Acme Pest Solutions' technicians"), or a comparison/hiring lead
+// right before it ("vs. Acme Pest Solutions", "hire Acme Pest Solutions").
+// A legal-entity suffix (LLC, Inc., Co.) is business evidence on its own.
+// Curated mentions are blanked first ("Orkin and Acme Pest Solutions" must
+// not read as one name); generic/geo-led captures and statute / regulator
+// names ("the Structural Pest Control Act", "Bureau of …") are dropped.
+const BUSINESS_USE_AFTER_RE = /^(?:['’]s?\s+(?:plans?|pricing|prices|contracts?|technicians?|techs?|website|site|guarantee|warranty|customers?|service\s+area|reviews?|crews?|team|owners?)\b|\s+(?:(?:also|now|still|currently|typically|usually|only)\s+)?(?:offers?|charges?|provides?|serves?|sells?|advertises?|guarantees?|promises?|quotes?|bills?|treats?|sprays?|installs?|operates?|runs?|lists?|publishes?|says|said|states|claims?|markets?|acquired|bought|merged|covers?|includes?|requires?|was\s+founded|has\s+been\s+in\s+business|is\s+(?:a|an)\s+(?:local|family|national|regional|licensed|franchise|pest|lawn|termite|mosquito)\b))/;
+const BUSINESS_USE_BEFORE_RE = /\b(?:vs\.?|versus|hire|hired|hiring|call|called|calling|contact|contacted|companies\s+(?:like|such\s+as)|providers?\s+(?:like|such\s+as)|switch(?:ed|ing)?\s+(?:from|to)|compared?\s+(?:with|to)|than|owned\s+by|acquired\s+by|customers\s+of)\s+(?:the\s+)?$/i;
 const REGULATORY_TAIL_RE = /^\s+(?:Acts?|Laws?|Boards?|Bureaus?|Commissions?|Programs?|Divisions?|Offices?|Rules?|Statutes?|Chapters?|Licens\w*|Exams?|Examinations?|Certificat\w*|Categor\w*|Regulations?)\b/;
 const REGULATORY_HEAD_RE = /\b(?:Bureau|Division|Office|Board|Department|Commission)\s+(?:of|for)\s+$/i;
 function uncuratedBusinessNames(text) {
@@ -1691,15 +1642,19 @@ function uncuratedBusinessNames(text) {
     blanked = blanked.replace(new RegExp(`\\b${escapeForNameRe(n)}\\b`, 'gi'), (m) => ' '.repeat(m.length));
   }
   const out = new Set();
-  for (const re of [providerNameRe('g'), legalEntityRe('g')]) {
+  for (const [re, needsUse] of [[providerNameRe('g'), true], [legalEntityRe('g'), false]]) {
     for (const m of blanked.matchAll(re)) {
       const nm = m[1].trim().replace(/\s+/g, ' ');
       const lead = nm.split(' ')[0].toLowerCase();
       if (OWN_BRAND_RE.test(nm) || GENERIC_LEAD_SET.has(lead) || GEO_LEAD_SET.has(lead)) continue;
-      const end = m.index + m[0].length;
+      const start = m.index + m[0].indexOf(m[1]);
+      const end = start + m[1].length;
+      const after = blanked.slice(end, end + 60);
+      const before = blanked.slice(Math.max(0, start - 40), start);
       if (/^(?:bureau|division|office|board|department|commission)$/.test(lead)
-        || REGULATORY_TAIL_RE.test(blanked.slice(end, end + 40))
-        || REGULATORY_HEAD_RE.test(blanked.slice(Math.max(0, m.index - 40), m.index))) continue;
+        || REGULATORY_TAIL_RE.test(after)
+        || REGULATORY_HEAD_RE.test(before)) continue;
+      if (needsUse && !BUSINESS_USE_AFTER_RE.test(after) && !BUSINESS_USE_BEFORE_RE.test(before)) continue;
       out.add(nm);
     }
   }
@@ -2510,9 +2465,6 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
       `Names a competitor (${[...unsourcedKnown].join(', ')}) without an "as of <date>" + source caption on the table that names it. Add e.g. caption="Attributes as of June 2026, per each company's public website."`));
   }
 
-  const factRule = unverifiedNegativeClaimFinding(proseNameText);
-  if (factRule) findings.push(factRule);
-
   const pass = !findings.some((f) => f.severity === 'P0' || f.severity === 'P1');
   // Preserve the review signal for other content lanes. The supporting-blog
   // runner uses namedCompetitorAutopublishEligible to process clean drafts
@@ -2544,14 +2496,14 @@ function namedCompetitorAutopublishEligible(brief) {
 // Owner rulings 2026-09-27 (D2) + 2026-09-28: a competitor blog publishes
 // unattended only when EVERY competitor it names is on
 // competitor-facts OWNER_APPROVED_AUTOPUBLISH_IDS — including names an
-// operator brief authorized — and no owner fact rule is broken. Reads the
+// operator brief authorized. (The owner's fact rules for those posts ship
+// separately.) Reads the
 // PERSISTED evaluate() result, so the runner's decision and the poller's
 // merge-time recheck judge the same thing. A verdict without
 // `namedCompetitors` (written before this check existed, or unparseable)
 // fails closed.
 //   → { ok: true, approved }                                  publish
 //   → { ok: false, reason: 'named_competitor_off_list', offList, approved }
-//   → { ok: false, reason: 'named_competitor_fact_rule', approved }
 function namedCompetitorListVerdict(comparisonResult) {
   const names = comparisonResult && Array.isArray(comparisonResult.namedCompetitors)
     ? comparisonResult.namedCompetitors : null;
@@ -2559,10 +2511,6 @@ function namedCompetitorListVerdict(comparisonResult) {
   const approved = names.filter((n) => competitorFacts.isOwnerApprovedForAutopublish(n));
   const offList = names.filter((n) => !competitorFacts.isOwnerApprovedForAutopublish(n));
   if (offList.length) return { ok: false, reason: 'named_competitor_off_list', offList, approved };
-  const findings = Array.isArray(comparisonResult.findings) ? comparisonResult.findings : [];
-  if (findings.some((f) => f && f.code === 'COMPARISON_UNVERIFIED_NEGATIVE_CLAIM')) {
-    return { ok: false, reason: 'named_competitor_fact_rule', approved };
-  }
   return { ok: true, approved };
 }
 

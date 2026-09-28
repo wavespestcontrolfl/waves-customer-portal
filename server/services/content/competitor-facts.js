@@ -142,6 +142,10 @@ const COMPETITORS = [
     id: 'turner-pest',
     name: 'Turner Pest Control',
     aliases: ['turner pest'],
+    // Case-sensitive bare brand (owner ruling 2026-09-27 D2 names it
+    // "Turner", and intercept copy uses the short form): "Turner" /
+    // "TURNER" only — never a lowercase word.
+    aliasesCS: ['Turner'],
     attributes: {
       reach: { value: 'Florida (statewide)', source: 'https://www.turnerpest.com', asOf: '2026-06-22' },
       residential_recurring: { value: 'Yes — recurring residential plans', source: 'https://www.turnerpest.com', asOf: '2026-06-22' },

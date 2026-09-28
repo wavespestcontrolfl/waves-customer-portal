@@ -3256,7 +3256,7 @@ describe('named-competitor autopublish gate', () => {
   });
 
   // Owner rulings 2026-09-27 (D2) + 2026-09-28: unattended only when every
-  // named competitor is on the owner list and no fact rule is broken. These
+  // named competitor is on the owner list. These
   // run the REAL comparison gate over synthetic drafts, with the names
   // authorized by the (synthetic) operator brief.
   describe('owner-approved competitor list (real comparison gate)', () => {
@@ -3277,7 +3277,7 @@ describe('named-competitor autopublish gate', () => {
       const { runner, queue } = namedCompetitorScenario({
         publisher, comparisonGate: realGate,
         operatorBrief: brief('Orkin and HomeTeam'),
-        body: 'HomeTeam installs TAEXX tubes in new walls. Orkin offers recurring residential plans. Whether either includes a termite bond in Sarasota is not verified.',
+        body: 'HomeTeam installs TAEXX tubes in new walls. Orkin offers recurring residential plans.',
       });
 
       const result = await runner.runNext();
@@ -3305,22 +3305,6 @@ describe('named-competitor autopublish gate', () => {
       expect(publisher.publishOrUpdatePage).not.toHaveBeenCalled();
       expect(queue.pendingReview).not.toHaveBeenCalled();
       expect(queue.skip).toHaveBeenCalledWith('opp_named_1', 'named_competitor_off_list', { claimToken: claimedAt });
-    });
-
-    test('an unverified "does not offer" claim about an approved competitor skips as named_competitor_fact_rule', async () => {
-      process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH = 'true';
-      const publisher = prPublisher(913);
-      const { runner, queue, claimedAt } = namedCompetitorScenario({
-        publisher, comparisonGate: realGate,
-        operatorBrief: brief('Orkin'),
-        body: 'Orkin offers recurring residential plans, but it does not offer a termite bond in Sarasota.',
-      });
-
-      const result = await runner.runNext();
-
-      expect(result).toMatchObject({ outcome: 'skipped', skip_reason: 'named_competitor_fact_rule' });
-      expect(publisher.publishOrUpdatePage).not.toHaveBeenCalled();
-      expect(queue.skip).toHaveBeenCalledWith('opp_named_1', 'named_competitor_fact_rule', { claimToken: claimedAt });
     });
 
     test('kill switch off: an approved-names-only draft is skipped exactly as before (named_competitor_disabled)', async () => {

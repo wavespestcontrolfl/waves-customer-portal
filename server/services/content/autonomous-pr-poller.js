@@ -1548,7 +1548,7 @@ async function maybeAutoMerge(run, pr) {
           }
           // Lane (kill switch + action) AND the owner list on the persisted
           // verdict — the same two checks the runner applied, so a name
-          // off the owner list or a fact-rule finding never merges unattended.
+          // off the owner list never merges unattended.
           const { namedCompetitorAutopublishEligible, namedCompetitorListVerdict } = require('./comparison-table-gate');
           eligible = namedCompetitorAutopublishEligible(rawBrief) === true
             && namedCompetitorListVerdict(comparisonVerdict).ok === true;

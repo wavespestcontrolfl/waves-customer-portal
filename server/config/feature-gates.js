@@ -1849,7 +1849,7 @@ const gates = {
   // competitor autopublishing; comparison/content checks remain mandatory.
   // On, a blog still publishes only when every named competitor is on the
   // owner list (competitor-facts OWNER_APPROVED_AUTOPUBLISH_IDS, rulings
-  // 2026-09-27 D2 + 2026-09-28) with no fact-rule finding.
+  // 2026-09-27 D2 + 2026-09-28).
   namedCompetitorAutopublish: process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH == null || process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH === 'true',
 
   // Affiliate links in blog bodies (owner monetization pilot 2026-08-31).

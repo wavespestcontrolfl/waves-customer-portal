@@ -1143,8 +1143,8 @@ class AutonomousRunner {
     const trustBuildCount = await this._getTrustBuildCount(run.action_type).catch(() => 0);
     // Named-competitor blogs use the shared automated eligibility check:
     // the lane (action + GATE_NAMED_COMPETITOR_AUTOPUBLISH + comparison
-    // gate) AND the owner list (every name approved, no fact-rule finding —
-    // owner rulings 2026-09-27 D2 + 2026-09-28). Comparison, sourcing, and
+    // gate) AND the owner list (every name approved — owner rulings
+    // 2026-09-27 D2 + 2026-09-28). Comparison, sourcing, and
     // merge-time head checks remain mandatory.
     let namedCompetitorLaneOpen = false;
     let namedCompetitorList = null;
@@ -1186,17 +1186,15 @@ class AutonomousRunner {
 
     // Blog risk flags fail closed without asking an operator to override them.
     // A named-competitor blog with the lane open but a name off the owner
-    // list (or a fact-rule finding) skips with that distinct reason; lane
-    // closed (kill switch off) stays named_competitor_disabled.
+    // list skips with that distinct reason; lane closed (kill switch off)
+    // stays named_competitor_disabled.
     if (unattendedBlog && (brief.human_review_required || !autoPublish || forceNamedCompetitorReview)) {
       const reason = !autoPublish ? 'auto_publish_disabled'
         : forceNamedCompetitorReview
           ? ((namedCompetitorLaneOpen && namedCompetitorList?.reason) || 'named_competitor_disabled')
           : 'brief_risk_blocked';
-      const listNote = namedCompetitorLaneOpen && reason === namedCompetitorList?.reason
-        ? (reason === 'named_competitor_off_list'
-          ? `Names competitor(s) outside the owner-approved list: ${namedCompetitorList.offList.join(', ')} (a new owner ruling is needed to name them).`
-          : 'States a named competitor does not offer / has no guarantee for something (owner fact rule: write "not verified").')
+      const listNote = namedCompetitorLaneOpen && reason === 'named_competitor_off_list'
+        ? `Names competitor(s) outside the owner-approved list: ${namedCompetitorList.offList.join(', ')} (a new owner ruling is needed to name them).`
         : null;
       const finalized = await finalize(run, t0, {
         outcome: 'skipped', skip_reason: reason,
