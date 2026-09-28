@@ -269,6 +269,30 @@ describe('checkPhotoSlotsLicensedOnly', () => {
     expect(checkPhotoSlotsLicensedOnly({ frontmatter: {}, body: kept }, refresh, ctx(`<!-- ${live} -->`)).ok).toBe(false);
   });
 
+  // Codex r5 on #5216 ("Require populated photo slots to appear in the draft").
+  test('a new post must embed every photo its brief populated; null slots may stay empty', () => {
+    const mound = PHOTO_LIBRARY.find((e) => e.catalog_slug === 'fire-ant-mound');
+    const both = slotsBrief([PHOTO, mound]);
+    const pest = `![${PHOTO.alt}](${PHOTO_URL})\n\n${ATTR}`;
+    const sign = `![${mound.alt}](${mound.src})\n\n${photoAttributionLine(mound)}`;
+    expect(checkPhotoSlotsLicensedOnly(diag('Fire ants sting. Call a pro.'), both))
+      .toEqual({ ok: false, reason: `identification_photo_slot_missing:pest:${PHOTO_URL}` });
+    expect(checkPhotoSlotsLicensedOnly(diag(`Intro.\n\n${pest}`), both))
+      .toEqual({ ok: false, reason: `identification_photo_slot_missing:sign:${mound.src}` });
+    expect(checkPhotoSlotsLicensedOnly(diag(`Intro.\n\n${pest}\n\n${sign}`), both)).toEqual({ ok: true });
+    // A slot the library could not fill (photo: null) is not required.
+    const withNull = brief({ voice_constraints: { photo_slots: [...both.voice_constraints.photo_slots, { slot: 'look_alike', photo: null }] } });
+    expect(checkPhotoSlotsLicensedOnly(diag(`Intro.\n\n${pest}\n\n${sign}`), withNull)).toEqual({ ok: true });
+    // A photo that appears only inside a comment does not count as shown.
+    expect(checkPhotoSlotsLicensedOnly(diag(`Intro.\n\n${pest}\n\n<!-- ${sign} -->`), both).ok).toBe(false);
+  });
+
+  test('a refresh is never required to add a slot photo', () => {
+    const refresh = slotsBrief([PHOTO], { action_type: 'refresh_existing_page', page_type: 'refresh' });
+    const ctx = { liveFrontmatter: { post_type: 'diagnostic' }, previousVersion: { body: 'Old intro.' } };
+    expect(checkPhotoSlotsLicensedOnly({ frontmatter: {}, body: '<BottomLineBox verdict="v" recommendation="r" />\n\nNew intro.' }, refresh, ctx)).toEqual({ ok: true });
+  });
+
   test('remediation revalidation re-runs with the run\'s own stored brief, so its slots apply', () => {
     const body = `<BottomLineBox verdict="v" recommendation="r" />\n\n![${PHOTO.alt}](${PHOTO_URL})\n\n${ATTR}`;
     expect(checkPhotoSlotsLicensedOnly(diag(body), slotsBrief([PHOTO], { action_type: 'new_supporting_blog' }))).toEqual({ ok: true });

@@ -1365,7 +1365,8 @@ function checkPhotoSlotsLicensedOnly(draft, brief, context) {
   const body = String(draft.body || '');
   const renderedBody = require('./content-guardrails').blankNonRenderedMarkdown(body);
   const allowed = allowedIdentificationPhotoSrcs(brief, context);
-  for (const { alt, url, form } of collectBodyImageOccurrences(body)) {
+  const occurrences = collectBodyImageOccurrences(body);
+  for (const { alt, url, form } of occurrences) {
     const failure = validateLibraryPhoto(libraryPhotoBySrc(url), alt, url, renderedBody);
     if (failure) return failure;
     // Raw <img> (src or srcset) is outside the publisher's Markdown subset —
@@ -1375,6 +1376,18 @@ function checkPhotoSlotsLicensedOnly(draft, brief, context) {
     // what the publisher actually ships.
     if (form !== 'markdown') return { ok: false, reason: `identification_photo_unsupported_form:${form}:${url}` };
     if (!allowed.has(url)) return { ok: false, reason: `identification_photo_not_in_brief_slots:${url}` };
+  }
+  // Codex r5 on #5216: the writer must embed every slot its brief
+  // POPULATED (null slots stay empty) — the loop above only judges images
+  // that are present, so a draft that omitted them all passed. A refresh
+  // carries no slots and is never required to add a photo.
+  if (brief?.action_type !== 'refresh_existing_page') {
+    const shown = new Set(occurrences.filter((o) => o.form === 'markdown').map((o) => o.url));
+    const slots = Array.isArray(brief?.voice_constraints?.photo_slots) ? brief.voice_constraints.photo_slots : [];
+    for (const slot of slots) {
+      const src = slot?.photo?.src;
+      if (src && !shown.has(src)) return { ok: false, reason: `identification_photo_slot_missing:${slot.slot || 'unknown'}:${src}` };
+    }
   }
   return { ok: true };
 }
