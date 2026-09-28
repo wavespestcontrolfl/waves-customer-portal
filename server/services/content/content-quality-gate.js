@@ -119,6 +119,9 @@ const HARD_CHECKS = [
   // URLs the brief's voice_constraints.photo_slots supplied. Common (not
   // page-type-scoped) because post_type is independent of page_type.
   { name: 'photo_slots_licensed_only', weight: 0, evaluate: checkPhotoSlotsLicensedOnly },
+  // next_steps can ship on any body lane (supporting blogs included), so
+  // their PII scan is common — next_steps only, never a body (#5216 r4).
+  { name: 'next_steps_redacted', weight: 0, evaluate: checkNextStepsRedacted },
   // (C2 frontmatter next_steps / related_posts are NOT checked here: they
   // render as links, so content-guardrails.evaluate() judges them with the
   // body-link chokepoints — Codex r2 on #5216.)
@@ -636,11 +639,32 @@ function checkLocalBusinessServiceSchema(draft) {
 
 // ── customer-question checks ────────────────────────────────────────
 
+// When the answer-first contract puts the verdict box first (C2), the
+// box's verdict IS the first answer: its text is judged, never the raw
+// component tag, and a direct verdict ("Yes, some species can.") need not
+// repeat a noun from the question (Codex r4 on #5216).
+function leadingVerdictBox(body) {
+  const trimmed = String(body || '').replace(/^\s+/, '');
+  if (!/^<BottomLineBox\b/.test(trimmed)) return null;
+  const tag = trimmed.match(BOTTOM_LINE_BOX_TAG_RE);
+  if (!tag || tag.index !== 0) return null;
+  return {
+    verdict: String(attrValue(tag[0], 'verdict') || '').trim(),
+    recommendation: String(attrValue(tag[0], 'recommendation') || '').trim(),
+  };
+}
+
 function checkAnswerInFirstParagraph(draft, brief) {
   const body = String(draft.body || '');
-  const firstParagraph = body.split(/\n\s*\n/)[0] || '';
   const q = brief.customer_signal?.normalized_question || brief.target_keyword || '';
   if (!q) return { ok: false, reason: 'no_question_to_check_against' };
+  const box = leadingVerdictBox(body);
+  if (box) {
+    if (!box.verdict) return { ok: false, reason: 'verdict_box_has_no_verdict' };
+    if (`${box.verdict} ${box.recommendation}`.length > 600) return { ok: false, reason: 'first_paragraph_too_long_for_quick_answer' };
+    return { ok: true };
+  }
+  const firstParagraph = body.split(/\n\s*\n/)[0] || '';
   // First paragraph should be a direct answer — short (< 400 chars)
   // and contain at least one key noun from the question.
   if (firstParagraph.length > 600) return { ok: false, reason: 'first_paragraph_too_long_for_quick_answer' };
@@ -787,6 +811,36 @@ function headingCustomerNamePair(headingText) {
   return null;
 }
 
+// Broad phone regex covers `941-555-1234`, `(941) 555-1234`, and compact
+// 11-digit / E.164 forms (`+19415551234`, `19415551234`) — the earlier
+// 10-digit-only pattern could not match an 11-digit run (no interior
+// word boundary), so a customer number pasted in E.164 form sailed
+// through. The digit lookbehind keeps mid-run starts out, so long
+// numeric IDs still don't false-match.
+// The CORE number is captured separately from an optional attached
+// extension (`x99`, `ext. 4`): the trailing \b cannot sit between a digit
+// and an `x` (both word chars), so `212-555-1234x99` previously matched
+// nothing at all — and extension digits must not pollute the last-10
+// comparison against the Waves allowlist.
+const phoneRe = /(?<!\d)(\+?1?[-.\s]?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4})(?:\s*(?:x|ext\.?|extension)\s*\d{1,6})?\b/gi;
+const scanPhones = (text, where) => {
+  const re = new RegExp(phoneRe.source, phoneRe.flags);
+  let pm;
+  while ((pm = re.exec(text)) !== null) {
+    const digits = pm[1].replace(/\D/g, '');
+    const last10 = digits.length >= 10 ? digits.slice(-10) : null;
+    if (!last10) return { ok: false, reason: `malformed_phone_number_in_${where}` };
+    // isWavesPhone, not the core-office set: spoke/refresh copy legitimately
+    // carries domain/GBP tracking lines, which are Waves' own numbers too.
+    if (!isWavesPhone(last10)) {
+      return { ok: false, reason: `non_business_phone_number_in_${where}:${last10}` };
+    }
+  }
+  return null;
+};
+
+const BLOCKING_PII_TYPES = new Set(['name', 'address', 'ssn', 'card']);
+
 // Percent/plus-decoding for scanning only — a malformed escape keeps the
 // raw text rather than hiding it.
 function decodeLinkText(text) {
@@ -794,35 +848,61 @@ function decodeLinkText(text) {
   try { return decodeURIComponent(plus); } catch { return plus.replace(/%40/gi, '@').replace(/%20/g, ' '); }
 }
 
+// One public frontmatter field's PII scan — the SEO fields in
+// checkRedactionPassed and the next_steps check below share it. Phones and
+// emails use the Waves allowlists; name/address/ssn/card use the redactor.
+// Name semantics follow FIELD SHAPE: Title-Case furniture (titles, link
+// labels) gets the heading-pair name check (the raw scan reads "Chinch Bug
+// Control" as a person); sentence-cased prose (metas) gets the raw name
+// scan plus the low-confidence backstop. Throws if the redactor is missing
+// — callers fail closed.
+function scanPublicFieldForPii(where, raw, { titleCased }) {
+  if (!String(raw || '').trim()) return null;
+  const { redact } = require('./pii-redactor');
+  const phoneHit = scanPhones(raw, where);
+  if (phoneHit) return phoneHit;
+  const fieldEmails = raw.match(/[\w._%+-]+@[\w-]+\.[A-Za-z]{2,}/g) || [];
+  if (fieldEmails.some((e) => !e.toLowerCase().endsWith('@wavespestcontrol.com'))) {
+    return { ok: false, reason: `email_in_${where}` };
+  }
+  const stripped = stripWavesOfficeAddresses(raw);
+  const fieldScan = redact(stripped);
+  const fieldHit = (fieldScan.findings || [])
+    .find((f) => BLOCKING_PII_TYPES.has(f.type) && (titleCased ? f.type !== 'name' : true));
+  if (fieldHit) return { ok: false, reason: `unredacted_${fieldHit.type}_in_${where}` };
+  if (titleCased && headingCustomerNamePair(stripped)) {
+    return { ok: false, reason: `unredacted_name_in_${where}` };
+  }
+  // A lowercase self-intro meta ("this is john smith ants are back")
+  // reports low confidence with ZERO findings; Title-Case fields skip this
+  // (the heading-pair check covers casing-blind names there).
+  if (!titleCased && fieldScan.confidence === 'low') {
+    return { ok: false, reason: `pii_confidence_low_in_${where}` };
+  }
+  return null;
+}
+
+// next_steps render publicly as links on every lane that ships them
+// (supporting blogs included), so they get the PII scan wherever they can
+// ship — a COMMON hard check scoped to next_steps only; it never starts
+// scanning a supporting-blog body (Codex r3/r4 on #5216). Each entry is the
+// SAME "[label](href)" text the guardrails synthesize
+// (content-guardrails.nextStepsLinkMarkdown), with the href's query decoded
+// ("name=Jane+Doe", "%40") so the redactor sees what a visitor would.
+// Title-Case semantics: link labels are UI furniture, and the heading-pair
+// name check also catches a lowercase name in a query string.
+function checkNextStepsRedacted(draft) {
+  const text = decodeLinkText(require('./content-guardrails').nextStepsLinkMarkdown(draft?.frontmatter || {}));
+  if (!text.trim()) return { ok: true, reason: 'no_next_steps' };
+  try {
+    return scanPublicFieldForPii('next_steps', text, { titleCased: true }) || { ok: true };
+  } catch (err) {
+    return { ok: false, reason: `pii_scan_unavailable:${err.message}` };
+  }
+}
+
 function checkRedactionPassed(draft) {
   const body = String(draft.body || '');
-  // Broad phone regex covers `941-555-1234`, `(941) 555-1234`, and compact
-  // 11-digit / E.164 forms (`+19415551234`, `19415551234`) — the earlier
-  // 10-digit-only pattern could not match an 11-digit run (no interior
-  // word boundary), so a customer number pasted in E.164 form sailed
-  // through. The digit lookbehind keeps mid-run starts out, so long
-  // numeric IDs still don't false-match.
-  // The CORE number is captured separately from an optional attached
-  // extension (`x99`, `ext. 4`): the trailing \b cannot sit between a digit
-  // and an `x` (both word chars), so `212-555-1234x99` previously matched
-  // nothing at all — and extension digits must not pollute the last-10
-  // comparison against the Waves allowlist.
-  const phoneRe = /(?<!\d)(\+?1?[-.\s]?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4})(?:\s*(?:x|ext\.?|extension)\s*\d{1,6})?\b/gi;
-  const scanPhones = (text, where) => {
-    const re = new RegExp(phoneRe.source, phoneRe.flags);
-    let pm;
-    while ((pm = re.exec(text)) !== null) {
-      const digits = pm[1].replace(/\D/g, '');
-      const last10 = digits.length >= 10 ? digits.slice(-10) : null;
-      if (!last10) return { ok: false, reason: `malformed_phone_number_in_${where}` };
-      // isWavesPhone, not the core-office set: spoke/refresh copy legitimately
-      // carries domain/GBP tracking lines, which are Waves' own numbers too.
-      if (!isWavesPhone(last10)) {
-        return { ok: false, reason: `non_business_phone_number_in_${where}:${last10}` };
-      }
-    }
-    return null;
-  };
   const bodyPhoneHit = scanPhones(body, 'body');
   if (bodyPhoneHit) return bodyPhoneHit;
   // Waves' own addresses are legitimate page furniture (city-service NAP
@@ -857,7 +937,6 @@ function checkRedactionPassed(draft) {
     //     destination); a long https URL is a citation, not per-se PII.
     // Everything else — name, address, ssn, card — is customer PII with no
     // legitimate page-furniture form and hard-fails the publish gate.
-    const BLOCKING_PII_TYPES = new Set(['name', 'address', 'ssn', 'card']);
     // Markdown HEADING lines are excluded from the redactor's raw NAME scan
     // (title-case section headings like "## Why Choose Waves Pest Control"
     // read as name pairs) but NOT from name detection altogether: a
@@ -914,42 +993,10 @@ function checkRedactionPassed(draft) {
     const seoFields = [
       ['title', joinFields(draft.title, fm.title, draft.metaTitle, fm.metaTitle)],
       ['meta_description', joinFields(draft.meta_description, fm.meta_description, draft.metaDescription, fm.metaDescription)],
-      // Codex r3 on #5216: next_steps render publicly as links, so each
-      // entry is scanned as the SAME "[label](href)" text the guardrails
-      // synthesize (one synthesis, content-guardrails.nextStepsLinkMarkdown),
-      // with the href's query decoded ("name=Jane+Doe", "%40") so the
-      // redactor sees the value a visitor would. Title-cased like the title:
-      // link labels are UI furniture, and the heading-pair name check covers
-      // a lowercase name in a query string too.
-      ['next_steps', decodeLinkText(require('./content-guardrails').nextStepsLinkMarkdown(fm))],
     ];
     for (const [where, raw] of seoFields) {
-      if (!raw.trim()) continue;
-      const phoneHit = scanPhones(raw, where);
-      if (phoneHit) return phoneHit;
-      const fieldEmails = raw.match(/[\w._%+-]+@[\w-]+\.[A-Za-z]{2,}/g) || [];
-      if (fieldEmails.some((e) => !e.toLowerCase().endsWith('@wavespestcontrol.com'))) {
-        return { ok: false, reason: `email_in_${where}` };
-      }
-      const stripped = stripWavesOfficeAddresses(raw);
-      const fieldScan = redact(stripped);
-      const titleCased = where === 'title' || where === 'next_steps';
-      const fieldHit = (fieldScan.findings || [])
-        .find((f) => BLOCKING_PII_TYPES.has(f.type) && (titleCased ? f.type !== 'name' : true));
-      if (fieldHit) return { ok: false, reason: `unredacted_${fieldHit.type}_in_${where}` };
-      if (titleCased && headingCustomerNamePair(stripped)) {
-        return { ok: false, reason: `unredacted_name_in_${where}` };
-      }
-      // Prose-shaped metas get the body's low-confidence backstop too: a
-      // lowercase self-intro meta ("this is john smith ants are back")
-      // reports low confidence with ZERO findings — the redactor is saying
-      // its heuristics were blind, so "no findings" proves nothing. Titles
-      // skip this: the case-promoting heading-pair check above already
-      // covers casing-blind names there, and Title Case never trips the
-      // lowercase arms anyway.
-      if (!titleCased && fieldScan.confidence === 'low') {
-        return { ok: false, reason: `pii_confidence_low_in_${where}` };
-      }
+      const hit = scanPublicFieldForPii(where, raw, { titleCased: where === 'title' });
+      if (hit) return hit;
     }
   } catch (err) {
     // Redactor unavailable = we cannot prove the body is clean — this is a
@@ -1123,8 +1170,14 @@ function isIdentificationDraft(draft, brief, context) {
   if (brief?.action_type === 'refresh_existing_page' && context?.liveFrontmatterUnavailable && !context?.liveFrontmatter) return true;
   return isIdentificationPost(effectiveFrontmatter(draft, brief, context));
 }
+// A customer-question page keeps its answer-first contract through a
+// refresh: the refresh brief's page_type is the generic 'refresh', so the
+// effective (live, on a refresh) frontmatter's page_type counts too (Codex
+// r4 on #5216).
 function isIdentificationOrQuestionDraft(draft, brief, context) {
-  return isIdentificationDraft(draft, brief, context) || brief?.page_type === 'customer-question';
+  if (isIdentificationDraft(draft, brief, context) || brief?.page_type === 'customer-question') return true;
+  const live = brief?.action_type === 'refresh_existing_page' ? context?.liveFrontmatter : null;
+  return String(live?.page_type || '').trim().toLowerCase() === 'customer-question';
 }
 
 // C2: the verdict box (BottomLineBox) must be the LITERAL first block of
@@ -1240,10 +1293,35 @@ function collectBodyImageOccurrences(body) {
   return out;
 }
 
+// Codex r4 on #5216: the library lookup proves a photo is licensed and
+// attributed, but a post may only show the photos its OWN brief assigned —
+// a fire-ant post must not borrow the cockroach photo. The allowed set is
+// the brief's voice_constraints.photo_slots srcs; remediation revalidation
+// re-runs this with the run's own stored brief, so it gets the same set.
+// A refresh (whose brief carries no slots) may also keep a library photo
+// the LIVE previous body already showed (context.previousVersion, rendered
+// view) — never add a new one.
+function allowedIdentificationPhotoSrcs(brief, context) {
+  const allowed = new Set(
+    (Array.isArray(brief?.voice_constraints?.photo_slots) ? brief.voice_constraints.photo_slots : [])
+      .map((slot) => slot?.photo?.src)
+      .filter(Boolean),
+  );
+  const prior = context?.previousVersion?.body;
+  if (brief?.action_type === 'refresh_existing_page' && typeof prior === 'string' && prior.trim()) {
+    const rendered = require('./content-guardrails').blankNonRenderedMarkdown(prior);
+    for (const { url, form } of collectBodyImageOccurrences(rendered)) {
+      if (form === 'inline' && libraryPhotoBySrc(url)) allowed.add(url);
+    }
+  }
+  return allowed;
+}
+
 function checkPhotoSlotsLicensedOnly(draft, brief, context) {
   if (!isIdentificationDraft(draft, brief, context)) return { ok: true, reason: 'not_identification_post' };
   const body = String(draft.body || '');
   const renderedBody = require('./content-guardrails').blankNonRenderedMarkdown(body);
+  const allowed = allowedIdentificationPhotoSrcs(brief, context);
   for (const { alt, url, form } of collectBodyImageOccurrences(body)) {
     const failure = validateLibraryPhoto(libraryPhotoBySrc(url), alt, url, renderedBody);
     if (failure) return failure;
@@ -1251,6 +1329,7 @@ function checkPhotoSlotsLicensedOnly(draft, brief, context) {
     // Refs parks a raw <img>), so a library photo in any other form would
     // pass here and fail at publish.
     if (form !== 'inline') return { ok: false, reason: `identification_photo_unsupported_form:${form}:${url}` };
+    if (!allowed.has(url)) return { ok: false, reason: `identification_photo_not_in_brief_slots:${url}` };
   }
   return { ok: true };
 }
@@ -1449,6 +1528,6 @@ module.exports._internals = {
   checkNoRawMarkdownTables,
   checkBodySyntaxSupported,
   checkVerdictBoxFirst, checkCtaAfterVerdictBox,
-  checkPhotoSlotsLicensedOnly, isIdentificationOrQuestionDraft, effectiveFrontmatter,
+  checkPhotoSlotsLicensedOnly, isIdentificationOrQuestionDraft, effectiveFrontmatter, checkNextStepsRedacted,
   collectBodyImageOccurrences,
 };
