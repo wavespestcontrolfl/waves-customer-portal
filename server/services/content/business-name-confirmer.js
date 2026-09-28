@@ -153,8 +153,9 @@ function inputKey(text) {
 }
 
 // Canonical curated name when the extraction names a curated competitor
-// (alias spellings like "Massey" → "Massey Services"), else the name as
-// written. Own-brand mentions are dropped.
+// (alias spellings like "Massey" → "Massey Services", legal-name variants
+// like "Orkin, LLC" → "Orkin" via findCompetitor's suffix normalization),
+// else the name as written. Own-brand mentions are dropped.
 function canonicalCompanies(names) {
   const out = new Set();
   for (const raw of names) {
@@ -242,7 +243,27 @@ async function assertOwnerListForCommit({ draft, brief = {}, frontmatter = {}, b
   const finalDraft = {
     frontmatter, body, title: frontmatter.title, meta_description: frontmatter.meta_description,
   };
-  const comparison = gate.evaluate(finalDraft, { namedCompetitorEnabled: true, operatorBriefText: '' });
+  // The FULL comparison gate on the final text (Codex r7): publisher-added
+  // text (a generated / reused image alt) can carry disparagement or an
+  // unsourced competitor claim the draft-time gate never saw. Evaluated
+  // exactly as the runner does — same feature flag, same operator-brief
+  // authorization (the brief's own bucket) — so pre-existing authorized
+  // prose still passes. The scheduler lane (humanMergeFallback) keeps
+  // publishAstro's advisory treatment of COMPARISON_UNCLASSIFIED_OPTION.
+  let namedCompetitorEnabled = false;
+  try { namedCompetitorEnabled = require('../../config/feature-gates').isEnabled('namedCompetitorComparison') === true; } catch (_) { namedCompetitorEnabled = false; }
+  const { operatorBriefTextForComparisonGate } = require('./guardrail-options');
+  const comparison = gate.evaluate(finalDraft, {
+    namedCompetitorEnabled,
+    operatorBriefText: operatorBriefTextForComparisonGate({ bucket: brief?.gsc_signal?.bucket }, brief),
+  });
+  const blocking = (comparison.findings || []).filter((f) => (f.severity === 'P0' || f.severity === 'P1')
+    && !(humanMergeFallback && f.code === 'COMPARISON_UNCLASSIFIED_OPTION'));
+  if (blocking.length) {
+    throw ownerListError('BLOG_OWNER_LIST_BLOCKED',
+      `final text fails the comparison gate: ${blocking.map((f) => `${f.severity} ${f.code}`).join('; ')}`,
+      { reason: 'comparison_table_failed', offList: [], findings: blocking });
+  }
   // Through module.exports so a suite exercising the publisher can stub the
   // model call alone and keep this chokepoint's real decision logic.
   const extraction = await module.exports.extractCompanyNames(finalDraft, {

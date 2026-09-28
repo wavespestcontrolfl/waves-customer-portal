@@ -174,7 +174,8 @@ this skill.
 - Named competitors (owner rulings 2026-09-27 D2 + 2026-09-28): a blog
   publishes unattended only when EVERY competitor it names is on
   `OWNER_APPROVED_AUTOPUBLISH_IDS` in `competitor-facts.js` (Orkin, Terminix,
-  HomeTeam/TAEXX, Turner, Massey, TruGreen). Otherwise it skips as
+  HomeTeam/TAEXX, Turner, Massey, TruGreen, Aptive, Truly Nolen — the last
+  two added 2026-09-28). Otherwise it skips as
   `named_competitor_off_list`; naming anyone else needs a new owner ruling.
   Kill switch: `GATE_NAMED_COMPETITOR_AUTOPUBLISH=false` (skips every
   named-competitor blog as `named_competitor_disabled`).

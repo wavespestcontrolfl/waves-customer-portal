@@ -673,7 +673,10 @@ describe('blog Astro frontmatter validation', () => {
         },
         body: 'A comparison for Southwest Florida homeowners choosing between a national pest brand and local service.',
       },
-      { action_type: 'new_supporting_blog', service: 'pest', target_keyword: 'orkin vs local pest control', schema_types: ['Article', 'BreadcrumbList', 'FAQPage'] }
+      // Operator-authorized Orkin (the publisher's final-text comparison
+      // gate evaluates exactly like the runner's, operator brief included).
+      { action_type: 'new_supporting_blog', service: 'pest', target_keyword: 'orkin vs local pest control', schema_types: ['Article', 'BreadcrumbList', 'FAQPage'],
+        gsc_signal: { bucket: 'operator_intercept' }, voice_constraints: { operator_brief: { working_title: 'Orkin vs. a Local SWFL Pest Control Company' } } }
     );
 
     const fmModule = require('../services/content-astro/frontmatter');

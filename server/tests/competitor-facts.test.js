@@ -90,16 +90,25 @@ describe('competitor-facts', () => {
     expect(orkin.attributes.reach.as_of).toBeTruthy();
   });
 
-  test('owner autopublish list: the six approved companies under every approved spelling, nobody else (rulings 2026-09-27 D2 + 2026-09-28)', () => {
-    for (const name of ['Orkin', 'Terminix', 'HomeTeam', 'HomeTeam Pest Defense', 'TAEXX', 'Turner', 'Turner Pest Control', 'Massey', 'Massey Services', 'TruGreen']) {
+  test('owner autopublish list: the eight approved companies under every approved spelling, nobody else (rulings 2026-09-27 D2 + 2026-09-28, Aptive + Truly Nolen added 2026-09-28)', () => {
+    for (const name of ['Orkin', 'Terminix', 'HomeTeam', 'HomeTeam Pest Defense', 'TAEXX', 'Turner', 'Turner Pest Control', 'Massey', 'Massey Services', 'TruGreen', 'Aptive', 'Aptive Environmental', 'Aptive Pest Control', 'goaptive', 'Truly Nolen']) {
       expect(cf.isOwnerApprovedForAutopublish(name)).toBe(true);
     }
-    for (const name of ['Truly Nolen', 'Aptive', 'Keller\'s Pest Control', 'Hulett']) {
+    for (const name of ['Keller\'s Pest Control', 'Hughes Exterminators', 'Hulett', 'Hawx']) {
       expect(cf.isOwnerApprovedForAutopublish(name)).toBe(false);
     }
     expect(cf.findBusinessMentions('HomeTeam installs TAEXX tubes.').map((m) => m.name)).toEqual(['HomeTeam Pest Defense']);
     // Lowercase "hometeam" / "home team" / "turner" stay ordinary prose.
     expect(cf.findBusinessMentions('Cheer for the home team; hometeam spirit; a pancake turner.')).toEqual([]);
     expect(cf.findBusinessMentions('Turner runs its plan under TurnerGuard.').map((m) => m.name)).toEqual(['Turner Pest Control']);
+  });
+
+  test('Aptive has a curated record sourced from its own site (aptivepestcontrol.com — aptive.com is an unrelated company)', () => {
+    const rec = cf.findCompetitor('Aptive');
+    expect(rec).toMatchObject({ id: 'aptive', name: 'Aptive Environmental' });
+    for (const a of Object.values(rec.attributes)) {
+      expect(a.source).toMatch(/^https:\/\/aptivepestcontrol\.com\//);
+      expect(a.asOf).toBe('2026-09-28');
+    }
   });
 });

@@ -1462,7 +1462,7 @@ function evaluateProse(draft, body, { operatorBriefText = '', namedCompetitorEna
         .slice(Math.max(0, idx - PROVIDER_NEGATIVE_PROXIMITY), idx + len + PROVIDER_NEGATIVE_PROXIMITY)
         .toLowerCase()
         .replace(/\s+/g, ' ');
-      return curatedNames.some((n) => window.includes(n.toLowerCase().replace(/\s+/g, ' ')));
+      return windowNamesAny(window, curatedNames);
     };
     const p0Re = new RegExp(`${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b`, 'gi');
     let am;
@@ -1728,6 +1728,29 @@ function linkedCompetitorMentions(text) {
 
 // Escape a detected business name for use inside a regex, tolerating the
 // collapsed whitespace stripQuotesForNames leaves behind.
+// Every surface form a detected name can take in the text: a curated
+// record's canonical name AND its aliases ("Massey" for "Massey Services",
+// "HomeTeam" / "TAEXX" for "HomeTeam Pest Defense", "Aptive" for "Aptive
+// Environmental"). Proximity scans matched only the canonical string, so an
+// alias-only mention ("Massey is dishonest…") escaped the disparagement /
+// reliability checks (#5146 owner-list review). Matched on word boundaries
+// so a short alias never fires inside another word ("adaptive").
+function windowNamesAny(window, names) {
+  const forms = new Set();
+  for (const n of names) {
+    forms.add(String(n));
+    const rec = competitorFacts.findCompetitor(n);
+    if (rec) [rec.name, ...(rec.aliases || []), ...(rec.aliasesCS || [])].forEach((f) => forms.add(f));
+  }
+  for (const f of forms) {
+    const norm = String(f).toLowerCase().replace(/\s+/g, ' ').trim();
+    if (!norm) continue;
+    const re = new RegExp(`(?:^|[^a-z0-9])${norm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:$|[^a-z0-9])`);
+    if (re.test(window)) return true;
+  }
+  return false;
+}
+
 function escapeForNameRe(name) {
   return String(name || '')
     .replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -1847,7 +1870,7 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
       .slice(Math.max(0, idx - PROVIDER_NEGATIVE_PROXIMITY), idx + len + PROVIDER_NEGATIVE_PROXIMITY)
       .toLowerCase()
       .replace(/\s+/g, ' ');
-    return targetNames.some((n) => window.includes(n.toLowerCase().replace(/\s+/g, ' ')));
+    return windowNamesAny(window, targetNames);
   };
 
   // ── Whole-text + prose tone scans (body + title/meta) ──
@@ -2102,7 +2125,7 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
       while ((mnum = metaNumRe.exec(metaText)) !== null) {
         if (sentenceHasNegator(metaText, mnum.index, mnum[0].length)) continue;
         const mtail = metaText.slice(mnum.index, mnum.index + 60);
-        const hasName = targetNames.some((n) => metaText.toLowerCase().includes(n.toLowerCase()));
+        const hasName = windowNamesAny(metaText.toLowerCase().replace(/\s+/g, ' '), targetNames);
         if (numAdjacentProviderRe.test(mtail) || hasName) { rank = mnum; break; }
       }
     }
@@ -2157,7 +2180,7 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
         .slice(Math.max(0, idx - PROVIDER_NEGATIVE_PROXIMITY), idx + len + PROVIDER_NEGATIVE_PROXIMITY)
         .toLowerCase()
         .replace(/\s+/g, ' ');
-      return competitorNames.some((n) => window.includes(n.toLowerCase().replace(/\s+/g, ' ')));
+      return windowNamesAny(window, competitorNames);
     };
     // Disparaging adjective near a competitor name → P0. Denial-guarded:
     // "No shady billing from Orkin" keeps at most the competitor-in-prose

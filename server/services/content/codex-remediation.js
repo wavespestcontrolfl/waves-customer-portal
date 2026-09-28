@@ -1686,7 +1686,7 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
     // the caller's parent check must not have its unrelated changes blessed
     // by the post-fix re-pin (PR r16 P1).
     expectedParentSha = null,
-    onPark = null, revalidateFix = null, revalidateBodyImages = null, onRemediated = null, prePushCheck = null,
+    onPark = null, revalidateFix = null, revalidateOwnerList = null, revalidateBodyImages = null, onRemediated = null, prePushCheck = null,
   } = ctx;
   if (!prNumber || !branch) return { skipped: true, reason: 'missing PR/branch' };
 
@@ -1991,19 +1991,25 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
 
   // Lane-specific gate re-run (autonomous lane: uniqueness / quality /
   // SEO-completion / visibility on the rewritten body). Fail or throw → park.
-  if (typeof revalidateFix === 'function') {
+  // Lane gate re-runs on the rewritten body — revalidateFix (autonomous
+  // lane: uniqueness / quality / SEO / visibility / owner list) and
+  // revalidateOwnerList (scheduler lane: the owner competitor list on the
+  // fixed text, Codex r7 on #5146). A transient failure (provider outage)
+  // spends a round on the bounded transient budget; anything else parks.
+  for (const [hook, label] of [[revalidateFix, 'lane gates'], [revalidateOwnerList, 'owner competitor list']]) {
+    if (typeof hook !== 'function') continue;
     let recheck;
-    try { recheck = await revalidateFix(fixed); } catch (e) { recheck = { ok: false, reason: e.message }; }
+    try { recheck = await hook(fixed); } catch (e) { recheck = { ok: false, reason: e.message }; }
     if (recheck && recheck.transient === true) {
       // Same bounded transient-round budget as the content-gate outage above.
       const attempt = (state.rounds || 0) + 1;
       await saveState(db, prNumber, { branch, status: 'active', rounds: attempt });
-      const reason = `fix lane gates temporarily unavailable: ${recheck.reason}`;
+      const reason = `fix ${label} temporarily unavailable: ${recheck.reason}`;
       if (atRoundLimit(attempt)) return park(db, prNumber, `${reason} (exhausted ${MAX_ROUNDS} remediation rounds)`, onPark, headSha, PARK_PRE_PUSH);
       return { skipped: true, transient: true, reason: `${reason} (will retry)` };
     }
     if (!recheck || recheck.ok !== true) {
-      return park(db, prNumber, `fix failed lane gates: ${(recheck && recheck.reason) || 'no result'}`, onPark, headSha, PARK_PRE_PUSH);
+      return park(db, prNumber, `fix failed ${label}: ${(recheck && recheck.reason) || 'no result'}`, onPark, headSha, PARK_PRE_PUSH);
     }
   }
   // Body-image contract on the fixed body (scheduler lane — the autonomous
@@ -2347,6 +2353,33 @@ async function maybeRemediateBlogPost(post, deps = {}) {
     // Rendered as the scheduler's file renders: publishAstro writes a flat
     // `.md` (scheduledBlogFilePathForPost), whose raw HTML blocks hide the
     // Markdown inside them — same flavour pages-poll's HEAD check applies.
+    // The owner competitor list on the FIXED text, same chokepoint as
+    // publishAstro (Codex r7 on #5146): pages-poll auto-merges this PR
+    // unless astro_requires_human_merge, so an off-list company refuses the
+    // fix, competitor content naming only the approved list stamps the row
+    // for a human merge (sticky, claim-guarded), and a check outage is
+    // transient.
+    revalidateOwnerList: async (fixedMarkdown) => {
+      let parsed;
+      try { parsed = fm.parse(fixedMarkdown); } catch (e) { return { ok: false, reason: `unparseable fix: ${e.message}` }; }
+      const confirmer = deps.businessNameConfirmer || require('./business-name-confirmer');
+      let verdict;
+      try {
+        verdict = await confirmer.assertOwnerListForCommit({
+          draft: null, brief: {}, frontmatter: (parsed && parsed.data) || {}, body: String((parsed && parsed.content) || ''), humanMergeFallback: true,
+        });
+      } catch (err) {
+        if (err.code === 'BLOG_OWNER_LIST_UNVERIFIED') return { ok: false, transient: err.retryable === true, reason: err.message };
+        return { ok: false, reason: err.message };
+      }
+      if (verdict && verdict.requiresHumanMerge) {
+        const stamped = await db('blog_posts')
+          .where({ id: row.id, publish_status: 'publishing', astro_pr_number: row.astro_pr_number })
+          .update({ astro_requires_human_merge: true, updated_at: new Date() });
+        if (!stamped) return { ok: false, reason: 'could not stamp the human-merge requirement (row moved)' };
+      }
+      return { ok: true };
+    },
     revalidateBodyImages: async (fixedMarkdown) => {
       const schedPath = String((deps.astroPublisher || require('../content-astro/astro-publisher')).scheduledBlogFilePathForPost(row) || '');
       return revalidateBodyImagesForMarkdown(fixedMarkdown, {

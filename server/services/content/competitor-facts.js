@@ -223,18 +223,39 @@ const COMPETITORS = [
       guarantee: { value: 'Healthy Lawn Guarantee — "we\'ll gladly visit your property as often as needed between scheduled visits to make any necessary adjustments and to ensure your satisfaction"; site footnote: "Guarantee applies to full program customers only"', source: 'https://www.trugreen.com/why-choose-trugreen/professional-lawn-care', asOf: '2026-07-28' },
     },
   },
+  {
+    // Owner ruling 2026-09-28 added Aptive to the unattended list (it was a
+    // detection-only signal before). Official host is aptivepestcontrol.com
+    // (goaptive.com is the company's older domain) — NOT aptive.com, which
+    // is an unrelated software company. Both values verified against
+    // aptivepestcontrol.com on 2026-09-28 (WebFetch): "Aptive provides
+    // residential pest control services in 6,000+ cities across 37 states"
+    // and "Aptive schedules recurring services during the year based on the
+    // service plan you select" (/pest-control/). Nothing else is curated.
+    id: 'aptive',
+    name: 'Aptive Environmental',
+    aliases: ['aptive', 'aptive pest control', 'aptive environmental llc'],
+    // Link destinations: the older goaptive.com host tokenizes to "goaptive".
+    urlAliases: ['goaptive'],
+    attributes: {
+      reach: { value: 'Multi-state (37 US states, per the company)', source: 'https://aptivepestcontrol.com/', asOf: '2026-09-28' },
+      residential_recurring: { value: 'Yes — recurring residential plans', source: 'https://aptivepestcontrol.com/pest-control/', asOf: '2026-09-28' },
+    },
+  },
 ];
 
 // Competitors the owner approved for UNATTENDED blog publishing (owner
 // rulings 2026-09-27 D2 + 2026-09-28: comparison/alternatives blog posts may
 // name Orkin, Terminix, HomeTeam (also sold as TAEXX), Turner, Massey and
-// TruGreen and publish with no human sign-off). A draft naming ANY other
+// TruGreen and publish with no human sign-off; Aptive and Truly Nolen added
+// 2026-09-28 ~07:05Z). A draft naming ANY other
 // business — including a COMPETITORS record not listed here, or a name only
 // an operator brief authorized — does not autopublish; naming anyone else
 // needs a new owner ruling. Ids, not display names, so every alias of an
 // approved record resolves through findCompetitor().
 const OWNER_APPROVED_AUTOPUBLISH_IDS = Object.freeze([
   'orkin', 'terminix', 'hometeam-pest-defense', 'turner-pest', 'massey-services', 'trugreen',
+  'aptive', 'truly-nolen',
 ]);
 
 // Detection-only list of pest-control BUSINESS names that may plausibly appear
@@ -258,8 +279,6 @@ const COMPETITOR_BRAND_SIGNALS = [
   'Turner Pest Control',
   'Nozzle Nolen',
   'Rentokil',
-  'Aptive',
-  'Aptive Environmental',
   'Hawx',
   'Catseye',
   // Suffix-less lawn/mosquito franchise brands — no pest-industry suffix, so
@@ -324,14 +343,29 @@ const URL_ALIAS_NAMES = (() => {
   return [...set].sort((a, b) => b.length - a.length);
 })();
 
-/** findCompetitor(name) → allowlist record | null (matches name or alias). */
+// Trailing legal / corporate suffixes stripped (repeatedly) when an exact
+// name/alias lookup misses: "Orkin, LLC", "Massey Services, Inc.",
+// "Terminix Global Holdings", "HomeTeam Pest Defense, Inc." resolve to their
+// curated record instead of reading as a distinct company (#5146 r7).
+const LEGAL_SUFFIX_TOKENS = new Set(['llc', 'l l c', 'inc', 'incorporated', 'corp', 'corporation', 'co', 'company', 'ltd', 'limited', 'holdings', 'holding', 'global', 'group', 'services', 'service', 'the']);
+
+/** findCompetitor(name) → allowlist record | null (matches name or alias, legal suffixes ignored). */
 function findCompetitor(name) {
-  return ALLOWLIST_INDEX.get(normalize(name)) || null;
+  const key = normalize(name);
+  const exact = ALLOWLIST_INDEX.get(key);
+  if (exact) return exact;
+  const words = key.split(' ').filter(Boolean);
+  while (words.length > 1 && LEGAL_SUFFIX_TOKENS.has(words[words.length - 1])) {
+    words.pop();
+    const hit = ALLOWLIST_INDEX.get(words.join(' '));
+    if (hit) return hit;
+  }
+  return null;
 }
 
 /** isKnownCompetitor(name) → true iff `name` is on the curated allowlist. */
 function isKnownCompetitor(name) {
-  return ALLOWLIST_INDEX.has(normalize(name));
+  return findCompetitor(name) !== null;
 }
 
 /** isOwnerApprovedForAutopublish(name) → true iff `name` resolves to a record on OWNER_APPROVED_AUTOPUBLISH_IDS. */

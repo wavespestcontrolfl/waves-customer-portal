@@ -88,38 +88,9 @@ const getTopicTargetingGate = lazy('topic-targeting-gate', './topic-targeting-ga
 // single-sourced with the sync guardrail-option derivation (the writer's
 // in-loop self-lint shares it) — a light module, so the runner's claim path
 // still doesn't depend on the seeder loading.
-const { OPERATOR_INTERCEPT_BUCKET, deriveSyncGuardrailOptions } = require('./guardrail-options');
-
-// The operator-authored text of an intercept brief (title/keywords/thesis/
-// outline/sourcing), for the comparison gate's operator-authorized-
-// competitor exception: a recognized competitor the OPERATOR named there
-// (e.g. the Aptive cancellation brief) routes the draft to the approvable
-// named-competitor review path instead of a hard UNKNOWN_COMPETITOR block.
-// Only operator_intercept opportunities produce text — mined briefs get '',
-// so nothing changes for them. Both gate call sites (runNext and the
-// approval re-check) MUST derive this identically, or a draft parked as
-// approvable would fail its own approval re-evaluation.
-function operatorBriefTextForComparisonGate(opp, brief) {
-  if (!opp || opp.bucket !== OPERATOR_INTERCEPT_BUCKET) return '';
-  const ob = brief?.voice_constraints?.operator_brief || null;
-  if (!ob) return '';
-  return [
-    ob.working_title,
-    ob.primary_kw,
-    ob.thesis,
-    ...(Array.isArray(ob.secondary_kws) ? ob.secondary_kws : []),
-    ...(Array.isArray(ob.outline) ? ob.outline : []),
-    // Sourcing fields are operator-authored too: a REQUIRED competitor
-    // citation (required_sources URL like https://www.orkin.com/...) or a
-    // source note naming the competitor authorizes that name exactly like
-    // the title/outline do. Without these, the binding citation URL itself
-    // read as an unauthorized mention in the draft and hard-blocked the
-    // run at comparison_table_failed instead of the review path the
-    // operator's own brief was steering it to.
-    ...(Array.isArray(ob.required_sources) ? ob.required_sources : []),
-    ...(Array.isArray(ob.source_notes) ? ob.source_notes : []),
-  ].filter(Boolean).join('\n');
-}
+// operatorBriefTextForComparisonGate lives there too, shared with the
+// publisher's owner-list commit chokepoint (business-name-confirmer).
+const { OPERATOR_INTERCEPT_BUCKET, deriveSyncGuardrailOptions, operatorBriefTextForComparisonGate } = require('./guardrail-options');
 
 // City → GBP location for autonomous gbp_post distribution, backed by the
 // canonical CITY_TO_LOCATION map in config/locations.js. A post goes to the

@@ -973,40 +973,43 @@ describe('table-less drafts: directed-scan tightening (Codex round 2)', () => {
 });
 
 describe('table-less drafts: operator-authorized competitor naming (Codex round 3)', () => {
-  // The Aptive intercept brief's own text — the operator personally named
+  // Hawx stands in for a DETECTION-ONLY brand (no curated record); these
+  // cases used Aptive until the owner added Aptive to the curated list
+  // (2026-09-28).
+  // The Hawx intercept brief's own text — the operator personally named
   // the competitor, so the draft routes to the APPROVABLE named-competitor
   // review path instead of a hard UNKNOWN_COMPETITOR block.
   const BRIEF_TEXT = [
-    "Aptive's Cancellation Fee, Explained",
-    'aptive cancellation fee',
-    "What Aptive's contract actually costs and how the cancellation fee works",
-    'how to cancel aptive',
+    "Hawx's Cancellation Fee, Explained",
+    'hawx cancellation fee',
+    "What Hawx's contract actually costs and how the cancellation fee works",
+    'how to cancel hawx',
   ].join('\n');
 
   test('an operator-named recognized competitor passes with requiresHumanReview', () => {
     const r = gate.evaluate({
-      body: 'Aptive charges a $199 early-cancel fee per its published contract terms; here is the dispute path.',
-      frontmatter: { title: "Aptive's Cancellation Fee, Explained" },
+      body: 'Hawx charges a $199 early-cancel fee per its published contract terms; here is the dispute path.',
+      frontmatter: { title: "Hawx's Cancellation Fee, Explained" },
     }, { operatorBriefText: BRIEF_TEXT });
     expect(r.pass).toBe(true);
     expect(r.requiresHumanReview).toBe(true);
     expect(r.findings).toHaveLength(0);
   });
   test('the same draft with NO operator brief text stays hard-blocked (mined lane unchanged)', () => {
-    const r = gate.evaluate({ body: 'Aptive charges a $199 early-cancel fee per its contract terms.' }, {});
+    const r = gate.evaluate({ body: 'Hawx charges a $199 early-cancel fee per its contract terms.' }, {});
     expect(r.pass).toBe(false);
     expect(r.findings.some((f) => f.code === 'COMPARISON_UNKNOWN_COMPETITOR' && f.severity === 'P0')).toBe(true);
   });
   test('a competitor the operator did NOT name still flags', () => {
     const r = gate.evaluate({
-      body: 'Aptive charges a cancellation fee, and Terminix has similar terms in its contracts.',
+      body: 'Hawx charges a cancellation fee, and Terminix has similar terms in its contracts.',
     }, { operatorBriefText: BRIEF_TEXT });
     expect(r.pass).toBe(false);
     expect(r.findings.some((f) => f.code === 'COMPARISON_COMPETITOR_IN_PROSE')).toBe(true);
   });
   test('disparaging the operator-authorized name still blocks (full curated strictness)', () => {
     const r = gate.evaluate({
-      body: 'Aptive is dishonest and scams customers out of hundreds every year.',
+      body: 'Hawx is dishonest and scams customers out of hundreds every year.',
     }, { operatorBriefText: BRIEF_TEXT });
     expect(r.pass).toBe(false);
     expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
@@ -1029,12 +1032,12 @@ describe('table-less drafts: operator-authorized competitor naming (Codex round 
     expect(r.findings).toHaveLength(0);
   });
   test('a detection-only alias in the brief authorizes the FULLER surface form (word-boundary containment, Codex round 7)', () => {
-    // "Aptive" (brief) and "Aptive Environmental" (draft) canonicalize to
+    // "Hawx" (brief) and "Hawx Services" (draft) canonicalize to
     // DIFFERENT unknown names — exact-string matching sent the operator's
-    // own Aptive draft to the hard UNKNOWN_COMPETITOR block.
+    // own Hawx draft to the hard UNKNOWN_COMPETITOR block.
     const r = gate.evaluate({
-      body: 'Aptive Environmental charges a $199 early-cancel fee per its published contract.',
-    }, { operatorBriefText: 'aptive cancellation fee explained\nhow to cancel aptive' });
+      body: 'Hawx Services charges a $199 early-cancel fee per its published contract.',
+    }, { operatorBriefText: 'hawx cancellation fee explained\nhow to cancel hawx' });
     expect(r.pass).toBe(true);
     expect(r.requiresHumanReview).toBe(true);
     expect(r.findings).toHaveLength(0);
@@ -2745,9 +2748,9 @@ describe('operator-authorized prose mentions on table-backed drafts', () => {
 
 describe('operator authorization: detection-only unknowns + feature-flag exemption on table drafts (Codex r3 on #3256)', () => {
   const B3_BRIEF = [
-    "Aptive's Cancellation Fee, Explained",
-    'aptive cancellation fee',
-    "What Aptive's contract actually costs, with a trade-off comparison table",
+    "Hawx's Cancellation Fee, Explained",
+    'hawx cancellation fee',
+    "What Hawx's contract actually costs, with a trade-off comparison table",
   ].join('\n');
   const NEUTRAL_TABLE = `<ComparisonTable
   columns={["What to weigh","National chain","Local SWFL company","DIY"]}
@@ -2759,8 +2762,8 @@ describe('operator authorization: detection-only unknowns + feature-flag exempti
 
   test('detection-only operator-named competitor in prose + table → review, no UNKNOWN_COMPETITOR', () => {
     const r = gate.evaluate({
-      body: `# Guide\n\nAptive contracts run annual terms; here is what cancelling involves.\n\n${NEUTRAL_TABLE}\n\nClosing prose.`,
-      frontmatter: { title: "Aptive's Cancellation Fee, Explained" },
+      body: `# Guide\n\nHawx contracts run annual terms; here is what cancelling involves.\n\n${NEUTRAL_TABLE}\n\nClosing prose.`,
+      frontmatter: { title: "Hawx's Cancellation Fee, Explained" },
     }, { namedCompetitorEnabled: true, operatorBriefText: B3_BRIEF });
     expect(r.findings.some((f) => f.code === 'COMPARISON_UNKNOWN_COMPETITOR')).toBe(false);
     expect(r.pass).toBe(true);
@@ -2768,7 +2771,7 @@ describe('operator authorization: detection-only unknowns + feature-flag exempti
   });
 
   test('the same detection-only name INSIDE a table cell stays fail-closed regardless of authorization', () => {
-    const t = NEUTRAL_TABLE.replace('National chain', 'Aptive');
+    const t = NEUTRAL_TABLE.replace('National chain', 'Hawx');
     const r = gate.evaluate({
       body: `# Guide\n\nIntro prose.\n\n${t}\n\nClosing prose.`,
     }, { namedCompetitorEnabled: true, operatorBriefText: B3_BRIEF });
@@ -2834,7 +2837,7 @@ describe('operator authorization: detection-only unknowns + feature-flag exempti
 // competitor it detected, and namedCompetitorListVerdict holds unattended
 // blog publishing to the owner list.
 describe('owner competitor list', () => {
-  const OPTS = { namedCompetitorEnabled: true, operatorBriefText: 'Orkin, Terminix, Massey, Turner and Truly Nolen alternatives' };
+  const OPTS = { namedCompetitorEnabled: true, operatorBriefText: 'Orkin, Terminix, Massey, Turner, Aptive, Truly Nolen and Hughes Exterminators alternatives' };
   // The runner stores a successful whole-draft extraction on the verdict.
   const ext = (r, companies = []) => ({ ...r, companyExtraction: { ok: true, key: 'k', companies } });
 
@@ -2843,8 +2846,22 @@ describe('owner competitor list', () => {
     expect(approved.namedCompetitors).toEqual(['Massey Services', 'Orkin']);
     expect(gate.namedCompetitorListVerdict(ext(approved))).toEqual({ ok: true, approved: ['Massey Services', 'Orkin'] });
 
-    const offList = gate.evaluate({ body: 'Orkin and Truly Nolen both offer recurring residential plans.', title: 'x' }, OPTS);
-    expect(gate.namedCompetitorListVerdict(ext(offList))).toMatchObject({ ok: false, reason: 'named_competitor_off_list', offList: ['Truly Nolen'] });
+    // Hughes is curated but NOT on the owner list.
+    const offList = gate.evaluate({ body: 'Orkin and Hughes Exterminators both offer recurring residential plans.', title: 'x' }, OPTS);
+    expect(gate.namedCompetitorListVerdict(ext(offList))).toMatchObject({ ok: false, reason: 'named_competitor_off_list', offList: ['Hughes Exterminators'] });
+
+    // Owner ruling 2026-09-28 (~07:05Z): Aptive and Truly Nolen joined the list.
+    for (const [body, name] of [
+      ['Aptive offers recurring residential plans.', 'Aptive Environmental'],
+      ['Truly Nolen offers recurring residential plans.', 'Truly Nolen'],
+    ]) {
+      const r = gate.evaluate({ body, title: 'x' }, OPTS);
+      expect(r.namedCompetitors).toEqual([name]);
+      expect(gate.namedCompetitorListVerdict(ext(r))).toEqual({ ok: true, approved: [name] });
+    }
+    // Alias-only disparagement of an approved name still blocks.
+    expect(gate.evaluate({ body: 'Aptive is dishonest and scams customers.', title: 'x' }, OPTS).findings
+      .some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(true);
 
     // A name only a link destination carries still counts, and the bare
     // HomeTeam / Turner aliases match lowercase URL slugs (Codex r2 P1) —

@@ -1718,7 +1718,7 @@ describe('auto-merge gating (each condition individually blocking)', () => {
   // holds the persisted verdict to the owner list too — an off-list name or
   // a verdict recorded before names were persisted leaves the PR for a human.
   test.each([
-    ['names a competitor off the owner list', { pass: true, findings: [], requiresHumanReview: true, namedCompetitors: ['Orkin', 'Truly Nolen'], companyExtraction: { ok: true, key: 'k', companies: [] } }],
+    ['names a competitor off the owner list', { pass: true, findings: [], requiresHumanReview: true, namedCompetitors: ['Orkin', 'Hughes Exterminators'], companyExtraction: { ok: true, key: 'k', companies: [] } }],
     ['has no recorded names (pre-list verdict)', { pass: true, findings: [], requiresHumanReview: true }],
     ['has no stored company extraction', { pass: true, findings: [], requiresHumanReview: true, namedCompetitors: ['Orkin'] }],
     ['is an unflagged blog verdict recorded before the company check (no extraction)', { pass: true, findings: [], requiresHumanReview: false, namedCompetitors: [] }],

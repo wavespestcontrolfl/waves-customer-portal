@@ -3309,19 +3309,34 @@ describe('named-competitor autopublish gate', () => {
       expect(queue.skip).not.toHaveBeenCalled();
     });
 
+    test.each([
+      ['Aptive', 'Aptive offers recurring residential plans across its markets.', 'Aptive Environmental'],
+      ['Truly Nolen', 'Truly Nolen offers recurring residential plans.', 'Truly Nolen'],
+    ])('%s alone clears the owner list (owner added it 2026-09-28) and publishes', async (who, body, canonical) => {
+      process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH = 'true';
+      const publisher = chokepointPublisher(921, () => [who]);
+      const { runner, queue } = namedCompetitorScenario({ publisher, comparisonGate: realGate, operatorBrief: brief(who), body });
+
+      const result = await runner.runNext();
+
+      expect(result.skip_reason).toBe('astro_pr_pending_merge');
+      expect(result.comparison_table_result.competitors_approved_by_list).toEqual([canonical]);
+      expect(queue.skip).not.toHaveBeenCalled();
+    });
+
     test('one name off the owner list skips as named_competitor_off_list — never published, never queued for approval', async () => {
       process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH = 'true';
       const publisher = prPublisher(912);
       const { runner, queue, claimedAt } = namedCompetitorScenario({
         publisher, comparisonGate: realGate,
-        operatorBrief: brief('Orkin and Truly Nolen'),
-        body: 'Orkin offers recurring residential plans. Truly Nolen offers recurring residential plans too.',
+        operatorBrief: brief('Orkin and Hughes Exterminators'),
+        body: 'Orkin offers recurring residential plans. Hughes Exterminators offers recurring residential plans too.',
       });
 
       const result = await runner.runNext();
 
       expect(result).toMatchObject({ outcome: 'skipped', skip_reason: 'named_competitor_off_list' });
-      expect(result.reviewer_notes).toMatch(/Truly Nolen/);
+      expect(result.reviewer_notes).toMatch(/Hughes Exterminators/);
       expect(result.comparison_table_result.competitors_approved_by_list).toBeUndefined();
       expect(publisher.publishOrUpdatePage).not.toHaveBeenCalled();
       expect(queue.pendingReview).not.toHaveBeenCalled();
@@ -3358,12 +3373,31 @@ describe('named-competitor autopublish gate', () => {
         draft.body = `${draft.body}\n\n![Orkin truck outside a Venice home](/images/blog/x/body-1.webp)`;
         return inner(draft, briefArg, opts);
       });
-      const { runner } = namedCompetitorScenario({ publisher, comparisonGate: realGate, intercept: false, body: 'How to compare local pest providers.' });
+      // Orkin is operator-authorized, so the publisher's final-text
+      // comparison gate passes it and only the name inventory changes.
+      const { runner } = namedCompetitorScenario({ publisher, comparisonGate: realGate, operatorBrief: brief('Orkin'), body: 'How to compare local pest providers.' });
 
       const result = await runner.runNext();
 
       expect(result.skip_reason).toBe('astro_pr_pending_merge');
       expect(result.comparison_table_result.namedCompetitors).toEqual(['Orkin']);
+    });
+
+    test('publisher-added text that fails the comparison gate refuses the commit (Codex r7)', async () => {
+      process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH = 'true';
+      const publisher = chokepointPublisher(922, () => ['Orkin']);
+      const inner = publisher.publishOrUpdatePage.getMockImplementation();
+      publisher.publishOrUpdatePage.mockImplementation(async (draft, briefArg, opts) => {
+        draft.body = `${draft.body}\n\n![Orkin scams customers with hidden fees](/images/blog/x/body-1.webp)`;
+        return inner(draft, briefArg, opts);
+      });
+      const { runner, queue, claimedAt } = namedCompetitorScenario({ publisher, comparisonGate: realGate, operatorBrief: brief('Orkin'), body: 'How to compare local pest providers.' });
+
+      const result = await runner.runNext();
+
+      expect(result).toMatchObject({ outcome: 'skipped', skip_reason: 'comparison_table_failed' });
+      expect(result.reviewer_notes).toMatch(/COMPARISON_DISPARAGEMENT/);
+      expect(queue.skip).toHaveBeenCalledWith('opp_named_1', 'comparison_table_failed', { claimToken: claimedAt });
     });
 
     test('the model listing no company publishes an ordinary post, even with the kill switch off', async () => {

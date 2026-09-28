@@ -111,7 +111,13 @@ describe('extractCompanyNames', () => {
 // The owner-list check at the publisher's commit chokepoint, on the FINAL
 // committed text (Codex r5 on #5146).
 describe('assertOwnerListForCommit', () => {
-  const BLOG_BRIEF = { action_type: 'new_supporting_blog' };
+  // An operator-intercept brief naming the competitors the drafts mention
+  // (the final-text comparison gate authorizes exactly as the runner does).
+  const BLOG_BRIEF = {
+    action_type: 'new_supporting_blog',
+    gsc_signal: { bucket: 'operator_intercept' },
+    voice_constraints: { operator_brief: { working_title: 'Orkin, Bug Out and local alternatives', primary_kw: 'orkin alternatives' } },
+  };
   const TABLE = (cols) => `Intro.\n\n<ComparisonTable columns={${JSON.stringify(cols)}} rows={[{ label: "Recurring plans", values: ["Yes","Yes","Yes"] }]} caption="Attributes as of June 2026, per each company public website." />\n\nOutro.`;
   const finalFm = { title: 'Orkin alternatives in Sarasota', slug: '/pest-control/orkin-alternatives/', meta_description: 'Compare plans.' };
 
@@ -144,11 +150,29 @@ describe('assertOwnerListForCommit', () => {
 
   test('scheduler lane (humanMergeFallback): only-six competitor content asks for a human merge; an off-list company is refused (Codex r6)', async () => {
     dispatchWithFallback.mockResolvedValue({ ok: true, json: { companies: ['Orkin'] } });
-    expect(await assertOwnerListForCommit({ draft: null, brief: {}, frontmatter: finalFm, body: 'Orkin offers plans.', humanMergeFallback: true }))
+    const schedFm = { title: 'Choosing pest control in Sarasota', slug: '/pest-control/choosing/', meta_description: 'Compare plans.' };
+    expect(await assertOwnerListForCommit({ draft: null, brief: {}, frontmatter: schedFm, body: TABLE(['What to weigh', 'Orkin', 'Waves']), humanMergeFallback: true }))
       .toMatchObject({ requiresHumanMerge: true });
     dispatchWithFallback.mockResolvedValue({ ok: true, json: { companies: ['Bug Out'] } });
-    await expect(assertOwnerListForCommit({ draft: null, brief: {}, frontmatter: finalFm, body: 'Bug Out competes with local providers.', humanMergeFallback: true }))
+    await expect(assertOwnerListForCommit({ draft: null, brief: {}, frontmatter: schedFm, body: 'Bug Out competes with local providers.', humanMergeFallback: true }))
       .rejects.toMatchObject({ code: 'BLOG_OWNER_LIST_BLOCKED', reason: 'named_competitor_off_list', offList: ['Bug Out'] });
+  });
+
+  test('publisher-added text failing the comparison gate refuses the commit; operator-authorized prose still passes (Codex r7)', async () => {
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { companies: ['Orkin'] } });
+    await expect(assertOwnerListForCommit({ draft: {}, brief: BLOG_BRIEF, frontmatter: finalFm, body: 'Orkin offers plans.\n\n![Orkin scams customers with hidden fees](/images/blog/x/body-1.webp)' }))
+      .rejects.toMatchObject({ code: 'BLOG_OWNER_LIST_BLOCKED', reason: 'comparison_table_failed' });
+    const draft = {};
+    await assertOwnerListForCommit({ draft, brief: BLOG_BRIEF, frontmatter: finalFm, body: 'Orkin offers recurring residential plans.' });
+    expect(draft.competitors_approved_by_list).toEqual(['Orkin']);
+  });
+
+  test('legal-name variants of an approved competitor map to its record, not off-list (Codex r7)', async () => {
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { companies: ['Orkin, LLC', 'Terminix Global Holdings', 'Aptive Environmental, Inc.'] } });
+    const draft = {};
+    await assertOwnerListForCommit({ draft, brief: BLOG_BRIEF, frontmatter: finalFm, body: 'Orkin offers recurring residential plans.' });
+    expect(draft.company_extraction.companies).toEqual(['Aptive Environmental', 'Orkin', 'Terminix']);
+    expect(draft.competitors_approved_by_list).toEqual(['Aptive Environmental', 'Orkin', 'Terminix']);
   });
 
   test('a failed check refuses the commit; a human-approved publish skips the check', async () => {
