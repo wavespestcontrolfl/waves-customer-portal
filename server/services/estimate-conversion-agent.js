@@ -628,6 +628,12 @@ async function generateLlmReviewDraft({ customer, body, decision }) {
       inboundMessage: body,
       intent: { intent: decision.intent, confidence: decision.confidence },
       schedulingIntent: hasSchedulingIntent(body),
+      // Real-answers OPEN TIMES (pre-push audit P1): without city,
+      // fetchOpenTimesBlock always returns null even for a matched
+      // customer with a known city, and GATE_SMS_REAL_ANSWERS's rewritten
+      // prompt would tell the model to offer times it was never given.
+      // Same customer row + convention draftShadowReply uses.
+      city: customer?.city || null,
     });
     // Only a verified-clean draft may replace the template: unconverged means
     // the reply still asserts facts the context doesn't support after the

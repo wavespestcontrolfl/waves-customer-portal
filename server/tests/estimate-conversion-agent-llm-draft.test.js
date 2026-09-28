@@ -76,7 +76,7 @@ const { generateGroundedDraft } = require('../services/sms-shadow-drafter');
 const MODELS = require('../config/models');
 const { processInboundSms } = require('../services/estimate-conversion-agent');
 
-const CUSTOMER = { id: 'cust-1', first_name: 'Catherine', last_name: 'Jones' };
+const CUSTOMER = { id: 'cust-1', first_name: 'Catherine', last_name: 'Jones', city: 'Venice' };
 
 // An outbound scheduling prompt makes the thread "active scheduling", which is
 // what routed Catherine's complaint into service_scheduling_sms in the first
@@ -153,6 +153,10 @@ describe('processInboundSms — grounded LLM review draft', () => {
     const call = generateGroundedDraft.mock.calls[0][0];
     expect(call.inboundMessage).toBe('Hello what happened this morning');
     expect(call.intent.intent).toBe('service_scheduling_window_reply');
+    // Real-answers OPEN TIMES (pre-push audit P1): without this, a matched
+    // customer's known city never reaches fetchOpenTimesBlock, and the
+    // gate-on prompt would ask the model to offer times it has none of.
+    expect(call.city).toBe('Venice');
   });
 
   test('persists the PER-DRAFT promptVersion generateGroundedDraft actually returned, not a hardcoded constant (pre-push audit P1)', async () => {
