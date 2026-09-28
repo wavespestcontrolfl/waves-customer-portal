@@ -89,9 +89,7 @@ async function runVisitCancellationFollowThrough({
       // The void sweep deliberately skips unsafe invoices without throwing.
       // Reuse its callers' resolved-status contract: paid/processing money,
       // an unverifiable PI, and still-collectible invoices all need review.
-      const unresolvedInvoice = await InvoiceService
-        .unresolvedInvoicesForCancelledService(db, id, { serviceRecordLinks: Boolean(pinned) })
-        .first('id');
+      const unresolvedInvoice = await InvoiceService.unresolvedInvoicesForCancelledService(db, id).first('id');
       if (unresolvedInvoice) {
         throw new Error('Service invoice still needs money handling; fee requires review');
       }
