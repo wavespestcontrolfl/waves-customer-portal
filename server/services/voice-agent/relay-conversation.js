@@ -3194,7 +3194,6 @@ class RelayConversation {
     this._pinClaudeFallback();
     this._modelSwitch = { from, to: this.model, reason, turn: Number.isFinite(stat.turn) ? stat.turn : null };
     stat.modelSwitched = true;
-    stat.effort = this._stampedEffort; // the turn's reply now comes from Claude
     if (reason === 'stream_timeout') stat.timedOut = true; // the caller still waited out the timeout, rescued or not
     logger.warn(`[voice-relay] provider-failure fallback callSid=${maskSid(this.callSid)} reason=${reason} from=${from} to=${this.model}`);
     // Stamped on the call row the moment it happens (codex r2 P2 on #5209):
@@ -3216,10 +3215,13 @@ class RelayConversation {
    * is once per CALL, so this leg runs on the same shared-chain Claude model
    * for the rest of the call instead of returning to the provider that
    * failed, and carries the earlier record forward in its own stamps (this
-   * leg's own record wins if it somehow switched first).
+   * leg's own record wins if it somehow switched first). It keeps the model
+   * the call already switched to when that is still an allowed Claude id,
+   * so a reconnect on a process with newer settings never changes models
+   * again mid-call (codex r4).
    */
   _adoptEarlierSwitch(earlier) {
-    this._pinClaudeFallback();
+    this._pinClaudeFallback(earlier.to);
     this._modelSwitch ||= earlier;
     if (this._currentTurn) this._currentTurn.effort = this._stampedEffort;
   }
@@ -3230,8 +3232,8 @@ class RelayConversation {
    * run by _applyResumeState when an earlier leg of this call already
    * switched, so a reconnect never returns to the provider that failed.
    */
-  _pinClaudeFallback() {
-    const shared = resolveSharedAnthropicChain(null);
+  _pinClaudeFallback(recordedModel = null) {
+    const shared = ALLOWED_OVERRIDE_MODEL_IDS.has(recordedModel) ? { model: recordedModel, fallbackReason: null } : resolveSharedAnthropicChain(null);
     this.model = shared.model;
     // A rejected VOICE_RELAY_MODEL / MODEL_VOICE is why the call runs on the
     // registry default now (codex r2 P2): keep that in the stamp.
@@ -3392,6 +3394,9 @@ class RelayConversation {
           return null;
         }
         if (retryable) {
+          // Only a retry makes Claude this turn's speaker; a round that already
+          // spoke on OpenAI keeps OpenAI's effort (codex r4).
+          stat.effort = this._stampedEffort;
           stat.firstTokenAt = firstTokenAtStart;
           continue;
         }

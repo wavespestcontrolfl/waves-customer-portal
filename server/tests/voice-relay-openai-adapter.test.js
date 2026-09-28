@@ -931,6 +931,44 @@ describe('OpenAI provider-failure fallback (mid-call switch to Claude)', () => {
     }
   });
 
+  // gpt-5.6-luna stamps effort 'none'; the Claude fallback stamps 'low' — so
+  // these two tell which model a turn's effort is credited to.
+  test('turn effort is credited to Claude only when Claude retries the round', async () => {
+    process.env.GATE_VOICE_RELAY_OPENAI_INBOUND = 'true';
+    process.env.VOICE_RELAY_INBOUND_MODEL = 'gpt-5.6-luna';
+    global.fetch = jest.fn(async () => ({ ok: false, status: 500, text: async () => 'server error' }));
+    mockAnthropicScriptedMessages.push({ content: [{ type: 'text', text: 'How can I help?' }], stop_reason: 'end_turn' });
+    const convo = new RelayConversation({ callSid: 'CA-fallback-effort-retry', from: '+19415551234', send: () => {} });
+    expect(convo._stampedEffort).toBe('none');
+    await convo.handlePrompt('hello?');
+    expect(mockAnthropicStreamCalls).toHaveLength(1);
+    expect(convo._turnStats[0].effort).toBe('low');
+  });
+
+  test('a streamed round that spoke on OpenAI and then failed keeps OpenAI effort on its turn', async () => {
+    const savedRenderer = process.env.VOICE_RELAY_RENDERER;
+    process.env.VOICE_RELAY_RENDERER = 'stream';
+    try {
+      process.env.GATE_VOICE_RELAY_OPENAI_INBOUND = 'true';
+      process.env.VOICE_RELAY_INBOUND_MODEL = 'gpt-5.6-luna';
+      global.fetch = jest.fn(async () => ({
+        ok: true, status: 200,
+        body: (async function* gen() {
+          yield `data: ${JSON.stringify({ type: 'response.output_item.added', item: { type: 'message' } })}\n\n`;
+          yield `data: ${JSON.stringify({ type: 'response.output_text.delta', delta: 'One moment please. ' })}\n\n`;
+          yield `data: ${JSON.stringify({ type: 'error', error: { code: 'stream_broke' } })}\n\n`;
+        }()),
+      }));
+      const convo = new RelayConversation({ callSid: 'CA-fallback-effort-spoke', from: '+19415551234', send: () => {} });
+      await convo.handlePrompt('hello?');
+      expect(mockAnthropicStreamCalls).toHaveLength(0); // not retried
+      expect(convo._provider).toBe('anthropic'); // switched for the next turn
+      expect(convo._turnStats[0].effort).toBe('none'); // this turn's speech came from OpenAI
+    } finally {
+      if (savedRenderer === undefined) delete process.env.VOICE_RELAY_RENDERER; else process.env.VOICE_RELAY_RENDERER = savedRenderer;
+    }
+  });
+
   test('a round whose streamed send already failed is not retried on Claude — the socket cannot deliver speech', async () => {
     const savedRenderer = process.env.VOICE_RELAY_RENDERER;
     process.env.VOICE_RELAY_RENDERER = 'stream';
@@ -1006,6 +1044,21 @@ describe('OpenAI provider-failure fallback (mid-call switch to Claude)', () => {
     expect(convo.model).toBe(MODELS.DEFAULTS.VOICE);
     expect(convo._canSwitchToClaudeFallback()).toBe(false);
     expect(convo._versionStamps().model_switch).toEqual(earlier);
+  });
+
+  test('a reconnected leg keeps the Claude model the call already switched to, not this process\'s current setting', async () => {
+    process.env.GATE_VOICE_RELAY_OPENAI_INBOUND = 'true';
+    process.env.VOICE_RELAY_INBOUND_MODEL = LUNA;
+    const { ALLOWED_OVERRIDE_MODEL_IDS } = require('../services/voice-agent/relay-conversation');
+    const other = [...ALLOWED_OVERRIDE_MODEL_IDS].find((id) => id !== MODELS.DEFAULTS.VOICE);
+    const convo = new RelayConversation({ callSid: 'CA-fallback-resume-model', from: '+19415551234', send: () => {} });
+    await convo._applyResumeState({ callerTurns: [], lookupRefs: [], slotRefs: [], promises: [], modelSwitch: { from: LUNA, to: other, reason: 'provider_error', turn: 1 } });
+    expect(convo.model).toBe(other);
+    expect(convo._provider).toBe('anthropic');
+    // A recorded model this process no longer allows falls to the shared chain.
+    const convo2 = new RelayConversation({ callSid: 'CA-fallback-resume-model-2', from: '+19415551234', send: () => {} });
+    await convo2._applyResumeState({ callerTurns: [], lookupRefs: [], slotRefs: [], promises: [], modelSwitch: { from: LUNA, to: 'gpt-6-sol', reason: 'provider_error', turn: 1 } });
+    expect(convo2.model).toBe(MODELS.DEFAULTS.VOICE);
   });
 
   test('a mid-stream OpenAI error on the block renderer retries on Claude, and the turn stats describe the Claude reply', async () => {
