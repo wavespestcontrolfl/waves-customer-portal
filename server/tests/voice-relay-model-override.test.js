@@ -479,7 +479,7 @@ describe('Sonnet 5.5 sandbox candidate (between_tools floor)', () => {
       expect(p.model).toBe(SONNET_55);
       expect(p.thinking).toEqual({ type: 'between_tools' });
       expect(p.output_config).toEqual({ effort: 'low' });
-      expect(p.max_tokens).toBe(THINKING_FLOOR_TOKENS); // progress-update thinking blocks spend from it
+      expect(p.max_tokens).toBe(THINKING_FLOOR_TOKENS); // progress-update thinking blocks spend from it (shared floor)
       expect(p).not.toHaveProperty('tool_choice');
     }
   });

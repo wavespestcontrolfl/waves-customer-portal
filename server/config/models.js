@@ -117,8 +117,10 @@ function anthropicAcceptsEffort(model, level) {
 // a no-thinking reply ends the turn with no text. Sonnet 5 also thinks by
 // default, but its lanes' caps were already tuned against it in production
 // (previsit brief 1000 → 2000 → 3000), so it is left out and this stays
-// inert for today's traffic.
-const ANTHROPIC_THINKING_FLOOR_RE = /^claude-opus-[5-9](?![0-9])|^claude-(fable|mythos)-/;
+// inert for today's traffic. Sonnet 5.5 and later cannot turn thinking off
+// (even `between_tools` returns progress-update thinking blocks), so they
+// take the floor like Opus 5.5.
+const ANTHROPIC_THINKING_FLOOR_RE = /^claude-opus-[5-9](?![0-9])|^claude-sonnet-5-[0-9]|^claude-sonnet-[6-9](?![0-9])|^claude-(fable|mythos)-/;
 
 // NARROWER than the floor above on purpose: bare Opus 5 (`claude-opus-5`)
 // thinks by default (ANTHROPIC_THINKING_FLOOR_RE) but still ACCEPTS

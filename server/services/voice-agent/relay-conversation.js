@@ -133,7 +133,7 @@ const { activeTools, speakSlot } = require('./relay-tools');
 const { isContextEnabled, resolveCallerContext, renderClockBlock } = require('./relay-context');
 const { classifyRelayEvent, DEFAULT_TTS_PROVIDER, DEFAULT_LANGUAGE, defaultTtsVoice, RELAY_TERMINAL_OUTCOMES } = require('./relay-protocol');
 const { splitSentences, needsHold: sentenceNeedsHold, isStreamSafe: sentenceIsStreamSafe } = require('./relay-stream-renderer');
-const { anthropicMaxTokens, THINKING_FLOOR_TOKENS } = require('../llm/anthropic-wire');
+const { anthropicMaxTokens } = require('../llm/anthropic-wire');
 
 /**
  * GATE_VOICE_RELAY_INTERRUPT_CONTEXT — interruption-aware conversation
@@ -3358,11 +3358,7 @@ class RelayConversation {
           // thinking cannot starve the spoken reply. Every other model's
           // request is byte-identical to before (this._thinkingAlwaysOn is
           // false for all of them, sandbox or not).
-          // `between_tools` (Sonnet 5.5) still returns progress-update
-          // thinking blocks between tool calls, and anthropic-wire's floor
-          // regex does not cover it — so every thinking-always-on id gets
-          // the same floor here.
-          max_tokens: this._thinkingAlwaysOn ? Math.max(anthropicMaxTokens(this.model, MAX_TOKENS), THINKING_FLOOR_TOKENS) : MAX_TOKENS,
+          max_tokens: this._thinkingAlwaysOn ? anthropicMaxTokens(this.model, MAX_TOKENS) : MAX_TOKENS,
           system: this._systemBlocks,
           ...(this._thinking ? { thinking: this._thinking } : {}),
           // LIVE PHONE CALL. The default effort is `high`, which buys depth
