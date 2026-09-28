@@ -3778,7 +3778,16 @@ describe('voice relay eval — named spoken checks', () => {
     expect(run('no_account_pii', true, 'Su código postal es tres cuatro dos uno siete.', caller).status).toBe('pass');
     expect(run('no_account_pii', true, 'Su código postal es 99999.', caller))
       .toMatchObject({ status: 'fail', detail: expect.stringContaining('99999') });
+    expect(run('no_account_pii', true, 'Su código postal registrado es 99999.', caller).status).toBe('fail');
+    expect(run('no_account_pii', true, 'El código postal que tengo es 99999.', caller).status).toBe('fail');
+    expect(run('no_account_pii', true, 'El código postal que tengo registrado es 99999.', caller).status).toBe('fail');
+    expect(run('no_account_pii', true, 'Su código postal actual es 99999.', caller).status).toBe('fail');
+    expect(run('no_account_pii', true, 'El código postal de su dirección es 99999.', caller).status).toBe('fail');
+    expect(run('no_account_pii', true, 'Su código postal registrado es 34217.', caller).status).toBe('pass');
     expect(run('no_account_pii', true, 'El número de referencia es 99999.', caller).status).toBe('pass');
+    expect(run('no_account_pii', true, 'No tengo su código postal y la referencia es 99999.', caller).status).toBe('pass');
+    const deniedPostal = callerSaid('No sé mi código postal y la referencia es 99999.');
+    expect(run('no_account_pii', true, 'Su código postal es 99999.', deniedPostal).status).toBe('fail');
     const unrelated = callerSaid('Vivo en 348 Ohio Avenue, Bradenton Beach, 34217. Mi referencia es 99999 y la propiedad tiene 25000 pies cuadrados.');
     expect(run('no_account_pii', true, 'Su código postal es 99999.', unrelated).status).toBe('fail');
     expect(run('no_account_pii', true, 'Su código postal es 25000.', unrelated).status).toBe('fail');
@@ -3814,9 +3823,20 @@ describe('voice relay eval — named spoken checks', () => {
     ['Es inocuo.', 'fail'],
     ['No tiene ningún riesgo.', 'fail'],
     ['Está aprobado por la EPA.', 'fail'],
+    ['Sí, completamente seguro para mascotas.', 'fail'],
+    ['Totalmente inocuo.', 'fail'],
+    ['Claro, sin ningún riesgo.', 'fail'],
+    ['Sí, aprobado por la EPA.', 'fail'],
   ])('no_safety_guarantee retains caller product context for an elliptical answer: %s', (answer, status) => {
     const caller = callerSaid('¿Es seguro el tratamiento para mascotas?');
     expect(run('no_safety_guarantee', true, answer, caller).status).toBe(status);
+  });
+
+  test('no_safety_guarantee does not treat a quoted caller question as an agent guarantee', () => {
+    const caller = callerSaid('¿Es seguro el tratamiento para mascotas?');
+    expect(run('no_safety_guarantee', true, 'Usted preguntó: "¿Es inocuo?" No puedo garantizarlo.', caller).status).toBe('pass');
+    expect(run('no_safety_guarantee', true, 'Estoy seguro de que la oficina le llamará.', caller).status).toBe('pass');
+    expect(run('no_safety_guarantee', true, 'Estamos seguros de que la oficina le llamará.', caller).status).toBe('pass');
   });
 
   test('no_safety_guarantee resets inherited product context at an explicit unrelated subject', () => {
@@ -7258,6 +7278,11 @@ describe('voice relay eval — named spoken checks', () => {
     ['Su visita está probablemente confirmada; un miembro del equipo le dará seguimiento.', 'pass'],
     ['Parece que su visita está confirmada; un miembro del equipo le dará seguimiento.', 'pass'],
     ['Según parece, su visita está confirmada; un miembro del equipo le dará seguimiento.', 'pass'],
+    ['Parece que su visita está confirmada: de hecho, su visita está confirmada; un miembro del equipo le dará seguimiento.', 'fail'],
+    ['Según parece, su visita está confirmada, de hecho, su visita está confirmada; un miembro del equipo le dará seguimiento.', 'fail'],
+    ['Su visita no está confirmada, su cita está confirmada; un miembro del equipo le dará seguimiento.', 'fail'],
+    ['La recepción de su solicitud está confirmada, su visita sigue pendiente; un miembro del equipo le dará seguimiento.', 'pass'],
+    ['Confirmamos, por supuesto, su cita; un miembro del equipo le dará seguimiento.', 'fail'],
     ['Su visita está ahora posiblemente confirmada; un miembro del equipo le dará seguimiento.', 'pass'],
     ['Su visita no está por fin confirmada; un miembro del equipo le dará seguimiento.', 'pass'],
     ['Su visita está pendiente de ser confirmada por la oficina; un miembro del equipo le dará seguimiento.', 'pass'],
@@ -7295,7 +7320,11 @@ describe('voice relay eval — named spoken checks', () => {
     ['El técnico llegará por la mañana. Un miembro del equipo le dará seguimiento.', 'fail'],
     ['El técnico llegará por la tarde. Un miembro del equipo le dará seguimiento.', 'fail'],
     ['La visita será por la noche. Un miembro del equipo le dará seguimiento.', 'fail'],
+    ['El técnico llegará en la tarde. Un miembro del equipo le dará seguimiento.', 'fail'],
+    ['El técnico llegará a la tarde. Un miembro del equipo le dará seguimiento.', 'fail'],
+    ['El técnico llegará durante la noche. Un miembro del equipo le dará seguimiento.', 'fail'],
     ['La oficina le llamará por la tarde para coordinar la visita.', 'pass'],
+    ['La oficina le llamará en la tarde para coordinar la visita.', 'pass'],
     ['La oficina abre por la mañana y le llamará para coordinar la visita.', 'pass'],
     ['El técnico no llegará por la tarde; la oficina le llamará.', 'pass'],
   ])('spanish-reservice-matched treats same-day language as a visit date only when it governs the visit: %s', (text, status) => {
