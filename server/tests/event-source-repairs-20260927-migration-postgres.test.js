@@ -10,6 +10,7 @@ const { randomUUID } = require('crypto');
 const knex = require('knex');
 
 const migration = require('../models/migrations/20260927120000_event_source_repairs_20260927');
+const seedMigration = require('../models/migrations/20260927140000_seed_clearwater_wellen_event_sources');
 
 const DISABLE_FEED_URLS = [
   'https://www.visitsarasota.com/events-festivals',
@@ -48,6 +49,7 @@ async function seedSource(db, overrides) {
       t.string('url', 512).notNullable();
       t.string('feed_url', 512).notNullable().unique();
       t.string('feed_type', 16).notNullable();
+      t.specificType('coverage_geo', 'text[]').nullable();
       t.smallint('priority_tier').notNullable().defaultTo(3);
       t.boolean('enabled').notNullable().defaultTo(true);
       t.jsonb('scrape_config').nullable();
@@ -228,5 +230,31 @@ async function seedSource(db, overrides) {
     expect(disabled.every((r) => r.enabled === false)).toBe(true);
     const mote = await db('event_sources').where({ feed_url: 'https://mote.org/?post_type=tribe_events&ical=1&eventDisplay=list' }).first();
     expect(mote).toBeTruthy();
+  });
+
+  test('seeds Clearwater and Wellen Park when a fresh database never had them', async () => {
+    await db('event_sources').whereIn('feed_url', [
+      'https://www.myclearwater.com/Events-and-Meetings',
+      'https://wellenpark.com/events/feed/',
+      'https://wellenpark.com/events/',
+    ]).del();
+    await migration.up(db);
+    await seedMigration.up(db);
+    const clearwater = await db('event_sources').where({ feed_url: 'https://www.myclearwater.com/Events-and-Meetings' });
+    const wellen = await db('event_sources').where({ feed_url: 'https://wellenpark.com/events/' });
+    expect(clearwater).toHaveLength(1);
+    expect(clearwater[0].scrape_config).toMatchObject({ contentSelector: '.events-list-container' });
+    expect(wellen).toHaveLength(1);
+    expect(wellen[0].feed_type).toBe('scrape');
+    expect(wellen[0].scrape_config).toMatchObject({ contentSelector: 'section.featured-events-slider' });
+  });
+
+  test('seed does not duplicate or alter existing Clearwater / Wellen Park rows', async () => {
+    await seedMigration.up(db);
+    await migration.up(db);
+    await seedMigration.up(db);
+    expect(await db('event_sources').where({ feed_url: 'https://www.myclearwater.com/Events-and-Meetings' })).toHaveLength(1);
+    const rows = await db('event_sources').where('name', 'like', 'Wellen Park%');
+    expect(rows).toHaveLength(1);
   });
 });
