@@ -2577,13 +2577,17 @@ describe('runNext general shadow behavior', () => {
 });
 
 describe('runNext post-publish bookkeeping', () => {
-  function pageEditLockHarness(lockedRow, { unlockThrows = false } = {}) {
+  function pageEditLockHarness(lockedRow, { unlockThrows = false, lockFree = true } = {}) {
     const events = [];
     const conn = {
       query: jest.fn(async (sql) => {
-        events.push(sql.includes('unlock') ? 'unlock' : 'lock');
-        if (unlockThrows && sql.includes('unlock')) throw new Error('connection reset');
-        return { rows: [] };
+        if (sql.includes('unlock')) {
+          events.push('unlock');
+          if (unlockThrows) throw new Error('connection reset');
+          return { rows: [] };
+        }
+        events.push(lockFree ? 'lock' : 'lock_busy');
+        return { rows: [{ locked: lockFree }] };
       }),
     };
     const client = {
@@ -2642,7 +2646,7 @@ describe('runNext post-publish bookkeeping', () => {
         queue_claimed_at: new Date('2026-09-26T13:00:00Z'),
       },
     )).rejects.toMatchObject({ code: 'PAGE_EDIT_SUPERSEDED' });
-    expect(lock.conn.query).toHaveBeenCalledWith('SELECT pg_advisory_lock(hashtext($1))', ['opportunity_page_edit']);
+    expect(lock.conn.query).toHaveBeenCalledWith('SELECT pg_try_advisory_lock(hashtext($1)) AS locked', ['opportunity_page_edit']);
     expect(lock.events).toEqual(['lock', 'unlock', 'release']);
     expect(publisher.publishRefresh).not.toHaveBeenCalled();
   });
@@ -2713,6 +2717,82 @@ describe('runNext post-publish bookkeeping', () => {
     expect(lock.conn.__knex__disposed).toMatch(/page-edit advisory unlock failed: connection reset/);
     expect(lock.client.releaseConnection).toHaveBeenCalledWith(lock.conn);
     expect(lock.client.destroyRawConnection).toHaveBeenCalledWith(lock.conn);
+  });
+
+  describe('page-edit lock bounds', () => {
+    const originalEnv = { ...process.env };
+    const originalFetch = global.fetch;
+    afterEach(() => {
+      process.env = { ...originalEnv };
+      global.fetch = originalFetch;
+    });
+
+    function backfillRun(id) {
+      return {
+        opportunity_id: id,
+        queue_claim_id: 'claim-bound',
+        queue_claimed_at: new Date('2026-09-28T18:00:00Z'),
+      };
+    }
+
+    function backfillQueue(id) {
+      return {
+        getById: jest.fn().mockResolvedValue({
+          id, bucket: 'citability_backfill', status: 'claimed', signal_metadata: {},
+        }),
+        _internals: { pageEditSuperseded: () => false },
+      };
+    }
+
+    const lockedRow = {
+      bucket: 'citability_backfill', status: 'claimed', claim_id: 'claim-bound',
+      claimed_at: new Date('2026-09-28T18:00:00Z'), signal_metadata: {},
+    };
+
+    test('gives up waiting for a busy page-edit lock and fails closed without publishing', async () => {
+      process.env.CONTENT_PAGE_EDIT_LOCK_ACQUIRE_MS = '0';
+      const lock = pageEditLockHarness(lockedRow, { lockFree: false });
+      const publisher = { publishRefresh: jest.fn() };
+      const runner = loadRunnerWith({
+        queue: backfillQueue('opp_lock_busy'), briefBuilder: {}, publisher, dbQuery: lock.query, dbClient: lock.client,
+      });
+
+      await expect(runner._publishAndDistribute(
+        { body: 'draft' }, { action_type: 'refresh_existing_page' }, backfillRun('opp_lock_busy'),
+      )).rejects.toMatchObject({ code: 'PAGE_EDIT_OWNERSHIP_LOST', message: expect.stringMatching(/timed out after 0ms/) });
+      expect(publisher.publishRefresh).not.toHaveBeenCalled();
+      // Never acquired, so never unlocked; the pooled connection still goes back.
+      expect(lock.events).toEqual(['lock_busy', 'release']);
+    });
+
+    test('a GitHub call that outlives the hold deadline fails and the lock is still released', async () => {
+      process.env.CONTENT_PAGE_EDIT_LOCK_HOLD_MS = '30';
+      process.env.GITHUB_TOKEN = 'test-token';
+      global.fetch = jest.fn((url, init) => new Promise((resolve, reject) => {
+        init.signal.addEventListener('abort', () => reject(init.signal.reason));
+      }));
+      const lock = pageEditLockHarness(lockedRow);
+      let gh = null;
+      const publisher = {
+        publishRefresh: jest.fn(async () => {
+          lock.events.push('publish');
+          await gh.getFile('src/content/blog/x.mdx');
+          return { status: 'no_changes' };
+        }),
+      };
+      const runner = loadRunnerWith({
+        queue: backfillQueue('opp_hold'), briefBuilder: {}, publisher, dbQuery: lock.query, dbClient: lock.client,
+      });
+      // loadRunnerWith resets the module registry; take the same client
+      // instance the runner's lazy require will resolve.
+      gh = require('../services/content-astro/github-client');
+
+      await expect(runner._publishAndDistribute(
+        { body: 'draft' }, { action_type: 'refresh_existing_page' }, backfillRun('opp_hold'),
+      )).rejects.toMatchObject({ code: 'GITHUB_REQUEST_DEADLINE_EXCEEDED' });
+      expect(global.fetch).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ signal: expect.any(Object) }));
+      expect(lock.events).toEqual(['lock', 'publish', 'unlock', 'release']);
+    });
   });
 
   // These tests exercise publish/queue bookkeeping, not blog dedup. Blog

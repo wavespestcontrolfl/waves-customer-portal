@@ -100,6 +100,15 @@ const getImpactTracker = lazy('impact-tracker', '../seo/impact-tracker');
 const getSocialMedia = lazy('social-media', '../social-media');
 const getInterceptSeeder = lazy('intercept-brief-seeder', './intercept-brief-seeder');
 const getTopicTargetingGate = lazy('topic-targeting-gate', './topic-targeting-gate');
+const getGithubClient = lazy('github-client', '../content-astro/github-client');
+
+// Bounds for the session-level page-edit lock held across a citability
+// publish. Waiting past ACQUIRE fails closed (PAGE_EDIT_OWNERSHIP_LOST);
+// GitHub calls inside the locked section stop at HOLD so a hung request
+// cannot keep every page-edit producer waiting.
+const PAGE_EDIT_LOCK_ACQUIRE_MS_DEFAULT = 30_000;
+const PAGE_EDIT_LOCK_POLL_MS = 250;
+const PAGE_EDIT_LOCK_HOLD_MS_DEFAULT = 10 * 60_000;
 
 async function releasePageEditLockConnection(lockConn, unlockError) {
   // Tarn still owns this checkout. Mark it disposed so Knex rejects it,
@@ -1673,17 +1682,28 @@ class AutonomousRunner {
    * keeping a database transaction open. A successful GitHub branch/commit/PR
    * must not be converted into an ordinary retry by a later COMMIT failure.
    * This lock fails closed: proceeding without page ownership proof could
-   * publish over an ordinary edit.
+   * publish over an ordinary edit. Both waits are bounded: acquiring gives up
+   * after CONTENT_PAGE_EDIT_LOCK_ACQUIRE_MS, and GitHub calls inside the
+   * locked section fail once CONTENT_PAGE_EDIT_LOCK_HOLD_MS has elapsed.
    */
   async _withPageEditLock(fn) {
     let lockConn = null;
     let acquired = false;
     let unlockError = null;
+    const acquireMs = envInt('CONTENT_PAGE_EDIT_LOCK_ACQUIRE_MS', PAGE_EDIT_LOCK_ACQUIRE_MS_DEFAULT);
+    // A zero hold would fail every GitHub call, so it falls back to the default.
+    const holdMs = envInt('CONTENT_PAGE_EDIT_LOCK_HOLD_MS', PAGE_EDIT_LOCK_HOLD_MS_DEFAULT) || PAGE_EDIT_LOCK_HOLD_MS_DEFAULT;
     try {
       lockConn = await db.client.acquireConnection();
-      await lockConn.query("SELECT pg_advisory_lock(hashtext($1))", ['opportunity_page_edit']);
+      const waitUntil = Date.now() + acquireMs;
+      for (;;) {
+        const res = await lockConn.query('SELECT pg_try_advisory_lock(hashtext($1)) AS locked', ['opportunity_page_edit']);
+        if (res?.rows?.[0]?.locked === true) break;
+        if (Date.now() >= waitUntil) throw new Error(`timed out after ${acquireMs}ms waiting for another page edit`);
+        await new Promise((r) => setTimeout(r, PAGE_EDIT_LOCK_POLL_MS));
+      }
       acquired = true;
-      return await fn(lockConn);
+      return await getGithubClient().runWithRequestDeadline(Date.now() + holdMs, () => fn(lockConn));
     } catch (err) {
       if (!acquired) {
         const unavailable = new Error(`Page-edit ownership lock unavailable: ${err.message}`);
