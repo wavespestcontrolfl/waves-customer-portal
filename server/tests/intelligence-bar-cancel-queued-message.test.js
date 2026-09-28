@@ -8,7 +8,10 @@
 // which skips cleanly without DATABASE_URL.
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../services/scheduled-sms-cancel', () => ({ cancelScheduledSmsRow: jest.fn() }));
+jest.mock('../services/scheduled-sms-cancel', () => ({
+  cancelScheduledSmsRow: jest.fn(),
+  PRIOR_ATTEMPT_KEY_RE: jest.requireActual('../services/scheduled-sms-cancel').PRIOR_ATTEMPT_KEY_RE,
+}));
 
 const db = require('../models/db');
 const { COMMS_TOOLS, COMMS_READ_TOOLS, executeCommsTool } = require('../services/intelligence-bar/comms-tools');
@@ -18,6 +21,8 @@ const { WRITE_TWO_STEP_TOOL_NAMES } = require('../services/intelligence-bar/writ
 
 const MESSAGE_ID = '11111111-1111-4111-8111-111111111111';
 const CUSTOMER_ID = '22222222-2222-4222-8222-222222222222';
+// Synthetic uuid per index — the queue cursor validates ids as uuids.
+const msgId = (i) => `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`;
 const CUSTOMER_ROW = { id: CUSTOMER_ID, first_name: 'Synthetic', last_name: 'Fixture' };
 
 beforeEach(() => {
@@ -436,7 +441,7 @@ test('the confirming admin (actionContext.technicianId) is threaded into the sha
 // P2: pages by a (scheduled_for, id) keyset cursor, not an offset.
 test('list_queued_messages caps at the default limit (25) and pages by next_cursor', async () => {
   const rows = Array.from({ length: 30 }, (_, i) => ({
-    id: `msg-${i}`, customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled',
+    id: msgId(i), customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled',
     to_phone: '+19415550100', message_type: 'reminder', message_body: `Synthetic body ${i}`,
     scheduled_for: new Date(Date.now() + (i + 1) * 60000), metadata: {},
   }));
@@ -452,14 +457,14 @@ test('list_queued_messages caps at the default limit (25) and pages by next_curs
   // after the last row page one showed.
   rows.splice(0, 5);
   const page2 = await executeCommsTool('list_queued_messages', { customer_id: CUSTOMER_ID, channel: 'sms', cursor: page1.next_cursor });
-  expect(page2.messages.map((m) => m.message_id)).toEqual(['msg-25', 'msg-26', 'msg-27', 'msg-28', 'msg-29']);
+  expect(page2.messages.map((m) => m.message_id)).toEqual([25, 26, 27, 28, 29].map(msgId));
   expect(page2.has_more).toBe(false);
   expect(page2.next_cursor).toBeNull();
 });
 
 test('list_queued_messages keeps reading past ineligible rows so a page is not empty while more are queued', async () => {
   const rows = Array.from({ length: 30 }, (_, i) => ({
-    id: `msg-${String(i).padStart(2, '0')}`, customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled',
+    id: msgId(i), customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled',
     to_phone: '+19415550100', message_type: 'reminder', message_body: `Synthetic body ${i}`,
     scheduled_for: new Date(Date.UTC(2099, 0, 1, 12, i)),
     // The first 26 were already attempted — never listed.
@@ -467,9 +472,30 @@ test('list_queued_messages keeps reading past ineligible rows so a page is not e
   }));
   db.mockImplementation(makeSmsDbMock(rows));
   const page = await executeCommsTool('list_queued_messages', { customer_id: CUSTOMER_ID, channel: 'sms' });
-  expect(page.messages.map((m) => m.message_id)).toEqual(['msg-26', 'msg-27', 'msg-28', 'msg-29']);
+  expect(page.messages.map((m) => m.message_id)).toEqual([26, 27, 28, 29].map(msgId));
   expect(page.has_more).toBe(false);
   expect(page.next_cursor).toBeNull();
+});
+
+test('list_queued_messages discloses texts it left out, so [] never reads as "nothing queued"', async () => {
+  const row = {
+    id: MESSAGE_ID, customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled',
+    to_phone: '+19415550100', message_type: 'reminder', message_body: 'Synthetic body',
+    scheduled_for: new Date('2099-01-01T12:00:00Z'), metadata: { entry_point: 'invoice_send_deferred' },
+  };
+  db.mockImplementation(makeSmsDbMock([row]));
+  const out = await executeCommsTool('list_queued_messages', { customer_id: CUSTOMER_ID, channel: 'sms' });
+  expect(out.messages).toEqual([]);
+  expect(out.has_more).toBe(false);
+  expect(out.excluded_count).toBe(1);
+  expect(out.note).toMatch(/still queued to send but can't be cancelled from the bar/i);
+});
+
+test('list_queued_messages refuses a cursor whose id is not a uuid (Postgres would reject the bound id)', async () => {
+  db.mockImplementation(makeSmsDbMock([]));
+  const cursor = Buffer.from('2099-01-01T12:00:00.000Z|not-a-uuid', 'utf8').toString('base64url');
+  const out = await executeCommsTool('list_queued_messages', { customer_id: CUSTOMER_ID, channel: 'sms', cursor });
+  expect(out.error).toMatch(/cursor is not valid/i);
 });
 
 test('list_queued_messages refuses a malformed cursor instead of restarting from the top', async () => {
@@ -504,6 +530,7 @@ test('a provider-retry row (provider_retry_at set) is excluded from the list and
 test.each([
   ['recovered from a stale send claim', { scheduled_sms_recovered_at: '2099-01-01T11:50:00Z', scheduled_sms_claimed_at: '2099-01-01T11:40:00Z' }, /may have reached the provider/i],
   ['claimed once then deferred with the attempt refunded', { scheduled_sms_claimed_at: '2099-01-01T11:40:00Z', scheduled_sms_attempts: 0 }, /may have reached the provider/i],
+  ['an AI-reply provider retry (twilio-webhook provider_retry: true)', { provider_retry: true }, /may have reached the provider/i],
   ['tied to an agent decision', { agent_decision_id: 'dec-synthetic-1' }, /Agent Review/i],
   ['carrying parked decisions', { parked_decision_ids: ['dec-synthetic-2'] }, /Agent Review/i],
 ])('a row %s is excluded from the list and refused', async (_label, metadata, reason) => {

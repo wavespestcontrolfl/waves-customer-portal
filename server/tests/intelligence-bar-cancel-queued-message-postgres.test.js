@@ -327,6 +327,24 @@ postgres('cancel_queued_message / list_queued_messages (real PostgreSQL, SMS-onl
     expect((await trx('sms_log').where({ id: targetId }).first()).status).toBe('sending');
   });
 
+  // Codex rounds 6-7 on #5224: the simple-only rule is enforced in the SAME
+  // statement that cancels, not just in the preview — a claim marker or an
+  // Agent Review decision landing between the fresh re-read and the DELETE
+  // still refuses. Driven at the writer so the race window is deterministic.
+  test.each([
+    ['a worker claim marker', { scheduled_sms_claimed_at: '2099-01-01T11:40:00Z' }],
+    ['an AI-reply provider_retry marker', { provider_retry: true }],
+    ['an agent decision', { agent_decision_id: 'dec-synthetic-1' }],
+    ['parked decisions', { parked_decision_ids: ['dec-synthetic-2'] }],
+  ])('the writer\'s simpleOnly CAS refuses a row carrying %s', async (_label, metadata) => {
+    const { cancelScheduledSmsRow } = require('../services/scheduled-sms-cancel');
+    const custId = await customer();
+    const targetId = await scheduledSms(custId, { metadata });
+    const result = await cancelScheduledSmsRow({ id: targetId, techRole: 'admin', simpleOnly: true });
+    expect(result.cancelled).toBe(false);
+    expect((await trx('sms_log').where({ id: targetId }).first()).status).toBe('scheduled');
+  });
+
   test('refuses when the sms was rescheduled after the preview — the pinned scheduled_for no longer matches', async () => {
     const custId = await customer();
     const targetId = await scheduledSms(custId);

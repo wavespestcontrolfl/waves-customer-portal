@@ -31,7 +31,7 @@ const { ledgerCall, ledgerCallRejected } = require('../llm-dispatch-metrics');
 // (thread lock, review-ask-reservation-in-place, recruiting reconciliation,
 // agent_decision re-park/reopen — the same workflow the admin SMS inbox's
 // own cancel uses, so this tool can never bypass it with a bare status flip).
-const { cancelScheduledSmsRow } = require('../scheduled-sms-cancel');
+const { cancelScheduledSmsRow, PRIOR_ATTEMPT_KEY_RE } = require('../scheduled-sms-cancel');
 const { isDeferredReplayEntryPoint } = require('../messaging/deferred-replay-registry');
 
 // Admin phones to exclude from results
@@ -480,7 +480,12 @@ function smsIneligibilityReason(row) {
   // Twilio accepted it. Every claim stamps scheduled_sms_claimed_at, so the
   // bar cancels only texts NO worker has ever picked up (the simple-only
   // chokepoint, as #5214 did for visits), rather than one marker per round.
-  if (meta.provider_retry_at || meta.scheduled_sms_recovered_at || meta.scheduled_sms_claimed_at) {
+  //
+  // Codex round 7 P1: producers mark this differently (twilio-webhook.js's
+  // AI-reply retry row carries provider_retry: true), so match the marker
+  // FAMILY by key name — the same regex the writer's CAS uses
+  // (scheduled-sms-cancel.js PRIOR_ATTEMPT_KEY_RE).
+  if (Object.keys(meta).some((k) => PRIOR_ATTEMPT_KEY_RE.test(k))) {
     return "This text already had a send attempt and may have reached the provider — it can't be cancelled here.";
   }
   // Agent Review linked (Codex round 6 on #5224, P1): cancelling a reply
@@ -598,6 +603,8 @@ const LIST_QUEUED_MESSAGES_MAX_BATCHES = 10;
 // scheduled_for sort last.
 const SF_MS = "date_trunc('milliseconds', scheduled_for)";
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 function encodeQueueCursor(row) {
   const sf = row.scheduled_for ? new Date(row.scheduled_for).toISOString() : '';
   return Buffer.from(`${sf}|${row.id}`, 'utf8').toString('base64url');
@@ -610,7 +617,10 @@ function decodeQueueCursor(cursor) {
   if (bar < 0) return undefined;
   const sf = raw.slice(0, bar);
   const id = raw.slice(bar + 1);
-  if (!id || (sf && Number.isNaN(Date.parse(sf)))) return undefined;
+  // The id is bound against the uuid sms_log.id column — a non-uuid would
+  // make Postgres reject the query instead of this clean refusal (Codex
+  // round 7 P2).
+  if (!UUID_RE.test(id) || (sf && Number.isNaN(Date.parse(sf)))) return undefined;
   return { sf: sf || null, id };
 }
 
@@ -630,6 +640,7 @@ async function listQueuedMessages(input) {
   // cursor always points at the last row EXAMINED, so a capped read resumes
   // exactly where it stopped.
   const messages = [];
+  let excluded = 0;
   let cursor = after;
   let lastExamined = null;
   let hasMore = false;
@@ -657,7 +668,7 @@ async function listQueuedMessages(input) {
     const page = hasMore ? rows.slice(0, want) : rows;
     for (const row of page) {
       lastExamined = row;
-      if (smsIneligibilityReason(row)) continue; // workflow-owned or already delivered — not the bar's to list
+      if (smsIneligibilityReason(row)) { excluded += 1; continue; } // not the bar's to cancel — counted, never silently hidden
       messages.push({
         message_id: row.id, channel: 'sms', masked_recipient: maskPhoneLast4(row.to_phone),
         kind: row.message_type || 'sms',
@@ -677,9 +688,14 @@ async function listQueuedMessages(input) {
     messages, total: messages.length,
     has_more: hasMore,
     next_cursor: hasMore ? encodeQueueCursor(lastExamined) : null,
-    ...(hasMore && messages.length === 0
-      ? { note: 'Only texts the bar cannot cancel were found so far — more are queued; call again with next_cursor.' }
-      : {}),
+    // Codex round 7 P2: texts the bar cannot cancel are still queued to
+    // send — say so, or [] reads as "nothing is queued".
+    excluded_count: excluded,
+    ...(excluded > 0
+      ? { note: `${excluded} other scheduled text(s) on this page are still queued to send but can't be cancelled from the bar (workflow-owned, already attempted, or tied to Agent Review) — the office handles those.${hasMore ? ' More are queued; call again with next_cursor.' : ''}` }
+      : hasMore && messages.length === 0
+        ? { note: 'More texts are queued; call again with next_cursor.' }
+        : {}),
   };
 }
 
@@ -752,7 +768,11 @@ async function cancelQueuedMessage(input, actionContext = {}) {
     preview = await queuedMessagePreview(db, input.message_id, channel);
   } catch (err) {
     // A failed read REFUSES — it never falls through as "nothing queued".
-    return { error: err.message };
+    // On Confirm it means the message changed since the card (claimed,
+    // sent, deleted), so it is flagged like every other confirm-time drift.
+    return input.confirmed === true
+      ? { error: `${err.message} Nothing was changed.`, preview_changed: true }
+      : { error: err.message };
   }
   if (String(preview.customer_id).toLowerCase() !== String(input.customer_id).toLowerCase()) {
     return { error: 'That message does not belong to the named customer. Call list_queued_messages again to resolve the correct id.' };

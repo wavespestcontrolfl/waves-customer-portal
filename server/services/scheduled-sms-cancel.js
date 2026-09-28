@@ -92,12 +92,21 @@ function pinnedBodyDigest(query, expectedBodyDigest) {
 // enforced in the SAME statement that cancels: never claimed by a send
 // worker and carrying no Agent Review decisions, so nothing past the row
 // itself changes. Off (the inbox route) = unchanged behavior.
+// Any metadata key in the prior-send-attempt family: a worker claim
+// (scheduled_sms_claimed_at), a stale-claim recovery
+// (scheduled_sms_recovered_at), or any producer's provider-retry marker
+// (scheduler.js provider_retry_at/_code, twilio-webhook.js provider_retry).
+// Matched by key NAME so a producer's variant spelling is still caught.
+const PRIOR_ATTEMPT_KEY_RE = /^(provider_retry|scheduled_sms_(claimed|recovered)_at$)/;
+const PRIOR_ATTEMPT_KEY_SQL = '^(provider_retry|scheduled_sms_(claimed|recovered)_at$)';
+
 function simpleOnlyWhere(query, simpleOnly) {
   if (!simpleOnly) return query;
   return query
-    .whereRaw("COALESCE(metadata->>'scheduled_sms_claimed_at', '') = ''")
-    .whereRaw("COALESCE(metadata->>'scheduled_sms_recovered_at', '') = ''")
-    .whereRaw("COALESCE(metadata->>'provider_retry_at', '') = ''")
+    .whereRaw(
+      "NOT EXISTS (SELECT 1 FROM jsonb_object_keys(CASE WHEN jsonb_typeof(metadata) = 'object' THEN metadata ELSE '{}'::jsonb END) AS k WHERE k ~ ?)",
+      [PRIOR_ATTEMPT_KEY_SQL],
+    )
     .whereRaw("COALESCE(metadata->>'agent_decision_id', '') = ''")
     .whereRaw("COALESCE(metadata->'parked_decision_ids', '[]'::jsonb) IN ('[]'::jsonb, 'null'::jsonb)");
 }
@@ -251,4 +260,4 @@ async function cancelScheduledSmsRow({ id, techRole, technicianId, expectedSched
   return { outcome: 'ok', cancelled: !!cancelledRow, row: cancelledRow };
 }
 
-module.exports = { cancelScheduledSmsRow };
+module.exports = { cancelScheduledSmsRow, PRIOR_ATTEMPT_KEY_RE };
