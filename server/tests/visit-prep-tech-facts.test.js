@@ -32,6 +32,7 @@ function fakeConn(tables) {
     // Real ordering (not a no-op) — this suite specifically asserts photo
     // order, which the real query gets from ORDER BY photo_index asc.
     q.orderBy = (col, dir = 'asc') => { q._order.push([col, dir]); return q; };
+    q.first = async () => (await q.select())[0];
     q.select = async () => {
       const rows = tables[table] || [];
       const filtered = rows.filter((r) => {
@@ -56,7 +57,7 @@ describe('customerFlaggedFacts', () => {
 
   test('no CURRENT-membership submissions → null (never an empty array)', async () => {
     const conn = fakeConn({
-      scheduled_services: [],
+      scheduled_services: [{ id: 'svc-1', visit_id: null }],
       visit_prep_submissions: [],
       visit_prep_photos: [],
     });
@@ -66,7 +67,7 @@ describe('customerFlaggedFacts', () => {
 
   test('ungrouped stop with submissions: shaped entries, ordered photo ids, no S3 keys/URLs', async () => {
     const conn = fakeConn({
-      scheduled_services: [],
+      scheduled_services: [{ id: 'svc-1', visit_id: null }],
       visit_prep_submissions: [
         {
           id: 'sub-1', scheduled_service_id: 'svc-1', created_at: new Date('2026-09-30T23:42:00Z'),
@@ -123,7 +124,7 @@ describe('customerFlaggedFacts', () => {
 
   test('submissions exist for the stop but none carry photos yet (note-only submission)', async () => {
     const conn = fakeConn({
-      scheduled_services: [],
+      scheduled_services: [{ id: 'svc-1', visit_id: null }],
       visit_prep_submissions: [
         { id: 'sub-1', scheduled_service_id: 'svc-1', created_at: new Date('2026-09-30T10:00:00Z'), topic: 'other', location_on_property: null, note: 'Ants near the mailbox' },
       ],
@@ -206,7 +207,10 @@ describe('members re-resolved after the read (Codex #5239 r2 P1)', () => {
     return (table) => {
       if (table !== 'scheduled_services') return base(table);
       memberReads += 1;
-      return fakeConn({ scheduled_services: memberReads === 1 ? before : after })(table);
+      // Each membership resolution reads the anchor, then its group: the
+      // first resolution (reads 1–2) sees svc-B on the stop, the post-work
+      // re-resolution sees it reassigned.
+      return fakeConn({ scheduled_services: memberReads <= 2 ? before : after })(table);
     };
   }
 
@@ -222,11 +226,51 @@ describe('members re-resolved after the read (Codex #5239 r2 P1)', () => {
   });
 });
 
+describe('anchor re-read from the database (Codex #5239 r3 P2)', () => {
+  const { techStopMemberIds } = visitPrep;
+
+  test('a requested row regrouped mid-request resolves its CURRENT stop, not the old group', async () => {
+    const conn = fakeConn({
+      scheduled_services: [
+        { id: 'svc-A', visit_id: 'visit-10', technician_id: 'tech-1', scheduled_date: '2026-10-02' },
+        { id: 'svc-B', visit_id: 'visit-9', technician_id: 'tech-1', scheduled_date: '2026-10-02' },
+        { id: 'svc-C', visit_id: 'visit-10', technician_id: 'tech-1', scheduled_date: '2026-10-02' },
+      ],
+    });
+    // The caller still holds svc-A's old visit_id (visit-9).
+    expect(await techStopMemberIds({ id: 'svc-A', visit_id: 'visit-9' }, conn)).toEqual(['svc-A', 'svc-C']);
+  });
+
+  test('a requested row detached from its group resolves to itself only', async () => {
+    const conn = fakeConn({
+      scheduled_services: [
+        { id: 'svc-A', visit_id: null, technician_id: 'tech-1', scheduled_date: '2026-10-02' },
+        { id: 'svc-B', visit_id: 'visit-9', technician_id: 'tech-1', scheduled_date: '2026-10-02' },
+      ],
+    });
+    expect(await techStopMemberIds({ id: 'svc-A', visit_id: 'visit-9' }, conn)).toEqual(['svc-A']);
+  });
+
+  test('a requested row that no longer exists resolves to nothing, so neither read returns data', async () => {
+    const conn = fakeConn({
+      scheduled_services: [{ id: 'svc-B', visit_id: 'visit-9', technician_id: 'tech-1', scheduled_date: '2026-10-02' }],
+      visit_prep_submissions: [
+        { id: 'sub-B', scheduled_service_id: 'svc-B', created_at: new Date('2026-09-30T10:00:00Z'), topic: null, location_on_property: null, note: 'old group' },
+      ],
+      visit_prep_photos: [{ id: 'photo-B', submission_id: 'sub-B', scheduled_service_id: 'svc-B', photo_index: 0, s3_key: 'visitprep/B.jpg' }],
+    });
+    const svc = { id: 'svc-A', visit_id: 'visit-9' };
+    expect(await techStopMemberIds(svc, conn)).toEqual([]);
+    expect(await customerFlaggedFacts(svc, conn)).toBeNull();
+    expect(await stopPhotoViewUrls(svc, conn)).toEqual([]);
+  });
+});
+
 describe('stopPhotoViewUrls', () => {
   beforeEach(() => jest.clearAllMocks());
 
   test('no CURRENT-membership photos → []', async () => {
-    const conn = fakeConn({ scheduled_services: [], visit_prep_photos: [] });
+    const conn = fakeConn({ scheduled_services: [{ id: 'svc-1', visit_id: null }], visit_prep_photos: [] });
     const urls = await stopPhotoViewUrls({ id: 'svc-1', visit_id: null }, conn);
     expect(urls).toEqual([]);
     expect(PhotoService.getViewUrl).not.toHaveBeenCalled();
@@ -235,7 +279,7 @@ describe('stopPhotoViewUrls', () => {
   test('signs every photo on the CURRENT stop membership at the 1-hour TTL, never S3 keys back to the caller', async () => {
     expect(TECH_PHOTO_VIEW_TTL_SECONDS).toBe(3600);
     const conn = fakeConn({
-      scheduled_services: [],
+      scheduled_services: [{ id: 'svc-1', visit_id: null }],
       visit_prep_photos: [
         { id: 'photo-1', submission_id: 'sub-1', photo_index: 0, s3_key: 'visitprep/1.jpg', scheduled_service_id: 'svc-1' },
         { id: 'photo-2', submission_id: 'sub-1', photo_index: 1, s3_key: 'visitprep/2.jpg', scheduled_service_id: 'svc-1' },

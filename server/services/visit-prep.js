@@ -486,17 +486,25 @@ async function createVisitPrepSubmission({
 // customer-side cap counts, which are about the visit, not access.
 async function techStopMemberIds(svc, conn) {
   if (!svc?.id) return [];
-  if (!svc.visit_id) return [svc.id];
+  // The anchor is re-read by id (Codex #5239 r3 P2): its visit_id,
+  // technician and date all come from the database, never the caller's
+  // copy, so a row detached or regrouped mid-request resolves its CURRENT
+  // stop instead of the old group it left. A row that no longer exists
+  // resolves to nothing.
+  const anchor = await conn('scheduled_services')
+    .where({ id: svc.id })
+    .first('id', 'visit_id', 'technician_id', 'scheduled_date');
+  if (!anchor) return [];
+  if (!anchor.visit_id) return [anchor.id];
   const rows = await conn('scheduled_services')
-    .where({ visit_id: svc.visit_id })
+    .where({ visit_id: anchor.visit_id })
     .select('id', 'technician_id', 'scheduled_date');
-  const self = rows.find((r) => String(r.id) === String(svc.id)) || svc;
-  const techKey = self.technician_id == null ? null : String(self.technician_id);
-  const dateKey = dateOnlyString(self.scheduled_date);
-  const others = rows.filter((r) => String(r.id) !== String(svc.id)
+  const techKey = anchor.technician_id == null ? null : String(anchor.technician_id);
+  const dateKey = dateOnlyString(anchor.scheduled_date);
+  const others = rows.filter((r) => String(r.id) !== String(anchor.id)
     && (r.technician_id == null ? null : String(r.technician_id)) === techKey
     && dateOnlyString(r.scheduled_date) === dateKey);
-  return [svc.id, ...others.map((r) => r.id)];
+  return [anchor.id, ...others.map((r) => r.id)];
 }
 
 // Re-resolves the stop AFTER the read/signing work and returns the member
