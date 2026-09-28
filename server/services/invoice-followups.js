@@ -1382,8 +1382,8 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
   // (Contact-ledger rows were written BEFORE each leg's delivery attempt —
   // record-then-send, codex 2026-08-14 — so there is nothing to record here.)
 
-  // A repaired original event advances its step without a new outbound touch.
-  if (selectedChannels !== null && !freshDelivery) return;
+  // An already delivered leg advances its step without a new outbound touch.
+  if (!freshDelivery) return;
 
   // Log to customer_interactions for the 360 view
   try {
