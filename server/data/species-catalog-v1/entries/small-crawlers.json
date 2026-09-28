@@ -114,8 +114,9 @@
     "safety_line": null,
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "a427cac1bc5441b7699d9ff4aee0355ac2f482505f8b92f3b34684e1d1a26eef"
     },
     "slug": "earwig",
     "common_name": "Earwig",
@@ -656,8 +657,9 @@
       "https://edis.ifas.ufl.edu/publication/IN553"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Found and confirmed a dedicated UF/IFAS Featured Creatures page this session: EENY275/IN553, \"A Webbing Barklouse, A Psocid, Archipsocus nomas Gurney\" (Donald W. Hall, Entomology & Nematology Dept.). It directly states \"the webs are unsightly, but neither the barklice nor the webs cause any harm to the trees\" and that they feed primarily on lichens (bark grazers, not tree feeders) — confirming both the webbing behavior and the harmless-to-the-tree claim. It also gives real Florida phenology: colonies rare Dec-Feb (central FL), more frequent March-June, rapidly increasing July-October; peak_months tightened to 7-10 and season_basis changed to observed accordingly."
+      "status": "owner_approved",
+      "notes": "Found and confirmed a dedicated UF/IFAS Featured Creatures page this session: EENY275/IN553, \"A Webbing Barklouse, A Psocid, Archipsocus nomas Gurney\" (Donald W. Hall, Entomology & Nematology Dept.). It directly states \"the webs are unsightly, but neither the barklice nor the webs cause any harm to the trees\" and that they feed primarily on lichens (bark grazers, not tree feeders) — confirming both the webbing behavior and the harmless-to-the-tree claim. It also gives real Florida phenology: colonies rare Dec-Feb (central FL), more frequent March-June, rapidly increasing July-October; peak_months tightened to 7-10 and season_basis changed to observed accordingly. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "4d04582d5e3fb15aa3292a9d8c6fb5f7ff516595b5e7f741519033735d93456a"
     },
     "role": "beneficial",
     "risk": "low",
