@@ -175,18 +175,33 @@ describe('predictCompletionBilling', () => {
       .toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason: 'no_amount_on_file' });
   });
 
-  // Codex pre-push P1 (client-side finding, verified against the server):
-  // a stamped estimatedPrice of 0 must resolve exactly like null — hasVisitPrice
-  // gates on `estimatedPrice != null && Number(estimatedPrice) > 0`, the SAME
-  // precedence completionInvoiceAmount and resolveScheduledServiceCharge
-  // (admin-schedule.js) both use — never a bare != null, which reads 0 as an
-  // authoritative "$0 visit" and skips the acceptance-fee fallback.
-  test('a zero estimatedPrice falls through to the per-application fee, same as null', () => {
+  // Owner ruling 2026-09-28 (real-prod bug: a $0 Rodent Trapping Service
+  // visit — estimated_price 0.00, primary_line_price 0.00, is_callback
+  // false — billed the $127 per_application_fee at completion): a stamped
+  // estimated_price of exactly 0 is the row's OWN deliberate price and is
+  // now authoritative for per-application, same as the discount-engine's
+  // provenance-backed $0 shape below — it never falls back to the
+  // acceptance fee, regardless of whether a primary_line_price base is on
+  // file. This REVERSES the prior "same as null" behavior this test used to
+  // assert (Codex pre-push P1, now superseded) — a genuinely blank
+  // (null/'') estimatedPrice still falls through to the fee exactly as
+  // before; only the bare literal zero's precedence changed.
+  test('a stamped zero estimatedPrice is authoritative for per-application (no fee fallback); null still falls through to the fee', () => {
     const perApp = { ...memberBase, lane: 'per_application', billingMode: 'per_application', perApplicationFee: 98, monthlyRate: null };
     expect(predictCompletionBilling({ ...perApp, estimatedPrice: 0 }))
-      .toEqual({ kind: 'auto_charge', amount: 98, grossAmount: 98, conflictStampedPrice: false });
+      .toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason: 'fully_discounted' });
     expect(predictCompletionBilling({ ...perApp, estimatedPrice: null }))
       .toEqual({ kind: 'auto_charge', amount: 98, grossAmount: 98, conflictStampedPrice: false });
+    expect(completionInvoiceAmount({
+      estimatedPrice: 0, isCallback: false, perApplicationBilling: true,
+      perApplicationFee: 98, monthlyRate: null, billingMode: 'per_application', primaryLinePrice: null,
+    })).toBe(0);
+    // Same with a stamped (but non-authoritative-by-the-old-rule) $0
+    // primary_line_price on file too — the bug's exact prod shape.
+    expect(completionInvoiceAmount({
+      estimatedPrice: 0, isCallback: false, perApplicationBilling: true,
+      perApplicationFee: 98, monthlyRate: null, billingMode: 'per_application', primaryLinePrice: 0,
+    })).toBe(0);
   });
 
   test('per-application honors always-free service types (Codex r1)', () => {
@@ -304,11 +319,13 @@ describe('predictCompletionBilling', () => {
       };
       expect(predictCompletionBilling(perApp))
         .toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason: 'fully_discounted' });
-      // Without primaryLinePrice (the parity fixture's own shape — a bare
-      // stamped 0, no provenance), the SAME estimatedPrice: 0 still defers
-      // to the acceptance fee exactly as before this change.
+      // Owner ruling 2026-09-28: WITHOUT primaryLinePrice too (a bare
+      // stamped 0, no discount-engine provenance) the per-application lane
+      // now ALSO predicts no charge — a bare $0 is equally the row's own
+      // deliberate price for this lane, and never falls back to the
+      // acceptance fee (superseded the old "still defers to the fee" rule).
       expect(predictCompletionBilling({ ...perApp, primaryLinePrice: null }))
-        .toEqual({ kind: 'auto_charge', amount: 97.2, grossAmount: 97.2, conflictStampedPrice: false });
+        .toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason: 'fully_discounted' });
     });
 
     test('self-pay/membership lane: a fully-discounted visit predicts no charge, never the monthly rate', () => {
@@ -320,15 +337,15 @@ describe('predictCompletionBilling', () => {
         .toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason: 'fully_discounted' });
     });
 
-    test('a primaryLinePrice of 0 (or missing) is NOT provenance — a bare stamped 0 defers to the fallback', () => {
+    test('a primaryLinePrice of 0 (or missing) is NOT discount-engine provenance, but per-application still bills nothing on a bare stamped 0 (owner ruling 2026-09-28)', () => {
       const perApp = {
         ...memberBase, lane: 'per_application', billingMode: 'per_application',
         estimatedPrice: 0, perApplicationFee: 97.2, monthlyRate: null,
       };
       expect(predictCompletionBilling({ ...perApp, primaryLinePrice: 0 }))
-        .toEqual({ kind: 'auto_charge', amount: 97.2, grossAmount: 97.2, conflictStampedPrice: false });
+        .toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason: 'fully_discounted' });
       expect(predictCompletionBilling(perApp))
-        .toEqual({ kind: 'auto_charge', amount: 97.2, grossAmount: 97.2, conflictStampedPrice: false });
+        .toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason: 'fully_discounted' });
     });
 
     test('a POSITIVE estimatedPrice always wins, provenance or not', () => {

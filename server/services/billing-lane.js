@@ -152,6 +152,16 @@ function membershipDuesCoverVisit({
     && Number(monthlyRate || 0) > 0;
 }
 
+// The ONE fact "was an ACTUAL, literal $0 stamped on this row" — Number(null)
+// === 0 and Number('') === 0, so a never-priced row (blank) must be excluded
+// explicitly before any caller treats a value as a deliberate zero (Codex
+// round 4 P1 originally guarded this inline inside hasAuthoritativeZeroPrice
+// below; hoisted so that predicate and the per-application fee-fallback below
+// share the exact same guard instead of two hand-copied versions).
+function isStampedZeroEstimate(estimatedPrice) {
+  return estimatedPrice != null && estimatedPrice !== '' && Number(estimatedPrice) === 0;
+}
+
 // Codex pre-push P1 (round 3): a stamped 0 estimated_price is NOT always
 // "unpriced" — completion-pricing's discount engine (services/completion-pricing.js
 // discountedVisit) freezes a fully-discounted application at a genuine $0 net
@@ -166,13 +176,23 @@ function membershipDuesCoverVisit({
 // every "does this visit have its own price" gate below shares this ONE
 // predicate so the two can never be told apart in one spot and conflated in
 // another.
+//
+// Stays narrow (primaryLinePrice > 0 required) on purpose: completionInvoiceAmount's
+// fallback precedence for monthly_membership / legacy-null customers depends
+// on it staying narrow — a bare $0/NULL row on THOSE lanes is documented as
+// NOT inert (waves-billing skill invariant #6: it falls through to
+// monthly_rate/WaveGuard-tier billing) and widening this general predicate
+// would silently break that. The per-application lane has no whole-plan rate
+// to protect (its own precedence is its own price -> the acceptance fee ->
+// nothing), so a bare stamped $0 there is credited via isStampedZeroEstimate
+// directly, alongside this predicate, everywhere perApplicationBilling is
+// known — never by widening this predicate itself.
 function hasAuthoritativeZeroPrice(estimatedPrice, primaryLinePrice) {
   // Codex round 4 P1: estimatedPrice must be an ACTUAL stamped zero, not
   // absent — Number(null) === 0 and Number('') === 0, so without this guard
   // a never-priced row (null/'') with a positive primary_line_price on file
   // was misread as a deliberately free visit and skipped its fee fallback.
-  return estimatedPrice != null && estimatedPrice !== ''
-    && Number(estimatedPrice) === 0
+  return isStampedZeroEstimate(estimatedPrice)
     && primaryLinePrice != null && Number(primaryLinePrice) > 0;
 }
 
@@ -202,6 +222,18 @@ function completionInvoiceAmount({
   if (hasAuthoritativeZeroPrice(estimatedPrice, primaryLinePrice)) return 0;
   if (isCallback) return 0;
   if (perApplicationBilling) {
+    // A per-application row's OWN precedence is: its own price -> the
+    // acceptance fee -> nothing. A bare stamped $0 (no primary_line_price
+    // base — the discount engine always pairs a genuine $0 net with a
+    // positive base; see hasAuthoritativeZeroPrice above) is EQUALLY the
+    // row's own deliberate price here: per-application has no whole-plan
+    // monthly_rate to protect the way monthly_membership does (that lane's
+    // legacy $0/NULL-falls-to-dues shape below is a documented, unrelated
+    // invariant — waves-billing skill #6), so there is no reason to treat a
+    // bare $0 as unpriced and fall back to the acceptance fee (2026-09-28:
+    // a $0 Rodent Trapping Service visit billed the $127 per_application_fee
+    // at completion).
+    if (isStampedZeroEstimate(estimatedPrice)) return 0;
     return Number(perApplicationFee) > 0 ? Number(perApplicationFee) : 0;
   }
   // The customer-level monthly_rate is the MEMBERSHIP dues number. An
@@ -265,10 +297,11 @@ function predictCompletionBillingPayer({
   const payerFreeReason = isCallback
     ? 'callback'
     : (isAlwaysFreeServiceType(serviceType) ? 'always_free_service_type' : null);
+  const perApplicationBilling = lane === 'per_application' || billingMode === 'per_application';
   const payerAmount = completionInvoiceAmount({
     estimatedPrice,
     isCallback,
-    perApplicationBilling: lane === 'per_application' || billingMode === 'per_application',
+    perApplicationBilling,
     perApplicationFee,
     monthlyRate,
     billingMode,
@@ -295,7 +328,8 @@ function predictCompletionBillingPayer({
   // returned { kind: 'payer', amount: 0 }, which unbilledCompletionGap
   // reads as a genuine 'no_amount_on_file' money-gap alert for a visit
   // that was never supposed to bill anyone.
-  if (hasAuthoritativeZeroPrice(estimatedPrice, primaryLinePrice)) {
+  if (hasAuthoritativeZeroPrice(estimatedPrice, primaryLinePrice)
+    || (perApplicationBilling && isStampedZeroEstimate(estimatedPrice))) {
     return { kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason: 'fully_discounted' };
   }
   return {
@@ -321,14 +355,20 @@ function predictCompletionBillingPayer({
 // and risks the two diverging.
 function predictionFromResolvedAmount({
   amount, estimatedPrice, primaryLinePrice, prepaid, autoChargeEligible, noCharge,
+  // Set only by the per_application caller — see completionInvoiceAmount's
+  // own per-application branch for why a bare stamped $0 is authoritative
+  // there but NOT for the membership/self-pay caller sharing this tail.
+  perApplicationBilling = false,
 }) {
   if (!(amount > 0)) {
-    // A provenance-backed $0 (see hasAuthoritativeZeroPrice) is a
-    // deliberately free visit, never a money gap — 'fully_discounted' is
-    // NOT in UNBILLED_MONEY_GAP_REASONS, and 'no_charge' (never
+    // A provenance-backed $0 (see hasAuthoritativeZeroPrice), or — for the
+    // per-application lane only — ANY actual stamped $0, is a deliberately
+    // free visit, never a money gap — 'fully_discounted' is NOT in
+    // UNBILLED_MONEY_GAP_REASONS, and 'no_charge' (never
     // 'invoice'/'auto_charge') keeps unbilledCompletionGap's willMint===false
     // path from reading it as a stalled mint either.
-    if (hasAuthoritativeZeroPrice(estimatedPrice, primaryLinePrice)) {
+    if (hasAuthoritativeZeroPrice(estimatedPrice, primaryLinePrice)
+      || (perApplicationBilling && isStampedZeroEstimate(estimatedPrice))) {
       return { kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason: 'fully_discounted' };
     }
     // A POSITIVE out-of-band prepayment (cash/Zelle stamped through
@@ -426,6 +466,7 @@ function predictCompletionBillingPerApplication({
   });
   return predictionFromResolvedAmount({
     amount, estimatedPrice, primaryLinePrice, prepaid, autoChargeEligible: autopayActive, noCharge,
+    perApplicationBilling: true,
   });
 }
 
@@ -513,7 +554,12 @@ function predictCompletionBilling({
   completionAutopayChargeEnabled = false,
 }) {
   const hasVisitPrice = (estimatedPrice != null && Number(estimatedPrice) > 0)
-    || hasAuthoritativeZeroPrice(estimatedPrice, primaryLinePrice);
+    || hasAuthoritativeZeroPrice(estimatedPrice, primaryLinePrice)
+    // A per-application row's own bare stamped $0 counts too (only affects
+    // the payer lane below — predictCompletionBillingPerApplication never
+    // reads this top-level hasVisitPrice, it derives its own via
+    // completionInvoiceAmount/predictionFromResolvedAmount above).
+    || ((lane === 'per_application' || billingMode === 'per_application') && isStampedZeroEstimate(estimatedPrice));
   // no_charge is two different worlds and the office must be able to tell
   // them apart. A callback / always-free type / renewal-owned visit is
   // SUPPOSED to bill nothing. An unpriced self-pay visit bills nothing only
@@ -1079,7 +1125,8 @@ async function perApplicationCompletionVoidHold({
   isCallback, serviceType, svc, dbConn,
 }) {
   const hasOwnPrice = (svc?.estimated_price != null && Number(svc.estimated_price) > 0)
-    || hasAuthoritativeZeroPrice(svc?.estimated_price, svc?.primary_line_price);
+    || hasAuthoritativeZeroPrice(svc?.estimated_price, svc?.primary_line_price)
+    || isStampedZeroEstimate(svc?.estimated_price);
   if (!isSiblingCoverageEligibleVisit({
     sourceEstimateId: svc?.source_estimate_id, hasOwnPrice, isCallback: !!isCallback, serviceType,
   })) return null;
@@ -1313,7 +1360,8 @@ async function enrichCoveredSiblingPrediction(prediction, svc, inv, dbConn) {
 // fields this lookup itself needs in order to run at all.
 function scheduleSiblingCoverageEligible(svc, dbConn) {
   const hasOwnPrice = (svc?.estimated_price != null && Number(svc.estimated_price) > 0)
-    || hasAuthoritativeZeroPrice(svc?.estimated_price, svc?.primary_line_price ?? null);
+    || hasAuthoritativeZeroPrice(svc?.estimated_price, svc?.primary_line_price ?? null)
+    || isStampedZeroEstimate(svc?.estimated_price);
   const baseShape = { sourceEstimateId: svc?.source_estimate_id, hasOwnPrice, isCallback: !!svc?.is_callback, serviceType: svc?.service_type };
   const hasBaseFields = !!(svc?.source_estimate_id && svc?.customer_id && svc?.scheduled_date && dbConn);
   return hasBaseFields && isSiblingCoverageEligibleVisit(baseShape);
@@ -1444,6 +1492,7 @@ function unbilledCompletionGap({ prediction, hasChargeableMethod = null, willMin
 module.exports = {
   BILLING_MODES,
   hasAuthoritativeZeroPrice,
+  isStampedZeroEstimate,
   UNBILLED_MONEY_GAP_REASONS,
   unbilledCompletionGap,
   MONTHLY_LANE_SQL,

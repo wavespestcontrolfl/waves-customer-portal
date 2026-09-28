@@ -44,7 +44,7 @@ const {
 } = require('../utils/datetime-et');
 const { calculateBoundedTrackingEta } = require('../services/customer-tracking-eta');
 const { customerOnAutopay, isBankMethodType, isExpiredCardMethod } = require('../services/autopay-eligibility');
-const { resolveBillingLane, predictCompletionBilling, completionInvoiceAmount, hasAuthoritativeZeroPrice, monthlyDuesCollected, attachedInvoiceAutoChargeLikely, unbilledCompletionGap, UNBILLED_MONEY_GAP_REASONS, siblingCoverageForSchedule, siblingInvoiceCoverageVerdict, isSiblingCoverageEligibleVisit, sameTripFirstApplicationBreakdown } = require('../services/billing-lane');
+const { resolveBillingLane, predictCompletionBilling, completionInvoiceAmount, hasAuthoritativeZeroPrice, isStampedZeroEstimate, monthlyDuesCollected, attachedInvoiceAutoChargeLikely, unbilledCompletionGap, UNBILLED_MONEY_GAP_REASONS, siblingCoverageForSchedule, siblingInvoiceCoverageVerdict, isSiblingCoverageEligibleVisit, sameTripFirstApplicationBreakdown } = require('../services/billing-lane');
 const { isAlwaysFreeServiceType } = require('../services/no-cost-visit-types');
 const DiscountEngine = require('../services/discount-engine');
 const { serviceExcludedFromPercentDiscount } = require('../services/pricing-engine/discount-engine');
@@ -15795,7 +15795,8 @@ async function resolveScheduledServiceCharge({
   // pure/unit-test caller, so this is a no-op for them.
   const primaryLinePrice = svc?.primary_line_price ?? null;
   const hasOwnPrice = (estimatedPrice != null && Number(estimatedPrice) > 0)
-    || hasAuthoritativeZeroPrice(estimatedPrice, primaryLinePrice);
+    || hasAuthoritativeZeroPrice(estimatedPrice, primaryLinePrice)
+    || isStampedZeroEstimate(estimatedPrice);
   // Codex P1 (round 6): this used to gate on the CUSTOMER'S CURRENT billing
   // mode — so a combined pay-per-application trip that already has its
   // first-application invoice on a sibling, whose customer later moves to a
@@ -15902,7 +15903,8 @@ async function resolveScheduledServiceCharge({
 function siblingCoverageRecheckInTrx(svc) {
   const primaryLinePrice = svc?.primary_line_price ?? null;
   const hasOwnPrice = (svc?.estimated_price != null && Number(svc.estimated_price) > 0)
-    || hasAuthoritativeZeroPrice(svc?.estimated_price, primaryLinePrice);
+    || hasAuthoritativeZeroPrice(svc?.estimated_price, primaryLinePrice)
+    || isStampedZeroEstimate(svc?.estimated_price);
   if (!isSiblingCoverageEligibleVisit({
     sourceEstimateId: svc?.source_estimate_id, hasOwnPrice, isCallback: !!svc?.is_callback, serviceType: svc?.service_type,
   })) return null;
@@ -16778,7 +16780,8 @@ router.post('/:id/invoice', async (req, res, next) => {
       // original generic copy — "bill it at completion" would be untrue for
       // those, since none of them ever bill anything at completion either.
       const hasOwnPrice = (svc.estimated_price != null && Number(svc.estimated_price) > 0)
-        || hasAuthoritativeZeroPrice(svc.estimated_price, svc.primary_line_price);
+        || hasAuthoritativeZeroPrice(svc.estimated_price, svc.primary_line_price)
+        || isStampedZeroEstimate(svc.estimated_price);
       const clearerCopy = isSiblingCoverageEligibleVisit({
         sourceEstimateId: svc.source_estimate_id, hasOwnPrice, isCallback: svc.is_callback, serviceType: svc.service_type,
       });
