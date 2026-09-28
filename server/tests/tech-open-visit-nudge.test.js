@@ -60,7 +60,7 @@ function visitRow({
 beforeEach(() => {
   jest.clearAllMocks();
   delete process.env[GATE];
-  TwilioService.sendSMS.mockResolvedValue({ success: true, sid: 'SM123' });
+  TwilioService.sendSMS.mockResolvedValue({ success: true, sid: 'SM123', deliveryOutcome: 'accepted' });
   // Fixture techs are the owner (texted) unless a test says otherwise.
   TwilioService.isKnownOwnerPhone.mockReturnValue(true);
   PushService.sendToAdminUser.mockResolvedValue({ sent: 0 });
@@ -483,8 +483,12 @@ describe('send boundary and GSM-7 (Codex r1 comment)', () => {
     expect(body).toContain('No time - Ana R. - Pest Control');
   });
 
-  test('a text suppressed by OWNER_SMS_DISABLED gives the slot back and is not counted as sent', async () => {
-    TwilioService.sendSMS.mockResolvedValue({ success: true, sid: 'owner-sms-disabled', suppressed: true });
+  test.each([
+    ['OWNER_SMS_DISABLED', { success: true, sid: 'owner-sms-disabled', suppressed: true }],
+    ['the SMS gate off', { success: true, sid: 'gate-blocked', gateBlocked: true }],
+    ['a disabled template', { success: true, sid: 'template-disabled', templateDisabled: true }],
+  ])('a success:true sentinel from %s gives the slot back and is not counted as sent', async (_label, sentinel) => {
+    TwilioService.sendSMS.mockResolvedValue(sentinel);
     const rows = [visitRow({ id: 'v1', techId: 'tech-a' })];
     const notifChains = [];
     db.mockImplementation((table) => {
@@ -540,4 +544,19 @@ describe('send boundary and GSM-7 (Codex r1 comment)', () => {
     expect(TwilioService.sendSMS).not.toHaveBeenCalled();
     expect(notifChains.some((c) => c.del.mock.calls.length > 0)).toBe(true);
   });
+});
+
+test('a push-routed delivery (the routing layer delivered in-app) counts as sent and keeps the slot', async () => {
+  process.env[GATE] = 'true';
+  TwilioService.sendSMS.mockResolvedValue({ success: true, sid: 'push-1', pushRouted: true });
+  const rows = [visitRow({ id: 'v1', techId: 'tech-a' })];
+  const notifChains = [];
+  db.mockImplementation((table) => {
+    if (table === 'scheduled_services as s') return chain({ select: jest.fn().mockResolvedValue(rows) });
+    if (table === 'tech_notifications') { const c = chain({ del: jest.fn().mockResolvedValue(1) }); notifChains.push(c); return c; }
+    return chain();
+  });
+  const r = await runTechOpenVisitNudge({ now: new Date('2026-09-28T23:00:00Z') });
+  expect(r).toMatchObject({ sent: 1, skipped: 0 });
+  expect(notifChains.every((c) => c.del.mock.calls.length === 0)).toBe(true);
 });

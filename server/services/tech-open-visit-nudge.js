@@ -217,13 +217,6 @@ function errTag(err) {
   return err?.code || err?.name || 'error';
 }
 
-// True only when nothing reached the provider. 'uncertain' may already be
-// on the handset and 'accepted' is sent; a result with no outcome is a local
-// refusal (guard, not configured) and sent nothing.
-function definitelyNotSent(deliveryOutcome) {
-  return deliveryOutcome !== 'uncertain' && deliveryOutcome !== 'accepted';
-}
-
 // Claims today's slot for this technician. Returns true when THIS call won
 // the claim (the row was inserted) — false when a dedupe_key collision means
 // either an earlier run today already claimed it, or a concurrent replica
@@ -276,16 +269,15 @@ async function smsNudge(tech, cell, message, etDate) {
       // OWNER_SMS_DISABLED still silences it (checked separately).
       allowOwnerSms: true,
     });
-    // OWNER_SMS_DISABLED / the SMS gate answer success:true + suppressed:
-    // nothing reached the phone, so the slot goes back for a later retry.
-    if (result?.suppressed) {
-      logger.info(`[tech-open-visit-nudge] text suppressed for ${tech.id}`);
-      await releaseClaim(tech.id, etDate);
-      return false;
-    }
-    if (!result || result.success !== false) return true;
-    logger.warn(`[tech-open-visit-nudge] send failed for ${tech.id}: ${result.code || 'refused'}`);
-    if (definitelyNotSent(result.deliveryOutcome)) await releaseClaim(tech.id, etDate);
+    // Delivered only on a provider accept, or the push-routing layer's
+    // in-app delivery. Every other answer put nothing on the phone —
+    // success:false, and the success:true sentinels (suppressed for
+    // OWNER_SMS_DISABLED, gateBlocked for the SMS gate, templateDisabled) —
+    // so the slot goes back for a later retry. An uncertain outcome keeps
+    // it: the text may already be on the phone.
+    if (result?.deliveryOutcome === 'accepted' || result?.pushRouted === true) return true;
+    logger.warn(`[tech-open-visit-nudge] text not delivered for ${tech.id}: ${result?.code || result?.sid || 'refused'}`);
+    if (result?.deliveryOutcome !== 'uncertain') await releaseClaim(tech.id, etDate);
     return false;
   } catch (err) {
     // sendSMS throws a provider rejection with providerOutcome attached;
@@ -411,7 +403,6 @@ module.exports = {
     claimToday,
     releaseClaim,
     ownerCell,
-    definitelyNotSent,
     pushNudge,
     smsNudge,
     deliverNudge,
