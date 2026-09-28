@@ -37,7 +37,7 @@ function makeBuilder(table) {
     // treated as a no-op here so it doesn't pollute the assertions.
     const wheres = b.where.mock.calls.map(c => c[0]);
     if (!wheres.some(w => w && typeof w === 'object' && 'id' in w)) return Promise.resolve(0);
-    const u = { table, where: wheres, patch };
+    const u = { table, where: wheres, patch, raws: b.whereRaw.mock.calls.map(c => String(c[0])) };
     state.updates.push(u);
     if (state.onUpdate) state.onUpdate(u); // concurrency hooks for race tests
     return Promise.resolve(1);
@@ -463,6 +463,8 @@ describe('runDeterministicMatching', () => {
     expect(link.patch.matched_payout_id).toBe('po-1');
     // CAS: the update is scoped to id AND status='unmatched'
     expect(link.where).toContainEqual({ id: 'bt-1', status: 'unmatched' });
+    // …and re-checks there is no unresolved Plaid bank change on the row
+    expect(link.raws.some(r => r.includes("(suggestion->'plaidModified') is null"))).toBe(true);
     // reconciliation INTENT rides in the claim itself (crash-safe)…
     expect(sugOf(link).reconcilePending).toBe(true);
     // …the echo goes through the existing mechanism with a row-specific
@@ -513,6 +515,7 @@ describe('runDeterministicMatching', () => {
     let summary = await runDeterministicMatching();
     expect(summary.expensesLinked).toBe(1);
     expect(state.updates.find(u => u.patch.status === 'matched_expense').patch.matched_expense_id).toBe('exp-1');
+    expect(state.updates.find(u => u.patch.status === 'matched_expense').raws.some(r => r.includes("(suggestion->'plaidModified') is null"))).toBe(true);
     // the claim locked the candidate expense and revalidated it
     expect(state.builders.some(x => x.table === 'expenses' && x.b.forUpdate.mock.calls.length > 0)).toBe(true);
 

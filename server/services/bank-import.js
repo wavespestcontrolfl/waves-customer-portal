@@ -1343,10 +1343,9 @@ function strongExpenseMatch(row, c) {
 // A Plaid row the bank corrected or withdrew AFTER it was reviewed keeps
 // its flag (plaidModified / plaidRemoved) when the operator unlinks it, and
 // still carries the OLD values — the matcher must not re-link it before the
-// operator applies or dismisses the change. Selection is the only gate
-// needed: the sync never flags an UNMATCHED row (it replaces or deletes
-// it), so a row the matcher selected unflagged cannot become flagged
-// before its claim.
+// operator applies or dismisses the change. Enforced at selection AND at
+// each claim (a row can be linked elsewhere, flagged, and unlinked between
+// this pass's read and its claim).
 const BANK_CHANGE_UNRESOLVED_SQL_NOT = "(suggestion->'plaidModified') is null and (suggestion->'plaidRemoved') is null";
 
 async function runDeterministicMatching({ limit } = {}) {
@@ -1560,6 +1559,9 @@ async function runDeterministicMatching({ limit } = {}) {
           // already reconciled → skip + clear; unreconciled → echo + clear.
           const changed = await db('bank_transactions')
             .where({ id: row.id, status: 'unmatched' })
+            // re-checked at the claim: the row may have been linked, got a
+            // bank change parked, and been unlinked since this pass read it
+            .whereRaw(BANK_CHANGE_UNRESOLVED_SQL_NOT)
             .update({
               status: 'matched_payout',
               matched_payout_id: exact[0].id,
@@ -1771,6 +1773,9 @@ async function runDeterministicMatching({ limit } = {}) {
           }
           const changed = await trx('bank_transactions')
             .where({ id: row.id, status: 'unmatched' })
+            // re-checked at the claim: the row may have been linked, got a
+            // bank change parked, and been unlinked since this pass read it
+            .whereRaw(BANK_CHANGE_UNRESOLVED_SQL_NOT)
             .update({
               status: 'matched_expense',
               matched_expense_id: strong[0].id,
