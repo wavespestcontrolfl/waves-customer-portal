@@ -1039,6 +1039,7 @@ function CustomerDirectoryView({
   startEdit,
   handleDeleteCustomer,
   geocodeReviewRefreshToken,
+  onDraftActiveChange,
   isAdmin,
   editingId,
   customerEditor,
@@ -1054,6 +1055,7 @@ function CustomerDirectoryView({
             onSelectCustomer={openCustomerProfile}
             refreshToken={geocodeReviewRefreshToken}
             onResolved={loadCustomers}
+            onDraftActiveChange={onDraftActiveChange}
           />
         )}
         {" "}
@@ -1886,15 +1888,19 @@ export default function CustomersPageV2() {
     selectCustomer(null, { replace: true });
   };
 
-  // "draft active" reported up from the embedded profile's own choke point
-  // (Customer360ProfileV2's useCustomerProfileNavigation / Customer360Workspace)
-  // — a ref, not state, so the popstate guard below reads it synchronously
-  // with no re-render dependency, same reasoning as that hook's own
-  // draftActiveRef. Browser Back/Forward changes ?customerId= without ever
-  // firing beforeunload (same-document navigation), silently unmounting the
-  // workspace and losing an open address-review draft — this is the one
-  // other place (besides that hook's tab/close/switch guards) that can
-  // discard it.
+  // "draft active" reported up from EITHER address-review panel this page
+  // can have open: the embedded profile's own choke point
+  // (Customer360ProfileV2's useCustomerProfileNavigation / Customer360Workspace,
+  // customerId set) or the directory-level queue panel (CustomerDirectoryView,
+  // no customerId — the two never render at once in workspace mode, and in
+  // overlay mode a live draft in either is enough to warn). A ref, not
+  // state, so the guards below read it synchronously with no re-render
+  // dependency, same reasoning as that hook's own draftActiveRef. Neither
+  // browser Back/Forward (changes ?customerId= without ever firing
+  // beforeunload — same-document navigation) nor an in-app link push (the
+  // sidebar/tab bar in AdminLayoutV2, or any other <a href> — also never
+  // fires beforeunload) goes through that hook's own tab/close/switch
+  // guards, so this page needs its own.
   const draftActiveRef = useRef(false);
   const handleDraftActiveChange = (active) => { draftActiveRef.current = active; };
   // Kept in sync on every settled render so a later popstate can restore
@@ -1911,8 +1917,26 @@ export default function CustomersPageV2() {
       // history-manipulation mechanism (minimal, scoped to a live draft).
       navigate(currentUrlRef.current, { replace: true });
     };
+    // Same-document navigation via a real <a href> (react-router's <Link>,
+    // e.g. AdminLayoutV2's sidebar/tab bar) never fires 'popstate' at all —
+    // it's a push, not a pop — so guardHistory alone misses it. Same
+    // capture-phase anchor-click pattern as EstimateToolViewV2's own
+    // unsaved-draft guard (guardLink).
+    const guardLink = (event) => {
+      if (!draftActiveRef.current) return;
+      const link = event.target.closest?.("a[href]");
+      if (!link || link.target === "_blank" || event.metaKey || event.ctrlKey || link.hash) return;
+      if (!confirmDiscardDraft()) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+    };
     window.addEventListener("popstate", guardHistory);
-    return () => window.removeEventListener("popstate", guardHistory);
+    document.addEventListener("click", guardLink, true);
+    return () => {
+      window.removeEventListener("popstate", guardHistory);
+      document.removeEventListener("click", guardLink, true);
+    };
   }, [navigate]);
 
   function loadCustomers(p) {
@@ -2263,6 +2287,7 @@ export default function CustomersPageV2() {
         startEdit={startEdit}
         handleDeleteCustomer={handleDeleteCustomer}
         geocodeReviewRefreshToken={geocodeReviewRefreshToken}
+        onDraftActiveChange={handleDraftActiveChange}
         isAdmin={isAdmin}
         editingId={editingId}
         customerEditor={customerEditor}

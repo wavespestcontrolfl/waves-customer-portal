@@ -24,10 +24,19 @@ vi.mock('../../components/admin/Customer360ProfileV2', () => ({
 }));
 vi.mock('../../components/admin/MobileNewCustomerSheet', () => ({ default: () => null }));
 vi.mock('../../components/admin/CustomerGeocodeReviewPanel', () => ({
-  default: ({ refreshToken = 0, onResolved }) => <>
-    <output data-testid="geocode-review-refresh">{refreshToken}</output>
-    <button type="button" onClick={onResolved}>Resolve address review</button>
-  </>,
+  default: function GeocodeReviewPanel({ refreshToken = 0, onResolved, onDraftActiveChange }) {
+    // Stands in for this panel's own draft-active signal — real for the
+    // directory-level queue instance (no customerId) this test file mounts;
+    // the embedded per-customer instance lives inside the fully-mocked
+    // Customer360ProfileV2 above and never renders this component.
+    const [draftOpen, setDraftOpen] = React.useState(false);
+    return <>
+      <output data-testid="geocode-review-refresh">{refreshToken}</output>
+      <span data-testid="queue-draft-open">{String(draftOpen)}</span>
+      <button type="button" onClick={onResolved}>Resolve address review</button>
+      <button type="button" onClick={() => { setDraftOpen(true); onDraftActiveChange?.(true); }}>Open queue draft</button>
+    </>;
+  },
   confirmDiscardDraft: () => window.confirm('This will discard the unsaved address review draft. Continue?'),
 }));
 vi.mock('../../components/AddressAutocomplete', () => ({
@@ -586,5 +595,82 @@ describe('CustomersPageV2 workflow state', () => {
     await waitFor(() => expect(confirmSpy).toHaveBeenCalledOnce());
     await waitFor(() => expect(window.location.search).toBe(''));
     await waitFor(() => expect(screen.queryByTestId('customer-profile')).not.toBeInTheDocument());
+  });
+
+  // The directory-level address-review QUEUE (no customerId — rendered on
+  // the bare Customers directory) has its own open-draft state, independent
+  // of a customer profile's. It shares the same page-level guard. Two
+  // separate tests (rather than declining then confirming in the same one)
+  // because declining replaces the popped-to entry with the draft's own URL
+  // — a second real Back from that same minimal two-entry stack would have
+  // nothing left before it to go to, a test-stack artifact, not a real-world
+  // dead end (see the analogous profile-level tests above).
+  it('keeps a directory queue draft intact when browser Back is declined', async () => {
+    vi.stubGlobal('fetch', vi.fn((url) => String(url).includes('/admin/customers?') ? response(list) : response({})));
+    window.history.replaceState({ idx: 0 }, '', '/admin/dashboard');
+    window.history.pushState({ idx: 1 }, '', '/admin/customers');
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+
+    render(<BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><CustomersPageV2 /></BrowserRouter>);
+    await screen.findByText('Avery Customer');
+    fireEvent.click(screen.getByRole('button', { name: 'Open queue draft' }));
+    expect(screen.getByTestId('queue-draft-open')).toHaveTextContent('true');
+
+    // Declined: still on the Customers directory with the queue draft intact.
+    act(() => { window.history.back(); });
+    await waitFor(() => expect(confirmSpy).toHaveBeenCalledOnce());
+    expect(window.location.pathname).toBe('/admin/customers');
+    expect(screen.getByTestId('queue-draft-open')).toHaveTextContent('true');
+  });
+
+  it('lets browser Back away from the Customers directory through once a queue draft discard is confirmed', async () => {
+    vi.stubGlobal('fetch', vi.fn((url) => String(url).includes('/admin/customers?') ? response(list) : response({})));
+    window.history.replaceState({ idx: 0 }, '', '/admin/dashboard');
+    window.history.pushState({ idx: 1 }, '', '/admin/customers');
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+
+    render(<BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><CustomersPageV2 /></BrowserRouter>);
+    await screen.findByText('Avery Customer');
+    fireEvent.click(screen.getByRole('button', { name: 'Open queue draft' }));
+    expect(screen.getByTestId('queue-draft-open')).toHaveTextContent('true');
+
+    act(() => { window.history.back(); });
+    await waitFor(() => expect(confirmSpy).toHaveBeenCalledOnce());
+    await waitFor(() => expect(window.location.pathname).toBe('/admin/dashboard'));
+  });
+
+  // In-app link navigation (the AdminLayoutV2 sidebar/tab bar, or any other
+  // <a href>) pushes a new location instead of firing 'popstate' — the
+  // separate guardLink capture-phase listener covers it, same pattern as
+  // EstimateToolViewV2's own unsaved-draft guard.
+  it('confirms before an in-app link push away from the Customers page discards an open draft', async () => {
+    vi.stubGlobal('fetch', vi.fn((url) => String(url).includes('/admin/customers?') ? response(list) : response({})));
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    const linkClicks = vi.fn();
+
+    render(<MemoryRouter initialEntries={['/admin/customers']}>
+      {/* A plain onClick counter (preventDefault always, so jsdom never
+          attempts a real document navigation) stands in for react-router's
+          <Link> reaching its own click handler — guardLink runs in the
+          capture phase, so stopping it there keeps the target's own
+          handler from ever firing, same as it would for a real <Link>. */}
+      <a href="/admin/dashboard" onClick={(e) => { e.preventDefault(); linkClicks(); }}>Leave to Dashboard</a>
+      <CustomersPageV2 />
+    </MemoryRouter>);
+    await screen.findByText('Avery Customer');
+    fireEvent.click(screen.getByRole('button', { name: 'Open queue draft' }));
+    expect(screen.getByTestId('queue-draft-open')).toHaveTextContent('true');
+
+    // Declined: the click is swallowed before the link's own handler runs.
+    fireEvent.click(screen.getByRole('link', { name: 'Leave to Dashboard' }));
+    expect(confirmSpy).toHaveBeenCalledOnce();
+    expect(linkClicks).not.toHaveBeenCalled();
+    expect(screen.getByTestId('queue-draft-open')).toHaveTextContent('true');
+
+    // Confirmed: the click reaches the link's own handler.
+    confirmSpy.mockReturnValue(true);
+    fireEvent.click(screen.getByRole('link', { name: 'Leave to Dashboard' }));
+    expect(confirmSpy).toHaveBeenCalledTimes(2);
+    expect(linkClicks).toHaveBeenCalledOnce();
   });
 });
