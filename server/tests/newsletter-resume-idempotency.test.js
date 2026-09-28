@@ -566,6 +566,35 @@ describe('resumeCampaign — preconditions', () => {
     });
   });
 
+  test('a correction saved between validation and the claim makes the claim miss: VERSION_CHANGED, nothing is sent (codex round 13 P1)', async () => {
+    const failedSend = {
+      id: 's', status: 'failed', newsletter_type: 'pest-insider-monthly', updated_at: new Date('2026-09-28T12:00:00Z'),
+      subject: 'Pest Insider — September', html_body: '<p>Fine copy about mowing height.</p>', text_body: 'Fine copy about mowing height.', event_ids: [],
+    };
+    const wheres = [];
+    const claimChain = chain({ returning: [] }); // the version-bound claim finds no row: it was edited after validation
+    const where = claimChain.where;
+    claimChain.where = jest.fn((...args) => { wheres.push(args); return where(...args); });
+    const queues = {
+      newsletter_sends: [
+        chain({ first: failedSend }),          // fetch + validate
+        claimChain,                            // claim
+        chain({ first: { status: 'failed' } }), // re-read: still failed → edited, not claimed elsewhere
+      ],
+      newsletter_send_deliveries: [
+        chain({ count: 1 }),                   // ledger exists
+        chain({ count: 1 }),                   // outstanding eligible rows
+      ],
+    };
+    db.mockImplementation((table) => {
+      const queue = queues[table];
+      if (!queue || !queue.length) throw new Error(`unexpected ${table}`);
+      return queue.shift();
+    });
+    await expect(prepareResumeCampaign('s')).rejects.toMatchObject({ code: 'VERSION_CHANGED' });
+    expect(wheres).toContainEqual(['updated_at', '<', expect.any(Date)]);
+  });
+
   test("a STALE 'sending' parent with zero eligible recipients is reclaimed and finalized — never left sending", async () => {
     const staleSend = {
       id: 's',
@@ -649,8 +678,8 @@ describe('resumeCampaign — preconditions', () => {
     expect(sweepUpdate).toMatchObject({ status: 'skipped' });
   });
 
-  test('a Pest Insider campaign that no longer passes the claim scan is refused BEFORE anything is claimed (codex round 8 P1 on #5187)', async () => {
-    let otherTableTouched = null;
+  test('a partially delivered Pest Insider campaign that no longer passes the claim scan is refused BEFORE anything is claimed (codex round 8 P1 on #5187)', async () => {
+    const tablesTouched = [];
     let sendUpdate = null;
     db.mockImplementation((table) => {
       if (table === 'newsletter_sends') {
@@ -662,11 +691,13 @@ describe('resumeCampaign — preconditions', () => {
           onUpdate: (payload) => { sendUpdate = payload; },
         });
       }
-      otherTableTouched = table;
+      tablesTouched.push(table);
+      if (table === 'newsletter_send_deliveries') return chain({ count: 1 }); // somebody received it
       return chain({});
     });
     await expect(prepareResumeCampaign('s')).rejects.toMatchObject({ code: 'VALIDATION_FAILED', message: expect.stringMatching(/correct the copy and resume again/) });
-    expect(otherTableTouched).toBeNull();
+    // only the ledger was read; nothing was claimed or written elsewhere
+    expect(tablesTouched).toEqual(['newsletter_send_deliveries']);
     // …and the campaign KEEPS its delivered, publicly readable state — it is
     // corrected in place through PATCH, never demoted to draft (codex round 12 P2).
     expect(sendUpdate).toBeNull();
@@ -684,11 +715,37 @@ describe('resumeCampaign — preconditions', () => {
           onUpdate: (payload) => { sendUpdate = payload; },
         });
       }
+      if (table === 'newsletter_send_deliveries') return chain({ count: 1 });
       if (table === 'newsletter_calendar') return chain({ first: { id: 'cal-1' } });
       throw new Error(`unexpected ${table}`);
     });
     await expect(prepareResumeCampaign('s')).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
     expect(sendUpdate).toBeNull();
+  });
+
+  test('a ZERO-ledger failed campaign that fails the claim scan goes back to an editable draft — nobody received it (codex round 13 P2)', async () => {
+    let sendUpdate = null;
+    const wheres = [];
+    db.mockImplementation((table) => {
+      if (table === 'newsletter_sends') {
+        const q = chain({
+          first: {
+            id: 's', status: 'failed', newsletter_type: 'pest-insider-monthly', subject: 'Pest Insider — September',
+            html_body: '<p>Termites swarm again after storms.</p>', text_body: 'Termites swarm again after storms.', event_ids: [],
+          },
+          updated: 1,
+          onUpdate: (payload) => { sendUpdate = payload; },
+        });
+        const where = q.where;
+        q.where = jest.fn((...args) => { wheres.push(args); return where(...args); });
+        return q;
+      }
+      if (table === 'newsletter_send_deliveries') return chain({ count: 0 });
+      throw new Error(`unexpected ${table}`);
+    });
+    await expect(prepareResumeCampaign('s')).rejects.toMatchObject({ code: 'VALIDATION_FAILED', message: expect.stringMatching(/returned to draft/) });
+    expect(sendUpdate).toMatchObject({ status: 'draft', proof_approved_at: null, proof_token: null, sending_claim_token: null });
+    expect(wheres).toContainEqual([{ id: 's', status: 'failed' }]);
   });
 
   test('an actively sending Pest Insider campaign that fails the claim scan is refused as STILL_SENDING and never reset to draft (pre-push audit P1)', async () => {
@@ -727,6 +784,7 @@ describe('resumeCampaign — preconditions', () => {
         q.where = jest.fn((...args) => { wheres.push(args); return where(...args); });
         return q;
       }
+      if (table === 'newsletter_send_deliveries') return chain({ count: 1 }); // partially delivered
       throw new Error(`unexpected ${table}`);
     });
     await expect(prepareResumeCampaign('s')).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });

@@ -215,6 +215,43 @@ describe('PATCH /sends/:id correct-and-resume for a partially delivered campaign
     expect(update.mock.calls[0][0].status).toBeUndefined();
   });
 
+  test('a correction that still carries a blocked claim is refused with the validation errors — the web version never shows it (pre-push audit P1)', async () => {
+    const { update } = mockTables({ send: failedInsider, deliveryRow: { id: 'd-1' } });
+    await withServer(async (baseUrl) => {
+      const res = await patchSend(baseUrl, {
+        htmlBody: '<p>Termites swarm again after storms.</p>', textBody: 'Termites swarm again after storms.',
+      });
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.errors.some((e) => /termite_second_swarm/.test(e))).toBe(true);
+    });
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  test("adding or removing subject B on a partially delivered campaign is refused — every recipient's variant is fixed (codex round 13 P1)", async () => {
+    const { update } = mockTables({ send: failedInsider, deliveryRow: { id: 'd-1' } });
+    await withServer(async (baseUrl) => {
+      const res = await patchSend(baseUrl, { subjectB: 'A second subject line' });
+      expect(res.status).toBe(400);
+    });
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  test('the composer may send the stored type back unchanged; a changed type is still refused (codex round 13 P2)', async () => {
+    const same = mockTables({ send: failedInsider, deliveryRow: { id: 'd-1' } });
+    await withServer(async (baseUrl) => {
+      const res = await patchSend(baseUrl, { htmlBody: '<p>Corrected</p>', textBody: 'Corrected', newsletterType: 'pest-insider-monthly', subjectB: null });
+      expect(res.status).toBe(200);
+    });
+    expect(same.update).toHaveBeenCalledTimes(1);
+    const changed = mockTables({ send: failedInsider, deliveryRow: { id: 'd-1' } });
+    await withServer(async (baseUrl) => {
+      const res = await patchSend(baseUrl, { htmlBody: '<p>Corrected</p>', newsletterType: 'reengagement' });
+      expect(res.status).toBe(400);
+    });
+    expect(changed.update).not.toHaveBeenCalled();
+  });
+
   test('a failed campaign with NO delivery ledger is still not editable', async () => {
     const { update } = mockTables({ send: failedInsider, deliveryRow: undefined });
     await withServer(async (baseUrl) => {

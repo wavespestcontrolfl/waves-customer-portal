@@ -398,7 +398,13 @@ router.get('/sends', async (req, res, next) => {
     // instead of bunching at "now" by import time.
     const rows = await db('newsletter_sends')
       .leftJoin('technicians', 'newsletter_sends.created_by', 'technicians.id')
-      .select('newsletter_sends.*', 'technicians.name as created_by_name')
+      .select(
+        'newsletter_sends.*',
+        'technicians.name as created_by_name',
+        // Whether a delivery ledger exists: a failed/sent campaign WITH one
+        // can have its copy corrected in place (PATCH correct-and-resume).
+        db.raw('EXISTS (SELECT 1 FROM newsletter_send_deliveries d WHERE d.send_id = newsletter_sends.id) AS has_ledger'),
+      )
       .orderByRaw('COALESCE(newsletter_sends.sent_at, newsletter_sends.created_at) DESC')
       .limit(500);
 
@@ -409,6 +415,7 @@ router.get('/sends', async (req, res, next) => {
       ...row,
       rates: computeSendRates(row),
       sending_stale: NewsletterSender.sendingClaimIsStale(row),
+      correctable: ['failed', 'sent'].includes(row.status) && row.has_ledger === true,
     }));
 
     // Pooled aggregate is summed across ALL sent campaigns in the DB — not
@@ -637,8 +644,29 @@ router.patch('/sends/:id', async (req, res, next) => {
     }
 
     const { subject, subjectB, htmlBody, textBody, previewText, fromName, fromEmail, replyTo, segmentFilter, aiPrompt, newsletterType, autoShareSocial, eventIds } = req.body;
-    if (correctingDelivered && [segmentFilter, newsletterType, eventIds].some((value) => value !== undefined)) {
-      return res.status(400).json({ error: 'a partially delivered campaign can only have its copy corrected — its audience is the delivery ledger and its type is fixed' });
+    if (correctingDelivered) {
+      // Immutable on a partially delivered campaign: the audience (the
+      // ledger), the type (locked by the guards below) and the event lineup.
+      // The composer sends the stored type back on every save, so an
+      // UNCHANGED value passes and only a change is refused (codex round 13
+      // P2).
+      const sameJson = (left, right) => JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
+      const storedEventIds = Array.isArray(send.event_ids) ? send.event_ids : (() => {
+        try { return JSON.parse(send.event_ids || '[]'); } catch { return []; }
+      })();
+      const changesImmutable = (newsletterType !== undefined && newsletterType !== send.newsletter_type)
+        || (segmentFilter !== undefined && !sameJson(segmentFilter, send.segment_filter))
+        || (eventIds !== undefined && !sameJson([...(Array.isArray(eventIds) ? eventIds : [])].sort(), [...storedEventIds].sort()));
+      if (changesImmutable) {
+        return res.status(400).json({ error: 'a partially delivered campaign can only have its copy corrected — its audience is the delivery ledger and its type and event lineup are fixed' });
+      }
+      // Every recipient's A/B variant is already fixed in the ledger: adding
+      // or removing subject B would leave the outstanding rows in a variant
+      // sendCampaign never iterates, and the campaign could finalize as sent
+      // with nobody mailed (codex round 13 P1). Rewording B is fine.
+      if (subjectB !== undefined && Boolean(subjectB) !== Boolean(send.subject_b)) {
+        return res.status(400).json({ error: 'cannot add or remove subject B on a partially delivered campaign — every recipient\'s variant is already assigned' });
+      }
     }
 
     // Factual-lock integrity: a flagship ("local-weekly-fresh-events") draft was
@@ -732,6 +760,35 @@ router.patch('/sends/:id', async (req, res, next) => {
       fromName, fromEmail, replyTo, segmentFilter, newsletterType, eventIds]
       .some((value) => value !== undefined);
     const invalidatesProof = send.status === 'scheduled' && !!send.proof_approved_at && contentChanged;
+
+    if (correctingDelivered) {
+      // The corrected copy is written to the row and served on the public
+      // web version at once, and a fully delivered campaign gives nobody a
+      // reason to click Resume — so the correction itself must pass the
+      // same claim validation a send does, here, not only in
+      // prepareResumeCampaign (pre-push audit P1 on fcd51e3fca). A
+      // Pest Insider by its type; a promoted legacy flagship by its calendar
+      // link, exactly as the send path classifies it.
+      const typedFor = requiresClaimValidation(send.newsletter_type)
+        ? send.newsletter_type
+        : ((send.newsletter_type === null && await isFlagshipSend(send)) ? FLAGSHIP_TYPE_KEY : null);
+      if (typedFor) {
+        const corrected = {
+          ...send,
+          newsletter_type: typedFor,
+          subject: subject ?? send.subject,
+          subject_b: subjectB !== undefined ? subjectB : send.subject_b,
+          html_body: htmlBody ?? send.html_body,
+          text_body: textBody ?? send.text_body,
+          preview_text: previewText ?? send.preview_text,
+        };
+        const lockedPrices = await lockedPricesForSend(corrected, db);
+        const { errors } = validateNewsletterDraft(corrected, { recipientCount: 1, lockedPrices });
+        if (errors.length > 0) {
+          return res.status(400).json({ error: 'Validation failed — the corrected copy still carries a blocked claim', errors });
+        }
+      }
+    }
 
     const updatedCount = await db('newsletter_sends')
       .where({ id: req.params.id })
@@ -1069,7 +1126,7 @@ router.post('/sends/:id/resume', async (req, res) => {
 
     res.status(202).json({ accepted: true, sendId: req.params.id, status: 'resuming' });
   } catch (err) {
-    if (err.code === 'STILL_SENDING' || err.code === 'ALREADY_CLAIMED') {
+    if (err.code === 'STILL_SENDING' || err.code === 'ALREADY_CLAIMED' || err.code === 'VERSION_CHANGED') {
       return res.status(409).json({ error: err.message, code: err.code });
     }
     if (err.code === 'NOT_RESUMABLE' || err.code === 'NOTHING_TO_RESUME' || err.code === 'VALIDATION_FAILED') {

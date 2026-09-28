@@ -192,6 +192,26 @@ postgres('email-division fact register sync against migrated PostgreSQL', () => 
     expect(_internals.rowFingerprint(after)).toBe(after.metadata.register_hash); // the stamp still matches: not an edit
   });
 
+  test('a wording update drops the fact\'s hybrid-index chunks at once; a metadata-only restamp keeps them (codex round 13 P2)', async () => {
+    const facts = [fact(1)];
+    await sync(facts);
+    const chunk = {
+      source: 'kb', source_id: facts[0].slug, chunk_index: 0, title: facts[0].title, content: facts[0].content,
+      content_hash: 'synthetic-hash', metadata: JSON.stringify({ category: 'facts' }),
+    };
+    await trx('knowledge_embeddings').insert(chunk);
+    const reworded = [{ ...facts[0], content: `${facts[0].content} One more sentence.` }];
+    const r = await sync(reworded);
+    expect(r.updated).toEqual([facts[0].slug]);
+    // the superseded wording is no longer retrievable through the index
+    expect(await trx('knowledge_embeddings').where({ source: 'kb', source_id: facts[0].slug })).toHaveLength(0);
+
+    await trx('knowledge_embeddings').insert({ ...chunk, content: reworded[0].content });
+    const r2 = await sync([{ ...reworded[0], expiresOn: '2027-06-30' }]);
+    expect(r2.updated).toEqual([facts[0].slug]);
+    expect(await trx('knowledge_embeddings').where({ source: 'kb', source_id: facts[0].slug })).toHaveLength(1);
+  });
+
   test('an expired fact retires its untouched row once (active=false + status archived, so shared search drops it), and is never seeded fresh', async () => {
     const facts = [fact(1)];
     await sync(facts);

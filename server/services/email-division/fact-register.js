@@ -321,6 +321,12 @@ async function applyFactPlan(trx, fact, row, plan, { now, today, hasAuditLog, ha
         previous_hash: meta.register_hash || null,
         register_hash: factFingerprint(fact),
       });
+      // The hybrid index keeps this fact's chunks until its own nightly
+      // sync; a wording change written here (the on-demand sync before a
+      // draft after a daytime deploy) must not leave the superseded wording
+      // searchable until then (codex round 13 P2) — the retirement branch
+      // already drops them. A metadata-only restamp changes no indexed text.
+      if (!plan.metadataOnly) await dropIndexChunks(trx, hasEmbeddings, row.slug);
       result.updated.push(fact.slug);
       return;
     }

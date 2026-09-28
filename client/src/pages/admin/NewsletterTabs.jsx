@@ -2802,25 +2802,25 @@ export function HistoryView() {
                       )}
                     </div>{" "}
                     <div className="grid grid-cols-2 sm:grid-cols-4 lg:flex lg:items-center gap-3 lg:gap-5 text-ui-body flex-shrink-0">
+                      {(s.status === "draft" || s.correctable) && (
+                        <Button
+                          type="button"
+                          onClick={() => editDraft(s.id)}
+                          className=""
+                          variant="secondary"
+                        >
+                          {s.status === "draft" ? "Edit" : "Correct copy"}
+                        </Button>
+                      )}
                       {s.status === "draft" && (
-                        <>
-                          <Button
-                            type="button"
-                            onClick={() => editDraft(s.id)}
-                            className=""
-                            variant="secondary"
-                          >
-                            Edit
-                          </Button>
-                          <Button
-                            type="button"
-                            onClick={() => deleteDraft(s.id)}
-                            className=""
-                            variant="secondary"
-                          >
-                            Delete
-                          </Button>
-                        </>
+                        <Button
+                          type="button"
+                          onClick={() => deleteDraft(s.id)}
+                          className=""
+                          variant="secondary"
+                        >
+                          Delete
+                        </Button>
                       )}
                       {(s.status === "failed" || s.sending_stale) && (
                         <Button

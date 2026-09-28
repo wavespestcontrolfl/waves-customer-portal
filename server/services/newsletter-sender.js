@@ -20,6 +20,11 @@
  */
 
 const db = require('../models/db');
+
+// A row version as a claim bound: `updated_at < stored + 1ms` (millisecond
+// truncation on the way through the driver would otherwise miss an exact
+// match). Used by every dispatch claim that validated a row first.
+const noLaterThan = (value) => new Date(new Date(value).getTime() + 1);
 const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
 const crypto = require('crypto');
@@ -594,7 +599,6 @@ async function sendCampaign(sendId, opts = {}) {
       // moves updated_at (and returns the row to draft), so the claim finds
       // nothing and edited, unapproved content is never broadcast. The +1ms
       // absorbs sub-millisecond precision the driver drops on read.
-      const noLaterThan = (value) => new Date(new Date(value).getTime() + 1);
       claim = claim.where({ status: opts.expect.status || 'scheduled' });
       if (opts.expect.updatedAt) claim = claim.where('updated_at', '<', noLaterThan(opts.expect.updatedAt));
       if (opts.expect.proofApprovedAt) {
@@ -1140,6 +1144,15 @@ async function prepareResumeCampaign(sendId) {
   // persisted before a stricter claim scan shipped, or one edited after its
   // first attempt failed, must pass the same validation the manual and
   // scheduled paths run — before anything is claimed (codex round 8 P1).
+  // Read before validation: whether anyone has received this campaign decides
+  // what an invalid copy may do to its state (below).
+  const deliveryTotal = await db('newsletter_send_deliveries')
+    .where({ send_id: send.id })
+    .count('* as c')
+    .first();
+  const totalDeliveries = Number(deliveryTotal?.c || 0);
+  const leaseCutoff = new Date(Date.now() - sendingLeaseMinutes() * 60 * 1000);
+
   const { requiresClaimValidation, FLAGSHIP_TYPE_KEY } = require('../config/newsletter-types');
   // A promoted legacy flagship has newsletter_type NULL; the manual and
   // scheduled paths classify it by its calendar link and validate it as the
@@ -1167,14 +1180,28 @@ async function prepareResumeCampaign(sendId) {
       // learns through its heartbeat ownership check that it no longer owns
       // the campaign — as a compare-and-set on the inspected state and lease
       // (pre-push audit P1).
-      let released = false;
-      if (reclaimingStaleSend) {
-        released = (await db('newsletter_sends')
+      let outcome = 'correct the copy and resume again';
+      if (totalDeliveries === 0 && (send.status === 'failed' || reclaimingStaleSend)) {
+        // Nobody received a zero-ledger campaign (the first attempt failed
+        // before any delivery row was seeded), so there is no web version
+        // to keep and no ledger to resume: it goes back to an editable draft
+        // with its approval cleared (codex round 13 P2) — compare-and-set on
+        // the inspected state and lease, like every other transition here.
+        const reset = db('newsletter_sends').where({ id: send.id, status: send.status });
+        if (reclaimingStaleSend) reset.where('updated_at', '<=', leaseCutoff);
+        const returned = (await reset.update({
+          status: 'draft', scheduled_for: null, proof_token: null, proof_sent_at: null, proof_approved_at: null,
+          sending_claim_token: null, updated_at: new Date(),
+        })) > 0;
+        outcome = returned ? 'returned to draft for editing (nobody received it)' : 'it changed state meanwhile and was left as is';
+      } else if (reclaimingStaleSend) {
+        const released = (await db('newsletter_sends')
           .where({ id: send.id, status: 'sending' })
-          .where('updated_at', '<=', new Date(Date.now() - sendingLeaseMinutes() * 60 * 1000))
+          .where('updated_at', '<=', leaseCutoff)
           .update({ status: 'failed', sending_claim_token: null, updated_at: new Date() })) > 0;
+        if (released) outcome = 'its stale send claim was released; correct the copy and resume again';
       }
-      const err = new Error(`campaign no longer passes validation${released ? ' (its stale send claim was released)' : ''}; correct the copy and resume again: ${errors.join('; ')}`);
+      const err = new Error(`campaign no longer passes validation; ${outcome}: ${errors.join('; ')}`);
       err.code = 'VALIDATION_FAILED';
       err.errors = errors;
       throw err;
@@ -1185,11 +1212,6 @@ async function prepareResumeCampaign(sendId) {
   // rows exist and all of them are already terminal-success, bail early so
   // the operator knows. If no rows exist yet, the first attempt failed
   // before pre-seeding and sendCampaign should reseed from subscribers.
-  const deliveryTotal = await db('newsletter_send_deliveries')
-    .where({ send_id: send.id })
-    .count('* as c')
-    .first();
-  const totalDeliveries = Number(deliveryTotal?.c || 0);
   if (totalDeliveries === 0 && send.status !== 'failed' && !reclaimingStaleSend) {
     const err = new Error('no outstanding deliveries to resume');
     err.code = 'NOTHING_TO_RESUME';
@@ -1242,8 +1264,15 @@ async function prepareResumeCampaign(sendId) {
   const claimQuery = db('newsletter_sends')
     .where({ id: send.id, status: send.status });
   if (reclaimingStaleSend) {
-    claimQuery.where('updated_at', '<=', new Date(Date.now() - sendingLeaseMinutes() * 60 * 1000));
+    claimQuery.where('updated_at', '<=', leaseCutoff);
   }
+  // The claim is bound to the exact row version this function validated
+  // (codex round 13 P1): a correction saved between the validation above
+  // and this claim leaves the claim empty, so the corrected, not yet
+  // validated copy is never mailed to the outstanding recipients — the
+  // operator resumes again and the new copy is validated first. The same
+  // bound the manual and scheduled dispatch paths carry.
+  if (send.updated_at) claimQuery.where('updated_at', '<', noLaterThan(send.updated_at));
   // A fresh owner token every (re)claim: a stale-reclaim rotates the token,
   // which is exactly what tells the stuck original worker (via its next
   // heartbeat ownership check) that it no longer owns the campaign.
@@ -1252,8 +1281,18 @@ async function prepareResumeCampaign(sendId) {
     .update({ status: 'sending', scheduled_for: null, sending_claim_token: claimToken, updated_at: new Date() })
     .returning('id');
   if (!claimed.length) {
-    const err = new Error('campaign was claimed by another worker');
-    err.code = 'ALREADY_CLAIMED';
+    // Edited (the row still holds the status we inspected) vs claimed by
+    // another worker (it moved on) — a lost claim is never reported as an
+    // edit or the other way round.
+    let current = null;
+    try { current = await db('newsletter_sends').where({ id: send.id }).first('status'); } catch (readErr) {
+      logger.warn(`[newsletter] resume claim re-read for ${send.id} failed: ${readErr.message}`);
+    }
+    const edited = current?.status === send.status;
+    const err = new Error(edited
+      ? 'campaign changed after it was validated; resume again to validate the new copy'
+      : 'campaign was claimed by another worker');
+    err.code = edited ? 'VERSION_CHANGED' : 'ALREADY_CLAIMED';
     throw err;
   }
 
