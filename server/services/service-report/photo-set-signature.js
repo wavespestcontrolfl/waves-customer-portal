@@ -134,12 +134,29 @@ async function reportPhotoSetPdfSignature(serviceRecordId, knex = null, options 
     let lawnPart = '';
     const serviceLine = lawnFields?.service_line || detectServiceLine(lawnFields?.service_type);
     if (serviceLine === 'lawn') {
+      // options.propertyHistoryEnabled / options.lawnHistory (Sonnet
+      // fallback-audit P1, 2026-09-28): resolveLawnAssessmentAndHistory
+      // (report-data.js) re-derives its OWN propertyHistoryEnabled default
+      // (a bare gateEnvValue read) when not given one, same as the render
+      // path's default. Today that default is the only value either side
+      // ever uses (the gate is a process-wide env flag, not request- or
+      // customer-scoped), so this can never actually diverge from the
+      // render's own resolution — but a caller that already resolved the
+      // canonical render (pdf-queue.js's `canonical`, reports-public.js's
+      // `canonical`) can pass its EXACT propertyHistoryEnabled/lawnHistory
+      // through here instead of letting this call re-derive its own, so the
+      // two paths are provably reading the same value rather than
+      // coincidentally agreeing on a shared default.
       const assessmentIds = await resolveLawnPhotoAssessmentIds({
         id: serviceRecordId,
         customer_id: lawnFields?.customer_id,
         scheduled_service_id: lawnFields?.scheduled_service_id,
         service_id: lawnFields?.service_id,
-      }, knex, { failClosed: true });
+      }, knex, {
+        failClosed: true,
+        propertyHistoryEnabled: options.propertyHistoryEnabled,
+        lawnHistory: options.lawnHistory,
+      });
       const turfPhotos = await resolveLawnReportPhotos(assessmentIds, knex, { failClosed: true });
       const turfDigest = crypto.createHash('sha1')
         .update(turfPhotos.map((p) => `${p.assessment_id}:${p.id}:${p.updated_at ? new Date(p.updated_at).toISOString() : ''}`).join(','))

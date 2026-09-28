@@ -548,3 +548,74 @@ describe('shared resolver import wiring (so report-data.js and the preview-image
   });
 
 });
+
+describe('reportPhotoSetPdfSignature threads propertyHistoryEnabled/lawnHistory through, rather than re-deriving its own default (Sonnet fallback-audit P1, 2026-09-28)', () => {
+  // The gate-ON resolution path (installedForVisit, lawn-assessment-history.js)
+  // does real, separately-tested DB work of its own and is dark in every
+  // environment (docs/…, GATE_LAWN_PROPERTY_HISTORY) — exercising it here
+  // would duplicate that module's own tests without adding coverage. This
+  // isolates report-photo-set.js instead, to prove the exact plumbing bug
+  // class the finding named: that reportPhotoSetPdfSignature forwards the
+  // CALLER's propertyHistoryEnabled/lawnHistory into resolveLawnPhotoAssessmentIds
+  // instead of letting the resolver re-derive its own default independently.
+  afterEach(() => {
+    jest.dontMock('../services/service-report/report-photo-set');
+    jest.resetModules();
+  });
+
+  test('propertyHistoryEnabled: true and a supplied lawnHistory both reach resolveLawnPhotoAssessmentIds unchanged', async () => {
+    let capturedOptions = null;
+    jest.resetModules();
+    jest.doMock('../services/service-report/report-photo-set', () => ({
+      resolveLawnReportPhotos: async () => [],
+      resolveLawnPhotoAssessmentIds: async (service, knex, options) => { capturedOptions = options; return []; },
+    }));
+    const { reportPhotoSetPdfSignature: freshSignature } = require('../services/service-report/photo-set-signature');
+
+    const record = {
+      service_data: null, customer_id: 'cust-1', service_line: 'lawn', service_type: 'Lawn Care',
+      scheduled_service_id: 'sched-1', service_id: null,
+    };
+    const knex = (table) => {
+      if (table === 'service_photos') return { where() { return this; }, orderBy() { return this; }, async select() { return []; } };
+      if (table === 'service_records') return { where() { return this; }, async first() { return record; } };
+      throw new Error(`unexpected table in this isolated test's knex fake: ${table}`);
+    };
+    const sentinelHistory = { current: { id: 'assess-x' }, rows: [{ id: 'assess-x' }], identity: 'sentinel' };
+
+    await freshSignature('rec-lawn-thread', knex, {
+      serviceData: null, propertyHistoryEnabled: true, lawnHistory: sentinelHistory,
+    });
+
+    expect(capturedOptions).not.toBeNull();
+    expect(capturedOptions.failClosed).toBe(true);
+    expect(capturedOptions.propertyHistoryEnabled).toBe(true);
+    expect(capturedOptions.lawnHistory).toBe(sentinelHistory);
+  });
+
+  test('omitting propertyHistoryEnabled/lawnHistory forwards undefined (the resolver applies its own gate-read default, same as before this fix)', async () => {
+    let capturedOptions = null;
+    jest.resetModules();
+    jest.doMock('../services/service-report/report-photo-set', () => ({
+      resolveLawnReportPhotos: async () => [],
+      resolveLawnPhotoAssessmentIds: async (service, knex, options) => { capturedOptions = options; return []; },
+    }));
+    const { reportPhotoSetPdfSignature: freshSignature } = require('../services/service-report/photo-set-signature');
+
+    const record = {
+      service_data: null, customer_id: 'cust-1', service_line: 'lawn', service_type: 'Lawn Care',
+      scheduled_service_id: 'sched-1', service_id: null,
+    };
+    const knex = (table) => {
+      if (table === 'service_photos') return { where() { return this; }, orderBy() { return this; }, async select() { return []; } };
+      if (table === 'service_records') return { where() { return this; }, async first() { return record; } };
+      throw new Error(`unexpected table in this isolated test's knex fake: ${table}`);
+    };
+
+    await freshSignature('rec-lawn-thread', knex, { serviceData: null });
+
+    expect(capturedOptions).not.toBeNull();
+    expect(capturedOptions.propertyHistoryEnabled).toBeUndefined();
+    expect(capturedOptions.lawnHistory).toBeUndefined();
+  });
+});

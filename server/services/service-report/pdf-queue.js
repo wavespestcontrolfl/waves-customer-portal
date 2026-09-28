@@ -240,10 +240,21 @@ async function renderAndStoreServiceReportPdf(recordId, {
   // (`service`, loaded above), never a fresh read — see the module doc.
   // lawnFields: this `service` row is already service_records.* (see
   // loadServiceRecordForPdf above) — passing it through the lawn-photo
-  // identity lookup skips a second service_records read here (Sonnet
-  // fallback-audit P1, 2026-09-28: this call's whole point is avoiding a
-  // fresh read when the caller already has the row).
-  const photoSetBefore = await reportPhotoSetPdfSignature(recordId, knex, { serviceData: service.service_data, lawnFields: service });
+  // identity lookup skips a second service_records read here. lawnHistory:
+  // canonical.lawnHistory (never the possibly-DELIVERY-pinned local
+  // `lawnHistory` above) — this signature always describes the unpinned
+  // CANONICAL render, matching lawnAssessmentPdfSignature's own posture, so
+  // reuse the canonical resolver's own history instead of re-deriving it a
+  // second time (Sonnet fallback-audit P1s, 2026-09-28: avoid the extra
+  // read/query when the caller already has the row, and thread the same
+  // propertyHistoryEnabled/lawnHistory the render itself resolved from,
+  // rather than each side re-deriving its own default).
+  const photoSetBefore = await reportPhotoSetPdfSignature(recordId, knex, {
+    serviceData: service.service_data,
+    lawnFields: service,
+    propertyHistoryEnabled,
+    lawnHistory: canonical.lawnHistory,
+  });
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const renderSignature = visibilitySignature;
     const data = await buildReportV1Data(service, reportToken, knex, { pestPressureConfig, pinnedLawnAssessmentId: effectivePin, pinnedWeekPlanAvailableAt: canonical.weekPlanAvailableAt, propertyHistoryEnabled, lawnHistory, pinnedLawnHistoryIdentity, pestWeekWeather: true });
@@ -442,7 +453,10 @@ async function renderAndStoreServiceReportPdf(recordId, {
         uncachedReason: 'callback_set_changed',
       };
     }
-    const photoSetAfter = await reportPhotoSetPdfSignature(recordId, knex);
+    // Same canonical (never delivery-pinned) propertyHistoryEnabled/lawnHistory
+    // as the BEFORE capture above, so a real content change is the only thing
+    // that can move this value between the two reads.
+    const photoSetAfter = await reportPhotoSetPdfSignature(recordId, knex, { propertyHistoryEnabled, lawnHistory: canonical.lawnHistory });
     if (photoSetAfter !== photoSetBefore) {
       logger.warn(`[service-report-pdf] photo set changed during PDF render for ${recordId} — serving without storing`);
       return {
@@ -602,7 +616,13 @@ async function getOrRenderServiceReportPdf(recordId, {
   const visibilitySignature = pestPressureVisibilitySignature(pestPressureConfig);
   const expectedPdfStorageKey = service?.id
     ? reportPdfStorageKey(service.id, {
-      visibilitySignature: visibilitySignature + summaryCopySignature(service) + mosquitoReportV2PdfSignature(service) + pestReportV2PdfSignature(service) + termiteReportV2PdfSignature(service) + await cockroachReportV2PdfSignature(service, knex) + await reserviceReportPdfSignature(service, { knex }) + await reserviceTrendsPdfSignature(service, knex) + await reportPhotoSetPdfSignature(service.id, knex) + await treatmentZonePdfSignature(service, knex) + await stationMapPdfSignature(service, knex) + await treatmentNarrativePdfSignature(service.id, knex) + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + treeShrubReviewPdfSignature(service) + await applicatorIdentityPdfSignature(service.id, knex) + await lawnAssessmentPdfSignature(service, knex, { propertyHistoryEnabled }) + photoMarksPdfSignature() + publicOriginPdfSignature(),
+      // reportPhotoSetPdfSignature reuses this already-loaded `service` row
+      // (serviceData + lawnFields, per this function's own comment above on
+      // why customer_id/service_id/service_data ride along) instead of a
+      // second service_records read, and threads the same
+      // propertyHistoryEnabled lawnAssessmentPdfSignature is already given
+      // just below (Sonnet fallback-audit P1s, 2026-09-28).
+      visibilitySignature: visibilitySignature + summaryCopySignature(service) + mosquitoReportV2PdfSignature(service) + pestReportV2PdfSignature(service) + termiteReportV2PdfSignature(service) + await cockroachReportV2PdfSignature(service, knex) + await reserviceReportPdfSignature(service, { knex }) + await reserviceTrendsPdfSignature(service, knex) + await reportPhotoSetPdfSignature(service.id, knex, { serviceData: service.service_data, lawnFields: service, propertyHistoryEnabled }) + await treatmentZonePdfSignature(service, knex) + await stationMapPdfSignature(service, knex) + await treatmentNarrativePdfSignature(service.id, knex) + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + treeShrubReviewPdfSignature(service) + await applicatorIdentityPdfSignature(service.id, knex) + await lawnAssessmentPdfSignature(service, knex, { propertyHistoryEnabled }) + photoMarksPdfSignature() + publicOriginPdfSignature(),
     })
     : null;
   const stored = (!mustRenderFresh && service?.pdf_storage_key === expectedPdfStorageKey)
