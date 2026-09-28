@@ -7170,44 +7170,76 @@ function callBookingConflictBody(existingVisits) {
   };
 }
 
-async function findExistingCallBookings({ customerId, serviceType, scheduledDate, propertyId }) {
-  const query = db('scheduled_services')
-    .where({ customer_id: customerId })
-    .whereNull('parent_service_id')
+// Every service line this create books — the primary and each add-on,
+// which persist on the same visit (codex #5183 r1 P1) — lowercased and
+// trimmed, the same normalization the match applies to stored names.
+function requestedServiceLineNames(serviceType, serviceAddons) {
+  const addonNames = Array.isArray(serviceAddons) ? serviceAddons.map((a) => a?.name || a?.serviceName) : [];
+  return [...new Set([serviceType, ...addonNames]
+    .map((n) => String(n || '').trim().toLowerCase())
+    .filter(Boolean))];
+}
+
+// Live, call-booked parent visits for this customer within ±1 day of the
+// date that share ANY service line with the request — by their own
+// service_type or one of their add-ons. `conn` is the booking transaction
+// for the locked re-check.
+async function findExistingCallBookings({ conn = db, customerId, serviceNames, scheduledDate, propertyId }) {
+  if (!serviceNames.length) return [];
+  const query = conn('scheduled_services as ss')
+    .where('ss.customer_id', customerId)
+    .whereNull('ss.parent_service_id')
     // Live visits only (scheduled-service-statuses.js): a completed, skipped
     // or no-show call booking is not a visit the office could double-book.
-    .whereIn('status', require('../services/scheduled-service-statuses').NONTERMINAL_SCHEDULED_SERVICE_STATUSES)
-    .where((qb) => qb.where('booking_source', 'phone_call').orWhereNotNull('source_call_log_id'))
-    .whereRaw('LOWER(TRIM(service_type)) = LOWER(TRIM(?))', [serviceType])
-    .whereRaw('scheduled_date BETWEEN ?::date - 1 AND ?::date + 1', [scheduledDate, scheduledDate]);
+    .whereIn('ss.status', require('../services/scheduled-service-statuses').NONTERMINAL_SCHEDULED_SERVICE_STATUSES)
+    .where((qb) => qb.where('ss.booking_source', 'phone_call').orWhereNotNull('ss.source_call_log_id'))
+    .where((qb) => qb
+      .whereRaw('LOWER(TRIM(ss.service_type)) = ANY(?)', [serviceNames])
+      .orWhereExists(function sharedAddonLine() {
+        this.select(conn.raw('1')).from('scheduled_service_addons as a')
+          .whereRaw('a.scheduled_service_id = ss.id')
+          .whereRaw('LOWER(TRIM(a.service_name)) = ANY(?)', [serviceNames]);
+      }))
+    .whereRaw('ss.scheduled_date BETWEEN ?::date - 1 AND ?::date + 1', [scheduledDate, scheduledDate]);
   if (propertyId) {
-    query.where((qb) => qb.where('property_id', propertyId).orWhereNull('property_id'));
+    query.where((qb) => qb.where('ss.property_id', propertyId).orWhereNull('ss.property_id'));
   }
   return query
     .select(
-      'id', 'status', 'service_type',
-      db.raw("to_char(scheduled_date, 'YYYY-MM-DD') as scheduled_date_label"),
-      db.raw("to_char(window_start, 'HH24:MI') as window_start_label"),
+      'ss.id', 'ss.status', 'ss.service_type',
+      conn.raw("to_char(ss.scheduled_date, 'YYYY-MM-DD') as scheduled_date_label"),
+      conn.raw("to_char(ss.window_start, 'HH24:MI') as window_start_label"),
     )
-    .orderBy('scheduled_date', 'asc')
-    .orderBy('window_start', 'asc');
+    .orderBy('ss.scheduled_date', 'asc')
+    .orderBy('ss.window_start', 'asc');
 }
 
 // The guard's verdict for one create: the 409 body, or null to proceed (no
-// match, an explicit logged override, or a failed lookup — fail open).
-async function callBookingDuplicateConflict({ override, customerId, serviceType, scheduledDate, bookingProperty }) {
+// match, an explicit logged override, or — for the preflight only — a
+// failed lookup, which fails open).
+async function callBookingDuplicateConflict({ conn = db, failOpen = true, override, customerId, serviceNames, scheduledDate, bookingProperty }) {
   try {
     const existing = await findExistingCallBookings({
-      customerId, serviceType, scheduledDate, propertyId: bookingProperty?.property_id || null,
+      conn, customerId, serviceNames, scheduledDate, propertyId: bookingProperty?.property_id || null,
     });
     if (!existing.length) return null;
     if (!override) return callBookingConflictBody(existing);
-    logger.warn(`[schedule] allowCallBookingDuplicate override: booking customer ${customerId} again for "${serviceType}" alongside phone-agent-booked visit(s) ${existing.map((v) => v.id).join(', ')}`);
+    logger.warn(`[schedule] allowCallBookingDuplicate override: booking customer ${customerId} again alongside phone-agent-booked visit(s) ${existing.map((v) => v.id).join(', ')}`);
     return null;
   } catch (guardErr) {
+    if (!failOpen) throw guardErr;
     logger.warn(`[schedule] call-booking duplicate guard failed (booking proceeds): ${guardErr.message}`);
     return null;
   }
+}
+
+// Throws the conflict for the route's catch to answer with its 409 — the
+// preflight (fails open on a lookup error) and the locked re-check inside the
+// booking transaction (passes the trx and `failOpen: false`: an error there
+// aborts the create, and a conflict rolls it back) share this one exit.
+async function assertNoCallBookingConflict(guard) {
+  const conflict = await callBookingDuplicateConflict(guard);
+  if (conflict) throw Object.assign(new Error('The phone agent already booked this visit for this customer.'), { callBookingConflict: conflict });
 }
 
 router.post('/', requireAdmin, async (req, res, next) => {
@@ -7349,10 +7381,16 @@ router.post('/', requireAdmin, async (req, res, next) => {
 
     // Phone-agent double-booking guard: applies to one-off AND recurring
     // creates alike (scheduledDate is the recurring series' first visit).
-    const callBookingConflict = await callBookingDuplicateConflict({
-      override: req.body.allowCallBookingDuplicate === true, customerId, serviceType, scheduledDate, bookingProperty,
-    });
-    if (callBookingConflict) return res.status(409).json(callBookingConflict);
+    // A fast preflight; the locked re-check inside the booking transaction
+    // (right after the customer lock) is the race-safe backstop.
+    const callBookingGuard = {
+      override: req.body.allowCallBookingDuplicate === true,
+      customerId,
+      serviceNames: requestedServiceLineNames(serviceType, serviceAddons),
+      scheduledDate,
+      bookingProperty,
+    };
+    await assertNoCallBookingConflict(callBookingGuard);
 
     const linkedEstimateId = sourceEstimateId || req.body.source_estimate_id || null;
     // Optional: accept the linked open quote as annual prepay on book (creates
@@ -8099,6 +8137,12 @@ router.post('/', requireAdmin, async (req, res, next) => {
       // the same lock in the same position, so the #3011 customer-row →
       // series-advisory order below is unchanged relative to it.
       await lockCustomerComms(trx, customerId);
+      // Phone-agent double-booking backstop: the call pipeline inserts its
+      // booking under this same customer lock, so re-checking here — not
+      // only in the preflight above, before the slow pricing reads — sees
+      // any booking it committed in between (codex #5183 r1 P1). An error
+      // here aborts the create rather than failing open.
+      await assertNoCallBookingConflict({ ...callBookingGuard, conn: trx, failOpen: false });
       // Post-lock revalidation (r23): the pre-transaction snapshot loaded
       // the customer BEFORE this acquire — if a merge-undo held the lock
       // and cleared inherited address/service-contact fields while we
@@ -9297,6 +9341,8 @@ router.post('/', requireAdmin, async (req, res, next) => {
     if (Array.isArray(err.duplicateRecurringSeries)) {
       return res.status(409).json(duplicateSeriesConflictBody(err.duplicateRecurringSeries));
     }
+    // The phone-agent double-booking guard (preflight or locked re-check).
+    if (err.callBookingConflict) return res.status(409).json(err.callBookingConflict);
     if (err.isOperational && err.status) {
       return res.status(err.status).json({ error: err.message, code: err.code, ...(err.conflicts ? { conflicts: err.conflicts } : {}) });
     }

@@ -818,11 +818,11 @@ export function classifyCallBookingConflict(e, { key, groupLabelText, separatePr
     recoverable: false,
     duplicateConflict: null,
     callBookingConflict: { ...e.body, key, separateProgram: separateProgram || null },
-    firstError: { label: groupLabelText, message: e.message, duplicate: true },
+    firstError: { label: groupLabelText, message: e.message, callBooking: true },
   };
 }
 
-export function classifySubmitGroupFailure(e, {
+function classifyDuplicateSeriesFailure(e, {
   group, linkedEstimate, separateProgram, key, groupLabelText, carriesAppointmentDiscount = false,
 }) {
   const dupBody = e?.body?.code === 'duplicate_recurring_series' ? e.body : null;
@@ -866,29 +866,11 @@ export function classifySubmitGroupFailure(e, {
   };
 }
 
-// One call site (submitAppointments' catch block) for both classifiers,
-// kept as its own function purely so that call site stays a single
-// function call — adding the branch here instead of inline in
-// submitAppointments keeps that already-large function's complexity at
-// its pre-existing baseline (a bare `||` inline would have added a branch
-// there too).
-export function classifyGroupSubmitFailure(e, {
-  group, linkedEstimate, separateProgram, key, groupLabelText, carriesAppointmentDiscount,
-}) {
-  return classifyCallBookingConflict(e, { key, groupLabelText, separateProgram })
-    || classifySubmitGroupFailure(e, { group, linkedEstimate, separateProgram, key, groupLabelText, carriesAppointmentDiscount });
-}
-
-// Applies a submit-failure classification's conflict state. Split out of
-// submitAppointments' catch block for the same complexity-baseline reason
-// as classifyGroupSubmitFailure above — two independent `if`s inline there
-// would each count toward that function's own complexity.
-function applySubmitConflictState(decision, { setDuplicateConflict, setSeparateProgramReason, setCallBookingConflict }) {
-  if (decision.duplicateConflict) {
-    setDuplicateConflict(decision.duplicateConflict);
-    setSeparateProgramReason('');
-  }
-  if (decision.callBookingConflict) setCallBookingConflict(decision.callBookingConflict);
+// The classifier for a failed group save: each 409 conflict code has its own
+// classifier — the phone-agent double-booking conflict, then the
+// duplicate-series one, which also owns every other failure.
+export function classifySubmitGroupFailure(e, context) {
+  return classifyCallBookingConflict(e, context) || classifyDuplicateSeriesFailure(e, context);
 }
 
 // The 5-key discount shape a request-body line carries — the primary line
@@ -1183,6 +1165,14 @@ export function matchesPrepayTarget({ targetKey, key, result }) {
 // blocking alert (a genuine error) or a toast (a duplicate-program conflict
 // the operator resolves via the conflict UI below).
 export function submitFailureNotice({ firstError, created, total }) {
+  if (firstError.callBooking) {
+    return {
+      toastText: created
+        ? `${created} of ${total} appointment series saved. The phone agent already booked the rest — review it below.`
+        : 'The phone agent already booked this visit — review it below.',
+      alertText: null,
+    };
+  }
   if (firstError.duplicate) {
     return {
       toastText: created
@@ -4329,7 +4319,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         } catch (e) {
           // A late failure must not update a closed draft.
           assertSubmitCurrent();
-          const decision = classifyGroupSubmitFailure(e, {
+          const decision = classifySubmitGroupFailure(e, {
             group, linkedEstimate, separateProgram, key, groupLabelText: groupLabel(group),
             carriesAppointmentDiscount,
           });
@@ -4348,7 +4338,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             if (carriesAppointmentDiscount) appointmentDiscountCommittedGroupKeyRef.current = key;
             continue;
           }
-          applySubmitConflictState(decision, { setDuplicateConflict, setSeparateProgramReason, setCallBookingConflict });
+          if (decision.duplicateConflict) {
+            setDuplicateConflict(decision.duplicateConflict);
+            setSeparateProgramReason('');
+          }
+          if (decision.callBookingConflict) setCallBookingConflict(decision.callBookingConflict);
           firstError = decision.firstError;
           break;
         }

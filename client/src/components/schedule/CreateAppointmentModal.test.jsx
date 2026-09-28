@@ -9,7 +9,6 @@ import {
   buildFindTimeRequestBody,
   canSubmitAppointments,
   classifyCallBookingConflict,
-  classifyGroupSubmitFailure,
   classifyManualPrepayMintOutcome,
   classifySubmitGroupFailure,
   composeAppointmentSuccessToast,
@@ -426,7 +425,7 @@ describe('classifySubmitGroupFailure', () => {
 // Phone-agent double-booking guard (owner ruling 2026-09-28): the server's
 // 409 duplicate_call_booking is classified by classifyCallBookingConflict,
 // ahead of classifySubmitGroupFailure's own duplicate-series logic — see
-// classifyGroupSubmitFailure, the one call site submitAppointments actually
+// classifySubmitGroupFailure, the one call site submitAppointments actually
 // uses, below.
 describe('classifyCallBookingConflict', () => {
   const callBookingError = () => Object.assign(new Error('The phone agent already booked this visit for this customer.'), {
@@ -447,7 +446,7 @@ describe('classifyCallBookingConflict', () => {
         key: 'quarterly',
         separateProgram: null,
       },
-      firstError: { label: 'Quarterly', message: 'The phone agent already booked this visit for this customer.', duplicate: true },
+      firstError: { label: 'Quarterly', message: 'The phone agent already booked this visit for this customer.', callBooking: true },
     });
   });
 
@@ -458,12 +457,12 @@ describe('classifyCallBookingConflict', () => {
   });
 });
 
-describe('classifyGroupSubmitFailure', () => {
+describe('classifySubmitGroupFailure', () => {
   it('routes a phone-agent double-booking 409 to the call-booking conflict, never the duplicate-series one', () => {
     const e = Object.assign(new Error('The phone agent already booked this visit for this customer.'), {
       body: { code: 'duplicate_call_booking', existingVisits: [] },
     });
-    const decision = classifyGroupSubmitFailure(e, {
+    const decision = classifySubmitGroupFailure(e, {
       group: { seasonalIndex: 0 }, linkedEstimate: null, separateProgram: null, key: 'quarterly', groupLabelText: 'Quarterly',
     });
     expect(decision.recoverable).toBe(false);
@@ -476,14 +475,14 @@ describe('classifyGroupSubmitFailure', () => {
       body: { code: 'duplicate_call_booking', existingVisits: [] },
     });
     const separateProgram = { key: 'quarterly', existingSeries: [{ id: 's1' }] };
-    const decision = classifyGroupSubmitFailure(e, {
+    const decision = classifySubmitGroupFailure(e, {
       group: { seasonalIndex: 0 }, linkedEstimate: null, separateProgram, key: 'quarterly', groupLabelText: 'Quarterly',
     });
     expect(decision.callBookingConflict.separateProgram).toBe(separateProgram);
   });
 
   it('falls through to the duplicate-series classification for every other failure', () => {
-    const decision = classifyGroupSubmitFailure(new Error('network down'), {
+    const decision = classifySubmitGroupFailure(new Error('network down'), {
       group: { seasonalIndex: 0 }, linkedEstimate: null, separateProgram: null, key: 'weekly', groupLabelText: 'Weekly',
     });
     expect(decision).toEqual({
@@ -831,6 +830,12 @@ describe('matchesPrepayTarget', () => {
 });
 
 describe('submitFailureNotice', () => {
+  it('a phone-agent conflict gets its own toast, never the recurring-program one (codex #5183 r1 P2)', () => {
+    expect(submitFailureNotice({ firstError: { callBooking: true, label: 'Quarterly', message: 'x' }, created: 0, total: 1 }))
+      .toEqual({ toastText: 'The phone agent already booked this visit — review it below.', alertText: null });
+    expect(submitFailureNotice({ firstError: { callBooking: true, label: 'Quarterly', message: 'x' }, created: 1, total: 2 }).toastText)
+      .toBe('1 of 2 appointment series saved. The phone agent already booked the rest — review it below.');
+  });
   it('reads as a toast for a duplicate-program conflict, review-only wording with nothing yet created', () => {
     expect(submitFailureNotice({ firstError: { duplicate: true, label: 'Quarterly', message: 'x' }, created: 0, total: 2 }))
       .toEqual({ toastText: 'Review the existing recurring program below.', alertText: null });

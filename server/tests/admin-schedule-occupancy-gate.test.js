@@ -413,6 +413,8 @@ describe('POST / — admin create', () => {
 
   describe('phone-agent double-booking guard', () => {
     const logger = require('../services/logger');
+    // The guard reads call-booked visits through this alias.
+    const GUARD_TABLE = 'scheduled_services as ss';
     const callBookedVisit = {
       id: 'call-visit-1', status: 'confirmed', service_type: 'General Pest Control',
       scheduled_date_label: '2099-07-03', window_start_label: '09:00',
@@ -420,7 +422,7 @@ describe('POST / — admin create', () => {
 
     test('a live phone-agent-booked visit refuses the create with the conflict payload', async () => {
       db.mockImplementation((table) => chain(
-        table === 'customers' ? CUSTOMER_ROW : (table === 'scheduled_services' ? callBookedVisit : undefined),
+        table === 'customers' ? CUSTOMER_ROW : (table === GUARD_TABLE ? callBookedVisit : undefined),
       ));
 
       const result = await post(createBody);
@@ -438,7 +440,7 @@ describe('POST / — admin create', () => {
 
     test('allowCallBookingDuplicate overrides the guard, proceeds, and logs the override', async () => {
       db.mockImplementation((table) => chain(
-        table === 'customers' ? CUSTOMER_ROW : (table === 'scheduled_services' ? callBookedVisit : undefined),
+        table === 'customers' ? CUSTOMER_ROW : (table === GUARD_TABLE ? callBookedVisit : undefined),
       ));
 
       const result = await post({ ...createBody, allowCallBookingDuplicate: true });
@@ -455,7 +457,7 @@ describe('POST / — admin create', () => {
     test('a guard query error fails open and still books', async () => {
       db.mockImplementation((table) => {
         if (table === 'customers') return chain(CUSTOMER_ROW);
-        if (table === 'scheduled_services') {
+        if (table === GUARD_TABLE) {
           const c = chain(undefined);
           // A real thenable's `.then` must invoke the passed reject callback
           // itself — returning a rejected promise from `.then()` is not the
@@ -470,6 +472,61 @@ describe('POST / — admin create', () => {
 
       expect(result.status).toBe(201);
       expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('call-booking duplicate guard failed'));
+    });
+    test('every requested service line is matched — the add-ons too (codex #5183 r1 P1)', async () => {
+      const matched = [];
+      db.mockImplementation((table) => {
+        const c = chain(table === 'customers' ? CUSTOMER_ROW : undefined);
+        if (table === GUARD_TABLE) {
+          // Run the grouped predicates so their inner whereRaw calls are seen.
+          const run = (arg) => { if (typeof arg === 'function') arg(c); return c; };
+          c.where = jest.fn(run);
+          c.orWhereExists = jest.fn(() => c);
+          c.orWhereNotNull = jest.fn(() => c);
+          c.whereRaw = jest.fn((sql, bindings) => { if (String(sql).includes('ANY(?)')) matched.push(bindings[0]); return c; });
+        }
+        return c;
+      });
+
+      await post({ ...createBody, serviceType: 'General Pest Control', serviceAddons: [{ name: '  Mosquito Control ' }, { serviceName: 'Lawn Care' }, { name: 'general pest control' }] });
+
+      expect(matched[0]).toEqual(['general pest control', 'mosquito control', 'lawn care']);
+    });
+
+    test('a phone-agent booking committed after the preflight is caught by the locked re-check inside the booking transaction (codex #5183 r1 P1)', async () => {
+      const insertSpy = jest.fn();
+      trx.mockImplementation((table) => {
+        const c = chain(table === GUARD_TABLE ? callBookedVisit : (table === 'customers' ? { id: 'cust-1' } : (table === 'scheduled_services' ? { ...SVC } : undefined)));
+        if (table === 'scheduled_services') c.insert = insertSpy;
+        return c;
+      });
+
+      const result = await post(createBody);
+
+      expect(result.status).toBe(409);
+      expect(result.body).toMatchObject({ code: 'duplicate_call_booking', existingVisits: [{ id: 'call-visit-1' }] });
+      expect(insertSpy).not.toHaveBeenCalled();
+      // Checked under the customer lock, after it is taken.
+      expect(callOrder).toContain('comms');
+    });
+
+    test('the locked re-check does not fail open: an error there aborts the create', async () => {
+      const insertSpy = jest.fn();
+      trx.mockImplementation((table) => {
+        if (table === GUARD_TABLE) {
+          const c = chain(undefined);
+          c.then = (resolve, reject) => reject(new Error('locked guard query failed'));
+          return c;
+        }
+        const c = chain(table === 'customers' ? { id: 'cust-1' } : (table === 'scheduled_services' ? { ...SVC } : undefined));
+        if (table === 'scheduled_services') c.insert = insertSpy;
+        return c;
+      });
+
+      const result = await post(createBody);
+
+      expect(result.status).toBeGreaterThanOrEqual(500);
+      expect(insertSpy).not.toHaveBeenCalled();
     });
   });
 
