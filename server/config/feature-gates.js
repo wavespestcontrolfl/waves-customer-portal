@@ -3168,6 +3168,15 @@ const gates = {
   // for logGateStatus only: services/invoice-followups.js reads
   // GATE_DUNNING_LADDER_90 at call time.
   dunningLadder90: process.env.GATE_DUNNING_LADDER_90 === 'true',
+
+  // Seven-day overdue-reminder spacing rule, SHADOW ONLY (dunning
+  // unification PR 1, re-sequenced narrow 2026-09-28 — see #5108's wide
+  // version for what this deliberately leaves out). Ships DARK: off unless
+  // exactly 'true'. This entry is for logGateStatus only:
+  // services/collections/contact-policy.js reads GATE_DUNNING_SPACING_SHADOW
+  // at call time and only LOGS what the rule would have held — it never
+  // holds, denies, or changes a send.
+  dunningSpacingShadow: process.env.GATE_DUNNING_SPACING_SHADOW === 'true',
 };
 
 // Parse a gate env var at CALL time (for request-time availability checks
