@@ -744,4 +744,22 @@ postgres('rider-series sync against migrated PostgreSQL', () => {
     expect(pestDates.every((d) => d >= floor)).toBe(true);
     expect(pestDates[0]).toBe(lawnStart); // overdue: rides the first lawn stop after the floor
   });
+
+  test.each(['cancelled', 'skipped', 'no_show', 'rescheduled'])(
+    'a %s rider row in the near-term window never anchors the plan',
+    async (status) => {
+      const { pestParent } = await linkedPair();
+      const { syncRiderSeries } = require('../services/rider-series');
+      const baseline = await syncRiderSeries(trx, pestParent.id, { dryRun: true });
+      await trx('scheduled_services').insert({
+        id: randomUUID(), customer_id: customerId, service_type: 'Pest Control', status,
+        scheduled_date: addDays(etDateString(), 3), window_start: '08:00', window_end: '10:00',
+        is_recurring: true, recurring_pattern: 'quarterly', recurring_parent_id: pestParent.id, source: 'admin',
+      });
+      const result = await syncRiderSeries(trx, pestParent.id, { dryRun: true });
+      expect(result.skipped).toBeUndefined();
+      const shape = (r) => ({ keep: r.keep.length, move: r.move.length, insert: r.insert.length, cancel: r.cancel.length });
+      expect(shape(result)).toEqual(shape(baseline));
+    },
+  );
 });

@@ -107,6 +107,10 @@ own 84-day cadence rather than lapsing.
    than treating an unprovable row as movable. With no completed/immovable
    row at all (a brand-new rider), the anchor falls back to the rider
    parent's own `scheduled_date`.
+   A cancelled, skipped, no-show or rescheduled row is never an anchor,
+   even when it is near-term or still carries a leftover `visit_id`,
+   invoice or sent-reminder stamp: only a completed row or a LIVE
+   immovable row counts.
 5. Horizon = the host's last live future date, or (host has none) the
    anchor plus `plannedVisitCountForPattern(pattern) * TARGET_GAP_DAYS`
    days — the same visit count the seeder would plan for that pattern in a

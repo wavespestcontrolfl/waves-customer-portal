@@ -423,8 +423,15 @@ async function syncRiderSeries(conn, riderParentId, { dryRun = false, source = '
       || (dateOnly(r.scheduled_date) != null && dateOnly(r.scheduled_date) <= nearTermCutoff);
 
     let lastRiderDate = null;
+    // Only a visit that happened (completed) or a live fixed visit anchors
+    // the plan. A cancelled, skipped, no-show or rescheduled row never does,
+    // even when it sits in the near-term window or still carries a leftover
+    // visit_id, invoice or sent-reminder stamp: anchoring on it would
+    // restart the plan from a visit that never happened, and every live row
+    // dated before it would drop out of the diff.
     for (const r of riderRows) {
-      if (r.status === 'completed' || isImmovable(r)) {
+      const liveImmovable = !JOIN_INELIGIBLE_STATUSES.includes(r.status) && isImmovable(r);
+      if (r.status === 'completed' || liveImmovable) {
         const d = dateOnly(r.scheduled_date);
         if (d && (!lastRiderDate || d > lastRiderDate)) lastRiderDate = d;
       }
