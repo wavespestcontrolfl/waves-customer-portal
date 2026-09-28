@@ -21,7 +21,6 @@
 const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
-const { redactText } = require('./agent-decision-training');
 const { addETDaysAtWallClock } = require('../utils/datetime-et');
 const policy = require('./intelligence-bar/action-policy.json');
 
@@ -35,32 +34,7 @@ const GAP_STATUSES = Object.freeze(['new', 'building', 'fixed', 'by_design', 'di
 const CLOSED_STATUSES = Object.freeze(['fixed', 'by_design', 'dismissed']);
 const MAX_TEXT = 300;
 const TOOL_NAME_RE = /^[a-z0-9_]{1,64}$/;
-const UUID_RE = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi;
-// Record numbers (invoice, property, account) left after redactText's
-// phone pass. Four digits or more, so "2 times" and short counts survive.
-const LONG_NUMBER_RE = /\b\d{4,}\b/g;
 const KNOWN_DOMAINS = new Set(Object.values(policy).map((entry) => entry?.domain).filter(Boolean));
-// A house number followed by capitalized street words ("12 Palm Row"),
-// including suffixes redactText's address pattern does not know.
-const STREET_RE = /\b\d{1,6}(?:\s+\p{Lu}[\p{L}'’-]*){1,4}/gu;
-// The same in any case, when the last word is a street type: "12 palm row".
-const STREET_ANY_CASE_RE = /\b\d{1,6}(?:\s+[\p{L}'’.-]+){1,3}?\s+(?:st|street|ave|avenue|rd|road|dr|drive|ln|lane|ct|court|cir|circle|way|pl|place|blvd|boulevard|ter|terrace|row|loop|trl|trail|pkwy|parkway|hwy|highway|cv|cove|sq|square|plz|plaza|cres|crescent|xing|crossing|mnr|manor|hts|heights|grv|grove|bnd|bend|rdg|ridge|lndg|landing)\b\.?/giu;
-const CAPITALIZED_RE = /\p{Lu}[\p{L}'’-]*/gu;
-const NAME_TOKEN_RE = /\p{L}[\p{L}'’-]{2,}/gu;
-const ACRONYM_RE = /^[\p{Lu}\d]{2,6}$/u; // WDO, SMS, ACH, GA4 — kept
-// Capitalized words a general description may use without naming anyone:
-// services the bar integrates with, the Waves plan tiers, days and months.
-const KEEP_CAPITALIZED = new Set(('Waves WaveGuard Bronze Silver Gold Platinum Stripe Twilio SendGrid Google Gmail '
-  + 'Meta Facebook Instagram Sentry Cloudflare GitHub Railway GrowthBook Bouncie Apify QuickBooks Zelle PayPal '
-  + 'Venmo Apple Android Yelp Nextdoor Angi Thumbtack TikTok YouTube LinkedIn Bing OpenAI Claude Gemini DataForSEO '
-  + 'Monday Tuesday Wednesday Thursday Friday Saturday Sunday January February March April May June July August '
-  + 'September October November December').split(' '));
-// A capitalized first word is kept only when it reads as the request's verb.
-const LEADING_VERBS = new Set(('add create cancel refund merge update change send schedule reschedule move delete '
-  + 'remove show find list set mark book charge void issue edit export import sync connect split combine assign '
-  + 'reassign apply waive pause resume stop start text email call print upload download approve reject close open '
-  + 'reopen transfer convert archive restore generate draft post publish check verify track view pull run look '
-  + 'see get').split(' '));
 const DISCOVERY_TOOL_NAME = 'discover_capabilities';
 
 // Same stopword list as the discovery ranker (action-registry.js
@@ -95,39 +69,18 @@ function gapReportsEnabled() {
 }
 
 const PROMPT_LINE = '\nBefore you tell the operator that something they asked for cannot be done from the bar, '
-  + 'call discover_capabilities with a short, general description of it (no names, phone numbers, emails, '
-  + 'street addresses or record ids).';
+  + 'call discover_capabilities with a short, general description of it.';
 
 // Appended to the platform prompt; empty while the kill switch is off.
 function gapReportPromptLine() {
   return gapReportsEnabled() ? PROMPT_LINE : '';
 }
 
-// Deterministic scrub for model-written text, which can carry a name or a
-// new address the request never resolved to a customer: every capitalized
-// word becomes [name] unless it is an acronym, on the keep list, or the
-// leading verb; a house number with its street becomes [address].
-function scrubProperNouns(text) {
-  return text.replace(STREET_RE, '[address]').replace(CAPITALIZED_RE, (word, offset) => {
-    if (ACRONYM_RE.test(word) || KEEP_CAPITALIZED.has(word)) return word;
-    if (offset === 0 && LEADING_VERBS.has(word.toLowerCase())) return word;
-    return '[name]';
-  });
-}
-
-// `freeText` marks model-written text (a search description); the server's
-// own fixed phrasings skip the proper-noun scrub.
-function cleanText(value, names, { freeText = false } = {}) {
+// Stored as written (owner 2026-09-28: no name or contact scrubbing in gap
+// reports), trimmed to one line of MAX_TEXT characters.
+function cleanText(value) {
   if (!value) return null;
-  // Strip UUIDs BEFORE redactText: its phone regex has no leading word
-  // boundary and can otherwise eat into a UUID's digit runs first.
-  const withoutIds = String(value).replace(UUID_RE, '[id]').replace(/\s+/g, ' ').trim();
-  // Contact patterns first, then the request's names: redactText replaces
-  // names before emails, so a name inside an address would otherwise break
-  // the email match and leave "[name]@domain" behind.
-  const redacted = redactText(redactText(withoutIds), { names }).replace(STREET_ANY_CASE_RE, '[address]');
-  const scrubbed = (freeText ? scrubProperNouns(redacted) : redacted).replace(LONG_NUMBER_RE, '[number]');
-  const text = scrubbed.replace(/\s+/g, ' ').trim().slice(0, MAX_TEXT);
+  const text = String(value).replace(/\s+/g, ' ').trim().slice(0, MAX_TEXT);
   return text || null;
 }
 
@@ -158,10 +111,10 @@ function fingerprintFor({ source, kind, summary }) {
 }
 
 // Pure: a cleaned, fingerprinted row for one signal, or null if it carries
-// nothing recordable. `names` are the request's customer names to redact.
-function prepareGapRow({ source, kind, summary, freeText, attempted, closestTool, domain } = {}, names = []) {
+// nothing recordable.
+function prepareGapRow({ source, kind, summary, attempted, closestTool, domain } = {}) {
   if (!KINDS.has(kind)) return null;
-  const cleanSummary = cleanText(summary, names, { freeText: freeText === true });
+  const cleanSummary = cleanText(summary);
   if (!cleanSummary) return null;
   const tool = cleanTool(closestTool);
   const src = String(source || 'unknown').slice(0, 32);
@@ -170,7 +123,7 @@ function prepareGapRow({ source, kind, summary, freeText, attempted, closestTool
     kind,
     domain: cleanDomain(domain),
     summary: cleanSummary,
-    attempted: cleanText(attempted, names),
+    attempted: cleanText(attempted),
     closest_tool: tool,
     fingerprint: fingerprintFor({ source: src, kind, summary: cleanSummary }),
   };
@@ -210,13 +163,13 @@ async function upsertGapRow(row) {
  * throws; a failed write is logged with the error code only — the error text
  * can carry a compiled query with the summary in it.
  */
-async function writeGapRows(signals, { names = [] } = {}) {
+async function writeGapRows(signals) {
   if (!gapReportsEnabled()) return [];
   const seen = new Set();
   const saved = [];
   for (const signal of signals || []) {
     try {
-      const row = prepareGapRow(signal, names);
+      const row = prepareGapRow(signal);
       if (!row || seen.has(row.fingerprint)) continue;
       seen.add(row.fingerprint);
       const result = await upsertGapRow(row);
@@ -270,42 +223,6 @@ async function setGapStatus(gapId, status) {
   return row || null;
 }
 
-// Customer names (and street addresses) the request resolved — the most
-// likely identifying text in a model-written search description.
-function namesFromTaskContext(taskContext) {
-  const names = new Set();
-  for (const target of [...(taskContext?.targets || []), ...(taskContext?.candidates || [])]) {
-    const label = String(target?.label || '').trim();
-    if (label) {
-      names.add(label);
-      for (const part of label.split(/\s+/)) names.add(part);
-    }
-    if (target?.address) names.add(String(target.address).trim());
-  }
-  return [...names];
-}
-
-// Customer and lead first/last names that appear in the texts, in any case —
-// the case-independent guard for a name the request never resolved ("add
-// josé at …"). Matched against the stored names, so a lowercase or
-// unresolved name is still caught.
-async function knownNamesIn(texts) {
-  const tokens = [...new Set(texts.flatMap((text) => String(text || '').toLowerCase().match(NAME_TOKEN_RE) || []))].slice(0, 100);
-  if (!tokens.length) return [];
-  const byName = (table) => db(table)
-    .whereRaw('lower(first_name) = ANY(?) OR lower(last_name) = ANY(?)', [tokens, tokens])
-    .select('first_name', 'last_name');
-  const rows = [...await byName('customers'), ...await byName('leads')];
-  const found = new Set();
-  for (const row of rows) {
-    for (const part of [row.first_name, row.last_name]) {
-      const lower = String(part || '').trim().toLowerCase();
-      if (tokens.includes(lower)) found.add(lower);
-    }
-  }
-  return [...found];
-}
-
 function searchAttempt(search) {
   if (!search.surfaced.size) return 'Searched the bar; no matching tool';
   return search.relatedToolRan
@@ -355,7 +272,7 @@ function createGapCollector({ source, isRegisteredTool = () => false }) {
 
   function pendingSignals() {
     const signals = searches.map((search) => ({
-      source, kind: 'missing_capability', summary: search.query, freeText: true, domain: search.domain,
+      source, kind: 'missing_capability', summary: search.query, domain: search.domain,
       closestTool: search.closestTool, attempted: searchAttempt(search),
     }));
     for (const name of unknownTools) {
@@ -368,15 +285,12 @@ function createGapCollector({ source, isRegisteredTool = () => false }) {
     return signals;
   }
 
-  async function flush({ reply, taskContext } = {}) {
+  async function flush({ reply } = {}) {
     try {
       if (!gapReportsEnabled() || !DECLINE_RE.test(String(reply || ''))) return;
       const signals = pendingSignals();
       if (!signals.length) return;
-      // A failed name lookup throws into the catch below: nothing is written
-      // unscrubbed.
-      const stored = await knownNamesIn(signals.map((signal) => signal.summary));
-      await writeGapRows(signals, { names: [...namesFromTaskContext(taskContext), ...stored] });
+      await writeGapRows(signals);
     } catch (err) {
       logger.warn(`[agent-gap-reports] collector flush failed (${err.code || err.name || 'error'})`);
     }
@@ -394,5 +308,5 @@ module.exports = {
   listRecentGaps,
   setGapStatus,
   createGapCollector,
-  _private: { prepareGapRow, scrubProperNouns, knownNamesIn, gapWindowCutoff, DECLINE_RE },
+  _private: { prepareGapRow, gapWindowCutoff, DECLINE_RE },
 };
