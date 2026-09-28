@@ -4020,7 +4020,7 @@ async function loadExistingPageBody(targetUrlOrPath, { strictRegistryErrors = fa
   // without the -fl marker URL inference needs, but service_areas_tag
   // carries it authoritatively — the family miner derives refresh cities
   // from it (Codex #3255 r29).
-  return { body, word_count, frontmatter: parsed.data || {}, source_file: resolved.path };
+  return { body, word_count, frontmatter: parsed.data || {} };
 }
 
 function canPublishRefresh(draft, brief = {}) {

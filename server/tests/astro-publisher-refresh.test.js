@@ -270,7 +270,6 @@ describe('loadExistingPageBody', () => {
     expect(r).not.toBeNull();
     expect(r.body).toContain('Old body content about Sarasota pest control.');
     expect(r.word_count).toBe(7);
-    expect(r.source_file).toBe(FILE_PATH);
   });
 });
 

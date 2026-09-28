@@ -1474,6 +1474,17 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     let trx = fakeTrx({ row: parkedRow });
     expect(await poller._internals.queueRowStillParkedLocked(run, trx)).toBe(true);
     expect(trx.mock.results[0].value.forUpdate).toHaveBeenCalled();
+    // Blog merges never take the page-edit lock; every refresh merge does,
+    // gate or no gate, so an ordinary refresh merge serializes with page-edit
+    // producers (miner persist, refresh-audit enqueue, intercept seed).
+    expect(trx.raw).not.toHaveBeenCalled();
+    const refreshTrx = fakeTrx({ row: parkedRow });
+    expect(await poller._internals.queueRowStillParkedLocked(
+      makeRun({ action_type: 'refresh_existing_page', created_at: '2026-08-28T04:00:00Z', queue_claim_id: 'claim-b' }),
+      refreshTrx,
+    )).toBe(true);
+    expect(refreshTrx.raw).toHaveBeenCalledWith("SELECT pg_advisory_xact_lock(hashtext('opportunity_page_edit'))");
+    expect(refreshTrx.raw.mock.invocationCallOrder[0]).toBeLessThan(refreshTrx.mock.results[0].value.forUpdate.mock.invocationCallOrder[0]);
     // Dismissed / requeued meanwhile → withheld.
     expect(await poller._internals.queueRowStillParkedLocked(run, fakeTrx({ row: { ...parkedRow, skip_reason: 'dismissed' } }))).toBe(false);
     expect(await poller._internals.queueRowStillParkedLocked(run, fakeTrx({ row: null }))).toBe(false);
