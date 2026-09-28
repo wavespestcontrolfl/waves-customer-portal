@@ -130,7 +130,7 @@ jobs:
         env:
           DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
           SIBLING_RESPLIT_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
-        run: npx jest --ci --silent --runInBand tests/first-application-sibling-split.postgres.test.js
+        run: npx jest --ci --silent --runInBand tests/first-application-sibling-split.postgres.test.js tests/priced-covered-sibling-charge.postgres.test.js tests/billing-recovery-sibling-coverage.postgres.test.js
       - name: SMS copy migration transaction tests
         working-directory: server
         env:
