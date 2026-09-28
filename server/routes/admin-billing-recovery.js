@@ -476,6 +476,18 @@ router.post('/:scheduledServiceId/bill', requireAdmin, async (req, res) => {
     const invoice = await db.transaction(async (trx) => {
       await acquireScheduledInvoiceMintLock(trx, scheduledServiceId);
 
+      // The amount above was resolved from an unlocked read. Re-read the
+      // visit price under the row lock: any change — including NULL to a
+      // stamped $0, which now bills nothing (owner 2026-09-28) — refuses
+      // rather than minting the stale fee.
+      const lockedVisit = await trx('scheduled_services').where({ id: scheduledServiceId }).forUpdate().first('estimated_price');
+      const priceCents = (v) => (v == null || v === '' ? null : Math.round(Number(v) * 100));
+      if (!lockedVisit || priceCents(lockedVisit.estimated_price) !== priceCents(visit.estimated_price)) {
+        const e = new Error('The visit price changed while billing — reload and try again.');
+        e.status = 409;
+        throw e;
+      }
+
       const existingInvoice = await trx('invoices')
         .where(function () {
           this.where('service_record_id', visit.service_record_id).orWhere('scheduled_service_id', scheduledServiceId);

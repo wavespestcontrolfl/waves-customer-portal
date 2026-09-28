@@ -3165,6 +3165,10 @@ async function assertRepriceAllowed(conn, scheduledServiceId, nextPrice) {
   const openInvoices = await conn('invoices')
     .where(function ownOrPacket() {
       this.where({ scheduled_service_id: scheduledServiceId });
+      // Most post-completion invoices carry only service_record_id.
+      this.orWhereIn('service_record_id', conn('service_records')
+        .where({ scheduled_service_id: scheduledServiceId })
+        .select('id'));
       if (hasPacketItems) {
         this.orWhereIn('id', conn('visit_completion_packet_items')
           .where({ scheduled_service_id: scheduledServiceId })
@@ -3193,10 +3197,15 @@ async function assertRepriceAllowed(conn, scheduledServiceId, nextPrice) {
       { code: 'REPRICE_BLOCKED_CARD_HOLD' },
     );
   }
+  // Every live approval at the old price: pending (link sent, amount
+  // disclosed), completing (capture in flight), completed, satisfied. Locked
+  // FOR SHARE so an in-flight capture can't promote a request past this check
+  // while the re-price commits.
   const cardLane = await conn('appointment_card_requests')
     .where({ scheduled_service_id: scheduledServiceId })
-    .whereIn('status', ['completed', 'satisfied'])
+    .whereIn('status', ['pending', 'completing', 'completed', 'satisfied'])
     .where('accepted_amount', '>', 0)
+    .forShare()
     .first('id');
   if (cardLane) {
     throw Object.assign(

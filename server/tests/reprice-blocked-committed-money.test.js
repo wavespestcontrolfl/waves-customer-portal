@@ -11,7 +11,7 @@ function conn({ price = 129, invoices = [], hold = null, cardLane = null } = {})
   const fn = (table) => {
     const chain = {
       where(arg) { if (typeof arg === 'function') arg.call(chain); return chain; },
-      whereNotIn() { return chain; }, whereIn() { return chain; }, orWhereIn() { return chain; }, whereNotNull() { return chain; },
+      whereNotIn() { return chain; }, whereIn() { return chain; }, orWhereIn() { return chain; }, whereNotNull() { return chain; }, forShare() { return chain; },
       select: async () => invoices,
       first: async () => {
         if (table === 'scheduled_services') return { estimated_price: price };
@@ -75,4 +75,34 @@ test('a shared combined-visit (packet) invoice the visit belongs to is part of t
   wrapped.schema = c.schema;
   await expect(assertRepriceAllowed(wrapped, 's1', 0)).rejects.toMatchObject({ code: 'REPRICE_BLOCKED_OPEN_INVOICE' });
   expect(calls).toContainEqual({ table: 'invoices', col: 'id' });
+});
+
+test('an invoice linked only through the visit\'s service record is part of the check', async () => {
+  const calls = [];
+  const c = conn({ invoices: [{ status: 'sent', total: 90 }] });
+  const wrapped = (table) => {
+    const ch = c(table);
+    const orig = ch.orWhereIn;
+    ch.orWhereIn = (...args) => { calls.push(args[0]); return orig.apply(ch, args); };
+    return ch;
+  };
+  wrapped.schema = c.schema;
+  await expect(assertRepriceAllowed(wrapped, 's1', 0)).rejects.toMatchObject({ code: 'REPRICE_BLOCKED_OPEN_INVOICE' });
+  expect(calls).toContain('service_record_id');
+});
+
+test('an in-flight or pending card approval (not only completed) blocks a re-price', async () => {
+  const seen = [];
+  const c = conn({ cardLane: { id: 'a1' } });
+  const wrapped = (table) => {
+    const ch = c(table);
+    if (table === 'appointment_card_requests') {
+      const orig = ch.whereIn;
+      ch.whereIn = (col, vals) => { seen.push(vals); return orig.call(ch, col, vals); };
+    }
+    return ch;
+  };
+  wrapped.schema = c.schema;
+  await expect(assertRepriceAllowed(wrapped, 's1', 0)).rejects.toMatchObject({ code: 'REPRICE_BLOCKED_CARD_APPROVAL' });
+  expect(seen[0]).toEqual(expect.arrayContaining(['pending', 'completing', 'completed', 'satisfied']));
 });

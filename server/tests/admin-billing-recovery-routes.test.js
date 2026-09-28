@@ -48,7 +48,7 @@ const router = require('../routes/admin-billing-recovery');
 // to `rows` (the `.orderBy(...)` terminal in GET /leaks).
 function makeQB({ rows = [], first = null, insert = undefined } = {}) {
   const qb = {};
-  ['join', 'leftJoin', 'where', 'whereRaw', 'whereNull', 'whereNot', 'whereNotIn', 'orWhere', 'select', 'orderBy']
+  ['join', 'leftJoin', 'where', 'whereRaw', 'whereNull', 'whereNot', 'whereNotIn', 'orWhere', 'select', 'orderBy', 'forUpdate']
     .forEach((m) => { qb[m] = jest.fn(() => qb); });
   qb.first = jest.fn(() => Promise.resolve(first));
   qb.insert = jest.fn(() => Promise.resolve(insert));
@@ -59,7 +59,14 @@ function makeQB({ rows = [], first = null, insert = undefined } = {}) {
 // Install a db.transaction(cb) that routes trx(table) like db and supports trx.raw.
 function installTransaction(routeTable) {
   db.transaction = jest.fn(async (cb) => {
-    const trx = (arg) => routeTable(arg);
+    // The locked price re-read defaults to the same visit row the unlocked
+    // read returned (price unchanged) unless a test routes it itself.
+    const trx = (arg) => {
+      if (arg === 'scheduled_services') {
+        try { return routeTable(arg); } catch { return db({ ss: 'scheduled_services' }); }
+      }
+      return routeTable(arg);
+    };
     trx.raw = jest.fn(() => Promise.resolve());
     return cb(trx);
   });
@@ -394,6 +401,30 @@ describe('admin billing-recovery routes', () => {
     expect(priceSql).toContain('COALESCE(ss.estimated_price, CASE');
     expect(priceSql).not.toContain('NULLIF(ss.estimated_price, 0)');
     delete db.schema;
+  });
+
+  // Owner ruling 2026-09-28: a NULL-priced visit (fee lane) that gets stamped
+  // $0 before the recovery lock must not mint the stale fee.
+  test('a visit re-priced (NULL to $0) before the lock is refused, never billed the stale fee', async () => {
+    db.mockImplementation((arg) => {
+      if (typeof arg === 'object' && arg.ss) return makeQB({ first: { ...BILLABLE_VISIT, estimated_price: null, monthly_rate: '55.30' } });
+      if (arg === 'customers') return makeQB({ first: { billing_mode: 'per_application', per_application_fee: '55.30' } });
+      throw new Error(`unexpected direct table ${JSON.stringify(arg)}`);
+    });
+    customerOnAutopay.mockResolvedValue(true);
+    installTransaction((arg) => {
+      if (arg === 'scheduled_services') return makeQB({ first: { estimated_price: '0.00' } });
+      if (arg === 'invoices') return makeQB({ first: null });
+      if (arg === 'visit_billing_dispositions') return makeQB({ first: null });
+      throw new Error(`unexpected trx table ${arg}`);
+    });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/billing-recovery/ss-1/bill`, {
+        method: 'POST', headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' }, body: '{}',
+      });
+      expect(res.status).toBe(409);
+      expect(InvoiceService.createFromService).not.toHaveBeenCalled();
+    });
   });
 
   test('GET /leaks surfaces per-application fee-only visits under needs_review with the fee as price', async () => {

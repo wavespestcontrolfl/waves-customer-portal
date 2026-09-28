@@ -459,6 +459,30 @@ describe('InvoiceService.unvoidInvoice', () => {
     expect(db.transaction).not.toHaveBeenCalled();
   });
 
+  // Owner ruling 2026-09-28: the re-price guard makes staff void a visit's
+  // old invoice before re-pricing it to $0 — restoring that invoice would put
+  // the pre-reprice charge back in front of the customer.
+  test('refuses a visit now priced at exactly $0 (not a callback)', async () => {
+    const svc = { id: 'svc-1', status: 'completed', is_callback: false, estimated_price: '0.00' };
+    db
+      .mockReturnValueOnce(chain({ first: voidInvoice({ scheduled_service_id: 'svc-1' }) }))
+      .mockReturnValueOnce(noRow())
+      .mockReturnValueOnce(chain({ first: svc }));
+    await expect(InvoiceService.unvoidInvoice('inv-1')).rejects.toThrow(/now priced at \$0/);
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  test('refuses a service-record-linked invoice whose visit is now priced at $0', async () => {
+    const svc = { id: 'svc-1', status: 'completed', is_callback: false, estimated_price: 0 };
+    db
+      .mockReturnValueOnce(chain({ first: voidInvoice({ scheduled_service_id: null, service_record_id: 'sr-1' }) }))
+      .mockReturnValueOnce(noRow())
+      .mockReturnValueOnce(chain({ first: { scheduled_service_id: 'svc-1' } }))
+      .mockReturnValueOnce(chain({ first: svc }));
+    await expect(InvoiceService.unvoidInvoice('inv-1')).rejects.toThrow(/now priced at \$0/);
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
   test('re-checks the linked visit on the LOCKED row — a cancellation landing mid-restore rolls it back (Codex #3493 r3/r8)', async () => {
     const inTrxVisitChain = chain({ first: { id: 'svc-1', status: 'cancelled' } });
     db

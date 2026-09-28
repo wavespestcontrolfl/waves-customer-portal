@@ -450,7 +450,21 @@ async function reconcileInvoiceDiscountProvenance(invoiceId, lineItems, discount
 // cancellation sweep only voids non-void invoices, so it would miss a
 // restore that commits on a stale verdict. All reads fail CLOSED.
 async function assertUnvoidableLinkedVisit(conn, invoiceRow, { lock = false } = {}) {
-  if (!invoiceRow.scheduled_service_id) return;
+  // Most post-completion invoices carry only service_record_id — resolve the
+  // visit through the service record so every linked-visit guard (including
+  // the $0 one) covers them too.
+  let scheduledServiceId = invoiceRow.scheduled_service_id || null;
+  if (!scheduledServiceId && invoiceRow.service_record_id) {
+    try {
+      const sr = await conn("service_records").where({ id: invoiceRow.service_record_id }).first("scheduled_service_id");
+      scheduledServiceId = sr?.scheduled_service_id || null;
+    } catch (err) {
+      throw new Error(
+        `Could not verify the linked service visit — refusing to unvoid (${err.message})`,
+      );
+    }
+  }
+  if (!scheduledServiceId) return;
   let svc = null;
   try {
     // The in-transaction pass takes the visit row lock (Codex #3493 r8): a
@@ -458,7 +472,7 @@ async function assertUnvoidableLinkedVisit(conn, invoiceRow, { lock = false } = 
     // is uncommitted-invisible to a plain MVCC read, so a lockless second
     // read could pass on the stale version while both commit. FOR UPDATE
     // waits for the in-flight writer and reads the committed result.
-    let q = conn("scheduled_services").where({ id: invoiceRow.scheduled_service_id });
+    let q = conn("scheduled_services").where({ id: scheduledServiceId });
     if (lock) q = q.forUpdate();
     svc = await q.first();
   } catch (err) {
@@ -485,6 +499,15 @@ async function assertUnvoidableLinkedVisit(conn, invoiceRow, { lock = false } = 
   if (svc.is_callback && !(Number(svc.estimated_price) > 0)) {
     throw new Error(
       "Cannot unvoid — this visit was converted to a free re-service and its invoice was retired with it; re-price the visit before restoring a charge",
+    );
+  }
+  // A visit priced at exactly $0 is free (owner ruling 2026-09-28): the
+  // re-price guard makes staff void its old invoice before the $0 lands, so
+  // restoring that invoice would put the pre-reprice charge back in front of
+  // the customer. Re-price the visit first.
+  if (svc.estimated_price != null && svc.estimated_price !== "" && Number(svc.estimated_price) === 0) {
+    throw new Error(
+      "Cannot unvoid — this visit is now priced at $0; re-price the visit before restoring a charge",
     );
   }
   // Annual-prepay stamping: prepaid_method + amount + term link mean the
