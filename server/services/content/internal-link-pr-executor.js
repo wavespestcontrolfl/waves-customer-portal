@@ -521,27 +521,36 @@ class InternalLinkPrExecutor {
   // fail-soft — a bookkeeping error never undoes a merge.
   async _finalizeOriginatingRuns(prUrl, { merged }) {
     if (!prUrl) return;
-    try {
-      const runs = await db('autonomous_runs')
+    const now = new Date();
+    // Run + opportunity move together in one transaction: a half-applied
+    // finalize would leave the opportunity parked with no run left to retry
+    // it (retries select only still-parked runs).
+    const finalize = async (k) => {
+      const runs = await k('autonomous_runs')
         .where({ outcome: 'completed_pending_review', skip_reason: LINK_RUN_PENDING_REASON, astro_pr_url: prUrl })
         .select('id', 'opportunity_id', 'queue_claim_id');
-      const now = new Date();
       for (const run of runs) {
-        await db('autonomous_runs').where({ id: run.id, skip_reason: LINK_RUN_PENDING_REASON }).update(merged
+        await k('autonomous_runs').where({ id: run.id, skip_reason: LINK_RUN_PENDING_REASON }).update(merged
           ? { outcome: 'completed_published', skip_reason: null, updated_at: now }
           : { outcome: 'skipped', skip_reason: LINK_RUN_CLOSED_REASON, updated_at: now });
         if (!run.opportunity_id) continue;
-        await db('opportunity_queue')
+        await k('opportunity_queue')
           .where({ id: run.opportunity_id, status: 'pending_review', skip_reason: LINK_RUN_PENDING_REASON })
           .where('claim_id', run.queue_claim_id || null)
           .update(merged
             ? { status: 'done', completed_at: now, updated_at: now }
             : { status: 'skipped', skip_reason: LINK_RUN_CLOSED_REASON, completed_at: now, updated_at: now });
       }
+    };
+    try {
+      if (typeof db.transaction === 'function') await db.transaction(finalize);
+      else await finalize(db);
     } catch (err) {
+      // Nothing committed; the next settle pass (verification / poller) retries.
       logger.warn(`[internal-link-pr-executor] originating-run finalize failed for ${prUrl}: ${err.message}`);
     }
   }
+
 
   async _checkLinkOnlyDiff(pr, prTasks, baseSha) {
     const files = await GitHubClient.listPrFiles(pr.number);

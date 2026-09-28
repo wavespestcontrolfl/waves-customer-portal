@@ -1479,7 +1479,9 @@ describe('internal-link originating run finalize', () => {
       };
       return q;
     });
+    db.transaction = jest.fn(async (fn) => fn(db));
     await instance._finalizeOriginatingRuns('https://github.com/x/y/pull/9', { merged: true });
+    expect(db.transaction).toHaveBeenCalledTimes(1);
     expect(calls).toEqual([
       { table: 'autonomous_runs', patch: expect.objectContaining({ outcome: 'completed_published', skip_reason: null }) },
       { table: 'opportunity_queue', patch: expect.objectContaining({ status: 'done' }) },
