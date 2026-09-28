@@ -767,6 +767,19 @@ function rowGuaranteeLanes(row = {}) {
     || (row.isCommercial === true ? guaranteeLanesForRow(row) : serviceKeysFromText(row.service, row.label));
 }
 
+const RECURRING_PLAN_TERMS = 'Money-back guarantee on recurring WaveGuard service: free re-treats between visits, and a refund of the most recent service payment if a covered problem can’t be solved.';
+const ONE_TIME_CALLBACK_TERMS = 'This one-time service may include a 30-day callback period when shown on the estimate.';
+
+// Whether one row carries the plan terms itself (owner ruling 2026-09-27:
+// each service carries its own terms; the page's serviceRowTermsScope):
+// residential pest, lawn, mosquito, tree & shrub or palm work, on an
+// estimate with no termite, unclassifiable or commercial scope.
+function rowCarriesOwnPlanTerms(row, { noGuaranteeClaims = false, commercialScope = false } = {}) {
+  if (noGuaranteeClaims === true || commercialScope === true || !row || row.isCommercial === true) return false;
+  const lanes = rowGuaranteeLanes(row);
+  return lanes.length > 0 && lanes.every((lane) => RECURRING_TERMS_LANES.includes(lane));
+}
+
 function assistantGuaranteeContext(noGuaranteeClaims, serviceMode, recurringRows, oneTimeRows, noEstimateWideGuarantee = false) {
   const rowLanes = [...recurringRows, ...oneTimeRows].map((row) => {
     const keys = rowGuaranteeLanes(row);
@@ -789,10 +802,8 @@ function assistantGuaranteeContext(noGuaranteeClaims, serviceMode, recurringRows
   return {
     noGuaranteeClaims: noGuaranteeClaims === true,
     recurringTermsEligible,
-    recurring: recurringTermsEligible
-      ? 'Money-back guarantee on recurring WaveGuard service: free re-treats between visits, and a refund of the most recent service payment if a covered problem can’t be solved.'
-      : null,
-    oneTime: oneTimePestTerms ? 'This one-time service may include a 30-day callback period when shown on the estimate.' : null,
+    recurring: recurringTermsEligible ? RECURRING_PLAN_TERMS : null,
+    oneTime: oneTimePestTerms ? ONE_TIME_CALLBACK_TERMS : null,
     guidance: noGuaranteeClaims
       ? 'Use this estimate’s written service scope and terms. Do not infer an estimate-wide callback, satisfaction, re-treatment, or money-back guarantee. State each service’s terms exactly as guarantees.serviceTerms lists them.'
       : (recurringTermsEligible ? null : 'Use the service-specific written terms. Do not infer recurring callbacks, money-back, or no-contract terms from membership or category-specific satisfaction wording. State each service’s terms exactly as guarantees.serviceTerms lists them.'),
@@ -807,6 +818,9 @@ function buildEstimateAssistantContext({
   serviceMode = 'recurring',
   noGuaranteeClaims = false,
   noEstimateWideGuarantee = false,
+  // An authored proposal or an engine commercial row anywhere
+  // (estimateHasCommercialScope): no row carries the plan terms itself.
+  commercialScope = false,
 } = {}) {
   const parsedData = parseEstimateData(estData);
   const requestedMode = serviceMode === 'one_time' ? 'one_time' : 'recurring';
@@ -884,9 +898,12 @@ function buildEstimateAssistantContext({
   const contextBillingText = selectedMode === 'one_time'
     ? (oneTimeBillingAmount ? fmtMoney(oneTimeBillingAmount) : null)
     : normalBillingAmountText;
+  // Each service keeps its own terms: a row that carries the plan terms
+  // itself keeps them in its detail even where the estimate as a whole
+  // does not.
   const rowWithSummary = (row) => {
     const claimPattern = noGuaranteeClaims ? PLAN_TERMS_COPY
-      : (guarantees.recurringTermsEligible ? null : RECURRING_TERMS_COPY);
+      : (guarantees.recurringTermsEligible || rowCarriesOwnPlanTerms(row, { commercialScope }) ? null : RECURRING_TERMS_COPY);
     const detail = claimPattern ? withoutClaimParts(cleanText(row.detail), claimPattern) : row.detail;
     const safeRow = quoteRequired
       ? {
@@ -957,6 +974,18 @@ function buildEstimateAssistantContext({
               && !recurringServices.some((merged) => merged.label === row.label)),
           ],
           oneTimeItemsContext || [],
+          {
+            // A row that carries the plan terms itself states them under its
+            // own name: the recurring terms on a recurring plan, or the
+            // callback period on one-time work other than lawn.
+            ownTerms: (row) => {
+              if (!rowCarriesOwnPlanTerms(row, { noGuaranteeClaims, commercialScope })) return [];
+              if (row.oneTime === true) {
+                return rowGuaranteeLanes(row).every((lane) => lane === 'lawn') ? [] : [ONE_TIME_CALLBACK_TERMS];
+              }
+              return selectedMode === 'recurring' ? [RECURRING_PLAN_TERMS] : [];
+            },
+          },
         ),
       },
     contact: COMPANY,
@@ -1612,7 +1641,7 @@ function writtenSatisfactionClause(detail) {
 // satisfaction clause written in its own detail, which rowWithSummary has
 // already removed on an estimate with termite work, as the page does. The
 // model context and the fallback answer read this one list.
-function serviceTermsFromRows(rowGroups = [], oneTimeRows = []) {
+function serviceTermsFromRows(rowGroups = [], oneTimeRows = [], { ownTerms = () => [] } = {}) {
   const oneTimeIdentities = new Set(oneTimeRows.map(trenchingServiceIdentity));
   const seen = new Set();
   const entries = rowGroups.flat().flatMap((row) => {
@@ -1641,7 +1670,7 @@ function serviceTermsFromRows(rowGroups = [], oneTimeRows = []) {
       terms = purchased.length ? purchased : (warranty.length ? warranty : ['No guarantee.']);
     } else {
       const clause = writtenSatisfactionClause(row.detail);
-      terms = [...purchased, ...(clause ? [`The written detail says “${clause}”`] : [])];
+      terms = [...purchased, ...ownTerms(row), ...(clause ? [`The written detail says “${clause}”`] : [])];
       if (!terms.length) return [];
     }
     const amount = Number(row.amount);
@@ -1950,6 +1979,7 @@ async function answerEstimateQuestion({
   serviceMode,
   noGuaranteeClaims = false,
   noEstimateWideGuarantee = false,
+  commercialScope = false,
   database = db,
 } = {}) {
   const cleanQuestion = cleanText(question);
@@ -1961,6 +1991,7 @@ async function answerEstimateQuestion({
     serviceMode,
     noGuaranteeClaims,
     noEstimateWideGuarantee,
+    commercialScope,
   });
   try {
     context.supportContext = await loadEstimateAiSupportContext({

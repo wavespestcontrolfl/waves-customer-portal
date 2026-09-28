@@ -100,6 +100,33 @@ describe('estimate assistant no-guarantee context', () => {
     expect(answer).not.toMatch(/includes the money-back guarantee|30-day callback/i);
   });
 
+  test('each service states its own terms: pest keeps its plan terms beside rodent, under its own name only', () => {
+    const build = (commercialScope) => buildEstimateAssistantContext({
+      estimate: { waveguard_tier: 'Bronze', monthly_total: 75 },
+      pricingBundle: { waveGuardTier: 'Bronze', frequencies: [{ key: 'quarterly', label: 'Quarterly', monthly: 75, annual: 900,
+        included: [
+          { service: 'pest_control', label: 'Pest Control' },
+          { service: 'rodent_bait', label: 'Rodent Bait Stations', detail: 'Station monitoring and service.' },
+        ],
+      }] },
+      noEstimateWideGuarantee: true,
+      commercialScope,
+    });
+    const context = build(false);
+    expect(context.guarantees).toMatchObject({ recurringTermsEligible: false, recurring: null });
+    const pestEntry = context.guarantees.serviceTerms.find((entry) => entry.service === 'Pest Control');
+    expect(pestEntry.terms.join(' ')).toMatch(/^Money-back guarantee on recurring WaveGuard service/);
+    expect(context.guarantees.serviceTerms.find((entry) => /Rodent/.test(entry.service))).toBeUndefined();
+    const answer = answerEstimateQuestionFallback('What is the guarantee?', context);
+    expect(answer).toContain('Pest Control: Money-back guarantee on recurring WaveGuard service');
+    expect(answer).toMatch(/applies to that service only/);
+    expect(answer).not.toMatch(/Rodent Bait Stations:/);
+
+    // An authored proposal or commercial row anywhere: no service carries them.
+    const commercial = build(true);
+    expect(commercial.guarantees.serviceTerms.some((entry) => /Money-back/.test(entry.terms.join(' ')))).toBe(false);
+  });
+
   test('a pest + lawn bundle carries the plan terms, as the page states them (every service carries them)', () => {
     const context = buildEstimateAssistantContext({
       estimate: { waveguard_tier: 'Silver', monthly_total: 110 },

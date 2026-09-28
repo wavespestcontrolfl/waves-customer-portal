@@ -1590,7 +1590,10 @@ termite bond, trenching warranty or pre-slab warranty option the customer
 selected. Where no estimate-wide terms apply, Ask Waves answers every
 guarantee question with one per-service list under these rules, never infers
 from a question's wording which service is meant, and never serves a model
-answer that makes a plan-terms claim.
+answer that makes a plan-terms claim. A service that carries the plan terms
+itself lists them under its own name, as the page shows them on its own card;
+the route passes the page's `noEstimateWideGuarantee` and commercial scope so
+Ask Waves never states more than the page.
 `/data`'s optional `estimate.noEstimateWideGuarantee: true` (and the same
 field on a document `proposal`) is set when not every service carries the
 recurring residential terms: a rodent, commercial, termite or unclassifiable

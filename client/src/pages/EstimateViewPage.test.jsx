@@ -542,6 +542,22 @@ describe('mixed-estimate approval microcopy', () => {
     }
   });
 
+  it('the document footer follows the document scope, which honors the page decision (engine commercial marks)', async () => {
+    window.history.replaceState({}, '', '/estimate/mixed-termite-token?mode=pdf');
+    const payload = documentPayload(false, false);
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true, status: 200,
+      json: async () => ({ ...payload, estimate: { ...payload.estimate, noEstimateWideGuarantee: true } }),
+    })));
+
+    render(<WavesShell><EstimateViewPage /></WavesShell>);
+
+    await screen.findByText('Pest Control');
+    const footer = within(screen.getByRole('contentinfo'));
+    expect(await footer.findByText(/Written estimate scope and terms apply/i)).toBeInTheDocument();
+    expect(footer.queryByText(/Backed by the Waves Guarantee/i)).not.toBeInTheDocument();
+  });
+
   it('scopes the server no-guarantee decision to the estimate shell beside one-time termite work', async () => {
     const frequency = {
       key: 'standard',

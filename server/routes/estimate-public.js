@@ -26723,6 +26723,7 @@ async function composeEstimateDataPayload(estimate, {
           serviceMode: defaultServiceMode,
           noGuaranteeClaims,
           noEstimateWideGuarantee,
+          commercialScope: estimateHasCommercialScope(estimateDataForIntelligence),
         });
         intelligence.supportSources = loadPublicEstimateSupportSources({
           question: 'What is included in this WaveGuard estimate?',
@@ -27779,6 +27780,7 @@ async function handleEstimateAsk(req, res, next) {
       serviceMode,
       noGuaranteeClaims,
       noEstimateWideGuarantee,
+      commercialScope: estimateHasCommercialScope(estData),
     });
 
     await db('intelligence_bar_queries').insert(buildEstimateAskQueryLog({

@@ -72,7 +72,7 @@ const glassAppearanceActive = () => document.documentElement.hasAttribute('data-
 import { estimateCard, estimateInnerBox } from '../components/estimate/cardStyles';
 import TerminalStateCard from '../components/estimate/TerminalStateCard';
 import ProposalDetailCard from '../components/estimate/ProposalDetailCard';
-import EstimateProposalDocument, { proposalMakesNoGuaranteeClaim } from './EstimateProposalDocument';
+import EstimateProposalDocument, { proposalGuaranteeScope } from './EstimateProposalDocument';
 import { copyAllowedInScope, guaranteeScope, serviceGuaranteeScope, withoutClaimsOutsideScope } from '@estimate-copy-claims';
 import { estimateCopyFor } from '../lib/estimate-copy';
 import {
@@ -5536,11 +5536,12 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // The footer's "Backed by the Waves Guarantee" covers the whole estimate,
   // so it needs every service to carry the plan terms: the server's
   // noEstimateWideGuarantee (a rodent, commercial, termite or unknown service
-  // anywhere), on the page or on the document it renders.
+  // anywhere). The document it renders reads the same scope as its own terms
+  // line (proposalGuaranteeScope, which also honors the page's decision).
   const footerNoGuaranteeClaims = data === null
     ? null
     : (pdfDocumentMode && data?.documentRender === true
-        ? proposalMakesNoGuaranteeClaim(data) || data?.proposal?.noEstimateWideGuarantee === true
+        ? proposalGuaranteeScope(data) !== 'all'
         : data?.estimate?.noGuaranteeClaims === true || data?.estimate?.noEstimateWideGuarantee === true);
   useLayoutEffect(() => {
     setFooterNoGuarantee?.(footerNoGuaranteeClaims);
