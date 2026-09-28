@@ -28,6 +28,7 @@ const authorService = require('./author-service');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { assertValidBlogFrontmatter } = require('./schema-validator');
+const { costGuidePriceRange } = require('./price-range');
 const contentGuardrails = require('../content/content-guardrails');
 const { decodeHTMLStrict } = require('entities');
 const { refineFootprintFindings } = require('../content/footprint-claim-classifier');
@@ -3280,6 +3281,15 @@ async function publishOrUpdatePage(draft, brief = {}) {
   const isLegacyMd = !!existingFile && existingFile.path.endsWith('.md');
   const filePath = existingFile && !isLegacyMd ? existingFile.path : `${ASTRO_BLOG_DIR}/${slug}.mdx`;
 
+  // Cost-guide price card (owner D1): a price_range already on the live post
+  // (owner-set, or an explicit [] clearing it) is kept verbatim — this lane
+  // rebuilds frontmatter from the draft and must never drop it; otherwise a
+  // cost guide gets the deterministic mapped keys (price-range.js).
+  let livePriceRange;
+  try { livePriceRange = existingFile ? fm.parse(existingFile.file.content)?.data?.price_range : undefined; } catch { livePriceRange = undefined; }
+  const priceRange = livePriceRange != null ? livePriceRange : costGuidePriceRange(frontmatter);
+  if (priceRange) frontmatter.price_range = priceRange;
+
   // LLM fact-check (same gate as the admin publish path) before any branch is
   // cut, so a factual error never opens an orphan PR. The autonomous runner's
   // upstream gates are rule-based (quality, uniqueness) — none catch a wrong
@@ -3774,6 +3784,13 @@ async function publishRefresh(draft, brief = {}) {
   let backfilledFields = [];
   if (isBlogTarget(filePath)) {
     backfilledFields = backfillLegacyBlogRequiredFields(nextFrontmatter, brief);
+    // Cost-guide price card (owner D1): added only when the live post has no
+    // price_range at all — an owner-set list (or an explicit []) stays frozen
+    // with the rest of the live frontmatter.
+    if (nextFrontmatter.price_range == null) {
+      const priceRange = costGuidePriceRange(nextFrontmatter);
+      if (priceRange) nextFrontmatter.price_range = priceRange;
+    }
     assertValidBlogFrontmatter(nextFrontmatter);
   }
 
@@ -4559,6 +4576,7 @@ function buildDraftPrBody({ frontmatter, slug, branch, content, brief, images = 
     `- Action type: ${brief.action_type || '—'}`,
     `- Category: ${frontmatter.category || '—'}`,
     `- Service areas: ${formatList(frontmatter.service_areas_tag)}`,
+    ...(Array.isArray(frontmatter.price_range) ? [`- Price card (\`price_range\`): ${formatList(frontmatter.price_range)}`] : []),
     `- Word count: ${wordCount}`,
     ...imageProvenanceSection(images),
     ``,
@@ -4623,6 +4641,10 @@ function buildRefreshPrBody({ filePath, targetUrl, branch, before = {}, after = 
     ``,
     ...(backfilledFields.length ? [
       `**Backfilled schema-required fields (inferred — legacy pre-schema-v2 post):** ${backfilledFields.map((f) => `\`${f}\``).join(', ')}. Review the inferred values in the diff.`,
+      ``,
+    ] : []),
+    ...(before.price_range == null && Array.isArray(after.price_range) ? [
+      `**Added cost-guide price card (\`price_range\`):** ${formatList(after.price_range)}.`,
       ``,
     ] : []),
     `**Frozen (unchanged):** canonical, slug, schema, domains, trackingNumberKey, cityPhone, ${backfilledFields.some((f) => String(f).startsWith('page_type')) ? '' : 'pageType, '}category, robots, ogImage — all preserved from the live page. Only body + meta + freshness date${backfilledFields.length ? ' + the backfilled fields above' : ''} changed.`,

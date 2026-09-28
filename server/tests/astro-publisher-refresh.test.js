@@ -306,6 +306,25 @@ describe('publishRefresh blog-schema validation gate', () => {
     expect(data.meta_description.length).toBeLessThanOrEqual(160);
   });
 
+  test('a cost-guide refresh adds the mapped price_range only when the live post has none', async () => {
+    const liveCost = VALID_BLOG.replace('post_type: "diagnostic"', 'post_type: "cost"');
+    gh.getFile.mockResolvedValue({ content: liveCost, sha: 'blog-sha' });
+    await pub.publishRefresh(blogRefreshDraft(), BLOG_BRIEF);
+    expect(fm.parse(gh.putFile.mock.calls[0][0].content).data.price_range)
+      .toEqual(['termite_bait_install', 'termite_bait_monitoring', 'termite_trenching']);
+    expect(gh.createPr.mock.calls[0][0].body).toContain('Added cost-guide price card');
+
+    // An owner-set list (even an explicit empty one) is never replaced or removed.
+    for (const ownerSet of ['price_range:\n  - "termite_bait_install"', 'price_range: []']) {
+      jest.clearAllMocks();
+      gh.getFile.mockResolvedValue({ content: liveCost.replace('category: "termite"', `category: "termite"\n${ownerSet}`), sha: 'blog-sha' });
+      await pub.publishRefresh(blogRefreshDraft(), BLOG_BRIEF);
+      const { data } = fm.parse(gh.putFile.mock.calls[0][0].content);
+      expect(data.price_range).toEqual(ownerSet.includes('[]') ? [] : ['termite_bait_install']);
+      expect(gh.createPr.mock.calls[0][0].body).not.toContain('Added cost-guide price card');
+    }
+  });
+
   test('blocks a blog refresh that pushes meta_description out of the 115-160 bound', async () => {
     const tooLong = `Drywood termite signs ${'x'.repeat(180)}`;
     await expect(
