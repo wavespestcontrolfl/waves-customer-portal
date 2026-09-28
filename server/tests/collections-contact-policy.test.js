@@ -524,16 +524,14 @@ describe('rolling frequency windows', () => {
       expect(result.allowed).toBe(true);
     });
 
-    test('gate on: a text 3 days ago holds the next message, on any text channel, until that weekday next week', async () => {
+    test('gate on: a text 3 days ago holds the next message, on any text channel, until 7 days after it', async () => {
       process.env.GATE_DUNNING_SPACING = 'true';
       for (const channel of ['sms', 'email', 'push']) {
         armAllowedBaseline({ ledger: [{ id: 'l-1', channel: 'sms', occurred_at: at(3 * DAY) }] });
         const result = await evalText(channel);
         expect(result.allowed).toBe(false);
         expect(result.denialReasons).toEqual(['dunning_within_7d']);
-        // Sent Sunday Aug 9 at 11:00 ET: the next message may go from the
-        // start of Sunday Aug 16 in ET.
-        expect(result.nextEligibleAt.toISOString()).toBe('2026-08-16T04:00:00.000Z');
+        expect(result.nextEligibleAt.toISOString()).toBe(new Date(WED_11AM_EDT.getTime() + 4 * DAY).toISOString());
       }
     });
 
@@ -544,20 +542,16 @@ describe('rolling frequency windows', () => {
       expect(result.denialReasons).toContain('dunning_within_7d');
     });
 
-    test('gate on: counts ET calendar days, so run-time jitter never pushes a weekly step back a day', async () => {
+    test('gate on: a full 7×24 hours — 30 seconds short still holds, 7 days on the dot does not', async () => {
       process.env.GATE_DUNNING_SPACING = 'true';
-      // Last Wednesday at 11:00:30 ET is 6 days 23:59:30 before this
-      // Wednesday's 11:00 run, and it no longer holds.
       armAllowedBaseline({ ledger: [{ id: 'l-3', channel: 'push', occurred_at: at(7 * DAY - 30 * 1000) }] });
-      const sameWeekday = await evalText('sms');
-      expect(sameWeekday.denialReasons).not.toContain('dunning_within_7d');
-      expect(sameWeekday.allowed).toBe(true);
+      const short = await evalText('sms');
+      expect(short.denialReasons).toEqual(['dunning_within_7d']);
+      expect(short.nextEligibleAt.toISOString()).toBe(new Date(WED_11AM_EDT.getTime() + 30 * 1000).toISOString());
 
-      // Last Thursday at 23:00 ET still holds all of this Wednesday.
-      armAllowedBaseline({ ledger: [{ id: 'l-3', channel: 'push', occurred_at: at(5 * DAY + 12 * HOUR) }] });
-      const lateThursday = await evalText('sms');
-      expect(lateThursday.denialReasons).toEqual(['dunning_within_7d']);
-      expect(lateThursday.nextEligibleAt.toISOString()).toBe('2026-08-13T04:00:00.000Z');
+      armAllowedBaseline({ ledger: [{ id: 'l-3', channel: 'push', occurred_at: at(7 * DAY) }] });
+      const full = await evalText('sms');
+      expect(full.denialReasons).not.toContain('dunning_within_7d');
     });
 
     test('gate on: messages that never reached the customer do not count', async () => {

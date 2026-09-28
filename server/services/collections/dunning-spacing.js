@@ -4,11 +4,11 @@
  * dunning_within_7d denial and the ledger's reservation-time re-check, so
  * the two never disagree about which message holds the next one.
  *
- * Counted in ET calendar days: a message on a Tuesday holds every overdue
- * text, email and push until the next Tuesday begins, whatever the hour, so
- * a weekly step is never pushed back a day by seconds of run-time jitter.
- * Never longer than 7×24 hours (the fall-back week has one more hour), which
- * keeps every holding row inside the policy's 7-day ledger read.
+ * A full 7×24 hours from the moment a message went out (codex #5108 r2: a
+ * calendar-week boundary let a late-evening message be followed after
+ * about six and a half days). The daily runs are not timed to the second,
+ * so a weekly step that comes due a few seconds short of the full week
+ * goes out on the next run instead.
  *
  * A row holds only if the message may have reached the customer: not a
  * never_contacted row, a definite refusal (send_failed) or an episode
@@ -20,7 +20,6 @@
  * customer asks for during a collections call.
  */
 
-const { etDateString, addETDays, parseETDateTime } = require('../../utils/datetime-et');
 const { dunningSpacingLive } = require('../../config/feature-gates');
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -35,9 +34,7 @@ function metadataOf(row) {
 
 // The instant a message sent at `occurredAt` stops holding the next one.
 function spacingHeldUntil(occurredAt) {
-  const at = new Date(occurredAt);
-  const nextWeek = parseETDateTime(`${etDateString(addETDays(at, SPACING_DAYS))}T00:00`);
-  return new Date(Math.min(nextWeek.getTime(), at.getTime() + SPACING_DAYS * DAY_MS));
+  return new Date(new Date(occurredAt).getTime() + SPACING_DAYS * DAY_MS);
 }
 
 function holdsNextMessage(row, now) {

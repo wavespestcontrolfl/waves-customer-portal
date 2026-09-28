@@ -3122,7 +3122,8 @@ const gates = {
   // Seven-day spacing between overdue-payment messages (owner ruling
   // 2026-09-27, dunning unification PR 1). Ships DARK: off unless exactly
   // 'true'. This entry is for logGateStatus only — the canonical CALL-TIME
-  // reader is dunningSpacingLive() below, which contact-policy.js uses.
+  // reader is dunningSpacingLive() below, which collections/dunning-spacing.js
+  // uses.
   dunningSpacing: process.env.GATE_DUNNING_SPACING === 'true',
 };
 
@@ -3273,10 +3274,10 @@ function bookCapacityCommitLive() {
 }
 
 // GATE_DUNNING_SPACING read at CALL time — strict `=== 'true'`. The one
-// reader collections/contact-policy.js uses for the seven-day spacing between
-// overdue-payment messages. Only consulted while the collections policy
-// itself runs (GATE_COLLECTIONS_POLICY), since every rail reaches the rule
-// through that consult.
+// reader collections/dunning-spacing.js uses for the seven-day spacing between
+// overdue-payment messages, shared by the collections policy and the contact
+// ledger's reservation re-check. Both only act while GATE_COLLECTIONS_POLICY
+// is also on.
 function dunningSpacingLive() {
   return process.env.GATE_DUNNING_SPACING === 'true';
 }

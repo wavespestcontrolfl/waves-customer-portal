@@ -2,7 +2,7 @@
  * collections/dunning-spacing — the seven-day overdue-message window the
  * policy and the ledger share (GATE_DUNNING_SPACING).
  *
- * Pins: the window counts ET calendar days and is capped at 7×24 hours;
+ * Pins: the window is a full 7×24 hours from the send;
  * a row holds only while the message may have reached the customer
  * (delivery evidence beats a failure stamp); the pay link a customer asks
  * for on a call and the annual prepay renewal reminder neither wait nor
@@ -20,21 +20,18 @@ afterEach(() => {
 });
 
 describe('spacingHeldUntil', () => {
-  test('a message holds until that weekday next week begins in ET, whatever the hour', () => {
-    // Tue Sep 29 2026, 14:00 EDT and 23:30 EDT (already Wednesday in UTC).
-    expect(DunningSpacing.spacingHeldUntil('2026-09-29T18:00:00Z').toISOString()).toBe('2026-10-06T04:00:00.000Z');
-    expect(DunningSpacing.spacingHeldUntil('2026-09-30T03:30:00Z').toISOString()).toBe('2026-10-06T04:00:00.000Z');
-  });
-
-  test('the fall-back week never holds longer than 7×24 hours', () => {
-    // Sat Oct 31 2026, 00:30 EDT. Midnight ET on Nov 7 (EST) is 05:00Z,
-    // an hour past 7×24h, so the cap ends the hold at 04:30Z.
+  test('a message holds for a full 7×24 hours from the moment it went out', () => {
+    expect(DunningSpacing.spacingHeldUntil('2026-09-29T18:00:00Z').toISOString()).toBe('2026-10-06T18:00:00.000Z');
+    // Across the fall-back week too: elapsed time, not the wall clock.
     expect(DunningSpacing.spacingHeldUntil('2026-10-31T04:30:00Z').toISOString()).toBe('2026-11-07T04:30:00.000Z');
   });
 
-  test('the spring-forward week ends at midnight ET', () => {
-    // Sat Mar 7 2026, 10:00 EST → Sat Mar 14 00:00 EDT.
-    expect(DunningSpacing.spacingHeldUntil('2026-03-07T15:00:00Z').toISOString()).toBe('2026-03-14T04:00:00.000Z');
+  // codex #5108 r2: a late-evening message must not reopen at the start of
+  // the same weekday next week.
+  test('a Tuesday 23:30 ET message still holds the next Tuesday morning run', () => {
+    const tuesdayNight = { id: 'l-1', channel: 'sms', source: 'late_payment_checker', occurred_at: '2026-09-30T03:30:00Z', metadata: null };
+    expect(DunningSpacing.holdsNextMessage(tuesdayNight, new Date('2026-10-06T14:16:00Z'))).toBe(true);
+    expect(DunningSpacing.holdsNextMessage(tuesdayNight, new Date('2026-10-07T03:30:00Z'))).toBe(false);
   });
 });
 
@@ -68,11 +65,10 @@ describe('holdsNextMessage', () => {
     expect(DunningSpacing.holdsNextMessage(row({ metadata: { resolved: true, delivered: true } }), now)).toBe(true);
   });
 
-  test('a message stops holding when its ET week is up', () => {
-    // Last Thursday 23:00 EDT holds through Wednesday; this Thursday is clear.
-    const lastThursday = row({ occurred_at: '2026-09-25T03:00:00Z' });
-    expect(DunningSpacing.holdsNextMessage(lastThursday, new Date('2026-10-01T03:59:59Z'))).toBe(true);
-    expect(DunningSpacing.holdsNextMessage(lastThursday, new Date('2026-10-01T04:00:00Z'))).toBe(false);
+  test('a message stops holding exactly 7×24 hours after it went out', () => {
+    const sent = row({ occurred_at: '2026-09-24T14:16:30Z' });
+    expect(DunningSpacing.holdsNextMessage(sent, new Date('2026-10-01T14:16:29Z'))).toBe(true);
+    expect(DunningSpacing.holdsNextMessage(sent, new Date('2026-10-01T14:16:30Z'))).toBe(false);
   });
 });
 
