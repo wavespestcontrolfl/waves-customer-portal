@@ -2110,13 +2110,20 @@ async function hasActiveSequence(invoiceId) {
  * module that run before it (the annual-prepay reminder's same-day
  * suppression, codex #5126 r1). Under the Day 90 ladder a touch stored on
  * the legacy Day 7 or Day 14 fires on its Day 10 or Day 17, which this
- * module's next run writes back. A step past the live cadence fires no
- * touch at all. `seq` carries step_index, next_touch_at, anchor_at and
- * created_at; the invoice supplies the send-time anchor when needed.
+ * module's next run writes back, and a sequence finished at the Day 60 or
+ * Day 90 step on its open invoice is resumed by that run: its touch is the
+ * first step not already past its send day, the one the run would send. A
+ * step past the live cadence fires no touch at all. `seq` carries status,
+ * step_index, next_touch_at, anchor_at and created_at; the invoice supplies
+ * the send-time anchor when needed.
  */
-async function liveNextTouchAt(invoiceId, seq) {
-  if (!seq?.next_touch_at) return null;
-  if (Number(seq.step_index) >= followupSteps().length) return null;
+async function liveNextTouchAt(invoiceId, seq, now = new Date()) {
+  if (!seq) return null;
+  const index = Number(seq.step_index);
+  const steps = followupSteps();
+  const pendingRevival = ladderThrough90Live() && seq.status === 'completed'
+    && index >= config.steps.length && index < steps.length;
+  if (!pendingRevival && (!seq.next_touch_at || index >= steps.length)) return null;
   if (!ladderThrough90Live()) return seq.next_touch_at;
   let anchored = seq;
   if (!seq.anchor_at) {
@@ -2125,7 +2132,16 @@ async function liveNextTouchAt(invoiceId, seq) {
       ...seq, invoice_sent_at: invoice?.sent_at, invoice_sms_sent_at: invoice?.sms_sent_at, invoice_created_at: invoice?.created_at,
     };
   }
-  const due = computeNextTouchAt(sequenceAnchor(anchored), Number(seq.step_index));
+  if (pendingRevival) {
+    let step = index;
+    let due = computeNextTouchAt(sequenceAnchor(anchored), step);
+    while (due && isStaleTouch(due, now)) {
+      step += 1;
+      due = computeNextTouchAt(sequenceAnchor(anchored), step);
+    }
+    return due;
+  }
+  const due = computeNextTouchAt(sequenceAnchor(anchored), index);
   return due && due.getTime() > new Date(seq.next_touch_at).getTime() ? due : seq.next_touch_at;
 }
 

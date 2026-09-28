@@ -335,11 +335,23 @@ describe('annual prepay pre-visit payment reminders', () => {
       InvoiceFollowUps.liveNextTouchAt.mockResolvedValueOnce(new Date('2026-07-11T14:00:00Z'));
       setDbQueues({ invoice_followup_sequences: [query({ first: { ...dueRow } })] });
       await expect(_private.invoiceDunningActiveToday('inv-1', { todayYmd: '2026-07-08' })).resolves.toBe(false);
-      expect(InvoiceFollowUps.liveNextTouchAt).toHaveBeenCalledWith('inv-1', expect.objectContaining({ step_index: 1 }));
+      expect(InvoiceFollowUps.liveNextTouchAt).toHaveBeenCalledWith('inv-1', expect.objectContaining({ step_index: 1 }), expect.any(Date));
 
       InvoiceFollowUps.liveNextTouchAt.mockResolvedValueOnce(new Date('2026-07-08T14:00:00Z'));
       setDbQueues({ invoice_followup_sequences: [query({ first: { ...dueRow } })] });
       await expect(_private.invoiceDunningActiveToday('inv-1', { todayYmd: '2026-07-08' })).resolves.toBe(true);
+    });
+
+    test('Day 90 ladder: a finished sequence the follow-up run will resume today suppresses', async () => {
+      process.env.GATE_DUNNING_LADDER_90 = 'true';
+      const finished = { status: 'completed', last_touch_at: null, next_touch_at: null, step_index: 4 };
+      InvoiceFollowUps.liveNextTouchAt.mockResolvedValueOnce(new Date('2026-07-08T14:00:00Z'));
+      setDbQueues({ invoice_followup_sequences: [query({ first: { ...finished } })] });
+      await expect(_private.invoiceDunningActiveToday('inv-1', { todayYmd: '2026-07-08' })).resolves.toBe(true);
+      // Nothing to resume (liveNextTouchAt null): the reminder is the only nudge left.
+      InvoiceFollowUps.liveNextTouchAt.mockResolvedValueOnce(null);
+      setDbQueues({ invoice_followup_sequences: [query({ first: { ...finished } })] });
+      await expect(_private.invoiceDunningActiveToday('inv-1', { todayYmd: '2026-07-08' })).resolves.toBe(false);
     });
 
     test('gate off: a row the Day 90 ladder advanced past Day 30 fires nothing, so it does not suppress', async () => {

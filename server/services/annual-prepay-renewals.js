@@ -7696,9 +7696,13 @@ async function invoiceDunningActiveToday(invoiceId, { now = new Date(), todayYmd
     if (['paused', 'autopay_hold', 'stopped'].includes(row.status)) return true;
     // 'completed' (sequence exhausted) falls through: the visit-anchored
     // reminder is the only nudge left, so only the recent-touch window above
-    // suppresses it.
-    if (row.status !== 'active') return false;
-    if (row.next_touch_at) {
+    // suppresses it. Under the Day 90 ladder (GATE_DUNNING_LADDER_90) a
+    // sequence finished at the Day 60 or Day 90 step on this open invoice is
+    // resumed by the 10:16 follow-up run (codex #5126 r1), so its touch is
+    // checked like an active one.
+    const ladder90 = process.env.GATE_DUNNING_LADDER_90 === 'true';
+    if (row.status !== 'active' && !(ladder90 && row.status === 'completed')) return false;
+    if (row.next_touch_at || (ladder90 && row.status === 'completed')) {
       // A due touch only suppresses on a day the follow-up cron can actually
       // fire (Tue–Fri per config.sendWindow). A touch that came due over the
       // weekend would otherwise suppress the Sat 3d AND Mon 1d reminders while
@@ -7709,8 +7713,8 @@ async function invoiceDunningActiveToday(invoiceId, { now = new Date(), todayYmd
       // runs before the follow-up job, which under the Day 90 ladder
       // (GATE_DUNNING_LADDER_90) moves a legacy Day 7/14 touch to Day 10/17
       // without sending it today. A step past the live cadence fires nothing.
-      const nextTouchAt = process.env.GATE_DUNNING_LADDER_90 === 'true'
-        ? await require('./invoice-followups').liveNextTouchAt(invoiceId, row)
+      const nextTouchAt = ladder90
+        ? await require('./invoice-followups').liveNextTouchAt(invoiceId, row, now)
         : (Number(row.step_index) >= followupConfig.steps.length ? null : row.next_touch_at);
       const sendDays = new Set(followupConfig?.sendWindow?.daysOfWeek || []);
       const today = todayYmd || etDateString(now);

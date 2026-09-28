@@ -172,6 +172,25 @@ describe('when the next touch really fires (liveNextTouchAt)', () => {
       .resolves.toEqual(tenAmET('2026-08-05'));
     await expect(liveNextTouchAt('inv-1', { step_index: 6, next_touch_at: tenAmET('2026-08-05') })).resolves.toBeNull();
   });
+
+  test('gate on: a finish at the Day 60 step awaiting revival fires on the first step not already past its day', async () => {
+    process.env.GATE_DUNNING_LADDER_90 = 'true';
+    const finished = (sentDay) => ({ status: 'completed', step_index: 4, anchor_at: tenAmET(sentDay), next_touch_at: null });
+    // Sent Mon 06-08: Day 60 = Fri 08-07, still ahead of NOW (Wed 08-05).
+    await expect(liveNextTouchAt('inv-1', finished('2026-06-08'), NOW)).resolves.toEqual(tenAmET('2026-08-07'));
+    // Sent Mon 05-11: Day 60 (Fri 07-10) is long past, so the run passes it
+    // over to Day 90 = Sun 08-09 (first fires Tue 08-11).
+    await expect(liveNextTouchAt('inv-1', finished('2026-05-11'), NOW)).resolves.toEqual(tenAmET('2026-08-09'));
+    // Both past: the run finishes it, no touch.
+    await expect(liveNextTouchAt('inv-1', finished('2026-03-01'), NOW)).resolves.toBeNull();
+    // A payment finish before the Day 30 end is not revived.
+    await expect(liveNextTouchAt('inv-1', { ...finished('2026-06-08'), step_index: 2 }, NOW)).resolves.toBeNull();
+  });
+
+  test('gate off: a finished sequence has no next touch', async () => {
+    await expect(liveNextTouchAt('inv-1', { status: 'completed', step_index: 4, anchor_at: tenAmET('2026-06-08'), next_touch_at: null }, NOW))
+      .resolves.toBeNull();
+  });
 });
 
 describe('runPending under the Day 90 ladder', () => {
