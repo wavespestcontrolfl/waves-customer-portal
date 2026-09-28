@@ -1341,8 +1341,9 @@ const VISIT_PREP_TOPIC_LABELS = {
 // DEFAULT_ON_CATEGORIES, so the item is admitted into the feed even while
 // GATE_ADMIN_BELL_POLICY is on (with an owner override to silence the
 // category later from Settings -> Notifications) — never a dead letterbox.
-// Every error here is caught and logged: it must never fail or delay the
-// customer's already-sent response beyond its own bounded work above.
+// Every error here is caught and logged, and the route never awaits this
+// (it runs detached), so it can neither fail nor delay the customer's
+// upload response.
 async function notifyOfficeVisitPrepSubmission(svc, topic) {
   try {
     // Customer's display name is read fresh here, never hardcoded or
@@ -1434,16 +1435,13 @@ router.post(
       });
       // Office feed item — ONE per NEW submission, never a duplicate-only
       // resubmit (result.created is false for those). The write already
-      // committed inside createVisitPrepSubmission; this is a bounded
-      // best-effort await (same shape as estimate-measurement-review.js's
-      // sendOfficeNotification and requests.js's own notifyAdmin call —
-      // NotificationService.notifyAdmin never throws, it catches and
-      // returns null/suppressed on any failure) that adds at most one or
-      // two fast local DB round trips, never a network call to a
-      // push/SMS/email provider, so it can never hang the response the way
-      // an external send could. A failure is caught and logged, never
-      // surfaced to the customer (see the function for exactly how this
-      // stays in-app-feed-only).
+      // committed inside createVisitPrepSubmission; the feed item is
+      // DETACHED, never awaited (Codex #5242 r2 P2): its customer read and
+      // insert carry no statement timeout, so a stalled connection or lock
+      // must not hold the customer's already-committed upload response
+      // open. The function catches and logs every failure itself (see it
+      // for exactly how this stays in-app-feed-only), so nothing here can
+      // reject unhandled.
       //
       // Built from result.svc — the RECHECKED row createVisitPrepSubmission
       // now returns (Codex r1 P2) — never req.visitPrepSvc, the stale
@@ -1452,7 +1450,7 @@ router.post(
       // Guaranteed present whenever result.created is true (persistLocked
       // never reaches created:true without a non-null recheck() row).
       if (result.created) {
-        await notifyOfficeVisitPrepSubmission(result.svc, req.body?.topic);
+        void notifyOfficeVisitPrepSubmission(result.svc, req.body?.topic);
       }
       // Never photo URLs/keys, the note, or any customer identity — the
       // token is shared with whoever received the visit text, and nothing

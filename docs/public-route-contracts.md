@@ -2922,7 +2922,9 @@ tell them apart) are ever echoed to the caller; any other error — a library
 error that happens to carry a `statusCode` included — goes to the generic
 error handler, never its raw message. On a NEW submission only (never a
 duplicate-only resubmit), the route writes ONE admin in-app notification —
-a bounded, best-effort `NotificationService.notifyAdmin` call, category
+a detached, best-effort `NotificationService.notifyAdmin` call written after
+the response is sent (never awaited, so a slow or stalled insert cannot hold
+the customer's request open), category
 `visit_prep_photos`, direct (never through the `notification-triggers.js`
 registry, so it never pushes), linking to the customer; the category is on
 `notification-bell-policy.js`'s `DEFAULT_ON_CATEGORIES` (rings by default,

@@ -171,6 +171,7 @@ function chain(table) {
     // insert, `.returning('*')` chained on the result.
     if (table === 'notifications') {
       if (dbState.notificationsInsertThrows) throw new Error('notifications insert failed');
+      if (dbState.notificationsInsertHangs) return { returning: () => new Promise(() => {}) };
       const id = `notif-${dbState.inserted.notifications.length + 1}`;
       const row = { id, ...arr[0] };
       dbState.inserted.notifications.push(row);
@@ -231,6 +232,7 @@ function resetDbState(overrides = {}) {
     groupedMembersForPreCheck: null,
     inserted: { submissions: [], photos: [], notifications: [] },
     notificationsInsertThrows: false,
+    notificationsInsertHangs: false,
     ...overrides,
   };
 }
@@ -645,6 +647,12 @@ describe('POST /api/public/appointment/:token/photos — office feed item (PR 3b
     if (prevPrep === undefined) delete process.env.GATE_VISIT_PREP_PHOTOS; else process.env.GATE_VISIT_PREP_PHOTOS = prevPrep;
   });
 
+  // The office item runs detached from the response (Codex #5242 r2 P2):
+  // let its promise chain settle before asserting on it either way.
+  const settleDetached = async () => {
+    for (let i = 0; i < 25; i += 1) await new Promise((r) => setImmediate(r));
+  };
+
   test('a NEW submission writes exactly one quiet admin notification: in-app only, no push, no SMS, no email', async () => {
     await withServer(async (baseUrl) => {
       const res = await postPhotos(baseUrl, {
@@ -652,6 +660,7 @@ describe('POST /api/public/appointment/:token/photos — office feed item (PR 3b
         topic: 'lawn',
       });
       expect(res.status).toBe(201);
+      await settleDetached();
       expect(dbState.inserted.notifications).toHaveLength(1);
       const notif = dbState.inserted.notifications[0];
       expect(notif.recipient_type).toBe('admin');
@@ -679,6 +688,7 @@ describe('POST /api/public/appointment/:token/photos — office feed item (PR 3b
     await withServer(async (baseUrl) => {
       const res = await postPhotos(baseUrl, { files: [{ bytes: JPEG_BYTES, mimetype: 'image/jpeg' }] });
       expect(res.status).toBe(201);
+      await settleDetached();
       const notif = dbState.inserted.notifications[0];
       expect(notif.body).toMatch(/June 15/);
       expect(notif.body).not.toMatch(/January 1/);
@@ -692,6 +702,7 @@ describe('POST /api/public/appointment/:token/photos — office feed item (PR 3b
       const res = await postPhotos(baseUrl, { files: [{ bytes: JPEG_BYTES, mimetype: 'image/jpeg' }] });
       expect(res.status).toBe(200);
       expect(dbState.inserted.submissions).toHaveLength(0);
+      await settleDetached();
       expect(dbState.inserted.notifications).toHaveLength(0);
     });
   });
@@ -701,6 +712,7 @@ describe('POST /api/public/appointment/:token/photos — office feed item (PR 3b
     await withServer(async (baseUrl) => {
       const res = await postPhotos(baseUrl, { files: [{ bytes: JPEG_BYTES, mimetype: 'image/jpeg' }] });
       expect(res.status).toBe(503);
+      await settleDetached();
       expect(dbState.inserted.notifications).toHaveLength(0);
     });
   });
@@ -710,6 +722,7 @@ describe('POST /api/public/appointment/:token/photos — office feed item (PR 3b
     await withServer(async (baseUrl) => {
       const res = await postPhotos(baseUrl, { files: [{ bytes: JPEG_BYTES, mimetype: 'image/jpeg' }] });
       expect(res.status).toBe(404);
+      await settleDetached();
       expect(dbState.inserted.notifications).toHaveLength(0);
     });
   });
@@ -721,7 +734,18 @@ describe('POST /api/public/appointment/:token/photos — office feed item (PR 3b
       expect(res.status).toBe(201);
       expect((await res.json()).ok).toBe(true);
       expect(dbState.inserted.submissions).toHaveLength(1);
+      await settleDetached();
       expect(dbState.inserted.notifications).toHaveLength(0);
+    });
+  });
+
+  test('a stalled notification insert never holds the customer response open (Codex #5242 r2 P2)', async () => {
+    resetDbState({ notificationsInsertHangs: true });
+    await withServer(async (baseUrl) => {
+      const res = await postPhotos(baseUrl, { files: [{ bytes: JPEG_BYTES, mimetype: 'image/jpeg' }] });
+      expect(res.status).toBe(201);
+      expect((await res.json()).ok).toBe(true);
+      expect(dbState.inserted.submissions).toHaveLength(1);
     });
   });
 
@@ -732,6 +756,7 @@ describe('POST /api/public/appointment/:token/photos — office feed item (PR 3b
       await withServer(async (baseUrl) => {
         const res = await postPhotos(baseUrl, { files: [{ bytes: JPEG_BYTES, mimetype: 'image/jpeg' }] });
         expect(res.status).toBe(201);
+        await settleDetached();
         expect(dbState.inserted.notifications).toHaveLength(1);
         expect(dbState.inserted.notifications[0].category).toBe('visit_prep_photos');
       });
