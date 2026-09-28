@@ -68,12 +68,14 @@ function trimTrailingUrlNoise(url) {
 // competitor's own page keeps its evidence without the post linking it
 // (Codex r2 on #5191).
 // An unlinked destination in any form the unlinker recognizes (http://,
-// protocol-relative, www., entity- or backslash-escaped) as the https URL
-// the review's filter below accepts (Codex r3 on #5191); null when it isn't
-// a web URL at all.
+// protocol-relative, www., entity- or backslash-escaped, backslash
+// separators) as the https URL the review's filter below accepts (Codex r3,
+// r5 on #5191); null when it isn't a web URL at all. Same WHATWG rules as
+// the unlinker's hostOf: an http(s) scheme is parsed as written, where a
+// backslash is a slash ("https:\\orkin.com\\plans").
 function evidenceUrl(raw) {
   const url = require('./competitor-links').readableUrl(raw);
-  const absolute = /^https?:\/\//i.test(url) ? url : url.startsWith('//') ? `https:${url}` : /^www\./i.test(url) ? `https://${url}` : null;
+  const absolute = /^https?:/i.test(url) ? url : /^[\\/]{2}/.test(url) ? `https:${url}` : /^www\./i.test(url) ? `https://${url}` : null;
   if (!absolute) return null;
   try {
     const parsed = new URL(absolute);
