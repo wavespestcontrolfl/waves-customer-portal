@@ -2771,9 +2771,15 @@ const AppointmentReminders = {
           // commit and this registration; it inserts the row with the
           // confirmation marked handled (it never sends one). A booking that
           // asks for its confirmation re-arms it — the sweep sent nothing.
-          if (sendConfirmation && existing.source === 'cron_selfheal' && existing.confirmation_sent) {
+          // Never a sibling-suppressed row (the slot's primary row owns that
+          // confirmation), a pre-closed placeholder, or a cancelled row.
+          if (sendConfirmation && existing.source === 'cron_selfheal' && existing.confirmation_sent
+            && !existing.suppressed_by_sibling && !existing.windows_preclosed && !existing.cancelled) {
             const [rearmed] = await trx('appointment_reminders')
-              .where({ id: existing.id, source: 'cron_selfheal', confirmation_sent: true })
+              .where({
+                id: existing.id, source: 'cron_selfheal', confirmation_sent: true,
+                suppressed_by_sibling: false, windows_preclosed: false, cancelled: false,
+              })
               .update({ confirmation_sent: false, confirmation_sent_at: null })
               .returning('*');
             if (rearmed) return { record: rearmed, serviceLabel: rearmed.service_type, inserted: false, reason: 'rearmed_selfheal' };
