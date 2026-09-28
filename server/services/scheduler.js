@@ -2294,10 +2294,12 @@ function initScheduledJobs() {
     } catch (err) { logger.error(`Internal-link candidate sweep failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 
-  // WEEKLY MONDAY 10AM ET — plan internal links to the pages Search Console
-  // has just off page one (position 8–20), ranked by impressions, ahead of
-  // the 10:30 sweep. Kill switch: AUTONOMOUS_INTERNAL_LINK_GSC_TARGETS=false.
-  cron.schedule('0 10 * * 1', async () => {
+  // WEEKLY MONDAY 10:23AM ET — plan internal links to the pages Search
+  // Console has just off page one (position 8–20), ranked by impressions,
+  // ahead of the 10:30 sweep. On an unused 10am minute per the stagger rule
+  // (see the 10:16 invoice follow-up block). Kill switch:
+  // AUTONOMOUS_INTERNAL_LINK_GSC_TARGETS=false.
+  cron.schedule('23 10 * * 1', async () => {
     if (!isEnabled('autonomousContentEngine')) return;
     try {
       await runExclusive('internal-link-gsc-targets', async () => {

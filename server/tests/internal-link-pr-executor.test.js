@@ -1251,8 +1251,15 @@ describe('internal-link PR auto-merge', () => {
   const headBody = 'Intro.\n\nA [termite inspection in Florida](/termite-inspection/) helps.\n';
   let instance;
 
-  function openTasks(rows) {
-    const q = { where: jest.fn(() => q), whereNotNull: jest.fn(() => q), orderBy: jest.fn(() => q), select: jest.fn(async () => rows) };
+  function openTasks(rows, { mergedToday = 0 } = {}) {
+    const q = {
+      where: jest.fn(() => q),
+      whereNotNull: jest.fn(() => q),
+      orderBy: jest.fn(() => q),
+      select: jest.fn(async () => rows),
+      countDistinct: jest.fn(() => q),
+      first: jest.fn(async () => ({ count: String(mergedToday) })),
+    };
     db.mockImplementation(() => q);
   }
 
@@ -1416,6 +1423,33 @@ describe('internal-link PR auto-merge', () => {
     openTasks([{ id: 't1', status: 'pr_open', astro_pr_url: prUrl, pr_commit_sha: HEAD, executor_version: 'internal-link-pr-executor-recovered', source_file: 'src/content/blog/a.md', target_url: '/termite-inspection/' }]);
     expect(await instance.runAutoMerge()).toMatchObject({ status: 'hold', reason: 'pre_judge_pr' });
     expect(GitHubClient.mergePr).not.toHaveBeenCalled();
+  });
+
+  test('the autonomous publish freeze (daily cap 0) stops link merges', async () => {
+    const saved = process.env.AUTONOMOUS_CONTENT_MAX_PUBLISHES_PER_DAY;
+    process.env.AUTONOMOUS_CONTENT_MAX_PUBLISHES_PER_DAY = '0';
+    try {
+      expect(await instance.runAutoMerge()).toMatchObject({ status: 'hold', reason: 'publish_frozen' });
+      expect(GitHubClient.mergePr).not.toHaveBeenCalled();
+    } finally {
+      if (saved === undefined) delete process.env.AUTONOMOUS_CONTENT_MAX_PUBLISHES_PER_DAY;
+      else process.env.AUTONOMOUS_CONTENT_MAX_PUBLISHES_PER_DAY = saved;
+    }
+  });
+
+  test('link merges count against the daily publish cap', async () => {
+    const saved = process.env.AUTONOMOUS_CONTENT_MAX_PUBLISHES_PER_DAY;
+    process.env.AUTONOMOUS_CONTENT_MAX_PUBLISHES_PER_DAY = '2';
+    const row = { id: 't1', status: 'pr_open', astro_pr_url: prUrl, pr_commit_sha: HEAD, executor_version: 'internal-link-pr-executor-v2', source_file: 'src/content/blog/a.md', target_url: '/termite-inspection/' };
+    try {
+      openTasks([row], { mergedToday: 2 });
+      expect(await instance.runAutoMerge()).toMatchObject({ status: 'hold', reason: 'daily_publish_cap_reached' });
+      openTasks([row], { mergedToday: 1 });
+      expect(await instance.runAutoMerge()).toMatchObject({ status: 'merged' });
+    } finally {
+      if (saved === undefined) delete process.env.AUTONOMOUS_CONTENT_MAX_PUBLISHES_PER_DAY;
+      else process.env.AUTONOMOUS_CONTENT_MAX_PUBLISHES_PER_DAY = saved;
+    }
   });
 
   test('kill switch and shadow mode disable it', async () => {

@@ -244,12 +244,32 @@ function codexGraceGate(ctx) {
   return waiting ? { hold: 'codex_review_pending' } : null;
 }
 
+// The autonomous daily publish cap (AUTONOMOUS_CONTENT_MAX_PUBLISHES_PER_DAY),
+// same env and zero-inclusive semantics the blog lane's auto-merge honors:
+// 0 is the ops freeze. Link PRs count per ET day by distinct merged PR; a
+// count error fails closed (hold).
+async function publishCapGate() {
+  const maxPerDay = Number(process.env.AUTONOMOUS_CONTENT_MAX_PUBLISHES_PER_DAY);
+  if (!Number.isFinite(maxPerDay) || maxPerDay < 0) return null;
+  if (maxPerDay === 0) return { hold: 'publish_frozen' };
+  try {
+    const { parseETDateTime } = require('../../utils/datetime-et');
+    const startOfEtDay = parseETDateTime(`${etDateString(new Date())}T00:00`);
+    const row = await db(TABLE).where('merged_at', '>=', startOfEtDay).whereNotNull('astro_pr_url')
+      .countDistinct('astro_pr_url as count').first();
+    return Number(row?.count || 0) >= maxPerDay ? { hold: 'daily_publish_cap_reached' } : null;
+  } catch (err) {
+    logger.warn(`[internal-link-pr-executor] publish-cap count failed (holding merge): ${err.message}`);
+    return { hold: 'publish_cap_unavailable' };
+  }
+}
+
 // The poller's per-tick merge cap: checks still ran (and closed failures).
 function mergeCapGate(ctx) {
   return ctx.allowMerge ? null : { hold: 'merge_cap_reached' };
 }
 
-const MERGE_GATES = [prStateGate, provenanceGate, productionBaseGate, codexFindingsGate, linkOnlyDiffGate, previewBuildGate, codexGraceGate, mergeCapGate];
+const MERGE_GATES = [prStateGate, provenanceGate, productionBaseGate, codexFindingsGate, linkOnlyDiffGate, previewBuildGate, codexGraceGate, publishCapGate, mergeCapGate];
 
 class InternalLinkPrExecutor {
   async runDryRun({ limit = DEFAULT_LIMIT, taskIds = null } = {}) {
