@@ -5,7 +5,11 @@
  * customers that month never gets a row — one customer with several
  * visits (multiple service lines, callbacks) must never alone clear the
  * re-identification floor; `visits` (the raw visit count) is still the
- * stored/sentence denominator once the floor clears.
+ * stored/sentence denominator once the floor clears. The pest numerator
+ * is structured application targets only (service_products.targets),
+ * never technician_notes. This file is the authority on both rules; the
+ * table's migration header (20260928070000, frozen once pushed) predates
+ * them and still says "named in technician_notes" / "5-visit floor".
  */
 
 const db = require('../../models/db');
