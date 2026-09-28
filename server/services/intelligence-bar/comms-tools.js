@@ -31,7 +31,7 @@ const { ledgerCall, ledgerCallRejected } = require('../llm-dispatch-metrics');
 // (thread lock, review-ask-reservation-in-place, recruiting reconciliation,
 // agent_decision re-park/reopen — the same workflow the admin SMS inbox's
 // own cancel uses, so this tool can never bypass it with a bare status flip).
-const { cancelScheduledSmsRow, PRIOR_ATTEMPT_KEY_RE } = require('../scheduled-sms-cancel');
+const { cancelScheduledSmsRow, PRIOR_ATTEMPT_KEY_RE, SIMPLE_SMS_META_KEYS } = require('../scheduled-sms-cancel');
 const { isDeferredReplayEntryPoint } = require('../messaging/deferred-replay-registry');
 
 // Admin phones to exclude from results
@@ -218,7 +218,7 @@ Use for: "what happened today?", "today's comms summary", "morning inbox briefin
   },
   {
     name: 'list_queued_messages',
-    description: `List a customer's outbound TEXTS that are still SCHEDULED — not yet sent (e.g. a text held past 8PM-8AM quiet hours). Texts a send worker already picked up, and replies tied to an Agent Review suggestion, are left out — the bar cannot cancel those. Use before cancel_queued_message to resolve the exact message_id; a cancel preview always names one message from this list. Soonest first, capped at 25 — pass next_cursor as cursor for more. SCHEDULED EMAILS DO NOT EXIST: an email is rendered and handed to the delivery provider within seconds of being queued, so by the time anyone could ask about it, it has already sent — there is nothing to list or cancel.
+    description: `List a customer's outbound TEXTS that are still SCHEDULED — not yet sent (e.g. a text held past 8PM-8AM quiet hours). Only texts a staff member scheduled from the inbox are cancelable; automated texts, anything a send worker already picked up, and replies tied to an Agent Review suggestion are left out (counted in excluded_count) — the office handles those. Use before cancel_queued_message to resolve the exact message_id; a cancel preview always names one message from this list. Soonest first, capped at 25 — pass next_cursor as cursor for more. SCHEDULED EMAILS DO NOT EXIST: an email is rendered and handed to the delivery provider within seconds of being queued, so by the time anyone could ask about it, it has already sent — there is nothing to list or cancel.
 Use for: "what's queued to send Henderson?", "is there a text scheduled for this customer?"`,
     input_schema: {
       type: 'object',
@@ -514,6 +514,16 @@ function smsIneligibilityReason(row) {
   if (isDeferredReplayEntryPoint(meta.entry_point)) {
     return `This text is managed by the ${String(meta.entry_point).replace(/_/g, ' ')} workflow and can't be cancelled here.`;
   }
+  // Last and catch-all — ALLOWLIST, not another marker (Codex round 9 on #5224, P1: a deposit-
+  // receipt requeue marks its retry only with its own entry_point; rounds
+  // 5-9 each found one more producer's retry spelling). The bar cancels only
+  // a text a STAFF MEMBER scheduled from the inbox (admin_user_id set) whose
+  // metadata carries nothing beyond SIMPLE_SMS_META_KEYS. Every automated
+  // producer's row is refused, whatever it calls its markers. The writer's
+  // simpleOnly CAS enforces the same rule (scheduled-sms-cancel.js).
+  if (!row.admin_user_id || Object.keys(meta).some((k) => !SIMPLE_SMS_META_KEYS.has(k))) {
+    return "This text was queued by an automated workflow, not scheduled by staff — it can't be cancelled here.";
+  }
   return null;
 }
 
@@ -669,7 +679,7 @@ async function listQueuedMessages(input) {
       .modify(afterQueueCursor, cursor)
       .orderByRaw(`${SF_MS} ASC NULLS LAST, id ASC`)
       .limit(want + 1)
-      .select('id', 'to_phone', 'message_type', 'scheduled_for', 'metadata', 'message_body');
+      .select('id', 'to_phone', 'message_type', 'scheduled_for', 'metadata', 'message_body', 'admin_user_id');
     hasMore = rows.length > want;
     const page = hasMore ? rows.slice(0, want) : rows;
     for (const row of page) {

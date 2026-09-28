@@ -11,6 +11,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/scheduled-sms-cancel', () => ({
   cancelScheduledSmsRow: jest.fn(),
   PRIOR_ATTEMPT_KEY_RE: jest.requireActual('../services/scheduled-sms-cancel').PRIOR_ATTEMPT_KEY_RE,
+  SIMPLE_SMS_META_KEYS: jest.requireActual('../services/scheduled-sms-cancel').SIMPLE_SMS_META_KEYS,
 }));
 
 const db = require('../models/db');
@@ -23,6 +24,7 @@ const MESSAGE_ID = '11111111-1111-4111-8111-111111111111';
 const CUSTOMER_ID = '22222222-2222-4222-8222-222222222222';
 // Synthetic uuid per index — the queue cursor validates ids as uuids.
 const msgId = (i) => `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`;
+const STAFF_ID = '33333333-3333-4333-8333-333333333333';
 const CUSTOMER_ROW = { id: CUSTOMER_ID, first_name: 'Synthetic', last_name: 'Fixture' };
 
 beforeEach(() => {
@@ -86,7 +88,7 @@ test('an unconfirmed call never reaches the cancel workflow', async () => {
 
 test('confirmed:true with no pinned _verified_message_version refuses instead of committing', async () => {
   const row = {
-    id: MESSAGE_ID, customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled',
+    id: MESSAGE_ID, customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled', admin_user_id: STAFF_ID,
     to_phone: '+19415550100', message_type: 'manual', message_body: 'Synthetic reminder body',
     scheduled_for: new Date('2099-01-01T12:00:00Z'),
   };
@@ -102,7 +104,7 @@ test('confirmed:true with no pinned _verified_message_version refuses instead of
 test('a message resolved for a different customer refuses before it ever reaches confirmed', async () => {
   const otherCustomer = '33333333-3333-4333-8333-333333333333';
   const row = {
-    id: MESSAGE_ID, customer_id: otherCustomer, direction: 'outbound', status: 'scheduled',
+    id: MESSAGE_ID, customer_id: otherCustomer, direction: 'outbound', status: 'scheduled', admin_user_id: STAFF_ID,
     to_phone: '+19415550100', message_type: 'manual', message_body: 'Synthetic reminder body',
     scheduled_for: new Date('2099-01-01T12:00:00Z'),
   };
@@ -163,7 +165,7 @@ test('a workflow-owned sms_log row (entry_point with an onTerminal hook) is excl
   expect(requiresTerminalHook(workflowOwnedEntryPoint)).toBe(true);
 
   const row = {
-    id: MESSAGE_ID, customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled',
+    id: MESSAGE_ID, customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled', admin_user_id: STAFF_ID,
     to_phone: '+19415550100', message_type: 'reminder', message_body: 'Synthetic body',
     scheduled_for: new Date('2099-01-01T12:00:00Z'),
     metadata: { entry_point: workflowOwnedEntryPoint },
@@ -186,7 +188,7 @@ test('a registered deferred-replay row WITHOUT a terminal hook (invoice_send_def
   expect(isDeferredReplayEntryPoint('some_manual_send')).toBe(false);
 
   const row = {
-    id: MESSAGE_ID, customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled',
+    id: MESSAGE_ID, customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled', admin_user_id: STAFF_ID,
     to_phone: '+19415550100', message_type: 'invoice', message_body: 'Synthetic invoice text',
     scheduled_for: new Date('2099-01-01T12:00:00Z'),
     metadata: { entry_point: 'invoice_send_deferred' },
@@ -204,7 +206,7 @@ test('a registered deferred-replay row WITHOUT a terminal hook (invoice_send_def
 // deferred-replay registry (pre-push audit P1, round 2 on #5224).
 test('a recruiting-typed row (job_* message_type, no entry_point) is excluded from the list and refused outright, with no inbox pointer', async () => {
   const row = {
-    id: MESSAGE_ID, customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled',
+    id: MESSAGE_ID, customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled', admin_user_id: STAFF_ID,
     to_phone: '+19415550100', message_type: 'job_application_received', message_body: 'Synthetic recruiting text',
     scheduled_for: new Date('2099-01-01T12:00:00Z'), metadata: {},
   };
@@ -222,7 +224,7 @@ test('a recruiting-typed row (job_* message_type, no entry_point) is excluded fr
 // row only exists for post-delivery bookkeeping, never "still queued."
 test('a finalize_only sms_log row is excluded from the list and refused as already-delivered', async () => {
   const row = {
-    id: MESSAGE_ID, customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled',
+    id: MESSAGE_ID, customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled', admin_user_id: STAFF_ID,
     to_phone: '+19415550100', message_type: 'reminder', message_body: 'Synthetic body',
     scheduled_for: new Date('2099-01-01T12:00:00Z'),
     metadata: { finalize_only: true },
@@ -250,7 +252,7 @@ test.each([
   ['review_ask_reservation + review_delivery_uncertain_exhausted (the final ambiguous attempt)', { review_ask_reservation: true, review_delivery_uncertain_exhausted: true }],
 ])('a %s sms_log row is excluded from the list and refused as possibly-already-sent', async (_label, metaFlag) => {
   const row = {
-    id: MESSAGE_ID, customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled',
+    id: MESSAGE_ID, customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled', admin_user_id: STAFF_ID,
     to_phone: '+19415550100', message_type: 'review_request', message_body: 'Synthetic review ask',
     scheduled_for: new Date('2099-01-01T12:00:00Z'),
     metadata: metaFlag,
@@ -271,7 +273,7 @@ test.each([
 test('a body preview (collapsed whitespace, capped ~160 chars) rides the list and the preview, masked recipient stays masked', async () => {
   const longBody = `Hi there,\n\n   this   is a synthetic reminder body that runs well past one hundred and sixty characters so the preview truncation logic actually has something real to cut off before it reaches the end of the message.`;
   const row = {
-    id: MESSAGE_ID, customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled',
+    id: MESSAGE_ID, customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled', admin_user_id: STAFF_ID,
     to_phone: '+19415550100', message_type: 'reminder', message_body: longBody,
     scheduled_for: new Date('2099-01-01T12:00:00Z'), metadata: {},
   };
@@ -293,7 +295,7 @@ test('a body preview (collapsed whitespace, capped ~160 chars) rides the list an
 
 test('a body change between the preview and confirm refuses — the pinned body_preview no longer matches', async () => {
   const row = {
-    id: MESSAGE_ID, customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled',
+    id: MESSAGE_ID, customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled', admin_user_id: STAFF_ID,
     to_phone: '+19415550100', message_type: 'reminder', message_body: 'Original synthetic body',
     scheduled_for: new Date('2099-01-01T12:00:00Z'), metadata: {},
   };
@@ -322,7 +324,7 @@ test('a body change between the preview and confirm refuses — the pinned body_
 test('the SMS commit calls the shared cancel workflow with the pinned scheduled_for, and refuses when it reports no row cancelled', async () => {
   const scheduledFor = new Date('2099-01-01T12:00:00Z');
   const row = {
-    id: MESSAGE_ID, customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled',
+    id: MESSAGE_ID, customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled', admin_user_id: STAFF_ID,
     to_phone: '+19415550100', message_type: 'manual', message_body: 'Synthetic reminder body',
     scheduled_for: scheduledFor, metadata: {},
   };
@@ -367,7 +369,7 @@ test('the SMS commit calls the shared cancel workflow with the pinned scheduled_
 // or scheduled_for — the scheduled_for pin alone would not catch it.
 test('the recipient (to_phone) is pinned into _version and threaded to the shared workflow as expectedToPhone', async () => {
   const row = {
-    id: MESSAGE_ID, customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled',
+    id: MESSAGE_ID, customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled', admin_user_id: STAFF_ID,
     to_phone: '+19415550100', message_type: 'manual', message_body: 'Synthetic body',
     scheduled_for: new Date('2099-01-01T12:00:00Z'), metadata: {},
   };
@@ -385,7 +387,7 @@ test('the recipient (to_phone) is pinned into _version and threaded to the share
 
 test('a recipient change between the preview and confirm refuses — the pinned to_phone no longer matches', async () => {
   const row = {
-    id: MESSAGE_ID, customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled',
+    id: MESSAGE_ID, customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled', admin_user_id: STAFF_ID,
     to_phone: '+19415550100', message_type: 'manual', message_body: 'Synthetic body',
     scheduled_for: new Date('2099-01-01T12:00:00Z'), metadata: {},
   };
@@ -411,7 +413,7 @@ test('a recipient change between the preview and confirm refuses — the pinned 
 // reviewed_by records the real admin if a parked decision reopens.
 test('the confirming admin (actionContext.technicianId) is threaded into the shared cancel workflow', async () => {
   const row = {
-    id: MESSAGE_ID, customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled',
+    id: MESSAGE_ID, customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled', admin_user_id: STAFF_ID,
     to_phone: '+19415550100', message_type: 'manual', message_body: 'Synthetic body',
     scheduled_for: new Date('2099-01-01T12:00:00Z'), metadata: {},
   };
@@ -431,7 +433,7 @@ test('the confirming admin (actionContext.technicianId) is threaded into the sha
 // P2: pages by a (scheduled_for, id) keyset cursor, not an offset.
 test('list_queued_messages caps at the default limit (25) and pages by next_cursor', async () => {
   const rows = Array.from({ length: 30 }, (_, i) => ({
-    id: msgId(i), customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled',
+    id: msgId(i), customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled', admin_user_id: STAFF_ID,
     to_phone: '+19415550100', message_type: 'reminder', message_body: `Synthetic body ${i}`,
     scheduled_for: new Date(Date.now() + (i + 1) * 60000), metadata: {},
   }));
@@ -454,7 +456,7 @@ test('list_queued_messages caps at the default limit (25) and pages by next_curs
 
 test('list_queued_messages keeps reading past ineligible rows so a page is not empty while more are queued', async () => {
   const rows = Array.from({ length: 30 }, (_, i) => ({
-    id: msgId(i), customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled',
+    id: msgId(i), customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled', admin_user_id: STAFF_ID,
     to_phone: '+19415550100', message_type: 'reminder', message_body: `Synthetic body ${i}`,
     scheduled_for: new Date(Date.UTC(2099, 0, 1, 12, i)),
     // The first 26 were already attempted — never listed.
@@ -467,9 +469,21 @@ test('list_queued_messages keeps reading past ineligible rows so a page is not e
   expect(page.next_cursor).toBeNull();
 });
 
+test('a scheduled text with no staff author (admin_user_id null) is refused even with empty metadata', async () => {
+  const row = {
+    id: MESSAGE_ID, customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled', admin_user_id: null,
+    to_phone: '+19415550100', message_type: 'reminder', message_body: 'Synthetic body',
+    scheduled_for: new Date('2099-01-01T12:00:00Z'), metadata: {},
+  };
+  db.mockImplementation(makeSmsDbMock([row]));
+  const out = await executeCommsTool('cancel_queued_message', { message_id: MESSAGE_ID, customer_id: CUSTOMER_ID, channel: 'sms' });
+  expect(out.error).toMatch(/automated workflow/i);
+  expect(cancelScheduledSmsRow).not.toHaveBeenCalled();
+});
+
 test('list_queued_messages discloses texts it left out, so [] never reads as "nothing queued"', async () => {
   const row = {
-    id: MESSAGE_ID, customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled',
+    id: MESSAGE_ID, customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled', admin_user_id: STAFF_ID,
     to_phone: '+19415550100', message_type: 'reminder', message_body: 'Synthetic body',
     scheduled_for: new Date('2099-01-01T12:00:00Z'), metadata: { entry_point: 'invoice_send_deferred' },
   };
@@ -499,7 +513,7 @@ test('list_queued_messages refuses a malformed cursor instead of restarting from
 // Twilio handoff the provider may already have accepted.
 test('a provider-retry row (provider_retry_at set) is excluded from the list and refused', async () => {
   const row = {
-    id: MESSAGE_ID, customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled',
+    id: MESSAGE_ID, customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled', admin_user_id: STAFF_ID,
     to_phone: '+19415550100', message_type: 'manual', message_body: 'Synthetic body',
     scheduled_for: new Date('2099-01-01T12:00:00Z'),
     metadata: { provider_retry_at: '2099-01-01T11:45:00Z', provider_retry_code: 'TWILIO_UNCERTAIN' },
@@ -522,10 +536,11 @@ test.each([
   ['claimed once then deferred with the attempt refunded', { scheduled_sms_claimed_at: '2099-01-01T11:40:00Z', scheduled_sms_attempts: 0 }, /may have reached the provider/i],
   ['an AI-reply provider retry (twilio-webhook provider_retry: true)', { provider_retry: true }, /may have reached the provider/i],
   ['tied to an agent decision', { agent_decision_id: 'dec-synthetic-1' }, /Agent Review/i],
+  ['queued by an automated producer (deposit-receipt requeue entry_point, no retry marker)', { entry_point: 'estimate_deposit_receipt_requeue', original_failure_code: 'TWILIO_TIMEOUT' }, /automated workflow|managed by/i],
   ['carrying parked decisions', { parked_decision_ids: ['dec-synthetic-2'] }, /Agent Review/i],
 ])('a row %s is excluded from the list and refused', async (_label, metadata, reason) => {
   const row = {
-    id: MESSAGE_ID, customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled',
+    id: MESSAGE_ID, customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled', admin_user_id: STAFF_ID,
     to_phone: '+19415550100', message_type: 'manual', message_body: 'Synthetic body',
     scheduled_for: new Date('2099-01-01T12:00:00Z'), metadata,
   };
@@ -543,7 +558,7 @@ test.each([
 test('an edit past the 160-char preview refuses, and the full-body digest reaches the writer', async () => {
   const longBody = `${'a'.repeat(200)} original ending`;
   const row = {
-    id: MESSAGE_ID, customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled',
+    id: MESSAGE_ID, customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled', admin_user_id: STAFF_ID,
     to_phone: '+19415550100', message_type: 'manual', message_body: longBody,
     scheduled_for: new Date('2099-01-01T12:00:00Z'), metadata: {},
   };

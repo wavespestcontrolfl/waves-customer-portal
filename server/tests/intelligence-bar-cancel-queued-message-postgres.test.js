@@ -52,6 +52,8 @@ postgres('cancel_queued_message / list_queued_messages (real PostgreSQL, SMS-onl
   afterEach(async () => { await trx?.rollback(); });
   afterAll(async () => { await database?.destroy(); });
 
+  const STAFF_ID = randomUUID();
+
   async function customer() {
     const id = randomUUID();
     const suffix = id.replace(/-/g, '').slice(0, 10);
@@ -68,6 +70,8 @@ postgres('cancel_queued_message / list_queued_messages (real PostgreSQL, SMS-onl
     await trx('sms_log').insert({
       id, customer_id: customerId, direction: 'outbound', from_phone: '+19413529161', to_phone: '+19415550100',
       message_body: 'Synthetic scheduled reminder', message_type: 'reminder', status: 'scheduled',
+      // Staff-scheduled by default — the bar's simple-only allowlist.
+      admin_user_id: STAFF_ID,
       scheduled_for: new Date(Date.now() + 3600000),
       ...overrides,
     });
@@ -336,6 +340,7 @@ postgres('cancel_queued_message / list_queued_messages (real PostgreSQL, SMS-onl
     ['an AI-reply provider_retry marker', { provider_retry: true }],
     ['an agent decision', { agent_decision_id: 'dec-synthetic-1' }],
     ['parked decisions', { parked_decision_ids: ['dec-synthetic-2'] }],
+    ['an automated producer entry_point (deposit-receipt requeue)', { entry_point: 'estimate_deposit_receipt_requeue' }],
   ])('the writer\'s simpleOnly CAS refuses a row carrying %s', async (_label, metadata) => {
     const { cancelScheduledSmsRow } = require('../services/scheduled-sms-cancel');
     const custId = await customer();

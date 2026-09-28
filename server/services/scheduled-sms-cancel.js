@@ -102,9 +102,19 @@ const PRIOR_ATTEMPT_KEY_RE = /^(provider_retry|scheduled_sms_(claimed|recovered)
 // syntax is valid in both JS and Postgres POSIX regex).
 const PRIOR_ATTEMPT_KEY_SQL = PRIOR_ATTEMPT_KEY_RE.source;
 
+// The only metadata a staff-scheduled inbox text may carry and still be
+// "simple" (admin-communications.js POST /send-sms schedule branch writes
+// human_authored; its decision keys are refused separately).
+const SIMPLE_SMS_META_KEYS = new Set(['human_authored']);
+
 function simpleOnlyWhere(query, simpleOnly) {
   if (!simpleOnly) return query;
   return query
+    .whereNotNull('admin_user_id')
+    .whereRaw(
+      "NOT EXISTS (SELECT 1 FROM jsonb_object_keys(CASE WHEN jsonb_typeof(metadata) = 'object' THEN metadata ELSE '{}'::jsonb END) AS k WHERE k <> ALL(?::text[]))",
+      [[...SIMPLE_SMS_META_KEYS]],
+    )
     .whereRaw(
       "NOT EXISTS (SELECT 1 FROM jsonb_object_keys(CASE WHEN jsonb_typeof(metadata) = 'object' THEN metadata ELSE '{}'::jsonb END) AS k WHERE k ~ ?)",
       [PRIOR_ATTEMPT_KEY_SQL],
@@ -273,4 +283,4 @@ async function cancelScheduledSmsRow({ id, techRole, technicianId, expectedSched
   return { outcome: 'ok', cancelled: !!cancelledRow, row: cancelledRow };
 }
 
-module.exports = { cancelScheduledSmsRow, PRIOR_ATTEMPT_KEY_RE };
+module.exports = { cancelScheduledSmsRow, PRIOR_ATTEMPT_KEY_RE, SIMPLE_SMS_META_KEYS };
