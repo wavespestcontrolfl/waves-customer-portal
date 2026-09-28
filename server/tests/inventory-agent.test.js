@@ -292,7 +292,7 @@ describe('classifyDecision — a new product\'s category must be one the listing
     expect(decide('Bifen XTS Insecticide 96 oz', 'Bifen XTS', 'fertilizer', oz(96)))
       .toMatchObject({ kind: 'unsure', reason: expect.stringMatching(/doesn't state the category/) });
     expect(decide('Bifen XTS Insecticide 96 oz', 'Bifen XTS', 'insecticide', oz(96)))
-      .toMatchObject({ kind: 'new_product', newProduct: { category: 'Insecticide' } });
+      .toMatchObject({ kind: 'new_product', newProduct: { category: 'insecticide' } });
   });
 
   test('a title that states no category at all is held, whatever the model picked', () => {
@@ -301,34 +301,34 @@ describe('classifyDecision — a new product\'s category must be one the listing
 
   test('a lowercase model answer is written onto the product in its CANONICAL spelling, not the model\'s own casing', () => {
     expect(decide('Bifen XTS Insecticide 96 oz', 'Bifen XTS', 'insecticide', oz(96)))
-      .toMatchObject({ newProduct: { category: 'Insecticide' } });
+      .toMatchObject({ newProduct: { category: 'insecticide' } });
     expect(decide('LESCO 16-4-8 Turf 50 lb', 'LESCO 16-4-8 Turf', 'FERTILIZER', { size_text: '50 lb', size_number: 50, size_unit: 'lb', pack_count: 1 }))
-      .toMatchObject({ kind: 'new_product', newProduct: { category: 'Fertilizer' } });
+      .toMatchObject({ kind: 'new_product', newProduct: { category: 'fertilizer' } });
   });
 
   test('an N-P-K grade states Fertilizer; a rat trap states Rodent Trap; "Supplies"/"cleaner" are never stated (not on the canonical list at all)', () => {
     expect(decide('LESCO 16-4-8 Turf 50 lb', 'LESCO 16-4-8 Turf', 'fertilizer', { size_text: '50 lb', size_number: 50, size_unit: 'lb', pack_count: 1 }))
-      .toMatchObject({ kind: 'new_product', newProduct: { category: 'Fertilizer' } });
+      .toMatchObject({ kind: 'new_product', newProduct: { category: 'fertilizer' } });
     const count = { size_text: '4 Count', size_number: 4, size_unit: 'each', pack_count: 1 };
     expect(decide('Victor Snap Rat Trap 4 Count', 'Victor Snap Rat Trap', 'rodent trap', count))
-      .toMatchObject({ kind: 'new_product', newProduct: { category: 'Rodent Trap' } });
+      .toMatchObject({ kind: 'new_product', newProduct: { category: 'rodent trap' } });
     expect(decide('Victor Snap Rat Trap 4 Count', 'Victor Snap Rat Trap', 'supplies', count)).toMatchObject({ kind: 'unsure' });
     expect(decide('Victor Snap Rat Trap 4 Count', 'Victor Snap Rat Trap', 'cleaner', count)).toMatchObject({ kind: 'unsure' });
   });
 
   test('"Southern Ag Thuricide BT Caterpillar Control 16 oz" states Insecticide via the stating phrase, not the word "Insecticide" itself', () => {
     expect(decide('Southern Ag Thuricide BT Caterpillar Control 16 oz', 'Southern Ag Thuricide BT Caterpillar', 'insecticide', oz(16)))
-      .toMatchObject({ kind: 'new_product', status: 'logged', newProduct: { category: 'Insecticide' } });
+      .toMatchObject({ kind: 'new_product', status: 'logged', newProduct: { category: 'insecticide' } });
   });
 
   test('"Weed & Grass Killer" states Herbicide', () => {
     expect(decide('Ortho Weed & Grass Killer 32 oz', 'Ortho Weed & Grass Killer', 'herbicide', oz(32)))
-      .toMatchObject({ kind: 'new_product', status: 'logged', newProduct: { category: 'Herbicide' } });
+      .toMatchObject({ kind: 'new_product', status: 'logged', newProduct: { category: 'herbicide' } });
   });
 
   test('"Scotts Turf Builder Lawn Food" states Fertilizer', () => {
     expect(decide('Scotts Turf Builder Lawn Food 5 lb', 'Scotts Turf Builder Lawn Food', 'fertilizer', { size_text: '5 lb', size_number: 5, size_unit: 'lb', pack_count: 1 }))
-      .toMatchObject({ kind: 'new_product', status: 'logged', newProduct: { category: 'Fertilizer' } });
+      .toMatchObject({ kind: 'new_product', status: 'logged', newProduct: { category: 'fertilizer' } });
   });
 
   test('"DEMAND CS 8OZ" states nothing — any category is held', () => {
@@ -343,9 +343,37 @@ describe('classifyDecision — a new product\'s category must be one the listing
 
 describe('categoriesStatedBy — the wording that counts as stating each canonical category', () => {
   test('a stating phrase counts even without the category\'s own name in the title', () => {
-    expect(categoriesStatedBy('Southern Ag Thuricide BT Caterpillar Control 16 oz').has('Insecticide')).toBe(true);
-    expect(categoriesStatedBy('Ortho Weed & Grass Killer 32 oz').has('Herbicide')).toBe(true);
-    expect(categoriesStatedBy('Scotts Turf Builder Lawn Food').has('Fertilizer')).toBe(true);
+    expect(categoriesStatedBy('Southern Ag Thuricide BT Caterpillar Control 16 oz').has('insecticide')).toBe(true);
+    expect(categoriesStatedBy('Ortho Weed & Grass Killer 32 oz').has('herbicide')).toBe(true);
+    expect(categoriesStatedBy('Scotts Turf Builder Lawn Food').has('fertilizer')).toBe(true);
+  });
+
+  test('categories are stored lowercase (compliance compares category = \'fertilizer\' exactly)', () => {
+    expect([...categoriesStatedBy('Acme 16-4-8 Fertilizer')]).toEqual(['fertilizer']);
+  });
+
+  test('"weed & feed" states fertilizer only, never also herbicide', () => {
+    for (const title of ['Scotts Turf Builder Weed & Feed 20 lb', 'Acme Weed and Feed', 'Acme Weed-and-Feed']) {
+      const stated = categoriesStatedBy(title);
+      expect(stated.has('fertilizer')).toBe(true);
+      expect(stated.has('herbicide')).toBe(false);
+    }
+  });
+
+  test('a specific bait states only its own category, never generic bait', () => {
+    expect([...categoriesStatedBy('NewBrand Mole Bait 20 Count')]).toEqual(['mole bait']);
+    expect([...categoriesStatedBy('Acme Termite-Bait Cartridges')]).toEqual(['termite bait']);
+    expect([...categoriesStatedBy('Advion Cockroach Gel Bait')]).toEqual(['bait']);
+  });
+
+  test('punctuated or double-spaced "soil surfactant" never states adjuvant', () => {
+    for (const title of ['Dispatch Soil-Surfactant 8 oz', 'Dispatch Soil / Surfactant', 'Dispatch Soil  Surfactant', 'Dispatch SOIL_SURFACTANT']) {
+      expect(categoriesStatedBy(title).has('adjuvant')).toBe(false);
+    }
+  });
+
+  test('an N-P-K grade keeps its hyphens through separator folding', () => {
+    expect(categoriesStatedBy('LESCO 0-0-62').has('fertilizer')).toBe(true);
   });
 
   test('a title with no category wording at all states nothing', () => {
@@ -353,8 +381,8 @@ describe('categoriesStatedBy — the wording that counts as stating each canonic
   });
 
   test('"soil surfactant" is excluded from Adjuvant\'s "surfactant" wording, but a bare "surfactant" still states it', () => {
-    expect(categoriesStatedBy('Dispatch Soil Surfactant').has('Adjuvant')).toBe(false);
-    expect(categoriesStatedBy('Dispatch Surfactant').has('Adjuvant')).toBe(true);
+    expect(categoriesStatedBy('Dispatch Soil Surfactant').has('adjuvant')).toBe(false);
+    expect(categoriesStatedBy('Dispatch Surfactant').has('adjuvant')).toBe(true);
   });
 });
 
@@ -374,7 +402,7 @@ describe('inventoryUnitForNewProduct — the stock unit is also a valid applicat
       new_product: { name: 'LESCO Turf Fertilizer', category: 'fertilizer', active_ingredient: null, epa_reg_no: null },
       reading: { size_text: '2 kg', size_number: 2, size_unit: 'kg', pack_count: 1 },
     }, ctx({ rawTitle: 'LESCO Turf Fertilizer 2 kg', lineQuantity: 3 }));
-    expect(decision).toMatchObject({ kind: 'new_product', amount: 6, unit: 'kg', newProduct: { inventoryUnit: 'g', category: 'Fertilizer' } });
+    expect(decision).toMatchObject({ kind: 'new_product', amount: 6, unit: 'kg', newProduct: { inventoryUnit: 'g', category: 'fertilizer' } });
   });
 });
 
@@ -613,7 +641,7 @@ describe('classifyDecision — new_product', () => {
       rawTitle: 'Control Solutions Bifen XTS Insecticide 96 oz', lineQuantity: 1, allActiveProducts: [] }));
     expect(decision).toMatchObject({
       kind: 'new_product', status: 'logged', amount: 96, unit: 'oz',
-      newProduct: { name: 'Bifen XTS', category: 'Insecticide', containerSize: '96 oz', inventoryUnit: 'oz' },
+      newProduct: { name: 'Bifen XTS', category: 'insecticide', containerSize: '96 oz', inventoryUnit: 'oz' },
     });
     // The model's own active_ingredient is NEVER carried into the decision —
     // see the next test — even though this one proposed a plausible value.
@@ -733,7 +761,7 @@ describe('classifyDecision — new_product: the name must COVER the title\'s own
 
   test('a count-item noun ("Trap") is not an identity word either — the anchor is the real word before it', () => {
     const decision = nameFor('Victor Rat Trap 12 Count', 'Victor Rat Trap', { size_text: '12 Count', size_number: 12, size_unit: 'each', pack_count: 1 }, 'rodent trap');
-    expect(decision).toMatchObject({ kind: 'new_product', status: 'logged', newProduct: { category: 'Rodent Trap' } });
+    expect(decision).toMatchObject({ kind: 'new_product', status: 'logged', newProduct: { category: 'rodent trap' } });
   });
 
   test('a size-first title has no identity word before its first size claim — no anchor, always unsure', () => {
@@ -804,6 +832,17 @@ describe('classifyDecision — the agent may only confirm the deterministic matc
       rawTitle: 'Taurus SC Termiticide 78 oz', lineQuantity: 1, candidates: [taurus, other], matchedProductId: 'p-taurus',
     }));
     expect(decision).toMatchObject({ kind: 'unsure', status: 'agent_unsure' });
+    // The refused substitute is never the closest guess — the matcher's own product is.
+    expect(decision.suggestion).toEqual({ type: 'existing', productId: 'p-taurus', productName: 'Taurus SC' });
+  });
+
+  test('a refused substitute whose matched product is not on hand to name carries no guess at all', () => {
+    const raw = { kind: 'existing', product_id: 'p-other', reading: { size_text: '78 oz', size_number: 78, size_unit: 'oz', pack_count: 1 } };
+    const decision = classifyDecision(raw, ctx({
+      rawTitle: 'Taurus SC Termiticide 78 oz', lineQuantity: 1, candidates: [other], matchedProductId: 'p-taurus',
+    }));
+    expect(decision).toMatchObject({ kind: 'unsure' });
+    expect(decision).not.toHaveProperty('suggestion');
   });
 
   test('naming the SAME matched product back still validates normally', () => {
@@ -871,7 +910,7 @@ describe('classifyDecision — refused proposals carry a "closest guess" suggest
       rawTitle: 'Bifen XTS Insecticide 96 oz', allActiveProducts: [{ id: 'p-x', name: 'Bifen XTS' }],
     }));
     expect(decision).toMatchObject({
-      kind: 'unsure', suggestion: { type: 'new_product', name: 'Bifen XTS', category: 'Insecticide', containerSize: '96 oz' },
+      kind: 'unsure', suggestion: { type: 'new_product', name: 'Bifen XTS', category: 'insecticide', containerSize: '96 oz' },
     });
   });
 
@@ -881,7 +920,7 @@ describe('classifyDecision — refused proposals carry a "closest guess" suggest
       reading: { size_text: '96 oz', size_number: 96, size_unit: 'gal', pack_count: 1 },
     };
     const decision = classifyDecision(raw, ctx({ rawTitle: 'Bifen XTS Insecticide 96 oz' }));
-    expect(decision.suggestion).toMatchObject({ type: 'new_product', name: 'Bifen XTS', category: 'Insecticide' });
+    expect(decision.suggestion).toMatchObject({ type: 'new_product', name: 'Bifen XTS', category: 'insecticide' });
     expect(decision.suggestion).not.toHaveProperty('containerSize');
   });
 

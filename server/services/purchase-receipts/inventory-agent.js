@@ -547,9 +547,23 @@ function validateExisting(raw, ctx) {
   const candidate = ctx.candidates.find((c) => c.id === raw.product_id);
   if (!candidate) return unsureResult('proposed product is not one of the candidates offered');
   const result = validateExistingCandidate(raw, ctx, candidate);
-  return result.kind === 'unsure'
-    ? { ...result, suggestion: { type: 'existing', productId: candidate.id, productName: candidate.name } }
-    : result;
+  if (result.kind !== 'unsure') return result;
+  const guess = existingGuess(candidate, ctx);
+  return guess ? { ...result, suggestion: guess } : result;
+}
+
+// The product a refused 'existing' proposal shows as its closest guess. When
+// the deterministic matcher already named a DIFFERENT product, the model's
+// pick was refused precisely because it conflicts with that stronger match,
+// so the guess is the matcher's product (or nothing if it isn't on hand to
+// name) — never the substitute the refusal just rejected.
+function existingGuess(candidate, ctx) {
+  const { matchedProductId } = ctx;
+  if (!matchedProductId || matchedProductId === candidate.id) {
+    return { type: 'existing', productId: candidate.id, productName: candidate.name };
+  }
+  const matched = [...(ctx.candidates || []), ...(ctx.allActiveProducts || [])].find((p) => p.id === matchedProductId);
+  return matched ? { type: 'existing', productId: matched.id, productName: matched.name } : null;
 }
 
 function validateExistingCandidate(raw, ctx, candidate) {
@@ -604,54 +618,71 @@ function validateExistingCandidate(raw, ctx, candidate) {
 
 // A new product's category is accepted only when the LISTING states it
 // (Codex round 11), and only from ONE fixed, canonical list this agent may
-// ever create (2026-09-27 category-canonicalization review) — never the
-// catalog's own DB-distinct categories, which mix case ("Insecticide" vs
-// "insecticide") and carry duplicate spellings a separate data fix is
-// renaming away. The model is given these exact names in the prompt
-// (ALLOWED_CATEGORY_LIST_TEXT below); validateNewProduct matches its answer
-// case-insensitively against `name` and writes the CANONICAL spelling onto
-// the new product — never the model's own casing. `statedBy` is the wording
-// that counts as the listing stating this category; a category the title
-// doesn't state (or that isn't on this list at all, like "Supplies",
-// "Cleaner", "Termite Monitoring" — held for a person by design) holds the
-// line.
+// ever create — never the catalog's own DB-distinct categories, which carry
+// duplicate spellings a separate data fix renames away. Names are LOWERCASE:
+// products_catalog stores a lowercase category (AGENTS.md lawn protocol
+// fan-out), it is copied into service_products.product_category and
+// property_application_history.category, and compliance readers compare it
+// exactly (compliance.js `category = 'fertilizer'`). The model's answer is
+// matched case-insensitively and the canonical lowercase name is written.
+// `statedBy` runs against the title after statingText() folds separators, so
+// "Soil-Surfactant" and "Termite-Bait" read like their spaced forms. Each
+// stating phrase states exactly ONE category (a composite like "weed & feed"
+// is a fertilizer — granular, broadcast — never also herbicide), and a
+// specific bait ("termite bait", "mole bait") never also states generic
+// bait. A category the title doesn't state, or one not on this list at all
+// ("supplies", "cleaner", "termite monitoring", "soil moisture management
+// aid", "termiticide / insecticide"), holds the line for a person.
 const CANONICAL_CATEGORIES = [
   {
-    name: 'Insecticide',
-    statedBy: /\binsecticides?\b|\binsect\s+killers?\b|\bbug\s+killers?\b|\b(?:ant|roach|cockroach|flea|tick|flea\s+and\s+tick|flea\s*&\s*tick|spider|scorpion|wasp|hornet)\s+killers?\b|\b(?:ant|roach|cockroach|flea|tick|caterpillar|grub|worm|armyworm|chinch\s+bug|insect|bug|mite|spider|scorpion)\s+control\b/i,
+    name: 'insecticide',
+    statedBy: /\binsecticides?\b|\binsect killers?\b|\bbug killers?\b|\b(?:ant|roach|cockroach|flea|tick|flea and tick|flea & tick|spider|scorpion|wasp|hornet) killers?\b|\b(?:ant|roach|cockroach|flea|tick|caterpillar|grub|worm|armyworm|chinch bug|insect|bug|mite|spider|scorpion) control\b/i,
   },
-  { name: 'Termiticide', statedBy: /\btermiticides?\b/i },
+  { name: 'termiticide', statedBy: /\btermiticides?\b/i },
   {
-    name: 'Herbicide',
-    statedBy: /\bherbicides?\b|\bweed\s+killers?\b|\b(?:weed|grass|sedge|nutsedge|crabgrass|brush|weed\s*(?:&|and)\s*grass)\s+(?:killers?|control)\b|\bpre[\s-]?emergents?\b|\bpost[\s-]?emergents?\b|\bcrabgrass\s+preventers?\b|\bweed\s*(?:&|and)\s*feed\b/i,
-  },
-  {
-    name: 'Fungicide',
-    statedBy: /\bfungicides?\b|\b(?:fungus|disease|brown\s+patch|large\s+patch|dollar\s+spot)\s+(?:control|killers?)\b/i,
+    name: 'herbicide',
+    statedBy: /\bherbicides?\b|\bweed killers?\b|\b(?:weed|grass|sedge|nutsedge|crabgrass|brush|weed ?(?:&|and) ?grass) (?:killers?|control)\b|\bpre ?emergents?\b|\bpost ?emergents?\b|\bcrabgrass preventers?\b/i,
   },
   {
-    name: 'Fertilizer',
-    statedBy: /\bfertili[sz]ers?\b|\b\d{1,2}-\d{1,2}-\d{1,2}\b|\b(?:lawn|plant|turf|palm)\s+food\b|\bweed\s*(?:&|and)\s*feed\b/i,
+    name: 'fungicide',
+    statedBy: /\bfungicides?\b|\b(?:fungus|disease|brown patch|large patch|dollar spot) (?:control|killers?)\b/i,
   },
-  { name: 'Micronutrient Fertilizer', statedBy: /\bmicronutrients?\b/i },
-  { name: 'Insect Growth Regulator (IGR)', statedBy: /\binsect\s+growth\s+regulators?\b|\bIGR\b/i },
-  { name: 'Plant Growth Regulator', statedBy: /\bplant\s+growth\s+regulators?\b|\bPGR\b/i },
-  // "surfactant" alone states Adjuvant, but "soil surfactant" never does — a
-  // soil surfactant is held for a person, same as before this list existed.
-  { name: 'Adjuvant', statedBy: /\badjuvants?\b|(?<!soil\s)\bsurfactants?\b/i },
-  { name: 'Soil Amendment', statedBy: /\bsoil\s+amendments?\b/i },
-  { name: 'Bait', statedBy: /\bbaits?\b/i },
-  { name: 'Termite Bait', statedBy: /\btermite\s+baits?\b/i },
-  { name: 'Rodenticide', statedBy: /\brodenticides?\b|\brat\s+poison\b|\bmouse\s+poison\b/i },
-  { name: 'Rodent Trap', statedBy: /\b(?:rat|mouse|mice|rodent|snap)\s+traps?\b/i },
-  { name: 'Mosquito', statedBy: /\bmosquito(?:es)?\b|\blarvicides?\b/i },
+  {
+    name: 'fertilizer',
+    statedBy: /\bfertili[sz]ers?\b|\b\d{1,2}-\d{1,2}-\d{1,2}\b|\b(?:lawn|plant|turf|palm) food\b|\bweed ?(?:&|and) ?feed\b/i,
+  },
+  { name: 'micronutrient fertilizer', statedBy: /\bmicronutrients?\b/i },
+  { name: 'insect growth regulator (igr)', statedBy: /\binsect growth regulators?\b|\bIGR\b/i },
+  { name: 'plant growth regulator', statedBy: /\bplant growth regulators?\b|\bPGR\b/i },
+  // "surfactant" alone states adjuvant; "soil surfactant" (however it is
+  // punctuated — statingText folds the separator) never does.
+  { name: 'adjuvant', statedBy: /\badjuvants?\b|(?<!\bsoil )\bsurfactants?\b/i },
+  { name: 'soil amendment', statedBy: /\bsoil amendments?\b/i },
+  { name: 'bait', statedBy: /(?<!\b(?:termite|mole) )\bbaits?\b/i },
+  { name: 'termite bait', statedBy: /\btermite baits?\b/i },
+  { name: 'mole bait', statedBy: /\bmole baits?\b/i },
+  { name: 'rodenticide', statedBy: /\brodenticides?\b|\brat poison\b|\bmouse poison\b/i },
+  { name: 'rodent trap', statedBy: /\b(?:rat|mouse|mice|rodent|snap) traps?\b/i },
+  { name: 'mosquito', statedBy: /\bmosquito(?:es)?\b|\blarvicides?\b/i },
 ];
 
-const CANONICAL_CATEGORY_BY_LOWER = new Map(CANONICAL_CATEGORIES.map((c) => [c.name.toLowerCase(), c.name]));
+const CANONICAL_CATEGORY_BY_LOWER = new Map(CANONICAL_CATEGORIES.map((c) => [c.name, c.name]));
 const ALLOWED_CATEGORY_LIST_TEXT = CANONICAL_CATEGORIES.map((c) => c.name).sort().join(', ');
 
+// The title as the stating rules read it: separators (underscore, slash,
+// pipe, period, comma, colon, semicolon, plus, and any hyphen that is not
+// between two digits — an N-P-K like 16-4-8 keeps its hyphens) fold to one
+// space, and whitespace runs collapse.
+function statingText(rawTitle) {
+  return String(rawTitle || '')
+    .replace(/[_/|.,:;+]+/g, ' ')
+    .replace(/(?<!\d)-|-(?!\d)/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 function categoriesStatedBy(rawTitle) {
-  const title = String(rawTitle || '');
+  const title = statingText(rawTitle);
   return new Set(CANONICAL_CATEGORIES.filter((c) => c.statedBy.test(title)).map((c) => c.name));
 }
 
