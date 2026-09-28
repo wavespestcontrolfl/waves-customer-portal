@@ -16,7 +16,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { findDuplicateClusters, rewriteCalendarEventIds } = require('./event-duplicates');
-const { parseETDateTime, etDateString, addETDays, etParts } = require('../utils/datetime-et');
+const { parseETDateTime, etDateString, addETDays } = require('../utils/datetime-et');
 
 // Same advisory-lock key the manual POST /events/merge route uses, so manual and
 // automatic merges serialize against each other and merge-vs-merge races (where
@@ -155,33 +155,21 @@ const normalizeVenue = (v) => String(v || '').toLowerCase().replace(/[^a-z0-9]+/
 // minutes), not hours.
 const MAX_START_DRIFT_MS = 30 * 60 * 1000; // 30 minutes
 
-// A start_at that lands exactly on ET midnight is how a date-only source
-// (no stated time, just "Sept 19") comes through parsing — it carries no
-// real time signal, so it must never be read as conflicting with another
-// row's actual time. A row that's genuinely a midnight event AND has a
-// same-day, same-title, same-venue, cross-source duplicate is exotic enough
-// that treating it the same (tolerant) way is an acceptable, conservative
-// trade-off.
-function isDatelessMidnight(startAt) {
-  const p = etParts(new Date(startAt));
-  return !!p && p.hour === 0 && p.minute === 0;
-}
-
 // Whether every row's start_at agrees closely enough to be the same
-// happening: rows sitting on the midnight placeholder carry no time
-// information and never conflict; among the rows with a real time, the
-// spread between the earliest and latest must be within MAX_START_DRIFT_MS.
+// happening: the spread between the earliest and latest must be within
+// MAX_START_DRIFT_MS. A date-only row (parsed to ET midnight) is NOT treated
+// as a wildcard: pickSurvivor ranks on curation/source quality, not time, so
+// a placeholder row could survive and suppress the only real start time.
+// Such clusters stay for the manual /events/duplicates review.
 function startTimesAgree(events) {
-  const realTimes = [];
+  const times = [];
   for (const e of events) {
     if (!e.start_at) return false;
     const t = new Date(e.start_at).getTime();
     if (Number.isNaN(t)) return false;
-    if (isDatelessMidnight(e.start_at)) continue; // no real time to compare
-    realTimes.push(t);
+    times.push(t);
   }
-  if (realTimes.length === 0) return true; // every row is a placeholder — nothing to conflict
-  return Math.max(...realTimes) - Math.min(...realTimes) <= MAX_START_DRIFT_MS;
+  return Math.max(...times) - Math.min(...times) <= MAX_START_DRIFT_MS;
 }
 
 /**
@@ -191,9 +179,8 @@ function startTimesAgree(events) {
  * venues, or a matinee vs an evening showing) would group together. On top of
  * the pure cross-source check, require the rows to also agree on a non-empty
  * venue (tolerant of formatting — see normalizeVenue) AND a start_at that's
- * either identical or within MAX_START_DRIFT_MS of every other row's (rows
- * with no real time — the ET-midnight placeholder — never count against this)
- * — a same-title/day/city/venue/time-or-placeholder match across ≥2 sources is
+ * either identical or within MAX_START_DRIFT_MS of every other row's — a
+ * same-title/day/city/venue/time match across ≥2 sources is
  * almost certainly one real event. Anything looser (different/blank venue, a
  * genuinely different time) is left for the manual /events/duplicates review
  * rather than auto-rejected.

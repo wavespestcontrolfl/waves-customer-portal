@@ -97,17 +97,33 @@ describeOrSkip('buildCurationCandidateQuery admits a genuine first-of-year stale
     // subquery — it need not itself be a curation candidate (a past-dated
     // row never is), and loadYearIdentityPool-style evidence includes
     // rows regardless of admin_status.
+    // Both occurrences sit a minute apart so they can never straddle an ET
+    // New Year boundary whatever day the suite runs.
+    const laterStart = new Date(Date.now() + 10 * 24 * 3600 * 1000);
     await insertEvent({
       title,
       admin_status: 'approved',
-      start_at: new Date(Date.now() - 5 * 24 * 3600 * 1000),
+      start_at: new Date(laterStart.getTime() - 60 * 1000),
     });
     const laterId = await insertEvent({
       title,
-      start_at: new Date(Date.now() + 10 * 24 * 3600 * 1000),
+      start_at: laterStart,
     });
     const rows = await buildCurationCandidateQuery(500);
     expect(rows.map((r) => r.id)).not.toContain(laterId);
+  });
+
+  test('a merged-away duplicate a few minutes earlier does not count as an earlier occurrence', async () => {
+    const title = 'TEST Weekly Trivia With Merged Duplicate';
+    const survivorStart = new Date(Date.now() + 10 * 24 * 3600 * 1000);
+    const survivorId = await insertEvent({ title, start_at: survivorStart });
+    const loserId = await insertEvent({
+      title,
+      start_at: new Date(survivorStart.getTime() - 15 * 60 * 1000),
+    });
+    await db('events_raw').where({ id: loserId }).update({ merged_into: survivorId });
+    const rows = await buildCurationCandidateQuery(500);
+    expect(rows.map((r) => r.id)).toContain(survivorId);
   });
 
   test('expired and needs_review rows remain excluded unconditionally, even with no earlier sibling at all', async () => {

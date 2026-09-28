@@ -303,7 +303,9 @@ const sqlEtYear = (colRef) => `date_part('year', (${colRef} AT TIME ZONE 'Americ
  * row's identity (normalized title + venue, or title + city when venue is
  * blank on either side — mirrors newsletter-event-selection.js's
  * isSameSeriesSibling) with a start_at strictly earlier in the SAME ET
- * calendar year. Correlated against `alias` (the caller's own query alias),
+ * calendar year. Merged-away rows never count (isFirstOccurrenceOfYear ignores
+ * them too: a merged duplicate a few minutes earlier than its survivor is the
+ * same happening, not an earlier occurrence). Correlated against `alias` (the caller's own query alias),
  * so it can only be used once that alias is actually in scope.
  */
 function buildRoutineFirstOfYearAdmission(alias) {
@@ -312,6 +314,7 @@ function buildRoutineFirstOfYearAdmission(alias) {
   return `NOT EXISTS (
     SELECT 1 FROM events_raw AS routine_sibling
     WHERE ${sib('id')} != ${outer('id')}
+      AND ${sib('merged_into')} IS NULL
       AND ${sib('start_at')} < ${outer('start_at')}
       AND ${sqlEtYear(sib('start_at'))} = ${sqlEtYear(outer('start_at'))}
       AND ${sqlNormalizedTitle(sib('title'))} = ${sqlNormalizedTitle(outer('title'))}

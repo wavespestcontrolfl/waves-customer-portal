@@ -124,12 +124,12 @@ describe('cross-source dedup: conservative boundaries are preserved', () => {
     expect(isAutoMergeableCluster(cluster)).toBe(false);
   });
 
-  test('a date-only (ET-midnight placeholder) row does not block merging against a row with a real time', () => {
+  test('a date-only (ET-midnight) row is not auto-merged with a timed row, so the real start time is never suppressed', () => {
     const cluster = [
       ev({ id: 'a', title: 'Sarasota Paradise vs. Greenville Triumph SC', start_at: '2026-09-19T04:00:00.000Z', city: 'lakewood-ranch', venue_name: 'Premier Sports Campus at Lakewood Ranch', source_id: 's1' }), // ET midnight
       ev({ id: 'b', title: 'Sarasota Paradise vs. Greenville Triumph SC', start_at: '2026-09-19T23:30:00.000Z', city: 'lakewood-ranch', venue_name: 'Premier Sports Campus at Lakewood Ranch', source_id: 's2' }),
     ];
-    expect(isAutoMergeableCluster(cluster)).toBe(true);
+    expect(isAutoMergeableCluster(cluster)).toBe(false);
   });
 });
 
