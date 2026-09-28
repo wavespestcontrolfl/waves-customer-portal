@@ -139,6 +139,17 @@ function holds(quote, words) {
 
 // The 24-hour clock value an hour word and its period words state, or null
 // when the hour is not one hour, or no single half of the day is stated.
+function twelveNamed(n, periodToks) {
+  return n === 12 && periodToks.length === 1 && (periodToks[0] === 'noon' || periodToks[0] === 'midnight');
+}
+
+// The hour a word states, 1-12, or null.
+function hourNumber(hourWords) {
+  const tok = normalize(hourWords);
+  const n = /^\d{1,2}$/.test(tok) ? Number(tok) : HOUR_WORDS[tok];
+  return n >= 1 && n <= 12 ? n : null;
+}
+
 function statedHour(hourWords, periodWords) {
   const toks = normalize(hourWords).split(' ');
   if (toks.length !== 1) return null;
@@ -149,10 +160,10 @@ function statedHour(hourWords, periodWords) {
   if (!(n >= 1 && n <= 12)) return null;
   const periodToks = normalize(periodWords).split(' ');
   // "12 noon" / "12 midnight" name the hour itself; for any other hour noon
-  // or midnight is a window's end (see PERIOD_WORDS).
-  if (n === 12 && periodToks.length === 1 && (periodToks[0] === 'noon' || periodToks[0] === 'midnight')) {
-    return periodToks[0] === 'noon' ? 12 : 0;
-  }
+  // or midnight is a window's end (see PERIOD_WORDS). Twelve beside a
+  // named end ("between 12 and midnight") is told apart by the slot quote,
+  // which must then say the two words together (see twelveNamed).
+  if (twelveNamed(n, periodToks)) return periodToks[0] === 'noon' ? 12 : 0;
   const halves = new Set(periodToks.filter((t) => Object.hasOwn(PERIOD_WORDS, t)).map((t) => PERIOD_WORDS[t]));
   if (halves.size !== 1) return null;
   return (n % 12) + (halves.has('pm') ? 12 : 0);
@@ -184,10 +195,14 @@ function nearestDate(said, started) {
     return thisYear >= today ? thisYear : isoDate(ty + 1, said.month, said.day);
   }
   if (said.day !== undefined) {
-    const thisMonth = isoDate(ty, tm, said.day);
-    if (thisMonth >= today && validCalendarDate(thisMonth)) return thisMonth;
-    const next = isoDate(tm === 12 ? ty + 1 : ty, tm === 12 ? 1 : tm + 1, said.day);
-    return validCalendarDate(next) ? next : null;
+    // This month's if still ahead, else the first later month that has
+    // that day ("the 30th" said on January 31 is March 30).
+    for (let k = 0; k <= 12; k += 1) {
+      const y = ty + Math.floor((tm - 1 + k) / 12);
+      const candidate = isoDate(y, ((tm - 1 + k) % 12) + 1, said.day);
+      if (candidate >= today && validCalendarDate(candidate)) return candidate;
+    }
+    return null;
   }
   if (said.weekday !== undefined) return etDateString(addETDays(started, (said.weekday - etParts(started).dayOfWeek + 7) % 7));
   return null;
@@ -230,6 +245,14 @@ function isPlain(holding, quote, fieldPath) {
   return holding.length > 0 && holding.every((turn) => plainlySaid(turn, quote, ASKING_FAILS.has(fieldPath)));
 }
 
+// The recorded words the slot quote must hold. "12 noon" must be said as
+// such, not read off "between 12 and noon".
+function slotPhrases(words) {
+  const said = [words.day, words.hour, words.period].filter((w) => typeof w === 'string');
+  if (twelveNamed(hourNumber(words.hour), normalize(words.period).split(' '))) said.push(`${words.hour} ${words.period}`);
+  return said;
+}
+
 /**
  * Pure function. See file header for contract.
  */
@@ -262,7 +285,7 @@ function groundRescheduleAgreement({ v2, transcript, callStartedAt } = {}) {
   const words = scheduling.agreed_slot_words;
   if (typeof words?.hour !== 'string') return fail('agreed_slot_words_missing');
   if (!wordsStateSlot(words, slot, started, movedDate)) return fail('agreed_slot_words_mismatch');
-  const said = [words.day, words.hour, words.period].filter((w) => typeof w === 'string');
+  const said = slotPhrases(words);
   if (!grounded('/scheduling/confirmed_start_at').some((q) => said.every((w) => holds(q, w)))) {
     return fail('agreed_slot_ungrounded');
   }

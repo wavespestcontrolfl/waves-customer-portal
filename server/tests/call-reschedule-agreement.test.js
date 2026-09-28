@@ -147,6 +147,9 @@ describe('groundRescheduleAgreement', () => {
     expect(agreedAt('2026-09-24T12:00:00-04:00', 'We will see you tomorrow at twelve noon.', { day: 'tomorrow', hour: 'twelve', period: 'noon' }).ok).toBe(true);
     expect(agreedAt('2026-09-24T00:00:00-04:00', 'We will see you tomorrow at 12 noon.', { day: 'tomorrow', hour: '12', period: 'noon' }))
       .toMatchObject({ ok: false, reason: 'agreed_slot_words_mismatch' });
+    // Codex #5092 r9: twelve beside a window's named end is not "12 midnight".
+    expect(agreedAt('2026-09-24T00:00:00-04:00', 'We will be there between 12 and midnight tomorrow.', { day: 'tomorrow', hour: '12', period: 'midnight' }))
+      .toMatchObject({ ok: false, reason: 'agreed_slot_ungrounded' });
   });
 
   // Codex #5092 r4: day words are read by the shared reschedule date grammar
@@ -167,6 +170,21 @@ describe('groundRescheduleAgreement', () => {
     expect(on('the 1st', '2026-12-01T14:00:00-05:00').ok).toBe(false);
     expect(on('December 24th', '2026-12-24T14:00:00-05:00').ok).toBe(true);
     expect(on('September 22nd', '2027-09-22T14:00:00-04:00').ok).toBe(true); // passed this year: next year's
+  });
+
+  test('a day of the month skips months that lack it', () => {
+    // Codex #5092 r9: said on January 31, "the 30th" is March 30.
+    const jan31 = (day, slot) => groundRescheduleAgreement({
+      v2: v2({ scheduling: { confirmed_start_at: slot, agreed_slot_words: { day, hour: 'two', period: 'in the afternoon' } }, evidence: [
+        quote('/scheduling/agent_committed_booking', 'agent', `We will see you ${day} at two in the afternoon.`),
+        quote('/scheduling/confirmed_start_at', 'agent', `We will see you ${day} at two in the afternoon.`),
+        quote('/scheduling/caller_accepted_slot', 'caller', ACCEPT),
+      ] }),
+      transcript: `Caller: Can we move my visit?\nAgent: We will see you ${day} at two in the afternoon.\nCaller: ${ACCEPT}`,
+      callStartedAt: '2027-01-31T15:00:00Z',
+    });
+    expect(jan31('the 30th', '2027-03-30T14:00:00-04:00').ok).toBe(true);
+    expect(jan31('the 30th', '2027-02-28T14:00:00-05:00').ok).toBe(false);
   });
 
   test('a weekday beside an explicit date describes that date', () => {
