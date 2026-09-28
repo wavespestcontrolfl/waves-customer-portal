@@ -1325,6 +1325,24 @@ describe('BOTH GATES ON — request_booking behavior', () => {
       expect(trxBuilders.scheduled_services.insert).not.toHaveBeenCalled();
     });
 
+    test('prepare refuses the day (route_unverified capacity error) → the stale-offer refusal, never a throw', async () => {
+      arrivalRoute.prepareArrivalCapacity.mockRejectedValue(
+        Object.assign(new Error('route_unverified'), { code: 'SLOT_UNAVAILABLE', reason: 'route_unverified' }),
+      );
+      const out = await executeTool('request_booking', GOOD_INPUT, CTX);
+      expect(out).toMatch(/just taken/i);
+      expect(db.transaction).not.toHaveBeenCalled();
+      expect(trxBuilders.scheduled_services.insert).not.toHaveBeenCalled();
+    });
+
+    test('prepare fails for any other reason (DB error) → a tool error, never a throw, no write', async () => {
+      arrivalRoute.prepareArrivalCapacity.mockRejectedValue(new Error('connection reset'));
+      const out = await executeTool('request_booking', GOOD_INPUT, CTX);
+      expect(out).not.toMatch(/Booking REQUEST submitted/i);
+      expect(db.transaction).not.toHaveBeenCalled();
+      expect(trxBuilders.scheduled_services.insert).not.toHaveBeenCalled();
+    });
+
     test('offer/commit parity: recheck ran append-only (gate off), gate now ON at commit → still books, insertion engages (Codex P1 reverse case)', async () => {
       // The FIRST read of bookInsertionOffersLive() is revalidateSlot's own
       // (the recheck); the SECOND is commitVoiceBooking's engage check.

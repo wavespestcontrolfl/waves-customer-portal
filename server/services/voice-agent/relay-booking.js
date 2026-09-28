@@ -364,19 +364,28 @@ async function commitVoiceBooking({
   let preparedCapacity = null;
   if (insertData.technician_id && coords && coords.lat && coords.lng && booking.bookInsertionOffersLive()) {
     const { prepareArrivalCapacity } = require('../scheduling/arrival-route');
-    preparedCapacity = await prepareArrivalCapacity({
-      date: dateStr,
-      technicianId: insertData.technician_id,
-      prospective: {
-        lat: coords.lat,
-        lng: coords.lng,
-        estimated_duration_minutes: insertData.estimated_duration_minutes,
-        service_type: insertData.service_type,
-      },
-      windowStart,
-      windowEnd: endTime,
-      durationMinutes: insertData.estimated_duration_minutes,
-    });
+    // Same outcomes as the transaction's own catch below: a capacity refusal
+    // (e.g. route_unverified — a stop on that day has no pin) is the stale-offer
+    // "pick another time", anything else is a tool error, never a throw.
+    try {
+      preparedCapacity = await prepareArrivalCapacity({
+        date: dateStr,
+        technicianId: insertData.technician_id,
+        prospective: {
+          lat: coords.lat,
+          lng: coords.lng,
+          estimated_duration_minutes: insertData.estimated_duration_minutes,
+          service_type: insertData.service_type,
+        },
+        windowStart,
+        windowEnd: endTime,
+        durationMinutes: insertData.estimated_duration_minutes,
+      });
+    } catch (prepareErr) {
+      if (prepareErr && prepareErr.code === 'SLOT_UNAVAILABLE') return { status: 'slot_taken' };
+      logger.error(`[voice-relay-booking] capacity prepare failed for customer ${customerId} on ${dateStr}: ${prepareErr.message}`);
+      return { status: 'error' };
+    }
     if (preparedCapacity) {
       // Stamp the CERTIFIED point onto the row itself (Codex P1): a legacy
       // account with no resolved propertyLinkage leaves insertData (and so
