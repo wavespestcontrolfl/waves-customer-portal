@@ -1036,6 +1036,20 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
         expect(result.internal.escalation_reasons).toEqual(['self_contradiction']);
       });
 
+      test('a repeated condition slug is deduped before the top-two reads (escalation, display, referral)', async () => {
+        queue(
+          candidatesLeg({ shows: 'damage' }),
+          conditionsLeg([
+            ['fixture-palm-leaf-spot', 0.9], ['fixture-palm-leaf-spot', 0.9], ['fixture-palm-leaf-spot', 0.85], ['fixture-lethal-bronzing', 0.5],
+          ]),
+          MISS,
+        );
+        const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'palm' });
+        expect(result.internal.escalation_reasons).toEqual(['different_outcome_classes']);
+        expect(result.v2.possibilities.map((p) => p.slug)).toEqual(['fixture-palm-leaf-spot', 'fixture-lethal-bronzing']);
+        expect(result.v2.next_step_hint.kind).toBe('specialist');
+      });
+
       test('an off-catalog top below the threshold escalates too', async () => {
         queue(
           candidatesLeg({ host: [idItem('', 0.5, { off_catalog_name: 'Foxtail palm', group_id: 'palms' })] }),

@@ -1138,14 +1138,15 @@ function dedupePossibilities(list) {
   return [...bySlug.values()].sort(byConfidenceDesc);
 }
 
-/** One provider's selected conditions, resolved against `indexEntries` and
- * ranked by confidence — the schema does not enforce descending order, so
- * nothing may read a provider's "top" before this sort. */
+/** One provider's selected conditions, resolved against `indexEntries`,
+ * deduped by slug (higher confidence kept) and ranked by confidence — the
+ * schema enforces neither order nor uniqueness, so nothing may read a
+ * provider's "top" or "top two" before this (pre-push audit on #5186 r1:
+ * a repeated slug filled the top two and hid an outcome-class split). */
 function resolvePossibilities(rawList, indexEntries) {
-  return (Array.isArray(rawList) ? rawList : [])
+  return dedupePossibilities((Array.isArray(rawList) ? rawList : [])
     .map((raw) => resolveConditionCandidate(raw, indexEntries))
-    .filter(Boolean)
-    .sort(byConfidenceDesc);
+    .filter(Boolean));
 }
 
 /** Same "agree / disagree is uncertain" combination as `combineIdentity`,
