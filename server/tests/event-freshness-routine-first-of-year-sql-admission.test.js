@@ -56,6 +56,7 @@ describeOrSkip('buildCurationCandidateQuery admits a genuine first-of-year stale
 
   const db = require('../models/db');
   const { buildCurationCandidateQuery } = require('../services/event-curation');
+  const { filterRepeatedDateIdentities } = require('../services/newsletter-event-selection');
 
   const feedUrl = `https://test.invalid/curation-first-of-year-sql/${randomUUID()}`;
   let sourceId;
@@ -186,6 +187,21 @@ describeOrSkip('buildCurationCandidateQuery admits a genuine first-of-year stale
     const laterId = await insertEvent({ title, venue_name: '  ', city: 'Venice', start_at: etAt(laterDay) });
     const rows = await buildCurationCandidateQuery(500);
     expect(rows.map((r) => r.id)).toContain(laterId);
+  });
+
+  test('the real year-pool loader carries recurrence metadata: rows re-labeled one_time inherit last year\'s weekly label', async () => {
+    const title = 'TEST Relabeled Riverside Market';
+    const { laterDay, earlierDay } = sameYearDays();
+    const priorYear = `${Number(laterDay.slice(0, 4)) - 1}-08-01`;
+    await insertEvent({ title, admin_status: 'approved', start_at: etAt(priorYear) });
+    const oneTime = { event_type: 'one_time', recurrence_type: 'none', freshness_status: 'fresh_one_time' };
+    const firstId = await insertEvent({ title, ...oneTime, start_at: etAt(earlierDay) });
+    const laterId = await insertEvent({ title, ...oneTime, start_at: etAt(laterDay) });
+    const candidates = await db('events_raw').whereIn('id', [firstId, laterId]);
+
+    // No pools passed: the production loaders run against real Postgres.
+    const rows = await filterRepeatedDateIdentities(candidates, { knex: db, reference: etAt(earlierDay) });
+    expect(rows.map((r) => r.id)).toEqual([firstId]);
   });
 
   test('expired and needs_review rows remain excluded unconditionally, even with no earlier sibling at all', async () => {

@@ -812,6 +812,7 @@ function normalizeExtractedEvent(source, ev, nowMs, opts = {}) {
     legacyExternalId,
     legacyExternalIds: [...new Set([legacyExternalId, tzDroppedExternalId])]
       .filter((key) => key && key !== externalId),
+    tzDroppedExternalId: tzDroppedExternalId && tzDroppedExternalId !== externalId ? tzDroppedExternalId : null,
   };
 }
 
@@ -884,11 +885,18 @@ async function upsertExtractedEvents(source, claudeEvents, opts = {}) {
   let upserted = 0;
   let dropped = 0;
 
-  for (const ev of claudeEvents) {
-    const normalized = normalizeExtractedEvent(source, ev, nowMs, opts);
+  const normalizedEvents = claudeEvents.map((ev) => normalizeExtractedEvent(source, ev, nowMs, opts));
+  // Every legacy-shaped key this pull's own listings claim with their
+  // corrected times. A timezone-dropped key is ambiguous on its own (in EDT a
+  // 7 PM event's shifted key equals a real 3 PM showtime's correct key), so it
+  // is reconciled only when the page does NOT also list that showtime.
+  const listedLegacyKeys = new Set(normalizedEvents.filter(Boolean).map((n) => n.legacyExternalId));
+
+  for (const normalized of normalizedEvents) {
     if (!normalized) { dropped += 1; continue; }
-    const { row, legacyExternalIds } = normalized;
+    const { row, legacyExternalIds, tzDroppedExternalId } = normalized;
     for (const legacyKey of legacyExternalIds) {
+      if (legacyKey === tzDroppedExternalId && listedLegacyKeys.has(legacyKey)) continue;
       await reconcileLegacyKey(source.id, row.external_id, legacyKey);
     }
 

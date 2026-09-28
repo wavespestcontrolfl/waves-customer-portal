@@ -308,6 +308,38 @@ describeOrSkip('upsertExtractedEvents — legacy dedup-key migration on real Pos
     expect(legacy.merged_into).toBe(finalId);
   });
 
+  test('a real matinee whose correct key equals the evening show\'s shifted key is left alone', async () => {
+    const source = { id: sourceId, coverage_geo: [] };
+    const title = 'TEST Matinee And Evening';
+    const url = 'https://test.invalid/matinee-and-evening/';
+    // Evening at 23:00Z; its timezone-dropped key embeds the ET wall clock as
+    // UTC, which is exactly the matinee's correct instant on the same day.
+    const eveningIso = daysFromNowIso(39, 23);
+    const evening = parseExtractedStartAt(eveningIso);
+    const { tzDroppedExternalId } = extractedEventDedupKeys(title, evening, url);
+    const matineeIso = tzDroppedExternalId.split('|')[1];
+    const matinee = parseExtractedStartAt(matineeIso);
+    const { legacyExternalId: matineeLegacyKey } = extractedEventDedupKeys(title, matinee, url);
+    expect(matineeLegacyKey).toBe(tzDroppedExternalId);
+
+    const [matineeRow] = await db('events_raw').insert({
+      source_id: sourceId, external_id: matineeLegacyKey, title, start_at: matinee, event_url: url,
+    }).returning(['id']);
+    const matineeId = matineeRow.id || matineeRow;
+
+    // Evening first: without the guard, its shifted key would grab the
+    // matinee row before the matinee listing is processed.
+    await upsertExtractedEvents(source, [
+      { title, startAt: eveningIso, eventUrl: url },
+      { title, startAt: matineeIso, eventUrl: url },
+    ]);
+
+    const live = await db('events_raw').where({ source_id: sourceId, title }).whereNull('merged_into');
+    expect(live).toHaveLength(2);
+    const kept = live.find((r) => r.id === matineeId);
+    expect(new Date(kept.start_at).toISOString()).toBe(matinee.toISOString());
+  });
+
   test('with no legacy row present, a fresh pull inserts once under the new key', async () => {
     const source = { id: sourceId, coverage_geo: [] };
     const title = 'TEST Fresh Pull Event';

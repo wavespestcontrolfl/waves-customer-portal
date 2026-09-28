@@ -754,7 +754,7 @@ describe('event ingestion normalizeExtractedEvent — validation (no auto-approv
     expect(dated.row.admin_status).toBeUndefined();
     const tier2Dated = normalizeExtractedEvent(tier2, { title: 'Festival', startAt: '2026-06-14T10:00:00-04:00' }, NOW);
     expect(tier2Dated.autoApprove).toBeUndefined();
-    expect(Object.keys(dated).sort()).toEqual(['legacyExternalId', 'legacyExternalIds', 'row']);
+    expect(Object.keys(dated).sort()).toEqual(['legacyExternalId', 'legacyExternalIds', 'row', 'tzDroppedExternalId']);
   });
 
   test('canonicalizes the dedup key (ET calendar day + ET wall-clock time) and validates URLs', () => {
