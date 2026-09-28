@@ -3665,6 +3665,17 @@ async function cancelAppointment(input, actionContext = {}) {
   // trigger the follow-up re-park hook for a treatment that already
   // happened. Idempotent on an already-cancelled row; every other terminal
   // state is an error, matching rescheduleAppointment above.
+  if (String(appt.status) === 'cancelled' && input._frozen_cancellation_impact) {
+    // A card confirm whose visit was cancelled ELSEWHERE since the card was
+    // shown (Codex round 6 P1): the replay below would run follow-through
+    // for effects the card never approved. The bar's own card cancel has no
+    // post-commit money obligations to retry (bare visits only; the shared
+    // status-writer seam runs them), so refuse as stale — never replay.
+    return {
+      error: 'This visit was already cancelled since the card was shown — nothing was changed.',
+      preview_changed: true,
+    };
+  }
   if (String(appt.status) === 'cancelled') {
     // Retry of an already-committed cancellation: the post-commit re-park
     // hook may have failed transiently on the first attempt, and this early
@@ -3807,7 +3818,15 @@ async function cancelAppointment(input, actionContext = {}) {
       // recurrence flags, then the window label, then visit_id); pinning
       // the whole row closes that class of gap structurally.
       if (input._frozen_cancellation_impact) {
-        const lockedRow = await trx('scheduled_services').where('id', appointment_id).forUpdate().first();
+        // The shared scheduled-invoice lock chain (mint advisory lock →
+        // customer KEY SHARE → visit row FOR UPDATE), not a bare row lock
+        // (Codex round 6 P1): InvoiceService.create fences scheduled-service
+        // mints with the advisory lock, and a row lock does not protect the
+        // ABSENCE of invoice rows — joining the same protocol, in the same
+        // order, makes the no-invoice check below hold through the status
+        // transition in this trx.
+        const { acquireScheduledMintLockChain } = require('../scheduled-invoice-mint');
+        const lockedRow = await acquireScheduledMintLockChain(trx, { scheduledServiceId: appointment_id, visitColumns: ['*'] });
         if (!lockedRow) throw new Error('__cancel_target_missing__');
         const { computeRowFingerprint } = require('../appointment-cancel-impact');
         if (computeRowFingerprint(lockedRow) !== input._frozen_cancellation_impact.identity_fingerprint) {

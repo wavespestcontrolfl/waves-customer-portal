@@ -291,10 +291,13 @@ describe('round-3 P1a: the FINAL identity recheck runs INSIDE the mutation trans
   test('the recheck actually takes a row lock (source contract — real blocking is a Postgres guarantee, not mockable)', () => {
     const source = require('fs').readFileSync(require.resolve('../services/intelligence-bar/tools.js'), 'utf8');
     const cancelFn = source.slice(source.indexOf('async function cancelAppointment('));
-    expect(cancelFn).toContain(".where('id', appointment_id).forUpdate().first()");
+    // Codex round 6 P1: the lock is the shared scheduled-invoice chain
+    // (mint advisory lock → customer KEY SHARE → visit row FOR UPDATE), so
+    // an in-flight invoice mint serializes with the no-invoice recheck.
+    expect(cancelFn).toContain("acquireScheduledMintLockChain(trx, { scheduledServiceId: appointment_id, visitColumns: ['*'] })");
     // The lock read happens BEFORE transitionJobStatus is called, both
     // inside the same db.transaction callback.
-    const lockIdx = cancelFn.indexOf('.forUpdate().first()');
+    const lockIdx = cancelFn.indexOf('acquireScheduledMintLockChain(trx,');
     const transitionIdx = cancelFn.indexOf('await transitionJobStatus({');
     expect(lockIdx).toBeGreaterThan(-1);
     expect(transitionIdx).toBeGreaterThan(lockIdx);
@@ -584,16 +587,28 @@ test('no reason: no notes update at all (unchanged from before)', async () => {
   expect(capturedNotesUpdate).toBeNull();
 });
 
-test('a replay of a pinned confirm (visit already cancelled) still runs the follow-through, unpinned', async () => {
+// Codex round 6 P1: a card confirm whose visit was cancelled ELSEWHERE since
+// the card is stale — refused, never replayed (the replay would run
+// follow-through for effects the card never approved).
+test('a card confirm on a visit already cancelled elsewhere is refused as stale — no replay, no follow-through', async () => {
   mockApptRow = { ...mockApptRow, status: 'cancelled' };
   const result = await executeTool('cancel_appointment', {
     appointment_id: 'svc-synthetic-1',
     _frozen_cancellation_impact: FROZEN,
   }, {});
 
+  expect(result.preview_changed).toBe(true);
+  expect(result.error).toMatch(/already cancelled since the card was shown/);
+  expect(result.already_cancelled).toBeUndefined();
+  expect(mockFollowThrough).not.toHaveBeenCalled();
+  expect(mockTransitionJobStatus).not.toHaveBeenCalled();
+});
+
+test('an unpinned (non-card) call on an already-cancelled visit still replays the follow-through, as before', async () => {
+  mockApptRow = { ...mockApptRow, status: 'cancelled' };
+  const result = await executeTool('cancel_appointment', { appointment_id: 'svc-synthetic-1' }, {});
   expect(result.already_cancelled).toBe(true);
   expect(mockFollowThrough).toHaveBeenCalledWith(expect.objectContaining({ targetIds: ['svc-synthetic-1'] }));
-  expect(mockFollowThrough.mock.calls[0][0]).not.toHaveProperty('pinnedEffects');
 });
 
 test('no frozen pin: the follow-through runs unpinned, as before', async () => {
