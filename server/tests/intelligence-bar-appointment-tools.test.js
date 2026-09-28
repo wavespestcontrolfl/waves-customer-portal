@@ -51,6 +51,7 @@ jest.mock('../utils/datetime-et', () => {
 jest.mock('../services/waveguard-existing-services', () => ({
   ...jest.requireActual('../services/waveguard-existing-services'),
   loadOwnedRecurringServiceKeys: jest.fn(),
+  loadLiveRecurringObligationRows: jest.fn(),
 }));
 
 const db = require('../models/db');
@@ -58,7 +59,7 @@ const logger = require('../services/logger');
 const { clearTechCurrentJob } = require('../services/tech-status');
 const AppointmentReminders = require('../services/appointment-reminders');
 const datetimeEt = require('../utils/datetime-et');
-const { loadOwnedRecurringServiceKeys } = require('../services/waveguard-existing-services');
+const { loadOwnedRecurringServiceKeys, loadLiveRecurringObligationRows } = require('../services/waveguard-existing-services');
 const { executeTool, ibBookingProposal } = require('../services/intelligence-bar/tools');
 
 // Real ET "today" — the date a same-day move targets.
@@ -145,6 +146,7 @@ beforeEach(() => {
   // Default: no live recurring coverage — a test that needs coverage sets
   // its own resolved value.
   loadOwnedRecurringServiceKeys.mockResolvedValue([]);
+  loadLiveRecurringObligationRows.mockResolvedValue([]);
 });
 // A booking defers its confirmation text past the result (setImmediate), so
 // let every test's deferred work finish before the next test clears mocks.
@@ -983,7 +985,7 @@ describe('create_appointment — the visit carries a price like a Schedule-scree
       // one-time-source exclusions are proven in its own module's tests and
       // in intelligence-bar-recurring-coverage-canonical.test.js; this test
       // only proves the IB wiring reaches it and honors a non-empty result.
-      loadOwnedRecurringServiceKeys.mockResolvedValue(['pest_control']);
+      loadLiveRecurringObligationRows.mockResolvedValue([{ id: 'rec-visit' }]);
       wireDb({
         customers: [chain({ first: jest.fn().mockResolvedValue(recurringOnly) }), chain({ first: jest.fn().mockResolvedValue(recurringOnly) })],
         services: [catalog([ONE_TIME_PEST]), catalog([ONE_TIME_PEST])],
@@ -999,7 +1001,7 @@ describe('create_appointment — the visit carries a price like a Schedule-scree
       expect(result).toMatchObject({ success: true, price: 212.5 });
       expect(insertChain.insert.mock.calls[0][0]).toMatchObject({ estimated_price: 212.5, line_discount_id: 'disc-member' });
       // Reached the canonical loader for this exact customer.
-      expect(loadOwnedRecurringServiceKeys).toHaveBeenCalledWith(expect.anything(), 'cust-1');
+      expect(loadLiveRecurringObligationRows).toHaveBeenCalledWith(expect.anything(), 'cust-1');
     });
 
     test('the locked recheck never refreshes the exclusion catalog on the global pool — it holds a transaction connection already', async () => {
@@ -1167,7 +1169,7 @@ describe('create_appointment — the visit carries a price like a Schedule-scree
       id: 'cust-1', first_name: 'Ada', last_name: 'L', billing_mode: 'per_application', per_application_fee: 95,
       waveguard_tier: null, monthly_rate: 0, active: true, lot_sqft: 12000,
     };
-    loadOwnedRecurringServiceKeys.mockResolvedValue(['mosquito']);
+    loadLiveRecurringObligationRows.mockResolvedValue([{ id: 'rec-visit' }]);
     wireDb({
       customers: [chain({ first: jest.fn().mockResolvedValue(recurringOnly) })],
       services: [chain({ select: jest.fn().mockResolvedValue([MOSQUITO]) })],

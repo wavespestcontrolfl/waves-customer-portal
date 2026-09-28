@@ -43,6 +43,7 @@ jest.mock('../services/appointment-reminders', () => ({
 jest.mock('../services/waveguard-existing-services', () => ({
   ...jest.requireActual('../services/waveguard-existing-services'),
   loadOwnedRecurringServiceKeys: jest.fn().mockResolvedValue([]),
+  loadLiveRecurringObligationRows: jest.fn().mockResolvedValue([]),
 }));
 
 const db = require('../models/db');

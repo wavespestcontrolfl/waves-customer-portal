@@ -2443,27 +2443,20 @@ async function resolveTechnicianByName(name) {
 const MEMBER_DISCOUNT_KEYS = ['waveguard_member'];
 
 // Live recurring coverage: the "or recurring customers" half of the owner's
-// rule (2026-09-27) — through the canonical owned-service lifecycle
-// (waveguard-existing-services.js loadOwnedRecurringServiceKeys), not a
-// hand-rolled is_recurring/status/date query (Codex round 5, P1). The old
-// query here counted callback rows and one-time booking sources as coverage
-// and missed a visit still en_route/on_site across ET midnight; the
-// canonical loader excludes the former unconditionally and bypasses the
-// date cutoff for the latter (same precedent as the billed-plan logic). It
-// THROWS on a catalog join failure — fail CLOSED (no automatic discount)
-// rather than misread coverage off a half-loaded catalog.
-// ownedKeys: an already-loaded owned-recurring-keys array for this same
-// customer within the same pricing pass (ibBookingPricing loads it at most
-// once and threads it here) — skips a redundant call to the canonical
-// loader. Omitted (every other caller), this loads its own.
-async function hasLiveRecurringCoverage(customerId, conn = db, ownedKeys = null) {
-  if (ownedKeys !== null) return ownedKeys.length > 0;
-  const { loadOwnedRecurringServiceKeys } = require('../waveguard-existing-services');
+// rule (2026-09-27), through the canonical lifecycle in
+// waveguard-existing-services.js (callbacks and one-time sources excluded,
+// in-progress rows across ET midnight kept, inactive customers rejected) —
+// the customer's live recurring obligation ROWS being non-empty, not the
+// owned-keys set: a palm-injection or termite-bond plan is a live recurring
+// plan that maps to no ownership family (Codex r5, r7). A catalog-join
+// failure fails CLOSED (no automatic discount).
+async function hasLiveRecurringCoverage(customerId, conn = db) {
+  const { loadLiveRecurringObligationRows } = require('../waveguard-existing-services');
   try {
-    const keys = await loadOwnedRecurringServiceKeys(conn, customerId);
-    return Array.isArray(keys) && keys.length > 0;
+    const rows = await loadLiveRecurringObligationRows(conn, customerId);
+    return Array.isArray(rows) && rows.length > 0;
   } catch (err) {
-    logger.warn(`[intelligence-bar] loadOwnedRecurringServiceKeys failed for customer ${customerId}; treating as no live recurring coverage: ${err.message}`);
+    logger.warn(`[intelligence-bar] loadLiveRecurringObligationRows failed for customer ${customerId}; treating as no live recurring coverage: ${err.message}`);
     return false;
   }
 }
@@ -2476,9 +2469,9 @@ async function hasLiveRecurringCoverage(customerId, conn = db, ownedKeys = null)
 // fail-closed guard (waveguard-existing-services.js:70-77, 151-155). Every
 // caller of the recurring-coverage evidence (the member line discount AND
 // the mosquito ladder default) goes through this, not the raw row query.
-async function activeCustomerHasLiveRecurringCoverage(customer, conn = db, ownedKeys = null) {
+async function activeCustomerHasLiveRecurringCoverage(customer, conn = db) {
   if (!customer?.id || customer.active === false) return false;
-  return hasLiveRecurringCoverage(customer.id, conn, ownedKeys);
+  return hasLiveRecurringCoverage(customer.id, conn);
 }
 
 // The WaveGuard member discount a member's one-off catalog visit carries
@@ -2488,7 +2481,7 @@ async function activeCustomerHasLiveRecurringCoverage(customer, conn = db, owned
 // which meets the same Bronze floor the engine opens for recurring
 // coverage (the only extra query, run only when the plain check fails).
 // Returns { row, recurringCustomer } or null.
-async function memberOneOffDiscount({ customer, catalogRow, listPrice, conn = db, ownedRecurringKeys = null }) {
+async function memberOneOffDiscount({ customer, catalogRow, listPrice, conn = db }) {
   // An inactive customer is no member, whatever tier a cancellation left on
   // the row (the wind-down gate can retain it) — isActivePlanCustomer's rule.
   if (!customer || customer.active === false) return null;
@@ -2547,7 +2540,7 @@ async function memberOneOffDiscount({ customer, catalogRow, listPrice, conn = db
   };
   const byMembership = await firstEligible(false);
   if (byMembership) return { row: byMembership, recurringCustomer: false };
-  if (!(await activeCustomerHasLiveRecurringCoverage(customer, conn, ownedRecurringKeys))) return null;
+  if (!(await activeCustomerHasLiveRecurringCoverage(customer, conn))) return null;
   const byRecurring = await firstEligible(true);
   return byRecurring ? { row: byRecurring, recurringCustomer: true } : null;
 }
@@ -2673,7 +2666,7 @@ async function ibBookingPricing({ customer, serviceType, statedPrice, conn = db 
   // operator's own number) or the one-time mosquito line (its lot ladder
   // already prices members as recurring customers).
   const memberDiscount = !stated && Number(catalogDefault) > 0
-    ? await memberOneOffDiscount({ customer, catalogRow, listPrice: Number(catalogDefault), conn, ownedRecurringKeys })
+    ? await memberOneOffDiscount({ customer, catalogRow, listPrice: Number(catalogDefault), conn })
     : null;
   // The mosquito ladder's OWN "or recurring customers" floor (Codex r2 on
   // #5093, P1): mosquitoOneTimeDefaultPrice (admin-schedule.js) only ORs in
@@ -2685,7 +2678,7 @@ async function ibBookingPricing({ customer, serviceType, statedPrice, conn = db 
   // checked first so the extra query only runs when it's actually needed.
   const { hasMembership } = require('../project-completion');
   const mosquitoRecurringOverride = !stated && catalogRow.service_key === 'mosquito_one_time' && !hasMembership(customer)
-    ? await activeCustomerHasLiveRecurringCoverage(customer, conn, ownedRecurringKeys)
+    ? await activeCustomerHasLiveRecurringCoverage(customer, conn)
     : false;
   const pricing = await buildAppointmentPricing({
     serviceRecord: catalogRow,

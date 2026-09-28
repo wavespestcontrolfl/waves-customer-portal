@@ -431,10 +431,11 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     if (preview?.inspection_credit) push('billing', 'No inspection credit is redeemed by this booking (no open credit; re-verified at commit under the credit lock offer creation shares)');
     // A booking with a time texts the booking confirmation exactly as a
     // Schedule-screen booking does (owner 2026-09-27); a windowless one
-    // registers a non-delivering placeholder until a time is set.
+    // registers a non-delivering placeholder: its confirmation is marked
+    // handled, so setting a time later re-arms only the 72h/24h reminders.
     push('operational', params?.time_window
       ? 'Registers the 72h/24h reminder rows (sent later by the reminder schedule; a registration failure is reported as a warning on this card)'
-      : 'Registers placeholder reminder rows: with no time set, no confirmation or reminder text goes out until a time is set');
+      : 'Registers placeholder reminder rows: no booking confirmation is sent for a booking with no time, even after a time is set later; setting a time re-arms only the 72h/24h reminders');
   }
   if (toolName === 'bulk_update_customers') {
     push('customer', 'Applies to each listed customer that still resolves at commit — any skipped customer is reported as a warning on this card, never a silent Done');

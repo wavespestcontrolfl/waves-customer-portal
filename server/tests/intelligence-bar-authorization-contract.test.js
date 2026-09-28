@@ -203,11 +203,11 @@ test('schedule moves/cancels are NOT marked as contacting the customer; sends an
   expect(buildContract({ toolName: 'create_appointment', params: {}, displayParams: {} }).notifies_customer).toBe(false);
 });
 
-test('create_appointment: card bookings are credit-free by construction; a windowless one texts nothing until a time is set', () => {
+test('create_appointment: card bookings are credit-free by construction; a windowless one never sends a booking confirmation', () => {
   const c = buildContract({ toolName: 'create_appointment', params: { customer_id: 'c1' }, displayParams: { customer_id: 'c1', date: '2026-09-02' }, preview: { proposal: true, inspection_credit: { amount: 0 } } });
   const labels = c.effects.map((e) => e.label);
   expect(labels).toContainEqual(expect.stringMatching(/^No inspection credit is redeemed by this booking/));
-  expect(labels).toContainEqual(expect.stringMatching(/placeholder reminder rows: with no time set, no confirmation or reminder text goes out/));
+  expect(labels).toContainEqual(expect.stringMatching(/placeholder reminder rows: no booking confirmation is sent for a booking with no time, even after a time is set later; setting a time re-arms only the 72h\/24h reminders/));
   expect(c.notifies_customer).toBe(false);
 });
 

@@ -139,4 +139,14 @@ describe('live recurring coverage through the canonical ownership loader (Codex 
     const result = await ibBookingProposal('cust-1', ONE_TIME_PEST.name, undefined);
     expect(result).toMatchObject({ price: 212.5, discountId: 'disc-member' });
   });
+
+  test('a live palm-injection plan (a recurring plan with no ownership family) counts as coverage (Codex r7)', async () => {
+    const palmRow = {
+      id: 'ss-palm', service_type: 'Palm Injection', scheduled_date: FUTURE, status: 'pending',
+      is_recurring: true, is_callback: false, source: null,
+    };
+    wireCanonicalLoader([palmRow]);
+    const result = await ibBookingProposal('cust-1', ONE_TIME_PEST.name, undefined);
+    expect(result).toMatchObject({ price: 212.5, discountId: 'disc-member' });
+  });
 });
