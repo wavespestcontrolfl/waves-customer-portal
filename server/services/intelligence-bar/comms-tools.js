@@ -549,9 +549,9 @@ const SMS_STORE = {
 // never a cached/guessed value. Throws a plain, operator-readable Error for
 // every ineligible state (not found, already sent, workflow-owned, not a
 // customer message); the caller turns that into { error } so a failed read
-// always REFUSES, never reads as "nothing queued". `forUpdate` is accepted
-// for parity with other two-step previews but unused here — the sms cancel
-// workflow holds its own row lock (scheduled-sms-cancel.js).
+// always REFUSES, never reads as "nothing queued". No row lock here — the
+// sms cancel workflow's own CAS statement is the atomic check
+// (scheduled-sms-cancel.js).
 async function queuedMessagePreview(conn, messageId, channel) {
   if (channel !== 'sms') throw new Error('channel must be "sms".');
   const store = SMS_STORE;
