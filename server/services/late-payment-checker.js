@@ -1,3 +1,4 @@
+const { billingLegDeliveryState } = require('./messaging/billing-channel-routing');
 /**
  * Late Payment Checker
  *
@@ -160,7 +161,7 @@ function pendingDeliveryChannel(row) {
   return activityMetadata(row).channel || 'sms';
 }
 
-async function dispatchReservedText(ContactLedger, ledger, dispatch) {
+async function dispatchReservedText(ContactLedger, ledger, dispatch, channel = 'sms') {
   const claim = typeof ContactLedger.claimAttempt === 'function'
     ? await ContactLedger.claimAttempt(ledger)
     : { allowed: true };
@@ -171,20 +172,21 @@ async function dispatchReservedText(ContactLedger, ledger, dispatch) {
   catch (err) {
     // A throw that carries the provider's own outcome keeps it; anything
     // else is an unconfirmed attempt.
-    result = err.providerOutcome || {};
-    if (!['accepted', 'not_sent'].includes(result.deliveryOutcome)) {
-      return { sent: false, deferred: true, deliveryOutcome: 'uncertain', code: 'TEXT_OUTCOME_UNCONFIRMED' };
-    }
-    result = { ...result, sent: result.deliveryOutcome === 'accepted', retryable: result.deliveryOutcome === 'not_sent' };
+    result = err.providerOutcome || { deliveryOutcome: 'uncertain' };
+    // Classify the same way as a returned outcome, including a bell that
+    // committed before a later audit/provider failure.
+    result = { ...result, retryable: true };
   }
   // A legacy blocked result with no outcome is a definite non-send.
   const outcome = result?.deliveryOutcome ?? (result?.blocked === true ? 'not_sent' : 'unconfirmed');
-  if (!['accepted', 'not_sent'].includes(outcome)) {
-    return { sent: false, deferred: true, code: 'TEXT_OUTCOME_UNCONFIRMED' };
+  const delivery = billingLegDeliveryState(channel, result || {});
+  if (!delivery && !['accepted', 'not_sent'].includes(outcome)) {
+    return { sent: false, deferred: true, deliveryOutcome: 'uncertain', code: 'TEXT_OUTCOME_UNCONFIRMED' };
   }
-  const accepted = outcome === 'accepted';
+  const accepted = !!delivery;
   const stamped = accepted
-    ? (typeof ContactLedger.markDelivered === 'function' ? await ContactLedger.markDelivered(ledger) : true)
+    ? (typeof ContactLedger.markDelivered === 'function'
+      ? await ContactLedger.markDelivered(ledger) : true)
     : await ContactLedger.markSendFailed(ledger, { code: result.code || 'blocked' });
   return stamped ? { ...result, sent: accepted } : { sent: false, deferred: true, code: 'TEXT_OUTCOME_STAMP_FAILED' };
 }
@@ -240,7 +242,7 @@ async function dispatchSelectedNonEmail({ ContactLedger, customer, invoice, body
       },
       hasEmailLeg: true,
       ...(preDispatchCheck ? { preDispatchCheck } : {}),
-    }));
+    }), channel);
   }
   return { results, ledgers, sentChannels: deliveredChannelLabel(results),
     willRetry: Object.values(results).some((result) => !result.sent && isTransientSmsResult(result)) };

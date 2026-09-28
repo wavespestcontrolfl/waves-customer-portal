@@ -15,8 +15,10 @@ afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 // one extra product the tech can add manually.
 const CATALOG = [
   { id: 'taurus', name: 'Taurus SC', category: 'Insecticide', default_rate: '0.2-0.8', default_unit: 'fl_oz/gal' },
-  { id: 'talstar', name: 'Talstar P', category: 'Insecticide' },
-  { id: 'surfactant', name: 'Non-ionic Surfactant', category: 'adjuvant' },
+  // House mix names per the 2026-09-27 ruling (#5049): Talstar P → Atticus
+  // Talak 7.9 F, bare surfactant → LESCO 90/10. Ids kept so assertions hold.
+  { id: 'talstar', name: 'Atticus Talak 7.9 F', category: 'Insecticide' },
+  { id: 'surfactant', name: 'LESCO 90/10 Nonionic Surfactant', category: 'adjuvant' },
   { id: 'extra', name: 'Advion Ant Bait Gel', category: 'Bait' },
 ];
 
@@ -59,8 +61,8 @@ describe('FastCompleteSheet', () => {
     render(<FastCompleteSheet service={SERVICE} request={request} onClose={() => {}} />);
 
     expect(await screen.findByRole('button', { name: /Taurus SC — 4 fl oz/ })).toBeTruthy();
-    expect(screen.getByRole('button', { name: /Talstar P — 4 oz/ })).toBeTruthy();
-    expect(screen.getByRole('button', { name: /Non-ionic Surfactant — 0.25 oz/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /Atticus Talak 7\.9 F — 4 oz/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /LESCO 90\/10 Nonionic Surfactant — 0.25 oz/ })).toBeTruthy();
   });
 
   test('tapping a prefilled tile strikes it through (off) instead of removing it; tapping again restores it', async () => {
@@ -90,8 +92,8 @@ describe('FastCompleteSheet', () => {
 
     // Deselect every default product — now nothing is selected at all.
     fireEvent.click(screen.getByRole('button', { name: /Taurus SC/ }));
-    fireEvent.click(screen.getByRole('button', { name: /Talstar P/ }));
-    fireEvent.click(screen.getByRole('button', { name: /Non-ionic Surfactant/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Atticus Talak 7\.9 F/ }));
+    fireEvent.click(screen.getByRole('button', { name: /LESCO 90\/10 Nonionic Surfactant/ }));
     expect(screen.getByText('Select at least one product.')).toBeTruthy();
     expect(submit.disabled).toBe(true);
 

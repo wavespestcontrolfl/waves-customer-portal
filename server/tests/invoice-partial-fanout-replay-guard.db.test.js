@@ -56,7 +56,7 @@ postgres('invoice_send_deferred partial-fanout replay: leg-retry guard + durable
   beforeAll(async () => {
     fixture = await createLawnVisitDb(false);
     mockKnex = fixture.knex;
-    for (const table of ['sms_log', 'notification_prefs', 'invoices', 'email_messages']) {
+    for (const table of ['sms_log', 'notification_prefs', 'invoices', 'email_messages', 'notifications']) {
       await fixture.knex.raw('CREATE TABLE ??.?? (LIKE public.?? INCLUDING ALL)', [fixture.schema, table, table]);
     }
   }, 60000);
@@ -66,7 +66,7 @@ postgres('invoice_send_deferred partial-fanout replay: leg-retry guard + durable
   beforeEach(async () => {
     jest.clearAllMocks();
     mockSendCustomerMessage.mockReset();
-    for (const table of ['sms_log', 'notification_prefs', 'email_messages', 'invoices', 'customers']) {
+    for (const table of ['sms_log', 'notification_prefs', 'email_messages', 'notifications', 'invoices', 'customers']) {
       await fixture.knex(table).del();
     }
   });

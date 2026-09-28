@@ -425,11 +425,10 @@ const INSPECTION_FIRST_NODES = (() => {
 // pestNextStepKind whenever a v2 object is present (POST and every later
 // GET reconstruction). `contract` is the v1-mapped report_contract
 // (mapToV1's output), read here only for the re-service lane. Order matters:
-// - a referral wins first. The engine attaches one to a named entry or a
-//   generic node whose descendants all share it; the card always shows its
-//   text (V2Result), and it says who handles this instead of us (bee
-//   relocation, bat exclusion, a wildlife trapper, an FWC/FDACS report).
-//   Honey bee swarms/wall colonies and bats are ALSO
+// - a referral wins first. The engine attaches one only to a named, approved
+//   entry; the card always shows its text (V2Result), and it says who handles
+//   this instead of us (bee relocation, bat exclusion, a wildlife trapper, an
+//   FWC/FDACS report). Honey bee swarms/wall colonies and bats are ALSO
 //   inspection-first, and an in-person-inspection offer under "we refer you
 //   to a licensed specialist" would contradict the card.
 // - then inspection-first, at any confidence (v1's rule), judged on the node

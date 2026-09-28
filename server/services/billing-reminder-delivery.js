@@ -1,5 +1,7 @@
 'use strict';
 
+const { billingLegDeliveryState } = require('./messaging/billing-channel-routing');
+
 const crypto = require('node:crypto');
 const db = require('../models/db');
 const ContactLedger = require('./collections/contact-ledger');
@@ -112,10 +114,7 @@ async function sendLeg(send, channel, entry) {
 // as delivered), or null while it stays pending. An uncertain outcome keeps
 // the reservation held; only a definite non-send becomes retryable.
 async function recordLegOutcome(entry, channel, result, results) {
-  const accepted = result?.deliveryOutcome === 'accepted'
-    || (channel === 'email' && result?.ok === true && result.deliveryOutcome === undefined)
-    // A bell committed by this attempt remains visible if native push fails.
-    || (channel === 'push' && result?.bellPersisted === true);
+  const accepted = billingLegDeliveryState(channel, result || {});
   if (accepted) {
     if (await ContactLedger.markDelivered(entry)) return 'delivered';
     results[channel] = { ...result, deliveryHeld: true, code: 'REMINDER_ACCEPTANCE_UNSTAMPED' };

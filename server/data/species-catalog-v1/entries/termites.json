@@ -561,7 +561,7 @@
     "scientific_name": "Isoptera (winged reproductives)",
     "rank": "group",
     "group": "termites",
-    "subgroup": "termite-swarm-activity",
+    "subgroup": null,
     "site_category": "Termites",
     "stages": [
       "winged reproductive"

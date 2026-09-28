@@ -1108,6 +1108,11 @@ export default function TechHomePage({ section = 'today' }) {
             id: recapService.id,
             customerName: recapService.customer_name || recapService.customerName,
             serviceType: recapService.service_type || recapService.serviceType,
+            // The catalog key lets the recap recognize a one-time pest job
+            // booked under the bare "Pest Control Service" label, which the
+            // label alone deliberately doesn't match (Codex r4, PR #5049).
+            serviceKey: recapService.completionProfile?.serviceKey
+              || recapService.serviceKey || recapService.service_key_snapshot || null,
           }}
           request={techRequest}
           onClose={() => setRecapService(null)}

@@ -1075,7 +1075,7 @@ payload via buildPublicPestReport, generic 404, plus a set-once
 GATE_PEST_IDENTIFIER: sent reports are owner-initiated communications
 (admin manual send works pre-launch), and an invalid token 404s exactly
 like the dark surface — only analyze/claim are gated.)
-`/api/public/pest-forecast` (+ `/pest-forecast/locations`) (read-only,
+`/api/public/pest-forecast` (+ `/pest-forecast/locations`, `/pest-forecast/nearest`) (read-only,
 no auth, no DB writes, no PII — returns a deterministic Florida
 pest-pressure model keyed only on a curated city slug / FL ZIP plus
 public NWS weather and NOAA MRMS radar rainfall (via the Iowa
@@ -1091,10 +1091,18 @@ available yet (IEM backfills late), and never past the next ET midnight
 the seconds left until that instant, measured when the response is sent,
 so a result computed before ET midnight and sent after it carries
 `max-age=0, s-maxage=0`; `/locations` stays `public, max-age=86400`.
-Note: unlike the token-gated read routes, this surface
-is deliberately cacheable and indexable — it exposes only modeled,
-non-sensitive forecast data, so `no-store`/`noindex` privacy headers do
-NOT apply here).
+`/nearest` returns only `{ location: <curated slug> | null }`, derived
+from Cloudflare's visitor-location request headers (`cf-ipcountry`,
+`cf-region-code`, `cf-iplatitude`, `cf-iplongitude`; zone Managed
+Transform "Add visitor location headers"): a visitor geolocated in
+Florida gets the nearest curated city, anyone else `null`. The location
+values are never logged or stored, and it carries
+`Cache-Control: private, no-store` (per visitor).
+Note: unlike the token-gated read routes, the forecast and `/locations`
+responses are deliberately cacheable and indexable — they expose only
+modeled, non-sensitive forecast data, so `no-store`/`noindex` privacy
+headers do NOT apply to them. `/nearest` is the exception: its answer is
+per visitor, so it stays `private, no-store`).
 `/api/public/ui-flags` (read-only, no auth, no token, no params, no DB
 access, no PII — compatibility shim that always returns
 `{ portalGlass: true }`. The glass release gate is retired and current
