@@ -2925,6 +2925,13 @@ describe('owner competitor list', () => {
     expect(gate.namedCompetitorListVerdict(ext(r, ['Orkin', 'Home Depot']))).toMatchObject({ ok: false, reason: 'named_competitor_off_list', offList: ['Home Depot'] });
   });
 
+  test('a table draft records a competitor it names only through a link destination', () => {
+    const body = 'Intro. See [their plans](https://prodigypest.com/plans).\n\n<ComparisonTable columns={["What to weigh","Orkin","Waves"]} rows={[{ label: "Recurring plans", values: ["Yes","Yes"] }]} caption="Attributes as of June 2026, per each company public website." />\n\nOutro.';
+    const r = gate.evaluate({ body, title: 'x' }, { namedCompetitorEnabled: true, operatorBriefText: 'Orkin and Prodigy Pest alternatives' });
+    expect(r.namedCompetitors).toEqual(['Orkin', 'Prodigy Pest Solutions']);
+    expect(gate.namedCompetitorListVerdict(ext(r, ['Orkin']))).toMatchObject({ ok: false, offList: ['Prodigy Pest Solutions'] });
+  });
+
   test('a verdict without recorded names fails closed', () => {
     expect(gate.namedCompetitorListVerdict({ pass: true, findings: [], requiresHumanReview: true }))
       .toMatchObject({ ok: false, reason: 'named_competitor_off_list' });
