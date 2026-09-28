@@ -119,6 +119,22 @@ describe('checkCtaAfterVerdictBox', () => {
     expect(r.reason).toBe('cta_before_verdict_box');
   });
 
+  // Codex P1 (2nd round): a pitch-style link before the box worded
+  // differently than "estimate"/"quote" must not be invisible to this
+  // check — "answer first, pitch second" bars ANY link before the box,
+  // not only estimate/quote-labelled ones.
+  test('fails when a non-estimate/quote pitch link ("Book Now") sits before the verdict box', () => {
+    const r = checkCtaAfterVerdictBox(
+      {
+        frontmatter: { post_type: 'diagnostic' },
+        body: '[Book Now](/contact/)\n\n<BottomLineBox verdict="Yes." recommendation="Call a pro." />',
+      },
+      brief(),
+    );
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('cta_before_verdict_box');
+  });
+
   test('passes when the CTA link comes AFTER the verdict box', () => {
     const r = checkCtaAfterVerdictBox(
       {
@@ -308,6 +324,41 @@ describe('checkPhotoSlotsLicensedOnly', () => {
     const r = checkPhotoSlotsLicensedOnly(
       // Credit + license text present, but neither is an actual link.
       { frontmatter: { post_type: 'diagnostic' }, body: '![fire ant](https://upload.wikimedia.org/real-fire-ant.jpg)\n\nPhoto: Judy Gallagher (CC BY 2.0)' },
+      b,
+    );
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/^identification_photo_(license_link|source_link)_missing:/);
+  });
+
+  // Codex P1 (2nd round): the old check was `body.includes(url)`, which a
+  // BARE url in plain prose (never wrapped in markdown link syntax, so it
+  // never renders as a clickable hyperlink) also satisfies.
+  test('fails when the license_url/source_page appear as BARE unlinked text, not inside a markdown link', () => {
+    const b = brief({
+      voice_constraints: {
+        photo_slots: [
+          {
+            slot: 'pest',
+            photo: {
+              url: 'https://upload.wikimedia.org/real-fire-ant.jpg',
+              alt: 'fire ant',
+              credit: 'Judy Gallagher',
+              license: 'CC BY 2.0',
+              license_url: 'https://creativecommons.org/licenses/by/2.0',
+              source_page: 'https://commons.wikimedia.org/wiki/File:Real_Fire_Ant.jpg',
+            },
+            flagged_for_human: false,
+          },
+        ],
+      },
+    });
+    const r = checkPhotoSlotsLicensedOnly(
+      {
+        frontmatter: { post_type: 'diagnostic' },
+        body: '![fire ant](https://upload.wikimedia.org/real-fire-ant.jpg)\n\n'
+          + 'Photo: Judy Gallagher (CC BY 2.0). See https://commons.wikimedia.org/wiki/File:Real_Fire_Ant.jpg '
+          + 'and https://creativecommons.org/licenses/by/2.0 for details.',
+      },
       b,
     );
     expect(r.ok).toBe(false);

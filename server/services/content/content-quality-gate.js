@@ -1113,17 +1113,19 @@ function checkVerdictBoxFirst(draft, brief) {
 // already covers "no box at all" / "box isn't first" — this check only
 // judges relative order once a box is present, so the two never double-
 // report the same root cause.
-const EARLY_CTA_ANCHOR_RE = /\[[^\]]*\b(?:estimate|estimates|quote|quotes)\b[^\]]*\]\(([^)]+)\)/gi;
-// Codex P2: the estimate/quote-labelled check above only ever scanned for
-// a CTA-shaped link, so a non-CTA markdown-link-shaped string INSIDE the
-// box's own props (e.g. recommendation="See our [guide](/pest-control-
-// services/)") was invisible to it — verdict_box_first and
-// source_internal_link both passed, so a page whose only "internal link"
-// is text that can never render as a clickable anchor (BottomLineBox's
-// props are literal strings, not parsed Markdown) could auto-publish.
-// ANY markdown-link-shaped substring inside the box's own tag span is a
-// hard failure here, regardless of its wording — a link belongs in the
-// prose AFTER the verdict box, never inside a component prop.
+// Codex P2 (2nd round): the estimate/quote-labelled check only ever
+// scanned for a CTA-SHAPED link, so a non-CTA markdown-link-shaped string
+// INSIDE the box's own props (e.g. recommendation="See our [guide]
+// (/pest-control-services/)") was invisible to it, AND any pitch-style
+// link BEFORE the box worded differently ("Book Now", "Call Today",
+// "Schedule Service") was equally invisible — only the estimate/quote
+// wording was ever checked, with no broader catch-all. Both are now the
+// SAME check: ANY markdown-link-shaped substring anywhere before the box
+// closes (inside its own tag OR in the prose before it) is a hard
+// failure — verdict_box_first already requires the box to be the literal
+// first block, so a compliant draft has NOTHING at all before boxEnd;
+// this is the fail-closed backstop for whatever reaches this check
+// without that having held.
 const ANY_MD_LINK_RE = /\[[^\]]*\]\([^)]+\)/g;
 function checkCtaAfterVerdictBox(draft, brief) {
   if (!isIdentificationOrQuestionDraft(draft, brief)) return { ok: true, reason: 'not_identification_or_question' };
@@ -1133,9 +1135,9 @@ function checkCtaAfterVerdictBox(draft, brief) {
   const boxStart = boxMatch.index;
   ANY_MD_LINK_RE.lastIndex = 0;
   if (ANY_MD_LINK_RE.test(boxMatch[0])) return { ok: false, reason: 'link_inside_verdict_box' };
-  EARLY_CTA_ANCHOR_RE.lastIndex = 0;
+  ANY_MD_LINK_RE.lastIndex = 0;
   let m;
-  while ((m = EARLY_CTA_ANCHOR_RE.exec(body))) {
+  while ((m = ANY_MD_LINK_RE.exec(body))) {
     if (m.index < boxStart) return { ok: false, reason: 'cta_before_verdict_box' };
   }
   return { ok: true };
@@ -1157,20 +1159,39 @@ function checkCtaAfterVerdictBox(draft, brief) {
 // `checks` pairs each required-substring field with the reason code it
 // reports missing — walked as data instead of a repeated if-chain so
 // checkPhotoSlotsLicensedOnly's own complexity stays low.
+// 'text' fields (credit/license) are the visible LABEL text inside a
+// markdown link — a bare substring match is the real requirement (they
+// are prose, not a URL). 'link' fields (license_url/source_page) are the
+// opposite: Codex P1 (2nd round) — checking `body.includes(url)` only
+// proved the URL string appears somewhere in the text, not that it
+// renders as an actual clickable hyperlink (CC BY/BY-SA compliance,
+// per the instruction this check enforces, needs a real link — "See
+// https://creativecommons.org/licenses/by/2.0" as bare prose would have
+// passed the old check without ever being clickable). 'link' fields must
+// appear as the DESTINATION of a real markdown link, `[text](URL)`.
 const PHOTO_ATTRIBUTION_FIELDS = [
-  ['credit', 'identification_photo_credit_missing'],
-  ['license', 'identification_photo_license_missing'],
-  // Codex P1: a bare credit/license STRING with no link is not CC-BY/BY-SA
-  // compliant — the license (and, where the catalog has it, the source
-  // page) must be an actual link, not just text the human eye can read.
-  ['license_url', 'identification_photo_license_link_missing'],
-  ['source_page', 'identification_photo_source_link_missing'],
+  ['credit', 'identification_photo_credit_missing', 'text'],
+  ['license', 'identification_photo_license_missing', 'text'],
+  ['license_url', 'identification_photo_license_link_missing', 'link'],
+  ['source_page', 'identification_photo_source_link_missing', 'link'],
 ];
+const MD_LINK_DEST_RE = /\]\(([^)]+)\)/g;
+function bodyLinksTo(body, url) {
+  MD_LINK_DEST_RE.lastIndex = 0;
+  let m;
+  while ((m = MD_LINK_DEST_RE.exec(body))) {
+    if (m[1].trim() === url) return true;
+  }
+  return false;
+}
 function validateSlotPhotoAttribution(photo, alt, url, body) {
   if (!photo) return { ok: false, reason: `unlicensed_or_unknown_identification_photo:${url}` };
   if (alt !== photo.alt) return { ok: false, reason: `identification_photo_alt_mismatch:${url}` };
-  for (const [field, reasonCode] of PHOTO_ATTRIBUTION_FIELDS) {
-    if (photo[field] && !body.includes(photo[field])) return { ok: false, reason: `${reasonCode}:${url}` };
+  for (const [field, reasonCode, kind] of PHOTO_ATTRIBUTION_FIELDS) {
+    const value = photo[field];
+    if (!value) continue;
+    const present = kind === 'link' ? bodyLinksTo(body, value) : body.includes(value);
+    if (!present) return { ok: false, reason: `${reasonCode}:${url}` };
   }
   return null;
 }
