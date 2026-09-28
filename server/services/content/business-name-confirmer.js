@@ -1,8 +1,8 @@
 /**
  * business-name-confirmer.js — lists every home-service COMPANY a blog draft
  * names, links or references (owner rulings 2026-09-27 D2 + 2026-09-28: an
- * unattended competitor blog may name only the six owner-approved
- * competitors in competitor-facts OWNER_APPROVED_AUTOPUBLISH_IDS).
+ * unattended competitor blog may name only the owner-approved competitors
+ * in competitor-facts OWNER_APPROVED_AUTOPUBLISH_IDS).
  *
  * Why a model and not a detector: whether a phrase is a company ("Bug Out
  * competes with local providers", "Lawn Doctor" used both as a company and
@@ -212,6 +212,30 @@ async function extractCompanyNames(draft, { prior = null, brief = null, final = 
   }
 }
 
+// Whole-word text of the draft the operator approved (every frontmatter
+// string, the top-level metadata, the body), padded for ` word ` lookups.
+function reviewedWords(draft) {
+  const words = (value) => String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const text = [
+    ...textFields(draft?.frontmatter || {}, '', []),
+    ...textFields({ title: draft?.title, meta_description: draft?.meta_description, url: draft?.url, slug: draft?.slug }, '', []),
+    String(draft?.body || draft?.content || ''),
+  ].join('\n');
+  return ` ${words(text)} `;
+}
+
+// True when the approved draft names `name` — as written, or for a curated
+// competitor by any of its curated spellings (the extraction reports a
+// curated name canonically: "Massey" in the text comes back "Massey Services").
+function namedInReviewedDraft(name, reviewed) {
+  const rec = competitorFacts.findCompetitor(name);
+  const spellings = rec ? [rec.name, ...(rec.aliases || []), ...(rec.aliasesCS || [])] : [name];
+  return spellings.some((spelling) => {
+    const w = String(spelling || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    return Boolean(w) && reviewed.includes(` ${w} `);
+  });
+}
+
 function ownerListError(code, message, fields) {
   const err = new Error(message);
   err.code = code;
@@ -226,10 +250,12 @@ function ownerListError(code, message, fields) {
  * the branch is cut, on the FINAL frontmatter + body (after hero / body-image
  * alt text and every other publisher transform — Codex r5 on #5146).
  *
- * Deterministic names (comparison gate: curated, operator, link, compared
- * table providers) + the whole-draft company extraction on the final text
- * (a stored draft.company_extraction is reused when the final text hashes
- * to the same key). Competitor content commits only on the unattended
+ * Deterministic names (comparison gate: curated, operator, link) + the
+ * whole-draft company extraction on the final text, which alone judges the
+ * other companies a draft names — a comparison-table column included
+ * (Codex r10: a column-casing heuristic kept reading categories such as
+ * "Local SWFL Company" as providers). A stored draft.company_extraction is
+ * reused when the final text hashes to the same key. Competitor content commits only on the unattended
  * named-competitor lane (namedCompetitorAutopublishEligible) with every
  * name on the owner list. The result is left on the draft
  * (draft.company_extraction, draft.final_named_competitors,
@@ -240,15 +266,16 @@ function ownerListError(code, message, fields) {
  *   BLOG_OWNER_LIST_UNVERIFIED { retryable } — extraction failed / too long
  *   BLOG_OWNER_LIST_BLOCKED    { reason, offList } — off-list name, or
  *     competitor content outside the unattended lane
- * humanApproved (the operator approval / admin publish) skips ONLY the
- * owner-list company-extraction + enforcement below — a human approves the
- * DRAFT text, not text the publisher adds afterward (hero/body-image alt and
- * similar), so the final comparison-gate scan two paragraphs down (which
- * covers that publisher-added text) still runs and can still block a
- * human-approved publish (#5146 r9). A name the human saw in the approved
- * draft stays approved either way.
+ * humanApproved: a human approved the DRAFT text, not text the publisher
+ * adds afterward (hero/body-image alt and similar), so the final
+ * comparison-gate scan always runs (#5146 r9). The operator-approval lane
+ * (a stored `draft`) merges on its approved head with no second look, so
+ * the company extraction runs on its final text too, and every name must
+ * be one the operator saw in the approved draft or be on the owner list
+ * (#5146 r10). The admin lane (publishAstro, no stored draft) skips the
+ * extraction: an admin merges that PR by hand after reading the final text.
  * humanMergeFallback (the scheduler's publishAstro): competitor content
- * naming only the six returns { requiresHumanMerge: true } for the PR's
+ * naming only owner-list competitors returns { requiresHumanMerge: true } for the PR's
  * human-merge stamp instead of throwing. Returns { extraction,
  * requiresHumanMerge }.
  */
@@ -270,20 +297,30 @@ async function assertOwnerListForCommit({ draft, brief = {}, frontmatter = {}, b
   const { operatorBriefTextForComparisonGate } = require('./guardrail-options');
   // Every publisher-set text field of the final frontmatter (hero alt
   // included — Codex r8) is scanned, derived by the SAME walk the company
-  // extraction uses (textFields), appended to the body as its own
-  // paragraphs so the prose scans see them; the gate itself reads only
-  // title/meta from frontmatter.
+  // extraction uses (textFields). Each field is judged as its own document
+  // (Codex r10): joined into one text, unrelated fields read as one
+  // sentence (a slug's "orkin-alternatives" beside a meta description's
+  // "Worst roach problems" is not disparagement). Title and meta are left to
+  // the gate itself, which reads them exactly as the runner's draft-time
+  // gate does.
   // The byline blocks are the only exclusion: they come from the curated
   // author registry (author-service), not from the writer or an image
   // model, and a credential such as "FDACS Licensed Pest Control Operator"
   // is business-shaped by construction.
-  const frontmatterText = [...new Set(textFields(frontmatter, '', [])
-    .filter((line) => !/^(?:author|technically_reviewed_by)\./.test(line))
-    .map((line) => line.replace(/^[^:]*: /, '')))].join('\n\n');
-  const comparison = gate.evaluate({ ...finalDraft, body: frontmatterText ? `${body}\n\n${frontmatterText}` : body }, {
+  const fieldTexts = [...new Set(textFields(frontmatter, '', [])
+    .filter((line) => !/^(?:author|technically_reviewed_by)\./.test(line)
+      && !/^(?:title|meta_description|metaTitle|metaDescription): /.test(line))
+    .map((line) => line.replace(/^[^:]*: /, '')))];
+  const gateOptions = {
     namedCompetitorEnabled,
     operatorBriefText: operatorBriefTextForComparisonGate({ bucket: brief?.gsc_signal?.bucket }, brief),
-  });
+  };
+  const evaluations = [finalDraft, ...fieldTexts.map((text) => ({ frontmatter: {}, body: text }))]
+    .map((doc) => gate.evaluate(doc, gateOptions));
+  const comparison = {
+    findings: evaluations.flatMap((e) => e.findings || []),
+    namedCompetitors: [...new Set(evaluations.flatMap((e) => (Array.isArray(e.namedCompetitors) ? e.namedCompetitors : [])))].sort(),
+  };
   const blocking = (comparison.findings || []).filter((f) => (f.severity === 'P0' || f.severity === 'P1')
     && !(humanMergeFallback && f.code === 'COMPARISON_UNCLASSIFIED_OPTION'));
   if (blocking.length) {
@@ -291,10 +328,8 @@ async function assertOwnerListForCommit({ draft, brief = {}, frontmatter = {}, b
       `final text fails the comparison gate: ${blocking.map((f) => `${f.severity} ${f.code}`).join('; ')}`,
       { reason: 'comparison_table_failed', offList: [], findings: blocking });
   }
-  // humanApproved skips ONLY the owner-list company-extraction + enforcement
-  // below — the human approved the draft's own names; the gate above already
-  // covered publisher-added text on their behalf.
-  if (humanApproved) return { extraction: null, requiresHumanMerge: false };
+  // The admin lane's PR waits for an admin merge — see the doc comment.
+  if (humanApproved && !draft) return { extraction: null, requiresHumanMerge: false };
   // Through module.exports so a suite exercising the publisher can stub the
   // model call alone and keep this chokepoint's real decision logic.
   const extraction = await module.exports.extractCompanyNames(finalDraft, {
@@ -306,7 +341,21 @@ async function assertOwnerListForCommit({ draft, brief = {}, frontmatter = {}, b
       `company-name check unavailable for the final text (${extraction.reason || 'unknown'})`,
       { retryable: extraction.retryable === true, extraction });
   }
-  const names = Array.isArray(comparison.namedCompetitors) ? comparison.namedCompetitors : [];
+  const names = comparison.namedCompetitors;
+  if (humanApproved) {
+    // The operator approved every name in the stored draft; a name only
+    // publisher-added text carries was never reviewed, so it must be on the
+    // owner list (#5146 r10).
+    const reviewed = reviewedWords(draft);
+    const unreviewed = [...new Set([...names, ...extraction.companies])]
+      .filter((nm) => !namedInReviewedDraft(nm, reviewed) && !competitorFacts.isOwnerApprovedForAutopublish(nm));
+    if (unreviewed.length) {
+      throw ownerListError('BLOG_OWNER_LIST_BLOCKED',
+        `publisher-added text names company(ies) the operator never reviewed: ${unreviewed.join(', ')}`,
+        { reason: 'unreviewed_company_name', offList: unreviewed, extraction });
+    }
+    return { extraction, requiresHumanMerge: false };
+  }
   // The deterministic names of the FINAL text ride along too, so the
   // merge-time recheck (kill switch included) governs a run whose
   // publisher-added text named a competitor (pre-push r11).
@@ -315,7 +364,7 @@ async function assertOwnerListForCommit({ draft, brief = {}, frontmatter = {}, b
   const verdict = gate.namedCompetitorListVerdict({ namedCompetitors: names, companyExtraction: extraction });
   if (!gate.namedCompetitorAutopublishEligible(brief)) {
     // The scheduler lane (publishAstro) keeps its human-merge stamp for
-    // competitor content naming only the six; anything off the list is
+    // competitor content naming only owner-list competitors; anything off the list is
     // refused like every other unattended commit.
     if (humanMergeFallback && verdict.ok) return { extraction, requiresHumanMerge: true };
     throw ownerListError('BLOG_OWNER_LIST_BLOCKED',

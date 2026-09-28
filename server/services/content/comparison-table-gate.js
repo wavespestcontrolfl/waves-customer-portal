@@ -628,18 +628,6 @@ function isTitleCasedPhrase(header) {
   return words.slice(1).every((w) => /^[A-Z0-9]/.test(w));
 }
 const HEADER_LEGAL_MARKER_RE = /\b(?:LLC|L\.L\.C\.|Inc\.?|Incorporated|Corp\.?|Co\.|Bros\.?|Brothers|& Sons?)\b/i;
-// A provider-CATEGORY option header in any casing: the strict category form
-// above, or words drawn only from the category modifiers plus generic
-// provider nouns ("DIY", "National Chain", "Local Company", "Big-Box
-// Store"). Used to keep such columns out of a provider table's compared-
-// provider names.
-const CATEGORY_OPTION_WORD_RE = new RegExp(`^(?:${HEADER_CATEGORY_MODS}|local|chains?|compan(?:y|ies)|providers?|services?|plans?|programs?|options?|pros?|professionals?|exterminators?|stores?|retail|brands?|companies|approach|methods?|homeowners?|yourself|diy|self|and|or|the|a|&|\\+|/|-)$`, 'i');
-function isRecognizedCategoryOption(header) {
-  const h = String(header || '').trim();
-  if (HEADER_CATEGORY_FORM_RE.test(h)) return true;
-  const words = h.replace(/[()]/g, ' ').split(/\s+/).filter(Boolean);
-  return words.length > 0 && words.every((w) => CATEGORY_OPTION_WORD_RE.test(w));
-}
 
 // Business-shaped PROSE mentions that only the header detectors recognize —
 // bare or less-common suffixes the prose name regex misses ("Bug Busters",
@@ -1816,7 +1804,6 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
   const blockNamedKnown = new Set();
   const unsupportedFacts = new Set();
   const negativeReliability = new Set();
-  const comparedProviders = new Set();
 
   // Business names are collected BEFORE the tone scans: the prose-scoped
   // disparagement/ranking checks below need the full name inventory as
@@ -2228,27 +2215,9 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
     const options = extractColumns(block).slice(1);
     const rows = extractRows(block);
     const blockKnown = new Set();
-    // A PROVIDER table (any column is a competitor or Waves): every other
-    // column that reads as a NAME — a single word or a Title-Cased phrase
-    // ("Home Depot", "Amazon") — is a compared provider by construction,
-    // so it joins the recorded names and the owner list judges it
-    // (Codex r5 on #5146). Sentence-case category columns ("Local SWFL
-    // company", "Full exterior + interior IPM") stay categories.
-    // Recognized category options ("DIY", "National Chain", "Professional
-    // Pest Control") are preserved before the heuristic (pre-push r10).
-    const classes = options.map((opt) => classifyOption(opt));
-    if (classes.some((c) => c === 'own' || c === 'known_competitor' || c === 'unknown_competitor')) {
-      options.forEach((opt, j) => {
-        const words = String(opt).trim().split(/\s+/).filter(Boolean);
-        if (classes[j] === 'category' && words.length && (words.length === 1 || isTitleCasedPhrase(opt))
-          && !isRecognizedCategoryOption(opt)) {
-          comparedProviders.add(String(opt).trim());
-        }
-      });
-    }
 
     options.forEach((opt, j) => {
-      const cls = classes[j];
+      const cls = classifyOption(opt);
       if (cls === 'known_competitor') {
         const allowlisted = competitorFacts.findBusinessMentions(opt).filter((x) => x.inAllowlist);
         const distinctNames = [...new Set(allowlisted.map((x) => x.name))];
@@ -2492,7 +2461,7 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
   // automatically while retaining the comparison and sourcing checks.
   const requiresHumanReview = pass
     && ((namedCompetitorEnabled && (known.size > 0 || linkedKnown.size > 0)) || operatorAuthorizedProse);
-  return { pass, findings, requiresHumanReview, namedCompetitors: sortedNames(known, unknown, comparedProviders) };
+  return { pass, findings, requiresHumanReview, namedCompetitors: sortedNames(known, unknown) };
 }
 
 // Clean autonomous blogs need no human sign-off. The content gate and

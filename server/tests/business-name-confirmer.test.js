@@ -138,10 +138,27 @@ describe('assertOwnerListForCommit', () => {
     expect(draft.competitors_approved_by_list).toEqual(['Orkin']);
   });
 
-  test('every provider column of a comparison table is a compared provider: Orkin + Home Depot columns go off-list without the model', async () => {
-    dispatchWithFallback.mockResolvedValue({ ok: true, json: { companies: [] } });
+  test('a compared retailer column goes off-list through the extraction; a Title-Cased category column is no company (Codex r10)', async () => {
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { companies: ['Orkin', 'Home Depot'] } });
     await expect(assertOwnerListForCommit({ draft: {}, brief: BLOG_BRIEF, frontmatter: finalFm, body: TABLE(['What to weigh', 'Orkin', 'Home Depot', 'Waves']) }))
       .rejects.toMatchObject({ code: 'BLOG_OWNER_LIST_BLOCKED', reason: 'named_competitor_off_list', offList: ['Home Depot'] });
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { companies: ['Orkin'] } });
+    const draft = {};
+    await assertOwnerListForCommit({ draft, brief: BLOG_BRIEF, frontmatter: finalFm, body: TABLE(['What to weigh', 'Orkin', 'Local SWFL Company', 'Waves']) });
+    expect(draft.competitors_approved_by_list).toEqual(['Orkin']);
+  });
+
+  test('each frontmatter field is judged on its own: a slug and an unrelated meta phrase are not one sentence (Codex r10)', async () => {
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { companies: ['Orkin'] } });
+    const fm2 = { title: 'Roach control options in Sarasota', slug: '/pest-control/orkin-alternatives/', meta_description: 'Worst roach problems in Sarasota and how to fix them fast.', secondary_keywords: ['worst roach problems'] };
+    const body = 'German roaches hide near sinks and dishwashers. Seal gaps and keep counters dry.';
+    const draft = {};
+    await assertOwnerListForCommit({ draft, brief: BLOG_BRIEF, frontmatter: fm2, body });
+    expect(draft.competitors_approved_by_list).toEqual(['Orkin']);
+    // Disparagement inside ONE field still blocks.
+    await expect(assertOwnerListForCommit({ draft: {}, brief: BLOG_BRIEF, body,
+      frontmatter: { ...fm2, hero_image: { src: '/images/blog/x/hero.webp', alt: 'Orkin scams customers with hidden fees' } } }))
+      .rejects.toMatchObject({ code: 'BLOG_OWNER_LIST_BLOCKED', reason: 'comparison_table_failed' });
   });
 
   test('an incidental retailer mention the model does not list is not off-list', async () => {
@@ -201,22 +218,17 @@ describe('assertOwnerListForCommit', () => {
     expect(draft.competitors_approved_by_list).toEqual(['Aptive Environmental', 'Orkin', 'Terminix']);
   });
 
-  test('a failed check refuses the commit; a human-approved publish skips only the owner-list extraction/enforcement', async () => {
+  test('a failed check refuses the commit', async () => {
     dispatchWithFallback.mockResolvedValue({ ok: false, reason: 'no_key' });
     await expect(assertOwnerListForCommit({ draft: {}, brief: BLOG_BRIEF, frontmatter: finalFm, body: 'Plain body.' }))
       .rejects.toMatchObject({ code: 'BLOG_OWNER_LIST_UNVERIFIED', retryable: true });
-    dispatchWithFallback.mockClear();
-    expect(await assertOwnerListForCommit({ draft: {}, brief: BLOG_BRIEF, frontmatter: finalFm, body: 'Bug Out competes.', humanApproved: true }))
-      .toEqual({ extraction: null, requiresHumanMerge: false });
-    // No model call — company extraction is the part humanApproved skips.
-    expect(dispatchWithFallback).not.toHaveBeenCalled();
   });
 
-  // #5146 r9: a human approves the DRAFT the operator reviewed, not text the
-  // publisher adds afterward (a generated/reused hero or body-image alt).
-  // The final comparison gate must still run — and can still block — a
-  // human-approved publish; only the owner-list company-extraction +
-  // enforcement is what humanApproved skips.
+  // #5146 r9 + r10: a human approves the DRAFT the operator reviewed, not
+  // text the publisher adds afterward (a generated/reused hero or body-image
+  // alt). The final comparison gate always runs; on the operator-approval
+  // lane (a stored draft) the extraction runs too, and a name only
+  // publisher-added text carries must be on the owner list.
   test('humanApproved still runs the final comparison gate on publisher-added text (#5146 r9)', async () => {
     // Disparagement planted ONLY in the hero alt (publisher-added, never
     // seen by the human at approval time) still blocks, even humanApproved.
@@ -224,16 +236,49 @@ describe('assertOwnerListForCommit', () => {
       draft: {}, brief: BLOG_BRIEF, humanApproved: true, body: 'Orkin offers recurring residential plans.',
       frontmatter: { ...finalFm, hero_image: { src: '/images/blog/x/hero.webp', alt: 'Orkin scams customers with hidden fees' } },
     })).rejects.toMatchObject({ code: 'BLOG_OWNER_LIST_BLOCKED', reason: 'comparison_table_failed' });
-    // No model call happens either way — the gate is deterministic.
+    // The gate refuses before any model call.
     expect(dispatchWithFallback).not.toHaveBeenCalled();
   });
 
-  test('humanApproved with clean publisher-added text still skips extraction and passes', async () => {
+  test('humanApproved admin lane (no stored draft) skips the extraction: an admin merges that PR by hand', async () => {
     const result = await assertOwnerListForCommit({
-      draft: {}, brief: BLOG_BRIEF, humanApproved: true, body: 'Orkin offers recurring residential plans.',
+      draft: null, brief: BLOG_BRIEF, humanApproved: true, body: 'Bug Out competes with local providers.',
       frontmatter: { ...finalFm, hero_image: { src: '/images/blog/x/hero.webp', alt: 'A technician inspects a Sarasota lanai' } },
     });
     expect(result).toEqual({ extraction: null, requiresHumanMerge: false });
     expect(dispatchWithFallback).not.toHaveBeenCalled();
+  });
+
+  test('humanApproved operator lane: names the operator saw pass; a name only publisher-added text carries must be on the owner list (#5146 r10)', async () => {
+    const heroFm = (alt) => ({ ...finalFm, hero_image: { src: '/images/blog/x/hero.webp', alt } });
+    const orkinOnly = { frontmatter: { ...finalFm }, body: 'Orkin offers recurring residential plans.' };
+    // Nothing added: the operator's own names pass.
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { companies: ['Orkin'] } });
+    await expect(assertOwnerListForCommit({ draft: { ...orkinOnly }, brief: BLOG_BRIEF, humanApproved: true, body: orkinOnly.body,
+      frontmatter: heroFm('A technician inspects a Sarasota lanai') })).resolves.toMatchObject({ requiresHumanMerge: false, extraction: { ok: true } });
+    // An off-list company only the hero alt names was never reviewed.
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { companies: ['Bug Out', 'Orkin'] } });
+    await expect(assertOwnerListForCommit({ draft: { ...orkinOnly }, brief: BLOG_BRIEF, humanApproved: true, body: orkinOnly.body,
+      frontmatter: heroFm('A Bug Out technician at a lanai') }))
+      .rejects.toMatchObject({ code: 'BLOG_OWNER_LIST_BLOCKED', reason: 'unreviewed_company_name', offList: ['Bug Out'] });
+    // The same name is fine when the operator saw it in the approved draft.
+    const withBugOut = { frontmatter: { ...finalFm }, body: 'Bug Out competes with local providers. Orkin offers recurring residential plans.' };
+    await expect(assertOwnerListForCommit({ draft: { ...withBugOut }, brief: BLOG_BRIEF, humanApproved: true, body: withBugOut.body,
+      frontmatter: heroFm('A Bug Out technician at a lanai') })).resolves.toMatchObject({ requiresHumanMerge: false });
+    // An owner-list competitor the publisher adds is allowed unattended anyway.
+    const bugOutOnly = { frontmatter: { ...finalFm }, body: 'Bug Out competes with local providers.' };
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { companies: ['Bug Out', 'Orkin'] } });
+    await expect(assertOwnerListForCommit({ draft: { ...bugOutOnly }, brief: BLOG_BRIEF, humanApproved: true, body: bugOutOnly.body,
+      frontmatter: heroFm('An Orkin truck on a Sarasota street') })).resolves.toMatchObject({ requiresHumanMerge: false });
+  });
+
+  test('humanApproved operator lane: a curated name counts as reviewed under any curated spelling (#5146 r10)', async () => {
+    // The extraction reports curated names canonically ("Prodigy Pest" →
+    // "Prodigy Pest Solutions"); the operator saw the alias spelling.
+    const brief = { ...BLOG_BRIEF, voice_constraints: { operator_brief: { working_title: 'Prodigy Pest alternatives', primary_kw: 'prodigy pest alternatives' } } };
+    const approved = { frontmatter: { title: 'Prodigy Pest alternatives in Sarasota', slug: '/pest-control/prodigy-pest-alternatives/', meta_description: 'Compare plans.' }, body: 'Prodigy Pest offers quarterly plans.' };
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { companies: ['Prodigy Pest'] } });
+    await expect(assertOwnerListForCommit({ draft: { ...approved }, brief, humanApproved: true, body: approved.body, frontmatter: approved.frontmatter }))
+      .resolves.toMatchObject({ requiresHumanMerge: false, extraction: { companies: ['Prodigy Pest Solutions'] } });
   });
 });

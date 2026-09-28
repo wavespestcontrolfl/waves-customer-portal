@@ -2911,16 +2911,18 @@ describe('owner competitor list', () => {
     expect(gate.namedCompetitorListVerdict(ext(r, ['Orkin']))).toEqual({ ok: true, approved: ['Orkin'] });
   });
 
-  test('every name-shaped column of a PROVIDER table is a compared provider; sentence-case category columns are not (Codex r5)', () => {
+  test('table columns add no heuristic names: the whole-draft company extraction judges a compared retailer or category (Codex r10)', () => {
     const T = (cols) => `Intro.\n\n<ComparisonTable columns={${JSON.stringify(cols)}} rows={[{ label: "Recurring plans", values: ["Yes","Yes","Yes"] }]} caption="Attributes as of June 2026, per each company public website." />\n\nOutro.`;
-    expect(gate.evaluate({ body: T(['What to weigh', 'Orkin', 'Home Depot', 'Waves']), title: 'x' }, OPTS).namedCompetitors).toEqual(['Home Depot', 'Orkin']);
-    expect(gate.evaluate({ body: T(['What to weigh', 'Orkin (national)', 'Local SWFL company', 'Waves']), title: 'x' }, OPTS).namedCompetitors).toEqual(['Orkin']);
-    // A pure category table names no provider at all.
-    expect(gate.evaluate({ body: T(['What to weigh', 'National chain', 'Local SWFL company', 'DIY']), title: 'x' }, OPTS).namedCompetitors).toEqual([]);
-    // Recognized category columns beside Waves stay categories (pre-push r10).
-    for (const cols of [['What to weigh', 'Waves', 'DIY'], ['What to weigh', 'Waves', 'National Chain', 'Local Company'], ['What to weigh', 'Waves', 'Professional Pest Control'], ['What to weigh', 'Waves', 'Do-It-Yourself']]) {
-      expect(gate.evaluate({ body: T(cols), title: 'x' }, OPTS).namedCompetitors).toEqual([]);
+    // A Title-Cased category is not a provider in any casing ("Local SWFL
+    // Company" kept reading as one under the old column-casing heuristic).
+    for (const cols of [['What to weigh', 'Orkin', 'Local SWFL Company', 'Waves'], ['What to weigh', 'Orkin (national)', 'Local SWFL company', 'Waves'], ['What to weigh', 'Orkin', 'Gulf Coast Company', 'Waves']]) {
+      expect(gate.evaluate({ body: T(cols), title: 'x' }, OPTS).namedCompetitors).toEqual(['Orkin']);
     }
+    expect(gate.evaluate({ body: T(['What to weigh', 'National chain', 'Local SWFL company', 'DIY']), title: 'x' }, OPTS).namedCompetitors).toEqual([]);
+    // A compared retailer is the extraction's call; the verdict holds it to the owner list.
+    const r = gate.evaluate({ body: T(['What to weigh', 'Orkin', 'Home Depot', 'Waves']), title: 'x' }, OPTS);
+    expect(r.namedCompetitors).toEqual(['Orkin']);
+    expect(gate.namedCompetitorListVerdict(ext(r, ['Orkin', 'Home Depot']))).toMatchObject({ ok: false, reason: 'named_competitor_off_list', offList: ['Home Depot'] });
   });
 
   test('a verdict without recorded names fails closed', () => {
