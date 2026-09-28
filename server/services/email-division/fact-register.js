@@ -7,6 +7,13 @@
  * newsletter copy is allowed to state, and flags a small, deterministic set
  * of known-false or overreaching claim shapes so the newsletter validator
  * can hard-block them before a draft is proofed or sent.
+ *
+ * This is a tripwire, not a proof: a false hold costs one proof review, a
+ * false pass mails a wrong claim to the list. So every exemption below is
+ * an ALLOWLIST of explicit denial shapes for that one claim — never "the
+ * clause contains a negation word", which lets idioms ("no doubt", "no
+ * joke", "never fails to", "not only") and unrelated asides clear a real
+ * false claim.
  */
 
 const db = require('../../models/db');
@@ -31,53 +38,60 @@ async function listFacts({ tags, limit = 50 } = {}) {
   return filtered.slice(0, limit);
 }
 
+// The words that make the termite claim false: a SECOND / repeat /
+// late-summer / storm-triggered swarm (the January–May swarm "on warm days
+// after rain" is the true fact and carries none of them).
+const REPEAT_SWARM = '(?:second|another|again|repeat(?:ed)?|late[-\\s]?summer|post[-\\s]?storm|storm[-\\s]?(?:triggered|induced|driven)?)';
+const NEGATOR = "(?:do(?:es)?\\s+not|don'?t|doesn'?t|did\\s+not|didn'?t|will\\s+not|won'?t|cannot|can'?t|never)";
+const SWARM_VERB = '(?:have|throw|produce|swarm|get|trigger|stage)';
+
 // Known-false or overreaching claim shapes an AI-written newsletter draft
-// must never state. Each is deliberately narrow (matched against the
-// correct, verified phrasing in the fact register itself — see the
-// migration above — to confirm no rule here false-positives on citing a
-// real fact correctly).
+// must never state. `denials` lists the ONLY phrasings that exempt an
+// occurrence: the rule's own correct fact stated as a denial of that claim.
 const UNVERIFIED_CLAIM_RULES = [
   {
-    // The exact false claim the September 2026 Pest Insider draft made:
-    // native subterranean termites do NOT have a second, storm/late-summer
-    // triggered swarm (see fact-no-storm-triggered-second-termite-swarm). A
-    // negated match ("termites do NOT swarm again after storms") is that
-    // fact stated correctly, not the false claim — negatable exempts it.
-    // The anchor's negative lookbehind excludes "drywood termites" (and
-    // "western"/"west indian drywood termites") specifically — both
-    // drywood species correctly document wide/near-any-month flight
-    // windows (fact-west-indian-drywood-termite-dispersal,
-    // fact-western-drywood-termite-flight-season), so this rule's false
-    // claim, which is specific to native subterranean termites, must never
-    // anchor on a drywood mention even when one sits in an earlier
-    // contrastive clause of the same sentence ("Unlike drywood termites,
-    // native subterranean termites have a second swarm…" still anchors on
-    // — and blocks — the SECOND, non-drywood "termites").
+    // The September 2026 Pest Insider draft's actual error: native
+    // subterranean termites do NOT have a second, storm/late-summer
+    // triggered swarm (fact-no-storm-triggered-second-termite-swarm). Two
+    // word orders: "... a second swarm" and "... swarm again / a second
+    // time". The anchor's negative lookbehind keeps a drywood subject out:
+    // both drywood species correctly document wide, near-any-month flight
+    // windows, while a contrastive "Unlike drywood termites, native
+    // subterranean termites have a second swarm" still anchors on — and
+    // blocks — the second, non-drywood "termites".
     rule: 'termite_second_swarm',
-    pattern: /\b(?<!drywood[\s-])termites?\b[^.]{0,150}?\b(?:second|another|again|repeat(?:ed)?|late[-\s]?summer|post[-\s]?storm|storm[-\s]?(?:triggered|induced|driven)?)\b[^.]{0,60}?\bswarm/i,
-    negatable: true,
+    pattern: new RegExp(
+      `\\b(?<!drywood[\\s-])termites?\\b[^.]{0,150}?\\b${REPEAT_SWARM}\\b[^.]{0,60}?\\bswarm`
+      + `|\\b(?<!drywood[\\s-])termites?\\b[^.]{0,80}?\\bswarm(?:s|ed|ing)?\\s+(?:again|a\\s+second\\s+time|twice|once\\s+more)\\b`,
+      'i',
+    ),
+    denials: [
+      // "termites do not have a second swarm", "termites never swarm again"
+      new RegExp(`\\b${NEGATOR}\\s+${SWARM_VERB}\\b[^.,;]{0,60}?\\b(?:${REPEAT_SWARM}|a\\s+second\\s+time|twice|once\\s+more)`, 'i'),
+      // "No native subterranean termites have a second swarm"
+      new RegExp(`\\bno\\s+(?:[\\w-]+\\s+){0,4}?termites?\\s+${SWARM_VERB}\\b[^.,;]{0,60}?\\b${REPEAT_SWARM}`, 'i'),
+      // "there is no second swarm" (never "there is no doubt ...")
+      new RegExp(`\\b(?:there\\s+is|there'?s|there\\s+are)\\s+no\\s+(?:such\\s+)?${REPEAT_SWARM}\\b`, 'i'),
+    ],
   },
   {
-    // Large/brown patch is a spring-and-fall, cool/humid-weather disease —
-    // never a summer or above-80°F one (fact-st-augustinegrass-care). A
-    // NEGATED claim ("it is NOT a summer disease") is the correct fact
-    // stated correctly — findUnverifiedClaims below drops any match whose
-    // span carries a negation word, so only the asserted-true claim blocks.
+    // Large/brown patch shows in spring and fall; it is not a summer or
+    // above-80°F disease (fact-st-augustinegrass-care).
     rule: 'large_patch_summer_disease',
     pattern: /\b(?:brown|large)\s+patch\b[^.]{0,100}?\b(?:summer|above[-\s]?80|hot\s+weather|warm\s+weather|high\s+temperatures?)\b|\b(?:summer|above[-\s]?80\s*(?:°|degrees?)?|hot\s+weather|high\s+temperatures?)\b[^.]{0,100}?\b(?:brown|large)\s+patch\b/i,
-    negatable: true,
+    denials: [
+      // "it is not a summer disease"
+      /\b(?:is\s+not|isn'?t|are\s+not|aren'?t|it'?s\s+not|was\s+not|never)\s+(?:a\s+|an\s+)?(?:summer|hot[-\s]?weather|warm[-\s]?weather|high[-\s]?temperature)\b/i,
+      // "spring and fall, not in summer"
+      /\bnot\s+(?:in|during)\s+(?:the\s+)?(?:summer|hot\s+weather|warm\s+weather|high\s+temperatures?)\b/i,
+    ],
   },
   {
     // "Vacuum daily for 14 days" is flea-specific (pupae hatch into the
-    // residual) — fact-flea-vacuuming-14-days. Two distinct wrong shapes:
-    // (a) the AFFIRMATIVE instruction ("vacuum ... for N days") generalized
-    // to a non-flea pest — findUnverifiedClaims exempts this ONE shape when
-    // "flea" is nearby, since that's the actual correct guidance; (b) a
-    // NEGATED instruction ("do not"/"avoid" vacuuming for N days), which is
-    // never correct — no fact in the register recommends avoiding
-    // vacuuming, for fleas or anything else, so this is flagged regardless
-    // of context. Capture group 1 carries the negation phrase (or
-    // undefined) so findUnverifiedClaims can tell the two apart.
+    // residual) — fact-flea-vacuuming-14-days. The affirmative instruction
+    // is exempt only in a sentence about fleas; a NEGATED instruction
+    // ("do not"/"avoid" vacuuming for N days) is never correct, for fleas
+    // or anything else. Capture group 1 carries the negation phrase.
     rule: 'non_flea_vacuum_advice',
     pattern: /\b((?:do\s*not|don'?t|avoid)\s+)?vacuum(?:ing)?\b[^.]{0,80}?\b\d+\s*(?:days?|weeks?)\b/i,
   },
@@ -89,17 +103,8 @@ const UNVERIFIED_CLAIM_RULES = [
   },
 ];
 
-// A "negatable" rule's own correct fact is stated as a denial (e.g. "no
-// second swarm", "not a summer disease") — a match carrying one of these
-// words is that denial stated correctly, not the false claim.
-const NEGATION_RE = /\b(?:not|isn'?t|is\s+not|never|no)\b/i;
-
-// The exemption keyword ("flea") must belong to the SAME sentence as the
-// matched claim — a fixed character radius bleeds across sentence
-// boundaries and lets an unrelated sentence about a different pest wrongly
-// clear this one. Bounded the same way the rule patterns themselves are
-// ([^.]) — from the period before the match (or text start) to the period
-// after it (or text end).
+// The sentence an occurrence sits in: from the period before the match (or
+// text start) to the period after it (or text end).
 function sentenceWindow(body, match) {
   const idx = match.index ?? 0;
   const end = idx + match[0].length;
@@ -108,23 +113,17 @@ function sentenceWindow(body, match) {
   return body.slice(start, stop === -1 ? body.length : stop);
 }
 
-// A leading negation ("No native subterranean termites have…") sits
-// BEFORE the match itself, so checking match[0] alone misses it — but a
-// plain sentence-wide window risks the opposite mistake: a trailing,
-// unrelated "not" after a comma in the SAME sentence ("Termites have a
-// second swarm after storms, not that anyone believes it.") would wrongly
-// exempt a real false claim. Bound the window at the nearest comma or
-// semicolon too (not just the sentence period) on each side, so only
-// negation in the match's OWN clause counts.
-function clauseWindow(body, match) {
+// Where a denial may sit: from the start of the match's own clause (the
+// nearest period, comma or semicolon before it, so a leading "No native
+// subterranean termites ..." counts) to the END OF THE MATCH. Nothing after
+// the match is read: a trailing "..., not that anyone believes it" and a
+// correct denial elsewhere in the same sentence must not clear this
+// occurrence.
+function denialWindow(body, match) {
   const idx = match.index ?? 0;
-  const end = idx + match[0].length;
   const before = body.slice(0, idx);
-  const after = body.slice(end);
   const start = Math.max(before.lastIndexOf('.'), before.lastIndexOf(','), before.lastIndexOf(';')) + 1;
-  const boundaryInAfter = after.match(/[.,;]/);
-  const stop = boundaryInAfter ? end + boundaryInAfter.index : body.length;
-  return body.slice(start, stop);
+  return body.slice(start, idx + match[0].length);
 }
 
 // A global clone of a rule's pattern — matchAll needs the 'g' flag, and a
@@ -135,20 +134,16 @@ function globalPattern(pattern) {
   return new RegExp(pattern.source, pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`);
 }
 
-// True when THIS occurrence is the rule's own correct fact stated
-// correctly (a negated denial — leading or internal to the claim's own
-// clause — or, for the vacuum rule only, the affirmative flea-context
-// instruction), not the false claim. Species-scoping for the termite rule
-// (drywood vs. native subterranean) is handled at the PATTERN level (a
-// negative lookbehind on the anchor), not here — a nearby-text check
-// can't tell a real drywood subject from a contrastive clause naming
-// drywood only to assert something false about a DIFFERENT species.
-function isExemptOccurrence(body, match, rule, negatable) {
-  if (negatable && NEGATION_RE.test(clauseWindow(body, match))) return true;
+// True when THIS occurrence is the rule's own correct fact (one of its
+// allowlisted denial shapes, or — vacuum rule only — the affirmative
+// instruction in a sentence about fleas), not the false claim.
+function isExemptOccurrence(body, match, { rule, denials }) {
+  if (Array.isArray(denials) && denials.length) {
+    const window = denialWindow(body, match);
+    if (denials.some((denial) => denial.test(window))) return true;
+  }
   if (rule === 'non_flea_vacuum_advice') {
     const negated = !!match[1];
-    // A negated instruction ("do not"/"avoid" vacuuming for N days) is
-    // never correct — flagged regardless of flea context.
     if (!negated && /\bflea/i.test(sentenceWindow(body, match))) return true;
   }
   return false;
@@ -158,18 +153,17 @@ function isExemptOccurrence(body, match, rule, negatable) {
  * Scan customer-facing copy for the known-false/overreaching claim shapes
  * above. Returns one { rule, excerpt } per rule that matched (never more
  * than one per rule, mirroring findHallucinatedClaims' one-per-label shape).
- * Every occurrence of a rule's pattern is checked — one exempt mention
- * (a correct denial, or correct flea-context vacuuming advice) does not
- * clear a LATER, non-exempt occurrence of the same shape.
+ * Every occurrence of a rule's pattern is checked — one exempt mention does
+ * not clear a LATER, non-exempt occurrence of the same shape.
  */
 function findUnverifiedClaims(text) {
   const body = String(text ?? '');
   if (!body) return [];
   const results = [];
-  for (const { rule, pattern, negatable } of UNVERIFIED_CLAIM_RULES) {
-    for (const match of body.matchAll(globalPattern(pattern))) {
-      if (isExemptOccurrence(body, match, rule, negatable)) continue;
-      results.push({ rule, excerpt: match[0].trim().slice(0, 160) });
+  for (const claimRule of UNVERIFIED_CLAIM_RULES) {
+    for (const match of body.matchAll(globalPattern(claimRule.pattern))) {
+      if (isExemptOccurrence(body, match, claimRule)) continue;
+      results.push({ rule: claimRule.rule, excerpt: match[0].trim().slice(0, 160) });
       break; // one result per rule, mirroring findHallucinatedClaims
     }
   }

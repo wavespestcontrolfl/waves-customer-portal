@@ -97,6 +97,36 @@ describe('findUnverifiedClaims', () => {
     expect(claims.some((c) => c.rule === 'termite_second_swarm')).toBe(true);
   });
 
+  test('flags the natural word order "swarm again after storms"', () => {
+    const claims = findUnverifiedClaims('After a wet week, termites swarm again after storms roll through.');
+    expect(claims.some((c) => c.rule === 'termite_second_swarm')).toBe(true);
+  });
+
+  test('exempts an explicit denial in that word order', () => {
+    expect(findUnverifiedClaims('Termites do not swarm again after storms.')).toEqual([]);
+    expect(findUnverifiedClaims('For termites, there is no second swarm after storms.')).toEqual([]);
+  });
+
+  test.each([
+    ['no doubt', 'There is no doubt termites will swarm a second time after storms.'],
+    ['not only', 'Not only do termites swarm in spring, termites swarm again after storms.'],
+    ['never fail to', 'Termites never fail to swarm again after a storm.'],
+    ['a negated aside inside the match', 'Termites, which are not picky, have a second swarm after storms.'],
+    ['a negated different verb', 'Termites do not eat concrete, yet termites have a second swarm after storms.'],
+  ])('a negation idiom or unrelated negation (%s) does NOT exempt the false claim', (_label, sentence) => {
+    expect(findUnverifiedClaims(sentence).some((c) => c.rule === 'termite_second_swarm')).toBe(true);
+  });
+
+  test('a correct denial earlier in the sentence does NOT exempt a later false claim in it', () => {
+    const claims = findUnverifiedClaims('Large patch is not a summer disease up north, but here large patch thrives in summer heat.');
+    expect(claims.some((c) => c.rule === 'large_patch_summer_disease')).toBe(true);
+  });
+
+  test('"no joke" is not a denial of the large-patch claim', () => {
+    const claims = findUnverifiedClaims('Brown patch is no joke in summer heat.');
+    expect(claims.some((c) => c.rule === 'large_patch_summer_disease')).toBe(true);
+  });
+
   test('flags brown/large patch mis-described as a summer disease', () => {
     const claims = findUnverifiedClaims('Watch for large patch this summer as temperatures climb.');
     expect(claims.some((c) => c.rule === 'large_patch_summer_disease')).toBe(true);
