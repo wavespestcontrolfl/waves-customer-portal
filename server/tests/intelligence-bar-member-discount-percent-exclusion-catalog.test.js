@@ -42,7 +42,6 @@ jest.mock('../services/appointment-reminders', () => ({
 // consistent with the original bare scheduled_services stub it replaces.
 jest.mock('../services/waveguard-existing-services', () => ({
   ...jest.requireActual('../services/waveguard-existing-services'),
-  loadOwnedRecurringServiceKeys: jest.fn().mockResolvedValue([]),
   loadLiveRecurringObligationRows: jest.fn().mockResolvedValue([]),
 }));
 

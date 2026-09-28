@@ -2450,24 +2450,33 @@ const MEMBER_DISCOUNT_KEYS = ['waveguard_member'];
 // owned-keys set: a palm-injection or termite-bond plan is a live recurring
 // plan that maps to no ownership family (Codex r5, r7). A catalog-join
 // failure fails CLOSED (no automatic discount).
-// On the locked recheck (conn is the booking transaction) the evidence rows
-// are share-locked and re-read (Codex r10): a series cancel that locks and
-// ends them concurrently either finishes first — and the re-read sees it —
-// or waits for this booking to commit.
-async function hasLiveRecurringCoverage(customerId, conn = db) {
+// The customer's live recurring obligation rows (the canonical lifecycle in
+// waveguard-existing-services). On the locked recheck (conn is the booking
+// transaction) they are share-locked and re-read (Codex r10, r11): a series
+// cancel that ends them concurrently either commits first — and the re-read
+// drops them — or waits for this booking. Locks are taken in the series
+// writers' own order (admin-dispatch.js: scheduled_date, window_start, id)
+// so the two paths can never deadlock. Throws on a loader failure.
+async function liveRecurringObligationRows(customerId, conn = db) {
   const { loadLiveRecurringObligationRows, TERMINAL_STATUSES } = require('../waveguard-existing-services');
+  const rows = await loadLiveRecurringObligationRows(conn, customerId);
+  if (!Array.isArray(rows) || rows.length === 0) return [];
+  if (conn === db) return rows;
+  const locked = await conn('scheduled_services')
+    .whereIn('id', rows.map((r) => r.id))
+    .whereNotIn('status', TERMINAL_STATUSES)
+    .orderBy(['scheduled_date', 'window_start', 'id'])
+    .forShare()
+    .select('id');
+  const live = new Set((Array.isArray(locked) ? locked : []).map((r) => r.id));
+  return rows.filter((r) => live.has(r.id));
+}
+
+async function hasLiveRecurringCoverage(customerId, conn = db) {
   try {
-    const rows = await loadLiveRecurringObligationRows(conn, customerId);
-    if (!Array.isArray(rows) || rows.length === 0) return false;
-    if (conn === db) return true;
-    const locked = await conn('scheduled_services')
-      .whereIn('id', rows.map((r) => r.id))
-      .whereNotIn('status', TERMINAL_STATUSES)
-      .forShare()
-      .select('id');
-    return Array.isArray(locked) && locked.length > 0;
+    return (await liveRecurringObligationRows(customerId, conn)).length > 0;
   } catch (err) {
-    logger.warn(`[intelligence-bar] loadLiveRecurringObligationRows failed for customer ${customerId}; treating as no live recurring coverage: ${err.message}`);
+    logger.warn(`[intelligence-bar] live recurring obligation read failed for customer ${customerId}; treating as no live recurring coverage: ${err.message}`);
     return false;
   }
 }
@@ -2590,12 +2599,6 @@ function resolveBookingCatalogRow(services, serviceType) {
 }
 
 async function ibBookingPricing({ customer, serviceType, statedPrice, conn = db }) {
-  // Loaded at most once per pricing pass and shared with every recurring-
-  // ownership check below (the monthly-lane dues-covered check, the member
-  // one-off discount's recurring-coverage fallback, the mosquito ladder
-  // override) — null means "not loaded yet", so a caller downstream still
-  // loads its own if the monthly-lane branch never ran.
-  let ownedRecurringKeys = null;
   const services = await conn('services').where({ is_active: true })
     .select('id', 'name', 'short_name', 'service_key', 'base_price', 'price_range_min', 'category', 'billing_type');
   const match = resolveBookingCatalogRow(Array.isArray(services) ? services : [], serviceType);
@@ -2631,23 +2634,25 @@ async function ibBookingPricing({ customer, serviceType, statedPrice, conn = db 
   // catalog row is that plan. A lawn-only member booking a one-off pest
   // visit is not dues coverage for pest — it is a one-off extra, priced at
   // catalog less the member 15% like any other one-off member booking below.
-  // Ownership reuses the canonical lifecycle set (loadOwnedRecurringServiceKeys)
-  // against the booked row's OWN family (ownershipKeysForRow) — never a fresh
-  // approximation. Only a POSITIVE ownership match is dues coverage (Codex
+  // Ownership is the families of the customer's live recurring obligation
+  // rows (the canonical lifecycle, share-locked on the locked recheck like
+  // the discount evidence — Codex r11) against the booked row's OWN family
+  // (ownershipKeysForRow) — never a fresh approximation. Only a POSITIVE ownership match is dues coverage (Codex
   // r6): a row with no ownership family (a termite bond is recurring and
   // priced, yet owns no family) prices as a one-off, shown on the card; a
   // failed ownership read refuses rather than guess either way.
   if (!stated && catalogRow.billing_type === 'recurring' && !customer?.payer_id
     && resolveBillingLane(customer).mode === 'monthly_membership') {
-    const { loadOwnedRecurringServiceKeys, ownershipKeysForRow } = require('../waveguard-existing-services');
+    const { ownershipKeysForRow } = require('../waveguard-existing-services');
     const bookedFamilyKeys = ownershipKeysForRow({ service_key: catalogRow.service_key, service_name: catalogRow.name });
     let duesCovered = false;
     if (bookedFamilyKeys.length && customer?.id) {
       try {
-        ownedRecurringKeys = ownedRecurringKeys ?? await loadOwnedRecurringServiceKeys(conn, customer.id);
-        duesCovered = ownedRecurringKeys.some((key) => bookedFamilyKeys.includes(key));
+        const owned = new Set();
+        for (const row of await liveRecurringObligationRows(customer.id, conn)) ownershipKeysForRow(row).forEach((k) => owned.add(k));
+        duesCovered = bookedFamilyKeys.some((key) => owned.has(key));
       } catch (err) {
-        logger.warn(`[intelligence-bar] loadOwnedRecurringServiceKeys failed for monthly-lane customer ${customer.id}: ${err.message}`);
+        logger.warn(`[intelligence-bar] live recurring ownership read failed for monthly-lane customer ${customer.id}: ${err.message}`);
         return { error: 'Could not read which plan services this member owns, so whether their dues cover this visit is unknown. Try again in a moment, or state the price. Nothing was booked.' };
       }
     }

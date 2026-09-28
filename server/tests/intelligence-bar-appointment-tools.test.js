@@ -41,7 +41,7 @@ jest.mock('../utils/datetime-et', () => {
   return { ...actual, sameDayWindowElapsed: jest.fn(actual.sameDayWindowElapsed) };
 });
 // Live recurring coverage now goes through the canonical ownership loader
-// (waveguard-existing-services.js loadOwnedRecurringServiceKeys — Codex
+// (waveguard-existing-services.js loadLiveRecurringObligationRows — Codex
 // round 5, P1) instead of a hand-rolled scheduled_services query. Real
 // exports throughout except that one loader, which the recurring-coverage
 // tests below control directly — the loader's OWN lifecycle behavior
@@ -50,7 +50,6 @@ jest.mock('../utils/datetime-et', () => {
 // intelligence-bar-recurring-coverage-canonical.test.js, not re-derived here.
 jest.mock('../services/waveguard-existing-services', () => ({
   ...jest.requireActual('../services/waveguard-existing-services'),
-  loadOwnedRecurringServiceKeys: jest.fn(),
   loadLiveRecurringObligationRows: jest.fn(),
 }));
 
@@ -59,7 +58,7 @@ const logger = require('../services/logger');
 const { clearTechCurrentJob } = require('../services/tech-status');
 const AppointmentReminders = require('../services/appointment-reminders');
 const datetimeEt = require('../utils/datetime-et');
-const { loadOwnedRecurringServiceKeys, loadLiveRecurringObligationRows } = require('../services/waveguard-existing-services');
+const { loadLiveRecurringObligationRows } = require('../services/waveguard-existing-services');
 const { executeTool, ibBookingProposal } = require('../services/intelligence-bar/tools');
 
 // Real ET "today" — the date a same-day move targets.
@@ -146,7 +145,6 @@ beforeEach(() => {
   db.fn = { now: jest.fn(() => 'now()') };
   // Default: no live recurring coverage — a test that needs coverage sets
   // its own resolved value.
-  loadOwnedRecurringServiceKeys.mockResolvedValue([]);
   loadLiveRecurringObligationRows.mockResolvedValue([]);
 });
 // A booking defers its confirmation text past the result (setImmediate), so
@@ -695,13 +693,15 @@ describe('create_appointment — the visit carries a price like a Schedule-scree
   const catalog = (rows) => chain({ select: jest.fn().mockResolvedValue(rows) });
   // Preflight + locked reads of the customer and the catalog; the insert
   // echoes its price back so the result can report it.
-  const wirePriced = ({ customer = PER_VISIT, lockedCustomer = customer, rows, lockedRows = rows }) => {
+  const wirePriced = ({ customer = PER_VISIT, lockedCustomer = customer, rows, lockedRows = rows, evidenceLock = null }) => {
     const insertChain = chain();
     insertChain.returning.mockImplementation(async () => [{ id: 'appt-1', ...insertChain.insert.mock.calls[0][0] }]);
     wireDb({
       customers: [chain({ first: jest.fn().mockResolvedValue(customer) }), chain({ first: jest.fn().mockResolvedValue(lockedCustomer) })],
       services: [catalog(rows), catalog(lockedRows)],
-      scheduled_services: [chain(), insertChain], // leading chain: the advisory probe (clean)
+      // leading chain: the advisory probe (clean); then the locked pass's
+      // share-lock re-read of recurring evidence, when a test has any
+      scheduled_services: [chain(), ...(evidenceLock ? [evidenceLock] : []), insertChain],
     });
     return insertChain;
   };
@@ -760,14 +760,31 @@ describe('create_appointment — the visit carries a price like a Schedule-scree
     // The monthly-lane dues-covered check now verifies the member actually
     // OWNS the booked family (Codex round 5, P2) — this member's plan IS the
     // foam family they're booking again, so the canonical loader reports it.
-    loadOwnedRecurringServiceKeys.mockResolvedValue(['termite_foam']);
-    const insertChain = wirePriced({ customer: { ...PER_VISIT, ...MEMBER_BILLING }, rows: [foam] });
+    const foamPlanRow = { id: 'rec-foam', service_key: 'foam_recurring', service_name: 'Recurring Termite Foam Service' };
+    loadLiveRecurringObligationRows.mockResolvedValue([foamPlanRow]);
+    const evidenceLock = chain({ orderBy: jest.fn().mockReturnThis(), select: jest.fn().mockResolvedValue([{ id: 'rec-foam' }]) });
+    const insertChain = wirePriced({ customer: { ...PER_VISIT, ...MEMBER_BILLING }, rows: [foam], evidenceLock });
     const result = await book({ service_type: foam.name, _booking_price: null, _booking_service_id: 'svc-foam' });
     expect(result.success).toBe(true);
     const payload = insertChain.insert.mock.calls[0][0];
     expect(payload).toMatchObject({ service_id: 'svc-foam' });
     expect(payload).not.toHaveProperty('estimated_price');
     expect(payload).not.toHaveProperty('create_invoice_on_complete');
+  });
+
+  test('a series cancel that ends the owned plan before commit refuses the dues-covered booking instead of inserting it unpriced (Codex r11)', async () => {
+    const foam = {
+      id: 'svc-foam', name: 'Recurring Termite Foam Service', short_name: null, service_key: 'foam_recurring',
+      price_range_min: '146.00', base_price: '164.00', category: 'termite', billing_type: 'recurring',
+    };
+    loadLiveRecurringObligationRows.mockResolvedValue([{ id: 'rec-foam', service_key: 'foam_recurring', service_name: 'Recurring Termite Foam Service' }]);
+    // The share-locked re-read finds the plan row already cancelled.
+    const evidenceLock = chain({ orderBy: jest.fn().mockReturnThis(), select: jest.fn().mockResolvedValue([]) });
+    const insertChain = wirePriced({ customer: { ...PER_VISIT, ...MEMBER_BILLING }, rows: [foam], evidenceLock });
+    const result = await book({ service_type: foam.name, _booking_price: null, _booking_service_id: 'svc-foam' });
+    expect(result).toMatchObject({ preview_changed: true });
+    expect(insertChain.insert).not.toHaveBeenCalled();
+    expect(evidenceLock.forShare).toHaveBeenCalled();
   });
 
   test('a monthly member booking a one-off visit OUTSIDE their plan family is priced (not dues-covered) — the family-ownership check (Codex round 5, P2)', async () => {
@@ -783,7 +800,7 @@ describe('create_appointment — the visit carries a price like a Schedule-scree
     };
     const lawnOnlyMember = { ...PER_VISIT, ...MEMBER_BILLING, waveguard_tier: 'Gold', active: true };
     // Owns ONLY lawn_care — never pest_control.
-    loadOwnedRecurringServiceKeys.mockResolvedValue(['lawn_care']);
+    loadLiveRecurringObligationRows.mockResolvedValue([{ id: 'rec-lawn', service_key: 'lawn_care_monthly', service_name: 'Monthly Lawn Care Service' }]);
     const GENERIC = {
       id: 'disc-member', discount_key: 'waveguard_member', name: 'WaveGuard Member Discount', discount_type: 'percentage',
       amount: '15.00', requires_waveguard_tier: 'Bronze', service_key_filter: null, is_active: true, show_in_invoices: true, max_discount_dollars: null,
@@ -798,7 +815,7 @@ describe('create_appointment — the visit carries a price like a Schedule-scree
         listing([GENERIC]), chain({ first: jest.fn().mockResolvedValue(GENERIC) }),
         listing([GENERIC]), chain({ first: jest.fn().mockResolvedValue(GENERIC) }),
       ],
-      scheduled_services: [chain(), chain({ columnInfo: jest.fn().mockResolvedValue({
+      scheduled_services: [chain(), chain({ orderBy: jest.fn().mockReturnThis(), select: jest.fn().mockResolvedValue([{ id: 'rec-lawn' }]) }), chain({ columnInfo: jest.fn().mockResolvedValue({
         line_discount_id: {}, line_discount_name: {}, line_discount_type: {}, line_discount_amount: {}, line_discount_dollars: {},
       }) }), insertChain],
     });
@@ -815,7 +832,7 @@ describe('create_appointment — the visit carries a price like a Schedule-scree
       id: 'svc-bond', name: 'Termite Bond (1 Year)', short_name: null, service_key: 'termite_bond_1yr',
       price_range_min: null, base_price: '199.00', category: 'termite', billing_type: 'recurring',
     };
-    loadOwnedRecurringServiceKeys.mockResolvedValue(['pest_control']);
+    loadLiveRecurringObligationRows.mockResolvedValue([{ id: 'rec-pest', service_key: 'pest_general_quarterly', service_name: 'Recurring Pest Control Service' }]);
     wireDb({
       customers: [chain({ first: jest.fn().mockResolvedValue({ ...PER_VISIT, ...MEMBER_BILLING }) })],
       services: [catalog([bond])],
@@ -830,7 +847,7 @@ describe('create_appointment — the visit carries a price like a Schedule-scree
       id: 'svc-pest-plan', name: 'Recurring Pest Control Service', short_name: null, service_key: 'pest_general_quarterly',
       price_range_min: '146.00', base_price: '164.00', category: 'pest', billing_type: 'recurring',
     };
-    loadOwnedRecurringServiceKeys.mockRejectedValue(new Error('ownership catalog join failed'));
+    loadLiveRecurringObligationRows.mockRejectedValue(new Error('ownership catalog join failed'));
     wireDb({
       customers: [chain({ first: jest.fn().mockResolvedValue({ ...PER_VISIT, ...MEMBER_BILLING }) })],
       services: [catalog([pest])],
@@ -1009,7 +1026,7 @@ describe('create_appointment — the visit carries a price like a Schedule-scree
       // in intelligence-bar-recurring-coverage-canonical.test.js; this test
       // only proves the IB wiring reaches it and honors a non-empty result.
       loadLiveRecurringObligationRows.mockResolvedValue([{ id: 'rec-visit' }]);
-      const evidenceLock = chain({ select: jest.fn().mockResolvedValue([{ id: 'rec-visit' }]) });
+      const evidenceLock = chain({ orderBy: jest.fn().mockReturnThis(), select: jest.fn().mockResolvedValue([{ id: 'rec-visit' }]) });
       wireDb({
         customers: [chain({ first: jest.fn().mockResolvedValue(recurringOnly) }), chain({ first: jest.fn().mockResolvedValue(recurringOnly) })],
         services: [catalog([ONE_TIME_PEST]), catalog([ONE_TIME_PEST])],
@@ -1028,6 +1045,8 @@ describe('create_appointment — the visit carries a price like a Schedule-scree
       // Reached the canonical loader for this exact customer.
       expect(loadLiveRecurringObligationRows).toHaveBeenCalledWith(expect.anything(), 'cust-1');
       expect(evidenceLock.forShare).toHaveBeenCalled();
+      // The series writers' own lock order, so the two paths never deadlock.
+      expect(evidenceLock.orderBy).toHaveBeenCalledWith(['scheduled_date', 'window_start', 'id']);
     });
 
     test('a series cancel that ends the only qualifying row before commit refuses the discounted booking (Codex r10)', async () => {
@@ -1040,7 +1059,7 @@ describe('create_appointment — the visit carries a price like a Schedule-scree
         services: [catalog([ONE_TIME_PEST]), catalog([ONE_TIME_PEST])],
         discounts: discountsQueue([GENERIC], GENERIC),
         // The share-locked re-read finds the row already cancelled.
-        scheduled_services: [chain(), chain({ select: jest.fn().mockResolvedValue([]) }), chain()],
+        scheduled_services: [chain(), chain({ orderBy: jest.fn().mockReturnThis(), select: jest.fn().mockResolvedValue([]) }), chain()],
       });
       const result = await book({
         _booking_price: 212.5, _booking_service_id: 'svc-otp',
