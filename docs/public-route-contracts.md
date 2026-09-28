@@ -71,25 +71,24 @@ unchanged.
 
 Report plan summary (owner ask 2026-09-28): `GATE_REPORT_PLAN_SUMMARY` (off
 unless exactly `true`, read at startup). On, the LIVE service-report payload
-(`/api/reports/:token/data`) carries an optional `planSummary` for the
-token's own customer and no one else. For an active plan member
-(`isActivePlanCustomer`, fail-closed to non-member) it is `{ member: true,
-year, visitsThisYear, reservicesThisYear, upcoming: [{ serviceName,
-scheduledDate, windowStart, windowEnd }] }`; for anyone else it is `{ member:
-false, upcoming }` only, with no counts and no plan wording on the page.
-`visitsThisYear` counts completed visits in the current ET calendar year;
-`reservicesThisYear` counts how many of those were the plan's free callbacks
-(the persisted `is_callback` flag, a `pest_re_service` / `lawn_re_service`
-key, or a "Re-Service" service name when neither is stamped; included
-trapping follow-ups never count). `upcoming` holds at most 4 upcoming scheduled
-visits across every service line within the next 120 days, drawn from the same
-customer-scoped, disclosable-status candidate pool as `nextAppointment` (the
-report's own visit excluded). Counts and dates only: no price, address,
-technician, or token. `stripLiveOnlyScheduleFields` deletes it from every
-non-live render (PDF, static, sms_preview), the same staleness rule as
-`nextAppointment`. Omitted when the gate is off, the visit has no customer, or
-there is nothing to show. No new route and no write; auth, headers and rate
-limits are unchanged.
+(`/api/reports/:token/data`, built with `mode: 'live'`; no other build reads
+or carries it) may carry `planSummary: { year, visitsThisYear,
+reservicesThisYear }` for the token's own customer, only when that customer
+is an active plan member (`isActivePlanCustomer`, fail-closed to non-member)
+with at least one completed visit this year; anyone else gets no field and no
+plan wording on the page. The plan is account-level, so the counts cover the
+account's visits, not only this property's. `visitsThisYear` counts completed
+visits in the current ET calendar year; `reservicesThisYear` counts how many
+of those were callbacks (the persisted `is_callback` flag, a `pest_re_service`
+/ `lawn_re_service` key, or a "Re-Service" service name when neither is
+stamped; a rodent-program visit, such as the included trapping follow-up,
+never counts, by its key or its rodent-line name). Counts only: no price, no
+"at no charge" claim (a callback can be billed; see `reservice-report.js`), no
+dates, address, technician, or token. Upcoming visits belong to the separate
+upcoming-visits card, not this field. `stripLiveOnlyScheduleFields` also
+deletes it from every non-live render (PDF, static, sms_preview), the same
+staleness rule as `nextAppointment`. No new route and no write; auth, headers
+and rate limits are unchanged.
 
 Invoice line-item ownership metadata: `/api/pay/:token` and
 `/api/receipt/:token` return the invoice's persisted `line_items` as `lineItems`.

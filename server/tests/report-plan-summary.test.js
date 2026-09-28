@@ -1,10 +1,11 @@
 // "Your plan" section payload (owner ask 2026-09-28, GATE_REPORT_PLAN_SUMMARY):
 // buildReportV1Data adds planSummary { year, visitsThisYear,
-// reservicesThisYear, upcoming } on live views only, when the gate is on and
-// there's something to show. Counts are COUNTS, never a price (owner rule:
-// prices only ever appear on estimate pages). stripLiveOnlyScheduleFields
-// removes it for every non-live render, same staleness rule as
-// nextAppointment.
+// reservicesThisYear } for an active plan member, on live builds only, when
+// the gate is on and the member has a completed visit this year. Counts are
+// COUNTS, never a price (owner rule: prices only ever appear on estimate
+// pages). Upcoming visits are the upcoming-visits card's job, not this one.
+// stripLiveOnlyScheduleFields removes it for every non-live render, same
+// staleness rule as nextAppointment.
 
 // gates.reportPlanSummary reads process.env.GATE_REPORT_PLAN_SUMMARY once at
 // require time (same static-gate convention as reportCrossSell), so a test
@@ -25,13 +26,14 @@ function requireWithGateOn() {
 // where/andWhere/whereIn/whereNot(modify)/orderBy/limit/select chain the
 // next-appointment AND plan-summary lookups use, plus the object-criteria
 // `where` the rest of the builder calls.
-function makeKnex(fixtures) {
+function makeKnex(fixtures, reads = []) {
   const knex = (table) => {
     let rows = [...(fixtures[table] || [])];
     const sortKeys = [];
     const query = {
       where(criteria, value) {
         if (criteria && typeof criteria === 'object') {
+          reads.push([table, criteria]);
           rows = rows.filter((row) => Object.entries(criteria)
             .every(([key, val]) => row[key] === val));
         } else if (typeof criteria === 'string' && arguments.length === 2) {
@@ -154,6 +156,9 @@ test('gate on: counts only COMPLETED visits in the current ET calendar year, and
       { id: 'scheduled-flagged-callback', customer_id: 'customer-plan', scheduled_date: `${YEAR}-04-05`, status: 'completed', service_type: 'Pest Control Service', service_key_snapshot: 'pest_general_quarterly', is_callback: true },
       // this year, completed, a flagged trapping follow-up — never a re-service
       { id: 'scheduled-flagged-trap', customer_id: 'customer-plan', scheduled_date: `${YEAR}-04-12`, status: 'completed', service_type: 'Rodent Trapping Follow-Up', service_key_snapshot: 'rodent_trapping_followup', is_callback: true },
+      // this year, completed, a flagged trapping follow-up with NO key — the
+      // rodent-line name excludes it before the callback flag is read
+      { id: 'scheduled-flagged-unkeyed-trap', customer_id: 'customer-plan', scheduled_date: `${YEAR}-04-19`, status: 'completed', service_type: 'Rodent Trapping Follow-Up', service_key_snapshot: null, is_callback: true },
       // this year, but NOT completed — excluded
       { id: 'scheduled-pending', customer_id: 'customer-plan', scheduled_date: `${YEAR}-04-01`, status: 'pending', service_type: 'Quarterly Pest Control Service' },
       // last calendar year — excluded even though completed
@@ -163,43 +168,10 @@ test('gate on: counts only COMPLETED visits in the current ET calendar year, and
     ],
   });
   const data = await build(BASE_SERVICE, 'token-plan-counts', knex, { mode: 'live' });
-  expect(data.planSummary).toMatchObject({ member: true, year: YEAR, visitsThisYear: 7, reservicesThisYear: 3 });
+  expect(data.planSummary).toEqual({ year: YEAR, visitsThisYear: 8, reservicesThisYear: 3 });
 });
 
-test('gate on: upcoming visits span every service line, exclude cancelled/rescheduled/completed/skipped, order by date, cap at 4, and drop anything past 120 days', async () => {
-  const build = requireWithGateOn();
-  const fmt = (d) => d.toISOString().slice(0, 10);
-  const addDays = (n) => { const d = new Date(`${todayIso}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + n); return fmt(d); };
-  const knex = makeKnex({
-    ...BASE_FIXTURES,
-    scheduled_services: [
-      // this report's own visit — excluded by id even though it's "today"
-      { id: 'scheduled-current', customer_id: 'customer-plan', scheduled_date: todayIso, status: 'completed', service_type: 'Quarterly Pest Control Service' },
-      // excluded by status
-      { id: 'scheduled-cancelled', customer_id: 'customer-plan', scheduled_date: addDays(5), status: 'cancelled', service_type: 'Quarterly Pest Control Service' },
-      { id: 'scheduled-rescheduled', customer_id: 'customer-plan', scheduled_date: addDays(6), status: 'rescheduled', service_type: 'Quarterly Pest Control Service' },
-      { id: 'scheduled-skipped', customer_id: 'customer-plan', scheduled_date: addDays(7), status: 'skipped', service_type: 'Quarterly Pest Control Service' },
-      // beyond the 120-day horizon — excluded
-      { id: 'scheduled-far', customer_id: 'customer-plan', scheduled_date: addDays(130), status: 'confirmed', service_type: 'Quarterly Pest Control Service' },
-      // eligible, ANY service line, ordered by date ascending
-      { id: 'scheduled-lawn', customer_id: 'customer-plan', scheduled_date: addDays(10), status: 'confirmed', service_type: 'Lawn Care Treatment', window_start: '08:00:00', window_end: '10:00:00' },
-      { id: 'scheduled-pest-1', customer_id: 'customer-plan', scheduled_date: addDays(20), status: 'pending', service_type: 'Quarterly Pest Control Service', window_start: '09:00:00' },
-      { id: 'scheduled-pest-2', customer_id: 'customer-plan', scheduled_date: addDays(40), status: 'confirmed', service_type: 'Quarterly Pest Control Service' },
-      { id: 'scheduled-pest-3', customer_id: 'customer-plan', scheduled_date: addDays(60), status: 'en_route', service_type: 'Quarterly Pest Control Service' },
-      // 5th eligible candidate — beyond the 4-item cap
-      { id: 'scheduled-pest-4', customer_id: 'customer-plan', scheduled_date: addDays(80), status: 'on_site', service_type: 'Quarterly Pest Control Service' },
-    ],
-  });
-  const data = await build(BASE_SERVICE, 'token-plan-upcoming', knex, { mode: 'live' });
-  expect(data.planSummary.upcoming).toEqual([
-    { serviceName: 'Lawn Care Treatment', scheduledDate: addDays(10), windowStart: '08:00:00', windowEnd: '10:00:00' },
-    { serviceName: 'Quarterly Pest Control Service', scheduledDate: addDays(20), windowStart: '09:00:00', windowEnd: null },
-    { serviceName: 'Quarterly Pest Control Service', scheduledDate: addDays(40), windowStart: null, windowEnd: null },
-    { serviceName: 'Quarterly Pest Control Service', scheduledDate: addDays(60), windowStart: null, windowEnd: null },
-  ]);
-});
-
-test('a non-member gets only their upcoming visits: member false, no year counts', async () => {
+test('a non-member gets no planSummary, even with completed visits and visits coming up', async () => {
   const build = requireWithGateOn();
   const addDays = (n) => { const d = new Date(`${todayIso}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
   const knex = makeKnex({
@@ -212,26 +184,24 @@ test('a non-member gets only their upcoming visits: member false, no year counts
     ],
   });
   const data = await build(BASE_SERVICE, 'token-plan-nonmember', knex, { mode: 'live' });
-  expect(data.planSummary).toEqual({
-    member: false,
-    upcoming: [{ serviceName: 'Mosquito Event Spray', scheduledDate: addDays(10), windowStart: null, windowEnd: null }],
-  });
-});
-
-test('a non-member with nothing upcoming gets no planSummary at all', async () => {
-  const build = requireWithGateOn();
-  const knex = makeKnex({
-    ...BASE_FIXTURES,
-    customers: [{ id: 'customer-plan', waveguard_tier: null, monthly_rate: 0, active: true }],
-    scheduled_services: [
-      { id: 'scheduled-current', customer_id: 'customer-plan', scheduled_date: `${YEAR}-01-16`, status: 'completed', service_type: 'One-Time Pest Control' },
-    ],
-  });
-  const data = await build(BASE_SERVICE, 'token-plan-nonmember-empty', knex, { mode: 'live' });
   expect(data).not.toHaveProperty('planSummary');
 });
 
-test('omitted when there is no customer, or when visitsThisYear is 0 and upcoming is empty', async () => {
+test.each(['pdf', 'static', undefined])('a non-live build (mode %s) skips the completed-history read and carries no planSummary', async (mode) => {
+  const build = requireWithGateOn();
+  const reads = [];
+  const knex = makeKnex({
+    ...BASE_FIXTURES,
+    scheduled_services: [
+      { id: 'scheduled-current', customer_id: 'customer-plan', scheduled_date: `${YEAR}-01-16`, status: 'completed', service_type: 'Quarterly Pest Control Service' },
+    ],
+  }, reads);
+  const data = await build(BASE_SERVICE, `token-plan-${mode || 'default'}`, knex, mode ? { mode } : {});
+  expect(data).not.toHaveProperty('planSummary');
+  expect(reads.some(([table, criteria]) => table === 'scheduled_services' && criteria.status === 'completed')).toBe(false);
+});
+
+test('omitted when there is no customer, or when the member has no completed visit this year', async () => {
   const build = requireWithGateOn();
   const noCustomer = await build({ ...BASE_SERVICE, customer_id: null }, 'token-plan-no-customer', makeKnex({ ...BASE_FIXTURES, scheduled_services: [] }), { mode: 'live' });
   expect(noCustomer).not.toHaveProperty('planSummary');
@@ -241,7 +211,7 @@ test('omitted when there is no customer, or when visitsThisYear is 0 and upcomin
 });
 
 test('stripLiveOnlyScheduleFields removes planSummary the same way it removes nextAppointment', () => {
-  const data = { nextAppointment: { scheduledDate: '2026-01-01' }, planSummary: { year: 2026, visitsThisYear: 1, reservicesThisYear: 0, upcoming: [] } };
+  const data = { nextAppointment: { scheduledDate: '2026-01-01' }, planSummary: { year: 2026, visitsThisYear: 1, reservicesThisYear: 0 } };
   stripLiveOnlyScheduleFields(data);
   expect(data).not.toHaveProperty('planSummary');
   expect(data).not.toHaveProperty('nextAppointment');

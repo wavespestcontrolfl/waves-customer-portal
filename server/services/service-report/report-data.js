@@ -4790,9 +4790,10 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   let cockroachRenderedSignature;
   // "Your plan" section (owner ask 2026-09-28, GATE_REPORT_PLAN_SUMMARY):
   // this year's completed-visit + re-service COUNTS — never a price, owner
-  // rule that prices live on estimate pages only — plus up to 4 upcoming
-  // scheduled visits across every service line. Live-view only
-  // (stripLiveOnlyScheduleFields), like nextAppointment.
+  // rule that prices live on estimate pages only. Upcoming visits are NOT
+  // listed here: the upcoming-visits card (GATE_REPORT_UPCOMING_VISITS) owns
+  // that list. Live-view only (stripLiveOnlyScheduleFields), like
+  // nextAppointment.
   let planSummary = null;
   try {
     const reportTodayIso = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
@@ -4996,12 +4997,16 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     // Placed last in this try so a failure here can never disturb the
     // next-appointment picks already resolved above — this whole block is
     // best-effort under the shared outer catch.
-    if (featureGates.isEnabled('reportPlanSummary') && service.customer_id) {
+    // Live builds only: the PDF, email, recap and map builders would delete
+    // the field unread, so they skip these reads entirely.
+    if (opts.mode === 'live' && featureGates.isEnabled('reportPlanSummary') && service.customer_id) {
       const yearEt = Number(reportTodayIso.slice(0, 4));
-      // Plan branding (the "Your plan" title, the year counts, "at no
-      // charge") is for active plan members only, by the canonical
-      // membership read, which fails closed to non-member. Everyone else
-      // still sees their upcoming visits, under neutral copy.
+      // Active plan members only, by the canonical membership read, which
+      // fails closed to non-member: "Your plan" describes a plan a one-time
+      // customer does not have. The plan is account-level (the customers
+      // row), so the counts cover the account's visits, not one property's.
+      // Counts only, never "at no charge": a member's callback can still be
+      // billed, and that money claim needs per-visit proof (reservice-report.js).
       const member = await isActivePlanCustomer(knex, service.customer_id);
       const completedRows = member
         ? await knex('scheduled_services')
@@ -5010,48 +5015,25 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           .andWhere('scheduled_date', '<', `${yearEt + 1}-01-01`)
           .select('service_key_snapshot', 'service_type', 'is_callback')
           .catch(() => null)
-        : [];
-      if (Array.isArray(completedRows)) {
+        : null;
+      if (Array.isArray(completedRows) && completedRows.length) {
         const visitsThisYear = completedRows.length;
         const reservicesThisYear = completedRows
-          // The booking's persisted is_callback flag is the canonical callback
-          // fact (record creation copies it to service_records), then a
-          // stamped callback key, then, for a free-text booking with neither,
-          // the canonical "Re-Service" name match. An included trapping
-          // follow-up never counts, whatever its flags say.
+          // A rodent-program visit (the included trapping follow-up, a trap
+          // check) is a program step, never a re-service, whatever its flags
+          // say: excluded by its key or by a rodent-line name, keyed or not.
+          // Then the booking's persisted is_callback flag is the
+          // canonical callback fact (record creation copies it to
+          // service_records), then a stamped callback key, then, for a
+          // free-text booking with neither, the canonical "Re-Service" match.
           .filter((row) => {
             const key = row?.service_key_snapshot || null;
-            if (key === 'rodent_trapping_followup') return false;
+            if (key === 'rodent_trapping_followup' || detectServiceLine(row?.service_type) === 'rodent') return false;
             if (row?.is_callback === true) return true;
             return key ? PLAN_CALLBACK_RESERVICE_KEYS.has(key) : isReService({ serviceType: row?.service_type });
           })
           .length;
-        // Same candidate pool as the next-appointment pick above (already
-        // customer-scoped, disclosable-status-filtered, excludes this
-        // report's own visit, and sorted date/window ascending) — just
-        // capped to the next 120 days, ANY service line, at most 4.
-        const horizonDate = new Date(`${reportTodayIso}T00:00:00Z`);
-        horizonDate.setUTCDate(horizonDate.getUTCDate() + 120);
-        const horizonIso = horizonDate.toISOString().slice(0, 10);
-        const upcoming = (Array.isArray(upcomingRows) ? upcomingRows : [])
-          .filter((row) => row && row.scheduled_date)
-          .map((row) => {
-            const rawDate = row.scheduled_date;
-            const scheduledDate = rawDate instanceof Date ? rawDate.toISOString().slice(0, 10) : String(rawDate).slice(0, 10);
-            return {
-              serviceName: row.service_type || null,
-              scheduledDate,
-              windowStart: row.window_start || null,
-              windowEnd: row.window_end || null,
-            };
-          })
-          .filter((row) => row.scheduledDate <= horizonIso)
-          .slice(0, 4);
-        if (member && (visitsThisYear > 0 || upcoming.length)) {
-          planSummary = { member: true, year: yearEt, visitsThisYear, reservicesThisYear, upcoming };
-        } else if (!member && upcoming.length) {
-          planSummary = { member: false, upcoming };
-        }
+        planSummary = { year: yearEt, visitsThisYear, reservicesThisYear };
       }
     }
   } catch { /* best-effort */ }

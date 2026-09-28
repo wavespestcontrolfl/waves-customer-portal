@@ -2639,46 +2639,28 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
   );
 }
 
-// "Your plan" section (owner ask 2026-09-28): this year's visit + re-service
-// COUNTS — never a price, owner rule that prices only ever appear on
-// estimate pages — plus any upcoming scheduled visits. Live view only; the
-// payload field itself is stripped from pdf/static/sms_preview renders
-// server-side (stripLiveOnlyScheduleFields), so `mode` is a belt-and-braces
-// check here, same as the other live-only cards on this page.
+// "Your plan" section (owner ask 2026-09-28): an active plan member's visit +
+// re-service COUNTS for this year — never a price, owner rule that prices
+// only ever appear on estimate pages. The server sends it for members only.
+// Live view only; the payload field itself is stripped from
+// pdf/static/sms_preview renders server-side (stripLiveOnlyScheduleFields),
+// so `mode` is a belt-and-braces check here, same as the other live-only
+// cards on this page.
 function PlanSummaryCard({ data, mode }) {
   const plan = data.planSummary;
   if (mode !== 'live' || !plan) return null;
-  // Plan branding and the year counts are for active plan members only; a
-  // non-member gets the upcoming list under neutral copy (the server sends
-  // member: false with no counts).
-  const member = plan.member !== false;
-  const visits = member ? Number(plan.visitsThisYear) || 0 : 0;
+  const visits = Number(plan.visitsThisYear) || 0;
+  if (visits <= 0) return null;
   const reservices = Number(plan.reservicesThisYear) || 0;
-  const upcoming = Array.isArray(plan.upcoming) ? plan.upcoming : [];
   const visitWord = visits === 1 ? 'visit' : 'visits';
   const reserviceWord = reservices === 1 ? 're-service' : 're-services';
   const yearLine = reservices > 0
-    ? `This year: ${visits} ${visitWord}, including ${reservices} ${reserviceWord} at no charge`
+    ? `This year: ${visits} ${visitWord}, including ${reservices} ${reserviceWord}`
     : `This year: ${visits} ${visitWord}`;
   return (
     <section data-glass="card" className="sr-section plan-summary-section" id="your-plan">
-      <div className="section-eyebrow">{member ? 'Your plan' : 'Coming up'}</div>
-      {visits > 0 && <p className="map-context-copy">{yearLine}</p>}
-      {upcoming.length > 0 && (
-        <div className="sr-cell">
-          {member && <div className="sr-cell-label">Coming up</div>}
-          {upcoming.map((visit, index) => (
-            <div className="sr-cell-value" key={`${index}-${visit.scheduledDate}`}>
-              {formatNextAppointmentLabel({
-                serviceType: visit.serviceName,
-                scheduledDate: visit.scheduledDate,
-                windowStart: visit.windowStart,
-              })}
-            </div>
-          ))}
-          <div className="sr-cell-note">Subject to change</div>
-        </div>
-      )}
+      <div className="section-eyebrow">Your plan</div>
+      <p className="map-context-copy">{yearLine}</p>
     </section>
   );
 }
