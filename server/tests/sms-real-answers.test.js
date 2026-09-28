@@ -1806,3 +1806,39 @@ describe('follow-up #1: an edited follow-up promise with unrecognized timing is 
     expect(followupPromiseEdited({ inputSnapshot: promised, originalBody: null, body: 'within 60 minutes' })).toBe(false);
   });
 });
+
+describe('follow-up #5: a NEW booking is priced with the requested service, not the next scheduled visit', () => {
+  const priorGate = process.env.GATE_SMS_REAL_ANSWERS;
+  beforeEach(() => { process.env.GATE_SMS_REAL_ANSWERS = 'true'; jest.resetModules(); });
+  afterEach(() => {
+    if (priorGate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = priorGate;
+    jest.dontMock('../services/customer-pricing-ai'); jest.dontMock('../services/service-library'); jest.dontMock('../services/availability');
+    jest.resetModules();
+  });
+
+  test('requestedServiceType resolves the message through the existing catalog resolvers; no service named → null; resolver error → null', async () => {
+    jest.doMock('../services/customer-pricing-ai', () => ({ serviceKeyFromText: (t) => (/lawn/i.test(t) ? 'lawn_care' : null) }));
+    const resolveServiceType = jest.fn(async (text) => (text === 'lawn care' ? { name: 'Lawn Care' } : null));
+    jest.doMock('../services/service-library', () => ({ resolveServiceType }));
+    const drafter = require('../services/sms-shadow-drafter');
+    await expect(drafter.requestedServiceType('Can you add lawn service for me?')).resolves.toBe('Lawn Care');
+    expect(resolveServiceType).toHaveBeenCalledWith('lawn care');
+    await expect(drafter.requestedServiceType('When are you coming next?')).resolves.toBeNull();
+    resolveServiceType.mockRejectedValueOnce(new Error('boom'));
+    await expect(drafter.requestedServiceType('lawn please')).resolves.toBeNull();
+  });
+
+  test('the availability lookup uses the requested service; a message naming none falls back to the next visit', async () => {
+    jest.doMock('../services/customer-pricing-ai', () => ({ serviceKeyFromText: (t) => (/lawn/i.test(t) ? 'lawn_care' : null) }));
+    jest.doMock('../services/service-library', () => ({ resolveServiceType: async () => ({ name: 'Lawn Care' }) }));
+    const getAvailableSlots = jest.fn(async () => ({ days: [] }));
+    jest.doMock('../services/availability', () => ({ getAvailableSlots }));
+    const drafter = require('../services/sms-shadow-drafter');
+    const context = { summary: 'x', upcomingServices: [{ type: 'Quarterly Pest', date: '2026-10-01' }], customer: { id: 'c1' } };
+    const client = { messages: { create: async () => ({ content: [{ text: JSON.stringify({ reply: 'Sure — let me check.', intended_actions: [], missing_info: null }) }] }) } };
+    await drafter.generateGroundedDraft({ client, context, inboundMessage: 'Can you add lawn service?', intent: { intent: 'general_customer_sms_needs_review' }, schedulingIntent: true, city: 'Venice' });
+    expect(getAvailableSlots).toHaveBeenLastCalledWith('Venice', null, expect.objectContaining({ serviceType: 'Lawn Care' }));
+    await drafter.generateGroundedDraft({ client, context, inboundMessage: 'Can we move my visit?', intent: { intent: 'general_customer_sms_needs_review' }, schedulingIntent: true, city: 'Venice' });
+    expect(getAvailableSlots).toHaveBeenLastCalledWith('Venice', null, expect.objectContaining({ serviceType: 'Quarterly Pest' }));
+  });
+});

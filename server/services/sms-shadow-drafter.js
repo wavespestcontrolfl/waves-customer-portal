@@ -450,6 +450,27 @@ function validateReserviceOffer({ reply, factsBlock }) {
   return { ok: true, violations: [] };
 }
 
+// The service a customer is asking FOR in an inbound message, resolved to a
+// catalog service name through the existing resolvers (customer-pricing-ai
+// serviceKeyFromText → service-library resolveServiceType). Null when the
+// message names no service, or on any resolver error (fail-safe: the
+// caller falls back to the customer's own visit).
+async function requestedServiceType(inboundMessage) {
+  const text = String(inboundMessage || '').trim();
+  if (!text) return null;
+  try {
+    const { serviceKeyFromText } = require('./customer-pricing-ai');
+    const key = serviceKeyFromText(text);
+    if (!key) return null;
+    const { resolveServiceType } = require('./service-library');
+    const row = await resolveServiceType(String(key).replace(/_/g, ' '));
+    return row?.name ? String(row.name) : null;
+  } catch (err) {
+    logger.warn(`[sms-shadow] requested-service resolution failed (${err.message}); using the customer's own visit`);
+    return null;
+  }
+}
+
 // The service a live (non-estimate) scheduling reply is about: the next
 // scheduled visit's type, else the most recent completed one. Null when the
 // context names neither (the engine then keeps its own default).
@@ -1733,7 +1754,12 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   // cancellation/complaint reply is about; an estimate's service_interest
   // still wins inside the engine when estimateId is set. Carried on the
   // snapshot so the send-time recheck asks the same question.
-  const serviceType = liveServiceType(context);
+  // Follow-up #5 (Codex r8): a NEW booking is about the service the customer
+  // is asking for, not their next scheduled visit — "can you add lawn?"
+  // must be priced with lawn minutes. The requested service is resolved
+  // from the inbound text through the existing catalog resolvers; when the
+  // message names none, the customer's own next (else last) visit stands.
+  const serviceType = (await requestedServiceType(inboundMessage)) || liveServiceType(context);
   const needsOpenTimes = Boolean(schedulingIntent)
     || SAVE_SALE_INTENT_RE.test(String(intent?.intent || ''))
     || SAVE_SALE_TEXT_RE.test(String(inboundMessage || ''));
@@ -2364,6 +2390,7 @@ module.exports = {
   replyQuotesUngroundedAmount,
   replyBindsDeclaredDays,
   liveServiceType,
+  requestedServiceType,
   fetchReserviceLanes,
   reserviceFactLine,
   validateReserviceOffer,

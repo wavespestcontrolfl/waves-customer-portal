@@ -173,89 +173,19 @@ async function verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomer
       }
     }
 
-    // OPEN TIMES send-time recheck (Codex P2): a draft built with an OPEN
-    // TIMES section stores the exact windows it quoted plus the lookup
-    // inputs (input_snapshot.open_times_snapshot, written by
-    // sms-shadow-drafter / estimate-conversion-agent at draft time). This is
-    // the shared choke point for BOTH /sms (immediate send) and
-    // /schedule-sms (queue-time verification) — a card can sit in review up
-    // to 48h, or be scheduled for later, and the calendar never re-checks
-    // itself. Only windows still present in the OUTGOING body are rechecked
-    // (a reviewer's correction that drops every quoted window needs no
-    // recheck; an edit that reformats or re-dates one refuses — see
-    // planOpenTimesRecheck); a gone slot, a fetch error, or a timeout all fail closed,
-    // reusing the same supersede-and-refuse mechanism as the staleness check
-    // above rather than inventing a new one.
-    let openTimesSnapshot = null;
-    if (decision.input_snapshot) {
-      try {
-        const parsedSnapshot = typeof decision.input_snapshot === 'string'
-          ? JSON.parse(decision.input_snapshot)
-          : decision.input_snapshot;
-        openTimesSnapshot = parsedSnapshot?.open_times_snapshot || null;
-      } catch (_e) { openTimesSnapshot = null; }
-    }
-    if (openTimesSnapshot?.quotedWindows?.length) {
-      // Codex r2 P2: an EDITED body (reformatted time, changed day) cannot be
-      // matched to its snapshot by exact text — planOpenTimesRecheck fails
-      // closed on any edit that is not a clean keep-or-drop of each pair.
-      const { openTimesStillOffered, planOpenTimesRecheck } = require('../services/sms-shadow-drafter');
-      const plan = planOpenTimesRecheck({ snapshot: openTimesSnapshot, outgoingBody, originalBody: decision.suggested_message });
-      if (plan.action === 'refuse') {
-        logger.info(`[agent-review] decision ${decision.id} open-times unverifiable after edit (${plan.reason}) — refusing send`);
-        await require('../services/sms-suggest-mode').supersedeStaleDecision({ decisionId: decision.id });
-        return null;
-      }
-      if (plan.action === 'recheck') {
-        const recheck = await openTimesStillOffered({
-          city: openTimesSnapshot.lookup?.city || null,
-          customerId: openTimesSnapshot.lookup?.customerId || null,
-          estimateId: openTimesSnapshot.lookup?.estimateId || null,
-          ...(openTimesSnapshot.lookup?.serviceType ? { serviceType: openTimesSnapshot.lookup.serviceType } : {}),
-          quotedWindows: plan.quotedWindows,
-        });
-        if (!recheck.ok) {
-          logger.info(`[agent-review] decision ${decision.id} open-times stale (${recheck.reason}) — refusing send`);
-          await require('../services/sms-suggest-mode').supersedeStaleDecision({ decisionId: decision.id });
-          return null;
-        }
-      }
-    }
-
-    // Follow-up SLA phrase recheck (Codex r3 P2): a draft's relative SLA
-    // wording ("within the hour" / "by 9 AM this morning"/"tomorrow
-    // morning") is frozen at generation, but an Agent Review card can sit
-    // up to 48h before this immediate-send verification runs — the same
-    // choke point as the open-times recheck above, covering both /sms
-    // (immediate send) and /schedule-sms (queue-time verification). Refuse
-    // rather than rewrite: the reviewer approved specific wording, and a
-    // phrase that no longer matches the current 8am/8pm ET window needs a
-    // fresh look, not a silent substitution.
-    // Scoped to drafts that recorded an escalation (Codex r5): the phrases
-    // are ordinary English, so wording alone never refuses a send.
-    const { followupPromiseBlockReason } = require('../services/sms-followup-sla');
-    const followupBlock = followupPromiseBlockReason({
-      inputSnapshot: decision.input_snapshot, promptVersion: decision.prompt_version,
-      originalBody: decision.suggested_message, body: outgoingBody,
-    });
-    if (followupBlock) {
-      logger.info(`[agent-review] decision ${decision.id} follow-up promise unsendable (${followupBlock}) — refusing send`);
+    // Every send-time revalidation of the decision's CONTENT lives in one
+    // service (PR #5119 follow-up #6): the OPEN TIMES recheck (a
+    // reviewer-edited body is matched to the persisted pairs, surviving
+    // pairs are rechecked against live availability), the follow-up promise
+    // (stale or edited timing), and the billing amounts (re-read now). This
+    // route keeps ownership + thread staleness and orchestrates. Any block
+    // refuses and retires the decision the same way a stale anchor does.
+    const { agentDecisionSendBlockReason } = require('../services/agent-decision-send-checks');
+    const blockReason = await agentDecisionSendBlockReason({ decision, outgoingBody });
+    if (blockReason) {
+      logger.info(`[agent-review] decision ${decision.id} ${blockReason} — refusing send`);
       await require('../services/sms-suggest-mode').supersedeStaleDecision({ decisionId: decision.id });
       return null;
-    }
-    // Amount revalidation at the IMMEDIATE send (PR #5119 follow-up #2):
-    // a real-answers card may carry exact balance/invoice/dues figures and
-    // can wait through a payment; the scheduler already re-reads billing at
-    // fire time, so the same shared check runs here for real-answers
-    // decisions. Older-prompt decisions are untouched.
-    if (typeof decision.prompt_version === 'string' && decision.prompt_version.startsWith('house_voice_v12') && decision.customer_id) {
-      const { outgoingAmountsStale } = require('../services/sms-amount-recheck');
-      const amounts = await outgoingAmountsStale({ customerId: decision.customer_id, body: outgoingBody });
-      if (amounts.stale) {
-        logger.info(`[agent-review] decision ${decision.id} amount no longer authorized (${amounts.reason}) — refusing send`);
-        await require('../services/sms-suggest-mode').supersedeStaleDecision({ decisionId: decision.id });
-        return null;
-      }
     }
     return decision;
   } catch (verifyErr) {
