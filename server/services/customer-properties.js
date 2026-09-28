@@ -781,6 +781,111 @@ async function anchorSoleProperty(target, cols, conn = db) {
   target.property_id = await soleActivePropertyId(target.customer_id, conn);
 }
 
+// Dead evidence for mostRecentAddressedSeriesSibling below: a cancelled,
+// skipped, no-show, or rescheduled-awaiting-replacement row never counts as
+// where a series lives. JOIN_INELIGIBLE_STATUSES also lists 'completed',
+// but a completed visit's stamped address is exactly the evidence prod
+// 2026-09-28 needed (a completed Square-imported parent's LATER completed
+// child carried the real property) — so that one status is kept live here.
+const DEAD_SIBLING_STATUSES = require('./visit-context/statuses')
+  .JOIN_INELIGIBLE_STATUSES.filter((s) => s !== 'completed');
+
+/**
+ * Most recent ADDRESSED sibling in the same recurring series — precedence 2
+ * of anchorSeriesAddress below, for a series whose PARENT carries no address
+ * of its own (an imported/legacy parent, or one that predates the
+ * property-linkage migration) so anchorSoleProperty would otherwise fall
+ * through straight to the customer's current primary address, which can be
+ * a different house than every visit the series has actually been running
+ * at (prod 2026-09-28: a Square-imported quarterly series' parent had no
+ * property_id/address; its children were linked to a non-primary rental;
+ * extending the series stamped the new rows with the customer's current
+ * main address instead).
+ *
+ * Walks the series (id = parentId OR recurring_parent_id = parentId, same
+ * customer) newest-first (scheduled_date DESC, created_at DESC tiebreak),
+ * skipping DEAD_SIBLING_STATUSES rows, and returns the first candidate that
+ * carries a property_id or a non-empty service_address_line1 AND, when it
+ * names a property_id, that property is still ACTIVE for this customer (a
+ * deactivated property is not evidence of where the next visit belongs —
+ * the walk keeps looking at the next-most-recent candidate rather than
+ * giving up). Runs in a SAVEPOINT inside a caller transaction — same
+ * discipline as soleActivePropertyId — so a failed read here cannot poison
+ * the caller's transaction. Best-effort: null on error or no match.
+ */
+async function mostRecentAddressedSeriesSibling(parentId, customerId, cols, conn = db) {
+  if (!parentId || !customerId || !cols || !cols.property_id) return null;
+  const read = async (c) => {
+    const rows = await c('scheduled_services')
+      .where({ customer_id: customerId })
+      .andWhere(function () { this.where('id', parentId).orWhere('recurring_parent_id', parentId); })
+      .whereNotIn('status', DEAD_SIBLING_STATUSES)
+      .andWhere(function () {
+        this.whereNotNull('property_id');
+        if (cols.service_address_line1) {
+          this.orWhere(function () {
+            this.whereNotNull('service_address_line1').andWhere('service_address_line1', '!=', '');
+          });
+        }
+      })
+      .orderBy('scheduled_date', 'desc')
+      .orderBy('created_at', 'desc')
+      .limit(20)
+      .select('*');
+    for (const row of rows) {
+      if (row.property_id) {
+        const active = await c('customer_properties')
+          .where({ id: row.property_id, customer_id: customerId, active: true })
+          .first('id');
+        if (!active) continue;
+      }
+      return row;
+    }
+    return null;
+  };
+  const inSavepoint = (fn) => (conn.isTransaction ? conn.transaction((sp) => fn(sp)) : fn(conn));
+  try {
+    return await inSavepoint(read);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Series-aware address anchor for an EXTENSION writer (a new visit spawned
+ * onto an EXISTING series, not a brand-new series' own first follow-up
+ * batch — those keep plain anchorSoleProperty, since there is no series
+ * history yet to consult). Precedence, filling blanks only:
+ *  1. Whatever copyStampedServiceAddressFields already stamped from the
+ *     parent (or its recurring_template_overrides.appointment_address) —
+ *     never touched here.
+ *  2. Still no property_id AND no service_address_line1: the most recent
+ *     addressed, live-enough sibling in the SAME series — see
+ *     mostRecentAddressedSeriesSibling above.
+ *  3. Otherwise, the existing sole-active-property fallback.
+ * `parentId` is the series parent's id (recurring_parent_id on every
+ * child). Same estimate-linkage guard as anchorSoleProperty: an
+ * estimate-linked row (target.source_estimate_id set) is left for the
+ * estimate linkage to stamp and never reaches the sibling lookup.
+ */
+async function anchorSeriesAddress(target, parentId, cols, conn = db) {
+  if (!target || !cols || !cols.property_id) return;
+  if (target.property_id != null || !target.customer_id) return;
+  if (cols.service_address_line1 && target.service_address_line1) return;
+  if (cols.source_estimate_id && target.source_estimate_id) return;
+  const sibling = await mostRecentAddressedSeriesSibling(parentId, target.customer_id, cols, conn);
+  if (sibling) {
+    const { recurringServiceAddress } = require('./booking/visit-financial-stamps');
+    // == null (not === undefined): copyStampedServiceAddressFields above may
+    // already have stamped an explicit NULL from an addressless parent, and
+    // that is exactly the blank this precedence step fills.
+    for (const [field, value] of Object.entries(recurringServiceAddress(sibling))) {
+      if (cols[field] && target[field] == null) target[field] = value;
+    }
+  }
+  await anchorSoleProperty(target, cols, conn);
+}
+
 const PROPERTY_FIELD_LIMITS = Object.freeze({ address_line1: 200, address_line2: 100, city: 50, zip: 10, label: 100 });
 
 function propertyActionError(message, statusCode = 400, code = 'invalid_property') {
@@ -1051,6 +1156,7 @@ module.exports = {
   sweepMissingPrimaryProperties,
   soleActivePropertyId,
   anchorSoleProperty,
+  anchorSeriesAddress,
   bookingPropertyStamp,
   OCCUPANCY_TYPES,
   normStreet,

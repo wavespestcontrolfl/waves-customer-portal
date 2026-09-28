@@ -1550,7 +1550,7 @@ const {
   stampPrimaryLineDiscount,
   capsSnapshotFromPricing,
 } = require('../services/booking/visit-financial-stamps');
-const { anchorSoleProperty } = require('../services/customer-properties');
+const { anchorSoleProperty, anchorSeriesAddress } = require('../services/customer-properties');
 
 function clearAppointmentDiscountCatalogFields(target, cols) {
   if (!target || !cols) return;
@@ -14903,8 +14903,11 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               // Stamped service address rides the spawn too — a series
               // anchored on a secondary/rental-property visit must not spawn
               // children that fall back to the customer's primary address.
+              // An addressless parent (no stamp of its own) falls through to
+              // the series' own most-recent-addressed sibling before the
+              // customer's sole-property default (anchorSeriesAddress).
               copyStampedServiceAddressFields(childData, parent, cols);
-              await anchorSoleProperty(childData, cols, trx);
+              await anchorSeriesAddress(childData, parent.id, cols, trx);
             } catch (spawnStampErr) {
               // The optional column stamps above are non-blocking, but a
               // pricing refusal (exclusion catalog not loaded) must abort
@@ -17531,7 +17534,7 @@ async function reconcileRecurringSeriesVisitCount(trx, {
     copyAppointmentDiscountFields(data, parent, cols);
     copyBillToFields(data, parent, cols);
     copyStampedServiceAddressFields(data, parent, cols);
-    await anchorSoleProperty(data, cols, trx);
+    await anchorSeriesAddress(data, parentId, cols, trx);
     const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nd, extendBlackoutDates, skipParent);
     assertDueAddonsWithinDiscountCapUniverse(dueAddons, discountStackingLive() ? discountCapIds : null, 'reconcileRecurringSeriesVisitCount');
     // Anchored-split provenance governs the per-visit amount on EVERY
@@ -17955,7 +17958,7 @@ async function extendSeriesOnceLocked(conn, parent, parentId, cols, svcLike, opt
       copyAppointmentDiscountFields(nextData, parent, cols);
       copyBillToFields(nextData, parent, cols);
       copyStampedServiceAddressFields(nextData, parent, cols);
-      await anchorSoleProperty(nextData, cols, conn);
+      await anchorSeriesAddress(nextData, parentId, cols, conn);
       // Required scope must be readable before creating any child.
       const parentAddons = await conn('scheduled_service_addons').where({ scheduled_service_id: parentId });
       // Legacy-series root freeze (Codex round 2 P1) — see
@@ -24769,7 +24772,7 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         copyAppointmentDiscountFields(data, parent, cols);
         copyBillToFields(data, parent, cols);
         copyStampedServiceAddressFields(data, parent, cols);
-        await anchorSoleProperty(data, cols, conn);
+        await anchorSeriesAddress(data, parentId, cols, conn);
         const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nd, alertBlackoutDates, skipParent);
         assertDueAddonsWithinDiscountCapUniverse(dueAddons, discountStackingLive() ? discountCapIds : null, 'runRecurringAlertAction:extend');
         // Anchored-split provenance governs the per-visit amount on EVERY
@@ -24869,7 +24872,7 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         copyAppointmentDiscountFields(data, parent, cols);
         copyBillToFields(data, parent, cols);
         copyStampedServiceAddressFields(data, parent, cols);
-        await anchorSoleProperty(data, cols, conn);
+        await anchorSeriesAddress(data, parentId, cols, conn);
         const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nd, alertBlackoutDates, skipParent);
         assertDueAddonsWithinDiscountCapUniverse(dueAddons, discountStackingLive() ? discountCapIds : null, 'runRecurringAlertAction:convert_ongoing');
         // Anchored-split provenance governs the per-visit amount on EVERY

@@ -116,12 +116,21 @@ describe('every spawned-row writer anchors the sole property', () => {
 
   test('every admin-schedule spawned-row writer copies the parent stamp AND anchors', () => {
     const src = read('routes/admin-schedule.js');
-    const anchored = src.match(/copyStampedServiceAddressFields\((\w+), (\w+), cols\);\n\s*(?:if \(!propertyOwnedByEstimateLinkage\) )?await anchorSoleProperty\(\1, cols, (trx|conn)\);/g) || [];
+    // The two direct-create spawn loops (a brand-new series' own first child
+    // + booster batch, spawned from the just-inserted parent `svc` in the
+    // SAME request — no series history to consult yet) keep the plain
+    // sole-property anchor.
+    const soleAnchored = src.match(/copyStampedServiceAddressFields\((\w+), (\w+), cols\);\n\s*if \(!propertyOwnedByEstimateLinkage\) await anchorSoleProperty\(\1, cols, (trx|conn)\);/g) || [];
+    // The five EXTENSION writers (a new visit spawned onto an EXISTING
+    // series) anchor through the series-aware helper instead (owner bug
+    // report 2026-09-28: an addressless parent must consult the series'
+    // own history before falling back to the customer's current primary).
+    const seriesAnchored = src.match(/copyStampedServiceAddressFields\((\w+), \w+, cols\);\n(?:[^\n]*\n)?\s*await anchorSeriesAddress\(\1, \w+(?:\.\w+)?, cols, (trx|conn)\);/g) || [];
     const allCopies = src.match(/copyStampedServiceAddressFields\(\w+, \w+, cols\);/g) || [];
-    // Five extension/spawn writers + the direct admin-create child and
-    // booster loops (GH codex #3837 r1 P1).
     expect(allCopies.length).toBe(7);
-    expect(anchored.length).toBe(allCopies.length);
+    expect(soleAnchored.length).toBe(2);
+    expect(seriesAnchored.length).toBe(5);
+    expect(soleAnchored.length + seriesAnchored.length).toBe(allCopies.length);
     // The direct-create loops spawn from the freshly inserted parent `svc`.
     // Deferred estimate link (GH codex #3837 r2 P1): the rows carry no
     // source_estimate_id yet, so the anchor is gated on the deferral — the
