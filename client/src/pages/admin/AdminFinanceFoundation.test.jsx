@@ -429,6 +429,36 @@ describe("Finance workflow preservation", () => {
     expect(screen.getByText(newRow.description)).toBeInTheDocument();
     expect(screen.queryByText(oldRow.description)).not.toBeInTheDocument();
   });
+  it("sets up a Plaid connection: an existing CSV label continues its series the day after its last row", async () => {
+    overrides.set("GET /api/admin/tax/bank-import/status", () =>
+      response({ enabled: true, plaidEnabled: true, counts: {} }));
+    overrides.set("GET /api/admin/tax/bank-import/coverage", () => response({ months: [] }));
+    overrides.set("GET /api/admin/tax/bank-import/transactions", () => response({ transactions: [], hasMore: false }));
+    overrides.set("GET /api/admin/tax/bank-import/plaid/status", () => response({
+      configured: true, tokenKey: true, env: "sandbox",
+      existingLabels: [{ label: "capone-checking", accountType: "bank", lastDate: "2026-09-10", rows: 42 }],
+      items: [{
+        id: "item-1", institutionName: "Synthetic Bank", status: "setup", lastSyncedAt: null, lastError: null,
+        accounts: [{
+          id: "acct-1", name: "Checking", mask: "0001", plaidType: "depository", plaidSubtype: "checking",
+          accountLabel: "synthetic-bank-checking-0001", accountType: "bank", syncFrom: "2026-01-01", enabled: true,
+        }],
+      }],
+    }));
+    overrides.set("POST /api/admin/tax/bank-import/plaid/items/item-1/setup", () =>
+      response({ success: true, sync: { inserted: 3, complete: true } }));
+    open(TaxPage);
+    await taxSection("Expenses", "Import");
+    const label = await screen.findByDisplayValue("synthetic-bank-checking-0001");
+    fireEvent.change(label, { target: { value: "capone-checking" } });
+    expect(await screen.findByText("42 rows already imported, last 2026-09-10")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("2026-09-11")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Save and sync" }));
+    await screen.findByText("Synced: 3 new");
+    expect(requests.find((r) => r.key === "POST /api/admin/tax/bank-import/plaid/items/item-1/setup").body).toEqual({
+      accounts: [{ id: "acct-1", accountLabel: "capone-checking", accountType: "bank", syncFrom: "2026-09-11", enabled: true }],
+    });
+  });
   it("keeps the bank-import gate closed on a failed status read", async () => {
     overrides.set("GET /api/admin/tax/bank-import/status", () =>
       response({ error: "Read unavailable" }, 503),

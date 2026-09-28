@@ -4806,6 +4806,445 @@ const BANK_STATUS_LABELS = {
   refund_applied: "refund",
   ignored: "ignored",
 };
+// ── Live bank feeds (GATE_PLAID_SYNC) ──────────────────────────────
+// Plaid Link runs from Plaid's own script; the bank login happens inside
+// Plaid's window and never touches this page. The server keeps the access
+// token; this panel only ever sees a one-time public token.
+
+const PLAID_LINK_SRC = "https://cdn.plaid.com/link/v2/stable/link-initialize.js";
+let plaidScriptPromise = null;
+function loadPlaidLink() {
+  if (window.Plaid) return Promise.resolve(window.Plaid);
+  if (!plaidScriptPromise) {
+    plaidScriptPromise = new Promise((resolve, reject) => {
+      const s = document.createElement("script");
+      s.src = PLAID_LINK_SRC;
+      s.async = true;
+      s.onload = () =>
+        window.Plaid
+          ? resolve(window.Plaid)
+          : reject(new Error("Plaid Link did not load"));
+      s.onerror = () => {
+        plaidScriptPromise = null;
+        reject(new Error("Could not load Plaid Link"));
+      };
+      document.head.appendChild(s);
+    });
+  }
+  return plaidScriptPromise;
+}
+
+const PLAID_ITEM_STATUS = {
+  setup: "Needs setup",
+  active: "Syncing",
+  login_required: "Bank login needed",
+  error: "Last sync failed",
+};
+
+function nextDay(dateStr) {
+  const d = new Date(`${dateStr}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + 1);
+  return d.toISOString().slice(0, 10);
+}
+
+function syncSummary(sync) {
+  if (!sync) return "";
+  if (sync.error) return `Sync failed: ${sync.error}`;
+  if (sync.skipped) return `Sync skipped (${sync.skipped})`;
+  const parts = [`${sync.inserted || 0} new`];
+  if (sync.updated) parts.push(`${sync.updated} updated`);
+  if (sync.deleted) parts.push(`${sync.deleted} withdrawn by the bank`);
+  if (sync.flagged) parts.push(`${sync.flagged} reviewed rows flagged`);
+  let text = `Synced: ${parts.join(", ")}`;
+  if (sync.matching)
+    text += ` — ${sync.matching.payoutsLinked} payouts + ${sync.matching.expensesLinked} expenses matched`;
+  if (sync.matchingError) text += ` — ${sync.matchingError}`;
+  if (sync.complete === false) text += " — more pending, runs again next hour";
+  return text;
+}
+
+function PlaidAccountsForm({ item, existingLabels, busy, onSave, onCancel }) {
+  const [draft, setDraft] = useState(() =>
+    item.accounts.map((a) => ({ ...a })),
+  );
+  const listId = `plaid-labels-${item.id}`;
+  const today = etDateString(new Date());
+  const patch = (id, change) =>
+    setDraft((rows) => rows.map((r) => (r.id === id ? { ...r, ...change } : r)));
+  const onLabel = (id, value) => {
+    const known = existingLabels.find(
+      (l) => l.label.trim().toUpperCase() === value.trim().toUpperCase(),
+    );
+    // continuing an existing statement series: keep its type and start
+    // the feed the day after its last imported row (no overlap)
+    patch(
+      id,
+      known
+        ? {
+            accountLabel: value,
+            accountType: known.accountType,
+            syncFrom:
+              known.lastDate && known.lastDate < today
+                ? nextDay(known.lastDate)
+                : today,
+          }
+        : { accountLabel: value },
+    );
+  };
+  return (
+    <div className="mt-3">
+      <datalist id={listId}>
+        {existingLabels.map((l) => (
+          <option key={l.label} value={l.label} />
+        ))}
+      </datalist>
+      <Table>
+        <THead>
+          <TR>
+            <TH>Import</TH>
+            <TH>Account</TH>
+            <TH>Label</TH>
+            <TH>Type</TH>
+            <TH>Start date</TH>
+          </TR>
+        </THead>
+        <TBody>
+          {draft.map((a) => {
+            const known = existingLabels.find(
+              (l) =>
+                l.label.trim().toUpperCase() ===
+                a.accountLabel.trim().toUpperCase(),
+            );
+            return (
+              <TR key={a.id}>
+                <TD>
+                  <Checkbox
+                    checked={a.enabled}
+                    onChange={(e) => patch(a.id, { enabled: e.target.checked })}
+                    disabled={busy}
+                    aria-label={`Import ${a.name}`}
+                  />
+                </TD>
+                <TD style={{ minWidth: 180 }}>
+                  {a.name}
+                  {a.mask ? ` ••${a.mask}` : ""}
+                  <div className="text-14 text-ink-secondary">
+                    {a.plaidSubtype || a.plaidType}
+                  </div>
+                </TD>
+                <TD>
+                  <Input
+                    list={listId}
+                    value={a.accountLabel}
+                    onChange={(e) => onLabel(a.id, e.target.value)}
+                    disabled={busy || !a.enabled}
+                    style={{ width: 240 }}
+                  />
+                  {known && (
+                    <div className="text-14 text-ink-secondary">
+                      {known.rows} rows already imported
+                      {known.lastDate ? `, last ${known.lastDate}` : ""}
+                    </div>
+                  )}
+                </TD>
+                <TD>
+                  <Select
+                    value={a.accountType}
+                    onChange={(e) =>
+                      patch(a.id, { accountType: e.target.value })
+                    }
+                    disabled={busy || !a.enabled}
+                  >
+                    <option value="bank">Bank account</option>
+                    <option value="card">Credit card</option>
+                  </Select>
+                </TD>
+                <TD>
+                  <Input
+                    type="date"
+                    value={a.syncFrom}
+                    max={today}
+                    onChange={(e) => patch(a.id, { syncFrom: e.target.value })}
+                    disabled={busy || !a.enabled}
+                    title="Transactions before this date are not imported — set it after the last statement you uploaded by CSV"
+                  />
+                </TD>
+              </TR>
+            );
+          })}
+        </TBody>
+      </Table>
+      <div className="mt-3 flex flex-wrap gap-2">
+        <Button type="button" disabled={busy} onClick={() => onSave(draft)}>
+          {busy ? "Saving…" : "Save and sync"}
+        </Button>
+        {onCancel && (
+          <Button
+            type="button"
+            variant="secondary"
+            disabled={busy}
+            onClick={onCancel}
+          >
+            Cancel
+          </Button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function PlaidFeedsPanel({ onSynced }) {
+  const [status, setStatus] = useState(null);
+  const [loadError, setLoadError] = useState("");
+  const [busy, setBusy] = useState("");
+  const [notice, setNotice] = useState(null);
+  const [editing, setEditing] = useState(null);
+  const busyRef = useRef(false);
+
+  const load = useCallback(() => {
+    adminFetch("/admin/tax/bank-import/plaid/status")
+      .then((s) => {
+        setStatus(s);
+        setLoadError("");
+      })
+      .catch((e) => setLoadError(e.message));
+  }, []);
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const run = (label, fn) => {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setBusy(label);
+    setNotice(null);
+    Promise.resolve()
+      .then(fn)
+      .catch((e) => setNotice({ error: true, text: e.message }))
+      .finally(() => {
+        busyRef.current = false;
+        setBusy("");
+        load();
+      });
+  };
+  const post = (path, body) =>
+    adminFetch(path, { method: "POST", body: JSON.stringify(body || {}) });
+  const reportSync = (r) => {
+    if (r?.sync) {
+      setNotice({ error: !!r.sync.error, text: syncSummary(r.sync) });
+      onSynced();
+    }
+  };
+
+  // itemId present = re-login for an existing connection (update mode)
+  const openLink = (itemId) =>
+    run(itemId ? `reconnect-${itemId}` : "connect", async () => {
+      const [Plaid, tok] = await Promise.all([
+        loadPlaidLink(),
+        post("/admin/tax/bank-import/plaid/link-token", itemId ? { itemId } : {}),
+      ]);
+      const outcome = await new Promise((resolve, reject) => {
+        const handler = Plaid.create({
+          token: tok.linkToken,
+          onSuccess: (publicToken, metadata) => {
+            handler.destroy();
+            resolve({ publicToken, metadata });
+          },
+          onExit: (err) => {
+            handler.destroy();
+            if (err)
+              reject(
+                new Error(err.display_message || err.error_message || "Bank connection was not completed"),
+              );
+            else resolve(null);
+          },
+        });
+        handler.open();
+      });
+      if (!outcome) return;
+      if (itemId) {
+        reportSync(await post(`/admin/tax/bank-import/plaid/items/${itemId}/reconnected`));
+      } else {
+        const r = await post("/admin/tax/bank-import/plaid/connect", {
+          publicToken: outcome.publicToken,
+          institutionName: outcome.metadata?.institution?.name || null,
+        });
+        setEditing(r.itemId);
+        setNotice({
+          text: "Connected. Confirm each account below, then save to start syncing.",
+        });
+      }
+    });
+
+  if (loadError)
+    return (
+      <ActionFeedback error className="mb-3" onRetry={load}>
+        Could not load bank feeds: {loadError}
+      </ActionFeedback>
+    );
+  if (!status) return null;
+
+  return (
+    <Card style={{ padding: 16, marginBottom: 16 }}>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <div className="text-14 font-medium">Live bank feeds</div>
+          <div className="text-14 text-ink-secondary">
+            Read-only via Plaid. New transactions land here every hour for
+            review, the same as an uploaded statement.
+            {status.env === "sandbox" ? " (Plaid sandbox — test data)" : ""}
+          </div>
+        </div>
+        <Button
+          type="button"
+          disabled={!!busy || !status.configured || !status.tokenKey}
+          onClick={() => openLink(null)}
+        >
+          {busy === "connect" ? "Connecting…" : "Connect a bank"}
+        </Button>
+      </div>
+      {!status.configured && (
+        <ActionFeedback className="mt-3">
+          Plaid keys are not set on the server (PLAID_CLIENT_ID,
+          PLAID_SECRET, PLAID_ENV).
+        </ActionFeedback>
+      )}
+      {status.configured && !status.tokenKey && (
+        <ActionFeedback error className="mt-3">
+          No encryption key is set (PLAID_TOKEN_KEY), so bank connections
+          cannot be stored.
+        </ActionFeedback>
+      )}
+      {notice && (
+        <ActionFeedback error={notice.error} className="mt-3">
+          {notice.text}
+        </ActionFeedback>
+      )}
+      {status.items.map((item) => (
+        <div key={item.id} className="mt-4 border-t border-zinc-200 pt-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-14 font-medium">
+              {item.institutionName || "Bank connection"}
+            </span>
+            <Badge tone="neutral">
+              {PLAID_ITEM_STATUS[item.status] || item.status}
+            </Badge>
+            {item.lastSyncedAt && (
+              <span className="text-14 text-ink-secondary">
+                Last synced{" "}
+                {new Date(item.lastSyncedAt).toLocaleString("en-US", {
+                  timeZone: "America/New_York",
+                })}
+              </span>
+            )}
+            <span className="ml-auto flex flex-wrap gap-2">
+              {item.status === "login_required" && (
+                <Button
+                  type="button"
+                  disabled={!!busy}
+                  onClick={() => openLink(item.id)}
+                >
+                  {busy === `reconnect-${item.id}` ? "Opening…" : "Log in again"}
+                </Button>
+              )}
+              {item.status !== "setup" && (
+                <>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    disabled={!!busy}
+                    onClick={() =>
+                      run(`sync-${item.id}`, async () =>
+                        reportSync(
+                          await post(`/admin/tax/bank-import/plaid/items/${item.id}/sync`),
+                        ),
+                      )
+                    }
+                  >
+                    {busy === `sync-${item.id}` ? "Syncing…" : "Sync now"}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    disabled={!!busy}
+                    onClick={() =>
+                      setEditing(editing === item.id ? null : item.id)
+                    }
+                  >
+                    Edit accounts
+                  </Button>
+                </>
+              )}
+              <Button
+                type="button"
+                variant="secondary"
+                disabled={!!busy}
+                onClick={() => {
+                  if (
+                    !window.confirm(
+                      `Disconnect ${item.institutionName || "this bank"}? Transactions already imported stay; new ones stop.`,
+                    )
+                  )
+                    return;
+                  run(`disconnect-${item.id}`, () =>
+                    post(`/admin/tax/bank-import/plaid/items/${item.id}/disconnect`),
+                  );
+                }}
+              >
+                Disconnect
+              </Button>
+            </span>
+          </div>
+          {item.lastError && item.status !== "active" && (
+            <div className="mt-1 text-14 text-ink-secondary">
+              {item.lastError}
+            </div>
+          )}
+          {item.status === "setup" || editing === item.id ? (
+            <PlaidAccountsForm
+              key={`${item.id}-${item.accounts.map((a) => a.accountLabel).join("|")}`}
+              item={item}
+              existingLabels={status.existingLabels}
+              busy={busy === `setup-${item.id}`}
+              onCancel={item.status === "setup" ? null : () => setEditing(null)}
+              onSave={(draft) =>
+                run(`setup-${item.id}`, async () => {
+                  const r = await post(
+                    `/admin/tax/bank-import/plaid/items/${item.id}/setup`,
+                    {
+                      accounts: draft.map((a) => ({
+                        id: a.id,
+                        accountLabel: a.accountLabel,
+                        accountType: a.accountType,
+                        syncFrom: a.syncFrom,
+                        enabled: a.enabled,
+                      })),
+                    },
+                  );
+                  setEditing(null);
+                  reportSync(r);
+                })
+              }
+            />
+          ) : (
+            <ul className="mt-2 list-none space-y-1 p-0 text-14">
+              {item.accounts.map((a) => (
+                <li key={a.id}>
+                  {a.name}
+                  {a.mask ? ` ••${a.mask}` : ""} —{" "}
+                  {a.enabled
+                    ? `${a.accountLabel} (${a.accountType === "card" ? "card" : "bank"}) from ${a.syncFrom}`
+                    : "not imported"}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      ))}
+    </Card>
+  );
+}
+
 function BankImportTab() {
   // 14px floor on this financial-review surface (repo minimum readable
   // size) — the shared inputStyle stays 12px for the legacy tabs
@@ -4819,6 +5258,7 @@ function BankImportTab() {
   const [countsReady, setCountsReady] = useState(false);
   const [categoryAttempt, setCategoryAttempt] = useState(0);
   const [counts, setCounts] = useState({});
+  const [plaidEnabled, setPlaidEnabled] = useState(false);
   const [rows, setRows] = useState([]);
   const [coverage, setCoverage] = useState([]);
   const [filter, setFilter] = useState("");
@@ -4906,6 +5346,7 @@ function BankImportTab() {
     adminFetch("/admin/tax/bank-import/status")
       .then((s) => {
         setCounts(s?.counts || {});
+        setPlaidEnabled(!!s?.plaidEnabled);
         setCountsReady(true);
         setReadErrors((prev) => ({
           ...prev,
@@ -5154,6 +5595,8 @@ function BankImportTab() {
           value={countsReady ? counts.ignored || 0 : "\u2014"}
         />
       </div>
+
+      {plaidEnabled && <PlaidFeedsPanel onSynced={load} />}
 
       <Card
         style={{

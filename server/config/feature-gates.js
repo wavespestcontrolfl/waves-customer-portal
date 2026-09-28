@@ -2694,6 +2694,13 @@ const gates = {
   // disagree with request-time enforcement ('1'/'on' variants included).
   bankImport: gateEnvValue('GATE_BANK_IMPORT'),
 
+  // Plaid bank sync (2026-09-28): live Capital One checking/card feed into
+  // the Bank Import staging table (read-only Transactions product — no money
+  // movement). Nested under GATE_BANK_IMPORT; also needs PLAID_CLIENT_ID /
+  // PLAID_SECRET / PLAID_ENV and a token key (PLAID_TOKEN_KEY, falls back to
+  // DATA_HYGIENE_VAULT_KEY). Read at call time; kill switch = unset.
+  plaidSync: gateEnvValue('GATE_PLAID_SYNC'),
+
   // Stops-away tracker count (2026-08-14): "N stops away" on the portal
   // ServiceTracker + public /track page. Read-only, fires no comms; count
   // is bare (never other customers' info), capped at 3, clamped monotonic

@@ -1866,6 +1866,7 @@ router.get('/bank-import/status', async (req, res, next) => {
     const counts = await db('bank_transactions').select('status').count('* as n').groupBy('status');
     res.json({
       enabled: true,
+      plaidEnabled: gateEnvValue('GATE_PLAID_SYNC'),
       counts: Object.fromEntries(counts.map(c => [c.status, parseInt(c.n, 10)])),
     });
   } catch (err) { next(err); }
@@ -1874,6 +1875,92 @@ router.get('/bank-import/status', async (req, res, next) => {
 router.use('/bank-import', (req, res, next) => {
   if (!gateEnvValue('GATE_BANK_IMPORT')) return res.status(404).json({ error: 'not found' });
   next();
+});
+
+// ── Plaid live feed (GATE_PLAID_SYNC, nested under GATE_BANK_IMPORT) ────────
+// Connect a bank through Plaid Link, confirm each account's label / type /
+// start date, then transactions sync hourly (cron) or on demand into the
+// same staging table the CSV upload fills. See services/plaid-sync.js.
+
+const plaidSync = require('../services/plaid-sync');
+const { PlaidError } = require('../services/plaid-client');
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+router.use('/bank-import/plaid', (req, res, next) => {
+  if (!gateEnvValue('GATE_PLAID_SYNC')) return res.status(404).json({ error: 'not found' });
+  next();
+});
+
+router.param('plaidItemId', (req, res, next, id) => {
+  if (!UUID_RE.test(String(id))) return res.status(404).json({ error: 'connection not found' });
+  next();
+});
+
+function plaidRouteError(res, next, err) {
+  if (err instanceof PlaidError) return res.status(502).json({ error: err.message, plaidErrorCode: err.errorCode });
+  if ([400, 404, 409, 503].includes(err.status)) return res.status(err.status).json({ error: err.message });
+  return next(err);
+}
+
+router.get('/bank-import/plaid/status', async (req, res, next) => {
+  try {
+    res.json(await plaidSync.getStatus());
+  } catch (err) { plaidRouteError(res, next, err); }
+});
+
+// itemId present = update mode (re-authenticate an existing connection)
+router.post('/bank-import/plaid/link-token', async (req, res, next) => {
+  try {
+    const { itemId } = req.body || {};
+    if (itemId !== undefined && itemId !== null && !UUID_RE.test(String(itemId))) {
+      return res.status(400).json({ error: 'invalid itemId' });
+    }
+    const out = await plaidSync.createLinkToken({ clientUserId: req.technicianId, itemId: itemId || null });
+    res.json(out);
+  } catch (err) { plaidRouteError(res, next, err); }
+});
+
+router.post('/bank-import/plaid/connect', async (req, res, next) => {
+  try {
+    const { publicToken, institutionName } = req.body || {};
+    if (typeof publicToken !== 'string' || !publicToken || publicToken.length > 300) {
+      return res.status(400).json({ error: 'publicToken is required' });
+    }
+    const itemId = await plaidSync.connectItem({ publicToken, institutionName });
+    res.json({ success: true, itemId });
+  } catch (err) { plaidRouteError(res, next, err); }
+});
+
+// Confirming the mapping activates a new connection and runs its first sync
+// right away (the operator is watching); later edits re-sync too.
+router.post('/bank-import/plaid/items/:plaidItemId/setup', async (req, res, next) => {
+  try {
+    await plaidSync.setupItem(req.params.plaidItemId, (req.body || {}).accounts);
+    res.json({ success: true, sync: await plaidSync.syncItem(req.params.plaidItemId) });
+  } catch (err) { plaidRouteError(res, next, err); }
+});
+
+router.post('/bank-import/plaid/items/:plaidItemId/reconnected', async (req, res, next) => {
+  try {
+    await plaidSync.markReconnected(req.params.plaidItemId);
+    res.json({ success: true, sync: await plaidSync.syncItem(req.params.plaidItemId) });
+  } catch (err) { plaidRouteError(res, next, err); }
+});
+
+router.post('/bank-import/plaid/items/:plaidItemId/sync', async (req, res, next) => {
+  try {
+    res.json({ success: true, sync: await plaidSync.syncItem(req.params.plaidItemId) });
+  } catch (err) { plaidRouteError(res, next, err); }
+});
+
+// Revokes the connection at Plaid. Rows already imported stay (they may be
+// linked to expenses); the feed just stops.
+router.post('/bank-import/plaid/items/:plaidItemId/disconnect', async (req, res, next) => {
+  try {
+    await plaidSync.disconnectItem(req.params.plaidItemId);
+    res.json({ success: true });
+  } catch (err) { plaidRouteError(res, next, err); }
 });
 
 router.post('/bank-import/upload', async (req, res, next) => {

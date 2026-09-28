@@ -151,15 +151,15 @@ const cspDirectives = {
   // PostHog (*.posthog.com) is loaded only on the public funnel pages
   // (/book, /estimate, /pay) and only after consent — see the client's
   // PublicFunnelTracking. Listing the host here is harmless when no key is set.
-  scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'", "https://maps.googleapis.com", "https://js.stripe.com", "https://static.cloudflareinsights.com", "https://*.posthog.com", "https://challenges.cloudflare.com"],
+  scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'", "https://maps.googleapis.com", "https://js.stripe.com", "https://static.cloudflareinsights.com", "https://*.posthog.com", "https://challenges.cloudflare.com", "https://cdn.plaid.com"],
   styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
   fontSrc: ["'self'", "https://fonts.gstatic.com", "data:"],
   imgSrc: ["'self'", "https:", "data:", "blob:"],
-  connectSrc: ["'self'", "https://fonts.googleapis.com", "https://fonts.gstatic.com", "https://maps.googleapis.com", "https://api.dataforseo.com", "https://fawn.ifas.ufl.edu", "https://generativelanguage.googleapis.com", "https://www.googleapis.com", "https://api.stripe.com", "https://*.posthog.com"],
+  connectSrc: ["'self'", "https://fonts.googleapis.com", "https://fonts.gstatic.com", "https://maps.googleapis.com", "https://api.dataforseo.com", "https://fawn.ifas.ufl.edu", "https://generativelanguage.googleapis.com", "https://www.googleapis.com", "https://api.stripe.com", "https://*.posthog.com", "https://*.plaid.com"],
   // blob: — the customer portal's in-app document viewer renders Bearer-only
   // report PDFs through an iframe on a blob URL (Capacitor shell has no
   // download pipeline); blob frames are same-origin script-created only.
-  frameSrc: ["'self'", "blob:", "https://www.google.com", "https://js.stripe.com", "https://hooks.stripe.com", "https://challenges.cloudflare.com"],
+  frameSrc: ["'self'", "blob:", "https://www.google.com", "https://js.stripe.com", "https://hooks.stripe.com", "https://challenges.cloudflare.com", "https://cdn.plaid.com"],
   // Authenticated call recordings are fetched with a Bearer header and played
   // from short-lived, script-created Blob URLs (revoked when the player leaves).
   mediaSrc: ["'self'", "https:", "blob:"],
